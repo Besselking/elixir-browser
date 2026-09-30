@@ -92,4 +92,93 @@ defmodule Browser.StyleTest do
     assert page.title == "T"
     assert tags(page.nodes) |> Enum.count(&(&1 == "p")) == 1
   end
+
+  describe "clipping and visibility" do
+    test "zero height with overflow hidden removes the subtree" do
+      css = ".c { height: 0; overflow: hidden }"
+      assert tags(prune(~s(<div class="c"><p>x</p></div><i>y</i>), css)) == ["i"]
+    end
+
+    test "two-value overflow shorthand clips if either axis clips" do
+      css = ".c { height: 0; opacity: 0; overflow: hidden auto }"
+      assert tags(prune(~s(<div class="c"><p>x</p></div>), css)) == []
+    end
+
+    test "max-height zero works like height zero" do
+      assert tags(prune(~s(<div class="c">x</div>), ".c { max-height: 0px; overflow-y: scroll }")) == []
+    end
+
+    test "zero height without clipping keeps the content" do
+      assert tags(prune(~s(<div class="c"><p>x</p></div>), ".c { height: 0 }")) == ["div", "p"]
+    end
+
+    test "overflow hidden with a non-zero height keeps the content" do
+      css = ".c { height: 10px; overflow: hidden }"
+      assert tags(prune(~s(<div class="c"><p>x</p></div>), css)) == ["div", "p"]
+    end
+
+    defp computed_of(nodes, tag) do
+      Enum.find_value(nodes, fn
+        {:element, ^tag, attrs, _} -> List.keyfind(attrs, "@computed", 0, {nil, %{}}) |> elem(1)
+        {:element, _, _, kids} -> computed_of(kids, tag)
+        _ -> nil
+      end)
+    end
+
+    test "visibility is inherited and can be overridden by descendants" do
+      css = ".h { visibility: hidden } .v { visibility: visible }"
+      nodes = prune(~s(<div class="h"><p>a</p><b class="v">b</b></div><i>c</i>), css)
+      assert computed_of(nodes, "p")["visibility"] == "hidden"
+      assert computed_of(nodes, "b")["visibility"] == "visible"
+      assert computed_of(nodes, "i") == %{}
+    end
+
+    test "inherit keyword takes the parent's value" do
+      css = ".h { visibility: hidden } b { visibility: inherit }"
+      nodes = prune(~s(<div class="h"><b>b</b></div>), css)
+      assert computed_of(nodes, "b")["visibility"] == "hidden"
+    end
+
+    test "layout keeps the space of visibility:hidden text but marks it hidden and unclickable" do
+      css = ".h { visibility: hidden }"
+      nodes = prune(~s(<p>a <a class="h" href="/x">b</a> c</p>), css)
+      {items, _} = Browser.Layout.layout(nodes, 400, fn t, _ -> String.length(t) * 7 end)
+      b = Enum.find(items, &(&1.text == "b"))
+      c = Enum.find(items, &(&1.text == "c"))
+      assert b.hidden and b.href == nil
+      refute c.hidden
+      assert c.x > b.x + b.w
+    end
+  end
+
+  describe "media queries" do
+    @css "p { display: none } @media (min-width: 800px) { p { display: block } }"
+
+    defp prune_at(width, html, css) do
+      env = %{type: "screen", width: width, height: 600, dppx: 1.0}
+      Style.prune(HTML.parse(html), Style.index([{:author, css}], env))
+    end
+
+    test "rules inside @media apply only when the query matches" do
+      assert tags(prune_at(1000, "<p>a</p>", @css)) == ["p"]
+      assert tags(prune_at(500, "<p>a</p>", @css)) == []
+    end
+
+    test "rules nested in @supports and @layer are applied" do
+      css = "@supports (display: grid) { @layer x { p { display: none } } }"
+      assert tags(prune_at(1000, "<p>a</p><i>b</i>", css)) == ["i"]
+    end
+
+    test "Page.restyle only re-cascades when a query result changes" do
+      html = "<style>#{@css}</style><p>a</p>"
+      env = fn w -> %{type: "screen", width: w, height: 600, dppx: 1.0} end
+      page = Page.build(html, "about:home", env.(1000))
+      assert tags(page.nodes) |> Enum.count(&(&1 == "p")) == 1
+
+      assert Page.restyle(page, env.(900)) == page
+      narrow = Page.restyle(page, env.(500))
+      assert tags(narrow.nodes) |> Enum.count(&(&1 == "p")) == 0
+      assert Page.restyle(narrow, env.(1000)).nodes == page.nodes
+    end
+  end
 end

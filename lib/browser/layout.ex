@@ -30,7 +30,7 @@ defmodule Browser.Layout do
 
   @doc "Returns `{items, content_height}`."
   def layout(nodes, width, measure) do
-    style = %{size: @base, bold: false, italic: false, mono: false, href: nil, pre: false, indent: 0}
+    style = %{size: @base, bold: false, italic: false, mono: false, href: nil, pre: false, indent: 0, hidden: false}
     ops = nodes |> walk(style, []) |> Enum.reverse()
     place(ops, width, measure)
   end
@@ -102,7 +102,19 @@ defmodule Browser.Layout do
         _ -> style
       end
 
-    style
+    apply_computed(style, computed(attrs))
+  end
+
+  defp computed(attrs) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, map} -> map
+      nil -> %{}
+    end
+  end
+
+  # visibility is inherited and already resolved by Style
+  defp apply_computed(style, c) do
+    %{style | hidden: Map.get(c, "visibility", "visible") in ["hidden", "collapse"]}
   end
 
   defp intersperse(words, style), do: Enum.intersperse(words, {:space, style})
@@ -167,7 +179,8 @@ defmodule Browser.Layout do
     st = bridge_link(st, style.href, space_w)
 
     item = %{type: :text, x: x, y: 0, w: w, h: style.size, text: text, size: style.size,
-             bold: style.bold, italic: style.italic, mono: style.mono, href: style.href}
+             bold: style.bold, italic: style.italic, mono: style.mono, href: if(style.hidden, do: nil, else: style.href),
+             hidden: style.hidden}
 
     %{st | line: [item | st.line], x: x + w, pending_space: nil,
            lh: max(st.lh, style.size), last_break: :text}

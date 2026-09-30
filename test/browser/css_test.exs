@@ -25,14 +25,31 @@ defmodule Browser.CSSTest do
   test "parses rules, declarations and !important; ignores comments" do
     css = "/* c */ p, .a > b { color: red; DISPLAY : none !important ; } @media print { p { x: y } } i{a:b}"
     rules = CSS.parse(css)
-    assert length(rules) == 3
+    assert length(rules) == 4
     assert hd(rules).decls == [{"color", "red", false}, {"display", "none", true}]
     assert List.last(rules).decls == [{"a", "b", false}]
+    assert [_] = Enum.at(rules, 2).media
   end
 
   test "skips at-rules with blocks and statements" do
-    css = "@import url(x.css); @media screen { a { b: c } } p { d: e }"
-    assert [%{decls: [{"d", "e", false}]}] = CSS.parse(css)
+    css = "@import url(x.css); @font-face { font-family: x; src: url(y) } @keyframes k { from { a: b } } p { d: e }"
+    assert [%{decls: [{"d", "e", false}], media: []}] = CSS.parse(css)
+  end
+
+  test "enters @supports and @layer, but not negated @supports" do
+    css = """
+    @supports (display: grid) { a { x: 1 } }
+    @supports not (display: grid) { b { x: 2 } }
+    @layer base { c { x: 3 } }
+    @layer a, b;
+    """
+
+    assert [%{decls: [{"x", "1", false}]}, %{decls: [{"x", "3", false}]}] = CSS.parse(css)
+  end
+
+  test "nested @media conditions accumulate" do
+    css = "@media screen { @media (min-width: 10px) { a { x: y } } b { x: y } }"
+    assert [%{media: [_, _]}, %{media: [_]}] = CSS.parse(css)
   end
 
   test "drops selectors that cannot be evaluated but keeps the rest of the list" do

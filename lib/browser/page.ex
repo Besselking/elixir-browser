@@ -9,26 +9,49 @@ defmodule Browser.Page do
   @max_sheets 24
   @sheet_timeout 10_000
 
-  def load(url) do
+  defstruct [:url, :title, :raw, :rules, :queries, :key, :nodes]
+
+  @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
+  def load(url, env \\ Style.default_env()) do
     case Fetch.load(url) do
-      {:ok, body, final} -> {:ok, build(body, final)}
+      {:ok, body, final} -> {:ok, build(body, final, env)}
       {:error, _} = err -> err
     end
   end
 
   @doc "Builds a page from an HTML string fetched from `url`."
-  def build(body, url) do
-    nodes = body |> String.replace_invalid() |> HTML.parse()
+  def build(body, url, env \\ Style.default_env()) do
+    raw = body |> String.replace_invalid() |> HTML.parse()
 
     author =
-      nodes
+      raw
       |> Style.sheet_refs()
       |> Enum.take(@max_sheets)
       |> fetch_sheets(url)
       |> Enum.map(&{:author, &1})
 
-    index = Style.index([{:ua, Style.ua_css()} | author])
-    %{url: url, title: Layout.title(nodes), nodes: Style.prune(nodes, index)}
+    rules = Style.parse_sheets([{:ua, Style.ua_css()} | author])
+    queries = Style.media_queries(rules)
+
+    restyle(
+      %__MODULE__{url: url, title: Layout.title(raw), raw: raw, rules: rules, queries: queries},
+      env
+    )
+  end
+
+  @doc """
+  Re-runs the cascade for a new viewport. Returns the page unchanged when no
+  media query result differs from the last run.
+  """
+  def restyle(%__MODULE__{} = page, env) do
+    key = Style.media_key(page.queries, env)
+
+    if key == page.key and page.nodes != nil do
+      page
+    else
+      index = Style.index_rules(page.rules, env)
+      %{page | key: key, nodes: Style.prune(page.raw, index)}
+    end
   end
 
   defp fetch_sheets(refs, base) do

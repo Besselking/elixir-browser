@@ -16,7 +16,7 @@ defmodule Browser.Session do
     ui = UI.build()
 
     state = %{
-      ui: ui, history: History.new(), nodes: [], items: [], height: 0, scroll: 0,
+      ui: ui, history: History.new(), page: nil, nodes: [], items: [], height: 0, scroll: 0,
       width: UI.client_width(ui), nonce: 0, hover: nil, url: nil
     }
 
@@ -36,7 +36,8 @@ defmodule Browser.Session do
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
-    Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url)}) end)
+    env = env(state)
+    Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url, env)}) end)
     %{state | nonce: nonce}
   end
 
@@ -48,7 +49,8 @@ defmodule Browser.Session do
     page =
       case result do
         {:ok, page} -> page
-        {:error, msg} -> Page.build("<h1>Error</h1><p>#{escape(msg)}</p><p>#{escape(url)}</p>", url)
+        {:error, msg} ->
+          Page.build("<h1>Error</h1><p>#{escape(msg)}</p><p>#{escape(url)}</p>", url, env(state))
       end
 
     history =
@@ -61,7 +63,7 @@ defmodule Browser.Session do
     UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
     UI.set_status(state.ui, "Done")
 
-    state = %{state | history: history, nodes: page.nodes, url: page.url, scroll: 0}
+    state = %{state | history: history, page: page, nodes: page.nodes, url: page.url, scroll: 0}
     {:noreply, state |> relayout() |> sync_buttons()}
   end
 
@@ -109,9 +111,18 @@ defmodule Browser.Session do
     do: {:noreply, scroll_by(state, -rot)}
 
   def handle_info(wx(event: wxSize(size: {w, _})), state) do
-    if w != state.width and state.nodes != [],
-      do: {:noreply, relayout(%{state | width: w})},
-      else: {:noreply, %{state | width: w}}
+    cond do
+      w == state.width ->
+        {:noreply, state}
+
+      state.page == nil ->
+        {:noreply, %{state | width: w}}
+
+      true ->
+        state = %{state | width: w}
+        page = Page.restyle(state.page, env(state))
+        {:noreply, relayout(%{state | page: page, nodes: page.nodes})}
+    end
   end
 
   def handle_info(wx(event: wxKey(keyCode: code)), state) do
@@ -133,6 +144,11 @@ defmodule Browser.Session do
   def handle_info(_other, state), do: {:noreply, state}
 
   # -- helpers -----------------------------------------------------------------
+
+  # viewport description used to evaluate media queries
+  defp env(state) do
+    %{type: "screen", width: state.width, height: UI.client_height(state.ui), dppx: 1.0}
+  end
 
   defp history_nav(state, fun) do
     case fun.(state.history) do

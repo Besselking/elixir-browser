@@ -8,13 +8,18 @@ defmodule Browser.CSS do
   `:first-child`, `:last-child`, `:only-child` and `:not(<compound>)`.
 
   Selectors using anything else (`:hover`, `::before`, `:nth-child(…)`, …) are
-  dropped, since they can't be evaluated statically. At-rules (`@media`,
-  `@import`, `@font-face`, …) are skipped entirely.
+  dropped, since they can't be evaluated statically. `@media` (see
+  `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
+  and `@layer` blocks are entered; other at-rules (`@import`, `@font-face`,
+  `@keyframes`, …) are skipped.
 
-  A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls}`
-  where `decls` is `[{property, value, important?}]` and `parts` is the
+  A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds}`
+  where `decls` is `[{property, value, important?}]`, `media` lists the
+  enclosing `@media` query lists (all must match), and `parts` is the
   selector in right-to-left form: `[{compound, combinator_to_the_left}, …]`.
   """
+
+  alias Browser.MediaQuery
 
   # -- stylesheet parsing --------------------------------------------------------
 
@@ -22,13 +27,13 @@ defmodule Browser.CSS do
     css
     |> String.replace_invalid()
     |> strip_comments()
-    |> blocks([])
-    |> Enum.flat_map(fn {prelude, body} ->
+    |> blocks([], [])
+    |> Enum.flat_map(fn {prelude, body, conds} ->
       decls = parse_declarations(body)
 
       for sel <- split_top(prelude, ?,),
           {:ok, %{parts: parts, spec: spec}} <- [parse_selector(sel)] do
-        %{selector: parts, specificity: spec, decls: decls}
+        %{selector: parts, specificity: spec, decls: decls, media: conds}
       end
     end)
   end
@@ -61,17 +66,18 @@ defmodule Browser.CSS do
 
   defp strip_comments(css), do: Regex.replace(~r{/\*.*?\*/}s, css, " ")
 
-  # -> [{prelude, body}] for each qualified rule, skipping at-rules
-  defp blocks(bin, acc) do
+  # -> [{prelude, body, media_conditions}] for each qualified rule, in order
+  defp blocks(bin, conds, acc) do
     case String.trim_leading(bin) do
       "" ->
         Enum.reverse(acc)
 
       "@" <> _ = b ->
-        b |> skip_at_rule() |> blocks(acc)
+        {acc, rest} = at_rule(b, conds, acc)
+        blocks(rest, conds, acc)
 
       "}" <> rest ->
-        blocks(rest, acc)
+        blocks(rest, conds, acc)
 
       b ->
         case :binary.match(b, ["{", ";"]) do
@@ -83,30 +89,42 @@ defmodule Browser.CSS do
 
             if delim == ?{ do
               {body, rest} = take_block(rest)
-              blocks(rest, [{prelude, body} | acc])
+              blocks(rest, conds, [{prelude, body, conds} | acc])
             else
-              blocks(rest, acc)
+              blocks(rest, conds, acc)
             end
         end
     end
   end
 
-  defp skip_at_rule(bin) do
+  defp at_rule(bin, conds, acc) do
     case :binary.match(bin, ["{", ";"]) do
       :nomatch ->
-        ""
+        {acc, ""}
 
       {pos, 1} ->
-        <<_::binary-size(^pos), delim, rest::binary>> = bin
+        <<head::binary-size(^pos), delim, rest::binary>> = bin
 
-        if delim == ?{ do
-          {_, rest} = take_block(rest)
-          rest
+        if delim == ?; do
+          {acc, rest}
         else
-          rest
+          {body, rest} = take_block(rest)
+          [_, name, prelude] = Regex.run(~r/\A@([\w-]+)\s*(.*)\z/s, head)
+
+          inner =
+            case String.downcase(name) do
+              "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
+              "supports" -> if supports_not?(prelude), do: [], else: blocks(body, conds, [])
+              "layer" -> blocks(body, conds, [])
+              _ -> []
+            end
+
+          {Enum.reverse(inner) ++ acc, rest}
         end
     end
   end
+
+  defp supports_not?(prelude), do: prelude |> String.trim() |> String.downcase() |> String.starts_with?("not")
 
   # `bin` starts just after an opening "{": returns {body, rest_after_closing_brace}
   defp take_block(bin), do: scan(bin, bin, 1, nil, 0)

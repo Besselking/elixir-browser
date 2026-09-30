@@ -2,14 +2,18 @@ defmodule Browser.Style do
   @moduledoc """
   Stylesheet collection, cascade and pruning.
 
-  Only the properties in `@props` are cascaded for now (`display`); adding a
-  property here makes `declared/2` compute it too. `prune/2` removes elements
-  whose computed `display` is `none` before layout.
+  Only the properties in `@props` are cascaded; adding one makes `declared/2`
+  compute it. `prune/2` removes elements that are not rendered (`display:none`,
+  or clipped to zero height) and attaches each remaining element's computed
+  style to its attributes under the reserved key `"@computed"` (a map of
+  property => value) for layout to read.
   """
 
-  alias Browser.CSS
+  alias Browser.{CSS, MediaQuery}
 
-  @props ~w(display)
+  @props ~w(display visibility height max-height overflow-x overflow-y)
+  @inherited ~w(visibility)
+  @clips ~w(hidden clip scroll auto)
 
   @ua_css """
   [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
@@ -58,23 +62,39 @@ defmodule Browser.Style do
 
   # -- rule index ----------------------------------------------------------------
 
-  @doc """
-  Builds a rule index from `[{origin, css}]` in cascade order, where origin is
-  `:ua` or `:author`.
-  """
-  def index(sheets) do
-    sheets
-    |> Enum.flat_map(fn {origin, css} ->
+  @default_env %{type: "screen", width: 1024, height: 768, dppx: 1.0}
+
+  def default_env, do: @default_env
+
+  @doc "Parses `[{origin, css}]` (origin `:ua` or `:author`, in cascade order) into rules."
+  def parse_sheets(sheets) do
+    Enum.flat_map(sheets, fn {origin, css} ->
       for rule <- CSS.parse(css),
-          decls = Enum.filter(rule.decls, fn {p, _, _} -> p in @props end),
+          decls = relevant(rule.decls),
           decls != [],
           do: %{rule | decls: decls} |> Map.put(:origin, origin)
     end)
+  end
+
+  @doc "The distinct media query lists used by `rules`."
+  def media_queries(rules), do: rules |> Enum.flat_map(& &1.media) |> Enum.uniq()
+
+  @doc "Media query results for `env`; changes exactly when the active rule set would."
+  def media_key(queries, env), do: Enum.map(queries, &MediaQuery.eval(&1, env))
+
+  @doc "Builds a rule index, keeping only rules whose media conditions hold in `env`."
+  def index_rules(rules, env) do
+    rules
+    |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
     |> Enum.reduce(%{}, fn {rule, order}, idx ->
-      Map.update(idx, key(rule), [Map.put(rule, :order, order)], &[Map.put(rule, :order, order) | &1])
+      rule = Map.put(rule, :order, order)
+      Map.update(idx, key(rule), [rule], &[rule | &1])
     end)
   end
+
+  @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
+  def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
 
   # bucket by the rightmost compound so lookups only test plausible rules
   defp key(%{selector: [{cmp, _} | _]}) do
@@ -118,9 +138,23 @@ defmodule Browser.Style do
     |> Map.new(fn {prop, {_k, v}} -> {prop, v} end)
   end
 
+  defp relevant(decls) do
+    decls |> Enum.flat_map(&expand/1) |> Enum.filter(fn {p, _, _} -> p in @props end)
+  end
+
+  defp expand({"overflow", value, imp}) do
+    case String.split(value) do
+      [a] -> [{"overflow-x", a, imp}, {"overflow-y", a, imp}]
+      [a, b] -> [{"overflow-x", a, imp}, {"overflow-y", b, imp}]
+      _ -> []
+    end
+  end
+
+  defp expand(decl), do: [decl]
+
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do
-      {_, css} -> Enum.filter(CSS.parse_declarations(css), fn {p, _, _} -> p in @props end)
+      {_, css} -> css |> CSS.parse_declarations() |> relevant()
       nil -> []
     end
   end
@@ -133,7 +167,10 @@ defmodule Browser.Style do
 
   # -- pruning -------------------------------------------------------------------
 
-  @doc "Removes every element whose computed `display` is `none` (with its subtree)."
+  @doc """
+  Removes elements that are not rendered, with their subtrees, and attaches
+  computed styles (see moduledoc).
+  """
   def prune(nodes, idx), do: prune_children(nodes, nil, idx)
 
   defp prune_children(nodes, parent, idx) do
@@ -146,11 +183,16 @@ defmodule Browser.Style do
 
         {:element, tag, attrs, kids}, {acc, {i, prev}} ->
           ctx = context(tag, attrs, parent, prev, i, count)
+          computed = compute(idx, ctx, parent)
+          ctx = Map.put(ctx, :computed, computed)
 
           acc =
-            if hidden?(idx, ctx),
-              do: acc,
-              else: [{:element, tag, attrs, prune_children(kids, ctx, idx)} | acc]
+            if not_rendered?(computed) do
+              acc
+            else
+              attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
+              [{:element, tag, attrs, prune_children(kids, ctx, idx)} | acc]
+            end
 
           {acc, {i + 1, [ctx | prev]}}
       end)
@@ -158,12 +200,45 @@ defmodule Browser.Style do
     Enum.reverse(out)
   end
 
-  defp hidden?(idx, ctx) do
-    case declared(idx, ctx) do
-      %{"display" => display} -> display |> String.downcase() |> String.trim() == "none"
-      _ -> false
-    end
+  defp compute(idx, ctx, parent) do
+    inherited =
+      case parent do
+        %{computed: c} -> Map.take(c, @inherited)
+        nil -> %{}
+      end
+
+    declared =
+      idx
+      |> declared(ctx)
+      |> Map.new(fn {k, v} -> {k, normalize(v)} end)
+      |> resolve_keywords(inherited)
+
+    Map.merge(inherited, declared)
   end
+
+  defp normalize(v), do: v |> String.trim() |> String.downcase()
+
+  # `inherit` takes the parent's value; `initial`/`unset` drop the declaration
+  defp resolve_keywords(declared, inherited) do
+    Enum.reduce(declared, %{}, fn
+      {k, "inherit"}, acc -> if(v = inherited[k], do: Map.put(acc, k, v), else: acc)
+      {_k, v}, acc when v in ["initial", "unset", "revert"] -> acc
+      {k, v}, acc -> Map.put(acc, k, v)
+    end)
+  end
+
+  defp not_rendered?(c), do: c["display"] == "none" or collapsed?(c)
+
+  # a clipping box with zero height shows none of its content
+  defp collapsed?(c) do
+    (Map.get(c, "overflow-x", "visible") in @clips or Map.get(c, "overflow-y", "visible") in @clips) and
+      (zero?(c["height"]) or zero?(c["max-height"]))
+  end
+
+  defp zero?(nil), do: false
+
+  defp zero?(v),
+    do: Regex.match?(~r/\A\+?(0+\.?0*|\.0+)(px|em|rem|%|pt|vh|vw|ch|ex|cm|mm|in)?\z/, v)
 
   defp context(tag, attrs, parent, prev, i, count) do
     %{

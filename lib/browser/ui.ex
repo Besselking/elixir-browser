@@ -111,7 +111,8 @@ defmodule Browser.UI do
     :wxDC.clear(dc)
     {_, h} = :wxWindow.getClientSize(panel)
 
-    for item <- items, item.y - scroll < h, item.y - scroll + 40 > 0 do
+    for item <- items, not Map.get(item, :hidden, false),
+        item.y - scroll < h, item.y - scroll + 40 > 0 do
       y = item.y - scroll
 
       case item do
