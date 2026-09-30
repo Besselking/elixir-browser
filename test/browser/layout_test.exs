@@ -49,4 +49,13 @@ defmodule Browser.LayoutTest do
   test "title extraction" do
     assert Layout.title(HTML.parse("<head><title> A\n B </title></head>")) == "A B"
   end
+
+  test "space between words of one link is covered by the link" do
+    {items, _} = run(~s(<a href="/x">foo bar</a> baz))
+    foo = Enum.find(items, &(&1.text == "foo"))
+    bar = Enum.find(items, &(&1.text == "bar"))
+    baz = Enum.find(items, &(&1.text == "baz"))
+    assert foo.x + foo.w == bar.x
+    assert baz.x > bar.x + bar.w
+  end
 end

@@ -164,6 +164,7 @@ defmodule Browser.Layout do
 
     space_w = if st.line == [], do: 0, else: space_w
     x = st.x + space_w
+    st = bridge_link(st, style.href, space_w)
 
     item = %{type: :text, x: x, y: 0, w: w, h: style.size, text: text, size: style.size,
              bold: style.bold, italic: style.italic, mono: style.mono, href: style.href}
@@ -171,6 +172,14 @@ defmodule Browser.Layout do
     %{st | line: [item | st.line], x: x + w, pending_space: nil,
            lh: max(st.lh, style.size), last_break: :text}
   end
+
+  # Extend the previous word of the same link over the gap so the underline
+  # and click target are continuous between words.
+  defp bridge_link(%{line: [%{href: href} = prev | rest]} = st, href, gap)
+       when is_binary(href) and gap > 0,
+       do: %{st | line: [%{prev | w: prev.w + gap} | rest]}
+
+  defp bridge_link(st, _, _), do: st
 
   defp flush(%{line: []} = st), do: %{st | pending_space: nil}
 
