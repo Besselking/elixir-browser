@@ -11,12 +11,60 @@ defmodule Browser.Style do
 
   alias Browser.{CSS, MediaQuery}
 
-  @props ~w(display visibility height max-height overflow-x overflow-y)
-  @inherited ~w(visibility)
+  @props ~w(display visibility height max-height overflow-x overflow-y
+            color background-color font-size font-weight font-style font-family
+            text-decoration-line text-align list-style-type flex-direction
+            margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
+  @inherited ~w(visibility color font-size font-weight font-style font-family
+                text-decoration-line text-align list-style-type)
   @clips ~w(hidden clip scroll auto)
+  @default_fs 16.0
 
+  @shorthands %{
+    "margin" => ~w(margin-top margin-right margin-bottom margin-left),
+    "padding" => ~w(padding-top padding-right padding-bottom padding-left),
+    "overflow" => ~w(overflow-x overflow-y),
+    "list-style" => ~w(list-style-type),
+    "text-decoration" => ~w(text-decoration-line),
+    "font" => ~w(font-style font-weight font-size font-family),
+    "background" => ~w(background-color)
+  }
+
+  # user-agent defaults; author rules and inline styles override them
   @ua_css """
   [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
+  html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
+  address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
+  fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
+  html, legend, main, menu, nav, ol, p, pre, section, summary, ul, table, caption, tr,
+  thead, tbody, tfoot { display: block }
+  li { display: list-item }
+  body { margin: 8px }
+  p, dl, pre, figure { margin: 1em 0 }
+  ul, ol { margin: 1em 0; padding-left: 40px }
+  ul { list-style-type: disc }
+  ol { list-style-type: decimal }
+  ul ul, ol ul { list-style-type: circle }
+  ul ul ul, ol ul ul, ul ol ul, ol ol ul { list-style-type: square }
+  ul ul, ul ol, ol ul, ol ol { margin-top: 0; margin-bottom: 0 }
+  blockquote { margin: 1em 40px }
+  dd { margin-left: 40px }
+  hr { margin: 8px 0 }
+  h1 { font-size: 2em; margin: .67em 0 }
+  h2 { font-size: 1.5em; margin: .83em 0 }
+  h3 { font-size: 1.17em; margin: 1em 0 }
+  h4 { margin: 1.33em 0 }
+  h5 { font-size: .83em; margin: 1.67em 0 }
+  h6 { font-size: .67em; margin: 2.33em 0 }
+  h1, h2, h3, h4, h5, h6, b, strong, th { font-weight: bold }
+  i, em, cite, dfn, var, address { font-style: italic }
+  code, kbd, samp, tt, pre { font-family: monospace }
+  small, sub, sup { font-size: smaller }
+  big { font-size: larger }
+  a[href] { color: #0000ee; text-decoration: underline }
+  u, ins { text-decoration: underline }
+  s, strike, del { text-decoration: line-through }
+  center, th { text-align: center }
   """
 
   def ua_css, do: @ua_css
@@ -139,18 +187,103 @@ defmodule Browser.Style do
   end
 
   defp relevant(decls) do
-    decls |> Enum.flat_map(&expand/1) |> Enum.filter(fn {p, _, _} -> p in @props end)
+    decls
+    |> Enum.flat_map(&expand/1)
+    |> Enum.filter(fn {p, _, _} -> p in @props or String.starts_with?(p, "--") end)
   end
 
-  defp expand({"overflow", value, imp}) do
-    case String.split(value) do
-      [a] -> [{"overflow-x", a, imp}, {"overflow-y", a, imp}]
-      [a, b] -> [{"overflow-x", a, imp}, {"overflow-y", b, imp}]
-      _ -> []
+  # Shorthands become longhands so the cascade can order them against each
+  # other. A shorthand whose value uses var() can't be split until the
+  # variables are known, so each longhand carries the raw value and is
+  # resolved per element: `{:sh, shorthand, raw_value, longhand}`.
+  defp expand({prop, value, imp}) when is_map_key(@shorthands, prop) do
+    longs = @shorthands[prop]
+
+    if String.contains?(value, "var(") do
+      for long <- longs, do: {long, {:sh, prop, value, long}, imp}
+    else
+      for {long, v} <- split_shorthand(prop, value), do: {long, v, imp}
     end
   end
 
   defp expand(decl), do: [decl]
+
+  @keywords ~w(inherit initial unset revert)
+
+  defp split_shorthand(prop, value) do
+    v = value |> String.trim() |> String.downcase()
+    longs = @shorthands[prop]
+
+    if v in @keywords do
+      for long <- longs, do: {long, v}
+    else
+      do_split(prop, v, tokens(v))
+    end
+  end
+
+  defp tokens(v), do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(v) |> List.flatten()
+
+  defp do_split(box, _v, toks) when box in ["margin", "padding"] do
+    [t, r, b, l] =
+      case toks do
+        [a] -> [a, a, a, a]
+        [a, b] -> [a, b, a, b]
+        [a, b, c] -> [a, b, c, b]
+        [a, b, c, d | _] -> [a, b, c, d]
+        [] -> List.duplicate("0", 4)
+      end
+
+    Enum.zip(@shorthands[box], [t, r, b, l])
+  end
+
+  defp do_split("overflow", _v, toks) do
+    case toks do
+      [a] -> [{"overflow-x", a}, {"overflow-y", a}]
+      [a, b | _] -> [{"overflow-x", a}, {"overflow-y", b}]
+      [] -> []
+    end
+  end
+
+  defp do_split("list-style", _v, toks) do
+    skip = ["inside", "outside"]
+
+    case Enum.find(toks, &(&1 == "none")) ||
+           Enum.find(toks, &(&1 not in skip and not String.starts_with?(&1, "url("))) do
+      nil -> []
+      type -> [{"list-style-type", type}]
+    end
+  end
+
+  defp do_split("text-decoration", _v, toks) do
+    lines = Enum.filter(toks, &(&1 in ~w(none underline overline line-through blink)))
+    if lines == [], do: [], else: [{"text-decoration-line", Enum.join(lines, " ")}]
+  end
+
+  defp do_split("background", _v, toks) do
+    color = Enum.find(toks, &(Browser.Color.parse(&1) != nil))
+    [{"background-color", color || "transparent"}]
+  end
+
+  defp do_split("font", v, _toks) do
+    size = "[\\d.]+(?:px|em|rem|pt|%)|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger"
+    re = Regex.compile!("(?<![\\w.-])(#{size})(?:/\\S+)?\\s+(.+)\\z", "s")
+
+    case Regex.run(re, v, return: :index) do
+      [{start, _}, {s0, sl}, {f0, fl}] ->
+        prefix = v |> binary_part(0, start) |> String.split()
+        size_v = binary_part(v, s0, sl)
+        family = binary_part(v, f0, fl)
+
+        weight =
+          Enum.find(prefix, "normal", &(&1 in ~w(bold bolder lighter) or Regex.match?(~r/\A[1-9]00\z/, &1)))
+
+        style = if Enum.any?(prefix, &(&1 in ~w(italic oblique))), do: "italic", else: "normal"
+        [{"font-style", style}, {"font-weight", weight}, {"font-size", size_v}, {"font-family", family}]
+
+      _ ->
+        []
+    end
+  end
 
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do
@@ -165,7 +298,7 @@ defmodule Browser.Style do
   defp rank(:author, true), do: 2
   defp rank(:ua, true), do: 3
 
-  # -- pruning -------------------------------------------------------------------
+  # -- pruning / computed style ----------------------------------------------------
 
   @doc """
   Removes elements that are not rendered, with their subtrees, and attaches
@@ -183,8 +316,9 @@ defmodule Browser.Style do
 
         {:element, tag, attrs, kids}, {acc, {i, prev}} ->
           ctx = context(tag, attrs, parent, prev, i, count)
-          computed = compute(idx, ctx, parent)
-          ctx = Map.put(ctx, :computed, computed)
+          {computed, custom} = compute(idx, ctx, parent)
+          root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
+          ctx = ctx |> Map.put(:computed, computed) |> Map.put(:custom, custom) |> Map.put(:root_fs, root)
 
           acc =
             if not_rendered?(computed) do
@@ -200,32 +334,210 @@ defmodule Browser.Style do
     Enum.reverse(out)
   end
 
+  # -> {computed_map, custom_properties}
   defp compute(idx, ctx, parent) do
-    inherited =
+    {pc, parent_custom, parent_root} =
       case parent do
-        %{computed: c} -> Map.take(c, @inherited)
-        nil -> %{}
+        nil -> {%{}, %{}, nil}
+        p -> {p.computed, p.custom, p.root_fs}
       end
 
-    declared =
-      idx
-      |> declared(ctx)
-      |> Map.new(fn {k, v} -> {k, normalize(v)} end)
-      |> resolve_keywords(inherited)
+    inherited = Map.take(pc, @inherited)
+    {customs, normals} = idx |> declared(ctx) |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+    custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 
-    Map.merge(inherited, declared)
+    resolved = resolve_vars(normals, custom)
+
+    pfs = Map.get(inherited, "font-size", @default_fs)
+
+    fs =
+      case resolved do
+        %{"font-size" => v} -> font_size(v, pfs, parent_root || @default_fs) || pfs
+        _ -> pfs
+      end
+
+    color =
+      case resolved do
+        %{"color" => v} -> color_value(v, inherited["color"]) || inherited["color"]
+        _ -> inherited["color"]
+      end
+
+    env = %{fs: fs, root: parent_root || fs, color: color}
+
+    typed =
+      for {k, v} <- resolved, k not in ["font-size", "color"], reduce: %{} do
+        acc ->
+          case typed(k, v, env, pc) do
+            {:ok, val} -> Map.put(acc, k, val)
+            :skip -> acc
+          end
+      end
+
+    base = Map.merge(inherited, typed)
+    base = if Map.has_key?(resolved, "font-size") or Map.has_key?(inherited, "font-size"), do: Map.put(base, "font-size", fs), else: base
+    base = if color, do: Map.put(base, "color", color), else: base
+    {base, custom}
+  end
+
+  # substitute var() and finish pending shorthands; -> %{prop => normalized string}
+  defp resolve_vars(decls, custom) do
+    Enum.reduce(decls, %{}, fn
+      {prop, {:sh, short, raw, long}}, acc ->
+        with {:ok, v} <- substitute(raw, custom, 0),
+             {^long, val} <- List.keyfind(split_shorthand(short, v), long, 0) do
+          Map.put(acc, prop, normalize(val))
+        else
+          _ -> acc
+        end
+
+      {prop, value}, acc ->
+        case substitute(value, custom, 0) do
+          {:ok, v} -> Map.put(acc, prop, normalize(v))
+          :error -> acc
+        end
+    end)
   end
 
   defp normalize(v), do: v |> String.trim() |> String.downcase()
 
-  # `inherit` takes the parent's value; `initial`/`unset` drop the declaration
-  defp resolve_keywords(declared, inherited) do
-    Enum.reduce(declared, %{}, fn
-      {k, "inherit"}, acc -> if(v = inherited[k], do: Map.put(acc, k, v), else: acc)
-      {_k, v}, acc when v in ["initial", "unset", "revert"] -> acc
-      {k, v}, acc -> Map.put(acc, k, v)
-    end)
+  @doc false
+  def substitute(value, _custom, depth) when depth > 16, do: (if String.contains?(value, "var("), do: :error, else: {:ok, value})
+
+  def substitute(value, custom, depth) do
+    case :binary.match(value, "var(") do
+      :nomatch ->
+        {:ok, value}
+
+      {pos, 4} ->
+        before = binary_part(value, 0, pos)
+        rest = binary_part(value, pos + 4, byte_size(value) - pos - 4)
+        {inner, after_} = take_parens(rest)
+        {name, fallback} = split_comma(inner)
+        name = name |> String.trim() |> String.downcase()
+
+        replacement =
+          case custom do
+            %{^name => v} -> substitute(v, custom, depth + 1)
+            _ when fallback != nil -> substitute(fallback, custom, depth + 1)
+            _ -> :error
+          end
+
+        with {:ok, r} <- replacement,
+             {:ok, tail} <- substitute(after_, custom, depth + 1) do
+          {:ok, before <> String.trim(r) <> tail}
+        end
+    end
   end
+
+  # `rest` follows an opening paren: -> {inside, after_closing_paren}
+  defp take_parens(rest), do: take_parens(rest, rest, 1, 0)
+  defp take_parens(<<>>, whole, _d, _n), do: {whole, ""}
+  defp take_parens(<<?(, r::binary>>, w, d, n), do: take_parens(r, w, d + 1, n + 1)
+
+  defp take_parens(<<?), r::binary>>, w, d, n) do
+    if d == 1, do: {binary_part(w, 0, n), r}, else: take_parens(r, w, d - 1, n + 1)
+  end
+
+  defp take_parens(<<_, r::binary>>, w, d, n), do: take_parens(r, w, d, n + 1)
+
+  defp split_comma(s), do: split_comma(s, s, 0, 0)
+  defp split_comma(<<>>, s, _d, _n), do: {s, nil}
+  defp split_comma(<<?(, r::binary>>, s, d, n), do: split_comma(r, s, d + 1, n + 1)
+  defp split_comma(<<?), r::binary>>, s, d, n), do: split_comma(r, s, d - 1, n + 1)
+
+  defp split_comma(<<?,, _::binary>>, s, 0, n),
+    do: {binary_part(s, 0, n), binary_part(s, n + 1, byte_size(s) - n - 1)}
+
+  defp split_comma(<<_, r::binary>>, s, d, n), do: split_comma(r, s, d, n + 1)
+
+  # -- typed values --------------------------------------------------------------------
+
+  defp typed(prop, v, _env, pc) when v in @keywords do
+    if v == "inherit" and Map.has_key?(pc, prop), do: {:ok, pc[prop]}, else: :skip
+  end
+
+  defp typed("background-color", v, env, _pc) do
+    case color_value(v, env.color) do
+      nil -> :skip
+      c -> {:ok, c}
+    end
+  end
+
+  defp typed(prop, v, env, _pc) when prop in ~w(margin-top margin-bottom margin-left padding-top padding-bottom padding-left) do
+    cond do
+      v == "auto" -> {:ok, 0.0}
+      px = length(v, env) -> {:ok, max(px, 0.0)}
+      true -> :skip
+    end
+  end
+
+  defp typed("font-weight", v, _env, _pc) do
+    bold? =
+      v in ["bold", "bolder"] or
+        (Regex.match?(~r/\A\d+\z/, v) and String.to_integer(v) >= 600)
+
+    {:ok, if(bold?, do: "bold", else: "normal")}
+  end
+
+  defp typed("font-style", v, _env, _pc), do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
+  defp typed(_prop, v, _env, _pc), do: {:ok, v}
+
+  defp color_value(v, current) do
+    case Browser.Color.parse(v) do
+      :current -> current
+      c -> c
+    end
+  end
+
+  @font_keywords %{
+    "xx-small" => 9.0, "x-small" => 10.0, "small" => 13.0, "medium" => 16.0,
+    "large" => 18.0, "x-large" => 24.0, "xx-large" => 32.0, "xxx-large" => 48.0
+  }
+
+  defp font_size(v, pfs, root) do
+    cond do
+      Map.has_key?(@font_keywords, v) -> @font_keywords[v]
+      v == "smaller" -> pfs / 1.2
+      v == "larger" -> pfs * 1.2
+      v == "inherit" -> pfs
+      m = Regex.run(~r/\A([\d.]+)%\z/, v) -> pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
+      true -> length(v, %{fs: pfs, root: root})
+    end
+  end
+
+  defp normalize_num(n), do: if(String.contains?(n, "."), do: n, else: n <> ".0")
+
+  # a CSS length in px, or nil if unsupported (percentages, calc(), viewport units)
+  defp length(v, env) do
+    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))([a-z]*)\z/, v) do
+      [_, n, unit] ->
+        n = n |> String.trim_leading("+") |> normalize_num_signed() |> String.to_float()
+
+        case unit do
+          "" -> if n == 0.0, do: 0.0
+          "px" -> n
+          "em" -> n * env.fs
+          "rem" -> n * env.root
+          "pt" -> n * 4 / 3
+          "pc" -> n * 16
+          "in" -> n * 96
+          "cm" -> n * 96 / 2.54
+          "mm" -> n * 96 / 25.4
+          u when u in ["ex", "ch"] -> n * env.fs / 2
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp normalize_num_signed(n) do
+    n = if String.starts_with?(n, ["-.", "."]), do: String.replace(n, ".", "0.", global: false), else: n
+    if String.contains?(n, "."), do: n, else: n <> ".0"
+  end
+
+  # -- visibility helpers -----------------------------------------------------------------
 
   defp not_rendered?(c), do: c["display"] == "none" or collapsed?(c)
 

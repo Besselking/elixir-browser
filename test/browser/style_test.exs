@@ -130,7 +130,7 @@ defmodule Browser.StyleTest do
       nodes = prune(~s(<div class="h"><p>a</p><b class="v">b</b></div><i>c</i>), css)
       assert computed_of(nodes, "p")["visibility"] == "hidden"
       assert computed_of(nodes, "b")["visibility"] == "visible"
-      assert computed_of(nodes, "i") == %{}
+      refute Map.has_key?(computed_of(nodes, "i"), "visibility")
     end
 
     test "inherit keyword takes the parent's value" do
@@ -179,6 +179,115 @@ defmodule Browser.StyleTest do
       narrow = Page.restyle(page, env.(500))
       assert tags(narrow.nodes) |> Enum.count(&(&1 == "p")) == 0
       assert Page.restyle(narrow, env.(1000)).nodes == page.nodes
+    end
+  end
+
+  describe "computed values" do
+    defp comp(html, css, tag) do
+      nodes = prune(html, css)
+      Enum.find_value([nodes], fn n -> computed_of(n, tag) end)
+    end
+
+    test "color and font-size inherit; em resolves against the parent" do
+      css = "div { color: #ff0000; font-size: 20px } span { font-size: 0.5em }"
+      html = "<div><b>x</b><span>y</span></div>"
+      assert comp(html, css, "b")["color"] == {255, 0, 0}
+      assert comp(html, css, "b")["font-size"] == 20.0
+      assert comp(html, css, "span")["font-size"] == 10.0
+    end
+
+    test "rem uses the root font size; keywords and percentages" do
+      css = "html { font-size: 10px } p { font-size: 2rem } i { font-size: 150% } u { font-size: large }"
+      html = "<html><body><p>a<i>b</i></p><u>c</u></body></html>"
+      assert comp(html, css, "p")["font-size"] == 20.0
+      assert comp(html, css, "i")["font-size"] == 30.0
+      assert comp(html, css, "u")["font-size"] == 18.0
+    end
+
+    test "UA defaults: headings, links, bold, monospace" do
+      html = ~s(<h2>a</h2><a href="/x">b</a><b>c</b><code>d</code>)
+      assert comp(html, "", "h2")["font-size"] == 24.0
+      assert comp(html, "", "h2")["font-weight"] == "bold"
+      assert comp(html, "", "a")["color"] == {0, 0, 238}
+      assert comp(html, "", "a")["text-decoration-line"] == "underline"
+      assert comp(html, "", "b")["font-weight"] == "bold"
+      assert comp(html, "", "code")["font-family"] == "monospace"
+    end
+
+    test "author rules override UA defaults" do
+      css = "a { text-decoration: none; color: green } b { font-weight: 400 }"
+      html = ~s(<a href="/x">a</a><b>b</b>)
+      assert comp(html, css, "a")["text-decoration-line"] == "none"
+      assert comp(html, css, "a")["color"] == {0, 128, 0}
+      assert comp(html, css, "b")["font-weight"] == "normal"
+    end
+
+    test "margin and padding shorthands expand to px, auto is zero" do
+      css = "p { margin: 1em 2px 3px; padding: 4px 8px } div { margin: 0 auto }"
+      c = comp("<p>a</p><div>b</div>", css, "p")
+      assert {c["margin-top"], c["margin-bottom"], c["margin-left"]} == {16.0, 3.0, 2.0}
+      assert {c["padding-top"], c["padding-left"]} == {4.0, 8.0}
+      d = comp("<p>a</p><div>b</div>", css, "div")
+      assert {d["margin-top"], d["margin-left"]} == {0.0, 0.0}
+    end
+
+    test "longhand after shorthand wins, shorthand after longhand wins" do
+      css = "p { margin: 10px; margin-top: 1px } div { margin-top: 1px; margin: 10px }"
+      html = "<p>a</p><div>b</div>"
+      assert comp(html, css, "p")["margin-top"] == 1.0
+      assert comp(html, css, "div")["margin-top"] == 10.0
+    end
+
+    test "background shorthand extracts the color" do
+      css = "p { background: #eee url(x.png) no-repeat } div { background: none }"
+      assert comp("<p>a</p><div>b</div>", css, "p")["background-color"] == {238, 238, 238}
+      assert comp("<p>a</p><div>b</div>", css, "div")["background-color"] == :transparent
+    end
+
+    test "font shorthand" do
+      css = "p { font: italic bold 12px/1.5 Arial, sans-serif }"
+      c = comp("<p>a</p>", css, "p")
+      assert {c["font-style"], c["font-weight"], c["font-size"]} == {"italic", "bold", 12.0}
+      assert c["font-family"] == "arial, sans-serif"
+    end
+
+    test "custom properties: declared, inherited, fallback, nested" do
+      css = """
+      :root { --brand: #0000ff; --alias: var(--brand); --pad: 6px }
+      p { color: var(--alias); padding: var(--pad) 2px; margin-top: var(--missing, 7px) }
+      div { --brand: #00ff00 }
+      i { color: var(--brand) }
+      b { color: var(--nope) }
+      """
+
+      html = "<html><body><p>a</p><div><i>b</i></div><b>c</b></body></html>"
+      p = comp(html, css, "p")
+      assert p["color"] == {0, 0, 255}
+      assert {p["padding-top"], p["padding-left"], p["margin-top"]} == {6.0, 2.0, 7.0}
+      assert comp(html, css, "i")["color"] == {0, 255, 0}
+      # unresolvable var() drops the declaration (color falls back to the inherited black)
+      assert comp(html, css, "b")["color"] == {0, 0, 0}
+    end
+
+    test "custom properties inside var() with nested fallback" do
+      css = "p { color: var(--a, var(--b, red)) }"
+      assert comp("<p>a</p>", css, "p")["color"] == {255, 0, 0}
+    end
+
+    test "currentcolor and inherit" do
+      css = "div { color: #00f } p { background-color: currentcolor; margin-top: inherit } div { margin-top: 9px }"
+      c = comp("<div><p>a</p></div>", css, "p")
+      assert c["background-color"] == {0, 0, 255}
+      assert c["margin-top"] == 9.0
+    end
+
+    test "list-style shorthand and inheritance" do
+      css = "ul { list-style: none }"
+      assert comp("<ul><li><b>a</b></li></ul>", css, "b")["list-style-type"] == "none"
+    end
+
+    test "text-align is inherited" do
+      assert comp("<div style=\"text-align:center\"><p>a</p></div>", "", "p")["text-align"] == "center"
     end
   end
 end

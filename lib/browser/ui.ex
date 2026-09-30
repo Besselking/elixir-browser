@@ -9,7 +9,6 @@ defmodule Browser.UI do
   Record.defrecord(:wxKey, Record.extract(:wxKey, from_lib: "wx/include/wx.hrl"))
 
   @view :browser_view
-  @link {0, 0, 238}
   @wx_default 70
   @wx_teletype 76
   @wx_normal 90
@@ -112,23 +111,30 @@ defmodule Browser.UI do
     {_, h} = :wxWindow.getClientSize(panel)
 
     for item <- items, not Map.get(item, :hidden, false),
-        item.y - scroll < h, item.y - scroll + 40 > 0 do
+        item.y - scroll < h, item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
       y = item.y - scroll
 
       case item do
+        %{type: :rect} ->
+          :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
+          :wxDC.setBrush(dc, :wxBrush.new(item.color))
+          :wxDC.drawRectangle(dc, {item.x, y}, {item.w, item.h})
+
         %{type: :hr} ->
           :wxDC.setPen(dc, :wxPen.new({170, 170, 170}))
           :wxDC.drawLine(dc, {item.x, y}, {item.x + item.w, y})
 
         %{type: :text} ->
           :wxDC.setFont(dc, font(item))
-          :wxDC.setTextForeground(dc, if(item.href, do: @link, else: {0, 0, 0}))
+          :wxDC.setTextForeground(dc, item.color)
           :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+          :wxDC.setPen(dc, :wxPen.new(item.color))
 
-          if item.href do
-            :wxDC.setPen(dc, :wxPen.new(@link))
-            :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
-          end
+          if item.underline,
+            do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
+
+          if item.strike,
+            do: :wxDC.drawLine(dc, {item.x, y + div(item.h, 2) + 2}, {item.x + item.w, y + div(item.h, 2) + 2})
       end
     end
 
