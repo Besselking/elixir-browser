@@ -23,7 +23,9 @@ defmodule Browser.CSSTest do
   defp sm?(selector, ctx), do: CSS.matches?(sel(selector), ctx)
 
   test "parses rules, declarations and !important; ignores comments" do
-    css = "/* c */ p, .a > b { color: red; DISPLAY : none !important ; } @media print { p { x: y } } i{a:b}"
+    css =
+      "/* c */ p, .a > b { color: red; DISPLAY : none !important ; } @media print { p { x: y } } i{a:b}"
+
     rules = CSS.parse(css)
     assert length(rules) == 4
     assert hd(rules).decls == [{"color", "red", false}, {"display", "none", true}]
@@ -32,7 +34,9 @@ defmodule Browser.CSSTest do
   end
 
   test "skips at-rules with blocks and statements" do
-    css = "@import url(x.css); @font-face { font-family: x; src: url(y) } @keyframes k { from { a: b } } p { d: e }"
+    css =
+      "@import url(x.css); @font-face { font-family: x; src: url(y) } @keyframes k { from { a: b } } p { d: e }"
+
     assert [%{decls: [{"d", "e", false}], media: []}] = CSS.parse(css)
   end
 
@@ -82,7 +86,14 @@ defmodule Browser.CSSTest do
   end
 
   test "attribute selectors" do
-    el = ctx("a", [{"href", "https://x.org/a.pdf"}, {"lang", "en-US"}, {"rel", "nofollow me"}, {"hidden", ""}])
+    el =
+      ctx("a", [
+        {"href", "https://x.org/a.pdf"},
+        {"lang", "en-US"},
+        {"rel", "nofollow me"},
+        {"hidden", ""}
+      ])
+
     assert sm?("[href]", el)
     assert sm?("[hidden]", el)
     assert sm?("[lang|=en]", el)

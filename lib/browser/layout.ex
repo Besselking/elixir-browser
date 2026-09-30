@@ -40,13 +40,30 @@ defmodule Browser.Layout do
   defp find(_, _), do: nil
 
   defp text_of(nodes),
-    do: nodes |> Enum.map(fn {:text, t} -> t; {:element, _, _, k} -> text_of(k) end) |> Enum.join()
+    do:
+      nodes
+      |> Enum.map(fn
+        {:text, t} -> t
+        {:element, _, _, k} -> text_of(k)
+      end)
+      |> Enum.join()
 
   @doc "Returns `{items, content_height}`."
   def layout(nodes, width, measure) do
     style = %{
-      size: @base, bold: false, italic: false, mono: false, href: nil, pre: false, indent: 0,
-      hidden: false, color: {0, 0, 0}, underline: false, strike: false, align: :left, list: nil
+      size: @base,
+      bold: false,
+      italic: false,
+      mono: false,
+      href: nil,
+      pre: false,
+      indent: 0,
+      hidden: false,
+      color: {0, 0, 0},
+      underline: false,
+      strike: false,
+      align: :left,
+      list: nil
     }
 
     ops = nodes |> walk(style, []) |> Enum.reverse()
@@ -58,7 +75,8 @@ defmodule Browser.Layout do
   # ops: {:word, text, style[, :pre]} {:space, style} {:marker, text, style}
   #      {:flush} {:gap, px} {:pad, px} {:hr} {:box_start, ref, color, left} {:box_end, ref}
 
-  defp walk(nodes, style, acc) when is_list(nodes), do: Enum.reduce(nodes, acc, &walk(&1, style, &2))
+  defp walk(nodes, style, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &walk(&1, style, &2))
 
   defp walk({:text, t}, %{pre: true} = style, acc), do: pre_text(t, style, acc)
 
@@ -97,12 +115,32 @@ defmodule Browser.Layout do
   # display -> :block | :list_item | :flex | :inline | :contents
   defp kind(tag, c) do
     case c["display"] do
-      nil -> legacy_kind(tag)
-      d when d in ["block", "flow-root", "grid", "table", "table-row", "table-row-group", "table-caption"] -> :block
-      "list-item" -> :list_item
-      "flex" -> if c["flex-direction"] in ["column", "column-reverse"], do: :block, else: :flex
-      "contents" -> :contents
-      _ -> :inline
+      nil ->
+        legacy_kind(tag)
+
+      d
+      when d in [
+             "block",
+             "flow-root",
+             "grid",
+             "table",
+             "table-row",
+             "table-row-group",
+             "table-caption"
+           ] ->
+        :block
+
+      "list-item" ->
+        :list_item
+
+      "flex" ->
+        if c["flex-direction"] in ["column", "column-reverse"], do: :block, else: :flex
+
+      "contents" ->
+        :contents
+
+      _ ->
+        :inline
     end
   end
 
@@ -140,13 +178,15 @@ defmodule Browser.Layout do
   defp block_children(_tag, :flex, kids, style, acc) do
     kids
     |> Enum.reduce({acc, false}, fn
-      {:text, _} = t, {a, _} -> {walk(t, style, a), false}
+      {:text, _} = t, {a, _} ->
+        {walk(t, style, a), false}
 
       {:element, tag, _, _} = el, {a, sep?} when tag not in @skip ->
         a = if sep?, do: [{:space, style} | a], else: a
         {walk_element(el, style, a, :inline), true}
 
-      _, acc2 -> acc2
+      _, acc2 ->
+        acc2
     end)
     |> elem(0)
   end
@@ -198,7 +238,9 @@ defmodule Browser.Layout do
   defp marker(_other, n), do: "#{n}."
 
   defp alpha(n, base) when n > 0 do
-    div(n - 1, 26) |> then(&if(&1 > 0, do: alpha(&1, base), else: "")) |> Kernel.<>(<<base + rem(n - 1, 26)>>)
+    div(n - 1, 26)
+    |> then(&if(&1 > 0, do: alpha(&1, base), else: ""))
+    |> Kernel.<>(<<base + rem(n - 1, 26)>>)
   end
 
   defp alpha(_, _), do: ""
@@ -214,7 +256,13 @@ defmodule Browser.Layout do
       pl: px(c["padding-left"] || if(tag in ~w(ul ol), do: @legacy_indent, else: 0)),
       pt: px(c["padding-top"] || 0),
       pb: px(c["padding-bottom"] || 0),
-      bg: case(c["background-color"], do: ({_, _, _} = rgb -> rgb; _ -> nil))
+      bg:
+        case(c["background-color"],
+          do: (
+            {_, _, _} = rgb -> rgb
+            _ -> nil
+          )
+        )
     }
   end
 
@@ -259,12 +307,21 @@ defmodule Browser.Layout do
     decoration = c["text-decoration-line"]
 
     style
-    |> put_if(c["font-size"], fn s, fs -> if fs < 1, do: %{s | size: 1, hidden: true}, else: %{s | size: round(fs)} end)
+    |> put_if(c["font-size"], fn s, fs ->
+      if fs < 1, do: %{s | size: 1, hidden: true}, else: %{s | size: round(fs)}
+    end)
     |> put_if(c["font-weight"], &%{&1 | bold: &2 == "bold"})
     |> put_if(c["font-style"], &%{&1 | italic: &2 == "italic"})
     |> put_if(c["font-family"], &%{&1 | mono: mono?(&2)})
     |> put_if(match?({_, _, _}, c["color"]) && c["color"], &%{&1 | color: &2})
-    |> put_if(decoration, &%{&1 | underline: String.contains?(&2, "underline"), strike: String.contains?(&2, "line-through")})
+    |> put_if(
+      decoration,
+      &%{
+        &1
+        | underline: String.contains?(&2, "underline"),
+          strike: String.contains?(&2, "line-through")
+      }
+    )
     |> put_if(c["text-align"], &%{&1 | align: align(&2)})
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> Map.put(:hidden, hidden?(c))
@@ -272,14 +329,23 @@ defmodule Browser.Layout do
 
   # visibility is inherited by Style; a zero font-size hides text too
   defp hidden?(c),
-    do: c["visibility"] in ["hidden", "collapse"] or (is_number(c["font-size"]) and c["font-size"] < 1)
+    do:
+      c["visibility"] in ["hidden", "collapse"] or
+        (is_number(c["font-size"]) and c["font-size"] < 1)
 
   defp put_if(style, nil, _fun), do: style
   defp put_if(style, false, _fun), do: style
   defp put_if(style, value, fun), do: fun.(style, value)
 
   defp mono?(family) do
-    first = family |> String.split(",") |> hd() |> String.trim() |> String.trim("\"") |> String.trim("'")
+    first =
+      family
+      |> String.split(",")
+      |> hd()
+      |> String.trim()
+      |> String.trim("\"")
+      |> String.trim("'")
+
     first in @mono_fonts
   end
 
@@ -302,8 +368,18 @@ defmodule Browser.Layout do
 
   defp place(ops, width, measure) do
     st = %{
-      items: [], rects: [], open: %{}, line: [], x: 0, y: 0, gap: 0, pending_space: nil,
-      lh: 0, indent: 0, width: width, measure: measure
+      items: [],
+      rects: [],
+      open: %{},
+      line: [],
+      x: 0,
+      y: 0,
+      gap: 0,
+      pending_space: nil,
+      lh: 0,
+      indent: 0,
+      width: width,
+      measure: measure
     }
 
     st = ops |> Enum.reduce(st, &op/2) |> flush()
@@ -345,7 +421,15 @@ defmodule Browser.Layout do
 
     case Map.pop(st.open, ref) do
       {{top, left, color}, open} when st.y > top ->
-        rect = %{type: :rect, x: left, y: top, w: max(st.width - @margin - left, 0), h: st.y - top, color: color}
+        rect = %{
+          type: :rect,
+          x: left,
+          y: top,
+          w: max(st.width - @margin - left, 0),
+          h: st.y - top,
+          color: color
+        }
+
         %{st | open: open, rects: [rect | st.rects]}
 
       {_, open} ->
@@ -358,8 +442,12 @@ defmodule Browser.Layout do
   defp word(text, style, nowrap?, st) do
     w = st.measure.(text, style)
     indent = @margin + style.indent
-    space_w = if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
-    st = if st.line == [], do: st |> apply_gap() |> Map.merge(%{x: indent, indent: indent}), else: st
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    st =
+      if st.line == [], do: st |> apply_gap() |> Map.merge(%{x: indent, indent: indent}), else: st
 
     st =
       if st.line != [] and not nowrap? and st.x + space_w + w > st.width - @margin do
@@ -372,10 +460,22 @@ defmodule Browser.Layout do
     x = st.x + space_w
 
     item = %{
-      type: :text, x: x, y: 0, w: w, h: style.size, text: text, size: style.size,
-      bold: style.bold, italic: style.italic, mono: style.mono,
-      href: if(style.hidden, do: nil, else: style.href), hidden: style.hidden,
-      color: style.color, underline: style.underline, strike: style.strike, align: style.align
+      type: :text,
+      x: x,
+      y: 0,
+      w: w,
+      h: style.size,
+      text: text,
+      size: style.size,
+      bold: style.bold,
+      italic: style.italic,
+      mono: style.mono,
+      href: if(style.hidden, do: nil, else: style.href),
+      hidden: style.hidden,
+      color: style.color,
+      underline: style.underline,
+      strike: style.strike,
+      align: style.align
     }
 
     st = bridge(st, item, space_w)
@@ -411,7 +511,15 @@ defmodule Browser.Layout do
         %{it | x: it.x + shift, y: st.y + lh - it.h - div(lh - it.h, 4)}
       end)
 
-    %{st | items: placed ++ st.items, line: [], y: st.y + lh, lh: 0, x: st.indent, pending_space: nil}
+    %{
+      st
+      | items: placed ++ st.items,
+        line: [],
+        y: st.y + lh,
+        lh: 0,
+        x: st.indent,
+        pending_space: nil
+    }
   end
 
   defp align_shift([first | _] = items, st) do

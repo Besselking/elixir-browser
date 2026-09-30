@@ -105,7 +105,8 @@ defmodule Browser.StyleTest do
     end
 
     test "max-height zero works like height zero" do
-      assert tags(prune(~s(<div class="c">x</div>), ".c { max-height: 0px; overflow-y: scroll }")) == []
+      assert tags(prune(~s(<div class="c">x</div>), ".c { max-height: 0px; overflow-y: scroll }")) ==
+               []
     end
 
     test "zero height without clipping keeps the content" do
@@ -197,7 +198,9 @@ defmodule Browser.StyleTest do
     end
 
     test "rem uses the root font size; keywords and percentages" do
-      css = "html { font-size: 10px } p { font-size: 2rem } i { font-size: 150% } u { font-size: large }"
+      css =
+        "html { font-size: 10px } p { font-size: 2rem } i { font-size: 150% } u { font-size: large }"
+
       html = "<html><body><p>a<i>b</i></p><u>c</u></body></html>"
       assert comp(html, css, "p")["font-size"] == 20.0
       assert comp(html, css, "i")["font-size"] == 30.0
@@ -275,7 +278,9 @@ defmodule Browser.StyleTest do
     end
 
     test "currentcolor and inherit" do
-      css = "div { color: #00f } p { background-color: currentcolor; margin-top: inherit } div { margin-top: 9px }"
+      css =
+        "div { color: #00f } p { background-color: currentcolor; margin-top: inherit } div { margin-top: 9px }"
+
       c = comp("<div><p>a</p></div>", css, "p")
       assert c["background-color"] == {0, 0, 255}
       assert c["margin-top"] == 9.0
@@ -287,7 +292,8 @@ defmodule Browser.StyleTest do
     end
 
     test "text-align is inherited" do
-      assert comp("<div style=\"text-align:center\"><p>a</p></div>", "", "p")["text-align"] == "center"
+      assert comp("<div style=\"text-align:center\"><p>a</p></div>", "", "p")["text-align"] ==
+               "center"
     end
   end
 end

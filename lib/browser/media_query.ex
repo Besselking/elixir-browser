@@ -59,7 +59,10 @@ defmodule Browser.MediaQuery do
   defp reglue([one]), do: [one]
 
   defp reglue([first | rest]) do
-    [first <> ")" | Enum.map(Enum.slice(rest, 0..-2//1), &("(" <> &1 <> ")")) ++ ["(" <> List.last(rest)]]
+    [
+      first <> ")"
+      | Enum.map(Enum.slice(rest, 0..-2//1), &("(" <> &1 <> ")")) ++ ["(" <> List.last(rest)]
+    ]
   end
 
   defp parse_single(q) do
@@ -118,7 +121,9 @@ defmodule Browser.MediaQuery do
   defp base_name(_, base), do: base
 
   defp range(inner) do
-    case ~r/(<=|>=|<|>|=)/ |> Regex.split(inner, include_captures: true) |> Enum.map(&String.trim/1) do
+    case ~r/(<=|>=|<|>|=)/
+         |> Regex.split(inner, include_captures: true)
+         |> Enum.map(&String.trim/1) do
       [a, op, b] ->
         if name?(a), do: [{a, op(op), value(b)}], else: [{b, op(flip(op)), value(a)}]
 
@@ -216,10 +221,13 @@ defmodule Browser.MediaQuery do
 
   defp metric(name, env) when name in ["width", "device-width"], do: env.width
   defp metric(name, env) when name in ["height", "device-height"], do: env.height
-  defp metric(name, env) when name in ["aspect-ratio", "device-aspect-ratio"], do: env.width / max(env.height, 1)
 
-  defp metric(name, env) when name in ["resolution", "device-pixel-ratio", "-webkit-device-pixel-ratio"],
-    do: env.dppx
+  defp metric(name, env) when name in ["aspect-ratio", "device-aspect-ratio"],
+    do: env.width / max(env.height, 1)
+
+  defp metric(name, env)
+       when name in ["resolution", "device-pixel-ratio", "-webkit-device-pixel-ratio"],
+       do: env.dppx
 
   defp metric("color", _), do: 8
   defp metric(name, _) when name in ["color-index", "monochrome", "grid"], do: 0

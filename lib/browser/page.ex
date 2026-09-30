@@ -84,6 +84,9 @@ defmodule Browser.Page do
   # remote pages may not pull in local files
   defp allowed?(base, url) do
     scheme = URI.parse(url).scheme
-    if URI.parse(base).scheme == "file", do: scheme in ~w(file http https), else: scheme in ~w(http https)
+
+    if URI.parse(base).scheme == "file",
+      do: scheme in ~w(file http https),
+      else: scheme in ~w(http https)
   end
 end

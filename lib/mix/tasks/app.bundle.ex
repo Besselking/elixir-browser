@@ -157,7 +157,9 @@ defmodule Mix.Tasks.App.Bundle do
   # -- icon / plist / launcher -------------------------------------------------
 
   defp make_icon(res, icon) do
-    iconset = Path.join(System.tmp_dir!(), "iconset-#{System.unique_integer([:positive])}/icon.iconset")
+    iconset =
+      Path.join(System.tmp_dir!(), "iconset-#{System.unique_integer([:positive])}/icon.iconset")
+
     File.mkdir_p!(iconset)
     base = Path.join(iconset, "base.png")
 

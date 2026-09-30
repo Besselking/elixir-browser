@@ -124,7 +124,8 @@ defmodule Browser.CSS do
     end
   end
 
-  defp supports_not?(prelude), do: prelude |> String.trim() |> String.downcase() |> String.starts_with?("not")
+  defp supports_not?(prelude),
+    do: prelude |> String.trim() |> String.downcase() |> String.starts_with?("not")
 
   # `bin` starts just after an opening "{": returns {body, rest_after_closing_brace}
   defp take_block(bin), do: scan(bin, bin, 1, nil, 0)
@@ -196,7 +197,11 @@ defmodule Browser.CSS do
         [whole, cls] = m
         tokenize(drop(s, whole), [{:class, cls} | acc])
 
-      m = Regex.run(~r/\A\[\s*([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u, s) ->
+      m =
+          Regex.run(
+            ~r/\A\[\s*([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
+            s
+          ) ->
         [whole, name | rest] = m
         tokenize(drop(s, whole), [attr_token(name, rest) | acc])
 

@@ -8,7 +8,9 @@ defmodule Browser.LayoutTest do
   defp texts(items), do: for(%{type: :text, text: t} <- items, do: t)
 
   test "emits words in order and skips script/style/head" do
-    {items, _} = run("<head><title>x</title></head><style>a{}</style><p>hello <b>big</b> world</p>")
+    {items, _} =
+      run("<head><title>x</title></head><style>a{}</style><p>hello <b>big</b> world</p>")
+
     assert texts(items) |> Enum.sort() == ["big", "hello", "world"]
   end
 
@@ -60,7 +62,7 @@ defmodule Browser.LayoutTest do
   end
 
   describe "styled layout" do
-    alias Browser.{Page, Style}
+    alias Browser.Page
 
     # runs the full cascade so UA + author CSS apply
     defp styled(html, width \\ 400) do
@@ -72,7 +74,9 @@ defmodule Browser.LayoutTest do
 
     test "color, size, weight from CSS reach the items" do
       {items, _} =
-        styled("<style>.x { color: #ff0000; font-size: 20px; font-weight: bold }</style><p class=x>hi</p>")
+        styled(
+          "<style>.x { color: #ff0000; font-size: 20px; font-weight: bold }</style><p class=x>hi</p>"
+        )
 
       assert %{color: {255, 0, 0}, size: 20, bold: true} = word(items, "hi")
     end
@@ -81,7 +85,9 @@ defmodule Browser.LayoutTest do
       {items, _} = styled(~s(<a href="/x">a</a>))
       assert %{color: {0, 0, 238}, underline: true} = word(items, "a")
 
-      {items, _} = styled(~s(<style>a { text-decoration: none; color: #36c }</style><a href="/x">a</a>))
+      {items, _} =
+        styled(~s(<style>a { text-decoration: none; color: #36c }</style><a href="/x">a</a>))
+
       assert %{color: {51, 102, 204}, underline: false, href: "/x"} = word(items, "a")
     end
 
@@ -91,7 +97,9 @@ defmodule Browser.LayoutTest do
     end
 
     test "text-align centers and right-aligns lines" do
-      {items, _} = styled(~s(<p style="text-align:center">ab</p><p style="text-align:right">cd</p>), 400)
+      {items, _} =
+        styled(~s(<p style="text-align:center">ab</p><p style="text-align:right">cd</p>), 400)
+
       ab = word(items, "ab")
       cd = word(items, "cd")
       assert_in_delta ab.x + ab.w / 2, 200, 4
@@ -116,7 +124,9 @@ defmodule Browser.LayoutTest do
     end
 
     test "margin-left and padding-left indent content" do
-      {items, _} = styled(~s(<div style="margin-left: 30px; padding-left: 10px">x</div><div>y</div>))
+      {items, _} =
+        styled(~s(<div style="margin-left: 30px; padding-left: 10px">x</div><div>y</div>))
+
       assert word(items, "x").x - word(items, "y").x == 40
     end
 
@@ -146,14 +156,23 @@ defmodule Browser.LayoutTest do
       assert word(items, "left").y == word(items, "right").y
       assert word(items, "right").x > word(items, "left").x + word(items, "left").w
 
-      {items, _} = styled(css <> ~s(<div class="row" style="flex-direction:column"><div>l</div><div>r</div></div>))
+      {items, _} =
+        styled(
+          css <> ~s(<div class="row" style="flex-direction:column"><div>l</div><div>r</div></div>)
+        )
+
       assert word(items, "r").y > word(items, "l").y
     end
 
     test "display overrides the tag: a div can be inline, a span can be block" do
-      {items, _} = styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
+      {items, _} =
+        styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
+
       assert word(items, "a").y == word(items, "b").y
-      {items, _} = styled(~s(<span style="display:block">a</span><span style="display:block">b</span>))
+
+      {items, _} =
+        styled(~s(<span style="display:block">a</span><span style="display:block">b</span>))
+
       assert word(items, "b").y > word(items, "a").y
     end
 
@@ -164,7 +183,11 @@ defmodule Browser.LayoutTest do
     end
 
     test "monospace family is detected from the first family" do
-      {items, _} = styled(~s(<p style="font-family: Menlo, serif">a</p><p style="font-family: Helvetica, monospace">b</p>))
+      {items, _} =
+        styled(
+          ~s(<p style="font-family: Menlo, serif">a</p><p style="font-family: Helvetica, monospace">b</p>)
+        )
+
       assert word(items, "a").mono
       refute word(items, "b").mono
     end

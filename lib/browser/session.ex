@@ -16,8 +16,17 @@ defmodule Browser.Session do
     ui = UI.build()
 
     state = %{
-      ui: ui, history: History.new(), page: nil, nodes: [], items: [], height: 0, scroll: 0,
-      width: UI.client_width(ui), nonce: 0, hover: nil, url: nil
+      ui: ui,
+      history: History.new(),
+      page: nil,
+      nodes: [],
+      items: [],
+      height: 0,
+      scroll: 0,
+      width: UI.client_width(ui),
+      nonce: 0,
+      hover: nil,
+      url: nil
     }
 
     start = System.get_env("BROWSER_URL") || Browser.home()
@@ -28,7 +37,8 @@ defmodule Browser.Session do
   def handle_continue({:go, url}, state), do: {:noreply, load(state, Fetch.normalize(url), :push)}
 
   @impl true
-  def handle_cast({:navigate, url}, state), do: {:noreply, load(state, Fetch.normalize(url), :push)}
+  def handle_cast({:navigate, url}, state),
+    do: {:noreply, load(state, Fetch.normalize(url), :push)}
 
   # -- loading -------------------------------------------------------------
 
@@ -48,7 +58,9 @@ defmodule Browser.Session do
   def handle_info({:loaded, _, url, mode, result}, state) do
     page =
       case result do
-        {:ok, page} -> page
+        {:ok, page} ->
+          page
+
         {:error, msg} ->
           Page.build("<h1>Error</h1><p>#{escape(msg)}</p><p>#{escape(url)}</p>", url, env(state))
       end
@@ -74,7 +86,10 @@ defmodule Browser.Session do
     {:noreply, state}
   end
 
-  def handle_info(wx(obj: obj, event: wxCommand(type: :command_text_enter, cmdString: str)), state)
+  def handle_info(
+        wx(obj: obj, event: wxCommand(type: :command_text_enter, cmdString: str)),
+        state
+      )
       when obj == state.ui.url,
       do: {:noreply, load(state, Fetch.normalize(to_string(str)), :push)}
 
@@ -84,7 +99,7 @@ defmodule Browser.Session do
     cond do
       obj == ui.back -> {:noreply, history_nav(state, &History.back/1)}
       obj == ui.forward -> {:noreply, history_nav(state, &History.forward/1)}
-      obj == ui.reload -> {:noreply, state.url && load(state, state.url, :history) || state}
+      obj == ui.reload -> {:noreply, (state.url && load(state, state.url, :history)) || state}
       true -> {:noreply, state}
     end
   end
@@ -130,11 +145,16 @@ defmodule Browser.Session do
 
     delta =
       case code do
-        315 -> -40      # up
-        317 -> 40       # down
-        312 -> -page    # page up
-        313 -> page     # page down
-        32 -> page      # space
+        # up
+        315 -> -40
+        # down
+        317 -> 40
+        # page up
+        312 -> -page
+        # page down
+        313 -> page
+        # space
+        32 -> page
         _ -> 0
       end
 

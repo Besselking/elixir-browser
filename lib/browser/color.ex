@@ -8,32 +8,83 @@ defmodule Browser.Color do
   """
 
   @named %{
-    "black" => {0, 0, 0}, "silver" => {192, 192, 192}, "gray" => {128, 128, 128},
-    "grey" => {128, 128, 128}, "white" => {255, 255, 255}, "maroon" => {128, 0, 0},
-    "red" => {255, 0, 0}, "purple" => {128, 0, 128}, "fuchsia" => {255, 0, 255},
-    "magenta" => {255, 0, 255}, "green" => {0, 128, 0}, "lime" => {0, 255, 0},
-    "olive" => {128, 128, 0}, "yellow" => {255, 255, 0}, "navy" => {0, 0, 128},
-    "blue" => {0, 0, 255}, "teal" => {0, 128, 128}, "aqua" => {0, 255, 255},
-    "cyan" => {0, 255, 255}, "orange" => {255, 165, 0}, "pink" => {255, 192, 203},
-    "brown" => {165, 42, 42}, "gold" => {255, 215, 0}, "indigo" => {75, 0, 130},
-    "violet" => {238, 130, 238}, "coral" => {255, 127, 80}, "crimson" => {220, 20, 60},
-    "tomato" => {255, 99, 71}, "salmon" => {250, 128, 114}, "khaki" => {240, 230, 140},
-    "turquoise" => {64, 224, 208}, "tan" => {210, 180, 140}, "beige" => {245, 245, 220},
-    "ivory" => {255, 255, 240}, "lavender" => {230, 230, 250}, "orchid" => {218, 112, 214},
-    "plum" => {221, 160, 221}, "sienna" => {160, 82, 45}, "chocolate" => {210, 105, 30},
-    "firebrick" => {178, 34, 34}, "darkred" => {139, 0, 0}, "darkgreen" => {0, 100, 0},
-    "darkblue" => {0, 0, 139}, "darkgray" => {169, 169, 169}, "darkgrey" => {169, 169, 169},
-    "dimgray" => {105, 105, 105}, "dimgrey" => {105, 105, 105}, "lightgray" => {211, 211, 211},
-    "lightgrey" => {211, 211, 211}, "gainsboro" => {220, 220, 220}, "whitesmoke" => {245, 245, 245},
-    "snow" => {255, 250, 250}, "lightblue" => {173, 216, 230}, "skyblue" => {135, 206, 235},
-    "steelblue" => {70, 130, 180}, "royalblue" => {65, 105, 225}, "dodgerblue" => {30, 144, 255},
-    "midnightblue" => {25, 25, 112}, "cornflowerblue" => {100, 149, 237},
-    "lightgreen" => {144, 238, 144}, "limegreen" => {50, 205, 50}, "forestgreen" => {34, 139, 34},
-    "seagreen" => {46, 139, 87}, "darkorange" => {255, 140, 0}, "lightyellow" => {255, 255, 224},
-    "goldenrod" => {218, 165, 32}, "slategray" => {112, 128, 144}, "slategrey" => {112, 128, 144},
-    "rebeccapurple" => {102, 51, 153}, "hotpink" => {255, 105, 180}, "deeppink" => {255, 20, 147},
-    "aliceblue" => {240, 248, 255}, "azure" => {240, 255, 255}, "honeydew" => {240, 255, 240},
-    "mintcream" => {245, 255, 250}, "linen" => {250, 240, 230}, "wheat" => {245, 222, 179}
+    "black" => {0, 0, 0},
+    "silver" => {192, 192, 192},
+    "gray" => {128, 128, 128},
+    "grey" => {128, 128, 128},
+    "white" => {255, 255, 255},
+    "maroon" => {128, 0, 0},
+    "red" => {255, 0, 0},
+    "purple" => {128, 0, 128},
+    "fuchsia" => {255, 0, 255},
+    "magenta" => {255, 0, 255},
+    "green" => {0, 128, 0},
+    "lime" => {0, 255, 0},
+    "olive" => {128, 128, 0},
+    "yellow" => {255, 255, 0},
+    "navy" => {0, 0, 128},
+    "blue" => {0, 0, 255},
+    "teal" => {0, 128, 128},
+    "aqua" => {0, 255, 255},
+    "cyan" => {0, 255, 255},
+    "orange" => {255, 165, 0},
+    "pink" => {255, 192, 203},
+    "brown" => {165, 42, 42},
+    "gold" => {255, 215, 0},
+    "indigo" => {75, 0, 130},
+    "violet" => {238, 130, 238},
+    "coral" => {255, 127, 80},
+    "crimson" => {220, 20, 60},
+    "tomato" => {255, 99, 71},
+    "salmon" => {250, 128, 114},
+    "khaki" => {240, 230, 140},
+    "turquoise" => {64, 224, 208},
+    "tan" => {210, 180, 140},
+    "beige" => {245, 245, 220},
+    "ivory" => {255, 255, 240},
+    "lavender" => {230, 230, 250},
+    "orchid" => {218, 112, 214},
+    "plum" => {221, 160, 221},
+    "sienna" => {160, 82, 45},
+    "chocolate" => {210, 105, 30},
+    "firebrick" => {178, 34, 34},
+    "darkred" => {139, 0, 0},
+    "darkgreen" => {0, 100, 0},
+    "darkblue" => {0, 0, 139},
+    "darkgray" => {169, 169, 169},
+    "darkgrey" => {169, 169, 169},
+    "dimgray" => {105, 105, 105},
+    "dimgrey" => {105, 105, 105},
+    "lightgray" => {211, 211, 211},
+    "lightgrey" => {211, 211, 211},
+    "gainsboro" => {220, 220, 220},
+    "whitesmoke" => {245, 245, 245},
+    "snow" => {255, 250, 250},
+    "lightblue" => {173, 216, 230},
+    "skyblue" => {135, 206, 235},
+    "steelblue" => {70, 130, 180},
+    "royalblue" => {65, 105, 225},
+    "dodgerblue" => {30, 144, 255},
+    "midnightblue" => {25, 25, 112},
+    "cornflowerblue" => {100, 149, 237},
+    "lightgreen" => {144, 238, 144},
+    "limegreen" => {50, 205, 50},
+    "forestgreen" => {34, 139, 34},
+    "seagreen" => {46, 139, 87},
+    "darkorange" => {255, 140, 0},
+    "lightyellow" => {255, 255, 224},
+    "goldenrod" => {218, 165, 32},
+    "slategray" => {112, 128, 144},
+    "slategrey" => {112, 128, 144},
+    "rebeccapurple" => {102, 51, 153},
+    "hotpink" => {255, 105, 180},
+    "deeppink" => {255, 20, 147},
+    "aliceblue" => {240, 248, 255},
+    "azure" => {240, 255, 255},
+    "honeydew" => {240, 255, 240},
+    "mintcream" => {245, 255, 250},
+    "linen" => {250, 240, 230},
+    "wheat" => {245, 222, 179}
   }
 
   @spec parse(String.t()) :: {0..255, 0..255, 0..255} | :transparent | :current | nil
@@ -87,9 +138,14 @@ defmodule Browser.Color do
     parts = args |> String.replace(["/", ","], " ") |> String.split()
 
     case {String.starts_with?(name, "rgb"), parts} do
-      {true, [r, g, b | alpha]} -> with_alpha(alpha, &rgba(channel(r), channel(g), channel(b), &1))
-      {false, [h, s, l | alpha]} -> with_alpha(alpha, &hsl(hue(h), pct(s), pct(l), &1))
-      _ -> nil
+      {true, [r, g, b | alpha]} ->
+        with_alpha(alpha, &rgba(channel(r), channel(g), channel(b), &1))
+
+      {false, [h, s, l | alpha]} ->
+        with_alpha(alpha, &hsl(hue(h), pct(s), pct(l), &1))
+
+      _ ->
+        nil
     end
   end
 
@@ -144,13 +200,24 @@ defmodule Browser.Color do
     l = clamp(l, 0, 1)
     q = if l < 0.5, do: l * (1 + s), else: l + s - l * s
     p = 2 * l - q
-    rgba(hue_to_rgb(p, q, h + 1 / 3) * 255, hue_to_rgb(p, q, h) * 255, hue_to_rgb(p, q, h - 1 / 3) * 255, a)
+
+    rgba(
+      hue_to_rgb(p, q, h + 1 / 3) * 255,
+      hue_to_rgb(p, q, h) * 255,
+      hue_to_rgb(p, q, h - 1 / 3) * 255,
+      a
+    )
   end
 
   defp hsl(_, _, _, _), do: nil
 
   defp hue_to_rgb(p, q, t) do
-    t = cond do t < 0 -> t + 1; t > 1 -> t - 1; true -> t end
+    t =
+      cond do
+        t < 0 -> t + 1
+        t > 1 -> t - 1
+        true -> t
+      end
 
     cond do
       t < 1 / 6 -> p + (q - p) * 6 * t

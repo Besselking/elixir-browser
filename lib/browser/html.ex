@@ -14,9 +14,19 @@ defmodule Browser.HTML do
   @closes_p @block
 
   @entities %{
-    "amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", "apos" => "'",
-    "nbsp" => " ", "copy" => "©", "mdash" => "—", "ndash" => "–",
-    "hellip" => "…", "laquo" => "«", "raquo" => "»", "middot" => "·"
+    "amp" => "&",
+    "lt" => "<",
+    "gt" => ">",
+    "quot" => "\"",
+    "apos" => "'",
+    "nbsp" => " ",
+    "copy" => "©",
+    "mdash" => "—",
+    "ndash" => "–",
+    "hellip" => "…",
+    "laquo" => "«",
+    "raquo" => "»",
+    "middot" => "·"
   }
 
   @spec parse(binary) :: [term]
@@ -58,7 +68,9 @@ defmodule Browser.HTML do
   defp tokenize(bin, acc) do
     # text up to next "<" (a literal "<" not starting a tag is consumed as text)
     {text, rest} =
-      case :binary.match(bin, "<", scope: {min(1, byte_size(bin)), byte_size(bin) - min(1, byte_size(bin))}) do
+      case :binary.match(bin, "<",
+             scope: {min(1, byte_size(bin)), byte_size(bin) - min(1, byte_size(bin))}
+           ) do
         {pos, _} -> {binary_part(bin, 0, pos), binary_part(bin, pos, byte_size(bin) - pos)}
         :nomatch -> {bin, ""}
       end
@@ -72,8 +84,11 @@ defmodule Browser.HTML do
 
   defp take_raw(bin, name) do
     case Regex.run(~r/<\/#{name}\s*>/i, bin, return: :index) do
-      [{pos, len}] -> {binary_part(bin, 0, pos), binary_part(bin, pos + len, byte_size(bin) - pos - len)}
-      nil -> {bin, ""}
+      [{pos, len}] ->
+        {binary_part(bin, 0, pos), binary_part(bin, pos + len, byte_size(bin) - pos - len)}
+
+      nil ->
+        {bin, ""}
     end
   end
 
@@ -86,7 +101,9 @@ defmodule Browser.HTML do
 
   defp take_name(bin) do
     case Regex.run(~r/\A([^\s\/>]*)/, bin, capture: :all_but_first) do
-      [name] -> {String.downcase(name), binary_part(bin, byte_size(name), byte_size(bin) - byte_size(name))}
+      [name] ->
+        {String.downcase(name),
+         binary_part(bin, byte_size(name), byte_size(bin) - byte_size(name))}
     end
   end
 
@@ -94,10 +111,18 @@ defmodule Browser.HTML do
     bin = String.trim_leading(bin)
 
     case bin do
-      "" -> {Enum.reverse(acc), false, ""}
-      ">" <> rest -> {Enum.reverse(acc), false, rest}
-      "/>" <> rest -> {Enum.reverse(acc), true, rest}
-      "/" <> rest -> take_attrs(rest, acc)
+      "" ->
+        {Enum.reverse(acc), false, ""}
+
+      ">" <> rest ->
+        {Enum.reverse(acc), false, rest}
+
+      "/>" <> rest ->
+        {Enum.reverse(acc), true, rest}
+
+      "/" <> rest ->
+        take_attrs(rest, acc)
+
       _ ->
         [name] = Regex.run(~r/\A[^\s=\/>]+/, bin)
         rest = binary_part(bin, byte_size(name), byte_size(bin) - byte_size(name))
@@ -108,8 +133,12 @@ defmodule Browser.HTML do
 
   defp take_value("=" <> rest) do
     case String.trim_leading(rest) do
-      "\"" <> r -> split_quoted(r, "\"")
-      "'" <> r -> split_quoted(r, "'")
+      "\"" <> r ->
+        split_quoted(r, "\"")
+
+      "'" <> r ->
+        split_quoted(r, "'")
+
       r ->
         [v] = Regex.run(~r/\A[^\s>]*/, r)
         {decode(v), binary_part(r, byte_size(v), byte_size(r) - byte_size(v))}
@@ -181,7 +210,10 @@ defmodule Browser.HTML do
   defp close_all([{{name, _}, _} | _] = stack), do: stack |> pop_until(name) |> close_all()
 
   defp implied_close("li", stack), do: close_nearest(stack, "li", ~w(ul ol))
-  defp implied_close(name, stack) when name in ["dt", "dd"], do: close_nearest(stack, name, ~w(dl))
+
+  defp implied_close(name, stack) when name in ["dt", "dd"],
+    do: close_nearest(stack, name, ~w(dl))
+
   defp implied_close(name, stack) when name in @closes_p, do: close_nearest(stack, "p", [])
   defp implied_close(_, stack), do: stack
 
@@ -195,7 +227,9 @@ defmodule Browser.HTML do
       stack
     else
       case Enum.find_index(stack, &match?({{^target, _}, _}, &1)) do
-        nil -> stack
+        nil ->
+          stack
+
         idx ->
           between = stack |> Enum.take(idx) |> Enum.map(fn {{n, _}, _} -> n end)
           if Enum.all?(between, &(&1 not in @block)), do: pop_until(stack, target), else: stack

@@ -265,7 +265,9 @@ defmodule Browser.Style do
   end
 
   defp do_split("font", v, _toks) do
-    size = "[\\d.]+(?:px|em|rem|pt|%)|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger"
+    size =
+      "[\\d.]+(?:px|em|rem|pt|%)|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger"
+
     re = Regex.compile!("(?<![\\w.-])(#{size})(?:/\\S+)?\\s+(.+)\\z", "s")
 
     case Regex.run(re, v, return: :index) do
@@ -275,10 +277,20 @@ defmodule Browser.Style do
         family = binary_part(v, f0, fl)
 
         weight =
-          Enum.find(prefix, "normal", &(&1 in ~w(bold bolder lighter) or Regex.match?(~r/\A[1-9]00\z/, &1)))
+          Enum.find(
+            prefix,
+            "normal",
+            &(&1 in ~w(bold bolder lighter) or Regex.match?(~r/\A[1-9]00\z/, &1))
+          )
 
         style = if Enum.any?(prefix, &(&1 in ~w(italic oblique))), do: "italic", else: "normal"
-        [{"font-style", style}, {"font-weight", weight}, {"font-size", size_v}, {"font-family", family}]
+
+        [
+          {"font-style", style},
+          {"font-weight", weight},
+          {"font-size", size_v},
+          {"font-family", family}
+        ]
 
       _ ->
         []
@@ -318,7 +330,12 @@ defmodule Browser.Style do
           ctx = context(tag, attrs, parent, prev, i, count)
           {computed, custom} = compute(idx, ctx, parent)
           root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
-          ctx = ctx |> Map.put(:computed, computed) |> Map.put(:custom, custom) |> Map.put(:root_fs, root)
+
+          ctx =
+            ctx
+            |> Map.put(:computed, computed)
+            |> Map.put(:custom, custom)
+            |> Map.put(:root_fs, root)
 
           acc =
             if not_rendered?(computed) do
@@ -343,7 +360,10 @@ defmodule Browser.Style do
       end
 
     inherited = Map.take(pc, @inherited)
-    {customs, normals} = idx |> declared(ctx) |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+
+    {customs, normals} =
+      idx |> declared(ctx) |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+
     custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 
     resolved = resolve_vars(normals, custom)
@@ -374,7 +394,12 @@ defmodule Browser.Style do
       end
 
     base = Map.merge(inherited, typed)
-    base = if Map.has_key?(resolved, "font-size") or Map.has_key?(inherited, "font-size"), do: Map.put(base, "font-size", fs), else: base
+
+    base =
+      if Map.has_key?(resolved, "font-size") or Map.has_key?(inherited, "font-size"),
+        do: Map.put(base, "font-size", fs),
+        else: base
+
     base = if color, do: Map.put(base, "color", color), else: base
     {base, custom}
   end
@@ -401,7 +426,8 @@ defmodule Browser.Style do
   defp normalize(v), do: v |> String.trim() |> String.downcase()
 
   @doc false
-  def substitute(value, _custom, depth) when depth > 16, do: (if String.contains?(value, "var("), do: :error, else: {:ok, value})
+  def substitute(value, _custom, depth) when depth > 16,
+    do: if(String.contains?(value, "var("), do: :error, else: {:ok, value})
 
   def substitute(value, custom, depth) do
     case :binary.match(value, "var(") do
@@ -463,7 +489,8 @@ defmodule Browser.Style do
     end
   end
 
-  defp typed(prop, v, env, _pc) when prop in ~w(margin-top margin-bottom margin-left padding-top padding-bottom padding-left) do
+  defp typed(prop, v, env, _pc)
+       when prop in ~w(margin-top margin-bottom margin-left padding-top padding-bottom padding-left) do
     cond do
       v == "auto" -> {:ok, 0.0}
       px = length(v, env) -> {:ok, max(px, 0.0)}
@@ -479,7 +506,9 @@ defmodule Browser.Style do
     {:ok, if(bold?, do: "bold", else: "normal")}
   end
 
-  defp typed("font-style", v, _env, _pc), do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
+  defp typed("font-style", v, _env, _pc),
+    do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
+
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
 
   defp color_value(v, current) do
@@ -490,18 +519,35 @@ defmodule Browser.Style do
   end
 
   @font_keywords %{
-    "xx-small" => 9.0, "x-small" => 10.0, "small" => 13.0, "medium" => 16.0,
-    "large" => 18.0, "x-large" => 24.0, "xx-large" => 32.0, "xxx-large" => 48.0
+    "xx-small" => 9.0,
+    "x-small" => 10.0,
+    "small" => 13.0,
+    "medium" => 16.0,
+    "large" => 18.0,
+    "x-large" => 24.0,
+    "xx-large" => 32.0,
+    "xxx-large" => 48.0
   }
 
   defp font_size(v, pfs, root) do
     cond do
-      Map.has_key?(@font_keywords, v) -> @font_keywords[v]
-      v == "smaller" -> pfs / 1.2
-      v == "larger" -> pfs * 1.2
-      v == "inherit" -> pfs
-      m = Regex.run(~r/\A([\d.]+)%\z/, v) -> pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
-      true -> length(v, %{fs: pfs, root: root})
+      Map.has_key?(@font_keywords, v) ->
+        @font_keywords[v]
+
+      v == "smaller" ->
+        pfs / 1.2
+
+      v == "larger" ->
+        pfs * 1.2
+
+      v == "inherit" ->
+        pfs
+
+      m = Regex.run(~r/\A([\d.]+)%\z/, v) ->
+        pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
+
+      true ->
+        length(v, %{fs: pfs, root: root})
     end
   end
 
@@ -533,7 +579,11 @@ defmodule Browser.Style do
   end
 
   defp normalize_num_signed(n) do
-    n = if String.starts_with?(n, ["-.", "."]), do: String.replace(n, ".", "0.", global: false), else: n
+    n =
+      if String.starts_with?(n, ["-.", "."]),
+        do: String.replace(n, ".", "0.", global: false),
+        else: n
+
     if String.contains?(n, "."), do: n, else: n <> ".0"
   end
 
@@ -543,7 +593,8 @@ defmodule Browser.Style do
 
   # a clipping box with zero height shows none of its content
   defp collapsed?(c) do
-    (Map.get(c, "overflow-x", "visible") in @clips or Map.get(c, "overflow-y", "visible") in @clips) and
+    (Map.get(c, "overflow-x", "visible") in @clips or
+       Map.get(c, "overflow-y", "visible") in @clips) and
       (zero?(c["height"]) or zero?(c["max-height"]))
   end
 
@@ -556,7 +607,13 @@ defmodule Browser.Style do
     %{
       tag: tag,
       attrs: attrs,
-      id: case(List.keyfind(attrs, "id", 0), do: ({_, v} -> v; nil -> nil)),
+      id:
+        case(List.keyfind(attrs, "id", 0),
+          do: (
+            {_, v} -> v
+            nil -> nil
+          )
+        ),
       classes: attrs |> attr("class") |> String.split(),
       parent: parent,
       prev: prev,

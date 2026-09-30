@@ -64,8 +64,15 @@ defmodule Browser.UI do
     :wxFrame.show(frame)
     :wxWindow.setFocus(panel)
 
-    %__MODULE__{frame: frame, url: url, back: back, forward: forward, reload: reload,
-                panel: panel, status: status}
+    %__MODULE__{
+      frame: frame,
+      url: url,
+      back: back,
+      forward: forward,
+      reload: reload,
+      panel: panel,
+      status: status
+    }
   end
 
   def publish(items, scroll), do: :ets.insert(@view, {:view, items, scroll})
@@ -81,12 +88,20 @@ defmodule Browser.UI do
     case Process.get(key) do
       nil ->
         weight = :wxe_util.get_const(if bold, do: :wxFONTWEIGHT_BOLD, else: :wxFONTWEIGHT_NORMAL)
-        f = :wxFont.new(size, if(mono, do: @wx_teletype, else: @wx_default),
-                        if(italic, do: @wx_italic, else: @wx_normal), weight)
+
+        f =
+          :wxFont.new(
+            size,
+            if(mono, do: @wx_teletype, else: @wx_default),
+            if(italic, do: @wx_italic, else: @wx_normal),
+            weight
+          )
+
         Process.put(key, f)
         f
 
-      f -> f
+      f ->
+        f
     end
   end
 
@@ -110,8 +125,10 @@ defmodule Browser.UI do
     :wxDC.clear(dc)
     {_, h} = :wxWindow.getClientSize(panel)
 
-    for item <- items, not Map.get(item, :hidden, false),
-        item.y - scroll < h, item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
+    for item <- items,
+        not Map.get(item, :hidden, false),
+        item.y - scroll < h,
+        item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
       y = item.y - scroll
 
       case item do
@@ -134,7 +151,12 @@ defmodule Browser.UI do
             do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
 
           if item.strike,
-            do: :wxDC.drawLine(dc, {item.x, y + div(item.h, 2) + 2}, {item.x + item.w, y + div(item.h, 2) + 2})
+            do:
+              :wxDC.drawLine(
+                dc,
+                {item.x, y + div(item.h, 2) + 2},
+                {item.x + item.w, y + div(item.h, 2) + 2}
+              )
       end
     end
 
@@ -149,7 +171,8 @@ defmodule Browser.UI do
       %{type: :text, href: href} = it when is_binary(href) ->
         if x >= it.x and x <= it.x + it.w and y >= it.y and y <= it.y + it.h + 4, do: href
 
-      _ -> nil
+      _ ->
+        nil
     end)
   end
 
@@ -158,6 +181,7 @@ defmodule Browser.UI do
   def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
+
   def set_cursor(%{panel: p}, hand?) do
     :wxWindow.setCursor(p, :wxCursor.new(if hand?, do: 6, else: 1))
   end
