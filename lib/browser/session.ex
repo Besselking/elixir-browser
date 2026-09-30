@@ -6,7 +6,7 @@ defmodule Browser.Session do
   use GenServer
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxKey: 1]
 
-  alias Browser.{Fetch, HTML, History, Layout, UI}
+  alias Browser.{Fetch, History, Layout, Page, UI}
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   def navigate(url), do: GenServer.cast(__MODULE__, {:navigate, url})
@@ -36,7 +36,7 @@ defmodule Browser.Session do
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
-    Task.start(fn -> send(me, {:loaded, nonce, url, mode, Fetch.load(url)}) end)
+    Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url)}) end)
     %{state | nonce: nonce}
   end
 
@@ -45,24 +45,23 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
-    {body, final} =
+    page =
       case result do
-        {:ok, body, final} -> {body, final}
-        {:error, msg} -> {"<h1>Error</h1><p>#{escape(msg)}</p><p>#{escape(url)}</p>", url}
+        {:ok, page} -> page
+        {:error, msg} -> Page.build("<h1>Error</h1><p>#{escape(msg)}</p><p>#{escape(url)}</p>", url)
       end
 
     history =
       case mode do
-        :push -> History.visit(state.history, final)
+        :push -> History.visit(state.history, page.url)
         :history -> state.history
       end
 
-    nodes = HTML.parse(body)
-    UI.set_url_text(state.ui, final)
-    UI.set_title(state.ui, (Layout.title(nodes) || final) <> " — Elixir Browser")
+    UI.set_url_text(state.ui, page.url)
+    UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
     UI.set_status(state.ui, "Done")
 
-    state = %{state | history: history, nodes: nodes, url: final, scroll: 0}
+    state = %{state | history: history, nodes: page.nodes, url: page.url, scroll: 0}
     {:noreply, state |> relayout() |> sync_buttons()}
   end
 

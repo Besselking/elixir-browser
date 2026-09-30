@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><title>Hidden elements</title>
+<style>
+.gone { display: none }
+#menu li:first-child { display: none }
+.card > .badge { display: none !important }
+p.shown[hidden] { display: block }
+a:hover { display: none }
+@media print { p { display: none } }
+</style></head>
+<body>
+<h1>Hidden elements</h1>
+<p>1. Visible paragraph.</p>
+<p hidden>2. HIDDEN by the hidden attribute.</p>
+<p class="gone">3. HIDDEN by .gone.</p>
+<p style="display:none">4. HIDDEN by inline style.</p>
+<p class="shown" hidden>5. Visible: author display:block beats [hidden].</p>
+<ul id="menu"><li>6. HIDDEN first child</li><li>7. Visible second item</li></ul>
+<div class="card"><span class="badge" style="display:block">8. HIDDEN by !important.</span>9. Visible card text.</div>
+<p>10. <a href="/x">hover-only rule is ignored, so this link stays</a> and <span class="gone">11. HIDDEN inline</span>text continues.</p>
+</body></html>

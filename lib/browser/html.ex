@@ -49,7 +49,7 @@ defmodule Browser.HTML do
 
     if name in @raw_text and not self_close? do
       {raw, rest} = take_raw(rest, name)
-      tokenize(rest, [{:close, name}, {:open, name, attrs, false} | acc] |> add_raw(raw))
+      tokenize(rest, [{:close, name} | add_raw(name, raw, [{:open, name, attrs, false} | acc])])
     else
       tokenize(rest, [{:open, name, attrs, self_close?} | acc])
     end
@@ -66,8 +66,9 @@ defmodule Browser.HTML do
     tokenize(rest, [{:text, decode(text)} | acc])
   end
 
-  # raw text is dropped (script/style content is never rendered)
-  defp add_raw(acc, _raw), do: acc
+  # style text is kept (undecoded) for the CSS engine; script text is dropped
+  defp add_raw("style", raw, acc) when raw != "", do: [{:text, raw} | acc]
+  defp add_raw(_name, _raw, acc), do: acc
 
   defp take_raw(bin, name) do
     case Regex.run(~r/<\/#{name}\s*>/i, bin, return: :index) do
