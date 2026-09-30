@@ -8,7 +8,7 @@ defmodule Browser.MixProject do
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: [],
-      releases: [browser: [include_erts: false, strip_beams: false]]
+      releases: [browser: [include_erts: true, strip_beams: true]]
     ]
   end
 
