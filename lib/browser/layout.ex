@@ -542,6 +542,7 @@ defmodule Browser.Layout do
         t when t in ~w(i em cite) -> %{style | italic: true}
         t when t in ~w(code tt kbd samp) -> %{style | mono: true}
         "pre" -> %{style | mono: true, pre: true}
+        "textarea" -> %{style | pre: true}
         "a" -> link_style(style, attrs)
         t when is_map_key(@headings, t) -> %{style | size: @headings[t], bold: true}
         _ -> style

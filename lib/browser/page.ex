@@ -4,7 +4,7 @@ defmodule Browser.Page do
   references, cascade and prune. Runs in a task, never in the UI process.
   """
 
-  alias Browser.{Fetch, HTML, Layout, Style}
+  alias Browser.{Fetch, Forms, HTML, Layout, Style}
 
   @max_sheets 24
   @sheet_timeout 10_000
@@ -21,7 +21,7 @@ defmodule Browser.Page do
 
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    raw = body |> String.replace_invalid() |> HTML.parse()
+    raw = body |> String.replace_invalid() |> HTML.parse() |> Forms.transform()
 
     author =
       raw

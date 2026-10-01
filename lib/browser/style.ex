@@ -91,7 +91,20 @@ defmodule Browser.Style do
   u, ins { text-decoration: underline }
   s, strike, del { text-decoration: line-through }
   center, th { text-align: center }
-  button { display: inline-block; padding: 1px 6px; border: 1px solid #767676; background-color: #efefef; text-align: center }
+  input, select, textarea, button { display: inline-block; font-size: 13.3333px; font-weight: normal; font-style: normal; color: #000000; text-align: left; line-height: normal; text-decoration: none; text-indent: 0; margin: 0; padding: 1px 2px; border: 1px solid #767676; border-radius: 2px; background-color: #ffffff; overflow: hidden }
+  input { width: 170px }
+  input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; text-align: center; line-height: 13px; font-size: 10px }
+  input[type=checkbox] { border-radius: 2px }
+  input[type=radio] { border-radius: 50% }
+  input[type=checkbox][checked] { background-color: #0075ff; border-color: #0075ff; color: #ffffff }
+  input[type=radio][checked] { border-color: #0075ff; color: #0075ff }
+  input[type=submit], input[type=button], input[type=reset], input[type=file], button { width: auto; padding: 1px 6px; text-align: center; background-color: #efefef; border-radius: 3px }
+  textarea { width: 160px; height: 36px; padding: 2px }
+  select { padding: 0 4px; border-radius: 3px }
+  input[disabled], select[disabled], textarea[disabled], button[disabled] { color: #6d6d6d; background-color: #efefef; border-color: #b8b8b8 }
+  placeholder { color: #757575 }
+  fieldset { margin: 0 2px; padding: .35em .75em .625em; border: 1px solid #c0c0c0 }
+  legend { padding: 0 2px }
   """
 
   def ua_css, do: @ua_css
@@ -203,7 +216,13 @@ defmodule Browser.Style do
         {prop, {rank(:author, important?), {1, {0, 0, 0}}, 0}, value}
       end
 
-    (from_rules ++ from_inline)
+    # presentational attributes (size, cols, rows) rank below every author rule
+    from_hints =
+      for {prop, value} <- hints(ctx) do
+        {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
+      end
+
+    (from_hints ++ from_rules ++ from_inline)
     |> Enum.reduce(%{}, fn {prop, k, v}, acc ->
       case acc do
         %{^prop => {k0, _}} when k0 > k -> acc
@@ -374,6 +393,25 @@ defmodule Browser.Style do
         []
     end
   end
+
+  defp hints(%{tag: "input", attrs: attrs}) do
+    type = attrs |> attr("type") |> String.downcase()
+
+    with true <- Browser.Forms.text_like?(type),
+         {n, ""} when n > 0 <- Integer.parse(attr(attrs, "size")) do
+      [{"width", "#{n * 8}px"}]
+    else
+      _ -> []
+    end
+  end
+
+  defp hints(%{tag: "textarea", attrs: attrs}) do
+    for {name, prop, unit} <- [{"cols", "width", 8}, {"rows", "height", 18}],
+        {n, ""} when n > 0 <- [Integer.parse(attr(attrs, name))],
+        do: {prop, "#{n * unit}px"}
+  end
+
+  defp hints(_ctx), do: []
 
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do

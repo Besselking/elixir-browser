@@ -784,7 +784,8 @@ defmodule Browser.LayoutTest do
 
     test "button gets a box by default" do
       {items, _} = ib("<button>Go</button> text")
-      assert length(rs(items)) == 5
+      # background and border merged into one rounded rect
+      assert [%{radius: _, border: %{w: {1, 1, 1, 1}}, color: {239, 239, 239}}] = rs(items)
       go = wi(items, "Go")
       text = wi(items, "text")
       assert go.y + go.h == text.y + text.h
@@ -1328,6 +1329,195 @@ defmodule Browser.LayoutTest do
       {items, h} = lt(~s(<p style="line-height:0">a</p><p style="line-height:0">b</p>))
       assert wt(items, "b").y >= wt(items, "a").y
       assert is_integer(h)
+    end
+  end
+
+  describe "form controls" do
+    alias Browser.Page
+
+    defp fm(html, width \\ 500) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wf(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp boxes(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "a text input is a white bordered box showing its value" do
+      {items, _} = fm(~s(<input type="text" value="hello">))
+      [box] = boxes(items)
+      assert %{color: {255, 255, 255}, border: %{w: {1, 1, 1, 1}}, radius: _} = box
+      # 170px content + 2 x 2px padding + 2 x 1px border
+      assert box.w == 176
+      hello = wf(items, "hello")
+      assert hello.x == box.x + 1 + 2
+      assert hello.color == {0, 0, 0}
+    end
+
+    test "controls don't inherit the page's text colour or size" do
+      {items, _} =
+        fm(~s(<div style="color:#f00; font-size:30px"><input value="v"> <b>b</b></div>))
+
+      assert wf(items, "v").color == {0, 0, 0}
+      assert wf(items, "v").size == 13
+      assert wf(items, "b").color == {255, 0, 0}
+    end
+
+    test "a placeholder is grey and disappears once there is a value" do
+      {items, _} = fm(~s(<input placeholder="Search here">))
+      assert wf(items, "Search").color == {117, 117, 117}
+      {items, _} = fm(~s(<input placeholder="Search here" value="typed">))
+      assert wf(items, "typed").color == {0, 0, 0}
+      refute wf(items, "Search")
+    end
+
+    test "passwords are masked" do
+      {items, _} = fm(~s(<input type="password" value="secret">))
+      assert wf(items, "••••••")
+      refute wf(items, "secret")
+    end
+
+    test "size sets the width; page CSS overrides the attribute; the attribute overrides defaults" do
+      {items, _} = fm(~s(<input size="10">))
+      assert hd(boxes(items)).w == 10 * 8 + 6
+
+      {items, _} = fm(~s(<style>input { width: 50px }</style><input size="10">))
+      assert hd(boxes(items)).w == 50 + 6
+
+      {items, _} = fm(~s(<input size="10" style="width:90px">))
+      assert hd(boxes(items)).w == 90 + 6
+    end
+
+    test "an empty input is as tall as a filled one, with its box on the text baseline" do
+      {a, _} = fm(~s(before <input> after))
+      {b, _} = fm(~s(before <input value="x"> after))
+      assert hd(boxes(a)).h == hd(boxes(b)).h
+      before = wf(a, "before")
+      after_ = wf(a, "after")
+      assert (before.y + before.h - (after_.y + after_.h)) in -1..1
+    end
+
+    test "checkboxes are small squares, blue when checked" do
+      {items, _} = fm(~s(<input type="checkbox"><input type="checkbox" checked>))
+      [off, on] = boxes(items)
+      assert off.w == 15 and off.h == 15
+      assert off.color == {255, 255, 255}
+      assert on.color == {0, 117, 255}
+      assert wf(items, "✓").color == {255, 255, 255}
+    end
+
+    test "radio buttons are circles" do
+      {items, _} = fm(~s(<input type="radio" checked>))
+      [box] = boxes(items)
+      assert box.radius == {{7, 7}, {7, 7}, {7, 7}, {7, 7}}
+      assert wf(items, "●")
+    end
+
+    test "buttons show their label and fit it" do
+      {items, _} =
+        fm(~s(<input type="submit" value="Send"> <input type="reset"> <button>Go</button>))
+
+      assert wf(items, "Send") && wf(items, "Reset") && wf(items, "Go")
+      [send, reset, go] = boxes(items)
+      assert send.color == {239, 239, 239}
+      # sized by their label plus padding and border, not the 170px of a text field
+      assert send.w == wf(items, "Send").w + 12 + 2
+      assert reset.w < 100 and go.w < 100
+    end
+
+    test "a select shows the selected option and an arrow; the other options don't render" do
+      html =
+        ~s(<select><option>One</option><option selected>Two</option><option>Three</option></select>)
+
+      {items, _} = fm(html)
+      assert wf(items, "Two") && wf(items, "▾")
+      refute wf(items, "One")
+      refute wf(items, "Three")
+      assert [%{radius: _}] = boxes(items)
+    end
+
+    test "a textarea has its default size and keeps its line breaks" do
+      {items, _} = fm("<textarea>first line\nsecond line</textarea>")
+      [box] = boxes(items)
+      assert box.w == 160 + 4 + 2
+      assert box.h == 36 + 4 + 2
+      assert wf(items, "second line").y > wf(items, "first line").y
+    end
+
+    test "cols and rows size a textarea" do
+      {items, _} = fm(~s(<textarea cols="30" rows="4">x</textarea>))
+      [box] = boxes(items)
+      assert box.w == 30 * 8 + 6
+      assert box.h == 4 * 18 + 6
+    end
+
+    test "long values are clipped inside the box" do
+      {items, _} = fm(~s(<input value="#{String.duplicate("wide ", 60)}" size="5">))
+      [box] = boxes(items)
+      # the input never grows to fit its text: the text is clipped to the padding box
+      assert box.w == 5 * 8 + 6
+      assert Enum.all?(items, fn it -> it.type != :text or Map.has_key?(it, :clip) end)
+    end
+
+    test "disabled controls are greyed" do
+      {items, _} = fm(~s(<input value="v" disabled><button disabled>b</button>))
+      [input, button] = boxes(items)
+      assert input.color == {239, 239, 239} and button.color == {239, 239, 239}
+      assert wf(items, "v").color == {109, 109, 109}
+    end
+
+    test "hidden inputs take no room" do
+      {plain, _} = fm("a <b>b</b>")
+      {items, _} = fm(~s(a <input type="hidden" name="t" value="secret"><b>b</b>))
+      assert wf(items, "b").x == wf(plain, "b").x
+      assert boxes(items) == []
+    end
+
+    test "a label and its control share a line" do
+      {items, _} =
+        fm(~s(<label>Name <input value="x"></label><label>Mail <input value="y"></label>))
+
+      assert wf(items, "Name").y == wf(items, "Mail").y
+      assert length(boxes(items)) == 2
+    end
+
+    test "controls sit side by side and wrap like inline-blocks" do
+      {items, _} = fm(String.duplicate(~s(<input value="v">), 4), 400)
+      ys = items |> boxes() |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(ys) == 2
+    end
+
+    test "a fieldset is a bordered block with padding" do
+      {items, _} = fm(~s(<fieldset><legend>Title</legend>Content</fieldset>))
+      # four border strips, in the UA's grey
+      assert [%{y: top}, %{y: bottom} | _] = boxes(items)
+      assert Enum.all?(boxes(items), &(&1.color == {192, 192, 192}))
+      left = Enum.min_by(boxes(items), & &1.x).x
+      assert wf(items, "Title").x > left
+      assert wf(items, "Title").y > top
+      assert wf(items, "Content").y > wf(items, "Title").y
+      assert wf(items, "Content").y < bottom
+    end
+
+    test "a login-style form lays out and stays on integer pixels" do
+      html = """
+      <form><fieldset><legend>Sign in</legend>
+      <label>User <input name="u" placeholder="name"></label><br>
+      <label>Pass <input type="password" value="hunter2"></label><br>
+      <label><input type="checkbox" checked> Remember me</label><br>
+      <select><option>A</option><option selected>Beta</option></select>
+      <textarea rows="2">note</textarea>
+      <input type="submit" value="Go"></fieldset></form>
+      """
+
+      for width <- [200, 500] do
+        {items, height} = fm(html, width)
+        assert is_integer(height)
+
+        for it <- items, key <- [:x, :y, :w, :h], Map.has_key?(it, key) do
+          assert is_integer(Map.fetch!(it, key)), "#{key} of #{inspect(it)}"
+        end
+      end
     end
   end
 end
