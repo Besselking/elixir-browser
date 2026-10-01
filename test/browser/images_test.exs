@@ -1,5 +1,6 @@
 defmodule Browser.ImagesTest do
-  use ExUnit.Case, async: true
+  # not async: one test changes PATH for the whole VM
+  use ExUnit.Case, async: false
   alias Browser.{HTML, Images}
 
   @dir Path.expand("../fixtures/images", __DIR__)
@@ -141,9 +142,16 @@ defmodule Browser.ImagesTest do
       end
     end
 
-    test "other formats are converted to PNG" do
-      assert {:ok, png, :png} = Images.fetch(file("photo.tiff"), @base)
-      assert Images.sniff(png) == :png
+    test "other formats are converted to PNG with sips, and reported where it is missing" do
+      result = Images.fetch(file("photo.tiff"), @base)
+
+      if System.find_executable("sips") do
+        assert {:ok, png, :png} = result
+        assert Images.sniff(png) == :png
+      else
+        # not macOS: the image just can't be shown, nothing crashes
+        assert {:error, "cannot convert tiff" <> _} = result
+      end
     end
 
     test "data URLs work" do
@@ -187,6 +195,17 @@ defmodule Browser.ImagesTest do
   describe "convert/2" do
     test "garbage that claims to be an image is an error, not a crash" do
       assert {:error, "cannot convert webp" <> _} = Images.convert("RIFF....WEBPnonsense", :webp)
+    end
+
+    test "a missing tool is an error, not a crash" do
+      old = System.get_env("PATH")
+      System.put_env("PATH", "/nonexistent")
+
+      try do
+        assert {:error, "cannot convert tiff" <> _} = Images.convert("II*\0", :tiff)
+      after
+        System.put_env("PATH", old)
+      end
     end
   end
 end
