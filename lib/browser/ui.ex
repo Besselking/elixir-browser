@@ -223,6 +223,15 @@ defmodule Browser.UI do
     end
   end
 
+  # a vector picture: its display list is relative to the item's top-left corner
+  defp draw(dc, %{type: :svg} = item, y, scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    clip_to(gc, item, scroll)
+    :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
+    draw_svg(gc, item.ops, item.x, y)
+    :wxGraphicsContext.destroy(gc)
+  end
+
   # the focus ring: a 2px line around the control, following its rounded corners
   defp draw(dc, %{type: :ring} = item, y, _scroll) do
     gc = :wxGraphicsContext.create(dc)
@@ -319,6 +328,14 @@ defmodule Browser.UI do
             :ok
         end
 
+      :svg ->
+        for {x, y} <- tiles do
+          :wxGraphicsContext.clip(gc, x, y - scroll, tw, th)
+          draw_svg(gc, layer.ops, x, y - scroll)
+          :wxGraphicsContext.resetClip(gc)
+          :wxGraphicsContext.clip(gc, cx, cy - scroll, cw, ch)
+        end
+
       :linear ->
         {x1, y1, x2, y2} = layer.line
         stops = gradient_stops(layer.stops)
@@ -346,6 +363,128 @@ defmodule Browser.UI do
           radial_tile(gc, stops, {x + ox, y + oy - scroll}, {rx, ry}, {x, y - scroll, tw, th})
         end
     end
+  end
+
+  # -- vector pictures ----------------------------------------------------------------
+
+  # Pen widths are whole pixels, so strokes are drawn in a space four times as big and
+  # scaled back down: quarter-pixel precision.
+  @stroke_scale 4
+
+  defp draw_svg(gc, ops, ox, oy) do
+    Enum.each(ops, fn
+      %{kind: :path} = op ->
+        if op.fill, do: svg_fill(gc, op, ox, oy)
+        if op.stroke, do: svg_stroke(gc, op, ox, oy)
+
+      %{kind: :text} = op ->
+        svg_text(gc, op, ox, oy)
+    end)
+  end
+
+  defp svg_path(gc, segments, ox, oy, k) do
+    path = :wxGraphicsContext.createPath(gc)
+
+    Enum.each(segments, fn
+      {:M, x, y} ->
+        :wxGraphicsPath.moveToPoint(path, (ox + x) * k, (oy + y) * k)
+
+      {:L, x, y} ->
+        :wxGraphicsPath.addLineToPoint(path, (ox + x) * k, (oy + y) * k)
+
+      {:C, x1, y1, x2, y2, x, y} ->
+        :wxGraphicsPath.addCurveToPoint(
+          path,
+          {(ox + x1) * k, (oy + y1) * k},
+          {(ox + x2) * k, (oy + y2) * k},
+          {(ox + x) * k, (oy + y) * k}
+        )
+
+      :Z ->
+        :wxGraphicsPath.closeSubpath(path)
+    end)
+
+    path
+  end
+
+  defp svg_fill(gc, %{fill: %{paint: paint, rule: rule}, segments: segments}, ox, oy) do
+    :wxGraphicsContext.setBrush(gc, svg_brush(gc, paint, ox, oy))
+    path = svg_path(gc, segments, ox, oy, 1)
+    :wxGraphicsContext.fillPath(gc, path, [{:fillStyle, if(rule == :evenodd, do: 1, else: 2)}])
+  end
+
+  defp svg_brush(_gc, {:color, color}, _ox, _oy), do: :wxBrush.new(color)
+
+  defp svg_brush(gc, {:linear, {x1, y1, x2, y2}, stops}, ox, oy) do
+    :wxGraphicsContext.createLinearGradientBrush(
+      gc,
+      ox + x1,
+      oy + y1,
+      ox + x2,
+      oy + y2,
+      gradient_stops(stops)
+    )
+  end
+
+  defp svg_brush(gc, {:radial, {cx, cy, r, fx, fy}, stops}, ox, oy) do
+    :wxGraphicsContext.createRadialGradientBrush(
+      gc,
+      ox + fx,
+      oy + fy,
+      ox + cx,
+      oy + cy,
+      max(r, 0.01),
+      gradient_stops(stops)
+    )
+  end
+
+  # pens can't be gradients: a gradient stroke takes its first colour
+  defp stroke_color({:color, color}), do: color
+  defp stroke_color({_, _, [{_, color} | _]}), do: color
+
+  defp svg_stroke(gc, %{stroke: stroke, segments: segments}, ox, oy) do
+    k = @stroke_scale
+    pen = :wxPen.new(stroke_color(stroke.paint), [{:width, max(round(stroke.width * k), 1)}])
+
+    :wxPen.setCap(
+      pen,
+      case stroke.cap do
+        :round -> 130
+        :square -> 131
+        :butt -> 132
+      end
+    )
+
+    :wxPen.setJoin(
+      pen,
+      case stroke.join do
+        :bevel -> 120
+        :miter -> 121
+        :round -> 122
+      end
+    )
+
+    :wxGraphicsContext.setPen(gc, pen)
+    :wxGraphicsContext.scale(gc, 1 / k, 1 / k)
+    :wxGraphicsContext.strokePath(gc, svg_path(gc, segments, ox, oy, k))
+    :wxGraphicsContext.scale(gc, k * 1.0, k * 1.0)
+  end
+
+  # SVG gives the baseline, anchored at the start, middle or end of the text
+  defp svg_text(gc, op, ox, oy) do
+    f = font(%{size: max(round(op.size), 1), bold: op.bold, italic: op.italic, mono: op.mono})
+    :wxGraphicsContext.setFont(gc, f, op.color)
+    str = String.to_charlist(op.text)
+    {w, h, descent, _} = :wxGraphicsContext.getTextExtent(gc, str)
+
+    x =
+      case op.anchor do
+        :start -> op.x
+        :middle -> op.x - w / 2
+        :end -> op.x - w
+      end
+
+    :wxGraphicsContext.drawText(gc, str, ox + x, oy + op.y - (h - descent))
   end
 
   # a lone gradient that fills its whole area follows the box's rounded corners
@@ -499,7 +638,7 @@ defmodule Browser.UI do
 
   def link_at(items, x, y) do
     Enum.find_value(items, fn
-      %{type: type, href: href} = it when type in [:text, :image] and is_binary(href) ->
+      %{type: type, href: href} = it when type in [:text, :image, :svg] and is_binary(href) ->
         if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: href
 
       _ ->

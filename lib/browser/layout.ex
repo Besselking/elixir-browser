@@ -82,7 +82,8 @@ defmodule Browser.Layout do
       list: nil,
       lh: :normal,
       cid: nil,
-      images: Keyword.get(opts, :images)
+      images: Keyword.get(opts, :images),
+      svg_defs: Keyword.get(opts, :svg_defs, %{})
     }
 
     {nodes, canvas} = propagate_background(nodes)
@@ -258,6 +259,7 @@ defmodule Browser.Layout do
   end
 
   defp color4({r, g, b}), do: {r, g, b, 255}
+  defp color4(_), do: {0, 0, 0, 255}
 
   # -- tree -> ops ---------------------------------------------------------------
   #
@@ -284,6 +286,7 @@ defmodule Browser.Layout do
   defp walk({:element, "br", _, _}, _style, acc), do: [{:flush} | acc]
 
   defp walk({:element, "img", _attrs, _} = el, style, acc), do: image_ops(el, style, acc)
+  defp walk({:element, "svg", _attrs, _} = el, style, acc), do: svg_ops(el, style, acc)
 
   defp walk(el, style, acc), do: walk_element(el, style, acc, nil)
 
@@ -367,6 +370,11 @@ defmodule Browser.Layout do
       match?({:ok, _, _}, info) ->
         image_atom(url, info, attrs, c, style, acc)
 
+      match?({:svg, _, _, _}, info) ->
+        {:svg, w, h, scene} = info
+        extra = %{scene: scene, intrinsic: {w, h}, paint?: true, current: color4(c["color"])}
+        image_atom(url, nil, attrs, c, style, acc, extra)
+
       url != nil and info == nil and is_map(images) and declared != nil ->
         image_atom(url, nil, attrs, c, style, acc)
 
@@ -396,10 +404,46 @@ defmodule Browser.Layout do
 
   defp attr_value(attrs, name), do: List.keyfind(attrs, name, 0, {nil, ""}) |> elem(1)
 
-  defp image_atom(url, info, attrs, c, style, acc) do
-    kind = kind("img", c)
+  # An inline <svg> is a replaced element too. Its width/height attributes size it (a
+  # percentage is relative to the container); with only a viewBox it fills the width.
+  defp svg_ops({:element, "svg", attrs, _} = el, parent_style, acc) do
+    c = computed(attrs)
+    style = restyle("svg", attrs, parent_style, c)
+    scene = Browser.Svg.from_element(el, parent_style.svg_defs)
+    {iw, ih} = Browser.Svg.intrinsic(scene)
+
+    c =
+      Enum.reduce([{"width", scene.width}, {"height", scene.height}], c, fn
+        {prop, {:pct, _} = pct}, c -> Map.put_new(c, prop, pct)
+        _, c -> c
+      end)
+
+    num = fn v -> if is_number(v), do: v end
+
+    fill_ratio =
+      case scene do
+        %{width: nil, height: nil, viewbox: {_, _, vw, vh}} -> vh / vw
+        _ -> nil
+      end
+
+    extra = %{
+      scene: scene,
+      intrinsic: {iw, ih},
+      fill_ratio: fill_ratio,
+      paint?: true,
+      attrs: %{w: num.(scene.width), h: num.(scene.height)},
+      current: color4(c["color"]),
+      tag: "svg"
+    }
+
+    image_atom(nil, nil, attrs, c, style, acc, extra)
+  end
+
+  defp image_atom(url, info, attrs, c, style, acc, extra \\ %{}) do
+    tag = Map.get(extra, :tag, "img")
+    kind = kind(tag, c)
     block? = kind in [:block, :list_item, :flex]
-    box = box("img", c)
+    box = box(tag, c)
 
     # a block-level image sits on its own line; auto side margins position it
     {box, align, before, after_} =
@@ -434,6 +478,8 @@ defmodule Browser.Layout do
       hidden: style.hidden,
       valign: c["vertical-align"]
     }
+
+    spec = Map.merge(spec, extra)
 
     Enum.reverse(before) ++
       [{:image, spec, %{style | align: align}}] ++ Enum.reverse(after_) ++ acc
@@ -1055,7 +1101,14 @@ defmodule Browser.Layout do
   # whatever box (border, padding, background, radius) the element has.
   defp op({:image, spec, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
-    {cw, ch} = Browser.ImageBox.size(spec.intrinsic, spec.attrs, spec.css, avail)
+
+    intrinsic =
+      case spec do
+        %{fill_ratio: r} when is_number(r) -> {avail, avail * r}
+        _ -> spec.intrinsic
+      end
+
+    {cw, ch} = Browser.ImageBox.size(intrinsic, spec.attrs, spec.css, avail)
     box = spec.box
     {bt, br, bb, bl} = box.bw
     ml = if box.ml == :auto, do: 0, else: box.ml
@@ -1073,18 +1126,23 @@ defmodule Browser.Layout do
 
     picture =
       if spec.paint? and cw > 0 and ch > 0 do
-        [
-          %{
-            type: :image,
-            url: spec.url,
-            x: ml + bl + box.pl,
-            y: box.mt + bt + box.pt,
-            w: cw,
-            h: ch,
-            href: spec.href,
-            hidden: spec.hidden
-          }
-        ]
+        item = %{
+          x: ml + bl + box.pl,
+          y: box.mt + bt + box.pt,
+          w: cw,
+          h: ch,
+          href: spec.href,
+          hidden: spec.hidden
+        }
+
+        case spec do
+          %{scene: scene} ->
+            ops = Browser.Svg.render(scene, cw, ch, current: spec.current)
+            [Map.merge(item, %{type: :svg, ops: ops})]
+
+          _ ->
+            [Map.merge(item, %{type: :image, url: spec.url})]
+        end
       else
         []
       end

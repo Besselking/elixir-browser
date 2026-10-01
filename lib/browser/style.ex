@@ -22,9 +22,21 @@ defmodule Browser.Style do
             background-image background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
-            margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
+            margin-top margin-bottom margin-left padding-top padding-bottom padding-left
+            fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
+            stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor)
   @inherited ~w(visibility text-indent color font-size font-weight font-style font-family
-                text-decoration-line text-align list-style-type line-height)
+                text-decoration-line text-align list-style-type line-height
+                fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor)
+
+  # SVG presentation attributes: they act like author rules of the lowest priority
+  @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
+               lineargradient radialgradient symbol defs)
+  @svg_attrs ~w(fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
+                stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity
+                text-anchor opacity visibility display color font-size font-weight font-style
+                font-family)
   @clips ~w(hidden clip scroll auto)
   @default_fs 16.0
 
@@ -61,7 +73,7 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
-  svg, canvas, audio, video, iframe, object, embed, applet { display: none }
+  canvas, audio, video, iframe, object, embed, applet { display: none }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
@@ -435,6 +447,16 @@ defmodule Browser.Style do
     for {name, prop, unit} <- [{"cols", "width", 8}, {"rows", "height", 18}],
         {n, ""} when n > 0 <- [Integer.parse(attr(attrs, name))],
         do: {prop, "#{n * unit}px"}
+  end
+
+  defp hints(%{tag: tag, attrs: attrs}) when tag in @svg_tags do
+    for {name, value} <- attrs, name in @svg_attrs, is_binary(value) do
+      value = String.trim(value)
+
+      if name == "font-size" and Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, value),
+        do: {name, value <> "px"},
+        else: {name, value}
+    end
   end
 
   defp hints(_ctx), do: []

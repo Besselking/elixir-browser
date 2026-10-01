@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60" width="120" height="60">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e3c72"/>
+      <stop offset="1" stop-color="#2a9df4"/>
+    </linearGradient>
+  </defs>
+  <style>.sun { fill: #ffd54f } text { font-family: sans-serif }</style>
+  <rect width="120" height="60" rx="8" fill="url(#sky)"/>
+  <circle class="sun" cx="92" cy="20" r="11"/>
+  <path d="M0 60 L30 30 L52 48 L74 26 L120 60 Z" fill="#0b3d2e"/>
+  <text x="8" y="16" font-size="11" fill="white" font-weight="bold">SVG</text>
+</svg>

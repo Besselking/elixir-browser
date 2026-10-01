@@ -583,10 +583,10 @@ defmodule Browser.Backgrounds do
   The layers to paint, bottom first. `spec` holds the parsed lists (`images`, `repeat`,
   `position`, `size`; the shorter lists repeat to match `images`), `area` is the box the
   images are positioned in and `clip` the box they are painted into, both
-  `{x, y, w, h}`. `sizes` maps image urls to `{:ok, w, h}` (images not loaded yet are
+  `{x, y, w, h}`. `sizes` maps image urls to `{:ok, w, h}` or `{:svg, w, h, scene}` (images not loaded yet are
   skipped) and `current` is the colour for `currentcolor`.
 
-  A layer is `%{kind: :image | :linear | :radial, tile: {x, y, w, h}, repeat: {rx, ry},
+  A layer is `%{kind: :image | :svg | :linear | :radial, tile: {x, y, w, h}, repeat: {rx, ry},
   clip: clip, ...}` where gradient geometry is relative to the tile's top-left corner.
   """
   def paint_layers(spec, area, clip, sizes, current) do
@@ -627,6 +627,7 @@ defmodule Browser.Backgrounds do
   defp image_content({:url, url}, sizes) do
     case sizes && Map.get(sizes, url) do
       {:ok, w, h} -> {:image, url, {w, h}}
+      {:svg, w, h, scene} -> {:svg, scene, {w, h}}
       _ -> nil
     end
   end
@@ -636,6 +637,10 @@ defmodule Browser.Backgrounds do
   defp image_content(_, _sizes), do: nil
 
   defp finish(:image, url, _tw, _th, _current), do: %{url: url}
+
+  # vector images are drawn at the tile's size, so they stay sharp
+  defp finish(:svg, scene, tw, th, current),
+    do: %{ops: Browser.Svg.render(scene, tw, th, current: current)}
 
   defp finish(:linear, {dir, stops}, tw, th, current) do
     {x1, y1, x2, y2} = linear_line(dir, tw, th)

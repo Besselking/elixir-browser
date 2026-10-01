@@ -91,7 +91,8 @@ defmodule Browser.Images do
 
   @doc """
   Fetches the image at `url` (for a page at `base`): `{:ok, bytes, format}` with
-  `format` one of `:png | :jpeg | :gif | :bmp`, or `{:error, reason}`.
+  `format` one of `:png | :jpeg | :gif | :bmp`, or `{:error, reason}`. An SVG
+  comes back parsed: `{:ok, scene, :svg}` (see `Browser.Svg`).
   """
   def fetch(url, base) do
     with :ok <- check_allowed(url, base),
@@ -132,12 +133,19 @@ defmodule Browser.Images do
             :error -> {:error, "bad base64"}
           end
         else
-          {:ok, URI.decode(data)}
+          {:ok, percent_decode(data)}
         end
 
       _ ->
         {:error, "bad data URL"}
     end
+  end
+
+  # inline SVG often has a bare % (as in width="100%"), which URI.decode rejects
+  defp percent_decode(data) do
+    URI.decode(data)
+  rescue
+    ArgumentError -> data
   end
 
   # -- formats -------------------------------------------------------------------
@@ -157,6 +165,16 @@ defmodule Browser.Images do
 
   def sniff(<<"II*", 0, _::binary>>), do: :tiff
   def sniff(<<"MM", 0, "*", _::binary>>), do: :tiff
+
+  def sniff(bytes) when is_binary(bytes) do
+    head = bytes |> binary_part(0, min(byte_size(bytes), 2048)) |> String.downcase()
+
+    if String.contains?(head, "<svg") and
+         not String.starts_with?(String.trim_leading(head), ["<html", "<!doctype html"]),
+       do: :svg,
+       else: :unknown
+  end
+
   def sniff(_), do: :unknown
 
   # formats the toolkit reads directly; anything `sips` can read is converted to PNG
@@ -164,6 +182,7 @@ defmodule Browser.Images do
     case sniff(bytes) do
       format when format in [:png, :jpeg, :gif, :bmp] -> {:ok, bytes, format}
       format when format in [:webp, :avif, :heic, :tiff] -> convert(bytes, format)
+      :svg -> with {:ok, scene} <- Browser.Svg.from_source(bytes), do: {:ok, scene, :svg}
       :unknown -> {:error, "unknown image format"}
     end
   end

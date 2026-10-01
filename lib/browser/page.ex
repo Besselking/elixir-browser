@@ -22,7 +22,8 @@ defmodule Browser.Page do
     :nodes,
     forms: %{controls: %{}, forms: %{}},
     form_state: %{},
-    image_urls: []
+    image_urls: [],
+    svg_defs: %{}
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
@@ -117,7 +118,9 @@ defmodule Browser.Page do
       page
     else
       index = Style.index_rules(page.rules, env)
-      render(%{page | key: key, pruned: Style.prune(page.raw, index)}, page.form_state)
+      pruned = Style.prune(page.raw, index)
+      defs = Browser.Svg.defs(page.raw, pruned)
+      render(%{page | key: key, pruned: pruned, svg_defs: defs}, page.form_state)
     end
   end
 

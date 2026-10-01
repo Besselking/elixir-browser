@@ -407,7 +407,8 @@ defmodule Browser.LayoutTest do
   describe "geometry invariants" do
     alias Browser.Page
 
-    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds) do
+    for fixture <-
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("test/fixtures/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")

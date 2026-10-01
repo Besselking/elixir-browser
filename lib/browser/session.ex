@@ -116,11 +116,19 @@ defmodule Browser.Session do
 
   def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
     info =
-      with {:ok, bytes, format} <- result,
-           {:ok, w, h} <- UI.load_image(url, bytes, format) do
-        {:ok, w, h}
-      else
-        _ -> :failed
+      case result do
+        {:ok, scene, :svg} ->
+          {w, h} = Browser.Svg.intrinsic(scene)
+          {:svg, max(round(w), 1), max(round(h), 1), scene}
+
+        {:ok, bytes, format} ->
+          case UI.load_image(url, bytes, format) do
+            {:ok, w, h} -> {:ok, w, h}
+            _ -> :failed
+          end
+
+        _ ->
+          :failed
       end
 
     {:noreply, state |> put_in([:images, url], info) |> schedule_image_layout()}
@@ -610,7 +618,8 @@ defmodule Browser.Session do
     {items, height} =
       Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
         focus: focus_option(state),
-        images: state.images
+        images: state.images,
+        svg_defs: if(state.page, do: state.page.svg_defs, else: %{})
       )
 
     state = %{

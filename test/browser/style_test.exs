@@ -21,9 +21,21 @@ defmodule Browser.StyleTest do
 
   test "embedded content we can't draw is hidden, so its fallback text doesn't leak" do
     html =
-      "<p>a</p><svg><text>svg text</text></svg><video>no video</video><iframe>frame</iframe><i>b</i>"
+      "<p>a</p><canvas>no canvas</canvas><video>no video</video><iframe>frame</iframe><i>b</i>"
 
     assert tags(prune(html)) == ["p", "i"]
+  end
+
+  test "svg is drawn, with its shapes" do
+    assert tags(prune("<p>a</p><svg><circle r=\"3\"></circle></svg>")) == ["p", "svg", "circle"]
+  end
+
+  test "svg presentation attributes cascade below stylesheets" do
+    [{:element, "svg", _, [{:element, "rect", attrs, _}]}] =
+      prune(~s|<svg><rect fill="red" stroke="green"></rect></svg>|, "rect { fill: blue }")
+
+    assert {"@computed", %{"fill" => "blue", "stroke" => "green"}} =
+             List.keyfind(attrs, "@computed", 0)
   end
 
   test "input type=hidden is hidden" do
