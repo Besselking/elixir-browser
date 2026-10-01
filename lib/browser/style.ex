@@ -11,11 +11,12 @@ defmodule Browser.Style do
 
   alias Browser.{CSS, MediaQuery}
 
-  @props ~w(display visibility height max-height overflow-x overflow-y
+  @props ~w(display visibility overflow-x overflow-y position top left right bottom
+            width height min-height max-height clip clip-path text-indent opacity
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
-  @inherited ~w(visibility color font-size font-weight font-style font-family
+  @inherited ~w(visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type)
   @clips ~w(hidden clip scroll auto)
   @default_fs 16.0
@@ -327,7 +328,7 @@ defmodule Browser.Style do
           {[t | acc], state}
 
         {:element, tag, attrs, kids}, {acc, {i, prev}} ->
-          ctx = context(tag, attrs, parent, prev, i, count)
+          ctx = context(tag, attrs, kids, parent, prev, i, count)
           {computed, custom} = compute(idx, ctx, parent)
           root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
@@ -401,6 +402,8 @@ defmodule Browser.Style do
         else: base
 
     base = if color, do: Map.put(base, "color", color), else: base
+    # a fully transparent element (and, approximately, its subtree) takes space but isn't painted
+    base = if base["opacity"] == 0.0, do: Map.put(base, "visibility", "hidden"), else: base
     {base, custom}
   end
 
@@ -498,6 +501,33 @@ defmodule Browser.Style do
     end
   end
 
+  @size_props ~w(width height min-height max-height top left right bottom)
+
+  # px as a float, {:pct, fraction}, or no entry for auto/none/unsupported values
+  defp typed(prop, v, env, _pc) when prop in @size_props do
+    cond do
+      m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) ->
+        {:ok, {:pct, m |> Enum.at(1) |> to_float() |> Kernel./(100)}}
+
+      px = length(v, env) ->
+        {:ok, px}
+
+      true ->
+        :skip
+    end
+  end
+
+  defp typed("text-indent", v, env, _pc) do
+    if px = length(v, env), do: {:ok, px}, else: :skip
+  end
+
+  defp typed("opacity", v, _env, _pc) do
+    case Float.parse(v) do
+      {n, ""} -> {:ok, n |> max(0.0) |> min(1.0)}
+      _ -> :skip
+    end
+  end
+
   defp typed("font-weight", v, _env, _pc) do
     bold? =
       v in ["bold", "bolder"] or
@@ -551,6 +581,9 @@ defmodule Browser.Style do
     end
   end
 
+  defp to_float(n),
+    do: n |> String.trim_leading("+") |> normalize_num_signed() |> String.to_float()
+
   defp normalize_num(n), do: if(String.contains?(n, "."), do: n, else: n <> ".0")
 
   # a CSS length in px, or nil if unsupported (percentages, calc(), viewport units)
@@ -589,21 +622,70 @@ defmodule Browser.Style do
 
   # -- visibility helpers -----------------------------------------------------------------
 
-  defp not_rendered?(c), do: c["display"] == "none" or collapsed?(c)
+  defp not_rendered?(c), do: c["display"] == "none" or collapsed?(c) or visually_hidden?(c)
 
-  # a clipping box with zero height shows none of its content
+  # a clipping box with zero height or width shows none of its content
   defp collapsed?(c) do
-    (Map.get(c, "overflow-x", "visible") in @clips or
-       Map.get(c, "overflow-y", "visible") in @clips) and
-      (zero?(c["height"]) or zero?(c["max-height"]))
+    clips?(c) and (zero?(c["height"]) or zero?(c["max-height"]) or zero?(c["width"]))
   end
 
-  defp zero?(nil), do: false
+  defp clips?(c),
+    do:
+      Map.get(c, "overflow-x", "visible") in @clips or
+        Map.get(c, "overflow-y", "visible") in @clips
 
-  defp zero?(v),
-    do: Regex.match?(~r/\A\+?(0+\.?0*|\.0+)(px|em|rem|%|pt|vh|vw|ch|ex|cm|mm|in)?\z/, v)
+  defp zero?(v), do: v == 0.0 or v == {:pct, 0.0}
 
-  defp context(tag, attrs, parent, prev, i, count) do
+  # Boxes that exist only for assistive technology, or that are pushed far off
+  # screen, are not shown: clipped to nothing, 1x1 clipping boxes, huge offsets.
+  defp visually_hidden?(c) do
+    positioned? = c["position"] in ["absolute", "fixed"]
+
+    (positioned? and (empty_clip?(c["clip"]) or empty_clip_path?(c["clip-path"]))) or
+      (clips?(c) and tiny?(c["width"]) and tiny?(c["height"])) or
+      (c["position"] in ["absolute", "fixed", "relative"] and offscreen?(c)) or
+      (clips?(c) and is_number(c["text-indent"]) and c["text-indent"] <= -1000)
+  end
+
+  defp tiny?(v), do: is_number(v) and v <= 1.0
+
+  defp offscreen?(c) do
+    Enum.any?(["left", "top"], fn k -> is_number(c[k]) and c[k] <= -1000 end) or
+      Enum.any?(["left", "top"], fn k -> is_number(c[k]) and c[k] >= 10_000 end)
+  end
+
+  # clip: rect(top, right, bottom, left) with an empty area
+  defp empty_clip?(nil), do: false
+
+  defp empty_clip?(v) do
+    case Regex.run(~r/\Arect\(\s*(.*?)\s*\)\z/, v) do
+      [_, args] ->
+        case args |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&clip_px/1) do
+          [t, r, b, l] when is_number(t) and is_number(r) and is_number(b) and is_number(l) ->
+            b <= t or r <= l
+
+          _ ->
+            false
+        end
+
+      nil ->
+        false
+    end
+  end
+
+  defp clip_px("auto"), do: :auto
+  defp clip_px(v), do: length(v, %{fs: 16.0, root: 16.0})
+
+  defp empty_clip_path?(nil), do: false
+
+  defp empty_clip_path?(v) do
+    case Regex.run(~r/\Ainset\(\s*(\d+(?:\.\d+)?)%/, v) do
+      [_, n] -> to_float(n) >= 50.0
+      nil -> Regex.match?(~r/\Acircle\(\s*0(?:px|%)?\s*[\s)]/, v)
+    end
+  end
+
+  defp context(tag, attrs, kids, parent, prev, i, count) do
     %{
       tag: tag,
       attrs: attrs,
@@ -618,7 +700,10 @@ defmodule Browser.Style do
       parent: parent,
       prev: prev,
       first?: i == 0,
-      last?: i == count - 1
+      last?: i == count - 1,
+      index: i + 1,
+      count: count,
+      empty?: kids == []
     }
   end
 end

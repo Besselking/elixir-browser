@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><title>Positioning and clipping</title>
+<style>
+body { font-family: sans-serif }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0) }
+.panel { position: relative; margin: 12px 0 12px 40px; padding: 8px; background: #eef; height: 90px }
+.badge { position: absolute; top: 4px; right: 8px; background: #c33; color: white; padding: 2px 6px }
+.corner { position: absolute; bottom: 4px; left: 8px; color: #060 }
+.clip { height: 44px; overflow: hidden; background: #ffd; border: 1px solid #cc9 }
+.toast { position: fixed; bottom: 10px; right: 10px; background: #333; color: #fff; padding: 6px 10px }
+.skip:not(:focus) { position: absolute; left: -9999px }
+li:nth-child(odd) { color: #036 }
+</style></head>
+<body>
+<a class="skip" href="#c">SKIP-LINK (must be hidden)</a>
+<h1>Positioning and clipping</h1>
+<p>1. Before the panel. <span class="sr-only">SR-ONLY TEXT (must be hidden)</span>Visible text continues.</p>
+<div class="panel">
+  <span class="badge">Badge top-right</span>
+  Panel content, positioned relative.
+  <span class="corner">Bottom-left of the panel</span>
+</div>
+<p>2. After the panel: absolute children did not take space.</p>
+<div class="clip">Clipped box line 1<br>Clipped box line 2<br>CLIPPED line 3 (hidden)<br>CLIPPED line 4 (hidden)</div>
+<p>3. After the clipped box.</p>
+<ul><li>odd one</li><li>even two</li><li>odd three</li><li>even four</li></ul>
+<div class="toast">Fixed toast, bottom-right</div>
+</body></html>

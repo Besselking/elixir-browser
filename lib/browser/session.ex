@@ -179,7 +179,10 @@ defmodule Browser.Session do
 
   defp relayout(state) do
     width = max(UI.client_width(state.ui), 200)
-    {items, height} = Layout.layout(state.nodes, width, UI.measurer(state.ui))
+
+    {items, height} =
+      Layout.layout(state.nodes, width, UI.measurer(state.ui), UI.client_height(state.ui))
+
     state = %{state | items: items, height: height, width: width}
     scroll_by(state, 0)
   end

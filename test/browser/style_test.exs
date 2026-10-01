@@ -296,4 +296,63 @@ defmodule Browser.StyleTest do
                "center"
     end
   end
+
+  describe "visually hidden patterns" do
+    @sr_only_cases [
+      {"clip rect 1px", "position:absolute; clip: rect(1px, 1px, 1px, 1px)"},
+      {"clip rect zero, spaces", "position:absolute; clip: rect(0 0 0 0)"},
+      {"clip-path inset 50%", "position:absolute; clip-path: inset(50%)"},
+      {"clip-path circle 0", "position:fixed; clip-path: circle(0)"},
+      {"1x1 clipped box", "width:1px; height:1px; overflow:hidden"},
+      {"offscreen left", "position:absolute; left:-9999px"},
+      {"offscreen top, relative", "position:relative; top:-10000px"},
+      {"far right", "position:absolute; left:100000px"},
+      {"zero width clip", "width:0; overflow:hidden"},
+      {"text-indent image replacement", "text-indent:-9999px; overflow:hidden"}
+    ]
+
+    for {name, decls} <- @sr_only_cases do
+      test "#{name} is not rendered" do
+        assert tags(prune(~s(<p style="#{unquote(decls)}">x</p><i>y</i>))) == ["i"]
+      end
+    end
+
+    test "a visible absolutely positioned element is kept" do
+      assert tags(prune(~s(<p style="position:absolute; top:10px; left:5px">x</p>))) == ["p"]
+    end
+
+    test "clip without positioning, a normal clip rect and clip: auto are kept" do
+      assert tags(prune(~s|<p style="clip: rect(1px,1px,1px,1px)">x</p>|)) == ["p"]
+
+      assert tags(prune(~s|<p style="position:absolute; clip: rect(0,10px,10px,0)">x</p>|)) == [
+               "p"
+             ]
+
+      assert tags(prune(~s(<p style="position:absolute; clip: auto">x</p>))) == ["p"]
+    end
+
+    test ":not(:focus) skip-link pattern" do
+      css =
+        ".skip:not(:focus) { position: absolute !important; clip: rect(1px,1px,1px,1px); width: 1px; height: 1px; overflow: hidden }"
+
+      assert tags(prune(~s(<a class="skip" href="#c">Jump</a><i>y</i>), css)) == ["i"]
+    end
+
+    test "opacity zero keeps the space but hides painting" do
+      nodes = prune(~s(<p style="opacity:0">x</p>))
+      assert computed_of(nodes, "p")["visibility"] == "hidden"
+      assert computed_of(prune(~s(<p style="opacity:.5">x</p>)), "p")["visibility"] == nil
+    end
+
+    test "sizes and offsets are typed: px, percentages, auto is absent" do
+      html =
+        ~s(<p style="position:absolute; top:5px; left:10%; width:2em; height:auto; max-height:none">x</p>)
+
+      c = computed_of(prune(html), "p")
+      assert {c["top"], c["left"], c["width"]} == {5.0, {:pct, 0.1}, 32.0}
+      refute Map.has_key?(c, "height")
+      refute Map.has_key?(c, "max-height")
+      assert c["position"] == "absolute"
+    end
+  end
 end

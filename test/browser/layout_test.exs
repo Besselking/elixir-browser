@@ -192,4 +192,234 @@ defmodule Browser.LayoutTest do
       refute word(items, "b").mono
     end
   end
+
+  describe "sizes and clipping" do
+    alias Browser.Page
+
+    defp styled2(html, width \\ 400, view_h \\ 600) do
+      page = Page.build(html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, view_h)
+    end
+
+    defp w2(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    @reset "<style>body{margin:0} p,div{margin:0}</style>"
+
+    test "a fixed height pads a short box" do
+      {items, _} = styled2(@reset <> ~s(<div style="height:100px">a</div><p>b</p>))
+      assert w2(items, "b").y - w2(items, "a").y >= 100 - 20
+    end
+
+    test "overflow hidden clips content below the height" do
+      html =
+        @reset <>
+          ~s(<div style="height:40px; overflow:hidden"><p>l1</p><p>l2</p><p>l3</p><p>l4</p></div><p>after</p>)
+
+      {items, _} = styled2(html)
+      assert w2(items, "l1")
+      refute w2(items, "l4")
+      assert w2(items, "after").y < 80
+    end
+
+    test "overflow visible lets content overflow, following content is not overlapped" do
+      html = @reset <> ~s(<div style="height:10px"><p>l1</p><p>l2</p><p>l3</p></div><p>after</p>)
+      {items, _} = styled2(html)
+      assert w2(items, "l3")
+      assert w2(items, "after").y > w2(items, "l3").y
+    end
+
+    test "max-height clips and min-height pads" do
+      {items, _} =
+        styled2(
+          @reset <>
+            ~s(<div style="max-height:30px;overflow:hidden"><p>a</p><p>b</p><p>c</p></div><p>z</p>)
+        )
+
+      refute w2(items, "c")
+      assert w2(items, "z").y < 60
+
+      {items, _} = styled2(@reset <> ~s(<div style="min-height:100px">a</div><p>z</p>))
+      assert w2(items, "z").y >= 100
+    end
+
+    test "background rects are clamped to the clipped height and sit under inner rects" do
+      html =
+        @reset <>
+          ~s(<div style="background:#eee; height:30px; overflow:hidden"><div style="background:#ddd"><p>a</p><p>b</p><p>c</p></div></div>)
+
+      {items, _} = styled2(html)
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert [outer, inner] = rects
+      assert outer.color == {238, 238, 238} and outer.h == 30
+      assert inner.color == {221, 221, 221} and inner.h <= 30
+    end
+  end
+
+  describe "absolute positioning" do
+    alias Browser.Page
+
+    defp abs_layout(html, width \\ 400, view_h \\ 600) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, view_h)
+    end
+
+    defp wd(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "absolute elements take no space in the flow" do
+      {items, _} =
+        abs_layout(
+          ~s(<p>a</p><div style="position:absolute; top:200px; left:50px">box</div><p>b</p>)
+        )
+
+      a = wd(items, "a")
+      b = wd(items, "b")
+      assert b.y - a.y < 30
+    end
+
+    test "top/left are relative to the page without a positioned ancestor" do
+      {items, _} =
+        abs_layout(~s(<p>a</p><div style="position:absolute; top:200px; left:50px">box</div>))
+
+      box = wd(items, "box")
+      assert box.x == 50
+      assert box.y > 195 and box.y < 230
+    end
+
+    test "top/left are relative to the nearest positioned ancestor" do
+      html =
+        ~s(<p>above</p><div style="position:relative; margin-left:100px">) <>
+          ~s(<p>inside</p><span style="position:absolute; top:0; left:10px">tip</span></div>)
+
+      {items, _} = abs_layout(html)
+      inside = wd(items, "inside")
+      tip = wd(items, "tip")
+      assert tip.x == 114
+      assert abs(tip.y - inside.y) < 5
+    end
+
+    test "right aligns the element's right edge to the containing block" do
+      {items, _} =
+        abs_layout(~s(<div style="position:absolute; top:0; right:20px">hello</div>), 400)
+
+      hello = wd(items, "hello")
+      assert hello.x + hello.w == 400 - 20
+    end
+
+    test "explicit and percentage widths wrap the content" do
+      {items, _} =
+        abs_layout(
+          ~s(<div style="position:absolute; top:0; left:0; width:80px">one two three four five six</div>)
+        )
+
+      texts = for %{type: :text} = i <- items, do: i
+      assert Enum.all?(texts, &(&1.x + &1.w <= 80))
+      assert length(Enum.uniq_by(texts, & &1.y)) > 1
+
+      {items, _} =
+        abs_layout(
+          ~s(<div style="position:absolute; top:0; left:0; width:50%">one two three four five six seven eight nine ten</div>),
+          400
+        )
+
+      assert Enum.all?(for(%{type: :text} = i <- items, do: i.x + i.w), &(&1 <= 200))
+    end
+
+    test "bottom is relative to the viewport for page-level elements" do
+      {items, _} =
+        abs_layout(~s(<div style="position:absolute; bottom:10px; left:0">foot</div>), 400, 600)
+
+      foot = wd(items, "foot")
+      assert foot.y > 600 - 10 - 40 and foot.y < 600
+    end
+
+    test "bottom inside a positioned box with a height is resolved when the box closes" do
+      html =
+        ~s(<div style="position:relative; height:100px; margin-left:20px"><p>top</p>) <>
+          ~s(<span style="position:absolute; bottom:5px; left:6px">low</span></div><p>after</p>)
+
+      {items, _} = abs_layout(html)
+      top = wd(items, "top")
+      low = wd(items, "low")
+      assert low.x == 4 + 20 + 6
+      # near the bottom of the 100px box, well below the first line
+      assert low.y > top.y + 50 and low.y < top.y + 100
+    end
+
+    test "bottom inside a positioned box without a fixed height uses the content height" do
+      html =
+        ~s(<div style="position:relative"><p>one</p><p>two</p><span style="position:absolute; bottom:0">low</span></div>)
+
+      {items, _} = abs_layout(html)
+      assert wd(items, "low").y >= wd(items, "two").y - 2
+    end
+
+    test "fixed uses the page origin even inside a positioned ancestor" do
+      html =
+        ~s(<div style="position:relative; margin-left:100px"><p>x</p>) <>
+          ~s(<div style="position:fixed; top:5px; left:7px">fx</div></div>)
+
+      {items, _} = abs_layout(html)
+      assert wd(items, "fx").x == 7
+    end
+
+    test "absolute elements are painted after the flow, with their own background first" do
+      {items, _} =
+        abs_layout(
+          ~s(<p>flow</p><div style="position:absolute; top:0; left:0; background:#ff0">pop</div>)
+        )
+
+      types = Enum.map(items, &{&1.type, Map.get(&1, :text)})
+      assert List.last(types) == {:text, "pop"}
+
+      assert Enum.find_index(types, &(&1 == {:rect, nil})) <
+               Enum.find_index(types, &(&1 == {:text, "pop"}))
+
+      assert Enum.find_index(types, &(&1 == {:text, "flow"})) <
+               Enum.find_index(types, &(&1 == {:text, "pop"}))
+
+      [rect] = Enum.filter(items, &(&1.type == :rect))
+      pop = wd(items, "pop")
+      assert rect.w <= pop.w + 2
+    end
+
+    test "static position when no offsets are given" do
+      {items, _} =
+        abs_layout(~s(<p>before</p><div style="position:absolute">here</div><p>after</p>))
+
+      assert wd(items, "here").x == 4
+      assert wd(items, "here").y > wd(items, "before").y
+    end
+
+    test "hidden and display:none absolute elements leave nothing" do
+      {items, _} =
+        abs_layout(
+          ~s(<div style="position:absolute; visibility:hidden">h</div><div style="position:absolute; display:none">n</div><p>k</p>)
+        )
+
+      refute wd(items, "h")
+      refute wd(items, "n")
+      assert wd(items, "k")
+    end
+  end
+
+  describe "geometry invariants" do
+    alias Browser.Page
+
+    for fixture <- ~w(sample hidden positioning) do
+      test "#{fixture}.html lays out on integer pixels" do
+        html = File.read!("test/fixtures/#{unquote(fixture)}.html")
+        page = Page.build(html, "about:home")
+
+        for width <- [300, 640, 1100], view_h <- [400, 800] do
+          {items, height} = Layout.layout(page.nodes, width, &measure/2, view_h)
+          assert is_integer(height)
+
+          for item <- items, key <- [:x, :y, :w, :h], Map.has_key?(item, key) do
+            assert is_integer(Map.fetch!(item, key)),
+                   "#{key} of #{inspect(item)} is not an integer (width #{width})"
+          end
+        end
+      end
+    end
+  end
 end

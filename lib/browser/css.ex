@@ -4,11 +4,14 @@ defmodule Browser.CSS do
 
   Supported: type/universal, `#id`, `.class`, attribute selectors (`=`, `~=`,
   `|=`, `^=`, `$=`, `*=`, `i` flag), the descendant/child/next-sibling/
-  subsequent-sibling combinators, and the pseudo-classes `:root`,
-  `:first-child`, `:last-child`, `:only-child` and `:not(<compound>)`.
+  subsequent-sibling combinators, and these pseudo-classes: `:root`, `:empty`,
+  `:first-child`, `:last-child`, `:only-child`, `:first-of-type`, `:nth-child()`,
+  `:nth-last-child()`, `:nth-of-type()`, `:link`, `:disabled`, `:enabled`, and
+  `:not()`/`:is()`/`:where()` over lists of compound selectors. State-dependent
+  pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
+  `:not(:focus)` true.
 
-  Selectors using anything else (`:hover`, `::before`, `:nth-child(…)`, …) are
-  dropped, since they can't be evaluated statically. `@media` (see
+  Selectors using anything else (`::before`, `:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered; other at-rules (`@import`, `@font-face`,
   `@keyframes`, …) are skipped.
@@ -208,21 +211,47 @@ defmodule Browser.CSS do
       String.starts_with?(s, "::") ->
         :error
 
-      m = Regex.run(~r/\A:not\(([^()]*)\)/u, s) ->
-        [whole, inner] = m
+      m = Regex.run(~r/\A:(not|is|where|matches|-webkit-any|-moz-any)\(/u, s) ->
+        [whole, name] = m
 
-        with {:ok, toks} <- tokenize(String.trim(inner), []),
-             true <- Enum.all?(toks, &(not match?({:comb, _}, &1))),
-             {:ok, cmp} <- compound(toks) do
-          tokenize(drop(s, whole), [{:not, cmp} | acc])
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {:ok, cmps} <- compound_list(inner) do
+          kind =
+            case name,
+              do: (
+                "not" -> :not
+                "where" -> :where
+                _ -> :is
+              )
+
+          tokenize(rest, [{:fn, kind, cmps} | acc])
         else
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(root|first-child|last-child|only-child)(?![\w\-(])/u, s) ->
+      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type)\(\s*([^()]*?)\s*\)/u, s) ->
+        [whole, name, arg] = m
+
+        kind =
+          case name,
+            do: (
+              "nth-child" -> :child
+              "nth-last-child" -> :last_child
+              _ -> :of_type
+            )
+
+        case nth(arg) do
+          nil -> :error
+          ab -> tokenize(drop(s, whole), [{:nth, kind, ab} | acc])
+        end
+
+      m = Regex.run(~r/\A:([a-z-]+)(?![\w\-(])/u, s) ->
         [whole, name] = m
-        pseudo = name |> String.replace("-", "_") |> String.to_atom()
-        tokenize(drop(s, whole), [{:pseudo, pseudo} | acc])
+
+        case pseudo_class(name) do
+          nil -> :error
+          p -> tokenize(drop(s, whole), [{:pseudo, p} | acc])
+        end
 
       m = Regex.run(~r/\A([\w\-\x{80}-\x{10FFFF}]+)/u, s) ->
         [whole, tag] = m
@@ -234,6 +263,88 @@ defmodule Browser.CSS do
   end
 
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
+
+  @never ~w(hover focus focus-within focus-visible active visited target checked indeterminate)
+  @simple ~w(root empty first-child last-child only-child first-of-type link any-link disabled enabled)
+
+  defp pseudo_class(name) when name in @never, do: :never
+
+  defp pseudo_class(name) when name in @simple,
+    do: name |> String.replace("-", "_") |> String.to_atom()
+
+  defp pseudo_class(_), do: nil
+
+  # `rest` follows an opening paren: -> {inside, after_closing_paren} | :error
+  defp balanced(rest), do: balanced(rest, rest, 1, 0)
+  defp balanced(<<>>, _w, _d, _n), do: :error
+  defp balanced(<<?(, r::binary>>, w, d, n), do: balanced(r, w, d + 1, n + 1)
+
+  defp balanced(<<?), r::binary>>, w, d, n) do
+    if d == 1, do: {binary_part(w, 0, n), r}, else: balanced(r, w, d - 1, n + 1)
+  end
+
+  defp balanced(<<_, r::binary>>, w, d, n), do: balanced(r, w, d, n + 1)
+
+  # comma-separated compound selectors (no combinators) as used in :is()/:not()
+  defp compound_list(inner) do
+    inner
+    |> String.split(~r/,(?![^()]*\))/)
+    |> Enum.reduce_while({:ok, []}, fn part, {:ok, acc} ->
+      with {:ok, toks} <- tokenize(String.trim(part), []),
+           true <- Enum.all?(toks, &(not match?({:comb, _}, &1))),
+           {:ok, cmp} <- compound(toks) do
+        {:cont, {:ok, [cmp | acc]}}
+      else
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, Enum.reverse(list)}
+      :error -> :error
+    end
+  end
+
+  # an+b -> {a, b}
+  defp nth(arg) do
+    arg = String.downcase(arg)
+
+    cond do
+      arg == "odd" ->
+        {2, 1}
+
+      arg == "even" ->
+        {2, 0}
+
+      m = Regex.run(~r/\A([+-]?\d*)n\s*(?:([+-])\s*(\d+))?\z/, arg) ->
+        [_, coef | rest] = m
+
+        a =
+          case coef,
+            do: (
+              "" -> 1
+              "+" -> 1
+              "-" -> -1
+              c -> String.to_integer(c)
+            )
+
+        b =
+          case rest do
+            [sign, n] when n != "" ->
+              if sign == "-", do: -String.to_integer(n), else: String.to_integer(n)
+
+            _ ->
+              0
+          end
+
+        {a, b}
+
+      Regex.match?(~r/\A[+-]?\d+\z/, arg) ->
+        {0, String.to_integer(String.trim_leading(arg, "+"))}
+
+      true ->
+        nil
+    end
+  end
 
   defp comb(">"), do: :child
   defp comb("+"), do: :next
@@ -292,7 +403,8 @@ defmodule Browser.CSS do
       {:class, cl}, {:ok, c} -> {:cont, {:ok, %{c | classes: [cl | c.classes]}}}
       {:attr, n, o, v, i}, {:ok, c} -> {:cont, {:ok, %{c | attrs: [{n, o, v, i} | c.attrs]}}}
       {:pseudo, p}, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [p | c.pseudos]}}}
-      {:not, n}, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [{:not, n} | c.pseudos]}}}
+      {:fn, _, _} = f, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [f | c.pseudos]}}}
+      {:nth, _, _} = n, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [n | c.pseudos]}}}
       _tag_or_any_mid_compound, _ -> {:halt, :error}
     end)
     |> case do
@@ -311,7 +423,8 @@ defmodule Browser.CSS do
     base = {ids, length(c.classes) + length(c.attrs), tags}
 
     Enum.reduce(c.pseudos, base, fn
-      {:not, inner}, acc -> add_spec(acc, compound_spec(inner))
+      {:fn, :where, _}, acc -> acc
+      {:fn, _, cmps}, acc -> add_spec(acc, cmps |> Enum.map(&compound_spec/1) |> Enum.max())
       _, {a, b, t} -> {a, b + 1, t}
     end)
   end
@@ -375,5 +488,24 @@ defmodule Browser.CSS do
   defp pseudo?(:first_child, ctx), do: ctx.first?
   defp pseudo?(:last_child, ctx), do: ctx.last?
   defp pseudo?(:only_child, ctx), do: ctx.first? and ctx.last?
-  defp pseudo?({:not, cmp}, ctx), do: not match_compound(cmp, ctx)
+  defp pseudo?(:never, _ctx), do: false
+  defp pseudo?(:empty, ctx), do: ctx.empty?
+  defp pseudo?(:first_of_type, ctx), do: not Enum.any?(ctx.prev, &(&1.tag == ctx.tag))
+
+  defp pseudo?(link, ctx) when link in [:link, :any_link],
+    do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
+
+  defp pseudo?(:disabled, ctx), do: List.keymember?(ctx.attrs, "disabled", 0)
+  defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
+  defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
+  defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))
+  defp pseudo?({:nth, kind, {a, b}}, ctx), do: nth_match?(a, b, position(kind, ctx))
+
+  defp position(:child, ctx), do: ctx.index
+  defp position(:last_child, ctx), do: ctx.count - ctx.index + 1
+  defp position(:of_type, ctx), do: 1 + Enum.count(ctx.prev, &(&1.tag == ctx.tag))
+
+  # does some n >= 0 satisfy a*n + b == pos?
+  defp nth_match?(0, b, pos), do: pos == b
+  defp nth_match?(a, b, pos), do: rem(pos - b, a) == 0 and div(pos - b, a) >= 0
 end

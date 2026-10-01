@@ -11,7 +11,10 @@ defmodule Browser.CSSTest do
       parent: opts[:parent],
       prev: opts[:prev] || [],
       first?: Keyword.get(opts, :first?, true),
-      last?: Keyword.get(opts, :last?, true)
+      last?: Keyword.get(opts, :last?, true),
+      index: Keyword.get(opts, :index, 1),
+      count: Keyword.get(opts, :count, 1),
+      empty?: Keyword.get(opts, :empty?, false)
     }
   end
 
@@ -57,8 +60,8 @@ defmodule Browser.CSSTest do
   end
 
   test "drops selectors that cannot be evaluated but keeps the rest of the list" do
-    rules = CSS.parse("a:hover, b, c::before, d:nth-child(2) { x: y }")
-    assert [%{selector: [{%{tag: "b"}, nil}]}] = rules
+    rules = CSS.parse("a:hover, b, c::before, d:nth-child(2), e:has(a) { x: y }")
+    assert Enum.map(rules, fn %{selector: [{c, nil}]} -> c.tag end) == ["a", "b", "d"]
   end
 
   test "strings and braces inside values don't break parsing" do
@@ -131,5 +134,63 @@ defmodule Browser.CSSTest do
     refute sm?("p:last-child", ctx("p", [], last?: false))
     assert sm?("p:not(.x)", ctx("p"))
     refute sm?("p:not(.x)", ctx("p", [{"class", "x"}]))
+  end
+
+  test "state pseudo-classes never match, so :not() of them always does" do
+    el = ctx("a", [{"href", "/x"}])
+    refute sm?("a:hover", el)
+    refute sm?("a:focus", el)
+    assert sm?("a:not(:focus)", el)
+    assert sm?("a:not(:hover):not(:visited)", el)
+    assert sm?("a:link", el)
+    refute sm?("span:link", el)
+  end
+
+  test ":is(), :where() and :not() take selector lists" do
+    el = ctx("p", [{"class", "b"}])
+    assert sm?(":is(p, div).b", el)
+    assert sm?(":where(.a, .b)", el)
+    refute sm?(":is(.a, .c)", el)
+    refute sm?("p:not(.a, .b)", el)
+    assert sm?("p:not(.a, .c)", el)
+    assert {:ok, %{spec: {0, 1, 0}}} = CSS.parse_selector(":is(.a, p)")
+    assert {:ok, %{spec: {1, 0, 0}}} = CSS.parse_selector(":is(#a, .b)")
+    assert {:ok, %{spec: {0, 0, 0}}} = CSS.parse_selector(":where(#a)")
+    assert {:ok, %{spec: {0, 1, 1}}} = CSS.parse_selector("p:not(.x)")
+  end
+
+  test ":nth-child and friends" do
+    at = fn i, n -> ctx("li", [], index: i, count: n, first?: i == 1, last?: i == n) end
+
+    assert sm?("li:nth-child(2)", at.(2, 5))
+    refute sm?("li:nth-child(2)", at.(3, 5))
+    assert sm?("li:nth-child(odd)", at.(3, 5))
+    refute sm?("li:nth-child(odd)", at.(2, 5))
+    assert sm?("li:nth-child(even)", at.(4, 5))
+    assert sm?("li:nth-child(2n+1)", at.(5, 5))
+    assert sm?("li:nth-child(-n+2)", at.(2, 5))
+    refute sm?("li:nth-child(-n+2)", at.(3, 5))
+    assert sm?("li:nth-child(n+3)", at.(3, 5))
+    refute sm?("li:nth-child(n+3)", at.(2, 5))
+    assert sm?("li:nth-last-child(1)", at.(5, 5))
+    assert sm?("li:nth-last-child(2)", at.(4, 5))
+    assert :error = CSS.parse_selector("li:nth-child(foo)")
+  end
+
+  test ":nth-of-type, :first-of-type and :empty" do
+    a = ctx("b", [], index: 1, count: 3)
+    p = ctx("p", [], index: 2, count: 3, prev: [a])
+    p2 = ctx("p", [], index: 3, count: 3, prev: [p, a])
+    assert sm?("p:first-of-type", p)
+    refute sm?("p:first-of-type", p2)
+    assert sm?("p:nth-of-type(2)", p2)
+    assert sm?("p:empty", ctx("p", [], empty?: true))
+    refute sm?("p:empty", ctx("p"))
+  end
+
+  test "unsupported selectors are still dropped" do
+    assert :error = CSS.parse_selector("p::before")
+    assert :error = CSS.parse_selector("p:has(a)")
+    assert :error = CSS.parse_selector("p:is(a b)")
   end
 end
