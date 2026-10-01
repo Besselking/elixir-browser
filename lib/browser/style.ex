@@ -12,7 +12,11 @@ defmodule Browser.Style do
   alias Browser.{CSS, MediaQuery}
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
-            width height min-height max-height clip clip-path text-indent opacity
+            width height min-height max-height min-width max-width box-sizing clip clip-path
+            text-indent opacity margin-right padding-right
+            border-top-width border-right-width border-bottom-width border-left-width
+            border-top-style border-right-style border-bottom-style border-left-style
+            border-top-color border-right-color border-bottom-color border-left-color
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
@@ -28,8 +32,24 @@ defmodule Browser.Style do
     "list-style" => ~w(list-style-type),
     "text-decoration" => ~w(text-decoration-line),
     "font" => ~w(font-style font-weight font-size font-family),
-    "background" => ~w(background-color)
+    "background" => ~w(background-color),
+    "border-width" =>
+      ~w(border-top-width border-right-width border-bottom-width border-left-width),
+    "border-style" =>
+      ~w(border-top-style border-right-style border-bottom-style border-left-style),
+    "border-color" =>
+      ~w(border-top-color border-right-color border-bottom-color border-left-color),
+    "border-top" => ~w(border-top-width border-top-style border-top-color),
+    "border-right" => ~w(border-right-width border-right-style border-right-color),
+    "border-bottom" => ~w(border-bottom-width border-bottom-style border-bottom-color),
+    "border-left" => ~w(border-left-width border-left-style border-left-color),
+    "border" => ~w(border-top-width border-top-style border-top-color
+         border-right-width border-right-style border-right-color
+         border-bottom-width border-bottom-style border-bottom-color
+         border-left-width border-left-style border-left-color)
   }
+
+  @border_styles ~w(none hidden dotted dashed solid double groove ridge inset outset)
 
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
@@ -222,9 +242,22 @@ defmodule Browser.Style do
     end
   end
 
+  # width/style/color in any order; unspecified parts take their initial values
+  defp border_parts(toks) do
+    Enum.reduce(toks, {"medium", "none", "currentcolor"}, fn tok, {w, st, c} ->
+      cond do
+        tok in @border_styles -> {w, tok, c}
+        tok in ~w(thin medium thick) or Regex.match?(~r/\A[+-]?[\d.]/, tok) -> {tok, st, c}
+        Browser.Color.parse(tok) != nil -> {w, st, tok}
+        true -> {w, st, c}
+      end
+    end)
+  end
+
   defp tokens(v), do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(v) |> List.flatten()
 
-  defp do_split(box, _v, toks) when box in ["margin", "padding"] do
+  defp do_split(box, _v, toks)
+       when box in ["margin", "padding", "border-width", "border-style", "border-color"] do
     [t, r, b, l] =
       case toks do
         [a] -> [a, a, a, a]
@@ -235,6 +268,19 @@ defmodule Browser.Style do
       end
 
     Enum.zip(@shorthands[box], [t, r, b, l])
+  end
+
+  defp do_split("border", _v, toks) do
+    {w, st, c} = border_parts(toks)
+
+    for side <- ~w(top right bottom left),
+        {suffix, val} <- [{"width", w}, {"style", st}, {"color", c}],
+        do: {"border-#{side}-#{suffix}", val}
+  end
+
+  defp do_split("border-" <> side, _v, toks) when side in ~w(top right bottom left) do
+    {w, st, c} = border_parts(toks)
+    [{"border-#{side}-width", w}, {"border-#{side}-style", st}, {"border-#{side}-color", c}]
   end
 
   defp do_split("overflow", _v, toks) do
@@ -492,8 +538,12 @@ defmodule Browser.Style do
     end
   end
 
+  # left/right margins keep `auto` (used for centering); top/bottom auto is zero
+  defp typed(prop, "auto", _env, _pc) when prop in ~w(margin-left margin-right), do: {:ok, :auto}
+
   defp typed(prop, v, env, _pc)
-       when prop in ~w(margin-top margin-bottom margin-left padding-top padding-bottom padding-left) do
+       when prop in ~w(margin-top margin-bottom margin-left margin-right
+                       padding-top padding-bottom padding-left padding-right) do
     cond do
       v == "auto" -> {:ok, 0.0}
       px = length(v, env) -> {:ok, max(px, 0.0)}
@@ -501,7 +551,7 @@ defmodule Browser.Style do
     end
   end
 
-  @size_props ~w(width height min-height max-height top left right bottom)
+  @size_props ~w(width height min-height max-height min-width max-width top left right bottom)
 
   # px as a float, {:pct, fraction}, or no entry for auto/none/unsupported values
   defp typed(prop, v, env, _pc) when prop in @size_props do
@@ -514,6 +564,28 @@ defmodule Browser.Style do
 
       true ->
         :skip
+    end
+  end
+
+  @border_widths ~w(border-top-width border-right-width border-bottom-width border-left-width)
+  @border_colors ~w(border-top-color border-right-color border-bottom-color border-left-color)
+
+  defp typed(prop, v, env, _pc) when prop in @border_widths do
+    px =
+      case v do
+        "thin" -> 1.0
+        "medium" -> 3.0
+        "thick" -> 5.0
+        _ -> length(v, env)
+      end
+
+    if px && px >= 0, do: {:ok, px}, else: :skip
+  end
+
+  defp typed(prop, v, env, _pc) when prop in @border_colors do
+    case color_value(v, env.color) do
+      nil -> :skip
+      c -> {:ok, c}
     end
   end
 

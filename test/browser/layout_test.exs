@@ -251,7 +251,9 @@ defmodule Browser.LayoutTest do
       rects = Enum.filter(items, &(&1.type == :rect))
       assert [outer, inner] = rects
       assert outer.color == {238, 238, 238} and outer.h == 30
-      assert inner.color == {221, 221, 221} and inner.h <= 30
+      assert inner.color == {221, 221, 221}
+      # the inner rect is cut off by the outer box's clip rectangle
+      assert inner.clip.y + inner.clip.h <= outer.y + outer.h
     end
   end
 
@@ -420,6 +422,192 @@ defmodule Browser.LayoutTest do
           end
         end
       end
+    end
+  end
+
+  describe "widths, centering and borders" do
+    alias Browser.Page
+
+    defp bx(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wb(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp rects(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "a width limits the content and wraps text inside it" do
+      {items, _} = bx(~s(<div style="width:100px">one two three four five six seven</div>))
+      texts = for %{type: :text} = i <- items, do: i
+      assert Enum.all?(texts, &(&1.x + &1.w <= 4 + 100))
+      assert length(Enum.uniq_by(texts, & &1.y)) > 1
+    end
+
+    test "percentage widths are relative to the container" do
+      {items, _} = bx(~s(<div style="width:50%; background:#eee">x</div>), 408)
+      [r] = rects(items)
+      assert r.w == 200
+    end
+
+    test "max-width caps, min-width raises" do
+      {items, _} = bx(~s(<div style="max-width:120px; background:#eee">x</div>))
+      assert [%{w: 120}] = rects(items)
+      # a block is as wide as its container; min-width only matters when that is narrower
+      {items, _} = bx(~s(<div style="min-width:300px; background:#eee">x</div>), 250)
+      assert [%{w: 300}] = rects(items)
+    end
+
+    test "margin auto centers a box with a width" do
+      {items, _} = bx(~s(<div style="width:100px; margin:0 auto; background:#eee">x</div>), 408)
+      [r] = rects(items)
+      assert r.x == 4 + 150 and r.w == 100
+      assert wb(items, "x").x == r.x
+    end
+
+    test "max-width with margin auto centers like a page container" do
+      {items, _} =
+        bx(
+          ~s(<div style="max-width:200px; margin-left:auto; margin-right:auto"><p>hello</p></div>),
+          408
+        )
+
+      assert wb(items, "hello").x == 4 + 100
+    end
+
+    test "only margin-left auto pushes the box to the right" do
+      {items, _} =
+        bx(~s(<div style="width:100px; margin-left:auto; background:#eee">x</div>), 408)
+
+      assert [%{x: 304, w: 100}] = rects(items)
+    end
+
+    test "margin-right narrows the content" do
+      {items, _} = bx(~s(<div style="margin-right:300px">aaa bbb ccc ddd eee fff ggg</div>))
+      assert Enum.all?(for(%{type: :text} = i <- items, do: i.x + i.w), &(&1 <= 4 + 100))
+    end
+
+    test "content-box adds padding and border to the width; border-box includes them" do
+      pad = "padding: 10px; border: 2px solid #000; background:#eee; width:100px;"
+      {items, _} = bx(~s(<div style="#{pad}">x</div>))
+      [bg | _] = rects(items)
+      assert bg.w == 100 + 20 + 4
+
+      {items, _} = bx(~s(<div style="#{pad} box-sizing:border-box">x</div>))
+      [bg | _] = rects(items)
+      assert bg.w == 100
+    end
+
+    test "borders become rects in their colors and take space" do
+      {plain, _} = bx(~s(<div>x</div><p>after</p>))
+
+      {items, _} =
+        bx(~s(<div style="border:3px solid #f00">x</div><p>after</p>))
+
+      assert length(rects(items)) == 4
+      assert Enum.all?(rects(items), &(&1.color == {255, 0, 0}))
+      x = wb(items, "x")
+      assert x.x == wb(plain, "x").x + 3
+      assert x.y == wb(plain, "x").y + 3
+      assert wb(items, "after").y - wb(plain, "after").y == 6
+    end
+
+    test "per-side borders and style none/missing style draw nothing" do
+      {items, _} = bx(~s(<div style="border-bottom: 2px solid #00f">x</div>))
+      assert [%{color: {0, 0, 255}, h: 2, w: w}] = rects(items)
+      assert w > 100
+
+      {items, _} =
+        bx(
+          ~s(<div style="border: 2px #000">x</div><div style="border:none; background:#eee">y</div>)
+        )
+
+      assert length(rects(items)) == 1
+    end
+
+    test "borders and background paint in that order, under inner rects" do
+      {items, _} =
+        bx(
+          ~s(<div style="border:1px solid #000; background:#eee"><div style="background:#ddd">x</div></div>)
+        )
+
+      assert [outer_bg, _, _, _, _, inner] = rects(items)
+      assert outer_bg.color == {238, 238, 238}
+      assert inner.color == {221, 221, 221}
+    end
+
+    test "overflow hidden attaches clip rectangles; nested clips intersect" do
+      html =
+        ~s(<div style="width:100px; overflow:hidden"><div style="height:20px; overflow:hidden">) <>
+          ~s(<p style="white-space:pre">averyveryverylongunbreakableword</p></div></div>)
+
+      {items, _} = bx(html)
+      word = wb(items, "averyveryverylongunbreakableword")
+      assert word.clip.w <= 100
+      assert word.clip.h <= 20
+      assert word.x + word.w > word.clip.x + word.clip.w
+    end
+
+    test "items outside a clip carry it, items outside any clip do not" do
+      {items, _} = bx(~s(<p>free</p><div style="height:30px; overflow:hidden">boxed</div>))
+      refute Map.has_key?(wb(items, "free"), :clip)
+      assert Map.has_key?(wb(items, "boxed"), :clip)
+    end
+
+    test "absolute elements size from width/extra and respect max-width" do
+      {items, _} =
+        bx(
+          ~s(<div style="position:absolute; top:0; left:0; width:100px; padding:10px; background:#eee">x</div>)
+        )
+
+      assert [%{w: 120}] = rects(items)
+
+      {items, _} =
+        bx(
+          ~s(<div style="position:absolute; top:0; left:0; max-width:60px; background:#eee">aaa bbb ccc ddd eee fff</div>)
+        )
+
+      assert [%{w: w}] = rects(items)
+      assert w <= 60
+    end
+
+    test "list item text wraps under the text, not under the marker" do
+      {items, _} =
+        bx(
+          ~s(<ul style="padding-left:30px"><li>aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn</li></ul>),
+          200
+        )
+
+      marker = wb(items, "•")
+      lines = for %{type: :text, text: t} = i <- items, t != "•", do: i
+      assert Enum.all?(lines, &(&1.x >= marker.x + 10))
+    end
+  end
+
+  describe "canvas background" do
+    alias Browser.Page
+
+    defp page_items(html) do
+      page = Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600)
+      items
+    end
+
+    test "the body background becomes the canvas colour" do
+      items = page_items("<html><body style=\"background:#123456\"><p>x</p></body></html>")
+      assert [%{type: :canvas, color: {18, 52, 86}} | _] = items
+    end
+
+    test "the html background wins over the body's" do
+      items =
+        page_items(
+          "<html style=\"background:#111\"><body style=\"background:#eee\"><p>x</p></body></html>"
+        )
+
+      assert [%{type: :canvas, color: {17, 17, 17}} | _] = items
+    end
+
+    test "no background, no canvas item" do
+      refute Enum.any?(page_items("<html><body><p>x</p></body></html>"), &(&1.type == :canvas))
     end
   end
 end

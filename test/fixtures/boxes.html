@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><title>Borders and widths</title>
+<style>
+body { margin: 0; background: #f4f4f4 }
+.page { max-width: 560px; margin: 16px auto; background: #fff; border: 1px solid #bbb; padding: 14px 18px }
+h1 { margin: 0 0 10px; border-bottom: 3px solid #36c; padding-bottom: 4px }
+.note { border-left: 5px solid #e90; background: #fff6e0; padding: 8px 12px; margin: 10px 0 }
+.row > .box { display: inline-block }
+.box { width: 120px; border: 2px dashed #c33; padding: 6px; margin: 4px; box-sizing: border-box; background: #fee }
+.card { width: 60%; border: 2px solid #393; margin: 10px 0 10px auto; padding: 8px }
+.narrow { width: 150px; height: 46px; overflow: hidden; border: 1px solid #333; padding: 4px }
+.badge { position: absolute; top: 6px; right: 8px; width: 90px; padding: 4px; border: 2px solid #639; background: #edf }
+.wrap { position: relative; border: 1px solid #999; height: 70px; padding: 6px; margin-top: 12px }
+ul { padding-left: 24px }
+</style></head>
+<body>
+<div class="page">
+  <h1>Borders and widths</h1>
+  <p>A centered 560px container (max-width + auto margins) with a border and padding.</p>
+  <div class="note">Left accent border, background and padding. This note is long enough to wrap onto a second line inside its box.</div>
+  <div class="row"><span class="box">border-box 120px</span><span class="box">second box</span></div>
+  <div class="card">60% wide, pushed right with margin-left:auto</div>
+  <div class="narrow">Clipped: 150px wide, 46px tall, overflow hidden. This text keeps going past the bottom of the box and must be cut off.</div>
+  <div class="wrap">Relative wrapper<div class="badge">abs badge, 90px wide</div></div>
+  <ul><li>A list item that is long enough to wrap onto a second line, and the second line must align under the text rather than under the bullet.</li><li>Short item</li></ul>
+</div>
+</body></html>

@@ -121,47 +121,60 @@ defmodule Browser.UI do
   defp paint(panel) do
     [{:view, items, scroll}] = :ets.lookup(@view, :view)
     dc = :wxPaintDC.new(panel)
-    :wxDC.setBackground(dc, :wxBrush.new({255, 255, 255}))
+
+    canvas =
+      case items do
+        [%{type: :canvas, color: color} | _] -> color
+        _ -> {255, 255, 255}
+      end
+
+    :wxDC.setBackground(dc, :wxBrush.new(canvas))
     :wxDC.clear(dc)
     {_, h} = :wxWindow.getClientSize(panel)
 
     for item <- items,
+        item.type != :canvas,
         not Map.get(item, :hidden, false),
         item.y - scroll < h,
         item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
       y = item.y - scroll
-
-      case item do
-        %{type: :rect} ->
-          :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
-          :wxDC.setBrush(dc, :wxBrush.new(item.color))
-          :wxDC.drawRectangle(dc, {item.x, y}, {item.w, item.h})
-
-        %{type: :hr} ->
-          :wxDC.setPen(dc, :wxPen.new({170, 170, 170}))
-          :wxDC.drawLine(dc, {item.x, y}, {item.x + item.w, y})
-
-        %{type: :text} ->
-          :wxDC.setFont(dc, font(item))
-          :wxDC.setTextForeground(dc, item.color)
-          :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
-          :wxDC.setPen(dc, :wxPen.new(item.color))
-
-          if item.underline,
-            do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
-
-          if item.strike,
-            do:
-              :wxDC.drawLine(
-                dc,
-                {item.x, y + div(item.h, 2) + 2},
-                {item.x + item.w, y + div(item.h, 2) + 2}
-              )
-      end
+      clip = Map.get(item, :clip)
+      if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - scroll, clip.w, clip.h})
+      draw(dc, item, y)
+      if clip, do: :wxDC.destroyClippingRegion(dc)
     end
 
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  defp draw(dc, %{type: :rect} = item, y) do
+    :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
+    :wxDC.setBrush(dc, :wxBrush.new(item.color))
+    :wxDC.drawRectangle(dc, {item.x, y}, {item.w, item.h})
+  end
+
+  defp draw(dc, %{type: :hr} = item, y) do
+    :wxDC.setPen(dc, :wxPen.new({170, 170, 170}))
+    :wxDC.drawLine(dc, {item.x, y}, {item.x + item.w, y})
+  end
+
+  defp draw(dc, %{type: :text} = item, y) do
+    :wxDC.setFont(dc, font(item))
+    :wxDC.setTextForeground(dc, item.color)
+    :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    :wxDC.setPen(dc, :wxPen.new(item.color))
+
+    if item.underline,
+      do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
+
+    if item.strike,
+      do:
+        :wxDC.drawLine(
+          dc,
+          {item.x, y + div(item.h, 2) + 2},
+          {item.x + item.w, y + div(item.h, 2) + 2}
+        )
   end
 
   # -- hit testing -------------------------------------------------------------
@@ -169,12 +182,18 @@ defmodule Browser.UI do
   def link_at(items, x, y) do
     Enum.find_value(items, fn
       %{type: :text, href: href} = it when is_binary(href) ->
-        if x >= it.x and x <= it.x + it.w and y >= it.y and y <= it.y + it.h + 4, do: href
+        if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: href
 
       _ ->
         nil
     end)
   end
+
+  defp inside?(px, py, x, y, w, h), do: px >= x and px <= x + w and py >= y and py <= y + h
+
+  # a link scrolled out of its clipping box can't be clicked
+  defp clipped_in?(%{clip: c}, x, y), do: inside?(x, y, c.x, c.y, c.w, c.h)
+  defp clipped_in?(_, _, _), do: true
 
   def set_url_text(%{url: url}, text), do: :wxTextCtrl.setValue(url, String.to_charlist(text))
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))

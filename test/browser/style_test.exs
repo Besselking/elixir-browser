@@ -231,7 +231,7 @@ defmodule Browser.StyleTest do
       assert {c["margin-top"], c["margin-bottom"], c["margin-left"]} == {16.0, 3.0, 2.0}
       assert {c["padding-top"], c["padding-left"]} == {4.0, 8.0}
       d = comp("<p>a</p><div>b</div>", css, "div")
-      assert {d["margin-top"], d["margin-left"]} == {0.0, 0.0}
+      assert {d["margin-top"], d["margin-left"]} == {0.0, :auto}
     end
 
     test "longhand after shorthand wins, shorthand after longhand wins" do
@@ -353,6 +353,83 @@ defmodule Browser.StyleTest do
       refute Map.has_key?(c, "height")
       refute Map.has_key?(c, "max-height")
       assert c["position"] == "absolute"
+    end
+  end
+
+  describe "borders and widths" do
+    defp cb(css, tag \\ "p"), do: comp("<p>a</p>", css, tag)
+
+    test "border shorthand sets width, style and color on every side" do
+      c = cb("p { border: 2px solid #f00 }")
+
+      for side <- ~w(top right bottom left) do
+        assert c["border-#{side}-width"] == 2.0
+        assert c["border-#{side}-style"] == "solid"
+        assert c["border-#{side}-color"] == {255, 0, 0}
+      end
+    end
+
+    test "tokens may come in any order and default to medium/none/currentcolor" do
+      c = cb("p { color: #00f; border: dashed 1px }")
+      assert c["border-top-color"] == {0, 0, 255}
+      c = cb("p { border: solid }")
+      assert {c["border-top-width"], c["border-top-style"]} == {3.0, "solid"}
+      c = cb("p { border: 1px red }")
+      assert c["border-top-style"] == "none"
+      c = cb("p { border: thick double }")
+      assert c["border-left-width"] == 5.0
+    end
+
+    test "per-side shorthands and longhands override the border shorthand" do
+      c =
+        cb(
+          "p { border: 1px solid #000; border-bottom: 4px dotted #0f0; border-left-color: #00f }"
+        )
+
+      assert {c["border-top-width"], c["border-bottom-width"]} == {1.0, 4.0}
+      assert c["border-bottom-style"] == "dotted"
+      assert c["border-bottom-color"] == {0, 255, 0}
+      assert c["border-left-color"] == {0, 0, 255}
+      assert c["border-right-color"] == {0, 0, 0}
+    end
+
+    test "border-width/style/color take 1-4 values" do
+      c =
+        cb(
+          "p { border-style: solid dashed; border-width: 1px 2px 3px 4px; border-color: red blue }"
+        )
+
+      assert {c["border-top-style"], c["border-right-style"]} == {"solid", "dashed"}
+
+      assert {c["border-top-width"], c["border-right-width"], c["border-bottom-width"],
+              c["border-left-width"]} == {1.0, 2.0, 3.0, 4.0}
+
+      assert {c["border-top-color"], c["border-right-color"]} == {{255, 0, 0}, {0, 0, 255}}
+    end
+
+    test "border with var()" do
+      css = ":root { --b: #00f; --w: 3px } p { border: var(--w) solid var(--b) }"
+      c = comp("<html><body><p>a</p></body></html>", css, "p")
+
+      assert {c["border-top-width"], c["border-top-style"], c["border-top-color"]} ==
+               {3.0, "solid", {0, 0, 255}}
+    end
+
+    test "widths are typed; min/max-width and box-sizing" do
+      c = cb("p { width: 50%; min-width: 10em; max-width: 600px; box-sizing: border-box }")
+      assert {c["width"], c["min-width"], c["max-width"]} == {{:pct, 0.5}, 160.0, 600.0}
+      assert c["box-sizing"] == "border-box"
+      c = cb("p { max-width: none; width: auto }")
+      refute Map.has_key?(c, "max-width")
+      refute Map.has_key?(c, "width")
+    end
+
+    test "left/right margins keep auto, margin-right and padding-right exist" do
+      c = cb("p { margin: 0 auto; padding: 1px 2px 3px 4px }")
+      assert {c["margin-left"], c["margin-right"], c["margin-top"]} == {:auto, :auto, 0.0}
+      assert {c["padding-right"], c["padding-left"]} == {2.0, 4.0}
+      c = cb("p { margin-left: auto; margin-right: 5px }")
+      assert {c["margin-left"], c["margin-right"]} == {:auto, 5.0}
     end
   end
 end
