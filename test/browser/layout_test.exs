@@ -854,4 +854,217 @@ defmodule Browser.LayoutTest do
       assert wr(items, "next").y >= 100
     end
   end
+
+  describe "inline element boxes" do
+    alias Browser.Page
+
+    defp il(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wl(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp rl(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "a background paints behind the text, including horizontal padding" do
+      {items, _} =
+        il(~s(a <b style="background:#ff0; padding:0 6px; font-weight:normal">mid</b> z))
+
+      [bg] = rl(items)
+      mid = wl(items, "mid")
+      assert bg.x == mid.x - 6
+      assert bg.w == mid.w + 12
+      assert bg.color == {255, 255, 0}
+    end
+
+    test "padding, border and margin push the neighbouring text" do
+      {plain, _} = il("a <span>mid</span> z")
+
+      {items, _} =
+        il(~s(a <span style="padding:0 5px; border:2px solid #000; margin:0 3px">mid</span> z))
+
+      # left margin + border + padding in front of the text
+      assert wl(items, "mid").x - wl(plain, "mid").x == 3 + 2 + 5
+      # and the same on the right pushes the following text
+      assert wl(items, "z").x - wl(plain, "z").x == 2 * (3 + 2 + 5)
+    end
+
+    test "all four borders on a single-line fragment" do
+      {items, _} = il(~s(<span style="border:2px solid #f00; padding:1px 4px">hi</span>))
+      assert length(rl(items)) == 4
+      assert Enum.all?(rl(items), &(&1.color == {255, 0, 0}))
+      [top, bottom, left, right] = rl(items)
+      assert top.h == 2 and bottom.h == 2 and left.w == 2 and right.w == 2
+      assert top.w == bottom.w
+      assert right.x == top.x + top.w - 2
+      # the box wraps the text vertically with padding and border around it
+      hi = wl(items, "hi")
+      assert top.y < hi.y and bottom.y + bottom.h > hi.y + hi.h
+    end
+
+    test "vertical padding and borders don't change the line height" do
+      {plain, _} = il("<span>a</span><p>next</p>")
+
+      {items, _} =
+        il(
+          ~s(<span style="padding:10px 0; border:3px solid #000; background:#eee">a</span><p>next</p>)
+        )
+
+      assert wl(items, "next").y == wl(plain, "next").y
+    end
+
+    test "padding alone produces no rects" do
+      {items, _} = il(~s(<span style="padding:0 10px">x</span>))
+      assert rl(items) == []
+    end
+
+    test "a box wrapping over two lines gets two fragments with the right edges" do
+      text = String.duplicate("word ", 12)
+
+      {items, _} =
+        il(
+          ~s(<span style="border:2px solid #00f; padding:0 3px; background:#eef">#{text}</span>),
+          160
+        )
+
+      bgs = Enum.filter(rl(items), &(&1.color == {238, 238, 255}))
+      assert length(bgs) >= 3
+      blues = Enum.filter(rl(items), &(&1.color == {0, 0, 255}))
+      lefts = Enum.filter(blues, &(&1.w == 2 and &1.h > 2))
+      rights = Enum.filter(blues, &(&1.w == 2 and &1.h > 2))
+      # exactly one left border (first fragment) and one right border (last fragment)
+      assert length(lefts) == 2
+      assert length(rights) == 2
+      first = Enum.min_by(bgs, & &1.y)
+      last = Enum.max_by(bgs, & &1.y)
+      assert Enum.any?(lefts, &(&1.x == first.x and &1.y == first.y))
+      assert Enum.any?(rights, &(&1.x + &1.w == last.x + last.w and &1.y == last.y))
+      # continuation fragments start at the line start, flush with the first line
+      assert Enum.all?(bgs -- [first], &(&1.x == 4))
+    end
+
+    test "borders exist only where the box starts and ends (slice)" do
+      text = String.duplicate("word ", 12)
+
+      {items, _} =
+        il(
+          ~s(<span style="border-left:4px solid #0a0; border-right:4px solid #a00">#{text}</span>),
+          160
+        )
+
+      greens = Enum.filter(rl(items), &(&1.color == {0, 170, 0}))
+      reds = Enum.filter(rl(items), &(&1.color == {170, 0, 0}))
+      assert length(greens) == 1
+      assert length(reds) == 1
+      assert hd(greens).y < hd(reds).y
+    end
+
+    test "a box whose first word wraps doesn't leave a stub at the end of the previous line" do
+      long = String.duplicate("a", 20)
+
+      {items, _} =
+        il(~s(#{long} <span style="background:#ff0; padding:0 8px">#{long}</span>), 240)
+
+      [bg] = rl(items)
+      texts = for %{type: :text} = t <- items, do: t
+      second_line = texts |> Enum.map(& &1.y) |> Enum.max()
+      boxed = Enum.filter(texts, &(&1.y == second_line))
+      # one fragment, on the second line, wrapped around the moved word with its padding
+      assert bg.x == 4
+      assert Enum.all?(boxed, &(&1.x >= bg.x + 8))
+      assert bg.y > Enum.min(Enum.map(texts, & &1.y))
+    end
+
+    test "background is painted before the borders of the same box" do
+      {items, _} = il(~s(<span style="background:#ff0; border:2px solid #000">x</span>))
+      assert [%{color: {255, 255, 0}}, %{color: {0, 0, 0}} | _] = rl(items)
+    end
+
+    test "boxes at the start of a line include their leading padding" do
+      {items, _} =
+        il(
+          ~s(<p><span style="background:#ff0; padding:0 7px; border-left:2px solid #000">go</span> on</p>)
+        )
+
+      [bg | _] = rl(items)
+      assert bg.x == 4
+      assert wl(items, "go").x == 4 + 2 + 7
+    end
+
+    test "nested boxes paint outer first and keep their own extents" do
+      html =
+        ~s(<span style="background:#ddd; padding:0 10px">out <span style="background:#ff0; padding:0 4px">in</span> er</span>)
+
+      {items, _} = il(html)
+      [outer, inner] = rl(items)
+      assert outer.color == {221, 221, 221} and inner.color == {255, 255, 0}
+      assert outer.x < inner.x and outer.x + outer.w > inner.x + inner.w
+    end
+
+    test "boxes continue across a line break and across block-free inline children" do
+      {items, _} = il(~s(<span style="background:#ff0">one<br>two <b>three</b></span>))
+      bgs = rl(items)
+      assert length(bgs) == 2
+      assert Enum.at(bgs, 1).y > Enum.at(bgs, 0).y
+      assert Enum.at(bgs, 1).w >= wl(items, "two").w + wl(items, "three").w
+    end
+
+    test "inline boxes paint above a block background but under text" do
+      {items, _} =
+        il(~s(<div style="background:#eee">x <span style="background:#ff0">y</span></div>))
+
+      assert [%{color: {238, 238, 238}}, %{color: {255, 255, 0}}] = rl(items)
+      assert Enum.find_index(items, &(&1.type == :text)) > 1
+    end
+
+    test "visibility hidden keeps the space but paints nothing" do
+      {plain, _} = il("a <span>b</span> c")
+
+      {items, _} =
+        il(~s(a <span style="visibility:hidden; background:#ff0; padding:0 5px">b</span> c))
+
+      assert rl(items) == []
+      assert wl(items, "c").x - wl(plain, "c").x == 10
+    end
+
+    test "links with a background keep their href and position" do
+      {items, _} = il(~s(<a href="/go" style="background:#eef; padding:2px 8px">go</a>))
+      link = wl(items, "go")
+      assert link.href == "/go"
+      [bg] = rl(items)
+      assert bg.x < link.x and bg.x + bg.w > link.x + link.w
+    end
+
+    test "inline boxes work inside inline-blocks and absolute elements" do
+      html =
+        ~s(<span style="display:inline-block; width:200px">a <i style="background:#ff0; padding:0 4px">b</i></span>) <>
+          ~s(<div style="position:absolute; top:100px; left:10px">c <i style="background:#0ff">d</i></div>)
+
+      {items, _} = il(html)
+      assert Enum.any?(rl(items), &(&1.color == {255, 255, 0}))
+      cyan = Enum.find(rl(items), &(&1.color == {0, 255, 255}))
+      assert cyan.y > 90
+    end
+
+    test "text-align centers a line including the inline box fragment" do
+      {items, _} =
+        il(
+          ~s(<div style="text-align:center"><span style="background:#ff0; padding:0 10px">mid</span></div>),
+          408
+        )
+
+      [bg] = rl(items)
+      assert_in_delta bg.x + bg.w / 2, 4 + 200, 1
+    end
+
+    test "list items with inline boxes" do
+      {items, _} =
+        il(~s(<ul><li>x <code style="background:#eee; padding:0 3px">code</code></li></ul>))
+
+      [bg] = rl(items)
+      code = wl(items, "code")
+      assert bg.x < code.x
+      assert wl(items, "•").y == code.y
+    end
+  end
 end

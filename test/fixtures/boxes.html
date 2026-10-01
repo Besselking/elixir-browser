@@ -6,6 +6,9 @@ body { margin: 0; background: #f4f4f4 }
 h1 { margin: 0 0 10px; border-bottom: 3px solid #36c; padding-bottom: 4px }
 .note { border-left: 5px solid #e90; background: #fff6e0; padding: 8px 12px; margin: 10px 0 }
 .row > .box { display: inline-block; vertical-align: top }
+.hl { background: #fff2a8; padding: 1px 4px; border-radius: 3px }
+code { background: #eef; border: 1px solid #ccd; padding: 0 4px; font-family: monospace }
+.pill { background: #36c; color: #fff; padding: 2px 10px; margin: 0 4px; border: 1px solid #124 }
 .nav a { display: inline-block; padding: 4px 12px; margin: 0 4px 6px 0; border: 1px solid #36c; background: #eaf0ff; color: #036; text-decoration: none }
 .tag { display: inline-block; padding: 0 8px; border: 1px solid #999; background: #eee; font-size: 12px }
 .big { display: inline-block; width: 70px; height: 54px; padding: 4px; border: 2px solid #393; background: #efe; margin: 0 6px }
@@ -23,6 +26,7 @@ ul { padding-left: 24px }
   <div class="note">Left accent border, background and padding. This note is long enough to wrap onto a second line inside its box.</div>
   <p class="nav"><a href="#a">Home</a><a href="#b">Documentation</a><a href="#c">Download</a><a href="#d">Community</a><a href="#e">Blog</a></p>
   <p>Inline text with a <span class="tag">tag</span> and a <button>Button</button> baseline-aligned, then a <span class="big">tall unit</span> that stretches the line.</p>
+  <p>Inline <code>code chips</code> and <span class="hl">highlighted text</span> flow with the line, and a <span class="hl">highlight that is long enough to wrap onto the next line so that its box is split into two fragments, with the left edge only on the first</span> keeps its look. A <a class="pill" href="#p">link pill</a> and <span class="pill">span pill</span> have margins.</p>
   <div class="row"><span class="box">border-box 120px</span><span class="box">second box</span></div>
   <div class="card">60% wide, pushed right with margin-left:auto</div>
   <div class="narrow">Clipped: 150px wide, 46px tall, overflow hidden. This text keeps going past the bottom of the box and must be cut off.</div>

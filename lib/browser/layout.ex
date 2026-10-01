@@ -282,8 +282,45 @@ defmodule Browser.Layout do
     acc = if tag in ~w(td th), do: [{:space, style} | acc], else: acc
     positioned? = c["position"] in ["relative", "sticky"]
     acc = if positioned?, do: [{:pos_inline} | acc], else: acc
+
+    spec = inline_spec(tag, c, style)
+    ref = make_ref()
+    acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
     acc = walk_children(tag, kids, style, acc)
+    acc = if spec, do: [{:inline_close, ref, spec} | acc], else: acc
+
     if positioned?, do: [{:pos_end} | acc], else: acc
+  end
+
+  # An inline element needs its own box only if it has a background, borders,
+  # or horizontal padding/margins (vertical padding alone paints nothing).
+  defp inline_spec(_tag, c, _style) when map_size(c) == 0, do: nil
+
+  defp inline_spec(tag, c, style) do
+    box = box(tag, c)
+    {bt, br, bb, bl} = box.bw
+    ml = if box.ml == :auto, do: 0, else: box.ml
+    mr = if box.mr == :auto, do: 0, else: box.mr
+    visible? = box.bg != nil or bt + br + bb + bl > 0
+
+    if visible? or box.pl + box.pr + ml + mr > 0 do
+      %{
+        ml: ml,
+        mr: mr,
+        pl: box.pl,
+        pr: box.pr,
+        pt: box.pt,
+        pb: box.pb,
+        bt: bt,
+        br: br,
+        bb: bb,
+        bl: bl,
+        bc: box.bc,
+        bg: box.bg,
+        size: style.size,
+        paint: visible? and not style.hidden
+      }
+    end
   end
 
   defp block_ops(tag, kind, kids, style, c, acc) do
@@ -615,7 +652,11 @@ defmodule Browser.Layout do
       measure: measure,
       view_h: view_height,
       margin: margin,
-      aligned?: aligned?
+      aligned?: aligned?,
+      marks: [],
+      active: [],
+      lead: 0,
+      line_lead: 0
     }
 
     ops |> Enum.reduce(st, &op/2) |> flush()
@@ -692,14 +733,11 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    st =
-      if st.line == [],
-        do: st |> apply_gap() |> Map.merge(%{x: line_left, indent: line_left}),
-        else: st
+    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, 0), else: st
 
     st =
       if st.line != [] and st.x + space_w + w > st.width - st.margin - st.right do
-        st |> flush() |> apply_gap() |> Map.merge(%{x: line_left, indent: line_left})
+        st |> flush() |> apply_gap() |> start_line(line_left, 0)
       else
         st
       end
@@ -719,6 +757,42 @@ defmodule Browser.Layout do
     }
 
     %{st | line: [atom | st.line], x: x + w, pending_space: nil}
+  end
+
+  # Opening an inline box adds its left margin/border/padding to the line and
+  # records where its box starts. On an empty line the space is carried in
+  # `lead` and applied when the first word of the line is placed.
+  defp op({:inline_open, ref, spec}, st) do
+    if st.line == [] do
+      x = st.margin + st.left + st.lead + spec.ml
+
+      %{
+        st
+        | lead: st.lead + spec.ml + spec.bl + spec.pl,
+          marks: [{:start, ref, spec, x} | st.marks]
+      }
+    else
+      space_w = if st.pending_space, do: st.measure.(" ", st.pending_space), else: 0
+      x = st.x + space_w
+
+      %{
+        st
+        | x: x + spec.ml + spec.bl + spec.pl,
+          pending_space: nil,
+          marks: [{:start, ref, spec, x + spec.ml} | st.marks]
+      }
+    end
+  end
+
+  defp op({:inline_close, ref, spec}, st) do
+    right = spec.pr + spec.br
+
+    if st.line == [] do
+      x = st.margin + st.left + st.lead + right
+      %{st | lead: st.lead + right + spec.mr, marks: [{:end, ref, x} | st.marks]}
+    else
+      %{st | x: st.x + right + spec.mr, marks: [{:end, ref, st.x + right} | st.marks]}
+    end
   end
 
   defp op({:pos_inline}, st) do
@@ -1078,6 +1152,20 @@ defmodule Browser.Layout do
 
   # -- words and lines ------------------------------------------------------------------
 
+  # A new line starts at `line_left` (a list marker hangs `dx` to the left). Space
+  # owed by inline boxes opened on the empty line (`lead`) is applied to content.
+  defp start_line(st, line_left, dx) do
+    lead = if dx == 0, do: st.lead, else: 0
+
+    %{
+      st
+      | x: line_left + dx + lead,
+        indent: line_left,
+        lead: st.lead - lead,
+        line_lead: lead
+    }
+  end
+
   defp word(text, style, nowrap?, st, dx \\ 0) do
     w = st.measure.(text, style)
     line_left = st.margin + st.left
@@ -1085,14 +1173,11 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    st =
-      if st.line == [],
-        do: st |> apply_gap() |> Map.merge(%{x: line_left + dx, indent: line_left}),
-        else: st
+    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
 
     st =
       if st.line != [] and not nowrap? and st.x + space_w + w > st.width - st.margin - st.right do
-        st |> flush() |> apply_gap() |> Map.merge(%{x: line_left, indent: line_left})
+        st |> flush() |> apply_gap() |> start_line(line_left, 0)
       else
         st
       end
@@ -1140,7 +1225,19 @@ defmodule Browser.Layout do
 
   defp bridge(st, _item, _gap), do: st
 
-  defp flush(%{line: []} = st), do: %{st | pending_space: nil}
+  # Nothing on the line: boxes opened/closed here only change which boxes are
+  # open. Newly opened ones are `pending` until a line with content paints them.
+  defp flush(%{line: []} = st) do
+    active =
+      st.marks
+      |> Enum.reverse()
+      |> Enum.reduce(st.active, fn
+        {:start, ref, spec, _x}, active -> active ++ [%{ref: ref, spec: spec, pending: true}]
+        {:end, ref, _x}, active -> Enum.reject(active, &(&1.ref == ref))
+      end)
+
+    %{st | pending_space: nil, marks: [], active: active}
+  end
 
   # A line holds words and inline-block atoms. Baseline-aligned atoms (the
   # default) put their baseline on the line's, which sits at the taller of the
@@ -1178,25 +1275,124 @@ defmodule Browser.Layout do
     {rects, others} = Enum.split_with(moved, &(&1.type == :rect))
     new_items = Enum.reverse(others) ++ placed
 
+    ctx = %{
+      shift: shift,
+      first_x: st.line |> List.last() |> Map.fetch!(:x),
+      last_right: (fn l -> l.x + l.w end).(hd(st.line)),
+      y_ref: fn size ->
+        if lh > 0,
+          do: st.y + dy + lh - size - div(lh - size, 4),
+          else: st.y + base - size
+      end
+    }
+
+    {boxes, active, carried, lead} = inline_boxes(st, ctx)
+    # `boxes` is already newest-first like st.rects
+    all_rects = Enum.reverse(rects) ++ boxes
+
     %{
       st
       | items: new_items ++ st.items,
         n: st.n + length(new_items),
-        rects: Enum.reverse(rects) ++ st.rects,
-        nr: st.nr + length(rects),
+        rects: all_rects ++ st.rects,
+        nr: st.nr + length(rects) + length(boxes),
         line: [],
         y: st.y + line_h,
         lh: 0,
         x: st.indent,
-        pending_space: nil
+        pending_space: nil,
+        marks: carried,
+        active: active,
+        lead: lead
     }
+  end
+
+  # -- inline boxes -----------------------------------------------------------------
+  #
+  # `marks` (newest first) say where inline boxes start and end on this line;
+  # `active` are boxes still open from earlier lines. Every box open on the line
+  # gets one fragment: background plus top/bottom borders, the left border only
+  # on its first fragment and the right border only on its last.
+  #
+  # -> {rects in reverse paint order, boxes still open, marks carried to the next
+  #     line, lead for the next line}
+  defp inline_boxes(%{marks: [], active: []} = st, _ctx), do: {[], [], [], st.lead}
+
+  defp inline_boxes(st, ctx) do
+    ended = for {:end, ref, _} <- st.marks, into: MapSet.new(), do: ref
+
+    # boxes opened on an empty line sit just before the first word's lead
+    {open0, _} =
+      Enum.map_reduce(Enum.with_index(st.active), st.indent, fn {e, i}, running ->
+        if Map.get(e, :pending) do
+          x = running + e.spec.ml
+          {%{ref: e.ref, spec: e.spec, x: x, first?: true, seq: i}, x + e.spec.bl + e.spec.pl}
+        else
+          {%{ref: e.ref, spec: e.spec, x: nil, first?: false, seq: i}, running}
+        end
+      end)
+
+    {open, done, carried, lead, _} =
+      st.marks
+      |> Enum.reverse()
+      |> Enum.reduce({open0, [], [], st.lead, length(open0)}, fn
+        {:start, ref, spec, x}, {open, done, carried, lead, seq} ->
+          if x >= ctx.last_right and not MapSet.member?(ended, ref) do
+            # no content after the box's start on this line: it starts on the next one
+            mark = {:start, ref, spec, st.indent + lead + spec.ml}
+            {open, done, [mark | carried], lead + spec.ml + spec.bl + spec.pl, seq}
+          else
+            box = %{ref: ref, spec: spec, x: x, first?: true, seq: seq}
+            {open ++ [box], done, carried, lead, seq + 1}
+          end
+
+        {:end, ref, x}, {open, done, carried, lead, seq} ->
+          case Enum.split_with(open, &(&1.ref == ref)) do
+            {[box], rest} -> {rest, [{box, x, true} | done], carried, lead, seq}
+            {[], _} -> {open, done, carried, lead, seq}
+          end
+      end)
+
+    done = Enum.reduce(open, done, fn box, acc -> [{box, ctx.last_right, false} | acc] end)
+
+    boxes =
+      done
+      |> Enum.sort_by(fn {box, _, _} -> box.seq end)
+      |> Enum.flat_map(fn {box, x1, last?} -> fragment(box, x1, last?, ctx) end)
+
+    still_open = for box <- open, do: %{ref: box.ref, spec: box.spec}
+    {Enum.reverse(boxes), still_open, carried, lead}
+  end
+
+  defp fragment(%{spec: %{paint: false}}, _x1, _last?, _ctx), do: []
+
+  defp fragment(%{spec: spec} = box, x1, last?, ctx) do
+    x0 = (box.x || ctx.first_x) + ctx.shift
+    w = x1 + ctx.shift - x0
+    y = ctx.y_ref.(spec.size) - spec.pt - spec.bt
+    h = round(spec.size * 1.2) + spec.pt + spec.pb + spec.bt + spec.bb
+    {tc, rc, bc, lc} = spec.bc
+
+    sides = [
+      spec.bt > 0 && tc && rect(x0, y, w, spec.bt, tc),
+      spec.bb > 0 && bc && rect(x0, y + h - spec.bb, w, spec.bb, bc),
+      box.first? && spec.bl > 0 && lc && rect(x0, y, spec.bl, h, lc),
+      last? && spec.br > 0 && rc && rect(x0 + w - spec.br, y, spec.br, h, rc)
+    ]
+
+    bg = if spec.bg && w > 0, do: [rect(x0, y, w, h, spec.bg)], else: []
+    if w > 0, do: bg ++ Enum.filter(sides, & &1), else: []
   end
 
   defp align_shift(_items, %{aligned?: false}), do: 0
 
   defp align_shift([first | _] = items, st) do
     last = List.last(items)
-    free = st.width - st.margin - st.right - st.indent - (last.x + last.w - first.x)
+    # the line runs from its start (inline-box lead included) to wherever the
+    # last box's padding/border ends, which `st.x` tracks
+    left = min(first.x, st.indent)
+    right = max(last.x + last.w, st.x)
+    free = st.width - st.margin - st.right - st.indent - (right - left)
 
     case first.align do
       :center -> max(round(free / 2), 0)
