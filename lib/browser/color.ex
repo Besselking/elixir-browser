@@ -5,6 +5,9 @@ defmodule Browser.Color do
   `parse/1` returns `{r, g, b}` (alpha is blended over white, since pages are
   painted on a white canvas), `:transparent`, `:current` for `currentcolor`,
   or `nil` if the value isn't a color we understand.
+
+  `parse_alpha/1` keeps the alpha instead, for things painted over other things
+  (gradient stops, shadows): `{r, g, b, a}` with `a` from 0 (clear) to 255.
   """
 
   @named %{
@@ -89,15 +92,41 @@ defmodule Browser.Color do
 
   @spec parse(String.t()) :: {0..255, 0..255, 0..255} | :transparent | :current | nil
   def parse(str) when is_binary(str) do
+    case raw(str) do
+      {:rgba, _r, _g, _b, +0.0} -> :transparent
+      {:rgba, r, g, b, a} -> {blend(r, a), blend(g, a), blend(b, a)}
+      other -> other
+    end
+  end
+
+  @spec parse_alpha(String.t()) :: {0..255, 0..255, 0..255, 0..255} | :current | nil
+  def parse_alpha(str) when is_binary(str) do
+    case raw(str) do
+      {:rgba, r, g, b, a} -> {r, g, b, round(a * 255)}
+      other -> other
+    end
+  end
+
+  # blend a channel over white
+  defp blend(c, a), do: round(c * a + 255 * (1 - a))
+
+  defp raw(str) do
     s = str |> String.trim() |> String.downcase()
 
     cond do
-      s == "transparent" -> :transparent
+      s == "transparent" -> {:rgba, 0, 0, 0, 0.0}
       s == "currentcolor" -> :current
       String.starts_with?(s, "#") -> s |> binary_part(1, byte_size(s) - 1) |> hex()
       m = Regex.run(~r/\A(rgba?|hsla?)\((.*)\)\z/s, s) -> func(Enum.at(m, 1), Enum.at(m, 2))
-      m = Regex.run(~r/\Alight-dark\((.*)\)\z/s, s) -> m |> Enum.at(1) |> first_arg() |> parse()
-      true -> Map.get(@named, s)
+      m = Regex.run(~r/\Alight-dark\((.*)\)\z/s, s) -> m |> Enum.at(1) |> first_arg() |> raw()
+      true -> named(s)
+    end
+  end
+
+  defp named(s) do
+    case Map.get(@named, s) do
+      {r, g, b} -> {:rgba, r, g, b, 1.0}
+      nil -> nil
     end
   end
 
@@ -187,11 +216,14 @@ defmodule Browser.Color do
   defp number(tok) do
     pct? = String.ends_with?(tok, "%")
 
-    case tok |> String.trim_trailing("%") |> Float.parse() do
+    case tok |> String.trim_trailing("%") |> leading_zero() |> Float.parse() do
       {n, ""} -> {n, pct?}
       _ -> nil
     end
   end
+
+  # CSS allows ".5" and "-.5", which Float.parse/1 rejects
+  defp leading_zero(num), do: Regex.replace(~r/\A([+-]?)\./, num, "\\g{1}0.")
 
   defp hsl(h, s, l, a) when is_number(h) and is_number(s) and is_number(l) do
     h = :math.fmod(h, 360) / 360
@@ -229,16 +261,9 @@ defmodule Browser.Color do
 
   defp clamp(n, lo, hi), do: n |> max(lo) |> min(hi)
 
-  # blend over white
   defp rgba(r, g, b, a) when is_number(r) and is_number(g) and is_number(b) do
-    a = clamp(a * 1.0, 0, 1)
-
-    if a == 0 do
-      :transparent
-    else
-      mix = fn c -> round(clamp(c, 0, 255) * a + 255 * (1 - a)) end
-      {mix.(r), mix.(g), mix.(b)}
-    end
+    {:rgba, round(clamp(r, 0, 255)), round(clamp(g, 0, 255)), round(clamp(b, 0, 255)),
+     clamp(a * 1.0, 0, 1)}
   end
 
   defp rgba(_, _, _, _), do: nil

@@ -19,6 +19,7 @@ defmodule Browser.Style do
             border-top-color border-right-color border-bottom-color border-left-color
             border-top-left-radius border-top-right-radius border-bottom-right-radius
             border-bottom-left-radius line-height
+            background-image background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
@@ -34,7 +35,8 @@ defmodule Browser.Style do
     "list-style" => ~w(list-style-type),
     "text-decoration" => ~w(text-decoration-line),
     "font" => ~w(font-style font-weight font-size line-height font-family),
-    "background" => ~w(background-color),
+    "background" =>
+      ~w(background-color background-image background-repeat background-position background-size),
     "border-width" =>
       ~w(border-top-width border-right-width border-bottom-width border-left-width),
     "border-style" =>
@@ -156,11 +158,28 @@ defmodule Browser.Style do
 
   @doc "Parses `[{origin, css}]` (origin `:ua` or `:author`, in cascade order) into rules."
   def parse_sheets(sheets) do
-    Enum.flat_map(sheets, fn {origin, css} ->
+    Enum.flat_map(sheets, fn sheet ->
+      {origin, css, base} =
+        case sheet do
+          {origin, css} -> {origin, css, nil}
+          {origin, css, base} -> {origin, css, base}
+        end
+
       for rule <- CSS.parse(css),
-          decls = relevant(rule.decls),
+          decls = rule.decls |> absolutize_urls(base) |> relevant(),
           decls != [],
           do: %{rule | decls: decls} |> Map.put(:origin, origin)
+    end)
+  end
+
+  # url() in a stylesheet is relative to the stylesheet, not to the page
+  defp absolutize_urls(decls, nil), do: decls
+
+  defp absolutize_urls(decls, base) do
+    Enum.map(decls, fn {prop, value, important?} ->
+      if String.contains?(value, "url("),
+        do: {prop, Browser.Backgrounds.absolutize(value, base), important?},
+        else: {prop, value, important?}
     end)
   end
 
@@ -352,9 +371,16 @@ defmodule Browser.Style do
     if lines == [], do: [], else: [{"text-decoration-line", Enum.join(lines, " ")}]
   end
 
-  defp do_split("background", _v, toks) do
-    color = Enum.find(toks, &(Browser.Color.parse(&1) != nil))
-    [{"background-color", color || "transparent"}]
+  defp do_split("background", v, _toks) do
+    parts = Browser.Backgrounds.shorthand(v)
+
+    [
+      {"background-color", parts.color},
+      {"background-image", parts.image},
+      {"background-repeat", parts.repeat},
+      {"background-position", parts.position},
+      {"background-size", parts.size}
+    ]
   end
 
   defp do_split("font", v, _toks) do
@@ -541,7 +567,11 @@ defmodule Browser.Style do
     end)
   end
 
-  defp normalize(v), do: v |> String.trim() |> String.downcase()
+  # values are case-insensitive keywords, except the paths inside url()
+  defp normalize(v) do
+    v = String.trim(v)
+    if String.contains?(v, "url("), do: v, else: String.downcase(v)
+  end
 
   @doc false
   def substitute(value, _custom, depth) when depth > 16,
@@ -703,6 +733,21 @@ defmodule Browser.Style do
       true ->
         :skip
     end
+  end
+
+  defp typed("background-image", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_images(v)}
+  defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
+
+  defp typed("background-position", v, _env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_position(v)}
+
+  defp typed("background-size", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_size(v)}
+
+  defp typed("box-shadow", "none", _env, _pc), do: {:ok, []}
+
+  defp typed("box-shadow", v, env, _pc) do
+    {r, g, b} = if match?({_, _, _}, env.color), do: env.color, else: {0, 0, 0}
+    {:ok, Browser.Shadows.parse(v, env.fs, {r, g, b, 255})}
   end
 
   defp typed("text-indent", v, env, _pc) do

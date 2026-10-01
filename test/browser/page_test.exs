@@ -57,4 +57,47 @@ defmodule Browser.PageTest do
       assert {:error, _} = Page.load("file:///no/such/file.html")
     end
   end
+
+  describe "all_image_urls/1" do
+    @url "http://h.test/dir/p.html"
+
+    test "includes background images from style elements, style attributes and external rules" do
+      html = """
+      <html><head><style>body { background: url(bg.png) } .x { background-image: linear-gradient(red, blue), url("/deep/y.png") }</style></head>
+      <body><img src="a.png"><div class="x">t</div>
+      <div style="background: url('inline.png')">u</div></body></html>
+      """
+
+      page = Page.build(html, @url)
+
+      assert Page.all_image_urls(page) |> Enum.sort() ==
+               Enum.sort([
+                 "http://h.test/dir/a.png",
+                 "http://h.test/dir/bg.png",
+                 "http://h.test/deep/y.png",
+                 "http://h.test/dir/inline.png"
+               ])
+    end
+
+    test "no duplicates, and nothing for pages without pictures" do
+      page =
+        Page.build(
+          ~s|<style>p { background: url(a.png) }</style><p>x</p><img src="a.png"><p>y</p>|,
+          @url
+        )
+
+      assert Page.all_image_urls(page) == ["http://h.test/dir/a.png"]
+      assert Page.all_image_urls(Page.build("<p>no pictures</p>", @url)) == []
+    end
+
+    test "backgrounds that only apply at some widths follow the media queries" do
+      html =
+        "<style>@media (min-width: 800px) { p { background-image: url(wide.png) } }</style><p>x</p>"
+
+      narrow = Page.build(html, @url, %{type: "screen", width: 500, height: 600, dppx: 1.0})
+      wide = Page.restyle(narrow, %{type: "screen", width: 1000, height: 600, dppx: 1.0})
+      assert Page.all_image_urls(narrow) == []
+      assert Page.all_image_urls(wide) == ["http://h.test/dir/wide.png"]
+    end
+  end
 end

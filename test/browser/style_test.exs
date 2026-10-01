@@ -320,7 +320,7 @@ defmodule Browser.StyleTest do
 
     for {name, decls} <- @sr_only_cases do
       test "#{name} is not rendered" do
-        assert tags(prune(~s(<p style="#{unquote(decls)}">x</p><i>y</i>))) == ["i"]
+        assert tags(prune(~s|<p style="#{unquote(decls)}">x</p><i>y</i>|)) == ["i"]
       end
     end
 
@@ -555,6 +555,109 @@ defmodule Browser.StyleTest do
     test "line-height with var()" do
       css = ":root { --lh: 1.6 } p { line-height: var(--lh) }"
       assert lhv(css, "<html><body><p>a</p></body></html>") == {:num, 1.6}
+    end
+  end
+
+  describe "background images and shadows" do
+    defp bg(css, prop), do: comp("<p>a</p>", css, "p")[prop]
+
+    test "background-image: urls keep their case, gradients and lists parse" do
+      assert bg(~s|p { background-image: url("https://X.test/Img.PNG") }|, "background-image") ==
+               [{:url, "https://X.test/Img.PNG"}]
+
+      assert [{:linear, {:to, [:right]}, [_, _]}, {:url, "a.png"}] =
+               bg(
+                 "p { background-image: linear-gradient(to right, red, blue), url(a.png) }",
+                 "background-image"
+               )
+
+      assert bg("p { background-image: none }", "background-image") == [:none]
+    end
+
+    test "repeat, position and size" do
+      assert bg("p { background-repeat: no-repeat }", "background-repeat") == [
+               {:no_repeat, :no_repeat}
+             ]
+
+      assert bg("p { background-position: right 10px top }", "background-position") == [
+               {{:from_end, 10.0}, {:pct, 0.0}}
+             ]
+
+      assert bg("p { background-size: cover }", "background-size") == [:cover]
+    end
+
+    test "the background shorthand sets all five longhands and resets what it omits" do
+      css = "p { background: #eee url(a.png) no-repeat center / 50px auto }"
+      assert bg(css, "background-color") == {238, 238, 238}
+      assert bg(css, "background-image") == [{:url, "a.png"}]
+      assert bg(css, "background-repeat") == [{:no_repeat, :no_repeat}]
+      assert bg(css, "background-position") == [{{:pct, 0.5}, {:pct, 0.5}}]
+      assert bg(css, "background-size") == [{50.0, :auto}]
+
+      reset = "p { background-image: url(a.png); background-repeat: no-repeat; background: #fff }"
+      assert bg(reset, "background-image") == [:none]
+      assert bg(reset, "background-repeat") == [{:repeat, :repeat}]
+    end
+
+    test "a longhand after the shorthand wins" do
+      css = "p { background: url(a.png); background-image: linear-gradient(red, blue) }"
+      assert [{:linear, _, _}] = bg(css, "background-image")
+    end
+
+    test "gradients in the shorthand, with a colour behind" do
+      css = "p { background: #ccc linear-gradient(red, blue) }"
+      assert bg(css, "background-color") == {204, 204, 204}
+      assert [{:linear, _, _}] = bg(css, "background-image")
+    end
+
+    test "background with var()" do
+      css =
+        ":root { --img: url(a.png); --c: #123 } p { background: var(--c) var(--img) no-repeat }"
+
+      html = "<html><body><p>a</p></body></html>"
+      c = comp(html, css, "p")
+      assert c["background-color"] == {17, 34, 51}
+      assert c["background-image"] == [{:url, "a.png"}]
+      assert c["background-repeat"] == [{:no_repeat, :no_repeat}]
+    end
+
+    test "urls in a stylesheet are relative to the stylesheet" do
+      rules =
+        Style.parse_sheets([
+          {:author, "p { background: url(../img/a.png) }", "https://x.test/css/site.css"},
+          {:author, "p { background-image: url(b.png) }", "https://y.test/"}
+        ])
+
+      decls = for %{decls: d} <- rules, {"background-image", v, _} <- d, do: v
+      assert decls == [~s|url("https://x.test/img/a.png")|, ~s|url("https://y.test/b.png")|]
+    end
+
+    test "box-shadow: lists, em, currentcolor, none" do
+      assert [%{dx: 1.0, dy: 2.0, blur: 3.0, spread: 4.0, color: {255, 0, 0, 255}, inset?: false}] =
+               bg("p { box-shadow: 1px 2px 3px 4px red }", "box-shadow")
+
+      assert [%{dx: 32.0}, %{inset?: true}] =
+               bg("p { box-shadow: 2em 0 black, inset 0 1px #000 }", "box-shadow")
+
+      assert [%{color: {0, 0, 255, 255}}] =
+               bg("p { color: #00f; box-shadow: 0 1px 2px currentcolor }", "box-shadow")
+
+      assert [%{color: {0, 0, 255, 255}}] =
+               bg("p { color: #00f; box-shadow: 0 1px 2px }", "box-shadow")
+
+      assert bg("p { box-shadow: none }", "box-shadow") == []
+    end
+
+    test "these properties are not inherited" do
+      c =
+        comp(
+          ~s|<div style="box-shadow: 1px 1px red; background-image: url(a.png)"><p>a</p></div>|,
+          "",
+          "p"
+        )
+
+      refute Map.has_key?(c, "box-shadow")
+      refute Map.has_key?(c, "background-image")
     end
   end
 end

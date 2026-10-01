@@ -407,7 +407,7 @@ defmodule Browser.LayoutTest do
   describe "geometry invariants" do
     alias Browser.Page
 
-    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms images) do
+    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("test/fixtures/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -1866,6 +1866,255 @@ defmodule Browser.LayoutTest do
         for it <- items, key <- [:x, :y, :w, :h], Map.has_key?(it, key) do
           assert is_integer(Map.fetch!(it, key)), "#{key} of #{inspect(it)} at #{w}"
         end
+      end
+    end
+  end
+
+  describe "background images and shadows" do
+    alias Browser.Page
+
+    @pic "http://example.test/dir/a.png"
+
+    defp bgl(html, images \\ nil, width \\ 400) do
+      page =
+        Page.build(
+          "<style>body{margin:0} p,div{margin:0}</style>" <> html,
+          "http://example.test/dir/p.html"
+        )
+
+      Layout.layout(page.nodes, width, &measure/2, 600, images: images)
+    end
+
+    defp kinds(items), do: Enum.map(items, & &1.type)
+    defp of_type(items, type), do: Enum.filter(items, &(&1.type == type))
+
+    test "a gradient background is an item with its layer, no image info needed" do
+      {items, _} =
+        bgl(
+          ~s|<div style="background: linear-gradient(to right, red, blue); height: 40px">x</div>|
+        )
+
+      [%{layers: [layer], x: 4, w: 392, h: 40}] = of_type(items, :bgimage)
+      assert %{kind: :linear, tile: {4, 0, 392, 40}, line: {x1, y1, x2, y2}} = layer
+      assert {x1, y1, x2, y2} == {0.0, 20.0, 392.0, 20.0}
+      assert [{+0.0, {255, 0, 0, 255}}, {1.0, {0, 0, 255, 255}}] = layer.stops
+    end
+
+    test "an image layer appears once its size is known" do
+      html = ~s|<div style="background: url(a.png) no-repeat; height: 30px">x</div>|
+      {loading, _} = bgl(html, %{})
+      assert of_type(loading, :bgimage) == []
+      {failed, _} = bgl(html, %{@pic => :failed})
+      assert of_type(failed, :bgimage) == []
+
+      {items, _} = bgl(html, %{@pic => {:ok, 20, 10}})
+
+      assert [
+               %{
+                 layers: [
+                   %{
+                     kind: :image,
+                     url: @pic,
+                     tile: {4, 0, 20, 10},
+                     repeat: {:no_repeat, :no_repeat}
+                   }
+                 ]
+               }
+             ] = of_type(items, :bgimage)
+    end
+
+    test "positioning, size and repeat apply" do
+      html =
+        ~s|<div style="background: url(a.png) right bottom / 40px auto no-repeat; height: 60px; width: 200px">x</div>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 20, 10}})
+      [%{layers: [layer]}] = of_type(items, :bgimage)
+      # 40px wide, 20px tall, in the bottom-right corner of the 200x60 box at x=4
+      assert layer.tile == {4 + 160, 40, 40, 20}
+    end
+
+    test "images are positioned in the padding box and painted into the border box" do
+      html =
+        ~s|<div style="background: url(a.png) no-repeat; border: 5px solid #000; padding: 3px; width: 50px; height: 20px">x</div>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      [%{layers: [layer]} = item] = of_type(items, :bgimage)
+      assert layer.tile == {4 + 5, 5, 10, 10}
+      assert layer.clip == {4, 0, item.w, item.h}
+      assert item.w == 50 + 6 + 10
+    end
+
+    test "layers are returned bottom first" do
+      html =
+        ~s|<div style="background: url(a.png) no-repeat, linear-gradient(red, blue); height: 30px">x</div>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      [%{layers: [bottom, top]}] = of_type(items, :bgimage)
+      assert bottom.kind == :linear and top.kind == :image
+    end
+
+    test "paint order of a decorated box: shadow, colour, images, inset shadow, borders" do
+      html =
+        ~s|<div style="box-shadow: 0 2px 4px #000, inset 0 0 3px #00f; background: #eee linear-gradient(red, blue); border: 1px solid #333; height: 20px">x</div>|
+
+      {items, _} = bgl(html)
+      boxes = items |> Enum.reject(&(&1.type == :text))
+      assert kinds(boxes) == [:shadow, :rect, :bgimage, :inset_shadow, :rect, :rect, :rect, :rect]
+      assert [%{color: {238, 238, 238}} | _] = of_type(items, :rect)
+    end
+
+    test "a rounded box keeps its borders above images and inset shadows" do
+      html =
+        ~s|<div style="background: #eee linear-gradient(red, blue); box-shadow: inset 0 0 4px #000; border: 2px solid #f00; border-radius: 8px; height: 20px">x</div>|
+
+      {items, _} = bgl(html)
+      boxes = Enum.reject(items, &(&1.type == :text))
+      assert kinds(boxes) == [:rect, :bgimage, :inset_shadow, :rect]
+      [fill, _, _, frame] = boxes
+      assert fill.color == {238, 238, 238} and fill.border == nil
+      assert frame.color == nil and frame.border.w == {2, 2, 2, 2}
+      assert fill.radius == frame.radius
+    end
+
+    test "outer shadows: layers, blur fade, spread and the box's rounding" do
+      {items, _} =
+        bgl(
+          ~s|<div style="box-shadow: 0 4px 8px 2px rgba(0,0,0,.4); border-radius: 6px; height: 40px">x</div>|
+        )
+
+      [%{layers: layers, radius: radii} = shadow] = of_type(items, :shadow)
+      assert length(layers) == 8
+      assert {{6, 6}, _, _, _} = radii
+      # the item's box covers every layer
+      for %{rect: {x, y, w, h}} <- layers do
+        assert x >= shadow.x and y >= shadow.y and x + w <= shadow.x + shadow.w and
+                 y + h <= shadow.y + shadow.h
+      end
+
+      # the outermost layer is bigger than the box by spread + blur, moved down by 4
+      %{rect: {x, y, w, h}} = hd(layers)
+      assert {x, y, w, h} == {4 - 10, 0 + 4 - 10, 392 + 20, 40 + 20}
+    end
+
+    test "a box with a shadow but no colour or border still gets the shadow" do
+      {items, _} = bgl(~s(<div style="box-shadow: 2px 2px #000">x</div>))
+      assert [%{type: :shadow}] = of_type(items, :shadow)
+      assert of_type(items, :rect) == []
+    end
+
+    test "several outer shadows: the first is painted last, on top" do
+      {items, _} =
+        bgl(~s(<div style="box-shadow: 1px 1px #f00, 5px 5px #00f; height: 10px">x</div>))
+
+      [first, second] = of_type(items, :shadow)
+      assert [%{color: {0, 0, 255, 255}}] = first.layers
+      assert [%{color: {255, 0, 0, 255}}] = second.layers
+    end
+
+    test "box-shadow none and an empty list draw nothing" do
+      {items, _} = bgl(~s(<div style="box-shadow: none; background: #eee">x</div>))
+      assert of_type(items, :shadow) == []
+    end
+
+    test "shadows of an element inside a clipping box are clipped with it" do
+      html =
+        ~s(<div style="width:50px; height:20px; overflow:hidden"><div style="box-shadow: 0 0 6px #000; width: 30px; height: 10px">x</div></div>)
+
+      {items, _} = bgl(html)
+      assert %{clip: %{w: 50}} = hd(of_type(items, :shadow))
+    end
+
+    test "the body's gradient becomes the canvas, and the body doesn't paint it again" do
+      html = ~s|<html><body style="background: linear-gradient(red, blue)"><p>x</p></body></html>|
+      {items, _} = bgl(html)
+      [%{type: :canvas, layers: [layer]} | rest] = items
+      assert layer.kind == :linear
+      assert of_type(rest, :bgimage) == []
+    end
+
+    test "the canvas covers the whole window even when the content is short" do
+      html = ~s|<html><body style="background: #123 url(a.png) repeat-x"><p>x</p></body></html>|
+      {[canvas | _], height} = bgl(html, %{@pic => {:ok, 10, 10}})
+      assert canvas.color == {17, 34, 51}
+      assert canvas.h == 600 and canvas.w == 400 and height < 100
+
+      assert [%{kind: :image, repeat: {:repeat, :no_repeat}, clip: {0, 0, 400, 600}}] =
+               canvas.layers
+    end
+
+    test "when html has a background too, the body keeps its own" do
+      html =
+        ~s|<html style="background: #111"><body style="background: linear-gradient(red, blue)"><p>x</p></body></html>|
+
+      {items, _} = bgl(html)
+      assert [%{type: :canvas, color: {17, 17, 17}, layers: []} | rest] = items
+      assert [%{type: :bgimage}] = of_type(rest, :bgimage)
+    end
+
+    test "inside an inline-block, shadows and images still go behind the text and above the colour" do
+      html =
+        ~s|<span style="display:inline-block"><div style="box-shadow: 0 2px 4px #000; background: #eee linear-gradient(red, blue); width: 60px; height: 30px">x</div></span>|
+
+      {items, _} = bgl(html)
+      assert kinds(items) == [:shadow, :rect, :bgimage, :text]
+    end
+
+    test "decorations inside an inline-block move with it" do
+      deco =
+        "background: url(a.png) no-repeat, linear-gradient(red, blue); box-shadow: 0 2px 4px #000, inset 0 0 3px #00f;"
+
+      plain = ~s|<div style="#{deco} width: 60px; height: 30px">x</div>|
+
+      boxed =
+        ~s|<span style="display:inline-block; margin-left: 40px"><div style="#{deco} width: 60px; height: 30px">x</div></span>|
+
+      {a, _} = bgl(plain, %{@pic => {:ok, 10, 10}})
+      {b, _} = bgl(boxed, %{@pic => {:ok, 10, 10}})
+
+      for type <- [:bgimage, :shadow, :inset_shadow] do
+        [one] = of_type(a, type)
+        [two] = of_type(b, type)
+        assert two.x == one.x + 40, "#{type} item"
+        # what is inside the item moved by the same amount
+        case type do
+          :bgimage ->
+            for {l1, l2} <- Enum.zip(one.layers, two.layers) do
+              assert elem(l2.tile, 0) == elem(l1.tile, 0) + 40
+              assert elem(l2.clip, 0) == elem(l1.clip, 0) + 40
+              assert elem(l2.tile, 1) == elem(l1.tile, 1)
+            end
+
+          :shadow ->
+            for {l1, l2} <- Enum.zip(one.layers, two.layers),
+                do: assert(elem(l2.rect, 0) == elem(l1.rect, 0) + 40)
+
+          :inset_shadow ->
+            for {l1, l2} <- Enum.zip(one.layers, two.layers),
+                do: assert(elem(l2.hole.rect, 0) == elem(l1.hole.rect, 0) + 40)
+        end
+      end
+    end
+
+    test "geometry stays on whole pixels" do
+      html =
+        ~s|<div style="background: url(a.png) 33.3% 66.6% / 33% auto, radial-gradient(circle at 20% 30%, red, blue); box-shadow: 1.5px 2.5px 7.3px 1.2px #000; border-radius: 7%; height: 33.3px; width: 77.7%">x</div>|
+
+      for w <- [200, 333, 777] do
+        {items, h} = bgl(html, %{@pic => {:ok, 21, 13}}, w)
+        assert is_integer(h)
+
+        for it <- items,
+            key <- [:x, :y, :w, :h],
+            Map.has_key?(it, key),
+            do: assert(is_integer(Map.fetch!(it, key)))
+
+        for %{layers: layers} <- of_type(items, :bgimage),
+            %{tile: {x, y, tw, th}} <- layers,
+            do: assert(Enum.all?([x, y, tw, th], &is_integer/1))
+
+        for %{layers: layers} <- of_type(items, :shadow),
+            %{rect: {x, y, sw, sh}} <- layers,
+            do: assert(Enum.all?([x, y, sw, sh], &is_integer/1))
       end
     end
   end

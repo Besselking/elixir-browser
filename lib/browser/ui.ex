@@ -129,12 +129,13 @@ defmodule Browser.UI do
 
     canvas =
       case items do
-        [%{type: :canvas, color: color} | _] -> color
+        [%{type: :canvas, color: color} | _] when color != nil -> color
         _ -> {255, 255, 255}
       end
 
     :wxDC.setBackground(dc, :wxBrush.new(canvas))
     :wxDC.clear(dc)
+    draw_canvas_layers(dc, items, scroll)
     {_, h} = :wxWindow.getClientSize(panel)
 
     for item <- items,
@@ -152,6 +153,57 @@ defmodule Browser.UI do
 
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  # -- shadows and background images --------------------------------------------------
+
+  @no_radii {{0, 0}, {0, 0}, {0, 0}, {0, 0}}
+
+  # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
+  # fades the edge like a blur
+  defp draw(dc, %{type: :shadow} = item, _y, scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    clip_to(gc, item, scroll)
+
+    for %{rect: {x, y, w, h}, radii: radii, color: color} <- item.layers do
+      :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+      path = :wxGraphicsContext.createPath(gc)
+      outline(path, x, y - scroll, w, h, radii || @no_radii)
+      :wxGraphicsContext.fillPath(gc, path)
+    end
+
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  # an inset shadow: inside the box, frames (the box minus a hole) stacked from the
+  # smallest hole to the biggest
+  defp draw(dc, %{type: :inset_shadow} = item, y, scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    clip_to(gc, item, scroll)
+    :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
+
+    for %{hole: hole, color: color} <- item.layers do
+      :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+      path = :wxGraphicsContext.createPath(gc)
+      outline(path, item.x, y, item.w, item.h, item.radius || @no_radii)
+
+      if hole do
+        %{rect: {hx, hy, hw, hh}, radii: hradii} = hole
+        outline(path, hx, hy - scroll, hw, hh, hradii || @no_radii)
+      end
+
+      # odd-even: what is inside the box but outside the hole
+      :wxGraphicsContext.fillPath(gc, path, [{:fillStyle, 1}])
+    end
+
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw(dc, %{type: :bgimage} = item, _y, scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    clip_to(gc, item, scroll)
+    Enum.each(item.layers, &draw_layer(gc, &1, item.radius, scroll))
+    :wxGraphicsContext.destroy(gc)
   end
 
   # a decoded picture, scaled to its box
@@ -232,6 +284,111 @@ defmodule Browser.UI do
           {item.x, y + div(item.h, 2) + 2},
           {item.x + item.w, y + div(item.h, 2) + 2}
         )
+  end
+
+  defp clip_to(gc, item, scroll) do
+    if clip = Map.get(item, :clip),
+      do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
+  end
+
+  # the root element's background layers cover the whole window and scroll with the page
+  defp draw_canvas_layers(dc, [%{type: :canvas, layers: [_ | _] = layers} | _], scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    Enum.each(layers, &draw_layer(gc, &1, nil, scroll))
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw_canvas_layers(_dc, _items, _scroll), do: :ok
+
+  # One background layer: a picture or gradient, repeated as the layer says, and
+  # clipped to the area it paints into.
+  defp draw_layer(gc, layer, radii, scroll) do
+    {cx, cy, cw, ch} = layer.clip
+    :wxGraphicsContext.clip(gc, cx, cy - scroll, cw, ch)
+    tiles = Browser.Backgrounds.tiles(layer.tile, layer.repeat, layer.clip)
+    {_, _, tw, th} = layer.tile
+
+    case layer.kind do
+      :image ->
+        case :ets.lookup(@images, layer.url) do
+          [{_url, bitmap}] ->
+            for {x, y} <- tiles,
+                do: :wxGraphicsContext.drawBitmap(gc, bitmap, x, y - scroll, tw, th)
+
+          [] ->
+            :ok
+        end
+
+      :linear ->
+        {x1, y1, x2, y2} = layer.line
+        stops = gradient_stops(layer.stops)
+
+        for {x, y} <- tiles do
+          brush =
+            :wxGraphicsContext.createLinearGradientBrush(
+              gc,
+              x + x1,
+              y + y1 - scroll,
+              x + x2,
+              y + y2 - scroll,
+              stops
+            )
+
+          fill_tile(gc, brush, {x, y - scroll, tw, th}, layer.clip, radii, scroll)
+        end
+
+      :radial ->
+        {ox, oy} = layer.center
+        {rx, ry} = layer.radii
+        stops = gradient_stops(layer.stops)
+
+        for {x, y} <- tiles do
+          radial_tile(gc, stops, {x + ox, y + oy - scroll}, {rx, ry}, {x, y - scroll, tw, th})
+        end
+    end
+  end
+
+  # a lone gradient that fills its whole area follows the box's rounded corners
+  defp fill_tile(gc, brush, {x, y, w, h}, {cx, cy, cw, ch}, radii, scroll) do
+    :wxGraphicsContext.setBrush(gc, brush)
+    path = :wxGraphicsContext.createPath(gc)
+
+    if radii && {x, y, w, h} == {cx, cy - scroll, cw, ch},
+      do: outline(path, x, y, w, h, radii),
+      else: :wxGraphicsPath.addRectangle(path, x, y, w, h)
+
+    :wxGraphicsContext.fillPath(gc, path)
+  end
+
+  # a radial gradient is circular; an ellipse is drawn as a circle in a stretched space
+  defp radial_tile(gc, stops, {cx, cy}, {rx, ry}, {x, y, w, h}) do
+    if abs(rx - ry) < 0.5 do
+      brush = :wxGraphicsContext.createRadialGradientBrush(gc, cx, cy, cx, cy, rx, stops)
+      :wxGraphicsContext.setBrush(gc, brush)
+      path = :wxGraphicsContext.createPath(gc)
+      :wxGraphicsPath.addRectangle(path, x, y, w, h)
+      :wxGraphicsContext.fillPath(gc, path)
+    else
+      k = rx / ry
+      :wxGraphicsContext.translate(gc, cx, cy)
+      :wxGraphicsContext.scale(gc, 1.0, ry / rx)
+      brush = :wxGraphicsContext.createRadialGradientBrush(gc, 0.0, 0.0, 0.0, 0.0, rx, stops)
+      :wxGraphicsContext.setBrush(gc, brush)
+      path = :wxGraphicsContext.createPath(gc)
+      :wxGraphicsPath.addRectangle(path, x - cx, (y - cy) * k, w, h * k)
+      :wxGraphicsContext.fillPath(gc, path)
+      :wxGraphicsContext.scale(gc, 1.0, k)
+      :wxGraphicsContext.translate(gc, -cx, -cy)
+    end
+  end
+
+  # [{position, {r, g, b, a}}] as gradient stops; the ends are the first and last colours
+  defp gradient_stops(stops) do
+    [{_, first} | _] = stops
+    {_, last} = List.last(stops)
+    gs = :wxGraphicsGradientStops.new([{:startCol, first}, {:endCol, last}])
+    Enum.each(stops, fn {pos, color} -> :wxGraphicsGradientStops.add(gs, color, pos) end)
+    gs
   end
 
   # a quarter ellipse is approximated by a cubic bezier with this handle length

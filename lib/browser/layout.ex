@@ -14,6 +14,11 @@ defmodule Browser.Layout do
   borders), so text paints over them.
   """
 
+  alias Browser.{Backgrounds, Shadows}
+
+  # item types painted before (underneath) the text of the same page
+  @behind_text [:rect, :shadow, :inset_shadow, :bgimage]
+
   @base 16
   @margin 4
   @legacy_gap 10
@@ -80,13 +85,17 @@ defmodule Browser.Layout do
       images: Keyword.get(opts, :images)
     }
 
+    {nodes, canvas} = propagate_background(nodes)
     ops = nodes |> walk(style, []) |> Enum.reverse()
-    {items, height} = place(ops, width, measure, view_height)
+    {items, height} = place(ops, width, measure, view_height, opts[:images])
     items = add_focus(items, measure, opts[:focus])
 
-    case canvas_background(nodes) do
-      nil -> {items, height}
-      color -> {[%{type: :canvas, color: color, x: 0, y: 0} | items], height}
+    case canvas do
+      nil ->
+        {items, height}
+
+      canvas ->
+        {[canvas_item(canvas, width, max(height, view_height), opts[:images]) | items], height}
     end
   end
 
@@ -188,26 +197,67 @@ defmodule Browser.Layout do
     end
   end
 
-  # The root element's background (or body's, if the root has none) paints the
-  # whole canvas, not just the area the element covers.
-  defp canvas_background(nodes) do
-    html = Enum.find(nodes, &match?({:element, "html", _, _}, &1))
+  # The root element's background (or body's, if the root has none) paints the whole
+  # canvas, not just the area the element covers. That element then doesn't paint it
+  # again on its own box. Returns `{nodes, canvas_style | nil}`.
+  defp propagate_background(nodes) do
+    with i when i != nil <- Enum.find_index(nodes, &match?({:element, "html", _, _}, &1)),
+         {:element, "html", hattrs, kids} <- Enum.at(nodes, i) do
+      body_i = Enum.find_index(kids, &match?({:element, "body", _, _}, &1))
+      body = body_i && Enum.at(kids, body_i)
 
-    with {:element, "html", attrs, kids} <- html do
-      bg(attrs) ||
-        with {:element, _, battrs, _} <- Enum.find(kids, &match?({:element, "body", _, _}, &1)),
-             do: bg(battrs)
+      cond do
+        has_background?(computed(hattrs)) ->
+          html = {:element, "html", without_background(hattrs), kids}
+          {List.replace_at(nodes, i, html), canvas_style(computed(hattrs))}
+
+        body && has_background?(computed(elem(body, 2))) ->
+          {:element, "body", battrs, bkids} = body
+          body = {:element, "body", without_background(battrs), bkids}
+          html = {:element, "html", hattrs, List.replace_at(kids, body_i, body)}
+          {List.replace_at(nodes, i, html), canvas_style(computed(battrs))}
+
+        true ->
+          {nodes, nil}
+      end
     else
-      _ -> nil
+      _ -> {nodes, nil}
     end
   end
 
-  defp bg(attrs) do
-    case computed(attrs)["background-color"] do
-      {_, _, _} = rgb -> rgb
-      _ -> nil
-    end
+  @background_keys ~w(background-color background-image background-repeat background-position background-size)
+
+  defp has_background?(c), do: match?({_, _, _}, c["background-color"]) or bgimg_spec(c) != nil
+
+  defp without_background(attrs) do
+    List.keyreplace(
+      attrs,
+      "@computed",
+      0,
+      {"@computed", Map.drop(computed(attrs), @background_keys)}
+    )
   end
+
+  defp canvas_style(c) do
+    %{
+      color: if(match?({_, _, _}, c["background-color"]), do: c["background-color"]),
+      bgimg: bgimg_spec(c),
+      current: if(match?({_, _, _}, c["color"]), do: c["color"], else: {0, 0, 0})
+    }
+  end
+
+  defp canvas_item(canvas, width, height, images) do
+    area = {0, 0, width, height}
+
+    layers =
+      if canvas.bgimg,
+        do: Backgrounds.paint_layers(canvas.bgimg, area, area, images, color4(canvas.current)),
+        else: []
+
+    %{type: :canvas, color: canvas.color, layers: layers, x: 0, y: 0, w: width, h: height}
+  end
+
+  defp color4({r, g, b}), do: {r, g, b, 255}
 
   # -- tree -> ops ---------------------------------------------------------------
   #
@@ -567,6 +617,9 @@ defmodule Browser.Layout do
       sizing: if(c["box-sizing"] == "border-box", do: :border, else: :content),
       bg: box.bg,
       r: box.r,
+      bgimg: box.bgimg,
+      shadows: box.shadows,
+      color: box.color,
       cid: style.cid,
       h: num(c["height"]),
       min: num(c["min-height"]),
@@ -576,7 +629,8 @@ defmodule Browser.Layout do
     }
 
     needed? =
-      spec.bg || bt + br + bb + bl > 0 || spec.h || spec.min || spec.max || spec.pos ||
+      spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h || spec.min ||
+        spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto
 
@@ -691,8 +745,25 @@ defmodule Browser.Layout do
         border_c(c, "left", color)
       },
       bg: if(match?({_, _, _}, c["background-color"]), do: c["background-color"]),
-      r: radii_spec(c)
+      r: radii_spec(c),
+      bgimg: bgimg_spec(c),
+      shadows: c["box-shadow"] || [],
+      color: color
     }
+  end
+
+  # the parsed background layers, or nil when there are no images or gradients
+  defp bgimg_spec(c) do
+    images = c["background-image"]
+
+    if is_list(images) and Enum.any?(images, &(&1 != :none)) do
+      %{
+        images: images,
+        repeat: c["background-repeat"] || [],
+        position: c["background-position"] || [],
+        size: c["background-size"] || []
+      }
+    end
   end
 
   # raw corner radii {tl, tr, br, bl}, each {horizontal, vertical} (px or {:pct, f})
@@ -851,12 +922,21 @@ defmodule Browser.Layout do
   # `n`/`nr` count items/rects so a box can find the ones created inside it;
   # `overlays` are laid-out absolute elements.
 
-  defp place(ops, width, measure, view_height) do
-    st = run(ops, width, measure, view_height, @margin)
+  defp place(ops, width, measure, view_height, images) do
+    st = run(ops, width, measure, view_height, @margin, :view, true, images)
     {finalize(st), st.y + st.margin}
   end
 
-  defp run(ops, width, measure, view_height, margin, root_height \\ :view, aligned? \\ true) do
+  defp run(
+         ops,
+         width,
+         measure,
+         view_height,
+         margin,
+         root_height,
+         aligned?,
+         images
+       ) do
     st = %{
       items: [],
       rects: [],
@@ -883,6 +963,7 @@ defmodule Browser.Layout do
       view_h: view_height,
       margin: margin,
       aligned?: aligned?,
+      images: images,
       marks: [],
       active: [],
       lead: 0,
@@ -1015,7 +1096,7 @@ defmodule Browser.Layout do
       h: height,
       # the baseline of a replaced element is its bottom margin edge
       base: height,
-      items: outer_rects(outer, box_h) ++ picture,
+      items: outer_rects(outer, box_h, st.images) ++ picture,
       align: style.align,
       valign: spec.valign
     })
@@ -1201,7 +1282,7 @@ defmodule Browser.Layout do
     st = if o.clip, do: clip_new(st, box, clip), else: st
 
     # the box's own background and borders go under whatever is inside it
-    outer = outer_rects(box, height)
+    outer = outer_rects(box, height, st.images)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
     %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
   end
@@ -1209,32 +1290,93 @@ defmodule Browser.Layout do
   # items in paint order: background, then the four border sides. A box with
   # rounded corners is a single item carrying its radii and border data, for
   # the painter to draw as paths.
-  defp outer_rects(%{o: o} = box, height) do
-    items = plain_outer_rects(box, height)
+  defp outer_rects(%{o: o} = box, height, images) do
+    items = plain_outer_rects(box, height, images)
     if o.cid, do: Enum.map(items, &Map.put(&1, :cid, o.cid)), else: items
   end
 
-  defp plain_outer_rects(%{o: o} = box, height) do
+  # In paint order: outer shadows, background colour, background images, inset shadows,
+  # then the borders. Without images or shadows this is just colour and borders.
+  defp plain_outer_rects(%{o: o} = box, height, images) do
     {bt, br, bb, bl} = o.bw
     {tc, rc, bc, lc} = o.bc
     {x, y, w} = {box.x, box.top, box.w}
+    border_box = {x, y, w, height}
+    radii = resolve_radii(o.r, w, height)
 
-    case resolve_radii(o.r, w, height) do
-      nil ->
-        bg = if o.bg && w > 0 && height > 0, do: [rect(x, y, w, height, o.bg)], else: []
+    # images are positioned in the padding box and painted into the border box
+    padding_box = {x + bl, y + bt, max(w - bl - br, 0), max(height - bt - bb, 0)}
 
-        sides = [
-          bt > 0 && tc && rect(x, y, w, bt, tc),
-          bb > 0 && bc && rect(x, y + height - bb, w, bb, bc),
-          bl > 0 && lc && rect(x, y, bl, height, lc),
-          br > 0 && rc && rect(x + w - br, y, br, height, rc)
-        ]
+    layers =
+      if Map.get(o, :bgimg) && w > 0 && height > 0,
+        do:
+          Backgrounds.paint_layers(
+            o.bgimg,
+            padding_box,
+            border_box,
+            images,
+            color4(Map.get(o, :color) || {0, 0, 0})
+          ),
+        else: []
 
-        bg ++ Enum.filter(sides, & &1)
+    {inset, outer} = o |> Map.get(:shadows, []) |> Enum.split_with(& &1.inset?)
 
-      radii ->
-        rounded(x, y, w, height, o.bg, radii, o.bw, o.bc)
-    end
+    shadows =
+      for s <- Enum.reverse(outer),
+          layers = Shadows.outer_layers(s, border_box, radii),
+          layers != [] do
+        {bx, by, bw, bh} = shadow_bounds(layers)
+        %{type: :shadow, layers: layers, x: bx, y: by, w: bw, h: bh, radius: radii}
+      end
+
+    insets =
+      for s <- Enum.reverse(inset),
+          layers = Shadows.inset_layers(s, border_box, radii),
+          layers != [] do
+        %{type: :inset_shadow, layers: layers, x: x, y: y, w: w, h: height, radius: radii}
+      end
+
+    images_item =
+      if layers == [],
+        do: [],
+        else: [%{type: :bgimage, layers: layers, x: x, y: y, w: w, h: height, radius: radii}]
+
+    decorated? = images_item != [] or insets != []
+
+    body =
+      case radii do
+        nil ->
+          bg = if o.bg && w > 0 && height > 0, do: [rect(x, y, w, height, o.bg)], else: []
+
+          sides = [
+            bt > 0 && tc && rect(x, y, w, bt, tc),
+            bb > 0 && bc && rect(x, y + height - bb, w, bb, bc),
+            bl > 0 && lc && rect(x, y, bl, height, lc),
+            br > 0 && rc && rect(x + w - br, y, br, height, rc)
+          ]
+
+          bg ++ images_item ++ insets ++ Enum.filter(sides, & &1)
+
+        radii when decorated? ->
+          # the border must be painted over the images and inset shadows
+          rounded(x, y, w, height, o.bg, radii, {0, 0, 0, 0}, o.bc) ++
+            images_item ++ insets ++ rounded(x, y, w, height, nil, radii, o.bw, o.bc)
+
+        radii ->
+          rounded(x, y, w, height, o.bg, radii, o.bw, o.bc)
+      end
+
+    shadows ++ body
+  end
+
+  # the box around all of a shadow's layers, so it is drawn whenever any of it is visible
+  defp shadow_bounds(layers) do
+    rects = Enum.map(layers, & &1.rect)
+    x0 = rects |> Enum.map(&elem(&1, 0)) |> Enum.min()
+    y0 = rects |> Enum.map(&elem(&1, 1)) |> Enum.min()
+    x1 = rects |> Enum.map(fn {x, _, w, _} -> x + w end) |> Enum.max()
+    y1 = rects |> Enum.map(fn {_, y, _, h} -> y + h end) |> Enum.max()
+    {x0, y0, x1 - x0, y1 - y0}
   end
 
   defp rounded(x, y, w, h, bg, radii, bw, bc) do
@@ -1375,14 +1517,42 @@ defmodule Browser.Layout do
     %{st | overlays: [moved | st.overlays]}
   end
 
+  # Moves an item, including the coordinates held inside it: the clip, the tiles and
+  # clip of background layers, the shapes of shadows.
   defp move(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
 
+    it =
+      case it do
+        %{clip: c} -> %{it | clip: shift_rect(c, dx, dy)}
+        _ -> it
+      end
+
     case it do
-      %{clip: c} -> %{it | clip: %{c | x: c.x + dx, y: c.y + dy}}
-      _ -> it
+      %{type: :bgimage, layers: layers} ->
+        %{it | layers: Enum.map(layers, &shift_layer(&1, dx, dy))}
+
+      %{type: :shadow, layers: layers} ->
+        %{it | layers: Enum.map(layers, &%{&1 | rect: shift_box(&1.rect, dx, dy)})}
+
+      %{type: :inset_shadow, layers: layers} ->
+        %{it | layers: Enum.map(layers, &shift_hole(&1, dx, dy))}
+
+      _ ->
+        it
     end
   end
+
+  defp shift_rect(%{x: x, y: y} = c, dx, dy), do: %{c | x: x + dx, y: y + dy}
+  defp shift_box({x, y, w, h}, dx, dy), do: {x + dx, y + dy, w, h}
+
+  defp shift_layer(layer, dx, dy),
+    do: %{layer | tile: shift_box(layer.tile, dx, dy), clip: shift_box(layer.clip, dx, dy)}
+
+  defp shift_hole(%{hole: nil} = layer, _dx, _dy), do: layer
+
+  defp shift_hole(%{hole: hole} = layer, dx, dy),
+    do: %{layer | hole: %{hole | rect: shift_box(hole.rect, dx, dy)}}
 
   # vertical offsets: percentages need a known containing-block height
   defp resolve_v({:pct, _}, nil), do: nil
@@ -1454,12 +1624,12 @@ defmodule Browser.Layout do
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
   defp shrink_extent(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false)
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
     sub_st |> finalize() |> extent()
   end
 
   defp layout_sub(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil)
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
     {finalize(sub_st), sub_st.y}
   end
 
@@ -1467,7 +1637,7 @@ defmodule Browser.Layout do
   # to its top-left), its height including trailing margin, and its baseline
   # (bottom of the last text line, or the bottom edge if there is no text).
   defp layout_atom(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil)
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
     height = sub_st.y + sub_st.gap
     items = finalize(sub_st)
     {items, height, last_baseline(items, height)}
@@ -1637,7 +1807,8 @@ defmodule Browser.Layout do
           sub <- atom.items,
           do: move(sub, atom.x + shift, top_of.(atom))
 
-    {rects, others} = Enum.split_with(moved, &(&1.type == :rect))
+    # everything a box paints behind its text: colours, borders, images, shadows
+    {rects, others} = Enum.split_with(moved, &(&1.type in @behind_text))
     new_items = Enum.reverse(others) ++ placed
 
     ctx = %{

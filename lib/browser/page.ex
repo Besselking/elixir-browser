@@ -87,7 +87,7 @@ defmodule Browser.Page do
       |> Style.sheet_refs()
       |> Enum.take(@max_sheets)
       |> fetch_sheets(url)
-      |> Enum.map(&{:author, &1})
+      |> Enum.map(fn {css, base} -> {:author, css, base} end)
 
     rules = Style.parse_sheets([{:ua, Style.ua_css()} | author])
     queries = Style.media_queries(rules)
@@ -122,6 +122,29 @@ defmodule Browser.Page do
   end
 
   @doc """
+  Every picture the page needs: its `<img>` sources and the `url()` images its styles
+  use as backgrounds (these depend on the cascade, so they change with the viewport).
+  """
+  def all_image_urls(%__MODULE__{} = page),
+    do: Enum.uniq(page.image_urls ++ background_urls(page.pruned || []))
+
+  defp background_urls(nodes) do
+    Enum.flat_map(nodes, fn
+      {:element, _tag, attrs, kids} ->
+        own =
+          case List.keyfind(attrs, "@computed", 0) do
+            {_, %{"background-image" => images}} -> Images.background_urls(images)
+            _ -> []
+          end
+
+        own ++ background_urls(kids)
+
+      _ ->
+        []
+    end)
+  end
+
+  @doc """
   Re-renders the form controls for `form_state`. Cheap: the styled tree is reused,
   so this is what typing, toggling and choosing call.
   """
@@ -139,19 +162,19 @@ defmodule Browser.Page do
       ordered: true
     )
     |> Enum.flat_map(fn
-      {:ok, css} when is_binary(css) -> [css]
+      {:ok, {css, _base} = sheet} when is_binary(css) -> [sheet]
       _ -> []
     end)
   end
 
-  defp sheet({:style, css}, _base), do: css
+  defp sheet({:style, css}, base), do: {css, base}
 
   defp sheet({:link, href}, base) do
     url = Fetch.resolve(base, href)
 
     if allowed?(base, url) do
       case Fetch.load(url) do
-        {:ok, css, _} -> css
+        {:ok, css, final} -> {css, final}
         _ -> nil
       end
     end

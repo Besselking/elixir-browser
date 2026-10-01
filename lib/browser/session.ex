@@ -233,7 +233,9 @@ defmodule Browser.Session do
       true ->
         state = %{state | width: w}
         page = Page.restyle(state.page, env(state))
-        {:noreply, relayout(%{state | page: page, nodes: page.nodes})}
+        state = relayout(%{state | page: page, nodes: page.nodes})
+        # a new viewport can switch on other background images
+        {:noreply, start_images(state)}
     end
   end
 
@@ -543,7 +545,7 @@ defmodule Browser.Session do
 
   # fetch the page's pictures in the background, a few at a time
   defp start_images(%{page: page} = state) do
-    urls = Enum.reject(page.image_urls, &Map.has_key?(state.images, &1))
+    urls = page |> Page.all_image_urls() |> Enum.reject(&Map.has_key?(state.images, &1))
 
     if urls != [] do
       me = self()

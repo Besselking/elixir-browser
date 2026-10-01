@@ -29,6 +29,8 @@ defmodule Browser.Images do
   defp index_node({:text, _} = t, _base, acc), do: {t, acc}
 
   defp index_node({:element, "img", attrs, kids}, base, acc) do
+    attrs = absolutize_style(attrs, base)
+
     case source(attrs) do
       nil ->
         {{:element, "img", attrs, kids}, acc}
@@ -41,8 +43,30 @@ defmodule Browser.Images do
 
   defp index_node({:element, tag, attrs, kids}, base, acc) do
     {kids, acc} = Enum.map_reduce(kids, acc, &index_node(&1, base, &2))
-    {{:element, tag, attrs, kids}, acc}
+    {{:element, tag, absolutize_style(attrs, base), kids}, acc}
   end
+
+  # url() in a style attribute is relative to the page
+  defp absolutize_style(attrs, base) do
+    case List.keyfind(attrs, "style", 0) do
+      {_, css} ->
+        if String.contains?(css, "url("),
+          do:
+            List.keyreplace(
+              attrs,
+              "style",
+              0,
+              {"style", Browser.Backgrounds.absolutize(css, base)}
+            ),
+          else: attrs
+
+      nil ->
+        attrs
+    end
+  end
+
+  @doc "The `url()` addresses in a computed `background-image` list."
+  def background_urls(images), do: Browser.Backgrounds.urls(images)
 
   @doc "The image address an `<img>` with these attributes asks for, or nil."
   def source(attrs) do
