@@ -317,6 +317,7 @@ defmodule Browser.Layout do
         bl: bl,
         bc: box.bc,
         bg: box.bg,
+        r: box.r,
         size: style.size,
         paint: visible? and not style.hidden
       }
@@ -370,6 +371,7 @@ defmodule Browser.Layout do
       maxw: c["max-width"],
       sizing: if(c["box-sizing"] == "border-box", do: :border, else: :content),
       bg: box.bg,
+      r: box.r,
       h: num(c["height"]),
       min: num(c["min-height"]),
       max: num(c["max-height"]),
@@ -488,8 +490,19 @@ defmodule Browser.Layout do
         border_c(c, "bottom", color),
         border_c(c, "left", color)
       },
-      bg: if(match?({_, _, _}, c["background-color"]), do: c["background-color"])
+      bg: if(match?({_, _, _}, c["background-color"]), do: c["background-color"]),
+      r: radii_spec(c)
     }
+  end
+
+  # raw corner radii {tl, tr, br, bl}, each {horizontal, vertical} (px or {:pct, f})
+  defp radii_spec(c) do
+    corners =
+      for k <- ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius
+                  border-bottom-left-radius),
+          do: c[k]
+
+    if Enum.any?(corners, & &1), do: corners |> Enum.map(&(&1 || {0, 0})) |> List.to_tuple()
   end
 
   defp margin_x(:auto, _legacy), do: :auto
@@ -921,23 +934,75 @@ defmodule Browser.Layout do
     %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
   end
 
-  # rects in paint order: background, then the four border sides
+  # items in paint order: background, then the four border sides. A box with
+  # rounded corners is a single item carrying its radii and border data, for
+  # the painter to draw as paths.
   defp outer_rects(%{o: o} = box, height) do
     {bt, br, bb, bl} = o.bw
     {tc, rc, bc, lc} = o.bc
     {x, y, w} = {box.x, box.top, box.w}
 
-    bg = if o.bg && w > 0 && height > 0, do: [rect(x, y, w, height, o.bg)], else: []
+    case resolve_radii(o.r, w, height) do
+      nil ->
+        bg = if o.bg && w > 0 && height > 0, do: [rect(x, y, w, height, o.bg)], else: []
 
-    sides = [
-      bt > 0 && tc && rect(x, y, w, bt, tc),
-      bb > 0 && bc && rect(x, y + height - bb, w, bb, bc),
-      bl > 0 && lc && rect(x, y, bl, height, lc),
-      br > 0 && rc && rect(x + w - br, y, br, height, rc)
-    ]
+        sides = [
+          bt > 0 && tc && rect(x, y, w, bt, tc),
+          bb > 0 && bc && rect(x, y + height - bb, w, bb, bc),
+          bl > 0 && lc && rect(x, y, bl, height, lc),
+          br > 0 && rc && rect(x + w - br, y, br, height, rc)
+        ]
 
-    bg ++ Enum.filter(sides, & &1)
+        bg ++ Enum.filter(sides, & &1)
+
+      radii ->
+        rounded(x, y, w, height, o.bg, radii, o.bw, o.bc)
+    end
   end
+
+  defp rounded(x, y, w, h, bg, radii, bw, bc) do
+    border = if bw == {0, 0, 0, 0}, do: nil, else: %{w: bw, c: bc}
+
+    if w > 0 and h > 0 and (bg || border) do
+      [%{type: :rect, x: x, y: y, w: w, h: h, color: bg, radius: radii, border: border}]
+    else
+      []
+    end
+  end
+
+  # Corner radii in px for a box of `w` x `h`: {{rx, ry} for tl, tr, br, bl}, or
+  # nil when no corner is rounded. Percentages are relative to the box, and radii
+  # are scaled down together if neighbouring corners would overlap (CSS rule).
+  defp resolve_radii(nil, _w, _h), do: nil
+
+  defp resolve_radii({tl, tr, br, bl}, w, h) do
+    [{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}] =
+      for {hv, vv} <- [tl, tr, br, bl], do: {radius_len(hv, w), radius_len(vv, h)}
+
+    f =
+      Enum.min([
+        1.0,
+        fit(w, tlx + trx),
+        fit(w, blx + brx),
+        fit(h, tly + bly),
+        fit(h, try_ + bry)
+      ])
+
+    scale = fn {a, b} ->
+      {a, b} = if f < 1.0, do: {floor(a * f), floor(b * f)}, else: {a, b}
+      if a > 0 and b > 0, do: {a, b}, else: {0, 0}
+    end
+
+    radii = {scale.({tlx, tly}), scale.({trx, try_}), scale.({brx, bry}), scale.({blx, bly})}
+    if radii == {{0, 0}, {0, 0}, {0, 0}, {0, 0}}, do: nil, else: radii
+  end
+
+  defp radius_len({:pct, f}, dim), do: round(f * dim)
+  defp radius_len(n, _dim) when is_number(n), do: round(n)
+  defp radius_len(_, _dim), do: 0
+
+  defp fit(_len, 0), do: 1.0
+  defp fit(len, sum), do: len / sum
 
   defp rect(x, y, w, h, color), do: %{type: :rect, x: x, y: y, w: w, h: h, color: color}
 
@@ -1372,16 +1437,39 @@ defmodule Browser.Layout do
     y = ctx.y_ref.(spec.size) - spec.pt - spec.bt
     h = round(spec.size * 1.2) + spec.pt + spec.pb + spec.bt + spec.bb
     {tc, rc, bc, lc} = spec.bc
+    # a box broken over lines keeps its left edge on the first fragment only and
+    # its right edge on the last one
+    bl = if box.first?, do: spec.bl, else: 0
+    br = if last?, do: spec.br, else: 0
 
-    sides = [
-      spec.bt > 0 && tc && rect(x0, y, w, spec.bt, tc),
-      spec.bb > 0 && bc && rect(x0, y + h - spec.bb, w, spec.bb, bc),
-      box.first? && spec.bl > 0 && lc && rect(x0, y, spec.bl, h, lc),
-      last? && spec.br > 0 && rc && rect(x0 + w - spec.br, y, spec.br, h, rc)
-    ]
+    cond do
+      w <= 0 ->
+        []
 
-    bg = if spec.bg && w > 0, do: [rect(x0, y, w, h, spec.bg)], else: []
-    if w > 0, do: bg ++ Enum.filter(sides, & &1), else: []
+      radii = resolve_radii(spec.r, w, h) |> cut_corners(box.first?, last?) ->
+        rounded(x0, y, w, h, spec.bg, radii, {spec.bt, br, spec.bb, bl}, spec.bc)
+
+      true ->
+        sides = [
+          spec.bt > 0 && tc && rect(x0, y, w, spec.bt, tc),
+          spec.bb > 0 && bc && rect(x0, y + h - spec.bb, w, spec.bb, bc),
+          bl > 0 && lc && rect(x0, y, bl, h, lc),
+          br > 0 && rc && rect(x0 + w - br, y, br, h, rc)
+        ]
+
+        bg = if spec.bg, do: [rect(x0, y, w, h, spec.bg)], else: []
+        bg ++ Enum.filter(sides, & &1)
+    end
+  end
+
+  # fragments that continue on another line have square edges on that side
+  defp cut_corners(nil, _first?, _last?), do: nil
+
+  defp cut_corners({tl, tr, br, bl}, first?, last?) do
+    {tl, bl} = if first?, do: {tl, bl}, else: {{0, 0}, {0, 0}}
+    {tr, br} = if last?, do: {tr, br}, else: {{0, 0}, {0, 0}}
+    radii = {tl, tr, br, bl}
+    if radii == {{0, 0}, {0, 0}, {0, 0}, {0, 0}}, do: nil, else: radii
   end
 
   defp align_shift(_items, %{aligned?: false}), do: 0

@@ -140,7 +140,7 @@ defmodule Browser.UI do
       y = item.y - scroll
       clip = Map.get(item, :clip)
       if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - scroll, clip.w, clip.h})
-      draw(dc, item, y)
+      draw(dc, item, y, scroll)
       if clip, do: :wxDC.destroyClippingRegion(dc)
     end
 
@@ -148,18 +148,38 @@ defmodule Browser.UI do
     :ok
   end
 
-  defp draw(dc, %{type: :rect} = item, y) do
+  # Boxes with rounded corners are drawn as paths on a graphics context: the
+  # background fills a rounded outline, each border side is a straight strip and
+  # each corner a ring segment in the colour of the thicker adjacent side.
+  defp draw(dc, %{type: :rect, radius: radius} = item, y, scroll) when radius != nil do
+    gc = :wxGraphicsContext.create(dc)
+
+    if clip = Map.get(item, :clip),
+      do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
+
+    if item.color do
+      :wxGraphicsContext.setBrush(gc, :wxBrush.new(item.color))
+      path = :wxGraphicsContext.createPath(gc)
+      outline(path, item.x, y, item.w, item.h, radius)
+      :wxGraphicsContext.fillPath(gc, path)
+    end
+
+    if item.border, do: borders(gc, item.x, y, item.w, item.h, radius, item.border)
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw(dc, %{type: :rect} = item, y, _scroll) do
     :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
     :wxDC.setBrush(dc, :wxBrush.new(item.color))
     :wxDC.drawRectangle(dc, {item.x, y}, {item.w, item.h})
   end
 
-  defp draw(dc, %{type: :hr} = item, y) do
+  defp draw(dc, %{type: :hr} = item, y, _scroll) do
     :wxDC.setPen(dc, :wxPen.new({170, 170, 170}))
     :wxDC.drawLine(dc, {item.x, y}, {item.x + item.w, y})
   end
 
-  defp draw(dc, %{type: :text} = item, y) do
+  defp draw(dc, %{type: :text} = item, y, _scroll) do
     :wxDC.setFont(dc, font(item))
     :wxDC.setTextForeground(dc, item.color)
     :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
@@ -175,6 +195,110 @@ defmodule Browser.UI do
           {item.x, y + div(item.h, 2) + 2},
           {item.x + item.w, y + div(item.h, 2) + 2}
         )
+  end
+
+  # a quarter ellipse is approximated by a cubic bezier with this handle length
+  @kappa 0.5523
+
+  defp outline(path, x, y, w, h, {{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}}) do
+    k = 1 - @kappa
+    :wxGraphicsPath.moveToPoint(path, x + tlx, y)
+    :wxGraphicsPath.addLineToPoint(path, x + w - trx, y)
+
+    :wxGraphicsPath.addCurveToPoint(
+      path,
+      x + w - trx * k,
+      y,
+      x + w,
+      y + try_ * k,
+      x + w,
+      y + try_
+    )
+
+    :wxGraphicsPath.addLineToPoint(path, x + w, y + h - bry)
+
+    :wxGraphicsPath.addCurveToPoint(
+      path,
+      x + w,
+      y + h - bry * k,
+      x + w - brx * k,
+      y + h,
+      x + w - brx,
+      y + h
+    )
+
+    :wxGraphicsPath.addLineToPoint(path, x + blx, y + h)
+
+    :wxGraphicsPath.addCurveToPoint(
+      path,
+      x + blx * k,
+      y + h,
+      x,
+      y + h - bly * k,
+      x,
+      y + h - bly
+    )
+
+    :wxGraphicsPath.addLineToPoint(path, x, y + tly)
+    :wxGraphicsPath.addCurveToPoint(path, x, y + tly * k, x + tlx * k, y, x + tlx, y)
+    :wxGraphicsPath.closeSubpath(path)
+  end
+
+  defp borders(gc, x, y, w, h, radii, %{w: {bt, br, bb, bl}, c: {tc, rc, bc, lc}}) do
+    {{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}} = radii
+
+    # straight parts of the four sides
+    strip(gc, tc, x + tlx, y, w - tlx - trx, bt)
+    strip(gc, bc, x + blx, y + h - bb, w - blx - brx, bb)
+    strip(gc, lc, x, y + tly, bl, h - tly - bly)
+    strip(gc, rc, x + w - br, y + try_, br, h - try_ - bry)
+
+    # corners: local coordinates run from the corner point inwards along (dx, dy)
+    corner(gc, pick(tc, bt, lc, bl), x, y, 1, 1, {tlx, tly}, bl, bt)
+    corner(gc, pick(tc, bt, rc, br), x + w, y, -1, 1, {trx, try_}, br, bt)
+    corner(gc, pick(bc, bb, rc, br), x + w, y + h, -1, -1, {brx, bry}, br, bb)
+    corner(gc, pick(bc, bb, lc, bl), x, y + h, 1, -1, {blx, bly}, bl, bb)
+  end
+
+  # colour of the thicker of the two sides meeting at a corner (horizontal wins ties)
+  defp pick(hc, ht, vc, vt), do: if(ht >= vt, do: hc || vc, else: vc || hc)
+
+  defp strip(_gc, nil, _x, _y, _w, _h), do: :ok
+  defp strip(_gc, _c, _x, _y, w, h) when w <= 0 or h <= 0, do: :ok
+
+  defp strip(gc, color, x, y, w, h) do
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.addRectangle(path, x, y, w, h)
+    :wxGraphicsContext.fillPath(gc, path)
+  end
+
+  defp corner(_gc, nil, _cx, _cy, _dx, _dy, _r, _bv, _bh), do: :ok
+  defp corner(_gc, _c, _cx, _cy, _dx, _dy, {rx, ry}, _bv, _bh) when rx <= 0 or ry <= 0, do: :ok
+
+  # `bv` is the thickness of the vertical side at this corner, `bh` of the horizontal
+  defp corner(gc, color, cx, cy, dx, dy, {rx, ry}, bv, bh) do
+    k = 1 - @kappa
+    irx = max(rx - bv, 0)
+    iry = max(ry - bh, 0)
+    m = fn u, v -> {cx + dx * u, cy + dy * v} end
+    {ox1, oy1} = m.(0, ry)
+    {ox2, oy2} = m.(rx, 0)
+    {c1x, c1y} = m.(0, ry * k)
+    {c2x, c2y} = m.(rx * k, 0)
+    {ax, ay} = m.(bv + irx, bh)
+    {bx, by} = m.(bv, bh + iry)
+    {d1x, d1y} = m.(bv + irx - irx * @kappa, bh)
+    {d2x, d2y} = m.(bv, bh + iry - iry * @kappa)
+
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.moveToPoint(path, ox1, oy1)
+    :wxGraphicsPath.addCurveToPoint(path, c1x, c1y, c2x, c2y, ox2, oy2)
+    :wxGraphicsPath.addLineToPoint(path, ax, ay)
+    :wxGraphicsPath.addCurveToPoint(path, d1x, d1y, d2x, d2y, bx, by)
+    :wxGraphicsPath.closeSubpath(path)
+    :wxGraphicsContext.fillPath(gc, path)
   end
 
   # -- hit testing -------------------------------------------------------------

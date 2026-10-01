@@ -17,6 +17,8 @@ defmodule Browser.Style do
             border-top-width border-right-width border-bottom-width border-left-width
             border-top-style border-right-style border-bottom-style border-left-style
             border-top-color border-right-color border-bottom-color border-left-color
+            border-top-left-radius border-top-right-radius border-bottom-right-radius
+            border-bottom-left-radius
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
@@ -39,6 +41,9 @@ defmodule Browser.Style do
       ~w(border-top-style border-right-style border-bottom-style border-left-style),
     "border-color" =>
       ~w(border-top-color border-right-color border-bottom-color border-left-color),
+    "border-radius" =>
+      ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius
+         border-bottom-left-radius),
     "border-top" => ~w(border-top-width border-top-style border-top-color),
     "border-right" => ~w(border-right-width border-right-style border-right-color),
     "border-bottom" => ~w(border-bottom-width border-bottom-style border-bottom-color),
@@ -255,6 +260,16 @@ defmodule Browser.Style do
     end)
   end
 
+  defp corner_values(toks) do
+    case toks do
+      [a] -> [a, a, a, a]
+      [a, b] -> [a, b, a, b]
+      [a, b, c] -> [a, b, c, b]
+      [a, b, c, d | _] -> [a, b, c, d]
+      [] -> List.duplicate("0", 4)
+    end
+  end
+
   defp tokens(v), do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(v) |> List.flatten()
 
   defp do_split(box, _v, toks)
@@ -269,6 +284,17 @@ defmodule Browser.Style do
       end
 
     Enum.zip(@shorthands[box], [t, r, b, l])
+  end
+
+  # `h1 h2 h3 h4 / v1 v2 v3 v4`: corners in the order top-left, top-right,
+  # bottom-right, bottom-left, each as "horizontal vertical"
+  defp do_split("border-radius", v, _toks) do
+    [h | rest] = String.split(v, "/", parts: 2)
+    hs = h |> tokens() |> corner_values()
+    vs = if rest == [], do: hs, else: rest |> hd() |> tokens() |> corner_values()
+
+    for {long, {a, b}} <- Enum.zip(@shorthands["border-radius"], Enum.zip(hs, vs)),
+        do: {long, "#{a} #{b}"}
   end
 
   defp do_split("border", _v, toks) do
@@ -590,6 +616,28 @@ defmodule Browser.Style do
     end
   end
 
+  @radii ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius
+            border-bottom-left-radius)
+
+  # `h` or `h v`, each a length or percentage -> {h, v} (px floats / {:pct, f})
+  defp typed(prop, v, env, _pc) when prop in @radii do
+    parsed =
+      v
+      |> String.split()
+      |> Enum.map(fn tok ->
+        case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, tok) do
+          [_, n] -> {:pct, to_float(n) / 100}
+          nil -> length(tok, env)
+        end
+      end)
+
+    case parsed do
+      [h] -> radius_pair(h, h)
+      [h, vv] -> radius_pair(h, vv)
+      _ -> :skip
+    end
+  end
+
   defp typed("text-indent", v, env, _pc) do
     if px = length(v, env), do: {:ok, px}, else: :skip
   end
@@ -613,6 +661,14 @@ defmodule Browser.Style do
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
 
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
+
+  defp radius_pair(h, v) do
+    if valid_radius?(h) and valid_radius?(v), do: {:ok, {h, v}}, else: :skip
+  end
+
+  defp valid_radius?({:pct, f}), do: f >= 0
+  defp valid_radius?(n) when is_number(n), do: n >= 0
+  defp valid_radius?(_), do: false
 
   defp color_value(v, current) do
     case Browser.Color.parse(v) do

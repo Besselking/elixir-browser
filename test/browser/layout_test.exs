@@ -1067,4 +1067,140 @@ defmodule Browser.LayoutTest do
       assert wl(items, "•").y == code.y
     end
   end
+
+  describe "rounded boxes" do
+    alias Browser.Page
+
+    defp rd(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp rects_of(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "a rounded box is a single rect carrying its radii" do
+      {items, _} = rd(~s(<div style="background:#eee; border-radius:6px">x</div>))
+      assert [%{color: {238, 238, 238}, radius: r, border: nil} = rect] = rects_of(items)
+      assert r == {{6, 6}, {6, 6}, {6, 6}, {6, 6}}
+      assert rect.w == 392 and rect.h > 10
+    end
+
+    test "borders are merged into the rounded rect instead of separate rects" do
+      {items, _} = rd(~s(<div style="border:2px solid #f00; border-radius:5px">x</div>))
+
+      assert [%{color: nil, border: %{w: {2, 2, 2, 2}, c: {red, red, red, red}}}] =
+               rects_of(items)
+
+      assert red == {255, 0, 0}
+    end
+
+    test "boxes without a radius keep plain rects" do
+      {items, _} = rd(~s(<div style="background:#eee; border:1px solid #000">x</div>))
+      assert length(rects_of(items)) == 5
+      refute Enum.any?(rects_of(items), &Map.has_key?(&1, :radius))
+    end
+
+    test "percentages are relative to the box: 50% makes a pill or circle" do
+      {items, _} =
+        rd(~s(<div style="width:100px; height:40px; background:#eee; border-radius:50%">x</div>))
+
+      [%{radius: r}] = rects_of(items)
+      assert r == {{50, 20}, {50, 20}, {50, 20}, {50, 20}}
+
+      {items, _} =
+        rd(
+          ~s(<div style="width:100px; height:40px; background:#eee; border-radius:50px/50%">x</div>)
+        )
+
+      [%{radius: r}] = rects_of(items)
+      assert r == {{50, 20}, {50, 20}, {50, 20}, {50, 20}}
+    end
+
+    test "radii that don't fit are scaled down together" do
+      {items, _} =
+        rd(
+          ~s(<div style="width:60px; height:100px; background:#eee; border-radius:200px">x</div>)
+        )
+
+      [%{radius: {{a, b}, _, _, _}}] = rects_of(items)
+      assert a == 30 and b == 30
+    end
+
+    test "a corner with a zero radius on one axis is square" do
+      {items, _} =
+        rd(~s(<div style="background:#eee; border-radius:10px 0 / 10px 5px 10px 5px">x</div>))
+
+      [%{radius: r}] = rects_of(items)
+      assert elem(r, 1) == {0, 0}
+      assert elem(r, 0) == {10, 10}
+    end
+
+    test "different radii per corner" do
+      {items, _} = rd(~s(<div style="background:#eee; border-radius:1px 2px 3px 4px">x</div>))
+      [%{radius: r}] = rects_of(items)
+      assert r == {{1, 1}, {2, 2}, {3, 3}, {4, 4}}
+    end
+
+    test "a radius without background or border draws nothing" do
+      {items, _} = rd(~s(<div style="border-radius:8px">x</div>))
+      assert rects_of(items) == []
+    end
+
+    test "inline boxes get rounded fragments, with square edges where the box continues" do
+      text = String.duplicate("word ", 12)
+
+      {items, _} =
+        rd(
+          ~s(<span style="background:#ff0; border-radius:6px; padding:0 4px">#{text}</span>),
+          160
+        )
+
+      rects = rects_of(items)
+      assert length(rects) >= 3
+      first = Enum.min_by(rects, & &1.y)
+      last = Enum.max_by(rects, & &1.y)
+      middle = rects -- [first, last]
+      assert {tl, tr, br, bl} = first.radius
+      assert tl != {0, 0} and bl != {0, 0} and tr == {0, 0} and br == {0, 0}
+      assert {tl, tr, br, bl} = last.radius
+      assert tl == {0, 0} and bl == {0, 0} and tr != {0, 0} and br != {0, 0}
+      assert Enum.all?(middle, &(not Map.has_key?(&1, :radius)))
+    end
+
+    test "a single-line inline box is rounded on both ends" do
+      {items, _} =
+        rd(~s(<span style="background:#ff0; border-radius:50px; padding:0 8px">pill</span>))
+
+      [%{radius: r, h: h}] = rects_of(items)
+      assert Enum.all?(Tuple.to_list(r), &(&1 == {div(h, 2), div(h, 2)}))
+    end
+
+    test "inline fragments lose the border on the cut side" do
+      text = String.duplicate("word ", 12)
+
+      {items, _} =
+        rd(~s(<span style="border:2px solid #00f; border-radius:4px">#{text}</span>), 160)
+
+      [first | _] = items |> rects_of() |> Enum.sort_by(& &1.y)
+      assert %{w: {2, 0, 2, 2}} = first.border
+    end
+
+    test "rounded inline-blocks and absolute boxes" do
+      html =
+        ~s(<span style="display:inline-block; background:#eee; border-radius:8px; padding:4px">a</span>) <>
+          ~s(<div style="position:absolute; top:50px; left:10px; background:#ddd; border-radius:3px">b</div>)
+
+      {items, _} = rd(html)
+      assert length(Enum.filter(rects_of(items), &Map.has_key?(&1, :radius))) == 2
+    end
+
+    test "clipping boxes attach their clip to rounded rects inside" do
+      html =
+        ~s(<div style="width:50px; height:20px; overflow:hidden"><div style="background:#eee; border-radius:6px; width:200px">x</div></div>)
+
+      {items, _} = rd(html)
+      [%{radius: _, clip: clip}] = rects_of(items)
+      assert clip.w == 50
+    end
+  end
 end

@@ -432,4 +432,80 @@ defmodule Browser.StyleTest do
       assert {c["margin-left"], c["margin-right"]} == {:auto, 5.0}
     end
   end
+
+  describe "border-radius" do
+    defp radii(css) do
+      c = comp("<p>a</p>", css, "p")
+
+      for k <-
+            ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius border-bottom-left-radius),
+          do: c[k]
+    end
+
+    test "one value applies to every corner, as a circle" do
+      assert radii("p { border-radius: 6px }") == List.duplicate({6.0, 6.0}, 4)
+    end
+
+    test "two, three and four values follow the corner order" do
+      assert radii("p { border-radius: 1px 2px }") == [
+               {1.0, 1.0},
+               {2.0, 2.0},
+               {1.0, 1.0},
+               {2.0, 2.0}
+             ]
+
+      assert radii("p { border-radius: 1px 2px 3px }") == [
+               {1.0, 1.0},
+               {2.0, 2.0},
+               {3.0, 3.0},
+               {2.0, 2.0}
+             ]
+
+      assert radii("p { border-radius: 1px 2px 3px 4px }") == [
+               {1.0, 1.0},
+               {2.0, 2.0},
+               {3.0, 3.0},
+               {4.0, 4.0}
+             ]
+    end
+
+    test "a slash gives separate horizontal and vertical radii" do
+      assert radii("p { border-radius: 10px 20px / 5px 8px }") ==
+               [{10.0, 5.0}, {20.0, 8.0}, {10.0, 5.0}, {20.0, 8.0}]
+
+      assert radii("p { border-radius: 10px/20px }") == List.duplicate({10.0, 20.0}, 4)
+    end
+
+    test "percentages and em" do
+      assert radii("p { border-radius: 50% }") == List.duplicate({{:pct, 0.5}, {:pct, 0.5}}, 4)
+      assert radii("p { border-radius: 1em 25% }") |> hd() == {16.0, 16.0}
+      assert radii("p { border-radius: 1em 25% }") |> Enum.at(1) == {{:pct, 0.25}, {:pct, 0.25}}
+    end
+
+    test "longhands take one or two values and override the shorthand" do
+      r =
+        radii(
+          "p { border-radius: 4px; border-top-left-radius: 10px 20px; border-bottom-right-radius: 0 }"
+        )
+
+      assert r == [{10.0, 20.0}, {4.0, 4.0}, {0.0, 0.0}, {4.0, 4.0}]
+    end
+
+    test "negative and invalid radii are ignored" do
+      assert radii("p { border-radius: -3px }") == List.duplicate(nil, 4)
+      assert radii("p { border-radius: banana }") == List.duplicate(nil, 4)
+    end
+
+    test "border-radius with var()" do
+      css = ":root { --r: 7px } p { border-radius: var(--r) 2px }"
+      c = comp("<html><body><p>a</p></body></html>", css, "p")
+      assert c["border-top-left-radius"] == {7.0, 7.0}
+      assert c["border-top-right-radius"] == {2.0, 2.0}
+    end
+
+    test "radii are not inherited" do
+      c = comp("<div style=\"border-radius:5px\"><p>a</p></div>", "", "p")
+      refute Map.has_key?(c, "border-top-left-radius")
+    end
+  end
 end

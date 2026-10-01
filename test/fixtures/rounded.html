@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><title>Rounded corners</title>
+<style>
+body { margin: 0; background: #eef1f6; font-family: sans-serif }
+.page { max-width: 600px; margin: 14px auto; padding: 0 14px }
+h1 { margin: 8px 0 12px }
+.card { background: #fff; border: 1px solid #c4cad6; border-radius: 10px; padding: 12px 16px; margin: 10px 0 }
+.corners { background: #cfe3ff; border: 2px solid #2a5db0; padding: 10px; margin: 10px 0; border-radius: 30px 4px 30px 4px }
+.row { margin: 10px 0 }
+.circle { display: inline-block; width: 64px; height: 64px; border-radius: 50%; background: #e55; color: #fff; text-align: center; line-height: 64px; margin-right: 10px }
+.pill { display: inline-block; padding: 4px 16px; border-radius: 999px; background: #2a9d5c; color: #fff; margin-right: 6px }
+.outline { display: inline-block; padding: 4px 14px; border: 2px solid #2a9d5c; border-radius: 8px; color: #1c6b3e; margin-right: 6px }
+.callout { background: #fff8e6; border-left: 6px solid #e8a200; border-radius: 6px; padding: 10px 14px; margin: 10px 0 }
+.mixed { border: 1px solid #999; border-top: 5px solid #c0392b; border-bottom: 3px solid #2980b9; border-radius: 14px; padding: 10px 14px; background: #fff; margin: 10px 0 }
+.hl { background: #fff2a8; border-radius: 4px; padding: 1px 5px }
+code { background: #e8ecf4; border: 1px solid #c4cad6; border-radius: 4px; padding: 0 5px; font-family: monospace }
+.clip { width: 200px; height: 40px; overflow: hidden; border-radius: 12px; background: #fde; border: 1px solid #c8a; padding: 6px 10px }
+</style></head>
+<body><div class="page">
+<h1>Rounded corners</h1>
+<div class="card">A card: 1px border, 10px radius, padding. Paragraph text inside the rounded box.</div>
+<div class="corners">Different radii per corner: 30px 4px 30px 4px, thick blue border and fill.</div>
+<div class="row"><span class="circle">50%</span><span class="pill">pill</span><span class="pill">999px radius</span><span class="outline">outlined</span><span class="outline">buttons</span></div>
+<div class="callout">Callout: thick left border with a 6px radius, light background.</div>
+<div class="mixed">Mixed borders: thin grey sides, thick red top and blue bottom, 14px radius.</div>
+<p>Inline <code>code chips</code> and <span class="hl">a highlighted phrase long enough to wrap over two lines so that the rounded ends only appear at the start and the end of the whole box</span> with rounded ends.</p>
+<div class="clip">Clipped rounded box: this text is longer than the box and gets cut off at the edge.</div>
+</div></body></html>
