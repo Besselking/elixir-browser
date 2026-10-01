@@ -38,6 +38,25 @@ defmodule Browser.StyleTest do
              List.keyfind(attrs, "@computed", 0)
   end
 
+  test "logical properties map to physical ones" do
+    [{:element, "div", attrs, _}] =
+      prune(
+        "<div></div>",
+        "div { margin-block: 2px 4px; padding-inline: 6px; inline-size: 50px; block-size: 7px }"
+      )
+
+    {"@computed", c} = List.keyfind(attrs, "@computed", 0)
+
+    assert %{
+             "margin-top" => 2.0,
+             "margin-bottom" => 4.0,
+             "padding-left" => 6.0,
+             "padding-right" => 6.0
+           } = c
+
+    assert %{"width" => 50.0, "height" => 7.0} = c
+  end
+
   test "input type=hidden is hidden" do
     assert tags(prune(~s(<form><input type="hidden"><input type="text"></form>))) ==
              ["form", "input"]

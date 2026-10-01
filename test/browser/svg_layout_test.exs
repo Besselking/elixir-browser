@@ -119,6 +119,15 @@ defmodule Browser.SvgLayoutTest do
       assert [%{w: 20, ops: [%{fill: %{paint: {:color, {0, 0, 255, 255}}}}]}] = svgs(items)
     end
 
+    test "is laid out as a flex item, sized by logical properties" do
+      html =
+        ~s|<style>header{display:flex;align-items:center} #logo{block-size:5em;flex:none}</style>| <>
+          ~s|<header><svg id="logo" viewBox="0 0 800 400"><rect width="9" height="9"/></svg><h1>x</h1></header>|
+
+      {items, _} = lay(html)
+      assert [%{h: 80, w: 160}] = svgs(items)
+    end
+
     test "a zero-size sprite does not take room" do
       {items, height} = lay(~s|<svg width="0" height="0"><symbol id="s"></symbol></svg><p>x</p>|)
       assert height < 40

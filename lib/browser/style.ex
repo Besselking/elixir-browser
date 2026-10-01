@@ -273,6 +273,43 @@ defmodule Browser.Style do
   # other. A shorthand whose value uses var() can't be split until the
   # variables are known, so each longhand carries the raw value and is
   # resolved per element: `{:sh, shorthand, raw_value, longhand}`.
+  # logical properties, for the horizontal left-to-right writing mode
+  @logical %{
+    "block-size" => "height",
+    "inline-size" => "width",
+    "min-block-size" => "min-height",
+    "max-block-size" => "max-height",
+    "min-inline-size" => "min-width",
+    "max-inline-size" => "max-width",
+    "margin-block-start" => "margin-top",
+    "margin-block-end" => "margin-bottom",
+    "margin-inline-start" => "margin-left",
+    "margin-inline-end" => "margin-right",
+    "padding-block-start" => "padding-top",
+    "padding-block-end" => "padding-bottom",
+    "padding-inline-start" => "padding-left",
+    "padding-inline-end" => "padding-right"
+  }
+  @logical_pairs %{
+    "margin-block" => {"margin-top", "margin-bottom"},
+    "margin-inline" => {"margin-left", "margin-right"},
+    "padding-block" => {"padding-top", "padding-bottom"},
+    "padding-inline" => {"padding-left", "padding-right"}
+  }
+
+  defp expand({prop, value, imp}) when is_map_key(@logical, prop),
+    do: expand({@logical[prop], value, imp})
+
+  defp expand({prop, value, imp}) when is_map_key(@logical_pairs, prop) do
+    {first, second} = @logical_pairs[prop]
+
+    case tokens(String.trim(value)) do
+      [a] -> [{first, a, imp}, {second, a, imp}]
+      [a, b] -> [{first, a, imp}, {second, b, imp}]
+      _ -> []
+    end
+  end
+
   defp expand({prop, value, imp}) when is_map_key(@shorthands, prop) do
     longs = @shorthands[prop]
 

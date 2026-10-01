@@ -703,7 +703,7 @@ defmodule Browser.Layout do
 
       {:element, tag, _, _} = el, {a, sep?} when tag not in @skip ->
         a = if sep?, do: [{:space, style} | a], else: a
-        {walk_element(el, style, a, :inline), true}
+        {flex_item(el, style, a), true}
 
       _, acc2 ->
         acc2
@@ -712,6 +712,12 @@ defmodule Browser.Layout do
   end
 
   defp block_children(tag, _kind, kids, style, acc), do: walk_children(tag, kids, style, acc)
+
+  # replaced elements are not ordinary boxes
+  defp flex_item({:element, tag, _, _} = el, style, acc) when tag in ~w(img svg),
+    do: walk(el, style, acc)
+
+  defp flex_item(el, style, acc), do: walk_element(el, style, acc, :inline)
 
   # ul/ol number their list items and emit markers; everything else just recurses
   defp walk_children(tag, kids, style, acc) when tag in ~w(ul ol) do
