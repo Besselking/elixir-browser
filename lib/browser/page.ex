@@ -4,7 +4,7 @@ defmodule Browser.Page do
   references, cascade and prune. Runs in a task, never in the UI process.
   """
 
-  alias Browser.{Fetch, Forms, HTML, Layout, Style}
+  alias Browser.{Fetch, Forms, HTML, Images, Layout, Style}
 
   @max_sheets 24
   @sheet_timeout 10_000
@@ -21,20 +21,66 @@ defmodule Browser.Page do
     :pruned,
     :nodes,
     forms: %{controls: %{}, forms: %{}},
-    form_state: %{}
+    form_state: %{},
+    image_urls: []
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
   def load(url, env \\ Style.default_env(), fetch_opts \\ []) do
     case Fetch.load(url, fetch_opts) do
-      {:ok, body, final} -> {:ok, build(body, final, env)}
+      {:ok, body, final} -> {:ok, build(document(body, final), final, env)}
       {:error, _} = err -> err
     end
   end
 
+  @doc """
+  The HTML to show for fetched bytes. Markup is shown as is; a picture becomes a page
+  holding just that picture; any other binary file gets a short explanation instead of
+  its bytes drawn as text.
+  """
+  def document(body, url) do
+    cond do
+      Images.sniff(body) != :unknown -> image_document(url)
+      binary?(body) -> binary_document(url, byte_size(body))
+      true -> body
+    end
+  end
+
+  defp image_document(url) do
+    name = url |> URI.parse() |> Map.get(:path) |> Kernel.||("") |> Path.basename()
+
+    """
+    <!doctype html><html><head><title>#{escape(name)}</title></head>
+    <body style="margin:0; background:#202124; text-align:center">
+    <img src="#{escape(url)}" alt="#{escape(name)}" style="max-width:100%; height:auto">
+    </body></html>
+    """
+  end
+
+  defp binary_document(url, size) do
+    """
+    <!doctype html><html><head><title>#{escape(Path.basename(url))}</title></head>
+    <body><h1>This file can't be shown</h1>
+    <p>#{escape(url)} is a binary file of #{size} bytes. This browser can only show web pages and pictures.</p>
+    </body></html>
+    """
+  end
+
+  # a NUL byte near the start means it is not text
+  defp binary?(body),
+    do: body |> binary_part(0, min(byte_size(body), 1024)) |> :binary.match(<<0>>) != :nomatch
+
+  defp escape(s),
+    do:
+      s
+      |> String.replace("&", "&amp;")
+      |> String.replace("<", "&lt;")
+      |> String.replace("\"", "&quot;")
+
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
     {raw, forms} = body |> String.replace_invalid() |> HTML.parse() |> Forms.index()
+    {raw, image_urls} = Images.index(raw, url)
 
     author =
       raw
@@ -53,7 +99,8 @@ defmodule Browser.Page do
         raw: raw,
         rules: rules,
         queries: queries,
-        forms: forms
+        forms: forms,
+        image_urls: image_urls
       },
       env
     )

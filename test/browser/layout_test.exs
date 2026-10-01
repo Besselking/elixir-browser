@@ -407,7 +407,7 @@ defmodule Browser.LayoutTest do
   describe "geometry invariants" do
     alias Browser.Page
 
-    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms) do
+    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms images) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("test/fixtures/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -1640,6 +1640,233 @@ defmodule Browser.LayoutTest do
       {_, h2} = fx("<pre>a\nb</pre>")
       assert h1 == h2
       assert length(Enum.filter(items, &(&1.type == :text))) == 2
+    end
+  end
+
+  describe "images" do
+    alias Browser.Page
+
+    @base "http://example.test/dir/page.html"
+    @img "http://example.test/dir/a.png"
+
+    defp im(html, images, width \\ 500) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, @base)
+      Layout.layout(page.nodes, width, &measure/2, 600, images: images)
+    end
+
+    defp loaded(w, h), do: %{@img => {:ok, w, h}}
+    defp pics(items), do: Enum.filter(items, &(&1.type == :image))
+    defp tw(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "a loaded image takes its own size and carries its url" do
+      {items, _} = im(~s(<img src="a.png">), loaded(120, 80))
+      assert [%{url: @img, w: 120, h: 80, x: 4}] = pics(items)
+    end
+
+    test "the page collects the urls to fetch" do
+      page =
+        Page.build(~s(<img src="a.png"><p><img src="/b.jpg" alt="b"><img src="a.png"></p>), @base)
+
+      assert page.image_urls == [@img, "http://example.test/b.jpg"]
+    end
+
+    test "width and height attributes size it; one attribute keeps the ratio" do
+      {items, _} = im(~s(<img src="a.png" width="60" height="60">), loaded(120, 80))
+      assert [%{w: 60, h: 60}] = pics(items)
+      {items, _} = im(~s(<img src="a.png" width="60">), loaded(120, 80))
+      assert [%{w: 60, h: 40}] = pics(items)
+    end
+
+    test "css width and height win over the attributes" do
+      {items, _} =
+        im(
+          ~s(<img src="a.png" width="60" height="60" style="width:30px; height:20px">),
+          loaded(120, 80)
+        )
+
+      assert [%{w: 30, h: 20}] = pics(items)
+    end
+
+    test "the responsive recipe: max-width 100% and height auto" do
+      html =
+        ~s(<style>img { max-width: 100%; height: auto }</style><img src="a.png" width="400" height="200">)
+
+      {items, _} = im(html, loaded(400, 200), 208)
+      assert [%{w: 200, h: 100}] = pics(items)
+      {items, _} = im(html, loaded(400, 200), 1000)
+      assert [%{w: 400, h: 200}] = pics(items)
+    end
+
+    test "percentage widths follow the container and keep the ratio" do
+      {items, _} = im(~s(<img src="a.png" style="width:50%">), loaded(120, 80), 408)
+      assert [%{w: 200, h: 133}] = pics(items)
+    end
+
+    test "an image sits on the text baseline" do
+      {items, _} = im(~s(before <img src="a.png"> after), loaded(40, 40))
+      [pic] = pics(items)
+      before = tw(items, "before")
+      after_ = tw(items, "after")
+      assert pic.y + pic.h == before.y + before.h
+      assert before.y + before.h == after_.y + after_.h
+    end
+
+    test "a tall image makes its line taller; the next line starts below it" do
+      {items, _} = im(~s(<img src="a.png"><p>next</p>), loaded(50, 100))
+      [pic] = pics(items)
+      assert tw(items, "next").y >= pic.y + pic.h
+    end
+
+    test "images flow and wrap like inline boxes" do
+      img = ~s(<img src="a.png" width="90" height="10">)
+      {items, _} = im(String.duplicate(img, 5), loaded(10, 10), 208)
+      ys = items |> pics() |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(ys) == 3
+    end
+
+    test "margins separate images" do
+      {items, _} =
+        im(~s(<img src="a.png" style="margin:0 10px"><img src="a.png">), loaded(20, 20))
+
+      [a, b] = pics(items)
+      assert b.x == a.x + 20 + 10
+      assert a.x == 4 + 10
+    end
+
+    test "border, padding and background draw around the picture" do
+      html = ~s(<img src="a.png" style="border:2px solid #f00; padding:3px; background:#eee">)
+      {items, _} = im(html, loaded(40, 30))
+      [pic] = pics(items)
+      assert pic.x == 4 + 2 + 3 and pic.w == 40 and pic.h == 30
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert length(rects) == 5
+      bg = hd(rects)
+      assert bg.w == 40 + 6 + 4 and bg.h == 30 + 6 + 4
+      assert pic.y == bg.y + 2 + 3
+    end
+
+    test "a border radius on an image box gives a rounded box" do
+      {items, _} =
+        im(~s(<img src="a.png" style="border:1px solid #000; border-radius:6px">), loaded(40, 30))
+
+      assert [%{radius: {{6, 6}, _, _, _}}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "an image in a link carries the href" do
+      {items, _} = im(~s(<a href="/go"><img src="a.png"></a>), loaded(20, 20))
+      assert [%{href: "/go"}] = pics(items)
+    end
+
+    test "display:block puts the image on its own line; auto margins position it" do
+      html = ~s(text<img src="a.png" style="display:block; margin:10px auto">more)
+      {items, _} = im(html, loaded(100, 40), 408)
+      [pic] = pics(items)
+      assert pic.x == 4 + 150
+      assert tw(items, "more").y > pic.y + pic.h
+      assert tw(items, "text").y + 16 <= pic.y
+
+      {items, _} =
+        im(~s(<img src="a.png" style="display:block; margin-left:auto">), loaded(100, 40), 408)
+
+      assert [%{x: 304}] = pics(items)
+    end
+
+    test "vertical margins of a block image collapse with the text around it" do
+      {a, _} =
+        im(
+          ~s(<p>a</p><img src="a.png" style="display:block; margin:30px 0"><p>b</p>),
+          loaded(10, 10)
+        )
+
+      {b, _} = im(~s(<p>a</p><img src="a.png" style="display:block"><p>b</p>), loaded(10, 10))
+      assert hd(pics(a)).y - tw(a, "a").y > hd(pics(b)).y - tw(b, "a").y + 20
+    end
+
+    test "vertical-align moves an image against the line" do
+      html =
+        ~s(<span style="font-size:30px">big text</span><img src="a.png" style="vertical-align: top">)
+
+      {items, _} = im(html, loaded(10, 10))
+      assert hd(pics(items)).y <= tw(items, "big").y
+    end
+
+    test "a hidden image keeps its space but isn't painted" do
+      {plain, _} = im(~s(<img src="a.png" width="30" height="10">x), loaded(30, 10))
+
+      {items, _} =
+        im(
+          ~s(<img src="a.png" width="30" height="10" style="visibility:hidden">x),
+          loaded(30, 10)
+        )
+
+      assert [%{hidden: true}] = pics(items)
+      assert tw(items, "x").x == tw(plain, "x").x
+    end
+
+    test "while an image loads its declared size is reserved" do
+      html = ~s(<img src="a.png" width="50" height="20">x)
+      {items, _} = im(html, %{"http://example.test/other.png" => {:ok, 1, 1}})
+      assert pics(items) == []
+      {done, _} = im(html, loaded(50, 20))
+      assert tw(items, "x").x == tw(done, "x").x
+    end
+
+    test "an empty image map means everything is still loading, not that images are off" do
+      {items, _} = im(~s(a<img src="a.png" alt="alt">b), %{})
+      refute tw(items, "[alt]")
+      assert pics(items) == []
+      {items, _} = im(~s(<img src="a.png" width="20" height="20">x), %{})
+      {plain, _} = im(~s(x), %{})
+      assert tw(items, "x").x == tw(plain, "x").x + 20
+    end
+
+    test "while an image loads without declared size it takes no room" do
+      {items, _} = im(~s(a<img src="a.png">b), %{"http://example.test/other.png" => {:ok, 1, 1}})
+      assert pics(items) == []
+      assert tw(items, "a") && tw(items, "b")
+    end
+
+    test "a failed image shows its alt text, or nothing without one" do
+      {items, _} = im(~s(<img src="a.png" alt="A picture">), %{@img => :failed})
+      assert pics(items) == []
+      assert tw(items, "[A") && tw(items, "picture]")
+      {items, _} = im(~s(x<img src="a.png">y), %{@img => :failed})
+      assert Enum.filter(items, &(&1.type == :text)) |> length() == 2
+    end
+
+    test "without image information the alt text is shown, as before" do
+      page = Page.build(~s(<img src="a.png" alt="Alt text">), @base)
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      assert tw(items, "[Alt")
+    end
+
+    test "an image with no src shows its alt text" do
+      {items, _} = im(~s(<img alt="nothing here">), loaded(10, 10))
+      assert tw(items, "[nothing")
+    end
+
+    test "images work inside inline-blocks and absolute boxes" do
+      html =
+        ~s(<span style="display:inline-block; background:#eee"><img src="a.png"></span>) <>
+          ~s(<div style="position:absolute; top:100px; left:10px"><img src="a.png"></div>)
+
+      {items, _} = im(html, loaded(30, 20))
+      assert [a, b] = Enum.sort_by(pics(items), & &1.y)
+      assert a.w == 30 and b.y >= 100 and b.x == 10
+    end
+
+    test "geometry is whole pixels at every size" do
+      html =
+        ~s(<img src="a.png" style="width:33%; border:1px solid #000; padding:1px"> t <img src="a.png" width="7">)
+
+      for w <- [200, 333, 777] do
+        {items, h} = im(html, loaded(101, 53), w)
+        assert is_integer(h)
+
+        for it <- items, key <- [:x, :y, :w, :h], Map.has_key?(it, key) do
+          assert is_integer(Map.fetch!(it, key)), "#{key} of #{inspect(it)} at #{w}"
+        end
+      end
     end
   end
 end

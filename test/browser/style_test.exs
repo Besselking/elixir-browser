@@ -19,6 +19,13 @@ defmodule Browser.StyleTest do
     assert tags(prune("<div><p hidden>x<b>y</b></p><i>z</i></div>")) == ["div", "i"]
   end
 
+  test "embedded content we can't draw is hidden, so its fallback text doesn't leak" do
+    html =
+      "<p>a</p><svg><text>svg text</text></svg><video>no video</video><iframe>frame</iframe><i>b</i>"
+
+    assert tags(prune(html)) == ["p", "i"]
+  end
+
   test "input type=hidden is hidden" do
     assert tags(prune(~s(<form><input type="hidden"><input type="text"></form>))) ==
              ["form", "input"]
@@ -344,13 +351,13 @@ defmodule Browser.StyleTest do
       assert computed_of(prune(~s(<p style="opacity:.5">x</p>)), "p")["visibility"] == nil
     end
 
-    test "sizes and offsets are typed: px, percentages, auto is absent" do
+    test "sizes and offsets are typed: px, percentages, auto for width/height" do
       html =
         ~s(<p style="position:absolute; top:5px; left:10%; width:2em; height:auto; max-height:none">x</p>)
 
       c = computed_of(prune(html), "p")
       assert {c["top"], c["left"], c["width"]} == {5.0, {:pct, 0.1}, 32.0}
-      refute Map.has_key?(c, "height")
+      assert c["height"] == :auto
       refute Map.has_key?(c, "max-height")
       assert c["position"] == "absolute"
     end
@@ -421,7 +428,8 @@ defmodule Browser.StyleTest do
       assert c["box-sizing"] == "border-box"
       c = cb("p { max-width: none; width: auto }")
       refute Map.has_key?(c, "max-width")
-      refute Map.has_key?(c, "width")
+      # an explicit auto is kept (it overrides image size attributes), unlike none
+      assert c["width"] == :auto
     end
 
     test "left/right margins keep auto, margin-right and padding-right exist" do

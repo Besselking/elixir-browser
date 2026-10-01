@@ -11,7 +11,7 @@ defmodule Browser.Session do
   use GenServer
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1]
 
-  alias Browser.{Fetch, Forms, History, Interact, Layout, Page, TextEdit, UI}
+  alias Browser.{Fetch, Forms, History, Images, Interact, Layout, Page, TextEdit, UI}
 
   @blink_ms 530
 
@@ -30,6 +30,9 @@ defmodule Browser.Session do
       nodes: [],
       items: [],
       controls: %{},
+      # decoded pictures by url: {:ok, width, height} or :failed
+      images: %{},
+      layout_timer: nil,
       height: 0,
       scroll: 0,
       width: UI.client_width(ui),
@@ -106,8 +109,38 @@ defmodule Browser.Session do
         menu: nil
       })
 
-    {:noreply, state |> relayout() |> sync_buttons()}
+    {:noreply, state |> relayout() |> sync_buttons() |> start_images()}
   end
+
+  # -- images arriving -------------------------------------------------------
+
+  def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
+    info =
+      with {:ok, bytes, format} <- result,
+           {:ok, w, h} <- UI.load_image(url, bytes, format) do
+        {:ok, w, h}
+      else
+        _ -> :failed
+      end
+
+    {:noreply, state |> put_in([:images, url], info) |> schedule_image_layout()}
+  end
+
+  def handle_info({:image, _stale, _url, _result}, state), do: {:noreply, state}
+
+  # a fetch that was killed on timeout never reports, so mark what is still missing
+  def handle_info({:images_done, nonce, urls}, %{nonce: nonce} = state) do
+    images = Enum.reduce(urls, state.images, &Map.put_new(&2, &1, :failed))
+    {:noreply, schedule_image_layout(%{state | images: images})}
+  end
+
+  def handle_info({:images_done, _stale, _urls}, state), do: {:noreply, state}
+
+  # several pictures usually arrive together: lay out once for the batch
+  def handle_info({:image_layout, ref}, %{layout_timer: ref} = state),
+    do: {:noreply, relayout(%{state | layout_timer: nil})}
+
+  def handle_info({:image_layout, _stale}, state), do: {:noreply, state}
 
   # -- blinking caret --------------------------------------------------------
 
@@ -506,6 +539,42 @@ defmodule Browser.Session do
   defp control(%{page: nil}, _cid), do: nil
   defp control(state, cid), do: state.page.forms.controls[cid]
 
+  # -- images ----------------------------------------------------------------
+
+  # fetch the page's pictures in the background, a few at a time
+  defp start_images(%{page: page} = state) do
+    urls = Enum.reject(page.image_urls, &Map.has_key?(state.images, &1))
+
+    if urls != [] do
+      me = self()
+      nonce = state.nonce
+      base = page.url
+
+      Task.start(fn ->
+        urls
+        |> Task.async_stream(
+          fn url -> send(me, {:image, nonce, url, Images.fetch(url, base)}) end,
+          max_concurrency: 6,
+          timeout: 20_000,
+          on_timeout: :kill_task
+        )
+        |> Stream.run()
+
+        send(me, {:images_done, nonce, urls})
+      end)
+    end
+
+    state
+  end
+
+  defp schedule_image_layout(%{layout_timer: nil} = state) do
+    ref = make_ref()
+    Process.send_after(self(), {:image_layout, ref}, 60)
+    %{state | layout_timer: ref}
+  end
+
+  defp schedule_image_layout(state), do: state
+
   # -- blink -----------------------------------------------------------------
 
   defp reset_blink(state), do: schedule_blink(%{state | caret_on: true}, true)
@@ -538,7 +607,8 @@ defmodule Browser.Session do
 
     {items, height} =
       Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
-        focus: focus_option(state)
+        focus: focus_option(state),
+        images: state.images
       )
 
     state = %{

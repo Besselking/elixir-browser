@@ -53,6 +53,11 @@ defmodule Browser.Layout do
   Returns `{items, content_height}`. `view_height` is the viewport height, the
   reference for `bottom`/percentage offsets of positioned elements.
 
+  Option `images: %{url => {:ok, width, height} | :failed}` says which pictures are
+  known; without it images are shown as their alt text. With it (even empty), an
+  image not in the map is still loading: its declared size is reserved and it
+  takes no room if it has none.
+
   Option `focus: %{cid: id, caret: {line, column}}` adds a `:ring` item around the
   focused form control and a `:caret` item at the given position of its text.
   """
@@ -71,7 +76,8 @@ defmodule Browser.Layout do
       align: :left,
       list: nil,
       lh: :normal,
-      cid: nil
+      cid: nil,
+      images: Keyword.get(opts, :images)
     }
 
     ops = nodes |> walk(style, []) |> Enum.reverse()
@@ -227,10 +233,7 @@ defmodule Browser.Layout do
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
   defp walk({:element, "br", _, _}, _style, acc), do: [{:flush} | acc]
 
-  defp walk({:element, "img", attrs, _}, style, acc) do
-    alt = List.keyfind(attrs, "alt", 0, {nil, ""}) |> elem(1)
-    if alt == "", do: acc, else: walk({:text, "[#{alt}]"}, restyle_inline(style, attrs), acc)
-  end
+  defp walk({:element, "img", _attrs, _} = el, style, acc), do: image_ops(el, style, acc)
 
   defp walk(el, style, acc), do: walk_element(el, style, acc, nil)
 
@@ -284,7 +287,7 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: c["width"],
+        width: dim(c["width"]),
         minw: c["min-width"],
         maxw: c["max-width"],
         # width properties size the content box unless box-sizing says otherwise
@@ -296,6 +299,94 @@ defmodule Browser.Layout do
 
       [{:abs, sub, spec} | acc]
     end
+  end
+
+  # <img>: the picture once it has loaded; its declared size while it loads; the alt
+  # text if there is no picture (no source, or it failed). Without any image
+  # information at all (`images` option not given) it is just the alt text.
+  defp image_ops({:element, "img", attrs, _}, parent_style, acc) do
+    c = computed(attrs)
+    style = restyle("img", attrs, parent_style, c)
+    url = with "" <- attr_value(attrs, "@src"), do: nil
+    images = parent_style.images
+    info = if url && images, do: Map.get(images, url)
+    alt = attr_value(attrs, "alt")
+    declared = declared_size(attrs)
+
+    cond do
+      match?({:ok, _, _}, info) ->
+        image_atom(url, info, attrs, c, style, acc)
+
+      url != nil and info == nil and is_map(images) and declared != nil ->
+        image_atom(url, nil, attrs, c, style, acc)
+
+      url != nil and info == nil and is_map(images) ->
+        acc
+
+      alt == "" ->
+        acc
+
+      true ->
+        walk({:text, "[#{alt}]"}, restyle_inline(parent_style, attrs), acc)
+    end
+  end
+
+  defp declared_size(attrs) do
+    w = attr_int(attrs, "width")
+    h = attr_int(attrs, "height")
+    if w || h, do: %{w: w, h: h}
+  end
+
+  defp attr_int(attrs, name) do
+    case Integer.parse(attr_value(attrs, name)) do
+      {n, _} when n >= 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp attr_value(attrs, name), do: List.keyfind(attrs, name, 0, {nil, ""}) |> elem(1)
+
+  defp image_atom(url, info, attrs, c, style, acc) do
+    kind = kind("img", c)
+    block? = kind in [:block, :list_item, :flex]
+    box = box("img", c)
+
+    # a block-level image sits on its own line; auto side margins position it
+    {box, align, before, after_} =
+      if block? do
+        align =
+          case {box.ml, box.mr} do
+            {:auto, :auto} -> :center
+            {:auto, _} -> :right
+            _ -> style.align
+          end
+
+        {%{box | mt: 0, mb: 0}, align, [{:flush}, {:gap, box.mt}], [{:flush}, {:gap, box.mb}]}
+      else
+        {box, style.align, [], []}
+      end
+
+    spec = %{
+      url: url,
+      intrinsic: with({:ok, w, h} <- info, do: {w, h}, else: (_ -> nil)),
+      paint?: info != nil,
+      attrs: declared_size(attrs) || %{w: nil, h: nil},
+      css: %{
+        w: c["width"],
+        h: c["height"],
+        minw: c["min-width"],
+        maxw: c["max-width"],
+        minh: c["min-height"],
+        maxh: c["max-height"]
+      },
+      box: box,
+      href: style.href,
+      hidden: style.hidden,
+      valign: c["vertical-align"]
+    }
+
+    Enum.reverse(before) ++
+      [{:image, spec, %{style | align: align}}] ++ Enum.reverse(after_) ++ acc
   end
 
   defp blockify(kind) when kind in [:inline, :contents, :inline_block], do: :block
@@ -331,7 +422,7 @@ defmodule Browser.Layout do
     {_, br, _, bl} = box.bw
 
     spec = %{
-      width: c["width"],
+      width: dim(c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
       extra: if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br),
@@ -470,7 +561,7 @@ defmodule Browser.Layout do
       pb: box.pb,
       bw: box.bw,
       bc: box.bc,
-      width: c["width"],
+      width: dim(c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
       sizing: if(c["box-sizing"] == "border-box", do: :border, else: :content),
@@ -491,6 +582,10 @@ defmodule Browser.Layout do
 
     if needed?, do: spec
   end
+
+  # `auto` is the same as no width/height for everything but images
+  defp dim(:auto), do: nil
+  defp dim(v), do: v
 
   defp num(v) when is_number(v), do: v
   defp num(_), do: nil
@@ -864,35 +959,66 @@ defmodule Browser.Layout do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, base} = layout_atom(st, sub, w)
-    line_left = st.margin + st.left
 
-    space_w =
-      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
-
-    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, 0), else: st
-
-    st =
-      if st.line != [] and st.x + space_w + w > st.width - st.margin - st.right do
-        st |> flush() |> apply_gap() |> start_line(line_left, 0)
-      else
-        st
-      end
-
-    space_w = if st.line == [], do: 0, else: space_w
-    x = st.x + space_w
-
-    atom = %{
-      type: :atom,
-      x: x,
+    place_atom(st, %{
       w: w,
       h: height,
       base: base,
       items: items,
       align: style.align,
       valign: spec.valign
+    })
+  end
+
+  # An image is a replaced element: an atom whose content is the picture inside
+  # whatever box (border, padding, background, radius) the element has.
+  defp op({:image, spec, style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    {cw, ch} = Browser.ImageBox.size(spec.intrinsic, spec.attrs, spec.css, avail)
+    box = spec.box
+    {bt, br, bb, bl} = box.bw
+    ml = if box.ml == :auto, do: 0, else: box.ml
+    mr = if box.mr == :auto, do: 0, else: box.mr
+
+    box_w = bl + box.pl + cw + box.pr + br
+    box_h = bt + box.pt + ch + box.pb + bb
+
+    outer = %{
+      o: %{bw: box.bw, bc: box.bc, bg: box.bg, r: box.r, cid: nil},
+      x: ml,
+      top: box.mt,
+      w: box_w
     }
 
-    %{st | line: [atom | st.line], x: x + w, pending_space: nil}
+    picture =
+      if spec.paint? and cw > 0 and ch > 0 do
+        [
+          %{
+            type: :image,
+            url: spec.url,
+            x: ml + bl + box.pl,
+            y: box.mt + bt + box.pt,
+            w: cw,
+            h: ch,
+            href: spec.href,
+            hidden: spec.hidden
+          }
+        ]
+      else
+        []
+      end
+
+    height = box.mt + box_h + box.mb
+
+    place_atom(st, %{
+      w: ml + box_w + mr,
+      h: height,
+      # the baseline of a replaced element is its bottom margin edge
+      base: height,
+      items: outer_rects(outer, box_h) ++ picture,
+      align: style.align,
+      valign: spec.valign
+    })
   end
 
   # Opening an inline box adds its left margin/border/padding to the line and
@@ -956,6 +1082,29 @@ defmodule Browser.Layout do
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
   defp apply_gap(st), do: %{st | y: st.y + st.gap, gap: 0}
+
+  # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
+  # wrapping to a new line if it doesn't fit.
+  defp place_atom(st, atom) do
+    line_left = st.margin + st.left
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, 0), else: st
+
+    st =
+      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right do
+        st |> flush() |> apply_gap() |> start_line(line_left, 0)
+      else
+        st
+      end
+
+    space_w = if st.line == [], do: 0, else: space_w
+    x = st.x + space_w
+    atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
+    %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil}
+  end
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
 

@@ -9,6 +9,7 @@ defmodule Browser.UI do
   Record.defrecord(:wxKey, Record.extract(:wxKey, from_lib: "wx/include/wx.hrl"))
 
   @view :browser_view
+  @images :browser_images
   @wx_default 70
   @wx_teletype 76
   @wx_normal 90
@@ -23,6 +24,7 @@ defmodule Browser.UI do
 
   def build do
     :ets.new(@view, [:named_table, :public])
+    :ets.new(@images, [:named_table, :public])
     :ets.insert(@view, {:view, [], 0, true})
 
     wx = :wx.new()
@@ -150,6 +152,23 @@ defmodule Browser.UI do
 
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  # a decoded picture, scaled to its box
+  defp draw(dc, %{type: :image} = item, y, scroll) do
+    case :ets.lookup(@images, item.url) do
+      [{_url, bitmap}] ->
+        gc = :wxGraphicsContext.create(dc)
+
+        if clip = Map.get(item, :clip),
+          do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
+
+        :wxGraphicsContext.drawBitmap(gc, bitmap, item.x, y, item.w, item.h)
+        :wxGraphicsContext.destroy(gc)
+
+      [] ->
+        :ok
+    end
   end
 
   # the focus ring: a 2px line around the control, following its rounded corners
@@ -323,7 +342,7 @@ defmodule Browser.UI do
 
   def link_at(items, x, y) do
     Enum.find_value(items, fn
-      %{type: :text, href: href} = it when is_binary(href) ->
+      %{type: type, href: href} = it when type in [:text, :image] and is_binary(href) ->
         if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: href
 
       _ ->
@@ -358,6 +377,37 @@ defmodule Browser.UI do
 
   @doc "Moves keyboard focus to the page, so key events reach it."
   def focus_page(%{panel: p}), do: :wxWindow.setFocus(p)
+
+  # -- images ------------------------------------------------------------------------
+
+  @doc """
+  Decodes image bytes (PNG, JPEG, GIF or BMP) into a bitmap the painter can draw, kept
+  under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
+  so the bytes pass through a temporary one.
+  """
+  def load_image(url, bytes, format) do
+    path =
+      Path.join(System.tmp_dir!(), "browser-pic-#{System.unique_integer([:positive])}.#{format}")
+
+    try do
+      File.write!(path, bytes)
+      image = :wxImage.new(String.to_charlist(path))
+
+      if :wxImage.isOk(image) do
+        {w, h} = {:wxImage.getWidth(image), :wxImage.getHeight(image)}
+        bitmap = :wxBitmap.new(image)
+        :wxImage.destroy(image)
+        :ets.insert(@images, {url, bitmap})
+        if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+      else
+        :error
+      end
+    rescue
+      _ -> :error
+    after
+      File.rm(path)
+    end
+  end
 
   # -- controls --------------------------------------------------------------------
 

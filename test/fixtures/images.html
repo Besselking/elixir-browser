@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><title>Images</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f4f6fa }
+.page { max-width: 600px; margin: 12px auto; padding: 0 14px }
+h1 { margin: 6px 0 10px }
+.card { background: #fff; border: 1px solid #c4cad6; border-radius: 8px; padding: 10px 14px; margin: 10px 0 }
+.card p { margin: 6px 0 }
+.fluid { max-width: 100%; height: auto }
+.framed { border: 3px solid #36c; padding: 4px; background: #fff }
+.round { border-radius: 8px; border: 1px solid #999 }
+.center { display: block; margin: 8px auto }
+</style></head>
+<body><div class="page">
+<h1>Images</h1>
+<div class="card">
+  <p>Formats, each 120x80: PNG <img src="images/photo.png" width="60" height="40" alt="png"> JPEG <img src="images/photo.jpg" width="60" height="40" alt="jpeg"> GIF <img src="images/photo.gif" width="60" height="40" alt="gif"> BMP <img src="images/photo.bmp" width="60" height="40" alt="bmp"> TIFF <img src="images/photo.tiff" width="60" height="40" alt="tiff"></p>
+  <p>Intrinsic size, baseline-aligned with text: <img src="images/badge.png"> and a transparent PNG over the card background.</p>
+</div>
+<div class="card">
+  <p>Responsive (<code>max-width:100%; height:auto</code>) with width/height attributes 600x400:</p>
+  <img class="fluid" src="images/photo.png" width="600" height="400" alt="fluid">
+</div>
+<div class="card">
+  <p>Framed, rounded, and a block image centred with auto margins:</p>
+  <img class="framed" src="images/photo.png" width="90" height="60" alt="framed"> <img class="round" src="images/photo.jpg" width="90" height="60" alt="round">
+  <img class="center" src="images/photo.gif" width="120" height="80" alt="centered">
+</div>
+<div class="card">
+  <p>A linked image: <a href="images/photo.png"><img src="images/badge.png" alt="badge link"></a> (click it). Lazy <code>data-src</code>: <img data-src="images/badge.png" width="24" height="24"> and <code>srcset</code>: <img srcset="images/badge.png 1x, images/photo.png 2x" width="24" height="24"></p>
+  <p>A data URL: <img width="24" height="24" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="> and a missing file: <img src="images/missing.png" alt="missing image"> done.</p>
+</div>
+</div></body></html>

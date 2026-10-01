@@ -59,6 +59,7 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
+  svg, canvas, audio, video, iframe, object, embed, applet { display: none }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
@@ -621,7 +622,11 @@ defmodule Browser.Style do
 
   @size_props ~w(width height min-height max-height min-width max-width top left right bottom)
 
-  # px as a float, {:pct, fraction}, or no entry for auto/none/unsupported values
+  # px as a float, {:pct, fraction}, no entry for none/unsupported values, and `:auto`
+  # for an explicit `width: auto` / `height: auto` (which, unlike no declaration,
+  # overrides the size attributes of images)
+  defp typed(prop, "auto", _env, _pc) when prop in ["width", "height"], do: {:ok, :auto}
+
   defp typed(prop, v, env, _pc) when prop in @size_props do
     cond do
       m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) ->
