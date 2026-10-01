@@ -508,4 +508,45 @@ defmodule Browser.StyleTest do
       refute Map.has_key?(c, "border-top-left-radius")
     end
   end
+
+  describe "line-height" do
+    defp lhv(css, html \\ "<p>a</p>", tag \\ "p"), do: comp(html, css, tag)["line-height"]
+
+    test "normal, numbers, lengths and percentages" do
+      assert lhv("p { line-height: normal }") == :normal
+      assert lhv("p { line-height: 1.5 }") == {:num, 1.5}
+      assert lhv("p { line-height: 2 }") == {:num, 2.0}
+      assert lhv("p { line-height: 24px }") == {:px, 24.0}
+      assert lhv("p { line-height: 1.5em; font-size: 10px }") == {:px, 15.0}
+      assert lhv("p { line-height: 150%; font-size: 20px }") == {:px, 30.0}
+      assert lhv("p { line-height: 0 }") == {:num, 0.0}
+    end
+
+    test "invalid and negative values are ignored" do
+      assert lhv("p { line-height: banana }") == nil
+      assert lhv("p { line-height: -2 }") == nil
+      assert lhv("p { line-height: -4px }") == nil
+    end
+
+    test "numbers inherit as factors, lengths as pixels" do
+      html = "<div><b style=\"font-size: 30px\">a</b></div>"
+      assert lhv("div { line-height: 1.5 }", html, "b") == {:num, 1.5}
+      # 1.5em on a 10px parent is 15px, which the 30px child keeps
+      css = "div { font-size: 10px; line-height: 1.5em }"
+      assert lhv(css, html, "b") == {:px, 15.0}
+      assert lhv("div { font-size: 10px; line-height: 150% }", html, "b") == {:px, 15.0}
+    end
+
+    test "the font shorthand sets and resets it" do
+      assert lhv("p { font: 12px/1.4 Arial }") == {:num, 1.4}
+      assert lhv("p { font: 12px/20px Arial }") == {:px, 20.0}
+      assert lhv("p { line-height: 2; font: 12px Arial }") == :normal
+      assert lhv("p { font: bold italic 12px/1.5 serif }") == {:num, 1.5}
+    end
+
+    test "line-height with var()" do
+      css = ":root { --lh: 1.6 } p { line-height: var(--lh) }"
+      assert lhv(css, "<html><body><p>a</p></body></html>") == {:num, 1.6}
+    end
+  end
 end

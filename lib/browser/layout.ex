@@ -66,7 +66,8 @@ defmodule Browser.Layout do
       underline: false,
       strike: false,
       align: :left,
-      list: nil
+      list: nil,
+      lh: :normal
     }
 
     ops = nodes |> walk(style, []) |> Enum.reverse()
@@ -585,6 +586,7 @@ defmodule Browser.Layout do
     )
     |> put_if(c["text-align"], &%{&1 | align: align(&2)})
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
+    |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> Map.put(:hidden, hidden?(c))
   end
 
@@ -669,7 +671,8 @@ defmodule Browser.Layout do
       marks: [],
       active: [],
       lead: 0,
-      line_lead: 0
+      line_lead: 0,
+      lmax: 0
     }
 
     ops |> Enum.reduce(st, &op/2) |> flush()
@@ -1217,6 +1220,12 @@ defmodule Browser.Layout do
 
   # -- words and lines ------------------------------------------------------------------
 
+  # the line-height of text in px: `normal` is the built-in 1.35, a number is a
+  # factor of the font size
+  defp line_px(%{lh: :normal, size: size}), do: round(size * 1.35)
+  defp line_px(%{lh: {:num, f}, size: size}), do: round(f * size)
+  defp line_px(%{lh: {:px, v}}), do: round(v)
+
   # A new line starts at `line_left` (a list marker hangs `dx` to the left). Space
   # owed by inline boxes opened on the empty line (`lead`) is applied to content.
   defp start_line(st, line_left, dx) do
@@ -1271,7 +1280,14 @@ defmodule Browser.Layout do
 
     st = bridge(st, item, space_w)
 
-    %{st | line: [item | st.line], x: x + w, pending_space: nil, lh: max(st.lh, style.size)}
+    %{
+      st
+      | line: [item | st.line],
+        x: x + w,
+        pending_space: nil,
+        lh: max(st.lh, style.size),
+        lmax: max(st.lmax, line_px(style))
+    }
   end
 
   # Extend the previous word over the gap when both belong to the same link or
@@ -1312,8 +1328,13 @@ defmodule Browser.Layout do
   defp flush(st) do
     {atoms, texts} = Enum.split_with(st.line, &(&1.type == :atom))
     {floating, on_baseline} = Enum.split_with(atoms, &(&1.valign in ["top", "bottom", "middle"]))
-    lh = if st.lh > 0, do: round(st.lh * 1.35), else: 0
-    text_base = if st.lh > 0, do: lh - div(lh - st.lh, 4), else: 0
+
+    # `normal` height of the biggest text, and the height line-height gives the
+    # line; the glyphs sit centred in the line, i.e. shifted by half the difference
+    normal = if st.lh > 0, do: round(st.lh * 1.35), else: 0
+    lh = if st.lh > 0, do: st.lmax, else: 0
+    half = if st.lh > 0, do: div(lh - normal, 2), else: 0
+    text_base = if st.lh > 0, do: half + normal - div(normal - st.lh, 4), else: 0
 
     base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base))
     below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base))
@@ -1323,7 +1344,11 @@ defmodule Browser.Layout do
 
     placed =
       for it <- texts,
-          do: %{it | x: it.x + shift, y: st.y + dy + lh - it.h - div(lh - it.h, 4)}
+          do: %{
+            it
+            | x: it.x + shift,
+              y: st.y + dy + half + normal - it.h - div(normal - it.h, 4)
+          }
 
     top_of = fn
       %{valign: "top"} -> st.y
@@ -1345,8 +1370,8 @@ defmodule Browser.Layout do
       first_x: st.line |> List.last() |> Map.fetch!(:x),
       last_right: (fn l -> l.x + l.w end).(hd(st.line)),
       y_ref: fn size ->
-        if lh > 0,
-          do: st.y + dy + lh - size - div(lh - size, 4),
+        if normal > 0,
+          do: st.y + dy + half + normal - size - div(normal - size, 4),
           else: st.y + base - size
       end
     }
@@ -1364,6 +1389,7 @@ defmodule Browser.Layout do
         line: [],
         y: st.y + line_h,
         lh: 0,
+        lmax: 0,
         x: st.indent,
         pending_space: nil,
         marks: carried,

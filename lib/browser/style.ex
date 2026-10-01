@@ -18,12 +18,12 @@ defmodule Browser.Style do
             border-top-style border-right-style border-bottom-style border-left-style
             border-top-color border-right-color border-bottom-color border-left-color
             border-top-left-radius border-top-right-radius border-bottom-right-radius
-            border-bottom-left-radius
+            border-bottom-left-radius line-height
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left)
   @inherited ~w(visibility text-indent color font-size font-weight font-style font-family
-                text-decoration-line text-align list-style-type)
+                text-decoration-line text-align list-style-type line-height)
   @clips ~w(hidden clip scroll auto)
   @default_fs 16.0
 
@@ -33,7 +33,7 @@ defmodule Browser.Style do
     "overflow" => ~w(overflow-x overflow-y),
     "list-style" => ~w(list-style-type),
     "text-decoration" => ~w(text-decoration-line),
-    "font" => ~w(font-style font-weight font-size font-family),
+    "font" => ~w(font-style font-weight font-size line-height font-family),
     "background" => ~w(background-color),
     "border-width" =>
       ~w(border-top-width border-right-width border-bottom-width border-left-width),
@@ -342,13 +342,16 @@ defmodule Browser.Style do
     size =
       "[\\d.]+(?:px|em|rem|pt|%)|xx-small|x-small|small|medium|large|x-large|xx-large|smaller|larger"
 
-    re = Regex.compile!("(?<![\\w.-])(#{size})(?:/\\S+)?\\s+(.+)\\z", "s")
+    re = Regex.compile!("(?<![\\w.-])(#{size})(?:/(\\S+))?\\s+(.+)\\z", "s")
 
     case Regex.run(re, v, return: :index) do
-      [{start, _}, {s0, sl}, {f0, fl}] ->
+      [{start, _}, {s0, sl}, lh, {f0, fl}] ->
         prefix = v |> binary_part(0, start) |> String.split()
         size_v = binary_part(v, s0, sl)
         family = binary_part(v, f0, fl)
+
+        line_height =
+          with {l0, ll} when l0 >= 0 <- lh, do: binary_part(v, l0, ll), else: (_ -> "normal")
 
         weight =
           Enum.find(
@@ -363,6 +366,7 @@ defmodule Browser.Style do
           {"font-style", style},
           {"font-weight", weight},
           {"font-size", size_v},
+          {"line-height", line_height},
           {"font-family", family}
         ]
 
@@ -635,6 +639,27 @@ defmodule Browser.Style do
       [h] -> radius_pair(h, h)
       [h, vv] -> radius_pair(h, vv)
       _ -> :skip
+    end
+  end
+
+  # `normal`, a number (a factor of the font size, inherited as such), or a
+  # length/percentage (resolved against this element's font size to px)
+  defp typed("line-height", v, env, _pc) do
+    cond do
+      v == "normal" ->
+        {:ok, :normal}
+
+      Regex.match?(~r/\A\+?(\d+\.?\d*|\.\d+)\z/, v) ->
+        {:ok, {:num, to_float(v)}}
+
+      m = Regex.run(~r/\A\+?(\d+\.?\d*|\.\d+)%\z/, v) ->
+        {:ok, {:px, env.fs * to_float(Enum.at(m, 1)) / 100}}
+
+      (px = length(v, env)) && px >= 0 ->
+        {:ok, {:px, px}}
+
+      true ->
+        :skip
     end
   end
 

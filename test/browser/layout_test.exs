@@ -1203,4 +1203,131 @@ defmodule Browser.LayoutTest do
       assert clip.w == 50
     end
   end
+
+  describe "line-height" do
+    alias Browser.Page
+
+    defp lt(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wt(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    # y distance between the first words of two successive lines
+    defp pitch(html, width) do
+      {items, _} = lt(html, width)
+      lines = for %{type: :text} = t <- items, do: t
+      ys = lines |> Enum.map(& &1.y) |> Enum.uniq() |> Enum.sort()
+      [a, b | _] = ys
+      b - a
+    end
+
+    @two_lines ~s(<p style="LH">one two three four five six seven eight nine ten eleven twelve</p>)
+
+    test "normal keeps the built-in spacing" do
+      assert pitch(String.replace(@two_lines, "LH", ""), 120) == round(16 * 1.35)
+    end
+
+    test "px, number, em and percentage line heights set the pitch" do
+      for {lh, expected} <- [
+            {"line-height: 30px", 30},
+            {"line-height: 2", 32},
+            {"line-height: 1.5", 24},
+            {"line-height: 2em", 32},
+            {"line-height: 150%", 24},
+            {"line-height: 1", 16}
+          ] do
+        assert pitch(String.replace(@two_lines, "LH", lh), 120) == expected, lh
+      end
+    end
+
+    test "a block with one line is as tall as its line-height" do
+      for lh <- [10, 22, 40, 64] do
+        {items, h} = lt(~s(<div style="line-height:#{lh}px; background:#eee">x</div>))
+        [bg] = Enum.filter(items, &(&1.type == :rect))
+        assert bg.h == lh
+        assert h >= lh
+      end
+    end
+
+    test "leading is split above and below: text stays centred as the line grows" do
+      centre = fn lh ->
+        {items, _} = lt(~s(<div style="line-height:#{lh}px; background:#eee">x</div>))
+        [bg] = Enum.filter(items, &(&1.type == :rect))
+        x = wt(items, "x")
+        {x.y + div(x.h, 2) - bg.y, lh}
+      end
+
+      {c1, _} = centre.(22)
+      {c2, _} = centre.(62)
+      # 40px more line height moves the text 20px down
+      assert c2 - c1 == 20
+    end
+
+    test "line-height centres a label vertically in a fixed-height box" do
+      html =
+        ~s(<div style="width:64px; height:64px; line-height:64px; background:#e55; text-align:center">ok</div>)
+
+      {items, _} = lt(html)
+      [bg] = Enum.filter(items, &(&1.type == :rect))
+      ok = wt(items, "ok")
+      mid = ok.y + div(ok.h, 2)
+      assert abs(mid - (bg.y + 32)) <= 4
+    end
+
+    test "line-height is inherited by nested elements" do
+      html =
+        ~s(<div style="line-height:40px"><p>a b c d e f g h i j k l m n o p q r s t u v w x y z</p></div>)
+
+      assert pitch(html, 100) == 40
+    end
+
+    test "the tallest line-height on a line wins" do
+      {items, _} =
+        lt(~s(<p>small <span style="line-height:60px">tall</span> text</p><p>next</p>))
+
+      # the first paragraph is one 60px line, so the next one starts at 60 or below
+      assert wt(items, "next").y >= 60
+    end
+
+    test "a number follows each element's own font size" do
+      {items, _} =
+        lt(
+          ~s(<div style="line-height:1.5"><span style="font-size:32px">big</span></div><p>next</p>)
+        )
+
+      # 1.5 x 32px = 48px line, so the next paragraph starts at 48 or below
+      assert wt(items, "next").y >= 48
+    end
+
+    test "line-height does not change the width of text" do
+      {a, _} = lt(~s(<p>hello world</p>))
+      {b, _} = lt(~s(<p style="line-height:50px">hello world</p>))
+      assert wt(a, "world").x == wt(b, "world").x
+    end
+
+    test "lines with inline-blocks and inline boxes follow the same rule" do
+      html =
+        ~s(<div style="line-height:40px">a <span style="display:inline-block; background:#eee">b</span> ) <>
+          ~s(<span style="background:#ff0">c</span></div><p>next</p>)
+
+      {items, _} = lt(html)
+      assert wt(items, "next").y >= 40
+      assert wt(items, "a").y + wt(items, "a").h == wt(items, "c").y + wt(items, "c").h
+    end
+
+    test "list items and inline-block contents use their own line-height" do
+      html =
+        ~s(<ul style="line-height:30px"><li>a b c d e f g h i j k l m n o p q r s t u v w x y z</li></ul>)
+
+      assert pitch(html, 100) == 30
+    end
+
+    test "line-height 0 collapses lines but keeps them drawn in order" do
+      {items, h} = lt(~s(<p style="line-height:0">a</p><p style="line-height:0">b</p>))
+      assert wt(items, "b").y >= wt(items, "a").y
+      assert is_integer(h)
+    end
+  end
 end

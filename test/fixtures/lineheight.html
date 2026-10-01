@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><title>Line height</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f6f6f6 }
+.page { max-width: 560px; margin: 12px auto; padding: 0 12px }
+h1 { margin: 6px 0 10px }
+.col { background: #fff; border: 1px solid #ccc; padding: 6px 10px; margin: 8px 0 }
+.tight { line-height: 1 }
+.loose { line-height: 2 }
+.px { line-height: 28px }
+.box { width: 120px; height: 60px; background: #2a5db0; color: #fff; line-height: 60px; text-align: center; display: inline-block; margin-right: 8px; border-radius: 8px }
+.btn { display: inline-block; line-height: 1; padding: 6px 14px; background: #2a9d5c; color: #fff; border-radius: 4px }
+.tall { background: #ffe9a8; line-height: 48px }
+</style></head>
+<body><div class="page">
+<h1>Line height</h1>
+<div class="col tight"><b>line-height: 1</b> &mdash; lines are packed tightly together, one line right after the other, so that descenders nearly touch the next line's ascenders.</div>
+<div class="col"><b>normal</b> &mdash; the built-in spacing, unchanged from before, with enough room between lines for easy reading of a paragraph of text.</div>
+<div class="col loose"><b>line-height: 2</b> &mdash; double spaced lines, with the text centred in each line box so the extra space is split above and below.</div>
+<div class="col px"><b>line-height: 28px</b> &mdash; a fixed pitch whatever the font size, <span style="font-size: 24px">even with big text</span> inside the line.</div>
+<p><span class="box">centred</span><span class="box" style="line-height: 30px">30px</span><span class="btn">button</span> and inline text <span class="tall">a tall inline span</span> next to it.</p>
+</div></body></html>
