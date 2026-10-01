@@ -142,12 +142,14 @@ defmodule Browser.Layout do
         case force do
           nil -> kind(tag, c)
           :abs_inner -> blockify(kind(tag, c))
+          :inline_inner -> inner_kind(c)
           forced -> forced
         end
 
       case kind do
         :contents -> walk(kids, style, acc)
         :inline -> inline_ops(tag, kids, style, c, acc)
+        :inline_block -> inline_block_ops(el, parent_style, c, acc)
         kind -> block_ops(tag, kind, kids, style, c, acc)
       end
     end
@@ -184,6 +186,7 @@ defmodule Browser.Layout do
         # width properties size the content box unless box-sizing says otherwise
         extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
         rextra: box.pr + br,
+        mextra: 0,
         fixed: c["position"] == "fixed"
       }
 
@@ -191,8 +194,50 @@ defmodule Browser.Layout do
     end
   end
 
-  defp blockify(kind) when kind in [:inline, :contents], do: :block
+  defp blockify(kind) when kind in [:inline, :contents, :inline_block], do: :block
   defp blockify(kind), do: kind
+
+  # the box an inline-block establishes inside itself
+  defp inner_kind(c) do
+    if c["display"] == "inline-flex" and c["flex-direction"] not in ["column", "column-reverse"],
+      do: :flex,
+      else: :block
+  end
+
+  # An inline-block is laid out on its own (a block inside) and then placed in
+  # the line as one unit; its width properties size the unit, so they are
+  # removed from the element's own box.
+  defp inline_block_ops({:element, tag, attrs, kids}, parent_style, c, acc) do
+    box = box(tag, c)
+    ml = if box.ml == :auto, do: 0, else: box.ml
+    mr = if box.mr == :auto, do: 0, else: box.mr
+
+    own =
+      c
+      |> Map.drop(~w(width min-width max-width))
+      |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
+
+    attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+
+    sub =
+      {:element, tag, attrs, kids}
+      |> walk_element(parent_style, [], :inline_inner)
+      |> Enum.reverse()
+
+    {_, br, _, bl} = box.bw
+
+    spec = %{
+      width: c["width"],
+      minw: c["min-width"],
+      maxw: c["max-width"],
+      extra: if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br),
+      mextra: ml + mr,
+      rextra: box.pr + br + mr,
+      valign: c["vertical-align"]
+    }
+
+    [{:inline_block, sub, spec, parent_style} | acc]
+  end
 
   # display -> :block | :list_item | :flex | :inline | :contents
   defp kind(tag, c) do
@@ -220,6 +265,9 @@ defmodule Browser.Layout do
 
       "contents" ->
         :contents
+
+      d when d in ["inline-block", "inline-flex", "inline-grid", "inline-table"] ->
+        :inline_block
 
       _ ->
         :inline
@@ -541,7 +589,7 @@ defmodule Browser.Layout do
     {finalize(st), st.y + st.margin}
   end
 
-  defp run(ops, width, measure, view_height, margin) do
+  defp run(ops, width, measure, view_height, margin, root_height \\ :view, aligned? \\ true) do
     st = %{
       items: [],
       rects: [],
@@ -550,7 +598,9 @@ defmodule Browser.Layout do
       overlays: [],
       deferred: [],
       open: %{},
-      pos: [%{x: 0, y: 0, w: width, h: view_height}],
+      pos: [
+        %{x: 0, y: 0, w: width, h: if(root_height == :view, do: view_height, else: root_height)}
+      ],
       left: 0,
       right: 0,
       insets: [],
@@ -564,7 +614,8 @@ defmodule Browser.Layout do
       width: width,
       measure: measure,
       view_h: view_height,
-      margin: margin
+      margin: margin,
+      aligned?: aligned?
     }
 
     ops |> Enum.reduce(st, &op/2) |> flush()
@@ -630,6 +681,44 @@ defmodule Browser.Layout do
     st = %{st | left: l, right: r}
     st = if box.o.pos, do: %{st | pos: tl(st.pos)}, else: st
     finish_box(st, box)
+  end
+
+  defp op({:inline_block, sub, spec, style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    w = fit_width(st, sub, spec, avail)
+    {items, height, base} = layout_atom(st, sub, w)
+    line_left = st.margin + st.left
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    st =
+      if st.line == [],
+        do: st |> apply_gap() |> Map.merge(%{x: line_left, indent: line_left}),
+        else: st
+
+    st =
+      if st.line != [] and st.x + space_w + w > st.width - st.margin - st.right do
+        st |> flush() |> apply_gap() |> Map.merge(%{x: line_left, indent: line_left})
+      else
+        st
+      end
+
+    space_w = if st.line == [], do: 0, else: space_w
+    x = st.x + space_w
+
+    atom = %{
+      type: :atom,
+      x: x,
+      w: w,
+      h: height,
+      base: base,
+      items: items,
+      align: style.align,
+      valign: spec.valign
+    }
+
+    %{st | line: [atom | st.line], x: x + w, pending_space: nil}
   end
 
   defp op({:pos_inline}, st) do
@@ -908,32 +997,75 @@ defmodule Browser.Layout do
           if left && right do
             avail
           else
-            {items, _} = layout_sub(st, sub, avail)
-            min(avail, extent(items) + spec.rextra)
+            min(avail, shrink_extent(st, sub, avail) + spec.rextra)
           end
 
         w ->
-          w + spec.extra
+          w + spec.extra + spec.mextra
       end
 
-    width =
-      case resolve(spec.maxw, cw) do
-        nil -> width
-        m -> min(width, m + spec.extra)
-      end
-
-    width =
-      case resolve(spec.minw, cw) do
-        nil -> width
-        m -> max(width, m + spec.extra)
-      end
-
+    width = clamp_width(width, spec, cw)
     {width, if(right && !left, do: origin.x + cw - right - width, else: static_x)}
   end
 
+  defp clamp_width(width, spec, base) do
+    width =
+      case resolve(spec.maxw, base) do
+        nil -> width
+        m -> min(width, m + spec.extra + spec.mextra)
+      end
+
+    case resolve(spec.minw, base) do
+      nil -> width
+      m -> max(width, m + spec.extra + spec.mextra)
+    end
+  end
+
+  # outer width of an inline-block: its width, or shrink-to-fit within `avail`
+  defp fit_width(st, sub, spec, avail) do
+    width =
+      case resolve(spec.width, avail) do
+        nil ->
+          min(avail, shrink_extent(st, sub, max(avail, 1)) + spec.rextra)
+
+        w ->
+          w + spec.extra + spec.mextra
+      end
+
+    clamp_width(width, spec, avail)
+  end
+
+  # natural width of the content when wrapped at `width`: lines are measured
+  # left-aligned, since centring inside the available width would inflate it
+  defp shrink_extent(st, sub, width) do
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false)
+    sub_st |> finalize() |> extent()
+  end
+
   defp layout_sub(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0)
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil)
     {finalize(sub_st), sub_st.y}
+  end
+
+  # An inline-block's content: laid out at `width`; returns its items (relative
+  # to its top-left), its height including trailing margin, and its baseline
+  # (bottom of the last text line, or the bottom edge if there is no text).
+  defp layout_atom(st, sub, width) do
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil)
+    height = sub_st.y + sub_st.gap
+    items = finalize(sub_st)
+    {items, height, last_baseline(items, height)}
+  end
+
+  defp last_baseline(items, height) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        height
+
+      texts ->
+        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
+        for(%{y: ^last_y} = t <- texts, do: t.y + t.h) |> Enum.max()
+    end
   end
 
   # right edge of the text, for shrink-to-fit
@@ -994,7 +1126,7 @@ defmodule Browser.Layout do
 
   # Extend the previous word over the gap when both belong to the same link or
   # the same decoration, so underlines and click targets are continuous.
-  defp bridge(%{line: [prev | rest]} = st, item, gap) when gap > 0 do
+  defp bridge(%{line: [%{type: :text} = prev | rest]} = st, item, gap) when gap > 0 do
     same_link = is_binary(item.href) and prev.href == item.href
 
     same_deco =
@@ -1010,27 +1142,57 @@ defmodule Browser.Layout do
 
   defp flush(%{line: []} = st), do: %{st | pending_space: nil}
 
+  # A line holds words and inline-block atoms. Baseline-aligned atoms (the
+  # default) put their baseline on the line's, which sits at the taller of the
+  # text's and the atoms' ascent; the line grows to hold whatever hangs below.
+  # Atoms with `vertical-align: top | bottom | middle` are placed afterwards
+  # against the finished line, which they can only make taller.
   defp flush(st) do
-    lh = round(st.lh * 1.35)
-    items = Enum.reverse(st.line)
-    shift = align_shift(items, st)
+    {atoms, texts} = Enum.split_with(st.line, &(&1.type == :atom))
+    {floating, on_baseline} = Enum.split_with(atoms, &(&1.valign in ["top", "bottom", "middle"]))
+    lh = if st.lh > 0, do: round(st.lh * 1.35), else: 0
+    text_base = if st.lh > 0, do: lh - div(lh - st.lh, 4), else: 0
+
+    base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base))
+    below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base))
+    line_h = Enum.reduce(floating, base + below, &max(&2, &1.h))
+    shift = align_shift(Enum.reverse(st.line), st)
+    dy = base - text_base
 
     placed =
-      Enum.map(st.line, fn it ->
-        %{it | x: it.x + shift, y: st.y + lh - it.h - div(lh - it.h, 4)}
-      end)
+      for it <- texts,
+          do: %{it | x: it.x + shift, y: st.y + dy + lh - it.h - div(lh - it.h, 4)}
+
+    top_of = fn
+      %{valign: "top"} -> st.y
+      %{valign: "bottom"} = a -> st.y + line_h - a.h
+      %{valign: "middle"} = a -> st.y + base - round(st.lh * 0.3) - div(a.h, 2)
+      a -> st.y + base - a.base
+    end
+
+    moved =
+      for atom <- Enum.reverse(atoms),
+          sub <- atom.items,
+          do: move(sub, atom.x + shift, top_of.(atom))
+
+    {rects, others} = Enum.split_with(moved, &(&1.type == :rect))
+    new_items = Enum.reverse(others) ++ placed
 
     %{
       st
-      | items: placed ++ st.items,
-        n: st.n + length(placed),
+      | items: new_items ++ st.items,
+        n: st.n + length(new_items),
+        rects: Enum.reverse(rects) ++ st.rects,
+        nr: st.nr + length(rects),
         line: [],
-        y: st.y + lh,
+        y: st.y + line_h,
         lh: 0,
         x: st.indent,
         pending_space: nil
     }
   end
+
+  defp align_shift(_items, %{aligned?: false}), do: 0
 
   defp align_shift([first | _] = items, st) do
     last = List.last(items)

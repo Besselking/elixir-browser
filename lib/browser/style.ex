@@ -13,7 +13,7 @@ defmodule Browser.Style do
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
             width height min-height max-height min-width max-width box-sizing clip clip-path
-            text-indent opacity margin-right padding-right
+            text-indent opacity margin-right padding-right vertical-align
             border-top-width border-right-width border-bottom-width border-left-width
             border-top-style border-right-style border-bottom-style border-left-style
             border-top-color border-right-color border-bottom-color border-left-color
@@ -86,6 +86,7 @@ defmodule Browser.Style do
   u, ins { text-decoration: underline }
   s, strike, del { text-decoration: line-through }
   center, th { text-align: center }
+  button { display: inline-block; padding: 1px 6px; border: 1px solid #767676; background-color: #efefef; text-align: center }
   """
 
   def ua_css, do: @ua_css

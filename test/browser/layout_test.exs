@@ -610,4 +610,248 @@ defmodule Browser.LayoutTest do
       refute Enum.any?(page_items("<html><body><p>x</p></body></html>"), &(&1.type == :canvas))
     end
   end
+
+  describe "inline-block" do
+    alias Browser.Page
+
+    defp ib(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wi(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp rs(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "inline-blocks sit side by side on one line" do
+      html =
+        ~s(<span style="display:inline-block; width:100px; background:#eee">a</span>) <>
+          ~s(<span style="display:inline-block; width:100px; background:#ddd">b</span>)
+
+      {items, _} = ib(html)
+      [r1, r2] = rs(items)
+      assert r1.w == 100 and r2.w == 100
+      assert r2.x == r1.x + 100
+      assert wi(items, "a").y == wi(items, "b").y
+    end
+
+    test "padding and border take space inside the unit" do
+      html =
+        ~s(<span style="display:inline-block; padding:5px 8px; border:2px solid #000; background:#eee">hi</span>)
+
+      {items, _} = ib(html)
+      # background + 4 border sides
+      assert length(rs(items)) == 5
+      bg = hd(rs(items))
+      hi = wi(items, "hi")
+      assert hi.x == bg.x + 2 + 8
+      assert bg.w == 2 + 8 + hi.w + 8 + 2
+      assert hi.y >= bg.y + 2 + 5
+    end
+
+    test "shrink-to-fit width follows the content, not the container" do
+      {items, _} = ib(~s(<span style="display:inline-block; background:#eee">short</span>), 800)
+      [bg] = rs(items)
+      assert bg.w == wi(items, "short").w
+    end
+
+    test "shrink-to-fit is capped by the available width and wraps the text" do
+      text = String.duplicate("word ", 40)
+      {items, _} = ib(~s(<span style="display:inline-block; background:#eee">#{text}</span>), 208)
+      [bg] = rs(items)
+      assert bg.w <= 200
+      assert length(Enum.uniq(for %{type: :text} = t <- items, do: t.y)) > 1
+    end
+
+    test "inline-blocks wrap onto the next line when they don't fit" do
+      box = ~s(<span style="display:inline-block; width:90px; background:#eee">x</span>)
+      {items, _} = ib(String.duplicate(box, 5), 208)
+      ys = items |> rs() |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(ys) == 3
+
+      assert items |> rs() |> Enum.group_by(& &1.y) |> Map.values() |> Enum.map(&length/1) == [
+               2,
+               2,
+               1
+             ]
+    end
+
+    test "text inside aligns to the baseline of the surrounding text" do
+      html =
+        ~s(before <span style="display:inline-block; padding:10px; border:2px solid #000">inside</span> after)
+
+      {items, _} = ib(html)
+      before = wi(items, "before")
+      inside = wi(items, "inside")
+      after_ = wi(items, "after")
+      assert before.y + before.h == inside.y + inside.h
+      assert after_.y + after_.h == inside.y + inside.h
+    end
+
+    test "the line grows to hold a tall inline-block, and the next line starts below it" do
+      html =
+        ~s(<span style="display:inline-block; height:80px; background:#eee">tall</span><p>next</p>)
+
+      {items, _} = ib(html)
+      [bg] = rs(items)
+      assert bg.h == 80
+      assert wi(items, "next").y >= bg.y + 80
+    end
+
+    test "margins separate inline-blocks" do
+      html =
+        ~s(<span style="display:inline-block; width:50px; margin-right:20px; background:#eee">a</span>) <>
+          ~s(<span style="display:inline-block; width:50px; background:#ddd">b</span>)
+
+      {items, _} = ib(html)
+      [r1, r2] = rs(items)
+      assert r2.x == r1.x + 50 + 20
+    end
+
+    test "vertical margins are part of the unit's height" do
+      html =
+        ~s(<span style="display:inline-block; margin:10px 0; background:#eee">m</span><p>n</p>)
+
+      {items, _} = ib(html)
+      [bg] = rs(items)
+      plain_h = bg.h
+      assert wi(items, "n").y >= bg.y + plain_h + 10
+    end
+
+    test "min-width and max-width apply to the unit" do
+      {items, _} =
+        ib(~s(<span style="display:inline-block; min-width:120px; background:#eee">a</span>))
+
+      assert [%{w: 120}] = rs(items)
+
+      text = String.duplicate("word ", 20)
+
+      {items, _} =
+        ib(~s(<span style="display:inline-block; max-width:80px; background:#eee">#{text}</span>))
+
+      assert [%{w: w}] = rs(items)
+      assert w <= 80
+    end
+
+    test "box-sizing border-box includes padding and border in the width" do
+      html =
+        ~s(<span style="display:inline-block; width:100px; padding:10px; border:1px solid #000; box-sizing:border-box; background:#eee">a</span>)
+
+      {items, _} = ib(html)
+      assert hd(rs(items)).w == 100
+    end
+
+    test "text-align on the parent positions inline-blocks" do
+      html =
+        ~s(<div style="text-align:center"><span style="display:inline-block; width:100px; background:#eee">a</span></div>)
+
+      {items, _} = ib(html, 408)
+      [bg] = rs(items)
+      assert bg.x == 4 + 150
+    end
+
+    test "block content inside an inline-block" do
+      html = ~s(<span style="display:inline-block; width:100px"><p>one</p><p>two</p></span>)
+      {items, _} = ib(html)
+      assert wi(items, "two").y > wi(items, "one").y
+    end
+
+    test "links inside an inline-block keep their href and move with it" do
+      html =
+        ~s(pad <span style="display:inline-block; margin-left:40px"><a href="/x">link</a></span>)
+
+      {items, _} = ib(html)
+      link = wi(items, "link")
+      assert link.href == "/x"
+      assert link.x > 40
+    end
+
+    test "absolute children are positioned relative to a relative inline-block" do
+      html =
+        ~s(<span style="display:inline-block; position:relative; width:100px; height:50px; margin-left:60px">in) <>
+          ~s(<span style="position:absolute; top:0; right:0">tag</span></span>)
+
+      {items, _} = ib(html)
+      tag = wi(items, "tag")
+      # gutter + margin-left + width
+      assert tag.x + tag.w == 4 + 60 + 100
+    end
+
+    test "inline-flex lays out children in a row inside the unit" do
+      html = ~s(<span style="display:inline-flex"><div>a</div><div>b</div></span>)
+      {items, _} = ib(html)
+      assert wi(items, "a").y == wi(items, "b").y
+    end
+
+    test "button gets a box by default" do
+      {items, _} = ib("<button>Go</button> text")
+      assert length(rs(items)) == 5
+      go = wi(items, "Go")
+      text = wi(items, "text")
+      assert go.y + go.h == text.y + text.h
+    end
+
+    test "empty inline-block with a size still takes room" do
+      html =
+        ~s(a<span style="display:inline-block; width:30px; height:10px; background:#eee"></span>b)
+
+      {items, _} = ib(html)
+      assert wi(items, "b").x >= wi(items, "a").x + wi(items, "a").w + 30
+    end
+  end
+
+  describe "inline-block refinements" do
+    alias Browser.Page
+
+    defp rb(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wr(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp rr(items), do: Enum.filter(items, &(&1.type == :rect))
+
+    test "centered text doesn't inflate a shrink-to-fit unit" do
+      html =
+        ~s(<span style="display:inline-block; text-align:center; background:#eee">tiny</span>)
+
+      {items, _} = rb(html, 800)
+      [bg] = rr(items)
+      assert bg.w == wr(items, "tiny").w
+    end
+
+    test "buttons shrink to their label plus padding and border" do
+      {items, _} = rb("<button>Go</button>", 800)
+      [bg | _] = rr(items)
+      go = wr(items, "Go")
+      assert bg.w == go.w + 2 * 6 + 2 * 1
+    end
+
+    test "vertical-align top, middle and bottom position atoms against the line" do
+      tall = ~s(<span style="display:inline-block; height:60px; background:#eee">T</span>)
+
+      for {valign, check} <- [
+            {"top", fn small, big -> small.y == big.y end},
+            {"bottom", fn small, big -> small.y + small.h == big.y + big.h end},
+            {"middle", fn small, big -> small.y > big.y and small.y + small.h < big.y + big.h end}
+          ] do
+        html =
+          tall <>
+            ~s(<span style="display:inline-block; vertical-align:#{valign}; background:#ddd">s</span>)
+
+        {items, _} = rb(html)
+        [big, small] = rr(items)
+        assert big.h == 60
+        assert check.(small, big), "#{valign}: #{inspect({small, big})}"
+      end
+    end
+
+    test "floating atoms can make the line taller but never shorter" do
+      html =
+        ~s(<span style="display:inline-block; vertical-align:top; height:100px; background:#eee">a</span>) <>
+          ~s(<span style="display:inline-block; height:10px; background:#ddd">b</span><p>next</p>)
+
+      {items, _} = rb(html)
+      assert wr(items, "next").y >= 100
+    end
+  end
 end
