@@ -23,7 +23,7 @@ defmodule Browser.UI do
 
   def build do
     :ets.new(@view, [:named_table, :public])
-    :ets.insert(@view, {:view, [], 0})
+    :ets.insert(@view, {:view, [], 0, true})
 
     wx = :wx.new()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
@@ -39,7 +39,8 @@ defmodule Browser.UI do
     :wxSizer.add(row, url, proportion: 1, border: 3, flag: @all)
     :wxWindow.setSizer(toolbar, row)
 
-    panel = :wxPanel.new(frame, style: 65536)
+    # FULL_REPAINT_ON_RESIZE | WANTS_CHARS (Tab, Enter and arrows arrive as char events)
+    panel = :wxPanel.new(frame, style: 65536 + 262_144)
     :wxWindow.setBackgroundColour(panel, {255, 255, 255})
     :wxWindow.setBackgroundStyle(panel, :wxe_util.get_const(:wxBG_STYLE_PAINT))
 
@@ -58,7 +59,7 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :motion)
     :wxPanel.connect(panel, :mousewheel)
     :wxPanel.connect(panel, :size)
-    :wxPanel.connect(panel, :key_down)
+    :wxPanel.connect(panel, :char)
     :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel) end)
 
     :wxFrame.show(frame)
@@ -75,7 +76,9 @@ defmodule Browser.UI do
     }
   end
 
-  def publish(items, scroll), do: :ets.insert(@view, {:view, items, scroll})
+  @doc "Hands the painter what to draw; `caret_on` is the blink state of the text caret."
+  def publish(items, scroll, caret_on \\ true),
+    do: :ets.insert(@view, {:view, items, scroll, caret_on})
 
   def client_width(%{panel: panel}), do: panel |> :wxWindow.getClientSize() |> elem(0)
   def client_height(%{panel: panel}), do: panel |> :wxWindow.getClientSize() |> elem(1)
@@ -119,7 +122,7 @@ defmodule Browser.UI do
   # -- painting (runs in wx callback process) --------------------------------
 
   defp paint(panel) do
-    [{:view, items, scroll}] = :ets.lookup(@view, :view)
+    [{:view, items, scroll, caret_on}] = :ets.lookup(@view, :view)
     dc = :wxPaintDC.new(panel)
 
     canvas =
@@ -134,6 +137,7 @@ defmodule Browser.UI do
 
     for item <- items,
         item.type != :canvas,
+        item.type != :caret or caret_on,
         not Map.get(item, :hidden, false),
         item.y - scroll < h,
         item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
@@ -146,6 +150,20 @@ defmodule Browser.UI do
 
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  # the focus ring: a 2px line around the control, following its rounded corners
+  defp draw(dc, %{type: :ring} = item, y, _scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    radii = item.radius || {{0, 0}, {0, 0}, {0, 0}, {0, 0}}
+    c = item.color
+    borders(gc, item.x, y, item.w, item.h, radii, %{w: {2, 2, 2, 2}, c: {c, c, c, c}})
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw(dc, %{type: :caret} = item, y, _scroll) do
+    :wxDC.setPen(dc, :wxPen.new(item.color))
+    :wxDC.drawLine(dc, {item.x, y}, {item.x, y + item.h})
   end
 
   # Boxes with rounded corners are drawn as paths on a graphics context: the
@@ -325,7 +343,89 @@ defmodule Browser.UI do
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
 
-  def set_cursor(%{panel: p}, hand?) do
-    :wxWindow.setCursor(p, :wxCursor.new(if hand?, do: 6, else: 1))
+  @doc "Sets the mouse cursor over the page: `:arrow`, `:hand` or `:text`."
+  def set_cursor(%{panel: p}, kind) do
+    id =
+      case kind do
+        true -> 6
+        :hand -> 6
+        :text -> 7
+        _ -> 1
+      end
+
+    :wxWindow.setCursor(p, :wxCursor.new(id))
   end
+
+  @doc "Moves keyboard focus to the page, so key events reach it."
+  def focus_page(%{panel: p}), do: :wxWindow.setFocus(p)
+
+  # -- controls --------------------------------------------------------------------
+
+  @doc "The id of the form control at page position `{x, y}` (the smallest if they nest), or nil."
+  def control_at(controls, x, y) do
+    controls
+    |> Enum.filter(fn {_cid, b} ->
+      x >= b.x and x <= b.x + b.w and y >= b.y and y <= b.y + b.h
+    end)
+    |> Enum.min_by(fn {_cid, b} -> b.w * b.h end, fn -> nil end)
+    |> case do
+      nil -> nil
+      {cid, _} -> cid
+    end
+  end
+
+  # -- keyboard and clipboard ------------------------------------------------------
+
+  @doc "Reads a wx key event into the plain map `Browser.Interact.key/1` expects."
+  def key_event(
+        wxKey(
+          keyCode: code,
+          uniChar: char,
+          controlDown: ctrl,
+          metaDown: meta,
+          shiftDown: shift,
+          altDown: alt
+        )
+      ) do
+    %{code: code, char: char, ctrl?: ctrl, meta?: meta, shift?: shift, alt?: alt}
+  end
+
+  @doc "The text on the clipboard, or \"\"."
+  def clipboard_text do
+    clip = :wxClipboard.get()
+
+    if :wxClipboard.open(clip) do
+      data = :wxTextDataObject.new()
+      text = if :wxClipboard.getData(clip, data), do: :wxTextDataObject.getText(data), else: []
+      :wxClipboard.close(clip)
+      List.to_string(text)
+    else
+      ""
+    end
+  end
+
+  # -- select popup ----------------------------------------------------------------
+
+  @menu_base 1000
+
+  @doc """
+  Pops up a menu of `labels` at page position `{x, y}` (the chosen one is ticked). The
+  choice arrives as a `command_menu_selected` event whose id is `menu_base() + index`.
+  """
+  def popup_menu(%{panel: p}, {x, y}, labels, selected) do
+    menu = :wxMenu.new()
+
+    labels
+    |> Enum.with_index()
+    |> Enum.each(fn {label, i} ->
+      text = if i == selected, do: "✓ " <> label, else: "   " <> label
+      :wxMenu.append(menu, @menu_base + i, String.to_charlist(text))
+    end)
+
+    :wxMenu.connect(menu, :command_menu_selected)
+    :wxWindow.popupMenu(p, menu, x, y)
+    :ok
+  end
+
+  def menu_base, do: @menu_base
 end

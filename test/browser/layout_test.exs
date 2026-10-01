@@ -407,7 +407,7 @@ defmodule Browser.LayoutTest do
   describe "geometry invariants" do
     alias Browser.Page
 
-    for fixture <- ~w(sample hidden positioning) do
+    for fixture <- ~w(sample hidden positioning boxes rounded lineheight forms) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("test/fixtures/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -1365,10 +1365,10 @@ defmodule Browser.LayoutTest do
 
     test "a placeholder is grey and disappears once there is a value" do
       {items, _} = fm(~s(<input placeholder="Search here">))
-      assert wf(items, "Search").color == {117, 117, 117}
+      assert wf(items, "Search here").color == {117, 117, 117}
       {items, _} = fm(~s(<input placeholder="Search here" value="typed">))
       assert wf(items, "typed").color == {0, 0, 0}
-      refute wf(items, "Search")
+      refute wf(items, "Search here")
     end
 
     test "passwords are masked" do
@@ -1407,10 +1407,21 @@ defmodule Browser.LayoutTest do
     end
 
     test "radio buttons are circles" do
-      {items, _} = fm(~s(<input type="radio" checked>))
+      {items, _} = fm(~s(<input type="radio">))
       [box] = boxes(items)
       assert box.radius == {{7, 7}, {7, 7}, {7, 7}, {7, 7}}
-      assert wf(items, "●")
+    end
+
+    test "a checked radio's dot is a round box centred in the circle" do
+      {items, _} = fm(~s(<input type="radio" checked>))
+      [box, dot] = boxes(items)
+      assert dot.w == 7 and dot.h == 7
+      assert dot.radius == {{3, 3}, {3, 3}, {3, 3}, {3, 3}}
+      # equal space on all four sides, inside the 1px border
+      assert dot.x - (box.x + 1) == box.x + box.w - 1 - (dot.x + dot.w)
+      assert dot.y - (box.y + 1) == box.y + box.h - 1 - (dot.y + dot.h)
+      # and no stray text glyph
+      refute Enum.any?(items, &(&1.type == :text and &1.text == "●"))
     end
 
     test "buttons show their label and fit it" do
@@ -1518,6 +1529,117 @@ defmodule Browser.LayoutTest do
           assert is_integer(Map.fetch!(it, key)), "#{key} of #{inspect(it)}"
         end
       end
+    end
+  end
+
+  describe "focus, caret and control bounds" do
+    alias Browser.Page
+
+    defp fx(html, opts \\ [], width \\ 500) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600, opts)
+    end
+
+    defp tx(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "controls tag their text and boxes with an id; other content has none" do
+      {items, _} = fx(~s(plain <input value="v"><input value="w">))
+      assert Map.get(tx(items, "plain"), :cid) == nil
+      assert tx(items, "v").cid == 0
+      assert tx(items, "w").cid == 1
+      assert [%{cid: 0}, %{cid: 1}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "controls/1 gives each control's border box" do
+      {items, _} = fx(~s(<input value="v"><textarea>t</textarea>))
+      bounds = Layout.controls(items)
+      assert Map.keys(bounds) |> Enum.sort() == [0, 1]
+      assert bounds[0].w == 176 and bounds[0].h > 15
+      assert bounds[1].w == 166 and bounds[1].h == 42
+      assert bounds[0].x < bounds[1].x
+    end
+
+    test "no focus option, no ring and no caret" do
+      {items, _} = fx(~s(<input value="v">))
+      refute Enum.any?(items, &(&1.type in [:ring, :caret]))
+    end
+
+    test "focus adds a ring around the control's box" do
+      {items, _} = fx(~s(<input value="v">), focus: %{cid: 0, caret: {0, 0}})
+      [ring] = Enum.filter(items, &(&1.type == :ring))
+      box = Layout.controls(items)[0]
+      assert {ring.x, ring.y, ring.w, ring.h} == {box.x - 2, box.y - 2, box.w + 4, box.h + 4}
+      assert ring.cid == 0
+      # rounded like the control, grown by the ring width
+      assert ring.radius == {{4, 4}, {4, 4}, {4, 4}, {4, 4}}
+    end
+
+    test "the ring only goes around the focused control" do
+      {items, _} = fx(~s(<input value="a"><input value="b">), focus: %{cid: 1, caret: {0, 0}})
+      [ring] = Enum.filter(items, &(&1.type == :ring))
+      assert ring.x > Layout.controls(items)[0].x + 100
+    end
+
+    test "the caret sits between characters, measured with the control's font" do
+      {items, _} = fx(~s(<input value="hello">), focus: %{cid: 0, caret: {0, 3}})
+      [caret] = Enum.filter(items, &(&1.type == :caret))
+      text = tx(items, "hello")
+      # measure/2 here is length * size / 2 per character
+      assert caret.x == text.x + 3 * div(text.size, 2)
+      assert caret.y == text.y and caret.w == 1
+      assert caret.h > text.h
+
+      {items, _} = fx(~s(<input value="hello">), focus: %{cid: 0, caret: {0, 0}})
+      assert Enum.find(items, &(&1.type == :caret)).x == tx(items, "hello").x
+
+      {items, _} = fx(~s(<input value="hello">), focus: %{cid: 0, caret: {0, 5}})
+      c = Enum.find(items, &(&1.type == :caret))
+      assert c.x == tx(items, "hello").x + tx(items, "hello").w
+    end
+
+    test "an empty control's caret is at the start of its text line" do
+      {items, _} = fx(~s(<input>), focus: %{cid: 0, caret: {0, 0}})
+      assert [%{type: :caret}] = Enum.filter(items, &(&1.type == :caret))
+      {items, _} = fx(~s(<input placeholder="Search">), focus: %{cid: 0, caret: {0, 0}})
+      assert Enum.find(items, &(&1.type == :caret)).x == tx(items, "Search").x
+    end
+
+    test "a textarea's caret is on the right line and column" do
+      {items, _} =
+        fx("<textarea rows=\"3\">one\ntwo\nthree</textarea>", focus: %{cid: 0, caret: {2, 2}})
+
+      caret = Enum.find(items, &(&1.type == :caret))
+      three = tx(items, "three")
+      assert caret.y == three.y
+      assert caret.x == three.x + 2 * div(three.size, 2)
+    end
+
+    test "a caret line past the end of the text is dropped" do
+      {items, _} = fx(~s(<input value="x">), focus: %{cid: 0, caret: {5, 0}})
+      refute Enum.any?(items, &(&1.type == :caret))
+    end
+
+    test "a caret inside a clipping control keeps the clip" do
+      {items, _} = fx(~s(<input value="x" size="3">), focus: %{cid: 0, caret: {0, 1}})
+      assert Map.has_key?(Enum.find(items, &(&1.type == :caret)), :clip)
+    end
+
+    test "focusing a missing control changes nothing" do
+      {plain, _} = fx(~s(<input value="v">))
+      {items, _} = fx(~s(<input value="v">), focus: %{cid: 9, caret: {0, 0}})
+      assert length(items) == length(plain)
+    end
+
+    test "blank lines in preformatted text take a line; a final newline does not" do
+      {items, _} = fx("<pre>a\n\nb</pre>")
+      ys = items |> Enum.filter(&(&1.type == :text and &1.text != "\u200B")) |> Enum.map(& &1.y)
+      [ya, yb] = ys
+      assert yb - ya >= 2 * 20
+
+      {items, h1} = fx("<pre>a\nb\n</pre>")
+      {_, h2} = fx("<pre>a\nb</pre>")
+      assert h1 == h2
+      assert length(Enum.filter(items, &(&1.type == :text))) == 2
     end
   end
 end

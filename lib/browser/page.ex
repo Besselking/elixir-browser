@@ -9,11 +9,24 @@ defmodule Browser.Page do
   @max_sheets 24
   @sheet_timeout 10_000
 
-  defstruct [:url, :title, :raw, :rules, :queries, :key, :nodes]
+  # `pruned` is the styled tree before form controls get their content, `nodes`
+  # what layout draws: `pruned` rendered with `form_state` (see `Browser.Forms`).
+  defstruct [
+    :url,
+    :title,
+    :raw,
+    :rules,
+    :queries,
+    :key,
+    :pruned,
+    :nodes,
+    forms: %{controls: %{}, forms: %{}},
+    form_state: %{}
+  ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
-  def load(url, env \\ Style.default_env()) do
-    case Fetch.load(url) do
+  def load(url, env \\ Style.default_env(), fetch_opts \\ []) do
+    case Fetch.load(url, fetch_opts) do
       {:ok, body, final} -> {:ok, build(body, final, env)}
       {:error, _} = err -> err
     end
@@ -21,7 +34,7 @@ defmodule Browser.Page do
 
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    raw = body |> String.replace_invalid() |> HTML.parse() |> Forms.transform()
+    {raw, forms} = body |> String.replace_invalid() |> HTML.parse() |> Forms.index()
 
     author =
       raw
@@ -34,7 +47,14 @@ defmodule Browser.Page do
     queries = Style.media_queries(rules)
 
     restyle(
-      %__MODULE__{url: url, title: Layout.title(raw), raw: raw, rules: rules, queries: queries},
+      %__MODULE__{
+        url: url,
+        title: Layout.title(raw),
+        raw: raw,
+        rules: rules,
+        queries: queries,
+        forms: forms
+      },
       env
     )
   end
@@ -50,8 +70,17 @@ defmodule Browser.Page do
       page
     else
       index = Style.index_rules(page.rules, env)
-      %{page | key: key, nodes: Style.prune(page.raw, index)}
+      render(%{page | key: key, pruned: Style.prune(page.raw, index)}, page.form_state)
     end
+  end
+
+  @doc """
+  Re-renders the form controls for `form_state`. Cheap: the styled tree is reused,
+  so this is what typing, toggling and choosing call.
+  """
+  def render(%__MODULE__{} = page, form_state) do
+    nodes = Forms.render(page.pruned, form_state, page.forms.controls)
+    %{page | form_state: form_state, nodes: nodes}
   end
 
   defp fetch_sheets(refs, base) do

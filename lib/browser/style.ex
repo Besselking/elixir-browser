@@ -102,7 +102,6 @@ defmodule Browser.Style do
   textarea { width: 160px; height: 36px; padding: 2px }
   select { padding: 0 4px; border-radius: 3px }
   input[disabled], select[disabled], textarea[disabled], button[disabled] { color: #6d6d6d; background-color: #efefef; border-color: #b8b8b8 }
-  placeholder { color: #757575 }
   fieldset { margin: 0 2px; padding: .35em .75em .625em; border: 1px solid #c0c0c0 }
   legend { padding: 0 2px }
   """

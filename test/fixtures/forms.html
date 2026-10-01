@@ -13,15 +13,16 @@ label { margin-right: 10px }
 <body><div class="page">
 <h1>Form controls</h1>
 <form class="card">
-  <div class="row"><label>Name <input type="text" value="Ada Lovelace"></label> <label>Email <input type="email" placeholder="you@example.com"></label></div>
-  <div class="row"><label>Password <input type="password" value="hunter2"></label> <label>Age <input type="number" value="36" size="4"></label></div>
-  <div class="row"><label><input type="checkbox" checked> Subscribe</label> <label><input type="checkbox"> Terms</label> <label><input type="radio" name="r" checked> Yes</label> <label><input type="radio" name="r"> No</label></div>
-  <div class="row"><label>Country <select><option>Iceland</option><option selected>Netherlands</option><option>Peru</option></select></label></div>
-  <div class="row"><textarea rows="3">A multi-line
+  <div class="row"><label>Name <input type="text" name="name" value="Ada Lovelace"></label> <label>Email <input type="email" name="email" placeholder="you@example.com"></label></div>
+  <div class="row"><label>Password <input type="password" name="pw" value="hunter2"></label> <label>Age <input type="number" name="age" value="36" size="4"></label></div>
+  <div class="row"><label><input type="checkbox" name="sub" checked> Subscribe</label> <label><input type="checkbox" name="terms" value="yes"> Terms</label> <label><input type="radio" name="r" value="yes" checked> Yes</label> <label><input type="radio" name="r" value="no"> No</label></div>
+  <div class="row"><label>Country <select name="country"><option value="is">Iceland</option><option value="nl" selected>Netherlands</option><option value="pe">Peru</option></select></label></div>
+  <div class="row"><textarea name="notes" rows="3">A multi-line
 text area with two
 lines of text.</textarea></div>
-  <div class="row"><input class="wide" type="text" placeholder="a full width input"></div>
-  <div class="row"><input type="submit" value="Submit"> <button class="primary">Primary</button> <input type="reset"> <button disabled>Disabled</button> <input type="text" value="disabled" disabled></div>
+  <div class="row"><input class="wide" type="text" name="wide" placeholder="a full width input"></div>
+  <div class="row"><input type="submit" name="go" value="Submit"> <button class="primary">Primary</button> <input type="reset"> <button disabled>Disabled</button> <input type="text" value="disabled" disabled></div>
   <fieldset><legend>Options</legend><label><input type="checkbox"> one</label> <label><input type="checkbox" checked> two</label></fieldset>
 </form>
+<form class="card" method="post" action="/echo"><div class="row"><input name="msg" value="posted text"> <input type="submit" value="Send by POST"></div></form>
 </div></body></html>

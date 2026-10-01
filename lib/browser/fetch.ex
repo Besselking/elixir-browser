@@ -33,22 +33,39 @@ defmodule Browser.Fetch do
     _ -> href
   end
 
-  def load(url), do: load(url, @max_redirects)
+  @doc """
+  Loads `url` into `{:ok, body, final_url}` or `{:error, message}`.
 
-  defp load("about:home", _), do: {:ok, @about_home, "about:home"}
-  defp load("about:" <> _ = url, _), do: {:ok, "<h1>Unknown page</h1>", url}
+  Options: `method: :get | :post` (default `:get`) and `body:` (a urlencoded form, for
+  POST). After a 301/302/303 redirect the request becomes a GET, as browsers do; 307
+  and 308 repeat the same request.
+  """
+  def load(url, opts \\ []),
+    do: fetch(url, Keyword.get(opts, :method, :get), Keyword.get(opts, :body), @max_redirects)
 
-  defp load("file://" <> path, _) do
+  defp fetch("about:home", _, _, _), do: {:ok, @about_home, "about:home"}
+  defp fetch("about:" <> _ = url, _, _, _), do: {:ok, "<h1>Unknown page</h1>", url}
+
+  defp fetch("file://" <> path, _, _, _) do
     case File.read(URI.decode(path)) do
       {:ok, body} -> {:ok, body, "file://" <> path}
       {:error, reason} -> {:error, "Cannot read #{path}: #{:file.format_error(reason)}"}
     end
   end
 
-  defp load(_url, 0), do: {:error, "Too many redirects"}
+  defp fetch(_url, _method, _body, 0), do: {:error, "Too many redirects"}
 
-  defp load(url, redirects) do
-    request = {String.to_charlist(url), [{~c"user-agent", ~c"ElixirBrowser/0.1"}]}
+  defp fetch(url, method, body, redirects) do
+    headers = [{~c"user-agent", ~c"ElixirBrowser/0.1"}]
+
+    request =
+      case method do
+        :post ->
+          {String.to_charlist(url), headers, ~c"application/x-www-form-urlencoded", body || ""}
+
+        _ ->
+          {String.to_charlist(url), headers}
+      end
 
     http_opts = [
       autoredirect: false,
@@ -60,11 +77,18 @@ defmodule Browser.Fetch do
       ]
     ]
 
-    case :httpc.request(:get, request, http_opts, body_format: :binary) do
+    case :httpc.request(method, request, http_opts, body_format: :binary) do
       {:ok, {{_, status, _}, headers, _body}} when status in [301, 302, 303, 307, 308] ->
         case List.keyfind(headers, ~c"location", 0) do
-          {_, loc} -> load(resolve(url, to_string(loc)), redirects - 1)
-          nil -> {:error, "Redirect without Location"}
+          {_, loc} ->
+            next = resolve(url, to_string(loc))
+
+            if status in [307, 308],
+              do: fetch(next, method, body, redirects - 1),
+              else: fetch(next, :get, nil, redirects - 1)
+
+          nil ->
+            {:error, "Redirect without Location"}
         end
 
       {:ok, {{_, status, _}, _headers, body}} when status in 200..299 ->

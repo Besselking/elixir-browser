@@ -52,8 +52,11 @@ defmodule Browser.Layout do
   @doc """
   Returns `{items, content_height}`. `view_height` is the viewport height, the
   reference for `bottom`/percentage offsets of positioned elements.
+
+  Option `focus: %{cid: id, caret: {line, column}}` adds a `:ring` item around the
+  focused form control and a `:caret` item at the given position of its text.
   """
-  def layout(nodes, width, measure, view_height \\ 768) do
+  def layout(nodes, width, measure, view_height \\ 768, opts \\ []) do
     style = %{
       size: @base,
       bold: false,
@@ -67,15 +70,115 @@ defmodule Browser.Layout do
       strike: false,
       align: :left,
       list: nil,
-      lh: :normal
+      lh: :normal,
+      cid: nil
     }
 
     ops = nodes |> walk(style, []) |> Enum.reverse()
     {items, height} = place(ops, width, measure, view_height)
+    items = add_focus(items, measure, opts[:focus])
 
     case canvas_background(nodes) do
       nil -> {items, height}
       color -> {[%{type: :canvas, color: color, x: 0, y: 0} | items], height}
+    end
+  end
+
+  # -- focus -----------------------------------------------------------------------
+
+  @ring_color {26, 115, 232}
+
+  defp add_focus(items, _measure, nil), do: items
+
+  defp add_focus(items, measure, %{cid: cid, caret: caret}) do
+    texts =
+      items
+      |> Enum.filter(&(&1.type == :text and Map.get(&1, :cid) == cid))
+      |> Enum.sort_by(&{&1.y, &1.x})
+
+    ring =
+      case controls(items)[cid] do
+        nil ->
+          []
+
+        b ->
+          [
+            %{
+              type: :ring,
+              x: b.x - 2,
+              y: b.y - 2,
+              w: b.w + 4,
+              h: b.h + 4,
+              radius: grow(b.radius, 2),
+              color: @ring_color,
+              cid: cid
+            }
+          ]
+      end
+
+    caret =
+      with {line, col} <- caret, %{} = it <- Enum.at(texts, line) do
+        prefix = String.slice(it.text, 0, col)
+        x = it.x + if(prefix == "", do: 0, else: measure.(prefix, it))
+
+        c = %{
+          type: :caret,
+          x: round(x),
+          y: it.y,
+          w: 1,
+          h: round(it.h * 1.25),
+          color: it.color,
+          cid: cid
+        }
+
+        [if(clip = Map.get(it, :clip), do: Map.put(c, :clip, clip), else: c)]
+      else
+        _ -> []
+      end
+
+    items ++ ring ++ caret
+  end
+
+  defp grow(nil, _by), do: nil
+
+  defp grow(radii, by) do
+    radii
+    |> Tuple.to_list()
+    |> Enum.map(fn {rx, ry} -> if rx > 0 and ry > 0, do: {rx + by, ry + by}, else: {0, 0} end)
+    |> List.to_tuple()
+  end
+
+  @doc """
+  Bounds of every form control that appears in `items`: `%{cid => %{x, y, w, h, radius}}`.
+  A control is its border box (its largest rect), or the box around its text if it has none.
+  """
+  def controls(items) do
+    items
+    |> Enum.filter(&(Map.get(&1, :cid) != nil and &1.type in [:rect, :text]))
+    |> Enum.group_by(& &1.cid)
+    |> Map.new(fn {cid, its} -> {cid, bounds(its)} end)
+  end
+
+  # the font of the control's text, for measuring it
+  defp font_of(items) do
+    case Enum.find(items, &(&1.type == :text)) do
+      nil -> nil
+      it -> Map.take(it, [:size, :bold, :italic, :mono])
+    end
+  end
+
+  defp bounds(items) do
+    case Enum.filter(items, &(&1.type == :rect)) do
+      [] ->
+        x0 = items |> Enum.map(& &1.x) |> Enum.min()
+        y0 = items |> Enum.map(& &1.y) |> Enum.min()
+        x1 = items |> Enum.map(&(&1.x + &1.w)) |> Enum.max()
+        y1 = items |> Enum.map(&(&1.y + round(&1.h * 1.25))) |> Enum.max()
+        %{x: x0, y: y0, w: x1 - x0, h: y1 - y0, radius: nil, font: font_of(items)}
+
+      rects ->
+        r = Enum.max_by(rects, &(&1.w * &1.h))
+        %{x: r.x, y: r.y, w: r.w, h: r.h, radius: Map.get(r, :radius), font: font_of(items)}
     end
   end
 
@@ -334,7 +437,7 @@ defmodule Browser.Layout do
     else
       ref = make_ref()
 
-      case box_spec(c, box) do
+      case box_spec(c, box, style) do
         nil ->
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
@@ -355,7 +458,7 @@ defmodule Browser.Layout do
 
   # Boxes whose geometry must be resolved at placement: backgrounds, borders,
   # explicit widths/heights, `auto` margins, clipping and positioned boxes.
-  defp box_spec(c, box) do
+  defp box_spec(c, box, style) do
     {bt, br, bb, bl} = box.bw
 
     spec = %{
@@ -373,6 +476,7 @@ defmodule Browser.Layout do
       sizing: if(c["box-sizing"] == "border-box", do: :border, else: :content),
       bg: box.bg,
       r: box.r,
+      cid: style.cid,
       h: num(c["height"]),
       min: num(c["min-height"]),
       max: num(c["max-height"]),
@@ -542,10 +646,16 @@ defmodule Browser.Layout do
         t when t in ~w(i em cite) -> %{style | italic: true}
         t when t in ~w(code tt kbd samp) -> %{style | mono: true}
         "pre" -> %{style | mono: true, pre: true}
-        "textarea" -> %{style | pre: true}
+        t when t in ~w(textarea input) -> %{style | pre: true}
         "a" -> link_style(style, attrs)
         t when is_map_key(@headings, t) -> %{style | size: @headings[t], bold: true}
         _ -> style
+      end
+
+    style =
+      case List.keyfind(attrs, "@cid", 0) do
+        {_, cid} -> %{style | cid: cid}
+        nil -> style
       end
 
     apply_computed(style, c)
@@ -618,13 +728,22 @@ defmodule Browser.Layout do
   defp align(v) when v in ["right", "end"], do: :right
   defp align(_), do: :left
 
+  # Preformatted text keeps its line breaks. A blank line holds a zero-width space so
+  # it still takes a line; the empty tail after a final newline just ends the line.
   defp pre_text(t, style, acc) do
-    t
-    |> String.split("\n")
+    lines = String.split(t, "\n")
+    last = length(lines) - 1
+
+    lines
     |> Enum.with_index()
     |> Enum.reduce(acc, fn {line, i}, a ->
       a = if i > 0, do: [{:flush} | a], else: a
-      if line == "", do: a, else: [{:word, String.replace(line, "\t", "    "), style, :pre} | a]
+
+      cond do
+        line != "" -> [{:word, String.replace(line, "\t", "    "), style, :pre} | a]
+        i == last -> a
+        true -> [{:word, "\u200B", style, :pre} | a]
+      end
     end)
   end
 
@@ -942,6 +1061,11 @@ defmodule Browser.Layout do
   # rounded corners is a single item carrying its radii and border data, for
   # the painter to draw as paths.
   defp outer_rects(%{o: o} = box, height) do
+    items = plain_outer_rects(box, height)
+    if o.cid, do: Enum.map(items, &Map.put(&1, :cid, o.cid)), else: items
+  end
+
+  defp plain_outer_rects(%{o: o} = box, height) do
     {bt, br, bb, bl} = o.bw
     {tc, rc, bc, lc} = o.bc
     {x, y, w} = {box.x, box.top, box.w}
@@ -1276,7 +1400,8 @@ defmodule Browser.Layout do
       color: style.color,
       underline: style.underline,
       strike: style.strike,
-      align: style.align
+      align: style.align,
+      cid: style.cid
     }
 
     st = bridge(st, item, space_w)
