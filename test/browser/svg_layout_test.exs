@@ -72,7 +72,7 @@ defmodule Browser.SvgLayoutTest do
       {items, _} = lay(~s|<a href="/x"><svg width="20" height="20"></svg></a>|)
       assert [%{href: href}] = svgs(items)
       assert href =~ "/x"
-      assert Browser.UI.link_at(items, 5, 5) =~ "/x"
+      assert Browser.UI.link_at(Browser.UI.links(items), 5, 5) =~ "/x"
     end
 
     test "display none and visibility hidden" do
