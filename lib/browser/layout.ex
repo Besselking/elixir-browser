@@ -114,6 +114,7 @@ defmodule Browser.Layout do
       mono: false,
       href: nil,
       pre: false,
+      ws: :normal,
       hidden: false,
       color: {0, 0, 0},
       underline: false,
@@ -464,6 +465,21 @@ defmodule Browser.Layout do
     do: Enum.reduce(nodes, acc, &walk(&1, style, &2))
 
   defp walk({:text, t}, %{pre: true} = style, acc), do: pre_text(t, style, acc)
+
+  defp walk({:text, t}, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line],
+    do: pre_text(t, style, acc, ws)
+
+  defp walk({:text, t}, %{ws: :nowrap} = style, acc) do
+    # whitespace collapses, but the words never wrap
+    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
+    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
+    words = t |> String.split() |> Enum.map(&{:word, &1, style, :pre})
+
+    case words do
+      [] -> if t == "", do: acc, else: [{:space, style} | acc]
+      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
+    end
+  end
 
   defp walk({:text, t}, style, acc) do
     leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
@@ -1195,7 +1211,7 @@ defmodule Browser.Layout do
         t when t in ~w(b strong) -> %{style | bold: true}
         t when t in ~w(i em cite) -> %{style | italic: true}
         t when t in ~w(code tt kbd samp) -> %{style | mono: true}
-        "pre" -> %{style | mono: true, pre: true}
+        "pre" -> %{style | mono: true, pre: true, ws: :pre}
         t when t in ~w(textarea input) -> %{style | pre: true}
         "a" -> link_style(style, attrs)
         t when is_map_key(@headings, t) -> %{style | size: @headings[t], bold: true}
@@ -1248,6 +1264,7 @@ defmodule Browser.Layout do
     |> put_if(c["text-align"], &%{&1 | align: align(&2)})
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
+    |> put_if(c["white-space"], &white_space(&1, &2))
     |> Map.put(:hidden, hidden?(c))
   end
 
@@ -1256,6 +1273,20 @@ defmodule Browser.Layout do
     do:
       c["visibility"] in ["hidden", "collapse"] or
         (is_number(c["font-size"]) and c["font-size"] < 1)
+
+  defp white_space(style, value) do
+    ws =
+      case value do
+        "pre" -> :pre
+        "pre-wrap" -> :pre_wrap
+        "break-spaces" -> :pre_wrap
+        "pre-line" -> :pre_line
+        "nowrap" -> :nowrap
+        _ -> :normal
+      end
+
+    %{style | ws: ws, pre: ws == :pre}
+  end
 
   defp put_if(style, nil, _fun), do: style
   defp put_if(style, false, _fun), do: style
@@ -1287,7 +1318,7 @@ defmodule Browser.Layout do
 
   # Preformatted text keeps its line breaks. A blank line holds a zero-width space so
   # it still takes a line; the empty tail after a final newline just ends the line.
-  defp pre_text(t, style, acc) do
+  defp pre_text(t, style, acc, ws \\ :pre) do
     lines = String.split(t, "\n")
     last = length(lines) - 1
 
@@ -1297,9 +1328,38 @@ defmodule Browser.Layout do
       a = if i > 0, do: [{:flush} | a], else: a
 
       cond do
-        line != "" -> [{:word, String.replace(line, "\t", "    "), style, :pre} | a]
+        line != "" -> Enum.reverse(line_ops(line, style, ws)) ++ a
         i == last -> a
         true -> [{:word, "\u200B", style, :pre} | a]
+      end
+    end)
+  end
+
+  # the words of one line: `pre` keeps it whole, `pre-wrap` keeps its spaces but may wrap,
+  # `pre-line` collapses spaces
+  defp line_ops(line, style, :pre),
+    do: [{:word, String.replace(line, "\t", "    "), style, :pre}]
+
+  defp line_ops(line, style, :pre_line) do
+    line
+    |> String.split()
+    |> Enum.map(&{:word, &1, style})
+    |> Enum.intersperse({:space, style})
+  end
+
+  defp line_ops(line, style, :pre_wrap) do
+    ~r/ +|[^ ]+/
+    |> Regex.scan(String.replace(line, "\t", "    "))
+    |> Enum.map(fn [run] ->
+      cond do
+        run == " " ->
+          {:space, style}
+
+        String.starts_with?(run, " ") ->
+          {:word, String.duplicate("\u00A0", String.length(run)), style, :pre}
+
+        true ->
+          {:word, run, style}
       end
     end)
   end
@@ -1341,6 +1401,8 @@ defmodule Browser.Layout do
       ],
       left: 0,
       right: 0,
+      free: 0,
+      ext: 0,
       insets: [],
       line: [],
       x: 0,
@@ -1503,8 +1565,8 @@ defmodule Browser.Layout do
     # child margins stay inside the box only when padding or a border separates them
     st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
     st = %{st | y: st.y + box.o.pb + bb}
-    {l, r} = box.saved
-    st = %{st | left: l, right: r}
+    {l, r, f} = box.saved
+    st = %{st | left: l, right: r, free: f}
     st = if box.o.pos, do: %{st | pos: tl(st.pos)}, else: st
     finish_box(st, box)
   end
@@ -1784,7 +1846,7 @@ defmodule Browser.Layout do
       nr0: st.nr,
       fl0: length(st.floats),
       ov0: length(st.overlays),
-      saved: {st.left, st.right}
+      saved: {st.left, st.right, st.free}
     }
 
     st = %{
@@ -1793,6 +1855,8 @@ defmodule Browser.Layout do
         blocks: [id | st.blocks],
         left: left + bl + o.pl,
         right: st.right + rest + br + o.pr,
+        # room beside a box with a width is not part of what it needs
+        free: st.free + if(o.width || o.maxw, do: max(rest - mr0, 0), else: 0),
         y: st.y + bt + o.pt
     }
 
@@ -1802,6 +1866,10 @@ defmodule Browser.Layout do
       st
     end
   end
+
+  # a box with a width is that wide for shrink-to-fit, whatever it holds (and the margin after it)
+  defp box_mr(%{mr: mr}) when is_number(mr), do: max(mr, 0)
+  defp box_mr(_), do: 0
 
   defp finish_box(st, %{o: o} = box) do
     {bt, br, bb, bl} = o.bw
@@ -1824,6 +1892,12 @@ defmodule Browser.Layout do
     limit = box.top + bt + o.pt + used
     st = if clipped?, do: drop_below(st, box, limit), else: st
     st = %{st | y: box.top + height}
+
+    st =
+      if o.width != nil and fixed_width?(box),
+        do: %{st | ext: max(st.ext, box.x + box.w + box_mr(o))},
+        else: st
+
     st = place_deferred(st, box, height)
 
     # overflow clips to the padding box
@@ -1837,7 +1911,7 @@ defmodule Browser.Layout do
     st = if o.clip, do: clip_new(st, box, clip), else: st
 
     # the box's own background and borders go under whatever is inside it
-    outer = outer_rects(box, height, st.images) |> measured_width(o)
+    outer = outer_rects(box, height, st.images)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
@@ -1845,18 +1919,6 @@ defmodule Browser.Layout do
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st
   end
-
-  # A box with a width and nothing in it is still as wide as that when shrink-to-fit sizes its
-  # container; a background image shows how wide it is (and the margin after it).
-  defp measured_width(items, %{width: w} = o) when w != nil do
-    mr = if is_number(o.mr), do: max(o.mr, 0), else: 0
-
-    for item <- items do
-      if item.type == :bgimage, do: Map.merge(item, %{rr: mr, sized: true}), else: item
-    end
-  end
-
-  defp measured_width(items, _o), do: items
 
   # everything the box painted sticks with it
   defp stick_new(st, %{o: o} = box, height) do
@@ -2313,7 +2375,7 @@ defmodule Browser.Layout do
   defp shrink_extent(st, sub, width) do
     memo({:extent, sub, width}, fn ->
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
-      sub_st |> finalize() |> extent()
+      max(sub_st |> finalize() |> extent(), sub_st.ext)
     end)
   end
 
@@ -2447,7 +2509,7 @@ defmodule Browser.Layout do
       align: style.align,
       cid: style.cid,
       # the room boxes around it keep free on its right: for measuring how wide content is
-      rr: st.right
+      rr: st.right - st.free
     }
 
     st = bridge(st, item, space_w)

@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<title>White space</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; line-height: 1.4 }
+  h2 { margin: 16px 0 4px; font-size: 15px }
+  .box { width: 260px; border: 1px dashed #888; padding: 6px; background: #fafafa; font-size: 14px }
+  .row { display: flex; gap: 12px; flex-wrap: wrap }
+  .tag { display: inline-block; white-space: nowrap; background: #c5cae9; padding: 2px 8px; border-radius: 8px }
+</style>
+</head>
+<body>
+<h1>white-space</h1>
+<div class="row">
+  <div><h2>normal</h2><div class="box" style="white-space:normal">Spaces   collapse,
+  newlines too, and long lines wrap inside the box.</div></div>
+  <div><h2>nowrap</h2><div class="box" style="white-space:nowrap;overflow:hidden">Spaces collapse but this line never wraps, so it is clipped.</div></div>
+  <div><h2>pre</h2><div class="box" style="white-space:pre;overflow:hidden">line one
+    indented   with   spaces
+a very long line that does not wrap at all</div></div>
+  <div><h2>pre-wrap</h2><div class="box" style="white-space:pre-wrap">line one
+    indented   with   spaces
+a very long line that wraps inside the box</div></div>
+  <div><h2>pre-line</h2><div class="box" style="white-space:pre-line">line one
+    spaces    collapse
+but newlines stay, and long lines wrap inside the box</div></div>
+</div>
+<h2>Nowrap tags in flowing text</h2>
+<p>Labels <span class="tag">stay in one piece</span> <span class="tag">even when</span> <span class="tag">the line is short</span> <span class="tag">and have to move down</span> <span class="tag">as a whole</span>.</p>
+</body>
+</html>

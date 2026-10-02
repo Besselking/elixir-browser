@@ -3549,4 +3549,82 @@ defmodule Browser.LayoutTest do
       assert image.w < 100
     end
   end
+
+  describe "white-space" do
+    defp ws(css, text, width \\ 200) do
+      page = Browser.Page.build(~s|<div style="margin:0;#{css}">#{text}</div>|, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2)
+      for %{type: :text} = t <- items, do: t
+    end
+
+    defp lines(items), do: items |> Enum.map(& &1.y) |> Enum.uniq() |> length()
+
+    test "normal wraps and collapses" do
+      items = ws("", String.duplicate("word ", 20))
+      assert lines(items) > 1
+    end
+
+    test "nowrap keeps everything on one line" do
+      items = ws("white-space:nowrap", String.duplicate("word ", 20) <> "\n x")
+      assert lines(items) == 1
+      assert Enum.max_by(items, & &1.x).x > 200
+    end
+
+    test "pre keeps newlines and does not wrap" do
+      items = ws("white-space:pre", "a\nb  c " <> String.duplicate("w", 100))
+      assert lines(items) == 2
+    end
+
+    test "pre-wrap keeps newlines and spaces but wraps" do
+      items = ws("white-space:pre-wrap", "a\nb " <> String.duplicate("word ", 20))
+      assert lines(items) > 3
+      assert Enum.all?(items, &(&1.x + &1.w <= 200))
+      spaced = ws("white-space:pre-wrap", "a    b")
+      [a, b] = spaced |> Enum.reject(&(&1.text =~ "\u00A0")) |> Enum.sort_by(& &1.x)
+      assert b.x - (a.x + a.w) >= 4 * 8
+    end
+
+    test "pre-line keeps newlines, collapses spaces, wraps" do
+      items = ws("white-space:pre-line", "a    b\nc\n\nd")
+      assert lines(items) == 4
+      [a, b | _] = Enum.sort_by(items, &{&1.y, &1.x})
+      assert b.x - (a.x + a.w) < 20
+    end
+
+    test "white-space is inherited" do
+      page =
+        Browser.Page.build(
+          ~s|<div style="white-space:nowrap"><p>#{String.duplicate("word ", 20)}</p></div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2)
+      assert items |> Enum.filter(&(&1.type == :text)) |> lines() == 1
+    end
+
+    test "a nowrap box is as wide as its content when shrink-to-fit" do
+      page =
+        Browser.Page.build(
+          ~s|<div style="float:left;white-space:nowrap;background:#ccc">#{String.duplicate("word ", 8)}</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 300, &measure/2)
+      assert lines(Enum.filter(items, &(&1.type == :text))) == 1
+    end
+  end
+
+  test "flex items holding fixed-width boxes sit side by side" do
+    box = ~s|<div><div style="width:100px;padding:5px">some text</div></div>|
+
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:flex;flex-wrap:wrap">#{box}#{box}#{box}</div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 600, &measure/2)
+    ys = for %{type: :text} = t <- items, uniq: true, do: t.y
+    assert ys == Enum.take(ys, 1)
+  end
 end

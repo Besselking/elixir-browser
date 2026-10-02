@@ -20,6 +20,7 @@ defmodule Browser.Fetch do
     {"floats.html", "Floats", "text flowing around floated boxes, clear, containment"},
     {"margins.html", "Margins", "negative margins, collapsing, percentage margins and padding"},
     {"transforms.html", "Transforms", "rotate, scale, skew, translate and transform-origin"},
+    {"whitespace.html", "White space", "normal, nowrap, pre, pre-wrap and pre-line"},
     {"sticky.html", "Sticky and fixed",
      "a header and a heading that stay in the window, a fixed badge"},
     {"wide.html", "Wide content", "pages wider than the window scroll sideways"}
