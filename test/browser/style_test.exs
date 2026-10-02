@@ -392,6 +392,12 @@ defmodule Browser.StyleTest do
       assert c["width"] == {:pct, 0.25}
     end
 
+    test "substituted variables stay separate values (var(--a)var(--b))" do
+      css = ".f { --x: -100%; --y: 1; scale: var(--x)var(--y) }"
+      html = ~s|<html><body><svg class="f"></svg></body></html>|
+      assert comp(html, css, "svg")["scale"] |> String.split() == ["-100%", "1"]
+    end
+
     test "margins may be negative, padding may not" do
       css = "div { margin: -4px -10% 0 -1rem; padding: -3px 2px }"
       c = computed_of(prune("<div>x</div>", css), "div")

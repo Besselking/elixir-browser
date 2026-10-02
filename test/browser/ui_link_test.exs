@@ -102,4 +102,47 @@ defmodule Browser.UILinkTest do
       assert UI.sticky_hit([], 5, 5, 0) == nil
     end
   end
+
+  describe "transformed items" do
+    alias Browser.Transform
+
+    # a 100 x 40 box at (0, 100), turned a quarter turn about its centre (50, 120)
+    @turn Transform.matrix(%{"transform" => "rotate(90deg)"}, {0, 100, 100, 40})
+
+    test "a link is found where the box is drawn, not where it was laid out" do
+      items = [link("/a", 0, 100, 100, 40, %{xform: [@turn]})]
+      # the quarter turn puts the right end of the box at the bottom: (50, 170)
+      assert UI.sticky_hit(items, 50, 165, 0) == {:link, "/a"}
+      # the middle of the old left end is now at the top, not at (5, 120)
+      assert UI.sticky_hit(items, 5, 120, 0) == nil
+    end
+
+    test "not in the ordinary index" do
+      items = [link("/a", 0, 100, 100, 40, %{xform: [@turn]})]
+      assert UI.link_at(UI.links(items), 20, 110) == nil
+    end
+
+    test "a transformed box does not cover what is under it" do
+      items = [%{type: :rect, x: 0, y: 100, w: 100, h: 40, xform: [@turn]}]
+      assert UI.sticky_hit(items, 50, 120, 0) == nil
+    end
+
+    test "controls get the position they have in the box" do
+      items = [%{type: :rect, x: 0, y: 100, w: 100, h: 40, cid: 3, xform: [@turn]}]
+      assert {:control, 3, py} = UI.sticky_hit(items, 50, 165, 0)
+      # the point where the box is, before it was turned: its right end
+      assert_in_delta py, 120.0, 1.0e-6
+    end
+
+    test "boxes with two transformations are undone one after the other" do
+      double = {2.0, 0.0, 0.0, 2.0, 0.0, 0.0}
+      items = [link("/b", 0, 0, 10, 10, %{xform: [@turn, double]})]
+      assert UI.sticky_hit(items, 1000, 1000, 0) == nil
+    end
+
+    test "a box that cannot be undone is never hit" do
+      flat = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+      assert UI.sticky_hit([link("/c", 0, 0, 10, 10, %{xform: [flat]})], 5, 5, 0) == nil
+    end
+  end
 end

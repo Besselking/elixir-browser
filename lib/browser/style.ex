@@ -27,7 +27,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
-            row-gap column-gap order border-spacing border-collapse float clear)
+            row-gap column-gap order border-spacing border-collapse float clear rotate scale transform-origin)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -819,7 +819,8 @@ defmodule Browser.Style do
       cond do
         base["opacity"] != 0.0 -> base
         # without scripts a reveal animation never runs: what would fade in shows its end state
-        reveal?(base) -> Map.delete(base, "opacity")
+        # (it starts displaced too: the end state is in place)
+        reveal?(base) -> Map.drop(base, ["opacity", "transform", "translate", "rotate", "scale"])
         true -> Map.put(base, "visibility", "hidden")
       end
 
@@ -885,7 +886,8 @@ defmodule Browser.Style do
 
         with {:ok, r} <- replacement,
              {:ok, tail} <- substitute(after_, custom, depth + 1) do
-          {:ok, before <> String.trim(r) <> tail}
+          # a substituted value is its own token(s): `var(--a)var(--b)` is two values, not one
+          {:ok, before <> " " <> String.trim(r) <> " " <> tail}
         end
     end
   end

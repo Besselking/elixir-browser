@@ -287,12 +287,104 @@ defmodule Browser.UI do
       y = item.y - sc
       clip = Map.get(item, :clip)
       if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - sc, clip.w, clip.h})
-      draw(dc, item, y, sc)
+
+      # inside a transformed box everything is drawn through its matrices (see `new_gc/1`)
+      xform = Map.get(item, :xform)
+      if xform, do: Process.put(:xform, {xform, sc})
+      draw_item(dc, item, y, sc)
+      if xform, do: Process.delete(:xform)
+
       if clip, do: :wxDC.destroyClippingRegion(dc)
     end
 
     :wxPaintDC.destroy(dc)
     :ok
+  end
+
+  # -- transformed boxes ------------------------------------------------------------------
+
+  # A graphics context for `dc`, set up for the item being drawn: boxes with `transform` (or
+  # `rotate`, `scale`) draw through their matrices, outermost first. A matrix works in page
+  # coordinates; the window is `sc` px down the page, which is taken out here.
+  defp new_gc(dc) do
+    gc = :wxGraphicsContext.create(dc)
+
+    case Process.get(:xform) do
+      nil ->
+        gc
+
+      {matrices, sc} ->
+        for {a, b, c, d, e, f} <- Enum.reverse(matrices) do
+          matrix =
+            :wxGraphicsContext.createMatrix(gc,
+              a: a,
+              b: b,
+              c: c,
+              d: d,
+              tx: e + c * sc,
+              ty: f + d * sc - sc
+            )
+
+          :wxGraphicsContext.concatTransform(gc, matrix)
+        end
+
+        gc
+    end
+  end
+
+  # The plain DC cannot rotate or scale, so text, boxes and lines of transformed boxes are
+  # drawn with the graphics context instead.
+  defp draw_item(dc, %{type: type} = item, y, sc) do
+    plain? = type in [:text, :hr, :caret] or (type == :rect and Map.get(item, :radius) == nil)
+
+    if plain? and Process.get(:xform),
+      do: draw_gc(dc, item, y),
+      else: draw(dc, item, y, sc)
+  end
+
+  defp draw_gc(dc, %{type: :rect} = item, y) do
+    gc = new_gc(dc)
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new(item.color))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.addRectangle(path, item.x, y, item.w, item.h)
+    :wxGraphicsContext.fillPath(gc, path)
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw_gc(dc, %{type: :text} = item, y) do
+    gc = new_gc(dc)
+    :wxGraphicsContext.setFont(gc, font(item), item.color)
+    :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+
+    if item.underline,
+      do: gc_line(gc, item.color, item.x, y + item.h + 2, item.x + item.w, y + item.h + 2)
+
+    if item.strike do
+      mid = y + div(item.h, 2) + 2
+      gc_line(gc, item.color, item.x, mid, item.x + item.w, mid)
+    end
+
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw_gc(dc, %{type: :hr} = item, y) do
+    gc = new_gc(dc)
+    gc_line(gc, {170, 170, 170}, item.x, y, item.x + item.w, y)
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp draw_gc(dc, %{type: :caret} = item, y) do
+    gc = new_gc(dc)
+    gc_line(gc, item.color, item.x, y, item.x, y + item.h)
+    :wxGraphicsContext.destroy(gc)
+  end
+
+  defp gc_line(gc, color, x0, y0, x1, y1) do
+    :wxGraphicsContext.setPen(gc, :wxPen.new(color))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.moveToPoint(path, x0, y0)
+    :wxGraphicsPath.addLineToPoint(path, x1, y1)
+    :wxGraphicsContext.strokePath(gc, path)
   end
 
   # -- shadows and background images --------------------------------------------------
@@ -303,7 +395,7 @@ defmodule Browser.UI do
   # fades the edge like a blur
   # selected text: a translucent wash over it
   defp draw(dc, %{type: :selection} = item, y, _scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     :wxGraphicsContext.setBrush(gc, :wxBrush.new({56, 132, 255, 90}))
     path = :wxGraphicsContext.createPath(gc)
     :wxGraphicsPath.addRectangle(path, item.x, y, item.w, item.h)
@@ -315,7 +407,7 @@ defmodule Browser.UI do
   defp draw(_dc, %{type: :box}, _y, _scroll), do: :ok
 
   defp draw(dc, %{type: :shadow} = item, _y, scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     clip_to(gc, item, scroll)
 
     for %{rect: {x, y, w, h}, radii: radii, color: color} <- item.layers do
@@ -331,7 +423,7 @@ defmodule Browser.UI do
   # an inset shadow: inside the box, frames (the box minus a hole) stacked from the
   # smallest hole to the biggest
   defp draw(dc, %{type: :inset_shadow} = item, y, scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     clip_to(gc, item, scroll)
     :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
 
@@ -353,7 +445,7 @@ defmodule Browser.UI do
   end
 
   defp draw(dc, %{type: :bgimage} = item, _y, scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     clip_to(gc, item, scroll)
     Enum.each(item.layers, &draw_layer(gc, &1, item.radius, scroll))
     :wxGraphicsContext.destroy(gc)
@@ -363,7 +455,7 @@ defmodule Browser.UI do
   defp draw(dc, %{type: :image} = item, y, scroll) do
     case :ets.lookup(@images, item.url) do
       [{_url, bitmap}] ->
-        gc = :wxGraphicsContext.create(dc)
+        gc = new_gc(dc)
 
         if clip = Map.get(item, :clip),
           do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
@@ -378,7 +470,7 @@ defmodule Browser.UI do
 
   # a vector picture: its display list is relative to the item's top-left corner
   defp draw(dc, %{type: :svg} = item, y, scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     clip_to(gc, item, scroll)
     :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
     draw_svg(gc, item.ops, item.x, y)
@@ -387,7 +479,7 @@ defmodule Browser.UI do
 
   # the focus ring: a 2px line around the control, following its rounded corners
   defp draw(dc, %{type: :ring} = item, y, _scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     radii = item.radius || {{0, 0}, {0, 0}, {0, 0}, {0, 0}}
     c = item.color
     borders(gc, item.x, y, item.w, item.h, radii, %{w: {2, 2, 2, 2}, c: {c, c, c, c}})
@@ -403,7 +495,7 @@ defmodule Browser.UI do
   # background fills a rounded outline, each border side is a straight strip and
   # each corner a ring segment in the colour of the thicker adjacent side.
   defp draw(dc, %{type: :rect, radius: radius} = item, y, scroll) when radius != nil do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
 
     if clip = Map.get(item, :clip),
       do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
@@ -421,7 +513,7 @@ defmodule Browser.UI do
 
   # a translucent fill needs the graphics context
   defp draw(dc, %{type: :rect, color: color} = item, y, _scroll) when tuple_size(color) == 4 do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
     path = :wxGraphicsContext.createPath(gc)
     :wxGraphicsPath.addRectangle(path, item.x, y, item.w, item.h)
@@ -465,7 +557,7 @@ defmodule Browser.UI do
 
   # the root element's background layers cover the whole window and scroll with the page
   defp draw_canvas_layers(dc, [%{type: :canvas, layers: [_ | _] = layers} | _], scroll) do
-    gc = :wxGraphicsContext.create(dc)
+    gc = new_gc(dc)
     Enum.each(layers, &draw_layer(gc, &1, nil, scroll))
     :wxGraphicsContext.destroy(gc)
   end
@@ -821,6 +913,10 @@ defmodule Browser.UI do
       %{stick: _}, acc ->
         acc
 
+      # transformed boxes are drawn somewhere else than they were laid out: see `sticky_hit/4`
+      %{xform: _}, acc ->
+        acc
+
       %{type: type, href: href} = it, acc
       when type in [:text, :image, :svg] and is_binary(href) ->
         first = band(it.y)
@@ -909,23 +1005,24 @@ defmodule Browser.UI do
       for it <- items,
           Map.has_key?(it, :w) and Map.has_key?(it, :h),
           shift = stick_shift(it, scroll),
-          sc = scroll - shift,
+          # the point on the page, as laid out: before sticking and before any transformation
+          {px, py} <- [item_space(it, x, y + scroll - shift)],
           inside?(
-            x,
-            y,
+            px,
+            py,
             it.x,
-            it.y - sc,
+            it.y,
             it.w,
             it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
           ),
-          clipped_in?(shift_clip(it, shift), x, y + scroll - shift) do
-        {it, shift}
+          Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
+        {it, py}
       end
 
     # the topmost (last painted) item decides; controls and links before plain boxes
     control =
-      Enum.find_value(at, fn {it, shift} ->
-        if Map.get(it, :cid) != nil, do: {:control, it.cid, y + scroll - shift}
+      Enum.find_value(at, fn {it, py} ->
+        if Map.get(it, :cid) != nil, do: {:control, it.cid, py}
       end)
 
     link =
@@ -934,16 +1031,30 @@ defmodule Browser.UI do
           do: {:link, it.href}
       end)
 
+    # a stuck box also keeps the page below it from being clicked; a transformed one does not
+    cover = Enum.any?(at, fn {it, _} -> Map.has_key?(it, :stick) end)
+
     cond do
       control -> control
       link -> link
-      at != [] -> :cover
+      cover -> :cover
       true -> nil
     end
   end
 
-  # clip rectangles are in page coordinates: for a point at the item's unshifted place
-  defp shift_clip(it, _shift), do: it
+  # where the item is, for the point `{x, y}` on the page as it is drawn
+  defp item_space(%{xform: matrices}, x, y) do
+    case Browser.Transform.unapply(matrices, x, y) do
+      nil -> :none
+      point -> point
+    end
+    |> case do
+      :none -> {-1.0e9, -1.0e9}
+      point -> point
+    end
+  end
+
+  defp item_space(_item, x, y), do: {x, y}
 
   def control_at(controls, x, y) do
     controls

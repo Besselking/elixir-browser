@@ -1001,8 +1001,8 @@ defmodule Browser.Session do
         width: width,
         links: UI.links(items),
         controls: Layout.controls(items),
-        hit_controls: Layout.controls(Enum.reject(items, &Map.has_key?(&1, :stick))),
-        sticky: Enum.filter(items, &Map.has_key?(&1, :stick)),
+        hit_controls: Layout.controls(Enum.reject(items, &moved_on_screen?/1)),
+        sticky: Enum.filter(items, &moved_on_screen?/1),
         content_w: Layout.content_width(items, width),
         sel: nil,
         sel_anchor: nil,
@@ -1044,7 +1044,7 @@ defmodule Browser.Session do
              do: UI.links(items),
              else: state.links
 
-        sticky = Enum.filter(items, &Map.has_key?(&1, :stick))
+        sticky = Enum.filter(items, &moved_on_screen?/1)
         scroll_by(%{state | items: items, links: links, sticky: sticky}, 0, :diff)
 
       :error ->
@@ -1145,6 +1145,9 @@ defmodule Browser.Session do
       %{state | scroll_x: sx}
     end
   end
+
+  # sticky, fixed and transformed items are drawn somewhere else than they were laid out
+  defp moved_on_screen?(item), do: Map.has_key?(item, :stick) or Map.has_key?(item, :xform)
 
   defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)

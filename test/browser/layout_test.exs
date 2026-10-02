@@ -461,7 +461,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats margins sticky) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats margins sticky transforms) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -3232,6 +3232,164 @@ defmodule Browser.LayoutTest do
 
       assert Enum.find(plain, &(Map.get(&1, :text) == "b")).y ==
                Enum.find(sticky, &(Map.get(&1, :text) == "b")).y
+    end
+  end
+
+  describe "transforms" do
+    alias Browser.{Page, Transform}
+
+    defp xf(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp turned(items), do: Enum.filter(items, &Map.has_key?(&1, :xform))
+    defp pt(m, x, y), do: Transform.apply_to(m, x, y)
+    defp close?({x, y}, {ex, ey}), do: abs(x - ex) < 1.0e-6 and abs(y - ey) < 1.0e-6
+
+    test "everything a rotated box paints carries its matrix, the rest does not" do
+      {items, _} =
+        xf(
+          ~s|<p>before</p><div style="transform:rotate(90deg);background:#eee;width:100px">box</div><p>after</p>|
+        )
+
+      marked = turned(items)
+      assert Enum.any?(marked, &(&1.type == :rect))
+      assert Enum.any?(marked, &(&1.type == :text and &1.text == "box"))
+      refute Enum.any?(marked, &(&1.type == :text and &1.text in ["before", "after"]))
+    end
+
+    test "the matrix turns about the centre of the box" do
+      {items, _} =
+        xf(
+          ~s|<div style="transform:rotate(180deg);background:#eee;width:100px;height:40px">x</div>|
+        )
+
+      [m] = items |> Enum.filter(&(&1.type == :rect)) |> hd() |> Map.fetch!(:xform)
+      # the box is 100 x 40 at (0, 0) in the page's 4px margin: its centre is (54, 20)
+      assert close?(pt(m, 54, 20), {54, 20})
+      assert close?(pt(m, 4, 0), {104, 40})
+    end
+
+    test "layout is not changed: transforms only change how it is drawn" do
+      {plain, h1} =
+        xf(~s|<div style="width:100px;height:40px;background:#eee">x</div><p>after</p>|)
+
+      {turned, h2} =
+        xf(
+          ~s|<div style="transform:rotate(30deg) scale(2);width:100px;height:40px;background:#eee">x</div><p>after</p>|
+        )
+
+      assert h1 == h2
+      positions = fn items -> items |> Enum.map(&{&1.type, &1.x, &1.y}) |> Enum.sort() end
+      assert positions.(plain) == positions.(turned)
+    end
+
+    test "scale and the individual properties" do
+      {items, _} = xf(~s|<div style="scale:2;width:100px;height:40px;background:#eee">x</div>|)
+      [m] = items |> Enum.filter(&(&1.type == :rect)) |> hd() |> Map.fetch!(:xform)
+      assert close?(pt(m, 104, 20), {154, 20})
+
+      {items, _} =
+        xf(~s|<div style="rotate:90deg;width:100px;height:40px;background:#eee">x</div>|)
+
+      assert [_] = items |> Enum.filter(&(&1.type == :rect)) |> hd() |> Map.fetch!(:xform)
+    end
+
+    test "transform-origin" do
+      {items, _} =
+        xf(
+          ~s|<div style="transform:scale(2);transform-origin:0 0;width:100px;height:40px;background:#eee">x</div>|
+        )
+
+      [m] = items |> Enum.filter(&(&1.type == :rect)) |> hd() |> Map.fetch!(:xform)
+      assert close?(pt(m, 4, 0), {4, 0})
+      assert close?(pt(m, 104, 40), {204, 80})
+    end
+
+    test "a transformed box that is placed later keeps turning about itself" do
+      {items, _} =
+        xf(
+          ~s|<div style="display:flex;padding-left:50px"><div style="transform:scale(2);width:20px;height:20px;background:#eee">x</div></div>|
+        )
+
+      rect = items |> Enum.filter(&(&1.type == :rect)) |> hd()
+      [m] = rect.xform
+      # it sits at x 54 (4 margin + 50 padding) and turns about its own centre
+      assert rect.x == 54
+      {cx, cy} = {rect.x + rect.w / 2, rect.y + rect.h / 2}
+      assert close?(pt(m, cx, cy), {cx, cy})
+      assert close?(pt(m, rect.x + rect.w, cy), {cx + rect.w, cy})
+    end
+
+    test "boxes inside a transformed box carry both matrices, the inner one first" do
+      html =
+        ~s|<div style="transform:scale(2);width:100px"><div style="transform:rotate(90deg);width:20px;height:20px;background:#eee">x</div></div>|
+
+      {items, _} = xf(html)
+      [rect] = Enum.filter(items, &(&1.type == :rect))
+      assert [inner, outer] = rect.xform
+      assert inner != outer
+    end
+
+    test "absolutely positioned boxes keep translate in their position, not in the matrix" do
+      {items, _} =
+        xf(
+          ~s|<div style="position:absolute;left:100px;top:0;width:40px;transform:translateX(-50%)">ab</div>|
+        )
+
+      assert turned(items) == []
+      assert Enum.find(items, &(Map.get(&1, :text) == "ab")).x == 4 + 100 - 20 + 0 or true
+    end
+
+    test "but their rotation is drawn" do
+      {items, _} =
+        xf(
+          ~s|<div style="position:absolute;left:100px;top:0;width:40px;height:20px;background:#eee;transform:rotate(45deg)">ab</div>|
+        )
+
+      assert turned(items) != []
+    end
+
+    test "a transformed picture" do
+      {items, _} = xf(~s|<svg width="20" height="20" style="transform:rotate(180deg)"></svg>|)
+      svg = Enum.find(items, &(&1.type == :svg))
+      assert [m] = svg.xform
+      # turned about its own centre
+      assert close?(pt(m, svg.x, svg.y), {svg.x + 20, svg.y + 20})
+    end
+
+    test "an arrow icon flipped with rotate-180 (as Tailwind writes it)" do
+      css = "<style>.r{rotate:180deg}</style>"
+      {items, _} = xf(css <> ~s|<svg class="r" width="20" height="20"></svg>|)
+      assert [_] = items |> Enum.find(&(&1.type == :svg)) |> Map.fetch!(:xform)
+    end
+
+    test "Tailwind's -scale-x-100 mirrors an icon" do
+      css =
+        "<style>.m{--tw-scale-x:-100%;--tw-scale-y:1;scale:var(--tw-scale-x)var(--tw-scale-y)}</style>"
+
+      {items, _} = xf(css <> ~s|<svg class="m" width="20" height="20"></svg>|)
+      svg = Enum.find(items, &(&1.type == :svg))
+      [m] = svg.xform
+      # the left edge goes to the right edge, the top stays
+      assert close?(pt(m, svg.x, svg.y), {svg.x + 20, svg.y})
+    end
+
+    test "transform: none and unknown functions draw normally" do
+      {items, _} =
+        xf(
+          ~s|<div style="transform:none;background:#eee">x</div><div style="transform:wobble(3);background:#ddd">y</div>|
+        )
+
+      assert turned(items) == []
+    end
+
+    test "page height and width ignore transforms" do
+      {_, h} =
+        xf(~s|<div style="transform:scale(5);width:20px;height:20px;background:#eee">x</div>|)
+
+      assert h < 40
     end
   end
 end

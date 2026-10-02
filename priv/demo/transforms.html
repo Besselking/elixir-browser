@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<title>Transforms</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; line-height: 1.5 }
+  h2 { margin: 18px 0 8px }
+  .row { display: flex; gap: 40px; padding: 30px 40px; background: #f4f4f8; flex-wrap: wrap }
+  .box { width: 90px; height: 60px; background: #5c6bc0; color: #fff; text-align: center; line-height: 60px; border-radius: 8px; border: 2px solid #283593 }
+  .r30 { transform: rotate(30deg) }
+  .r90 { transform: rotate(90deg) }
+  .s15 { transform: scale(1.5) }
+  .sx { transform: scale(1.4, 0.6) }
+  .combo { transform: rotate(-12deg) scale(1.2) }
+  .origin { transform: rotate(20deg); transform-origin: left top }
+  .skew { transform: skewX(-20deg) }
+  .move { transform: translate(20px, 10px) }
+  .prop { rotate: 45deg; scale: 0.8 }
+  .card { width: 150px; padding: 10px; background: #fff; border: 1px solid #aaa; box-shadow: 3px 3px 6px #0004; transform: rotate(-4deg) }
+  .arrow { width: 28px; height: 28px; fill: none; stroke: #333; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round }
+  .flip { transform: rotate(180deg) }
+  .outer { transform: scale(1.3); background: #ffe0b2; padding: 10px; width: 120px }
+  .inner { transform: rotate(10deg); background: #ef6c00; color: #fff; padding: 6px; text-align: center }
+</style>
+</head>
+<body>
+<h1>Transforms</h1>
+
+<h2>Rotate and scale about the centre</h2>
+<div class="row">
+  <div class="box r30">rotate 30</div>
+  <div class="box r90">rotate 90</div>
+  <div class="box s15">scale 1.5</div>
+  <div class="box sx">scale x,y</div>
+  <div class="box combo">both</div>
+</div>
+
+<h2>Origin, skew, translate and the individual properties</h2>
+<div class="row">
+  <div class="box origin">origin</div>
+  <div class="box skew">skewX</div>
+  <div class="box move">translate</div>
+  <div class="box prop">rotate+scale</div>
+</div>
+
+<h2>Cards, icons and nesting</h2>
+<div class="row">
+  <div class="card">A card, tilted a few degrees, with a shadow and a <a href="sample.html">link</a>.</div>
+  <svg class="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+  <svg class="arrow flip" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+  <div class="outer">outer<div class="inner">inner, turned inside a scaled box</div></div>
+</div>
+</body>
+</html>

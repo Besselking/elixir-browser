@@ -722,7 +722,8 @@ defmodule Browser.Layout do
       href: style.href,
       hidden: style.hidden,
       # a block-level picture sits on a line of its own: vertical-align does not apply
-      valign: if(block?, do: nil, else: c["vertical-align"])
+      valign: if(block?, do: nil, else: c["vertical-align"]),
+      xform: xform_spec(c)
     }
 
     spec = Map.merge(spec, extra)
@@ -970,12 +971,14 @@ defmodule Browser.Layout do
       max: num(c["max-height"]),
       clip: clips?(c),
       pos: c["position"] in ["relative", "sticky"],
+      xform: xform_spec(c),
       # `position: sticky; top: n`: the box stays n px from the top of the window once scrolled to it
       sticky: if(c["position"] == "sticky" and is_number(c["top"]), do: round(c["top"]))
     }
 
     needed? =
-      spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h || spec.min ||
+      spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
+        spec.min ||
         spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto
@@ -1580,7 +1583,12 @@ defmodule Browser.Layout do
       h: height,
       # the baseline of a replaced element is its bottom margin edge
       base: height,
-      items: outer_rects(outer, box_h, st.images) ++ picture,
+      items:
+        transformed_picture(
+          spec,
+          outer_rects(outer, box_h, st.images) ++ picture,
+          {ml, box.mt, box_w, box_h}
+        ),
       align: style.align,
       valign: spec.valign
     })
@@ -1783,6 +1791,7 @@ defmodule Browser.Layout do
     outer = outer_rects(box, height, st.images)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
+    st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box), else: st
   end
 
@@ -2111,6 +2120,13 @@ defmodule Browser.Layout do
     it =
       case it do
         %{stick: %{y0: y0} = stick} -> %{it | stick: %{stick | y0: y0 + dy}}
+        _ -> it
+      end
+
+    # and a transformed box turns about where it now is
+    it =
+      case it do
+        %{xform: list} -> %{it | xform: Enum.map(list, &Browser.Transform.moved(&1, dx, dy))}
         _ -> it
       end
 
@@ -3435,6 +3451,54 @@ defmodule Browser.Layout do
 
     max(round(width), 0)
   end
+
+  # -- transforms --------------------------------------------------------------------------
+
+  # what a box needs to work out its transformation once its size is known
+  defp xform_spec(c) do
+    if Browser.Transform.transformed?(c) do
+      %{
+        c: Map.take(c, Browser.Transform.props() ++ ["transform-origin", "font-size"]),
+        # boxes placed with `top`/`left` have had their translation applied to their position
+        translate?: c["position"] not in ["absolute", "fixed"]
+      }
+    end
+  end
+
+  defp xform_matrix(%{c: c, translate?: translate?}, rect),
+    do: Browser.Transform.matrix(c, rect, translate: translate?)
+
+  # everything the box painted is drawn through the box's transformation
+  defp xform_new(st, %{o: o} = box, height) do
+    case xform_matrix(o.xform, {box.x, box.top, box.w, height}) do
+      nil ->
+        st
+
+      matrix ->
+        {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+        {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
+
+        %{
+          st
+          | items: with_xform(new_items, matrix) ++ old_items,
+            rects: with_xform(new_rects, matrix) ++ old_rects
+        }
+    end
+  end
+
+  # a picture's box and what is drawn in it, through the picture's own transformation
+  defp transformed_picture(%{xform: nil}, items, _rect), do: items
+
+  defp transformed_picture(%{xform: xform}, items, rect) do
+    case xform_matrix(xform, rect) do
+      nil -> items
+      matrix -> with_xform(items, matrix)
+    end
+  end
+
+  # (transformations of boxes inside come first in the list; the outermost last)
+  defp with_xform(items, matrix),
+    do: Enum.map(items, &Map.update(&1, :xform, [matrix], fn list -> list ++ [matrix] end))
 
   # -- floats --------------------------------------------------------------------------------
 
