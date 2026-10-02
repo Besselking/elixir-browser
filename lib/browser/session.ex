@@ -60,7 +60,11 @@ defmodule Browser.Session do
       sel_texts: nil,
       sel_items: [],
       # the last click, for double and triple clicks: {time, x, y, count}
-      click: nil
+      click: nil,
+      # text selected in the focused field: the other end of the selection (the caret is
+      # one end), and whether the mouse is dragging it out
+      fanchor: nil,
+      fdrag: false
     }
 
     start = System.get_env("BROWSER_URL") || Browser.home()
@@ -207,7 +211,10 @@ defmodule Browser.Session do
   def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state),
     do: System.halt(0)
 
-  # Edit > Copy and Select All (wxID_COPY, wxID_SELECTALL)
+  # Edit > Cut, Copy and Select All (wxID_CUT, wxID_COPY, wxID_SELECTALL)
+  def handle_info(wx(id: 5031, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, on_key(state, :cut)}
+
   def handle_info(wx(id: 5032, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, on_key(state, :copy)}
 
@@ -234,7 +241,7 @@ defmodule Browser.Session do
         end
 
       cid ->
-        {:noreply, click_control(state, cid, x, py)}
+        {:noreply, click_control(state, cid, x, py, count, shift)}
     end
   end
 
@@ -242,12 +249,28 @@ defmodule Browser.Session do
     py = y + state.scroll
     {count, state} = register_click(state, x, y, :dclick)
 
-    if UI.control_at(state.controls, x, py) == nil and UI.link_at(state.links, x, py) == nil,
-      do: {:noreply, select_unit(state, x, py, count)},
-      else: {:noreply, state}
+    case UI.control_at(state.controls, x, py) do
+      nil ->
+        if UI.link_at(state.links, x, py) == nil,
+          do: {:noreply, select_unit(state, x, py, count)},
+          else: {:noreply, state}
+
+      cid ->
+        {:noreply, click_control(state, cid, x, py, count, false)}
+    end
   end
 
   def handle_info(wx(event: wxMouse(type: :left_up)), state), do: {:noreply, end_drag(state)}
+
+  # dragging out a selection in a text field
+  def handle_info(
+        wx(event: wxMouse(type: :motion, x: x, y: y, leftDown: down)),
+        %{fdrag: true} = state
+      ) do
+    if down,
+      do: {:noreply, drag_field(state, x, y + state.scroll)},
+      else: {:noreply, end_drag(state)}
+  end
 
   # dragging out a selection; past the top or bottom edge the page scrolls along
   def handle_info(
@@ -334,14 +357,11 @@ defmodule Browser.Session do
 
   defp on_key(state, :ignore), do: state
 
-  defp on_key(state, key) when key in [:copy, :select_all] do
-    editing? =
-      case state.focus && control(state, state.focus) do
-        %{} = control -> Forms.editable?(control)
-        _ -> false
-      end
-
-    if editing?, do: state, else: page_selection_key(state, key)
+  defp on_key(state, key) when key in [:copy, :select_all, :cut] do
+    case editing_control(state) do
+      nil -> if key == :cut, do: state, else: page_selection_key(state, key)
+      control -> edit_key(state, control, key)
+    end
   end
 
   defp on_key(%{focus: nil} = state, key) when key in [:tab, :shift_tab],
@@ -370,22 +390,45 @@ defmodule Browser.Session do
     end
   end
 
+  defp editing_control(%{focus: nil}), do: nil
+
+  defp editing_control(state) do
+    case control(state, state.focus) do
+      %{} = control -> if Forms.editable?(control), do: control
+      nil -> nil
+    end
+  end
+
+  defp edit_key(state, control, :copy) do
+    cur = Forms.current(control, state.page.form_state)
+    text = TextEdit.selected(cur.value, TextEdit.selection(state.caret, state.fanchor))
+    if text != "", do: UI.set_clipboard_text(text)
+    state
+  end
+
   defp edit_key(state, control, key) do
     cur = Forms.current(control, state.page.form_state)
     multiline? = Forms.multiline?(control)
     opts = [multiline: multiline?, max: control.maxlength]
 
-    result =
+    cut_text =
+      if key == :cut,
+        do: TextEdit.selected(cur.value, TextEdit.selection(state.caret, state.fanchor))
+
+    sel_key =
       case key do
-        :paste -> TextEdit.apply({cur.value, state.caret}, {:char, UI.clipboard_text()}, opts)
-        _ -> TextEdit.apply({cur.value, state.caret}, key, opts)
+        :paste -> {:char, UI.clipboard_text()}
+        _ -> key
       end
 
+    result = TextEdit.apply_sel({cur.value, state.caret}, state.fanchor, sel_key, opts)
+    if cut_text not in [nil, ""] and result != :ignored, do: UI.set_clipboard_text(cut_text)
+
     case {result, key} do
-      {{value, caret}, _} ->
+      {{value, caret, anchor}, _} ->
         old_text = if(multiline?, do: nil, else: Forms.visible_text(control, cur))
 
-        state
+        %{state | fanchor: anchor}
         |> edit(control.cid, value, caret)
         |> reset_blink()
         |> relayout_edit(control, old_text)
@@ -505,7 +548,7 @@ defmodule Browser.Session do
     apply_selection(state, Selection.range(state.sel_anchor, head))
   end
 
-  defp end_drag(state), do: %{state | drag: false}
+  defp end_drag(state), do: %{state | drag: false, fdrag: false}
 
   defp page_selection_key(state, :select_all) do
     {texts, state} = sel_texts(state)
@@ -567,12 +610,12 @@ defmodule Browser.Session do
           0
       end
 
-    state = %{state | focus: cid, caret: caret, menu: nil}
+    state = %{state | focus: cid, caret: caret, menu: nil, fanchor: nil, fdrag: false}
     if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
   end
 
   defp blur(state) do
-    state |> stop_blink() |> Map.put(:focus, nil) |> relayout()
+    state |> stop_blink() |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false}) |> relayout()
   end
 
   defp ensure_visible(state, cid) do
@@ -598,7 +641,7 @@ defmodule Browser.Session do
 
   # -- clicking controls -----------------------------------------------------
 
-  defp click_control(state, cid, x, py) do
+  defp click_control(state, cid, x, py, count, shift) do
     control = control(state, cid)
 
     cond do
@@ -619,7 +662,13 @@ defmodule Browser.Session do
             state.measure
           )
 
-        state |> focus(cid, caret) |> relayout()
+        # shift extends the selection of the field that already has focus
+        keep = if shift and state.focus == cid, do: state.fanchor || state.caret
+
+        state
+        |> focus(cid, caret)
+        |> select_in_field(control, cur.value, caret, keep, count)
+        |> relayout()
 
       control.type in ["checkbox", "radio"] ->
         state |> focus(cid, 0) |> toggle(cid)
@@ -632,6 +681,56 @@ defmodule Browser.Session do
 
       true ->
         state |> focus(cid, 0) |> relayout()
+    end
+  end
+
+  # what a click in a field selects: a double click the word, a triple click the line (the
+  # whole text of a single-line field); with `keep` the selection grows from there; else a
+  # plain click starts one that dragging extends
+  defp select_in_field(state, control, value, caret, _keep, count) when count >= 3 do
+    {from, to} =
+      if Forms.multiline?(control) do
+        {line, _} = TextEdit.line_col(value, caret)
+        {TextEdit.index_at(value, line, 0), TextEdit.index_at(value, line, String.length(value))}
+      else
+        {0, String.length(value)}
+      end
+
+    %{state | fanchor: from, caret: to}
+  end
+
+  defp select_in_field(state, _control, value, caret, _keep, 2) do
+    case TextEdit.word_range(value, caret) do
+      {from, to} -> %{state | fanchor: from, caret: to}
+      nil -> %{state | fanchor: caret}
+    end
+  end
+
+  defp select_in_field(state, _control, _value, _caret, keep, _count) when keep != nil,
+    do: %{state | fanchor: keep, fdrag: true}
+
+  defp select_in_field(state, _control, _value, caret, nil, _count),
+    do: %{state | fanchor: caret, fdrag: true}
+
+  # the caret follows the mouse, the anchor stays
+  defp drag_field(state, x, py) do
+    with %{} = control <- editing_control(state) do
+      cur = Forms.current(control, state.page.form_state)
+
+      caret =
+        Interact.caret_at(
+          state.items,
+          control.cid,
+          cur.value,
+          cur.scroll,
+          Forms.multiline?(control),
+          {x, py},
+          state.measure
+        )
+
+      if caret == state.caret, do: state, else: relayout(%{state | caret: caret}, :diff)
+    else
+      _ -> %{state | fdrag: false}
     end
   end
 
@@ -876,13 +975,22 @@ defmodule Browser.Session do
         nil
 
       control ->
-        caret =
+        {caret, sel} =
           if Forms.editable?(control) do
             cur = Forms.current(control, state.page.form_state)
-            Interact.caret_position(cur.value, state.caret, cur.scroll, Forms.multiline?(control))
+            multiline? = Forms.multiline?(control)
+            pos = &Interact.caret_position(cur.value, &1, cur.scroll, multiline?)
+
+            sel =
+              with {from, to} <- TextEdit.selection(state.caret, state.fanchor),
+                   do: {pos.(from), pos.(to)}
+
+            {pos.(state.caret), sel}
+          else
+            {nil, nil}
           end
 
-        %{cid: control.cid, caret: caret}
+        %{cid: control.cid, caret: caret, sel: sel}
     end
   end
 

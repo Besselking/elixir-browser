@@ -106,7 +106,7 @@ defmodule Browser.Layout do
 
   defp add_focus(items, _measure, nil), do: items
 
-  defp add_focus(items, measure, %{cid: cid, caret: caret}) do
+  defp add_focus(items, measure, %{cid: cid, caret: caret} = focus) do
     texts =
       items
       |> Enum.filter(&(&1.type == :text and Map.get(&1, :cid) == cid))
@@ -161,8 +161,39 @@ defmodule Browser.Layout do
         _ -> []
       end
 
-    items ++ ring ++ caret
+    items ++ selection_items(texts, cid, focus[:sel], measure) ++ ring ++ caret
   end
+
+  # The highlight of the text selected in the focused field: `sel` is `{from, to}` with
+  # positions `{line, column}` relative to what the field shows (lines may fall outside it).
+  defp selection_items(_texts, _cid, nil, _measure), do: []
+
+  defp selection_items(texts, cid, {{fl, fc}, {tl, tc}}, measure) do
+    for {it, line} <- Enum.with_index(texts),
+        line >= fl and line <= tl,
+        len = String.length(it.text),
+        it.text != "\u200B",
+        s = if(line == fl, do: min(fc, len), else: 0),
+        e = if(line == tl, do: min(tc, len), else: len),
+        e > s do
+      x0 = it.x + prefix_width(it, s, measure)
+      x1 = it.x + prefix_width(it, e, measure)
+
+      item = %{
+        type: :selection,
+        x: round(x0),
+        y: it.y,
+        w: max(round(x1 - x0), 1),
+        h: round(it.h * 1.25),
+        cid: cid
+      }
+
+      if clip = Map.get(it, :clip), do: Map.put(item, :clip, clip), else: item
+    end
+  end
+
+  defp prefix_width(_it, 0, _measure), do: 0
+  defp prefix_width(it, n, measure), do: measure.(String.slice(it.text, 0, n), it)
 
   # a control wider than the box that clips it (overflow: hidden) is only seen inside that box
   defp within(b, nil), do: b
@@ -193,7 +224,7 @@ defmodule Browser.Layout do
          width = measure.(new_text, item),
          true <- width <= box_w - 8 do
       items =
-        for it <- items, not (it.type in [:ring, :caret] and mine.(it)) do
+        for it <- items, not (it.type in [:ring, :caret, :selection] and mine.(it)) do
           if it.type == :text and mine.(it), do: %{it | text: new_text, w: width}, else: it
         end
 

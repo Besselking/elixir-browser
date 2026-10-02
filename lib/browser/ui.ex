@@ -61,6 +61,7 @@ defmodule Browser.UI do
     :wxMenuBar.append(menubar, file, ~c"File")
 
     edit = :wxMenu.new()
+    :wxMenu.append(edit, 5031, ~c"Cut\tCtrl+X")
     :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
     :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
     :wxMenuBar.append(menubar, edit, ~c"Edit")

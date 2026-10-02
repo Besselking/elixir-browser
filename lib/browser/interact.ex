@@ -20,15 +20,24 @@ defmodule Browser.Interact do
     * `{:char, text}` for typed text
     * `:backspace`, `:delete`, `:enter`, `:tab`, `:shift_tab`, `:escape`
     * `:left`, `:right`, `:up`, `:down`, `:home`, `:end`, `:page_up`, `:page_down`
-    * `:paste`, `:copy` and `:select_all` for those shortcuts, `:ignore` for everything else
+    * `{:select, :left | :right | :up | :down | :home | :end}` for shift and a movement key
+    * `:paste`, `:copy`, `:cut` and `:select_all` for those shortcuts, `:ignore` for everything else
   """
   def key(%{ctrl?: ctrl, meta?: meta, alt?: alt} = event) when ctrl or meta or alt do
     cond do
       (ctrl or meta) and not alt and paste_key?(event) -> :paste
       (ctrl or meta) and not alt and letter_key?(event, [?c, ?C, 3]) -> :copy
       (ctrl or meta) and not alt and letter_key?(event, [?a, ?A, 1]) -> :select_all
+      (ctrl or meta) and not alt and letter_key?(event, [?x, ?X, 24]) -> :cut
       alt and not (ctrl or meta) -> printable(event)
       true -> :ignore
+    end
+  end
+
+  # shift plus a movement key selects while moving
+  def key(%{code: code, shift?: true}) when code in 312..317 do
+    case key(%{code: code, shift?: false}) do
+      dir when is_atom(dir) -> {:select, dir}
     end
   end
 

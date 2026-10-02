@@ -2160,4 +2160,53 @@ defmodule Browser.LayoutTest do
       assert ring.x + ring.w <= 4 + 100 + 2
     end
   end
+
+  describe "selection in a focused field" do
+    alias Browser.Page
+
+    defp field_items(html, focus) do
+      page = Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {plain, _} = Layout.layout(page.nodes, 400, &measure/2, 600)
+      [{cid, _} | _] = plain |> Layout.controls() |> Enum.sort()
+
+      {items, _} =
+        Layout.layout(page.nodes, 400, &measure/2, 600, focus: Map.put(focus, :cid, cid))
+
+      {items, cid}
+    end
+
+    test "a single-line field highlights the selected characters" do
+      {items, cid} =
+        field_items(~s|<input type="text" value="hello world">|, %{
+          caret: {0, 7},
+          sel: {{0, 2}, {0, 7}}
+        })
+
+      [text] = Enum.filter(items, &(&1.type == :text and &1.cid == cid))
+      [sel] = Enum.filter(items, &(&1.type == :selection))
+      assert sel.cid == cid
+      assert sel.x == text.x + measure("he", text)
+      assert sel.w == measure("llo w", text)
+    end
+
+    test "no selection, no highlight" do
+      {items, _} = field_items(~s|<input type="text" value="hello">|, %{caret: {0, 2}, sel: nil})
+      assert Enum.filter(items, &(&1.type == :selection)) == []
+    end
+
+    test "a textarea highlights each line of the selection" do
+      {items, _} =
+        field_items(
+          ~s|<textarea rows="4">one two\nthree\nfour</textarea>|,
+          %{caret: {2, 2}, sel: {{0, 4}, {2, 2}}}
+        )
+
+      sels = Enum.filter(items, &(&1.type == :selection))
+      assert length(sels) == 3
+      [first, second, third] = Enum.sort_by(sels, & &1.y)
+      # 3, 5 and 2 characters of the same width each
+      assert first.w * 5 == second.w * 3
+      assert third.w * 5 == second.w * 2
+    end
+  end
 end

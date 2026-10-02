@@ -140,4 +140,91 @@ defmodule Browser.TextEditTest do
     assert :ignored = ed({"a", 0}, :f5)
     assert :ignored = ed({"a", 0}, {:other, 1})
   end
+
+  describe "selections" do
+    # "hello world", the selection "llo w" is anchor 2, caret 7
+    @v "hello world"
+
+    test "selection/2 and selected/2" do
+      assert TextEdit.selection(7, 2) == {2, 7}
+      assert TextEdit.selection(2, 7) == {2, 7}
+      assert TextEdit.selection(3, 3) == nil
+      assert TextEdit.selection(3, nil) == nil
+      assert TextEdit.selected(@v, {2, 7}) == "llo w"
+      assert TextEdit.selected(@v, nil) == ""
+    end
+
+    test "shift plus a movement grows the selection from the anchor" do
+      assert TextEdit.apply_sel({@v, 3}, nil, {:select, :right}) == {@v, 4, 3}
+      assert TextEdit.apply_sel({@v, 4}, 3, {:select, :right}) == {@v, 5, 3}
+      assert TextEdit.apply_sel({@v, 4}, 3, {:select, :left}) == {@v, 3, nil}
+      assert TextEdit.apply_sel({@v, 4}, 3, {:select, :home}) == {@v, 0, 3}
+      assert TextEdit.apply_sel({@v, 4}, 3, {:select, :end}) == {@v, 11, 3}
+    end
+
+    test "selecting past either end is ignored" do
+      assert TextEdit.apply_sel({@v, 0}, nil, {:select, :left}) == :ignored
+      assert TextEdit.apply_sel({@v, 11}, nil, {:select, :right}) == :ignored
+    end
+
+    test "select all" do
+      assert TextEdit.apply_sel({@v, 3}, nil, :select_all) == {@v, 11, 0}
+      assert TextEdit.apply_sel({@v, 11}, 0, :select_all) == :ignored
+      assert TextEdit.apply_sel({"", 0}, nil, :select_all) == :ignored
+    end
+
+    test "typing replaces the selection" do
+      assert TextEdit.apply_sel({@v, 7}, 2, {:char, "X"}) == {"heXorld", 3, nil}
+      assert TextEdit.apply_sel({@v, 2}, 7, {:char, "XY"}) == {"heXYorld", 4, nil}
+    end
+
+    test "backspace, delete and cut remove it" do
+      for key <- [:backspace, :delete, :cut] do
+        assert TextEdit.apply_sel({@v, 7}, 2, key) == {"heorld", 2, nil}
+      end
+    end
+
+    test "cut with nothing selected does nothing" do
+      assert TextEdit.apply_sel({@v, 3}, nil, :cut) == :ignored
+    end
+
+    test "arrows end the selection at its edges, other movements from the caret" do
+      assert TextEdit.apply_sel({@v, 7}, 2, :left) == {@v, 2, nil}
+      assert TextEdit.apply_sel({@v, 2}, 7, :right) == {@v, 7, nil}
+      assert TextEdit.apply_sel({@v, 7}, 2, :end) == {@v, 11, nil}
+      assert TextEdit.apply_sel({@v, 7}, 2, :home) == {@v, 0, nil}
+    end
+
+    test "without a selection it is plain editing" do
+      assert TextEdit.apply_sel({@v, 5}, nil, {:char, "!"}) == {"hello! world", 6, nil}
+      assert TextEdit.apply_sel({@v, 5}, nil, :left) == {@v, 4, nil}
+      assert TextEdit.apply_sel({@v, 0}, nil, :left) == :ignored
+    end
+
+    test "the length limit counts without the selected text" do
+      assert TextEdit.apply_sel({"abcde", 4}, 1, {:char, "XYZ"}, max: 5) == {"aXYZe", 4, nil}
+      assert TextEdit.apply_sel({"abcde", 4}, 1, {:char, "XYZW"}, max: 5) == {"aXYZe", 4, nil}
+    end
+
+    test "typing nothing keeps the selection" do
+      assert TextEdit.apply_sel({@v, 7}, 2, {:char, ""}) == :ignored
+    end
+
+    test "enter replaces the selection in a textarea only" do
+      assert TextEdit.apply_sel({@v, 7}, 2, :enter, multiline: true) == {"he\norld", 3, nil}
+      assert TextEdit.apply_sel({@v, 7}, 2, :enter) == :ignored
+    end
+
+    test "counts graphemes" do
+      assert TextEdit.apply_sel({"héllo", 3}, 1, :backspace) == {"hlo", 1, nil}
+    end
+
+    test "word_range" do
+      assert TextEdit.word_range("one two  three", 5) == {4, 7}
+      assert TextEdit.word_range("one two  three", 7) == {4, 7}
+      assert TextEdit.word_range("one two  three", 8) == nil
+      assert TextEdit.word_range("one", 0) == {0, 3}
+      assert TextEdit.word_range("", 0) == nil
+    end
+  end
 end
