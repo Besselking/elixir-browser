@@ -75,7 +75,19 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
-    :wxPanel.connect(panel, :mousewheel)
+    # the event record does not say which way the wheel turned: sideways swipes of a
+    # trackpad would scroll the page up and down, so only vertical turns go on
+    me = self()
+
+    :wxPanel.connect(panel, :mousewheel,
+      callback: fn wx(
+                     event: wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)
+                   ),
+                   obj ->
+        if :wxMouseEvent.getWheelAxis(obj) == 0, do: send(me, {:wheel, rot, delta, lines})
+      end
+    )
+
     :wxPanel.connect(panel, :size)
     :wxPanel.connect(panel, :char)
     :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel) end)

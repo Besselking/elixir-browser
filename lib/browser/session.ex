@@ -15,7 +15,8 @@ defmodule Browser.Session do
 
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
-  @wheel_line 40
+  # pixels per line of a notch of the wheel
+  @wheel_line 24
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   def navigate(url), do: GenServer.cast(__MODULE__, {:navigate, url})
@@ -320,10 +321,10 @@ defmodule Browser.Session do
     {:noreply, %{state | hover: {href, kind}}}
   end
 
-  def handle_info(wx(event: wxMouse(type: :mousewheel) = ev), state) do
+  def handle_info({:wheel, rot, delta, lines}, state) do
     # a trackpad or momentum flick delivers dozens of events a second: fold every wheel event
     # already queued into this one so a burst costs one scroll and one repaint
-    {rot, state} = drain_wheel(wheel_rotation(ev), state)
+    {rot, state} = drain_wheel(wheel_rotation(rot, delta, lines), state)
     px = state.wheel_rem - rot
     whole = trunc(px)
     {:noreply, scroll_by(%{state | wheel_rem: px - whole}, whole)}
@@ -1030,13 +1031,11 @@ defmodule Browser.Session do
 
   # one notch is `wheelDelta` rotation units and scrolls `linesPerAction` lines; precision
   # devices (macOS trackpads, momentum) send many small fractions of a notch
-  defp wheel_rotation(wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)) do
-    rot / max(delta, 1) * max(lines, 1) * @wheel_line
-  end
+  defp wheel_rotation(rot, delta, lines), do: rot / max(delta, 1) * max(lines, 1) * @wheel_line
 
   defp drain_wheel(acc, state) do
     receive do
-      wx(event: wxMouse(type: :mousewheel) = ev) -> drain_wheel(acc + wheel_rotation(ev), state)
+      {:wheel, rot, delta, lines} -> drain_wheel(acc + wheel_rotation(rot, delta, lines), state)
     after
       0 -> {acc, state}
     end
