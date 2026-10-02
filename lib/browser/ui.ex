@@ -94,14 +94,7 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :size)
     :wxPanel.connect(panel, :char)
 
-    :wxPanel.connect(panel, :paint,
-      callback: fn _ev, _obj ->
-        {us, _} = :timer.tc(fn -> paint(panel) end)
-
-        if System.get_env("BROWSER_PAINT_LOG"),
-          do: File.write("/tmp/paint.log", "#{us}\n", [:append])
-      end
-    )
+    :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel) end)
 
     :wxFrame.show(frame)
     :wxWindow.setFocus(panel)
