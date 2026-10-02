@@ -2804,6 +2804,7 @@ defmodule Browser.Layout do
   defp flex_text_item(text, style) do
     %{
       sub: walk({:text, text}, style, []) |> Enum.reverse(),
+      key: make_ref(),
       rebuild: nil,
       grow: 0.0,
       shrink: 1.0,
@@ -2843,6 +2844,7 @@ defmodule Browser.Layout do
 
     %{
       sub: build.(%{}),
+      key: make_ref(),
       rebuild: if(tag in ~w(img svg), do: nil, else: build),
       grow: flex_number(c["flex-grow"], 0.0),
       shrink: flex_number(c["flex-shrink"], 1.0),
@@ -2941,7 +2943,7 @@ defmodule Browser.Layout do
       cond do
         it.basis != nil -> len_px(it.basis, avail) + it.extra
         it.width != nil -> resolve(it.width, avail) + it.extra
-        true -> shrink_extent(st, it.sub, @unbounded)
+        true -> shrink_extent(st, it.sub, @unbounded, it.key)
       end
 
     clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
@@ -3005,7 +3007,7 @@ defmodule Browser.Layout do
     sized =
       Enum.map(line, fn it ->
         w = max(round(it.hw), 1)
-        {items, h, _base} = layout_atom(st, it.sub, w)
+        {items, h, _base} = layout_atom(st, it.sub, w, it.key)
         Map.merge(it, %{w: w, items: items, h: h})
       end)
 
@@ -3099,7 +3101,7 @@ defmodule Browser.Layout do
       box_h = cross - it.mt - it.mb
       min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
       sub = it.rebuild.(%{"min-height" => max(min_h, 0) * 1.0})
-      {items, h, _} = layout_atom(st, sub, it.w)
+      {items, h, _} = layout_atom(st, sub, it.w, {it.key, min_h})
       %{it | items: items, h: max(h, cross)}
     else
       it
@@ -3118,12 +3120,12 @@ defmodule Browser.Layout do
           cond do
             it.width != nil -> resolve(it.width, avail) + it.extra
             align in ["stretch", "normal"] and not it.fit? -> room
-            true -> min(room, shrink_extent(st, it.sub, @unbounded))
+            true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
           end
 
         w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
         w = max(round(w), 1)
-        {items, h, _} = layout_atom(st, it.sub, w)
+        {items, h, _} = layout_atom(st, it.sub, w, it.key)
 
         x =
           cond do
