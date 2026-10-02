@@ -2372,8 +2372,8 @@ defmodule Browser.Layout do
 
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
-  defp shrink_extent(st, sub, width) do
-    memo({:extent, sub, width}, fn ->
+  defp shrink_extent(st, sub, width, key \\ nil) do
+    memo({:extent, key || :erlang.phash2(sub), width}, fn ->
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
       max(sub_st |> finalize() |> extent(), sub_st.ext)
     end)
@@ -2388,7 +2388,7 @@ defmodule Browser.Layout do
         fun.()
 
       cache ->
-        key = {:erlang.phash2(key, 4_294_967_296), containing_width()}
+        key = {key, containing_width()}
 
         case cache do
           %{^key => value} ->
@@ -2410,8 +2410,8 @@ defmodule Browser.Layout do
   # An inline-block's content: laid out at `width`; returns its items (relative
   # to its top-left), its height including trailing margin, and its baseline
   # (bottom of the last text line, or the bottom edge if there is no text).
-  defp layout_atom(st, sub, width) do
-    memo({:atom, sub, width}, fn ->
+  defp layout_atom(st, sub, width, key \\ nil) do
+    memo({:atom, key || :erlang.phash2(sub), width}, fn ->
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
       height = sub_st.y + sub_st.gap + sub_st.ngap
       items = finalize(sub_st)
@@ -3230,10 +3230,12 @@ defmodule Browser.Layout do
     cw = containing_width()
 
     build = fn props -> with_cw(cw, fn -> build_cell(tag, attrs, kids, c, style, props) end) end
+    sub = build.(%{})
 
     %{
       build: build,
-      sub: build.(%{}),
+      sub: sub,
+      key: :erlang.phash2(sub),
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),
@@ -3241,6 +3243,11 @@ defmodule Browser.Layout do
       valign: valign_of(c["vertical-align"]),
       extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
       pt: box.pt,
+      # nothing is painted for the cell itself, so its height does not show
+      plain:
+        box.bg == nil and box.bgimg == nil and box.shadows == [] and box.bw == {0, 0, 0, 0} and
+          xform_spec(c) == nil and not clips?(c) and
+          c["position"] not in ["relative", "sticky"],
       vextra: box.pt + box.pb + bt + bb,
       sizing: if(border_box?, do: :border, else: :content)
     }
@@ -3300,8 +3307,8 @@ defmodule Browser.Layout do
       sized =
         Enum.map(placed, fn p ->
           w = max(span_w.(p.col, p.cell.colspan), 1)
-          {_items, h, _} = layout_atom(st, p.cell.sub, w)
-          Map.merge(p, %{w: w, h0: h})
+          {items0, h, _} = layout_atom(st, p.cell.sub, w, p.cell.key)
+          Map.merge(p, %{w: w, h0: h, items0: items0})
         end)
 
       row_heights = table_row_heights(sized, nrows, sy)
@@ -3334,7 +3341,15 @@ defmodule Browser.Layout do
           }
 
           props = if ts.collapse?, do: collapse_borders(props, p, ncols, nrows), else: props
-          {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
+          # a plain cell that starts at the top looks the same at its final height
+          items =
+            if p.cell.plain and extra_top == 0 and not ts.collapse? do
+              p.items0
+            else
+              {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
+              items
+            end
+
           dx = Enum.at(xs, p.col)
           dy = Enum.at(ys, p.row)
           behind = if p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: []
@@ -3405,8 +3420,8 @@ defmodule Browser.Layout do
     measured =
       Enum.map(placed, fn p ->
         cell = p.cell
-        min = shrink_extent(st, cell.sub, 1)
-        max = shrink_extent(st, cell.sub, @unbounded)
+        min = shrink_extent(st, cell.sub, 1, cell.key)
+        max = shrink_extent(st, cell.sub, @unbounded, cell.key)
 
         {max, pct} =
           case cell.width do
