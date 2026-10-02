@@ -39,4 +39,34 @@ defmodule Browser.HTMLTest do
   test "stray close tags are ignored" do
     assert [{:text, "a"}, {:text, "b"}] = HTML.parse("a</div>b")
   end
+
+  describe "table parts close each other" do
+    defp cells(html) do
+      [{:element, "table", _, kids}] = HTML.parse(html)
+      kids
+    end
+
+    test "unclosed cells and rows" do
+      [{:element, "tr", _, tds1}, {:element, "tr", _, tds2}] =
+        cells("<table><tr><td>a<td>b<tr><td>c<td>d</table>")
+
+      assert for({:element, "td", _, [{:text, t}]} <- tds1, do: t) == ["a", "b"]
+      assert for({:element, "td", _, [{:text, t}]} <- tds2, do: t) == ["c", "d"]
+    end
+
+    test "th and td mix, sections close each other" do
+      [{:element, "thead", _, [head]}, {:element, "tbody", _, [body]}] =
+        cells("<table><thead><tr><th>h1<th>h2<tbody><tr><td>x</table>")
+
+      assert {:element, "tr", _, [{:element, "th", _, _}, {:element, "th", _, _}]} = head
+      assert {:element, "tr", _, [{:element, "td", _, _}]} = body
+    end
+
+    test "a nested table keeps its own cells" do
+      html = "<table><tr><td><table><tr><td>in</table><td>out</table>"
+      [{:element, "tr", _, [outer1, outer2]}] = cells(html)
+      assert {:element, "td", _, [{:element, "table", _, _}]} = outer1
+      assert {:element, "td", _, [{:text, "out"}]} = outer2
+    end
+  end
 end

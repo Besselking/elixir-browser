@@ -473,6 +473,7 @@ defmodule Browser.Layout do
         end
 
       fit? = c["width"] == :fit and kind in [:block, :flex]
+      table? = kind == :table and force != :inline_inner
 
       case kind do
         :contents ->
@@ -487,7 +488,13 @@ defmodule Browser.Layout do
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
           acc = [{:flush} | acc]
-          acc = inline_block_ops(el, parent_style, c, acc)
+          acc = inline_block_ops(el, parent_style, c, acc, true)
+          [{:flush} | acc]
+
+        # a table is as wide as its columns need, on a line of its own
+        _ when table? ->
+          acc = [{:flush} | acc]
+          acc = inline_block_ops(el, parent_style, c, acc, true, true)
           [{:flush} | acc]
 
         kind ->
@@ -673,13 +680,24 @@ defmodule Browser.Layout do
 
   # the box an inline-block establishes inside itself
   defp inner_kind(c) do
-    if c["display"] in ["flex", "inline-flex"], do: :flex, else: :block
+    case c["display"] do
+      d when d in ["flex", "inline-flex"] -> :flex
+      d when d in ["table", "inline-table"] -> :table
+      _ -> :block
+    end
   end
 
   # An inline-block is laid out on its own (a block inside) and then placed in
   # the line as one unit; its width properties size the unit, so they are
   # removed from the element's own box.
-  defp inline_block_ops({:element, tag, attrs, kids}, parent_style, c, acc) do
+  defp inline_block_ops(
+         {:element, tag, attrs, kids},
+         parent_style,
+         c,
+         acc,
+         block? \\ false,
+         table? \\ false
+       ) do
     box = box(tag, c)
     ml = if box.ml == :auto, do: 0, else: box.ml
     mr = if box.mr == :auto, do: 0, else: box.mr
@@ -705,7 +723,16 @@ defmodule Browser.Layout do
       extra: if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br),
       mextra: ml + mr,
       rextra: box.pr + br + mr,
-      valign: c["vertical-align"]
+      valign: c["vertical-align"],
+      table?: table?,
+      # a block-level box with auto side margins sits in the middle (or at the right)
+      malign:
+        cond do
+          not block? -> nil
+          box.ml == :auto and box.mr == :auto -> :center
+          box.ml == :auto -> :right
+          true -> nil
+        end
     }
 
     [{:inline_block, sub, spec, parent_style} | acc]
@@ -722,12 +749,20 @@ defmodule Browser.Layout do
              "block",
              "flow-root",
              "grid",
-             "table",
              "table-row",
              "table-row-group",
+             "table-header-group",
+             "table-footer-group",
              "table-caption"
            ] ->
         :block
+
+      "table" ->
+        :table
+
+      # a cell outside a table: side by side like inline blocks
+      "table-cell" ->
+        :inline_block
 
       "list-item" ->
         :list_item
@@ -875,6 +910,16 @@ defmodule Browser.Layout do
   defp clips?(c) do
     Map.get(c, "overflow-x", "visible") in ~w(hidden clip scroll auto) or
       Map.get(c, "overflow-y", "visible") in ~w(hidden clip scroll auto)
+  end
+
+  # A table is laid out as one unit at placement time (`op({:table, ...})`), when the width
+  # its columns share is known.
+  defp block_children(_tag, :table, kids, style, c, acc) do
+    model = table_model(kids, style)
+
+    if model.rows == [] and model.caption == nil,
+      do: acc,
+      else: [{:table, table_spec(c), model, style} | acc]
   end
 
   # A flex container lays its children out as one unit at placement time (`op({:flex, ...})`),
@@ -1298,8 +1343,23 @@ defmodule Browser.Layout do
       h: height,
       base: base,
       items: items,
-      align: style.align,
+      align: Map.get(spec, :malign) || style.align,
       valign: spec.valign
+    })
+  end
+
+  defp op({:table, ts, model, _style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    {laid, w, height} = table_layout(st, ts, model, avail)
+    laid = [%{type: :box, x: 0, y: 0, w: w, h: 0, rr: 0} | laid]
+
+    place_atom(st, %{
+      w: w,
+      h: height,
+      base: height,
+      items: laid,
+      align: :left,
+      valign: nil
     })
   end
 
@@ -1309,8 +1369,9 @@ defmodule Browser.Layout do
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
     {laid, height} = flex_layout(st, cs, items, avail)
-    # lets a measuring layout see how wide the container is, and what is reserved after it
-    laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: st.right} | laid]
+    # lets a measuring layout see how wide the container is (what surrounds it is added when
+    # the atom is placed)
+    laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
 
     place_atom(st, %{
       w: avail,
@@ -1358,7 +1419,7 @@ defmodule Browser.Layout do
           h: ch,
           href: spec.href,
           hidden: spec.hidden,
-          rr: st.right + box.pr + br + mr
+          rr: box.pr + br + mr
         }
 
         case spec do
@@ -1450,6 +1511,9 @@ defmodule Browser.Layout do
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
   # wrapping to a new line if it doesn't fit.
+  defp add_rr(%{rr: rr} = item, extra), do: %{item | rr: rr + extra}
+  defp add_rr(item, _extra), do: item
+
   defp place_atom(st, atom) do
     line_left = st.margin + st.left
 
@@ -1467,6 +1531,12 @@ defmodule Browser.Layout do
 
     space_w = if st.line == [], do: 0, else: space_w
     x = st.x + space_w
+    # inside the atom the room kept free on the right (see `rr`) includes what surrounds it
+    atom =
+      if st.right > 0,
+        do: %{atom | items: Enum.map(atom.items, &add_rr(&1, st.right))},
+        else: atom
+
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil}
   end
@@ -1965,7 +2035,8 @@ defmodule Browser.Layout do
     width =
       case resolve(spec.width, avail) do
         nil ->
-          min(avail, shrink_extent(st, sub, max(avail, 1)))
+          measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
+          min(avail, shrink_extent(st, sub, measure_at))
 
         w ->
           w + spec.extra + spec.mextra
@@ -2673,5 +2744,452 @@ defmodule Browser.Layout do
       end)
 
     {laid |> Enum.reverse() |> List.flatten(), max(y - round(cs.row_gap), 0)}
+  end
+
+  # -- tables -------------------------------------------------------------------------------
+
+  defp table_spec(c) do
+    collapse? = c["border-collapse"] == "collapse"
+
+    {sx, sy} =
+      case c["border-spacing"] do
+        {h, v} when not collapse? -> {h, v}
+        _ when collapse? -> {0.0, 0.0}
+        _ -> {2.0, 2.0}
+      end
+
+    %{sx: round(sx), sy: round(sy), collapse?: collapse?}
+  end
+
+  @cell_tags ~w(td th)
+  @group_tags ~w(thead tbody tfoot)
+
+  # the caption and the rows of a table, in display order: header rows, body rows, footer rows
+  defp table_model(kids, style) do
+    parts =
+      for {:element, tag, attrs, ekids} = el <- kids, tag not in @skip do
+        c = computed(attrs)
+        {kind_of_table_part(tag, c), el, tag, c, ekids}
+      end
+
+    caption =
+      Enum.find_value(parts, fn
+        {:caption, el, _tag, _c, _kids} -> table_caption(el, style)
+        _ -> nil
+      end)
+
+    rows_of = fn wanted ->
+      Enum.flat_map(parts, fn
+        {:row, el, _tag, c, kids} when wanted == :body ->
+          [table_row(el, c, kids, style, nil)]
+
+        {:group, _el, tag, c, kids} ->
+          if group_kind(tag) == wanted, do: group_rows(kids, style, row_bg(c)), else: []
+
+        _ ->
+          []
+      end)
+    end
+
+    %{
+      caption: caption,
+      rows: rows_of.(:head) ++ rows_of.(:body) ++ rows_of.(:foot)
+    }
+  end
+
+  defp kind_of_table_part(tag, c) do
+    cond do
+      tag == "caption" or c["display"] == "table-caption" ->
+        :caption
+
+      tag == "tr" or c["display"] == "table-row" ->
+        :row
+
+      tag in @group_tags or
+          c["display"] in ["table-row-group", "table-header-group", "table-footer-group"] ->
+        :group
+
+      true ->
+        :other
+    end
+  end
+
+  defp group_kind("thead"), do: :head
+  defp group_kind("tfoot"), do: :foot
+  defp group_kind(_), do: :body
+
+  defp group_rows(kids, style, bg) do
+    for {:element, tag, attrs, ekids} = el <- kids,
+        tag not in @skip,
+        c = computed(attrs),
+        tag == "tr" or c["display"] == "table-row",
+        do: table_row(el, c, ekids, style, bg)
+  end
+
+  defp row_bg(c), do: if(color?(c["background-color"]), do: c["background-color"])
+
+  # a row's background shows behind its cells; a row group's behind its rows
+  defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg) do
+    cells =
+      for {:element, tag, attrs, _} = el <- kids,
+          tag not in @skip,
+          cc = computed(attrs),
+          tag in @cell_tags or cc["display"] == "table-cell",
+          do: table_cell(el, cc, style)
+
+    %{cells: cells, valign: valign_of(c["vertical-align"]), bg: row_bg(c) || group_bg}
+  end
+
+  defp table_caption({:element, tag, attrs, kids}, style) do
+    c = computed(attrs)
+    own = Map.merge(c, %{"margin-left" => 0.0, "margin-right" => 0.0})
+    attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+    {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()
+  end
+
+  defp valign_of(v) when v in ["top", "middle", "bottom"], do: v
+  defp valign_of(_), do: nil
+
+  defp table_cell({:element, tag, attrs, kids}, c, style) do
+    box = box(tag, c)
+    {bt, br, bb, bl} = box.bw
+    border_box? = c["box-sizing"] == "border-box"
+
+    build = fn props ->
+      own =
+        c
+        |> Map.drop(~w(width min-width max-width height))
+        |> Map.merge(%{
+          "margin-left" => 0.0,
+          "margin-right" => 0.0,
+          "margin-top" => 0.0,
+          "margin-bottom" => 0.0
+        })
+        |> Map.merge(props)
+
+      attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+      {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()
+    end
+
+    %{
+      build: build,
+      sub: build.(%{}),
+      colspan: span_attr(attrs, "colspan"),
+      rowspan: span_attr(attrs, "rowspan"),
+      width: dim(c["width"]),
+      minh: num(c["height"]) || num(c["min-height"]),
+      valign: valign_of(c["vertical-align"]),
+      extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
+      pt: box.pt,
+      vextra: box.pt + box.pb + bt + bb,
+      sizing: if(border_box?, do: :border, else: :content)
+    }
+  end
+
+  defp span_attr(attrs, name) do
+    case Integer.parse(attr_value(attrs, name)) do
+      {n, _} when n >= 1 -> min(n, 200)
+      _ -> 1
+    end
+  end
+
+  # -> {items, table width, height}
+  defp table_layout(st, ts, model, avail) do
+    placed = table_grid(model.rows)
+    ncols = placed |> Enum.map(&(&1.col + &1.cell.colspan)) |> Enum.max(fn -> 0 end)
+    nrows = length(model.rows)
+    sx = ts.sx
+    sy = ts.sy
+
+    if ncols == 0 do
+      table_caption_only(st, model, avail)
+    else
+      natural? = avail > @unbounded / 2
+      {mins, maxs, pcts} = table_columns(st, placed, ncols)
+      spacing = sx * (ncols + 1)
+
+      widths =
+        if natural? do
+          maxs
+        else
+          table_widths(mins, maxs, pcts, max(avail - spacing, 0))
+        end
+
+      table_w = if natural?, do: Enum.sum(widths) + spacing, else: avail
+      xs = column_positions(widths, sx)
+      span_w = fn col, span -> Enum.sum(Enum.slice(widths, col, span)) + sx * (span - 1) end
+
+      # first pass: the height every cell wants at the width of its columns
+      sized =
+        Enum.map(placed, fn p ->
+          w = max(span_w.(p.col, p.cell.colspan), 1)
+          {_items, h, _} = layout_atom(st, p.cell.sub, w)
+          Map.merge(p, %{w: w, h0: h})
+        end)
+
+      row_heights = table_row_heights(sized, nrows, sy)
+
+      {caption_items, caption_h} = table_caption_items(st, model.caption, table_w)
+      top = caption_h
+      ys = row_positions(row_heights, sy, top)
+
+      cells =
+        for p <- sized do
+          rs = min(p.cell.rowspan, nrows - p.row)
+          full_h = Enum.sum(Enum.slice(row_heights, p.row, rs)) + sy * (rs - 1)
+          valign = p.cell.valign || p.row_valign || "middle"
+
+          extra_top =
+            case valign do
+              "middle" -> max(div(full_h - p.h0, 2), 0)
+              "bottom" -> max(full_h - p.h0, 0)
+              _ -> 0
+            end
+
+          min_h =
+            if p.cell.sizing == :border,
+              do: full_h,
+              else: max(full_h - p.cell.vextra - extra_top, 0)
+
+          props = %{
+            "padding-top" => (p.cell.pt + extra_top) * 1.0,
+            "min-height" => min_h * 1.0
+          }
+
+          props = if ts.collapse?, do: collapse_borders(props, p, ncols, nrows), else: props
+          {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
+          dx = Enum.at(xs, p.col)
+          dy = Enum.at(ys, p.row)
+          behind = if p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: []
+          for item <- behind ++ items, do: move(item, dx, dy)
+        end
+
+      height = top + sy + Enum.sum(row_heights) + sy * nrows
+      {List.flatten([caption_items | cells]), table_w, height}
+    end
+  end
+
+  # a table with only a caption
+  defp table_caption_only(st, model, avail) do
+    {items, h} = table_caption_items(st, model.caption, avail)
+    {items, avail, h}
+  end
+
+  defp table_caption_items(_st, nil, _w), do: {[], 0}
+
+  defp table_caption_items(st, sub, w) do
+    {items, h, _} = layout_atom(st, sub, max(w, 1))
+    {items, h}
+  end
+
+  # with collapsed borders neighbouring cells share one line: the right and bottom
+  # borders only belong to the cells at the edge
+  defp collapse_borders(props, p, ncols, nrows) do
+    props =
+      if p.col + p.cell.colspan < ncols,
+        do: Map.put(props, "border-right-width", 0.0),
+        else: props
+
+    if p.row + min(p.cell.rowspan, nrows - p.row) < nrows,
+      do: Map.put(props, "border-bottom-width", 0.0),
+      else: props
+  end
+
+  # cells at their row and column; a cell with a rowspan or colspan takes the places below
+  # and beside it
+  defp table_grid(rows) do
+    {placed, _taken} =
+      rows
+      |> Enum.with_index()
+      |> Enum.reduce({[], MapSet.new()}, fn {row, r}, {placed, taken} ->
+        {placed, taken, _col} =
+          Enum.reduce(row.cells, {placed, taken, 0}, fn cell, {placed, taken, col} ->
+            col = next_free(taken, r, col)
+
+            spots =
+              for dr <- 0..(cell.rowspan - 1), dc <- 0..(cell.colspan - 1), do: {r + dr, col + dc}
+
+            entry = %{cell: cell, row: r, col: col, row_valign: row.valign, row_bg: row.bg}
+            {[entry | placed], Enum.into(spots, taken), col + cell.colspan}
+          end)
+
+        {placed, taken}
+      end)
+
+    Enum.reverse(placed)
+  end
+
+  defp next_free(taken, r, col),
+    do: if(MapSet.member?(taken, {r, col}), do: next_free(taken, r, col + 1), else: col)
+
+  # the narrowest and widest each column can be, from its cells: wide cells that span several
+  # columns add what is missing equally; percentage widths are kept per column
+  defp table_columns(st, placed, ncols) do
+    measured =
+      Enum.map(placed, fn p ->
+        cell = p.cell
+        min = shrink_extent(st, cell.sub, 1)
+        max = shrink_extent(st, cell.sub, @unbounded)
+
+        {max, pct} =
+          case cell.width do
+            w when is_number(w) -> {max(min, round(w) + cell.extra), nil}
+            {:pct, f} -> {max, f}
+            _ -> {max, nil}
+          end
+
+        {p, min, max(max, min), pct}
+      end)
+
+    zeros = List.duplicate(0, ncols)
+
+    {mins, maxs, pcts} =
+      measured
+      |> Enum.filter(fn {p, _, _, _} -> p.cell.colspan == 1 end)
+      |> Enum.reduce({zeros, zeros, List.duplicate(nil, ncols)}, fn {p, mn, mx, pct},
+                                                                    {mins, maxs, pcts} ->
+        {
+          List.update_at(mins, p.col, &max(&1, mn)),
+          List.update_at(maxs, p.col, &max(&1, mx)),
+          if(pct, do: List.update_at(pcts, p.col, &max(&1 || 0, pct)), else: pcts)
+        }
+      end)
+
+    spanning =
+      measured
+      |> Enum.filter(fn {p, _, _, _} -> p.cell.colspan > 1 end)
+      |> Enum.sort_by(fn {p, _, _, _} -> p.cell.colspan end)
+
+    Enum.reduce(spanning, {mins, maxs, pcts}, fn {p, mn, mx, _pct}, {mins, maxs, pcts} ->
+      {widen(mins, p.col, p.cell.colspan, mn), widen(maxs, p.col, p.cell.colspan, mx), pcts}
+    end)
+  end
+
+  # make the columns col..col+span-1 together `need` wide
+  defp widen(list, col, span, need) do
+    have = list |> Enum.slice(col, span) |> Enum.sum()
+
+    if have >= need do
+      list
+    else
+      lack = need - have
+      share = div(lack, span)
+      rest = rem(lack, span)
+
+      list
+      |> Enum.with_index()
+      |> Enum.map(fn {w, i} ->
+        if i >= col and i < col + span,
+          do: w + share + if(i - col < rest, do: 1, else: 0),
+          else: w
+      end)
+    end
+  end
+
+  # column widths for `space` px: percentages first, then the others between their narrowest
+  # and widest
+  defp table_widths(mins, maxs, pcts, space) do
+    fixed =
+      Enum.zip([mins, pcts])
+      |> Enum.map(fn
+        {mn, nil} -> {nil, mn}
+        {mn, pct} -> {max(round(pct * space), mn), mn}
+      end)
+
+    taken = fixed |> Enum.map(fn {w, _} -> w || 0 end) |> Enum.sum()
+    free = max(space - taken, 0)
+
+    open =
+      for {{nil, _}, mn, mx} <- Enum.zip([fixed, mins, maxs]), do: {mn, mx}
+
+    shared = distribute_columns(open, free)
+
+    {widths, _} =
+      Enum.map_reduce(fixed, shared, fn
+        {nil, _}, [w | rest] -> {w, rest}
+        {w, _}, rest -> {w, rest}
+      end)
+
+    widths
+  end
+
+  defp distribute_columns([], _space), do: []
+
+  defp distribute_columns(cols, space) do
+    sum_min = cols |> Enum.map(&elem(&1, 0)) |> Enum.sum()
+    sum_max = cols |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+
+    cond do
+      sum_min >= space ->
+        Enum.map(cols, &elem(&1, 0))
+
+      sum_max <= space ->
+        # more room than the content wants: grow in proportion to the preferred width
+        extra = space - sum_max
+        spread(Enum.map(cols, &elem(&1, 1)), extra, sum_max)
+
+      true ->
+        t = (space - sum_min) / (sum_max - sum_min)
+
+        widths = Enum.map(cols, fn {mn, mx} -> mn + (mx - mn) * t end)
+        round_to(widths, space)
+    end
+  end
+
+  defp spread(widths, 0, _total), do: widths
+
+  defp spread(widths, extra, total) do
+    weights = if total > 0, do: widths, else: List.duplicate(1, length(widths))
+    sum = Enum.sum(weights)
+    grown = Enum.zip(widths, weights) |> Enum.map(fn {w, wt} -> w + extra * wt / sum end)
+    round_to(grown, Enum.sum(widths) + extra)
+  end
+
+  # whole pixels that still add up to `total`
+  defp round_to(widths, total) do
+    floors = Enum.map(widths, &floor/1)
+    missing = total - Enum.sum(floors)
+
+    order =
+      widths
+      |> Enum.with_index()
+      |> Enum.sort_by(fn {w, i} -> {-(w - floor(w)), i} end)
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.take(max(missing, 0))
+
+    floors |> Enum.with_index() |> Enum.map(fn {w, i} -> if i in order, do: w + 1, else: w end)
+  end
+
+  defp column_positions(widths, sx) do
+    {xs, _} = Enum.map_reduce(widths, sx, fn w, x -> {x, x + w + sx} end)
+    xs
+  end
+
+  defp row_positions(heights, sy, top) do
+    {ys, _} = Enum.map_reduce(heights, top + sy, fn h, y -> {y, y + h + sy} end)
+    ys
+  end
+
+  # a row is as tall as its tallest cell; cells spanning rows add what is missing to their
+  # last row
+  defp table_row_heights(sized, nrows, sy) do
+    base = List.duplicate(0, nrows)
+
+    single =
+      sized
+      |> Enum.filter(&(min(&1.cell.rowspan, nrows - &1.row) == 1))
+      |> Enum.reduce(base, fn p, heights ->
+        List.update_at(heights, p.row, &max(&1, max(p.h0, round(p.cell.minh || 0))))
+      end)
+
+    sized
+    |> Enum.filter(&(min(&1.cell.rowspan, nrows - &1.row) > 1))
+    |> Enum.sort_by(& &1.cell.rowspan)
+    |> Enum.reduce(single, fn p, heights ->
+      rs = min(p.cell.rowspan, nrows - p.row)
+      have = heights |> Enum.slice(p.row, rs) |> Enum.sum() |> Kernel.+(sy * (rs - 1))
+      need = max(p.h0, round(p.cell.minh || 0)) - have
+      if need > 0, do: List.update_at(heights, p.row + rs - 1, &(&1 + need)), else: heights
+    end)
   end
 end

@@ -392,6 +392,12 @@ defmodule Browser.StyleTest do
       assert c["width"] == {:pct, 0.25}
     end
 
+    test "center centres its content but not the text of a table inside it" do
+      html = "<center><p>a</p><table><tr><td>b</td></tr></table></center>"
+      assert comp(html, "", "p")["text-align"] == "-webkit-center"
+      assert comp(html, "", "td")["text-align"] == "left"
+    end
+
     test "viewport units refer to the window" do
       css = "div { height: 50vh; width: 10vw; margin-top: calc(1vh + 2px); min-height: 100vmin }"
       c = computed_of(prune("<div>x</div>", css), "div")

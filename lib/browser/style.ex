@@ -27,8 +27,8 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
-            row-gap column-gap order)
-  @inherited ~w(visibility text-indent color font-size font-weight font-style font-family
+            row-gap column-gap order border-spacing border-collapse)
+  @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
                 stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events)
@@ -80,8 +80,13 @@ defmodule Browser.Style do
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
-  html, legend, main, menu, nav, ol, p, pre, section, summary, ul, table, caption, tr,
-  thead, tbody, tfoot { display: block }
+  html, legend, main, menu, nav, ol, p, pre, section, summary, ul { display: block }
+  table { display: table; border-spacing: 2px }
+  caption { display: table-caption; text-align: center }
+  thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
+  tr { display: table-row; vertical-align: middle }
+  td, th { display: table-cell; padding: 1px; vertical-align: inherit }
+  col, colgroup { display: none }
   li { display: list-item }
   body { margin: 8px }
   p, dl, pre, figure { margin: 1em 0 }
@@ -108,7 +113,8 @@ defmodule Browser.Style do
   a[href] { color: #0000ee; text-decoration: underline }
   u, ins { text-decoration: underline }
   s, strike, del { text-decoration: line-through }
-  center, th { text-align: center }
+  center { text-align: -webkit-center }
+  th { text-align: center }
   input, select, textarea, button { display: inline-block; font-size: 13.3333px; font-weight: normal; font-style: normal; color: #000000; text-align: left; line-height: normal; text-decoration: none; text-indent: 0; margin: 0; padding: 1px 2px; border: 1px solid #767676; border-radius: 2px; background-color: #ffffff; overflow: hidden }
   input { width: 170px }
   input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; text-align: center; line-height: 13px; font-size: 10px }
@@ -513,6 +519,64 @@ defmodule Browser.Style do
         do: {prop, "#{n * unit}px"}
   end
 
+  @table_tags ~w(table tr td th thead tbody tfoot)
+  @table_border_color "#808080"
+
+  # presentational attributes of tables: width, bgcolor, border, cellspacing, cellpadding,
+  # align and valign (what HTML 4 pages use instead of CSS)
+  defp hints(%{tag: tag, attrs: attrs} = ctx) when tag in @table_tags do
+    size = fn name, prop ->
+      case attrs |> attr(name) |> String.trim() do
+        "" ->
+          []
+
+        v ->
+          if Regex.match?(~r/\A\d+(\.\d+)?%?\z/, v),
+            do: [{prop, if(String.ends_with?(v, "%"), do: v, else: v <> "px")}],
+            else: []
+      end
+    end
+
+    background =
+      case attrs |> attr("bgcolor") |> String.trim() do
+        "" ->
+          []
+
+        v ->
+          [
+            {"background-color",
+             if(Regex.match?(~r/\A[0-9a-fA-F]{6}\z/, v), do: "#" <> v, else: v)}
+          ]
+      end
+
+    align =
+      case attrs |> attr("align") |> String.downcase() do
+        a when a in ["left", "center", "right"] and tag != "table" -> [{"text-align", a}]
+        _ -> []
+      end
+
+    valign =
+      case attrs |> attr("valign") |> String.downcase() do
+        v when v in ["top", "middle", "bottom"] -> [{"vertical-align", v}]
+        "baseline" -> [{"vertical-align", "top"}]
+        _ -> []
+      end
+
+    own =
+      case tag do
+        "table" ->
+          table_own_hints(attrs)
+
+        t when t in ["td", "th"] ->
+          size.("width", "width") ++ size.("height", "height") ++ cell_hints(ctx)
+
+        _ ->
+          []
+      end
+
+    own ++ background ++ align ++ valign
+  end
+
   defp hints(%{tag: tag, attrs: attrs}) when tag in @svg_tags do
     for {name, value} <- attrs, name in @svg_attrs, is_binary(value) do
       value = String.trim(value)
@@ -524,6 +588,100 @@ defmodule Browser.Style do
   end
 
   defp hints(_ctx), do: []
+
+  defp table_own_hints(attrs) do
+    size = fn name, prop ->
+      case attrs |> attr(name) |> String.trim() do
+        v when v != "" ->
+          if Regex.match?(~r/\A\d+(\.\d+)?%?\z/, v),
+            do: [{prop, if(String.ends_with?(v, "%"), do: v, else: v <> "px")}],
+            else: []
+
+        _ ->
+          []
+      end
+    end
+
+    border =
+      if List.keymember?(attrs, "border", 0) do
+        n =
+          attrs
+          |> attr("border")
+          |> Integer.parse()
+          |> then(fn
+            {n, _} -> n
+            :error -> 1
+          end)
+
+        if n > 0,
+          do: border_hints(n),
+          else: []
+      else
+        []
+      end
+
+    spacing =
+      case attrs |> attr("cellspacing") |> Integer.parse() do
+        {n, _} when n >= 0 -> [{"border-spacing", "#{n}px"}]
+        _ -> []
+      end
+
+    align =
+      case attrs |> attr("align") |> String.downcase() do
+        "center" -> [{"margin-left", "auto"}, {"margin-right", "auto"}]
+        "right" -> [{"margin-left", "auto"}]
+        _ -> []
+      end
+
+    size.("width", "width") ++ size.("height", "height") ++ border ++ spacing ++ align
+  end
+
+  # what a cell takes from its table: cellpadding, and a border when the table has one
+  defp cell_hints(ctx) do
+    case table_ancestor(ctx) do
+      nil ->
+        []
+
+      %{attrs: attrs} ->
+        padding =
+          case attrs |> attr("cellpadding") |> Integer.parse() do
+            {n, _} when n >= 0 ->
+              for side <- ~w(top right bottom left), do: {"padding-#{side}", "#{n}px"}
+
+            _ ->
+              []
+          end
+
+        border =
+          if List.keymember?(attrs, "border", 0) do
+            n =
+              attrs
+              |> attr("border")
+              |> Integer.parse()
+              |> then(fn
+                {n, _} -> n
+                :error -> 1
+              end)
+
+            if n > 0, do: border_hints(1), else: []
+          else
+            []
+          end
+
+        padding ++ border
+    end
+  end
+
+  defp border_hints(n) do
+    for side <- ~w(top right bottom left),
+        {part, value} <- [{"width", "#{n}px"}, {"style", "solid"}, {"color", @table_border_color}],
+        do: {"border-#{side}-#{part}", value}
+  end
+
+  defp table_ancestor(%{parent: nil}), do: nil
+  defp table_ancestor(%{parent: %{tag: "table"} = table}), do: table
+  defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
+  defp table_ancestor(_), do: nil
 
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do
@@ -623,6 +781,12 @@ defmodule Browser.Style do
       end
 
     base = Map.merge(inherited, typed)
+
+    # `<center>` centres blocks and tables, but its text alignment stops at a table
+    base =
+      if ctx.tag == "table" and base["text-align"] == "-webkit-center",
+        do: Map.put(base, "text-align", "left"),
+        else: base
 
     base =
       if Map.has_key?(resolved, "font-size") or Map.has_key?(inherited, "font-size"),
@@ -837,6 +1001,15 @@ defmodule Browser.Style do
 
   # `normal`, a number (a factor of the font size, inherited as such), or a
   # length/percentage (resolved against this element's font size to px)
+  # one length for both directions, or horizontal then vertical
+  defp typed("border-spacing", v, env, _pc) do
+    case v |> tokens() |> Enum.map(&length(&1, env)) do
+      [h] when is_number(h) -> {:ok, {max(h, 0.0), max(h, 0.0)}}
+      [h, vv | _] when is_number(h) and is_number(vv) -> {:ok, {max(h, 0.0), max(vv, 0.0)}}
+      _ -> :skip
+    end
+  end
+
   defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
     px = if v == "normal", do: 0.0, else: length(v, env)
     if px && px >= 0, do: {:ok, px}, else: :skip

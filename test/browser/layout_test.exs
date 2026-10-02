@@ -461,7 +461,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -2550,6 +2550,205 @@ defmodule Browser.LayoutTest do
 
       {items, _} = flex(html)
       assert x_of(items, "x") == 40
+    end
+  end
+
+  describe "tables" do
+    alias Browser.Page
+
+    # 8px per character at 16px; the page keeps a 4px margin; the default cell spacing is 2px
+    # and padding 1px, so a cell holding "ab" is 18 wide
+    defp tbl(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} p{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp table_rects(items),
+      do: items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(&{&1.y, &1.x})
+
+    test "cells sit in columns, rows below each other" do
+      {items, _} =
+        tbl("<table><tr><td>aa</td><td>bbbb</td></tr><tr><td>c</td><td>d</td></tr></table>")
+
+      assert at(items, "aa").y == at(items, "bbbb").y
+      assert at(items, "c").y > at(items, "aa").y
+      # the second column starts in the same place in every row
+      assert at(items, "bbbb").x == at(items, "d").x
+      assert at(items, "aa").x == at(items, "c").x
+    end
+
+    test "the table is as wide as its columns need, not the whole window" do
+      {items, _} =
+        tbl(~s|<table style="background:#eee"><tr><td>aa</td><td>bbbb</td></tr></table>|)
+
+      [r] = table_rects(items)
+      # 2 + 18 + 2 + 34 + 2
+      assert r.w == 58
+    end
+
+    test "columns share a fixed width by their content" do
+      html = ~s|<table width="400"><tr><td>a</td><td>bbbbbbbb</td></tr></table>|
+      {items, _} = tbl(html)
+      a = at(items, "a")
+      b = at(items, "bbbbbbbb")
+      # all 400px are used and the wider column gets the larger share
+      assert b.x - a.x > 10
+      assert b.x + b.w + 3 + 2 <= 4 + 400 + 1
+    end
+
+    test "text wraps inside a narrow table" do
+      html = ~s|<table width="100"><tr><td>aaaa bbbb cccc dddd</td></tr></table>|
+      {items, _} = tbl(html)
+      ys = for w <- ~w(aaaa bbbb cccc dddd), do: at(items, w).y
+      assert length(Enum.uniq(ys)) > 1
+    end
+
+    test "colspan and rowspan" do
+      html =
+        ~s|<table><tr><td colspan="2">wide wide</td><td rowspan="2">tall</td></tr><tr><td>a</td><td>b</td></tr></table>|
+
+      {items, _} = tbl(html)
+      assert at(items, "tall").x > at(items, "b").x
+      assert at(items, "a").y > at(items, "wide").y
+      assert at(items, "tall").y <= at(items, "a").y
+    end
+
+    test "cellspacing and cellpadding" do
+      {plain, _} = tbl(~s|<table><tr><td>a</td><td>b</td></tr></table>|)
+
+      {spaced, _} =
+        tbl(~s|<table cellspacing="10" cellpadding="5"><tr><td>a</td><td>b</td></tr></table>|)
+
+      assert at(spaced, "a").x - at(plain, "a").x == 10 + 5 - (2 + 1)
+      assert at(spaced, "b").x - at(spaced, "a").x > at(plain, "b").x - at(plain, "a").x
+    end
+
+    test "the border attribute draws a border on the table and its cells" do
+      {items, _} = tbl(~s|<table border="1"><tr><td>a</td></tr></table>|)
+      assert length(table_rects(items)) == 8
+    end
+
+    test "collapsed borders are shared" do
+      css = "<style>table{border-collapse:collapse} td{border:1px solid #000}</style>"
+      {items, _} = tbl(css <> "<table><tr><td>a</td><td>b</td></tr></table>")
+
+      verticals =
+        items |> table_rects() |> Enum.filter(&(&1.w == 1)) |> Enum.map(& &1.x) |> Enum.sort()
+
+      # left edge, the shared line, right edge: three lines, not four
+      assert length(verticals) == 3
+    end
+
+    test "backgrounds fill the whole cell and the row has one height" do
+      html =
+        ~s|<table><tr><td style="background:#eee">a</td><td style="background:#ddd;font-size:32px">b</td></tr></table>|
+
+      {items, _} = tbl(html)
+      [x, y] = table_rects(items)
+      assert x.h == y.h
+      assert x.y == y.y
+    end
+
+    test "row and row group backgrounds show behind the cells" do
+      html =
+        ~s|<table><thead style="background:#111"><tr><td>h</td></tr></thead><tr bgcolor="#eeeeee"><td>a</td><td>b</td></tr></table>|
+
+      {items, _} = tbl(html)
+      colors = items |> table_rects() |> Enum.map(& &1.color)
+      assert {17, 17, 17} in colors
+      assert length(Enum.filter(colors, &(&1 == {238, 238, 238}))) == 2
+    end
+
+    test "vertical alignment: middle by default, top and bottom on request" do
+      td = fn v ->
+        ~s|<table><tr><td style="font-size:32px;background:#ccc">big</td><td valign="#{v}">s</td></tr></table>|
+      end
+
+      {mid, _} = tbl(td.("middle"))
+      {top, _} = tbl(td.("top"))
+      {bottom, _} = tbl(td.("bottom"))
+      assert at(top, "s").y < at(mid, "s").y
+      assert at(mid, "s").y < at(bottom, "s").y
+    end
+
+    test "valign on the row" do
+      html =
+        ~s|<table><tr valign="top"><td style="font-size:32px">big</td><td>s</td></tr></table>|
+
+      {items, _} = tbl(html)
+      assert at(items, "s").y < 12
+    end
+
+    test "text-align from the align attribute and th" do
+      html = ~s|<table width="200"><tr><th>h</th><td align="right">r</td></tr></table>|
+      {items, _} = tbl(html)
+      assert at(items, "h").x < at(items, "r").x
+    end
+
+    test "a caption sits above the rows" do
+      {items, _} = tbl(~s|<table><caption>cap</caption><tr><td>cell</td></tr></table>|)
+      assert at(items, "cap").y < at(items, "cell").y
+    end
+
+    test "header rows come first and footer rows last, wherever they are written" do
+      html =
+        ~s|<table><tfoot><tr><td>foot</td></tr></tfoot><tbody><tr><td>body</td></tr></tbody><thead><tr><td>head</td></tr></thead></table>|
+
+      {items, _} = tbl(html)
+      assert at(items, "head").y < at(items, "body").y
+      assert at(items, "body").y < at(items, "foot").y
+    end
+
+    test "tables nest" do
+      html =
+        ~s|<table><tr><td><table><tr><td>in1</td><td>in2</td></tr></table></td><td>out</td></tr></table>|
+
+      {items, _} = tbl(html)
+      assert at(items, "in1").y == at(items, "in2").y
+      assert at(items, "out").x > at(items, "in2").x
+    end
+
+    test "align=center centres a narrow table" do
+      html = ~s|<table align="center"><tr><td>ab</td></tr></table>|
+      {items, _} = tbl(html)
+      # the cell content is about 16 wide in a 400 wide window: about 192 from the left
+      assert abs(at(items, "ab").x - 192) <= 12
+    end
+
+    test "a percentage width is relative to the container" do
+      html = ~s|<table width="50%" style="background:#eee"><tr><td>a</td></tr></table>|
+      {items, _} = tbl(html)
+      assert [%{w: 200}] = table_rects(items)
+    end
+
+    test "empty rows and cells take little room" do
+      {items, h} = tbl("<table><tr><td></td></tr></table><p>after</p>")
+      assert at(items, "after").y < 40
+      assert h < 60
+    end
+
+    test "text outside cells and stray elements do not break it" do
+      {items, _} = tbl("<table>stray<tr><td>a</td></tr><div>junk</div></table><p>after</p>")
+      assert at(items, "a")
+      assert at(items, "after")
+    end
+
+    test "display: table works on any element" do
+      html =
+        ~s|<div style="display:table"><div style="display:table-row"><div style="display:table-cell">a</div><div style="display:table-cell">b</div></div></div>|
+
+      {items, _} = tbl(html)
+      assert at(items, "a").y == at(items, "b").y
+      assert at(items, "b").x > at(items, "a").x
+    end
+
+    test "table cells outside a table sit side by side" do
+      {items, _} =
+        tbl(
+          ~s|<div><div style="display:table-cell">a</div><div style="display:table-cell">b</div></div>|
+        )
+
+      assert at(items, "a").y == at(items, "b").y
     end
   end
 end

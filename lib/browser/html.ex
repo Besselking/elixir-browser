@@ -211,11 +211,40 @@ defmodule Browser.HTML do
 
   defp implied_close("li", stack), do: close_nearest(stack, "li", ~w(ul ol))
 
+  # table parts end the ones before them (`<td>a<td>b`, `<tr>..<tr>`), inside the same table
+  defp implied_close(name, stack) when name in ["td", "th"],
+    do: close_within(stack, ["td", "th"], "table")
+
+  defp implied_close("tr", stack) do
+    stack
+    |> close_within(["td", "th", "tr"], "table")
+    |> close_nearest("p", [])
+  end
+
+  defp implied_close(name, stack) when name in ["thead", "tbody", "tfoot"],
+    do: close_within(stack, ["td", "th", "tr", "thead", "tbody", "tfoot"], "table")
+
   defp implied_close(name, stack) when name in ["dt", "dd"],
     do: close_nearest(stack, name, ~w(dl))
 
   defp implied_close(name, stack) when name in @closes_p, do: close_nearest(stack, "p", [])
   defp implied_close(_, stack), do: stack
+
+  # closes the outermost open element named in `targets`, if there is one before `barrier`
+  defp close_within(stack, targets, barrier) do
+    names =
+      Enum.map(stack, fn
+        {{name, _}, _} -> name
+        {:root, _} -> :root
+      end)
+
+    inside = Enum.take_while(names, &(&1 != barrier and &1 != :root))
+
+    case Enum.filter(inside, &(&1 in targets)) do
+      [] -> stack
+      found -> pop_until(stack, List.last(found))
+    end
+  end
 
   # close an open `target` only if it's the current element or separated by
   # inline elements (i.e. not past a `barrier` list container)

@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<title>Tables</title>
+<style>
+  body { font-family: sans-serif; margin: 12px }
+  h2 { margin: 18px 0 6px }
+  .zebra { border-collapse: collapse; width: 100% }
+  .zebra th { background: #2b3a55; color: #fff; text-align: left }
+  .zebra th, .zebra td { padding: 6px 10px; border: 1px solid #c8cfdb }
+  .zebra tr:nth-child(even) td { background: #f2f5fa }
+  .num { text-align: right }
+  .card { border-collapse: separate; border-spacing: 8px; background: #eef }
+  .card td { background: #fff; border-radius: 6px; padding: 10px }
+</style>
+</head>
+<body>
+<h1>Tables</h1>
+
+<h2>Old-school: border, cellpadding, bgcolor</h2>
+<table border="1" cellpadding="6" cellspacing="0">
+  <caption>Planets</caption>
+  <tr bgcolor="#dddddd"><th>Name</th><th>Moons</th><th>Distance (AU)</th></tr>
+  <tr><td>Mercury</td><td align="right">0</td><td align="right">0.39</td></tr>
+  <tr><td>Earth</td><td align="right">1</td><td align="right">1.00</td></tr>
+  <tr><td>Jupiter</td><td align="right">95</td><td align="right">5.20</td></tr>
+</table>
+
+<h2>CSS: collapsed borders, zebra rows, full width</h2>
+<table class="zebra">
+  <thead><tr><th>Language</th><th>Typing</th><th class="num">Year</th></tr></thead>
+  <tbody>
+    <tr><td>Elixir</td><td>dynamic, gradual</td><td class="num">2012</td></tr>
+    <tr><td>Erlang</td><td>dynamic</td><td class="num">1986</td></tr>
+    <tr><td>Gleam</td><td>static</td><td class="num">2016</td></tr>
+    <tr><td>Rust</td><td>static</td><td class="num">2010</td></tr>
+  </tbody>
+  <tfoot><tr><td colspan="2">Four languages</td><td class="num">&nbsp;</td></tr></tfoot>
+</table>
+
+<h2>Spans and vertical alignment</h2>
+<table border="1" cellpadding="6" cellspacing="0" width="60%">
+  <tr><td rowspan="2" valign="top">top</td><td colspan="2" align="center">spans two columns</td></tr>
+  <tr><td>left</td><td valign="bottom" style="height:60px">bottom</td></tr>
+  <tr><td colspan="3"><b>wraps</b>: a longer piece of text that has to break over several lines inside a narrow table cell.</td></tr>
+</table>
+
+<h2>Cards in a table, centred</h2>
+<table class="card" align="center">
+  <tr><td>One</td><td>Two</td><td>Three</td></tr>
+  <tr><td colspan="3">A wide card below</td></tr>
+</table>
+
+<h2>Nested</h2>
+<table border="1" cellpadding="8" cellspacing="0">
+  <tr>
+    <td>
+      <table border="1" cellpadding="3" cellspacing="0"><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>
+    </td>
+    <td>next to it</td>
+  </tr>
+</table>
+</body>
+</html>
