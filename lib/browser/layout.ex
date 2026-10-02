@@ -2395,6 +2395,44 @@ defmodule Browser.Layout do
     end)
   end
 
+  # The narrowest content can be: what `shrink_extent(st, sub, 1)` gives, which puts one word on
+  # every line. Content made of words, blocks and their insets only needs no layout for that:
+  # it is as wide as its widest word plus the insets around it. Anything else (boxes, images,
+  # floats, inline boxes, preformatted words) is laid out at width 1.
+  defp min_extent(st, sub, key) do
+    memo({:min_extent, key || :erlang.phash2(sub)}, fn ->
+      case min_words(sub, st.measure, 0, 0, [], 0) do
+        :layout -> shrink_extent(st, sub, 1, key)
+        ext -> ext
+      end
+    end)
+  end
+
+  defp min_words([], _measure, _l, _r, _stack, ext), do: ext
+
+  defp min_words([op | rest], measure, l, r, stack, ext) do
+    case op do
+      {:word, text, style} ->
+        min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
+
+      {:inset, dl, dr} ->
+        min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], ext)
+
+      {:inset_end} when stack != [] ->
+        [{l, r} | stack] = stack
+        min_words(rest, measure, l, r, stack, ext)
+
+      {tag, _} when tag in [:space, :gap, :pad] ->
+        min_words(rest, measure, l, r, stack, ext)
+
+      {:flush} ->
+        min_words(rest, measure, l, r, stack, ext)
+
+      _ ->
+        :layout
+    end
+  end
+
   # Nested tables measure and lay out the same cell content again and again (and every level
   # multiplies the passes), so results are remembered for the duration of one layout. The key
   # is a hash of the content, so a collision is possible in principle but not worth guarding.
@@ -3445,7 +3483,7 @@ defmodule Browser.Layout do
     measured =
       Enum.map(placed, fn p ->
         cell = p.cell
-        min = shrink_extent(st, cell.sub, 1, cell.key)
+        min = min_extent(st, cell.sub, cell.key)
         max = shrink_extent(st, cell.sub, @unbounded, cell.key)
 
         {max, pct} =

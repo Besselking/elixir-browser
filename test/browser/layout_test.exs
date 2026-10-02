@@ -2595,6 +2595,18 @@ defmodule Browser.LayoutTest do
       assert r.w == 58
     end
 
+    test "in a narrow window columns shrink to their widest word, padding included" do
+      html =
+        ~s|<table style="background:#eee"><tr><td>aa bbbbbb c</td><td style="padding:5px">dd eeee</td></tr></table>|
+
+      {items, _} = tbl(html, 60)
+      [r] = table_rects(items)
+      # the same width the cells get when laid out one word per line
+      assert r.w == 52
+      assert at(items, "aa").y < at(items, "bbbbbb").y
+      assert at(items, "dd").y < at(items, "eeee").y
+    end
+
     test "columns share a fixed width by their content" do
       html = ~s|<table width="400"><tr><td>a</td><td>bbbbbbbb</td></tr></table>|
       {items, _} = tbl(html)
