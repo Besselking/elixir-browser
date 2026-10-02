@@ -2317,10 +2317,14 @@ defmodule Browser.Layout do
     end
   end
 
+  # A marker box is as wide as its content only when it is not just the measuring width: the
+  # box of a block-level control fills whatever width it is laid out at.
+  defp fixed_width?(%{w: w}), do: w < @unbounded / 2
+
   # right edge of the text, for shrink-to-fit
   defp extent(items) do
     items
-    |> Enum.filter(&(&1.type in [:text, :image, :svg, :box]))
+    |> Enum.filter(&(&1.type in [:text, :image, :svg] or (&1.type == :box and fixed_width?(&1))))
     |> Enum.map(&(&1.x + &1.w + Map.get(&1, :rr, 0)))
     |> Enum.max(fn -> 0 end)
   end

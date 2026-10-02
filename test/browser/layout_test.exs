@@ -2458,6 +2458,15 @@ defmodule Browser.LayoutTest do
       assert x_of(items, "c") == 392
     end
 
+    test "buttons in a flex row are as wide as their text (a control's box fills any width)" do
+      html =
+        ~s|<div style="display:flex;overflow-x:auto"><div style="display:flex;flex-shrink:0"><button style="flex-shrink:0;padding:4px 24px">Books</button><button style="flex-shrink:0;padding:4px 24px">Courses</button></div></div>|
+
+      {items, _} = flex(html)
+      assert x_of(items, "Courses") < 200
+      assert Layout.content_width(items, 408) == 408
+    end
+
     test "an inline-flex link in a container is as wide as its content, not spread out" do
       html =
         ~s|<div style="display:flex;justify-content:space-between"><a href="/" style="display:inline-flex;justify-content:center;padding:0 10px"><span>logo</span></a><div>menu</div></div>|
@@ -2713,6 +2722,14 @@ defmodule Browser.LayoutTest do
       {items, _} = tbl(html)
       # the cell content is about 16 wide in a 400 wide window: about 192 from the left
       assert abs(at(items, "ab").x - 192) <= 12
+    end
+
+    test "a table's width includes its padding and border" do
+      html =
+        ~s|<table style="width:100%;padding:10px;border:3px solid #333;background:#eee"><tr><td>x</td></tr></table>|
+
+      {items, _} = tbl(html)
+      assert Layout.content_width(items, 408) == 408
     end
 
     test "a percentage width is relative to the container" do

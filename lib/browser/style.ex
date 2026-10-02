@@ -81,7 +81,7 @@ defmodule Browser.Style do
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
   html, legend, main, menu, nav, ol, p, pre, section, summary, ul { display: block }
-  table { display: table; border-spacing: 2px }
+  table { display: table; border-spacing: 2px; box-sizing: border-box }
   caption { display: table-caption; text-align: center }
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
   tr { display: table-row; vertical-align: middle }
