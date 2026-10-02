@@ -209,7 +209,7 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{}, fn {rule, order}, idx ->
+    |> Enum.reduce(%{viewport: {env.width, env.height}}, fn {rule, order}, idx ->
       rule = Map.put(rule, :order, order)
       Map.update(idx, key(rule), [rule], &[rule | &1])
     end)
@@ -610,7 +610,8 @@ defmodule Browser.Style do
         _ -> inherited["color"]
       end
 
-    env = %{fs: fs, root: parent_root || fs, color: color}
+    {vw, vh} = Map.get(idx, :viewport, {1024, 768})
+    env = %{fs: fs, root: parent_root || fs, color: color, vw: vw / 100, vh: vh / 100}
 
     typed =
       for {k, v} <- resolved, k not in ["font-size", "color"], reduce: %{} do
@@ -974,7 +975,27 @@ defmodule Browser.Style do
     end
   end
 
-  defp unit_px(unit, env), do: Browser.Calc.unit_px(unit, env.fs, env.root)
+  defp unit_px(unit, env) do
+    case viewport_unit(unit, env) do
+      nil -> Browser.Calc.unit_px(unit, env.fs, env.root)
+      px -> px
+    end
+  end
+
+  # one viewport unit in px (1vw is a hundredth of the window's width)
+  defp viewport_unit(unit, env) do
+    vw = Map.get(env, :vw)
+    vh = Map.get(env, :vh)
+
+    cond do
+      vw == nil -> nil
+      unit in ["vw", "dvw", "svw", "lvw"] -> vw
+      unit in ["vh", "dvh", "svh", "lvh"] -> vh
+      unit == "vmin" -> min(vw, vh)
+      unit == "vmax" -> max(vw, vh)
+      true -> nil
+    end
+  end
 
   defp plain_length(v, env) do
     case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))([a-z]*)\z/, v) do
@@ -992,7 +1013,7 @@ defmodule Browser.Style do
           "cm" -> n * 96 / 2.54
           "mm" -> n * 96 / 25.4
           u when u in ["ex", "ch"] -> n * env.fs / 2
-          _ -> nil
+          u -> if px = viewport_unit(u, env), do: n * px
         end
 
       _ ->

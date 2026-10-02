@@ -193,12 +193,15 @@ defmodule Browser.LayoutTest do
         styled(
           ~s|<p style='font-family: "DM Mono", "DM Mono fallback", ui-monospace, monospace'>a</p>| <>
             ~s|<p style='font-family: "DM Sans", sans-serif, monospace'>b</p>| <>
-            ~s|<p style='font-family: "Fancy Face"'>c</p>|
+            ~s|<p style='font-family: "Fancy Face"'>c</p>| <>
+            ~s|<p style='font-family: "DM Mono-abc123", "DM Mono-abc123 fallback: Arial", sans-serif, ui-monospace'>d</p>|
         )
 
       assert word(items, "a").mono
       refute word(items, "b").mono
       refute word(items, "c").mono
+      # a web font named "mono" stands for a monospace font, even before a generic sans-serif
+      assert word(items, "d").mono
     end
 
     test "monospace family is detected from the first family" do
@@ -310,6 +313,11 @@ defmodule Browser.LayoutTest do
       {moved, _} = abs_layout(css <> ~s|<div class="t" style="#{base}">hi</div>|)
       assert wd(moved, "hi").x == wd(plain, "hi").x - 50
       assert wd(moved, "hi").y == wd(plain, "hi").y
+    end
+
+    test "an absolute box extends the scrollable page" do
+      {_, h} = abs_layout(~s|<p>x</p><div style="position:absolute; top:900px; left:0">far</div>|)
+      assert h >= 900
     end
 
     test "absolute elements take no space in the flow" do

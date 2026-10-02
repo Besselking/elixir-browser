@@ -100,4 +100,33 @@ defmodule Browser.PageTest do
       assert Page.all_image_urls(wide) == ["http://h.test/dir/wide.png"]
     end
   end
+
+  describe "viewport units" do
+    defp page_height(page), do: div_height(page.nodes)
+
+    defp div_height(nodes) do
+      Enum.find_value(nodes, fn
+        {:element, "div", attrs, _} ->
+          attrs |> List.keyfind("@computed", 0) |> elem(1) |> Map.get("height")
+
+        {:element, _, _, kids} ->
+          div_height(kids)
+
+        _ ->
+          nil
+      end)
+    end
+
+    test "restyle follows the window size, only for pages that use them" do
+      html = ~s|<body style="margin:0"><div style="height: 50vh">x</div></body>|
+      env = fn w, h -> %{type: "screen", width: w, height: h, dppx: 1.0} end
+      page = Page.build(html, "about:home", env.(800, 600))
+      assert page.viewport_units
+      assert page_height(Page.restyle(page, env.(800, 400))) == 200.0
+
+      plain = Page.build("<div>x</div>", "about:home", env.(800, 600))
+      refute plain.viewport_units
+      assert Page.restyle(plain, env.(800, 400)) == plain
+    end
+  end
 end

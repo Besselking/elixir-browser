@@ -23,6 +23,8 @@ defmodule Browser.Page do
     forms: %{controls: %{}, forms: %{}},
     form_state: %{},
     image_urls: [],
+    # whether styles use vw/vh units: then the window size is part of the cascade
+    viewport_units: false,
     svg_defs: %{},
     fixed_width: MapSet.new()
   ]
@@ -102,10 +104,33 @@ defmodule Browser.Page do
         rules: rules,
         queries: queries,
         forms: forms,
-        image_urls: image_urls
+        image_urls: image_urls,
+        viewport_units: viewport_units?(rules, raw)
       },
       env
     )
+  end
+
+  @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
+
+  defp viewport_units?(rules, raw) do
+    Enum.any?(rules, fn rule ->
+      Enum.any?(rule.decls, fn {_prop, value, _important} ->
+        is_binary(value) and Regex.match?(@viewport_unit, value)
+      end)
+    end) or inline_viewport_units?(raw)
+  end
+
+  defp inline_viewport_units?(nodes) when is_list(nodes),
+    do: Enum.any?(nodes, &inline_viewport_units?/1)
+
+  defp inline_viewport_units?({:text, _}), do: false
+
+  defp inline_viewport_units?({:element, _tag, attrs, kids}) do
+    case List.keyfind(attrs, "style", 0) do
+      {_, css} when is_binary(css) -> Regex.match?(@viewport_unit, css)
+      _ -> false
+    end or inline_viewport_units?(kids)
   end
 
   @doc """
@@ -113,7 +138,7 @@ defmodule Browser.Page do
   media query result differs from the last run.
   """
   def restyle(%__MODULE__{} = page, env) do
-    key = Style.media_key(page.queries, env)
+    key = {Style.media_key(page.queries, env), page.viewport_units && {env.width, env.height}}
 
     if key == page.key and page.nodes != nil do
       page

@@ -392,6 +392,16 @@ defmodule Browser.StyleTest do
       assert c["width"] == {:pct, 0.25}
     end
 
+    test "viewport units refer to the window" do
+      css = "div { height: 50vh; width: 10vw; margin-top: calc(1vh + 2px); min-height: 100vmin }"
+      c = computed_of(prune("<div>x</div>", css), "div")
+      # the default window is 1024x768
+      assert c["height"] == 384.0
+      assert c["width"] == 102.4
+      assert_in_delta c["margin-top"], 9.68, 1.0e-9
+      assert c["min-height"] == 768.0
+    end
+
     test "translucent backgrounds and borders keep their alpha" do
       css = "div { background-color: #f0682a1a; border: 1px solid rgb(0 0 0 / 50%) }"
       c = computed_of(prune("<div>x</div>", css), "div")

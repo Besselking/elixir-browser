@@ -129,6 +129,8 @@ defmodule Browser.Layout do
     {nodes, canvas} = propagate_background(nodes)
     ops = nodes |> walk(style, []) |> Enum.reverse()
     {items, height} = place(ops, width, measure, view_height, opts[:images])
+    # absolutely positioned boxes take no room in the flow but do extend the scrollable page
+    height = max(height, content_bottom(items))
     items = add_focus(items, measure, opts[:focus])
 
     case canvas do
@@ -281,6 +283,22 @@ defmodule Browser.Layout do
     |> Tuple.to_list()
     |> Enum.map(fn {rx, ry} -> if rx > 0 and ry > 0, do: {rx + by, ry + by}, else: {0, 0} end)
     |> List.to_tuple()
+  end
+
+  @doc """
+  How far down the laid out page extends (inside the boxes that clip it): the bottom of
+  what is drawn.
+  """
+  def content_bottom(items) do
+    items
+    |> Enum.filter(
+      &(&1.type in [:text, :rect, :image, :svg, :hr] and not Map.get(&1, :hidden, false))
+    )
+    |> Enum.reduce(0, fn item, acc ->
+      bottom = item.y + Map.get(item, :h, 0)
+      bottom = if clip = Map.get(item, :clip), do: min(bottom, clip.y + clip.h), else: bottom
+      max(acc, bottom)
+    end)
   end
 
   @doc """
@@ -1117,7 +1135,8 @@ defmodule Browser.Layout do
     |> Enum.find_value(false, fn
       name when name in @mono_fonts -> :mono
       name when name in @proportional_fonts -> :proportional
-      _web_or_unknown -> nil
+      # a web font we can't load, but whose name says what it is: "DM Mono", "Fira Code"
+      name -> if String.contains?(name, ["mono", "code", "courier", "consol"]), do: :mono
     end)
     |> Kernel.==(:mono)
   end
