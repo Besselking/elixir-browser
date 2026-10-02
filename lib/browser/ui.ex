@@ -20,7 +20,7 @@ defmodule Browser.UI do
   @horizontal 4
   @vertical 8
 
-  defstruct [:frame, :url, :back, :forward, :reload, :panel, :status]
+  defstruct [:frame, :url, :back, :forward, :reload, :panel, :status, :cursors]
 
   def build do
     :ets.new(@view, [:named_table, :public])
@@ -74,7 +74,8 @@ defmodule Browser.UI do
       forward: forward,
       reload: reload,
       panel: panel,
-      status: status
+      status: status,
+      cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
   end
 
@@ -699,16 +700,9 @@ defmodule Browser.UI do
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
 
   @doc "Sets the mouse cursor over the page: `:arrow`, `:hand` or `:text`."
-  def set_cursor(%{panel: p}, kind) do
-    id =
-      case kind do
-        true -> 6
-        :hand -> 6
-        :text -> 7
-        _ -> 1
-      end
-
-    :wxWindow.setCursor(p, :wxCursor.new(id))
+  def set_cursor(%{panel: p, cursors: cursors}, kind) do
+    kind = if kind in [true, :hand], do: :hand, else: if(kind == :text, do: :text, else: :arrow)
+    :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
   end
 
   @doc "Moves keyboard focus to the page, so key events reach it."

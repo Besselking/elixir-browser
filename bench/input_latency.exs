@@ -60,7 +60,9 @@ paint = fn -> if paint?, do: (:wxWindow.refresh(ui.panel); :wxWindow.update(ui.p
 
 send_ev = fn ev -> send(session, wx(event: ev)); barrier.(); paint.() end
 key = fn cp -> send_ev.(wxKey(type: :char, keyCode: cp, uniChar: cp, controlDown: false, metaDown: false, shiftDown: false, altDown: false)) end
-motion = fn x, y -> send_ev.(wxMouse(type: :motion, x: x, y: y)) end
+# hover never invalidates the panel, so no paint here: a paint left pending by the previous
+# event would otherwise make the next blocking wx call (setCursor) wait behind it and look slow
+motion = fn x, y -> send(session, wx(event: wxMouse(type: :motion, x: x, y: y))); barrier.() end
 wheel = fn rot -> send_ev.(wxMouse(type: :mousewheel, wheelRotation: rot)) end
 click = fn x, y -> send_ev.(wxMouse(type: :left_down, x: x, y: y)) end
 
