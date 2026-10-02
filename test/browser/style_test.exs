@@ -392,6 +392,14 @@ defmodule Browser.StyleTest do
       assert c["width"] == {:pct, 0.25}
     end
 
+    test "percentage margins and padding are kept as shares" do
+      css = "div { margin: 0 3%; padding: 10% 5% }"
+      c = computed_of(prune("<div>x</div>", css), "div")
+      assert c["margin-left"] == {:pct, 0.03} and c["margin-right"] == {:pct, 0.03}
+      assert c["margin-top"] == 0.0
+      assert c["padding-top"] == {:pct, 0.1} and c["padding-left"] == {:pct, 0.05}
+    end
+
     test "center centres its content but not the text of a table inside it" do
       html = "<center><p>a</p><table><tr><td>b</td></tr></table></center>"
       assert comp(html, "", "p")["text-align"] == "-webkit-center"

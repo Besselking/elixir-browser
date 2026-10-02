@@ -933,6 +933,8 @@ defmodule Browser.Style do
     cond do
       v == "auto" -> {:ok, 0.0}
       px = length(v, env) -> {:ok, max(px, 0.0)}
+      # a percentage is of the containing block's width, known only to layout
+      pct = percentage(v) -> {:ok, {:pct, max(pct, 0.0)}}
       true -> :skip
     end
   end
@@ -1211,6 +1213,14 @@ defmodule Browser.Style do
 
       _ ->
         nil
+    end
+  end
+
+  # "12.5%" -> 0.125, nil when it is not a percentage
+  defp percentage(v) do
+    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) do
+      [_, n] -> to_float(n) / 100
+      nil -> nil
     end
   end
 

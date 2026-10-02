@@ -126,6 +126,8 @@ defmodule Browser.Layout do
       svg_defs: Keyword.get(opts, :svg_defs, %{})
     }
 
+    # what percentage margins and padding refer to, as the walk goes down the tree
+    Process.put(:layout_cw, max(width - 2 * @margin, 0))
     {nodes, canvas} = propagate_background(nodes)
     ops = nodes |> walk(style, []) |> Enum.reverse()
     {items, height} = place(ops, width, measure, view_height, opts[:images])
@@ -738,12 +740,26 @@ defmodule Browser.Layout do
 
     attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
 
-    sub =
-      {:element, tag, attrs, kids}
-      |> walk_element(parent_style, [], :inline_inner)
-      |> Enum.reverse()
-
+    # a box with a width of its own is what its children's percentages refer to
     {_, br, _, bl} = box.bw
+    outer = containing_width()
+
+    reference =
+      case dim(c["width"]) do
+        nil ->
+          outer
+
+        w ->
+          sized_by(w, outer) +
+            if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br) + ml + mr
+      end
+
+    sub =
+      with_cw(reference, fn ->
+        {:element, tag, attrs, kids}
+        |> walk_element(parent_style, [], :inline_inner)
+        |> Enum.reverse()
+      end)
 
     spec = %{
       width: dim(c["width"]),
@@ -879,14 +895,20 @@ defmodule Browser.Layout do
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
           acc = if box.pt > 0, do: [{:pad, box.pt} | acc], else: acc
-          acc = block_children(tag, kind, kids, style, c, acc)
+
+          acc =
+            with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
+
           acc = [{:flush} | acc]
           acc = if box.pb > 0, do: [{:pad, box.pb} | acc], else: acc
           [{:gap, box.mb}, {:inset_end} | acc]
 
         spec ->
           acc = [{:box_start, ref, spec} | acc]
-          acc = block_children(tag, kind, kids, style, c, acc)
+
+          acc =
+            with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
+
           acc = [{:box_end, ref}, {:flush} | acc]
           [{:gap, box.mb} | acc]
       end
@@ -1123,7 +1145,11 @@ defmodule Browser.Layout do
   end
 
   # wx draws at integer pixels
+  # a percentage margin or padding is of the width of the containing block
+  defp px({:pct, f}), do: round(f * containing_width())
   defp px(n), do: round(n)
+
+  defp containing_width, do: Process.get(:layout_cw, 0)
 
   # -- styles ----------------------------------------------------------------------
 
@@ -2536,22 +2562,11 @@ defmodule Browser.Layout do
     border_box? = c["box-sizing"] == "border-box"
     fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
 
+    # built again when the container stretches the item: with the same reference width
+    cw = containing_width()
+
     build = fn extra_props ->
-      if tag in ~w(img svg) do
-        el |> walk(style, []) |> Enum.reverse()
-      else
-        own =
-          c
-          |> Map.drop(~w(width min-width max-width flex-basis))
-          |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
-          |> Map.merge(extra_props)
-
-        attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
-
-        {:element, tag, attrs, kids}
-        |> walk_element(style, [], :inline_inner)
-        |> Enum.reverse()
-      end
+      with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
     end
 
     %{
@@ -2576,6 +2591,24 @@ defmodule Browser.Layout do
       auto_height?: c["height"] in [nil, :auto],
       fit?: c["width"] == :fit
     }
+  end
+
+  defp build_flex_item(tag, el, c, attrs, kids, style, extra_props) do
+    if tag in ~w(img svg) do
+      el |> walk(style, []) |> Enum.reverse()
+    else
+      own =
+        c
+        |> Map.drop(~w(width min-width max-width flex-basis))
+        |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
+        |> Map.merge(extra_props)
+
+      attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+
+      {:element, tag, attrs, kids}
+      |> walk_element(style, [], :inline_inner)
+      |> Enum.reverse()
+    end
   end
 
   defp flex_number(v, default) when is_binary(v) do
@@ -2944,21 +2977,10 @@ defmodule Browser.Layout do
     {bt, br, bb, bl} = box.bw
     border_box? = c["box-sizing"] == "border-box"
 
-    build = fn props ->
-      own =
-        c
-        |> Map.drop(~w(width min-width max-width height))
-        |> Map.merge(%{
-          "margin-left" => 0.0,
-          "margin-right" => 0.0,
-          "margin-top" => 0.0,
-          "margin-bottom" => 0.0
-        })
-        |> Map.merge(props)
+    # cells are built again at their final size: with the same reference width
+    cw = containing_width()
 
-      attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
-      {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()
-    end
+    build = fn props -> with_cw(cw, fn -> build_cell(tag, attrs, kids, c, style, props) end) end
 
     %{
       build: build,
@@ -2973,6 +2995,22 @@ defmodule Browser.Layout do
       vextra: box.pt + box.pb + bt + bb,
       sizing: if(border_box?, do: :border, else: :content)
     }
+  end
+
+  defp build_cell(tag, attrs, kids, c, style, props) do
+    own =
+      c
+      |> Map.drop(~w(width min-width max-width height))
+      |> Map.merge(%{
+        "margin-left" => 0.0,
+        "margin-right" => 0.0,
+        "margin-top" => 0.0,
+        "margin-bottom" => 0.0
+      })
+      |> Map.merge(props)
+
+    attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+    {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()
   end
 
   defp span_attr(attrs, name) do
@@ -3280,6 +3318,53 @@ defmodule Browser.Layout do
       need = max(p.h0, round(p.cell.minh || 0)) - have
       if need > 0, do: List.update_at(heights, p.row + rs - 1, &(&1 + need)), else: heights
     end)
+  end
+
+  # -- percentage margins and padding -------------------------------------------------------
+
+  defp sized_by({:pct, f}, outer), do: round(f * outer)
+  defp sized_by(w, _outer) when is_number(w), do: round(w)
+  defp sized_by(_, outer), do: outer
+
+  # runs `fun` with `width` as the containing block's width, then puts the old one back
+  defp with_cw(width, fun) do
+    previous = containing_width()
+    Process.put(:layout_cw, width)
+
+    try do
+      fun.()
+    after
+      Process.put(:layout_cw, previous)
+    end
+  end
+
+  # the width of a block's content box, which its children's percentages refer to: its width
+  # (or what is left of the container) less padding and borders
+  defp child_width(c, box) do
+    outer = containing_width()
+    {_bt, br, _bb, bl} = box.bw
+    extras = box.pl + box.pr + bl + br
+    ml = if box.ml == :auto, do: 0, else: box.ml
+    mr = if box.mr == :auto, do: 0, else: box.mr
+    border_box? = c["box-sizing"] == "border-box"
+    sized = fn w -> if border_box?, do: w - extras, else: w end
+
+    width =
+      case dim(c["width"]) do
+        nil -> outer - ml - mr - extras
+        {:pct, f} -> sized.(f * outer)
+        w when is_number(w) -> sized.(w)
+        _ -> outer - ml - mr - extras
+      end
+
+    width =
+      case c["max-width"] do
+        m when is_number(m) -> min(width, sized.(m))
+        {:pct, f} -> min(width, sized.(f * outer))
+        _ -> width
+      end
+
+    max(round(width), 0)
   end
 
   # -- floats --------------------------------------------------------------------------------

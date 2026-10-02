@@ -2913,4 +2913,93 @@ defmodule Browser.LayoutTest do
       assert h >= 300
     end
   end
+
+  describe "percentage margins and padding" do
+    alias Browser.Page
+
+    # the layout is 408 wide: 400 for the content, inside the page's 4px margin
+    defp pct(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp wx(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "padding is a share of the container's width" do
+      {items, _} = pct(~s|<div style="padding:10%">ab</div>|)
+      # 10% of 400
+      assert wx(items, "ab").x == 4 + 40
+    end
+
+    test "all four sides refer to the width, top and bottom too" do
+      {items, h} = pct(~s|<div style="padding-top:10%;padding-bottom:5%">ab</div>|)
+      assert wx(items, "ab").y >= 40
+      assert h >= 40 + 20 + 20
+    end
+
+    test "margin-left and margin-right" do
+      {items, _} = pct(~s|<div style="margin-left:25%;background:#eee">ab</div>|)
+      assert wx(items, "ab").x == 4 + 100
+      [r] = Enum.filter(items, &(&1.type == :rect))
+      assert r.x == 104 and r.w == 300
+    end
+
+    test "children refer to the width of their own container" do
+      html = ~s|<div style="width:200px"><div style="padding-left:10%">ab</div></div>|
+      {items, _} = pct(html)
+      assert wx(items, "ab").x == 4 + 20
+    end
+
+    test "a container's padding and borders are not part of what children refer to" do
+      html = ~s|<div style="padding:0 20px;border:0"><div style="padding-left:10%">ab</div></div>|
+      {items, _} = pct(html)
+      # the container's content is 360 wide
+      assert wx(items, "ab").x == 4 + 20 + 36
+    end
+
+    test "a percentage width gives a percentage of that to the children" do
+      html = ~s|<div style="width:50%"><div style="padding-left:10%">ab</div></div>|
+      {items, _} = pct(html)
+      assert wx(items, "ab").x == 4 + 20
+    end
+
+    test "floated columns with percentage widths and margins" do
+      col = ~s|<div style="float:left;width:30%;margin-right:3%;background:#eee">x</div>|
+      {items, _} = pct(col <> col <> col)
+      [a, b, c] = items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(& &1.x)
+      assert {a.x, a.w} == {4, 120}
+      assert b.x == 4 + 120 + 12
+      assert c.x == 4 + 2 * (120 + 12)
+      assert a.y == c.y
+    end
+
+    test "inline-blocks with a width have their own reference" do
+      html =
+        ~s|<div style="display:inline-block;width:100px"><div style="padding-left:10%">ab</div></div>|
+
+      {items, _} = pct(html)
+      assert wx(items, "ab").x == 4 + 10
+    end
+
+    test "flex items and table cells" do
+      {items, _} = pct(~s|<div style="display:flex"><div style="padding-left:5%">ab</div></div>|)
+      assert wx(items, "ab").x == 4 + 20
+
+      {items, _} = pct(~s|<table><tr><td style="padding-left:5%">ab</td></tr></table>|)
+      assert wx(items, "ab").x >= 4 + 20
+    end
+
+    test "they follow the window when it is resized" do
+      html = ~s|<div style="padding-left:10%">ab</div>|
+      {narrow, _} = pct(html, 208)
+      {wide, _} = pct(html, 808)
+      assert wx(narrow, "ab").x == 4 + 20
+      assert wx(wide, "ab").x == 4 + 80
+    end
+
+    test "negative-looking and zero values do not break" do
+      {items, _} = pct(~s|<div style="padding:0%;margin:0%">ab</div>|)
+      assert wx(items, "ab").x == 4
+    end
+  end
 end
