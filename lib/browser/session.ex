@@ -156,8 +156,7 @@ defmodule Browser.Session do
 
   def handle_info({:blink, ref}, %{blink: ref} = state) do
     state = %{state | caret_on: not state.caret_on}
-    UI.publish(state.items, state.scroll, state.caret_on)
-    UI.refresh(state.ui)
+    UI.update(state.ui, state.items, state.scroll, state.caret_on, :diff)
     {:noreply, schedule_blink(state, false)}
   end
 
@@ -618,7 +617,9 @@ defmodule Browser.Session do
     end
   end
 
-  defp relayout(state) do
+  # `mode` is `UI.update/5`'s: `:diff` when the caller knows the page only changed in
+  # the items that differ from the last published ones
+  defp relayout(state, mode \\ :full) do
     state = fit_scroll(state)
     width = max(UI.client_width(state.ui), 200)
 
@@ -638,17 +639,17 @@ defmodule Browser.Session do
         controls: Layout.controls(items)
     }
 
-    scroll_by(state, 0)
+    scroll_by(state, 0, mode)
   end
 
   # After typing into a single-line field only its text and caret move, so patch the
   # laid out items instead of laying out the whole page (see `Layout.patch_field/6`).
-  defp relayout_edit(state, _control, nil), do: relayout(state)
+  defp relayout_edit(state, _control, nil), do: relayout(state, :diff)
 
   defp relayout_edit(state, control, old_text) do
     if MapSet.member?(state.page.fixed_width, control.cid),
       do: patch_edit(state, control, old_text),
-      else: relayout(state)
+      else: relayout(state, :diff)
   end
 
   defp patch_edit(state, control, old_text) do
@@ -670,10 +671,10 @@ defmodule Browser.Session do
              do: UI.links(items),
              else: state.links
 
-        scroll_by(%{state | items: items, links: links}, 0)
+        scroll_by(%{state | items: items, links: links}, 0, :diff)
 
       :error ->
-        relayout(state)
+        relayout(state, :diff)
     end
   end
 
@@ -730,11 +731,10 @@ defmodule Browser.Session do
     end
   end
 
-  defp scroll_by(state, delta) do
+  defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
-    UI.publish(state.items, scroll, state.caret_on)
-    UI.refresh(state.ui)
+    UI.update(state.ui, state.items, scroll, state.caret_on, mode)
     %{state | scroll: scroll}
   end
 
