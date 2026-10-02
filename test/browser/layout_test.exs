@@ -3627,4 +3627,17 @@ defmodule Browser.LayoutTest do
     ys = for %{type: :text} = t <- items, uniq: true, do: t.y
     assert ys == Enum.take(ys, 1)
   end
+
+  test "an inline link directly inside a grid is a block, so its background covers its content" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:grid"><a href="#" style="background:#eee"><div style="height:80px"></div></a></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+    rect = Enum.find(items, &(&1.type == :rect and &1.color == {238, 238, 238}))
+    assert rect.h == 80
+    assert rect.w > 300
+  end
 end

@@ -413,6 +413,29 @@ defmodule Browser.BackgroundsTest do
     defp sizes, do: %{"a.png" => {:ok, 40, 20}, "bad.png" => :failed}
     defp layers(spec), do: B.paint_layers(spec, @area, @clip, sizes(), {0, 0, 0, 255})
 
+    test "a picture with only a viewBox fits the area under size auto" do
+      {:ok, scene} =
+        Browser.Svg.from_source(
+          ~s|<svg viewBox="0 0 400 140" xmlns="http://www.w3.org/2000/svg"><path d="M0 0h400v140z"/></svg>|
+        )
+
+      sizes = %{"logo.svg" => {:svg, 400, 140, scene}}
+      spec = spec([{:url, "logo.svg"}], %{repeat: [{:no_repeat, :no_repeat}]})
+      assert [%{tile: {10, 20, 200, 70}}] = B.paint_layers(spec, @area, @clip, sizes, nil)
+    end
+
+    test "a picture with its own width and height keeps them under size auto" do
+      {:ok, scene} =
+        Browser.Svg.from_source(
+          ~s|<svg width="40" height="14" viewBox="0 0 400 140" xmlns="http://www.w3.org/2000/svg"><path d="M0 0h400v140z"/></svg>|
+        )
+
+      sizes = %{"logo.svg" => {:svg, 40, 14, scene}}
+
+      assert [%{tile: {10, 20, 40, 14}}] =
+               B.paint_layers(spec([{:url, "logo.svg"}]), @area, @clip, sizes, nil)
+    end
+
     test "an image at its own size in the top-left corner, repeating" do
       assert [%{kind: :image, url: "a.png", tile: {10, 20, 40, 20}, repeat: {:repeat, :repeat}}] =
                layers(spec([{:url, "a.png"}]))

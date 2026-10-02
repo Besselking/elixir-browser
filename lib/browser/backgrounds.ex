@@ -626,9 +626,18 @@ defmodule Browser.Backgrounds do
   # {kind, payload, intrinsic size}; nil for what can't be painted (yet)
   defp image_content({:url, url}, sizes) do
     case sizes && Map.get(sizes, url) do
-      {:ok, w, h} -> {:image, url, {w, h}}
-      {:svg, w, h, scene} -> {:svg, scene, {w, h}}
-      _ -> nil
+      {:ok, w, h} ->
+        {:image, url, {w, h}}
+
+      # a picture with a viewBox but no width or height has only a shape: `auto` sizes it to fit
+      {:svg, w, h, %{width: sw, height: sh} = scene} ->
+        {:svg, scene, if(is_number(sw) or is_number(sh), do: {w, h}, else: {w, h, :ratio})}
+
+      {:svg, w, h, scene} ->
+        {:svg, scene, {w, h}}
+
+      _ ->
+        nil
     end
   end
 
@@ -658,6 +667,9 @@ defmodule Browser.Backgrounds do
   defp place_offset(px, _free) when is_number(px), do: px
 
   # the size of one tile in the positioning area; gradients have no intrinsic size
+  defp tile_size({:auto, :auto}, area, {iw, ih, :ratio}), do: tile_size(:contain, area, {iw, ih})
+  defp tile_size(size, area, {iw, ih, :ratio}), do: tile_size(size, area, {iw, ih})
+
   defp tile_size(size, {aw, ah}, intrinsic) do
     case {size, intrinsic} do
       {:cover, {iw, ih}} ->

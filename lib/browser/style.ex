@@ -735,6 +735,7 @@ defmodule Browser.Style do
         {:element, tag, attrs, kids}, {acc, {i, prev}} ->
           ctx = context(tag, attrs, kids, parent, prev, i, count)
           {computed, custom} = compute(idx, ctx, parent)
+          computed = blockify_grid_item(computed, parent)
           root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
           ctx =
@@ -756,6 +757,21 @@ defmodule Browser.Style do
 
     Enum.reverse(out)
   end
+
+  # Grid is laid out as a stack of blocks, so what sits directly in a grid container is
+  # block-level, as it is in a real grid (an inline link wrapping a logo becomes a block box).
+  defp blockify_grid_item(computed, %{computed: %{"display" => d}})
+       when d in ["grid", "inline-grid"] do
+    case computed["display"] do
+      v when v in [nil, "inline", "inline-block"] -> Map.put(computed, "display", "block")
+      "inline-flex" -> Map.put(computed, "display", "flex")
+      "inline-grid" -> Map.put(computed, "display", "grid")
+      "inline-table" -> Map.put(computed, "display", "table")
+      _ -> computed
+    end
+  end
+
+  defp blockify_grid_item(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
   defp compute(idx, ctx, parent) do
