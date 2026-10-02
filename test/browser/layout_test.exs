@@ -3490,4 +3490,63 @@ defmodule Browser.LayoutTest do
       assert h < 40
     end
   end
+
+  describe "line breaks" do
+    defp y_of(items, text), do: Enum.find(items, &(&1.text == text)).y
+
+    defp styled3(html, width \\ 400) do
+      page = Browser.Page.build(html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2)
+    end
+
+    test "a second <br> leaves a blank line" do
+      {items, _} = run("a<br>b<br><br>c")
+      line = y_of(items, "b") - y_of(items, "a")
+      assert line > 0
+      assert y_of(items, "c") - y_of(items, "b") == 2 * line
+    end
+
+    test "a <br> after a block is a line of its own" do
+      {items, _} = run("<div>a</div><br>b")
+      {plain, _} = run("<div>a</div>b")
+      assert y_of(items, "b") > y_of(plain, "b")
+    end
+
+    test "a <br> closing a line adds nothing" do
+      {items, _} = run("<div>a<br></div>b")
+      {plain, _} = run("<div>a</div>b")
+      assert y_of(items, "b") == y_of(plain, "b")
+    end
+
+    test "a negative bottom margin pulls the next line up, the <br> still takes its own" do
+      {items, _} = styled3(~s|<div style="margin-bottom:-10px">a</div><br><div>b</div>|)
+      {plain, _} = styled3(~s|<div>a</div><br><div>b</div>|)
+      assert y_of(items, "b") == y_of(plain, "b") - 10
+    end
+  end
+
+  describe "empty boxes with a size" do
+    test "an empty box with a background image makes its table column that wide" do
+      html =
+        ~s|<table cellspacing=0 cellpadding=0><tr><td><div style="width:10px;height:10px;margin:0 2px;background:linear-gradient(red,blue)"></div></td><td>text</td></tr></table>|
+
+      {items, _} = Layout.layout(Browser.Page.build(html, "about:home").nodes, 400, &measure/2)
+      [image] = Enum.filter(items, &(&1.type == :bgimage))
+      text = Enum.find(items, &(Map.get(&1, :text) == "text"))
+      assert text.x >= image.x + image.w + 2
+    end
+
+    test "a bare background image does not widen a shrink-to-fit box" do
+      page =
+        Browser.Page.build(
+          ~s|<div style="float:left;background:linear-gradient(red,blue)">hi</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 300, &measure/2)
+
+      [image] = Enum.filter(items, &(&1.type == :bgimage))
+      assert image.w < 100
+    end
+  end
 end

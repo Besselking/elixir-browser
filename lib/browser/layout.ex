@@ -128,6 +128,7 @@ defmodule Browser.Layout do
 
     # what percentage margins and padding refer to, as the walk goes down the tree
     Process.put(:layout_cw, max(width - 2 * @margin, 0))
+    Process.put(:layout_memo, %{})
     {nodes, canvas} = propagate_background(nodes)
     ops = nodes |> walk(style, []) |> Enum.reverse()
     {items, height} = place(ops, width, measure, view_height, opts[:images])
@@ -476,7 +477,7 @@ defmodule Browser.Layout do
   end
 
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
-  defp walk({:element, "br", _, _}, _style, acc), do: [{:flush} | acc]
+  defp walk({:element, "br", _, _}, style, acc), do: [{:br, style} | acc]
 
   defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg"] do
     ops = fn acc ->
@@ -1406,6 +1407,17 @@ defmodule Browser.Layout do
   defp op({:flush}, %{line: [%{marker: true}]} = st), do: st
   defp op({:flush}, st), do: flush(st)
 
+  # a line break ends the line; on an empty line (after another break or a block) it is a
+  # blank line of its own
+  defp op({:br, _style}, %{line: [%{marker: true}]} = st), do: st
+
+  defp op({:br, style}, %{line: []} = st) do
+    st = st |> apply_gap() |> flush()
+    %{st | y: st.y + line_px(style)}
+  end
+
+  defp op({:br, _style}, st), do: flush(st)
+
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
   defp op({:gap, px}, st), do: %{flush(st) | gap: max(st.gap, px)}
@@ -1825,7 +1837,7 @@ defmodule Browser.Layout do
     st = if o.clip, do: clip_new(st, box, clip), else: st
 
     # the box's own background and borders go under whatever is inside it
-    outer = outer_rects(box, height, st.images)
+    outer = outer_rects(box, height, st.images) |> measured_width(o)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
@@ -1833,6 +1845,18 @@ defmodule Browser.Layout do
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st
   end
+
+  # A box with a width and nothing in it is still as wide as that when shrink-to-fit sizes its
+  # container; a background image shows how wide it is (and the margin after it).
+  defp measured_width(items, %{width: w} = o) when w != nil do
+    mr = if is_number(o.mr), do: max(o.mr, 0), else: 0
+
+    for item <- items do
+      if item.type == :bgimage, do: Map.merge(item, %{rr: mr, sized: true}), else: item
+    end
+  end
+
+  defp measured_width(items, _o), do: items
 
   # everything the box painted sticks with it
   defp stick_new(st, %{o: o} = box, height) do
@@ -2287,8 +2311,33 @@ defmodule Browser.Layout do
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
   defp shrink_extent(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
-    sub_st |> finalize() |> extent()
+    memo({:extent, sub, width}, fn ->
+      sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+      sub_st |> finalize() |> extent()
+    end)
+  end
+
+  # Nested tables measure and lay out the same cell content again and again (and every level
+  # multiplies the passes), so results are remembered for the duration of one layout. The key
+  # is a hash of the content, so a collision is possible in principle but not worth guarding.
+  defp memo(key, fun) do
+    case Process.get(:layout_memo) do
+      nil ->
+        fun.()
+
+      cache ->
+        key = {:erlang.phash2(key, 4_294_967_296), containing_width()}
+
+        case cache do
+          %{^key => value} ->
+            value
+
+          _ ->
+            value = fun.()
+            Process.put(:layout_memo, Map.put(Process.get(:layout_memo), key, value))
+            value
+        end
+    end
   end
 
   defp layout_sub(st, sub, width) do
@@ -2300,10 +2349,12 @@ defmodule Browser.Layout do
   # to its top-left), its height including trailing margin, and its baseline
   # (bottom of the last text line, or the bottom edge if there is no text).
   defp layout_atom(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
-    height = sub_st.y + sub_st.gap + sub_st.ngap
-    items = finalize(sub_st)
-    {items, height, last_baseline(items, height)}
+    memo({:atom, sub, width}, fn ->
+      sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
+      height = sub_st.y + sub_st.gap + sub_st.ngap
+      items = finalize(sub_st)
+      {items, height, last_baseline(items, height)}
+    end)
   end
 
   defp last_baseline(items, height) do
@@ -2324,7 +2375,10 @@ defmodule Browser.Layout do
   # right edge of the text, for shrink-to-fit
   defp extent(items) do
     items
-    |> Enum.filter(&(&1.type in [:text, :image, :svg] or (&1.type == :box and fixed_width?(&1))))
+    |> Enum.filter(
+      &(&1.type in [:text, :image, :svg] or (&1.type == :box and fixed_width?(&1)) or
+          (&1.type == :bgimage and Map.get(&1, :sized, false)))
+    )
     |> Enum.map(&(&1.x + &1.w + Map.get(&1, :rr, 0)))
     |> Enum.max(fn -> 0 end)
   end
