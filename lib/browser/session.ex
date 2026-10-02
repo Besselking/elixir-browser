@@ -169,7 +169,10 @@ defmodule Browser.Session do
   # -- wx events -------------------------------------------------------------
 
   def handle_info(wx(event: {:wxClose, :close_window}), state) do
-    System.stop(0)
+    # An orderly shutdown frees the toolkit's objects while its event loop is still
+    # running, which crashes the wx driver (a "quit unexpectedly" dialog on macOS).
+    # There is nothing to save, so leave straight away.
+    System.halt(0)
     {:noreply, state}
   end
 
