@@ -192,7 +192,7 @@ defmodule Browser.Session do
 
   def handle_info({:blink, ref}, %{blink: ref} = state) do
     state = %{state | caret_on: not state.caret_on}
-    UI.update(state.ui, view_items(state), state.scroll, state.caret_on, :diff)
+    UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
     {:noreply, schedule_blink(state, false)}
   end
 
@@ -600,9 +600,6 @@ defmodule Browser.Session do
 
   # -- selecting page text ---------------------------------------------------
 
-  defp view_items(%{sel_items: []} = state), do: state.items
-  defp view_items(state), do: state.items ++ state.sel_items
-
   defp sel_texts(%{sel_texts: nil} = state) do
     texts = Selection.texts(state.items)
     {texts, %{state | sel_texts: texts}}
@@ -691,7 +688,7 @@ defmodule Browser.Session do
       state
     else
       state = %{state | sel: range, sel_items: items}
-      UI.update(state.ui, view_items(state), state.scroll, state.caret_on, :diff)
+      UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
       state
     end
   end
@@ -1032,7 +1029,7 @@ defmodule Browser.Session do
     end
   end
 
-  # `mode` is `UI.update/5`'s: `:diff` when the caller knows the page only changed in
+  # `mode` is `UI.update/6`'s: `:diff` when the caller knows the page only changed in
   # the items that differ from the last published ones
   defp relayout(state, mode \\ :full) do
     state = fit_scroll(state)
@@ -1245,7 +1242,7 @@ defmodule Browser.Session do
   defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
-    UI.update(state.ui, view_items(state), scroll, state.caret_on, mode)
+    UI.update(state.ui, state.items, state.sel_items, scroll, state.caret_on, mode)
     %{state | scroll: scroll}
   end
 

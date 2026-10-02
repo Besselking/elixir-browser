@@ -175,3 +175,33 @@ defmodule Browser.UILinkTest do
     end
   end
 end
+
+defmodule Browser.UIPageIndexTest do
+  use ExUnit.Case, async: true
+  alias Browser.UI
+
+  defp box(y, h, extra \\ %{}), do: Map.merge(%{type: :rect, x: 0, y: y, w: 10, h: h}, extra)
+
+  test "items are listed in the bands they reach, with their page order" do
+    items = [box(0, 10), box(300, 10), box(0, 1000)]
+    %{bands: bands} = UI.index_page(items)
+    ids = fn b -> bands |> elem(b) |> Enum.map(&elem(&1, 1)) |> Enum.sort() end
+    assert ids.(0) == [0, 2]
+    assert ids.(1) == [1, 2]
+    assert ids.(tuple_size(bands) - 1) == [2]
+  end
+
+  test "the canvas and sticky items are kept apart, sticky ones by z-index" do
+    canvas = %{type: :canvas, color: {1, 2, 3}}
+    a = box(0, 5, %{stick: :fixed, z: 5})
+    b = box(0, 5, %{stick: :fixed, z: 1})
+    page = UI.index_page([canvas, a, box(0, 5), b])
+    assert page.canvas == canvas
+    assert page.sticky == [b, a]
+    assert [{_, 1}] = elem(page.bands, 0)
+  end
+
+  test "an empty page has one empty band" do
+    assert %{bands: {[]}, sticky: [], canvas: nil} = UI.index_page([])
+  end
+end

@@ -26,6 +26,7 @@ defmodule Browser.UI do
     :ets.new(@view, [:named_table, :public])
     :ets.new(@images, [:named_table, :public])
     :ets.insert(@view, {:view, [], 0, true})
+    set_page([])
     :ets.insert(@view, {:sx, 0})
 
     wx = :wx.new()
@@ -92,7 +93,15 @@ defmodule Browser.UI do
 
     :wxPanel.connect(panel, :size)
     :wxPanel.connect(panel, :char)
-    :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel) end)
+
+    :wxPanel.connect(panel, :paint,
+      callback: fn _ev, _obj ->
+        {us, _} = :timer.tc(fn -> paint(panel) end)
+
+        if System.get_env("BROWSER_PAINT_LOG"),
+          do: File.write("/tmp/paint.log", "#{us}\n", [:append])
+      end
+    )
 
     :wxFrame.show(frame)
     :wxWindow.setFocus(panel)
@@ -115,23 +124,79 @@ defmodule Browser.UI do
     :wxWindow.refresh(panel)
   end
 
-  @doc "Hands the painter what to draw; `caret_on` is the blink state of the text caret."
-  def publish(items, scroll, caret_on \\ true),
-    do: :ets.insert(@view, {:view, items, scroll, caret_on})
+  @band 256
+
+  # The painter reads the page from `:persistent_term`, which hands out the same term to every
+  # reader without copying it (an ETS lookup would copy every item, on every frame). It is
+  # indexed by horizontal bands of the page so a frame only looks at what is near the window.
+  defp set_page(items), do: :persistent_term.put({__MODULE__, :page}, index_page(items))
+
+  @doc false
+  def index_page(items) do
+    {canvas, rest} =
+      case items do
+        [%{type: :canvas} = c | rest] -> {c, rest}
+        _ -> {nil, items}
+      end
+
+    indexed = rest |> Enum.with_index() |> Enum.reverse()
+    {sticky, normal} = Enum.split_with(indexed, fn {item, _} -> Map.has_key?(item, :stick) end)
+
+    sticky =
+      sticky |> Enum.reverse() |> Enum.map(&elem(&1, 0)) |> Enum.sort_by(&Map.get(&1, :z, 0))
+
+    reach = fn {item, _} -> item.y + Map.get(item, :h, 40) + 40 end
+    last = normal |> Enum.map(reach) |> Enum.max(fn -> 0 end) |> max(0) |> div(@band)
+
+    bands =
+      Enum.reduce(normal, %{}, fn {item, _} = entry, acc ->
+        first = item.y |> max(0) |> div(@band) |> min(last)
+        stop = reach.(entry) |> max(0) |> div(@band) |> min(last)
+
+        Enum.reduce(first..stop//1, acc, fn b, acc ->
+          Map.update(acc, b, [entry], &[entry | &1])
+        end)
+      end)
+
+    bands = List.to_tuple(for b <- 0..last, do: Map.get(bands, b, []))
+    %{canvas: canvas, sticky: sticky, bands: bands}
+  end
 
   @doc """
-  Like `publish/3`, then asks wx to repaint. In `:diff` mode (same scroll offset) only the
+  Hands the painter what to draw: the page's `items`, `overlay` items drawn over them (the
+  selection), the scroll offset and the blink state of the text caret. The items are only
+  indexed again when they are not the very list given last time.
+  """
+  def publish(items, overlay, scroll, caret_on \\ true) do
+    unless Process.get(:published_items) === items do
+      set_page(items)
+      Process.put(:published_items, items)
+    end
+
+    :ets.insert(@view, {:view, overlay, scroll, caret_on})
+  end
+
+  @doc """
+  Like `publish/4`, then asks wx to repaint. In `:diff` mode (same scroll offset) only the
   area covered by items that differ from the previous view, or by the caret when it
   blinks, is invalidated; anything else repaints the whole panel.
   """
-  def update(%{panel: panel}, items, scroll, caret_on, mode \\ :full) do
-    [{:view, old_items, old_scroll, old_caret}] = :ets.lookup(@view, :view)
-    publish(items, scroll, caret_on)
+  def update(%{panel: panel}, items, overlay, scroll, caret_on, mode \\ :full) do
+    [{:view, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, :view)
+    old_items = Process.get(:published_items, [])
+    publish(items, overlay, scroll, caret_on)
 
     dirty =
-      if mode == :diff and old_scroll == scroll,
-        do: diff_items(old_items, items, old_caret != caret_on, nil),
-        else: :full
+      cond do
+        mode == :diff and old_scroll == scroll and old_overlay == overlay ->
+          if old_items === items,
+            do:
+              if(old_caret != caret_on, do: diff_items(old_items, items, true, nil), else: :none),
+            else: diff_items(old_items, items, old_caret != caret_on, nil)
+
+        true ->
+          :full
+      end
 
     case dirty do
       :none ->
@@ -260,29 +325,43 @@ defmodule Browser.UI do
   end
 
   defp paint(panel) do
-    [{:view, items, scroll, caret_on}] = :ets.lookup(@view, :view)
+    [{:view, overlay, scroll, caret_on}] = :ets.lookup(@view, :view)
+
+    %{canvas: canvas_item, sticky: sticky, bands: bands} =
+      :persistent_term.get({__MODULE__, :page})
+
     dc = :wxPaintDC.new(panel)
+    Process.delete(:paint_font)
+    Process.delete(:paint_color)
     # everything is drawn at page x: the origin moves with the horizontal scroll
     :wxDC.setDeviceOrigin(dc, -sx(), 0)
 
     canvas =
-      case items do
-        [%{type: :canvas, color: color} | _] when color != nil -> color
+      case canvas_item do
+        %{color: color} when color != nil -> color
         _ -> {255, 255, 255}
       end
 
     :wxDC.setBackground(dc, :wxBrush.new(canvas))
     :wxDC.clear(dc)
-    draw_canvas_layers(dc, items, scroll)
+    draw_canvas_layers(dc, [canvas_item], scroll)
     # only the invalidated part of the window is drawn into, so items outside it are skipped
     {cx, cy, cw, ch} = :wxDC.getClippingBox(dc)
 
+    # the items of the bands the window shows, in page order
+    last = tuple_size(bands) - 1
+    first_band = (cy + scroll) |> max(0) |> div(@band) |> min(last)
+    last_band = (cy + ch + scroll) |> max(0) |> div(@band) |> min(last)
+
+    near =
+      first_band..last_band//1
+      |> Enum.flat_map(&elem(bands, &1))
+      |> Enum.sort_by(&elem(&1, 1))
+      |> Enum.dedup_by(&elem(&1, 1))
+      |> Enum.map(&elem(&1, 0))
+
     # sticky and fixed items are drawn last, over the page, shifted by how far the page has scrolled
-    {sticky, normal} = Enum.split_with(items, &Map.has_key?(&1, :stick))
-
-    sticky = Enum.sort_by(sticky, &Map.get(&1, :z, 0))
-
-    for item <- normal ++ sticky,
+    for item <- near ++ overlay ++ sticky,
         item.type != :canvas,
         item.type != :caret or caret_on,
         not Map.get(item, :hidden, false),
@@ -529,32 +608,63 @@ defmodule Browser.UI do
   end
 
   defp draw(dc, %{type: :rect} = item, y, _scroll) do
-    :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
-    :wxDC.setBrush(dc, :wxBrush.new(item.color))
+    :wxDC.setPen(dc, cached({:pen, :none}, fn -> :wxPen.new({0, 0, 0}, style: 106) end))
+    :wxDC.setBrush(dc, cached({:brush, item.color}, fn -> :wxBrush.new(item.color) end))
     :wxDC.drawRectangle(dc, {item.x, y}, {item.w, item.h})
   end
 
   defp draw(dc, %{type: :hr} = item, y, _scroll) do
-    :wxDC.setPen(dc, :wxPen.new({170, 170, 170}))
+    :wxDC.setPen(dc, pen({170, 170, 170}))
     :wxDC.drawLine(dc, {item.x, y}, {item.x + item.w, y})
   end
 
+  # Every wx call is a round trip to the wx thread, so the font and colour are only set when
+  # they differ from the previous word's (the paint starts with neither set).
   defp draw(dc, %{type: :text} = item, y, _scroll) do
-    :wxDC.setFont(dc, font(item))
-    :wxDC.setTextForeground(dc, item.color)
+    font_key = {item.size, item.bold, item.italic, item.mono}
+
+    if Process.get(:paint_font) != font_key do
+      :wxDC.setFont(dc, font(item))
+      Process.put(:paint_font, font_key)
+    end
+
+    if Process.get(:paint_color) != item.color do
+      :wxDC.setTextForeground(dc, item.color)
+      Process.put(:paint_color, item.color)
+    end
+
     :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
-    :wxDC.setPen(dc, :wxPen.new(item.color))
 
-    if item.underline,
-      do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
+    if item.underline or item.strike do
+      :wxDC.setPen(dc, pen(item.color))
 
-    if item.strike,
-      do:
-        :wxDC.drawLine(
-          dc,
-          {item.x, y + div(item.h, 2) + 2},
-          {item.x + item.w, y + div(item.h, 2) + 2}
-        )
+      if item.underline,
+        do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
+
+      if item.strike,
+        do:
+          :wxDC.drawLine(
+            dc,
+            {item.x, y + div(item.h, 2) + 2},
+            {item.x + item.w, y + div(item.h, 2) + 2}
+          )
+    end
+  end
+
+  defp pen(color), do: cached({:pen, color}, fn -> :wxPen.new(color) end)
+
+  # wx objects are made once per kind and kept: making one is a round trip, and nothing frees
+  # them when they are dropped
+  defp cached(key, make) do
+    case Process.get(key) do
+      nil ->
+        value = make.()
+        Process.put(key, value)
+        value
+
+      value ->
+        value
+    end
   end
 
   defp clip_to(gc, item, scroll) do
