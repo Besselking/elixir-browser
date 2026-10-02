@@ -219,10 +219,17 @@ defmodule Browser.Session do
     ui = state.ui
 
     cond do
-      obj == ui.back -> {:noreply, history_nav(state, &History.back/1)}
-      obj == ui.forward -> {:noreply, history_nav(state, &History.forward/1)}
-      obj == ui.reload -> {:noreply, (state.url && load(state, state.url, :history)) || state}
-      true -> {:noreply, state}
+      obj == ui.back ->
+        {:noreply, history_nav(state, &History.back/1)}
+
+      obj == ui.forward ->
+        {:noreply, history_nav(state, &History.forward/1)}
+
+      obj == ui.reload ->
+        {:noreply, (state.url && load(state, state.url, :history, cache: :reload)) || state}
+
+      true ->
+        {:noreply, state}
     end
   end
 
@@ -1024,7 +1031,7 @@ defmodule Browser.Session do
 
   defp history_nav(state, fun) do
     case fun.(state.history) do
-      {:ok, h} -> load(%{state | history: h}, h.current, :history)
+      {:ok, h} -> load(%{state | history: h}, h.current, :history, cache: :history)
       {:error, _} -> state
     end
   end

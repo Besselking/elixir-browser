@@ -1,6 +1,8 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
+  alias Browser.HttpCache
+
   @max_redirects 8
 
   # the pages in priv/demo, with what each one shows
@@ -79,24 +81,52 @@ defmodule Browser.Fetch do
   Options: `method: :get | :post` (default `:get`) and `body:` (a urlencoded form, for
   POST). After a 301/302/303 redirect the request becomes a GET, as browsers do; 307
   and 308 repeat the same request.
+
+  GET responses go through `Browser.HttpCache`. `cache:` is `:normal` (the default: use
+  fresh entries, revalidate stale ones), `:reload` (always ask the server, revalidating
+  with `ETag`/`Last-Modified`) or `:history` (back/forward: use any cached entry).
   """
-  def load(url, opts \\ []),
-    do: fetch(url, Keyword.get(opts, :method, :get), Keyword.get(opts, :body), @max_redirects)
+  def load(url, opts \\ []) do
+    fetch(
+      url,
+      Keyword.get(opts, :method, :get),
+      Keyword.get(opts, :body),
+      @max_redirects,
+      Keyword.get(opts, :cache, :normal)
+    )
+  end
 
-  defp fetch("about:home", _, _, _), do: {:ok, about_home(), "about:home"}
-  defp fetch("about:" <> _ = url, _, _, _), do: {:ok, "<h1>Unknown page</h1>", url}
+  defp fetch("about:home", _, _, _, _), do: {:ok, about_home(), "about:home"}
+  defp fetch("about:" <> _ = url, _, _, _, _), do: {:ok, "<h1>Unknown page</h1>", url}
 
-  defp fetch("file://" <> path, _, _, _) do
+  defp fetch("file://" <> path, _, _, _, _) do
     case File.read(URI.decode(path)) do
       {:ok, body} -> {:ok, body, "file://" <> path}
       {:error, reason} -> {:error, "Cannot read #{path}: #{:file.format_error(reason)}"}
     end
   end
 
-  defp fetch(_url, _method, _body, 0), do: {:error, "Too many redirects"}
+  defp fetch(_url, _method, _body, 0, _cache), do: {:error, "Too many redirects"}
 
-  defp fetch(url, method, body, redirects) do
-    headers = [{~c"user-agent", ~c"ElixirBrowser/0.1"}, {~c"accept-encoding", ~c"gzip"}]
+  defp fetch(url, :get, body, redirects, cache) do
+    case lookup(url, cache) do
+      {:fresh, entry} when cache != :reload -> {:ok, entry.body, url}
+      {_, entry} -> request(url, :get, body, redirects, cache, entry)
+      :miss -> request(url, :get, body, redirects, cache, nil)
+    end
+  end
+
+  defp fetch(url, method, body, redirects, cache),
+    do: request(url, method, body, redirects, cache, nil)
+
+  defp lookup(url, :history), do: HttpCache.lookup(url, use_stale: true)
+  defp lookup(url, _), do: HttpCache.lookup(url)
+
+  # `entry`: a stale cached response to revalidate, or nil
+  defp request(url, method, body, redirects, cache, entry) do
+    headers =
+      [{~c"user-agent", ~c"ElixirBrowser/0.1"}, {~c"accept-encoding", ~c"gzip"}] ++
+        if(entry, do: HttpCache.validators(entry), else: [])
 
     request =
       case method do
@@ -118,20 +148,30 @@ defmodule Browser.Fetch do
     ]
 
     case :httpc.request(method, request, http_opts, body_format: :binary) do
+      {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
+        HttpCache.refresh(entry, headers, url)
+        {:ok, entry.body, url}
+
       {:ok, {{_, status, _}, headers, _body}} when status in [301, 302, 303, 307, 308] ->
         case List.keyfind(headers, ~c"location", 0) do
           {_, loc} ->
             next = resolve(url, to_string(loc))
 
             if status in [307, 308],
-              do: fetch(next, method, body, redirects - 1),
-              else: fetch(next, :get, nil, redirects - 1)
+              do: fetch(next, method, body, redirects - 1, cache),
+              else: fetch(next, :get, nil, redirects - 1, cache)
 
           nil ->
             {:error, "Redirect without Location"}
         end
 
-      {:ok, {{_, status, _}, headers, body}} when status in 200..299 ->
+      {:ok, {{_, 200, _}, headers, body}} ->
+        with {:ok, body, _} = ok <- decode_body(headers, body, url) do
+          if method == :get, do: HttpCache.store(url, headers, body)
+          ok
+        end
+
+      {:ok, {{_, status, _}, headers, body}} when status in 201..299 ->
         decode_body(headers, body, url)
 
       {:ok, {{_, status, reason}, _, _}} ->

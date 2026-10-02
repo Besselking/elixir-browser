@@ -139,4 +139,99 @@ defmodule Browser.FetchTest do
       end
     end
   end
+
+  describe "caching" do
+    defp response(body, headers),
+      do:
+        "HTTP/1.1 200 OK\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n" <>
+          Enum.map_join(headers, "", fn h -> h <> "\r\n" end) <> "\r\n" <> body
+
+    @not_modified "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+    test "a fresh response is served from memory, without a request" do
+      base = serve([response("once", ["Cache-Control: max-age=60"])])
+      assert {:ok, "once", _} = Fetch.load(base <> "/a")
+      assert_receive {:request, "GET", "/a", _, ""}
+      assert {:ok, "once", _} = Fetch.load(base <> "/a")
+      refute_receive {:request, _, _, _, _}, 50
+    end
+
+    test "a stale response is revalidated with its ETag, and a 304 reuses the body" do
+      base =
+        serve([
+          response("body", ["ETag: \"v1\"", "Cache-Control: max-age=0"]),
+          @not_modified
+        ])
+
+      assert {:ok, "body", _} = Fetch.load(base <> "/e")
+      assert_receive {:request, "GET", "/e", headers, ""}
+      refute Map.has_key?(headers, "if-none-match")
+
+      assert {:ok, "body", _} = Fetch.load(base <> "/e")
+      assert_receive {:request, "GET", "/e", %{"if-none-match" => "\"v1\""}, ""}
+    end
+
+    test "Last-Modified revalidates with If-Modified-Since, and a 200 replaces the entry" do
+      lm = "Mon, 01 Jan 2024 00:00:00 GMT"
+      base = serve([response("old", ["Last-Modified: #{lm}"]), response("new", [])])
+
+      assert {:ok, "old", _} = Fetch.load(base <> "/m")
+      assert {:ok, "new", _} = Fetch.load(base <> "/m")
+      assert_receive {:request, "GET", "/m", _, ""}
+      assert_receive {:request, "GET", "/m", %{"if-modified-since" => ^lm}, ""}
+    end
+
+    test "Expires sets the lifetime when there is no max-age" do
+      expires = :httpd_util.rfc1123_date() |> to_string()
+      future = "Fri, 01 Jan 2100 00:00:00 GMT"
+
+      base =
+        serve([response("a", ["Expires: #{future}"]), response("b", ["Expires: #{expires}"])])
+
+      assert {:ok, "a", _} = Fetch.load(base <> "/future")
+      assert {:ok, "a", _} = Fetch.load(base <> "/future")
+      assert {:ok, "b", _} = Fetch.load(base <> "/past")
+    end
+
+    test "no-store, no-cache and responses with no lifetime or validator are not reused" do
+      for headers <- [["Cache-Control: no-store"], ["Cache-Control: no-cache"], []] do
+        base = serve([response("1", headers), response("2", headers)])
+        assert {:ok, "1", _} = Fetch.load(base <> "/n")
+        assert {:ok, "2", _} = Fetch.load(base <> "/n")
+      end
+    end
+
+    test "private responses and Vary: * are not stored" do
+      for header <- ["Cache-Control: private, max-age=60", "Vary: *"] do
+        base = serve([response("1", [header, "Cache-Control: max-age=60"]), response("2", [])])
+        assert {:ok, "1", _} = Fetch.load(base <> "/p")
+        assert {:ok, "2", _} = Fetch.load(base <> "/p")
+      end
+    end
+
+    test "cache: :reload always asks the server" do
+      base = serve([response("1", ["Cache-Control: max-age=60", "ETag: \"a\""]), @not_modified])
+      assert {:ok, "1", _} = Fetch.load(base <> "/r")
+      assert {:ok, "1", _} = Fetch.load(base <> "/r", cache: :reload)
+      assert_receive {:request, "GET", "/r", _, ""}
+      assert_receive {:request, "GET", "/r", %{"if-none-match" => "\"a\""}, ""}
+    end
+
+    test "cache: :history reuses a stale entry" do
+      base = serve([response("1", ["Cache-Control: max-age=0", "ETag: \"a\""])])
+      assert {:ok, "1", _} = Fetch.load(base <> "/h")
+      assert {:ok, "1", _} = Fetch.load(base <> "/h", cache: :history)
+      assert_receive {:request, "GET", "/h", _, ""}
+      refute_receive {:request, _, _, _, _}, 50
+    end
+
+    test "POSTs are neither cached nor served from the cache" do
+      base =
+        serve([response("get", ["Cache-Control: max-age=60"]), response("post", [])])
+
+      assert {:ok, "get", _} = Fetch.load(base <> "/q")
+      assert {:ok, "post", _} = Fetch.load(base <> "/q", method: :post, body: "a=1")
+      assert_receive {:request, "POST", "/q", _, "a=1"}
+    end
+  end
 end
