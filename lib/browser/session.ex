@@ -15,6 +15,9 @@ defmodule Browser.Session do
 
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
+  # how long the window must stay the same size before the page is laid out for it
+  @resize_delay 80
+
   # pixels per line of a notch of the wheel
   @wheel_line 24
 
@@ -50,6 +53,8 @@ defmodule Browser.Session do
       wheel_rem_x: 0.0,
       # sub-pixel remainder of precise wheel input, carried to the next event
       wheel_rem: 0.0,
+      # the timer that lays the page out once resizing stops: {ref, timer}
+      resize_timer: nil,
       width: UI.client_width(ui),
       nonce: 0,
       hover: {nil, :arrow},
@@ -390,7 +395,24 @@ defmodule Browser.Session do
     {:noreply, scroll_x_by(%{state | wheel_rem_x: px - whole}, whole)}
   end
 
-  def handle_info(wx(event: wxSize(size: {w, _})), state) do
+  # A window being dragged to a new size sends a stream of size events, and laying the page out
+  # for each one would put the session minutes behind. Every event only restarts a timer; the
+  # page is laid out once, for the size the window has when the events stop.
+  def handle_info(wx(event: wxSize(size: _)), state) do
+    case state.resize_timer do
+      {_ref, timer} -> Process.cancel_timer(timer)
+      nil -> :ok
+    end
+
+    ref = make_ref()
+    timer = Process.send_after(self(), {:resize, ref}, @resize_delay)
+    {:noreply, %{state | resize_timer: {ref, timer}}}
+  end
+
+  def handle_info({:resize, ref}, %{resize_timer: {ref, _}} = state) do
+    state = %{state | resize_timer: nil}
+    w = UI.client_width(state.ui)
+
     cond do
       w == state.width ->
         {:noreply, state}
@@ -406,6 +428,9 @@ defmodule Browser.Session do
         {:noreply, start_images(state)}
     end
   end
+
+  # a timer for a size that has since changed again
+  def handle_info({:resize, _stale}, state), do: {:noreply, state}
 
   def handle_info(wx(event: event), state) when elem(event, 0) == :wxKey do
     key = event |> UI.key_event() |> Interact.key()
