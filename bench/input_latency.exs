@@ -56,7 +56,7 @@ ui = state.().ui
 me = self()
 :sys.replace_state(session, fn s -> send(me, {:wx_env, :wx.get_env()}); s end)
 receive do {:wx_env, env} -> :wx.set_env(env) end
-paint = fn -> if paint?, do: (:wxWindow.refresh(ui.panel); :wxWindow.update(ui.panel)) end
+paint = fn -> if paint?, do: :wxWindow.update(ui.panel) end
 
 send_ev = fn ev -> send(session, wx(event: ev)); barrier.(); paint.() end
 key = fn cp -> send_ev.(wxKey(type: :char, keyCode: cp, uniChar: cp, controlDown: false, metaDown: false, shiftDown: false, altDown: false)) end

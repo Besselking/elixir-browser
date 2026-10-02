@@ -83,6 +83,75 @@ defmodule Browser.UI do
   def publish(items, scroll, caret_on \\ true),
     do: :ets.insert(@view, {:view, items, scroll, caret_on})
 
+  @doc """
+  Like `publish/3`, then asks wx to repaint. In `:diff` mode (same scroll offset) only the
+  area covered by items that differ from the previous view, or by the caret when it
+  blinks, is invalidated; anything else repaints the whole panel.
+  """
+  def update(%{panel: panel}, items, scroll, caret_on, mode \\ :full) do
+    [{:view, old_items, old_scroll, old_caret}] = :ets.lookup(@view, :view)
+    publish(items, scroll, caret_on)
+
+    dirty =
+      if mode == :diff and old_scroll == scroll,
+        do: diff_items(old_items, items, old_caret != caret_on, nil),
+        else: :full
+
+    case dirty do
+      :none ->
+        :ok
+
+      :full ->
+        :wxWindow.refresh(panel)
+
+      {x, y, w, h} ->
+        {cw, ch} = :wxWindow.getClientSize(panel)
+
+        if w * h * 2 > cw * ch,
+          do: :wxWindow.refresh(panel),
+          else: :wxWindow.refreshRect(panel, {x, y - scroll, w, h})
+    end
+  end
+
+  # bounding box (page coordinates) of what differs between two item lists, `:none` if
+  # nothing, `:full` when the lists can't be compared item by item
+  defp diff_items([same | old], [same | new], flip?, acc) do
+    acc = if flip? and same.type == :caret, do: union(acc, bbox(same)), else: acc
+    diff_items(old, new, flip?, acc)
+  end
+
+  defp diff_items([%{type: :canvas} | _], _, _, _), do: :full
+  defp diff_items(_, [%{type: :canvas} | _], _, _), do: :full
+
+  defp diff_items([a | old], [b | new], flip?, acc),
+    do: diff_items(old, new, flip?, acc |> union(bbox(a)) |> union(bbox(b)))
+
+  defp diff_items([], [], _, nil), do: :none
+  defp diff_items([], [], _, acc), do: acc
+  defp diff_items(_, _, _, _), do: :full
+
+  defp union(nil, r), do: r
+
+  defp union({x1, y1, w1, h1}, {x2, y2, w2, h2}) do
+    x = min(x1, x2)
+    y = min(y1, y2)
+    {x, y, max(x1 + w1, x2 + w2) - x, max(y1 + h1, y2 + h2) - y}
+  end
+
+  # Everything an item can touch when drawn: shadows spread past their box, text runs a
+  # line taller than its font size, the rest gets a little slack for antialiasing.
+  defp bbox(%{type: :shadow, layers: [_ | _] = layers}) do
+    layers
+    |> Enum.map(fn %{rect: {x, y, w, h}} -> {x - 2, y - 2, w + 4, h + 4} end)
+    |> Enum.reduce(&union/2)
+  end
+
+  defp bbox(%{type: :text, x: x, y: y, w: w, h: h}), do: {x - 6, y - 4, w + 12, h * 2 + 8}
+
+  defp bbox(%{x: x, y: y, w: w} = item), do: {x - 4, y - 4, w + 8, Map.get(item, :h, 40) + 8}
+
+  defp bbox(_), do: {0, 0, 1_000_000, 1_000_000}
+
   def client_width(%{panel: panel}), do: panel |> :wxWindow.getClientSize() |> elem(0)
   def client_height(%{panel: panel}), do: panel |> :wxWindow.getClientSize() |> elem(1)
 
@@ -155,14 +224,17 @@ defmodule Browser.UI do
     :wxDC.setBackground(dc, :wxBrush.new(canvas))
     :wxDC.clear(dc)
     draw_canvas_layers(dc, items, scroll)
-    {_, h} = :wxWindow.getClientSize(panel)
+    # only the invalidated part of the window is drawn into, so items outside it are skipped
+    {cx, cy, cw, ch} = :wxDC.getClippingBox(dc)
 
     for item <- items,
         item.type != :canvas,
         item.type != :caret or caret_on,
         not Map.get(item, :hidden, false),
-        item.y - scroll < h,
-        item.y + Map.get(item, :h, 40) + 40 - scroll > 0 do
+        item.y - scroll < cy + ch,
+        item.y + Map.get(item, :h, 40) + 40 - scroll > cy,
+        item.x - 40 < cx + cw,
+        item.x + Map.get(item, :w, 100_000) + 40 > cx do
       y = item.y - scroll
       clip = Map.get(item, :clip)
       if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - scroll, clip.w, clip.h})
