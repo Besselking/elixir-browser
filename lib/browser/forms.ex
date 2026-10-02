@@ -18,7 +18,7 @@ defmodule Browser.Forms do
       text line to sit on
     * `password` shows one bullet per character
     * checkboxes show a check mark when checked; radio buttons a round dot
-    * buttons show their value (or "Submit"/"Reset")
+    * buttons show their value (or "Submit"/"Reset" when it is missing)
     * `<select>` shows the selected option followed by an arrow
     * `<textarea>` shows its text
   """
@@ -226,14 +226,29 @@ defmodule Browser.Forms do
     placeholder = attr(attrs, "placeholder")
 
     case type do
-      "hidden" -> []
-      "checkbox" -> [text(if cur.checked, do: "✓", else: @empty)]
-      "radio" -> if cur.checked, do: [dot(attrs)], else: [text(@empty)]
-      t when t in ["submit", "button", "reset"] -> [text(button_label(t, cur.value))]
-      "image" -> [text(first_present([attr(attrs, "alt"), cur.value], "Submit"))]
-      "file" -> [text("Choose file")]
-      "password" -> shown(bullets(cur.value), cur, placeholder)
-      _ -> shown(cur.value, cur, placeholder)
+      "hidden" ->
+        []
+
+      "checkbox" ->
+        [text(if cur.checked, do: "✓", else: @empty)]
+
+      "radio" ->
+        if cur.checked, do: [dot(attrs)], else: [text(@empty)]
+
+      t when t in ["submit", "button", "reset"] ->
+        [text(button_label(t, cur.value, has?(attrs, "value")))]
+
+      "image" ->
+        [text(first_present([attr(attrs, "alt"), cur.value], "Submit"))]
+
+      "file" ->
+        [text("Choose file")]
+
+      "password" ->
+        shown(bullets(cur.value), cur, placeholder)
+
+      _ ->
+        shown(cur.value, cur, placeholder)
     end
   end
 
@@ -261,10 +276,11 @@ defmodule Browser.Forms do
     [text(String.trim(label <> " ▾"))]
   end
 
-  defp button_label("submit", ""), do: "Submit"
-  defp button_label("reset", ""), do: "Reset"
-  defp button_label(_type, ""), do: @empty
-  defp button_label(_type, value), do: value
+  # the default labels only stand in for a missing value attribute: `value=""` is an empty label
+  defp button_label("submit", "", false), do: "Submit"
+  defp button_label("reset", "", false), do: "Reset"
+  defp button_label(_type, "", _given?), do: @empty
+  defp button_label(_type, value, _given?), do: value
 
   defp first_present(values, default), do: Enum.find(values, default, &(&1 != ""))
 

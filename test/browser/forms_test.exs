@@ -54,6 +54,11 @@ defmodule Browser.FormsTest do
     assert [{:text, @zw}] = kids(~s(<input type="button">), "input")
   end
 
+  test "an empty value attribute is an empty label, not the default one" do
+    assert [{:text, @zw}] = kids(~s(<input type="submit" value="">), "input")
+    assert [{:text, @zw}] = kids(~s(<input type="reset" value="">), "input")
+  end
+
   test "hidden inputs have no content" do
     assert [] = kids(~s(<input type="hidden" value="secret">), "input")
   end
