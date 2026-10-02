@@ -96,7 +96,7 @@ defmodule Browser.Fetch do
   defp fetch(_url, _method, _body, 0), do: {:error, "Too many redirects"}
 
   defp fetch(url, method, body, redirects) do
-    headers = [{~c"user-agent", ~c"ElixirBrowser/0.1"}]
+    headers = [{~c"user-agent", ~c"ElixirBrowser/0.1"}, {~c"accept-encoding", ~c"gzip"}]
 
     request =
       case method do
@@ -131,14 +131,29 @@ defmodule Browser.Fetch do
             {:error, "Redirect without Location"}
         end
 
-      {:ok, {{_, status, _}, _headers, body}} when status in 200..299 ->
-        {:ok, body, url}
+      {:ok, {{_, status, _}, headers, body}} when status in 200..299 ->
+        decode_body(headers, body, url)
 
       {:ok, {{_, status, reason}, _, _}} ->
         {:error, "HTTP #{status} #{reason}"}
 
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
+    end
+  end
+
+  # servers send gzip when asked: several times fewer bytes for HTML and CSS
+  defp decode_body(headers, body, url) do
+    case List.keyfind(headers, ~c"content-encoding", 0) do
+      {_, enc} when enc in [~c"gzip", ~c"x-gzip"] ->
+        try do
+          {:ok, :zlib.gunzip(body), url}
+        rescue
+          _ -> {:error, "Bad gzip data"}
+        end
+
+      _ ->
+        {:ok, body, url}
     end
   end
 end

@@ -3235,7 +3235,7 @@ defmodule Browser.Layout do
     %{
       build: build,
       sub: sub,
-      key: :erlang.phash2(sub),
+      key: make_ref(),
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),

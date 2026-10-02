@@ -27,10 +27,15 @@ defmodule Browser.Session do
   @impl true
   def init(_) do
     ui = UI.build()
+    cache = UI.new_measure_cache()
 
     state = %{
       ui: ui,
-      measure: UI.measurer(ui),
+      measure: UI.measurer(ui, cache),
+      # the same widths for a layout running in the background, which needs a DC of its own
+      measure_bg: UI.measurer(ui, cache),
+      # a layout running in the background after a resize: {ref, pid}
+      layout_job: nil,
       history: History.new(),
       page: nil,
       nodes: [],
@@ -399,6 +404,8 @@ defmodule Browser.Session do
   # for each one would put the session minutes behind. Every event only restarts a timer; the
   # page is laid out once, for the size the window has when the events stop.
   def handle_info(wx(event: wxSize(size: _)), state) do
+    state = cancel_layout_job(state)
+
     case state.resize_timer do
       {_ref, timer} -> Process.cancel_timer(timer)
       nil -> :ok
@@ -421,13 +428,32 @@ defmodule Browser.Session do
         {:noreply, %{state | width: w}}
 
       true ->
-        state = %{state | width: w}
-        page = Page.restyle(state.page, env(state))
-        state = relayout(%{state | page: page, nodes: page.nodes})
-        # a new viewport can switch on other background images
-        {:noreply, start_images(state)}
+        {:noreply, start_layout_job(%{state | width: w})}
     end
   end
+
+  # The page is restyled and laid out for the new size in a process of its own, so the window
+  # keeps answering (and a further resize just throws the work away) while a big page lays out.
+  def handle_info(
+        {:layout_done, ref, base, page, items, height, width},
+        %{layout_job: {ref, _}} = state
+      ) do
+    state = %{state | layout_job: nil}
+
+    state =
+      if state.page == base do
+        state = fit_scroll(%{state | page: page, nodes: page.nodes})
+        apply_layout(state, items, height, width, :full)
+      else
+        # the page changed meanwhile (typing, a new page): the result is stale
+        relayout(state)
+      end
+
+    # a new viewport can switch on other background images
+    {:noreply, start_images(state)}
+  end
+
+  def handle_info({:layout_done, _stale, _, _, _, _, _}, state), do: {:noreply, state}
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
@@ -1019,6 +1045,48 @@ defmodule Browser.Session do
         svg_defs: if(state.page, do: state.page.svg_defs, else: %{})
       )
 
+    apply_layout(state, items, height, width, mode)
+  end
+
+  defp start_layout_job(state) do
+    state = cancel_layout_job(state)
+    me = self()
+    ref = make_ref()
+    wx_env = :wx.get_env()
+    base = state.page
+    env = env(state)
+    width = max(UI.client_width(state.ui), 200)
+    view_h = UI.client_height(state.ui)
+    focus = focus_option(state)
+    images = state.images
+    measure = state.measure_bg
+
+    {:ok, pid} =
+      Task.start(fn ->
+        :wx.set_env(wx_env)
+        page = Page.restyle(base, env)
+
+        {items, height} =
+          Layout.layout(page.nodes, width, measure, view_h,
+            focus: focus,
+            images: images,
+            svg_defs: page.svg_defs
+          )
+
+        send(me, {:layout_done, ref, base, page, items, height, width})
+      end)
+
+    %{state | layout_job: {ref, pid}}
+  end
+
+  defp cancel_layout_job(%{layout_job: nil} = state), do: state
+
+  defp cancel_layout_job(%{layout_job: {_ref, pid}} = state) do
+    Process.exit(pid, :kill)
+    %{state | layout_job: nil}
+  end
+
+  defp apply_layout(state, items, height, width, mode) do
     state = %{
       state
       | items: items,

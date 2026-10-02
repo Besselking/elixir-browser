@@ -220,13 +220,18 @@ defmodule Browser.UI do
   # (~100us), and a relayout asks for the same text hundreds of times
   @measure_cache_limit 50_000
 
+  @doc "A width cache that several measurers (each with its own DC) can share."
+  def new_measure_cache, do: :ets.new(:measure_cache, [:set, :public])
+
   @doc """
   Returns a `(text, style) -> width` function backed by a wx client DC. Widths are
-  memoized (in the calling process), so only text that changed costs a wx round trip.
+  memoized in `cache`, so only text that changed costs a wx round trip. A measurer is used
+  by one process at a time (its DC holds the current font); a second one on the same cache
+  serves a background process.
   """
-  def measurer(%{panel: panel}) do
+  def measurer(%{panel: panel}, cache \\ nil) do
     dc = :wxClientDC.new(panel)
-    cache = :ets.new(:measure_cache, [:set, :private])
+    cache = cache || new_measure_cache()
 
     fn text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
       key = {text, size, bold, italic, mono}

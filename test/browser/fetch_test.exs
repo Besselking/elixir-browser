@@ -71,6 +71,20 @@ defmodule Browser.FetchTest do
     assert_receive {:request, "GET", "/x?a=1", %{"user-agent" => "ElixirBrowser/0.1"}, ""}
   end
 
+  test "asks for gzip and unpacks it" do
+    body = :zlib.gzip(String.duplicate("squeeze me ", 50))
+
+    base =
+      serve([
+        "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n" <>
+          body
+      ])
+
+    assert {:ok, text, _} = Fetch.load(base <> "/z")
+    assert text == String.duplicate("squeeze me ", 50)
+    assert_receive {:request, "GET", "/z", %{"accept-encoding" => "gzip"}, ""}
+  end
+
   test "POST sends the body as a urlencoded form" do
     base = serve([ok("posted")])
     assert {:ok, "posted", _} = Fetch.load(base <> "/submit", method: :post, body: "a=1&b=x+y")
