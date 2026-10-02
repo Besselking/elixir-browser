@@ -20,11 +20,13 @@ defmodule Browser.Interact do
     * `{:char, text}` for typed text
     * `:backspace`, `:delete`, `:enter`, `:tab`, `:shift_tab`, `:escape`
     * `:left`, `:right`, `:up`, `:down`, `:home`, `:end`, `:page_up`, `:page_down`
-    * `:paste` for the paste shortcut, `:ignore` for everything else
+    * `:paste`, `:copy` and `:select_all` for those shortcuts, `:ignore` for everything else
   """
   def key(%{ctrl?: ctrl, meta?: meta, alt?: alt} = event) when ctrl or meta or alt do
     cond do
       (ctrl or meta) and not alt and paste_key?(event) -> :paste
+      (ctrl or meta) and not alt and letter_key?(event, [?c, ?C, 3]) -> :copy
+      (ctrl or meta) and not alt and letter_key?(event, [?a, ?A, 1]) -> :select_all
       alt and not (ctrl or meta) -> printable(event)
       true -> :ignore
     end
@@ -47,7 +49,10 @@ defmodule Browser.Interact do
   def key(event), do: printable(event)
 
   # `v` pressed with the command/control key (some platforms send the control code 22)
-  defp paste_key?(%{char: char, code: code}), do: char in [?v, ?V, 22] or code in [?v, ?V, 22]
+  defp paste_key?(event), do: letter_key?(event, [?v, ?V, 22])
+
+  # a letter pressed with the command/control key, as a character or as its control code
+  defp letter_key?(%{char: char, code: code}, keys), do: char in keys or code in keys
 
   defp printable(%{char: char}) when is_integer(char) and char >= 32 and char != 127 do
     if char in 0xD800..0xDFFF or char > 0x10FFFF, do: :ignore, else: {:char, <<char::utf8>>}

@@ -203,6 +203,10 @@ defmodule Mix.Tasks.App.Bundle do
     #!/bin/bash
     DIR="$(cd "$(dirname "$0")/../Resources/release" && pwd)"
     export RELEASE_DISTRIBUTION=none
+    # launched from the Dock there is no locale, and the toolkit would turn non-ASCII
+    # text on the clipboard into question marks
+    : "${LANG:=en_US.UTF-8}"
+    export LANG
     exec "$DIR/bin/browser" start
     """)
 

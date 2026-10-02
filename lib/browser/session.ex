@@ -11,7 +11,7 @@ defmodule Browser.Session do
   use GenServer
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1]
 
-  alias Browser.{Fetch, Forms, History, Images, Interact, Layout, Page, TextEdit, UI}
+  alias Browser.{Fetch, Forms, History, Images, Interact, Layout, Page, Selection, TextEdit, UI}
 
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
@@ -51,7 +51,14 @@ defmodule Browser.Session do
       caret: 0,
       caret_on: true,
       blink: nil,
-      menu: nil
+      menu: nil,
+      # selected page text: the range, its anchor while dragging, the selectable text items
+      # (computed when needed) and the highlight items drawn over them
+      sel: nil,
+      sel_anchor: nil,
+      drag: false,
+      sel_texts: nil,
+      sel_items: []
     }
 
     start = System.get_env("BROWSER_URL") || Browser.home()
@@ -160,7 +167,7 @@ defmodule Browser.Session do
 
   def handle_info({:blink, ref}, %{blink: ref} = state) do
     state = %{state | caret_on: not state.caret_on}
-    UI.update(state.ui, state.items, state.scroll, state.caret_on, :diff)
+    UI.update(state.ui, view_items(state), state.scroll, state.caret_on, :diff)
     {:noreply, schedule_blink(state, false)}
   end
 
@@ -198,6 +205,13 @@ defmodule Browser.Session do
   def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state),
     do: System.halt(0)
 
+  # Edit > Copy and Select All (wxID_COPY, wxID_SELECTALL)
+  def handle_info(wx(id: 5032, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, on_key(state, :copy)}
+
+  def handle_info(wx(id: 5035, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, on_key(state, :select_all)}
+
   # a choice from the open <select> menu
   def handle_info(wx(id: id, event: wxCommand(type: :command_menu_selected)), state) do
     {:noreply, choose_option(state, id - UI.menu_base())}
@@ -212,12 +226,43 @@ defmodule Browser.Session do
         state = if state.focus, do: blur(state), else: state
 
         case UI.link_at(state.links, x, py) do
-          nil -> {:noreply, state}
+          nil -> {:noreply, start_selection(state, x, py)}
           href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
         end
 
       cid ->
         {:noreply, click_control(state, cid, x, py)}
+    end
+  end
+
+  def handle_info(wx(event: wxMouse(type: :left_dclick, x: x, y: y)), state) do
+    py = y + state.scroll
+
+    if UI.control_at(state.controls, x, py) == nil and UI.link_at(state.links, x, py) == nil,
+      do: {:noreply, select_word(state, x, py)},
+      else: {:noreply, state}
+  end
+
+  def handle_info(wx(event: wxMouse(type: :left_up)), state), do: {:noreply, end_drag(state)}
+
+  # dragging out a selection; past the top or bottom edge the page scrolls along
+  def handle_info(
+        wx(event: wxMouse(type: :motion, x: x, y: y, leftDown: down)),
+        %{drag: true} = state
+      ) do
+    if down do
+      view = UI.client_height(state.ui)
+
+      state =
+        cond do
+          y < 0 -> scroll_by(state, -24)
+          y > view -> scroll_by(state, 24)
+          true -> state
+        end
+
+      {:noreply, extend_selection(state, x, y + state.scroll)}
+    else
+      {:noreply, end_drag(state)}
     end
   end
 
@@ -276,6 +321,16 @@ defmodule Browser.Session do
   # -- keyboard --------------------------------------------------------------
 
   defp on_key(state, :ignore), do: state
+
+  defp on_key(state, key) when key in [:copy, :select_all] do
+    editing? =
+      case state.focus && control(state, state.focus) do
+        %{} = control -> Forms.editable?(control)
+        _ -> false
+      end
+
+    if editing?, do: state, else: page_selection_key(state, key)
+  end
 
   defp on_key(%{focus: nil} = state, key) when key in [:tab, :shift_tab],
     do: focus_step(state, if(key == :tab, do: :forward, else: :backward))
@@ -369,7 +424,79 @@ defmodule Browser.Session do
       {:char, " "} -> scroll_by(state, page)
       :home -> scroll_by(state, -state.scroll)
       :end -> scroll_by(state, state.height)
+      :escape -> apply_selection(state, nil)
       _ -> state
+    end
+  end
+
+  # -- selecting page text ---------------------------------------------------
+
+  defp view_items(%{sel_items: []} = state), do: state.items
+  defp view_items(state), do: state.items ++ state.sel_items
+
+  defp sel_texts(%{sel_texts: nil} = state) do
+    texts = Selection.texts(state.items)
+    {texts, %{state | sel_texts: texts}}
+  end
+
+  defp sel_texts(state), do: {state.sel_texts, state}
+
+  defp start_selection(state, x, py) do
+    {texts, state} = sel_texts(state)
+    anchor = Selection.point_at(texts, x, py, state.measure)
+    apply_selection(%{state | sel_anchor: anchor, drag: anchor != nil}, nil)
+  end
+
+  defp extend_selection(%{sel_anchor: nil} = state, _x, _py), do: state
+
+  defp extend_selection(state, x, py) do
+    {texts, state} = sel_texts(state)
+    head = Selection.point_at(texts, x, py, state.measure)
+    apply_selection(state, Selection.range(state.sel_anchor, head))
+  end
+
+  defp end_drag(state), do: %{state | drag: false}
+
+  defp select_word(state, x, py) do
+    {texts, state} = sel_texts(state)
+
+    with pos when pos != nil <- Selection.point_at(texts, x, py, state.measure),
+         range when range != nil <- Selection.word_at(texts, pos) do
+      apply_selection(%{state | sel_anchor: elem(range, 0), drag: false}, range)
+    else
+      _ -> state
+    end
+  end
+
+  defp page_selection_key(state, :select_all) do
+    {texts, state} = sel_texts(state)
+    apply_selection(state, Selection.all(texts))
+  end
+
+  defp page_selection_key(state, :copy) do
+    {texts, state} = sel_texts(state)
+
+    case Selection.text(texts, state.sel) do
+      "" ->
+        state
+
+      text ->
+        UI.set_clipboard_text(text)
+        state
+    end
+  end
+
+  # shows `range` (nil: nothing) as the selection, repainting only if it changed
+  defp apply_selection(state, range) do
+    {texts, state} = sel_texts(state)
+    items = Selection.rects(texts, range, state.measure)
+
+    if range == state.sel and items == state.sel_items do
+      state
+    else
+      state = %{state | sel: range, sel_items: items}
+      UI.update(state.ui, view_items(state), state.scroll, state.caret_on, :diff)
+      state
     end
   end
 
@@ -654,7 +781,12 @@ defmodule Browser.Session do
         height: height,
         width: width,
         links: UI.links(items),
-        controls: Layout.controls(items)
+        controls: Layout.controls(items),
+        sel: nil,
+        sel_anchor: nil,
+        drag: false,
+        sel_texts: nil,
+        sel_items: []
     }
 
     scroll_by(state, 0, mode)
@@ -766,7 +898,7 @@ defmodule Browser.Session do
   defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
-    UI.update(state.ui, state.items, scroll, state.caret_on, mode)
+    UI.update(state.ui, view_items(state), scroll, state.caret_on, mode)
     %{state | scroll: scroll}
   end
 

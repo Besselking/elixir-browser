@@ -43,6 +43,15 @@ defmodule Browser.InteractTest do
       assert Interact.key(ev(0, char: 0xD800)) == :ignore
     end
 
+    test "the copy and select-all shortcuts" do
+      assert Interact.key(ev(?c, meta?: true)) == :copy
+      assert Interact.key(ev(?C, ctrl?: true)) == :copy
+      assert Interact.key(ev(3, ctrl?: true, char: 3)) == :copy
+      assert Interact.key(ev(?a, meta?: true)) == :select_all
+      assert Interact.key(ev(1, ctrl?: true, char: 1)) == :select_all
+      assert Interact.key(ev(?c, meta?: true, alt?: true)) != :copy
+    end
+
     test "the paste shortcut, with command or control" do
       assert Interact.key(ev(?V, meta?: true)) == :paste
       assert Interact.key(ev(?v, ctrl?: true)) == :paste
@@ -50,8 +59,8 @@ defmodule Browser.InteractTest do
     end
 
     test "other shortcuts do nothing, and alt keeps typing characters" do
-      assert Interact.key(ev(?c, meta?: true)) == :ignore
-      assert Interact.key(ev(?a, ctrl?: true)) == :ignore
+      assert Interact.key(ev(?x, meta?: true)) == :ignore
+      assert Interact.key(ev(?z, ctrl?: true)) == :ignore
       assert Interact.key(ev(?e, alt?: true, char: 0xE9)) == {:char, "é"}
     end
   end

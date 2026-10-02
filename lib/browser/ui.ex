@@ -59,6 +59,11 @@ defmodule Browser.UI do
     :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
     menubar = :wxMenuBar.new()
     :wxMenuBar.append(menubar, file, ~c"File")
+
+    edit = :wxMenu.new()
+    :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
+    :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
+    :wxMenuBar.append(menubar, edit, ~c"Edit")
     :wxFrame.setMenuBar(frame, menubar)
 
     :wxFrame.connect(frame, :close_window)
@@ -66,6 +71,8 @@ defmodule Browser.UI do
     :wxTextCtrl.connect(url, :command_text_enter)
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
     :wxPanel.connect(panel, :left_down)
+    :wxPanel.connect(panel, :left_up)
+    :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
     :wxPanel.connect(panel, :mousewheel)
     :wxPanel.connect(panel, :size)
@@ -260,6 +267,16 @@ defmodule Browser.UI do
 
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
+  # selected text: a translucent wash over it
+  defp draw(dc, %{type: :selection} = item, y, _scroll) do
+    gc = :wxGraphicsContext.create(dc)
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new({56, 132, 255, 90}))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.addRectangle(path, item.x, y, item.w, item.h)
+    :wxGraphicsContext.fillPath(gc, path)
+    :wxGraphicsContext.destroy(gc)
+  end
+
   # only marks where a control is
   defp draw(_dc, %{type: :box}, _y, _scroll), do: :ok
 
@@ -851,6 +868,18 @@ defmodule Browser.UI do
         )
       ) do
     %{code: code, char: char, ctrl?: ctrl, meta?: meta, shift?: shift, alt?: alt}
+  end
+
+  @doc "Puts `text` on the clipboard."
+  def set_clipboard_text(text) do
+    clip = :wxClipboard.get()
+
+    if :wxClipboard.open(clip) do
+      :wxClipboard.setData(clip, :wxTextDataObject.new([{:text, String.to_charlist(text)}]))
+      :wxClipboard.close(clip)
+    end
+
+    :ok
   end
 
   @doc "The text on the clipboard, or \"\"."
