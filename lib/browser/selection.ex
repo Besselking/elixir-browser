@@ -181,6 +181,31 @@ defmodule Browser.Selection do
     end
   end
 
+  @doc """
+  The selection of the paragraph at `position`: the lines around it up to the blank space
+  that `text/2` would copy as a paragraph break.
+  """
+  def paragraph_at(texts, {index, _offset}) do
+    t = List.to_tuple(texts)
+    last = tuple_size(t) - 1
+    first_i = walk(t, index, -1, last)
+    last_i = walk(t, index, 1, last)
+    {{first_i, 0}, {last_i, String.length(elem(t, last_i).text)}}
+  end
+
+  # the index of the paragraph's first (step -1) or last (step 1) item
+  defp walk(t, i, step, last) do
+    next = i + step
+
+    cond do
+      next < 0 or next > last -> i
+      paragraph_break?(elem(t, min(i, next)), elem(t, max(i, next))) -> i
+      true -> walk(t, next, step, last)
+    end
+  end
+
+  defp paragraph_break?(prev, item), do: separator(prev, item) == "\n\n"
+
   # -- output --------------------------------------------------------------------------
 
   @doc """

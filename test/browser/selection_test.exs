@@ -114,6 +114,19 @@ defmodule Browser.SelectionTest do
     end
   end
 
+  describe "paragraph_at/2" do
+    test "the lines around the position, up to the blank space" do
+      assert Selection.paragraph_at(texts(), {0, 2}) == {{0, 0}, {2, 5}}
+      assert Selection.paragraph_at(texts(), {2, 1}) == {{0, 0}, {2, 5}}
+      assert Selection.paragraph_at(texts(), {4, 0}) == {{3, 0}, {4, 4}}
+    end
+
+    test "a lone line" do
+      t = texts([item("only", 0, 0)])
+      assert Selection.paragraph_at(t, {0, 1}) == {{0, 0}, {0, 4}}
+    end
+  end
+
   describe "text/2" do
     test "within one item" do
       assert Selection.text(texts(), {{0, 1}, {0, 4}}) == "ell"

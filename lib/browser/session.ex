@@ -58,7 +58,9 @@ defmodule Browser.Session do
       sel_anchor: nil,
       drag: false,
       sel_texts: nil,
-      sel_items: []
+      sel_items: [],
+      # the last click, for double and triple clicks: {time, x, y, count}
+      click: nil
     }
 
     start = System.get_env("BROWSER_URL") || Browser.home()
@@ -217,16 +219,17 @@ defmodule Browser.Session do
     {:noreply, choose_option(state, id - UI.menu_base())}
   end
 
-  def handle_info(wx(event: wxMouse(type: :left_down, x: x, y: y)), state) do
+  def handle_info(wx(event: wxMouse(type: :left_down, x: x, y: y, shiftDown: shift)), state) do
     UI.focus_page(state.ui)
     py = y + state.scroll
+    {count, state} = register_click(state, x, y, :down)
 
     case UI.control_at(state.controls, x, py) do
       nil ->
         state = if state.focus, do: blur(state), else: state
 
         case UI.link_at(state.links, x, py) do
-          nil -> {:noreply, start_selection(state, x, py)}
+          nil -> {:noreply, page_click(state, x, py, count, shift)}
           href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
         end
 
@@ -237,9 +240,10 @@ defmodule Browser.Session do
 
   def handle_info(wx(event: wxMouse(type: :left_dclick, x: x, y: y)), state) do
     py = y + state.scroll
+    {count, state} = register_click(state, x, y, :dclick)
 
     if UI.control_at(state.controls, x, py) == nil and UI.link_at(state.links, x, py) == nil,
-      do: {:noreply, select_word(state, x, py)},
+      do: {:noreply, select_unit(state, x, py, count)},
       else: {:noreply, state}
   end
 
@@ -441,6 +445,44 @@ defmodule Browser.Session do
 
   defp sel_texts(state), do: {state.sel_texts, state}
 
+  # A press on plain page area: a triple click selects the paragraph; with shift the
+  # selection grows from where it started; otherwise a new selection begins.
+  defp page_click(state, x, py, count, _shift) when count >= 3, do: select_unit(state, x, py, 3)
+
+  defp page_click(%{sel_anchor: anchor} = state, x, py, _count, true) when anchor != nil do
+    extend_selection(%{state | drag: true}, x, py)
+  end
+
+  defp page_click(state, x, py, _count, _shift), do: start_selection(state, x, py)
+
+  # clicks at (about) the same place in quick succession count up
+  defp register_click(state, x, y, kind) do
+    now = System.monotonic_time(:millisecond)
+
+    count =
+      case state.click do
+        {t, cx, cy, n} when now - t < 500 and abs(x - cx) < 5 and abs(y - cy) < 5 -> n + 1
+        _ -> if kind == :dclick, do: 2, else: 1
+      end
+
+    {count, %{state | click: {now, x, y, count}}}
+  end
+
+  defp select_unit(state, x, py, count) do
+    {texts, state} = sel_texts(state)
+
+    with pos when pos != nil <- Selection.point_at(texts, x, py, state.measure),
+         range when range != nil <-
+           if(count >= 3,
+             do: Selection.paragraph_at(texts, pos),
+             else: Selection.word_at(texts, pos)
+           ) do
+      apply_selection(%{state | sel_anchor: elem(range, 0), drag: false}, range)
+    else
+      _ -> state
+    end
+  end
+
   defp start_selection(state, x, py) do
     {texts, state} = sel_texts(state)
     anchor = Selection.point_at(texts, x, py, state.measure)
@@ -456,17 +498,6 @@ defmodule Browser.Session do
   end
 
   defp end_drag(state), do: %{state | drag: false}
-
-  defp select_word(state, x, py) do
-    {texts, state} = sel_texts(state)
-
-    with pos when pos != nil <- Selection.point_at(texts, x, py, state.measure),
-         range when range != nil <- Selection.word_at(texts, pos) do
-      apply_selection(%{state | sel_anchor: elem(range, 0), drag: false}, range)
-    else
-      _ -> state
-    end
-  end
 
   defp page_selection_key(state, :select_all) do
     {texts, state} = sel_texts(state)
