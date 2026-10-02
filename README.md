@@ -5,7 +5,7 @@ a CSS engine (selectors, cascade, `@media`, custom properties, box model) and a 
 layout, drawn with Erlang's `:wx`.
 
 ```bash
-mix run --no-halt            # opens the about:home page
+mix run --no-halt            # opens the start page: a few sites and the demo pages in priv/demo
 BROWSER_URL=https://example.com mix run --no-halt
 mix test
 mix app.bundle               # macOS: self-contained dist/"Elixir Browser.app"

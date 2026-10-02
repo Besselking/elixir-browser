@@ -3,17 +3,49 @@ defmodule Browser.Fetch do
 
   @max_redirects 8
 
-  @about_home """
-  <html><body>
-  <h1>Elixir Browser</h1>
-  <p>A tiny browser written in Elixir. Type a URL above and press Enter.</p>
-  <ul>
-  <li><a href="https://example.com">example.com</a></li>
-  <li><a href="http://info.cern.ch">info.cern.ch</a> (the first website)</li>
-  <li><a href="https://elixir-lang.org">elixir-lang.org</a></li>
-  </ul>
-  </body></html>
-  """
+  # the pages in priv/demo, with what each one shows
+  @demos [
+    {"sample.html", "Sample", "headings, links, lists, preformatted text"},
+    {"boxes.html", "Boxes", "borders, widths and centering"},
+    {"rounded.html", "Rounded corners", "border-radius"},
+    {"backgrounds.html", "Backgrounds and shadows", "images, gradients and box-shadow"},
+    {"positioning.html", "Positioning", "absolute and fixed boxes, clipping"},
+    {"lineheight.html", "Line height", "line-height and inline boxes"},
+    {"hidden.html", "Hidden elements", "display, visibility and hidden content"},
+    {"images.html", "Images", "PNG, JPEG, GIF, BMP and TIFF pictures"},
+    {"svg.html", "SVG", "inline and linked vector graphics"},
+    {"forms.html", "Form controls", "inputs, selects, buttons and text selection"},
+    {"selects.html", "Selects", "clipped dropdowns"}
+  ]
+
+  @doc "The start page: a few sites, and the demo pages that ship with the browser."
+  def about_home do
+    dir = Application.app_dir(:browser, "priv/demo")
+
+    demos =
+      for {file, title, what} <- @demos, File.exists?(Path.join(dir, file)) do
+        url = "file://" <> URI.encode(Path.join(dir, file))
+        ~s|<li><a href="#{url}">#{title}</a> &ndash; #{what}</li>\n|
+      end
+
+    """
+    <html><head><title>Elixir Browser</title></head><body>
+    <h1>Elixir Browser</h1>
+    <p>A tiny browser written in Elixir. Type a URL above and press Enter.</p>
+    <h2>Sites</h2>
+    <ul>
+    <li><a href="https://example.com">example.com</a></li>
+    <li><a href="http://info.cern.ch">info.cern.ch</a> (the first website)</li>
+    <li><a href="https://elixir-lang.org">elixir-lang.org</a></li>
+    <li><a href="https://html.duckduckgo.com/html/">html.duckduckgo.com</a> (search, no JavaScript)</li>
+    </ul>
+    <h2>Demo pages</h2>
+    <p>Pages that exercise what the browser can draw.</p>
+    <ul>
+    #{demos}</ul>
+    </body></html>
+    """
+  end
 
   @doc "Turn what the user typed into an absolute URL."
   def normalize(input) do
@@ -43,7 +75,7 @@ defmodule Browser.Fetch do
   def load(url, opts \\ []),
     do: fetch(url, Keyword.get(opts, :method, :get), Keyword.get(opts, :body), @max_redirects)
 
-  defp fetch("about:home", _, _, _), do: {:ok, @about_home, "about:home"}
+  defp fetch("about:home", _, _, _), do: {:ok, about_home(), "about:home"}
   defp fetch("about:" <> _ = url, _, _, _), do: {:ok, "<h1>Unknown page</h1>", url}
 
   defp fetch("file://" <> path, _, _, _) do

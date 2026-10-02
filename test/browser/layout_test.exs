@@ -410,7 +410,7 @@ defmodule Browser.LayoutTest do
     for fixture <-
           ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects) do
       test "#{fixture}.html lays out on integer pixels" do
-        html = File.read!("test/fixtures/#{unquote(fixture)}.html")
+        html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
 
         for width <- [300, 640, 1100], view_h <- [400, 800] do

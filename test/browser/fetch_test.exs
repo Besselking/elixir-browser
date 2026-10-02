@@ -110,4 +110,19 @@ defmodule Browser.FetchTest do
     assert {:ok, "<p>hi</p>", _} = Fetch.load("file://" <> path, method: :post)
     File.rm!(path)
   end
+
+  describe "the start page" do
+    test "links to demo pages that exist" do
+      {:ok, html, "about:home"} = Fetch.load("about:home")
+
+      links =
+        Regex.scan(~r/href="(file:\/\/[^"]+)"/, html, capture: :all_but_first) |> List.flatten()
+
+      assert length(links) >= 10
+
+      for "file://" <> path <- links do
+        assert File.exists?(URI.decode(path)), "#{path} is missing"
+      end
+    end
+  end
 end

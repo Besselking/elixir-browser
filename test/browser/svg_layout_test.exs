@@ -215,7 +215,7 @@ defmodule Browser.SvgLayoutTest do
     test "fetch reads local files for local pages" do
       assert {:ok, scene, :svg} =
                Images.fetch(
-                 "file://" <> Path.expand("test/fixtures/images/logo.svg"),
+                 "file://" <> Path.expand("priv/demo/images/logo.svg"),
                  "file:///x.html"
                )
 

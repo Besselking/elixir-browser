@@ -2,7 +2,7 @@ defmodule Browser.PageTest do
   use ExUnit.Case, async: true
   alias Browser.Page
 
-  @dir Path.expand("../fixtures/images", __DIR__)
+  @dir Path.expand("../../priv/demo/images", __DIR__)
 
   defp texts(nodes) do
     Enum.flat_map(nodes, fn

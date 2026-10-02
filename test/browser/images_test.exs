@@ -3,7 +3,7 @@ defmodule Browser.ImagesTest do
   use ExUnit.Case, async: false
   alias Browser.{HTML, Images}
 
-  @dir Path.expand("../fixtures/images", __DIR__)
+  @dir Path.expand("../../priv/demo/images", __DIR__)
   @base "file://" <> @dir <> "/page.html"
 
   defp file(name), do: "file://" <> Path.join(@dir, name)
