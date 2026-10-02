@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+<title>Margins</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; line-height: 1.5 }
+  h2 { margin: 18px 0 6px }
+  .wrap { border: 1px dashed #888; padding: 14px 24px; background: #fafafa }
+  .a, .b { padding: 8px 12px; background: #c5cae9; border: 1px solid #5c6bc0 }
+  .b { background: #ffe0b2; border-color: #ef6c00 }
+  .pull { margin-top: -14px }
+  .bleed { margin-left: -24px; margin-right: -24px; background: #1a1221; color: #fff; padding: 8px 24px }
+  .cols { overflow: hidden }
+  .col { float: left; width: 31%; margin-right: 3.5%; padding: 3%; background: #e0f2f1; box-sizing: border-box }
+  .col:last-child { margin-right: 0 }
+  .pad { padding: 4% 6%; background: #fff3e0 }
+</style>
+</head>
+<body>
+<h1>Margins</h1>
+
+<h2>Negative margin-top overlaps the box above</h2>
+<div class="a">First box</div>
+<div class="b pull">Second box, pulled up by 14px</div>
+
+<h2>Negative side margins break out of the padding</h2>
+<div class="wrap">
+  <p>Text inside a padded container.</p>
+  <div class="bleed">This bar reaches the container's edges</div>
+  <p>More text after the bar.</p>
+</div>
+
+<h2>Collapsing: 30px below, -10px above leaves 20px</h2>
+<div class="a" style="margin-bottom: 30px">Above</div>
+<div class="b" style="margin-top: -10px">Below</div>
+
+<h2>Percentage margins and padding</h2>
+<div class="cols">
+  <div class="col">One of three columns</div>
+  <div class="col">Two of three, a bit more text here</div>
+  <div class="col">Three</div>
+</div>
+<div class="pad">Padding of 4% and 6% of the container's width, in every direction that percentages are allowed.</div>
+</body>
+</html>

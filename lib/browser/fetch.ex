@@ -18,6 +18,7 @@ defmodule Browser.Fetch do
     {"selects.html", "Selects", "clipped dropdowns"},
     {"tables.html", "Tables", "borders, spans, collapsing, alignment, nesting"},
     {"floats.html", "Floats", "text flowing around floated boxes, clear, containment"},
+    {"margins.html", "Margins", "negative margins, collapsing, percentage margins and padding"},
     {"wide.html", "Wide content", "pages wider than the window scroll sideways"}
   ]
 

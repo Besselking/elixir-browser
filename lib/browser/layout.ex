@@ -735,6 +735,7 @@ defmodule Browser.Layout do
 
     own =
       c
+      |> resolve_box_pct(containing_width())
       |> Map.drop(~w(width min-width max-width))
       |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
 
@@ -1312,6 +1313,8 @@ defmodule Browser.Layout do
       x: 0,
       y: 0,
       gap: 0,
+      # the most negative margin waiting to be applied, which adds to the largest positive one
+      ngap: 0,
       pending_space: nil,
       lh: 0,
       indent: 0,
@@ -1355,6 +1358,7 @@ defmodule Browser.Layout do
   defp op({:flush}, st), do: flush(st)
 
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
+  defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
   defp op({:gap, px}, st), do: %{flush(st) | gap: max(st.gap, px)}
 
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
@@ -1560,7 +1564,7 @@ defmodule Browser.Layout do
   # `lead` and applied when the first word of the line is placed.
   defp op({:inline_open, ref, spec}, st) do
     if st.line == [] do
-      {fl, _} = float_offsets(st, st.y + st.gap)
+      {fl, _} = float_offsets(st, st.y + st.gap + st.ngap)
       x = st.margin + st.left + fl + st.lead + spec.ml
 
       %{
@@ -1585,7 +1589,7 @@ defmodule Browser.Layout do
     right = spec.pr + spec.br
 
     if st.line == [] do
-      {fl, _} = float_offsets(st, st.y + st.gap)
+      {fl, _} = float_offsets(st, st.y + st.gap + st.ngap)
       x = st.margin + st.left + fl + st.lead + right
       %{st | lead: st.lead + right + spec.mr, marks: [{:end, ref, x} | st.marks]}
     else
@@ -1596,7 +1600,7 @@ defmodule Browser.Layout do
   defp op({:pos_inline}, st) do
     {x, y} =
       if st.line == [],
-        do: {st.margin + st.left, st.y + st.gap},
+        do: {st.margin + st.left, st.y + st.gap + st.ngap},
         else: {st.x, st.y}
 
     push_pos(st, %{x: x, y: y, w: max(st.width - st.margin - st.right - x, 0), h: nil})
@@ -1617,7 +1621,7 @@ defmodule Browser.Layout do
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
-  defp apply_gap(st), do: %{st | y: st.y + st.gap, gap: 0}
+  defp apply_gap(st), do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0}
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
   # wrapping to a new line if it doesn't fit.
@@ -1683,7 +1687,9 @@ defmodule Browser.Layout do
       end
 
     left = st.left + ml
-    rest = max(avail - ml - box_w, 0)
+    # a negative margin lets the box reach into the space beside it
+    rest = avail - ml - box_w
+    rest = if ml0 < 0 or mr0 < 0, do: rest, else: max(rest, 0)
     x = st.margin + left
 
     box = %{
@@ -1965,7 +1971,7 @@ defmodule Browser.Layout do
 
     {static_x, static_y} =
       if st.line == [],
-        do: {st.margin + st.left, st.y + st.gap},
+        do: {st.margin + st.left, st.y + st.gap + st.ngap},
         else: {st.x, st.y}
 
     left = resolve_h(spec.left, cw)
@@ -2173,7 +2179,7 @@ defmodule Browser.Layout do
   # (bottom of the last text line, or the bottom edge if there is no text).
   defp layout_atom(st, sub, width) do
     sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
-    height = sub_st.y + sub_st.gap
+    height = sub_st.y + sub_st.gap + sub_st.ngap
     items = finalize(sub_st)
     {items, height, last_baseline(items, height)}
   end
@@ -2599,6 +2605,7 @@ defmodule Browser.Layout do
     else
       own =
         c
+        |> resolve_box_pct(containing_width())
         |> Map.drop(~w(width min-width max-width flex-basis))
         |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
         |> Map.merge(extra_props)
@@ -3000,6 +3007,7 @@ defmodule Browser.Layout do
   defp build_cell(tag, attrs, kids, c, style, props) do
     own =
       c
+      |> resolve_box_pct(containing_width())
       |> Map.drop(~w(width min-width max-width height))
       |> Map.merge(%{
         "margin-left" => 0.0,
@@ -3321,6 +3329,21 @@ defmodule Browser.Layout do
   end
 
   # -- percentage margins and padding -------------------------------------------------------
+
+  @box_props ~w(margin-top margin-right margin-bottom margin-left
+                padding-top padding-right padding-bottom padding-left)
+
+  # A box laid out on its own (inline-block, float, flex item, cell) is built with a new
+  # reference width for its children, but its own percentage margins and padding refer to
+  # the width outside it: turn them into px before that changes.
+  defp resolve_box_pct(c, outer) do
+    Enum.reduce(@box_props, c, fn key, acc ->
+      case acc[key] do
+        {:pct, f} -> Map.put(acc, key, f * outer * 1.0)
+        _ -> acc
+      end
+    end)
+  end
 
   defp sized_by({:pct, f}, outer), do: round(f * outer)
   defp sized_by(w, _outer) when is_number(w), do: round(w)

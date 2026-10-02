@@ -927,13 +927,22 @@ defmodule Browser.Style do
   # left/right margins keep `auto` (used for centering); top/bottom auto is zero
   defp typed(prop, "auto", _env, _pc) when prop in ~w(margin-left margin-right), do: {:ok, :auto}
 
+  # margins may be negative: they pull a box over its neighbours or out of its container
   defp typed(prop, v, env, _pc)
-       when prop in ~w(margin-top margin-bottom margin-left margin-right
-                       padding-top padding-bottom padding-left padding-right) do
+       when prop in ~w(margin-top margin-bottom margin-left margin-right) do
     cond do
       v == "auto" -> {:ok, 0.0}
-      px = length(v, env) -> {:ok, max(px, 0.0)}
+      px = length(v, env) -> {:ok, px}
       # a percentage is of the containing block's width, known only to layout
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> :skip
+    end
+  end
+
+  defp typed(prop, v, env, _pc)
+       when prop in ~w(padding-top padding-bottom padding-left padding-right) do
+    cond do
+      px = length(v, env) -> {:ok, max(px, 0.0)}
       pct = percentage(v) -> {:ok, {:pct, max(pct, 0.0)}}
       true -> :skip
     end

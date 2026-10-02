@@ -392,6 +392,15 @@ defmodule Browser.StyleTest do
       assert c["width"] == {:pct, 0.25}
     end
 
+    test "margins may be negative, padding may not" do
+      css = "div { margin: -4px -10% 0 -1rem; padding: -3px 2px }"
+      c = computed_of(prune("<div>x</div>", css), "div")
+      assert c["margin-top"] == -4.0 and c["margin-left"] == -16.0
+      assert c["margin-right"] == {:pct, -0.1}
+      assert c["padding-top"] == 0.0
+      assert c["padding-left"] == 2.0
+    end
+
     test "percentage margins and padding are kept as shares" do
       css = "div { margin: 0 3%; padding: 10% 5% }"
       c = computed_of(prune("<div>x</div>", css), "div")

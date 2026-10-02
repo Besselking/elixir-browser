@@ -461,7 +461,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats margins) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -2981,6 +2981,13 @@ defmodule Browser.LayoutTest do
       assert wx(items, "ab").x == 4 + 10
     end
 
+    test "a float's own percentage padding refers to its container, not to itself" do
+      html = ~s|<div style="float:left;width:50%;padding-left:10%;background:#eee">ab</div>|
+      {items, _} = pct(html)
+      # 10% of the 400px container, not of the 200px float
+      assert wx(items, "ab").x == 4 + 40
+    end
+
     test "flex items and table cells" do
       {items, _} = pct(~s|<div style="display:flex"><div style="padding-left:5%">ab</div></div>|)
       assert wx(items, "ab").x == 4 + 20
@@ -3000,6 +3007,138 @@ defmodule Browser.LayoutTest do
     test "negative-looking and zero values do not break" do
       {items, _} = pct(~s|<div style="padding:0%;margin:0%">ab</div>|)
       assert wx(items, "ab").x == 4
+    end
+  end
+
+  describe "negative margins" do
+    alias Browser.Page
+
+    defp neg(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp nw(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "a negative top margin pulls the next block up" do
+      {plain, _} = neg(~s|<p>a</p><p>b</p>|)
+      {pulled, _} = neg(~s|<p>a</p><p style="margin-top:-10px">b</p>|)
+      assert nw(pulled, "b").y == nw(plain, "b").y - 10
+    end
+
+    test "a negative bottom margin pulls what follows up" do
+      {plain, _} = neg(~s|<p>a</p><p>b</p>|)
+      {pulled, _} = neg(~s|<p style="margin-bottom:-6px">a</p><p>b</p>|)
+      assert nw(pulled, "b").y == nw(plain, "b").y - 6
+    end
+
+    test "a negative margin adds to the positive one it meets" do
+      {plain, _} = neg(~s|<p>a</p><p>b</p>|)
+      {mixed, _} = neg(~s|<p style="margin-bottom:20px">a</p><p style="margin-top:-8px">b</p>|)
+      assert nw(mixed, "b").y == nw(plain, "b").y + 12
+    end
+
+    test "two negative margins: the more negative wins" do
+      {plain, _} = neg(~s|<p>a</p><p>b</p>|)
+      {both, _} = neg(~s|<p style="margin-bottom:-4px">a</p><p style="margin-top:-9px">b</p>|)
+      assert nw(both, "b").y == nw(plain, "b").y - 9
+    end
+
+    test "a negative margin-left moves a block left" do
+      {items, _} =
+        neg(~s|<div style="padding-left:30px"><div style="margin-left:-20px">ab</div></div>|)
+
+      assert nw(items, "ab").x == 4 + 30 - 20
+    end
+
+    test "a negative margin-right makes a block wider" do
+      {items, _} =
+        neg(
+          ~s|<div style="width:300px"><div style="margin-right:-50px;background:#eee">ab</div></div>|
+        )
+
+      [r] = Enum.filter(items, &(&1.type == :rect))
+      assert r.w == 350
+    end
+
+    test "negative margins on both sides make a block wider than its container" do
+      {items, _} =
+        neg(
+          ~s|<div style="padding:0 20px"><div style="margin:0 -20px;background:#eee">ab</div></div>|
+        )
+
+      [r] = Enum.filter(items, &(&1.type == :rect))
+      assert r.x == 4 and r.w == 400
+    end
+
+    test "text in a block with negative side margins wraps at its wider width" do
+      words = String.duplicate("word ", 20)
+
+      {wide, _} =
+        neg(~s|<div style="padding:0 40px"><div style="margin:0 -40px">#{words}</div></div>|)
+
+      {narrow, _} = neg(~s|<div style="padding:0 40px"><div>#{words}</div></div>|)
+
+      lines = fn items ->
+        items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq() |> length()
+      end
+
+      assert lines.(wide) < lines.(narrow)
+    end
+
+    test "negative margins from calc and variables (Tailwind's -mt-4)" do
+      css = "<style>.m{--spacing:.25rem;margin-top:calc(var(--spacing)*-4)}</style>"
+      {plain, _} = neg(css <> ~s|<p>a</p><p>b</p>|)
+      {pulled, _} = neg(css <> ~s|<p>a</p><p class="m">b</p>|)
+      assert nw(pulled, "b").y == nw(plain, "b").y - 16
+    end
+
+    test "a negative percentage" do
+      {items, _} =
+        neg(~s|<div style="padding-left:100px"><div style="margin-left:-10%">ab</div></div>|)
+
+      # 10% of the container's content width: 400 less its 100px padding
+      assert nw(items, "ab").x == 4 + 100 - 30
+    end
+
+    test "padding is never negative" do
+      {items, _} = neg(~s|<div style="padding-left:-20px">ab</div>|)
+      assert nw(items, "ab").x == 4
+    end
+
+    test "flex items with negative margins overlap their neighbours" do
+      html =
+        ~s|<div style="display:flex"><div>ab</div><div style="margin-left:-8px">cd</div></div>|
+
+      {items, _} = neg(html)
+      assert nw(items, "cd").x == nw(items, "ab").x + 16 - 8
+    end
+
+    test "a floated box with a negative margin overlaps what is beside it" do
+      html =
+        ~s|<div style="float:left;width:50px;height:20px;margin-right:-10px;background:#ccc"></div><p>text</p>|
+
+      {items, _} = neg(html)
+      assert nw(items, "text").x == 4 + 50 - 10
+    end
+
+    test "an image with a negative margin" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><img src="a.png" width="20" height="10" style="margin-left:-5px">|,
+          "about:home"
+        )
+
+      {items, _} =
+        Layout.layout(page.nodes, 408, &measure/2, 600, images: %{"about:a.png" => {:ok, 20, 10}})
+
+      assert [%{x: x}] = Enum.filter(items, &(&1.type == :image))
+      assert x == 4 - 5
+    end
+
+    test "the page height does not go below zero for a pulled-up first block" do
+      {_, h} = neg(~s|<p style="margin-top:-30px">a</p>|)
+      assert h >= 0
     end
   end
 end
