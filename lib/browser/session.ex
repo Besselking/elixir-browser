@@ -29,6 +29,8 @@ defmodule Browser.Session do
       page: nil,
       nodes: [],
       items: [],
+      # links indexed by band (UI.links/1), so hover needn't scan every item
+      links: %{},
       controls: %{},
       # decoded pictures by url: {:ok, width, height} or :failed
       images: %{},
@@ -199,7 +201,7 @@ defmodule Browser.Session do
       nil ->
         state = if state.focus, do: blur(state), else: state
 
-        case UI.link_at(state.items, x, py) do
+        case UI.link_at(state.links, x, py) do
           nil -> {:noreply, state}
           href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
         end
@@ -211,7 +213,7 @@ defmodule Browser.Session do
 
   def handle_info(wx(event: wxMouse(type: :motion, x: x, y: y)), state) do
     py = y + state.scroll
-    href = UI.link_at(state.items, x, py)
+    href = UI.link_at(state.links, x, py)
 
     kind =
       case UI.control_at(state.controls, x, py) do
@@ -632,6 +634,7 @@ defmodule Browser.Session do
       | items: items,
         height: height,
         width: width,
+        links: UI.links(items),
         controls: Layout.controls(items)
     }
 
@@ -660,8 +663,17 @@ defmodule Browser.Session do
            focus_option(state),
            state.measure
          ) do
-      {:ok, items} -> scroll_by(%{state | items: items}, 0)
-      :error -> relayout(state)
+      {:ok, items} ->
+        # field items are never links, unless the field sits inside one
+        links =
+          if Enum.any?(state.links, fn {_, its} -> Enum.any?(its, &(&1[:cid] == control.cid)) end),
+             do: UI.links(items),
+             else: state.links
+
+        scroll_by(%{state | items: items, links: links}, 0)
+
+      :error ->
+        relayout(state)
     end
   end
 

@@ -654,15 +654,37 @@ defmodule Browser.UI do
 
   # -- hit testing -------------------------------------------------------------
 
-  def link_at(items, x, y) do
-    Enum.find_value(items, fn
-      %{type: type, href: href} = it when type in [:text, :image, :svg] and is_binary(href) ->
-        if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: href
+  @link_band 64
 
-      _ ->
-        nil
+  @doc """
+  Indexes the links of a laid out page by horizontal band, so `link_at/3` looks at the few
+  links near the pointer instead of every item. Each band keeps its links in paint order.
+  """
+  def links(items) do
+    items
+    |> Enum.reduce(%{}, fn
+      %{type: type, href: href} = it, acc
+      when type in [:text, :image, :svg] and is_binary(href) ->
+        first = band(it.y)
+        last = band(it.y + it.h + 4)
+        Enum.reduce(first..last//1, acc, fn b, acc -> Map.update(acc, b, [it], &[it | &1]) end)
+
+      _, acc ->
+        acc
+    end)
+    |> Map.new(fn {b, its} -> {b, Enum.reverse(its)} end)
+  end
+
+  @doc "The href of the first link in the index `links` (see `links/1`) at page position `{x, y}`, or nil."
+  def link_at(links, x, y) do
+    links
+    |> Map.get(band(y), [])
+    |> Enum.find_value(fn it ->
+      if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: it.href
     end)
   end
+
+  defp band(y), do: floor(y / @link_band)
 
   defp inside?(px, py, x, y, w, h), do: px >= x and px <= x + w and py >= y and py <= y + h
 
