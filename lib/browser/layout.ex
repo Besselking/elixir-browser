@@ -2388,7 +2388,7 @@ defmodule Browser.Layout do
 
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
-  defp shrink_extent(st, sub, width, key \\ nil) do
+  defp shrink_extent(st, sub, width, key) do
     memo({:extent, key || :erlang.phash2(sub), width}, fn ->
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
       max(sub_st |> finalize() |> extent(), sub_st.ext)
