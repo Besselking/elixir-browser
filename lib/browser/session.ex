@@ -14,6 +14,8 @@ defmodule Browser.Session do
   alias Browser.{Fetch, Forms, History, Images, Interact, Layout, Page, TextEdit, UI}
 
   @blink_ms 530
+  # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
+  @wheel_line 40
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   def navigate(url), do: GenServer.cast(__MODULE__, {:navigate, url})
@@ -37,6 +39,8 @@ defmodule Browser.Session do
       layout_timer: nil,
       height: 0,
       scroll: 0,
+      # sub-pixel remainder of precise wheel input, carried to the next event
+      wheel_rem: 0.0,
       width: UI.client_width(ui),
       nonce: 0,
       hover: {nil, :arrow},
@@ -230,8 +234,14 @@ defmodule Browser.Session do
     {:noreply, %{state | hover: {href, kind}}}
   end
 
-  def handle_info(wx(event: wxMouse(type: :mousewheel, wheelRotation: rot)), state),
-    do: {:noreply, scroll_by(state, -rot)}
+  def handle_info(wx(event: wxMouse(type: :mousewheel) = ev), state) do
+    # a trackpad or momentum flick delivers dozens of events a second: fold every wheel event
+    # already queued into this one so a burst costs one scroll and one repaint
+    {rot, state} = drain_wheel(wheel_rotation(ev), state)
+    px = state.wheel_rem - rot
+    whole = trunc(px)
+    {:noreply, scroll_by(%{state | wheel_rem: px - whole}, whole)}
+  end
 
   def handle_info(wx(event: wxSize(size: {w, _})), state) do
     cond do
@@ -728,6 +738,20 @@ defmodule Browser.Session do
         else: set_form_state(state, Forms.put(state.page.form_state, control.cid, scroll: scroll))
     else
       _ -> state
+    end
+  end
+
+  # one notch is `wheelDelta` rotation units and scrolls `linesPerAction` lines; precision
+  # devices (macOS trackpads, momentum) send many small fractions of a notch
+  defp wheel_rotation(wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)) do
+    rot / max(delta, 1) * max(lines, 1) * @wheel_line
+  end
+
+  defp drain_wheel(acc, state) do
+    receive do
+      wx(event: wxMouse(type: :mousewheel) = ev) -> drain_wheel(acc + wheel_rotation(ev), state)
+    after
+      0 -> {acc, state}
     end
   end
 
