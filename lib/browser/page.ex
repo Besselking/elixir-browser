@@ -26,7 +26,11 @@ defmodule Browser.Page do
     # whether styles use vw/vh units: then the window size is part of the cascade
     viewport_units: false,
     svg_defs: %{},
-    fixed_width: MapSet.new()
+    fixed_width: MapSet.new(),
+    # the cascade for the window sizes seen so far, by media key: resizing back is free
+    style_cache: %{},
+    # changes whenever the page is rebuilt or re-rendered, so a copy can be told from the original
+    ver: nil
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
@@ -143,10 +147,29 @@ defmodule Browser.Page do
     if key == page.key and page.nodes != nil do
       page
     else
-      index = Style.index_rules(page.rules, env)
-      pruned = Style.prune(page.raw, index)
-      defs = Browser.Svg.defs(page.raw, pruned)
-      page = %{page | key: key, pruned: pruned, svg_defs: defs, fixed_width: fixed_width(pruned)}
+      {pruned, defs, fixed, cache} =
+        case page.style_cache do
+          %{^key => {pruned, defs, fixed}} ->
+            {pruned, defs, fixed, page.style_cache}
+
+          cache ->
+            index = Style.index_rules(page.rules, env)
+            pruned = Style.prune(page.raw, index)
+            defs = Browser.Svg.defs(page.raw, pruned)
+            fixed = fixed_width(pruned)
+            cache = if map_size(cache) >= 4, do: %{}, else: cache
+            {pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed})}
+        end
+
+      page = %{
+        page
+        | key: key,
+          pruned: pruned,
+          svg_defs: defs,
+          fixed_width: fixed,
+          style_cache: cache
+      }
+
       render(page, page.form_state)
     end
   end
@@ -202,7 +225,7 @@ defmodule Browser.Page do
   """
   def render(%__MODULE__{} = page, form_state) do
     nodes = Forms.render(page.pruned, form_state, page.forms.controls)
-    %{page | form_state: form_state, nodes: nodes}
+    %{page | form_state: form_state, nodes: nodes, ver: make_ref()}
   end
 
   defp fetch_sheets(refs, base) do

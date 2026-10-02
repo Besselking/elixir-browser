@@ -101,6 +101,29 @@ defmodule Browser.PageTest do
     end
   end
 
+  describe "restyling" do
+    @narrow %{type: "screen", width: 500, height: 600, dppx: 1.0}
+    @wide %{type: "screen", width: 1000, height: 600, dppx: 1.0}
+    @html "<style>@media (min-width: 800px) { p { color: red } }</style><p>x</p>"
+
+    test "a size seen before comes from the cache with the same result" do
+      narrow = Page.build(@html, @url, @narrow)
+      wide = Page.restyle(narrow, @wide)
+      assert map_size(wide.style_cache) == 2
+      back = Page.restyle(wide, @narrow)
+      assert back.nodes == narrow.nodes
+      assert Page.restyle(back, @wide).nodes == wide.nodes
+      assert map_size(back.style_cache) == 2
+    end
+
+    test "every render is a new version of the page" do
+      page = Page.build(@html, @url, @narrow)
+      assert page.ver != nil
+      assert Page.render(page, page.form_state).ver != page.ver
+      assert Page.restyle(page, @wide).ver != page.ver
+    end
+  end
+
   describe "viewport units" do
     defp page_height(page), do: div_height(page.nodes)
 

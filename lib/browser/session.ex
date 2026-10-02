@@ -147,7 +147,8 @@ defmodule Browser.Session do
         menu: nil
       })
 
-    {:noreply, state |> relayout() |> sync_buttons() |> start_images()}
+    # the pictures download while the page is being laid out
+    {:noreply, state |> start_images() |> relayout() |> sync_buttons()}
   end
 
   # -- images arriving -------------------------------------------------------
@@ -448,7 +449,7 @@ defmodule Browser.Session do
     state = %{state | layout_job: nil}
 
     state =
-      if state.page == base do
+      if state.page.ver == base do
         state = fit_scroll(%{state | page: page, nodes: page.nodes})
         apply_layout(state, items, height, width, :full)
       else
@@ -1065,20 +1066,24 @@ defmodule Browser.Session do
     images = state.images
     measure = state.measure_bg
 
-    {:ok, pid} =
-      Task.start(fn ->
-        :wx.set_env(wx_env)
-        page = Page.restyle(base, env)
+    # a layout allocates a lot: a big initial heap saves it growing the heap by many collections
+    pid =
+      :erlang.spawn_opt(
+        fn ->
+          :wx.set_env(wx_env)
+          page = Page.restyle(base, env)
 
-        {items, height} =
-          Layout.layout(page.nodes, width, measure, view_h,
-            focus: focus,
-            images: images,
-            svg_defs: page.svg_defs
-          )
+          {items, height} =
+            Layout.layout(page.nodes, width, measure, view_h,
+              focus: focus,
+              images: images,
+              svg_defs: page.svg_defs
+            )
 
-        send(me, {:layout_done, ref, base, page, items, height, width})
-      end)
+          send(me, {:layout_done, ref, base.ver, page, items, height, width})
+        end,
+        min_heap_size: 2_000_000
+      )
 
     %{state | layout_job: {ref, pid}}
   end

@@ -509,6 +509,7 @@ defmodule Browser.Layout do
         sub = [] |> ops.() |> Enum.reverse()
 
         spec = %{
+          key: make_ref(),
           width: nil,
           minw: nil,
           maxw: nil,
@@ -597,6 +598,7 @@ defmodule Browser.Layout do
       border_box? = c["box-sizing"] == "border-box"
 
       spec = %{
+        key: make_ref(),
         top: c["top"],
         left: c["left"],
         right: c["right"],
@@ -807,6 +809,7 @@ defmodule Browser.Layout do
       end)
 
     spec = %{
+      key: make_ref(),
       width: dim(c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
@@ -1292,7 +1295,20 @@ defmodule Browser.Layout do
   defp put_if(style, false, _fun), do: style
   defp put_if(style, value, fun), do: fun.(style, value)
 
+  # every element restyles with its family string, and there are only a few distinct ones
   defp mono?(family) do
+    case Process.get({:mono, family}) do
+      nil ->
+        mono = mono_family?(family)
+        Process.put({:mono, family}, if(mono, do: :yes, else: :no))
+        mono
+
+      cached ->
+        cached == :yes
+    end
+  end
+
+  defp mono_family?(family) do
     family
     |> String.split(",")
     |> Enum.map(
@@ -1491,7 +1507,7 @@ defmodule Browser.Layout do
     st = st |> flush() |> apply_gap()
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _base} = layout_atom(st, sub, w)
+    {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
     {x, y} = place_float(st, side, w, height)
     moved = for item <- items, do: item |> move(x, y) |> adopt_sticky(st)
     float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
@@ -1574,7 +1590,7 @@ defmodule Browser.Layout do
   defp op({:inline_block, sub, spec, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, base} = layout_atom(st, sub, w)
+    {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key))
 
     place_atom(st, %{
       w: w,
@@ -2331,7 +2347,7 @@ defmodule Browser.Layout do
           if left && right do
             avail
           else
-            min(avail, shrink_extent(st, sub, avail) + spec.rextra)
+            min(avail, shrink_extent(st, sub, avail, Map.get(spec, :key)) + spec.rextra)
           end
 
         w ->
@@ -2361,7 +2377,7 @@ defmodule Browser.Layout do
       case resolve(spec.width, avail) do
         nil ->
           measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
-          min(avail, shrink_extent(st, sub, measure_at))
+          min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
 
         w ->
           w + spec.extra + spec.mextra
@@ -2560,8 +2576,16 @@ defmodule Browser.Layout do
   # Atoms with `vertical-align: top | bottom | middle` are placed afterwards
   # against the finished line, which they can only make taller.
   defp flush(st) do
-    {atoms, texts} = Enum.split_with(st.line, &(&1.type == :atom))
-    {floating, on_baseline} = Enum.split_with(atoms, &(&1.valign in ["top", "bottom", "middle"]))
+    # most lines are words only
+    {atoms, texts} =
+      if Enum.any?(st.line, &(&1.type == :atom)),
+        do: Enum.split_with(st.line, &(&1.type == :atom)),
+        else: {[], st.line}
+
+    {floating, on_baseline} =
+      if atoms == [],
+        do: {[], []},
+        else: Enum.split_with(atoms, &(&1.valign in ["top", "bottom", "middle"]))
 
     # `normal` height of the biggest text, and the height line-height gives the
     # line; the glyphs sit centred in the line, i.e. shifted by half the difference
@@ -3341,10 +3365,11 @@ defmodule Browser.Layout do
           }
 
           props = if ts.collapse?, do: collapse_borders(props, p, ncols, nrows), else: props
-          # a plain cell that starts at the top looks the same at its final height
+          # a plain cell looks the same at its final height, just lower when it is centred or
+          # at the bottom
           items =
-            if p.cell.plain and extra_top == 0 and not ts.collapse? do
-              p.items0
+            if p.cell.plain and not ts.collapse? do
+              if extra_top == 0, do: p.items0, else: Enum.map(p.items0, &move(&1, 0, extra_top))
             else
               {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
               items

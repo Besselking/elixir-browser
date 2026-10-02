@@ -4,6 +4,9 @@ defmodule Browser.Application do
 
   @impl true
   def start(_type, _args) do
+    # the default is two connections per host, which is what a page full of images waits on
+    :httpc.set_options(max_sessions: 8, max_keep_alive_length: 20)
+
     children =
       [Browser.HttpCache] ++
         if Application.get_env(:browser, :gui, true) do
