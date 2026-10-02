@@ -4,7 +4,7 @@ defmodule Browser.Page do
   references, cascade and prune. Runs in a task, never in the UI process.
   """
 
-  alias Browser.{Fetch, Forms, HTML, Images, Layout, Style}
+  alias Browser.{Fetch, Forms, HTML, Images, Layout, Prefetch, Style}
 
   @max_sheets 24
   @sheet_timeout 10_000
@@ -35,7 +35,11 @@ defmodule Browser.Page do
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
   def load(url, env \\ Style.default_env(), fetch_opts \\ []) do
-    case Fetch.load(url, fetch_opts) do
+    Prefetch.reset()
+
+    on_chunk = fn chunk, from -> Prefetch.feed(chunk, from, &allowed?(from, &1)) end
+
+    case Fetch.load(url, [on_chunk: on_chunk] ++ fetch_opts) do
       {:ok, body, final} -> {:ok, build(document(body, final), final, env)}
       {:error, _} = err -> err
     end
@@ -228,8 +232,11 @@ defmodule Browser.Page do
     %{page | form_state: form_state, nodes: nodes, ver: make_ref()}
   end
 
+  # Sheets `Browser.Prefetch` started while the HTML arrived are collected here, in the
+  # process that received it; the rest are fetched in parallel now.
   defp fetch_sheets(refs, base) do
     refs
+    |> Enum.map(&prefetched(&1, base))
     |> Task.async_stream(&sheet(&1, base),
       max_concurrency: 8,
       timeout: @sheet_timeout,
@@ -242,7 +249,20 @@ defmodule Browser.Page do
     end)
   end
 
+  defp prefetched({:link, href} = ref, base) do
+    url = Fetch.resolve(base, href)
+
+    case Prefetch.take(url, @sheet_timeout) do
+      :none -> ref
+      result -> {:prefetched, result}
+    end
+  end
+
+  defp prefetched(ref, _base), do: ref
+
   defp sheet({:style, css}, base), do: {css, base}
+  defp sheet({:prefetched, {:ok, css, final}}, _base), do: {css, final}
+  defp sheet({:prefetched, _}, _base), do: nil
 
   defp sheet({:link, href}, base) do
     url = Fetch.resolve(base, href)
