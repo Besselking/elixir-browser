@@ -198,7 +198,7 @@ defmodule Browser.Layout do
   """
   def controls(items) do
     items
-    |> Enum.filter(&(Map.get(&1, :cid) != nil and &1.type in [:rect, :text]))
+    |> Enum.filter(&(Map.get(&1, :cid) != nil and &1.type in [:rect, :box, :text]))
     |> Enum.group_by(& &1.cid)
     |> Map.new(fn {cid, its} -> {cid, bounds(its)} end)
   end
@@ -212,7 +212,7 @@ defmodule Browser.Layout do
   end
 
   defp bounds(items) do
-    case Enum.filter(items, &(&1.type == :rect)) do
+    case Enum.filter(items, &(&1.type in [:rect, :box])) do
       [] ->
         x0 = items |> Enum.map(& &1.x) |> Enum.min()
         y0 = items |> Enum.map(& &1.y) |> Enum.min()
@@ -1458,7 +1458,13 @@ defmodule Browser.Layout do
           rounded(x, y, w, height, o.bg, radii, o.bw, o.bc)
       end
 
-    shadows ++ body
+    # a control without background or border still has a box: keep it for its bounds
+    marker =
+      if o.cid && body == [] && w > 0 && height > 0,
+        do: [%{type: :box, x: x, y: y, w: w, h: height}],
+        else: []
+
+    shadows ++ body ++ marker
   end
 
   # the box around all of a shadow's layers, so it is drawn whenever any of it is visible

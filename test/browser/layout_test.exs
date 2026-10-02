@@ -2119,4 +2119,20 @@ defmodule Browser.LayoutTest do
       end
     end
   end
+
+  describe "control bounds" do
+    alias Browser.Page
+
+    test "a field without background or border still has its full box" do
+      html =
+        ~s|<style>body{margin:0} input{display:block;width:100%;border:none;padding:0;background:none}</style>| <>
+          ~s|<input type="text" value="">|
+
+      page = Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600)
+      [bounds] = Map.values(Layout.controls(items))
+      assert bounds.w >= 390
+      assert bounds.h > 5
+    end
+  end
 end

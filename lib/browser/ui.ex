@@ -252,6 +252,9 @@ defmodule Browser.UI do
 
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
+  # only marks where a control is
+  defp draw(_dc, %{type: :box}, _y, _scroll), do: :ok
+
   defp draw(dc, %{type: :shadow} = item, _y, scroll) do
     gc = :wxGraphicsContext.create(dc)
     clip_to(gc, item, scroll)
