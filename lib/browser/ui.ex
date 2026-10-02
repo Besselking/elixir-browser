@@ -207,6 +207,27 @@ defmodule Browser.UI do
     end
   end
 
+  @doc """
+  Repaints the pictures at `url` (a picture that has just been decoded) without touching
+  the rest of the panel. `fixed?` items sit at screen positions, not page ones, so with
+  any of those the whole panel is repainted.
+  """
+  def refresh_images(%{panel: panel}, items, url, scroll, fixed?) do
+    pics = Enum.filter(items, &(&1.type == :image and &1.url == url))
+
+    cond do
+      pics == [] ->
+        :ok
+
+      Enum.any?(pics, fixed?) ->
+        :wxWindow.refresh(panel)
+
+      true ->
+        {x, y, w, h} = pics |> Enum.map(&bbox/1) |> Enum.reduce(&union/2)
+        :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
+    end
+  end
+
   # bounding box (page coordinates) of what differs between two item lists, `:none` if
   # nothing, `:full` when the lists can't be compared item by item
   defp diff_items([same | old], [same | new], flip?, acc) do

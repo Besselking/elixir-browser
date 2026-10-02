@@ -37,6 +37,16 @@ defmodule Browser.ImageBox do
     {round(max(w, 0)), round(max(h, 0))}
   end
 
+  @doc """
+  True when `size/4` does not depend on the picture's own size: both dimensions are given
+  by the attributes or by CSS, so the box is the same before and after the picture loads.
+  """
+  @spec fixed?(map, map) :: boolean
+  def fixed?(attrs, css) do
+    spec(css[:w], width(css[:w], 1), attrs[:w]) != nil and
+      spec(css[:h], px(css[:h]), attrs[:h]) != nil
+  end
+
   # CSS wins over the attributes; an explicit `auto` switches the attribute off
   defp spec(:auto, _css, _attr), do: nil
   defp spec(_declared, css, attr), do: css || attr

@@ -80,4 +80,13 @@ defmodule Browser.ImageBoxTest do
     assert size({0, 0}, %{w: 50}) == {50, 0}
     assert size({100, 0}, %{h: 20}) == {100, 20}
   end
+
+  test "fixed?: both dimensions given, by attributes or css" do
+    assert ImageBox.fixed?(%{w: 5, h: 5}, %{})
+    assert ImageBox.fixed?(%{w: 5}, %{h: 7.0})
+    assert ImageBox.fixed?(%{}, %{w: {:pct, 0.5}, h: 7.0})
+    refute ImageBox.fixed?(%{w: 5}, %{})
+    refute ImageBox.fixed?(%{w: 5, h: 5}, %{h: :auto})
+    refute ImageBox.fixed?(%{}, %{})
+  end
 end

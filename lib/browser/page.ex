@@ -203,6 +203,10 @@ defmodule Browser.Page do
   def all_image_urls(%__MODULE__{} = page),
     do: Enum.uniq(page.image_urls ++ background_urls(page.pruned || []))
 
+  @doc "True when a style of the page uses `url` as a background image."
+  def background_url?(%__MODULE__{pruned: pruned}, url),
+    do: url in background_urls(pruned || [])
+
   defp background_urls(nodes) do
     Enum.flat_map(nodes, fn
       {:element, _tag, attrs, kids} ->

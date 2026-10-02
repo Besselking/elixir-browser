@@ -174,15 +174,31 @@ defmodule Browser.Session do
           :failed
       end
 
-    {:noreply, state |> put_in([:images, url], info) |> schedule_image_layout()}
+    state = put_in(state, [:images, url], info)
+
+    cond do
+      # the layout that is running picks up (or checks) the picture when it is done
+      state.layout_job != nil ->
+        {:noreply, state}
+
+      image_layout_needed?(state.page, url, info) ->
+        {:noreply, schedule_image_layout(state)}
+
+      true ->
+        # every <img> showing it already has its final box: only the picture is missing
+        UI.refresh_images(state.ui, state.items, url, state.scroll, &moved_on_screen?/1)
+        {:noreply, state}
+    end
   end
 
   def handle_info({:image, _stale, _url, _result}, state), do: {:noreply, state}
 
   # a fetch that was killed on timeout never reports, so mark what is still missing
   def handle_info({:images_done, nonce, urls}, %{nonce: nonce} = state) do
-    images = Enum.reduce(urls, state.images, &Map.put_new(&2, &1, :failed))
-    {:noreply, schedule_image_layout(%{state | images: images})}
+    missing = Enum.reject(urls, &Map.has_key?(state.images, &1))
+    images = Enum.reduce(missing, state.images, &Map.put(&2, &1, :failed))
+    state = %{state | images: images}
+    {:noreply, if(missing == [], do: state, else: schedule_image_layout(state))}
   end
 
   def handle_info({:images_done, _stale, _urls}, state), do: {:noreply, state}
@@ -451,7 +467,7 @@ defmodule Browser.Session do
   # The page is restyled and laid out for the new size in a process of its own, so the window
   # keeps answering (and a further resize just throws the work away) while a big page lays out.
   def handle_info(
-        {:layout_done, ref, base, page, items, height, width},
+        {:layout_done, ref, base, page, items, height, width, used},
         %{layout_job: {ref, _}} = state
       ) do
     state = %{state | layout_job: nil}
@@ -459,7 +475,14 @@ defmodule Browser.Session do
     state =
       if state.page.ver == base do
         state = fit_scroll(%{state | page: page, nodes: page.nodes})
-        apply_layout(state, items, height, width, :full)
+        state = apply_layout(state, items, height, width, :full)
+        # pictures that arrived while it ran: it laid them out as still loading, which
+        # is right when their boxes do not depend on them
+        late = for {url, info} <- state.images, Map.get(used, url) != info, do: {url, info}
+
+        if Enum.any?(late, fn {url, info} -> image_layout_needed?(page, url, info) end),
+          do: schedule_image_layout(state),
+          else: state
       else
         # the page changed meanwhile (typing, a new page): the result is stale
         relayout(state)
@@ -469,7 +492,7 @@ defmodule Browser.Session do
     {:noreply, start_images(state)}
   end
 
-  def handle_info({:layout_done, _stale, _, _, _, _, _}, state), do: {:noreply, state}
+  def handle_info({:layout_done, _stale, _, _, _, _, _, _}, state), do: {:noreply, state}
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
@@ -1011,6 +1034,15 @@ defmodule Browser.Session do
     state
   end
 
+  # A decoded bitmap whose <img> boxes do not depend on its size (and that no style uses
+  # as a background) only needs repainting. Anything else, a failed picture included,
+  # changes the page.
+  defp image_layout_needed?(%Page{} = page, url, {:ok, _, _}) do
+    not (Layout.image_size_fixed?(page.nodes, url) and not Page.background_url?(page, url))
+  end
+
+  defp image_layout_needed?(_page, _url, _info), do: true
+
   defp schedule_image_layout(%{layout_timer: nil} = state) do
     ref = make_ref()
     Process.send_after(self(), {:image_layout, ref}, 60)
@@ -1088,7 +1120,7 @@ defmodule Browser.Session do
               svg_defs: page.svg_defs
             )
 
-          send(me, {:layout_done, ref, base.ver, page, items, height, width})
+          send(me, {:layout_done, ref, base.ver, page, items, height, width, images})
         end,
         min_heap_size: 2_000_000
       )
