@@ -110,14 +110,32 @@ defmodule Browser.UI do
     end
   end
 
-  @doc "Returns a `(text, style) -> width` function backed by a wx client DC."
+  # widths cached per font; each uncached measurement is two synchronous wx calls
+  # (~100us), and a relayout asks for the same text hundreds of times
+  @measure_cache_limit 50_000
+
+  @doc """
+  Returns a `(text, style) -> width` function backed by a wx client DC. Widths are
+  memoized (in the calling process), so only text that changed costs a wx round trip.
+  """
   def measurer(%{panel: panel}) do
     dc = :wxClientDC.new(panel)
+    cache = :ets.new(:measure_cache, [:set, :private])
 
-    fn text, style ->
-      :wxDC.setFont(dc, font(style))
-      {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
-      w
+    fn text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
+      key = {text, size, bold, italic, mono}
+
+      case :ets.lookup(cache, key) do
+        [{_, w}] ->
+          w
+
+        [] ->
+          :wxDC.setFont(dc, font(style))
+          {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
+          if :ets.info(cache, :size) >= @measure_cache_limit, do: :ets.delete_all_objects(cache)
+          :ets.insert(cache, {key, w})
+          w
+      end
     end
   end
 
