@@ -667,12 +667,13 @@ defmodule Browser.Session do
         # field items are never links, unless the field sits inside one
         links =
           if Enum.any?(state.links, fn {_, its} -> Enum.any?(its, &(&1[:cid] == control.cid)) end),
-            do: UI.links(items),
-            else: state.links
+             do: UI.links(items),
+             else: state.links
 
         scroll_by(%{state | items: items, links: links}, 0)
 
-      :error -> relayout(state)
+      :error ->
+        relayout(state)
     end
   end
 

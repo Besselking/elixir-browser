@@ -663,7 +663,8 @@ defmodule Browser.UI do
   def links(items) do
     items
     |> Enum.reduce(%{}, fn
-      %{type: type, href: href} = it, acc when type in [:text, :image, :svg] and is_binary(href) ->
+      %{type: type, href: href} = it, acc
+      when type in [:text, :image, :svg] and is_binary(href) ->
         first = band(it.y)
         last = band(it.y + it.h + 4)
         Enum.reduce(first..last//1, acc, fn b, acc -> Map.update(acc, b, [it], &[it | &1]) end)
