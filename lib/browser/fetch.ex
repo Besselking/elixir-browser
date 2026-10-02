@@ -85,6 +85,11 @@ defmodule Browser.Fetch do
   GET responses go through `Browser.HttpCache`. `cache:` is `:normal` (the default: use
   fresh entries, revalidate stale ones), `:reload` (always ask the server, revalidating
   with `ETag`/`Last-Modified`) or `:history` (back/forward: use any cached entry).
+
+  `on_chunk:` is a `fn text, url -> any end` called, in the calling process, with each
+  piece of a GET response as it arrives (already gunzipped) and the URL it came from,
+  so a caller can start on a document before it is complete. Cached responses arrive
+  whole and call it never.
   """
   def load(url, opts \\ []) do
     fetch(
@@ -92,7 +97,7 @@ defmodule Browser.Fetch do
       Keyword.get(opts, :method, :get),
       Keyword.get(opts, :body),
       @max_redirects,
-      Keyword.get(opts, :cache, :normal)
+      %{cache: Keyword.get(opts, :cache, :normal), on_chunk: opts[:on_chunk]}
     )
   end
 
@@ -108,22 +113,22 @@ defmodule Browser.Fetch do
 
   defp fetch(_url, _method, _body, 0, _cache), do: {:error, "Too many redirects"}
 
-  defp fetch(url, :get, body, redirects, cache) do
+  defp fetch(url, :get, body, redirects, %{cache: cache} = ctx) do
     case lookup(url, cache) do
       {:fresh, entry} when cache != :reload -> {:ok, entry.body, url}
-      {_, entry} -> request(url, :get, body, redirects, cache, entry)
-      :miss -> request(url, :get, body, redirects, cache, nil)
+      {_, entry} -> request(url, :get, body, redirects, ctx, entry)
+      :miss -> request(url, :get, body, redirects, ctx, nil)
     end
   end
 
-  defp fetch(url, method, body, redirects, cache),
-    do: request(url, method, body, redirects, cache, nil)
+  defp fetch(url, method, body, redirects, ctx),
+    do: request(url, method, body, redirects, ctx, nil)
 
   defp lookup(url, :history), do: HttpCache.lookup(url, use_stale: true)
   defp lookup(url, _), do: HttpCache.lookup(url)
 
   # `entry`: a stale cached response to revalidate, or nil
-  defp request(url, method, body, redirects, cache, entry) do
+  defp request(url, method, body, redirects, ctx, entry) do
     headers =
       [{~c"user-agent", ~c"ElixirBrowser/0.1"}, {~c"accept-encoding", ~c"gzip"}] ++
         if(entry, do: HttpCache.validators(entry), else: [])
@@ -147,7 +152,12 @@ defmodule Browser.Fetch do
       ]
     ]
 
-    case :httpc.request(method, request, http_opts, body_format: :binary) do
+    result =
+      if method == :get and ctx.on_chunk,
+        do: stream_get(request, http_opts, url, ctx.on_chunk),
+        else: :httpc.request(method, request, http_opts, body_format: :binary)
+
+    case result do
       {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
         HttpCache.refresh(entry, headers, url)
         {:ok, entry.body, url}
@@ -158,8 +168,8 @@ defmodule Browser.Fetch do
             next = resolve(url, to_string(loc))
 
             if status in [307, 308],
-              do: fetch(next, method, body, redirects - 1, cache),
-              else: fetch(next, :get, nil, redirects - 1, cache)
+              do: fetch(next, method, body, redirects - 1, ctx),
+              else: fetch(next, :get, nil, redirects - 1, ctx)
 
           nil ->
             {:error, "Redirect without Location"}
@@ -180,6 +190,66 @@ defmodule Browser.Fetch do
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
     end
+  end
+
+  # A GET answered in pieces: each is handed to `on_chunk` (gunzipped on the side) while the
+  # raw body is collected, so the result looks like a plain `:httpc.request` reply.
+  # Anything but a 200 is not streamed by httpc and arrives whole.
+  defp stream_get(request, http_opts, url, on_chunk) do
+    case :httpc.request(:get, request, http_opts,
+           sync: false,
+           stream: :self,
+           body_format: :binary
+         ) do
+      {:ok, ref} -> stream_loop(ref, url, on_chunk, nil, [], nil)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp stream_loop(ref, url, on_chunk, z, acc, headers) do
+    receive do
+      {:http, {^ref, :stream_start, hs}} ->
+        z =
+          case List.keyfind(hs, ~c"content-encoding", 0) do
+            {_, enc} when enc in [~c"gzip", ~c"x-gzip"] ->
+              z = :zlib.open()
+              :zlib.inflateInit(z, 31)
+              z
+
+            _ ->
+              nil
+          end
+
+        stream_loop(ref, url, on_chunk, z, acc, hs)
+
+      {:http, {^ref, :stream, chunk}} ->
+        notify(on_chunk, z, chunk, url)
+        stream_loop(ref, url, on_chunk, z, [acc | chunk], headers)
+
+      {:http, {^ref, :stream_end, hs}} ->
+        z && :zlib.close(z)
+        {:ok, {{~c"HTTP/1.1", 200, ~c"OK"}, headers ++ hs, IO.iodata_to_binary(acc)}}
+
+      {:http, {^ref, {:error, reason}}} ->
+        z && :zlib.close(z)
+        {:error, reason}
+
+      {:http, {^ref, {_status, _headers, _body} = whole}} ->
+        {:ok, whole}
+    after
+      20_000 ->
+        :httpc.cancel_request(ref)
+        z && :zlib.close(z)
+        {:error, :timeout}
+    end
+  end
+
+  defp notify(on_chunk, nil, chunk, url), do: on_chunk.(chunk, url)
+
+  defp notify(on_chunk, z, chunk, url) do
+    on_chunk.(IO.iodata_to_binary(:zlib.inflate(z, chunk)), url)
+  rescue
+    _ -> :ok
   end
 
   # servers send gzip when asked: several times fewer bytes for HTML and CSS
