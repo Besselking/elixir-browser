@@ -194,6 +194,10 @@ defmodule Browser.Session do
     end
   end
 
+  # Quit (Cmd+Q and the application menu's item)
+  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state),
+    do: System.halt(0)
+
   # a choice from the open <select> menu
   def handle_info(wx(id: id, event: wxCommand(type: :command_menu_selected)), state) do
     {:noreply, choose_option(state, id - UI.menu_base())}

@@ -54,7 +54,15 @@ defmodule Browser.UI do
     :wxSizer.add(col, panel, proportion: 1, flag: @expand)
     :wxWindow.setSizer(frame, col)
 
+    # wxID_EXIT is moved into the macOS application menu as "Quit", with Cmd+Q
+    file = :wxMenu.new()
+    :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
+    menubar = :wxMenuBar.new()
+    :wxMenuBar.append(menubar, file, ~c"File")
+    :wxFrame.setMenuBar(frame, menubar)
+
     :wxFrame.connect(frame, :close_window)
+    :wxFrame.connect(frame, :command_menu_selected)
     :wxTextCtrl.connect(url, :command_text_enter)
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
     :wxPanel.connect(panel, :left_down)
