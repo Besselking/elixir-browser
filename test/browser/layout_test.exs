@@ -3190,6 +3190,47 @@ defmodule Browser.LayoutTest do
       assert first.stick.y0 >= 30
     end
 
+    test "absolutely positioned children of a sticky box stick with it" do
+      html =
+        ~s|<div style="position:sticky;top:0;height:60px;background:#eee"><span style="position:absolute;left:50px;top:10px">nav</span>head</div><p>after</p>|
+
+      {items, _} = stk(html)
+      nav = Enum.find(items, &(Map.get(&1, :text) == "nav"))
+      assert nav.stick.top == 0
+      refute Enum.any?(items, &(Map.get(&1, :text) == "after" and Map.has_key?(&1, :stick)))
+    end
+
+    test "a percentage top is resolved against the height of the box once it is known" do
+      html =
+        ~s|<div style="position:sticky;top:0;height:80px;background:#eee"><div style="position:absolute;top:50%;left:0;height:40px;background:#ccc">x</div></div>|
+
+      {items, _} = stk(html)
+      inner = items |> Enum.filter(&(&1.type == :rect and &1.h == 40)) |> hd()
+      # 50% of 80
+      assert inner.y == 40
+    end
+
+    test "centred with translate: top 50% and -50% of its own height" do
+      html =
+        ~s|<div style="position:sticky;top:0;height:80px;background:#eee"><div style="position:absolute;top:50%;left:10px;height:40px;transform:translateY(-50%);background:#ccc">x</div></div>|
+
+      {items, _} = stk(html)
+      inner = items |> Enum.filter(&(&1.type == :rect and &1.h == 40)) |> hd()
+      # 50% of 80, then half of its own 40px back up
+      assert inner.y == 20
+    end
+
+    test "z-index is kept on sticky and fixed items" do
+      html =
+        ~s|<div style="position:sticky;top:0;z-index:40;background:#eee">a</div><div style="position:sticky;top:0;background:#ddd">b</div><div style="position:fixed;top:0;left:0;z-index:7">c</div>|
+
+      {items, _} = stk(html)
+      z = fn text -> items |> Enum.find(&(Map.get(&1, :text) == text)) |> Map.get(:z) end
+      assert z.("a") == 40
+      assert z.("b") == 0
+      assert z.("c") == 7
+    end
+
     test "a sticky box is limited by the bottom of the block it is in" do
       html =
         ~s|<div style="height:300px;background:#eee"><div style="position:sticky;top:0;height:50px">s</div></div><p>after</p>|

@@ -1027,7 +1027,7 @@ defmodule Browser.Session do
         links: UI.links(items),
         controls: Layout.controls(items),
         hit_controls: Layout.controls(Enum.reject(items, &moved_on_screen?/1)),
-        sticky: Enum.filter(items, &moved_on_screen?/1),
+        sticky: items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0)),
         content_w: Layout.content_width(items, width),
         sel: nil,
         sel_anchor: nil,
@@ -1069,7 +1069,7 @@ defmodule Browser.Session do
              do: UI.links(items),
              else: state.links
 
-        sticky = Enum.filter(items, &moved_on_screen?/1)
+        sticky = items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0))
         scroll_by(%{state | items: items, links: links, sticky: sticky}, 0, :diff)
 
       :error ->

@@ -275,6 +275,8 @@ defmodule Browser.UI do
     # sticky and fixed items are drawn last, over the page, shifted by how far the page has scrolled
     {sticky, normal} = Enum.split_with(items, &Map.has_key?(&1, :stick))
 
+    sticky = Enum.sort_by(sticky, &Map.get(&1, :z, 0))
+
     for item <- normal ++ sticky,
         item.type != :canvas,
         item.type != :caret or caret_on,
@@ -1028,6 +1030,8 @@ defmodule Browser.UI do
       end
 
     # the topmost (last painted) item decides; controls and links before plain boxes
+    at = Enum.reverse(at)
+
     control =
       Enum.find_value(at, fn {it, py} ->
         if Map.get(it, :cid) != nil, do: {:control, it.cid, py}

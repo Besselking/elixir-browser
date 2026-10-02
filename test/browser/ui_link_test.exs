@@ -116,6 +116,17 @@ defmodule Browser.UILinkTest do
       assert UI.sticky_hit(items, 50, 10, 300) == {:control, 7, 10 + 300 - 200}
     end
 
+    test "where sticky boxes overlap, the one painted last (the last in the list) is hit" do
+      stick = %{top: 0, y0: 0}
+
+      items = [
+        link("/under", 10, 10, 40, 16, %{stick: stick}),
+        link("/over", 10, 10, 40, 16, %{stick: stick})
+      ]
+
+      assert UI.sticky_hit(items, 20, 15, 0) == {:link, "/over"}
+    end
+
     test "nothing sticky, nothing found" do
       assert UI.sticky_hit([], 5, 5, 0) == nil
     end

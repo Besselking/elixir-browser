@@ -592,6 +592,7 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        z: z_index(c),
         translate: translate_of(c)
       }
 
@@ -973,7 +974,8 @@ defmodule Browser.Layout do
       pos: c["position"] in ["relative", "sticky"],
       xform: xform_spec(c),
       # `position: sticky; top: n`: the box stays n px from the top of the window once scrolled to it
-      sticky: if(c["position"] == "sticky" and is_number(c["top"]), do: round(c["top"]))
+      sticky: if(c["position"] == "sticky" and is_number(c["top"]), do: round(c["top"])),
+      z: z_index(c)
     }
 
     needed? =
@@ -1666,8 +1668,10 @@ defmodule Browser.Layout do
   defp op({:abs, sub, spec}, st) do
     origin = if spec.fixed, do: List.last(st.pos), else: hd(st.pos)
 
-    # `bottom` needs the containing box's height, known only once it closes
-    if spec.bottom && !spec.top && is_nil(origin.h) && Map.get(origin, :ref) do
+    # `bottom` and a percentage `top` need the containing box's height, known only once it closes
+    needs_height? = (spec.bottom && !spec.top) || match?({:pct, _}, spec.top)
+
+    if needs_height? && is_nil(origin.h) && Map.get(origin, :ref) do
       %{st | deferred: [{origin.ref, sub, spec} | st.deferred]}
     else
       place_absolute(st, sub, spec, origin)
@@ -1767,6 +1771,7 @@ defmodule Browser.Layout do
       n0: st.n,
       nr0: st.nr,
       fl0: length(st.floats),
+      ov0: length(st.overlays),
       saved: {st.left, st.right}
     }
 
@@ -1835,8 +1840,19 @@ defmodule Browser.Layout do
     stick = %{top: o.sticky, y0: box.top, h: height, parent: List.first(st.blocks)}
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
-    tag = fn list -> Enum.map(list, &Map.put_new(&1, :stick, stick)) end
-    %{st | items: tag.(new_items) ++ old_items, rects: tag.(new_rects) ++ old_rects}
+    # absolutely positioned children are placed in `overlays`, outside the flow
+    {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
+
+    tag = fn list ->
+      Enum.map(list, &(&1 |> Map.put_new(:stick, stick) |> Map.put_new(:z, o.z)))
+    end
+
+    %{
+      st
+      | items: tag.(new_items) ++ old_items,
+        rects: tag.(new_rects) ++ old_rects,
+        overlays: Enum.map(new_over, tag) ++ old_over
+    }
   end
 
   # items in paint order: background, then the four border sides. A box with
@@ -2074,7 +2090,11 @@ defmodule Browser.Layout do
     {tx, ty} = resolve_translate(spec.translate, width, height)
     moved = for it <- items, do: move(it, x + tx, y + ty)
     # a fixed box stays where it is in the window while the page scrolls
-    moved = if spec.fixed, do: Enum.map(moved, &Map.put(&1, :stick, :fixed)), else: moved
+    moved =
+      if spec.fixed,
+        do: Enum.map(moved, &(&1 |> Map.put(:stick, :fixed) |> Map.put(:z, spec.z))),
+        else: moved
+
     %{st | overlays: [moved | st.overlays]}
   end
 
@@ -3517,11 +3537,13 @@ defmodule Browser.Layout do
       matrix ->
         {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
         {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
+        {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
 
         %{
           st
           | items: with_xform(new_items, matrix) ++ old_items,
-            rects: with_xform(new_rects, matrix) ++ old_rects
+            rects: with_xform(new_rects, matrix) ++ old_rects,
+            overlays: Enum.map(new_over, &with_xform(&1, matrix)) ++ old_over
         }
     end
   end
@@ -3541,6 +3563,14 @@ defmodule Browser.Layout do
     do: Enum.map(items, &Map.update(&1, :xform, [matrix], fn list -> list ++ [matrix] end))
 
   # -- floats --------------------------------------------------------------------------------
+
+  # `z-index`: the order sticky and fixed boxes are painted in
+  defp z_index(c) do
+    case Integer.parse(to_string(c["z-index"])) do
+      {n, ""} -> n
+      _ -> 0
+    end
+  end
 
   defp float_side(c) do
     case c["float"] do
