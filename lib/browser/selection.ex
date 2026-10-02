@@ -147,6 +147,19 @@ defmodule Browser.Selection do
   def range(a, b) when a == b, do: nil
   def range(a, b), do: if(a <= b, do: {a, b}, else: {b, a})
 
+  @doc "Whether page point `{x, y}` is on visible selectable text (inside any box that clips it)."
+  def over_text?(texts, x, y) do
+    Enum.any?(texts, fn item ->
+      x >= item.x and x < item.x + item.w and y >= item.y and y < item.y + height(item) and
+        visible_at?(item, x, y)
+    end)
+  end
+
+  defp visible_at?(%{clip: %{x: cx, y: cy, w: cw, h: ch}}, x, y),
+    do: x >= cx and x < cx + cw and y >= cy and y < cy + ch
+
+  defp visible_at?(_item, _x, _y), do: true
+
   @doc "The selection of everything."
   def all([]), do: nil
 

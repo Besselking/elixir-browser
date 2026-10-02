@@ -89,6 +89,23 @@ defmodule Browser.SelectionTest do
     end
   end
 
+  describe "over_text?/3" do
+    test "inside a text box only" do
+      t = texts()
+      assert Selection.over_text?(t, 10, 5)
+      assert Selection.over_text?(t, 50, 5)
+      refute Selection.over_text?(t, 44, 5)
+      refute Selection.over_text?(t, 10, 40)
+      refute Selection.over_text?(t, 500, 5)
+    end
+
+    test "not outside the box that clips the text" do
+      t = texts([item("clipped", 0, 0, %{clip: %{x: 0, y: 0, w: 20, h: 20}})])
+      assert Selection.over_text?(t, 10, 5)
+      refute Selection.over_text?(t, 40, 5)
+    end
+  end
+
   describe "ranges, words and everything" do
     test "range orders positions and drops empty ones" do
       assert Selection.range({1, 2}, {0, 4}) == {{0, 4}, {1, 2}}

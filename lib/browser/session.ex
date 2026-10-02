@@ -273,11 +273,19 @@ defmodule Browser.Session do
   def handle_info(wx(event: wxMouse(type: :motion, x: x, y: y)), state) do
     py = y + state.scroll
     href = UI.link_at(state.links, x, py)
+    {texts, state} = sel_texts(state)
 
     kind =
       case UI.control_at(state.controls, x, py) do
-        nil -> if href, do: :hand, else: :arrow
-        cid -> control_cursor(state, cid)
+        nil ->
+          cond do
+            href -> :hand
+            Selection.over_text?(texts, x, py) -> :text
+            true -> :arrow
+          end
+
+        cid ->
+          control_cursor(state, cid)
       end
 
     {old_href, old_kind} = state.hover
