@@ -26,7 +26,7 @@ defmodule Browser.Style do
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
+            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
             row-gap column-gap order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
@@ -215,7 +215,8 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{viewport: {env.width, env.height}}, fn {rule, order}, idx ->
+    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo?: false}, fn {rule, order}, idx ->
+      idx = if Map.get(rule, :pseudo), do: %{idx | pseudo?: true}, else: idx
       rule = Map.put(rule, :order, order)
       Map.update(idx, key(rule), [rule], &[rule | &1])
     end)
@@ -237,7 +238,7 @@ defmodule Browser.Style do
   # -- cascade -------------------------------------------------------------------
 
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
-  def declared(idx, ctx) do
+  def declared(idx, ctx, pseudo \\ nil) do
     candidates =
       Map.get(idx, {:tag, ctx.tag}, []) ++
         Map.get(idx, :other, []) ++
@@ -246,19 +247,23 @@ defmodule Browser.Style do
 
     from_rules =
       for rule <- candidates,
+          Map.get(rule, :pseudo) == pseudo,
           CSS.matches?(rule.selector, ctx),
           {prop, value, important?} <- rule.decls do
         {prop, {rank(rule.origin, important?), {0, rule.specificity}, rule.order}, value}
       end
 
+    # inline styles and presentational attributes belong to the element, not its generated boxes
+    own = if pseudo, do: %{attrs: [], tag: nil}, else: ctx
+
     from_inline =
-      for {prop, value, important?} <- inline_decls(ctx.attrs) do
+      for {prop, value, important?} <- inline_decls(own.attrs) do
         {prop, {rank(:author, important?), {1, {0, 0, 0}}, 0}, value}
       end
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
-      for {prop, value} <- hints(ctx) do
+      for {prop, value} <- hints(own) do
         {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
       end
 
@@ -749,13 +754,73 @@ defmodule Browser.Style do
               acc
             else
               attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
-              [{:element, tag, attrs, prune_children(kids, ctx, idx)} | acc]
+              kids = prune_children(kids, ctx, idx)
+              kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+              [{:element, tag, attrs, kids} | acc]
             end
 
           {acc, {i + 1, [ctx | prev]}}
       end)
 
     Enum.reverse(out)
+  end
+
+  # The box `::before` / `::after` makes: a `span` holding the `content` text, styled by the
+  # pseudo-element rules. Nothing is made without `content` (or with `none`/`normal`), for
+  # `display: none`, or for elements whose content is not their children.
+  @no_pseudo ~w(input select textarea img br hr svg video canvas iframe option)
+
+  defp generated(%{pseudo?: false}, _ctx, _which), do: []
+  defp generated(_idx, %{tag: tag}, _which) when tag in @no_pseudo, do: []
+
+  defp generated(idx, ctx, which) do
+    {computed, _custom} = compute(idx, ctx, ctx, which)
+
+    with text when is_binary(text) <- content_text(computed["content"], ctx.attrs),
+         false <- not_rendered?(computed) do
+      kids = if text == "", do: [], else: [{:text, text}]
+      [{:element, "span", [{"@computed", Map.delete(computed, "content")}], kids}]
+    else
+      _ -> []
+    end
+  end
+
+  # the text of a `content` value: strings, `attr()` and quotes joined; nil for no box
+  defp content_text(value, attrs) when is_binary(value) do
+    value = String.trim(value)
+
+    parts =
+      Regex.scan(
+        ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su,
+        value
+      )
+
+    if value in ["", "none", "normal"] or parts == [] do
+      nil
+    else
+      Enum.map_join(parts, fn
+        [_, s] -> css_string(s)
+        [_, "", s] -> css_string(s)
+        [_, "", "", name] -> attr(attrs, String.downcase(name))
+        ["open-quote"] -> "“"
+        ["close-quote"] -> "”"
+        _ -> ""
+      end)
+    end
+  end
+
+  defp content_text(_value, _attrs), do: nil
+
+  # `\201C` and `\"` in a CSS string
+  defp css_string(s) do
+    Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, s, fn
+      _, hex, "" ->
+        cp = String.to_integer(hex, 16)
+        if cp in 1..0xD7FF or cp in 0xE000..0x10FFFF, do: <<cp::utf8>>, else: "\uFFFD"
+
+      _, _, char ->
+        char
+    end)
   end
 
   # Grid is laid out as a stack of blocks, so what sits directly in a grid container is
@@ -774,7 +839,7 @@ defmodule Browser.Style do
   defp blockify_grid_item(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
-  defp compute(idx, ctx, parent) do
+  defp compute(idx, ctx, parent, pseudo \\ nil) do
     {pc, parent_custom, parent_root} =
       case parent do
         nil -> {%{}, %{}, nil}
@@ -784,7 +849,9 @@ defmodule Browser.Style do
     inherited = Map.take(pc, @inherited)
 
     {customs, normals} =
-      idx |> declared(ctx) |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+      idx
+      |> declared(ctx, pseudo)
+      |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
 
     custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 

@@ -477,4 +477,50 @@ defmodule Browser.FormsTest do
       assert c["width"] == 13.0 and c["background-color"] == {0, 117, 255}
     end
   end
+
+  describe "details and summary" do
+    @html "<details><summary>More</summary><p>hidden text</p></details>"
+
+    defp details(html, state \\ %{}) do
+      {nodes, %{controls: controls}} = html |> HTML.parse() |> Forms.index()
+      {Forms.render(nodes, state, controls), controls}
+    end
+
+    defp text_of(nodes) do
+      Enum.map_join(nodes, fn
+        {:text, t} -> t
+        {:element, _, _, kids} -> text_of(kids)
+      end)
+    end
+
+    test "a closed details shows only its summary, with a closed marker" do
+      {nodes, _} = details(@html)
+      assert text_of(nodes) == "▸ More"
+    end
+
+    test "open attribute and toggled state show the content" do
+      {nodes, _} = details(String.replace(@html, "<details>", "<details open>"))
+      assert text_of(nodes) == "▾ Morehidden text"
+
+      {_, controls} = details(@html)
+      [cid] = Map.keys(controls)
+      state = Forms.toggle(%{}, controls, cid)
+      {nodes, _} = details(@html, state)
+      assert text_of(nodes) == "▾ Morehidden text"
+      {nodes, _} = details(@html, Forms.toggle(state, controls, cid))
+      assert text_of(nodes) == "▸ More"
+    end
+
+    test "summaries are not in the tab order and submit nothing" do
+      {_, controls} = details(@html)
+      assert Forms.focus_order(controls) == []
+      assert Forms.params(controls, %{}, nil, nil) == []
+    end
+
+    test "details without a summary stays as it is" do
+      {nodes, controls} = details("<details><p>x</p></details>")
+      assert text_of(nodes) == "x"
+      assert controls == %{}
+    end
+  end
 end

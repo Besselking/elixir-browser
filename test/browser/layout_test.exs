@@ -565,6 +565,21 @@ defmodule Browser.LayoutTest do
       assert wb(items, "after").y - wb(plain, "after").y == 6
     end
 
+    test "dashed and dotted borders are rows of dashes and dots" do
+      {items, _} = bx(~s(<div style="border-top: 2px dashed #f00; width: 100px">x</div>))
+      dashes = rects(items)
+      assert length(dashes) > 3
+      assert Enum.all?(dashes, &(&1.h == 2 and &1.color == {255, 0, 0}))
+      assert Enum.all?(dashes, &(&1.w in 5..7))
+      # starts and ends with a full dash, with gaps between
+      assert List.last(dashes).x + List.last(dashes).w - hd(dashes).x == 100
+      assert Enum.all?(Enum.chunk_every(dashes, 2, 1, :discard), fn [a, b] -> b.x > a.x + a.w end)
+
+      {items, _} = bx(~s(<div style="border-left: 2px dotted #00f; height: 40px">x</div>))
+      assert length(rects(items)) > 5
+      assert Enum.all?(rects(items), &(&1.w == 2 and &1.h in 1..3))
+    end
+
     test "per-side borders and style none/missing style draw nothing" do
       {items, _} = bx(~s(<div style="border-bottom: 2px solid #00f">x</div>))
       assert [%{color: {0, 0, 255}, h: 2, w: w}] = rects(items)

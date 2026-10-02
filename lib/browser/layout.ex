@@ -1005,6 +1005,7 @@ defmodule Browser.Layout do
       pb: box.pb,
       bw: box.bw,
       bc: box.bc,
+      bs: box.bs,
       width: dim(c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
@@ -1164,6 +1165,7 @@ defmodule Browser.Layout do
       pt: px(c["padding-top"] || 0),
       pb: px(c["padding-bottom"] || 0),
       bw: {border_w(c, "top"), border_w(c, "right"), border_w(c, "bottom"), border_w(c, "left")},
+      bs: {border_s(c, "top"), border_s(c, "right"), border_s(c, "bottom"), border_s(c, "left")},
       bc: {
         border_c(c, "top", color),
         border_c(c, "right", color),
@@ -1213,6 +1215,14 @@ defmodule Browser.Layout do
     else
       w = c["border-#{side}-width"] || 3.0
       if w > 0, do: max(round(w), 1), else: 0
+    end
+  end
+
+  # how a side is drawn: :solid (also for the styles drawn like it), :dashed or :dotted
+  defp border_s(c, side) do
+    case c["border-#{side}-style"] do
+      s when s in ["dashed", "dotted"] -> String.to_atom(s)
+      _ -> :solid
     end
   end
 
@@ -1686,7 +1696,7 @@ defmodule Browser.Layout do
     box_h = bt + box.pt + ch + box.pb + bb
 
     outer = %{
-      o: %{bw: box.bw, bc: box.bc, bg: box.bg, r: box.r, cid: nil},
+      o: %{bw: box.bw, bc: box.bc, bs: box.bs, bg: box.bg, r: box.r, cid: nil},
       x: ml,
       top: box.mt,
       w: box_w
@@ -2046,14 +2056,16 @@ defmodule Browser.Layout do
         nil ->
           bg = if o.bg && w > 0 && height > 0, do: [rect(x, y, w, height, o.bg)], else: []
 
+          {st, sr, sb, sl} = Map.get(o, :bs, {:solid, :solid, :solid, :solid})
+
           sides = [
-            bt > 0 && tc && rect(x, y, w, bt, tc),
-            bb > 0 && bc && rect(x, y + height - bb, w, bb, bc),
-            bl > 0 && lc && rect(x, y, bl, height, lc),
-            br > 0 && rc && rect(x + w - br, y, br, height, rc)
+            bt > 0 && tc && side_rects(st, :h, x, y, w, bt, tc),
+            bb > 0 && bc && side_rects(sb, :h, x, y + height - bb, w, bb, bc),
+            bl > 0 && lc && side_rects(sl, :v, x, y, bl, height, lc),
+            br > 0 && rc && side_rects(sr, :v, x + w - br, y, br, height, rc)
           ]
 
-          bg ++ images_item ++ insets ++ Enum.filter(sides, & &1)
+          bg ++ images_item ++ insets ++ (sides |> Enum.filter(& &1) |> List.flatten())
 
         radii when decorated? ->
           # the border must be painted over the images and inset shadows
@@ -2126,6 +2138,35 @@ defmodule Browser.Layout do
 
   defp fit(_len, 0), do: 1.0
   defp fit(len, sum), do: len / sum
+
+  # One border side. A dashed side is a row of 3t-long dashes with gaps of 3t, a dotted one a
+  # row of t-wide dots with gaps of t; the pattern is spread so that it starts and ends with
+  # a full dash at the corners (`:h` runs along x, `:v` along y).
+  @max_dashes 400
+
+  defp side_rects(:solid, _dir, x, y, w, h, color), do: [rect(x, y, w, h, color)]
+
+  defp side_rects(style, dir, x, y, w, h, color) do
+    {len, t} = if dir == :h, do: {w, h}, else: {h, w}
+    {dash, gap} = if style == :dashed, do: {3 * t, 3 * t}, else: {t, t}
+    n = max(round((len + gap) / (dash + gap)), 1)
+
+    if n == 1 or n > @max_dashes do
+      [rect(x, y, w, h, color)]
+    else
+      # n dashes and n - 1 gaps exactly fill the side
+      dash_len = (len - (n - 1) * gap) / n
+
+      for i <- 0..(n - 1) do
+        from = round(i * (dash_len + gap))
+        to = round(i * (dash_len + gap) + dash_len)
+
+        if dir == :h,
+          do: rect(x + from, y, max(to - from, 1), h, color),
+          else: rect(x, y + from, w, max(to - from, 1), color)
+      end
+    end
+  end
 
   defp rect(x, y, w, h, color), do: %{type: :rect, x: x, y: y, w: w, h: h, color: color}
 

@@ -772,4 +772,45 @@ defmodule Browser.StyleTest do
       refute Map.has_key?(c, "background-image")
     end
   end
+
+  describe "generated content" do
+    defp pseudo_kids(html, css) do
+      [{:element, _, _, kids}] = prune(html, css)
+      kids
+    end
+
+    test "::before and ::after add a styled span with the content text" do
+      css = ~s(p::before { content: "\\201C"; color: #f00 } p::after { content: "end" })
+
+      assert [
+               {:element, "span", [{"@computed", %{"color" => {255, 0, 0}} = c}], [{:text, "“"}]},
+               {:text, "hi"},
+               {:element, "span", _, [{:text, "end"}]}
+             ] = pseudo_kids("<p>hi</p>", css)
+
+      refute Map.has_key?(c, "content")
+    end
+
+    test "attr() and joined strings; none and missing content make no box" do
+      assert [{:element, "span", _, [{:text, "[x1]"}]}, {:text, "a"}] =
+               pseudo_kids(
+                 ~S|<a data-n="1">a</a>|,
+                 ~S|a::before { content: "[x" attr(data-n) "]" }|
+               )
+
+      assert [{:text, "a"}] = pseudo_kids("<a>a</a>", "a::before { content: none }")
+      assert [{:text, "a"}] = pseudo_kids("<a>a</a>", "a::before { color: red }")
+    end
+
+    test "an empty string still makes a box, for decoration" do
+      css = ~s(a::after { content: ""; display: block; height: 2px })
+      assert [{:text, "a"}, {:element, "span", _, []}] = pseudo_kids("<a>a</a>", css)
+    end
+
+    test "pseudo-element rules don't style the element itself" do
+      [{:element, _, attrs, _}] = prune("<p>x</p>", ~s(p::before { content: "a"; color: #f00 }))
+      assert {"@computed", c} = List.keyfind(attrs, "@computed", 0)
+      refute c["color"] == {255, 0, 0}
+    end
+  end
 end

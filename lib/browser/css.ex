@@ -11,12 +11,15 @@ defmodule Browser.CSS do
   pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
   `:not(:focus)` true.
 
-  Selectors using anything else (`::before`, `:has()`, …) are dropped. `@media` (see
+  A selector may end in `::before` or `::after` (or the one-colon forms): its rule styles
+  the generated box, and carries `pseudo: :before | :after` (nil for other rules).
+  Selectors using anything else (`::marker`, `:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered; other at-rules (`@import`, `@font-face`,
   `@keyframes`, …) are skipped.
 
-  A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds}`
+  A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds,
+  pseudo: pseudo}`
   where `decls` is `[{property, value, important?}]`, `media` lists the
   enclosing `@media` query lists (all must match), and `parts` is the
   selector in right-to-left form: `[{compound, combinator_to_the_left}, …]`.
@@ -35,8 +38,8 @@ defmodule Browser.CSS do
       decls = parse_declarations(body)
 
       for sel <- split_top(prelude, ?,),
-          {:ok, %{parts: parts, spec: spec}} <- [parse_selector(sel)] do
-        %{selector: parts, specificity: spec, decls: decls, media: conds}
+          {:ok, %{parts: parts, spec: spec, pseudo: pseudo}} <- [parse_selector(sel)] do
+        %{selector: parts, specificity: spec, decls: decls, media: conds, pseudo: pseudo}
       end
     end)
   end
@@ -175,9 +178,20 @@ defmodule Browser.CSS do
 
   @doc "Parses one complex selector. Returns `{:ok, %{parts: …, spec: …}}` or `:error`."
   def parse_selector(str) do
-    with {:ok, toks} <- tokenize(String.trim(str), []),
+    {str, pseudo} = split_pseudo_element(String.trim(str))
+
+    with {:ok, toks} <- tokenize(str, []),
          {:ok, parts} <- group(toks) do
-      {:ok, %{parts: parts, spec: specificity(parts)}}
+      {:ok, %{parts: parts, spec: specificity(parts), pseudo: pseudo}}
+    end
+  end
+
+  # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
+  defp split_pseudo_element(str) do
+    case Regex.run(~r/\A(.*?)::?(before|after)\z/su, str) do
+      [_, "", which] -> {"*", String.to_atom(which)}
+      [_, head, which] -> {head, String.to_atom(which)}
+      nil -> {str, nil}
     end
   end
 
