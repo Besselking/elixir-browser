@@ -232,7 +232,7 @@ defmodule Browser.Forms do
       t when t in ["submit", "button", "reset"] -> [text(button_label(t, cur.value))]
       "image" -> [text(first_present([attr(attrs, "alt"), cur.value], "Submit"))]
       "file" -> [text("Choose file")]
-      "password" -> shown(String.duplicate("•", String.length(cur.value)), cur, placeholder)
+      "password" -> shown(bullets(cur.value), cur, placeholder)
       _ -> shown(cur.value, cur, placeholder)
     end
   end
@@ -268,6 +268,17 @@ defmodule Browser.Forms do
 
   defp first_present(values, default), do: Enum.find(values, default, &(&1 != ""))
 
+  defp bullets(value), do: String.duplicate("•", String.length(value))
+
+  @doc """
+  The text a non-empty single-line field shows, scrolled by `cur.scroll` characters
+  (what `render/3` puts in the field, so a changed value needn't be rendered to know it).
+  """
+  def visible_text(%{type: "password"}, cur), do: cur.value |> bullets() |> scrolled(cur)
+  def visible_text(_control, cur), do: scrolled(cur.value, cur)
+
+  defp scrolled(display, %{scroll: scroll}), do: String.slice(display, scroll..-1//1)
+
   # the text, scrolled by `scroll` characters; an empty control shows its placeholder instead
   defp shown("", _cur, ""), do: [text(@empty)]
 
@@ -278,7 +289,7 @@ defmodule Browser.Forms do
     ]
 
   defp shown(display, %{scroll: scroll}, _placeholder) do
-    case String.slice(display, scroll..-1//1) do
+    case scrolled(display, %{scroll: scroll}) do
       "" -> [text(@empty)]
       visible -> [text(visible)]
     end

@@ -155,6 +155,34 @@ defmodule Browser.Layout do
     items ++ ring ++ caret
   end
 
+  @doc """
+  Updates `items` (from `layout/5`) after the text of one single-line field changed from
+  `old_text` to `new_text`, without laying the page out again. Returns `{:ok, items}`, or
+  `:error` when only a full layout can be trusted: the field's text isn't exactly one
+  left-aligned item showing `old_text`, or the new text wouldn't fit the field on one line
+  (a field's box doesn't depend on its text, so when it fits, nothing else moves).
+
+  `focus` is as for the `:focus` option of `layout/5`; the ring and caret are redone.
+  """
+  def patch_field(items, cid, old_text, new_text, focus, measure) do
+    mine = fn it -> Map.get(it, :cid) == cid end
+
+    with [%{text: ^old_text, align: :left} = item] when old_text != "" and new_text != "" <-
+           Enum.filter(items, &(&1.type == :text and mine.(&1))),
+         %{w: box_w} <- controls(items)[cid],
+         width = measure.(new_text, item),
+         true <- width <= box_w - 8 do
+      items =
+        for it <- items, not (it.type in [:ring, :caret] and mine.(it)) do
+          if it.type == :text and mine.(it), do: %{it | text: new_text, w: width}, else: it
+        end
+
+      {:ok, add_focus(items, measure, focus)}
+    else
+      _ -> :error
+    end
+  end
+
   defp grow(nil, _by), do: nil
 
   defp grow(radii, by) do

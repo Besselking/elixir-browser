@@ -23,7 +23,8 @@ defmodule Browser.Page do
     forms: %{controls: %{}, forms: %{}},
     form_state: %{},
     image_urls: [],
-    svg_defs: %{}
+    svg_defs: %{},
+    fixed_width: MapSet.new()
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
@@ -120,9 +121,32 @@ defmodule Browser.Page do
       index = Style.index_rules(page.rules, env)
       pruned = Style.prune(page.raw, index)
       defs = Browser.Svg.defs(page.raw, pruned)
-      render(%{page | key: key, pruned: pruned, svg_defs: defs}, page.form_state)
+      page = %{page | key: key, pruned: pruned, svg_defs: defs, fixed_width: fixed_width(pruned)}
+      render(page, page.form_state)
     end
   end
+
+  # The controls whose box width doesn't depend on their content (a length or a
+  # percentage, not `auto`): typing in one can't move anything else on the page.
+  defp fixed_width(nodes, acc \\ MapSet.new())
+
+  defp fixed_width(nodes, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &fixed_width/2)
+
+  defp fixed_width({:element, _tag, attrs, kids}, acc) do
+    acc =
+      with {_, cid} <- List.keyfind(attrs, "@cid", 0),
+           {_, %{"width" => w}} <- List.keyfind(attrs, "@computed", 0),
+           true <- is_number(w) or match?({:pct, _}, w) do
+        MapSet.put(acc, cid)
+      else
+        _ -> acc
+      end
+
+    fixed_width(kids, acc)
+  end
+
+  defp fixed_width(_text, acc), do: acc
 
   @doc """
   Every picture the page needs: its `<img>` sources and the `url()` images its styles
