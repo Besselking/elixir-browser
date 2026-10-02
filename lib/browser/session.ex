@@ -297,7 +297,12 @@ defmodule Browser.Session do
 
     case {result, key} do
       {{value, caret}, _} ->
-        state |> edit(control.cid, value, caret) |> reset_blink() |> relayout()
+        old_text = if(multiline?, do: nil, else: Forms.visible_text(control, cur))
+
+        state
+        |> edit(control.cid, value, caret)
+        |> reset_blink()
+        |> relayout_edit(control, old_text)
 
       # Enter in a single-line field submits its form
       {:ignored, :enter} ->
@@ -631,6 +636,33 @@ defmodule Browser.Session do
     }
 
     scroll_by(state, 0)
+  end
+
+  # After typing into a single-line field only its text and caret move, so patch the
+  # laid out items instead of laying out the whole page (see `Layout.patch_field/6`).
+  defp relayout_edit(state, _control, nil), do: relayout(state)
+
+  defp relayout_edit(state, control, old_text) do
+    if MapSet.member?(state.page.fixed_width, control.cid),
+      do: patch_edit(state, control, old_text),
+      else: relayout(state)
+  end
+
+  defp patch_edit(state, control, old_text) do
+    state = fit_scroll(state)
+    cur = Forms.current(control, state.page.form_state)
+
+    case Layout.patch_field(
+           state.items,
+           control.cid,
+           old_text,
+           Forms.visible_text(control, cur),
+           focus_option(state),
+           state.measure
+         ) do
+      {:ok, items} -> scroll_by(%{state | items: items}, 0)
+      :error -> relayout(state)
+    end
   end
 
   # what layout needs to draw the ring and caret
