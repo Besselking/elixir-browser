@@ -115,7 +115,7 @@ defmodule Browser.Style do
   input[type=radio][checked] { border-color: #0075ff; color: #0075ff }
   input[type=submit], input[type=button], input[type=reset], input[type=file], button { width: auto; padding: 1px 6px; text-align: center; background-color: #efefef; border-radius: 3px }
   textarea { width: 160px; height: 36px; padding: 2px }
-  select { padding: 0 4px; border-radius: 3px }
+  select { padding: 0 4px; border-radius: 3px; box-sizing: border-box }
   input[disabled], select[disabled], textarea[disabled], button[disabled] { color: #6d6d6d; background-color: #efefef; border-color: #b8b8b8 }
   fieldset { margin: 0 2px; padding: .35em .75em .625em; border: 1px solid #c0c0c0 }
   legend { padding: 0 2px }

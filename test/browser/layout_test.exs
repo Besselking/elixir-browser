@@ -408,7 +408,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("test/fixtures/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -2133,6 +2133,31 @@ defmodule Browser.LayoutTest do
       [bounds] = Map.values(Layout.controls(items))
       assert bounds.w >= 390
       assert bounds.h > 5
+    end
+  end
+
+  describe "controls wider than the box that clips them" do
+    alias Browser.Page
+
+    @clipped ~s|<style>body{margin:0} .w{display:inline-block;overflow:hidden;width:100px} select{display:block;width:140%;border:none;padding:0 10px}</style>| <>
+               ~s|<div class="w"><select><option>A</option></select></div><div class="w"><select><option>B</option></select></div>|
+
+    test "selects size their border box" do
+      page = Page.build(@clipped, "about:home")
+      {items, _} = Layout.layout(page.nodes, 600, &measure/2, 600)
+
+      assert [%{w: 140}, %{w: 140}] =
+               items |> Layout.controls() |> Enum.sort() |> Enum.map(&elem(&1, 1))
+    end
+
+    test "the focus ring stays inside the clipping box" do
+      page = Page.build(@clipped, "about:home")
+      {plain, _} = Layout.layout(page.nodes, 600, &measure/2, 600)
+      [{cid, _} | _] = plain |> Layout.controls() |> Enum.sort()
+      {items, _} = Layout.layout(page.nodes, 600, &measure/2, 600, focus: %{cid: cid, caret: nil})
+      [ring] = Enum.filter(items, &(&1.type == :ring))
+      # the box is 100 wide at x 4; the ring is 2px outside the visible part of the field
+      assert ring.x + ring.w <= 4 + 100 + 2
     end
   end
 end

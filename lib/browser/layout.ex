@@ -112,12 +112,21 @@ defmodule Browser.Layout do
       |> Enum.filter(&(&1.type == :text and Map.get(&1, :cid) == cid))
       |> Enum.sort_by(&{&1.y, &1.x})
 
+    # the box item is clipped by ancestors only: the control's own clip applies to its text
+    clip =
+      Enum.find_value(
+        items,
+        &((Map.get(&1, :cid) == cid and &1.type in [:rect, :box]) && Map.get(&1, :clip))
+      )
+
     ring =
       case controls(items)[cid] do
         nil ->
           []
 
         b ->
+          b = within(b, clip)
+
           [
             %{
               type: :ring,
@@ -153,6 +162,17 @@ defmodule Browser.Layout do
       end
 
     items ++ ring ++ caret
+  end
+
+  # a control wider than the box that clips it (overflow: hidden) is only seen inside that box
+  defp within(b, nil), do: b
+
+  defp within(b, clip) do
+    x0 = max(b.x, clip.x)
+    y0 = max(b.y, clip.y)
+    x1 = min(b.x + b.w, clip.x + clip.w)
+    y1 = min(b.y + b.h, clip.y + clip.h)
+    if x1 > x0 and y1 > y0, do: %{b | x: x0, y: y0, w: x1 - x0, h: y1 - y0}, else: b
   end
 
   @doc """
