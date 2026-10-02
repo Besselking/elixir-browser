@@ -39,7 +39,7 @@ defmodule Browser.Session do
       scroll: 0,
       width: UI.client_width(ui),
       nonce: 0,
-      hover: nil,
+      hover: {nil, :arrow},
       url: nil,
       # form interaction: the focused control, its caret (graphemes), blink state, and
       # the control whose option menu is open
@@ -221,10 +221,11 @@ defmodule Browser.Session do
         cid -> control_cursor(state, cid)
       end
 
-    if {href, kind} != state.hover do
-      UI.set_cursor(state.ui, kind)
-      UI.set_status(state.ui, if(href, do: Fetch.resolve(state.url, href), else: ""))
-    end
+    {old_href, old_kind} = state.hover
+    if kind != old_kind, do: UI.set_cursor(state.ui, kind)
+
+    if href != old_href,
+      do: UI.set_status(state.ui, if(href, do: Fetch.resolve(state.url, href), else: ""))
 
     {:noreply, %{state | hover: {href, kind}}}
   end
