@@ -72,12 +72,11 @@ defmodule Browser.PatchFieldTest do
     assert type_into(~s(<form><input type=password name=p></form>)) >= 5
   end
 
-  # a flex item's box carries no control id, so its size is unknown: always a full layout
-  test "an input in a flex row is laid out in full, with the same result" do
+  test "an input in a flex row is patched, with the same result as a full layout" do
     html =
       ~s(<div style="display:flex"><input name=q style="width:200px"><button>Go</button></div>)
 
-    assert type_into(html) == 0
+    assert type_into(html) >= 5
   end
 
   test "right-aligned text in a field is never patched" do

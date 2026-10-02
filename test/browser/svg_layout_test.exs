@@ -128,6 +128,14 @@ defmodule Browser.SvgLayoutTest do
       assert [%{h: 80, w: 160}] = svgs(items)
     end
 
+    test "vertical-align does not move a block-level svg" do
+      html =
+        ~s|<style>svg{display:block;vertical-align:middle}</style><svg width="20" height="20"></svg>|
+
+      {items, _} = lay(html)
+      assert [%{y: 0, h: 20}] = svgs(items)
+    end
+
     test "a zero-size sprite does not take room" do
       {items, height} = lay(~s|<svg width="0" height="0"><symbol id="s"></symbol></svg><p>x</p>|)
       assert height < 40

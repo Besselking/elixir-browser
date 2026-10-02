@@ -82,4 +82,61 @@ defmodule Browser.ColorTest do
       assert Color.parse("rgba(9,9,9,0)") == :transparent
     end
   end
+
+  describe "parse_rgba/1" do
+    test "opaque, translucent and transparent colours" do
+      assert Color.parse_rgba("#ff0000") == {255, 0, 0}
+      assert Color.parse_rgba("#f0682a1a") == {240, 104, 42, 26}
+      assert Color.parse_rgba("rgb(0 0 0 / 50%)") == {0, 0, 0, 128}
+      assert Color.parse_rgba("transparent") == :transparent
+      assert Color.parse_rgba("rgba(1,2,3,0)") == :transparent
+      assert Color.parse_rgba("currentcolor") == :current
+      assert Color.parse_rgba("nonsense") == nil
+    end
+  end
+
+  describe "oklch and oklab" do
+    test "known colours" do
+      assert Color.parse("oklch(100% 0 0)") == {255, 255, 255}
+      assert Color.parse("oklch(0% 0 0)") == {0, 0, 0}
+      # sRGB red in oklch
+      assert {r, g, b} = Color.parse("oklch(62.8% 0.2577 29.23)")
+      assert r > 250 and g < 8 and b < 8
+      assert {r, g, b} = Color.parse("oklab(0.6 0 0)")
+      assert abs(r - g) <= 1 and abs(g - b) <= 1
+    end
+
+    test "alpha" do
+      assert Color.parse_rgba("oklch(100% 0 0 / 50%)") == {255, 255, 255, 128}
+    end
+
+    test "garbage" do
+      assert Color.parse("oklch(red)") == nil
+    end
+  end
+
+  describe "color-mix" do
+    test "with transparent it is an alpha" do
+      assert Color.parse_rgba("color-mix(in oklab,#f0682a 10%,transparent)") == {240, 104, 42, 26}
+      assert Color.parse_rgba("color-mix(in srgb, red 40%, transparent)") == {255, 0, 0, 102}
+    end
+
+    test "two colours mix by their shares" do
+      assert Color.parse_rgba("color-mix(in srgb, #000 50%, #fff 50%)") in [
+               {128, 128, 128},
+               {127, 127, 127}
+             ]
+
+      assert Color.parse_rgba("color-mix(in srgb, #000, #fff)") in [
+               {128, 128, 128},
+               {127, 127, 127}
+             ]
+
+      assert Color.parse_rgba("color-mix(in srgb, #000 25%, #fff)") == {191, 191, 191}
+    end
+
+    test "unknown parts fail" do
+      assert Color.parse("color-mix(in srgb, currentcolor 50%, transparent)") == nil
+    end
+  end
 end

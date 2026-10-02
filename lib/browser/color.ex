@@ -107,6 +107,20 @@ defmodule Browser.Color do
     end
   end
 
+  @doc """
+  Like `parse_alpha/1` but in the shape layout paints with: `{r, g, b}` when opaque,
+  `{r, g, b, a}` (a 1..254) when translucent, `:transparent`, `:current`, or nil.
+  Backgrounds and borders keep their alpha this way instead of being blended over white.
+  """
+  def parse_rgba(str) when is_binary(str) do
+    case raw(str) do
+      {:rgba, r, g, b, a} when a >= 1.0 -> {r, g, b}
+      {:rgba, _r, _g, _b, a} when a <= 0.0 -> :transparent
+      {:rgba, r, g, b, a} -> {r, g, b, max(round(a * 255), 1)}
+      other -> other
+    end
+  end
+
   # blend a channel over white
   defp blend(c, a), do: round(c * a + 255 * (1 - a))
 
@@ -119,8 +133,138 @@ defmodule Browser.Color do
       String.starts_with?(s, "#") -> s |> binary_part(1, byte_size(s) - 1) |> hex()
       m = Regex.run(~r/\A(rgba?|hsla?)\((.*)\)\z/s, s) -> func(Enum.at(m, 1), Enum.at(m, 2))
       m = Regex.run(~r/\Alight-dark\((.*)\)\z/s, s) -> m |> Enum.at(1) |> first_arg() |> raw()
+      m = Regex.run(~r/\A(oklch|oklab)\((.*)\)\z/s, s) -> oklab_func(Enum.at(m, 1), Enum.at(m, 2))
+      m = Regex.run(~r/\Acolor-mix\((.*)\)\z/s, s) -> color_mix(Enum.at(m, 1))
       true -> named(s)
     end
+  end
+
+  # -- oklab / oklch ---------------------------------------------------------------
+
+  defp oklab_func(name, args) do
+    parts = args |> String.replace("/", " ") |> String.split()
+
+    case parts do
+      [l, c1, c2 | alpha] ->
+        with lightness when is_number(lightness) <- ok_number(l, 1.0),
+             {:ok, alpha} <- ok_alpha(alpha) do
+          if name == "oklch" do
+            chroma = ok_number(c1, 0.4)
+            hue = hue(c2)
+
+            if is_number(chroma) and is_number(hue) do
+              rad = hue * :math.pi() / 180
+              oklab_to_rgba(lightness, chroma * :math.cos(rad), chroma * :math.sin(rad), alpha)
+            end
+          else
+            a = ok_number(c1, 0.4)
+            b = ok_number(c2, 0.4)
+            if is_number(a) and is_number(b), do: oklab_to_rgba(lightness, a, b, alpha)
+          end
+        else
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # a number, or a percentage of `full`
+  defp ok_number("none", _full), do: 0.0
+
+  defp ok_number(tok, full) do
+    case number(tok) do
+      {n, true} -> n / 100 * full
+      {n, false} -> n
+      nil -> nil
+    end
+  end
+
+  defp ok_alpha([]), do: {:ok, 1.0}
+  defp ok_alpha([a]), do: {:ok, alpha(a)}
+  defp ok_alpha(_), do: :error
+
+  defp oklab_to_rgba(l, a, b, alpha) do
+    l_ = :math.pow(l + 0.3963377774 * a + 0.2158037573 * b, 3)
+    m_ = :math.pow(l - 0.1055613458 * a - 0.0638541728 * b, 3)
+    s_ = :math.pow(l - 0.0894841775 * a - 1.2914855480 * b, 3)
+
+    r = 4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_
+    g = -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_
+    bl = -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_
+
+    rgba(gamma(r) * 255, gamma(g) * 255, gamma(bl) * 255, alpha)
+  end
+
+  defp gamma(v) do
+    v = clamp(v, 0.0, 1.0)
+    if v <= 0.0031308, do: 12.92 * v, else: 1.055 * :math.pow(v, 1 / 2.4) - 0.055
+  end
+
+  # -- color-mix() -----------------------------------------------------------------
+
+  # Mixed in premultiplied sRGB whatever space is named: close enough for the usual
+  # `color-mix(in oklab, <color> 40%, transparent)` of an opacity modifier.
+  defp color_mix(args) do
+    with [_space, first, second] <- split_commas(args),
+         {c1, p1} <- mix_part(first),
+         {c2, p2} <- mix_part(second),
+         {:rgba, r1, g1, b1, a1} <- raw(c1),
+         {:rgba, r2, g2, b2, a2} <- raw(c2) do
+      {p1, p2} =
+        case {p1, p2} do
+          {nil, nil} -> {50.0, 50.0}
+          {p, nil} -> {p, 100.0 - p}
+          {nil, p} -> {100.0 - p, p}
+          both -> both
+        end
+
+      total = p1 + p2
+
+      if total > 0 do
+        {w1, w2} = {p1 / total, p2 / total}
+        alpha = a1 * w1 + a2 * w2
+
+        if alpha == 0.0 do
+          {:rgba, 0, 0, 0, 0.0}
+        else
+          mix = fn x1, x2 -> (x1 * a1 * w1 + x2 * a2 * w2) / alpha end
+          rgba(mix.(r1, r2), mix.(g1, g2), mix.(b1, b2), alpha * min(total, 100.0) / 100)
+        end
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  # "<color> [percent]" or "[percent] <color>" -> {color text, percent | nil}
+  defp mix_part(text) do
+    case Regex.run(~r/\A\s*(?:([\d.]+)%\s*)?(.*?)(?:\s*([\d.]+)%)?\s*\z/s, text) do
+      [_, pre, color, post] ->
+        pct = if pre != "", do: pre, else: post
+        {color, if(pct != "", do: pct |> leading_zero() |> Float.parse() |> elem(0))}
+
+      [_, pre, color] ->
+        {color, if(pre != "", do: pre |> leading_zero() |> Float.parse() |> elem(0))}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp split_commas(args) do
+    {parts, cur, _} =
+      args
+      |> String.graphemes()
+      |> Enum.reduce({[], "", 0}, fn
+        ",", {parts, cur, 0} -> {[cur | parts], "", 0}
+        "(", {parts, cur, d} -> {parts, cur <> "(", d + 1}
+        ")", {parts, cur, d} -> {parts, cur <> ")", d - 1}
+        c, {parts, cur, d} -> {parts, cur <> c, d}
+      end)
+
+    Enum.reverse([cur | parts])
   end
 
   defp named(s) do

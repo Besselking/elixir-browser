@@ -382,6 +382,48 @@ defmodule Browser.StyleTest do
       assert computed_of(prune(~s(<p style="opacity:.5">x</p>)), "p")["visibility"] == nil
     end
 
+    test "calc() in lengths, with variables" do
+      css =
+        ":root { --spacing: .25rem } div { padding-inline: calc(var(--spacing) * 6); margin-top: calc(1px + 1rem); width: calc(100% / 4) }"
+
+      c = computed_of(prune("<html><body><div>x</div></body></html>", css), "div")
+      assert c["padding-left"] == 24.0 and c["padding-right"] == 24.0
+      assert c["margin-top"] == 17.0
+      assert c["width"] == {:pct, 0.25}
+    end
+
+    test "translucent backgrounds and borders keep their alpha" do
+      css = "div { background-color: #f0682a1a; border: 1px solid rgb(0 0 0 / 50%) }"
+      c = computed_of(prune("<div>x</div>", css), "div")
+      assert c["background-color"] == {240, 104, 42, 26}
+      assert c["border-top-color"] == {0, 0, 0, 128}
+      c = computed_of(prune("<div>x</div>", "div { background: transparent }"), "div")
+      assert c["background-color"] == :transparent
+    end
+
+    test "a fade-in (opacity 0 with an opacity transition) shows its end state without scripts" do
+      css = "[data-reveal] { opacity: 0; transition: opacity .7s ease, transform .7s ease }"
+      nodes = prune(~s(<div data-reveal><h1>x</h1></div>), css)
+      assert computed_of(nodes, "div")["visibility"] == nil
+      assert computed_of(nodes, "h1")["visibility"] == nil
+      assert computed_of(nodes, "div")["opacity"] == nil
+
+      css = ".a { opacity: 0; transition-property: transform, opacity }"
+      assert computed_of(prune(~s(<p class="a">x</p>), css), "p")["visibility"] == nil
+    end
+
+    test "but a hidden menu that ignores pointer events stays hidden" do
+      css = ".menu { opacity: 0; pointer-events: none; transition: opacity .2s }"
+      nodes = prune(~s(<div class="menu"><a href="/">x</a></div>), css)
+      assert computed_of(nodes, "div")["visibility"] == "hidden"
+      assert computed_of(nodes, "a")["visibility"] == "hidden"
+    end
+
+    test "opacity zero with a transition on something else stays hidden" do
+      css = ".a { opacity: 0; transition: transform .2s }"
+      assert computed_of(prune(~s(<p class="a">x</p>), css), "p")["visibility"] == "hidden"
+    end
+
     test "sizes and offsets are typed: px, percentages, auto for width/height" do
       html =
         ~s(<p style="position:absolute; top:5px; left:10%; width:2em; height:auto; max-height:none">x</p>)

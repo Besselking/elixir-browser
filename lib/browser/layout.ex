@@ -23,6 +23,9 @@ defmodule Browser.Layout do
   @margin 4
   @legacy_gap 10
   @legacy_indent 28
+  # the width a box is laid out at to find how wide its content wants to be
+  @unbounded 100_000
+
   @skip ~w(head script style title template)
 
   @block_tags ~w(address article aside blockquote body center details dialog dd div dl dt
@@ -31,7 +34,44 @@ defmodule Browser.Layout do
                  tfoot)
   @legacy_gap_tags ~w(p ul ol pre h1 h2 h3 h4 h5 h6 blockquote)
   @headings %{"h1" => 32, "h2" => 24, "h3" => 19, "h4" => 16, "h5" => 13, "h6" => 11}
-  @mono_fonts ~w(monospace courier menlo monaco consolas ui-monospace sfmono-regular)
+  # Fonts we can tell apart in a font-family list. Names of web fonts (which are not loaded)
+  # are skipped: the first font we know decides, as with the fonts a browser has installed.
+  @mono_fonts [
+    "monospace",
+    "ui-monospace",
+    "sfmono-regular",
+    "sf mono",
+    "menlo",
+    "monaco",
+    "consolas",
+    "courier",
+    "courier new",
+    "liberation mono",
+    "dejavu sans mono",
+    "lucida console"
+  ]
+  @proportional_fonts [
+    "sans-serif",
+    "serif",
+    "system-ui",
+    "ui-sans-serif",
+    "ui-serif",
+    "ui-rounded",
+    "-apple-system",
+    "blinkmacsystemfont",
+    "segoe ui",
+    "roboto",
+    "helvetica",
+    "helvetica neue",
+    "arial",
+    "times",
+    "times new roman",
+    "georgia",
+    "verdana",
+    "tahoma",
+    "cursive",
+    "fantasy"
+  ]
 
   def title(nodes) do
     case find(nodes, "title") do
@@ -323,7 +363,20 @@ defmodule Browser.Layout do
 
   @background_keys ~w(background-color background-image background-repeat background-position background-size)
 
-  defp has_background?(c), do: match?({_, _, _}, c["background-color"]) or bgimg_spec(c) != nil
+  defp has_background?(c), do: color?(c["background-color"]) or bgimg_spec(c) != nil
+
+  # an opaque `{r, g, b}` or translucent `{r, g, b, a}` colour
+  defp color?({_, _, _}), do: true
+  defp color?({_, _, _, _}), do: true
+  defp color?(_), do: false
+
+  # the canvas is painted first, over white: a translucent colour is blended with it
+  defp over_white({r, g, b, a}) do
+    f = a / 255
+    {round(r * f + 255 * (1 - f)), round(g * f + 255 * (1 - f)), round(b * f + 255 * (1 - f))}
+  end
+
+  defp over_white(c), do: c
 
   defp without_background(attrs) do
     List.keyreplace(
@@ -336,7 +389,7 @@ defmodule Browser.Layout do
 
   defp canvas_style(c) do
     %{
-      color: if(match?({_, _, _}, c["background-color"]), do: c["background-color"]),
+      color: if(color?(c["background-color"]), do: over_white(c["background-color"])),
       bgimg: bgimg_spec(c),
       current: if(match?({_, _, _}, c["color"]), do: c["color"], else: {0, 0, 0})
     }
@@ -401,11 +454,26 @@ defmodule Browser.Layout do
           forced -> forced
         end
 
+      fit? = c["width"] == :fit and kind in [:block, :flex]
+
       case kind do
-        :contents -> walk(kids, style, acc)
-        :inline -> inline_ops(tag, kids, style, c, acc)
-        :inline_block -> inline_block_ops(el, parent_style, c, acc)
-        kind -> block_ops(tag, kind, kids, style, c, acc)
+        :contents ->
+          walk(kids, style, acc)
+
+        :inline ->
+          inline_ops(tag, kids, style, c, acc)
+
+        :inline_block ->
+          inline_block_ops(el, parent_style, c, acc)
+
+        # `width: fit-content`: a block as wide as its content, on a line of its own
+        _ when fit? ->
+          acc = [{:flush} | acc]
+          acc = inline_block_ops(el, parent_style, c, acc)
+          [{:flush} | acc]
+
+        kind ->
+          block_ops(tag, kind, kids, style, c, acc)
       end
     end
   end
@@ -442,7 +510,8 @@ defmodule Browser.Layout do
         extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
         rextra: box.pr + br,
         mextra: 0,
-        fixed: c["position"] == "fixed"
+        fixed: c["position"] == "fixed",
+        translate: translate_of(c)
       }
 
       [{:abs, sub, spec} | acc]
@@ -571,7 +640,8 @@ defmodule Browser.Layout do
       box: box,
       href: style.href,
       hidden: style.hidden,
-      valign: c["vertical-align"]
+      # a block-level picture sits on a line of its own: vertical-align does not apply
+      valign: if(block?, do: nil, else: c["vertical-align"])
     }
 
     spec = Map.merge(spec, extra)
@@ -585,9 +655,7 @@ defmodule Browser.Layout do
 
   # the box an inline-block establishes inside itself
   defp inner_kind(c) do
-    if c["display"] == "inline-flex" and c["flex-direction"] not in ["column", "column-reverse"],
-      do: :flex,
-      else: :block
+    if c["display"] in ["flex", "inline-flex"], do: :flex, else: :block
   end
 
   # An inline-block is laid out on its own (a block inside) and then placed in
@@ -647,7 +715,7 @@ defmodule Browser.Layout do
         :list_item
 
       "flex" ->
-        if c["flex-direction"] in ["column", "column-reverse"], do: :block, else: :flex
+        :flex
 
       "contents" ->
         :contents
@@ -724,14 +792,14 @@ defmodule Browser.Layout do
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
           acc = if box.pt > 0, do: [{:pad, box.pt} | acc], else: acc
-          acc = block_children(tag, kind, kids, style, acc)
+          acc = block_children(tag, kind, kids, style, c, acc)
           acc = [{:flush} | acc]
           acc = if box.pb > 0, do: [{:pad, box.pb} | acc], else: acc
           [{:gap, box.mb}, {:inset_end} | acc]
 
         spec ->
           acc = [{:box_start, ref, spec} | acc]
-          acc = block_children(tag, kind, kids, style, acc)
+          acc = block_children(tag, kind, kids, style, c, acc)
           acc = [{:box_end, ref}, {:flush} | acc]
           [{:gap, box.mb} | acc]
       end
@@ -780,6 +848,7 @@ defmodule Browser.Layout do
 
   # `auto` is the same as no width/height for everything but images
   defp dim(:auto), do: nil
+  defp dim(:fit), do: nil
   defp dim(v), do: v
 
   defp num(v) when is_number(v), do: v
@@ -790,29 +859,39 @@ defmodule Browser.Layout do
       Map.get(c, "overflow-y", "visible") in ~w(hidden clip scroll auto)
   end
 
-  defp block_children(_tag, :flex, kids, style, acc) do
-    kids
-    |> Enum.reduce({acc, false}, fn
-      {:text, _} = t, {a, _} ->
-        {walk(t, style, a), false}
+  # A flex container lays its children out as one unit at placement time (`op({:flex, ...})`),
+  # when the width they share is known. Out-of-flow children are placed as usual.
+  defp block_children(tag, :flex, kids, style, c, acc) do
+    {items, acc} =
+      Enum.reduce(kids, {[], acc}, fn
+        {:text, t}, {items, acc} ->
+          if String.trim(t) == "",
+            do: {items, acc},
+            else: {[flex_text_item(t, style) | items], acc}
 
-      {:element, tag, _, _} = el, {a, sep?} when tag not in @skip ->
-        a = if sep?, do: [{:space, style} | a], else: a
-        {flex_item(el, style, a), true}
+        {:element, tag, _, _}, {items, acc} when tag in @skip ->
+          {items, acc}
 
-      _, acc2 ->
-        acc2
-    end)
-    |> elem(0)
+        {:element, _tag, attrs, _} = el, {items, acc} ->
+          ic = computed(attrs)
+
+          cond do
+            hidden?(ic) -> {items, acc}
+            ic["position"] in ["absolute", "fixed"] -> {items, walk(el, style, acc)}
+            true -> {[flex_element_item(el, ic, style) | items], acc}
+          end
+
+        _, state ->
+          state
+      end)
+
+    case Enum.reverse(items) do
+      [] -> acc
+      items -> [{:flex, flex_spec(tag, c), items, style} | acc]
+    end
   end
 
-  defp block_children(tag, _kind, kids, style, acc), do: walk_children(tag, kids, style, acc)
-
-  # replaced elements are not ordinary boxes
-  defp flex_item({:element, tag, _, _} = el, style, acc) when tag in ~w(img svg),
-    do: walk(el, style, acc)
-
-  defp flex_item(el, style, acc), do: walk_element(el, style, acc, :inline)
+  defp block_children(tag, _kind, kids, style, _c, acc), do: walk_children(tag, kids, style, acc)
 
   # ul/ol number their list items and emit markers; everything else just recurses
   defp walk_children(tag, kids, style, acc) when tag in ~w(ul ol) do
@@ -891,7 +970,7 @@ defmodule Browser.Layout do
         border_c(c, "bottom", color),
         border_c(c, "left", color)
       },
-      bg: if(match?({_, _, _}, c["background-color"]), do: c["background-color"]),
+      bg: if(color?(c["background-color"]), do: c["background-color"]),
       r: radii_spec(c),
       bgimg: bgimg_spec(c),
       shadows: c["box-shadow"] || [],
@@ -940,6 +1019,7 @@ defmodule Browser.Layout do
   defp border_c(c, side, default) do
     case c["border-#{side}-color"] do
       {_, _, _} = rgb -> rgb
+      {_, _, _, _} = rgba -> rgba
       :transparent -> nil
       _ -> default
     end
@@ -1025,15 +1105,21 @@ defmodule Browser.Layout do
   defp put_if(style, value, fun), do: fun.(style, value)
 
   defp mono?(family) do
-    first =
-      family
-      |> String.split(",")
-      |> hd()
-      |> String.trim()
-      |> String.trim("\"")
-      |> String.trim("'")
-
-    first in @mono_fonts
+    family
+    |> String.split(",")
+    |> Enum.map(
+      &(&1
+        |> String.trim()
+        |> String.trim("\"")
+        |> String.trim("'")
+        |> String.downcase())
+    )
+    |> Enum.find_value(false, fn
+      name when name in @mono_fonts -> :mono
+      name when name in @proportional_fonts -> :proportional
+      _web_or_unknown -> nil
+    end)
+    |> Kernel.==(:mono)
   end
 
   defp align("center"), do: :center
@@ -1198,6 +1284,25 @@ defmodule Browser.Layout do
     })
   end
 
+  defp op({:flex, cs, items, style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    # when measuring how wide the content wants to be (an unbounded width), the container
+    # is as wide as its items, rather than spreading them over the whole width
+    avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
+    {laid, height} = flex_layout(st, cs, items, avail)
+    # lets a measuring layout see how wide the container is, and what is reserved after it
+    laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: st.right} | laid]
+
+    place_atom(st, %{
+      w: avail,
+      h: height,
+      base: height,
+      items: laid,
+      align: style.align,
+      valign: nil
+    })
+  end
+
   # An image is a replaced element: an atom whose content is the picture inside
   # whatever box (border, padding, background, radius) the element has.
   defp op({:image, spec, style}, st) do
@@ -1233,7 +1338,8 @@ defmodule Browser.Layout do
           w: cw,
           h: ch,
           href: spec.href,
-          hidden: spec.hidden
+          hidden: spec.hidden,
+          rr: st.right + box.pr + br + mr
         }
 
         case spec do
@@ -1678,9 +1784,72 @@ defmodule Browser.Layout do
       end
 
     x = if left, do: origin.x + left, else: x
-    moved = for it <- items, do: move(it, x, y)
+    {tx, ty} = resolve_translate(spec.translate, width, height)
+    moved = for it <- items, do: move(it, x + tx, y + ty)
     %{st | overlays: [moved | st.overlays]}
   end
+
+  # The translation of a box: `translate: x y` or `transform: translate(x, y)` (also translateX
+  # and translateY), each as `{:px, n}` or `{:pct, fraction of the box}`.
+  defp translate_of(c) do
+    fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
+
+    from_property = c["translate"] |> translate_pair(fs)
+
+    from_transform =
+      case c["transform"] do
+        t when is_binary(t) ->
+          Regex.scan(~r/translate(x|y|3d)?\(([^)]*(?:\([^)]*\)[^)]*)*)\)/, t)
+          |> Enum.reduce({nil, nil}, fn [_, axis, args], {x, y} ->
+            parts = args |> String.split(",") |> Enum.map(&translate_value(&1, fs))
+
+            case {axis, parts} do
+              {"x", [v]} -> {v || x, y}
+              {"y", [v]} -> {x, v || y}
+              {_, [vx, vy | _]} -> {vx || x, vy || y}
+              {_, [vx]} -> {vx || x, y}
+            end
+          end)
+
+        _ ->
+          {nil, nil}
+      end
+
+    {tx, ty} = if from_transform != {nil, nil}, do: from_transform, else: from_property
+    if tx || ty, do: {tx || {:px, 0}, ty || {:px, 0}}
+  end
+
+  defp translate_pair(value, fs) when is_binary(value) do
+    case Regex.scan(~r/[\w.%-]*\((?:[^()]|\([^()]*\))*\)|\S+/, value) |> List.flatten() do
+      [x] -> {translate_value(x, fs), nil}
+      [x, y | _] -> {translate_value(x, fs), translate_value(y, fs)}
+      _ -> {nil, nil}
+    end
+  end
+
+  defp translate_pair(_, _fs), do: {nil, nil}
+
+  defp translate_value(text, fs) do
+    text = String.trim(text)
+
+    if text == "0" do
+      {:px, 0}
+    else
+      case Browser.Calc.eval("calc(" <> text <> ")", &Browser.Calc.unit_px(&1, fs, 16.0)) do
+        {:ok, {:px, n}} -> {:px, n}
+        {:ok, {:pct, f}} -> {:pct, f}
+        _ -> nil
+      end
+    end
+  end
+
+  defp resolve_translate(nil, _w, _h), do: {0, 0}
+
+  defp resolve_translate({tx, ty}, w, h),
+    do: {round(translate_px(tx, w)), round(translate_px(ty, h))}
+
+  defp translate_px({:px, n}, _size), do: n
+  defp translate_px({:pct, f}, size), do: f * size
 
   # Moves an item, including the coordinates held inside it: the clip, the tiles and
   # clip of background layers, the shapes of shadows.
@@ -1777,7 +1946,7 @@ defmodule Browser.Layout do
     width =
       case resolve(spec.width, avail) do
         nil ->
-          min(avail, shrink_extent(st, sub, max(avail, 1)) + spec.rextra)
+          min(avail, shrink_extent(st, sub, max(avail, 1)))
 
         w ->
           w + spec.extra + spec.mextra
@@ -1822,8 +1991,8 @@ defmodule Browser.Layout do
   # right edge of the text, for shrink-to-fit
   defp extent(items) do
     items
-    |> Enum.filter(&(&1.type == :text))
-    |> Enum.map(&(&1.x + &1.w))
+    |> Enum.filter(&(&1.type in [:text, :image, :svg, :box]))
+    |> Enum.map(&(&1.x + &1.w + Map.get(&1, :rr, 0)))
     |> Enum.max(fn -> 0 end)
   end
 
@@ -1885,7 +2054,9 @@ defmodule Browser.Layout do
       underline: style.underline,
       strike: style.strike,
       align: style.align,
-      cid: style.cid
+      cid: style.cid,
+      # the room boxes around it keep free on its right: for measuring how wide content is
+      rr: st.right
     }
 
     st = bridge(st, item, space_w)
@@ -2124,5 +2295,364 @@ defmodule Browser.Layout do
       :right -> max(round(free), 0)
       :left -> 0
     end
+  end
+
+  # -- flexbox ------------------------------------------------------------------------------
+
+  defp flex_spec(tag, c) do
+    fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
+    box = box(tag, c)
+    {bt, _br, bb, _bl} = box.bw
+    vextra = if c["box-sizing"] == "border-box", do: box.pt + box.pb + bt + bb, else: 0
+    # the content height a container with a height of its own gives its line
+    inner = fn v -> if is_number(v), do: max(v - vextra, 0) end
+
+    %{
+      dir: flex_direction(c["flex-direction"]),
+      wrap: c["flex-wrap"] in ["wrap", "wrap-reverse"],
+      justify: c["justify-content"] || "flex-start",
+      align: c["align-items"] || "stretch",
+      col_gap: num(c["column-gap"]) || 0.0,
+      row_gap: num(c["row-gap"]) || 0.0,
+      height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
+      fs: fs
+    }
+  end
+
+  defp flex_direction("row-reverse"), do: :row_reverse
+  defp flex_direction("column"), do: :column
+  defp flex_direction("column-reverse"), do: :column_reverse
+  defp flex_direction(_), do: :row
+
+  defp flex_text_item(text, style) do
+    %{
+      sub: walk({:text, text}, style, []) |> Enum.reverse(),
+      rebuild: nil,
+      grow: 0.0,
+      shrink: 1.0,
+      basis: nil,
+      width: nil,
+      minw: nil,
+      maxw: nil,
+      extra: 0,
+      rextra: 0,
+      ml: 0,
+      mr: 0,
+      mt: 0,
+      mb: 0,
+      vextra: 0,
+      sizing: :content,
+      align: "auto",
+      order: 0,
+      auto_height?: true,
+      fit?: false
+    }
+  end
+
+  # A child of a flex container: laid out on its own as a block (like an inline-block),
+  # with its horizontal margins and its width taken over by the container.
+  defp flex_element_item({:element, tag, attrs, kids} = el, c, style) do
+    box = box(tag, c)
+    {bt, br, bb, bl} = box.bw
+    border_box? = c["box-sizing"] == "border-box"
+    fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
+
+    build = fn extra_props ->
+      if tag in ~w(img svg) do
+        el |> walk(style, []) |> Enum.reverse()
+      else
+        own =
+          c
+          |> Map.drop(~w(width min-width max-width flex-basis))
+          |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
+          |> Map.merge(extra_props)
+
+        attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+
+        {:element, tag, attrs, kids}
+        |> walk_element(style, [], :inline_inner)
+        |> Enum.reverse()
+      end
+    end
+
+    %{
+      sub: build.(%{}),
+      rebuild: if(tag in ~w(img svg), do: nil, else: build),
+      grow: flex_number(c["flex-grow"], 0.0),
+      shrink: flex_number(c["flex-shrink"], 1.0),
+      basis: len_value(c["flex-basis"], fs),
+      width: dim(c["width"]),
+      minw: c["min-width"],
+      maxw: c["max-width"],
+      extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
+      rextra: box.pr + br,
+      ml: box.ml,
+      mr: box.mr,
+      mt: box.mt,
+      mb: box.mb,
+      vextra: box.pt + box.pb + bt + bb,
+      sizing: if(border_box?, do: :border, else: :content),
+      align: c["align-self"] || "auto",
+      order: flex_number(c["order"], 0.0),
+      auto_height?: c["height"] in [nil, :auto],
+      fit?: c["width"] == :fit
+    }
+  end
+
+  defp flex_number(v, default) when is_binary(v) do
+    case Float.parse(v) do
+      {n, ""} -> n
+      _ -> default
+    end
+  end
+
+  defp flex_number(_v, default), do: default
+
+  # a length or percentage written as text: `{:px, n}`, `{:pct, f}`, or nil (auto, content)
+  defp len_value(text, fs) when is_binary(text) do
+    text = String.trim(text)
+
+    cond do
+      text in ["", "auto", "content", "none"] -> nil
+      text == "0" -> {:px, 0.0}
+      true -> translate_value(text, fs)
+    end
+  end
+
+  defp len_value(n, _fs) when is_number(n), do: {:px, n * 1.0}
+  defp len_value(_, _fs), do: nil
+
+  defp len_px({:px, n}, _base), do: n
+  defp len_px({:pct, f}, base), do: f * base
+
+  defp flex_natural_width(st, cs, items, avail) do
+    widths =
+      for it <- items,
+          do: flex_base(st, it, avail) + auto_zero(it.ml) + auto_zero(it.mr)
+
+    if cs.dir in [:row, :row_reverse],
+      do: round(Enum.sum(widths) + cs.col_gap * (length(items) - 1)),
+      else: round(Enum.max(widths, fn -> 0 end))
+  end
+
+  defp flex_layout(_st, _cs, [], _avail), do: {[], 0}
+
+  defp flex_layout(st, cs, items, avail) do
+    items = Enum.sort_by(items, & &1.order)
+    reverse? = cs.dir in [:row_reverse, :column_reverse]
+    items = if reverse?, do: Enum.reverse(items), else: items
+
+    if cs.dir in [:row, :row_reverse],
+      do: flex_row(st, cs, items, avail),
+      else: flex_column(st, cs, items, avail)
+  end
+
+  defp auto_zero(:auto), do: 0
+  defp auto_zero(n), do: n
+
+  # the border-box width an item would like
+  defp flex_base(st, it, avail) do
+    w =
+      cond do
+        it.basis != nil -> len_px(it.basis, avail) + it.extra
+        it.width != nil -> resolve(it.width, avail) + it.extra
+        true -> shrink_extent(st, it.sub, @unbounded)
+      end
+
+    clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+  end
+
+  defp flex_row(st, cs, items, avail) do
+    items = Enum.map(items, &Map.put(&1, :hw, flex_base(st, &1, avail) * 1.0))
+
+    lines =
+      if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
+
+    {laid, y} =
+      Enum.map_reduce(lines, 0, fn line, y ->
+        min_cross = if length(lines) == 1, do: cs.height || 0, else: 0
+        {line_items, cross} = flex_line(st, cs, line, avail, y, min_cross)
+        {line_items, y + cross + round(cs.row_gap)}
+      end)
+
+    {List.flatten(laid), max(y - round(cs.row_gap), 0)}
+  end
+
+  # wrapping: a new line when the next item no longer fits
+  defp flex_break(items, gap, avail) do
+    {lines, current, _used} =
+      Enum.reduce(items, {[], [], 0.0}, fn it, {lines, cur, used} ->
+        outer = it.hw + auto_zero(it.ml) + auto_zero(it.mr)
+        needed = if cur == [], do: outer, else: used + gap + outer
+
+        if cur != [] and needed > avail,
+          do: {[Enum.reverse(cur) | lines], [it], outer},
+          else: {lines, [it | cur], needed}
+      end)
+
+    Enum.reverse(if current == [], do: lines, else: [Enum.reverse(current) | lines])
+  end
+
+  defp flex_line(st, cs, line, avail, top, min_cross) do
+    n = length(line)
+    gaps = cs.col_gap * (n - 1)
+    outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end
+    free = avail - Enum.sum(Enum.map(line, outer)) - gaps
+
+    line = flex_resize(line, free, avail)
+    free = avail - Enum.sum(Enum.map(line, outer)) - gaps
+
+    # auto margins take the free space before justify-content does
+    autos = Enum.sum(for it <- line, m <- [it.ml, it.mr], m == :auto, do: 1)
+
+    {line, free} =
+      if free > 0 and autos > 0 do
+        share = free / autos
+        fix = fn m -> if m == :auto, do: share, else: m end
+        {Enum.map(line, &%{&1 | ml: fix.(&1.ml), mr: fix.(&1.mr)}), 0.0}
+      else
+        {Enum.map(line, &%{&1 | ml: auto_zero(&1.ml), mr: auto_zero(&1.mr)}), free}
+      end
+
+    {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, max(free, 0.0), n)
+
+    # lay every item out at its final width, find the height of the line
+    sized =
+      Enum.map(line, fn it ->
+        w = max(round(it.hw), 1)
+        {items, h, _base} = layout_atom(st, it.sub, w)
+        Map.merge(it, %{w: w, items: items, h: h})
+      end)
+
+    cross = sized |> Enum.map(& &1.h) |> Enum.max() |> max(round(min_cross))
+
+    {placed, _x} =
+      Enum.map_reduce(sized, start, fn it, x ->
+        it = flex_stretch(st, it, cs.align, cross)
+        dy = flex_offset(flex_align(it, cs.align), cross, it.h)
+        ix = x + it.ml
+        moved = for item <- it.items, do: move(item, round(ix), top + dy)
+        {moved, ix + it.w + it.mr + cs.col_gap + between}
+      end)
+
+    {placed, cross}
+  end
+
+  # grow into free space, or shrink in proportion to the base size
+  defp flex_resize(line, free, avail) when free > 0 do
+    total = line |> Enum.map(& &1.grow) |> Enum.sum()
+
+    if total > 0 do
+      Enum.map(line, fn it ->
+        w = it.hw + free * it.grow / total
+
+        %{
+          it
+          | hw:
+              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail) *
+                1.0
+        }
+      end)
+    else
+      line
+    end
+  end
+
+  defp flex_resize(line, free, avail) when free < 0 do
+    total = line |> Enum.map(&(&1.shrink * &1.hw)) |> Enum.sum()
+
+    if total > 0 do
+      Enum.map(line, fn it ->
+        w = it.hw + free * it.shrink * it.hw / total
+        w = max(w, it.extra + 0.0)
+
+        %{
+          it
+          | hw:
+              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail) *
+                1.0
+        }
+      end)
+    else
+      line
+    end
+  end
+
+  defp flex_resize(line, _free, _avail), do: line
+
+  # -> {offset before the first item, extra space between items}
+  defp flex_justify(justify, reversed?, free, n) do
+    justify =
+      case {justify, reversed?} do
+        {j, true} when j in ["flex-start", "start", "normal"] -> "flex-end"
+        {j, true} when j in ["flex-end", "end"] -> "flex-start"
+        {j, _} -> j
+      end
+
+    case justify do
+      j when j in ["flex-end", "end", "right"] -> {free, 0.0}
+      "center" -> {free / 2, 0.0}
+      "space-between" when n > 1 -> {0.0, free / (n - 1)}
+      "space-around" -> {free / n / 2, free / n}
+      "space-evenly" -> {free / (n + 1), free / (n + 1)}
+      _ -> {0.0, 0.0}
+    end
+  end
+
+  defp flex_align(%{align: "auto"}, container), do: container
+  defp flex_align(%{align: own}, _container), do: own
+
+  defp flex_offset(align, cross, h) when align in ["center"], do: round((cross - h) / 2)
+  defp flex_offset(align, cross, h) when align in ["flex-end", "end"], do: cross - h
+  defp flex_offset(_align, _cross, _h), do: 0
+
+  # a stretched item with an automatic height fills the line: laid out again with a minimum height
+  defp flex_stretch(st, it, container_align, cross) do
+    stretch? = flex_align(it, container_align) in ["stretch", "normal"]
+
+    if stretch? and it.auto_height? and it.rebuild != nil and it.h < cross do
+      box_h = cross - it.mt - it.mb
+      min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
+      sub = it.rebuild.(%{"min-height" => max(min_h, 0) * 1.0})
+      {items, h, _} = layout_atom(st, sub, it.w)
+      %{it | items: items, h: max(h, cross)}
+    else
+      it
+    end
+  end
+
+  defp flex_column(st, cs, items, avail) do
+    {laid, y} =
+      Enum.reduce(items, {[], 0}, fn it, {laid, y} ->
+        ml = it.ml
+        mr = it.mr
+        room = avail - auto_zero(ml) - auto_zero(mr)
+        align = flex_align(it, cs.align)
+
+        w =
+          cond do
+            it.width != nil -> resolve(it.width, avail) + it.extra
+            align in ["stretch", "normal"] and not it.fit? -> room
+            true -> min(room, shrink_extent(st, it.sub, @unbounded))
+          end
+
+        w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+        w = max(round(w), 1)
+        {items, h, _} = layout_atom(st, it.sub, w)
+
+        x =
+          cond do
+            ml == :auto and mr == :auto -> round((avail - w) / 2)
+            ml == :auto -> avail - w - mr
+            align in ["center"] -> round((avail - w) / 2)
+            align in ["flex-end", "end"] -> avail - w - mr
+            true -> ml
+          end
+
+        moved = for item <- items, do: move(item, round(x), y)
+        {[moved | laid], y + h + round(cs.row_gap)}
+      end)
+
+    {laid |> Enum.reverse() |> List.flatten(), max(y - round(cs.row_gap), 0)}
   end
 end

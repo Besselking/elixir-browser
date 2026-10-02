@@ -24,11 +24,14 @@ defmodule Browser.Style do
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-            stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor)
+            stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
+            transition transition-property pointer-events transform translate
+            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
+            row-gap column-gap order)
   @inherited ~w(visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events)
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -297,6 +300,28 @@ defmodule Browser.Style do
     "padding-inline" => {"padding-left", "padding-right"}
   }
 
+  defp expand({"flex", value, imp}) do
+    {grow, shrink, basis} =
+      case value |> String.trim() |> String.downcase() |> tokens() do
+        ["none"] -> {"0", "0", "auto"}
+        ["auto"] -> {"1", "1", "auto"}
+        [one] -> if number?(one), do: {one, "1", "0%"}, else: {"1", "1", one}
+        [a, b] -> if number?(b), do: {a, b, "0%"}, else: {a, "1", b}
+        [a, b, c | _] -> {a, b, c}
+        [] -> {"0", "1", "auto"}
+      end
+
+    [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  defp expand({"gap", value, imp}) do
+    case tokens(String.trim(value)) do
+      [a] -> [{"row-gap", a, imp}, {"column-gap", a, imp}]
+      [a, b | _] -> [{"row-gap", a, imp}, {"column-gap", b, imp}]
+      [] -> []
+    end
+  end
+
   defp expand({prop, value, imp}) when is_map_key(@logical, prop),
     do: expand({@logical[prop], value, imp})
 
@@ -356,6 +381,8 @@ defmodule Browser.Style do
       [] -> List.duplicate("0", 4)
     end
   end
+
+  defp number?(token), do: Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, token)
 
   defp tokens(v), do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(v) |> List.flatten()
 
@@ -603,8 +630,24 @@ defmodule Browser.Style do
 
     base = if color, do: Map.put(base, "color", color), else: base
     # a fully transparent element (and, approximately, its subtree) takes space but isn't painted
-    base = if base["opacity"] == 0.0, do: Map.put(base, "visibility", "hidden"), else: base
+    base =
+      cond do
+        base["opacity"] != 0.0 -> base
+        # without scripts a reveal animation never runs: what would fade in shows its end state
+        reveal?(base) -> Map.delete(base, "opacity")
+        true -> Map.put(base, "visibility", "hidden")
+      end
+
     {base, custom}
+  end
+
+  # `opacity: 0` with a transition on opacity, on something that takes clicks: a scripted
+  # fade-in (a hidden menu or dialog turns pointer events off as well)
+  defp reveal?(c) do
+    c["pointer-events"] != "none" and
+      Enum.any?(["transition", "transition-property"], fn k ->
+        is_binary(c[k]) and Regex.match?(~r/(\A|[\s,])opacity(\z|[\s,])/, c[k])
+      end)
   end
 
   # substitute var() and finish pending shorthands; -> %{prop => normalized string}
@@ -690,7 +733,7 @@ defmodule Browser.Style do
   end
 
   defp typed("background-color", v, env, _pc) do
-    case color_value(v, env.color) do
+    case color_value_rgba(v, env.color) do
       nil -> :skip
       c -> {:ok, c}
     end
@@ -716,8 +759,26 @@ defmodule Browser.Style do
   # overrides the size attributes of images)
   defp typed(prop, "auto", _env, _pc) when prop in ["width", "height"], do: {:ok, :auto}
 
+  # fit-content: as wide as the content wants (a block that sizes itself like an inline-block)
+  defp typed("width", v, _env, _pc)
+       when v in [
+              "fit-content",
+              "max-content",
+              "min-content",
+              "-webkit-fit-content",
+              "-moz-fit-content"
+            ],
+       do: {:ok, :fit}
+
   defp typed(prop, v, env, _pc) when prop in @size_props do
     cond do
+      Browser.Calc.math?(v) ->
+        case Browser.Calc.eval(v, &unit_px(&1, env)) do
+          {:ok, {:pct, f}} -> {:ok, {:pct, f}}
+          {:ok, {:px, n}} -> {:ok, n}
+          _ -> :skip
+        end
+
       m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) ->
         {:ok, {:pct, m |> Enum.at(1) |> to_float() |> Kernel./(100)}}
 
@@ -745,7 +806,7 @@ defmodule Browser.Style do
   end
 
   defp typed(prop, v, env, _pc) when prop in @border_colors do
-    case color_value(v, env.color) do
+    case color_value_rgba(v, env.color) do
       nil -> :skip
       c -> {:ok, c}
     end
@@ -775,6 +836,11 @@ defmodule Browser.Style do
 
   # `normal`, a number (a factor of the font size, inherited as such), or a
   # length/percentage (resolved against this element's font size to px)
+  defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
+    px = if v == "normal", do: 0.0, else: length(v, env)
+    if px && px >= 0, do: {:ok, px}, else: :skip
+  end
+
   defp typed("line-height", v, env, _pc) do
     cond do
       v == "normal" ->
@@ -841,6 +907,14 @@ defmodule Browser.Style do
   defp valid_radius?(n) when is_number(n), do: n >= 0
   defp valid_radius?(_), do: false
 
+  # backgrounds and borders keep their alpha: `{r, g, b, a}` when translucent
+  defp color_value_rgba(v, current) do
+    case Browser.Color.parse_rgba(v) do
+      :current -> current
+      c -> c
+    end
+  end
+
   defp color_value(v, current) do
     case Browser.Color.parse(v) do
       :current -> current
@@ -888,6 +962,21 @@ defmodule Browser.Style do
 
   # a CSS length in px, or nil if unsupported (percentages, calc(), viewport units)
   defp length(v, env) do
+    if Browser.Calc.math?(v), do: math_length(v, env), else: plain_length(v, env)
+  end
+
+  # calc(), min(), max(), clamp(): a length, or nil when it can't be resolved to px
+  defp math_length(v, env) do
+    case Browser.Calc.eval(v, &unit_px(&1, env)) do
+      {:ok, {:px, n}} -> n
+      {:ok, {:num, n}} when n == 0 -> 0.0
+      _ -> nil
+    end
+  end
+
+  defp unit_px(unit, env), do: Browser.Calc.unit_px(unit, env.fs, env.root)
+
+  defp plain_length(v, env) do
     case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))([a-z]*)\z/, v) do
       [_, n, unit] ->
         n = n |> String.trim_leading("+") |> normalize_num_signed() |> String.to_float()

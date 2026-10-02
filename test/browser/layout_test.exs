@@ -154,7 +154,8 @@ defmodule Browser.LayoutTest do
       css = "<style>.row { display: flex }</style>"
       {items, _} = styled(css <> ~s(<div class="row"><div>left</div><div>right</div></div>))
       assert word(items, "left").y == word(items, "right").y
-      assert word(items, "right").x > word(items, "left").x + word(items, "left").w
+      # flex items are flush: no whitespace between them
+      assert word(items, "right").x == word(items, "left").x + word(items, "left").w
 
       {items, _} =
         styled(
@@ -180,6 +181,24 @@ defmodule Browser.LayoutTest do
       {items, _} = styled(~s(<p>a<span style="font-size:0">b</span>c</p>))
       assert word(items, "b").hidden
       refute word(items, "a").hidden
+    end
+
+    test "a translucent background is painted with its alpha" do
+      {items, _} = styled(~s|<p style="background: rgb(0 0 0 / 25%)">x</p>|)
+      assert [%{color: {0, 0, 0, 64}}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "web fonts that are not loaded are skipped, the first known font decides" do
+      {items, _} =
+        styled(
+          ~s|<p style='font-family: "DM Mono", "DM Mono fallback", ui-monospace, monospace'>a</p>| <>
+            ~s|<p style='font-family: "DM Sans", sans-serif, monospace'>b</p>| <>
+            ~s|<p style='font-family: "Fancy Face"'>c</p>|
+        )
+
+      assert word(items, "a").mono
+      refute word(items, "b").mono
+      refute word(items, "c").mono
     end
 
     test "monospace family is detected from the first family" do
@@ -266,6 +285,32 @@ defmodule Browser.LayoutTest do
     end
 
     defp wd(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "translate moves an absolute box, percentages by its own size" do
+      base = ~s|position:absolute; top:100px; left:200px; width:100px; height:40px|
+      {plain, _} = abs_layout(~s|<div style="#{base}">hi</div>|)
+      at = wd(plain, "hi")
+
+      {moved, _} = abs_layout(~s|<div style="#{base}; transform: translate(-50%, 10px)">hi</div>|)
+      assert %{x: x, y: y} = wd(moved, "hi")
+      assert {x, y} == {at.x - 50, at.y + 10}
+
+      {moved, _} = abs_layout(~s|<div style="#{base}; transform: translateY(-110%)">hi</div>|)
+      assert wd(moved, "hi").y == at.y - 44
+      assert wd(moved, "hi").x == at.x
+    end
+
+    test "the translate property, as Tailwind writes it" do
+      base = ~s|position:absolute; top:100px; left:200px; width:100px; height:40px|
+      {plain, _} = abs_layout(~s|<div style="#{base}">hi</div>|)
+
+      css =
+        "<style>.t{--tw-translate-x:calc(calc(1/2*100%)*-1);--tw-translate-y:0;translate:var(--tw-translate-x)var(--tw-translate-y)}</style>"
+
+      {moved, _} = abs_layout(css <> ~s|<div class="t" style="#{base}">hi</div>|)
+      assert wd(moved, "hi").x == wd(plain, "hi").x - 50
+      assert wd(moved, "hi").y == wd(plain, "hi").y
+    end
 
     test "absolute elements take no space in the flow" do
       {items, _} =
@@ -2237,6 +2282,266 @@ defmodule Browser.LayoutTest do
         ~s|<div style="width:100px;overflow:hidden"><div style="width:900px;background:#eee">x</div></div>|
 
       assert content(html) == 400
+    end
+  end
+
+  describe "flexbox" do
+    alias Browser.Page
+
+    # 8px per character (see measure/2 at 16px); the page keeps a 4px margin on both sides
+    defp flex(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} div,p{margin:0}</style>" <> html, "about:home")
+      {items, h} = Layout.layout(page.nodes, width, &measure/2, 600)
+      {items, h}
+    end
+
+    defp at(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+    defp x_of(items, text), do: at(items, text).x - 4
+
+    test "items sit side by side, flush" do
+      {items, _} = flex(~s|<div style="display:flex"><div>ab</div><div>cd</div></div>|)
+      assert x_of(items, "ab") == 0
+      assert x_of(items, "cd") == 16
+      assert at(items, "ab").y == at(items, "cd").y
+    end
+
+    test "gap" do
+      {items, _} = flex(~s|<div style="display:flex;gap:10px"><div>ab</div><div>cd</div></div>|)
+      assert x_of(items, "cd") == 26
+    end
+
+    test "flex-grow shares the free space" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex"><div style="flex:1">a</div><div style="flex:1">b</div></div>|
+        )
+
+      assert x_of(items, "b") == 200
+    end
+
+    test "grow factors weight the share" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex"><div style="flex:1">a</div><div style="flex:3">b</div></div>|
+        )
+
+      assert x_of(items, "b") == 100
+    end
+
+    test "a fixed item and a growing one" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex"><div style="width:100px">a</div><div style="flex:1">b</div></div>|
+        )
+
+      assert x_of(items, "b") == 100
+    end
+
+    test "justify-content" do
+      row = fn j ->
+        ~s|<div style="display:flex;justify-content:#{j}"><div>ab</div><div>cd</div></div>|
+      end
+
+      # 400 wide, content 32
+      {items, _} = flex(row.("flex-end"))
+      assert x_of(items, "ab") == 368
+      {items, _} = flex(row.("center"))
+      assert x_of(items, "ab") == 184
+      {items, _} = flex(row.("space-between"))
+      assert x_of(items, "ab") == 0
+      assert x_of(items, "cd") == 384
+      {items, _} = flex(row.("space-around"))
+      assert x_of(items, "ab") == 92
+      {items, _} = flex(row.("space-evenly"))
+      assert round(x_of(items, "ab")) == 123
+    end
+
+    test "auto margins push items apart" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex"><div>ab</div><div style="margin-left:auto">cd</div></div>|
+        )
+
+      assert x_of(items, "ab") == 0
+      assert x_of(items, "cd") == 384
+    end
+
+    test "align-items places items across the line" do
+      html = fn a ->
+        ~s|<div style="display:flex;align-items:#{a}"><div style="height:80px;background:#eee">a</div><div style="height:40px;background:#ddd">b</div></div>|
+      end
+
+      tops = fn a ->
+        {items, _} = flex(html.(a))
+        [x, y] = items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(& &1.x)
+        {y.y - x.y, y.h}
+      end
+
+      assert tops.("flex-start") == {0, 40}
+      assert tops.("center") == {20, 40}
+      assert tops.("flex-end") == {40, 40}
+      assert tops.("stretch") == {0, 40}
+    end
+
+    test "items stretch to the height of the line" do
+      html =
+        ~s|<div style="display:flex"><div style="background:#eee;font-size:32px">tall</div><div style="background:#ddd">s</div></div>|
+
+      {items, _} = flex(html)
+      [a, b] = items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(& &1.x)
+      assert a.h == b.h
+    end
+
+    test "too much content shrinks items" do
+      html =
+        ~s|<div style="display:flex"><div style="width:300px">a</div><div style="width:300px">b</div></div>|
+
+      {items, _} = flex(html)
+      assert x_of(items, "b") == 200
+    end
+
+    test "flex-shrink: 0 keeps the size" do
+      html =
+        ~s|<div style="display:flex"><div style="width:300px;flex-shrink:0">a</div><div style="width:300px">b</div></div>|
+
+      {items, _} = flex(html)
+      assert x_of(items, "b") == 300
+    end
+
+    test "wrapping starts a new line" do
+      html =
+        ~s|<div style="display:flex;flex-wrap:wrap;gap:0"><div style="width:150px">a</div><div style="width:150px">b</div><div style="width:150px">c</div></div>|
+
+      {items, _} = flex(html)
+      assert at(items, "a").y == at(items, "b").y
+      assert at(items, "c").y > at(items, "a").y
+      assert x_of(items, "c") == 0
+    end
+
+    test "columns stack, with a gap" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex;flex-direction:column;gap:10px"><div>a</div><div>b</div></div>|
+        )
+
+      assert at(items, "b").y - at(items, "a").y > 10
+      assert x_of(items, "a") == 0 and x_of(items, "b") == 0
+    end
+
+    test "columns align items: start shrinks to the content, center centres" do
+      html = fn a ->
+        ~s|<div style="display:flex;flex-direction:column;align-items:#{a}"><div style="background:#eee">ab</div></div>|
+      end
+
+      {items, _} = flex(html.("stretch"))
+      assert [%{w: 400}] = Enum.filter(items, &(&1.type == :rect))
+      {items, _} = flex(html.("flex-start"))
+      assert [%{w: 16}] = Enum.filter(items, &(&1.type == :rect))
+      {items, _} = flex(html.("center"))
+      assert [%{x: 196, w: 16}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "nested flex containers" do
+      html =
+        ~s|<div style="display:flex;justify-content:space-between"><div style="display:flex;gap:8px"><div>a</div><div>b</div></div><div>c</div></div>|
+
+      {items, _} = flex(html)
+      assert x_of(items, "b") == 16
+      assert x_of(items, "c") == 392
+    end
+
+    test "an inline-flex link in a container is as wide as its content, not spread out" do
+      html =
+        ~s|<div style="display:flex;justify-content:space-between"><a href="/" style="display:inline-flex;justify-content:center;padding:0 10px"><span>logo</span></a><div>menu</div></div>|
+
+      {items, _} = flex(html)
+      # "logo" (32px) sits after the link's 10px padding; the link ends right after it
+      assert x_of(items, "logo") == 10
+      assert x_of(items, "menu") == 400 - 32
+    end
+
+    test "buttons side by side keep their own width" do
+      html =
+        ~s|<div style="display:flex;gap:8px"><a style="display:inline-flex;padding:4px;background:#eee">go</a><a style="display:inline-flex;padding:4px;background:#ddd">stop</a></div>|
+
+      {items, _} = flex(html)
+      [a, b] = items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(& &1.x)
+      assert a.w == 16 + 8
+      assert b.x == a.x + a.w + 8
+    end
+
+    test "a row with a height of its own centres items inside it" do
+      html =
+        ~s|<div style="display:flex;align-items:center;height:80px"><div style="background:#eee;height:40px">a</div></div>|
+
+      {items, h} = flex(html)
+      [r] = Enum.filter(items, &(&1.type == :rect))
+      assert r.y == 20
+      # the row is 80 high; the page adds its 4px margin below
+      assert h == 84
+    end
+
+    test "box-sizing: border-box takes the padding out of the row's height" do
+      html =
+        ~s|<div style="display:flex;align-items:center;height:80px;padding:10px 0;box-sizing:border-box"><div style="background:#eee;height:40px">a</div></div>|
+
+      {items, h} = flex(html)
+      [r] = Enum.filter(items, &(&1.type == :rect))
+      assert r.y == 20
+      assert h == 84
+    end
+
+    test "width: fit-content makes a block as wide as its content" do
+      {items, _} = flex(~s|<div style="width:fit-content;background:#eee">abcd</div><p>x</p>|)
+      assert [%{w: 32}] = Enum.filter(items, &(&1.type == :rect))
+      # and the next block starts on a line of its own
+      assert at(items, "x").y > at(items, "abcd").y
+    end
+
+    test "fit-content as a flex item in a column that stretches" do
+      html =
+        ~s|<div style="display:flex;flex-direction:column"><div style="width:fit-content;background:#eee">ab</div></div>|
+
+      {items, _} = flex(html)
+      assert [%{w: 16}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "text directly in a container is an item" do
+      {items, _} = flex(~s|<div style="display:flex;gap:10px">hello<div>x</div></div>|)
+      assert x_of(items, "x") == 40 + 10
+    end
+
+    test "order" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex"><div style="order:2">a</div><div style="order:1">b</div></div>|
+        )
+
+      assert x_of(items, "b") < x_of(items, "a")
+    end
+
+    test "row-reverse" do
+      {items, _} =
+        flex(
+          ~s|<div style="display:flex;flex-direction:row-reverse"><div>a</div><div>b</div></div>|
+        )
+
+      assert x_of(items, "b") < x_of(items, "a")
+    end
+
+    test "a flex container's own padding and background wrap its items" do
+      html = ~s|<div style="display:flex;padding:10px;background:#eee"><div>a</div></div>|
+      {items, _} = flex(html)
+      assert x_of(items, "a") == 10
+      assert [%{w: 400}] = Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "images and svg are items" do
+      html =
+        ~s|<div style="display:flex;gap:10px"><svg width="30" height="20"></svg><div>x</div></div>|
+
+      {items, _} = flex(html)
+      assert x_of(items, "x") == 40
     end
   end
 end

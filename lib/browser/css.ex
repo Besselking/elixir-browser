@@ -155,6 +155,9 @@ defmodule Browser.CSS do
 
   defp split_top(<<>>, _sep, _d, _q, cur, acc), do: Enum.reverse([flat(cur) | acc])
 
+  defp split_top(<<?\\, x, r::binary>>, sep, d, q, cur, acc),
+    do: split_top(r, sep, d, q, [x, ?\\ | cur], acc)
+
   defp split_top(<<c, r::binary>>, sep, d, q, cur, acc) do
     cond do
       q != nil -> split_top(r, sep, d, if(c == q, do: nil, else: q), [c | cur], acc)
@@ -178,6 +181,16 @@ defmodule Browser.CSS do
     end
   end
 
+  # an identifier: name characters and escapes (`\[`, `\:`, `\31 `), as in Tailwind's `.w-\[10px\]`
+  @ident ~S"(?:[\w\-\x{80}-\x{10FFFF}]|\\(?:[0-9a-fA-F]{1,6}\s?|[^\n0-9a-fA-F]))+"
+
+  defp unescape(ident) do
+    Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, ident, fn
+      _, hex, "" -> <<String.to_integer(hex, 16)::utf8>>
+      _, _, char -> char
+    end)
+  end
+
   defp tokenize("", acc), do: {:ok, Enum.reverse(acc)}
 
   defp tokenize(s, acc) do
@@ -192,13 +205,13 @@ defmodule Browser.CSS do
       String.starts_with?(s, "*") ->
         tokenize(binary_part(s, 1, byte_size(s) - 1), [:any | acc])
 
-      m = Regex.run(~r/\A#([\w\-\x{80}-\x{10FFFF}]+)/u, s) ->
+      m = Regex.run(~r/\A#(#{@ident})/u, s) ->
         [whole, id] = m
-        tokenize(drop(s, whole), [{:id, id} | acc])
+        tokenize(drop(s, whole), [{:id, unescape(id)} | acc])
 
-      m = Regex.run(~r/\A\.([\w\-\x{80}-\x{10FFFF}]+)/u, s) ->
+      m = Regex.run(~r/\A\.(#{@ident})/u, s) ->
         [whole, cls] = m
-        tokenize(drop(s, whole), [{:class, cls} | acc])
+        tokenize(drop(s, whole), [{:class, unescape(cls)} | acc])
 
       m =
           Regex.run(
@@ -253,9 +266,9 @@ defmodule Browser.CSS do
           p -> tokenize(drop(s, whole), [{:pseudo, p} | acc])
         end
 
-      m = Regex.run(~r/\A([\w\-\x{80}-\x{10FFFF}]+)/u, s) ->
+      m = Regex.run(~r/\A(#{@ident})/u, s) ->
         [whole, tag] = m
-        tokenize(drop(s, whole), [{:tag, String.downcase(tag)} | acc])
+        tokenize(drop(s, whole), [{:tag, tag |> unescape() |> String.downcase()} | acc])
 
       true ->
         :error

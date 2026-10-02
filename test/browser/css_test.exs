@@ -193,4 +193,46 @@ defmodule Browser.CSSTest do
     assert :error = CSS.parse_selector("p:has(a)")
     assert :error = CSS.parse_selector("p:is(a b)")
   end
+
+  describe "escapes in selectors" do
+    defp classes_of(css) do
+      [rule] = CSS.parse(css)
+      [{cmp, nil}] = rule.selector
+      cmp.classes
+    end
+
+    test "backslash-escaped characters in class names" do
+      assert classes_of(~S|.text-\[2\.25rem\]{color:red}|) == ["text-[2.25rem]"]
+      assert classes_of(~S|.md\:flex{color:red}|) == ["md:flex"]
+      assert classes_of(~S|.w-1\/2{color:red}|) == ["w-1/2"]
+    end
+
+    test "hex escapes" do
+      assert classes_of(~S|.\31 0{color:red}|) == ["10"]
+      assert classes_of(~S|.a\2c b{color:red}|) == ["a,b"]
+    end
+
+    test "an escaped comma or bracket does not split a selector list" do
+      assert [_, _] = CSS.parse(~S|.a\,b, .c\[d\]{color:red}|)
+      assert [rule] = CSS.parse(~S|.\[\&\>svg\]\:h-full{color:red}|)
+      assert rule.decls == [{"color", "red", false}]
+    end
+
+    test "escaped selectors match elements with the plain class" do
+      [rule] = CSS.parse(~S|.text-\[2\.25rem\]{font-size:2.25rem}|)
+
+      ctx = %{
+        tag: "h1",
+        id: nil,
+        classes: ["text-[2.25rem]"],
+        attrs: [],
+        parent: nil,
+        prev: [],
+        index: 0,
+        count: 1
+      }
+
+      assert CSS.matches?(rule.selector, ctx)
+    end
+  end
 end

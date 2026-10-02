@@ -415,6 +415,16 @@ defmodule Browser.UI do
     :wxGraphicsContext.destroy(gc)
   end
 
+  # a translucent fill needs the graphics context
+  defp draw(dc, %{type: :rect, color: color} = item, y, _scroll) when tuple_size(color) == 4 do
+    gc = :wxGraphicsContext.create(dc)
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+    path = :wxGraphicsContext.createPath(gc)
+    :wxGraphicsPath.addRectangle(path, item.x, y, item.w, item.h)
+    :wxGraphicsContext.fillPath(gc, path)
+    :wxGraphicsContext.destroy(gc)
+  end
+
   defp draw(dc, %{type: :rect} = item, y, _scroll) do
     :wxDC.setPen(dc, :wxPen.new({0, 0, 0}, style: 106))
     :wxDC.setBrush(dc, :wxBrush.new(item.color))
