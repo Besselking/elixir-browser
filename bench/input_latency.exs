@@ -60,8 +60,10 @@ paint = fn -> if paint?, do: :wxWindow.update(ui.panel) end
 
 send_ev = fn ev -> send(session, wx(event: ev)); barrier.(); paint.() end
 key = fn cp -> send_ev.(wxKey(type: :char, keyCode: cp, uniChar: cp, controlDown: false, metaDown: false, shiftDown: false, altDown: false)) end
-motion = fn x, y -> send_ev.(wxMouse(type: :motion, x: x, y: y)) end
-wheel = fn rot -> send_ev.(wxMouse(type: :mousewheel, wheelRotation: rot)) end
+# hover never invalidates the panel, so no paint here: a paint left pending by the previous
+# event would otherwise make the next blocking wx call (setCursor) wait behind it and look slow
+motion = fn x, y -> send(session, wx(event: wxMouse(type: :motion, x: x, y: y))); barrier.() end
+wheel = fn rot -> send_ev.(wxMouse(type: :mousewheel, wheelRotation: rot, wheelDelta: 120, linesPerAction: 3)) end
 click = fn x, y -> send_ev.(wxMouse(type: :left_down, x: x, y: y)) end
 
 # focus a field by clicking its box
@@ -111,6 +113,15 @@ w = Browser.UI.client_width(ui)
 pts = for i <- 0..(n - 1), do: {rem(i * 37, max(w, 1)), rem(i * 11, max(h, 1))}
 stats.("mouse motion (diagonal sweep)", for({x, y} <- pts, do: time.(fn -> motion.(x, y) end)))
 stats.("mouse wheel (down then up)", for(i <- 1..n, do: time.(fn -> wheel.(if rem(i, 20) < 10, do: -120, else: 120) end)))
+
+# a trackpad flick: 30 small precise events arrive back to back, then the window paints once
+precise = fn rot -> send(session, wx(event: wxMouse(type: :mousewheel, wheelRotation: rot, wheelDelta: 10, linesPerAction: 1))) end
+burst = fn ->
+  for _ <- 1..30, do: precise.(-3)
+  barrier.()
+  paint.()
+end
+stats.("wheel flick (30 events, 1 paint)", for(_ <- 1..max(div(n, 10), 5), do: time.(burst)))
 
 File.rm(path)
 System.halt(0)
