@@ -244,6 +244,22 @@ defmodule Browser.Layout do
   end
 
   @doc """
+  How far right the laid out page extends: the right edge of what is drawn (inside the boxes
+  that clip it), and at least `width`. A wider page scrolls sideways.
+  """
+  def content_width(items, width) do
+    items
+    |> Enum.filter(
+      &(&1.type in [:text, :rect, :image, :svg, :hr] and not Map.get(&1, :hidden, false))
+    )
+    |> Enum.reduce(width, fn item, acc ->
+      right = item.x + Map.get(item, :w, 0)
+      right = if clip = Map.get(item, :clip), do: min(right, clip.x + clip.w), else: right
+      max(acc, right)
+    end)
+  end
+
+  @doc """
   Bounds of every form control that appears in `items`: `%{cid => %{x, y, w, h, radius}}`.
   A control is its border box (its largest rect), or the box around its text if it has none.
   """

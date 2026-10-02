@@ -40,6 +40,11 @@ defmodule Browser.Session do
       layout_timer: nil,
       height: 0,
       scroll: 0,
+      # horizontal scroll, and the width of what the page lays out (wider than the window
+      # when something overflows)
+      scroll_x: 0,
+      content_w: 0,
+      wheel_rem_x: 0.0,
       # sub-pixel remainder of precise wheel input, carried to the next event
       wheel_rem: 0.0,
       width: UI.client_width(ui),
@@ -227,7 +232,8 @@ defmodule Browser.Session do
     {:noreply, choose_option(state, id - UI.menu_base())}
   end
 
-  def handle_info(wx(event: wxMouse(type: :left_down, x: x, y: y, shiftDown: shift)), state) do
+  def handle_info(wx(event: wxMouse(type: :left_down, x: wx_x, y: y, shiftDown: shift)), state) do
+    x = wx_x + state.scroll_x
     UI.focus_page(state.ui)
     py = y + state.scroll
     {count, state} = register_click(state, x, y, :down)
@@ -246,7 +252,8 @@ defmodule Browser.Session do
     end
   end
 
-  def handle_info(wx(event: wxMouse(type: :left_dclick, x: x, y: y)), state) do
+  def handle_info(wx(event: wxMouse(type: :left_dclick, x: wx_x, y: y)), state) do
+    x = wx_x + state.scroll_x
     py = y + state.scroll
     {count, state} = register_click(state, x, y, :dclick)
 
@@ -265,9 +272,11 @@ defmodule Browser.Session do
 
   # dragging out a selection in a text field
   def handle_info(
-        wx(event: wxMouse(type: :motion, x: x, y: y, leftDown: down)),
+        wx(event: wxMouse(type: :motion, x: wx_x, y: y, leftDown: down)),
         %{fdrag: true} = state
       ) do
+    x = wx_x + state.scroll_x
+
     if down,
       do: {:noreply, drag_field(state, x, y + state.scroll)},
       else: {:noreply, end_drag(state)}
@@ -275,9 +284,11 @@ defmodule Browser.Session do
 
   # dragging out a selection; past the top or bottom edge the page scrolls along
   def handle_info(
-        wx(event: wxMouse(type: :motion, x: x, y: y, leftDown: down)),
+        wx(event: wxMouse(type: :motion, x: wx_x, y: y, leftDown: down)),
         %{drag: true} = state
       ) do
+    x = wx_x + state.scroll_x
+
     if down do
       view = UI.client_height(state.ui)
 
@@ -294,7 +305,8 @@ defmodule Browser.Session do
     end
   end
 
-  def handle_info(wx(event: wxMouse(type: :motion, x: x, y: y)), state) do
+  def handle_info(wx(event: wxMouse(type: :motion, x: wx_x, y: y)), state) do
+    x = wx_x + state.scroll_x
     py = y + state.scroll
     href = UI.link_at(state.links, x, py)
     {texts, state} = sel_texts(state)
@@ -328,6 +340,13 @@ defmodule Browser.Session do
     px = state.wheel_rem - rot
     whole = trunc(px)
     {:noreply, scroll_by(%{state | wheel_rem: px - whole}, whole)}
+  end
+
+  def handle_info({:hwheel, rot, delta, lines}, state) do
+    {rot, state} = drain_hwheel(wheel_rotation(rot, delta, lines), state)
+    px = state.wheel_rem_x + rot
+    whole = trunc(px)
+    {:noreply, scroll_x_by(%{state | wheel_rem_x: px - whole}, whole)}
   end
 
   def handle_info(wx(event: wxSize(size: {w, _})), state) do
@@ -475,6 +494,8 @@ defmodule Browser.Session do
     case key do
       :up -> scroll_by(state, -40)
       :down -> scroll_by(state, 40)
+      :left -> scroll_x_by(state, -40)
+      :right -> scroll_x_by(state, 40)
       :page_up -> scroll_by(state, -page)
       :page_down -> scroll_by(state, page)
       {:char, " "} -> scroll_by(state, page)
@@ -627,6 +648,18 @@ defmodule Browser.Session do
       b ->
         view = UI.client_height(state.ui)
 
+        state =
+          cond do
+            b.x < state.scroll_x ->
+              scroll_x_by(state, b.x - 16 - state.scroll_x)
+
+            b.x + b.w > state.scroll_x + state.width ->
+              scroll_x_by(state, b.x + b.w + 16 - state.scroll_x - state.width)
+
+            true ->
+              state
+          end
+
         cond do
           b.y < state.scroll ->
             scroll_by(state, b.y - 16 - state.scroll)
@@ -769,7 +802,7 @@ defmodule Browser.Session do
       {[_ | _] = options, %{} = b} ->
         UI.popup_menu(
           state.ui,
-          {b.x, b.y + b.h - state.scroll},
+          {b.x - state.scroll_x, b.y + b.h - state.scroll},
           Enum.map(options, & &1.label),
           cur.selected
         )
@@ -921,6 +954,7 @@ defmodule Browser.Session do
         width: width,
         links: UI.links(items),
         controls: Layout.controls(items),
+        content_w: Layout.content_width(items, width),
         sel: nil,
         sel_anchor: nil,
         drag: false,
@@ -928,6 +962,7 @@ defmodule Browser.Session do
         sel_items: []
     }
 
+    state = scroll_x_by(state, 0)
     scroll_by(state, 0, mode)
   end
 
@@ -1038,6 +1073,26 @@ defmodule Browser.Session do
       {:wheel, rot, delta, lines} -> drain_wheel(acc + wheel_rotation(rot, delta, lines), state)
     after
       0 -> {acc, state}
+    end
+  end
+
+  defp drain_hwheel(acc, state) do
+    receive do
+      {:hwheel, rot, delta, lines} -> drain_hwheel(acc + wheel_rotation(rot, delta, lines), state)
+    after
+      0 -> {acc, state}
+    end
+  end
+
+  defp scroll_x_by(state, delta) do
+    max_x = max(state.content_w - state.width, 0)
+    sx = state.scroll_x |> Kernel.+(delta) |> max(0) |> min(max_x)
+
+    if sx == state.scroll_x do
+      state
+    else
+      UI.set_scroll_x(state.ui, sx)
+      %{state | scroll_x: sx}
     end
   end
 

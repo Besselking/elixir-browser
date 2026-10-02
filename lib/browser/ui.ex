@@ -26,6 +26,7 @@ defmodule Browser.UI do
     :ets.new(@view, [:named_table, :public])
     :ets.new(@images, [:named_table, :public])
     :ets.insert(@view, {:view, [], 0, true})
+    :ets.insert(@view, {:sx, 0})
 
     wx = :wx.new()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
@@ -75,8 +76,8 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
-    # the event record does not say which way the wheel turned: sideways swipes of a
-    # trackpad would scroll the page up and down, so only vertical turns go on
+    # the event record does not say which way the wheel turned (a sideways swipe of a
+    # trackpad is not a vertical scroll), so the callback tells the session
     me = self()
 
     :wxPanel.connect(panel, :mousewheel,
@@ -84,7 +85,8 @@ defmodule Browser.UI do
                      event: wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)
                    ),
                    obj ->
-        if :wxMouseEvent.getWheelAxis(obj) == 0, do: send(me, {:wheel, rot, delta, lines})
+        tag = if :wxMouseEvent.getWheelAxis(obj) == 0, do: :wheel, else: :hwheel
+        send(me, {tag, rot, delta, lines})
       end
     )
 
@@ -105,6 +107,12 @@ defmodule Browser.UI do
       status: status,
       cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
+  end
+
+  @doc "Scrolls the page sideways to `sx` pixels."
+  def set_scroll_x(%{panel: panel}, sx) do
+    :ets.insert(@view, {:sx, sx})
+    :wxWindow.refresh(panel)
   end
 
   @doc "Hands the painter what to draw; `caret_on` is the blink state of the text caret."
@@ -137,7 +145,7 @@ defmodule Browser.UI do
 
         if w * h * 2 > cw * ch,
           do: :wxWindow.refresh(panel),
-          else: :wxWindow.refreshRect(panel, {x, y - scroll, w, h})
+          else: :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
     end
   end
 
@@ -239,9 +247,18 @@ defmodule Browser.UI do
 
   # -- painting (runs in wx callback process) --------------------------------
 
+  defp sx do
+    case :ets.lookup(@view, :sx) do
+      [{:sx, sx}] -> sx
+      [] -> 0
+    end
+  end
+
   defp paint(panel) do
     [{:view, items, scroll, caret_on}] = :ets.lookup(@view, :view)
     dc = :wxPaintDC.new(panel)
+    # everything is drawn at page x: the origin moves with the horizontal scroll
+    :wxDC.setDeviceOrigin(dc, -sx(), 0)
 
     canvas =
       case items do

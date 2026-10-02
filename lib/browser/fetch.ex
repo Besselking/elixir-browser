@@ -15,7 +15,8 @@ defmodule Browser.Fetch do
     {"images.html", "Images", "PNG, JPEG, GIF, BMP and TIFF pictures"},
     {"svg.html", "SVG", "inline and linked vector graphics"},
     {"forms.html", "Form controls", "inputs, selects, buttons and text selection"},
-    {"selects.html", "Selects", "clipped dropdowns"}
+    {"selects.html", "Selects", "clipped dropdowns"},
+    {"wide.html", "Wide content", "pages wider than the window scroll sideways"}
   ]
 
   @doc "The start page: a few sites, and the demo pages that ship with the browser."

@@ -408,7 +408,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -2207,6 +2207,36 @@ defmodule Browser.LayoutTest do
       # 3, 5 and 2 characters of the same width each
       assert first.w * 5 == second.w * 3
       assert third.w * 5 == second.w * 2
+    end
+  end
+
+  describe "content width" do
+    alias Browser.Page
+
+    defp content(html, width \\ 400) do
+      page = Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2, 600)
+      Layout.content_width(items, width)
+    end
+
+    test "is the window for ordinary pages" do
+      assert content("<p>hello world</p>") == 400
+    end
+
+    test "a wide box makes the page wider" do
+      assert content(~s|<div style="width:900px;background:#eee">x</div>|) >= 900
+    end
+
+    test "so do wide pictures and unbreakable text" do
+      assert content(~s|<svg width="1200" height="10"></svg>|) >= 1200
+      assert content(~s|<pre>#{String.duplicate("x", 200)}</pre>|) > 400
+    end
+
+    test "what overflow hidden clips does not" do
+      html =
+        ~s|<div style="width:100px;overflow:hidden"><div style="width:900px;background:#eee">x</div></div>|
+
+      assert content(html) == 400
     end
   end
 end

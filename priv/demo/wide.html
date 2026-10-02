@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<title>Wide content</title>
+<style>
+  body { font-family: sans-serif; margin: 12px }
+  .wide { width: 1600px; height: 60px; background: linear-gradient(90deg, #ff7043, #ffee58, #66bb6a, #29b6f6, #7e57c2); border-radius: 8px; color: #fff; font-size: 20px; line-height: 60px; text-align: center }
+  .ruler { width: 1600px; height: 24px; background: repeating-linear-gradient(90deg, #333 0 1px, transparent 1px 100px) }
+  pre { background: #f3f3f3; padding: 8px; border-radius: 6px }
+  .clip { width: 300px; overflow: hidden; border: 1px solid #aaa }
+  .clip div { width: 900px }
+</style>
+</head>
+<body>
+<h1>Wide content</h1>
+<p>This page is wider than the window: scroll sideways with the trackpad or the left and right arrow keys.</p>
+<div class="wide">1600px wide box</div>
+<svg width="1600" height="60" viewBox="0 0 1600 60"><rect width="1600" height="60" fill="#eee"/><circle cx="1500" cy="30" r="24" fill="#e91e63"/><text x="1400" y="36" font-size="16" text-anchor="end" fill="#333">the far end</text></svg>
+<pre>0         10        20        30        40        50        60        70        80        90        100       110       120       130       140       150       160
+a long line of preformatted text that does not wrap and runs on and on and on past the edge of the window and further still, to the right</pre>
+<p>Content clipped by overflow: hidden does not make the page wider:</p>
+<div class="clip"><div>hidden hidden hidden hidden hidden hidden hidden hidden hidden hidden hidden hidden hidden</div></div>
+<form><input type="text" value="a field after the wide content" style="margin: 12px 0"> <button type="button">button</button></form>
+</body>
+</html>
