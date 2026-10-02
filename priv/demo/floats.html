@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<title>Floats</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; line-height: 1.5 }
+  h2 { margin: 18px 0 6px; clear: both }
+  .box { float: left; width: 90px; height: 70px; margin: 4px 14px 6px 0; background: #5c6bc0; color: #fff; text-align: center; line-height: 70px; border-radius: 8px }
+  .right { float: right; margin: 4px 0 6px 14px; background: #ef6c00 }
+  .card { border: 1px solid #aaa; padding: 8px; margin-bottom: 8px }
+  .clearfix { overflow: hidden; background: #eef; padding: 6px }
+  .col { float: left; width: 30%; margin-right: 3%; background: #e0f2f1; padding: 8px; box-sizing: border-box }
+  .pill { float: left; background: #333; color: #fff; border-radius: 12px; padding: 2px 12px; margin: 0 6px 6px 0 }
+</style>
+</head>
+<body>
+<h1>Floats</h1>
+
+<h2>Text flows around a float</h2>
+<div class="card">
+  <div class="box">left</div>
+  <p>Floats take their box out of the normal flow and push it to the left or right edge. The lines of text that follow flow along the side of the box, and use the full width again once they are below it. This paragraph is long enough to run past the bottom of the box so you can see that.</p>
+</div>
+
+<h2>Right floats and both sides at once</h2>
+<div class="card">
+  <div class="box right">right</div>
+  <div class="box">left</div>
+  <p>With a float on each side the text sits in the middle. As the floats end, the lines grow wider on that side first. Add a few more words so that this paragraph has enough lines to show every step of that, from the narrow lines in the middle down to the full width again below both boxes.</p>
+</div>
+
+<h2>A container that holds its floats</h2>
+<div class="clearfix">
+  <div class="col">One column of three</div>
+  <div class="col">Another column, with a little more text in it</div>
+  <div class="col" style="margin-right:0">The third</div>
+</div>
+<p>The paragraph below starts under the shaded box, because overflow: hidden makes the box contain its floats.</p>
+
+<h2>Clear</h2>
+<div class="box">a</div><div class="box">b</div>
+<p style="clear:both">This paragraph clears both floats and starts below them.</p>
+
+<h2>Floating inline elements</h2>
+<div class="card">
+  <span class="pill">Elixir</span><span class="pill">Erlang</span><span class="pill">Phoenix</span><span class="pill">LiveView</span><span class="pill">Ecto</span><span class="pill">Nerves</span><span class="pill">Broadway</span><span class="pill">Oban</span><span class="pill">Livebook</span><span class="pill">Nx</span>
+  <div style="clear:both"></div>
+</div>
+</body>
+</html>

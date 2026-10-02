@@ -27,7 +27,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
-            row-gap column-gap order border-spacing border-collapse)
+            row-gap column-gap order border-spacing border-collapse float clear)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -517,6 +517,26 @@ defmodule Browser.Style do
     for {name, prop, unit} <- [{"cols", "width", 8}, {"rows", "height", 18}],
         {n, ""} when n > 0 <- [Integer.parse(attr(attrs, name))],
         do: {prop, "#{n * unit}px"}
+  end
+
+  # <img align="left|right"> floats; hspace/vspace are margins
+  defp hints(%{tag: "img", attrs: attrs}) do
+    float =
+      case attrs |> attr("align") |> String.downcase() do
+        a when a in ["left", "right"] -> [{"float", a}]
+        _ -> []
+      end
+
+    margin = fn name, props ->
+      case attrs |> attr(name) |> Integer.parse() do
+        {n, _} when n > 0 -> for p <- props, do: {p, "#{n}px"}
+        _ -> []
+      end
+    end
+
+    float ++
+      margin.("hspace", ["margin-left", "margin-right"]) ++
+      margin.("vspace", ["margin-top", "margin-bottom"])
   end
 
   @table_tags ~w(table tr td th thead tbody tfoot)

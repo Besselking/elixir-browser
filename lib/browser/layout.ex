@@ -451,8 +451,33 @@ defmodule Browser.Layout do
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
   defp walk({:element, "br", _, _}, _style, acc), do: [{:flush} | acc]
 
-  defp walk({:element, "img", _attrs, _} = el, style, acc), do: image_ops(el, style, acc)
-  defp walk({:element, "svg", _attrs, _} = el, style, acc), do: svg_ops(el, style, acc)
+  defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg"] do
+    ops = fn acc ->
+      if tag == "img", do: image_ops(el, style, acc), else: svg_ops(el, style, acc)
+    end
+
+    case float_side(computed(attrs)) do
+      nil ->
+        ops.(acc)
+
+      side ->
+        # a floated picture is sized by its own content, like any float
+        sub = [] |> ops.() |> Enum.reverse()
+
+        spec = %{
+          width: nil,
+          minw: nil,
+          maxw: nil,
+          extra: 0,
+          mextra: 0,
+          rextra: 0,
+          valign: nil,
+          table?: false
+        }
+
+        [{:float, side, sub, spec, style} | acc]
+    end
+  end
 
   defp walk(el, style, acc), do: walk_element(el, style, acc, nil)
 
@@ -474,8 +499,12 @@ defmodule Browser.Layout do
 
       fit? = c["width"] == :fit and kind in [:block, :flex]
       table? = kind == :table and force != :inline_inner
+      float? = force == nil and c["float"] in ["left", "right"]
 
       case kind do
+        _ when float? ->
+          float_ops(el, parent_style, c, acc)
+
         :contents ->
           walk(kids, style, acc)
 
@@ -833,7 +862,12 @@ defmodule Browser.Layout do
 
   defp block_ops(tag, kind, kids, style, c, acc) do
     box = box(tag, c)
-    acc = [{:gap, box.mt}, {:flush} | acc]
+
+    acc =
+      case clear_side(c) do
+        nil -> [{:gap, box.mt}, {:flush} | acc]
+        side -> [{:gap, box.mt}, {:clear, side}, {:flush} | acc]
+      end
 
     if tag == "hr" do
       [{:hr}, {:gap, box.mb} | acc]
@@ -1265,7 +1299,10 @@ defmodule Browser.Layout do
       active: [],
       lead: 0,
       line_lead: 0,
-      lmax: 0
+      lmax: 0,
+      # floated boxes (newest first) and how much the right-hand ones take of the current line
+      floats: [],
+      fr: 0
     }
 
     ops |> Enum.reduce(st, &op/2) |> flush()
@@ -1296,12 +1333,53 @@ defmodule Browser.Layout do
 
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
 
-  defp op({:inset, l, r}, st) do
-    %{st | insets: [{st.left, st.right} | st.insets], left: st.left + l, right: st.right + r}
+  # a floated box goes to the left or right edge of the line below, and text flows around it
+  defp op({:float, side, sub, spec, _style}, st) do
+    st = st |> flush() |> apply_gap()
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    w = fit_width(st, sub, spec, avail)
+    {items, height, _base} = layout_atom(st, sub, w)
+    {x, y} = place_float(st, side, w, height)
+    moved = for item <- items, do: move(item, x, y)
+    float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
+
+    # a float paints above the backgrounds and borders of the blocks it overlaps: all of it,
+    # background included, goes with the content
+    %{
+      st
+      | items: Enum.reverse(moved) ++ st.items,
+        n: st.n + length(moved),
+        floats: [float | st.floats]
+    }
   end
 
-  defp op({:inset_end}, %{insets: [{l, r} | rest]} = st),
-    do: %{st | insets: rest, left: l, right: r}
+  # `clear`: the next line starts below the floats on that side
+  defp op({:clear, side}, st) do
+    st = st |> flush() |> apply_gap()
+
+    bottom =
+      st.floats
+      |> Enum.filter(&(side == :both or &1.side == side))
+      |> Enum.map(& &1.y1)
+      |> Enum.max(fn -> st.y end)
+
+    %{st | y: max(st.y, bottom)}
+  end
+
+  defp op({:inset, l, r}, st) do
+    %{
+      st
+      | insets: [{st.left, st.right, st.y, length(st.floats)} | st.insets],
+        left: st.left + l,
+        right: st.right + r
+    }
+  end
+
+  # a block holding nothing but floats still contains them (the usual "clearfix")
+  defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
+    st = if st.y == y0, do: contain_floats(st, n0), else: st
+    %{st | insets: rest, left: l, right: r}
+  end
 
   defp op({:hr}, st) do
     st = st |> flush() |> apply_gap()
@@ -1321,8 +1399,12 @@ defmodule Browser.Layout do
   defp op({:box_end, ref}, st) do
     st = flush(st)
     {box, open} = Map.pop(st.open, ref)
-    {_bt, _br, bb, _bl} = box.o.bw
+    {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
+
+    # a box that clips, or that holds nothing but floats, contains them
+    flow? = st.y > box.top + bt + box.o.pt
+    st = if box.o.clip or not flow?, do: contain_floats(st, box.fl0), else: st
 
     # child margins stay inside the box only when padding or a border separates them
     st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
@@ -1452,7 +1534,8 @@ defmodule Browser.Layout do
   # `lead` and applied when the first word of the line is placed.
   defp op({:inline_open, ref, spec}, st) do
     if st.line == [] do
-      x = st.margin + st.left + st.lead + spec.ml
+      {fl, _} = float_offsets(st, st.y + st.gap)
+      x = st.margin + st.left + fl + st.lead + spec.ml
 
       %{
         st
@@ -1476,7 +1559,8 @@ defmodule Browser.Layout do
     right = spec.pr + spec.br
 
     if st.line == [] do
-      x = st.margin + st.left + st.lead + right
+      {fl, _} = float_offsets(st, st.y + st.gap)
+      x = st.margin + st.left + fl + st.lead + right
       %{st | lead: st.lead + right + spec.mr, marks: [{:end, ref, x} | st.marks]}
     else
       %{st | x: st.x + right + spec.mr, marks: [{:end, ref, st.x + right} | st.marks]}
@@ -1523,7 +1607,7 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, 0), else: st
 
     st =
-      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right do
+      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr do
         st |> flush() |> apply_gap() |> start_line(line_left, 0)
       else
         st
@@ -1584,6 +1668,7 @@ defmodule Browser.Layout do
       w: box_w,
       n0: st.n,
       nr0: st.nr,
+      fl0: length(st.floats),
       saved: {st.left, st.right}
     }
 
@@ -2098,13 +2183,16 @@ defmodule Browser.Layout do
   # owed by inline boxes opened on the empty line (`lead`) is applied to content.
   defp start_line(st, line_left, dx) do
     lead = if dx == 0, do: st.lead, else: 0
+    # floats beside this line push its start right and its end left
+    {fl, fr} = float_offsets(st, st.y)
 
     %{
       st
-      | x: line_left + dx + lead,
-        indent: line_left,
+      | x: line_left + fl + dx + lead,
+        indent: line_left + fl,
         lead: st.lead - lead,
-        line_lead: lead
+        line_lead: lead,
+        fr: fr
     }
   end
 
@@ -2118,7 +2206,8 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
 
     st =
-      if st.line != [] and not nowrap? and st.x + space_w + w > st.width - st.margin - st.right do
+      if st.line != [] and not nowrap? and
+           st.x + space_w + w > st.width - st.margin - st.right - st.fr do
         st |> flush() |> apply_gap() |> start_line(line_left, 0)
       else
         st
@@ -2378,7 +2467,7 @@ defmodule Browser.Layout do
     # last box's padding/border ends, which `st.x` tracks
     left = min(first.x, st.indent)
     right = max(last.x + last.w, st.x)
-    free = st.width - st.margin - st.right - st.indent - (right - left)
+    free = st.width - st.margin - st.right - st.fr - st.indent - (right - left)
 
     case first.align do
       :center -> max(round(free / 2), 0)
@@ -3191,5 +3280,86 @@ defmodule Browser.Layout do
       need = max(p.h0, round(p.cell.minh || 0)) - have
       if need > 0, do: List.update_at(heights, p.row + rs - 1, &(&1 + need)), else: heights
     end)
+  end
+
+  # -- floats --------------------------------------------------------------------------------
+
+  defp float_side(c) do
+    case c["float"] do
+      "left" -> :left
+      "right" -> :right
+      _ -> nil
+    end
+  end
+
+  defp clear_side(c) do
+    case c["clear"] do
+      "left" -> :left
+      "right" -> :right
+      "both" -> :both
+      _ -> nil
+    end
+  end
+
+  # a floated element: laid out on its own like an inline-block, then placed by `op({:float, ...})`
+  defp float_ops({:element, _, _, _} = el, parent_style, c, acc) do
+    side = float_side(c)
+
+    [{:inline_block, sub, spec, style}] =
+      inline_block_ops(el, parent_style, c, [], true, c["display"] == "table")
+
+    [{:float, side, sub, spec, style} | acc]
+  end
+
+  # how far floats take from the line starting at `y`: {from the left, from the right}
+  defp float_offsets(%{floats: []}, _y), do: {0, 0}
+
+  defp float_offsets(st, y), do: float_offsets(st, y, y + 1)
+
+  # ... or across the vertical span y0..y1
+  defp float_offsets(st, y0, y1) do
+    left = st.margin + st.left
+    right = st.width - st.margin - st.right
+    active = Enum.filter(st.floats, &(&1.y0 < y1 and &1.y1 > y0))
+
+    fl = for(%{side: :left} = f <- active, do: f.x1 - left) |> Enum.max(fn -> 0 end)
+    fr = for(%{side: :right} = f <- active, do: right - f.x0) |> Enum.max(fn -> 0 end)
+    {max(fl, 0), max(fr, 0)}
+  end
+
+  # the top-left corner of a float `w` x `h`: at the current line, or lower down when the
+  # floats beside it leave no room
+  defp place_float(st, side, w, h) do
+    left = st.margin + st.left
+    right = st.width - st.margin - st.right
+    place_float(st, side, w, h, st.y, left, right)
+  end
+
+  defp place_float(st, side, w, h, y, left, right) do
+    {fl, fr} = float_offsets(st, y, y + max(h, 1))
+    overlapping = Enum.filter(st.floats, &(&1.y0 < y + max(h, 1) and &1.y1 > y))
+
+    if overlapping == [] or w <= right - fr - (left + fl) do
+      x = if side == :left, do: left + fl, else: right - fr - w
+      {x, y}
+    else
+      # below the lowest edge of the floats in the way, and look again
+      next = overlapping |> Enum.map(& &1.y1) |> Enum.min()
+      place_float(st, side, w, h, next, left, right)
+    end
+  end
+
+  # the floats made since `count` stop affecting what follows, and the box grows to hold them
+  defp contain_floats(st, count) do
+    mine = Enum.take(st.floats, max(length(st.floats) - count, 0))
+
+    case mine do
+      [] ->
+        st
+
+      _ ->
+        bottom = mine |> Enum.map(& &1.y1) |> Enum.max()
+        %{st | floats: Enum.drop(st.floats, length(mine)), y: max(st.y, bottom)}
+    end
   end
 end

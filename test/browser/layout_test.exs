@@ -461,7 +461,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -2749,6 +2749,168 @@ defmodule Browser.LayoutTest do
         )
 
       assert at(items, "a").y == at(items, "b").y
+    end
+  end
+
+  describe "floats" do
+    alias Browser.Page
+
+    # 8px per character at 16px; the page keeps a 4px margin on each side
+    defp fl(html, width \\ 208) do
+      page = Page.build("<style>body{margin:0} p{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp word_at(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    defp box_of(items),
+      do: items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(&{&1.y, &1.x}) |> hd()
+
+    @words "aaaa bbbb cccc dddd eeee ffff gggg hhhh"
+
+    test "a left float sits at the left edge and text flows to its right" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:60px;height:50px;background:#ccc"></div><p>#{@words}</p>|
+        )
+
+      assert %{x: 4, y: 0, w: 60} = box_of(items)
+      assert word_at(items, "aaaa").x == 64
+      assert word_at(items, "aaaa").y == word_at(items, "bbbb").y
+    end
+
+    test "a right float sits at the right edge and shortens the lines beside it" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:right;width:60px;height:30px;background:#ccc"></div><p>#{@words}</p>|
+        )
+
+      assert %{x: 144, w: 60} = box_of(items)
+      assert word_at(items, "aaaa").x == 4
+      # three words fit in the 140px beside the float, then the next line
+      assert word_at(items, "dddd").y > word_at(items, "aaaa").y
+      assert word_at(items, "cccc").y == word_at(items, "aaaa").y
+    end
+
+    test "text goes back to the full width once the float ends" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:60px;height:20px;background:#ccc"></div><p>#{@words}</p>|
+        )
+
+      assert word_at(items, "aaaa").x == 64
+      # the second line starts below the float and has the full width
+      assert word_at(items, "dddd").x == 4
+      assert word_at(items, "hhhh").y == word_at(items, "dddd").y
+    end
+
+    test "floats stack side by side, then below when there is no room" do
+      html =
+        ~s|<div style="float:left;width:80px;height:20px;background:#ccc"></div>| <>
+          ~s|<div style="float:left;width:80px;height:20px;background:#ddd"></div>| <>
+          ~s|<div style="float:left;width:80px;height:20px;background:#eee"></div>|
+
+      {items, _} = fl(html)
+      [a, b, c] = items |> Enum.filter(&(&1.type == :rect)) |> Enum.sort_by(&{&1.y, &1.x})
+      assert {a.x, b.x} == {4, 84}
+      assert a.y == b.y
+      assert c.x == 4
+      assert c.y == 20
+    end
+
+    test "a float is as wide as its content when it has no width" do
+      {items, _} = fl(~s|<div style="float:left;background:#ccc">abcd</div><p>x</p>|)
+      assert %{w: 32} = box_of(items)
+      assert word_at(items, "x").x == 36
+    end
+
+    test "clear moves a block below the floats" do
+      html =
+        ~s|<div style="float:left;width:60px;height:100px;background:#ccc"></div><p>one</p><p style="clear:both">two</p>|
+
+      {items, _} = fl(html)
+      assert word_at(items, "one").x == 64
+      assert word_at(items, "two").y >= 100
+      assert word_at(items, "two").x == 4
+    end
+
+    test "clear: right ignores left floats" do
+      html =
+        ~s|<div style="float:left;width:60px;height:100px;background:#ccc"></div><p style="clear:right">text</p>|
+
+      {items, _} = fl(html)
+      assert word_at(items, "text").x == 64
+    end
+
+    test "a box holding only floats contains them" do
+      html =
+        ~s|<div style="background:#eee"><div style="float:left;width:60px;height:100px"></div></div><p>below</p>|
+
+      {items, _} = fl(html)
+      assert box_of(items).h == 100
+      assert word_at(items, "below").y >= 100
+      assert word_at(items, "below").x == 4
+    end
+
+    test "a box with overflow hidden contains its floats" do
+      html =
+        ~s|<div style="overflow:hidden"><div style="float:left;width:60px;height:100px"></div>short</div><p>below</p>|
+
+      {items, _} = fl(html)
+      assert word_at(items, "below").y >= 100
+    end
+
+    test "text of the next paragraph keeps flowing around a float from the one before" do
+      html =
+        ~s|<div style="float:left;width:60px;height:100px;background:#ccc"></div><p>one</p><p>two</p>|
+
+      {items, _} = fl(html)
+      assert word_at(items, "two").x == 64
+    end
+
+    test "floated images" do
+      html = ~s|<svg width="40" height="30" style="float:right"></svg><p>#{@words}</p>|
+      {items, _} = fl(html)
+      svg = Enum.find(items, &(&1.type == :svg))
+      assert svg.x == 4 + 200 - 40
+      assert word_at(items, "aaaa").x == 4
+    end
+
+    test "img align=left floats too" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><img src="a.png" width="40" height="30" align="left"><p>text</p>|,
+          "about:home"
+        )
+
+      {items, _} =
+        Layout.layout(page.nodes, 208, &measure/2, 600, images: %{"about:a.png" => {:ok, 40, 30}})
+
+      assert word_at(items, "text").x == 44
+    end
+
+    test "floats inside a table cell stay in the cell" do
+      html =
+        ~s|<table><tr><td><div style="float:left;width:10px;height:10px;background:#ccc"></div>cell</td><td>next</td></tr></table>|
+
+      {items, _} = fl(html)
+      assert word_at(items, "next").x > word_at(items, "cell").x
+    end
+
+    test "centred text is centred between the floats" do
+      html =
+        ~s|<div style="float:left;width:60px;height:50px;background:#ccc"></div><p style="text-align:center">abcd</p>|
+
+      {items, _} = fl(html)
+      # the free space is 4+60 .. 204: the word (32) in the middle
+      assert abs(word_at(items, "abcd").x - (64 + div(140 - 32, 2))) <= 1
+    end
+
+    test "page height covers floats that stick out below the text" do
+      {_, h} =
+        fl(~s|<div style="float:left;width:60px;height:300px;background:#ccc"></div><p>short</p>|)
+
+      assert h >= 300
     end
   end
 end
