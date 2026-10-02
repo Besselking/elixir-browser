@@ -654,6 +654,37 @@ defmodule Browser.Layout do
     end
   end
 
+  @doc """
+  True when none of the `<img>` elements showing `url` change size when the picture
+  loads: each has a width and a height of its own (attributes or CSS). Laying the page
+  out again after such a picture arrives would give the same boxes, so a repaint is enough.
+  """
+  @spec image_size_fixed?([term] | term, String.t()) :: boolean
+  def image_size_fixed?(nodes, url) when is_list(nodes),
+    do: Enum.all?(nodes, &image_size_fixed?(&1, url))
+
+  def image_size_fixed?({:element, "img", attrs, _}, url) do
+    attr_value(attrs, "@src") != url or
+      Browser.ImageBox.fixed?(
+        declared_size(attrs) || %{w: nil, h: nil},
+        image_css(computed(attrs))
+      )
+  end
+
+  def image_size_fixed?({:element, _tag, _attrs, kids}, url), do: image_size_fixed?(kids, url)
+  def image_size_fixed?(_text, _url), do: true
+
+  defp image_css(c) do
+    %{
+      w: c["width"],
+      h: c["height"],
+      minw: c["min-width"],
+      maxw: c["max-width"],
+      minh: c["min-height"],
+      maxh: c["max-height"]
+    }
+  end
+
   defp declared_size(attrs) do
     w = attr_int(attrs, "width")
     h = attr_int(attrs, "height")
@@ -725,19 +756,16 @@ defmodule Browser.Layout do
         {box, style.align, [], []}
       end
 
+    declared = declared_size(attrs) || %{w: nil, h: nil}
+
     spec = %{
       url: url,
       intrinsic: with({:ok, w, h} <- info, do: {w, h}, else: (_ -> nil)),
-      paint?: info != nil,
-      attrs: declared_size(attrs) || %{w: nil, h: nil},
-      css: %{
-        w: c["width"],
-        h: c["height"],
-        minw: c["min-width"],
-        maxw: c["max-width"],
-        minh: c["min-height"],
-        maxh: c["max-height"]
-      },
+      # a picture still loading whose box is already known gets its (not yet drawable) item
+      # now, so that the page does not need another layout when the picture arrives
+      paint?: info != nil or (url != nil and Browser.ImageBox.fixed?(declared, image_css(c))),
+      attrs: declared,
+      css: image_css(c),
       box: box,
       href: style.href,
       hidden: style.hidden,

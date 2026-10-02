@@ -1860,9 +1860,35 @@ defmodule Browser.LayoutTest do
     test "while an image loads its declared size is reserved" do
       html = ~s(<img src="a.png" width="50" height="20">x)
       {items, _} = im(html, %{"http://example.test/other.png" => {:ok, 1, 1}})
-      assert pics(items) == []
       {done, _} = im(html, loaded(50, 20))
       assert tw(items, "x").x == tw(done, "x").x
+    end
+
+    test "a loading image with a declared size has the same items as the loaded one" do
+      html = ~s(<p>a</p><img src="a.png" width="50" height="20">x)
+      {loading, h1} = im(html, %{})
+      {done, h2} = im(html, loaded(50, 20))
+      assert loading == done
+      assert h1 == h2
+      assert [%{type: :image, w: 50, h: 20}] = pics(loading)
+    end
+
+    test "a loading image without a full declared size has no item yet" do
+      {items, _} = im(~s(<img src="a.png" width="50">x), %{})
+      assert pics(items) == []
+    end
+
+    test "image_size_fixed? is true only when every <img> of the url has both dimensions" do
+      nodes = fn html -> Page.build(html, @base).nodes end
+      fixed = &Layout.image_size_fixed?(nodes.(&1), @img)
+
+      assert fixed.(~s(<img src="a.png" width="5" height="5">))
+      assert fixed.(~s(<img src="a.png" style="width:5px;height:5px">))
+      assert fixed.(~s(<img src="b.png">))
+      refute fixed.(~s(<img src="a.png">))
+      refute fixed.(~s(<img src="a.png" width="5">))
+      refute fixed.(~s(<img src="a.png" width="5" height="5" style="height:auto">))
+      refute fixed.(~s(<img src="a.png" width="5" height="5"><div><img src="a.png"></div>))
     end
 
     test "an empty image map means everything is still loading, not that images are off" do
