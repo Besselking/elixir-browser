@@ -272,18 +272,22 @@ defmodule Browser.UI do
     # only the invalidated part of the window is drawn into, so items outside it are skipped
     {cx, cy, cw, ch} = :wxDC.getClippingBox(dc)
 
-    for item <- items,
+    # sticky and fixed items are drawn last, over the page, shifted by how far the page has scrolled
+    {sticky, normal} = Enum.split_with(items, &Map.has_key?(&1, :stick))
+
+    for item <- normal ++ sticky,
         item.type != :canvas,
         item.type != :caret or caret_on,
         not Map.get(item, :hidden, false),
-        item.y - scroll < cy + ch,
-        item.y + Map.get(item, :h, 40) + 40 - scroll > cy,
+        sc = scroll - stick_shift(item, scroll),
+        item.y - sc < cy + ch,
+        item.y + Map.get(item, :h, 40) + 40 - sc > cy,
         item.x - 40 < cx + cw,
         item.x + Map.get(item, :w, 100_000) + 40 > cx do
-      y = item.y - scroll
+      y = item.y - sc
       clip = Map.get(item, :clip)
-      if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - scroll, clip.w, clip.h})
-      draw(dc, item, y, scroll)
+      if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - sc, clip.w, clip.h})
+      draw(dc, item, y, sc)
       if clip, do: :wxDC.destroyClippingRegion(dc)
     end
 
@@ -801,9 +805,22 @@ defmodule Browser.UI do
   Indexes the links of a laid out page by horizontal band, so `link_at/3` looks at the few
   links near the pointer instead of every item. Each band keeps its links in paint order.
   """
+  # How far a sticky or fixed item is moved down the page when the window is scrolled to
+  # `scroll`: nothing for ordinary items; a sticky box once the page has scrolled past the
+  # point where it would leave the window; a fixed box all the way.
+  def stick_shift(%{stick: :fixed}, scroll), do: scroll
+
+  def stick_shift(%{stick: %{top: top, y0: y0}}, scroll), do: max(round(scroll + top - y0), 0)
+
+  def stick_shift(_item, _scroll), do: 0
+
+  # (sticky and fixed items are found by `sticky_hit/4`: their place depends on the scroll)
   def links(items) do
     items
     |> Enum.reduce(%{}, fn
+      %{stick: _}, acc ->
+        acc
+
       %{type: type, href: href} = it, acc
       when type in [:text, :image, :svg] and is_binary(href) ->
         first = band(it.y)
@@ -882,6 +899,52 @@ defmodule Browser.UI do
   # -- controls --------------------------------------------------------------------
 
   @doc "The id of the form control at page position `{x, y}` (the smallest if they nest), or nil."
+  # What the sticky and fixed `items` (with the window scrolled to `scroll`) have at window
+  # point `{x, y}`: `{:link, href}`, `{:control, cid, page_y}` (with the y the control has on
+  # the page, for caret placement), `:cover` for anything else they paint there, or nil.
+  def sticky_hit([], _x, _y, _scroll), do: nil
+
+  def sticky_hit(items, x, y, scroll) do
+    at =
+      for it <- items,
+          Map.has_key?(it, :w) and Map.has_key?(it, :h),
+          shift = stick_shift(it, scroll),
+          sc = scroll - shift,
+          inside?(
+            x,
+            y,
+            it.x,
+            it.y - sc,
+            it.w,
+            it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
+          ),
+          clipped_in?(shift_clip(it, shift), x, y + scroll - shift) do
+        {it, shift}
+      end
+
+    # the topmost (last painted) item decides; controls and links before plain boxes
+    control =
+      Enum.find_value(at, fn {it, shift} ->
+        if Map.get(it, :cid) != nil, do: {:control, it.cid, y + scroll - shift}
+      end)
+
+    link =
+      Enum.find_value(at, fn {it, _} ->
+        if it.type in [:text, :image, :svg] and is_binary(Map.get(it, :href)),
+          do: {:link, it.href}
+      end)
+
+    cond do
+      control -> control
+      link -> link
+      at != [] -> :cover
+      true -> nil
+    end
+  end
+
+  # clip rectangles are in page coordinates: for a point at the item's unshifted place
+  defp shift_clip(it, _shift), do: it
+
   def control_at(controls, x, y) do
     controls
     |> Enum.filter(fn {_cid, b} ->

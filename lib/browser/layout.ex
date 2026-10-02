@@ -205,7 +205,11 @@ defmodule Browser.Layout do
         _ -> []
       end
 
-    items ++ selection_items(texts, cid, focus[:sel], measure) ++ ring ++ caret
+    # a control in a sticky or fixed box has its ring and caret there too
+    stick = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :stick)))
+    extra = selection_items(texts, cid, focus[:sel], measure) ++ ring ++ caret
+    extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
+    items ++ extra
   end
 
   # The highlight of the text selected in the focused field: `sel` is `{from, to}` with
@@ -345,13 +349,34 @@ defmodule Browser.Layout do
         y0 = items |> Enum.map(& &1.y) |> Enum.min()
         x1 = items |> Enum.map(&(&1.x + &1.w)) |> Enum.max()
         y1 = items |> Enum.map(&(&1.y + round(&1.h * 1.25))) |> Enum.max()
-        %{x: x0, y: y0, w: x1 - x0, h: y1 - y0, radius: nil, font: font_of(items)}
+
+        %{
+          x: x0,
+          y: y0,
+          w: x1 - x0,
+          h: y1 - y0,
+          radius: nil,
+          font: font_of(items),
+          stick: stick_of(items)
+        }
 
       rects ->
         r = Enum.max_by(rects, &(&1.w * &1.h))
-        %{x: r.x, y: r.y, w: r.w, h: r.h, radius: Map.get(r, :radius), font: font_of(items)}
+
+        %{
+          x: r.x,
+          y: r.y,
+          w: r.w,
+          h: r.h,
+          radius: Map.get(r, :radius),
+          font: font_of(items),
+          stick: stick_of(items)
+        }
     end
   end
+
+  # set when the control sits in a sticky or fixed box (see `Browser.UI.stick_shift/2`)
+  defp stick_of(items), do: Enum.find_value(items, &Map.get(&1, :stick))
 
   # The root element's background (or body's, if the root has none) paints the whole
   # canvas, not just the area the element covers. That element then doesn't paint it
@@ -944,7 +969,9 @@ defmodule Browser.Layout do
       min: num(c["min-height"]),
       max: num(c["max-height"]),
       clip: clips?(c),
-      pos: c["position"] in ["relative", "sticky"]
+      pos: c["position"] in ["relative", "sticky"],
+      # `position: sticky; top: n`: the box stays n px from the top of the window once scrolled to it
+      sticky: if(c["position"] == "sticky" and is_number(c["top"]), do: round(c["top"]))
     }
 
     needed? =
@@ -1755,7 +1782,17 @@ defmodule Browser.Layout do
     # the box's own background and borders go under whatever is inside it
     outer = outer_rects(box, height, st.images)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
-    %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
+    st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
+    if o.sticky, do: stick_new(st, box), else: st
+  end
+
+  # everything the box painted sticks with it
+  defp stick_new(st, %{o: o} = box) do
+    stick = %{top: o.sticky, y0: box.top}
+    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
+    tag = fn list -> Enum.map(list, &Map.put_new(&1, :stick, stick)) end
+    %{st | items: tag.(new_items) ++ old_items, rects: tag.(new_rects) ++ old_rects}
   end
 
   # items in paint order: background, then the four border sides. A box with
@@ -1992,6 +2029,8 @@ defmodule Browser.Layout do
     x = if left, do: origin.x + left, else: x
     {tx, ty} = resolve_translate(spec.translate, width, height)
     moved = for it <- items, do: move(it, x + tx, y + ty)
+    # a fixed box stays where it is in the window while the page scrolls
+    moved = if spec.fixed, do: Enum.map(moved, &Map.put(&1, :stick, :fixed)), else: moved
     %{st | overlays: [moved | st.overlays]}
   end
 
@@ -2065,6 +2104,13 @@ defmodule Browser.Layout do
     it =
       case it do
         %{clip: c} -> %{it | clip: shift_rect(c, dx, dy)}
+        _ -> it
+      end
+
+    # a sticky box's own place moves with it
+    it =
+      case it do
+        %{stick: %{y0: y0} = stick} -> %{it | stick: %{stick | y0: y0 + dy}}
         _ -> it
       end
 

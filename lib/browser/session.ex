@@ -35,6 +35,9 @@ defmodule Browser.Session do
       # links indexed by band (UI.links/1), so hover needn't scan every item
       links: %{},
       controls: %{},
+      # the same without controls in sticky or fixed boxes, which are found by `UI.sticky_hit/4`
+      hit_controls: %{},
+      sticky: [],
       # decoded pictures by url: {:ok, width, height} or :failed
       images: %{},
       layout_timer: nil,
@@ -238,17 +241,30 @@ defmodule Browser.Session do
     py = y + state.scroll
     {count, state} = register_click(state, x, y, :down)
 
-    case UI.control_at(state.controls, x, py) do
+    case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+      {:control, cid, spy} ->
+        {:noreply, click_control(state, cid, x, spy, count, shift)}
+
+      {:link, href} ->
+        {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
+
+      # a click on a sticky or fixed box that is neither: it does not reach the page below
+      :cover ->
+        {:noreply, if(state.focus, do: blur(state), else: state)}
+
       nil ->
-        state = if state.focus, do: blur(state), else: state
+        case UI.control_at(state.hit_controls, x, py) do
+          nil ->
+            state = if state.focus, do: blur(state), else: state
 
-        case UI.link_at(state.links, x, py) do
-          nil -> {:noreply, page_click(state, x, py, count, shift)}
-          href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
+            case UI.link_at(state.links, x, py) do
+              nil -> {:noreply, page_click(state, x, py, count, shift)}
+              href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
+            end
+
+          cid ->
+            {:noreply, click_control(state, cid, x, py, count, shift)}
         end
-
-      cid ->
-        {:noreply, click_control(state, cid, x, py, count, shift)}
     end
   end
 
@@ -257,14 +273,23 @@ defmodule Browser.Session do
     py = y + state.scroll
     {count, state} = register_click(state, x, y, :dclick)
 
-    case UI.control_at(state.controls, x, py) do
-      nil ->
-        if UI.link_at(state.links, x, py) == nil,
-          do: {:noreply, select_unit(state, x, py, count)},
-          else: {:noreply, state}
+    case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+      {:control, cid, spy} ->
+        {:noreply, click_control(state, cid, x, spy, count, false)}
 
-      cid ->
-        {:noreply, click_control(state, cid, x, py, count, false)}
+      hit when hit != nil ->
+        {:noreply, state}
+
+      nil ->
+        case UI.control_at(state.hit_controls, x, py) do
+          nil ->
+            if UI.link_at(state.links, x, py) == nil,
+              do: {:noreply, select_unit(state, x, py, count)},
+              else: {:noreply, state}
+
+          cid ->
+            {:noreply, click_control(state, cid, x, py, count, false)}
+        end
     end
   end
 
@@ -308,20 +333,36 @@ defmodule Browser.Session do
   def handle_info(wx(event: wxMouse(type: :motion, x: wx_x, y: y)), state) do
     x = wx_x + state.scroll_x
     py = y + state.scroll
-    href = UI.link_at(state.links, x, py)
     {texts, state} = sel_texts(state)
 
-    kind =
-      case UI.control_at(state.controls, x, py) do
-        nil ->
-          cond do
-            href -> :hand
-            Selection.over_text?(texts, x, py) -> :text
-            true -> :arrow
-          end
+    {href, kind} =
+      case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+        {:link, href} ->
+          {href, :hand}
 
-        cid ->
-          control_cursor(state, cid)
+        {:control, cid, _} ->
+          {nil, control_cursor(state, cid)}
+
+        :cover ->
+          {nil, :arrow}
+
+        nil ->
+          href = UI.link_at(state.links, x, py)
+
+          kind =
+            case UI.control_at(state.hit_controls, x, py) do
+              nil ->
+                cond do
+                  href -> :hand
+                  Selection.over_text?(texts, x, py) -> :text
+                  true -> :arrow
+                end
+
+              cid ->
+                control_cursor(state, cid)
+            end
+
+          {href, kind}
       end
 
     {old_href, old_kind} = state.hover
@@ -645,6 +686,10 @@ defmodule Browser.Session do
       nil ->
         state
 
+      # a control in a sticky or fixed box is in the window wherever the page is
+      %{stick: stick} when stick != nil ->
+        state
+
       b ->
         view = UI.client_height(state.ui)
 
@@ -800,9 +845,11 @@ defmodule Browser.Session do
 
     case {control.options, state.controls[control.cid]} do
       {[_ | _] = options, %{} = b} ->
+        shift = UI.stick_shift(%{stick: b.stick}, state.scroll)
+
         UI.popup_menu(
           state.ui,
-          {b.x - state.scroll_x, b.y + b.h - state.scroll},
+          {b.x - state.scroll_x, b.y + b.h - state.scroll + shift},
           Enum.map(options, & &1.label),
           cur.selected
         )
@@ -954,6 +1001,8 @@ defmodule Browser.Session do
         width: width,
         links: UI.links(items),
         controls: Layout.controls(items),
+        hit_controls: Layout.controls(Enum.reject(items, &Map.has_key?(&1, :stick))),
+        sticky: Enum.filter(items, &Map.has_key?(&1, :stick)),
         content_w: Layout.content_width(items, width),
         sel: nil,
         sel_anchor: nil,
@@ -995,7 +1044,8 @@ defmodule Browser.Session do
              do: UI.links(items),
              else: state.links
 
-        scroll_by(%{state | items: items, links: links}, 0, :diff)
+        sticky = Enum.filter(items, &Map.has_key?(&1, :stick))
+        scroll_by(%{state | items: items, links: links, sticky: sticky}, 0, :diff)
 
       :error ->
         relayout(state, :diff)

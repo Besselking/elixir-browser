@@ -461,7 +461,7 @@ defmodule Browser.LayoutTest do
     alias Browser.Page
 
     for fixture <-
-          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats margins) do
+          ~w(sample hidden positioning boxes rounded lineheight forms images backgrounds svg selects wide tables floats margins sticky) do
       test "#{fixture}.html lays out on integer pixels" do
         html = File.read!("priv/demo/#{unquote(fixture)}.html")
         page = Page.build(html, "about:home")
@@ -3139,6 +3139,99 @@ defmodule Browser.LayoutTest do
     test "the page height does not go below zero for a pulled-up first block" do
       {_, h} = neg(~s|<p style="margin-top:-30px">a</p>|)
       assert h >= 0
+    end
+  end
+
+  describe "sticky and fixed boxes" do
+    alias Browser.Page
+
+    defp stk(html, width \\ 408) do
+      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2, 600)
+    end
+
+    defp stuck(items), do: Enum.filter(items, &Map.has_key?(&1, :stick))
+
+    test "everything a sticky box paints is marked with where it started" do
+      {items, _} =
+        stk(
+          ~s|<p>before</p><div style="position:sticky;top:0;background:#eee">head</div><p>after</p>|
+        )
+
+      marked = stuck(items)
+      assert Enum.any?(marked, &(&1.type == :rect))
+      assert Enum.any?(marked, &(&1.type == :text and &1.text == "head"))
+      refute Enum.any?(marked, &(&1.type == :text and &1.text in ["before", "after"]))
+      assert Enum.all?(marked, &(&1.stick.top == 0))
+      [first | _] = marked
+      assert first.stick.y0 >= 20
+    end
+
+    test "top is how far from the top of the window it stays, in whole pixels" do
+      {items, _} = stk(~s|<div style="position:sticky;top:12px">head</div>|)
+      assert Enum.all?(stuck(items), &(&1.stick.top == 12 and is_integer(&1.stick.top)))
+    end
+
+    test "sticky without a top does nothing" do
+      {items, _} = stk(~s|<div style="position:sticky">head</div>|)
+      assert stuck(items) == []
+      {items, _} = stk(~s|<div style="position:sticky;top:auto">head</div>|)
+      assert stuck(items) == []
+    end
+
+    test "a sticky box that is moved takes its place with it" do
+      {items, _} =
+        stk(
+          ~s|<div style="display:flex;padding-top:30px"><div style="position:sticky;top:0">head</div></div>|
+        )
+
+      [first | _] = stuck(items)
+      assert first.stick.y0 == first.y - 0 or first.stick.y0 <= first.y
+      assert first.stick.y0 >= 30
+    end
+
+    test "a fixed box is marked as fixed" do
+      {items, _} = stk(~s|<p>text</p><div style="position:fixed;top:0;left:0">bar</div>|)
+      assert Enum.any?(items, &(&1[:stick] == :fixed and Map.get(&1, :text) == "bar"))
+      refute Enum.any?(items, &(&1[:stick] == :fixed and Map.get(&1, :text) == "text"))
+    end
+
+    test "controls in a sticky box say so" do
+      {items, _} = stk(~s|<div style="position:sticky;top:0"><input type="text" value="q"></div>|)
+      [{_cid, bounds}] = items |> Layout.controls() |> Enum.to_list()
+      assert bounds.stick.top == 0
+    end
+
+    test "controls elsewhere do not" do
+      {items, _} = stk(~s|<input type="text" value="q">|)
+      [{_cid, bounds}] = items |> Layout.controls() |> Enum.to_list()
+      assert bounds.stick == nil
+    end
+
+    test "the ring and caret of a focused control in a sticky box stick too" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:sticky;top:0"><input type="text" value="q"></div>|,
+          "about:home"
+        )
+
+      {plain, _} = Layout.layout(page.nodes, 408, &measure/2, 600)
+      [{cid, _}] = plain |> Layout.controls() |> Enum.to_list()
+
+      {items, _} =
+        Layout.layout(page.nodes, 408, &measure/2, 600, focus: %{cid: cid, caret: {0, 1}})
+
+      ring = Enum.find(items, &(&1.type == :ring))
+      assert ring.stick.top == 0
+    end
+
+    test "sticky and fixed boxes do not change the page's layout" do
+      {plain, h1} = stk(~s|<p>a</p><div>head</div><p>b</p>|)
+      {sticky, h2} = stk(~s|<p>a</p><div style="position:sticky;top:0">head</div><p>b</p>|)
+      assert h1 == h2
+
+      assert Enum.find(plain, &(Map.get(&1, :text) == "b")).y ==
+               Enum.find(sticky, &(Map.get(&1, :text) == "b")).y
     end
   end
 end
