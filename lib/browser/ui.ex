@@ -902,7 +902,15 @@ defmodule Browser.UI do
   # point where it would leave the window; a fixed box all the way.
   def stick_shift(%{stick: :fixed}, scroll), do: scroll
 
-  def stick_shift(%{stick: %{top: top, y0: y0}}, scroll), do: max(round(scroll + top - y0), 0)
+  def stick_shift(%{stick: %{top: top, y0: y0} = stick}, scroll) do
+    shift = max(round(scroll + top - y0), 0)
+
+    case stick do
+      # it stops when its bottom reaches the bottom of the block it is in
+      %{limit: limit, h: h} when is_number(limit) -> min(shift, max(round(limit - (y0 + h)), 0))
+      _ -> shift
+    end
+  end
 
   def stick_shift(_item, _scroll), do: 0
 

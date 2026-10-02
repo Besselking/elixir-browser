@@ -1361,7 +1361,10 @@ defmodule Browser.Layout do
       lmax: 0,
       # floated boxes (newest first) and how much the right-hand ones take of the current line
       floats: [],
-      fr: 0
+      fr: 0,
+      # the open blocks (innermost first), and where each one ended: what sticky boxes inside stop at
+      blocks: [],
+      limits: %{}
     }
 
     ops |> Enum.reduce(st, &op/2) |> flush()
@@ -1369,9 +1372,23 @@ defmodule Browser.Layout do
 
   # paint order: backgrounds, flow content, then absolutely positioned elements
   defp finalize(st) do
-    Enum.reverse(st.rects) ++
-      Enum.reverse(st.items) ++ (st.overlays |> Enum.reverse() |> Enum.concat())
+    all =
+      Enum.reverse(st.rects) ++
+        Enum.reverse(st.items) ++ (st.overlays |> Enum.reverse() |> Enum.concat())
+
+    if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
   end
+
+  # A block ends: its content bottom is as far as sticky boxes inside it can go.
+  defp end_block(%{blocks: [id | rest]} = st),
+    do: %{st | blocks: rest, limits: Map.put(st.limits, id, st.y)}
+
+  defp end_block(st), do: st
+
+  defp stick_limit(%{stick: %{parent: parent} = stick} = item, limits) when parent != nil,
+    do: %{item | stick: Map.put(stick, :limit, Map.get(limits, parent))}
+
+  defp stick_limit(item, _limits), do: item
 
   defp op({:space, style}, st), do: if(st.line == [], do: st, else: %{st | pending_space: style})
   defp op({:word, text, style}, st), do: word(text, style, false, st)
@@ -1400,7 +1417,7 @@ defmodule Browser.Layout do
     w = fit_width(st, sub, spec, avail)
     {items, height, _base} = layout_atom(st, sub, w)
     {x, y} = place_float(st, side, w, height)
-    moved = for item <- items, do: move(item, x, y)
+    moved = for item <- items, do: item |> move(x, y) |> adopt_sticky(st)
     float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
 
     # a float paints above the backgrounds and borders of the blocks it overlaps: all of it,
@@ -1430,6 +1447,7 @@ defmodule Browser.Layout do
     %{
       st
       | insets: [{st.left, st.right, st.y, length(st.floats)} | st.insets],
+        blocks: [make_ref() | st.blocks],
         left: st.left + l,
         right: st.right + r
     }
@@ -1438,6 +1456,7 @@ defmodule Browser.Layout do
   # a block holding nothing but floats still contains them (the usual "clearfix")
   defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
     st = if st.y == y0, do: contain_floats(st, n0), else: st
+    st = end_block(st)
     %{st | insets: rest, left: l, right: r}
   end
 
@@ -1465,6 +1484,7 @@ defmodule Browser.Layout do
     # a box that clips, or that holds nothing but floats, contains them
     flow? = st.y > box.top + bt + box.o.pt
     st = if box.o.clip or not flow?, do: contain_floats(st, box.fl0), else: st
+    st = %{st | blocks: List.delete(st.blocks, box.id)}
 
     # child margins stay inside the box only when padding or a border separates them
     st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
@@ -1660,6 +1680,13 @@ defmodule Browser.Layout do
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
   # wrapping to a new line if it doesn't fit.
+  # A sticky box that sat at the top of a layout of its own (a flex item, say) is limited by
+  # the block the whole thing is placed in.
+  defp adopt_sticky(%{stick: %{parent: nil} = stick} = item, st),
+    do: %{item | stick: %{stick | parent: List.first(st.blocks)}}
+
+  defp adopt_sticky(item, _st), do: item
+
   defp add_rr(%{rr: rr} = item, extra), do: %{item | rr: rr + extra}
   defp add_rr(item, _extra), do: item
 
@@ -1686,6 +1713,7 @@ defmodule Browser.Layout do
         do: %{atom | items: Enum.map(atom.items, &add_rr(&1, st.right))},
         else: atom
 
+    atom = %{atom | items: Enum.map(atom.items, &adopt_sticky(&1, st))}
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil}
   end
@@ -1727,7 +1755,10 @@ defmodule Browser.Layout do
     rest = if ml0 < 0 or mr0 < 0, do: rest, else: max(rest, 0)
     x = st.margin + left
 
+    id = make_ref()
+
     box = %{
+      id: id,
       ref: ref,
       o: o,
       top: st.y,
@@ -1742,6 +1773,7 @@ defmodule Browser.Layout do
     st = %{
       st
       | open: Map.put(st.open, ref, box),
+        blocks: [id | st.blocks],
         left: left + bl + o.pl,
         right: st.right + rest + br + o.pr,
         y: st.y + bt + o.pt
@@ -1791,13 +1823,16 @@ defmodule Browser.Layout do
     outer = outer_rects(box, height, st.images)
     {new, old} = Enum.split(st.rects, st.nr - box.nr0)
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
+    # sticky boxes inside stop at the bottom of this one's content
+    st = %{st | limits: Map.put(st.limits, box.id, box.top + height - bb - o.pb)}
     st = if o.xform, do: xform_new(st, box, height), else: st
-    if o.sticky, do: stick_new(st, box), else: st
+    if o.sticky, do: stick_new(st, box, height), else: st
   end
 
   # everything the box painted sticks with it
-  defp stick_new(st, %{o: o} = box) do
-    stick = %{top: o.sticky, y0: box.top}
+  defp stick_new(st, %{o: o} = box, height) do
+    # `parent` is the block it sits in, whose bottom becomes its `limit` when layout is done
+    stick = %{top: o.sticky, y0: box.top, h: height, parent: List.first(st.blocks)}
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     tag = fn list -> Enum.map(list, &Map.put_new(&1, :stick, stick)) end
@@ -2119,8 +2154,13 @@ defmodule Browser.Layout do
     # a sticky box's own place moves with it
     it =
       case it do
-        %{stick: %{y0: y0} = stick} -> %{it | stick: %{stick | y0: y0 + dy}}
-        _ -> it
+        %{stick: %{y0: y0} = stick} ->
+          stick = %{stick | y0: y0 + dy}
+          stick = if stick[:limit], do: %{stick | limit: stick.limit + dy}, else: stick
+          %{it | stick: stick}
+
+        _ ->
+          it
       end
 
     # and a transformed box turns about where it now is

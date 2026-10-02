@@ -50,6 +50,24 @@ defmodule Browser.UILinkTest do
       assert UI.stick_shift(%{stick: stick}, 300) == 220
     end
 
+    test "a sticky box stops when it reaches the bottom of its block" do
+      stick = %{top: 0, y0: 100, h: 50, limit: 400}
+      assert UI.stick_shift(%{stick: stick}, 200) == 100
+      # the box bottom (150 + shift) may not pass 400: at most 250
+      assert UI.stick_shift(%{stick: stick}, 250) == 150
+      assert UI.stick_shift(%{stick: stick}, 300) == 200
+      assert UI.stick_shift(%{stick: stick}, 350) == 250
+      assert UI.stick_shift(%{stick: stick}, 900) == 250
+    end
+
+    test "a box taller than its block does not stick at all" do
+      assert UI.stick_shift(%{stick: %{top: 0, y0: 100, h: 300, limit: 350}}, 500) == 0
+    end
+
+    test "without a limit it sticks to the end" do
+      assert UI.stick_shift(%{stick: %{top: 0, y0: 100, h: 50, limit: nil}}, 5000) == 4900
+    end
+
     test "the shift is whole pixels even when positions are fractional" do
       assert UI.stick_shift(%{stick: %{top: 0.0, y0: 52}}, 460) == 408
       assert is_integer(UI.stick_shift(%{stick: %{top: 0.5, y0: 52}}, 460))

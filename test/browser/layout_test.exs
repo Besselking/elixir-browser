@@ -3190,6 +3190,46 @@ defmodule Browser.LayoutTest do
       assert first.stick.y0 >= 30
     end
 
+    test "a sticky box is limited by the bottom of the block it is in" do
+      html =
+        ~s|<div style="height:300px;background:#eee"><div style="position:sticky;top:0;height:50px">s</div></div><p>after</p>|
+
+      {items, _} = stk(html)
+      stick = stuck(items) |> hd() |> Map.fetch!(:stick)
+      assert stick.h == 50
+      # the container is 300 high and starts at 0
+      assert stick.limit == 300
+    end
+
+    test "also when the parent is a plain block" do
+      html =
+        ~s|<div><p>one</p><div style="position:sticky;top:0">s</div><p>two</p><p>three</p></div><p>after</p>|
+
+      {items, _} = stk(html)
+      stick = stuck(items) |> hd() |> Map.fetch!(:stick)
+      after_y = Enum.find(items, &(Map.get(&1, :text) == "after")).y
+      assert stick.limit <= after_y
+      assert stick.limit > stick.y0 + stick.h
+    end
+
+    test "a sticky flex item is limited by its flex container" do
+      html =
+        ~s|<div style="display:flex"><div style="position:sticky;top:0">side</div><div style="height:200px">tall</div></div><p>after</p>|
+
+      {items, _} = stk(html)
+      stick = stuck(items) |> Enum.filter(&(&1.type == :text)) |> hd() |> Map.fetch!(:stick)
+      assert stick.limit == 200
+    end
+
+    test "the limit moves with the box when it is placed" do
+      html =
+        ~s|<p>above</p><div style="display:flex"><div style="position:sticky;top:0">side</div><div style="height:100px">tall</div></div>|
+
+      {items, _} = stk(html)
+      stick = stuck(items) |> Enum.filter(&(&1.type == :text)) |> hd() |> Map.fetch!(:stick)
+      assert stick.limit - stick.y0 == 100
+    end
+
     test "a fixed box is marked as fixed" do
       {items, _} = stk(~s|<p>text</p><div style="position:fixed;top:0;left:0">bar</div>|)
       assert Enum.any?(items, &(&1[:stick] == :fixed and Map.get(&1, :text) == "bar"))
