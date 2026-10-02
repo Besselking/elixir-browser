@@ -144,11 +144,15 @@ defmodule Browser.Session do
         focus: nil,
         caret: 0,
         controls: %{},
+        # the old page stays on screen until the new one is laid out: nothing on it is live
+        links: %{},
+        hit_controls: %{},
+        sticky: [],
         menu: nil
       })
 
-    # the pictures download while the page is being laid out
-    {:noreply, state |> start_images() |> relayout() |> sync_buttons()}
+    # the pictures download while the page is laid out in the background
+    {:noreply, state |> start_images() |> start_layout_job() |> sync_buttons()}
   end
 
   # -- images arriving -------------------------------------------------------
@@ -184,8 +188,12 @@ defmodule Browser.Session do
   def handle_info({:images_done, _stale, _urls}, state), do: {:noreply, state}
 
   # several pictures usually arrive together: lay out once for the batch
+  def handle_info({:image_layout, ref}, %{layout_timer: ref, layout_job: nil} = state),
+    do: {:noreply, start_layout_job(%{state | layout_timer: nil})}
+
+  # a layout is running in the background: the pictures are picked up when it is done
   def handle_info({:image_layout, ref}, %{layout_timer: ref} = state),
-    do: {:noreply, relayout(%{state | layout_timer: nil})}
+    do: {:noreply, schedule_image_layout(%{state | layout_timer: nil})}
 
   def handle_info({:image_layout, _stale}, state), do: {:noreply, state}
 
