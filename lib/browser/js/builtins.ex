@@ -309,12 +309,30 @@ defmodule Browser.JS.Builtins do
     end
   end
 
+  # an array that push/pop may edit in place: not frozen, sealed, non-extensible or length-locked
+  defp plain_array?({:obj, id}) do
+    o = deref(id)
+
+    o.class == :array and
+      not (Map.get(o, :frozen, false) or Map.get(o, :sealed, false) or
+             Map.get(o, :len_ro, false) or Map.get(o, :ext, true) == false)
+  end
+
+  defp plain_array?(_), do: false
+
   defp array_methods(p) do
     def_fn(p, "push", fn this, args ->
-      if array?(this) do
-        list = array_list(this) ++ args
-        set_array_list(this, list)
-        float(length(list))
+      if plain_array?(this) do
+        {:obj, id} = this
+        o = deref(id)
+
+        {items, len} =
+          Enum.reduce(args, {o.items, o.len}, fn v, {items, i} ->
+            {Map.put(items, i, v), i + 1}
+          end)
+
+        Interp.store(id, %{o | items: items, len: len})
+        float(len)
       else
         o = this_obj(this)
         len = length_of(o)
@@ -325,14 +343,21 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(p, "pop", fn this, _ ->
-      if array?(this) do
-        case Enum.reverse(array_list(this)) do
-          [] ->
-            :undefined
+      if plain_array?(this) do
+        {:obj, id} = this
+        o = deref(id)
 
-          [last | rest] ->
-            set_array_list(this, Enum.reverse(rest))
-            last
+        if o.len == 0 do
+          :undefined
+        else
+          last =
+            case Map.get(o.items, o.len - 1, :undefined) do
+              {:accessor, g, _} -> if function?(g), do: call(g, this, []), else: :undefined
+              v -> v
+            end
+
+          Interp.store(id, %{o | items: Map.delete(o.items, o.len - 1), len: o.len - 1})
+          last
         end
       else
         o = this_obj(this)
