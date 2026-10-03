@@ -145,10 +145,13 @@ defmodule Browser.JS.Interp do
     })
   end
 
-  defp lookup_var(nil, _), do: :error
+  defp lookup_var(scope, name), do: lookup_var(scope, name, Process.get(:js_heap))
 
-  defp lookup_var(scope, name) do
-    s = deref(scope)
+  # walks the scope chain over one read of the heap
+  defp lookup_var(nil, _, _), do: :error
+
+  defp lookup_var(scope, name, heap) do
+    s = Map.fetch!(heap, scope)
 
     case s.vars do
       %{^name => v} ->
@@ -159,29 +162,31 @@ defmodule Browser.JS.Interp do
           %{with: obj} when is_binary(name) ->
             if has_property?(obj, name),
               do: {:ok, get(obj, name)},
-              else: lookup_var(s.parent, name)
+              else: lookup_var(s.parent, name, heap)
 
           _ ->
-            lookup_var(s.parent, name)
+            lookup_var(s.parent, name, heap)
         end
     end
   end
 
-  defp assign_var(scope, name, val) do
-    s = deref(scope)
+  defp assign_var(scope, name, val), do: assign_var(scope, name, val, Process.get(:js_heap))
+
+  defp assign_var(scope, name, val, heap) do
+    s = Map.fetch!(heap, scope)
 
     cond do
       Map.has_key?(s.vars, name) ->
         if MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
 
-        store(scope, %{s | vars: Map.put(s.vars, name, val)})
+        Process.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
         put(s.with, name, val)
 
       s.parent != nil ->
-        assign_var(s.parent, name, val)
+        assign_var(s.parent, name, val, heap)
 
       true ->
         # an undeclared variable becomes a global
@@ -937,7 +942,7 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
-        run_closure(c, this, args)
+        run_closure(id, c, this, args)
 
       _ ->
         throw_error("TypeError", "value is not a function")
@@ -1076,7 +1081,8 @@ defmodule Browser.JS.Interp do
   # A call's scope can only outlive the call through a closure created inside it (a function,
   # method, class or arrow all go through `make_fn`, which counts them). When none was, the
   # scope is garbage on return: dropping it keeps the heap from growing with every call.
-  defp run_closure(c, this, args) do
+  defp run_closure(id, c, this, args) do
+    c = with_hoist(id, c)
     before = Process.get(:js_fns)
     {result, scope} = run_closure_scope(c, this, args, [])
     free_scope(scope, before)
@@ -1110,8 +1116,13 @@ defmodule Browser.JS.Interp do
             ev(c.body, scope)
 
           _ ->
-            hoist_vars(c.body, scope)
-            hoist_functions(c.body, scope)
+            {names, funs} =
+              case c do
+                %{hoist: h} -> h
+                _ -> {hoisted_names(c.body), fundecls(c.body)}
+              end
+
+            apply_hoist(scope, names, funs)
 
             try do
               exec_list(c.body, scope)
@@ -1274,17 +1285,33 @@ defmodule Browser.JS.Interp do
 
   # ── hoisting ───────────────────────────────────────────────
 
-  defp hoist_vars(stmts, scope) do
-    case hoisted_names(stmts) do
-      [] ->
-        :ok
+  defp hoist_vars(stmts, scope), do: apply_hoist(scope, hoisted_names(stmts), [])
 
-      names ->
-        s = deref(scope)
-        vars = Enum.reduce(names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
-        store(scope, %{s | vars: vars})
+  # declares `var` names (undefined unless already a parameter) and function declarations
+  defp apply_hoist(scope, names, funs) do
+    if names != [] do
+      s = deref(scope)
+      vars = Enum.reduce(names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
+      store(scope, %{s | vars: vars})
     end
+
+    for {name, fun} <- funs, do: declare(scope, name, make_fn(fun, scope))
+    :ok
   end
+
+  # What a call must hoist is worked out from the body once per function object and kept in
+  # its closure: looking the body up by value costs time proportional to its size on every call.
+  defp with_hoist(_id, %{hoist: _} = c), do: c
+  defp with_hoist(_id, %{mode: :arrow_expr} = c), do: c
+
+  defp with_hoist(id, c) do
+    c = Map.put(c, :hoist, {hoisted_names(c.body), fundecls(c.body)})
+    o = deref(id)
+    store(id, %{o | fun: {:closure, c}})
+    c
+  end
+
+  defp fundecls(stmts), do: for(stmt <- stmts, {:fundecl, n, f} <- [unexport(stmt)], do: {n, f})
 
   # the `var` names of a body, remembered: walking the syntax tree on every call is costly
   defp hoisted_names(stmts) do
