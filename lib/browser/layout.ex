@@ -1306,7 +1306,11 @@ defmodule Browser.Layout do
         nil -> style
       end
 
-    apply_computed(style, c)
+    style = apply_computed(style, c)
+
+    # a field draws its text a line to an item (the caret and the selection count on it),
+    # whatever `white-space` the page gives it
+    if tag in ~w(textarea input), do: %{style | pre: true, ws: :pre}, else: style
   end
 
   defp link_style(style, attrs) do

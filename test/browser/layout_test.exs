@@ -3694,6 +3694,18 @@ defmodule Browser.LayoutTest do
     assert rect.w > 300
   end
 
+  test "a textarea keeps one text item per line whatever white-space says" do
+    page =
+      Browser.Page.build(
+        ~s|<style>textarea { white-space: pre-wrap }</style><textarea rows=3>one two three\nfour five</textarea>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+    texts = for %{type: :text, cid: cid} = t <- items, cid != nil, do: t.text
+    assert texts == ["one two three", "four five"]
+  end
+
   describe "grid" do
     defp grid(html, width \\ 400) do
       page = Browser.Page.build(html, "about:home")

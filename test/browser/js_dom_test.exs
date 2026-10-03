@@ -172,6 +172,24 @@ defmodule Browser.JS.DOMTest do
       refute second.prevented
     end
 
+    test "an async onsubmit handler prevents the default and finishes its awaits" do
+      {pid, _} =
+        start(~S"""
+        <body><form id=f><input type=submit></form><script>
+        const log = (m) => console.log(m);
+        document.getElementById("f").onsubmit = async (event) => {
+          event.preventDefault();
+          for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 100));
+          log("done");
+        };
+        </script></body>
+        """)
+
+      r = Runtime.dispatch(pid, {:form, 0}, "submit")
+      assert r.prevented
+      assert logs(r) == ["done"]
+    end
+
     test "control state from the page reaches `.value` and `.checked`" do
       {pid, _} =
         start(~S"""

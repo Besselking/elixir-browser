@@ -1,0 +1,389 @@
+defmodule Browser.JS.Promise do
+  @moduledoc """
+  Promises, `async` functions and `await` for the JavaScript runtime.
+
+  A promise is a heap object of class `:promise` holding its state and the reactions waiting on
+  it. Reactions run as microtasks, which are drained when a script, a timer callback or an event
+  handler returns (see `run_microtasks/0`).
+
+  `await` is synchronous: it runs the microtasks and the virtual-time timers until the awaited
+  promise has settled, then carries on with its value (or throws its reason). An `async` function
+  therefore runs to the end when it is called and returns an already settled promise. Code that
+  depends on the interleaving of an `async` call with what follows it will see another order than
+  in a browser; a program that only awaits things that settle by themselves (timers, other
+  promises) gives the same results.
+  """
+
+  import Browser.JS.Interp, except: [get: 2, put: 3]
+  alias Browser.JS.Interp
+
+  defp arg(args, i), do: Enum.at(args, i, :undefined)
+
+  # ── promises ───────────────────────────────────────────────
+
+  def new do
+    {:obj,
+     alloc(%{
+       class: :promise,
+       state: :pending,
+       value: :undefined,
+       reactions: [],
+       props: %{},
+       keys: [],
+       proto: proto(:promise)
+     })}
+  end
+
+  def promise?({:obj, id}), do: match?(%{class: :promise}, deref(id))
+  def promise?(_), do: false
+
+  defp data({:obj, id}), do: deref(id)
+
+  defp update({:obj, id}, fun), do: store(id, fun.(deref(id)))
+
+  def state(p), do: data(p).state
+
+  @doc "The promise's resolve function: settles it with `value`, following thenables."
+  def resolve(p, value) do
+    cond do
+      value == p ->
+        reject(p, make_error("TypeError", "Chaining cycle detected for promise"))
+
+      promise?(value) ->
+        enqueue(fn -> then(value, resolver(p), rejecter(p)) end)
+
+      match?({:obj, _}, value) ->
+        case thenable(value) do
+          nil -> fulfill(p, value)
+          then_fn -> enqueue(fn -> follow(p, value, then_fn) end)
+        end
+
+      true ->
+        fulfill(p, value)
+    end
+  end
+
+  defp thenable(obj) do
+    case Interp.get(obj, "then") do
+      f when is_tuple(f) -> if function?(f), do: f
+      _ -> nil
+    end
+  catch
+    {:js_error, _} -> nil
+  end
+
+  defp follow(p, thenable, then_fn) do
+    {res, rej} = once_pair(p)
+
+    try do
+      call(then_fn, thenable, [res, rej])
+    catch
+      {:js_error, e} -> call(rej, :undefined, [e])
+    end
+  end
+
+  # resolve and reject functions of which only the first call counts
+  defp once_pair(p) do
+    key = {:js_once, make_ref()}
+
+    guard = fn fun ->
+      native("", fn _, args ->
+        unless Process.get(key) do
+          Process.put(key, true)
+          fun.(arg(args, 0))
+        end
+
+        :undefined
+      end)
+    end
+
+    {guard.(&resolve(p, &1)), guard.(&reject(p, &1))}
+  end
+
+  defp resolver(p),
+    do:
+      native("", fn _, args ->
+        resolve(p, arg(args, 0))
+        :undefined
+      end)
+
+  defp rejecter(p),
+    do:
+      native("", fn _, args ->
+        reject(p, arg(args, 0))
+        :undefined
+      end)
+
+  def fulfill(p, v), do: settle(p, :fulfilled, v)
+  def reject(p, e), do: settle(p, :rejected, e)
+
+  defp settle(p, state, v) do
+    d = data(p)
+
+    if d.state == :pending do
+      update(p, &%{&1 | state: state, value: v, reactions: []})
+      for r <- Enum.reverse(d.reactions), do: enqueue(fn -> react(r, state, v) end)
+    end
+
+    :ok
+  end
+
+  @doc "`p.then(on_fulfilled, on_rejected)`: the derived promise."
+  def then(p, on_f, on_r) do
+    child = new()
+    reaction = %{on_f: on_f, on_r: on_r, child: child}
+    d = data(p)
+
+    case d.state do
+      :pending -> update(p, &%{&1 | reactions: [reaction | &1.reactions]})
+      state -> enqueue(fn -> react(reaction, state, d.value) end)
+    end
+
+    child
+  end
+
+  defp react(%{on_f: on_f, on_r: on_r, child: child}, state, value) do
+    handler = if state == :fulfilled, do: on_f, else: on_r
+
+    if function?(handler) do
+      try do
+        resolve(child, call(handler, :undefined, [value]))
+      catch
+        {:js_error, e} -> reject(child, e)
+      end
+    else
+      if state == :fulfilled, do: resolve(child, value), else: reject(child, value)
+    end
+  end
+
+  # ── microtasks ─────────────────────────────────────────────
+
+  def enqueue(fun), do: Process.put(:js_microtasks, [fun | Process.get(:js_microtasks, [])])
+
+  @doc "Runs the queued microtasks (and those they queue) to the end."
+  def run_microtasks do
+    case Process.get(:js_microtasks, []) do
+      [] ->
+        :ok
+
+      jobs ->
+        Process.put(:js_microtasks, [])
+        Enum.each(Enum.reverse(jobs), & &1.())
+        run_microtasks()
+    end
+  end
+
+  # ── async / await ──────────────────────────────────────────
+
+  @doc "Runs the body of an async function: a promise for its result."
+  def run_async(fun) do
+    p = new()
+
+    try do
+      resolve(p, fun.())
+    catch
+      {:js_error, e} -> reject(p, e)
+    end
+
+    p
+  end
+
+  @doc "`await value`."
+  def await(value) do
+    p =
+      if promise?(value) do
+        value
+      else
+        np = new()
+        resolve(np, value)
+        np
+      end
+
+    settle_loop(p)
+  end
+
+  defp settle_loop(p) do
+    run_microtasks()
+
+    case data(p) do
+      %{state: :fulfilled, value: v} ->
+        v
+
+      %{state: :rejected, value: e} ->
+        throw({:js_error, e})
+
+      %{state: :pending} ->
+        if Browser.JS.Builtins.run_next_timer(fn _ -> :ok end),
+          do: settle_loop(p),
+          else: throw_error("Error", "await: the promise never settles")
+    end
+  end
+
+  # ── install ────────────────────────────────────────────────
+
+  def install(scope) do
+    p = new_object()
+    put_proto(:promise, p)
+
+    ctor =
+      native("Promise", fn _this, args ->
+        executor = arg(args, 0)
+
+        unless function?(executor),
+          do: throw_error("TypeError", "Promise resolver #{to_str(executor)} is not a function")
+
+        promise = new()
+        {res, rej} = once_pair(promise)
+
+        try do
+          call(executor, :undefined, [res, rej])
+        catch
+          {:js_error, e} -> call(rej, :undefined, [e])
+        end
+
+        promise
+      end)
+
+    put_hidden(ctor, "prototype", p)
+    put_hidden(p, "constructor", ctor)
+    declare(scope, "Promise", ctor)
+
+    def_fn(p, "then", fn this, args -> then(this, arg(args, 0), arg(args, 1)) end)
+    def_fn(p, "catch", fn this, args -> then(this, :undefined, arg(args, 0)) end)
+
+    def_fn(p, "finally", fn this, args ->
+      f = arg(args, 0)
+
+      if function?(f) do
+        then(
+          this,
+          native("", fn _, [v | _] ->
+            call(f, :undefined, [])
+            v
+          end),
+          native("", fn _, [e | _] ->
+            call(f, :undefined, [])
+            throw({:js_error, e})
+          end)
+        )
+      else
+        then(this, :undefined, :undefined)
+      end
+    end)
+
+    def_fn(ctor, "resolve", fn _, args -> to_promise(arg(args, 0)) end)
+
+    def_fn(ctor, "reject", fn _, args ->
+      pr = new()
+      reject(pr, arg(args, 0))
+      pr
+    end)
+
+    def_fn(ctor, "all", fn _, args -> combine(arg(args, 0), :all) end)
+    def_fn(ctor, "allSettled", fn _, args -> combine(arg(args, 0), :all_settled) end)
+    def_fn(ctor, "race", fn _, args -> combine(arg(args, 0), :race) end)
+    def_fn(ctor, "any", fn _, args -> combine(arg(args, 0), :any) end)
+
+    declare(
+      scope,
+      "queueMicrotask",
+      native("queueMicrotask", fn _, args ->
+        f = arg(args, 0)
+        enqueue(fn -> call(f, :undefined, []) end)
+        :undefined
+      end)
+    )
+
+    :ok
+  end
+
+  defp to_promise(v) do
+    if promise?(v) do
+      v
+    else
+      pr = new()
+      resolve(pr, v)
+      pr
+    end
+  end
+
+  defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+
+  # Promise.all / allSettled / race / any
+  defp combine(iterable, mode) do
+    items = iterate(iterable)
+    result = new()
+    n = length(items)
+    key = {:js_combine, make_ref()}
+    Process.put(key, %{done: 0, values: %{}})
+
+    if n == 0 do
+      case mode do
+        :race -> :ok
+        :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
+        _ -> resolve(result, new_array([]))
+      end
+    end
+
+    finish = fn i, v ->
+      s = Process.get(key)
+      s = %{s | done: s.done + 1, values: Map.put(s.values, i, v)}
+      Process.put(key, s)
+
+      if s.done == n do
+        list = for j <- 0..(n - 1), do: Map.fetch!(s.values, j)
+
+        case mode do
+          :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
+          _ -> resolve(result, new_array(list))
+        end
+      end
+    end
+
+    items
+    |> Enum.with_index()
+    |> Enum.each(fn {item, i} ->
+      pr = to_promise(item)
+
+      case mode do
+        :all ->
+          then(
+            pr,
+            native("", fn _, a ->
+              finish.(i, arg(a, 0))
+              :undefined
+            end),
+            rejecter(result)
+          )
+
+        :all_settled ->
+          then(
+            pr,
+            native("", fn _, a ->
+              finish.(i, new_object([{"status", "fulfilled"}, {"value", arg(a, 0)}])) &&
+                :undefined
+            end),
+            native("", fn _, a ->
+              finish.(i, new_object([{"status", "rejected"}, {"reason", arg(a, 0)}])) &&
+                :undefined
+            end)
+          )
+
+        :race ->
+          then(pr, resolver(result), rejecter(result))
+
+        :any ->
+          then(
+            pr,
+            resolver(result),
+            native("", fn _, a ->
+              finish.(i, arg(a, 0))
+              :undefined
+            end)
+          )
+      end
+    end)
+
+    result
+  end
+end

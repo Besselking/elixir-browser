@@ -97,6 +97,12 @@ defmodule Browser.JS.Parser do
     {{:fundecl, name, fun}, ts}
   end
 
+  defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
+       when name not in @reserved do
+    {fun, ts} = function_rest(name, ts)
+    {{:fundecl, name, {:async, fun}}, ts}
+  end
+
   defp statement([{:id, "return", _} | ts]) do
     case ts do
       [{:p, ";", _} | ts] ->
@@ -283,7 +289,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "export", _} | ts]) do
     case ts do
-      [{:id, kw, _} | _] when kw in ["var", "let", "const", "function"] ->
+      [{:id, kw, _} | _] when kw in ["var", "let", "const", "function", "async"] ->
         {stmt, ts} = statement(ts)
         {{:export, stmt}, ts}
 
@@ -643,7 +649,45 @@ defmodule Browser.JS.Parser do
 
   defp comma(ts, acc), do: {{:seq, Enum.reverse(acc)}, ts}
 
-  defp assignment(ts) do
+  defp assignment([{:id, "async", _} | [_ | _] = rest] = ts) do
+    cond do
+      arrow_ahead?(rest) and not match?([{_, _, true} | _], rest) ->
+        {fun, ts} = arrow(rest)
+        {{:async, fun}, ts}
+
+      true ->
+        assignment_plain(ts)
+    end
+  end
+
+  defp assignment(ts), do: assignment_plain(ts)
+
+  defp assignment_plain([{:p, open, _} | _] = ts) when open in ["[", "{"] do
+    if destructuring_ahead?(tl(ts), 1) do
+      {pat, ts} = pattern(ts, false)
+      [{:p, "=", _} | ts] = ts
+      {right, ts} = assignment(ts)
+      {{:destructure, pat, right}, ts}
+    else
+      assignment_value(ts)
+    end
+  end
+
+  defp assignment_plain(ts), do: assignment_value(ts)
+
+  # `[a, b] = …` or `{a, b} = …`: the bracket at the head closes and `=` follows
+  defp destructuring_ahead?([{:eof, _, _} | _], _), do: false
+
+  defp destructuring_ahead?([{:p, p, _} | ts], d) when p in ["(", "[", "{"],
+    do: destructuring_ahead?(ts, d + 1)
+
+  defp destructuring_ahead?([{:p, p, _} | ts], d) when p in [")", "]", "}"] do
+    if d == 1, do: match?([{:p, "=", _} | _], ts), else: destructuring_ahead?(ts, d - 1)
+  end
+
+  defp destructuring_ahead?([_ | ts], d), do: destructuring_ahead?(ts, d)
+
+  defp assignment_value(ts) do
     if arrow_ahead?(ts) do
       arrow(ts)
     else
@@ -714,6 +758,19 @@ defmodule Browser.JS.Parser do
     {e, ts} = unary(ts)
     unless assignable?(e), do: throw({:syntax, "invalid #{op} operand"})
     {{:update, op, true, e}, ts}
+  end
+
+  defp unary([{:id, "await", _}, {k, v, _} | _] = [_ | ts])
+       when k in [:id, :num, :str, :tmpl, :regex] and
+              (k != :id or v not in ["in", "of", "instanceof"]) do
+    {e, ts} = unary(ts)
+    {{:await, e}, ts}
+  end
+
+  defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts])
+       when p in ["(", "[", "{", "!", "~"] do
+    {e, ts} = unary(ts)
+    {{:await, e}, ts}
   end
 
   defp unary([{:id, op, _} | ts]) when op in ["typeof", "void", "delete"] do
@@ -848,6 +905,11 @@ defmodule Browser.JS.Parser do
   defp primary([{:id, "null", _} | ts]), do: {{:lit, :null}, ts}
   defp primary([{:id, "this", _} | ts]), do: {{:this}, ts}
 
+  defp primary([{:id, "async", _}, {:id, "function", _} | _] = [_ | rest]) do
+    {fun, ts} = primary(rest)
+    {{:async, fun}, ts}
+  end
+
   defp primary([{:id, "function", _} | ts]) do
     {name, ts} =
       case ts do
@@ -896,6 +958,13 @@ defmodule Browser.JS.Parser do
   defp object_literal([{:p, "...", _} | ts], acc) do
     {e, ts} = assignment(ts)
     object_next(ts, [{:spread, e} | acc])
+  end
+
+  defp object_literal([{:id, "async", _}, {k, _, false} | _] = [_ | rest], acc)
+       when k in [:id, :str, :num] do
+    {key, shorthand, after_key} = property_key(rest)
+    {fun, ts} = function_rest({:method, shorthand}, after_key)
+    object_next(ts, [{:init, key, {:async, fun}} | acc])
   end
 
   defp object_literal(ts, acc) do

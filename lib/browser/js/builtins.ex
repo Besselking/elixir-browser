@@ -58,6 +58,7 @@ defmodule Browser.JS.Builtins do
     install_timers(scope)
     install_misc(scope)
     Browser.JS.RegExp.install(scope)
+    Browser.JS.Promise.install(scope)
 
     scope
   end
@@ -1125,12 +1126,20 @@ defmodule Browser.JS.Builtins do
   `on_error` receives the thrown value of a callback that raised; the others still run.
   """
   def run_timers(on_error) do
+    if run_next_timer(on_error), do: run_timers(on_error), else: :ok
+  end
+
+  @doc """
+  Runs the earliest pending timer; false when there is none (or the next one lies beyond the
+  virtual minute).
+  """
+  def run_next_timer(on_error) do
     case Enum.min_by(Process.get(:js_timers), &{&1.at, &1.seq}, fn -> nil end) do
       nil ->
-        :ok
+        false
 
       %{at: at} when at > @timer_horizon ->
-        :ok
+        false
 
       t ->
         Process.put(:js_timers, List.delete(Process.get(:js_timers), t))
@@ -1147,11 +1156,12 @@ defmodule Browser.JS.Builtins do
 
         try do
           call(t.fun, :undefined, t.args)
+          Browser.JS.Promise.run_microtasks()
         catch
           {:js_error, v} -> on_error.(v)
         end
 
-        run_timers(on_error)
+        true
     end
   end
 

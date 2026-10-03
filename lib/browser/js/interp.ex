@@ -533,6 +533,10 @@ defmodule Browser.JS.Interp do
         tick()
         fun.(this, args)
 
+      %{class: :function, fun: {:closure, c}, async: true} ->
+        tick()
+        Browser.JS.Promise.run_async(fn -> run_closure(c, this, args) end)
+
       %{class: :function, fun: {:closure, c}} ->
         tick()
         run_closure(c, this, args)
@@ -636,6 +640,12 @@ defmodule Browser.JS.Interp do
     bind_params(ps, rest, scope)
   end
 
+  defp make_fn({:async, fun}, env) do
+    {:obj, id} = f = make_fn(fun, env)
+    store(id, Map.put(deref(id), :async, true))
+    f
+  end
+
   defp make_fn({:fn, name, params, body, mode}, env) do
     env =
       if is_binary(name) and mode == false do
@@ -726,6 +736,7 @@ defmodule Browser.JS.Interp do
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
+    Browser.JS.Promise.run_microtasks()
     # (the process dictionary reports a stored :undefined as missing, hence the default)
     Process.get(:js_last, :undefined)
   end
@@ -752,6 +763,7 @@ defmodule Browser.JS.Interp do
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
+    Browser.JS.Promise.run_microtasks()
 
     pairs =
       Enum.flat_map(stmts, fn
@@ -1039,6 +1051,15 @@ defmodule Browser.JS.Interp do
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
+
+  def ev({:destructure, pat, right}, env) do
+    v = ev(right, env)
+    bind(pat, v, env, :assign)
+    v
+  end
+
+  def ev({:async, fun}, env), do: make_fn({:async, fun}, env)
+  def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
   def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v

@@ -525,4 +525,62 @@ defmodule Browser.JSTest do
       assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A {}")
     end
   end
+
+  describe "promises and async functions" do
+    # the script ends by returning a promise: what it resolves to, after everything has run
+    defp logs_of(src) do
+      case Browser.JS.eval(src) do
+        {:ok, _, console} -> for {:log, t} <- console, do: t
+        {:error, reason, _} -> {:error, reason}
+      end
+    end
+
+    test "then, catch and finally run as microtasks, after the script" do
+      assert logs_of("""
+             Promise.resolve(1).then(v => { console.log('then', v); return v + 1 })
+               .then(v => console.log('next', v))
+               .finally(() => console.log('finally'));
+             Promise.reject('no').catch(e => console.log('caught', e));
+             console.log('sync');
+             """) == ["sync", "then 1", "caught no", "next 2", "finally"]
+    end
+
+    test "the executor, resolving with a promise, and the combinators" do
+      assert logs_of("""
+             new Promise((res, rej) => res(Promise.resolve('inner'))).then(v => console.log(v));
+             new Promise((res, rej) => { throw 'boom' }).catch(e => console.log('rejected', e));
+             Promise.all([1, Promise.resolve(2), new Promise(r => setTimeout(() => r(3), 10))]).then(v => console.log(v.join()));
+             Promise.race([new Promise(r => setTimeout(() => r('slow'), 20)), new Promise(r => setTimeout(() => r('fast'), 5))]).then(v => console.log(v));
+             Promise.allSettled([Promise.reject('x'), 1]).then(r => console.log(r.map(o => o.status).join()));
+             """)
+             |> Enum.sort() ==
+               ["1,2,3", "fast", "inner", "rejected boom", "rejected,fulfilled"]
+    end
+
+    test "await waits for timers and other promises, and rethrows" do
+      assert logs_of("""
+             async function wait(ms, v) { await new Promise(r => setTimeout(r, ms)); return v }
+             (async () => {
+               console.log(await wait(50, 'a'), await wait(10, 'b'));
+               try { await Promise.reject(new Error('bad')) } catch (e) { console.log('caught', e.message) }
+               const [x, y] = await Promise.all([wait(5, 1), wait(1, 2)]);
+               console.log(x + y);
+             })();
+             """) == ["a b", "caught bad", "3"]
+    end
+
+    test "async arrows, methods, function expressions and exceptions" do
+      assert logs_of("""
+             const o = { async m(x) { return x * 2 }, n: async function () { throw 'oops' } };
+             o.m(4).then(v => console.log('m', v));
+             o.n().catch(e => console.log('n', e));
+             (async x => x + 1)(1).then(v => console.log('arrow', v));
+             """) == ["m 8", "n oops", "arrow 2"]
+    end
+
+    test "destructuring assignment" do
+      assert js("var a = 1, b = 2; [a, b] = [b, a]; a + ',' + b") == "2,1"
+      assert js("var o; ({ x: o } = { x: 5 }); o") == 5.0
+    end
+  end
 end
