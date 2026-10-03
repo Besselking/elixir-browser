@@ -1624,6 +1624,8 @@ defmodule Browser.JS.Builtins do
           {:js_error, v} -> on_error.(v)
         end
 
+        # no script is on the stack now: the one safe moment to free unreachable objects
+        Browser.JS.GC.maybe_collect()
         true
     end
   end

@@ -100,6 +100,7 @@ defmodule Browser.JS.Runtime do
 
   defp boot(raw, info) do
     Interp.init(@steps)
+    Browser.JS.GC.enable()
     scope = Builtins.install()
     DOM.init(raw, info)
     DOM.install(scope)
