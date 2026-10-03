@@ -177,4 +177,35 @@ defmodule Browser.PageTest do
       assert Page.restyle(plain, env.(800, 400)) == plain
     end
   end
+
+  describe "base href" do
+    test "relative addresses resolve against it" do
+      html = ~s|<head><base href="/"><img src="a.png"></head><body><img src="b/c.png"></body>|
+
+      page =
+        Page.build(html, "http://t.test/x/y/page", %{
+          type: "screen",
+          width: 800,
+          height: 600,
+          dppx: 1.0
+        })
+
+      assert page.base == "http://t.test/"
+      assert page.url == "http://t.test/x/y/page"
+      assert "http://t.test/a.png" in page.image_urls
+      assert "http://t.test/b/c.png" in page.image_urls
+    end
+
+    test "without one, the page's own address is the base" do
+      page =
+        Page.build("<p>x</p>", "http://t.test/x/y", %{
+          type: "screen",
+          width: 800,
+          height: 600,
+          dppx: 1.0
+        })
+
+      assert page.base == "http://t.test/x/y"
+    end
+  end
 end

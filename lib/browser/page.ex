@@ -13,6 +13,8 @@ defmodule Browser.Page do
   # what layout draws: `pruned` rendered with `form_state` (see `Browser.Forms`).
   defstruct [
     :url,
+    # what relative addresses resolve against: the url, or the page's `<base href>`
+    :base,
     :title,
     :raw,
     :rules,
@@ -92,13 +94,14 @@ defmodule Browser.Page do
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
     {raw, forms} = body |> String.replace_invalid() |> HTML.parse() |> Forms.index()
-    {raw, image_urls} = Images.index(raw, url)
+    base = base_href(raw, url)
+    {raw, image_urls} = Images.index(raw, base)
 
     author =
       raw
       |> Style.sheet_refs()
       |> Enum.take(@max_sheets)
-      |> fetch_sheets(url)
+      |> fetch_sheets(base)
       |> Enum.map(fn {css, base} -> {:author, css, base} end)
 
     rules = Style.parse_sheets([{:ua, Style.ua_css()} | author])
@@ -107,6 +110,7 @@ defmodule Browser.Page do
     restyle(
       %__MODULE__{
         url: url,
+        base: base,
         title: Layout.title(raw),
         raw: raw,
         rules: rules,
@@ -118,6 +122,26 @@ defmodule Browser.Page do
       env
     )
   end
+
+  @doc "The address relative references resolve against: the first `<base href>`, or `url`."
+  def base_href(raw, url) do
+    case find_base(raw) do
+      nil -> url
+      href -> Fetch.resolve(url, href)
+    end
+  end
+
+  defp find_base(nodes) when is_list(nodes), do: Enum.find_value(nodes, &find_base/1)
+  defp find_base({:text, _}), do: nil
+
+  defp find_base({:element, "base", attrs, _}) do
+    case List.keyfind(attrs, "href", 0) do
+      {_, href} when is_binary(href) and href != "" -> href
+      _ -> nil
+    end
+  end
+
+  defp find_base({:element, _, _, kids}), do: find_base(kids)
 
   @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
 
@@ -242,12 +266,14 @@ defmodule Browser.Page do
   """
   def from_raw(%__MODULE__{} = page, raw, env) do
     {raw, forms} = Forms.index(raw)
-    {raw, image_urls} = Images.index(raw, page.url)
+    base = base_href(raw, page.url)
+    {raw, image_urls} = Images.index(raw, base)
 
     restyle(
       %{
         page
         | raw: raw,
+          base: base,
           title: Layout.title(raw),
           forms: forms,
           image_urls: image_urls,

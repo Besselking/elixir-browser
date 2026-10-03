@@ -304,7 +304,7 @@ defmodule Browser.Session do
         {:noreply, click_control(state, cid, x, spy, count, shift)}
 
       {:link, href} ->
-        {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
+        {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
 
       # a click on a sticky or fixed box that is neither: it does not reach the page below
       :cover ->
@@ -317,7 +317,7 @@ defmodule Browser.Session do
 
             case UI.link_at(state.links, x, py) do
               nil -> {:noreply, page_click(state, x, py, count, shift)}
-              href -> {:noreply, load(state, Fetch.resolve(state.url, href), :push)}
+              href -> {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
             end
 
           cid ->
@@ -427,7 +427,7 @@ defmodule Browser.Session do
     if kind != old_kind, do: UI.set_cursor(state.ui, kind)
 
     if href != old_href,
-      do: UI.set_status(state.ui, if(href, do: Fetch.resolve(state.url, href), else: ""))
+      do: UI.set_status(state.ui, if(href, do: Fetch.resolve(base(state), href), else: ""))
 
     {:noreply, %{state | hover: {href, kind}}}
   end
@@ -1036,7 +1036,8 @@ defmodule Browser.Session do
         page.form_state,
         form,
         clicked,
-        page.url
+        page.url,
+        page.base || page.url
       )
 
     opts = if request.method == :post, do: [method: :post, body: request.body], else: []
@@ -1051,10 +1052,15 @@ defmodule Browser.Session do
 
   # -- the page's scripts ------------------------------------------------------
 
+  # what the page's relative addresses resolve against
+  defp base(%{page: %{base: base}}) when is_binary(base), do: base
+  defp base(state), do: state.url
+
   defp start_js(%{page: page} = state) do
     if Page.scripts?(page) do
       info = %{
         url: page.url,
+        base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
         fetch: &Fetch.load/1
@@ -1145,7 +1151,7 @@ defmodule Browser.Session do
     if urls != [] do
       me = self()
       nonce = state.nonce
-      base = page.url
+      base = page.base || page.url
 
       Task.start(fn ->
         urls

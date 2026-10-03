@@ -97,7 +97,7 @@ defmodule Browser.JS.Runtime do
     Process.put(:rt_modules, %{})
 
     Process.put(:js_import, fn spec, from ->
-      load_module(resolve_specifier(spec, from || page_url()))
+      load_module(resolve_specifier(spec, from || base_url()))
     end)
 
     Process.put(:rt_importmap, %{})
@@ -313,7 +313,7 @@ defmodule Browser.JS.Runtime do
     do: "inline script: " <> (text |> String.trim() |> String.slice(0, 50))
 
   defp script_source(%{src: src}) when is_binary(src) and src != "" do
-    url = Browser.Fetch.resolve(page_url(), src)
+    url = Browser.Fetch.resolve(base_url(), src)
 
     case fetch(url) do
       {:ok, body, final} ->
@@ -327,6 +327,7 @@ defmodule Browser.JS.Runtime do
 
   defp script_source(%{text: text}), do: {:ok, text, page_url()}
 
+  defp base_url, do: Process.get(:rt_info)[:base] || page_url()
   defp page_url, do: Process.get(:rt_info).url
 
   defp fetch(url) do
@@ -356,7 +357,7 @@ defmodule Browser.JS.Runtime do
   defp add_importmap(%{text: text}) do
     case safe_json(text) do
       %{"imports" => imports} when is_map(imports) ->
-        base = page_url()
+        base = base_url()
 
         resolved =
           Map.new(imports, fn {k, v} ->

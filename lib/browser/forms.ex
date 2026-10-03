@@ -513,13 +513,15 @@ defmodule Browser.Forms do
   a name or that are disabled are skipped, unchecked boxes and radio buttons are skipped,
   and a select contributes its chosen option's value.
   """
-  def submission(forms, controls, state, fid, clicked, page_url) do
+  def submission(forms, controls, state, fid, clicked, page_url, base \\ nil) do
     form = Map.get(forms, fid, %{action: "", method: ""})
     params = params(controls, state, fid, clicked)
     query = encode(params)
 
     action =
-      if form.action == "", do: page_url, else: Browser.Fetch.resolve(page_url, form.action)
+      if form.action == "",
+        do: page_url,
+        else: Browser.Fetch.resolve(base || page_url, form.action)
 
     uri = URI.parse(action)
 
