@@ -452,8 +452,9 @@ defmodule Browser.UI do
   by one process at a time (its DC holds the current font); a second one on the same cache
   serves a background process.
   """
-  def measurer(%{panel: panel}, cache \\ nil) do
-    dc = :wxClientDC.new(panel)
+  def measurer(%{panel: panel}, cache \\ nil), do: dc_measurer(:wxClientDC.new(panel), cache)
+
+  defp dc_measurer(dc, cache) do
     cache = cache || new_measure_cache()
 
     fn text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
@@ -473,6 +474,38 @@ defmodule Browser.UI do
     end
   end
 
+  # -- pictures of a page without a window ------------------------------------------------
+
+  @doc """
+  Starts what drawing needs when there is no window (`snapshot/5`): wx, the tables the
+  painter reads, and a measurer on a bitmap's DC. Returns the measurer.
+  """
+  def snapshot_start do
+    :wx.new()
+
+    for name <- [@view, @images], :ets.whereis(name) == :undefined do
+      :ets.new(name, [:named_table, :public])
+    end
+
+    :ets.insert(@view, {:view, [], 0, true})
+    :ets.insert(@view, {:sx, 0})
+    dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
+  end
+
+  @doc """
+  Paints `items` the way the window would, into a `width` x `height` bitmap, and saves it as
+  PNG at `path`. Returns `true` when the file was written.
+  """
+  def snapshot(items, width, height, path) do
+    set_page(items)
+    :ets.insert(@view, {:view, [], 0, false})
+    bitmap = :wxBitmap.new(width, height)
+    dc = :wxMemoryDC.new(bitmap)
+    paint_dc(dc)
+    :wxMemoryDC.destroy(dc)
+    :wxBitmap.saveFile(bitmap, String.to_charlist(path), :wxe_util.get_const(:wxBITMAP_TYPE_PNG))
+  end
+
   # -- painting (runs in wx callback process) --------------------------------
 
   defp sx do
@@ -483,12 +516,18 @@ defmodule Browser.UI do
   end
 
   defp paint(panel) do
+    dc = :wxPaintDC.new(panel)
+    paint_dc(dc)
+    :wxPaintDC.destroy(dc)
+    :ok
+  end
+
+  defp paint_dc(dc) do
     [{:view, overlay, scroll, caret_on}] = :ets.lookup(@view, :view)
 
     %{canvas: canvas_item, sticky: sticky, bands: bands} =
       :persistent_term.get({__MODULE__, :page})
 
-    dc = :wxPaintDC.new(panel)
     Process.delete(:paint_font)
     Process.delete(:paint_color)
     # everything is drawn at page x: the origin moves with the horizontal scroll
@@ -540,9 +579,6 @@ defmodule Browser.UI do
 
       if clip, do: :wxDC.destroyClippingRegion(dc)
     end
-
-    :wxPaintDC.destroy(dc)
-    :ok
   end
 
   # -- transformed boxes ------------------------------------------------------------------
