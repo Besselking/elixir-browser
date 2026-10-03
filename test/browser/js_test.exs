@@ -419,7 +419,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("class A { static async *#m() {} }")
+      assert {:syntax, _} = error("var a = 1n")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -522,7 +522,7 @@ defmodule Browser.JSTest do
     end
 
     test "syntax the runtime lacks is a syntax error" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A { static async *#m() {} }")
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("var a = 1n")
     end
   end
 
@@ -1011,6 +1011,49 @@ defmodule Browser.JSTest do
           ] do
         assert {:syntax, _} = error(src)
       end
+    end
+  end
+
+  describe "async generators and for await" do
+    test "next, return, yield*, and queued requests" do
+      assert logs_of("""
+             async function* ag() { var x = yield 1; console.log('got ' + x); try { yield Promise.resolve(2) } finally { console.log('fin') } return 3 }
+             var it = ag();
+             var rs = [it.next(), it.next('X'), it.return(9), it.next()];
+             Promise.all(rs).then(v => console.log(JSON.stringify(v)))
+             """) == [
+               "got X",
+               "fin",
+               ~s([{"value":1,"done":false},{"value":2,"done":false},{"value":9,"done":true},{"done":true}])
+             ]
+    end
+
+    test "for await over async and sync iterables, closing on break" do
+      assert logs_of("""
+             async function* inner() { yield 'a'; yield 'b' }
+             async function* outer() { yield* inner(); yield* [1, Promise.resolve(2)] }
+             async function* endless() { try { var i = 0; while (true) yield i++ } finally { console.log('closed') } }
+             (async () => {
+               var acc = [];
+               for await (var v of outer()) acc.push(v);
+               for await (var v of [Promise.resolve('p'), 'q']) acc.push(v);
+               console.log(acc.join());
+               for await (const n of endless()) { if (n > 1) break }
+             })()
+             """) == ["a,b,1,2,p,q", "closed"]
+    end
+
+    test "methods and errors" do
+      assert logs_of("""
+             var o = { async *m() { yield 'm' } };
+             class C { static async *s() { yield 's' } async *[Symbol.asyncIterator]() { yield 'ci' } }
+             (async () => {
+               for await (var v of o.m()) console.log(v);
+               for await (var v of C.s()) console.log(v);
+               for await (var v of new C()) console.log(v);
+               try { for await (var z of (async function*() { throw new Error('bad') })()); } catch (e) { console.log(e.message) }
+             })()
+             """) == ["m", "s", "ci", "bad"]
     end
   end
 end

@@ -185,6 +185,277 @@ defmodule Browser.JS.Async do
     :ok
   end
 
+  # ── async generators ───────────────────────────────────────
+  #
+  # `next`, `return` and `throw` return promises and queue up while the body runs. A yielded
+  # value is awaited first, and so is a returned one.
+
+  @doc "Calls an async generator function: binds the parameters and makes the generator object."
+  def call_async_generator(f, c, this, args) do
+    scope = Interp.call_scope(c, this, args)
+
+    proto =
+      case Interp.get(f, "prototype") do
+        {:obj, _} = p -> p
+        _ -> Interp.proto(:async_generator)
+      end
+
+    {:obj, gid} = gen = Interp.new_object([], proto)
+
+    base = %{
+      throw: fn e -> ag_finish(gid, {:throw, e}) end,
+      yield: fn v, resume -> ag_yield(gid, v, resume) end,
+      async_gen: true,
+      brk: %{},
+      cont: %{}
+    }
+
+    ctx =
+      Map.put(base, :ret, fn v ->
+        await_value(v, base, fn v2 -> ag_finish(gid, {:return, v2}) end)
+      end)
+
+    start = fn
+      {:next, _} ->
+        case c.mode do
+          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
+          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+        end
+
+      {:throw, e} ->
+        ctx.throw.(e)
+
+      {:return, v} ->
+        ctx.ret.(v)
+    end
+
+    set_agen(gid, %{state: :start, resume: start, queue: [], running: false, cur: nil})
+    gen
+  end
+
+  defp agen(gid), do: Map.get(Interp.deref(gid), :agen)
+  defp set_agen(gid, g), do: Interp.store(gid, Map.put(Interp.deref(gid), :agen, g))
+  defp update_agen(gid, changes), do: set_agen(gid, Map.merge(agen(gid), changes))
+
+  defp ag_request({:obj, gid}, msg) do
+    case Interp.deref(gid) do
+      %{agen: g} ->
+        p = Promise.new()
+        update_agen(gid, %{queue: g.queue ++ [{msg, p}]})
+        ag_drain(gid)
+        p
+
+      _ ->
+        p = Promise.new()
+
+        Promise.reject(
+          p,
+          Interp.make_error("TypeError", "next method called on an incompatible receiver")
+        )
+
+        p
+    end
+  end
+
+  defp ag_request(_, _) do
+    p = Promise.new()
+
+    Promise.reject(
+      p,
+      Interp.make_error("TypeError", "next method called on an incompatible receiver")
+    )
+
+    p
+  end
+
+  # starts the next queued request, unless the body is running
+  defp ag_drain(gid) do
+    g = agen(gid)
+
+    with false <- g.running, [{msg, p} | rest] <- g.queue do
+      update_agen(gid, %{queue: rest})
+
+      case {g.state, msg} do
+        {:done, {:next, _}} ->
+          Promise.resolve(p, iter_result(:undefined, true))
+          ag_drain(gid)
+
+        {:done, {:throw, e}} ->
+          Promise.reject(p, e)
+          ag_drain(gid)
+
+        {state, {:throw, e}} when state == :start ->
+          update_agen(gid, %{state: :done})
+          Promise.reject(p, e)
+          ag_drain(gid)
+
+        {state, {:return, v}} when state in [:done, :start] ->
+          update_agen(gid, %{state: :done, running: true})
+
+          await_value(v, %{throw: fn e -> ag_settle(gid, p, {:throw, e}) end}, fn v2 ->
+            ag_settle(gid, p, {:return, v2})
+          end)
+
+        _ ->
+          update_agen(gid, %{running: true, cur: p})
+
+          try do
+            g.resume.(msg)
+          catch
+            {:js_error, e} -> ag_finish(gid, {:throw, e})
+          end
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp ag_settle(gid, p, {:return, v}) do
+    Promise.resolve(p, iter_result(v, true))
+    update_agen(gid, %{running: false})
+    ag_drain(gid)
+  end
+
+  defp ag_settle(gid, p, {:throw, e}) do
+    Promise.reject(p, e)
+    update_agen(gid, %{running: false})
+    ag_drain(gid)
+  end
+
+  defp ag_finish(gid, out) do
+    g = agen(gid)
+    update_agen(gid, %{state: :done, resume: nil, cur: nil})
+    ag_settle(gid, g.cur, out)
+    :done
+  end
+
+  defp ag_yield(gid, v, resume) do
+    await_value(v, %{throw: fn e -> resume.({:throw, e}) end}, fn v2 ->
+      g = agen(gid)
+      update_agen(gid, %{state: :suspended, resume: resume, running: false, cur: nil})
+      Promise.resolve(g.cur, iter_result(v2, false))
+      ag_drain(gid)
+    end)
+
+    :suspended
+  end
+
+  @doc "`AsyncGenerator.prototype`."
+  def install_async_generators do
+    ai = Interp.new_object()
+
+    Interp.put_hidden(
+      ai,
+      {:symbol, :asyncIterator, "Symbol.asyncIterator"},
+      Interp.native("[Symbol.asyncIterator]", fn this, _ -> this end)
+    )
+
+    p = Interp.new_object([], ai)
+    Interp.put_proto(:async_generator, p)
+
+    for {name, tag} <- [{"next", :next}, {"return", :return}, {"throw", :throw}] do
+      Interp.put_hidden(
+        p,
+        name,
+        Interp.native(name, fn this, args ->
+          ag_request(this, {tag, Enum.at(args, 0, :undefined)})
+        end)
+      )
+    end
+
+    Interp.put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "AsyncGenerator")
+    :ok
+  end
+
+  # the iterator of a `for await` or `yield*` in an async generator: an async one, or a sync one
+  # whose values are awaited
+  defp async_iterator(target) do
+    key = {:symbol, :asyncIterator, "Symbol.asyncIterator"}
+
+    method =
+      if match?({:obj, _}, target), do: Interp.get(target, key), else: :undefined
+
+    cond do
+      is_tuple(method) and Interp.function?(method) ->
+        it = Interp.call(method, target, [])
+        {it, Interp.get(it, "next"), false}
+
+      true ->
+        case Interp.iter_source(target) do
+          {:proto, it, next} ->
+            {it, next, true}
+
+          {:list, items} ->
+            it = iterator_of(items)
+            {it, Interp.get(it, "next"), true}
+        end
+    end
+  end
+
+  # `yield*` in an async generator
+  defp adelegate(it, next, msg, ctx, k) do
+    call_result =
+      try do
+        {:ok, adelegate_call(it, next, msg)}
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case call_result do
+      {:throw, e} ->
+        ctx.throw.(e)
+
+      {:ok, {:return_now, v}} ->
+        ctx.ret.(v)
+
+      {:ok, {:result, r}} ->
+        await_value(r, ctx, fn r2 ->
+          attempt(
+            fn ->
+              unless match?({:obj, _}, r2),
+                do: Interp.throw_error("TypeError", "Iterator result is not an object")
+
+              {Interp.truthy(Interp.get(r2, "done")), Interp.get(r2, "value")}
+            end,
+            ctx,
+            fn
+              {true, v} ->
+                if match?({:return, _}, msg), do: ctx.ret.(v), else: k.(v)
+
+              {false, v} ->
+                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k) end)
+            end
+          )
+        end)
+    end
+  end
+
+  defp adelegate_call(it, next, {:next, x}), do: {:result, Interp.call(next, it, [x])}
+
+  defp adelegate_call(it, _next, {:throw, e}) do
+    case Interp.get(it, "throw") do
+      f when is_tuple(f) ->
+        if Interp.function?(f),
+          do: {:result, Interp.call(f, it, [e])},
+          else: Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
+
+      _ ->
+        Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
+    end
+  end
+
+  defp adelegate_call(it, _next, {:return, v}) do
+    case Interp.get(it, "return") do
+      f when is_tuple(f) ->
+        if Interp.function?(f),
+          do: {:result, Interp.call(f, it, [v])},
+          else: {:return_now, v}
+
+      _ ->
+        {:return_now, v}
+    end
+  end
+
   # `yield*`: forwards `next`, `throw` and `return` to the inner iterator
   defp delegate(it, next, msg, ctx, k) do
     attempt(fn -> delegate_step(it, next, msg) end, ctx, fn
@@ -263,6 +534,7 @@ defmodule Browser.JS.Async do
 
   defp has_await?({:await, _}), do: true
   defp has_await?({:yield, _, _}), do: true
+  defp has_await?({:forawait, _, _, _, _}), do: true
   defp has_await?({:gen, _}), do: false
   defp has_await?({:fn, _, _, _, _}), do: false
   defp has_await?({:async, _}), do: false
@@ -286,6 +558,14 @@ defmodule Browser.JS.Async do
         {:next, x} -> k.(x)
         {:throw, err} -> ctx.throw.(err)
         {:return, r} -> ctx.ret.(r)
+      end)
+    end)
+  end
+
+  defp cev_await({:yield, e, true}, env, %{async_gen: true} = ctx, k) do
+    cev(e, env, ctx, fn iterable ->
+      attempt(fn -> async_iterator(iterable) end, ctx, fn {it, next, _sync?} ->
+        adelegate(it, next, {:next, :undefined}, ctx, k)
       end)
     end)
   end
@@ -570,6 +850,15 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  defp cs({:forawait, decl, pat, obj, body}, env, ctx, k, labels) do
+    cev(obj, env, ctx, fn target ->
+      attempt(fn -> async_iterator(target) end, ctx, fn {it, next, sync?} ->
+        mode = if decl == nil, do: :assign, else: decl
+        afor(it, next, sync?, {pat, mode, body, env}, ctx, k, labels)
+      end)
+    end)
+  end
+
   defp cs({:switch, disc, cases}, env, ctx, k, _labels) do
     cev(disc, env, ctx, fn v ->
       scope = Interp.new_scope(env)
@@ -708,6 +997,78 @@ defmodule Browser.JS.Async do
 
     guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, ctx, fn ->
       run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
+    end)
+  end
+
+  # `for await`: each step's result is awaited, and so is each value of a sync iterator
+  defp afor(it, next, sync?, spec, ctx, k, labels) do
+    attempt(fn -> Interp.call(next, it, []) end, ctx, fn r ->
+      await_value(r, ctx, fn r2 ->
+        attempt(
+          fn ->
+            unless match?({:obj, _}, r2),
+              do: Interp.throw_error("TypeError", "Iterator result is not an object")
+
+            {Interp.truthy(Interp.get(r2, "done")), Interp.get(r2, "value")}
+          end,
+          ctx,
+          fn
+            {true, _} ->
+              k.(:ok)
+
+            {false, v} ->
+              if sync?,
+                do: await_value(v, ctx, &afor_body(&1, it, next, sync?, spec, ctx, k, labels)),
+                else: afor_body(v, it, next, sync?, spec, ctx, k, labels)
+          end
+        )
+      end)
+    end)
+  end
+
+  defp afor_body(item, it, next, sync?, {pat, mode, body, env} = spec, ctx, k, labels) do
+    Interp.tick()
+    iter_env = Interp.new_scope(env)
+
+    # leaving the loop early calls the iterator's `return` and waits for it
+    closing = fn after_ ->
+      attempt(
+        fn ->
+          case Interp.get(it, "return") do
+            f when is_tuple(f) ->
+              if Interp.function?(f), do: Interp.call(f, it, []), else: :undefined
+
+            _ ->
+              :undefined
+          end
+        end,
+        ctx,
+        fn r -> await_value(r, ctx, fn _ -> after_.() end) end
+      )
+    end
+
+    inner = %{
+      ctx
+      | ret: fn v -> closing.(fn -> ctx.ret.(v) end) end,
+        throw: fn e ->
+          try do
+            Interp.call(Interp.get(it, "return"), it, [])
+          catch
+            {:js_error, _} -> :ok
+          end
+
+          ctx.throw.(e)
+        end,
+        brk: Map.new(ctx.brk, fn {l, f} -> {l, fn x -> closing.(fn -> f.(x) end) end} end),
+        cont: Map.new(ctx.cont, fn {l, f} -> {l, fn x -> closing.(fn -> f.(x) end) end} end)
+    }
+
+    on_break = fn x -> closing.(fn -> k.(x) end) end
+
+    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+      run_body(body, iter_env, inner, on_break, labels, fn _ ->
+        afor(it, next, sync?, spec, ctx, k, labels)
+      end)
     end)
   end
 
