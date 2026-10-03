@@ -28,8 +28,25 @@ defmodule Browser.JS.Str do
   defp scan(""), do: true
   defp scan(_), do: false
 
+  # a long string with wider characters: its characters as a tuple, for the last one asked about
+  defp chars(s) do
+    case Process.get(:js_str_chars) do
+      {^s, t} ->
+        t
+
+      _ ->
+        t = s |> String.codepoints() |> List.to_tuple()
+        Process.put(:js_str_chars, {s, t})
+        t
+    end
+  end
+
   def length(s) do
-    if ascii?(s), do: byte_size(s), else: String.length(s)
+    cond do
+      ascii?(s) -> byte_size(s)
+      byte_size(s) <= @small -> String.length(s)
+      true -> tuple_size(chars(s))
+    end
   end
 
   @doc "The character at `i` (a string of it) or nil."
@@ -40,7 +57,12 @@ defmodule Browser.JS.Str do
     if ascii?(s) do
       if i < byte_size(s), do: binary_part(s, i, 1)
     else
-      String.at(s, i)
+      if byte_size(s) <= @small do
+        String.at(s, i)
+      else
+        t = chars(s)
+        if i < tuple_size(t), do: elem(t, i)
+      end
     end
   end
 
