@@ -306,7 +306,15 @@ defmodule Browser.JS.Parser do
   defp statement([{:id, "import", _}, {:p, p, _} | _] = ts) when p in ["(", "."],
     do: expression_statement(ts)
 
-  defp statement([{:id, kw, _} | _]) when kw in ~w(import with enum),
+  defp statement([{:id, "with", _} | ts]) do
+    ts = expect(ts, "(")
+    {obj, ts} = expression(ts)
+    ts = expect(ts, ")")
+    {body, ts} = statement(ts)
+    {{:with, obj, body}, ts}
+  end
+
+  defp statement([{:id, kw, _} | _]) when kw in ~w(import enum),
     do: throw({:syntax, "`#{kw}` is not supported yet"})
 
   defp statement(ts), do: expression_statement(ts)

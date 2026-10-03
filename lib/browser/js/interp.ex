@@ -136,8 +136,19 @@ defmodule Browser.JS.Interp do
     s = deref(scope)
 
     case s.vars do
-      %{^name => v} -> {:ok, v}
-      _ -> lookup_var(s.parent, name)
+      %{^name => v} ->
+        {:ok, v}
+
+      _ ->
+        case s do
+          %{with: obj} when is_binary(name) ->
+            if has_property?(obj, name),
+              do: {:ok, get(obj, name)},
+              else: lookup_var(s.parent, name)
+
+          _ ->
+            lookup_var(s.parent, name)
+        end
     end
   end
 
@@ -150,6 +161,9 @@ defmodule Browser.JS.Interp do
           do: throw_error("TypeError", "Assignment to constant variable.")
 
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
+
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
+        put(s.with, name, val)
 
       s.parent != nil ->
         assign_var(s.parent, name, val)
@@ -998,6 +1012,7 @@ defmodule Browser.JS.Interp do
   defp var_names({:while, _, body}, acc), do: var_names(body, acc)
   defp var_names({:dowhile, body, _}, acc), do: var_names(body, acc)
   defp var_names({:block, stmts}, acc), do: var_names(stmts, acc)
+  defp var_names({:with, _, body}, acc), do: var_names(body, acc)
   defp var_names({:labeled, _, s}, acc), do: var_names(s, acc)
   defp var_names({:try, b, _, h, f}, acc), do: var_names(f, var_names(h, var_names(b, acc)))
 
@@ -1134,6 +1149,18 @@ defmodule Browser.JS.Interp do
     end
 
     :ok
+  end
+
+  defp exec({:with, obj, body}, env, _) do
+    o = ev(obj, env)
+
+    if o in [:undefined, :null],
+      do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+    scope = new_scope(env)
+    s = deref(scope)
+    store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
+    exec(body, scope, [])
   end
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
