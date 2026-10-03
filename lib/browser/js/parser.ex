@@ -234,6 +234,12 @@ defmodule Browser.JS.Parser do
     {{:fundecl, name, fun}, ts}
   end
 
+  defp statement([{:id, "async", _}, {:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
+       when name not in @reserved do
+    {fun, ts} = generator_rest(name, ts)
+    {{:fundecl, name, {:async, fun}}, ts}
+  end
+
   defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
        when name not in @reserved do
     {fun, ts} = function_rest(name, ts)
@@ -298,6 +304,13 @@ defmodule Browser.JS.Parser do
       end
 
     {{:dowhile, body, c}, ts}
+  end
+
+  defp statement([{:id, "for", _}, {:id, "await", _} | ts]) do
+    case for_statement(expect(ts, "(")) do
+      {{:forof, decl, pat, obj, body}, ts} -> {{:forawait, decl, pat, obj, body}, ts}
+      _ -> throw({:syntax, "for await needs an of loop"})
+    end
   end
 
   defp statement([{:id, "for", _} | ts]), do: for_statement(expect(ts, "("))
@@ -857,10 +870,9 @@ defmodule Browser.JS.Parser do
         {{:fn, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
 
-        if async? and generator?, do: throw({:syntax, "async generators are not supported"})
-
         value =
           cond do
+            async? and generator? -> {:async, {:gen, fun}}
             async? -> {:async, fun}
             generator? -> {:gen, fun}
             true -> fun
@@ -1403,6 +1415,12 @@ defmodule Browser.JS.Parser do
     {key, shorthand, after_key} = property_key(rest)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:gen, fun}} | acc])
+  end
+
+  defp object_literal([{:id, "async", _}, {:p, "*", false} | _] = [_, _ | rest], acc) do
+    {key, shorthand, after_key} = property_key(rest)
+    {fun, ts} = function_rest({:method, shorthand}, after_key, true)
+    object_next(ts, [{:init, key, {:async, {:gen, fun}}} | acc])
   end
 
   defp object_literal([{:id, "async", _}, {k, _, false} | _] = [_ | rest], acc)

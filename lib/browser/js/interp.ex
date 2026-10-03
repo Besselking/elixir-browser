@@ -415,8 +415,8 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp function_prop(id, %{generator: true}, "prototype") do
-    p = new_object([], proto(:generator))
+  defp function_prop(id, %{generator: true} = o, "prototype") do
+    p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
     put_hidden({:obj, id}, "prototype", p)
     p
   end
@@ -868,6 +868,10 @@ defmodule Browser.JS.Interp do
       %{class: :function, fun: {:native, _, fun}} ->
         tick()
         fun.(this, args)
+
+      %{class: :function, fun: {:closure, c}, generator: true, async: true} ->
+        tick()
+        Browser.JS.Async.call_async_generator({:obj, id}, c, this, args)
 
       %{class: :function, fun: {:closure, c}, generator: true} ->
         tick()

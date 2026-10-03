@@ -20,8 +20,8 @@ defmodule Browser.JS.Test262 do
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
       
-      async-iteration
-    Symbol.asyncIterator symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
+      
+     symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
     DataView DataView.prototype.getFloat32 DataView.prototype.getFloat64
     DataView.prototype.getInt16 DataView.prototype.getInt32 DataView.prototype.getInt8
     DataView.prototype.getUint16 DataView.prototype.getUint32 DataView.prototype.setUint8
