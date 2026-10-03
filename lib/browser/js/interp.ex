@@ -37,6 +37,7 @@ defmodule Browser.JS.Interp do
     Process.put(:js_steps, max_steps)
     Process.put(:js_depth, 0)
     Process.put(:js_last, :undefined)
+    Process.put(:js_fns, 0)
   end
 
   def alloc(obj) do
@@ -995,7 +996,18 @@ defmodule Browser.JS.Interp do
     scope
   end
 
-  defp run_closure(c, this, args), do: elem(run_closure_scope(c, this, args, []), 0)
+  # A call's scope can only outlive the call through a closure created inside it (a function,
+  # method, class or arrow all go through `make_fn`, which counts them). When none was, the
+  # scope is garbage on return: dropping it keeps the heap from growing with every call.
+  defp run_closure(c, this, args) do
+    before = Process.get(:js_fns)
+    {result, scope} = run_closure_scope(c, this, args, [])
+
+    if Process.get(:js_fns) == before,
+      do: Process.put(:js_heap, Map.delete(Process.get(:js_heap), scope))
+
+    result
+  end
 
   @doc false
   # runs a function body, also handing back its scope (a constructor reads `this` from it);
@@ -1006,16 +1018,14 @@ defmodule Browser.JS.Interp do
     Process.put(:js_depth, depth + 1)
 
     try do
-      scope = new_scope(c.scope)
+      vars =
+        if c.mode in [false, nil],
+          do: %{this: this, args: args, new_target: :undefined},
+          else: %{}
 
-      if c.mode in [false, nil] do
-        declare(scope, :this, this)
-        declare(scope, :args, args)
-        declare(scope, :new_target, :undefined)
-      end
-
-      if h = Map.get(c, :home), do: declare(scope, :home, h)
-      for {k, v} <- extra, do: declare(scope, k, v)
+      vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
+      vars = Enum.reduce(extra, vars, fn {k, v}, m -> Map.put(m, k, v) end)
+      scope = alloc(%{scope: true, vars: vars, consts: MapSet.new(), parent: c.scope})
       bind_params(c.params, args, scope)
 
       result =
@@ -1123,6 +1133,8 @@ defmodule Browser.JS.Interp do
         env
       end
 
+    Process.put(:js_fns, Process.get(:js_fns) + 1)
+
     fun =
       {:obj,
        alloc(%{
@@ -1160,11 +1172,30 @@ defmodule Browser.JS.Interp do
   # ── hoisting ───────────────────────────────────────────────
 
   defp hoist_vars(stmts, scope) do
-    stmts
-    |> var_names([])
-    |> Enum.each(fn name ->
-      unless Map.has_key?(deref(scope).vars, name), do: declare(scope, name, :undefined)
-    end)
+    case hoisted_names(stmts) do
+      [] ->
+        :ok
+
+      names ->
+        s = deref(scope)
+        vars = Enum.reduce(names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
+        store(scope, %{s | vars: vars})
+    end
+  end
+
+  # the `var` names of a body, remembered: walking the syntax tree on every call is costly
+  defp hoisted_names(stmts) do
+    key = {:js_hoist, stmts}
+
+    case Process.get(key) do
+      nil ->
+        names = stmts |> var_names([]) |> Enum.uniq()
+        Process.put(key, names)
+        names
+
+      names ->
+        names
+    end
   end
 
   @doc false
