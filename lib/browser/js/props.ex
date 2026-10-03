@@ -23,13 +23,15 @@ defmodule Browser.JS.Props do
         case Map.fetch(o.items, array_index(key)) do
           {:ok, {:accessor, g, s}} ->
             a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
-            {:accessor, g, s, true, not Map.get(o, :frozen, false) and Map.get(a, :c, true)}
+
+            {:accessor, g, s, Map.get(a, :e, true),
+             not Map.get(o, :frozen, false) and Map.get(a, :c, true)}
 
           {:ok, v} ->
             frozen = Map.get(o, :frozen, false)
             a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
 
-            {:data, v, not frozen and Map.get(a, :w, true), true,
+            {:data, v, not frozen and Map.get(a, :w, true), Map.get(a, :e, true),
              not frozen and Map.get(a, :c, true)}
 
           :error ->
@@ -412,7 +414,14 @@ defmodule Browser.JS.Props do
         item = {:accessor, Map.get(desc, :get, g0), Map.get(desc, :set, s0)}
         attrs = Map.get(o, :attrs, %{})
         c = Map.get(desc, :configurable, if(exists?, do: elem(current, 4), else: false))
-        attrs = if c, do: Map.delete(attrs, i), else: Map.put(attrs, i, %{w: true, c: false})
+        cur = Map.get(attrs, i, %{})
+        e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
+        flags = %{w: true, c: c, e: e}
+
+        attrs =
+          if flags == %{w: true, c: true, e: true},
+            do: Map.delete(attrs, i),
+            else: Map.put(attrs, i, flags)
 
         store(
           id,
@@ -444,10 +453,11 @@ defmodule Browser.JS.Props do
         cur = Map.get(attrs, i, %{})
         w = Map.get(desc, :writable, if(exists?, do: Map.get(cur, :w, true), else: false))
         c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
-        flags = %{w: w, c: c}
+        e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
+        flags = %{w: w, c: c, e: e}
 
         attrs =
-          if flags == %{w: true, c: true},
+          if flags == %{w: true, c: true, e: true},
             do: Map.delete(attrs, i),
             else: Map.put(attrs, i, flags)
 
@@ -465,10 +475,10 @@ defmodule Browser.JS.Props do
 
   defp validate_element({:accessor, _, _, _, c}, _desc, key), do: if(not c, do: reject(key))
 
-  defp validate_element({:data, v, w, _e, c}, desc, key) do
+  defp validate_element({:data, v, w, e, c}, desc, key) do
     if not c do
       if Map.get(desc, :configurable) == true, do: reject(key)
-      if Map.get(desc, :enumerable) == false, do: reject(key)
+      if Map.get(desc, :enumerable, e) != e, do: reject(key)
       if not w and Map.get(desc, :writable) == true, do: reject(key)
       if not w and Map.has_key?(desc, :value) and not same_value?(desc.value, v), do: reject(key)
     end

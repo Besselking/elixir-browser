@@ -775,7 +775,14 @@ defmodule Browser.JS.Interp do
 
     case o do
       %{class: :array} ->
-        for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++ base
+        attrs = Map.get(o, :attrs, %{})
+
+        for(
+          i <- 0..(o.len - 1)//1,
+          Map.has_key?(o.items, i),
+          Map.get(Map.get(attrs, i, %{}), :e, true),
+          do: Integer.to_string(i)
+        ) ++ base
 
       _ ->
         {ints, rest} = Enum.split_with(base, &is_integer(index(&1)))
