@@ -42,6 +42,9 @@ defmodule Browser.Session do
       # a `#fragment` to scroll to once the page is laid out: `{name, give up at}`
       fragment: nil,
       page_pending: nil,
+      # what the user typed into controls (by element number): it stays as it is when a script
+      # changes the page
+      page_edits: %{},
       # the page's JavaScript runtime, when it has scripts
       js: nil,
       history: History.new(),
@@ -151,6 +154,7 @@ defmodule Browser.Session do
         nodes: page.nodes,
         url: page.url,
         scroll: 0,
+        page_edits: %{},
         fragment: pending_fragment(page.url),
         focus: nil,
         caret: 0,
@@ -523,14 +527,29 @@ defmodule Browser.Session do
         %{page_job: {ref, _}} = state
       ) do
     pending = state.page_pending
+    edits = state.page_edits
     state = %{state | page_job: nil, page_pending: nil}
 
     state =
       if nonce == state.nonce and state.page != nil do
-        focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
+        # the new page's controls may be numbered differently: the focus and what the user
+        # typed meanwhile follow the element
+        old_nids = Page.cid_nids(state.page)
+        new_cids = page |> Page.cid_nids() |> Map.new(fn {cid, nid} -> {nid, cid} end)
+        focus = with nid when nid != nil <- old_nids[state.focus], do: new_cids[nid]
+
+        carried =
+          for {nid, entry} <- edits, new_cid = new_cids[nid], into: %{}, do: {new_cid, entry}
+
+        page = if carried == %{}, do: page, else: Page.render(page, carried)
         state = %{state | page: page, nodes: page.nodes, focus: focus, controls: %{}}
         state = cancel_layout_job(state)
-        state = apply_layout(state, items, height, width, :full)
+
+        # what the user typed meanwhile is not in what the job laid out: lay out again
+        state =
+          if carried == %{},
+            do: apply_layout(state, items, height, width, :full),
+            else: start_layout_job(state)
 
         late = for {url, info} <- state.images, Map.get(used, url) != info, do: {url, info}
 
@@ -566,21 +585,95 @@ defmodule Browser.Session do
 
   # -- keyboard --------------------------------------------------------------
 
-  defp on_key(state, :ignore), do: state
+  # A key goes to the page's scripts first (`keydown`, then `keypress` for characters and Enter),
+  # and does what it does by default unless one of them called `preventDefault`.
+  defp on_key(%{js: nil} = state, key), do: do_key(state, key)
 
-  defp on_key(state, key) when key in [:copy, :select_all, :cut] do
+  defp on_key(state, key) when key in [:ignore, :copy, :select_all, :cut, :paste],
+    do: do_key(state, key)
+
+  defp on_key(state, key) do
+    {state, prevented?} = key_event(state, "keydown", key)
+
+    {state, prevented?} =
+      if not prevented? and press?(key),
+        do: key_event(state, "keypress", key),
+        else: {state, prevented?}
+
+    if prevented?, do: state, else: do_key(state, key)
+  end
+
+  defp press?({:char, _}), do: true
+  defp press?(:enter), do: true
+  defp press?(_), do: false
+
+  defp key_event(state, type, key) do
+    target = if state.focus, do: {:control, state.focus}, else: :document
+
+    reply =
+      Browser.JS.Runtime.dispatch(
+        state.js,
+        target,
+        type,
+        key_props(key),
+        controls_snapshot(state)
+      )
+
+    {apply_js(state, reply), reply.prevented}
+  end
+
+  # the properties of a keyboard event
+  defp key_props(key) do
+    {shift?, key} = with {:select, dir} <- key, do: {true, dir}, else: (k -> {false, k})
+
+    {name, code} =
+      case key do
+        {:char, c} -> {c, c |> String.upcase() |> String.to_charlist() |> hd()}
+        :enter -> {"Enter", 13}
+        :backspace -> {"Backspace", 8}
+        :delete -> {"Delete", 46}
+        :tab -> {"Tab", 9}
+        :shift_tab -> {"Tab", 9}
+        :escape -> {"Escape", 27}
+        :left -> {"ArrowLeft", 37}
+        :up -> {"ArrowUp", 38}
+        :right -> {"ArrowRight", 39}
+        :down -> {"ArrowDown", 40}
+        :home -> {"Home", 36}
+        :end -> {"End", 35}
+        :page_up -> {"PageUp", 33}
+        :page_down -> {"PageDown", 34}
+        _ -> {"Unidentified", 0}
+      end
+
+    %{
+      "key" => name,
+      "code" => name,
+      "keyCode" => code * 1.0,
+      "which" => code * 1.0,
+      "shiftKey" => shift? or key == :shift_tab,
+      "ctrlKey" => false,
+      "altKey" => false,
+      "metaKey" => false,
+      "repeat" => false
+    }
+  end
+
+  defp do_key(state, :ignore), do: state
+
+  defp do_key(state, key) when key in [:copy, :select_all, :cut] do
     case editing_control(state) do
       nil -> if key == :cut, do: state, else: page_selection_key(state, key)
       control -> edit_key(state, control, key)
     end
   end
 
-  defp on_key(%{focus: nil} = state, key) when key in [:tab, :shift_tab],
+  defp do_key(%{focus: nil} = state, key) when key in [:tab, :shift_tab],
     do: focus_step(state, if(key == :tab, do: :forward, else: :backward))
 
-  defp on_key(%{focus: nil} = state, key), do: page_key(state, key)
+  defp do_key(%{focus: nil} = state, key), do: page_key(state, key)
 
-  defp on_key(state, key) do
+  defp do_key(state, key) do
     case control(state, state.focus) do
       nil -> page_key(%{state | focus: nil}, key)
       control -> control_key(state, control, key)
@@ -1090,8 +1183,21 @@ defmodule Browser.Session do
 
   # re-render the controls from `form_state`; layout follows in the caller
   defp set_form_state(state, form_state) do
+    edits =
+      if state.js == nil do
+        state.page_edits
+      else
+        nids = Page.cid_nids(state.page)
+
+        for {cid, entry} <- form_state,
+            Map.get(state.page.form_state, cid) != entry,
+            nid = nids[cid],
+            reduce: state.page_edits,
+            do: (acc -> Map.put(acc, nid, entry))
+      end
+
     page = Page.render(state.page, form_state)
-    %{state | page: page, nodes: page.nodes}
+    %{state | page: page, nodes: page.nodes, page_edits: edits}
   end
 
   # -- the page's scripts ------------------------------------------------------
@@ -1230,6 +1336,9 @@ defmodule Browser.Session do
     |> scroll_x_by(round(x) - state.scroll_x)
     |> scroll_by(round(y) - state.scroll)
   end
+
+  # `form.submit()` and `requestSubmit()`: the form goes the way a click on its button sends it
+  defp js_effect({:submit, fid}, state) when is_integer(fid), do: navigate_form(state, fid, nil)
 
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, n}, state) when n < 0, do: history_nav(state, &History.back/1)

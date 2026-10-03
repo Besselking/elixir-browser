@@ -1054,7 +1054,7 @@ defmodule Browser.Layout do
         spec.min ||
         spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
-        spec.mr == :auto
+        spec.mr == :auto || spec.cid != nil
 
     if needed?, do: spec
   end
@@ -1973,9 +1973,12 @@ defmodule Browser.Layout do
     space_w = if st.line == [], do: 0, else: space_w
     x = st.x + space_w
     # inside the atom the room kept free on the right (see `rr`) includes what surrounds it
+    # (not the room beside a box that has a width of its own: that is not part of what it needs)
+    extra = st.right - st.free
+
     atom =
-      if st.right > 0,
-        do: %{atom | items: Enum.map(atom.items, &add_rr(&1, st.right))},
+      if extra > 0,
+        do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
         else: atom
 
     atom = %{atom | items: Enum.map(atom.items, &adopt_sticky(&1, st))}

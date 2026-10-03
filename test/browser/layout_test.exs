@@ -147,6 +147,17 @@ defmodule Browser.LayoutTest do
       assert word(items, "a").x == word(items, "b").x
     end
 
+    test "a control beside an inline-block with a fixed-width child gets the rest of the row" do
+      {items, _} =
+        styled(
+          ~s|<div style="width: 700px"><div style="display:flex"><div style="display:flex;flex:1 1 0%"><textarea style="display:flex;width:100%;flex:100%;border:none;height:18px" rows=1></textarea></div><div style="display:flex;flex:0 0 auto"><div style="display:inline-block"><div style="display:flex;flex-grow:1;width:24px"><div style="width:24px;height:24px"></div></div></div></div></div></div>|,
+          800
+        )
+
+      [%{w: w}] = items |> Browser.Layout.controls() |> Map.values()
+      assert w > 600
+    end
+
     test "list-style none removes markers; default lists have them" do
       {items, _} = styled("<ul><li>a</li></ul>")
       assert "•" in texts(items)

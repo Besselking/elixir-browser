@@ -260,6 +260,27 @@ defmodule Browser.Page do
     end)
   end
 
+  @doc """
+  `%{control id => element number}` (`"@nid"`) of the page's controls: how a control is found
+  again in a page a script has changed, where the ids may have been dealt out afresh.
+  """
+  def cid_nids(%__MODULE__{raw: raw}), do: cid_nids(raw, %{})
+
+  defp cid_nids(nodes, acc) when is_list(nodes), do: Enum.reduce(nodes, acc, &cid_nids/2)
+  defp cid_nids({:text, _}, acc), do: acc
+
+  defp cid_nids({:element, _tag, attrs, kids}, acc) do
+    acc =
+      with {_, cid} <- List.keyfind(attrs, "@cid", 0),
+           {_, nid} <- List.keyfind(attrs, "@nid", 0) do
+        Map.put(acc, cid, nid)
+      else
+        _ -> acc
+      end
+
+    cid_nids(kids, acc)
+  end
+
   @doc "True when the page has a `<script>` element."
   def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script")
 

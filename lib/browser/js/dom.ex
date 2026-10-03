@@ -430,6 +430,11 @@ defmodule Browser.JS.DOM do
   @doc "The node id of the n-th `<form>` (the number the page's form index uses), or nil."
   def form_node(fid), do: Enum.at(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), fid)
 
+  # the number the page's form index uses for a `<form>`
+  defp form_index(nid) do
+    Enum.find_index(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), &(&1 == nid))
+  end
+
   @doc "The node id of the element for the page's control `cid`, or nil."
   def control_node(cid) do
     Enum.find(elements(st().doc), fn nid ->
@@ -2283,13 +2288,13 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "submit", fn this, _ ->
-      out({:submit, this_nid(this)})
+      out({:submit, form_index(this_nid(this))})
       :undefined
     end)
 
     def_fn(p, "requestSubmit", fn this, _ ->
       nid = this_nid(this)
-      if dispatch(nid, "submit", %{}) == :ok, do: out({:submit, nid})
+      if dispatch(nid, "submit", %{}) == :ok, do: out({:submit, form_index(nid)})
       :undefined
     end)
 
