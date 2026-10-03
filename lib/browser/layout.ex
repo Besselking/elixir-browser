@@ -1751,7 +1751,15 @@ defmodule Browser.Layout do
     x = st.margin + st.left
     moved = for it <- items, do: move(it, x, box.top)
     {rects, others} = Enum.split_with(moved, &(&1.type in @behind_text))
-    off = max(div(height - bt, 2), 0)
+    # the border runs through the middle of the legend's text (a little above the baseline), not
+    # the middle of its line, which sits above the text: the way a line puts its text lower
+    middle =
+      case for(%{type: :text, y: ty, h: th} <- others, do: ty + round(th * 0.64)) do
+        [] -> box.top + div(height, 2)
+        mids -> Enum.min(mids)
+      end
+
+    off = (middle - box.top - div(bt, 2)) |> max(0) |> min(max(height - bt, 0))
     box = Map.put(box, :legend, %{x: x, w: w, off: off})
 
     %{
