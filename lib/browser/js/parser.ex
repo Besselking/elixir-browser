@@ -602,6 +602,9 @@ defmodule Browser.JS.Parser do
 
   # `for ([a, b] of x)` / `for ({a} of x)`: a pattern in the head
   defp destructuring_head([{:p, open, _} | _] = ts) when open in ["[", "{"] do
+    outer = Process.get(:js_assign_pattern, false)
+    Process.put(:js_assign_pattern, true)
+
     try do
       {pat, rest} = pattern(ts, false)
 
@@ -611,6 +614,8 @@ defmodule Browser.JS.Parser do
       end
     catch
       {:syntax, _} -> nil
+    after
+      Process.put(:js_assign_pattern, outer)
     end
   end
 
