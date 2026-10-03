@@ -77,6 +77,21 @@ defmodule Browser.JS.Props do
     end
   end
 
+  # a variable of the global scope is a property of the global object
+  defp virtual(_id, %{class: :host, host: {Browser.JS.Global, :global}}, key)
+       when is_binary(key) do
+    case Browser.JS.Global.host_get(:global, key, nil) do
+      {:ok, v} ->
+        builtin? = MapSet.member?(Process.get(:js_builtin_names, MapSet.new()), key)
+
+        {:data, v, key not in ["NaN", "Infinity", "undefined"], not builtin?,
+         key not in ["NaN", "Infinity", "undefined"]}
+
+      :miss ->
+        nil
+    end
+  end
+
   defp virtual(_, _, _), do: nil
 
   @doc "The property descriptor object of an own property, or undefined."
