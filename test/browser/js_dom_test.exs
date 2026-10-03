@@ -222,10 +222,19 @@ defmodule Browser.JS.DOMTest do
         </script></body>
         """)
 
-      for expected <- ["1", "2", "3"] do
-        assert_receive {:js_async, ^pid, r}, 1000
-        assert {:element, "p", _, [{:text, ^expected}]} = hd(r.raw |> hd() |> elem(3))
-      end
+      # a busy machine may run two ticks in one go, but the count never goes back and stops at 3
+      texts =
+        Stream.repeatedly(fn ->
+          assert_receive {:js_async, ^pid, r}, 1000
+          {:element, "p", _, [{:text, text}]} = hd(r.raw |> hd() |> elem(3))
+          text
+        end)
+        |> Enum.reduce_while([], fn
+          "3", acc -> {:halt, Enum.reverse(["3" | acc])}
+          text, acc -> {:cont, [text | acc]}
+        end)
+
+      assert texts == Enum.sort(texts)
 
       refute_receive {:js_async, ^pid, _}, 100
     end

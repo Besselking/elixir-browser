@@ -738,43 +738,160 @@ defmodule Browser.Style do
   Removes elements that are not rendered, with their subtrees, and attaches
   computed styles (see moduledoc).
   """
-  def prune(nodes, idx), do: prune_children(nodes, nil, idx)
+  def prune(nodes, idx) do
+    Process.delete(:style_memo)
+    prune_children(nodes, nil, idx)
+  end
+
+  @doc """
+  `prune/2` that reuses what an earlier run (`memo`, as it returned it) worked out for elements
+  that did not change: `{pruned, memo}`. An element is taken over when it and everything below
+  it is as before (`"@nid"` tells which element is which), its place among its siblings is the
+  same, no element before it changed, and what it inherits from its parent is the same. The
+  elements that changed, and the ones their selectors can reach, are styled afresh.
+  """
+  def prune(nodes, idx, memo) do
+    Process.put(:style_memo, memo || %{})
+    pruned = prune_children(nodes, nil, idx)
+    {pruned, Process.delete(:style_memo)}
+  end
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
-    prune_list(nodes, parent, idx, count, 0, [], [])
+    tags_same? = same_shape?(parent, nodes)
+    prune_list(nodes, parent, idx, count, 0, [], [], {tags_same?, true})
   end
 
-  defp prune_list([], _parent, _idx, _count, _i, _prev, acc), do: Enum.reverse(acc)
+  # What the memo keeps per element is plain data: contexts link to their parent, their
+  # earlier siblings and their later ones, and copying such a term (into another process, say)
+  # takes it apart into a tree that grows with every sibling.
 
-  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc),
-    do: prune_list(rest, parent, idx, count, i, prev, [t | acc])
+  # the elements among the children are the ones there were
+  defp same_shape?(nil, _nodes), do: true
 
-  defp prune_list([{:element, tag, attrs, kids} | rest], parent, idx, count, i, prev, acc) do
-    ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
-    {computed, custom} = compute(idx, ctx, parent)
-    computed = blockify_grid_item(computed, parent)
-    root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
-
-    ctx =
-      ctx
-      |> Map.put(:computed, computed)
-      |> Map.put(:custom, custom)
-      |> Map.put(:root_fs, root)
-
-    acc =
-      if not_rendered?(computed) do
-        acc
-      else
-        {computed, attrs} = marker(idx, ctx, computed, attrs)
-        attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
-        kids = prune_children(kids, ctx, idx)
-        kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
-        [{:element, tag, attrs, kids} | acc]
-      end
-
-    prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc)
+  defp same_shape?(parent, nodes) do
+    case memo_get(parent.attrs) do
+      {%{shape: old}, _} -> old == shape(nodes)
+      nil -> false
+    end
   end
+
+  defp shape(nodes), do: for({:element, tag, _, _} <- nodes, do: tag)
+
+  defp memo_get(attrs) do
+    with memo when is_map(memo) <- Process.get(:style_memo),
+         {_, nid} when is_integer(nid) <- List.keyfind(attrs, "@nid", 0) do
+      Map.get(memo, nid)
+    else
+      _ -> nil
+    end
+  end
+
+  defp memo_put(%{attrs: attrs} = ctx, kids, node) do
+    with memo when is_map(memo) <- Process.get(:style_memo),
+         {_, nid} when is_integer(nid) <- List.keyfind(attrs, "@nid", 0) do
+      entry = %{
+        tag: ctx.tag,
+        attrs: attrs,
+        kids: :erlang.phash2(kids, 4_294_967_296),
+        shape: shape(kids),
+        index: ctx.index,
+        count: ctx.count,
+        computed: ctx.computed,
+        custom: ctx.custom,
+        root_fs: ctx.root_fs,
+        chain_same: ctx.chain_same,
+        parent: parent_sig(ctx.parent)
+      }
+
+      Process.put(:style_memo, Map.put(memo, nid, {entry, node}))
+    end
+
+    :ok
+  end
+
+  defp parent_sig(nil), do: nil
+  defp parent_sig(p), do: {p.computed, p.custom, p.root_fs}
+
+  defp parent_same?(nil, nil), do: true
+  defp parent_same?(nil, _), do: false
+  defp parent_same?(_, nil), do: false
+
+  defp parent_same?(p, sig),
+    do: p.chain_same and {p.computed, p.custom, p.root_fs} == sig
+
+  defp prune_list([], _parent, _idx, _count, _i, _prev, acc, _flags), do: Enum.reverse(acc)
+
+  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc, flags),
+    do: prune_list(rest, parent, idx, count, i, prev, [t | acc], flags)
+
+  defp prune_list(
+         [{:element, tag, attrs, kids} | rest],
+         parent,
+         idx,
+         count,
+         i,
+         prev,
+         acc,
+         {tags_same?, clean}
+       ) do
+    old = memo_get(attrs)
+    same_self? = match?({%{tag: ^tag, attrs: ^attrs}, _}, old)
+
+    reusable? =
+      same_self? and tags_same? and clean and old != nil and
+        elem(old, 0).kids == :erlang.phash2(kids, 4_294_967_296) and
+        elem(old, 0).index == i + 1 and elem(old, 0).count == count and
+        parent_same?(parent, elem(old, 0).parent)
+
+    next_flags = {tags_same?, clean and same_self?}
+
+    if reusable? do
+      {e, onode} = old
+
+      ctx =
+        tag
+        |> CSS.context(attrs, kids, parent, prev, i, count, rest)
+        |> Map.merge(%{
+          computed: e.computed,
+          custom: e.custom,
+          root_fs: e.root_fs,
+          chain_same: true
+        })
+
+      acc = if onode == :hidden, do: acc, else: [onode | acc]
+      prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
+    else
+      ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
+      {computed, custom} = compute(idx, ctx, parent)
+      computed = blockify_grid_item(computed, parent)
+      root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
+
+      ctx =
+        ctx
+        |> Map.put(:computed, computed)
+        |> Map.put(:custom, custom)
+        |> Map.put(:root_fs, root)
+        |> Map.put(:chain_same, same_self? and (parent == nil or parent.chain_same))
+
+      {acc, node} =
+        if not_rendered?(computed) do
+          {acc, :hidden}
+        else
+          {computed, attrs} = marker(idx, ctx, computed, attrs)
+          attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
+          kids = prune_children(kids, ctx, idx)
+          kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+          node = {:element, tag, attrs, kids}
+          {[node | acc], node}
+        end
+
+      memo_put(ctx, kids_of(tag, attrs, kids), node)
+      prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
+    end
+  end
+
+  defp kids_of(_tag, _attrs, kids), do: kids
 
   # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
   # summaries. A summary's marker may depend on whether its `<details>` is open, so both are

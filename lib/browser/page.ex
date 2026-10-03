@@ -31,6 +31,9 @@ defmodule Browser.Page do
     fixed_width: MapSet.new(),
     # the cascade for the window sizes seen so far, by media key: resizing back is free
     style_cache: %{},
+    # what the cascade worked out per element (`Browser.Style.prune/3`), for the media key it
+    # was run for: a changed tree only has its changed elements styled afresh
+    memo: nil,
     # changes whenever the page is rebuilt or re-rendered, so a copy can be told from the original
     ver: nil
   ]
@@ -176,18 +179,19 @@ defmodule Browser.Page do
     if key == page.key and page.nodes != nil do
       page
     else
-      {pruned, defs, fixed, cache} =
+      {pruned, defs, fixed, cache, memo} =
         case page.style_cache do
           %{^key => {pruned, defs, fixed}} ->
-            {pruned, defs, fixed, page.style_cache}
+            {pruned, defs, fixed, page.style_cache, page.memo}
 
           cache ->
             index = Style.index_rules(page.rules, env)
-            pruned = Style.prune(page.raw, index)
+            old = with {^key, memo} <- page.memo, do: memo, else: (_ -> nil)
+            {pruned, memo} = Style.prune(page.raw, index, old)
             defs = Browser.Svg.defs(page.raw, pruned)
             fixed = fixed_width(pruned)
             cache = if map_size(cache) >= 4, do: %{}, else: cache
-            {pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed})}
+            {pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed}), {key, memo}}
         end
 
       page = %{
@@ -196,7 +200,8 @@ defmodule Browser.Page do
           pruned: pruned,
           svg_defs: defs,
           fixed_width: fixed,
-          style_cache: cache
+          style_cache: cache,
+          memo: memo
       }
 
       render(page, page.form_state)

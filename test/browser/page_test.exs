@@ -208,4 +208,58 @@ defmodule Browser.PageTest do
       assert page.base == "http://t.test/x/y"
     end
   end
+
+  describe "incremental restyle" do
+    @env %{type: "screen", width: 800, height: 600, dppx: 1.0}
+
+    @html """
+    <style>
+      .on .x { color: red } .on + .b { color: blue } li:last-child { color: green }
+      .on { font-size: 20px } .on span { font-weight: bold }
+    </style>
+    <div class="a" id="a"><p class="x">one</p><span class="x">two</span></div>
+    <div class="b" id="b"><p class="x">three</p></div>
+    <ul><li>1</li><li>2</li></ul>
+    """
+
+    defp set_attr(nodes, id, name, value) when is_list(nodes),
+      do: Enum.map(nodes, &set_attr(&1, id, name, value))
+
+    defp set_attr({:element, tag, attrs, kids}, id, name, value) do
+      attrs =
+        if {"id", id} in attrs,
+          do: List.keystore(attrs, name, 0, {name, value}),
+          else: attrs
+
+      {:element, tag, attrs, set_attr(kids, id, name, value)}
+    end
+
+    defp set_attr(other, _, _, _), do: other
+
+    test "a changed tree styles the same as a fresh one" do
+      page = Page.build(@html, "about:x", @env)
+
+      for {id, name, value} <- [
+            {"a", "class", "a on"},
+            {"b", "class", "b on"},
+            {"a", "style", "color: pink"},
+            {"b", "hidden", ""}
+          ] do
+        raw = set_attr(page.raw, id, name, value)
+        fresh = Page.from_raw(%{page | memo: nil}, raw, @env)
+        incremental = Page.from_raw(page, raw, @env)
+        assert incremental.pruned == fresh.pruned
+        assert incremental.pruned != page.pruned
+        # and once more from the result
+        assert Page.from_raw(incremental, raw, @env).pruned == fresh.pruned
+      end
+    end
+
+    test "a page can be sent to another process" do
+      page = Page.build(@html, "about:x", @env)
+      me = self()
+      spawn(fn -> send(me, {:page, page}) end)
+      assert_receive {:page, ^page}, 1000
+    end
+  end
 end
