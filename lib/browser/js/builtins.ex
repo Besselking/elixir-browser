@@ -64,6 +64,14 @@ defmodule Browser.JS.Builtins do
     scope
   end
 
+  # Runs source text in the global scope (indirect eval, and the Function constructor).
+  defp eval_source(src) do
+    case Browser.JS.Parser.parse(src) do
+      {:ok, program} -> Interp.run_program(program)
+      {:error, msg} -> throw_error("SyntaxError", msg)
+    end
+  end
+
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp float(n), do: n * 1.0
@@ -1354,6 +1362,24 @@ defmodule Browser.JS.Builtins do
   end
 
   defp install_misc(scope) do
+    constructor(scope, "Function", proto(:function), fn _, args ->
+      {params, body} = Enum.split(args, -1)
+      params = params |> Enum.map(&to_str/1) |> Enum.join(",")
+      body = body |> Enum.map(&to_str/1) |> Enum.join()
+      eval_source("(function anonymous(#{params}\n) {\n#{body}\n})")
+    end)
+
+    declare(
+      scope,
+      "eval",
+      native("eval", fn _, args ->
+        case arg(args, 0) do
+          src when is_binary(src) -> eval_source(src)
+          other -> other
+        end
+      end)
+    )
+
     date = new_object()
     declare(scope, "Date", date)
     def_fn(date, "now", fn _, _ -> float(System.system_time(:millisecond)) end)
