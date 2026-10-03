@@ -1170,6 +1170,17 @@ defmodule Browser.Layout do
     [{:gap, box.mb}, {:inset_end} | acc]
   end
 
+  # `list-style-type: "- "`: the string is the marker
+  defp marker(<<q, _::binary>> = type, _) when q in [?", ?'] do
+    type
+    |> String.slice(1..-2//1)
+    |> then(
+      &Regex.replace(~r/\\([0-9a-fA-F]{1,6}) ?/, &1, fn _, h ->
+        <<String.to_integer(h, 16)::utf8>>
+      end)
+    )
+  end
+
   defp marker("disc", _), do: "•"
   defp marker("circle", _), do: "◦"
   defp marker("square", _), do: "▪"

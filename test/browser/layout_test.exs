@@ -130,6 +130,16 @@ defmodule Browser.LayoutTest do
       assert word(items, "x").x - word(items, "y").x == 40
     end
 
+    test "a string list-style-type is the marker, also in a list nested in an ol" do
+      {items, _} =
+        styled(
+          ~s|<style>li.d { list-style-type: "- " }</style><ol><li><ul><li class=d>a</li></ul></li></ol>|
+        )
+
+      assert "- " in texts(items)
+      refute "1." in tl(Enum.drop_while(texts(items), &(&1 != "1.")))
+    end
+
     test "list-style none removes markers; default lists have them" do
       {items, _} = styled("<ul><li>a</li></ul>")
       assert "•" in texts(items)
