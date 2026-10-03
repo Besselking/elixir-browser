@@ -1107,4 +1107,22 @@ defmodule Browser.JSTest do
                [10.0, "héllo €"]
     end
   end
+
+  describe "scope lifetime" do
+    test "closures keep the scopes of calls, blocks and loop iterations alive" do
+      assert js(
+               "var fs = []; function mk(n) { { let k = n * 2; fs.push(() => k + n) } } " <>
+                 "for (let i = 0; i < 3; i++) mk(i); " <>
+                 "for (let j = 0; j < 3; j++) fs.push(() => j); " <>
+                 "for (const x of [7, 8]) fs.push(() => x); " <>
+                 "fs.map(f => f()).join()"
+             ) == "0,3,6,0,1,2,7,8"
+    end
+
+    test "a closure made in a for loop's update expression sees that iteration's variable" do
+      assert js(
+               "var fs = []; for (let i = 0; i < 3; fs.push(() => i), i++) {} fs.map(f => f()).join()"
+             ) == "1,2,3"
+    end
+  end
 end
