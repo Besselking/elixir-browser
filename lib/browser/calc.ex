@@ -131,7 +131,13 @@ defmodule Browser.Calc do
   defp to_float(n) do
     n = if String.starts_with?(n, "."), do: "0" <> n, else: n
     n = if String.contains?(n, [".", "e", "E"]), do: n, else: n <> ".0"
-    n = Regex.replace(~r/\.(?=[eE])/, n, ".0")
+
+    n =
+      String.replace(n, [".e", ".E"], fn
+        ".e" -> ".0e"
+        ".E" -> ".0E"
+      end)
+
     n |> Float.parse() |> elem(0)
   end
 

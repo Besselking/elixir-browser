@@ -1503,36 +1503,75 @@ defmodule Browser.Style do
   end
 
   defp plain_length(v, env) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))([a-z]*)\z/, v) do
-      [_, n, unit] ->
-        n = n |> String.trim_leading("+") |> normalize_num_signed() |> String.to_float()
-
-        case unit do
-          "" -> if n == 0.0, do: 0.0
-          "px" -> n
-          "em" -> n * env.fs
-          "rem" -> n * env.root
-          "pt" -> n * 4 / 3
-          "pc" -> n * 16
-          "in" -> n * 96
-          "cm" -> n * 96 / 2.54
-          "mm" -> n * 96 / 25.4
-          "ex" -> n * env.fs / 2
-          # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
-          "ch" -> n * env.fs * 0.6
-          u -> if px = viewport_unit(u, env), do: n * px
-        end
+    case scan_num(v) do
+      {n, unit} when is_float(n) ->
+        if lower?(unit), do: length_value(n, unit, env), else: nil
 
       _ ->
         nil
     end
   end
 
+  # `[+-]? (digits [. digits?] | . digits)` at the start of `text`: {float, rest}, or nil. By
+  # hand, as every length of every element of a page goes through here.
+  defp scan_num(<<s, rest::binary>>) when s in [?+, ?-] do
+    with {n, after_num} <- scan_unsigned(rest), do: {if(s == ?-, do: -n, else: n), after_num}
+  end
+
+  defp scan_num(text), do: scan_unsigned(text)
+
+  defp scan_unsigned(text) do
+    {int, after_int} = scan_digits(text, 0)
+
+    {frac, after_frac} =
+      case after_int do
+        <<?., more::binary>> ->
+          {n, rest} = scan_digits(more, 0)
+          {binary_part(more, 0, n), rest}
+
+        _ ->
+          {"", after_int}
+      end
+
+    if int == 0 and frac == "" do
+      nil
+    else
+      whole = if int == 0, do: "0", else: binary_part(text, 0, int)
+      {n, _} = Float.parse(whole <> "." <> if(frac == "", do: "0", else: frac))
+      {n, after_frac}
+    end
+  end
+
+  defp scan_digits(<<c, rest::binary>>, n) when c in ?0..?9, do: scan_digits(rest, n + 1)
+  defp scan_digits(rest, n), do: {n, rest}
+
+  defp lower?(<<c, rest::binary>>) when c in ?a..?z, do: lower?(rest)
+  defp lower?(""), do: true
+  defp lower?(_), do: false
+
+  defp length_value(n, unit, env) do
+    case unit do
+      "" -> if n == 0.0, do: 0.0
+      "px" -> n
+      "em" -> n * env.fs
+      "rem" -> n * env.root
+      "pt" -> n * 4 / 3
+      "pc" -> n * 16
+      "in" -> n * 96
+      "cm" -> n * 96 / 2.54
+      "mm" -> n * 96 / 25.4
+      "ex" -> n * env.fs / 2
+      # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
+      "ch" -> n * env.fs * 0.6
+      u -> if px = viewport_unit(u, env), do: n * px
+    end
+  end
+
   # "12.5%" -> 0.125, nil when it is not a percentage
   defp percentage(v) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) do
-      [_, n] -> to_float(n) / 100
-      nil -> nil
+    case scan_num(v) do
+      {n, "%"} -> n / 100
+      _ -> nil
     end
   end
 

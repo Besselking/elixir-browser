@@ -133,8 +133,18 @@ defmodule Browser.Layout do
     Process.put(:layout_cw, max(width - 2 * @margin, 0))
     Process.put(:layout_memo, %{})
     {nodes, canvas} = propagate_background(nodes)
+    t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse()
+    t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images])
+
+    if System.get_env("LAYOUT_TIMES"),
+      do:
+        IO.puts(
+          :stderr,
+          "walk #{div(t1 - t0, 1000)}ms place #{div(System.monotonic_time(:microsecond) - t1, 1000)}ms ops=#{length(ops)}"
+        )
+
     # absolutely positioned boxes take no room in the flow but do extend the scrollable page
     height = max(height, content_bottom(items))
     items = add_focus(items, measure, opts[:focus])
