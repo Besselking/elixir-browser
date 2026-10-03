@@ -298,8 +298,14 @@ defmodule Browser.JS.Interp do
     case o.class do
       :array ->
         case index(key) do
-          i when is_integer(i) -> Map.get(o.items, i, :undefined)
-          nil -> if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key), {:obj, id})
+          i when is_integer(i) ->
+            case o.items do
+              %{^i => v} -> v
+              _ -> lookup(o, to_key(key), {:obj, id})
+            end
+
+          nil ->
+            if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key), {:obj, id})
         end
 
       :function ->
@@ -570,8 +576,12 @@ defmodule Browser.JS.Interp do
     key_s = to_key(key)
 
     cond do
-      o.class == :array and (is_integer(index(key)) or key_s == "length") ->
-        key_s == "length" or Map.has_key?(o.items, index(key))
+      o.class == :array and key_s == "length" ->
+        true
+
+      o.class == :array and is_integer(index(key)) ->
+        Map.has_key?(o.items, index(key)) or
+          (match?({:obj, _}, o.proto) and has_property?(o.proto, key_s))
 
       Map.has_key?(o.props, key_s) ->
         true
@@ -1207,7 +1217,29 @@ defmodule Browser.JS.Interp do
     |> IO.iodata_to_binary()
   end
 
-  def ev({:array, elems}, env), do: new_array(eval_list(elems, env))
+  # an elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length
+  def ev({:array, elems}, env) do
+    {items, len} =
+      Enum.reduce(elems, {%{}, 0}, fn
+        {:spread, e}, {m, i} ->
+          vals = iterate(ev(e, env))
+
+          m =
+            vals |> Enum.with_index(i) |> Enum.reduce(m, fn {v, j}, acc -> Map.put(acc, j, v) end)
+
+          {m, i + length(vals)}
+
+        :hole, {m, i} ->
+          {m, i + 1}
+
+        n, {m, i} ->
+          {Map.put(m, i, ev(n, env)), i + 1}
+      end)
+
+    {:obj, id} = arr = new_array([])
+    store(id, %{deref(id) | items: items, len: len})
+    arr
+  end
 
   def ev({:object, props}, env) do
     obj = new_object()

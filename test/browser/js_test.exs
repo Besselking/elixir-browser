@@ -750,4 +750,61 @@ defmodule Browser.JSTest do
                "true,false,true"
     end
   end
+
+  describe "array methods on array-likes" do
+    test "work on any object with a length" do
+      assert js(
+               "var o = {length: 3, 0: 'a', 1: 'b', 2: 'c'}; Array.prototype.map.call(o, x => x + x).join()"
+             ) == "aa,bb,cc"
+
+      assert js(
+               "var o = {length: 2, 0: 1, 1: 2}; Array.prototype.push.call(o, 3, 4); [o.length, o[2], o[3]].join()"
+             ) == "4,3,4"
+
+      assert js(
+               "var o = {length: 3, 0: 1, 1: 2, 2: 3}; Array.prototype.reverse.call(o); [o[0], o[1], o[2]].join()"
+             ) == "3,2,1"
+
+      assert js(
+               "var o = {length: 2, 0: 5, 1: 6}; [Array.prototype.indexOf.call(o, 6), Array.prototype.slice.call(o).join(), Array.prototype.pop.call(o), o.length].join()"
+             ) == "1,5,6,6,1"
+
+      assert js("Array.prototype.join.call('abc', '-')") == "a-b-c"
+
+      assert js("var o = {length: 0}; Array.prototype.shift.call(o) + ',' + o.length") ==
+               "undefined,0"
+    end
+
+    test "null and undefined are rejected, and so is a callback that is not a function" do
+      assert js("try { Array.prototype.map.call(null, x => x) } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("try { [].forEach(1) } catch (e) { e.name }") == "TypeError"
+      assert js("try { [1].reduce(2) } catch (e) { e.name }") == "TypeError"
+      assert js("try { new Array(-1) } catch (e) { e.name }") == "RangeError"
+    end
+
+    test "holes are skipped, count in the length, and read through the prototype" do
+      assert js(
+               "var a = [1, , 3]; var n = 0; a.forEach(function () { n++ }); [n, a.length, 1 in a].join()"
+             ) == "2,3,false"
+
+      assert js("var a = new Array(3); [a.length, 0 in a].join()") == "3,false"
+
+      assert js(
+               "Array.prototype[1] = 'p'; var a = [0, , 2]; var seen = []; a.forEach(function (v) { seen.push(v) }); delete Array.prototype[1]; seen.join()"
+             ) == "0,p,2"
+
+      assert js("[1, , 3].map(x => x * 2).length + ',' + (1 in [1, , 3].map(x => x))") ==
+               "3,false"
+
+      assert js("var r = [, , 5].reduce(function (a, b) { return a + b }); r") == 5.0
+    end
+
+    test "a callback that changes the array is seen by the rest of the iteration" do
+      assert js(
+               "var arr = [1, 2, , 4]; var n = 0; arr.forEach(function () { n++; arr[2] = 3 }); n"
+             ) == 4.0
+    end
+  end
 end

@@ -180,8 +180,14 @@ defmodule Browser.JS.Builtins do
     arr =
       constructor(scope, "Array", array_proto, fn _, args ->
         case args do
-          [n] when is_number(n) -> new_array(List.duplicate(:undefined, trunc(n)))
-          list -> new_array(list)
+          [n] when is_number(n) ->
+            unless n >= 0 and n == trunc(n) and n < 4_294_967_296,
+              do: throw_error("RangeError", "Invalid array length")
+
+            array_of(trunc(n), %{})
+
+          list ->
+            new_array(list)
         end
       end)
 
@@ -227,41 +233,65 @@ defmodule Browser.JS.Builtins do
 
   defp array_methods(p) do
     def_fn(p, "push", fn this, args ->
-      list = array_list(this) ++ args
-      set_array_list(this, list)
-      float(length(list))
+      if array?(this) do
+        list = array_list(this) ++ args
+        set_array_list(this, list)
+        float(length(list))
+      else
+        o = this_obj(this)
+        len = length_of(o)
+        args |> Enum.with_index(len) |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
+        Interp.put(o, "length", float(len + length(args)))
+        float(len + length(args))
+      end
     end)
 
     def_fn(p, "pop", fn this, _ ->
-      case Enum.reverse(array_list(this)) do
-        [] ->
-          :undefined
+      if array?(this) do
+        case Enum.reverse(array_list(this)) do
+          [] ->
+            :undefined
 
-        [last | rest] ->
-          set_array_list(this, Enum.reverse(rest))
+          [last | rest] ->
+            set_array_list(this, Enum.reverse(rest))
+            last
+        end
+      else
+        o = this_obj(this)
+        len = length_of(o)
+
+        if len == 0 do
+          Interp.put(o, "length", 0.0)
+          :undefined
+        else
+          last = Interp.get(o, float(len - 1))
+          Interp.delete(o, float(len - 1))
+          Interp.put(o, "length", float(len - 1))
           last
+        end
       end
     end)
 
     def_fn(p, "shift", fn this, _ ->
-      case array_list(this) do
+      case elems(this) do
         [] ->
+          put_elems(this, [])
           :undefined
 
         [first | rest] ->
-          set_array_list(this, rest)
+          put_elems(this, rest)
           first
       end
     end)
 
     def_fn(p, "unshift", fn this, args ->
-      list = args ++ array_list(this)
-      set_array_list(this, list)
+      list = args ++ elems(this)
+      put_elems(this, list)
       float(length(list))
     end)
 
     def_fn(p, "slice", fn this, args ->
-      list = array_list(this)
+      list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
       to = rel(arg(args, 1), len, len)
@@ -269,7 +299,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(p, "splice", fn this, args ->
-      list = array_list(this)
+      list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
 
@@ -282,14 +312,15 @@ defmodule Browser.JS.Builtins do
 
       {head, rest} = Enum.split(list, from)
       {removed, tail} = Enum.split(rest, count)
-      set_array_list(this, head ++ Enum.drop(args, 2) ++ tail)
+      put_elems(this, head ++ Enum.drop(args, 2) ++ tail)
       new_array(removed)
     end)
 
     def_fn(p, "concat", fn this, args ->
+      first = if array?(this), do: array_list(this), else: [this_obj(this)]
+
       new_array(
-        array_list(this) ++
-          Enum.flat_map(args, fn a -> if array?(a), do: array_list(a), else: [a] end)
+        first ++ Enum.flat_map(args, fn a -> if array?(a), do: array_list(a), else: [a] end)
       )
     end)
 
@@ -297,44 +328,61 @@ defmodule Browser.JS.Builtins do
       join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
     end)
 
-    def_fn(p, "toString", fn this, _ -> join(this, ",") end)
+    def_fn(p, "toString", fn this, _ ->
+      case this do
+        {:obj, _} ->
+          case Interp.get(this, "join") do
+            f when is_tuple(f) -> if function?(f), do: call(f, this, []), else: "[object Object]"
+            _ -> "[object Object]"
+          end
+
+        _ ->
+          join(this, ",")
+      end
+    end)
 
     def_fn(p, "reverse", fn this, _ ->
-      set_array_list(this, Enum.reverse(array_list(this)))
+      put_elems(this, Enum.reverse(elems(this)))
       this
     end)
 
     def_fn(p, "indexOf", fn this, args ->
       v = arg(args, 0)
-      float(Enum.find_index(array_list(this), &strict_eq(&1, v)) || -1)
+
+      case Enum.find(pairs(this), fn {_, x} -> strict_eq(x, v) end) do
+        {i, _} -> float(i)
+        nil -> -1.0
+      end
     end)
 
     def_fn(p, "lastIndexOf", fn this, args ->
       v = arg(args, 0)
-      list = array_list(this)
-      idx = list |> Enum.reverse() |> Enum.find_index(&strict_eq(&1, v))
-      float(if idx, do: length(list) - 1 - idx, else: -1)
+
+      case this |> pairs(:desc) |> Enum.find(fn {_, x} -> strict_eq(x, v) end) do
+        {i, _} -> float(i)
+        nil -> -1.0
+      end
     end)
 
     def_fn(p, "includes", fn this, args ->
       v = arg(args, 0)
-      Enum.any?(array_list(this), &same_value_zero(&1, v))
+      Enum.any?(elems(this), &same_value_zero(&1, v))
     end)
 
     def_fn(p, "at", fn this, args ->
-      list = array_list(this)
+      list = elems(this)
       n = to_int(arg(args, 0))
       Enum.at(list, if(n < 0, do: length(list) + n, else: n), :undefined)
     end)
 
     def_fn(p, "fill", fn this, args ->
-      list = array_list(this)
+      list = elems(this)
       len = length(list)
       from = rel(arg(args, 1), len, 0)
       to = rel(arg(args, 2), len, len)
       v = arg(args, 0)
 
-      set_array_list(
+      put_elems(
         this,
         list
         |> Enum.with_index()
@@ -346,62 +394,86 @@ defmodule Browser.JS.Builtins do
 
     def_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
-      new_array(flatten(array_list(this), depth))
+      new_array(flatten(elems(this), depth))
     end)
 
-    def_fn(p, "forEach", fn this, [f | _] = args ->
-      each_with_index(this, f, args)
+    def_fn(p, "forEach", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
       :undefined
     end)
 
-    def_fn(p, "map", fn this, [f | _] = args ->
-      new_array(
-        for {v, i} <- Enum.with_index(array_list(this)),
-            do: call(f, arg(args, 1), [v, float(i), this])
-      )
+    def_fn(p, "map", fn this, args ->
+      f = callable!(arg(args, 0))
+      len = length_of(this)
+
+      mapped =
+        for {i, v} <- pairs(this), into: %{}, do: {i, call(f, arg(args, 1), [v, float(i), this])}
+
+      array_of(len, mapped)
     end)
 
-    def_fn(p, "filter", fn this, [f | _] = args ->
+    def_fn(p, "filter", fn this, args ->
+      f = callable!(arg(args, 0))
+
       new_array(
-        for {v, i} <- Enum.with_index(array_list(this)),
+        for {i, v} <- pairs(this),
             truthy(call(f, arg(args, 1), [v, float(i), this])),
             do: v
       )
     end)
 
-    def_fn(p, "find", fn this, [f | _] = args ->
-      Enum.find_value(Enum.with_index(array_list(this)), :undefined, fn {v, i} ->
+    def_fn(p, "find", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      Enum.find_value(Enum.with_index(elems(this)), :undefined, fn {v, i} ->
         if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
       end)
     end)
 
-    def_fn(p, "findIndex", fn this, [f | _] = args ->
+    def_fn(p, "findIndex", fn this, args ->
+      f = callable!(arg(args, 0))
+
       idx =
-        Enum.find_index(Enum.with_index(array_list(this)), fn {v, i} ->
+        Enum.find_index(Enum.with_index(elems(this)), fn {v, i} ->
           truthy(call(f, arg(args, 1), [v, float(i), this]))
         end)
 
       float(idx || -1)
     end)
 
-    def_fn(p, "some", fn this, [f | _] = args ->
-      Enum.any?(Enum.with_index(array_list(this)), fn {v, i} ->
-        truthy(call(f, arg(args, 1), [v, float(i), this]))
-      end)
+    def_fn(p, "some", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      Enum.any?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "every", fn this, [f | _] = args ->
-      Enum.all?(Enum.with_index(array_list(this)), fn {v, i} ->
-        truthy(call(f, arg(args, 1), [v, float(i), this]))
-      end)
+    def_fn(p, "every", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      Enum.all?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "reduce", fn this, [f | rest] -> reduce(this, f, rest, false) end)
-    def_fn(p, "reduceRight", fn this, [f | rest] -> reduce(this, f, rest, true) end)
+    def_fn(p, "reduce", fn this, args ->
+      reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), false)
+    end)
+
+    def_fn(p, "reduceRight", fn this, args ->
+      reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), true)
+    end)
 
     def_fn(p, "sort", fn this, args ->
       f = arg(args, 0)
-      {undefs, list} = this |> array_list() |> Enum.split_with(&(&1 == :undefined))
+
+      unless f == :undefined or function?(f),
+        do:
+          throw_error(
+            "TypeError",
+            "The comparison function must be either a function or undefined"
+          )
+
+      {undefs, list} = this |> elems() |> Enum.split_with(&(&1 == :undefined))
 
       cmp =
         if function?(f),
@@ -413,28 +485,119 @@ defmodule Browser.JS.Builtins do
           end,
           else: fn a, b -> to_str(a) <= to_str(b) end
 
-      set_array_list(this, Enum.sort(list, cmp) ++ undefs)
+      put_elems(this, Enum.sort(list, cmp) ++ undefs)
       this
     end)
   end
 
-  defp each_with_index(this, f, args) do
-    for {v, i} <- Enum.with_index(array_list(this)),
-        do: call(f, arg(args, 1), [v, float(i), this])
+  # ── array methods on anything with a `length` ──────────────
+
+  @max_length 50_000_000
+
+  defp this_obj(this) do
+    if this in [:undefined, :null],
+      do: throw_error("TypeError", "Array.prototype method called on null or undefined"),
+      else: this
+  end
+
+  defp callable!(f) do
+    unless function?(f), do: throw_error("TypeError", "#{inspect_js(f, 0, [])} is not a function")
+    f
+  end
+
+  defp to_length(v) do
+    case to_num(v) do
+      n when is_number(n) -> n |> trunc() |> max(0) |> min(9_007_199_254_740_991)
+      :infinity -> 9_007_199_254_740_991
+      _ -> 0
+    end
+  end
+
+  defp length_of(this) do
+    cond do
+      array?(this) ->
+        to_int(Interp.get(this, "length"))
+
+      is_binary(this) ->
+        String.length(this)
+
+      true ->
+        len = to_length(Interp.get(this_obj(this), "length"))
+        if len > @max_length, do: throw_error("RangeError", "Invalid array length")
+        len
+    end
+  end
+
+  # the elements as a list, holes and missing indices reading as undefined
+  defp elems(this) do
+    cond do
+      array?(this) and not has_holes?(this) -> array_list(this)
+      true -> for i <- 0..(length_of(this) - 1)//1, do: Interp.get(this, float(i))
+    end
+  end
+
+  defp has_holes?({:obj, id}) do
+    o = deref(id)
+    map_size(o.items) != o.len
+  end
+
+  # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
+  # callback that changes the array is seen by the iteration); the length is read once
+  defp pairs(this, dir \\ :asc) do
+    len = length_of(this)
+    range = if dir == :asc, do: 0..(len - 1)//1, else: (len - 1)..0//-1
+
+    Stream.flat_map(range, fn i ->
+      present =
+        if is_binary(this), do: i < len, else: has_property?(this, float(i))
+
+      if present, do: [{i, Interp.get(this, float(i))}], else: []
+    end)
+  end
+
+  # an array of `len` slots with values at some of them
+  defp array_of(len, items) do
+    arr = new_array([])
+    {:obj, id} = arr
+    store(id, %{deref(id) | items: items, len: len})
+    arr
+  end
+
+  # the elements written back: to the array, or to an object index by index
+  defp put_elems(this, list) do
+    if array?(this) do
+      set_array_list(this, list)
+    else
+      o = this_obj(this)
+      old = length_of(o)
+      list |> Enum.with_index() |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
+      for i <- length(list)..(old - 1)//1, do: Interp.delete(o, float(i))
+      Interp.put(o, "length", float(length(list)))
+    end
   end
 
   defp reduce(this, f, rest, right?) do
-    list = this |> array_list() |> Enum.with_index()
-    list = if right?, do: Enum.reverse(list), else: list
+    stream = pairs(this, if(right?, do: :desc, else: :asc))
 
-    {acc, list} =
-      case {rest, list} do
-        {[init | _], l} -> {init, l}
-        {[], [{v, _} | l]} -> {v, l}
-        {[], []} -> throw_error("TypeError", "Reduce of empty array with no initial value")
+    {acc, stream} =
+      case rest do
+        [init | _] ->
+          {init, stream}
+
+        [] ->
+          case Enum.take(stream, 1) do
+            [{first_i, v}] ->
+              {v,
+               Stream.drop_while(stream, fn {i, _} ->
+                 if right?, do: i >= first_i, else: i <= first_i
+               end)}
+
+            [] ->
+              throw_error("TypeError", "Reduce of empty array with no initial value")
+          end
       end
 
-    Enum.reduce(list, acc, fn {v, i}, acc -> call(f, :undefined, [acc, v, float(i), this]) end)
+    Enum.reduce(stream, acc, fn {i, v}, acc -> call(f, :undefined, [acc, v, float(i), this]) end)
   end
 
   defp flatten(list, depth) do
@@ -444,7 +607,7 @@ defmodule Browser.JS.Builtins do
   end
 
   defp join(arr, sep) do
-    arr |> array_list() |> Enum.map_join(sep, fn v -> if nullish?(v), do: "", else: to_str(v) end)
+    arr |> elems() |> Enum.map_join(sep, fn v -> if nullish?(v), do: "", else: to_str(v) end)
   end
 
   # ── String / Number / Boolean ──────────────────────────────
