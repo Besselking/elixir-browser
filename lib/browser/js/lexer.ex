@@ -49,8 +49,10 @@ defmodule Browser.JS.Lexer do
   end
 
   defp lex("`" <> rest, nl, acc) do
-    {parts, rest} = template(rest, [], [])
-    lex(rest, false, [{:tmpl, parts, nl} | acc])
+    {parts, after_tmpl} = template(rest, [], [])
+    # the raw text of the chunks, which `String.raw` and other tags read
+    raw = binary_part(rest, 0, byte_size(rest) - byte_size(after_tmpl) - 1)
+    lex(after_tmpl, false, [{:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl} | acc])
   end
 
   defp lex(<<?\\, ?u, _::binary>> = s, nl, acc), do: lex_ident(s, nl, acc)
@@ -266,8 +268,7 @@ defmodule Browser.JS.Lexer do
   defp escape(""), do: throw({:syntax, "unterminated string"})
 
   # template literal: cooked text chunks interleaved with `{:expr, tokens}`
-  defp template("`" <> rest, text, parts),
-    do: {Enum.reverse([flush(text) | parts]) |> Enum.reject(&(&1 == "")), rest}
+  defp template("`" <> rest, text, parts), do: {Enum.reverse([flush(text) | parts]), rest}
 
   defp template("${" <> rest, text, parts) do
     {src, rest} = expr_source(rest, 0, [])
@@ -289,6 +290,23 @@ defmodule Browser.JS.Lexer do
     do: template(rest, [<<c::utf8>> | text], parts)
 
   defp template(_, _text, _parts), do: throw({:syntax, "unterminated template"})
+
+  # the text between the `${ }` of a template as written (escapes not interpreted)
+  defp raw_chunks("", text, chunks), do: Enum.reverse([flush(text) | chunks])
+
+  defp raw_chunks("${" <> rest, text, chunks) do
+    {_src, rest} = expr_source(rest, 0, [])
+    raw_chunks(rest, [], [flush(text) | chunks])
+  end
+
+  defp raw_chunks(<<?\\, c::utf8, rest::binary>>, text, chunks),
+    do: raw_chunks(rest, [<<c::utf8>>, "\\" | text], chunks)
+
+  defp raw_chunks(<<"\r\n", rest::binary>>, text, chunks),
+    do: raw_chunks(rest, ["\n" | text], chunks)
+
+  defp raw_chunks(<<c::utf8, rest::binary>>, text, chunks),
+    do: raw_chunks(rest, [<<c::utf8>> | text], chunks)
 
   defp flush(text), do: text |> Enum.reverse() |> IO.iodata_to_binary()
 

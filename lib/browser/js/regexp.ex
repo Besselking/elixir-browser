@@ -109,8 +109,25 @@ defmodule Browser.JS.RegExp do
     translate(rest, cls, ["\\x{#{hex}}" | acc])
   end
 
-  defp translate(<<"\\u", hex::binary-size(4), rest::binary>>, cls, acc),
-    do: translate(rest, cls, ["\\x{#{hex}}" | acc])
+  defp translate(<<"\\u", hex::binary-size(4), rest::binary>>, cls, acc) do
+    case Integer.parse(hex, 16) do
+      {hi, ""} when hi in 0xD800..0xDBFF ->
+        # an escaped surrogate pair is the one character it stands for
+        with <<"\\u", lo_hex::binary-size(4), after_pair::binary>> <- rest,
+             {lo, ""} when lo in 0xDC00..0xDFFF <- Integer.parse(lo_hex, 16) do
+          cp = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)
+          translate(after_pair, cls, ["\\x{#{Integer.to_string(cp, 16)}}" | acc])
+        else
+          _ -> lone_surrogate(rest, cls, acc)
+        end
+
+      {lo, ""} when lo in 0xDC00..0xDFFF ->
+        lone_surrogate(rest, cls, acc)
+
+      _ ->
+        translate(rest, cls, ["\\x{#{hex}}" | acc])
+    end
+  end
 
   defp translate("\\/" <> rest, cls, acc), do: translate(rest, cls, ["/" | acc])
 
@@ -124,6 +141,23 @@ defmodule Browser.JS.RegExp do
 
   defp translate(<<c::utf8, rest::binary>>, cls, acc),
     do: translate(rest, cls, [<<c::utf8>> | acc])
+
+  # a character no string has: what a surrogate in a class becomes (a class cannot be left empty)
+  @never "\\x{FFFF}"
+
+  # A string here is made of whole characters, so a lone surrogate in a pattern never matches:
+  # outside a class that is `(?!)`, inside one the character (or a range of them) is left out.
+  defp lone_surrogate(rest, false, acc), do: translate(rest, false, ["(?!)" | acc])
+
+  defp lone_surrogate(<<"-\\u", hex::binary-size(4), after_range::binary>> = rest, true, acc) do
+    case Integer.parse(hex, 16) do
+      {n, ""} when n in 0xD800..0xDFFF -> translate(after_range, true, [@never | acc])
+      {n, ""} when n > 0xDFFF -> translate(after_range, true, ["\\x{E000}-\\x{#{hex}}" | acc])
+      _ -> translate(rest, true, [@never | acc])
+    end
+  end
+
+  defp lone_surrogate(rest, true, acc), do: translate(rest, true, [@never | acc])
 
   # ── matching ───────────────────────────────────────────────
 

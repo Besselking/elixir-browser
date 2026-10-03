@@ -71,6 +71,13 @@ defmodule Browser.Fetch do
     end
   end
 
+  # Sites send the page a browser gets to what the user agent says it is. Naming only ourselves
+  # earns the plain, scriptless fallback page of some of them.
+  @user_agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ElixirBrowser/0.1"
+
+  @doc "The `User-Agent` of requests, and of `navigator.userAgent`."
+  def user_agent, do: @user_agent
+
   def resolve(base, href) do
     base |> URI.merge(href) |> URI.to_string()
   rescue
@@ -156,7 +163,7 @@ defmodule Browser.Fetch do
   # `entry`: a stale cached response to revalidate, or nil
   defp request(url, method, body, redirects, ctx, entry) do
     headers =
-      [{~c"user-agent", ~c"ElixirBrowser/0.1"}, {~c"accept-encoding", ~c"gzip"}] ++
+      [{~c"user-agent", String.to_charlist(user_agent())}, {~c"accept-encoding", ~c"gzip"}] ++
         if(entry, do: HttpCache.validators(entry), else: [])
 
     request =

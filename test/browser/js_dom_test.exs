@@ -542,4 +542,41 @@ defmodule Browser.JS.DOMTest do
       assert logs(reply) == ["scrolled 40"]
     end
   end
+
+  describe "secure contexts" do
+    test "which addresses are secure" do
+      alias Browser.JS.DOM
+
+      for url <- ~w(https://a.test/ file:///x.html http://localhost/ http://app.localhost:3000/
+                    http://127.0.0.1:8080/ http://127.5.5.5/ http://[::1]:3000/ about:blank) do
+        assert DOM.secure_context?(url), url
+      end
+
+      for url <- ~w(http://a.test/ http://192.168.1.2/ http://localhostx/ ftp://a.test/) do
+        refute DOM.secure_context?(url), url
+      end
+    end
+
+    test "isSecureContext follows the page's address and gates crypto.subtle" do
+      run_at = fn url ->
+        {raw, _} =
+          "<body><script>console.log(isSecureContext, window.isSecureContext, typeof crypto.subtle)</script></body>"
+          |> Browser.HTML.parse()
+          |> Browser.Forms.index()
+
+        pid =
+          Runtime.start(raw, %{
+            url: url,
+            width: 800,
+            height: 600,
+            fetch: fn _ -> {:error, "no"} end
+          })
+
+        logs(Runtime.run_scripts(pid))
+      end
+
+      assert run_at.("https://a.test/") == ["true true object"]
+      assert run_at.("http://a.test/") == ["false false undefined"]
+    end
+  end
 end

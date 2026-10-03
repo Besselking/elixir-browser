@@ -105,7 +105,21 @@ defmodule Browser.JS.Interp do
   end
 
   def make_error(type, message) do
-    new_object([{"message", message}], proto({:error, type}))
+    err = new_object([{"message", message}], proto({:error, type}))
+    put_hidden(err, "stack", stack_string("#{type}: #{message}"))
+    err
+  end
+
+  @doc "`Error.stack`: the header and the names of the functions being run, innermost first."
+  def stack_string(header) do
+    frames =
+      Process.get(:js_stack, [])
+      |> Enum.take(12)
+      |> Enum.map(fn name ->
+        "\n    at " <> if(is_binary(name) and name != "", do: name, else: "<anonymous>")
+      end)
+
+    header <> Enum.join(frames)
   end
 
   def throw_error(type, message), do: throw({:js_error, make_error(type, message)})
@@ -203,6 +217,10 @@ defmodule Browser.JS.Interp do
 
   def to_num(v) when is_number(v), do: v
   def to_num(v) when v in [:nan, :infinity, :neg_infinity], do: v
+
+  def to_num({:symbol, _, _}),
+    do: throw_error("TypeError", "Cannot convert a Symbol value to a number")
+
   def to_num(:undefined), do: :nan
   def to_num(:null), do: 0.0
   def to_num(true), do: 1.0
@@ -377,8 +395,8 @@ defmodule Browser.JS.Interp do
 
   def get(s, key) when is_binary(s) do
     case {index(key), key} do
-      {i, _} when is_integer(i) -> String.at(s, i) || :undefined
-      {_, "length"} -> String.length(s) * 1.0
+      {i, _} when is_integer(i) -> Browser.JS.Str.at(s, i) || :undefined
+      {_, "length"} -> Browser.JS.Str.length(s) * 1.0
       _ -> lookup(deref(elem(proto(:string), 1)), to_key(key), s)
     end
   end
@@ -634,6 +652,20 @@ defmodule Browser.JS.Interp do
   def delete({:obj, id}, key) do
     o = deref(id)
 
+    case o do
+      %{class: :host, host: {mod, data}} ->
+        if function_exported?(mod, :host_delete, 2),
+          do: mod.host_delete(data, to_key(key)),
+          else: delete_plain(id, o, key)
+
+      _ ->
+        delete_plain(id, o, key)
+    end
+  end
+
+  def delete(_, _), do: true
+
+  defp delete_plain(id, o, key) do
     i = if o.class == :array, do: index(key)
 
     cond do
@@ -667,13 +699,15 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def delete(_, _), do: true
-
   def has_property?({:obj, id}, key) do
     o = deref(id)
     key_s = to_key(key)
 
     cond do
+      # what a host object answers for is there (`"foo" in window`)
+      o.class == :host and host_has?(o, id, key_s) ->
+        true
+
       o.class == :array and key_s == "length" ->
         true
 
@@ -695,9 +729,33 @@ defmodule Browser.JS.Interp do
   def has_property?(_, _),
     do: throw_error("TypeError", "Cannot use 'in' operator to search for a key in a non-object")
 
+  defp host_has?(%{host: {mod, data}}, id, key) do
+    if function_exported?(mod, :host_has, 2),
+      do: mod.host_has(data, key),
+      else: match?({:ok, v} when v != :undefined, mod.host_get(data, key, {:obj, id}))
+  end
+
   @doc "Own enumerable string keys, in insertion order (array indices first)."
   def own_keys({:obj, id}) do
     o = deref(id)
+
+    case o do
+      %{class: :host, host: {mod, data}} ->
+        if function_exported?(mod, :host_keys, 1),
+          do: mod.host_keys(data),
+          else: own_keys_plain(o)
+
+      _ ->
+        own_keys_plain(o)
+    end
+  end
+
+  def own_keys(s) when is_binary(s),
+    do: for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i))
+
+  def own_keys(_), do: []
+
+  defp own_keys_plain(o) do
     base = Enum.reverse(o.keys)
 
     case o do
@@ -709,11 +767,6 @@ defmodule Browser.JS.Interp do
         Enum.sort_by(ints, &index/1) ++ rest
     end
   end
-
-  def own_keys(s) when is_binary(s),
-    do: for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i))
-
-  def own_keys(_), do: []
 
   def array_list({:obj, id}) do
     o = deref(id)
@@ -906,6 +959,23 @@ defmodule Browser.JS.Interp do
 
     nt = new_target || f
 
+    case Map.get(deref(id), :bound) do
+      {target, bound_args} ->
+        # a bound function constructs what it is bound to
+        construct(
+          target,
+          bound_args ++ args,
+          if(new_target in [nil, f], do: nil, else: new_target)
+        )
+
+      nil ->
+        construct_plain(f, id, nt, new_target, args)
+    end
+  end
+
+  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
+
+  defp construct_plain({:obj, _} = f, id, nt, new_target, args) do
     case Map.get(deref(id), :class_info) do
       nil ->
         proto =
@@ -945,8 +1015,6 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
-
   def instance_of?({:obj, _} = o, {:obj, _} = f) do
     unless function?(f),
       do: throw_error("TypeError", "Right-hand side of 'instanceof' is not callable")
@@ -981,7 +1049,7 @@ defmodule Browser.JS.Interp do
     scope = new_scope(c.scope)
 
     if c.mode in [false, nil] do
-      declare(scope, :this, this)
+      declare(scope, :this, sloppy_this(c, this))
       declare(scope, :args, args)
     end
 
@@ -1022,11 +1090,13 @@ defmodule Browser.JS.Interp do
     depth = Process.get(:js_depth)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     Process.put(:js_depth, depth + 1)
+    stack = Process.get(:js_stack, [])
+    Process.put(:js_stack, [c.name | stack])
 
     try do
       vars =
         if c.mode in [false, nil],
-          do: %{this: this, args: args, new_target: :undefined},
+          do: %{this: sloppy_this(c, this), args: args, new_target: :undefined},
           else: %{}
 
       vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
@@ -1054,6 +1124,7 @@ defmodule Browser.JS.Interp do
       {result, scope}
     after
       Process.put(:js_depth, depth)
+      Process.put(:js_stack, stack)
     end
   end
 
@@ -1154,6 +1225,24 @@ defmodule Browser.JS.Interp do
     if is_binary(name) and mode == false and env != nil, do: declare(env, name, fun)
     fun
   end
+
+  # A function that is not strict gets the global object for a `this` that is undefined or null
+  # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
+  # (no page) nothing changes.
+  defp sloppy_this(c, this) when this in [:undefined, :null] do
+    case c.body do
+      [{:expr, {:str, "use strict"}} | _] ->
+        this
+
+      _ ->
+        case lookup_var(global(), :this) do
+          {:ok, w} -> w
+          :error -> this
+        end
+    end
+  end
+
+  defp sloppy_this(_c, this), do: this
 
   # `arguments` is only built when a function body asks for it
   defp lazy_arguments(env) do
@@ -1706,6 +1795,13 @@ defmodule Browser.JS.Interp do
       :error when name == "arguments" -> lazy_arguments(env)
       :error -> throw_error("ReferenceError", "#{name} is not defined")
     end
+  end
+
+  # the strings argument of a tagged template: an array with a `raw` twin
+  def ev({:tagged_strings, cooked, raw}, _env) do
+    strings = new_array(cooked)
+    put_hidden(strings, "raw", new_array(raw))
+    strings
   end
 
   def ev({:tmpl, parts}, env) do

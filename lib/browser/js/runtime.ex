@@ -105,6 +105,7 @@ defmodule Browser.JS.Runtime do
     DOM.init(raw, info)
     DOM.install(scope)
     Process.put(:rt_info, info)
+    Browser.JS.WebAPI.install(scope, &http/3)
     Process.put(:rt_modules, %{})
 
     Process.put(:js_import, fn spec, from ->
@@ -314,7 +315,9 @@ defmodule Browser.JS.Runtime do
 
     for s <- scripts, s.kind == :classic do
       Process.put(:rt_script, label(s))
+      DOM.set_current_script(s.nid)
       with {:ok, src, base} <- script_source(s), do: guard(fn -> run_classic(src, base) end, :ok)
+      DOM.set_current_script(nil)
     end
 
     for s <- scripts, s.kind == :module do
@@ -346,7 +349,7 @@ defmodule Browser.JS.Runtime do
           true -> :other
         end
 
-      %{kind: kind, src: DOM.get_attr(n, "src"), text: text}
+      %{kind: kind, src: DOM.get_attr(n, "src"), text: text, nid: nid}
     end
   end
 
@@ -372,6 +375,23 @@ defmodule Browser.JS.Runtime do
 
   defp base_url, do: Process.get(:rt_info)[:base] || page_url()
   defp page_url, do: Process.get(:rt_info).url
+
+  # a request from a script (`fetch`, `XMLHttpRequest`)
+  @doc false
+  def http("GET", url, _body), do: fetch(url)
+
+  def http(method, url, body) do
+    if URI.parse(url).scheme in ["http", "https"] do
+      verb = if method == "POST", do: :post, else: :get
+
+      case Browser.Fetch.load(url, method: verb, body: body) do
+        {:ok, text, final} -> {:ok, text, final}
+        {:error, msg} -> {:error, to_string(msg)}
+      end
+    else
+      {:error, "blocked"}
+    end
+  end
 
   defp fetch(url) do
     allowed? = page_scheme() == "file" or URI.parse(url).scheme in ["http", "https", "data"]

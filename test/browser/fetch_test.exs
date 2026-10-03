@@ -68,7 +68,9 @@ defmodule Browser.FetchTest do
     base = serve([ok("hello")])
     assert {:ok, "hello", url} = Fetch.load(base <> "/x?a=1")
     assert url == base <> "/x?a=1"
-    assert_receive {:request, "GET", "/x?a=1", %{"user-agent" => "ElixirBrowser/0.1"}, ""}
+    assert_receive {:request, "GET", "/x?a=1", %{"user-agent" => ua}, ""}
+    assert ua == Fetch.user_agent()
+    assert ua =~ "Mozilla/5.0" and ua =~ "ElixirBrowser"
   end
 
   test "asks for gzip and unpacks it" do

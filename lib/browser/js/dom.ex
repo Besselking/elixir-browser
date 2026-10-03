@@ -104,6 +104,8 @@ defmodule Browser.JS.DOM do
       # where the layout put the elements (`Browser.Nids.rects/2`), the window's scroll
       # position, and the size of the page
       rects: %{},
+      current_script: nil,
+      write_after: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
       next_nid: Browser.Nids.max_nid(raw, -1) + 1
@@ -877,6 +879,9 @@ defmodule Browser.JS.DOM do
       "head" ->
         {:ok, wrap_or_null(find_tag(s.doc, "head"))}
 
+      "currentScript" ->
+        {:ok, wrap_or_null(s.current_script)}
+
       "documentElement" ->
         root =
           find_tag(s.doc, "html") ||
@@ -1544,6 +1549,32 @@ defmodule Browser.JS.DOM do
 
   # ── window, location, history ──────────────────────────────
 
+  @doc """
+  Is a page at `url` a secure context? (https://w3c.github.io/webappsec-secure-contexts/) Its
+  origin has to be potentially trustworthy: a secure scheme (https, wss), a file, `data:` or
+  `about:blank` address, or a loopback host (`localhost`, `*.localhost`, 127.0.0.0/8, `::1`).
+  Plain http to anywhere else is not.
+  """
+  def secure_context?(url) do
+    uri = URI.parse(url || "")
+
+    case uri.scheme do
+      s when s in ["https", "wss", "file", "data", "about"] -> true
+      s when s in ["http", "ws"] -> loopback?(uri.host)
+      _ -> false
+    end
+  end
+
+  defp loopback?(nil), do: false
+
+  defp loopback?(host) do
+    host = String.downcase(host)
+
+    host == "localhost" or String.ends_with?(host, ".localhost") or host == "::1" or
+      match?({:ok, {127, _, _, _}}, :inet.parse_ipv4_address(String.to_charlist(host))) or
+      match?({:ok, {0, 0, 0, 0, 0, 0, 0, 1}}, :inet.parse_ipv6_address(String.to_charlist(host)))
+  end
+
   defp window_get(key) do
     s = st()
 
@@ -1571,6 +1602,9 @@ defmodule Browser.JS.DOM do
 
       "outerHeight" ->
         {:ok, float(s.height)}
+
+      "isSecureContext" ->
+        {:ok, secure_context?(s.url)}
 
       "devicePixelRatio" ->
         {:ok, 1.0}
@@ -2244,7 +2278,45 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  @doc "The `<script>` element being run (`document.currentScript`), or nil."
+  def set_current_script(nid), do: put_st(%{st() | current_script: nid, write_after: nil})
+
+  # `document.write`: what is written goes in after the running script (after what an earlier
+  # write of the same script put there), or at the end of the body when nothing is running
+  defp write_html(html) do
+    ids = parse_fragment(html)
+    s = st()
+
+    cond do
+      s.write_after != nil ->
+        adjacent(s.write_after, "afterend", ids)
+
+      s.current_script != nil ->
+        adjacent(s.current_script, "afterend", ids)
+
+      body = find_tag(s.doc, "body") ->
+        adjacent(body, "beforeend", ids)
+
+      true ->
+        :ok
+    end
+
+    if ids != [], do: put_st(%{st() | write_after: List.last(ids)})
+    :undefined
+  end
+
   defp install_document(p) do
+    for name <- ~w(write writeln) do
+      def_fn(p, name, fn _this, args ->
+        text = Enum.map_join(args, "", &to_str/1)
+        write_html(if name == "writeln", do: text <> "\n", else: text)
+      end)
+    end
+
+    for name <- ~w(open close) do
+      def_fn(p, name, fn _this, _ -> :undefined end)
+    end
+
     def_fn(p, "getElementById", fn _this, args ->
       id = to_str(arg(args, 0))
       wrap_or_null(Enum.find(elements(st().doc), &(get_attr(node(&1), "id") == id)))
@@ -2765,7 +2837,17 @@ defmodule Browser.JS.DOM do
     # globals that point into the document
     window = aux_host(:window, :window)
     declare(scope, "window", window)
+    # `this` at the top of a classic script is the window
+    declare(scope, :this, window)
     declare(scope, "self", window)
+    # there are no frames: the window is its own top and parent
+    declare(scope, "top", window)
+    declare(scope, "parent", window)
+    declare(scope, "frames", window)
+    declare(scope, "opener", :null)
+    declare(scope, "closed", false)
+    declare(scope, "name", "")
+    declare(scope, "isSecureContext", secure_context?(st().url))
     declare(scope, "globalThis", window)
     declare(scope, "document", wrap(st().doc))
     declare(scope, "location", aux_host(:location, :location))
@@ -2808,7 +2890,8 @@ defmodule Browser.JS.DOM do
 
     navigator =
       new_object([
-        {"userAgent", "ElixirBrowser/0.1"},
+        {"userAgent", Browser.Fetch.user_agent()},
+        {"vendor", "Google Inc."},
         {"language", "en-US"},
         {"languages", new_array(["en-US"])},
         {"platform", "MacIntel"},

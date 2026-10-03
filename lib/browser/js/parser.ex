@@ -137,6 +137,10 @@ defmodule Browser.JS.Parser do
     names =
       if params == [], do: [], else: Enum.reduce(params, [], &Interp.pattern_names/2)
 
+    # a function inside strict code carries the directive itself, which is how a call knows
+    # not to give it the window for `this`
+    body = if strict?(), do: [{:expr, {:str, "use strict"}} | body], else: body
+
     Process.put(:js_strict, outer)
     {check_scope(body, true, names), rest}
   end
@@ -680,10 +684,18 @@ defmodule Browser.JS.Parser do
 
   defp pattern(ts, allow_default \\ true)
 
-  defp pattern([{:id, name, _} | ts], allow_default) when name not in @reserved do
-    check_strict_name(name)
-    with_default({:id, name}, ts, allow_default)
+  # in a destructuring *assignment* a target can be a property: `({a: o.x, b: o.y[0]} = v)`
+  defp pattern([{:id, name, _}, {:p, p, _} | _] = ts, allow_default)
+       when p in [".", "["] and (name not in @reserved or name == "this") do
+    if Process.get(:js_assign_pattern, false) do
+      {target, ts} = call_chain(ts)
+      with_default(target, ts, allow_default)
+    else
+      pattern_id(ts, allow_default)
+    end
   end
+
+  defp pattern([{:id, _, _} | _] = ts, allow_default), do: pattern_id(ts, allow_default)
 
   defp pattern([{:p, "[", _} | ts], allow_default) do
     {elems, ts} = array_pattern(ts, [])
@@ -696,6 +708,14 @@ defmodule Browser.JS.Parser do
   end
 
   defp pattern([{_, v, _} | _], _),
+    do: throw({:syntax, "unexpected token #{inspect(v)} in binding"})
+
+  defp pattern_id([{:id, name, _} | ts], allow_default) when name not in @reserved do
+    check_strict_name(name)
+    with_default({:id, name}, ts, allow_default)
+  end
+
+  defp pattern_id([{_, v, _} | _], _),
     do: throw({:syntax, "unexpected token #{inspect(v)} in binding"})
 
   defp with_default(pat, [{:p, "=", _} | ts], true) do
@@ -1036,7 +1056,15 @@ defmodule Browser.JS.Parser do
 
   defp assignment_plain([{:p, open, _} | _] = ts) when open in ["[", "{"] do
     if destructuring_ahead?(tl(ts), 1) do
-      {pat, ts} = pattern(ts, false)
+      Process.put(:js_assign_pattern, true)
+
+      {pat, ts} =
+        try do
+          pattern(ts, false)
+        after
+          Process.put(:js_assign_pattern, false)
+        end
+
       [{:p, "=", _} | ts] = ts
       {right, ts} = assignment(ts)
       {{:destructure, pat, right}, ts}
@@ -1224,6 +1252,17 @@ defmodule Browser.JS.Parser do
     chain({:call, e, args, true}, ts, true)
   end
 
+  # a tagged template: `tag`a${b}c`` calls tag(["a", "c"], b), the strings with a `raw` list
+  defp chain(_e, [{:tmpl, _, _} | _], true),
+    do: throw({:syntax, "a template literal cannot follow an optional chain"})
+
+  defp chain(e, [{:tmpl, parts, _} | ts], c) do
+    {parts, raw} = template_parts(parts)
+    cooked = Enum.filter(parts, &is_binary/1)
+    exprs = Enum.reject(parts, &is_binary/1)
+    chain({:call, e, [{:tagged_strings, cooked, raw} | exprs], false}, ts, c)
+  end
+
   defp chain(e, [{:p, "[", _} | ts], c) do
     {k, ts} = expression(ts)
     chain({:member, e, k, false}, expect(ts, "]"), c)
@@ -1293,17 +1332,14 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
-  defp primary([{:str, s, _} | ts]), do: {{:str, s}, ts}
+  # -> {parts with the expressions parsed (text chunks that are empty are left out), raw chunks}
+  defp template_parts(parts) do
+    {raw, parts} =
+      case List.last(parts) do
+        {:raw, raw} -> {raw, Enum.drop(parts, -1)}
+        _ -> {[], parts}
+      end
 
-  defp primary([{:regex, {source, flags}, _} | ts]) do
-    case Browser.JS.RegExp.validate(source, flags) do
-      :ok -> {{:regex, source, flags}, ts}
-      {:error, msg} -> throw({:syntax, msg})
-    end
-  end
-
-  defp primary([{:tmpl, parts, _} | ts]) do
     parts =
       Enum.map(parts, fn
         {:expr, toks} ->
@@ -1315,6 +1351,21 @@ defmodule Browser.JS.Parser do
           s
       end)
 
+    {parts, raw}
+  end
+
+  defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
+  defp primary([{:str, s, _} | ts]), do: {{:str, s}, ts}
+
+  defp primary([{:regex, {source, flags}, _} | ts]) do
+    case Browser.JS.RegExp.validate(source, flags) do
+      :ok -> {{:regex, source, flags}, ts}
+      {:error, msg} -> throw({:syntax, msg})
+    end
+  end
+
+  defp primary([{:tmpl, parts, _} | ts]) do
+    {parts, _raw} = template_parts(parts)
     {{:tmpl, parts}, ts}
   end
 

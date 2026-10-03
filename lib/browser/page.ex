@@ -96,7 +96,10 @@ defmodule Browser.Page do
 
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    {raw, forms} = body |> String.replace_invalid() |> HTML.parse() |> Forms.index()
+    parsed = body |> String.replace_invalid() |> HTML.parse()
+    # scripts run, so what is meant for browsers without them is not shown
+    parsed = if has_tag?(parsed, "script"), do: empty_tag(parsed, "noscript"), else: parsed
+    {raw, forms} = Forms.index(parsed)
     raw = Browser.Nids.index(raw)
     base = base_href(raw, url)
     {raw, image_urls} = Images.index(raw, base)
@@ -259,6 +262,15 @@ defmodule Browser.Page do
 
   @doc "True when the page has a `<script>` element."
   def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script")
+
+  # the element stays (scripts and frameworks expect it in the tree), its content does not
+  defp empty_tag(nodes, tag) when is_list(nodes), do: Enum.map(nodes, &empty_tag(&1, tag))
+  defp empty_tag({:element, tag, attrs, _kids}, tag), do: {:element, tag, attrs, []}
+
+  defp empty_tag({:element, el, attrs, kids}, tag),
+    do: {:element, el, attrs, empty_tag(kids, tag)}
+
+  defp empty_tag(other, _tag), do: other
 
   defp has_tag?(nodes, tag) when is_list(nodes), do: Enum.any?(nodes, &has_tag?(&1, tag))
   defp has_tag?({:element, tag, _, _}, tag), do: true

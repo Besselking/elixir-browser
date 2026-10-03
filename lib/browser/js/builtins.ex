@@ -8,6 +8,7 @@ defmodule Browser.JS.Builtins do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  alias Browser.JS.Str
   alias Browser.JS.Num
 
   @timer_horizon 60_000.0
@@ -149,7 +150,14 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "bind", fn this, args ->
       bound_this = arg(args, 0)
       bound_args = Enum.drop(args, 1)
-      native("bound", fn _, more -> call(this, bound_this, bound_args ++ more) end)
+
+      {:obj, id} =
+        bound = native("bound", fn _, more -> call(this, bound_this, bound_args ++ more) end)
+
+      # `new bound(...)` constructs the target (see `Interp.construct/3`)
+      Interp.store(id, Map.put(Interp.deref(id), :bound, {this, bound_args}))
+      put_hidden(bound, "name", "bound " <> to_str(Interp.get(this, "name")))
+      bound
     end)
 
     def_fn(p, "toString", fn this, _ ->
@@ -169,6 +177,13 @@ defmodule Browser.JS.Builtins do
         err = if match?({:obj, _}, this), do: this, else: new_object([], proto)
         msg = arg(args, 0)
         if msg != :undefined, do: put_hidden(err, "message", to_str(msg))
+
+        put_hidden(
+          err,
+          "stack",
+          Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> to_str(msg)))
+        )
+
         err
       end)
     end
@@ -672,7 +687,7 @@ defmodule Browser.JS.Builtins do
         to_int(Interp.get(this, "length"))
 
       is_binary(this) ->
-        String.length(this)
+        Str.length(this)
 
       true ->
         len = to_length(Interp.get(this_obj(this), "length"))
@@ -777,6 +792,32 @@ defmodule Browser.JS.Builtins do
           s
         end
       end)
+
+    # `String.raw`a\n${b}c``: the raw strings with the substitutions between them
+    def_fn(str, "raw", fn _, args ->
+      cooked = arg(args, 0)
+
+      if nullish?(cooked),
+        do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      raw = Interp.get(cooked, "raw")
+
+      if nullish?(raw),
+        do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      count =
+        raw
+        |> Interp.get("length")
+        |> to_num()
+        |> then(&if(is_number(&1), do: trunc(&1), else: 0))
+
+      subs = Enum.drop(args, 1)
+
+      Enum.map_join(0..(count - 1)//1, fn i ->
+        piece = to_str(Interp.get(raw, Integer.to_string(i)))
+        if i < count - 1 and i < length(subs), do: piece <> to_str(Enum.at(subs, i)), else: piece
+      end)
+    end)
 
     def_fn(str, "fromCharCode", fn _, args ->
       args |> Enum.map(&<<trunc(to_num(&1))::utf8>>) |> Enum.join()
@@ -1035,22 +1076,22 @@ defmodule Browser.JS.Builtins do
     str_fn(p, "trim", fn this, _ -> String.trim(this) end)
     str_fn(p, "trimStart", fn this, _ -> String.trim_leading(this) end)
     str_fn(p, "trimEnd", fn this, _ -> String.trim_trailing(this) end)
-    str_fn(p, "charAt", fn this, args -> String.at(this, to_int(arg(args, 0))) || "" end)
+    str_fn(p, "charAt", fn this, args -> Str.at(this, to_int(arg(args, 0))) || "" end)
 
     str_fn(p, "at", fn this, args ->
       n = to_int(arg(args, 0))
-      String.at(this, n) || :undefined
+      Str.at(this, n) || :undefined
     end)
 
     str_fn(p, "charCodeAt", fn this, args ->
-      case String.at(this, to_int(arg(args, 0))) do
+      case Str.at(this, to_int(arg(args, 0))) do
         nil -> :nan
         <<c::utf8, _::binary>> -> float(c)
       end
     end)
 
     str_fn(p, "codePointAt", fn this, args ->
-      case String.at(this, to_int(arg(args, 0))) do
+      case Str.at(this, to_int(arg(args, 0))) do
         nil -> :undefined
         <<c::utf8, _::binary>> -> float(c)
       end
@@ -1083,14 +1124,14 @@ defmodule Browser.JS.Builtins do
     str_fn(p, "repeat", fn this, args -> String.duplicate(this, max(to_int(arg(args, 0)), 0)) end)
 
     str_fn(p, "slice", fn this, args ->
-      len = String.length(this)
+      len = Str.length(this)
       from = rel(arg(args, 0), len, 0)
       to = rel(arg(args, 1), len, len)
       cp_slice(this, from, max(to - from, 0))
     end)
 
     str_fn(p, "substring", fn this, args ->
-      len = String.length(this)
+      len = Str.length(this)
 
       clamp = fn v, default ->
         if v == :undefined, do: default, else: v |> to_int() |> max(0) |> min(len)
@@ -1099,6 +1140,21 @@ defmodule Browser.JS.Builtins do
       a = clamp.(arg(args, 0), 0)
       b = clamp.(arg(args, 1), len)
       cp_slice(this, min(a, b), abs(b - a))
+    end)
+
+    # `substr(start, length)`: a negative start counts from the end
+    str_fn(p, "substr", fn this, args ->
+      len = Str.length(this)
+      start = arg(args, 0) |> to_int()
+      start = if start < 0, do: max(len + start, 0), else: min(start, len)
+
+      count =
+        case arg(args, 1) do
+          :undefined -> len - start
+          v -> v |> to_int() |> max(0) |> min(len - start)
+        end
+
+      cp_slice(this, start, count)
     end)
 
     str_fn(p, "match", fn this, args ->
@@ -1137,19 +1193,9 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
-  defp cp_slice(s, from, nil), do: s |> String.codepoints() |> Enum.drop(from) |> Enum.join()
+  defp cp_slice(s, from, count), do: Str.slice(s, from, count)
 
-  defp cp_slice(s, from, count),
-    do: s |> String.codepoints() |> Enum.slice(from, count) |> Enum.join()
-
-  defp index_of(s, needle, from) do
-    rest = cp_slice(s, from, nil)
-
-    case :binary.match(rest, needle) do
-      {pos, _} -> from + String.length(binary_part(rest, 0, pos))
-      :nomatch -> -1
-    end
-  end
+  defp index_of(s, needle, from), do: Str.index_of(s, needle, from)
 
   defp split_string(this, sep, limit) do
     parts =
