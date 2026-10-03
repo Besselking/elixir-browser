@@ -35,6 +35,7 @@ defmodule Browser.JS.Collections do
     install_weak(scope)
     install_reflect(scope)
     install_host(scope)
+    Browser.JS.TypedArrays.install(scope)
     :ok
   end
 

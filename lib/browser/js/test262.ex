@@ -21,13 +21,13 @@ defmodule Browser.JS.Test262 do
   @unsupported_features ~w(
       
       
-     symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
-    DataView DataView.prototype.getFloat32 DataView.prototype.getFloat64
-    DataView.prototype.getInt16 DataView.prototype.getInt32 DataView.prototype.getInt8
-    DataView.prototype.getUint16 DataView.prototype.getUint32 DataView.prototype.setUint8
-    SharedArrayBuffer Atomics Atomics.pause Atomics.waitAsync TypedArray TypedArray.prototype.at
-    Float16Array Float32Array Float64Array Int8Array Int16Array Int32Array Uint8Array
-    Uint16Array Uint32Array Uint8ClampedArray resizable-arraybuffer arraybuffer-transfer
+     symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt 
+      
+      
+      
+    SharedArrayBuffer Atomics Atomics.pause Atomics.waitAsync  
+    Float16Array      
+       resizable-arraybuffer arraybuffer-transfer
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality
     stable-typedarray-sort WeakRef FinalizationRegistry set-methods dynamic-import cross-realm
     tail-call-optimization caller Temporal ShadowRealm decorators import.meta import-attributes
