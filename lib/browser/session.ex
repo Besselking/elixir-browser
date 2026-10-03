@@ -36,6 +36,12 @@ defmodule Browser.Session do
       measure_bg: UI.measurer(ui, cache),
       # a layout running in the background after a resize: {ref, pid}
       layout_job: nil,
+      # the page a script's changes are being turned into (`start_page_job/2`), and the newest
+      # tree that arrived meanwhile
+      page_job: nil,
+      # a `#fragment` to scroll to once the page is laid out: `{name, give up at}`
+      fragment: nil,
+      page_pending: nil,
       # the page's JavaScript runtime, when it has scripts
       js: nil,
       history: History.new(),
@@ -145,6 +151,7 @@ defmodule Browser.Session do
         nodes: page.nodes,
         url: page.url,
         scroll: 0,
+        fragment: pending_fragment(page.url),
         focus: nil,
         caret: 0,
         controls: %{},
@@ -304,7 +311,7 @@ defmodule Browser.Session do
         {:noreply, click_control(state, cid, x, spy, count, shift)}
 
       {:link, href} ->
-        {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
+        {:noreply, follow(state, href)}
 
       # a click on a sticky or fixed box that is neither: it does not reach the page below
       :cover ->
@@ -317,7 +324,7 @@ defmodule Browser.Session do
 
             case UI.link_at(state.links, x, py) do
               nil -> {:noreply, page_click(state, x, py, count, shift)}
-              href -> {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
+              href -> {:noreply, follow(state, href)}
             end
 
           cid ->
@@ -509,6 +516,43 @@ defmodule Browser.Session do
   end
 
   def handle_info({:layout_done, _stale, _, _, _, _, _, _}, state), do: {:noreply, state}
+
+  # a script's changes to the page are laid out
+  def handle_info(
+        {:page_done, ref, nonce, page, items, height, width, used},
+        %{page_job: {ref, _}} = state
+      ) do
+    pending = state.page_pending
+    state = %{state | page_job: nil, page_pending: nil}
+
+    state =
+      if nonce == state.nonce and state.page != nil do
+        focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
+        state = %{state | page: page, nodes: page.nodes, focus: focus, controls: %{}}
+        state = cancel_layout_job(state)
+        state = apply_layout(state, items, height, width, :full)
+
+        late = for {url, info} <- state.images, Map.get(used, url) != info, do: {url, info}
+
+        cond do
+          width != max(UI.client_width(state.ui), 200) ->
+            relayout(state)
+
+          Enum.any?(late, fn {url, info} -> image_layout_needed?(page, url, info) end) ->
+            schedule_image_layout(state)
+
+          true ->
+            state
+        end
+      else
+        state
+      end
+
+    state = if pending, do: start_page_job(state, pending), else: state
+    {:noreply, start_images(state)}
+  end
+
+  def handle_info({:page_done, _, _, _, _, _, _, _}, state), do: {:noreply, state}
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
@@ -1080,11 +1124,24 @@ defmodule Browser.Session do
     end
   end
 
-  defp stop_js(%{js: nil} = state), do: state
+  defp stop_js(state) do
+    state = cancel_page_job(state)
 
-  defp stop_js(%{js: pid} = state) do
-    Browser.JS.Runtime.stop(pid)
-    %{state | js: nil}
+    case state.js do
+      nil ->
+        state
+
+      pid ->
+        Browser.JS.Runtime.stop(pid)
+        %{state | js: nil}
+    end
+  end
+
+  defp cancel_page_job(%{page_job: nil} = state), do: %{state | page_pending: nil}
+
+  defp cancel_page_job(%{page_job: {_ref, pid}} = state) do
+    Process.exit(pid, :kill)
+    %{state | page_job: nil, page_pending: nil}
   end
 
   # the live values of the controls, which scripts read
@@ -1113,14 +1170,47 @@ defmodule Browser.Session do
   defp apply_js(state, reply) do
     state = Enum.reduce(reply.outbox, state, &js_effect/2)
 
-    if reply.dirty and reply.raw != nil and state.page != nil do
-      page = Page.from_raw(state.page, reply.raw, env(state))
-      focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
-      start_layout_job(%{state | page: page, nodes: page.nodes, focus: focus, controls: %{}})
-    else
-      state
-    end
+    if reply.dirty and reply.raw != nil and state.page != nil,
+      do: start_page_job(state, reply.raw),
+      else: state
   end
+
+  # The changed tree is indexed, styled and laid out in a process of its own, so a script that
+  # keeps changing the page (an animation, a scroll listener) does not stop the window from
+  # scrolling and answering. Trees that arrive while it runs are replaced by the newest one.
+  defp start_page_job(%{page_job: nil} = state, raw) do
+    me = self()
+    ref = make_ref()
+    wx_env = :wx.get_env()
+    base = state.page
+    env = env(state)
+    nonce = state.nonce
+    width = max(UI.client_width(state.ui), 200)
+    view_h = UI.client_height(state.ui)
+    images = state.images
+    measure = state.measure_bg
+
+    pid =
+      :erlang.spawn_opt(
+        fn ->
+          :wx.set_env(wx_env)
+          page = Page.from_raw(base, raw, env)
+
+          {items, height} =
+            Layout.layout(page.nodes, width, measure, view_h,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+
+          send(me, {:page_done, ref, nonce, page, items, height, width, images})
+        end,
+        min_heap_size: 2_000_000
+      )
+
+    %{state | page_job: {ref, pid}, page_pending: nil}
+  end
+
+  defp start_page_job(state, raw), do: %{state | page_pending: raw}
 
   defp js_effect({:history, kind, url}, state) do
     history =
@@ -1134,6 +1224,13 @@ defmodule Browser.Session do
   end
 
   defp js_effect({:navigate, url}, state), do: load(state, url, :push)
+
+  defp js_effect({:scroll_to, x, y}, state) do
+    state
+    |> scroll_x_by(round(x) - state.scroll_x)
+    |> scroll_by(round(y) - state.scroll)
+  end
+
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, n}, state) when n < 0, do: history_nav(state, &History.back/1)
   defp js_effect({:history_go, n}, state) when n > 0, do: history_nav(state, &History.forward/1)
@@ -1290,8 +1387,101 @@ defmodule Browser.Session do
     }
 
     state = scroll_x_by(state, 0)
-    scroll_by(state, 0, mode)
+    state = scroll_by(state, 0, mode)
+    send_layout(state)
+    scroll_to_fragment(state)
   end
+
+  # -- #fragments ---------------------------------------------------------------
+
+  # a link to the same document with a fragment only moves within it
+  defp follow(state, href) do
+    url = Fetch.resolve(base(state), href)
+    {target, fragment} = Fetch.split_fragment(url)
+    {here, _} = Fetch.split_fragment(state.url || "")
+
+    if fragment != nil and target == here and state.page != nil,
+      do: go_to_fragment(state, url, fragment),
+      else: load(state, url, :push)
+  end
+
+  defp go_to_fragment(state, url, fragment) do
+    UI.set_url_text(state.ui, url)
+
+    state =
+      %{
+        state
+        | history: History.visit(state.history, url),
+          url: url,
+          page: %{state.page | url: url},
+          fragment: {fragment, deadline()}
+      }
+
+    state |> sync_buttons() |> scroll_to_fragment()
+  end
+
+  defp decode_fragment(raw) do
+    URI.decode(raw)
+  rescue
+    ArgumentError -> raw
+  end
+
+  defp pending_fragment(url) do
+    case Fetch.split_fragment(url) do
+      {_, nil} -> nil
+      {_, fragment} -> {fragment, deadline()}
+    end
+  end
+
+  # the page may still be growing (a script builds the section): keep trying for a while
+  defp deadline, do: System.monotonic_time(:millisecond) + 4000
+
+  defp scroll_to_fragment(%{fragment: nil} = state), do: state
+
+  defp scroll_to_fragment(%{fragment: {raw, until}} = state) do
+    name = decode_fragment(raw)
+
+    y =
+      if name in ["", "top"] do
+        0
+      else
+        rects = Browser.Nids.rects(state.items, Browser.Nids.parents(state.page.pruned || []))
+        Browser.Nids.anchor_y(state.page.pruned || [], rects, name)
+      end
+
+    cond do
+      y != nil ->
+        state = %{state | fragment: nil}
+        scroll_by(state, round(y) - state.scroll)
+
+      System.monotonic_time(:millisecond) > until ->
+        %{state | fragment: nil}
+
+      true ->
+        state
+    end
+  end
+
+  # the scripts learn where the elements are (and how far the page is scrolled)
+  defp send_layout(%{js: nil}), do: :ok
+  defp send_layout(%{page: nil}), do: :ok
+
+  defp send_layout(%{js: pid, page: page} = state) do
+    rects = Browser.Nids.rects(state.items, Browser.Nids.parents(page.pruned || []))
+
+    Browser.JS.Runtime.layout(
+      pid,
+      rects,
+      state.scroll_x,
+      state.scroll,
+      {state.content_w, state.height}
+    )
+  end
+
+  defp notify_scroll(%{js: nil}), do: :ok
+
+  defp notify_scroll(%{js: pid} = state),
+    do: Browser.JS.Runtime.scrolled(pid, state.scroll_x, state.scroll)
 
   # After typing into a single-line field only its text and caret move, so patch the
   # laid out items instead of laying out the whole page (see `Layout.patch_field/6`).
@@ -1420,7 +1610,9 @@ defmodule Browser.Session do
       state
     else
       UI.set_scroll_x(state.ui, sx)
-      %{state | scroll_x: sx}
+      state = %{state | scroll_x: sx}
+      notify_scroll(state)
+      state
     end
   end
 
@@ -1429,9 +1621,12 @@ defmodule Browser.Session do
 
   defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
+    old = state.scroll
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
     UI.update(state.ui, state.items, state.sel_items, scroll, state.caret_on, mode)
-    %{state | scroll: scroll}
+    state = %{state | scroll: scroll}
+    if scroll != old, do: notify_scroll(state)
+    state
   end
 
   defp sync_buttons(state) do

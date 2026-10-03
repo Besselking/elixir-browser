@@ -124,6 +124,7 @@ defmodule Browser.Layout do
       list: nil,
       lh: :normal,
       cid: nil,
+      nid: nil,
       images: Keyword.get(opts, :images),
       svg_defs: Keyword.get(opts, :svg_defs, %{})
     }
@@ -132,8 +133,18 @@ defmodule Browser.Layout do
     Process.put(:layout_cw, max(width - 2 * @margin, 0))
     Process.put(:layout_memo, %{})
     {nodes, canvas} = propagate_background(nodes)
+    t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse()
+    t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images])
+
+    if System.get_env("LAYOUT_TIMES"),
+      do:
+        IO.puts(
+          :stderr,
+          "walk #{div(t1 - t0, 1000)}ms place #{div(System.monotonic_time(:microsecond) - t1, 1000)}ms ops=#{length(ops)}"
+        )
+
     # absolutely positioned boxes take no room in the flow but do extend the scrollable page
     height = max(height, content_bottom(items))
     items = add_focus(items, measure, opts[:focus])
@@ -573,6 +584,9 @@ defmodule Browser.Layout do
           [{:flush} | acc]
 
         kind ->
+          # an element that can be linked to (`#id`) needs to know where its box starts, which
+          # nothing drawn says for a plain block
+          c = if List.keymember?(attrs, "id", 0), do: Map.put(c, :anchor, true), else: c
           block_ops(tag, kind, kids, style, c, acc)
       end
     end
@@ -770,6 +784,7 @@ defmodule Browser.Layout do
       box: box,
       href: style.href,
       hidden: style.hidden,
+      nid: style.nid,
       # a block-level picture sits on a line of its own: vertical-align does not apply
       valign: if(block?, do: nil, else: c["vertical-align"]),
       xform: xform_spec(c)
@@ -965,6 +980,8 @@ defmodule Browser.Layout do
         side -> [{:gap, box.mt}, {:clear, side}, {:flush} | acc]
       end
 
+    acc = if Map.get(c, :anchor) && style.nid, do: [{:anchor, style.nid} | acc], else: acc
+
     if tag == "hr" do
       [{:hr}, {:gap, box.mb} | acc]
     else
@@ -1020,6 +1037,7 @@ defmodule Browser.Layout do
       shadows: box.shadows,
       color: box.color,
       cid: style.cid,
+      nid: style.nid,
       h: num(c["height"]),
       min: num(c["min-height"]),
       max: num(c["max-height"]),
@@ -1315,6 +1333,12 @@ defmodule Browser.Layout do
     style =
       case List.keyfind(attrs, "@cid", 0) do
         {_, cid} -> %{style | cid: cid}
+        nil -> style
+      end
+
+    style =
+      case List.keyfind(attrs, "@nid", 0) do
+        {_, nid} -> %{style | nid: nid}
         nil -> style
       end
 
@@ -1659,6 +1683,21 @@ defmodule Browser.Layout do
     %{st | insets: rest, left: l, right: r}
   end
 
+  # where a block that has an id starts, for `#fragment`s and `scrollIntoView`
+  defp op({:anchor, nid}, st) do
+    item = %{
+      type: :box,
+      nid: nid,
+      x: st.margin + st.left,
+      y: st.y + max(st.gap, 0) + min(st.ngap, 0),
+      w: max(st.width - 2 * st.margin - st.left - st.right, 0),
+      h: 0,
+      rr: 0
+    }
+
+    %{st | items: [item | st.items], n: st.n + 1}
+  end
+
   defp op({:hr}, st) do
     st = st |> flush() |> apply_gap()
 
@@ -1781,7 +1820,15 @@ defmodule Browser.Layout do
     box_h = bt + box.pt + ch + box.pb + bb
 
     outer = %{
-      o: %{bw: box.bw, bc: box.bc, bs: box.bs, bg: box.bg, r: box.r, cid: nil},
+      o: %{
+        bw: box.bw,
+        bc: box.bc,
+        bs: box.bs,
+        bg: box.bg,
+        r: box.r,
+        cid: nil,
+        nid: Map.get(spec, :nid)
+      },
       x: ml,
       top: box.mt,
       w: box_w
@@ -1796,6 +1843,7 @@ defmodule Browser.Layout do
           h: ch,
           href: spec.href,
           hidden: spec.hidden,
+          nid: Map.get(spec, :nid),
           rr: box.pr + br + mr
         }
 
@@ -2085,7 +2133,8 @@ defmodule Browser.Layout do
   # the painter to draw as paths.
   defp outer_rects(%{o: o} = box, height, images) do
     items = plain_outer_rects(box, height, images)
-    if o.cid, do: Enum.map(items, &Map.put(&1, :cid, o.cid)), else: items
+    items = if o.cid, do: Enum.map(items, &Map.put(&1, :cid, o.cid)), else: items
+    if Map.get(o, :nid), do: Enum.map(items, &Map.put(&1, :nid, o.nid)), else: items
   end
 
   # In paint order: outer shadows, background colour, background images, inset shadows,
@@ -2718,6 +2767,7 @@ defmodule Browser.Layout do
       strike: style.strike,
       align: style.align,
       cid: style.cid,
+      nid: style.nid,
       # the room boxes around it keep free on its right: for measuring how wide content is
       rr: st.right - st.free
     }

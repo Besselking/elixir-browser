@@ -208,4 +208,119 @@ defmodule Browser.PageTest do
       assert page.base == "http://t.test/x/y"
     end
   end
+
+  describe "incremental restyle" do
+    @env %{type: "screen", width: 800, height: 600, dppx: 1.0}
+
+    @html """
+    <style>
+      .on .x { color: red } .on + .b { color: blue } li:last-child { color: green }
+      .on { font-size: 20px } .on span { font-weight: bold }
+    </style>
+    <div class="a" id="a"><p class="x">one</p><span class="x">two</span></div>
+    <div class="b" id="b"><p class="x">three</p></div>
+    <ul><li>1</li><li>2</li></ul>
+    """
+
+    defp set_attr(nodes, id, name, value) when is_list(nodes),
+      do: Enum.map(nodes, &set_attr(&1, id, name, value))
+
+    defp set_attr({:element, tag, attrs, kids}, id, name, value) do
+      attrs =
+        if {"id", id} in attrs,
+          do: List.keystore(attrs, name, 0, {name, value}),
+          else: attrs
+
+      {:element, tag, attrs, set_attr(kids, id, name, value)}
+    end
+
+    defp set_attr(other, _, _, _), do: other
+
+    test "a changed tree styles the same as a fresh one" do
+      page = Page.build(@html, "about:x", @env)
+
+      for {id, name, value} <- [
+            {"a", "class", "a on"},
+            {"b", "class", "b on"},
+            {"a", "style", "color: pink"},
+            {"b", "hidden", ""}
+          ] do
+        raw = set_attr(page.raw, id, name, value)
+        fresh = Page.from_raw(%{page | memo: nil}, raw, @env)
+        incremental = Page.from_raw(page, raw, @env)
+        assert incremental.pruned == fresh.pruned
+        assert incremental.pruned != page.pruned
+        # and once more from the result
+        assert Page.from_raw(incremental, raw, @env).pruned == fresh.pruned
+      end
+    end
+
+    test "a page can be sent to another process" do
+      page = Page.build(@html, "about:x", @env)
+      me = self()
+      spawn(fn -> send(me, {:page, page}) end)
+      assert_receive {:page, ^page}, 1000
+    end
+  end
+
+  describe "fragments" do
+    test "the top of the element a fragment names" do
+      html =
+        ~s|<body><div style="height: 300px">top</div><h2 id="sponsors">Sponsors</h2><a name="old">x</a></body>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "sponsors") > 250
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "old") >
+               Browser.Nids.anchor_y(page.pruned, rects, "sponsors")
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "nothing") == nil
+    end
+
+    test "scroll-margin-top and the page's scroll-padding-top keep the element clear of a header" do
+      html =
+        ~s|<html><head><style>html { scroll-padding-top: 10px } h2 { scroll-margin-top: 32px }</style></head><body><div style="height: 300px">top</div><h2 id="s">S</h2></body></html>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+      %{} = rects
+
+      heading_top =
+        items |> Enum.find(&(&1.type == :text and &1.text == "S")) |> Map.fetch!(:y)
+
+      assert_in_delta Browser.Nids.anchor_y(page.pruned, rects, "s"), heading_top - 42, 8
+    end
+
+    test "a plain block with an id starts at its own top, padding included" do
+      html =
+        ~s|<div style="height: 300px">top</div><section id="s" style="padding-top: 80px"><h2>Sponsors</h2></section>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      heading =
+        items |> Enum.find(&(&1.type == :text and &1.text == "Sponsors")) |> Map.fetch!(:y)
+
+      assert_in_delta Browser.Nids.anchor_y(page.pruned, rects, "s"), 300, 8
+      assert heading > 370
+    end
+
+    test "a url is split into the address and its fragment" do
+      assert Browser.Fetch.split_fragment("http://a.test/x?y=1#sec") ==
+               {"http://a.test/x?y=1", "sec"}
+
+      assert Browser.Fetch.split_fragment("http://a.test/x") == {"http://a.test/x", nil}
+    end
+  end
 end

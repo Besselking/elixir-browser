@@ -94,13 +94,37 @@ defmodule Browser.Fetch do
   whole and call it never.
   """
   def load(url, opts \\ []) do
-    fetch(
-      url,
-      Keyword.get(opts, :method, :get),
-      Keyword.get(opts, :body),
-      @max_redirects,
-      %{cache: Keyword.get(opts, :cache, :normal), on_chunk: opts[:on_chunk]}
-    )
+    # a fragment is for the browser, not the server: the page is the same with or without it
+    {url, fragment} = split_fragment(url)
+
+    result =
+      fetch(
+        url,
+        Keyword.get(opts, :method, :get),
+        Keyword.get(opts, :body),
+        @max_redirects,
+        %{cache: Keyword.get(opts, :cache, :normal), on_chunk: opts[:on_chunk]}
+      )
+
+    case result do
+      {:ok, body, final} when fragment != nil -> {:ok, body, put_fragment(final, fragment)}
+      other -> other
+    end
+  end
+
+  @doc "`{url without its fragment, fragment or nil}`."
+  def split_fragment(url) do
+    case :binary.split(url, "#") do
+      [base, fragment] -> {base, fragment}
+      [base] -> {base, nil}
+    end
+  end
+
+  defp put_fragment(url, fragment) do
+    case split_fragment(url) do
+      {base, nil} -> base <> "#" <> fragment
+      _ -> url
+    end
   end
 
   defp fetch("about:home", _, _, _, _), do: {:ok, about_home(), "about:home"}

@@ -15,6 +15,29 @@ defmodule Browser.StyleTest do
     end)
   end
 
+  test "elements that declare the same get the same style only when what they inherit is the same" do
+    css = "li { margin-left: 3px } ul { color: red } .b { color: blue; font-size: 20px }"
+    nodes = prune(~s|<ul><li>x</li><li>y</li></ul><ul class=b><li>x</li></ul>|, css)
+
+    computed = fn {:element, _, attrs, _} -> List.keyfind(attrs, "@computed", 0) |> elem(1) end
+
+    all = fn all, ns ->
+      Enum.flat_map(ns, fn
+        {:element, _, _, kids} = el -> [el | all.(all, kids)]
+        _ -> []
+      end)
+    end
+
+    elements = all.(all, nodes)
+    [a, b, c] = Enum.filter(elements, &match?({:element, "li", _, _}, &1))
+
+    assert computed.(a) == computed.(b)
+    assert computed.(a)["color"] == {255, 0, 0}
+    assert computed.(c)["color"] == {0, 0, 255}
+    assert computed.(c)["font-size"] == 20.0
+    assert computed.(a)["margin-left"] == 3.0 and computed.(c)["margin-left"] == 3.0
+  end
+
   test "hidden attribute hides an element and its subtree" do
     assert tags(prune("<div><p hidden>x<b>y</b></p><i>z</i></div>")) == ["div", "i"]
   end

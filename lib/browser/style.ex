@@ -23,6 +23,7 @@ defmodule Browser.Style do
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
+            scroll-margin-top scroll-padding-top
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
@@ -220,7 +221,7 @@ defmodule Browser.Style do
                                                                                   idx ->
       idx = note_pseudo(idx, rule)
       rule = Map.put(rule, :order, order)
-      Map.update(idx, key(rule), [rule], &[rule | &1])
+      Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
     end)
   end
 
@@ -250,11 +251,12 @@ defmodule Browser.Style do
 
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
   def declared(idx, ctx, pseudo \\ nil) do
+    # rules are bucketed by the pseudo-element they are for, and then by their rightmost compound
     candidates =
-      Map.get(idx, {:tag, ctx.tag}, []) ++
-        Map.get(idx, :other, []) ++
-        if(ctx.id, do: Map.get(idx, {:id, ctx.id}, []), else: []) ++
-        Enum.flat_map(ctx.classes, &Map.get(idx, {:class, &1}, []))
+      Map.get(idx, {pseudo, {:tag, ctx.tag}}, []) ++
+        Map.get(idx, {pseudo, :other}, []) ++
+        if(ctx.id, do: Map.get(idx, {pseudo, {:id, ctx.id}}, []), else: []) ++
+        Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, {:class, &1}}, []))
 
     from_rules =
       for rule <- candidates,
@@ -719,10 +721,23 @@ defmodule Browser.Style do
   defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
   defp table_ancestor(_), do: nil
 
+  # the same `style` attribute is on many elements of a page (and on one of them every time the
+  # page is styled again), so its parse is kept for the run
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do
-      {_, css} -> css |> CSS.parse_declarations() |> relevant()
-      nil -> []
+      {_, css} ->
+        case Process.get(:style_inline) do
+          %{^css => decls} ->
+            decls
+
+          cache ->
+            decls = css |> CSS.parse_declarations() |> relevant()
+            if cache, do: Process.put(:style_inline, Map.put(cache, css, decls))
+            decls
+        end
+
+      nil ->
+        []
     end
   end
 
@@ -738,43 +753,169 @@ defmodule Browser.Style do
   Removes elements that are not rendered, with their subtrees, and attaches
   computed styles (see moduledoc).
   """
-  def prune(nodes, idx), do: prune_children(nodes, nil, idx)
+  def prune(nodes, idx) do
+    Process.delete(:style_memo)
+    Process.put(:style_share, %{})
+    Process.put(:style_inline, %{})
+    pruned = prune_children(nodes, nil, idx)
+    Process.delete(:style_share)
+    Process.delete(:style_inline)
+    pruned
+  end
+
+  @doc """
+  `prune/2` that reuses what an earlier run (`memo`, as it returned it) worked out for elements
+  that did not change: `{pruned, memo}`. An element is taken over when it and everything below
+  it is as before (`"@nid"` tells which element is which), its place among its siblings is the
+  same, no element before it changed, and what it inherits from its parent is the same. The
+  elements that changed, and the ones their selectors can reach, are styled afresh.
+  """
+  def prune(nodes, idx, memo) do
+    Process.put(:style_memo, memo || %{})
+    Process.put(:style_share, %{})
+    Process.put(:style_inline, %{})
+    pruned = prune_children(nodes, nil, idx)
+    Process.delete(:style_share)
+    Process.delete(:style_inline)
+    {pruned, Process.delete(:style_memo)}
+  end
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
-    prune_list(nodes, parent, idx, count, 0, [], [])
+    tags_same? = same_shape?(parent, nodes)
+    prune_list(nodes, parent, idx, count, 0, [], [], {tags_same?, true})
   end
 
-  defp prune_list([], _parent, _idx, _count, _i, _prev, acc), do: Enum.reverse(acc)
+  # What the memo keeps per element is plain data: contexts link to their parent, their
+  # earlier siblings and their later ones, and copying such a term (into another process, say)
+  # takes it apart into a tree that grows with every sibling.
 
-  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc),
-    do: prune_list(rest, parent, idx, count, i, prev, [t | acc])
+  # the elements among the children are the ones there were
+  defp same_shape?(nil, _nodes), do: true
 
-  defp prune_list([{:element, tag, attrs, kids} | rest], parent, idx, count, i, prev, acc) do
-    ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
-    {computed, custom} = compute(idx, ctx, parent)
-    computed = blockify_grid_item(computed, parent)
-    root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
-
-    ctx =
-      ctx
-      |> Map.put(:computed, computed)
-      |> Map.put(:custom, custom)
-      |> Map.put(:root_fs, root)
-
-    acc =
-      if not_rendered?(computed) do
-        acc
-      else
-        {computed, attrs} = marker(idx, ctx, computed, attrs)
-        attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
-        kids = prune_children(kids, ctx, idx)
-        kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
-        [{:element, tag, attrs, kids} | acc]
-      end
-
-    prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc)
+  defp same_shape?(parent, nodes) do
+    case memo_get(parent.attrs) do
+      {%{shape: old}, _} -> old == shape(nodes)
+      nil -> false
+    end
   end
+
+  defp shape(nodes), do: for({:element, tag, _, _} <- nodes, do: tag)
+
+  defp memo_get(attrs) do
+    with memo when is_map(memo) <- Process.get(:style_memo),
+         {_, nid} when is_integer(nid) <- List.keyfind(attrs, "@nid", 0) do
+      Map.get(memo, nid)
+    else
+      _ -> nil
+    end
+  end
+
+  defp memo_put(%{attrs: attrs} = ctx, kids, node) do
+    with memo when is_map(memo) <- Process.get(:style_memo),
+         {_, nid} when is_integer(nid) <- List.keyfind(attrs, "@nid", 0) do
+      entry = %{
+        tag: ctx.tag,
+        attrs: attrs,
+        kids: :erlang.phash2(kids, 4_294_967_296),
+        shape: shape(kids),
+        index: ctx.index,
+        count: ctx.count,
+        computed: ctx.computed,
+        custom: ctx.custom,
+        root_fs: ctx.root_fs,
+        chain_same: ctx.chain_same,
+        parent: parent_sig(ctx.parent)
+      }
+
+      Process.put(:style_memo, Map.put(memo, nid, {entry, node}))
+    end
+
+    :ok
+  end
+
+  defp parent_sig(nil), do: nil
+  defp parent_sig(p), do: {p.computed, p.custom, p.root_fs}
+
+  defp parent_same?(nil, nil), do: true
+  defp parent_same?(nil, _), do: false
+  defp parent_same?(_, nil), do: false
+
+  defp parent_same?(p, sig),
+    do: p.chain_same and {p.computed, p.custom, p.root_fs} == sig
+
+  defp prune_list([], _parent, _idx, _count, _i, _prev, acc, _flags), do: Enum.reverse(acc)
+
+  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc, flags),
+    do: prune_list(rest, parent, idx, count, i, prev, [t | acc], flags)
+
+  defp prune_list(
+         [{:element, tag, attrs, kids} | rest],
+         parent,
+         idx,
+         count,
+         i,
+         prev,
+         acc,
+         {tags_same?, clean}
+       ) do
+    old = memo_get(attrs)
+    same_self? = match?({%{tag: ^tag, attrs: ^attrs}, _}, old)
+
+    reusable? =
+      same_self? and tags_same? and clean and old != nil and
+        elem(old, 0).kids == :erlang.phash2(kids, 4_294_967_296) and
+        elem(old, 0).index == i + 1 and elem(old, 0).count == count and
+        parent_same?(parent, elem(old, 0).parent)
+
+    next_flags = {tags_same?, clean and same_self?}
+
+    if reusable? do
+      {e, onode} = old
+
+      ctx =
+        tag
+        |> CSS.context(attrs, kids, parent, prev, i, count, rest)
+        |> Map.merge(%{
+          computed: e.computed,
+          custom: e.custom,
+          root_fs: e.root_fs,
+          chain_same: true
+        })
+
+      acc = if onode == :hidden, do: acc, else: [onode | acc]
+      prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
+    else
+      ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
+      {computed, custom} = compute(idx, ctx, parent)
+      computed = blockify_grid_item(computed, parent)
+      root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
+
+      ctx =
+        ctx
+        |> Map.put(:computed, computed)
+        |> Map.put(:custom, custom)
+        |> Map.put(:root_fs, root)
+        |> Map.put(:chain_same, same_self? and (parent == nil or parent.chain_same))
+
+      {acc, node} =
+        if not_rendered?(computed) do
+          {acc, :hidden}
+        else
+          {computed, attrs} = marker(idx, ctx, computed, attrs)
+          attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
+          kids = prune_children(kids, ctx, idx)
+          kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+          node = {:element, tag, attrs, kids}
+          {[node | acc], node}
+        end
+
+      memo_put(ctx, kids_of(tag, attrs, kids), node)
+      prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
+    end
+  end
+
+  defp kids_of(_tag, _attrs, kids), do: kids
 
   # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
   # summaries. A summary's marker may depend on whether its `<details>` is open, so both are
@@ -938,6 +1079,10 @@ defmodule Browser.Style do
   defp blockify_grid_item(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
+  #
+  # What an element computes to follows from what the cascade declared for it and what its parent
+  # computed to (and whether it is a table). Most elements of a page, a row of list items or the
+  # cells of a grid, have both the same as another element, so those are worked out once.
   defp compute(idx, ctx, parent, pseudo \\ nil) do
     {pc, parent_custom, parent_root} =
       case parent do
@@ -945,12 +1090,32 @@ defmodule Browser.Style do
         p -> {p.computed, p.custom, p.root_fs}
       end
 
+    decl = declared(idx, ctx, pseudo)
+
+    case Process.get(:style_share) do
+      nil ->
+        compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
+
+      shared ->
+        key = {decl, ctx.tag == "table", pc, parent_custom, parent_root}
+
+        case shared do
+          %{^key => result} ->
+            result
+
+          _ ->
+            result = compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
+            shared = if map_size(shared) >= 20_000, do: %{}, else: shared
+            Process.put(:style_share, Map.put(shared, key, result))
+            result
+        end
+    end
+  end
+
+  defp compute_declared(idx, tag, decl, pc, parent_custom, parent_root) do
     inherited = Map.take(pc, @inherited)
 
-    {customs, normals} =
-      idx
-      |> declared(ctx, pseudo)
-      |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+    {customs, normals} = Enum.split_with(decl, fn {k, _} -> String.starts_with?(k, "--") end)
 
     custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 
@@ -986,7 +1151,7 @@ defmodule Browser.Style do
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
-      if ctx.tag == "table" and base["text-align"] == "-webkit-center",
+      if tag == "table" and base["text-align"] == "-webkit-center",
         do: Map.put(base, "text-align", "left"),
         else: base
 
@@ -1132,7 +1297,7 @@ defmodule Browser.Style do
     end
   end
 
-  @size_props ~w(width height min-height max-height min-width max-width top left right bottom)
+  @size_props ~w(width height min-height max-height min-width max-width top left right bottom scroll-margin-top scroll-padding-top)
 
   # px as a float, {:pct, fraction}, no entry for none/unsupported values, and `:auto`
   # for an explicit `width: auto` / `height: auto` (which, unlike no declaration,
@@ -1386,36 +1551,75 @@ defmodule Browser.Style do
   end
 
   defp plain_length(v, env) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))([a-z]*)\z/, v) do
-      [_, n, unit] ->
-        n = n |> String.trim_leading("+") |> normalize_num_signed() |> String.to_float()
-
-        case unit do
-          "" -> if n == 0.0, do: 0.0
-          "px" -> n
-          "em" -> n * env.fs
-          "rem" -> n * env.root
-          "pt" -> n * 4 / 3
-          "pc" -> n * 16
-          "in" -> n * 96
-          "cm" -> n * 96 / 2.54
-          "mm" -> n * 96 / 25.4
-          "ex" -> n * env.fs / 2
-          # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
-          "ch" -> n * env.fs * 0.6
-          u -> if px = viewport_unit(u, env), do: n * px
-        end
+    case scan_num(v) do
+      {n, unit} when is_float(n) ->
+        if lower?(unit), do: length_value(n, unit, env), else: nil
 
       _ ->
         nil
     end
   end
 
+  # `[+-]? (digits [. digits?] | . digits)` at the start of `text`: {float, rest}, or nil. By
+  # hand, as every length of every element of a page goes through here.
+  defp scan_num(<<s, rest::binary>>) when s in [?+, ?-] do
+    with {n, after_num} <- scan_unsigned(rest), do: {if(s == ?-, do: -n, else: n), after_num}
+  end
+
+  defp scan_num(text), do: scan_unsigned(text)
+
+  defp scan_unsigned(text) do
+    {int, after_int} = scan_digits(text, 0)
+
+    {frac, after_frac} =
+      case after_int do
+        <<?., more::binary>> ->
+          {n, rest} = scan_digits(more, 0)
+          {binary_part(more, 0, n), rest}
+
+        _ ->
+          {"", after_int}
+      end
+
+    if int == 0 and frac == "" do
+      nil
+    else
+      whole = if int == 0, do: "0", else: binary_part(text, 0, int)
+      {n, _} = Float.parse(whole <> "." <> if(frac == "", do: "0", else: frac))
+      {n, after_frac}
+    end
+  end
+
+  defp scan_digits(<<c, rest::binary>>, n) when c in ?0..?9, do: scan_digits(rest, n + 1)
+  defp scan_digits(rest, n), do: {n, rest}
+
+  defp lower?(<<c, rest::binary>>) when c in ?a..?z, do: lower?(rest)
+  defp lower?(""), do: true
+  defp lower?(_), do: false
+
+  defp length_value(n, unit, env) do
+    case unit do
+      "" -> if n == 0.0, do: 0.0
+      "px" -> n
+      "em" -> n * env.fs
+      "rem" -> n * env.root
+      "pt" -> n * 4 / 3
+      "pc" -> n * 16
+      "in" -> n * 96
+      "cm" -> n * 96 / 2.54
+      "mm" -> n * 96 / 25.4
+      "ex" -> n * env.fs / 2
+      # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
+      "ch" -> n * env.fs * 0.6
+      u -> if px = viewport_unit(u, env), do: n * px
+    end
+  end
+
   # "12.5%" -> 0.125, nil when it is not a percentage
   defp percentage(v) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) do
-      [_, n] -> to_float(n) / 100
-      nil -> nil
+    case scan_num(v) do
+      {n, "%"} -> n / 100
+      _ -> nil
     end
   end
 

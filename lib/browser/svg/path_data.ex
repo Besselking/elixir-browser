@@ -141,24 +141,66 @@ defmodule Browser.Svg.PathData do
   defp flag(<<?1, rest::binary>>), do: {1, rest}
   defp flag(_), do: :error
 
-  defp number(data) do
-    case Regex.run(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, data) do
-      [text] ->
-        {to_float(text), binary_part(data, byte_size(text), byte_size(data) - byte_size(text))}
+  # `[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?`, scanned by hand: a path has
+  # thousands of numbers and a regular expression per number was most of a page's layout time
+  defp number(<<sign, rest::binary>>) when sign in [?+, ?-], do: number(rest, <<sign>>, rest)
+  defp number(data), do: number(data, "+", data)
 
-      nil ->
-        :error
+  defp number(data, sign, whole) do
+    {int, after_int} = digits(data, 0)
+
+    {frac, after_frac} =
+      case after_int do
+        <<?., more::binary>> ->
+          {n, rest} = digits(more, 0)
+          {{:some, binary_part(more, 0, n)}, rest}
+
+        _ ->
+          {:none, after_int}
+      end
+
+    int_text = binary_part(data, 0, int)
+
+    if int == 0 and frac in [:none, {:some, ""}] do
+      _ = whole
+      :error
+    else
+      {exp, rest} = exponent(after_frac)
+
+      text =
+        sign <>
+          if(int_text == "", do: "0", else: int_text) <>
+          "." <>
+          case frac do
+            {:some, f} when f != "" -> f
+            _ -> "0"
+          end <> exp
+
+      {f, _} = Float.parse(text)
+      {f, rest}
     end
   end
 
-  defp to_float(text) do
-    text = if String.starts_with?(text, ["+", "-"]), do: text, else: "+" <> text
-    text = Regex.replace(~r/\A([+-])\./, text, "\\g{1}0.")
-    # Float.parse needs a digit after the point ("1.e3" is valid in SVG)
-    text = Regex.replace(~r/\.(?=[eE]|\z)/, text, ".0")
-    {f, _} = Float.parse(text)
-    f
+  defp digits(<<c, rest::binary>>, n) when c in ?0..?9, do: digits(rest, n + 1)
+  defp digits(rest, n), do: {n, rest}
+
+  defp exponent(<<e, rest::binary>> = all) when e in [?e, ?E] do
+    {sign, after_sign} =
+      case rest do
+        <<s, more::binary>> when s in [?+, ?-] -> {<<s>>, more}
+        _ -> {"", rest}
+      end
+
+    case digits(after_sign, 0) do
+      {0, _} ->
+        {"", all}
+
+      {n, after_digits} ->
+        {"e" <> sign <> binary_part(after_sign, 0, n), after_digits}
+    end
   end
+
+  defp exponent(rest), do: {"", rest}
 
   # -- turning one command into segments -------------------------------------------------
 

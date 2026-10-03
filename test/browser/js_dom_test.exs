@@ -130,8 +130,11 @@ defmodule Browser.JS.DOMTest do
 
       assert r.dirty
       [{:element, "body", _, kids}] = r.raw
-      assert {:element, "p", [{"id", "a"}], [{:text, "changed"}]} in kids
-      assert {:element, "hr", [], []} in kids
+
+      assert {:element, "p", [{"id", "a"}, {"@nid", _}], [{:text, "changed"}]} =
+               Enum.find(kids, &match?({:element, "p", _, _}, &1))
+
+      assert {:element, "hr", [{"@nid", _}], []} = List.last(kids)
     end
   end
 
@@ -208,7 +211,7 @@ defmodule Browser.JS.DOMTest do
       assert {:element, "p", _, [{:text, "after"}]} = hd(first.raw |> hd() |> elem(3))
 
       assert_receive {:js_async, ^pid, second}, 1000
-      assert {:element, "hr", [], []} = second.raw |> hd() |> elem(3) |> List.last()
+      assert {:element, "hr", [{"@nid", _}], []} = second.raw |> hd() |> elem(3) |> List.last()
     end
 
     test "an interval keeps going until it is cleared" do
@@ -219,10 +222,19 @@ defmodule Browser.JS.DOMTest do
         </script></body>
         """)
 
-      for expected <- ["1", "2", "3"] do
-        assert_receive {:js_async, ^pid, r}, 1000
-        assert {:element, "p", _, [{:text, ^expected}]} = hd(r.raw |> hd() |> elem(3))
-      end
+      # a busy machine may run two ticks in one go, but the count never goes back and stops at 3
+      texts =
+        Stream.repeatedly(fn ->
+          assert_receive {:js_async, ^pid, r}, 1000
+          {:element, "p", _, [{:text, text}]} = hd(r.raw |> hd() |> elem(3))
+          text
+        end)
+        |> Enum.reduce_while([], fn
+          "3", acc -> {:halt, Enum.reverse(["3" | acc])}
+          text, acc -> {:cont, [text | acc]}
+        end)
+
+      assert texts == Enum.sort(texts)
 
       refute_receive {:js_async, ^pid, _}, 100
     end
@@ -450,6 +462,84 @@ defmodule Browser.JS.DOMTest do
       assert errors(r) == []
       reply = Runtime.dispatch(pid, {:control, 0}, "click")
       assert logs(reply) == ["clicked"]
+    end
+  end
+
+  describe "layout and scrolling" do
+    # a page laid out for real, whose scripts are told where things are
+    defp laid_out(html, scroll \\ 0) do
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Browser.Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, height} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      pid =
+        Runtime.start(page.raw, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          fetch: fn _ -> {:error, "no"} end
+        })
+
+      Runtime.run_scripts(pid)
+      Runtime.layout(pid, rects, 0, scroll, {800, height})
+      pid
+    end
+
+    @spacer ~S|<div style="height: 1000px">spacer</div>|
+
+    test "getBoundingClientRect, offsets and scroll position" do
+      pid =
+        laid_out(
+          ~s|<body>#{@spacer}<p id=t>target</p><button id=b>b</button><script>
+          document.getElementById("b").addEventListener("click", function () {
+            var r = document.getElementById("t").getBoundingClientRect();
+            console.log(r.top > 900, r.left >= 0, r.width > 0, r.height > 0, r.bottom - r.top == r.height);
+            console.log(window.scrollY, scrollY, document.documentElement.scrollTop);
+            console.log(document.documentElement.scrollHeight > 1000, document.getElementById("t").offsetHeight > 0);
+          });
+          </script></body>|,
+          100
+        )
+
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert errors(reply) == []
+      assert logs(reply) == ["true true true true true", "100 100 100", "true true"]
+    end
+
+    test "scrollTo, scrollBy and scrollIntoView ask the session to scroll" do
+      pid =
+        laid_out(~s|<body>#{@spacer}<p id=t>target</p><button id=b>b</button><script>
+          document.getElementById("b").addEventListener("click", function () {
+            window.scrollTo(0, 300);
+            console.log(scrollY);
+            window.scrollBy({top: 50});
+            console.log(scrollY);
+            document.getElementById("t").scrollIntoView();
+            console.log(scrollY > 900);
+          });
+          </script></body>|)
+
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert errors(reply) == []
+      assert logs(reply) == ["300", "350", "true"]
+
+      assert [{:scroll_to, +0.0, 300.0}, {:scroll_to, +0.0, 350.0}, {:scroll_to, +0.0, y}] =
+               reply.outbox
+
+      assert y > 900
+    end
+
+    test "scrolling the window fires scroll events" do
+      pid =
+        laid_out(~s|<body><script>
+        window.addEventListener("scroll", function () { console.log("scrolled", scrollY); });
+        </script></body>|)
+
+      Runtime.scrolled(pid, 0, 40)
+      assert_receive {:js_async, ^pid, reply}, 1000
+      assert logs(reply) == ["scrolled 40"]
     end
   end
 end

@@ -248,6 +248,13 @@ defmodule Browser.Svg do
   end
 
   defp to_float(n) do
+    case Float.parse(n) do
+      {f, ""} -> f
+      _ -> to_float_slow(n)
+    end
+  end
+
+  defp to_float_slow(n) do
     n = if String.starts_with?(n, ["+", "-"]), do: n, else: "+" <> n
     n = Regex.replace(~r/\A([+-])\./, n, "\\g{1}0.")
     n = Regex.replace(~r/\.(?=[eE]|\z)/, n, ".0")
