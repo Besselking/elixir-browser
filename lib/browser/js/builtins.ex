@@ -64,6 +64,30 @@ defmodule Browser.JS.Builtins do
     scope
   end
 
+  # Runs source text in the global scope (indirect eval, and the Function constructor).
+  defp eval_source(src) do
+    case Browser.JS.Parser.parse(src) do
+      {:ok, program} -> Interp.run_program(program)
+      {:error, msg} -> throw_error("SyntaxError", msg)
+    end
+  end
+
+  defp has_own?(o, key) do
+    if nullish?(o), do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+    case o do
+      {:obj, _} ->
+        key in own_keys(o) or (array?(o) and key == "length") or
+          Browser.JS.Props.descriptor(o, key) != :undefined
+
+      s when is_binary(s) ->
+        key == "length" or key in own_keys(s)
+
+      _ ->
+        false
+    end
+  end
+
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp float(n), do: n * 1.0
@@ -80,8 +104,7 @@ defmodule Browser.JS.Builtins do
 
   defp object_methods(p) do
     def_fn(p, "hasOwnProperty", fn this, args ->
-      key = to_key(arg(args, 0))
-      key in own_keys(this) or (array?(this) and key == "length")
+      has_own?(this, to_key(arg(args, 0)))
     end)
 
     def_fn(p, "toString", fn _, _ -> "[object Object]" end)
@@ -145,8 +168,10 @@ defmodule Browser.JS.Builtins do
 
     def_fn(obj, "hasOwn", fn _, args ->
       o = arg(args, 0)
-      key = to_key(arg(args, 1))
-      match?({:obj, _}, o) and (key in own_keys(o) or (array?(o) and key == "length"))
+
+      if nullish?(o),
+        do: throw_error("TypeError", "Cannot convert undefined or null to object"),
+        else: has_own?(o, to_key(arg(args, 1)))
     end)
 
     def_fn(obj, "values", fn _, [o | _] ->
@@ -624,8 +649,15 @@ defmodule Browser.JS.Builtins do
 
   defp install_primitives(scope) do
     str =
-      constructor(scope, "String", proto(:string), fn _, args ->
-        if args == [], do: "", else: to_str(hd(args))
+      constructor(scope, "String", proto(:string), fn this, args ->
+        s = if args == [], do: "", else: to_str(hd(args))
+
+        if wrapper_target?(this, :string) do
+          put_hidden(this, "length", float(String.length(s)))
+          wrap(this, s)
+        else
+          s
+        end
       end)
 
     def_fn(str, "fromCharCode", fn _, args ->
@@ -633,11 +665,15 @@ defmodule Browser.JS.Builtins do
     end)
 
     num =
-      constructor(scope, "Number", proto(:number), fn _, args ->
-        if args == [], do: 0.0, else: to_num(hd(args))
+      constructor(scope, "Number", proto(:number), fn this, args ->
+        n = if args == [], do: 0.0, else: to_num(hd(args))
+        if wrapper_target?(this, :number), do: wrap(this, n), else: n
       end)
 
-    constructor(scope, "Boolean", proto(:boolean), fn _, args -> truthy(arg(args, 0)) end)
+    constructor(scope, "Boolean", proto(:boolean), fn this, args ->
+      b = truthy(arg(args, 0))
+      if wrapper_target?(this, :boolean), do: wrap(this, b), else: b
+    end)
 
     def_fn(num, "isInteger", fn _, [v | _] -> is_number(v) and v == trunc(v) end)
 
@@ -723,6 +759,8 @@ defmodule Browser.JS.Builtins do
 
   defp number_methods(p) do
     def_fn(p, "toString", fn this, args ->
+      this = unwrap(this)
+
       case arg(args, 0) do
         :undefined ->
           Num.to_string(this)
@@ -736,6 +774,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(p, "toFixed", fn this, args ->
+      this = unwrap(this)
       d = to_int(arg(args, 0))
 
       if is_number(this) and abs(this) < 1.0e21,
@@ -743,45 +782,78 @@ defmodule Browser.JS.Builtins do
         else: Num.to_string(this)
     end)
 
-    def_fn(p, "valueOf", fn this, _ -> this end)
-    def_fn(proto(:boolean), "toString", fn this, _ -> to_str(this) end)
+    def_fn(p, "valueOf", fn this, _ -> unwrap(this) end)
+    def_fn(proto(:boolean), "toString", fn this, _ -> this |> unwrap() |> to_str() end)
+    def_fn(proto(:boolean), "valueOf", fn this, _ -> unwrap(this) end)
+  end
+
+  # `new String(x)`, `new Number(x)`, `new Boolean(x)`: the constructor was handed a fresh object
+  # of the right prototype, which becomes the wrapper
+  defp wrapper_target?({:obj, id}, kind) do
+    o = deref(id)
+    not Map.has_key?(o, :prim) and o.proto == proto(kind)
+  end
+
+  defp wrapper_target?(_, _), do: false
+
+  defp wrap({:obj, id} = o, prim) do
+    store(id, Map.put(deref(id), :prim, prim))
+    o
+  end
+
+  defp unwrap({:obj, id} = o) do
+    case Map.fetch(deref(id), :prim) do
+      {:ok, prim} -> prim
+      :error -> o
+    end
+  end
+
+  defp unwrap(v), do: v
+
+  # String.prototype methods take any `this` that is not null or undefined, as a string
+  defp str_fn(obj, name, fun) do
+    def_fn(obj, name, fn this, args ->
+      if nullish?(this),
+        do: throw_error("TypeError", "String.prototype.#{name} called on null or undefined"),
+        else: fun.(to_str(this), args)
+    end)
   end
 
   defp string_methods(p) do
-    def_fn(p, "toString", fn this, _ -> this end)
-    def_fn(p, "valueOf", fn this, _ -> this end)
-    def_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
-    def_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
-    def_fn(p, "trim", fn this, _ -> String.trim(this) end)
-    def_fn(p, "trimStart", fn this, _ -> String.trim_leading(this) end)
-    def_fn(p, "trimEnd", fn this, _ -> String.trim_trailing(this) end)
-    def_fn(p, "charAt", fn this, args -> String.at(this, to_int(arg(args, 0))) || "" end)
+    def_fn(p, "toString", fn this, _ -> unwrap(this) end)
+    def_fn(p, "valueOf", fn this, _ -> unwrap(this) end)
+    str_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
+    str_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
+    str_fn(p, "trim", fn this, _ -> String.trim(this) end)
+    str_fn(p, "trimStart", fn this, _ -> String.trim_leading(this) end)
+    str_fn(p, "trimEnd", fn this, _ -> String.trim_trailing(this) end)
+    str_fn(p, "charAt", fn this, args -> String.at(this, to_int(arg(args, 0))) || "" end)
 
-    def_fn(p, "at", fn this, args ->
+    str_fn(p, "at", fn this, args ->
       n = to_int(arg(args, 0))
       String.at(this, n) || :undefined
     end)
 
-    def_fn(p, "charCodeAt", fn this, args ->
+    str_fn(p, "charCodeAt", fn this, args ->
       case String.at(this, to_int(arg(args, 0))) do
         nil -> :nan
         <<c::utf8, _::binary>> -> float(c)
       end
     end)
 
-    def_fn(p, "codePointAt", fn this, args ->
+    str_fn(p, "codePointAt", fn this, args ->
       case String.at(this, to_int(arg(args, 0))) do
         nil -> :undefined
         <<c::utf8, _::binary>> -> float(c)
       end
     end)
 
-    def_fn(p, "indexOf", fn this, args ->
+    str_fn(p, "indexOf", fn this, args ->
       from = max(to_int(arg(args, 1)), 0)
       float(index_of(this, to_str(arg(args, 0)), from))
     end)
 
-    def_fn(p, "lastIndexOf", fn this, args ->
+    str_fn(p, "lastIndexOf", fn this, args ->
       needle = to_str(arg(args, 0))
 
       positions =
@@ -792,24 +864,24 @@ defmodule Browser.JS.Builtins do
       float(List.last(positions) || -1)
     end)
 
-    def_fn(p, "includes", fn this, args -> index_of(this, to_str(arg(args, 0)), 0) >= 0 end)
+    str_fn(p, "includes", fn this, args -> index_of(this, to_str(arg(args, 0)), 0) >= 0 end)
 
-    def_fn(p, "startsWith", fn this, args ->
+    str_fn(p, "startsWith", fn this, args ->
       String.starts_with?(cp_slice(this, max(to_int(arg(args, 1)), 0), nil), to_str(arg(args, 0)))
     end)
 
-    def_fn(p, "endsWith", fn this, args -> String.ends_with?(this, to_str(arg(args, 0))) end)
-    def_fn(p, "concat", fn this, args -> this <> Enum.map_join(args, &to_str/1) end)
-    def_fn(p, "repeat", fn this, args -> String.duplicate(this, max(to_int(arg(args, 0)), 0)) end)
+    str_fn(p, "endsWith", fn this, args -> String.ends_with?(this, to_str(arg(args, 0))) end)
+    str_fn(p, "concat", fn this, args -> this <> Enum.map_join(args, &to_str/1) end)
+    str_fn(p, "repeat", fn this, args -> String.duplicate(this, max(to_int(arg(args, 0)), 0)) end)
 
-    def_fn(p, "slice", fn this, args ->
+    str_fn(p, "slice", fn this, args ->
       len = String.length(this)
       from = rel(arg(args, 0), len, 0)
       to = rel(arg(args, 1), len, len)
       cp_slice(this, from, max(to - from, 0))
     end)
 
-    def_fn(p, "substring", fn this, args ->
+    str_fn(p, "substring", fn this, args ->
       len = String.length(this)
 
       clamp = fn v, default ->
@@ -821,19 +893,19 @@ defmodule Browser.JS.Builtins do
       cp_slice(this, min(a, b), abs(b - a))
     end)
 
-    def_fn(p, "match", fn this, args ->
+    str_fn(p, "match", fn this, args ->
       Browser.JS.RegExp.string_match(this, to_regexp(arg(args, 0)))
     end)
 
-    def_fn(p, "matchAll", fn this, args ->
+    str_fn(p, "matchAll", fn this, args ->
       Browser.JS.RegExp.string_match_all(this, to_regexp(arg(args, 0), "g"))
     end)
 
-    def_fn(p, "search", fn this, args ->
+    str_fn(p, "search", fn this, args ->
       Browser.JS.RegExp.string_search(this, to_regexp(arg(args, 0)))
     end)
 
-    def_fn(p, "split", fn this, args ->
+    str_fn(p, "split", fn this, args ->
       sep = arg(args, 0)
 
       if Browser.JS.RegExp.regexp?(sep),
@@ -841,12 +913,12 @@ defmodule Browser.JS.Builtins do
         else: split_string(this, sep, arg(args, 1))
     end)
 
-    def_fn(p, "replace", fn this, args -> replace(this, args, false) end)
-    def_fn(p, "replaceAll", fn this, args -> replace(this, args, true) end)
-    def_fn(p, "padStart", fn this, args -> pad(this, args, :leading) end)
-    def_fn(p, "padEnd", fn this, args -> pad(this, args, :trailing) end)
+    str_fn(p, "replace", fn this, args -> replace(this, args, false) end)
+    str_fn(p, "replaceAll", fn this, args -> replace(this, args, true) end)
+    str_fn(p, "padStart", fn this, args -> pad(this, args, :leading) end)
+    str_fn(p, "padEnd", fn this, args -> pad(this, args, :trailing) end)
 
-    def_fn(p, "localeCompare", fn this, args ->
+    str_fn(p, "localeCompare", fn this, args ->
       other = to_str(arg(args, 0))
 
       cond do
@@ -1354,6 +1426,24 @@ defmodule Browser.JS.Builtins do
   end
 
   defp install_misc(scope) do
+    constructor(scope, "Function", proto(:function), fn _, args ->
+      {params, body} = Enum.split(args, -1)
+      params = params |> Enum.map(&to_str/1) |> Enum.join(",")
+      body = body |> Enum.map(&to_str/1) |> Enum.join()
+      eval_source("(function anonymous(#{params}\n) {\n#{body}\n})")
+    end)
+
+    declare(
+      scope,
+      "eval",
+      native("eval", fn _, args ->
+        case arg(args, 0) do
+          src when is_binary(src) -> eval_source(src)
+          other -> other
+        end
+      end)
+    )
+
     date = new_object()
     declare(scope, "Date", date)
     def_fn(date, "now", fn _, _ -> float(System.system_time(:millisecond)) end)

@@ -44,32 +44,58 @@ defmodule Browser.JS.RegExp do
 
   defp flag?(re_obj, f), do: String.contains?(Interp.get(re_obj, "flags"), f)
 
+  @doc "Checks a literal at parse time: `:ok` or `{:error, message}` (an early SyntaxError)."
+  def validate(source, flags) do
+    flag_list = String.graphemes(flags)
+
+    cond do
+      Enum.any?(flag_list, &(&1 not in ~w(d g i m s u v y))) or
+          length(flag_list) != length(Enum.uniq(flag_list)) ->
+        {:error, "Invalid regular expression flags"}
+
+      true ->
+        case build(source, flags) do
+          {:ok, _} -> :ok
+          {:error, msg} -> {:error, "Invalid regular expression: /#{source}/: #{msg}"}
+        end
+    end
+  end
+
   defp compile(source, flags) do
     key = {:js_re, source, flags}
 
     case Process.get(key) do
       nil ->
-        opts =
-          [:unicode, :dollar_endonly] ++
-            for(
-              {f, o} <- [{"i", :caseless}, {"m", :multiline}, {"s", :dotall}],
-              String.contains?(flags, f),
-              do: o
-            )
-
-        case :re.compile(translate(source), opts) do
-          {:ok, re} ->
-            {:namelist, names} = :re.inspect(re, :namelist)
-            res = {re, names}
+        case build(source, flags) do
+          {:ok, res} ->
             Process.put(key, res)
             res
 
-          {:error, {msg, _}} ->
+          {:error, msg} ->
             throw_error("SyntaxError", "Invalid regular expression: /#{source}/: #{msg}")
         end
 
       res ->
         res
+    end
+  end
+
+  defp build(source, flags) do
+    opts =
+      [:unicode, :dollar_endonly] ++
+        for(
+          {f, o} <- [{"i", :caseless}, {"m", :multiline}, {"s", :dotall}],
+          String.contains?(flags, f),
+          do: o
+        )
+
+    case :re.compile(translate(source), opts) do
+      {:ok, re} ->
+        {:namelist, names} = :re.inspect(re, :namelist)
+        {:ok, {re, names}}
+
+      {:error, {msg, _}} ->
+        {:error, msg}
     end
   end
 

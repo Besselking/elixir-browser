@@ -13,6 +13,11 @@ defmodule Browser.JS.Lexer do
              { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = ."
           |> Enum.sort_by(&(-byte_size(&1)))
 
+  @keywords ~w(break case catch class const continue debugger default delete do else enum export
+    extends false finally for function if import in instanceof new null return super switch this
+    throw true try typeof var void while with implements interface let package private protected
+    public static yield await async)
+
   @doc "`{:ok, tokens}` or `{:error, message}`."
   def tokenize(src) do
     {:ok, lex(src, false, [])}
@@ -48,11 +53,11 @@ defmodule Browser.JS.Lexer do
     lex(rest, false, [{:tmpl, parts, nl} | acc])
   end
 
+  defp lex(<<?\\, ?u, _::binary>> = s, nl, acc), do: lex_ident(s, nl, acc)
+
   defp lex(<<c, _::binary>> = s, nl, acc)
-       when c in ?a..?z or c in ?A..?Z or c in [?_, ?$] or c > 127 do
-    {name, rest} = ident(s, [])
-    lex(rest, false, [{:id, name, nl} | acc])
-  end
+       when c in ?a..?z or c in ?A..?Z or c in [?_, ?$] or c > 127,
+       do: lex_ident(s, nl, acc)
 
   defp lex("/" <> rest, nl, acc) do
     if regex_allowed?(acc) do
@@ -64,6 +69,15 @@ defmodule Browser.JS.Lexer do
   end
 
   defp lex(s, nl, acc), do: punct(s, nl, acc)
+
+  defp lex_ident(s, nl, acc) do
+    {name, rest} = ident(s, [])
+
+    # a reserved word spelled with an escape is no keyword and no identifier either: the
+    # parser has no use for this token, so it is a syntax error wherever it appears
+    kind = if name in @keywords and escaped?(s, rest), do: :eid, else: :id
+    lex(rest, false, [{kind, name, nl} | acc])
+  end
 
   defp punct(s, nl, acc) do
     case Enum.find(@puncts, &String.starts_with?(s, &1)) do
@@ -111,9 +125,30 @@ defmodule Browser.JS.Lexer do
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)
   defp skip_line(""), do: ""
 
+  defp escaped?(s, rest),
+    do: String.contains?(binary_part(s, 0, byte_size(s) - byte_size(rest)), "\\")
+
   defp ident(<<c, rest::binary>>, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127,
        do: ident(rest, [c | acc])
+
+  # \uXXXX and \u{X...} escapes are part of an identifier
+  defp ident(<<"\\u{", rest::binary>>, acc) do
+    with [hex, rest] <- String.split(rest, "}", parts: 2),
+         {cp, ""} <- Integer.parse(hex, 16),
+         true <- cp in 0..0x10FFFF do
+      ident(rest, [<<cp::utf8>> | acc])
+    else
+      _ -> throw({:syntax, "bad unicode escape in identifier"})
+    end
+  end
+
+  defp ident(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
+    case Integer.parse(hex, 16) do
+      {cp, ""} when cp not in 0xD800..0xDFFF -> ident(rest, [<<cp::utf8>> | acc])
+      _ -> throw({:syntax, "bad unicode escape in identifier"})
+    end
+  end
 
   defp ident(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 

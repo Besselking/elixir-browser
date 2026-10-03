@@ -573,6 +573,7 @@ defmodule Browser.JS.Parser do
 
   # → {key_node, shorthand_name_or_nil, rest}
   defp property_key([{:id, name, _} | ts]), do: {{:str, name}, name, ts}
+  defp property_key([{:eid, name, _} | ts]), do: {{:str, name}, nil, ts}
   defp property_key([{:str, s, _} | ts]), do: {{:str, s}, nil, ts}
   defp property_key([{:num, n, _} | ts]), do: {{:str, Browser.JS.Num.to_string(n)}, nil, ts}
 
@@ -891,10 +892,10 @@ defmodule Browser.JS.Parser do
     {if(chained?, do: {:chain, e}, else: e), ts}
   end
 
-  defp chain(e, [{:p, ".", _}, {:id, name, _} | ts], c),
+  defp chain(e, [{:p, ".", _}, {k, name, _} | ts], c) when k in [:id, :eid],
     do: chain({:member, e, {:str, name}, false}, ts, c)
 
-  defp chain(e, [{:p, "?.", _}, {:id, name, _} | ts], _),
+  defp chain(e, [{:p, "?.", _}, {k, name, _} | ts], _) when k in [:id, :eid],
     do: chain({:member, e, {:str, name}, true}, ts, true)
 
   defp chain(e, [{:p, "?.", _}, {:p, "[", _} | ts], _) do
@@ -937,7 +938,7 @@ defmodule Browser.JS.Parser do
     {{:new, callee, args}, ts}
   end
 
-  defp member_only(e, [{:p, ".", _}, {:id, name, _} | ts]),
+  defp member_only(e, [{:p, ".", _}, {k, name, _} | ts]) when k in [:id, :eid],
     do: member_only({:member, e, {:str, name}, false}, ts)
 
   defp member_only(e, [{:p, "[", _} | ts]) do
@@ -969,7 +970,13 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
   defp primary([{:str, s, _} | ts]), do: {{:str, s}, ts}
-  defp primary([{:regex, {source, flags}, _} | ts]), do: {{:regex, source, flags}, ts}
+
+  defp primary([{:regex, {source, flags}, _} | ts]) do
+    case Browser.JS.RegExp.validate(source, flags) do
+      :ok -> {{:regex, source, flags}, ts}
+      {:error, msg} -> throw({:syntax, msg})
+    end
+  end
 
   defp primary([{:tmpl, parts, _} | ts]) do
     parts =

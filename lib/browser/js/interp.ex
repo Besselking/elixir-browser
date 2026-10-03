@@ -379,6 +379,9 @@ defmodule Browser.JS.Interp do
 
   defp function_prop(id, o, "prototype") do
     case o.fun do
+      {:closure, %{name: {:method, _}}} ->
+        :undefined
+
       {:closure, %{mode: mode}} when mode in [false, nil] ->
         p = new_object()
         put_hidden(p, "constructor", {:obj, id})
