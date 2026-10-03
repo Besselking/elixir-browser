@@ -52,10 +52,87 @@ defmodule Browser.JS.Parser do
   def parse(src) do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
+        Process.put(:js_strict, use_strict?(tokens))
         {:ok, {:program, statements(tokens)}}
       catch
         {:syntax, msg} -> {:error, msg}
       end
+    end
+  end
+
+  # ── strict mode ────────────────────────────────────────────
+
+  @strict_reserved ~w(implements interface let package private protected public static yield)
+
+  defp strict?, do: Process.get(:js_strict, false)
+
+  # does the token list begin with a "use strict" directive?
+  defp use_strict?([{:str, "use strict", _}, {:p, p, _} | _]) when p in [";", "}"], do: true
+  defp use_strict?([{:str, "use strict", _}, {_, _, true} | _]), do: true
+  defp use_strict?([{:str, "use strict", _}, {:eof, _, _} | _]), do: true
+  defp use_strict?([{:str, _, _}, {:p, ";", _} | ts]), do: use_strict?(ts)
+  defp use_strict?(_), do: false
+
+  # a function body: strict when it opens with the directive (or is inside strict code)
+  defp function_body(ts, params) do
+    outer = strict?()
+
+    if use_strict?(ts) do
+      unless Enum.all?(params, &match?({:id, _}, &1)),
+        do: throw({:syntax, "\"use strict\" in a function with non-simple parameters"})
+
+      Process.put(:js_strict, true)
+    end
+
+    if strict?(), do: check_strict_params(params)
+    result = block_body(ts, [])
+    Process.put(:js_strict, outer)
+    result
+  end
+
+  defp check_strict_params(params) do
+    names = for {:id, n} <- Enum.map(params, &strip_default/1), do: n
+
+    if names != Enum.uniq(names), do: throw({:syntax, "duplicate parameter name in strict mode"})
+    Enum.each(names, &check_strict_name/1)
+  end
+
+  defp strip_default({:default, p, _}), do: p
+  defp strip_default(p), do: p
+
+  defp check_strict_name(name) do
+    if strict?() and (name in ["eval", "arguments"] or name in @strict_reserved),
+      do: throw({:syntax, "unexpected #{name} in strict mode"})
+  end
+
+  # the body of if, a loop, `with` or a label: a statement, never a declaration (a plain
+  # function declaration is allowed after `if` and a label)
+  defp body_statement(ts, allow_function \\ false) do
+    case ts do
+      [{:id, "let", _}, {:p, "[", _} | _] ->
+        throw({:syntax, "lexical declaration in statement position"})
+
+      [{:id, "let", _}, {:p, "{", false} | _] ->
+        throw({:syntax, "lexical declaration in statement position"})
+
+      [{:id, "let", _}, {:id, n, false} | _] when n not in ["in", "of", "instanceof"] ->
+        throw({:syntax, "lexical declaration in statement position"})
+
+      [{:id, kw, _} | _] when kw in ["const", "class"] ->
+        throw({:syntax, "#{kw} declaration in statement position"})
+
+      [{:id, l, _}, {:p, ":", _} | rest] when not allow_function and l not in @reserved ->
+        body_statement(rest, false)
+        statement(ts)
+
+      [{:id, "async", _}, {:id, "function", f} | _] when f != true ->
+        throw({:syntax, "async function declaration in statement position"})
+
+      [{:id, "function", _} | _] when not allow_function ->
+        throw({:syntax, "function declaration in statement position"})
+
+      _ ->
+        statement(ts)
     end
   end
 
@@ -127,11 +204,11 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
     ts = expect(ts, ")")
-    {a, ts} = statement(ts)
+    {a, ts} = body_statement(ts, true)
 
     case ts do
       [{:id, "else", _} | ts] ->
-        {b, ts} = statement(ts)
+        {b, ts} = body_statement(ts, true)
         {{:if, c, a, b}, ts}
 
       _ ->
@@ -143,12 +220,12 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
     ts = expect(ts, ")")
-    {body, ts} = statement(ts)
+    {body, ts} = body_statement(ts)
     {{:while, c, body}, ts}
   end
 
   defp statement([{:id, "do", _} | ts]) do
-    {body, ts} = statement(ts)
+    {body, ts} = body_statement(ts)
     ts = expect_id(ts, "while")
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
@@ -223,7 +300,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, name, _}, {:p, ":", _} | ts]) when name not in @reserved do
-    {stmt, ts} = statement(ts)
+    {stmt, ts} = body_statement(ts, true)
     {{:labeled, name, stmt}, ts}
   end
 
@@ -307,10 +384,11 @@ defmodule Browser.JS.Parser do
     do: expression_statement(ts)
 
   defp statement([{:id, "with", _} | ts]) do
+    if strict?(), do: throw({:syntax, "`with` in strict mode"})
     ts = expect(ts, "(")
     {obj, ts} = expression(ts)
     ts = expect(ts, ")")
-    {body, ts} = statement(ts)
+    {body, ts} = body_statement(ts)
     {{:with, obj, body}, ts}
   end
 
@@ -402,7 +480,7 @@ defmodule Browser.JS.Parser do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
-            {body, t} = statement(t)
+            {body, t} = body_statement(t)
             {{if(of_in == "of", do: :forof, else: :forin), String.to_atom(kw), pat, obj, body}, t}
 
           _ ->
@@ -426,7 +504,7 @@ defmodule Browser.JS.Parser do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
-            {body, t} = statement(t)
+            {body, t} = body_statement(t)
             {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
 
           _ ->
@@ -456,7 +534,7 @@ defmodule Browser.JS.Parser do
       end
 
     ts = expect(ts, ")")
-    {body, ts} = statement(ts)
+    {body, ts} = body_statement(ts)
     {{:for, init, test, update, body}, ts}
   end
 
@@ -507,6 +585,7 @@ defmodule Browser.JS.Parser do
   defp pattern(ts, allow_default \\ true)
 
   defp pattern([{:id, name, _} | ts], allow_default) when name not in @reserved do
+    check_strict_name(name)
     with_default({:id, name}, ts, allow_default)
   end
 
@@ -603,6 +682,9 @@ defmodule Browser.JS.Parser do
         t -> {nil, t}
       end
 
+    outer = strict?()
+    Process.put(:js_strict, true)
+
     {super, ts} =
       case ts do
         [{:id, "extends", _} | t] -> call_chain(t)
@@ -611,6 +693,7 @@ defmodule Browser.JS.Parser do
 
     ts = expect(ts, "{")
     {members, ts} = class_members(ts, [])
+    Process.put(:js_strict, outer)
     {{:class, name, super, members}, ts}
   end
 
@@ -671,7 +754,7 @@ defmodule Browser.JS.Parser do
   defp function_rest(name, ts) do
     {params, ts} = params(expect(ts, "("), [])
     ts = expect(ts, "{")
-    {body, ts} = block_body(ts, [])
+    {body, ts} = function_body(ts, params)
     {{:fn, name, params, body, false}, ts}
   end
 
@@ -717,7 +800,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp arrow_body(params, [{:p, "{", _} | ts]) do
-    {body, ts} = block_body(ts, [])
+    {body, ts} = function_body(ts, params)
     {{:fn, nil, params, body, :arrow}, ts}
   end
 
@@ -800,7 +883,7 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp assignable?({:id, _}), do: true
+  defp assignable?({:id, n}), do: not (strict?() and n in ["eval", "arguments"])
   defp assignable?({:member, _, _, false}), do: true
   defp assignable?(_), do: false
 
@@ -846,6 +929,10 @@ defmodule Browser.JS.Parser do
 
   defp unary([{:p, op, _} | ts]) when op in ["!", "-", "+", "~"] do
     {e, ts} = unary(ts)
+
+    if op == "delete" and strict?() and match?({:id, _}, e),
+      do: throw({:syntax, "delete of an identifier in strict mode"})
+
     {{:unary, op, e}, ts}
   end
 
