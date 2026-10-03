@@ -39,6 +39,8 @@ defmodule Browser.Session do
       # the page a script's changes are being turned into (`start_page_job/2`), and the newest
       # tree that arrived meanwhile
       page_job: nil,
+      # a `#fragment` to scroll to once the page is laid out: `{name, give up at}`
+      fragment: nil,
       page_pending: nil,
       # the page's JavaScript runtime, when it has scripts
       js: nil,
@@ -149,6 +151,7 @@ defmodule Browser.Session do
         nodes: page.nodes,
         url: page.url,
         scroll: 0,
+        fragment: pending_fragment(page.url),
         focus: nil,
         caret: 0,
         controls: %{},
@@ -308,7 +311,7 @@ defmodule Browser.Session do
         {:noreply, click_control(state, cid, x, spy, count, shift)}
 
       {:link, href} ->
-        {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
+        {:noreply, follow(state, href)}
 
       # a click on a sticky or fixed box that is neither: it does not reach the page below
       :cover ->
@@ -321,7 +324,7 @@ defmodule Browser.Session do
 
             case UI.link_at(state.links, x, py) do
               nil -> {:noreply, page_click(state, x, py, count, shift)}
-              href -> {:noreply, load(state, Fetch.resolve(base(state), href), :push)}
+              href -> {:noreply, follow(state, href)}
             end
 
           cid ->
@@ -1386,7 +1389,77 @@ defmodule Browser.Session do
     state = scroll_x_by(state, 0)
     state = scroll_by(state, 0, mode)
     send_layout(state)
-    state
+    scroll_to_fragment(state)
+  end
+
+  # -- #fragments ---------------------------------------------------------------
+
+  # a link to the same document with a fragment only moves within it
+  defp follow(state, href) do
+    url = Fetch.resolve(base(state), href)
+    {target, fragment} = Fetch.split_fragment(url)
+    {here, _} = Fetch.split_fragment(state.url || "")
+
+    if fragment != nil and target == here and state.page != nil,
+      do: go_to_fragment(state, url, fragment),
+      else: load(state, url, :push)
+  end
+
+  defp go_to_fragment(state, url, fragment) do
+    UI.set_url_text(state.ui, url)
+
+    state =
+      %{
+        state
+        | history: History.visit(state.history, url),
+          url: url,
+          page: %{state.page | url: url},
+          fragment: {fragment, deadline()}
+      }
+
+    state |> sync_buttons() |> scroll_to_fragment()
+  end
+
+  defp decode_fragment(raw) do
+    URI.decode(raw)
+  rescue
+    ArgumentError -> raw
+  end
+
+  defp pending_fragment(url) do
+    case Fetch.split_fragment(url) do
+      {_, nil} -> nil
+      {_, fragment} -> {fragment, deadline()}
+    end
+  end
+
+  # the page may still be growing (a script builds the section): keep trying for a while
+  defp deadline, do: System.monotonic_time(:millisecond) + 4000
+
+  defp scroll_to_fragment(%{fragment: nil} = state), do: state
+
+  defp scroll_to_fragment(%{fragment: {raw, until}} = state) do
+    name = decode_fragment(raw)
+
+    y =
+      if name in ["", "top"] do
+        0
+      else
+        rects = Browser.Nids.rects(state.items, Browser.Nids.parents(state.page.pruned || []))
+        Browser.Nids.anchor_y(state.page.pruned || [], rects, name)
+      end
+
+    cond do
+      y != nil ->
+        state = %{state | fragment: nil}
+        scroll_by(state, round(y) - state.scroll)
+
+      System.monotonic_time(:millisecond) > until ->
+        %{state | fragment: nil}
+
+      true ->
+        state
+    end
   end
 
   # the scripts learn where the elements are (and how far the page is scrolled)

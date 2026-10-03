@@ -262,4 +262,48 @@ defmodule Browser.PageTest do
       assert_receive {:page, ^page}, 1000
     end
   end
+
+  describe "fragments" do
+    test "the top of the element a fragment names" do
+      html =
+        ~s|<body><div style="height: 300px">top</div><h2 id="sponsors">Sponsors</h2><a name="old">x</a></body>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "sponsors") > 250
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "old") >
+               Browser.Nids.anchor_y(page.pruned, rects, "sponsors")
+
+      assert Browser.Nids.anchor_y(page.pruned, rects, "nothing") == nil
+    end
+
+    test "scroll-margin-top and the page's scroll-padding-top keep the element clear of a header" do
+      html =
+        ~s|<html><head><style>html { scroll-padding-top: 10px } h2 { scroll-margin-top: 32px }</style></head><body><div style="height: 300px">top</div><h2 id="s">S</h2></body></html>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+      %{} = rects
+
+      heading_top =
+        items |> Enum.find(&(&1.type == :text and &1.text == "S")) |> Map.fetch!(:y)
+
+      assert_in_delta Browser.Nids.anchor_y(page.pruned, rects, "s"), heading_top - 42, 8
+    end
+
+    test "a url is split into the address and its fragment" do
+      assert Browser.Fetch.split_fragment("http://a.test/x?y=1#sec") ==
+               {"http://a.test/x?y=1", "sec"}
+
+      assert Browser.Fetch.split_fragment("http://a.test/x") == {"http://a.test/x", nil}
+    end
+  end
 end

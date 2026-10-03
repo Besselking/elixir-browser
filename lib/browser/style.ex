@@ -23,6 +23,7 @@ defmodule Browser.Style do
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
+            scroll-margin-top scroll-padding-top
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
@@ -1296,7 +1297,7 @@ defmodule Browser.Style do
     end
   end
 
-  @size_props ~w(width height min-height max-height min-width max-width top left right bottom)
+  @size_props ~w(width height min-height max-height min-width max-width top left right bottom scroll-margin-top scroll-padding-top)
 
   # px as a float, {:pct, fraction}, no entry for none/unsupported values, and `:auto`
   # for an explicit `width: auto` / `height: auto` (which, unlike no declaration,

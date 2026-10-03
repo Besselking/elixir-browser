@@ -87,4 +87,77 @@ defmodule Browser.Nids do
 
     grow(Map.put(acc, nid, box), Map.get(parents, nid), parents, x0, y0, x1, y1)
   end
+
+  @doc """
+  The top of the element a `#fragment` names (the element with that `id`, or an `<a>` with that
+  `name`), in page coordinates, or nil when there is none. An element nothing was drawn for
+  takes the top of the next one that was.
+  """
+  def anchor_y(pruned, rects, fragment) do
+    order = preorder(pruned, [])
+
+    order =
+      Enum.drop_while(order, fn {_nid, id, name, tag, _} ->
+        not anchor?(fragment, id, name, tag)
+      end)
+
+    Enum.find_value(order, fn {nid, _, _, _, margin} ->
+      case rects do
+        # `scroll-margin-top` of the element and `scroll-padding-top` of the page keep it clear of
+        # a fixed header
+        %{^nid => {_x, y, _w, _h}} -> max(y - margin - root_padding(pruned), 0)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp root_padding(pruned) do
+    case Enum.find(pruned, &match?({:element, "html", _, _}, &1)) do
+      {:element, _, attrs, _} -> length_of(attrs, "scroll-padding-top")
+      nil -> 0
+    end
+  end
+
+  defp length_of(attrs, prop) do
+    with {_, computed} when is_map(computed) <- List.keyfind(attrs, "@computed", 0),
+         n when is_number(n) <- Map.get(computed, prop) do
+      n
+    else
+      _ -> 0
+    end
+  end
+
+  defp anchor?(fragment, id, name, tag), do: id == fragment or (tag == "a" and name == fragment)
+
+  defp preorder(nodes, acc) do
+    nodes |> collect([]) |> Enum.reverse() |> Kernel.++(acc)
+  end
+
+  # numbered elements in document order, newest first
+  defp collect(nodes, rev) when is_list(nodes), do: Enum.reduce(nodes, rev, &collect/2)
+  defp collect({:text, _}, rev), do: rev
+
+  defp collect({:element, tag, attrs, kids}, rev) do
+    rev =
+      case List.keyfind(attrs, "@nid", 0) do
+        {_, nid} ->
+          [
+            {nid, attr(attrs, "id"), attr(attrs, "name"), tag,
+             length_of(attrs, "scroll-margin-top")}
+            | rev
+          ]
+
+        nil ->
+          rev
+      end
+
+    collect(kids, rev)
+  end
+
+  defp attr(attrs, name) do
+    case List.keyfind(attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
 end
