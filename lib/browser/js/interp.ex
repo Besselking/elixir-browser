@@ -2079,6 +2079,13 @@ defmodule Browser.JS.Interp do
   # an anonymous function or class takes the name of the binding or property it is assigned to
   defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
   defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+
+  defp ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
+    do: name_fn(ev(e, env), name)
+
+  defp ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
+    do: name_fn(ev(e, env), name)
+
   defp ev_named(e, env, _), do: ev(e, env)
 
   defp name_fn({:obj, id} = f, name) do

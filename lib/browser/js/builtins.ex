@@ -60,8 +60,12 @@ defmodule Browser.JS.Builtins do
     install_misc(scope)
     Browser.JS.RegExp.install(scope)
     Browser.JS.Promise.install(scope)
+    global = Browser.JS.Global.new()
+    declare(scope, "globalThis", global)
+    declare(scope, :this, global)
     Browser.JS.Collections.install(scope)
 
+    Process.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
     scope
   end
 
