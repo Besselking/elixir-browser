@@ -75,7 +75,7 @@ defmodule Browser.JS.Lexer do
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
-    kind = if name in @keywords and escaped?(s, rest), do: :eid, else: :id
+    kind = if (name in @keywords or name == "target") and escaped?(s, rest), do: :eid, else: :id
     lex(rest, false, [{kind, name, nl} | acc])
   end
 
@@ -153,6 +153,8 @@ defmodule Browser.JS.Lexer do
   defp ident(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
   defp number(s, nl, acc) do
+    s = strip_separators(s)
+
     {value, rest} =
       case s do
         <<?0, x, digits::binary>> when x in [?x, ?X, ?b, ?B, ?o, ?O] ->
@@ -180,6 +182,20 @@ defmodule Browser.JS.Lexer do
       _ ->
         lex(rest, false, [{:num, value, nl} | acc])
     end
+  end
+
+  # numeric separators: an underscore between two digits is dropped; any other underscore is left
+  # for `number/3` to reject
+  @separated_number ~r/\A(?:0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*|0[bB][01](?:_?[01])*|0[oO][0-7](?:_?[0-7])*|(?:[1-9](?:_?[0-9])*|0)?(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?)/
+
+  defp strip_separators(s) do
+    [lit] = Regex.run(@separated_number, s)
+
+    if String.contains?(lit, "_"),
+      do:
+        String.replace(lit, "_", "") <>
+          binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit)),
+      else: s
   end
 
   defp string(<<q, rest::binary>>, q, acc),

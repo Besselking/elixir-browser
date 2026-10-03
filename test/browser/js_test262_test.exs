@@ -41,11 +41,11 @@ defmodule Browser.JS.Test262Test do
 
   describe "decide/3" do
     test "skips what the runtime cannot do" do
-      assert Test262.decide(%{"features" => ["Symbol"]}, "") == {:skip, "feature Symbol"}
+      assert Test262.decide(%{"features" => ["generators"]}, "") == {:skip, "feature generators"}
       assert Test262.decide(%{"flags" => ["module"]}, "") == {:skip, "module"}
       assert {:skip, _} = Test262.decide(%{}, "$262.createRealm()")
       assert Test262.decide(%{"features" => ["arrow-function"]}, "") == :run
-      assert Test262.decide(%{"features" => ["Symbol"]}, "", skip_features: []) == :run
+      assert Test262.decide(%{"features" => ["generators"]}, "", skip_features: []) == :run
     end
   end
 

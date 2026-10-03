@@ -1023,8 +1023,17 @@ defmodule Browser.JS.Parser do
   defp call_chain(ts) do
     {base, ts} =
       case ts do
-        [{:id, "new", _} | ts] -> new_expression(ts)
-        _ -> primary(ts)
+        [{:id, "new", _}, {:p, ".", _}, {:eid, "target", _} | _] ->
+          throw({:syntax, "new.target must not contain escapes"})
+
+        [{:id, "new", _}, {:p, ".", _}, {:id, "target", _} | t] ->
+          {{:new_target}, t}
+
+        [{:id, "new", _} | ts] ->
+          new_expression(ts)
+
+        _ ->
+          primary(ts)
       end
 
     {e, ts, chained?} = chain(base, ts, false)
@@ -1062,8 +1071,17 @@ defmodule Browser.JS.Parser do
   defp new_expression(ts) do
     {callee, ts} =
       case ts do
-        [{:id, "new", _} | t] -> new_expression(t)
-        _ -> primary(ts)
+        [{:id, "new", _}, {:p, ".", _}, {:eid, "target", _} | _] ->
+          throw({:syntax, "new.target must not contain escapes"})
+
+        [{:id, "new", _}, {:p, ".", _}, {:id, "target", _} | t] ->
+          {{:new_target}, t}
+
+        [{:id, "new", _} | t] ->
+          new_expression(t)
+
+        _ ->
+          primary(ts)
       end
 
     {callee, ts} = member_only(callee, ts)

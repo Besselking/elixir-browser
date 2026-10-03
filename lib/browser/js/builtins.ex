@@ -218,6 +218,22 @@ defmodule Browser.JS.Builtins do
       target
     end)
 
+    def_fn(obj, "groupBy", fn _, [list, f | _] ->
+      callable!(f)
+      groups = new_object([], nil)
+
+      for {e, i} <- Enum.with_index(iterate(list)) do
+        k = to_key(call(f, :undefined, [e, float(i)]))
+
+        case Interp.get(groups, k) do
+          {:obj, _} = arr -> call(Interp.get(arr, "push"), arr, [e])
+          _ -> Interp.put(groups, k, new_array([e]))
+        end
+      end
+
+      groups
+    end)
+
     def_fn(obj, "fromEntries", fn _, [list | _] ->
       o = new_object()
       for e <- iterate(list), do: Interp.put(o, to_key(Interp.get(e, 0.0)), Interp.get(e, 1.0))
@@ -505,6 +521,56 @@ defmodule Browser.JS.Builtins do
       float(idx || -1)
     end)
 
+    def_fn(p, "findLast", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      this
+      |> elems()
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(:undefined, fn {v, i} ->
+        if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
+      end)
+    end)
+
+    def_fn(p, "findLastIndex", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      idx =
+        this
+        |> elems()
+        |> Enum.with_index()
+        |> Enum.reverse()
+        |> Enum.find_value(-1, fn {v, i} ->
+          if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
+        end)
+
+      float(idx)
+    end)
+
+    def_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
+
+    def_fn(p, "toSorted", fn this, args ->
+      copy = new_array(elems(this))
+      call(Interp.get(copy, "sort"), copy, args)
+    end)
+
+    def_fn(p, "toSpliced", fn this, args ->
+      copy = new_array(elems(this))
+      call(Interp.get(copy, "splice"), copy, args)
+      copy
+    end)
+
+    def_fn(p, "with", fn this, args ->
+      list = elems(this)
+      len = length(list)
+      n = to_int(arg(args, 0))
+      i = if n < 0, do: len + n, else: n
+
+      if i < 0 or i >= len, do: throw_error("RangeError", "Invalid index")
+      new_array(List.replace_at(list, i, arg(args, 1)))
+    end)
+
     def_fn(p, "some", fn this, args ->
       f = callable!(arg(args, 0))
 
@@ -733,6 +799,7 @@ defmodule Browser.JS.Builtins do
     declare(scope, "parseFloat", parse_float)
     declare(scope, "parseInt", parse_int)
     declare(scope, "isNaN", native("isNaN", fn _, args -> to_num(arg(args, 0)) == :nan end))
+    install_uri(scope)
 
     declare(
       scope,
@@ -740,6 +807,73 @@ defmodule Browser.JS.Builtins do
       native("isFinite", fn _, args -> is_number(to_num(arg(args, 0))) end)
     )
   end
+
+  # encodeURIComponent and friends. Characters not in `keep` become %XX per UTF-8 byte.
+  @uri_unreserved ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
+  @uri_reserved ~c";/?:@&=+$,#"
+
+  defp install_uri(scope) do
+    for {name, keep} <- [
+          {"encodeURIComponent", @uri_unreserved},
+          {"encodeURI", @uri_unreserved ++ @uri_reserved}
+        ] do
+      declare(scope, name, native(name, fn _, args -> uri_encode(to_str(arg(args, 0)), keep) end))
+    end
+
+    for {name, keep} <- [{"decodeURIComponent", []}, {"decodeURI", @uri_reserved}] do
+      declare(scope, name, native(name, fn _, args -> uri_decode(to_str(arg(args, 0)), keep) end))
+    end
+  end
+
+  defp uri_encode(str, keep) do
+    unless String.valid?(str), do: throw_error("URIError", "URI malformed")
+
+    for <<b <- str>>, into: "" do
+      if b in keep,
+        do: <<b>>,
+        else: "%" <> String.upcase(Base.encode16(<<b>>))
+    end
+  end
+
+  defp uri_decode(str, keep), do: uri_decode(str, keep, [])
+
+  defp uri_decode("", _, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp uri_decode(<<"%", h::binary-size(2), rest::binary>>, keep, acc) do
+    with {:ok, <<b>>} <- Base.decode16(h, case: :mixed) do
+      if b < 0x80 do
+        if b in keep,
+          do: uri_decode(rest, keep, [<<"%", h::binary>> | acc]),
+          else: uri_decode(rest, keep, [<<b>> | acc])
+      else
+        n = if b >= 0xF0, do: 3, else: if(b >= 0xE0, do: 2, else: 1)
+        {bytes, rest} = uri_continuation(rest, n, [<<b>>])
+        bin = IO.iodata_to_binary(bytes)
+
+        if b >= 0xC0 and String.valid?(bin),
+          do: uri_decode(rest, keep, [bin | acc]),
+          else: throw_error("URIError", "URI malformed")
+      end
+    else
+      _ -> throw_error("URIError", "URI malformed")
+    end
+  end
+
+  defp uri_decode(<<"%", _::binary>>, _, _), do: throw_error("URIError", "URI malformed")
+
+  defp uri_decode(<<c::utf8, rest::binary>>, keep, acc),
+    do: uri_decode(rest, keep, [<<c::utf8>> | acc])
+
+  defp uri_continuation(rest, 0, acc), do: {Enum.reverse(acc), rest}
+
+  defp uri_continuation(<<"%", h::binary-size(2), rest::binary>>, n, acc) do
+    case Base.decode16(h, case: :mixed) do
+      {:ok, <<b>>} when b in 0x80..0xBF -> uri_continuation(rest, n - 1, [<<b>> | acc])
+      _ -> throw_error("URIError", "URI malformed")
+    end
+  end
+
+  defp uri_continuation(_, _, _), do: throw_error("URIError", "URI malformed")
 
   defp parse_int(s, radix_arg) do
     s = String.trim(s)
