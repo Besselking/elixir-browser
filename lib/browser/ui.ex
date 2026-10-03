@@ -53,7 +53,10 @@ defmodule Browser.UI do
     dc = :wxClientDC.new(panel)
     {_, ppi} = :wxDC.getPPI(dc)
     :wxClientDC.destroy(dc)
-    :persistent_term.put({__MODULE__, :ppi}, max(ppi, 1))
+    # a Retina display reports its device pixels (144 for 2x), while fonts are sized in
+    # logical ones: the density that matters is per logical pixel
+    scale = max(:wxWindow.getContentScaleFactor(panel), 1)
+    :persistent_term.put({__MODULE__, :ppi}, max(ppi / scale, 1))
 
     status = :wxStatusBar.new(frame)
     :wxFrame.setStatusBar(frame, status)
