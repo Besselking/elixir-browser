@@ -1056,4 +1056,55 @@ defmodule Browser.JSTest do
              """) == ["m", "s", "ci", "bad"]
     end
   end
+
+  describe "typed arrays" do
+    test "element types wrap, clamp and keep floats" do
+      assert js("new Uint8Array([1, 2, 300, -1]).join()") == "1,2,44,255"
+      assert js("new Uint8ClampedArray([300, -5, 1.5, 2.5]).join()") == "255,0,2,2"
+      assert js("var a = new Int16Array(2); a[0] = 40000; a[0]") == -25536.0
+
+      assert js("var f = new Float32Array(3); f[0] = 1.5; f[1] = NaN; f[2] = 1e40; f.join()") ==
+               "1.5,NaN,Infinity"
+
+      assert js("var a = new Uint8Array(2); a[5] = 1; [a.length, a[5]]") == [2.0, :undefined]
+    end
+
+    test "views share a buffer, DataView reads both byte orders" do
+      assert js("""
+             var buf = new ArrayBuffer(8), dv = new DataView(buf);
+             dv.setUint16(0, 0x1234); dv.setFloat32(4, 2.5, true);
+             var b = new Uint8Array(buf), i32 = new Int32Array(buf, 4, 1);
+             [b.join(), dv.getUint16(0), dv.getUint16(0, true), dv.getFloat32(4, true), buf.byteLength, i32.length, i32.byteOffset]
+             """) == ["18,52,0,0,0,0,32,64", 4660.0, 13330.0, 2.5, 8.0, 1.0, 4.0]
+    end
+
+    test "array methods, iteration and construction" do
+      assert js("""
+             var s = new Uint8Array([5, 3, 9, 1]);
+             [s.sort().join(), s.map(x => x * 2).join(), [...s].join(), s.subarray(1, 3).join(),
+              s.slice(2).join(), s.reduce((a, b) => a + b), s.indexOf(9), s.includes(3),
+              Uint8Array.from([1, 2, 3], x => x * 3).join(), Uint8Array.of(7, 8).join(),
+              Uint8Array.BYTES_PER_ELEMENT]
+             """) == [
+               "1,3,5,9",
+               "2,6,10,18",
+               "1,3,5,9",
+               "3,5",
+               "5,9",
+               18.0,
+               3.0,
+               true,
+               "3,6,9",
+               "7,8",
+               1.0
+             ]
+    end
+
+    test "TextEncoder and TextDecoder" do
+      assert js(
+               "var t = new TextEncoder().encode('h\u00e9llo \u20ac'); [t.length, new TextDecoder().decode(t)]"
+             ) ==
+               [10.0, "héllo €"]
+    end
+  end
 end
