@@ -217,6 +217,12 @@ defmodule Browser.JS.Parser do
     {{:fundecl, name, fun}, ts}
   end
 
+  defp statement([{:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
+       when name not in @reserved do
+    {fun, ts} = generator_rest(name, ts)
+    {{:fundecl, name, fun}, ts}
+  end
+
   defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
        when name not in @reserved do
     {fun, ts} = function_rest(name, ts)
@@ -537,11 +543,17 @@ defmodule Browser.JS.Parser do
 
       _ ->
         {lhs, after_lhs} =
-          try do
-            unary_or_lhs(ts)
-          catch
-            # an init such as `typeof a == "x" && b()` is no left-hand side
-            {:syntax, _} -> {nil, []}
+          case destructuring_head(ts) do
+            nil ->
+              try do
+                unary_or_lhs(ts)
+              catch
+                # an init such as `typeof a == "x" && b()` is no left-hand side
+                {:syntax, _} -> {nil, []}
+              end
+
+            head ->
+              head
           end
 
         case after_lhs do
@@ -559,6 +571,22 @@ defmodule Browser.JS.Parser do
   end
 
   defp unary_or_lhs(ts), do: postfix(ts)
+
+  # `for ([a, b] of x)` / `for ({a} of x)`: a pattern in the head
+  defp destructuring_head([{:p, open, _} | _] = ts) when open in ["[", "{"] do
+    try do
+      {pat, rest} = pattern(ts, false)
+
+      case rest do
+        [{:id, w, _} | _] when w in ["of", "in"] -> {pat, rest}
+        _ -> nil
+      end
+    catch
+      {:syntax, _} -> nil
+    end
+  end
+
+  defp destructuring_head(_), do: nil
 
   defp for_rest(init, ts) do
     ts = expect(ts, ";")
@@ -745,13 +773,26 @@ defmodule Browser.JS.Parser do
   defp class_members([{:p, ";", _} | ts], acc), do: class_members(ts, acc)
 
   defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
-    {body, ts} = block_body(ts, [])
-    class_members(ts, [{:cmember, :block, nil, body, true} | acc])
+    outer = Process.get(:js_generator, false)
+    Process.put(:js_generator, false)
+
+    try do
+      {body, ts} = block_body(ts, [])
+      class_members(ts, [{:cmember, :block, nil, body, true} | acc])
+    after
+      Process.put(:js_generator, outer)
+    end
   end
 
   defp class_members(ts, acc) do
     {static?, ts} = class_modifier(ts, "static")
     {async?, ts} = class_modifier(ts, "async")
+
+    {generator?, ts} =
+      case ts do
+        [{:p, "*", _} | t] -> {true, t}
+        _ -> {false, ts}
+      end
 
     {kind, ts} =
       case ts do
@@ -769,8 +810,16 @@ defmodule Browser.JS.Parser do
 
     case after_key do
       [{:p, "(", _} | _] ->
-        {{:fn, _, _, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
-        value = if async?, do: {:async, fun}, else: fun
+        {{:fn, _, _, _, _} = fun, ts} =
+          function_rest({:method, shorthand}, after_key, generator?)
+
+        value =
+          cond do
+            async? -> {:async, fun}
+            generator? -> {:gen, fun}
+            true -> fun
+          end
+
         class_members(ts, [{:cmember, kind, key, value, static?} | acc])
 
       [{:p, "=", _} | t] ->
@@ -795,11 +844,24 @@ defmodule Browser.JS.Parser do
   # ── functions ──────────────────────────────────────────────
 
   # after `function name?` — at the parameter list
-  defp function_rest(name, ts) do
-    {params, ts} = params(expect(ts, "("), [])
-    ts = expect(ts, "{")
-    {body, ts} = function_body(ts, params)
-    {{:fn, name, params, body, false}, ts}
+  defp function_rest(name, ts, generator? \\ false) do
+    outer = Process.get(:js_generator, false)
+    Process.put(:js_generator, generator?)
+
+    try do
+      {params, ts} = params(expect(ts, "("), [])
+      ts = expect(ts, "{")
+      {body, ts} = function_body(ts, params)
+      {{:fn, name, params, body, false}, ts}
+    after
+      Process.put(:js_generator, outer)
+    end
+  end
+
+  # `function*`: the function node wrapped as a generator
+  defp generator_rest(name, ts) do
+    {fun, ts} = function_rest(name, ts, true)
+    {{:gen, fun}, ts}
   end
 
   defp params([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
@@ -882,7 +944,36 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp assignment([{:id, "yield", _} | rest] = ts) do
+    if Process.get(:js_generator, false) do
+      yield_expression(rest)
+    else
+      assignment_plain(ts)
+    end
+  end
+
   defp assignment(ts), do: assignment_plain(ts)
+
+  defp yield_expression(ts) do
+    case ts do
+      [{_, _, true} | _] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [{:p, p, _} | _] when p in [")", "]", "}", ",", ";", ":"] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [{:p, "*", _} | t] ->
+        {e, ts} = assignment(t)
+        {{:yield, e, true}, ts}
+
+      _ ->
+        {e, ts} = assignment(ts)
+        {{:yield, e, false}, ts}
+    end
+  end
 
   defp assignment_plain([{:p, open, _} | _] = ts) when open in ["[", "{"] do
     if destructuring_ahead?(tl(ts), 1) do
@@ -1182,13 +1273,19 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:id, "function", _} | ts]) do
+    {generator?, ts} =
+      case ts do
+        [{:p, "*", _} | t] -> {true, t}
+        t -> {false, t}
+      end
+
     {name, ts} =
       case ts do
         [{:id, n, _} | t] when n not in @reserved -> {n, t}
         t -> {nil, t}
       end
 
-    function_rest(name, ts)
+    if generator?, do: generator_rest(name, ts), else: function_rest(name, ts)
   end
 
   defp primary([{:id, name, _} | ts]) when name not in @reserved, do: {{:id, name}, ts}
@@ -1229,6 +1326,12 @@ defmodule Browser.JS.Parser do
   defp object_literal([{:p, "...", _} | ts], acc) do
     {e, ts} = assignment(ts)
     object_next(ts, [{:spread, e} | acc])
+  end
+
+  defp object_literal([{:p, "*", _} | rest], acc) do
+    {key, shorthand, after_key} = property_key(rest)
+    {fun, ts} = function_rest({:method, shorthand}, after_key, true)
+    object_next(ts, [{:init, key, {:gen, fun}} | acc])
   end
 
   defp object_literal([{:id, "async", _}, {k, _, false} | _] = [_ | rest], acc)

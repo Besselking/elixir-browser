@@ -56,9 +56,214 @@ defmodule Browser.JS.Async do
     p
   end
 
+  # ── generators ─────────────────────────────────────────────
+  #
+  # A generator function's body runs in the same continuation-passing style. `yield` hands the
+  # rest of the body (as `resume`) to the generator object and returns; `next`, `throw` and
+  # `return` call that function with how to go on. A yielded value, the end of the body or a
+  # throw is left in the process dictionary for the caller of `resume/2` to pick up as soon as
+  # the body has returned control.
+
+  @doc "Calls a generator function: binds the parameters and makes the generator object."
+  def call_generator(f, c, this, args) do
+    scope = Interp.call_scope(c, this, args)
+
+    proto =
+      case Interp.get(f, "prototype") do
+        {:obj, _} = p -> p
+        _ -> Interp.proto(:generator)
+      end
+
+    {:obj, gid} = gen = Interp.new_object([], proto)
+
+    ctx = %{
+      ret: fn v -> finish(gid, {:return, v}) end,
+      throw: fn e -> finish(gid, {:throw, e}) end,
+      yield: fn v, resume -> suspend(gid, v, resume) end,
+      brk: %{},
+      cont: %{}
+    }
+
+    start = fn
+      {:next, _} ->
+        case c.mode do
+          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
+          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+        end
+
+      {:throw, e} ->
+        ctx.throw.(e)
+
+      {:return, v} ->
+        ctx.ret.(v)
+    end
+
+    set_gen(gid, %{state: :start, resume: start})
+    gen
+  end
+
+  defp set_gen(gid, gen), do: Interp.store(gid, Map.put(Interp.deref(gid), :gen, gen))
+
+  defp finish(gid, out) do
+    set_gen(gid, %{state: :done, resume: nil})
+    Process.put(:js_gen_out, out)
+    :done
+  end
+
+  defp suspend(gid, v, resume) do
+    set_gen(gid, %{state: :suspended, resume: resume})
+    Process.put(:js_gen_out, {:yield, v})
+    :suspended
+  end
+
+  @doc "`next`, `throw` or `return` on a generator: `msg` is `{:next | :throw | :return, value}`."
+  def resume({:obj, gid}, msg) do
+    gen =
+      case Interp.deref(gid) do
+        %{gen: g} -> g
+        _ -> Interp.throw_error("TypeError", "next method called on an incompatible receiver")
+      end
+
+    case {gen.state, msg} do
+      {:running, _} ->
+        Interp.throw_error("TypeError", "Generator is already running")
+
+      {:done, {:next, _}} ->
+        iter_result(:undefined, true)
+
+      {:done, {:return, v}} ->
+        iter_result(v, true)
+
+      {:done, {:throw, e}} ->
+        throw({:js_error, e})
+
+      {:start, {:return, v}} ->
+        finish(gid, {:return, v})
+        iter_result(v, true)
+
+      {:start, {:throw, e}} ->
+        finish(gid, {:throw, e})
+        throw({:js_error, e})
+
+      _ ->
+        set_gen(gid, %{gen | state: :running})
+        Process.delete(:js_gen_out)
+
+        try do
+          gen.resume.(msg)
+        catch
+          {:js_error, e} -> finish(gid, {:throw, e})
+        end
+
+        case Process.delete(:js_gen_out) do
+          {:yield, v} -> iter_result(v, false)
+          {:return, v} -> iter_result(v, true)
+          {:throw, e} -> throw({:js_error, e})
+          nil -> iter_result(:undefined, true)
+        end
+    end
+  end
+
+  defp iter_result(v, done), do: Interp.new_object([{"value", v}, {"done", done}])
+
+  @doc "`Generator.prototype` with `next`, `return` and `throw`."
+  def install_generators do
+    p = Interp.new_object([], Interp.proto(:iterator))
+    Interp.put_proto(:generator, p)
+
+    for {name, tag} <- [{"next", :next}, {"return", :return}, {"throw", :throw}] do
+      Interp.put_hidden(
+        p,
+        name,
+        Interp.native(name, fn this, args ->
+          resume(this, {tag, Enum.at(args, 0, :undefined)})
+        end)
+      )
+    end
+
+    Interp.put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "Generator")
+    :ok
+  end
+
+  # `yield*`: forwards `next`, `throw` and `return` to the inner iterator
+  defp delegate(it, next, msg, ctx, k) do
+    attempt(fn -> delegate_step(it, next, msg) end, ctx, fn
+      {:yield, v} ->
+        ctx.yield.(v, fn m -> delegate(it, next, m, ctx, k) end)
+
+      {:done, v} ->
+        k.(v)
+
+      {:return, v} ->
+        ctx.ret.(v)
+    end)
+  end
+
+  defp delegate_step(it, next, {:next, x}) do
+    check_result(Interp.call(next, it, [x]), :done)
+  end
+
+  defp delegate_step(it, _next, {:throw, e}) do
+    case Interp.get(it, "throw") do
+      f when is_tuple(f) ->
+        if Interp.function?(f) do
+          check_result(Interp.call(f, it, [e]), :done)
+        else
+          Interp.iter_close(it, false)
+          Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
+        end
+
+      _ ->
+        Interp.iter_close(it, false)
+        Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
+    end
+  end
+
+  defp delegate_step(it, _next, {:return, v}) do
+    case Interp.get(it, "return") do
+      f when is_tuple(f) ->
+        if Interp.function?(f),
+          do: check_result(Interp.call(f, it, [v]), :return),
+          else: {:return, v}
+
+      _ ->
+        {:return, v}
+    end
+  end
+
+  defp check_result(r, on_done) do
+    unless match?({:obj, _}, r),
+      do: Interp.throw_error("TypeError", "Iterator result is not an object")
+
+    if Interp.truthy(Interp.get(r, "done")),
+      do: {on_done, Interp.get(r, "value")},
+      else: {:yield, Interp.get(r, "value")}
+  end
+
+  defp iterator_of(items) do
+    Browser.JS.Collections.make_iterator(items)
+  end
+
+  # runs a piece of synchronous work and hands its value on, or takes its throw
+  defp attempt(fun, ctx, k) do
+    result =
+      try do
+        {:ok, fun.()}
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case result do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
   # ── what contains an await ─────────────────────────────────
 
   defp has_await?({:await, _}), do: true
+  defp has_await?({:yield, _, _}), do: true
+  defp has_await?({:gen, _}), do: false
   defp has_await?({:fn, _, _, _, _}), do: false
   defp has_await?({:async, _}), do: false
   defp has_await?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_await?/1)
@@ -73,6 +278,37 @@ defmodule Browser.JS.Async do
 
   defp cev_await({:await, e}, env, ctx, k) do
     cev(e, env, ctx, fn v -> await_value(v, ctx, k) end)
+  end
+
+  defp cev_await({:yield, e, false}, env, ctx, k) do
+    cev(e, env, ctx, fn v ->
+      ctx.yield.(v, fn
+        {:next, x} -> k.(x)
+        {:throw, err} -> ctx.throw.(err)
+        {:return, r} -> ctx.ret.(r)
+      end)
+    end)
+  end
+
+  defp cev_await({:yield, e, true}, env, ctx, k) do
+    cev(e, env, ctx, fn iterable ->
+      attempt(
+        fn ->
+          case Interp.iter_source(iterable) do
+            {:proto, it, next} -> {it, next}
+            {:list, items} -> {iterator_of(items), nil}
+          end
+        end,
+        ctx,
+        fn
+          {it, nil} ->
+            delegate(it, Interp.get(it, "next"), {:next, :undefined}, ctx, k)
+
+          {it, next} ->
+            delegate(it, next, {:next, :undefined}, ctx, k)
+        end
+      )
+    end)
   end
 
   defp cev_await({:logical, op, l, r}, env, ctx, k) do
@@ -131,6 +367,7 @@ defmodule Browser.JS.Async do
   end
 
   defp leaf?({:await, _}), do: true
+  defp leaf?({:yield, _, _}), do: true
   defp leaf?({:logical, _, _, _} = n), do: has_await?(n)
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
   defp leaf?(_), do: false
@@ -311,17 +548,21 @@ defmodule Browser.JS.Async do
         try do
           {:ok,
            case kind do
-             :forin -> if Interp.nullish?(target), do: [], else: Interp.own_keys(target)
-             :forof -> Interp.iterate(target)
+             :forin -> {:list, if(Interp.nullish?(target), do: [], else: Interp.own_keys(target))}
+             :forof -> Interp.iter_source(target)
            end}
         catch
           {:js_error, e} -> {:throw, e}
         end
 
+      mode = if decl == nil, do: :assign, else: decl
+
       case items do
-        {:ok, list} ->
-          mode = if decl == nil, do: :assign, else: decl
+        {:ok, {:list, list}} ->
           foreach(list, {pat, mode, body, env}, ctx, k, labels)
+
+        {:ok, {:proto, it, next}} ->
+          proto_foreach(it, next, {pat, mode, body, env}, ctx, k, labels)
 
         {:throw, e} ->
           ctx.throw.(e)
@@ -468,6 +709,57 @@ defmodule Browser.JS.Async do
     guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, ctx, fn ->
       run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
     end)
+  end
+
+  # `for of` over an iterator object, one value at a time; leaving the loop early (break,
+  # return, an outer label, a throw) calls the iterator's `return`
+  defp proto_foreach(it, next, {pat, mode, body, env} = spec, ctx, k, labels) do
+    step =
+      try do
+        {:ok, Interp.iter_step(it, next)}
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case step do
+      {:throw, e} ->
+        ctx.throw.(e)
+
+      {:ok, :done} ->
+        k.(:ok)
+
+      {:ok, {:ok, item}} ->
+        Interp.tick()
+        iter_env = Interp.new_scope(env)
+
+        closing = fn after_ ->
+          guarded(fn -> Interp.iter_close(it, false) end, ctx, after_)
+        end
+
+        inner = %{
+          ctx
+          | ret: fn v -> closing.(fn -> ctx.ret.(v) end) end,
+            throw: fn e ->
+              try do
+                Interp.iter_close(it, true)
+              catch
+                {:js_error, _} -> :ok
+              end
+
+              ctx.throw.(e)
+            end,
+            brk: Map.new(ctx.brk, fn {l, f} -> {l, fn x -> closing.(fn -> f.(x) end) end} end),
+            cont: Map.new(ctx.cont, fn {l, f} -> {l, fn x -> closing.(fn -> f.(x) end) end} end)
+        }
+
+        on_break = fn x -> closing.(fn -> k.(x) end) end
+
+        guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+          run_body(body, iter_env, inner, on_break, labels, fn _ ->
+            proto_foreach(it, next, spec, ctx, k, labels)
+          end)
+        end)
+    end
   end
 
   # the first `case` whose test equals the value, else `default`

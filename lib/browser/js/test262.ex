@@ -20,7 +20,7 @@ defmodule Browser.JS.Test262 do
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
     class-fields-private class-fields-private-in class-methods-private
-    class-static-fields-private class-static-methods-private generators async-iteration
+    class-static-fields-private class-static-methods-private async-iteration
     Symbol.asyncIterator symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
     DataView DataView.prototype.getFloat32 DataView.prototype.getFloat64
     DataView.prototype.getInt16 DataView.prototype.getInt32 DataView.prototype.getInt8
@@ -29,7 +29,7 @@ defmodule Browser.JS.Test262 do
     Float16Array Float32Array Float64Array Int8Array Int16Array Int32Array Uint8Array
     Uint16Array Uint32Array Uint8ClampedArray resizable-arraybuffer arraybuffer-transfer
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality
-    stable-typedarray-sort WeakRef FinalizationRegistry set-methods cross-realm
+    stable-typedarray-sort WeakRef FinalizationRegistry set-methods dynamic-import cross-realm
     tail-call-optimization caller Temporal ShadowRealm decorators import.meta import-attributes
     import-defer export-defer source-phase-imports source-phase-imports-module-source
     import-text import-bytes json-modules top-level-await explicit-resource-management

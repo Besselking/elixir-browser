@@ -28,6 +28,7 @@ defmodule Browser.JS.Collections do
   def install(scope) do
     install_symbol(scope)
     install_iterators()
+    Browser.JS.Async.install_generators()
     install_map(scope)
     install_set(scope)
     install_weak(scope)
