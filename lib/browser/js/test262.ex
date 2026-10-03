@@ -19,31 +19,27 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    class class-fields-private class-fields-private-in class-fields-public class-methods-private
-    class-static-block class-static-fields-private class-static-fields-public
-    class-static-methods-private new.target super generators async-iteration
-    Symbol Symbol.asyncIterator Symbol.hasInstance Symbol.isConcatSpreadable Symbol.iterator
-    Symbol.match Symbol.matchAll Symbol.prototype.description Symbol.replace Symbol.search
-    Symbol.species Symbol.split Symbol.toPrimitive Symbol.toStringTag Symbol.unscopables
-    symbols-as-weakmap-keys Proxy proxy-missing-checks Reflect Reflect.construct Reflect.set
-    Reflect.setPrototypeOf BigInt ArrayBuffer DataView DataView.prototype.getFloat32
-    DataView.prototype.getFloat64 DataView.prototype.getInt16 DataView.prototype.getInt32
-    DataView.prototype.getInt8 DataView.prototype.getUint16 DataView.prototype.getUint32
-    DataView.prototype.setUint8 SharedArrayBuffer Atomics Atomics.pause Atomics.waitAsync
-    TypedArray TypedArray.prototype.at Float16Array Float32Array Float64Array Int8Array Int16Array
-    Int32Array Uint8Array Uint16Array Uint32Array Uint8ClampedArray resizable-arraybuffer
-    arraybuffer-transfer immutable-arraybuffer align-detached-buffer-semantics-with-web-reality
-    stable-typedarray-sort WeakRef WeakMap WeakSet FinalizationRegistry Map Set set-methods
-    cross-realm tail-call-optimization caller Temporal ShadowRealm decorators dynamic-import
-    import.meta import-attributes import-defer export-defer source-phase-imports
-    source-phase-imports-module-source import-text import-bytes json-modules
-    top-level-await explicit-resource-management export-star-as-namespace-from-module
-    arbitrary-module-namespace-names Array.fromAsync iterator-helpers iterator-chunking
-    iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
-    array-grouping change-array-by-copy uint8array-base64 upsert await-dictionary
-    regexp-match-indices regexp-v-flag regexp-modifiers regexp-duplicate-named-groups
-    RegExp.escape legacy-regexp Error.isError error-stack-accessor json-parse-with-source
-    Math.sumPrecise promise-try nonextensible-applies-to-private
+    class-fields-private class-fields-private-in class-methods-private
+    class-static-fields-private class-static-methods-private generators async-iteration
+    Symbol.asyncIterator symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
+    DataView DataView.prototype.getFloat32 DataView.prototype.getFloat64
+    DataView.prototype.getInt16 DataView.prototype.getInt32 DataView.prototype.getInt8
+    DataView.prototype.getUint16 DataView.prototype.getUint32 DataView.prototype.setUint8
+    SharedArrayBuffer Atomics Atomics.pause Atomics.waitAsync TypedArray TypedArray.prototype.at
+    Float16Array Float32Array Float64Array Int8Array Int16Array Int32Array Uint8Array
+    Uint16Array Uint32Array Uint8ClampedArray resizable-arraybuffer arraybuffer-transfer
+    immutable-arraybuffer align-detached-buffer-semantics-with-web-reality
+    stable-typedarray-sort WeakRef FinalizationRegistry set-methods cross-realm
+    tail-call-optimization caller Temporal ShadowRealm decorators import.meta import-attributes
+    import-defer export-defer source-phase-imports source-phase-imports-module-source
+    import-text import-bytes json-modules top-level-await explicit-resource-management
+    export-star-as-namespace-from-module arbitrary-module-namespace-names Array.fromAsync
+    iterator-helpers iterator-chunking iterator-sequencing iterator-includes
+    Iterator.prototype.join joint-iteration array-grouping change-array-by-copy
+    uint8array-base64 upsert await-dictionary regexp-match-indices regexp-v-flag
+    regexp-modifiers regexp-duplicate-named-groups RegExp.escape legacy-regexp Error.isError
+    error-stack-accessor json-parse-with-source Math.sumPrecise promise-try
+    nonextensible-applies-to-private
   )
 
   def unsupported_features, do: @unsupported_features

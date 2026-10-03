@@ -779,7 +779,20 @@ defmodule Browser.JS.Interp do
 
         this = new_object([], proto)
 
-        case call(f, this, args) do
+        result =
+          case deref(id) do
+            %{fun: {:closure, _}, async: true} ->
+              call(f, this, args)
+
+            %{fun: {:closure, c}} ->
+              tick()
+              elem(run_closure_scope(c, this, args, [{:new_target, nt}]), 0)
+
+            _ ->
+              call(f, this, args)
+          end
+
+        case result do
           {:obj, rid} = result ->
             # a built-in that makes its own object (Error, Array, an element) gets the
             # prototype of the class that extended it
@@ -862,6 +875,7 @@ defmodule Browser.JS.Interp do
       if c.mode in [false, nil] do
         declare(scope, :this, this)
         declare(scope, :args, args)
+        declare(scope, :new_target, :undefined)
       end
 
       if h = Map.get(c, :home), do: declare(scope, :home, h)
@@ -1404,6 +1418,13 @@ defmodule Browser.JS.Interp do
   def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v
+
+  def ev({:new_target}, env) do
+    case lookup_var(env, :new_target) do
+      {:ok, nt} -> nt
+      _ -> :undefined
+    end
+  end
 
   def ev({:this}, env) do
     case lookup_var(env, :this) do

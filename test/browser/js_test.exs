@@ -866,4 +866,43 @@ defmodule Browser.JSTest do
              ) == ["v 1"]
     end
   end
+
+  describe "web-page staples" do
+    test "numeric separators" do
+      assert js("[1_000, 0x1_F, 1_0.5_0, 1e1_0]") == [1000.0, 31.0, 10.5, 1.0e10]
+      assert js("try { eval('1__0') } catch (e) { e.name }") == "SyntaxError"
+      assert js("try { eval('1_') } catch (e) { e.name }") == "SyntaxError"
+    end
+
+    test "new.target" do
+      assert js("function F() { return new.target } F() === undefined") == true
+      assert js("function G() { this.t = new.target === G } new G().t") == true
+
+      assert js(
+               "class A { constructor() { this.n = new.target.name } } class B extends A {} new B().n"
+             ) == "B"
+    end
+
+    test "URI encoding" do
+      assert js("encodeURIComponent('a b&é/€')") == "a%20b%26%C3%A9%2F%E2%82%AC"
+      assert js("decodeURIComponent('a%20b%26%C3%A9%2F%E2%82%AC')") == "a b&é/€"
+      assert js("encodeURI('http://x/a b?q=é#h')") == "http://x/a%20b?q=%C3%A9#h"
+      assert js("decodeURI('%41%2F')") == "A%2F"
+      assert js("try { decodeURIComponent('%E0%A4%A') } catch (e) { e.name }") == "URIError"
+    end
+
+    test "newer array and object methods" do
+      assert js("[1, 2, 3].findLast(x => x < 3)") == 2.0
+      assert js("[1, 2, 3].findLastIndex(x => x > 5)") == -1.0
+      assert js("[3, 1, 2].toSorted().join()") == "1,2,3"
+      assert js("var a = [3, 1]; a.toSorted(); a.join()") == "3,1"
+      assert js("[1, 2].toReversed().join()") == "2,1"
+      assert js("[1, 2, 3].with(1, 9).join()") == "1,9,3"
+      assert js("[1, 2, 3].toSpliced(1, 1).join()") == "1,3"
+
+      assert js(
+               "var g = Object.groupBy([1, 2, 3, 4], x => x % 2 ? 'odd' : 'even'); g.odd.join() + '/' + g.even.join()"
+             ) == "1,3/2,4"
+    end
+  end
 end
