@@ -54,4 +54,6 @@ jobs:
           restore-keys: test262-
 
       - name: Run test262 and compare with the baseline
-        run: mix js.test262 --fetch --check
+        # a shared runner is several times slower than a laptop: the 65536-iteration eval tests
+        # take about 5 s here and passed the default 10 s only just
+        run: mix js.test262 --fetch --check --timeout 30000
