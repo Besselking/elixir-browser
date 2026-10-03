@@ -14,7 +14,12 @@ mix browser.screenshot URL out.png [--width 1000] [--height 800]
 mix browser.screenshot file:///tmp/case.html /tmp/case.png --width 500 --height 260
 ```
 
-Limits: text uses the system's sans/monospace font squeezed to the layout width, and pictures,
+With `--wx` the page is painted by the window's own painter (real fonts, pictures, shadows)
+into a bitmap. That needs an Erlang with wx and a display; in a cloud session run it as
+`xvfb-run -a mix browser.screenshot URL out.png --wx`. Where wx is missing it says so and falls
+back to the SVG route below.
+
+SVG route limits: text uses the system's sans/monospace font squeezed to the layout width, and pictures,
 vector graphics and shadows are not drawn. It shows where things are and how borders, boxes and
 text line up, not the exact glyphs. Pages whose content comes from scripts needing a server
 (Blazor) show only what is in the HTML; write a small HTML file that reproduces the case.
