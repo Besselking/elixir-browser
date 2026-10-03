@@ -1570,6 +1570,18 @@ defmodule Browser.Layout do
   defp op({:word, text, style, :pre}, st), do: word(text, style, true, st)
 
   defp op({:marker, m, style}, st) do
+    # a marker right after another one (the first item of a list nested in an item) hangs in
+    # its own list's margin, on the same line
+    st =
+      case st.line do
+        [%{marker: true}] ->
+          left = st.margin + st.left
+          %{st | x: left - 18, indent: left, pending_space: nil}
+
+        _ ->
+          st
+      end
+
     st = word(m, style, true, st, -18)
     st = %{st | line: [Map.put(hd(st.line), :marker, true) | tl(st.line)]}
     %{st | pending_space: style}

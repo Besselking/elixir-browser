@@ -140,6 +140,13 @@ defmodule Browser.LayoutTest do
       refute "1." in tl(Enum.drop_while(texts(items), &(&1 != "1.")))
     end
 
+    test "the first item of a list nested in an item lines up with its siblings" do
+      {items, _} = styled("<ol><li><ul><li>a</li><li>b</li></ul></li></ol>")
+      markers = for %{text: "◦", x: x} <- items, do: x
+      assert [x, x] = markers
+      assert word(items, "a").x == word(items, "b").x
+    end
+
     test "list-style none removes markers; default lists have them" do
       {items, _} = styled("<ul><li>a</li></ul>")
       assert "•" in texts(items)
