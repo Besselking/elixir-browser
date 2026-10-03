@@ -323,4 +323,10 @@ defmodule Browser.PageTest do
       assert Browser.Fetch.split_fragment("http://a.test/x") == {"http://a.test/x", nil}
     end
   end
+
+  test "every inline style block counts, however many there are" do
+    styles = for i <- 1..40, into: "", do: "<style>.s#{i}{color:red}</style>"
+    page = Page.build(styles <> ~s|<style>.late{display:none}</style><p class="late">x</p>|, @url)
+    assert Enum.any?(page.rules, &(inspect(&1.selector) =~ "late"))
+  end
 end

@@ -107,7 +107,7 @@ defmodule Browser.Page do
     author =
       raw
       |> Style.sheet_refs()
-      |> Enum.take(@max_sheets)
+      |> cap_links()
       |> fetch_sheets(base)
       |> Enum.map(fn {css, base} -> {:author, css, base} end)
 
@@ -338,6 +338,17 @@ defmodule Browser.Page do
 
   # Sheets `Browser.Prefetch` started while the HTML arrived are collected here, in the
   # process that received it; the rest are fetched in parallel now.
+  # at most @max_sheets linked sheets are fetched; inline <style> blocks cost nothing, so all stay
+  defp cap_links(refs) do
+    {kept, _} =
+      Enum.flat_map_reduce(refs, 0, fn
+        {:link, _} = ref, n -> if n < @max_sheets, do: {[ref], n + 1}, else: {[], n}
+        ref, n -> {[ref], n}
+      end)
+
+    kept
+  end
+
   defp fetch_sheets(refs, base) do
     refs
     |> Enum.map(&prefetched(&1, base))
