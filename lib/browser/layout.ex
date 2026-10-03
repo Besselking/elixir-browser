@@ -1123,7 +1123,14 @@ defmodule Browser.Layout do
     mr = if box.mr == :auto, do: 0, else: box.mr
 
     acc = [{:inset, ml + box.pl, mr + box.pr}, {:gap, box.mt}, {:flush} | acc]
-    acc = if type == "none", do: acc, else: [{:marker, marker(type, n), li_style} | acc]
+
+    acc =
+      cond do
+        is_binary(c["marker-content"]) -> [{:marker, c["marker-content"], li_style} | acc]
+        type == "none" -> acc
+        true -> [{:marker, marker(type, n), li_style} | acc]
+      end
+
     acc = walk(kids, li_style, acc)
     acc = [{:flush} | acc]
     [{:gap, box.mb}, {:inset_end} | acc]
@@ -2070,10 +2077,10 @@ defmodule Browser.Layout do
         radii when decorated? ->
           # the border must be painted over the images and inset shadows
           rounded(x, y, w, height, o.bg, radii, {0, 0, 0, 0}, o.bc) ++
-            images_item ++ insets ++ rounded(x, y, w, height, nil, radii, o.bw, o.bc)
+            images_item ++ insets ++ rounded(x, y, w, height, nil, radii, o.bw, o.bc, o[:bs])
 
         radii ->
-          rounded(x, y, w, height, o.bg, radii, o.bw, o.bc)
+          rounded(x, y, w, height, o.bg, radii, o.bw, o.bc, o[:bs])
       end
 
     # a control without background or border still has a box: keep it for its bounds
@@ -2095,8 +2102,9 @@ defmodule Browser.Layout do
     {x0, y0, x1 - x0, y1 - y0}
   end
 
-  defp rounded(x, y, w, h, bg, radii, bw, bc) do
-    border = if bw == {0, 0, 0, 0}, do: nil, else: %{w: bw, c: bc}
+  # `bs` are the sides' styles (:solid, :dashed, :dotted), which the painter draws
+  defp rounded(x, y, w, h, bg, radii, bw, bc, bs \\ nil) do
+    border = if bw == {0, 0, 0, 0}, do: nil, else: %{w: bw, c: bc, s: bs}
 
     if w > 0 and h > 0 and (bg || border) do
       [%{type: :rect, x: x, y: y, w: w, h: h, color: bg, radius: radii, border: border}]

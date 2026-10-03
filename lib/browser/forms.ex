@@ -227,8 +227,7 @@ defmodule Browser.Forms do
 
     with {_, cid} <- List.keyfind(attrs, "@cid", 0),
          %{} = control <- Map.get(controls, cid),
-         false <- list_style_none?(attrs) do
-      mark = if current(control, state).checked, do: "▾ ", else: "▸ "
+         mark when mark not in [nil, ""] <- summary_marker(attrs, current(control, state).checked) do
       {:element, "summary", attrs, [text(mark) | kids]}
     else
       _ -> {:element, "summary", attrs, kids}
@@ -243,10 +242,21 @@ defmodule Browser.Forms do
 
   defp summary?(_node, _cid), do: false
 
-  defp list_style_none?(attrs) do
+  # the text of `summary::marker`, else a triangle (none with `list-style: none`)
+  defp summary_marker(attrs, open?) do
+    case List.keyfind(attrs, "@marker", 0) do
+      {_, {closed, open}} when closed != nil or open != nil ->
+        if(open?, do: open, else: closed) || default_marker(attrs, open?)
+
+      _ ->
+        default_marker(attrs, open?)
+    end
+  end
+
+  defp default_marker(attrs, open?) do
     case List.keyfind(attrs, "@computed", 0) do
-      {_, %{"list-style-type" => "none"}} -> true
-      _ -> false
+      {_, %{"list-style-type" => "none"}} -> nil
+      _ -> if open?, do: "▾ ", else: "▸ "
     end
   end
 
@@ -257,6 +267,12 @@ defmodule Browser.Forms do
 
   defp restyle_checked(attrs, %{type: type, checked: initial}, %{checked: now})
        when type in ["checkbox", "radio"] and initial != now do
+    if List.keymember?(attrs, "@content", 0), do: attrs, else: checked_look(attrs, type, now)
+  end
+
+  defp restyle_checked(attrs, _control, _cur), do: attrs
+
+  defp checked_look(attrs, type, now) do
     {bg, fg, border} =
       case {type, now} do
         {"checkbox", true} -> {@blue, {255, 255, 255}, @blue}
@@ -282,7 +298,10 @@ defmodule Browser.Forms do
     end
   end
 
-  defp restyle_checked(attrs, _control, _cur), do: attrs
+  defp default_check("checkbox", _attrs, cur), do: [text(if cur.checked, do: "✓", else: @empty)]
+
+  defp default_check("radio", attrs, cur),
+    do: if(cur.checked, do: [dot(attrs)], else: [text(@empty)])
 
   defp content(%{tag: "input", type: type}, attrs, cur) do
     placeholder = attr(attrs, "placeholder")
@@ -291,11 +310,14 @@ defmodule Browser.Forms do
       "hidden" ->
         []
 
-      "checkbox" ->
-        [text(if cur.checked, do: "✓", else: @empty)]
+      t when t in ["checkbox", "radio"] ->
+        case List.keyfind(attrs, "@content", 0) do
+          {_, {unchecked, checked}} ->
+            [text(if(cur.checked, do: checked, else: unchecked) || @empty)]
 
-      "radio" ->
-        if cur.checked, do: [dot(attrs)], else: [text(@empty)]
+          nil ->
+            default_check(t, attrs, cur)
+        end
 
       t when t in ["submit", "button", "reset"] ->
         [text(button_label(t, cur.value, has?(attrs, "value")))]

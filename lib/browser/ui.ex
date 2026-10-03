@@ -963,14 +963,15 @@ defmodule Browser.UI do
     :wxGraphicsPath.closeSubpath(path)
   end
 
-  defp borders(gc, x, y, w, h, radii, %{w: {bt, br, bb, bl}, c: {tc, rc, bc, lc}}) do
+  defp borders(gc, x, y, w, h, radii, %{w: {bt, br, bb, bl}, c: {tc, rc, bc, lc}} = border) do
     {{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}} = radii
+    {st, sr, sb, sl} = Map.get(border, :s) || {:solid, :solid, :solid, :solid}
 
     # straight parts of the four sides
-    strip(gc, tc, x + tlx, y, w - tlx - trx, bt)
-    strip(gc, bc, x + blx, y + h - bb, w - blx - brx, bb)
-    strip(gc, lc, x, y + tly, bl, h - tly - bly)
-    strip(gc, rc, x + w - br, y + try_, br, h - try_ - bry)
+    strip(gc, tc, st, :h, x + tlx, y, w - tlx - trx, bt)
+    strip(gc, bc, sb, :h, x + blx, y + h - bb, w - blx - brx, bb)
+    strip(gc, lc, sl, :v, x, y + tly, bl, h - tly - bly)
+    strip(gc, rc, sr, :v, x + w - br, y + try_, br, h - try_ - bry)
 
     # corners: local coordinates run from the corner point inwards along (dx, dy)
     corner(gc, pick(tc, bt, lc, bl), x, y, 1, 1, {tlx, tly}, bl, bt)
@@ -982,10 +983,31 @@ defmodule Browser.UI do
   # colour of the thicker of the two sides meeting at a corner (horizontal wins ties)
   defp pick(hc, ht, vc, vt), do: if(ht >= vt, do: hc || vc, else: vc || hc)
 
-  defp strip(_gc, nil, _x, _y, _w, _h), do: :ok
-  defp strip(_gc, _c, _x, _y, w, h) when w <= 0 or h <= 0, do: :ok
+  defp strip(_gc, nil, _style, _dir, _x, _y, _w, _h), do: :ok
+  defp strip(_gc, _c, _style, _dir, _x, _y, w, h) when w <= 0 or h <= 0, do: :ok
 
-  defp strip(gc, color, x, y, w, h) do
+  # a dashed or dotted side: dashes 3 thick (dots 1) with gaps as long, spread to fit the side
+  defp strip(gc, color, style, dir, x, y, w, h) when style in [:dashed, :dotted] do
+    {len, t} = if dir == :h, do: {w, h}, else: {h, w}
+    {dash, gap} = if style == :dashed, do: {3 * t, 3 * t}, else: {t, t}
+    n = max(round((len + gap) / (dash + gap)), 1)
+    dash_len = if n == 1, do: len, else: (len - (n - 1) * gap) / n
+
+    :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+    path = :wxGraphicsContext.createPath(gc)
+
+    for i <- 0..(n - 1) do
+      at = i * (dash_len + gap)
+
+      if dir == :h,
+        do: :wxGraphicsPath.addRectangle(path, x + at, y, dash_len, h),
+        else: :wxGraphicsPath.addRectangle(path, x, y + at, w, dash_len)
+    end
+
+    :wxGraphicsContext.fillPath(gc, path)
+  end
+
+  defp strip(gc, color, _style, _dir, x, y, w, h) do
     :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
     path = :wxGraphicsContext.createPath(gc)
     :wxGraphicsPath.addRectangle(path, x, y, w, h)

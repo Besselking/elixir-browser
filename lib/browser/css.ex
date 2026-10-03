@@ -6,13 +6,14 @@ defmodule Browser.CSS do
   `|=`, `^=`, `$=`, `*=`, `i` flag), the descendant/child/next-sibling/
   subsequent-sibling combinators, and these pseudo-classes: `:root`, `:empty`,
   `:first-child`, `:last-child`, `:only-child`, `:first-of-type`, `:nth-child()`,
-  `:nth-last-child()`, `:nth-of-type()`, `:link`, `:disabled`, `:enabled`, and
+  `:nth-last-child()`, `:nth-of-type()`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
   `:not()`/`:is()`/`:where()` over lists of compound selectors. State-dependent
   pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
   `:not(:focus)` true.
 
-  A selector may end in `::before` or `::after` (or the one-colon forms): its rule styles
-  the generated box, and carries `pseudo: :before | :after` (nil for other rules).
+  A selector may end in `::before`, `::after` (or the one-colon forms) or `::marker`: its
+  rule styles the generated box or marker, and carries `pseudo: :before | :after | :marker`
+  (nil for other rules).
   Selectors using anything else (`::marker`, `:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered; other at-rules (`@import`, `@font-face`,
@@ -188,12 +189,15 @@ defmodule Browser.CSS do
 
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
-    case Regex.run(~r/\A(.*?)::?(before|after)\z/su, str) do
-      [_, "", which] -> {"*", String.to_atom(which)}
-      [_, head, which] -> {head, String.to_atom(which)}
+    case Regex.run(~r/\A(.*?)(?:::(before|after|marker)|:(before|after))\z/su, str) do
+      [_, head, which] -> {head_or_any(head), String.to_atom(which)}
+      [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
       nil -> {str, nil}
     end
   end
+
+  defp head_or_any(""), do: "*"
+  defp head_or_any(head), do: head
 
   # an identifier: name characters and escapes (`\[`, `\:`, `\31 `), as in Tailwind's `.w-\[10px\]`
   @ident ~S"(?:[\w\-\x{80}-\x{10FFFF}]|\\(?:[0-9a-fA-F]{1,6}\s?|[^\n0-9a-fA-F]))+"
@@ -291,8 +295,8 @@ defmodule Browser.CSS do
 
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
-  @never ~w(hover focus focus-within focus-visible active visited target checked indeterminate)
-  @simple ~w(root empty first-child last-child only-child first-of-type link any-link disabled enabled)
+  @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
+  @simple ~w(root empty first-child last-child only-child first-of-type link any-link disabled enabled checked)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -523,6 +527,10 @@ defmodule Browser.CSS do
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
 
   defp pseudo?(:disabled, ctx), do: List.keymember?(ctx.attrs, "disabled", 0)
+
+  defp pseudo?(:checked, ctx),
+    do: List.keymember?(ctx.attrs, "checked", 0) or List.keymember?(ctx.attrs, "selected", 0)
+
   defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))

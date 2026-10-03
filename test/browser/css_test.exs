@@ -60,7 +60,7 @@ defmodule Browser.CSSTest do
   end
 
   test "drops selectors that cannot be evaluated but keeps the rest of the list" do
-    rules = CSS.parse("a:hover, b, c::marker, d:nth-child(2), e:has(a) { x: y }")
+    rules = CSS.parse("a:hover, b, c::selection, d:nth-child(2), e:has(a) { x: y }")
     assert Enum.map(rules, fn %{selector: [{c, nil}]} -> c.tag end) == ["a", "b", "d"]
   end
 
@@ -191,12 +191,13 @@ defmodule Browser.CSSTest do
   test "::before and ::after (and the one-colon forms) mark the rule as styling a generated box" do
     rules = CSS.parse("a::before, b:after, ::after, c:hover::before { x: y } d { x: y }")
     assert Enum.map(rules, & &1.pseudo) == [:before, :after, :after, :before, nil]
+    assert [%{pseudo: :marker}] = CSS.parse("li::marker { content: \"> \" }")
     assert [{%{tag: "a"}, nil}] = hd(rules).selector
     assert [{%{tag: :any}, nil}] = Enum.at(rules, 2).selector
   end
 
   test "unsupported selectors are still dropped" do
-    assert :error = CSS.parse_selector("p::marker")
+    assert :error = CSS.parse_selector("p::selection")
     assert :error = CSS.parse_selector("p:has(a)")
     assert :error = CSS.parse_selector("p:is(a b)")
   end

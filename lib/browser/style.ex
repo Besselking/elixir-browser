@@ -215,12 +215,22 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo?: false}, fn {rule, order}, idx ->
-      idx = if Map.get(rule, :pseudo), do: %{idx | pseudo?: true}, else: idx
+    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo: MapSet.new()}, fn {rule, order},
+                                                                                  idx ->
+      idx = note_pseudo(idx, rule)
       rule = Map.put(rule, :order, order)
       Map.update(idx, key(rule), [rule], &[rule | &1])
     end)
   end
+
+  # which pseudo-elements have a rule that gives them `content` (the others make no box)
+  defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
+    if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
+      do: %{idx | pseudo: MapSet.put(idx.pseudo, which)},
+      else: idx
+  end
+
+  defp note_pseudo(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
@@ -753,6 +763,7 @@ defmodule Browser.Style do
             if not_rendered?(computed) do
               acc
             else
+              {computed, attrs} = marker(idx, ctx, computed, attrs)
               attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
               kids = prune_children(kids, ctx, idx)
               kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
@@ -765,15 +776,103 @@ defmodule Browser.Style do
     Enum.reverse(out)
   end
 
+  # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
+  # summaries. A summary's marker may depend on whether its `<details>` is open, so both are
+  # kept: `"@marker"` is `{closed_text, open_text}`.
+  defp marker(idx, %{tag: "li"} = ctx, computed, attrs) do
+    case marker_text(idx, ctx, ctx) do
+      nil -> {computed, attrs}
+      text -> {Map.put(computed, "marker-content", text), attrs}
+    end
+  end
+
+  defp marker(
+         idx,
+         %{tag: "summary", parent: %{tag: "details", attrs: pattrs} = parent} = ctx,
+         computed,
+         attrs
+       ) do
+    toggled = fn open? ->
+      pattrs = List.keydelete(pattrs, "open", 0)
+      pattrs = if open?, do: [{"open", ""} | pattrs], else: pattrs
+      %{ctx | parent: %{parent | attrs: pattrs}}
+    end
+
+    closed = marker_text(idx, toggled.(false), ctx)
+    open = marker_text(idx, toggled.(true), ctx)
+
+    if closed == nil and open == nil,
+      do: {computed, attrs},
+      else: {computed, [{"@marker", {closed, open}} | attrs]}
+  end
+
+  # A checkbox or radio button has no children for `::before`/`::after` to go beside, so
+  # their text replaces what it shows: `"@content"` is `{unchecked_text, checked_text}`.
+  defp marker(idx, %{tag: "input", attrs: iattrs} = ctx, computed, attrs) do
+    type = iattrs |> attr("type") |> String.downcase()
+
+    if type in ["checkbox", "radio"] and pseudo_any?(idx, [:before, :after]) do
+      toggled = fn checked? ->
+        iattrs = List.keydelete(iattrs, "checked", 0)
+        %{ctx | attrs: if(checked?, do: [{"checked", ""} | iattrs], else: iattrs)}
+      end
+
+      text = fn checked? ->
+        before = pseudo_text(idx, toggled.(checked?), ctx, :before)
+        after_ = pseudo_text(idx, toggled.(checked?), ctx, :after)
+        if before || after_, do: (before || "") <> (after_ || "")
+      end
+
+      case {text.(false), text.(true)} do
+        {nil, nil} -> {computed, attrs}
+        content -> {unboxed(computed), [{"@content", content} | attrs]}
+      end
+    else
+      {computed, attrs}
+    end
+  end
+
+  defp marker(_idx, _ctx, computed, attrs), do: {computed, attrs}
+
+  # text drawn instead of the native box: the box's fixed 13px height (a user-agent value) and
+  # its clipping would cut it
+  defp unboxed(computed) do
+    ["height", "line-height"]
+    |> Enum.reduce(computed, fn k, c -> if c[k] == 13.0, do: Map.delete(c, k), else: c end)
+    |> Map.drop(["overflow-x", "overflow-y"])
+  end
+
+  defp pseudo_any?(idx, which),
+    do: Enum.any?(which, &MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), &1))
+
+  # spaces don't collapse in a marker
+  defp marker_text(idx, match_ctx, ctx) do
+    with text when is_binary(text) <- pseudo_text(idx, match_ctx, ctx, :marker),
+         do: String.replace(text, " ", "\u00A0")
+  end
+
+  # the `content` text of a pseudo-element: matched against `match_ctx`, inheriting from `ctx`
+  defp pseudo_text(idx, match_ctx, ctx, which) do
+    if MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), which) do
+      {computed, _} = compute(idx, match_ctx, ctx, which)
+      content_text(computed["content"], ctx.attrs)
+    end
+  end
+
   # The box `::before` / `::after` makes: a `span` holding the `content` text, styled by the
   # pseudo-element rules. Nothing is made without `content` (or with `none`/`normal`), for
   # `display: none`, or for elements whose content is not their children.
   @no_pseudo ~w(input select textarea img br hr svg video canvas iframe option)
 
-  defp generated(%{pseudo?: false}, _ctx, _which), do: []
   defp generated(_idx, %{tag: tag}, _which) when tag in @no_pseudo, do: []
 
   defp generated(idx, ctx, which) do
+    if MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), which),
+      do: generate(idx, ctx, which),
+      else: []
+  end
+
+  defp generate(idx, ctx, which) do
     {computed, _custom} = compute(idx, ctx, ctx, which)
 
     with text when is_binary(text) <- content_text(computed["content"], ctx.attrs),
@@ -1301,7 +1400,9 @@ defmodule Browser.Style do
           "in" -> n * 96
           "cm" -> n * 96 / 2.54
           "mm" -> n * 96 / 25.4
-          u when u in ["ex", "ch"] -> n * env.fs / 2
+          "ex" -> n * env.fs / 2
+          # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
+          "ch" -> n * env.fs * 0.6
           u -> if px = viewport_unit(u, env), do: n * px
         end
 

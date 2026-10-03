@@ -523,4 +523,23 @@ defmodule Browser.FormsTest do
       assert controls == %{}
     end
   end
+
+  describe "summary markers from the page" do
+    test "the page's marker text is shown for each state, instead of the triangle" do
+      attrs = [{"@marker", {">\u00A0", "x\u00A0"}}]
+      html = "<details><summary>More</summary><p>t</p></details>"
+      {nodes, %{controls: controls}} = html |> HTML.parse() |> Forms.index()
+      [{:element, "details", dattrs, [{:element, "summary", sattrs, skids}, p]}] = nodes
+      nodes = [{:element, "details", dattrs, [{:element, "summary", sattrs ++ attrs, skids}, p]}]
+
+      assert [{:element, _, _, [{:element, _, _, [{:text, ">\u00A0"} | _]}]}] =
+               Forms.render(nodes, %{}, controls)
+
+      [cid] = Map.keys(controls)
+      state = Forms.toggle(%{}, controls, cid)
+
+      assert [{:element, _, _, [{:element, _, _, [{:text, "x\u00A0"} | _]}, _]}] =
+               Forms.render(nodes, state, controls)
+    end
+  end
 end

@@ -813,4 +813,34 @@ defmodule Browser.StyleTest do
       refute c["color"] == {255, 0, 0}
     end
   end
+
+  describe "marker and checkbox content" do
+    test "li::marker content reaches the list item's computed style" do
+      [{:element, "ul", _, [{:element, "li", attrs, _}]}] =
+        prune("<ul><li>a</li></ul>", ~s(li::marker { content: "> " }))
+
+      assert {"@computed", %{"marker-content" => ">\u00A0"}} = List.keyfind(attrs, "@computed", 0)
+    end
+
+    test "summary::marker can differ between closed and open details" do
+      css =
+        ~s(summary::marker { content: "> " } details[open] > summary::marker { content: "x " })
+
+      [{:element, "details", _, [{:element, "summary", attrs, _}]}] =
+        prune("<details><summary>s</summary></details>", css)
+
+      assert {"@marker", {">\u00A0", "x\u00A0"}} = List.keyfind(attrs, "@marker", 0)
+    end
+
+    test "a checkbox's ::after content, for each state, replaces its mark" do
+      css = ~s(input::after { content: "[ ]" } input:checked::after { content: "[x]" })
+      [{:element, "input", attrs, _}] = prune(~s(<input type="checkbox">), css)
+      assert {"@content", {"[ ]", "[x]"}} = List.keyfind(attrs, "@content", 0)
+    end
+
+    test "ch is about 0.6em" do
+      [{:element, "p", attrs, _}] = prune(~s(<p style="font-size:10px; width:5ch">x</p>))
+      assert {"@computed", %{"width" => 30.0}} = List.keyfind(attrs, "@computed", 0)
+    end
+  end
 end
