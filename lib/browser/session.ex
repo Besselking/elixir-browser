@@ -11,7 +11,19 @@ defmodule Browser.Session do
   use GenServer
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1]
 
-  alias Browser.{Fetch, Forms, History, Images, Interact, Layout, Page, Selection, TextEdit, UI}
+  alias Browser.{
+    Fetch,
+    Forms,
+    History,
+    Images,
+    Interact,
+    Layout,
+    Page,
+    Selection,
+    TextEdit,
+    UI,
+    Visits
+  }
 
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
@@ -48,6 +60,11 @@ defmodule Browser.Session do
       # the page's JavaScript runtime, when it has scripts
       js: nil,
       history: History.new(),
+      # pages visited, kept between runs, and what the address bar is suggesting from them:
+      # `%{items: [{url, title}], idx: highlighted or -1, typed: what the user typed}`
+      visits: Visits.load(),
+      suggest: nil,
+      url_text: nil,
       page: nil,
       nodes: [],
       items: [],
@@ -141,7 +158,7 @@ defmodule Browser.Session do
         :history -> state.history
       end
 
-    UI.set_url_text(state.ui, page.url)
+    state = state |> set_url_text(page.url) |> remember(result, mode, page)
     UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
     UI.set_status(state.ui, "Done")
 
@@ -267,6 +284,55 @@ defmodule Browser.Session do
       when obj == state.ui.url,
       do: {:noreply, load(state, Fetch.normalize(to_string(str)), :push)}
 
+  # typing in the address bar suggests visited pages (not when the text was set by the browser)
+  def handle_info(
+        wx(obj: obj, event: wxCommand(type: :command_text_updated, cmdString: str)),
+        state
+      )
+      when obj == state.ui.url do
+    text = to_string(str)
+
+    if text == state.url_text do
+      {:noreply, state}
+    else
+      items = Visits.suggest(state.visits, text)
+      UI.show_suggestions(state.ui, items)
+      {:noreply, %{state | suggest: %{items: items, idx: -1, typed: text}, url_text: text}}
+    end
+  end
+
+  def handle_info({:url_key, 27}, state) do
+    UI.hide_suggestions(state.ui)
+    {:noreply, %{state | suggest: nil}}
+  end
+
+  def handle_info({:url_key, key}, %{suggest: %{items: [_ | _]} = sg} = state) do
+    n = length(sg.items)
+    idx = if key == 317, do: min(sg.idx + 1, n - 1), else: max(sg.idx - 1, -1)
+    UI.select_suggestion(state.ui, idx)
+
+    text = if idx == -1, do: sg.typed, else: elem(Enum.at(sg.items, idx), 0)
+    UI.put_url_text(state.ui, text)
+    {:noreply, %{state | suggest: %{sg | idx: idx}, url_text: text}}
+  end
+
+  def handle_info({:url_key, _}, state), do: {:noreply, state}
+
+  def handle_info(
+        wx(obj: obj, event: wxCommand(type: :command_listbox_selected, commandInt: i)),
+        state
+      )
+      when obj == state.ui.suggest do
+    case state.suggest && Enum.at(state.suggest.items, i) do
+      {url, _} ->
+        UI.hide_suggestions(state.ui)
+        {:noreply, load(%{state | suggest: nil}, url, :push)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(wx(obj: obj, event: wxCommand(type: :command_button_clicked)), state) do
     ui = state.ui
 
@@ -305,6 +371,9 @@ defmodule Browser.Session do
   end
 
   def handle_info(wx(event: wxMouse(type: :left_down, x: wx_x, y: y, shiftDown: shift)), state) do
+    UI.hide_suggestions(state.ui)
+    state = %{state | suggest: nil}
+
     x = wx_x + state.scroll_x
     UI.focus_page(state.ui)
     py = y + state.scroll
@@ -1324,7 +1393,7 @@ defmodule Browser.Session do
         do: History.visit(state.history, url),
         else: History.replace(state.history, url)
 
-    UI.set_url_text(state.ui, url)
+    state = set_url_text(state, url)
     page = state.page && %{state.page | url: url}
     sync_buttons(%{state | history: history, url: url, page: page})
   end
@@ -1514,8 +1583,23 @@ defmodule Browser.Session do
       else: load(state, url, :push)
   end
 
+  # the address bar shows `text`; the change is not something the user typed
+  defp set_url_text(state, text) do
+    UI.set_url_text(state.ui, text)
+    %{state | url_text: text, suggest: nil}
+  end
+
+  # a page that loaded is added to the history (an error page, or back/forward, is not)
+  defp remember(state, {:ok, _}, :push, page) do
+    visits = Visits.record(state.visits, page.url, page.title)
+    Task.start(fn -> Visits.save(visits) end)
+    %{state | visits: visits}
+  end
+
+  defp remember(state, _result, _mode, _page), do: state
+
   defp go_to_fragment(state, url, fragment) do
-    UI.set_url_text(state.ui, url)
+    state = set_url_text(state, url)
 
     state =
       %{

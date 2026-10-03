@@ -20,7 +20,18 @@ defmodule Browser.UI do
   @horizontal 4
   @vertical 8
 
-  defstruct [:frame, :url, :back, :forward, :reload, :panel, :status, :cursors]
+  defstruct [
+    :frame,
+    :url,
+    :back,
+    :forward,
+    :reload,
+    :panel,
+    :status,
+    :cursors,
+    :toolbar,
+    :suggest
+  ]
 
   def build do
     :ets.new(@view, [:named_table, :public])
@@ -82,6 +93,21 @@ defmodule Browser.UI do
     :wxFrame.connect(frame, :close_window)
     :wxFrame.connect(frame, :command_menu_selected)
     :wxTextCtrl.connect(url, :command_text_enter)
+    :wxTextCtrl.connect(url, :command_text_updated)
+
+    # up, down and escape belong to the suggestions; everything else is typing
+    me_url = self()
+
+    :wxTextCtrl.connect(url, :key_down,
+      callback: fn wx(event: wxKey(keyCode: k)), ev ->
+        if k in [27, 315, 317], do: send(me_url, {:url_key, k}), else: :wxEvent.skip(ev)
+      end
+    )
+
+    # the dropdown floats over the page, below the address bar
+    suggest = :wxListBox.new(frame, -1, pos: {0, 0}, size: {100, 100})
+    :wxWindow.hide(suggest)
+    :wxListBox.connect(suggest, :command_listbox_selected)
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
     :wxPanel.connect(panel, :left_down)
     :wxPanel.connect(panel, :left_up)
@@ -117,6 +143,8 @@ defmodule Browser.UI do
       reload: reload,
       panel: panel,
       status: status,
+      toolbar: toolbar,
+      suggest: suggest,
       cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
   end
@@ -1231,7 +1259,46 @@ defmodule Browser.UI do
   defp clipped_in?(%{clip: c}, x, y), do: inside?(x, y, c.x, c.y, c.w, c.h)
   defp clipped_in?(_, _, _), do: true
 
-  def set_url_text(%{url: url}, text), do: :wxTextCtrl.setValue(url, String.to_charlist(text))
+  def set_url_text(%{url: url} = ui, text) do
+    hide_suggestions(ui)
+    :wxTextCtrl.setValue(url, String.to_charlist(text))
+  end
+
+  @doc "Puts text in the address bar and leaves the suggestions as they are."
+  def put_url_text(%{url: url}, text), do: :wxTextCtrl.setValue(url, String.to_charlist(text))
+
+  @row_h 22
+
+  @doc "Shows the address suggestions (`[{url, title}]`) under the address bar; none hides them."
+  def show_suggestions(ui, []), do: hide_suggestions(ui)
+
+  def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
+    {x, _} = :wxWindow.getPosition(url)
+    {w, _} = :wxWindow.getSize(url)
+    {_, y} = :wxWindow.getSize(toolbar)
+    :wxListBox.clear(list)
+
+    for {u, title} <- items do
+      label = if title in [nil, ""], do: u, else: "#{title} — #{u}"
+      :wxListBox.append(list, String.to_charlist(label))
+    end
+
+    :wxWindow.setSize(list, x, y, w, min(length(items), 8) * @row_h + 6)
+    :wxWindow.raise(list)
+    :wxWindow.show(list)
+  end
+
+  def hide_suggestions(%{suggest: list}), do: :wxWindow.hide(list)
+
+  @doc "Highlights suggestion `i` (-1: none)."
+  def select_suggestion(%{suggest: list}, -1) do
+    case :wxListBox.getSelection(list) do
+      -1 -> :ok
+      i -> :wxListBox.deselect(list, i)
+    end
+  end
+
+  def select_suggestion(%{suggest: list}, i), do: :wxListBox.setSelection(list, i)
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
   def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
