@@ -191,7 +191,12 @@ defmodule Browser.JS.Props do
     g = Keyword.get(opts, :get, g)
     s = Keyword.get(opts, :set, s)
 
-    define_own(obj, id, key, %{get: g, set: s, enumerable: true, configurable: true})
+    define_own(obj, id, key, %{
+      get: g,
+      set: s,
+      enumerable: Keyword.get(opts, :enumerable, true),
+      configurable: true
+    })
   end
 
   defp reject(key), do: throw_error("TypeError", "Cannot redefine property: #{key}")

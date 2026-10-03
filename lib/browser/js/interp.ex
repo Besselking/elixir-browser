@@ -641,6 +641,12 @@ defmodule Browser.JS.Interp do
 
   def call({:obj, id}, this, args) do
     case deref(id) do
+      %{class_info: info} ->
+        throw_error(
+          "TypeError",
+          "Class constructor #{info.name || ""} cannot be invoked without 'new'"
+        )
+
       %{class: :function, fun: {:native, _, fun}} ->
         tick()
         fun.(this, args)
@@ -660,25 +666,43 @@ defmodule Browser.JS.Interp do
 
   def call(_, _, _), do: throw_error("TypeError", "value is not a function")
 
-  def construct({:obj, id} = f, args) do
+  def construct(f, args, new_target \\ nil)
+
+  def construct({:obj, id} = f, args, new_target) do
     unless function?(f), do: throw_error("TypeError", "value is not a constructor")
 
     if match?(%{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr], deref(id)),
       do: throw_error("TypeError", "arrow function is not a constructor")
 
-    proto =
-      case get(f, "prototype") do
-        {:obj, _} = p -> p
-        _ -> proto(:object)
-      end
+    nt = new_target || f
 
-    this = new_object([], proto)
+    case Map.get(deref(id), :class_info) do
+      nil ->
+        proto =
+          case get(nt, "prototype") do
+            {:obj, _} = p -> p
+            _ -> proto(:object)
+          end
 
-    case call(f, this, args) do
-      {:obj, _} = result -> result
-      _ -> this
+        this = new_object([], proto)
+
+        case call(f, this, args) do
+          {:obj, rid} = result ->
+            # a built-in that makes its own object (Error, Array, an element) gets the
+            # prototype of the class that extended it
+            if new_target != nil and result != this, do: store(rid, %{deref(rid) | proto: proto})
+            result
+
+          _ ->
+            this
+        end
+
+      info ->
+        Browser.JS.Classes.construct(f, info, args, nt)
     end
   end
+
+  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
 
   def instance_of?({:obj, _} = o, {:obj, _} = f) do
     unless function?(f),
@@ -713,6 +737,7 @@ defmodule Browser.JS.Interp do
   def call_scope(c, this, args) do
     scope = new_scope(c.scope)
     if c.mode in [false, nil], do: declare(scope, :this, this)
+    if h = Map.get(c, :home), do: declare(scope, :home, h)
     bind_params(c.params, args, scope)
 
     if c.mode != :arrow_expr do
@@ -723,7 +748,12 @@ defmodule Browser.JS.Interp do
     scope
   end
 
-  defp run_closure(c, this, args) do
+  defp run_closure(c, this, args), do: elem(run_closure_scope(c, this, args, []), 0)
+
+  @doc false
+  # runs a function body, also handing back its scope (a constructor reads `this` from it);
+  # `extra` are more variables for the scope
+  def run_closure_scope(c, this, args, extra) do
     depth = Process.get(:js_depth)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     Process.put(:js_depth, depth + 1)
@@ -731,27 +761,62 @@ defmodule Browser.JS.Interp do
     try do
       scope = new_scope(c.scope)
       if c.mode in [false, nil], do: declare(scope, :this, this)
+      if h = Map.get(c, :home), do: declare(scope, :home, h)
+      for {k, v} <- extra, do: declare(scope, k, v)
       bind_params(c.params, args, scope)
 
-      case c.mode do
-        :arrow_expr ->
-          ev(c.body, scope)
+      result =
+        case c.mode do
+          :arrow_expr ->
+            ev(c.body, scope)
 
-        _ ->
-          hoist_vars(c.body, scope)
-          hoist_functions(c.body, scope)
+          _ ->
+            hoist_vars(c.body, scope)
+            hoist_functions(c.body, scope)
 
-          try do
-            exec_list(c.body, scope)
-            :undefined
-          catch
-            {:js_return, v} -> v
-          end
-      end
+            try do
+              exec_list(c.body, scope)
+              :undefined
+            catch
+              {:js_return, v} -> v
+            end
+        end
+
+      {result, scope}
     after
       Process.put(:js_depth, depth)
     end
   end
+
+  @doc false
+  def make_function(node, env), do: make_fn(node, env)
+
+  @doc false
+  # sets a field of a function's closure (the `home` object of a method)
+  def set_home({:obj, id}, home) do
+    o = deref(id)
+
+    case o.fun do
+      {:closure, c} -> store(id, %{o | fun: {:closure, Map.put(c, :home, home)}})
+      _ -> :ok
+    end
+  end
+
+  @doc false
+  def lookup_scoped(env, name), do: lookup_var(env, name)
+
+  @doc false
+  # the scope, along the chain from `env`, that holds the variable `name`
+  def scope_of(nil, _), do: nil
+
+  def scope_of(env, name) do
+    s = deref(env)
+    if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
+  end
+
+  @doc "A property read with a given `this` for getters (`super.x`)."
+  def get_with_receiver({:obj, id}, key, receiver), do: lookup(deref(id), to_key(key), receiver)
+  def get_with_receiver(_, _, _), do: :undefined
 
   defp bind_params([], _, _), do: :ok
 
@@ -1201,8 +1266,31 @@ defmodule Browser.JS.Interp do
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v
 
-  def ev({:this}, env),
-    do: with({:ok, v} <- lookup_var(env, :this), do: v, else: (_ -> :undefined))
+  def ev({:this}, env) do
+    case lookup_var(env, :this) do
+      {:ok, :uninit_this} ->
+        throw_error(
+          "ReferenceError",
+          "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+        )
+
+      {:ok, v} ->
+        v
+
+      :error ->
+        :undefined
+    end
+  end
+
+  def ev({:class, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
+
+  def ev({:call, {:super}, args, _}, env),
+    do: Browser.JS.Classes.super_call(eval_list(args, env), env)
+
+  def ev({:super_member, key}, env) do
+    {home, this} = Browser.JS.Classes.super_base(env)
+    get_with_receiver(home, ev_key(key, env), this)
+  end
 
   def ev({:id, name}, env) do
     case lookup_var(env, name) do
@@ -1367,6 +1455,10 @@ defmodule Browser.JS.Interp do
   def ev({:call, callee, args, opt}, env) do
     {f, this} =
       case callee do
+        {:super_member, key} ->
+          {home, this} = Browser.JS.Classes.super_base(env)
+          {get_with_receiver(home, ev_key(key, env), this), this}
+
         {:member, o, k, mopt} ->
           ov = ev(o, env)
           if mopt and nullish?(ov), do: throw(:js_short)

@@ -298,7 +298,12 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp statement([{:id, kw, _} | _]) when kw in ~w(class import with enum),
+  defp statement([{:id, "class", _}, {:id, name, _} | _] = [_ | ts]) when name not in @reserved do
+    {node, ts} = class_rest(ts)
+    {{:var, :let, [{{:id, name}, node}]}, ts}
+  end
+
+  defp statement([{:id, kw, _} | _]) when kw in ~w(import with enum),
     do: throw({:syntax, "`#{kw}` is not supported yet"})
 
   defp statement(ts), do: expression_statement(ts)
@@ -569,6 +574,78 @@ defmodule Browser.JS.Parser do
 
   defp property_key([{_, v, _} | _]),
     do: throw({:syntax, "unexpected token #{inspect(v)} as property name"})
+
+  # ── classes ────────────────────────────────────────────────
+
+  # after `class`: `Name? (extends expr)? { members }` -> {:class, name, super, members}
+  defp class_rest(ts) do
+    {name, ts} =
+      case ts do
+        [{:id, n, _} | t] when n not in @reserved and n != "extends" -> {n, t}
+        t -> {nil, t}
+      end
+
+    {super, ts} =
+      case ts do
+        [{:id, "extends", _} | t] -> call_chain(t)
+        t -> {nil, t}
+      end
+
+    ts = expect(ts, "{")
+    {members, ts} = class_members(ts, [])
+    {{:class, name, super, members}, ts}
+  end
+
+  defp class_members([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  defp class_members([{:p, ";", _} | ts], acc), do: class_members(ts, acc)
+
+  defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
+    {body, ts} = block_body(ts, [])
+    class_members(ts, [{:cmember, :block, nil, body, true} | acc])
+  end
+
+  defp class_members(ts, acc) do
+    {static?, ts} = class_modifier(ts, "static")
+    {async?, ts} = class_modifier(ts, "async")
+
+    {kind, ts} =
+      case ts do
+        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num] ->
+          {String.to_atom(k), tl(ts)}
+
+        [{:id, k, _}, {:p, "[", _} | _] when k in ["get", "set"] ->
+          {String.to_atom(k), tl(ts)}
+
+        _ ->
+          {:method, ts}
+      end
+
+    {key, shorthand, after_key} = property_key(ts)
+
+    case after_key do
+      [{:p, "(", _} | _] ->
+        {{:fn, _, _, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
+        value = if async?, do: {:async, fun}, else: fun
+        class_members(ts, [{:cmember, kind, key, value, static?} | acc])
+
+      [{:p, "=", _} | t] ->
+        {init, ts} = assignment(t)
+        class_members(semi_field(ts), [{:cmember, :field, key, init, static?} | acc])
+
+      t ->
+        class_members(semi_field(t), [{:cmember, :field, key, nil, static?} | acc])
+    end
+  end
+
+  # `static` / `async` as a modifier: followed by a member name, not by `(`, `=`, `;` or `}`
+  defp class_modifier([{:id, word, _}, {t, v, _} | _] = ts, word) do
+    if t == :p and v in ["(", "=", ";", "}"], do: {false, ts}, else: {true, tl(ts)}
+  end
+
+  defp class_modifier(ts, _), do: {false, ts}
+
+  defp semi_field([{:p, ";", _} | ts]), do: ts
+  defp semi_field(ts), do: ts
 
   # ── functions ──────────────────────────────────────────────
 
@@ -904,6 +981,18 @@ defmodule Browser.JS.Parser do
   defp primary([{:id, "false", _} | ts]), do: {{:lit, false}, ts}
   defp primary([{:id, "null", _} | ts]), do: {{:lit, :null}, ts}
   defp primary([{:id, "this", _} | ts]), do: {{:this}, ts}
+
+  defp primary([{:id, "class", _} | ts]), do: class_rest(ts)
+
+  defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
+
+  defp primary([{:id, "super", _}, {:p, ".", _}, {:id, name, _} | ts]),
+    do: {{:super_member, {:str, name}}, ts}
+
+  defp primary([{:id, "super", _}, {:p, "[", _} | ts]) do
+    {k, ts} = expression(ts)
+    {{:super_member, k}, expect(ts, "]")}
+  end
 
   defp primary([{:id, "async", _}, {:id, "function", _} | _] = [_ | rest]) do
     {fun, ts} = primary(rest)

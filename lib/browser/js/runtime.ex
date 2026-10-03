@@ -205,16 +205,24 @@ defmodule Browser.JS.Runtime do
     fun.()
   catch
     {:js_error, v} ->
-      log(:error, "Uncaught " <> describe(v))
+      log(:error, "Uncaught " <> describe(v) <> where())
       default
 
     :js_limit ->
-      log(:error, "script ran too long")
+      log(:error, "script ran too long" <> where())
       default
 
     {:syntax, msg} ->
-      log(:error, "SyntaxError: " <> msg)
+      log(:error, "SyntaxError: " <> msg <> where())
       default
+  end
+
+  # which script was running, for the console
+  defp where do
+    case Process.get(:rt_script) do
+      nil -> ""
+      label -> " (in #{label})"
+    end
   end
 
   defp describe(v) when is_binary(v), do: v
@@ -250,15 +258,19 @@ defmodule Browser.JS.Runtime do
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
 
     for s <- scripts, s.kind == :classic do
+      Process.put(:rt_script, label(s))
       with {:ok, src, base} <- script_source(s), do: guard(fn -> run_classic(src, base) end, :ok)
     end
 
     for s <- scripts, s.kind == :module do
+      Process.put(:rt_script, label(s))
+
       with {:ok, src, base} <- script_source(s) do
         guard(fn -> run_module_source(src, base) end, :ok)
       end
     end
 
+    Process.delete(:rt_script)
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
     Browser.JS.Promise.run_microtasks()
@@ -282,6 +294,11 @@ defmodule Browser.JS.Runtime do
       %{kind: kind, src: DOM.get_attr(n, "src"), text: text}
     end
   end
+
+  defp label(%{src: src}) when is_binary(src) and src != "", do: src
+
+  defp label(%{text: text}),
+    do: "inline script: " <> (text |> String.trim() |> String.slice(0, 50))
 
   defp script_source(%{src: src}) when is_binary(src) and src != "" do
     url = Browser.Fetch.resolve(page_url(), src)
