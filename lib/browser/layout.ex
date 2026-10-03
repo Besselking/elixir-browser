@@ -584,6 +584,9 @@ defmodule Browser.Layout do
           [{:flush} | acc]
 
         kind ->
+          # an element that can be linked to (`#id`) needs to know where its box starts, which
+          # nothing drawn says for a plain block
+          c = if List.keymember?(attrs, "id", 0), do: Map.put(c, :anchor, true), else: c
           block_ops(tag, kind, kids, style, c, acc)
       end
     end
@@ -976,6 +979,8 @@ defmodule Browser.Layout do
         nil -> [{:gap, box.mt}, {:flush} | acc]
         side -> [{:gap, box.mt}, {:clear, side}, {:flush} | acc]
       end
+
+    acc = if Map.get(c, :anchor) && style.nid, do: [{:anchor, style.nid} | acc], else: acc
 
     if tag == "hr" do
       [{:hr}, {:gap, box.mb} | acc]
@@ -1676,6 +1681,21 @@ defmodule Browser.Layout do
     st = if st.y == y0, do: contain_floats(st, n0), else: st
     st = end_block(st)
     %{st | insets: rest, left: l, right: r}
+  end
+
+  # where a block that has an id starts, for `#fragment`s and `scrollIntoView`
+  defp op({:anchor, nid}, st) do
+    item = %{
+      type: :box,
+      nid: nid,
+      x: st.margin + st.left,
+      y: st.y + max(st.gap, 0) + min(st.ngap, 0),
+      w: max(st.width - 2 * st.margin - st.left - st.right, 0),
+      h: 0,
+      rr: 0
+    }
+
+    %{st | items: [item | st.items], n: st.n + 1}
   end
 
   defp op({:hr}, st) do

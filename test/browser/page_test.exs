@@ -299,6 +299,23 @@ defmodule Browser.PageTest do
       assert_in_delta Browser.Nids.anchor_y(page.pruned, rects, "s"), heading_top - 42, 8
     end
 
+    test "a plain block with an id starts at its own top, padding included" do
+      html =
+        ~s|<div style="height: 300px">top</div><section id="s" style="padding-top: 80px"><h2>Sponsors</h2></section>|
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0}
+      page = Page.build(html, "http://t.test/", env)
+      measure = fn text, style -> String.length(text) * style.size * 0.5 end
+      {items, _} = Browser.Layout.layout(page.nodes, 800, measure, 600)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      heading =
+        items |> Enum.find(&(&1.type == :text and &1.text == "Sponsors")) |> Map.fetch!(:y)
+
+      assert_in_delta Browser.Nids.anchor_y(page.pruned, rects, "s"), 300, 8
+      assert heading > 370
+    end
+
     test "a url is split into the address and its fragment" do
       assert Browser.Fetch.split_fragment("http://a.test/x?y=1#sec") ==
                {"http://a.test/x?y=1", "sec"}
