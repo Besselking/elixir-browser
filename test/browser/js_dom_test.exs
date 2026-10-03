@@ -32,6 +32,17 @@ defmodule Browser.JS.DOMTest do
     reply
   end
 
+  test "performance.now counts from the start of the page, not from the machine's boot" do
+    r =
+      run("""
+      var t = performance.now();
+      var e = new Event("x");
+      console.log(t >= 0 && t < 60000, e.timeStamp >= 0 && e.timeStamp < 60000);
+      """)
+
+    assert logs(r) == ["true true"]
+  end
+
   describe "the tree" do
     test "queries, text and attributes" do
       r =

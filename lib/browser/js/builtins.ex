@@ -1715,6 +1715,22 @@ defmodule Browser.JS.Builtins do
 
     perf = new_object()
     declare(scope, "performance", perf)
-    def_fn(perf, "now", fn _, _ -> float(System.monotonic_time(:microsecond)) / 1000 end)
+    def_fn(perf, "now", fn _, _ -> perf_now() end)
+  end
+
+  @doc "Milliseconds since the page's time origin (the first time anything asked)."
+  def perf_now do
+    origin =
+      case Process.get(:js_time_origin) do
+        nil ->
+          t = System.monotonic_time(:microsecond)
+          Process.put(:js_time_origin, t)
+          t
+
+        t ->
+          t
+      end
+
+    float(System.monotonic_time(:microsecond) - origin) / 1000
   end
 end

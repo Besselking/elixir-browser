@@ -1244,7 +1244,7 @@ defmodule Browser.JS.DOM do
           {"cancelable", cancelable},
           {"eventPhase", 0.0},
           {"isTrusted", true},
-          {"timeStamp", float(System.monotonic_time(:millisecond))}
+          {"timeStamp", Browser.JS.Builtins.perf_now()}
         ] ++
           for({k, v} <- init, is_binary(k), do: {k, v}),
         proto({:dom, :event})
@@ -2768,7 +2768,7 @@ defmodule Browser.JS.DOM do
             {"cancelable", opt.("cancelable")},
             {"eventPhase", 0.0},
             {"isTrusted", false},
-            {"timeStamp", float(System.monotonic_time(:millisecond))}
+            {"timeStamp", Browser.JS.Builtins.perf_now()}
           ],
           event
         )
