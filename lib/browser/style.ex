@@ -741,39 +741,38 @@ defmodule Browser.Style do
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
+    prune_list(nodes, parent, idx, count, 0, [], [])
+  end
 
-    {out, _} =
-      Enum.reduce(nodes, {[], {0, []}}, fn
-        {:text, _} = t, {acc, state} ->
-          {[t | acc], state}
+  defp prune_list([], _parent, _idx, _count, _i, _prev, acc), do: Enum.reverse(acc)
 
-        {:element, tag, attrs, kids}, {acc, {i, prev}} ->
-          ctx = context(tag, attrs, kids, parent, prev, i, count)
-          {computed, custom} = compute(idx, ctx, parent)
-          computed = blockify_grid_item(computed, parent)
-          root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
+  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc),
+    do: prune_list(rest, parent, idx, count, i, prev, [t | acc])
 
-          ctx =
-            ctx
-            |> Map.put(:computed, computed)
-            |> Map.put(:custom, custom)
-            |> Map.put(:root_fs, root)
+  defp prune_list([{:element, tag, attrs, kids} | rest], parent, idx, count, i, prev, acc) do
+    ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
+    {computed, custom} = compute(idx, ctx, parent)
+    computed = blockify_grid_item(computed, parent)
+    root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
-          acc =
-            if not_rendered?(computed) do
-              acc
-            else
-              {computed, attrs} = marker(idx, ctx, computed, attrs)
-              attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
-              kids = prune_children(kids, ctx, idx)
-              kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
-              [{:element, tag, attrs, kids} | acc]
-            end
+    ctx =
+      ctx
+      |> Map.put(:computed, computed)
+      |> Map.put(:custom, custom)
+      |> Map.put(:root_fs, root)
 
-          {acc, {i + 1, [ctx | prev]}}
-      end)
+    acc =
+      if not_rendered?(computed) do
+        acc
+      else
+        {computed, attrs} = marker(idx, ctx, computed, attrs)
+        attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
+        kids = prune_children(kids, ctx, idx)
+        kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+        [{:element, tag, attrs, kids} | acc]
+      end
 
-    Enum.reverse(out)
+    prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc)
   end
 
   # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
@@ -1491,27 +1490,5 @@ defmodule Browser.Style do
       [_, n] -> to_float(n) >= 50.0
       nil -> Regex.match?(~r/\Acircle\(\s*0(?:px|%)?\s*[\s)]/, v)
     end
-  end
-
-  defp context(tag, attrs, kids, parent, prev, i, count) do
-    %{
-      tag: tag,
-      attrs: attrs,
-      id:
-        case(List.keyfind(attrs, "id", 0),
-          do: (
-            {_, v} -> v
-            nil -> nil
-          )
-        ),
-      classes: attrs |> attr("class") |> String.split(),
-      parent: parent,
-      prev: prev,
-      first?: i == 0,
-      last?: i == count - 1,
-      index: i + 1,
-      count: count,
-      empty?: kids == []
-    }
   end
 end

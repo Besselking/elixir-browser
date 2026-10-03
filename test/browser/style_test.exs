@@ -843,4 +843,72 @@ defmodule Browser.StyleTest do
       assert {"@computed", %{"width" => 30.0}} = List.keyfind(attrs, "@computed", 0)
     end
   end
+
+  describe ":has()" do
+    defp color_of(nodes, tag) do
+      Enum.find_value(nodes, fn
+        {:element, ^tag, attrs, _} ->
+          {_, c} = List.keyfind(attrs, "@computed", 0)
+          c["color"]
+
+        {:element, _, _, kids} ->
+          color_of(kids, tag)
+
+        _ ->
+          nil
+      end)
+    end
+
+    @red {255, 0, 0}
+
+    test "matches an element by what is inside it" do
+      nodes =
+        prune(
+          "<ul><li><a class=x>a</a></li><li><b>b</b></li></ul>",
+          "li:has(a.x) { color: #f00 }"
+        )
+
+      [{:element, "ul", _, [one, two]}] = nodes
+      assert color_of([one], "li") == @red
+      assert color_of([two], "li") != @red
+    end
+
+    test "child, next-sibling and subsequent-sibling forms" do
+      css = "div:has(> i) { color: #f00 } p:has(+ q) { color: #f00 } s:has(~ u) { color: #f00 }"
+
+      nodes =
+        prune(
+          "<div><i>x</i></div><div><b><i>y</i></b></div><p>1</p><q>2</q><p>3</p><s>4</s><u>5</u>",
+          css
+        )
+
+      [d1, d2, p1, _q, p2, s, _u] = nodes
+      assert color_of([d1], "div") == @red
+      assert color_of([d2], "div") != @red
+      assert color_of([p1], "p") == @red
+      assert color_of([p2], "p") != @red
+      assert color_of([s], "s") == @red
+    end
+
+    test "state selectors inside it never match; :not() of one does" do
+      nodes =
+        prune(
+          "<div><a>x</a></div>",
+          "div:has(a:hover) { color: #f00 } div:has(a:not(:hover)) { color: #00f }"
+        )
+
+      assert color_of(nodes, "div") == {0, 0, 255}
+    end
+
+    test "works as the left side of a sibling combinator" do
+      css = "label:has(> input:not(:checked)) + div { color: #f00 }"
+
+      nodes =
+        prune("<label><input></label><div>a</div><label><input checked></label><div>b</div>", css)
+
+      [_, d1, _, d2] = nodes
+      assert color_of([d1], "div") == @red
+      assert color_of([d2], "div") != @red
+    end
+  end
 end

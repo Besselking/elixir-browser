@@ -242,6 +242,16 @@ defmodule Browser.CSS do
       String.starts_with?(s, "::") ->
         :error
 
+      m = Regex.run(~r/\A:has\(/u, s) ->
+        [whole] = m
+
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {:ok, rels} <- relative_list(inner) do
+          tokenize(rest, [{:has, rels} | acc])
+        else
+          _ -> :error
+        end
+
       m = Regex.run(~r/\A:(not|is|where|matches|-webkit-any|-moz-any)\(/u, s) ->
         [whole, name] = m
 
@@ -315,6 +325,32 @@ defmodule Browser.CSS do
   end
 
   defp balanced(<<_, r::binary>>, w, d, n), do: balanced(r, w, d, n + 1)
+
+  # the argument of :has(): comma-separated relative selectors (`> a`, `+ b c`, `d`) as
+  # `[{combinator_to_the_anchor, parts}]`. One that needs a state we don't track (`a:hover`)
+  # can never match and is left out.
+  defp relative_list(inner) do
+    inner
+    |> split_top(?,)
+    |> Enum.reduce_while({:ok, []}, fn part, {:ok, acc} ->
+      part = String.trim(part)
+
+      {lead, body} =
+        case Regex.run(~r/\A([>+~])\s*(.*)\z/su, part) do
+          [_, c, rest] -> {comb(c), rest}
+          nil -> {:descendant, part}
+        end
+
+      with {:ok, toks} <- tokenize(body, []),
+           {:ok, parts} <- group(toks) do
+        if Enum.any?(parts, fn {c, _} -> :never in c.pseudos end),
+          do: {:cont, {:ok, acc}},
+          else: {:cont, {:ok, acc ++ [{lead, parts}]}}
+      else
+        _ -> {:halt, :error}
+      end
+    end)
+  end
 
   # comma-separated compound selectors (no combinators) as used in :is()/:not()
   defp compound_list(inner) do
@@ -435,6 +471,7 @@ defmodule Browser.CSS do
       {:attr, n, o, v, i}, {:ok, c} -> {:cont, {:ok, %{c | attrs: [{n, o, v, i} | c.attrs]}}}
       {:pseudo, p}, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [p | c.pseudos]}}}
       {:fn, _, _} = f, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [f | c.pseudos]}}}
+      {:has, _} = h, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [h | c.pseudos]}}}
       {:nth, _, _} = n, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [n | c.pseudos]}}}
       _tag_or_any_mid_compound, _ -> {:halt, :error}
     end)
@@ -454,9 +491,20 @@ defmodule Browser.CSS do
     base = {ids, length(c.classes) + length(c.attrs), tags}
 
     Enum.reduce(c.pseudos, base, fn
-      {:fn, :where, _}, acc -> acc
-      {:fn, _, cmps}, acc -> add_spec(acc, cmps |> Enum.map(&compound_spec/1) |> Enum.max())
-      _, {a, b, t} -> {a, b + 1, t}
+      {:fn, :where, _}, acc ->
+        acc
+
+      {:fn, _, cmps}, acc ->
+        add_spec(acc, cmps |> Enum.map(&compound_spec/1) |> Enum.max())
+
+      {:has, []}, acc ->
+        acc
+
+      {:has, rels}, acc ->
+        add_spec(acc, rels |> Enum.map(fn {_, parts} -> specificity(parts) end) |> Enum.max())
+
+      _, {a, b, t} ->
+        {a, b + 1, t}
     end)
   end
 
@@ -532,9 +580,95 @@ defmodule Browser.CSS do
     do: List.keymember?(ctx.attrs, "checked", 0) or List.keymember?(ctx.attrs, "selected", 0)
 
   defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
+  defp pseudo?({:anchor, key}, ctx), do: ctx.key == key
+  defp pseudo?({:has, rels}, ctx), do: Enum.any?(rels, &has?(&1, ctx))
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:nth, kind, {a, b}}, ctx), do: nth_match?(a, b, position(kind, ctx))
+
+  # `:has(lead parts)`: some element the relative selector reaches from `ctx`. The selector is
+  # matched as `parts` with `ctx` itself (an :anchor) at its left end, joined by `lead`.
+  defp has?({lead, parts}, ctx) do
+    anchor = {%{tag: nil, id: nil, classes: [], attrs: [], pseudos: [{:anchor, ctx.key}]}, nil}
+    {rest, [{leftmost, nil}]} = Enum.split(parts, -1)
+    parts = rest ++ [{leftmost, lead}, anchor]
+
+    ctx
+    |> reachable(lead)
+    |> Enum.any?(&match_parts(parts, &1))
+  end
+
+  # the elements a `:has()` selector may match: below `ctx`, or after it (and below those)
+  defp reachable(ctx, lead) when lead in [:descendant, :child], do: descendants(ctx)
+
+  defp reachable(ctx, _lead) do
+    Stream.flat_map(next_contexts(ctx), fn sibling ->
+      Stream.concat([sibling], descendants(sibling))
+    end)
+  end
+
+  defp descendants(ctx) do
+    Stream.flat_map(child_contexts(ctx), fn child ->
+      Stream.concat([child], descendants(child))
+    end)
+  end
+
+  defp child_contexts(ctx) do
+    count = Enum.count(ctx.kids, &match?({:element, _, _, _}, &1))
+    contexts(ctx.kids, ctx, [], 0, count)
+  end
+
+  defp next_contexts(%{next: rest} = ctx) do
+    count = ctx.count
+    contexts(rest, ctx.parent, [ctx | ctx.prev], ctx.index, count)
+  end
+
+  # the contexts of the elements in `nodes`, lazily
+  defp contexts(nodes, parent, prev, i, count) do
+    Stream.unfold({nodes, prev, i}, fn
+      {[], _, _} ->
+        nil
+
+      {[{:text, _} | rest], prev, i} ->
+        {nil, {rest, prev, i}}
+
+      {[{:element, tag, attrs, kids} | rest], prev, i} ->
+        ctx = context(tag, attrs, kids, parent, prev, i, count, rest)
+        {ctx, {rest, [ctx | prev], i + 1}}
+    end)
+    |> Stream.reject(&is_nil/1)
+  end
+
+  @doc """
+  The element context (see above) of an element with `kids`, `rest` being the nodes after it
+  among its siblings. `prev` are the contexts of the elements before it, nearest first, `i` its
+  0-based position among the elements and `count` how many elements there are in all.
+  """
+  def context(tag, attrs, kids, parent, prev, i, count, rest) do
+    %{
+      tag: tag,
+      attrs: attrs,
+      id: attr_value(attrs, "id"),
+      classes: attrs |> attr_value("class") |> Kernel.||("") |> String.split(),
+      parent: parent,
+      prev: prev,
+      first?: i == 0,
+      last?: i == count - 1,
+      index: i + 1,
+      count: count,
+      empty?: kids == [],
+      kids: kids,
+      next: rest,
+      key: {parent && parent.key, i}
+    }
+  end
+
+  defp attr_value(attrs, name) do
+    case List.keyfind(attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
 
   defp position(:child, ctx), do: ctx.index
   defp position(:last_child, ctx), do: ctx.count - ctx.index + 1

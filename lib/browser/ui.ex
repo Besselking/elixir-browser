@@ -48,6 +48,13 @@ defmodule Browser.UI do
     :wxWindow.setBackgroundColour(panel, {255, 255, 255})
     :wxWindow.setBackgroundStyle(panel, :wxe_util.get_const(:wxBG_STYLE_PAINT))
 
+    # a CSS pixel is a point only at macOS's 72 dpi; at 96 dpi a font drawn in points would be
+    # 4/3 taller than the lines laid out for it
+    dc = :wxClientDC.new(panel)
+    {_, ppi} = :wxDC.getPPI(dc)
+    :wxClientDC.destroy(dc)
+    :persistent_term.put({__MODULE__, :ppi}, max(ppi, 1))
+
     status = :wxStatusBar.new(frame)
     :wxFrame.setStatusBar(frame, status)
 
@@ -272,6 +279,9 @@ defmodule Browser.UI do
 
   # -- fonts ---------------------------------------------------------------
 
+  # the point size that is `px` pixels tall on this display
+  defp points(px), do: max(round(px * 72 / :persistent_term.get({__MODULE__, :ppi}, 72)), 1)
+
   defp font(%{size: size, bold: bold, italic: italic, mono: mono}) do
     key = {:font, size, bold, italic, mono}
 
@@ -281,7 +291,7 @@ defmodule Browser.UI do
 
         f =
           :wxFont.new(
-            size,
+            points(size),
             if(mono, do: @wx_teletype, else: @wx_default),
             if(italic, do: @wx_italic, else: @wx_normal),
             weight
