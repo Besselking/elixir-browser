@@ -6,12 +6,10 @@ defmodule Browser.JS.Promise do
   it. Reactions run as microtasks, which are drained when a script, a timer callback or an event
   handler returns (see `run_microtasks/0`).
 
-  `await` is synchronous: it runs the microtasks and the virtual-time timers until the awaited
-  promise has settled, then carries on with its value (or throws its reason). An `async` function
-  therefore runs to the end when it is called and returns an already settled promise. Code that
-  depends on the interleaving of an `async` call with what follows it will see another order than
-  in a browser; a program that only awaits things that settle by themselves (timers, other
-  promises) gives the same results.
+  `async` functions are run by `Browser.JS.Async`, which suspends them at an `await` and resumes
+  them from a promise reaction. The `await/1` here is only for an `await` outside any async
+  function (a top-level one in a module): it blocks, running microtasks and timers until the
+  promise has settled.
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
@@ -173,20 +171,7 @@ defmodule Browser.JS.Promise do
     end
   end
 
-  # ── async / await ──────────────────────────────────────────
-
-  @doc "Runs the body of an async function: a promise for its result."
-  def run_async(fun) do
-    p = new()
-
-    try do
-      resolve(p, fun.())
-    catch
-      {:js_error, e} -> reject(p, e)
-    end
-
-    p
-  end
+  # ── await outside async functions ──────────────────────────
 
   @doc "`await value`."
   def await(value) do

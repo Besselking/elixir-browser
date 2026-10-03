@@ -578,6 +578,84 @@ defmodule Browser.JSTest do
              """) == ["m 8", "n oops", "arrow 2"]
     end
 
+    test "an async function stops at its first await, and carries on in microtask order" do
+      assert logs_of("""
+             var out = [];
+             async function f() { out.push('a'); await null; out.push('c'); await null; out.push('e'); return 'r' }
+             f().then(v => out.push('then ' + v));
+             out.push('b');
+             Promise.resolve().then(() => out.push('d'));
+             console.log(out.join());
+             setTimeout(() => console.log(out.join()), 0);
+             """) == ["a,b", "a,b,c,d,e,then r"]
+    end
+
+    test "await inside loops, try, switch, labels and expressions" do
+      assert logs_of("""
+             async function g(n) { let s = 0; for (let i = 0; i < n; i++) { s += await i } return s }
+             g(5).then(v => console.log('sum', v));
+             async function h() {
+               try { await Promise.reject('x'); console.log('no') }
+               catch (e) { console.log('caught', e) }
+               finally { console.log('fin') }
+               return 'ok'
+             }
+             h().then(v => console.log(v));
+             async function k() {
+               outer: for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { if (j == 1) continue outer; if (i == 2) break outer; await null; console.log(i, j) } }
+               switch (await 2) { case 1: console.log('one'); break; case 2: console.log('two'); case 3: console.log('three'); break; default: console.log('d') }
+               const o = { a: await 1, b: [await 2, await 3] };
+               console.log(o.a + o.b.join());
+               return (await 5) > 3 ? await 'big' : 'small';
+             }
+             k().then(v => console.log(v));
+             """)
+             |> Enum.sort() ==
+               Enum.sort([
+                 "sum 10",
+                 "caught x",
+                 "fin",
+                 "ok",
+                 "0 0",
+                 "1 0",
+                 "two",
+                 "three",
+                 "12,3",
+                 "big"
+               ])
+    end
+
+    test "return and throw cross a finally, and short-circuits do not await" do
+      assert logs_of("""
+             async function a() { try { await null; return 'from try' } finally { console.log('cleanup') } }
+             a().then(v => console.log(v));
+             async function b() { try { await null; throw 'e' } catch (x) { return await ('caught ' + x) } finally { console.log('done b') } }
+             b().then(v => console.log(v));
+             async function c() { let ran = false; const f = async () => { ran = true; return 1 };
+               const x = false && await f(); const y = true || await f(); const z = null ?? await f();
+               return [x, y, z, ran].join() }
+             c().then(v => console.log(v));
+             """)
+             |> Enum.sort() ==
+               Enum.sort(["cleanup", "from try", "done b", "caught e", "false,true,1,true"])
+    end
+
+    test "separate calls interleave at their awaits" do
+      assert logs_of("""
+             const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+             async function a() { await sleep(30); console.log('slow') }
+             async function b() { await sleep(10); console.log('fast') }
+             a(); b(); console.log('started');
+             """) == ["started", "fast", "slow"]
+    end
+
+    test "a rejection after an await reaches catch" do
+      assert logs_of("""
+             async function th() { await null; throw new Error('late') }
+             th().catch(e => console.log('c', e.message));
+             """) == ["c late"]
+    end
+
     test "destructuring assignment" do
       assert js("var a = 1, b = 2; [a, b] = [b, a]; a + ',' + b") == "2,1"
       assert js("var o; ({ x: o } = { x: 5 }); o") == 5.0

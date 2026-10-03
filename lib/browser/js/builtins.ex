@@ -1133,12 +1133,12 @@ defmodule Browser.JS.Builtins do
   Runs the earliest pending timer; false when there is none (or the next one lies beyond the
   virtual minute).
   """
-  def run_next_timer(on_error) do
+  def run_next_timer(on_error, horizon \\ @timer_horizon) do
     case Enum.min_by(Process.get(:js_timers), &{&1.at, &1.seq}, fn -> nil end) do
       nil ->
         false
 
-      %{at: at} when at > @timer_horizon ->
+      %{at: at} when at > horizon ->
         false
 
       t ->
@@ -1163,6 +1163,11 @@ defmodule Browser.JS.Builtins do
 
         true
     end
+  end
+
+  @doc "When the earliest pending timer is due (in the runtime's milliseconds), or nil."
+  def next_timer_at do
+    Process.get(:js_timers) |> Enum.map(& &1.at) |> Enum.min(fn -> nil end)
   end
 
   defp install_misc(scope) do

@@ -21,11 +21,19 @@ defmodule Browser.JS.Runtime do
 
   # ── API ────────────────────────────────────────────────────
 
-  @doc "Boots a runtime for the page. `info` has `:url`, `:width`, `:height` and `:fetch`."
+  @doc """
+  Boots a runtime for the page. `info` has `:url`, `:width`, `:height` and `:fetch`.
+
+  Timers run in real time. What a timer's callback changes (and a promise that settles later)
+  is sent to the process that started the runtime, as `{:js_async, pid, reply}` with a reply
+  like the ones the calls return.
+  """
   def start(raw, info) do
+    owner = self()
+
     spawn(fn ->
-      boot(raw, info)
-      loop()
+      boot(raw, Map.put(info, :owner, owner))
+      loop(System.monotonic_time(:millisecond))
     end)
   end
 
@@ -40,6 +48,9 @@ defmodule Browser.JS.Runtime do
   """
   def dispatch(pid, target, type, init \\ %{}, controls \\ %{}),
     do: call(pid, {:dispatch, target, type, init, controls})
+
+  @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
+  def flush(pid), do: call(pid, :flush)
 
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
@@ -81,14 +92,57 @@ defmodule Browser.JS.Runtime do
     Process.put(:rt_importmap, %{})
   end
 
-  defp loop do
+  # `t0` is when the runtime started: timers are timed from it
+  defp loop(t0) do
+    wait =
+      case Builtins.next_timer_at() do
+        nil -> :infinity
+        at -> max(trunc(at - elapsed(t0)), 0)
+      end
+
     receive do
       {:call, from, ref, request} ->
+        Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         reply = handle(request)
         send(from, {ref, reply})
-        loop()
+        loop(t0)
+    after
+      wait ->
+        fire_due(t0)
+        loop(t0)
     end
+  end
+
+  defp elapsed(t0), do: (System.monotonic_time(:millisecond) - t0) * 1.0
+
+  # the timers that have come due run, then whatever they changed goes to the session
+  defp fire_due(t0) do
+    now = elapsed(t0)
+    Process.put(:js_steps, @steps)
+
+    guard(
+      fn ->
+        while_due(now)
+      end,
+      :ok
+    )
+
+    Process.put(:js_now, elapsed(t0))
+    reply = finish(%{})
+
+    if reply.dirty or reply.outbox != [],
+      do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+  end
+
+  defp while_due(now) do
+    on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end
+    if Builtins.run_next_timer(on_error, now), do: while_due(now)
+  end
+
+  defp handle(:flush) do
+    run_timers()
+    finish(%{})
   end
 
   defp handle(:run_scripts) do
@@ -105,7 +159,7 @@ defmodule Browser.JS.Runtime do
         t -> guard(fn -> DOM.dispatch(t, type, init) end, :ok)
       end
 
-    run_timers()
+    Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
   end
 
@@ -197,20 +251,17 @@ defmodule Browser.JS.Runtime do
 
     for s <- scripts, s.kind == :classic do
       with {:ok, src, base} <- script_source(s), do: guard(fn -> run_classic(src, base) end, :ok)
-      run_timers()
     end
 
     for s <- scripts, s.kind == :module do
       with {:ok, src, base} <- script_source(s) do
         guard(fn -> run_module_source(src, base) end, :ok)
       end
-
-      run_timers()
     end
 
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
-    run_timers()
+    Browser.JS.Promise.run_microtasks()
   end
 
   defp script_info(nid) do

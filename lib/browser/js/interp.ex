@@ -109,7 +109,8 @@ defmodule Browser.JS.Interp do
 
   def throw_error(type, message), do: throw({:js_error, make_error(type, message)})
 
-  defp new_scope(parent) do
+  @doc false
+  def new_scope(parent) do
     alloc(%{scope: true, vars: %{}, consts: MapSet.new(), parent: parent})
   end
 
@@ -159,7 +160,8 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp copy_scope(src, parent) do
+  @doc false
+  def copy_scope(src, parent) do
     s = deref(src)
     alloc(%{s | parent: parent})
   end
@@ -535,7 +537,7 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
-        Browser.JS.Promise.run_async(fn -> run_closure(c, this, args) end)
+        Browser.JS.Async.call_closure(c, this, args)
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
@@ -589,10 +591,26 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp tick do
+  @doc false
+  def tick do
     n = Process.get(:js_steps) - 1
     if n < 0, do: throw(:js_limit)
     Process.put(:js_steps, n)
+  end
+
+  @doc false
+  # the scope a function body runs in: `this`, the parameters, hoisted declarations
+  def call_scope(c, this, args) do
+    scope = new_scope(c.scope)
+    if c.mode in [false, nil], do: declare(scope, :this, this)
+    bind_params(c.params, args, scope)
+
+    if c.mode != :arrow_expr do
+      hoist_vars(c.body, scope)
+      hoist_functions(c.body, scope)
+    end
+
+    scope
   end
 
   defp run_closure(c, this, args) do
@@ -716,7 +734,8 @@ defmodule Browser.JS.Interp do
 
   defp pattern_names(_, acc), do: acc
 
-  defp hoist_functions(stmts, scope) do
+  @doc false
+  def hoist_functions(stmts, scope) do
     for stmt <- stmts, {:fundecl, name, fun} <- [unexport(stmt)] do
       declare(scope, name, make_fn(fun, scope))
     end
@@ -809,6 +828,9 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
+
+  @doc false
+  def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
 
   defp exec(stmt, env), do: exec(stmt, env, [])
 
@@ -989,6 +1011,9 @@ defmodule Browser.JS.Interp do
 
   # ── binding ────────────────────────────────────────────────
 
+  @doc false
+  def bind_pattern(pat, v, env, mode), do: bind(pat, v, env, mode)
+
   defp bind({:id, name}, v, env, mode), do: bind_name(mode, env, name, v)
 
   defp bind({:default, pat, e}, v, env, mode),
@@ -1051,6 +1076,8 @@ defmodule Browser.JS.Interp do
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
+
+  def ev({:val, v}, _env), do: v
 
   def ev({:destructure, pat, right}, env) do
     v = ev(right, env)

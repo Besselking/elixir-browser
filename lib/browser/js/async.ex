@@ -1,0 +1,490 @@
+defmodule Browser.JS.Async do
+  @moduledoc """
+  The body of an `async` function, run so that `await` really suspends it.
+
+  An async function is evaluated in continuation-passing style: `cev/4` and `cexec/4` take what
+  to do next as a function, and `await` hands that function to the awaited promise as a
+  reaction, then simply returns. The caller gets the function's promise straight away, and the
+  rest of the body runs later, as a microtask, when the awaited promise has settled.
+
+  Only the parts of the body that contain an `await` are run this way; everything else goes to
+  the ordinary evaluator in `Browser.JS.Interp`, so a function that awaits once at the end pays
+  for that once. Abrupt completions (`return`, `break`, `continue`, a throw) are continuations
+  too, kept in the `ctx` map, so that `try`/`finally` and labelled loops behave as usual across
+  an `await`.
+
+  Within an expression the awaits are evaluated first, left to right, and the expression is then
+  evaluated with their values (`f(a(), await b)` calls `a` after waiting for `b`); `&&`, `||`,
+  `??` and `?:` keep their short-circuiting.
+  """
+
+  alias Browser.JS.{Interp, Promise}
+
+  @max_depth 1000
+
+  @doc "Calls an async closure: starts its body and returns its promise."
+  def call_closure(c, this, args) do
+    p = Promise.new()
+
+    ctx = %{
+      ret: fn v -> Promise.resolve(p, v) end,
+      throw: fn e -> Promise.reject(p, e) end,
+      brk: %{},
+      cont: %{}
+    }
+
+    depth = Process.get(:js_depth)
+
+    if depth >= @max_depth,
+      do: Interp.throw_error("RangeError", "Maximum call stack size exceeded")
+
+    Process.put(:js_depth, depth + 1)
+
+    try do
+      scope = Interp.call_scope(c, this, args)
+
+      case c.mode do
+        :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
+        _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+      end
+    catch
+      {:js_error, e} -> Promise.reject(p, e)
+    after
+      Process.put(:js_depth, depth)
+    end
+
+    p
+  end
+
+  # ── what contains an await ─────────────────────────────────
+
+  defp has_await?({:await, _}), do: true
+  defp has_await?({:fn, _, _, _, _}), do: false
+  defp has_await?({:async, _}), do: false
+  defp has_await?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_await?/1)
+  defp has_await?(l) when is_list(l), do: Enum.any?(l, &has_await?/1)
+  defp has_await?(_), do: false
+
+  # ── expressions ────────────────────────────────────────────
+
+  defp cev(node, env, ctx, k) do
+    if has_await?(node), do: cev_await(node, env, ctx, k), else: sync_expr(node, env, ctx, k)
+  end
+
+  defp cev_await({:await, e}, env, ctx, k) do
+    cev(e, env, ctx, fn v -> await_value(v, ctx, k) end)
+  end
+
+  defp cev_await({:logical, op, l, r}, env, ctx, k) do
+    cev(l, env, ctx, fn lv ->
+      short =
+        case op do
+          "&&" -> not Interp.truthy(lv)
+          "||" -> Interp.truthy(lv)
+          "??" -> not Interp.nullish?(lv)
+        end
+
+      if short, do: k.(lv), else: cev(r, env, ctx, k)
+    end)
+  end
+
+  defp cev_await({:cond, c, a, b}, env, ctx, k) do
+    cev(c, env, ctx, fn cv ->
+      if Interp.truthy(cv), do: cev(a, env, ctx, k), else: cev(b, env, ctx, k)
+    end)
+  end
+
+  defp cev_await(node, env, ctx, k) do
+    {template, leaves} = lift(node, [])
+    scope = Interp.new_scope(env)
+
+    eval_leaves(Enum.reverse(leaves), 0, scope, env, ctx, fn ->
+      sync_expr(template, scope, ctx, k)
+    end)
+  end
+
+  # the awaits (and short-circuit expressions holding one) of an expression, in order, each
+  # replaced by a variable the expression is later evaluated with
+  defp lift(node, leaves) do
+    cond do
+      leaf?(node) ->
+        name = "\0s#{length(leaves)}"
+        {{:id, name}, [node | leaves]}
+
+      is_tuple(node) and elem(node, 0) in [:fn, :async] ->
+        {node, leaves}
+
+      is_tuple(node) ->
+        {items, leaves} = lift_list(Tuple.to_list(node), leaves)
+        {List.to_tuple(items), leaves}
+
+      is_list(node) ->
+        lift_list(node, leaves)
+
+      true ->
+        {node, leaves}
+    end
+  end
+
+  defp lift_list(items, leaves) do
+    Enum.map_reduce(items, leaves, fn item, acc -> lift(item, acc) end)
+  end
+
+  defp leaf?({:await, _}), do: true
+  defp leaf?({:logical, _, _, _} = n), do: has_await?(n)
+  defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
+  defp leaf?(_), do: false
+
+  defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
+
+  defp eval_leaves([leaf | rest], i, scope, env, ctx, done) do
+    cev(leaf, env, ctx, fn v ->
+      Interp.declare(scope, "\0s#{i}", v)
+      eval_leaves(rest, i + 1, scope, env, ctx, done)
+    end)
+  end
+
+  # evaluates a piece without awaits; a throw goes to the nearest handler, outside the `try`
+  # so the rest of the function does not run inside it
+  defp sync_expr(node, env, ctx, k) do
+    result =
+      try do
+        {:ok, Interp.ev(node, env)}
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case result do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp await_value(v, ctx, k) do
+    p =
+      if Promise.promise?(v) do
+        v
+      else
+        np = Promise.new()
+        Promise.resolve(np, v)
+        np
+      end
+
+    Promise.then(
+      p,
+      Interp.native("", fn _, args ->
+        k.(Enum.at(args, 0, :undefined))
+        :undefined
+      end),
+      Interp.native("", fn _, args ->
+        ctx.throw.(Enum.at(args, 0, :undefined))
+        :undefined
+      end)
+    )
+
+    :suspended
+  end
+
+  # ── statements ─────────────────────────────────────────────
+
+  defp clist([], _env, _ctx, k), do: k.(:ok)
+
+  defp clist([s | rest], env, ctx, k),
+    do: cexec(s, env, ctx, fn _ -> clist(rest, env, ctx, k) end)
+
+  defp cexec(stmt, env, ctx, k, labels \\ []) do
+    if has_await?(stmt),
+      do: cs(stmt, env, ctx, k, labels),
+      else: sync_stmt(stmt, env, ctx, k, labels)
+  end
+
+  # a statement without awaits, by the ordinary evaluator; its abrupt completions are routed
+  defp sync_stmt(stmt, env, ctx, k, labels) do
+    result =
+      try do
+        Interp.exec_stmt(stmt, env, labels)
+        :ok
+      catch
+        {:js_error, e} -> {:throw, e}
+        {:js_return, v} -> {:ret, v}
+        {:js_break, l} -> {:brk, l}
+        {:js_continue, l} -> {:cont, l}
+      end
+
+    abrupt(result, ctx, k)
+  end
+
+  defp abrupt(:ok, _ctx, k), do: k.(:ok)
+  defp abrupt({:throw, e}, ctx, _k), do: ctx.throw.(e)
+  defp abrupt({:ret, v}, ctx, _k), do: ctx.ret.(v)
+
+  defp abrupt({:brk, l}, ctx, _k) do
+    case ctx.brk do
+      %{^l => target} -> target.(:ok)
+      _ -> :ok
+    end
+  end
+
+  defp abrupt({:cont, l}, ctx, _k) do
+    case ctx.cont do
+      %{^l => target} -> target.(:ok)
+      _ -> :ok
+    end
+  end
+
+  # run a piece of synchronous work (a binding, say), then carry on or take its throw
+  defp guarded(fun, ctx, next) do
+    result =
+      try do
+        fun.()
+        :ok
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case result do
+      :ok -> next.()
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp cs({:expr, e}, env, ctx, k, _labels) do
+    cev(e, env, ctx, fn v ->
+      Process.put(:js_last, v)
+      k.(:ok)
+    end)
+  end
+
+  defp cs({:var, kind, decls}, env, ctx, k, _labels), do: cdecls(decls, kind, env, ctx, k)
+
+  defp cs({:return, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
+  defp cs({:throw, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.throw)
+
+  defp cs({:if, c, a, b}, env, ctx, k, _labels) do
+    cev(c, env, ctx, fn v ->
+      cond do
+        Interp.truthy(v) -> cexec(a, env, ctx, k)
+        b != nil -> cexec(b, env, ctx, k)
+        true -> k.(:ok)
+      end
+    end)
+  end
+
+  defp cs({:block, stmts}, env, ctx, k, _labels) do
+    scope = Interp.new_scope(env)
+
+    guarded(fn -> Interp.hoist_functions(stmts, scope) end, ctx, fn ->
+      clist(stmts, scope, ctx, k)
+    end)
+  end
+
+  defp cs({:labeled, l, s}, env, ctx, k, labels) do
+    ctx = %{ctx | brk: Map.put(ctx.brk, l, k)}
+    cexec(s, env, ctx, k, [l | labels])
+  end
+
+  defp cs({:while, c, body}, env, ctx, k, labels), do: while_loop(c, body, env, ctx, k, labels)
+
+  defp cs({:dowhile, body, c}, env, ctx, k, labels) do
+    run_body(body, env, ctx, k, labels, fn _ -> while_loop(c, body, env, ctx, k, labels) end)
+  end
+
+  defp cs({:for, init, test, update, body}, env, ctx, k, labels) do
+    loop_env = Interp.new_scope(env)
+    per_iteration? = match?({:var, :let, _}, init)
+
+    start = fn _ ->
+      first = if per_iteration?, do: Interp.copy_scope(loop_env, env), else: loop_env
+      for_iter({test, update, body, env, per_iteration?}, first, ctx, k, labels)
+    end
+
+    case init do
+      {:var, _, _} = d -> cexec(d, loop_env, ctx, start)
+      {:expr, e} -> cev(e, loop_env, ctx, start)
+      nil -> start.(:ok)
+    end
+  end
+
+  defp cs({kind, decl, pat, obj, body}, env, ctx, k, labels) when kind in [:forin, :forof] do
+    cev(obj, env, ctx, fn target ->
+      items =
+        try do
+          {:ok,
+           case kind do
+             :forin -> if Interp.nullish?(target), do: [], else: Interp.own_keys(target)
+             :forof -> Interp.iterate(target)
+           end}
+        catch
+          {:js_error, e} -> {:throw, e}
+        end
+
+      case items do
+        {:ok, list} ->
+          mode = if decl == nil, do: :assign, else: decl
+          foreach(list, {pat, mode, body, env}, ctx, k, labels)
+
+        {:throw, e} ->
+          ctx.throw.(e)
+      end
+    end)
+  end
+
+  defp cs({:switch, disc, cases}, env, ctx, k, _labels) do
+    cev(disc, env, ctx, fn v ->
+      scope = Interp.new_scope(env)
+      all = Enum.flat_map(cases, fn {_, body} -> body end)
+
+      guarded(fn -> Interp.hoist_functions(all, scope) end, ctx, fn ->
+        find_case(cases, 0, v, scope, ctx, fn start ->
+          ctx = %{ctx | brk: Map.put(ctx.brk, nil, k)}
+
+          if start do
+            body = cases |> Enum.drop(start) |> Enum.flat_map(fn {_, b} -> b end)
+            clist(body, scope, ctx, k)
+          else
+            k.(:ok)
+          end
+        end)
+      end)
+    end)
+  end
+
+  defp cs({:try, block, param, handler, finalizer}, env, ctx, k, _labels) do
+    # a `finally` runs before any way out of the statement
+    leave = fn after_ ->
+      if finalizer, do: cexec(finalizer, env, ctx, fn _ -> after_.() end), else: after_.()
+    end
+
+    wrapped = %{
+      ctx
+      | ret: fn v -> leave.(fn -> ctx.ret.(v) end) end,
+        throw: fn e -> leave.(fn -> ctx.throw.(e) end) end,
+        brk: Map.new(ctx.brk, fn {l, f} -> {l, fn x -> leave.(fn -> f.(x) end) end} end),
+        cont: Map.new(ctx.cont, fn {l, f} -> {l, fn x -> leave.(fn -> f.(x) end) end} end)
+    }
+
+    done = fn _ -> leave.(fn -> k.(:ok) end) end
+
+    in_try =
+      if handler do
+        %{
+          wrapped
+          | throw: fn e ->
+              scope = Interp.new_scope(env)
+
+              guarded(
+                fn -> if param, do: Interp.bind_pattern(param, e, scope, :let) end,
+                wrapped,
+                fn -> cexec(handler, scope, wrapped, done) end
+              )
+            end
+        }
+      else
+        wrapped
+      end
+
+    cexec(block, env, in_try, done)
+  end
+
+  defp cs(stmt, env, ctx, k, labels), do: sync_stmt(stmt, env, ctx, k, labels)
+
+  # declarations, one at a time
+  defp cdecls([], _kind, _env, _ctx, k), do: k.(:ok)
+
+  defp cdecls([{pat, init} | rest], kind, env, ctx, k) do
+    next = fn -> cdecls(rest, kind, env, ctx, k) end
+
+    cond do
+      init != nil ->
+        cev(init, env, ctx, fn v ->
+          guarded(fn -> Interp.bind_pattern(pat, v, env, kind) end, ctx, next)
+        end)
+
+      kind == :var ->
+        next.()
+
+      true ->
+        guarded(fn -> Interp.bind_pattern(pat, :undefined, env, kind) end, ctx, next)
+    end
+  end
+
+  # ── loops ──────────────────────────────────────────────────
+
+  # the context for a loop body: where `break` and `continue` (bare or with this loop's labels) go
+  defp loop_ctx(ctx, labels, on_break, on_continue) do
+    brk = Enum.reduce([nil | labels], ctx.brk, &Map.put(&2, &1, on_break))
+    cont = Enum.reduce([nil | labels], ctx.cont, &Map.put(&2, &1, on_continue))
+    %{ctx | brk: brk, cont: cont}
+  end
+
+  defp run_body(body, env, ctx, k, labels, next) do
+    cexec(body, env, loop_ctx(ctx, labels, k, next), next)
+  end
+
+  defp while_loop(c, body, env, ctx, k, labels) do
+    cev(c, env, ctx, fn v ->
+      if Interp.truthy(v) do
+        Interp.tick()
+
+        run_body(body, env, ctx, k, labels, fn _ ->
+          while_loop(c, body, env, ctx, k, labels)
+        end)
+      else
+        k.(:ok)
+      end
+    end)
+  end
+
+  defp for_iter({test, update, body, env, copy?} = spec, iter_env, ctx, k, labels) do
+    Interp.tick()
+
+    run = fn ->
+      advance = fn _ ->
+        next_env = if copy?, do: Interp.copy_scope(iter_env, env), else: iter_env
+
+        if update do
+          cev(update, next_env, ctx, fn _ -> for_iter(spec, next_env, ctx, k, labels) end)
+        else
+          for_iter(spec, next_env, ctx, k, labels)
+        end
+      end
+
+      run_body(body, iter_env, ctx, k, labels, advance)
+    end
+
+    if test == nil do
+      run.()
+    else
+      cev(test, iter_env, ctx, fn v -> if Interp.truthy(v), do: run.(), else: k.(:ok) end)
+    end
+  end
+
+  defp foreach([], _spec, _ctx, k, _labels), do: k.(:ok)
+
+  defp foreach([item | rest], {pat, mode, body, env} = spec, ctx, k, labels) do
+    Interp.tick()
+    iter_env = Interp.new_scope(env)
+
+    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, ctx, fn ->
+      run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
+    end)
+  end
+
+  # the first `case` whose test equals the value, else `default`
+  defp find_case(cases, i, v, scope, ctx, found) do
+    case Enum.at(cases, i) do
+      nil ->
+        found.(Enum.find_index(cases, fn {t, _} -> t == :default end))
+
+      {:default, _} ->
+        find_case(cases, i + 1, v, scope, ctx, found)
+
+      {test, _} ->
+        cev(test, scope, ctx, fn tv ->
+          if Interp.strict_eq(v, tv),
+            do: found.(i),
+            else: find_case(cases, i + 1, v, scope, ctx, found)
+        end)
+    end
+  end
+end

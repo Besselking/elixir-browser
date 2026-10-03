@@ -187,7 +187,44 @@ defmodule Browser.JS.DOMTest do
 
       r = Runtime.dispatch(pid, {:form, 0}, "submit")
       assert r.prevented
-      assert logs(r) == ["done"]
+      # the awaits have not finished: the handler returned at the first one
+      assert logs(r) == []
+      assert logs(Runtime.flush(pid)) == ["done"]
+    end
+
+    test "timers run in real time and report what they changed" do
+      {pid, r} =
+        start(~S"""
+        <body><p id=p>before</p><script>
+        setTimeout(() => { document.getElementById("p").textContent = "after"; }, 20);
+        (async () => { await new Promise(r => setTimeout(r, 40)); document.body.appendChild(document.createElement("hr")); })();
+        </script></body>
+        """)
+
+      refute r.dirty
+
+      assert_receive {:js_async, ^pid, first}, 1000
+      assert first.dirty
+      assert {:element, "p", _, [{:text, "after"}]} = hd(first.raw |> hd() |> elem(3))
+
+      assert_receive {:js_async, ^pid, second}, 1000
+      assert {:element, "hr", [], []} = second.raw |> hd() |> elem(3) |> List.last()
+    end
+
+    test "an interval keeps going until it is cleared" do
+      {pid, _} =
+        start(~S"""
+        <body><p id=p>0</p><script>
+        var n = 0, id = setInterval(() => { n++; document.getElementById("p").textContent = String(n); if (n == 3) clearInterval(id); }, 10);
+        </script></body>
+        """)
+
+      for expected <- ["1", "2", "3"] do
+        assert_receive {:js_async, ^pid, r}, 1000
+        assert {:element, "p", _, [{:text, ^expected}]} = hd(r.raw |> hd() |> elem(3))
+      end
+
+      refute_receive {:js_async, ^pid, _}, 100
     end
 
     test "control state from the page reaches `.value` and `.checked`" do

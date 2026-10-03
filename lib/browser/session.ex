@@ -165,6 +165,12 @@ defmodule Browser.Session do
 
   def handle_info({:js_reply, _, _, _}, state), do: {:noreply, state}
 
+  # a timer or a promise changed the page after the call that started it had returned
+  def handle_info({:js_async, pid, reply}, %{js: pid} = state),
+    do: {:noreply, apply_js(state, reply)}
+
+  def handle_info({:js_async, _, _}, state), do: {:noreply, state}
+
   # -- images arriving -------------------------------------------------------
 
   def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
