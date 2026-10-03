@@ -11,6 +11,8 @@ programs = [
   {"array push/map/reduce",
    "var a = []; for (var i = 0; i < 20000; i++) a.push(i); a.map(x => x * 2).filter(x => x % 3 == 0).reduce((p, c) => p + c, 0)"},
   {"string building", "var s = ''; for (var i = 0; i < 20000; i++) { s += String(i % 10) } s.length"},
+  {"large function body, 20k calls",
+   "function big(x) { var t = 0;" <> String.duplicate(" if (x < 0) { t += 1 }", 300) <> " return t + x } var r = 0; for (var i = 0; i < 20000; i++) r += big(i); r"},
   {"class method calls",
    "class P { constructor(x){ this.x = x } inc(){ this.x++; return this } } var p = new P(0); for (var i = 0; i < 30000; i++) p.inc(); p.x"}
 ]

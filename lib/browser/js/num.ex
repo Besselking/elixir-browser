@@ -137,6 +137,12 @@ defmodule Browser.JS.Num do
 
   def uint32(n), do: band(int32(n), 0xFFFFFFFF)
 
+  # far from the overflow limit a float add cannot raise, so it needs no `guard`
+  def add(a, b)
+      when is_float(a) and is_float(b) and a < 1.0e300 and a > -1.0e300 and b < 1.0e300 and
+             b > -1.0e300,
+      do: a + b
+
   def add(:nan, _), do: :nan
   def add(_, :nan), do: :nan
   def add(:infinity, :neg_infinity), do: :nan
@@ -151,6 +157,11 @@ defmodule Browser.JS.Num do
   def neg(:infinity), do: :neg_infinity
   def neg(:neg_infinity), do: :infinity
   def neg(n), do: -n * 1.0
+
+  def mul(a, b)
+      when is_float(a) and is_float(b) and a < 1.0e150 and a > -1.0e150 and b < 1.0e150 and
+             b > -1.0e150,
+      do: a * b
 
   def mul(:nan, _), do: :nan
   def mul(_, :nan), do: :nan

@@ -1598,13 +1598,42 @@ defmodule Browser.LayoutTest do
     test "a fieldset is a bordered block with padding" do
       {items, _} = fm(~s(<fieldset><legend>Title</legend>Content</fieldset>))
       # four border strips, in the UA's grey
-      assert [%{y: top}, %{y: bottom} | _] = boxes(items)
+      top = boxes(items) |> Enum.map(& &1.y) |> Enum.min()
+      bottom = boxes(items) |> Enum.map(& &1.y) |> Enum.max()
       assert Enum.all?(boxes(items), &(&1.color == {192, 192, 192}))
       left = Enum.min_by(boxes(items), & &1.x).x
       assert wf(items, "Title").x > left
-      assert wf(items, "Title").y > top
+      # the legend straddles the top border
+      assert wf(items, "Title").y <= top
       assert wf(items, "Content").y > wf(items, "Title").y
       assert wf(items, "Content").y < bottom
+    end
+
+    test "a legend sits on the top border and interrupts it" do
+      {items, _} =
+        fm(~s(<fieldset style="border: 2px solid #f00"><legend>Title</legend>Content</fieldset>))
+
+      title = wf(items, "Title")
+      top_y = boxes(items) |> Enum.map(& &1.y) |> Enum.min()
+      # the top border runs along the middle of the legend, in two pieces around it
+      assert [left, right] =
+               boxes(items) |> Enum.filter(&(&1.y == top_y and &1.h == 2)) |> Enum.sort_by(& &1.x)
+
+      assert left.y + 1 > title.y and left.y < title.y + title.h
+      assert left.x + left.w <= title.x
+      assert right.x >= title.x + title.w
+      assert wf(items, "Content").y >= title.y + title.h
+    end
+
+    test "a rounded fieldset's border item carries the gap for its legend" do
+      {items, _} =
+        fm(
+          ~s(<fieldset style="border: 2px dashed #f00; border-radius: 4px"><legend>Title</legend>x</fieldset>)
+        )
+
+      title = wf(items, "Title")
+      assert [%{border: %{gap: {g0, g1}}}] = boxes(items)
+      assert g0 <= title.x and g1 >= title.x + title.w
     end
 
     test "a login-style form lays out and stays on integer pixels" do
