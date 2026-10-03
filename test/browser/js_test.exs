@@ -419,7 +419,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("class A {}")
+      assert {:syntax, _} = error("function* g() {}")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -521,8 +521,8 @@ defmodule Browser.JSTest do
                Browser.JS.parse("export default 1 + 2")
     end
 
-    test "plain scripts still reject them at run time" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A {}")
+    test "syntax the runtime lacks is a syntax error" do
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("function* g() {}")
     end
   end
 
@@ -805,6 +805,65 @@ defmodule Browser.JSTest do
       assert js(
                "var arr = [1, 2, , 4]; var n = 0; arr.forEach(function () { n++; arr[2] = 3 }); n"
              ) == 4.0
+    end
+  end
+
+  describe "classes" do
+    test "constructors, methods, accessors and statics" do
+      assert js(
+               "class A { constructor(x) { this.x = x } get double() { return this.x * 2 } static make(n) { return new A(n) } add(n) { return this.x + n } } var a = A.make(4); [a.x, a.double, a.add(1), a instanceof A, typeof A].join()"
+             ) == "4,8,5,true,function"
+
+      assert js(
+               "class A { m() {} static get z() { return 'sz' } set v(x) { this._v = x * 2 } } var a = new A; a.v = 4; [A.z, a._v, Object.keys(a).join(), Object.getOwnPropertyNames(A.prototype).join()].join()"
+             ) == "sz,8,_v,constructor,m,v"
+
+      assert js("var C = class Named { who() { return Named.name } }; new C().who()") == "Named"
+    end
+
+    test "extends, super calls and super.method" do
+      assert js(
+               "class A { constructor(x) { this.x = x } hi() { return 'A' + this.x } } class B extends A { constructor() { super(7); this.y = 1 } hi() { return 'B' + super.hi() } } var b = new B; [b.x, b.y, b.hi(), b instanceof A, Object.getPrototypeOf(B) === A].join()"
+             ) == "7,1,BA7,true,true"
+
+      assert js("class A { constructor() { this.n = 1 } } class B extends A {} new B().n") == 1.0
+
+      assert js(
+               "class A { static s() { return 'static' } } class B extends A { static s() { return super.s() + '!' } } B.s()"
+             ) == "static!"
+    end
+
+    test "extending built-ins" do
+      assert js(
+               "class E extends Error { constructor(m) { super(m); this.name = 'E' } } var e = new E('boom'); [e.message, e.name, e instanceof Error, e instanceof E].join()"
+             ) == "boom,E,true,true"
+
+      assert js(
+               "class L extends Array { sum() { return this.reduce((a, b) => a + b, 0) } } var l = new L(); l.push(1, 2, 3); [l.length, l.sum(), Array.isArray(l)].join()"
+             ) == "3,6,true"
+    end
+
+    test "fields, static fields and static blocks" do
+      assert js(
+               "class P { a = 1; b = this.a + 1; static s = 5; static { P.t = P.s * 2 } } var p = new P; [p.a, p.b, P.s, P.t].join()"
+             ) == "1,2,5,10"
+    end
+
+    test "misuse is an error" do
+      assert js("class A {} try { A() } catch (e) { e.name + ': ' + e.message }") ==
+               "TypeError: Class constructor A cannot be invoked without 'new'"
+
+      assert js(
+               "class A {} class B extends A { constructor() { this.x = 1; super() } } try { new B } catch (e) { e.name }"
+             ) == "ReferenceError"
+
+      assert js("try { class X extends 5 {} } catch (e) { e.name }") == "TypeError"
+    end
+
+    test "async methods" do
+      assert logs_of(
+               "class A { async f() { return await 1 } } new A().f().then(v => console.log('v', v))"
+             ) == ["v 1"]
     end
   end
 end

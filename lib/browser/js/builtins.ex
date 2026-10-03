@@ -30,7 +30,7 @@ defmodule Browser.JS.Builtins do
 
     put_proto(:function, function_proto)
 
-    for name <- [:array, :string, :number, :boolean], do: put_proto(name, new_object())
+    for name <- [:array, :string, :number, :boolean, :symbol], do: put_proto(name, new_object())
     error_proto = new_object()
     put_proto({:error, "Error"}, error_proto)
 
@@ -59,6 +59,7 @@ defmodule Browser.JS.Builtins do
     install_misc(scope)
     Browser.JS.RegExp.install(scope)
     Browser.JS.Promise.install(scope)
+    Browser.JS.Collections.install(scope)
 
     scope
   end
@@ -203,6 +204,9 @@ defmodule Browser.JS.Builtins do
           is_binary(src) or array?(src) ->
             iterate(src)
 
+          match?({:obj, _}, src) and iterable?(src) ->
+            iterate(src)
+
           match?({:obj, _}, src) ->
             for i <- 0..(to_int(Interp.get(src, "length")) - 1)//1, do: Interp.get(src, float(i))
 
@@ -219,6 +223,12 @@ defmodule Browser.JS.Builtins do
           else: list
       )
     end)
+  end
+
+  defp iterable?({:obj, id} = o) do
+    deref(id).class in [:map, :set] or
+      (match?(f when is_tuple(f), Interp.get(o, {:symbol, :iterator, "Symbol.iterator"})) and
+         function?(Interp.get(o, {:symbol, :iterator, "Symbol.iterator"})))
   end
 
   # start / end arguments of slice-like methods
@@ -1033,6 +1043,17 @@ defmodule Browser.JS.Builtins do
     def_fn(math, "max", fn _, args -> extreme(args, :neg_infinity, :gt) end)
     def_fn(math, "min", fn _, args -> extreme(args, :infinity, :lt) end)
 
+    def_fn(math, "clz32", fn _, args ->
+      n = args |> arg(0) |> to_num() |> Num.uint32()
+      float(32 - if(n == 0, do: 0, else: length(Integer.digits(n, 2))))
+    end)
+
+    def_fn(math, "imul", fn _, args ->
+      float(Num.int32(Num.int32(to_num(arg(args, 0))) * Num.int32(to_num(arg(args, 1)))))
+    end)
+
+    def_fn(math, "fround", fn _, args -> to_num(arg(args, 0)) end)
+
     def_fn(math, "hypot", fn _, args ->
       args
       |> Enum.map(&to_num/1)
@@ -1304,7 +1325,8 @@ defmodule Browser.JS.Builtins do
 
       t ->
         Process.put(:js_timers, List.delete(Process.get(:js_timers), t))
-        Process.put(:js_now, t.at)
+        # time never runs backwards: a timer that is late sees the time it actually ran
+        Process.put(:js_now, max(t.at, Process.get(:js_now, 0.0)))
 
         if t.interval do
           seq = Process.get(:js_timer_seq)

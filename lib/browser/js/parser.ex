@@ -303,6 +303,9 @@ defmodule Browser.JS.Parser do
     {{:var, :let, [{{:id, name}, node}]}, ts}
   end
 
+  defp statement([{:id, "import", _}, {:p, p, _} | _] = ts) when p in ["(", "."],
+    do: expression_statement(ts)
+
   defp statement([{:id, kw, _} | _]) when kw in ~w(import with enum),
     do: throw({:syntax, "`#{kw}` is not supported yet"})
 
@@ -403,7 +406,13 @@ defmodule Browser.JS.Parser do
         for_rest(nil, ts)
 
       _ ->
-        {lhs, after_lhs} = unary_or_lhs(ts)
+        {lhs, after_lhs} =
+          try do
+            unary_or_lhs(ts)
+          catch
+            # an init such as `typeof a == "x" && b()` is no left-hand side
+            {:syntax, _} -> {nil, []}
+          end
 
         case after_lhs do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
@@ -983,6 +992,15 @@ defmodule Browser.JS.Parser do
   defp primary([{:id, "this", _} | ts]), do: {{:this}, ts}
 
   defp primary([{:id, "class", _} | ts]), do: class_rest(ts)
+
+  # `import(specifier)` and `import.meta`
+  defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
+    {e, ts} = assignment(ts)
+    {{:import_call, e}, expect(ts, ")")}
+  end
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]),
+    do: {{:import_meta}, ts}
 
   defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
 

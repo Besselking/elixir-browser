@@ -363,4 +363,93 @@ defmodule Browser.JS.DOMTest do
       assert e =~ "nope"
     end
   end
+
+  describe "custom elements and element classes" do
+    test "define upgrades existing elements and runs the callbacks" do
+      r =
+        run(
+          ~S"""
+          class Ping extends HTMLElement {
+            static get observedAttributes() { return ["n"]; }
+            connectedCallback() { console.log("connected", this.tagName, this.getAttribute("n")); }
+            attributeChangedCallback(name, old, v) { console.log("attr", name, old, v); }
+          }
+          customElements.define("x-ping", Ping);
+          var el = document.querySelector("x-ping");
+          console.log(el instanceof Ping, customElements.get("x-ping") === Ping);
+          el.setAttribute("n", "2");
+          var made = document.createElement("x-ping");
+          console.log(made instanceof Ping);
+          document.body.appendChild(made);
+          """,
+          "<x-ping n=1></x-ping>"
+        )
+
+      assert errors(r) == []
+
+      assert logs(r) == [
+               "attr n null 1",
+               "connected X-PING 1",
+               "true true",
+               "attr n 1 2",
+               "true",
+               "connected X-PING null"
+             ]
+    end
+
+    test "tag classes work with instanceof" do
+      r =
+        run(
+          ~S"""
+          var a = document.getElementById("l");
+          console.log(a instanceof HTMLAnchorElement, a instanceof HTMLElement, a instanceof Element,
+            a instanceof HTMLIFrameElement, document.body instanceof HTMLAnchorElement);
+          """,
+          "<a id=l href='/x'>l</a>"
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["true true true false false"]
+    end
+  end
+
+  describe "globals pages rely on" do
+    test "URL, bare window members and arguments" do
+      r =
+        run(~S"""
+        var u = new URL("../a?x=1#h", "https://e.com/b/c/d");
+        console.log(u.href, u.origin, u.searchParams.get("x"));
+        addEventListener("ping", function () { console.log("pinged", scrollX, typeof scrollTo); });
+        dispatchEvent(new Event("ping"));
+        function f() { return (() => arguments.length + arguments[0])(); }
+        console.log(f(5, 6), Math.clz32(1), Math.imul(3, 4));
+        for (typeof u == "object" && console.log("init"), u = 0; u < 1; u++);
+        """)
+
+      assert errors(r) == []
+
+      assert logs(r) == [
+               "https://e.com/b/a?x=1#h https://e.com 1",
+               "pinged 0 function",
+               "7 31 12",
+               "init"
+             ]
+    end
+
+    test "a task that keeps rescheduling itself does not starve timers or events" do
+      {pid, r} =
+        start(~S"""
+        <body><button id=b>b</button><script>
+        var n = 0;
+        function spin() { n++; setImmediate(spin); }
+        spin();
+        document.getElementById("b").addEventListener("click", function () { console.log("clicked"); });
+        </script></body>
+        """)
+
+      assert errors(r) == []
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert logs(reply) == ["clicked"]
+    end
+  end
 end

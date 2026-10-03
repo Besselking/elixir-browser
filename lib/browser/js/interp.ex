@@ -183,6 +183,7 @@ defmodule Browser.JS.Interp do
   def typeof(v) when is_boolean(v), do: "boolean"
   def typeof(v) when is_binary(v), do: "string"
   def typeof({:obj, _} = v), do: if(function?(v), do: "function", else: "object")
+  def typeof({:symbol, _, _}), do: "symbol"
   def typeof(v), do: if(num?(v), do: "number", else: "object")
 
   def to_num(v) when is_number(v), do: v
@@ -205,6 +206,10 @@ defmodule Browser.JS.Interp do
   end
 
   def to_str(v) when is_binary(v), do: v
+
+  def to_str({:symbol, _, _}),
+    do: throw_error("TypeError", "Cannot convert a Symbol value to a string")
+
   def to_str(:undefined), do: "undefined"
   def to_str(:null), do: "null"
   def to_str(true), do: "true"
@@ -213,6 +218,7 @@ defmodule Browser.JS.Interp do
   def to_str({:obj, _} = v), do: v |> to_primitive("string") |> to_str()
 
   def to_key(k) when is_binary(k), do: k
+  def to_key({:symbol, _, _} = k), do: k
   def to_key(k), do: to_str(k)
 
   def to_primitive({:obj, _} = o, hint) do
@@ -340,6 +346,8 @@ defmodule Browser.JS.Interp do
 
   def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
     do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
+
+  def get({:symbol, _, _} = s, key), do: lookup(deref(elem(proto(:symbol), 1)), to_key(key), s)
 
   def get(b, key) when is_boolean(b),
     do: lookup(deref(elem(proto(:boolean), 1)), to_key(key), b)
@@ -500,7 +508,13 @@ defmodule Browser.JS.Interp do
 
           :none ->
             if Map.get(o, :ext, true),
-              do: store(id, %{o | props: Map.put(o.props, key, v), keys: [key | o.keys]}),
+              do:
+                store(id, %{
+                  o
+                  | props: Map.put(o.props, key, v),
+                    # a symbol-keyed property is not listed by Object.keys or for-in
+                    keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
+                }),
               else: :ok
         end
     end
@@ -630,12 +644,48 @@ defmodule Browser.JS.Interp do
   def array?({:obj, id}), do: deref(id).class == :array
   def array?(_), do: false
 
-  def iterate({:obj, _} = v) do
-    if array?(v), do: array_list(v), else: throw_error("TypeError", "object is not iterable")
+  def iterate({:obj, id} = v) do
+    o = deref(id)
+
+    cond do
+      o.class == :array -> array_list(v)
+      o.class in [:map, :set] -> Browser.JS.Collections.entries(o)
+      true -> iterate_protocol(v)
+    end
   end
 
   def iterate(s) when is_binary(s), do: String.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+
+  # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
+  defp iterate_protocol(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        if function?(f) do
+          it = call(f, v, [])
+          pull(it, get(it, "next"), [])
+        else
+          throw_error("TypeError", "object is not iterable")
+        end
+
+      _ ->
+        throw_error("TypeError", "object is not iterable")
+    end
+  end
+
+  defp pull(it, next, acc) do
+    r = call(next, it, [])
+
+    unless match?({:obj, _}, r),
+      do: throw_error("TypeError", "Iterator result is not an object")
+
+    if truthy(get(r, "done")) do
+      Enum.reverse(acc)
+    else
+      tick()
+      pull(it, next, [get(r, "value") | acc])
+    end
+  end
 
   # ── calling ────────────────────────────────────────────────
 
@@ -736,7 +786,12 @@ defmodule Browser.JS.Interp do
   # the scope a function body runs in: `this`, the parameters, hoisted declarations
   def call_scope(c, this, args) do
     scope = new_scope(c.scope)
-    if c.mode in [false, nil], do: declare(scope, :this, this)
+
+    if c.mode in [false, nil] do
+      declare(scope, :this, this)
+      declare(scope, :args, args)
+    end
+
     if h = Map.get(c, :home), do: declare(scope, :home, h)
     bind_params(c.params, args, scope)
 
@@ -760,7 +815,12 @@ defmodule Browser.JS.Interp do
 
     try do
       scope = new_scope(c.scope)
-      if c.mode in [false, nil], do: declare(scope, :this, this)
+
+      if c.mode in [false, nil] do
+        declare(scope, :this, this)
+        declare(scope, :args, args)
+      end
+
       if h = Map.get(c, :home), do: declare(scope, :home, h)
       for {k, v} <- extra, do: declare(scope, k, v)
       bind_params(c.params, args, scope)
@@ -863,6 +923,26 @@ defmodule Browser.JS.Interp do
     fun
   end
 
+  # `arguments` is only built when a function body asks for it
+  defp lazy_arguments(env) do
+    case lookup_var(env, :args) do
+      {:ok, args} ->
+        a = new_array(args)
+        owner = scope_with(env, :args)
+        declare(owner, "arguments", a)
+        a
+
+      :error ->
+        throw_error("ReferenceError", "arguments is not defined")
+    end
+  end
+
+  defp scope_with(scope, name) do
+    if Map.has_key?(deref(scope).vars, name),
+      do: scope,
+      else: scope_with(deref(scope).parent, name)
+  end
+
   # ── hoisting ───────────────────────────────────────────────
 
   defp hoist_vars(stmts, scope) do
@@ -939,8 +1019,9 @@ defmodule Browser.JS.Interp do
   Runs a module in a scope of its own and returns its namespace object (the exports).
   `resolve` maps an import specifier to the namespace object of that module.
   """
-  def run_module({:program, stmts}, resolve) do
+  def run_module({:program, stmts}, resolve, base \\ nil) do
     scope = new_scope(global())
+    if base, do: declare(scope, :module_url, base)
 
     for {:import, spec, bindings} <- stmts do
       ns = resolve.(spec)
@@ -1282,6 +1363,42 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # `import(specifier)`: a promise for the module's namespace (the host loads it)
+  def ev({:import_call, e}, env) do
+    spec = to_str(ev(e, env))
+    p = Browser.JS.Promise.new()
+
+    case Process.get(:js_import) do
+      nil ->
+        Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
+
+      hook ->
+        base =
+          case lookup_var(env, :module_url) do
+            {:ok, b} -> b
+            :error -> nil
+          end
+
+        try do
+          Browser.JS.Promise.resolve(p, hook.(spec, base))
+        catch
+          {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+        end
+    end
+
+    p
+  end
+
+  def ev({:import_meta}, env) do
+    url =
+      case lookup_var(env, :module_url) do
+        {:ok, b} -> b
+        :error -> :undefined
+      end
+
+    new_object([{"url", url}])
+  end
+
   def ev({:class, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
 
   def ev({:call, {:super}, args, _}, env),
@@ -1295,6 +1412,7 @@ defmodule Browser.JS.Interp do
   def ev({:id, name}, env) do
     case lookup_var(env, name) do
       {:ok, v} -> v
+      :error when name == "arguments" -> lazy_arguments(env)
       :error -> throw_error("ReferenceError", "#{name} is not defined")
     end
   end

@@ -98,7 +98,9 @@ defmodule Browser.JS.DOM do
       state: nil,
       storage: %{},
       usp: 0,
-      history_len: 1
+      history_len: 1,
+      ce: %{},
+      ce_done: MapSet.new()
     })
 
     doc = new_node(%{kind: :document})
@@ -153,6 +155,38 @@ defmodule Browser.JS.DOM do
     doc = node(st().doc)
     Enum.map(doc.kids, &export/1)
   end
+
+  @doc """
+  The session numbers a page's controls afresh whenever it takes in a new tree, so the
+  nodes here take the numbers `Forms.index` gives the exported `raw`.
+  """
+  def sync_cids(raw) do
+    {indexed, _} = Browser.Forms.index(raw)
+    sync_kids(node(st().doc).kids, indexed)
+    :ok
+  end
+
+  defp sync_kids(nids, indexed) when length(nids) == length(indexed),
+    do: Enum.zip(nids, indexed) |> Enum.each(fn {nid, i} -> sync_node(nid, i) end)
+
+  defp sync_kids(_, _), do: :ok
+
+  defp sync_node(nid, {:element, tag, attrs, kids}) do
+    n = node(nid)
+
+    if n.kind == :element do
+      internal =
+        case List.keyfind(attrs, "@cid", 0) do
+          nil -> List.keydelete(n.internal, "@cid", 0)
+          cid -> List.keystore(n.internal, "@cid", 0, cid)
+        end
+
+      if internal != n.internal, do: update_node_quiet(nid, &%{&1 | internal: internal})
+      if tag not in ["textarea", "select"], do: sync_kids(n.kids, kids)
+    end
+  end
+
+  defp sync_node(_, _), do: :ok
 
   defp export(nid) do
     n = node(nid)
@@ -307,6 +341,8 @@ defmodule Browser.JS.DOM do
 
           %{p | kids: kids}
         end)
+
+        connect(child)
     end
   end
 
@@ -354,7 +390,12 @@ defmodule Browser.JS.DOM do
 
   defp set_attr(nid, name, value) do
     name = String.downcase(name)
+    old_value = nid |> node() |> get_attr(name)
+    set_attr_quiet(nid, name, value)
+    attribute_changed(nid, name, old_value, value)
+  end
 
+  defp set_attr_quiet(nid, name, value) do
     update_node(nid, fn n ->
       n = %{n | attrs: List.keystore(n.attrs, name, 0, {name, value})}
 
@@ -390,7 +431,7 @@ defmodule Browser.JS.DOM do
             :comment -> proto({:dom, :text})
             :document -> proto({:dom, :document})
             :fragment -> proto({:dom, :node})
-            :element -> proto({:dom, :element})
+            :element -> proto({:dom, {:tag, node(nid).tag}}) || proto({:dom, :element})
           end
 
         w = new_host(__MODULE__, nid, proto)
@@ -1547,6 +1588,130 @@ defmodule Browser.JS.DOM do
   @doc false
   def encode_pairs(pairs), do: encode_query(pairs)
 
+  # ── custom elements ────────────────────────────────────────
+
+  defp registered(tag), do: Map.get(st().ce, tag)
+
+  defp set_proto({:obj, id}, proto), do: store(id, %{deref(id) | proto: proto})
+
+  defp connected?(nid), do: nid == st().doc or st().doc in ancestors(nid)
+
+  # an element that is in the document gets upgraded, or told it was connected again
+  defp connect(nid) do
+    if st().ce != %{} and connected?(nid) do
+      for e <- [nid | elements(nid)], node(e).kind == :element, ctor = registered(node(e).tag) do
+        if MapSet.member?(st().ce_done, e) do
+          call_callback(e, "connectedCallback", [])
+        else
+          upgrade(e, ctor)
+        end
+      end
+    end
+
+    :ok
+  end
+
+  defp upgrade(nid, ctor) do
+    put_st(%{st() | ce_done: MapSet.put(st().ce_done, nid)})
+    w = wrap(nid)
+    set_proto(w, Interp.get(ctor, "prototype"))
+    Process.put(:ce_upgrading, w)
+
+    try do
+      construct(ctor, [], ctor)
+    catch
+      {:js_error, v} -> console_error("Uncaught " <> describe(v))
+    after
+      Process.delete(:ce_upgrading)
+    end
+
+    for name <- observed(ctor), (v = get_attr(node(nid), name)) != nil do
+      call_callback(nid, "attributeChangedCallback", [name, :null, v])
+    end
+
+    if connected?(nid), do: call_callback(nid, "connectedCallback", [])
+  end
+
+  defp observed(ctor) do
+    case Interp.get(ctor, "observedAttributes") do
+      {:obj, _} = list -> if array?(list), do: Enum.map(array_list(list), &to_str/1), else: []
+      _ -> []
+    end
+  end
+
+  defp call_callback(nid, name, args) do
+    w = wrap(nid)
+
+    case Interp.get(w, name) do
+      f when is_tuple(f) ->
+        if function?(f) do
+          try do
+            call(f, w, args)
+          catch
+            {:js_error, v} -> console_error("Uncaught " <> describe(v))
+          end
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp attribute_changed(nid, name, old, new) do
+    if MapSet.member?(st().ce_done, nid) do
+      tag = node(nid).tag
+
+      with ctor when ctor != nil <- registered(tag), true <- name in observed(ctor) do
+        call_callback(nid, "attributeChangedCallback", [name, old || :null, new])
+      end
+    end
+
+    :ok
+  end
+
+  defp define_element(name, ctor) do
+    name = String.downcase(to_str(name))
+
+    unless function?(ctor),
+      do: throw_error("TypeError", "The custom element constructor is not a function")
+
+    unless String.contains?(name, "-"),
+      do: throw_error("SyntaxError", "'#{name}' is not a valid custom element name")
+
+    if registered(name),
+      do: throw_error("NotSupportedError", "'#{name}' has already been used with this registry")
+
+    put_st(%{st() | ce: Map.put(st().ce, name, ctor)})
+
+    for e <- elements(st().doc), node(e).tag == name, do: upgrade(e, ctor)
+    :ok
+  end
+
+  # `new X()` for a registered constructor, or the element being upgraded
+  defp html_element_ctor(this) do
+    case Process.get(:ce_upgrading) do
+      nil ->
+        proto =
+          case this do
+            {:obj, id} -> deref(id).proto
+            _ -> nil
+          end
+
+        tag =
+          Enum.find_value(st().ce, fn {name, c} ->
+            if proto != nil and Interp.get(c, "prototype") == proto, do: name
+          end)
+
+        if tag == nil, do: throw_error("TypeError", "Illegal constructor")
+        nid = new_node(%{tag: tag})
+        put_st(%{st() | ce_done: MapSet.put(st().ce_done, nid)})
+        wrap(nid)
+
+      w ->
+        w
+    end
+  end
+
   # ── install ────────────────────────────────────────────────
 
   @doc "Defines the DOM prototypes and the `window`, `document`, ... globals."
@@ -1896,7 +2061,12 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "createElement", fn _this, args ->
-      wrap(new_node(%{tag: args |> arg(0) |> to_str() |> String.downcase()}))
+      tag = args |> arg(0) |> to_str() |> String.downcase()
+
+      case registered(tag) do
+        nil -> wrap(new_node(%{tag: tag}))
+        ctor -> construct(ctor, [], ctor)
+      end
     end)
 
     def_fn(p, "createTextNode", fn _this, args ->
@@ -2189,12 +2359,66 @@ defmodule Browser.JS.DOM do
     end)
   end
 
+  @element_classes [
+    {"HTMLAnchorElement", ["a"]},
+    {"HTMLAreaElement", ["area"]},
+    {"HTMLFormElement", ["form"]},
+    {"HTMLInputElement", ["input"]},
+    {"HTMLTextAreaElement", ["textarea"]},
+    {"HTMLButtonElement", ["button"]},
+    {"HTMLSelectElement", ["select"]},
+    {"HTMLOptionElement", ["option"]},
+    {"HTMLImageElement", ["img"]},
+    {"HTMLScriptElement", ["script"]},
+    {"HTMLLinkElement", ["link"]},
+    {"HTMLStyleElement", ["style"]},
+    {"HTMLDivElement", ["div"]},
+    {"HTMLSpanElement", ["span"]},
+    {"HTMLBodyElement", ["body"]},
+    {"HTMLHtmlElement", ["html"]},
+    {"HTMLTemplateElement", ["template"]},
+    {"HTMLLabelElement", ["label"]},
+    {"HTMLIFrameElement", ["iframe"]},
+    {"HTMLDialogElement", ["dialog"]},
+    {"HTMLCanvasElement", ["canvas"]},
+    {"HTMLVideoElement", ["video"]},
+    {"HTMLAudioElement", ["audio"]},
+    {"HTMLTableElement", ["table"]},
+    {"HTMLUListElement", ["ul"]},
+    {"HTMLOListElement", ["ol"]},
+    {"HTMLLIElement", ["li"]},
+    {"HTMLParagraphElement", ["p"]},
+    {"HTMLHeadingElement", ["h1", "h2", "h3", "h4", "h5", "h6"]},
+    {"HTMLPreElement", ["pre"]},
+    {"HTMLMetaElement", ["meta"]},
+    {"HTMLHeadElement", ["head"]},
+    {"HTMLTitleElement", ["title"]},
+    {"HTMLBRElement", ["br"]},
+    {"HTMLHRElement", ["hr"]},
+    {"HTMLDetailsElement", ["details"]},
+    {"HTMLFieldSetElement", ["fieldset"]},
+    {"HTMLLegendElement", ["legend"]},
+    {"HTMLOptGroupElement", ["optgroup"]},
+    {"HTMLProgressElement", ["progress"]}
+  ]
+
   defp install_globals(scope, event_target, node_proto, element, text, document, event) do
     # constructors, so `instanceof` works (and `new Event(...)`)
     ctor(scope, "EventTarget", event_target, fn _, _ -> :undefined end)
     ctor(scope, "Node", node_proto, fn _, _ -> :undefined end)
     ctor(scope, "Element", element, fn _, _ -> :undefined end)
-    ctor(scope, "HTMLElement", element, fn _, _ -> :undefined end)
+    ctor(scope, "HTMLElement", element, fn this, _ -> html_element_ctor(this) end)
+    # `el instanceof HTMLAnchorElement` and the like
+    for {name, tags} <- @element_classes do
+      p = new_object([], element)
+      for tag <- tags, do: put_proto({:dom, {:tag, tag}}, p)
+      ctor(scope, name, p, fn _, _ -> throw_error("TypeError", "Illegal constructor") end)
+    end
+
+    for name <- ~w(SVGElement SVGAElement ShadowRoot DocumentFragment Comment KeyframeEffect) do
+      ctor(scope, name, new_object([], element), fn _, _ -> :undefined end)
+    end
+
     ctor(scope, "Text", text, fn _, _ -> :undefined end)
     ctor(scope, "Document", document, fn _, _ -> :undefined end)
 
@@ -2234,6 +2458,65 @@ defmodule Browser.JS.DOM do
       ctor(scope, name, event, make_event)
     end
 
+    url_proto = new_object()
+
+    ctor(scope, "URL", url_proto, fn _this, args ->
+      raw = to_str(arg(args, 0))
+
+      uri =
+        case arg(args, 1) do
+          b when b in [:undefined, :null] -> URI.parse(raw)
+          b -> URI.merge(URI.parse(to_str(b)), raw)
+        end
+
+      unless uri.scheme && (uri.host || uri.scheme in ~w(data blob mailto javascript about)),
+        do: throw_error("TypeError", "Invalid URL: " <> raw)
+
+      path = if uri.path in [nil, ""] and uri.host, do: "/", else: uri.path || ""
+      host = uri.host || ""
+
+      port =
+        if uri.port && uri.port != URI.default_port(uri.scheme),
+          do: Integer.to_string(uri.port),
+          else: ""
+
+      query = if uri.query in [nil, ""], do: "", else: "?" <> uri.query
+      hash = if uri.fragment in [nil, ""], do: "", else: "#" <> uri.fragment
+      hostport = if port == "", do: host, else: host <> ":" <> port
+      origin = if uri.host, do: uri.scheme <> "://" <> hostport, else: "null"
+
+      href =
+        if uri.host,
+          do: origin <> path <> query <> hash,
+          else: uri.scheme <> ":" <> path <> query <> hash
+
+      usp = deref_global("URLSearchParams")
+      params = construct(usp, [String.trim_leading(query, "?")], usp)
+
+      obj =
+        new_object([
+          {"href", href},
+          {"origin", origin},
+          {"protocol", uri.scheme <> ":"},
+          {"username", ""},
+          {"password", ""},
+          {"host", hostport},
+          {"hostname", host},
+          {"port", port},
+          {"pathname", path},
+          {"search", query},
+          {"hash", hash},
+          {"searchParams", params}
+        ])
+
+      set_proto(obj, url_proto)
+      obj
+    end)
+
+    for name <- ~w(toString toJSON) do
+      def_fn(url_proto, name, fn this, _ -> Interp.get(this, "href") end)
+    end
+
     usp =
       ctor(scope, "URLSearchParams", proto({:dom, :usp}), fn _this, args ->
         init = arg(args, 0)
@@ -2265,6 +2548,26 @@ defmodule Browser.JS.DOM do
 
     _ = usp
 
+    registry = new_object()
+    declare(scope, "customElements", registry)
+
+    def_fn(registry, "define", fn _, args ->
+      define_element(arg(args, 0), arg(args, 1))
+      :undefined
+    end)
+
+    def_fn(registry, "get", fn _, args ->
+      registered(String.downcase(to_str(arg(args, 0)))) || :undefined
+    end)
+
+    def_fn(registry, "whenDefined", fn _, _ ->
+      p = Browser.JS.Promise.new()
+      Browser.JS.Promise.resolve(p, :undefined)
+      p
+    end)
+
+    def_fn(registry, "upgrade", fn _, _ -> :undefined end)
+
     # globals that point into the document
     window = aux_host(:window, :window)
     declare(scope, "window", window)
@@ -2275,6 +2578,35 @@ defmodule Browser.JS.DOM do
     declare(scope, "history", aux_host(:history, :history))
     declare(scope, "localStorage", aux_host(:storage, :storage))
     declare(scope, "sessionStorage", aux_host(:storage, :storage))
+
+    for {name, v} <- [
+          {"innerWidth", float(st().width)},
+          {"innerHeight", float(st().height)},
+          {"outerWidth", float(st().width)},
+          {"outerHeight", float(st().height)},
+          {"devicePixelRatio", 1.0},
+          {"scrollX", 0.0},
+          {"scrollY", 0.0},
+          {"pageXOffset", 0.0},
+          {"pageYOffset", 0.0}
+        ] do
+      declare(scope, name, v)
+    end
+
+    for name <- ~w(alert scrollTo scroll scrollBy focus blur print) do
+      declare(scope, name, native(name, fn _, _ -> :undefined end))
+    end
+
+    # `addEventListener(...)` without `window.` is the window's
+    for name <- ~w(addEventListener removeEventListener dispatchEvent) do
+      declare(
+        scope,
+        name,
+        native(name, fn _, args ->
+          call(Interp.get(proto({:dom, :window}), name), window, args)
+        end)
+      )
+    end
 
     navigator =
       new_object([

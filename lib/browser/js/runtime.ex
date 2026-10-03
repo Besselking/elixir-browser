@@ -18,6 +18,7 @@ defmodule Browser.JS.Runtime do
 
   @steps 5_000_000
   @call_timeout 15_000
+  @slice_ms 30
 
   # ── API ────────────────────────────────────────────────────
 
@@ -31,10 +32,15 @@ defmodule Browser.JS.Runtime do
   def start(raw, info) do
     owner = self()
 
-    spawn(fn ->
-      boot(raw, Map.put(info, :owner, owner))
-      loop(System.monotonic_time(:millisecond))
-    end)
+    # the heap lives in the process dictionary and only grows, so avoid repeated full sweeps
+    :erlang.spawn_opt(
+      fn ->
+        boot(raw, Map.put(info, :owner, owner))
+        loop(System.monotonic_time(:millisecond))
+      end,
+      min_heap_size: 2_000_000,
+      fullsweep_after: 1_000_000
+    )
   end
 
   def stop(pid), do: Process.exit(pid, :kill)
@@ -89,6 +95,11 @@ defmodule Browser.JS.Runtime do
     DOM.install(scope)
     Process.put(:rt_info, info)
     Process.put(:rt_modules, %{})
+
+    Process.put(:js_import, fn spec, from ->
+      load_module(resolve_specifier(spec, from || page_url()))
+    end)
+
     Process.put(:rt_importmap, %{})
   end
 
@@ -119,14 +130,12 @@ defmodule Browser.JS.Runtime do
   # the timers that have come due run, then whatever they changed goes to the session
   defp fire_due(t0) do
     now = elapsed(t0)
+    Process.put(:js_now, now)
     Process.put(:js_steps, @steps)
 
-    guard(
-      fn ->
-        while_due(now)
-      end,
-      :ok
-    )
+    # a slice is bounded, so that events (clicks) are served between the slices of a task
+    # that keeps rescheduling itself, as a browser's event loop does
+    guard(fn -> while_due(now, System.monotonic_time(:millisecond) + @slice_ms) end, :ok)
 
     Process.put(:js_now, elapsed(t0))
     reply = finish(%{})
@@ -135,9 +144,11 @@ defmodule Browser.JS.Runtime do
       do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
   end
 
-  defp while_due(now) do
+  defp while_due(now, deadline) do
     on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end
-    if Builtins.run_next_timer(on_error, now), do: while_due(now)
+
+    if System.monotonic_time(:millisecond) < deadline and Builtins.run_next_timer(on_error, now),
+      do: while_due(now, deadline)
   end
 
   defp handle(:flush) do
@@ -176,6 +187,7 @@ defmodule Browser.JS.Runtime do
   defp finish(extra) do
     dirty = DOM.dirty?() or Map.get(extra, :force_raw, false)
     raw = if dirty, do: DOM.to_raw()
+    if raw, do: DOM.sync_cids(raw)
     DOM.clean()
 
     Map.merge(
@@ -401,7 +413,11 @@ defmodule Browser.JS.Runtime do
   defp run_module_source(src, base) do
     case Parser.parse(src) do
       {:ok, program} ->
-        Interp.run_module(program, fn spec -> load_module(resolve_specifier(spec, base)) end)
+        Interp.run_module(
+          program,
+          fn spec -> load_module(resolve_specifier(spec, base)) end,
+          base
+        )
 
       {:error, msg} ->
         throw({:syntax, msg})

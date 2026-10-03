@@ -116,6 +116,13 @@ defmodule Browser.JS.Props do
   def own_names(s) when is_binary(s), do: Interp.own_keys(s) ++ ["length"]
   def own_names(_), do: []
 
+  @doc "The symbols an object has properties for."
+  def own_symbols({:obj, id}) do
+    deref(id).props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+  end
+
+  def own_symbols(_), do: []
+
   # ── defining ───────────────────────────────────────────────
 
   # the fields of a descriptor object that are present: %{value:, writable:, get:, set:, ...}
@@ -573,7 +580,9 @@ defmodule Browser.JS.Props do
       end
     end)
 
-    def_fn.(object_ctor, "getOwnPropertySymbols", fn _, _ -> new_array([]) end)
+    def_fn.(object_ctor, "getOwnPropertySymbols", fn _, args ->
+      new_array(own_symbols(arg(args, 0)))
+    end)
 
     def_fn.(object_ctor, "create", fn _, args ->
       proto =
