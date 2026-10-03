@@ -136,8 +136,19 @@ defmodule Browser.JS.Interp do
     s = deref(scope)
 
     case s.vars do
-      %{^name => v} -> {:ok, v}
-      _ -> lookup_var(s.parent, name)
+      %{^name => v} ->
+        {:ok, v}
+
+      _ ->
+        case s do
+          %{with: obj} when is_binary(name) ->
+            if has_property?(obj, name),
+              do: {:ok, get(obj, name)},
+              else: lookup_var(s.parent, name)
+
+          _ ->
+            lookup_var(s.parent, name)
+        end
     end
   end
 
@@ -150,6 +161,9 @@ defmodule Browser.JS.Interp do
           do: throw_error("TypeError", "Assignment to constant variable.")
 
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
+
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
+        put(s.with, name, val)
 
       s.parent != nil ->
         assign_var(s.parent, name, val)
@@ -306,8 +320,14 @@ defmodule Browser.JS.Interp do
         case index(key) do
           i when is_integer(i) ->
             case o.items do
-              %{^i => v} -> v
-              _ -> lookup(o, to_key(key), {:obj, id})
+              %{^i => {:accessor, g, _}} ->
+                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+
+              %{^i => v} ->
+                v
+
+              _ ->
+                lookup(o, to_key(key), {:obj, id})
             end
 
           nil ->
@@ -430,11 +450,25 @@ defmodule Browser.JS.Interp do
         case index(key) do
           i when is_integer(i) ->
             cond do
-              Map.get(o, :frozen, false) -> :ok
-              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) -> :ok
-              i >= o.len and Map.get(o, :len_ro, false) -> :ok
-              not writable?(o, i) -> :ok
-              true -> store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+              match?(%{^i => {:accessor, _, _}}, o.items) ->
+                {:accessor, _, setter} = o.items[i]
+                if function?(setter), do: call(setter, {:obj, id}, [v])
+                :ok
+
+              Map.get(o, :frozen, false) ->
+                :ok
+
+              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) ->
+                :ok
+
+              i >= o.len and Map.get(o, :len_ro, false) ->
+                :ok
+
+              not writable?(o, i) ->
+                :ok
+
+              true ->
+                store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
             end
 
           nil ->
@@ -636,7 +670,13 @@ defmodule Browser.JS.Interp do
 
   def array_list({:obj, id}) do
     o = deref(id)
-    for i <- 0..(o.len - 1)//1, do: Map.get(o.items, i, :undefined)
+
+    for i <- 0..(o.len - 1)//1 do
+      case Map.get(o.items, i, :undefined) do
+        {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+        v -> v
+      end
+    end
   end
 
   def set_array_list({:obj, id}, list) do
@@ -956,41 +996,44 @@ defmodule Browser.JS.Interp do
     end)
   end
 
-  defp var_names(stmts, acc) when is_list(stmts), do: Enum.reduce(stmts, acc, &var_names/2)
+  @doc false
+  def var_names(stmts, acc) when is_list(stmts), do: Enum.reduce(stmts, acc, &var_names/2)
 
-  defp var_names({:var, :var, decls}, acc),
+  def var_names({:var, :var, decls}, acc),
     do: Enum.reduce(decls, acc, fn {pat, _}, a -> pattern_names(pat, a) end)
 
-  defp var_names({:export, stmt}, acc), do: var_names(stmt, acc)
-  defp var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
-  defp var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
+  def var_names({:export, stmt}, acc), do: var_names(stmt, acc)
+  def var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
+  def var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
 
-  defp var_names({k, :var, pat, _, body}, acc) when k in [:forin, :forof],
+  def var_names({k, :var, pat, _, body}, acc) when k in [:forin, :forof],
     do: var_names(body, pattern_names(pat, acc))
 
-  defp var_names({k, _, _, _, body}, acc) when k in [:forin, :forof], do: var_names(body, acc)
-  defp var_names({:while, _, body}, acc), do: var_names(body, acc)
-  defp var_names({:dowhile, body, _}, acc), do: var_names(body, acc)
-  defp var_names({:block, stmts}, acc), do: var_names(stmts, acc)
-  defp var_names({:labeled, _, s}, acc), do: var_names(s, acc)
-  defp var_names({:try, b, _, h, f}, acc), do: var_names(f, var_names(h, var_names(b, acc)))
+  def var_names({k, _, _, _, body}, acc) when k in [:forin, :forof], do: var_names(body, acc)
+  def var_names({:while, _, body}, acc), do: var_names(body, acc)
+  def var_names({:dowhile, body, _}, acc), do: var_names(body, acc)
+  def var_names({:block, stmts}, acc), do: var_names(stmts, acc)
+  def var_names({:with, _, body}, acc), do: var_names(body, acc)
+  def var_names({:labeled, _, s}, acc), do: var_names(s, acc)
+  def var_names({:try, b, _, h, f}, acc), do: var_names(f, var_names(h, var_names(b, acc)))
 
-  defp var_names({:switch, _, cases}, acc),
+  def var_names({:switch, _, cases}, acc),
     do: Enum.reduce(cases, acc, fn {_, body}, a -> var_names(body, a) end)
 
-  defp var_names(_, acc), do: acc
+  def var_names(_, acc), do: acc
 
-  defp pattern_names({:id, n}, acc), do: [n | acc]
-  defp pattern_names({:default, p, _}, acc), do: pattern_names(p, acc)
-  defp pattern_names({:rest, p}, acc), do: pattern_names(p, acc)
-  defp pattern_names({:arrpat, elems}, acc), do: Enum.reduce(elems, acc, &pattern_names/2)
+  @doc false
+  def pattern_names({:id, n}, acc), do: [n | acc]
+  def pattern_names({:default, p, _}, acc), do: pattern_names(p, acc)
+  def pattern_names({:rest, p}, acc), do: pattern_names(p, acc)
+  def pattern_names({:arrpat, elems}, acc), do: Enum.reduce(elems, acc, &pattern_names/2)
 
-  defp pattern_names({:objpat, props, rest}, acc) do
+  def pattern_names({:objpat, props, rest}, acc) do
     acc = Enum.reduce(props, acc, fn {_, p}, a -> pattern_names(p, a) end)
     if rest, do: pattern_names(rest, acc), else: acc
   end
 
-  defp pattern_names(_, acc), do: acc
+  def pattern_names(_, acc), do: acc
 
   @doc false
   def hoist_functions(stmts, scope) do
@@ -1101,13 +1144,25 @@ defmodule Browser.JS.Interp do
   defp exec({:var, kind, decls}, env, _) do
     for {pat, init} <- decls do
       cond do
-        init != nil -> bind(pat, ev(init, env), env, kind)
+        init != nil -> bind(pat, ev_named(init, env, pat), env, kind)
         kind == :var -> :ok
         true -> bind(pat, :undefined, env, kind)
       end
     end
 
     :ok
+  end
+
+  defp exec({:with, obj, body}, env, _) do
+    o = ev(obj, env)
+
+    if o in [:undefined, :null],
+      do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+    scope = new_scope(env)
+    s = deref(scope)
+    store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
+    exec(body, scope, [])
   end
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
@@ -1276,7 +1331,7 @@ defmodule Browser.JS.Interp do
   defp bind({:id, name}, v, env, mode), do: bind_name(mode, env, name, v)
 
   defp bind({:default, pat, e}, v, env, mode),
-    do: bind(pat, if(v == :undefined, do: ev(e, env), else: v), env, mode)
+    do: bind(pat, if(v == :undefined, do: ev_named(e, env, pat), else: v), env, mode)
 
   defp bind({:arrpat, elems}, v, env, mode), do: bind_elems(elems, iterate(v), env, mode)
 
@@ -1455,7 +1510,8 @@ defmodule Browser.JS.Interp do
 
     Enum.each(props, fn
       {:init, key, val} ->
-        put(obj, key_of(key, env), ev(val, env))
+        k = key_of(key, env)
+        put(obj, k, ev_named(val, env, if(is_binary(k), do: {:id, k})))
 
       {:spread, e} ->
         spread_into(obj, ev(e, env))
@@ -1471,6 +1527,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:fn, _, _, _, _} = f, env), do: make_fn(f, env)
+
   def ev({:seq, es}, env), do: Enum.reduce(es, :undefined, fn e, _ -> ev(e, env) end)
 
   def ev({:chain, e}, env) do
@@ -1524,7 +1581,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:assign, "=", {:id, name}, value}, env) do
-    v = ev(value, env)
+    v = ev_named(value, env, {:id, name})
     assign_var(env, name, v)
     v
   end
@@ -1647,4 +1704,20 @@ defmodule Browser.JS.Interp do
   def binop(op, a, b) when op in ["<<", ">>", ">>>"], do: Num.shift(op, to_num(a), to_num(b))
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
+  # an anonymous function or class takes the name of the binding or property it is assigned to
+  defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  defp ev_named(e, env, _), do: ev(e, env)
+
+  defp name_fn({:obj, id} = f, name) do
+    case deref(id) do
+      %{fun: {:closure, %{name: n} = c}} = o when not is_binary(n) ->
+        store(id, %{o | fun: {:closure, %{c | name: name}}})
+
+      _ ->
+        :ok
+    end
+
+    f
+  end
 end

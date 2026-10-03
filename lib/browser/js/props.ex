@@ -21,6 +21,10 @@ defmodule Browser.JS.Props do
     cond do
       o.class == :array and is_integer(array_index(key)) ->
         case Map.fetch(o.items, array_index(key)) do
+          {:ok, {:accessor, g, s}} ->
+            a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
+            {:accessor, g, s, true, not Map.get(o, :frozen, false) and Map.get(a, :c, true)}
+
           {:ok, v} ->
             frozen = Map.get(o, :frozen, false)
             a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
@@ -378,11 +382,47 @@ defmodule Browser.JS.Props do
   defp define_element(id, o, key, desc) do
     i = array_index(key)
 
-    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
-      do: throw_error("TypeError", "accessors on array elements are not supported")
-
     exists? = Map.has_key?(o.items, i)
 
+    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
+      do: define_element_accessor(id, o, key, i, desc, exists?),
+      else: define_element_data(id, o, key, i, desc, exists?)
+  end
+
+  defp define_element_accessor(id, o, key, i, desc, exists?) do
+    cond do
+      not exists? and not Map.get(o, :ext, true) ->
+        throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
+
+      not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
+        throw_error("TypeError", "Cannot define property #{key}, array length is not writable")
+
+      true ->
+        current = if exists?, do: state({:obj, id}, key)
+        if current && !elem(current, 4), do: reject(key)
+
+        {g0, s0} =
+          case o.items[i] do
+            {:accessor, g, s} -> {g, s}
+            _ -> {:undefined, :undefined}
+          end
+
+        item = {:accessor, Map.get(desc, :get, g0), Map.get(desc, :set, s0)}
+        attrs = Map.get(o, :attrs, %{})
+        c = Map.get(desc, :configurable, if(exists?, do: elem(current, 4), else: false))
+        attrs = if c, do: Map.delete(attrs, i), else: Map.put(attrs, i, %{w: true, c: false})
+
+        store(
+          id,
+          o
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:items, Map.put(o.items, i, item))
+          |> Map.put(:len, max(o.len, i + 1))
+        )
+    end
+  end
+
+  defp define_element_data(id, o, key, i, desc, exists?) do
     cond do
       not exists? and not Map.get(o, :ext, true) ->
         throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
@@ -420,6 +460,8 @@ defmodule Browser.JS.Props do
         )
     end
   end
+
+  defp validate_element({:accessor, _, _, _, c}, _desc, key), do: if(not c, do: reject(key))
 
   defp validate_element({:data, v, w, _e, c}, desc, key) do
     if not c do
