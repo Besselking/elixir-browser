@@ -1001,7 +1001,10 @@ defmodule Browser.Layout do
           [{:gap, box.mb}, {:inset_end} | acc]
 
         spec ->
+          {legend, kids} = take_legend(tag, kind, spec, kids, style)
+          spec = if legend, do: Map.put(spec, :legend, true), else: spec
           acc = [{:box_start, ref, spec} | acc]
+          acc = if legend, do: [legend | acc], else: acc
 
           acc =
             with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
@@ -1011,6 +1014,28 @@ defmodule Browser.Layout do
       end
     end
   end
+
+  # A fieldset's first child, when it is a legend, sits on the top border and interrupts it.
+  # -> {the `:legend` op or nil, the children left for the fieldset's content}
+  defp take_legend("fieldset", :block, %{bw: {bt, _, _, _}}, kids, style) when bt > 0 do
+    {skipped, rest} =
+      Enum.split_while(kids, &(match?({:text, t} when is_binary(t), &1) and blank?(&1)))
+
+    with [{:element, "legend", attrs, _} = el | rest] <- rest,
+         c = computed(attrs),
+         false <- hidden?(c),
+         false <- c["position"] in ["absolute", "fixed"],
+         false <- c["float"] in ["left", "right"] do
+      [{:inline_block, sub, spec, ps}] = inline_block_ops(el, style, c, [], true)
+      {{:legend, sub, spec, ps}, skipped ++ rest}
+    else
+      _ -> {nil, kids}
+    end
+  end
+
+  defp take_legend(_tag, _kind, _spec, kids, _style), do: {nil, kids}
+
+  defp blank?({:text, t}), do: String.trim(t) == ""
 
   # Boxes whose geometry must be resolved at placement: backgrounds, borders,
   # explicit widths/heights, `auto` margins, clipping and positioned boxes.
@@ -1714,6 +1739,34 @@ defmodule Browser.Layout do
 
   defp op({:box_start, ref, o}, st), do: start_box(st, ref, o)
 
+  # A fieldset's legend is laid out on its own, shrink-to-fit, at the top of the fieldset with its
+  # middle on the border. The content starts below it, and the border has a gap where it is.
+  defp op({:legend, sub, spec, _style}, st) do
+    {ref, box} = Enum.find(st.open, fn {_, b} -> b.id == hd(st.blocks) end)
+    {bt, _br, _bb, _bl} = box.o.bw
+    st = flush(st)
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    w = fit_width(st, sub, spec, avail)
+    {items, height, _} = layout_atom(st, sub, w, spec.key)
+    x = st.margin + st.left
+    moved = for it <- items, do: move(it, x, box.top)
+    {rects, others} = Enum.split_with(moved, &(&1.type in @behind_text))
+    off = max(div(height - bt, 2), 0)
+    box = Map.put(box, :legend, %{x: x, w: w, off: off})
+
+    %{
+      st
+      | items: Enum.reverse(others) ++ st.items,
+        n: st.n + length(others),
+        rects: Enum.reverse(rects) ++ st.rects,
+        nr: st.nr + length(rects),
+        open: Map.put(st.open, ref, box),
+        gap: 0,
+        ngap: 0,
+        y: box.top + max(height, off + bt) + box.o.pt
+    }
+  end
+
   defp op({:box_end, ref}, st) do
     st = flush(st)
     {box, open} = Map.pop(st.open, ref)
@@ -2146,7 +2199,15 @@ defmodule Browser.Layout do
   defp plain_outer_rects(%{o: o} = box, height, images) do
     {bt, br, bb, bl} = o.bw
     {tc, rc, bc, lc} = o.bc
-    {x, y, w} = {box.x, box.top, box.w}
+    # the border of a fieldset starts at the middle of its legend, which has a gap cut out of it
+    {off, gap} =
+      case box do
+        %{legend: %{x: lx, w: lw, off: off}} -> {off, {lx, lx + lw}}
+        _ -> {0, nil}
+      end
+
+    {x, y, w} = {box.x, box.top + off, box.w}
+    height = height - off
     border_box = {x, y, w, height}
     radii = resolve_radii(o.r, w, height)
 
@@ -2197,7 +2258,7 @@ defmodule Browser.Layout do
           {st, sr, sb, sl} = Map.get(o, :bs, {:solid, :solid, :solid, :solid})
 
           sides = [
-            bt > 0 && tc && side_rects(st, :h, x, y, w, bt, tc),
+            bt > 0 && tc && top_rects(st, x, y, w, bt, tc, gap),
             bb > 0 && bc && side_rects(sb, :h, x, y + height - bb, w, bb, bc),
             bl > 0 && lc && side_rects(sl, :v, x, y, bl, height, lc),
             br > 0 && rc && side_rects(sr, :v, x + w - br, y, br, height, rc)
@@ -2208,10 +2269,10 @@ defmodule Browser.Layout do
         radii when decorated? ->
           # the border must be painted over the images and inset shadows
           rounded(x, y, w, height, o.bg, radii, {0, 0, 0, 0}, o.bc) ++
-            images_item ++ insets ++ rounded(x, y, w, height, nil, radii, o.bw, o.bc, o[:bs])
+            images_item ++ insets ++ rounded(x, y, w, height, nil, radii, o.bw, o.bc, o[:bs], gap)
 
         radii ->
-          rounded(x, y, w, height, o.bg, radii, o.bw, o.bc, o[:bs])
+          rounded(x, y, w, height, o.bg, radii, o.bw, o.bc, o[:bs], gap)
       end
 
     # a control without background or border still has a box: keep it for its bounds
@@ -2234,8 +2295,9 @@ defmodule Browser.Layout do
   end
 
   # `bs` are the sides' styles (:solid, :dashed, :dotted), which the painter draws
-  defp rounded(x, y, w, h, bg, radii, bw, bc, bs \\ nil) do
-    border = if bw == {0, 0, 0, 0}, do: nil, else: %{w: bw, c: bc, s: bs}
+  # `gap` is the stretch {x0, x1} of the top side a fieldset's legend sits in, left undrawn
+  defp rounded(x, y, w, h, bg, radii, bw, bc, bs \\ nil, gap \\ nil) do
+    border = if bw == {0, 0, 0, 0}, do: nil, else: %{w: bw, c: bc, s: bs, gap: gap}
 
     if w > 0 and h > 0 and (bg || border) do
       [%{type: :rect, x: x, y: y, w: w, h: h, color: bg, radius: radii, border: border}]
@@ -2282,6 +2344,19 @@ defmodule Browser.Layout do
   # row of t-wide dots with gaps of t; the pattern is spread so that it starts and ends with
   # a full dash at the corners (`:h` runs along x, `:v` along y).
   @max_dashes 400
+
+  # the top side, without the stretch `gap` ({x0, x1}) a legend sits in
+  defp top_rects(style, x, y, w, h, color, nil), do: side_rects(style, :h, x, y, w, h, color)
+
+  defp top_rects(style, x, y, w, h, color, {g0, g1}) do
+    g0 = g0 |> max(x) |> min(x + w)
+    g1 = g1 |> max(g0) |> min(x + w)
+
+    for {from, to} <- [{x, g0}, {g1, x + w}], to > from do
+      side_rects(style, :h, from, y, to - from, h, color)
+    end
+    |> List.flatten()
+  end
 
   defp side_rects(:solid, _dir, x, y, w, h, color), do: [rect(x, y, w, h, color)]
 

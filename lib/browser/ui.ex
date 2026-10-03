@@ -1119,11 +1119,23 @@ defmodule Browser.UI do
     {{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}} = radii
     {st, sr, sb, sl} = Map.get(border, :s) || {:solid, :solid, :solid, :solid}
 
-    # straight parts of the four sides
-    strip(gc, tc, st, :h, x + tlx, y, w - tlx - trx, bt)
-    strip(gc, bc, sb, :h, x + blx, y + h - bb, w - blx - brx, bb)
-    strip(gc, lc, sl, :v, x, y + tly, bl, h - tly - bly)
-    strip(gc, rc, sr, :v, x + w - br, y + try_, br, h - try_ - bry)
+    # straight parts of the four sides; the top one has a gap where a fieldset's legend is
+    {g0, g1} = Map.get(border, :gap) || {0, 0}
+    top0 = x + tlx
+    top1 = x + w - trx
+    g0 = g0 |> max(top0) |> min(top1)
+    g1 = g1 |> max(g0) |> min(top1)
+
+    if g1 > g0 do
+      strip(gc, tc, st, :h, top0, y, g0 - top0, bt, tlx > 0, false)
+      strip(gc, tc, st, :h, g1, y, top1 - g1, bt, false, trx > 0)
+    else
+      strip(gc, tc, st, :h, top0, y, top1 - top0, bt, tlx > 0, trx > 0)
+    end
+
+    strip(gc, bc, sb, :h, x + blx, y + h - bb, w - blx - brx, bb, blx > 0, brx > 0)
+    strip(gc, lc, sl, :v, x, y + tly, bl, h - tly - bly, tly > 0, bly > 0)
+    strip(gc, rc, sr, :v, x + w - br, y + try_, br, h - try_ - bry, try_ > 0, bry > 0)
 
     # corners: local coordinates run from the corner point inwards along (dx, dy)
     corner(gc, pick(tc, bt, lc, bl), x, y, 1, 1, {tlx, tly}, bl, bt)
@@ -1135,13 +1147,28 @@ defmodule Browser.UI do
   # colour of the thicker of the two sides meeting at a corner (horizontal wins ties)
   defp pick(hc, ht, vc, vt), do: if(ht >= vt, do: hc || vc, else: vc || hc)
 
-  defp strip(_gc, nil, _style, _dir, _x, _y, _w, _h), do: :ok
-  defp strip(_gc, _c, _style, _dir, _x, _y, w, h) when w <= 0 or h <= 0, do: :ok
+  defp strip(_gc, nil, _style, _dir, _x, _y, _w, _h, _arc0, _arc1), do: :ok
+  defp strip(_gc, _c, _style, _dir, _x, _y, w, h, _arc0, _arc1) when w <= 0 or h <= 0, do: :ok
 
-  # a dashed or dotted side: dashes 3 thick (dots 1) with gaps as long, spread to fit the side
-  defp strip(gc, color, style, dir, x, y, w, h) when style in [:dashed, :dotted] do
+  # a dashed or dotted side: dashes 3 thick (dots 1) with gaps as long, spread to fit the side.
+  # A rounded corner is drawn solid, so it counts as a dash: the side starts (ends) with a gap
+  # where it meets one (`arc0`, `arc1`).
+  defp strip(gc, color, style, dir, x, y, w, h, arc0, arc1) when style in [:dashed, :dotted] do
     {len, t} = if dir == :h, do: {w, h}, else: {h, w}
     {dash, gap} = if style == :dashed, do: {3 * t, 3 * t}, else: {t, t}
+    {lead, trail} = {if(arc0, do: gap, else: 0), if(arc1, do: gap, else: 0)}
+
+    {x, y, w, h, len} =
+      if len - lead - trail >= dash do
+        len = len - lead - trail
+
+        if dir == :h,
+          do: {x + lead, y, len, h, len},
+          else: {x, y + lead, w, len, len}
+      else
+        {x, y, w, h, len}
+      end
+
     n = max(round((len + gap) / (dash + gap)), 1)
     dash_len = if n == 1, do: len, else: (len - (n - 1) * gap) / n
 
@@ -1159,7 +1186,7 @@ defmodule Browser.UI do
     :wxGraphicsContext.fillPath(gc, path)
   end
 
-  defp strip(gc, color, _style, _dir, x, y, w, h) do
+  defp strip(gc, color, _style, _dir, x, y, w, h, _arc0, _arc1) do
     :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
     path = :wxGraphicsContext.createPath(gc)
     :wxGraphicsPath.addRectangle(path, x, y, w, h)
