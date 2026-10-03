@@ -299,13 +299,13 @@ defmodule Browser.JS.Interp do
       :array ->
         case index(key) do
           i when is_integer(i) -> Map.get(o.items, i, :undefined)
-          nil -> if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key))
+          nil -> if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key), {:obj, id})
         end
 
       :function ->
         key = to_key(key)
 
-        case lookup(o, key) do
+        case lookup(o, key, {:obj, id}) do
           :undefined -> function_prop(id, o, key)
           v -> v
         end
@@ -316,11 +316,11 @@ defmodule Browser.JS.Interp do
 
         case mod.host_get(data, key, {:obj, id}) do
           {:ok, v} -> v
-          :miss -> lookup(o, key)
+          :miss -> lookup(o, key, {:obj, id})
         end
 
       _ ->
-        lookup(o, to_key(key))
+        lookup(o, to_key(key), {:obj, id})
     end
   end
 
@@ -328,14 +328,15 @@ defmodule Browser.JS.Interp do
     case {index(key), key} do
       {i, _} when is_integer(i) -> String.at(s, i) || :undefined
       {_, "length"} -> String.length(s) * 1.0
-      _ -> lookup(deref(elem(proto(:string), 1)), to_key(key))
+      _ -> lookup(deref(elem(proto(:string), 1)), to_key(key), s)
     end
   end
 
   def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
-    do: lookup(deref(elem(proto(:number), 1)), to_key(key))
+    do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
 
-  def get(b, key) when is_boolean(b), do: lookup(deref(elem(proto(:boolean), 1)), to_key(key))
+  def get(b, key) when is_boolean(b),
+    do: lookup(deref(elem(proto(:boolean), 1)), to_key(key), b)
 
   def get(v, key),
     do:
@@ -344,14 +345,19 @@ defmodule Browser.JS.Interp do
         "Cannot read properties of #{to_str(v)} (reading '#{to_str(key)}')"
       )
 
-  defp lookup(o, key) do
+  # a property found along the prototype chain; a getter is called with the object it was
+  # asked of as `this`
+  defp lookup(o, key, receiver) do
     case o.props do
+      %{^key => {:accessor, getter, _}} ->
+        if function?(getter), do: call(getter, receiver, []), else: :undefined
+
       %{^key => v} ->
         v
 
       _ ->
         case o.proto do
-          {:obj, pid} -> lookup(deref(pid), key)
+          {:obj, pid} -> lookup(deref(pid), key, receiver)
           _ -> :undefined
         end
     end
@@ -406,17 +412,41 @@ defmodule Browser.JS.Interp do
       %{class: :array} ->
         case index(key) do
           i when is_integer(i) ->
-            store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+            cond do
+              Map.get(o, :frozen, false) -> :ok
+              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) -> :ok
+              i >= o.len and Map.get(o, :len_ro, false) -> :ok
+              not writable?(o, i) -> :ok
+              true -> store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+            end
 
           nil ->
             if key == "length" do
               new_len = to_int(v)
 
-              store(id, %{
-                o
-                | items: Map.filter(o.items, fn {i, _} -> i < new_len end),
-                  len: new_len
-              })
+              cond do
+                Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
+                  :ok
+
+                true ->
+                  # an element that cannot be deleted stops the array from shrinking past it
+                  attrs = Map.get(o, :attrs, %{})
+
+                  stop =
+                    o.items
+                    |> Map.keys()
+                    |> Enum.filter(
+                      &(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false)
+                    )
+                    |> Enum.max(fn -> nil end)
+                    |> then(&if(&1, do: &1 + 1, else: new_len))
+
+                  store(id, %{
+                    o
+                    | items: Map.filter(o.items, fn {i, _} -> i < stop end),
+                      len: stop
+                  })
+              end
             else
               put_prop(id, o, to_key(key), v)
             end
@@ -443,24 +473,94 @@ defmodule Browser.JS.Interp do
 
   def put(_primitive, _key, v), do: v
 
+  # an assignment: own accessor or non-writable property, inherited ones, then a new property
   defp put_prop(id, o, key, v) do
-    keys = if Map.has_key?(o.props, key), do: o.keys, else: [key | o.keys]
-    store(id, %{o | props: Map.put(o.props, key, v), keys: keys})
+    case Map.fetch(o.props, key) do
+      {:ok, {:accessor, _, setter}} ->
+        if function?(setter), do: call(setter, {:obj, id}, [v])
+        :ok
+
+      {:ok, _} ->
+        if writable?(o, key), do: store(id, %{o | props: Map.put(o.props, key, v)}), else: :ok
+
+      :error ->
+        case inherited_set(o.proto, key) do
+          {:setter, setter} ->
+            call(setter, {:obj, id}, [v])
+            :ok
+
+          :readonly ->
+            :ok
+
+          :none ->
+            if Map.get(o, :ext, true),
+              do: store(id, %{o | props: Map.put(o.props, key, v), keys: [key | o.keys]}),
+              else: :ok
+        end
+    end
   end
+
+  defp inherited_set({:obj, pid}, key) do
+    p = deref(pid)
+
+    case p.props do
+      %{^key => {:accessor, _, setter}} ->
+        if function?(setter), do: {:setter, setter}, else: :readonly
+
+      %{^key => _} ->
+        if writable?(p, key), do: :none, else: :readonly
+
+      _ ->
+        inherited_set(p.proto, key)
+    end
+  end
+
+  defp inherited_set(_, _), do: :none
+
+  @doc false
+  def writable?(o, key), do: match?(%{w: true}, Map.get(Map.get(o, :attrs, %{}), key, %{w: true}))
+
+  @doc false
+  def configurable?(o, key),
+    do: match?(%{c: true}, Map.get(Map.get(o, :attrs, %{}), key, %{c: true}))
+
+  @doc false
+  def array_index(key), do: index(key)
 
   def delete({:obj, id}, key) do
     o = deref(id)
 
     i = if o.class == :array, do: index(key)
 
-    if i do
-      store(id, %{o | items: Map.delete(o.items, i)})
-    else
-      key = to_key(key)
-      store(id, %{o | props: Map.delete(o.props, key), keys: List.delete(o.keys, key)})
-    end
+    cond do
+      i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
+        false
 
-    true
+      i ->
+        store(id, %{o | items: Map.delete(o.items, i)})
+        true
+
+      true ->
+        key = to_key(key)
+
+        if Map.has_key?(o.props, key) and not configurable?(o, key) do
+          false
+        else
+          attrs = Map.delete(Map.get(o, :attrs, %{}), key)
+
+          store(
+            id,
+            %{
+              o
+              | props: Map.delete(o.props, key),
+                keys: List.delete(o.keys, key)
+            }
+            |> Map.put(:attrs, attrs)
+          )
+
+          true
+        end
+    end
   end
 
   def delete(_, _), do: true
@@ -1113,8 +1213,17 @@ defmodule Browser.JS.Interp do
     obj = new_object()
 
     Enum.each(props, fn
-      {:init, key, val} -> put(obj, key_of(key, env), ev(val, env))
-      {:spread, e} -> spread_into(obj, ev(e, env))
+      {:init, key, val} ->
+        put(obj, key_of(key, env), ev(val, env))
+
+      {:spread, e} ->
+        spread_into(obj, ev(e, env))
+
+      {:getter, key, fun} ->
+        Browser.JS.Props.define_accessor(obj, key_of(key, env), get: ev(fun, env))
+
+      {:setter, key, fun} ->
+        Browser.JS.Props.define_accessor(obj, key_of(key, env), set: ev(fun, env))
     end)
 
     obj

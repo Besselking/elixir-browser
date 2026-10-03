@@ -1,0 +1,745 @@
+defmodule Browser.JS.Props do
+  @moduledoc """
+  Property attributes for the JavaScript runtime: `Object.defineProperty` and friends.
+
+  A property is a value in the object's `props`, or `{:accessor, getter, setter}` for an accessor.
+  Whether it is enumerable is whether its key is in the object's `keys`; `writable` and
+  `configurable` are kept in the object's `attrs` map only when they are not both true (the
+  default of an assignment). `ext: false` marks a non-extensible object, and `frozen: true` an
+  array whose elements may not change.
+  """
+
+  import Browser.JS.Interp, except: [get: 2, put: 3]
+  alias Browser.JS.Interp
+
+  defp arg(args, i), do: Enum.at(args, i, :undefined)
+
+  # ── reading ────────────────────────────────────────────────
+
+  # -> nil | {:data, value, writable, enumerable, configurable} | {:accessor, get, set, e, c}
+  defp own(o, key) do
+    cond do
+      o.class == :array and is_integer(array_index(key)) ->
+        case Map.fetch(o.items, array_index(key)) do
+          {:ok, v} ->
+            frozen = Map.get(o, :frozen, false)
+            a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
+
+            {:data, v, not frozen and Map.get(a, :w, true), true,
+             not frozen and Map.get(a, :c, true)}
+
+          :error ->
+            nil
+        end
+
+      o.class == :array and key == "length" ->
+        {:data, o.len * 1.0, not Map.get(o, :frozen, false) and not Map.get(o, :len_ro, false),
+         false, false}
+
+      Map.has_key?(o.props, key) ->
+        attrs = Map.get(o.attrs_or_default, key, %{})
+        e = key in o.keys
+        c = Map.get(attrs, :c, true)
+
+        case o.props[key] do
+          {:accessor, g, s} -> {:accessor, g, s, e, c}
+          v -> {:data, v, Map.get(attrs, :w, true), e, c}
+        end
+
+      true ->
+        nil
+    end
+  end
+
+  defp state({:obj, id}, key) do
+    o = deref(id)
+    o = Map.put(o, :attrs_or_default, Map.get(o, :attrs, %{}))
+    own(o, key) || virtual(id, o, key)
+  end
+
+  # `name`, `length` and `prototype` of a function exist without being stored
+  defp virtual(id, %{class: :function}, key) when key in ["name", "length", "prototype"] do
+    case Interp.get({:obj, id}, key) do
+      :undefined ->
+        nil
+
+      v ->
+        case key do
+          "prototype" -> {:data, v, true, false, false}
+          _ -> {:data, v, false, false, true}
+        end
+    end
+  end
+
+  defp virtual(_, _, _), do: nil
+
+  @doc "The property descriptor object of an own property, or undefined."
+  def descriptor(obj, key) do
+    case state(obj, key) do
+      nil ->
+        :undefined
+
+      {:data, v, w, e, c} ->
+        new_object([{"value", v}, {"writable", w}, {"enumerable", e}, {"configurable", c}])
+
+      {:accessor, g, s, e, c} ->
+        new_object([{"get", g}, {"set", s}, {"enumerable", e}, {"configurable", c}])
+    end
+  end
+
+  @doc "Every own property name, enumerable or not: array indices, then the rest."
+  def own_names({:obj, id}) do
+    o = deref(id)
+    base = Enum.reverse(o.keys)
+    hidden = (Map.keys(o.props) -- o.keys) |> Enum.sort()
+
+    case o do
+      %{class: :array} ->
+        for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
+          base ++ hidden ++ ["length"]
+
+      %{class: :function} ->
+        virtual =
+          for k <- ["length", "name", "prototype"],
+              k not in hidden,
+              state({:obj, id}, k) != nil,
+              do: k
+
+        base ++ virtual ++ hidden
+
+      _ ->
+        {ints, rest} = Enum.split_with(base, &is_integer(array_index(&1)))
+        Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+    end
+  end
+
+  def own_names(s) when is_binary(s), do: Interp.own_keys(s) ++ ["length"]
+  def own_names(_), do: []
+
+  # ── defining ───────────────────────────────────────────────
+
+  # the fields of a descriptor object that are present: %{value:, writable:, get:, set:, ...}
+  defp to_desc({:obj, _} = o) do
+    field = fn name ->
+      if has_property?(o, name), do: [{String.to_atom(name), Interp.get(o, name)}], else: []
+    end
+
+    desc =
+      ~w(enumerable configurable value writable get set)
+      |> Enum.flat_map(field)
+      |> Map.new()
+
+    desc =
+      desc
+      |> maybe_bool(:enumerable)
+      |> maybe_bool(:configurable)
+      |> maybe_bool(:writable)
+
+    for k <- [:get, :set] do
+      case desc do
+        %{^k => v} when v != :undefined ->
+          unless function?(v),
+            do:
+              throw_error("TypeError", "#{String.capitalize(to_string(k))}ter must be a function")
+
+        _ ->
+          :ok
+      end
+    end
+
+    if (Map.has_key?(desc, :get) or Map.has_key?(desc, :set)) and
+         (Map.has_key?(desc, :value) or Map.has_key?(desc, :writable)),
+       do:
+         throw_error(
+           "TypeError",
+           "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute"
+         )
+
+    desc
+  end
+
+  defp to_desc(v),
+    do: throw_error("TypeError", "Property description must be an object: #{to_str(v)}")
+
+  defp maybe_bool(desc, k) do
+    case desc do
+      %{^k => v} -> Map.put(desc, k, truthy(v))
+      _ -> desc
+    end
+  end
+
+  @doc "`Object.defineProperty(obj, key, descriptor_object)`."
+  def define({:obj, id} = obj, key, descriptor) do
+    key = to_key(key)
+    desc = to_desc(descriptor)
+    define_own(obj, id, key, desc)
+    obj
+  end
+
+  def define(_, _, _),
+    do: throw_error("TypeError", "Object.defineProperty called on non-object")
+
+  @doc "Adds or completes an accessor, enumerable and configurable (object literals, `get`/`set`)."
+  def define_accessor({:obj, id} = obj, key, opts) do
+    existing =
+      case state(obj, key) do
+        {:accessor, g, s, _, _} -> {g, s}
+        _ -> {:undefined, :undefined}
+      end
+
+    {g, s} = existing
+    g = Keyword.get(opts, :get, g)
+    s = Keyword.get(opts, :set, s)
+
+    define_own(obj, id, key, %{get: g, set: s, enumerable: true, configurable: true})
+  end
+
+  defp reject(key), do: throw_error("TypeError", "Cannot redefine property: #{key}")
+
+  defp define_own(obj, id, key, desc) do
+    o = deref(id)
+
+    cond do
+      o.class == :array and is_integer(array_index(key)) ->
+        define_element(id, o, key, desc)
+
+      o.class == :array and key == "length" ->
+        define_length(id, o, desc)
+
+      true ->
+        case state(obj, key) do
+          nil ->
+            unless Map.get(o, :ext, true),
+              do:
+                throw_error(
+                  "TypeError",
+                  "Cannot define property #{key}, object is not extensible"
+                )
+
+            create(id, key, desc)
+
+          current ->
+            validate(current, desc, key)
+            update(id, key, current, desc)
+        end
+    end
+  end
+
+  defp create(id, key, desc) do
+    o = deref(id)
+    accessor? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+
+    value =
+      if accessor?,
+        do: {:accessor, Map.get(desc, :get, :undefined), Map.get(desc, :set, :undefined)},
+        else: Map.get(desc, :value, :undefined)
+
+    attrs = Map.get(o, :attrs, %{})
+    flags = %{c: Map.get(desc, :configurable, false)}
+    flags = if accessor?, do: flags, else: Map.put(flags, :w, Map.get(desc, :writable, false))
+    flags = Map.put_new(flags, :w, true)
+
+    attrs =
+      if flags == %{c: true, w: true},
+        do: Map.delete(attrs, key),
+        else: Map.put(attrs, key, flags)
+
+    keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
+
+    store(
+      id,
+      o
+      |> Map.put(:attrs, attrs)
+      |> Map.put(:props, Map.put(o.props, key, value))
+      |> Map.put(:keys, keys)
+    )
+  end
+
+  # the rules for changing a property that is not configurable
+  defp validate({_, _, _, _, c} = current, desc, key) when c == true do
+    _ = {current, desc, key}
+    :ok
+  end
+
+  defp validate(current, desc, key) do
+    {kind, e} =
+      case current do
+        {:data, _, _, e, _} -> {:data, e}
+        {:accessor, _, _, e, _} -> {:accessor, e}
+      end
+
+    data_desc? = Map.has_key?(desc, :value) or Map.has_key?(desc, :writable)
+    accessor_desc? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+
+    cond do
+      Map.get(desc, :configurable) == true -> reject(key)
+      Map.has_key?(desc, :enumerable) and desc.enumerable != e -> reject(key)
+      kind == :data and accessor_desc? -> reject(key)
+      kind == :accessor and data_desc? -> reject(key)
+      true -> :ok
+    end
+
+    case current do
+      {:data, v, false, _, _} ->
+        if Map.get(desc, :writable) == true, do: reject(key)
+        if Map.has_key?(desc, :value) and not same_value?(desc.value, v), do: reject(key)
+
+      {:accessor, g, s, _, _} ->
+        if Map.has_key?(desc, :get) and desc.get != g, do: reject(key)
+        if Map.has_key?(desc, :set) and desc.set != s, do: reject(key)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp same_value?(a, b) do
+    cond do
+      a == :nan and b == :nan -> true
+      is_number(a) and is_number(b) -> a == b and (a != 0 or sign_bit(a) == sign_bit(b))
+      true -> a == b
+    end
+  rescue
+    _ -> a == b
+  end
+
+  defp sign_bit(n), do: match?(<<1::1, _::63>>, <<n * 1.0::float>>)
+
+  defp update(id, key, current, desc) do
+    o = deref(id)
+    accessor_desc? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+    data_desc? = Map.has_key?(desc, :value) or Map.has_key?(desc, :writable)
+
+    {kind, e, c} =
+      case current do
+        {:data, _, _, e, c} -> {:data, e, c}
+        {:accessor, _, _, e, c} -> {:accessor, e, c}
+      end
+
+    e = Map.get(desc, :enumerable, e)
+    c = Map.get(desc, :configurable, c)
+
+    {value, w} =
+      cond do
+        accessor_desc? and kind == :accessor ->
+          {:accessor, g, s, _, _} = current
+
+          {{:accessor, Map.get(desc, :get, g), Map.get(desc, :set, s)}, true}
+
+        accessor_desc? ->
+          {{:accessor, Map.get(desc, :get, :undefined), Map.get(desc, :set, :undefined)}, true}
+
+        data_desc? and kind == :accessor ->
+          {Map.get(desc, :value, :undefined), Map.get(desc, :writable, false)}
+
+        kind == :data ->
+          {:data, v, w, _, _} = current
+          {Map.get(desc, :value, v), Map.get(desc, :writable, w)}
+
+        true ->
+          {:accessor, g, s, _, _} = current
+          {{:accessor, g, s}, true}
+      end
+
+    attrs = Map.get(o, :attrs, %{})
+    flags = if match?({:accessor, _, _}, value), do: %{c: c, w: true}, else: %{c: c, w: w}
+
+    attrs =
+      if flags == %{c: true, w: true},
+        do: Map.delete(attrs, key),
+        else: Map.put(attrs, key, flags)
+
+    keys = o.keys |> List.delete(key) |> then(&if(e, do: [key | &1], else: &1))
+
+    # a function's own name, length and prototype become real properties
+    store(
+      id,
+      o
+      |> Map.put(:attrs, attrs)
+      |> Map.put(:props, Map.put(o.props, key, value))
+      |> Map.put(:keys, keys)
+    )
+  end
+
+  # array elements: a value with writable/configurable kept per index (enumerable stays true,
+  # and an accessor is not supported)
+  defp define_element(id, o, key, desc) do
+    i = array_index(key)
+
+    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
+      do: throw_error("TypeError", "accessors on array elements are not supported")
+
+    exists? = Map.has_key?(o.items, i)
+
+    cond do
+      not exists? and not Map.get(o, :ext, true) ->
+        throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
+
+      not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
+        throw_error("TypeError", "Cannot define property #{key}, array length is not writable")
+
+      true ->
+        current =
+          if exists?,
+            do: state({:obj, id}, key),
+            else: nil
+
+        if current, do: validate_element(current, desc, key)
+
+        attrs = Map.get(o, :attrs, %{})
+        cur = Map.get(attrs, i, %{})
+        w = Map.get(desc, :writable, if(exists?, do: Map.get(cur, :w, true), else: false))
+        c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
+        flags = %{w: w, c: c}
+
+        attrs =
+          if flags == %{w: true, c: true},
+            do: Map.delete(attrs, i),
+            else: Map.put(attrs, i, flags)
+
+        v = Map.get(desc, :value, Map.get(o.items, i, :undefined))
+
+        store(
+          id,
+          o
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:items, Map.put(o.items, i, v))
+          |> Map.put(:len, max(o.len, i + 1))
+        )
+    end
+  end
+
+  defp validate_element({:data, v, w, _e, c}, desc, key) do
+    if not c do
+      if Map.get(desc, :configurable) == true, do: reject(key)
+      if Map.get(desc, :enumerable) == false, do: reject(key)
+      if not w and Map.get(desc, :writable) == true, do: reject(key)
+      if not w and Map.has_key?(desc, :value) and not same_value?(desc.value, v), do: reject(key)
+    end
+  end
+
+  defp define_length(id, o, desc) do
+    cond do
+      Map.get(desc, :configurable) == true or Map.get(desc, :enumerable) == true or
+        Map.has_key?(desc, :get) or Map.has_key?(desc, :set) ->
+        reject("length")
+
+      true ->
+        read_only? = Map.get(o, :len_ro, false) or Map.get(o, :frozen, false)
+
+        if read_only? and Map.get(desc, :writable) == true, do: reject("length")
+
+        o =
+          if Map.has_key?(desc, :value) do
+            n = to_num(desc.value)
+
+            unless is_number(n) and n >= 0 and n == trunc(n) and n < 4_294_967_296,
+              do: throw_error("RangeError", "Invalid array length")
+
+            len = trunc(n)
+            if read_only? and len != o.len, do: reject("length")
+            shrink(id, o, len)
+          else
+            o
+          end
+
+        if Map.get(desc, :writable) == false,
+          do: store(id, Map.put(deref(id) || o, :len_ro, true))
+
+        :ok
+    end
+  end
+
+  # cut an array to `len`, but not below an element that cannot be deleted; that is an error
+  defp shrink(id, o, len) do
+    attrs = Map.get(o, :attrs, %{})
+
+    keep =
+      o.items
+      |> Map.keys()
+      |> Enum.filter(&(&1 >= len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+      |> Enum.max(fn -> nil end)
+
+    stop = if keep, do: keep + 1, else: len
+    o = %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop}
+    store(id, o)
+    if keep, do: reject("length")
+    o
+  end
+
+  # ── integrity levels ───────────────────────────────────────
+
+  @doc "`Object.preventExtensions`."
+  def prevent_extensions({:obj, id} = obj) do
+    o = deref(id)
+    store(id, Map.put(o, :ext, false))
+    obj
+  end
+
+  def prevent_extensions(v), do: v
+
+  def extensible?({:obj, id}), do: Map.get(deref(id), :ext, true)
+  def extensible?(_), do: false
+
+  @doc "`Object.seal` (`freeze?` false) and `Object.freeze` (true)."
+  def lock({:obj, id} = obj, freeze?) do
+    o = deref(id)
+
+    attrs =
+      Enum.reduce(Map.keys(o.props), Map.get(o, :attrs, %{}), fn key, attrs ->
+        accessor? = match?({:accessor, _, _}, o.props[key])
+        cur = Map.get(attrs, key, %{})
+        w = if freeze? and not accessor?, do: false, else: Map.get(cur, :w, true)
+        Map.put(attrs, key, %{c: false, w: w})
+      end)
+
+    o = o |> Map.put(:attrs, attrs) |> Map.put(:ext, false)
+    o = if freeze? and o.class == :array, do: Map.put(o, :frozen, true), else: o
+    o = if not freeze? and o.class == :array, do: Map.put(o, :sealed, true), else: o
+    store(id, o)
+    obj
+  end
+
+  def lock(v, _), do: v
+
+  @doc "`Object.isFrozen` (`freeze?` true) and `Object.isSealed`."
+  def locked?({:obj, id}, freeze?) do
+    o = deref(id)
+
+    not Map.get(o, :ext, true) and
+      Enum.all?(Map.keys(o.props), fn key ->
+        a = Map.get(Map.get(o, :attrs, %{}), key, %{})
+        accessor? = match?({:accessor, _, _}, o.props[key])
+
+        Map.get(a, :c, true) == false and
+          (not freeze? or accessor? or Map.get(a, :w, true) == false)
+      end) and
+      (o.class != :array or o.items == %{} or
+         Map.get(o, :frozen, false) or (not freeze? and Map.get(o, :sealed, false)))
+  end
+
+  def locked?(_, _), do: true
+
+  # ── install ────────────────────────────────────────────────
+
+  def install(object_ctor, object_proto) do
+    def_fn = fn obj, name, fun -> put_hidden(obj, name, native(name, fun)) end
+
+    def_fn.(object_ctor, "defineProperty", fn _, args ->
+      define(arg(args, 0), arg(args, 1), arg(args, 2))
+    end)
+
+    def_fn.(object_ctor, "defineProperties", fn _, args ->
+      define_all(arg(args, 0), arg(args, 1))
+    end)
+
+    def_fn.(object_ctor, "getOwnPropertyDescriptor", fn _, args ->
+      case arg(args, 0) do
+        {:obj, _} = o ->
+          descriptor(o, to_key(arg(args, 1)))
+
+        v when v in [:undefined, :null] ->
+          throw_error("TypeError", "Cannot convert undefined or null to object")
+
+        s when is_binary(s) ->
+          string_descriptor(s, to_key(arg(args, 1)))
+
+        _ ->
+          :undefined
+      end
+    end)
+
+    def_fn.(object_ctor, "getOwnPropertyDescriptors", fn _, args ->
+      o = arg(args, 0)
+
+      if o in [:undefined, :null],
+        do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      new_object(for k <- own_names(o), d = descriptor(o, k), d != :undefined, do: {k, d})
+    end)
+
+    def_fn.(object_ctor, "getOwnPropertyNames", fn _, args ->
+      case arg(args, 0) do
+        v when v in [:undefined, :null] ->
+          throw_error("TypeError", "Cannot convert undefined or null to object")
+
+        v ->
+          new_array(own_names(v))
+      end
+    end)
+
+    def_fn.(object_ctor, "getOwnPropertySymbols", fn _, _ -> new_array([]) end)
+
+    def_fn.(object_ctor, "create", fn _, args ->
+      proto =
+        case arg(args, 0) do
+          :null ->
+            :null
+
+          {:obj, _} = p ->
+            p
+
+          v ->
+            throw_error(
+              "TypeError",
+              "Object prototype may only be an Object or null: #{to_str(v)}"
+            )
+        end
+
+      o = new_object([], proto)
+      if arg(args, 1) != :undefined, do: define_all(o, arg(args, 1))
+      o
+    end)
+
+    def_fn.(object_ctor, "getPrototypeOf", fn _, args ->
+      case arg(args, 0) do
+        {:obj, id} ->
+          deref(id).proto || :null
+
+        v when v in [:undefined, :null] ->
+          throw_error("TypeError", "Cannot convert undefined or null to object")
+
+        s when is_binary(s) ->
+          proto(:string)
+
+        b when is_boolean(b) ->
+          proto(:boolean)
+
+        _ ->
+          proto(:number)
+      end
+    end)
+
+    def_fn.(object_ctor, "setPrototypeOf", fn _, args ->
+      o = arg(args, 0)
+      p = arg(args, 1)
+
+      unless p == :null or match?({:obj, _}, p),
+        do:
+          throw_error("TypeError", "Object prototype may only be an Object or null: #{to_str(p)}")
+
+      case o do
+        {:obj, id} ->
+          rec = deref(id)
+          current = rec.proto || :null
+
+          cond do
+            current == p ->
+              :ok
+
+            not Map.get(rec, :ext, true) ->
+              throw_error("TypeError", "#{to_str(o)} is not extensible")
+
+            cycle?(p, o) ->
+              throw_error("TypeError", "Cyclic __proto__ value")
+
+            true ->
+              store(id, %{rec | proto: if(p == :null, do: nil, else: p)})
+          end
+
+        v when v in [:undefined, :null] ->
+          throw_error("TypeError", "Object.setPrototypeOf called on null or undefined")
+
+        _ ->
+          :ok
+      end
+
+      o
+    end)
+
+    def_fn.(object_ctor, "preventExtensions", fn _, args -> prevent_extensions(arg(args, 0)) end)
+    def_fn.(object_ctor, "isExtensible", fn _, args -> extensible?(arg(args, 0)) end)
+    def_fn.(object_ctor, "freeze", fn _, args -> lock(arg(args, 0), true) end)
+    def_fn.(object_ctor, "seal", fn _, args -> lock(arg(args, 0), false) end)
+    def_fn.(object_ctor, "isFrozen", fn _, args -> locked?(arg(args, 0), true) end)
+    def_fn.(object_ctor, "isSealed", fn _, args -> locked?(arg(args, 0), false) end)
+
+    def_fn.(object_ctor, "is", fn _, args ->
+      a = arg(args, 0)
+      b = arg(args, 1)
+      same_value?(a, b)
+    end)
+
+    def_fn.(object_proto, "propertyIsEnumerable", fn this, args ->
+      enumerable_own?(this, to_key(arg(args, 0)))
+    end)
+
+    def_fn.(object_proto, "isPrototypeOf", fn this, args ->
+      case arg(args, 0) do
+        {:obj, id} ->
+          if this in [:undefined, :null],
+            do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+          proto_chain_has?(deref(id).proto, this)
+
+        _ ->
+          false
+      end
+    end)
+
+    :ok
+  end
+
+  defp enumerable_own?(this, key) do
+    cond do
+      this in [:undefined, :null] ->
+        throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      match?({:obj, _}, this) ->
+        case state(this, key) do
+          {:data, _, _, e, _} -> e
+          {:accessor, _, _, e, _} -> e
+          nil -> false
+        end
+
+      is_binary(this) ->
+        is_integer(array_index(key)) and array_index(key) < String.length(this)
+
+      true ->
+        false
+    end
+  end
+
+  defp proto_chain_has?({:obj, id} = p, target),
+    do: p == target or proto_chain_has?(deref(id).proto, target)
+
+  defp proto_chain_has?(_, _), do: false
+
+  defp cycle?(new_proto, obj), do: proto_chain_has?(new_proto, obj)
+
+  defp define_all(obj, props) do
+    unless match?({:obj, _}, obj),
+      do: throw_error("TypeError", "Object.defineProperties called on non-object")
+
+    if props in [:undefined, :null],
+      do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+    descs = for k <- Interp.own_keys(props), do: {k, to_desc(Interp.get(props, k))}
+    {:obj, id} = obj
+    for {k, d} <- descs, do: define_own(obj, id, k, d)
+    obj
+  end
+
+  defp string_descriptor(s, key) do
+    cond do
+      key == "length" ->
+        new_object([
+          {"value", String.length(s) * 1.0},
+          {"writable", false},
+          {"enumerable", false},
+          {"configurable", false}
+        ])
+
+      is_integer(array_index(key)) and array_index(key) < String.length(s) ->
+        new_object([
+          {"value", String.at(s, array_index(key))},
+          {"writable", false},
+          {"enumerable", true},
+          {"configurable", false}
+        ])
+
+      true ->
+        :undefined
+    end
+  end
+end

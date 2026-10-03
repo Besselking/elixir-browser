@@ -171,9 +171,7 @@ defmodule Browser.JS.Builtins do
       o
     end)
 
-    def_fn(obj, "create", fn _, [proto | _] -> new_object([], proto) end)
-    def_fn(obj, "freeze", fn _, [o | _] -> o end)
-    def_fn(obj, "getPrototypeOf", fn _, [{:obj, id} | _] -> deref(id).proto || :null end)
+    Browser.JS.Props.install(obj, object_proto)
   end
 
   # ── Array ──────────────────────────────────────────────────

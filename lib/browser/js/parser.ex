@@ -967,7 +967,33 @@ defmodule Browser.JS.Parser do
     object_next(ts, [{:init, key, {:async, fun}} | acc])
   end
 
-  defp object_literal(ts, acc) do
+  # `get x() {}` and `set x(v) {}`
+  defp object_literal([{:id, kind, _}, {k, _, _} | _] = [_ | rest], acc)
+       when kind in ["get", "set"] and k in [:id, :str, :num] do
+    {key, shorthand, after_key} = property_key(rest)
+
+    case after_key do
+      [{:p, "(", _} | _] ->
+        {{:fn, _, params, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
+
+        case {kind, params} do
+          {"get", []} -> :ok
+          {"get", _} -> throw({:syntax, "a getter must not have parameters"})
+          {"set", [{:rest, _}]} -> throw({:syntax, "a setter cannot take a rest parameter"})
+          {"set", [_]} -> :ok
+          {"set", _} -> throw({:syntax, "a setter must have exactly one parameter"})
+        end
+
+        object_next(ts, [{String.to_atom(kind <> "ter"), key, fun} | acc])
+
+      _ ->
+        object_literal_plain([{:id, kind, false} | rest], acc)
+    end
+  end
+
+  defp object_literal(ts, acc), do: object_literal_plain(ts, acc)
+
+  defp object_literal_plain(ts, acc) do
     {key, shorthand, after_key} = property_key(ts)
 
     {prop, ts} =

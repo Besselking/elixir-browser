@@ -661,4 +661,93 @@ defmodule Browser.JSTest do
       assert js("var o; ({ x: o } = { x: 5 }); o") == 5.0
     end
   end
+
+  describe "property attributes" do
+    test "defineProperty: a read-only, hidden property" do
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1}); o.x = 2; o.x + ',' + Object.keys(o).length"
+             ) == "1,0"
+
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1}); JSON.stringify(Object.getOwnPropertyDescriptor(o, 'x'))"
+             ) ==
+               ~s({"value":1,"writable":false,"enumerable":false,"configurable":false})
+
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1, writable: true, enumerable: true, configurable: true}); o.x = 5; delete o.y; o.x + ',' + Object.keys(o).join()"
+             ) == "5,x"
+    end
+
+    test "a non-configurable property cannot be redefined or deleted" do
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1}); try { Object.defineProperty(o, 'x', {value: 2}) } catch (e) { e.name }"
+             ) == "TypeError"
+
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1}); Object.defineProperty(o, 'x', {value: 1}); delete o.x"
+             ) == false
+
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'x', {value: 1, configurable: true}); Object.defineProperty(o, 'x', {get: function () { return 3 }}); o.x"
+             ) == 3.0
+    end
+
+    test "accessors, in object literals and defineProperty" do
+      assert js(
+               "var o = { get a() { return this.b * 2 }, set a(v) { this.b = v }, b: 1 }; o.a = 5; o.a"
+             ) == 10.0
+
+      assert js(
+               "var o = {}; Object.defineProperty(o, 'g', {get: function () { return 7 }, enumerable: true}); o.g + ',' + Object.keys(o).join()"
+             ) == "7,g"
+
+      assert js("var p = { get v() { return this.n } }; var o = Object.create(p); o.n = 4; o.v") ==
+               4.0
+
+      assert js("var o = { set only(v) {} }; o.only = 1; typeof o.only") == "undefined"
+    end
+
+    test "getOwnPropertyDescriptor, getOwnPropertyNames and propertyIsEnumerable" do
+      assert js("Object.getOwnPropertyNames([1, 2]).join()") == "0,1,length"
+
+      assert js(
+               "var o = {a: 1}; Object.defineProperty(o, 'h', {value: 1}); Object.getOwnPropertyNames(o).join() + '|' + o.propertyIsEnumerable('a') + o.propertyIsEnumerable('h')"
+             ) == "a,h|truefalse"
+
+      assert js("Object.getOwnPropertyDescriptor({}, 'nope')") == :undefined
+
+      assert js(
+               "var d = Object.getOwnPropertyDescriptor({get x() { return 1 }}, 'x'); typeof d.get + typeof d.set + d.enumerable"
+             ) == "functionundefinedtrue"
+    end
+
+    test "freeze, seal and preventExtensions" do
+      assert js(
+               "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
+             ) == "1,undefined,true"
+
+      assert js(
+               "var o = Object.seal({a: 1}); o.a = 2; o.z = 1; delete o.a; o.a + ',' + o.z + ',' + Object.isSealed(o) + Object.isFrozen(o)"
+             ) == "2,undefined,truefalse"
+
+      assert js(
+               "var o = Object.preventExtensions({a: 1}); o.b = 1; Object.isExtensible(o) + ',' + o.b"
+             ) == "false,undefined"
+
+      assert js("var a = Object.freeze([1, 2]); a[0] = 9; a[5] = 1; a.length + ',' + a[0]") ==
+               "2,1"
+    end
+
+    test "Object.create with a descriptor map, prototypes and Object.is" do
+      assert js(
+               "var p = {i: 1}; var o = Object.create(p, {own: {value: 2, enumerable: true}}); o.i + ',' + o.own + ',' + (Object.getPrototypeOf(o) === p)"
+             ) == "1,2,true"
+
+      assert js("var o = Object.create(null); Object.getPrototypeOf(o)") == nil
+      assert js("var o = {}; Object.setPrototypeOf(o, {z: 3}); o.z") == 3.0
+
+      assert js("[Object.is(NaN, NaN), Object.is(0, -0), Object.is(1, 1)].join()") ==
+               "true,false,true"
+    end
+  end
 end
