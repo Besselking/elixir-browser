@@ -112,6 +112,7 @@ defmodule Browser.Layout do
       bold: false,
       italic: false,
       mono: false,
+      family: nil,
       href: nil,
       pre: false,
       ws: :normal,
@@ -340,7 +341,7 @@ defmodule Browser.Layout do
   defp font_of(items) do
     case Enum.find(items, &(&1.type == :text)) do
       nil -> nil
-      it -> Map.take(it, [:size, :bold, :italic, :mono])
+      it -> Map.take(it, [:size, :bold, :italic, :mono, :family])
     end
   end
 
@@ -1303,8 +1304,8 @@ defmodule Browser.Layout do
       case tag do
         t when t in ~w(b strong) -> %{style | bold: true}
         t when t in ~w(i em cite) -> %{style | italic: true}
-        t when t in ~w(code tt kbd samp) -> %{style | mono: true}
-        "pre" -> %{style | mono: true, pre: true, ws: :pre}
+        t when t in ~w(code tt kbd samp) -> %{style | mono: true, family: "monospace"}
+        "pre" -> %{style | mono: true, family: "monospace", pre: true, ws: :pre}
         t when t in ~w(textarea input) -> %{style | pre: true}
         "a" -> link_style(style, attrs)
         t when is_map_key(@headings, t) -> %{style | size: @headings[t], bold: true}
@@ -1348,7 +1349,7 @@ defmodule Browser.Layout do
     end)
     |> put_if(c["font-weight"], &%{&1 | bold: &2 == "bold"})
     |> put_if(c["font-style"], &%{&1 | italic: &2 == "italic"})
-    |> put_if(c["font-family"], &%{&1 | mono: mono?(&2)})
+    |> put_if(c["font-family"], &%{&1 | mono: mono?(&2), family: &2})
     |> put_if(match?({_, _, _}, c["color"]) && c["color"], &%{&1 | color: &2})
     |> put_if(
       decoration,
@@ -2709,6 +2710,7 @@ defmodule Browser.Layout do
       bold: style.bold,
       italic: style.italic,
       mono: style.mono,
+      family: style.family,
       href: if(style.hidden, do: nil, else: style.href),
       hidden: style.hidden,
       color: style.color,

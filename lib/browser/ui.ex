@@ -285,23 +285,24 @@ defmodule Browser.UI do
   # the point size that is `px` pixels tall on this display
   defp points(px), do: max(round(px * 72 / :persistent_term.get({__MODULE__, :ppi}, 72)), 1)
 
-  defp font(%{size: size, bold: bold, italic: italic, mono: mono}) do
-    key = {:font, size, bold, italic, mono}
+  defp font(%{size: size, bold: bold, italic: italic, mono: mono} = style) do
+    family = Map.get(style, :family)
+    key = {:font, size, bold, italic, mono, family}
 
     case Process.get(key) do
       nil ->
         weight = :wxe_util.get_const(if bold, do: :wxFONTWEIGHT_BOLD, else: :wxFONTWEIGHT_NORMAL)
+        {wx_family, face} = family_spec(family, mono)
 
         f =
           :wxFont.new(
             points(size),
-            if(mono, do: @wx_teletype, else: @wx_default),
+            wx_family,
             if(italic, do: @wx_italic, else: @wx_normal),
             weight
           )
 
-        if mono, do: mono_face(f)
-
+        if face, do: :wxFont.setFaceName(f, face)
         Process.put(key, f)
         f
 
@@ -310,25 +311,104 @@ defmodule Browser.UI do
     end
   end
 
+  @wx_roman 72
+  @wx_swiss 74
+  @mono_generics ~w(monospace ui-monospace)
+  @serif_generics ~w(serif ui-serif)
+  @sans_generics ~w(sans-serif ui-sans-serif)
+  @system_generics ~w(system-ui -apple-system blinkmacsystemfont ui-rounded cursive fantasy)
+
+  # What a CSS font-family list means here: the first entry that is a generic family or a font
+  # that is installed decides; `{wx family, face name or nil}`.
+  defp family_spec(family, mono) do
+    cache = {__MODULE__, :family, family, mono}
+
+    case :persistent_term.get(cache, nil) do
+      nil ->
+        spec = resolve_family(family, mono)
+        :persistent_term.put(cache, spec)
+        spec
+
+      spec ->
+        spec
+    end
+  end
+
+  defp resolve_family(family, mono) do
+    names =
+      for part <- String.split(family || "", ","),
+          name = part |> String.trim() |> String.trim("\"") |> String.trim("'"),
+          name != "",
+          do: name
+
+    found =
+      Enum.find_value(names, fn name ->
+        lower = String.downcase(name)
+
+        cond do
+          lower in @mono_generics -> {@wx_teletype, mono_face()}
+          lower in @serif_generics -> {@wx_roman, nil}
+          lower in @sans_generics -> {@wx_swiss, nil}
+          lower in @system_generics -> {@wx_default, nil}
+          installed?(name) -> {@wx_default, name}
+          true -> nil
+        end
+      end)
+
+    cond do
+      found -> found
+      mono -> {@wx_teletype, mono_face()}
+      true -> {@wx_default, nil}
+    end
+  end
+
+  # wx accepts any face name and quietly shows its default font for one that is not installed,
+  # so a font exists when text in it is not as wide as in a face that cannot exist
+  @probe "The quick brown fox jumps over the lazy dog 0123456789 WMiIl"
+
+  defp installed?(name) do
+    key = {__MODULE__, :installed, String.downcase(name)}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        result = probe_width(name) != probe_width("no such font \u2603")
+        :persistent_term.put(key, result)
+        result
+
+      result ->
+        result
+    end
+  end
+
+  defp probe_width(face) do
+    dc = :wxScreenDC.new()
+    f = :wxFont.new(40, @wx_default, @wx_normal, :wxe_util.get_const(:wxFONTWEIGHT_NORMAL))
+    :wxFont.setFaceName(f, String.to_charlist(face))
+    :wxDC.setFont(dc, f)
+    {w, _} = :wxDC.getTextExtent(dc, String.to_charlist(@probe))
+    :wxScreenDC.destroy(dc)
+    w
+  end
+
   # wx's "teletype" family alone can mean Courier; the system's own fixed-width font is what
   # other programs on the platform show
   @wx_sys_ansi_fixed_font 11
 
-  defp mono_face(font) do
-    face =
-      case :persistent_term.get({__MODULE__, :mono_face}, nil) do
-        nil ->
-          sys = :wxSystemSettings.getFont(@wx_sys_ansi_fixed_font)
-          face = if :wxFont.isOk(sys), do: :wxFont.getFaceName(sys) |> to_string()
-          face = if face in [nil, ""], do: false, else: face
-          :persistent_term.put({__MODULE__, :mono_face}, face)
-          face
+  defp mono_face do
+    case :persistent_term.get({__MODULE__, :mono_face}, nil) do
+      nil ->
+        sys = :wxSystemSettings.getFont(@wx_sys_ansi_fixed_font)
+        face = if :wxFont.isOk(sys), do: sys |> :wxFont.getFaceName() |> to_string()
+        face = if face in [nil, ""], do: nil, else: face
+        :persistent_term.put({__MODULE__, :mono_face}, face || false)
+        face
 
-        face ->
-          face
-      end
+      false ->
+        nil
 
-    if face, do: :wxFont.setFaceName(font, face)
+      face ->
+        face
+    end
   end
 
   # widths cached per font; each uncached measurement is two synchronous wx calls
@@ -349,7 +429,7 @@ defmodule Browser.UI do
     cache = cache || new_measure_cache()
 
     fn text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
-      key = {text, size, bold, italic, mono}
+      key = {text, size, bold, italic, mono, Map.get(style, :family)}
 
       case :ets.lookup(cache, key) do
         [{_, w}] ->
@@ -671,7 +751,7 @@ defmodule Browser.UI do
   # Every wx call is a round trip to the wx thread, so the font and colour are only set when
   # they differ from the previous word's (the paint starts with neither set).
   defp draw(dc, %{type: :text} = item, y, _scroll) do
-    font_key = {item.size, item.bold, item.italic, item.mono}
+    font_key = {item.size, item.bold, item.italic, item.mono, Map.get(item, :family)}
 
     if Process.get(:paint_font) != font_key do
       :wxDC.setFont(dc, font(item))
@@ -894,7 +974,15 @@ defmodule Browser.UI do
 
   # SVG gives the baseline, anchored at the start, middle or end of the text
   defp svg_text(gc, op, ox, oy) do
-    f = font(%{size: max(round(op.size), 1), bold: op.bold, italic: op.italic, mono: op.mono})
+    f =
+      font(%{
+        size: max(round(op.size), 1),
+        bold: op.bold,
+        italic: op.italic,
+        mono: op.mono,
+        family: Map.get(op, :family)
+      })
+
     :wxGraphicsContext.setFont(gc, f, op.color)
     str = String.to_charlist(op.text)
     {w, h, descent, _} = :wxGraphicsContext.getTextExtent(gc, str)

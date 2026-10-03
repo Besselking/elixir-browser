@@ -1032,7 +1032,8 @@ defmodule Browser.Svg do
             p(el, "font-weight", state) in ["bold", "bolder"] or
               (number(p(el, "font-weight", state) || "") || 0) >= 600,
           italic: p(el, "font-style", state) in ["italic", "oblique"],
-          mono: mono?(p(el, "font-family", state))
+          mono: mono?(p(el, "font-family", state)),
+          family: p(el, "font-family", state)
         }
       ]
     else
