@@ -375,8 +375,13 @@ defmodule Browser.JS.Interp do
         key = to_key(key)
 
         case lookup(o, key, {:obj, id}) do
-          :undefined -> function_prop(id, o, key)
-          v -> v
+          :undefined ->
+            if key in ["name", "length"] and key in Map.get(o, :gone, []),
+              do: :undefined,
+              else: function_prop(id, o, key)
+
+          v ->
+            v
         end
 
       :host ->
@@ -576,6 +581,12 @@ defmodule Browser.JS.Interp do
           :miss -> put_prop(id, o, key, v)
         end
 
+      # a function's own name and length are not writable
+      %{class: :function, props: props} when key in ["name", "length"] ->
+        unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
+          do: :ok,
+          else: put_prop(id, o, key, v)
+
       _ ->
         put_prop(id, o, to_key(key), v)
     end
@@ -669,6 +680,10 @@ defmodule Browser.JS.Interp do
     i = if o.class == :array, do: index(key)
 
     cond do
+      o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
+        store(id, Map.update(o, :gone, [key], &[key | &1]))
+        true
+
       i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
         false
 
