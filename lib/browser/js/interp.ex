@@ -996,16 +996,22 @@ defmodule Browser.JS.Interp do
     scope
   end
 
+  # Drops a scope from the heap once its code has run, unless a closure was created since
+  # `fns` was read (`make_fn` counts them): only a closure can keep a scope alive past its code.
+  defp free_scope(scope, fns) do
+    if Process.get(:js_fns) == fns,
+      do: Process.put(:js_heap, Map.delete(Process.get(:js_heap), scope))
+
+    :ok
+  end
+
   # A call's scope can only outlive the call through a closure created inside it (a function,
   # method, class or arrow all go through `make_fn`, which counts them). When none was, the
   # scope is garbage on return: dropping it keeps the heap from growing with every call.
   defp run_closure(c, this, args) do
     before = Process.get(:js_fns)
     {result, scope} = run_closure_scope(c, this, args, [])
-
-    if Process.get(:js_fns) == before,
-      do: Process.put(:js_heap, Map.delete(Process.get(:js_heap), scope))
-
+    free_scope(scope, before)
     result
   end
 
@@ -1377,9 +1383,12 @@ defmodule Browser.JS.Interp do
   defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
+    fns = Process.get(:js_fns)
     scope = new_scope(env)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
+    result = exec_list(stmts, scope)
+    free_scope(scope, fns)
+    result
   end
 
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
@@ -1422,7 +1431,7 @@ defmodule Browser.JS.Interp do
     end
 
     first = if per_iteration?, do: copy_scope(loop_env, env), else: loop_env
-    for_loop(test, update, body, env, first, per_iteration?, labels)
+    for_loop(test, update, body, env, first, per_iteration?, labels, Process.get(:js_fns))
   end
 
   defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
@@ -1443,10 +1452,13 @@ defmodule Browser.JS.Interp do
       {:list, items} ->
         Enum.reduce_while(items, :ok, fn item, _ ->
           tick()
+          fns = Process.get(:js_fns)
           iter_env = new_scope(env)
           bind(pat, item, iter_env, mode)
+          outcome = run_body(body, iter_env, labels)
+          free_scope(iter_env, fns)
 
-          case run_body(body, iter_env, labels) do
+          case outcome do
             :break -> {:halt, :ok}
             :next -> {:cont, :ok}
           end
@@ -1504,7 +1516,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp for_loop(test, update, body, env, iter_env, copy?, labels) do
+  # `fns` is the closure count from before this iteration's update expression ran (which
+  # evaluates in the iteration's scope), so a closure made there keeps the scope alive too
+  defp for_loop(test, update, body, env, iter_env, copy?, labels, fns) do
     tick()
 
     if test == nil or truthy(ev(test, iter_env)) do
@@ -1514,8 +1528,10 @@ defmodule Browser.JS.Interp do
 
         :next ->
           next_env = if copy?, do: copy_scope(iter_env, env), else: iter_env
+          if copy?, do: free_scope(iter_env, fns)
+          next_fns = Process.get(:js_fns)
           if update, do: ev(update, next_env)
-          for_loop(test, update, body, env, next_env, copy?, labels)
+          for_loop(test, update, body, env, next_env, copy?, labels, next_fns)
       end
     else
       :ok
