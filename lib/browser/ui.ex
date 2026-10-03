@@ -300,12 +300,35 @@ defmodule Browser.UI do
             weight
           )
 
+        if mono, do: mono_face(f)
+
         Process.put(key, f)
         f
 
       f ->
         f
     end
+  end
+
+  # wx's "teletype" family alone can mean Courier; the system's own fixed-width font is what
+  # other programs on the platform show
+  @wx_sys_ansi_fixed_font 11
+
+  defp mono_face(font) do
+    face =
+      case :persistent_term.get({__MODULE__, :mono_face}, nil) do
+        nil ->
+          sys = :wxSystemSettings.getFont(@wx_sys_ansi_fixed_font)
+          face = if :wxFont.isOk(sys), do: :wxFont.getFaceName(sys) |> to_string()
+          face = if face in [nil, ""], do: false, else: face
+          :persistent_term.put({__MODULE__, :mono_face}, face)
+          face
+
+        face ->
+          face
+      end
+
+    if face, do: :wxFont.setFaceName(font, face)
   end
 
   # widths cached per font; each uncached measurement is two synchronous wx calls
