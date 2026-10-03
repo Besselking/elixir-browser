@@ -78,8 +78,10 @@ defmodule Browser.HTML do
     tokenize(rest, [{:text, decode(text)} | acc])
   end
 
-  # style text is kept (undecoded) for the CSS engine; script text is dropped
-  defp add_raw("style", raw, acc) when raw != "", do: [{:text, raw} | acc]
+  # style text is kept (undecoded) for the CSS engine, script text for the page's scripts
+  defp add_raw(name, raw, acc) when name in ["style", "script"] and raw != "",
+    do: [{:text, raw} | acc]
+
   defp add_raw(_name, _raw, acc), do: acc
 
   defp take_raw(bin, name) do

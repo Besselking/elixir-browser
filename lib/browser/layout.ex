@@ -542,7 +542,7 @@ defmodule Browser.Layout do
           forced -> forced
         end
 
-      fit? = c["width"] == :fit and kind in [:block, :flex]
+      fit? = c["width"] == :fit and kind in [:block, :flex, :grid]
       table? = kind == :table and force != :inline_inner
       float? = force == nil and c["float"] in ["left", "right"]
 
@@ -738,7 +738,7 @@ defmodule Browser.Layout do
   defp image_atom(url, info, attrs, c, style, acc, extra \\ %{}) do
     tag = Map.get(extra, :tag, "img")
     kind = kind(tag, c)
-    block? = kind in [:block, :list_item, :flex]
+    block? = kind in [:block, :list_item, :flex, :grid]
     box = box(tag, c)
 
     # a block-level image sits on its own line; auto side margins position it
@@ -787,6 +787,7 @@ defmodule Browser.Layout do
   defp inner_kind(c) do
     case c["display"] do
       d when d in ["flex", "inline-flex"] -> :flex
+      d when d in ["grid", "inline-grid"] -> :grid
       d when d in ["table", "inline-table"] -> :table
       _ -> :block
     end
@@ -869,7 +870,6 @@ defmodule Browser.Layout do
       when d in [
              "block",
              "flow-root",
-             "grid",
              "table-row",
              "table-row-group",
              "table-header-group",
@@ -890,6 +890,9 @@ defmodule Browser.Layout do
 
       "flex" ->
         :flex
+
+      "grid" ->
+        :grid
 
       "contents" ->
         :contents
@@ -1089,6 +1092,37 @@ defmodule Browser.Layout do
     case Enum.reverse(items) do
       [] -> acc
       items -> [{:flex, flex_spec(tag, c), items, style} | acc]
+    end
+  end
+
+  # A grid is laid out like a flex container is: as one unit, once the width is known.
+  defp block_children(tag, :grid, kids, style, c, acc) do
+    {items, acc} =
+      Enum.reduce(kids, {[], acc}, fn
+        {:text, t}, {items, acc} ->
+          if String.trim(t) == "",
+            do: {items, acc},
+            else: {[grid_item(flex_text_item(t, style), %{}) | items], acc}
+
+        {:element, tag, _, _}, {items, acc} when tag in @skip ->
+          {items, acc}
+
+        {:element, _tag, attrs, _} = el, {items, acc} ->
+          ic = computed(attrs)
+
+          cond do
+            hidden?(ic) -> {items, acc}
+            ic["position"] in ["absolute", "fixed"] -> {items, walk(el, style, acc)}
+            true -> {[grid_item(flex_element_item(el, ic, style), ic) | items], acc}
+          end
+
+        _, state ->
+          state
+      end)
+
+    case Enum.reverse(items) do
+      [] -> acc
+      items -> [{:grid, grid_spec(tag, c), items, style} | acc]
     end
   end
 
@@ -1674,6 +1708,22 @@ defmodule Browser.Layout do
 
     place_atom(st, %{
       w: avail,
+      h: height,
+      base: height,
+      items: laid,
+      align: style.align,
+      valign: nil
+    })
+  end
+
+  defp op({:grid, gs, items, style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    natural? = avail > @unbounded / 2
+    {laid, width, height} = grid_layout(st, gs, items, avail, natural?)
+    laid = [%{type: :box, x: 0, y: 0, w: width, h: 0, rr: 0} | laid]
+
+    place_atom(st, %{
+      w: width,
       h: height,
       base: height,
       items: laid,
@@ -2890,6 +2940,504 @@ defmodule Browser.Layout do
   end
 
   # -- flexbox ------------------------------------------------------------------------------
+
+  # ── grid ─────────────────────────────────────────────────────────────────────────────────
+
+  defp grid_spec(_tag, c) do
+    fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
+
+    %{
+      tracks: grid_tracks(c["grid-template-columns"], fs),
+      col_gap: num(c["column-gap"]) || 0.0,
+      row_gap: num(c["row-gap"]) || 0.0,
+      align: c["align-items"] || "stretch",
+      justify: c["justify-items"] || "stretch",
+      fs: fs
+    }
+  end
+
+  # where the child asks to sit: `{start, stop}` of `{:line, n}`, `{:span, n}` or nil
+  defp grid_item(item, c) do
+    {start, stop} =
+      case c["grid-column"] do
+        v when is_binary(v) ->
+          case String.split(v, "/") do
+            [a, b] -> {grid_line(a), grid_line(b)}
+            [a] -> {grid_line(a), nil}
+          end
+
+        _ ->
+          {grid_line(c["grid-column-start"]), grid_line(c["grid-column-end"])}
+      end
+
+    Map.merge(item, %{gstart: start, gstop: stop, gjustify: c["justify-self"] || "auto"})
+  end
+
+  defp grid_line(nil), do: nil
+
+  defp grid_line(v) when is_binary(v) do
+    v = String.trim(v)
+
+    cond do
+      v in ["", "auto"] ->
+        nil
+
+      String.starts_with?(v, "span") ->
+        {:span, v |> String.replace("span", "") |> String.trim() |> int_or(1)}
+
+      true ->
+        {:line, int_or(v, 1)}
+    end
+  end
+
+  defp grid_line(v) when is_number(v), do: {:line, trunc(v)}
+  defp grid_line(_), do: nil
+
+  defp int_or(text, default) do
+    case Integer.parse(text) do
+      {n, ""} -> n
+      _ -> default
+    end
+  end
+
+  # grid-template-columns: a list of tracks (`{:repeat_auto, min, tracks}` expands to what fits)
+  defp grid_tracks(v, fs) when is_binary(v) do
+    v
+    |> split_tracks()
+    |> Enum.flat_map(&parse_track(&1, fs))
+  end
+
+  defp grid_tracks(_, _), do: []
+
+  defp split_tracks(text), do: split_tracks(String.graphemes(text), 0, [], [])
+
+  defp split_tracks([], _d, cur, acc), do: Enum.reverse(flush_track(cur, acc))
+
+  defp split_tracks([c | rest], d, cur, acc) do
+    cond do
+      c == "(" -> split_tracks(rest, d + 1, [c | cur], acc)
+      c == ")" -> split_tracks(rest, d - 1, [c | cur], acc)
+      d == 0 and c in [" ", "\t", "\n"] -> split_tracks(rest, d, [], flush_track(cur, acc))
+      true -> split_tracks(rest, d, [c | cur], acc)
+    end
+  end
+
+  defp flush_track([], acc), do: acc
+  defp flush_track(cur, acc), do: [cur |> Enum.reverse() |> Enum.join() | acc]
+
+  defp parse_track("[" <> _, _fs), do: []
+
+  defp parse_track("repeat(" <> rest, fs) do
+    inner = String.trim_trailing(rest, ")")
+
+    case String.split(inner, ",", parts: 2) do
+      [count, list] ->
+        tracks = list |> split_tracks() |> Enum.flat_map(&parse_track(&1, fs))
+
+        case String.trim(count) do
+          n when n in ["auto-fill", "auto-fit"] ->
+            [{:repeat_auto, tracks}]
+
+          n ->
+            List.flatten(List.duplicate(tracks, max(int_or(n, 1), 1)))
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp parse_track("minmax(" <> rest, fs) do
+    inner = String.trim_trailing(rest, ")")
+
+    case split_args(inner) do
+      [a, b] -> [{:minmax, track_size(a, fs), track_size(b, fs)}]
+      _ -> [{:auto}]
+    end
+  end
+
+  defp parse_track("fit-content(" <> _, _fs), do: [{:auto}]
+  defp parse_track(t, fs), do: [track_size(t, fs)]
+
+  defp split_args(text), do: split_args(String.graphemes(text), 0, [], [])
+
+  defp split_args([], _d, cur, acc),
+    do: Enum.reverse([cur |> Enum.reverse() |> Enum.join() |> String.trim() | acc])
+
+  defp split_args([c | rest], d, cur, acc) do
+    cond do
+      c == "(" ->
+        split_args(rest, d + 1, [c | cur], acc)
+
+      c == ")" ->
+        split_args(rest, d - 1, [c | cur], acc)
+
+      c == "," and d == 0 ->
+        split_args(rest, d, [], [cur |> Enum.reverse() |> Enum.join() |> String.trim() | acc])
+
+      true ->
+        split_args(rest, d, [c | cur], acc)
+    end
+  end
+
+  # one track size: {:px, n} {:pct, f} {:fr, f} {:auto} {:minc} {:maxc}
+  defp track_size(text, fs) do
+    text = String.trim(text)
+
+    cond do
+      text == "auto" ->
+        {:auto}
+
+      text == "min-content" ->
+        {:minc}
+
+      text == "max-content" ->
+        {:maxc}
+
+      String.ends_with?(text, "fr") ->
+        case Float.parse(String.trim_trailing(text, "fr")) do
+          {f, ""} -> {:fr, f}
+          _ -> {:auto}
+        end
+
+      String.starts_with?(text, "minmax(") ->
+        {:auto}
+
+      true ->
+        case len_value(text, fs) do
+          {:px, n} -> {:px, n * 1.0}
+          {:pct, f} -> {:pct, f}
+          _ -> {:auto}
+        end
+    end
+  end
+
+  # -> {items, width, height}
+  defp grid_layout(st, gs, items, avail, natural?) do
+    # explicit columns, or one stretching column; `repeat(auto-fill, …)` as many as fit
+    explicit = expand_repeats(gs.tracks, avail, gs.col_gap, natural?)
+    explicit = if explicit == [], do: [{:auto}], else: explicit
+
+    placed = place_in_grid(items, length(explicit))
+
+    ncols =
+      max(length(explicit), placed |> Enum.map(&(&1.col + &1.span)) |> Enum.max(fn -> 0 end))
+
+    tracks = explicit ++ List.duplicate({:auto}, ncols - length(explicit))
+
+    sizes = track_sizes(st, tracks, placed, avail, gs.col_gap, natural?)
+    gap = round(gs.col_gap)
+    xs = sizes |> Enum.scan(0, fn w, x -> x + w + gap end) |> then(&[0 | Enum.drop(&1, -1)])
+    width = Enum.sum(sizes) + gap * (ncols - 1)
+
+    rows = placed |> Enum.group_by(& &1.row) |> Enum.sort()
+
+    {laid, y} =
+      Enum.map_reduce(rows, 0, fn {_row, cells}, y ->
+        sized =
+          Enum.map(cells, fn it ->
+            span_w = Enum.sum(Enum.slice(sizes, it.col, it.span)) + gap * (it.span - 1)
+            room = max(span_w - auto_zero(it.ml) - auto_zero(it.mr), 1)
+
+            w =
+              cond do
+                it.width != nil ->
+                  resolve(it.width, span_w) + it.extra
+
+                it.fit? or justify_shrink?(it, gs) ->
+                  min(room, shrink_extent(st, it.sub, @unbounded, it.key))
+
+                true ->
+                  room
+              end
+
+            w =
+              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, span_w)
+
+            w = max(round(w), 1)
+            {items, h, _} = layout_atom(st, it.sub, w, it.key)
+            Map.merge(it, %{w: w, items: items, h: h, room: room})
+          end)
+
+        cross = sized |> Enum.map(&(&1.h + &1.mt + &1.mb)) |> Enum.max() |> max(0)
+
+        placed_items =
+          Enum.flat_map(sized, fn it ->
+            it = flex_stretch(st, it, gs.align, cross)
+            dy = flex_offset(flex_align(it, gs.align), cross - it.mt - it.mb, it.h)
+            dx = grid_justify(it, gs, it.room)
+            x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
+            for item <- it.items, do: move(item, round(x), y + it.mt + dy)
+          end)
+
+        {placed_items, y + cross + round(gs.row_gap)}
+      end)
+
+    {List.flatten(laid), width, max(y - round(gs.row_gap), 0)}
+  end
+
+  defp justify_shrink?(it, gs),
+    do: grid_self(it, gs) in ["start", "end", "center", "left", "right", "flex-start", "flex-end"]
+
+  defp grid_self(it, gs), do: if(it.gjustify in ["auto", nil], do: gs.justify, else: it.gjustify)
+
+  defp grid_justify(it, gs, room) do
+    free = max(room - it.w, 0)
+
+    case grid_self(it, gs) do
+      j when j in ["center"] -> round(free / 2)
+      j when j in ["end", "right", "flex-end"] -> free
+      _ -> 0
+    end
+  end
+
+  defp expand_repeats(tracks, avail, gap, natural?) do
+    Enum.flat_map(tracks, fn
+      {:repeat_auto, inner} ->
+        min =
+          inner
+          |> Enum.map(fn
+            {:px, n} -> n
+            {:minmax, {:px, n}, _} -> n
+            _ -> 1.0
+          end)
+          |> Enum.sum()
+
+        min = max(min, 1.0)
+        n = if natural?, do: 1, else: max(trunc((avail + gap) / (min + gap)), 1)
+        List.flatten(List.duplicate(inner, n))
+
+      t ->
+        [t]
+    end)
+  end
+
+  # items into (row, column) cells, in order; `span` columns wide
+  defp place_in_grid(items, ncols) do
+    {placed, _} =
+      Enum.map_reduce(items, {0, 0}, fn it, {row, col} ->
+        {start, span} = grid_range(it, ncols)
+
+        {row, col} =
+          cond do
+            start != nil and start < col -> {row + 1, 0}
+            start == nil and col + span > ncols and col > 0 -> {row + 1, 0}
+            true -> {row, col}
+          end
+
+        c = start || col
+        {Map.merge(it, %{row: row, col: c, span: span}), {row, c + span}}
+      end)
+
+    placed
+  end
+
+  # -> {start column (0-based) or nil, span}
+  defp grid_range(it, ncols) do
+    line = fn
+      {:line, n} when n < 0 -> max(ncols + 2 + n, 1)
+      {:line, n} -> n
+      _ -> nil
+    end
+
+    case {it.gstart, it.gstop} do
+      {{:span, n}, _} ->
+        {nil, min(max(n, 1), ncols)}
+
+      {nil, {:span, n}} ->
+        {nil, min(max(n, 1), ncols)}
+
+      {nil, nil} ->
+        {nil, 1}
+
+      {a, nil} ->
+        {(line.(a) || 1) - 1, 1}
+
+      {nil, b} ->
+        {nil, max((line.(b) || 2) - 1, 1)}
+
+      {a, {:span, n}} ->
+        {(line.(a) || 1) - 1, min(max(n, 1), ncols)}
+
+      {a, b} ->
+        s = line.(a) || 1
+        e = line.(b) || s + 1
+        {s - 1, max(e - s, 1)}
+    end
+  end
+
+  # the width of every column
+  defp track_sizes(st, tracks, placed, avail, gap, natural?) do
+    n = length(tracks)
+
+    contents =
+      for i <- 0..(n - 1) do
+        singles = Enum.filter(placed, &(&1.col == i and &1.span == 1))
+
+        min =
+          singles
+          |> Enum.map(
+            &(shrink_extent(st, &1.sub, 1, &1.key) + auto_zero(&1.ml) + auto_zero(&1.mr))
+          )
+          |> Enum.max(fn -> 0 end)
+
+        max =
+          singles
+          |> Enum.map(
+            &(shrink_extent(st, &1.sub, @unbounded, &1.key) + auto_zero(&1.ml) + auto_zero(&1.mr))
+          )
+          |> Enum.max(fn -> 0 end)
+
+        {min, max(max, min)}
+      end
+
+    limits =
+      for {t, {min, max}} <- Enum.zip(tracks, contents) do
+        resolve_track(t, min, max, avail)
+      end
+
+    gaps = gap * (n - 1)
+
+    if natural? do
+      # as wide as the content wants, flexible columns included
+      for {base, limit} <- limits, do: round(grow_limit(base, limit, nil))
+    else
+      widths = for {base, _} <- limits, do: base * 1.0
+      grow_tracks(limits, widths, avail - gaps)
+    end
+  end
+
+  defp grow_limit(base, {:num, l}, _), do: max(base, l)
+  defp grow_limit(base, {:auto_max, l}, _), do: max(base, l)
+  defp grow_limit(base, {:flex, _, max}, _), do: max(base, max)
+
+  # {base, limit}: limit is {:num, n}, {:flex, f} or {:auto_max, n} (grows only when stretched)
+  defp resolve_track({:px, v}, _min, _max, _avail), do: {v, {:num, v}}
+  defp resolve_track({:pct, f}, _min, _max, avail), do: {f * avail, {:num, f * avail}}
+  defp resolve_track({:fr, f}, min, max, _avail), do: {min * 1.0, {:flex, f, max}}
+  defp resolve_track({:auto}, min, max, _avail), do: {min * 1.0, {:auto_max, max * 1.0}}
+  defp resolve_track({:minc}, min, _max, _avail), do: {min * 1.0, {:num, min * 1.0}}
+  defp resolve_track({:maxc}, _min, max, _avail), do: {max * 1.0, {:num, max * 1.0}}
+
+  defp resolve_track({:minmax, a, b}, min, max, avail) do
+    {base, _} = resolve_track(a, min, max, avail)
+    base = if match?({:fr, _}, a), do: min * 1.0, else: base
+
+    limit =
+      case b do
+        {:fr, f} -> {:flex, f, max}
+        {:px, v} -> {:num, v}
+        {:pct, f} -> {:num, f * avail}
+        {:minc} -> {:num, min * 1.0}
+        _ -> {:auto_max, max * 1.0}
+      end
+
+    {base, limit}
+  end
+
+  # free space goes to the tracks that can still grow, then to the flexible ones
+  defp grow_tracks(limits, widths, space) do
+    free = space - Enum.sum(widths)
+
+    if free <= 0 do
+      Enum.map(widths, &round/1)
+    else
+      growable = fn {w, {_b, l}} ->
+        case l do
+          {:num, v} -> v > w + 0.5
+          {:auto_max, v} -> v > w + 0.5
+          _ -> false
+        end
+      end
+
+      widths = maximize(Enum.zip(widths, limits), free, growable)
+      free = space - Enum.sum(widths)
+      flex = for {_, {_, {:flex, f, _}}} <- Enum.zip(widths, limits), do: f
+
+      cond do
+        flex != [] and free > 0 ->
+          flex_widths(widths, limits, space)
+
+        free > 0 ->
+          # nothing flexible: columns that size to their content share what is left
+          autos =
+            for {{_, {_, {:auto_max, _}}}, i} <- Enum.with_index(Enum.zip(widths, limits)), do: i
+
+          if autos == [] do
+            Enum.map(widths, &round/1)
+          else
+            share = free / length(autos)
+
+            widths
+            |> Enum.with_index()
+            |> Enum.map(fn {w, i} -> round(if i in autos, do: w + share, else: w) end)
+          end
+
+        true ->
+          Enum.map(widths, &round/1)
+      end
+    end
+  end
+
+  # raise every growable track toward its limit, equally, until the space or the limits run out
+  defp maximize(pairs, free, growable) do
+    open = Enum.filter(pairs, growable)
+
+    if free < 0.5 or open == [] do
+      Enum.map(pairs, &elem(&1, 0))
+    else
+      share = free / length(open)
+
+      {new, used} =
+        Enum.map_reduce(pairs, 0.0, fn {w, {_b, l} = lim} = pair, used ->
+          if growable.(pair) do
+            target =
+              case l do
+                {:num, v} -> v
+                {:auto_max, v} -> v
+              end
+
+            add = min(share, target - w)
+            {{w + add, lim}, used + add}
+          else
+            {{w, lim}, used}
+          end
+        end)
+
+      if used < 0.5, do: Enum.map(new, &elem(&1, 0)), else: maximize(new, free - used, growable)
+    end
+  end
+
+  # fr tracks split what is left in proportion, none below its own minimum
+  defp flex_widths(widths, limits, space) do
+    flex_idx =
+      for {{_, {_, {:flex, f, _}}}, i} <- Enum.with_index(Enum.zip(widths, limits)), do: {i, f}
+
+    fixed_total =
+      widths
+      |> Enum.with_index()
+      |> Enum.reject(fn {_, i} -> List.keymember?(flex_idx, i, 0) end)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.sum()
+
+    result = settle_flex(flex_idx, widths, space - fixed_total, %{})
+    widths |> Enum.with_index() |> Enum.map(fn {w, i} -> round(Map.get(result, i, w)) end)
+  end
+
+  defp settle_flex(flex, widths, space, fixed) do
+    open = Enum.reject(flex, fn {i, _} -> Map.has_key?(fixed, i) end)
+    taken = fixed |> Map.values() |> Enum.sum()
+    total = open |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+    per = if total > 0, do: (space - taken) / total, else: 0
+
+    case Enum.find(open, fn {i, f} -> f * per < Enum.at(widths, i) end) do
+      nil ->
+        Enum.reduce(open, fixed, fn {i, f}, acc -> Map.put(acc, i, f * per) end)
+
+      {i, _} ->
+        settle_flex(flex, widths, space, Map.put(fixed, i, Enum.at(widths, i)))
+    end
+  end
 
   defp flex_spec(tag, c) do
     fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0

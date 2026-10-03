@@ -124,6 +124,31 @@ defmodule Browser.PageTest do
     end
   end
 
+  describe "from_raw/3" do
+    test "indexes the controls again and keeps the values written into the tree" do
+      page = Page.build(~s|<input value=a><p>x</p>|, @url, @narrow)
+      assert map_size(page.forms.controls) == 1
+
+      raw = [
+        {:element, "input", [{"value", "typed"}], []},
+        {:element, "p", [], [{:text, "changed"}]},
+        {:element, "input", [{"type", "checkbox"}, {"checked", ""}], []}
+      ]
+
+      changed = Page.from_raw(page, raw, @narrow)
+      assert map_size(changed.forms.controls) == 2
+      assert changed.forms.controls[0].value == "typed"
+      assert changed.forms.controls[1].checked
+      assert changed.form_state == %{}
+      assert changed.ver != page.ver
+    end
+
+    test "scripts? looks for a script element" do
+      assert Page.scripts?(Page.build("<script>1</script>", @url))
+      refute Page.scripts?(Page.build("<p>no</p>", @url))
+    end
+  end
+
   describe "viewport units" do
     defp page_height(page), do: div_height(page.nodes)
 

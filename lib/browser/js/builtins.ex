@@ -57,6 +57,7 @@ defmodule Browser.JS.Builtins do
     install_console(scope)
     install_timers(scope)
     install_misc(scope)
+    Browser.JS.RegExp.install(scope)
 
     scope
   end
@@ -139,6 +140,12 @@ defmodule Browser.JS.Builtins do
       end)
 
     def_fn(obj, "keys", fn _, [o | _] -> new_array(own_keys(o)) end)
+
+    def_fn(obj, "hasOwn", fn _, args ->
+      o = arg(args, 0)
+      key = to_key(arg(args, 1))
+      match?({:obj, _}, o) and (key in own_keys(o) or (array?(o) and key == "length"))
+    end)
 
     def_fn(obj, "values", fn _, [o | _] ->
       new_array(Enum.map(own_keys(o), &Interp.get(o, &1)))
@@ -642,18 +649,24 @@ defmodule Browser.JS.Builtins do
       cp_slice(this, min(a, b), abs(b - a))
     end)
 
+    def_fn(p, "match", fn this, args ->
+      Browser.JS.RegExp.string_match(this, to_regexp(arg(args, 0)))
+    end)
+
+    def_fn(p, "matchAll", fn this, args ->
+      Browser.JS.RegExp.string_match_all(this, to_regexp(arg(args, 0), "g"))
+    end)
+
+    def_fn(p, "search", fn this, args ->
+      Browser.JS.RegExp.string_search(this, to_regexp(arg(args, 0)))
+    end)
+
     def_fn(p, "split", fn this, args ->
       sep = arg(args, 0)
 
-      parts =
-        cond do
-          sep == :undefined -> [this]
-          to_str(sep) == "" -> String.codepoints(this)
-          true -> String.split(this, to_str(sep))
-        end
-
-      limit = arg(args, 1)
-      new_array(if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit)))
+      if Browser.JS.RegExp.regexp?(sep),
+        do: Browser.JS.RegExp.string_split(this, sep, arg(args, 1)),
+        else: split_string(this, sep, arg(args, 1))
     end)
 
     def_fn(p, "replace", fn this, args -> replace(this, args, false) end)
@@ -686,7 +699,28 @@ defmodule Browser.JS.Builtins do
     end
   end
 
+  defp split_string(this, sep, limit) do
+    parts =
+      cond do
+        sep == :undefined -> [this]
+        to_str(sep) == "" -> String.codepoints(this)
+        true -> String.split(this, to_str(sep))
+      end
+
+    new_array(if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit)))
+  end
+
+  defp to_regexp(v, flags \\ "") do
+    if Browser.JS.RegExp.regexp?(v), do: v, else: Browser.JS.RegExp.new(to_str(v), flags)
+  end
+
   defp replace(s, args, all?) do
+    if Browser.JS.RegExp.regexp?(arg(args, 0)),
+      do: Browser.JS.RegExp.string_replace(s, arg(args, 0), arg(args, 1), all?),
+      else: replace_string(s, args, all?)
+  end
+
+  defp replace_string(s, args, all?) do
     pattern = to_str(arg(args, 0))
     repl = arg(args, 1)
 

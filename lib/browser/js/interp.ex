@@ -83,6 +83,15 @@ defmodule Browser.JS.Interp do
 
   defp items_map(list), do: list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
 
+  @doc """
+  An object backed by Elixir: reads and writes of its properties go to `mod.host_get/3` and
+  `mod.host_put/4` first (`{:ok, value}` / `:ok`, or `:miss` to fall back to ordinary
+  properties and the prototype chain, where its methods live).
+  """
+  def new_host(mod, data, proto) do
+    {:obj, alloc(%{class: :host, host: {mod, data}, props: %{}, keys: [], proto: proto})}
+  end
+
   def native(name, fun) do
     {:obj,
      alloc(%{
@@ -299,6 +308,15 @@ defmodule Browser.JS.Interp do
           v -> v
         end
 
+      :host ->
+        key = to_key(key)
+        {mod, data} = o.host
+
+        case mod.host_get(data, key, {:obj, id}) do
+          {:ok, v} -> v
+          :miss -> lookup(o, key)
+        end
+
       _ ->
         lookup(o, to_key(key))
     end
@@ -400,6 +418,14 @@ defmodule Browser.JS.Interp do
             else
               put_prop(id, o, to_key(key), v)
             end
+        end
+
+      %{class: :host, host: {mod, data}} ->
+        key = to_key(key)
+
+        case mod.host_put(data, key, v, {:obj, id}) do
+          :ok -> :ok
+          :miss -> put_prop(id, o, key, v)
         end
 
       _ ->
@@ -649,6 +675,7 @@ defmodule Browser.JS.Interp do
   defp var_names({:var, :var, decls}, acc),
     do: Enum.reduce(decls, acc, fn {pat, _}, a -> pattern_names(pat, a) end)
 
+  defp var_names({:export, stmt}, acc), do: var_names(stmt, acc)
   defp var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
   defp var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
 
@@ -680,9 +707,16 @@ defmodule Browser.JS.Interp do
   defp pattern_names(_, acc), do: acc
 
   defp hoist_functions(stmts, scope) do
-    for {:fundecl, name, fun} <- stmts, do: declare(scope, name, make_fn(fun, scope))
+    for stmt <- stmts, {:fundecl, name, fun} <- [unexport(stmt)] do
+      declare(scope, name, make_fn(fun, scope))
+    end
+
     :ok
   end
+
+  defp unexport({:export, stmt}), do: stmt
+  defp unexport({:export_default, {:fundecl, _, _} = stmt}), do: stmt
+  defp unexport(stmt), do: stmt
 
   # ── statements ─────────────────────────────────────────────
 
@@ -694,6 +728,72 @@ defmodule Browser.JS.Interp do
     exec_list(stmts, scope)
     # (the process dictionary reports a stored :undefined as missing, hence the default)
     Process.get(:js_last, :undefined)
+  end
+
+  @doc """
+  Runs a module in a scope of its own and returns its namespace object (the exports).
+  `resolve` maps an import specifier to the namespace object of that module.
+  """
+  def run_module({:program, stmts}, resolve) do
+    scope = new_scope(global())
+
+    for {:import, spec, bindings} <- stmts do
+      ns = resolve.(spec)
+
+      for b <- bindings do
+        case b do
+          {:default, local} -> declare(scope, local, get(ns, "default"))
+          {:ns, local} -> declare(scope, local, ns)
+          {:named, imported, local} -> declare(scope, local, get(ns, imported))
+        end
+      end
+    end
+
+    hoist_vars(stmts, scope)
+    hoist_functions(stmts, scope)
+    exec_list(stmts, scope)
+
+    pairs =
+      Enum.flat_map(stmts, fn
+        {:export, {:var, _, decls}} ->
+          decls
+          |> Enum.reduce([], fn {pat, _}, a -> pattern_names(pat, a) end)
+          |> Enum.reverse()
+          |> Enum.map(&{&1, scope_value(scope, &1)})
+
+        {:export, {:fundecl, name, _}} ->
+          [{name, scope_value(scope, name)}]
+
+        {:export_default, {:fundecl, name, _}} ->
+          [{"default", scope_value(scope, name)}]
+
+        {:export_default, {:expr, _}} ->
+          [{"default", scope_value(scope, :default_export)}]
+
+        {:export_names, names} ->
+          for {local, exported} <- names, do: {exported, scope_value(scope, local)}
+
+        {:export_from, spec, :all} ->
+          ns = resolve.(spec)
+          for k <- own_keys(ns), k != "default", do: {k, get(ns, k)}
+
+        {:export_from, spec, names} ->
+          ns = resolve.(spec)
+          for {imported, exported} <- names, do: {exported, get(ns, imported)}
+
+        _ ->
+          []
+      end)
+
+    # a module namespace lists its names in code unit order
+    pairs |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort_by(&elem(&1, 0)) |> new_object()
+  end
+
+  defp scope_value(scope, name) do
+    case lookup_var(scope, name) do
+      {:ok, v} -> v
+      :error -> :undefined
+    end
   end
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
@@ -719,6 +819,12 @@ defmodule Browser.JS.Interp do
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
   defp exec({:empty}, _, _), do: :ok
+  defp exec({:import, _, _}, _, _), do: :ok
+  defp exec({:export, stmt}, env, _), do: exec(stmt, env, [])
+  defp exec({:export_default, {:fundecl, _, _}}, _, _), do: :ok
+  defp exec({:export_default, {:expr, e}}, env, _), do: declare(env, :default_export, ev(e, env))
+  defp exec({:export_names, _}, _, _), do: :ok
+  defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
     scope = new_scope(env)
@@ -933,6 +1039,7 @@ defmodule Browser.JS.Interp do
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
+  def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v
 

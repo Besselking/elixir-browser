@@ -11,6 +11,9 @@ defmodule Browser.History do
   def visit(%__MODULE__{} = h, url),
     do: %__MODULE__{back: [h.current | h.back], current: url, forward: []}
 
+  @doc "The current entry's address changes without a new entry (`history.replaceState`)."
+  def replace(%__MODULE__{} = h, url), do: %{h | current: url}
+
   def can_back?(%__MODULE__{back: b}), do: b != []
   def can_forward?(%__MODULE__{forward: f}), do: f != []
 

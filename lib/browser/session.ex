@@ -36,6 +36,8 @@ defmodule Browser.Session do
       measure_bg: UI.measurer(ui, cache),
       # a layout running in the background after a resize: {ref, pid}
       layout_job: nil,
+      # the page's JavaScript runtime, when it has scripts
+      js: nil,
       history: History.new(),
       page: nil,
       nodes: [],
@@ -113,6 +115,8 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
+    state = stop_js(state)
+
     page =
       case result do
         {:ok, page} ->
@@ -152,8 +156,14 @@ defmodule Browser.Session do
       })
 
     # the pictures download while the page is laid out in the background
-    {:noreply, state |> start_images() |> start_layout_job() |> sync_buttons()}
+    {:noreply, state |> start_images() |> start_layout_job() |> start_js() |> sync_buttons()}
   end
+
+  # a runtime's scripts have run
+  def handle_info({:js_reply, nonce, pid, reply}, %{nonce: nonce, js: pid} = state),
+    do: {:noreply, apply_js(state, reply)}
+
+  def handle_info({:js_reply, _, _, _}, state), do: {:noreply, state}
 
   # -- images arriving -------------------------------------------------------
 
@@ -598,7 +608,8 @@ defmodule Browser.Session do
 
   defp edit(state, cid, value, caret) do
     form_state = Forms.put(state.page.form_state, cid, value: value)
-    set_form_state(state, form_state) |> Map.put(:caret, caret)
+    state = set_form_state(state, form_state) |> Map.put(:caret, caret)
+    js_notify(state, cid, ["input"])
   end
 
   defp toggle_key(state, control, {:char, " "}), do: toggle(state, control.cid)
@@ -918,10 +929,19 @@ defmodule Browser.Session do
   # -- changing controls -----------------------------------------------------
 
   defp toggle(state, cid) do
-    state.page.form_state
-    |> then(&Forms.toggle(&1, state.page.forms.controls, cid))
-    |> then(&set_form_state(state, &1))
-    |> relayout()
+    state =
+      state.page.form_state
+      |> then(&Forms.toggle(&1, state.page.forms.controls, cid))
+      |> then(&set_form_state(state, &1))
+      |> relayout()
+
+    case control(state, cid) do
+      %{type: type} when type in ["checkbox", "radio"] ->
+        js_notify(state, cid, ["click", "input", "change"])
+
+      _ ->
+        state
+    end
   end
 
   defp step_option(state, control, delta) do
@@ -980,11 +1000,27 @@ defmodule Browser.Session do
   defp activate(state, %{type: type} = control) when type in ["submit", "image"],
     do: submit(state, control.form, control.cid)
 
+  defp activate(state, %{type: type} = control)
+       when type in ["button"] or control.tag == "button" do
+    {state, _} = js_event(state, {:control, control.cid}, "click")
+    state
+  end
+
   defp activate(state, _control), do: state
 
-  defp submit(state, nil, _clicked), do: state
-
   defp submit(state, form, clicked) do
+    # scripts may handle the click or the submission themselves
+    {state, prevented} =
+      case if(clicked, do: js_event(state, {:control, clicked}, "click"), else: {state, false}) do
+        {state, true} -> {state, true}
+        {state, false} when form == nil -> {state, true}
+        {state, false} -> js_event(state, {:form, form}, "submit")
+      end
+
+    if prevented, do: state, else: navigate_form(state, form, clicked)
+  end
+
+  defp navigate_form(state, form, clicked) do
     page = state.page
 
     request =
@@ -1006,6 +1042,90 @@ defmodule Browser.Session do
     page = Page.render(state.page, form_state)
     %{state | page: page, nodes: page.nodes}
   end
+
+  # -- the page's scripts ------------------------------------------------------
+
+  defp start_js(%{page: page} = state) do
+    if Page.scripts?(page) do
+      info = %{
+        url: page.url,
+        width: state.width,
+        height: UI.client_height(state.ui),
+        fetch: &Fetch.load/1
+      }
+
+      pid = Browser.JS.Runtime.start(page.raw, info)
+      me = self()
+      nonce = state.nonce
+
+      Task.start(fn ->
+        send(me, {:js_reply, nonce, pid, Browser.JS.Runtime.run_scripts(pid)})
+      end)
+
+      %{state | js: pid}
+    else
+      state
+    end
+  end
+
+  defp stop_js(%{js: nil} = state), do: state
+
+  defp stop_js(%{js: pid} = state) do
+    Browser.JS.Runtime.stop(pid)
+    %{state | js: nil}
+  end
+
+  # the live values of the controls, which scripts read
+  defp controls_snapshot(%{page: page}) do
+    for {cid, control} <- page.forms.controls, into: %{} do
+      cur = Forms.current(control, page.form_state)
+      {cid, %{value: cur.value, checked: cur.checked, selected: cur.selected}}
+    end
+  end
+
+  # fires an event in the page's scripts: -> {state, default prevented?}
+  defp js_event(%{js: nil} = state, _target, _type), do: {state, false}
+
+  defp js_event(state, target, type) do
+    reply = Browser.JS.Runtime.dispatch(state.js, target, type, %{}, controls_snapshot(state))
+    {apply_js(state, reply), reply.prevented}
+  end
+
+  defp js_notify(state, cid, types) do
+    Enum.reduce(types, state, fn type, state ->
+      state |> js_event({:control, cid}, type) |> elem(0)
+    end)
+  end
+
+  # what a script did: address changes, navigations, and a changed document
+  defp apply_js(state, reply) do
+    state = Enum.reduce(reply.outbox, state, &js_effect/2)
+
+    if reply.dirty and reply.raw != nil and state.page != nil do
+      page = Page.from_raw(state.page, reply.raw, env(state))
+      focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
+      start_layout_job(%{state | page: page, nodes: page.nodes, focus: focus, controls: %{}})
+    else
+      state
+    end
+  end
+
+  defp js_effect({:history, kind, url}, state) do
+    history =
+      if kind == :push,
+        do: History.visit(state.history, url),
+        else: History.replace(state.history, url)
+
+    UI.set_url_text(state.ui, url)
+    page = state.page && %{state.page | url: url}
+    sync_buttons(%{state | history: history, url: url, page: page})
+  end
+
+  defp js_effect({:navigate, url}, state), do: load(state, url, :push)
+  defp js_effect({:reload}, state), do: load(state, state.url, :history)
+  defp js_effect({:history_go, n}, state) when n < 0, do: history_nav(state, &History.back/1)
+  defp js_effect({:history_go, n}, state) when n > 0, do: history_nav(state, &History.forward/1)
+  defp js_effect(_other, state), do: state
 
   defp control(%{page: nil}, _cid), do: nil
   defp control(state, cid), do: state.page.forms.controls[cid]

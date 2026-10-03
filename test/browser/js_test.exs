@@ -451,4 +451,78 @@ defmodule Browser.JSTest do
       assert js("true ?.5:1") == 0.5
     end
   end
+
+  describe "regular expressions" do
+    test "literals are told from division" do
+      assert js("var a = 8, b = 2, g = 2; a / b / g") == 2.0
+      assert js("(8) / 2") == 4.0
+      assert js("[1, 2].map(x => x / 2).join()") == "0.5,1"
+      assert js("function f() { return /a/.test('cat') } f()") == true
+      assert js("typeof /x/") == "object"
+    end
+
+    test "test, exec and lastIndex" do
+      assert js(~S'/^on[A-Z]/.test("onClick")') == true
+      assert js(~S'/^on[A-Z]/.test("online")') == false
+
+      assert js(
+               ~S'var m = /(\d+)-(\d+)/.exec("a 10-20 b"); m[0] + "|" + m[1] + "|" + m[2] + "|" + m.index'
+             ) == "10-20|10|20|2"
+
+      assert js(
+               ~S'var re = /a/g; re.test("aa"); re.test("aa"); var r = re.test("aa"); r + ":" + re.lastIndex'
+             ) == "false:0"
+
+      assert js(~S'new RegExp("a+", "i").test("xAAy")') == true
+      assert js(~S'/a\/b/.source') == "a\\/b"
+    end
+
+    test "string methods with a regular expression" do
+      assert js(~S'"a1b22c".replace(/\d+/g, m => "<" + m + ">")') == "a<1>b<22>c"
+      assert js(~S'"John Smith".replace(/(\w+) (\w+)/, "$2, $1")') == "Smith, John"
+      assert js(~S'"a-b_c".split(/[-_]/).join("+")') == "a+b+c"
+      assert js(~S'"2024-01-02".match(/\d+/g).join()') == "2024,01,02"
+      assert js(~S'"abc".match(/z/)') == nil
+      assert js(~S'"x1y2".search(/\d/)') == 1.0
+
+      assert js(~S'[..."a1b2".matchAll(/[a-z](\d)/g)].map(m => m[1] + m.index).join()') ==
+               "10,22"
+
+      assert js(~S'"aaa".replaceAll(/a/g, "b")') == "bbb"
+      assert js(~S'"a  b".replace(/\s+/, " ")') == "a b"
+    end
+
+    test "named groups" do
+      assert js(~S'"John Smith".replace(/(?<f>\w+) (?<l>\w+)/, "$<l> $<f>")') == "Smith John"
+      assert js(~S'"ab".match(/(?<x>a)(?<y>b)/).groups.y') == "b"
+    end
+  end
+
+  describe "modules" do
+    test "import and export declarations parse" do
+      assert {:ok, {:program, [{:import, "a", [{:named, "x", "x"}, {:named, "y", "y"}]}]}} =
+               Browser.JS.parse(~S'import { x, y } from "a"')
+
+      assert {:ok, {:program, [{:import, "a", [{:default, "d"}, {:ns, "n"}]}]}} =
+               Browser.JS.parse(~S'import d, * as n from "a"')
+
+      assert {:ok, {:program, [{:import, "a", [{:named, "x", "z"}]}]}} =
+               Browser.JS.parse(~S'import { x as z } from "a"')
+
+      assert {:ok, {:program, [{:import, "side", []}]}} = Browser.JS.parse(~S'import "side"')
+
+      assert {:ok, {:program, [{:export, {:fundecl, "f", _}}]}} =
+               Browser.JS.parse("export function f() {}")
+
+      assert {:ok, {:program, [{:export_names, [{"a", "b"}, {"c", "c"}]}]}} =
+               Browser.JS.parse("export { a as b, c }")
+
+      assert {:ok, {:program, [{:export_default, {:expr, _}}]}} =
+               Browser.JS.parse("export default 1 + 2")
+    end
+
+    test "plain scripts still reject them at run time" do
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A {}")
+    end
+  end
 end

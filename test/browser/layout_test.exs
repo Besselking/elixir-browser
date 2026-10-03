@@ -3693,4 +3693,81 @@ defmodule Browser.LayoutTest do
     assert rect.h == 80
     assert rect.w > 300
   end
+
+  describe "grid" do
+    defp grid(html, width \\ 400) do
+      page = Browser.Page.build(html, "about:home")
+      Layout.layout(page.nodes, width, &measure/2)
+    end
+
+    defp gat(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    test "fixed, content and flexible columns" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid;grid-template-columns:100px max-content 1fr"><span>a</span><span>bbbb</span><span>c</span></div>|
+        )
+
+      a = gat(items, "a")
+      b = gat(items, "bbbb")
+      c = gat(items, "c")
+      assert b.x == a.x + 100
+      assert c.x == b.x + b.w
+    end
+
+    test "items fill the rows in order, wrapping after the last column" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid;grid-template-columns:100px 100px"><span>a</span><span>b</span><span>c</span></div>|
+        )
+
+      assert gat(items, "a").y == gat(items, "b").y
+      assert gat(items, "c").y > gat(items, "a").y
+      assert gat(items, "c").x == gat(items, "a").x
+    end
+
+    test "gaps, repeat() and fr" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid;grid-template-columns:repeat(2,1fr);column-gap:20px;row-gap:10px;width:220px"><span>a</span><span>b</span></div>|,
+          300
+        )
+
+      assert gat(items, "b").x - gat(items, "a").x == 120
+    end
+
+    test "grid-column places and spans" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid;grid-template-columns:50px 50px 50px"><span style="grid-column:2 / 4">w</span><span>x</span><span>y</span></div>|
+        )
+
+      assert gat(items, "w").x == gat(items, "x").x + 50
+      # x starts a new row (the wide item filled to the end), y follows it
+      assert gat(items, "x").y > gat(items, "w").y
+      assert gat(items, "y").x == gat(items, "x").x + 50
+    end
+
+    test "a column of minmax(0, max-content) and 1fr, text right aligned in the second" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid;grid-template-columns:minmax(0,max-content) 1fr;column-gap:10px;width:200px"><span>left</span><span style="text-align:right">right</span></div>|,
+          300
+        )
+
+      left = gat(items, "left")
+      right = gat(items, "right")
+      assert right.x + right.w - left.x == 200
+    end
+
+    test "no template: one column, as a stack of blocks" do
+      {items, _} =
+        grid(
+          ~s|<style>body{margin:0}</style><div style="display:grid"><span>a</span><span>b</span></div>|
+        )
+
+      assert gat(items, "b").y > gat(items, "a").y
+      assert gat(items, "b").x == gat(items, "a").x
+    end
+  end
 end

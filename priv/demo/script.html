@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+<title>Scripts</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; line-height: 1.5 }
+  h2 { margin: 18px 0 6px }
+  .row { display: flex; gap: 8px; align-items: center }
+  .log div { padding: 2px 8px; border-left: 3px solid #5c6bc0; background: #f4f5ff; margin: 2px 0 }
+  .log .error { border-color: #c62828; background: #fdecea }
+  .grid { display: grid; grid-template-columns: max-content 1fr; column-gap: 12px }
+  .grid span:nth-child(even) { text-align: right }
+  #out { font-weight: bold }
+</style>
+<script type="module" src="script-main.js"></script>
+</head>
+<body>
+<h1>Scripts</h1>
+<p>A page script (an ES module that imports another one) wires up everything below.</p>
+
+<h2>Click</h2>
+<div class="row"><button id="count">Clicked 0 times</button><button id="reset" type="button">Reset</button></div>
+
+<h2>Typing</h2>
+<div class="row"><input id="echo" type="text" placeholder="type here"> <span id="out"></span></div>
+
+<h2>Form with a handler</h2>
+<form id="form" class="row"><input id="expr" type="text" placeholder="2 3 +"><input type="submit" value="Evaluate"></form>
+<div id="log" class="log"></div>
+
+<h2>Checkbox</h2>
+<label><input id="box" type="checkbox"> Show the note</label>
+<p id="note" hidden>Here it is.</p>
+
+<h2>Built with the DOM</h2>
+<div id="stack" class="grid"></div>
+</body>
+</html>

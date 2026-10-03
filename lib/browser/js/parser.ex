@@ -223,10 +223,121 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "debugger", _} | ts]), do: {{:empty}, semi(ts)}
 
-  defp statement([{:id, kw, _} | _]) when kw in ~w(class import export with enum),
+  # ── modules ────────────────────────────────────────────────
+
+  defp statement([{:id, "import", _}, {:str, spec, _} | ts]), do: {{:import, spec, []}, semi(ts)}
+
+  defp statement([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp statement([{:id, "import", _}, {:p, "{", _} | _] = [_ | ts]) do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp statement([{:id, "import", _}, {:p, "*", _} | _] = [_ | ts]) do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp statement([{:id, "export", _}, {:id, "default", _} | ts]) do
+    case ts do
+      [{:id, "function", _}, {:id, name, _} | rest] when name not in @reserved ->
+        {fun, rest} = function_rest(name, rest)
+        {{:export_default, {:fundecl, name, fun}}, rest}
+
+      _ ->
+        {e, ts} = assignment(ts)
+        {{:export_default, {:expr, e}}, semi(ts)}
+    end
+  end
+
+  defp statement([{:id, "export", _}, {:p, "{", _} | ts]) do
+    {names, ts} = export_names(ts, [])
+
+    case ts do
+      [{:id, "from", _}, {:str, spec, _} | ts] -> {{:export_from, spec, names}, semi(ts)}
+      ts -> {{:export_names, names}, semi(ts)}
+    end
+  end
+
+  defp statement([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
+    do: {{:export_from, spec, :all}, semi(ts)}
+
+  defp statement([{:id, "export", _} | ts]) do
+    case ts do
+      [{:id, kw, _} | _] when kw in ["var", "let", "const", "function"] ->
+        {stmt, ts} = statement(ts)
+        {{:export, stmt}, ts}
+
+      _ ->
+        throw({:syntax, "unsupported export"})
+    end
+  end
+
+  defp statement([{:id, kw, _} | _]) when kw in ~w(class import with enum),
     do: throw({:syntax, "`#{kw}` is not supported yet"})
 
   defp statement(ts), do: expression_statement(ts)
+
+  defp import_bindings([{:p, "*", _}, {:id, "as", _}, {:id, local, _} | ts], acc),
+    do: import_more(ts, [{:ns, local} | acc])
+
+  defp import_bindings([{:p, "{", _} | ts], acc) do
+    {named, ts} = import_named(ts, [])
+    import_more(ts, named ++ acc)
+  end
+
+  defp import_bindings([{:id, local, _} | ts], acc) when local not in @reserved,
+    do: import_more(ts, [{:default, local} | acc])
+
+  defp import_bindings(_ts, _acc), do: throw({:syntax, "bad import"})
+
+  # after a default import: `, {…}` or `, * as ns`
+  defp import_more([{:p, ",", _} | ts], acc), do: import_bindings(ts, acc)
+  defp import_more(ts, acc), do: {Enum.reverse(acc), ts}
+
+  defp import_named([{:p, "}", _} | ts], acc), do: {acc, ts}
+
+  defp import_named([{k, imported, _}, {:id, "as", _}, {:id, local, _} | ts], acc)
+       when k in [:id, :str],
+       do: import_named_next(ts, [{:named, imported, local} | acc])
+
+  defp import_named([{k, name, _} | ts], acc) when k in [:id, :str],
+    do: import_named_next(ts, [{:named, name, name} | acc])
+
+  defp import_named(_ts, _acc), do: throw({:syntax, "bad import list"})
+
+  defp import_named_next([{:p, ",", _} | ts], acc), do: import_named(ts, acc)
+  defp import_named_next([{:p, "}", _} | ts], acc), do: {acc, ts}
+  defp import_named_next(_ts, _acc), do: throw({:syntax, "bad import list"})
+
+  defp export_names([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  defp export_names([{:p, ",", _} | ts], acc), do: export_names(ts, acc)
+
+  defp export_names([{:id, local, _}, {:id, "as", _}, {k, exported, _} | ts], acc)
+       when k in [:id, :str],
+       do: export_names(ts, [{local, exported} | acc])
+
+  defp export_names([{:id, name, _} | ts], acc), do: export_names(ts, [{name, name} | acc])
+  defp export_names(_ts, _acc), do: throw({:syntax, "bad export list"})
 
   defp expression_statement(ts) do
     {e, ts} = expression(ts)
@@ -715,6 +826,7 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
   defp primary([{:str, s, _} | ts]), do: {{:str, s}, ts}
+  defp primary([{:regex, {source, flags}, _} | ts]), do: {{:regex, source, flags}, ts}
 
   defp primary([{:tmpl, parts, _} | ts]) do
     parts =

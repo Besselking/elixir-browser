@@ -4,8 +4,9 @@ defmodule Browser.JS.Lexer do
 
   Types are `:num` (a float), `:str`, `:tmpl` (a list of strings and `{:expr, tokens}`), `:id`
   (names and keywords alike), `:p` (punctuation) and `:eof`. The newline flag is what lets the
-  parser do automatic semicolon insertion. Regular expression literals aren't supported, so a
-  `/` is always a division or a comment.
+  parser do automatic semicolon insertion. A `/` where a value may start (after an operator, an
+  opening bracket or a keyword such as `return`) begins a regular expression literal, `:regex`
+  with `{source, flags}`; anywhere else it is a division.
   """
 
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
@@ -53,7 +54,18 @@ defmodule Browser.JS.Lexer do
     lex(rest, false, [{:id, name, nl} | acc])
   end
 
-  defp lex(s, nl, acc) do
+  defp lex("/" <> rest, nl, acc) do
+    if regex_allowed?(acc) do
+      {source, flags, rest} = regex(rest, [], false)
+      lex(rest, false, [{:regex, {source, flags}, nl} | acc])
+    else
+      punct("/" <> rest, nl, acc)
+    end
+  end
+
+  defp lex(s, nl, acc), do: punct(s, nl, acc)
+
+  defp punct(s, nl, acc) do
     case Enum.find(@puncts, &String.starts_with?(s, &1)) do
       # `a?.5:b` is a conditional, not an optional chain
       "?." when binary_part(s, 2, min(1, byte_size(s) - 2)) in ~w(0 1 2 3 4 5 6 7 8 9) ->
@@ -66,6 +78,34 @@ defmodule Browser.JS.Lexer do
         lex(binary_part(s, byte_size(p), byte_size(s) - byte_size(p)), false, [{:p, p, nl} | acc])
     end
   end
+
+  @regex_keywords ~w(return typeof instanceof in of new delete void throw case do else yield await)
+
+  # a `/` starts a regular expression where an operand is expected
+  defp regex_allowed?([]), do: true
+  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]", "}"]
+  defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
+  defp regex_allowed?(_), do: false
+
+  defp regex(<<?\\, c::utf8, rest::binary>>, acc, cls),
+    do: regex(rest, [<<?\\, c::utf8>> | acc], cls)
+
+  defp regex(<<?[, rest::binary>>, acc, false), do: regex(rest, ["[" | acc], true)
+  defp regex(<<?], rest::binary>>, acc, true), do: regex(rest, ["]" | acc], false)
+
+  defp regex(<<?/, rest::binary>>, acc, false) do
+    {flags, rest} = regex_flags(rest, [])
+    {acc |> Enum.reverse() |> IO.iodata_to_binary(), flags, rest}
+  end
+
+  defp regex(<<c, _::binary>>, _acc, _cls) when c in [?\n, ?\r],
+    do: throw({:syntax, "unterminated regular expression"})
+
+  defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
+  defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
+
+  defp regex_flags(<<c, rest::binary>>, acc) when c in ?a..?z, do: regex_flags(rest, [c | acc])
+  defp regex_flags(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
   defp skip_line(<<c, _::binary>> = s) when c in [?\n, ?\r], do: s
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)

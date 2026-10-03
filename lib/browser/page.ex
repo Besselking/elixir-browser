@@ -227,6 +227,40 @@ defmodule Browser.Page do
     end)
   end
 
+  @doc "True when the page has a `<script>` element."
+  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script")
+
+  defp has_tag?(nodes, tag) when is_list(nodes), do: Enum.any?(nodes, &has_tag?(&1, tag))
+  defp has_tag?({:element, tag, _, _}, tag), do: true
+  defp has_tag?({:element, _, _, kids}, tag), do: has_tag?(kids, tag)
+  defp has_tag?(_, _), do: false
+
+  @doc """
+  The page for a tree a script has changed (see `Browser.JS.DOM.to_raw/0`): forms and pictures
+  are indexed again and the cascade runs afresh. Control state is not kept: the tree carries
+  the values the controls have.
+  """
+  def from_raw(%__MODULE__{} = page, raw, env) do
+    {raw, forms} = Forms.index(raw)
+    {raw, image_urls} = Images.index(raw, page.url)
+
+    restyle(
+      %{
+        page
+        | raw: raw,
+          title: Layout.title(raw),
+          forms: forms,
+          image_urls: image_urls,
+          form_state: %{},
+          key: nil,
+          pruned: nil,
+          nodes: nil,
+          style_cache: %{}
+      },
+      env
+    )
+  end
+
   @doc """
   Re-renders the form controls for `form_state`. Cheap: the styled tree is reused,
   so this is what typing, toggling and choosing call.

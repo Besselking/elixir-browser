@@ -23,6 +23,7 @@ defmodule Browser.Fetch do
     {"margins.html", "Margins", "negative margins, collapsing, percentage margins and padding"},
     {"transforms.html", "Transforms", "rotate, scale, skew, translate and transform-origin"},
     {"whitespace.html", "White space", "normal, nowrap, pre, pre-wrap and pre-line"},
+    {"script.html", "Scripts", "JavaScript modules, events, the DOM, forms, history"},
     {"sticky.html", "Sticky and fixed",
      "a header and a heading that stay in the window, a fixed badge"},
     {"wide.html", "Wide content", "pages wider than the window scroll sideways"}
