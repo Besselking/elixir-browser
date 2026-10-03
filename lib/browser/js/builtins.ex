@@ -787,7 +787,19 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     str =
       constructor(scope, "String", proto(:string), fn this, args ->
-        s = if args == [], do: "", else: to_str(hd(args))
+        s =
+          case args do
+            [] ->
+              ""
+
+            [{:symbol, _, _} = sym | _] ->
+              if wrapper_target?(this, :string),
+                do: to_str(sym),
+                else: call(Interp.get(sym, "toString"), sym, [])
+
+            [v | _] ->
+              to_str(v)
+          end
 
         if wrapper_target?(this, :string) do
           put_hidden(this, "length", float(String.length(s)))

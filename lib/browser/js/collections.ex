@@ -144,6 +144,18 @@ defmodule Browser.JS.Collections do
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
 
+    unscopables = new_object([], :null)
+
+    for name <-
+          ~w(at copyWithin entries fill find findIndex findLast findLastIndex flat flatMap includes keys toReversed toSorted toSpliced values),
+        do: Interp.put(unscopables, name, true)
+
+    key = {:symbol, :unscopables, "Symbol.unscopables"}
+    put_hidden(array, key, unscopables)
+    {:obj, aid} = array
+    ao = deref(aid)
+    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
+
     def_fn(array, "keys", fn this, _ ->
       make_iterator(for i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0)
     end)

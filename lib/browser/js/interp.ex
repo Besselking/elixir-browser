@@ -167,6 +167,14 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # `with` skips what the object's Symbol.unscopables lists
+  defp unscopable?(obj, name) do
+    case get(obj, {:symbol, :unscopables, "Symbol.unscopables"}) do
+      {:obj, _} = u -> truthy(get(u, name))
+      _ -> false
+    end
+  end
+
   defp assign_var(scope, name, val) do
     s = deref(scope)
 
@@ -177,7 +185,8 @@ defmodule Browser.JS.Interp do
 
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
 
-      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
+          not unscopable?(s.with, name) ->
         put(s.with, name, val)
 
       s.parent != nil ->
