@@ -1101,7 +1101,7 @@ defmodule Browser.JS.Interp do
   defp exec({:var, kind, decls}, env, _) do
     for {pat, init} <- decls do
       cond do
-        init != nil -> bind(pat, ev(init, env), env, kind)
+        init != nil -> bind(pat, ev_named(init, env, pat), env, kind)
         kind == :var -> :ok
         true -> bind(pat, :undefined, env, kind)
       end
@@ -1276,7 +1276,7 @@ defmodule Browser.JS.Interp do
   defp bind({:id, name}, v, env, mode), do: bind_name(mode, env, name, v)
 
   defp bind({:default, pat, e}, v, env, mode),
-    do: bind(pat, if(v == :undefined, do: ev(e, env), else: v), env, mode)
+    do: bind(pat, if(v == :undefined, do: ev_named(e, env, pat), else: v), env, mode)
 
   defp bind({:arrpat, elems}, v, env, mode), do: bind_elems(elems, iterate(v), env, mode)
 
@@ -1455,7 +1455,8 @@ defmodule Browser.JS.Interp do
 
     Enum.each(props, fn
       {:init, key, val} ->
-        put(obj, key_of(key, env), ev(val, env))
+        k = key_of(key, env)
+        put(obj, k, ev_named(val, env, if(is_binary(k), do: {:id, k})))
 
       {:spread, e} ->
         spread_into(obj, ev(e, env))
@@ -1471,6 +1472,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:fn, _, _, _, _} = f, env), do: make_fn(f, env)
+
   def ev({:seq, es}, env), do: Enum.reduce(es, :undefined, fn e, _ -> ev(e, env) end)
 
   def ev({:chain, e}, env) do
@@ -1524,7 +1526,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:assign, "=", {:id, name}, value}, env) do
-    v = ev(value, env)
+    v = ev_named(value, env, {:id, name})
     assign_var(env, name, v)
     v
   end
@@ -1647,4 +1649,20 @@ defmodule Browser.JS.Interp do
   def binop(op, a, b) when op in ["<<", ">>", ">>>"], do: Num.shift(op, to_num(a), to_num(b))
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
+  # an anonymous function or class takes the name of the binding or property it is assigned to
+  defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  defp ev_named(e, env, _), do: ev(e, env)
+
+  defp name_fn({:obj, id} = f, name) do
+    case deref(id) do
+      %{fun: {:closure, %{name: n} = c}} = o when not is_binary(n) ->
+        store(id, %{o | fun: {:closure, %{c | name: name}}})
+
+      _ ->
+        :ok
+    end
+
+    f
+  end
 end
