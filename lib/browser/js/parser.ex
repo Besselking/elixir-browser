@@ -13,6 +13,7 @@ defmodule Browser.JS.Parser do
   tuples; see `Browser.JS.Interp` for what each node means.
   """
 
+  alias Browser.JS.Interp
   alias Browser.JS.Lexer
 
   @reserved ~w(break case catch const continue debugger default delete do else export extends finally for
@@ -53,11 +54,49 @@ defmodule Browser.JS.Parser do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
         Process.put(:js_strict, use_strict?(tokens))
-        {:ok, {:program, statements(tokens)}}
+        {:ok, {:program, tokens |> statements() |> check_scope(true)}}
       catch
         {:syntax, msg} -> {:error, msg}
       end
     end
+  end
+
+  # ── redeclarations ─────────────────────────────────────────
+
+  # Early errors of a statement list that is a scope: a lexical name (let, const, class, and
+  # in blocks function declarations) declared twice, or also declared with var, or also a
+  # parameter. At the top of a function or script, function declarations are var-scoped.
+  defp check_scope(stmts, top?, params \\ []) do
+    lexical =
+      Enum.flat_map(stmts, fn
+        {:var, k, decls} when k in [:let, :const] ->
+          for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: {n, :lexical}
+
+        {:fundecl, n, {:async, _}} when not top? ->
+          [{n, :lexical}]
+
+        {:fundecl, n, _} when not top? ->
+          [{n, if(strict?(), do: :lexical, else: :function)}]
+
+        _ ->
+          []
+      end)
+
+    names = Enum.map(lexical, &elem(&1, 0))
+
+    dup? =
+      lexical
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.any?(fn {_, kinds} -> length(kinds) > 1 and Enum.any?(kinds, &(&1 == :lexical)) end)
+
+    vars =
+      Interp.var_names(stmts, []) ++
+        if(top?, do: for({:fundecl, n, _} <- stmts, do: n), else: [])
+
+    if dup? or Enum.any?(names, &(&1 in vars or &1 in params)),
+      do: throw({:syntax, "redeclaration of a lexical name"})
+
+    stmts
   end
 
   # ── strict mode ────────────────────────────────────────────
@@ -85,9 +124,13 @@ defmodule Browser.JS.Parser do
     end
 
     if strict?(), do: check_strict_params(params)
-    result = block_body(ts, [])
+    {body, rest} = block_body(ts, [])
+
+    names =
+      if params == [], do: [], else: Enum.reduce(params, [], &Interp.pattern_names/2)
+
     Process.put(:js_strict, outer)
-    result
+    {check_scope(body, true, names), rest}
   end
 
   defp check_strict_params(params) do
@@ -151,7 +194,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:p, "{", _} | ts]) do
     {body, ts} = block_body(ts, [])
-    {{:block, body}, ts}
+    {{:block, check_scope(body, false)}, ts}
   end
 
   defp statement([{:p, ";", _} | ts]), do: {{:empty}, ts}
@@ -296,6 +339,7 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, ")")
     ts = expect(ts, "{")
     {cases, ts} = switch_cases(ts, [])
+    check_scope(Enum.flat_map(cases, &elem(&1, 1)), false)
     {{:switch, disc, cases}, ts}
   end
 

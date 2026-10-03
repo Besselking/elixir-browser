@@ -996,42 +996,44 @@ defmodule Browser.JS.Interp do
     end)
   end
 
-  defp var_names(stmts, acc) when is_list(stmts), do: Enum.reduce(stmts, acc, &var_names/2)
+  @doc false
+  def var_names(stmts, acc) when is_list(stmts), do: Enum.reduce(stmts, acc, &var_names/2)
 
-  defp var_names({:var, :var, decls}, acc),
+  def var_names({:var, :var, decls}, acc),
     do: Enum.reduce(decls, acc, fn {pat, _}, a -> pattern_names(pat, a) end)
 
-  defp var_names({:export, stmt}, acc), do: var_names(stmt, acc)
-  defp var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
-  defp var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
+  def var_names({:export, stmt}, acc), do: var_names(stmt, acc)
+  def var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
+  def var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
 
-  defp var_names({k, :var, pat, _, body}, acc) when k in [:forin, :forof],
+  def var_names({k, :var, pat, _, body}, acc) when k in [:forin, :forof],
     do: var_names(body, pattern_names(pat, acc))
 
-  defp var_names({k, _, _, _, body}, acc) when k in [:forin, :forof], do: var_names(body, acc)
-  defp var_names({:while, _, body}, acc), do: var_names(body, acc)
-  defp var_names({:dowhile, body, _}, acc), do: var_names(body, acc)
-  defp var_names({:block, stmts}, acc), do: var_names(stmts, acc)
-  defp var_names({:with, _, body}, acc), do: var_names(body, acc)
-  defp var_names({:labeled, _, s}, acc), do: var_names(s, acc)
-  defp var_names({:try, b, _, h, f}, acc), do: var_names(f, var_names(h, var_names(b, acc)))
+  def var_names({k, _, _, _, body}, acc) when k in [:forin, :forof], do: var_names(body, acc)
+  def var_names({:while, _, body}, acc), do: var_names(body, acc)
+  def var_names({:dowhile, body, _}, acc), do: var_names(body, acc)
+  def var_names({:block, stmts}, acc), do: var_names(stmts, acc)
+  def var_names({:with, _, body}, acc), do: var_names(body, acc)
+  def var_names({:labeled, _, s}, acc), do: var_names(s, acc)
+  def var_names({:try, b, _, h, f}, acc), do: var_names(f, var_names(h, var_names(b, acc)))
 
-  defp var_names({:switch, _, cases}, acc),
+  def var_names({:switch, _, cases}, acc),
     do: Enum.reduce(cases, acc, fn {_, body}, a -> var_names(body, a) end)
 
-  defp var_names(_, acc), do: acc
+  def var_names(_, acc), do: acc
 
-  defp pattern_names({:id, n}, acc), do: [n | acc]
-  defp pattern_names({:default, p, _}, acc), do: pattern_names(p, acc)
-  defp pattern_names({:rest, p}, acc), do: pattern_names(p, acc)
-  defp pattern_names({:arrpat, elems}, acc), do: Enum.reduce(elems, acc, &pattern_names/2)
+  @doc false
+  def pattern_names({:id, n}, acc), do: [n | acc]
+  def pattern_names({:default, p, _}, acc), do: pattern_names(p, acc)
+  def pattern_names({:rest, p}, acc), do: pattern_names(p, acc)
+  def pattern_names({:arrpat, elems}, acc), do: Enum.reduce(elems, acc, &pattern_names/2)
 
-  defp pattern_names({:objpat, props, rest}, acc) do
+  def pattern_names({:objpat, props, rest}, acc) do
     acc = Enum.reduce(props, acc, fn {_, p}, a -> pattern_names(p, a) end)
     if rest, do: pattern_names(rest, acc), else: acc
   end
 
-  defp pattern_names(_, acc), do: acc
+  def pattern_names(_, acc), do: acc
 
   @doc false
   def hoist_functions(stmts, scope) do
