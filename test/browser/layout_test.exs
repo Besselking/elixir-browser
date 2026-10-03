@@ -3810,4 +3810,15 @@ defmodule Browser.LayoutTest do
       assert gat(items, "b").x == gat(items, "a").x
     end
   end
+
+  test "flex items shrink no further than their min-content next to a very wide item" do
+    {items, _} =
+      run(
+        ~s|<div style="display:flex"><a style="padding:0 5px">Over</a><a style="padding:0 5px">Store</a><div style="flex-grow:1"><div style="float:right">Login</div></div></div>|,
+        300
+      )
+
+    x = fn t -> Enum.find(items, &(&1[:text] == t)).x end
+    assert x.("Store") >= x.("Over") + 4 * 8
+  end
 end

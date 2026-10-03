@@ -3731,7 +3731,7 @@ defmodule Browser.Layout do
     outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
-    line = flex_resize(line, free, avail)
+    line = flex_resize(st, line, free, avail)
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     # auto margins take the free space before justify-content does
@@ -3771,7 +3771,7 @@ defmodule Browser.Layout do
   end
 
   # grow into free space, or shrink in proportion to the base size
-  defp flex_resize(line, free, avail) when free > 0 do
+  defp flex_resize(_st, line, free, avail) when free > 0 do
     total = line |> Enum.map(& &1.grow) |> Enum.sum()
 
     if total > 0 do
@@ -3790,27 +3790,52 @@ defmodule Browser.Layout do
     end
   end
 
-  defp flex_resize(line, free, avail) when free < 0 do
-    total = line |> Enum.map(&(&1.shrink * &1.hw)) |> Enum.sum()
+  # shrinking stops at the min-content width (`min-width: auto`); an item that reaches it is
+  # frozen there and the others shrink further
+  defp flex_resize(st, line, free, avail) when free < 0 do
+    line = Enum.map(line, &Map.put(&1, :frozen, false))
+    flex_shrink(st, line, free, avail)
+  end
 
-    if total > 0 do
-      Enum.map(line, fn it ->
-        w = it.hw + free * it.shrink * it.hw / total
-        w = max(w, it.extra + 0.0)
+  defp flex_resize(_st, line, _free, _avail), do: line
 
-        %{
-          it
-          | hw:
-              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail) *
-                1.0
-        }
-      end)
+  defp flex_shrink(st, line, free, avail) do
+    live = Enum.reject(line, & &1.frozen)
+    total = live |> Enum.map(&(&1.shrink * &1.hw)) |> Enum.sum()
+
+    if total > 0 and free < 0 do
+      # items whose share would go below their floor are pinned there
+      {pinned, _} =
+        Enum.split_with(live, fn it ->
+          it.width == nil and it.hw + free * it.shrink * it.hw / total < flex_min(st, it)
+        end)
+
+      if pinned == [] do
+        Enum.map(line, fn it ->
+          if it.frozen do
+            it
+          else
+            w = max(it.hw + free * it.shrink * it.hw / total, it.extra + 0.0)
+            c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
+            %{it | hw: clamp_width(w, c, avail) * 1.0}
+          end
+        end)
+      else
+        gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it), 0.0))
+
+        line =
+          Enum.map(line, fn it ->
+            if it in pinned, do: %{it | hw: min(flex_min(st, it), it.hw), frozen: true}, else: it
+          end)
+
+        flex_shrink(st, line, free + gained, avail)
+      end
     else
       line
     end
   end
 
-  defp flex_resize(line, _free, _avail), do: line
+  defp flex_min(st, it), do: shrink_extent(st, it.sub, 1, it.key) * 1.0
 
   # -> {offset before the first item, extra space between items}
   defp flex_justify(justify, reversed?, free, n) do
