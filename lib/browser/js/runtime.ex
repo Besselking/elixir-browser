@@ -259,6 +259,11 @@ defmodule Browser.JS.Runtime do
   # runs `fun`, turning a script's uncaught error into a console line
   defp guard(fun, default) do
     fun.()
+  rescue
+    # a bug in a built-in must not take the page's scripts down with it
+    e ->
+      log(:error, "internal error: " <> Exception.message(e) <> where())
+      default
   catch
     {:js_error, v} ->
       log(:error, "Uncaught " <> describe(v) <> where())

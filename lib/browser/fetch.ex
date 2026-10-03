@@ -71,6 +71,8 @@ defmodule Browser.Fetch do
     end
   end
 
+  defp pad_base64(s), do: s <> String.duplicate("=", rem(4 - rem(byte_size(s), 4), 4))
+
   # Sites send the page a browser gets to what the user agent says it is. Naming only ourselves
   # earns the plain, scriptless fallback page of some of them.
   @user_agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 ElixirBrowser/0.1"
@@ -136,6 +138,31 @@ defmodule Browser.Fetch do
 
   defp fetch("about:home", _, _, _, _), do: {:ok, about_home(), "about:home"}
   defp fetch("about:" <> _ = url, _, _, _, _), do: {:ok, "<h1>Unknown page</h1>", url}
+
+  # `data:[<mediatype>][;base64],<data>`
+  defp fetch("data:" <> rest = url, _, _, _, _) do
+    case :binary.split(rest, ",") do
+      [meta, payload] ->
+        body =
+          if String.ends_with?(meta, ";base64") do
+            payload
+            |> URI.decode()
+            |> String.replace(~r/\s+/, "")
+            |> pad_base64()
+            |> Base.decode64(ignore_whitespace: true)
+          else
+            {:ok, URI.decode(payload)}
+          end
+
+        case body do
+          {:ok, text} -> {:ok, text, url}
+          :error -> {:error, "Bad data: URL"}
+        end
+
+      _ ->
+        {:error, "Bad data: URL"}
+    end
+  end
 
   defp fetch("file://" <> path, _, _, _, _) do
     case File.read(URI.decode(path)) do

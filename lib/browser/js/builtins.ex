@@ -819,8 +819,9 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
+    # UTF-16 code units: a surrogate pair is one character, a lone surrogate cannot be kept
     def_fn(str, "fromCharCode", fn _, args ->
-      args |> Enum.map(&<<trunc(to_num(&1))::utf8>>) |> Enum.join()
+      args |> Enum.map(&(&1 |> to_num() |> code_unit())) |> units_to_string()
     end)
 
     num =
@@ -1192,6 +1193,16 @@ defmodule Browser.JS.Builtins do
       end
     end)
   end
+
+  defp code_unit(n) when is_number(n), do: trunc(n) |> Bitwise.band(0xFFFF)
+  defp code_unit(_), do: 0
+
+  defp units_to_string([hi, lo | rest]) when hi in 0xD800..0xDBFF and lo in 0xDC00..0xDFFF,
+    do: <<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>> <> units_to_string(rest)
+
+  defp units_to_string([u | rest]) when u in 0xD800..0xDFFF, do: "\uFFFD" <> units_to_string(rest)
+  defp units_to_string([u | rest]), do: <<u::utf8>> <> units_to_string(rest)
+  defp units_to_string([]), do: ""
 
   defp cp_slice(s, from, count), do: Str.slice(s, from, count)
 

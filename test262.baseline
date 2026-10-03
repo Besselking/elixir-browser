@@ -7191,8 +7191,14 @@ built-ins/String/S9.8_A5_T1.js
 built-ins/String/fromCharCode/S15.5.3.2_A2.js
 built-ins/String/fromCharCode/S15.5.3.2_A3_T1.js
 built-ins/String/fromCharCode/S15.5.3.2_A3_T2.js
+built-ins/String/fromCharCode/S9.7_A1.js
+built-ins/String/fromCharCode/S9.7_A2.1.js
+built-ins/String/fromCharCode/S9.7_A2.2.js
 built-ins/String/fromCharCode/S9.7_A3.1_T1.js
+built-ins/String/fromCharCode/S9.7_A3.1_T2.js
+built-ins/String/fromCharCode/S9.7_A3.1_T3.js
 built-ins/String/fromCharCode/S9.7_A3.1_T4.js
+built-ins/String/fromCharCode/S9.7_A3.2_T1.js
 built-ins/String/fromCharCode/touint16-tonumber-throws-valueof.js
 built-ins/String/fromCodePoint/argument-is-Symbol.js
 built-ins/String/is-a-constructor.js
@@ -8532,6 +8538,7 @@ built-ins/parseFloat/S15.1.2.3_A5_T1.js
 built-ins/parseFloat/S15.1.2.3_A5_T2.js
 built-ins/parseFloat/S15.1.2.3_A5_T3.js
 built-ins/parseFloat/S15.1.2.3_A5_T4.js
+built-ins/parseFloat/S15.1.2.3_A6.js
 built-ins/parseFloat/S15.1.2.3_A7.6.js
 built-ins/parseFloat/tonumber-numeric-separator-literal-dd-dot-dd-ep-sign-minus-dd-nsl-dd.js
 built-ins/parseFloat/tonumber-numeric-separator-literal-dd-dot-dd-ep-sign-minus-dds-nsl-dd.js
@@ -9060,6 +9067,7 @@ language/comments/S7.4_A4_T4.js
 language/comments/S7.4_A4_T5.js
 language/comments/S7.4_A4_T6.js
 language/comments/S7.4_A4_T7.js
+language/comments/S7.4_A6.js
 language/comments/hashbang/escaped-bang-041.js
 language/comments/hashbang/escaped-bang-u0021.js
 language/comments/hashbang/escaped-bang-u21.js
@@ -17803,6 +17811,7 @@ language/literals/numeric/octal.js
 language/literals/regexp/7.8.5-1gs.js
 language/literals/regexp/7.8.5-2gs.js
 language/literals/regexp/S7.8.5_A1.1_T1.js
+language/literals/regexp/S7.8.5_A1.1_T2.js
 language/literals/regexp/S7.8.5_A1.2_T1.js
 language/literals/regexp/S7.8.5_A1.2_T2.js
 language/literals/regexp/S7.8.5_A1.2_T3.js
@@ -17812,7 +17821,9 @@ language/literals/regexp/S7.8.5_A1.3_T2.js
 language/literals/regexp/S7.8.5_A1.3_T3.js
 language/literals/regexp/S7.8.5_A1.3_T4.js
 language/literals/regexp/S7.8.5_A1.4_T1.js
+language/literals/regexp/S7.8.5_A1.4_T2.js
 language/literals/regexp/S7.8.5_A2.1_T1.js
+language/literals/regexp/S7.8.5_A2.1_T2.js
 language/literals/regexp/S7.8.5_A2.2_T1.js
 language/literals/regexp/S7.8.5_A2.2_T2.js
 language/literals/regexp/S7.8.5_A2.3_T1.js
@@ -17820,6 +17831,7 @@ language/literals/regexp/S7.8.5_A2.3_T2.js
 language/literals/regexp/S7.8.5_A2.3_T3.js
 language/literals/regexp/S7.8.5_A2.3_T4.js
 language/literals/regexp/S7.8.5_A2.4_T1.js
+language/literals/regexp/S7.8.5_A2.4_T2.js
 language/literals/regexp/S7.8.5_A3.1_T1.js
 language/literals/regexp/S7.8.5_A3.1_T2.js
 language/literals/regexp/S7.8.5_A3.1_T3.js

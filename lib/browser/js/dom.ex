@@ -1279,6 +1279,7 @@ defmodule Browser.JS.DOM do
   defp fire(target, event, phase) do
     listeners = Map.get(st().listeners, target, [])
     type = Interp.get(event, "type")
+    if phase != :capture, do: run_inline_handler(target, type, event)
 
     for l <- listeners, l.type == type, phase_matches?(l, phase) do
       if l.once, do: remove_listener(target, type, l.fun, l.capture)
@@ -1301,6 +1302,62 @@ defmodule Browser.JS.DOM do
 
     if truthy(Interp.get(event, "__stop")), do: throw(:dom_stop)
     :ok
+  end
+
+  # `<button onclick="go()">`: the attribute's code is a handler with `event` and `this`; the
+  # handler of `<body onload>` and the like is the window's. Returning false cancels the event.
+  @window_events ~w(load unload beforeunload resize scroll popstate hashchange message focus blur error)
+
+  defp run_inline_handler(target, type, event) do
+    holder =
+      case target do
+        :window when type in @window_events -> find_tag(st().doc, "body")
+        nid when is_integer(nid) -> nid
+        _ -> nil
+      end
+
+    with nid when is_integer(nid) <- holder,
+         code when is_binary(code) <- get_attr(node(nid), "on" <> type),
+         f when is_tuple(f) <- inline_function(nid, type, code) do
+      try do
+        if call(f, target_obj(target), [event]) == false and
+             truthy(Interp.get(event, "cancelable")),
+           do: Interp.put(event, "defaultPrevented", true)
+      catch
+        {:js_error, v} -> console_error("Uncaught " <> describe(v))
+      end
+    end
+
+    :ok
+  end
+
+  defp inline_function(nid, type, code) do
+    key = {:inline_handler, nid, type, code}
+
+    case Process.get(key) do
+      nil ->
+        f =
+          try do
+            case Interp.lookup_scoped(global(), "Function") do
+              {:ok, ctor} -> construct(ctor, ["event", code], ctor)
+              _ -> :none
+            end
+          catch
+            {:js_error, v} ->
+              console_error("Uncaught " <> describe(v))
+              :none
+
+            {:syntax, msg} ->
+              console_error("SyntaxError: " <> msg)
+              :none
+          end
+
+        Process.put(key, f)
+        f
+
+      f ->
+        f
+    end
   end
 
   defp phase_matches?(l, :capture), do: l.capture
