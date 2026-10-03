@@ -419,7 +419,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("class A { #p = 1 }")
+      assert {:syntax, _} = error("class A { static async *#m() {} }")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -522,7 +522,7 @@ defmodule Browser.JSTest do
     end
 
     test "syntax the runtime lacks is a syntax error" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A { #p = 1 }")
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A { static async *#m() {} }")
     end
   end
 
@@ -964,6 +964,53 @@ defmodule Browser.JSTest do
 
     test "yield is an ordinary name outside generators" do
       assert js("var yield = 3; yield + 1") == 4.0
+    end
+  end
+
+  describe "private class members" do
+    test "fields, methods, accessors and statics" do
+      assert js("""
+             class A {
+               #x = 1; #y; static #n = 0;
+               constructor(y) { this.#y = y }
+               static inc() { return ++A.#n }
+               #sum() { return this.#x + this.#y }
+               #acc = 5;
+               get #dbl() { return this.#acc * 2 }
+               set #dbl(v) { this.#acc = v }
+               run() { this.#dbl = 7; return [this.#sum(), this.#dbl] }
+               bump() { this.#x++; this.#x += 10; return this.#x }
+             }
+             var a = new A(2);
+             [a.run().join(), a.bump(), A.inc(), A.inc(), Object.keys(a).length, JSON.stringify(a)]
+             """) == ["3,14", 12.0, 1.0, 2.0, 0.0, "{}"]
+    end
+
+    test "#x in obj, optional chains and subclasses" do
+      assert js("""
+             class A { #x = 1; static has(o) { return #x in o } opt(o) { return o?.#x } }
+             class B extends A { #z = 3; z() { return this.#z } }
+             [A.has(new A), A.has({}), new A().opt(null), new B().z()]
+             """) == [true, false, :undefined, 3.0]
+    end
+
+    test "a foreign object has no such member" do
+      assert js(
+               "class A { #x; static read(o) { return o.#x } } try { A.read({}) } catch (e) { e.name }"
+             ) ==
+               "TypeError"
+    end
+
+    test "early errors" do
+      for src <- [
+            "class A { m() { this.#nope } }",
+            "this.#x",
+            "class A { #x; #x }",
+            "class A { #constructor }",
+            "class A { #x; m() { delete this.#x } }"
+          ] do
+        assert {:syntax, _} = error(src)
+      end
     end
   end
 end

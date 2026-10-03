@@ -47,6 +47,11 @@ defmodule Browser.JS.Classes do
         nil -> default_constructor(name, derived?)
       end
 
+    # each private name of the class gets a key of its own, visible to the class body
+    for n <- Enum.uniq(for {:cmember, _, {:priv, n}, _, _} <- members, do: n) do
+      Interp.declare(cenv, {:priv, n}, make_ref())
+    end
+
     f = Interp.make_function(ctor_node, cenv)
     if name, do: Interp.declare(cenv, name, f, true)
     Interp.set_home(f, proto)
@@ -73,6 +78,19 @@ defmodule Browser.JS.Classes do
             do: {fields, [{:field, k, init} | statics]},
             else: {[{k, init} | fields], statics}
 
+        {:cmember, kind, {:priv, _} = key, value, static?}, {fields, statics} = acc ->
+          k = member_key(key, cenv)
+          fun = Interp.ev(value, cenv)
+          Interp.set_home(fun, if(static?, do: f, else: proto))
+
+          if static? do
+            put_private(f, k, kind, fun)
+            acc
+          else
+            {fields, statics} = {fields, statics}
+            {[{:private_method, k, kind, fun} | fields], statics}
+          end
+
         {:cmember, kind, key, value, static?}, acc ->
           target = if static?, do: f, else: proto
           k = member_key(key, cenv)
@@ -87,6 +105,10 @@ defmodule Browser.JS.Classes do
 
           acc
       end)
+
+    # private methods and accessors are installed before any field is initialised
+    {methods, fields} = Enum.split_with(fields, &match?({:private_method, _, _, _}, &1))
+    fields = Enum.reverse(methods) ++ fields
 
     info = %{
       parent: parent,
@@ -111,6 +133,7 @@ defmodule Browser.JS.Classes do
   end
 
   defp member_key({:str, s}, _), do: s
+  defp member_key({:priv, n}, env), do: Interp.private_key(n, env)
   defp member_key({:computed, e}, env), do: to_key(Interp.ev(e, env))
 
   defp run_statics(statics, f, cenv) do
@@ -121,7 +144,7 @@ defmodule Browser.JS.Classes do
     Enum.each(statics, fn
       {:field, key, init} ->
         v = if init, do: Interp.ev(init, scope), else: :undefined
-        Interp.put(f, key, v)
+        define_field(f, key, v)
 
       {:block, body} ->
         inner = Interp.new_scope(scope)
@@ -176,12 +199,38 @@ defmodule Browser.JS.Classes do
     scope = Interp.new_scope(info.env)
     Interp.declare(scope, :this, this)
 
-    for {key, init} <- info.fields do
-      v = if init, do: Interp.ev(init, scope), else: :undefined
-      Interp.put(this, key, v)
+    for field <- info.fields do
+      case field do
+        {:private_method, key, kind, fun} ->
+          put_private(this, key, kind, fun)
+
+        {key, init} ->
+          v = if init, do: Interp.ev(init, scope), else: :undefined
+          define_field(this, key, v)
+      end
     end
 
     :ok
+  end
+
+  # a private field is an own property that is not listed; a public one is assigned
+  defp define_field(obj, {:private, _} = key, v), do: put_private(obj, key, :field, v)
+  defp define_field(obj, key, v), do: Interp.put(obj, key, v)
+
+  # stores a private method, accessor half or field value on an object
+  defp put_private({:obj, id}, key, kind, value) do
+    o = deref(id)
+
+    stored =
+      case {kind, Map.get(o.props, key)} do
+        {:get, {:accessor, _, s}} -> {:accessor, value, s}
+        {:get, _} -> {:accessor, value, :undefined}
+        {:set, {:accessor, g, _}} -> {:accessor, g, value}
+        {:set, _} -> {:accessor, :undefined, value}
+        _ -> value
+      end
+
+    store(id, %{o | props: Map.put(o.props, key, stored)})
   end
 
   @doc "`super(...)` in a constructor."

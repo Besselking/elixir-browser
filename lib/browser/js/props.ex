@@ -95,7 +95,9 @@ defmodule Browser.JS.Props do
   def own_names({:obj, id}) do
     o = deref(id)
     base = Enum.reverse(o.keys)
-    hidden = (Map.keys(o.props) -- o.keys) |> Enum.sort()
+
+    hidden =
+      (Map.keys(o.props) -- o.keys) |> Enum.reject(&match?({:private, _}, &1)) |> Enum.sort()
 
     case o do
       %{class: :array} ->
@@ -535,12 +537,15 @@ defmodule Browser.JS.Props do
   def extensible?({:obj, id}), do: Map.get(deref(id), :ext, true)
   def extensible?(_), do: false
 
+  # private fields are outside freezing and sealing
+  defp public_keys(o), do: Enum.reject(Map.keys(o.props), &match?({:private, _}, &1))
+
   @doc "`Object.seal` (`freeze?` false) and `Object.freeze` (true)."
   def lock({:obj, id} = obj, freeze?) do
     o = deref(id)
 
     attrs =
-      Enum.reduce(Map.keys(o.props), Map.get(o, :attrs, %{}), fn key, attrs ->
+      Enum.reduce(public_keys(o), Map.get(o, :attrs, %{}), fn key, attrs ->
         accessor? = match?({:accessor, _, _}, o.props[key])
         cur = Map.get(attrs, key, %{})
         w = if freeze? and not accessor?, do: false, else: Map.get(cur, :w, true)
@@ -561,7 +566,7 @@ defmodule Browser.JS.Props do
     o = deref(id)
 
     not Map.get(o, :ext, true) and
-      Enum.all?(Map.keys(o.props), fn key ->
+      Enum.all?(public_keys(o), fn key ->
         a = Map.get(Map.get(o, :attrs, %{}), key, %{})
         accessor? = match?({:accessor, _, _}, o.props[key])
 

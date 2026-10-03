@@ -312,6 +312,24 @@ defmodule Browser.JS.Interp do
 
   defp index(_), do: nil
 
+  def get({:obj, id} = obj, {:private, _} = key) do
+    case Map.fetch(deref(id).props, key) do
+      {:ok, {:accessor, g, _}} ->
+        if function?(g),
+          do: call(g, obj, []),
+          else: throw_error("TypeError", "'#x' was defined without a getter")
+
+      {:ok, v} ->
+        v
+
+      :error ->
+        throw_error(
+          "TypeError",
+          "Cannot read private member from an object whose class did not declare it"
+        )
+    end
+  end
+
   def get({:obj, id}, key) do
     o = deref(id)
 
@@ -446,6 +464,28 @@ defmodule Browser.JS.Interp do
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
     store(id, %{o | props: Map.put(o.props, key, v)})
+  end
+
+  def put({:obj, id} = obj, {:private, _} = key, v) do
+    o = deref(id)
+
+    case Map.fetch(o.props, key) do
+      {:ok, {:accessor, _, setter}} ->
+        if function?(setter),
+          do: call(setter, obj, [v]),
+          else: throw_error("TypeError", "'#x' was defined without a setter")
+
+        :ok
+
+      {:ok, _} ->
+        store(id, %{o | props: Map.put(o.props, key, v)})
+
+      :error ->
+        throw_error(
+          "TypeError",
+          "Cannot write private member to an object whose class did not declare it"
+        )
+    end
   end
 
   def put({:obj, id}, key, v) do
@@ -1015,6 +1055,21 @@ defmodule Browser.JS.Interp do
   def lookup_scoped(env, name), do: lookup_var(env, name)
 
   @doc false
+  # the key a private name stands for in the class it is declared in
+  def private_key(name, env) do
+    case lookup_var(env, {:priv, name}) do
+      {:ok, ref} ->
+        {:private, ref}
+
+      :error ->
+        throw_error(
+          "SyntaxError",
+          "Private field '#' + #{name} must be declared in an enclosing class"
+        )
+    end
+  end
+
+  @doc false
   # the scope, along the chain from `env`, that holds the variable `name`
   def scope_of(nil, _), do: nil
 
@@ -1503,6 +1558,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp ev_key({:str, s}, _), do: s
+  defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
 
   # ── expressions ────────────────────────────────────────────
@@ -1694,6 +1750,21 @@ defmodule Browser.JS.Interp do
       "~" -> (Num.int32(to_num(v)) |> Bitwise.bnot()) * 1.0
       "typeof" -> typeof(v)
       "void" -> :undefined
+    end
+  end
+
+  def ev({:binary, "in", {:priv_ref, name}, r}, env) do
+    key = private_key(name, env)
+
+    case ev(r, env) do
+      {:obj, id} ->
+        Map.has_key?(deref(id).props, key)
+
+      _ ->
+        throw_error(
+          "TypeError",
+          "Cannot use 'in' operator to search for a private field in a non-object"
+        )
     end
   end
 

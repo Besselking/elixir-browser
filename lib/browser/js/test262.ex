@@ -19,8 +19,8 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    class-fields-private class-fields-private-in class-methods-private
-    class-static-fields-private class-static-methods-private async-iteration
+      
+      async-iteration
     Symbol.asyncIterator symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt ArrayBuffer
     DataView DataView.prototype.getFloat32 DataView.prototype.getFloat64
     DataView.prototype.getInt16 DataView.prototype.getInt32 DataView.prototype.getInt8

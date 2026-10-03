@@ -54,7 +54,15 @@ defmodule Browser.JS.Parser do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
         Process.put(:js_strict, use_strict?(tokens))
-        {:ok, {:program, tokens |> statements() |> check_scope(true)}}
+        Process.put(:js_priv_refs, [])
+        program = tokens |> statements() |> check_scope(true)
+
+        case Process.get(:js_priv_refs) do
+          [] -> :ok
+          [n | _] -> throw({:syntax, "private name #" <> n <> " is not defined"})
+        end
+
+        {:ok, {:program, program}}
       catch
         {:syntax, msg} -> {:error, msg}
       end
@@ -735,6 +743,7 @@ defmodule Browser.JS.Parser do
   end
 
   # → {key_node, shorthand_name_or_nil, rest}
+  defp property_key([{:priv, name, _} | ts]), do: {{:priv, name}, nil, ts}
   defp property_key([{:id, name, _} | ts]), do: {{:str, name}, name, ts}
   defp property_key([{:eid, name, _} | ts]), do: {{:str, name}, nil, ts}
   defp property_key([{:str, s, _} | ts]), do: {{:str, s}, nil, ts}
@@ -751,7 +760,34 @@ defmodule Browser.JS.Parser do
   # ── classes ────────────────────────────────────────────────
 
   # after `class`: `Name? (extends expr)? { members }` -> {:class, name, super, members}
+  # a private name used in the code being parsed; `class_rest` settles them against the
+  # names the class declares, the rest belongs to an enclosing class or is an error
+  defp private_ref(name), do: Process.put(:js_priv_refs, [name | Process.get(:js_priv_refs, [])])
+
+  defp check_private_names(members) do
+    declared =
+      for {:cmember, kind, {:priv, n}, _, static?} <- members do
+        if n == "constructor", do: throw({:syntax, "#constructor is not a valid private name"})
+        {n, kind, static?}
+      end
+
+    declared
+    |> Enum.group_by(&elem(&1, 0))
+    |> Enum.each(fn {n, entries} ->
+      kinds = entries |> Enum.map(&elem(&1, 1)) |> Enum.sort()
+      statics = entries |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+
+      unless length(entries) == 1 or (kinds == [:get, :set] and length(statics) == 1),
+        do: throw({:syntax, "private name #" <> n <> " is declared twice"})
+    end)
+
+    Enum.map(declared, &elem(&1, 0))
+  end
+
   defp class_rest(ts) do
+    outer_refs = Process.get(:js_priv_refs, [])
+    Process.put(:js_priv_refs, [])
+
     {name, ts} =
       case ts do
         [{:id, n, _} | t] when n not in @reserved and n != "extends" -> {n, t}
@@ -770,6 +806,10 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "{")
     {members, ts} = class_members(ts, [])
     Process.put(:js_strict, outer)
+
+    names = check_private_names(members)
+    unresolved = Enum.reject(Process.get(:js_priv_refs, []), &(&1 in names))
+    Process.put(:js_priv_refs, unresolved ++ outer_refs)
     {{:class, name, super, members}, ts}
   end
 
@@ -800,7 +840,7 @@ defmodule Browser.JS.Parser do
 
     {kind, ts} =
       case ts do
-        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num] ->
+        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num, :priv] ->
           {String.to_atom(k), tl(ts)}
 
         [{:id, k, _}, {:p, "[", _} | _] when k in ["get", "set"] ->
@@ -816,6 +856,8 @@ defmodule Browser.JS.Parser do
       [{:p, "(", _} | _] ->
         {{:fn, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
+
+        if async? and generator?, do: throw({:syntax, "async generators are not supported"})
 
         value =
           cond do
@@ -1067,6 +1109,10 @@ defmodule Browser.JS.Parser do
 
   defp binary_loop(left, ts, _), do: {left, ts}
 
+  defp private_member?({:member, _, {:priv, _}, _}), do: true
+  defp private_member?({:chain, e}), do: private_member?(e)
+  defp private_member?(_), do: false
+
   defp unary([{:p, op, _} | ts]) when op in ["!", "-", "+", "~"] do
     {e, ts} = unary(ts)
 
@@ -1097,6 +1143,10 @@ defmodule Browser.JS.Parser do
 
   defp unary([{:id, op, _} | ts]) when op in ["typeof", "void", "delete"] do
     {e, ts} = unary(ts)
+
+    if op == "delete" and private_member?(e),
+      do: throw({:syntax, "private fields can not be deleted"})
+
     {{:unary, op, e}, ts}
   end
 
@@ -1134,6 +1184,16 @@ defmodule Browser.JS.Parser do
 
     {e, ts, chained?} = chain(base, ts, false)
     {if(chained?, do: {:chain, e}, else: e), ts}
+  end
+
+  defp chain(e, [{:p, ".", _}, {:priv, name, _} | ts], c) do
+    private_ref(name)
+    chain({:member, e, {:priv, name}, false}, ts, c)
+  end
+
+  defp chain(e, [{:p, "?.", _}, {:priv, name, _} | ts], _) do
+    private_ref(name)
+    chain({:member, e, {:priv, name}, true}, ts, true)
   end
 
   defp chain(e, [{:p, ".", _}, {k, name, _} | ts], c) when k in [:id, :eid],
@@ -1263,6 +1323,12 @@ defmodule Browser.JS.Parser do
     do: {{:import_meta}, ts}
 
   defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
+
+  # `#x in obj`
+  defp primary([{:priv, name, _}, {:id, "in", _} | _] = [{:priv, _, _} | ts]) do
+    private_ref(name)
+    {{:priv_ref, name}, ts}
+  end
 
   defp primary([{:id, "super", _}, {:p, ".", _}, {:id, name, _} | ts]),
     do: {{:super_member, {:str, name}}, ts}
