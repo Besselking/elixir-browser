@@ -60,7 +60,7 @@ defmodule Browser.CSSTest do
   end
 
   test "drops selectors that cannot be evaluated but keeps the rest of the list" do
-    rules = CSS.parse("a:hover, b, c::before, d:nth-child(2), e:has(a) { x: y }")
+    rules = CSS.parse("a:hover, b, c::selection, d:nth-child(2), e:is(a b) { x: y }")
     assert Enum.map(rules, fn %{selector: [{c, nil}]} -> c.tag end) == ["a", "b", "d"]
   end
 
@@ -188,9 +188,25 @@ defmodule Browser.CSSTest do
     refute sm?("p:empty", ctx("p"))
   end
 
+  test "::before and ::after (and the one-colon forms) mark the rule as styling a generated box" do
+    rules = CSS.parse("a::before, b:after, ::after, c:hover::before { x: y } d { x: y }")
+    assert Enum.map(rules, & &1.pseudo) == [:before, :after, :after, :before, nil]
+    assert [%{pseudo: :marker}] = CSS.parse("li::marker { content: \"> \" }")
+    assert [{%{tag: "a"}, nil}] = hd(rules).selector
+    assert [{%{tag: :any}, nil}] = Enum.at(rules, 2).selector
+  end
+
+  test ":has() takes relative selectors; ones that can't match are dropped from it" do
+    assert {:ok, %{spec: {0, 1, 2}}} = CSS.parse_selector("li:has(a.active)")
+    assert {:ok, _} = CSS.parse_selector("li:has(> a, + b, ~ c d)")
+
+    assert {:ok, %{parts: [{%{pseudos: [{:has, []}]}, nil}]}} =
+             CSS.parse_selector(":has(a:hover)")
+  end
+
   test "unsupported selectors are still dropped" do
-    assert :error = CSS.parse_selector("p::before")
-    assert :error = CSS.parse_selector("p:has(a)")
+    assert :error = CSS.parse_selector("p::selection")
+    assert :error = CSS.parse_selector("p:has(")
     assert :error = CSS.parse_selector("p:is(a b)")
   end
 

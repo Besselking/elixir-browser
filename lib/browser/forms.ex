@@ -21,6 +21,11 @@ defmodule Browser.Forms do
     * buttons show their value (or "Submit"/"Reset" when it is missing)
     * `<select>` shows the selected option followed by an arrow
     * `<textarea>` shows its text
+
+  A `<details>` has one control too: its first `<summary>`, which counts as "checked"
+  while the details is open (the `open` attribute is the initial state). The `<details>`
+  carries the summary's id as `"@summary"`; closed, `render/3` leaves only its summary, and
+  the summary shows a triangle unless its `list-style` is `none`.
   """
 
   # keeps an empty control's box one text line tall and gives it a baseline
@@ -61,6 +66,26 @@ defmodule Browser.Forms do
     acc = %{acc | f: fid + 1, forms: Map.put(acc.forms, fid, info)}
     {kids, acc} = index_nodes(kids, fid, acc)
     {{:element, "form", attrs, kids}, acc}
+  end
+
+  defp index_node({:element, "details", attrs, kids}, form, acc) do
+    case Enum.find_index(kids, &match?({:element, "summary", _, _}, &1)) do
+      nil ->
+        {kids, acc} = index_nodes(kids, form, acc)
+        {{:element, "details", attrs, kids}, acc}
+
+      at ->
+        {:element, "summary", sattrs, skids} = Enum.at(kids, at)
+        cid = acc.n
+        control = %{control(cid, "summary", sattrs, skids, form) | checked: has?(attrs, "open")}
+        acc = %{acc | n: cid + 1, controls: Map.put(acc.controls, cid, control)}
+        {skids, acc} = index_nodes(skids, form, acc)
+        summary = {:element, "summary", sattrs ++ [{"@cid", cid}], skids}
+        {before, [_ | rest]} = Enum.split(kids, at)
+        {before, acc} = index_nodes(before, form, acc)
+        {rest, acc} = index_nodes(rest, form, acc)
+        {{:element, "details", attrs ++ [{"@summary", cid}], before ++ [summary | rest]}, acc}
+    end
   end
 
   defp index_node({:element, tag, attrs, kids}, form, acc) when tag in @controls do
@@ -185,8 +210,55 @@ defmodule Browser.Forms do
     end
   end
 
+  defp render_node({:element, "details", attrs, kids}, state, controls) do
+    with {_, cid} <- List.keyfind(attrs, "@summary", 0),
+         %{} = control <- Map.get(controls, cid),
+         %{checked: false} <- current(control, state) do
+      # closed: only the summary stays
+      kids = Enum.filter(kids, &summary?(&1, cid))
+      {:element, "details", attrs, render(kids, state, controls)}
+    else
+      _ -> {:element, "details", attrs, render(kids, state, controls)}
+    end
+  end
+
+  defp render_node({:element, "summary", attrs, kids}, state, controls) do
+    kids = render(kids, state, controls)
+
+    with {_, cid} <- List.keyfind(attrs, "@cid", 0),
+         %{} = control <- Map.get(controls, cid),
+         mark when mark not in [nil, ""] <- summary_marker(attrs, current(control, state).checked) do
+      {:element, "summary", attrs, [text(mark) | kids]}
+    else
+      _ -> {:element, "summary", attrs, kids}
+    end
+  end
+
   defp render_node({:element, tag, attrs, kids}, state, controls),
     do: {:element, tag, attrs, render(kids, state, controls)}
+
+  defp summary?({:element, "summary", attrs, _}, cid),
+    do: List.keyfind(attrs, "@cid", 0) == {"@cid", cid}
+
+  defp summary?(_node, _cid), do: false
+
+  # the text of `summary::marker`, else a triangle (none with `list-style: none`)
+  defp summary_marker(attrs, open?) do
+    case List.keyfind(attrs, "@marker", 0) do
+      {_, {closed, open}} when closed != nil or open != nil ->
+        if(open?, do: open, else: closed) || default_marker(attrs, open?)
+
+      _ ->
+        default_marker(attrs, open?)
+    end
+  end
+
+  defp default_marker(attrs, open?) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, %{"list-style-type" => "none"}} -> nil
+      _ -> if open?, do: "▾ ", else: "▸ "
+    end
+  end
 
   # The default stylesheet draws `[checked]` boxes blue, but the cascade only sees the
   # attribute. Once the user's choice differs from it, apply the matching look here.
@@ -195,6 +267,12 @@ defmodule Browser.Forms do
 
   defp restyle_checked(attrs, %{type: type, checked: initial}, %{checked: now})
        when type in ["checkbox", "radio"] and initial != now do
+    if List.keymember?(attrs, "@content", 0), do: attrs, else: checked_look(attrs, type, now)
+  end
+
+  defp restyle_checked(attrs, _control, _cur), do: attrs
+
+  defp checked_look(attrs, type, now) do
     {bg, fg, border} =
       case {type, now} do
         {"checkbox", true} -> {@blue, {255, 255, 255}, @blue}
@@ -220,7 +298,10 @@ defmodule Browser.Forms do
     end
   end
 
-  defp restyle_checked(attrs, _control, _cur), do: attrs
+  defp default_check("checkbox", _attrs, cur), do: [text(if cur.checked, do: "✓", else: @empty)]
+
+  defp default_check("radio", attrs, cur),
+    do: if(cur.checked, do: [dot(attrs)], else: [text(@empty)])
 
   defp content(%{tag: "input", type: type}, attrs, cur) do
     placeholder = attr(attrs, "placeholder")
@@ -229,11 +310,14 @@ defmodule Browser.Forms do
       "hidden" ->
         []
 
-      "checkbox" ->
-        [text(if cur.checked, do: "✓", else: @empty)]
+      t when t in ["checkbox", "radio"] ->
+        case List.keyfind(attrs, "@content", 0) do
+          {_, {unchecked, checked}} ->
+            [text(if(cur.checked, do: checked, else: unchecked) || @empty)]
 
-      "radio" ->
-        if cur.checked, do: [dot(attrs)], else: [text(@empty)]
+          nil ->
+            default_check(t, attrs, cur)
+        end
 
       t when t in ["submit", "button", "reset"] ->
         [text(button_label(t, cur.value, has?(attrs, "value")))]
@@ -344,6 +428,7 @@ defmodule Browser.Forms do
   @doc "Whether the control can take keyboard focus."
   def focusable?(%{disabled?: true}), do: false
   def focusable?(%{type: "hidden"}), do: false
+  def focusable?(%{tag: "summary"}), do: false
   def focusable?(_control), do: true
 
   @doc "Control ids in tab order (document order)."
@@ -384,7 +469,7 @@ defmodule Browser.Forms do
       "radio" ->
         state
 
-      "checkbox" ->
+      type when type in ["checkbox", "summary"] ->
         put(state, cid, checked: checked?)
 
       _ ->

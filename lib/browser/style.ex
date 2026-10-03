@@ -26,7 +26,7 @@ defmodule Browser.Style do
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis
+            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
             row-gap column-gap order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
@@ -215,11 +215,22 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{viewport: {env.width, env.height}}, fn {rule, order}, idx ->
+    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo: MapSet.new()}, fn {rule, order},
+                                                                                  idx ->
+      idx = note_pseudo(idx, rule)
       rule = Map.put(rule, :order, order)
       Map.update(idx, key(rule), [rule], &[rule | &1])
     end)
   end
+
+  # which pseudo-elements have a rule that gives them `content` (the others make no box)
+  defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
+    if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
+      do: %{idx | pseudo: MapSet.put(idx.pseudo, which)},
+      else: idx
+  end
+
+  defp note_pseudo(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
@@ -237,7 +248,7 @@ defmodule Browser.Style do
   # -- cascade -------------------------------------------------------------------
 
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
-  def declared(idx, ctx) do
+  def declared(idx, ctx, pseudo \\ nil) do
     candidates =
       Map.get(idx, {:tag, ctx.tag}, []) ++
         Map.get(idx, :other, []) ++
@@ -246,19 +257,23 @@ defmodule Browser.Style do
 
     from_rules =
       for rule <- candidates,
+          Map.get(rule, :pseudo) == pseudo,
           CSS.matches?(rule.selector, ctx),
           {prop, value, important?} <- rule.decls do
         {prop, {rank(rule.origin, important?), {0, rule.specificity}, rule.order}, value}
       end
 
+    # inline styles and presentational attributes belong to the element, not its generated boxes
+    own = if pseudo, do: %{attrs: [], tag: nil}, else: ctx
+
     from_inline =
-      for {prop, value, important?} <- inline_decls(ctx.attrs) do
+      for {prop, value, important?} <- inline_decls(own.attrs) do
         {prop, {rank(:author, important?), {1, {0, 0, 0}}, 0}, value}
       end
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
-      for {prop, value} <- hints(ctx) do
+      for {prop, value} <- hints(own) do
         {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
       end
 
@@ -726,36 +741,184 @@ defmodule Browser.Style do
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
+    prune_list(nodes, parent, idx, count, 0, [], [])
+  end
 
-    {out, _} =
-      Enum.reduce(nodes, {[], {0, []}}, fn
-        {:text, _} = t, {acc, state} ->
-          {[t | acc], state}
+  defp prune_list([], _parent, _idx, _count, _i, _prev, acc), do: Enum.reverse(acc)
 
-        {:element, tag, attrs, kids}, {acc, {i, prev}} ->
-          ctx = context(tag, attrs, kids, parent, prev, i, count)
-          {computed, custom} = compute(idx, ctx, parent)
-          computed = blockify_grid_item(computed, parent)
-          root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
+  defp prune_list([{:text, _} = t | rest], parent, idx, count, i, prev, acc),
+    do: prune_list(rest, parent, idx, count, i, prev, [t | acc])
 
-          ctx =
-            ctx
-            |> Map.put(:computed, computed)
-            |> Map.put(:custom, custom)
-            |> Map.put(:root_fs, root)
+  defp prune_list([{:element, tag, attrs, kids} | rest], parent, idx, count, i, prev, acc) do
+    ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
+    {computed, custom} = compute(idx, ctx, parent)
+    computed = blockify_grid_item(computed, parent)
+    root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
-          acc =
-            if not_rendered?(computed) do
-              acc
-            else
-              attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
-              [{:element, tag, attrs, prune_children(kids, ctx, idx)} | acc]
-            end
+    ctx =
+      ctx
+      |> Map.put(:computed, computed)
+      |> Map.put(:custom, custom)
+      |> Map.put(:root_fs, root)
 
-          {acc, {i + 1, [ctx | prev]}}
+    acc =
+      if not_rendered?(computed) do
+        acc
+      else
+        {computed, attrs} = marker(idx, ctx, computed, attrs)
+        attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
+        kids = prune_children(kids, ctx, idx)
+        kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+        [{:element, tag, attrs, kids} | acc]
+      end
+
+    prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc)
+  end
+
+  # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
+  # summaries. A summary's marker may depend on whether its `<details>` is open, so both are
+  # kept: `"@marker"` is `{closed_text, open_text}`.
+  defp marker(idx, %{tag: "li"} = ctx, computed, attrs) do
+    case marker_text(idx, ctx, ctx) do
+      nil -> {computed, attrs}
+      text -> {Map.put(computed, "marker-content", text), attrs}
+    end
+  end
+
+  defp marker(
+         idx,
+         %{tag: "summary", parent: %{tag: "details", attrs: pattrs} = parent} = ctx,
+         computed,
+         attrs
+       ) do
+    toggled = fn open? ->
+      pattrs = List.keydelete(pattrs, "open", 0)
+      pattrs = if open?, do: [{"open", ""} | pattrs], else: pattrs
+      %{ctx | parent: %{parent | attrs: pattrs}}
+    end
+
+    closed = marker_text(idx, toggled.(false), ctx)
+    open = marker_text(idx, toggled.(true), ctx)
+
+    if closed == nil and open == nil,
+      do: {computed, attrs},
+      else: {computed, [{"@marker", {closed, open}} | attrs]}
+  end
+
+  # A checkbox or radio button has no children for `::before`/`::after` to go beside, so
+  # their text replaces what it shows: `"@content"` is `{unchecked_text, checked_text}`.
+  defp marker(idx, %{tag: "input", attrs: iattrs} = ctx, computed, attrs) do
+    type = iattrs |> attr("type") |> String.downcase()
+
+    if type in ["checkbox", "radio"] and pseudo_any?(idx, [:before, :after]) do
+      toggled = fn checked? ->
+        iattrs = List.keydelete(iattrs, "checked", 0)
+        %{ctx | attrs: if(checked?, do: [{"checked", ""} | iattrs], else: iattrs)}
+      end
+
+      text = fn checked? ->
+        before = pseudo_text(idx, toggled.(checked?), ctx, :before)
+        after_ = pseudo_text(idx, toggled.(checked?), ctx, :after)
+        if before || after_, do: (before || "") <> (after_ || "")
+      end
+
+      case {text.(false), text.(true)} do
+        {nil, nil} -> {computed, attrs}
+        content -> {unboxed(computed), [{"@content", content} | attrs]}
+      end
+    else
+      {computed, attrs}
+    end
+  end
+
+  defp marker(_idx, _ctx, computed, attrs), do: {computed, attrs}
+
+  # text drawn instead of the native box: the box's fixed 13px height (a user-agent value) and
+  # its clipping would cut it
+  defp unboxed(computed) do
+    ["height", "line-height"]
+    |> Enum.reduce(computed, fn k, c -> if c[k] == 13.0, do: Map.delete(c, k), else: c end)
+    |> Map.drop(["overflow-x", "overflow-y"])
+  end
+
+  defp pseudo_any?(idx, which),
+    do: Enum.any?(which, &MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), &1))
+
+  # spaces don't collapse in a marker
+  defp marker_text(idx, match_ctx, ctx) do
+    with text when is_binary(text) <- pseudo_text(idx, match_ctx, ctx, :marker),
+         do: String.replace(text, " ", "\u00A0")
+  end
+
+  # the `content` text of a pseudo-element: matched against `match_ctx`, inheriting from `ctx`
+  defp pseudo_text(idx, match_ctx, ctx, which) do
+    if MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), which) do
+      {computed, _} = compute(idx, match_ctx, ctx, which)
+      content_text(computed["content"], ctx.attrs)
+    end
+  end
+
+  # The box `::before` / `::after` makes: a `span` holding the `content` text, styled by the
+  # pseudo-element rules. Nothing is made without `content` (or with `none`/`normal`), for
+  # `display: none`, or for elements whose content is not their children.
+  @no_pseudo ~w(input select textarea img br hr svg video canvas iframe option)
+
+  defp generated(_idx, %{tag: tag}, _which) when tag in @no_pseudo, do: []
+
+  defp generated(idx, ctx, which) do
+    if MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), which),
+      do: generate(idx, ctx, which),
+      else: []
+  end
+
+  defp generate(idx, ctx, which) do
+    {computed, _custom} = compute(idx, ctx, ctx, which)
+
+    with text when is_binary(text) <- content_text(computed["content"], ctx.attrs),
+         false <- not_rendered?(computed) do
+      kids = if text == "", do: [], else: [{:text, text}]
+      [{:element, "span", [{"@computed", Map.delete(computed, "content")}], kids}]
+    else
+      _ -> []
+    end
+  end
+
+  # the text of a `content` value: strings, `attr()` and quotes joined; nil for no box
+  defp content_text(value, attrs) when is_binary(value) do
+    value = String.trim(value)
+
+    parts =
+      Regex.scan(
+        ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su,
+        value
+      )
+
+    if value in ["", "none", "normal"] or parts == [] do
+      nil
+    else
+      Enum.map_join(parts, fn
+        [_, s] -> css_string(s)
+        [_, "", s] -> css_string(s)
+        [_, "", "", name] -> attr(attrs, String.downcase(name))
+        ["open-quote"] -> "“"
+        ["close-quote"] -> "”"
+        _ -> ""
       end)
+    end
+  end
 
-    Enum.reverse(out)
+  defp content_text(_value, _attrs), do: nil
+
+  # `\201C` and `\"` in a CSS string
+  defp css_string(s) do
+    Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, s, fn
+      _, hex, "" ->
+        cp = String.to_integer(hex, 16)
+        if cp in 1..0xD7FF or cp in 0xE000..0x10FFFF, do: <<cp::utf8>>, else: "\uFFFD"
+
+      _, _, char ->
+        char
+    end)
   end
 
   # Grid is laid out as a stack of blocks, so what sits directly in a grid container is
@@ -774,7 +937,7 @@ defmodule Browser.Style do
   defp blockify_grid_item(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
-  defp compute(idx, ctx, parent) do
+  defp compute(idx, ctx, parent, pseudo \\ nil) do
     {pc, parent_custom, parent_root} =
       case parent do
         nil -> {%{}, %{}, nil}
@@ -784,7 +947,9 @@ defmodule Browser.Style do
     inherited = Map.take(pc, @inherited)
 
     {customs, normals} =
-      idx |> declared(ctx) |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+      idx
+      |> declared(ctx, pseudo)
+      |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
 
     custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 
@@ -1234,7 +1399,9 @@ defmodule Browser.Style do
           "in" -> n * 96
           "cm" -> n * 96 / 2.54
           "mm" -> n * 96 / 25.4
-          u when u in ["ex", "ch"] -> n * env.fs / 2
+          "ex" -> n * env.fs / 2
+          # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
+          "ch" -> n * env.fs * 0.6
           u -> if px = viewport_unit(u, env), do: n * px
         end
 
@@ -1323,27 +1490,5 @@ defmodule Browser.Style do
       [_, n] -> to_float(n) >= 50.0
       nil -> Regex.match?(~r/\Acircle\(\s*0(?:px|%)?\s*[\s)]/, v)
     end
-  end
-
-  defp context(tag, attrs, kids, parent, prev, i, count) do
-    %{
-      tag: tag,
-      attrs: attrs,
-      id:
-        case(List.keyfind(attrs, "id", 0),
-          do: (
-            {_, v} -> v
-            nil -> nil
-          )
-        ),
-      classes: attrs |> attr("class") |> String.split(),
-      parent: parent,
-      prev: prev,
-      first?: i == 0,
-      last?: i == count - 1,
-      index: i + 1,
-      count: count,
-      empty?: kids == []
-    }
   end
 end

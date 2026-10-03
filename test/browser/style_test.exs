@@ -772,4 +772,143 @@ defmodule Browser.StyleTest do
       refute Map.has_key?(c, "background-image")
     end
   end
+
+  describe "generated content" do
+    defp pseudo_kids(html, css) do
+      [{:element, _, _, kids}] = prune(html, css)
+      kids
+    end
+
+    test "::before and ::after add a styled span with the content text" do
+      css = ~s(p::before { content: "\\201C"; color: #f00 } p::after { content: "end" })
+
+      assert [
+               {:element, "span", [{"@computed", %{"color" => {255, 0, 0}} = c}], [{:text, "“"}]},
+               {:text, "hi"},
+               {:element, "span", _, [{:text, "end"}]}
+             ] = pseudo_kids("<p>hi</p>", css)
+
+      refute Map.has_key?(c, "content")
+    end
+
+    test "attr() and joined strings; none and missing content make no box" do
+      assert [{:element, "span", _, [{:text, "[x1]"}]}, {:text, "a"}] =
+               pseudo_kids(
+                 ~S|<a data-n="1">a</a>|,
+                 ~S|a::before { content: "[x" attr(data-n) "]" }|
+               )
+
+      assert [{:text, "a"}] = pseudo_kids("<a>a</a>", "a::before { content: none }")
+      assert [{:text, "a"}] = pseudo_kids("<a>a</a>", "a::before { color: red }")
+    end
+
+    test "an empty string still makes a box, for decoration" do
+      css = ~s(a::after { content: ""; display: block; height: 2px })
+      assert [{:text, "a"}, {:element, "span", _, []}] = pseudo_kids("<a>a</a>", css)
+    end
+
+    test "pseudo-element rules don't style the element itself" do
+      [{:element, _, attrs, _}] = prune("<p>x</p>", ~s(p::before { content: "a"; color: #f00 }))
+      assert {"@computed", c} = List.keyfind(attrs, "@computed", 0)
+      refute c["color"] == {255, 0, 0}
+    end
+  end
+
+  describe "marker and checkbox content" do
+    test "li::marker content reaches the list item's computed style" do
+      [{:element, "ul", _, [{:element, "li", attrs, _}]}] =
+        prune("<ul><li>a</li></ul>", ~s(li::marker { content: "> " }))
+
+      assert {"@computed", %{"marker-content" => ">\u00A0"}} = List.keyfind(attrs, "@computed", 0)
+    end
+
+    test "summary::marker can differ between closed and open details" do
+      css =
+        ~s(summary::marker { content: "> " } details[open] > summary::marker { content: "x " })
+
+      [{:element, "details", _, [{:element, "summary", attrs, _}]}] =
+        prune("<details><summary>s</summary></details>", css)
+
+      assert {"@marker", {">\u00A0", "x\u00A0"}} = List.keyfind(attrs, "@marker", 0)
+    end
+
+    test "a checkbox's ::after content, for each state, replaces its mark" do
+      css = ~s(input::after { content: "[ ]" } input:checked::after { content: "[x]" })
+      [{:element, "input", attrs, _}] = prune(~s(<input type="checkbox">), css)
+      assert {"@content", {"[ ]", "[x]"}} = List.keyfind(attrs, "@content", 0)
+    end
+
+    test "ch is about 0.6em" do
+      [{:element, "p", attrs, _}] = prune(~s(<p style="font-size:10px; width:5ch">x</p>))
+      assert {"@computed", %{"width" => 30.0}} = List.keyfind(attrs, "@computed", 0)
+    end
+  end
+
+  describe ":has()" do
+    defp color_of(nodes, tag) do
+      Enum.find_value(nodes, fn
+        {:element, ^tag, attrs, _} ->
+          {_, c} = List.keyfind(attrs, "@computed", 0)
+          c["color"]
+
+        {:element, _, _, kids} ->
+          color_of(kids, tag)
+
+        _ ->
+          nil
+      end)
+    end
+
+    @red {255, 0, 0}
+
+    test "matches an element by what is inside it" do
+      nodes =
+        prune(
+          "<ul><li><a class=x>a</a></li><li><b>b</b></li></ul>",
+          "li:has(a.x) { color: #f00 }"
+        )
+
+      [{:element, "ul", _, [one, two]}] = nodes
+      assert color_of([one], "li") == @red
+      assert color_of([two], "li") != @red
+    end
+
+    test "child, next-sibling and subsequent-sibling forms" do
+      css = "div:has(> i) { color: #f00 } p:has(+ q) { color: #f00 } s:has(~ u) { color: #f00 }"
+
+      nodes =
+        prune(
+          "<div><i>x</i></div><div><b><i>y</i></b></div><p>1</p><q>2</q><p>3</p><s>4</s><u>5</u>",
+          css
+        )
+
+      [d1, d2, p1, _q, p2, s, _u] = nodes
+      assert color_of([d1], "div") == @red
+      assert color_of([d2], "div") != @red
+      assert color_of([p1], "p") == @red
+      assert color_of([p2], "p") != @red
+      assert color_of([s], "s") == @red
+    end
+
+    test "state selectors inside it never match; :not() of one does" do
+      nodes =
+        prune(
+          "<div><a>x</a></div>",
+          "div:has(a:hover) { color: #f00 } div:has(a:not(:hover)) { color: #00f }"
+        )
+
+      assert color_of(nodes, "div") == {0, 0, 255}
+    end
+
+    test "works as the left side of a sibling combinator" do
+      css = "label:has(> input:not(:checked)) + div { color: #f00 }"
+
+      nodes =
+        prune("<label><input></label><div>a</div><label><input checked></label><div>b</div>", css)
+
+      [_, d1, _, d2] = nodes
+      assert color_of([d1], "div") == @red
+      assert color_of([d2], "div") != @red
+    end
+  end
 end

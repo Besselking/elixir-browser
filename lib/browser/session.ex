@@ -839,6 +839,10 @@ defmodule Browser.Session do
       control.type in ["checkbox", "radio"] ->
         state |> focus(cid, 0) |> toggle(cid)
 
+      # opening or closing a <details>: the summary takes no focus
+      control.type == "summary" ->
+        toggle(state, cid)
+
       control.tag == "select" ->
         state |> focus(cid, 0) |> relayout() |> open_select(control)
 
