@@ -220,7 +220,7 @@ defmodule Browser.Style do
                                                                                   idx ->
       idx = note_pseudo(idx, rule)
       rule = Map.put(rule, :order, order)
-      Map.update(idx, key(rule), [rule], &[rule | &1])
+      Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
     end)
   end
 
@@ -250,11 +250,12 @@ defmodule Browser.Style do
 
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
   def declared(idx, ctx, pseudo \\ nil) do
+    # rules are bucketed by the pseudo-element they are for, and then by their rightmost compound
     candidates =
-      Map.get(idx, {:tag, ctx.tag}, []) ++
-        Map.get(idx, :other, []) ++
-        if(ctx.id, do: Map.get(idx, {:id, ctx.id}, []), else: []) ++
-        Enum.flat_map(ctx.classes, &Map.get(idx, {:class, &1}, []))
+      Map.get(idx, {pseudo, {:tag, ctx.tag}}, []) ++
+        Map.get(idx, {pseudo, :other}, []) ++
+        if(ctx.id, do: Map.get(idx, {pseudo, {:id, ctx.id}}, []), else: []) ++
+        Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, {:class, &1}}, []))
 
     from_rules =
       for rule <- candidates,
@@ -719,10 +720,23 @@ defmodule Browser.Style do
   defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
   defp table_ancestor(_), do: nil
 
+  # the same `style` attribute is on many elements of a page (and on one of them every time the
+  # page is styled again), so its parse is kept for the run
   defp inline_decls(attrs) do
     case List.keyfind(attrs, "style", 0) do
-      {_, css} -> css |> CSS.parse_declarations() |> relevant()
-      nil -> []
+      {_, css} ->
+        case Process.get(:style_inline) do
+          %{^css => decls} ->
+            decls
+
+          cache ->
+            decls = css |> CSS.parse_declarations() |> relevant()
+            if cache, do: Process.put(:style_inline, Map.put(cache, css, decls))
+            decls
+        end
+
+      nil ->
+        []
     end
   end
 
@@ -740,7 +754,12 @@ defmodule Browser.Style do
   """
   def prune(nodes, idx) do
     Process.delete(:style_memo)
-    prune_children(nodes, nil, idx)
+    Process.put(:style_share, %{})
+    Process.put(:style_inline, %{})
+    pruned = prune_children(nodes, nil, idx)
+    Process.delete(:style_share)
+    Process.delete(:style_inline)
+    pruned
   end
 
   @doc """
@@ -752,7 +771,11 @@ defmodule Browser.Style do
   """
   def prune(nodes, idx, memo) do
     Process.put(:style_memo, memo || %{})
+    Process.put(:style_share, %{})
+    Process.put(:style_inline, %{})
     pruned = prune_children(nodes, nil, idx)
+    Process.delete(:style_share)
+    Process.delete(:style_inline)
     {pruned, Process.delete(:style_memo)}
   end
 
@@ -1055,6 +1078,10 @@ defmodule Browser.Style do
   defp blockify_grid_item(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
+  #
+  # What an element computes to follows from what the cascade declared for it and what its parent
+  # computed to (and whether it is a table). Most elements of a page, a row of list items or the
+  # cells of a grid, have both the same as another element, so those are worked out once.
   defp compute(idx, ctx, parent, pseudo \\ nil) do
     {pc, parent_custom, parent_root} =
       case parent do
@@ -1062,12 +1089,32 @@ defmodule Browser.Style do
         p -> {p.computed, p.custom, p.root_fs}
       end
 
+    decl = declared(idx, ctx, pseudo)
+
+    case Process.get(:style_share) do
+      nil ->
+        compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
+
+      shared ->
+        key = {decl, ctx.tag == "table", pc, parent_custom, parent_root}
+
+        case shared do
+          %{^key => result} ->
+            result
+
+          _ ->
+            result = compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
+            shared = if map_size(shared) >= 20_000, do: %{}, else: shared
+            Process.put(:style_share, Map.put(shared, key, result))
+            result
+        end
+    end
+  end
+
+  defp compute_declared(idx, tag, decl, pc, parent_custom, parent_root) do
     inherited = Map.take(pc, @inherited)
 
-    {customs, normals} =
-      idx
-      |> declared(ctx, pseudo)
-      |> Enum.split_with(fn {k, _} -> String.starts_with?(k, "--") end)
+    {customs, normals} = Enum.split_with(decl, fn {k, _} -> String.starts_with?(k, "--") end)
 
     custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
 
@@ -1103,7 +1150,7 @@ defmodule Browser.Style do
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
-      if ctx.tag == "table" and base["text-align"] == "-webkit-center",
+      if tag == "table" and base["text-align"] == "-webkit-center",
         do: Map.put(base, "text-align", "left"),
         else: base
 
