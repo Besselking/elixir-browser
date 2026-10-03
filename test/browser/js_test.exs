@@ -419,7 +419,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("function* g() {}")
+      assert {:syntax, _} = error("class A { static async *#m() {} }")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -522,7 +522,7 @@ defmodule Browser.JSTest do
     end
 
     test "syntax the runtime lacks is a syntax error" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("function* g() {}")
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("class A { static async *#m() {} }")
     end
   end
 
@@ -903,6 +903,114 @@ defmodule Browser.JSTest do
       assert js(
                "var g = Object.groupBy([1, 2, 3, 4], x => x % 2 ? 'odd' : 'even'); g.odd.join() + '/' + g.even.join()"
              ) == "1,3/2,4"
+    end
+  end
+
+  describe "generators" do
+    test "next, return and the value sent in" do
+      assert logs_of("""
+             function* g(a) { var x = yield a; console.log('x=' + x); try { yield 2 } finally { console.log('fin') } return 9 }
+             var it = g(1);
+             console.log(JSON.stringify([it.next(), it.next('A'), it.return(5), it.next()]))
+             """) == [
+               "x=A",
+               "fin",
+               ~s([{"value":1,"done":false},{"value":2,"done":false},{"value":5,"done":true},{"done":true}])
+             ]
+    end
+
+    test "throw goes in at the yield" do
+      assert js("""
+             function* t() { try { yield 1 } catch (e) { yield 'caught ' + e } }
+             var i = t(); i.next(); i.throw('boom').value
+             """) == "caught boom"
+    end
+
+    test "for of pulls one value at a time and closes the iterator on break" do
+      assert logs_of("""
+             function* nat() { try { var i = 0; while (true) yield i++ } finally { console.log('closed') } }
+             var r = []; for (var n of nat()) { if (n > 2) break; r.push(n) }
+             console.log(r.join())
+             """) == ["closed", "0,1,2"]
+    end
+
+    test "yield*, spread and destructuring" do
+      assert js("""
+             function* a() { yield 1; yield* [2, 3]; yield* b() }
+             function* b() { yield 4; return 'r' }
+             [[...a()].join(), Array.from(a()).length]
+             """) == ["1,2,3,4", 4.0]
+
+      assert js(
+               "function* a() { yield 1; yield 2; yield 3 } var [p, ...r] = a(); p + ':' + r.join()"
+             ) ==
+               "1:2,3"
+    end
+
+    test "methods and the generator prototype" do
+      assert js("""
+             class C { *items() { yield 1; yield 2 } static *s() { yield 's' } }
+             var o = { *[Symbol.iterator]() { yield 'it' } };
+             [[...new C().items()].join(), C.s().next().value, [...o].join()]
+             """) == ["1,2", "s", "it"]
+
+      assert js(
+               "function* g() {} var i = g(); [Object.getPrototypeOf(i) === g.prototype, i[Symbol.iterator]() === i]"
+             ) ==
+               [true, true]
+
+      assert js("function* g() {} try { new g() } catch (e) { e.name }") == "TypeError"
+    end
+
+    test "yield is an ordinary name outside generators" do
+      assert js("var yield = 3; yield + 1") == 4.0
+    end
+  end
+
+  describe "private class members" do
+    test "fields, methods, accessors and statics" do
+      assert js("""
+             class A {
+               #x = 1; #y; static #n = 0;
+               constructor(y) { this.#y = y }
+               static inc() { return ++A.#n }
+               #sum() { return this.#x + this.#y }
+               #acc = 5;
+               get #dbl() { return this.#acc * 2 }
+               set #dbl(v) { this.#acc = v }
+               run() { this.#dbl = 7; return [this.#sum(), this.#dbl] }
+               bump() { this.#x++; this.#x += 10; return this.#x }
+             }
+             var a = new A(2);
+             [a.run().join(), a.bump(), A.inc(), A.inc(), Object.keys(a).length, JSON.stringify(a)]
+             """) == ["3,14", 12.0, 1.0, 2.0, 0.0, "{}"]
+    end
+
+    test "#x in obj, optional chains and subclasses" do
+      assert js("""
+             class A { #x = 1; static has(o) { return #x in o } opt(o) { return o?.#x } }
+             class B extends A { #z = 3; z() { return this.#z } }
+             [A.has(new A), A.has({}), new A().opt(null), new B().z()]
+             """) == [true, false, :undefined, 3.0]
+    end
+
+    test "a foreign object has no such member" do
+      assert js(
+               "class A { #x; static read(o) { return o.#x } } try { A.read({}) } catch (e) { e.name }"
+             ) ==
+               "TypeError"
+    end
+
+    test "early errors" do
+      for src <- [
+            "class A { m() { this.#nope } }",
+            "this.#x",
+            "class A { #x; #x }",
+            "class A { #constructor }",
+            "class A { #x; m() { delete this.#x } }"
+          ] do
+        assert {:syntax, _} = error(src)
+      end
     end
   end
 end

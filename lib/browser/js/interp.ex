@@ -312,6 +312,24 @@ defmodule Browser.JS.Interp do
 
   defp index(_), do: nil
 
+  def get({:obj, id} = obj, {:private, _} = key) do
+    case Map.fetch(deref(id).props, key) do
+      {:ok, {:accessor, g, _}} ->
+        if function?(g),
+          do: call(g, obj, []),
+          else: throw_error("TypeError", "'#x' was defined without a getter")
+
+      {:ok, v} ->
+        v
+
+      :error ->
+        throw_error(
+          "TypeError",
+          "Cannot read private member from an object whose class did not declare it"
+        )
+    end
+  end
+
   def get({:obj, id}, key) do
     o = deref(id)
 
@@ -397,6 +415,12 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  defp function_prop(id, %{generator: true}, "prototype") do
+    p = new_object([], proto(:generator))
+    put_hidden({:obj, id}, "prototype", p)
+    p
+  end
+
   defp function_prop(id, o, "prototype") do
     case o.fun do
       {:closure, %{name: {:method, _}}} ->
@@ -440,6 +464,28 @@ defmodule Browser.JS.Interp do
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
     store(id, %{o | props: Map.put(o.props, key, v)})
+  end
+
+  def put({:obj, id} = obj, {:private, _} = key, v) do
+    o = deref(id)
+
+    case Map.fetch(o.props, key) do
+      {:ok, {:accessor, _, setter}} ->
+        if function?(setter),
+          do: call(setter, obj, [v]),
+          else: throw_error("TypeError", "'#x' was defined without a setter")
+
+        :ok
+
+      {:ok, _} ->
+        store(id, %{o | props: Map.put(o.props, key, v)})
+
+      :error ->
+        throw_error(
+          "TypeError",
+          "Cannot write private member to an object whose class did not declare it"
+        )
+    end
   end
 
   def put({:obj, id}, key, v) do
@@ -700,6 +746,85 @@ defmodule Browser.JS.Interp do
   def iterate(s) when is_binary(s), do: String.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
 
+  @doc false
+  # what `for of` loops over: a list that is known up front (arrays, strings, Map, Set), or an
+  # iterator object to pull from one value at a time, so that an endless generator can be left
+  # with `break`
+  def iter_source({:obj, id} = v) do
+    o = deref(id)
+
+    if o.class in [:array, :map, :set] do
+      {:list, iterate(v)}
+    else
+      case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+        f when is_tuple(f) ->
+          unless function?(f), do: throw_error("TypeError", "object is not iterable")
+          it = call(f, v, [])
+          {:proto, it, get(it, "next")}
+
+        _ ->
+          throw_error("TypeError", "object is not iterable")
+      end
+    end
+  end
+
+  def iter_source(v), do: {:list, iterate(v)}
+
+  @doc false
+  # one step of an iterator: `{:ok, value}` or `:done`
+  def iter_step(it, next) do
+    r = call(next, it, [])
+
+    unless match?({:obj, _}, r),
+      do: throw_error("TypeError", "Iterator result is not an object")
+
+    if truthy(get(r, "done")), do: :done, else: {:ok, get(r, "value")}
+  end
+
+  @doc false
+  # leaves an iterator early: calls its `return` method. After a throw the error from `return`
+  # is dropped in favour of the original one.
+  def iter_close(it, after_throw?) do
+    try do
+      case get(it, "return") do
+        f when is_tuple(f) -> if function?(f), do: call(f, it, [])
+        _ -> :ok
+      end
+    catch
+      {:js_error, _} when after_throw? -> :ok
+    end
+  end
+
+  defp proto_loop(it, next, {pat, mode, body, env} = spec, labels) do
+    case iter_step(it, next) do
+      :done ->
+        :ok
+
+      {:ok, item} ->
+        tick()
+        iter_env = new_scope(env)
+
+        result =
+          try do
+            bind(pat, item, iter_env, mode)
+            run_body(body, iter_env, labels)
+          catch
+            kind, e ->
+              iter_close(it, true)
+              :erlang.raise(kind, e, __STACKTRACE__)
+          end
+
+        case result do
+          :break ->
+            iter_close(it, false)
+            :ok
+
+          :next ->
+            proto_loop(it, next, spec, labels)
+        end
+    end
+  end
+
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
   defp iterate_protocol(v) do
     case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
@@ -744,6 +869,10 @@ defmodule Browser.JS.Interp do
         tick()
         fun.(this, args)
 
+      %{class: :function, fun: {:closure, c}, generator: true} ->
+        tick()
+        Browser.JS.Async.call_generator({:obj, id}, c, this, args)
+
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
         Browser.JS.Async.call_closure(c, this, args)
@@ -766,6 +895,9 @@ defmodule Browser.JS.Interp do
 
     if match?(%{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr], deref(id)),
       do: throw_error("TypeError", "arrow function is not a constructor")
+
+    if Map.get(deref(id), :generator),
+      do: throw_error("TypeError", "generator is not a constructor")
 
     nt = new_target || f
 
@@ -923,6 +1055,21 @@ defmodule Browser.JS.Interp do
   def lookup_scoped(env, name), do: lookup_var(env, name)
 
   @doc false
+  # the key a private name stands for in the class it is declared in
+  def private_key(name, env) do
+    case lookup_var(env, {:priv, name}) do
+      {:ok, ref} ->
+        {:private, ref}
+
+      :error ->
+        throw_error(
+          "SyntaxError",
+          "Private field '#' + #{name} must be declared in an enclosing class"
+        )
+    end
+  end
+
+  @doc false
   # the scope, along the chain from `env`, that holds the variable `name`
   def scope_of(nil, _), do: nil
 
@@ -948,6 +1095,12 @@ defmodule Browser.JS.Interp do
 
     bind(p, arg, scope, :let)
     bind_params(ps, rest, scope)
+  end
+
+  defp make_fn({:gen, fun}, env) do
+    {:obj, id} = f = make_fn(fun, env)
+    store(id, Map.put(deref(id), :generator, true))
+    f
   end
 
   defp make_fn({:async, fun}, env) do
@@ -1240,24 +1393,30 @@ defmodule Browser.JS.Interp do
   defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
     target = ev(obj, env)
 
-    items =
-      case kind do
-        :forin -> if nullish?(target), do: [], else: own_keys(target)
-        :forof -> iterate(target)
-      end
-
     mode = if decl == nil, do: :assign, else: decl
 
-    Enum.reduce_while(items, :ok, fn item, _ ->
-      tick()
-      iter_env = new_scope(env)
-      bind(pat, item, iter_env, mode)
-
-      case run_body(body, iter_env, labels) do
-        :break -> {:halt, :ok}
-        :next -> {:cont, :ok}
+    source =
+      case kind do
+        :forin -> {:list, if(nullish?(target), do: [], else: own_keys(target))}
+        :forof -> iter_source(target)
       end
-    end)
+
+    case source do
+      {:proto, it, next} ->
+        proto_loop(it, next, {pat, mode, body, env}, labels)
+
+      {:list, items} ->
+        Enum.reduce_while(items, :ok, fn item, _ ->
+          tick()
+          iter_env = new_scope(env)
+          bind(pat, item, iter_env, mode)
+
+          case run_body(body, iter_env, labels) do
+            :break -> {:halt, :ok}
+            :next -> {:cont, :ok}
+          end
+        end)
+    end
   end
 
   defp exec({:switch, disc, cases}, env, _) do
@@ -1399,6 +1558,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp ev_key({:str, s}, _), do: s
+  defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
 
   # ── expressions ────────────────────────────────────────────
@@ -1414,6 +1574,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:async, fun}, env), do: make_fn({:async, fun}, env)
+  def ev({:gen, fun}, env), do: make_fn({:gen, fun}, env)
   def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
   def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
@@ -1589,6 +1750,21 @@ defmodule Browser.JS.Interp do
       "~" -> (Num.int32(to_num(v)) |> Bitwise.bnot()) * 1.0
       "typeof" -> typeof(v)
       "void" -> :undefined
+    end
+  end
+
+  def ev({:binary, "in", {:priv_ref, name}, r}, env) do
+    key = private_key(name, env)
+
+    case ev(r, env) do
+      {:obj, id} ->
+        Map.has_key?(deref(id).props, key)
+
+      _ ->
+        throw_error(
+          "TypeError",
+          "Cannot use 'in' operator to search for a private field in a non-object"
+        )
     end
   end
 

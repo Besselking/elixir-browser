@@ -54,7 +54,15 @@ defmodule Browser.JS.Parser do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
         Process.put(:js_strict, use_strict?(tokens))
-        {:ok, {:program, tokens |> statements() |> check_scope(true)}}
+        Process.put(:js_priv_refs, [])
+        program = tokens |> statements() |> check_scope(true)
+
+        case Process.get(:js_priv_refs) do
+          [] -> :ok
+          [n | _] -> throw({:syntax, "private name #" <> n <> " is not defined"})
+        end
+
+        {:ok, {:program, program}}
       catch
         {:syntax, msg} -> {:error, msg}
       end
@@ -146,6 +154,9 @@ defmodule Browser.JS.Parser do
   defp check_strict_name(name) do
     if strict?() and (name in ["eval", "arguments"] or name in @strict_reserved),
       do: throw({:syntax, "unexpected #{name} in strict mode"})
+
+    if name == "yield" and Process.get(:js_generator, false),
+      do: throw({:syntax, "yield is reserved in generators"})
   end
 
   # the body of if, a loop, `with` or a label: a statement, never a declaration (a plain
@@ -214,6 +225,12 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "function", _}, {:id, name, _} | ts]) when name not in @reserved do
     {fun, ts} = function_rest(name, ts)
+    {{:fundecl, name, fun}, ts}
+  end
+
+  defp statement([{:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
+       when name not in @reserved do
+    {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, fun}, ts}
   end
 
@@ -537,11 +554,17 @@ defmodule Browser.JS.Parser do
 
       _ ->
         {lhs, after_lhs} =
-          try do
-            unary_or_lhs(ts)
-          catch
-            # an init such as `typeof a == "x" && b()` is no left-hand side
-            {:syntax, _} -> {nil, []}
+          case destructuring_head(ts) do
+            nil ->
+              try do
+                unary_or_lhs(ts)
+              catch
+                # an init such as `typeof a == "x" && b()` is no left-hand side
+                {:syntax, _} -> {nil, []}
+              end
+
+            head ->
+              head
           end
 
         case after_lhs do
@@ -559,6 +582,22 @@ defmodule Browser.JS.Parser do
   end
 
   defp unary_or_lhs(ts), do: postfix(ts)
+
+  # `for ([a, b] of x)` / `for ({a} of x)`: a pattern in the head
+  defp destructuring_head([{:p, open, _} | _] = ts) when open in ["[", "{"] do
+    try do
+      {pat, rest} = pattern(ts, false)
+
+      case rest do
+        [{:id, w, _} | _] when w in ["of", "in"] -> {pat, rest}
+        _ -> nil
+      end
+    catch
+      {:syntax, _} -> nil
+    end
+  end
+
+  defp destructuring_head(_), do: nil
 
   defp for_rest(init, ts) do
     ts = expect(ts, ";")
@@ -691,6 +730,7 @@ defmodule Browser.JS.Parser do
 
         _ ->
           name = shorthand || throw({:syntax, "bad object pattern"})
+          check_strict_name(name)
           {pat, ts} = with_default({:id, name}, ts, true)
           {{key, pat}, ts}
       end
@@ -703,6 +743,7 @@ defmodule Browser.JS.Parser do
   end
 
   # → {key_node, shorthand_name_or_nil, rest}
+  defp property_key([{:priv, name, _} | ts]), do: {{:priv, name}, nil, ts}
   defp property_key([{:id, name, _} | ts]), do: {{:str, name}, name, ts}
   defp property_key([{:eid, name, _} | ts]), do: {{:str, name}, nil, ts}
   defp property_key([{:str, s, _} | ts]), do: {{:str, s}, nil, ts}
@@ -719,7 +760,34 @@ defmodule Browser.JS.Parser do
   # ── classes ────────────────────────────────────────────────
 
   # after `class`: `Name? (extends expr)? { members }` -> {:class, name, super, members}
+  # a private name used in the code being parsed; `class_rest` settles them against the
+  # names the class declares, the rest belongs to an enclosing class or is an error
+  defp private_ref(name), do: Process.put(:js_priv_refs, [name | Process.get(:js_priv_refs, [])])
+
+  defp check_private_names(members) do
+    declared =
+      for {:cmember, kind, {:priv, n}, _, static?} <- members do
+        if n == "constructor", do: throw({:syntax, "#constructor is not a valid private name"})
+        {n, kind, static?}
+      end
+
+    declared
+    |> Enum.group_by(&elem(&1, 0))
+    |> Enum.each(fn {n, entries} ->
+      kinds = entries |> Enum.map(&elem(&1, 1)) |> Enum.sort()
+      statics = entries |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+
+      unless length(entries) == 1 or (kinds == [:get, :set] and length(statics) == 1),
+        do: throw({:syntax, "private name #" <> n <> " is declared twice"})
+    end)
+
+    Enum.map(declared, &elem(&1, 0))
+  end
+
   defp class_rest(ts) do
+    outer_refs = Process.get(:js_priv_refs, [])
+    Process.put(:js_priv_refs, [])
+
     {name, ts} =
       case ts do
         [{:id, n, _} | t] when n not in @reserved and n != "extends" -> {n, t}
@@ -738,6 +806,10 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "{")
     {members, ts} = class_members(ts, [])
     Process.put(:js_strict, outer)
+
+    names = check_private_names(members)
+    unresolved = Enum.reject(Process.get(:js_priv_refs, []), &(&1 in names))
+    Process.put(:js_priv_refs, unresolved ++ outer_refs)
     {{:class, name, super, members}, ts}
   end
 
@@ -745,17 +817,30 @@ defmodule Browser.JS.Parser do
   defp class_members([{:p, ";", _} | ts], acc), do: class_members(ts, acc)
 
   defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
-    {body, ts} = block_body(ts, [])
-    class_members(ts, [{:cmember, :block, nil, body, true} | acc])
+    outer = Process.get(:js_generator, false)
+    Process.put(:js_generator, false)
+
+    try do
+      {body, ts} = block_body(ts, [])
+      class_members(ts, [{:cmember, :block, nil, body, true} | acc])
+    after
+      Process.put(:js_generator, outer)
+    end
   end
 
   defp class_members(ts, acc) do
     {static?, ts} = class_modifier(ts, "static")
     {async?, ts} = class_modifier(ts, "async")
 
+    {generator?, ts} =
+      case ts do
+        [{:p, "*", _} | t] -> {true, t}
+        _ -> {false, ts}
+      end
+
     {kind, ts} =
       case ts do
-        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num] ->
+        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num, :priv] ->
           {String.to_atom(k), tl(ts)}
 
         [{:id, k, _}, {:p, "[", _} | _] when k in ["get", "set"] ->
@@ -769,8 +854,18 @@ defmodule Browser.JS.Parser do
 
     case after_key do
       [{:p, "(", _} | _] ->
-        {{:fn, _, _, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
-        value = if async?, do: {:async, fun}, else: fun
+        {{:fn, _, _, _, _} = fun, ts} =
+          function_rest({:method, shorthand}, after_key, generator?)
+
+        if async? and generator?, do: throw({:syntax, "async generators are not supported"})
+
+        value =
+          cond do
+            async? -> {:async, fun}
+            generator? -> {:gen, fun}
+            true -> fun
+          end
+
         class_members(ts, [{:cmember, kind, key, value, static?} | acc])
 
       [{:p, "=", _} | t] ->
@@ -795,11 +890,24 @@ defmodule Browser.JS.Parser do
   # ── functions ──────────────────────────────────────────────
 
   # after `function name?` — at the parameter list
-  defp function_rest(name, ts) do
-    {params, ts} = params(expect(ts, "("), [])
-    ts = expect(ts, "{")
-    {body, ts} = function_body(ts, params)
-    {{:fn, name, params, body, false}, ts}
+  defp function_rest(name, ts, generator? \\ false) do
+    outer = Process.get(:js_generator, false)
+    Process.put(:js_generator, generator?)
+
+    try do
+      {params, ts} = params(expect(ts, "("), [])
+      ts = expect(ts, "{")
+      {body, ts} = function_body(ts, params)
+      {{:fn, name, params, body, false}, ts}
+    after
+      Process.put(:js_generator, outer)
+    end
+  end
+
+  # `function*`: the function node wrapped as a generator
+  defp generator_rest(name, ts) do
+    {fun, ts} = function_rest(name, ts, true)
+    {{:gen, fun}, ts}
   end
 
   defp params([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
@@ -882,7 +990,37 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp assignment([{:id, "yield", _} | rest] = ts) do
+    if Process.get(:js_generator, false) do
+      yield_expression(rest)
+    else
+      if strict?(), do: throw({:syntax, "yield is reserved in strict mode"})
+      assignment_plain(ts)
+    end
+  end
+
   defp assignment(ts), do: assignment_plain(ts)
+
+  defp yield_expression(ts) do
+    case ts do
+      [{_, _, true} | _] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [{:p, p, _} | _] when p in [")", "]", "}", ",", ";", ":"] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [] ->
+        {{:yield, {:lit, :undefined}, false}, ts}
+
+      [{:p, "*", _} | t] ->
+        {e, ts} = assignment(t)
+        {{:yield, e, true}, ts}
+
+      _ ->
+        {e, ts} = assignment(ts)
+        {{:yield, e, false}, ts}
+    end
+  end
 
   defp assignment_plain([{:p, open, _} | _] = ts) when open in ["[", "{"] do
     if destructuring_ahead?(tl(ts), 1) do
@@ -971,6 +1109,10 @@ defmodule Browser.JS.Parser do
 
   defp binary_loop(left, ts, _), do: {left, ts}
 
+  defp private_member?({:member, _, {:priv, _}, _}), do: true
+  defp private_member?({:chain, e}), do: private_member?(e)
+  defp private_member?(_), do: false
+
   defp unary([{:p, op, _} | ts]) when op in ["!", "-", "+", "~"] do
     {e, ts} = unary(ts)
 
@@ -1001,6 +1143,10 @@ defmodule Browser.JS.Parser do
 
   defp unary([{:id, op, _} | ts]) when op in ["typeof", "void", "delete"] do
     {e, ts} = unary(ts)
+
+    if op == "delete" and private_member?(e),
+      do: throw({:syntax, "private fields can not be deleted"})
+
     {{:unary, op, e}, ts}
   end
 
@@ -1038,6 +1184,16 @@ defmodule Browser.JS.Parser do
 
     {e, ts, chained?} = chain(base, ts, false)
     {if(chained?, do: {:chain, e}, else: e), ts}
+  end
+
+  defp chain(e, [{:p, ".", _}, {:priv, name, _} | ts], c) do
+    private_ref(name)
+    chain({:member, e, {:priv, name}, false}, ts, c)
+  end
+
+  defp chain(e, [{:p, "?.", _}, {:priv, name, _} | ts], _) do
+    private_ref(name)
+    chain({:member, e, {:priv, name}, true}, ts, true)
   end
 
   defp chain(e, [{:p, ".", _}, {k, name, _} | ts], c) when k in [:id, :eid],
@@ -1168,6 +1324,12 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
 
+  # `#x in obj`
+  defp primary([{:priv, name, _}, {:id, "in", _} | _] = [{:priv, _, _} | ts]) do
+    private_ref(name)
+    {{:priv_ref, name}, ts}
+  end
+
   defp primary([{:id, "super", _}, {:p, ".", _}, {:id, name, _} | ts]),
     do: {{:super_member, {:str, name}}, ts}
 
@@ -1182,13 +1344,19 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:id, "function", _} | ts]) do
+    {generator?, ts} =
+      case ts do
+        [{:p, "*", _} | t] -> {true, t}
+        t -> {false, t}
+      end
+
     {name, ts} =
       case ts do
         [{:id, n, _} | t] when n not in @reserved -> {n, t}
         t -> {nil, t}
       end
 
-    function_rest(name, ts)
+    if generator?, do: generator_rest(name, ts), else: function_rest(name, ts)
   end
 
   defp primary([{:id, name, _} | ts]) when name not in @reserved, do: {{:id, name}, ts}
@@ -1229,6 +1397,12 @@ defmodule Browser.JS.Parser do
   defp object_literal([{:p, "...", _} | ts], acc) do
     {e, ts} = assignment(ts)
     object_next(ts, [{:spread, e} | acc])
+  end
+
+  defp object_literal([{:p, "*", _} | rest], acc) do
+    {key, shorthand, after_key} = property_key(rest)
+    {fun, ts} = function_rest({:method, shorthand}, after_key, true)
+    object_next(ts, [{:init, key, {:gen, fun}} | acc])
   end
 
   defp object_literal([{:id, "async", _}, {k, _, false} | _] = [_ | rest], acc)

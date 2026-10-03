@@ -68,6 +68,13 @@ defmodule Browser.JS.Lexer do
     end
   end
 
+  # `#name`: a private name
+  defp lex(<<?#, c, _::binary>> = s, nl, acc)
+       when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
+    {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
+    lex(rest, false, [{:priv, name, nl} | acc])
+  end
+
   defp lex(s, nl, acc), do: punct(s, nl, acc)
 
   defp lex_ident(s, nl, acc) do
