@@ -8325,6 +8325,7 @@ language/expressions/arrow-function/non-strict.js
 language/expressions/arrow-function/object-destructuring-param-strict-body.js
 language/expressions/arrow-function/object-literal-return-requires-body-parens.js
 language/expressions/arrow-function/param-dflt-yield-id-non-strict.js
+language/expressions/arrow-function/param-dflt-yield-id-strict.js
 language/expressions/arrow-function/params-trailing-comma-multiple.js
 language/expressions/arrow-function/params-trailing-comma-single.js
 language/expressions/arrow-function/prototype-rules.js
@@ -8358,6 +8359,7 @@ language/expressions/arrow-function/syntax/arrowparameters-cover-rest-concisebod
 language/expressions/arrow-function/syntax/arrowparameters-cover-rest-lineterminator-concisebody-functionbody.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier-futurereservedword.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-no-yield.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-rest.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-arguments.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-eval.js
@@ -8392,6 +8394,7 @@ language/expressions/assignment/dstr/array-elem-init-let.js
 language/expressions/assignment/dstr/array-elem-init-order.js
 language/expressions/assignment/dstr/array-elem-init-simple-no-strict.js
 language/expressions/assignment/dstr/array-elem-init-yield-expr.js
+language/expressions/assignment/dstr/array-elem-init-yield-ident-invalid.js
 language/expressions/assignment/dstr/array-elem-init-yield-ident-valid.js
 language/expressions/assignment/dstr/array-elem-iter-get-err.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-skip.js
@@ -8410,6 +8413,7 @@ language/expressions/assignment/dstr/array-elem-nested-obj-undefined-hole.js
 language/expressions/assignment/dstr/array-elem-nested-obj-undefined-own.js
 language/expressions/assignment/dstr/array-elem-nested-obj-undefined.js
 language/expressions/assignment/dstr/array-elem-nested-obj-yield-expr.js
+language/expressions/assignment/dstr/array-elem-nested-obj-yield-ident-invalid.js
 language/expressions/assignment/dstr/array-elem-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/array-elem-nested-obj.js
 language/expressions/assignment/dstr/array-elem-put-const.js
@@ -8469,6 +8473,7 @@ language/expressions/assignment/dstr/array-rest-nested-obj-undefined-hole.js
 language/expressions/assignment/dstr/array-rest-nested-obj-undefined-own.js
 language/expressions/assignment/dstr/array-rest-nested-obj-undefined.js
 language/expressions/assignment/dstr/array-rest-nested-obj-yield-expr.js
+language/expressions/assignment/dstr/array-rest-nested-obj-yield-ident-invalid.js
 language/expressions/assignment/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/array-rest-nested-obj.js
 language/expressions/assignment/dstr/array-rest-put-const.js
@@ -8531,6 +8536,8 @@ language/expressions/assignment/dstr/obj-id-identifier-resolution-last.js
 language/expressions/assignment/dstr/obj-id-identifier-resolution-lone.js
 language/expressions/assignment/dstr/obj-id-identifier-resolution-middle.js
 language/expressions/assignment/dstr/obj-id-identifier-resolution-trlng.js
+language/expressions/assignment/dstr/obj-id-identifier-yield-expr.js
+language/expressions/assignment/dstr/obj-id-identifier-yield-ident-invalid.js
 language/expressions/assignment/dstr/obj-id-identifier-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-id-init-assignment-missing.js
 language/expressions/assignment/dstr/obj-id-init-assignment-null.js
@@ -8541,11 +8548,14 @@ language/expressions/assignment/dstr/obj-id-init-in.js
 language/expressions/assignment/dstr/obj-id-init-let.js
 language/expressions/assignment/dstr/obj-id-init-order.js
 language/expressions/assignment/dstr/obj-id-init-simple-no-strict.js
+language/expressions/assignment/dstr/obj-id-init-simple-strict.js
 language/expressions/assignment/dstr/obj-id-init-yield-expr.js
+language/expressions/assignment/dstr/obj-id-init-yield-ident-invalid.js
 language/expressions/assignment/dstr/obj-id-init-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-id-put-const.js
 language/expressions/assignment/dstr/obj-id-put-unresolvable-no-strict.js
 language/expressions/assignment/dstr/obj-id-simple-no-strict.js
+language/expressions/assignment/dstr/obj-id-simple-strict.js
 language/expressions/assignment/dstr/obj-prop-elem-init-assignment-missing.js
 language/expressions/assignment/dstr/obj-prop-elem-init-assignment-null.js
 language/expressions/assignment/dstr/obj-prop-elem-init-assignment-truthy.js
@@ -8554,6 +8564,7 @@ language/expressions/assignment/dstr/obj-prop-elem-init-evaluation.js
 language/expressions/assignment/dstr/obj-prop-elem-init-in.js
 language/expressions/assignment/dstr/obj-prop-elem-init-let.js
 language/expressions/assignment/dstr/obj-prop-elem-init-yield-expr.js
+language/expressions/assignment/dstr/obj-prop-elem-init-yield-ident-invalid.js
 language/expressions/assignment/dstr/obj-prop-elem-init-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-prop-elem-target-memberexpr-optchain-prop-ref-init.js
 language/expressions/assignment/dstr/obj-prop-elem-target-obj-literal-optchain-prop-ref-init.js
@@ -8570,6 +8581,7 @@ language/expressions/assignment/dstr/obj-prop-nested-array-null.js
 language/expressions/assignment/dstr/obj-prop-nested-array-undefined-own.js
 language/expressions/assignment/dstr/obj-prop-nested-array-undefined.js
 language/expressions/assignment/dstr/obj-prop-nested-array-yield-expr.js
+language/expressions/assignment/dstr/obj-prop-nested-array-yield-ident-invalid.js
 language/expressions/assignment/dstr/obj-prop-nested-array-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-prop-nested-array.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-invalid.js
@@ -8577,6 +8589,7 @@ language/expressions/assignment/dstr/obj-prop-nested-obj-null.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-undefined-own.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-undefined.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-yield-expr.js
+language/expressions/assignment/dstr/obj-prop-nested-obj-yield-ident-invalid.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-prop-nested-obj.js
 language/expressions/assignment/dstr/obj-prop-put-const.js
@@ -10440,6 +10453,7 @@ language/expressions/class/ident-name-method-def-var-escaped.js
 language/expressions/class/ident-name-method-def-void-escaped.js
 language/expressions/class/ident-name-method-def-while-escaped.js
 language/expressions/class/ident-name-method-def-with-escaped.js
+language/expressions/class/method-param-dflt-yield.js
 language/expressions/class/method-static/array-destructuring-param-strict-body.js
 language/expressions/class/method-static/dflt-params-abrupt.js
 language/expressions/class/method-static/dflt-params-arg-val-not-undefined.js
@@ -10496,6 +10510,7 @@ language/expressions/class/scope-static-gen-meth-paramsbody-var-close.js
 language/expressions/class/scope-static-meth-paramsbody-var-close.js
 language/expressions/class/scope-static-setter-paramsbody-var-close.js
 language/expressions/class/static-init-await-reference.js
+language/expressions/class/static-method-param-dflt-yield.js
 language/expressions/class/subclass-builtins/subclass-Array.js
 language/expressions/class/subclass-builtins/subclass-Boolean.js
 language/expressions/class/subclass-builtins/subclass-Date.js
@@ -11164,6 +11179,7 @@ language/expressions/function/named-no-strict-reassign-fn-name-in-body-in-eval.j
 language/expressions/function/object-destructuring-param-strict-body.js
 language/expressions/function/param-arguments-non-strict.js
 language/expressions/function/param-dflt-yield-non-strict.js
+language/expressions/function/param-dflt-yield-strict.js
 language/expressions/function/param-duplicated-non-strict.js
 language/expressions/function/param-duplicated-strict-1.js
 language/expressions/function/param-duplicated-strict-2.js
@@ -11378,6 +11394,7 @@ language/expressions/generators/has-instance.js
 language/expressions/generators/invoke-as-constructor.js
 language/expressions/generators/named-no-strict-reassign-fn-name-in-body-in-eval.js
 language/expressions/generators/named-yield-as-binding-identifier-escaped.js
+language/expressions/generators/named-yield-as-binding-identifier.js
 language/expressions/generators/named-yield-as-identifier-reference-escaped.js
 language/expressions/generators/named-yield-as-label-identifier-escaped.js
 language/expressions/generators/named-yield-identifier-non-strict.js
@@ -11411,12 +11428,14 @@ language/expressions/generators/static-init-await-binding.js
 language/expressions/generators/static-init-await-reference.js
 language/expressions/generators/use-strict-with-non-simple-param.js
 language/expressions/generators/yield-as-binding-identifier-escaped.js
+language/expressions/generators/yield-as-binding-identifier.js
 language/expressions/generators/yield-as-function-expression-binding-identifier.js
 language/expressions/generators/yield-as-identifier-in-nested-function.js
 language/expressions/generators/yield-as-identifier-reference-escaped.js
 language/expressions/generators/yield-as-label-identifier-escaped.js
 language/expressions/generators/yield-as-literal-property-name.js
 language/expressions/generators/yield-as-logical-or-expression.js
+language/expressions/generators/yield-as-parameter.js
 language/expressions/generators/yield-as-property-name.js
 language/expressions/generators/yield-as-statement.js
 language/expressions/generators/yield-as-yield-operand.js
@@ -11526,6 +11545,7 @@ language/expressions/in/S8.12.6_A2_T1.js
 language/expressions/in/S8.12.6_A2_T2.js
 language/expressions/in/S8.12.6_A3.js
 language/expressions/in/rhs-yield-absent-non-strict.js
+language/expressions/in/rhs-yield-absent-strict.js
 language/expressions/in/rhs-yield-present.js
 language/expressions/instanceof/S11.8.6_A2.1_T1.js
 language/expressions/instanceof/S11.8.6_A2.1_T2.js
@@ -12463,6 +12483,7 @@ language/expressions/object/method-definition/gen-meth-params-trailing-comma-sin
 language/expressions/object/method-definition/gen-meth-rest-param-strict-body.js
 language/expressions/object/method-definition/gen-meth-rest-params-trailing-comma-early-error.js
 language/expressions/object/method-definition/gen-yield-as-binding-identifier-escaped.js
+language/expressions/object/method-definition/gen-yield-as-binding-identifier.js
 language/expressions/object/method-definition/gen-yield-as-identifier-reference-escaped.js
 language/expressions/object/method-definition/gen-yield-as-label-identifier-escaped.js
 language/expressions/object/method-definition/gen-yield-identifier-non-strict.js
@@ -12475,6 +12496,7 @@ language/expressions/object/method-definition/generator-invoke-ctor.js
 language/expressions/object/method-definition/generator-invoke-fn-no-strict.js
 language/expressions/object/method-definition/generator-invoke-fn-strict.js
 language/expressions/object/method-definition/generator-no-yield.js
+language/expressions/object/method-definition/generator-param-id-yield.js
 language/expressions/object/method-definition/generator-param-redecl-const.js
 language/expressions/object/method-definition/generator-param-redecl-let.js
 language/expressions/object/method-definition/generator-params.js
@@ -12530,6 +12552,7 @@ language/expressions/object/method-definition/yield-as-generator-method-binding-
 language/expressions/object/method-definition/yield-as-identifier-in-nested-function.js
 language/expressions/object/method-definition/yield-as-literal-property-name.js
 language/expressions/object/method-definition/yield-as-logical-or-expression.js
+language/expressions/object/method-definition/yield-as-parameter.js
 language/expressions/object/method-definition/yield-as-property-name.js
 language/expressions/object/method-definition/yield-as-statement.js
 language/expressions/object/method-definition/yield-as-yield-operand.js
@@ -14171,6 +14194,7 @@ language/statements/class/definition/methods-gen-return.js
 language/statements/class/definition/methods-gen-yield-as-expression-with-rhs.js
 language/statements/class/definition/methods-gen-yield-as-expression-without-rhs.js
 language/statements/class/definition/methods-gen-yield-as-generator-method-binding-identifier.js
+language/statements/class/definition/methods-gen-yield-as-identifier-in-nested-function.js
 language/statements/class/definition/methods-gen-yield-as-literal-property-name.js
 language/statements/class/definition/methods-gen-yield-as-logical-or-expression.js
 language/statements/class/definition/methods-gen-yield-as-parameter.js
@@ -15115,6 +15139,7 @@ language/statements/class/ident-name-method-def-var-escaped.js
 language/statements/class/ident-name-method-def-void-escaped.js
 language/statements/class/ident-name-method-def-while-escaped.js
 language/statements/class/ident-name-method-def-with-escaped.js
+language/statements/class/method-param-yield.js
 language/statements/class/method-static/array-destructuring-param-strict-body.js
 language/statements/class/method-static/dflt-params-abrupt.js
 language/statements/class/method-static/dflt-params-arg-val-not-undefined.js
@@ -15189,6 +15214,7 @@ language/statements/class/static-init-scope-var-derived.js
 language/statements/class/static-init-sequence.js
 language/statements/class/static-init-statement-list-optional.js
 language/statements/class/static-init-super-property.js
+language/statements/class/static-method-param-yield.js
 language/statements/class/strict-mode/with.js
 language/statements/class/subclass-builtins/subclass-Array.js
 language/statements/class/subclass-builtins/subclass-Boolean.js
@@ -15478,14 +15504,22 @@ language/statements/for-in/decl-const.js
 language/statements/for-in/decl-fun.js
 language/statements/for-in/decl-gen.js
 language/statements/for-in/decl-let.js
+language/statements/for-in/dstr/array-elem-init-yield-ident-invalid.js
+language/statements/for-in/dstr/array-elem-nested-array-yield-ident-invalid.js
 language/statements/for-in/dstr/array-elem-nested-memberexpr-optchain-prop-ref-init.js
 language/statements/for-in/dstr/array-elem-nested-obj-yield-ident-invalid.js
 language/statements/for-in/dstr/array-elem-put-obj-literal-optchain-prop-ref-init.js
+language/statements/for-in/dstr/array-elem-target-yield-invalid.js
+language/statements/for-in/dstr/array-rest-nested-array-yield-ident-invalid.js
 language/statements/for-in/dstr/array-rest-nested-obj-yield-ident-invalid.js
+language/statements/for-in/dstr/array-rest-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-id-init-simple-strict.js
 language/statements/for-in/dstr/obj-id-init-yield-ident-invalid.js
+language/statements/for-in/dstr/obj-prop-elem-init-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-prop-elem-target-memberexpr-optchain-prop-ref-init.js
 language/statements/for-in/dstr/obj-prop-elem-target-obj-literal-optchain-prop-ref-init.js
+language/statements/for-in/dstr/obj-prop-elem-target-yield-ident-invalid.js
+language/statements/for-in/dstr/obj-prop-nested-array-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-prop-nested-obj-yield-ident-invalid.js
 language/statements/for-in/head-const-fresh-binding-per-iteration.js
 language/statements/for-in/head-decl-expr.js
@@ -15562,6 +15596,7 @@ language/statements/for-of/dstr/array-elem-init-in.js
 language/statements/for-of/dstr/array-elem-init-let.js
 language/statements/for-of/dstr/array-elem-init-order.js
 language/statements/for-of/dstr/array-elem-init-simple-no-strict.js
+language/statements/for-of/dstr/array-elem-init-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-init-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-iter-get-err.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-skip.js
@@ -15570,6 +15605,7 @@ language/statements/for-of/dstr/array-elem-nested-array-null.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined-hole.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined-own.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined.js
+language/statements/for-of/dstr/array-elem-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-nested-array.js
 language/statements/for-of/dstr/array-elem-nested-memberexpr-optchain-prop-ref-init.js
 language/statements/for-of/dstr/array-elem-nested-obj-null.js
@@ -15584,6 +15620,7 @@ language/statements/for-of/dstr/array-elem-put-obj-literal-optchain-prop-ref-ini
 language/statements/for-of/dstr/array-elem-put-unresolvable-no-strict.js
 language/statements/for-of/dstr/array-elem-target-identifier.js
 language/statements/for-of/dstr/array-elem-target-simple-no-strict.js
+language/statements/for-of/dstr/array-elem-target-yield-invalid.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-abpt.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js
 language/statements/for-of/dstr/array-elem-trlg-iter-get-err.js
@@ -15621,6 +15658,7 @@ language/statements/for-of/dstr/array-rest-nested-array-null.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-hole.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-own.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined.js
+language/statements/for-of/dstr/array-rest-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/array-rest-nested-array.js
 language/statements/for-of/dstr/array-rest-nested-obj-null.js
 language/statements/for-of/dstr/array-rest-nested-obj-undefined-hole.js
@@ -15631,6 +15669,7 @@ language/statements/for-of/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-rest-nested-obj.js
 language/statements/for-of/dstr/array-rest-put-const.js
 language/statements/for-of/dstr/array-rest-put-unresolvable-no-strict.js
+language/statements/for-of/dstr/array-rest-yield-ident-invalid.js
 language/statements/for-of/dstr/const-ary-init-iter-get-err.js
 language/statements/for-of/dstr/const-ary-init-iter-no-close.js
 language/statements/for-of/dstr/const-ary-name-iter-val.js
@@ -15842,9 +15881,11 @@ language/statements/for-of/dstr/obj-prop-elem-init-assignment-undef.js
 language/statements/for-of/dstr/obj-prop-elem-init-evaluation.js
 language/statements/for-of/dstr/obj-prop-elem-init-in.js
 language/statements/for-of/dstr/obj-prop-elem-init-let.js
+language/statements/for-of/dstr/obj-prop-elem-init-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-elem-init-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-elem-target-memberexpr-optchain-prop-ref-init.js
 language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-optchain-prop-ref-init.js
+language/statements/for-of/dstr/obj-prop-elem-target-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-identifier-resolution-first.js
 language/statements/for-of/dstr/obj-prop-identifier-resolution-last.js
 language/statements/for-of/dstr/obj-prop-identifier-resolution-lone.js
@@ -15855,6 +15896,7 @@ language/statements/for-of/dstr/obj-prop-name-evaluation.js
 language/statements/for-of/dstr/obj-prop-nested-array-null.js
 language/statements/for-of/dstr/obj-prop-nested-array-undefined-own.js
 language/statements/for-of/dstr/obj-prop-nested-array-undefined.js
+language/statements/for-of/dstr/obj-prop-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-nested-array-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-nested-array.js
 language/statements/for-of/dstr/obj-prop-nested-obj-null.js
@@ -16741,6 +16783,7 @@ language/statements/function/param-arguments-non-strict.js
 language/statements/function/param-arguments-strict-body.js
 language/statements/function/param-arguments-strict.js
 language/statements/function/param-dflt-yield-non-strict.js
+language/statements/function/param-dflt-yield-strict.js
 language/statements/function/param-duplicated-non-strict.js
 language/statements/function/param-duplicated-strict-1.js
 language/statements/function/param-duplicated-strict-2.js
@@ -16974,6 +17017,7 @@ language/statements/generators/scope-param-rest-elem-var-open.js
 language/statements/generators/scope-paramsbody-var-close.js
 language/statements/generators/use-strict-with-non-simple-param.js
 language/statements/generators/yield-as-binding-identifier-escaped.js
+language/statements/generators/yield-as-binding-identifier.js
 language/statements/generators/yield-as-function-expression-binding-identifier.js
 language/statements/generators/yield-as-generator-declaration-binding-identifier.js
 language/statements/generators/yield-as-identifier-in-nested-function.js
@@ -16981,6 +17025,7 @@ language/statements/generators/yield-as-identifier-reference-escaped.js
 language/statements/generators/yield-as-label-identifier-escaped.js
 language/statements/generators/yield-as-literal-property-name.js
 language/statements/generators/yield-as-logical-or-expression.js
+language/statements/generators/yield-as-parameter.js
 language/statements/generators/yield-as-property-name.js
 language/statements/generators/yield-as-statement.js
 language/statements/generators/yield-as-yield-operand.js

@@ -146,6 +146,9 @@ defmodule Browser.JS.Parser do
   defp check_strict_name(name) do
     if strict?() and (name in ["eval", "arguments"] or name in @strict_reserved),
       do: throw({:syntax, "unexpected #{name} in strict mode"})
+
+    if name == "yield" and Process.get(:js_generator, false),
+      do: throw({:syntax, "yield is reserved in generators"})
   end
 
   # the body of if, a loop, `with` or a label: a statement, never a declaration (a plain
@@ -719,6 +722,7 @@ defmodule Browser.JS.Parser do
 
         _ ->
           name = shorthand || throw({:syntax, "bad object pattern"})
+          check_strict_name(name)
           {pat, ts} = with_default({:id, name}, ts, true)
           {{key, pat}, ts}
       end
@@ -948,6 +952,7 @@ defmodule Browser.JS.Parser do
     if Process.get(:js_generator, false) do
       yield_expression(rest)
     else
+      if strict?(), do: throw({:syntax, "yield is reserved in strict mode"})
       assignment_plain(ts)
     end
   end
