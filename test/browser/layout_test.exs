@@ -3821,4 +3821,38 @@ defmodule Browser.LayoutTest do
     x = fn t -> Enum.find(items, &(&1[:text] == t)).x end
     assert x.("Store") >= x.("Over") + 4 * 8
   end
+
+  describe "ids on shrink-to-fit boxes" do
+    test "buttons with an id still take their content's width and share a line" do
+      page =
+        Browser.Page.build(
+          ~s|<body><button id="a">Generate BSN</button>\n<button id="b">Generate IBAN</button></body>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2)
+      [first, second] = Enum.filter(items, &(&1.type == :rect))
+
+      assert first.w < 200
+      assert second.w < 200
+      assert first.y == second.y
+      assert second.x > first.x + first.w
+    end
+
+    test "an inline-block holding a block with an id is not stretched, but the id is still found" do
+      page =
+        Browser.Page.build(
+          ~s|<body style="margin:0"><span style="display:inline-block"><div id="x">hi</div></span><span>after</span></body>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2)
+      hi = Enum.find(items, &(Map.get(&1, :text) == "hi"))
+      after_ = Enum.find(items, &(Map.get(&1, :text) == "after"))
+
+      assert after_.y == hi.y
+      assert after_.x < 100
+      assert Enum.any?(items, &(&1.type == :box and Map.get(&1, :anchor) == true))
+    end
+  end
 end
