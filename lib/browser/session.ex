@@ -36,6 +36,10 @@ defmodule Browser.Session do
       measure_bg: UI.measurer(ui, cache),
       # a layout running in the background after a resize: {ref, pid}
       layout_job: nil,
+      # the page a script's changes are being turned into (`start_page_job/2`), and the newest
+      # tree that arrived meanwhile
+      page_job: nil,
+      page_pending: nil,
       # the page's JavaScript runtime, when it has scripts
       js: nil,
       history: History.new(),
@@ -509,6 +513,43 @@ defmodule Browser.Session do
   end
 
   def handle_info({:layout_done, _stale, _, _, _, _, _, _}, state), do: {:noreply, state}
+
+  # a script's changes to the page are laid out
+  def handle_info(
+        {:page_done, ref, nonce, page, items, height, width, used},
+        %{page_job: {ref, _}} = state
+      ) do
+    pending = state.page_pending
+    state = %{state | page_job: nil, page_pending: nil}
+
+    state =
+      if nonce == state.nonce and state.page != nil do
+        focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
+        state = %{state | page: page, nodes: page.nodes, focus: focus, controls: %{}}
+        state = cancel_layout_job(state)
+        state = apply_layout(state, items, height, width, :full)
+
+        late = for {url, info} <- state.images, Map.get(used, url) != info, do: {url, info}
+
+        cond do
+          width != max(UI.client_width(state.ui), 200) ->
+            relayout(state)
+
+          Enum.any?(late, fn {url, info} -> image_layout_needed?(page, url, info) end) ->
+            schedule_image_layout(state)
+
+          true ->
+            state
+        end
+      else
+        state
+      end
+
+    state = if pending, do: start_page_job(state, pending), else: state
+    {:noreply, start_images(state)}
+  end
+
+  def handle_info({:page_done, _, _, _, _, _, _, _}, state), do: {:noreply, state}
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
@@ -1080,11 +1121,24 @@ defmodule Browser.Session do
     end
   end
 
-  defp stop_js(%{js: nil} = state), do: state
+  defp stop_js(state) do
+    state = cancel_page_job(state)
 
-  defp stop_js(%{js: pid} = state) do
-    Browser.JS.Runtime.stop(pid)
-    %{state | js: nil}
+    case state.js do
+      nil ->
+        state
+
+      pid ->
+        Browser.JS.Runtime.stop(pid)
+        %{state | js: nil}
+    end
+  end
+
+  defp cancel_page_job(%{page_job: nil} = state), do: %{state | page_pending: nil}
+
+  defp cancel_page_job(%{page_job: {_ref, pid}} = state) do
+    Process.exit(pid, :kill)
+    %{state | page_job: nil, page_pending: nil}
   end
 
   # the live values of the controls, which scripts read
@@ -1113,14 +1167,47 @@ defmodule Browser.Session do
   defp apply_js(state, reply) do
     state = Enum.reduce(reply.outbox, state, &js_effect/2)
 
-    if reply.dirty and reply.raw != nil and state.page != nil do
-      page = Page.from_raw(state.page, reply.raw, env(state))
-      focus = if Map.has_key?(page.forms.controls, state.focus), do: state.focus
-      start_layout_job(%{state | page: page, nodes: page.nodes, focus: focus, controls: %{}})
-    else
-      state
-    end
+    if reply.dirty and reply.raw != nil and state.page != nil,
+      do: start_page_job(state, reply.raw),
+      else: state
   end
+
+  # The changed tree is indexed, styled and laid out in a process of its own, so a script that
+  # keeps changing the page (an animation, a scroll listener) does not stop the window from
+  # scrolling and answering. Trees that arrive while it runs are replaced by the newest one.
+  defp start_page_job(%{page_job: nil} = state, raw) do
+    me = self()
+    ref = make_ref()
+    wx_env = :wx.get_env()
+    base = state.page
+    env = env(state)
+    nonce = state.nonce
+    width = max(UI.client_width(state.ui), 200)
+    view_h = UI.client_height(state.ui)
+    images = state.images
+    measure = state.measure_bg
+
+    pid =
+      :erlang.spawn_opt(
+        fn ->
+          :wx.set_env(wx_env)
+          page = Page.from_raw(base, raw, env)
+
+          {items, height} =
+            Layout.layout(page.nodes, width, measure, view_h,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+
+          send(me, {:page_done, ref, nonce, page, items, height, width, images})
+        end,
+        min_heap_size: 2_000_000
+      )
+
+    %{state | page_job: {ref, pid}, page_pending: nil}
+  end
+
+  defp start_page_job(state, raw), do: %{state | page_pending: raw}
 
   defp js_effect({:history, kind, url}, state) do
     history =
