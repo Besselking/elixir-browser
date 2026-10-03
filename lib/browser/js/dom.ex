@@ -100,7 +100,13 @@ defmodule Browser.JS.DOM do
       usp: 0,
       history_len: 1,
       ce: %{},
-      ce_done: MapSet.new()
+      ce_done: MapSet.new(),
+      # where the layout put the elements (`Browser.Nids.rects/2`), the window's scroll
+      # position, and the size of the page
+      rects: %{},
+      scroll: {0.0, 0.0},
+      content: {0.0, 0.0},
+      next_nid: Browser.Nids.max_nid(raw, -1) + 1
     })
 
     doc = new_node(%{kind: :document})
@@ -199,9 +205,25 @@ defmodule Browser.JS.DOM do
         {:text, ""}
 
       _ ->
-        attrs = export_attrs(n)
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}]
         kids = export_kids(n)
         {:element, n.tag, attrs, kids}
+    end
+  end
+
+  # the number the layout knows an element by; elements scripts made get one on their way out
+  defp ensure_nid(nid) do
+    n = node(nid)
+
+    case List.keyfind(n.internal, "@nid", 0) do
+      {_, v} ->
+        v
+
+      nil ->
+        v = st().next_nid
+        put_st(%{st() | next_nid: v + 1})
+        update_node_quiet(nid, &%{&1 | internal: &1.internal ++ [{"@nid", v}]})
+        v
     end
   end
 
@@ -251,6 +273,148 @@ defmodule Browser.JS.DOM do
   end
 
   defp export_kids(n), do: Enum.map(n.kids, &export/1)
+
+  # ── layout ─────────────────────────────────────────────────
+
+  @doc "What the layout knows: element boxes, scroll position, page size."
+  def set_layout(rects, sx, sy, content) do
+    put_st(%{st() | rects: rects, content: content})
+    set_scroll(sx, sy)
+  end
+
+  @doc "The window scrolled (or a script asked it to): the position scripts read."
+  def set_scroll(x, y) do
+    x = x * 1.0
+    y = y * 1.0
+    put_st(%{st() | scroll: {x, y}})
+
+    for {name, v} <- [{"scrollX", x}, {"pageXOffset", x}, {"scrollY", y}, {"pageYOffset", y}],
+        do: declare(global(), name, v)
+
+    :ok
+  end
+
+  # the box of an element in page coordinates; an element nothing was drawn for takes the
+  # top-left corner of its closest ancestor that has one
+  defp page_rect(nid) do
+    n = node(nid)
+
+    case List.keyfind(n.internal, "@nid", 0) do
+      {_, id} ->
+        case st().rects do
+          %{^id => {x, y, w, h}} -> {x, y, w, h}
+          _ -> inherited_rect(n.parent)
+        end
+
+      nil ->
+        inherited_rect(n.parent)
+    end
+  end
+
+  defp inherited_rect(nil), do: {0.0, 0.0, 0.0, 0.0}
+
+  defp inherited_rect(parent) do
+    case page_rect(parent) do
+      {x, y, _, _} -> {x, y, 0.0, 0.0}
+    end
+  end
+
+  defp scrolling_element?(n), do: n.kind == :document or n.tag in ["html", "body"]
+
+  defp metric(n, key) do
+    {x, y, w, h} = page_rect(n.id)
+    {sx, sy} = st().scroll
+    {cw, ch} = st().content
+
+    value =
+      case {key, scrolling_element?(n)} do
+        {"scrollTop", true} -> sy
+        {"scrollLeft", true} -> sx
+        {k, false} when k in ["scrollTop", "scrollLeft"] -> 0
+        {"scrollHeight", true} -> max(ch, st().height)
+        {"scrollWidth", true} -> max(cw, st().width)
+        {"clientHeight", true} -> st().height
+        {"clientWidth", true} -> st().width
+        {"offsetWidth", _} -> w
+        {"clientWidth", _} -> w
+        {"scrollWidth", _} -> w
+        {"offsetHeight", _} -> h
+        {"clientHeight", _} -> h
+        {"scrollHeight", _} -> h
+        {"offsetTop", _} -> y
+        {"offsetLeft", _} -> x
+        _ -> 0
+      end
+
+    value |> round() |> float()
+  end
+
+  defp rect_object(nid) do
+    {x, y, w, h} = page_rect(nid)
+    {sx, sy} = st().scroll
+    left = x - sx
+    top = y - sy
+
+    new_object(
+      for {k, v} <- [
+            {"x", left},
+            {"y", top},
+            {"width", w},
+            {"height", h},
+            {"top", top},
+            {"left", left},
+            {"right", left + w},
+            {"bottom", top + h}
+          ],
+          do: {k, v * 1.0}
+    )
+  end
+
+  # `scrollTo(x, y)` and `scrollTo({left, top, behavior})`; the session scrolls the page
+  defp scroll_args(args, relative?) do
+    {x0, y0} = st().scroll
+
+    {x, y} =
+      case args do
+        [{:obj, _} = o | _] ->
+          {opt_num(o, "left", relative?, x0), opt_num(o, "top", relative?, y0)}
+
+        [x, y | _] ->
+          {num_arg(x, relative?, x0), num_arg(y, relative?, y0)}
+
+        _ ->
+          {x0, y0}
+      end
+
+    scroll_to(x, y)
+  end
+
+  defp opt_num(o, key, relative?, current) do
+    case Interp.get(o, key) do
+      :undefined -> current
+      v -> num_arg(v, relative?, current)
+    end
+  end
+
+  defp num_arg(v, relative?, current) do
+    n = to_num_or_zero(v)
+    if relative?, do: current + n, else: n
+  end
+
+  defp to_num_or_zero(v) do
+    case to_num(v) do
+      n when is_number(n) -> n
+      _ -> 0
+    end
+  end
+
+  defp scroll_to(x, y) do
+    x = max(x, 0) * 1.0
+    y = max(y, 0) * 1.0
+    set_scroll(x, y)
+    out({:scroll_to, x, y})
+    :undefined
+  end
 
   # ── queries ────────────────────────────────────────────────
 
@@ -636,23 +800,9 @@ defmodule Browser.JS.DOM do
         {:ok,
          new_array(Enum.map(n.attrs, fn {k, v} -> new_object([{"name", k}, {"value", v}]) end))}
 
-      "offsetWidth" ->
-        {:ok, 0.0}
-
-      "offsetHeight" ->
-        {:ok, 0.0}
-
-      "clientWidth" ->
-        {:ok, 0.0}
-
-      "clientHeight" ->
-        {:ok, 0.0}
-
-      "scrollTop" ->
-        {:ok, 0.0}
-
-      "scrollLeft" ->
-        {:ok, 0.0}
+      k when k in ~w(offsetWidth offsetHeight offsetTop offsetLeft clientWidth clientHeight
+                     clientTop clientLeft scrollWidth scrollHeight scrollTop scrollLeft) ->
+        {:ok, metric(n, k)}
 
       "tabIndex" ->
         {:ok, -1.0}
@@ -728,7 +878,11 @@ defmodule Browser.JS.DOM do
         {:ok, wrap_or_null(find_tag(s.doc, "head"))}
 
       "documentElement" ->
-        {:ok, wrap_or_null(find_tag(s.doc, "html"))}
+        root =
+          find_tag(s.doc, "html") ||
+            Enum.find(node(s.doc).kids, &(node(&1).kind == :element))
+
+        {:ok, wrap_or_null(root)}
 
       "title" ->
         {:ok,
@@ -829,6 +983,15 @@ defmodule Browser.JS.DOM do
 
       "className" ->
         set_attr(nid, "class", to_str(v))
+        :ok
+
+      k when k in ["scrollTop", "scrollLeft"] ->
+        if scrolling_element?(n) do
+          {x, y} = st().scroll
+          num = to_num_or_zero(v)
+          if k == "scrollTop", do: scroll_to(x, num), else: scroll_to(num, y)
+        end
+
         :ok
 
       "innerHTML" ->
@@ -1412,17 +1575,11 @@ defmodule Browser.JS.DOM do
       "devicePixelRatio" ->
         {:ok, 1.0}
 
-      "scrollX" ->
-        {:ok, 0.0}
+      k when k in ["scrollX", "pageXOffset"] ->
+        {:ok, elem(s.scroll, 0)}
 
-      "scrollY" ->
-        {:ok, 0.0}
-
-      "pageXOffset" ->
-        {:ok, 0.0}
-
-      "pageYOffset" ->
-        {:ok, 0.0}
+      k when k in ["scrollY", "pageYOffset"] ->
+        {:ok, elem(s.scroll, 1)}
 
       "localStorage" ->
         {:ok, aux_host(:storage, :storage)}
@@ -1995,9 +2152,39 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    for name <- ~w(focus blur select scrollIntoView scrollTo scroll showModal close) do
+    for name <- ~w(focus blur select showModal close) do
       def_fn(p, name, fn _this, _ -> :undefined end)
     end
+
+    # scrolling an element's own contents is not supported; the page itself is
+    for name <- ~w(scrollTo scroll scrollBy) do
+      def_fn(p, name, fn _this, _ -> :undefined end)
+    end
+
+    def_fn(p, "scrollIntoView", fn this, args ->
+      {x, y, _, h} = page_rect(this_nid(this))
+      {_, sy} = st().scroll
+      view = st().height
+
+      block =
+        case arg(args, 0) do
+          {:obj, _} = o -> Interp.get(o, "block")
+          _ -> :undefined
+        end
+
+      target =
+        case block do
+          "end" -> y + h - view
+          "center" -> y + h / 2 - view / 2
+          "nearest" when y >= sy and y + h <= sy + view -> sy
+          "nearest" when y < sy -> y
+          "nearest" -> y + h - view
+          _ -> y
+        end
+
+      _ = x
+      scroll_to(elem(st().scroll, 0), target)
+    end)
 
     def_fn(p, "click", fn this, _ ->
       dispatch(this_nid(this), "click", %{})
@@ -2017,11 +2204,14 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "reset", fn _this, _ -> :undefined end)
 
-    def_fn(p, "getBoundingClientRect", fn _this, _ ->
-      new_object(for k <- ~w(x y width height top left right bottom), do: {k, 0.0})
-    end)
+    def_fn(p, "getBoundingClientRect", fn this, _ -> rect_object(this_nid(this)) end)
 
-    def_fn(p, "getClientRects", fn _this, _ -> new_array([]) end)
+    def_fn(p, "getClientRects", fn this, _ ->
+      case page_rect(this_nid(this)) do
+        {_, _, w, h} when w == 0 and h == 0 -> new_array([])
+        _ -> new_array([rect_object(this_nid(this))])
+      end
+    end)
 
     def_fn(p, "animate", fn _this, _ -> new_object([]) end)
   end
@@ -2255,9 +2445,13 @@ defmodule Browser.JS.DOM do
 
     win = proto({:dom, :window})
 
-    for name <- ~w(alert scrollTo scroll scrollBy focus blur print) do
+    for name <- ~w(alert focus blur print) do
       def_fn(win, name, fn _this, _ -> :undefined end)
     end
+
+    def_fn(win, "scrollTo", fn _this, args -> scroll_args(args, false) end)
+    def_fn(win, "scroll", fn _this, args -> scroll_args(args, false) end)
+    def_fn(win, "scrollBy", fn _this, args -> scroll_args(args, true) end)
   end
 
   defp history_state(args, kind) do
@@ -2593,8 +2787,12 @@ defmodule Browser.JS.DOM do
       declare(scope, name, v)
     end
 
-    for name <- ~w(alert scrollTo scroll scrollBy focus blur print) do
+    for name <- ~w(alert focus blur print) do
       declare(scope, name, native(name, fn _, _ -> :undefined end))
+    end
+
+    for {name, relative?} <- [{"scrollTo", false}, {"scroll", false}, {"scrollBy", true}] do
+      declare(scope, name, native(name, fn _, args -> scroll_args(args, relative?) end))
     end
 
     # `addEventListener(...)` without `window.` is the window's

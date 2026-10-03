@@ -1134,6 +1134,13 @@ defmodule Browser.Session do
   end
 
   defp js_effect({:navigate, url}, state), do: load(state, url, :push)
+
+  defp js_effect({:scroll_to, x, y}, state) do
+    state
+    |> scroll_x_by(round(x) - state.scroll_x)
+    |> scroll_by(round(y) - state.scroll)
+  end
+
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, n}, state) when n < 0, do: history_nav(state, &History.back/1)
   defp js_effect({:history_go, n}, state) when n > 0, do: history_nav(state, &History.forward/1)
@@ -1290,8 +1297,31 @@ defmodule Browser.Session do
     }
 
     state = scroll_x_by(state, 0)
-    scroll_by(state, 0, mode)
+    state = scroll_by(state, 0, mode)
+    send_layout(state)
+    state
   end
+
+  # the scripts learn where the elements are (and how far the page is scrolled)
+  defp send_layout(%{js: nil}), do: :ok
+  defp send_layout(%{page: nil}), do: :ok
+
+  defp send_layout(%{js: pid, page: page} = state) do
+    rects = Browser.Nids.rects(state.items, Browser.Nids.parents(page.pruned || []))
+
+    Browser.JS.Runtime.layout(
+      pid,
+      rects,
+      state.scroll_x,
+      state.scroll,
+      {state.content_w, state.height}
+    )
+  end
+
+  defp notify_scroll(%{js: nil}), do: :ok
+
+  defp notify_scroll(%{js: pid} = state),
+    do: Browser.JS.Runtime.scrolled(pid, state.scroll_x, state.scroll)
 
   # After typing into a single-line field only its text and caret move, so patch the
   # laid out items instead of laying out the whole page (see `Layout.patch_field/6`).
@@ -1420,7 +1450,9 @@ defmodule Browser.Session do
       state
     else
       UI.set_scroll_x(state.ui, sx)
-      %{state | scroll_x: sx}
+      state = %{state | scroll_x: sx}
+      notify_scroll(state)
+      state
     end
   end
 
@@ -1429,9 +1461,12 @@ defmodule Browser.Session do
 
   defp scroll_by(state, delta, mode \\ :full) do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
+    old = state.scroll
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
     UI.update(state.ui, state.items, state.sel_items, scroll, state.caret_on, mode)
-    %{state | scroll: scroll}
+    state = %{state | scroll: scroll}
+    if scroll != old, do: notify_scroll(state)
+    state
   end
 
   defp sync_buttons(state) do

@@ -43,6 +43,16 @@ defmodule Browser.JS.Runtime do
     )
   end
 
+  @doc """
+  Tells the page where its elements are (`Browser.Nids.rects/2`), where the window is scrolled to
+  and how big the page is, for `getBoundingClientRect` and the like.
+  """
+  def layout(pid, rects, scroll_x, scroll_y, content),
+    do: send(pid, {:layout, rects, scroll_x, scroll_y, content})
+
+  @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
+  def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
+
   def stop(pid), do: Process.exit(pid, :kill)
 
   def run_scripts(pid), do: call(pid, :run_scripts)
@@ -118,10 +128,40 @@ defmodule Browser.JS.Runtime do
         reply = handle(request)
         send(from, {ref, reply})
         loop(t0)
+
+      {:layout, rects, sx, sy, content} ->
+        DOM.set_layout(rects, sx, sy, content)
+        loop(t0)
+
+      {:scrolled, x, y} ->
+        # only the newest position matters when several have piled up
+        {x, y} = latest_scroll(x, y)
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        DOM.set_scroll(x, y)
+
+        guard(
+          fn -> DOM.dispatch(:window, "scroll", %{bubbles: false, cancelable: false}) end,
+          :ok
+        )
+
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
     after
       wait ->
         fire_due(t0)
         loop(t0)
+    end
+  end
+
+  defp latest_scroll(x, y) do
+    receive do
+      {:scrolled, x2, y2} -> latest_scroll(x2, y2)
+    after
+      0 -> {x, y}
     end
   end
 
@@ -140,9 +180,11 @@ defmodule Browser.JS.Runtime do
     Process.put(:js_now, elapsed(t0))
     reply = finish(%{})
 
-    if reply.dirty or reply.outbox != [],
-      do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+    if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
   end
+
+  # something the session should hear about
+  defp async?(reply), do: reply.dirty or reply.outbox != [] or reply.console != []
 
   defp while_due(now, deadline) do
     on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end

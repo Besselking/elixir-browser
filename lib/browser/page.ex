@@ -94,6 +94,7 @@ defmodule Browser.Page do
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
     {raw, forms} = body |> String.replace_invalid() |> HTML.parse() |> Forms.index()
+    raw = Browser.Nids.index(raw)
     base = base_href(raw, url)
     {raw, image_urls} = Images.index(raw, base)
 
@@ -266,6 +267,7 @@ defmodule Browser.Page do
   """
   def from_raw(%__MODULE__{} = page, raw, env) do
     {raw, forms} = Forms.index(raw)
+    raw = Browser.Nids.index(raw)
     base = base_href(raw, page.url)
     {raw, image_urls} = Images.index(raw, base)
 
