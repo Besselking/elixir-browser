@@ -32,3 +32,26 @@ jobs:
 
       - name: Test (warnings as errors)
         run: mix test --warnings-as-errors
+
+  # The JavaScript runtime against test262 (the ECMAScript conformance suite): a test that
+  # passed in test262.baseline must keep passing. `mix js.test262 --update` records progress.
+  test262:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+          version-type: loose
+
+      - name: Cache the test262 checkout
+        uses: actions/cache@v4
+        with:
+          path: .test262
+          key: test262-${{ github.run_id }}
+          restore-keys: test262-
+
+      - name: Run test262 and compare with the baseline
+        run: mix js.test262 --fetch --check

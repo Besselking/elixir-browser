@@ -23,3 +23,6 @@ erl_crash.dump
 browser-*.tar
 
 dist/
+
+# test262 checkout (mix js.test262 --fetch)
+/.test262/
