@@ -1145,6 +1145,14 @@ defmodule Browser.JS.Interp do
   @doc false
   def lookup_scoped(env, name), do: lookup_var(env, name)
 
+  # an unresolved name is an element with that id when the page has one, else a ReferenceError
+  defp named_global(name) do
+    case Browser.JS.DOM.named_element(name) do
+      {:ok, v} -> v
+      :error -> throw_error("ReferenceError", "#{name} is not defined")
+    end
+  end
+
   @doc false
   # the key a private name stands for in the class it is declared in
   def private_key(name, env) do
@@ -1793,7 +1801,7 @@ defmodule Browser.JS.Interp do
     case lookup_var(env, name) do
       {:ok, v} -> v
       :error when name == "arguments" -> lazy_arguments(env)
-      :error -> throw_error("ReferenceError", "#{name} is not defined")
+      :error -> named_global(name)
     end
   end
 
@@ -1879,8 +1887,13 @@ defmodule Browser.JS.Interp do
 
   def ev({:unary, "typeof", {:id, name}}, env) do
     case lookup_var(env, name) do
-      {:ok, v} -> typeof(v)
-      :error -> "undefined"
+      {:ok, v} ->
+        typeof(v)
+
+      :error ->
+        with {:ok, v} <- Browser.JS.DOM.named_element(name),
+             do: typeof(v),
+             else: (_ -> "undefined")
     end
   end
 

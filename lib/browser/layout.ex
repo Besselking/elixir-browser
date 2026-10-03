@@ -1692,7 +1692,8 @@ defmodule Browser.Layout do
       y: st.y + max(st.gap, 0) + min(st.ngap, 0),
       w: max(st.width - 2 * st.margin - st.left - st.right, 0),
       h: 0,
-      rr: 0
+      rr: 0,
+      anchor: true
     }
 
     %{st | items: [item | st.items], n: st.n + 1}
@@ -2695,11 +2696,13 @@ defmodule Browser.Layout do
   # box of a block-level control fills whatever width it is laid out at.
   defp fixed_width?(%{w: w}), do: w < @unbounded / 2
 
-  # right edge of the text, for shrink-to-fit
+  # right edge of the text, for shrink-to-fit; an anchor's box spans the width it was laid out at,
+  # which says nothing about what the content needs
   defp extent(items) do
     items
     |> Enum.filter(
-      &(&1.type in [:text, :image, :svg] or (&1.type == :box and fixed_width?(&1)) or
+      &(&1.type in [:text, :image, :svg] or
+          (&1.type == :box and fixed_width?(&1) and not Map.get(&1, :anchor, false)) or
           (&1.type == :bgimage and Map.get(&1, :sized, false)))
     )
     |> Enum.map(&(&1.x + &1.w + Map.get(&1, :rr, 0)))

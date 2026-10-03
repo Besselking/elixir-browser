@@ -579,4 +579,39 @@ defmodule Browser.JS.DOMTest do
       assert run_at.("http://a.test/") == ["false false undefined"]
     end
   end
+
+  describe "named access" do
+    test "an element's id is a global, after the real ones" do
+      r =
+        run(
+          ~S"""
+          log.textContent = "hi";
+          console.log(typeof log, log.tagName, window.log === log, typeof nothing);
+          var document2 = document;
+          console.log(typeof document2);
+          try { nothing; } catch (e) { console.log(e.name); }
+          """,
+          "<div id=log></div>"
+        )
+
+      assert logs(r) == ["object DIV true undefined", "object", "ReferenceError"]
+      assert errors(r) == []
+    end
+
+    test "a button that appends to the log by its global name" do
+      {pid, r} =
+        start(
+          ~S"""
+          <body><button id=go>Go</button><div id=log></div>
+          <script>go.addEventListener("click", function () { log.appendChild(document.createElement("p")); console.log(log.children.length); });</script></body>
+          """,
+          %{}
+        )
+
+      assert errors(r) == []
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert logs(reply) == ["1"]
+      assert errors(reply) == []
+    end
+  end
 end

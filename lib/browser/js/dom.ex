@@ -1690,10 +1690,26 @@ defmodule Browser.JS.DOM do
         # a global variable: `window.foo` is `foo`
         case Map.fetch(deref(global()).vars, key) do
           {:ok, v} -> {:ok, v}
-          :error -> :miss
+          :error -> named_element(key)
         end
     end
   end
+
+  @doc """
+  Named access on the window: an element with that `id` is a global (`<div id=log>` is `log`),
+  after every real global. `:error` when there is no such element or no document.
+  """
+  def named_element(name) when is_binary(name) do
+    with %{doc: doc} <- st(),
+         nid when not is_nil(nid) <-
+           Enum.find(elements(doc), &(get_attr(node(&1), "id") == name)) do
+      {:ok, wrap(nid)}
+    else
+      _ -> :error
+    end
+  end
+
+  def named_element(_), do: :error
 
   defp window_put(key, v) do
     if key == "location" do
