@@ -227,4 +227,18 @@ defmodule Browser.TextEditTest do
       assert TextEdit.word_range("", 0) == nil
     end
   end
+
+  describe "Enter in a single-line field" do
+    test "is left to the form whether or not something is selected or anchored" do
+      assert TextEdit.apply_sel({"1 2 +", 5}, nil, :enter, multiline: false) == :ignored
+      # an anchor at the caret (a click) is no selection
+      assert TextEdit.apply_sel({"1 2 +", 5}, 5, :enter, multiline: false) == :ignored
+      assert TextEdit.apply_sel({"1 2 +", 5}, 0, :enter, multiline: false) == :ignored
+    end
+
+    test "still breaks the line in a textarea, replacing a selection" do
+      assert TextEdit.apply_sel({"ab", 1}, nil, :enter, multiline: true) == {"a\nb", 2, nil}
+      assert {"\nb", 1, nil} = TextEdit.apply_sel({"ab", 1}, 0, :enter, multiline: true)
+    end
+  end
 end

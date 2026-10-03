@@ -82,6 +82,7 @@ defmodule Browser.TextEdit do
   """
   def apply_sel({value, caret}, anchor, key, opts \\ []) do
     range = selection(caret, anchor)
+    multiline? = Keyword.get(opts, :multiline, false)
 
     case key do
       {:select, dir} ->
@@ -110,6 +111,10 @@ defmodule Browser.TextEdit do
 
       {:char, _} = key when range != nil ->
         replace(value, range, key, opts)
+
+      # Enter in a single-line field submits its form, whatever is selected
+      :enter when not multiline? ->
+        :ignored
 
       :enter when range != nil ->
         replace(value, range, :enter, opts)
