@@ -26,35 +26,45 @@ defmodule Browser.JS.Interp do
 
   alias Browser.JS.Num
 
+  # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
+  defmacrop pget(key) do
+    quote do
+      case :erlang.get(unquote(key)) do
+        :undefined -> nil
+        v -> v
+      end
+    end
+  end
+
   @max_depth 1000
 
   # ── heap ───────────────────────────────────────────────────
 
   @doc "Starts a fresh heap in this process. `max_steps` bounds how much work a script may do."
   def init(max_steps) do
-    Process.put(:js_heap, %{})
-    Process.put(:js_next, 0)
-    Process.put(:js_steps, max_steps)
-    Process.put(:js_depth, 0)
-    Process.put(:js_last, :undefined)
-    Process.put(:js_fns, 0)
+    :erlang.put(:js_heap, %{})
+    :erlang.put(:js_next, 0)
+    :erlang.put(:js_steps, max_steps)
+    :erlang.put(:js_depth, 0)
+    :erlang.put(:js_last, :undefined)
+    :erlang.put(:js_fns, 0)
   end
 
   def alloc(obj) do
-    id = Process.get(:js_next)
-    Process.put(:js_next, id + 1)
-    Process.put(:js_heap, Map.put(Process.get(:js_heap), id, obj))
+    id = pget(:js_next)
+    :erlang.put(:js_next, id + 1)
+    :erlang.put(:js_heap, Map.put(pget(:js_heap), id, obj))
     id
   end
 
-  def deref(id), do: Map.fetch!(Process.get(:js_heap), id)
-  def store(id, obj), do: Process.put(:js_heap, Map.put(Process.get(:js_heap), id, obj))
+  def deref(id), do: Map.fetch!(pget(:js_heap), id)
+  def store(id, obj), do: :erlang.put(:js_heap, Map.put(pget(:js_heap), id, obj))
 
   @doc "The built-in prototype object registered under `name` (`:object`, `:array`, ...)."
   def proto(name), do: Process.get({:proto, name})
-  def put_proto(name, val), do: Process.put({:proto, name}, val)
+  def put_proto(name, val), do: :erlang.put({:proto, name}, val)
 
-  def global, do: Process.get(:js_global)
+  def global, do: pget(:js_global)
 
   @doc "A plain object with the given `{key, value}` pairs."
   def new_object(pairs \\ [], proto \\ nil) do
@@ -131,7 +141,7 @@ defmodule Browser.JS.Interp do
 
   def new_global_scope do
     id = new_scope(nil)
-    Process.put(:js_global, id)
+    :erlang.put(:js_global, id)
     id
   end
 
@@ -145,7 +155,7 @@ defmodule Browser.JS.Interp do
     })
   end
 
-  defp lookup_var(scope, name), do: lookup_var(scope, name, Process.get(:js_heap))
+  defp lookup_var(scope, name), do: lookup_var(scope, name, pget(:js_heap))
 
   # walks the scope chain over one read of the heap
   defp lookup_var(nil, _, _), do: :error
@@ -170,7 +180,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp assign_var(scope, name, val), do: assign_var(scope, name, val, Process.get(:js_heap))
+  defp assign_var(scope, name, val), do: assign_var(scope, name, val, pget(:js_heap))
 
   defp assign_var(scope, name, val, heap) do
     s = Map.fetch!(heap, scope)
@@ -180,7 +190,7 @@ defmodule Browser.JS.Interp do
         if MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
 
-        Process.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+        :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
         put(s.with, name, val)
@@ -1043,9 +1053,9 @@ defmodule Browser.JS.Interp do
 
   @doc false
   def tick do
-    n = Process.get(:js_steps) - 1
+    n = pget(:js_steps) - 1
     if n < 0, do: throw(:js_limit)
-    Process.put(:js_steps, n)
+    :erlang.put(:js_steps, n)
   end
 
   @doc false
@@ -1072,8 +1082,8 @@ defmodule Browser.JS.Interp do
   # Drops a scope from the heap once its code has run, unless a closure was created since
   # `fns` was read (`make_fn` counts them): only a closure can keep a scope alive past its code.
   defp free_scope(scope, fns) do
-    if Process.get(:js_fns) == fns,
-      do: Process.put(:js_heap, Map.delete(Process.get(:js_heap), scope))
+    if pget(:js_fns) == fns,
+      do: :erlang.put(:js_heap, Map.delete(pget(:js_heap), scope))
 
     :ok
   end
@@ -1083,7 +1093,7 @@ defmodule Browser.JS.Interp do
   # scope is garbage on return: dropping it keeps the heap from growing with every call.
   defp run_closure(id, c, this, args) do
     c = with_hoist(id, c)
-    before = Process.get(:js_fns)
+    before = pget(:js_fns)
     {result, scope} = run_closure_scope(c, this, args, [])
     free_scope(scope, before)
     result
@@ -1093,11 +1103,11 @@ defmodule Browser.JS.Interp do
   # runs a function body, also handing back its scope (a constructor reads `this` from it);
   # `extra` are more variables for the scope
   def run_closure_scope(c, this, args, extra) do
-    depth = Process.get(:js_depth)
+    depth = pget(:js_depth)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
-    Process.put(:js_depth, depth + 1)
+    :erlang.put(:js_depth, depth + 1)
     stack = Process.get(:js_stack, [])
-    Process.put(:js_stack, [c.name | stack])
+    :erlang.put(:js_stack, [c.name | stack])
 
     try do
       vars =
@@ -1134,8 +1144,8 @@ defmodule Browser.JS.Interp do
 
       {result, scope}
     after
-      Process.put(:js_depth, depth)
-      Process.put(:js_stack, stack)
+      :erlang.put(:js_depth, depth)
+      :erlang.put(:js_stack, stack)
     end
   end
 
@@ -1229,7 +1239,7 @@ defmodule Browser.JS.Interp do
         env
       end
 
-    Process.put(:js_fns, Process.get(:js_fns) + 1)
+    :erlang.put(:js_fns, pget(:js_fns) + 1)
 
     fun =
       {:obj,
@@ -1317,10 +1327,10 @@ defmodule Browser.JS.Interp do
   defp hoisted_names(stmts) do
     key = {:js_hoist, stmts}
 
-    case Process.get(key) do
+    case pget(key) do
       nil ->
         names = stmts |> var_names([]) |> Enum.uniq()
-        Process.put(key, names)
+        :erlang.put(key, names)
         names
 
       names ->
@@ -1469,7 +1479,7 @@ defmodule Browser.JS.Interp do
   defp exec(stmt, env), do: exec(stmt, env, [])
 
   defp exec({:expr, e}, env, _) do
-    Process.put(:js_last, ev(e, env))
+    :erlang.put(:js_last, ev(e, env))
     :ok
   end
 
@@ -1507,7 +1517,7 @@ defmodule Browser.JS.Interp do
   defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
-    fns = Process.get(:js_fns)
+    fns = pget(:js_fns)
     scope = new_scope(env)
     hoist_functions(stmts, scope)
     result = exec_list(stmts, scope)
@@ -1555,7 +1565,7 @@ defmodule Browser.JS.Interp do
     end
 
     first = if per_iteration?, do: copy_scope(loop_env, env), else: loop_env
-    for_loop(test, update, body, env, first, per_iteration?, labels, Process.get(:js_fns))
+    for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
   end
 
   defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
@@ -1576,7 +1586,7 @@ defmodule Browser.JS.Interp do
       {:list, items} ->
         Enum.reduce_while(items, :ok, fn item, _ ->
           tick()
-          fns = Process.get(:js_fns)
+          fns = pget(:js_fns)
           iter_env = new_scope(env)
           bind(pat, item, iter_env, mode)
           outcome = run_body(body, iter_env, labels)
@@ -1653,7 +1663,7 @@ defmodule Browser.JS.Interp do
         :next ->
           next_env = if copy?, do: copy_scope(iter_env, env), else: iter_env
           if copy?, do: free_scope(iter_env, fns)
-          next_fns = Process.get(:js_fns)
+          next_fns = pget(:js_fns)
           if update, do: ev(update, next_env)
           for_loop(test, update, body, env, next_env, copy?, labels, next_fns)
       end
@@ -1783,7 +1793,7 @@ defmodule Browser.JS.Interp do
     spec = to_str(ev(e, env))
     p = Browser.JS.Promise.new()
 
-    case Process.get(:js_import) do
+    case pget(:js_import) do
       nil ->
         Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
 
@@ -2061,6 +2071,15 @@ defmodule Browser.JS.Interp do
   end
 
   # ── operators ──────────────────────────────────────────────
+
+  # plain numbers (never NaN or infinite: those are atoms) skip the conversions
+  def binop("+", a, b) when is_float(a) and is_float(b), do: Num.add(a, b)
+  def binop("-", a, b) when is_float(a) and is_float(b), do: Num.add(a, -b)
+  def binop("*", a, b) when is_float(a) and is_float(b), do: Num.mul(a, b)
+  def binop("<", a, b) when is_float(a) and is_float(b), do: a < b
+  def binop(">", a, b) when is_float(a) and is_float(b), do: a > b
+  def binop("<=", a, b) when is_float(a) and is_float(b), do: a <= b
+  def binop(">=", a, b) when is_float(a) and is_float(b), do: a >= b
 
   def binop("+", a, b) do
     a = to_primitive(a, "default")
