@@ -306,8 +306,14 @@ defmodule Browser.JS.Interp do
         case index(key) do
           i when is_integer(i) ->
             case o.items do
-              %{^i => v} -> v
-              _ -> lookup(o, to_key(key), {:obj, id})
+              %{^i => {:accessor, g, _}} ->
+                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+
+              %{^i => v} ->
+                v
+
+              _ ->
+                lookup(o, to_key(key), {:obj, id})
             end
 
           nil ->
@@ -430,11 +436,25 @@ defmodule Browser.JS.Interp do
         case index(key) do
           i when is_integer(i) ->
             cond do
-              Map.get(o, :frozen, false) -> :ok
-              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) -> :ok
-              i >= o.len and Map.get(o, :len_ro, false) -> :ok
-              not writable?(o, i) -> :ok
-              true -> store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+              match?(%{^i => {:accessor, _, _}}, o.items) ->
+                {:accessor, _, setter} = o.items[i]
+                if function?(setter), do: call(setter, {:obj, id}, [v])
+                :ok
+
+              Map.get(o, :frozen, false) ->
+                :ok
+
+              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) ->
+                :ok
+
+              i >= o.len and Map.get(o, :len_ro, false) ->
+                :ok
+
+              not writable?(o, i) ->
+                :ok
+
+              true ->
+                store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
             end
 
           nil ->
@@ -636,7 +656,13 @@ defmodule Browser.JS.Interp do
 
   def array_list({:obj, id}) do
     o = deref(id)
-    for i <- 0..(o.len - 1)//1, do: Map.get(o.items, i, :undefined)
+
+    for i <- 0..(o.len - 1)//1 do
+      case Map.get(o.items, i, :undefined) do
+        {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+        v -> v
+      end
+    end
   end
 
   def set_array_list({:obj, id}, list) do

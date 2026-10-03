@@ -72,6 +72,33 @@ defmodule Browser.JS.Builtins do
     end
   end
 
+  defp class_tag(:undefined), do: "Undefined"
+  defp class_tag(:null), do: "Null"
+  defp class_tag(v) when is_binary(v), do: "String"
+  defp class_tag(v) when is_boolean(v), do: "Boolean"
+  defp class_tag({:symbol, _, _}), do: "Symbol"
+  defp class_tag(v) when not is_tuple(v), do: "Number"
+
+  defp class_tag({:obj, id} = o) do
+    case deref(id) do
+      %{class: :array} -> "Array"
+      %{class: :function} -> "Function"
+      %{class: :regexp} -> "RegExp"
+      %{date: _} -> "Date"
+      %{prim: p} when is_binary(p) -> "String"
+      %{prim: p} when is_boolean(p) -> "Boolean"
+      %{prim: _} -> "Number"
+      _ -> if error_object?(o), do: "Error", else: "Object"
+    end
+  end
+
+  defp error_object?({:obj, id}), do: inherits_error?(deref(id).proto)
+
+  defp inherits_error?({:obj, id} = p),
+    do: p == proto({:error, "Error"}) or inherits_error?(deref(id).proto)
+
+  defp inherits_error?(_), do: false
+
   defp has_own?(o, key) do
     if nullish?(o), do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
@@ -107,7 +134,7 @@ defmodule Browser.JS.Builtins do
       has_own?(this, to_key(arg(args, 0)))
     end)
 
-    def_fn(p, "toString", fn _, _ -> "[object Object]" end)
+    def_fn(p, "toString", fn this, _ -> "[object #{class_tag(this)}]" end)
     def_fn(p, "valueOf", fn this, _ -> this end)
   end
 
@@ -759,7 +786,7 @@ defmodule Browser.JS.Builtins do
 
   defp number_methods(p) do
     def_fn(p, "toString", fn this, args ->
-      this = unwrap(this)
+      this = this_prim(this, :number, "Number.prototype.toString")
 
       case arg(args, 0) do
         :undefined ->
@@ -774,7 +801,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(p, "toFixed", fn this, args ->
-      this = unwrap(this)
+      this = this_prim(this, :number, "Number.prototype.toFixed")
       d = to_int(arg(args, 0))
 
       if is_number(this) and abs(this) < 1.0e21,
@@ -782,9 +809,15 @@ defmodule Browser.JS.Builtins do
         else: Num.to_string(this)
     end)
 
-    def_fn(p, "valueOf", fn this, _ -> unwrap(this) end)
-    def_fn(proto(:boolean), "toString", fn this, _ -> this |> unwrap() |> to_str() end)
-    def_fn(proto(:boolean), "valueOf", fn this, _ -> unwrap(this) end)
+    def_fn(p, "valueOf", fn this, _ -> this_prim(this, :number, "Number.prototype.valueOf") end)
+
+    def_fn(proto(:boolean), "toString", fn this, _ ->
+      this |> this_prim(:boolean, "Boolean.prototype.toString") |> to_str()
+    end)
+
+    def_fn(proto(:boolean), "valueOf", fn this, _ ->
+      this_prim(this, :boolean, "Boolean.prototype.valueOf")
+    end)
   end
 
   # `new String(x)`, `new Number(x)`, `new Boolean(x)`: the constructor was handed a fresh object
@@ -810,6 +843,22 @@ defmodule Browser.JS.Builtins do
 
   defp unwrap(v), do: v
 
+  # the primitive of a String/Number/Boolean `this`, or a TypeError
+  defp this_prim(this, kind, method) do
+    v = unwrap(this)
+
+    ok? =
+      case kind do
+        :string -> is_binary(v)
+        :boolean -> is_boolean(v)
+        :number -> is_number(v) or v in [:nan, :infinity, :neg_infinity]
+      end
+
+    if ok?,
+      do: v,
+      else: throw_error("TypeError", "#{method} requires that 'this' be a #{kind}")
+  end
+
   # String.prototype methods take any `this` that is not null or undefined, as a string
   defp str_fn(obj, name, fun) do
     def_fn(obj, name, fn this, args ->
@@ -820,8 +869,8 @@ defmodule Browser.JS.Builtins do
   end
 
   defp string_methods(p) do
-    def_fn(p, "toString", fn this, _ -> unwrap(this) end)
-    def_fn(p, "valueOf", fn this, _ -> unwrap(this) end)
+    def_fn(p, "toString", fn this, _ -> this_prim(this, :string, "String.prototype.toString") end)
+    def_fn(p, "valueOf", fn this, _ -> this_prim(this, :string, "String.prototype.valueOf") end)
     str_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
     str_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
     str_fn(p, "trim", fn this, _ -> String.trim(this) end)
@@ -1444,9 +1493,7 @@ defmodule Browser.JS.Builtins do
       end)
     )
 
-    date = new_object()
-    declare(scope, "Date", date)
-    def_fn(date, "now", fn _, _ -> float(System.system_time(:millisecond)) end)
+    Browser.JS.Date.install(scope)
 
     perf = new_object()
     declare(scope, "performance", perf)
