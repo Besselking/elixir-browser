@@ -405,6 +405,8 @@ css/CSS2/floats-clear/floats-119.xht
 css/CSS2/floats-clear/floats-135.xht
 css/CSS2/floats-clear/floats-139.xht
 css/CSS2/floats-clear/floats-149.xht
+css/CSS2/floats-clear/floats-bfc-001.xht
+css/CSS2/floats-clear/floats-bfc-002.xht
 css/CSS2/floats-clear/margin-collapse-clear-016.xht
 css/CSS2/floats-clear/margin-collapse-clear-017.xht
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block-after-margin.html
@@ -431,11 +433,16 @@ css/CSS2/floats/floats-rule7-outside-left-001.xht
 css/CSS2/floats/floats-rule7-outside-right-001.xht
 css/CSS2/floats/floats-wrap-bfc-002-left-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-002-right-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-008.html
 css/CSS2/floats/floats-wrap-bfc-outside-001.xht
 css/CSS2/floats/floats-wrap-bfc-with-margin-006.tentative.html
+css/CSS2/floats/floats-wrap-bfc-with-margin-007.tentative.html
+css/CSS2/floats/floats-wrap-top-below-bfc-001l.xht
+css/CSS2/floats/floats-wrap-top-below-bfc-001r.xht
 css/CSS2/floats/floats-wrap-top-below-inline-001l.xht
 css/CSS2/floats/floats-wrap-top-below-inline-001r.xht
 css/CSS2/floats/negative-block-margin-pushing-float-out-of-block-formatting-context.html
+css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-min-width.html
 css/CSS2/floats/overhanging-float-paint-order.html
 css/CSS2/floats/zero-available-space-float-positioning.html

@@ -2924,6 +2924,25 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "cccc").y == word_at(items, "aaaa").y
     end
 
+    test "a box with overflow set narrows to the room beside a float" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:60px;height:50px"></div><div style="overflow:hidden;background:#ccc"><p>aaaa</p></div>|
+        )
+
+      assert %{x: 64, w: 140} = box_of(items)
+      assert word_at(items, "aaaa").x == 64
+    end
+
+    test "a box with overflow set and a width too big for the room beside a float goes below it" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:60px;height:50px"></div><div style="overflow:hidden;width:180px;height:10px;background:#ccc"></div>|
+        )
+
+      assert %{x: 4, y: 50, w: 180} = box_of(items)
+    end
+
     test "text goes back to the full width once the float ends" do
       {items, _} =
         fl(
