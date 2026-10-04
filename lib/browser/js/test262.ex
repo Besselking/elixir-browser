@@ -394,11 +394,13 @@ defmodule Browser.JS.Test262 do
   `%{"path" => :pass | {:fail, reason} | {:skip, reason}}`.
 
   Options: `:timeout` (ms per test), `:max_steps`, `:skip_features`, `:jobs`, `:on_result`
-  (called with `{path, result}` as results come in).
+  (called with `{path, result}` as results come in), `:on_time` (called with `path` and the
+  microseconds the test took, from the worker process).
   """
   def run(root, files, opts \\ []) do
     jobs = Keyword.get(opts, :jobs, System.schedulers_online())
     on_result = Keyword.get(opts, :on_result, fn _ -> :ok end)
+    on_time = Keyword.get(opts, :on_time)
 
     # the harness files that any test will want, parsed once
     harness = load_harness(root, harness_universe(root))
@@ -406,6 +408,7 @@ defmodule Browser.JS.Test262 do
     files
     |> Task.async_stream(
       fn rel ->
+        started = System.monotonic_time(:microsecond)
         path = Path.join([root, "test", rel])
         source = File.read!(path)
         meta = parse_meta(source)
@@ -423,6 +426,7 @@ defmodule Browser.JS.Test262 do
                 else: {:fail, "harness file #{hd(missing)} not in the checkout"}
           end
 
+        if on_time, do: on_time.(rel, System.monotonic_time(:microsecond) - started)
         {rel, result}
       end,
       max_concurrency: jobs,

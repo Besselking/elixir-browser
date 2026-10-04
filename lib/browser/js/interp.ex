@@ -802,8 +802,8 @@ defmodule Browser.JS.Interp do
         attrs = Map.get(o, :attrs, %{})
 
         for(
-          i <- 0..(o.len - 1)//1,
-          Map.has_key?(o.items, i),
+          i <- o.items |> Map.keys() |> Enum.sort(),
+          i < o.len,
           Map.get(Map.get(attrs, i, %{}), :e, true),
           do: Integer.to_string(i)
         ) ++ base
@@ -1722,7 +1722,12 @@ defmodule Browser.JS.Interp do
   defp bind({:default, pat, e}, v, env, mode),
     do: bind(pat, if(v == :undefined, do: ev_named(e, env, pat), else: v), env, mode)
 
-  defp bind({:arrpat, elems}, v, env, mode), do: bind_elems(elems, iterate(v), env, mode)
+  defp bind({:arrpat, elems}, v, env, mode) do
+    case iter_source(v) do
+      {:list, list} -> bind_elems(elems, list, env, mode)
+      {:proto, it, next} -> bind_proto(elems, it, next, env, mode, false)
+    end
+  end
 
   defp bind({:objpat, props, rest}, v, env, mode) do
     if nullish?(v),
@@ -1757,6 +1762,42 @@ defmodule Browser.JS.Interp do
 
     if p != nil, do: bind(p, v, env, mode)
     bind_elems(ps, rest, env, mode)
+  end
+
+  # an iterator object is pulled from one value per element, so that an endless one works
+  # and the iterator is closed when the pattern leaves it before it is done
+  defp bind_proto([], it, _next, _env, _mode, done?) do
+    unless done?, do: iter_close(it, false)
+    :ok
+  end
+
+  defp bind_proto([{:rest, pat}], it, next, env, mode, done?) do
+    list = if done?, do: [], else: pull(it, next, [])
+    bind(pat, new_array(list), env, mode)
+  end
+
+  defp bind_proto([p | ps], it, next, env, mode, done?) do
+    {v, done?} =
+      if done? do
+        {:undefined, true}
+      else
+        case iter_step(it, next) do
+          :done -> {:undefined, true}
+          {:ok, item} -> {item, false}
+        end
+      end
+
+    if p != nil do
+      try do
+        bind(p, v, env, mode)
+      catch
+        kind, e ->
+          unless done?, do: iter_close(it, true)
+          :erlang.raise(kind, e, __STACKTRACE__)
+      end
+    end
+
+    bind_proto(ps, it, next, env, mode, done?)
   end
 
   defp bind_name(:let, env, name, v), do: declare(env, name, v)

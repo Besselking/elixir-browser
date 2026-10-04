@@ -550,11 +550,13 @@ defmodule Browser.JS.Collections do
 
     def_fn(r, "setPrototypeOf", fn _, args ->
       case arg(args, 0) do
-        {:obj, id} ->
-          o = deref(id)
+        {:obj, _} = o ->
           p = arg(args, 1)
-          store(id, %{o | proto: if(p == :null, do: nil, else: p)})
-          true
+
+          unless p == :null or match?({:obj, _}, p),
+            do: throw_error("TypeError", "Object prototype may only be an Object or null")
+
+          Props.set_prototype_of(o, p) == true
 
         _ ->
           throw_error("TypeError", "Reflect.setPrototypeOf called on non-object")
