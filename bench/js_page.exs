@@ -40,4 +40,7 @@ for round <- 1..5 do
   IO.puts("flush #{round}: #{System.monotonic_time(:millisecond) - t} ms, process #{mem.()} MB")
 end
 
+snap = Runtime.snapshot(pid)
+dump = inspect(snap.raw, limit: :infinity, printable_limit: :infinity)
+IO.puts("astro islands still unhydrated (ssr attribute): #{length(Regex.scan(~r/"ssr"/, dump))}, DOM dump #{div(byte_size(dump), 1000)} KB")
 Runtime.stop(pid)

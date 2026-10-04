@@ -28,7 +28,7 @@ defmodule Browser.JS.DOM do
 
   defp put_node(n) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), dirty: true})
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), dirty: true, rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -53,7 +53,7 @@ defmodule Browser.JS.DOM do
         fields
       )
 
-    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n)})
+    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
     id
   end
 
@@ -86,6 +86,7 @@ defmodule Browser.JS.DOM do
   def init(raw, info) do
     put_st(%{
       nodes: %{},
+      rev: 0,
       next: 1,
       wrappers: %{},
       listeners: %{},
@@ -122,7 +123,7 @@ defmodule Browser.JS.DOM do
 
   defp update_node_quiet(nid, fun) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid)))})
+    put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid))), rev: s.rev + 1})
   end
 
   defp build({:text, t}, parent), do: new_node(%{kind: :text, text: t, parent: parent})
@@ -426,6 +427,21 @@ defmodule Browser.JS.DOM do
   end
 
   defp elements(nid), do: Enum.filter(descendants(nid), &(node(&1).kind == :element))
+
+  # the first element below `nid` in document order that `pred` accepts, without building the
+  # list of every descendant
+  defp find_element(nid, pred) do
+    Enum.find_value(node(nid).kids, fn k ->
+      n = node(k)
+
+      cond do
+        n.kind == :element and pred.(n) -> k
+        true -> find_element(k, pred)
+      end
+    end)
+  end
+
+  defp element_by_id(doc, id), do: find_element(doc, &(get_attr(&1, "id") == id))
 
   @doc "The node id of the n-th `<form>` (the number the page's form index uses), or nil."
   def form_node(fid), do: Enum.at(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), fid)
@@ -1707,8 +1723,7 @@ defmodule Browser.JS.DOM do
   """
   def named_element(name) when is_binary(name) do
     with %{doc: doc} <- st(),
-         nid when not is_nil(nid) <-
-           Enum.find(elements(doc), &(get_attr(node(&1), "id") == name)) do
+         nid when not is_nil(nid) <- named_nid(doc, name) do
       {:ok, wrap(nid)}
     else
       _ -> :error
@@ -1716,6 +1731,40 @@ defmodule Browser.JS.DOM do
   end
 
   def named_element(_), do: :error
+
+  # Scripts (and the runtime's own shims) probe undeclared globals (`typeof Foo`, `window.Foo`)
+  # over and over: one pass over the tree makes an index of the ids, kept until the tree changes.
+  defp named_nid(doc, name) do
+    rev = st().rev
+
+    index =
+      case Process.get(:dom_ids) do
+        {^rev, m} ->
+          m
+
+        _ ->
+          m = collect_ids(doc, %{})
+          Process.put(:dom_ids, {rev, m})
+          m
+      end
+
+    Map.get(index, name)
+  end
+
+  # id => the first element (in document order) with it
+  defp collect_ids(nid, acc) do
+    Enum.reduce(node(nid).kids, acc, fn k, acc ->
+      n = node(k)
+
+      acc =
+        case n.kind == :element and get_attr(n, "id") do
+          id when is_binary(id) -> Map.put_new(acc, id, k)
+          _ -> acc
+        end
+
+      collect_ids(k, acc)
+    end)
+  end
 
   defp window_put(key, v) do
     if key == "location" do
@@ -2403,7 +2452,7 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "getElementById", fn _this, args ->
       id = to_str(arg(args, 0))
-      wrap_or_null(Enum.find(elements(st().doc), &(get_attr(node(&1), "id") == id)))
+      wrap_or_null(element_by_id(st().doc, id))
     end)
 
     def_fn(p, "createElement", fn _this, args ->
