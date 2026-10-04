@@ -273,9 +273,12 @@ css/CSS2/floats-clear/floats-139.xht
 css/CSS2/floats-clear/margin-collapse-clear-017.xht
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block-after-margin.html
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block.html
+css/CSS2/floats/float-in-inline-001.html
+css/CSS2/floats/float-in-inline-002.html
 css/CSS2/floats/float-in-nested-multicol-001.html
 css/CSS2/floats/float-nowrap-1.html
 css/CSS2/floats/float-nowrap-4.html
+css/CSS2/floats/float-nowrap-6.html
 css/CSS2/floats/float-table-align-left-quirk.html
 css/CSS2/floats/float-with-absolutely-positioned-child-with-static-inset.html
 css/CSS2/floats/floats-in-table-caption-001.html
@@ -498,6 +501,7 @@ css/CSS2/text/text-decoration-applies-to-015.xht
 css/CSS2/text/text-indent-004.xht
 css/CSS2/text/text-indent-005.xht
 css/CSS2/text/text-indent-006.xht
+css/CSS2/text/text-indent-011.xht
 css/CSS2/text/text-indent-016.xht
 css/CSS2/text/text-indent-017.xht
 css/CSS2/text/text-indent-018.xht
@@ -542,6 +546,7 @@ css/CSS2/text/text-indent-wrap-001-ref-inline-margin.xht
 css/CSS2/text/text-transform-004.xht
 css/CSS2/text/text-transform-unicase-001.xht
 css/CSS2/text/white-space-004.xht
+css/CSS2/text/white-space-applies-to-003.xht
 css/CSS2/text/white-space-collapsing-003.xht
 css/CSS2/text/white-space-p-element-001.xht
 css/CSS2/text/white-space-pre-element-001.xht
@@ -1090,6 +1095,8 @@ css/css-sizing/intrinsic-size-min-content-box-sizing.html
 css/css-sizing/slice-intrinsic-size.html
 css/css-sizing/slice-nowrap-intrinsic-size-bidi.html
 css/css-sizing/slice-nowrap-intrinsic-size.html
+css/css-sizing/stretch/flexbox-stretch-minimum-001.html
+css/css-sizing/stretch/flexbox-stretch-minimum-002.html
 css/css-sizing/vert-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-text/bidi/bidi-lines-001.html
 css/css-text/bidi/bidi-lines-002.html
@@ -1105,11 +1112,20 @@ css/css-text/hanging-punctuation/hanging-punctuation-last.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html
 css/css-text/hyphens/hyphens-auto-001.html
+css/css-text/hyphens/hyphens-auto-last-word-001.html
 css/css-text/hyphens/hyphens-manual-010.html
 css/css-text/hyphens/hyphens-manual-inline-010.html
+css/css-text/hyphens/hyphens-none-011.html
+css/css-text/hyphens/hyphens-none-shy-on-2nd-line-001.html
+css/css-text/hyphens/hyphens-punctuation-001.html
 css/css-text/letter-spacing/letter-spacing-ligatures-005.html
 css/css-text/letter-spacing/letter-spacing-nesting-002.html
 css/css-text/letter-spacing/letter-spacing-percent-001.html
+css/css-text/line-break/line-break-anywhere-and-white-space-001.html
+css/css-text/line-break/line-break-anywhere-and-white-space-002.html
+css/css-text/line-break/line-break-anywhere-and-white-space-003.html
+css/css-text/line-break/line-break-anywhere-and-white-space-004.html
+css/css-text/line-break/line-break-anywhere-and-white-space-006.html
 css/css-text/line-break/line-break-loose-hyphens-003.html
 css/css-text/line-break/line-break-normal-hyphens-003.html
 css/css-text/line-break/line-break-strict-hyphens-003.html
@@ -1165,6 +1181,7 @@ css/css-text/overflow-wrap/overflow-wrap-anywhere-011.html
 css/css-text/overflow-wrap/overflow-wrap-anywhere-fit-content-001.html
 css/css-text/overflow-wrap/overflow-wrap-break-word-fit-content-001.html
 css/css-text/overflow-wrap/overflow-wrap-min-content-size-003.html
+css/css-text/overflow-wrap/overflow-wrap-min-content-size-004.html
 css/css-text/overflow-wrap/word-wrap-004.html
 css/css-text/tab-size/tab-size-integer-001.html
 css/css-text/tab-size/tab-size-integer-002.html
@@ -1181,6 +1198,7 @@ css/css-text/text-align/text-align-justify-002.html
 css/css-text/text-align/text-align-justify-004.html
 css/css-text/text-align/text-align-justify-006.html
 css/css-text/text-align/text-align-justify-last-default.html
+css/css-text/text-align/text-align-justify-shy-001.html
 css/css-text/text-align/text-align-justify-tabs-001.html
 css/css-text/text-align/text-align-justifyall-001.html
 css/css-text/text-align/text-align-justifyall-002.html
@@ -1221,6 +1239,7 @@ css/css-text/text-justify/text-justify-and-trailing-spaces-004.html
 css/css-text/text-transform/text-transform-full-size-kana-005.html
 css/css-text/text-transform/text-transform-full-size-kana-006.html
 css/css-text/text-transform/text-transform-full-size-kana-007.html
+css/css-text/text-transform/text-transform-fullwidth-006.html
 css/css-text/text-transform/text-transform-shaping-001.html
 css/css-text/text-transform/text-transform-shaping-002.html
 css/css-text/text-transform/text-transform-shaping-003.html
@@ -1294,6 +1313,7 @@ css/css-text/white-space/pre-wrap-004.html
 css/css-text/white-space/pre-wrap-005.html
 css/css-text/white-space/pre-wrap-006.html
 css/css-text/white-space/pre-wrap-007.html
+css/css-text/white-space/pre-wrap-015.html
 css/css-text/white-space/text-wrap-balance-align-001.html
 css/css-text/white-space/text-wrap-balance-before-after-001.html
 css/css-text/white-space/text-wrap-balance-float-006.html
@@ -1313,7 +1333,9 @@ css/css-text/white-space/white-space-intrinsic-size-003.html
 css/css-text/white-space/white-space-letter-spacing-001.html
 css/css-text/white-space/white-space-pre-wrap-justify-001.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-001.html
+css/css-text/word-break/auto-phrase/word-break-auto-phrase-003.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-004.html
+css/css-text/word-break/auto-phrase/word-break-auto-phrase-006.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-007.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-008.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-009.html

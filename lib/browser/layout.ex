@@ -1634,7 +1634,11 @@ defmodule Browser.Layout do
       (Enum.reverse(st.rects) ++ Enum.reverse(st.items))
       |> Enum.split_with(&Map.get(&1, :over))
 
-    all = flow ++ (st.overlays |> Enum.reverse() |> Enum.concat()) ++ over
+    {under, overlays} =
+      st.overlays |> Enum.reverse() |> Enum.concat() |> Enum.split_with(&Map.get(&1, :under))
+
+    {under_flow, flow} = Enum.split_with(flow, &Map.get(&1, :under))
+    all = under ++ under_flow ++ flow ++ overlays ++ over
 
     if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
   end
@@ -2545,7 +2549,9 @@ defmodule Browser.Layout do
 
     x = if left, do: origin.x + left, else: x
     {tx, ty} = resolve_translate(spec.translate, width, height)
-    moved = for it <- items, do: it |> move(x + tx, y + ty) |> Map.put(:over, true)
+    # a negative `z-index` puts the box behind the flow: above the page's background only
+    layer = if spec.z < 0 and !spec.fixed, do: :under, else: :over
+    moved = for it <- items, do: it |> move(x + tx, y + ty) |> Map.put(layer, true)
     # a fixed box stays where it is in the window while the page scrolls
     moved =
       if spec.fixed,
