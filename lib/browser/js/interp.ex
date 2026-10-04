@@ -2123,7 +2123,10 @@ defmodule Browser.JS.Interp do
   # the strings argument of a tagged template: an array with a `raw` twin
   def ev({:tagged_strings, cooked, raw}, _env) do
     strings = new_array(cooked)
-    put_hidden(strings, "raw", new_array(raw))
+    raw = new_array(raw)
+    Browser.JS.Props.lock(raw, true)
+    put_hidden(strings, "raw", raw)
+    Browser.JS.Props.lock(strings, true)
     strings
   end
 

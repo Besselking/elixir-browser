@@ -9360,6 +9360,7 @@ built-ins/String/raw/returns-abrupt-from-next-key-toString.js
 built-ins/String/raw/returns-abrupt-from-next-key.js
 built-ins/String/raw/returns-abrupt-from-substitution-symbol.js
 built-ins/String/raw/returns-abrupt-from-substitution.js
+built-ins/String/raw/special-characters.js
 built-ins/String/raw/substitutions-are-appended-on-same-index.js
 built-ins/String/raw/substitutions-are-limited-to-template-raw-length.js
 built-ins/String/raw/template-length-is-symbol-throws.js
@@ -19373,12 +19374,17 @@ language/expressions/tagged-template/call-expression-argument-list-evaluation.js
 language/expressions/tagged-template/call-expression-context-no-strict.js
 language/expressions/tagged-template/call-expression-context-strict.js
 language/expressions/tagged-template/chained-application.js
+language/expressions/tagged-template/invalid-escape-sequences.js
 language/expressions/tagged-template/member-expression-argument-list-evaluation.js
 language/expressions/tagged-template/member-expression-context.js
+language/expressions/tagged-template/template-object-frozen-non-strict.js
 language/expressions/template-literal/evaluation-order.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-1.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-2.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-3.js
+language/expressions/template-literal/invalid-legacy-octal-escape-sequence-8.js
+language/expressions/template-literal/invalid-legacy-octal-escape-sequence-9.js
+language/expressions/template-literal/invalid-legacy-octal-escape-sequence.js
 language/expressions/template-literal/invalid-unicode-escape-sequence-1.js
 language/expressions/template-literal/invalid-unicode-escape-sequence-2.js
 language/expressions/template-literal/invalid-unicode-escape-sequence-3.js
@@ -19416,6 +19422,7 @@ language/expressions/template-literal/mongolian-vowel-separator.js
 language/expressions/template-literal/no-sub.js
 language/expressions/template-literal/tv-character-escape-sequence.js
 language/expressions/template-literal/tv-hex-escape-sequence.js
+language/expressions/template-literal/tv-line-terminator-sequence.js
 language/expressions/template-literal/tv-no-substitution.js
 language/expressions/template-literal/tv-null-character-escape-sequence.js
 language/expressions/template-literal/tv-template-character.js
@@ -19426,6 +19433,7 @@ language/expressions/template-literal/tv-template-tail.js
 language/expressions/template-literal/tv-utf16-escape-sequence.js
 language/expressions/template-literal/tv-zwnbsp.js
 language/expressions/template-literal/unicode-escape-nls-err.js
+language/expressions/template-literal/unicode-escape-no-hex-err.js
 language/expressions/this/11.1.1-1.js
 language/expressions/this/S11.1.1_A1.js
 language/expressions/this/S11.1.1_A3.1.js
