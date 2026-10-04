@@ -10793,6 +10793,7 @@ language/expressions/arrow-function/cannot-override-this-with-thisArg.js
 language/expressions/arrow-function/dflt-params-abrupt.js
 language/expressions/arrow-function/dflt-params-arg-val-not-undefined.js
 language/expressions/arrow-function/dflt-params-arg-val-undefined.js
+language/expressions/arrow-function/dflt-params-duplicates.js
 language/expressions/arrow-function/dflt-params-ref-later.js
 language/expressions/arrow-function/dflt-params-ref-prior.js
 language/expressions/arrow-function/dflt-params-ref-self.js
@@ -11046,6 +11047,7 @@ language/expressions/arrow-function/object-destructuring-param-strict-body.js
 language/expressions/arrow-function/object-literal-return-requires-body-parens.js
 language/expressions/arrow-function/param-dflt-yield-id-non-strict.js
 language/expressions/arrow-function/param-dflt-yield-id-strict.js
+language/expressions/arrow-function/params-duplicate.js
 language/expressions/arrow-function/params-trailing-comma-multiple.js
 language/expressions/arrow-function/params-trailing-comma-single.js
 language/expressions/arrow-function/prototype-rules.js
@@ -11082,6 +11084,17 @@ language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingi
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-no-yield.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-rest.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-arguments.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-array-1.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-array-2.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-array-3.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-1.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-2.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-3.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-4.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-5.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-binding-object-6.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates-rest.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-duplicates.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-eval.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-yield.js
 language/expressions/arrow-function/syntax/early-errors/asi-restriction-invalid-parenless-parameters-expression-body.js
@@ -11829,6 +11842,7 @@ language/expressions/async-arrow-function/await-as-label-identifier-escaped.js
 language/expressions/async-arrow-function/dflt-params-abrupt.js
 language/expressions/async-arrow-function/dflt-params-arg-val-not-undefined.js
 language/expressions/async-arrow-function/dflt-params-arg-val-undefined.js
+language/expressions/async-arrow-function/dflt-params-duplicates.js
 language/expressions/async-arrow-function/dflt-params-ref-later.js
 language/expressions/async-arrow-function/dflt-params-ref-prior.js
 language/expressions/async-arrow-function/dflt-params-ref-self.js
@@ -11836,6 +11850,7 @@ language/expressions/async-arrow-function/dflt-params-rest.js
 language/expressions/async-arrow-function/dflt-params-trailing-comma.js
 language/expressions/async-arrow-function/early-errors-arrow-NSPL-with-USD.js
 language/expressions/async-arrow-function/early-errors-arrow-arguments-in-formal-parameters.js
+language/expressions/async-arrow-function/early-errors-arrow-duplicate-parameters.js
 language/expressions/async-arrow-function/early-errors-arrow-eval-in-formal-parameters.js
 language/expressions/async-arrow-function/early-errors-arrow-formals-body-duplicate.js
 language/expressions/async-arrow-function/early-errors-arrow-formals-lineterminator.js
@@ -11871,8 +11886,12 @@ language/expressions/async-function/await-as-identifier-reference.js
 language/expressions/async-function/await-as-label-identifier-escaped.js
 language/expressions/async-function/await-as-label-identifier.js
 language/expressions/async-function/early-errors-expression-NSPL-with-USD.js
+language/expressions/async-function/early-errors-expression-body-contains-super-call.js
+language/expressions/async-function/early-errors-expression-body-contains-super-property.js
 language/expressions/async-function/early-errors-expression-eval-in-formal-parameters.js
 language/expressions/async-function/early-errors-expression-formals-body-duplicate.js
+language/expressions/async-function/early-errors-expression-formals-contains-super-call.js
+language/expressions/async-function/early-errors-expression-formals-contains-super-property.js
 language/expressions/async-function/early-errors-expression-not-simple-assignment-target.js
 language/expressions/async-function/escaped-async.js
 language/expressions/async-function/expression-returns-promise.js
@@ -11897,6 +11916,7 @@ language/expressions/async-function/named-await-as-label-identifier.js
 language/expressions/async-function/named-dflt-params-abrupt.js
 language/expressions/async-function/named-dflt-params-arg-val-not-undefined.js
 language/expressions/async-function/named-dflt-params-arg-val-undefined.js
+language/expressions/async-function/named-dflt-params-duplicates.js
 language/expressions/async-function/named-dflt-params-ref-later.js
 language/expressions/async-function/named-dflt-params-ref-prior.js
 language/expressions/async-function/named-dflt-params-ref-self.js
@@ -11920,6 +11940,7 @@ language/expressions/async-function/nameless-array-destructuring-param-strict-bo
 language/expressions/async-function/nameless-dflt-params-abrupt.js
 language/expressions/async-function/nameless-dflt-params-arg-val-not-undefined.js
 language/expressions/async-function/nameless-dflt-params-arg-val-undefined.js
+language/expressions/async-function/nameless-dflt-params-duplicates.js
 language/expressions/async-function/nameless-dflt-params-ref-later.js
 language/expressions/async-function/nameless-dflt-params-ref-prior.js
 language/expressions/async-function/nameless-dflt-params-ref-self.js
@@ -11953,6 +11974,7 @@ language/expressions/async-generator/await-as-label-identifier.js
 language/expressions/async-generator/dflt-params-abrupt.js
 language/expressions/async-generator/dflt-params-arg-val-not-undefined.js
 language/expressions/async-generator/dflt-params-arg-val-undefined.js
+language/expressions/async-generator/dflt-params-duplicates.js
 language/expressions/async-generator/dflt-params-ref-later.js
 language/expressions/async-generator/dflt-params-ref-prior.js
 language/expressions/async-generator/dflt-params-ref-self.js
@@ -12324,10 +12346,14 @@ language/expressions/async-generator/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/async-generator/dstr/obj-ptrn-rest-val-obj.js
 language/expressions/async-generator/early-errors-expression-NSPL-with-USD.js
 language/expressions/async-generator/early-errors-expression-arguments-in-formal-parameters.js
+language/expressions/async-generator/early-errors-expression-body-contains-super-call.js
+language/expressions/async-generator/early-errors-expression-body-contains-super-property.js
 language/expressions/async-generator/early-errors-expression-eval-in-formal-parameters.js
 language/expressions/async-generator/early-errors-expression-formals-body-duplicate-const.js
 language/expressions/async-generator/early-errors-expression-formals-body-duplicate-let.js
 language/expressions/async-generator/early-errors-expression-formals-contains-await.js
+language/expressions/async-generator/early-errors-expression-formals-contains-super-call.js
+language/expressions/async-generator/early-errors-expression-formals-contains-super-property.js
 language/expressions/async-generator/early-errors-expression-formals-contains-yield.js
 language/expressions/async-generator/early-errors-expression-label-name-await.js
 language/expressions/async-generator/early-errors-expression-label-name-yield.js
@@ -12363,6 +12389,7 @@ language/expressions/async-generator/named-await-as-label-identifier.js
 language/expressions/async-generator/named-dflt-params-abrupt.js
 language/expressions/async-generator/named-dflt-params-arg-val-not-undefined.js
 language/expressions/async-generator/named-dflt-params-arg-val-undefined.js
+language/expressions/async-generator/named-dflt-params-duplicates.js
 language/expressions/async-generator/named-dflt-params-ref-later.js
 language/expressions/async-generator/named-dflt-params-ref-prior.js
 language/expressions/async-generator/named-dflt-params-ref-self.js
@@ -16972,6 +16999,7 @@ language/expressions/function/array-destructuring-param-strict-body.js
 language/expressions/function/dflt-params-abrupt.js
 language/expressions/function/dflt-params-arg-val-not-undefined.js
 language/expressions/function/dflt-params-arg-val-undefined.js
+language/expressions/function/dflt-params-duplicates.js
 language/expressions/function/dflt-params-ref-later.js
 language/expressions/function/dflt-params-ref-prior.js
 language/expressions/function/dflt-params-ref-self.js
@@ -17159,10 +17187,14 @@ language/expressions/function/dstr/obj-ptrn-prop-obj.js
 language/expressions/function/dstr/obj-ptrn-rest-getter.js
 language/expressions/function/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/function/dstr/obj-ptrn-rest-val-obj.js
+language/expressions/function/early-body-super-call.js
+language/expressions/function/early-body-super-prop.js
 language/expressions/function/early-errors/invalid-names-call-expression-bad-reference.js
 language/expressions/function/early-errors/invalid-names-call-expression-this.js
 language/expressions/function/early-errors/invalid-names-member-expression-bad-reference.js
 language/expressions/function/early-errors/invalid-names-member-expression-this.js
+language/expressions/function/early-params-super-call.js
+language/expressions/function/early-params-super-prop.js
 language/expressions/function/forbidden-ext/b1/func-expr-strict-forbidden-ext-direct-access-prop-arguments.js
 language/expressions/function/forbidden-ext/b1/func-expr-strict-forbidden-ext-direct-access-prop-caller.js
 language/expressions/function/forbidden-ext/b2/func-expr-forbidden-ext-indirect-access-own-prop-caller-get.js
@@ -17210,6 +17242,7 @@ language/expressions/generators/array-destructuring-param-strict-body.js
 language/expressions/generators/dflt-params-abrupt.js
 language/expressions/generators/dflt-params-arg-val-not-undefined.js
 language/expressions/generators/dflt-params-arg-val-undefined.js
+language/expressions/generators/dflt-params-duplicates.js
 language/expressions/generators/dflt-params-ref-later.js
 language/expressions/generators/dflt-params-ref-prior.js
 language/expressions/generators/dflt-params-ref-self.js
@@ -18742,6 +18775,7 @@ language/expressions/object/method-definition/async-gen-meth-array-destructuring
 language/expressions/object/method-definition/async-gen-meth-dflt-params-abrupt.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-arg-val-not-undefined.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-arg-val-undefined.js
+language/expressions/object/method-definition/async-gen-meth-dflt-params-duplicates.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-ref-later.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-ref-self.js
@@ -18820,6 +18854,7 @@ language/expressions/object/method-definition/async-meth-array-destructuring-par
 language/expressions/object/method-definition/async-meth-dflt-params-abrupt.js
 language/expressions/object/method-definition/async-meth-dflt-params-arg-val-not-undefined.js
 language/expressions/object/method-definition/async-meth-dflt-params-arg-val-undefined.js
+language/expressions/object/method-definition/async-meth-dflt-params-duplicates.js
 language/expressions/object/method-definition/async-meth-dflt-params-ref-later.js
 language/expressions/object/method-definition/async-meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/async-meth-dflt-params-ref-self.js
@@ -18838,13 +18873,17 @@ language/expressions/object/method-definition/async-returns-async-arrow.js
 language/expressions/object/method-definition/async-returns-async-function-returns-newtarget.js
 language/expressions/object/method-definition/async-returns-async-function.js
 language/expressions/object/method-definition/computed-property-name-yield-expression.js
+language/expressions/object/method-definition/early-errors-object-async-method-duplicate-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-NSPL-with-USD.js
 language/expressions/object/method-definition/early-errors-object-method-arguments-in-formal-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-async-lineterminator.js
 language/expressions/object/method-definition/early-errors-object-method-await-in-formals-default.js
 language/expressions/object/method-definition/early-errors-object-method-await-in-formals.js
+language/expressions/object/method-definition/early-errors-object-method-body-contains-super-call.js
+language/expressions/object/method-definition/early-errors-object-method-duplicate-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-eval-in-formal-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-formals-body-duplicate.js
+language/expressions/object/method-definition/early-errors-object-method-formals-contains-super-call.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-gen-meth-forbidden-ext-direct-access-prop-arguments.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-gen-meth-forbidden-ext-direct-access-prop-caller.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-meth-forbidden-ext-direct-access-prop-arguments.js
@@ -18869,6 +18908,7 @@ language/expressions/object/method-definition/gen-meth-array-destructuring-param
 language/expressions/object/method-definition/gen-meth-dflt-params-abrupt.js
 language/expressions/object/method-definition/gen-meth-dflt-params-arg-val-not-undefined.js
 language/expressions/object/method-definition/gen-meth-dflt-params-arg-val-undefined.js
+language/expressions/object/method-definition/gen-meth-dflt-params-duplicates.js
 language/expressions/object/method-definition/gen-meth-dflt-params-ref-later.js
 language/expressions/object/method-definition/gen-meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/gen-meth-dflt-params-ref-self.js
@@ -18907,11 +18947,14 @@ language/expressions/object/method-definition/generator-prop-name-yield-id.js
 language/expressions/object/method-definition/generator-property-desc.js
 language/expressions/object/method-definition/generator-prototype.js
 language/expressions/object/method-definition/generator-return.js
+language/expressions/object/method-definition/generator-super-call-body.js
+language/expressions/object/method-definition/generator-super-call-param.js
 language/expressions/object/method-definition/generator-use-strict-with-non-simple-param.js
 language/expressions/object/method-definition/meth-array-destructuring-param-strict-body.js
 language/expressions/object/method-definition/meth-dflt-params-abrupt.js
 language/expressions/object/method-definition/meth-dflt-params-arg-val-not-undefined.js
 language/expressions/object/method-definition/meth-dflt-params-arg-val-undefined.js
+language/expressions/object/method-definition/meth-dflt-params-duplicates.js
 language/expressions/object/method-definition/meth-dflt-params-ref-later.js
 language/expressions/object/method-definition/meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/meth-dflt-params-ref-self.js
@@ -18937,6 +18980,8 @@ language/expressions/object/method-definition/name-prop-name-yield-id.js
 language/expressions/object/method-definition/name-property-desc.js
 language/expressions/object/method-definition/name-prototype-prop.js
 language/expressions/object/method-definition/name-prototype.js
+language/expressions/object/method-definition/name-super-call-body.js
+language/expressions/object/method-definition/name-super-call-param.js
 language/expressions/object/method-definition/object-method-returns-promise.js
 language/expressions/object/method-definition/params-dflt-gen-meth-args-unmapped.js
 language/expressions/object/method-definition/params-dflt-gen-meth-ref-arguments.js
@@ -20438,6 +20483,7 @@ language/statements/async-function/declaration-returns-promise.js
 language/statements/async-function/dflt-params-abrupt.js
 language/statements/async-function/dflt-params-arg-val-not-undefined.js
 language/statements/async-function/dflt-params-arg-val-undefined.js
+language/statements/async-function/dflt-params-duplicates.js
 language/statements/async-function/dflt-params-ref-later.js
 language/statements/async-function/dflt-params-ref-prior.js
 language/statements/async-function/dflt-params-ref-self.js
@@ -20447,9 +20493,13 @@ language/statements/async-function/early-errors-declaration-NSPL-with-USD.js
 language/statements/async-function/early-errors-declaration-arguments-in-formal-parameters.js
 language/statements/async-function/early-errors-declaration-await-in-formals-default.js
 language/statements/async-function/early-errors-declaration-await-in-formals.js
+language/statements/async-function/early-errors-declaration-body-contains-super-call.js
+language/statements/async-function/early-errors-declaration-body-contains-super-property.js
 language/statements/async-function/early-errors-declaration-duplicate-parameters.js
 language/statements/async-function/early-errors-declaration-eval-in-formal-parameters.js
 language/statements/async-function/early-errors-declaration-formals-body-duplicate.js
+language/statements/async-function/early-errors-declaration-formals-contains-super-call.js
+language/statements/async-function/early-errors-declaration-formals-contains-super-property.js
 language/statements/async-function/escaped-async.js
 language/statements/async-function/eval-var-scope-syntax-err.js
 language/statements/async-function/evaluation-body-that-returns-after-await.js
@@ -20497,6 +20547,7 @@ language/statements/async-generator/await-as-label-identifier-escaped.js
 language/statements/async-generator/dflt-params-abrupt.js
 language/statements/async-generator/dflt-params-arg-val-not-undefined.js
 language/statements/async-generator/dflt-params-arg-val-undefined.js
+language/statements/async-generator/dflt-params-duplicates.js
 language/statements/async-generator/dflt-params-ref-later.js
 language/statements/async-generator/dflt-params-ref-prior.js
 language/statements/async-generator/dflt-params-ref-self.js
@@ -27383,6 +27434,7 @@ language/statements/function/array-destructuring-param-strict-body.js
 language/statements/function/dflt-params-abrupt.js
 language/statements/function/dflt-params-arg-val-not-undefined.js
 language/statements/function/dflt-params-arg-val-undefined.js
+language/statements/function/dflt-params-duplicates.js
 language/statements/function/dflt-params-ref-later.js
 language/statements/function/dflt-params-ref-prior.js
 language/statements/function/dflt-params-ref-self.js
@@ -27570,10 +27622,14 @@ language/statements/function/dstr/obj-ptrn-prop-obj.js
 language/statements/function/dstr/obj-ptrn-rest-getter.js
 language/statements/function/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/statements/function/dstr/obj-ptrn-rest-val-obj.js
+language/statements/function/early-body-super-call.js
+language/statements/function/early-body-super-prop.js
 language/statements/function/early-errors/invalid-names-call-expression-bad-reference.js
 language/statements/function/early-errors/invalid-names-call-expression-this.js
 language/statements/function/early-errors/invalid-names-member-expression-bad-reference.js
 language/statements/function/early-errors/invalid-names-member-expression-this.js
+language/statements/function/early-params-super-call.js
+language/statements/function/early-params-super-prop.js
 language/statements/function/enable-strict-via-body.js
 language/statements/function/enable-strict-via-outer-body.js
 language/statements/function/enable-strict-via-outer-script.js
@@ -27633,6 +27689,7 @@ language/statements/generators/declaration.js
 language/statements/generators/dflt-params-abrupt.js
 language/statements/generators/dflt-params-arg-val-not-undefined.js
 language/statements/generators/dflt-params-arg-val-undefined.js
+language/statements/generators/dflt-params-duplicates.js
 language/statements/generators/dflt-params-ref-later.js
 language/statements/generators/dflt-params-ref-prior.js
 language/statements/generators/dflt-params-ref-self.js

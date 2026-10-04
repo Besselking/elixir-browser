@@ -121,7 +121,7 @@ defmodule Browser.JS.Parser do
   defp use_strict?(_), do: false
 
   # a function body: strict when it opens with the directive (or is inside strict code)
-  defp function_body(ts, params) do
+  defp function_body(ts, params, unique?) do
     outer = strict?()
 
     if use_strict?(ts) do
@@ -132,6 +132,7 @@ defmodule Browser.JS.Parser do
     end
 
     if strict?(), do: check_strict_params(params)
+    if unique? or not Enum.all?(params, &match?({:id, _}, &1)), do: check_unique_params(params)
     {body, rest} = block_body(ts, [])
 
     names =
@@ -143,6 +144,28 @@ defmodule Browser.JS.Parser do
 
     Process.put(:js_strict, outer)
     {check_scope(body, true, names), rest}
+  end
+
+  # `super` needs a method: none in a plain function, no `super()` in an object method
+  defp check_super_use(name, code, class_method?) do
+    cond do
+      match?({:method, _}, name) and class_method? ->
+        :ok
+
+      match?({:method, _}, name) ->
+        if contains_node?(code, &(&1 == {:super})),
+          do: throw({:syntax, "'super' keyword unexpected here"})
+
+      true ->
+        if contains_node?(code, &(&1 == {:super} or match?({:super_member, _}, &1))),
+          do: throw({:syntax, "'super' keyword unexpected here"})
+    end
+  end
+
+  # arrow functions, methods and functions with non-simple parameters take no duplicates
+  defp check_unique_params(params) do
+    names = Enum.reduce(params, [], &Interp.pattern_names/2)
+    if names != Enum.uniq(names), do: throw({:syntax, "duplicate parameter name"})
   end
 
   defp check_strict_params(params) do
@@ -985,6 +1008,7 @@ defmodule Browser.JS.Parser do
     case after_key do
       [{:p, "(", _} | _] ->
         if async?, do: Process.put(:js_async_next, true)
+        Process.put(:js_class_method, true)
 
         {{:fn, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
@@ -1026,11 +1050,13 @@ defmodule Browser.JS.Parser do
     outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
     Process.put(:js_async, Process.delete(:js_async_next) == true)
+    class_method? = Process.delete(:js_class_method) == true
 
     try do
       {params, ts} = params(expect(ts, "("), [])
       ts = expect(ts, "{")
-      {body, ts} = function_body(ts, params)
+      {body, ts} = function_body(ts, params, match?({:method, _}, name))
+      check_super_use(name, [params, body], class_method?)
       {{:fn, name, params, body, false}, ts}
     after
       Process.put(:js_generator, outer)
@@ -1086,11 +1112,12 @@ defmodule Browser.JS.Parser do
   end
 
   defp arrow_body(params, [{:p, "{", _} | ts]) do
-    {body, ts} = function_body(ts, params)
+    {body, ts} = function_body(ts, params, true)
     {{:fn, nil, params, body, :arrow}, ts}
   end
 
   defp arrow_body(params, ts) do
+    check_unique_params(params)
     {e, ts} = assignment(ts)
     {{:fn, nil, params, e, :arrow_expr}, ts}
   end
