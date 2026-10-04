@@ -69,4 +69,15 @@ defmodule Browser.HTMLTest do
       assert {:element, "td", _, [{:text, "out"}]} = outer2
     end
   end
+
+  test "decodes the full named entity table" do
+    assert [{:text, "a\u00ADb"}] = HTML.parse("a&shy;b")
+    assert [{:text, "\u00A9 \u2212 \u{1D504}"}] = HTML.parse("&copy; &minus; &Afr;")
+    assert [{:text, "\u2265\u20D2"}] = HTML.parse("&nvge;")
+  end
+
+  test "legacy entities decode without a semicolon, unknown ones stay" do
+    assert HTML.decode("&amp") == "&"
+    assert HTML.decode("&bogus; &#65 &#x42;") == "&bogus; A B"
+  end
 end

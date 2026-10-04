@@ -476,32 +476,12 @@ defmodule Browser.Layout do
   defp walk(nodes, style, acc) when is_list(nodes),
     do: Enum.reduce(nodes, acc, &walk(&1, style, &2))
 
-  defp walk({:text, t}, %{pre: true} = style, acc), do: pre_text(t, style, acc)
-
-  defp walk({:text, t}, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line],
-    do: pre_text(t, style, acc, ws)
-
-  defp walk({:text, t}, %{ws: :nowrap} = style, acc) do
-    # whitespace collapses, but the words never wrap
-    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
-    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
-    words = t |> String.split() |> Enum.map(&{:word, &1, style, :pre})
-
-    case words do
-      [] -> if t == "", do: acc, else: [{:space, style} | acc]
-      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
-    end
-  end
-
-  defp walk({:text, t}, style, acc) do
-    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
-    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
-    words = t |> String.split() |> Enum.map(&{:word, &1, style})
-
-    case words do
-      [] -> if t == "", do: acc, else: [{:space, style} | acc]
-      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
-    end
+  # a soft hyphen (U+00AD) is invisible unless a line breaks at it; breaking there is not
+  # supported yet, so it is dropped from the laid-out text (the DOM text keeps it)
+  defp walk({:text, t}, style, acc) when is_binary(t) do
+    if String.contains?(t, "\u00AD"),
+      do: walk({:text, String.replace(t, "\u00AD", "")}, style, acc),
+      else: walk_text(t, style, acc)
   end
 
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
@@ -1492,6 +1472,34 @@ defmodule Browser.Layout do
       name -> if String.contains?(name, ["mono", "code", "courier", "consol"]), do: :mono
     end)
     |> Kernel.==(:mono)
+  end
+
+  defp walk_text(t, %{pre: true} = style, acc), do: pre_text(t, style, acc)
+
+  defp walk_text(t, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line],
+    do: pre_text(t, style, acc, ws)
+
+  defp walk_text(t, %{ws: :nowrap} = style, acc) do
+    # whitespace collapses, but the words never wrap
+    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
+    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
+    words = t |> String.split() |> Enum.map(&{:word, &1, style, :pre})
+
+    case words do
+      [] -> if t == "", do: acc, else: [{:space, style} | acc]
+      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
+    end
+  end
+
+  defp walk_text(t, style, acc) do
+    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
+    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
+    words = t |> String.split() |> Enum.map(&{:word, &1, style})
+
+    case words do
+      [] -> if t == "", do: acc, else: [{:space, style} | acc]
+      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
+    end
   end
 
   defp align("center"), do: :center
