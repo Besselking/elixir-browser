@@ -2952,6 +2952,35 @@ defmodule Browser.LayoutTest do
       assert %{h: 50} = box_of(items)
     end
 
+    test "a float with clear goes below the earlier floats on that side only" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:right;width:40px;height:20px;background:#111"></div><div style="float:right;clear:right;width:50px;height:30px;background:#222"></div><div style="float:left;width:50px;height:30px;background:#333"></div>|
+        )
+
+      rects = items |> Enum.filter(&(&1.type == :rect)) |> Map.new(&{&1.color, &1})
+      assert %{y: 20} = rects[{34, 34, 34}]
+      assert %{y: 0} = rects[{51, 51, 51}]
+    end
+
+    test "an inline-block that does not fit beside the floats goes below them" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:100px;height:30px"></div><span style="display:inline-block;width:150px;height:10px;background:#ccc"></span>|
+        )
+
+      assert %{y: 30} = box_of(items)
+    end
+
+    test "floats outside a box with overflow set do not push its content around" do
+      {items, _} =
+        fl(
+          ~s|<div style="float:left;width:60px;height:50px"></div><div style="overflow:hidden"><p>aaaa</p></div>|
+        )
+
+      assert word_at(items, "aaaa").x == 64
+    end
+
     test "text goes back to the full width once the float ends" do
       {items, _} =
         fl(

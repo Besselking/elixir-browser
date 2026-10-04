@@ -388,6 +388,7 @@ css/CSS2/css1/c5515-ibrdr-000.xht
 css/CSS2/css1/c5516-brdr-c-000.xht
 css/CSS2/css1/c5516-ibrdr-c-000.xht
 css/CSS2/css1/c71-fwd-parsing-001.xht
+css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-002.html
 css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-004.html
 css/CSS2/floats-clear/clear-004.xht
 css/CSS2/floats-clear/clear-after-top-margin.html
@@ -425,6 +426,7 @@ css/CSS2/floats/float-with-absolutely-positioned-child-with-static-inset.html
 css/CSS2/floats/floats-in-table-caption-001.html
 css/CSS2/floats/floats-placement-001.html
 css/CSS2/floats/floats-placement-002.html
+css/CSS2/floats/floats-placement-004.html
 css/CSS2/floats/floats-placement-vertical-003.xht
 css/CSS2/floats/floats-placement-vertical-004.xht
 css/CSS2/floats/floats-rule3-outside-left-002.xht
@@ -439,6 +441,8 @@ css/CSS2/floats/floats-wrap-bfc-002-left-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-002-right-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-003-left-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-003-right-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-004.xht
+css/CSS2/floats/floats-wrap-bfc-005.xht
 css/CSS2/floats/floats-wrap-bfc-007.xht
 css/CSS2/floats/floats-wrap-bfc-008.html
 css/CSS2/floats/floats-wrap-bfc-outside-001.xht
@@ -446,8 +450,18 @@ css/CSS2/floats/floats-wrap-bfc-with-margin-006.tentative.html
 css/CSS2/floats/floats-wrap-bfc-with-margin-007.tentative.html
 css/CSS2/floats/floats-wrap-top-below-bfc-001l.xht
 css/CSS2/floats/floats-wrap-top-below-bfc-001r.xht
+css/CSS2/floats/floats-wrap-top-below-bfc-002l.xht
+css/CSS2/floats/floats-wrap-top-below-bfc-002r.xht
+css/CSS2/floats/floats-wrap-top-below-bfc-003l.xht
+css/CSS2/floats/floats-wrap-top-below-bfc-003r.xht
 css/CSS2/floats/floats-wrap-top-below-inline-001l.xht
 css/CSS2/floats/floats-wrap-top-below-inline-001r.xht
+css/CSS2/floats/floats-wrap-top-below-inline-002l.xht
+css/CSS2/floats/floats-wrap-top-below-inline-002r.xht
+css/CSS2/floats/floats-wrap-top-below-inline-003l.xht
+css/CSS2/floats/floats-wrap-top-below-inline-003r.xht
+css/CSS2/floats/floats-zero-height-wrap-001.xht
+css/CSS2/floats/floats-zero-height-wrap-002.xht
 css/CSS2/floats/negative-block-margin-pushing-float-out-of-block-formatting-context.html
 css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-min-width.html
