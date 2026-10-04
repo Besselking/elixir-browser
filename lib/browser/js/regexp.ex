@@ -8,7 +8,7 @@ defmodule Browser.JS.RegExp do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
-  alias Browser.JS.Interp
+  alias Browser.JS.{Interp, Props}
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -22,6 +22,8 @@ defmodule Browser.JS.RegExp do
       {:obj,
        alloc(%{
          class: :regexp,
+         src: source,
+         fl: flags,
          re: re,
          names: names,
          props: %{},
@@ -29,12 +31,6 @@ defmodule Browser.JS.RegExp do
          proto: proto(:regexp)
        })}
 
-    put_hidden(obj, "source", source)
-    put_hidden(obj, "flags", flags)
-    put_hidden(obj, "global", String.contains?(flags, "g"))
-    put_hidden(obj, "ignoreCase", String.contains?(flags, "i"))
-    put_hidden(obj, "multiline", String.contains?(flags, "m"))
-    put_hidden(obj, "sticky", String.contains?(flags, "y"))
     put_hidden(obj, "lastIndex", 0.0)
     obj
   end
@@ -42,7 +38,31 @@ defmodule Browser.JS.RegExp do
   def regexp?({:obj, id}), do: match?(%{class: :regexp}, deref(id))
   def regexp?(_), do: false
 
-  defp flag?(re_obj, f), do: String.contains?(Interp.get(re_obj, "flags"), f)
+  defp flags_of({:obj, id}) do
+    case deref(id) do
+      %{fl: fl} -> fl
+      _ -> throw_error("TypeError", "RegExp method called on incompatible receiver")
+    end
+  end
+
+  defp flags_of(_), do: throw_error("TypeError", "RegExp method called on incompatible receiver")
+  defp source_of({:obj, id}), do: deref(id).src
+  defp flag?(re_obj, f), do: String.contains?(flags_of(re_obj), f)
+
+  # the pattern text as `source` shows it: `/` and line terminators escaped, `(?:)` when empty
+  defp escape_source(""), do: "(?:)"
+  defp escape_source(src), do: escape_source(String.graphemes(src), false, [])
+
+  defp escape_source([], _, acc), do: acc |> Enum.reverse() |> Enum.join()
+  defp escape_source(["\\", c | rest], cls, acc), do: escape_source(rest, cls, [c, "\\" | acc])
+  defp escape_source(["[" | rest], _, acc), do: escape_source(rest, true, ["[" | acc])
+  defp escape_source(["]" | rest], _, acc), do: escape_source(rest, false, ["]" | acc])
+  defp escape_source(["/" | rest], false, acc), do: escape_source(rest, false, ["\\/" | acc])
+  defp escape_source(["\n" | rest], c, acc), do: escape_source(rest, c, ["\\n" | acc])
+  defp escape_source(["\r" | rest], c, acc), do: escape_source(rest, c, ["\\r" | acc])
+  defp escape_source(["\u2028" | rest], c, acc), do: escape_source(rest, c, ["\\u2028" | acc])
+  defp escape_source(["\u2029" | rest], c, acc), do: escape_source(rest, c, ["\\u2029" | acc])
+  defp escape_source([ch | rest], c, acc), do: escape_source(rest, c, [ch | acc])
 
   @doc "Checks a literal at parse time: `:ok` or `{:error, message}` (an early SyntaxError)."
   def validate(source, flags) do
@@ -401,10 +421,10 @@ defmodule Browser.JS.RegExp do
             if regexp?(r) do
               flags =
                 if arg(args, 1) == :undefined,
-                  do: Interp.get(r, "flags"),
+                  do: flags_of(r),
                   else: to_str(arg(args, 1))
 
-              new(Interp.get(r, "source"), flags)
+              new(source_of(r), flags)
             else
               new(to_str(r), flags_arg(args))
             end
@@ -421,6 +441,75 @@ defmodule Browser.JS.RegExp do
     put_hidden(p, "constructor", ctor)
     declare(scope, "RegExp", ctor)
     def_species(ctor)
+
+    # `source`, `flags` and the flag accessors live on the prototype
+    for {name, flag} <- [
+          {"hasIndices", "d"},
+          {"global", "g"},
+          {"ignoreCase", "i"},
+          {"multiline", "m"},
+          {"dotAll", "s"},
+          {"unicode", "u"},
+          {"unicodeSets", "v"},
+          {"sticky", "y"}
+        ] do
+      Props.define_accessor(p, name,
+        get:
+          native("get " <> name, fn this, _ ->
+            cond do
+              regexp?(this) ->
+                flag?(this, flag)
+
+              this == p ->
+                :undefined
+
+              true ->
+                throw_error("TypeError", "RegExp.prototype.#{name} getter called on a non-RegExp")
+            end
+          end),
+        enumerable: false
+      )
+    end
+
+    Props.define_accessor(p, "source",
+      get:
+        native("get source", fn this, _ ->
+          cond do
+            regexp?(this) ->
+              escape_source(source_of(this))
+
+            this == p ->
+              "(?:)"
+
+            true ->
+              throw_error("TypeError", "RegExp.prototype.source getter called on a non-RegExp")
+          end
+        end),
+      enumerable: false
+    )
+
+    Props.define_accessor(p, "flags",
+      get:
+        native("get flags", fn this, _ ->
+          unless match?({:obj, _}, this),
+            do: throw_error("TypeError", "RegExp.prototype.flags getter called on a non-object")
+
+          for {name, ch} <- [
+                {"hasIndices", "d"},
+                {"global", "g"},
+                {"ignoreCase", "i"},
+                {"multiline", "m"},
+                {"dotAll", "s"},
+                {"unicode", "u"},
+                {"unicodeSets", "v"},
+                {"sticky", "y"}
+              ],
+              truthy(Interp.get(this, name)),
+              into: "",
+              do: ch
+        end),
+      enumerable: false
+    )
 
     def_fn(p, "test", fn this, args -> exec(this, to_str(arg(args, 0))) != :null end)
     def_fn(p, "exec", fn this, args -> exec(this, to_str(arg(args, 0))) end)
