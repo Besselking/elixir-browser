@@ -315,7 +315,7 @@ defmodule Browser.JS.TypedArrays do
       new_buffer(binary_part(bytes, from, n))
     end)
 
-    put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "ArrayBuffer")
+    put_tag(p, "ArrayBuffer")
   end
 
   # length, byteLength, byteOffset, buffer and @@toStringTag are getters on %TypedArray%.prototype
@@ -810,7 +810,7 @@ defmodule Browser.JS.TypedArrays do
 
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
-    put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "DataView")
+    put_tag(p, "DataView")
     declare(scope, "DataView", ctor)
 
     for {name, kind} <- @dv_types do

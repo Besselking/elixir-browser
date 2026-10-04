@@ -181,7 +181,7 @@ defmodule Browser.JS.Async do
       )
     end
 
-    Interp.put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "Generator")
+    Interp.put_tag(p, "Generator")
     :ok
   end
 
@@ -363,7 +363,7 @@ defmodule Browser.JS.Async do
       )
     end
 
-    Interp.put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "AsyncGenerator")
+    Interp.put_tag(p, "AsyncGenerator")
     :ok
   end
 

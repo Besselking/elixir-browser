@@ -479,6 +479,7 @@ defmodule Browser.JS.Interp do
     "ArrayBuffer" => 1.0,
     "Boolean" => 1.0,
     "Date" => 7.0,
+    "AggregateError" => 2.0,
     "Error" => 1.0,
     "EvalError" => 1.0,
     "Function" => 1.0,
@@ -679,8 +680,8 @@ defmodule Browser.JS.Interp do
       Enum.count(c.params, &(not match?({:rest, _}, &1) and not match?({:default, _, _}, &1))) *
         1.0
 
-  defp function_prop(_id, %{fun: {:native, name, _}}, "length"),
-    do: Map.get(@native_lengths, name, 0.0)
+  defp function_prop(_id, %{fun: {:native, name, _}} = o, "length"),
+    do: Map.get(o, :arity) || Map.get(@native_lengths, name, 0.0)
 
   defp function_prop(_id, _o, _key), do: :undefined
 
@@ -688,6 +689,14 @@ defmodule Browser.JS.Interp do
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
     store(id, %{o | props: Map.put(o.props, key, v)})
+  end
+
+  @doc "Sets `@@toStringTag`: not writable or enumerable, but configurable."
+  def put_tag({:obj, id}, name) do
+    key = {:symbol, :toStringTag, "Symbol.toStringTag"}
+    o = deref(id)
+    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
+    store(id, o |> Map.put(:props, Map.put(o.props, key, name)) |> Map.put(:attrs, attrs))
   end
 
   @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."

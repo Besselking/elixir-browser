@@ -12,7 +12,7 @@ defmodule Browser.JS.Builtins do
   alias Browser.JS.Num
 
   @timer_horizon 60_000.0
-  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError)
+  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError)
 
   @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
   def install do
@@ -179,6 +179,10 @@ defmodule Browser.JS.Builtins do
 
       constructor(scope, t, proto, fn this, args ->
         err = if match?({:obj, _}, this), do: this, else: new_object([], proto)
+        # AggregateError(errors, message): the iterable of errors comes first
+        {errors, args} =
+          if t == "AggregateError", do: {arg(args, 0), Enum.drop(args, 1)}, else: {nil, args}
+
         msg = arg(args, 0)
         if msg != :undefined, do: put_hidden(err, "message", to_str(msg))
 
@@ -187,6 +191,8 @@ defmodule Browser.JS.Builtins do
           "stack",
           Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> to_str(msg)))
         )
+
+        if errors, do: put_hidden(err, "errors", new_array(Interp.iterate(errors)))
 
         err
       end)
