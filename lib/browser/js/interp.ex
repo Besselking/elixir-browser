@@ -114,6 +114,15 @@ defmodule Browser.JS.Interp do
      })}
   end
 
+  @doc "`get [Symbol.species]` on a built-in constructor: returns `this`."
+  def def_species(ctor) do
+    put_hidden(
+      ctor,
+      {:symbol, :species, "Symbol.species"},
+      {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
+    )
+  end
+
   def make_error(type, message) do
     err = new_object([{"message", message}], proto({:error, type}))
     put_hidden(err, "stack", stack_string("#{type}: #{message}"))
@@ -1162,13 +1171,7 @@ defmodule Browser.JS.Interp do
   def construct(f, args, new_target \\ nil)
 
   def construct({:obj, id} = f, args, new_target) do
-    unless function?(f), do: throw_error("TypeError", "value is not a constructor")
-
-    if match?(%{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr], deref(id)),
-      do: throw_error("TypeError", "arrow function is not a constructor")
-
-    if Map.get(deref(id), :generator),
-      do: throw_error("TypeError", "generator is not a constructor")
+    unless constructor?(f), do: throw_error("TypeError", "value is not a constructor")
 
     nt = new_target || f
 
@@ -1187,6 +1190,24 @@ defmodule Browser.JS.Interp do
   end
 
   def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
+
+  @doc "IsConstructor: arrows, generators, async functions, methods and built-ins without a `prototype` are not."
+  def constructor?({:obj, id} = f) do
+    o = deref(id)
+
+    function?(f) and
+      case o do
+        %{bound: {target, _}} -> constructor?(target)
+        %{generator: true} -> false
+        %{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr] -> false
+        %{fun: {:closure, %{name: {:method, _}}}} -> false
+        %{fun: {:closure, _}, async: true} -> false
+        %{fun: {:native, _, _}, props: props} -> Map.has_key?(props, "prototype")
+        _ -> true
+      end
+  end
+
+  def constructor?(_), do: false
 
   defp construct_plain({:obj, _} = f, id, nt, new_target, args) do
     case Map.get(deref(id), :class_info) do

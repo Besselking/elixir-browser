@@ -232,6 +232,7 @@ defmodule Browser.JS.Promise do
     put_hidden(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Promise", ctor)
+    def_species(ctor)
 
     def_fn(p, "then", fn this, args -> then(this, arg(args, 0), arg(args, 1)) end)
     def_fn(p, "catch", fn this, args -> then(this, :undefined, arg(args, 0)) end)

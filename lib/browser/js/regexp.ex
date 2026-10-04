@@ -420,6 +420,7 @@ defmodule Browser.JS.RegExp do
     put_hidden(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "RegExp", ctor)
+    def_species(ctor)
 
     def_fn(p, "test", fn this, args -> exec(this, to_str(arg(args, 0))) != :null end)
     def_fn(p, "exec", fn this, args -> exec(this, to_str(arg(args, 0))) end)

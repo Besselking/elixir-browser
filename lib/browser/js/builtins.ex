@@ -279,6 +279,12 @@ defmodule Browser.JS.Builtins do
         end
       end)
 
+    put_hidden(
+      arr,
+      {:symbol, :species, "Symbol.species"},
+      {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
+    )
+
     def_fn(arr, "isArray", fn _, args -> array?(arg(args, 0)) end)
     def_fn(arr, "of", fn _, args -> new_array(args) end)
 
@@ -377,8 +383,93 @@ defmodule Browser.JS.Builtins do
 
   defp plain_array?(_), do: false
 
+  @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
+                       findLastIndex flatMap)
+
+  # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
+  # species constructor
+  defp species_target(this, n) do
+    if array?(this) do
+      c = Interp.get(this, "constructor")
+
+      c =
+        case c do
+          {:obj, _} ->
+            case Interp.get(c, {:symbol, :species, "Symbol.species"}) do
+              :null -> :undefined
+              sp -> sp
+            end
+
+          other ->
+            other
+        end
+
+      cond do
+        c == :undefined or c == Interp.get(proto(:array), "constructor") ->
+          nil
+
+        not function?(c) ->
+          throw_error("TypeError", "object.constructor[Symbol.species] is not a constructor")
+
+        true ->
+          construct(c, [float(n)])
+      end
+    end
+  end
+
+  # the elements of a plain result array, defined one by one on a species target
+  defp species_fill_from(res, target, set_len?), do: species_fill(target, res, set_len?)
+
+  defp species_fill(nil, res, _set_len?), do: res
+
+  defp species_fill(target, res, set_len?) do
+    items = array_list(res)
+
+    for {v, i} <- Enum.with_index(items) do
+      Browser.JS.Props.define(
+        target,
+        float(i),
+        new_object([
+          {"value", v},
+          {"writable", true},
+          {"enumerable", true},
+          {"configurable", true}
+        ])
+      )
+    end
+
+    if set_len?, do: Interp.put(target, "length", float(length(items)))
+    target
+  end
+
+  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers
+  defp array_fn(obj, name, fun) do
+    def_fn(obj, name, fn this, args ->
+      this =
+        cond do
+          nullish?(this) ->
+            throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+
+          is_boolean(this) ->
+            wrap(new_object([], proto(:boolean)), this)
+
+          is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
+            wrap(new_object([], proto(:number)), this)
+
+          true ->
+            this
+        end
+
+      # the length is read before the callback is checked
+      if name in @callback_methods and not array?(this) and not is_binary(this),
+        do: length_of(this, false)
+
+      fun.(this, args)
+    end)
+  end
+
   defp array_methods(p) do
-    def_fn(p, "push", fn this, args ->
+    array_fn(p, "push", fn this, args ->
       if plain_array?(this) do
         {:obj, id} = this
         o = deref(id)
@@ -399,7 +490,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "pop", fn this, _ ->
+    array_fn(p, "pop", fn this, _ ->
       if plain_array?(this) do
         {:obj, id} = this
         o = deref(id)
@@ -432,7 +523,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "shift", fn this, _ ->
+    array_fn(p, "shift", fn this, _ ->
       case elems(this) do
         [] ->
           put_elems(this, [])
@@ -444,21 +535,24 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "unshift", fn this, args ->
+    array_fn(p, "unshift", fn this, args ->
       list = args ++ elems(this)
       put_elems(this, list)
       float(length(list))
     end)
 
-    def_fn(p, "slice", fn this, args ->
+    array_fn(p, "slice", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
       to = rel(arg(args, 1), len, len)
+      target = species_target(this, max(to - from, 0))
+
       new_array(Enum.slice(list, from, max(to - from, 0)))
+      |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "splice", fn this, args ->
+    array_fn(p, "splice", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
@@ -470,25 +564,28 @@ defmodule Browser.JS.Builtins do
           [_, c | _] -> c |> to_int() |> max(0) |> min(len - from)
         end
 
+      target = species_target(this, count)
       {head, rest} = Enum.split(list, from)
       {removed, tail} = Enum.split(rest, count)
       put_elems(this, head ++ Enum.drop(args, 2) ++ tail)
-      new_array(removed)
+      new_array(removed) |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "concat", fn this, args ->
+    array_fn(p, "concat", fn this, args ->
       first = if array?(this), do: array_list(this), else: [this_obj(this)]
+      target = species_target(this, 0)
 
       new_array(
         first ++ Enum.flat_map(args, fn a -> if array?(a), do: array_list(a), else: [a] end)
       )
+      |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "join", fn this, args ->
+    array_fn(p, "join", fn this, args ->
       join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
     end)
 
-    def_fn(p, "toString", fn this, _ ->
+    array_fn(p, "toString", fn this, _ ->
       case this do
         {:obj, _} ->
           case Interp.get(this, "join") do
@@ -501,12 +598,12 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "reverse", fn this, _ ->
+    array_fn(p, "reverse", fn this, _ ->
       put_elems(this, Enum.reverse(elems(this)))
       this
     end)
 
-    def_fn(p, "indexOf", fn this, args ->
+    array_fn(p, "indexOf", fn this, args ->
       v = arg(args, 0)
 
       from = from_index(this, args, nil, :asc)
@@ -517,7 +614,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "lastIndexOf", fn this, args ->
+    array_fn(p, "lastIndexOf", fn this, args ->
       v = arg(args, 0)
 
       from = from_index(this, args, nil, :desc)
@@ -528,18 +625,18 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "includes", fn this, args ->
+    array_fn(p, "includes", fn this, args ->
       v = arg(args, 0)
       Enum.any?(elems(this), &same_value_zero(&1, v))
     end)
 
-    def_fn(p, "at", fn this, args ->
+    array_fn(p, "at", fn this, args ->
       list = elems(this)
       n = to_int(arg(args, 0))
       Enum.at(list, if(n < 0, do: length(list) + n, else: n), :undefined)
     end)
 
-    def_fn(p, "fill", fn this, args ->
+    array_fn(p, "fill", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 1), len, 0)
@@ -556,39 +653,70 @@ defmodule Browser.JS.Builtins do
       this
     end)
 
-    def_fn(p, "flat", fn this, args ->
+    array_fn(p, "copyWithin", fn this, args ->
+      o = this_obj(this)
+      len = length_of(o)
+      to = rel(arg(args, 0), len, 0)
+      from = rel(arg(args, 1), len, 0)
+      final = rel(arg(args, 2), len, len)
+      count = min(final - from, len - to)
+
+      {dir, from, to} =
+        if from < to and to < from + count,
+          do: {-1, from + count - 1, to + count - 1},
+          else: {1, from, to}
+
+      for k <- 0..(count - 1)//1 do
+        f = float(from + dir * k)
+        t = float(to + dir * k)
+
+        if Interp.has_property?(o, to_key(f)),
+          do: Interp.put(o, t, Interp.get(o, f)),
+          else:
+            unless(Interp.delete(o, to_key(t)),
+              do: throw_error("TypeError", "Cannot delete property '#{to_str(t)}'")
+            )
+      end
+
+      o
+    end)
+
+    array_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
       new_array(flatten(elems(this), depth))
     end)
 
-    def_fn(p, "forEach", fn this, args ->
+    array_fn(p, "forEach", fn this, args ->
       f = callable!(arg(args, 0))
 
       for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
       :undefined
     end)
 
-    def_fn(p, "map", fn this, args ->
+    array_fn(p, "map", fn this, args ->
       f = callable!(arg(args, 0))
       len = length_of(this)
+      target = species_target(this, len)
 
       mapped =
         for {i, v} <- pairs(this), into: %{}, do: {i, call(f, arg(args, 1), [v, float(i), this])}
 
-      array_of(len, mapped)
+      species_fill(target, array_of(len, mapped), false)
     end)
 
-    def_fn(p, "filter", fn this, args ->
+    array_fn(p, "filter", fn this, args ->
       f = callable!(arg(args, 0))
+      target = species_target(this, 0)
 
       new_array(
         for {i, v} <- pairs(this),
             truthy(call(f, arg(args, 1), [v, float(i), this])),
             do: v
       )
+      |> species_fill_from(target, false)
     end)
 
-    def_fn(p, "find", fn this, args ->
+    array_fn(p, "find", fn this, args ->
       f = callable!(arg(args, 0))
 
       Enum.find_value(Enum.with_index(elems(this)), :undefined, fn {v, i} ->
@@ -596,7 +724,7 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
-    def_fn(p, "findIndex", fn this, args ->
+    array_fn(p, "findIndex", fn this, args ->
       f = callable!(arg(args, 0))
 
       idx =
@@ -607,7 +735,7 @@ defmodule Browser.JS.Builtins do
       float(idx || -1)
     end)
 
-    def_fn(p, "findLast", fn this, args ->
+    array_fn(p, "findLast", fn this, args ->
       f = callable!(arg(args, 0))
 
       this
@@ -619,7 +747,7 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
-    def_fn(p, "findLastIndex", fn this, args ->
+    array_fn(p, "findLastIndex", fn this, args ->
       f = callable!(arg(args, 0))
 
       idx =
@@ -634,20 +762,20 @@ defmodule Browser.JS.Builtins do
       float(idx)
     end)
 
-    def_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
+    array_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
 
-    def_fn(p, "toSorted", fn this, args ->
+    array_fn(p, "toSorted", fn this, args ->
       copy = new_array(elems(this))
       call(Interp.get(copy, "sort"), copy, args)
     end)
 
-    def_fn(p, "toSpliced", fn this, args ->
+    array_fn(p, "toSpliced", fn this, args ->
       copy = new_array(elems(this))
       call(Interp.get(copy, "splice"), copy, args)
       copy
     end)
 
-    def_fn(p, "with", fn this, args ->
+    array_fn(p, "with", fn this, args ->
       list = elems(this)
       len = length(list)
       n = to_int(arg(args, 0))
@@ -657,27 +785,27 @@ defmodule Browser.JS.Builtins do
       new_array(List.replace_at(list, i, arg(args, 1)))
     end)
 
-    def_fn(p, "some", fn this, args ->
+    array_fn(p, "some", fn this, args ->
       f = callable!(arg(args, 0))
 
       Enum.any?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "every", fn this, args ->
+    array_fn(p, "every", fn this, args ->
       f = callable!(arg(args, 0))
 
       Enum.all?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "reduce", fn this, args ->
+    array_fn(p, "reduce", fn this, args ->
       reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), false)
     end)
 
-    def_fn(p, "reduceRight", fn this, args ->
+    array_fn(p, "reduceRight", fn this, args ->
       reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), true)
     end)
 
-    def_fn(p, "sort", fn this, args ->
+    array_fn(p, "sort", fn this, args ->
       f = arg(args, 0)
 
       unless f == :undefined or function?(f),
@@ -727,7 +855,7 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp length_of(this) do
+  defp length_of(this, cap? \\ true) do
     cond do
       array?(this) ->
         to_int(Interp.get(this, "length"))
@@ -737,7 +865,7 @@ defmodule Browser.JS.Builtins do
 
       true ->
         len = to_length(Interp.get(this_obj(this), "length"))
-        if len > @max_length, do: throw_error("RangeError", "Invalid array length")
+        if cap? and len > @max_length, do: throw_error("RangeError", "Invalid array length")
         len
     end
   end
@@ -758,7 +886,7 @@ defmodule Browser.JS.Builtins do
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
   defp pairs(this, dir \\ :asc, from \\ nil) do
-    len = length_of(this)
+    len = length_of(this, false)
 
     {first, last} =
       if dir == :asc, do: {from || 0, len - 1}, else: {from || len - 1, 0}

@@ -264,6 +264,7 @@ defmodule Browser.JS.TypedArrays do
     put_hidden(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "ArrayBuffer", ctor)
+    def_species(ctor)
 
     def_fn(ctor, "isView", fn _, args ->
       case arg(args, 0) do
@@ -314,6 +315,7 @@ defmodule Browser.JS.TypedArrays do
 
     put_hidden(base_ctor, "prototype", base)
     put_hidden(base, "constructor", base_ctor)
+    def_species(base_ctor)
 
     for {name, kind, size} <- @kinds do
       p = new_object([], base)

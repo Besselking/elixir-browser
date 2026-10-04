@@ -254,6 +254,7 @@ defmodule Browser.JS.Collections do
     put_hidden(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Map", ctor)
+    def_species(ctor)
 
     def_fn(p, "get", fn this, args ->
       o = data!(this, :map)
@@ -334,6 +335,7 @@ defmodule Browser.JS.Collections do
     put_hidden(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Set", ctor)
+    def_species(ctor)
 
     def_fn(p, "add", fn this, args ->
       data!(this, :set)
@@ -488,6 +490,8 @@ defmodule Browser.JS.Collections do
     def_fn(r, "construct", fn _, args ->
       f = arg(args, 0)
       nt = if arg(args, 2) == :undefined, do: f, else: arg(args, 2)
+
+      unless constructor?(nt), do: throw_error("TypeError", "newTarget is not a constructor")
       construct(f, iterate_args(arg(args, 1)), nt)
     end)
 
