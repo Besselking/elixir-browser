@@ -9,6 +9,11 @@ mix run --no-halt            # opens the start page: a few sites and the demo pa
 BROWSER_URL=https://example.com mix run --no-halt
 mix test
 mix app.bundle               # macOS: self-contained dist/"Elixir Browser.app"
+mix reftest --fetch          # layout/CSS: web-platform-tests reference tests (not part of CI)
 ```
+
+`mix reftest` lays out each test page and its reference page, paints both with a small
+software painter (no window needed) and compares the pixels; `mix help reftest` lists the options
+(`--check` against `reftest.baseline`, `--dump DIR` to save the pictures of failing pairs).
 
 Requires Elixir 1.15+ and an Erlang/OTP with the `wx` application (Homebrew's `erlang` has it).
