@@ -2590,6 +2590,16 @@ defmodule Browser.Layout do
         _ -> it
       end
 
+    # the gap a fieldset's legend leaves in the top border is a place on the page too
+    it =
+      case it do
+        %{border: %{gap: {g0, g1}} = border} ->
+          %{it | border: %{border | gap: {g0 + dx, g1 + dx}}}
+
+        _ ->
+          it
+      end
+
     case it do
       %{type: :bgimage, layers: layers} ->
         %{it | layers: Enum.map(layers, &shift_layer(&1, dx, dy))}

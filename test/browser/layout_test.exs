@@ -3902,4 +3902,20 @@ defmodule Browser.LayoutTest do
     assert drop_bg > below
     assert index.(&(&1[:text] == "drop")) > drop_bg
   end
+
+  test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
+    page =
+      Browser.Page.build(
+        ~s|<span>pad</span><div style="display:inline-block;width:200px"><fieldset style="border:2px solid #000;border-radius:6px"><legend>Title</legend>x</fieldset></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+    rect = Enum.find(items, &(&1.type == :rect and is_map(Map.get(&1, :border))))
+    title = Enum.find(items, &(&1[:text] == "Title"))
+    {g0, g1} = rect.border.gap
+
+    assert g0 >= rect.x and g1 <= rect.x + rect.w
+    assert g0 <= title.x and g1 >= title.x + title.w
+  end
 end
