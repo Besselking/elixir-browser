@@ -95,26 +95,61 @@ defmodule Browser.JS.Props do
   defp virtual(_, _, _), do: nil
 
   @doc "The property descriptor object of an own property, or undefined."
-  def descriptor(obj, key) do
-    case state(obj, key) do
-      nil ->
-        :undefined
-
-      {:data, v, w, e, c} ->
-        new_object([{"value", v}, {"writable", w}, {"enumerable", e}, {"configurable", c}])
-
-      {:accessor, g, s, e, c} ->
-        new_object([{"get", g}, {"set", s}, {"enumerable", e}, {"configurable", c}])
+  def descriptor({:obj, id} = obj, key) do
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.get_own_property(obj, key)
+      _ -> state_to_object(state(obj, key))
     end
   end
+
+  @doc "The descriptor object for an own-property state (or `undefined`)."
+  def state_to_object(nil), do: :undefined
+
+  def state_to_object({:data, v, w, e, c}),
+    do: new_object([{"value", v}, {"writable", w}, {"enumerable", e}, {"configurable", c}])
+
+  def state_to_object({:accessor, g, s, e, c}),
+    do: new_object([{"get", g}, {"set", s}, {"enumerable", e}, {"configurable", c}])
+
+  @doc "The own property of a (non-proxy) object as `nil | {:data, ..} | {:accessor, ..}`."
+  def own_state(obj, key), do: state(obj, key)
+
+  @doc "Whether `desc` may be applied to a property in state `current` (nil: absent)."
+  def compatible?(extensible?, desc, current) do
+    if current == nil do
+      extensible?
+    else
+      try do
+        validate(current, desc, "x")
+        true
+      catch
+        {:js_error, _} -> false
+      end
+    end
+  end
+
+  @doc "Descriptor object to the field map (`ToPropertyDescriptor`)."
+  def to_property_descriptor(v), do: to_desc(v)
 
   @doc "Every own property name, enumerable or not: array indices, then the rest."
   def own_names({:obj, id}) do
     o = deref(id)
+
+    if Map.has_key?(o, :proxy) do
+      for k <- Browser.JS.Proxy.own_keys({:obj, id}), is_binary(k), do: k
+    else
+      own_names_plain(id, o)
+    end
+  end
+
+  def own_names(s) when is_binary(s), do: Interp.own_keys(s) ++ ["length"]
+  def own_names(_), do: []
+
+  defp own_names_plain(id, o) do
     base = Enum.reverse(o.keys)
 
     hidden =
-      (Map.keys(o.props) -- o.keys) |> Enum.reject(&match?({:private, _}, &1)) |> Enum.sort()
+      (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
 
     case o do
       %{class: :array} ->
@@ -136,12 +171,48 @@ defmodule Browser.JS.Props do
     end
   end
 
-  def own_names(s) when is_binary(s), do: Interp.own_keys(s) ++ ["length"]
-  def own_names(_), do: []
+  @doc "Every own key, strings first then symbols (a proxy's `ownKeys` result as it is)."
+  def all_own_keys({:obj, id} = o) do
+    if Map.has_key?(deref(id), :proxy),
+      do: Browser.JS.Proxy.own_keys(o),
+      else: own_names(o) ++ own_symbols(o)
+  end
+
+  def all_own_keys(v), do: own_names(v) ++ own_symbols(v)
+
+  @doc """
+  The own enumerable keys, strings first then symbols (a proxy's in the order of its `ownKeys`
+  trap, asking for the descriptor of every key that is not in `exclude`).
+  """
+  def enumerable_keys(o, exclude \\ [])
+
+  def enumerable_keys({:obj, id} = o, exclude) do
+    if Map.has_key?(deref(id), :proxy) do
+      for k <- Browser.JS.Proxy.own_keys(o),
+          k not in exclude,
+          d = descriptor(o, k),
+          d != :undefined,
+          truthy(Interp.get(d, "enumerable")),
+          do: k
+    else
+      Enum.reject(Interp.own_keys(o), &(&1 in exclude))
+    end
+  end
+
+  def enumerable_keys(s, exclude) when is_binary(s),
+    do: Enum.reject(Interp.own_keys(s), &(&1 in exclude))
+
+  def enumerable_keys(_, _), do: []
 
   @doc "The symbols an object has properties for."
   def own_symbols({:obj, id}) do
-    deref(id).props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+    o = deref(id)
+
+    if Map.has_key?(o, :proxy) do
+      for k <- Browser.JS.Proxy.own_keys({:obj, id}), match?({:symbol, _, _}, k), do: k
+    else
+      o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+    end
   end
 
   def own_symbols(_), do: []
@@ -202,7 +273,14 @@ defmodule Browser.JS.Props do
   def define({:obj, id} = obj, key, descriptor) do
     key = to_key(key)
     desc = to_desc(descriptor)
-    define_own(obj, id, key, desc)
+
+    if Map.has_key?(deref(id), :proxy) do
+      unless Browser.JS.Proxy.define_own_property(obj, key, descriptor, desc),
+        do: throw_error("TypeError", "'defineProperty' on proxy: trap returned falsish")
+    else
+      define_own(obj, id, key, desc)
+    end
+
     obj
   end
 
@@ -553,13 +631,26 @@ defmodule Browser.JS.Props do
   @doc "`Object.preventExtensions`."
   def prevent_extensions({:obj, id} = obj) do
     o = deref(id)
-    store(id, Map.put(o, :ext, false))
+
+    if Map.has_key?(o, :proxy) do
+      unless Browser.JS.Proxy.prevent_extensions(obj),
+        do: throw_error("TypeError", "'preventExtensions' on proxy: trap returned falsish")
+    else
+      store(id, Map.put(o, :ext, false))
+    end
+
     obj
   end
 
   def prevent_extensions(v), do: v
 
-  def extensible?({:obj, id}), do: Map.get(deref(id), :ext, true)
+  def extensible?({:obj, id} = obj) do
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.extensible?(obj)
+      o -> Map.get(o, :ext, true)
+    end
+  end
+
   def extensible?(_), do: false
 
   # private fields are outside freezing and sealing
@@ -569,6 +660,37 @@ defmodule Browser.JS.Props do
   def lock({:obj, id} = obj, freeze?) do
     o = deref(id)
 
+    if Map.has_key?(o, :proxy),
+      do: lock_proxy(obj, freeze?),
+      else: lock_plain(obj, id, o, freeze?)
+  end
+
+  def lock(v, _), do: v
+
+  defp lock_proxy(obj, freeze?) do
+    prevent_extensions(obj)
+
+    for k <- Browser.JS.Proxy.own_keys(obj) do
+      case descriptor(obj, k) do
+        :undefined ->
+          :ok
+
+        d ->
+          accessor? = has_property?(d, "get") or has_property?(d, "set")
+
+          fields =
+            if freeze? and not accessor?,
+              do: [{"configurable", false}, {"writable", false}],
+              else: [{"configurable", false}]
+
+          define(obj, k, new_object(fields))
+      end
+    end
+
+    obj
+  end
+
+  defp lock_plain(obj, id, o, freeze?) do
     attrs =
       Enum.reduce(public_keys(o), Map.get(o, :attrs, %{}), fn key, attrs ->
         accessor? = match?({:accessor, _, _}, o.props[key])
@@ -584,12 +706,33 @@ defmodule Browser.JS.Props do
     obj
   end
 
-  def lock(v, _), do: v
-
   @doc "`Object.isFrozen` (`freeze?` true) and `Object.isSealed`."
-  def locked?({:obj, id}, freeze?) do
+  def locked?({:obj, id} = obj, freeze?) do
     o = deref(id)
 
+    if Map.has_key?(o, :proxy),
+      do: locked_proxy?(obj, freeze?),
+      else: locked_plain?(o, freeze?)
+  end
+
+  def locked?(_, _), do: true
+
+  defp locked_proxy?(obj, freeze?) do
+    not extensible?(obj) and
+      Enum.all?(Browser.JS.Proxy.own_keys(obj), fn k ->
+        case descriptor(obj, k) do
+          :undefined ->
+            true
+
+          d ->
+            not truthy(Interp.get(d, "configurable")) and
+              (not freeze? or has_property?(d, "get") or has_property?(d, "set") or
+                 not truthy(Interp.get(d, "writable")))
+        end
+      end)
+  end
+
+  defp locked_plain?(o, freeze?) do
     not Map.get(o, :ext, true) and
       Enum.all?(public_keys(o), fn key ->
         a = Map.get(Map.get(o, :attrs, %{}), key, %{})
@@ -601,8 +744,6 @@ defmodule Browser.JS.Props do
       (o.class != :array or o.items == %{} or
          Map.get(o, :frozen, false) or (not freeze? and Map.get(o, :sealed, false)))
   end
-
-  def locked?(_, _), do: true
 
   # ── install ────────────────────────────────────────────────
 
@@ -639,7 +780,7 @@ defmodule Browser.JS.Props do
       if o in [:undefined, :null],
         do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-      new_object(for k <- own_names(o), d = descriptor(o, k), d != :undefined, do: {k, d})
+      new_object(for k <- all_own_keys(o), d = descriptor(o, k), d != :undefined, do: {k, d})
     end)
 
     def_fn.(object_ctor, "getOwnPropertyNames", fn _, args ->
@@ -679,8 +820,8 @@ defmodule Browser.JS.Props do
 
     def_fn.(object_ctor, "getPrototypeOf", fn _, args ->
       case arg(args, 0) do
-        {:obj, id} ->
-          deref(id).proto || :null
+        {:obj, _} = o ->
+          get_prototype_of(o)
 
         v when v in [:undefined, :null] ->
           throw_error("TypeError", "Cannot convert undefined or null to object")
@@ -746,7 +887,7 @@ defmodule Browser.JS.Props do
           if this in [:undefined, :null],
             do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-          proto_chain_has?(deref(id).proto, this)
+          proto_chain_has?(get_prototype_of({:obj, id}), this)
 
         _ ->
           false
@@ -776,10 +917,18 @@ defmodule Browser.JS.Props do
     end
   end
 
-  defp proto_chain_has?({:obj, id} = p, target),
-    do: p == target or proto_chain_has?(deref(id).proto, target)
+  defp proto_chain_has?({:obj, _} = p, target),
+    do: p == target or proto_chain_has?(get_prototype_of(p), target)
 
   defp proto_chain_has?(_, _), do: false
+
+  @doc "[[GetPrototypeOf]]."
+  def get_prototype_of({:obj, id} = o) do
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.get_prototype_of(o)
+      rec -> rec.proto || :null
+    end
+  end
 
   @doc """
   [[SetPrototypeOf]]: `true` when done, else why not: `:extensible`, `:cycle` or `:immutable`
@@ -790,11 +939,23 @@ defmodule Browser.JS.Props do
     current = rec.proto || :null
 
     cond do
-      current == p -> true
-      not Map.get(rec, :ext, true) -> :extensible
-      o == proto(:object) -> :immutable
-      proto_chain_has?(p, o) -> :cycle
-      true -> store(id, %{rec | proto: if(p == :null, do: nil, else: p)}) && true
+      Map.has_key?(rec, :proxy) ->
+        if Browser.JS.Proxy.set_prototype_of(o, p), do: true, else: :extensible
+
+      current == p ->
+        true
+
+      not Map.get(rec, :ext, true) ->
+        :extensible
+
+      o == proto(:object) ->
+        :immutable
+
+      proto_chain_has?(p, o) ->
+        :cycle
+
+      true ->
+        store(id, %{rec | proto: if(p == :null, do: nil, else: p)}) && true
     end
   end
 
@@ -805,9 +966,15 @@ defmodule Browser.JS.Props do
     if props in [:undefined, :null],
       do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-    descs = for k <- Interp.own_keys(props), do: {k, to_desc(Interp.get(props, k))}
+    descs = for k <- enumerable_keys(props), do: {k, Interp.get(props, k)}
+
+    descs = for {k, d} <- descs, do: {k, d, to_desc(d)}
     {:obj, id} = obj
-    for {k, d} <- descs, do: define_own(obj, id, k, d)
+
+    for {k, raw, d} <- descs do
+      if Map.has_key?(deref(id), :proxy), do: define(obj, k, raw), else: define_own(obj, id, k, d)
+    end
+
     obj
   end
 

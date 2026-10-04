@@ -65,6 +65,7 @@ defmodule Browser.JS.Builtins do
     declare(scope, "globalThis", global)
     declare(scope, :this, global)
     Browser.JS.Collections.install(scope)
+    Browser.JS.Proxy.install(scope)
 
     :erlang.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
     scope
@@ -88,15 +89,39 @@ defmodule Browser.JS.Builtins do
 
   defp class_tag({:obj, id} = o) do
     case deref(id) do
-      %{class: :array} -> "Array"
-      %{class: :function} -> "Function"
-      %{class: :regexp} -> "RegExp"
-      %{date: _} -> "Date"
-      %{prim: p} when is_binary(p) -> "String"
-      %{prim: p} when is_boolean(p) -> "Boolean"
-      %{prim: {:bigint, _}} -> "Object"
-      %{prim: _} -> "Number"
-      _ -> if error_object?(o), do: "Error", else: "Object"
+      %{proxy: _} ->
+        cond do
+          Browser.JS.Proxy.is_array(o) -> "Array"
+          function?(o) -> "Function"
+          true -> "Object"
+        end
+
+      %{class: :array} ->
+        "Array"
+
+      %{class: :function} ->
+        "Function"
+
+      %{class: :regexp} ->
+        "RegExp"
+
+      %{date: _} ->
+        "Date"
+
+      %{prim: p} when is_binary(p) ->
+        "String"
+
+      %{prim: p} when is_boolean(p) ->
+        "Boolean"
+
+      %{prim: {:bigint, _}} ->
+        "Object"
+
+      %{prim: _} ->
+        "Number"
+
+      _ ->
+        if error_object?(o), do: "Error", else: "Object"
     end
   end
 
@@ -228,6 +253,21 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
+  # [key, value] of the own enumerable string properties; a proxy is asked for each key's
+  # descriptor and then its value, one key at a time
+  defp enum_pairs(o) do
+    if Browser.JS.Proxy.proxy?(o) do
+      for k <- Browser.JS.Proxy.own_keys(o),
+          is_binary(k),
+          d = Browser.JS.Props.descriptor(o, k),
+          d != :undefined,
+          Interp.truthy(Interp.get(d, "enumerable")),
+          do: {k, Interp.get(o, k)}
+    else
+      for k <- own_keys(o), do: {k, Interp.get(o, k)}
+    end
+  end
+
   # ── Object ─────────────────────────────────────────────────
 
   defp install_object(scope, object_proto) do
@@ -251,17 +291,17 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(obj, "values", fn _, [o | _] ->
-      new_array(Enum.map(own_keys(o), &Interp.get(o, &1)))
+      new_array(Enum.map(enum_pairs(o), &elem(&1, 1)))
     end)
 
     def_fn(obj, "entries", fn _, [o | _] ->
-      new_array(Enum.map(own_keys(o), &new_array([&1, Interp.get(o, &1)])))
+      new_array(Enum.map(enum_pairs(o), fn {k, v} -> new_array([k, v]) end))
     end)
 
     def_fn(obj, "assign", fn _, [target | sources] ->
       for s <- sources,
           not nullish?(s),
-          k <- own_keys(s),
+          k <- Browser.JS.Props.enumerable_keys(s),
           do: Interp.put(target, k, Interp.get(s, k))
 
       target
@@ -315,7 +355,7 @@ defmodule Browser.JS.Builtins do
       {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
     )
 
-    def_fn(arr, "isArray", fn _, args -> array?(arg(args, 0)) end)
+    def_fn(arr, "isArray", fn _, args -> Browser.JS.Proxy.is_array(arg(args, 0)) end)
     put_hidden(arr, "fromAsync", Browser.JS.Prelude.from_async())
     def_fn(arr, "of", fn _, args -> new_array(args) end)
 
@@ -603,12 +643,10 @@ defmodule Browser.JS.Builtins do
     end)
 
     array_fn(p, "concat", fn this, args ->
-      first = if array?(this), do: array_list(this), else: [this_obj(this)]
       target = species_target(this, 0)
+      items = [this_obj(this) | args]
 
-      new_array(
-        first ++ Enum.flat_map(args, fn a -> if array?(a), do: array_list(a), else: [a] end)
-      )
+      new_array(Enum.flat_map(items, &concat_items/1))
       |> species_fill_from(target, true)
     end)
 
@@ -916,6 +954,33 @@ defmodule Browser.JS.Builtins do
     unless function?(f), do: throw_error("TypeError", "#{inspect_js(f, 0, [])} is not a function")
     f
   end
+
+  # the elements `concat` adds for one argument: its elements when it is spreadable
+  defp concat_items({:obj, _} = v) do
+    spreadable? =
+      case Interp.get(v, {:symbol, :isConcatSpreadable, "Symbol.isConcatSpreadable"}) do
+        :undefined -> Browser.JS.Proxy.is_array(v)
+        x -> Interp.truthy(x)
+      end
+
+    cond do
+      not spreadable? ->
+        [v]
+
+      array?(v) ->
+        array_list(v)
+
+      true ->
+        len = v |> Interp.get("length") |> to_length()
+
+        if len > 9_007_199_254_740_991 - 1,
+          do: throw_error("TypeError", "Invalid array length")
+
+        for i <- 0..(len - 1)//1, Interp.has_property?(v, i), do: Interp.get(v, i)
+    end
+  end
+
+  defp concat_items(v), do: [v]
 
   defp to_length(v) do
     case to_num(v) do
