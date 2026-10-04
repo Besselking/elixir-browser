@@ -463,6 +463,170 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # spec lengths of the built-in functions, by name (a handful of names are shared
+  # between objects with different arities; the common one wins)
+  @native_lengths %{
+    "Array" => 1.0,
+    "ArrayBuffer" => 1.0,
+    "Boolean" => 1.0,
+    "Date" => 7.0,
+    "Error" => 1.0,
+    "EvalError" => 1.0,
+    "Function" => 1.0,
+    "Number" => 1.0,
+    "Object" => 1.0,
+    "Promise" => 1.0,
+    "Proxy" => 2.0,
+    "RangeError" => 1.0,
+    "ReferenceError" => 1.0,
+    "RegExp" => 2.0,
+    "String" => 1.0,
+    "SyntaxError" => 1.0,
+    "TypeError" => 1.0,
+    "URIError" => 1.0,
+    "UTC" => 7.0,
+    "abs" => 1.0,
+    "acos" => 1.0,
+    "acosh" => 1.0,
+    "add" => 1.0,
+    "all" => 1.0,
+    "allSettled" => 1.0,
+    "any" => 1.0,
+    "apply" => 2.0,
+    "asin" => 1.0,
+    "asinh" => 1.0,
+    "assign" => 2.0,
+    "at" => 1.0,
+    "atan" => 1.0,
+    "atan2" => 2.0,
+    "atanh" => 1.0,
+    "bind" => 1.0,
+    "catch" => 1.0,
+    "cbrt" => 1.0,
+    "ceil" => 1.0,
+    "charAt" => 1.0,
+    "charCodeAt" => 1.0,
+    "clz32" => 1.0,
+    "codePointAt" => 1.0,
+    "concat" => 1.0,
+    "construct" => 2.0,
+    "copyWithin" => 2.0,
+    "cos" => 1.0,
+    "cosh" => 1.0,
+    "create" => 2.0,
+    "decodeURI" => 1.0,
+    "decodeURIComponent" => 1.0,
+    "defineProperties" => 2.0,
+    "defineProperty" => 3.0,
+    "delete" => 1.0,
+    "deleteProperty" => 2.0,
+    "encodeURI" => 1.0,
+    "encodeURIComponent" => 1.0,
+    "endsWith" => 1.0,
+    "eval" => 1.0,
+    "every" => 1.0,
+    "exp" => 1.0,
+    "expm1" => 1.0,
+    "fill" => 1.0,
+    "filter" => 1.0,
+    "finally" => 1.0,
+    "find" => 1.0,
+    "findIndex" => 1.0,
+    "findLast" => 1.0,
+    "findLastIndex" => 1.0,
+    "flatMap" => 1.0,
+    "floor" => 1.0,
+    "forEach" => 1.0,
+    "freeze" => 1.0,
+    "from" => 1.0,
+    "fromCharCode" => 1.0,
+    "fromCodePoint" => 1.0,
+    "fromEntries" => 1.0,
+    "fround" => 1.0,
+    "get" => 1.0,
+    "getOwnPropertyDescriptor" => 2.0,
+    "getOwnPropertyDescriptors" => 1.0,
+    "getOwnPropertyNames" => 1.0,
+    "getOwnPropertySymbols" => 1.0,
+    "getPrototypeOf" => 1.0,
+    "has" => 1.0,
+    "hasOwn" => 2.0,
+    "hasOwnProperty" => 1.0,
+    "hypot" => 2.0,
+    "imul" => 2.0,
+    "includes" => 1.0,
+    "indexOf" => 1.0,
+    "is" => 2.0,
+    "isArray" => 1.0,
+    "isExtensible" => 1.0,
+    "isFinite" => 1.0,
+    "isFrozen" => 1.0,
+    "isInteger" => 1.0,
+    "isNaN" => 1.0,
+    "isPrototypeOf" => 1.0,
+    "isSafeInteger" => 1.0,
+    "isSealed" => 1.0,
+    "isView" => 1.0,
+    "join" => 1.0,
+    "lastIndexOf" => 1.0,
+    "localeCompare" => 1.0,
+    "log" => 1.0,
+    "log10" => 1.0,
+    "log1p" => 1.0,
+    "log2" => 1.0,
+    "map" => 1.0,
+    "match" => 1.0,
+    "matchAll" => 1.0,
+    "max" => 2.0,
+    "min" => 2.0,
+    "padEnd" => 1.0,
+    "padStart" => 1.0,
+    "parse" => 1.0,
+    "parseFloat" => 1.0,
+    "parseInt" => 2.0,
+    "pow" => 2.0,
+    "preventExtensions" => 1.0,
+    "propertyIsEnumerable" => 1.0,
+    "push" => 1.0,
+    "race" => 1.0,
+    "raw" => 1.0,
+    "reduce" => 1.0,
+    "reduceRight" => 1.0,
+    "reject" => 1.0,
+    "repeat" => 1.0,
+    "replace" => 2.0,
+    "replaceAll" => 2.0,
+    "resolve" => 1.0,
+    "round" => 1.0,
+    "seal" => 1.0,
+    "search" => 1.0,
+    "set" => 2.0,
+    "setPrototypeOf" => 2.0,
+    "sign" => 1.0,
+    "sin" => 1.0,
+    "sinh" => 1.0,
+    "slice" => 2.0,
+    "some" => 1.0,
+    "sort" => 1.0,
+    "splice" => 2.0,
+    "split" => 2.0,
+    "sqrt" => 1.0,
+    "startsWith" => 1.0,
+    "stringify" => 3.0,
+    "substr" => 2.0,
+    "substring" => 2.0,
+    "tan" => 1.0,
+    "tanh" => 1.0,
+    "then" => 2.0,
+    "toExponential" => 1.0,
+    "toFixed" => 1.0,
+    "toPrecision" => 1.0,
+    "toSpliced" => 2.0,
+    "trunc" => 1.0,
+    "unshift" => 1.0,
+    "with" => 2.0
+  }
+
   defp function_prop(id, %{generator: true} = o, "prototype") do
     p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
     put_hidden({:obj, id}, "prototype", p)
@@ -505,6 +669,9 @@ defmodule Browser.JS.Interp do
     do:
       Enum.count(c.params, &(not match?({:rest, _}, &1) and not match?({:default, _, _}, &1))) *
         1.0
+
+  defp function_prop(_id, %{fun: {:native, name, _}}, "length"),
+    do: Map.get(@native_lengths, name, 0.0)
 
   defp function_prop(_id, _o, _key), do: :undefined
 
@@ -1233,11 +1400,21 @@ defmodule Browser.JS.Interp do
   def get_with_receiver({:obj, id}, key, receiver), do: lookup(deref(id), to_key(key), receiver)
   def get_with_receiver(_, _, _), do: :undefined
 
-  defp bind_params([], _, _), do: :ok
+  # a parameter list with initialisers gets a temporal dead zone: every name
+  # reads as uninitialised until its own binding runs
+  defp bind_params(params, args, scope) do
+    if Enum.any?(params, &match?({:default, _, _}, &1)) do
+      for p <- params, name <- pattern_names(p, []), do: declare(scope, name, :tdz)
+    end
 
-  defp bind_params([{:rest, pat}], args, scope), do: bind(pat, new_array(args), scope, :let)
+    bind_params_list(params, args, scope)
+  end
 
-  defp bind_params([p | ps], args, scope) do
+  defp bind_params_list([], _, _), do: :ok
+
+  defp bind_params_list([{:rest, pat}], args, scope), do: bind(pat, new_array(args), scope, :let)
+
+  defp bind_params_list([p | ps], args, scope) do
     {arg, rest} =
       case args do
         [a | r] -> {a, r}
@@ -1245,7 +1422,7 @@ defmodule Browser.JS.Interp do
       end
 
     bind(p, arg, scope, :let)
-    bind_params(ps, rest, scope)
+    bind_params_list(ps, rest, scope)
   end
 
   defp make_fn({:gen, fun}, env) do
@@ -1867,9 +2044,17 @@ defmodule Browser.JS.Interp do
 
   def ev({:id, name}, env) do
     case lookup_var(env, name) do
-      {:ok, v} -> v
-      :error when name == "arguments" -> lazy_arguments(env)
-      :error -> named_global(name)
+      {:ok, :tdz} ->
+        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
+      {:ok, v} ->
+        v
+
+      :error when name == "arguments" ->
+        lazy_arguments(env)
+
+      :error ->
+        named_global(name)
     end
   end
 
