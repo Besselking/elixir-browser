@@ -683,7 +683,18 @@ defmodule Browser.JS.Builtins do
 
     array_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
-      new_array(flatten(elems(this), depth))
+      target = species_target(this, 0)
+      new_array(flatten(elems(this), depth)) |> species_fill_from(target, false)
+    end)
+
+    array_fn(p, "flatMap", fn this, args ->
+      f = callable!(arg(args, 0))
+      target = species_target(this, 0)
+
+      mapped =
+        for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
+
+      new_array(flatten(mapped, 1)) |> species_fill_from(target, false)
     end)
 
     array_fn(p, "forEach", fn this, args ->
