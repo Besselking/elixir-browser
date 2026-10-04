@@ -1247,7 +1247,7 @@ defmodule Browser.Session do
       )
 
     opts = if request.method == :post, do: [method: :post, body: request.body], else: []
-    load(state, request.url, :push, opts)
+    load(state, request.url, :push, [initiator: state.url] ++ opts)
   end
 
   # re-render the controls from `form_state`; layout follows in the caller
@@ -1282,7 +1282,7 @@ defmodule Browser.Session do
         base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
-        fetch: &Fetch.load/1
+        fetch: &Fetch.load(&1, initiator: page.url)
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
@@ -1398,7 +1398,7 @@ defmodule Browser.Session do
     sync_buttons(%{state | history: history, url: url, page: page})
   end
 
-  defp js_effect({:navigate, url}, state), do: load(state, url, :push)
+  defp js_effect({:navigate, url}, state), do: load(state, url, :push, initiator: state.url)
 
   defp js_effect({:scroll_to, x, y}, state) do
     state
@@ -1580,7 +1580,7 @@ defmodule Browser.Session do
 
     if fragment != nil and target == here and state.page != nil,
       do: go_to_fragment(state, url, fragment),
-      else: load(state, url, :push)
+      else: load(state, url, :push, initiator: state.url)
   end
 
   # the address bar shows `text`; the change is not something the user typed

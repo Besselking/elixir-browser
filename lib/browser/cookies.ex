@@ -6,7 +6,21 @@ defmodule Browser.Cookies do
   header for a request. Cookies live in a public ETS table owned by this process, keyed by
   `{domain, path, name}`, and last until the browser quits (session cookies and persistent
   ones alike). `Domain`, `Path`, `Expires`, `Max-Age`, `Secure`, `HttpOnly` and `SameSite`
-  are parsed; `SameSite` is kept but not enforced, as requests do not know their initiator.
+  are parsed.
+
+  Security checks, as in modern browsers:
+
+    * `SameSite`: a cookie without the attribute counts as `Lax`. In a cross-site request
+      (the initiator's site differs from the target's, anywhere in a redirect chain) `Strict`
+      cookies are neither sent nor set, and `Lax` ones only travel on top-level GET
+      navigations. `None` needs `Secure`.
+    * the `__Secure-` and `__Host-` name prefixes demand `Secure` (and, for `__Host-`, no
+      `Domain` and `Path=/`)
+    * `Domain` may not name a public suffix (a small built-in list) or an IP address
+    * an insecure page cannot overwrite a `Secure` cookie
+    * size limits, no control characters, and lifetimes capped at 400 days
+
+  Requests describe themselves with `cross_site:` and `navigation:` options, see `header/2`.
   """
   use GenServer
 
@@ -14,6 +28,17 @@ defmodule Browser.Cookies do
   @max_per_domain 50
   @max_total 3000
   @max_size 4096
+  @max_attr 1024
+  @max_age 400 * 86_400
+
+  # no public suffix list ships with Erlang: the multi-label suffixes people actually meet
+  @public_suffixes ~w(co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk net.uk sch.uk
+    com.au net.au org.au edu.au gov.au co.nz org.nz net.nz co.jp ne.jp or.jp ac.jp
+    com.br net.br org.br co.in net.in org.in co.za org.za com.cn net.cn org.cn gov.cn
+    com.mx com.ar com.tr com.sg com.hk com.tw co.kr co.il
+    github.io gitlab.io herokuapp.com appspot.com blogspot.com netlify.app
+    vercel.app pages.dev workers.dev web.app firebaseapp.com cloudfront.net
+    s3.amazonaws.com azurewebsites.net)
 
   defmodule Cookie do
     @moduledoc false
@@ -55,6 +80,10 @@ defmodule Browser.Cookies do
   @doc """
   Keeps the cookies of the `Set-Cookie` header values `set_cookies` (strings or charlists)
   of a response to `url`. Invalid ones are ignored; an expired one deletes its old self.
+
+  Options: `cross_site: true` when the request was made from another site, `navigation: true`
+  for a top-level navigation (together they decide which `SameSite` cookies may be set), and
+  `http: false` for `document.cookie` (no `HttpOnly`).
   """
   def store(url, set_cookies, opts \\ []) do
     with true <- table?(),
@@ -70,7 +99,8 @@ defmodule Browser.Cookies do
 
   @doc """
   The `Cookie` request header value for `url`, or nil when no cookie applies. `http: false`
-  (for `document.cookie`) leaves out `HttpOnly` cookies.
+  (for `document.cookie`) leaves out `HttpOnly` cookies. `cross_site:`, `navigation:` and
+  `method:` (default `:get`) describe the request for `SameSite`, see `store/3`.
   """
   def header(url, opts \\ []) do
     case matching(url, opts) do
@@ -89,13 +119,15 @@ defmodule Browser.Cookies do
       https? = uri.scheme == "https"
       http? = Keyword.get(opts, :http, true)
       now = now()
+      send? = &send_same_site?(&1, opts)
 
       for {_, c} <- :ets.tab2list(@table),
           alive?(c, now),
           domain_match?(host, c),
           path_match?(path, c.path),
           https? or not c.secure,
-          http? or not c.http_only do
+          http? or not c.http_only,
+          send?.(c) do
         c
       end
       |> Enum.sort_by(&{-String.length(&1.path), &1.created_at})
@@ -118,24 +150,33 @@ defmodule Browser.Cookies do
     with true <- byte_size(header) <= @max_size,
          [name, value] <- split_pair(pair),
          true <- name != "" or value != "",
+         true <- byte_size(name) + byte_size(value) <= @max_size,
+         true <- clean?(name) and clean?(value),
          host = String.downcase(uri.host),
          attrs = parse_attrs(attrs),
+         true <- Enum.all?(attrs, fn {_, v} -> byte_size(v) <= @max_attr and clean?(v) end),
          {:ok, domain, host_only} <- cookie_domain(attrs["domain"], host),
          secure = Map.has_key?(attrs, "secure"),
          true <- not secure or uri.scheme == "https",
+         same_site = same_site(attrs["samesite"]),
+         true <- same_site != :none or secure,
+         path = cookie_path(attrs["path"], uri),
+         true <- prefix_ok?(name, value, secure, host_only, path, attrs),
+         true <- not insecure_overwrite?(uri, domain, name, path),
          http_only = Map.has_key?(attrs, "httponly"),
-         true <- Keyword.get(opts, :http, true) or not http_only do
+         true <- Keyword.get(opts, :http, true) or not http_only,
+         true <- same_site_may_set?(same_site, opts) do
       %Cookie{
         name: name,
         value: value,
         domain: domain,
         host_only: host_only,
-        path: cookie_path(attrs["path"], uri),
+        path: path,
         expires_at: expiry(attrs),
         created_at: System.monotonic_time(),
         secure: secure,
         http_only: http_only,
-        same_site: same_site(attrs["samesite"])
+        same_site: same_site
       }
     else
       _ -> nil
@@ -159,6 +200,96 @@ defmodule Browser.Cookies do
     end
   end
 
+  # no control characters (a `;` or `=` cannot occur: they split the header first)
+  defp clean?(str), do: not String.match?(str, ~r/[\x00-\x08\x0A-\x1F\x7F]/)
+
+  # `__Secure-` and `__Host-` (any case); a nameless cookie's value is checked as the name
+  defp prefix_ok?(name, value, secure, host_only, path, attrs) do
+    name = String.downcase(if name == "", do: value, else: name)
+
+    cond do
+      String.starts_with?(name, "__host-") ->
+        secure and host_only and path == "/" and not Map.has_key?(attrs, "domain")
+
+      String.starts_with?(name, "__secure-") ->
+        secure
+
+      true ->
+        true
+    end
+  end
+
+  # a page on http cannot replace or shadow a Secure cookie of the same name
+  defp insecure_overwrite?(%URI{scheme: "https"}, _domain, _name, _path), do: false
+
+  defp insecure_overwrite?(_uri, domain, name, path) do
+    overlap = fn a, b ->
+      a == b or String.ends_with?(a, "." <> b) or String.ends_with?(b, "." <> a)
+    end
+
+    Enum.any?(:ets.tab2list(@table), fn {_, c} ->
+      c.secure and c.name == name and alive?(c, now()) and overlap.(c.domain, domain) and
+        (path_match?(path, c.path) or path_match?(c.path, path))
+    end)
+  end
+
+  # SameSite on the way out: unset counts as Lax
+  defp send_same_site?(%Cookie{same_site: same_site}, opts) do
+    if Keyword.get(opts, :cross_site, false) do
+      case same_site || :lax do
+        :none -> true
+        :strict -> false
+        :lax -> Keyword.get(opts, :navigation, false) and Keyword.get(opts, :method, :get) == :get
+      end
+    else
+      true
+    end
+  end
+
+  # SameSite on the way in: a cross-site response sets only None cookies, plus Lax ones when
+  # it answers a top-level navigation
+  defp same_site_may_set?(same_site, opts) do
+    if Keyword.get(opts, :cross_site, false) do
+      case same_site || :lax do
+        :none -> true
+        :strict -> false
+        :lax -> Keyword.get(opts, :navigation, false)
+      end
+    else
+      true
+    end
+  end
+
+  @doc """
+  Whether `a` and `b` (URLs) are the same site: same scheme and registrable domain. Hosts
+  are compared by their last two labels, three under a known multi-label public suffix.
+  """
+  def same_site?(a, b) do
+    with %URI{scheme: sa, host: ha} when is_binary(ha) <- URI.parse(a),
+         %URI{scheme: sb, host: hb} when is_binary(hb) <- URI.parse(b) do
+      sa == sb and registrable(ha) == registrable(hb)
+    else
+      _ -> false
+    end
+  end
+
+  defp registrable(host) do
+    host = String.downcase(host)
+    labels = String.split(host, ".")
+
+    suffix =
+      Enum.find([3, 2], fn n ->
+        length(labels) > n and
+          labels |> Enum.take(-n) |> Enum.join(".") |> then(&(&1 in @public_suffixes))
+      end)
+
+    cond do
+      ip?(host) or length(labels) < 3 -> host
+      suffix -> labels |> Enum.take(-(suffix + 1)) |> Enum.join(".")
+      true -> labels |> Enum.take(-2) |> Enum.join(".")
+    end
+  end
+
   defp cookie_domain(nil, host), do: {:ok, host, true}
   defp cookie_domain("", host), do: {:ok, host, true}
 
@@ -166,7 +297,9 @@ defmodule Browser.Cookies do
     domain = domain |> String.trim_leading(".") |> String.downcase()
 
     cond do
+      domain == host and domain in @public_suffixes -> {:ok, host, true}
       domain == host -> {:ok, host, false}
+      domain in @public_suffixes -> :error
       # no public suffix list: a bare "com" is the one thing we can spot
       not String.contains?(domain, ".") -> :error
       ip?(host) -> :error
@@ -191,12 +324,18 @@ defmodule Browser.Cookies do
   # Max-Age beats Expires; a non-positive Max-Age expires the cookie at once
   defp expiry(%{"max-age" => max_age} = attrs) do
     case Integer.parse(max_age) do
-      {n, ""} -> if n <= 0, do: 0, else: now() + n
+      {n, ""} -> if n <= 0, do: 0, else: now() + min(n, @max_age)
       _ -> expiry(Map.delete(attrs, "max-age"))
     end
   end
 
-  defp expiry(%{"expires" => date}), do: parse_date(date)
+  defp expiry(%{"expires" => date}) do
+    case parse_date(date) do
+      nil -> nil
+      at -> min(at, now() + @max_age)
+    end
+  end
+
   defp expiry(_), do: nil
 
   defp same_site(nil), do: nil
