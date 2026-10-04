@@ -126,7 +126,7 @@ defmodule Browser.JS.Builtins do
 
   defp constructor(scope, name, proto, fun) do
     f = native(name, fun)
-    put_hidden(f, "prototype", proto)
+    put_const(f, "prototype", proto)
     put_hidden(proto, "constructor", f)
     declare(scope, name, f)
     f
@@ -1029,6 +1029,11 @@ defmodule Browser.JS.Builtins do
   # ── String / Number / Boolean ──────────────────────────────
 
   defp install_primitives(scope) do
+    # the prototypes are themselves a String, a Number and a Boolean
+    wrap(proto(:string), "")
+    wrap(proto(:number), 0.0)
+    wrap(proto(:boolean), false)
+
     str =
       constructor(scope, "String", proto(:string), fn this, args ->
         s =
