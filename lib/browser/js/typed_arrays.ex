@@ -318,6 +318,45 @@ defmodule Browser.JS.TypedArrays do
     put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "ArrayBuffer")
   end
 
+  # length, byteLength, byteOffset, buffer and @@toStringTag are getters on %TypedArray%.prototype
+  defp install_ta_accessors(base) do
+    getter = fn name, f ->
+      Props.define_accessor(base, name,
+        get:
+          native(to_string(name), fn this, _ ->
+            unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
+            {:obj, id} = this
+            %{host: {__MODULE__, {:ta, _, bid, _, _} = d}} = deref(id)
+            f.(d, detached?(bid))
+          end),
+        enumerable: false
+      )
+    end
+
+    getter.("length", fn {:ta, _, _, _, len}, gone -> if(gone, do: 0, else: len) * 1.0 end)
+
+    getter.("byteLength", fn {:ta, kind, _, _, len}, gone ->
+      if(gone, do: 0, else: len * size_of(kind)) * 1.0
+    end)
+
+    getter.("byteOffset", fn {:ta, _, _, off, _}, gone -> if(gone, do: 0, else: off) * 1.0 end)
+    getter.("buffer", fn {:ta, _, bid, _, _}, _ -> buffer_object(bid) end)
+
+    Props.define_accessor(base, {:symbol, :toStringTag, "Symbol.toStringTag"},
+      get:
+        native("get [Symbol.toStringTag]", fn this, _ ->
+          if ta?(this) do
+            {:obj, id} = this
+            %{host: {__MODULE__, {:ta, kind, _, _, _}}} = deref(id)
+            for({n, ^kind, _} <- @kinds, do: n) |> hd()
+          else
+            :undefined
+          end
+        end),
+      enumerable: false
+    )
+  end
+
   defp rel_index(:undefined, _len, default), do: default
 
   defp rel_index(v, len, _default) do
@@ -339,6 +378,7 @@ defmodule Browser.JS.TypedArrays do
     put_const(base_ctor, "prototype", base)
     put_hidden(base, "constructor", base_ctor)
     def_species(base_ctor)
+    install_ta_accessors(base)
 
     for {name, kind, size} <- @kinds do
       p = new_object([], base)
@@ -351,9 +391,8 @@ defmodule Browser.JS.TypedArrays do
       store(cid, %{deref(cid) | proto: base_ctor})
       put_const(ctor, "prototype", p)
       put_hidden(p, "constructor", ctor)
-      put_hidden(ctor, "BYTES_PER_ELEMENT", size * 1.0)
-      put_hidden(p, "BYTES_PER_ELEMENT", size * 1.0)
-      put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, name)
+      put_const(ctor, "BYTES_PER_ELEMENT", size * 1.0)
+      put_const(p, "BYTES_PER_ELEMENT", size * 1.0)
       declare(scope, name, ctor)
 
       def_fn(ctor, "from", fn _, args ->
