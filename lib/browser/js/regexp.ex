@@ -417,7 +417,7 @@ defmodule Browser.JS.RegExp do
         end
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "RegExp", ctor)
     def_species(ctor)

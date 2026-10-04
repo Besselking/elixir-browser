@@ -280,7 +280,7 @@ defmodule Browser.JS.TypedArrays do
         new_buffer(:binary.copy(<<0>>, n))
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "ArrayBuffer", ctor)
     def_species(ctor)
@@ -336,7 +336,7 @@ defmodule Browser.JS.TypedArrays do
         throw_error("TypeError", "Abstract class TypedArray not directly constructable")
       end)
 
-    put_hidden(base_ctor, "prototype", base)
+    put_const(base_ctor, "prototype", base)
     put_hidden(base, "constructor", base_ctor)
     def_species(base_ctor)
 
@@ -349,7 +349,7 @@ defmodule Browser.JS.TypedArrays do
 
       {:obj, cid} = ctor
       store(cid, %{deref(cid) | proto: base_ctor})
-      put_hidden(ctor, "prototype", p)
+      put_const(ctor, "prototype", p)
       put_hidden(p, "constructor", ctor)
       put_hidden(ctor, "BYTES_PER_ELEMENT", size * 1.0)
       put_hidden(p, "BYTES_PER_ELEMENT", size * 1.0)
@@ -769,7 +769,7 @@ defmodule Browser.JS.TypedArrays do
         new_host(__MODULE__, {:dv, buffer_id(buf), off, len}, p)
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     put_hidden(p, {:symbol, :toStringTag, "Symbol.toStringTag"}, "DataView")
     declare(scope, "DataView", ctor)
@@ -845,7 +845,7 @@ defmodule Browser.JS.TypedArrays do
         o
       end)
 
-    put_hidden(enc, "prototype", ep)
+    put_const(enc, "prototype", ep)
     put_hidden(ep, "constructor", enc)
     declare(scope, "TextEncoder", enc)
 
@@ -863,7 +863,7 @@ defmodule Browser.JS.TypedArrays do
         o
       end)
 
-    put_hidden(dec, "prototype", dp)
+    put_const(dec, "prototype", dp)
     put_hidden(dp, "constructor", dec)
     declare(scope, "TextDecoder", dec)
 

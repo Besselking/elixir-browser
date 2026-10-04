@@ -52,7 +52,7 @@ defmodule Browser.JS.Collections do
         {:symbol, :counters.get(counter, 1), desc}
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Symbol", ctor)
 
@@ -251,7 +251,7 @@ defmodule Browser.JS.Collections do
         m
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Map", ctor)
     def_species(ctor)
@@ -332,7 +332,7 @@ defmodule Browser.JS.Collections do
         s
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Set", ctor)
     def_species(ctor)
@@ -403,7 +403,7 @@ defmodule Browser.JS.Collections do
         m
       end)
 
-    put_hidden(wm_ctor, "prototype", wm)
+    put_const(wm_ctor, "prototype", wm)
     put_hidden(wm, "constructor", wm_ctor)
     declare(scope, "WeakMap", wm_ctor)
 
@@ -443,7 +443,7 @@ defmodule Browser.JS.Collections do
         s
       end)
 
-    put_hidden(ws_ctor, "prototype", ws)
+    put_const(ws_ctor, "prototype", ws)
     put_hidden(ws, "constructor", ws_ctor)
     declare(scope, "WeakSet", ws_ctor)
 

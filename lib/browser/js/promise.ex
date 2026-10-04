@@ -229,7 +229,7 @@ defmodule Browser.JS.Promise do
         promise
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Promise", ctor)
     def_species(ctor)

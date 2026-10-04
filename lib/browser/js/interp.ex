@@ -690,6 +690,13 @@ defmodule Browser.JS.Interp do
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 
+  @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."
+  def put_const({:obj, id}, key, v) do
+    o = deref(id)
+    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: false, e: false})
+    store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
+  end
+
   def put({:obj, id} = obj, {:private, _} = key, v) do
     o = deref(id)
 
