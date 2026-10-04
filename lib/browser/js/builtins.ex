@@ -826,7 +826,16 @@ defmodule Browser.JS.Builtins do
             "The comparison function must be either a function or undefined"
           )
 
-      {undefs, list} = this |> elems() |> Enum.split_with(&(&1 == :undefined))
+      o = this_obj(this)
+
+      # the values are read first (holes skipped), sorted, then written back and the
+      # slots left over deleted, so getters and setters see the spec's order of access
+      items =
+        if plain_elements?(o),
+          do: array_list(o),
+          else: for({_, v} <- pairs(o), do: v)
+
+      {undefs, list} = Enum.split_with(items, &(&1 == :undefined))
 
       cmp =
         if function?(f),
@@ -838,9 +847,28 @@ defmodule Browser.JS.Builtins do
           end,
           else: fn a, b -> to_str(a) <= to_str(b) end
 
-      put_elems(this, Enum.sort(list, cmp) ++ undefs)
-      this
+      sorted = Enum.sort(list, cmp) ++ undefs
+
+      if plain_elements?(o) do
+        put_elems(o, sorted)
+      else
+        len = length_of(o, false)
+        sorted |> Enum.with_index() |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
+
+        for i <- length(sorted)..(len - 1)//1 do
+          unless Interp.delete(o, float(i)),
+            do: throw_error("TypeError", "Cannot delete property '#{i}'")
+        end
+      end
+
+      o
     end)
+  end
+
+  # an array without holes or accessor elements, which can be sorted as a plain list
+  defp plain_elements?(o) do
+    array?(o) and not has_holes?(o) and
+      not Enum.any?(array_list(o), &match?({:accessor, _, _}, &1))
   end
 
   # ── array methods on anything with a `length` ──────────────
