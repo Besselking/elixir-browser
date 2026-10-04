@@ -686,6 +686,38 @@ defmodule Browser.JSTest do
     end
   end
 
+  describe "huge sparse arrays and prototypes" do
+    test "a sparse array with a huge length is searched without visiting every slot" do
+      assert js("var a = []; a[4294967294] = 'x'; [a.indexOf('x'), a.lastIndexOf('x')]") ==
+               [4_294_967_294.0, 4_294_967_294.0]
+
+      assert js("var a = []; a[4294967294] = 'x'; a.indexOf('x', Infinity)") == -1.0
+
+      assert js("var a = [1, 2, 3, 2]; [a.indexOf(2, 2), a.indexOf(2, -4), a.lastIndexOf(2, -2)]") ==
+               [3.0, 1.0, 1.0]
+
+      assert js(
+               "var a = []; Object.defineProperty(a, 4294967294, {value: 1}); Object.keys(a).length"
+             ) ==
+               0.0
+
+      assert js("var a = []; a[4294967294] = 1; a.hasOwnProperty('4294967294')") == true
+    end
+
+    test "Reflect.setPrototypeOf reports cycles and the immutable Object.prototype" do
+      assert js("Reflect.setPrototypeOf(Object.prototype, {})") == false
+      assert js("var a = {}, b = Object.create(a); Reflect.setPrototypeOf(a, b)") == false
+
+      assert js("var a = {}; Reflect.setPrototypeOf(a, Array.prototype) && a instanceof Array") ==
+               true
+    end
+
+    test "a typed array can not be made from an array-like with an absurd length" do
+      assert js("try { new Uint8Array({length: Math.pow(2, 53)}) } catch (e) { e.name }") ==
+               "RangeError"
+    end
+  end
+
   describe "promise combinators" do
     test "an iterator is closed when resolving an element throws, and the result rejects" do
       src = """

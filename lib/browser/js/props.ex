@@ -705,22 +705,12 @@ defmodule Browser.JS.Props do
           throw_error("TypeError", "Object prototype may only be an Object or null: #{to_str(p)}")
 
       case o do
-        {:obj, id} ->
-          rec = deref(id)
-          current = rec.proto || :null
-
-          cond do
-            current == p ->
-              :ok
-
-            not Map.get(rec, :ext, true) ->
-              throw_error("TypeError", "#{to_str(o)} is not extensible")
-
-            cycle?(p, o) ->
-              throw_error("TypeError", "Cyclic __proto__ value")
-
-            true ->
-              store(id, %{rec | proto: if(p == :null, do: nil, else: p)})
+        {:obj, _} ->
+          case set_prototype_of(o, p) do
+            true -> :ok
+            :extensible -> throw_error("TypeError", "#{to_str(o)} is not extensible")
+            :cycle -> throw_error("TypeError", "Cyclic __proto__ value")
+            :immutable -> throw_error("TypeError", "Immutable prototype object")
           end
 
         v when v in [:undefined, :null] ->
@@ -791,7 +781,22 @@ defmodule Browser.JS.Props do
 
   defp proto_chain_has?(_, _), do: false
 
-  defp cycle?(new_proto, obj), do: proto_chain_has?(new_proto, obj)
+  @doc """
+  [[SetPrototypeOf]]: `true` when done, else why not: `:extensible`, `:cycle` or `:immutable`
+  (the prototype of `Object.prototype` can not be changed).
+  """
+  def set_prototype_of({:obj, id} = o, p) do
+    rec = deref(id)
+    current = rec.proto || :null
+
+    cond do
+      current == p -> true
+      not Map.get(rec, :ext, true) -> :extensible
+      o == proto(:object) -> :immutable
+      proto_chain_has?(p, o) -> :cycle
+      true -> store(id, %{rec | proto: if(p == :null, do: nil, else: p)}) && true
+    end
+  end
 
   defp define_all(obj, props) do
     unless match?({:obj, _}, obj),

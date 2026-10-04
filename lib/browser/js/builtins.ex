@@ -286,8 +286,21 @@ defmodule Browser.JS.Builtins do
       src = arg(args, 0)
       f = arg(args, 1)
 
+      source =
+        if match?({:obj, _}, src) and not array?(src) and iterable?(src),
+          do: Interp.iter_source(src)
+
+      lazy = match?({:proto, _, _}, source)
+
       list =
         cond do
+          lazy ->
+            {:proto, it, next} = source
+            from_iterator(it, next, if(function?(f), do: f), 0, [])
+
+          match?({:list, _}, source) ->
+            elem(source, 1)
+
           is_binary(src) or array?(src) ->
             iterate(src)
 
@@ -302,7 +315,7 @@ defmodule Browser.JS.Builtins do
         end
 
       new_array(
-        if function?(f),
+        if function?(f) and not lazy,
           do:
             list
             |> Enum.with_index()
@@ -310,6 +323,31 @@ defmodule Browser.JS.Builtins do
           else: list
       )
     end)
+  end
+
+  # Array.from over an iterator: each value is mapped as it is pulled, and an error from the
+  # map function closes the iterator
+  defp from_iterator(it, next, f, i, acc) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        Enum.reverse(acc)
+
+      {:ok, v} ->
+        v =
+          if f do
+            try do
+              call(f, :undefined, [v, float(i)])
+            catch
+              kind, e ->
+                Interp.iter_close(it, true)
+                :erlang.raise(kind, e, __STACKTRACE__)
+            end
+          else
+            v
+          end
+
+        from_iterator(it, next, f, i + 1, [v | acc])
+    end
   end
 
   defp iterable?({:obj, id} = o) do
@@ -471,7 +509,9 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "indexOf", fn this, args ->
       v = arg(args, 0)
 
-      case Enum.find(pairs(this), fn {_, x} -> strict_eq(x, v) end) do
+      from = from_index(this, args, nil, :asc)
+
+      case Enum.find(pairs(this, :asc, from), fn {_, x} -> strict_eq(x, v) end) do
         {i, _} -> float(i)
         nil -> -1.0
       end
@@ -480,7 +520,9 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "lastIndexOf", fn this, args ->
       v = arg(args, 0)
 
-      case this |> pairs(:desc) |> Enum.find(fn {_, x} -> strict_eq(x, v) end) do
+      from = from_index(this, args, nil, :desc)
+
+      case this |> pairs(:desc, from) |> Enum.find(fn {_, x} -> strict_eq(x, v) end) do
         {i, _} -> float(i)
         nil -> -1.0
       end
@@ -715,16 +757,51 @@ defmodule Browser.JS.Builtins do
 
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
-  defp pairs(this, dir \\ :asc) do
+  defp pairs(this, dir \\ :asc, from \\ nil) do
     len = length_of(this)
-    range = if dir == :asc, do: 0..(len - 1)//1, else: (len - 1)..0//-1
 
-    Stream.flat_map(range, fn i ->
-      present =
-        if is_binary(this), do: i < len, else: has_property?(this, float(i))
+    {first, last} =
+      if dir == :asc, do: {from || 0, len - 1}, else: {from || len - 1, 0}
 
-      if present, do: [{i, Interp.get(this, float(i))}], else: []
-    end)
+    range = if dir == :asc, do: first..last//1, else: first..last//-1
+
+    if very_sparse?(this, len) do
+      # an array with a huge length and few elements: only the slots that exist are visited
+      {:obj, id} = this
+      keys = for k <- Map.keys(deref(id).items), k in range, do: k
+      keys = if dir == :asc, do: Enum.sort(keys), else: Enum.sort(keys, :desc)
+
+      Stream.flat_map(keys, fn i ->
+        if has_property?(this, float(i)), do: [{i, Interp.get(this, float(i))}], else: []
+      end)
+    else
+      Stream.flat_map(range, fn i ->
+        present =
+          if is_binary(this), do: i < len, else: has_property?(this, float(i))
+
+        if present, do: [{i, Interp.get(this, float(i))}], else: []
+      end)
+    end
+  end
+
+  defp very_sparse?({:obj, id} = this, len) do
+    len > 100_000 and array?(this) and len - map_size(deref(id).items) > 100_000
+  end
+
+  defp very_sparse?(_, _), do: false
+
+  # where indexOf/lastIndexOf start, from the `fromIndex` argument
+  defp from_index(this, args, default, dir) do
+    case args do
+      [_, from | _] ->
+        len = length_of(this)
+        n = if len == 0, do: 0, else: to_int(from)
+        n = if n < 0, do: len + n, else: n
+        if dir == :asc, do: max(n, 0), else: min(n, len - 1)
+
+      _ ->
+        default
+    end
   end
 
   # an array of `len` slots with values at some of them

@@ -802,8 +802,8 @@ defmodule Browser.JS.Interp do
         attrs = Map.get(o, :attrs, %{})
 
         for(
-          i <- 0..(o.len - 1)//1,
-          Map.has_key?(o.items, i),
+          i <- o.items |> Map.keys() |> Enum.sort(),
+          i < o.len,
           Map.get(Map.get(attrs, i, %{}), :e, true),
           do: Integer.to_string(i)
         ) ++ base
