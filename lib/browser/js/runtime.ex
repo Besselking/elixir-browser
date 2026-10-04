@@ -135,6 +135,16 @@ defmodule Browser.JS.Runtime do
         DOM.set_layout(rects, sx, sy, content)
         loop(t0)
 
+      {:storage, _origin, key, old, new} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> DOM.storage_changed(key, old, new) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
       {:scrolled, x, y} ->
         # only the newest position matters when several have piled up
         {x, y} = latest_scroll(x, y)
