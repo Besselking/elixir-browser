@@ -16,7 +16,7 @@ defmodule Browser.Cookies do
       navigations. `None` needs `Secure`.
     * the `__Secure-` and `__Host-` name prefixes demand `Secure` (and, for `__Host-`, no
       `Domain` and `Path=/`)
-    * `Domain` may not name a public suffix (a small built-in list) or an IP address
+    * `Domain` may not name a public suffix (`Browser.PublicSuffix`) or an IP address
     * an insecure page cannot overwrite a `Secure` cookie
     * size limits, no control characters, and lifetimes capped at 400 days
 
@@ -24,21 +24,14 @@ defmodule Browser.Cookies do
   """
   use GenServer
 
+  alias Browser.PublicSuffix
+
   @table __MODULE__
   @max_per_domain 50
   @max_total 3000
   @max_size 4096
   @max_attr 1024
   @max_age 400 * 86_400
-
-  # no public suffix list ships with Erlang: the multi-label suffixes people actually meet
-  @public_suffixes ~w(co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk net.uk sch.uk
-    com.au net.au org.au edu.au gov.au co.nz org.nz net.nz co.jp ne.jp or.jp ac.jp
-    com.br net.br org.br co.in net.in org.in co.za org.za com.cn net.cn org.cn gov.cn
-    com.mx com.ar com.tr com.sg com.hk com.tw co.kr co.il
-    github.io gitlab.io herokuapp.com appspot.com blogspot.com netlify.app
-    vercel.app pages.dev workers.dev web.app firebaseapp.com cloudfront.net
-    s3.amazonaws.com azurewebsites.net)
 
   defmodule Cookie do
     @moduledoc false
@@ -261,32 +254,14 @@ defmodule Browser.Cookies do
   end
 
   @doc """
-  Whether `a` and `b` (URLs) are the same site: same scheme and registrable domain. Hosts
-  are compared by their last two labels, three under a known multi-label public suffix.
+  Whether `a` and `b` (URLs) are the same site: same scheme and registrable domain.
   """
   def same_site?(a, b) do
     with %URI{scheme: sa, host: ha} when is_binary(ha) <- URI.parse(a),
          %URI{scheme: sb, host: hb} when is_binary(hb) <- URI.parse(b) do
-      sa == sb and registrable(ha) == registrable(hb)
+      sa == sb and PublicSuffix.registrable(ha) == PublicSuffix.registrable(hb)
     else
       _ -> false
-    end
-  end
-
-  defp registrable(host) do
-    host = String.downcase(host)
-    labels = String.split(host, ".")
-
-    suffix =
-      Enum.find([3, 2], fn n ->
-        length(labels) > n and
-          labels |> Enum.take(-n) |> Enum.join(".") |> then(&(&1 in @public_suffixes))
-      end)
-
-    cond do
-      ip?(host) or length(labels) < 3 -> host
-      suffix -> labels |> Enum.take(-(suffix + 1)) |> Enum.join(".")
-      true -> labels |> Enum.take(-2) |> Enum.join(".")
     end
   end
 
@@ -297,11 +272,9 @@ defmodule Browser.Cookies do
     domain = domain |> String.trim_leading(".") |> String.downcase()
 
     cond do
-      domain == host and domain in @public_suffixes -> {:ok, host, true}
+      domain == host and PublicSuffix.public_suffix?(domain) -> {:ok, host, true}
       domain == host -> {:ok, host, false}
-      domain in @public_suffixes -> :error
-      # no public suffix list: a bare "com" is the one thing we can spot
-      not String.contains?(domain, ".") -> :error
+      PublicSuffix.public_suffix?(domain) -> :error
       ip?(host) -> :error
       String.ends_with?(host, "." <> domain) -> {:ok, domain, false}
       true -> :error
