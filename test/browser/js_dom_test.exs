@@ -32,6 +32,17 @@ defmodule Browser.JS.DOMTest do
     reply
   end
 
+  test "reading an unknown property of window is undefined, a named element is found" do
+    r =
+      run(
+        ~S"console.log(window.Astro, typeof window.nothing, window.box.id, typeof Astro)",
+        "<p id=box>x</p>"
+      )
+
+    assert errors(r) == []
+    assert logs(r) == ["undefined undefined box undefined"]
+  end
+
   test "performance.now counts from the start of the page, not from the machine's boot" do
     r =
       run("""
