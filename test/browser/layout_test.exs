@@ -3918,4 +3918,27 @@ defmodule Browser.LayoutTest do
     assert g0 >= rect.x and g1 <= rect.x + rect.w
     assert g0 <= title.x and g1 >= title.x + title.w
   end
+
+  test "a fixed flex box docked with logical insets shrinks to its buttons and centres in the window" do
+    page =
+      Browser.Page.build(
+        """
+        <!doctype html><html><head><style>
+        .nav { position: fixed; inset-inline-end: 16px; inset-block-start: 50%; transform: translateY(-50%);
+               display: flex; flex-direction: column }
+        </style></head><body><div class="nav"><button>up</button><button>down</button></div>
+        <dialog><p>closed</p></dialog><dialog open><p>opened</p></dialog></body></html>
+        """,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 300)
+    up = Enum.find(items, &(&1[:text] == "up"))
+    down = Enum.find(items, &(&1[:text] == "down"))
+
+    assert up.x > 300 and up.x + up.w <= 384
+    assert up.y > 100 and down.y < 200
+    refute Enum.any?(items, &(&1[:text] == "closed"))
+    assert Enum.any?(items, &(&1[:text] == "opened"))
+  end
 end

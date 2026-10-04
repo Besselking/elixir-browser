@@ -54,6 +54,23 @@ defmodule Browser.JS.DOMTest do
     assert logs(r) == ["true true"]
   end
 
+  test "a dialog is shown while it is open" do
+    r =
+      run(
+        """
+        var d = document.getElementById("d");
+        console.log(d.open);
+        d.showModal();
+        console.log(d.open, d.hasAttribute("open"));
+        d.close("done");
+        console.log(d.open, d.returnValue);
+        """,
+        "<dialog id=d><p>x</p></dialog>"
+      )
+
+    assert logs(r) == ["false", "true true", "false done"]
+  end
+
   describe "the tree" do
     test "queries, text and attributes" do
       r =

@@ -77,7 +77,7 @@ defmodule Browser.Style do
 
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
-  [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
+  dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
   canvas, audio, video, iframe, object, embed, applet { display: none }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
@@ -315,13 +315,19 @@ defmodule Browser.Style do
     "padding-block-start" => "padding-top",
     "padding-block-end" => "padding-bottom",
     "padding-inline-start" => "padding-left",
-    "padding-inline-end" => "padding-right"
+    "padding-inline-end" => "padding-right",
+    "inset-block-start" => "top",
+    "inset-block-end" => "bottom",
+    "inset-inline-start" => "left",
+    "inset-inline-end" => "right"
   }
   @logical_pairs %{
     "margin-block" => {"margin-top", "margin-bottom"},
     "margin-inline" => {"margin-left", "margin-right"},
     "padding-block" => {"padding-top", "padding-bottom"},
-    "padding-inline" => {"padding-left", "padding-right"}
+    "padding-inline" => {"padding-left", "padding-right"},
+    "inset-block" => {"top", "bottom"},
+    "inset-inline" => {"left", "right"}
   }
 
   defp expand({"flex", value, imp}) do
@@ -343,6 +349,26 @@ defmodule Browser.Style do
       [a] -> [{"row-gap", a, imp}, {"column-gap", a, imp}]
       [a, b | _] -> [{"row-gap", a, imp}, {"column-gap", b, imp}]
       [] -> []
+    end
+  end
+
+  # inset: top, right, bottom, left, the way margin takes its values
+  defp expand({"inset", value, imp}) do
+    case tokens(String.trim(value)) do
+      [a] ->
+        for p <- ~w(top right bottom left), do: {p, a, imp}
+
+      [a, b] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", a, imp}, {"left", b, imp}]
+
+      [a, b, c] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", c, imp}, {"left", b, imp}]
+
+      [a, b, c, d | _] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", c, imp}, {"left", d, imp}]
+
+      [] ->
+        []
     end
   end
 

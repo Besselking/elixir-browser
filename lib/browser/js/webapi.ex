@@ -393,6 +393,18 @@ defmodule Browser.JS.WebAPI do
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = location.origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    // <dialog>: shown while it has the open attribute (a modal one is not modal here)
+    if (typeof HTMLDialogElement === "function") {
+      var DP = HTMLDialogElement.prototype;
+      DP.show = function () { this.setAttribute("open", ""); };
+      DP.showModal = DP.show;
+      DP.close = function (value) {
+        if (!this.hasAttribute("open")) return;
+        if (value !== undefined) this.returnValue = String(value);
+        this.removeAttribute("open");
+        this.dispatchEvent(new Event("close"));
+      };
+    }
     def("open", function () { return null; });
     def("close", function () {});
     def("stop", function () {});

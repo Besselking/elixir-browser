@@ -2464,6 +2464,8 @@ defmodule Browser.Layout do
   # -- absolute / fixed positioning ------------------------------------------------------
 
   defp place_absolute(st, sub, spec, origin) do
+    # a fixed box is placed against the window, whose height is known
+    origin = if spec.fixed and origin.h == nil, do: %{origin | h: st.view_h}, else: origin
     cw = origin.w
 
     {static_x, static_y} =
@@ -2652,10 +2654,16 @@ defmodule Browser.Layout do
 
           avail = max(avail, 40)
 
+          # a flex or grid container as the content wants its own natural width, not the room
+          at =
+            if Enum.any?(sub, &match?({tag, _, _, _} when tag in [:flex, :grid], &1)),
+              do: @unbounded,
+              else: avail
+
           if left && right do
             avail
           else
-            min(avail, shrink_extent(st, sub, avail, Map.get(spec, :key)) + spec.rextra)
+            min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)) + spec.rextra)
           end
 
         w ->
