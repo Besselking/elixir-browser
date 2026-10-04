@@ -65,7 +65,7 @@ defmodule Browser.JS.Builtins do
     declare(scope, :this, global)
     Browser.JS.Collections.install(scope)
 
-    Process.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
+    :erlang.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
     scope
   end
 

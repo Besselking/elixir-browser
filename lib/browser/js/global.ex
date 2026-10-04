@@ -42,6 +42,13 @@ defmodule Browser.JS.Global do
     end
   end
 
-  def host_keys(:global),
-    do: for(k <- Map.keys(Interp.deref(Interp.global()).vars), is_binary(k), do: k)
+  # the built-ins are not enumerable; what a script declares is
+  def host_keys(:global) do
+    builtin = :erlang.get(:js_builtin_names)
+
+    for k <- Map.keys(Interp.deref(Interp.global()).vars),
+        is_binary(k),
+        not MapSet.member?(builtin, k),
+        do: k
+  end
 end

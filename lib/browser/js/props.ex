@@ -82,7 +82,7 @@ defmodule Browser.JS.Props do
        when is_binary(key) do
     case Browser.JS.Global.host_get(:global, key, nil) do
       {:ok, v} ->
-        builtin? = MapSet.member?(Process.get(:js_builtin_names, MapSet.new()), key)
+        builtin? = MapSet.member?(:erlang.get(:js_builtin_names), key)
 
         {:data, v, key not in ["NaN", "Infinity", "undefined"], not builtin?,
          key not in ["NaN", "Infinity", "undefined"]}
