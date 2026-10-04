@@ -3941,4 +3941,48 @@ defmodule Browser.LayoutTest do
     refute Enum.any?(items, &(&1[:text] == "closed"))
     assert Enum.any?(items, &(&1[:text] == "opened"))
   end
+
+  describe "columns" do
+    defp columns(css, count, width) do
+      lines = for i <- 1..count, do: "<p>item#{i}</p>"
+
+      page =
+        Browser.Page.build(
+          "<!doctype html><html><head><style>.c{#{css}} p{margin:0}</style></head><body><div class=c>#{Enum.join(lines)}</div><p>after</p></body></html>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, width, &measure/2)
+      items
+    end
+
+    defp col_at(items, text), do: Enum.find(items, &(&1[:text] == text))
+
+    test "content is poured into balanced columns side by side" do
+      items = columns("columns: 2 100px; column-gap: 20px", 5, 400)
+      assert col_at(items, "item1").x == col_at(items, "item2").x
+      assert col_at(items, "item3").x == col_at(items, "item1").x
+      assert col_at(items, "item4").x > col_at(items, "item1").x + 100
+      assert col_at(items, "item4").y == col_at(items, "item1").y
+      assert col_at(items, "item5").y > col_at(items, "item4").y
+      assert col_at(items, "after").y > col_at(items, "item3").y
+    end
+
+    test "column-count sets the number of columns" do
+      items = columns("column-count: 3; column-gap: 10px", 6, 400)
+
+      xs =
+        items
+        |> Enum.filter(&String.starts_with?(&1[:text] || "", "item"))
+        |> Enum.map(& &1.x)
+        |> Enum.uniq()
+
+      assert length(xs) == 3
+    end
+
+    test "a column width that does not fit twice leaves one column" do
+      items = columns("columns: 2 300px", 4, 400)
+      assert col_at(items, "item1").x == col_at(items, "item4").x
+    end
+  end
 end

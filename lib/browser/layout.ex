@@ -1170,7 +1170,30 @@ defmodule Browser.Layout do
     end
   end
 
+  # a block with `columns`, `column-count` or `column-width` flows its content through columns
+  defp block_children(tag, :block, kids, style, c, acc) do
+    case columns_spec(c) do
+      nil ->
+        walk_children(tag, kids, style, acc)
+
+      cs ->
+        sub = tag |> walk_children(kids, style, []) |> Enum.reverse()
+        [{:columns, cs, sub, style} | acc]
+    end
+  end
+
   defp block_children(tag, _kind, kids, style, _c, acc), do: walk_children(tag, kids, style, acc)
+
+  defp columns_spec(c) do
+    count = c["column-count"]
+    width = c["column-width"]
+
+    if count || width do
+      fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
+      gap = if is_number(c["column-gap"]), do: c["column-gap"], else: fs
+      %{count: count, width: width, gap: gap}
+    end
+  end
 
   # ul/ol number their list items and emit markers; everything else just recurses
   defp walk_children(tag, kids, style, acc) when tag in ~w(ul ol) do
@@ -1850,6 +1873,30 @@ defmodule Browser.Layout do
       align: style.align,
       valign: nil
     })
+  end
+
+  # Columns: the content is laid out once at the width of a column, then cut into as many
+  # columns as there are, as even as lines allow, and the pieces are set side by side.
+  defp op({:columns, cs, sub, style}, st) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    {n, colw} = column_geometry(cs, avail)
+
+    if n <= 1 or avail > @unbounded / 2 do
+      Enum.reduce(sub, st, &op/2)
+    else
+      {items, height, _} = layout_atom(st, sub, colw)
+      {laid, height} = split_columns(items, height, n, colw, cs.gap)
+      laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
+
+      place_atom(st, %{
+        w: avail,
+        h: height,
+        base: height,
+        items: laid,
+        align: style.align,
+        valign: nil
+      })
+    end
   end
 
   defp op({:grid, gs, items, style}, st) do
@@ -3652,6 +3699,75 @@ defmodule Browser.Layout do
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       fs: fs
     }
+  end
+
+  # -> {number of columns, the width of one}
+  defp column_geometry(%{count: count, width: width, gap: gap}, avail) do
+    fit = if width, do: max(trunc((avail + gap) / (width + gap)), 1)
+
+    n =
+      cond do
+        count && fit -> min(count, fit)
+        count -> count
+        fit -> fit
+        true -> 1
+      end
+
+    {n, max((avail - (n - 1) * gap) / n, 1)}
+  end
+
+  # Cuts laid-out content (`items`, `height` tall) into `n` columns of the least height that
+  # holds it when columns break between lines. -> {the items placed, the height used}
+  defp split_columns(items, height, n, colw, gap) do
+    lines =
+      items
+      |> Enum.filter(&(&1.type not in [:rect, :box]))
+      |> Enum.map(&{&1.y, &1.y + Map.get(&1, :h, 0)})
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    # the top of each line, with the bottom of the lowest thing on it
+    starts_for = fn h -> column_starts(lines, h) end
+    fits? = fn h -> length(starts_for.(h)) <= n end
+
+    low = max(ceil(height / n), 1)
+    best = if fits?.(low), do: low, else: search_height(fits?, low, max(height, low))
+    starts = starts_for.(best)
+
+    ends = Enum.drop(starts, 1) ++ [height]
+    used = Enum.zip(starts, ends) |> Enum.map(fn {a, b} -> b - a end) |> Enum.max(fn -> 0 end)
+    bounds = Enum.with_index(starts)
+
+    placed =
+      for it <- items do
+        {start, k} =
+          bounds |> Enum.filter(fn {s, _} -> s <= it.y end) |> List.last() || {0, 0}
+
+        move(it, round(k * (colw + gap)), -start)
+      end
+
+    {placed, used}
+  end
+
+  # the least height in low..high at which the lines fit the columns (fits? is monotonic)
+  defp search_height(_fits?, low, high) when low >= high, do: high
+
+  defp search_height(fits?, low, high) do
+    mid = div(low + high, 2)
+    if fits?.(mid), do: search_height(fits?, low, mid), else: search_height(fits?, mid + 1, high)
+  end
+
+  # where each column starts when lines are poured into columns of height `h`: the first at the
+  # top, the others as far above their first line as the first column's first line is below it
+  defp column_starts([], _h), do: [0]
+
+  defp column_starts([{top0, _} | _] = lines, h) do
+    {breaks, _} =
+      Enum.reduce(lines, {[], top0}, fn {t, b}, {breaks, start} ->
+        if b - start > h and t > start, do: {[t | breaks], t}, else: {breaks, start}
+      end)
+
+    [0 | breaks |> Enum.reverse() |> Enum.map(&(&1 - top0))]
   end
 
   defp flex_direction("row-reverse"), do: :row_reverse

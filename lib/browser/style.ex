@@ -28,7 +28,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align list-style-type line-height
@@ -342,6 +342,15 @@ defmodule Browser.Style do
       end
 
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  # `columns: <width> || <count>`, in either order, either of them `auto`
+  defp expand({"columns", value, imp}) do
+    for t <- tokens(String.trim(value)), t != "auto" do
+      if Regex.match?(~r/\A\d+\z/, t),
+        do: {"column-count", t, imp},
+        else: {"column-width", t, imp}
+    end
   end
 
   defp expand({"gap", value, imp}) do
@@ -1416,9 +1425,23 @@ defmodule Browser.Style do
     end
   end
 
+  defp typed("column-gap", "normal", _env, _pc), do: {:ok, :normal}
+
   defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
     px = if v == "normal", do: 0.0, else: length(v, env)
     if px && px >= 0, do: {:ok, px}, else: :skip
+  end
+
+  defp typed("column-count", v, _env, _pc) do
+    case Integer.parse(v) do
+      {n, ""} when n >= 1 -> {:ok, n}
+      _ -> :skip
+    end
+  end
+
+  defp typed("column-width", v, env, _pc) do
+    px = length(v, env)
+    if px && px > 0, do: {:ok, px}, else: :skip
   end
 
   defp typed("line-height", v, env, _pc) do
