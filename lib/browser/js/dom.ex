@@ -1689,8 +1689,14 @@ defmodule Browser.JS.DOM do
       _ ->
         # a global variable: `window.foo` is `foo`
         case Map.fetch(deref(global()).vars, key) do
-          {:ok, v} -> {:ok, v}
-          :error -> named_element(key)
+          {:ok, v} ->
+            {:ok, v}
+
+          :error ->
+            case named_element(key) do
+              {:ok, _} = found -> found
+              :error -> :miss
+            end
         end
     end
   end
