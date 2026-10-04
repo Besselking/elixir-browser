@@ -926,7 +926,7 @@ defmodule Browser.JS.DOM do
         {:ok, "complete"}
 
       "cookie" ->
-        {:ok, ""}
+        {:ok, Browser.Cookies.header(s.url, http: false) || ""}
 
       "referrer" ->
         {:ok, ""}
@@ -989,6 +989,10 @@ defmodule Browser.JS.DOM do
 
       {"title", :document} ->
         set_title(to_str(v))
+        :ok
+
+      {"cookie", :document} ->
+        Browser.Cookies.set_from_script(st().url, to_str(v))
         :ok
 
       _ ->

@@ -8,19 +8,41 @@ defmodule Browser.JS.WebAPI do
 
   alias Browser.JS.{Interp, Parser}
 
-  @doc "Declares `__fetch` and runs the prelude. `http` is `(method, url, body) -> {:ok, body, url} | {:error, msg}`."
+  @methods ~w(get head post put patch delete options)
+
+  @doc """
+  Declares `__fetch` and runs the prelude. `http` is `(request) -> {:ok, response} | {:error, msg}`;
+  see `Browser.JS.Runtime.http/1`.
+  """
   def install(scope, http) do
     Interp.declare(
       scope,
       "__fetch",
       Interp.native("__fetch", fn _this, args ->
-        method = args |> Enum.at(0, "GET") |> Interp.to_str()
-        url = args |> Enum.at(1, "") |> Interp.to_str()
-        body = args |> Enum.at(2, :undefined) |> body_text()
+        arg = &Enum.at(args, &1, :undefined)
 
-        case http.(method, url, body) do
-          {:ok, text, final} ->
-            Interp.new_object([{"status", 200.0}, {"url", final}, {"body", text}])
+        method = arg.(0) |> Interp.to_str() |> String.downcase()
+        method = if method in @methods, do: String.to_atom(method), else: :get
+
+        request = %{
+          method: method,
+          url: arg.(1) |> Interp.to_str(),
+          body: body_text(arg.(2)),
+          headers: pairs(arg.(3)),
+          content_type: body_text(arg.(4)),
+          credentials: credentials(arg.(5))
+        }
+
+        case http.(request) do
+          {:ok, r} ->
+            Interp.new_object([
+              {"status", r.status * 1.0},
+              {"statusText", r.status_text},
+              {"url", r.url},
+              {"body", r.body},
+              {"redirected", r.redirected},
+              {"headers", Interp.new_array(for {k, v} <- r.headers, do: Interp.new_array([k, v]))}
+            ])
 
           {:error, msg} ->
             Interp.throw_error("TypeError", "Failed to fetch: #{msg}")
@@ -33,6 +55,22 @@ defmodule Browser.JS.WebAPI do
     case program() do
       {:ok, ast} -> Interp.run_program(ast)
       {:error, msg} -> throw({:syntax, "web api prelude: " <> msg})
+    end
+  end
+
+  defp pairs({:obj, _} = list) do
+    for pair <- Interp.array_list(list),
+        [k, v] <- [Interp.array_list(pair)],
+        do: {Interp.to_str(k), Interp.to_str(v)}
+  end
+
+  defp pairs(_), do: []
+
+  defp credentials(v) do
+    case body_text(v) do
+      "omit" -> :omit
+      "include" -> :include
+      _ -> :same_origin
     end
   end
 
@@ -63,83 +101,187 @@ defmodule Browser.JS.WebAPI do
     Headers.prototype.values = function () { var out = []; for (var k in this._h) out.push(this._h[k]); return out[Symbol.iterator](); };
     Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
 
+    // what a request body is sent as: `[text, content type]`
+    function encodeBody(body) {
+      if (body === undefined || body === null) return [null, null];
+      if (typeof body === "string") return [body, "text/plain;charset=UTF-8"];
+      if (typeof URLSearchParams === "function" && body instanceof URLSearchParams) return [body.toString(), "application/x-www-form-urlencoded;charset=UTF-8"];
+      if (body instanceof Blob) return [body._text, body.type || null];
+      if (body instanceof FormData) {
+        var boundary = "----ElixirBrowserFormBoundary" + Math.random().toString(36).slice(2);
+        var out = "";
+        body._e.forEach(function (e) {
+          var v = e[1];
+          out += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + e[0] + "\"";
+          if (v instanceof Blob) out += "; filename=\"" + (v.name || "blob") + "\"\r\nContent-Type: " + (v.type || "application/octet-stream") + "\r\n\r\n" + v._text;
+          else out += "\r\n\r\n" + v;
+          out += "\r\n";
+        });
+        return [out + "--" + boundary + "--\r\n", "multipart/form-data; boundary=" + boundary];
+      }
+      if (typeof ArrayBuffer === "function" && (body instanceof ArrayBuffer || ArrayBuffer.isView(body))) {
+        return [new TextDecoder().decode(body), "application/octet-stream"];
+      }
+      return [String(body), "text/plain;charset=UTF-8"];
+    }
+
+    // runs a request now: `{ status, statusText, url, body, headers, redirected }`; a failure throws
+    function send(method, url, body, headers, credentials) {
+      var enc = encodeBody(body);
+      var list = [], ctype = enc[1];
+      headers.forEach(function (v, k) { if (k === "content-type") ctype = v; else list.push([k, v]); });
+      if (enc[0] === null) ctype = null;
+      return __fetch(method, new URL(url, document.baseURI || location.href).href, enc[0], list, ctype, credentials);
+    }
+
     function Response(body, init) {
       init = init || {};
       this._body = body === undefined || body === null ? "" : String(body);
       this.status = init.status === undefined ? 200 : init.status;
       this.ok = this.status >= 200 && this.status < 300;
-      this.statusText = init.statusText || "";
+      this.statusText = init.statusText === undefined ? "" : init.statusText;
       this.url = init.url || "";
-      this.type = "basic";
-      this.redirected = false;
+      this.type = "default";
+      this.redirected = !!init.redirected;
       this.bodyUsed = false;
       this.headers = new Headers(init.headers);
+      if (typeof body === "string" && !this.headers.has("content-type")) this.headers.set("content-type", "text/plain;charset=UTF-8");
     }
-    Response.prototype.text = function () { this.bodyUsed = true; return Promise.resolve(this._body); };
-    Response.prototype.json = function () { var b = this._body; this.bodyUsed = true; return new Promise(function (res, rej) { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); };
-    Response.prototype.clone = function () { return new Response(this._body, { status: this.status, statusText: this.statusText, url: this.url, headers: this.headers }); };
-    Response.prototype.arrayBuffer = function () { return Promise.resolve(new TextEncoder().encode(this._body).buffer); };
-    Response.prototype.blob = function () { return Promise.resolve({ size: this._body.length, type: "", text: function () { return Promise.resolve(this._b); }, _b: this._body }); };
+    Response.prototype._read = function () {
+      if (this.bodyUsed) return Promise.reject(new TypeError("body stream already read"));
+      this.bodyUsed = true;
+      return Promise.resolve(this._body);
+    };
+    Response.prototype.text = function () { return this._read(); };
+    Response.prototype.json = function () { return this._read().then(function (t) { return JSON.parse(t); }); };
+    Response.prototype.arrayBuffer = function () { return this._read().then(function (t) { return new TextEncoder().encode(t).buffer; }); };
+    Response.prototype.blob = function () { var type = this.headers.get("content-type") || ""; return this._read().then(function (t) { return new Blob([t], { type: type }); }); };
+    Response.prototype.formData = function () { return this._read().then(function (t) { var fd = new FormData(); new URLSearchParams(t).forEach(function (v, k) { fd.append(k, v); }); return fd; }); };
+    Response.prototype.clone = function () {
+      if (this.bodyUsed) throw new TypeError("Response body is already used");
+      var r = new Response(this._body, { status: this.status, statusText: this.statusText, url: this.url, headers: this.headers, redirected: this.redirected });
+      r.type = this.type;
+      return r;
+    };
     Response.error = function () { var r = new Response("", { status: 0 }); r.type = "error"; return r; };
+    Response.json = function (data, init) { init = init || {}; var r = new Response(JSON.stringify(data), init); r.headers.set("content-type", "application/json"); return r; };
 
     function Request(input, init) {
       init = init || {};
-      this.url = typeof input === "string" ? input : (input && input.url) || String(input);
-      this.method = (init.method || (input && input.method) || "GET").toUpperCase();
-      this.headers = new Headers(init.headers || (input && input.headers));
-      this.body = init.body === undefined ? null : init.body;
-      this.signal = init.signal || null;
+      var base = input instanceof Request ? input : null;
+      this.url = base ? base.url : (typeof input === "string" ? input : (input && input.href) || String(input));
+      this.method = String(init.method || (base && base.method) || "GET").toUpperCase();
+      this.headers = new Headers(init.headers || (base && base.headers));
+      this.body = init.body === undefined ? (base ? base.body : null) : init.body;
+      this.signal = init.signal || (base && base.signal) || null;
+      this.credentials = init.credentials || (base && base.credentials) || "same-origin";
+      this.mode = init.mode || "cors";
+      this.cache = init.cache || "default";
+      this.redirect = init.redirect || "follow";
+      this.referrer = init.referrer || "about:client";
+      if (this.body !== null && (this.method === "GET" || this.method === "HEAD")) throw new TypeError("Request with GET/HEAD method cannot have body.");
     }
+    Request.prototype.clone = function () { return new Request(this); };
+    Request.prototype.text = function () { return Promise.resolve(this.body === null ? "" : encodeBody(this.body)[0]); };
+    Request.prototype.json = function () { return this.text().then(function (t) { return JSON.parse(t); }); };
+
+    function abortError(signal) { return signal.reason !== undefined ? signal.reason : new DOMException("The operation was aborted.", "AbortError"); }
 
     function fetchImpl(input, init) {
       return new Promise(function (resolve, reject) {
-        var req = new Request(input, init);
-        if (req.signal && req.signal.aborted) { reject(new DOMException("The operation was aborted.", "AbortError")); return; }
-        try {
-          var r = __fetch(req.method, new URL(req.url, document.baseURI || location.href).href, req.body);
-          var res = new Response(r.body, { status: r.status, url: r.url });
-          res.headers.set("content-type", "text/html");
+        var req;
+        try { req = new Request(input, init); } catch (e) { reject(e); return; }
+        if (req.signal && req.signal.aborted) { reject(abortError(req.signal)); return; }
+        var settled = false;
+        function onabort() { if (!settled) { settled = true; reject(abortError(req.signal)); } }
+        if (req.signal) req.signal.addEventListener("abort", onabort);
+        // the request goes out after the caller has had its turn, so `abort()` right after `fetch()` wins
+        setTimeout(function () {
+          if (settled) return;
+          var r;
+          try { r = send(req.method, req.url, req.body, req.headers, req.credentials); }
+          catch (e) { settled = true; reject(new TypeError("Failed to fetch")); return; }
+          if (settled) return;
+          settled = true;
+          if (req.signal) req.signal.removeEventListener("abort", onabort);
+          var res = new Response(r.body, { status: r.status, statusText: r.statusText, url: r.url, redirected: r.redirected, headers: r.headers });
+          res.type = "basic";
           resolve(res);
-        } catch (e) { reject(new TypeError("Failed to fetch")); }
+        }, 0);
       });
     }
 
     function XMLHttpRequest() {
       this.readyState = 0; this.status = 0; this.statusText = ""; this.responseText = ""; this.response = "";
-      this.responseType = ""; this.responseURL = ""; this.timeout = 0; this.withCredentials = false;
-      this._l = {}; this._headers = {}; this._method = "GET"; this._url = "";
+      this.responseType = ""; this.responseURL = ""; this.responseXML = null; this.timeout = 0; this.withCredentials = false;
+      this._l = {}; this._headers = new Headers(); this._method = "GET"; this._url = ""; this._async = true; this._rh = new Headers();
       this.upload = { addEventListener: function () {}, removeEventListener: function () {} };
     }
     XMLHttpRequest.UNSENT = 0; XMLHttpRequest.OPENED = 1; XMLHttpRequest.HEADERS_RECEIVED = 2; XMLHttpRequest.LOADING = 3; XMLHttpRequest.DONE = 4;
-    XMLHttpRequest.prototype.open = function (method, url) { this._method = String(method).toUpperCase(); this._url = String(url); this.readyState = 1; this._fire("readystatechange"); };
-    XMLHttpRequest.prototype.setRequestHeader = function (k, v) { this._headers[k] = v; };
-    XMLHttpRequest.prototype.getResponseHeader = function (k) { return String(k).toLowerCase() === "content-type" ? "text/html" : null; };
-    XMLHttpRequest.prototype.getAllResponseHeaders = function () { return "content-type: text/html\r\n"; };
+    XMLHttpRequest.prototype.open = function (method, url, async) {
+      this._method = String(method).toUpperCase(); this._url = String(url); this._async = async !== false;
+      this._headers = new Headers(); this._sent = false; this._aborted = false;
+      this.readyState = 1; this._fire("readystatechange");
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+      if (this.readyState !== 1 || this._sent) throw new DOMException("The object's state must be OPENED.", "InvalidStateError");
+      this._headers.append(k, v);
+    };
+    XMLHttpRequest.prototype.getResponseHeader = function (k) { return this.readyState < 2 ? null : this._rh.get(k); };
+    XMLHttpRequest.prototype.getAllResponseHeaders = function () {
+      if (this.readyState < 2) return "";
+      var out = ""; this._rh.forEach(function (v, k) { out += k + ": " + v + "\r\n"; }); return out;
+    };
     XMLHttpRequest.prototype.overrideMimeType = function () {};
-    XMLHttpRequest.prototype.abort = function () { this._aborted = true; this.readyState = 0; };
+    XMLHttpRequest.prototype.abort = function () {
+      var was = this.readyState;
+      this._aborted = true;
+      if (this._sent && was !== 4 && was !== 0) {
+        this.readyState = 4; this._fire("readystatechange"); this._fire("abort"); this._fire("loadend");
+      }
+      this.readyState = 0; this.status = 0;
+    };
     XMLHttpRequest.prototype.addEventListener = function (t, f) { (this._l[t] = this._l[t] || []).push(f); };
     XMLHttpRequest.prototype.removeEventListener = function (t, f) { var a = this._l[t]; if (a) { var i = a.indexOf(f); if (i >= 0) a.splice(i, 1); } };
-    XMLHttpRequest.prototype._fire = function (type) {
-      var ev = { type: type, target: this, currentTarget: this };
+    XMLHttpRequest.prototype._fire = function (type, extra) {
+      var ev = { type: type, target: this, currentTarget: this, lengthComputable: false, loaded: 0, total: 0 };
+      if (type === "load" || type === "loadend") { ev.loaded = ev.total = this.responseText.length; ev.lengthComputable = true; }
       var h = this["on" + type]; if (typeof h === "function") { try { h.call(this, ev); } catch (e) { console.error(e); } }
       var a = this._l[type]; if (a) a.slice().forEach(function (f) { try { f.call(this, ev); } catch (e) { console.error(e); } }, this);
     };
+    XMLHttpRequest.prototype._run = function (body) {
+      var self = this;
+      if (self._aborted) return;
+      var cred = self.withCredentials ? "include" : "same-origin";
+      var r = null;
+      try { r = send(self._method, self._url, body, self._headers, cred); } catch (e) { r = null; }
+      if (self._aborted) return;
+      if (r === null) {
+        self.readyState = 4; self.status = 0; self.statusText = "";
+        self._fire("readystatechange"); self._fire("error"); self._fire("loadend");
+        return;
+      }
+      self.status = r.status; self.statusText = r.statusText; self.responseURL = r.url;
+      self._rh = new Headers(r.headers);
+      self.readyState = 2; self._fire("readystatechange");
+      self.readyState = 3; self._fire("readystatechange");
+      self.responseText = r.body;
+      var type = self.responseType;
+      if (type === "json") { try { self.response = JSON.parse(r.body); } catch (e) { self.response = null; } }
+      else if (type === "arraybuffer") self.response = new TextEncoder().encode(r.body).buffer;
+      else if (type === "blob") self.response = new Blob([r.body], { type: self._rh.get("content-type") || "" });
+      else if (type === "document") { try { self.response = new DOMParser().parseFromString(r.body, "text/html"); } catch (e) { self.response = null; } }
+      else self.response = r.body;
+      self.readyState = 4;
+      self._fire("readystatechange"); self._fire("load"); self._fire("loadend");
+    };
     XMLHttpRequest.prototype.send = function (body) {
       var self = this;
-      setTimeout(function () {
-        if (self._aborted) return;
-        try {
-          var r = __fetch(self._method, new URL(self._url, document.baseURI || location.href).href, body);
-          self.status = r.status; self.statusText = "OK"; self.responseURL = r.url;
-          self.responseText = r.body;
-          self.response = self.responseType === "json" ? JSON.parse(r.body) : r.body;
-          self.readyState = 4;
-          self._fire("readystatechange"); self._fire("load"); self._fire("loadend");
-        } catch (e) {
-          self.readyState = 4; self.status = 0;
-          self._fire("readystatechange"); self._fire("error"); self._fire("loadend");
-        }
-      }, 0);
+      if (self.readyState !== 1 || self._sent) throw new DOMException("The object's state must be OPENED.", "InvalidStateError");
+      self._sent = true;
+      self._fire("loadstart");
+      if (!self._async) { self._run(body); return; }
+      setTimeout(function () { self._run(body); }, 0);
     };
 
     // ── abort ────────────────────────────────────────────────
@@ -156,7 +298,11 @@ defmodule Browser.JS.WebAPI do
       s._l.slice().forEach(function (f) { f(ev); });
     };
     AbortSignal.abort = function (reason) { var c = new AbortController(); c.abort(reason); return c.signal; };
-    AbortSignal.timeout = function () { return new AbortController().signal; };
+    AbortSignal.timeout = function (ms) {
+      var c = new AbortController();
+      setTimeout(function () { c.abort(new DOMException("The operation timed out.", "TimeoutError")); }, ms);
+      return c.signal;
+    };
 
     function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = 0; }
     DOMException.prototype = Object.create(Error.prototype);

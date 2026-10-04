@@ -1282,7 +1282,8 @@ defmodule Browser.Session do
         base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
-        fetch: &Fetch.load(&1, initiator: page.url)
+        fetch: &Fetch.load(&1, initiator: page.url),
+        request: &Fetch.load(&1, [initiator: page.url] ++ &2)
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
