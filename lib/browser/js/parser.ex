@@ -114,8 +114,11 @@ defmodule Browser.JS.Parser do
   defp strict?, do: Process.get(:js_strict, false)
 
   # does the token list begin with a "use strict" directive?
+  # a token that has a line break before it (`:octal_nl`: a string with a legacy octal escape)
+  defguardp nl?(mark) when mark in [true, :octal_nl]
+
   defp use_strict?([{:str, "use strict", _}, {:p, p, _} | _]) when p in [";", "}"], do: true
-  defp use_strict?([{:str, "use strict", _}, {_, _, true} | _]), do: true
+  defp use_strict?([{:str, "use strict", _}, {_, _, nl} | _]) when nl?(nl), do: true
   defp use_strict?([{:str, "use strict", _}, {:eof, _, _} | _]), do: true
   defp use_strict?([{:str, _, _}, {:p, ";", _} | ts]), do: use_strict?(ts)
   defp use_strict?(_), do: false
@@ -174,6 +177,12 @@ defmodule Browser.JS.Parser do
     if names != Enum.uniq(names), do: throw({:syntax, "duplicate parameter name in strict mode"})
     Enum.each(names, &check_strict_name/1)
   end
+
+  defp check_octal_string(mark) when mark in [:octal, :octal_nl] do
+    if strict?(), do: throw({:syntax, "octal escape sequences are not allowed in strict mode"})
+  end
+
+  defp check_octal_string(_), do: :ok
 
   # `yield` and `await` cannot be labels where they are keywords
   defp check_strict_name_context(name) do
@@ -289,7 +298,7 @@ defmodule Browser.JS.Parser do
       [{:p, ";", _} | ts] ->
         {{:return, nil}, ts}
 
-      [{_, _, true} | _] ->
+      [{_, _, nl} | _] when nl?(nl) ->
         {{:return, nil}, ts}
 
       [{:p, "}", _} | _] ->
@@ -717,7 +726,7 @@ defmodule Browser.JS.Parser do
   defp semi([{:p, ";", _} | ts]), do: ts
   defp semi([{:p, "}", _} | _] = ts), do: ts
   defp semi([{:eof, _, _} | _] = ts), do: ts
-  defp semi([{_, _, true} | _] = ts), do: ts
+  defp semi([{_, _, nl} | _] = ts) when nl?(nl), do: ts
   defp semi([{_, v, _} | _]), do: throw({:syntax, "unexpected token #{inspect(v)}"})
 
   # ── patterns (binding targets) ─────────────────────────────
@@ -819,7 +828,12 @@ defmodule Browser.JS.Parser do
   defp property_key([{:priv, name, _} | ts]), do: {{:priv, name}, nil, ts}
   defp property_key([{:id, name, _} | ts]), do: {{:str, name}, name, ts}
   defp property_key([{:eid, name, _} | ts]), do: {{:str, name}, nil, ts}
-  defp property_key([{:str, s, _} | ts]), do: {{:str, s}, nil, ts}
+
+  defp property_key([{:str, s, mark} | ts]) do
+    check_octal_string(mark)
+    {{:str, s}, nil, ts}
+  end
+
   defp property_key([{:num, n, _} | ts]), do: {{:str, Browser.JS.Num.to_string(n)}, nil, ts}
 
   defp property_key([{:p, "[", _} | ts]) do
@@ -1142,7 +1156,7 @@ defmodule Browser.JS.Parser do
 
   defp assignment([{:id, "async", _} | [_ | _] = rest] = ts) do
     cond do
-      arrow_ahead?(rest) and not match?([{_, _, true} | _], rest) ->
+      arrow_ahead?(rest) and not match?([{_, _, nl} | _] when nl?(nl), rest) ->
         {fun, ts} = arrow(rest)
         {{:async, fun}, ts}
 
@@ -1164,7 +1178,7 @@ defmodule Browser.JS.Parser do
 
   defp yield_expression(ts) do
     case ts do
-      [{_, _, true} | _] ->
+      [{_, _, nl} | _] when nl?(nl) ->
         {{:yield, {:lit, :undefined}, false}, ts}
 
       [{:p, p, _} | _] when p in [")", "]", "}", ",", ";", ":"] ->
@@ -1484,7 +1498,11 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
-  defp primary([{:str, s, _} | ts]), do: {{:str, s}, ts}
+
+  defp primary([{:str, s, mark} | ts]) do
+    check_octal_string(mark)
+    {{:str, s}, ts}
+  end
 
   defp primary([{:regex, {source, flags}, _} | ts]) do
     case Browser.JS.RegExp.validate(source, flags) do
