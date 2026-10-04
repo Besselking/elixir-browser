@@ -108,7 +108,7 @@ defmodule Browser.LayoutTest do
       ab = word(items, "ab")
       cd = word(items, "cd")
       assert_in_delta ab.x + ab.w / 2, 200, 4
-      assert cd.x + cd.w == 400 - 4
+      assert cd.x + cd.w == 400 - 4 - 8
     end
 
     test "block backgrounds become rects placed before the text" do
