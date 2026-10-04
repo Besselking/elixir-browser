@@ -264,10 +264,10 @@ defmodule Browser.JS.Promise do
       pr
     end)
 
-    def_fn(ctor, "all", fn _, args -> combine(arg(args, 0), :all) end)
-    def_fn(ctor, "allSettled", fn _, args -> combine(arg(args, 0), :all_settled) end)
-    def_fn(ctor, "race", fn _, args -> combine(arg(args, 0), :race) end)
-    def_fn(ctor, "any", fn _, args -> combine(arg(args, 0), :any) end)
+    def_fn(ctor, "all", fn this, args -> combine(this, arg(args, 0), :all) end)
+    def_fn(ctor, "allSettled", fn this, args -> combine(this, arg(args, 0), :all_settled) end)
+    def_fn(ctor, "race", fn this, args -> combine(this, arg(args, 0), :race) end)
+    def_fn(ctor, "any", fn this, args -> combine(this, arg(args, 0), :any) end)
 
     declare(
       scope,
@@ -294,81 +294,125 @@ defmodule Browser.JS.Promise do
 
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
 
-  # Promise.all / allSettled / race / any
-  defp combine(iterable, mode) do
-    items = iterate(iterable)
+  # Promise.all / allSettled / race / any: the iterable is pulled one value at a time, each one
+  # goes through `C.resolve` and its `then` (so a throwing one closes the iterator and rejects
+  # the result), and the combined value is made once the iterator is done and every element
+  # has settled
+  defp combine(ctor, iterable, mode) do
+    # only something with a `prototype` can be constructed (not `eval`, an arrow function ...)
+    unless function?(ctor) and match?({:obj, _}, Interp.get(ctor, "prototype")),
+      do: throw_error("TypeError", "Promise combinator called on a non-constructor")
+
     result = new()
-    n = length(items)
     key = {:js_combine, make_ref()}
-    Process.put(key, %{done: 0, values: %{}})
+    Process.put(key, %{remaining: 1, values: %{}})
 
-    if n == 0 do
-      case mode do
-        :race -> :ok
-        :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
-        _ -> resolve(result, new_array([]))
+    try do
+      resolve_fn = Interp.get(ctor, "resolve")
+
+      unless function?(resolve_fn),
+        do: throw_error("TypeError", "Promise resolve is not a function")
+
+      case iter_source(iterable) do
+        {:list, items} -> combine_each(items, nil, nil, 0, ctor, resolve_fn, mode, result, key)
+        {:proto, it, next} -> combine_each(nil, it, next, 0, ctor, resolve_fn, mode, result, key)
       end
+
+      if mode != :race, do: combine_finish(key, mode, result, -1, nil)
+    catch
+      {:js_error, e} -> reject(result, e)
     end
-
-    finish = fn i, v ->
-      s = Process.get(key)
-      s = %{s | done: s.done + 1, values: Map.put(s.values, i, v)}
-      Process.put(key, s)
-
-      if s.done == n do
-        list = for j <- 0..(n - 1), do: Map.fetch!(s.values, j)
-
-        case mode do
-          :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
-          _ -> resolve(result, new_array(list))
-        end
-      end
-    end
-
-    items
-    |> Enum.with_index()
-    |> Enum.each(fn {item, i} ->
-      pr = to_promise(item)
-
-      case mode do
-        :all ->
-          then(
-            pr,
-            native("", fn _, a ->
-              finish.(i, arg(a, 0))
-              :undefined
-            end),
-            rejecter(result)
-          )
-
-        :all_settled ->
-          then(
-            pr,
-            native("", fn _, a ->
-              finish.(i, new_object([{"status", "fulfilled"}, {"value", arg(a, 0)}])) &&
-                :undefined
-            end),
-            native("", fn _, a ->
-              finish.(i, new_object([{"status", "rejected"}, {"reason", arg(a, 0)}])) &&
-                :undefined
-            end)
-          )
-
-        :race ->
-          then(pr, resolver(result), rejecter(result))
-
-        :any ->
-          then(
-            pr,
-            resolver(result),
-            native("", fn _, a ->
-              finish.(i, arg(a, 0))
-              :undefined
-            end)
-          )
-      end
-    end)
 
     result
+  end
+
+  defp combine_each(items, it, next, i, ctor, resolve_fn, mode, result, key) do
+    step =
+      case items do
+        [h | t] ->
+          {:ok, h, t}
+
+        [] ->
+          :done
+
+        nil ->
+          case iter_step(it, next) do
+            :done -> :done
+            {:ok, v} -> {:ok, v, nil}
+          end
+      end
+
+    case step do
+      :done ->
+        :ok
+
+      {:ok, item, rest} ->
+        try do
+          combine_item(item, i, ctor, resolve_fn, mode, result, key)
+        catch
+          kind, e ->
+            if it, do: iter_close(it, true)
+            :erlang.raise(kind, e, __STACKTRACE__)
+        end
+
+        combine_each(rest, it, next, i + 1, ctor, resolve_fn, mode, result, key)
+    end
+  end
+
+  defp combine_item(item, i, ctor, resolve_fn, mode, result, key) do
+    pr = call(resolve_fn, ctor, [item])
+    then_fn = Interp.get(pr, "then")
+
+    unless function?(then_fn), do: throw_error("TypeError", "then is not a function")
+
+    if mode != :race do
+      s = Process.get(key)
+      Process.put(key, %{s | remaining: s.remaining + 1})
+    end
+
+    done = fn v ->
+      combine_finish(key, mode, result, i, v)
+      :undefined
+    end
+
+    {on_f, on_r} =
+      case mode do
+        :all ->
+          {native("", fn _, a -> done.(arg(a, 0)) end), rejecter(result)}
+
+        :all_settled ->
+          {native("", fn _, a ->
+             done.(new_object([{"status", "fulfilled"}, {"value", arg(a, 0)}]))
+           end),
+           native("", fn _, a ->
+             done.(new_object([{"status", "rejected"}, {"reason", arg(a, 0)}]))
+           end)}
+
+        :race ->
+          {resolver(result), rejecter(result)}
+
+        :any ->
+          {resolver(result), native("", fn _, a -> done.(arg(a, 0)) end)}
+      end
+
+    call(then_fn, pr, [on_f, on_r])
+  end
+
+  # one element has settled (index i), or `-1` when the iterator is done: when nothing is left
+  # the result is settled
+  defp combine_finish(key, mode, result, i, v) do
+    s = Process.get(key)
+    s = if i >= 0, do: %{s | values: Map.put(s.values, i, v)}, else: s
+    s = %{s | remaining: s.remaining - 1}
+    Process.put(key, s)
+
+    if s.remaining == 0 do
+      list = for j <- 0..(map_size(s.values) - 1)//1, do: Map.fetch!(s.values, j)
+
+      case mode do
+        :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
+        _ -> resolve(result, new_array(list))
+      end
+    end
   end
 end

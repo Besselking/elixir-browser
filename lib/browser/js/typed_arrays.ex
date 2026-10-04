@@ -422,6 +422,10 @@ defmodule Browser.JS.TypedArrays do
 
   defp array_like(src) do
     n = to_int(Interp.get(src, "length"))
+
+    # as large as the biggest typed array that can be made
+    if n > 100_000_000, do: throw_error("RangeError", "Invalid typed array length: #{n}")
+
     for i <- 0..(n - 1)//1, do: Interp.get(src, Integer.to_string(i))
   end
 

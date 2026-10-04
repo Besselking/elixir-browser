@@ -242,6 +242,30 @@ defmodule Browser.JSTest do
 
       assert js("function f({x, y = 2}, [z]) { return x + y + z } f({x: 1}, [3])") == 6.0
     end
+
+    test "array patterns pull only what they need from an iterator and close it" do
+      endless = """
+      var closed = 0, n = 0;
+      var it = {[Symbol.iterator]() {
+        return {next() { return {value: n++, done: false} },
+                return() { closed++; return {} }};
+      }};
+      """
+
+      assert js(endless <> "var [a, , b] = it; [a, b, n, closed]") == [0.0, 2.0, 3.0, 1.0]
+
+      assert js(endless <> "try { var [{x = (() => { throw 1 })()}] = it } catch (e) {} closed") ==
+               1.0
+
+      # a rest element drains it, a finished iterator is not closed
+      assert js("""
+             var closed = 0;
+             var it = {[Symbol.iterator]() { var i = 0; return {
+               next() { return i < 2 ? {value: i++, done: false} : {done: true} },
+               return() { closed++; return {} }}; }};
+             var [a, b, c, ...d] = it; [a, b, c, d.length, closed]
+             """) == [0.0, 1.0, :undefined, 0.0, 0.0]
+    end
   end
 
   describe "built-ins" do
@@ -659,6 +683,78 @@ defmodule Browser.JSTest do
     test "destructuring assignment" do
       assert js("var a = 1, b = 2; [a, b] = [b, a]; a + ',' + b") == "2,1"
       assert js("var o; ({ x: o } = { x: 5 }); o") == 5.0
+    end
+  end
+
+  describe "huge sparse arrays and prototypes" do
+    test "a sparse array with a huge length is searched without visiting every slot" do
+      assert js("var a = []; a[4294967294] = 'x'; [a.indexOf('x'), a.lastIndexOf('x')]") ==
+               [4_294_967_294.0, 4_294_967_294.0]
+
+      assert js("var a = []; a[4294967294] = 'x'; a.indexOf('x', Infinity)") == -1.0
+
+      assert js("var a = [1, 2, 3, 2]; [a.indexOf(2, 2), a.indexOf(2, -4), a.lastIndexOf(2, -2)]") ==
+               [3.0, 1.0, 1.0]
+
+      assert js(
+               "var a = []; Object.defineProperty(a, 4294967294, {value: 1}); Object.keys(a).length"
+             ) ==
+               0.0
+
+      assert js("var a = []; a[4294967294] = 1; a.hasOwnProperty('4294967294')") == true
+    end
+
+    test "Reflect.setPrototypeOf reports cycles and the immutable Object.prototype" do
+      assert js("Reflect.setPrototypeOf(Object.prototype, {})") == false
+      assert js("var a = {}, b = Object.create(a); Reflect.setPrototypeOf(a, b)") == false
+
+      assert js("var a = {}; Reflect.setPrototypeOf(a, Array.prototype) && a instanceof Array") ==
+               true
+    end
+
+    test "a typed array can not be made from an array-like with an absurd length" do
+      assert js("try { new Uint8Array({length: Math.pow(2, 53)}) } catch (e) { e.name }") ==
+               "RangeError"
+    end
+  end
+
+  describe "promise combinators" do
+    test "an iterator is closed when resolving an element throws, and the result rejects" do
+      src = """
+      var closed = 0;
+      var it = {[Symbol.iterator]() {
+        return {next() { return {value: 1, done: false} }, return() { closed++; return {} }};
+      }};
+      var p = Promise.resolve(1); p.then = function() { throw new Error('boom') };
+      var out = [];
+      for (var m of ['all', 'race', 'any', 'allSettled']) {
+        var r = Promise[m]({[Symbol.iterator]() { return {
+          next() { return {value: p, done: false} },
+          return() { closed++; return {} }}; }});
+        r.then(() => out.push('ok'), e => out.push(e.message));
+      }
+      Promise.resolve().then(() => 0).then(() => console.log(out.join() + ' ' + closed));
+      """
+
+      assert console(src) == [log: "boom,boom,boom,boom 4"]
+    end
+
+    test "all, allSettled, any and race still combine" do
+      src = """
+      Promise.all([1, Promise.resolve(2)]).then(v => console.log(v.join()));
+      Promise.allSettled([1, Promise.reject(3)]).then(v => console.log(v.map(x => x.status).join()));
+      Promise.any([Promise.reject(1), 5]).then(v => console.log(v));
+      Promise.race([new Promise(() => {}), 7]).then(v => console.log(v));
+      Promise.all([]).then(v => console.log(v.length));
+      """
+
+      assert Enum.sort(Keyword.values(console(src))) == [
+               "0",
+               "1,2",
+               "5",
+               "7",
+               "fulfilled,rejected"
+             ]
     end
   end
 

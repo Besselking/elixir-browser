@@ -29,6 +29,8 @@ defmodule Mix.Tasks.Js.Test262 do
     * `--all-features` - do not skip the tests that need features the runtime lacks
     * `--timeout MS` - per test, default 10000
     * `--jobs N` - parallel tests, default the number of schedulers
+    * `--timings FILE` - write how long each test took (ms, path) to a file, slowest first, and
+      print the slowest tests and the time per directory
     * `--limit N` - run only the first N tests found (a quick look)
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
@@ -72,7 +74,8 @@ defmodule Mix.Tasks.Js.Test262 do
           all_features: :boolean,
           timeout: :integer,
           jobs: :integer,
-          limit: :integer
+          limit: :integer,
+          timings: :string
         ],
         aliases: [v: :verbose]
       )
@@ -109,8 +112,11 @@ defmodule Mix.Tasks.Js.Test262 do
     # progress is for a terminal, not for a log
     tty? = match?({:ok, _}, :io.columns(:standard_error))
 
+    timings = if opts[:timings], do: :ets.new(:t262_timings, [:public]), else: nil
+
     run_opts =
       [
+        on_time: if(timings, do: fn rel, us -> :ets.insert(timings, {rel, us}) end, else: nil),
         timeout: opts[:timeout] || 10_000,
         jobs: opts[:jobs] || System.schedulers_online(),
         on_result: fn _ ->
@@ -124,6 +130,7 @@ defmodule Mix.Tasks.Js.Test262 do
     if tty?, do: IO.write(:stderr, "\r" <> String.duplicate(" ", 30) <> "\r")
 
     report(results, opts, started)
+    if timings, do: report_timings(timings, opts[:timings])
     baseline(results, paths, baseline_file, opts)
   end
 
@@ -236,6 +243,39 @@ defmodule Mix.Tasks.Js.Test262 do
         Mix.shell().info("  #{String.pad_leading(Integer.to_string(n), 6)}  #{reason}")
       end)
     end
+  end
+
+  defp report_timings(table, file) do
+    rows = table |> :ets.tab2list() |> Enum.sort_by(&(-elem(&1, 1)))
+
+    File.write!(
+      file,
+      Enum.map_join(rows, "\n", fn {p, us} -> "#{Float.round(us / 1000, 1)}\t#{p}" end) <> "\n"
+    )
+
+    total = rows |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+
+    Mix.shell().info(
+      "\nSlowest tests (total #{Float.round(total / 1_000_000, 1)} s of worker time):"
+    )
+
+    for {p, us} <- Enum.take(rows, 15),
+        do: Mix.shell().info("  #{String.pad_leading("#{div(us, 1000)}", 7)} ms  #{p}")
+
+    Mix.shell().info("\nWorker time per directory:")
+
+    rows
+    |> Enum.group_by(fn {p, _} -> p |> Path.split() |> Enum.take(2) |> Path.join() end)
+    |> Enum.map(fn {d, rs} -> {d, Enum.sum(Enum.map(rs, &elem(&1, 1))), length(rs)} end)
+    |> Enum.sort_by(&(-elem(&1, 1)))
+    |> Enum.take(15)
+    |> Enum.each(fn {d, us, n} ->
+      Mix.shell().info(
+        "  #{String.pad_leading("#{Float.round(us / 1_000_000, 1)}", 7)} s  #{String.pad_trailing(d, 36)} #{n} tests"
+      )
+    end)
+
+    Mix.shell().info("Timings written to #{file}")
   end
 
   defp first_line(text), do: text |> to_string() |> String.split("\n") |> hd()
