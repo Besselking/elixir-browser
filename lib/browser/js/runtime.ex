@@ -105,7 +105,7 @@ defmodule Browser.JS.Runtime do
     DOM.init(raw, info)
     DOM.install(scope)
     Process.put(:rt_info, info)
-    Browser.JS.WebAPI.install(scope, &http/3)
+    Browser.JS.WebAPI.install(scope, &http/1)
     Process.put(:rt_modules, %{})
 
     Process.put(:js_import, fn spec, from ->
@@ -381,20 +381,48 @@ defmodule Browser.JS.Runtime do
   defp base_url, do: Process.get(:rt_info)[:base] || page_url()
   defp page_url, do: Process.get(:rt_info).url
 
-  # a request from a script (`fetch`, `XMLHttpRequest`)
+  # A request from a script (`fetch`, `XMLHttpRequest`): `req` has `:method`, `:url`, `:body`,
+  # `:headers` (`[{name, value}]`), `:content_type` and `:credentials`. The answer is
+  # `{:ok, response}` (see `Browser.Fetch.load/2`, `full: true`) or `{:error, message}`.
+  # A page's `info.request` (`fn url, opts -> ...`) makes the real request; without one
+  # (in tests) the page's `fetch` function answers every request with status 200.
   @doc false
-  def http("GET", url, _body), do: fetch(url)
+  def http(%{url: url} = req) do
+    scheme = URI.parse(url).scheme
+    request = Process.get(:rt_info)[:request]
 
-  def http(method, url, body) do
-    if URI.parse(url).scheme in ["http", "https"] do
-      verb = if method == "POST", do: :post, else: :get
+    cond do
+      scheme in ["http", "https"] and request != nil ->
+        opts = [
+          method: req.method,
+          body: req.body,
+          headers: req.headers,
+          content_type: req.content_type,
+          credentials: req.credentials,
+          full: true
+        ]
 
-      case Browser.Fetch.load(url, method: verb, body: body, initiator: page_url()) do
-        {:ok, text, final} -> {:ok, text, final}
-        {:error, msg} -> {:error, to_string(msg)}
-      end
-    else
-      {:error, "blocked"}
+        case request.(url, opts) do
+          {:ok, response, _final} -> {:ok, response}
+          {:error, msg} -> {:error, to_string(msg)}
+        end
+
+      true ->
+        case fetch(url) do
+          {:ok, body, final} ->
+            {:ok,
+             %{
+               status: 200,
+               status_text: "OK",
+               headers: [],
+               body: body,
+               url: final,
+               redirected: false
+             }}
+
+          error ->
+            error
+        end
     end
   end
 

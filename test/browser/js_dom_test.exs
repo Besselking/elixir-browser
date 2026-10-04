@@ -3,7 +3,7 @@ defmodule Browser.JS.DOMTest do
   alias Browser.JS.Runtime
 
   # runs the page's scripts; `files` maps urls to what fetching them returns
-  defp start(html, files \\ %{}) do
+  defp start(html, files \\ %{}, info \\ %{}) do
     {raw, _} = html |> Browser.HTML.parse() |> Browser.Forms.index()
 
     fetch = fn url ->
@@ -14,12 +14,18 @@ defmodule Browser.JS.DOMTest do
     end
 
     pid =
-      Runtime.start(raw, %{
-        url: "http://t.test/dir/page?a=1#top",
-        width: 800,
-        height: 600,
-        fetch: fetch
-      })
+      Runtime.start(
+        raw,
+        Map.merge(
+          %{
+            url: "http://t.test/dir/page?a=1#top",
+            width: 800,
+            height: 600,
+            fetch: fetch
+          },
+          info
+        )
+      )
 
     {pid, Runtime.run_scripts(pid)}
   end
@@ -651,6 +657,202 @@ defmodule Browser.JS.DOMTest do
       reply = Runtime.dispatch(pid, {:control, 0}, "click")
       assert logs(reply) == ["1"]
       assert errors(reply) == []
+    end
+  end
+
+  describe "document.cookie" do
+    # each test has a host of its own: the jar is shared with the tests running beside it
+    defp run_on(host, script) do
+      {_pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: "http://#{host}/dir/page"})
+
+      r
+    end
+
+    defp cookie_pairs(r), do: logs(r) |> hd() |> String.split("; ", trim: true) |> Enum.sort()
+
+    test "reads the cookies of the page without the HttpOnly ones" do
+      Browser.Cookies.store("http://read.test/dir/page", ["a=1", "h=2; HttpOnly", "b=3; Path=/"])
+      r = run_on("read.test", "console.log(document.cookie)")
+      assert cookie_pairs(r) == ["a=1", "b=3"]
+    end
+
+    test "assigning sets one cookie, with its attributes, and keeps the rest" do
+      r =
+        run_on("write.test", """
+        document.cookie = "x=1; Path=/";
+        document.cookie = "y=2";
+        document.cookie = "gone=1; Max-Age=0";
+        document.cookie = "bad=1; HttpOnly";
+        console.log(document.cookie);
+        """)
+
+      assert errors(r) == []
+      assert cookie_pairs(r) == ["x=1", "y=2"]
+      assert Browser.Cookies.header("http://write.test/x") == "x=1"
+    end
+  end
+
+  describe "fetch and XMLHttpRequest" do
+    defp request_fn(test) do
+      fn url, opts ->
+        send(test, {:request, url, opts})
+
+        case url do
+          "http://t.test/missing" ->
+            {:ok,
+             %{
+               status: 404,
+               status_text: "Not Found",
+               headers: [{"content-type", "text/plain"}, {"x-a", "1"}],
+               body: "nope",
+               url: url,
+               redirected: false
+             }, url}
+
+          "http://t.test/down" ->
+            {:error, "Request failed: :econnrefused"}
+
+          _ ->
+            {:ok,
+             %{
+               status: 200,
+               status_text: "OK",
+               headers: [{"content-type", "application/json"}],
+               body: ~s({"n":1}),
+               url: url <> "?final",
+               redirected: true
+             }, url}
+        end
+      end
+    end
+
+    # timers (and so fetch and XHR) run on their own; what they log is sent to the owner
+    defp run_fetch(script) do
+      {pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{request: request_fn(self())})
+
+      assert errors(r) == []
+      %{r | console: r.console ++ collect_async(pid)}
+    end
+
+    defp collect_async(pid) do
+      receive do
+        {:js_async, ^pid, reply} -> reply.console ++ collect_async(pid)
+      after
+        150 -> Runtime.flush(pid).console
+      end
+    end
+
+    test "fetch gives the real status, headers, url and body" do
+      r =
+        run_fetch(~S"""
+        fetch("/missing").then(async (res) => {
+          console.log(res.status, res.ok, res.statusText, res.headers.get("x-a"), res.url, await res.text());
+        });
+        fetch("/ok").then(async (res) => {
+          console.log(res.status, res.ok, res.redirected, res.type, res.headers.get("Content-Type"), JSON.stringify(await res.json()));
+        });
+        """)
+
+      assert Enum.sort(logs(r)) == [
+               "200 true true basic application/json {\"n\":1}",
+               "404 false Not Found 1 http://t.test/missing nope"
+             ]
+    end
+
+    test "fetch sends the method, headers, body and credentials" do
+      run_fetch(~S"""
+      fetch("/api", { method: "post", headers: { "X-A": "1", "Content-Type": "application/json" }, body: JSON.stringify({ a: 1 }), credentials: "include" });
+      fetch("/form", { method: "POST", body: new URLSearchParams({ q: "x y" }) });
+      fetch("/plain", { method: "PUT", body: "hello" });
+      """)
+
+      assert_receive {:request, "http://t.test/api", opts}
+      assert opts[:method] == :post
+      assert opts[:body] == ~s({"a":1})
+      assert opts[:content_type] == "application/json"
+      assert opts[:credentials] == :include
+      assert {"x-a", "1"} in opts[:headers]
+      assert_receive {:request, "http://t.test/form", opts}
+      assert opts[:body] == "q=x+y"
+      assert opts[:content_type] == "application/x-www-form-urlencoded;charset=UTF-8"
+      assert_receive {:request, "http://t.test/plain", opts}
+      assert opts[:method] == :put
+      assert opts[:content_type] == "text/plain;charset=UTF-8"
+    end
+
+    test "fetch rejects with a TypeError when the request fails, and with an AbortError when aborted" do
+      r =
+        run_fetch(~S"""
+        fetch("/down").catch((e) => console.log(e.name, e.message));
+        const c = new AbortController();
+        fetch("/ok", { signal: c.signal }).catch((e) => console.log(e.name));
+        c.abort();
+        fetch("/ok", { signal: AbortSignal.abort() }).catch((e) => console.log(e.name));
+        try { new Request("/x", { method: "GET", body: "b" }); } catch (e) { console.log(e.name); }
+        """)
+
+      assert Enum.sort(logs(r)) == [
+               "AbortError",
+               "AbortError",
+               "TypeError",
+               "TypeError Failed to fetch"
+             ]
+
+      refute_received {:request, "http://t.test/ok", _}
+    end
+
+    test "XMLHttpRequest reports status, headers and the response in each responseType" do
+      r =
+        run_fetch(~S"""
+        const x = new XMLHttpRequest();
+        const states = [];
+        x.onreadystatechange = () => states.push(x.readyState);
+        x.open("POST", "/ok");
+        x.setRequestHeader("X-B", "2");
+        x.responseType = "json";
+        x.withCredentials = true;
+        x.onload = () => console.log(states.join(""), x.status, x.statusText, x.responseURL, x.response.n, x.getResponseHeader("content-type"), x.getAllResponseHeaders().trim());
+        x.send("data");
+        const y = new XMLHttpRequest();
+        y.open("GET", "/missing");
+        y.onload = () => console.log(y.status, y.responseText);
+        y.send();
+        const z = new XMLHttpRequest();
+        z.open("GET", "/down");
+        z.onerror = () => console.log("error", z.status, z.readyState);
+        z.send();
+        const w = new XMLHttpRequest();
+        w.open("GET", "/ok");
+        w.onload = () => console.log("never");
+        w.onabort = () => console.log("aborted");
+        w.send();
+        w.abort();
+        """)
+
+      assert "1234 200 OK http://t.test/ok?final 1 application/json content-type: application/json" in logs(
+               r
+             )
+
+      assert "404 nope" in logs(r)
+      assert "error 0 4" in logs(r)
+      assert "aborted" in logs(r)
+      refute "never" in logs(r)
+      assert_receive {:request, "http://t.test/ok", opts}
+      assert opts[:method] == :post and opts[:credentials] == :include
+      assert {"x-b", "2"} in opts[:headers]
+    end
+
+    test "a synchronous XMLHttpRequest has its answer when send returns" do
+      {_pid, r} =
+        start(
+          ~S"<body><script>const x = new XMLHttpRequest(); x.open('GET', '/missing', false); x.send(); console.log(x.status, x.responseText)</script></body>",
+          %{},
+          %{request: request_fn(self())}
+        )
+
+      assert logs(r) == ["404 nope"]
     end
   end
 end

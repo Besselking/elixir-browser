@@ -97,6 +97,14 @@ defmodule Browser.Fetch do
   fresh entries, revalidate stale ones), `:reload` (always ask the server, revalidating
   with `ETag`/`Last-Modified`) or `:history` (back/forward: use any cached entry).
 
+  `full: true` is for scripts (`fetch`, `XMLHttpRequest`): every status that is not a
+  redirect comes back, errors included, as `{:ok, response, final_url}` where `response` is
+  `%{status:, status_text:, headers: [{name, value}], body:, url:, redirected:}` (header
+  names lower-cased, `Set-Cookie` left out), and the cache is not consulted. They may also
+  give `method:` (`:get`, `:head`, `:post`, `:put`, `:patch`, `:delete`, `:options`),
+  `headers:` (`[{name, value}]`, forbidden names dropped), `content_type:` for a body and
+  `credentials: :omit | :same_origin | :include` (default `:same_origin`).
+
   Cookies follow `Browser.Cookies`. For `SameSite`, `initiator:` is the URL of the page making
   the request (nil for the address bar and reloads, which are never cross-site) and
   `navigation: true` marks a top-level navigation. A redirect chain is cross-site once any
@@ -122,7 +130,11 @@ defmodule Browser.Fetch do
           on_chunk: opts[:on_chunk],
           initiator: opts[:initiator],
           navigation: Keyword.get(opts, :navigation, false),
-          cross_site: false
+          cross_site: false,
+          full: Keyword.get(opts, :full, false),
+          headers: Keyword.get(opts, :headers, []),
+          content_type: opts[:content_type],
+          credentials: Keyword.get(opts, :credentials, :same_origin)
         }
       )
 
@@ -184,7 +196,7 @@ defmodule Browser.Fetch do
 
   defp fetch(_url, _method, _body, 0, _cache), do: {:error, "Too many redirects"}
 
-  defp fetch(url, :get, body, redirects, %{cache: cache} = ctx) do
+  defp fetch(url, :get, body, redirects, %{full: false, cache: cache} = ctx) do
     case lookup(url, cache) do
       {:fresh, entry} when cache != :reload -> {:ok, entry.body, url}
       {_, entry} -> request(url, :get, body, redirects, ctx, entry)
@@ -202,20 +214,15 @@ defmodule Browser.Fetch do
   defp request(url, method, body, redirects, ctx, entry) do
     ctx = %{ctx | cross_site: ctx.cross_site or cross_site?(ctx.initiator, url)}
     cookie_opts = [cross_site: ctx.cross_site, navigation: ctx.navigation, method: method]
+    cookies? = send_cookies?(ctx, url)
 
     headers =
       [{~c"user-agent", String.to_charlist(user_agent())}, {~c"accept-encoding", ~c"gzip"}] ++
-        cookie_header(url, cookie_opts) ++
+        script_headers(ctx, method) ++
+        if(cookies?, do: cookie_header(url, cookie_opts), else: []) ++
         if(entry, do: HttpCache.validators(entry), else: [])
 
-    request =
-      case method do
-        :post ->
-          {String.to_charlist(url), headers, ~c"application/x-www-form-urlencoded", body || ""}
-
-        _ ->
-          {String.to_charlist(url), headers}
-      end
+    request = build_request(url, method, body, headers, ctx)
 
     http_opts = [
       autoredirect: false,
@@ -232,7 +239,9 @@ defmodule Browser.Fetch do
         do: stream_get(request, http_opts, url, ctx.on_chunk),
         else: :httpc.request(method, request, http_opts, body_format: :binary)
 
-    with {:ok, {_, resp_headers, _}} <- result, do: store_cookies(url, resp_headers, cookie_opts)
+    with true <- cookies?, {:ok, {_, resp_headers, _}} <- result do
+      store_cookies(url, resp_headers, cookie_opts)
+    end
 
     case result do
       {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
@@ -244,12 +253,24 @@ defmodule Browser.Fetch do
           {_, loc} ->
             next = resolve(url, to_string(loc))
 
-            if status in [307, 308],
-              do: fetch(next, method, body, redirects - 1, ctx),
-              else: fetch(next, :get, nil, redirects - 1, ctx)
+            new = if status in [307, 308], do: method, else: redirect_method(method, status)
+            fetch(next, new, if(new == method, do: body), redirects - 1, ctx)
 
           nil ->
             {:error, "Redirect without Location"}
+        end
+
+      {:ok, {{_, status, reason}, headers, body}} when ctx.full ->
+        with {:ok, body, _} <- decode_body(headers, body, url) do
+          {:ok,
+           %{
+             status: status,
+             status_text: to_string(reason),
+             headers: response_headers(headers),
+             body: to_text(body),
+             url: url,
+             redirected: redirects < @max_redirects
+           }, url}
         end
 
       {:ok, {{_, 200, _}, headers, body}} ->
@@ -267,6 +288,88 @@ defmodule Browser.Fetch do
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
     end
+  end
+
+  # 301/302 turn a POST into a GET and 303 turns anything but HEAD into a GET
+  defp redirect_method(:head, _), do: :head
+  defp redirect_method(:post, _), do: :get
+  defp redirect_method(method, 303) when method != :get, do: :get
+  defp redirect_method(method, _), do: method
+
+  defp build_request(url, method, body, headers, ctx) do
+    if method in [:post, :put, :patch] or (method == :delete and body != nil) do
+      ctype = String.to_charlist(ctx.content_type || "application/x-www-form-urlencoded")
+      {String.to_charlist(url), headers, ctype, body || ""}
+    else
+      {String.to_charlist(url), headers}
+    end
+  end
+
+  # Request headers a script may not set (the browser owns them)
+  @forbidden ~w(accept-encoding connection content-length content-type cookie cookie2 host
+                origin referer te trailer transfer-encoding upgrade via user-agent)
+
+  # `fetch` and `XMLHttpRequest` headers, plus the `Origin` a browser adds to cross-site and
+  # non-GET requests and a default `Accept`
+  defp script_headers(%{full: false}, _method), do: []
+
+  defp script_headers(ctx, method) do
+    custom =
+      for {k, v} <- ctx.headers,
+          name = k |> to_string() |> String.downcase(),
+          name not in @forbidden and not String.starts_with?(name, "proxy-") and
+            not String.starts_with?(name, "sec-"),
+          do: {String.to_charlist(name), String.to_charlist(to_string(v))}
+
+    accept = if List.keymember?(custom, ~c"accept", 0), do: [], else: [{~c"accept", ~c"*/*"}]
+
+    origin =
+      case origin(ctx.initiator) do
+        nil -> []
+        o when method != :get and method != :head -> [{~c"origin", String.to_charlist(o)}]
+        o -> if ctx.cross_site, do: [{~c"origin", String.to_charlist(o)}], else: []
+      end
+
+    custom ++ accept ++ origin
+  end
+
+  defp origin(nil), do: nil
+
+  defp origin(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port}
+      when scheme in ["http", "https"] and host != nil ->
+        default = if scheme == "https", do: 443, else: 80
+        scheme <> "://" <> host <> if(port in [nil, default], do: "", else: ":#{port}")
+
+      _ ->
+        nil
+    end
+  end
+
+  # navigations and page loads always carry cookies; `credentials` is for scripts
+  defp send_cookies?(%{full: false}, _url), do: true
+  defp send_cookies?(%{credentials: :omit}, _url), do: false
+
+  defp send_cookies?(%{credentials: :same_origin, initiator: initiator}, url)
+       when initiator != nil,
+       do: origin(initiator) == origin(url)
+
+  defp send_cookies?(_ctx, _url), do: true
+
+  # lower-cased names, no `Set-Cookie` (scripts never see it)
+  defp response_headers(headers) do
+    for {k, v} <- headers,
+        name = k |> to_string() |> String.downcase(),
+        name not in ["set-cookie", "set-cookie2"],
+        do: {name, to_string(v)}
+  end
+
+  # a body that is not UTF-8 is read as Latin-1, as a script that asks for text would
+  defp to_text(body) do
+    if String.valid?(body),
+      do: body,
+      else: :unicode.characters_to_binary(body, :latin1, :utf8)
   end
 
   defp cross_site?(nil, _url), do: false
