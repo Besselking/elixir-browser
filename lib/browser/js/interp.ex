@@ -125,8 +125,15 @@ defmodule Browser.JS.Interp do
 
   def make_error(type, message) do
     err = new_object([{"message", message}], proto({:error, type}))
+    mark_error(err)
     put_hidden(err, "stack", stack_string("#{type}: #{message}"))
     err
+  end
+
+  @doc "Sets the [[ErrorData]] marker `Error.isError` looks for."
+  def mark_error({:obj, id} = e) do
+    store(id, Map.put(deref(id), :errdata, true))
+    e
   end
 
   @doc "`Error.stack`: the header and the names of the functions being run, innermost first."
@@ -612,6 +619,7 @@ defmodule Browser.JS.Interp do
     "fromCodePoint" => 1.0,
     "fromEntries" => 1.0,
     "fround" => 1.0,
+    "f16round" => 1.0,
     "get" => 1.0,
     "getOwnPropertyDescriptor" => 2.0,
     "getOwnPropertyDescriptors" => 1.0,
@@ -622,6 +630,7 @@ defmodule Browser.JS.Interp do
     "hasOwn" => 2.0,
     "hasOwnProperty" => 1.0,
     "hypot" => 2.0,
+    "sumPrecise" => 1.0,
     "imul" => 2.0,
     "includes" => 1.0,
     "indexOf" => 1.0,

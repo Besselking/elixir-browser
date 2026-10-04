@@ -10,6 +10,7 @@ defmodule Browser.JS.TypedArrays do
   little-endian.
   """
 
+  import Bitwise, only: [<<<: 2, |||: 2]
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Num, Props}
 
@@ -21,6 +22,7 @@ defmodule Browser.JS.TypedArrays do
     {"Uint16Array", :u16, 2},
     {"Int32Array", :i32, 4},
     {"Uint32Array", :u32, 4},
+    {"Float16Array", :f16, 2},
     {"Float32Array", :f32, 4},
     {"Float64Array", :f64, 8},
     {"BigInt64Array", :i64, 8},
@@ -31,6 +33,12 @@ defmodule Browser.JS.TypedArrays do
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+
+  defp def_fn(obj, name, arity, fun) do
+    {:obj, id} = f = native(name, fun)
+    store(id, Map.put(deref(id), :arity, arity * 1.0))
+    put_hidden(obj, name, f)
+  end
 
   defp callable!(f) do
     unless function?(f), do: throw_error("TypeError", "#{to_str(f)} is not a function")
@@ -50,8 +58,76 @@ defmodule Browser.JS.TypedArrays do
   defp read(:u32, <<v::little-unsigned-32>>), do: v * 1.0
   defp read(:i64, <<v::little-signed-64>>), do: {:bigint, v}
   defp read(:u64, <<v::little-unsigned-64>>), do: {:bigint, v}
+  defp read(:f16, <<bits::little-unsigned-16>>), do: decode_half(bits)
   defp read(:f32, <<bits::little-unsigned-32>>), do: decode_float(<<bits::32>>, 8)
   defp read(:f64, <<bits::little-unsigned-64>>), do: decode_float(<<bits::64>>, 11)
+
+  # IEEE 754 binary16
+  defp decode_half(bits) do
+    <<sign::1, exp::5, frac::10>> = <<bits::16>>
+    s = if sign == 1, do: -1.0, else: 1.0
+
+    cond do
+      exp == 31 and frac != 0 -> :nan
+      exp == 31 -> if sign == 1, do: :neg_infinity, else: :infinity
+      exp == 0 -> s * frac * :math.pow(2, -24)
+      true -> s * (1 + frac / 1024) * :math.pow(2, exp - 15)
+    end
+  end
+
+  # round to nearest, ties to even
+  defp encode_half(:nan), do: 0x7E00
+  defp encode_half(:infinity), do: 0x7C00
+  defp encode_half(:neg_infinity), do: 0xFC00
+
+  defp encode_half(x) do
+    <<sign::1, _::63>> = <<x * 1.0::float-64>>
+    a = abs(x)
+    s = sign <<< 15
+
+    cond do
+      a == 0 ->
+        s
+
+      a >= 65520.0 ->
+        s ||| 0x7C00
+
+      a < :math.pow(2, -14) ->
+        # subnormal (and the step up to the smallest normal): multiples of 2^-24
+        s ||| round_half_even(a * 16_777_216.0)
+
+      true ->
+        {m, e} = frexp(a)
+        # a = m * 2^e with m in [0.5, 1): the unbiased exponent is e - 1
+        he = e - 1 + 15
+        frac = round_half_even((m * 2 - 1) * 1024)
+
+        if frac == 1024,
+          do: s ||| (he + 1) <<< 10,
+          else: s ||| he <<< 10 ||| frac
+    end
+  end
+
+  # {m, e} with x = m * 2^e and m in [0.5, 1), for a positive finite float
+  defp frexp(x) do
+    <<_::1, e::11, m::52>> = <<x::float-64>>
+
+    if e == 0 do
+      {m0, e0} = frexp(x * 18_014_398_509_481_984.0)
+      {m0, e0 - 54}
+    else
+      <<mant::float-64>> = <<0::1, 1022::11, m::52>>
+      {mant, e - 1022}
+    end
+  end
+
+  @doc "`Math.f16round`: the nearest binary16 value."
+  def f16round(x) do
+    case to_num(x) do
+      n when n in [:nan, :infinity, :neg_infinity] -> n
+      n -> n |> encode_half() |> decode_half()
+    end
+  end
 
   # NaN and the infinities have no Elixir float; everything else decodes as a float
   defp decode_float(bits, exp_bits) do
@@ -65,6 +141,10 @@ defmodule Browser.JS.TypedArrays do
       total == 32 -> (fn <<f::float-32>> -> f end).(bits)
       true -> (fn <<f::float-64>> -> f end).(bits)
     end
+  end
+
+  defp write(:f16, value) do
+    <<encode_half(to_num(value))::little-unsigned-16>>
   end
 
   defp write(kind, value) when kind in [:f32, :f64] do
@@ -310,6 +390,48 @@ defmodule Browser.JS.TypedArrays do
       enumerable: false
     )
 
+    Props.define_accessor(p, "detached",
+      get:
+        native("get detached", fn this, _ ->
+          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          detached?(buffer_id(this))
+        end),
+      enumerable: false
+    )
+
+    # transfer(newLength) / transferToFixedLength(newLength): the bytes move to a new buffer
+    # (cut or zero-padded to the length) and this one is detached
+    for name <- ["transfer", "transferToFixedLength"] do
+      f =
+        native(name, fn this, args ->
+          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+
+          len =
+            case arg(args, 0) do
+              :undefined -> byte_size(bytes_of(this))
+              v -> to_index(v)
+            end
+
+          if detached?(buffer_id(this)),
+            do: throw_error("TypeError", "cannot transfer a detached ArrayBuffer")
+
+          bytes = bytes_of(this)
+
+          moved =
+            if len <= byte_size(bytes),
+              do: binary_part(bytes, 0, len),
+              else: bytes <> :binary.copy(<<0>>, len - byte_size(bytes))
+
+          buf = new_buffer(moved)
+          detach(this)
+          buf
+        end)
+
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, 0.0))
+      put_hidden(p, name, f)
+    end
+
     def_fn(p, "slice", fn this, args ->
       unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
 
@@ -364,6 +486,15 @@ defmodule Browser.JS.TypedArrays do
         end),
       enumerable: false
     )
+  end
+
+  # ToIndex
+  defp to_index(v) do
+    n = to_int(v)
+
+    if n < 0 or n > 9_007_199_254_740_991,
+      do: throw_error("RangeError", "Invalid array buffer length"),
+      else: n
   end
 
   defp rel_index(:undefined, _len, default), do: default
@@ -755,7 +886,17 @@ defmodule Browser.JS.TypedArrays do
   defp sort_compare({:bigint, a}, {:bigint, b}),
     do: if(a < b, do: :lt, else: if(a > b, do: :gt, else: :eq))
 
+  defp sort_compare(a, b) when is_number(a) and a == 0 and is_number(b) and b == 0 do
+    case {neg_zero?(a), neg_zero?(b)} do
+      {true, false} -> :lt
+      {false, true} -> :gt
+      _ -> :eq
+    end
+  end
+
   defp sort_compare(a, b), do: Num.compare(a, b)
+
+  defp neg_zero?(z), do: match?(<<1::1, _::63>>, <<z * 1.0::float-64>>)
 
   # the default order is numeric, NaN last
   defp sorted_values(d, cmp) do
@@ -787,6 +928,7 @@ defmodule Browser.JS.TypedArrays do
     {"Uint16", :u16},
     {"Int32", :i32},
     {"Uint32", :u32},
+    {"Float16", :f16},
     {"Float32", :f32},
     {"Float64", :f64},
     {"BigInt64", :i64},
@@ -832,7 +974,7 @@ defmodule Browser.JS.TypedArrays do
     for {name, kind} <- @dv_types do
       size = size_of(kind)
 
-      def_fn(p, "get" <> name, fn this, args ->
+      def_fn(p, "get" <> name, 1, fn this, args ->
         {:dv, bid, off, len} = dv!(this)
         i = dv_toindex(arg(args, 0))
         i = dv_check(i, size, len, bid)
@@ -840,7 +982,7 @@ defmodule Browser.JS.TypedArrays do
         read(kind, if(truthy(arg(args, 1)), do: bin, else: swap(bin)))
       end)
 
-      def_fn(p, "set" <> name, fn this, args ->
+      def_fn(p, "set" <> name, 2, fn this, args ->
         {:dv, bid, off, len} = dv!(this)
         i = dv_toindex(arg(args, 0))
         enc = write(kind, arg(args, 1))
