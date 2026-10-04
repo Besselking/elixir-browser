@@ -2943,6 +2943,15 @@ defmodule Browser.LayoutTest do
       assert %{x: 4, y: 50, w: 180} = box_of(items)
     end
 
+    test "a table cell grows to hold the float inside it" do
+      {items, _} =
+        fl(
+          ~s|<table style="background:#ccc;border-spacing:0"><tr><td style="padding:0"><div style="float:left;width:60px;height:50px"></div></td></tr></table>|
+        )
+
+      assert %{h: 50} = box_of(items)
+    end
+
     test "text goes back to the full width once the float ends" do
       {items, _} =
         fl(

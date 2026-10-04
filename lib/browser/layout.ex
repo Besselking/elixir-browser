@@ -1623,7 +1623,9 @@ defmodule Browser.Layout do
       limits: %{}
     }
 
-    ops |> Enum.reduce(st, &op/2) |> flush()
+    # what is laid out here is a block formatting context of its own: it grows to hold its floats
+    st = ops |> Enum.reduce(st, &op/2) |> flush()
+    contain_floats(st, 0)
   end
 
   # paint order: backgrounds, flow content, then absolutely positioned elements
