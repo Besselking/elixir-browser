@@ -236,7 +236,7 @@ defmodule Browser.JS.Interp do
   def function?({:obj, id}), do: deref(id).class == :function
   def function?(_), do: false
 
-  def truthy(v) when v in [false, :undefined, :null, :nan, ""], do: false
+  def truthy(v) when v in [false, :undefined, :null, :nan, "", {:bigint, 0}], do: false
   def truthy(v) when is_number(v), do: v != 0
   def truthy(_), do: true
 
@@ -246,6 +246,7 @@ defmodule Browser.JS.Interp do
   def typeof(v) when is_binary(v), do: "string"
   def typeof({:obj, _} = v), do: if(function?(v), do: "function", else: "object")
   def typeof({:symbol, _, _}), do: "symbol"
+  def typeof({:bigint, _}), do: "bigint"
   def typeof(v), do: if(num?(v), do: "number", else: "object")
 
   def to_num(v) when is_number(v), do: v
@@ -254,12 +255,46 @@ defmodule Browser.JS.Interp do
   def to_num({:symbol, _, _}),
     do: throw_error("TypeError", "Cannot convert a Symbol value to a number")
 
+  def to_num({:bigint, _}),
+    do: throw_error("TypeError", "Cannot convert a BigInt value to a number")
+
   def to_num(:undefined), do: :nan
   def to_num(:null), do: 0.0
   def to_num(true), do: 1.0
   def to_num(false), do: 0.0
   def to_num(v) when is_binary(v), do: Num.parse(v)
   def to_num({:obj, _} = v), do: v |> to_primitive("number") |> to_num()
+
+  # WhiteSpace and LineTerminator of the language: not Unicode's White_Space (U+180E, U+0085)
+  @js_space [9, 10, 11, 12, 13, 32, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF] ++
+              Enum.to_list(0x2000..0x200A)
+
+  def js_trim_start(<<c::utf8, rest::binary>> = s),
+    do: if(c in @js_space, do: js_trim_start(rest), else: s)
+
+  def js_trim_start(s), do: s
+
+  def js_trim_end(s) do
+    s
+    |> String.codepoints()
+    |> Enum.reverse()
+    |> Enum.drop_while(fn <<c::utf8>> -> c in @js_space end)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
+
+  def js_trim(s), do: s |> js_trim_start() |> js_trim_end()
+
+  @doc "ToNumeric: a number, or a `{:bigint, n}`."
+  def numeric(v) do
+    case to_primitive(v, "number") do
+      {:bigint, _} = b -> b
+      p -> to_num(p)
+    end
+  end
+
+  def big?({:bigint, _}), do: true
+  def big?(_), do: false
 
   @doc "ToIntegerOrInfinity, clamped to a large integer so callers can compare freely."
   def to_int(v) do
@@ -276,6 +311,7 @@ defmodule Browser.JS.Interp do
   def to_str({:symbol, _, _}),
     do: throw_error("TypeError", "Cannot convert a Symbol value to a string")
 
+  def to_str({:bigint, n}), do: Integer.to_string(n)
   def to_str(:undefined), do: "undefined"
   def to_str(:null), do: "null"
   def to_str(true), do: "true"
@@ -288,6 +324,24 @@ defmodule Browser.JS.Interp do
   def to_key(k), do: to_str(k)
 
   def to_primitive({:obj, _} = o, hint) do
+    case get(o, {:symbol, :toPrimitive, "Symbol.toPrimitive"}) do
+      m when m in [:undefined, :null] ->
+        ordinary_to_primitive(o, hint)
+
+      m ->
+        unless function?(m),
+          do: throw_error("TypeError", "Symbol.toPrimitive is not a function")
+
+        case call(m, o, [hint]) do
+          {:obj, _} -> throw_error("TypeError", "Cannot convert object to primitive value")
+          prim -> prim
+        end
+    end
+  end
+
+  def to_primitive(v, _), do: v
+
+  defp ordinary_to_primitive(o, hint) do
     order = if hint == "string", do: ["toString", "valueOf"], else: ["valueOf", "toString"]
 
     Enum.find_value(order, fn name ->
@@ -306,8 +360,6 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def to_primitive(v, _), do: v
-
   # ── equality and comparison ────────────────────────────────
 
   def strict_eq(a, b) do
@@ -319,6 +371,7 @@ defmodule Browser.JS.Interp do
       nullish?(a) and nullish?(b) -> true
       nullish?(a) or nullish?(b) -> false
       num?(a) and num?(b) -> Num.equal?(a, b)
+      big?(a) or big?(b) -> Browser.JS.BigInt.loose_eq(a, b)
       is_binary(a) and is_binary(b) -> a == b
       is_boolean(a) -> loose_eq(to_num(a), b)
       is_boolean(b) -> loose_eq(a, to_num(b))
@@ -340,14 +393,19 @@ defmodule Browser.JS.Interp do
     a = to_primitive(a, "number")
     b = to_primitive(b, "number")
 
-    if is_binary(a) and is_binary(b) do
-      cond do
-        a < b -> :lt
-        a > b -> :gt
-        true -> :eq
-      end
-    else
-      Num.compare(to_num(a), to_num(b))
+    cond do
+      is_binary(a) and is_binary(b) ->
+        cond do
+          a < b -> :lt
+          a > b -> :gt
+          true -> :eq
+        end
+
+      big?(a) or big?(b) ->
+        Browser.JS.BigInt.compare(a, b)
+
+      true ->
+        Num.compare(to_num(a), to_num(b))
     end
   end
 
@@ -442,6 +500,7 @@ defmodule Browser.JS.Interp do
   def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
     do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
 
+  def get({:bigint, _} = n, key), do: lookup(deref(elem(proto(:bigint), 1)), to_key(key), n)
   def get({:symbol, _, _} = s, key), do: lookup(deref(elem(proto(:symbol), 1)), to_key(key), s)
 
   def get(b, key) when is_boolean(b),
@@ -2035,6 +2094,7 @@ defmodule Browser.JS.Interp do
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
+  def ev({:bigint, n}, _), do: {:bigint, n}
 
   def ev({:val, v}, _env), do: v
 
@@ -2238,12 +2298,29 @@ defmodule Browser.JS.Interp do
     v = ev(e, env)
 
     case op do
-      "!" -> not truthy(v)
-      "-" -> Num.neg(to_num(v))
-      "+" -> to_num(v)
-      "~" -> (Num.int32(to_num(v)) |> Bitwise.bnot()) * 1.0
-      "typeof" -> typeof(v)
-      "void" -> :undefined
+      "!" ->
+        not truthy(v)
+
+      "-" ->
+        case numeric(v) do
+          {:bigint, n} -> {:bigint, -n}
+          n -> Num.neg(n)
+        end
+
+      "+" ->
+        to_num(v)
+
+      "~" ->
+        case numeric(v) do
+          {:bigint, n} -> {:bigint, Bitwise.bnot(n)}
+          n -> (Num.int32(n) |> Bitwise.bnot()) * 1.0
+        end
+
+      "typeof" ->
+        typeof(v)
+
+      "void" ->
+        :undefined
     end
   end
 
@@ -2265,8 +2342,14 @@ defmodule Browser.JS.Interp do
   def ev({:binary, op, l, r}, env), do: binop(op, ev(l, env), ev(r, env))
 
   def ev({:update, op, prefix?, target}, env) do
-    old = to_num(ev(target, env))
-    new = if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+    old = numeric(ev(target, env))
+
+    new =
+      case old do
+        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+      end
+
     assign_to(target, new, env)
     if prefix?, do: new, else: old
   end
@@ -2382,16 +2465,30 @@ defmodule Browser.JS.Interp do
     a = to_primitive(a, "default")
     b = to_primitive(b, "default")
 
-    if is_binary(a) or is_binary(b),
-      do: to_str(a) <> to_str(b),
-      else: Num.add(to_num(a), to_num(b))
+    cond do
+      is_binary(a) or is_binary(b) -> to_str(a) <> to_str(b)
+      big?(a) or big?(b) -> Browser.JS.BigInt.arith("+", a, b)
+      true -> Num.add(to_num(a), to_num(b))
+    end
   end
 
-  def binop("-", a, b), do: Num.sub(to_num(a), to_num(b))
-  def binop("*", a, b), do: Num.mul(to_num(a), to_num(b))
-  def binop("/", a, b), do: Num.div(to_num(a), to_num(b))
-  def binop("%", a, b), do: Num.mod(to_num(a), to_num(b))
-  def binop("**", a, b), do: Num.pow(to_num(a), to_num(b))
+  def binop(op, a, b) when op in ["-", "*", "/", "%", "**"] do
+    a = numeric(a)
+    b = numeric(b)
+
+    if big?(a) or big?(b) do
+      Browser.JS.BigInt.arith(op, a, b)
+    else
+      case op do
+        "-" -> Num.sub(a, b)
+        "*" -> Num.mul(a, b)
+        "/" -> Num.div(a, b)
+        "%" -> Num.mod(a, b)
+        "**" -> Num.pow(a, b)
+      end
+    end
+  end
+
   def binop("===", a, b), do: strict_eq(a, b)
   def binop("!==", a, b), do: not strict_eq(a, b)
   def binop("==", a, b), do: loose_eq(a, b)
@@ -2400,8 +2497,18 @@ defmodule Browser.JS.Interp do
   def binop(">", a, b), do: compare(a, b) == :gt
   def binop("<=", a, b), do: compare(a, b) in [:lt, :eq]
   def binop(">=", a, b), do: compare(a, b) in [:gt, :eq]
-  def binop(op, a, b) when op in ["&", "|", "^"], do: Num.bitop(op, to_num(a), to_num(b))
-  def binop(op, a, b) when op in ["<<", ">>", ">>>"], do: Num.shift(op, to_num(a), to_num(b))
+
+  def binop(op, a, b) when op in ["&", "|", "^", "<<", ">>", ">>>"] do
+    a = numeric(a)
+    b = numeric(b)
+
+    cond do
+      big?(a) or big?(b) -> Browser.JS.BigInt.arith(op, a, b)
+      op in ["&", "|", "^"] -> Num.bitop(op, a, b)
+      true -> Num.shift(op, a, b)
+    end
+  end
+
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to

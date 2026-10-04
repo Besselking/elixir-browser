@@ -835,6 +835,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp property_key([{:num, n, _} | ts]), do: {{:str, Browser.JS.Num.to_string(n)}, nil, ts}
+  defp property_key([{:bigint, n, _} | ts]), do: {{:str, Integer.to_string(n)}, nil, ts}
 
   defp property_key([{:p, "[", _} | ts]) do
     {e, ts} = assignment(ts)
@@ -1007,7 +1008,8 @@ defmodule Browser.JS.Parser do
 
     {kind, ts} =
       case ts do
-        [{:id, k, _}, {t, _, _} | _] when k in ["get", "set"] and t in [:id, :str, :num, :priv] ->
+        [{:id, k, _}, {t, _, _} | _]
+        when k in ["get", "set"] and t in [:id, :str, :num, :bigint, :priv] ->
           {String.to_atom(k), tl(ts)}
 
         [{:id, k, _}, {:p, "[", _} | _] when k in ["get", "set"] ->
@@ -1312,7 +1314,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp unary([{:id, "await", _}, {k, v, _} | _] = [_ | ts])
-       when k in [:id, :num, :str, :tmpl, :regex] and
+       when k in [:id, :num, :bigint, :str, :tmpl, :regex] and
               (k != :id or v not in ["in", "of", "instanceof"]) do
     {e, ts} = unary(ts)
     {{:await, e}, ts}
@@ -1499,6 +1501,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
+  defp primary([{:bigint, n, _} | ts]), do: {{:bigint, n}, ts}
 
   defp primary([{:str, s, mark} | ts]) do
     check_octal_string(mark)
@@ -1632,7 +1635,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp object_literal([{:id, "async", _}, {k, v, false} | _] = [_ | rest], acc)
-       when k in [:id, :str, :num] or (k == :p and v == "[") do
+       when k in [:id, :str, :num, :bigint] or (k == :p and v == "[") do
     {key, shorthand, after_key} = property_key(rest)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key)
@@ -1641,7 +1644,7 @@ defmodule Browser.JS.Parser do
 
   # `get x() {}` and `set x(v) {}`
   defp object_literal([{:id, kind, _}, {k, v, _} | _] = [_ | rest], acc)
-       when kind in ["get", "set"] and (k in [:id, :str, :num] or (k == :p and v == "[")) do
+       when kind in ["get", "set"] and (k in [:id, :str, :num, :bigint] or (k == :p and v == "[")) do
     {key, shorthand, after_key} = property_key(rest)
 
     case after_key do

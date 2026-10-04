@@ -87,17 +87,29 @@ defmodule Browser.JS.Collections do
       end
     end)
 
-    def_fn(p, "toString", fn this, _ -> "Symbol(#{description(this)})" end)
-    def_fn(p, "valueOf", fn this, _ -> this end)
+    def_fn(p, "toString", fn this, _ -> "Symbol(#{description(this_symbol(this))})" end)
+    def_fn(p, "valueOf", fn this, _ -> this_symbol(this) end)
 
     Props.define_accessor(p, "description",
-      get: native("description", fn this, _ -> desc_or_undefined(this) end),
+      get: native("description", fn this, _ -> desc_or_undefined(this_symbol(this)) end),
       enumerable: false
     )
 
     put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
     :ok
   end
+
+  # a Symbol primitive or a `Object(sym)` wrapper
+  defp this_symbol({:symbol, _, _} = s), do: s
+
+  defp this_symbol({:obj, id}) do
+    case deref(id) do
+      %{prim: {:symbol, _, _} = s} -> s
+      _ -> throw_error("TypeError", "not a symbol")
+    end
+  end
+
+  defp this_symbol(_), do: throw_error("TypeError", "not a symbol")
 
   defp description({:symbol, _, :undefined}), do: ""
   defp description({:symbol, _, d}), do: d
