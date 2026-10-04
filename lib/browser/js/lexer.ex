@@ -44,8 +44,18 @@ defmodule Browser.JS.Lexer do
   defp lex(<<?., c, _::binary>> = s, nl, acc) when c in ?0..?9, do: number(s, nl, acc)
 
   defp lex(<<q, rest::binary>>, nl, acc) when q in [?", ?'] do
+    Process.put(:js_octal, false)
     {str, rest} = string(rest, q, [])
-    lex(rest, false, [{:str, str, nl} | acc])
+    # a string with a legacy octal escape carries `:octal` (`:octal_nl` after a line break)
+    # where the newline flag goes, so the parser can refuse it in strict code
+    mark =
+      cond do
+        not Process.get(:js_octal) -> nl
+        nl -> :octal_nl
+        true -> :octal
+      end
+
+    lex(rest, false, [{:str, str, mark} | acc])
   end
 
   defp lex("`" <> rest, nl, acc) do
@@ -213,6 +223,27 @@ defmodule Browser.JS.Lexer do
   defp string(<<c, _::binary>>, _q, _acc) when c in [?\n, ?\r],
     do: throw({:syntax, "unterminated string"})
 
+  # legacy octal escapes (`\1`, `\012`, `\0` followed by a digit) and `\8`, `\9`
+  defp string(<<?\\, d, rest::binary>>, q, acc) when d in ?0..?9 do
+    case {d, rest} do
+      {?0, <<n, _::binary>>} when n not in ?0..?9 ->
+        string(rest, q, [<<0>> | acc])
+
+      {?0, ""} ->
+        string(rest, q, [<<0>> | acc])
+
+      {d, _} when d in [?8, ?9] ->
+        Process.put(:js_octal, true)
+        string(rest, q, [<<d>> | acc])
+
+      _ ->
+        Process.put(:js_octal, true)
+        max_more = if d <= ?3, do: 2, else: 1
+        {digits, rest} = octal_digits(rest, max_more, [d])
+        string(rest, q, [<<String.to_integer(List.to_string(digits), 8)::utf8>> | acc])
+    end
+  end
+
   defp string(<<?\\, rest::binary>>, q, acc) do
     {chunk, rest} = escape(rest)
     string(rest, q, [chunk | acc])
@@ -220,6 +251,11 @@ defmodule Browser.JS.Lexer do
 
   defp string(<<c::utf8, rest::binary>>, q, acc), do: string(rest, q, [<<c::utf8>> | acc])
   defp string(_, _q, _acc), do: throw({:syntax, "unterminated string"})
+
+  defp octal_digits(<<n, rest::binary>>, left, acc) when left > 0 and n in ?0..?7,
+    do: octal_digits(rest, left - 1, acc ++ [n])
+
+  defp octal_digits(rest, _left, acc), do: {acc, rest}
 
   defp escape("n" <> r), do: {"\n", r}
   defp escape("t" <> r), do: {"\t", r}
