@@ -22,7 +22,9 @@ defmodule Browser.JS.TypedArrays do
     {"Int32Array", :i32, 4},
     {"Uint32Array", :u32, 4},
     {"Float32Array", :f32, 4},
-    {"Float64Array", :f64, 8}
+    {"Float64Array", :f64, 8},
+    {"BigInt64Array", :i64, 8},
+    {"BigUint64Array", :u64, 8}
   ]
 
   @max_f32 3.4028235677973366e38
@@ -46,6 +48,8 @@ defmodule Browser.JS.TypedArrays do
   defp read(:u16, <<v::little-unsigned-16>>), do: v * 1.0
   defp read(:i32, <<v::little-signed-32>>), do: v * 1.0
   defp read(:u32, <<v::little-unsigned-32>>), do: v * 1.0
+  defp read(:i64, <<v::little-signed-64>>), do: {:bigint, v}
+  defp read(:u64, <<v::little-unsigned-64>>), do: {:bigint, v}
   defp read(:f32, <<bits::little-unsigned-32>>), do: decode_float(<<bits::32>>, 8)
   defp read(:f64, <<bits::little-unsigned-64>>), do: decode_float(<<bits::64>>, 11)
 
@@ -78,6 +82,11 @@ defmodule Browser.JS.TypedArrays do
       {:f64, :neg_infinity} -> <<0, 0, 0, 0, 0, 0, 0xF0, 0xFF>>
       {:f64, x} -> <<x::little-float-64>>
     end
+  end
+
+  defp write(kind, value) when kind in [:i64, :u64] do
+    {:bigint, n} = Browser.JS.BigInt.to_bigint(value)
+    <<Bitwise.band(n, Bitwise.bsl(1, 64) - 1)::little-size(64)>>
   end
 
   defp write(:u8c, value) do
@@ -743,6 +752,11 @@ defmodule Browser.JS.TypedArrays do
     Enum.reduce(rest, acc, fn {v, i}, a -> call(f, :undefined, [a, v, i * 1.0, this]) end)
   end
 
+  defp sort_compare({:bigint, a}, {:bigint, b}),
+    do: if(a < b, do: :lt, else: if(a > b, do: :gt, else: :eq))
+
+  defp sort_compare(a, b), do: Num.compare(a, b)
+
   # the default order is numeric, NaN last
   defp sorted_values(d, cmp) do
     items = values(d)
@@ -750,7 +764,7 @@ defmodule Browser.JS.TypedArrays do
     cond do
       cmp == :undefined ->
         {nans, nums} = Enum.split_with(items, &(&1 == :nan))
-        Enum.sort(nums, fn a, b -> Num.compare(a, b) != :gt end) ++ nans
+        Enum.sort(nums, fn a, b -> sort_compare(a, b) != :gt end) ++ nans
 
       true ->
         f = callable!(cmp)
@@ -774,7 +788,9 @@ defmodule Browser.JS.TypedArrays do
     {"Int32", :i32},
     {"Uint32", :u32},
     {"Float32", :f32},
-    {"Float64", :f64}
+    {"Float64", :f64},
+    {"BigInt64", :i64},
+    {"BigUint64", :u64}
   ]
 
   defp install_data_view(scope) do

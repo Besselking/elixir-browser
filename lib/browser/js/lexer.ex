@@ -181,6 +181,7 @@ defmodule Browser.JS.Lexer do
           base = %{?x => 16, ?X => 16, ?b => 2, ?B => 2, ?o => 8, ?O => 8}[x]
 
           case Integer.parse(digits, base) do
+            {n, <<?n, rest::binary>>} -> {{:bigint, n}, rest}
             {n, rest} -> {n * 1.0, rest}
             :error -> throw({:syntax, "bad number"})
           end
@@ -188,11 +189,21 @@ defmodule Browser.JS.Lexer do
         _ ->
           [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
           lit_f = if String.starts_with?(lit, "."), do: "0" <> lit, else: lit
+          rest = binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))
 
-          {f, _} =
-            Float.parse(if Regex.match?(~r/\A\d+\z/, lit_f), do: lit_f <> ".0", else: lit_f)
+          case {rest, Regex.match?(~r/\A(?:0|[1-9]\d*)\z/, lit)} do
+            {<<?n, rest::binary>>, true} ->
+              {{:bigint, String.to_integer(lit)}, rest}
 
-          {f, binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))}
+            {<<?n, _::binary>>, false} ->
+              throw({:syntax, "invalid BigInt literal"})
+
+            _ ->
+              {f, _} =
+                Float.parse(if Regex.match?(~r/\A\d+\z/, lit_f), do: lit_f <> ".0", else: lit_f)
+
+              {f, rest}
+          end
       end
 
     case rest do
@@ -200,7 +211,10 @@ defmodule Browser.JS.Lexer do
         throw({:syntax, "identifier directly after number"})
 
       _ ->
-        lex(rest, false, [{:num, value, nl} | acc])
+        case value do
+          {:bigint, n} -> lex(rest, false, [{:bigint, n, nl} | acc])
+          _ -> lex(rest, false, [{:num, value, nl} | acc])
+        end
     end
   end
 

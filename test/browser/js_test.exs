@@ -443,7 +443,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("var a = 1n")
+      assert {:syntax, _} = error("var a = 1.5n")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -546,7 +546,15 @@ defmodule Browser.JSTest do
     end
 
     test "syntax the runtime lacks is a syntax error" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("var a = 1n")
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("var a = 01n")
+    end
+
+    test "BigInt" do
+      assert {:ok, 42.0, _} = Browser.JS.eval("Number(2n ** 5n + 10n)")
+      assert {:ok, "bigint", _} = Browser.JS.eval("typeof 1n")
+      assert {:ok, "ff", _} = Browser.JS.eval("(255n).toString(16)")
+      assert {:error, {:uncaught, _}, _} = Browser.JS.eval("1n + 1")
+      assert {:ok, true, _} = Browser.JS.eval("1n == 1 && 2n > 1 && 10n > 9")
     end
   end
 

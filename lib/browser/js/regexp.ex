@@ -8,7 +8,7 @@ defmodule Browser.JS.RegExp do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
-  alias Browser.JS.{Interp, Props}
+  alias Browser.JS.{Interp, Props, Str}
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -198,8 +198,8 @@ defmodule Browser.JS.RegExp do
         named = named_groups(names, groups)
 
         %{
-          start: String.length(binary_part(subject, 0, start)),
-          stop: String.length(binary_part(subject, 0, start + len)),
+          start: cp_count(binary_part(subject, 0, start)),
+          stop: cp_count(binary_part(subject, 0, start + len)),
           text: binary_part(subject, start, len),
           groups: groups,
           named: named
@@ -221,8 +221,25 @@ defmodule Browser.JS.RegExp do
   defp named_values(names, groups), do: Enum.take(groups, length(names))
 
   defp byte_of(subject, cp) do
-    if cp <= 0, do: 0, else: byte_size(String.slice(subject, 0, cp))
+    byte_of(subject, cp, 0)
   end
+
+  # byte offset of the code point index `n` (strings are indexed by code point)
+  defp byte_of(_, n, acc) when n <= 0, do: acc
+  defp byte_of(<<c::utf8, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + utf8_size(c))
+  defp byte_of(<<>>, _, acc), do: acc
+  defp byte_of(<<_, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + 1)
+
+  defp utf8_size(c) when c < 0x80, do: 1
+  defp utf8_size(c) when c < 0x800, do: 2
+  defp utf8_size(c) when c < 0x10000, do: 3
+  defp utf8_size(_), do: 4
+
+  # the number of code points (what `.length` and match positions count)
+  defp cp_count(bin), do: cp_count(bin, 0)
+  defp cp_count(<<_::utf8, rest::binary>>, n), do: cp_count(rest, n + 1)
+  defp cp_count(<<>>, n), do: n
+  defp cp_count(<<_, rest::binary>>, n), do: cp_count(rest, n + 1)
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
@@ -246,7 +263,7 @@ defmodule Browser.JS.RegExp do
     global? = flag?(re_obj, "g") or flag?(re_obj, "y")
     from = if global?, do: to_int(Interp.get(re_obj, "lastIndex")), else: 0
 
-    if from > String.length(subject) do
+    if from > 0 and from > cp_count(subject) do
       put(re_obj, "lastIndex", 0.0)
       :null
     else
@@ -266,7 +283,7 @@ defmodule Browser.JS.RegExp do
   def all_matches(re_obj, subject), do: all_matches(re_obj, subject, 0, [])
 
   defp all_matches(re_obj, subject, from, acc) do
-    if from > String.length(subject) do
+    if from > cp_count(subject) do
       Enum.reverse(acc)
     else
       case match_at(re_obj, subject, from) do
@@ -316,20 +333,20 @@ defmodule Browser.JS.RegExp do
   def string_split(s, re_obj, limit) do
     matches =
       all_matches(re_obj, s)
-      |> Enum.reject(&(&1.stop == &1.start and &1.start >= String.length(s)))
+      |> Enum.reject(&(&1.stop == &1.start and &1.start >= cp_count(s)))
 
     {parts, last} =
       Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
         if m.stop == m.start and m.start == from and from == 0 do
           {acc, from}
         else
-          piece = String.slice(s, from, m.start - from)
+          piece = Str.slice(s, from, m.start - from)
           caps = for g <- m.groups, do: g
           {Enum.reverse(caps) ++ [piece | acc], m.stop}
         end
       end)
 
-    parts = Enum.reverse([String.slice(s, last, String.length(s)) | parts])
+    parts = Enum.reverse([Str.slice(s, last, cp_count(s)) | parts])
     parts = if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit))
     new_array(parts)
   end
@@ -346,11 +363,11 @@ defmodule Browser.JS.RegExp do
 
     {out, last} =
       Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
-        piece = String.slice(s, from, m.start - from)
+        piece = Str.slice(s, from, m.start - from)
         {[expand(repl, m, s), piece | acc], m.stop}
       end)
 
-    IO.iodata_to_binary(Enum.reverse([String.slice(s, last, String.length(s)) | out]))
+    IO.iodata_to_binary(Enum.reverse([Str.slice(s, last, cp_count(s)) | out]))
   end
 
   defp expand(repl, m, s) do
@@ -370,10 +387,10 @@ defmodule Browser.JS.RegExp do
   defp substitute("$&" <> r, m, s, acc), do: substitute(r, m, s, [m.text | acc])
 
   defp substitute("$`" <> r, m, s, acc),
-    do: substitute(r, m, s, [String.slice(s, 0, m.start) | acc])
+    do: substitute(r, m, s, [Str.slice(s, 0, m.start) | acc])
 
   defp substitute("$'" <> r, m, s, acc),
-    do: substitute(r, m, s, [String.slice(s, m.stop, String.length(s)) | acc])
+    do: substitute(r, m, s, [Str.slice(s, m.stop, cp_count(s)) | acc])
 
   defp substitute("$<" <> r, m, s, acc) do
     case String.split(r, ">", parts: 2) do

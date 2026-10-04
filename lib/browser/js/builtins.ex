@@ -53,6 +53,7 @@ defmodule Browser.JS.Builtins do
     install_object(scope, object_proto)
     install_array(scope, proto(:array))
     install_primitives(scope)
+    Browser.JS.BigInt.install(scope)
     install_math(scope)
     install_json(scope)
     install_console(scope)
@@ -82,6 +83,7 @@ defmodule Browser.JS.Builtins do
   defp class_tag(v) when is_binary(v), do: "String"
   defp class_tag(v) when is_boolean(v), do: "Boolean"
   defp class_tag({:symbol, _, _}), do: "Symbol"
+  defp class_tag({:bigint, _}), do: "BigInt"
   defp class_tag(v) when not is_tuple(v), do: "Number"
 
   defp class_tag({:obj, id} = o) do
@@ -92,6 +94,7 @@ defmodule Browser.JS.Builtins do
       %{date: _} -> "Date"
       %{prim: p} when is_binary(p) -> "String"
       %{prim: p} when is_boolean(p) -> "Boolean"
+      %{prim: {:bigint, _}} -> "Object"
       %{prim: _} -> "Number"
       _ -> if error_object?(o), do: "Error", else: "Object"
     end
@@ -212,7 +215,8 @@ defmodule Browser.JS.Builtins do
       constructor(scope, "Object", object_proto, fn _, args ->
         case arg(args, 0) do
           {:obj, _} = o -> o
-          _ -> new_object()
+          v when v in [:undefined, :null] -> new_object()
+          v -> box(v)
         end
       end)
 
@@ -1090,6 +1094,18 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
+    def_fn(str, "fromCodePoint", fn _, args ->
+      Enum.map_join(args, fn v ->
+        n = to_num(v)
+
+        unless is_number(n) and n == trunc(n) and n >= 0 and n <= 0x10FFFF,
+          do: throw_error("RangeError", "Invalid code point #{to_str(v)}")
+
+        n = trunc(n)
+        if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>>
+      end)
+    end)
+
     # UTF-16 code units: a surrogate pair is one character, a lone surrogate cannot be kept
     def_fn(str, "fromCharCode", fn _, args ->
       args |> Enum.map(&(&1 |> to_num() |> code_unit())) |> units_to_string()
@@ -1097,7 +1113,16 @@ defmodule Browser.JS.Builtins do
 
     num =
       constructor(scope, "Number", proto(:number), fn this, args ->
-        n = if args == [], do: 0.0, else: to_num(hd(args))
+        n =
+          if args == [] do
+            0.0
+          else
+            case to_primitive(hd(args), "number") do
+              {:bigint, b} -> Browser.JS.BigInt.to_float(b)
+              p -> to_num(p)
+            end
+          end
+
         if wrapper_target?(this, :number), do: wrap(this, n), else: n
       end)
 
@@ -1292,6 +1317,18 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
+  # ToObject of a primitive: a String, Number, Boolean or BigInt wrapper
+  defp box(v) when is_binary(v) do
+    o = new_object([], proto(:string))
+    put_const(o, "length", float(String.length(v)))
+    wrap(o, v)
+  end
+
+  defp box(v) when is_boolean(v), do: wrap(new_object([], proto(:boolean)), v)
+  defp box({:bigint, _} = v), do: wrap(new_object([], proto(:bigint)), v)
+  defp box({:symbol, _, _} = v), do: wrap(new_object([], proto(:symbol)), v)
+  defp box(v), do: wrap(new_object([], proto(:number)), v)
+
   # `new String(x)`, `new Number(x)`, `new Boolean(x)`: the constructor was handed a fresh object
   # of the right prototype, which becomes the wrapper
   defp wrapper_target?({:obj, id}, kind) do
@@ -1345,9 +1382,9 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "valueOf", fn this, _ -> this_prim(this, :string, "String.prototype.valueOf") end)
     str_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
     str_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
-    str_fn(p, "trim", fn this, _ -> String.trim(this) end)
-    str_fn(p, "trimStart", fn this, _ -> String.trim_leading(this) end)
-    str_fn(p, "trimEnd", fn this, _ -> String.trim_trailing(this) end)
+    str_fn(p, "trim", fn this, _ -> Interp.js_trim(this) end)
+    str_fn(p, "trimStart", fn this, _ -> Interp.js_trim_start(this) end)
+    str_fn(p, "trimEnd", fn this, _ -> Interp.js_trim_end(this) end)
     str_fn(p, "charAt", fn this, args -> Str.at(this, to_int(arg(args, 0))) || "" end)
 
     str_fn(p, "at", fn this, args ->
@@ -1736,6 +1773,7 @@ defmodule Browser.JS.Builtins do
       is_number(v) -> Num.to_string(v)
       v in [:nan, :infinity, :neg_infinity] -> "null"
       v == :undefined -> :skip
+      big?(v) -> throw_error("TypeError", "Do not know how to serialize a BigInt")
       function?(v) -> :skip
       v in seen -> throw_error("TypeError", "Converting circular structure to JSON")
       array?(v) -> stringify_array(v, indent, cur, [v | seen])
@@ -1818,6 +1856,9 @@ defmodule Browser.JS.Builtins do
 
       num?(v) ->
         Num.to_string(v)
+
+      big?(v) ->
+        to_str(v) <> "n"
 
       function?(v) ->
         function_label(v)

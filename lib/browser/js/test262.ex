@@ -19,7 +19,7 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt SharedArrayBuffer Atomics
+    symbols-as-weakmap-keys Proxy proxy-missing-checks SharedArrayBuffer Atomics
     Atomics.pause Atomics.waitAsync Float16Array resizable-arraybuffer arraybuffer-transfer
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
     FinalizationRegistry set-methods dynamic-import tail-call-optimization Temporal ShadowRealm
@@ -219,7 +219,7 @@ defmodule Browser.JS.Test262 do
         programs = Enum.map(names, &harness[&1])
 
         spawn_and_wait(timeout, fn ->
-          execute(programs, source, max_steps, async?)
+          execute(programs, source, max_steps, async?, "regExpUtils.js" in names)
         end)
         |> judge(negative, async?)
 
@@ -249,7 +249,7 @@ defmodule Browser.JS.Test262 do
   end
 
   # -> {:ok, printed} | {:syntax, msg} | {:uncaught, text} | :limit
-  defp execute(programs, source, max_steps, async?) do
+  defp execute(programs, source, max_steps, async?, regexp_utils?) do
     Interp.init(max_steps)
     scope = Builtins.install()
     install_host(scope)
@@ -261,6 +261,7 @@ defmodule Browser.JS.Test262 do
 
         {:ok, program} ->
           Enum.each(programs, &Interp.run_program/1)
+          if regexp_utils?, do: install_regexp_utils(scope)
           Interp.run_program(program)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
@@ -274,6 +275,52 @@ defmodule Browser.JS.Test262 do
       {:syntax, msg} -> {:syntax, msg}
       other -> {:uncaught, "internal: " <> inspect(other), printed()}
     end
+  end
+
+  # `buildString` and `testPropertyEscapes` of harness/regExpUtils.js, natively: the originals
+  # walk every code point of Unicode (over a million loop iterations per test) in the
+  # interpreter, which takes minutes for the ~500 property-escape tests. These do the same
+  # work (same string, same RegExp test, same assert message on a mismatch) in Elixir.
+  defp install_regexp_utils(scope) do
+    cp = fn n -> if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>> end
+
+    Interp.declare(
+      scope,
+      "buildString",
+      Interp.native("buildString", fn _, [args | _] ->
+        lone = args |> Interp.get("loneCodePoints") |> Interp.array_list()
+        ranges = args |> Interp.get("ranges") |> Interp.array_list()
+
+        pieces =
+          for r <- ranges do
+            [from, to] = r |> Interp.array_list() |> Enum.map(&trunc/1)
+            for n <- from..to//1, do: cp.(n)
+          end
+
+        IO.iodata_to_binary([Enum.map(lone, &cp.(trunc(&1))), pieces])
+      end)
+    )
+
+    Interp.declare(
+      scope,
+      "testPropertyEscapes",
+      Interp.native("testPropertyEscapes", fn _, [regexp, string, expression | _] ->
+        if Browser.JS.RegExp.exec(regexp, string) == :null do
+          Enum.each(String.codepoints(string), fn symbol ->
+            if Browser.JS.RegExp.exec(regexp, symbol) == :null do
+              <<n::utf8>> = symbol
+              hex = n |> Integer.to_string(16) |> String.upcase() |> String.pad_leading(6, "0")
+              msg = "`#{expression}` should match U+#{hex} (`#{symbol}`)"
+              Interp.declare(scope, "__t262_msg", msg)
+              {:ok, call} = Parser.parse("assert(false, __t262_msg);")
+              Interp.run_program(call)
+            end
+          end)
+        end
+
+        :undefined
+      end)
+    )
   end
 
   defp printed, do: Enum.reverse(Process.get(:t262_out, []))
