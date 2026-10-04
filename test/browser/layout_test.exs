@@ -3884,4 +3884,22 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1.type == :box and Map.get(&1, :anchor) == true))
     end
   end
+
+  test "an absolute box inside a flex item stays above the content that follows" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:flex"><form style="position:relative"><span>in</span><div style="position:absolute;top:20px;background:#fff;width:100px"><p>drop</p></div></form></div><div style="background:#eee;height:80px"><p>below</p></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2)
+
+    index = fn pred -> Enum.find_index(items, pred) end
+    drop_bg = index.(&(&1.type == :rect and &1.color == {255, 255, 255}))
+    band = index.(&(&1.type == :rect and &1.color == {238, 238, 238}))
+    below = index.(&(&1[:text] == "below"))
+    assert drop_bg > band
+    assert drop_bg > below
+    assert index.(&(&1[:text] == "drop")) > drop_bg
+  end
 end

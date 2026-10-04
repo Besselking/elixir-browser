@@ -1597,9 +1597,13 @@ defmodule Browser.Layout do
 
   # paint order: backgrounds, flow content, then absolutely positioned elements
   defp finalize(st) do
-    all =
-      Enum.reverse(st.rects) ++
-        Enum.reverse(st.items) ++ (st.overlays |> Enum.reverse() |> Enum.concat())
+    # what an absolutely positioned box painted (`:over`) stays above the flow, even when it came
+    # through a line or an inline-block that sorts its items into backgrounds and the rest
+    {over, flow} =
+      (Enum.reverse(st.rects) ++ Enum.reverse(st.items))
+      |> Enum.split_with(&Map.get(&1, :over))
+
+    all = flow ++ (st.overlays |> Enum.reverse() |> Enum.concat()) ++ over
 
     if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
   end
@@ -1750,7 +1754,10 @@ defmodule Browser.Layout do
     {items, height, _} = layout_atom(st, sub, w, spec.key)
     x = st.margin + st.left
     moved = for it <- items, do: move(it, x, box.top)
-    {rects, others} = Enum.split_with(moved, &(&1.type in @behind_text))
+
+    {rects, others} =
+      Enum.split_with(moved, &(&1.type in @behind_text and !Map.get(&1, :over)))
+
     # the border runs through the middle of the legend's text (a little above the baseline), not
     # the middle of its line, which sits above the text: the way a line puts its text lower
     middle =
@@ -2481,7 +2488,7 @@ defmodule Browser.Layout do
 
     x = if left, do: origin.x + left, else: x
     {tx, ty} = resolve_translate(spec.translate, width, height)
-    moved = for it <- items, do: move(it, x + tx, y + ty)
+    moved = for it <- items, do: it |> move(x + tx, y + ty) |> Map.put(:over, true)
     # a fixed box stays where it is in the window while the page scrolls
     moved =
       if spec.fixed,
@@ -2954,7 +2961,9 @@ defmodule Browser.Layout do
           do: move(sub, atom.x + shift, top_of.(atom))
 
     # everything a box paints behind its text: colours, borders, images, shadows
-    {rects, others} = Enum.split_with(moved, &(&1.type in @behind_text))
+    {rects, others} =
+      Enum.split_with(moved, &(&1.type in @behind_text and !Map.get(&1, :over)))
+
     new_items = Enum.reverse(others) ++ placed
 
     ctx = %{
