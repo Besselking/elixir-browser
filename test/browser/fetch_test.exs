@@ -142,6 +142,28 @@ defmodule Browser.FetchTest do
     end
   end
 
+  describe "cookies" do
+    test "Set-Cookie on a redirect is sent on the next request and later ones" do
+      Browser.Cookies.clear()
+
+      base =
+        serve([
+          "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2; Path=/\r\nContent-Length: 0\r\n\r\n",
+          "HTTP/1.1 200 OK\r\nSet-Cookie: c=3\r\nContent-Length: 2\r\n\r\nok",
+          "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: 2\r\n\r\nok"
+        ])
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/start")
+      assert_receive {:request, "GET", "/start", h1, _}
+      refute Map.has_key?(h1, "cookie")
+      assert_receive {:request, "GET", "/next", %{"cookie" => "a=1; b=2"}, _}
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/more", cache: :reload)
+      assert_receive {:request, "GET", "/more", %{"cookie" => cookie}, _}
+      assert cookie == "a=1; b=2; c=3"
+    end
+  end
+
   describe "caching" do
     defp response(body, headers),
       do:

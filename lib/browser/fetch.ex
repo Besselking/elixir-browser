@@ -1,7 +1,7 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
-  alias Browser.HttpCache
+  alias Browser.{Cookies, HttpCache}
 
   @max_redirects 8
 
@@ -191,6 +191,7 @@ defmodule Browser.Fetch do
   defp request(url, method, body, redirects, ctx, entry) do
     headers =
       [{~c"user-agent", String.to_charlist(user_agent())}, {~c"accept-encoding", ~c"gzip"}] ++
+        cookie_header(url) ++
         if(entry, do: HttpCache.validators(entry), else: [])
 
     request =
@@ -216,6 +217,8 @@ defmodule Browser.Fetch do
       if method == :get and ctx.on_chunk,
         do: stream_get(request, http_opts, url, ctx.on_chunk),
         else: :httpc.request(method, request, http_opts, body_format: :binary)
+
+    with {:ok, {_, resp_headers, _}} <- result, do: store_cookies(url, resp_headers)
 
     case result do
       {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
@@ -249,6 +252,21 @@ defmodule Browser.Fetch do
 
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp cookie_header(url) do
+    case Cookies.header(url) do
+      nil -> []
+      value -> [{~c"cookie", String.to_charlist(value)}]
+    end
+  end
+
+  # every response may set cookies, redirects and errors included
+  defp store_cookies(url, headers) do
+    case for({k, v} <- headers, k == ~c"set-cookie", do: v) do
+      [] -> :ok
+      set_cookies -> Cookies.store(url, set_cookies)
     end
   end
 
