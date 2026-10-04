@@ -1474,9 +1474,6 @@ defmodule Browser.Layout do
     |> Kernel.==(:mono)
   end
 
-  defp align("center"), do: :center
-  defp align("-webkit-center"), do: :center
-  defp align(v) when v in ["right", "end"], do: :right
   defp walk_text(t, %{pre: true} = style, acc), do: pre_text(t, style, acc)
 
   defp walk_text(t, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line],
@@ -1505,6 +1502,9 @@ defmodule Browser.Layout do
     end
   end
 
+  defp align("center"), do: :center
+  defp align("-webkit-center"), do: :center
+  defp align(v) when v in ["right", "end"], do: :right
   defp align(_), do: :left
 
   # Preformatted text keeps its line breaks. A blank line holds a zero-width space so
