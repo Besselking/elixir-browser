@@ -62,6 +62,7 @@ defmodule Browser.JS.Lexer do
     {parts, after_tmpl} = template(rest, [], [])
     # the raw text of the chunks, which `String.raw` and other tags read
     raw = binary_part(rest, 0, byte_size(rest) - byte_size(after_tmpl) - 1)
+    raw = String.replace(raw, ["\r\n", "\r"], "\n")
     lex(after_tmpl, false, [{:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl} | acc])
   end
 
@@ -265,6 +266,7 @@ defmodule Browser.JS.Lexer do
   defp escape("v" <> r), do: {"\v", r}
   defp escape("0" <> r), do: {<<0>>, r}
   defp escape("\r\n" <> r), do: {"", r}
+  defp escape("\r" <> r), do: {"", r}
   defp escape("\n" <> r), do: {"", r}
 
   defp escape(<<"x", h::binary-size(2), r::binary>>) do
@@ -316,11 +318,18 @@ defmodule Browser.JS.Lexer do
   end
 
   defp template(<<?\\, rest::binary>>, text, parts) do
-    {chunk, rest} = escape(rest)
-    template(rest, [chunk | text], parts)
+    if bad_template_escape?(rest) do
+      # no cooked value: a tagged template reads `undefined` there, an untagged one is an error
+      <<_::utf8, rest::binary>> = rest
+      template(rest, [:bad | text], parts)
+    else
+      {chunk, rest} = escape(rest)
+      template(rest, [chunk | text], parts)
+    end
   end
 
   defp template(<<"\r\n", rest::binary>>, text, parts), do: template(rest, ["\n" | text], parts)
+  defp template(<<"\r", rest::binary>>, text, parts), do: template(rest, ["\n" | text], parts)
 
   defp template(<<c::utf8, rest::binary>>, text, parts),
     do: template(rest, [<<c::utf8>> | text], parts)
@@ -344,7 +353,29 @@ defmodule Browser.JS.Lexer do
   defp raw_chunks(<<c::utf8, rest::binary>>, text, chunks),
     do: raw_chunks(rest, [<<c::utf8>> | text], chunks)
 
-  defp flush(text), do: text |> Enum.reverse() |> IO.iodata_to_binary()
+  defp flush(text) do
+    if :bad in text, do: :bad, else: text |> Enum.reverse() |> IO.iodata_to_binary()
+  end
+
+  # an escape a template literal cannot cook: `\1`..`\9`, `\0` before a digit, a malformed
+  # `\x`, `\u` or `\u{...}`
+  defp bad_template_escape?(<<?0, n, _::binary>>) when n in ?0..?9, do: true
+  defp bad_template_escape?(<<d, _::binary>>) when d in ?1..?9, do: true
+  defp bad_template_escape?(<<?x, h::binary-size(2), _::binary>>), do: not hex?(h)
+  defp bad_template_escape?(<<?x, _::binary>>), do: true
+
+  defp bad_template_escape?("u{" <> r) do
+    case String.split(r, "}", parts: 2) do
+      [hex, _] -> not (hex != "" and hex?(hex) and String.to_integer(hex, 16) <= 0x10FFFF)
+      _ -> true
+    end
+  end
+
+  defp bad_template_escape?(<<?u, h::binary-size(4), _::binary>>), do: not hex?(h)
+  defp bad_template_escape?(<<?u, _::binary>>), do: true
+  defp bad_template_escape?(_), do: false
+
+  defp hex?(s), do: s =~ ~r/\A[0-9a-fA-F]+\z/
 
   # the source of a `${ ... }` expression, up to its matching brace
   defp expr_source("}" <> rest, 0, acc),

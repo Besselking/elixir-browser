@@ -1401,8 +1401,9 @@ defmodule Browser.JS.Parser do
 
   defp chain(e, [{:tmpl, parts, _} | ts], c) do
     {parts, raw} = template_parts(parts)
-    cooked = Enum.filter(parts, &is_binary/1)
-    exprs = Enum.reject(parts, &is_binary/1)
+    is_text = &(is_binary(&1) or &1 == :bad)
+    cooked = parts |> Enum.filter(is_text) |> Enum.map(&if(&1 == :bad, do: :undefined, else: &1))
+    exprs = Enum.reject(parts, is_text)
     chain({:call, e, [{:tagged_strings, cooked, raw} | exprs], false}, ts, c)
   end
 
@@ -1513,6 +1514,7 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:tmpl, parts, _} | ts]) do
     {parts, _raw} = template_parts(parts)
+    if :bad in parts, do: throw({:syntax, "invalid escape sequence in template literal"})
     {{:tmpl, parts}, ts}
   end
 
