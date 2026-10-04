@@ -2116,9 +2116,10 @@ defmodule Browser.Layout do
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
 
-  defp start_box(st, ref, o) do
-    st = st |> flush() |> apply_gap()
-    {bt, br, _bb, bl} = o.bw
+  defp start_box(st, ref, o), do: st |> flush() |> apply_gap() |> place_box(ref, o)
+
+  defp place_box(st, ref, o) do
+    {_bt, br, _bb, bl} = o.bw
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     hpad = o.pl + o.pr + bl + br
 
@@ -2131,11 +2132,32 @@ defmodule Browser.Layout do
     ml0 = if o.ml == :auto, do: 0, else: o.ml
     mr0 = if o.mr == :auto, do: 0, else: o.mr
 
-    cw = to_content.(o.width) || max(avail - ml0 - mr0 - hpad, 0)
+    # a box that clips (overflow other than visible) starts a block formatting context: it does
+    # not overlap the floats beside it, but narrows to the room they leave, or moves below them
+    {fl, fr} = if o.clip, do: float_offsets(st, st.y), else: {0, 0}
+    beside = avail - fl - fr
+
+    cw = to_content.(o.width) || max(beside - ml0 - mr0 - hpad, 0)
     cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
     cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
     box_w = hpad + cw
-    free = avail - ml0 - mr0 - box_w
+    free = beside - ml0 - mr0 - box_w
+
+    below =
+      if fl > 0 or fr > 0,
+        do:
+          st.floats
+          |> Enum.filter(&(&1.y1 > st.y))
+          |> Enum.map(& &1.y1)
+          |> Enum.min(fn -> nil end)
+
+    if below && ml0 + box_w + mr0 > beside,
+      do: place_box(%{st | y: below}, ref, o),
+      else: open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free})
+  end
+
+  defp open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free}) do
+    {bt, br, _bb, bl} = o.bw
 
     {ml, _mr} =
       case {o.ml, o.mr} do
@@ -2145,9 +2167,9 @@ defmodule Browser.Layout do
         _ -> {ml0, mr0}
       end
 
-    left = st.left + ml
+    left = st.left + fl + ml
     # a negative margin lets the box reach into the space beside it
-    rest = avail - ml - box_w
+    rest = beside - ml - box_w
     rest = if ml0 < 0 or mr0 < 0, do: rest, else: max(rest, 0)
     x = st.margin + left
 
@@ -2172,7 +2194,7 @@ defmodule Browser.Layout do
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
         left: left + bl + o.pl,
-        right: st.right + rest + br + o.pr,
+        right: st.right + fr + rest + br + o.pr,
         # room beside a box with a width is not part of what it needs
         free: st.free + if(o.width || o.maxw, do: max(rest - mr0, 0), else: 0),
         y: st.y + bt + o.pt
