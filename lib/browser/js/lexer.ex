@@ -404,6 +404,18 @@ defmodule Browser.JS.Lexer do
     expr_source(after_str, d, [consumed, <<q>> | acc])
   end
 
+  # a regular expression literal (it may hold quotes and braces): `/` after an operator or an
+  # opening bracket, not a division
+  defp expr_source("/" <> rest, d, acc)
+       when rest != "" and binary_part(rest, 0, 1) not in ["/", "*"] do
+    if subst_regex?(acc) do
+      {lit, after_re} = subst_re_body(rest, false, [])
+      expr_source(after_re, d, [lit, "/" | acc])
+    else
+      expr_source(rest, d, ["/" | acc])
+    end
+  end
+
   defp expr_source("`" <> rest, d, acc) do
     {_, after_tmpl} = template(rest, [], [])
     consumed = binary_part(rest, 0, byte_size(rest) - byte_size(after_tmpl))
@@ -414,4 +426,36 @@ defmodule Browser.JS.Lexer do
     do: expr_source(rest, d, [<<c::utf8>> | acc])
 
   defp expr_source("", _d, _acc), do: throw({:syntax, "unterminated template expression"})
+
+  defp subst_regex?(acc) do
+    last =
+      Enum.find_value(acc, fn piece ->
+        t = String.trim_trailing(piece)
+        if t != "", do: binary_part(t, byte_size(t) - 1, 1)
+      end)
+
+    last == nil or last in ~w[( , = : [ ! & | ? { } ; + - * % < > ~ ^]
+  end
+
+  # the rest of a regex literal after its opening `/`: the body, the closing `/` and the flags
+  defp subst_re_body("\\" <> <<c::utf8, rest::binary>>, cls, acc),
+    do: subst_re_body(rest, cls, [<<c::utf8>>, "\\" | acc])
+
+  defp subst_re_body("[" <> rest, _cls, acc), do: subst_re_body(rest, true, ["[" | acc])
+  defp subst_re_body("]" <> rest, _cls, acc), do: subst_re_body(rest, false, ["]" | acc])
+
+  defp subst_re_body("/" <> rest, false, acc) do
+    {flags, rest} = subst_re_flags(rest, [])
+    {IO.iodata_to_binary(Enum.reverse(["/" | acc])) <> flags, rest}
+  end
+
+  defp subst_re_body(<<c::utf8, rest::binary>>, cls, acc),
+    do: subst_re_body(rest, cls, [<<c::utf8>> | acc])
+
+  defp subst_re_body("", _, _), do: throw({:syntax, "unterminated regular expression"})
+
+  defp subst_re_flags(<<c, rest::binary>>, acc) when c in ?a..?z,
+    do: subst_re_flags(rest, [c | acc])
+
+  defp subst_re_flags(rest, acc), do: {acc |> Enum.reverse() |> List.to_string(), rest}
 end

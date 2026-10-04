@@ -185,7 +185,7 @@ defmodule Browser.JS.Num do
   def div(a, b) when b == 0 do
     cond do
       a == 0 -> :nan
-      sign(a) > 0 -> :infinity
+      sign(a) * sign(b) > 0 -> :infinity
       true -> :neg_infinity
     end
   end
@@ -211,12 +211,16 @@ defmodule Browser.JS.Num do
   def pow(:infinity, b), do: if(b > 0, do: :infinity, else: 0.0)
 
   def pow(:neg_infinity, b),
-    do: if(b > 0, do: if(odd?(b), do: :neg_infinity, else: :infinity), else: 0.0)
+    do:
+      if(b > 0,
+        do: if(odd?(b), do: :neg_infinity, else: :infinity),
+        else: if(odd?(b), do: -0.0, else: 0.0)
+      )
 
   def pow(a, b) when a < 0 and b != trunc(b), do: :nan
 
   def pow(a, b),
-    do: guard(fn -> :math.pow(a * 1.0, b * 1.0) end, if(a < 0 and odd?(b), do: -1, else: 1))
+    do: guard(fn -> :math.pow(a * 1.0, b * 1.0) end, if(sign(a) < 0 and odd?(b), do: -1, else: 1))
 
   defp abs_gt1(a), do: a == :infinity or a == :neg_infinity or abs(a) > 1
   defp abs_eq1(a), do: not is_atom(a) and abs(a) == 1
@@ -264,6 +268,10 @@ defmodule Browser.JS.Num do
   defp sign(:infinity), do: 1
   defp sign(:neg_infinity), do: -1
   defp sign(n) when n < 0, do: -1
+
+  defp sign(n) when n == 0,
+    do: if(match?(<<1::1, _::63>>, <<n * 1.0::float-64>>), do: -1, else: 1)
+
   defp sign(_), do: 1
 
   # float overflow raises on the BEAM; JavaScript saturates to Infinity

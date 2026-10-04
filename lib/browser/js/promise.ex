@@ -311,6 +311,31 @@ defmodule Browser.JS.Promise do
       new_object([{"promise", pr}, {"resolve", res}, {"reject", rej}])
     end)
 
+    put_hidden(ctor, "allKeyed", Browser.JS.Prelude.all_keyed())
+    put_hidden(ctor, "allSettledKeyed", Browser.JS.Prelude.all_settled_keyed())
+
+    put_hidden(
+      ctor,
+      "try",
+      with_length(
+        native("try", fn this, args ->
+          unless match?({:obj, _}, this),
+            do: throw_error("TypeError", "Promise.try called on a non-object")
+
+          {pr, res, rej} = capability(this)
+
+          try do
+            call(res, :undefined, [call(arg(args, 0), :undefined, Enum.drop(args, 1))])
+          catch
+            {:js_error, e} -> call(rej, :undefined, [e])
+          end
+
+          pr
+        end),
+        1
+      )
+    )
+
     def_fn(ctor, "all", fn this, args -> combine(this, arg(args, 0), :all) end)
     def_fn(ctor, "allSettled", fn this, args -> combine(this, arg(args, 0), :all_settled) end)
     def_fn(ctor, "race", fn this, args -> combine(this, arg(args, 0), :race) end)

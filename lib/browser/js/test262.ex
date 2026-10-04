@@ -20,16 +20,16 @@ defmodule Browser.JS.Test262 do
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
     symbols-as-weakmap-keys Proxy proxy-missing-checks SharedArrayBuffer Atomics
-    Atomics.pause Atomics.waitAsync Float16Array resizable-arraybuffer arraybuffer-transfer
+    Atomics.pause Atomics.waitAsync resizable-arraybuffer
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
     FinalizationRegistry set-methods dynamic-import tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
     explicit-resource-management export-star-as-namespace-from-module
-    arbitrary-module-namespace-names Array.fromAsync iterator-helpers iterator-chunking
+    arbitrary-module-namespace-names iterator-helpers iterator-chunking
     iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
-    uint8array-base64 upsert await-dictionary regexp-match-indices regexp-v-flag
-    regexp-duplicate-named-groups RegExp.escape legacy-regexp Error.isError error-stack-accessor
-    json-parse-with-source Math.sumPrecise promise-try nonextensible-applies-to-private
+    uint8array-base64 upsert regexp-match-indices regexp-v-flag
+    regexp-duplicate-named-groups legacy-regexp error-stack-accessor
+    json-parse-with-source nonextensible-applies-to-private
   )
 
   def unsupported_features, do: @unsupported_features

@@ -528,6 +528,22 @@ defmodule Browser.JS.RegExp do
       enumerable: false
     )
 
+    # RegExp.escape(string): the string as a pattern that matches it literally
+    put_hidden(
+      ctor,
+      "escape",
+      native("escape", fn _, args ->
+        case arg(args, 0) do
+          str when is_binary(str) -> escape_pattern(str)
+          _ -> throw_error("TypeError", "RegExp.escape requires a string")
+        end
+      end)
+      |> then(fn {:obj, id} = f ->
+        store(id, Map.put(deref(id), :arity, 1.0))
+        f
+      end)
+    )
+
     def_fn(p, "test", fn this, args -> exec(this, to_str(arg(args, 0))) != :null end)
     def_fn(p, "exec", fn this, args -> exec(this, to_str(arg(args, 0))) end)
 
@@ -537,6 +553,57 @@ defmodule Browser.JS.RegExp do
 
     :ok
   end
+
+  @syntax_chars ~c"^$\\.*+?()[]{}|/"
+  @other_punct ~c",-=<>#&!%:;@~'`\""
+  @escape_space [
+                  0x09,
+                  0x0B,
+                  0x0C,
+                  0x20,
+                  0xA0,
+                  0xFEFF,
+                  0x1680,
+                  0x202F,
+                  0x205F,
+                  0x3000,
+                  0x0A,
+                  0x0D,
+                  0x2028,
+                  0x2029
+                ] ++
+                  Enum.to_list(0x2000..0x200A)
+
+  defp escape_pattern(<<c::utf8, rest::binary>>) do
+    first =
+      if c in ?0..?9 or c in ?a..?z or c in ?A..?Z, do: hex_escape(c), else: escape_char(c)
+
+    first <> escape_rest(rest)
+  end
+
+  defp escape_pattern(""), do: ""
+
+  defp escape_rest(<<c::utf8, rest::binary>>), do: escape_char(c) <> escape_rest(rest)
+  defp escape_rest(""), do: ""
+
+  defp escape_char(c) when c in @syntax_chars, do: <<?\\, c>>
+  defp escape_char(?\t), do: "\\t"
+  defp escape_char(?\n), do: "\\n"
+  defp escape_char(0x0B), do: "\\v"
+  defp escape_char(?\f), do: "\\f"
+  defp escape_char(?\r), do: "\\r"
+
+  defp escape_char(c) when c in @other_punct or c in @escape_space do
+    if c <= 0xFF,
+      do: hex_escape(c),
+      else:
+        "\\u" <> (c |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(4, "0"))
+  end
+
+  defp escape_char(c), do: <<c::utf8>>
+
+  defp hex_escape(c),
+    do: "\\x" <> (c |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(2, "0"))
 
   defp flags_arg(args), do: if(arg(args, 1) == :undefined, do: "", else: to_str(arg(args, 1)))
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
