@@ -152,6 +152,13 @@ defmodule Browser.JS.Parser do
     Enum.each(names, &check_strict_name/1)
   end
 
+  # `yield` and `await` cannot be labels where they are keywords
+  defp check_strict_name_context(name) do
+    if (name == "yield" and Process.get(:js_generator, false)) or
+         (name == "await" and Process.get(:js_async, false)),
+       do: throw({:syntax, "#{name} is not a valid label here"})
+  end
+
   defp strip_default({:default, p, _}), do: p
   defp strip_default(p), do: p
 
@@ -161,6 +168,9 @@ defmodule Browser.JS.Parser do
 
     if name == "yield" and Process.get(:js_generator, false),
       do: throw({:syntax, "yield is reserved in generators"})
+
+    if name == "await" and Process.get(:js_async, false),
+      do: throw({:syntax, "await is reserved in async functions"})
   end
 
   # the body of if, a loop, `with` or a label: a statement, never a declaration (a plain
@@ -246,6 +256,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    Process.put(:js_async_next, true)
     {fun, ts} = function_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
   end
@@ -378,6 +389,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, name, _}, {:p, ":", _} | ts]) when name not in @reserved do
+    check_strict_name_context(name)
     {stmt, ts} = body_statement(ts, true)
     {{:labeled, name, stmt}, ts}
   end
@@ -822,6 +834,85 @@ defmodule Browser.JS.Parser do
     Enum.map(declared, &elem(&1, 0))
   end
 
+  # early errors of a class body: special member names, `super()` and `arguments` where they
+  # are not allowed
+  defp check_class_members(members, derived?) do
+    ctor = fn
+      {:cmember, kind, {:str, "constructor"}, _, false} -> {true, kind}
+      {:cmember, kind, "constructor", _, false} -> {true, kind}
+      _ -> false
+    end
+
+    ctors = for m <- members, {true, kind} <- [ctor.(m)], do: {m, kind}
+
+    if length(ctors) > 1, do: throw({:syntax, "a class may only have one constructor"})
+
+    for {:cmember, kind, key, value, static?} = m <- members do
+      name =
+        case key do
+          {:str, n} -> n
+          n when is_binary(n) -> n
+          _ -> nil
+        end
+
+      cond do
+        ctor.(m) != false and (kind in [:get, :set] or not plain_method?(value)) and
+            kind != :field ->
+          throw({:syntax, "class constructor may not be an accessor, generator or async"})
+
+        kind == :field and name == "constructor" ->
+          throw({:syntax, "classes may not have a field named 'constructor'"})
+
+        static? and name == "prototype" and kind != :block ->
+          throw({:syntax, "classes may not have a static member named 'prototype'"})
+
+        true ->
+          :ok
+      end
+
+      case kind do
+        :block ->
+          if contains_node?(value, &(&1 == {:id, "arguments"})),
+            do: throw({:syntax, "'arguments' is not allowed in a class static block"})
+
+        :field ->
+          if value != nil and contains_node?(value, &(&1 == {:id, "arguments"})),
+            do: throw({:syntax, "'arguments' is not allowed in a class field initializer"})
+
+          if value != nil and contains_node?(value, &(&1 == {:super})),
+            do: throw({:syntax, "'super' keyword unexpected here"})
+
+        _ ->
+          allowed? = derived? and ctor.(m) != false
+
+          if not allowed? and contains_node?(method_code(value), &(&1 == {:super})),
+            do: throw({:syntax, "'super' keyword unexpected here"})
+      end
+    end
+
+    :ok
+  end
+
+  # the parameters and body of a method value, whatever generator/async wrapping it has
+  defp method_code({tag, fun}) when tag in [:async, :gen], do: method_code(fun)
+  defp method_code({:fn, _, params, body, _}), do: [params, body]
+  defp method_code(other), do: other
+
+  defp plain_method?({:fn, _, _, _, _}), do: true
+  defp plain_method?(_), do: false
+
+  # does `ast` hold a node satisfying `pred`, outside nested non-arrow functions and classes?
+  defp contains_node?(ast, pred) do
+    cond do
+      pred.(ast) -> true
+      match?({:fn, _, _, _, m} when m not in [:arrow, :arrow_expr], ast) -> false
+      match?({:class, _, _, _}, ast) -> false
+      is_tuple(ast) -> ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
+      is_list(ast) -> Enum.any?(ast, &contains_node?(&1, pred))
+      true -> false
+    end
+  end
+
   defp class_rest(ts) do
     outer_refs = Process.get(:js_priv_refs, [])
     Process.put(:js_priv_refs, [])
@@ -845,6 +936,7 @@ defmodule Browser.JS.Parser do
     {members, ts} = class_members(ts, [])
     Process.put(:js_strict, outer)
 
+    check_class_members(members, super != nil)
     names = check_private_names(members)
     unresolved = Enum.reject(Process.get(:js_priv_refs, []), &(&1 in names))
     Process.put(:js_priv_refs, unresolved ++ outer_refs)
@@ -892,6 +984,8 @@ defmodule Browser.JS.Parser do
 
     case after_key do
       [{:p, "(", _} | _] ->
+        if async?, do: Process.put(:js_async_next, true)
+
         {{:fn, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
 
@@ -929,7 +1023,9 @@ defmodule Browser.JS.Parser do
   # after `function name?` — at the parameter list
   defp function_rest(name, ts, generator? \\ false) do
     outer = Process.get(:js_generator, false)
+    outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
+    Process.put(:js_async, Process.delete(:js_async_next) == true)
 
     try do
       {params, ts} = params(expect(ts, "("), [])
@@ -938,6 +1034,7 @@ defmodule Browser.JS.Parser do
       {{:fn, name, params, body, false}, ts}
     after
       Process.put(:js_generator, outer)
+      Process.put(:js_async, outer_async)
     end
   end
 
@@ -1407,6 +1504,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:id, "async", _}, {:id, "function", _} | _] = [_ | rest]) do
+    Process.put(:js_async_next, true)
     {fun, ts} = primary(rest)
     {{:async, fun}, ts}
   end
@@ -1427,7 +1525,13 @@ defmodule Browser.JS.Parser do
     if generator?, do: generator_rest(name, ts), else: function_rest(name, ts)
   end
 
-  defp primary([{:id, name, _} | ts]) when name not in @reserved, do: {{:id, name}, ts}
+  defp primary([{:id, name, _} | ts]) when name not in @reserved do
+    if (name == "await" and Process.get(:js_async, false)) or
+         (name == "yield" and Process.get(:js_generator, false)),
+       do: throw({:syntax, "#{name} is not an identifier here"})
+
+    {{:id, name}, ts}
+  end
 
   defp primary([{:p, "(", _} | ts]) do
     {e, ts} = expression(ts)
@@ -1475,6 +1579,7 @@ defmodule Browser.JS.Parser do
 
   defp object_literal([{:id, "async", _}, {:p, "*", false} | _] = [_, _ | rest], acc) do
     {key, shorthand, after_key} = property_key(rest)
+    Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:async, {:gen, fun}}} | acc])
   end
@@ -1482,6 +1587,7 @@ defmodule Browser.JS.Parser do
   defp object_literal([{:id, "async", _}, {k, v, false} | _] = [_ | rest], acc)
        when k in [:id, :str, :num] or (k == :p and v == "[") do
     {key, shorthand, after_key} = property_key(rest)
+    Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key)
     object_next(ts, [{:init, key, {:async, fun}} | acc])
   end
