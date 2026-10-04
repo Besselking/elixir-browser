@@ -96,7 +96,7 @@ defmodule Browser.Page do
 
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    parsed = body |> String.replace_invalid() |> HTML.parse()
+    parsed = body |> String.replace_invalid() |> HTML.parse_document()
     # scripts run, so what is meant for browsers without them is not shown
     parsed = if has_tag?(parsed, "script"), do: empty_tag(parsed, "noscript"), else: parsed
     {raw, forms} = Forms.index(parsed)

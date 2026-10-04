@@ -80,4 +80,28 @@ defmodule Browser.HTMLTest do
     assert HTML.decode("&amp") == "&"
     assert HTML.decode("&bogus; &#65 &#x42;") == "&bogus; A B"
   end
+
+  describe "whole pages" do
+    test "get the html, head and body elements their tags leave out" do
+      assert [
+               {:element, "html", [],
+                [
+                  {:element, "head", [], [{:element, "title", [], [text: "t"]}]},
+                  {:element, "body", [], [{:element, "p", [], [text: "hi"]}]}
+                ]}
+             ] = HTML.parse_document("<!DOCTYPE html><title>t</title><p>hi</p>")
+    end
+
+    test "keep an explicit body" do
+      assert [{:element, "html", [], [{:element, "head", [], []}, {:element, "body", _, _}]}] =
+               HTML.parse_document("<html><head></head><body class=a>x</body></html>")
+    end
+
+    test "style text loses the CDATA markers of XHTML pages" do
+      assert [{:element, "style", [], [text: css]}] =
+               HTML.parse("<style><![CDATA[ div { color: red } ]]></style>")
+
+      assert css == " div { color: red } "
+    end
+  end
 end
