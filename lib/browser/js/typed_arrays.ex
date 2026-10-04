@@ -123,6 +123,15 @@ defmodule Browser.JS.TypedArrays do
     buf
   end
 
+  @doc "Detaches an ArrayBuffer (`$262.detachArrayBuffer`): it loses its bytes and its views read as empty."
+  def detach({:obj, id} = buf) do
+    unless buffer?(buf), do: throw_error("TypeError", "not an ArrayBuffer")
+    store(id, deref(id) |> Map.put(:bytes, <<>>) |> Map.put(:detached, true))
+    :undefined
+  end
+
+  defp detached?(bid), do: Map.get(deref(bid), :detached, false)
+
   defp buffer?({:obj, id}), do: Map.has_key?(deref(id), :bytes)
   defp buffer?(_), do: false
 
@@ -141,8 +150,14 @@ defmodule Browser.JS.TypedArrays do
 
   defp data!({:obj, id}) do
     case deref(id) do
-      %{host: {__MODULE__, {:ta, _, _, _, _} = d}} -> d
-      _ -> throw_error("TypeError", "this is not a typed array")
+      %{host: {__MODULE__, {:ta, _, bid, _, _} = d}} ->
+        if detached?(bid),
+          do: throw_error("TypeError", "cannot perform this operation on a detached ArrayBuffer")
+
+        d
+
+      _ ->
+        throw_error("TypeError", "this is not a typed array")
     end
   end
 
@@ -185,6 +200,8 @@ defmodule Browser.JS.TypedArrays do
 
   @doc false
   def host_get({:ta, kind, bid, off, len} = d, key, _self) when is_binary(key) do
+    {off, len} = if detached?(bid), do: {0, 0}, else: {off, len}
+
     case key do
       "length" ->
         {:ok, len * 1.0}
@@ -221,7 +238,9 @@ defmodule Browser.JS.TypedArrays do
   def host_get(_, _, _), do: :miss
 
   @doc false
-  def host_put({:ta, _, _, _, len} = d, key, v, _self) when is_binary(key) do
+  def host_put({:ta, _, bid, _, len} = d, key, v, _self) when is_binary(key) do
+    len = if detached?(bid), do: 0, else: len
+
     case Integer.parse(key) do
       {i, ""} when i >= 0 ->
         if i < len, do: put_elem_at(d, i, v)
@@ -284,6 +303,10 @@ defmodule Browser.JS.TypedArrays do
 
     def_fn(p, "slice", fn this, args ->
       unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+
+      if detached?(buffer_id(this)),
+        do: throw_error("TypeError", "cannot slice a detached ArrayBuffer")
+
       bytes = bytes_of(this)
       len = byte_size(bytes)
       from = rel_index(arg(args, 0), len, 0)
@@ -730,8 +753,14 @@ defmodule Browser.JS.TypedArrays do
               "First argument to DataView constructor must be an ArrayBuffer"
             )
 
-        total = byte_size(bytes_of(buf))
         off = if arg(args, 1) == :undefined, do: 0, else: to_int(arg(args, 1))
+
+        if off < 0, do: throw_error("RangeError", "Start offset #{off} is outside the bounds")
+
+        if detached?(buffer_id(buf)),
+          do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
+
+        total = byte_size(bytes_of(buf))
         len = if arg(args, 2) == :undefined, do: total - off, else: to_int(arg(args, 2))
 
         if off < 0 or off > total or len < 0 or off + len > total,
@@ -750,15 +779,17 @@ defmodule Browser.JS.TypedArrays do
 
       def_fn(p, "get" <> name, fn this, args ->
         {:dv, bid, off, len} = dv!(this)
-        i = dv_index(arg(args, 0), size, len)
+        i = dv_toindex(arg(args, 0))
+        i = dv_check(i, size, len, bid)
         bin = binary_part(deref(bid).bytes, off + i, size)
         read(kind, if(truthy(arg(args, 1)), do: bin, else: swap(bin)))
       end)
 
       def_fn(p, "set" <> name, fn this, args ->
         {:dv, bid, off, len} = dv!(this)
-        i = dv_index(arg(args, 0), size, len)
+        i = dv_toindex(arg(args, 0))
         enc = write(kind, arg(args, 1))
+        i = dv_check(i, size, len, bid)
         enc = if truthy(arg(args, 2)), do: enc, else: swap(enc)
         o = deref(bid)
         pos = off + i
@@ -781,10 +812,22 @@ defmodule Browser.JS.TypedArrays do
 
   defp dv!(_), do: throw_error("TypeError", "this is not a DataView")
 
-  defp dv_index(v, size, len) do
+  defp dv_toindex(v) do
+    n = to_num(v)
     i = to_int(v)
 
-    if i < 0 or i + size > len,
+    if n in [:infinity, :neg_infinity] or i < 0 or i > 9_007_199_254_740_991,
+      do: throw_error("RangeError", "Offset is outside the bounds of the DataView")
+
+    i
+  end
+
+  # a detached buffer is a TypeError, checked before the range
+  defp dv_check(i, size, len, bid) do
+    if detached?(bid),
+      do: throw_error("TypeError", "cannot perform this operation on a detached ArrayBuffer")
+
+    if i + size > len,
       do: throw_error("RangeError", "Offset is outside the bounds of the DataView")
 
     i

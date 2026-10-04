@@ -165,7 +165,7 @@ defmodule Browser.JS.Test262 do
       (f = Enum.find(features, &(&1 in skipped))) != nil ->
         {:skip, "feature " <> f}
 
-      String.contains?(source, ["$262.createRealm", "$262.agent", "$262.detachArrayBuffer"]) ->
+      String.contains?(source, ["$262.createRealm", "$262.agent"]) ->
         {:skip, "$262"}
 
       true ->
@@ -333,6 +333,14 @@ defmodule Browser.JS.Test262 do
           {:ok, program} -> Interp.run_program(program)
           {:error, msg} -> Interp.throw_error("SyntaxError", msg)
         end
+      end)
+    )
+
+    Interp.put_hidden(
+      host,
+      "detachArrayBuffer",
+      Interp.native("detachArrayBuffer", fn _, args ->
+        Browser.JS.TypedArrays.detach(Enum.at(args, 0, :undefined))
       end)
     )
 
