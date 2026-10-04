@@ -111,7 +111,7 @@ defmodule Browser.Prefetch do
       started
     else
       me = self()
-      spawn(fn -> send(me, {__MODULE__, url, Fetch.load(url)}) end)
+      spawn(fn -> send(me, {__MODULE__, url, Fetch.load(url, initiator: base)}) end)
       MapSet.put(started, url)
     end
   end

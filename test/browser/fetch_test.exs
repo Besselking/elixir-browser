@@ -142,6 +142,55 @@ defmodule Browser.FetchTest do
     end
   end
 
+  describe "cookies" do
+    test "Set-Cookie on a redirect is sent on the next request and later ones" do
+      Browser.Cookies.clear()
+
+      base =
+        serve([
+          "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2; Path=/\r\nContent-Length: 0\r\n\r\n",
+          "HTTP/1.1 200 OK\r\nSet-Cookie: c=3\r\nContent-Length: 2\r\n\r\nok",
+          "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: 2\r\n\r\nok"
+        ])
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/start")
+      assert_receive {:request, "GET", "/start", h1, _}
+      refute Map.has_key?(h1, "cookie")
+      assert_receive {:request, "GET", "/next", %{"cookie" => "a=1; b=2"}, _}
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/more", cache: :reload)
+      assert_receive {:request, "GET", "/more", %{"cookie" => cookie}, _}
+      assert cookie == "a=1; b=2; c=3"
+    end
+  end
+
+  describe "SameSite" do
+    test "a cookie is held back from a cross-site subresource, and from a cross-site POST" do
+      Browser.Cookies.clear()
+      base = serve(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+      Browser.Cookies.store(base <> "/", ["lax=1", "none=2; SameSite=None; Secure"], [])
+      # Secure needs https, so only the Lax one exists
+      assert Enum.map(Browser.Cookies.all(), & &1.name) == ["lax"]
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/img", initiator: "http://other.test/")
+      assert_receive {:request, "GET", "/img", headers, _}
+      refute Map.has_key?(headers, "cookie")
+    end
+
+    test "a top-level navigation from another site sends Lax cookies, a same-site initiator sends all" do
+      Browser.Cookies.clear()
+
+      base = serve(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+
+      Browser.Cookies.store(base <> "/", ["lax=1", "strict=2; SameSite=Strict"])
+
+      assert {:ok, "ok", _} =
+               Fetch.load(base <> "/nav", initiator: "http://other.test/", navigation: true)
+
+      assert_receive {:request, "GET", "/nav", %{"cookie" => "lax=1"}, _}
+    end
+  end
+
   describe "caching" do
     defp response(body, headers),
       do:

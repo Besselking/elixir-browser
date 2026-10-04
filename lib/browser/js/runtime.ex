@@ -389,7 +389,7 @@ defmodule Browser.JS.Runtime do
     if URI.parse(url).scheme in ["http", "https"] do
       verb = if method == "POST", do: :post, else: :get
 
-      case Browser.Fetch.load(url, method: verb, body: body) do
+      case Browser.Fetch.load(url, method: verb, body: body, initiator: page_url()) do
         {:ok, text, final} -> {:ok, text, final}
         {:error, msg} -> {:error, to_string(msg)}
       end

@@ -1,7 +1,7 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
-  alias Browser.HttpCache
+  alias Browser.{Cookies, HttpCache}
 
   @max_redirects 8
 
@@ -97,6 +97,11 @@ defmodule Browser.Fetch do
   fresh entries, revalidate stale ones), `:reload` (always ask the server, revalidating
   with `ETag`/`Last-Modified`) or `:history` (back/forward: use any cached entry).
 
+  Cookies follow `Browser.Cookies`. For `SameSite`, `initiator:` is the URL of the page making
+  the request (nil for the address bar and reloads, which are never cross-site) and
+  `navigation: true` marks a top-level navigation. A redirect chain is cross-site once any
+  hop is.
+
   `on_chunk:` is a `fn text, url -> any end` called, in the calling process, with each
   piece of a GET response as it arrives (already gunzipped) and the URL it came from,
   so a caller can start on a document before it is complete. Cached responses arrive
@@ -112,7 +117,13 @@ defmodule Browser.Fetch do
         Keyword.get(opts, :method, :get),
         Keyword.get(opts, :body),
         @max_redirects,
-        %{cache: Keyword.get(opts, :cache, :normal), on_chunk: opts[:on_chunk]}
+        %{
+          cache: Keyword.get(opts, :cache, :normal),
+          on_chunk: opts[:on_chunk],
+          initiator: opts[:initiator],
+          navigation: Keyword.get(opts, :navigation, false),
+          cross_site: false
+        }
       )
 
     case result do
@@ -189,8 +200,12 @@ defmodule Browser.Fetch do
 
   # `entry`: a stale cached response to revalidate, or nil
   defp request(url, method, body, redirects, ctx, entry) do
+    ctx = %{ctx | cross_site: ctx.cross_site or cross_site?(ctx.initiator, url)}
+    cookie_opts = [cross_site: ctx.cross_site, navigation: ctx.navigation, method: method]
+
     headers =
       [{~c"user-agent", String.to_charlist(user_agent())}, {~c"accept-encoding", ~c"gzip"}] ++
+        cookie_header(url, cookie_opts) ++
         if(entry, do: HttpCache.validators(entry), else: [])
 
     request =
@@ -216,6 +231,8 @@ defmodule Browser.Fetch do
       if method == :get and ctx.on_chunk,
         do: stream_get(request, http_opts, url, ctx.on_chunk),
         else: :httpc.request(method, request, http_opts, body_format: :binary)
+
+    with {:ok, {_, resp_headers, _}} <- result, do: store_cookies(url, resp_headers, cookie_opts)
 
     case result do
       {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
@@ -249,6 +266,24 @@ defmodule Browser.Fetch do
 
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp cross_site?(nil, _url), do: false
+  defp cross_site?(initiator, url), do: not Cookies.same_site?(initiator, url)
+
+  defp cookie_header(url, opts) do
+    case Cookies.header(url, opts) do
+      nil -> []
+      value -> [{~c"cookie", String.to_charlist(value)}]
+    end
+  end
+
+  # every response may set cookies, redirects and errors included
+  defp store_cookies(url, headers, opts) do
+    case for({k, v} <- headers, k == ~c"set-cookie", do: v) do
+      [] -> :ok
+      set_cookies -> Cookies.store(url, set_cookies, opts)
     end
   end
 

@@ -44,7 +44,7 @@ defmodule Browser.Page do
 
     on_chunk = fn chunk, from -> Prefetch.feed(chunk, from, &allowed?(from, &1)) end
 
-    case Fetch.load(url, [on_chunk: on_chunk] ++ fetch_opts) do
+    case Fetch.load(url, [on_chunk: on_chunk, navigation: true] ++ fetch_opts) do
       {:ok, body, final} -> {:ok, build(document(body, final), final, env)}
       {:error, _} = err -> err
     end
@@ -383,7 +383,7 @@ defmodule Browser.Page do
     url = Fetch.resolve(base, href)
 
     if allowed?(base, url) do
-      case Fetch.load(url) do
+      case Fetch.load(url, initiator: base) do
         {:ok, css, final} -> {css, final}
         _ -> nil
       end
