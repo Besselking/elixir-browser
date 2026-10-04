@@ -14,6 +14,11 @@ defmodule Browser.LayoutTest do
     assert texts(items) |> Enum.sort() == ["big", "hello", "world"]
   end
 
+  test "soft hyphens are invisible" do
+    {items, _} = run("<p>co&shy;op&shy;er&shy;ate</p><pre>a&shy;b</pre>")
+    assert texts(items) |> Enum.sort() == ["ab", "cooperate"]
+  end
+
   test "wraps long text" do
     {items, _} = run("<p>" <> String.duplicate("word ", 40) <> "</p>", 200)
     ys = items |> Enum.map(& &1.y) |> Enum.uniq()

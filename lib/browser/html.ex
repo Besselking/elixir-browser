@@ -13,21 +13,22 @@ defmodule Browser.HTML do
             section article header footer nav main form)
   @closes_p @block
 
-  @entities %{
-    "amp" => "&",
-    "lt" => "<",
-    "gt" => ">",
-    "quot" => "\"",
-    "apos" => "'",
-    "nbsp" => " ",
-    "copy" => "©",
-    "mdash" => "—",
-    "ndash" => "–",
-    "hellip" => "…",
-    "laquo" => "«",
-    "raquo" => "»",
-    "middot" => "·"
-  }
+  # the full WHATWG named character reference table (priv/html_entities.txt); keys keep their
+  # trailing ";", and the legacy names that may omit it are present without one too
+  @entities_path Path.expand("../../priv/html_entities.txt", __DIR__)
+  @external_resource @entities_path
+  @entities @entities_path
+            |> File.read!()
+            |> String.split("\n", trim: true)
+            |> Map.new(fn line ->
+              [name, cps] = String.split(line, "\t")
+
+              {name,
+               cps
+               |> String.split(" ")
+               |> Enum.map(&String.to_integer(&1, 16))
+               |> List.to_string()}
+            end)
 
   @spec parse(binary) :: [term]
   def parse(html) when is_binary(html) do
@@ -159,14 +160,20 @@ defmodule Browser.HTML do
   # -- entities ----------------------------------------------------------
 
   def decode(text) do
-    Regex.replace(~r/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/, text, fn whole, ent ->
+    if String.contains?(text, "&"), do: do_decode(text), else: text
+  end
+
+  defp do_decode(text) do
+    Regex.replace(~r/&(#[xX][0-9a-fA-F]+;?|#\d+;?|[a-zA-Z][a-zA-Z0-9]*;?)/, text, fn whole, ent ->
       case ent do
-        "#x" <> hex -> codepoint(hex, 16, whole)
-        "#" <> dec -> codepoint(dec, 10, whole)
+        "#" <> _ = num -> numeric(String.trim_trailing(num, ";"), whole)
         name -> Map.get(@entities, name, whole)
       end
     end)
   end
+
+  defp numeric(<<"#", x, hex::binary>>, whole) when x in [?x, ?X], do: codepoint(hex, 16, whole)
+  defp numeric("#" <> dec, whole), do: codepoint(dec, 10, whole)
 
   defp codepoint(str, base, fallback) do
     <<String.to_integer(str, base)::utf8>>
