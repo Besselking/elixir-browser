@@ -47,13 +47,14 @@ defmodule Browser.JS.Promise do
       value == p ->
         reject(p, make_error("TypeError", "Chaining cycle detected for promise"))
 
-      promise?(value) ->
-        enqueue(fn -> then(value, resolver(p), rejecter(p)) end)
-
       match?({:obj, _}, value) ->
-        case thenable(value) do
-          nil -> fulfill(p, value)
-          then_fn -> enqueue(fn -> follow(p, value, then_fn) end)
+        try do
+          case thenable(value) do
+            nil -> fulfill(p, value)
+            then_fn -> enqueue(fn -> follow(p, value, then_fn) end)
+          end
+        catch
+          {:js_error, e} -> reject(p, e)
         end
 
       true ->
@@ -61,13 +62,12 @@ defmodule Browser.JS.Promise do
     end
   end
 
+  # the `then` method of a thenable, `nil` for anything else; a throwing getter propagates
   defp thenable(obj) do
     case Interp.get(obj, "then") do
       f when is_tuple(f) -> if function?(f), do: f
       _ -> nil
     end
-  catch
-    {:js_error, _} -> nil
   end
 
   defp follow(p, thenable, then_fn) do
@@ -85,32 +85,21 @@ defmodule Browser.JS.Promise do
     key = {:js_once, make_ref()}
 
     guard = fn fun ->
-      native("", fn _, args ->
-        unless Process.get(key) do
-          Process.put(key, true)
-          fun.(arg(args, 0))
-        end
+      with_length(
+        native("", fn _, args ->
+          unless Process.get(key) do
+            Process.put(key, true)
+            fun.(arg(args, 0))
+          end
 
-        :undefined
-      end)
+          :undefined
+        end),
+        1
+      )
     end
 
     {guard.(&resolve(p, &1)), guard.(&reject(p, &1))}
   end
-
-  defp resolver(p),
-    do:
-      native("", fn _, args ->
-        resolve(p, arg(args, 0))
-        :undefined
-      end)
-
-  defp rejecter(p),
-    do:
-      native("", fn _, args ->
-        reject(p, arg(args, 0))
-        :undefined
-      end)
 
   def fulfill(p, v), do: settle(p, :fulfilled, v)
   def reject(p, e), do: settle(p, :rejected, e)
@@ -127,8 +116,9 @@ defmodule Browser.JS.Promise do
   end
 
   @doc "`p.then(on_fulfilled, on_rejected)`: the derived promise."
-  def then(p, on_f, on_r) do
-    child = new()
+  def then(p, on_f, on_r), do: then(p, on_f, on_r, new())
+
+  defp then(p, on_f, on_r, child) do
     reaction = %{on_f: on_f, on_r: on_r, child: child}
     d = data(p)
 
@@ -145,14 +135,19 @@ defmodule Browser.JS.Promise do
 
     if function?(handler) do
       try do
-        resolve(child, call(handler, :undefined, [value]))
+        child_resolve(child, call(handler, :undefined, [value]))
       catch
-        {:js_error, e} -> reject(child, e)
+        {:js_error, e} -> child_reject(child, e)
       end
     else
-      if state == :fulfilled, do: resolve(child, value), else: reject(child, value)
+      if state == :fulfilled, do: child_resolve(child, value), else: child_reject(child, value)
     end
   end
+
+  defp child_resolve({:cap, res, _}, v), do: call(res, :undefined, [v])
+  defp child_resolve(child, v), do: resolve(child, v)
+  defp child_reject({:cap, _, rej}, e), do: call(rej, :undefined, [e])
+  defp child_reject(child, e), do: reject(child, e)
 
   # ── microtasks ─────────────────────────────────────────────
 
@@ -231,38 +226,89 @@ defmodule Browser.JS.Promise do
 
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
+    put_proto(:promise_ctor, ctor)
     declare(scope, "Promise", ctor)
     def_species(ctor)
 
-    def_fn(p, "then", fn this, args -> then(this, arg(args, 0), arg(args, 1)) end)
-    def_fn(p, "catch", fn this, args -> then(this, :undefined, arg(args, 0)) end)
+    def_fn(p, "then", fn this, args ->
+      unless promise?(this),
+        do: throw_error("TypeError", "Promise.prototype.then called on a non-promise")
 
-    def_fn(p, "finally", fn this, args ->
-      f = arg(args, 0)
+      c = species_constructor(this)
 
-      if function?(f) do
-        then(
-          this,
-          native("", fn _, [v | _] ->
-            call(f, :undefined, [])
-            v
-          end),
-          native("", fn _, [e | _] ->
-            call(f, :undefined, [])
-            throw({:js_error, e})
-          end)
-        )
+      if c == proto(:promise_ctor) do
+        then(this, arg(args, 0), arg(args, 1))
       else
-        then(this, :undefined, :undefined)
+        {child, res, rej} = capability(c)
+        then(this, arg(args, 0), arg(args, 1), {:cap, res, rej})
+        child
       end
     end)
 
-    def_fn(ctor, "resolve", fn _, args -> to_promise(arg(args, 0)) end)
+    def_fn(p, "catch", fn this, args -> invoke_then(this, :undefined, arg(args, 0)) end)
 
-    def_fn(ctor, "reject", fn _, args ->
-      pr = new()
-      reject(pr, arg(args, 0))
+    def_fn(p, "finally", fn this, args ->
+      unless match?({:obj, _}, this),
+        do: throw_error("TypeError", "Promise.prototype.finally called on a non-object")
+
+      c = species_constructor(this)
+      f = arg(args, 0)
+
+      if function?(f) do
+        # `C.resolve(f())` is awaited, then the original value or reason passes through
+        settle_then = fn result, k ->
+          promise =
+            call(Interp.get(c, "resolve"), c, [result])
+
+          call(Interp.get(promise, "then"), promise, [native("", fn _, _ -> k.() end)])
+        end
+
+        invoke_then(
+          this,
+          with_length(
+            native("", fn _, a ->
+              settle_then.(call(f, :undefined, []), fn -> arg(a, 0) end)
+            end),
+            1
+          ),
+          with_length(
+            native("", fn _, a ->
+              settle_then.(call(f, :undefined, []), fn -> throw({:js_error, arg(a, 0)}) end)
+            end),
+            1
+          )
+        )
+      else
+        invoke_then(this, f, f)
+      end
+    end)
+
+    put_tag(p, "Promise")
+
+    def_fn(ctor, "resolve", fn this, args ->
+      unless match?({:obj, _}, this),
+        do: throw_error("TypeError", "Promise.resolve called on a non-object")
+
+      v = arg(args, 0)
+
+      if promise?(v) and Interp.get(v, "constructor") == this do
+        v
+      else
+        {pr, res, _} = capability(this)
+        call(res, :undefined, [v])
+        pr
+      end
+    end)
+
+    def_fn(ctor, "reject", fn this, args ->
+      {pr, _, rej} = capability(this)
+      call(rej, :undefined, [arg(args, 0)])
       pr
+    end)
+
+    def_fn(ctor, "withResolvers", fn this, _ ->
+      {pr, res, rej} = capability(this)
+      new_object([{"promise", pr}, {"resolve", res}, {"reject", rej}])
     end)
 
     def_fn(ctor, "all", fn this, args -> combine(this, arg(args, 0), :all) end)
@@ -283,14 +329,78 @@ defmodule Browser.JS.Promise do
     :ok
   end
 
-  defp to_promise(v) do
-    if promise?(v) do
-      v
-    else
-      pr = new()
-      resolve(pr, v)
-      pr
+  defp invoke_then(this, on_f, on_r) do
+    then_fn = Interp.get(this, "then")
+    call(then_fn, this, [on_f, on_r])
+  end
+
+  # SpeciesConstructor(promise, %Promise%)
+  defp species_constructor(promise) do
+    default = proto(:promise_ctor)
+
+    case Interp.get(promise, "constructor") do
+      :undefined ->
+        default
+
+      {:obj, _} = c ->
+        case Interp.get(c, {:symbol, :species, "Symbol.species"}) do
+          s when s in [:undefined, :null, nil] ->
+            default
+
+          s ->
+            if constructor?(s),
+              do: s,
+              else:
+                throw_error(
+                  "TypeError",
+                  "object.constructor[Symbol.species] is not a constructor"
+                )
+        end
+
+      _ ->
+        throw_error("TypeError", "The .constructor property is not an object")
     end
+  end
+
+  # NewPromiseCapability(C): {promise, resolve function, reject function}
+  defp capability(c) do
+    if c == proto(:promise_ctor) do
+      p = new()
+      {res, rej} = once_pair(p)
+      {p, res, rej}
+    else
+      unless constructor?(c),
+        do: throw_error("TypeError", "Promise capability constructor is not a constructor")
+
+      key = {:js_capability, make_ref()}
+      :erlang.put(key, {:undefined, :undefined})
+
+      executor =
+        native("", fn _, args ->
+          {r, j} = :erlang.get(key)
+
+          if r != :undefined or j != :undefined,
+            do: throw_error("TypeError", "Promise executor has already been invoked")
+
+          :erlang.put(key, {arg(args, 0), arg(args, 1)})
+          :undefined
+        end)
+        |> with_length(2)
+
+      p = Interp.construct(c, [executor])
+      {res, rej} = :erlang.erase(key)
+
+      unless function?(res) and function?(rej),
+        do: throw_error("TypeError", "Promise resolve or reject function is not callable")
+
+      {p, res, rej}
+    end
+  end
+
+  # a built-in function's `length` (the virtual property reads `:arity`)
+  defp with_length({:obj, id} = f, n) do
+    store(id, Map.put(deref(id), :arity, n * 1.0))
+    f
   end
 
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
@@ -300,11 +410,11 @@ defmodule Browser.JS.Promise do
   # the result), and the combined value is made once the iterator is done and every element
   # has settled
   defp combine(ctor, iterable, mode) do
-    # only something with a `prototype` can be constructed (not `eval`, an arrow function ...)
-    unless function?(ctor) and match?({:obj, _}, Interp.get(ctor, "prototype")),
-      do: throw_error("TypeError", "Promise combinator called on a non-constructor")
+    unless match?({:obj, _}, ctor),
+      do: throw_error("TypeError", "Promise combinator called on a non-object")
 
-    result = new()
+    {promise, res_fn, rej_fn} = capability(ctor)
+    result = {res_fn, rej_fn}
     key = {:js_combine, make_ref()}
     Process.put(key, %{remaining: 1, values: %{}})
 
@@ -321,10 +431,10 @@ defmodule Browser.JS.Promise do
 
       if mode != :race, do: combine_finish(key, mode, result, -1, nil)
     catch
-      {:js_error, e} -> reject(result, e)
+      {:js_error, e} -> call(rej_fn, :undefined, [e])
     end
 
-    result
+    promise
   end
 
   defp combine_each(items, it, next, i, ctor, resolve_fn, mode, result, key) do
@@ -371,29 +481,43 @@ defmodule Browser.JS.Promise do
       Process.put(key, %{s | remaining: s.remaining + 1})
     end
 
+    called = {:js_called, make_ref()}
+
     done = fn v ->
-      combine_finish(key, mode, result, i, v)
+      if :erlang.get(called) != true do
+        :erlang.put(called, true)
+        combine_finish(key, mode, result, i, v)
+      end
+
       :undefined
     end
+
+    {res_fn, rej_fn} = result
 
     {on_f, on_r} =
       case mode do
         :all ->
-          {native("", fn _, a -> done.(arg(a, 0)) end), rejecter(result)}
+          {with_length(native("", fn _, a -> done.(arg(a, 0)) end), 1), rej_fn}
 
         :all_settled ->
-          {native("", fn _, a ->
-             done.(new_object([{"status", "fulfilled"}, {"value", arg(a, 0)}]))
-           end),
-           native("", fn _, a ->
-             done.(new_object([{"status", "rejected"}, {"reason", arg(a, 0)}]))
-           end)}
+          {with_length(
+             native("", fn _, a ->
+               done.(new_object([{"status", "fulfilled"}, {"value", arg(a, 0)}]))
+             end),
+             1
+           ),
+           with_length(
+             native("", fn _, a ->
+               done.(new_object([{"status", "rejected"}, {"reason", arg(a, 0)}]))
+             end),
+             1
+           )}
 
         :race ->
-          {resolver(result), rejecter(result)}
+          {res_fn, rej_fn}
 
         :any ->
-          {resolver(result), native("", fn _, a -> done.(arg(a, 0)) end)}
+          {res_fn, with_length(native("", fn _, a -> done.(arg(a, 0)) end), 1)}
       end
 
     call(then_fn, pr, [on_f, on_r])
@@ -401,7 +525,7 @@ defmodule Browser.JS.Promise do
 
   # one element has settled (index i), or `-1` when the iterator is done: when nothing is left
   # the result is settled
-  defp combine_finish(key, mode, result, i, v) do
+  defp combine_finish(key, mode, {res_fn, rej_fn}, i, v) do
     s = Process.get(key)
     s = if i >= 0, do: %{s | values: Map.put(s.values, i, v)}, else: s
     s = %{s | remaining: s.remaining - 1}
@@ -411,8 +535,13 @@ defmodule Browser.JS.Promise do
       list = for j <- 0..(map_size(s.values) - 1)//1, do: Map.fetch!(s.values, j)
 
       case mode do
-        :any -> reject(result, make_error("AggregateError", "All promises were rejected"))
-        _ -> resolve(result, new_array(list))
+        :any ->
+          err = make_error("AggregateError", "All promises were rejected")
+          put_hidden(err, "errors", new_array(list))
+          call(rej_fn, :undefined, [err])
+
+        _ ->
+          call(res_fn, :undefined, [new_array(list)])
       end
     end
   end
