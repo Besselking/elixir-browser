@@ -170,13 +170,21 @@ defmodule Browser.JS.Interp do
       _ ->
         case s do
           %{with: obj} when is_binary(name) ->
-            if has_property?(obj, name),
+            if has_property?(obj, name) and not unscopable?(obj, name),
               do: {:ok, get(obj, name)},
               else: lookup_var(s.parent, name, heap)
 
           _ ->
             lookup_var(s.parent, name, heap)
         end
+    end
+  end
+
+  # `with` skips what the object's Symbol.unscopables lists
+  defp unscopable?(obj, name) do
+    case get(obj, {:symbol, :unscopables, "Symbol.unscopables"}) do
+      {:obj, _} = u -> truthy(get(u, name))
+      _ -> false
     end
   end
 
@@ -192,7 +200,8 @@ defmodule Browser.JS.Interp do
 
         :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
 
-      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) ->
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
+          not unscopable?(s.with, name) ->
         put(s.with, name, val)
 
       s.parent != nil ->
@@ -390,8 +399,13 @@ defmodule Browser.JS.Interp do
         key = to_key(key)
 
         case lookup(o, key, {:obj, id}) do
-          :undefined -> function_prop(id, o, key)
-          v -> v
+          :undefined ->
+            if key in ["name", "length"] and key in Map.get(o, :gone, []),
+              do: :undefined,
+              else: function_prop(id, o, key)
+
+          v ->
+            v
         end
 
       :host ->
@@ -591,6 +605,12 @@ defmodule Browser.JS.Interp do
           :miss -> put_prop(id, o, key, v)
         end
 
+      # a function's own name and length are not writable
+      %{class: :function, props: props} when key in ["name", "length"] ->
+        unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
+          do: :ok,
+          else: put_prop(id, o, key, v)
+
       _ ->
         put_prop(id, o, to_key(key), v)
     end
@@ -684,6 +704,10 @@ defmodule Browser.JS.Interp do
     i = if o.class == :array, do: index(key)
 
     cond do
+      o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
+        store(id, Map.update(o, :gone, [key], &[key | &1]))
+        true
+
       i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
         false
 
@@ -775,7 +799,14 @@ defmodule Browser.JS.Interp do
 
     case o do
       %{class: :array} ->
-        for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++ base
+        attrs = Map.get(o, :attrs, %{})
+
+        for(
+          i <- 0..(o.len - 1)//1,
+          Map.has_key?(o.items, i),
+          Map.get(Map.get(attrs, i, %{}), :e, true),
+          do: Integer.to_string(i)
+        ) ++ base
 
       _ ->
         {ints, rest} = Enum.split_with(base, &is_integer(index(&1)))
@@ -2110,6 +2141,13 @@ defmodule Browser.JS.Interp do
   # an anonymous function or class takes the name of the binding or property it is assigned to
   defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
   defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+
+  defp ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
+    do: name_fn(ev(e, env), name)
+
+  defp ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
+    do: name_fn(ev(e, env), name)
+
   defp ev_named(e, env, _), do: ev(e, env)
 
   defp name_fn({:obj, id} = f, name) do

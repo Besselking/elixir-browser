@@ -60,8 +60,12 @@ defmodule Browser.JS.Builtins do
     install_misc(scope)
     Browser.JS.RegExp.install(scope)
     Browser.JS.Promise.install(scope)
+    global = Browser.JS.Global.new()
+    declare(scope, "globalThis", global)
+    declare(scope, :this, global)
     Browser.JS.Collections.install(scope)
 
+    :erlang.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
     scope
   end
 
@@ -783,7 +787,19 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     str =
       constructor(scope, "String", proto(:string), fn this, args ->
-        s = if args == [], do: "", else: to_str(hd(args))
+        s =
+          case args do
+            [] ->
+              ""
+
+            [{:symbol, _, _} = sym | _] ->
+              if wrapper_target?(this, :string),
+                do: to_str(sym),
+                else: call(Interp.get(sym, "toString"), sym, [])
+
+            [v | _] ->
+              to_str(v)
+          end
 
         if wrapper_target?(this, :string) do
           put_hidden(this, "length", float(String.length(s)))

@@ -602,6 +602,9 @@ defmodule Browser.JS.Parser do
 
   # `for ([a, b] of x)` / `for ({a} of x)`: a pattern in the head
   defp destructuring_head([{:p, open, _} | _] = ts) when open in ["[", "{"] do
+    outer = Process.get(:js_assign_pattern, false)
+    Process.put(:js_assign_pattern, true)
+
     try do
       {pat, rest} = pattern(ts, false)
 
@@ -611,6 +614,8 @@ defmodule Browser.JS.Parser do
       end
     catch
       {:syntax, _} -> nil
+    after
+      Process.put(:js_assign_pattern, outer)
     end
   end
 
@@ -1474,16 +1479,16 @@ defmodule Browser.JS.Parser do
     object_next(ts, [{:init, key, {:async, {:gen, fun}}} | acc])
   end
 
-  defp object_literal([{:id, "async", _}, {k, _, false} | _] = [_ | rest], acc)
-       when k in [:id, :str, :num] do
+  defp object_literal([{:id, "async", _}, {k, v, false} | _] = [_ | rest], acc)
+       when k in [:id, :str, :num] or (k == :p and v == "[") do
     {key, shorthand, after_key} = property_key(rest)
     {fun, ts} = function_rest({:method, shorthand}, after_key)
     object_next(ts, [{:init, key, {:async, fun}} | acc])
   end
 
   # `get x() {}` and `set x(v) {}`
-  defp object_literal([{:id, kind, _}, {k, _, _} | _] = [_ | rest], acc)
-       when kind in ["get", "set"] and k in [:id, :str, :num] do
+  defp object_literal([{:id, kind, _}, {k, v, _} | _] = [_ | rest], acc)
+       when kind in ["get", "set"] and (k in [:id, :str, :num] or (k == :p and v == "[")) do
     {key, shorthand, after_key} = property_key(rest)
 
     case after_key do
