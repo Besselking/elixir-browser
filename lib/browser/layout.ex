@@ -21,6 +21,8 @@ defmodule Browser.Layout do
 
   @base 16
   @margin 4
+  # a font's content height (ascent plus descent) over its size, for the built-in font
+  @content_factor 1.35
   @legacy_gap 10
   @legacy_indent 28
   # the width a box is laid out at to find how wide its content wants to be
@@ -1608,6 +1610,7 @@ defmodule Browser.Layout do
       ngap: 0,
       pending_space: nil,
       lh: 0,
+      lf: @content_factor,
       indent: 0,
       width: width,
       measure: measure,
@@ -2952,9 +2955,17 @@ defmodule Browser.Layout do
 
   # -- words and lines ------------------------------------------------------------------
 
-  # the line-height of text in px: `normal` is the built-in 1.35, a number is a
+  # How tall the glyphs of a font are as a factor of its size (ascent plus descent, which is also
+  # its `normal` line-height): the built-in font's, or exactly 1 for Ahem, the test font.
+  defp content_factor(style) do
+    if String.contains?(to_string(Map.get(style, :family)), "ahem"),
+      do: 1.0,
+      else: @content_factor
+  end
+
+  # the line-height of text in px: `normal` is the font's content height, a number is a
   # factor of the font size
-  defp line_px(%{lh: :normal, size: size}), do: round(size * 1.35)
+  defp line_px(%{lh: :normal, size: size} = style), do: round(size * content_factor(style))
   defp line_px(%{lh: {:num, f}, size: size}), do: round(f * size)
   defp line_px(%{lh: {:px, v}}), do: round(v)
 
@@ -3051,6 +3062,7 @@ defmodule Browser.Layout do
       | line: [item | st.line],
         x: x + w,
         pending_space: nil,
+        lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
         lh: max(st.lh, style.size),
         lmax: max(st.lmax, line_px(style))
     }
@@ -3105,7 +3117,7 @@ defmodule Browser.Layout do
 
     # `normal` height of the biggest text, and the height line-height gives the
     # line; the glyphs sit centred in the line, i.e. shifted by half the difference
-    normal = if st.lh > 0, do: round(st.lh * 1.35), else: 0
+    normal = if st.lh > 0, do: round(st.lh * st.lf), else: 0
     lh = if st.lh > 0, do: st.lmax, else: 0
     half = if st.lh > 0, do: div(lh - normal, 2), else: 0
     text_base = if st.lh > 0, do: half + normal - div(normal - st.lh, 4), else: 0
@@ -3166,6 +3178,7 @@ defmodule Browser.Layout do
         line: [],
         y: st.y + line_h,
         lh: 0,
+        lf: @content_factor,
         lmax: 0,
         x: st.indent,
         pending_space: nil,
