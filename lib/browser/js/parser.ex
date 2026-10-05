@@ -50,17 +50,30 @@ defmodule Browser.JS.Parser do
     "**" => 12
   }
 
-  def parse(src) do
+  @doc """
+  Parses a script, or with `module: true` a module (strict, and its top-level function
+  declarations are lexical, so they clash with `var` and with each other).
+  """
+  def parse(src, opts \\ []) do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
-        Process.put(:js_strict, use_strict?(tokens))
+        Process.put(:js_strict, use_strict?(tokens) or Keyword.get(opts, :module, false))
         Process.put(:js_priv_refs, [])
+        Process.put(:js_module, Keyword.get(opts, :module, false))
+        Process.put(:js_labels, [])
+        Process.put(:js_loop, 0)
+        Process.put(:js_switch, 0)
+        # no `return` at the top level; a module has no `new.target` there either (a script
+        # may be eval code run inside a function)
+        Process.put(:js_fn, false)
+        Process.put(:js_nt, not Keyword.get(opts, :module, false))
         program = tokens |> statements()
 
         if Enum.any?(program, &using_decl?/1),
           do: throw({:syntax, "using declaration at the top level of a script"})
 
         program = check_scope(program, true)
+        if Keyword.get(opts, :module, false), do: check_module_names(program)
 
         case Process.get(:js_priv_refs) do
           [] -> :ok
@@ -112,6 +125,86 @@ defmodule Browser.JS.Parser do
     if Enum.any?(stmts, &using_decl?/1), do: wrap_using(stmts), else: stmts
   end
 
+  # Early errors of a module: a function declaration at its top is a lexical name, imported
+  # names are lexical too (and not `eval` or `arguments`), an exported name appears once, and
+  # a name exported from this module has to be declared in it.
+  defp check_module_names(stmts) do
+    declared_exports =
+      Enum.flat_map(stmts, fn
+        {:export, {:var, _, decls}} ->
+          for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: n
+
+        {:export, {:fundecl, n, _}} ->
+          [n]
+
+        _ ->
+          []
+      end)
+
+    stmts =
+      Enum.map(stmts, fn
+        {:export, s} -> s
+        s -> s
+      end)
+
+    imported =
+      for {:import, _, bindings} <- stmts,
+          b <- bindings,
+          do:
+            (case b do
+               {:default, l} -> l
+               {:ns, l} -> l
+               {:named, _, l} -> l
+             end)
+
+    if Enum.any?(imported, &(&1 in ["eval", "arguments"])),
+      do: throw({:syntax, "cannot bind eval or arguments"})
+
+    lexical =
+      imported ++
+        Enum.flat_map(stmts, fn
+          {:var, k, decls} when k in [:let, :const] ->
+            for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: n
+
+          {:fundecl, n, _} ->
+            [n]
+
+          {:export_default, {:classdecl, n, _}} ->
+            [n]
+
+          {:export_default, {:fundecl, n, _}} ->
+            [n]
+
+          _ ->
+            []
+        end)
+
+    vars = Interp.var_names(stmts, [])
+
+    if length(lexical) != length(Enum.uniq(lexical)) or Enum.any?(lexical, &(&1 in vars)),
+      do: throw({:syntax, "redeclaration of a lexical name"})
+
+    declared = lexical ++ vars
+    exported = declared_exports ++ exported_names(stmts)
+
+    if length(exported) != length(Enum.uniq(exported)),
+      do: throw({:syntax, "duplicate export"})
+
+    for {:export_names, names} <- stmts, {local, _} <- names, local not in declared do
+      throw({:syntax, "export of an undeclared name #{local}"})
+    end
+  end
+
+  defp exported_names(stmts) do
+    Enum.flat_map(stmts, fn
+      {:export_names, names} -> for {_, exported} <- names, do: exported
+      {:export_default, _} -> ["default"]
+      {:export_from, _, :all} -> []
+      {:export_from, _, names} -> for n <- names, do: elem(n, 1)
+      _ -> []
+    end)
+  end
+
   defp using_decl?({:var, k, _}), do: k in [:using, :await_using]
   defp using_decl?(_), do: false
 
@@ -158,7 +251,7 @@ defmodule Browser.JS.Parser do
 
     if strict?(), do: check_strict_params(params)
     if unique? or not Enum.all?(params, &match?({:id, _}, &1)), do: check_unique_params(params)
-    {body, rest} = block_body(ts, [])
+    {body, rest} = fresh_jumps(fn -> block_body(ts, []) end, true)
 
     names =
       if params == [], do: [], else: Enum.reduce(params, [], &Interp.pattern_names/2)
@@ -273,10 +366,29 @@ defmodule Browser.JS.Parser do
       [{:eof, _, _}] ->
         []
 
-      _ ->
+      [{:id, "export", _} | _] ->
+        if Process.get(:js_module, false), do: module_statements(ts), else: script_statements(ts)
+
+      [{:id, "import", _}, {:p, p, _} | _] when p in ["(", "."] ->
         {stmt, ts} = statement(ts)
         [stmt | statements(ts)]
+
+      [{:id, "import", _} | _] ->
+        if Process.get(:js_module, false), do: module_statements(ts), else: script_statements(ts)
+
+      _ ->
+        script_statements(ts)
     end
+  end
+
+  defp module_statements(ts) do
+    {stmt, ts} = module_item(ts)
+    [stmt | statements(ts)]
+  end
+
+  defp script_statements(ts) do
+    {stmt, ts} = statement(ts)
+    [stmt | statements(ts)]
   end
 
   # ── statements ─────────────────────────────────────────────
@@ -343,6 +455,8 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, "return", _} | ts]) do
+    unless Process.get(:js_fn, true), do: throw({:syntax, "return outside a function"})
+
     case ts do
       [{:p, ";", _} | ts] ->
         {{:return, nil}, ts}
@@ -382,12 +496,12 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
     ts = expect(ts, ")")
-    {body, ts} = body_statement(ts)
+    {body, ts} = loop_body(ts)
     {{:while, c, body}, ts}
   end
 
   defp statement([{:id, "do", _} | ts]) do
-    {body, ts} = body_statement(ts)
+    {body, ts} = loop_body(ts)
     ts = expect_id(ts, "while")
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
@@ -418,6 +532,7 @@ defmodule Browser.JS.Parser do
         t -> {nil, t}
       end
 
+    check_jump(kw, label)
     {{String.to_atom(kw), label}, semi(ts)}
   end
 
@@ -464,87 +579,38 @@ defmodule Browser.JS.Parser do
     {disc, ts} = expression(ts)
     ts = expect(ts, ")")
     ts = expect(ts, "{")
-    {cases, ts} = switch_cases(ts, [])
+    switches = Process.get(:js_switch, 0)
+    Process.put(:js_switch, switches + 1)
+
+    {cases, ts} =
+      try do
+        switch_cases(ts, [])
+      after
+        Process.put(:js_switch, switches)
+      end
+
     check_scope(Enum.flat_map(cases, &elem(&1, 1)), false)
     {{:switch, disc, cases}, ts}
   end
 
   defp statement([{:id, name, _}, {:p, ":", _} | ts]) when name not in @reserved do
     check_strict_name_context(name)
-    {stmt, ts} = body_statement(ts, true)
-    {{:labeled, name, stmt}, ts}
+    labels = Process.get(:js_labels, [])
+
+    if List.keymember?(labels, name, 0), do: throw({:syntax, "duplicate label #{name}"})
+    Process.put(:js_labels, [{name, loop_ahead?(ts)} | labels])
+
+    try do
+      {stmt, ts} = body_statement(ts, true)
+      {{:labeled, name, stmt}, ts}
+    after
+      Process.put(:js_labels, labels)
+    end
   end
 
   defp statement([{:id, "debugger", _} | ts]), do: {{:empty}, semi(ts)}
 
   # ── modules ────────────────────────────────────────────────
-
-  defp statement([{:id, "import", _}, {:str, spec, _} | ts]), do: {{:import, spec, []}, semi(ts)}
-
-  defp statement([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
-    {bindings, ts} = import_bindings(ts, [])
-    ts = expect_id(ts, "from")
-
-    case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
-    end
-  end
-
-  defp statement([{:id, "import", _}, {:p, "{", _} | _] = [_ | ts]) do
-    {bindings, ts} = import_bindings(ts, [])
-    ts = expect_id(ts, "from")
-
-    case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
-    end
-  end
-
-  defp statement([{:id, "import", _}, {:p, "*", _} | _] = [_ | ts]) do
-    {bindings, ts} = import_bindings(ts, [])
-    ts = expect_id(ts, "from")
-
-    case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
-    end
-  end
-
-  defp statement([{:id, "export", _}, {:id, "default", _} | ts]) do
-    case ts do
-      [{:id, "function", _}, {:id, name, _} | rest] when name not in @reserved ->
-        {fun, rest} = function_rest(name, rest)
-        {{:export_default, {:fundecl, name, fun}}, rest}
-
-      _ ->
-        {e, ts} = assignment(ts)
-        {{:export_default, {:expr, e}}, semi(ts)}
-    end
-  end
-
-  defp statement([{:id, "export", _}, {:p, "{", _} | ts]) do
-    {names, ts} = export_names(ts, [])
-
-    case ts do
-      [{:id, "from", _}, {:str, spec, _} | ts] -> {{:export_from, spec, names}, semi(ts)}
-      ts -> {{:export_names, names}, semi(ts)}
-    end
-  end
-
-  defp statement([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
-    do: {{:export_from, spec, :all}, semi(ts)}
-
-  defp statement([{:id, "export", _} | ts]) do
-    case ts do
-      [{:id, kw, _} | _] when kw in ["var", "let", "const", "function", "async"] ->
-        {stmt, ts} = statement(ts)
-        {{:export, stmt}, ts}
-
-      _ ->
-        throw({:syntax, "unsupported export"})
-    end
-  end
 
   defp statement([{:id, "class", _}, {:id, name, _} | _] = [_ | ts]) when name not in @reserved do
     {node, ts} = class_rest(ts)
@@ -554,12 +620,15 @@ defmodule Browser.JS.Parser do
   defp statement([{:id, "import", _}, {:p, p, _} | _] = ts) when p in ["(", "."],
     do: expression_statement(ts)
 
+  defp statement([{:id, kw, _} | _]) when kw in ["import", "export"],
+    do: throw({:syntax, "`#{kw}` is only allowed at the top level of a module"})
+
   defp statement([{:id, "with", _} | ts]) do
     if strict?(), do: throw({:syntax, "`with` in strict mode"})
     ts = expect(ts, "(")
     {obj, ts} = expression(ts)
     ts = expect(ts, ")")
-    {body, ts} = body_statement(ts)
+    {body, ts} = loop_body(ts)
     {{:with, obj, body}, ts}
   end
 
@@ -567,6 +636,124 @@ defmodule Browser.JS.Parser do
     do: throw({:syntax, "`#{kw}` is not supported yet"})
 
   defp statement(ts), do: expression_statement(ts)
+
+  defp module_item([{:id, "import", _}, {:str, spec, _} | ts]),
+    do: {{:import, spec, []}, semi(ts)}
+
+  defp module_item([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp module_item([{:id, "import", _}, {:p, "{", _} | _] = [_ | ts]) do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp module_item([{:id, "import", _}, {:p, "*", _} | _] = [_ | ts]) do
+    {bindings, ts} = import_bindings(ts, [])
+    ts = expect_id(ts, "from")
+
+    case ts do
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      _ -> throw({:syntax, "expected a module name"})
+    end
+  end
+
+  defp module_item([{:id, "export", _}, {:id, "default", _} | ts]) do
+    case ts do
+      [{:id, "function", _}, {:p, "*", _}, {:id, name, _} | rest] when name not in @reserved ->
+        {fun, rest} = generator_rest(name, rest)
+        {{:export_default, {:fundecl, name, fun}}, rest}
+
+      [{:id, "function", _}, {:p, "*", _} | rest] ->
+        {fun, rest} = generator_rest("default", rest)
+        {{:export_default, {:fundecl, "*default*", fun}}, rest}
+
+      [{:id, "function", _}, {:id, name, _} | rest] when name not in @reserved ->
+        {fun, rest} = function_rest(name, rest)
+        {{:export_default, {:fundecl, name, fun}}, rest}
+
+      [{:id, "function", _} | rest] ->
+        {fun, rest} = function_rest("default", rest)
+        {{:export_default, {:fundecl, "*default*", fun}}, rest}
+
+      [{:id, "async", _}, {:id, "function", f}, {:p, "*", _}, {:id, name, _} | rest]
+      when f != true and name not in @reserved ->
+        {fun, rest} = generator_rest(name, rest)
+        {{:export_default, {:fundecl, name, {:async, fun}}}, rest}
+
+      [{:id, "async", _}, {:id, "function", f}, {:p, "*", _} | rest] when f != true ->
+        {fun, rest} = generator_rest("default", rest)
+        {{:export_default, {:fundecl, "*default*", {:async, fun}}}, rest}
+
+      [{:id, "async", _}, {:id, "function", f}, {:id, name, _} | rest]
+      when f != true and name not in @reserved ->
+        Process.put(:js_async_next, true)
+        {fun, rest} = function_rest(name, rest)
+        {{:export_default, {:fundecl, name, {:async, fun}}}, rest}
+
+      [{:id, "async", _}, {:id, "function", f} | rest] when f != true ->
+        Process.put(:js_async_next, true)
+        {fun, rest} = function_rest("default", rest)
+        {{:export_default, {:fundecl, "*default*", {:async, fun}}}, rest}
+
+      [{:id, "class", _}, {:id, name, _} | _] = [_ | rest] when name not in @reserved ->
+        {node, rest} = class_rest(rest)
+        {{:export_default, {:classdecl, name, node}}, rest}
+
+      [{:id, "class", _} | rest] ->
+        {node, rest} = class_rest(rest)
+        {{:export_default, {:classdecl, "*default*", node}}, rest}
+
+      _ ->
+        {e, ts} = assignment(ts)
+        {{:export_default, {:expr, e}}, semi(ts)}
+    end
+  end
+
+  defp module_item([{:id, "export", _}, {:p, "{", _} | ts]) do
+    {names, ts} = export_names(ts, [])
+
+    case ts do
+      [{:id, "from", _}, {:str, spec, _} | ts] -> {{:export_from, spec, names}, semi(ts)}
+      ts -> {{:export_names, names}, semi(ts)}
+    end
+  end
+
+  defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
+    do: {{:export_from, spec, :all}, semi(ts)}
+
+  defp module_item([
+         {:id, "export", _},
+         {:p, "*", _},
+         {:id, "as", _},
+         {:id, name, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]),
+       do: {{:export_from, spec, [{:star, name}]}, semi(ts)}
+
+  defp module_item([{:id, "export", _} | ts]) do
+    case ts do
+      [{:id, kw, _} | _] when kw in ["var", "let", "const", "function", "async", "class"] ->
+        {stmt, ts} = statement(ts)
+        {{:export, stmt}, ts}
+
+      _ ->
+        throw({:syntax, "unsupported export"})
+    end
+  end
 
   defp import_bindings([{:p, "*", _}, {:id, "as", _}, {:id, local, _} | ts], acc),
     do: import_more(ts, [{:ns, local} | acc])
@@ -663,6 +850,68 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  # the body of a loop: `break` and `continue` are allowed in it
+  defp loop_body(ts) do
+    depth = Process.get(:js_loop, 0)
+    Process.put(:js_loop, depth + 1)
+
+    try do
+      body_statement(ts)
+    after
+      Process.put(:js_loop, depth)
+    end
+  end
+
+  # does the statement after a label (or a run of labels) iterate?
+  defp loop_ahead?([{:id, _, _}, {:p, ":", _} | ts]), do: loop_ahead?(ts)
+  defp loop_ahead?([{:id, kw, _} | _]), do: kw in ["for", "while", "do"]
+  defp loop_ahead?(_), do: false
+
+  # early errors of `break` and `continue`
+  defp check_jump("break", nil) do
+    if Process.get(:js_loop, 0) == 0 and Process.get(:js_switch, 0) == 0,
+      do: throw({:syntax, "break outside a loop or switch"})
+  end
+
+  defp check_jump("continue", nil) do
+    if Process.get(:js_loop, 0) == 0, do: throw({:syntax, "continue outside a loop"})
+  end
+
+  defp check_jump(kw, label) do
+    case List.keyfind(Process.get(:js_labels, []), label, 0) do
+      nil ->
+        throw({:syntax, "undefined label #{label}"})
+
+      {_, false} when kw == "continue" ->
+        throw({:syntax, "continue to a label that is not a loop"})
+
+      _ ->
+        :ok
+    end
+  end
+
+  # a function body starts a new world for labels, loops and switches
+  defp fresh_jumps(fun, in_fn?) do
+    saved =
+      {Process.get(:js_labels, []), Process.get(:js_loop, 0), Process.get(:js_switch, 0),
+       Process.get(:js_fn, true)}
+
+    Process.put(:js_labels, [])
+    Process.put(:js_loop, 0)
+    Process.put(:js_switch, 0)
+    Process.put(:js_fn, in_fn?)
+
+    try do
+      fun.()
+    after
+      {l, lp, sw, f} = saved
+      Process.put(:js_labels, l)
+      Process.put(:js_loop, lp)
+      Process.put(:js_switch, sw)
+      Process.put(:js_fn, f)
+    end
+  end
+
   defp for_statement(ts) do
     case ts do
       [{:id, kw, _} | rest] when kw in ["var", "let", "const"] ->
@@ -672,7 +921,7 @@ defmodule Browser.JS.Parser do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
-            {body, t} = body_statement(t)
+            {body, t} = loop_body(t)
             {{if(of_in == "of", do: :forof, else: :forin), String.to_atom(kw), pat, obj, body}, t}
 
           _ ->
@@ -714,7 +963,7 @@ defmodule Browser.JS.Parser do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
-            {body, t} = body_statement(t)
+            {body, t} = loop_body(t)
             {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
 
           _ ->
@@ -735,7 +984,7 @@ defmodule Browser.JS.Parser do
         check_strict_name(name)
         {obj, t} = assignment(t)
         t = expect(t, ")")
-        {body, t} = body_statement(t)
+        {body, t} = loop_body(t)
         tmp = " using"
         node = {:using, kind, name, {:id, tmp}, [body]}
         {{:forof, :const, {:id, tmp}, obj, {:block, [node]}}, t}
@@ -791,7 +1040,7 @@ defmodule Browser.JS.Parser do
       end
 
     ts = expect(ts, ")")
-    {body, ts} = body_statement(ts)
+    {body, ts} = loop_body(ts)
     {{:for, init, test, update, body}, ts}
   end
 
@@ -1082,7 +1331,9 @@ defmodule Browser.JS.Parser do
       end
 
     ts = expect(ts, "{")
+    nt = Process.put(:js_nt, true)
     {members, ts} = class_members(ts, [])
+    Process.put(:js_nt, nt)
     Process.put(:js_strict, outer)
 
     check_class_members(members, super != nil)
@@ -1100,7 +1351,7 @@ defmodule Browser.JS.Parser do
     Process.put(:js_generator, false)
 
     try do
-      {body, ts} = block_body(ts, [])
+      {body, ts} = fresh_jumps(fn -> block_body(ts, []) end, false)
       class_members(ts, [{:cmember, :block, nil, body, true} | acc])
     after
       Process.put(:js_generator, outer)
@@ -1178,6 +1429,7 @@ defmodule Browser.JS.Parser do
     Process.put(:js_generator, generator?)
     Process.put(:js_async, Process.delete(:js_async_next) == true)
     class_method? = Process.delete(:js_class_method) == true
+    nt = Process.put(:js_nt, true)
 
     try do
       {params, ts} = params(expect(ts, "("), [])
@@ -1188,6 +1440,7 @@ defmodule Browser.JS.Parser do
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
+      Process.put(:js_nt, nt)
     end
   end
 
@@ -1469,7 +1722,11 @@ defmodule Browser.JS.Parser do
           throw({:syntax, "new.target must not contain escapes"})
 
         [{:id, "new", _}, {:p, ".", _}, {:id, "target", _} | t] ->
+          unless Process.get(:js_nt, true), do: throw({:syntax, "new.target outside a function"})
           {{:new_target}, t}
+
+        [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
+          throw({:syntax, "new import() is not allowed"})
 
         [{:id, "new", _} | ts] ->
           new_expression(ts)
@@ -1539,10 +1796,17 @@ defmodule Browser.JS.Parser do
           throw({:syntax, "new.target must not contain escapes"})
 
         [{:id, "new", _}, {:p, ".", _}, {:id, "target", _} | t] ->
+          unless Process.get(:js_nt, true), do: throw({:syntax, "new.target outside a function"})
           {{:new_target}, t}
+
+        [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
+          throw({:syntax, "new import() is not allowed"})
 
         [{:id, "new", _} | t] ->
           new_expression(t)
+
+        [{:id, "import", _}, {:p, "(", _} | _] ->
+          throw({:syntax, "new import() is not allowed"})
 
         _ ->
           primary(ts)

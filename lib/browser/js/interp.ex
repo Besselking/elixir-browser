@@ -895,7 +895,9 @@ defmodule Browser.JS.Interp do
         :ok
 
       {:ok, _} ->
-        if writable?(o, key), do: store(id, %{o | props: Map.put(o.props, key, v)}), else: :ok
+        if writable?(o, key) and not Map.has_key?(o, :ns),
+          do: store(id, %{o | props: Map.put(o.props, key, v)}),
+          else: :ok
 
       :error ->
         case inherited_set(o.proto, key) do
@@ -1824,6 +1826,9 @@ defmodule Browser.JS.Interp do
         {:export_default, {:fundecl, name, _}} ->
           [{"default", scope_value(scope, name)}]
 
+        {:export_default, {:classdecl, name, _}} ->
+          [{"default", scope_value(scope, name)}]
+
         {:export_default, {:expr, _}} ->
           [{"default", scope_value(scope, :default_export)}]
 
@@ -1836,14 +1841,41 @@ defmodule Browser.JS.Interp do
 
         {:export_from, spec, names} ->
           ns = resolve.(spec)
-          for {imported, exported} <- names, do: {exported, get(ns, imported)}
+
+          for name <- names do
+            case name do
+              {:star, exported} -> {exported, ns}
+              {imported, exported} -> {exported, get(ns, imported)}
+            end
+          end
 
         _ ->
           []
       end)
 
     # a module namespace lists its names in code unit order
-    pairs |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort_by(&elem(&1, 0)) |> new_object()
+    pairs |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort_by(&elem(&1, 0)) |> make_namespace()
+  end
+
+  # a module namespace: no prototype, not extensible, `@@toStringTag` "Module", and exports
+  # that are enumerable and writable-looking but can not be set, deleted or redefined
+  defp make_namespace(pairs) do
+    {:obj, id} = ns = new_object(pairs, :null)
+    o = deref(id)
+    attrs = Map.new(pairs, fn {k, _} -> {k, %{w: true, c: false}} end)
+    tag = {:symbol, :toStringTag, "Symbol.toStringTag"}
+    attrs = Map.put(attrs, tag, %{w: false, c: false, e: false})
+
+    store(
+      id,
+      o
+      |> Map.put(:props, Map.put(o.props, tag, "Module"))
+      |> Map.put(:attrs, attrs)
+      |> Map.put(:ext, false)
+      |> Map.put(:ns, true)
+    )
+
+    ns
   end
 
   defp scope_value(scope, name) do
@@ -2003,7 +2035,13 @@ defmodule Browser.JS.Interp do
   defp exec({:import, _, _}, _, _), do: :ok
   defp exec({:export, stmt}, env, _), do: exec(stmt, env, [])
   defp exec({:export_default, {:fundecl, _, _}}, _, _), do: :ok
-  defp exec({:export_default, {:expr, e}}, env, _), do: declare(env, :default_export, ev(e, env))
+
+  defp exec({:export_default, {:classdecl, name, node}}, env, _),
+    do: declare(env, name, ev_named(node, env, {:id, "default"}))
+
+  defp exec({:export_default, {:expr, e}}, env, _),
+    do: declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+
   defp exec({:export_names, _}, _, _), do: :ok
   defp exec({:export_from, _, _}, _, _), do: :ok
 
@@ -2325,25 +2363,27 @@ defmodule Browser.JS.Interp do
 
   # `import(specifier)`: a promise for the module's namespace (the host loads it)
   def ev({:import_call, e}, env) do
-    spec = to_str(ev(e, env))
+    arg = ev(e, env)
     p = Browser.JS.Promise.new()
 
-    case pget(:js_import) do
-      nil ->
-        Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
+    try do
+      spec = to_str(arg)
 
-      hook ->
-        base =
-          case lookup_var(env, :module_url) do
-            {:ok, b} -> b
-            :error -> nil
-          end
+      case pget(:js_import) do
+        nil ->
+          Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
 
-        try do
+        hook ->
+          base =
+            case lookup_var(env, :module_url) do
+              {:ok, b} -> b
+              :error -> nil
+            end
+
           Browser.JS.Promise.resolve(p, hook.(spec, base))
-        catch
-          {:js_error, err} -> Browser.JS.Promise.reject(p, err)
-        end
+      end
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
     end
 
     p

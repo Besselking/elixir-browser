@@ -525,24 +525,25 @@ defmodule Browser.JSTest do
   describe "modules" do
     test "import and export declarations parse" do
       assert {:ok, {:program, [{:import, "a", [{:named, "x", "x"}, {:named, "y", "y"}]}]}} =
-               Browser.JS.parse(~S'import { x, y } from "a"')
+               Browser.JS.parse(~S'import { x, y } from "a"', module: true)
 
       assert {:ok, {:program, [{:import, "a", [{:default, "d"}, {:ns, "n"}]}]}} =
-               Browser.JS.parse(~S'import d, * as n from "a"')
+               Browser.JS.parse(~S'import d, * as n from "a"', module: true)
 
       assert {:ok, {:program, [{:import, "a", [{:named, "x", "z"}]}]}} =
-               Browser.JS.parse(~S'import { x as z } from "a"')
+               Browser.JS.parse(~S'import { x as z } from "a"', module: true)
 
-      assert {:ok, {:program, [{:import, "side", []}]}} = Browser.JS.parse(~S'import "side"')
+      assert {:ok, {:program, [{:import, "side", []}]}} =
+               Browser.JS.parse(~S'import "side"', module: true)
 
       assert {:ok, {:program, [{:export, {:fundecl, "f", _}}]}} =
-               Browser.JS.parse("export function f() {}")
+               Browser.JS.parse("export function f() {}", module: true)
 
-      assert {:ok, {:program, [{:export_names, [{"a", "b"}, {"c", "c"}]}]}} =
-               Browser.JS.parse("export { a as b, c }")
+      assert {:ok, {:program, [_, {:export_names, [{"a", "b"}, {"c", "c"}]}]}} =
+               Browser.JS.parse("var a, c; export { a as b, c }", module: true)
 
       assert {:ok, {:program, [{:export_default, {:expr, _}}]}} =
-               Browser.JS.parse("export default 1 + 2")
+               Browser.JS.parse("export default 1 + 2", module: true)
     end
 
     test "syntax the runtime lacks is a syntax error" do
@@ -1321,6 +1322,55 @@ defmodule Browser.JSTest do
                error("{ using x = 1 }")
 
       assert {:uncaught, "TypeError: object is not disposable"} = error("{ using x = {} }")
+    end
+  end
+
+  describe "early errors" do
+    test "labels, break and continue" do
+      for src <- [
+            "x: x: ;",
+            "break foo;",
+            "continue foo;",
+            "while (1) { break foo }",
+            "a: { continue a }",
+            "if (1) break;",
+            "function f() { while (1) { function g() { break } } }",
+            "return 1"
+          ] do
+        assert {:error, _} = Browser.JS.Parser.parse(src), src
+      end
+
+      for src <- [
+            "a: b: while (1) { continue a; break b }",
+            "a: { break a }",
+            "switch (1) { case 1: break }",
+            "x: ; x: ;"
+          ] do
+        assert {:ok, _} = Browser.JS.Parser.parse(src), src
+      end
+    end
+
+    test "import and export belong at the top level of a module" do
+      assert {:error, _} = Browser.JS.Parser.parse("export var a = 1")
+      assert {:error, _} = Browser.JS.Parser.parse("{ export var a = 1 }", module: true)
+      assert {:ok, _} = Browser.JS.Parser.parse("export var a = 1", module: true)
+      assert {:error, _} = Browser.JS.Parser.parse("export {x}", module: true)
+
+      assert {:error, _} =
+               Browser.JS.Parser.parse("var a; export {a}; export {a as a}", module: true)
+
+      assert {:error, _} =
+               Browser.JS.Parser.parse("export default 1; export {x as default}; var x",
+                 module: true
+               )
+
+      assert {:error, _} = Browser.JS.Parser.parse("function f() {} var f", module: true)
+      assert {:error, _} = Browser.JS.Parser.parse("new.target", module: true)
+
+      assert {:ok, _} =
+               Browser.JS.Parser.parse("export default class {}; export * as ns from 'x'",
+                 module: true
+               )
     end
   end
 

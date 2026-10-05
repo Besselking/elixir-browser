@@ -52,8 +52,8 @@ defmodule Mix.Tasks.Js.Test262 do
     built-ins/parseFloat built-ins/parseInt built-ins/undefined
     language/arguments-object language/asi language/block-scope language/comments
     language/destructuring language/expressions language/function-code language/future-reserved-words
-    language/identifiers language/keywords language/literals language/punctuators
-    language/reserved-words language/rest-parameters language/statements language/types
+    language/export language/identifiers language/import language/keywords language/literals language/punctuators
+    language/module-code language/reserved-words language/rest-parameters language/statements language/types
     language/white-space
   )
 

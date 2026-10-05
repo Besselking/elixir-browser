@@ -22,9 +22,9 @@ defmodule Browser.JS.Test262 do
     symbols-as-weakmap-keys proxy-missing-checks SharedArrayBuffer Atomics
     Atomics.pause Atomics.waitAsync
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
-    FinalizationRegistry set-methods dynamic-import tail-call-optimization Temporal ShadowRealm
+    FinalizationRegistry set-methods tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
-    export-star-as-namespace-from-module
+    source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names iterator-helpers iterator-chunking
     iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
     uint8array-base64 upsert regexp-match-indices regexp-v-flag
@@ -142,13 +142,9 @@ defmodule Browser.JS.Test262 do
   """
   def decide(meta, source, opts \\ []) do
     skipped = Keyword.get(opts, :skip_features, @unsupported_features)
-    flags = list(meta, "flags")
     features = list(meta, "features")
 
     cond do
-      "module" in flags ->
-        {:skip, "module"}
-
       match?(%{"phase" => "resolution"}, meta["negative"]) ->
         {:skip, "module resolution"}
 
@@ -218,8 +214,11 @@ defmodule Browser.JS.Test262 do
         async? = "async" in flags
         programs = Enum.map(names, &harness[&1])
 
+        path = Keyword.get(opts, :path)
+        module? = "module" in flags
+
         spawn_and_wait(timeout, fn ->
-          execute(programs, source, max_steps, async?, "regExpUtils.js" in names)
+          execute(programs, source, max_steps, async?, "regExpUtils.js" in names, path, module?)
         end)
         |> judge(negative, async?)
 
@@ -249,20 +248,27 @@ defmodule Browser.JS.Test262 do
   end
 
   # -> {:ok, printed} | {:syntax, msg} | {:uncaught, text} | :limit
-  defp execute(programs, source, max_steps, async?, regexp_utils?) do
+  defp execute(programs, source, max_steps, async?, regexp_utils?, path, module?) do
     Interp.init(max_steps)
     scope = Builtins.install()
     install_host(scope)
+    Process.put(:t262_modules, %{})
+
+    # `import()` (and a module's imports) load files next to the test
+    if path, do: Process.put(:js_import, fn spec, from -> load_module(spec, from || path) end)
 
     try do
-      case Parser.parse(source) do
+      case Parser.parse(source, module: module?) do
         {:error, msg} ->
           {:syntax, msg}
 
         {:ok, program} ->
           Enum.each(programs, &Interp.run_program/1)
           if regexp_utils?, do: install_regexp_utils(scope)
-          Interp.run_program(program)
+
+          if module?,
+            do: Interp.run_module(program, fn spec -> load_module(spec, path) end, path),
+            else: Interp.run_program(program)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
           {:ok, printed()}
@@ -274,6 +280,38 @@ defmodule Browser.JS.Test262 do
       :js_limit -> :limit
       {:syntax, msg} -> {:syntax, msg}
       other -> {:uncaught, "internal: " <> inspect(other), printed()}
+    end
+  end
+
+  # a module file next to `from`, evaluated once; a module that imports itself (through others)
+  # sees an empty namespace meanwhile
+  defp load_module(spec, from) do
+    path = Path.expand(spec, Path.dirname(from))
+
+    case Process.get(:t262_modules) do
+      %{^path => ns} ->
+        ns
+
+      modules ->
+        case File.read(path) do
+          {:ok, src} ->
+            Process.put(:t262_modules, Map.put(modules, path, Interp.new_object()))
+
+            ns =
+              case Parser.parse(src, module: true) do
+                {:ok, program} ->
+                  Interp.run_module(program, fn s -> load_module(s, path) end, path)
+
+                {:error, msg} ->
+                  Interp.throw_error("SyntaxError", msg)
+              end
+
+            Process.put(:t262_modules, Map.put(Process.get(:t262_modules), path, ns))
+            ns
+
+          {:error, _} ->
+            Interp.throw_error("TypeError", "Cannot find module #{spec}")
+        end
     end
   end
 
@@ -467,7 +505,7 @@ defmodule Browser.JS.Test262 do
               missing = Enum.reject(harness_names(meta), &Map.has_key?(harness, &1))
 
               if missing == [],
-                do: run_test(source, meta, harness, opts),
+                do: run_test(source, meta, harness, Keyword.put(opts, :path, path)),
                 else: {:fail, "harness file #{hd(missing)} not in the checkout"}
           end
 
