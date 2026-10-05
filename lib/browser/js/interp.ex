@@ -895,6 +895,9 @@ defmodule Browser.JS.Interp do
         :ok
 
       {:ok, _} ->
+        if key in Map.get(o, :pmethods, []),
+          do: throw_error("TypeError", "Private methods are not writable")
+
         store(id, %{o | props: Map.put(o.props, key, v)})
 
       :error ->
@@ -2082,6 +2085,13 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
+
+  @doc "Runs statements as a function body in `scope`: hoists, then executes."
+  def run_body(stmts, scope) do
+    hoist_vars(stmts, scope)
+    hoist_functions(stmts, scope)
+    exec_list(stmts, scope)
+  end
 
   # ── using declarations ─────────────────────────────────────
 
