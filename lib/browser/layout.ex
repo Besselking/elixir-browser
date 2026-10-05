@@ -1844,7 +1844,9 @@ defmodule Browser.Layout do
       st.overlays |> Enum.reverse() |> Enum.concat() |> Enum.split_with(&Map.get(&1, :under))
 
     {under_flow, flow} = Enum.split_with(flow, &Map.get(&1, :under))
-    all = under ++ under_flow ++ flow ++ overlays ++ over
+    # positioned boxes paint in tree order, whichever of the two lists they came through
+    positioned = Enum.sort_by(overlays ++ over, &Map.get(&1, :pz, 0))
+    all = under ++ under_flow ++ flow ++ positioned
 
     if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
   end
@@ -2270,6 +2272,7 @@ defmodule Browser.Layout do
   defp op({:pos_end}, st), do: %{st | pos: tl(st.pos)}
 
   defp op({:abs, sub, spec}, st) do
+    spec = Map.put(spec, :seq, :erlang.unique_integer([:monotonic]))
     origin = if spec.fixed, do: List.last(st.pos), else: hd(st.pos)
 
     # `bottom` and a percentage `top` need the containing box's height, known only once it closes
@@ -2338,7 +2341,10 @@ defmodule Browser.Layout do
 
     atom = %{
       atom
-      | items: Enum.map(atom.items, &(&1 |> adopt_sticky(st) |> limit_extent(atom.w)))
+      | items:
+          atom.items
+          |> Enum.map(&(&1 |> adopt_sticky(st) |> limit_extent(atom.w)))
+          |> renumber_pz()
     }
 
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
@@ -2346,6 +2352,19 @@ defmodule Browser.Layout do
     # measured by what it draws)
     ext = if extent(atom.items) == 0, do: max(st.ext, x + atom.w + max(extra, 0)), else: st.ext
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil, ext: ext}
+  end
+
+  # the tree order of positioned boxes in an atom (laid out earlier, maybe cached) is renewed
+  # to come after what the page placed before it
+  defp renumber_pz(items) do
+    order = items |> Enum.flat_map(&List.wrap(Map.get(&1, :pz))) |> Enum.uniq() |> Enum.sort()
+
+    if order == [] do
+      items
+    else
+      fresh = Map.new(order, &{&1, :erlang.unique_integer([:monotonic])})
+      Enum.map(items, fn it -> if pz = Map.get(it, :pz), do: %{it | pz: fresh[pz]}, else: it end)
+    end
   end
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
@@ -2437,6 +2456,7 @@ defmodule Browser.Layout do
       fl0: if(o.clip, do: 0, else: length(st.floats)),
       outer_floats: if(o.clip, do: st.floats),
       ov0: length(st.overlays),
+      seq: :erlang.unique_integer([:monotonic]),
       pcbh: st.cbh,
       pcbw: st.cbw,
       saved: {st.left, st.right, st.free}
@@ -2542,7 +2562,10 @@ defmodule Browser.Layout do
     shift = fn list ->
       if dx == 0 and dy == 0,
         do: list,
-        else: Enum.map(list, fn it -> it |> move(dx, dy) |> Map.put(:over, true) end)
+        else:
+          Enum.map(list, fn it ->
+            it |> move(dx, dy) |> Map.put(:over, true) |> Map.put_new(:pz, box.seq)
+          end)
     end
 
     st = %{
@@ -2562,6 +2585,9 @@ defmodule Browser.Layout do
   # the height of a box's content when `height` gives one
   defp content_height(%{h: h} = o) when is_number(h) do
     {bt, _, bb, _} = o.bw
+    # `min-height` and `max-height` bound the height its children's percentages refer to
+    h = if is_number(o.max), do: min(h, o.max), else: h
+    h = if is_number(o.min), do: max(h, o.min), else: h
     if o.sizing == :border, do: max(h - bt - bb - o.pt - o.pb, 0), else: h
   end
 
@@ -2884,7 +2910,7 @@ defmodule Browser.Layout do
       cond do
         top && bottom && (spec.mta || spec.mba) ->
           # auto vertical margins share what `top`, `bottom` and the height leave over
-          free = max(origin.h - top - bottom - height - if(spec.mba, do: 0, else: spec.mb), 0)
+          free = origin.h - top - bottom - height - if(spec.mba, do: 0, else: spec.mb)
           origin.y + top + if(spec.mta, do: if(spec.mba, do: div(free, 2), else: free), else: 0)
 
         top ->
@@ -2900,7 +2926,11 @@ defmodule Browser.Layout do
     {tx, ty} = resolve_translate(spec.translate, width, height)
     # a negative `z-index` puts the box behind the flow: above the page's background only
     layer = if spec.z < 0 and !spec.fixed, do: :under, else: :over
-    moved = for it <- items, do: it |> move(x + tx, y + ty) |> Map.put(layer, true)
+
+    moved =
+      for it <- items,
+          do: it |> move(x + tx, y + ty) |> Map.put(layer, true) |> Map.put_new(:pz, spec.seq)
+
     # a fixed box stays where it is in the window while the page scrolls
     moved =
       if spec.fixed,
