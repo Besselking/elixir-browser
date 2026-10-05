@@ -1796,12 +1796,15 @@ css/CSS2/positioning/absolute-non-replaced-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-height-007.xht
 css/CSS2/positioning/absolute-non-replaced-height-008.xht
 css/CSS2/positioning/absolute-non-replaced-height-009.xht
+css/CSS2/positioning/absolute-non-replaced-height-010.xht
+css/CSS2/positioning/absolute-non-replaced-height-011.xht
 css/CSS2/positioning/absolute-non-replaced-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-002.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-005.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-008.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-009.xht
+css/CSS2/positioning/absolute-non-replaced-max-height-010.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-min-max-001.html
 css/CSS2/positioning/absolute-non-replaced-width-001.xht
@@ -1877,6 +1880,16 @@ css/CSS2/positioning/abspos-022.xht
 css/CSS2/positioning/abspos-027.xht
 css/CSS2/positioning/abspos-028.xht
 css/CSS2/positioning/abspos-029.html
+css/CSS2/positioning/abspos-containing-block-001.xht
+css/CSS2/positioning/abspos-containing-block-002.xht
+css/CSS2/positioning/abspos-containing-block-003.xht
+css/CSS2/positioning/abspos-containing-block-004.xht
+css/CSS2/positioning/abspos-containing-block-005.xht
+css/CSS2/positioning/abspos-containing-block-006.xht
+css/CSS2/positioning/abspos-containing-block-007.xht
+css/CSS2/positioning/abspos-containing-block-008.xht
+css/CSS2/positioning/abspos-containing-block-009.xht
+css/CSS2/positioning/abspos-containing-block-010.xht
 css/CSS2/positioning/abspos-overflow-001.xht
 css/CSS2/positioning/abspos-overflow-002.xht
 css/CSS2/positioning/abspos-overflow-003.xht
@@ -1889,6 +1902,7 @@ css/CSS2/positioning/abspos-overflow-009.xht
 css/CSS2/positioning/abspos-overflow-010.xht
 css/CSS2/positioning/abspos-overflow-011.xht
 css/CSS2/positioning/abspos-overflow-012.xht
+css/CSS2/positioning/abspos-width-004.xht
 css/CSS2/positioning/abspos-width-005.xht
 css/CSS2/positioning/auto-position-rtl-child-viewport-scrollbar.html
 css/CSS2/positioning/bottom-004.xht
@@ -1939,6 +1953,7 @@ css/CSS2/positioning/bottom-112.xht
 css/CSS2/positioning/bottom-offset-001.xht
 css/CSS2/positioning/bottom-offset-002.xht
 css/CSS2/positioning/bottom-offset-003.xht
+css/CSS2/positioning/bottom-offset-percentage-001.xht
 css/CSS2/positioning/left-004.xht
 css/CSS2/positioning/left-005.xht
 css/CSS2/positioning/left-006.xht
@@ -1996,6 +2011,7 @@ css/CSS2/positioning/left-offset-003.xht
 css/CSS2/positioning/left-offset-percentage-001.xht
 css/CSS2/positioning/position-006.xht
 css/CSS2/positioning/position-absolute-001.xht
+css/CSS2/positioning/position-absolute-002.xht
 css/CSS2/positioning/position-absolute-003.xht
 css/CSS2/positioning/position-absolute-004.xht
 css/CSS2/positioning/position-absolute-006.xht
@@ -2132,6 +2148,7 @@ css/CSS2/positioning/top-applies-to-014.xht
 css/CSS2/positioning/top-offset-001.xht
 css/CSS2/positioning/top-offset-002.xht
 css/CSS2/positioning/top-offset-003.xht
+css/CSS2/positioning/top-offset-percentage-001.xht
 css/CSS2/text/bidi-span-002.html
 css/CSS2/text/letter-spacing-004.xht
 css/CSS2/text/letter-spacing-005.xht
@@ -2950,6 +2967,7 @@ css/css-multicol/subpixel-column-rule-width.tentative.html
 css/css-multicol/table/multicol-table-cell-height-001.xht
 css/css-position/nested-inline-abspos-child-with-siblings.html
 css/css-position/nested-inline-abspos-child.html
+css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
 css/css-position/position-absolute-in-inline-004.html
 css/css-position/position-absolute-large-negative-inset.html

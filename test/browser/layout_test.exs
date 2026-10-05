@@ -3232,6 +3232,30 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "text").x == 0
     end
 
+    test "an absolute box with top and bottom and an auto height fills the space between" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:absolute;top:10px;bottom:20px;left:0;background:#ccc">x</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2, 600, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert rect.y == 10
+      assert rect.h == 570
+    end
+
+    test "an absolute box with a percentage height takes it from the window" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:absolute;top:0;height:50%;width:50px;background:#ccc">x</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2, 600, margin: 0)
+      assert Enum.find(items, &(&1.type == :rect)).h == 300
+    end
+
     test "floats inside a table cell stay in the cell" do
       html =
         ~s|<table><tr><td><div style="float:left;width:10px;height:10px;background:#ccc"></div>cell</td><td>next</td></tr></table>|
