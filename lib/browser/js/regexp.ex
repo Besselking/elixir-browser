@@ -101,6 +101,12 @@ defmodule Browser.JS.RegExp do
   end
 
   defp build(source, flags) do
+    if String.contains?(flags, "u") and String.contains?(flags, "v"),
+      do: {:error, "the u and v flags can not be combined"},
+      else: build_pattern(source, flags)
+  end
+
+  defp build_pattern(source, flags) do
     opts =
       [:unicode, :dollar_endonly] ++
         for(
@@ -109,7 +115,12 @@ defmodule Browser.JS.RegExp do
           do: o
         )
 
-    case :re.compile(translate(source), opts) do
+    pattern =
+      if String.contains?(flags, "v"),
+        do: Browser.JS.RegExpSets.translate(source, &translate/1),
+        else: translate(source)
+
+    case :re.compile(pattern, opts) do
       {:ok, re} ->
         {:namelist, names} = :re.inspect(re, :namelist)
         {:ok, {re, names}}
@@ -117,6 +128,8 @@ defmodule Browser.JS.RegExp do
       {:error, {msg, _}} ->
         {:error, msg}
     end
+  catch
+    {:re_error, msg} -> {:error, msg}
   end
 
   # JavaScript syntax that PCRE spells differently
