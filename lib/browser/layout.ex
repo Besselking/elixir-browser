@@ -1705,7 +1705,12 @@ defmodule Browser.Layout do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
-    {x, y} = place_float(st, side, w, height)
+    # `clear` puts the float below the earlier floats on that side
+    top = clear_top(st, Map.get(spec, :clear))
+
+    {x, y} =
+      place_float(st, side, w, height, top, st.margin + st.left, st.width - st.margin - st.right)
+
     moved = for item <- items, do: item |> move(x, y) |> adopt_sticky(st)
     float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
 
@@ -1829,6 +1834,7 @@ defmodule Browser.Layout do
     flow? = st.y > box.top + bt + box.o.pt
     st = if box.o.clip or not flow?, do: contain_floats(st, box.fl0), else: st
     st = %{st | blocks: List.delete(st.blocks, box.id)}
+    st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
     # child margins stay inside the box only when padding or a border separates them
     st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
@@ -2091,11 +2097,11 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, 0), else: st
+    st = if st.line == [], do: st |> apply_gap() |> start_atom_line(atom, line_left), else: st
 
     st =
       if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr do
-        st |> flush() |> apply_gap() |> start_line(line_left, 0)
+        st |> flush() |> apply_gap() |> start_atom_line(atom, line_left)
       else
         st
       end
@@ -2136,7 +2142,7 @@ defmodule Browser.Layout do
 
     # a box that clips (overflow other than visible) starts a block formatting context: it does
     # not overlap the floats beside it, but narrows to the room they leave, or moves below them
-    {fl, fr} = if o.clip, do: float_offsets(st, st.y), else: {0, 0}
+    {fl, fr} = if o.clip, do: float_offsets(st, st.y, st.y + max(o.h || 1, 1)), else: {0, 0}
     beside = avail - fl - fr
 
     cw = to_content.(o.width) || max(beside - ml0 - mr0 - hpad, 0)
@@ -2186,7 +2192,9 @@ defmodule Browser.Layout do
       w: box_w,
       n0: st.n,
       nr0: st.nr,
-      fl0: length(st.floats),
+      # a box that clips has a block formatting context: the floats outside it do not reach in
+      fl0: if(o.clip, do: 0, else: length(st.floats)),
+      outer_floats: if(o.clip, do: st.floats),
       ov0: length(st.overlays),
       saved: {st.left, st.right, st.free}
     }
@@ -2195,6 +2203,7 @@ defmodule Browser.Layout do
       st
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
+        floats: if(o.clip, do: [], else: st.floats),
         left: left + bl + o.pl,
         right: st.right + fr + rest + br + o.pr,
         # room beside a box with a width is not part of what it needs
@@ -2912,10 +2921,35 @@ defmodule Browser.Layout do
 
   # A new line starts at `line_left` (a list marker hangs `dx` to the left). Space
   # owed by inline boxes opened on the empty line (`lead`) is applied to content.
-  defp start_line(st, line_left, dx) do
+  # The line an atom starts: beside the floats along its whole height, or lower down when it
+  # does not fit between them.
+  defp start_atom_line(st, atom, line_left) do
+    right = st.width - st.margin - st.right
+    st = move_below_floats(st, atom, right - line_left)
+    start_line(st, line_left, 0, atom.h)
+  end
+
+  defp move_below_floats(st, atom, room) do
+    h = max(atom.h, 1)
+    {fl, fr} = float_offsets(st, st.y, st.y + h)
+
+    case Enum.filter(st.floats, &(&1.y0 < st.y + h and &1.y1 > st.y)) do
+      [] ->
+        st
+
+      _ when atom.w <= room - fl - fr ->
+        st
+
+      overlapping ->
+        below = overlapping |> Enum.map(& &1.y1) |> Enum.min()
+        move_below_floats(%{st | y: below}, atom, room)
+    end
+  end
+
+  defp start_line(st, line_left, dx, h \\ 1) do
     lead = if dx == 0, do: st.lead, else: 0
-    # floats beside this line push its start right and its end left
-    {fl, fr} = float_offsets(st, st.y)
+    # floats beside this line push its start right and its end left (for as tall as the line is)
+    {fl, fr} = float_offsets(st, st.y, st.y + max(h, 1))
 
     %{
       st
@@ -4795,7 +4829,17 @@ defmodule Browser.Layout do
     [{:inline_block, sub, spec, style}] =
       inline_block_ops(el, parent_style, c, [], true, c["display"] == "table")
 
-    [{:float, side, sub, spec, style} | acc]
+    [{:float, side, sub, Map.put(spec, :clear, clear_side(c)), style} | acc]
+  end
+
+  defp clear_top(st, nil), do: st.y
+
+  defp clear_top(st, side) do
+    st.floats
+    |> Enum.filter(&(side == :both or &1.side == side))
+    |> Enum.map(& &1.y1)
+    |> Enum.max(fn -> st.y end)
+    |> max(st.y)
   end
 
   # how far floats take from the line starting at `y`: {from the left, from the right}
@@ -4814,14 +4858,8 @@ defmodule Browser.Layout do
     {max(fl, 0), max(fr, 0)}
   end
 
-  # the top-left corner of a float `w` x `h`: at the current line, or lower down when the
+  # the top-left corner of a float `w` x `h` whose top is no higher than `y`: lower down when the
   # floats beside it leave no room
-  defp place_float(st, side, w, h) do
-    left = st.margin + st.left
-    right = st.width - st.margin - st.right
-    place_float(st, side, w, h, st.y, left, right)
-  end
-
   defp place_float(st, side, w, h, y, left, right) do
     {fl, fr} = float_offsets(st, y, y + max(h, 1))
     overlapping = Enum.filter(st.floats, &(&1.y0 < y + max(h, 1) and &1.y1 > y))
