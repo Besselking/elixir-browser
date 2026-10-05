@@ -37,6 +37,7 @@ defmodule Browser.JS.Collections do
     install_host(scope)
     Browser.JS.TypedArrays.install(scope)
     Browser.JS.Disposables.install(scope)
+    Browser.JS.Iterators.install(scope)
     :ok
   end
 

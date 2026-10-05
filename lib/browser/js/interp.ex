@@ -1062,6 +1062,11 @@ defmodule Browser.JS.Interp do
       o.class == :host and host_has?(o, id, key_s) ->
         true
 
+      # a typed array never looks past itself for a numeric key
+      o.class == :host and match?({Browser.JS.TypedArrays, _}, o.host) and
+          Browser.JS.TypedArrays.numeric_key?(key_s) ->
+        false
+
       o.class == :array and key_s == "length" ->
         true
 
@@ -2481,7 +2486,14 @@ defmodule Browser.JS.Interp do
     Enum.each(props, fn
       {:init, key, val} ->
         k = key_of(key, env)
-        put(obj, k, ev_named(val, env, if(is_binary(k), do: {:id, k})))
+        define_data(obj, k, ev_named(val, env, if(is_binary(k), do: {:id, k})))
+
+      {:proto, e} ->
+        case ev(e, env) do
+          {:obj, _} = p -> Browser.JS.Props.set_prototype_of(obj, p)
+          :null -> Browser.JS.Props.set_prototype_of(obj, :null)
+          _ -> :ok
+        end
 
       {:spread, e} ->
         spread_into(obj, ev(e, env))

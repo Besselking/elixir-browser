@@ -25,8 +25,7 @@ defmodule Browser.JS.Test262 do
     FinalizationRegistry set-methods tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
     source-phase-imports source-phase-imports-module-source import-defer
-    arbitrary-module-namespace-names iterator-helpers iterator-chunking
-    iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
+    arbitrary-module-namespace-names
     uint8array-base64 upsert
     regexp-duplicate-named-groups legacy-regexp error-stack-accessor
     json-parse-with-source nonextensible-applies-to-private

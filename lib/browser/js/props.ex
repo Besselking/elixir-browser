@@ -185,7 +185,7 @@ defmodule Browser.JS.Props do
   defp index_key?(k), do: is_integer(array_index(k)) and array_index(k) < 4_294_967_295
 
   defp own_names_plain2(id, o) do
-    base = Enum.reverse(o.keys)
+    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
     hidden =
       (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
@@ -1066,6 +1066,8 @@ defmodule Browser.JS.Props do
       same_value?(a, b)
     end)
 
+    install_annex_b(object_proto)
+
     def_fn.(object_proto, "propertyIsEnumerable", fn this, args ->
       enumerable_own?(this, to_key(arg(args, 0)))
     end)
@@ -1084,6 +1086,100 @@ defmodule Browser.JS.Props do
     end)
 
     :ok
+  end
+
+  # `__proto__`, `__defineGetter__` and friends (Annex B), `toLocaleString`
+  defp install_annex_b(object_proto) do
+    def_fn = fn name, arity, fun ->
+      f = native(name, fun)
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, arity * 1.0))
+      put_hidden(object_proto, name, f)
+    end
+
+    # ToObject(this): a primitive stands in as an empty object with its prototype
+    to_obj = fn
+      v when v in [:undefined, :null] ->
+        throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      {:obj, _} = o ->
+        o
+
+      v ->
+        new_object([], primitive_proto(v))
+    end
+
+    getter =
+      native("get __proto__", fn this, _ -> this |> to_obj.() |> get_prototype_of() end)
+
+    setter =
+      native("set __proto__", fn this, args ->
+        if this in [:undefined, :null],
+          do: throw_error("TypeError", "Object.prototype.__proto__ called on null or undefined")
+
+        p = arg(args, 0)
+
+        if (p == :null or match?({:obj, _}, p)) and match?({:obj, _}, this) do
+          case set_prototype_of(this, p) do
+            true -> :ok
+            :cycle -> throw_error("TypeError", "Cyclic __proto__ value")
+            _ -> throw_error("TypeError", "Cannot set the prototype of this object")
+          end
+        end
+
+        :undefined
+      end)
+
+    {:obj, sid} = setter
+    store(sid, Map.put(deref(sid), :arity, 1.0))
+    define_accessor(object_proto, "__proto__", get: getter, set: setter, enumerable: false)
+
+    for {name, kind} <- [{"__defineGetter__", "get"}, {"__defineSetter__", "set"}] do
+      def_fn.(name, 2, fn this, args ->
+        o = to_obj.(this)
+        f = arg(args, 1)
+        unless function?(f), do: throw_error("TypeError", "#{name}: expecting function")
+        key = to_key(arg(args, 0))
+        define(o, key, new_object([{kind, f}, {"enumerable", true}, {"configurable", true}]))
+        :undefined
+      end)
+    end
+
+    for {name, kind} <- [{"__lookupGetter__", "get"}, {"__lookupSetter__", "set"}] do
+      def_fn.(name, 1, fn this, args ->
+        o = to_obj.(this)
+        lookup_accessor(o, to_key(arg(args, 0)), kind)
+      end)
+    end
+
+    def_fn.("toLocaleString", 0, fn this, _ ->
+      Interp.call(Interp.get(this, "toString"), this, [])
+    end)
+  end
+
+  defp lookup_accessor({:obj, _} = o, key, kind) do
+    case descriptor(o, key) do
+      {:obj, _} = d ->
+        if Interp.has_property?(d, "get") or Interp.has_property?(d, "set"),
+          do: Interp.get(d, kind),
+          else: :undefined
+
+      _ ->
+        case get_prototype_of(o) do
+          {:obj, _} = parent -> lookup_accessor(parent, key, kind)
+          _ -> :undefined
+        end
+    end
+  end
+
+  defp primitive_proto(v) do
+    case v do
+      s when is_binary(s) -> proto(:string)
+      b when is_boolean(b) -> proto(:boolean)
+      {:symbol, _, _} -> proto(:symbol)
+      {:bigint, _} -> proto(:bigint)
+      _ -> proto(:number)
+    end
   end
 
   defp enumerable_own?(this, key) do

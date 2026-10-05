@@ -511,6 +511,9 @@ defmodule Browser.JS.TypedArrays do
   def invalid_index?(_, _), do: false
 
   @doc false
+  def numeric_key?(key), do: is_binary(key) and canonical(key) != :none
+
+  @doc false
   def host_has({:ta, _, _, _, _} = d, key) when is_binary(key) do
     case {canonical(key), eff(d)} do
       {{:index, i}, {_, len}} -> i < len
