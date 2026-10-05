@@ -104,9 +104,19 @@ defmodule Browser.JS.RegExp do
   end
 
   defp build(source, flags) do
-    if String.contains?(flags, "u") and String.contains?(flags, "v"),
-      do: {:error, "the u and v flags can not be combined"},
-      else: build_pattern(source, flags)
+    flag_list = String.graphemes(flags)
+
+    cond do
+      Enum.any?(flag_list, &(&1 not in ~w(d g i m s u v y))) or
+          length(flag_list) != length(Enum.uniq(flag_list)) ->
+        {:error, "Invalid flags supplied to RegExp constructor '#{flags}'"}
+
+      String.contains?(flags, "u") and String.contains?(flags, "v") ->
+        {:error, "the u and v flags can not be combined"}
+
+      true ->
+        build_pattern(source, flags)
+    end
   end
 
   defp build_pattern(source, flags) do
@@ -118,7 +128,11 @@ defmodule Browser.JS.RegExp do
           do: o
         )
 
+    unless String.contains?(flags, "v"),
+      do: Browser.JS.RegExpSyntax.check(source, String.contains?(flags, "u"))
+
     {renamed, names} = rename_groups(source)
+    renamed = Browser.JS.RegExpSyntax.fix_references(renamed)
 
     pattern =
       if String.contains?(flags, "v"),
@@ -268,6 +282,9 @@ defmodule Browser.JS.RegExp do
     do: rewrite_groups(rest, cls, by, [<<c>> | acc])
 
   # JavaScript syntax that PCRE spells differently
+  @space_items "\\t\\n\\x{b}\\f\\r \\x{a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}\\x{feff}"
+  @nonspace_items "\\x{0}-\\x{8}\\x{e}-\\x{1f}\\x{21}-\\x{9f}\\x{a1}-\\x{167f}\\x{1681}-\\x{1fff}\\x{200b}-\\x{2027}\\x{202a}-\\x{202e}\\x{2030}-\\x{205e}\\x{2060}-\\x{2fff}\\x{3001}-\\x{fefe}\\x{ff00}-\\x{10ffff}"
+
   defp translate(source), do: translate(source, false, [])
 
   defp translate("", _cls, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
@@ -298,6 +315,21 @@ defmodule Browser.JS.RegExp do
   end
 
   defp translate("\\/" <> rest, cls, acc), do: translate(rest, cls, ["/" | acc])
+
+  # `\s` is JavaScript's white space and line terminators, not PCRE's
+  defp translate("\\s" <> rest, cls, acc),
+    do: translate(rest, cls, [if(cls, do: @space_items, else: "[" <> @space_items <> "]") | acc])
+
+  defp translate("\\S" <> rest, cls, acc),
+    do:
+      translate(rest, cls, [
+        if(cls, do: @nonspace_items, else: "[" <> @nonspace_items <> "]") | acc
+      ])
+
+  # an escaped letter that JavaScript gives no meaning is that letter (PCRE has `\A`, `\e`, ...)
+  defp translate(<<?\\, c, rest::binary>>, cls, acc)
+       when (c in ?a..?z or c in ?A..?Z) and c not in ~c"dDwWbBfnrtvcxukpP",
+       do: translate(rest, cls, [<<c>> | acc])
 
   defp translate(<<?\\, c::utf8, rest::binary>>, cls, acc),
     do: translate(rest, cls, [<<?\\, c::utf8>> | acc])
