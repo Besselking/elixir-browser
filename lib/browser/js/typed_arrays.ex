@@ -385,6 +385,17 @@ defmodule Browser.JS.TypedArrays do
 
   # ── host protocol ──────────────────────────────────────────
 
+  # the integer indices of the elements there are now
+  def host_keys({:ta, _, _, _, _} = d) do
+    case eff(d),
+      do: (
+        :oob -> []
+        {_, len} -> for(i <- 0..(len - 1)//1, do: Integer.to_string(i))
+      )
+  end
+
+  def host_keys(_), do: []
+
   @doc false
   def host_get({:ta, kind, bid, _, _} = d0, key, _self) when is_binary(key) do
     {off, len} =
@@ -900,17 +911,46 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "subarray", fn this, args ->
-      {:ta, kind, bid, off, len} = data!(this)
-      from = rel_index(arg(args, 0), len, 0)
-      to = rel_index(arg(args, 1), len, len)
-      view(kind, bid, off + from * size_of(kind), max(to - from, 0))
+      unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
+      {:obj, id} = this
+      %{host: {__MODULE__, {:ta, kind, bid, off0, len0} = d0}} = deref(id)
+
+      src_len =
+        case eff(d0),
+          do: (
+            :oob -> 0
+            {_, n} -> n
+          )
+
+      from = rel_index_inf(arg(args, 0), src_len, 0)
+      size = size_of(kind)
+
+      len =
+        if len0 == :auto and arg(args, 1) == :undefined do
+          :auto
+        else
+          to = rel_index_inf(arg(args, 1), src_len, src_len)
+          max(to - from, 0)
+        end
+
+      view(kind, bid, off0 + from * size, len)
     end)
 
     def_fn(p, "slice", fn this, args ->
-      {:ta, kind, _, _, len} = d = data!(this)
-      from = rel_index(arg(args, 0), len, 0)
-      to = rel_index(arg(args, 1), len, len)
-      make(kind, d |> values() |> Enum.slice(from, max(to - from, 0)))
+      {:ta, kind, _, _, len} = data!(this)
+      from = rel_index_inf(arg(args, 0), len, 0)
+      to = rel_index_inf(arg(args, 1), len, len)
+      count = max(to - from, 0)
+      zero = if kind in [:i64, :u64], do: {:bigint, 0}, else: 0.0
+
+      if count > 0, do: data!(this)
+
+      make(
+        kind,
+        for i <- from..(from + count - 1)//1 do
+          if present?(this, i), do: ta_at(this, i), else: zero
+        end
+      )
     end)
 
     def_fn(p, "map", fn this, args ->
@@ -1103,19 +1143,33 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "with", fn this, args ->
-      {:ta, kind, _, _, len} = d = data!(this)
-      n = to_int(arg(args, 0))
-      i = if n < 0, do: len + n, else: n
-      if i < 0 or i >= len, do: throw_error("RangeError", "Invalid typed array index")
-      make(kind, List.replace_at(values(d), i, arg(args, 1)))
+      {:ta, kind, _, _, len} = data!(this)
+
+      k =
+        case int_or_inf(arg(args, 0)) do
+          n when n in [:infinity, :neg_infinity] -> -1
+          n when n < 0 -> len + n
+          n -> n
+        end
+
+      value =
+        if kind in [:i64, :u64],
+          do: Browser.JS.BigInt.to_bigint(arg(args, 1)),
+          else: to_num(arg(args, 1))
+
+      unless present?(this, k) and k >= 0,
+        do: throw_error("RangeError", "Invalid typed array index")
+
+      make(kind, for(i <- 0..(len - 1)//1, do: if(i == k, do: value, else: ta_at(this, i))))
     end)
 
     def_fn(p, "copyWithin", fn this, args ->
-      {:ta, _, _, _, len} = d = data!(this)
-      target = rel_index(arg(args, 0), len, 0)
-      from = rel_index(arg(args, 1), len, 0)
-      to = rel_index(arg(args, 2), len, len)
-      count = min(to - from, len - target)
+      {:ta, _, _, _, len} = data!(this)
+      target = rel_index_inf(arg(args, 0), len, 0)
+      from = rel_index_inf(arg(args, 1), len, 0)
+      to = rel_index_inf(arg(args, 2), len, len)
+      {:ta, _, _, _, len2} = d = data!(this)
+      count = min(to - from, len - target) |> min(len2 - from) |> min(len2 - target)
 
       if count > 0 do
         chunk = d |> values() |> Enum.slice(from, count)

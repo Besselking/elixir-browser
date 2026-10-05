@@ -650,6 +650,22 @@ defmodule Browser.JS.Builtins do
       |> species_fill_from(target, true)
     end)
 
+    array_fn(p, "toLocaleString", fn this, _ ->
+      len = length_of(this)
+
+      Enum.map_join(0..(len - 1)//1, ",", fn i ->
+        case Interp.get(this, float(i)) do
+          v when v in [:undefined, :null] ->
+            ""
+
+          v ->
+            f = Interp.get(v, "toLocaleString")
+            callable!(f)
+            to_str(call(f, v, []))
+        end
+      end)
+    end)
+
     array_fn(p, "join", fn this, args ->
       join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
     end)
@@ -1368,6 +1384,10 @@ defmodule Browser.JS.Builtins do
   end
 
   defp number_methods(p) do
+    def_fn(p, "toLocaleString", fn this, _ ->
+      Num.to_string(this_prim(this, :number, "Number.prototype.toLocaleString"))
+    end)
+
     def_fn(p, "toString", fn this, args ->
       this = this_prim(this, :number, "Number.prototype.toString")
 
