@@ -27,7 +27,7 @@ defmodule Browser.JS.Test262 do
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names iterator-helpers iterator-chunking
     iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
-    uint8array-base64 upsert regexp-match-indices
+    uint8array-base64 upsert
     regexp-duplicate-named-groups legacy-regexp error-stack-accessor
     json-parse-with-source nonextensible-applies-to-private
   )
