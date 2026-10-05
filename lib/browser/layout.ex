@@ -2255,10 +2255,12 @@ defmodule Browser.Layout do
     {_bt, br, _bb, bl} = o.bw
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     hpad = o.pl + o.pr + bl + br
+    intrinsic? = Process.get(:layout_intrinsic, false)
 
     # width properties are for the content box unless box-sizing is border-box
     to_content = fn
       nil -> nil
+      {:pct, _} when intrinsic? -> nil
       v -> v |> resolve(avail) |> then(&if(o.sizing == :border, do: max(&1 - hpad, 0), else: &1))
     end
 
@@ -2335,7 +2337,7 @@ defmodule Browser.Layout do
         left: left + bl + o.pl,
         right: st.right + fr + rest + br + o.pr,
         # room beside a box with a width is not part of what it needs
-        free: st.free + if(o.width || o.maxw, do: max(rest - mr0, 0), else: 0),
+        free: st.free + if(own_width?(o.width) || o.maxw, do: max(rest - mr0, 0), else: 0),
         y: st.y + bt + o.pt
     }
 
@@ -2379,7 +2381,7 @@ defmodule Browser.Layout do
     st = %{st | y: box.top + height}
 
     st =
-      if (o.width != nil or o.maxw != nil) and fixed_width?(box),
+      if (own_width?(o.width) or o.maxw != nil) and fixed_width?(box),
         do: limit_new_items(%{st | ext: max(st.ext, box.x + box.w + box_mr(o))}, box),
         else: st
 
@@ -2985,8 +2987,15 @@ defmodule Browser.Layout do
   defp resolve_v(v, h), do: resolve(v, h)
   defp resolve_h(v, w), do: resolve(v, w)
 
+  # a width of its own: a percentage is none while the content's width is being measured
+  defp own_width?(nil), do: false
+  defp own_width?({:pct, _}), do: !Process.get(:layout_intrinsic)
+  defp own_width?(_), do: true
+
   defp resolve(nil, _base), do: nil
+
   defp resolve({:pct, f}, base), do: round(f * base)
+
   defp resolve(n, _base) when is_number(n), do: round(n)
 
   # CSS 2 10.3.7: the width of an absolutely positioned box and where its border box starts,
@@ -3092,7 +3101,10 @@ defmodule Browser.Layout do
   # left-aligned, since centring inside the available width would inflate it
   defp shrink_extent(st, sub, width, key) do
     memo({:extent, key || :erlang.phash2(sub), width}, fn ->
+      # a percentage width depends on the very width being measured: it counts as auto
+      outer = Process.put(:layout_intrinsic, true)
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+      Process.put(:layout_intrinsic, outer)
       max(sub_st |> finalize() |> extent(), sub_st.ext)
     end)
   end
@@ -3159,7 +3171,7 @@ defmodule Browser.Layout do
   end
 
   defp layout_sub(st, sub, width) do
-    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
+    sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
     {finalize(sub_st), sub_st.y}
   end
 
