@@ -21,8 +21,8 @@ defmodule Browser.ImageBox do
   @spec size({number, number} | nil, map, map, number) :: {non_neg_integer, non_neg_integer}
   def size(intrinsic, attrs, css, avail) do
     ratio = ratio(intrinsic, attrs)
-    wspec = spec(css[:w], width(css[:w], avail), attrs[:w])
-    hspec = spec(css[:h], px(css[:h]), attrs[:h])
+    wspec = spec(css[:w], width(css[:w], avail), width(attrs[:w], avail))
+    hspec = spec(css[:h], px(css[:h]), px(attrs[:h]))
 
     {w, h} =
       case {wspec, hspec} do

@@ -3210,6 +3210,22 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "text").x == 44
     end
 
+    test "an absolute img leaves the flow and its width percentage is of the containing block" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:relative;width:200px"><img src="a.png" width="50%" style="position:absolute"><p>text</p></div>|,
+          "about:home"
+        )
+
+      {items, _} =
+        Layout.layout(page.nodes, 208, &measure/2, 600, images: %{"about:a.png" => {:ok, 40, 30}})
+
+      img = Enum.find(items, &(&1.type == :image))
+      assert img.w == 100
+      assert img.h == 75
+      assert word_at(items, "text").y < 30
+    end
+
     test "floats inside a table cell stay in the cell" do
       html =
         ~s|<table><tr><td><div style="float:left;width:10px;height:10px;background:#ccc"></div>cell</td><td>next</td></tr></table>|
