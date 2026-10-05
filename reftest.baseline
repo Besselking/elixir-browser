@@ -2040,6 +2040,7 @@ css/CSS2/positioning/bottom-applies-to-005.xht
 css/CSS2/positioning/bottom-applies-to-006.xht
 css/CSS2/positioning/bottom-applies-to-009.xht
 css/CSS2/positioning/bottom-applies-to-012.xht
+css/CSS2/positioning/bottom-applies-to-013.xht
 css/CSS2/positioning/bottom-applies-to-014.xht
 css/CSS2/positioning/bottom-applies-to-015.xht
 css/CSS2/positioning/bottom-offset-001.xht
@@ -2104,6 +2105,7 @@ css/CSS2/positioning/left-applies-to-005.xht
 css/CSS2/positioning/left-applies-to-006.xht
 css/CSS2/positioning/left-applies-to-009.xht
 css/CSS2/positioning/left-applies-to-012.xht
+css/CSS2/positioning/left-applies-to-013.xht
 css/CSS2/positioning/left-applies-to-014.xht
 css/CSS2/positioning/left-applies-to-015.xht
 css/CSS2/positioning/left-offset-001.xht
@@ -2126,6 +2128,7 @@ css/CSS2/positioning/position-applies-to-005.xht
 css/CSS2/positioning/position-applies-to-006.xht
 css/CSS2/positioning/position-applies-to-009.xht
 css/CSS2/positioning/position-applies-to-012.xht
+css/CSS2/positioning/position-applies-to-013.xht
 css/CSS2/positioning/position-applies-to-014.xht
 css/CSS2/positioning/position-applies-to-015.xht
 css/CSS2/positioning/position-fixed-001.xht
@@ -2217,6 +2220,7 @@ css/CSS2/positioning/right-applies-to-005.xht
 css/CSS2/positioning/right-applies-to-006.xht
 css/CSS2/positioning/right-applies-to-009.xht
 css/CSS2/positioning/right-applies-to-012.xht
+css/CSS2/positioning/right-applies-to-013.xht
 css/CSS2/positioning/right-applies-to-014.xht
 css/CSS2/positioning/right-applies-to-015.xht
 css/CSS2/positioning/right-offset-001.xht
@@ -2280,6 +2284,7 @@ css/CSS2/positioning/top-applies-to-005.xht
 css/CSS2/positioning/top-applies-to-006.xht
 css/CSS2/positioning/top-applies-to-009.xht
 css/CSS2/positioning/top-applies-to-012.xht
+css/CSS2/positioning/top-applies-to-013.xht
 css/CSS2/positioning/top-applies-to-014.xht
 css/CSS2/positioning/top-applies-to-015.xht
 css/CSS2/positioning/top-offset-001.xht

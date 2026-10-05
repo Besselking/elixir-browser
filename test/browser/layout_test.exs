@@ -4246,6 +4246,18 @@ defmodule Browser.LayoutTest do
     assert rect.h >= 50
   end
 
+  test "an absolute table does not loop and keeps its own width" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:absolute;display:table;width:96px;background:#0f0"><div style="display:table-row"><div style="display:table-cell">x</div></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+    rect = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert rect.w == 96
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(
