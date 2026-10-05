@@ -348,8 +348,8 @@ defmodule Browser.JS.Parser do
     if name == "yield" and Process.get(:js_generator, false),
       do: throw({:syntax, "yield is reserved in generators"})
 
-    if name == "await" and Process.get(:js_async, false),
-      do: throw({:syntax, "await is reserved in async functions"})
+    if name == "await" and (Process.get(:js_async, false) or Process.get(:js_static_block, false)),
+      do: throw({:syntax, "await is reserved here"})
   end
 
   # the body of if, a loop, `with` or a label: a statement, never a declaration (a plain
@@ -1217,7 +1217,7 @@ defmodule Browser.JS.Parser do
   end
 
   # → {key_node, shorthand_name_or_nil, rest}
-  defp property_key([{:priv, name, _} | ts]), do: {{:priv, name}, nil, ts}
+  defp property_key([{:priv, name, _} | ts]), do: {{:priv, name}, "#" <> name, ts}
   defp property_key([{:id, name, _} | ts]), do: {{:str, name}, name, ts}
   defp property_key([{:eid, name, _} | ts]), do: {{:str, name}, nil, ts}
 
@@ -1300,10 +1300,21 @@ defmodule Browser.JS.Parser do
           :ok
       end
 
+      accessor_params!(kind, value)
+
+      case value do
+        {:gen, fun} -> check_no_yield(method_code(fun))
+        {:async, {:gen, fun}} -> check_no_yield(method_code(fun))
+        _ -> :ok
+      end
+
       case kind do
         :block ->
           if contains_node?(value, &(&1 == {:id, "arguments"})),
             do: throw({:syntax, "'arguments' is not allowed in a class static block"})
+
+          if contains_node?(value, &match?({:call, {:super}, _, _}, &1)),
+            do: throw({:syntax, "'super' call is not allowed in a class static block"})
 
         :field ->
           if value != nil and contains_node?(value, &(&1 == {:id, "arguments"})),
@@ -1321,6 +1332,26 @@ defmodule Browser.JS.Parser do
     end
 
     :ok
+  end
+
+  defp accessor_params!(:get, value) do
+    if match?([[_ | _], _], method_code(value)),
+      do: throw({:syntax, "a getter takes no parameters"})
+  end
+
+  defp accessor_params!(:set, value) do
+    case method_code(value) do
+      [[{:rest, _}], _] -> throw({:syntax, "a setter takes exactly one parameter"})
+      [[_], _] -> :ok
+      _ -> throw({:syntax, "a setter takes exactly one parameter"})
+    end
+  end
+
+  defp accessor_params!(_, _), do: :ok
+
+  defp check_no_yield([params, _body]) do
+    if contains_node?(params, &match?({:yield, _, _}, &1)),
+      do: throw({:syntax, "yield expression in generator parameters"})
   end
 
   # the parameters and body of a method value, whatever generator/async wrapping it has
@@ -1353,6 +1384,10 @@ defmodule Browser.JS.Parser do
         t -> {nil, t}
       end
 
+    if name in @strict_reserved or name in ["eval", "arguments"] or
+         (name == "await" and Process.get(:js_static_block, false)),
+       do: throw({:syntax, "#{name} is not a valid class name"})
+
     outer = strict?()
     Process.put(:js_strict, true)
 
@@ -1361,6 +1396,10 @@ defmodule Browser.JS.Parser do
         [{:id, "extends", _} | t] -> call_chain(t)
         t -> {nil, t}
       end
+
+    # private names in the heritage belong to the enclosing class
+    outer_refs = Process.get(:js_priv_refs, []) ++ outer_refs
+    Process.put(:js_priv_refs, [])
 
     ts = expect(ts, "{")
     nt = Process.put(:js_nt, true)
@@ -1380,13 +1419,16 @@ defmodule Browser.JS.Parser do
 
   defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
     outer = Process.get(:js_generator, false)
+    outer_sb = Process.put(:js_static_block, true)
     Process.put(:js_generator, false)
 
     try do
       {body, ts} = fresh_jumps(fn -> block_body(ts, []) end, false)
+      check_scope(body, true, [])
       class_members(ts, [{:cmember, :block, nil, body, true} | acc])
     after
       Process.put(:js_generator, outer)
+      Process.put(:js_static_block, outer_sb)
     end
   end
 
@@ -1450,7 +1492,9 @@ defmodule Browser.JS.Parser do
   defp class_modifier(ts, _), do: {false, ts}
 
   defp semi_field([{:p, ";", _} | ts]), do: ts
-  defp semi_field(ts), do: ts
+  defp semi_field([{:p, "}", _} | _] = ts), do: ts
+  defp semi_field([{_, _, nl} | _] = ts) when nl?(nl), do: ts
+  defp semi_field(_), do: throw({:syntax, "expected ';' after a class field"})
 
   # ── functions ──────────────────────────────────────────────
 
@@ -1460,6 +1504,7 @@ defmodule Browser.JS.Parser do
     outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
     Process.put(:js_async, Process.delete(:js_async_next) == true)
+    outer_sb = Process.put(:js_static_block, false)
     class_method? = Process.delete(:js_class_method) == true
     nt = Process.put(:js_nt, true)
 
@@ -1472,6 +1517,7 @@ defmodule Browser.JS.Parser do
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
+      Process.put(:js_static_block, outer_sb)
       Process.put(:js_nt, nt)
     end
   end
@@ -1524,7 +1570,9 @@ defmodule Browser.JS.Parser do
   end
 
   defp arrow_body(params, [{:p, "{", _} | ts]) do
+    outer_sb = Process.put(:js_static_block, false)
     {body, ts} = function_body(ts, params, true)
+    Process.put(:js_static_block, outer_sb)
     {{:fn, nil, params, body, :arrow}, ts}
   end
 

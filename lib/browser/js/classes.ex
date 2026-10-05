@@ -74,6 +74,9 @@ defmodule Browser.JS.Classes do
         {:cmember, :field, key, init, static?}, {fields, statics} ->
           k = member_key(key, cenv)
 
+          if static? and k == "prototype",
+            do: throw_error("TypeError", "Classes may not have a static field named 'prototype'")
+
           if static?,
             do: {fields, [{:field, k, init} | statics]},
             else: {[{k, init} | fields], statics}
@@ -94,6 +97,10 @@ defmodule Browser.JS.Classes do
         {:cmember, kind, key, value, static?}, acc ->
           target = if static?, do: f, else: proto
           k = member_key(key, cenv)
+
+          if static? and k == "prototype",
+            do: throw_error("TypeError", "Classes may not have a static member named 'prototype'")
+
           fun = Interp.ev(value, cenv)
           Interp.set_home(fun, target)
 
@@ -115,7 +122,8 @@ defmodule Browser.JS.Classes do
       derived?: derived?,
       fields: Enum.reverse(fields),
       env: cenv,
-      name: name
+      name: name,
+      proto: proto
     }
 
     obj = deref(fid)
@@ -146,8 +154,8 @@ defmodule Browser.JS.Classes do
         define_field(f, key, v)
 
       {:block, body} ->
-        inner = Interp.new_scope(scope)
-        Interp.exec_stmt({:block, body}, inner)
+        inner = Interp.new_fn_scope(scope, %{})
+        Interp.run_body(body, inner)
     end)
   end
 
@@ -164,6 +172,9 @@ defmodule Browser.JS.Classes do
       case ret do
         {:obj, _} ->
           ret
+
+        r when r != :undefined ->
+          throw_error("TypeError", "Derived constructors may only return object or undefined")
 
         _ ->
           case Interp.lookup_scoped(scope, :this) do
@@ -195,7 +206,13 @@ defmodule Browser.JS.Classes do
   defp init_fields(%{fields: []}, _this), do: :ok
 
   defp init_fields(info, this) do
-    scope = Interp.new_fn_scope(info.env, %{this: this, new_target: :undefined, field_init: true})
+    scope =
+      Interp.new_fn_scope(info.env, %{
+        this: this,
+        home: info.proto,
+        new_target: :undefined,
+        field_init: true
+      })
 
     for field <- info.fields do
       case field do
@@ -218,9 +235,21 @@ defmodule Browser.JS.Classes do
   # stores a private method, accessor half or field value on an object
   defp put_private({:obj, id}, key, kind, value) do
     o = deref(id)
+    existing = Map.get(o.props, key)
+
+    duplicate? =
+      case {kind, existing} do
+        {_, nil} -> false
+        {:get, {:accessor, g, _}} -> g != :undefined
+        {:set, {:accessor, _, s}} -> s != :undefined
+        _ -> true
+      end
+
+    if duplicate?,
+      do: throw_error("TypeError", "Cannot initialize a private member twice on the same object")
 
     stored =
-      case {kind, Map.get(o.props, key)} do
+      case {kind, existing} do
         {:get, {:accessor, _, s}} -> {:accessor, value, s}
         {:get, _} -> {:accessor, value, :undefined}
         {:set, {:accessor, g, _}} -> {:accessor, g, value}
@@ -228,6 +257,7 @@ defmodule Browser.JS.Classes do
         _ -> value
       end
 
+    o = if kind == :method, do: Map.update(o, :pmethods, [key], &[key | &1]), else: o
     store(id, %{o | props: Map.put(o.props, key, stored)})
   end
 

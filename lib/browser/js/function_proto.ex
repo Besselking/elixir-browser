@@ -34,7 +34,7 @@ defmodule Browser.JS.FunctionProto do
 
     def_fn(p, "toString", 0, fn this, _ ->
       callable!(this, "Function.prototype.toString")
-      "function #{to_str(get(this, "name"))}() { [native code] }"
+      "function #{String.trim_leading(to_str(get(this, "name")), "#")}() { [native code] }"
     end)
 
     has_instance =
