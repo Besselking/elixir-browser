@@ -19,8 +19,7 @@ defmodule Browser.JS do
   @type result :: term
   @type console :: [{:log | :warn | :error, String.t()}]
 
-  @doc "Parses `source`: `{:ok, {:program, statements}}` or `{:error, message}`."
-  @doc "Parses source text; `module: true` for a module (import and export allowed)."
+  @doc "Parses `source`: `{:ok, {:program, statements}}` or `{:error, message}`; `module: true` allows import and export."
   def parse(source, opts \\ []), do: Parser.parse(source, opts)
 
   @doc """
