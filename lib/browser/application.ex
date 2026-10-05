@@ -4,6 +4,7 @@ defmodule Browser.Application do
 
   @impl true
   def start(_type, _args) do
+    Browser.CrashReporter.install()
     # the default is two connections per host, which is what a page full of images waits on
     :httpc.set_options(max_sessions: 8, max_keep_alive_length: 20)
 

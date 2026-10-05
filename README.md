@@ -19,3 +19,7 @@ software painter (no window needed) and compares the pixels; `mix help reftest` 
 Requires Elixir 1.20+ and Erlang/OTP 29+ with the `wx` application; only the latest versions are
 supported. `scripts/install-toolchain.sh` installs them (Homebrew on macOS, a source build with wx on
 Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
+
+## Crash reports
+
+Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.

@@ -1633,6 +1633,7 @@ defmodule Browser.Session do
   # the address bar shows `text`; the change is not something the user typed
   defp set_url_text(state, text) do
     UI.set_url_text(state.ui, text)
+    Browser.CrashReporter.set_page(text)
     %{state | url_text: text, suggest: nil}
   end
 
