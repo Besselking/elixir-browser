@@ -703,11 +703,13 @@ defmodule Browser.UI do
     :wxGraphicsContext.setFont(gc, font(item), item.color)
     :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
 
-    if item.underline,
-      do: gc_line(gc, item.color, item.x, y + item.h + 2, item.x + item.w, y + item.h + 2)
+    if item.underline do
+      uy = y + underline_offset(dc, item)
+      gc_line(gc, item.color, item.x, uy, item.x + item.w, uy)
+    end
 
     if item.strike do
-      mid = y + div(item.h, 2) + 2
+      mid = y + strike_offset(dc, item)
       gc_line(gc, item.color, item.x, mid, item.x + item.w, mid)
     end
 
@@ -899,16 +901,47 @@ defmodule Browser.UI do
     if item.underline or item.strike do
       :wxDC.setPen(dc, pen(item.color))
 
-      if item.underline,
-        do: :wxDC.drawLine(dc, {item.x, y + item.h + 2}, {item.x + item.w, y + item.h + 2})
+      if item.underline do
+        uy = y + underline_offset(dc, item)
+        :wxDC.drawLine(dc, {item.x, uy}, {item.x + item.w, uy})
+      end
 
-      if item.strike,
-        do:
-          :wxDC.drawLine(
-            dc,
-            {item.x, y + div(item.h, 2) + 2},
-            {item.x + item.w, y + div(item.h, 2) + 2}
-          )
+      if item.strike do
+        sy = y + strike_offset(dc, item)
+        :wxDC.drawLine(dc, {item.x, sy}, {item.x + item.w, sy})
+      end
+    end
+  end
+
+  # Where the text's decorations go, measured from the top of the drawn glyph box: the baseline
+  # sits `descent` above its bottom, so the underline is a little under that and the strike
+  # line about a third of the font size above it. The glyph box is what the font really draws,
+  # which is not the item's `h` (the font size) nor the line's height.
+  defp underline_offset(dc, item) do
+    {height, descent} = glyph_box(dc, item)
+    height - descent + max(1, div(descent, 3))
+  end
+
+  defp strike_offset(dc, item) do
+    {height, descent} = glyph_box(dc, item)
+    height - descent - max(div(item.size * 3, 10), 2)
+  end
+
+  defp glyph_box(dc, item) do
+    key = {:glyph_box, item.size, item.bold, item.italic, item.mono, Map.get(item, :family)}
+
+    case Process.get(key) do
+      nil ->
+        gc = :wxGraphicsContext.create(dc)
+        :wxGraphicsContext.setFont(gc, font(item), item.color)
+        {_w, h, descent, _lead} = :wxGraphicsContext.getTextExtent(gc, ~c"Hg")
+        :wxGraphicsContext.destroy(gc)
+        box = {round(h), round(descent)}
+        Process.put(key, box)
+        box
+
+      box ->
+        box
     end
   end
 
