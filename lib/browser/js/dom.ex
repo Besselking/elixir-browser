@@ -97,7 +97,8 @@ defmodule Browser.JS.DOM do
       height: info[:height] || 658,
       doc: nil,
       state: nil,
-      storage: %{},
+      session: %{},
+      storage_origin: Browser.LocalStorage.origin(info.url),
       usp: 0,
       history_len: 1,
       ce: %{},
@@ -659,7 +660,7 @@ defmodule Browser.JS.DOM do
   def host_get(:window, key, _self), do: window_get(key)
   def host_get(:location, key, _self), do: location_get(key)
   def host_get({:usp, k}, key, _self), do: usp_get(k, key)
-  def host_get(:storage, key, _self), do: storage_get(key)
+  def host_get({:storage, area}, key, _self), do: storage_get(area, key)
   def host_get(:history, "length", _self), do: {:ok, float(st().history_len)}
   def host_get(:history, "state", _self), do: {:ok, st().state || :null}
   def host_get(_other, _key, _self), do: :miss
@@ -971,7 +972,7 @@ defmodule Browser.JS.DOM do
   def host_put({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
   def host_put(:window, key, v, _), do: window_put(key, v)
   def host_put(:location, key, v, _), do: location_put(key, v)
-  def host_put(:storage, key, v, _), do: storage_put(key, v)
+  def host_put({:storage, area}, key, v, _), do: storage_put(area, key, v)
   def host_put(_other, _key, _v, _self), do: :miss
 
   defp node_put(n, key, v) do
@@ -1698,10 +1699,10 @@ defmodule Browser.JS.DOM do
         {:ok, elem(s.scroll, 1)}
 
       "localStorage" ->
-        {:ok, aux_host(:storage, :storage)}
+        {:ok, aux_host({:storage, :local}, :storage)}
 
       "sessionStorage" ->
-        {:ok, aux_host(:storage, :storage)}
+        {:ok, aux_host({:storage, :session}, :storage)}
 
       "navigator" ->
         {:ok, Process.get(:dom_navigator, :undefined)}
@@ -1857,17 +1858,140 @@ defmodule Browser.JS.DOM do
 
   # ── Storage ────────────────────────────────────────────────
 
-  defp storage_get(key) do
-    case key do
-      "length" -> {:ok, float(map_size(st().storage))}
-      k when k in ~w(getItem setItem removeItem clear key) -> :miss
-      k -> {:ok, Map.get(st().storage, k, :undefined)}
+  # `localStorage` is shared by the pages of an origin and kept on disk
+  # (`Browser.LocalStorage`); `sessionStorage` belongs to this page. A page whose address
+  # has no origin (`about:`, `data:`) gets a `localStorage` that lasts as long as it does.
+  defp storage_area(this) do
+    case this do
+      {:obj, id} ->
+        case deref(id) do
+          %{class: :host, host: {__MODULE__, {:storage, area}}} -> area
+          _ -> throw_error("TypeError", "Illegal invocation")
+        end
+
+      _ ->
+        throw_error("TypeError", "Illegal invocation")
     end
   end
 
-  defp storage_put(key, v) do
-    put_st(%{st() | storage: Map.put(st().storage, key, to_str(v))})
+  defp subscribe_storage do
+    case st().storage_origin do
+      nil -> :ok
+      origin -> Browser.LocalStorage.subscribe(origin)
+    end
+  end
+
+  defp storage_origin, do: st().storage_origin || {:page, self()}
+
+  # items of a page without an origin: they last as long as the page
+  defp page_items(origin), do: Process.get({:local_items, origin}, %{})
+
+  defp storage_read(:session, key), do: Map.get(st().session, key)
+
+  defp storage_read(:local, key) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.get(origin, key)
+      origin -> Map.get(page_items(origin), key)
+    end
+  end
+
+  defp storage_length(:local) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.count(origin)
+      origin -> map_size(page_items(origin))
+    end
+  end
+
+  defp storage_length(:session), do: map_size(st().session)
+
+  defp storage_key(:local, index) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.key(origin, index)
+      origin -> page_items(origin) |> Map.keys() |> Enum.sort() |> Enum.at(index)
+    end
+  end
+
+  defp storage_key(:session, index),
+    do: st().session |> Map.keys() |> Enum.sort() |> Enum.at(index)
+
+  defp storage_set(:session, key, value) do
+    put_st(%{st() | session: Map.put(st().session, key, value)})
     :ok
+  end
+
+  defp storage_set(:local, key, value) do
+    case storage_origin() do
+      origin when is_binary(origin) ->
+        case Browser.LocalStorage.put(origin, key, value) do
+          :ok -> :ok
+          {:error, :quota} -> throw_quota_error()
+        end
+
+      origin ->
+        Process.put({:local_items, origin}, Map.put(page_items(origin), key, value))
+        :ok
+    end
+  end
+
+  defp throw_quota_error do
+    err = make_error("Error", "The quota has been exceeded.")
+    put(err, "name", "QuotaExceededError")
+    put(err, "code", 22.0)
+    throw({:js_error, err})
+  end
+
+  defp storage_remove(:session, key) do
+    put_st(%{st() | session: Map.delete(st().session, key)})
+    :ok
+  end
+
+  defp storage_remove(:local, key) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.delete(origin, key)
+      origin -> Process.put({:local_items, origin}, Map.delete(page_items(origin), key))
+    end
+
+    :ok
+  end
+
+  defp storage_clear(:session) do
+    put_st(%{st() | session: %{}})
+    :ok
+  end
+
+  defp storage_clear(:local) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.clear(origin)
+      origin -> Process.delete({:local_items, origin})
+    end
+
+    :ok
+  end
+
+  defp storage_get(area, key) do
+    case key do
+      "length" -> {:ok, float(storage_length(area))}
+      k when k in ~w(getItem setItem removeItem clear key) -> :miss
+      k -> {:ok, storage_read(area, k) || :undefined}
+    end
+  end
+
+  defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
+
+  @doc """
+  Another page changed `localStorage`: fires `storage` on the window with what changed
+  (`key` is nil for `clear`).
+  """
+  def storage_changed(key, old, new) do
+    dispatch(:window, "storage", %{
+      "key" => key || :null,
+      "oldValue" => old || :null,
+      "newValue" => new || :null,
+      "url" => st().url,
+      "storageArea" => aux_host({:storage, :local}, :storage),
+      bubbles: false,
+      cancelable: false
+    })
   end
 
   # ── URLSearchParams ────────────────────────────────────────
@@ -2627,27 +2751,27 @@ defmodule Browser.JS.DOM do
 
     storage = proto({:dom, :storage})
 
-    def_fn(storage, "getItem", fn _this, args ->
-      Map.get(st().storage, to_str(arg(args, 0)), :null)
+    def_fn(storage, "getItem", fn this, args ->
+      storage_read(storage_area(this), to_str(arg(args, 0))) || :null
     end)
 
-    def_fn(storage, "setItem", fn _this, args ->
-      put_st(%{st() | storage: Map.put(st().storage, to_str(arg(args, 0)), to_str(arg(args, 1)))})
+    def_fn(storage, "setItem", fn this, args ->
+      storage_set(storage_area(this), to_str(arg(args, 0)), to_str(arg(args, 1)))
       :undefined
     end)
 
-    def_fn(storage, "removeItem", fn _this, args ->
-      put_st(%{st() | storage: Map.delete(st().storage, to_str(arg(args, 0)))})
+    def_fn(storage, "removeItem", fn this, args ->
+      storage_remove(storage_area(this), to_str(arg(args, 0)))
       :undefined
     end)
 
-    def_fn(storage, "clear", fn _this, _ ->
-      put_st(%{st() | storage: %{}})
+    def_fn(storage, "clear", fn this, _ ->
+      storage_clear(storage_area(this))
       :undefined
     end)
 
-    def_fn(storage, "key", fn _this, args ->
-      st().storage |> Map.keys() |> Enum.sort() |> Enum.at(to_int(arg(args, 0)), :null)
+    def_fn(storage, "key", fn this, args ->
+      storage_key(storage_area(this), to_int(arg(args, 0))) || :null
     end)
 
     install_usp(proto({:dom, :usp}))
@@ -2989,8 +3113,9 @@ defmodule Browser.JS.DOM do
     declare(scope, "document", wrap(st().doc))
     declare(scope, "location", aux_host(:location, :location))
     declare(scope, "history", aux_host(:history, :history))
-    declare(scope, "localStorage", aux_host(:storage, :storage))
-    declare(scope, "sessionStorage", aux_host(:storage, :storage))
+    declare(scope, "localStorage", aux_host({:storage, :local}, :storage))
+    declare(scope, "sessionStorage", aux_host({:storage, :session}, :storage))
+    subscribe_storage()
 
     for {name, v} <- [
           {"innerWidth", float(st().width)},

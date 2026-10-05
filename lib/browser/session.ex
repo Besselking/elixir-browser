@@ -272,7 +272,8 @@ defmodule Browser.Session do
   def handle_info(wx(event: {:wxClose, :close_window}), state) do
     # An orderly shutdown frees the toolkit's objects while its event loop is still
     # running, which crashes the wx driver (a "quit unexpectedly" dialog on macOS).
-    # There is nothing to save, so leave straight away.
+    # Only localStorage may still be waiting to be written; then leave straight away.
+    Browser.LocalStorage.flush()
     System.halt(0)
     {:noreply, state}
   end
@@ -352,8 +353,10 @@ defmodule Browser.Session do
   end
 
   # Quit (Cmd+Q and the application menu's item)
-  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state),
-    do: System.halt(0)
+  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state) do
+    Browser.LocalStorage.flush()
+    System.halt(0)
+  end
 
   # Edit > Cut, Copy and Select All (wxID_CUT, wxID_COPY, wxID_SELECTALL)
   def handle_info(wx(id: 5031, event: wxCommand(type: :command_menu_selected)), state),

@@ -855,4 +855,113 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["404 nope"]
     end
   end
+
+  describe "localStorage and sessionStorage" do
+    # each test has a host of its own: the store is shared with the tests running beside it
+    defp run_at(host, script) do
+      {_pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: "http://#{host}/p"})
+
+      r
+    end
+
+    test "items, length, key, properties and removal" do
+      r =
+        run_at("ls1.test", """
+        localStorage.setItem("b", 2);
+        localStorage.a = "1";
+        console.log(localStorage.length, localStorage.getItem("b"), localStorage.a, localStorage.key(0), localStorage.key(5));
+        console.log(localStorage.getItem("zzz"), localStorage.zzz);
+        localStorage.removeItem("a");
+        console.log(localStorage.length, localStorage.a);
+        localStorage.clear();
+        console.log(localStorage.length);
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["2 2 1 a null", "null undefined", "1 undefined", "0"]
+    end
+
+    test "sessionStorage is not localStorage" do
+      r =
+        run_at("ls2.test", """
+        localStorage.setItem("k", "local");
+        sessionStorage.setItem("k", "session");
+        sessionStorage.setItem("only", "s");
+        console.log(localStorage.getItem("k"), sessionStorage.getItem("k"), localStorage.length, sessionStorage.length);
+        """)
+
+      assert logs(r) == ["local session 1 2"]
+    end
+
+    test "the items outlive the page and are shared by the pages of the origin only" do
+      run_at("ls3.test", ~s|localStorage.setItem("seen", "yes")|)
+
+      r =
+        run_at(
+          "ls3.test",
+          ~s|console.log(localStorage.getItem("seen"), sessionStorage.getItem("seen"))|
+        )
+
+      assert logs(r) == ["yes null"]
+      r = run_at("other.ls3.test", ~s|console.log(localStorage.getItem("seen"))|)
+      assert logs(r) == ["null"]
+    end
+
+    test "going over the quota throws a QuotaExceededError" do
+      r =
+        run_at("ls4.test", """
+        const big = "x".repeat(1024 * 1024);
+        try { for (let i = 0; i < 6; i++) localStorage.setItem("k" + i, big); console.log("no error"); }
+        catch (e) { console.log(e.name, localStorage.length); }
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["QuotaExceededError 4"]
+    end
+
+    test "a page without an origin has a storage that lasts as long as it does" do
+      {_pid, r} =
+        start(
+          ~S"<body><script>localStorage.setItem('a', '1'); console.log(localStorage.getItem('a'), localStorage.length)</script></body>",
+          %{},
+          %{url: "about:blank"}
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["1 1"]
+    end
+
+    test "another page of the origin gets a storage event" do
+      {pid, r} =
+        start(
+          ~S"""
+          <body><script>
+          window.addEventListener("storage", (e) => console.log("event", e.key, e.oldValue, e.newValue, e.url, e.storageArea === localStorage));
+          localStorage.setItem("own", "1");
+          </script></body>
+          """,
+          %{},
+          %{url: "http://ls5.test/a"}
+        )
+
+      assert errors(r) == []
+      # the page that made the change hears nothing
+      assert logs(r) == []
+
+      run_at(
+        "ls5.test",
+        ~s|localStorage.setItem("k", "v"); localStorage.setItem("k", "w"); localStorage.removeItem("k"); localStorage.clear()|
+      )
+
+      events = collect_async(pid)
+
+      assert Enum.sort(for({:log, t} <- events, do: t)) == [
+               "event k null v http://ls5.test/a true",
+               "event k v w http://ls5.test/a true",
+               "event k w null http://ls5.test/a true",
+               "event null null null http://ls5.test/a true"
+             ]
+    end
+  end
 end
