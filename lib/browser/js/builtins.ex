@@ -48,6 +48,7 @@ defmodule Browser.JS.Builtins do
     function_methods(function_proto)
     array_methods(proto(:array))
     string_methods(proto(:string))
+    Browser.JS.StringProto.install(proto(:string))
     number_methods(proto(:number))
     install_errors(scope, error_proto)
     install_object(scope, object_proto)
@@ -1189,7 +1190,7 @@ defmodule Browser.JS.Builtins do
           end
 
         if wrapper_target?(this, :string) do
-          put_hidden(this, "length", float(String.length(s)))
+          put_const(this, "length", float(String.length(s)))
           wrap(this, s)
         else
           s
