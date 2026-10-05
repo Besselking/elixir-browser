@@ -4205,6 +4205,20 @@ defmodule Browser.LayoutTest do
     assert red.y == 0
   end
 
+  test "a percentage height is a share of an enclosing block's height, auto when that has none" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="height:200px"><div id="a" style="height:50%;background:#00f"></div></div><div><div style="height:50%;background:#f00">x</div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.h == 100
+    red = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+    assert red.h < 50
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(

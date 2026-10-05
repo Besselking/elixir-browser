@@ -1055,7 +1055,7 @@ defmodule Browser.Layout do
     else
       ref = make_ref()
 
-      case box_spec(c, box, style) do
+      case box_spec(tag, c, box, style) do
         nil ->
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
@@ -1063,7 +1063,11 @@ defmodule Browser.Layout do
           acc = indent_op(c, box, acc)
 
           acc =
-            with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
+            with_cw(child_width(c, box), fn ->
+              with_definite(own_definite?(tag, c), fn ->
+                block_children(tag, kind, kids, style, c, acc)
+              end)
+            end)
 
           acc = [{:flush} | acc]
           acc = indent_end(c, acc)
@@ -1078,7 +1082,11 @@ defmodule Browser.Layout do
           acc = indent_op(c, box, acc)
 
           acc =
-            with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
+            with_cw(child_width(c, box), fn ->
+              with_definite(own_definite?(tag, c), fn ->
+                block_children(tag, kind, kids, style, c, acc)
+              end)
+            end)
 
           acc = [{:flush} | acc]
           acc = indent_end(c, acc)
@@ -1127,7 +1135,7 @@ defmodule Browser.Layout do
 
   # Boxes whose geometry must be resolved at placement: backgrounds, borders,
   # explicit widths/heights, `auto` margins, clipping and positioned boxes.
-  defp box_spec(c, box, style) do
+  defp box_spec(tag, c, box, style) do
     {bt, br, bb, bl} = box.bw
 
     spec = %{
@@ -1154,6 +1162,7 @@ defmodule Browser.Layout do
       nid: style.nid,
       h: num(c["height"]),
       hpct: pct_of(c["height"]),
+      root: tag == "html",
       min: num(c["min-height"]),
       max: num(c["max-height"]),
       clip: clips?(c),
@@ -1174,7 +1183,7 @@ defmodule Browser.Layout do
         spec.min ||
         spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
-        spec.mr == :auto || spec.cid != nil
+        spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
 
     if needed?, do: spec
   end
@@ -1762,7 +1771,9 @@ defmodule Browser.Layout do
       limits: %{},
       # the content height of the enclosing block when it has one of its own (for percentages)
       cbh: nil,
-      cbw: nil
+      cbw: nil,
+      root_view: root_height == :view,
+      flex_item: Process.get(:layout_flex_item, false)
     }
 
     # what is laid out here is a block formatting context of its own: it grows to hold its floats
@@ -2285,7 +2296,17 @@ defmodule Browser.Layout do
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
 
-  defp start_box(st, ref, o), do: st |> flush() |> apply_gap() |> place_box(ref, o)
+  defp start_box(st, ref, o),
+    do: st |> flush() |> apply_gap() |> place_box(ref, percent_height(st, o))
+
+  # a percentage height is a share of the enclosing block's height when that is known
+  defp percent_height(st, %{h: nil, hpct: pct} = o) when is_number(pct) do
+    # the root's percentage refers to the window, anything else to the block it sits in
+    base = if o.root and st.root_view, do: st.view_h, else: st.cbh
+    if is_number(base), do: %{o | h: round(pct * base)}, else: o
+  end
+
+  defp percent_height(_st, o), do: o
 
   defp place_box(st, ref, o) do
     {_bt, br, _bb, bl} = o.bw
@@ -2371,7 +2392,7 @@ defmodule Browser.Layout do
       st
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
-        cbh: content_height(o),
+        cbh: if(st.flex_item and st.blocks == [], do: nil, else: content_height(o)),
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.clip, do: [], else: st.floats),
         left: left + bl + o.pl,
@@ -3236,6 +3257,17 @@ defmodule Browser.Layout do
       items = finalize(sub_st)
       {items, height, last_baseline(items, height)}
     end)
+  end
+
+  # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
+  defp flex_atom(st, sub, width, key) do
+    Process.put(:layout_flex_item, true)
+
+    try do
+      layout_atom(st, sub, width, {:flex, key || :erlang.phash2(sub)})
+    after
+      Process.delete(:layout_flex_item)
+    end
   end
 
   defp last_baseline(items, height) do
@@ -4422,7 +4454,7 @@ defmodule Browser.Layout do
     sized =
       Enum.map(line, fn it ->
         w = max(round(it.hw), 1)
-        {items, h, _base} = layout_atom(st, it.sub, w, it.key)
+        {items, h, _base} = flex_atom(st, it.sub, w, it.key)
         Map.merge(it, %{w: w, items: items, h: h})
       end)
 
@@ -4541,7 +4573,7 @@ defmodule Browser.Layout do
       box_h = cross - it.mt - it.mb
       min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
       sub = it.rebuild.(%{"min-height" => max(min_h, 0) * 1.0})
-      {items, h, _} = layout_atom(st, sub, it.w, {it.key, min_h})
+      {items, h, _} = flex_atom(st, sub, it.w, {it.key, min_h})
       %{it | items: items, h: max(h, cross)}
     else
       it
@@ -4565,7 +4597,7 @@ defmodule Browser.Layout do
 
         w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
         w = max(round(w), 1)
-        {items, h, _} = layout_atom(st, it.sub, w, it.key)
+        {items, h, _} = flex_atom(st, it.sub, w, it.key)
 
         x =
           cond do
@@ -5074,6 +5106,26 @@ defmodule Browser.Layout do
   defp sized_by(_, outer), do: outer
 
   # runs `fun` with `width` as the containing block's width, then puts the old one back
+  # whether the block being built has a height its children's percentages can refer to
+  defp own_definite?(tag, c) do
+    is_number(c["height"]) or (match?({:pct, _}, c["height"]) and percent_definite?(tag))
+  end
+
+  # a percentage height has something to refer to: the window (for the root) or a block with a
+  # height of its own
+  defp percent_definite?(tag), do: tag == "html" or Process.get(:layout_definite, false)
+
+  defp with_definite(value, fun) do
+    previous = Process.get(:layout_definite, false)
+    Process.put(:layout_definite, value)
+
+    try do
+      fun.()
+    after
+      Process.put(:layout_definite, previous)
+    end
+  end
+
   defp with_cw(width, fun) do
     previous = containing_width()
     Process.put(:layout_cw, width)
