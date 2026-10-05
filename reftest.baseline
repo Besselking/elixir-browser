@@ -266,6 +266,7 @@ css/CSS2/borders/border-bottom-width-084.xht
 css/CSS2/borders/border-bottom-width-089.xht
 css/CSS2/borders/border-bottom-width-090.xht
 css/CSS2/borders/border-bottom-width-091.xht
+css/CSS2/borders/border-bottom-width-095.xht
 css/CSS2/borders/border-bottom-width-applies-to-009.xht
 css/CSS2/borders/border-bottom-width-applies-to-012.xht
 css/CSS2/borders/border-bottom-width-applies-to-015.xht
@@ -278,6 +279,7 @@ css/CSS2/borders/border-left-003.xht
 css/CSS2/borders/border-left-005.xht
 css/CSS2/borders/border-left-006.xht
 css/CSS2/borders/border-left-008.xht
+css/CSS2/borders/border-left-018.xht
 css/CSS2/borders/border-left-applies-to-009.xht
 css/CSS2/borders/border-left-applies-to-012.xht
 css/CSS2/borders/border-left-applies-to-015.xht
@@ -346,6 +348,7 @@ css/CSS2/borders/border-left-width-084.xht
 css/CSS2/borders/border-left-width-089.xht
 css/CSS2/borders/border-left-width-090.xht
 css/CSS2/borders/border-left-width-091.xht
+css/CSS2/borders/border-left-width-095.xht
 css/CSS2/borders/border-left-width-applies-to-009.xht
 css/CSS2/borders/border-left-width-applies-to-012.xht
 css/CSS2/borders/border-left-width-applies-to-015.xht
@@ -354,6 +357,7 @@ css/CSS2/borders/border-right-003.xht
 css/CSS2/borders/border-right-005.xht
 css/CSS2/borders/border-right-006.xht
 css/CSS2/borders/border-right-008.xht
+css/CSS2/borders/border-right-018.xht
 css/CSS2/borders/border-right-applies-to-009.xht
 css/CSS2/borders/border-right-applies-to-012.xht
 css/CSS2/borders/border-right-color-129.xht
@@ -605,6 +609,7 @@ css/CSS2/css1/c32-cascading-000.xht
 css/CSS2/css1/c412-blockw-000.xht
 css/CSS2/css1/c412-hz-box-000.xht
 css/CSS2/css1/c414-flt-fit-001.xht
+css/CSS2/css1/c45-bg-canvas-000.xht
 css/CSS2/css1/c526-font-sz-001.xht
 css/CSS2/css1/c531-color-000.xht
 css/CSS2/css1/c532-bgcolor-000.xht
@@ -625,11 +630,24 @@ css/CSS2/css1/c547-indent-000.xht
 css/CSS2/css1/c548-ln-ht-001.xht
 css/CSS2/css1/c548-ln-ht-003.xht
 css/CSS2/css1/c548-ln-ht-004.xht
+css/CSS2/css1/c5502-imrgn-r-000.xht
+css/CSS2/css1/c5502-imrgn-r-001.xht
+css/CSS2/css1/c5502-mrgn-r-000.xht
+css/CSS2/css1/c5502-mrgn-r-003.xht
+css/CSS2/css1/c5504-imrgn-l-000.xht
+css/CSS2/css1/c5504-mrgn-l-000.xht
+css/CSS2/css1/c5504-mrgn-l-003.xht
 css/CSS2/css1/c5505-mrgn-000.xht
 css/CSS2/css1/c5506-padn-t-000.xht
+css/CSS2/css1/c5507-ipadn-r-000.xht
+css/CSS2/css1/c5507-ipadn-r-001.xht
+css/CSS2/css1/c5507-padn-r-000.xht
 css/CSS2/css1/c5507-padn-r-002.xht
 css/CSS2/css1/c5508-ipadn-b-001.xht
 css/CSS2/css1/c5508-ipadn-b-003.xht
+css/CSS2/css1/c5509-ipadn-l-000.xht
+css/CSS2/css1/c5509-ipadn-l-001.xht
+css/CSS2/css1/c5509-padn-l-000.xht
 css/CSS2/css1/c5509-padn-l-002.xht
 css/CSS2/css1/c5510-padn-000.xht
 css/CSS2/css1/c5511-brdr-tw-001.xht
@@ -657,6 +675,7 @@ css/CSS2/css1/c5525-fltinln-000.xht
 css/CSS2/css1/c5525-fltwidth-001.xht
 css/CSS2/css1/c562-white-sp-000.xht
 css/CSS2/css1/c61-rel-len-000.xht
+css/CSS2/css1/c62-percent-000.xht
 css/CSS2/css1/c71-fwd-parsing-001.xht
 css/CSS2/css1/c71-fwd-parsing-004.xht
 css/CSS2/floats-clear/adjacent-floats-001.xht
@@ -746,10 +765,13 @@ css/CSS2/floats-clear/floats-145.xht
 css/CSS2/floats-clear/floats-149.xht
 css/CSS2/floats-clear/floats-bfc-001.xht
 css/CSS2/floats-clear/floats-bfc-002.xht
+css/CSS2/floats-clear/margin-collapse-024.xht
+css/CSS2/floats-clear/margin-collapse-031.xht
 css/CSS2/floats-clear/margin-collapse-clear-016.xht
 css/CSS2/floats-clear/margin-collapse-clear-017.xht
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block-after-margin.html
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block.html
+css/CSS2/floats/float-after-block-with-collapsed-margin-inside-inline.html
 css/CSS2/floats/float-in-inline-001.html
 css/CSS2/floats/float-in-inline-002.html
 css/CSS2/floats/float-in-inline-anonymous-block-with-overflow-hidden.html
@@ -938,9 +960,11 @@ css/CSS2/margin-padding-clear/margin-collapse-009.xht
 css/CSS2/margin-padding-clear/margin-collapse-013.xht
 css/CSS2/margin-padding-clear/margin-collapse-014.xht
 css/CSS2/margin-padding-clear/margin-collapse-015.xht
+css/CSS2/margin-padding-clear/margin-collapse-017.xht
 css/CSS2/margin-padding-clear/margin-collapse-021.xht
 css/CSS2/margin-padding-clear/margin-collapse-022.xht
 css/CSS2/margin-padding-clear/margin-collapse-025.xht
+css/CSS2/margin-padding-clear/margin-collapse-028.xht
 css/CSS2/margin-padding-clear/margin-collapse-037.xht
 css/CSS2/margin-padding-clear/margin-collapse-038.xht
 css/CSS2/margin-padding-clear/margin-collapse-106.xht
@@ -950,6 +974,7 @@ css/CSS2/margin-padding-clear/margin-collapse-130.xht
 css/CSS2/margin-padding-clear/margin-collapse-155.xht
 css/CSS2/margin-padding-clear/margin-collapse-156.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-011.xht
+css/CSS2/margin-padding-clear/margin-collapse-min-height-002.xht
 css/CSS2/margin-padding-clear/margin-inline-002.xht
 css/CSS2/margin-padding-clear/margin-left-004.xht
 css/CSS2/margin-padding-clear/margin-left-005.xht
@@ -1486,6 +1511,9 @@ css/CSS2/normal-flow/inline-replaced-height-010.xht
 css/CSS2/normal-flow/inline-replaced-height-011.xht
 css/CSS2/normal-flow/inline-replaced-width-001.xht
 css/CSS2/normal-flow/inline-replaced-width-006.xht
+css/CSS2/normal-flow/inline-replaced-width-011.xht
+css/CSS2/normal-flow/inline-replaced-width-012.xht
+css/CSS2/normal-flow/inline-replaced-width-013.xht
 css/CSS2/normal-flow/inline-replaced-width-016.xht
 css/CSS2/normal-flow/inline-replaced-width-017.xht
 css/CSS2/normal-flow/inline-table-height-001.xht
@@ -1945,6 +1973,7 @@ css/CSS2/positioning/absolute-replaced-width-076.xht
 css/CSS2/positioning/abspos-001.xht
 css/CSS2/positioning/abspos-002.xht
 css/CSS2/positioning/abspos-008.xht
+css/CSS2/positioning/abspos-009.xht
 css/CSS2/positioning/abspos-011.xht
 css/CSS2/positioning/abspos-012.xht
 css/CSS2/positioning/abspos-013.xht
@@ -2284,6 +2313,7 @@ css/CSS2/positioning/top-109.xht
 css/CSS2/positioning/top-110.xht
 css/CSS2/positioning/top-111.xht
 css/CSS2/positioning/top-112.xht
+css/CSS2/positioning/top-113.xht
 css/CSS2/positioning/top-applies-to-001.xht
 css/CSS2/positioning/top-applies-to-002.xht
 css/CSS2/positioning/top-applies-to-003.xht
@@ -2831,6 +2861,7 @@ css/css-flexbox/flexbox_columns-flexitems-2.html
 css/css-flexbox/flexbox_columns-flexitems.html
 css/css-flexbox/flexbox_direction-column-reverse.html
 css/css-flexbox/flexbox_direction-column.html
+css/css-flexbox/flexbox_direction-row-reverse.html
 css/css-flexbox/flexbox_first-line.html
 css/css-flexbox/flexbox_flex-0-0-1-unitless-basis.html
 css/css-flexbox/flexbox_flex-0-0-N-unitless-basis.html

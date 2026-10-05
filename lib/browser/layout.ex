@@ -1797,6 +1797,8 @@ defmodule Browser.Layout do
       x: 0,
       y: 0,
       gap: 0,
+      # boxes whose top edge waits for the margin that collapses into it (see `start_box`)
+      ptop: [],
       # the most negative margin waiting to be applied, which adds to the largest positive one
       ngap: 0,
       pending_space: nil,
@@ -2035,6 +2037,8 @@ defmodule Browser.Layout do
 
   defp op({:box_end, ref}, st) do
     st = flush(st)
+    # nothing was placed in it: the margin above still decides where it starts
+    st = if ref in st.ptop, do: apply_gap(st), else: st
     {box, open} = Map.pop(st.open, ref)
     {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
@@ -2273,6 +2277,8 @@ defmodule Browser.Layout do
 
   defp op({:abs, sub, spec}, st) do
     spec = Map.put(spec, :seq, :erlang.unique_integer([:monotonic]))
+    # the boxes it is placed against must know where they start
+    st = if st.ptop == [], do: st, else: apply_gap(st)
     origin = if spec.fixed, do: List.last(st.pos), else: hd(st.pos)
 
     # `bottom` and a percentage `top` need the containing box's height, known only once it closes
@@ -2287,7 +2293,24 @@ defmodule Browser.Layout do
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
-  defp apply_gap(st), do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0}
+  defp apply_gap(%{ptop: []} = st), do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0}
+
+  # the margin of a first child collapsed into the margin above its parent: the parent's top
+  # edge is where the merged margin ends
+  defp apply_gap(st) do
+    y = st.y + st.gap + st.ngap
+
+    {open, pos} =
+      Enum.reduce(st.ptop, {st.open, st.pos}, fn ref, {open, pos} ->
+        delta = y - open[ref].top
+        open = Map.update!(open, ref, &%{&1 | top: y})
+        # the box a positioned descendant is placed against moves with it
+        pos = Enum.map(pos, fn e -> if e[:ref] == ref, do: %{e | y: e.y + delta}, else: e end)
+        {open, pos}
+      end)
+
+    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: []}
+  end
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
   # wrapping to a new line if it doesn't fit.
@@ -2369,8 +2392,23 @@ defmodule Browser.Layout do
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
 
-  defp start_box(st, ref, o),
-    do: st |> flush() |> apply_gap() |> place_box(ref, percent_height(st, o))
+  # A box with no border or padding on top lets its first child's margin collapse into its own,
+  # so its top edge is only known once the first content is placed.
+  defp start_box(st, ref, o) do
+    {bt, _, _, _} = o.bw
+    st = flush(st)
+
+    # (the outermost box of a layout of its own, an absolute or inline-block one, say, is a
+    # block formatting context: its children's margins stay inside)
+    if bt == 0 and o.pt == 0 and not o.clip and not o.root and st.floats == [] and
+         not st.flex_item and
+         (st.blocks != [] or st.root_view) do
+      st = place_box(st, ref, percent_height(st, o))
+      if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
+    else
+      st |> apply_gap() |> place_box(ref, percent_height(st, o))
+    end
+  end
 
   # a percentage height is a share of the enclosing block's height when that is known
   defp percent_height(st, %{h: nil, hpct: pct} = o) when is_number(pct) do
