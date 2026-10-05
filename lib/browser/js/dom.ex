@@ -1976,6 +1976,29 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  defp storage_keys(:session), do: st().session |> Map.keys() |> Enum.sort()
+
+  defp storage_keys(:local) do
+    case storage_origin() do
+      origin when is_binary(origin) -> Browser.LocalStorage.keys(origin)
+      origin -> page_items(origin) |> Map.keys() |> Enum.sort()
+    end
+  end
+
+  # `Object.keys(localStorage)` and `delete localStorage.name` see the items; every other host
+  # object (nodes, `window`...) behaves like a plain object
+  @doc false
+  def host_keys({:storage, area}), do: storage_keys(area)
+  def host_keys(_other), do: :default
+
+  @doc false
+  def host_delete({:storage, area}, key) when is_binary(key) do
+    storage_remove(area, key)
+    true
+  end
+
+  def host_delete(_other, _key), do: :default
+
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
 
   @doc """
