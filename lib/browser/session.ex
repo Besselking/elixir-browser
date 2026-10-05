@@ -1379,6 +1379,7 @@ defmodule Browser.Session do
 
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
+              metrics: &measure.(:content_height, &1),
               images: images,
               svg_defs: page.svg_defs
             )
@@ -1540,6 +1541,7 @@ defmodule Browser.Session do
 
     {items, height} =
       Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
+        metrics: &state.measure.(:content_height, &1),
         focus: focus_option(state),
         images: state.images,
         svg_defs: if(state.page, do: state.page.svg_defs, else: %{})
@@ -1570,6 +1572,7 @@ defmodule Browser.Session do
 
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
+              metrics: &measure.(:content_height, &1),
               focus: focus,
               images: images,
               svg_defs: page.svg_defs

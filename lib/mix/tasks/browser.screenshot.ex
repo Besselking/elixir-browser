@@ -51,6 +51,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
 
     {items, height} =
       Browser.Layout.layout(page.nodes, width, measure, 800,
+        metrics: &measure.(:content_height, &1),
         images: images,
         svg_defs: page.svg_defs
       )

@@ -447,7 +447,8 @@ defmodule Browser.UI do
   def new_measure_cache, do: :ets.new(:measure_cache, [:set, :public])
 
   @doc """
-  Returns a `(text, style) -> width` function backed by a wx client DC. Widths are
+  Returns a `(text, style) -> width` function (`(:content_height, style) -> px` gives the
+  height of the font's glyphs) backed by a wx client DC. Widths are
   memoized in `cache`, so only text that changed costs a wx round trip. A measurer is used
   by one process at a time (its DC holds the current font); a second one on the same cache
   serves a background process.
@@ -457,20 +458,35 @@ defmodule Browser.UI do
   defp dc_measurer(dc, cache) do
     cache = cache || new_measure_cache()
 
-    fn text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
-      key = {text, size, bold, italic, mono, Map.get(style, :family)}
+    fn
+      :content_height, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
+        key = {:content_height, size, bold, italic, mono, Map.get(style, :family)}
 
-      case :ets.lookup(cache, key) do
-        [{_, w}] ->
-          w
+        case :ets.lookup(cache, key) do
+          [{_, h}] ->
+            h
 
-        [] ->
-          :wxDC.setFont(dc, font(style))
-          {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
-          if :ets.info(cache, :size) >= @measure_cache_limit, do: :ets.delete_all_objects(cache)
-          :ets.insert(cache, {key, w})
-          w
-      end
+          [] ->
+            :wxDC.setFont(dc, font(style))
+            {_w, h} = :wxDC.getTextExtent(dc, ~c"Hg")
+            :ets.insert(cache, {key, h})
+            h
+        end
+
+      text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
+        key = {text, size, bold, italic, mono, Map.get(style, :family)}
+
+        case :ets.lookup(cache, key) do
+          [{_, w}] ->
+            w
+
+          [] ->
+            :wxDC.setFont(dc, font(style))
+            {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
+            if :ets.info(cache, :size) >= @measure_cache_limit, do: :ets.delete_all_objects(cache)
+            :ets.insert(cache, {key, w})
+            w
+        end
     end
   end
 
