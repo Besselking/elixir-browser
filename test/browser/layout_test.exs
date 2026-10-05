@@ -276,11 +276,12 @@ defmodule Browser.LayoutTest do
       assert w2(items, "after").y < 80
     end
 
-    test "overflow visible lets content overflow, following content is not overlapped" do
+    test "overflow visible lets content overflow the box and the content after it" do
       html = @reset <> ~s(<div style="height:10px"><p>l1</p><p>l2</p><p>l3</p></div><p>after</p>)
       {items, _} = styled2(html)
       assert w2(items, "l3")
-      assert w2(items, "after").y > w2(items, "l3").y
+      # the box is as tall as it says, so what follows starts right below it
+      assert w2(items, "after").y < w2(items, "l3").y
     end
 
     test "max-height clips and min-height pads" do
