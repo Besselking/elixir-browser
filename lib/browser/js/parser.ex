@@ -55,7 +55,12 @@ defmodule Browser.JS.Parser do
       try do
         Process.put(:js_strict, use_strict?(tokens))
         Process.put(:js_priv_refs, [])
-        program = tokens |> statements() |> check_scope(true)
+        program = tokens |> statements()
+
+        if Enum.any?(program, &using_decl?/1),
+          do: throw({:syntax, "using declaration at the top level of a script"})
+
+        program = check_scope(program, true)
 
         case Process.get(:js_priv_refs) do
           [] -> :ok
@@ -77,7 +82,7 @@ defmodule Browser.JS.Parser do
   defp check_scope(stmts, top?, params \\ []) do
     lexical =
       Enum.flat_map(stmts, fn
-        {:var, k, decls} when k in [:let, :const] ->
+        {:var, k, decls} when k in [:let, :const, :using, :await_using] ->
           for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: {n, :lexical}
 
         {:fundecl, n, {:async, _}} when not top? ->
@@ -104,7 +109,24 @@ defmodule Browser.JS.Parser do
     if dup? or Enum.any?(names, &(&1 in vars or &1 in params)),
       do: throw({:syntax, "redeclaration of a lexical name"})
 
-    stmts
+    if Enum.any?(stmts, &using_decl?/1), do: wrap_using(stmts), else: stmts
+  end
+
+  defp using_decl?({:var, k, _}), do: k in [:using, :await_using]
+  defp using_decl?(_), do: false
+
+  # `using a = x; rest` becomes one node that owns the rest of the list, so that leaving the
+  # list (however it ends) disposes the resource
+  defp wrap_using([]), do: []
+
+  defp wrap_using([{:var, k, decls} | rest]) when k in [:using, :await_using],
+    do: [nest_using(k, decls, wrap_using(rest))]
+
+  defp wrap_using([s | rest]), do: [s | wrap_using(rest)]
+
+  defp nest_using(kind, decls, rest) do
+    List.foldr(decls, rest, fn {{:id, name}, init}, acc -> [{:using, kind, name, init, acc}] end)
+    |> hd()
   end
 
   # ── strict mode ────────────────────────────────────────────
@@ -221,6 +243,16 @@ defmodule Browser.JS.Parser do
       [{:id, kw, _} | _] when kw in ["const", "class"] ->
         throw({:syntax, "#{kw} declaration in statement position"})
 
+      [{:id, "using", _} | _] ->
+        if using_start?(ts),
+          do: throw({:syntax, "using declaration in statement position"}),
+          else: statement(ts)
+
+      [{:id, "await", _} | rest = [{:id, "using", _} | _]] ->
+        if Process.get(:js_async, false) and using_start?(rest),
+          do: throw({:syntax, "using declaration in statement position"}),
+          else: statement(ts)
+
       [{:id, l, _}, {:p, ":", _} | rest] when not allow_function and l not in @reserved ->
         body_statement(rest, false)
         statement(ts)
@@ -261,6 +293,22 @@ defmodule Browser.JS.Parser do
     {decl, semi(ts)}
   end
 
+  defp statement([{:id, "using", _}, {:id, name, false} | ts])
+       when name not in @reserved and name not in ["in", "instanceof", "of", "let"] do
+    {decls, ts} = using_declarators([{:id, name, false} | ts])
+    {{:var, :using, decls}, semi(ts)}
+  end
+
+  defp statement([{:id, "await", _}, {:id, "using", _}, {:id, name, false} | ts] = all)
+       when name not in @reserved and name not in ["in", "instanceof", "of", "let"] do
+    if Process.get(:js_async, false) do
+      {decls, ts} = using_declarators([{:id, name, false} | ts])
+      {{:var, :await_using, decls}, semi(ts)}
+    else
+      expression_statement(all)
+    end
+  end
+
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
       [{:id, name, _} | _] when name not in ["in", "of", "instanceof"] -> let_decl(ts)
@@ -282,6 +330,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "async", _}, {:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    Process.put(:js_async_next, true)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
   end
@@ -566,6 +615,27 @@ defmodule Browser.JS.Parser do
     {{:expr, e}, semi(ts)}
   end
 
+  # `using` followed, on the same line, by a binding name starts a using declaration
+  defp using_start?([{:id, "using", _}, {:id, name, false} | _]),
+    do: name not in ["in", "instanceof", "of", "let"] and name not in @reserved
+
+  defp using_start?(_), do: false
+
+  # the bindings of a using declaration are plain names and always have an initializer
+  defp using_declarators(ts) do
+    {decls, ts} = declarators(ts, [])
+
+    for {pat, init} <- decls do
+      unless match?({:id, _}, pat) and init != nil,
+        do: throw({:syntax, "invalid using declaration"})
+
+      {:id, name} = pat
+      check_strict_name(name)
+    end
+
+    {decls, ts}
+  end
+
   defp let_decl(ts) do
     {decl, ts} = declaration("let", ts)
     {decl, semi(ts)}
@@ -610,6 +680,18 @@ defmodule Browser.JS.Parser do
             for_rest(decl, t)
         end
 
+      [{:id, "using", _}, {:id, n, false} | rest]
+      when n not in @reserved and n not in ["in", "instanceof", "of", "let"] ->
+        using_for(:using, [{:id, n, false} | rest])
+
+      [{:id, "using", _}, {:id, "of", false}, {:p, "=", _} | _] ->
+        using_for(:using, tl(ts))
+
+      [{:id, "await", _}, {:id, "using", _}, {:id, n, false} | rest]
+      when n not in @reserved and n not in ["in", "instanceof", "let"] ->
+        unless Process.get(:js_async, false), do: throw({:syntax, "await using outside async"})
+        using_for(:await_using, [{:id, n, false} | rest])
+
       [{:p, ";", _} | _] ->
         for_rest(nil, ts)
 
@@ -639,6 +721,32 @@ defmodule Browser.JS.Parser do
             {e, t} = expression(ts)
             for_rest({:expr, e}, t)
         end
+    end
+  end
+
+  # `for (using x of y) body` takes each value into a fresh name and declares `x` from it in
+  # the iteration's block; `for (using x = a; ...)` disposes when the whole loop is done
+  defp using_for(kind, ts) do
+    {pat, after_pat} = pattern(ts, false)
+
+    case after_pat do
+      [{:id, "of", _} | t] ->
+        {:id, name} = pat
+        check_strict_name(name)
+        {obj, t} = assignment(t)
+        t = expect(t, ")")
+        {body, t} = body_statement(t)
+        tmp = " using"
+        node = {:using, kind, name, {:id, tmp}, [body]}
+        {{:forof, :const, {:id, tmp}, obj, {:block, [node]}}, t}
+
+      [{:id, "in", _} | _] ->
+        throw({:syntax, "using in a for-in head"})
+
+      _ ->
+        {decls, t} = using_declarators(ts)
+        {loop, t} = for_rest(nil, t)
+        {{:block, [nest_using(kind, decls, [loop])]}, t}
     end
   end
 
@@ -711,6 +819,9 @@ defmodule Browser.JS.Parser do
 
   defp case_body(ts, acc) do
     {stmt, ts} = statement(ts)
+
+    if using_decl?(stmt), do: throw({:syntax, "using declaration in a case clause"})
+
     case_body(ts, [stmt | acc])
   end
 

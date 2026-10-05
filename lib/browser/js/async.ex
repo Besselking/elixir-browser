@@ -535,6 +535,7 @@ defmodule Browser.JS.Async do
   defp has_await?({:await, _}), do: true
   defp has_await?({:yield, _, _}), do: true
   defp has_await?({:forawait, _, _, _, _}), do: true
+  defp has_await?({:using, :await_using, _, _, _}), do: true
   defp has_await?({:gen, _}), do: false
   defp has_await?({:fn, _, _, _, _}), do: false
   defp has_await?({:async, _}), do: false
@@ -916,7 +917,80 @@ defmodule Browser.JS.Async do
     cexec(block, env, in_try, done)
   end
 
+  # `using` / `await using`: the rest of the list runs under a context that disposes the
+  # resource before any way out
+  defp cs({:using, kind, name, init, rest}, env, ctx, k, _labels) do
+    cev_named(init, name, env, ctx, fn v ->
+      attempt(
+        fn ->
+          res = Interp.using_resource(kind, v)
+          Interp.declare(env, name, v, true)
+          res
+        end,
+        ctx,
+        fn res ->
+          leave = fn after_, thrown ->
+            dispose_cps(res, ctx, fn
+              :ok ->
+                after_.()
+
+              {:error, e2} ->
+                case thrown do
+                  {:error, e} -> ctx.throw.(Interp.suppressed_error(e2, e))
+                  :none -> ctx.throw.(e2)
+                end
+            end)
+          end
+
+          wrapped = %{
+            ctx
+            | ret: fn v -> leave.(fn -> ctx.ret.(v) end, :none) end,
+              throw: fn e -> leave.(fn -> ctx.throw.(e) end, {:error, e}) end,
+              brk:
+                Map.new(ctx.brk, fn {l, f} -> {l, fn x -> leave.(fn -> f.(x) end, :none) end} end),
+              cont:
+                Map.new(ctx.cont, fn {l, f} -> {l, fn x -> leave.(fn -> f.(x) end, :none) end} end)
+          }
+
+          clist(rest, env, wrapped, fn _ -> leave.(fn -> k.(:ok) end, :none) end)
+        end
+      )
+    end)
+  end
+
   defp cs(stmt, env, ctx, k, labels), do: sync_stmt(stmt, env, ctx, k, labels)
+
+  # the initializer, named after the binding when it is an anonymous function
+  defp cev_named(init, name, env, ctx, k) do
+    if has_await?(init) do
+      cev(init, env, ctx, k)
+    else
+      attempt(fn -> Interp.ev_named(init, env, {:id, name}) end, ctx, k)
+    end
+  end
+
+  # disposes one resource; `k` gets :ok or {:error, e}
+  defp dispose_cps({:none, :sync}, _ctx, k), do: k.(:ok)
+  defp dispose_cps({:none, :async}, ctx, k), do: await_result(:undefined, ctx, k)
+
+  defp dispose_cps({:res, v, m, mode}, ctx, k) do
+    result =
+      try do
+        {:ok, Interp.call(m, v, [])}
+      catch
+        {:js_error, e} -> {:error, e}
+      end
+
+    case {result, mode} do
+      {{:error, e}, _} -> k.({:error, e})
+      {{:ok, _}, :sync} -> k.(:ok)
+      {{:ok, r}, :async} -> await_result(r, ctx, k)
+      {{:ok, _}, :async_from_sync} -> await_result(:undefined, ctx, k)
+    end
+  end
+
+  defp await_result(v, ctx, k),
+    do: await_value(v, %{ctx | throw: fn e -> k.({:error, e}) end}, fn _ -> k.(:ok) end)
 
   # declarations, one at a time
   defp cdecls([], _kind, _env, _ctx, k), do: k.(:ok)

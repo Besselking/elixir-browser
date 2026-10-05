@@ -169,7 +169,7 @@ defmodule Browser.JS.Props do
       %{class: :function} ->
         virtual =
           for k <- ["length", "name", "prototype"],
-              k not in hidden,
+              k not in hidden and k not in base,
               state({:obj, id}, k) != nil,
               do: k
 
@@ -841,6 +841,12 @@ defmodule Browser.JS.Props do
 
         b when is_boolean(b) ->
           proto(:boolean)
+
+        {:symbol, _, _} ->
+          proto(:symbol)
+
+        {:bigint, _} ->
+          proto(:bigint)
 
         _ ->
           proto(:number)

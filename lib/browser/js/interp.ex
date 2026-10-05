@@ -542,6 +542,7 @@ defmodule Browser.JS.Interp do
     "Boolean" => 1.0,
     "Date" => 7.0,
     "AggregateError" => 2.0,
+    "SuppressedError" => 3.0,
     "Error" => 1.0,
     "EvalError" => 1.0,
     "Function" => 1.0,
@@ -621,7 +622,9 @@ defmodule Browser.JS.Interp do
     "getOwnPropertyDescriptors" => 1.0,
     "getOwnPropertyNames" => 1.0,
     "getOwnPropertySymbols" => 1.0,
+    "for" => 1.0,
     "getPrototypeOf" => 1.0,
+    "keyFor" => 1.0,
     "has" => 1.0,
     "hasOwn" => 2.0,
     "hasOwnProperty" => 1.0,
@@ -1315,14 +1318,26 @@ defmodule Browser.JS.Interp do
 
   def constructor?(_), do: false
 
+  defp builtin_prototype(%{fun: {:native, _, _}}, f) do
+    case get(f, "prototype") do
+      {:obj, _} = p -> p
+      _ -> proto(:object)
+    end
+  end
+
+  defp builtin_prototype(_, _), do: proto(:object)
+
   defp construct_plain({:obj, _} = f, id, nt, new_target, args) do
     case Map.get(deref(id), :class_info) do
       nil ->
         proto =
           case get(nt, "prototype") do
             {:obj, _} = p -> p
-            _ -> proto(:object)
+            # a built-in falls back to its own prototype, a plain function to Object.prototype
+            _ -> builtin_prototype(deref(id), f)
           end
+
+        if Map.get(deref(id), :no_new), do: throw_error("TypeError", "not a constructor")
 
         this = new_object([], proto)
 
@@ -1526,9 +1541,12 @@ defmodule Browser.JS.Interp do
   defp function_get(id, o, key) do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
-        if key in ["name", "length"] and key in Map.get(o, :gone, []),
-          do: :undefined,
-          else: function_prop(id, o, key)
+        cond do
+          key in ["name", "length"] and key in Map.get(o, :gone, []) -> :undefined
+          # `f.prototype = undefined` is a value, not a missing property
+          key == "prototype" and Map.has_key?(o.props, "prototype") -> :undefined
+          true -> function_prop(id, o, key)
+        end
 
       v ->
         v
@@ -1674,7 +1692,12 @@ defmodule Browser.JS.Interp do
     c
   end
 
-  defp fundecls(stmts), do: for(stmt <- stmts, {:fundecl, n, f} <- [unexport(stmt)], do: {n, f})
+  defp fundecls(stmts) do
+    Enum.flat_map(stmts, fn
+      {:using, _, _, _, rest} -> fundecls(rest)
+      stmt -> for {:fundecl, n, f} <- [unexport(stmt)], do: {n, f}
+    end)
+  end
 
   # the `var` names of a body, remembered: walking the syntax tree on every call is costly
   defp hoisted_names(stmts) do
@@ -1698,6 +1721,7 @@ defmodule Browser.JS.Interp do
     do: Enum.reduce(decls, acc, fn {pat, _}, a -> pattern_names(pat, a) end)
 
   def var_names({:export, stmt}, acc), do: var_names(stmt, acc)
+  def var_names({:using, _, _, _, rest}, acc), do: var_names(rest, acc)
   def var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
   def var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
 
@@ -1732,8 +1756,12 @@ defmodule Browser.JS.Interp do
 
   @doc false
   def hoist_functions(stmts, scope) do
-    for stmt <- stmts, {:fundecl, name, fun} <- [unexport(stmt)] do
-      declare(scope, name, make_fn(fun, scope))
+    for stmt <- stmts do
+      case unexport(stmt) do
+        {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope))
+        {:using, _, _, _, rest} -> hoist_functions(rest, scope)
+        _ -> :ok
+      end
     end
 
     :ok
@@ -1747,6 +1775,7 @@ defmodule Browser.JS.Interp do
 
   @doc "Runs a whole program in the global scope; returns the completion value."
   def run_program({:program, stmts}) do
+    :erlang.put(:js_last, :undefined)
     scope = global()
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
@@ -1826,6 +1855,97 @@ defmodule Browser.JS.Interp do
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
 
+  # ── using declarations ─────────────────────────────────────
+
+  @dispose {:symbol, :dispose, "Symbol.dispose"}
+  @async_dispose {:symbol, :asyncDispose, "Symbol.asyncDispose"}
+
+  @doc false
+  # what a `using` / `await using` initializer gives: `{:none, mode}` for null and undefined,
+  # else `{:res, value, method, mode}` where mode is :sync, :async, or :async_from_sync
+  def using_resource(kind, v) when v in [:undefined, :null],
+    do: {:none, if(kind == :using, do: :sync, else: :async)}
+
+  def using_resource(kind, v) do
+    unless match?({:obj, _}, v),
+      do: throw_error("TypeError", "using declaration needs an object, null or undefined")
+
+    case kind do
+      :using ->
+        {:res, v, dispose_method(v, @dispose) || missing_dispose(), :sync}
+
+      :await_using ->
+        case dispose_method(v, @async_dispose) do
+          nil -> {:res, v, dispose_method(v, @dispose) || missing_dispose(), :async_from_sync}
+          m -> {:res, v, m, :async}
+        end
+    end
+  end
+
+  defp missing_dispose, do: throw_error("TypeError", "object is not disposable")
+
+  defp dispose_method(v, sym) do
+    case get(v, sym) do
+      m when m in [:undefined, :null] ->
+        nil
+
+      m ->
+        unless function?(m), do: throw_error("TypeError", "dispose method is not callable")
+        m
+    end
+  end
+
+  @doc false
+  # runs the disposal of one resource to its end: :ok or {:error, e}
+  def dispose_sync({:none, :sync}), do: :ok
+  def dispose_sync({:none, :async}), do: await_catching(:undefined)
+
+  def dispose_sync({:res, v, m, :sync}) do
+    call(m, v, [])
+    :ok
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  def dispose_sync({:res, v, m, :async}) do
+    await_catching(call(m, v, []))
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  def dispose_sync({:res, v, m, :async_from_sync}) do
+    call(m, v, [])
+    await_catching(:undefined)
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  defp await_catching(value) do
+    Browser.JS.Promise.await(value)
+    :ok
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  @doc false
+  # how the rest of a list ended (:ok, or {:thrown, t}) together with its disposal
+  def using_finish(:ok, :ok), do: :ok
+  def using_finish(:ok, {:error, e}), do: throw({:js_error, e})
+  def using_finish({:thrown, t}, :ok), do: throw(t)
+
+  def using_finish({:thrown, {:js_error, e}}, {:error, e2}),
+    do: throw({:js_error, suppressed_error(e2, e)})
+
+  def using_finish({:thrown, _}, {:error, e2}), do: throw({:js_error, e2})
+
+  @doc false
+  def suppressed_error(error, suppressed) do
+    err = make_error("SuppressedError", "An error was suppressed during disposal")
+    put_hidden(err, "error", error)
+    put_hidden(err, "suppressed", suppressed)
+    err
+  end
+
   @doc false
   def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
 
@@ -1846,6 +1966,24 @@ defmodule Browser.JS.Interp do
     end
 
     :ok
+  end
+
+  # `using x = v; rest`: the rest of the list runs, then the resource is disposed, whichever
+  # way the rest ended
+  defp exec({:using, kind, name, init, rest}, env, _) do
+    v = ev_named(init, env, {:id, name})
+    res = using_resource(kind, v)
+    declare(env, name, v, true)
+
+    outcome =
+      try do
+        exec_list(rest, env)
+        :ok
+      catch
+        t -> {:thrown, t}
+      end
+
+    using_finish(outcome, dispose_sync(res))
   end
 
   defp exec({:with, obj, body}, env, _) do
@@ -2565,16 +2703,16 @@ defmodule Browser.JS.Interp do
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to
-  defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
-  defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  def ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  def ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
 
-  defp ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
+  def ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
     do: name_fn(ev(e, env), name)
 
-  defp ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
+  def ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
     do: name_fn(ev(e, env), name)
 
-  defp ev_named(e, env, _), do: ev(e, env)
+  def ev_named(e, env, _), do: ev(e, env)
 
   defp name_fn({:obj, id} = f, name) do
     case deref(id) do

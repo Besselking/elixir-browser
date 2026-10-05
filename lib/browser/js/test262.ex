@@ -24,7 +24,7 @@ defmodule Browser.JS.Test262 do
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
     FinalizationRegistry set-methods dynamic-import tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
-    explicit-resource-management export-star-as-namespace-from-module
+    export-star-as-namespace-from-module
     arbitrary-module-namespace-names iterator-helpers iterator-chunking
     iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
     uint8array-base64 upsert regexp-match-indices regexp-v-flag

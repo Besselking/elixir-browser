@@ -12,7 +12,7 @@ defmodule Browser.JS.Builtins do
   alias Browser.JS.Num
 
   @timer_horizon 60_000.0
-  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError)
+  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
 
   @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
   def install do
@@ -211,16 +211,31 @@ defmodule Browser.JS.Builtins do
            err = if match?({:obj, _}, this), do: this, else: new_object([], proto)
            mark_error(err)
            # AggregateError(errors, message): the iterable of errors comes first
-           {errors, args} =
-             if t == "AggregateError", do: {arg(args, 0), Enum.drop(args, 1)}, else: {nil, args}
+           {errors, suppressed, args} =
+             case t do
+               "AggregateError" -> {arg(args, 0), nil, Enum.drop(args, 1)}
+               "SuppressedError" -> {nil, {arg(args, 0), arg(args, 1)}, Enum.drop(args, 2)}
+               _ -> {nil, nil, args}
+             end
 
-           msg = arg(args, 0)
-           if msg != :undefined, do: put_hidden(err, "message", to_str(msg))
+           msg = if arg(args, 0) == :undefined, do: :undefined, else: to_str(arg(args, 0))
+
+           if msg != :undefined, do: put_hidden(err, "message", msg)
+
+           with {:obj, _} = opts <- arg(args, 1),
+                true <- Interp.has_property?(opts, "cause") do
+             put_hidden(err, "cause", Interp.get(opts, "cause"))
+           end
+
+           with {error, sup} <- suppressed do
+             put_hidden(err, "error", error)
+             put_hidden(err, "suppressed", sup)
+           end
 
            put_hidden(
              err,
              "stack",
-             Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> to_str(msg)))
+             Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> msg))
            )
 
            if errors, do: put_hidden(err, "errors", new_array(Interp.iterate(errors)))
@@ -230,6 +245,9 @@ defmodule Browser.JS.Builtins do
       end
 
     error_ctor = ctors |> List.keyfind("Error", 0) |> elem(1)
+
+    # the other error constructors inherit from Error
+    for {t, {:obj, id}} <- ctors, t != "Error", do: store(id, %{deref(id) | proto: error_ctor})
 
     put_hidden(
       error_ctor,
@@ -247,9 +265,17 @@ defmodule Browser.JS.Builtins do
     )
 
     def_fn(error_proto, "toString", fn this, _ ->
-      name = to_str(Interp.get(this, "name"))
-      msg = to_str(Interp.get(this, "message"))
-      if msg == "", do: name, else: name <> ": " <> msg
+      unless match?({:obj, _}, this),
+        do: throw_error("TypeError", "Error.prototype.toString called on a non-object")
+
+      name = with :undefined <- Interp.get(this, "name"), do: "Error", else: (n -> to_str(n))
+      msg = with :undefined <- Interp.get(this, "message"), do: "", else: (m -> to_str(m))
+
+      cond do
+        name == "" -> msg
+        msg == "" -> name
+        true -> name <> ": " <> msg
+      end
     end)
   end
 
