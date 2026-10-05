@@ -354,7 +354,8 @@ defmodule Browser.JS.Interp do
 
   def to_primitive(v, _), do: v
 
-  defp ordinary_to_primitive(o, hint) do
+  @doc false
+  def ordinary_to_primitive(o, hint) do
     order = if hint == "string", do: ["toString", "valueOf"], else: ["valueOf", "toString"]
 
     Enum.find_value(order, fn name ->

@@ -5,6 +5,7 @@ defmodule Browser.JS.Date do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  alias Browser.JS.Interp
 
   @ms_day 86_400_000
   @max_time 8.64e15
@@ -26,18 +27,19 @@ defmodule Browser.JS.Date do
         end
       end)
 
+    set_arity(ctor, 7)
     put_const(ctor, "prototype", proto)
     put_hidden(proto, "constructor", ctor)
     declare(scope, "Date", ctor)
 
-    def_fn(ctor, "now", fn _, _ -> now() end)
-    def_fn(ctor, "parse", fn _, args -> parse(to_str(arg(args, 0))) end)
-    def_fn(ctor, "UTC", fn _, args -> from_parts(args) end)
+    def_fn(ctor, "now", 0, fn _, _ -> now() end)
+    def_fn(ctor, "parse", 1, fn _, args -> parse(to_str(arg(args, 0))) end)
+    def_fn(ctor, "UTC", 7, fn _, args -> from_parts(args) end)
 
-    def_fn(proto, "getTime", fn this, _ -> time!(this) end)
-    def_fn(proto, "valueOf", fn this, _ -> time!(this) end)
+    def_fn(proto, "getTime", 0, fn this, _ -> time!(this) end)
+    def_fn(proto, "valueOf", 0, fn this, _ -> time!(this) end)
 
-    def_fn(proto, "getTimezoneOffset", fn this, _ ->
+    def_fn(proto, "getTimezoneOffset", 0, fn this, _ ->
       if time!(this) == :nan, do: :nan, else: 0.0
     end)
 
@@ -53,7 +55,7 @@ defmodule Browser.JS.Date do
     ]
 
     for {name, i} <- fields, prefix <- ["get", "getUTC"] do
-      def_fn(proto, prefix <> name, fn this, _ ->
+      def_fn(proto, prefix <> name, 0, fn this, _ ->
         case time!(this) do
           :nan -> :nan
           t -> Enum.at(parts(t), i) * 1.0
@@ -61,55 +63,169 @@ defmodule Browser.JS.Date do
       end)
     end
 
-    for {name, i} <- Enum.take(fields, 7), prefix <- ["set", "setUTC"] do
-      def_fn(proto, prefix <> name, fn this, args ->
-        t = time!(this)
-        base = if t == :nan, do: [1970, 0, 1, 0, 0, 0, 0], else: Enum.take(parts(t), 7)
-        nums = Enum.map(args, &to_num/1)
-
-        new =
-          if nums == [] or :nan in nums or (t == :nan and i != 0) do
-            :nan
-          else
-            from_parts(List.replace_at(Enum.map(base, &(&1 * 1.0)), i, hd(nums)))
-          end
-
-        store_time(this, new)
-        new
-      end)
+    # setX(a, b, ...): the fields from `i` on, as many as the method takes
+    for {name, i, max} <- [
+          {"FullYear", 0, 3},
+          {"Month", 1, 2},
+          {"Date", 2, 1},
+          {"Hours", 3, 4},
+          {"Minutes", 4, 3},
+          {"Seconds", 5, 2},
+          {"Milliseconds", 6, 1}
+        ],
+        prefix <- ["set", "setUTC"] do
+      def_fn(proto, prefix <> name, max, fn this, args -> set_fields(this, args, i, max) end)
     end
 
-    def_fn(proto, "setTime", fn this, args ->
-      store_time(this, clip(to_num(arg(args, 0)))) |> time!()
+    def_fn(proto, "setTime", 1, fn this, args ->
+      _ = time!(this)
+      t = clip(to_num(arg(args, 0)))
+      store_time(this, t)
+      t
     end)
 
-    def_fn(proto, "toISOString", fn this, _ ->
+    def_fn(proto, "toISOString", 0, fn this, _ ->
       case time!(this) do
         :nan -> throw_error("RangeError", "Invalid time value")
         t -> iso(t)
       end
     end)
 
-    def_fn(proto, "toJSON", fn this, _ ->
-      case time!(this) do
-        :nan -> :null
-        t -> iso(t)
+    def_fn(proto, "toJSON", 1, fn this, _ ->
+      o = to_object(this)
+
+      if to_primitive(o, "number") in [:nan, :infinity, :neg_infinity] do
+        :null
+      else
+        iso_f = Interp.get(o, "toISOString")
+        unless function?(iso_f), do: throw_error("TypeError", "toISOString is not a function")
+        call(iso_f, o, [])
       end
     end)
 
-    for name <- ["toString", "toUTCString", "toDateString", "toTimeString", "toLocaleString"] do
-      def_fn(proto, name, fn this, _ -> to_string_time(time!(this)) end)
+    for {name, fun} <- [
+          {"toString", &to_string_time/1},
+          {"toDateString", &to_date_string/1},
+          {"toTimeString", &to_time_string/1},
+          {"toLocaleString", &to_string_time/1},
+          {"toLocaleDateString", &to_date_string/1},
+          {"toLocaleTimeString", &to_time_string/1}
+        ] do
+      def_fn(proto, name, 0, fn this, _ -> fun.(time!(this)) end)
+    end
+
+    utc = native("toUTCString", fn this, _ -> to_utc_string(time!(this)) end)
+    put_hidden(proto, "toUTCString", utc)
+    put_hidden(proto, "toGMTString", utc)
+
+    def_fn(proto, "getYear", 0, fn this, _ ->
+      case time!(this) do
+        :nan -> :nan
+        t -> (hd(parts(t)) - 1900) * 1.0
+      end
+    end)
+
+    def_fn(proto, "setYear", 1, fn this, args ->
+      t = time!(this)
+      y = to_num(arg(args, 0))
+
+      if y in [:nan, :infinity, :neg_infinity] do
+        store_time(this, :nan)
+        :nan
+      else
+        yi = trunc(y)
+        yi = if yi in 0..99, do: 1900 + yi, else: yi
+        base = if t == :nan, do: [1970, 0, 1, 0, 0, 0, 0], else: Enum.take(parts(t), 7)
+        new = compose(List.replace_at(base, 0, yi))
+        store_time(this, new)
+        new
+      end
+    end)
+
+    # Date.prototype[@@toPrimitive](hint)
+    to_prim =
+      native("[Symbol.toPrimitive]", fn this, args ->
+        unless match?({:obj, _}, this),
+          do: throw_error("TypeError", "Date.prototype[Symbol.toPrimitive] called on non-object")
+
+        case arg(args, 0) do
+          h when h in ["string", "default"] -> ordinary_to_primitive(this, "string")
+          "number" -> ordinary_to_primitive(this, "number")
+          _ -> throw_error("TypeError", "Invalid hint")
+        end
+      end)
+
+    set_arity(to_prim, 1)
+    {:obj, pid} = proto
+    po = deref(pid)
+    key = {:symbol, :toPrimitive, "Symbol.toPrimitive"}
+    attrs = Map.put(Map.get(po, :attrs, %{}), key, %{w: false, c: true, e: false})
+    store(pid, po |> Map.put(:props, Map.put(po.props, key, to_prim)) |> Map.put(:attrs, attrs))
+  end
+
+  defp to_object({:obj, _} = o), do: o
+
+  defp to_object(v) when v in [:undefined, :null],
+    do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+  defp to_object(v), do: Browser.JS.Builtins.box(v)
+
+  # a setter: read the time value, coerce the arguments in order, then rebuild the date
+  defp set_fields(this, args, i, max) do
+    t = time!(this)
+
+    nums =
+      args
+      |> Enum.take(max)
+      |> then(&if &1 == [], do: [:undefined], else: &1)
+      |> Enum.map(&to_num/1)
+
+    cond do
+      t == :nan and i != 0 ->
+        :nan
+
+      Enum.any?(nums, &(not is_number(&1))) ->
+        store_time(this, :nan)
+        :nan
+
+      true ->
+        base = if t == :nan, do: [1970, 0, 1, 0, 0, 0, 0], else: Enum.take(parts(t), 7)
+
+        fields =
+          nums
+          |> Enum.map(&trunc/1)
+          |> Enum.with_index(i)
+          |> Enum.reduce(base, fn {v, idx}, acc -> List.replace_at(acc, idx, v) end)
+
+        new = compose(fields)
+        store_time(this, new)
+        new
     end
   end
 
-  defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+  defp def_fn(obj, name, arity, fun) do
+    f = native(name, fun)
+    set_arity(f, arity)
+    put_hidden(obj, name, f)
+  end
 
+  # `new Date()` (or a subclass): a fresh object whose prototype chain has Date.prototype
   defp date_target?({:obj, id}) do
     o = deref(id)
-    not Map.has_key?(o, :date) and o.proto == proto(:date)
+    not Map.has_key?(o, :date) and o.class == :object and inherits_date?(o.proto, 0)
   end
 
   defp date_target?(_), do: false
+
+  defp inherits_date?(p, depth) when depth < 100 do
+    cond do
+      p == proto(:date) -> true
+      match?({:obj, _}, p) -> inherits_date?(deref(elem(p, 1)).proto, depth + 1)
+      true -> false
+    end
+  end
+
+  defp inherits_date?(_, _), do: false
 
   defp store_time({:obj, id} = o, t) do
     store(id, Map.put(deref(id), :date, t))
@@ -165,11 +281,16 @@ defmodule Browser.JS.Date do
     if args == [] or Enum.any?(nums, &(not is_number(&1))) do
       :nan
     else
-      [y, m, d, h, mi, s, ms] = Enum.map(nums, &trunc/1)
+      [y | rest] = Enum.map(nums, &trunc/1)
       y = if y in 0..99, do: 1900 + y, else: y
-      days = days_from_civil(y + Integer.floor_div(m, 12), Integer.mod(m, 12) + 1, 1) + d - 1
-      clip((days * @ms_day + h * 3_600_000 + mi * 60_000 + s * 1000 + ms) * 1.0)
+      compose([y | rest])
     end
+  end
+
+  # [year, month0, day, h, m, s, ms] (integers, any size) -> time value
+  defp compose([y, m, d, h, mi, s, ms]) do
+    days = days_from_civil(y + Integer.floor_div(m, 12), Integer.mod(m, 12) + 1, 1) + d - 1
+    clip((days * @ms_day + h * 3_600_000 + mi * 60_000 + s * 1000 + ms) * 1.0)
   end
 
   # [year, month0, day, hours, minutes, seconds, ms, weekday]
@@ -230,16 +351,82 @@ defmodule Browser.JS.Date do
   defp pad(n, w), do: n |> Integer.to_string() |> String.pad_leading(w, "0")
 
   defp to_string_time(:nan), do: "Invalid Date"
+  defp to_string_time(t), do: to_date_string(t) <> " " <> to_time_string(t)
 
-  defp to_string_time(t) do
-    [y, m, d, h, mi, s, _, wd] = parts(t)
+  defp to_date_string(:nan), do: "Invalid Date"
 
-    "#{Enum.at(@days, wd)} #{Enum.at(@months, m)} #{pad(d, 2)} #{pad(y, 4)} " <>
-      "#{pad(h, 2)}:#{pad(mi, 2)}:#{pad(s, 2)} GMT+0000 (UTC)"
+  defp to_date_string(t) do
+    [y, m, d, _, _, _, _, wd] = parts(t)
+    "#{Enum.at(@days, wd)} #{Enum.at(@months, m)} #{pad(d, 2)} #{year_string(y)}"
   end
 
-  # ISO format (and the toString format is not read back)
+  defp to_time_string(:nan), do: "Invalid Date"
+
+  defp to_time_string(t) do
+    [_, _, _, h, mi, s, _, _] = parts(t)
+    "#{pad(h, 2)}:#{pad(mi, 2)}:#{pad(s, 2)} GMT+0000 (UTC)"
+  end
+
+  defp to_utc_string(:nan), do: "Invalid Date"
+
+  defp to_utc_string(t) do
+    [y, m, d, h, mi, s, _, wd] = parts(t)
+
+    "#{Enum.at(@days, wd)}, #{pad(d, 2)} #{Enum.at(@months, m)} #{year_string(y)} " <>
+      "#{pad(h, 2)}:#{pad(mi, 2)}:#{pad(s, 2)} GMT"
+  end
+
+  defp year_string(y) when y < 0, do: "-" <> pad(-y, 4)
+  defp year_string(y), do: pad(y, 4)
+
+  # the ISO format, and the toString and toUTCString formats
   defp parse(s) do
+    case parse_iso(s) do
+      :nan -> parse_legacy(s)
+      t -> t
+    end
+  end
+
+  defp parse_legacy(s) do
+    re =
+      ~r/\A(?:[A-Z][a-z]{2},? )?(?:([A-Z][a-z]{2}) (\d\d)|(\d\d) ([A-Z][a-z]{2})) (-?\d{4,6}) (\d\d):(\d\d):(\d\d) GMT(?:([+-])(\d\d)(\d\d))?(?: \(.*\))?\z/
+
+    case Regex.run(re, s) do
+      nil ->
+        :nan
+
+      [_, m1, d1, d2, m2, y, h, mi, sec | tz] ->
+        mon = if m1 == "", do: m2, else: m1
+        day = if d1 == "", do: d2, else: d1
+
+        case Enum.find_index(@months, &(&1 == mon)) do
+          nil ->
+            :nan
+
+          mi0 ->
+            offset =
+              case tz do
+                [sign, hh, mm] ->
+                  if(sign == "-", do: -1, else: 1) *
+                    (String.to_integer(hh) * 60 + String.to_integer(mm)) * 60_000
+
+                _ ->
+                  0
+              end
+
+            t =
+              days_from_civil(String.to_integer(y), mi0 + 1, String.to_integer(day)) * @ms_day +
+                String.to_integer(h) * 3_600_000 + String.to_integer(mi) * 60_000 +
+                String.to_integer(sec) * 1000 - offset
+
+            clip(t * 1.0)
+        end
+    end
+  end
+
+  defp parse_iso("-000000" <> _), do: :nan
+
+  defp parse_iso(s) do
     re =
       ~r/\A([+-]\d{6}|\d{4})(?:-(\d\d)(?:-(\d\d))?)?(?:T(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3})\d*)?)?(Z|[+-]\d\d:\d\d)?)?\z/
 
