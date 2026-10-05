@@ -1261,6 +1261,69 @@ defmodule Browser.JSTest do
     end
   end
 
+  describe "explicit resource management" do
+    test "using disposes in reverse order, also when the block throws or returns" do
+      src = """
+      var log = [];
+      function res(n) { return { [Symbol.dispose]() { log.push(n) } } }
+      function f() { using a = res('a'); using b = res('b'); return 'r' }
+      var r = f();
+      try { { using c = res('c'); throw new Error('boom') } } catch (e) { log.push(e.message) }
+      for (using d of [res('d1'), res('d2')]) log.push('body');
+      using_null: { using n = null; }
+      r + ':' + log.join()
+      """
+
+      assert js(src) == "r:b,a,c,boom,body,d1,body,d2"
+    end
+
+    test "errors during disposal become a SuppressedError" do
+      src = """
+      var bad = n => ({ [Symbol.dispose]() { throw n } });
+      var r;
+      try { { using a = bad(1); using b = bad(2); } } catch (e) {
+        r = [e instanceof SuppressedError, e.error, e.suppressed].join();
+      }
+      r
+      """
+
+      assert js(src) == "true,1,2"
+    end
+
+    test "await using waits for each disposer and the stacks work" do
+      src = """
+      var log = [];
+      async function main() {
+        {
+          await using a = { async [Symbol.asyncDispose]() { await null; log.push('a') } };
+          await using b = { [Symbol.dispose]() { log.push('b') } };
+          log.push('body');
+        }
+        var s = new AsyncDisposableStack();
+        s.defer(() => log.push('d1'));
+        s.adopt(5, v => log.push('adopt' + v));
+        await s.disposeAsync();
+        var ds = new DisposableStack();
+        ds.use({ [Symbol.dispose]() { log.push('u') } });
+        ds.dispose();
+        log.push(ds.disposed);
+      }
+      main().then(() => console.log(log.join()));
+      """
+
+      assert console(src) == [log: "body,b,a,adopt5,d1,u,true"]
+    end
+
+    test "using needs an initializer and an object" do
+      assert {:syntax, _} = error("{ using x; }")
+
+      assert {:uncaught, "TypeError: using declaration needs an object, null or undefined"} =
+               error("{ using x = 1 }")
+
+      assert {:uncaught, "TypeError: object is not disposable"} = error("{ using x = {} }")
+    end
+  end
+
   describe "scope lifetime" do
     test "closures keep the scopes of calls, blocks and loop iterations alive" do
       assert js(

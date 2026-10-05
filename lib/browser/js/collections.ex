@@ -16,7 +16,7 @@ defmodule Browser.JS.Collections do
 
   @iterator {:symbol, :iterator, "Symbol.iterator"}
   @well_known ~w(iterator asyncIterator hasInstance toPrimitive toStringTag species isConcatSpreadable
-                 match matchAll replace search split unscopables)a
+                 match matchAll replace search split unscopables dispose asyncDispose)a
 
   def iterator_symbol, do: @iterator
 
@@ -36,6 +36,7 @@ defmodule Browser.JS.Collections do
     install_reflect(scope)
     install_host(scope)
     Browser.JS.TypedArrays.install(scope)
+    Browser.JS.Disposables.install(scope)
     :ok
   end
 
@@ -55,9 +56,12 @@ defmodule Browser.JS.Collections do
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Symbol", ctor)
+    put_tag(p, "Symbol")
+    {:obj, ctor_id} = ctor
+    store(ctor_id, Map.put(deref(ctor_id), :no_new, true))
 
     for name <- @well_known,
-        do: put_hidden(ctor, to_string(name), {:symbol, name, "Symbol." <> to_string(name)})
+        do: put_const(ctor, to_string(name), {:symbol, name, "Symbol." <> to_string(name)})
 
     def_fn(ctor, "for", fn _, args ->
       key = to_str(arg(args, 0))
@@ -96,6 +100,15 @@ defmodule Browser.JS.Collections do
     )
 
     put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
+
+    # Symbol.prototype[@@toPrimitive]: not writable, but configurable
+    {:obj, tp_id} = to_prim = native("[Symbol.toPrimitive]", fn this, _ -> this_symbol(this) end)
+    store(tp_id, Map.put(deref(tp_id), :arity, 1.0))
+    key = {:symbol, :toPrimitive, "Symbol.toPrimitive"}
+    {:obj, pid} = p
+    po = deref(pid)
+    attrs = Map.put(Map.get(po, :attrs, %{}), key, %{w: false, c: true, e: false})
+    store(pid, po |> Map.put(:props, Map.put(po.props, key, to_prim)) |> Map.put(:attrs, attrs))
     :ok
   end
 
