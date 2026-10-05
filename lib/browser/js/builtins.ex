@@ -136,9 +136,13 @@ defmodule Browser.JS.Builtins do
     if nullish?(o), do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
     case o do
-      {:obj, _} ->
-        key in own_keys(o) or (array?(o) and key == "length") or
-          Browser.JS.Props.descriptor(o, key) != :undefined
+      {:obj, id} ->
+        # (a module namespace answers per name: reading an uninitialized export throws)
+        if match?(%{host: {Browser.JS.Modules, _}}, Interp.deref(id)),
+          do: Browser.JS.Props.descriptor(o, key) != :undefined,
+          else:
+            key in own_keys(o) or (array?(o) and key == "length") or
+              Browser.JS.Props.descriptor(o, key) != :undefined
 
       s when is_binary(s) ->
         key == "length" or key in own_keys(s)

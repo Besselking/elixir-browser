@@ -180,6 +180,9 @@ defmodule Browser.JS.Interp do
     s = Map.fetch!(heap, scope)
 
     case s.vars do
+      %{^name => {:alias, target, var}} ->
+        lookup_var(target, var, heap)
+
       %{^name => v} ->
         {:ok, v}
 
@@ -213,6 +216,9 @@ defmodule Browser.JS.Interp do
       Map.has_key?(s.vars, name) ->
         if MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
+
+        if :erlang.map_get(name, s.vars) == :tdz,
+          do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
         :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
 
@@ -895,7 +901,7 @@ defmodule Browser.JS.Interp do
         :ok
 
       {:ok, _} ->
-        if writable?(o, key) and not Map.has_key?(o, :ns),
+        if writable?(o, key),
           do: store(id, %{o | props: Map.put(o.props, key, v)}),
           else: :ok
 
@@ -1590,21 +1596,26 @@ defmodule Browser.JS.Interp do
     bind_params_list(ps, rest, scope)
   end
 
-  defp make_fn({:gen, fun}, env) do
-    {:obj, id} = f = make_fn(fun, env)
+  defp make_fn(node, env), do: make_fn(node, env, true)
+
+  # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
+  defp make_fn({:gen, fun}, env, named?) do
+    {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :generator, true))
     f
   end
 
-  defp make_fn({:async, fun}, env) do
-    {:obj, id} = f = make_fn(fun, env)
+  defp make_fn({:async, fun}, env, named?) do
+    {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :async, true))
     f
   end
 
-  defp make_fn({:fn, name, params, body, mode}, env) do
+  defp make_fn({:fn, name, params, body, mode}, env, named?) do
+    named? = named? and is_binary(name) and mode == false
+
     env =
-      if is_binary(name) and mode == false do
+      if named? do
         # a function expression can call itself by name
         s = new_scope(env)
         s
@@ -1624,7 +1635,7 @@ defmodule Browser.JS.Interp do
          proto: proto(:function)
        })}
 
-    if is_binary(name) and mode == false and env != nil, do: declare(env, name, fun)
+    if named? and env != nil, do: declare(env, name, fun)
     fun
   end
 
@@ -1678,7 +1689,7 @@ defmodule Browser.JS.Interp do
       store(scope, %{s | vars: vars})
     end
 
-    for {name, fun} <- funs, do: declare(scope, name, make_fn(fun, scope))
+    for {name, fun} <- funs, do: declare(scope, name, make_fn(fun, scope, false))
     :ok
   end
 
@@ -1760,7 +1771,7 @@ defmodule Browser.JS.Interp do
   def hoist_functions(stmts, scope) do
     for stmt <- stmts do
       case unexport(stmt) do
-        {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope))
+        {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope, false))
         {:using, _, _, _, rest} -> hoist_functions(rest, scope)
         _ -> :ok
       end
@@ -1787,98 +1798,29 @@ defmodule Browser.JS.Interp do
     Process.get(:js_last, :undefined)
   end
 
-  @doc """
-  Runs a module in a scope of its own and returns its namespace object (the exports).
-  `resolve` maps an import specifier to the namespace object of that module.
-  """
-  def run_module({:program, stmts}, resolve, base \\ nil) do
-    scope = new_scope(global())
-    if base, do: declare(scope, :module_url, base)
-
-    for {:import, spec, bindings} <- stmts do
-      ns = resolve.(spec)
-
-      for b <- bindings do
-        case b do
-          {:default, local} -> declare(scope, local, get(ns, "default"))
-          {:ns, local} -> declare(scope, local, ns)
-          {:named, imported, local} -> declare(scope, local, get(ns, imported))
-        end
-      end
-    end
-
+  @doc false
+  # declares what a module body brings into its scope: `var` names, `let`/`const`/class names
+  # (uninitialized until their declaration runs) and function declarations
+  def module_init(stmts, scope) do
     hoist_vars(stmts, scope)
+
+    for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(scope, name, :tdz)
+    declare(scope, :default_export, :tdz)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
-    Browser.JS.Promise.run_microtasks()
-
-    pairs =
-      Enum.flat_map(stmts, fn
-        {:export, {:var, _, decls}} ->
-          decls
-          |> Enum.reduce([], fn {pat, _}, a -> pattern_names(pat, a) end)
-          |> Enum.reverse()
-          |> Enum.map(&{&1, scope_value(scope, &1)})
-
-        {:export, {:fundecl, name, _}} ->
-          [{name, scope_value(scope, name)}]
-
-        {:export_default, {:fundecl, name, _}} ->
-          [{"default", scope_value(scope, name)}]
-
-        {:export_default, {:classdecl, name, _}} ->
-          [{"default", scope_value(scope, name)}]
-
-        {:export_default, {:expr, _}} ->
-          [{"default", scope_value(scope, :default_export)}]
-
-        {:export_names, names} ->
-          for {local, exported} <- names, do: {exported, scope_value(scope, local)}
-
-        {:export_from, spec, :all} ->
-          ns = resolve.(spec)
-          for k <- own_keys(ns), k != "default", do: {k, get(ns, k)}
-
-        {:export_from, spec, names} ->
-          ns = resolve.(spec)
-
-          for name <- names do
-            case name do
-              {:star, exported} -> {exported, ns}
-              {imported, exported} -> {exported, get(ns, imported)}
-            end
-          end
-
-        _ ->
-          []
-      end)
-
-    # a module namespace lists its names in code unit order
-    pairs |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort_by(&elem(&1, 0)) |> make_namespace()
   end
 
-  # a module namespace: no prototype, not extensible, `@@toStringTag` "Module", and exports
-  # that are enumerable and writable-looking but can not be set, deleted or redefined
-  defp make_namespace(pairs) do
-    {:obj, id} = ns = new_object(pairs, :null)
-    o = deref(id)
-    attrs = Map.new(pairs, fn {k, _} -> {k, %{w: true, c: false}} end)
-    tag = {:symbol, :toStringTag, "Symbol.toStringTag"}
-    attrs = Map.put(attrs, tag, %{w: false, c: false, e: false})
+  defp lexical_names({:var, kind, decls}) when kind in [:let, :const],
+    do: Enum.reduce(decls, [], fn {pat, _}, a -> pattern_names(pat, a) end)
 
-    store(
-      id,
-      o
-      |> Map.put(:props, Map.put(o.props, tag, "Module"))
-      |> Map.put(:attrs, attrs)
-      |> Map.put(:ext, false)
-      |> Map.put(:ns, true)
-    )
+  defp lexical_names({:export_default, {:classdecl, name, _}}), do: [name]
+  defp lexical_names(_), do: []
 
-    ns
-  end
+  @doc false
+  def module_exec(stmts, scope), do: exec_list(stmts, scope)
 
-  defp scope_value(scope, name) do
+  @doc false
+  # the current value of a module's variable (`:tdz` while uninitialized)
+  def module_binding(scope, name) do
     case lookup_var(scope, name) do
       {:ok, v} -> v
       :error -> :undefined
@@ -2366,22 +2308,27 @@ defmodule Browser.JS.Interp do
     arg = ev(e, env)
     p = Browser.JS.Promise.new()
 
+    # the specifier is converted now; the module is loaded in a later job
     try do
       spec = to_str(arg)
 
-      case pget(:js_import) do
-        nil ->
-          Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
+      base =
+        case lookup_var(env, :module_url) do
+          {:ok, b} -> b
+          :error -> nil
+        end
 
-        hook ->
-          base =
-            case lookup_var(env, :module_url) do
-              {:ok, b} -> b
-              :error -> nil
-            end
+      hook = pget(:js_import)
 
-          Browser.JS.Promise.resolve(p, hook.(spec, base))
-      end
+      Browser.JS.Promise.enqueue(fn ->
+        try do
+          if hook == nil,
+            do: throw_error("TypeError", "Dynamic import is not available"),
+            else: Browser.JS.Promise.resolve(p, hook.(spec, base))
+        catch
+          {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+        end
+      end)
     catch
       {:js_error, err} -> Browser.JS.Promise.reject(p, err)
     end
@@ -2510,6 +2457,9 @@ defmodule Browser.JS.Interp do
 
   def ev({:unary, "typeof", {:id, name}}, env) do
     case lookup_var(env, name) do
+      {:ok, :tdz} ->
+        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
       {:ok, v} ->
         typeof(v)
 

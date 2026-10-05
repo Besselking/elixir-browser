@@ -15,7 +15,7 @@ defmodule Browser.JS.Test262 do
   (`unsupported_features/0`) or something the runner does not provide (modules, other realms).
   """
 
-  alias Browser.JS.{Builtins, Interp, Parser}
+  alias Browser.JS.{Builtins, Interp, Modules, Parser}
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
@@ -252,10 +252,12 @@ defmodule Browser.JS.Test262 do
     Interp.init(max_steps)
     scope = Builtins.install()
     install_host(scope)
-    Process.put(:t262_modules, %{})
+    Modules.reset()
 
     # `import()` (and a module's imports) load files next to the test
-    if path, do: Process.put(:js_import, fn spec, from -> load_module(spec, from || path) end)
+    if path,
+      do:
+        Process.put(:js_import, fn spec, from -> Modules.import(spec, from || path, loader()) end)
 
     try do
       case Parser.parse(source, module: module?) do
@@ -267,7 +269,7 @@ defmodule Browser.JS.Test262 do
           if regexp_utils?, do: install_regexp_utils(scope)
 
           if module?,
-            do: Interp.run_module(program, fn spec -> load_module(spec, path) end, path),
+            do: Modules.run(path, path, program, loader()),
             else: Interp.run_program(program)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
@@ -283,36 +285,15 @@ defmodule Browser.JS.Test262 do
     end
   end
 
-  # a module file next to `from`, evaluated once; a module that imports itself (through others)
-  # sees an empty namespace meanwhile
-  defp load_module(spec, from) do
-    path = Path.expand(spec, Path.dirname(from))
-
-    case Process.get(:t262_modules) do
-      %{^path => ns} ->
-        ns
-
-      modules ->
-        case File.read(path) do
-          {:ok, src} ->
-            Process.put(:t262_modules, Map.put(modules, path, Interp.new_object()))
-
-            ns =
-              case Parser.parse(src, module: true) do
-                {:ok, program} ->
-                  Interp.run_module(program, fn s -> load_module(s, path) end, path)
-
-                {:error, msg} ->
-                  Interp.throw_error("SyntaxError", msg)
-              end
-
-            Process.put(:t262_modules, Map.put(Process.get(:t262_modules), path, ns))
-            ns
-
-          {:error, _} ->
-            Interp.throw_error("TypeError", "Cannot find module #{spec}")
-        end
-    end
+  # module files are found next to the module that imports them
+  defp loader do
+    {fn spec, base -> {:ok, Path.expand(spec, Path.dirname(base))} end,
+     fn path ->
+       case File.read(path) do
+         {:ok, src} -> {:ok, src, path}
+         {:error, _} -> {:error, "cannot find #{path}"}
+       end
+     end}
   end
 
   # `buildString` and `testPropertyEscapes` of harness/regExpUtils.js, natively: the originals
