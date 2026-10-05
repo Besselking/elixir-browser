@@ -3245,6 +3245,19 @@ defmodule Browser.LayoutTest do
       assert rect.h == 570
     end
 
+    test "auto vertical margins centre an absolute box between top and bottom" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:absolute;top:10px;bottom:10px;height:100px;margin:auto 0;width:50px;background:#ccc">x</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2, 600, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert rect.h == 100
+      assert rect.y == 250
+    end
+
     test "an absolute box with a percentage height takes it from the window" do
       page =
         Page.build(

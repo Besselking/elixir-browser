@@ -644,6 +644,9 @@ defmodule Browser.Layout do
         mextra: 0,
         fixed: c["position"] == "fixed",
         autoh: not replaced? and c["height"] in [nil, :auto] and c["max-height"] != :fit,
+        mta: c["margin-top"] == :auto,
+        mba: c["margin-bottom"] == :auto,
+        mb: box.mb,
         hpct:
           case c["height"] do
             {:pct, f} -> f
@@ -1426,6 +1429,7 @@ defmodule Browser.Layout do
 
   # wx draws at integer pixels
   # a percentage margin or padding is of the width of the containing block
+  defp px(:auto), do: 0
   defp px({:pct, f}), do: round(f * containing_width())
   defp px(n), do: round(n)
 
@@ -2750,9 +2754,19 @@ defmodule Browser.Layout do
 
     y =
       cond do
-        top -> origin.y + top
-        bottom -> origin.y + origin.h - bottom - height
-        true -> static_y
+        top && bottom && !spec.autoh && (spec.mta || spec.mba) ->
+          # auto vertical margins share what `top`, `bottom` and the height leave over
+          free = max(origin.h - top - bottom - height - if(spec.mba, do: 0, else: spec.mb), 0)
+          origin.y + top + if(spec.mta, do: if(spec.mba, do: div(free, 2), else: free), else: 0)
+
+        top ->
+          origin.y + top
+
+        bottom ->
+          origin.y + origin.h - bottom - height
+
+        true ->
+          static_y
       end
 
     {tx, ty} = resolve_translate(spec.translate, width, height)
