@@ -199,10 +199,7 @@ defmodule Browser.JS.Lexer do
               throw({:syntax, "invalid BigInt literal"})
 
             _ ->
-              {f, _} =
-                Float.parse(if Regex.match?(~r/\A\d+\z/, lit_f), do: lit_f <> ".0", else: lit_f)
-
-              {f, rest}
+              {Browser.JS.Num.parse(lit_f), rest}
           end
       end
 

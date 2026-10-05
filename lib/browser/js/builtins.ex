@@ -55,7 +55,7 @@ defmodule Browser.JS.Builtins do
     install_primitives(scope)
     Browser.JS.BigInt.install(scope)
     install_math(scope)
-    install_json(scope)
+    Browser.JS.Json.install(scope)
     install_console(scope)
     install_timers(scope)
     install_misc(scope)
@@ -1269,14 +1269,18 @@ defmodule Browser.JS.Builtins do
       if wrapper_target?(this, :boolean), do: wrap(this, b), else: b
     end)
 
-    def_fn(num, "isInteger", fn _, [v | _] -> is_number(v) and v == trunc(v) end)
+    def_fn(num, "isInteger", fn _, args ->
+      v = arg(args, 0)
+      is_number(v) and v == trunc(v)
+    end)
 
-    def_fn(num, "isSafeInteger", fn _, [v | _] ->
+    def_fn(num, "isSafeInteger", fn _, args ->
+      v = arg(args, 0)
       is_number(v) and v == trunc(v) and abs(v) <= 9_007_199_254_740_991
     end)
 
-    def_fn(num, "isFinite", fn _, [v | _] -> is_number(v) end)
-    def_fn(num, "isNaN", fn _, [v | _] -> v == :nan end)
+    def_fn(num, "isFinite", fn _, args -> is_number(arg(args, 0)) end)
+    def_fn(num, "isNaN", fn _, args -> arg(args, 0) == :nan end)
 
     for {k, v} <- [
           {"MAX_SAFE_INTEGER", 9_007_199_254_740_991.0},
@@ -1288,7 +1292,7 @@ defmodule Browser.JS.Builtins do
           {"NEGATIVE_INFINITY", :neg_infinity},
           {"NaN", :nan}
         ],
-        do: put_hidden(num, k, v)
+        do: put_const(num, k, v)
 
     parse_float = native("parseFloat", fn _, args -> Num.parse_prefix(to_str(arg(args, 0))) end)
 
@@ -1377,7 +1381,7 @@ defmodule Browser.JS.Builtins do
   defp uri_continuation(_, _, _), do: throw_error("URIError", "URI malformed")
 
   defp parse_int(s, radix_arg) do
-    s = String.trim(s)
+    s = Interp.js_trim_start(s)
 
     {sign, s} =
       case s do
@@ -1386,7 +1390,7 @@ defmodule Browser.JS.Builtins do
         _ -> {1, s}
       end
 
-    radix = if radix_arg == :undefined, do: 0, else: to_int(radix_arg)
+    radix = Num.int32(to_num(radix_arg))
 
     {radix, s} =
       case {radix, s} do
@@ -1419,33 +1423,66 @@ defmodule Browser.JS.Builtins do
     v < radix
   end
 
+  # ToIntegerOrInfinity, with the infinities as numbers far outside any range
+  defp int_or_inf(v) do
+    case to_num(v) do
+      :nan -> 0
+      :infinity -> 1_000_000
+      :neg_infinity -> -1_000_000
+      n -> n |> trunc() |> max(-1_000_000) |> min(1_000_000)
+    end
+  end
+
+  defp def_fn1(obj, name, fun) do
+    f = native(name, fun)
+    set_arity(f, 1)
+    put_hidden(obj, name, f)
+  end
+
   defp number_methods(p) do
     def_fn(p, "toLocaleString", fn this, _ ->
       Num.to_string(this_prim(this, :number, "Number.prototype.toLocaleString"))
     end)
 
-    def_fn(p, "toString", fn this, args ->
+    def_fn1(p, "toString", fn this, args ->
       this = this_prim(this, :number, "Number.prototype.toString")
 
-      case arg(args, 0) do
-        :undefined ->
-          Num.to_string(this)
+      radix =
+        case arg(args, 0) do
+          :undefined -> 10
+          r -> int_or_inf(r)
+        end
 
-        r when is_number(this) and this == trunc(this) ->
-          trunc(this) |> Integer.to_string(to_int(r)) |> String.downcase()
+      if radix < 2 or radix > 36,
+        do: throw_error("RangeError", "toString() radix must be between 2 and 36")
 
-        _ ->
-          Num.to_string(this)
-      end
+      if radix == 10, do: Num.to_string(this), else: Browser.JS.NumberFormat.to_radix(this, radix)
     end)
 
-    def_fn(p, "toFixed", fn this, args ->
+    def_fn1(p, "toFixed", fn this, args ->
       this = this_prim(this, :number, "Number.prototype.toFixed")
-      d = to_int(arg(args, 0))
+      Browser.JS.NumberFormat.to_fixed(this, int_or_inf(arg(args, 0)))
+    end)
 
-      if is_number(this) and abs(this) < 1.0e21,
-        do: :erlang.float_to_binary(this * 1.0, decimals: d),
-        else: Num.to_string(this)
+    def_fn1(p, "toExponential", fn this, args ->
+      this = this_prim(this, :number, "Number.prototype.toExponential")
+
+      f =
+        case arg(args, 0) do
+          :undefined -> :undefined
+          v -> int_or_inf(v)
+        end
+
+      Browser.JS.NumberFormat.to_exponential(this, f)
+    end)
+
+    def_fn1(p, "toPrecision", fn this, args ->
+      this = this_prim(this, :number, "Number.prototype.toPrecision")
+
+      case arg(args, 0) do
+        :undefined -> Num.to_string(this)
+        v -> Browser.JS.NumberFormat.to_precision(this, int_or_inf(v))
+      end
     end)
 
     def_fn(p, "valueOf", fn this, _ -> this_prim(this, :number, "Number.prototype.valueOf") end)
@@ -2089,102 +2126,6 @@ defmodule Browser.JS.Builtins do
         true -> acc
       end
     end)
-  end
-
-  # ── JSON ───────────────────────────────────────────────────
-
-  defp install_json(scope) do
-    json = new_object()
-    declare(scope, "JSON", json)
-
-    def_fn(json, "stringify", fn _, args ->
-      indent =
-        case arg(args, 2) do
-          n when is_number(n) -> String.duplicate(" ", n |> trunc() |> max(0) |> min(10))
-          s when is_binary(s) -> String.slice(s, 0, 10)
-          _ -> ""
-        end
-
-      case stringify(arg(args, 0), indent, "", []) do
-        :skip -> :undefined
-        s -> s
-      end
-    end)
-
-    def_fn(json, "parse", fn _, args ->
-      try do
-        {value, _, _} = :json.decode(to_str(arg(args, 0)), :ok, json_decoders())
-        value
-      catch
-        :error, _ -> throw_error("SyntaxError", "Unexpected token in JSON")
-      end
-    end)
-  end
-
-  defp json_decoders do
-    %{
-      array_start: fn _ -> [] end,
-      array_push: fn v, acc -> [v | acc] end,
-      array_finish: fn acc, old -> {new_array(Enum.reverse(acc)), old} end,
-      object_start: fn _ -> [] end,
-      object_push: fn k, v, acc -> [{k, v} | acc] end,
-      object_finish: fn acc, old ->
-        {new_object(acc |> Enum.reverse() |> Enum.uniq_by(&elem(&1, 0))), old}
-      end,
-      float: fn s -> String.to_float(s) end,
-      integer: fn s -> if s == "-0", do: -0.0, else: String.to_integer(s) * 1.0 end,
-      null: :null
-    }
-  end
-
-  defp stringify(v, indent, cur, seen) do
-    cond do
-      v == :null -> "null"
-      v in [true, false] -> to_str(v)
-      is_binary(v) -> :json.encode(v) |> IO.iodata_to_binary()
-      is_number(v) -> Num.to_string(v)
-      v in [:nan, :infinity, :neg_infinity] -> "null"
-      v == :undefined -> :skip
-      big?(v) -> throw_error("TypeError", "Do not know how to serialize a BigInt")
-      function?(v) -> :skip
-      v in seen -> throw_error("TypeError", "Converting circular structure to JSON")
-      array?(v) -> stringify_array(v, indent, cur, [v | seen])
-      true -> stringify_object(v, indent, cur, [v | seen])
-    end
-  end
-
-  defp stringify_array(v, indent, cur, seen) do
-    items =
-      for x <- array_list(v),
-          do:
-            (case stringify(x, indent, cur <> indent, seen) do
-               :skip -> "null"
-               s -> s
-             end)
-
-    wrap("[", "]", items, indent, cur)
-  end
-
-  defp stringify_object(v, indent, cur, seen) do
-    sep = if indent == "", do: ":", else: ": "
-
-    items =
-      Enum.flat_map(own_keys(v), fn k ->
-        case stringify(Interp.get(v, k), indent, cur <> indent, seen) do
-          :skip -> []
-          s -> [IO.iodata_to_binary(:json.encode(k)) <> sep <> s]
-        end
-      end)
-
-    wrap("{", "}", items, indent, cur)
-  end
-
-  defp wrap(open, close, [], _, _), do: open <> close
-  defp wrap(open, close, items, "", _), do: open <> Enum.join(items, ",") <> close
-
-  defp wrap(open, close, items, indent, cur) do
-    inner = cur <> indent
-    open <> "\n" <> inner <> Enum.join(items, ",\n" <> inner) <> "\n" <> cur <> close
   end
 
   # ── console ────────────────────────────────────────────────
