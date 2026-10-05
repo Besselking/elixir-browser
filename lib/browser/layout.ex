@@ -986,11 +986,13 @@ defmodule Browser.Layout do
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
           acc = if box.pt > 0, do: [{:pad, box.pt} | acc], else: acc
+          acc = indent_op(c, box, acc)
 
           acc =
             with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
 
           acc = [{:flush} | acc]
+          acc = indent_end(c, acc)
           acc = if box.pb > 0, do: [{:pad, box.pb} | acc], else: acc
           [{:gap, box.mb}, {:inset_end} | acc]
 
@@ -999,14 +1001,32 @@ defmodule Browser.Layout do
           spec = if legend, do: Map.put(spec, :legend, true), else: spec
           acc = [{:box_start, ref, spec} | acc]
           acc = if legend, do: [legend | acc], else: acc
+          acc = indent_op(c, box, acc)
 
           acc =
             with_cw(child_width(c, box), fn -> block_children(tag, kind, kids, style, c, acc) end)
 
-          acc = [{:box_end, ref}, {:flush} | acc]
+          acc = [{:flush} | acc]
+          acc = indent_end(c, acc)
+          acc = [{:box_end, ref} | acc]
           [{:gap, box.mb} | acc]
       end
     end
+  end
+
+  # `text-indent`: the first line of a block starts that far in, as if an inline box of that
+  # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
+  # one block to the next.
+  defp indent_op(c, box, acc) do
+    case c["text-indent"] do
+      n when is_number(n) and n != 0 -> [{:indent, round(n)} | acc]
+      {:pct, f} when f != 0 -> [{:indent, round(f * child_width(c, box))} | acc]
+      _ -> acc
+    end
+  end
+
+  defp indent_end(c, acc) do
+    if c["text-indent"] in [nil, 0, 0.0, {:pct, 0.0}], do: acc, else: [{:indent, 0} | acc]
   end
 
   # A fieldset's first child, when it is a legend, sits on the top border and interrupts it.
@@ -1687,6 +1707,9 @@ defmodule Browser.Layout do
     do: %{item | stick: Map.put(stick, :limit, Map.get(limits, parent))}
 
   defp stick_limit(item, _limits), do: item
+
+  defp op({:indent, px}, %{line: []} = st), do: %{st | lead: px}
+  defp op({:indent, _px}, st), do: st
 
   defp op({:space, style}, st), do: if(st.line == [], do: st, else: %{st | pending_space: style})
   defp op({:word, text, style}, st), do: word(text, style, false, st)
@@ -3383,7 +3406,7 @@ defmodule Browser.Layout do
     case first.align do
       :center -> max(round(free / 2), 0)
       :right -> max(round(free), 0)
-      :rstart -> round(free)
+      :rstart -> round(free) - st.line_lead
       :left -> 0
     end
   end

@@ -2988,6 +2988,23 @@ defmodule Browser.LayoutTest do
       assert %{x: 74, w: 60} = box_of(items)
     end
 
+    test "text-indent moves the first line of a block only" do
+      {items, _} = fl(~s|<p style="text-indent:20px">#{@words}</p>|)
+
+      assert word_at(items, "aaaa").x == 24
+      assert word_at(items, "eeee").x == 4
+    end
+
+    test "a percentage text-indent is of the block's own width" do
+      {items, _} = fl(~s|<div style="width:100px"><p style="text-indent:10%">aaaa</p></div>|)
+      assert word_at(items, "aaaa").x == 14
+    end
+
+    test "the indent does not carry over to the next block" do
+      {items, _} = fl(~s|<div style="text-indent:20px"></div><p>bbbb</p>|)
+      assert word_at(items, "bbbb").x == 4
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(

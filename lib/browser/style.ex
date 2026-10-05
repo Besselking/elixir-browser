@@ -1479,7 +1479,11 @@ defmodule Browser.Style do
   end
 
   defp typed("text-indent", v, env, _pc) do
-    if px = length(v, env), do: {:ok, px}, else: :skip
+    cond do
+      px = length(v, env) -> {:ok, px}
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> :skip
+    end
   end
 
   defp typed("opacity", v, _env, _pc) do
