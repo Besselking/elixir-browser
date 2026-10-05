@@ -696,6 +696,14 @@ defmodule Browser.StyleTest do
   describe "background images and shadows" do
     defp bg(css, prop), do: comp("<p>a</p>", css, "p")[prop]
 
+    test "the background shorthand keeps the case of the address too" do
+      assert bg(
+               ~s|p { background: red url("https://X.test/Img.PNG") no-repeat }|,
+               "background-image"
+             ) ==
+               [{:url, "https://X.test/Img.PNG"}]
+    end
+
     test "background-image: urls keep their case, gradients and lists parse" do
       assert bg(~s|p { background-image: url("https://X.test/Img.PNG") }|, "background-image") ==
                [{:url, "https://X.test/Img.PNG"}]

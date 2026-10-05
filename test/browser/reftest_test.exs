@@ -107,4 +107,64 @@ defmodule Browser.ReftestTest do
     b = Raster.paint([%{type: :rect, x: 1, y: 1, w: 2, h: 1, color: {0, 0, 0}}], 4, 2)
     assert Raster.diff(a, b) == {2, {1, 1}}
   end
+
+  # a PNG of the given colour type, 8 bits, from rows of bytes (filter 0)
+  defp png(w, h, ctype, rows, extra \\ []) do
+    chunk = fn type, data ->
+      <<byte_size(data)::32, type::binary, data::binary, :erlang.crc32([type, data])::32>>
+    end
+
+    raw = for row <- rows, into: <<>>, do: <<0, row::binary>>
+
+    <<0x89, "PNG\r\n", 0x1A, 0x0A>> <>
+      chunk.("IHDR", <<w::32, h::32, 8, ctype, 0, 0, 0>>) <>
+      Enum.map_join(extra, fn {t, d} -> chunk.(t, d) end) <>
+      chunk.("IDAT", :zlib.compress(raw)) <> chunk.("IEND", <<>>)
+  end
+
+  test "the picture decoder reads RGB, RGBA and palette PNGs" do
+    alias Browser.Reftest.Picture
+
+    assert {:ok, %{w: 2, h: 1, rows: [<<255, 0, 0, 255, 0, 0, 255, 255>>]}} =
+             Picture.decode(png(2, 1, 2, [<<255, 0, 0, 0, 0, 255>>]))
+
+    assert {:ok, %{rows: [<<1, 2, 3, 4>>]}} = Picture.decode(png(1, 1, 6, [<<1, 2, 3, 4>>]))
+
+    assert {:ok, %{rows: [<<10, 20, 30, 255, 40, 50, 60, 0>>]}} =
+             Picture.decode(
+               png(2, 1, 3, [<<0, 1>>], [
+                 {"PLTE", <<10, 20, 30, 40, 50, 60>>},
+                 {"tRNS", <<255, 0>>}
+               ])
+             )
+
+    assert Picture.decode("not a picture") == :error
+  end
+
+  test "pictures are painted: <img> scaled to its box, backgrounds tiled and clipped", %{
+    root: root
+  } do
+    File.mkdir_p!(Path.join(root, "css/t/support"))
+    File.write!(Path.join(root, "css/t/support/g.png"), png(1, 1, 2, [<<0, 128, 0>>]))
+
+    write(
+      root,
+      "p.html",
+      ~s(<link rel=match href=p-ref.html><img src="support/g.png" width=40 height=20>)
+    )
+
+    write(root, "p-ref.html", ~s(<div style="width:40px;height:20px;background:#008000"></div>))
+
+    write(
+      root,
+      "q.html",
+      ~s|<link rel=match href=q-ref.html><div style="width:30px;height:10px;background:url(support/G.png)"></div>|
+    )
+
+    write(root, "q-ref.html", ~s(<div style="width:30px;height:10px;background:#008000"></div>))
+
+    assert Reftest.run_test(root, "css/t/p.html") == :pass
+    # the file is called g.png: the address of a background keeps its case, so this one is missing
+    assert {:skip, "picture that is not a PNG file"} = Reftest.run_test(root, "css/t/q.html")
+  end
 end

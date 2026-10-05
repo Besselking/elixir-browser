@@ -409,7 +409,7 @@ defmodule Browser.Style do
   @keywords ~w(inherit initial unset revert)
 
   defp split_shorthand(prop, value) do
-    v = value |> String.trim() |> String.downcase()
+    v = value |> String.trim() |> downcase_outside_urls()
     longs = @shorthands[prop]
 
     if v in @keywords do
@@ -1241,6 +1241,19 @@ defmodule Browser.Style do
   defp normalize(v) do
     v = String.trim(v)
     if String.contains?(v, "url("), do: v, else: String.downcase(v)
+  end
+
+  # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone
+  defp downcase_outside_urls(v) do
+    if String.contains?(v, "url(") do
+      ~r/url\((?:"[^"]*"|'[^']*'|[^)]*)\)/i
+      |> Regex.split(v, include_captures: true)
+      |> Enum.map_join(fn part ->
+        if Regex.match?(~r/\Aurl\(/i, part), do: part, else: String.downcase(part)
+      end)
+    else
+      String.downcase(v)
+    end
   end
 
   @doc false
