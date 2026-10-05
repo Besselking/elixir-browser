@@ -643,6 +643,12 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        autoh: not replaced? and c["height"] in [nil, :auto] and c["max-height"] != :fit,
+        hpct:
+          case c["height"] do
+            {:pct, f} -> f
+            _ -> nil
+          end,
         z: z_index(c),
         translate: translate_of(c)
       }
@@ -1111,6 +1117,7 @@ defmodule Browser.Layout do
       cid: style.cid,
       nid: style.nid,
       h: num(c["height"]),
+      hpct: pct_of(c["height"]),
       min: num(c["min-height"]),
       max: num(c["max-height"]),
       clip: clips?(c),
@@ -2329,7 +2336,13 @@ defmodule Browser.Layout do
     }
 
     if o.pos do
-      push_pos(st, %{x: x + bl, y: box.top + bt, w: max(box_w - bl - br, 0), h: nil, ref: ref})
+      push_pos(st, %{
+        x: x + bl,
+        y: box.top + bt,
+        w: max(box_w - bl - br, 0),
+        h: padding_height(st, o),
+        ref: ref
+      })
     else
       st
     end
@@ -2725,6 +2738,14 @@ defmodule Browser.Layout do
 
     sub = if spec.replaced, do: Enum.map(sub, &pct_to_px(&1, cw)), else: sub
     {width, x} = abs_width(st, sub, spec, origin, left, right, {static_x, static_right})
+    # `top` and `bottom` with an auto height stretch the box between them
+    sub =
+      cond do
+        (spec.autoh and top) && bottom -> stretch(sub, origin.h - top - bottom)
+        is_number(spec.hpct) and origin.h -> set_height(sub, spec.hpct * origin.h)
+        true -> sub
+      end
+
     {items, height} = layout_sub(st, sub, width)
 
     y =
@@ -2745,6 +2766,57 @@ defmodule Browser.Layout do
         else: moved
 
     %{st | overlays: [moved | st.overlays]}
+  end
+
+  defp pct_of({:pct, f}), do: f
+  defp pct_of(_), do: nil
+
+  # the height of a positioned box's padding edge when its `height` is given: a length, or a
+  # percentage of the window's height for the root
+  defp padding_height(st, o) do
+    {bt, _, bb, _} = o.bw
+    # only the root's percentage is known: its containing block is the window
+    root? = length(st.blocks) <= 1
+    h = o.h || (root? && o.hpct && hd(st.pos).h && o.hpct * hd(st.pos).h)
+
+    if h do
+      round(if o.sizing == :border, do: max(h - bt - bb, 0), else: h + o.pt + o.pb)
+    end
+  end
+
+  # the element's own box, when nothing but margins comes before it (not a flex or table op)
+  defp own_box(sub) do
+    {before, rest} = Enum.split_while(sub, &(not match?({:box_start, _, _}, &1)))
+
+    with [{:box_start, ref, o} | tail] <- rest,
+         true <- Enum.all?(before, &(&1 == {:flush} or match?({:gap, _}, &1))) do
+      {before, ref, o, tail}
+    else
+      _ ->
+        nil
+    end
+  end
+
+  # the first box of an absolute element is at least `target` tall (margins are ignored)
+  defp stretch(sub, target) do
+    case own_box(sub) do
+      {before, ref, o, tail} ->
+        {bt, _, bb, _} = o.bw
+        extra = if o.sizing == :border, do: 0, else: bt + o.pt + o.pb + bb
+        target = max(target - extra, 0)
+        before ++ [{:box_start, ref, %{o | min: max(o.min || 0, target)}} | tail]
+
+      nil ->
+        sub
+    end
+  end
+
+  # an absolute element's percentage height is of its containing block
+  defp set_height(sub, h) do
+    case own_box(sub) do
+      {before, ref, o, tail} -> before ++ [{:box_start, ref, %{o | h: h}} | tail]
+      nil -> sub
+    end
   end
 
   # the width of an absolute picture in percent is relative to its containing block

@@ -521,7 +521,6 @@ css/CSS2/borders/border-width-008.xht
 css/CSS2/borders/border-width-011.xht
 css/CSS2/borders/border-width-012.xht
 css/CSS2/borders/border-width-014.xht
-css/CSS2/borders/border-width-applies-to-008.xht
 css/CSS2/borders/border-width-applies-to-009.xht
 css/CSS2/borders/border-width-applies-to-015.xht
 css/CSS2/borders/shand-border-000.xht
@@ -1796,12 +1795,15 @@ css/CSS2/positioning/absolute-non-replaced-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-height-007.xht
 css/CSS2/positioning/absolute-non-replaced-height-008.xht
 css/CSS2/positioning/absolute-non-replaced-height-009.xht
+css/CSS2/positioning/absolute-non-replaced-height-010.xht
+css/CSS2/positioning/absolute-non-replaced-height-011.xht
 css/CSS2/positioning/absolute-non-replaced-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-002.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-005.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-008.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-009.xht
+css/CSS2/positioning/absolute-non-replaced-max-height-010.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-min-max-001.html
 css/CSS2/positioning/absolute-non-replaced-width-001.xht
@@ -1877,6 +1879,16 @@ css/CSS2/positioning/abspos-022.xht
 css/CSS2/positioning/abspos-027.xht
 css/CSS2/positioning/abspos-028.xht
 css/CSS2/positioning/abspos-029.html
+css/CSS2/positioning/abspos-containing-block-001.xht
+css/CSS2/positioning/abspos-containing-block-002.xht
+css/CSS2/positioning/abspos-containing-block-003.xht
+css/CSS2/positioning/abspos-containing-block-004.xht
+css/CSS2/positioning/abspos-containing-block-005.xht
+css/CSS2/positioning/abspos-containing-block-006.xht
+css/CSS2/positioning/abspos-containing-block-007.xht
+css/CSS2/positioning/abspos-containing-block-008.xht
+css/CSS2/positioning/abspos-containing-block-009.xht
+css/CSS2/positioning/abspos-containing-block-010.xht
 css/CSS2/positioning/abspos-overflow-001.xht
 css/CSS2/positioning/abspos-overflow-002.xht
 css/CSS2/positioning/abspos-overflow-003.xht
@@ -1889,6 +1901,7 @@ css/CSS2/positioning/abspos-overflow-009.xht
 css/CSS2/positioning/abspos-overflow-010.xht
 css/CSS2/positioning/abspos-overflow-011.xht
 css/CSS2/positioning/abspos-overflow-012.xht
+css/CSS2/positioning/abspos-width-004.xht
 css/CSS2/positioning/abspos-width-005.xht
 css/CSS2/positioning/auto-position-rtl-child-viewport-scrollbar.html
 css/CSS2/positioning/bottom-004.xht
@@ -1939,6 +1952,7 @@ css/CSS2/positioning/bottom-112.xht
 css/CSS2/positioning/bottom-offset-001.xht
 css/CSS2/positioning/bottom-offset-002.xht
 css/CSS2/positioning/bottom-offset-003.xht
+css/CSS2/positioning/bottom-offset-percentage-001.xht
 css/CSS2/positioning/left-004.xht
 css/CSS2/positioning/left-005.xht
 css/CSS2/positioning/left-006.xht
@@ -1996,6 +2010,7 @@ css/CSS2/positioning/left-offset-003.xht
 css/CSS2/positioning/left-offset-percentage-001.xht
 css/CSS2/positioning/position-006.xht
 css/CSS2/positioning/position-absolute-001.xht
+css/CSS2/positioning/position-absolute-002.xht
 css/CSS2/positioning/position-absolute-003.xht
 css/CSS2/positioning/position-absolute-004.xht
 css/CSS2/positioning/position-absolute-006.xht
@@ -2132,6 +2147,7 @@ css/CSS2/positioning/top-applies-to-014.xht
 css/CSS2/positioning/top-offset-001.xht
 css/CSS2/positioning/top-offset-002.xht
 css/CSS2/positioning/top-offset-003.xht
+css/CSS2/positioning/top-offset-percentage-001.xht
 css/CSS2/text/bidi-span-002.html
 css/CSS2/text/letter-spacing-004.xht
 css/CSS2/text/letter-spacing-005.xht
@@ -2336,17 +2352,9 @@ css/CSS2/text/word-spacing-097.xht
 css/CSS2/text/word-spacing-098.xht
 css/CSS2/text/word-spacing-099.xht
 css/CSS2/text/word-spacing-100.xht
-css/CSS2/text/word-spacing-applies-to-001.xht
-css/CSS2/text/word-spacing-applies-to-002.xht
-css/CSS2/text/word-spacing-applies-to-003.xht
-css/CSS2/text/word-spacing-applies-to-007.xht
 css/CSS2/text/word-spacing-applies-to-012.xht
 css/CSS2/text/word-spacing-applies-to-013.xht
 css/CSS2/text/word-spacing-characters-002.xht
-css/CSS2/text/word-spacing-justify-001.xht
-css/CSS2/text/word-spacing-remove-space-001.xht
-css/CSS2/text/word-spacing-remove-space-002.xht
-css/CSS2/text/word-spacing-remove-space-003.xht
 css/CSS2/visudet/content-height-001.html
 css/CSS2/visudet/height-computed-001.xht
 css/CSS2/visudet/height-computed-002.xht
@@ -2839,7 +2847,6 @@ css/css-flexbox/table-as-item-inflexible-in-row-1.html
 css/css-flexbox/table-as-item-percent-width-cell-001.html
 css/css-flexbox/table-as-item-specified-width-vertical.html
 css/css-flexbox/table-as-item-specified-width.html
-css/css-flexbox/table-with-infinite-max-intrinsic-width.html
 css/css-flexbox/text-overflow-on-flexbox-001.html
 css/css-flexbox/webkit-box-vertical-writing-mode.html
 css/css-flexbox/whitespace-in-flexitem-001.html
@@ -2859,7 +2866,6 @@ css/css-multicol/fixed-in-nested-multicol.html
 css/css-multicol/inline-block-and-column-span-all.html
 css/css-multicol/intrinsic-size-002.html
 css/css-multicol/intrinsic-size-003.html
-css/css-multicol/moz-multicol3-column-balancing-break-inside-avoid-1.html
 css/css-multicol/multicol-basic-001.html
 css/css-multicol/multicol-basic-002.html
 css/css-multicol/multicol-basic-003.html
@@ -2950,6 +2956,7 @@ css/css-multicol/subpixel-column-rule-width.tentative.html
 css/css-multicol/table/multicol-table-cell-height-001.xht
 css/css-position/nested-inline-abspos-child-with-siblings.html
 css/css-position/nested-inline-abspos-child.html
+css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
 css/css-position/position-absolute-in-inline-004.html
 css/css-position/position-absolute-large-negative-inset.html
@@ -3231,7 +3238,6 @@ css/css-text/text-align/text-align-justify-shy-001.html
 css/css-text/text-align/text-align-justify-tabs-001.html
 css/css-text/text-align/text-align-justifyall-001.html
 css/css-text/text-align/text-align-justifyall-003.html
-css/css-text/text-align/text-align-match-parent-05.html
 css/css-text/text-align/text-align-match-parent-root-logical.html
 css/css-text/text-align/text-align-match-parent-root-ltr.html
 css/css-text/text-align/text-align-match-parent-root-rtl.html
