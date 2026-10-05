@@ -2982,6 +2982,28 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "aaaa").x == 64
     end
 
+    test "a relatively positioned box is drawn shifted and leaves its place in the flow" do
+      {items, _} =
+        fl(
+          ~s|<div style="position:relative;top:10px;left:7px;width:50px;height:20px;background:#111"></div><div style="width:50px;height:20px;background:#222"></div>|
+        )
+
+      rects = items |> Enum.filter(&(&1.type == :rect)) |> Map.new(&{&1.color, &1})
+      assert %{x: 11, y: 10} = rects[{17, 17, 17}]
+      assert %{x: 4, y: 20} = rects[{34, 34, 34}]
+    end
+
+    test "bottom and right shift a relative box up and left, top and left win" do
+      {items, _} =
+        fl(
+          ~s|<div style="position:relative;bottom:5px;right:3px;width:50px;height:20px;background:#111"></div><div style="position:relative;top:2px;bottom:9px;width:50px;height:20px;background:#222"></div>|
+        )
+
+      rects = items |> Enum.filter(&(&1.type == :rect)) |> Map.new(&{&1.color, &1})
+      assert %{x: 1, y: -5} = rects[{17, 17, 17}]
+      assert %{y: 22} = rects[{34, 34, 34}]
+    end
+
     test "text goes back to the full width once the float ends" do
       {items, _} =
         fl(

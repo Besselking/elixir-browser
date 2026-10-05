@@ -1048,6 +1048,11 @@ defmodule Browser.Layout do
       max: num(c["max-height"]),
       clip: clips?(c),
       pos: c["position"] in ["relative", "sticky"],
+      # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
+      rel:
+        if(c["position"] == "relative",
+          do: %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+        ),
       xform: xform_spec(c),
       # `position: sticky; top: n`: the box stays n px from the top of the window once scrolled to it
       sticky: if(c["position"] == "sticky" and is_number(c["top"]), do: round(c["top"])),
@@ -2267,9 +2272,43 @@ defmodule Browser.Layout do
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
     st = %{st | limits: Map.put(st.limits, box.id, box.top + height - bb - o.pb)}
+    {st, box} = if o.rel, do: relative_shift(st, box), else: {st, box}
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st
   end
+
+  # A relatively positioned box and everything it painted move by its offsets; the space it
+  # takes in the flow stays where it was. `top` wins over `bottom` and `left` over `right`.
+  defp relative_shift(st, %{o: %{rel: rel}} = box) do
+    cw = max(st.width - 2 * st.margin - st.left - st.right, 0)
+
+    dx = rel_offset(rel.left, cw) || -(rel_offset(rel.right, cw) || 0)
+    dy = rel_offset(rel.top, 0) || -(rel_offset(rel.bottom, 0) || 0)
+
+    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
+    {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
+
+    # a box that moved paints above the non-positioned content of the flow
+    shift = fn list ->
+      if dx == 0 and dy == 0,
+        do: list,
+        else: Enum.map(list, fn it -> it |> move(dx, dy) |> Map.put(:over, true) end)
+    end
+
+    st = %{
+      st
+      | items: shift.(new_items) ++ old_items,
+        rects: shift.(new_rects) ++ old_rects,
+        overlays: Enum.map(new_over, shift) ++ old_over
+    }
+
+    {st, %{box | x: box.x + dx, top: box.top + dy}}
+  end
+
+  defp rel_offset(n, _cw) when is_number(n), do: round(n)
+  defp rel_offset({:pct, f}, base), do: round(f * base)
+  defp rel_offset(_, _), do: nil
 
   # everything the box painted sticks with it
   defp stick_new(st, %{o: o} = box, height) do
