@@ -918,20 +918,20 @@ defmodule Browser.JS.Interp do
             cond do
               match?(%{^i => {:accessor, _, _}}, o.items) ->
                 {:accessor, _, setter} = o.items[i]
-                if function?(setter), do: call(setter, {:obj, id}, [v])
+                if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
                 :ok
 
               Map.get(o, :frozen, false) ->
-                :ok
+                fail_put()
 
               not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) ->
-                :ok
+                fail_put()
 
               i >= o.len and Map.get(o, :len_ro, false) ->
-                :ok
+                fail_put()
 
               not writable?(o, i) ->
-                :ok
+                fail_put()
 
               true ->
                 store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
@@ -943,7 +943,7 @@ defmodule Browser.JS.Interp do
 
               cond do
                 Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
-                  :ok
+                  fail_put()
 
                 true ->
                   # an element that cannot be deleted stops the array from shrinking past it
@@ -984,7 +984,7 @@ defmodule Browser.JS.Interp do
       # a function's own name and length are not writable
       %{class: :function, props: props} when key in ["name", "length"] ->
         unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
-          do: :ok,
+          do: fail_put(),
           else: put_prop(id, o, key, v)
 
       _ ->
@@ -1004,13 +1004,13 @@ defmodule Browser.JS.Interp do
   defp put_prop(id, o, key, v) do
     case Map.fetch(o.props, key) do
       {:ok, {:accessor, _, setter}} ->
-        if function?(setter), do: call(setter, {:obj, id}, [v])
+        if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
         :ok
 
       {:ok, _} ->
         if writable?(o, key),
           do: store(id, %{o | props: Map.put(o.props, key, v)}),
-          else: :ok
+          else: fail_put()
 
       :error ->
         case inherited_set(o.proto, key) do
@@ -1019,7 +1019,7 @@ defmodule Browser.JS.Interp do
             :ok
 
           :readonly ->
-            :ok
+            fail_put()
 
           {:proxy, proxy} ->
             Browser.JS.Proxy.set(proxy, key, v, {:obj, id})
@@ -1047,10 +1047,42 @@ defmodule Browser.JS.Interp do
                     )
                   )
             else
-              :ok
+              fail_put()
             end
         end
     end
+  end
+
+  # a failed [[Set]]: sloppy code ignores it, strict code (`strict_put`) throws
+  defp fail_put, do: :erlang.put(:js_put_failed, true)
+
+  defp strict_put(ov, key, v) do
+    :erlang.put(:js_put_failed, false)
+    put(ov, key, v)
+
+    if :erlang.get(:js_put_failed) == true do
+      :erlang.put(:js_put_failed, false)
+      throw_error("TypeError", "Cannot assign to read only property '#{to_str(key)}'")
+    end
+
+    v
+  end
+
+  # an assignment to a name nothing declares is a ReferenceError in strict code
+  defp resolvable?(scope, name) do
+    s = deref(scope)
+
+    cond do
+      Map.has_key?(s.vars, name) -> true
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
+      s.parent != nil -> resolvable?(s.parent, name)
+      true -> false
+    end
+  end
+
+  defp strict_assign_var(env, name, v, resolved?) do
+    unless resolved?, do: throw_error("ReferenceError", "#{name} is not defined")
+    assign_var(env, name, v)
   end
 
   defp inherited_set({:obj, pid}, key) do
@@ -2750,6 +2782,18 @@ defmodule Browser.JS.Interp do
   def ev({:unary, "delete", {:member, o, k, _}}, env), do: delete(ev(o, env), ev_key(k, env))
   def ev({:unary, "delete", _}, _), do: true
 
+  # in strict code a delete that fails throws
+  def ev({:unary, "sdelete", {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    key = ev_key(k, env)
+
+    if delete(ov, key) == false,
+      do: throw_error("TypeError", "Cannot delete property '#{to_str(key)}'"),
+      else: true
+  end
+
+  def ev({:unary, "sdelete", _}, _), do: true
+
   def ev({:unary, op, e}, env) do
     v = ev(e, env)
 
@@ -2824,34 +2868,40 @@ defmodule Browser.JS.Interp do
     v
   end
 
-  def ev({:assign, op, target, value}, env) do
-    # evaluate the target's object and key once
-    {read, write} =
-      case target do
-        {:id, name} ->
-          {fn -> ev(target, env) end, fn v -> assign_var(env, name, v) end}
+  def ev({:assign, op, target, value}, env), do: compound_assign(op, target, value, env, false)
 
-        {:member, o, k, _} ->
-          ov = ev(o, env)
-          key = ev_key(k, env)
-          {fn -> get(ov, key) end, fn v -> put(ov, key, v) end}
+  # assignments in strict code: a failed [[Set]] or an undeclared name throws
+  def ev({:sassign, "=", {:id, name}, value}, env) do
+    resolved? = resolvable?(env, name)
+    v = ev_named(value, env, {:id, name})
+    strict_assign_var(env, name, v, resolved?)
+    v
+  end
+
+  def ev({:sassign, "=", {:member, o, k, _}, value}, env) do
+    ov = ev(o, env)
+    key = ev_key(k, env)
+    v = ev(value, env)
+    strict_put(ov, key, v)
+  end
+
+  def ev({:sassign, op, target, value}, env), do: compound_assign(op, target, value, env, true)
+
+  def ev({:supdate, op, prefix?, target}, env) do
+    old = numeric(ev(target, env))
+
+    new =
+      case old do
+        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
       end
 
-    old = read.()
-    base = binary_part(op, 0, byte_size(op) - 1)
-
-    result =
-      case base do
-        "&&" -> if truthy(old), do: {:set, ev(value, env)}, else: :keep
-        "||" -> if truthy(old), do: :keep, else: {:set, ev(value, env)}
-        "??" -> if nullish?(old), do: {:set, ev(value, env)}, else: :keep
-        _ -> {:set, binop(base, old, ev(value, env))}
-      end
-
-    case result do
-      :keep -> old
-      {:set, v} -> write.(v) && v
+    case target do
+      {:id, name} -> strict_assign_var(env, name, new, resolvable?(env, name))
+      {:member, o, k, _} -> strict_put(ev(o, env), ev_key(k, env), new)
     end
+
+    if prefix?, do: new, else: old
   end
 
   def ev({:member, o, k, opt}, env) do
@@ -2994,6 +3044,45 @@ defmodule Browser.JS.Interp do
   end
 
   defp method_home(_, _), do: :ok
+
+  defp compound_assign(op, target, value, env, strict?) do
+    # evaluate the target's object and key once
+    {read, write} =
+      case target do
+        {:id, name} ->
+          resolved? = not strict? or resolvable?(env, name)
+
+          {fn -> ev(target, env) end,
+           fn v ->
+             if strict?,
+               do: strict_assign_var(env, name, v, resolved?),
+               else: assign_var(env, name, v)
+           end}
+
+        {:member, o, k, _} ->
+          ov = ev(o, env)
+          key = ev_key(k, env)
+
+          {fn -> get(ov, key) end,
+           fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
+      end
+
+    old = read.()
+    base = binary_part(op, 0, byte_size(op) - 1)
+
+    result =
+      case base do
+        "&&" -> if truthy(old), do: {:set, ev(value, env)}, else: :keep
+        "||" -> if truthy(old), do: :keep, else: {:set, ev(value, env)}
+        "??" -> if nullish?(old), do: {:set, ev(value, env)}, else: :keep
+        _ -> {:set, binop(base, old, ev(value, env))}
+      end
+
+    case result do
+      :keep -> old
+      {:set, v} -> write.(v) && v
+    end
+  end
 
   defp describe({:id, n}), do: n
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k
