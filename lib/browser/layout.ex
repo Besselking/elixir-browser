@@ -538,7 +538,7 @@ defmodule Browser.Layout do
   defp walk_element({:element, tag, attrs, kids} = el, parent_style, acc, force) do
     c = computed(attrs)
 
-    if c["position"] in ["absolute", "fixed"] and force != :abs_inner do
+    if c["position"] in ["absolute", "fixed"] and force not in [:abs_inner, :inline_inner] do
       abs_ops(el, parent_style, c, acc)
     else
       style = restyle(tag, attrs, parent_style, c)
@@ -607,10 +607,12 @@ defmodule Browser.Layout do
       own =
         Map.drop(
           c,
-          if(replaced?,
-            do: ~w(margin-left margin-right),
-            else: ~w(width min-width max-width margin-left margin-right)
-          )
+          cond do
+            replaced? -> ~w(margin-left margin-right)
+            # a table's width is its own, as well as what places it
+            kind(tag, c) == :table -> ~w(margin-left margin-right)
+            true -> ~w(width min-width max-width margin-left margin-right)
+          end
         )
 
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
