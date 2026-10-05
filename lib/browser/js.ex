@@ -19,8 +19,8 @@ defmodule Browser.JS do
   @type result :: term
   @type console :: [{:log | :warn | :error, String.t()}]
 
-  @doc "Parses `source`: `{:ok, {:program, statements}}` or `{:error, message}`."
-  defdelegate parse(source), to: Parser
+  @doc "Parses `source`: `{:ok, {:program, statements}}` or `{:error, message}`; `module: true` allows import and export."
+  def parse(source, opts \\ []), do: Parser.parse(source, opts)
 
   @doc """
   Runs `source` and returns `{:ok, value, console}` or `{:error, reason, console}`.

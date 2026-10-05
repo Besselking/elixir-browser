@@ -540,7 +540,7 @@ defmodule Browser.JS.Runtime do
   end
 
   defp run_module_source(src, base) do
-    case Parser.parse(src) do
+    case Parser.parse(src, module: true) do
       {:ok, program} ->
         Interp.run_module(
           program,
