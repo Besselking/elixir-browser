@@ -3258,6 +3258,18 @@ defmodule Browser.LayoutTest do
       assert rect.y == 250
     end
 
+    test "the stretch between top and bottom stops at max-height and auto margins centre it" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:absolute;top:0;bottom:0;left:0;right:0;margin:auto;max-height:34px;max-width:34px;background:#ccc"></div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 100, &measure/2, 100, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert {rect.x, rect.y, rect.w, rect.h} == {33, 33, 34, 34}
+    end
+
     test "an absolute box with a percentage height takes it from the window" do
       page =
         Page.build(
