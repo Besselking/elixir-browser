@@ -2920,6 +2920,16 @@ defmodule Browser.LayoutTest do
                items |> Enum.filter(&(&1.type == :text)) |> Enum.sort_by(& &1.y)
     end
 
+    test "normal line height comes from the font's measured content height" do
+      page = Page.build("<style>body{margin:0}</style><p>a</p><p>b</p>", "about:home")
+
+      {items, _} =
+        Layout.layout(page.nodes, 208, &measure/2, 600, metrics: fn style -> style.size * 2 end)
+
+      [a, b] = items |> Enum.filter(&(&1.type == :text)) |> Enum.sort_by(& &1.y)
+      assert b.y - a.y == 2 * 16 + 16
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(

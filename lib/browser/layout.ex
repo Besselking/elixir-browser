@@ -21,7 +21,7 @@ defmodule Browser.Layout do
 
   @base 16
   @margin 4
-  # a font's content height (ascent plus descent) over its size, for the built-in font
+  # a font's content height (ascent plus descent) over its size, for when nothing measures it
   @content_factor 1.35
   @legacy_gap 10
   @legacy_indent 28
@@ -105,6 +105,9 @@ defmodule Browser.Layout do
   image not in the map is still loading: its declared size is reserved and it
   takes no room if it has none.
 
+  Option `metrics: (style -> content_height_px)` gives the height of a font's glyphs (its
+  `normal` line-height); without it text is taken to be 1.35 times its size.
+
   Option `focus: %{cid: id, caret: {line, column}}` adds a `:ring` item around the
   focused form control and a `:caret` item at the given position of its text.
   """
@@ -134,6 +137,7 @@ defmodule Browser.Layout do
     # what percentage margins and padding refer to, as the walk goes down the tree
     Process.put(:layout_cw, max(width - 2 * @margin, 0))
     Process.put(:layout_memo, %{})
+    Process.put(:layout_metrics, opts[:metrics])
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse()
@@ -2956,11 +2960,14 @@ defmodule Browser.Layout do
   # -- words and lines ------------------------------------------------------------------
 
   # How tall the glyphs of a font are as a factor of its size (ascent plus descent, which is also
-  # its `normal` line-height): the built-in font's, or exactly 1 for Ahem, the test font.
+  # its `normal` line-height): what the `:metrics` option measures, exactly 1 for Ahem, the test
+  # font, or a fixed guess when nothing can measure the font.
   defp content_factor(style) do
-    if String.contains?(to_string(Map.get(style, :family)), "ahem"),
-      do: 1.0,
-      else: @content_factor
+    cond do
+      String.contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
+      metrics = Process.get(:layout_metrics) -> metrics.(style) / style.size
+      true -> @content_factor
+    end
   end
 
   # the line-height of text in px: `normal` is the font's content height, a number is a
