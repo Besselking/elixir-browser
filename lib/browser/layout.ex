@@ -126,6 +126,11 @@ defmodule Browser.Layout do
       underline: false,
       strike: false,
       align: :left,
+      # the direction of the text; of the block it is in (`cb`), which settles where a box
+      # that is over-constrained goes, and of the block its parent is in (`prtl`)
+      rtl: false,
+      cb: false,
+      prtl: false,
       list: nil,
       lh: :normal,
       cid: nil,
@@ -607,6 +612,9 @@ defmodule Browser.Layout do
         width: dim(c["width"]),
         minw: c["min-width"],
         maxw: c["max-width"],
+        ml: box.ml,
+        mr: box.mr,
+        rtl: parent_style.cb,
         # width properties size the content box unless box-sizing says otherwise
         extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
         rextra: box.pr + br,
@@ -1042,6 +1050,7 @@ defmodule Browser.Layout do
       minw: c["min-width"],
       maxw: c["max-width"],
       sizing: if(c["box-sizing"] == "border-box", do: :border, else: :content),
+      rtl: style.prtl,
       bg: box.bg,
       r: box.r,
       bgimg: box.bgimg,
@@ -1357,6 +1366,8 @@ defmodule Browser.Layout do
   defp restyle_inline(style, attrs), do: apply_computed(style, computed(attrs))
 
   defp restyle(tag, attrs, style, c) do
+    style = %{style | prtl: style.cb}
+
     style =
       case tag do
         t when t in ~w(b strong) -> %{style | bold: true}
@@ -1422,10 +1433,15 @@ defmodule Browser.Layout do
           strike: String.contains?(&2, "line-through")
       }
     )
-    |> put_if(c["text-align"], &%{&1 | align: align(&2)})
+    |> put_if(
+      c["text-align"] || c["direction"],
+      fn s, _ -> %{s | align: align(c["text-align"] || "start", c["direction"])} end
+    )
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
+    |> Map.put(:rtl, c["direction"] == "rtl")
+    |> then(&if(c["display"] in [nil, "inline"], do: &1, else: Map.put(&1, :cb, &1.rtl)))
     |> Map.put(:hidden, hidden?(c))
   end
 
@@ -1513,10 +1529,14 @@ defmodule Browser.Layout do
     end
   end
 
-  defp align("center"), do: :center
-  defp align("-webkit-center"), do: :center
-  defp align(v) when v in ["right", "end"], do: :right
-  defp align(_), do: :left
+  defp align("center", _dir), do: :center
+  defp align("-webkit-center", _dir), do: :center
+  # `:rstart`: against the right edge, and a line too long for the box overflows to the left
+  # (it starts at the right) where `:right` would start it at the left edge
+  defp align("right", dir), do: if(dir == "rtl", do: :rstart, else: :right)
+  defp align("end", dir), do: if(dir == "rtl", do: :left, else: :right)
+  defp align("start", dir), do: if(dir == "rtl", do: :rstart, else: :left)
+  defp align(_, _dir), do: :left
 
   # Preformatted text keeps its line breaks. A blank line holds a zero-width space so
   # it still takes a line; the empty tail after a final newline just ends the line.
@@ -2200,6 +2220,9 @@ defmodule Browser.Layout do
         {:auto, :auto} -> {max(div(free, 2), 0), max(free - div(free, 2), 0)}
         {:auto, _} -> {max(free, 0), mr0}
         {_, :auto} -> {ml0, max(free, 0)}
+        # over-constrained: the margin at the end of the line gives way, so a box with a width
+        # sits against the right edge when the direction is rtl
+        _ when o.rtl -> {ml0 + free, mr0}
         _ -> {ml0, mr0}
       end
 
@@ -2627,12 +2650,14 @@ defmodule Browser.Layout do
         do: {st.margin + st.left, st.y + st.gap + st.ngap},
         else: {st.x, st.y}
 
+    static_right = st.width - st.margin - st.right
+
     left = resolve_h(spec.left, cw)
     right = resolve_h(spec.right, cw)
     top = resolve_v(spec.top, origin.h)
     bottom = origin.h && resolve_v(spec.bottom, origin.h)
 
-    {width, x} = abs_width(st, sub, spec, origin, left, right, static_x)
+    {width, x} = abs_width(st, sub, spec, origin, left, right, {static_x, static_right})
     {items, height} = layout_sub(st, sub, width)
 
     y =
@@ -2642,7 +2667,6 @@ defmodule Browser.Layout do
         true -> static_y
       end
 
-    x = if left, do: origin.x + left, else: x
     {tx, ty} = resolve_translate(spec.translate, width, height)
     # a negative `z-index` puts the box behind the flow: above the page's background only
     layer = if spec.z < 0 and !spec.fixed, do: :under, else: :over
@@ -2794,9 +2818,22 @@ defmodule Browser.Layout do
   defp resolve({:pct, f}, base), do: round(f * base)
   defp resolve(n, _base) when is_number(n), do: round(n)
 
-  # -> {border-box width, x for the right/static placement}
-  defp abs_width(st, sub, spec, origin, left, right, static_x) do
+  # CSS 2 10.3.7: the width of an absolutely positioned box and where its border box starts,
+  # from `left`, `right`, `width` and the margins. With neither offset set the box sits at its
+  # static position, which is its left edge, or its right edge when the direction is rtl.
+  # -> {border-box width, x of the border box}
+  defp abs_width(st, sub, spec, origin, left, right, {static_x, static_right}) do
     cw = origin.w
+    rtl = spec.rtl
+    ml = if spec.ml == :auto, do: nil, else: spec.ml
+    mr = if spec.mr == :auto, do: nil, else: spec.mr
+
+    {left, right} =
+      cond do
+        left || right -> {left, right}
+        rtl -> {nil, origin.x + cw - static_right}
+        true -> {static_x - origin.x, nil}
+      end
 
     width =
       case resolve(spec.width, cw) do
@@ -2805,11 +2842,10 @@ defmodule Browser.Layout do
             cond do
               left && right -> cw - left - right
               left -> cw - left
-              right -> cw - right
-              true -> origin.x + cw - static_x
+              true -> cw - right
             end
 
-          avail = max(avail, 40)
+          avail = max(avail - (ml || 0) - (mr || 0), 40)
 
           # a flex or grid container as the content wants its own natural width, not the room
           at =
@@ -2828,7 +2864,29 @@ defmodule Browser.Layout do
       end
 
     width = clamp_width(width, spec, cw)
-    {width, if(right && !left, do: origin.x + cw - right - width, else: static_x)}
+
+    x =
+      cond do
+        left && right ->
+          free = cw - left - right - width - (ml || 0) - (mr || 0)
+
+          cond do
+            ml == nil and mr == nil and free >= 0 -> left + div(free, 2)
+            ml == nil and mr == nil -> if rtl, do: left + free, else: left
+            ml == nil -> left + free
+            mr == nil -> left + ml
+            rtl -> cw - right - mr - width
+            true -> left + ml
+          end
+
+        left ->
+          left + (ml || 0)
+
+        true ->
+          cw - right - (mr || 0) - width
+      end
+
+    {width, origin.x + x}
   end
 
   defp clamp_width(width, spec, base) do
@@ -3325,6 +3383,7 @@ defmodule Browser.Layout do
     case first.align do
       :center -> max(round(free / 2), 0)
       :right -> max(round(free), 0)
+      :rstart -> round(free)
       :left -> 0
     end
   end

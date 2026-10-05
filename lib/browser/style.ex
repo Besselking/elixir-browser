@@ -21,7 +21,7 @@ defmodule Browser.Style do
             border-bottom-left-radius line-height
             background-image background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
-            text-decoration-line text-align list-style-type flex-direction
+            text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
             scroll-margin-top scroll-padding-top
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -31,7 +31,7 @@ defmodule Browser.Style do
             row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
-                text-decoration-line text-align list-style-type line-height
+                text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
                 stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space)
 
