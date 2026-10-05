@@ -2800,7 +2800,7 @@ defmodule Browser.JS.Interp do
     Enum.each(props, fn
       {:init, key, val} ->
         k = key_of(key, env)
-        v = ev_named(val, env, if(is_binary(k), do: {:id, k}))
+        v = ev_named(val, env, if(fname = key_fn_name(k), do: {:id, fname}))
         method_home(v, obj)
         define_data(obj, k, v)
 
@@ -2815,14 +2815,18 @@ defmodule Browser.JS.Interp do
         spread_into(obj, ev(e, env))
 
       {:getter, key, fun} ->
+        k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        Browser.JS.Props.define_accessor(obj, key_of(key, env), get: f)
+        if fname = key_fn_name(k), do: name_fn(f, "get " <> fname)
+        Browser.JS.Props.define_accessor(obj, k, get: f)
 
       {:setter, key, fun} ->
+        k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        Browser.JS.Props.define_accessor(obj, key_of(key, env), set: f)
+        if fname = key_fn_name(k), do: name_fn(f, "set " <> fname)
+        Browser.JS.Props.define_accessor(obj, k, set: f)
     end)
 
     obj
@@ -3310,9 +3314,18 @@ defmodule Browser.JS.Interp do
 
   def ev_named(e, env, _), do: ev(e, env)
 
+  # the name a function gets from the property key it is defined under
+  defp key_fn_name(k) when is_binary(k), do: k
+  defp key_fn_name({:symbol, _, desc}) when is_binary(desc), do: "[" <> desc <> "]"
+  defp key_fn_name({:symbol, _, _}), do: ""
+  defp key_fn_name(_), do: nil
+
   defp name_fn({:obj, id} = f, name) do
     case deref(id) do
-      %{fun: {:closure, %{name: n} = c}} = o when not is_binary(n) ->
+      %{fun: {:closure, %{name: {:method, n}} = c}} = o when not is_binary(n) ->
+        store(id, %{o | fun: {:closure, %{c | name: {:method, name}}}})
+
+      %{fun: {:closure, %{name: n} = c}} = o when not is_binary(n) and not is_tuple(n) ->
         store(id, %{o | fun: {:closure, %{c | name: name}}})
 
       _ ->

@@ -18205,6 +18205,7 @@ language/directive-prologue/10.1.1-28-s.js
 language/directive-prologue/10.1.1-29-s.js
 language/directive-prologue/10.1.1-2gs.js
 language/directive-prologue/10.1.1-3-s.js
+language/directive-prologue/10.1.1-30-s.js
 language/directive-prologue/10.1.1-31-s.js
 language/directive-prologue/10.1.1-32-s.js
 language/directive-prologue/10.1.1-4-s.js
@@ -18945,6 +18946,8 @@ language/expressions/arrow-function/scope-param-rest-elem-var-open.js
 language/expressions/arrow-function/scope-paramsbody-var-close.js
 language/expressions/arrow-function/statement-body-requires-braces-must-return-explicitly-missing.js
 language/expressions/arrow-function/statement-body-requires-braces-must-return-explicitly.js
+language/expressions/arrow-function/static-init-await-binding.js
+language/expressions/arrow-function/static-init-await-reference.js
 language/expressions/arrow-function/strict.js
 language/expressions/arrow-function/syntax/arrowparameters-bindingidentifier-arguments.js
 language/expressions/arrow-function/syntax/arrowparameters-bindingidentifier-concisebody-assignmentexpression.js
@@ -18966,7 +18969,10 @@ language/expressions/arrow-function/syntax/arrowparameters-cover-lineterminator-
 language/expressions/arrow-function/syntax/arrowparameters-cover-rest-concisebody-functionbody.js
 language/expressions/arrow-function/syntax/arrowparameters-cover-rest-lineterminator-concisebody-functionbody.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier-futurereservedword.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier-strict-futurereservedword.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-identifier.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-no-arguments.js
+language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-no-eval.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-no-yield.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-bindingidentifier-rest.js
 language/expressions/arrow-function/syntax/early-errors/arrowparameters-cover-no-arguments.js
@@ -26501,6 +26507,7 @@ language/expressions/in/private-field-presence-method.js
 language/expressions/in/private-field-rhs-await-present.js
 language/expressions/in/private-field-rhs-non-object.js
 language/expressions/in/private-field-rhs-unresolvable.js
+language/expressions/in/private-field-rhs-yield-absent.js
 language/expressions/in/private-field-rhs-yield-present.js
 language/expressions/in/rhs-yield-absent-non-strict.js
 language/expressions/in/rhs-yield-absent-strict.js
@@ -26976,6 +26983,7 @@ language/expressions/object/S11.1.5_A4.1.js
 language/expressions/object/S11.1.5_A4.2.js
 language/expressions/object/S11.1.5_A4.3.js
 language/expressions/object/__proto__-duplicate-computed.js
+language/expressions/object/__proto__-duplicate.js
 language/expressions/object/__proto__-fn-name.js
 language/expressions/object/__proto__-permitted-dup-shorthand.js
 language/expressions/object/__proto__-permitted-dup.js
@@ -27636,6 +27644,13 @@ language/expressions/object/dstr/meth-obj-ptrn-rest-val-obj.js
 language/expressions/object/dstr/object-rest-proxy-get-not-called-on-dontenum-keys.js
 language/expressions/object/dstr/object-rest-proxy-gopd-not-called-on-excluded-keys.js
 language/expressions/object/dstr/object-rest-proxy-ownkeys-returned-keys-order.js
+language/expressions/object/fn-name-arrow.js
+language/expressions/object/fn-name-class.js
+language/expressions/object/fn-name-cover.js
+language/expressions/object/fn-name-fn.js
+language/expressions/object/fn-name-gen.js
+language/expressions/object/getter-body-strict-inside.js
+language/expressions/object/getter-body-strict-outside.js
 language/expressions/object/getter-param-dflt.js
 language/expressions/object/getter-prop-desc.js
 language/expressions/object/getter-super-prop.js
@@ -27731,9 +27746,18 @@ language/expressions/object/ident-name-prop-name-literal-void-escaped.js
 language/expressions/object/ident-name-prop-name-literal-while-escaped.js
 language/expressions/object/ident-name-prop-name-literal-with-escaped.js
 language/expressions/object/identifier-shorthand-await-strict-mode.js
+language/expressions/object/identifier-shorthand-implements-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-interface-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-invalid-computed-name.js
 language/expressions/object/identifier-shorthand-invalid-zero.js
+language/expressions/object/identifier-shorthand-let-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-package-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-private-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-protected-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-public-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-static-init-await-valid.js
+language/expressions/object/identifier-shorthand-static-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-yield-invalid-strict-mode.js
 language/expressions/object/let-non-strict-access.js
 language/expressions/object/let-non-strict-syntax.js
 language/expressions/object/literal-property-name-bigint.js
@@ -28039,6 +28063,8 @@ language/expressions/object/scope-meth-param-rest-elem-var-close.js
 language/expressions/object/scope-meth-param-rest-elem-var-open.js
 language/expressions/object/scope-meth-paramsbody-var-close.js
 language/expressions/object/scope-setter-paramsbody-var-close.js
+language/expressions/object/setter-body-strict-inside.js
+language/expressions/object/setter-body-strict-outside.js
 language/expressions/object/setter-length-dflt.js
 language/expressions/object/setter-param-arguments-strict-inside.js
 language/expressions/object/setter-param-arguments-strict-outside.js
@@ -28963,6 +28989,7 @@ language/identifier-resolution/S10.2.2_A1_T9.js
 language/identifier-resolution/S11.1.2_A1_T1.js
 language/identifier-resolution/S11.1.2_A1_T2.js
 language/identifier-resolution/assign-to-global-undefined.js
+language/identifier-resolution/static-init-invalid-await.js
 language/identifier-resolution/unscopables.js
 language/identifiers/other_id_continue-escaped.js
 language/identifiers/other_id_continue.js
@@ -36303,6 +36330,7 @@ language/statements/for-in/dstr/array-elem-target-yield-invalid.js
 language/statements/for-in/dstr/array-rest-nested-array-yield-ident-invalid.js
 language/statements/for-in/dstr/array-rest-nested-obj-yield-ident-invalid.js
 language/statements/for-in/dstr/array-rest-yield-ident-invalid.js
+language/statements/for-in/dstr/obj-id-identifier-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-id-init-simple-strict.js
 language/statements/for-in/dstr/obj-id-init-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-prop-elem-init-yield-ident-invalid.js
@@ -36699,6 +36727,7 @@ language/statements/for-of/dstr/obj-id-identifier-resolution-last.js
 language/statements/for-of/dstr/obj-id-identifier-resolution-lone.js
 language/statements/for-of/dstr/obj-id-identifier-resolution-middle.js
 language/statements/for-of/dstr/obj-id-identifier-resolution-trlng.js
+language/statements/for-of/dstr/obj-id-identifier-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-id-identifier-yield-ident-valid.js
 language/statements/for-of/dstr/obj-id-init-assignment-missing.js
 language/statements/for-of/dstr/obj-id-init-assignment-null.js
