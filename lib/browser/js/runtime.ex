@@ -14,7 +14,7 @@ defmodule Browser.JS.Runtime do
   event) and `:console`.
   """
 
-  alias Browser.JS.{Builtins, DOM, Interp, Parser}
+  alias Browser.JS.{Builtins, DOM, Interp, Modules, Parser}
 
   @steps 5_000_000
   @call_timeout 15_000
@@ -68,6 +68,16 @@ defmodule Browser.JS.Runtime do
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
 
+  @doc """
+  `history.go(n)` between the history entries the page made itself (`pushState`, fragments):
+  the reply has `moved: true` if the page took `n` steps, with `popstate` fired; otherwise
+  the entry is another document's and the caller loads it.
+  """
+  def traverse(pid, n), do: call(pid, {:traverse, n})
+
+  @doc "The browser followed a link to a fragment of this page, now at `url`."
+  def fragment(pid, url), do: call(pid, {:fragment, url})
+
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
@@ -105,11 +115,11 @@ defmodule Browser.JS.Runtime do
     DOM.init(raw, info)
     DOM.install(scope)
     Process.put(:rt_info, info)
-    Browser.JS.WebAPI.install(scope, &http/3)
-    Process.put(:rt_modules, %{})
+    Browser.JS.WebAPI.install(scope, &http/1)
+    Modules.reset()
 
     Process.put(:js_import, fn spec, from ->
-      load_module(resolve_specifier(spec, from || base_url()))
+      Modules.import(spec, from || base_url(), loader())
     end)
 
     Process.put(:rt_importmap, %{})
@@ -133,6 +143,16 @@ defmodule Browser.JS.Runtime do
 
       {:layout, rects, sx, sy, content} ->
         DOM.set_layout(rects, sx, sy, content)
+        loop(t0)
+
+      {:storage, _origin, key, old, new} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> DOM.storage_changed(key, old, new) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
       {:scrolled, x, y} ->
@@ -216,6 +236,18 @@ defmodule Browser.JS.Runtime do
 
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
+  end
+
+  defp handle({:traverse, n}) do
+    moved = guard(fn -> DOM.traverse(n) end, :out_of_range) == :moved
+    Browser.JS.Promise.run_microtasks()
+    finish(%{moved: moved})
+  end
+
+  defp handle({:fragment, url}) do
+    guard(fn -> DOM.fragment_navigation(url) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
   end
 
   defp handle({:snapshot, controls}) do
@@ -329,7 +361,9 @@ defmodule Browser.JS.Runtime do
       Process.put(:rt_script, label(s))
 
       with {:ok, src, base} <- script_source(s) do
-        guard(fn -> run_module_source(src, base) end, :ok)
+        # a module from a file runs once, however often it is imported; an inline one is its own
+        key = if is_binary(s.src) and s.src != "", do: base, else: {:inline, make_ref()}
+        guard(fn -> run_module_source(src, key, base) end, :ok)
       end
     end
 
@@ -381,20 +415,48 @@ defmodule Browser.JS.Runtime do
   defp base_url, do: Process.get(:rt_info)[:base] || page_url()
   defp page_url, do: Process.get(:rt_info).url
 
-  # a request from a script (`fetch`, `XMLHttpRequest`)
+  # A request from a script (`fetch`, `XMLHttpRequest`): `req` has `:method`, `:url`, `:body`,
+  # `:headers` (`[{name, value}]`), `:content_type` and `:credentials`. The answer is
+  # `{:ok, response}` (see `Browser.Fetch.load/2`, `full: true`) or `{:error, message}`.
+  # A page's `info.request` (`fn url, opts -> ...`) makes the real request; without one
+  # (in tests) the page's `fetch` function answers every request with status 200.
   @doc false
-  def http("GET", url, _body), do: fetch(url)
+  def http(%{url: url} = req) do
+    scheme = URI.parse(url).scheme
+    request = Process.get(:rt_info)[:request]
 
-  def http(method, url, body) do
-    if URI.parse(url).scheme in ["http", "https"] do
-      verb = if method == "POST", do: :post, else: :get
+    cond do
+      scheme in ["http", "https"] and request != nil ->
+        opts = [
+          method: req.method,
+          body: req.body,
+          headers: req.headers,
+          content_type: req.content_type,
+          credentials: req.credentials,
+          full: true
+        ]
 
-      case Browser.Fetch.load(url, method: verb, body: body) do
-        {:ok, text, final} -> {:ok, text, final}
-        {:error, msg} -> {:error, to_string(msg)}
-      end
-    else
-      {:error, "blocked"}
+        case request.(url, opts) do
+          {:ok, response, _final} -> {:ok, response}
+          {:error, msg} -> {:error, to_string(msg)}
+        end
+
+      true ->
+        case fetch(url) do
+          {:ok, body, final} ->
+            {:ok,
+             %{
+               status: 200,
+               status_text: "OK",
+               headers: [],
+               body: body,
+               url: final,
+               redirected: false
+             }}
+
+          error ->
+            error
+        end
     end
   end
 
@@ -479,38 +541,26 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp run_module_source(src, base) do
-    case Parser.parse(src) do
-      {:ok, program} ->
-        Interp.run_module(
-          program,
-          fn spec -> load_module(resolve_specifier(spec, base)) end,
-          base
-        )
-
-      {:error, msg} ->
-        throw({:syntax, msg})
+  defp run_module_source(src, key, base) do
+    case Parser.parse(src, module: true) do
+      {:ok, program} -> Modules.run(key, base, program, loader())
+      {:error, msg} -> throw({:syntax, msg})
     end
   end
 
-  defp load_module(url) do
-    case Process.get(:rt_modules) do
-      %{^url => ns} ->
-        ns
-
-      modules ->
-        # a module that imports itself (through others) sees an empty namespace
-        Process.put(:rt_modules, Map.put(modules, url, Interp.new_object()))
-
-        case fetch(url) do
-          {:ok, src, final} ->
-            ns = run_module_source(src, final)
-            Process.put(:rt_modules, Map.put(Process.get(:rt_modules), url, ns))
-            ns
-
-          {:error, msg} ->
-            Interp.throw_error("TypeError", "Failed to fetch module #{url}: #{msg}")
-        end
-    end
+  defp loader do
+    {fn spec, base ->
+       try do
+         {:ok, resolve_specifier(spec, base)}
+       catch
+         {:js_error, _} -> {:error, "Failed to resolve module specifier '#{spec}'"}
+       end
+     end,
+     fn url ->
+       case fetch(url) do
+         {:ok, src, final} -> {:ok, src, final}
+         {:error, msg} -> {:error, msg}
+       end
+     end}
   end
 end

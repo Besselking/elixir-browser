@@ -41,8 +41,8 @@ defmodule Browser.JS.Test262Test do
 
   describe "decide/3" do
     test "skips what the runtime cannot do" do
-      assert Test262.decide(%{"features" => ["Proxy"]}, "") == {:skip, "feature Proxy"}
-      assert Test262.decide(%{"flags" => ["module"]}, "") == {:skip, "module"}
+      assert Test262.decide(%{"features" => ["Temporal"]}, "") == {:skip, "feature Temporal"}
+      assert Test262.decide(%{"flags" => ["module"]}, "") == :run
       assert {:skip, _} = Test262.decide(%{}, "$262.createRealm()")
       assert Test262.decide(%{"features" => ["arrow-function"]}, "") == :run
       assert Test262.decide(%{"features" => ["Proxy"]}, "", skip_features: []) == :run

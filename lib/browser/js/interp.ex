@@ -114,10 +114,26 @@ defmodule Browser.JS.Interp do
      })}
   end
 
+  @doc "`get [Symbol.species]` on a built-in constructor: returns `this`."
+  def def_species(ctor) do
+    put_hidden(
+      ctor,
+      {:symbol, :species, "Symbol.species"},
+      {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
+    )
+  end
+
   def make_error(type, message) do
     err = new_object([{"message", message}], proto({:error, type}))
+    mark_error(err)
     put_hidden(err, "stack", stack_string("#{type}: #{message}"))
     err
+  end
+
+  @doc "Sets the [[ErrorData]] marker `Error.isError` looks for."
+  def mark_error({:obj, id} = e) do
+    store(id, Map.put(deref(id), :errdata, true))
+    e
   end
 
   @doc "`Error.stack`: the header and the names of the functions being run, innermost first."
@@ -164,6 +180,9 @@ defmodule Browser.JS.Interp do
     s = Map.fetch!(heap, scope)
 
     case s.vars do
+      %{^name => {:alias, target, var}} ->
+        lookup_var(target, var, heap)
+
       %{^name => v} ->
         {:ok, v}
 
@@ -198,6 +217,9 @@ defmodule Browser.JS.Interp do
         if MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
 
+        if :erlang.map_get(name, s.vars) == :tdz,
+          do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
         :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
@@ -227,7 +249,7 @@ defmodule Browser.JS.Interp do
   def function?({:obj, id}), do: deref(id).class == :function
   def function?(_), do: false
 
-  def truthy(v) when v in [false, :undefined, :null, :nan, ""], do: false
+  def truthy(v) when v in [false, :undefined, :null, :nan, "", {:bigint, 0}], do: false
   def truthy(v) when is_number(v), do: v != 0
   def truthy(_), do: true
 
@@ -237,6 +259,7 @@ defmodule Browser.JS.Interp do
   def typeof(v) when is_binary(v), do: "string"
   def typeof({:obj, _} = v), do: if(function?(v), do: "function", else: "object")
   def typeof({:symbol, _, _}), do: "symbol"
+  def typeof({:bigint, _}), do: "bigint"
   def typeof(v), do: if(num?(v), do: "number", else: "object")
 
   def to_num(v) when is_number(v), do: v
@@ -245,12 +268,46 @@ defmodule Browser.JS.Interp do
   def to_num({:symbol, _, _}),
     do: throw_error("TypeError", "Cannot convert a Symbol value to a number")
 
+  def to_num({:bigint, _}),
+    do: throw_error("TypeError", "Cannot convert a BigInt value to a number")
+
   def to_num(:undefined), do: :nan
   def to_num(:null), do: 0.0
   def to_num(true), do: 1.0
   def to_num(false), do: 0.0
   def to_num(v) when is_binary(v), do: Num.parse(v)
   def to_num({:obj, _} = v), do: v |> to_primitive("number") |> to_num()
+
+  # WhiteSpace and LineTerminator of the language: not Unicode's White_Space (U+180E, U+0085)
+  @js_space [9, 10, 11, 12, 13, 32, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF] ++
+              Enum.to_list(0x2000..0x200A)
+
+  def js_trim_start(<<c::utf8, rest::binary>> = s),
+    do: if(c in @js_space, do: js_trim_start(rest), else: s)
+
+  def js_trim_start(s), do: s
+
+  def js_trim_end(s) do
+    s
+    |> String.codepoints()
+    |> Enum.reverse()
+    |> Enum.drop_while(fn <<c::utf8>> -> c in @js_space end)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
+
+  def js_trim(s), do: s |> js_trim_start() |> js_trim_end()
+
+  @doc "ToNumeric: a number, or a `{:bigint, n}`."
+  def numeric(v) do
+    case to_primitive(v, "number") do
+      {:bigint, _} = b -> b
+      p -> to_num(p)
+    end
+  end
+
+  def big?({:bigint, _}), do: true
+  def big?(_), do: false
 
   @doc "ToIntegerOrInfinity, clamped to a large integer so callers can compare freely."
   def to_int(v) do
@@ -267,6 +324,7 @@ defmodule Browser.JS.Interp do
   def to_str({:symbol, _, _}),
     do: throw_error("TypeError", "Cannot convert a Symbol value to a string")
 
+  def to_str({:bigint, n}), do: Integer.to_string(n)
   def to_str(:undefined), do: "undefined"
   def to_str(:null), do: "null"
   def to_str(true), do: "true"
@@ -279,6 +337,24 @@ defmodule Browser.JS.Interp do
   def to_key(k), do: to_str(k)
 
   def to_primitive({:obj, _} = o, hint) do
+    case get(o, {:symbol, :toPrimitive, "Symbol.toPrimitive"}) do
+      m when m in [:undefined, :null] ->
+        ordinary_to_primitive(o, hint)
+
+      m ->
+        unless function?(m),
+          do: throw_error("TypeError", "Symbol.toPrimitive is not a function")
+
+        case call(m, o, [hint]) do
+          {:obj, _} -> throw_error("TypeError", "Cannot convert object to primitive value")
+          prim -> prim
+        end
+    end
+  end
+
+  def to_primitive(v, _), do: v
+
+  defp ordinary_to_primitive(o, hint) do
     order = if hint == "string", do: ["toString", "valueOf"], else: ["valueOf", "toString"]
 
     Enum.find_value(order, fn name ->
@@ -297,8 +373,6 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def to_primitive(v, _), do: v
-
   # ── equality and comparison ────────────────────────────────
 
   def strict_eq(a, b) do
@@ -310,6 +384,7 @@ defmodule Browser.JS.Interp do
       nullish?(a) and nullish?(b) -> true
       nullish?(a) or nullish?(b) -> false
       num?(a) and num?(b) -> Num.equal?(a, b)
+      big?(a) or big?(b) -> Browser.JS.BigInt.loose_eq(a, b)
       is_binary(a) and is_binary(b) -> a == b
       is_boolean(a) -> loose_eq(to_num(a), b)
       is_boolean(b) -> loose_eq(a, to_num(b))
@@ -331,14 +406,19 @@ defmodule Browser.JS.Interp do
     a = to_primitive(a, "number")
     b = to_primitive(b, "number")
 
-    if is_binary(a) and is_binary(b) do
-      cond do
-        a < b -> :lt
-        a > b -> :gt
-        true -> :eq
-      end
-    else
-      Num.compare(to_num(a), to_num(b))
+    cond do
+      is_binary(a) and is_binary(b) ->
+        cond do
+          a < b -> :lt
+          a > b -> :gt
+          true -> :eq
+        end
+
+      big?(a) or big?(b) ->
+        Browser.JS.BigInt.compare(a, b)
+
+      true ->
+        Num.compare(to_num(a), to_num(b))
     end
   end
 
@@ -398,14 +478,10 @@ defmodule Browser.JS.Interp do
       :function ->
         key = to_key(key)
 
-        case lookup(o, key, {:obj, id}) do
-          :undefined ->
-            if key in ["name", "length"] and key in Map.get(o, :gone, []),
-              do: :undefined,
-              else: function_prop(id, o, key)
-
-          v ->
-            v
+        if Map.has_key?(o, :proxy) do
+          Browser.JS.Proxy.get({:obj, id}, key, {:obj, id})
+        else
+          function_get(id, o, key)
         end
 
       :host ->
@@ -433,6 +509,7 @@ defmodule Browser.JS.Interp do
   def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
     do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
 
+  def get({:bigint, _} = n, key), do: lookup(deref(elem(proto(:bigint), 1)), to_key(key), n)
   def get({:symbol, _, _} = s, key), do: lookup(deref(elem(proto(:symbol), 1)), to_key(key), s)
 
   def get(b, key) when is_boolean(b),
@@ -468,8 +545,12 @@ defmodule Browser.JS.Interp do
   @native_lengths %{
     "Array" => 1.0,
     "ArrayBuffer" => 1.0,
+    "DataView" => 1.0,
+    "SharedArrayBuffer" => 1.0,
     "Boolean" => 1.0,
     "Date" => 7.0,
+    "AggregateError" => 2.0,
+    "SuppressedError" => 3.0,
     "Error" => 1.0,
     "EvalError" => 1.0,
     "Function" => 1.0,
@@ -543,16 +624,20 @@ defmodule Browser.JS.Interp do
     "fromCodePoint" => 1.0,
     "fromEntries" => 1.0,
     "fround" => 1.0,
+    "f16round" => 1.0,
     "get" => 1.0,
     "getOwnPropertyDescriptor" => 2.0,
     "getOwnPropertyDescriptors" => 1.0,
     "getOwnPropertyNames" => 1.0,
     "getOwnPropertySymbols" => 1.0,
+    "for" => 1.0,
     "getPrototypeOf" => 1.0,
+    "keyFor" => 1.0,
     "has" => 1.0,
     "hasOwn" => 2.0,
     "hasOwnProperty" => 1.0,
     "hypot" => 2.0,
+    "sumPrecise" => 1.0,
     "imul" => 2.0,
     "includes" => 1.0,
     "indexOf" => 1.0,
@@ -670,8 +755,8 @@ defmodule Browser.JS.Interp do
       Enum.count(c.params, &(not match?({:rest, _}, &1) and not match?({:default, _, _}, &1))) *
         1.0
 
-  defp function_prop(_id, %{fun: {:native, name, _}}, "length"),
-    do: Map.get(@native_lengths, name, 0.0)
+  defp function_prop(_id, %{fun: {:native, name, _}} = o, "length"),
+    do: Map.get(o, :arity) || Map.get(@native_lengths, name, 0.0)
 
   defp function_prop(_id, _o, _key), do: :undefined
 
@@ -679,6 +764,28 @@ defmodule Browser.JS.Interp do
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
     store(id, %{o | props: Map.put(o.props, key, v)})
+  end
+
+  @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
+  def define_data({:obj, id}, key, v) do
+    o = deref(id)
+    keys = if Map.has_key?(o.props, key), do: o.keys, else: [key | o.keys]
+    store(id, %{o | props: Map.put(o.props, key, v), keys: keys})
+  end
+
+  @doc "Sets `@@toStringTag`: not writable or enumerable, but configurable."
+  def put_tag({:obj, id}, name) do
+    key = {:symbol, :toStringTag, "Symbol.toStringTag"}
+    o = deref(id)
+    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
+    store(id, o |> Map.put(:props, Map.put(o.props, key, name)) |> Map.put(:attrs, attrs))
+  end
+
+  @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."
+  def put_const({:obj, id}, key, v) do
+    o = deref(id)
+    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: false, e: false})
+    store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
   end
 
   def put({:obj, id} = obj, {:private, _} = key, v) do
@@ -772,6 +879,10 @@ defmodule Browser.JS.Interp do
           :miss -> put_prop(id, o, key, v)
         end
 
+      %{proxy: _} ->
+        Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id})
+        :ok
+
       # a function's own name and length are not writable
       %{class: :function, props: props} when key in ["name", "length"] ->
         unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
@@ -799,7 +910,9 @@ defmodule Browser.JS.Interp do
         :ok
 
       {:ok, _} ->
-        if writable?(o, key), do: store(id, %{o | props: Map.put(o.props, key, v)}), else: :ok
+        if writable?(o, key),
+          do: store(id, %{o | props: Map.put(o.props, key, v)}),
+          else: :ok
 
       :error ->
         case inherited_set(o.proto, key) do
@@ -855,9 +968,13 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     case o do
+      %{proxy: _} ->
+        Browser.JS.Proxy.delete({:obj, id}, to_key(key))
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_delete, 2),
-          do: mod.host_delete(data, to_key(key)),
+          # a host that has nothing to say about `key` answers :default
+          do: with(:default <- mod.host_delete(data, to_key(key)), do: delete_plain(id, o, key)),
           else: delete_plain(id, o, key)
 
       _ ->
@@ -910,6 +1027,9 @@ defmodule Browser.JS.Interp do
     key_s = to_key(key)
 
     cond do
+      Map.has_key?(o, :proxy) ->
+        Browser.JS.Proxy.has({:obj, id}, key_s)
+
       # what a host object answers for is there (`"foo" in window`)
       o.class == :host and host_has?(o, id, key_s) ->
         true
@@ -946,9 +1066,15 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     case o do
+      %{proxy: _} ->
+        Browser.JS.Proxy.host_keys(id)
+
+      %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
+        Browser.JS.TypedArrays.host_keys(data) ++ own_keys_plain(o)
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
-          do: mod.host_keys(data),
+          do: with(:default <- mod.host_keys(data), do: own_keys_plain(o)),
           else: own_keys_plain(o)
 
       _ ->
@@ -1162,16 +1288,19 @@ defmodule Browser.JS.Interp do
   def construct(f, args, new_target \\ nil)
 
   def construct({:obj, id} = f, args, new_target) do
-    unless function?(f), do: throw_error("TypeError", "value is not a constructor")
-
-    if match?(%{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr], deref(id)),
-      do: throw_error("TypeError", "arrow function is not a constructor")
-
-    if Map.get(deref(id), :generator),
-      do: throw_error("TypeError", "generator is not a constructor")
+    unless constructor?(f), do: throw_error("TypeError", "value is not a constructor")
 
     nt = new_target || f
 
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.construct(f, args, nt)
+      _ -> construct_bound(f, id, args, new_target, nt)
+    end
+  end
+
+  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
+
+  defp construct_bound(f, id, args, new_target, nt) do
     case Map.get(deref(id), :bound) do
       {target, bound_args} ->
         # a bound function constructs what it is bound to
@@ -1186,7 +1315,34 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
+  @doc "IsConstructor: arrows, generators, async functions, methods and built-ins without a `prototype` are not."
+  def constructor?({:obj, id} = f) do
+    o = deref(id)
+
+    function?(f) and
+      case o do
+        %{proxy_constructor: c} -> c
+        %{proxy_ctor: true} -> true
+        %{bound: {target, _}} -> constructor?(target)
+        %{generator: true} -> false
+        %{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr] -> false
+        %{fun: {:closure, %{name: {:method, _}}}} -> false
+        %{fun: {:closure, _}, async: true} -> false
+        %{fun: {:native, _, _}, props: props} -> Map.has_key?(props, "prototype")
+        _ -> true
+      end
+  end
+
+  def constructor?(_), do: false
+
+  defp builtin_prototype(%{fun: {:native, _, _}}, f) do
+    case get(f, "prototype") do
+      {:obj, _} = p -> p
+      _ -> proto(:object)
+    end
+  end
+
+  defp builtin_prototype(_, _), do: proto(:object)
 
   defp construct_plain({:obj, _} = f, id, nt, new_target, args) do
     case Map.get(deref(id), :class_info) do
@@ -1194,8 +1350,11 @@ defmodule Browser.JS.Interp do
         proto =
           case get(nt, "prototype") do
             {:obj, _} = p -> p
-            _ -> proto(:object)
+            # a built-in falls back to its own prototype, a plain function to Object.prototype
+            _ -> builtin_prototype(deref(id), f)
           end
+
+        if Map.get(deref(id), :no_new), do: throw_error("TypeError", "not a constructor")
 
         this = new_object([], proto)
 
@@ -1242,8 +1401,8 @@ defmodule Browser.JS.Interp do
     false
   end
 
-  defp walk_protos({:obj, id}, target) do
-    case deref(id).proto do
+  defp walk_protos({:obj, _} = o, target) do
+    case Browser.JS.Props.get_prototype_of(o) do
       {:obj, _} = p -> p == target or walk_protos(p, target)
       _ -> false
     end
@@ -1396,8 +1555,29 @@ defmodule Browser.JS.Interp do
     if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
   end
 
+  defp function_get(id, o, key) do
+    case lookup(o, key, {:obj, id}) do
+      :undefined ->
+        cond do
+          key in ["name", "length"] and key in Map.get(o, :gone, []) -> :undefined
+          # `f.prototype = undefined` is a value, not a missing property
+          key == "prototype" and Map.has_key?(o.props, "prototype") -> :undefined
+          true -> function_prop(id, o, key)
+        end
+
+      v ->
+        v
+    end
+  end
+
   @doc "A property read with a given `this` for getters (`super.x`)."
-  def get_with_receiver({:obj, id}, key, receiver), do: lookup(deref(id), to_key(key), receiver)
+  def get_with_receiver({:obj, id} = obj, key, receiver) do
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.get(obj, to_key(key), receiver)
+      o -> lookup(o, to_key(key), receiver)
+    end
+  end
+
   def get_with_receiver(_, _, _), do: :undefined
 
   # a parameter list with initialisers gets a temporal dead zone: every name
@@ -1425,21 +1605,26 @@ defmodule Browser.JS.Interp do
     bind_params_list(ps, rest, scope)
   end
 
-  defp make_fn({:gen, fun}, env) do
-    {:obj, id} = f = make_fn(fun, env)
+  defp make_fn(node, env), do: make_fn(node, env, true)
+
+  # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
+  defp make_fn({:gen, fun}, env, named?) do
+    {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :generator, true))
     f
   end
 
-  defp make_fn({:async, fun}, env) do
-    {:obj, id} = f = make_fn(fun, env)
+  defp make_fn({:async, fun}, env, named?) do
+    {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :async, true))
     f
   end
 
-  defp make_fn({:fn, name, params, body, mode}, env) do
+  defp make_fn({:fn, name, params, body, mode}, env, named?) do
+    named? = named? and is_binary(name) and mode == false
+
     env =
-      if is_binary(name) and mode == false do
+      if named? do
         # a function expression can call itself by name
         s = new_scope(env)
         s
@@ -1459,7 +1644,7 @@ defmodule Browser.JS.Interp do
          proto: proto(:function)
        })}
 
-    if is_binary(name) and mode == false and env != nil, do: declare(env, name, fun)
+    if named? and env != nil, do: declare(env, name, fun)
     fun
   end
 
@@ -1513,7 +1698,7 @@ defmodule Browser.JS.Interp do
       store(scope, %{s | vars: vars})
     end
 
-    for {name, fun} <- funs, do: declare(scope, name, make_fn(fun, scope))
+    for {name, fun} <- funs, do: declare(scope, name, make_fn(fun, scope, false))
     :ok
   end
 
@@ -1529,7 +1714,12 @@ defmodule Browser.JS.Interp do
     c
   end
 
-  defp fundecls(stmts), do: for(stmt <- stmts, {:fundecl, n, f} <- [unexport(stmt)], do: {n, f})
+  defp fundecls(stmts) do
+    Enum.flat_map(stmts, fn
+      {:using, _, _, _, rest} -> fundecls(rest)
+      stmt -> for {:fundecl, n, f} <- [unexport(stmt)], do: {n, f}
+    end)
+  end
 
   # the `var` names of a body, remembered: walking the syntax tree on every call is costly
   defp hoisted_names(stmts) do
@@ -1553,6 +1743,7 @@ defmodule Browser.JS.Interp do
     do: Enum.reduce(decls, acc, fn {pat, _}, a -> pattern_names(pat, a) end)
 
   def var_names({:export, stmt}, acc), do: var_names(stmt, acc)
+  def var_names({:using, _, _, _, rest}, acc), do: var_names(rest, acc)
   def var_names({:if, _, a, b}, acc), do: var_names(b, var_names(a, acc))
   def var_names({:for, init, _, _, body}, acc), do: var_names(body, var_names(init, acc))
 
@@ -1587,8 +1778,12 @@ defmodule Browser.JS.Interp do
 
   @doc false
   def hoist_functions(stmts, scope) do
-    for stmt <- stmts, {:fundecl, name, fun} <- [unexport(stmt)] do
-      declare(scope, name, make_fn(fun, scope))
+    for stmt <- stmts do
+      case unexport(stmt) do
+        {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope, false))
+        {:using, _, _, _, rest} -> hoist_functions(rest, scope)
+        _ -> :ok
+      end
     end
 
     :ok
@@ -1602,6 +1797,7 @@ defmodule Browser.JS.Interp do
 
   @doc "Runs a whole program in the global scope; returns the completion value."
   def run_program({:program, stmts}) do
+    :erlang.put(:js_last, :undefined)
     scope = global()
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
@@ -1611,68 +1807,29 @@ defmodule Browser.JS.Interp do
     Process.get(:js_last, :undefined)
   end
 
-  @doc """
-  Runs a module in a scope of its own and returns its namespace object (the exports).
-  `resolve` maps an import specifier to the namespace object of that module.
-  """
-  def run_module({:program, stmts}, resolve, base \\ nil) do
-    scope = new_scope(global())
-    if base, do: declare(scope, :module_url, base)
-
-    for {:import, spec, bindings} <- stmts do
-      ns = resolve.(spec)
-
-      for b <- bindings do
-        case b do
-          {:default, local} -> declare(scope, local, get(ns, "default"))
-          {:ns, local} -> declare(scope, local, ns)
-          {:named, imported, local} -> declare(scope, local, get(ns, imported))
-        end
-      end
-    end
-
+  @doc false
+  # declares what a module body brings into its scope: `var` names, `let`/`const`/class names
+  # (uninitialized until their declaration runs) and function declarations
+  def module_init(stmts, scope) do
     hoist_vars(stmts, scope)
+
+    for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(scope, name, :tdz)
+    declare(scope, :default_export, :tdz)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
-    Browser.JS.Promise.run_microtasks()
-
-    pairs =
-      Enum.flat_map(stmts, fn
-        {:export, {:var, _, decls}} ->
-          decls
-          |> Enum.reduce([], fn {pat, _}, a -> pattern_names(pat, a) end)
-          |> Enum.reverse()
-          |> Enum.map(&{&1, scope_value(scope, &1)})
-
-        {:export, {:fundecl, name, _}} ->
-          [{name, scope_value(scope, name)}]
-
-        {:export_default, {:fundecl, name, _}} ->
-          [{"default", scope_value(scope, name)}]
-
-        {:export_default, {:expr, _}} ->
-          [{"default", scope_value(scope, :default_export)}]
-
-        {:export_names, names} ->
-          for {local, exported} <- names, do: {exported, scope_value(scope, local)}
-
-        {:export_from, spec, :all} ->
-          ns = resolve.(spec)
-          for k <- own_keys(ns), k != "default", do: {k, get(ns, k)}
-
-        {:export_from, spec, names} ->
-          ns = resolve.(spec)
-          for {imported, exported} <- names, do: {exported, get(ns, imported)}
-
-        _ ->
-          []
-      end)
-
-    # a module namespace lists its names in code unit order
-    pairs |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort_by(&elem(&1, 0)) |> new_object()
   end
 
-  defp scope_value(scope, name) do
+  defp lexical_names({:var, kind, decls}) when kind in [:let, :const],
+    do: Enum.reduce(decls, [], fn {pat, _}, a -> pattern_names(pat, a) end)
+
+  defp lexical_names({:export_default, {:classdecl, name, _}}), do: [name]
+  defp lexical_names(_), do: []
+
+  @doc false
+  def module_exec(stmts, scope), do: exec_list(stmts, scope)
+
+  @doc false
+  # the current value of a module's variable (`:tdz` while uninitialized)
+  def module_binding(scope, name) do
     case lookup_var(scope, name) do
       {:ok, v} -> v
       :error -> :undefined
@@ -1680,6 +1837,97 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
+
+  # ── using declarations ─────────────────────────────────────
+
+  @dispose {:symbol, :dispose, "Symbol.dispose"}
+  @async_dispose {:symbol, :asyncDispose, "Symbol.asyncDispose"}
+
+  @doc false
+  # what a `using` / `await using` initializer gives: `{:none, mode}` for null and undefined,
+  # else `{:res, value, method, mode}` where mode is :sync, :async, or :async_from_sync
+  def using_resource(kind, v) when v in [:undefined, :null],
+    do: {:none, if(kind == :using, do: :sync, else: :async)}
+
+  def using_resource(kind, v) do
+    unless match?({:obj, _}, v),
+      do: throw_error("TypeError", "using declaration needs an object, null or undefined")
+
+    case kind do
+      :using ->
+        {:res, v, dispose_method(v, @dispose) || missing_dispose(), :sync}
+
+      :await_using ->
+        case dispose_method(v, @async_dispose) do
+          nil -> {:res, v, dispose_method(v, @dispose) || missing_dispose(), :async_from_sync}
+          m -> {:res, v, m, :async}
+        end
+    end
+  end
+
+  defp missing_dispose, do: throw_error("TypeError", "object is not disposable")
+
+  defp dispose_method(v, sym) do
+    case get(v, sym) do
+      m when m in [:undefined, :null] ->
+        nil
+
+      m ->
+        unless function?(m), do: throw_error("TypeError", "dispose method is not callable")
+        m
+    end
+  end
+
+  @doc false
+  # runs the disposal of one resource to its end: :ok or {:error, e}
+  def dispose_sync({:none, :sync}), do: :ok
+  def dispose_sync({:none, :async}), do: await_catching(:undefined)
+
+  def dispose_sync({:res, v, m, :sync}) do
+    call(m, v, [])
+    :ok
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  def dispose_sync({:res, v, m, :async}) do
+    await_catching(call(m, v, []))
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  def dispose_sync({:res, v, m, :async_from_sync}) do
+    call(m, v, [])
+    await_catching(:undefined)
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  defp await_catching(value) do
+    Browser.JS.Promise.await(value)
+    :ok
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  @doc false
+  # how the rest of a list ended (:ok, or {:thrown, t}) together with its disposal
+  def using_finish(:ok, :ok), do: :ok
+  def using_finish(:ok, {:error, e}), do: throw({:js_error, e})
+  def using_finish({:thrown, t}, :ok), do: throw(t)
+
+  def using_finish({:thrown, {:js_error, e}}, {:error, e2}),
+    do: throw({:js_error, suppressed_error(e2, e)})
+
+  def using_finish({:thrown, _}, {:error, e2}), do: throw({:js_error, e2})
+
+  @doc false
+  def suppressed_error(error, suppressed) do
+    err = make_error("SuppressedError", "An error was suppressed during disposal")
+    put_hidden(err, "error", error)
+    put_hidden(err, "suppressed", suppressed)
+    err
+  end
 
   @doc false
   def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
@@ -1703,6 +1951,24 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
+  # `using x = v; rest`: the rest of the list runs, then the resource is disposed, whichever
+  # way the rest ended
+  defp exec({:using, kind, name, init, rest}, env, _) do
+    v = ev_named(init, env, {:id, name})
+    res = using_resource(kind, v)
+    declare(env, name, v, true)
+
+    outcome =
+      try do
+        exec_list(rest, env)
+        :ok
+      catch
+        t -> {:thrown, t}
+      end
+
+    using_finish(outcome, dispose_sync(res))
+  end
+
   defp exec({:with, obj, body}, env, _) do
     o = ev(obj, env)
 
@@ -1720,7 +1986,13 @@ defmodule Browser.JS.Interp do
   defp exec({:import, _, _}, _, _), do: :ok
   defp exec({:export, stmt}, env, _), do: exec(stmt, env, [])
   defp exec({:export_default, {:fundecl, _, _}}, _, _), do: :ok
-  defp exec({:export_default, {:expr, e}}, env, _), do: declare(env, :default_export, ev(e, env))
+
+  defp exec({:export_default, {:classdecl, name, node}}, env, _),
+    do: declare(env, name, ev_named(node, env, {:id, "default"}))
+
+  defp exec({:export_default, {:expr, e}}, env, _),
+    do: declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+
   defp exec({:export_names, _}, _, _), do: :ok
   defp exec({:export_from, _, _}, _, _), do: :ok
 
@@ -1918,7 +2190,9 @@ defmodule Browser.JS.Interp do
       end
 
     if rest do
-      pairs = for k <- own_keys(v), k not in used, do: {k, get(v, k)}
+      pairs =
+        for k <- Browser.JS.Props.enumerable_keys(v, used), do: {k, get(v, k)}
+
       bind(rest, new_object(pairs), env, mode)
     end
 
@@ -1998,6 +2272,7 @@ defmodule Browser.JS.Interp do
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
+  def ev({:bigint, n}, _), do: {:bigint, n}
 
   def ev({:val, v}, _env), do: v
 
@@ -2039,25 +2314,32 @@ defmodule Browser.JS.Interp do
 
   # `import(specifier)`: a promise for the module's namespace (the host loads it)
   def ev({:import_call, e}, env) do
-    spec = to_str(ev(e, env))
+    arg = ev(e, env)
     p = Browser.JS.Promise.new()
 
-    case pget(:js_import) do
-      nil ->
-        Browser.JS.Promise.reject(p, make_error("TypeError", "Dynamic import is not available"))
+    # the specifier is converted now; the module is loaded in a later job
+    try do
+      spec = to_str(arg)
 
-      hook ->
-        base =
-          case lookup_var(env, :module_url) do
-            {:ok, b} -> b
-            :error -> nil
-          end
+      base =
+        case lookup_var(env, :module_url) do
+          {:ok, b} -> b
+          :error -> nil
+        end
 
+      hook = pget(:js_import)
+
+      Browser.JS.Promise.enqueue(fn ->
         try do
-          Browser.JS.Promise.resolve(p, hook.(spec, base))
+          if hook == nil,
+            do: throw_error("TypeError", "Dynamic import is not available"),
+            else: Browser.JS.Promise.resolve(p, hook.(spec, base))
         catch
           {:js_error, err} -> Browser.JS.Promise.reject(p, err)
         end
+      end)
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
     end
 
     p
@@ -2102,7 +2384,10 @@ defmodule Browser.JS.Interp do
   # the strings argument of a tagged template: an array with a `raw` twin
   def ev({:tagged_strings, cooked, raw}, _env) do
     strings = new_array(cooked)
-    put_hidden(strings, "raw", new_array(raw))
+    raw = new_array(raw)
+    Browser.JS.Props.lock(raw, true)
+    put_hidden(strings, "raw", raw)
+    Browser.JS.Props.lock(strings, true)
     strings
   end
 
@@ -2181,6 +2466,9 @@ defmodule Browser.JS.Interp do
 
   def ev({:unary, "typeof", {:id, name}}, env) do
     case lookup_var(env, name) do
+      {:ok, :tdz} ->
+        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
       {:ok, v} ->
         typeof(v)
 
@@ -2198,12 +2486,29 @@ defmodule Browser.JS.Interp do
     v = ev(e, env)
 
     case op do
-      "!" -> not truthy(v)
-      "-" -> Num.neg(to_num(v))
-      "+" -> to_num(v)
-      "~" -> (Num.int32(to_num(v)) |> Bitwise.bnot()) * 1.0
-      "typeof" -> typeof(v)
-      "void" -> :undefined
+      "!" ->
+        not truthy(v)
+
+      "-" ->
+        case numeric(v) do
+          {:bigint, n} -> {:bigint, -n}
+          n -> Num.neg(n)
+        end
+
+      "+" ->
+        to_num(v)
+
+      "~" ->
+        case numeric(v) do
+          {:bigint, n} -> {:bigint, Bitwise.bnot(n)}
+          n -> (Num.int32(n) |> Bitwise.bnot()) * 1.0
+        end
+
+      "typeof" ->
+        typeof(v)
+
+      "void" ->
+        :undefined
     end
   end
 
@@ -2225,8 +2530,14 @@ defmodule Browser.JS.Interp do
   def ev({:binary, op, l, r}, env), do: binop(op, ev(l, env), ev(r, env))
 
   def ev({:update, op, prefix?, target}, env) do
-    old = to_num(ev(target, env))
-    new = if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+    old = numeric(ev(target, env))
+
+    new =
+      case old do
+        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+      end
+
     assign_to(target, new, env)
     if prefix?, do: new, else: old
   end
@@ -2323,7 +2634,9 @@ defmodule Browser.JS.Interp do
   end
 
   defp spread_into(obj, src) do
-    for k <- own_keys(src), do: put(obj, k, get(src, k))
+    unless nullish?(src) or not match?({:obj, _}, src),
+      do: for(k <- Browser.JS.Props.enumerable_keys(src), do: put(obj, k, get(src, k)))
+
     :ok
   end
 
@@ -2342,16 +2655,30 @@ defmodule Browser.JS.Interp do
     a = to_primitive(a, "default")
     b = to_primitive(b, "default")
 
-    if is_binary(a) or is_binary(b),
-      do: to_str(a) <> to_str(b),
-      else: Num.add(to_num(a), to_num(b))
+    cond do
+      is_binary(a) or is_binary(b) -> to_str(a) <> to_str(b)
+      big?(a) or big?(b) -> Browser.JS.BigInt.arith("+", a, b)
+      true -> Num.add(to_num(a), to_num(b))
+    end
   end
 
-  def binop("-", a, b), do: Num.sub(to_num(a), to_num(b))
-  def binop("*", a, b), do: Num.mul(to_num(a), to_num(b))
-  def binop("/", a, b), do: Num.div(to_num(a), to_num(b))
-  def binop("%", a, b), do: Num.mod(to_num(a), to_num(b))
-  def binop("**", a, b), do: Num.pow(to_num(a), to_num(b))
+  def binop(op, a, b) when op in ["-", "*", "/", "%", "**"] do
+    a = numeric(a)
+    b = numeric(b)
+
+    if big?(a) or big?(b) do
+      Browser.JS.BigInt.arith(op, a, b)
+    else
+      case op do
+        "-" -> Num.sub(a, b)
+        "*" -> Num.mul(a, b)
+        "/" -> Num.div(a, b)
+        "%" -> Num.mod(a, b)
+        "**" -> Num.pow(a, b)
+      end
+    end
+  end
+
   def binop("===", a, b), do: strict_eq(a, b)
   def binop("!==", a, b), do: not strict_eq(a, b)
   def binop("==", a, b), do: loose_eq(a, b)
@@ -2360,21 +2687,31 @@ defmodule Browser.JS.Interp do
   def binop(">", a, b), do: compare(a, b) == :gt
   def binop("<=", a, b), do: compare(a, b) in [:lt, :eq]
   def binop(">=", a, b), do: compare(a, b) in [:gt, :eq]
-  def binop(op, a, b) when op in ["&", "|", "^"], do: Num.bitop(op, to_num(a), to_num(b))
-  def binop(op, a, b) when op in ["<<", ">>", ">>>"], do: Num.shift(op, to_num(a), to_num(b))
+
+  def binop(op, a, b) when op in ["&", "|", "^", "<<", ">>", ">>>"] do
+    a = numeric(a)
+    b = numeric(b)
+
+    cond do
+      big?(a) or big?(b) -> Browser.JS.BigInt.arith(op, a, b)
+      op in ["&", "|", "^"] -> Num.bitop(op, a, b)
+      true -> Num.shift(op, a, b)
+    end
+  end
+
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to
-  defp ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
-  defp ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  def ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  def ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
 
-  defp ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
+  def ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
     do: name_fn(ev(e, env), name)
 
-  defp ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
+  def ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
     do: name_fn(ev(e, env), name)
 
-  defp ev_named(e, env, _), do: ev(e, env)
+  def ev_named(e, env, _), do: ev(e, env)
 
   defp name_fn({:obj, id} = f, name) do
     case deref(id) do

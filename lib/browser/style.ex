@@ -21,17 +21,17 @@ defmodule Browser.Style do
             border-bottom-left-radius line-height
             background-image background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
-            text-decoration-line text-align list-style-type flex-direction
+            text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
             scroll-margin-top scroll-padding-top
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
-                text-decoration-line text-align list-style-type line-height
+                text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
                 stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space)
 
@@ -77,7 +77,7 @@ defmodule Browser.Style do
 
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
-  [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
+  dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
   canvas, audio, video, iframe, object, embed, applet { display: none }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
@@ -315,13 +315,19 @@ defmodule Browser.Style do
     "padding-block-start" => "padding-top",
     "padding-block-end" => "padding-bottom",
     "padding-inline-start" => "padding-left",
-    "padding-inline-end" => "padding-right"
+    "padding-inline-end" => "padding-right",
+    "inset-block-start" => "top",
+    "inset-block-end" => "bottom",
+    "inset-inline-start" => "left",
+    "inset-inline-end" => "right"
   }
   @logical_pairs %{
     "margin-block" => {"margin-top", "margin-bottom"},
     "margin-inline" => {"margin-left", "margin-right"},
     "padding-block" => {"padding-top", "padding-bottom"},
-    "padding-inline" => {"padding-left", "padding-right"}
+    "padding-inline" => {"padding-left", "padding-right"},
+    "inset-block" => {"top", "bottom"},
+    "inset-inline" => {"left", "right"}
   }
 
   defp expand({"flex", value, imp}) do
@@ -338,11 +344,40 @@ defmodule Browser.Style do
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
   end
 
+  # `columns: <width> || <count>`, in either order, either of them `auto`
+  defp expand({"columns", value, imp}) do
+    for t <- tokens(String.trim(value)), t != "auto" do
+      if Regex.match?(~r/\A\d+\z/, t),
+        do: {"column-count", t, imp},
+        else: {"column-width", t, imp}
+    end
+  end
+
   defp expand({"gap", value, imp}) do
     case tokens(String.trim(value)) do
       [a] -> [{"row-gap", a, imp}, {"column-gap", a, imp}]
       [a, b | _] -> [{"row-gap", a, imp}, {"column-gap", b, imp}]
       [] -> []
+    end
+  end
+
+  # inset: top, right, bottom, left, the way margin takes its values
+  defp expand({"inset", value, imp}) do
+    case tokens(String.trim(value)) do
+      [a] ->
+        for p <- ~w(top right bottom left), do: {p, a, imp}
+
+      [a, b] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", a, imp}, {"left", b, imp}]
+
+      [a, b, c] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", c, imp}, {"left", b, imp}]
+
+      [a, b, c, d | _] ->
+        [{"top", a, imp}, {"right", b, imp}, {"bottom", c, imp}, {"left", d, imp}]
+
+      [] ->
+        []
     end
   end
 
@@ -374,7 +409,7 @@ defmodule Browser.Style do
   @keywords ~w(inherit initial unset revert)
 
   defp split_shorthand(prop, value) do
-    v = value |> String.trim() |> String.downcase()
+    v = value |> String.trim() |> downcase_outside_urls()
     longs = @shorthands[prop]
 
     if v in @keywords do
@@ -1208,6 +1243,19 @@ defmodule Browser.Style do
     if String.contains?(v, "url("), do: v, else: String.downcase(v)
   end
 
+  # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone
+  defp downcase_outside_urls(v) do
+    if String.contains?(v, "url(") do
+      ~r/url\((?:"[^"]*"|'[^']*'|[^)]*)\)/i
+      |> Regex.split(v, include_captures: true)
+      |> Enum.map_join(fn part ->
+        if Regex.match?(~r/\Aurl\(/i, part), do: part, else: String.downcase(part)
+      end)
+    else
+      String.downcase(v)
+    end
+  end
+
   @doc false
   def substitute(value, _custom, depth) when depth > 16,
     do: if(String.contains?(value, "var("), do: :error, else: {:ok, value})
@@ -1390,9 +1438,23 @@ defmodule Browser.Style do
     end
   end
 
+  defp typed("column-gap", "normal", _env, _pc), do: {:ok, :normal}
+
   defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
     px = if v == "normal", do: 0.0, else: length(v, env)
     if px && px >= 0, do: {:ok, px}, else: :skip
+  end
+
+  defp typed("column-count", v, _env, _pc) do
+    case Integer.parse(v) do
+      {n, ""} when n >= 1 -> {:ok, n}
+      _ -> :skip
+    end
+  end
+
+  defp typed("column-width", v, env, _pc) do
+    px = length(v, env)
+    if px && px > 0, do: {:ok, px}, else: :skip
   end
 
   defp typed("line-height", v, env, _pc) do
@@ -1430,7 +1492,11 @@ defmodule Browser.Style do
   end
 
   defp typed("text-indent", v, env, _pc) do
-    if px = length(v, env), do: {:ok, px}, else: :skip
+    cond do
+      px = length(v, env) -> {:ok, px}
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> :skip
+    end
   end
 
   defp typed("opacity", v, _env, _pc) do

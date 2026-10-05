@@ -8,7 +8,7 @@ defmodule Browser.JS.RegExp do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
-  alias Browser.JS.Interp
+  alias Browser.JS.{Interp, Props, Str}
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -22,6 +22,8 @@ defmodule Browser.JS.RegExp do
       {:obj,
        alloc(%{
          class: :regexp,
+         src: source,
+         fl: flags,
          re: re,
          names: names,
          props: %{},
@@ -29,12 +31,6 @@ defmodule Browser.JS.RegExp do
          proto: proto(:regexp)
        })}
 
-    put_hidden(obj, "source", source)
-    put_hidden(obj, "flags", flags)
-    put_hidden(obj, "global", String.contains?(flags, "g"))
-    put_hidden(obj, "ignoreCase", String.contains?(flags, "i"))
-    put_hidden(obj, "multiline", String.contains?(flags, "m"))
-    put_hidden(obj, "sticky", String.contains?(flags, "y"))
     put_hidden(obj, "lastIndex", 0.0)
     obj
   end
@@ -42,7 +38,31 @@ defmodule Browser.JS.RegExp do
   def regexp?({:obj, id}), do: match?(%{class: :regexp}, deref(id))
   def regexp?(_), do: false
 
-  defp flag?(re_obj, f), do: String.contains?(Interp.get(re_obj, "flags"), f)
+  defp flags_of({:obj, id}) do
+    case deref(id) do
+      %{fl: fl} -> fl
+      _ -> throw_error("TypeError", "RegExp method called on incompatible receiver")
+    end
+  end
+
+  defp flags_of(_), do: throw_error("TypeError", "RegExp method called on incompatible receiver")
+  defp source_of({:obj, id}), do: deref(id).src
+  defp flag?(re_obj, f), do: String.contains?(flags_of(re_obj), f)
+
+  # the pattern text as `source` shows it: `/` and line terminators escaped, `(?:)` when empty
+  defp escape_source(""), do: "(?:)"
+  defp escape_source(src), do: escape_source(String.graphemes(src), false, [])
+
+  defp escape_source([], _, acc), do: acc |> Enum.reverse() |> Enum.join()
+  defp escape_source(["\\", c | rest], cls, acc), do: escape_source(rest, cls, [c, "\\" | acc])
+  defp escape_source(["[" | rest], _, acc), do: escape_source(rest, true, ["[" | acc])
+  defp escape_source(["]" | rest], _, acc), do: escape_source(rest, false, ["]" | acc])
+  defp escape_source(["/" | rest], false, acc), do: escape_source(rest, false, ["\\/" | acc])
+  defp escape_source(["\n" | rest], c, acc), do: escape_source(rest, c, ["\\n" | acc])
+  defp escape_source(["\r" | rest], c, acc), do: escape_source(rest, c, ["\\r" | acc])
+  defp escape_source(["\u2028" | rest], c, acc), do: escape_source(rest, c, ["\\u2028" | acc])
+  defp escape_source(["\u2029" | rest], c, acc), do: escape_source(rest, c, ["\\u2029" | acc])
+  defp escape_source([ch | rest], c, acc), do: escape_source(rest, c, [ch | acc])
 
   @doc "Checks a literal at parse time: `:ok` or `{:error, message}` (an early SyntaxError)."
   def validate(source, flags) do
@@ -81,6 +101,12 @@ defmodule Browser.JS.RegExp do
   end
 
   defp build(source, flags) do
+    if String.contains?(flags, "u") and String.contains?(flags, "v"),
+      do: {:error, "the u and v flags can not be combined"},
+      else: build_pattern(source, flags)
+  end
+
+  defp build_pattern(source, flags) do
     opts =
       [:unicode, :dollar_endonly] ++
         for(
@@ -89,15 +115,154 @@ defmodule Browser.JS.RegExp do
           do: o
         )
 
-    case :re.compile(translate(source), opts) do
+    {renamed, names} = rename_groups(source)
+
+    pattern =
+      if String.contains?(flags, "v"),
+        do: Browser.JS.RegExpSets.translate(renamed, &translate/1),
+        else: translate(renamed)
+
+    case :re.compile(pattern, opts) do
       {:ok, re} ->
-        {:namelist, names} = :re.inspect(re, :namelist)
         {:ok, {re, names}}
 
       {:error, {msg, _}} ->
         {:error, msg}
     end
+  catch
+    {:re_error, msg} -> {:error, msg}
   end
+
+  # Named groups: JavaScript names (`$`, unicode letters, `\\u{..}` escapes) are not all valid
+  # in PCRE, so each group is renamed `g<number>` and `\\k<name>` follows. Returns the new
+  # pattern and `[{group number, name}]` in pattern order.
+  defp rename_groups(source) do
+    {count, names} = scan_groups(source, 0, false, [])
+
+    if names == [] do
+      {source, {count, []}}
+    else
+      by_name = Map.new(names, fn {i, n} -> {n, i} end)
+      {rewrite_groups(source, false, by_name, []), {count, names}}
+    end
+  end
+
+  # pass 1: the capture groups (counted) and the names of the named ones
+  defp scan_groups("", n, _cls, acc), do: {n, Enum.reverse(acc)}
+
+  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, acc),
+    do: scan_groups(rest, n, cls, acc)
+
+  defp scan_groups("[" <> rest, n, false, acc), do: scan_groups(rest, n, true, acc)
+  defp scan_groups("]" <> rest, n, true, acc), do: scan_groups(rest, n, false, acc)
+
+  defp scan_groups("(?<" <> rest, n, false, acc) do
+    case rest do
+      "=" <> r ->
+        scan_groups(r, n, false, acc)
+
+      "!" <> r ->
+        scan_groups(r, n, false, acc)
+
+      _ ->
+        unless String.contains?(rest, ">"), do: bad_name()
+        {raw, after_name} = split_name(rest)
+        name = decode_name(raw)
+        unless valid_name?(name), do: bad_name()
+        if Enum.any?(acc, fn {_, existing} -> existing == name end), do: bad_name()
+        scan_groups(after_name, n + 1, false, [{n + 1, name} | acc])
+    end
+  end
+
+  defp scan_groups("(?" <> rest, n, false, acc), do: scan_groups(rest, n, false, acc)
+  defp scan_groups("(" <> rest, n, false, acc), do: scan_groups(rest, n + 1, false, acc)
+  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+  defp scan_groups(<<_, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+
+  defp bad_name, do: throw({:re_error, "Invalid capture group name"})
+
+  # an identifier: ID_Start, `$` or `_`, then those and ID_Continue and ZWNJ/ZWJ
+  defp valid_name?(name) do
+    Regex.match?(
+      ~r/\A[\p{L}\p{Nl}$_][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$_\x{200C}\x{200D}]*\z/u,
+      name
+    )
+  end
+
+  defp split_name(rest) do
+    case String.split(rest, ">", parts: 2) do
+      [raw, after_name] -> {raw, after_name}
+      _ -> {rest, ""}
+    end
+  end
+
+  # `\u0041`, `\u{41}` and surrogate pairs in a group name
+  defp decode_name(raw), do: decode_name(raw, [])
+  defp decode_name("", acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp decode_name("\\u{" <> rest, acc) do
+    [hex, r] = String.split(rest, "}", parts: 2)
+    decode_name(r, [<<String.to_integer(hex, 16)::utf8>> | acc])
+  rescue
+    _ -> bad_name()
+  end
+
+  defp decode_name(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
+    with {hi, ""} when hi in 0xD800..0xDBFF <- Integer.parse(hex, 16),
+         <<"\\u", lo_hex::binary-size(4), after_pair::binary>> <- rest,
+         {lo, ""} when lo in 0xDC00..0xDFFF <- Integer.parse(lo_hex, 16) do
+      decode_name(after_pair, [<<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>> | acc])
+    else
+      _ ->
+        case Integer.parse(hex, 16) do
+          {n, ""} when n not in 0xD800..0xDFFF -> decode_name(rest, [<<n::utf8>> | acc])
+          _ -> bad_name()
+        end
+    end
+  end
+
+  defp decode_name(<<c::utf8, rest::binary>>, acc), do: decode_name(rest, [<<c::utf8>> | acc])
+  defp decode_name(<<_, rest::binary>>, acc), do: decode_name(rest, acc)
+
+  # pass 2: the definitions and the references use the new names
+  defp rewrite_groups("", _cls, _by, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp rewrite_groups(<<"\\k<", rest::binary>>, cls, by, acc) do
+    unless String.contains?(rest, ">"), do: bad_name()
+    {raw, after_name} = split_name(rest)
+
+    case Map.fetch(by, decode_name(raw)) do
+      {:ok, i} -> rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
+      :error -> bad_name()
+    end
+  end
+
+  defp rewrite_groups(<<?\\, c::utf8, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<?\\, c::utf8>> | acc])
+
+  defp rewrite_groups("[" <> rest, false, by, acc),
+    do: rewrite_groups(rest, true, by, ["[" | acc])
+
+  defp rewrite_groups("]" <> rest, true, by, acc),
+    do: rewrite_groups(rest, false, by, ["]" | acc])
+
+  defp rewrite_groups("(?<" <> rest, false, by, acc) do
+    case rest do
+      <<c, _::binary>> when c in ~c"=!" ->
+        rewrite_groups(rest, false, by, ["(?<" | acc])
+
+      _ ->
+        {raw, after_name} = split_name(rest)
+        i = Map.fetch!(by, decode_name(raw))
+        rewrite_groups(after_name, false, by, ["(?<g#{i}>" | acc])
+    end
+  end
+
+  defp rewrite_groups(<<c::utf8, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<c::utf8>> | acc])
+
+  defp rewrite_groups(<<c, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<c>> | acc])
 
   # JavaScript syntax that PCRE spells differently
   defp translate(source), do: translate(source, false, [])
@@ -170,19 +335,41 @@ defmodule Browser.JS.RegExp do
 
     case :re.run(subject, re, [{:capture, :all, :index}, {:offset, from_byte}]) do
       {:match, [{start, len} | caps]} when not sticky? or start == from_byte ->
+        {count, named_list} = names
+
+        # (PCRE leaves out trailing groups that did not take part)
         groups =
           for {s, l} <- caps do
             if s < 0, do: :undefined, else: binary_part(subject, s, l)
           end
 
-        named = named_groups(names, groups)
+        groups = groups ++ List.duplicate(:undefined, count - length(groups))
+
+        named = named_groups(named_list, groups)
+
+        # (the code point spans of every group, only worked out for the `d` flag)
+        spans =
+          if flag?(re_obj, "d") do
+            spans =
+              for {s, l} <- [{start, len} | caps] do
+                if s < 0,
+                  do: :undefined,
+                  else:
+                    {cp_count(binary_part(subject, 0, s)),
+                     cp_count(binary_part(subject, 0, s + l))}
+              end
+
+            spans ++ List.duplicate(:undefined, count + 1 - length(spans))
+          end
 
         %{
-          start: String.length(binary_part(subject, 0, start)),
-          stop: String.length(binary_part(subject, 0, start + len)),
+          spans: spans,
+          start: cp_count(binary_part(subject, 0, start)),
+          stop: cp_count(binary_part(subject, 0, start + len)),
           text: binary_part(subject, start, len),
           groups: groups,
-          named: named
+          named: named,
+          names: named_list
         }
 
       _ ->
@@ -190,33 +377,69 @@ defmodule Browser.JS.RegExp do
     end
   end
 
-  # the :namelist order is the order of the names in the pattern, which is the group order
-  # for the named groups; their indices are found from the name list of the compiled pattern
+  # `[{name, value}]` of the named groups, in pattern order; nil without any
   defp named_groups([], _), do: nil
 
   defp named_groups(names, groups),
-    do: names |> Enum.zip(named_values(names, groups)) |> Map.new(fn {n, v} -> {n, v} end)
-
-  # (best effort: the groups of a pattern with named groups are mostly all named)
-  defp named_values(names, groups), do: Enum.take(groups, length(names))
+    do: for({i, name} <- names, do: {name, Enum.at(groups, i - 1)})
 
   defp byte_of(subject, cp) do
-    if cp <= 0, do: 0, else: byte_size(String.slice(subject, 0, cp))
+    byte_of(subject, cp, 0)
   end
+
+  # byte offset of the code point index `n` (strings are indexed by code point)
+  defp byte_of(_, n, acc) when n <= 0, do: acc
+  defp byte_of(<<c::utf8, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + utf8_size(c))
+  defp byte_of(<<>>, _, acc), do: acc
+  defp byte_of(<<_, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + 1)
+
+  defp utf8_size(c) when c < 0x80, do: 1
+  defp utf8_size(c) when c < 0x800, do: 2
+  defp utf8_size(c) when c < 0x10000, do: 3
+  defp utf8_size(_), do: 4
+
+  # the number of code points (what `.length` and match positions count)
+  defp cp_count(bin), do: cp_count(bin, 0)
+  defp cp_count(<<_::utf8, rest::binary>>, n), do: cp_count(rest, n + 1)
+  defp cp_count(<<>>, n), do: n
+  defp cp_count(<<_, rest::binary>>, n), do: cp_count(rest, n + 1)
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
-    put(arr, "index", m.start * 1.0)
-    put(arr, "input", subject)
+    Interp.define_data(arr, "index", m.start * 1.0)
+    Interp.define_data(arr, "input", subject)
 
     groups =
       case m.named do
         nil -> :undefined
-        named -> new_object(Enum.map(named, fn {k, v} -> {k, v} end))
+        named -> new_object(named, :null)
       end
 
-    put(arr, "groups", groups)
+    Interp.define_data(arr, "groups", groups)
+    if m.spans, do: put_hidden_indices(arr, m)
     arr
+  end
+
+  # `indices` of a match made with the `d` flag: [start, end] pairs, and `groups` by name
+  defp put_hidden_indices(arr, m) do
+    pair = fn
+      :undefined -> :undefined
+      {a, b} -> new_array([a * 1.0, b * 1.0])
+    end
+
+    indices = new_array(Enum.map(m.spans, pair))
+
+    groups =
+      case m.named do
+        nil ->
+          :undefined
+
+        _named ->
+          new_object(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))}), :null)
+      end
+
+    Interp.define_data(indices, "groups", groups)
+    Interp.define_data(arr, "indices", indices)
   end
 
   defp put(o, k, v), do: Interp.put(o, k, v)
@@ -226,7 +449,7 @@ defmodule Browser.JS.RegExp do
     global? = flag?(re_obj, "g") or flag?(re_obj, "y")
     from = if global?, do: to_int(Interp.get(re_obj, "lastIndex")), else: 0
 
-    if from > String.length(subject) do
+    if from > 0 and from > cp_count(subject) do
       put(re_obj, "lastIndex", 0.0)
       :null
     else
@@ -246,7 +469,7 @@ defmodule Browser.JS.RegExp do
   def all_matches(re_obj, subject), do: all_matches(re_obj, subject, 0, [])
 
   defp all_matches(re_obj, subject, from, acc) do
-    if from > String.length(subject) do
+    if from > cp_count(subject) do
       Enum.reverse(acc)
     else
       case match_at(re_obj, subject, from) do
@@ -296,20 +519,20 @@ defmodule Browser.JS.RegExp do
   def string_split(s, re_obj, limit) do
     matches =
       all_matches(re_obj, s)
-      |> Enum.reject(&(&1.stop == &1.start and &1.start >= String.length(s)))
+      |> Enum.reject(&(&1.stop == &1.start and &1.start >= cp_count(s)))
 
     {parts, last} =
       Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
         if m.stop == m.start and m.start == from and from == 0 do
           {acc, from}
         else
-          piece = String.slice(s, from, m.start - from)
+          piece = Str.slice(s, from, m.start - from)
           caps = for g <- m.groups, do: g
           {Enum.reverse(caps) ++ [piece | acc], m.stop}
         end
       end)
 
-    parts = Enum.reverse([String.slice(s, last, String.length(s)) | parts])
+    parts = Enum.reverse([Str.slice(s, last, cp_count(s)) | parts])
     parts = if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit))
     new_array(parts)
   end
@@ -326,11 +549,11 @@ defmodule Browser.JS.RegExp do
 
     {out, last} =
       Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
-        piece = String.slice(s, from, m.start - from)
+        piece = Str.slice(s, from, m.start - from)
         {[expand(repl, m, s), piece | acc], m.stop}
       end)
 
-    IO.iodata_to_binary(Enum.reverse([String.slice(s, last, String.length(s)) | out]))
+    IO.iodata_to_binary(Enum.reverse([Str.slice(s, last, cp_count(s)) | out]))
   end
 
   defp expand(repl, m, s) do
@@ -350,15 +573,19 @@ defmodule Browser.JS.RegExp do
   defp substitute("$&" <> r, m, s, acc), do: substitute(r, m, s, [m.text | acc])
 
   defp substitute("$`" <> r, m, s, acc),
-    do: substitute(r, m, s, [String.slice(s, 0, m.start) | acc])
+    do: substitute(r, m, s, [Str.slice(s, 0, m.start) | acc])
 
   defp substitute("$'" <> r, m, s, acc),
-    do: substitute(r, m, s, [String.slice(s, m.stop, String.length(s)) | acc])
+    do: substitute(r, m, s, [Str.slice(s, m.stop, cp_count(s)) | acc])
 
   defp substitute("$<" <> r, m, s, acc) do
     case String.split(r, ">", parts: 2) do
       [name, rest] ->
-        v = if m.named, do: Map.get(m.named, name, :undefined), else: :undefined
+        v =
+          if m.named,
+            do: Enum.find_value(m.named, :undefined, fn {k, v} -> if k == name, do: v end),
+            else: :undefined
+
         substitute(rest, m, s, [if(v == :undefined, do: "", else: v) | acc])
 
       _ ->
@@ -401,10 +628,10 @@ defmodule Browser.JS.RegExp do
             if regexp?(r) do
               flags =
                 if arg(args, 1) == :undefined,
-                  do: Interp.get(r, "flags"),
+                  do: flags_of(r),
                   else: to_str(arg(args, 1))
 
-              new(Interp.get(r, "source"), flags)
+              new(source_of(r), flags)
             else
               new(to_str(r), flags_arg(args))
             end
@@ -417,9 +644,95 @@ defmodule Browser.JS.RegExp do
         end
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "RegExp", ctor)
+    def_species(ctor)
+
+    # `source`, `flags` and the flag accessors live on the prototype
+    for {name, flag} <- [
+          {"hasIndices", "d"},
+          {"global", "g"},
+          {"ignoreCase", "i"},
+          {"multiline", "m"},
+          {"dotAll", "s"},
+          {"unicode", "u"},
+          {"unicodeSets", "v"},
+          {"sticky", "y"}
+        ] do
+      Props.define_accessor(p, name,
+        get:
+          native("get " <> name, fn this, _ ->
+            cond do
+              regexp?(this) ->
+                flag?(this, flag)
+
+              this == p ->
+                :undefined
+
+              true ->
+                throw_error("TypeError", "RegExp.prototype.#{name} getter called on a non-RegExp")
+            end
+          end),
+        enumerable: false
+      )
+    end
+
+    Props.define_accessor(p, "source",
+      get:
+        native("get source", fn this, _ ->
+          cond do
+            regexp?(this) ->
+              escape_source(source_of(this))
+
+            this == p ->
+              "(?:)"
+
+            true ->
+              throw_error("TypeError", "RegExp.prototype.source getter called on a non-RegExp")
+          end
+        end),
+      enumerable: false
+    )
+
+    Props.define_accessor(p, "flags",
+      get:
+        native("get flags", fn this, _ ->
+          unless match?({:obj, _}, this),
+            do: throw_error("TypeError", "RegExp.prototype.flags getter called on a non-object")
+
+          for {name, ch} <- [
+                {"hasIndices", "d"},
+                {"global", "g"},
+                {"ignoreCase", "i"},
+                {"multiline", "m"},
+                {"dotAll", "s"},
+                {"unicode", "u"},
+                {"unicodeSets", "v"},
+                {"sticky", "y"}
+              ],
+              truthy(Interp.get(this, name)),
+              into: "",
+              do: ch
+        end),
+      enumerable: false
+    )
+
+    # RegExp.escape(string): the string as a pattern that matches it literally
+    put_hidden(
+      ctor,
+      "escape",
+      native("escape", fn _, args ->
+        case arg(args, 0) do
+          str when is_binary(str) -> escape_pattern(str)
+          _ -> throw_error("TypeError", "RegExp.escape requires a string")
+        end
+      end)
+      |> then(fn {:obj, id} = f ->
+        store(id, Map.put(deref(id), :arity, 1.0))
+        f
+      end)
+    )
 
     def_fn(p, "test", fn this, args -> exec(this, to_str(arg(args, 0))) != :null end)
     def_fn(p, "exec", fn this, args -> exec(this, to_str(arg(args, 0))) end)
@@ -430,6 +743,57 @@ defmodule Browser.JS.RegExp do
 
     :ok
   end
+
+  @syntax_chars ~c"^$\\.*+?()[]{}|/"
+  @other_punct ~c",-=<>#&!%:;@~'`\""
+  @escape_space [
+                  0x09,
+                  0x0B,
+                  0x0C,
+                  0x20,
+                  0xA0,
+                  0xFEFF,
+                  0x1680,
+                  0x202F,
+                  0x205F,
+                  0x3000,
+                  0x0A,
+                  0x0D,
+                  0x2028,
+                  0x2029
+                ] ++
+                  Enum.to_list(0x2000..0x200A)
+
+  defp escape_pattern(<<c::utf8, rest::binary>>) do
+    first =
+      if c in ?0..?9 or c in ?a..?z or c in ?A..?Z, do: hex_escape(c), else: escape_char(c)
+
+    first <> escape_rest(rest)
+  end
+
+  defp escape_pattern(""), do: ""
+
+  defp escape_rest(<<c::utf8, rest::binary>>), do: escape_char(c) <> escape_rest(rest)
+  defp escape_rest(""), do: ""
+
+  defp escape_char(c) when c in @syntax_chars, do: <<?\\, c>>
+  defp escape_char(?\t), do: "\\t"
+  defp escape_char(?\n), do: "\\n"
+  defp escape_char(0x0B), do: "\\v"
+  defp escape_char(?\f), do: "\\f"
+  defp escape_char(?\r), do: "\\r"
+
+  defp escape_char(c) when c in @other_punct or c in @escape_space do
+    if c <= 0xFF,
+      do: hex_escape(c),
+      else:
+        "\\u" <> (c |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(4, "0"))
+  end
+
+  defp escape_char(c), do: <<c::utf8>>
+
+  defp hex_escape(c),
+    do: "\\x" <> (c |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(2, "0"))
 
   defp flags_arg(args), do: if(arg(args, 1) == :undefined, do: "", else: to_str(arg(args, 1)))
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))

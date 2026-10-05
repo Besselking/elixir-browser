@@ -15,31 +15,21 @@ defmodule Browser.JS.Test262 do
   (`unsupported_features/0`) or something the runner does not provide (modules, other realms).
   """
 
-  alias Browser.JS.{Builtins, Interp, Parser}
+  alias Browser.JS.{Builtins, Interp, Modules, Parser}
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-      
-      
-     symbols-as-weakmap-keys Proxy proxy-missing-checks BigInt 
-      
-      
-      
-    SharedArrayBuffer Atomics Atomics.pause Atomics.waitAsync  
-    Float16Array      
-       resizable-arraybuffer arraybuffer-transfer
-    immutable-arraybuffer align-detached-buffer-semantics-with-web-reality
-    stable-typedarray-sort WeakRef FinalizationRegistry set-methods dynamic-import cross-realm
-    tail-call-optimization caller Temporal ShadowRealm decorators import.meta import-attributes
-    import-defer export-defer source-phase-imports source-phase-imports-module-source
-    import-text import-bytes json-modules top-level-await explicit-resource-management
-    export-star-as-namespace-from-module arbitrary-module-namespace-names Array.fromAsync
-    iterator-helpers iterator-chunking iterator-sequencing iterator-includes
-    Iterator.prototype.join joint-iteration array-grouping change-array-by-copy
-    uint8array-base64 upsert await-dictionary regexp-match-indices regexp-v-flag
-    regexp-modifiers regexp-duplicate-named-groups RegExp.escape legacy-regexp Error.isError
-    error-stack-accessor json-parse-with-source Math.sumPrecise promise-try
-    nonextensible-applies-to-private
+    symbols-as-weakmap-keys proxy-missing-checks
+    Atomics.pause Atomics.waitAsync
+    immutable-arraybuffer WeakRef
+    FinalizationRegistry set-methods tail-call-optimization Temporal ShadowRealm
+    decorators import-attributes import-text import-bytes json-modules top-level-await
+    source-phase-imports source-phase-imports-module-source import-defer
+    arbitrary-module-namespace-names iterator-helpers iterator-chunking
+    iterator-sequencing iterator-includes Iterator.prototype.join joint-iteration
+    uint8array-base64 upsert
+    regexp-duplicate-named-groups legacy-regexp error-stack-accessor
+    json-parse-with-source nonextensible-applies-to-private
   )
 
   def unsupported_features, do: @unsupported_features
@@ -152,20 +142,16 @@ defmodule Browser.JS.Test262 do
   """
   def decide(meta, source, opts \\ []) do
     skipped = Keyword.get(opts, :skip_features, @unsupported_features)
-    flags = list(meta, "flags")
     features = list(meta, "features")
 
     cond do
-      "module" in flags ->
-        {:skip, "module"}
-
       match?(%{"phase" => "resolution"}, meta["negative"]) ->
         {:skip, "module resolution"}
 
       (f = Enum.find(features, &(&1 in skipped))) != nil ->
         {:skip, "feature " <> f}
 
-      String.contains?(source, ["$262.createRealm", "$262.agent", "$262.detachArrayBuffer"]) ->
+      String.contains?(source, ["$262.createRealm", "$262.agent"]) ->
         {:skip, "$262"}
 
       true ->
@@ -228,8 +214,11 @@ defmodule Browser.JS.Test262 do
         async? = "async" in flags
         programs = Enum.map(names, &harness[&1])
 
+        path = Keyword.get(opts, :path)
+        module? = "module" in flags
+
         spawn_and_wait(timeout, fn ->
-          execute(programs, source, max_steps, async?)
+          execute(programs, source, max_steps, async?, "regExpUtils.js" in names, path, module?)
         end)
         |> judge(negative, async?)
 
@@ -259,19 +248,29 @@ defmodule Browser.JS.Test262 do
   end
 
   # -> {:ok, printed} | {:syntax, msg} | {:uncaught, text} | :limit
-  defp execute(programs, source, max_steps, async?) do
+  defp execute(programs, source, max_steps, async?, regexp_utils?, path, module?) do
     Interp.init(max_steps)
     scope = Builtins.install()
     install_host(scope)
+    Modules.reset()
+
+    # `import()` (and a module's imports) load files next to the test
+    if path,
+      do:
+        Process.put(:js_import, fn spec, from -> Modules.import(spec, from || path, loader()) end)
 
     try do
-      case Parser.parse(source) do
+      case Parser.parse(source, module: module?) do
         {:error, msg} ->
           {:syntax, msg}
 
         {:ok, program} ->
           Enum.each(programs, &Interp.run_program/1)
-          Interp.run_program(program)
+          if regexp_utils?, do: install_regexp_utils(scope)
+
+          if module?,
+            do: Modules.run(path, path, program, loader()),
+            else: Interp.run_program(program)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
           {:ok, printed()}
@@ -284,6 +283,63 @@ defmodule Browser.JS.Test262 do
       {:syntax, msg} -> {:syntax, msg}
       other -> {:uncaught, "internal: " <> inspect(other), printed()}
     end
+  end
+
+  # module files are found next to the module that imports them
+  defp loader do
+    {fn spec, base -> {:ok, Path.expand(spec, Path.dirname(base))} end,
+     fn path ->
+       case File.read(path) do
+         {:ok, src} -> {:ok, src, path}
+         {:error, _} -> {:error, "cannot find #{path}"}
+       end
+     end}
+  end
+
+  # `buildString` and `testPropertyEscapes` of harness/regExpUtils.js, natively: the originals
+  # walk every code point of Unicode (over a million loop iterations per test) in the
+  # interpreter, which takes minutes for the ~500 property-escape tests. These do the same
+  # work (same string, same RegExp test, same assert message on a mismatch) in Elixir.
+  defp install_regexp_utils(scope) do
+    cp = fn n -> if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>> end
+
+    Interp.declare(
+      scope,
+      "buildString",
+      Interp.native("buildString", fn _, [args | _] ->
+        lone = args |> Interp.get("loneCodePoints") |> Interp.array_list()
+        ranges = args |> Interp.get("ranges") |> Interp.array_list()
+
+        pieces =
+          for r <- ranges do
+            [from, to] = r |> Interp.array_list() |> Enum.map(&trunc/1)
+            for n <- from..to//1, do: cp.(n)
+          end
+
+        IO.iodata_to_binary([Enum.map(lone, &cp.(trunc(&1))), pieces])
+      end)
+    )
+
+    Interp.declare(
+      scope,
+      "testPropertyEscapes",
+      Interp.native("testPropertyEscapes", fn _, [regexp, string, expression | _] ->
+        if Browser.JS.RegExp.exec(regexp, string) == :null do
+          Enum.each(String.codepoints(string), fn symbol ->
+            if Browser.JS.RegExp.exec(regexp, symbol) == :null do
+              <<n::utf8>> = symbol
+              hex = n |> Integer.to_string(16) |> String.upcase() |> String.pad_leading(6, "0")
+              msg = "`#{expression}` should match U+#{hex} (`#{symbol}`)"
+              Interp.declare(scope, "__t262_msg", msg)
+              {:ok, call} = Parser.parse("assert(false, __t262_msg);")
+              Interp.run_program(call)
+            end
+          end)
+        end
+
+        :undefined
+      end)
+    )
   end
 
   defp printed, do: Enum.reverse(Process.get(:t262_out, []))
@@ -333,6 +389,14 @@ defmodule Browser.JS.Test262 do
           {:ok, program} -> Interp.run_program(program)
           {:error, msg} -> Interp.throw_error("SyntaxError", msg)
         end
+      end)
+    )
+
+    Interp.put_hidden(
+      host,
+      "detachArrayBuffer",
+      Interp.native("detachArrayBuffer", fn _, args ->
+        Browser.JS.TypedArrays.detach(Enum.at(args, 0, :undefined))
       end)
     )
 
@@ -422,7 +486,7 @@ defmodule Browser.JS.Test262 do
               missing = Enum.reject(harness_names(meta), &Map.has_key?(harness, &1))
 
               if missing == [],
-                do: run_test(source, meta, harness, opts),
+                do: run_test(source, meta, harness, Keyword.put(opts, :path, path)),
                 else: {:fail, "harness file #{hd(missing)} not in the checkout"}
           end
 

@@ -8,7 +8,7 @@ defmodule Browser.Application do
     :httpc.set_options(max_sessions: 8, max_keep_alive_length: 20)
 
     children =
-      [Browser.HttpCache] ++
+      [Browser.HttpCache, Browser.Cookies, Browser.LocalStorage] ++
         if Application.get_env(:browser, :gui, true) do
           [{Browser.Session, []}]
         else

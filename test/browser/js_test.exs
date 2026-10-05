@@ -443,7 +443,7 @@ defmodule Browser.JSTest do
       assert {:syntax, _} = error("var = 1")
       assert {:syntax, _} = error("1 +")
       assert {:syntax, _} = error("'unterminated")
-      assert {:syntax, _} = error("var a = 1n")
+      assert {:syntax, _} = error("var a = 1.5n")
       assert {:syntax, _} = error("a ? b")
       assert {:syntax, _} = error("1 = 2")
     end
@@ -525,28 +525,86 @@ defmodule Browser.JSTest do
   describe "modules" do
     test "import and export declarations parse" do
       assert {:ok, {:program, [{:import, "a", [{:named, "x", "x"}, {:named, "y", "y"}]}]}} =
-               Browser.JS.parse(~S'import { x, y } from "a"')
+               Browser.JS.parse(~S'import { x, y } from "a"', module: true)
 
       assert {:ok, {:program, [{:import, "a", [{:default, "d"}, {:ns, "n"}]}]}} =
-               Browser.JS.parse(~S'import d, * as n from "a"')
+               Browser.JS.parse(~S'import d, * as n from "a"', module: true)
 
       assert {:ok, {:program, [{:import, "a", [{:named, "x", "z"}]}]}} =
-               Browser.JS.parse(~S'import { x as z } from "a"')
+               Browser.JS.parse(~S'import { x as z } from "a"', module: true)
 
-      assert {:ok, {:program, [{:import, "side", []}]}} = Browser.JS.parse(~S'import "side"')
+      assert {:ok, {:program, [{:import, "side", []}]}} =
+               Browser.JS.parse(~S'import "side"', module: true)
 
       assert {:ok, {:program, [{:export, {:fundecl, "f", _}}]}} =
-               Browser.JS.parse("export function f() {}")
+               Browser.JS.parse("export function f() {}", module: true)
 
-      assert {:ok, {:program, [{:export_names, [{"a", "b"}, {"c", "c"}]}]}} =
-               Browser.JS.parse("export { a as b, c }")
+      assert {:ok, {:program, [_, {:export_names, [{"a", "b"}, {"c", "c"}]}]}} =
+               Browser.JS.parse("var a, c; export { a as b, c }", module: true)
 
       assert {:ok, {:program, [{:export_default, {:expr, _}}]}} =
-               Browser.JS.parse("export default 1 + 2")
+               Browser.JS.parse("export default 1 + 2", module: true)
     end
 
     test "syntax the runtime lacks is a syntax error" do
-      assert {:error, {:syntax, _}, _} = Browser.JS.eval("var a = 1n")
+      assert {:error, {:syntax, _}, _} = Browser.JS.eval("var a = 01n")
+    end
+
+    test "BigInt" do
+      assert {:ok, 42.0, _} = Browser.JS.eval("Number(2n ** 5n + 10n)")
+      assert {:ok, "bigint", _} = Browser.JS.eval("typeof 1n")
+      assert {:ok, "ff", _} = Browser.JS.eval("(255n).toString(16)")
+      assert {:error, {:uncaught, _}, _} = Browser.JS.eval("1n + 1")
+      assert {:ok, true, _} = Browser.JS.eval("1n == 1 && 2n > 1 && 10n > 9")
+    end
+
+    test "Proxy traps and invariants" do
+      src = """
+      var log = [];
+      var p = new Proxy({a: 1}, {
+        get(t, k, r) { log.push('get:' + String(k)); return Reflect.get(t, k, r); },
+        has(t, k) { log.push('has:' + k); return k in t; },
+        ownKeys(t) { log.push('ownKeys'); return Reflect.ownKeys(t); },
+        getOwnPropertyDescriptor(t, k) { log.push('gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); }
+      });
+      var f = new Proxy(function (a) { return a + 1; }, { apply(t, th, args) { return t(...args) * 2; } });
+      var frozen = Object.freeze({x: 1});
+      var bad = new Proxy(frozen, { get() { return 2; } });
+      var threw = false;
+      try { bad.x; } catch (e) { threw = e instanceof TypeError; }
+      var r = Proxy.revocable({}, {}); r.revoke();
+      var revokedThrew = false;
+      try { r.proxy.x; } catch (e) { revokedThrew = e instanceof TypeError; }
+      [p.a, 'a' in p, Object.keys(p).join(), f(3), typeof f, threw, revokedThrew,
+       Array.isArray(new Proxy([], {})), log.join()].join('|')
+      """
+
+      assert {:ok, "1|true|a|8|function|true|true|true|get:a,has:a,ownKeys,gopd:a", _} =
+               Browser.JS.eval(src)
+    end
+
+    test "resizable ArrayBuffer and length-tracking views" do
+      src = """
+      var rab = new ArrayBuffer(4, {maxByteLength: 16});
+      var tracking = new Uint8Array(rab);
+      var fixed = new Uint8Array(rab, 0, 4);
+      var before = [rab.resizable, rab.maxByteLength, tracking.length];
+      rab.resize(8);
+      var grown = tracking.length;
+      rab.resize(2);
+      var threw = false;
+      try { fixed.fill(1); } catch (e) { threw = e instanceof TypeError; }
+      [before.join(), grown, tracking.length, fixed.length, threw].join('|')
+      """
+
+      assert {:ok, "true,16,4|8|2|0|true", _} = Browser.JS.eval(src)
+    end
+
+    test "-0 and the Math functions" do
+      assert {:ok, true, _} =
+               Browser.JS.eval("1 / -0 === -Infinity && Object.is(Math.round(-0.2), -0)")
+
+      assert {:ok, 1.0, _} = Browser.JS.eval("Math.asin(1) * 2 / Math.PI")
     end
   end
 
@@ -1201,6 +1259,118 @@ defmodule Browser.JSTest do
                "var t = new TextEncoder().encode('h\u00e9llo \u20ac'); [t.length, new TextDecoder().decode(t)]"
              ) ==
                [10.0, "héllo €"]
+    end
+  end
+
+  describe "explicit resource management" do
+    test "using disposes in reverse order, also when the block throws or returns" do
+      src = """
+      var log = [];
+      function res(n) { return { [Symbol.dispose]() { log.push(n) } } }
+      function f() { using a = res('a'); using b = res('b'); return 'r' }
+      var r = f();
+      try { { using c = res('c'); throw new Error('boom') } } catch (e) { log.push(e.message) }
+      for (using d of [res('d1'), res('d2')]) log.push('body');
+      using_null: { using n = null; }
+      r + ':' + log.join()
+      """
+
+      assert js(src) == "r:b,a,c,boom,body,d1,body,d2"
+    end
+
+    test "errors during disposal become a SuppressedError" do
+      src = """
+      var bad = n => ({ [Symbol.dispose]() { throw n } });
+      var r;
+      try { { using a = bad(1); using b = bad(2); } } catch (e) {
+        r = [e instanceof SuppressedError, e.error, e.suppressed].join();
+      }
+      r
+      """
+
+      assert js(src) == "true,1,2"
+    end
+
+    test "await using waits for each disposer and the stacks work" do
+      src = """
+      var log = [];
+      async function main() {
+        {
+          await using a = { async [Symbol.asyncDispose]() { await null; log.push('a') } };
+          await using b = { [Symbol.dispose]() { log.push('b') } };
+          log.push('body');
+        }
+        var s = new AsyncDisposableStack();
+        s.defer(() => log.push('d1'));
+        s.adopt(5, v => log.push('adopt' + v));
+        await s.disposeAsync();
+        var ds = new DisposableStack();
+        ds.use({ [Symbol.dispose]() { log.push('u') } });
+        ds.dispose();
+        log.push(ds.disposed);
+      }
+      main().then(() => console.log(log.join()));
+      """
+
+      assert console(src) == [log: "body,b,a,adopt5,d1,u,true"]
+    end
+
+    test "using needs an initializer and an object" do
+      assert {:syntax, _} = error("{ using x; }")
+
+      assert {:uncaught, "TypeError: using declaration needs an object, null or undefined"} =
+               error("{ using x = 1 }")
+
+      assert {:uncaught, "TypeError: object is not disposable"} = error("{ using x = {} }")
+    end
+  end
+
+  describe "early errors" do
+    test "labels, break and continue" do
+      for src <- [
+            "x: x: ;",
+            "break foo;",
+            "continue foo;",
+            "while (1) { break foo }",
+            "a: { continue a }",
+            "if (1) break;",
+            "function f() { while (1) { function g() { break } } }",
+            "return 1"
+          ] do
+        assert {:error, _} = Browser.JS.Parser.parse(src), src
+      end
+
+      for src <- [
+            "a: b: while (1) { continue a; break b }",
+            "a: { break a }",
+            "switch (1) { case 1: break }",
+            "x: ; x: ;"
+          ] do
+        assert {:ok, _} = Browser.JS.Parser.parse(src), src
+      end
+    end
+
+    test "import and export belong at the top level of a module" do
+      assert {:error, _} = Browser.JS.Parser.parse("export var a = 1")
+      assert {:error, _} = Browser.JS.Parser.parse("{ export var a = 1 }", module: true)
+      assert {:ok, _} = Browser.JS.Parser.parse("export var a = 1", module: true)
+      assert {:error, _} = Browser.JS.Parser.parse("export {x}", module: true)
+
+      assert {:error, _} =
+               Browser.JS.Parser.parse("var a; export {a}; export {a as a}", module: true)
+
+      assert {:error, _} =
+               Browser.JS.Parser.parse("export default 1; export {x as default}; var x",
+                 module: true
+               )
+
+      assert {:error, _} = Browser.JS.Parser.parse("function f() {} var f", module: true)
+      assert {:error, _} = Browser.JS.Parser.parse("new.target", module: true)
+
+      assert {:ok, _} =
+               Browser.JS.Parser.parse("export default class {}; export * as ns from 'x'",
+                 module: true
+               )
     end
   end
 

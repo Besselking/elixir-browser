@@ -13,26 +13,68 @@ defmodule Browser.HTML do
             section article header footer nav main form)
   @closes_p @block
 
-  @entities %{
-    "amp" => "&",
-    "lt" => "<",
-    "gt" => ">",
-    "quot" => "\"",
-    "apos" => "'",
-    "nbsp" => " ",
-    "copy" => "©",
-    "mdash" => "—",
-    "ndash" => "–",
-    "hellip" => "…",
-    "laquo" => "«",
-    "raquo" => "»",
-    "middot" => "·"
-  }
+  # the full WHATWG named character reference table (priv/html_entities.txt); keys keep their
+  # trailing ";", and the legacy names that may omit it are present without one too
+  @entities_path Path.expand("../../priv/html_entities.txt", __DIR__)
+  @external_resource @entities_path
+  @entities @entities_path
+            |> File.read!()
+            |> String.split("\n", trim: true)
+            |> Map.new(fn line ->
+              [name, cps] = String.split(line, "\t")
+
+              {name,
+               cps
+               |> String.split(" ")
+               |> Enum.map(&String.to_integer(&1, 16))
+               |> List.to_string()}
+            end)
 
   @spec parse(binary) :: [term]
   def parse(html) when is_binary(html) do
     html |> tokenize([]) |> build([{:root, []}])
   end
+
+  @doc "Parses a whole page: `parse/1` plus the html, head and body elements it leaves implied."
+  @spec parse_document(binary) :: [term]
+  def parse_document(html) when is_binary(html), do: html |> parse() |> implied_structure()
+
+  # What HTML parsing makes of a document without `<html>`, `<head>` or `<body>` tags: the
+  # leading title, meta, link, style, script... go in the head and the rest in the body (which
+  # is where the body's default margin comes from).
+  @head_tags ~w(title meta link style script base noscript template)
+
+  defp implied_structure(nodes) do
+    if Enum.any?(nodes, &match?({:element, n, _, _} when n in ["frameset"], &1)) do
+      nodes
+    else
+      case Enum.split_with(nodes, &match?({:element, "html", _, _}, &1)) do
+        {[{:element, "html", attrs, kids} | _], others} ->
+          [{:element, "html", attrs, with_body(kids)} | others]
+
+        {[], _} ->
+          if Enum.any?(nodes, &match?({:element, "body", _, _}, &1)),
+            do: [{:element, "html", [], nodes}],
+            else: [{:element, "html", [], with_body(nodes)}]
+      end
+    end
+  end
+
+  defp with_body(kids) do
+    if Enum.any?(kids, &match?({:element, "body", _, _}, &1)) do
+      kids
+    else
+      {head, rest} = Enum.split_while(kids, &head_node?/1)
+
+      case Enum.find(head, &match?({:element, "head", _, _}, &1)) do
+        nil -> [{:element, "head", [], head}, {:element, "body", [], rest}]
+        _ -> head ++ [{:element, "body", [], rest}]
+      end
+    end
+  end
+
+  defp head_node?({:element, name, _, _}), do: name in @head_tags or name == "head"
+  defp head_node?({:text, t}), do: String.trim(t) == ""
 
   # -- tokenizer ---------------------------------------------------------
 
@@ -78,9 +120,12 @@ defmodule Browser.HTML do
     tokenize(rest, [{:text, decode(text)} | acc])
   end
 
-  # style text is kept (undecoded) for the CSS engine, script text for the page's scripts
-  defp add_raw(name, raw, acc) when name in ["style", "script"] and raw != "",
-    do: [{:text, raw} | acc]
+  # style text is kept (undecoded) for the CSS engine, script text for the page's scripts; the
+  # CDATA markers XHTML pages wrap their styles in are dropped, or the first rule would be lost
+  defp add_raw("style", raw, acc) when raw != "",
+    do: [{:text, String.replace(raw, ["<![CDATA[", "]]>"], "")} | acc]
+
+  defp add_raw("script", raw, acc) when raw != "", do: [{:text, raw} | acc]
 
   defp add_raw(_name, _raw, acc), do: acc
 
@@ -159,14 +204,20 @@ defmodule Browser.HTML do
   # -- entities ----------------------------------------------------------
 
   def decode(text) do
-    Regex.replace(~r/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/, text, fn whole, ent ->
+    if String.contains?(text, "&"), do: do_decode(text), else: text
+  end
+
+  defp do_decode(text) do
+    Regex.replace(~r/&(#[xX][0-9a-fA-F]+;?|#\d+;?|[a-zA-Z][a-zA-Z0-9]*;?)/, text, fn whole, ent ->
       case ent do
-        "#x" <> hex -> codepoint(hex, 16, whole)
-        "#" <> dec -> codepoint(dec, 10, whole)
+        "#" <> _ = num -> numeric(String.trim_trailing(num, ";"), whole)
         name -> Map.get(@entities, name, whole)
       end
     end)
   end
+
+  defp numeric(<<"#", x, hex::binary>>, whole) when x in [?x, ?X], do: codepoint(hex, 16, whole)
+  defp numeric("#" <> dec, whole), do: codepoint(dec, 10, whole)
 
   defp codepoint(str, base, fallback) do
     <<String.to_integer(str, base)::utf8>>

@@ -3,7 +3,7 @@ defmodule Browser.JS.DOMTest do
   alias Browser.JS.Runtime
 
   # runs the page's scripts; `files` maps urls to what fetching them returns
-  defp start(html, files \\ %{}) do
+  defp start(html, files \\ %{}, info \\ %{}) do
     {raw, _} = html |> Browser.HTML.parse() |> Browser.Forms.index()
 
     fetch = fn url ->
@@ -14,12 +14,18 @@ defmodule Browser.JS.DOMTest do
     end
 
     pid =
-      Runtime.start(raw, %{
-        url: "http://t.test/dir/page?a=1#top",
-        width: 800,
-        height: 600,
-        fetch: fetch
-      })
+      Runtime.start(
+        raw,
+        Map.merge(
+          %{
+            url: "http://t.test/dir/page?a=1#top",
+            width: 800,
+            height: 600,
+            fetch: fetch
+          },
+          info
+        )
+      )
 
     {pid, Runtime.run_scripts(pid)}
   end
@@ -52,6 +58,23 @@ defmodule Browser.JS.DOMTest do
       """)
 
     assert logs(r) == ["true true"]
+  end
+
+  test "a dialog is shown while it is open" do
+    r =
+      run(
+        """
+        var d = document.getElementById("d");
+        console.log(d.open);
+        d.showModal();
+        console.log(d.open, d.hasAttribute("open"));
+        d.close("done");
+        console.log(d.open, d.returnValue);
+        """,
+        "<dialog id=d><p>x</p></dialog>"
+      )
+
+    assert logs(r) == ["false", "true true", "false done"]
   end
 
   describe "the tree" do
@@ -313,7 +336,7 @@ defmodule Browser.JS.DOMTest do
 
     test "assigning location asks the session to navigate" do
       r = run("location.href = '/next'")
-      assert {:navigate, "http://t.test/next"} in r.outbox
+      assert {:navigate, "http://t.test/next", :push} in r.outbox
     end
 
     test "globals live on window" do
@@ -634,6 +657,543 @@ defmodule Browser.JS.DOMTest do
       reply = Runtime.dispatch(pid, {:control, 0}, "click")
       assert logs(reply) == ["1"]
       assert errors(reply) == []
+    end
+  end
+
+  describe "document.cookie" do
+    # each test has a host of its own: the jar is shared with the tests running beside it
+    defp run_on(host, script) do
+      {_pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: "http://#{host}/dir/page"})
+
+      r
+    end
+
+    defp cookie_pairs(r), do: logs(r) |> hd() |> String.split("; ", trim: true) |> Enum.sort()
+
+    test "reads the cookies of the page without the HttpOnly ones" do
+      Browser.Cookies.store("http://read.test/dir/page", ["a=1", "h=2; HttpOnly", "b=3; Path=/"])
+      r = run_on("read.test", "console.log(document.cookie)")
+      assert cookie_pairs(r) == ["a=1", "b=3"]
+    end
+
+    test "assigning sets one cookie, with its attributes, and keeps the rest" do
+      r =
+        run_on("write.test", """
+        document.cookie = "x=1; Path=/";
+        document.cookie = "y=2";
+        document.cookie = "gone=1; Max-Age=0";
+        document.cookie = "bad=1; HttpOnly";
+        console.log(document.cookie);
+        """)
+
+      assert errors(r) == []
+      assert cookie_pairs(r) == ["x=1", "y=2"]
+      assert Browser.Cookies.header("http://write.test/x") == "x=1"
+    end
+  end
+
+  describe "fetch and XMLHttpRequest" do
+    defp request_fn(test) do
+      fn url, opts ->
+        send(test, {:request, url, opts})
+
+        case url do
+          "http://t.test/missing" ->
+            {:ok,
+             %{
+               status: 404,
+               status_text: "Not Found",
+               headers: [{"content-type", "text/plain"}, {"x-a", "1"}],
+               body: "nope",
+               url: url,
+               redirected: false
+             }, url}
+
+          "http://t.test/down" ->
+            {:error, "Request failed: :econnrefused"}
+
+          _ ->
+            {:ok,
+             %{
+               status: 200,
+               status_text: "OK",
+               headers: [{"content-type", "application/json"}],
+               body: ~s({"n":1}),
+               url: url <> "?final",
+               redirected: true
+             }, url}
+        end
+      end
+    end
+
+    # timers (and so fetch and XHR) run on their own; what they log is sent to the owner
+    defp run_fetch(script) do
+      {pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{request: request_fn(self())})
+
+      assert errors(r) == []
+      %{r | console: r.console ++ collect_async(pid)}
+    end
+
+    defp collect_async(pid) do
+      receive do
+        {:js_async, ^pid, reply} -> reply.console ++ collect_async(pid)
+      after
+        150 -> Runtime.flush(pid).console
+      end
+    end
+
+    test "fetch gives the real status, headers, url and body" do
+      r =
+        run_fetch(~S"""
+        fetch("/missing").then(async (res) => {
+          console.log(res.status, res.ok, res.statusText, res.headers.get("x-a"), res.url, await res.text());
+        });
+        fetch("/ok").then(async (res) => {
+          console.log(res.status, res.ok, res.redirected, res.type, res.headers.get("Content-Type"), JSON.stringify(await res.json()));
+        });
+        """)
+
+      assert Enum.sort(logs(r)) == [
+               "200 true true basic application/json {\"n\":1}",
+               "404 false Not Found 1 http://t.test/missing nope"
+             ]
+    end
+
+    test "fetch sends the method, headers, body and credentials" do
+      run_fetch(~S"""
+      fetch("/api", { method: "post", headers: { "X-A": "1", "Content-Type": "application/json" }, body: JSON.stringify({ a: 1 }), credentials: "include" });
+      fetch("/form", { method: "POST", body: new URLSearchParams({ q: "x y" }) });
+      fetch("/plain", { method: "PUT", body: "hello" });
+      """)
+
+      assert_receive {:request, "http://t.test/api", opts}
+      assert opts[:method] == :post
+      assert opts[:body] == ~s({"a":1})
+      assert opts[:content_type] == "application/json"
+      assert opts[:credentials] == :include
+      assert {"x-a", "1"} in opts[:headers]
+      assert_receive {:request, "http://t.test/form", opts}
+      assert opts[:body] == "q=x+y"
+      assert opts[:content_type] == "application/x-www-form-urlencoded;charset=UTF-8"
+      assert_receive {:request, "http://t.test/plain", opts}
+      assert opts[:method] == :put
+      assert opts[:content_type] == "text/plain;charset=UTF-8"
+    end
+
+    test "fetch rejects with a TypeError when the request fails, and with an AbortError when aborted" do
+      r =
+        run_fetch(~S"""
+        fetch("/down").catch((e) => console.log(e.name, e.message));
+        const c = new AbortController();
+        fetch("/ok", { signal: c.signal }).catch((e) => console.log(e.name));
+        c.abort();
+        fetch("/ok", { signal: AbortSignal.abort() }).catch((e) => console.log(e.name));
+        try { new Request("/x", { method: "GET", body: "b" }); } catch (e) { console.log(e.name); }
+        """)
+
+      assert Enum.sort(logs(r)) == [
+               "AbortError",
+               "AbortError",
+               "TypeError",
+               "TypeError Failed to fetch"
+             ]
+
+      refute_received {:request, "http://t.test/ok", _}
+    end
+
+    test "XMLHttpRequest reports status, headers and the response in each responseType" do
+      r =
+        run_fetch(~S"""
+        const x = new XMLHttpRequest();
+        const states = [];
+        x.onreadystatechange = () => states.push(x.readyState);
+        x.open("POST", "/ok");
+        x.setRequestHeader("X-B", "2");
+        x.responseType = "json";
+        x.withCredentials = true;
+        x.onload = () => console.log(states.join(""), x.status, x.statusText, x.responseURL, x.response.n, x.getResponseHeader("content-type"), x.getAllResponseHeaders().trim());
+        x.send("data");
+        const y = new XMLHttpRequest();
+        y.open("GET", "/missing");
+        y.onload = () => console.log(y.status, y.responseText);
+        y.send();
+        const z = new XMLHttpRequest();
+        z.open("GET", "/down");
+        z.onerror = () => console.log("error", z.status, z.readyState);
+        z.send();
+        const w = new XMLHttpRequest();
+        w.open("GET", "/ok");
+        w.onload = () => console.log("never");
+        w.onabort = () => console.log("aborted");
+        w.send();
+        w.abort();
+        """)
+
+      assert "1234 200 OK http://t.test/ok?final 1 application/json content-type: application/json" in logs(
+               r
+             )
+
+      assert "404 nope" in logs(r)
+      assert "error 0 4" in logs(r)
+      assert "aborted" in logs(r)
+      refute "never" in logs(r)
+      assert_receive {:request, "http://t.test/ok", opts}
+      assert opts[:method] == :post and opts[:credentials] == :include
+      assert {"x-b", "2"} in opts[:headers]
+    end
+
+    test "a synchronous XMLHttpRequest has its answer when send returns" do
+      {_pid, r} =
+        start(
+          ~S"<body><script>const x = new XMLHttpRequest(); x.open('GET', '/missing', false); x.send(); console.log(x.status, x.responseText)</script></body>",
+          %{},
+          %{request: request_fn(self())}
+        )
+
+      assert logs(r) == ["404 nope"]
+    end
+  end
+
+  describe "localStorage and sessionStorage" do
+    # each test has a host of its own: the store is shared with the tests running beside it
+    defp run_at(host, script) do
+      {_pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: "http://#{host}/p"})
+
+      r
+    end
+
+    test "items, length, key, properties and removal" do
+      r =
+        run_at("ls1.test", """
+        localStorage.setItem("b", 2);
+        localStorage.a = "1";
+        console.log(localStorage.length, localStorage.getItem("b"), localStorage.a, localStorage.key(0), localStorage.key(5));
+        console.log(localStorage.getItem("zzz"), localStorage.zzz);
+        localStorage.removeItem("a");
+        console.log(localStorage.length, localStorage.a);
+        localStorage.clear();
+        console.log(localStorage.length);
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["2 2 1 a null", "null undefined", "1 undefined", "0"]
+    end
+
+    test "Object.keys, in, for-in and delete see the items" do
+      r =
+        run_at("ls6.test", """
+        localStorage.setItem("b", "2");
+        localStorage.setItem("a", "1");
+        sessionStorage.setItem("s", "3");
+        const seen = [];
+        for (const k in localStorage) seen.push(k);
+        console.log(Object.keys(localStorage).join(), JSON.stringify(localStorage), seen.join(), "a" in localStorage, "zz" in localStorage, Object.keys(sessionStorage).join());
+        console.log(delete localStorage.a, delete localStorage["nope"], localStorage.length, Object.keys(localStorage).join());
+        delete sessionStorage.s;
+        console.log(sessionStorage.length);
+        const el = document.body; el.expando = 1; console.log(delete el.expando, el.expando);
+        """)
+
+      assert errors(r) == []
+
+      assert logs(r) == [
+               "a,b {\"a\":\"1\",\"b\":\"2\"} a,b true false s",
+               "true true 1 b",
+               "0",
+               "true undefined"
+             ]
+    end
+
+    test "sessionStorage is not localStorage" do
+      r =
+        run_at("ls2.test", """
+        localStorage.setItem("k", "local");
+        sessionStorage.setItem("k", "session");
+        sessionStorage.setItem("only", "s");
+        console.log(localStorage.getItem("k"), sessionStorage.getItem("k"), localStorage.length, sessionStorage.length);
+        """)
+
+      assert logs(r) == ["local session 1 2"]
+    end
+
+    test "the items outlive the page and are shared by the pages of the origin only" do
+      run_at("ls3.test", ~s|localStorage.setItem("seen", "yes")|)
+
+      r =
+        run_at(
+          "ls3.test",
+          ~s|console.log(localStorage.getItem("seen"), sessionStorage.getItem("seen"))|
+        )
+
+      assert logs(r) == ["yes null"]
+      r = run_at("other.ls3.test", ~s|console.log(localStorage.getItem("seen"))|)
+      assert logs(r) == ["null"]
+    end
+
+    test "going over the quota throws a QuotaExceededError" do
+      r =
+        run_at("ls4.test", """
+        const big = "x".repeat(1024 * 1024);
+        try { for (let i = 0; i < 6; i++) localStorage.setItem("k" + i, big); console.log("no error"); }
+        catch (e) { console.log(e.name, localStorage.length); }
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["QuotaExceededError 4"]
+    end
+
+    test "a page without an origin has a storage that lasts as long as it does" do
+      {_pid, r} =
+        start(
+          ~S"<body><script>localStorage.setItem('a', '1'); console.log(localStorage.getItem('a'), localStorage.length)</script></body>",
+          %{},
+          %{url: "about:blank"}
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["1 1"]
+    end
+
+    test "another page of the origin gets a storage event" do
+      {pid, r} =
+        start(
+          ~S"""
+          <body><script>
+          window.addEventListener("storage", (e) => console.log("event", e.key, e.oldValue, e.newValue, e.url, e.storageArea === localStorage));
+          localStorage.setItem("own", "1");
+          </script></body>
+          """,
+          %{},
+          %{url: "http://ls5.test/a"}
+        )
+
+      assert errors(r) == []
+      # the page that made the change hears nothing
+      assert logs(r) == []
+
+      run_at(
+        "ls5.test",
+        ~s|localStorage.setItem("k", "v"); localStorage.setItem("k", "w"); localStorage.removeItem("k"); localStorage.clear()|
+      )
+
+      events = collect_async(pid)
+
+      assert Enum.sort(for({:log, t} <- events, do: t)) == [
+               "event k null v http://ls5.test/a true",
+               "event k v w http://ls5.test/a true",
+               "event k w null http://ls5.test/a true",
+               "event null null null http://ls5.test/a true"
+             ]
+    end
+  end
+
+  describe "history and location" do
+    defp hist_start(script, url \\ "http://h.test/dir/page?a=1") do
+      {pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: url, history_before: 2})
+
+      assert errors(r) == []
+      {pid, r}
+    end
+
+    test "pushState and replaceState keep their own state, history.length counts entries" do
+      {_pid, r} =
+        hist_start("""
+        console.log(history.length, history.state, history.scrollRestoration);
+        history.pushState({n: 1}, "", "/one");
+        history.pushState({n: 2}, "", "?two=2#x");
+        console.log(history.length, history.state.n, location.pathname, location.search, location.hash);
+        history.replaceState({n: 3}, "");
+        console.log(history.length, history.state.n, location.href);
+        history.scrollRestoration = "manual";
+        console.log(history.scrollRestoration);
+        history.scrollRestoration = "bogus";
+        console.log(history.scrollRestoration);
+        """)
+
+      assert logs(r) == [
+               "3 null auto",
+               "5 2 /one ?two=2 #x",
+               "5 3 http://h.test/one?two=2#x",
+               "manual",
+               "manual"
+             ]
+
+      assert {:history, :push, "http://h.test/one"} in r.outbox
+      assert {:history, :replace, "http://h.test/one?two=2#x"} in r.outbox
+    end
+
+    test "pushState to another origin is a SecurityError" do
+      {_pid, r} =
+        hist_start("""
+        try { history.pushState(null, "", "http://evil.test/x"); } catch (e) { console.log(e.name || e.message); }
+        console.log(location.href);
+        """)
+
+      assert logs(r) |> List.last() == "http://h.test/dir/page?a=1"
+      assert length(logs(r)) == 2
+    end
+
+    test "traversing between the page's own entries fires popstate with the state" do
+      {pid, _} =
+        hist_start("""
+        window.onpopstate = (e) => console.log("pop", e.state && e.state.n, location.pathname);
+        history.pushState({n: 1}, "", "/one");
+        history.pushState({n: 2}, "", "/two");
+        """)
+
+      r = Runtime.traverse(pid, -1)
+      assert r.moved
+      assert logs(r) == ["pop 1 /one"]
+      assert r.url == "http://h.test/one"
+      r = Runtime.traverse(pid, -1)
+      assert logs(r) == ["pop null /dir/page"]
+      # past the first entry the page cannot go on its own
+      assert Runtime.traverse(pid, -1).moved == false
+      r = Runtime.traverse(pid, 2)
+      assert r.moved
+      assert logs(r) == ["pop 2 /two"]
+      assert Runtime.traverse(pid, 1).moved == false
+    end
+
+    test "a new entry drops the entries that were forward" do
+      {pid, _} =
+        hist_start("""
+        history.pushState(1, "", "/a"); history.pushState(2, "", "/b");
+        """)
+
+      Runtime.traverse(pid, -1)
+      {_, r} = {nil, Runtime.dispatch(pid, :window, "x")}
+      _ = r
+      assert Runtime.traverse(pid, 1).moved
+    end
+
+    test "hash changes: location.hash and hash-only href make entries, popstate and hashchange" do
+      {pid, r} =
+        hist_start("""
+        window.addEventListener("popstate", (e) => console.log("pop", String(e.state), location.hash));
+        window.addEventListener("hashchange", (e) => console.log("hash", e.oldURL, e.newURL));
+        location.hash = "one";
+        location.href = "#two";
+        location.assign("#three");
+        location.replace("#four");
+        console.log(history.length, location.href);
+        """)
+
+      assert logs(r) == [
+               "pop null #one",
+               "hash http://h.test/dir/page?a=1 http://h.test/dir/page?a=1#one",
+               "pop null #two",
+               "hash http://h.test/dir/page?a=1#one http://h.test/dir/page?a=1#two",
+               "pop null #three",
+               "hash http://h.test/dir/page?a=1#two http://h.test/dir/page?a=1#three",
+               "pop null #four",
+               "hash http://h.test/dir/page?a=1#three http://h.test/dir/page?a=1#four",
+               # 2 before + the first entry + one, two, three; replace added none
+               "6 http://h.test/dir/page?a=1#four"
+             ]
+
+      assert {:hash, "http://h.test/dir/page?a=1#one", :push} in r.outbox
+      assert {:hash, "http://h.test/dir/page?a=1#four", :replace} in r.outbox
+      refute Enum.any?(r.outbox, &match?({:navigate, _, _}, &1))
+
+      # back from #four's entry (which replaced #three's) is #two, a hash-only traversal
+      r = Runtime.traverse(pid, -1)
+      assert r.moved
+
+      assert logs(r) == [
+               "pop null #two",
+               "hash http://h.test/dir/page?a=1#four http://h.test/dir/page?a=1#two"
+             ]
+    end
+
+    test "following a link to a fragment of the page is a history entry too" do
+      {pid, _} =
+        hist_start("""
+        window.addEventListener("hashchange", (e) => console.log("hash", e.newURL));
+        """)
+
+      r = Runtime.fragment(pid, "http://h.test/dir/page?a=1#sec")
+      assert logs(r) == ["hash http://h.test/dir/page?a=1#sec"]
+      assert r.url == "http://h.test/dir/page?a=1#sec"
+      assert Runtime.traverse(pid, -1).moved
+    end
+
+    test "replace and assign to another page ask the session to load it, replace without a new entry" do
+      {_pid, r} = hist_start("location.replace('/other'); location.assign('/more')")
+      assert {:navigate, "http://h.test/other", :replace} in r.outbox
+      assert {:navigate, "http://h.test/more", :push} in r.outbox
+    end
+
+    test "the parts of location can be set" do
+      {_pid, r} =
+        hist_start(
+          """
+          location.pathname = "new/path";
+          location.search = "q=1";
+          location.hostname = "other.test";
+          location.port = "8080";
+          location.host = "third.test:9090";
+          location.protocol = "https";
+          console.log(location.ancestorOrigins.length);
+          """,
+          "http://h.test/dir/page?a=1#top"
+        )
+
+      urls = for {:navigate, url, :push} <- r.outbox, do: url
+
+      assert urls == [
+               "http://h.test/new/path?a=1#top",
+               "http://h.test/dir/page?q=1#top",
+               "http://other.test/dir/page?a=1#top",
+               "http://h.test:8080/dir/page?a=1#top",
+               "http://third.test:9090/dir/page?a=1#top",
+               "https://h.test/dir/page?a=1#top"
+             ]
+
+      assert logs(r) == ["0"]
+    end
+
+    test "navigator has the usual properties" do
+      {_pid, r} =
+        hist_start("""
+        console.log(navigator.appName, navigator.product, navigator.cookieEnabled, navigator.webdriver, navigator.plugins.length, navigator.javaEnabled(), navigator.appVersion.startsWith("5.0"));
+        navigator.clipboard.writeText("hi").then(() => navigator.clipboard.readText()).then((t) => console.log("clip", t));
+        navigator.geolocation.getCurrentPosition(() => console.log("pos"), (e) => console.log("geo", e.code));
+        navigator.permissions.query({ name: "geolocation" }).then((p) => console.log("perm", p.state));
+        navigator.mediaDevices.enumerateDevices().then((d) => console.log("devices", d.length));
+        """)
+
+      assert hd(logs(r)) == "Netscape Gecko true false 0 false true"
+    end
+  end
+
+  describe "window and document event handler properties" do
+    test "window.onload, onpopstate, onhashchange and friends run, and read back" do
+      {pid, r} =
+        start(~S"""
+        <body><script>
+        console.log(window.onpopstate);
+        window.onpopstate = (e) => console.log("pop");
+        window.onhashchange = () => console.log("hash");
+        console.log(typeof window.onpopstate);
+        document.onclick = () => console.log("doc click");
+        window.onpopstate = null;
+        history.pushState(null, "", "/x");
+        </script><button id=b>x</button></body>
+        """)
+
+      assert logs(r) == ["null", "function"]
+      r = Runtime.fragment(pid, "http://t.test/x#y")
+      assert logs(r) == ["hash"]
+      # onpopstate was cleared; the fragment-only change still fires hashchange
+      r = Runtime.traverse(pid, -1)
+      assert logs(r) == ["hash"]
+      r = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert logs(r) == ["doc click"]
     end
   end
 end

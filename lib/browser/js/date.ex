@@ -26,7 +26,7 @@ defmodule Browser.JS.Date do
         end
       end)
 
-    put_hidden(ctor, "prototype", proto)
+    put_const(ctor, "prototype", proto)
     put_hidden(proto, "constructor", ctor)
     declare(scope, "Date", ctor)
 

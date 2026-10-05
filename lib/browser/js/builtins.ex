@@ -12,7 +12,7 @@ defmodule Browser.JS.Builtins do
   alias Browser.JS.Num
 
   @timer_horizon 60_000.0
-  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError)
+  @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
 
   @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
   def install do
@@ -53,6 +53,7 @@ defmodule Browser.JS.Builtins do
     install_object(scope, object_proto)
     install_array(scope, proto(:array))
     install_primitives(scope)
+    Browser.JS.BigInt.install(scope)
     install_math(scope)
     install_json(scope)
     install_console(scope)
@@ -64,6 +65,7 @@ defmodule Browser.JS.Builtins do
     declare(scope, "globalThis", global)
     declare(scope, :this, global)
     Browser.JS.Collections.install(scope)
+    Browser.JS.Proxy.install(scope)
 
     :erlang.put(:js_builtin_names, MapSet.new(Map.keys(deref(scope).vars)))
     scope
@@ -82,18 +84,44 @@ defmodule Browser.JS.Builtins do
   defp class_tag(v) when is_binary(v), do: "String"
   defp class_tag(v) when is_boolean(v), do: "Boolean"
   defp class_tag({:symbol, _, _}), do: "Symbol"
+  defp class_tag({:bigint, _}), do: "BigInt"
   defp class_tag(v) when not is_tuple(v), do: "Number"
 
   defp class_tag({:obj, id} = o) do
     case deref(id) do
-      %{class: :array} -> "Array"
-      %{class: :function} -> "Function"
-      %{class: :regexp} -> "RegExp"
-      %{date: _} -> "Date"
-      %{prim: p} when is_binary(p) -> "String"
-      %{prim: p} when is_boolean(p) -> "Boolean"
-      %{prim: _} -> "Number"
-      _ -> if error_object?(o), do: "Error", else: "Object"
+      %{proxy: _} ->
+        cond do
+          Browser.JS.Proxy.is_array(o) -> "Array"
+          function?(o) -> "Function"
+          true -> "Object"
+        end
+
+      %{class: :array} ->
+        "Array"
+
+      %{class: :function} ->
+        "Function"
+
+      %{class: :regexp} ->
+        "RegExp"
+
+      %{date: _} ->
+        "Date"
+
+      %{prim: p} when is_binary(p) ->
+        "String"
+
+      %{prim: p} when is_boolean(p) ->
+        "Boolean"
+
+      %{prim: {:bigint, _}} ->
+        "Object"
+
+      %{prim: _} ->
+        "Number"
+
+      _ ->
+        if error_object?(o), do: "Error", else: "Object"
     end
   end
 
@@ -108,9 +136,13 @@ defmodule Browser.JS.Builtins do
     if nullish?(o), do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
     case o do
-      {:obj, _} ->
-        key in own_keys(o) or (array?(o) and key == "length") or
-          Browser.JS.Props.descriptor(o, key) != :undefined
+      {:obj, id} ->
+        # (a module namespace answers per name: reading an uninitialized export throws)
+        if match?(%{host: {Browser.JS.Modules, _}}, Interp.deref(id)),
+          do: Browser.JS.Props.descriptor(o, key) != :undefined,
+          else:
+            key in own_keys(o) or (array?(o) and key == "length") or
+              Browser.JS.Props.descriptor(o, key) != :undefined
 
       s when is_binary(s) ->
         key == "length" or key in own_keys(s)
@@ -126,7 +158,7 @@ defmodule Browser.JS.Builtins do
 
   defp constructor(scope, name, proto, fun) do
     f = native(name, fun)
-    put_hidden(f, "prototype", proto)
+    put_const(f, "prototype", proto)
     put_hidden(proto, "constructor", f)
     declare(scope, name, f)
     f
@@ -172,31 +204,98 @@ defmodule Browser.JS.Builtins do
   # ── errors ─────────────────────────────────────────────────
 
   defp install_errors(scope, error_proto) do
-    for t <- @error_types do
-      proto = proto({:error, t})
-      put_hidden(proto, "name", t)
-      put_hidden(proto, "message", "")
+    ctors =
+      for t <- @error_types do
+        proto = proto({:error, t})
+        put_hidden(proto, "name", t)
+        put_hidden(proto, "message", "")
 
-      constructor(scope, t, proto, fn this, args ->
-        err = if match?({:obj, _}, this), do: this, else: new_object([], proto)
-        msg = arg(args, 0)
-        if msg != :undefined, do: put_hidden(err, "message", to_str(msg))
+        {t,
+         constructor(scope, t, proto, fn this, args ->
+           err = if match?({:obj, _}, this), do: this, else: new_object([], proto)
+           mark_error(err)
+           # AggregateError(errors, message): the iterable of errors comes first
+           {errors, suppressed, args} =
+             case t do
+               "AggregateError" -> {arg(args, 0), nil, Enum.drop(args, 1)}
+               "SuppressedError" -> {nil, {arg(args, 0), arg(args, 1)}, Enum.drop(args, 2)}
+               _ -> {nil, nil, args}
+             end
 
-        put_hidden(
-          err,
-          "stack",
-          Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> to_str(msg)))
-        )
+           msg = if arg(args, 0) == :undefined, do: :undefined, else: to_str(arg(args, 0))
 
-        err
+           if msg != :undefined, do: put_hidden(err, "message", msg)
+
+           with {:obj, _} = opts <- arg(args, 1),
+                true <- Interp.has_property?(opts, "cause") do
+             put_hidden(err, "cause", Interp.get(opts, "cause"))
+           end
+
+           with {error, sup} <- suppressed do
+             put_hidden(err, "error", error)
+             put_hidden(err, "suppressed", sup)
+           end
+
+           put_hidden(
+             err,
+             "stack",
+             Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> msg))
+           )
+
+           if errors, do: put_hidden(err, "errors", new_array(Interp.iterate(errors)))
+
+           err
+         end)}
+      end
+
+    error_ctor = ctors |> List.keyfind("Error", 0) |> elem(1)
+
+    # the other error constructors inherit from Error
+    for {t, {:obj, id}} <- ctors, t != "Error", do: store(id, %{deref(id) | proto: error_ctor})
+
+    put_hidden(
+      error_ctor,
+      "isError",
+      native("isError", fn _, args ->
+        case arg(args, 0) do
+          {:obj, id} -> Map.get(deref(id), :errdata, false)
+          _ -> false
+        end
       end)
-    end
+      |> then(fn {:obj, id} = f ->
+        store(id, Map.put(deref(id), :arity, 1.0))
+        f
+      end)
+    )
 
     def_fn(error_proto, "toString", fn this, _ ->
-      name = to_str(Interp.get(this, "name"))
-      msg = to_str(Interp.get(this, "message"))
-      if msg == "", do: name, else: name <> ": " <> msg
+      unless match?({:obj, _}, this),
+        do: throw_error("TypeError", "Error.prototype.toString called on a non-object")
+
+      name = with :undefined <- Interp.get(this, "name"), do: "Error", else: (n -> to_str(n))
+      msg = with :undefined <- Interp.get(this, "message"), do: "", else: (m -> to_str(m))
+
+      cond do
+        name == "" -> msg
+        msg == "" -> name
+        true -> name <> ": " <> msg
+      end
     end)
+  end
+
+  # [key, value] of the own enumerable string properties; a proxy is asked for each key's
+  # descriptor and then its value, one key at a time
+  defp enum_pairs(o) do
+    if Browser.JS.Proxy.proxy?(o) do
+      for k <- Browser.JS.Proxy.own_keys(o),
+          is_binary(k),
+          d = Browser.JS.Props.descriptor(o, k),
+          d != :undefined,
+          Interp.truthy(Interp.get(d, "enumerable")),
+          do: {k, Interp.get(o, k)}
+    else
+      for k <- own_keys(o), do: {k, Interp.get(o, k)}
+    end
   end
 
   # ── Object ─────────────────────────────────────────────────
@@ -206,7 +305,8 @@ defmodule Browser.JS.Builtins do
       constructor(scope, "Object", object_proto, fn _, args ->
         case arg(args, 0) do
           {:obj, _} = o -> o
-          _ -> new_object()
+          v when v in [:undefined, :null] -> new_object()
+          v -> box(v)
         end
       end)
 
@@ -221,17 +321,17 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(obj, "values", fn _, [o | _] ->
-      new_array(Enum.map(own_keys(o), &Interp.get(o, &1)))
+      new_array(Enum.map(enum_pairs(o), &elem(&1, 1)))
     end)
 
     def_fn(obj, "entries", fn _, [o | _] ->
-      new_array(Enum.map(own_keys(o), &new_array([&1, Interp.get(o, &1)])))
+      new_array(Enum.map(enum_pairs(o), fn {k, v} -> new_array([k, v]) end))
     end)
 
     def_fn(obj, "assign", fn _, [target | sources] ->
       for s <- sources,
           not nullish?(s),
-          k <- own_keys(s),
+          k <- Browser.JS.Props.enumerable_keys(s),
           do: Interp.put(target, k, Interp.get(s, k))
 
       target
@@ -279,7 +379,14 @@ defmodule Browser.JS.Builtins do
         end
       end)
 
-    def_fn(arr, "isArray", fn _, args -> array?(arg(args, 0)) end)
+    put_hidden(
+      arr,
+      {:symbol, :species, "Symbol.species"},
+      {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
+    )
+
+    def_fn(arr, "isArray", fn _, args -> Browser.JS.Proxy.is_array(arg(args, 0)) end)
+    put_hidden(arr, "fromAsync", Browser.JS.Prelude.from_async())
     def_fn(arr, "of", fn _, args -> new_array(args) end)
 
     def_fn(arr, "from", fn _, args ->
@@ -377,8 +484,93 @@ defmodule Browser.JS.Builtins do
 
   defp plain_array?(_), do: false
 
+  @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
+                       findLastIndex flatMap)
+
+  # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
+  # species constructor
+  defp species_target(this, n) do
+    if array?(this) do
+      c = Interp.get(this, "constructor")
+
+      c =
+        case c do
+          {:obj, _} ->
+            case Interp.get(c, {:symbol, :species, "Symbol.species"}) do
+              :null -> :undefined
+              sp -> sp
+            end
+
+          other ->
+            other
+        end
+
+      cond do
+        c == :undefined or c == Interp.get(proto(:array), "constructor") ->
+          nil
+
+        not function?(c) ->
+          throw_error("TypeError", "object.constructor[Symbol.species] is not a constructor")
+
+        true ->
+          construct(c, [float(n)])
+      end
+    end
+  end
+
+  # the elements of a plain result array, defined one by one on a species target
+  defp species_fill_from(res, target, set_len?), do: species_fill(target, res, set_len?)
+
+  defp species_fill(nil, res, _set_len?), do: res
+
+  defp species_fill(target, res, set_len?) do
+    items = array_list(res)
+
+    for {v, i} <- Enum.with_index(items) do
+      Browser.JS.Props.define(
+        target,
+        float(i),
+        new_object([
+          {"value", v},
+          {"writable", true},
+          {"enumerable", true},
+          {"configurable", true}
+        ])
+      )
+    end
+
+    if set_len?, do: Interp.put(target, "length", float(length(items)))
+    target
+  end
+
+  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers
+  defp array_fn(obj, name, fun) do
+    def_fn(obj, name, fn this, args ->
+      this =
+        cond do
+          nullish?(this) ->
+            throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+
+          is_boolean(this) ->
+            wrap(new_object([], proto(:boolean)), this)
+
+          is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
+            wrap(new_object([], proto(:number)), this)
+
+          true ->
+            this
+        end
+
+      # the length is read before the callback is checked
+      if name in @callback_methods and not array?(this) and not is_binary(this),
+        do: length_of(this, false)
+
+      fun.(this, args)
+    end)
+  end
+
   defp array_methods(p) do
-    def_fn(p, "push", fn this, args ->
+    array_fn(p, "push", fn this, args ->
       if plain_array?(this) do
         {:obj, id} = this
         o = deref(id)
@@ -399,7 +591,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "pop", fn this, _ ->
+    array_fn(p, "pop", fn this, _ ->
       if plain_array?(this) do
         {:obj, id} = this
         o = deref(id)
@@ -432,7 +624,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "shift", fn this, _ ->
+    array_fn(p, "shift", fn this, _ ->
       case elems(this) do
         [] ->
           put_elems(this, [])
@@ -444,21 +636,24 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "unshift", fn this, args ->
+    array_fn(p, "unshift", fn this, args ->
       list = args ++ elems(this)
       put_elems(this, list)
       float(length(list))
     end)
 
-    def_fn(p, "slice", fn this, args ->
+    array_fn(p, "slice", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
       to = rel(arg(args, 1), len, len)
+      target = species_target(this, max(to - from, 0))
+
       new_array(Enum.slice(list, from, max(to - from, 0)))
+      |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "splice", fn this, args ->
+    array_fn(p, "splice", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 0), len, 0)
@@ -470,25 +665,42 @@ defmodule Browser.JS.Builtins do
           [_, c | _] -> c |> to_int() |> max(0) |> min(len - from)
         end
 
+      target = species_target(this, count)
       {head, rest} = Enum.split(list, from)
       {removed, tail} = Enum.split(rest, count)
       put_elems(this, head ++ Enum.drop(args, 2) ++ tail)
-      new_array(removed)
+      new_array(removed) |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "concat", fn this, args ->
-      first = if array?(this), do: array_list(this), else: [this_obj(this)]
+    array_fn(p, "concat", fn this, args ->
+      target = species_target(this, 0)
+      items = [this_obj(this) | args]
 
-      new_array(
-        first ++ Enum.flat_map(args, fn a -> if array?(a), do: array_list(a), else: [a] end)
-      )
+      new_array(Enum.flat_map(items, &concat_items/1))
+      |> species_fill_from(target, true)
     end)
 
-    def_fn(p, "join", fn this, args ->
+    array_fn(p, "toLocaleString", fn this, _ ->
+      len = length_of(this)
+
+      Enum.map_join(0..(len - 1)//1, ",", fn i ->
+        case Interp.get(this, float(i)) do
+          v when v in [:undefined, :null] ->
+            ""
+
+          v ->
+            f = Interp.get(v, "toLocaleString")
+            callable!(f)
+            to_str(call(f, v, []))
+        end
+      end)
+    end)
+
+    array_fn(p, "join", fn this, args ->
       join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
     end)
 
-    def_fn(p, "toString", fn this, _ ->
+    array_fn(p, "toString", fn this, _ ->
       case this do
         {:obj, _} ->
           case Interp.get(this, "join") do
@@ -501,12 +713,12 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "reverse", fn this, _ ->
+    array_fn(p, "reverse", fn this, _ ->
       put_elems(this, Enum.reverse(elems(this)))
       this
     end)
 
-    def_fn(p, "indexOf", fn this, args ->
+    array_fn(p, "indexOf", fn this, args ->
       v = arg(args, 0)
 
       from = from_index(this, args, nil, :asc)
@@ -517,7 +729,7 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "lastIndexOf", fn this, args ->
+    array_fn(p, "lastIndexOf", fn this, args ->
       v = arg(args, 0)
 
       from = from_index(this, args, nil, :desc)
@@ -528,18 +740,18 @@ defmodule Browser.JS.Builtins do
       end
     end)
 
-    def_fn(p, "includes", fn this, args ->
+    array_fn(p, "includes", fn this, args ->
       v = arg(args, 0)
       Enum.any?(elems(this), &same_value_zero(&1, v))
     end)
 
-    def_fn(p, "at", fn this, args ->
+    array_fn(p, "at", fn this, args ->
       list = elems(this)
       n = to_int(arg(args, 0))
       Enum.at(list, if(n < 0, do: length(list) + n, else: n), :undefined)
     end)
 
-    def_fn(p, "fill", fn this, args ->
+    array_fn(p, "fill", fn this, args ->
       list = elems(this)
       len = length(list)
       from = rel(arg(args, 1), len, 0)
@@ -556,98 +768,132 @@ defmodule Browser.JS.Builtins do
       this
     end)
 
-    def_fn(p, "flat", fn this, args ->
-      depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
-      new_array(flatten(elems(this), depth))
+    array_fn(p, "copyWithin", fn this, args ->
+      o = this_obj(this)
+      len = length_of(o)
+      to = rel(arg(args, 0), len, 0)
+      from = rel(arg(args, 1), len, 0)
+      final = rel(arg(args, 2), len, len)
+      count = min(final - from, len - to)
+
+      {dir, from, to} =
+        if from < to and to < from + count,
+          do: {-1, from + count - 1, to + count - 1},
+          else: {1, from, to}
+
+      for k <- 0..(count - 1)//1 do
+        f = float(from + dir * k)
+        t = float(to + dir * k)
+
+        if Interp.has_property?(o, to_key(f)),
+          do: Interp.put(o, t, Interp.get(o, f)),
+          else:
+            unless(Interp.delete(o, to_key(t)),
+              do: throw_error("TypeError", "Cannot delete property '#{to_str(t)}'")
+            )
+      end
+
+      o
     end)
 
-    def_fn(p, "forEach", fn this, args ->
+    array_fn(p, "flat", fn this, args ->
+      depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
+      target = species_target(this, 0)
+      new_array(flatten(elems(this), depth)) |> species_fill_from(target, false)
+    end)
+
+    array_fn(p, "flatMap", fn this, args ->
+      f = callable!(arg(args, 0))
+      target = species_target(this, 0)
+
+      mapped =
+        for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
+
+      new_array(flatten(mapped, 1)) |> species_fill_from(target, false)
+    end)
+
+    array_fn(p, "forEach", fn this, args ->
       f = callable!(arg(args, 0))
 
       for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
       :undefined
     end)
 
-    def_fn(p, "map", fn this, args ->
+    array_fn(p, "map", fn this, args ->
       f = callable!(arg(args, 0))
       len = length_of(this)
+      target = species_target(this, len)
 
       mapped =
         for {i, v} <- pairs(this), into: %{}, do: {i, call(f, arg(args, 1), [v, float(i), this])}
 
-      array_of(len, mapped)
+      species_fill(target, array_of(len, mapped), false)
     end)
 
-    def_fn(p, "filter", fn this, args ->
+    array_fn(p, "filter", fn this, args ->
       f = callable!(arg(args, 0))
+      target = species_target(this, 0)
 
       new_array(
         for {i, v} <- pairs(this),
             truthy(call(f, arg(args, 1), [v, float(i), this])),
             do: v
       )
+      |> species_fill_from(target, false)
     end)
 
-    def_fn(p, "find", fn this, args ->
+    array_fn(p, "find", fn this, args ->
       f = callable!(arg(args, 0))
 
-      Enum.find_value(Enum.with_index(elems(this)), :undefined, fn {v, i} ->
+      Enum.find_value(each_pair(this, :asc), :undefined, fn {v, i} ->
         if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
       end)
     end)
 
-    def_fn(p, "findIndex", fn this, args ->
+    array_fn(p, "findIndex", fn this, args ->
       f = callable!(arg(args, 0))
 
       idx =
-        Enum.find_index(Enum.with_index(elems(this)), fn {v, i} ->
-          truthy(call(f, arg(args, 1), [v, float(i), this]))
-        end)
-
-      float(idx || -1)
-    end)
-
-    def_fn(p, "findLast", fn this, args ->
-      f = callable!(arg(args, 0))
-
-      this
-      |> elems()
-      |> Enum.with_index()
-      |> Enum.reverse()
-      |> Enum.find_value(:undefined, fn {v, i} ->
-        if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
-      end)
-    end)
-
-    def_fn(p, "findLastIndex", fn this, args ->
-      f = callable!(arg(args, 0))
-
-      idx =
-        this
-        |> elems()
-        |> Enum.with_index()
-        |> Enum.reverse()
-        |> Enum.find_value(-1, fn {v, i} ->
+        Enum.find_value(each_pair(this, :asc), -1, fn {v, i} ->
           if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
         end)
 
       float(idx)
     end)
 
-    def_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
+    array_fn(p, "findLast", fn this, args ->
+      f = callable!(arg(args, 0))
 
-    def_fn(p, "toSorted", fn this, args ->
+      Enum.find_value(each_pair(this, :desc), :undefined, fn {v, i} ->
+        if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
+      end)
+    end)
+
+    array_fn(p, "findLastIndex", fn this, args ->
+      f = callable!(arg(args, 0))
+
+      idx =
+        Enum.find_value(each_pair(this, :desc), -1, fn {v, i} ->
+          if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
+        end)
+
+      float(idx)
+    end)
+
+    array_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
+
+    array_fn(p, "toSorted", fn this, args ->
       copy = new_array(elems(this))
       call(Interp.get(copy, "sort"), copy, args)
     end)
 
-    def_fn(p, "toSpliced", fn this, args ->
+    array_fn(p, "toSpliced", fn this, args ->
       copy = new_array(elems(this))
       call(Interp.get(copy, "splice"), copy, args)
       copy
     end)
 
-    def_fn(p, "with", fn this, args ->
+    array_fn(p, "with", fn this, args ->
       list = elems(this)
       len = length(list)
       n = to_int(arg(args, 0))
@@ -657,27 +903,27 @@ defmodule Browser.JS.Builtins do
       new_array(List.replace_at(list, i, arg(args, 1)))
     end)
 
-    def_fn(p, "some", fn this, args ->
+    array_fn(p, "some", fn this, args ->
       f = callable!(arg(args, 0))
 
       Enum.any?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "every", fn this, args ->
+    array_fn(p, "every", fn this, args ->
       f = callable!(arg(args, 0))
 
       Enum.all?(pairs(this), fn {i, v} -> truthy(call(f, arg(args, 1), [v, float(i), this])) end)
     end)
 
-    def_fn(p, "reduce", fn this, args ->
+    array_fn(p, "reduce", fn this, args ->
       reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), false)
     end)
 
-    def_fn(p, "reduceRight", fn this, args ->
+    array_fn(p, "reduceRight", fn this, args ->
       reduce(this, callable!(arg(args, 0)), Enum.drop(args, 1), true)
     end)
 
-    def_fn(p, "sort", fn this, args ->
+    array_fn(p, "sort", fn this, args ->
       f = arg(args, 0)
 
       unless f == :undefined or function?(f),
@@ -687,7 +933,17 @@ defmodule Browser.JS.Builtins do
             "The comparison function must be either a function or undefined"
           )
 
-      {undefs, list} = this |> elems() |> Enum.split_with(&(&1 == :undefined))
+      o = this_obj(this)
+      len = if plain_elements?(o), do: nil, else: length_of(o, false)
+
+      # the values are read first (holes skipped), sorted, then written back and the
+      # slots left over deleted, so getters and setters see the spec's order of access
+      items =
+        if plain_elements?(o),
+          do: array_list(o),
+          else: for({_, v} <- pairs(o), do: v)
+
+      {undefs, list} = Enum.split_with(items, &(&1 == :undefined))
 
       cmp =
         if function?(f),
@@ -699,9 +955,27 @@ defmodule Browser.JS.Builtins do
           end,
           else: fn a, b -> to_str(a) <= to_str(b) end
 
-      put_elems(this, Enum.sort(list, cmp) ++ undefs)
-      this
+      sorted = Enum.sort(list, cmp) ++ undefs
+
+      if plain_elements?(o) do
+        put_elems(o, sorted)
+      else
+        sorted |> Enum.with_index() |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
+
+        for i <- length(sorted)..(len - 1)//1 do
+          unless Interp.delete(o, float(i)),
+            do: throw_error("TypeError", "Cannot delete property '#{i}'")
+        end
+      end
+
+      o
     end)
+  end
+
+  # an array without holes or accessor elements, which can be sorted as a plain list
+  defp plain_elements?(o) do
+    array?(o) and not has_holes?(o) and
+      not Enum.any?(array_list(o), &match?({:accessor, _, _}, &1))
   end
 
   # ── array methods on anything with a `length` ──────────────
@@ -719,6 +993,33 @@ defmodule Browser.JS.Builtins do
     f
   end
 
+  # the elements `concat` adds for one argument: its elements when it is spreadable
+  defp concat_items({:obj, _} = v) do
+    spreadable? =
+      case Interp.get(v, {:symbol, :isConcatSpreadable, "Symbol.isConcatSpreadable"}) do
+        :undefined -> Browser.JS.Proxy.is_array(v)
+        x -> Interp.truthy(x)
+      end
+
+    cond do
+      not spreadable? ->
+        [v]
+
+      array?(v) ->
+        array_list(v)
+
+      true ->
+        len = v |> Interp.get("length") |> to_length()
+
+        if len > 9_007_199_254_740_991 - 1,
+          do: throw_error("TypeError", "Invalid array length")
+
+        for i <- 0..(len - 1)//1, Interp.has_property?(v, i), do: Interp.get(v, i)
+    end
+  end
+
+  defp concat_items(v), do: [v]
+
   defp to_length(v) do
     case to_num(v) do
       n when is_number(n) -> n |> trunc() |> max(0) |> min(9_007_199_254_740_991)
@@ -727,7 +1028,7 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp length_of(this) do
+  defp length_of(this, cap? \\ true) do
     cond do
       array?(this) ->
         to_int(Interp.get(this, "length"))
@@ -737,7 +1038,7 @@ defmodule Browser.JS.Builtins do
 
       true ->
         len = to_length(Interp.get(this_obj(this), "length"))
-        if len > @max_length, do: throw_error("RangeError", "Invalid array length")
+        if cap? and len > @max_length, do: throw_error("RangeError", "Invalid array length")
         len
     end
   end
@@ -750,6 +1051,14 @@ defmodule Browser.JS.Builtins do
     end
   end
 
+  # `{value, index}` of every index below the length (holes read as undefined), each read as it
+  # is consumed so that a callback that changes the object is seen
+  defp each_pair(this, dir) do
+    len = length_of(this)
+    range = if dir == :asc, do: 0..(len - 1)//1, else: (len - 1)..0//-1
+    Stream.map(range, fn i -> {Interp.get(this, float(i)), i} end)
+  end
+
   defp has_holes?({:obj, id}) do
     o = deref(id)
     map_size(o.items) != o.len
@@ -758,7 +1067,7 @@ defmodule Browser.JS.Builtins do
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
   defp pairs(this, dir \\ :asc, from \\ nil) do
-    len = length_of(this)
+    len = length_of(this, false)
 
     {first, last} =
       if dir == :asc, do: {from || 0, len - 1}, else: {from || len - 1, 0}
@@ -862,6 +1171,11 @@ defmodule Browser.JS.Builtins do
   # ── String / Number / Boolean ──────────────────────────────
 
   defp install_primitives(scope) do
+    # the prototypes are themselves a String, a Number and a Boolean
+    wrap(proto(:string), "")
+    wrap(proto(:number), 0.0)
+    wrap(proto(:boolean), false)
+
     str =
       constructor(scope, "String", proto(:string), fn this, args ->
         s =
@@ -912,6 +1226,18 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
+    def_fn(str, "fromCodePoint", fn _, args ->
+      Enum.map_join(args, fn v ->
+        n = to_num(v)
+
+        unless is_number(n) and n == trunc(n) and n >= 0 and n <= 0x10FFFF,
+          do: throw_error("RangeError", "Invalid code point #{to_str(v)}")
+
+        n = trunc(n)
+        if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>>
+      end)
+    end)
+
     # UTF-16 code units: a surrogate pair is one character, a lone surrogate cannot be kept
     def_fn(str, "fromCharCode", fn _, args ->
       args |> Enum.map(&(&1 |> to_num() |> code_unit())) |> units_to_string()
@@ -919,7 +1245,16 @@ defmodule Browser.JS.Builtins do
 
     num =
       constructor(scope, "Number", proto(:number), fn this, args ->
-        n = if args == [], do: 0.0, else: to_num(hd(args))
+        n =
+          if args == [] do
+            0.0
+          else
+            case to_primitive(hd(args), "number") do
+              {:bigint, b} -> Browser.JS.BigInt.to_float(b)
+              p -> to_num(p)
+            end
+          end
+
         if wrapper_target?(this, :number), do: wrap(this, n), else: n
       end)
 
@@ -1079,6 +1414,10 @@ defmodule Browser.JS.Builtins do
   end
 
   defp number_methods(p) do
+    def_fn(p, "toLocaleString", fn this, _ ->
+      Num.to_string(this_prim(this, :number, "Number.prototype.toLocaleString"))
+    end)
+
     def_fn(p, "toString", fn this, args ->
       this = this_prim(this, :number, "Number.prototype.toString")
 
@@ -1113,6 +1452,18 @@ defmodule Browser.JS.Builtins do
       this_prim(this, :boolean, "Boolean.prototype.valueOf")
     end)
   end
+
+  # ToObject of a primitive: a String, Number, Boolean or BigInt wrapper
+  defp box(v) when is_binary(v) do
+    o = new_object([], proto(:string))
+    put_const(o, "length", float(String.length(v)))
+    wrap(o, v)
+  end
+
+  defp box(v) when is_boolean(v), do: wrap(new_object([], proto(:boolean)), v)
+  defp box({:bigint, _} = v), do: wrap(new_object([], proto(:bigint)), v)
+  defp box({:symbol, _, _} = v), do: wrap(new_object([], proto(:symbol)), v)
+  defp box(v), do: wrap(new_object([], proto(:number)), v)
 
   # `new String(x)`, `new Number(x)`, `new Boolean(x)`: the constructor was handed a fresh object
   # of the right prototype, which becomes the wrapper
@@ -1167,9 +1518,9 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "valueOf", fn this, _ -> this_prim(this, :string, "String.prototype.valueOf") end)
     str_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
     str_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
-    str_fn(p, "trim", fn this, _ -> String.trim(this) end)
-    str_fn(p, "trimStart", fn this, _ -> String.trim_leading(this) end)
-    str_fn(p, "trimEnd", fn this, _ -> String.trim_trailing(this) end)
+    str_fn(p, "trim", fn this, _ -> Interp.js_trim(this) end)
+    str_fn(p, "trimStart", fn this, _ -> Interp.js_trim_start(this) end)
+    str_fn(p, "trimEnd", fn this, _ -> Interp.js_trim_end(this) end)
     str_fn(p, "charAt", fn this, args -> Str.at(this, to_int(arg(args, 0))) || "" end)
 
     str_fn(p, "at", fn this, args ->
@@ -1369,11 +1720,21 @@ defmodule Browser.JS.Builtins do
   defp install_math(scope) do
     math = new_object()
     declare(scope, "Math", math)
-    put_hidden(math, "PI", :math.pi())
-    put_hidden(math, "E", :math.exp(1))
-    put_hidden(math, "LN2", :math.log(2))
-    put_hidden(math, "SQRT2", :math.sqrt(2))
+    put_tag(math, "Math")
 
+    for {k, v} <- [
+          {"PI", :math.pi()},
+          {"E", :math.exp(1)},
+          {"LN2", :math.log(2)},
+          {"LN10", :math.log(10)},
+          {"LOG2E", 1 / :math.log(2)},
+          {"LOG10E", 1 / :math.log(10)},
+          {"SQRT2", :math.sqrt(2)},
+          {"SQRT1_2", :math.sqrt(0.5)}
+        ],
+        do: put_const(math, k, v)
+
+    # `fun` gets a number (a float or :nan / :infinity / :neg_infinity)
     unary = fn name, fun ->
       def_fn(math, name, fn _, args ->
         case to_num(arg(args, 0)) do
@@ -1383,12 +1744,42 @@ defmodule Browser.JS.Builtins do
       end)
     end
 
-    keep_special = fn f -> fn n -> if is_atom(n), do: n, else: f.(n) end end
+    # zeros and non-finite values map to themselves
+    keep_special = fn f -> fn n -> if is_atom(n) or n == 0, do: n, else: f.(n) end end
+    nan_for_atoms = fn f -> fn n -> if is_atom(n), do: :nan, else: f.(n) end end
+    sign_of = fn n -> if n < 0, do: -1.0, else: 1.0 end
+
+    guarded = fn f, over ->
+      fn n ->
+        try do
+          f.(n)
+        rescue
+          ArithmeticError -> over.(n)
+        end
+      end
+    end
+
+    neg_zero = -1.0 * 0.0
 
     unary.("floor", keep_special.(&:math.floor/1))
     unary.("ceil", keep_special.(&:math.ceil/1))
-    unary.("trunc", keep_special.(&(&1 |> trunc() |> float())))
-    unary.("round", keep_special.(&:math.floor(&1 + 0.5)))
+
+    unary.(
+      "trunc",
+      keep_special.(fn n ->
+        t = trunc(n) * 1.0
+        if t == 0.0 and n < 0, do: neg_zero, else: t
+      end)
+    )
+
+    unary.(
+      "round",
+      keep_special.(fn n ->
+        f = :math.floor(n)
+        r = if n - f >= 0.5, do: f + 1.0, else: f
+        if r == 0.0 and n < 0, do: neg_zero, else: r
+      end)
+    )
 
     unary.("abs", fn n ->
       if n == :neg_infinity, do: :infinity, else: if(is_atom(n), do: n, else: abs(n))
@@ -1400,7 +1791,7 @@ defmodule Browser.JS.Builtins do
         n == :nan -> :nan
         n > 0 -> 1.0
         n < 0 -> -1.0
-        true -> 0.0
+        true -> n
       end
     end)
 
@@ -1415,19 +1806,99 @@ defmodule Browser.JS.Builtins do
 
     unary.(
       "cbrt",
-      keep_special.(&if &1 < 0, do: -:math.pow(-&1, 1 / 3), else: :math.pow(&1, 1 / 3))
+      keep_special.(fn n ->
+        x = abs(n)
+        r = :math.pow(x, 1 / 3)
+        r = r - (r * r * r - x) / (3 * r * r)
+        sign_of.(n) * r
+      end)
     )
 
-    unary.("sin", keep_special.(&:math.sin/1))
-    unary.("cos", keep_special.(&:math.cos/1))
-    unary.("tan", keep_special.(&:math.tan/1))
-    unary.("atan", keep_special.(&:math.atan/1))
+    unary.("sin", nan_for_atoms.(&:math.sin/1))
+    unary.("cos", nan_for_atoms.(&:math.cos/1))
+    unary.("tan", nan_for_atoms.(&:math.tan/1))
+
+    unary.("asin", fn n ->
+      if is_atom(n) or abs(n) > 1, do: :nan, else: :math.asin(n)
+    end)
+
+    unary.("acos", fn n ->
+      if is_atom(n) or abs(n) > 1, do: :nan, else: :math.acos(n)
+    end)
+
+    unary.("atan", fn
+      :infinity -> :math.pi() / 2
+      :neg_infinity -> -:math.pi() / 2
+      :nan -> :nan
+      n -> :math.atan(n)
+    end)
+
+    unary.("sinh", fn
+      n when is_atom(n) ->
+        n
+
+      n ->
+        guarded.(&:math.sinh/1, fn n -> if n < 0, do: :neg_infinity, else: :infinity end).(n)
+    end)
+
+    unary.("cosh", fn
+      :nan -> :nan
+      n when is_atom(n) -> :infinity
+      n -> guarded.(&:math.cosh/1, fn _ -> :infinity end).(n)
+    end)
+
+    unary.("tanh", fn
+      :infinity -> 1.0
+      :neg_infinity -> -1.0
+      :nan -> :nan
+      n -> if abs(n) > 20, do: sign_of.(n), else: :math.tanh(n)
+    end)
+
+    unary.(
+      "asinh",
+      keep_special.(fn n ->
+        x = abs(n)
+
+        sign_of.(n) *
+          if(x > 1.0e150,
+            do: :math.log(x) + :math.log(2),
+            else: :math.log(x + :math.sqrt(x * x + 1))
+          )
+      end)
+    )
+
+    unary.("acosh", fn
+      :infinity -> :infinity
+      n when is_atom(n) -> :nan
+      n when n < 1 -> :nan
+      n -> if n > 1.0e150, do: :math.log(n) + :math.log(2), else: :math.acosh(n)
+    end)
+
+    unary.("atanh", fn
+      n when is_atom(n) -> :nan
+      n when abs(n) > 1 -> :nan
+      n when n == 1 -> :infinity
+      n when n == -1 -> :neg_infinity
+      n when n == 0 -> n
+      n -> 0.5 * :math.log((1 + n) / (1 - n))
+    end)
 
     unary.("exp", fn n ->
       cond do
         is_atom(n) -> if n == :neg_infinity, do: 0.0, else: n
-        n > 709 -> :infinity
+        n > 709.79 -> :infinity
         true -> :math.exp(n)
+      end
+    end)
+
+    unary.("expm1", fn n ->
+      cond do
+        n == :neg_infinity -> -1.0
+        is_atom(n) -> n
+        n == 0 -> n
+        n > 709.79 -> :infinity
+        abs(n) < 1.0e-5 -> n + n * n / 2 + n * n * n / 6
+        true -> :math.exp(n) - 1
       end
     end)
 
@@ -1438,6 +1909,18 @@ defmodule Browser.JS.Builtins do
         n < 0 -> :nan
         n == 0 -> :neg_infinity
         true -> :math.log(n)
+      end
+    end)
+
+    unary.("log1p", fn n ->
+      cond do
+        n == :infinity -> n
+        is_atom(n) -> :nan
+        n < -1 -> :nan
+        n == -1 -> :neg_infinity
+        n == 0 -> n
+        abs(n) < 1.0e-4 -> n - n * n / 2 + n * n * n / 3
+        true -> :math.log(1 + n)
       end
     end)
 
@@ -1462,10 +1945,36 @@ defmodule Browser.JS.Builtins do
     end)
 
     def_fn(math, "atan2", fn _, args ->
-      with y when is_number(y) <- to_num(arg(args, 0)),
-           x when is_number(x) <- to_num(arg(args, 1)),
-           do: :math.atan2(y * 1.0, x * 1.0),
-           else: (_ -> :nan)
+      y = to_num(arg(args, 0))
+      x = to_num(arg(args, 1))
+      pi = :math.pi()
+
+      cond do
+        y == :nan or x == :nan ->
+          :nan
+
+        y in [:infinity, :neg_infinity] ->
+          ys = if y == :infinity, do: 1.0, else: -1.0
+
+          case x do
+            :infinity -> ys * pi / 4
+            :neg_infinity -> ys * 3 * pi / 4
+            _ -> ys * pi / 2
+          end
+
+        x == :infinity ->
+          if y < 0 or (y == 0 and match?(<<1::1, _::63>>, <<y * 1.0::float-64>>)),
+            do: neg_zero,
+            else: 0.0
+
+        x == :neg_infinity ->
+          if y < 0 or (y == 0 and match?(<<1::1, _::63>>, <<y * 1.0::float-64>>)),
+            do: -pi,
+            else: pi
+
+        true ->
+          :math.atan2(y * 1.0, x * 1.0)
+      end
     end)
 
     def_fn(math, "pow", fn _, args -> Num.pow(to_num(arg(args, 0)), to_num(arg(args, 1))) end)
@@ -1482,14 +1991,135 @@ defmodule Browser.JS.Builtins do
       float(Num.int32(Num.int32(to_num(arg(args, 0))) * Num.int32(to_num(arg(args, 1)))))
     end)
 
-    def_fn(math, "fround", fn _, args -> to_num(arg(args, 0)) end)
+    def_fn(math, "sumPrecise", fn _, args ->
+      sum_precise(sum_items(arg(args, 0)))
+    end)
+
+    def_fn(math, "fround", fn _, args ->
+      case to_num(arg(args, 0)) do
+        n when is_atom(n) -> n
+        n when abs(n) >= 3.4028235677973366e38 -> if n < 0, do: :neg_infinity, else: :infinity
+        n -> n |> then(&<<&1 * 1.0::float-32>>) |> then(fn <<f::float-32>> -> f end)
+      end
+    end)
+
+    def_fn(math, "f16round", fn _, args -> Browser.JS.TypedArrays.f16round(arg(args, 0)) end)
 
     def_fn(math, "hypot", fn _, args ->
-      args
-      |> Enum.map(&to_num/1)
-      |> Enum.reduce(0.0, fn n, acc -> Num.add(acc, Num.mul(n, n)) end)
-      |> then(&if(is_number(&1), do: :math.sqrt(&1), else: &1))
+      nums = Enum.map(args, &to_num/1)
+
+      cond do
+        Enum.any?(nums, &(&1 in [:infinity, :neg_infinity])) ->
+          :infinity
+
+        :nan in nums ->
+          :nan
+
+        true ->
+          m = nums |> Enum.map(&abs/1) |> Enum.max(fn -> 0.0 end)
+
+          if m == 0,
+            do: 0.0,
+            else: m * :math.sqrt(Enum.reduce(nums, 0.0, fn n, acc -> acc + n / m * (n / m) end))
+      end
     end)
+  end
+
+  # pulls the values for Math.sumPrecise through the iterator protocol, closing it on a non-number
+  defp sum_items(v) do
+    unless match?({:obj, _}, v), do: throw_error("TypeError", "Math.sumPrecise: not iterable")
+    f = Interp.get(v, {:symbol, :iterator, "Symbol.iterator"})
+    unless Interp.function?(f), do: throw_error("TypeError", "Math.sumPrecise: not iterable")
+    it = call(f, v, [])
+    next = Interp.get(it, "next")
+    sum_pull(it, next, [])
+  end
+
+  defp sum_pull(it, next, acc) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        Enum.reverse(acc)
+
+      {:ok, x} ->
+        unless num?(x) do
+          Interp.iter_close(it, true)
+          throw_error("TypeError", "Math.sumPrecise: not a number")
+        end
+
+        sum_pull(it, next, [x | acc])
+    end
+  end
+
+  # Math.sumPrecise: the exact sum of the numbers (as integers of 2^-1074), rounded once
+  defp sum_precise(items) do
+    {state, total} =
+      Enum.reduce(items, {%{nan: false, pos: false, neg: false, nonneg0: false}, 0}, fn v,
+                                                                                        {st, sum} ->
+        unless num?(v), do: throw_error("TypeError", "Math.sumPrecise: not a number")
+
+        case v do
+          :nan ->
+            {%{st | nan: true}, sum}
+
+          :infinity ->
+            {%{st | pos: true}, sum}
+
+          :neg_infinity ->
+            {%{st | neg: true}, sum}
+
+          f ->
+            f = f * 1.0
+            negzero? = f == 0.0 and match?(<<1::1, _::63>>, <<f::float-64>>)
+            st = if negzero?, do: st, else: %{st | nonneg0: true}
+            {n, d} = Float.ratio(f)
+            {st, sum + n * div(Bitwise.bsl(1, 1074), d)}
+        end
+      end)
+
+    cond do
+      state.nan or (state.pos and state.neg) -> :nan
+      state.pos -> :infinity
+      state.neg -> :neg_infinity
+      total == 0 -> if state.nonneg0, do: 0.0, else: -0.0
+      true -> scaled_to_float(total)
+    end
+  end
+
+  defp scaled_to_float(total) do
+    negative? = total < 0
+    m = abs(total)
+    bits = bit_length(m)
+
+    value =
+      if bits <= 53 do
+        m * :math.pow(2, -1074)
+      else
+        shift = bits - 53
+        q = Bitwise.bsr(m, shift)
+        rem = Bitwise.band(m, Bitwise.bsl(1, shift) - 1)
+        half = Bitwise.bsl(1, shift - 1)
+        q = if rem > half or (rem == half and Bitwise.band(q, 1) == 1), do: q + 1, else: q
+
+        {q, shift} =
+          if q == Bitwise.bsl(1, 53), do: {Bitwise.bsl(1, 52), shift + 1}, else: {q, shift}
+
+        if shift - 1074 + 53 > 1024, do: :infinity, else: q * :math.pow(2, shift - 1074)
+      end
+
+    cond do
+      value == :infinity -> if negative?, do: :neg_infinity, else: :infinity
+      negative? -> -value
+      true -> value
+    end
+  end
+
+  defp bit_length(0), do: 0
+  defp bit_length(n), do: length(Integer.digits(n, 2))
+
+  # max prefers +0 and min prefers -0
+  defp zero_pick(n, acc, want) do
+    neg? = fn z -> match?(<<1::1, _::63>>, <<z * 1.0::float-64>>) end
+    if want == :gt, do: if(neg?.(n), do: acc, else: n), else: if(neg?.(n), do: n, else: acc)
   end
 
   defp extreme(args, start, want) do
@@ -1499,6 +2129,7 @@ defmodule Browser.JS.Builtins do
       cond do
         acc == :nan or n == :nan -> :nan
         Num.compare(n, acc) == want -> n
+        n == 0 and acc == 0 -> zero_pick(n, acc, want)
         true -> acc
       end
     end)
@@ -1545,7 +2176,7 @@ defmodule Browser.JS.Builtins do
         {new_object(acc |> Enum.reverse() |> Enum.uniq_by(&elem(&1, 0))), old}
       end,
       float: fn s -> String.to_float(s) end,
-      integer: fn s -> String.to_integer(s) * 1.0 end,
+      integer: fn s -> if s == "-0", do: -0.0, else: String.to_integer(s) * 1.0 end,
       null: :null
     }
   end
@@ -1558,6 +2189,7 @@ defmodule Browser.JS.Builtins do
       is_number(v) -> Num.to_string(v)
       v in [:nan, :infinity, :neg_infinity] -> "null"
       v == :undefined -> :skip
+      big?(v) -> throw_error("TypeError", "Do not know how to serialize a BigInt")
       function?(v) -> :skip
       v in seen -> throw_error("TypeError", "Converting circular structure to JSON")
       array?(v) -> stringify_array(v, indent, cur, [v | seen])
@@ -1640,6 +2272,9 @@ defmodule Browser.JS.Builtins do
 
       num?(v) ->
         Num.to_string(v)
+
+      big?(v) ->
+        to_str(v) <> "n"
 
       function?(v) ->
         function_label(v)

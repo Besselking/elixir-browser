@@ -16,7 +16,7 @@ defmodule Browser.JS.Collections do
 
   @iterator {:symbol, :iterator, "Symbol.iterator"}
   @well_known ~w(iterator asyncIterator hasInstance toPrimitive toStringTag species isConcatSpreadable
-                 match matchAll replace search split unscopables)a
+                 match matchAll replace search split unscopables dispose asyncDispose)a
 
   def iterator_symbol, do: @iterator
 
@@ -36,6 +36,7 @@ defmodule Browser.JS.Collections do
     install_reflect(scope)
     install_host(scope)
     Browser.JS.TypedArrays.install(scope)
+    Browser.JS.Disposables.install(scope)
     :ok
   end
 
@@ -52,12 +53,15 @@ defmodule Browser.JS.Collections do
         {:symbol, :counters.get(counter, 1), desc}
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Symbol", ctor)
+    put_tag(p, "Symbol")
+    {:obj, ctor_id} = ctor
+    store(ctor_id, Map.put(deref(ctor_id), :no_new, true))
 
     for name <- @well_known,
-        do: put_hidden(ctor, to_string(name), {:symbol, name, "Symbol." <> to_string(name)})
+        do: put_const(ctor, to_string(name), {:symbol, name, "Symbol." <> to_string(name)})
 
     def_fn(ctor, "for", fn _, args ->
       key = to_str(arg(args, 0))
@@ -87,17 +91,38 @@ defmodule Browser.JS.Collections do
       end
     end)
 
-    def_fn(p, "toString", fn this, _ -> "Symbol(#{description(this)})" end)
-    def_fn(p, "valueOf", fn this, _ -> this end)
+    def_fn(p, "toString", fn this, _ -> "Symbol(#{description(this_symbol(this))})" end)
+    def_fn(p, "valueOf", fn this, _ -> this_symbol(this) end)
 
     Props.define_accessor(p, "description",
-      get: native("description", fn this, _ -> desc_or_undefined(this) end),
+      get: native("description", fn this, _ -> desc_or_undefined(this_symbol(this)) end),
       enumerable: false
     )
 
     put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
+
+    # Symbol.prototype[@@toPrimitive]: not writable, but configurable
+    {:obj, tp_id} = to_prim = native("[Symbol.toPrimitive]", fn this, _ -> this_symbol(this) end)
+    store(tp_id, Map.put(deref(tp_id), :arity, 1.0))
+    key = {:symbol, :toPrimitive, "Symbol.toPrimitive"}
+    {:obj, pid} = p
+    po = deref(pid)
+    attrs = Map.put(Map.get(po, :attrs, %{}), key, %{w: false, c: true, e: false})
+    store(pid, po |> Map.put(:props, Map.put(po.props, key, to_prim)) |> Map.put(:attrs, attrs))
     :ok
   end
+
+  # a Symbol primitive or a `Object(sym)` wrapper
+  defp this_symbol({:symbol, _, _} = s), do: s
+
+  defp this_symbol({:obj, id}) do
+    case deref(id) do
+      %{prim: {:symbol, _, _} = s} -> s
+      _ -> throw_error("TypeError", "not a symbol")
+    end
+  end
+
+  defp this_symbol(_), do: throw_error("TypeError", "not a symbol")
 
   defp description({:symbol, _, :undefined}), do: ""
   defp description({:symbol, _, d}), do: d
@@ -251,9 +276,10 @@ defmodule Browser.JS.Collections do
         m
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Map", ctor)
+    def_species(ctor)
 
     def_fn(p, "get", fn this, args ->
       o = data!(this, :map)
@@ -331,9 +357,10 @@ defmodule Browser.JS.Collections do
         s
       end)
 
-    put_hidden(ctor, "prototype", p)
+    put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Set", ctor)
+    def_species(ctor)
 
     def_fn(p, "add", fn this, args ->
       data!(this, :set)
@@ -401,7 +428,7 @@ defmodule Browser.JS.Collections do
         m
       end)
 
-    put_hidden(wm_ctor, "prototype", wm)
+    put_const(wm_ctor, "prototype", wm)
     put_hidden(wm, "constructor", wm_ctor)
     declare(scope, "WeakMap", wm_ctor)
 
@@ -441,7 +468,7 @@ defmodule Browser.JS.Collections do
         s
       end)
 
-    put_hidden(ws_ctor, "prototype", ws)
+    put_const(ws_ctor, "prototype", ws)
     put_hidden(ws, "constructor", ws_ctor)
     declare(scope, "WeakSet", ws_ctor)
 
@@ -488,6 +515,8 @@ defmodule Browser.JS.Collections do
     def_fn(r, "construct", fn _, args ->
       f = arg(args, 0)
       nt = if arg(args, 2) == :undefined, do: f, else: arg(args, 2)
+
+      unless constructor?(nt), do: throw_error("TypeError", "newTarget is not a constructor")
       construct(f, iterate_args(arg(args, 1)), nt)
     end)
 
@@ -505,9 +534,29 @@ defmodule Browser.JS.Collections do
 
     def_fn(r, "set", fn _, args ->
       case arg(args, 0) do
-        {:obj, _} = o ->
-          Interp.put(o, arg(args, 1), arg(args, 2))
-          true
+        {:obj, id} = o ->
+          if Map.has_key?(deref(id), :proxy) do
+            Browser.JS.Proxy.set(
+              o,
+              to_key(arg(args, 1)),
+              arg(args, 2),
+              if(length(args) > 3, do: arg(args, 3), else: o)
+            )
+          else
+            # a module namespace has nothing that can be set; a typed array takes nothing at an
+            # index it does not have (through another receiver the value is not even read)
+            if match?(%{host: {Browser.JS.Modules, _}}, deref(id)) do
+              false
+            else
+              if length(args) > 3 and arg(args, 3) != o and
+                   Browser.JS.TypedArrays.invalid_index?(o, to_key(arg(args, 1))) do
+                true
+              else
+                Interp.put(o, arg(args, 1), arg(args, 2))
+                true
+              end
+            end
+          end
 
         _ ->
           throw_error("TypeError", "Reflect.set called on non-object")
@@ -543,7 +592,7 @@ defmodule Browser.JS.Collections do
 
     def_fn(r, "getPrototypeOf", fn _, args ->
       case arg(args, 0) do
-        {:obj, id} -> deref(id).proto || :null
+        {:obj, _} = o -> Props.get_prototype_of(o)
         _ -> throw_error("TypeError", "Reflect.getPrototypeOf called on non-object")
       end
     end)
@@ -566,8 +615,18 @@ defmodule Browser.JS.Collections do
     def_fn(r, "isExtensible", fn _, args -> Props.extensible?(arg(args, 0)) end)
 
     def_fn(r, "preventExtensions", fn _, args ->
-      Props.prevent_extensions(arg(args, 0))
-      true
+      case arg(args, 0) do
+        {:obj, id} = o ->
+          if Map.has_key?(deref(id), :proxy) do
+            Browser.JS.Proxy.prevent_extensions(o)
+          else
+            Props.prevent_extensions(o)
+            true
+          end
+
+        _ ->
+          throw_error("TypeError", "Reflect.preventExtensions called on non-object")
+      end
     end)
   end
 

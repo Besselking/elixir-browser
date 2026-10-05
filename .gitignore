@@ -26,3 +26,4 @@ dist/
 
 # test262 checkout (mix js.test262 --fetch)
 /.test262/
+/.wpt/

@@ -69,4 +69,39 @@ defmodule Browser.HTMLTest do
       assert {:element, "td", _, [{:text, "out"}]} = outer2
     end
   end
+
+  test "decodes the full named entity table" do
+    assert [{:text, "a\u00ADb"}] = HTML.parse("a&shy;b")
+    assert [{:text, "\u00A9 \u2212 \u{1D504}"}] = HTML.parse("&copy; &minus; &Afr;")
+    assert [{:text, "\u2265\u20D2"}] = HTML.parse("&nvge;")
+  end
+
+  test "legacy entities decode without a semicolon, unknown ones stay" do
+    assert HTML.decode("&amp") == "&"
+    assert HTML.decode("&bogus; &#65 &#x42;") == "&bogus; A B"
+  end
+
+  describe "whole pages" do
+    test "get the html, head and body elements their tags leave out" do
+      assert [
+               {:element, "html", [],
+                [
+                  {:element, "head", [], [{:element, "title", [], [text: "t"]}]},
+                  {:element, "body", [], [{:element, "p", [], [text: "hi"]}]}
+                ]}
+             ] = HTML.parse_document("<!DOCTYPE html><title>t</title><p>hi</p>")
+    end
+
+    test "keep an explicit body" do
+      assert [{:element, "html", [], [{:element, "head", [], []}, {:element, "body", _, _}]}] =
+               HTML.parse_document("<html><head></head><body class=a>x</body></html>")
+    end
+
+    test "style text loses the CDATA markers of XHTML pages" do
+      assert [{:element, "style", [], [text: css]}] =
+               HTML.parse("<style><![CDATA[ div { color: red } ]]></style>")
+
+      assert css == " div { color: red } "
+    end
+  end
 end

@@ -44,7 +44,7 @@ defmodule Browser.Page do
 
     on_chunk = fn chunk, from -> Prefetch.feed(chunk, from, &allowed?(from, &1)) end
 
-    case Fetch.load(url, [on_chunk: on_chunk] ++ fetch_opts) do
+    case Fetch.load(url, [on_chunk: on_chunk, navigation: true] ++ fetch_opts) do
       {:ok, body, final} -> {:ok, build(document(body, final), final, env)}
       {:error, _} = err -> err
     end
@@ -96,7 +96,7 @@ defmodule Browser.Page do
 
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    parsed = body |> String.replace_invalid() |> HTML.parse()
+    parsed = body |> String.replace_invalid() |> HTML.parse_document()
     # scripts run, so what is meant for browsers without them is not shown
     parsed = if has_tag?(parsed, "script"), do: empty_tag(parsed, "noscript"), else: parsed
     {raw, forms} = Forms.index(parsed)
@@ -383,7 +383,7 @@ defmodule Browser.Page do
     url = Fetch.resolve(base, href)
 
     if allowed?(base, url) do
-      case Fetch.load(url) do
+      case Fetch.load(url, initiator: base) do
         {:ok, css, final} -> {css, final}
         _ -> nil
       end

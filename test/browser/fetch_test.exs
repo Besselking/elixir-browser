@@ -142,6 +142,55 @@ defmodule Browser.FetchTest do
     end
   end
 
+  describe "cookies" do
+    test "Set-Cookie on a redirect is sent on the next request and later ones" do
+      Browser.Cookies.clear()
+
+      base =
+        serve([
+          "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2; Path=/\r\nContent-Length: 0\r\n\r\n",
+          "HTTP/1.1 200 OK\r\nSet-Cookie: c=3\r\nContent-Length: 2\r\n\r\nok",
+          "HTTP/1.1 200 OK\r\nCache-Control: no-store\r\nContent-Length: 2\r\n\r\nok"
+        ])
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/start")
+      assert_receive {:request, "GET", "/start", h1, _}
+      refute Map.has_key?(h1, "cookie")
+      assert_receive {:request, "GET", "/next", %{"cookie" => "a=1; b=2"}, _}
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/more", cache: :reload)
+      assert_receive {:request, "GET", "/more", %{"cookie" => cookie}, _}
+      assert cookie == "a=1; b=2; c=3"
+    end
+  end
+
+  describe "SameSite" do
+    test "a cookie is held back from a cross-site subresource, and from a cross-site POST" do
+      Browser.Cookies.clear()
+      base = serve(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+      Browser.Cookies.store(base <> "/", ["lax=1", "none=2; SameSite=None; Secure"], [])
+      # Secure needs https, so only the Lax one exists
+      assert Enum.map(Browser.Cookies.all(), & &1.name) == ["lax"]
+
+      assert {:ok, "ok", _} = Fetch.load(base <> "/img", initiator: "http://other.test/")
+      assert_receive {:request, "GET", "/img", headers, _}
+      refute Map.has_key?(headers, "cookie")
+    end
+
+    test "a top-level navigation from another site sends Lax cookies, a same-site initiator sends all" do
+      Browser.Cookies.clear()
+
+      base = serve(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+
+      Browser.Cookies.store(base <> "/", ["lax=1", "strict=2; SameSite=Strict"])
+
+      assert {:ok, "ok", _} =
+               Fetch.load(base <> "/nav", initiator: "http://other.test/", navigation: true)
+
+      assert_receive {:request, "GET", "/nav", %{"cookie" => "lax=1"}, _}
+    end
+  end
+
   describe "caching" do
     defp response(body, headers),
       do:
@@ -234,6 +283,102 @@ defmodule Browser.FetchTest do
       assert {:ok, "get", _} = Fetch.load(base <> "/q")
       assert {:ok, "post", _} = Fetch.load(base <> "/q", method: :post, body: "a=1")
       assert_receive {:request, "POST", "/q", _, "a=1"}
+    end
+  end
+
+  describe "full responses for scripts" do
+    test "any status comes back with its reason, headers and body" do
+      base =
+        serve([
+          "HTTP/1.1 404 Not Found\r\nX-Thing: a\r\nSet-Cookie: s=1\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"
+        ])
+
+      assert {:ok, response, url} = Fetch.load(base <> "/missing", full: true)
+      assert url == base <> "/missing"
+      assert response.status == 404
+      assert response.status_text == "Not Found"
+      assert response.body == "nope"
+      assert response.redirected == false
+      assert {"x-thing", "a"} in response.headers
+      refute Enum.any?(response.headers, fn {k, _} -> k == "set-cookie" end)
+    end
+
+    test "a redirect is followed and marked" do
+      base = serve([redirect(302, "/b"), ok("there")])
+
+      assert {:ok, %{status: 200, body: "there", redirected: true}, url} =
+               Fetch.load(base <> "/a", full: true)
+
+      assert url == base <> "/b"
+    end
+
+    test "method, headers and content type are sent, the ones a script may not set are not" do
+      base = serve([ok("")])
+
+      Fetch.load(base <> "/r",
+        full: true,
+        method: :put,
+        body: ~s({"a":1}),
+        content_type: "application/json",
+        initiator: "http://page.test/",
+        headers: [{"X-Token", "abc"}, {"Host", "evil.test"}, {"Cookie", "x=1"}]
+      )
+
+      assert_receive {:request, "PUT", "/r", headers, ~s({"a":1})}
+      assert headers["content-type"] == "application/json"
+      assert headers["x-token"] == "abc"
+      assert headers["accept"] == "*/*"
+      assert headers["origin"] == "http://page.test"
+      refute headers["host"] == "evil.test"
+      refute headers["cookie"]
+    end
+
+    test "DELETE and HEAD are made as such" do
+      base =
+        serve([
+          ok(""),
+          "HTTP/1.1 200 OK\r\nX-Len: 5\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ])
+
+      assert {:ok, %{status: 200}, _} = Fetch.load(base <> "/d", full: true, method: :delete)
+      assert {:ok, %{headers: headers}, _} = Fetch.load(base <> "/h", full: true, method: :head)
+      assert_receive {:request, "DELETE", "/d", _, ""}
+      assert_receive {:request, "HEAD", "/h", _, ""}
+      assert {"x-len", "5"} in headers
+    end
+
+    test "credentials: :omit sends and stores no cookies" do
+      Browser.Cookies.clear()
+
+      base =
+        serve([
+          ok("1"),
+          ok("2"),
+          "HTTP/1.1 200 OK\r\nSet-Cookie: k=v\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ])
+
+      Browser.Cookies.store(base <> "/", ["omitme=1"])
+      on_exit(fn -> Browser.Cookies.store(base <> "/", ["omitme=; Max-Age=0"]) end)
+
+      Fetch.load(base <> "/a", full: true, credentials: :omit)
+      assert_receive {:request, "GET", "/a", headers, _}
+      refute headers["cookie"]
+
+      Fetch.load(base <> "/b", full: true, credentials: :include)
+      assert_receive {:request, "GET", "/b", %{"cookie" => cookie}, _}
+      assert cookie =~ "omitme=1"
+
+      Fetch.load(base <> "/c", full: true, credentials: :omit)
+      refute Browser.Cookies.header(base <> "/") =~ "k=v"
+    end
+
+    test "same-origin credentials leave cookies out of a cross-origin request" do
+      base = serve([ok("1")])
+      Browser.Cookies.store(base <> "/", ["crossme=1"])
+      on_exit(fn -> Browser.Cookies.store(base <> "/", ["crossme=; Max-Age=0"]) end)
+      Fetch.load(base <> "/a", full: true, initiator: "http://page.test/")
+      assert_receive {:request, "GET", "/a", headers, _}
+      refute headers["cookie"]
     end
   end
 end

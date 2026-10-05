@@ -96,7 +96,7 @@ defmodule Browser.Images do
   """
   def fetch(url, base) do
     with :ok <- check_allowed(url, base),
-         {:ok, bytes} <- load(url),
+         {:ok, bytes} <- load(url, base),
          :ok <- check_size(bytes) do
       prepare(bytes)
     end
@@ -110,10 +110,10 @@ defmodule Browser.Images do
     if scheme in allowed, do: :ok, else: {:error, "blocked: #{scheme || "relative"} URL"}
   end
 
-  defp load("data:" <> _ = url), do: decode_data_url(url)
+  defp load("data:" <> _ = url, _base), do: decode_data_url(url)
 
-  defp load(url) do
-    case Fetch.load(url) do
+  defp load(url, base) do
+    case Fetch.load(url, initiator: base) do
       {:ok, body, _final} -> {:ok, body}
       {:error, reason} -> {:error, reason}
     end

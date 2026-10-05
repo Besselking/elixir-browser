@@ -46,14 +46,14 @@ defmodule Mix.Tasks.Js.Test262 do
 
   @default_paths ~w(
     built-ins/Array built-ins/ArrayBuffer built-ins/DataView built-ins/TypedArray
-    built-ins/TypedArrayConstructors built-ins/Boolean built-ins/Date built-ins/Error built-ins/Function built-ins/Infinity
+    built-ins/TypedArrayConstructors built-ins/AsyncDisposableStack built-ins/Boolean built-ins/Date built-ins/DisposableStack built-ins/Error built-ins/Function built-ins/Infinity
     built-ins/JSON built-ins/Math built-ins/NaN built-ins/Number built-ins/Object
-    built-ins/Promise built-ins/RegExp built-ins/String built-ins/isFinite built-ins/isNaN
+    built-ins/Promise built-ins/RegExp built-ins/String built-ins/SuppressedError built-ins/Symbol built-ins/isFinite built-ins/isNaN
     built-ins/parseFloat built-ins/parseInt built-ins/undefined
     language/arguments-object language/asi language/block-scope language/comments
     language/destructuring language/expressions language/function-code language/future-reserved-words
-    language/identifiers language/keywords language/literals language/punctuators
-    language/reserved-words language/rest-parameters language/statements language/types
+    language/export language/identifiers language/import language/keywords language/literals language/punctuators
+    language/module-code language/reserved-words language/rest-parameters language/statements language/types
     language/white-space
   )
 

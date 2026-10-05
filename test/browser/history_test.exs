@@ -18,4 +18,15 @@ defmodule Browser.HistoryTest do
     h = History.visit(h, "z")
     refute History.can_forward?(h)
   end
+
+  test "push adds an entry even at the same address, visit does not" do
+    h = History.new() |> History.visit("a") |> History.visit("a")
+    refute History.can_back?(h)
+    h = History.push(h, "a")
+    assert History.can_back?(h)
+    assert h.current == "a"
+    {:ok, h} = History.back(h)
+    h = History.push(h, "z")
+    refute History.can_forward?(h)
+  end
 end
