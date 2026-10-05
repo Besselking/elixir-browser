@@ -1686,7 +1686,7 @@ defmodule Browser.JS.Parser do
         [{:p, op, _} | rest] when op in @assign_ops ->
           unless assignable?(left), do: throw({:syntax, "invalid assignment target"})
           {right, rest} = assignment(rest)
-          {{:assign, op, left, right}, rest}
+          {{if(strict?(), do: :sassign, else: :assign), op, left, right}, rest}
 
         _ ->
           {left, ts}
@@ -1754,7 +1754,7 @@ defmodule Browser.JS.Parser do
   defp unary([{:p, op, _} | ts]) when op in ["++", "--"] do
     {e, ts} = unary(ts)
     unless assignable?(e), do: throw({:syntax, "invalid #{op} operand"})
-    {{:update, op, true, e}, ts}
+    {{if(strict?(), do: :supdate, else: :update), op, true, e}, ts}
   end
 
   defp unary([{:id, "await", _}, {k, v, _} | _] = [_ | ts])
@@ -1776,6 +1776,7 @@ defmodule Browser.JS.Parser do
     if op == "delete" and private_member?(e),
       do: throw({:syntax, "private fields can not be deleted"})
 
+    op = if op == "delete" and strict?(), do: "sdelete", else: op
     {{:unary, op, e}, ts}
   end
 
@@ -1787,7 +1788,7 @@ defmodule Browser.JS.Parser do
     case ts do
       [{:p, op, false} | ts] when op in ["++", "--"] ->
         unless assignable?(e), do: throw({:syntax, "invalid #{op} operand"})
-        {{:update, op, false, e}, ts}
+        {{if(strict?(), do: :supdate, else: :update), op, false, e}, ts}
 
       _ ->
         {e, ts}
