@@ -2944,6 +2944,50 @@ defmodule Browser.LayoutTest do
       end
     end
 
+    test "a block with a width sits at the right edge when its containing block is rtl" do
+      {items, _} =
+        fl(
+          ~s|<div style="direction:rtl"><div style="direction:ltr;width:60px;height:10px;background:#0a0"></div></div>|
+        )
+
+      assert %{x: 144, w: 60} = box_of(items)
+    end
+
+    test "the direction of the block itself does not move it" do
+      {items, _} =
+        fl(~s|<div style="direction:rtl;width:60px;height:10px;background:#0a0"></div>|)
+
+      assert %{x: 4, w: 60} = box_of(items)
+    end
+
+    test "text lines start at the right in an rtl block" do
+      {items, _} =
+        fl(
+          ~s|<div style="direction:rtl">aaaa</div><p style="direction:rtl;text-align:left">bbbb</p>|
+        )
+
+      assert word_at(items, "aaaa").x == 208 - 4 - 32
+      assert word_at(items, "bbbb").x == 4
+    end
+
+    test "an absolute box without offsets sits at its static position, at the right when rtl" do
+      {items, _} =
+        fl(
+          ~s|<div style="direction:rtl"><div style="position:absolute;width:50px;height:10px;background:#f00"></div></div>|
+        )
+
+      assert %{x: 154, w: 50} = box_of(items)
+    end
+
+    test "an absolute box resolves auto margins between left and right" do
+      {items, _} =
+        fl(
+          ~s|<div style="position:absolute;left:10px;right:10px;width:60px;height:10px;margin:0 auto;background:#f00"></div>|
+        )
+
+      assert %{x: 74, w: 60} = box_of(items)
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(
