@@ -1513,6 +1513,12 @@ defmodule Browser.JS.Parser do
       ts = expect(ts, "{")
       {body, ts} = function_body(ts, params, match?({:method, _}, name))
       check_super_use(name, [params, body], class_method?)
+
+      # a "use strict" in the body makes the function's own name strict code too
+      if is_binary(name) and match?([{:expr, {:str, "use strict"}} | _], body) and
+           (name in ["eval", "arguments"] or name in @strict_reserved),
+         do: throw({:syntax, "unexpected #{name} as the name of a strict function"})
+
       {{:fn, name, params, body, false}, ts}
     after
       Process.put(:js_generator, outer)

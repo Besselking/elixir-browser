@@ -228,7 +228,7 @@ defmodule Browser.JS.Interp do
             throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
           MapSet.member?(s.consts, {:fname, name}) ->
-            :ok
+            :fname_ignored
 
           true ->
             :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
@@ -845,8 +845,12 @@ defmodule Browser.JS.Interp do
 
   defp function_prop(_id, %{fun: {:closure, c}}, "length"),
     do:
-      Enum.count(c.params, &(not match?({:rest, _}, &1) and not match?({:default, _, _}, &1))) *
-        1.0
+      Enum.count(
+        Enum.take_while(
+          c.params,
+          &(not match?({:rest, _}, &1) and not match?({:default, _, _}, &1))
+        )
+      ) * 1.0
 
   defp function_prop(_id, %{fun: {:native, name, _}} = o, "length"),
     do: Map.get(o, :arity) || Map.get(@native_lengths, name, 0.0)
@@ -1111,7 +1115,11 @@ defmodule Browser.JS.Interp do
 
   defp strict_assign_var(env, name, v, resolved?) do
     unless resolved?, do: throw_error("ReferenceError", "#{name} is not defined")
-    assign_var(env, name, v)
+
+    if assign_var(env, name, v) == :fname_ignored,
+      do: throw_error("TypeError", "Assignment to constant variable.")
+
+    :ok
   end
 
   defp inherited_set({:obj, pid}, key) do
@@ -2286,6 +2294,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:with, obj, body}, env, _) do
+    :erlang.put(:js_last, :undefined)
     o = ev(obj, env)
 
     if o in [:undefined, :null],
@@ -2328,6 +2337,8 @@ defmodule Browser.JS.Interp do
   defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
 
   defp exec({:if, c, a, b}, env, _) do
+    :erlang.put(:js_last, :undefined)
+
     cond do
       truthy(ev(c, env)) -> exec(a, env)
       b != nil -> exec(b, env)
@@ -2341,9 +2352,14 @@ defmodule Browser.JS.Interp do
     {:js_break, ^l} -> :ok
   end
 
-  defp exec({:while, c, body}, env, labels), do: while_loop(c, body, env, labels)
+  defp exec({:while, c, body}, env, labels) do
+    :erlang.put(:js_last, :undefined)
+    while_loop(c, body, env, labels)
+  end
 
   defp exec({:dowhile, body, c}, env, labels) do
+    :erlang.put(:js_last, :undefined)
+
     case run_body(body, env, labels) do
       :break -> :ok
       :next -> while_loop(c, body, env, labels)
@@ -2351,6 +2367,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:for, init, test, update, body}, env, labels) do
+    :erlang.put(:js_last, :undefined)
     loop_env = new_scope(env)
     per_iteration? = match?({:var, :let, _}, init)
 
@@ -2365,6 +2382,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
+    :erlang.put(:js_last, :undefined)
     target = ev(obj, env)
 
     mode = if decl == nil, do: :assign, else: decl
@@ -2397,6 +2415,7 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:switch, disc, cases}, env, _) do
+    :erlang.put(:js_last, :undefined)
     v = ev(disc, env)
     scope = new_scope(env)
     all = Enum.flat_map(cases, fn {_, body} -> body end)
@@ -2419,6 +2438,8 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:try, block, param, handler, finalizer}, env, _) do
+    :erlang.put(:js_last, :undefined)
+
     try do
       try do
         exec(block, env)
@@ -2429,7 +2450,12 @@ defmodule Browser.JS.Interp do
           exec(handler, scope)
       end
     after
-      if finalizer, do: exec(finalizer, env)
+      # a finalizer that completes normally leaves the try statement's own value
+      if finalizer do
+        saved = :erlang.get(:js_last)
+        exec(finalizer, env)
+        :erlang.put(:js_last, saved)
+      end
     end
   end
 
