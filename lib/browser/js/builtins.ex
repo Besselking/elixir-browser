@@ -175,31 +175,7 @@ defmodule Browser.JS.Builtins do
     def_fn(p, "valueOf", fn this, _ -> this end)
   end
 
-  defp function_methods(p) do
-    def_fn(p, "call", fn this, args -> call(this, arg(args, 0), Enum.drop(args, 1)) end)
-
-    def_fn(p, "apply", fn this, args ->
-      list = if nullish?(arg(args, 1)), do: [], else: array_list(arg(args, 1))
-      call(this, arg(args, 0), list)
-    end)
-
-    def_fn(p, "bind", fn this, args ->
-      bound_this = arg(args, 0)
-      bound_args = Enum.drop(args, 1)
-
-      {:obj, id} =
-        bound = native("bound", fn _, more -> call(this, bound_this, bound_args ++ more) end)
-
-      # `new bound(...)` constructs the target (see `Interp.construct/3`)
-      Interp.store(id, Map.put(Interp.deref(id), :bound, {this, bound_args}))
-      put_hidden(bound, "name", "bound " <> to_str(Interp.get(this, "name")))
-      bound
-    end)
-
-    def_fn(p, "toString", fn this, _ ->
-      "function #{to_str(Interp.get(this, "name"))}() { [native code] }"
-    end)
-  end
+  defp function_methods(p), do: Browser.JS.FunctionProto.install(p)
 
   # ── errors ─────────────────────────────────────────────────
 
@@ -1497,16 +1473,17 @@ defmodule Browser.JS.Builtins do
   end
 
   # ToObject of a primitive: a String, Number, Boolean or BigInt wrapper
-  defp box(v) when is_binary(v) do
+  @doc false
+  def box(v) when is_binary(v) do
     o = new_object([], proto(:string))
     put_const(o, "length", float(String.length(v)))
     wrap(o, v)
   end
 
-  defp box(v) when is_boolean(v), do: wrap(new_object([], proto(:boolean)), v)
-  defp box({:bigint, _} = v), do: wrap(new_object([], proto(:bigint)), v)
-  defp box({:symbol, _, _} = v), do: wrap(new_object([], proto(:symbol)), v)
-  defp box(v), do: wrap(new_object([], proto(:number)), v)
+  def box(v) when is_boolean(v), do: wrap(new_object([], proto(:boolean)), v)
+  def box({:bigint, _} = v), do: wrap(new_object([], proto(:bigint)), v)
+  def box({:symbol, _, _} = v), do: wrap(new_object([], proto(:symbol)), v)
+  def box(v), do: wrap(new_object([], proto(:number)), v)
 
   # `new String(x)`, `new Number(x)`, `new Boolean(x)`: the constructor was handed a fresh object
   # of the right prototype, which becomes the wrapper
