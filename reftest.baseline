@@ -549,7 +549,10 @@ css/CSS2/box-display/block-in-inline-negative-mb-collapses-with-positive-mt.html
 css/CSS2/box-display/block-in-inline-vertical-margins-on-span-ignored.html
 css/CSS2/box-display/block-in-inline-with-padded-parent.html
 css/CSS2/box-display/block-in-inlines-in-different-spans-margin-collapse.html
+css/CSS2/box-display/containing-block-001.xht
 css/CSS2/box-display/containing-block-003.xht
+css/CSS2/box-display/containing-block-004.xht
+css/CSS2/box-display/containing-block-006.xht
 css/CSS2/box-display/containing-block-007.xht
 css/CSS2/box-display/containing-block-009.xht
 css/CSS2/box-display/containing-block-019.xht
@@ -1300,6 +1303,7 @@ css/CSS2/normal-flow/block-formatting-contexts-004.xht
 css/CSS2/normal-flow/block-formatting-contexts-005.xht
 css/CSS2/normal-flow/block-formatting-contexts-006.xht
 css/CSS2/normal-flow/block-formatting-contexts-007.xht
+css/CSS2/normal-flow/block-formatting-contexts-010.xht
 css/CSS2/normal-flow/block-formatting-contexts-012.xht
 css/CSS2/normal-flow/block-formatting-contexts-015.xht
 css/CSS2/normal-flow/block-formatting-contexts-016.xht
@@ -1318,6 +1322,7 @@ css/CSS2/normal-flow/block-in-inline-margins-003.html
 css/CSS2/normal-flow/block-in-inline-margins-004.html
 css/CSS2/normal-flow/block-in-inline-margins-005.html
 css/CSS2/normal-flow/block-in-inline-nested-001.xht
+css/CSS2/normal-flow/block-in-inline-percents-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-005.xht
 css/CSS2/normal-flow/block-non-replaced-height-013.xht
@@ -1389,6 +1394,12 @@ css/CSS2/normal-flow/height-078.xht
 css/CSS2/normal-flow/height-079.xht
 css/CSS2/normal-flow/height-081.xht
 css/CSS2/normal-flow/height-082.xht
+css/CSS2/normal-flow/height-090.xht
+css/CSS2/normal-flow/height-091.xht
+css/CSS2/normal-flow/height-092.xht
+css/CSS2/normal-flow/height-093.xht
+css/CSS2/normal-flow/height-094.xht
+css/CSS2/normal-flow/height-095.xht
 css/CSS2/normal-flow/height-100.xht
 css/CSS2/normal-flow/height-101.xht
 css/CSS2/normal-flow/height-102.xht
@@ -1396,6 +1407,7 @@ css/CSS2/normal-flow/height-103.xht
 css/CSS2/normal-flow/height-104.xht
 css/CSS2/normal-flow/height-111.xht
 css/CSS2/normal-flow/height-112.xht
+css/CSS2/normal-flow/height-113.xht
 css/CSS2/normal-flow/height-applies-to-005.xht
 css/CSS2/normal-flow/height-applies-to-006.xht
 css/CSS2/normal-flow/height-applies-to-008.xht
@@ -1404,6 +1416,8 @@ css/CSS2/normal-flow/height-applies-to-012.xht
 css/CSS2/normal-flow/height-applies-to-015.xht
 css/CSS2/normal-flow/height-applies-to-016.xht
 css/CSS2/normal-flow/height-inherit-001.xht
+css/CSS2/normal-flow/height-percentage-001.xht
+css/CSS2/normal-flow/height-percentage-003.xht
 css/CSS2/normal-flow/height-percentage-005.xht
 css/CSS2/normal-flow/inline-block-height-001.xht
 css/CSS2/normal-flow/inline-block-height-002.xht
@@ -1962,6 +1976,13 @@ css/CSS2/positioning/bottom-110.xht
 css/CSS2/positioning/bottom-111.xht
 css/CSS2/positioning/bottom-112.xht
 css/CSS2/positioning/bottom-113.xht
+css/CSS2/positioning/bottom-applies-to-001.xht
+css/CSS2/positioning/bottom-applies-to-005.xht
+css/CSS2/positioning/bottom-applies-to-006.xht
+css/CSS2/positioning/bottom-applies-to-009.xht
+css/CSS2/positioning/bottom-applies-to-012.xht
+css/CSS2/positioning/bottom-applies-to-014.xht
+css/CSS2/positioning/bottom-applies-to-015.xht
 css/CSS2/positioning/bottom-offset-001.xht
 css/CSS2/positioning/bottom-offset-002.xht
 css/CSS2/positioning/bottom-offset-003.xht
@@ -2033,6 +2054,13 @@ css/CSS2/positioning/position-absolute-004.xht
 css/CSS2/positioning/position-absolute-006.xht
 css/CSS2/positioning/position-absolute-007.xht
 css/CSS2/positioning/position-absolute-008.xht
+css/CSS2/positioning/position-applies-to-001.xht
+css/CSS2/positioning/position-applies-to-005.xht
+css/CSS2/positioning/position-applies-to-006.xht
+css/CSS2/positioning/position-applies-to-009.xht
+css/CSS2/positioning/position-applies-to-012.xht
+css/CSS2/positioning/position-applies-to-014.xht
+css/CSS2/positioning/position-applies-to-015.xht
 css/CSS2/positioning/position-fixed-001.xht
 css/CSS2/positioning/position-fixed-007.xht
 css/CSS2/positioning/position-relative-001.xht
@@ -2390,6 +2418,7 @@ css/CSS2/text/word-spacing-characters-002.xht
 css/CSS2/visudet/content-height-001.html
 css/CSS2/visudet/height-computed-001.xht
 css/CSS2/visudet/height-computed-002.xht
+css/CSS2/visudet/height-percentage-003a.xht
 css/CSS2/visudet/height-percentage-004.xht
 css/CSS2/visudet/inline-block-baseline-001.xht
 css/CSS2/visudet/inline-block-baseline-002.xht
@@ -2557,6 +2586,7 @@ css/css-flexbox/flex-basis-007.html
 css/css-flexbox/flex-basis-008.html
 css/css-flexbox/flex-basis-011.html
 css/css-flexbox/flex-basis-item-margins-001.html
+css/css-flexbox/flex-child-percent-basis-resize-1.html
 css/css-flexbox/flex-container-margin.html
 css/css-flexbox/flex-cross-size-border-box-001.html
 css/css-flexbox/flex-direction-column-reverse.html
@@ -2635,7 +2665,6 @@ css/css-flexbox/flexbox-baseline-single-item-001a.html
 css/css-flexbox/flexbox-baseline-single-item-001b.html
 css/css-flexbox/flexbox-break-request-horiz-002a.html
 css/css-flexbox/flexbox-break-request-horiz-002b.html
-css/css-flexbox/flexbox-definite-sizes-005.html
 css/css-flexbox/flexbox-definite-sizes-006.html
 css/css-flexbox/flexbox-flex-direction-column-percentage-ignored.html
 css/css-flexbox/flexbox-flex-wrap-default.htm
@@ -2655,7 +2684,6 @@ css/css-flexbox/flexbox-overflow-horiz-004.html
 css/css-flexbox/flexbox-overflow-horiz-005.html
 css/css-flexbox/flexbox-overflow-padding-001.html
 css/css-flexbox/flexbox-overflow-padding-002.html
-css/css-flexbox/flexbox-overflow-vert-001.html
 css/css-flexbox/flexbox-overflow-vert-002.html
 css/css-flexbox/flexbox-overflow-vert-003.html
 css/css-flexbox/flexbox-paint-ordering-001.xhtml
