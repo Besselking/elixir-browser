@@ -2129,16 +2129,17 @@ defmodule Browser.JS.Builtins do
       eval_source("(function anonymous(#{params}\n) {\n#{body}\n})")
     end)
 
-    declare(
-      scope,
-      "eval",
+    eval_fn =
       native("eval", fn _, args ->
         case arg(args, 0) do
           src when is_binary(src) -> eval_source(src)
           other -> other
         end
       end)
-    )
+
+    # a call `eval(...)` through this very function is a direct eval (see `Interp.direct_eval/2`)
+    :erlang.put(:js_eval_fn, eval_fn)
+    declare(scope, "eval", eval_fn)
 
     Browser.JS.Date.install(scope)
 

@@ -137,9 +137,8 @@ defmodule Browser.JS.Classes do
   defp member_key({:computed, e}, env), do: to_key(Interp.ev(e, env))
 
   defp run_statics(statics, f, cenv) do
-    scope = Interp.new_scope(cenv)
-    Interp.declare(scope, :this, f)
-    Interp.declare(scope, :home, f)
+    scope =
+      Interp.new_fn_scope(cenv, %{this: f, home: f, new_target: :undefined, field_init: true})
 
     Enum.each(statics, fn
       {:field, key, init} ->
@@ -196,8 +195,7 @@ defmodule Browser.JS.Classes do
   defp init_fields(%{fields: []}, _this), do: :ok
 
   defp init_fields(info, this) do
-    scope = Interp.new_scope(info.env)
-    Interp.declare(scope, :this, this)
+    scope = Interp.new_fn_scope(info.env, %{this: this, new_target: :undefined, field_init: true})
 
     for field <- info.fields do
       case field do
