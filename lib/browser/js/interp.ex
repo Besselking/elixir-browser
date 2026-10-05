@@ -1650,6 +1650,7 @@ defmodule Browser.JS.Interp do
       alloc(%{
         scope: true,
         fnscope: true,
+        fid: Map.get(c, :fid),
         vars: strict_marks(c, %{}),
         consts: MapSet.new(),
         parent: c.scope
@@ -1712,7 +1713,14 @@ defmodule Browser.JS.Interp do
       vars = strict_marks(c, vars)
 
       scope =
-        alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: c.scope})
+        alloc(%{
+          scope: true,
+          fnscope: true,
+          fid: Map.get(c, :fid),
+          vars: vars,
+          consts: MapSet.new(),
+          parent: c.scope
+        })
 
       bind_params(c.params, args, scope)
 
@@ -1982,13 +1990,36 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # `arguments` is only built when a function body asks for it
+  # `arguments` is only built when a function body asks for it: an object of its own with
+  # the indices, `length`, `callee` (a poison pill in strict code) and the array iterator
   defp lazy_arguments(env) do
     case lookup_var(env, :args) do
       {:ok, args} ->
         {:obj, aid} = a = new_array(args)
-        store(aid, Map.put(deref(aid), :arguments, true))
         owner = scope_with(env, :args)
+        scope = deref(owner)
+
+        store(aid, deref(aid) |> Map.put(:arguments, true) |> Map.put(:proto, proto(:object)))
+
+        thrower = :erlang.get(:js_throw_type_error)
+
+        cond do
+          Map.has_key?(scope.vars, :strict) and thrower != :undefined ->
+            Browser.JS.Props.define_accessor(a, "callee",
+              get: thrower,
+              set: thrower,
+              enumerable: false,
+              configurable: false
+            )
+
+          is_integer(Map.get(scope, :fid)) ->
+            put_hidden(a, "callee", {:obj, scope.fid})
+
+          true ->
+            :ok
+        end
+
+        put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
         declare(owner, "arguments", a)
         a
 
@@ -2025,7 +2056,7 @@ defmodule Browser.JS.Interp do
   defp with_hoist(_id, %{mode: :arrow_expr} = c), do: c
 
   defp with_hoist(id, c) do
-    c = Map.put(c, :hoist, {hoisted_names(c.body), fundecls(c.body)})
+    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, fid: id})
     o = deref(id)
     store(id, %{o | fun: {:closure, c}})
     c

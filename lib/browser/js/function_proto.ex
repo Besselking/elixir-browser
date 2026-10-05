@@ -47,6 +47,7 @@ defmodule Browser.JS.FunctionProto do
 
     # accessors with one shared function as getter and setter
     accessor = restricted_accessor()
+    :erlang.put(:js_throw_type_error, accessor)
 
     for key <- ["caller", "arguments"],
         do: Browser.JS.Props.define(p, key, accessor_desc(accessor, accessor))
