@@ -953,7 +953,8 @@ defmodule Browser.JS.Interp do
 
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_delete, 2),
-          do: mod.host_delete(data, to_key(key)),
+          # a host that has nothing to say about `key` answers :default
+          do: with(:default <- mod.host_delete(data, to_key(key)), do: delete_plain(id, o, key)),
           else: delete_plain(id, o, key)
 
       _ ->
@@ -1050,7 +1051,7 @@ defmodule Browser.JS.Interp do
 
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
-          do: mod.host_keys(data),
+          do: with(:default <- mod.host_keys(data), do: own_keys_plain(o)),
           else: own_keys_plain(o)
 
       _ ->

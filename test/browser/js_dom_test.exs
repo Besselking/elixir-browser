@@ -882,6 +882,31 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["2 2 1 a null", "null undefined", "1 undefined", "0"]
     end
 
+    test "Object.keys, in, for-in and delete see the items" do
+      r =
+        run_at("ls6.test", """
+        localStorage.setItem("b", "2");
+        localStorage.setItem("a", "1");
+        sessionStorage.setItem("s", "3");
+        const seen = [];
+        for (const k in localStorage) seen.push(k);
+        console.log(Object.keys(localStorage).join(), JSON.stringify(localStorage), seen.join(), "a" in localStorage, "zz" in localStorage, Object.keys(sessionStorage).join());
+        console.log(delete localStorage.a, delete localStorage["nope"], localStorage.length, Object.keys(localStorage).join());
+        delete sessionStorage.s;
+        console.log(sessionStorage.length);
+        const el = document.body; el.expando = 1; console.log(delete el.expando, el.expando);
+        """)
+
+      assert errors(r) == []
+
+      assert logs(r) == [
+               "a,b {\"a\":\"1\",\"b\":\"2\"} a,b true false s",
+               "true true 1 b",
+               "0",
+               "true undefined"
+             ]
+    end
+
     test "sessionStorage is not localStorage" do
       r =
         run_at("ls2.test", """
