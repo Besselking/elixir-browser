@@ -97,6 +97,11 @@ defmodule Browser.JS.Props do
        when is_binary(key),
        do: Browser.JS.Modules.property(data, key)
 
+  # an element of a typed array
+  defp virtual(_id, %{class: :host, host: {Browser.JS.TypedArrays, data}}, key)
+       when is_binary(key),
+       do: Browser.JS.TypedArrays.property(data, key)
+
   defp virtual(_, _, _), do: nil
 
   @doc "The property descriptor object of an own property, or undefined."
@@ -336,6 +341,10 @@ defmodule Browser.JS.Props do
     cond do
       o.class == :host and match?({Browser.JS.Modules, _}, o.host) and
           Browser.JS.Modules.define_own(elem(o.host, 1), key, desc) == :ok ->
+        :ok
+
+      o.class == :host and match?({Browser.JS.TypedArrays, _}, o.host) and is_binary(key) and
+          Browser.JS.TypedArrays.define_own(elem(o.host, 1), key, desc) == :ok ->
         :ok
 
       o.class == :array and is_integer(array_index(key)) ->

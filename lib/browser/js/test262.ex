@@ -21,7 +21,7 @@ defmodule Browser.JS.Test262 do
   @unsupported_features ~w(
     symbols-as-weakmap-keys proxy-missing-checks
     Atomics.pause Atomics.waitAsync
-    immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
+    immutable-arraybuffer WeakRef
     FinalizationRegistry set-methods tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
     source-phase-imports source-phase-imports-module-source import-defer

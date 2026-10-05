@@ -543,12 +543,18 @@ defmodule Browser.JS.Collections do
               if(length(args) > 3, do: arg(args, 3), else: o)
             )
           else
-            # a module namespace has nothing that can be set
+            # a module namespace has nothing that can be set; a typed array takes nothing at an
+            # index it does not have (through another receiver the value is not even read)
             if match?(%{host: {Browser.JS.Modules, _}}, deref(id)) do
               false
             else
-              Interp.put(o, arg(args, 1), arg(args, 2))
-              true
+              if length(args) > 3 and arg(args, 3) != o and
+                   Browser.JS.TypedArrays.invalid_index?(o, to_key(arg(args, 1))) do
+                true
+              else
+                Interp.put(o, arg(args, 1), arg(args, 2))
+                true
+              end
             end
           end
 
