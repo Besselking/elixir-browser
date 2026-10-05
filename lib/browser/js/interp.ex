@@ -534,8 +534,14 @@ defmodule Browser.JS.Interp do
 
       _ ->
         case o.proto do
-          {:obj, pid} -> lookup(deref(pid), key, receiver)
-          _ -> :undefined
+          {:obj, pid} ->
+            case deref(pid) do
+              %{proxy: _} -> Browser.JS.Proxy.get({:obj, pid}, key, receiver)
+              po -> lookup(po, key, receiver)
+            end
+
+          _ ->
+            :undefined
         end
     end
   end
@@ -620,6 +626,7 @@ defmodule Browser.JS.Interp do
     "forEach" => 1.0,
     "freeze" => 1.0,
     "from" => 1.0,
+    "groupBy" => 2.0,
     "fromCharCode" => 1.0,
     "fromCodePoint" => 1.0,
     "fromEntries" => 1.0,
@@ -923,16 +930,34 @@ defmodule Browser.JS.Interp do
           :readonly ->
             :ok
 
+          {:proxy, proxy} ->
+            Browser.JS.Proxy.set(proxy, key, v, {:obj, id})
+            :ok
+
           :none ->
-            if Map.get(o, :ext, true),
-              do:
-                store(id, %{
-                  o
-                  | props: Map.put(o.props, key, v),
-                    # a symbol-keyed property is not listed by Object.keys or for-in
-                    keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
-                }),
-              else: :ok
+            if Map.get(o, :ext, true) do
+              o2 = %{
+                o
+                | props: Map.put(o.props, key, v),
+                  # a symbol-keyed property is not listed by Object.keys or for-in; it is
+                  # marked enumerable in its attributes instead
+                  keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
+              }
+
+              if is_binary(key),
+                do: store(id, o2),
+                else:
+                  store(
+                    id,
+                    Map.put(
+                      o2,
+                      :attrs,
+                      Map.put(Map.get(o, :attrs, %{}), key, %{e: true, w: true, c: true})
+                    )
+                  )
+            else
+              :ok
+            end
         end
     end
   end
@@ -941,6 +966,9 @@ defmodule Browser.JS.Interp do
     p = deref(pid)
 
     case p.props do
+      _ when is_map_key(p, :proxy) ->
+        {:proxy, {:obj, pid}}
+
       %{^key => {:accessor, _, setter}} ->
         if function?(setter), do: {:setter, setter}, else: :readonly
 
@@ -1088,7 +1116,7 @@ defmodule Browser.JS.Interp do
   def own_keys(_), do: []
 
   defp own_keys_plain(o) do
-    base = Enum.reverse(o.keys)
+    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
     case o do
       %{class: :array} ->
@@ -1102,7 +1130,9 @@ defmodule Browser.JS.Interp do
         ) ++ base
 
       _ ->
-        {ints, rest} = Enum.split_with(base, &is_integer(index(&1)))
+        {ints, rest} =
+          Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
+
         Enum.sort_by(ints, &index/1) ++ rest
     end
   end
@@ -1573,8 +1603,32 @@ defmodule Browser.JS.Interp do
   @doc "A property read with a given `this` for getters (`super.x`)."
   def get_with_receiver({:obj, id} = obj, key, receiver) do
     case deref(id) do
-      %{proxy: _} -> Browser.JS.Proxy.get(obj, to_key(key), receiver)
-      o -> lookup(o, to_key(key), receiver)
+      %{proxy: _} ->
+        Browser.JS.Proxy.get(obj, to_key(key), receiver)
+
+      %{class: class} = o when class in [:array, :function, :host] ->
+        if receiver == obj or class == :host or (not is_binary(key) and not is_tuple(key)) do
+          get(obj, key)
+        else
+          key = to_key(key)
+
+          case Browser.JS.Props.own_state(obj, key) do
+            nil ->
+              case o.proto do
+                {:obj, _} = p -> get_with_receiver(p, key, receiver)
+                _ -> :undefined
+              end
+
+            {:data, v, _, _, _} ->
+              v
+
+            {:accessor, g, _, _, _} ->
+              if function?(g), do: call(g, receiver, []), else: :undefined
+          end
+        end
+
+      o ->
+        lookup(o, to_key(key), receiver)
     end
   end
 
@@ -2635,7 +2689,11 @@ defmodule Browser.JS.Interp do
 
   defp spread_into(obj, src) do
     unless nullish?(src) or not match?({:obj, _}, src),
-      do: for(k <- Browser.JS.Props.enumerable_keys(src), do: put(obj, k, get(src, k)))
+      do:
+        for(
+          k <- Browser.JS.Props.enumerable_own_keys(src),
+          do: define_data(obj, k, get(src, k))
+        )
 
     :ok
   end
