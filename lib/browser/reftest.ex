@@ -202,6 +202,7 @@ defmodule Browser.Reftest do
         {items, height} =
           Layout.layout(page.nodes, @width, &measure/2, @view_height,
             images: images,
+            margin: 0,
             svg_defs: page.svg_defs
           )
 

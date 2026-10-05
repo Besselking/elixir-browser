@@ -698,6 +698,7 @@ css/CSS2/floats-clear/floats-008.xht
 css/CSS2/floats-clear/floats-009.xht
 css/CSS2/floats-clear/floats-014.xht
 css/CSS2/floats-clear/floats-015.xht
+css/CSS2/floats-clear/floats-019.xht
 css/CSS2/floats-clear/floats-022.xht
 css/CSS2/floats-clear/floats-023.xht
 css/CSS2/floats-clear/floats-024.xht
@@ -920,6 +921,8 @@ css/CSS2/margin-padding-clear/margin-collapse-015.xht
 css/CSS2/margin-padding-clear/margin-collapse-021.xht
 css/CSS2/margin-padding-clear/margin-collapse-022.xht
 css/CSS2/margin-padding-clear/margin-collapse-025.xht
+css/CSS2/margin-padding-clear/margin-collapse-037.xht
+css/CSS2/margin-padding-clear/margin-collapse-038.xht
 css/CSS2/margin-padding-clear/margin-collapse-106.xht
 css/CSS2/margin-padding-clear/margin-collapse-110.xht
 css/CSS2/margin-padding-clear/margin-collapse-112.xht
@@ -1193,6 +1196,7 @@ css/CSS2/margin-padding-clear/padding-left-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-left-applies-to-010.xht
 css/CSS2/margin-padding-clear/padding-left-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-left-applies-to-015.xht
+css/CSS2/margin-padding-clear/padding-percentage-inherit-001.xht
 css/CSS2/margin-padding-clear/padding-right-003.xht
 css/CSS2/margin-padding-clear/padding-right-006.xht
 css/CSS2/margin-padding-clear/padding-right-007.xht
@@ -1824,6 +1828,7 @@ css/CSS2/positioning/absolute-non-replaced-width-022.xht
 css/CSS2/positioning/absolute-non-replaced-width-023.xht
 css/CSS2/positioning/absolute-non-replaced-width-024.xht
 css/CSS2/positioning/absolute-non-replaced-width-025.xht
+css/CSS2/positioning/absolute-non-replaced-width-026.xht
 css/CSS2/positioning/absolute-replaced-height-001.xht
 css/CSS2/positioning/absolute-replaced-height-002.xht
 css/CSS2/positioning/absolute-replaced-height-003.xht
@@ -1860,14 +1865,27 @@ css/CSS2/positioning/abspos-002.xht
 css/CSS2/positioning/abspos-008.xht
 css/CSS2/positioning/abspos-011.xht
 css/CSS2/positioning/abspos-012.xht
+css/CSS2/positioning/abspos-013.xht
 css/CSS2/positioning/abspos-014.xht
+css/CSS2/positioning/abspos-015.xht
 css/CSS2/positioning/abspos-016.xht
+css/CSS2/positioning/abspos-017.xht
 css/CSS2/positioning/abspos-018.xht
+css/CSS2/positioning/abspos-019.xht
 css/CSS2/positioning/abspos-020.xht
 css/CSS2/positioning/abspos-022.xht
 css/CSS2/positioning/abspos-027.xht
 css/CSS2/positioning/abspos-028.xht
 css/CSS2/positioning/abspos-029.html
+css/CSS2/positioning/abspos-overflow-001.xht
+css/CSS2/positioning/abspos-overflow-002.xht
+css/CSS2/positioning/abspos-overflow-003.xht
+css/CSS2/positioning/abspos-overflow-004.xht
+css/CSS2/positioning/abspos-overflow-005.xht
+css/CSS2/positioning/abspos-overflow-006.xht
+css/CSS2/positioning/abspos-overflow-007.xht
+css/CSS2/positioning/abspos-overflow-008.xht
+css/CSS2/positioning/abspos-overflow-009.xht
 css/CSS2/positioning/abspos-overflow-010.xht
 css/CSS2/positioning/abspos-overflow-011.xht
 css/CSS2/positioning/abspos-overflow-012.xht
@@ -1969,6 +1987,9 @@ css/CSS2/positioning/left-110.xht
 css/CSS2/positioning/left-111.xht
 css/CSS2/positioning/left-112.xht
 css/CSS2/positioning/left-113.xht
+css/CSS2/positioning/left-applies-to-009.xht
+css/CSS2/positioning/left-applies-to-012.xht
+css/CSS2/positioning/left-applies-to-014.xht
 css/CSS2/positioning/left-offset-001.xht
 css/CSS2/positioning/left-offset-002.xht
 css/CSS2/positioning/left-offset-003.xht
@@ -1981,6 +2002,7 @@ css/CSS2/positioning/position-absolute-006.xht
 css/CSS2/positioning/position-absolute-007.xht
 css/CSS2/positioning/position-absolute-008.xht
 css/CSS2/positioning/position-fixed-001.xht
+css/CSS2/positioning/position-fixed-007.xht
 css/CSS2/positioning/position-relative-001.xht
 css/CSS2/positioning/position-relative-003.xht
 css/CSS2/positioning/position-relative-004.xht
@@ -2052,6 +2074,9 @@ css/CSS2/positioning/right-110.xht
 css/CSS2/positioning/right-111.xht
 css/CSS2/positioning/right-112.xht
 css/CSS2/positioning/right-113.xht
+css/CSS2/positioning/right-applies-to-009.xht
+css/CSS2/positioning/right-applies-to-012.xht
+css/CSS2/positioning/right-applies-to-014.xht
 css/CSS2/positioning/right-offset-001.xht
 css/CSS2/positioning/right-offset-002.xht
 css/CSS2/positioning/right-offset-003.xht
@@ -2511,6 +2536,7 @@ css/css-flexbox/flex-item-and-percentage-abspos.html
 css/css-flexbox/flex-item-max-height-min-content.html
 css/css-flexbox/flex-item-min-height-min-content-overflow.html
 css/css-flexbox/flex-item-min-height-min-content.html
+css/css-flexbox/flex-item-position-relative-001.html
 css/css-flexbox/flex-item-vertical-align.html
 css/css-flexbox/flex-item-z-ordering-001.html
 css/css-flexbox/flex-lines/multi-line-wrap-reverse-row-reverse.html

@@ -3226,6 +3226,12 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "text").y < 30
     end
 
+    test "the page margin can be switched off so the page is the containing block" do
+      page = Page.build(~s|<style>body{margin:0}</style><p>text</p>|, "about:home")
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2, 600, margin: 0)
+      assert word_at(items, "text").x == 0
+    end
+
     test "floats inside a table cell stay in the cell" do
       html =
         ~s|<table><tr><td><div style="float:left;width:10px;height:10px;background:#ccc"></div>cell</td><td>next</td></tr></table>|
