@@ -35,18 +35,36 @@ jobs:
 
   # The JavaScript runtime against test262 (the ECMAScript conformance suite): a test that
   # passed in test262.baseline must keep passing. `mix js.test262 --update` records progress.
+  # On a pull request that touches nothing the runtime depends on the job still runs (so the
+  # check always reports) but skips its slow steps.
   test262:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this change affect the JavaScript runtime?
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] &&
+             ! git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" |
+               grep -Eq '^(lib/browser/js/|lib/browser/js\.ex$|lib/mix/tasks/js\.test262\.ex$|test262\.baseline$|mix\.(exs|lock)$|\.github/workflows/)'; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No JavaScript runtime change: skipping test262."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: erlef/setup-beam@v1
+        if: steps.scope.outputs.run == 'true'
         with:
           elixir-version: "1.20"
           otp-version: "29"
           version-type: loose
 
       - name: Cache the test262 checkout
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache@v4
         with:
           path: .test262
@@ -54,6 +72,48 @@ jobs:
           restore-keys: test262-
 
       - name: Run test262 and compare with the baseline
+        if: steps.scope.outputs.run == 'true'
         # a shared runner is several times slower than a laptop: the 65536-iteration eval tests
         # take about 5 s here and passed the default 10 s only just
         run: mix js.test262 --fetch --check --timeout 30000
+
+  # The layout and paint engine against the WPT reftests: a test that passed in
+  # reftest.baseline must keep passing. `mix reftest --update` records progress. A pull request
+  # that only touches the JavaScript runtime or documentation skips the slow steps.
+  reftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this change affect layout or painting?
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] &&
+             ! git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" |
+               grep -Evq '^(lib/browser/js/|lib/browser/js\.ex$|lib/mix/tasks/js\.test262\.ex$|test262\.baseline$|test/browser/js|.*\.md$)'; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Only the JavaScript runtime or documentation changed: skipping reftests."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: erlef/setup-beam@v1
+        if: steps.scope.outputs.run == 'true'
+        with:
+          elixir-version: "1.20"
+          otp-version: "29"
+          version-type: loose
+
+      - name: Cache the WPT checkout
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .wpt
+          key: wpt-${{ github.run_id }}
+          restore-keys: wpt-
+
+      - name: Run the reftests and compare with the baseline
+        if: steps.scope.outputs.run == 'true'
+        run: mix reftest --fetch --check
