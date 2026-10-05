@@ -37,6 +37,7 @@ defmodule Browser.JS.Collections do
     install_host(scope)
     Browser.JS.TypedArrays.install(scope)
     Browser.JS.Disposables.install(scope)
+    Browser.JS.Iterators.install(scope)
     :ok
   end
 
@@ -207,11 +208,28 @@ defmodule Browser.JS.Collections do
        class: class,
        data: %{},
        seq: 0,
+       order: :gb_trees.empty(),
        props: %{},
        keys: [],
        proto: proto(proto_name)
      })}
   end
+
+  # a constructor was called with `new`: `this` is the object to turn into the collection
+  defp init_collection({:obj, id} = this, class, name) do
+    if deref(id).class != :object,
+      do: throw_error("TypeError", "Constructor #{name} requires 'new'")
+
+    store(
+      id,
+      Map.merge(deref(id), %{class: class, data: %{}, seq: 0, order: :gb_trees.empty()})
+    )
+
+    this
+  end
+
+  defp init_collection(_, _, name),
+    do: throw_error("TypeError", "Constructor #{name} requires 'new'")
 
   defp data!({:obj, id} = this, class) do
     o = deref(id)
@@ -242,52 +260,196 @@ defmodule Browser.JS.Collections do
         store(id, %{o | data: Map.put(o.data, nk, {seq, k, value})})
 
       _ ->
-        store(id, %{o | data: Map.put(o.data, nk, {o.seq, nk, value}), seq: o.seq + 1})
+        store(id, %{
+          o
+          | data: Map.put(o.data, nk, {o.seq, nk, value}),
+            order: :gb_trees.insert(o.seq, nk, o.order),
+            seq: o.seq + 1
+        })
     end
   end
 
-  defp ordered(o), do: o.data |> Map.values() |> Enum.sort_by(&elem(&1, 0))
+  defp delete_entry(id, o, nk) do
+    case o.data do
+      %{^nk => {seq, _, _}} ->
+        store(id, %{o | data: Map.delete(o.data, nk), order: :gb_trees.delete(seq, o.order)})
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp clear_entries(id, o), do: store(id, %{o | data: %{}, order: :gb_trees.empty()})
+
+  defp ordered(o), do: for(nk <- :gb_trees.values(o.order), do: Map.fetch!(o.data, nk))
+
+  # the first live entry at or after the numbered position `cursor`
+  defp next_from(o, cursor) do
+    case :gb_trees.next(:gb_trees.iterator_from(cursor, o.order)) do
+      {_, nk, _} -> Map.fetch!(o.data, nk)
+      :none -> :none
+    end
+  end
+
+  # `forEach`: sees the entries added while it runs and skips the ones deleted
+  defp each_live({:obj, id}, fun, cursor \\ 0) do
+    case next_from(deref(id), cursor) do
+      :none ->
+        :ok
+
+      {seq, k, v} ->
+        fun.(k, v)
+        each_live({:obj, id}, fun, seq + 1)
+    end
+  end
 
   @doc "The entries of a Map (`[key, value]` arrays) or Set (values), for iteration."
   def entries(%{class: :map} = o), do: for({_, k, v} <- ordered(o), do: new_array([k, v]))
   def entries(%{class: :set} = o), do: for({_, k, _} <- ordered(o), do: k)
 
+  # an iterator over a Map or Set that sees later additions; `kind` is :keys, :values or :entries
+  defp coll_iterator(this, class, kind) do
+    it = new_object([], proto(if class == :map, do: :map_iterator, else: :set_iterator))
+    {:obj, iid} = it
+    store(iid, Map.put(deref(iid), :coll_iter, {class, this, kind, 0}))
+    it
+  end
+
+  defp install_coll_iterator(name, class) do
+    p = new_object([], proto(:iterator))
+    put_proto(if(class == :map, do: :map_iterator, else: :set_iterator), p)
+    put_tag(p, name)
+
+    def_fn(p, "next", fn this, _ ->
+      state =
+        case this do
+          {:obj, iid} -> Map.get(deref(iid), :coll_iter)
+          _ -> nil
+        end
+
+      case state do
+        {^class, coll, kind, cursor} ->
+          {:obj, iid} = this
+
+          with true <- cursor != :done,
+               {seq, k, v} <- next_from(deref(elem(coll, 1)), cursor) do
+            store(iid, Map.put(deref(iid), :coll_iter, {class, coll, kind, seq + 1}))
+
+            value =
+              case kind do
+                :keys -> k
+                :values -> v
+                :entries -> new_array([k, v])
+              end
+
+            new_object([{"value", value}, {"done", false}])
+          else
+            _ ->
+              store(iid, Map.put(deref(iid), :coll_iter, {class, coll, kind, :done}))
+              new_object([{"value", :undefined}, {"done", true}])
+          end
+
+        _ ->
+          throw_error("TypeError", "next method called on incompatible receiver")
+      end
+    end)
+  end
+
+  # runs `fun.(item, index)` for every value of an iterable, closing the iterator when it throws
+  defp each_item(src, fun) do
+    case Interp.iter_source(src) do
+      {:list, list} ->
+        list |> Enum.with_index() |> Enum.each(fn {v, i} -> fun.(v, i) end)
+
+      {:proto, it, next} ->
+        each_proto(it, next, fun, 0)
+    end
+  end
+
+  defp each_proto(it, next, fun, i) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        :ok
+
+      {:ok, item} ->
+        try do
+          fun.(item, i)
+        catch
+          kind, e ->
+            Interp.iter_close(it, true)
+            :erlang.raise(kind, e, __STACKTRACE__)
+        end
+
+        each_proto(it, next, fun, i + 1)
+    end
+  end
+
+  # what the constructors do with their iterable: call `this.set` / `this.add` for each item
+  defp add_all(_this, src, _adder, _entry?) when src in [:undefined, :null], do: :ok
+
+  defp add_all(this, src, adder_name, entry?) do
+    adder = Interp.get(this, adder_name)
+
+    unless function?(adder),
+      do: throw_error("TypeError", "'#{adder_name}' returned for property is not a function")
+
+    each_item(src, fn item, _ ->
+      if entry? do
+        unless match?({:obj, _}, item),
+          do: throw_error("TypeError", "Iterator value #{to_str(item)} is not an entry object")
+
+        call(adder, this, [Interp.get(item, 0.0), Interp.get(item, 1.0)])
+      else
+        call(adder, this, [item])
+      end
+    end)
+  end
+
   defp install_map(scope) do
     p = new_object()
     put_proto(:map, p)
+    install_coll_iterator("Map Iterator", :map)
 
     ctor =
-      native("Map", fn _, args ->
-        m = new_collection(:map, :map)
-
-        case arg(args, 0) do
-          v when v in [:undefined, :null] ->
-            :ok
-
-          src ->
-            for e <- iterate(src) do
-              unless match?({:obj, _}, e),
-                do: throw_error("TypeError", "Iterator value #{to_str(e)} is not an entry object")
-
-              put_entry(m, Interp.get(e, 0.0), Interp.get(e, 1.0))
-            end
-        end
-
-        m
+      native("Map", fn this, args ->
+        init_collection(this, :map, "Map")
+        add_all(this, arg(args, 0), "set", true)
+        this
       end)
 
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Map", ctor)
     def_species(ctor)
+    put_tag(p, "Map")
+
+    def_fn(ctor, "groupBy", fn _, args ->
+      items = arg(args, 0)
+      f = arg(args, 1)
+
+      if items in [:undefined, :null],
+        do: throw_error("TypeError", "#{to_str(items)} is not iterable")
+
+      unless function?(f), do: throw_error("TypeError", "callback is not a function")
+      m = new_collection(:map, :map)
+      {:obj, mid} = m
+
+      each_item(items, fn item, i ->
+        key = norm(call(f, :undefined, [item, i * 1.0]))
+
+        case deref(mid).data do
+          %{^key => {_, _, {:obj, _} = arr}} -> call(Interp.get(arr, "push"), arr, [item])
+          _ -> put_entry(m, key, new_array([item]))
+        end
+      end)
+
+      m
+    end)
 
     def_fn(p, "get", fn this, args ->
       o = data!(this, :map)
-
-      case o.data do
-        %{} = d ->
-          with {_, _, v} <- Map.get(d, norm(arg(args, 0))), do: v, else: (_ -> :undefined)
-      end
+      with {_, _, v} <- Map.get(o.data, norm(arg(args, 0))), do: v, else: (_ -> :undefined)
     end)
 
     def_fn(p, "set", fn this, args ->
@@ -299,44 +461,48 @@ defmodule Browser.JS.Collections do
     def_fn(p, "has", fn this, args -> Map.has_key?(data!(this, :map).data, norm(arg(args, 0))) end)
 
     def_fn(p, "delete", fn this, args ->
-      {:obj, id} = this
       o = data!(this, :map)
-      nk = norm(arg(args, 0))
-      had = Map.has_key?(o.data, nk)
-      store(id, %{o | data: Map.delete(o.data, nk)})
-      had
+      {:obj, id} = this
+      delete_entry(id, o, norm(arg(args, 0)))
     end)
 
     def_fn(p, "clear", fn this, _ ->
-      {:obj, id} = this
       o = data!(this, :map)
-      store(id, %{o | data: %{}})
+      {:obj, id} = this
+      clear_entries(id, o)
       :undefined
     end)
 
     def_fn(p, "forEach", fn this, args ->
-      o = data!(this, :map)
+      data!(this, :map)
       f = arg(args, 0)
 
       unless function?(f), do: throw_error("TypeError", "callback is not a function")
-      for {_, k, v} <- ordered(o), do: call(f, arg(args, 1), [v, k, this])
+      each_live(this, fn k, v -> call(f, arg(args, 1), [v, k, this]) end)
       :undefined
     end)
 
     def_fn(p, "keys", fn this, _ ->
-      make_iterator(for({_, k, _} <- ordered(data!(this, :map)), do: k))
+      data!(this, :map)
+      coll_iterator(this, :map, :keys)
     end)
 
     def_fn(p, "values", fn this, _ ->
-      make_iterator(for({_, _, v} <- ordered(data!(this, :map)), do: v))
+      data!(this, :map)
+      coll_iterator(this, :map, :values)
     end)
 
-    entries_fn = native("entries", fn this, _ -> make_iterator(entries(data!(this, :map))) end)
+    entries_fn =
+      native("entries", fn this, _ ->
+        data!(this, :map)
+        coll_iterator(this, :map, :entries)
+      end)
+
     put_hidden(p, "entries", entries_fn)
     put_hidden(p, @iterator, entries_fn)
 
     Props.define_accessor(p, "size",
-      get: native("size", fn this, _ -> map_size(data!(this, :map).data) * 1.0 end),
+      get: native("get size", fn this, _ -> map_size(data!(this, :map).data) * 1.0 end),
       enumerable: false
     )
   end
@@ -344,23 +510,20 @@ defmodule Browser.JS.Collections do
   defp install_set(scope) do
     p = new_object()
     put_proto(:set, p)
+    install_coll_iterator("Set Iterator", :set)
 
     ctor =
-      native("Set", fn _, args ->
-        s = new_collection(:set, :set)
-
-        case arg(args, 0) do
-          v when v in [:undefined, :null] -> :ok
-          src -> for v <- iterate(src), do: put_entry(s, v, v)
-        end
-
-        s
+      native("Set", fn this, args ->
+        init_collection(this, :set, "Set")
+        add_all(this, arg(args, 0), "add", false)
+        this
       end)
 
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
     declare(scope, "Set", ctor)
     def_species(ctor)
+    put_tag(p, "Set")
 
     def_fn(p, "add", fn this, args ->
       data!(this, :set)
@@ -372,41 +535,44 @@ defmodule Browser.JS.Collections do
     def_fn(p, "has", fn this, args -> Map.has_key?(data!(this, :set).data, norm(arg(args, 0))) end)
 
     def_fn(p, "delete", fn this, args ->
-      {:obj, id} = this
       o = data!(this, :set)
-      nk = norm(arg(args, 0))
-      had = Map.has_key?(o.data, nk)
-      store(id, %{o | data: Map.delete(o.data, nk)})
-      had
+      {:obj, id} = this
+      delete_entry(id, o, norm(arg(args, 0)))
     end)
 
     def_fn(p, "clear", fn this, _ ->
-      {:obj, id} = this
       o = data!(this, :set)
-      store(id, %{o | data: %{}})
+      {:obj, id} = this
+      clear_entries(id, o)
       :undefined
     end)
 
     def_fn(p, "forEach", fn this, args ->
-      o = data!(this, :set)
+      data!(this, :set)
       f = arg(args, 0)
 
       unless function?(f), do: throw_error("TypeError", "callback is not a function")
-      for {_, k, _} <- ordered(o), do: call(f, arg(args, 1), [k, k, this])
+      each_live(this, fn k, _ -> call(f, arg(args, 1), [k, k, this]) end)
       :undefined
     end)
 
-    values_fn = native("values", fn this, _ -> make_iterator(entries(data!(this, :set))) end)
+    values_fn =
+      native("values", fn this, _ ->
+        data!(this, :set)
+        coll_iterator(this, :set, :keys)
+      end)
+
     put_hidden(p, "values", values_fn)
     put_hidden(p, "keys", values_fn)
     put_hidden(p, @iterator, values_fn)
 
     def_fn(p, "entries", fn this, _ ->
-      make_iterator(for v <- entries(data!(this, :set)), do: new_array([v, v]))
+      data!(this, :set)
+      coll_iterator(this, :set, :entries)
     end)
 
     Props.define_accessor(p, "size",
-      get: native("size", fn this, _ -> map_size(data!(this, :set).data) * 1.0 end),
+      get: native("get size", fn this, _ -> map_size(data!(this, :set).data) * 1.0 end),
       enumerable: false
     )
   end
@@ -417,20 +583,16 @@ defmodule Browser.JS.Collections do
     put_proto(:weakmap, wm)
 
     wm_ctor =
-      native("WeakMap", fn _, args ->
-        m = new_collection(:weakmap, :weakmap)
-
-        case arg(args, 0) do
-          v when v in [:undefined, :null] -> :ok
-          src -> for e <- iterate(src), do: put_weak(m, Interp.get(e, 0.0), Interp.get(e, 1.0))
-        end
-
-        m
+      native("WeakMap", fn this, args ->
+        init_collection(this, :weakmap, "WeakMap")
+        add_all(this, arg(args, 0), "set", true)
+        this
       end)
 
     put_const(wm_ctor, "prototype", wm)
     put_hidden(wm, "constructor", wm_ctor)
     declare(scope, "WeakMap", wm_ctor)
+    put_tag(wm, "WeakMap")
 
     def_fn(wm, "get", fn this, args ->
       o = data!(this, :weakmap)
@@ -446,31 +608,25 @@ defmodule Browser.JS.Collections do
     def_fn(wm, "has", fn this, args -> Map.has_key?(data!(this, :weakmap).data, arg(args, 0)) end)
 
     def_fn(wm, "delete", fn this, args ->
-      {:obj, id} = this
       o = data!(this, :weakmap)
-      had = Map.has_key?(o.data, arg(args, 0))
-      store(id, %{o | data: Map.delete(o.data, arg(args, 0))})
-      had
+      {:obj, id} = this
+      delete_entry(id, o, arg(args, 0))
     end)
 
     ws = new_object()
     put_proto(:weakset, ws)
 
     ws_ctor =
-      native("WeakSet", fn _, args ->
-        s = new_collection(:weakset, :weakset)
-
-        case arg(args, 0) do
-          v when v in [:undefined, :null] -> :ok
-          src -> for v <- iterate(src), do: put_weak(s, v, v)
-        end
-
-        s
+      native("WeakSet", fn this, args ->
+        init_collection(this, :weakset, "WeakSet")
+        add_all(this, arg(args, 0), "add", false)
+        this
       end)
 
     put_const(ws_ctor, "prototype", ws)
     put_hidden(ws, "constructor", ws_ctor)
     declare(scope, "WeakSet", ws_ctor)
+    put_tag(ws, "WeakSet")
 
     def_fn(ws, "add", fn this, args ->
       data!(this, :weakset)
@@ -481,11 +637,9 @@ defmodule Browser.JS.Collections do
     def_fn(ws, "has", fn this, args -> Map.has_key?(data!(this, :weakset).data, arg(args, 0)) end)
 
     def_fn(ws, "delete", fn this, args ->
-      {:obj, id} = this
       o = data!(this, :weakset)
-      had = Map.has_key?(o.data, arg(args, 0))
-      store(id, %{o | data: Map.delete(o.data, arg(args, 0))})
-      had
+      {:obj, id} = this
+      delete_entry(id, o, arg(args, 0))
     end)
   end
 
@@ -501,140 +655,128 @@ defmodule Browser.JS.Collections do
   defp install_reflect(scope) do
     r = new_object()
     declare(scope, "Reflect", r)
+    put_tag(r, "Reflect")
 
-    def_fn(r, "apply", fn _, args ->
+    # the target of most methods must be an object
+    target! = fn v, name ->
+      unless match?({:obj, _}, v),
+        do: throw_error("TypeError", "Reflect.#{name} called on non-object")
+
+      v
+    end
+
+    def = fn name, arity, fun ->
+      f = native(name, fun)
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, arity * 1.0))
+      put_hidden(r, name, f)
+    end
+
+    def.("apply", 3, fn _, args ->
       f = arg(args, 0)
-      list = if arg(args, 2) == :undefined, do: [], else: iterate_args(arg(args, 2))
 
       unless function?(f),
         do: throw_error("TypeError", "Function.prototype.apply was called on a non-function")
 
-      call(f, arg(args, 1), list)
+      call(f, arg(args, 1), iterate_args(arg(args, 2)))
     end)
 
-    def_fn(r, "construct", fn _, args ->
+    def.("construct", 2, fn _, args ->
       f = arg(args, 0)
-      nt = if arg(args, 2) == :undefined, do: f, else: arg(args, 2)
+
+      unless constructor?(f), do: throw_error("TypeError", "target is not a constructor")
+      nt = if length(args) < 3, do: f, else: arg(args, 2)
 
       unless constructor?(nt), do: throw_error("TypeError", "newTarget is not a constructor")
       construct(f, iterate_args(arg(args, 1)), nt)
     end)
 
-    def_fn(r, "get", fn _, args ->
-      case arg(args, 0) do
-        {:obj, _} = o ->
-          if arg(args, 2) == :undefined,
-            do: Interp.get(o, arg(args, 1)),
-            else: Interp.get_with_receiver(o, arg(args, 1), arg(args, 2))
+    def.("get", 2, fn _, args ->
+      o = target!.(arg(args, 0), "get")
 
-        _ ->
-          throw_error("TypeError", "Reflect.get called on non-object")
-      end
+      if length(args) < 3,
+        do: Interp.get(o, arg(args, 1)),
+        else: Interp.get_with_receiver(o, arg(args, 1), arg(args, 2))
     end)
 
-    def_fn(r, "set", fn _, args ->
-      case arg(args, 0) do
-        {:obj, id} = o ->
-          if Map.has_key?(deref(id), :proxy) do
-            Browser.JS.Proxy.set(
-              o,
-              to_key(arg(args, 1)),
-              arg(args, 2),
-              if(length(args) > 3, do: arg(args, 3), else: o)
-            )
-          else
-            # a module namespace has nothing that can be set; a typed array takes nothing at an
-            # index it does not have (through another receiver the value is not even read)
-            if match?(%{host: {Browser.JS.Modules, _}}, deref(id)) do
-              false
-            else
-              if length(args) > 3 and arg(args, 3) != o and
-                   Browser.JS.TypedArrays.invalid_index?(o, to_key(arg(args, 1))) do
-                true
-              else
-                Interp.put(o, arg(args, 1), arg(args, 2))
-                true
-              end
-            end
-          end
-
-        _ ->
-          throw_error("TypeError", "Reflect.set called on non-object")
-      end
+    def.("set", 3, fn _, args ->
+      o = target!.(arg(args, 0), "set")
+      key = to_key(arg(args, 1))
+      Props.ordinary_set(o, key, arg(args, 2), if(length(args) > 3, do: arg(args, 3), else: o))
     end)
 
-    def_fn(r, "has", fn _, args ->
-      unless match?({:obj, _}, arg(args, 0)),
-        do: throw_error("TypeError", "Reflect.has called on non-object")
-
-      has_property?(arg(args, 0), arg(args, 1))
+    def.("has", 2, fn _, args ->
+      has_property?(target!.(arg(args, 0), "has"), arg(args, 1))
     end)
 
-    def_fn(r, "deleteProperty", fn _, args -> Interp.delete(arg(args, 0), arg(args, 1)) end)
+    def.("deleteProperty", 2, fn _, args ->
+      o = target!.(arg(args, 0), "deleteProperty")
+      Interp.delete(o, to_key(arg(args, 1)))
+    end)
 
-    def_fn(r, "defineProperty", fn _, args ->
-      try do
-        Props.define(arg(args, 0), arg(args, 1), arg(args, 2))
+    def.("defineProperty", 3, fn _, args ->
+      o = target!.(arg(args, 0), "defineProperty")
+      Props.try_define(o, arg(args, 1), arg(args, 2))
+    end)
+
+    def.("getOwnPropertyDescriptor", 2, fn _, args ->
+      o = target!.(arg(args, 0), "getOwnPropertyDescriptor")
+      Props.descriptor(o, to_key(arg(args, 1)))
+    end)
+
+    def.("ownKeys", 1, fn _, args ->
+      new_array(Props.all_own_keys(target!.(arg(args, 0), "ownKeys")))
+    end)
+
+    def.("getPrototypeOf", 1, fn _, args ->
+      Props.get_prototype_of(target!.(arg(args, 0), "getPrototypeOf"))
+    end)
+
+    def.("setPrototypeOf", 2, fn _, args ->
+      o = target!.(arg(args, 0), "setPrototypeOf")
+      p = arg(args, 1)
+
+      unless p == :null or match?({:obj, _}, p),
+        do: throw_error("TypeError", "Object prototype may only be an Object or null")
+
+      Props.set_prototype_of(o, p) == true
+    end)
+
+    def.("isExtensible", 1, fn _, args ->
+      Props.extensible?(target!.(arg(args, 0), "isExtensible"))
+    end)
+
+    def.("preventExtensions", 1, fn _, args ->
+      {:obj, id} = o = target!.(arg(args, 0), "preventExtensions")
+
+      if Map.has_key?(deref(id), :proxy) do
+        Browser.JS.Proxy.prevent_extensions(o)
+      else
+        Props.prevent_extensions(o)
         true
-      catch
-        {:js_error, _} -> false
-      end
-    end)
-
-    def_fn(r, "getOwnPropertyDescriptor", fn _, args ->
-      Props.descriptor(arg(args, 0), to_key(arg(args, 1)))
-    end)
-
-    def_fn(r, "ownKeys", fn _, args ->
-      o = arg(args, 0)
-      new_array(Props.own_names(o) ++ Props.own_symbols(o))
-    end)
-
-    def_fn(r, "getPrototypeOf", fn _, args ->
-      case arg(args, 0) do
-        {:obj, _} = o -> Props.get_prototype_of(o)
-        _ -> throw_error("TypeError", "Reflect.getPrototypeOf called on non-object")
-      end
-    end)
-
-    def_fn(r, "setPrototypeOf", fn _, args ->
-      case arg(args, 0) do
-        {:obj, _} = o ->
-          p = arg(args, 1)
-
-          unless p == :null or match?({:obj, _}, p),
-            do: throw_error("TypeError", "Object prototype may only be an Object or null")
-
-          Props.set_prototype_of(o, p) == true
-
-        _ ->
-          throw_error("TypeError", "Reflect.setPrototypeOf called on non-object")
-      end
-    end)
-
-    def_fn(r, "isExtensible", fn _, args -> Props.extensible?(arg(args, 0)) end)
-
-    def_fn(r, "preventExtensions", fn _, args ->
-      case arg(args, 0) do
-        {:obj, id} = o ->
-          if Map.has_key?(deref(id), :proxy) do
-            Browser.JS.Proxy.prevent_extensions(o)
-          else
-            Props.prevent_extensions(o)
-            true
-          end
-
-        _ ->
-          throw_error("TypeError", "Reflect.preventExtensions called on non-object")
       end
     end)
   end
+
+  # CreateListFromArrayLike
+  defp iterate_args(:undefined),
+    do: throw_error("TypeError", "CreateListFromArrayLike called on non-object")
 
   defp iterate_args(list) do
     unless match?({:obj, _}, list),
       do: throw_error("TypeError", "CreateListFromArrayLike called on non-object")
 
-    if array?(list), do: array_list(list), else: iterate(list)
+    if array?(list) do
+      array_list(list)
+    else
+      len =
+        case to_int(Interp.get(list, "length")) do
+          n when is_integer(n) and n > 0 -> n
+          _ -> 0
+        end
+
+      for i <- 0..(len - 1)//1, do: Interp.get(list, Integer.to_string(i))
+    end
   end
 
   # ── setImmediate, MessageChannel ───────────────────────────

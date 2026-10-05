@@ -170,8 +170,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "set") do
       nil ->
-        Interp.put(target, key, value)
-        true
+        Props.ordinary_set(target, key, value, receiver)
 
       f ->
         if Interp.truthy(Interp.call(f, handler, [target, key_value(key), value, receiver])) do

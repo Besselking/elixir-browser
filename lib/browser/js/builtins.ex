@@ -331,7 +331,7 @@ defmodule Browser.JS.Builtins do
     def_fn(obj, "assign", fn _, [target | sources] ->
       for s <- sources,
           not nullish?(s),
-          k <- Browser.JS.Props.enumerable_keys(s),
+          k <- Browser.JS.Props.enumerable_own_keys(s),
           do: Interp.put(target, k, Interp.get(s, k))
 
       target
@@ -339,7 +339,7 @@ defmodule Browser.JS.Builtins do
 
     def_fn(obj, "groupBy", fn _, [list, f | _] ->
       callable!(f)
-      groups = new_object([], nil)
+      groups = new_object([], :null)
 
       for {e, i} <- Enum.with_index(iterate(list)) do
         k = to_key(call(f, :undefined, [e, float(i)]))
@@ -570,6 +570,12 @@ defmodule Browser.JS.Builtins do
   end
 
   defp array_methods(p) do
+    # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
+    {:obj, pid} = p
+    po = deref(pid)
+    attrs = Map.put(Map.get(po, :attrs, %{}), "length", %{w: true, c: false, e: false})
+    store(pid, po |> Map.put(:props, Map.put(po.props, "length", 0.0)) |> Map.put(:attrs, attrs))
+
     array_fn(p, "push", fn this, args ->
       if plain_array?(this) do
         {:obj, id} = this

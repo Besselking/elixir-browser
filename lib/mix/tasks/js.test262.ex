@@ -50,6 +50,19 @@ defmodule Mix.Tasks.Js.Test262 do
     built-ins/JSON built-ins/Math built-ins/NaN built-ins/Number built-ins/Object
     built-ins/Promise built-ins/RegExp built-ins/String built-ins/SuppressedError built-ins/Symbol built-ins/isFinite built-ins/isNaN
     built-ins/parseFloat built-ins/parseInt built-ins/undefined
+    built-ins/AggregateError built-ins/ArrayIteratorPrototype built-ins/AsyncFromSyncIteratorPrototype
+    built-ins/AsyncFunction built-ins/AsyncGeneratorFunction built-ins/AsyncGeneratorPrototype
+    built-ins/AsyncIteratorPrototype built-ins/BigInt built-ins/FinalizationRegistry
+    built-ins/GeneratorFunction built-ins/GeneratorPrototype built-ins/Iterator built-ins/Map
+    built-ins/MapIteratorPrototype built-ins/NativeErrors built-ins/Proxy built-ins/Reflect
+    built-ins/RegExpStringIteratorPrototype built-ins/Set built-ins/SetIteratorPrototype
+    built-ins/StringIteratorPrototype built-ins/ThrowTypeError built-ins/Uint8Array
+    built-ins/WeakMap built-ins/WeakRef built-ins/WeakSet built-ins/decodeURI
+    built-ins/decodeURIComponent built-ins/encodeURI built-ins/encodeURIComponent built-ins/eval
+    built-ins/global
+    language/computed-property-names language/directive-prologue language/eval-code
+    language/global-code language/identifier-resolution language/line-terminators
+    language/source-text language/statementList
     language/arguments-object language/asi language/block-scope language/comments
     language/destructuring language/expressions language/function-code language/future-reserved-words
     language/export language/identifiers language/import language/keywords language/literals language/punctuators

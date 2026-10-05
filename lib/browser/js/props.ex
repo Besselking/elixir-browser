@@ -44,7 +44,7 @@ defmodule Browser.JS.Props do
 
       Map.has_key?(o.props, key) ->
         attrs = Map.get(o.attrs_or_default, key, %{})
-        e = key in o.keys
+        e = key in o.keys or (not is_binary(key) and Map.get(attrs, :e, false))
         c = Map.get(attrs, :c, true)
 
         case o.props[key] do
@@ -101,6 +101,19 @@ defmodule Browser.JS.Props do
   defp virtual(_id, %{class: :host, host: {Browser.JS.TypedArrays, data}}, key)
        when is_binary(key),
        do: Browser.JS.TypedArrays.property(data, key)
+
+  defp virtual(_id, %{prim: s}, key) when is_binary(s) do
+    case array_index(key) do
+      i when is_integer(i) ->
+        case Browser.JS.Str.at(s, i) do
+          nil -> nil
+          c -> {:data, c, false, true, false}
+        end
+
+      _ ->
+        nil
+    end
+  end
 
   defp virtual(_, _, _), do: nil
 
@@ -168,8 +181,11 @@ defmodule Browser.JS.Props do
     end
   end
 
+  # an array index: an integer below 2^32 - 1
+  defp index_key?(k), do: is_integer(array_index(k)) and array_index(k) < 4_294_967_295
+
   defp own_names_plain2(id, o) do
-    base = Enum.reverse(o.keys)
+    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
     hidden =
       (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
@@ -188,8 +204,14 @@ defmodule Browser.JS.Props do
 
         base ++ virtual ++ hidden
 
+      %{prim: s} when is_binary(s) ->
+        {ints, rest} = Enum.split_with(base, &index_key?/1)
+
+        for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i)) ++
+          Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+
       _ ->
-        {ints, rest} = Enum.split_with(base, &is_integer(array_index(&1)))
+        {ints, rest} = Enum.split_with(base, &index_key?/1)
         Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
     end
   end
@@ -226,6 +248,21 @@ defmodule Browser.JS.Props do
     do: Enum.reject(Interp.own_keys(s), &(&1 in exclude))
 
   def enumerable_keys(_, _), do: []
+
+  @doc "Every enumerable own key (CopyDataProperties): strings, then symbols; a proxy's in trap order."
+  def enumerable_own_keys({:obj, id} = o) do
+    if Map.has_key?(deref(id), :proxy),
+      do: enumerable_keys(o),
+      else: enumerable_keys(o) ++ enumerable_symbols(o)
+  end
+
+  def enumerable_own_keys(v), do: enumerable_keys(v)
+
+  @doc "The symbols of an object's enumerable own properties."
+  def enumerable_symbols({:obj, _} = o),
+    do: for(k <- own_symbols(o), enumerable_own?(o, k), do: k)
+
+  def enumerable_symbols(_), do: []
 
   @doc "The symbols an object has properties for."
   def own_symbols({:obj, id}) do
@@ -334,6 +371,118 @@ defmodule Browser.JS.Props do
 
   defp key_name({:symbol, _, desc}), do: desc
   defp key_name(key), do: key
+
+  @doc """
+  `Reflect.defineProperty`: converts the key and the descriptor (which may throw), then reports
+  whether the property could be defined.
+  """
+  def try_define({:obj, id} = obj, key, descriptor) do
+    key = to_key(key)
+    desc = to_desc(descriptor)
+
+    if Map.has_key?(deref(id), :proxy) do
+      Browser.JS.Proxy.define_own_property(obj, key, descriptor, desc)
+    else
+      try do
+        define_own(obj, id, key, desc)
+        true
+      catch
+        {:js_error, _} -> false
+      end
+    end
+  end
+
+  @doc """
+  OrdinarySet: `target.[[Set]](key, value, receiver)` as a boolean. Proxies go through their
+  `set` trap; the value is stored on the receiver, which is not always the target.
+  """
+  def ordinary_set({:obj, id} = target, key, value, receiver) do
+    key = to_key(key)
+    o = deref(id)
+
+    cond do
+      Map.has_key?(o, :proxy) ->
+        Browser.JS.Proxy.set(target, key, value, receiver)
+
+      o.class == :host ->
+        cond do
+          match?({Browser.JS.Modules, _}, o.host) ->
+            false
+
+          receiver != target and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+            true
+
+          true ->
+            Interp.put(target, key, value)
+            true
+        end
+
+      true ->
+        case state(target, key) do
+          nil ->
+            case get_prototype_of(target) do
+              {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
+              _ -> set_on_receiver(key, value, receiver)
+            end
+
+          {:data, _, false, _, _} ->
+            false
+
+          {:data, _, _, _, _} ->
+            set_on_receiver(key, value, receiver)
+
+          {:accessor, _, setter, _, _} ->
+            if function?(setter) do
+              Interp.call(setter, receiver, [value])
+              true
+            else
+              false
+            end
+        end
+    end
+  end
+
+  defp set_on_receiver(key, value, {:obj, rid} = receiver) do
+    existing =
+      if Map.has_key?(deref(rid), :proxy) do
+        case Browser.JS.Proxy.get_own_property(receiver, key) do
+          {:obj, _} = d ->
+            if Interp.has_property?(d, "get") or Interp.has_property?(d, "set"),
+              do: {:accessor, nil, nil, true, true},
+              else: {:data, nil, truthy(Interp.get(d, "writable")), true, true}
+
+          _ ->
+            nil
+        end
+      else
+        state(receiver, key)
+      end
+
+    case existing do
+      {:accessor, _, _, _, _} ->
+        false
+
+      {:data, _, false, _, _} ->
+        false
+
+      {:data, _, _, _, _} ->
+        try_define(receiver, key, new_object([{"value", value}]))
+
+      nil ->
+        try_define(
+          receiver,
+          key,
+          new_object([
+            {"value", value},
+            {"writable", true},
+            {"enumerable", true},
+            {"configurable", true}
+          ])
+        )
+    end
+  end
+
+  defp set_on_receiver(_, _, _), do: false
 
   defp define_own(obj, id, key, desc) do
     o = deref(id)
@@ -917,6 +1066,8 @@ defmodule Browser.JS.Props do
       same_value?(a, b)
     end)
 
+    install_annex_b(object_proto)
+
     def_fn.(object_proto, "propertyIsEnumerable", fn this, args ->
       enumerable_own?(this, to_key(arg(args, 0)))
     end)
@@ -937,10 +1088,110 @@ defmodule Browser.JS.Props do
     :ok
   end
 
+  # `__proto__`, `__defineGetter__` and friends (Annex B), `toLocaleString`
+  defp install_annex_b(object_proto) do
+    def_fn = fn name, arity, fun ->
+      f = native(name, fun)
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, arity * 1.0))
+      put_hidden(object_proto, name, f)
+    end
+
+    # ToObject(this): a primitive stands in as an empty object with its prototype
+    to_obj = fn
+      v when v in [:undefined, :null] ->
+        throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      {:obj, _} = o ->
+        o
+
+      v ->
+        new_object([], primitive_proto(v))
+    end
+
+    getter =
+      native("get __proto__", fn this, _ -> this |> to_obj.() |> get_prototype_of() end)
+
+    setter =
+      native("set __proto__", fn this, args ->
+        if this in [:undefined, :null],
+          do: throw_error("TypeError", "Object.prototype.__proto__ called on null or undefined")
+
+        p = arg(args, 0)
+
+        if (p == :null or match?({:obj, _}, p)) and match?({:obj, _}, this) do
+          case set_prototype_of(this, p) do
+            true -> :ok
+            :cycle -> throw_error("TypeError", "Cyclic __proto__ value")
+            _ -> throw_error("TypeError", "Cannot set the prototype of this object")
+          end
+        end
+
+        :undefined
+      end)
+
+    {:obj, sid} = setter
+    store(sid, Map.put(deref(sid), :arity, 1.0))
+    define_accessor(object_proto, "__proto__", get: getter, set: setter, enumerable: false)
+
+    for {name, kind} <- [{"__defineGetter__", "get"}, {"__defineSetter__", "set"}] do
+      def_fn.(name, 2, fn this, args ->
+        o = to_obj.(this)
+        f = arg(args, 1)
+        unless function?(f), do: throw_error("TypeError", "#{name}: expecting function")
+        key = to_key(arg(args, 0))
+        define(o, key, new_object([{kind, f}, {"enumerable", true}, {"configurable", true}]))
+        :undefined
+      end)
+    end
+
+    for {name, kind} <- [{"__lookupGetter__", "get"}, {"__lookupSetter__", "set"}] do
+      def_fn.(name, 1, fn this, args ->
+        o = to_obj.(this)
+        lookup_accessor(o, to_key(arg(args, 0)), kind)
+      end)
+    end
+
+    def_fn.("toLocaleString", 0, fn this, _ ->
+      Interp.call(Interp.get(this, "toString"), this, [])
+    end)
+  end
+
+  defp lookup_accessor({:obj, _} = o, key, kind) do
+    case descriptor(o, key) do
+      {:obj, _} = d ->
+        if Interp.has_property?(d, "get") or Interp.has_property?(d, "set"),
+          do: Interp.get(d, kind),
+          else: :undefined
+
+      _ ->
+        case get_prototype_of(o) do
+          {:obj, _} = parent -> lookup_accessor(parent, key, kind)
+          _ -> :undefined
+        end
+    end
+  end
+
+  defp primitive_proto(v) do
+    case v do
+      s when is_binary(s) -> proto(:string)
+      b when is_boolean(b) -> proto(:boolean)
+      {:symbol, _, _} -> proto(:symbol)
+      {:bigint, _} -> proto(:bigint)
+      _ -> proto(:number)
+    end
+  end
+
   defp enumerable_own?(this, key) do
     cond do
       this in [:undefined, :null] ->
         throw_error("TypeError", "Cannot convert undefined or null to object")
+
+      match?({:obj, _}, this) and is_map_key(deref(elem(this, 1)), :proxy) ->
+        case Browser.JS.Proxy.get_own_property(this, key) do
+          {:obj, _} = d -> truthy(Interp.get(d, "enumerable"))
+          _ -> false
+        end
 
       match?({:obj, _}, this) ->
         case state(this, key) do

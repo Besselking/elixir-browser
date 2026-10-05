@@ -2050,7 +2050,8 @@ defmodule Browser.JS.Parser do
       case after_key do
         [{:p, ":", _} | t] ->
           {v, t} = assignment(t)
-          {{:init, key, v}, t}
+          # `__proto__: value` sets the prototype (a computed key or a shorthand does not)
+          if key == {:str, "__proto__"}, do: {{:proto, v}, t}, else: {{:init, key, v}, t}
 
         [{:p, "(", _} | _] = t ->
           {fun, t} = function_rest({:method, shorthand}, t)
