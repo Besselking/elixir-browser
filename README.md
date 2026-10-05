@@ -16,4 +16,6 @@ mix reftest --fetch          # layout/CSS: web-platform-tests reference tests (n
 software painter (no window needed) and compares the pixels; `mix help reftest` lists the options
 (`--check` against `reftest.baseline`, `--dump DIR` to save the pictures of failing pairs).
 
-Requires Elixir 1.15+ and an Erlang/OTP with the `wx` application (Homebrew's `erlang` has it).
+Requires Elixir 1.20+ and Erlang/OTP 29+ with the `wx` application; only the latest versions are
+supported. `scripts/install-toolchain.sh` installs them (Homebrew on macOS, a source build with wx on
+Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.

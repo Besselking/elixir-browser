@@ -5,7 +5,7 @@ defmodule Browser.MixProject do
     [
       app: :browser,
       version: "0.1.0",
-      elixir: "~> 1.15",
+      elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: [],
       releases: [browser: [include_erts: true, strip_beams: true]]
