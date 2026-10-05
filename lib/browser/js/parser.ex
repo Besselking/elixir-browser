@@ -57,7 +57,14 @@ defmodule Browser.JS.Parser do
   def parse(src, opts \\ []) do
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
-        Process.put(:js_strict, use_strict?(tokens) or Keyword.get(opts, :module, false))
+        eval? = Keyword.get(opts, :eval, false)
+
+        Process.put(
+          :js_strict,
+          use_strict?(tokens) or Keyword.get(opts, :module, false) or
+            Keyword.get(opts, :strict, false)
+        )
+
         Process.put(:js_priv_refs, [])
         Process.put(:js_module, Keyword.get(opts, :module, false))
         Process.put(:js_labels, [])
@@ -66,7 +73,15 @@ defmodule Browser.JS.Parser do
         # no `return` at the top level; a module has no `new.target` there either (a script
         # may be eval code run inside a function)
         Process.put(:js_fn, false)
-        Process.put(:js_nt, not Keyword.get(opts, :module, false))
+
+        Process.put(
+          :js_nt,
+          if(eval?,
+            do: Keyword.get(opts, :new_target, false),
+            else: not Keyword.get(opts, :module, false)
+          )
+        )
+
         program = tokens |> statements()
 
         if Enum.any?(program, &using_decl?/1),
@@ -75,16 +90,33 @@ defmodule Browser.JS.Parser do
         program = check_scope(program, true)
         if Keyword.get(opts, :module, false), do: check_module_names(program)
 
-        case Process.get(:js_priv_refs) do
+        # eval code sees the private names of the classes around the call
+        case Process.get(:js_priv_refs) -- Keyword.get(opts, :private, []) do
           [] -> :ok
           [n | _] -> throw({:syntax, "private name #" <> n <> " is not defined"})
         end
+
+        if eval?, do: check_eval_context(program, opts)
 
         {:ok, {:program, program}}
       catch
         {:syntax, msg} -> {:error, msg}
       end
     end
+  end
+
+  # `super` and `arguments` in eval code are only valid where the surrounding code allows them
+  defp check_eval_context(program, opts) do
+    if not Keyword.get(opts, :super_prop, false) and
+         contains_node?(program, &match?({:super_member, _}, &1)),
+       do: throw({:syntax, "'super' keyword unexpected here"})
+
+    if not Keyword.get(opts, :super_call, false) and contains_node?(program, &(&1 == {:super})),
+      do: throw({:syntax, "'super' keyword unexpected here"})
+
+    if Keyword.get(opts, :no_arguments, false) and
+         contains_node?(program, &(&1 == {:id, "arguments"})),
+       do: throw({:syntax, "'arguments' is not allowed in a class field initializer"})
   end
 
   # ── redeclarations ─────────────────────────────────────────

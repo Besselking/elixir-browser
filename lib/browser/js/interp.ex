@@ -155,6 +155,12 @@ defmodule Browser.JS.Interp do
     alloc(%{scope: true, vars: %{}, consts: MapSet.new(), parent: parent})
   end
 
+  @doc false
+  # a scope that `var`s declared by eval code land in (a function body's)
+  def new_fn_scope(parent, vars \\ %{}) do
+    alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: parent})
+  end
+
   def new_global_scope do
     id = new_scope(nil)
     :erlang.put(:js_global, id)
@@ -217,10 +223,16 @@ defmodule Browser.JS.Interp do
         if MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
 
-        if :erlang.map_get(name, s.vars) == :tdz,
-          do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+        cond do
+          :erlang.map_get(name, s.vars) == :tdz ->
+            throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
-        :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+          MapSet.member?(s.consts, {:fname, name}) ->
+            :ok
+
+          true ->
+            :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+        end
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
           not unscopable?(s.with, name) ->
@@ -1562,7 +1574,14 @@ defmodule Browser.JS.Interp do
   @doc false
   # the scope a function body runs in: `this`, the parameters, hoisted declarations
   def call_scope(c, this, args) do
-    scope = new_scope(c.scope)
+    scope =
+      alloc(%{
+        scope: true,
+        fnscope: true,
+        vars: strict_marks(c, %{}),
+        consts: MapSet.new(),
+        parent: c.scope
+      })
 
     if c.mode in [false, nil] do
       declare(scope, :this, sloppy_this(c, this))
@@ -1618,7 +1637,11 @@ defmodule Browser.JS.Interp do
 
       vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
       vars = Enum.reduce(extra, vars, fn {k, v}, m -> Map.put(m, k, v) end)
-      scope = alloc(%{scope: true, vars: vars, consts: MapSet.new(), parent: c.scope})
+      vars = strict_marks(c, vars)
+
+      scope =
+        alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: c.scope})
+
       bind_params(c.params, args, scope)
 
       result =
@@ -1760,9 +1783,14 @@ defmodule Browser.JS.Interp do
   defp bind_params(params, args, scope) do
     if Enum.any?(params, &match?({:default, _, _}, &1)) do
       for p <- params, name <- pattern_names(p, []), do: declare(scope, name, :tdz)
+      # eval code in a default expression cannot declare `arguments` (see `run_eval/3`)
+      declare(scope, :in_params, true)
+      bind_params_list(params, args, scope)
+      s = deref(scope)
+      store(scope, %{s | vars: Map.delete(s.vars, :in_params)})
+    else
+      bind_params_list(params, args, scope)
     end
-
-    bind_params_list(params, args, scope)
   end
 
   defp bind_params_list([], _, _), do: :ok
@@ -1836,9 +1864,21 @@ defmodule Browser.JS.Interp do
          proto: proto(:function)
        })}
 
-    if named? and env != nil, do: declare(env, name, fun)
+    if named? and env != nil do
+      declare(env, name, fun)
+      # the function's own name cannot be assigned to (sloppy code ignores the attempt)
+      s = deref(env)
+      store(env, %{s | consts: MapSet.put(s.consts, {:fname, name})})
+    end
+
     fun
   end
+
+  # strict functions mark their scope, so that eval code called from them is strict too
+  defp strict_marks(%{body: [{:expr, {:str, "use strict"}} | _]}, vars),
+    do: Map.put(vars, :strict, true)
+
+  defp strict_marks(_, vars), do: vars
 
   # A function that is not strict gets the global object for a `this` that is undefined or null
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
@@ -2632,7 +2672,9 @@ defmodule Browser.JS.Interp do
     Enum.each(props, fn
       {:init, key, val} ->
         k = key_of(key, env)
-        define_data(obj, k, ev_named(val, env, if(is_binary(k), do: {:id, k})))
+        v = ev_named(val, env, if(is_binary(k), do: {:id, k}))
+        method_home(v, obj)
+        define_data(obj, k, v)
 
       {:proto, e} ->
         case ev(e, env) do
@@ -2645,10 +2687,14 @@ defmodule Browser.JS.Interp do
         spread_into(obj, ev(e, env))
 
       {:getter, key, fun} ->
-        Browser.JS.Props.define_accessor(obj, key_of(key, env), get: ev(fun, env))
+        f = ev(fun, env)
+        method_home(f, obj)
+        Browser.JS.Props.define_accessor(obj, key_of(key, env), get: f)
 
       {:setter, key, fun} ->
-        Browser.JS.Props.define_accessor(obj, key_of(key, env), set: ev(fun, env))
+        f = ev(fun, env)
+        method_home(f, obj)
+        Browser.JS.Props.define_accessor(obj, key_of(key, env), set: f)
     end)
 
     obj
@@ -2804,6 +2850,16 @@ defmodule Browser.JS.Interp do
     get(ov, ev_key(k, env))
   end
 
+  # `eval(...)` where `eval` is the built-in function runs in the caller's scope
+  def ev({:call, {:id, "eval"} = callee, args, false}, env) do
+    f = ev(callee, env)
+    unless function?(f), do: throw_error("TypeError", "eval is not a function")
+
+    if f == :erlang.get(:js_eval_fn),
+      do: direct_eval(eval_list(args, env), env),
+      else: call(f, :undefined, eval_list(args, env))
+  end
+
   def ev({:call, callee, args, opt}, env) do
     {f, this} =
       case callee do
@@ -2830,6 +2886,104 @@ defmodule Browser.JS.Interp do
     unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
     construct(f, eval_list(args, env))
   end
+
+  # ── direct eval ────────────────────────────────────────────
+
+  @doc false
+  def direct_eval([src | _], env) when is_binary(src) do
+    ctx = %{
+      strict: lookup_var(env, :strict) == {:ok, true},
+      new_target: match?({:ok, _}, lookup_var(env, :new_target)),
+      super_prop: match?({:ok, {:obj, _}}, lookup_var(env, :home)),
+      super_call: match?({:ok, _}, lookup_var(env, :ctor_fn)),
+      private: private_names_in(env, []),
+      field_init: in_field_initializer?(env)
+    }
+
+    opts = [
+      eval: true,
+      strict: ctx.strict,
+      new_target: ctx.new_target,
+      super_prop: ctx.super_prop,
+      super_call: ctx.super_call,
+      private: ctx.private,
+      no_arguments: ctx.field_init
+    ]
+
+    case Browser.JS.Parser.parse(src, opts) do
+      {:error, msg} -> throw_error("SyntaxError", msg)
+      {:ok, {:program, stmts}} -> run_eval(stmts, env, ctx.strict)
+    end
+  end
+
+  def direct_eval([other | _], _env), do: other
+  def direct_eval([], _env), do: :undefined
+
+  # is the code in a class field initializer (arrow functions inside it count, functions do not)?
+  defp in_field_initializer?(nil), do: false
+
+  defp in_field_initializer?(env) do
+    s = deref(env)
+
+    cond do
+      Map.has_key?(s.vars, :field_init) -> true
+      Map.has_key?(s.vars, :args) -> false
+      true -> in_field_initializer?(s.parent)
+    end
+  end
+
+  # the private names (`#x`) declared by the classes around `env`
+  defp private_names_in(nil, acc), do: acc
+
+  defp private_names_in(env, acc) do
+    s = deref(env)
+    acc = for({:priv, n} <- Map.keys(s.vars), do: n) ++ acc
+    private_names_in(s.parent, acc)
+  end
+
+  # Runs eval code: `var`s and functions go to the caller's function scope (sloppy code) while
+  # `let`, `const` and classes stay in a scope of the eval's own; strict eval keeps everything.
+  defp run_eval(stmts, env, caller_strict?) do
+    strict? = caller_strict? or match?([{:expr, {:str, "use strict"}} | _], stmts)
+    before = pget(:js_fns)
+    lex = new_scope(env)
+    var_scope = if strict?, do: lex, else: variable_scope(env)
+
+    if strict?, do: declare(lex, :strict, true)
+
+    s = deref(var_scope)
+
+    if not strict? and Map.has_key?(s.vars, :in_params) and Map.has_key?(s.vars, :args) and
+         "arguments" in hoisted_names(stmts),
+       do: throw_error("SyntaxError", "Identifier 'arguments' has already been declared")
+
+    vars = Enum.reduce(hoisted_names(stmts), s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
+    store(var_scope, %{s | vars: vars})
+    for {name, fun} <- fundecls(stmts), do: declare(var_scope, name, make_fn(fun, lex, false))
+    for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
+
+    :erlang.put(:js_last, :undefined)
+    exec_list(stmts, lex)
+    result = Process.get(:js_last, :undefined)
+    free_scope(lex, before)
+    result
+  end
+
+  # the nearest function scope (or the global one) from `env` outwards
+  defp variable_scope(env) do
+    s = deref(env)
+    if Map.get(s, :fnscope, false) or s.parent == nil, do: env, else: variable_scope(s.parent)
+  end
+
+  # a method written in an object literal finds `super` through the object
+  defp method_home({:obj, id} = f, obj) do
+    case deref(id) do
+      %{fun: {:closure, %{name: {:method, _}}}} -> set_home(f, obj)
+      _ -> :ok
+    end
+  end
+
+  defp method_home(_, _), do: :ok
 
   defp describe({:id, n}), do: n
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k

@@ -74,8 +74,9 @@ defmodule Browser.JS.Builtins do
   end
 
   # Runs source text in the global scope (indirect eval, and the Function constructor).
+  # indirect eval and the Function constructor: global code, so no `super` or `new.target`
   defp eval_source(src) do
-    case Browser.JS.Parser.parse(src) do
+    case Browser.JS.Parser.parse(src, eval: true) do
       {:ok, program} -> Interp.run_program(program)
       {:error, msg} -> throw_error("SyntaxError", msg)
     end
@@ -2129,16 +2130,17 @@ defmodule Browser.JS.Builtins do
       eval_source("(function anonymous(#{params}\n) {\n#{body}\n})")
     end)
 
-    declare(
-      scope,
-      "eval",
+    eval_fn =
       native("eval", fn _, args ->
         case arg(args, 0) do
           src when is_binary(src) -> eval_source(src)
           other -> other
         end
       end)
-    )
+
+    # a call `eval(...)` through this very function is a direct eval (see `Interp.direct_eval/2`)
+    :erlang.put(:js_eval_fn, eval_fn)
+    declare(scope, "eval", eval_fn)
 
     Browser.JS.Date.install(scope)
 
