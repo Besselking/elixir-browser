@@ -57,12 +57,16 @@ defmodule Browser.CSS do
            prop = prop |> String.trim() |> String.downcase(),
            true <- prop != "" do
         {value, important?} = split_important(String.trim(value))
-        [{prop, value, important?}]
+        if valid_value?(prop, value), do: [{prop, value, important?}], else: []
       else
         _ -> []
       end
     end)
   end
+
+  # a declaration whose value is not allowed is dropped, so the one before it still applies
+  defp valid_value?("tab-size", value), do: not String.starts_with?(value, "-")
+  defp valid_value?(_prop, _value), do: true
 
   defp split_important(value) do
     case Regex.run(~r/\A(.*?)\s*!\s*important\s*\z/is, value, capture: :all_but_first) do

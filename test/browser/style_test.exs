@@ -268,6 +268,15 @@ defmodule Browser.StyleTest do
       assert comp(html, css, "u")["font-size"] == 18.0
     end
 
+    test "ex and ch follow the font: Ahem's x-height is 0.8em and its zero is 1em wide" do
+      html = ~s(<div><p>a</p></div>)
+      css = "div { font: 20px/1 Ahem } p { margin-left: 2ex; padding-left: 3ch } div + div {}"
+      assert comp(html, css, "p")["margin-left"] == 32.0
+      assert comp(html, css, "p")["padding-left"] == 60.0
+      css = "p { font-size: 20px; margin-left: 2ex }"
+      assert comp(html, css, "p")["margin-left"] == 20.0
+    end
+
     test "UA defaults: headings, links, bold, monospace" do
       html = ~s(<h2>a</h2><a href="/x">b</a><b>c</b><code>d</code>)
       assert comp(html, "", "h2")["font-size"] == 24.0

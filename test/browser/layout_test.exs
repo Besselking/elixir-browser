@@ -4219,6 +4219,20 @@ defmodule Browser.LayoutTest do
     assert red.h < 50
   end
 
+  test "a tab in preformatted text advances to the next multiple of 8 columns" do
+    page = Browser.Page.build("<pre>ab\tc\n\td</pre>", "about:home")
+    {items, _} = Layout.layout(page.nodes, 600, &measure/2)
+    words = for %{type: :text, text: t} <- items, do: t
+    assert Enum.any?(words, &(&1 == "ab" <> String.duplicate(" ", 6) <> "c"))
+    assert Enum.any?(words, &(&1 == String.duplicate(" ", 8) <> "d"))
+  end
+
+  test "tab-size sets the columns a tab spans" do
+    page = Browser.Page.build(~s|<pre style="tab-size:4">a\tb</pre>|, "about:home")
+    {items, _} = Layout.layout(page.nodes, 600, &measure/2)
+    assert Enum.any?(items, &(&1[:text] == "a   b"))
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(
