@@ -19,7 +19,7 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    symbols-as-weakmap-keys proxy-missing-checks SharedArrayBuffer Atomics
+    symbols-as-weakmap-keys proxy-missing-checks
     Atomics.pause Atomics.waitAsync
     immutable-arraybuffer align-detached-buffer-semantics-with-web-reality WeakRef
     FinalizationRegistry set-methods tail-call-optimization Temporal ShadowRealm

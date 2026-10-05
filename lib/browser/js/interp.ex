@@ -545,6 +545,7 @@ defmodule Browser.JS.Interp do
   @native_lengths %{
     "Array" => 1.0,
     "ArrayBuffer" => 1.0,
+    "SharedArrayBuffer" => 1.0,
     "Boolean" => 1.0,
     "Date" => 7.0,
     "AggregateError" => 2.0,

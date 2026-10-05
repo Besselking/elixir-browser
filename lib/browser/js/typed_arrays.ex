@@ -217,7 +217,7 @@ defmodule Browser.JS.TypedArrays do
 
   @doc "Detaches an ArrayBuffer (`$262.detachArrayBuffer`): it loses its bytes and its views read as empty."
   def detach({:obj, id} = buf) do
-    unless buffer?(buf), do: throw_error("TypeError", "not an ArrayBuffer")
+    unless ab?(buf), do: throw_error("TypeError", "not an ArrayBuffer")
     store(id, deref(id) |> Map.put(:bytes, <<>>) |> Map.put(:detached, true))
     :undefined
   end
@@ -226,6 +226,21 @@ defmodule Browser.JS.TypedArrays do
 
   defp buffer?({:obj, id}), do: Map.has_key?(deref(id), :bytes)
   defp buffer?(_), do: false
+
+  # an ArrayBuffer (not a SharedArrayBuffer)
+  defp ab?({:obj, id}) do
+    o = deref(id)
+    Map.has_key?(o, :bytes) and not Map.has_key?(o, :shared)
+  end
+
+  defp ab?(_), do: false
+
+  defp sab?({:obj, id}) do
+    o = deref(id)
+    Map.has_key?(o, :bytes) and Map.has_key?(o, :shared)
+  end
+
+  defp sab?(_), do: false
 
   defp bytes_of({:obj, id}), do: deref(id).bytes
   defp buffer_id({:obj, id}), do: id
@@ -481,6 +496,8 @@ defmodule Browser.JS.TypedArrays do
 
   def install(scope) do
     install_buffer(scope)
+    install_shared_buffer(scope)
+    install_atomics(scope)
     install_typed_arrays(scope)
     install_data_view(scope)
     install_text(scope)
@@ -511,6 +528,10 @@ defmodule Browser.JS.TypedArrays do
           end
 
         if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+
+        if max && max > 1_000_000_000_000,
+          do: throw_error("RangeError", "Array buffer allocation failed")
+
         if n > 1_000_000_000, do: throw_error("RangeError", "Array buffer allocation failed")
         new_buffer(:binary.copy(<<0>>, n), max)
       end)
@@ -529,8 +550,8 @@ defmodule Browser.JS.TypedArrays do
 
     Props.define_accessor(p, "byteLength",
       get:
-        native("byteLength", fn this, _ ->
-          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+        native("get byteLength", fn this, _ ->
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
           byte_size(bytes_of(this)) * 1.0
         end),
       enumerable: false
@@ -539,7 +560,7 @@ defmodule Browser.JS.TypedArrays do
     Props.define_accessor(p, "resizable",
       get:
         native("get resizable", fn this, _ ->
-          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
           resizable?(buffer_id(this))
         end),
       enumerable: false
@@ -548,7 +569,7 @@ defmodule Browser.JS.TypedArrays do
     Props.define_accessor(p, "maxByteLength",
       get:
         native("get maxByteLength", fn this, _ ->
-          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
           bid = buffer_id(this)
           o = deref(bid)
 
@@ -562,7 +583,7 @@ defmodule Browser.JS.TypedArrays do
 
     resize =
       native("resize", fn this, args ->
-        unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+        unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
         bid = buffer_id(this)
         unless resizable?(bid), do: throw_error("TypeError", "ArrayBuffer is not resizable")
         n = to_index(arg(args, 0))
@@ -583,12 +604,14 @@ defmodule Browser.JS.TypedArrays do
         :undefined
       end)
 
+    {:obj, rid} = resize
+    store(rid, Map.put(deref(rid), :arity, 1.0))
     put_hidden(p, "resize", resize)
 
     Props.define_accessor(p, "detached",
       get:
         native("get detached", fn this, _ ->
-          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
           detached?(buffer_id(this))
         end),
       enumerable: false
@@ -599,7 +622,7 @@ defmodule Browser.JS.TypedArrays do
     for name <- ["transfer", "transferToFixedLength"] do
       f =
         native(name, fn this, args ->
-          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
 
           len =
             case arg(args, 0) do
@@ -630,21 +653,321 @@ defmodule Browser.JS.TypedArrays do
       put_hidden(p, name, f)
     end
 
-    def_fn(p, "slice", fn this, args ->
-      unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+    def_fn(p, "slice", 2, fn this, args ->
+      unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
 
       if detached?(buffer_id(this)),
         do: throw_error("TypeError", "cannot slice a detached ArrayBuffer")
 
-      bytes = bytes_of(this)
-      len = byte_size(bytes)
-      from = rel_index(arg(args, 0), len, 0)
-      to = rel_index(arg(args, 1), len, len)
-      n = max(to - from, 0)
-      new_buffer(binary_part(bytes, from, n))
+      slice_buffer(this, args, :arraybuffer, &ab?/1, &new_buffer(&1, nil))
     end)
 
     put_tag(p, "ArrayBuffer")
+  end
+
+  # ── SharedArrayBuffer and Atomics ──────────────────────────
+
+  defp new_shared(bytes, max) do
+    {:obj, id} = buf = new_object([], proto(:sharedarraybuffer))
+    o = deref(id) |> Map.put(:bytes, bytes) |> Map.put(:shared, true)
+    store(id, if(max, do: Map.put(o, :max, max), else: o))
+    buf
+  end
+
+  defp install_shared_buffer(scope) do
+    p = new_object()
+    put_proto(:sharedarraybuffer, p)
+
+    ctor =
+      native("SharedArrayBuffer", fn this, args ->
+        unless match?({:obj, _}, this),
+          do: throw_error("TypeError", "Constructor SharedArrayBuffer requires 'new'")
+
+        n = to_index(arg(args, 0))
+
+        max =
+          case arg(args, 1) do
+            {:obj, _} = opts ->
+              case Interp.get(opts, "maxByteLength") do
+                :undefined -> nil
+                v -> to_index(v)
+              end
+
+            _ ->
+              nil
+          end
+
+        if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+
+        if max && max > 1_000_000_000_000,
+          do: throw_error("RangeError", "Array buffer allocation failed")
+
+        if n > 1_000_000_000, do: throw_error("RangeError", "Array buffer allocation failed")
+        new_shared(:binary.copy(<<0>>, n), max)
+      end)
+
+    put_const(ctor, "prototype", p)
+    put_hidden(p, "constructor", ctor)
+    declare(scope, "SharedArrayBuffer", ctor)
+    def_species(ctor)
+
+    shared! = fn this ->
+      unless sab?(this), do: throw_error("TypeError", "not a SharedArrayBuffer")
+      deref(buffer_id(this))
+    end
+
+    getter = fn name, fun ->
+      Props.define_accessor(p, name,
+        get: native("get " <> name, fn this, _ -> fun.(shared!.(this)) end),
+        enumerable: false
+      )
+    end
+
+    getter.("byteLength", fn o -> byte_size(o.bytes) * 1.0 end)
+    getter.("growable", fn o -> Map.has_key?(o, :max) end)
+    getter.("maxByteLength", fn o -> Map.get(o, :max, byte_size(o.bytes)) * 1.0 end)
+
+    def_fn(p, "grow", 1, fn this, args ->
+      o = shared!.(this)
+
+      unless Map.has_key?(o, :max),
+        do: throw_error("TypeError", "SharedArrayBuffer is not growable")
+
+      n = to_index(arg(args, 0))
+
+      if n > o.max or n < byte_size(o.bytes),
+        do: throw_error("RangeError", "Invalid array buffer length")
+
+      store(buffer_id(this), %{o | bytes: o.bytes <> :binary.copy(<<0>>, n - byte_size(o.bytes))})
+      :undefined
+    end)
+
+    def_fn(p, "slice", 2, fn this, args ->
+      shared!.(this)
+      slice_buffer(this, args, :sharedarraybuffer, &sab?/1, &new_shared(&1, nil))
+    end)
+
+    put_tag(p, "SharedArrayBuffer")
+  end
+
+  # `slice` of either buffer: a new buffer from the species constructor (`new`: the plain one)
+  defp slice_buffer(this, args, kind, kind?, plain) do
+    len = byte_size(bytes_of(this))
+    from = rel_index(arg(args, 0), len, 0)
+    to = rel_index(arg(args, 1), len, len)
+    n = max(to - from, 0)
+    default = Interp.get(proto(kind), "constructor")
+    c = Interp.get(this, "constructor")
+
+    species =
+      case c do
+        :undefined ->
+          default
+
+        {:obj, _} ->
+          case Interp.get(c, {:symbol, :species, "Symbol.species"}) do
+            s when s in [:undefined, :null] -> default
+            s -> s
+          end
+
+        _ ->
+          throw_error("TypeError", "object.constructor is not an object")
+      end
+
+    unless Interp.constructor?(species),
+      do: throw_error("TypeError", "species is not a constructor")
+
+    result =
+      if species == default do
+        plain.(binary_part(bytes_of(this), from, n))
+      else
+        r = construct(species, [n * 1.0])
+        unless kind?.(r), do: throw_error("TypeError", "species did not create a buffer")
+
+        if detached?(buffer_id(r)),
+          do: throw_error("TypeError", "species created a detached buffer")
+
+        if r == this, do: throw_error("TypeError", "species returned the same buffer")
+
+        if byte_size(bytes_of(r)) < n,
+          do: throw_error("TypeError", "species created a buffer that is too small")
+
+        # (the source may have shrunk or detached meanwhile)
+        src = bytes_of(this)
+        from = min(from, byte_size(src))
+        chunk = binary_part(src, from, min(n, byte_size(src) - from))
+        o = deref(buffer_id(r))
+        size = byte_size(chunk)
+        <<_::binary-size(^size), rest::binary>> = o.bytes
+        store(buffer_id(r), %{o | bytes: chunk <> rest})
+        r
+      end
+
+    result
+  end
+
+  @atomic_kinds [:i8, :u8, :i16, :u16, :i32, :u32, :i64, :u64]
+
+  defp install_atomics(scope) do
+    atomics = new_object()
+    declare(scope, "Atomics", atomics)
+    put_tag(atomics, "Atomics")
+
+    # the typed array (an integer one; for wait and notify an Int32Array or BigInt64Array)
+    validate = fn ta, waitable? ->
+      d = data!(ta)
+      {:ta, kind, _, _, _} = d
+      kinds = if waitable?, do: [:i32, :i64], else: @atomic_kinds
+
+      unless kind in kinds,
+        do: throw_error("TypeError", "invalid typed array type for this Atomics operation")
+
+      d
+    end
+
+    index = fn {:ta, _, _, _, len}, idx ->
+      i = to_index(idx)
+      if i >= len, do: throw_error("RangeError", "Atomics index out of range"), else: i
+    end
+
+    # the value as the element type holds it: an integer (a BigInt for the 64-bit kinds)
+    operand = fn kind, v ->
+      if kind in [:i64, :u64] do
+        {:bigint, n} = Browser.JS.BigInt.to_bigint(v)
+        n
+      else
+        int_or_inf(v)
+      end
+    end
+
+    num = fn
+      {:bigint, n} -> n
+      n -> trunc(n)
+    end
+
+    modify = fn name, fun ->
+      def_fn(atomics, name, 3, fn _, args ->
+        ta = arg(args, 0)
+        d = validate.(ta, false)
+        i = index.(d, arg(args, 1))
+        {:ta, kind, _, _, _} = d
+        v = operand.(kind, arg(args, 2))
+        d = data!(ta)
+        i = index.(d, i * 1.0)
+        old = elem_at(d, i)
+        v = if is_integer(v), do: v, else: 0
+        new = fun.(num.(old), v)
+        put_elem_at(d, i, if(kind in [:i64, :u64], do: {:bigint, new}, else: new * 1.0))
+        old
+      end)
+    end
+
+    modify.("add", &(&1 + &2))
+    modify.("sub", &(&1 - &2))
+    modify.("and", &Bitwise.band/2)
+    modify.("or", &Bitwise.bor/2)
+    modify.("xor", &Bitwise.bxor/2)
+    modify.("exchange", fn _, v -> v end)
+
+    def_fn(atomics, "compareExchange", 4, fn _, args ->
+      ta = arg(args, 0)
+      d = validate.(ta, false)
+      i = index.(d, arg(args, 1))
+      {:ta, kind, _, _, _} = d
+      expected = operand.(kind, arg(args, 2))
+      replacement = operand.(kind, arg(args, 3))
+      d = data!(ta)
+      i = index.(d, i * 1.0)
+      old = elem_at(d, i)
+      expected = if is_integer(expected), do: expected, else: 0
+      replacement = if is_integer(replacement), do: replacement, else: 0
+
+      as_kind = fn n ->
+        read(kind, write(kind, if(kind in [:i64, :u64], do: {:bigint, n}, else: n * 1.0)))
+      end
+
+      if as_kind.(expected) == old,
+        do:
+          put_elem_at(
+            d,
+            i,
+            if(kind in [:i64, :u64], do: {:bigint, replacement}, else: replacement * 1.0)
+          )
+
+      old
+    end)
+
+    def_fn(atomics, "load", 2, fn _, args ->
+      ta = arg(args, 0)
+      d = validate.(ta, false)
+      i = index.(d, arg(args, 1))
+      d = data!(ta)
+      elem_at(d, index.(d, i * 1.0))
+    end)
+
+    def_fn(atomics, "store", 3, fn _, args ->
+      ta = arg(args, 0)
+      d = validate.(ta, false)
+      i = index.(d, arg(args, 1))
+      {:ta, kind, _, _, _} = d
+      v = operand.(kind, arg(args, 2))
+      d = data!(ta)
+      i = index.(d, i * 1.0)
+
+      case v do
+        n when kind in [:i64, :u64] ->
+          put_elem_at(d, i, {:bigint, n})
+          {:bigint, n}
+
+        n when is_integer(n) ->
+          put_elem_at(d, i, n * 1.0)
+          n * 1.0
+
+        inf ->
+          put_elem_at(d, i, 0.0)
+          if inf == :infinity, do: :infinity, else: :neg_infinity
+      end
+    end)
+
+    def_fn(atomics, "isLockFree", 1, fn _, args ->
+      int_or_inf(arg(args, 0)) in [1, 2, 4, 8]
+    end)
+
+    def_fn(atomics, "wait", 4, fn _, args ->
+      ta = arg(args, 0)
+      d = validate.(ta, true)
+      {:ta, kind, bid, _, _} = d
+
+      unless Map.has_key?(deref(bid), :shared),
+        do: throw_error("TypeError", "not a shared typed array")
+
+      i = index.(d, arg(args, 1))
+
+      v =
+        if kind == :i64,
+          do: elem(Browser.JS.BigInt.to_bigint(arg(args, 2)), 1),
+          else: to_integer(arg(args, 2))
+
+      _timeout = to_num(arg(args, 3))
+      cur = num.(elem_at(d, i))
+      as_kind = read(kind, write(kind, if(kind == :i64, do: {:bigint, v}, else: v * 1.0)))
+      # (nothing can notify: a wait that finds its value just times out)
+      if num.(as_kind) == cur, do: "timed-out", else: "not-equal"
+    end)
+
+    def_fn(atomics, "notify", 3, fn _, args ->
+      d = validate.(arg(args, 0), true)
+      _ = index.(d, arg(args, 1))
+
+      case arg(args, 2) do
+        :undefined -> :ok
+        c -> int_or_inf(c)
+      end
+
+      0.0
+    end)
+
+    :ok
   end
 
   # length, byteLength, byteOffset, buffer and @@toStringTag are getters on %TypedArray%.prototype
