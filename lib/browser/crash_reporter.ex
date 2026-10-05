@@ -65,7 +65,9 @@ defmodule Browser.CrashReporter do
   def list(dir \\ dir()) do
     case dir && File.ls(dir) do
       {:ok, names} ->
-        names |> Enum.filter(&String.starts_with?(&1, "crash-")) |> Enum.sort(:desc)
+        names
+        |> Enum.filter(&(String.starts_with?(&1, "crash-") and not String.ends_with?(&1, ".tmp")))
+        |> Enum.sort(:desc)
 
       _ ->
         []

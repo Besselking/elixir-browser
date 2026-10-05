@@ -366,7 +366,7 @@ defmodule Browser.JS.Props do
       get: g,
       set: s,
       enumerable: Keyword.get(opts, :enumerable, true),
-      configurable: true
+      configurable: Keyword.get(opts, :configurable, true)
     })
   end
 
