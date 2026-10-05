@@ -155,6 +155,7 @@ defmodule Browser.Session do
     history =
       case mode do
         :push -> History.visit(state.history, page.url)
+        :replace -> History.replace(state.history, page.url)
         :history -> state.history
       end
 
@@ -339,10 +340,10 @@ defmodule Browser.Session do
 
     cond do
       obj == ui.back ->
-        {:noreply, history_nav(state, &History.back/1)}
+        {:noreply, history_step(state, -1)}
 
       obj == ui.forward ->
-        {:noreply, history_nav(state, &History.forward/1)}
+        {:noreply, history_step(state, 1)}
 
       obj == ui.reload ->
         {:noreply, (state.url && load(state, state.url, :history, cache: :reload)) || state}
@@ -1285,6 +1286,7 @@ defmodule Browser.Session do
         base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
+        history_before: length(state.history.back),
         fetch: &Fetch.load(&1, initiator: page.url),
         request: &Fetch.load(&1, [initiator: page.url] ++ &2)
       }
@@ -1394,7 +1396,7 @@ defmodule Browser.Session do
   defp js_effect({:history, kind, url}, state) do
     history =
       if kind == :push,
-        do: History.visit(state.history, url),
+        do: History.push(state.history, url),
         else: History.replace(state.history, url)
 
     state = set_url_text(state, url)
@@ -1402,7 +1404,20 @@ defmodule Browser.Session do
     sync_buttons(%{state | history: history, url: url, page: page})
   end
 
-  defp js_effect({:navigate, url}, state), do: load(state, url, :push, initiator: state.url)
+  defp js_effect({:navigate, url, mode}, state), do: load(state, url, mode, initiator: state.url)
+
+  # `location.hash = ...`: an entry in the page's history, and the page scrolls to the fragment
+  defp js_effect({:hash, url, mode}, state) do
+    state = js_effect({:history, mode, url}, state)
+
+    case Fetch.split_fragment(url) do
+      {_, fragment} when fragment not in [nil, ""] ->
+        scroll_to_fragment(%{state | fragment: {fragment, deadline()}})
+
+      _ ->
+        state
+    end
+  end
 
   defp js_effect({:scroll_to, x, y}, state) do
     state
@@ -1414,8 +1429,8 @@ defmodule Browser.Session do
   defp js_effect({:submit, fid}, state) when is_integer(fid), do: navigate_form(state, fid, nil)
 
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
-  defp js_effect({:history_go, n}, state) when n < 0, do: history_nav(state, &History.back/1)
-  defp js_effect({:history_go, n}, state) when n > 0, do: history_nav(state, &History.forward/1)
+  defp js_effect({:history_go, 0}, state), do: load(state, state.url, :history)
+  defp js_effect({:history_go, n}, state), do: history_step(state, n)
   defp js_effect(_other, state), do: state
 
   defp control(%{page: nil}, _cid), do: nil
@@ -1485,10 +1500,35 @@ defmodule Browser.Session do
     %{type: "screen", width: state.width, height: UI.client_height(state.ui), dppx: 1.0}
   end
 
-  defp history_nav(state, fun) do
-    case fun.(state.history) do
-      {:ok, h} -> load(%{state | history: h}, h.current, :history, cache: :history)
-      {:error, _} -> state
+  # `n` entries back (negative) or forward. Entries the page made itself with `pushState` or
+  # fragments are visited without loading anything, and the page hears `popstate`.
+  defp history_step(state, n) do
+    case step_history(state.history, n) do
+      {:ok, h} ->
+        reply = state.js && state.page && Browser.JS.Runtime.traverse(state.js, n)
+
+        if reply && Map.get(reply, :moved) do
+          state = set_url_text(%{state | history: h, url: h.current}, h.current)
+          state = %{state | page: state.page && %{state.page | url: h.current}}
+          state |> sync_buttons() |> apply_js(reply)
+        else
+          load(%{state | history: h}, h.current, :history, cache: :history)
+        end
+
+      :error ->
+        state
+    end
+  end
+
+  defp step_history(h, 0), do: {:ok, h}
+
+  defp step_history(h, n) do
+    fun = if n < 0, do: &History.back/1, else: &History.forward/1
+
+    with {:ok, h} <- fun.(h) do
+      step_history(h, n - div(n, abs(n)))
+    else
+      _ -> :error
     end
   end
 
@@ -1613,6 +1653,13 @@ defmodule Browser.Session do
           page: %{state.page | url: url},
           fragment: {fragment, deadline()}
       }
+
+    state =
+      if state.js do
+        apply_js(state, Browser.JS.Runtime.fragment(state.js, url))
+      else
+        state
+      end
 
     state |> sync_buttons() |> scroll_to_fragment()
   end

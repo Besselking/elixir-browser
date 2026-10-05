@@ -336,7 +336,7 @@ defmodule Browser.JS.DOMTest do
 
     test "assigning location asks the session to navigate" do
       r = run("location.href = '/next'")
-      assert {:navigate, "http://t.test/next"} in r.outbox
+      assert {:navigate, "http://t.test/next", :push} in r.outbox
     end
 
     test "globals live on window" do
@@ -987,6 +987,213 @@ defmodule Browser.JS.DOMTest do
                "event k w null http://ls5.test/a true",
                "event null null null http://ls5.test/a true"
              ]
+    end
+  end
+
+  describe "history and location" do
+    defp hist_start(script, url \\ "http://h.test/dir/page?a=1") do
+      {pid, r} =
+        start("<body><script>#{script}</script></body>", %{}, %{url: url, history_before: 2})
+
+      assert errors(r) == []
+      {pid, r}
+    end
+
+    test "pushState and replaceState keep their own state, history.length counts entries" do
+      {_pid, r} =
+        hist_start("""
+        console.log(history.length, history.state, history.scrollRestoration);
+        history.pushState({n: 1}, "", "/one");
+        history.pushState({n: 2}, "", "?two=2#x");
+        console.log(history.length, history.state.n, location.pathname, location.search, location.hash);
+        history.replaceState({n: 3}, "");
+        console.log(history.length, history.state.n, location.href);
+        history.scrollRestoration = "manual";
+        console.log(history.scrollRestoration);
+        history.scrollRestoration = "bogus";
+        console.log(history.scrollRestoration);
+        """)
+
+      assert logs(r) == [
+               "3 null auto",
+               "5 2 /one ?two=2 #x",
+               "5 3 http://h.test/one?two=2#x",
+               "manual",
+               "manual"
+             ]
+
+      assert {:history, :push, "http://h.test/one"} in r.outbox
+      assert {:history, :replace, "http://h.test/one?two=2#x"} in r.outbox
+    end
+
+    test "pushState to another origin is a SecurityError" do
+      {_pid, r} =
+        hist_start("""
+        try { history.pushState(null, "", "http://evil.test/x"); } catch (e) { console.log(e.name || e.message); }
+        console.log(location.href);
+        """)
+
+      assert logs(r) |> List.last() == "http://h.test/dir/page?a=1"
+      assert length(logs(r)) == 2
+    end
+
+    test "traversing between the page's own entries fires popstate with the state" do
+      {pid, _} =
+        hist_start("""
+        window.onpopstate = (e) => console.log("pop", e.state && e.state.n, location.pathname);
+        history.pushState({n: 1}, "", "/one");
+        history.pushState({n: 2}, "", "/two");
+        """)
+
+      r = Runtime.traverse(pid, -1)
+      assert r.moved
+      assert logs(r) == ["pop 1 /one"]
+      assert r.url == "http://h.test/one"
+      r = Runtime.traverse(pid, -1)
+      assert logs(r) == ["pop null /dir/page"]
+      # past the first entry the page cannot go on its own
+      assert Runtime.traverse(pid, -1).moved == false
+      r = Runtime.traverse(pid, 2)
+      assert r.moved
+      assert logs(r) == ["pop 2 /two"]
+      assert Runtime.traverse(pid, 1).moved == false
+    end
+
+    test "a new entry drops the entries that were forward" do
+      {pid, _} =
+        hist_start("""
+        history.pushState(1, "", "/a"); history.pushState(2, "", "/b");
+        """)
+
+      Runtime.traverse(pid, -1)
+      {_, r} = {nil, Runtime.dispatch(pid, :window, "x")}
+      _ = r
+      assert Runtime.traverse(pid, 1).moved
+    end
+
+    test "hash changes: location.hash and hash-only href make entries, popstate and hashchange" do
+      {pid, r} =
+        hist_start("""
+        window.addEventListener("popstate", (e) => console.log("pop", String(e.state), location.hash));
+        window.addEventListener("hashchange", (e) => console.log("hash", e.oldURL, e.newURL));
+        location.hash = "one";
+        location.href = "#two";
+        location.assign("#three");
+        location.replace("#four");
+        console.log(history.length, location.href);
+        """)
+
+      assert logs(r) == [
+               "pop null #one",
+               "hash http://h.test/dir/page?a=1 http://h.test/dir/page?a=1#one",
+               "pop null #two",
+               "hash http://h.test/dir/page?a=1#one http://h.test/dir/page?a=1#two",
+               "pop null #three",
+               "hash http://h.test/dir/page?a=1#two http://h.test/dir/page?a=1#three",
+               "pop null #four",
+               "hash http://h.test/dir/page?a=1#three http://h.test/dir/page?a=1#four",
+               # 2 before + the first entry + one, two, three; replace added none
+               "6 http://h.test/dir/page?a=1#four"
+             ]
+
+      assert {:hash, "http://h.test/dir/page?a=1#one", :push} in r.outbox
+      assert {:hash, "http://h.test/dir/page?a=1#four", :replace} in r.outbox
+      refute Enum.any?(r.outbox, &match?({:navigate, _, _}, &1))
+
+      # back from #four's entry (which replaced #three's) is #two, a hash-only traversal
+      r = Runtime.traverse(pid, -1)
+      assert r.moved
+
+      assert logs(r) == [
+               "pop null #two",
+               "hash http://h.test/dir/page?a=1#four http://h.test/dir/page?a=1#two"
+             ]
+    end
+
+    test "following a link to a fragment of the page is a history entry too" do
+      {pid, _} =
+        hist_start("""
+        window.addEventListener("hashchange", (e) => console.log("hash", e.newURL));
+        """)
+
+      r = Runtime.fragment(pid, "http://h.test/dir/page?a=1#sec")
+      assert logs(r) == ["hash http://h.test/dir/page?a=1#sec"]
+      assert r.url == "http://h.test/dir/page?a=1#sec"
+      assert Runtime.traverse(pid, -1).moved
+    end
+
+    test "replace and assign to another page ask the session to load it, replace without a new entry" do
+      {_pid, r} = hist_start("location.replace('/other'); location.assign('/more')")
+      assert {:navigate, "http://h.test/other", :replace} in r.outbox
+      assert {:navigate, "http://h.test/more", :push} in r.outbox
+    end
+
+    test "the parts of location can be set" do
+      {_pid, r} =
+        hist_start(
+          """
+          location.pathname = "new/path";
+          location.search = "q=1";
+          location.hostname = "other.test";
+          location.port = "8080";
+          location.host = "third.test:9090";
+          location.protocol = "https";
+          console.log(location.ancestorOrigins.length);
+          """,
+          "http://h.test/dir/page?a=1#top"
+        )
+
+      urls = for {:navigate, url, :push} <- r.outbox, do: url
+
+      assert urls == [
+               "http://h.test/new/path?a=1#top",
+               "http://h.test/dir/page?q=1#top",
+               "http://other.test/dir/page?a=1#top",
+               "http://h.test:8080/dir/page?a=1#top",
+               "http://third.test:9090/dir/page?a=1#top",
+               "https://h.test/dir/page?a=1#top"
+             ]
+
+      assert logs(r) == ["0"]
+    end
+
+    test "navigator has the usual properties" do
+      {_pid, r} =
+        hist_start("""
+        console.log(navigator.appName, navigator.product, navigator.cookieEnabled, navigator.webdriver, navigator.plugins.length, navigator.javaEnabled(), navigator.appVersion.startsWith("5.0"));
+        navigator.clipboard.writeText("hi").then(() => navigator.clipboard.readText()).then((t) => console.log("clip", t));
+        navigator.geolocation.getCurrentPosition(() => console.log("pos"), (e) => console.log("geo", e.code));
+        navigator.permissions.query({ name: "geolocation" }).then((p) => console.log("perm", p.state));
+        navigator.mediaDevices.enumerateDevices().then((d) => console.log("devices", d.length));
+        """)
+
+      assert hd(logs(r)) == "Netscape Gecko true false 0 false true"
+    end
+  end
+
+  describe "window and document event handler properties" do
+    test "window.onload, onpopstate, onhashchange and friends run, and read back" do
+      {pid, r} =
+        start(~S"""
+        <body><script>
+        console.log(window.onpopstate);
+        window.onpopstate = (e) => console.log("pop");
+        window.onhashchange = () => console.log("hash");
+        console.log(typeof window.onpopstate);
+        document.onclick = () => console.log("doc click");
+        window.onpopstate = null;
+        history.pushState(null, "", "/x");
+        </script><button id=b>x</button></body>
+        """)
+
+      assert logs(r) == ["null", "function"]
+      r = Runtime.fragment(pid, "http://t.test/x#y")
+      assert logs(r) == ["hash"]
+      # onpopstate was cleared; the fragment-only change still fires hashchange
+      r = Runtime.traverse(pid, -1)
+      assert logs(r) == ["hash"]
+      r = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert logs(r) == ["doc click"]
     end
   end
 end
