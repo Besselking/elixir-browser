@@ -496,6 +496,9 @@ defmodule Browser.UI do
   of an "x" drawn on a bitmap) and memoized in `cache`.
   """
   def font_units(cache) do
+    # the cascade runs in processes of its own (a page load, a restyle), which need wx's environment
+    wx_env = :wx.get_env()
+
     fn %{size: size, family: family, bold: bold, italic: italic} = style ->
       key = {:units, size, family, bold, italic}
 
@@ -504,6 +507,7 @@ defmodule Browser.UI do
           units
 
         [] ->
+          :wx.set_env(wx_env)
           units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
           :ets.insert(cache, {key, units})
           units
