@@ -4352,4 +4352,37 @@ defmodule Browser.LayoutTest do
       assert col_at(items, "item1").x == col_at(items, "item4").x
     end
   end
+
+  describe "positioned paint order" do
+    defp po_layout(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    defp bg_order(items), do: for(%{type: :rect, color: c} <- items, do: c)
+
+    test "a relatively shifted box paints over an earlier absolute one, also inside an atom" do
+      html = """
+      <div style="display: inline-block; position: relative; height: 200px">
+        <div style="position: absolute; top: 100px; width: 50px; height: 50px; background: red"></div>
+        <table><caption style="width: 50px; height: 50px; position: relative; top: 100px; background: green"></caption></table>
+      </div>
+      """
+
+      order = html |> po_layout() |> bg_order()
+      assert List.last(order) == {0, 128, 0}
+    end
+
+    test "auto vertical margins of an absolute box may go negative" do
+      html = """
+      <div style="position: relative; height: 40px">
+        <div style="position: absolute; top: 0; bottom: 0; margin: auto 0; height: 100px">box</div>
+      </div>
+      """
+
+      y = html |> po_layout() |> Enum.find(&(&1[:text] == "box")) |> Map.fetch!(:y)
+      assert y < 0
+    end
+  end
 end
