@@ -1709,54 +1709,49 @@ defmodule Browser.JS.TypedArrays do
     size = size_of(kind)
     pos = make_ref()
     Process.put(pos, 0)
-    it = new_object([], proto(:iterator))
 
-    put_hidden(
-      it,
-      "next",
-      native("next", fn _, _ ->
-        i = Process.get(pos)
+    step = fn ->
+      i = Process.get(pos)
 
-        result =
-          if i == :done do
-            :done
-          else
-            case eff(d0) do
-              :oob ->
-                throw_error(
-                  "TypeError",
-                  "cannot perform this operation on a detached or out of bounds typed array"
-                )
+      result =
+        if i == :done do
+          :done
+        else
+          case eff(d0) do
+            :oob ->
+              throw_error(
+                "TypeError",
+                "cannot perform this operation on a detached or out of bounds typed array"
+              )
 
-              {off, len} when i < len ->
-                Process.put(pos, i + 1)
+            {off, len} when i < len ->
+              Process.put(pos, i + 1)
 
-                case what do
-                  :keys ->
-                    {:ok, i * 1.0}
+              case what do
+                :keys ->
+                  {:ok, i * 1.0}
 
-                  :values ->
-                    {:ok, read(kind, binary_part(deref(bid).bytes, off + i * size, size))}
+                :values ->
+                  {:ok, read(kind, binary_part(deref(bid).bytes, off + i * size, size))}
 
-                  :entries ->
-                    v = read(kind, binary_part(deref(bid).bytes, off + i * size, size))
-                    {:ok, new_array([i * 1.0, v])}
-                end
+                :entries ->
+                  v = read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+                  {:ok, new_array([i * 1.0, v])}
+              end
 
-              _ ->
-                Process.put(pos, :done)
-                :done
-            end
+            _ ->
+              Process.put(pos, :done)
+              :done
           end
-
-        case result do
-          {:ok, v} -> new_object([{"value", v}, {"done", false}])
-          :done -> new_object([{"value", :undefined}, {"done", true}])
         end
-      end)
-    )
 
-    it
+      case result do
+        {:ok, v} -> new_object([{"value", v}, {"done", false}])
+        :done -> new_object([{"value", :undefined}, {"done", true}])
+      end
+    end
+
+    Browser.JS.Collections.array_iterator(step)
   end
 
   defp join_elems(this, len, sep, to_s) do

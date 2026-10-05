@@ -164,6 +164,9 @@ defmodule Browser.JS.Async do
     end
   end
 
+  def resume(_, _),
+    do: Interp.throw_error("TypeError", "next method called on an incompatible receiver")
+
   defp iter_result(v, done), do: Interp.new_object([{"value", v}, {"done", done}])
 
   @doc "`Generator.prototype` with `next`, `return` and `throw`."
@@ -172,13 +175,13 @@ defmodule Browser.JS.Async do
     Interp.put_proto(:generator, p)
 
     for {name, tag} <- [{"next", :next}, {"return", :return}, {"throw", :throw}] do
-      Interp.put_hidden(
-        p,
-        name,
+      f =
         Interp.native(name, fn this, args ->
           resume(this, {tag, Enum.at(args, 0, :undefined)})
         end)
-      )
+
+      Interp.set_arity(f, 1)
+      Interp.put_hidden(p, name, f)
     end
 
     Interp.put_tag(p, "Generator")
@@ -354,13 +357,13 @@ defmodule Browser.JS.Async do
     Interp.put_proto(:async_generator, p)
 
     for {name, tag} <- [{"next", :next}, {"return", :return}, {"throw", :throw}] do
-      Interp.put_hidden(
-        p,
-        name,
+      f =
         Interp.native(name, fn this, args ->
           ag_request(this, {tag, Enum.at(args, 0, :undefined)})
         end)
-      )
+
+      Interp.set_arity(f, 1)
+      Interp.put_hidden(p, name, f)
     end
 
     Interp.put_tag(p, "AsyncGenerator")

@@ -38,6 +38,7 @@ defmodule Browser.JS.Collections do
     Browser.JS.TypedArrays.install(scope)
     Browser.JS.Disposables.install(scope)
     Browser.JS.Iterators.install(scope)
+    Browser.JS.FunctionKinds.install(scope)
     :ok
   end
 
@@ -134,6 +135,58 @@ defmodule Browser.JS.Collections do
 
   # ── iterator objects ───────────────────────────────────────
 
+  # an Array or String iterator: `step` produces the next result object, `next` is on the shared
+  # prototype
+  defp make_kind_iterator(list, kind) do
+    pos = make_ref()
+    Process.put(pos, list)
+
+    step = fn ->
+      case Process.get(pos) do
+        [h | t] ->
+          Process.put(pos, t)
+          new_object([{"value", h}, {"done", false}])
+
+        _ ->
+          new_object([{"value", :undefined}, {"done", true}])
+      end
+    end
+
+    array_iterator(step, kind)
+  end
+
+  @doc "An Array Iterator object (also used for typed arrays) whose `next` runs `step`."
+  def array_iterator(step, kind \\ :array_iterator) do
+    {:obj, id} = it = new_object([], proto(kind))
+    store(id, deref(id) |> Map.put(:iter_kind, kind) |> Map.put(:iter_step, step))
+    it
+  end
+
+  defp install_kind_iterator(kind, tag) do
+    p = new_object([], proto(:iterator))
+    put_proto(kind, p)
+    put_tag(p, tag)
+
+    def_fn(p, "next", fn this, _ ->
+      step =
+        case this do
+          {:obj, id} ->
+            case deref(id) do
+              %{iter_kind: ^kind, iter_step: step} -> step
+              _ -> nil
+            end
+
+          _ ->
+            nil
+        end
+
+      if step == nil,
+        do: throw_error("TypeError", "next method called on an incompatible receiver")
+
+      step.()
+    end)
+  end
+
   @doc "An iterator object over a list (computed up front)."
   def make_iterator(list) do
     pos = make_ref()
@@ -163,10 +216,15 @@ defmodule Browser.JS.Collections do
     put_proto(:iterator, p)
     put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
 
+    install_kind_iterator(:array_iterator, "Array Iterator")
+    install_kind_iterator(:string_iterator, "String Iterator")
+
     # arrays, strings
     array = proto(:array)
 
-    values = native("values", fn this, _ -> make_iterator(iterate(this)) end)
+    values =
+      native("values", fn this, _ -> make_kind_iterator(iterate(this), :array_iterator) end)
+
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
 
@@ -183,17 +241,25 @@ defmodule Browser.JS.Collections do
     store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
 
     def_fn(array, "keys", fn this, _ ->
-      make_iterator(for i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0)
+      make_kind_iterator(
+        for(i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0),
+        :array_iterator
+      )
     end)
 
     def_fn(array, "entries", fn this, _ ->
-      make_iterator(for {v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v]))
+      make_kind_iterator(
+        for({v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v])),
+        :array_iterator
+      )
     end)
 
     put_hidden(
       proto(:string),
       @iterator,
-      native("[Symbol.iterator]", fn this, _ -> make_iterator(String.codepoints(to_str(this))) end)
+      native("[Symbol.iterator]", fn this, _ ->
+        make_kind_iterator(String.codepoints(to_str(this)), :string_iterator)
+      end)
     )
   end
 
