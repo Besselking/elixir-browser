@@ -2930,6 +2930,20 @@ defmodule Browser.LayoutTest do
       assert b.y - a.y == 2 * 16 + 16
     end
 
+    test "content overflowing a float or an inline-block does not widen a shrink-to-fit box" do
+      for inner <- [
+            ~s|<div style="float:left;max-width:40px;background:#0a0">aaaaaaaa</div>|,
+            ~s|<span style="display:inline-block;max-width:40px;background:#0a0">aaaaaaaa</span>|
+          ] do
+        {items, _} =
+          fl(~s|<div style="position:absolute;background:#f00">#{inner}</div>|, 400)
+
+        red = items |> Enum.filter(&(&1.type == :rect)) |> Enum.min_by(&(&1.x + &1.w * 0))
+        outer = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+        assert outer.w == 40, inspect(red)
+      end
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(

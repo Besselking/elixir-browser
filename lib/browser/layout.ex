@@ -1723,7 +1723,7 @@ defmodule Browser.Layout do
     {x, y} =
       place_float(st, side, w, height, top, st.margin + st.left, st.width - st.margin - st.right)
 
-    moved = for item <- items, do: item |> move(x, y) |> adopt_sticky(st)
+    moved = for item <- items, do: item |> limit_extent(w) |> move(x, y) |> adopt_sticky(st)
     float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
 
     # a float paints above the backgrounds and borders of the blocks it overlaps: all of it,
@@ -2103,6 +2103,18 @@ defmodule Browser.Layout do
   defp add_rr(%{rr: rr} = item, extra), do: %{item | rr: rr + extra}
   defp add_rr(item, _extra), do: item
 
+  # the items a box of its own width holds stop counting for shrink-to-fit at its right edge
+  defp limit_new_items(st, box) do
+    {new, old} = Enum.split(st.items, st.n - box.n0)
+    limit = box.x + box.w
+    %{st | items: Enum.map(new, &limit_extent(&1, limit)) ++ old}
+  end
+
+  # what overflows an inline-level box does not make the line wider: shrink-to-fit stops
+  # counting its content at the box's right edge (`xlim`, which moves with the item)
+  defp limit_extent(%{xlim: l} = item, w), do: %{item | xlim: min(l, w)}
+  defp limit_extent(item, w), do: Map.put(item, :xlim, w)
+
   defp place_atom(st, atom) do
     line_left = st.margin + st.left
 
@@ -2129,7 +2141,11 @@ defmodule Browser.Layout do
         do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
         else: atom
 
-    atom = %{atom | items: Enum.map(atom.items, &adopt_sticky(&1, st))}
+    atom = %{
+      atom
+      | items: Enum.map(atom.items, &(&1 |> adopt_sticky(st) |> limit_extent(atom.w)))
+    }
+
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil}
   end
@@ -2257,8 +2273,8 @@ defmodule Browser.Layout do
     st = %{st | y: box.top + height}
 
     st =
-      if o.width != nil and fixed_width?(box),
-        do: %{st | ext: max(st.ext, box.x + box.w + box_mr(o))},
+      if (o.width != nil or o.maxw != nil) and fixed_width?(box),
+        do: limit_new_items(%{st | ext: max(st.ext, box.x + box.w + box_mr(o))}, box),
         else: st
 
     st = place_deferred(st, box, height)
@@ -2706,6 +2722,7 @@ defmodule Browser.Layout do
   # clip of background layers, the shapes of shadows.
   defp move(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
+    it = if it[:xlim], do: %{it | xlim: it.xlim + dx}, else: it
 
     it =
       case it do
@@ -2953,7 +2970,7 @@ defmodule Browser.Layout do
           (&1.type == :box and fixed_width?(&1) and not Map.get(&1, :anchor, false)) or
           (&1.type == :bgimage and Map.get(&1, :sized, false)))
     )
-    |> Enum.map(&(&1.x + &1.w + Map.get(&1, :rr, 0)))
+    |> Enum.map(&(min(&1.x + &1.w, Map.get(&1, :xlim, @unbounded)) + Map.get(&1, :rr, 0)))
     |> Enum.max(fn -> 0 end)
   end
 

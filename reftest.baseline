@@ -411,6 +411,11 @@ css/CSS2/floats-clear/clear-initial-001.xht
 css/CSS2/floats-clear/clear-on-parent.html
 css/CSS2/floats-clear/float-006.xht
 css/CSS2/floats-clear/float-applies-to-008.xht
+css/CSS2/floats-clear/float-non-replaced-width-007.xht
+css/CSS2/floats-clear/float-non-replaced-width-008.xht
+css/CSS2/floats-clear/float-non-replaced-width-009.xht
+css/CSS2/floats-clear/float-non-replaced-width-010.xht
+css/CSS2/floats-clear/float-non-replaced-width-011.xht
 css/CSS2/floats-clear/float-non-replaced-width-012.xht
 css/CSS2/floats-clear/floats-022.xht
 css/CSS2/floats-clear/floats-028.xht
@@ -1045,6 +1050,8 @@ css/CSS2/normal-flow/height-applies-to-016.xht
 css/CSS2/normal-flow/height-inherit-001.xht
 css/CSS2/normal-flow/inline-block-height-001.xht
 css/CSS2/normal-flow/inline-block-height-002.xht
+css/CSS2/normal-flow/inline-block-non-replaced-width-003.xht
+css/CSS2/normal-flow/inline-block-non-replaced-width-004.xht
 css/CSS2/normal-flow/inline-block-width-001a.xht
 css/CSS2/normal-flow/inline-block-width-001b.xht
 css/CSS2/normal-flow/inline-block-width-002a.xht
@@ -1258,6 +1265,10 @@ css/CSS2/normal-flow/width-applies-to-008.xht
 css/CSS2/normal-flow/width-inherit-001.xht
 css/CSS2/normal-flow/width-non-replaced-inline-001.xht
 css/CSS2/positioning/absolute-non-replaced-min-max-001.html
+css/CSS2/positioning/absolute-non-replaced-width-017.xht
+css/CSS2/positioning/absolute-non-replaced-width-018.xht
+css/CSS2/positioning/absolute-non-replaced-width-019.xht
+css/CSS2/positioning/absolute-non-replaced-width-020.xht
 css/CSS2/positioning/absolute-replaced-width-003a.xht
 css/CSS2/positioning/absolute-replaced-width-003b.xht
 css/CSS2/positioning/absolute-replaced-width-003c.xht
