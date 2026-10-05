@@ -503,9 +503,13 @@ defmodule Browser.Layout do
       if tag == "img", do: image_ops(el, style, acc), else: svg_ops(el, style, acc)
     end
 
-    case float_side(computed(attrs)) do
+    c = computed(attrs)
+
+    case float_side(c) do
       nil ->
-        ops.(acc)
+        if c["position"] in ["absolute", "fixed"],
+          do: abs_ops(el, style, c, acc),
+          else: ops.(acc)
 
       side ->
         # a floated picture is sized by its own content, like any float
@@ -587,18 +591,35 @@ defmodule Browser.Layout do
   # relative to its containing block; it takes no space in the flow. Its width
   # properties belong to the placement, so they are removed from the element's
   # own box.
+  defp image_sub({:element, "img", _, _} = el, style), do: image_ops(el, style, [])
+  defp image_sub(el, style), do: svg_ops(el, style, [])
+
   defp abs_ops({:element, tag, attrs, kids}, parent_style, c, acc) do
     if hidden?(c) do
       acc
     else
       box = box(tag, c)
-      own = Map.drop(c, ~w(width min-width max-width margin-left margin-right))
+      # a picture is sized by its own width and height: they stay with it
+      replaced? = tag in ["img", "svg"]
+
+      own =
+        Map.drop(
+          c,
+          if(replaced?,
+            do: ~w(margin-left margin-right),
+            else: ~w(width min-width max-width margin-left margin-right)
+          )
+        )
+
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
+      el = {:element, tag, attrs, kids}
 
       sub =
-        {:element, tag, attrs, kids}
-        |> walk_element(parent_style, [], :abs_inner)
-        |> Enum.reverse()
+        if replaced? do
+          el |> image_sub(parent_style) |> Enum.reverse()
+        else
+          el |> walk_element(parent_style, [], :abs_inner) |> Enum.reverse()
+        end
 
       {_, br, _, bl} = box.bw
       border_box? = c["box-sizing"] == "border-box"
@@ -609,9 +630,10 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: dim(c["width"]),
-        minw: c["min-width"],
-        maxw: c["max-width"],
+        width: if(replaced?, do: nil, else: dim(c["width"])),
+        replaced: replaced?,
+        minw: if(replaced?, do: nil, else: c["min-width"]),
+        maxw: if(replaced?, do: nil, else: c["max-width"]),
         ml: box.ml,
         mr: box.mr,
         rtl: parent_style.cb,
@@ -695,9 +717,18 @@ defmodule Browser.Layout do
   end
 
   defp declared_size(attrs) do
-    w = attr_int(attrs, "width")
+    w = attr_width(attrs)
     h = attr_int(attrs, "height")
     if w || h, do: %{w: w, h: h}
+  end
+
+  # a width attribute may be a percentage of the container
+  defp attr_width(attrs) do
+    case Integer.parse(attr_value(attrs, "width")) do
+      {n, "%" <> _} when n >= 0 -> {:pct, n / 100}
+      {n, _} when n >= 0 -> n
+      _ -> nil
+    end
   end
 
   defp attr_int(attrs, name) do
@@ -2691,6 +2722,7 @@ defmodule Browser.Layout do
     top = resolve_v(spec.top, origin.h)
     bottom = origin.h && resolve_v(spec.bottom, origin.h)
 
+    sub = if spec.replaced, do: Enum.map(sub, &pct_to_px(&1, cw)), else: sub
     {width, x} = abs_width(st, sub, spec, origin, left, right, {static_x, static_right})
     {items, height} = layout_sub(st, sub, width)
 
@@ -2713,6 +2745,20 @@ defmodule Browser.Layout do
 
     %{st | overlays: [moved | st.overlays]}
   end
+
+  # the width of an absolute picture in percent is relative to its containing block
+  defp pct_to_px({:image, %{attrs: attrs, css: css} = spec, style}, cw) do
+    fix = fn
+      {:pct, f} -> f * cw
+      v -> v
+    end
+
+    attrs = if is_map(attrs), do: Map.update(attrs, :w, nil, fix), else: attrs
+    css = if is_map(css), do: Map.update(css, :w, nil, fix), else: css
+    {:image, %{spec | attrs: attrs, css: css}, style}
+  end
+
+  defp pct_to_px(op, _cw), do: op
 
   # The translation of a box: `translate: x y` or `transform: translate(x, y)` (also translateX
   # and translateY), each as `{:px, n}` or `{:pct, fraction of the box}`.
@@ -2887,7 +2933,7 @@ defmodule Browser.Layout do
               do: @unbounded,
               else: avail
 
-          if left && right do
+          if left && right && !spec.replaced do
             avail
           else
             min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)) + spec.rextra)

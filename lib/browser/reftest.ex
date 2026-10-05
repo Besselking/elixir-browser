@@ -22,7 +22,7 @@ defmodule Browser.Reftest do
   @unsupported [
     {~r/<script/i, "scripts"},
     {~r/reftest-wait|test-wait/, "waits for script"},
-    {~r/<(video|audio|iframe|object|embed|canvas|svg|math|picture)[\s>]/i,
+    {~r/<(video|audio|iframe|object|embed|canvas|svg|math|picture)[\s>:]/i,
      "frames, vector pictures or embedded content"},
     {~r/@font-face/i, "web fonts"}
   ]
