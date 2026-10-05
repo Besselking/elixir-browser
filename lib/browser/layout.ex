@@ -2237,8 +2237,8 @@ defmodule Browser.Layout do
     used = round(used)
 
     clipped? = o.clip and used < content
-    # without clipping a too-small height just lets the content overflow the box
-    height = if used < content and not clipped?, do: natural, else: used + extra
+    # a too-small height is the height of the box all the same: the content overflows it
+    height = used + extra
 
     limit = box.top + bt + o.pt + used
     st = if clipped?, do: drop_below(st, box, limit), else: st
