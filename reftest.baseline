@@ -778,7 +778,9 @@ css/CSS2/floats/floats-wrap-bfc-001-right-table.xht
 css/CSS2/floats/floats-wrap-bfc-002-left-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-002-right-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-003-left-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-003-left-table.xht
 css/CSS2/floats/floats-wrap-bfc-003-right-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-003-right-table.xht
 css/CSS2/floats/floats-wrap-bfc-004.xht
 css/CSS2/floats/floats-wrap-bfc-005.xht
 css/CSS2/floats/floats-wrap-bfc-007.xht
@@ -2031,6 +2033,9 @@ css/CSS2/positioning/bottom-111.xht
 css/CSS2/positioning/bottom-112.xht
 css/CSS2/positioning/bottom-113.xht
 css/CSS2/positioning/bottom-applies-to-001.xht
+css/CSS2/positioning/bottom-applies-to-002.xht
+css/CSS2/positioning/bottom-applies-to-003.xht
+css/CSS2/positioning/bottom-applies-to-004.xht
 css/CSS2/positioning/bottom-applies-to-005.xht
 css/CSS2/positioning/bottom-applies-to-006.xht
 css/CSS2/positioning/bottom-applies-to-009.xht
@@ -2092,6 +2097,9 @@ css/CSS2/positioning/left-111.xht
 css/CSS2/positioning/left-112.xht
 css/CSS2/positioning/left-113.xht
 css/CSS2/positioning/left-applies-to-001.xht
+css/CSS2/positioning/left-applies-to-002.xht
+css/CSS2/positioning/left-applies-to-003.xht
+css/CSS2/positioning/left-applies-to-004.xht
 css/CSS2/positioning/left-applies-to-005.xht
 css/CSS2/positioning/left-applies-to-006.xht
 css/CSS2/positioning/left-applies-to-009.xht
@@ -2111,6 +2119,9 @@ css/CSS2/positioning/position-absolute-006.xht
 css/CSS2/positioning/position-absolute-007.xht
 css/CSS2/positioning/position-absolute-008.xht
 css/CSS2/positioning/position-applies-to-001.xht
+css/CSS2/positioning/position-applies-to-002.xht
+css/CSS2/positioning/position-applies-to-003.xht
+css/CSS2/positioning/position-applies-to-004.xht
 css/CSS2/positioning/position-applies-to-005.xht
 css/CSS2/positioning/position-applies-to-006.xht
 css/CSS2/positioning/position-applies-to-009.xht
@@ -2198,6 +2209,10 @@ css/CSS2/positioning/right-110.xht
 css/CSS2/positioning/right-111.xht
 css/CSS2/positioning/right-112.xht
 css/CSS2/positioning/right-113.xht
+css/CSS2/positioning/right-applies-to-001.xht
+css/CSS2/positioning/right-applies-to-002.xht
+css/CSS2/positioning/right-applies-to-003.xht
+css/CSS2/positioning/right-applies-to-004.xht
 css/CSS2/positioning/right-applies-to-005.xht
 css/CSS2/positioning/right-applies-to-006.xht
 css/CSS2/positioning/right-applies-to-009.xht
@@ -2258,6 +2273,9 @@ css/CSS2/positioning/top-110.xht
 css/CSS2/positioning/top-111.xht
 css/CSS2/positioning/top-112.xht
 css/CSS2/positioning/top-applies-to-001.xht
+css/CSS2/positioning/top-applies-to-002.xht
+css/CSS2/positioning/top-applies-to-003.xht
+css/CSS2/positioning/top-applies-to-004.xht
 css/CSS2/positioning/top-applies-to-005.xht
 css/CSS2/positioning/top-applies-to-006.xht
 css/CSS2/positioning/top-applies-to-009.xht
@@ -2589,6 +2607,7 @@ css/css-flexbox/abspos/position-absolute-009.html
 css/css-flexbox/abspos/position-absolute-010.html
 css/css-flexbox/abspos/position-absolute-011.html
 css/css-flexbox/align-baseline.html
+css/css-flexbox/align-content-wrap-004.html
 css/css-flexbox/align-content_flex-start.html
 css/css-flexbox/align-items-006.html
 css/css-flexbox/align-items-009.html
@@ -2625,6 +2644,7 @@ css/css-flexbox/fieldset-as-item-overflow.html
 css/css-flexbox/fit-content-item-002.html
 css/css-flexbox/fit-content-item-003.html
 css/css-flexbox/fit-content-item-004.html
+css/css-flexbox/fixed-table-layout-with-percentage-width-in-flex-item.html
 css/css-flexbox/flex-abspos-inset-cross-size-001.html
 css/css-flexbox/flex-align-content-start.html
 css/css-flexbox/flex-aspect-ratio-img-column-001.html
@@ -2926,6 +2946,7 @@ css/css-flexbox/gap-014.html
 css/css-flexbox/gap-020.html
 css/css-flexbox/gap-021.html
 css/css-flexbox/gap-collapse.html
+css/css-flexbox/grandchild-span-height.html
 css/css-flexbox/grid-flex-item-003.html
 css/css-flexbox/grid-flex-item-004.html
 css/css-flexbox/grid-flex-item-006.html

@@ -2323,7 +2323,10 @@ defmodule Browser.Layout do
     }
 
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
-    %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil}
+    # an atom with nothing drawn in it still takes the room it asks for (one with content is
+    # measured by what it draws)
+    ext = if extent(atom.items) == 0, do: max(st.ext, x + atom.w + max(extra, 0)), else: st.ext
+    %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil, ext: ext}
   end
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
