@@ -4385,4 +4385,39 @@ defmodule Browser.LayoutTest do
       assert y < 0
     end
   end
+
+  describe "margins collapse into a box with a height" do
+    defp mc_layout(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    defp mc_y(items, text), do: Enum.find(items, &(&1[:text] == text)).y
+
+    test "the first child's margin merges with the box's own margin" do
+      plain = mc_layout("<div><p style=\"margin:30px 0 0\">x</p></div>")
+      sized = mc_layout("<div style=\"height: 100px\"><p style=\"margin:30px 0 0\">x</p></div>")
+      assert mc_y(sized, "x") == mc_y(plain, "x")
+    end
+
+    test "a box with a background starts below the merged margin" do
+      items =
+        mc_layout(
+          "<div style=\"height: 50px; background: #0f0; margin-top: 10px\"><p style=\"margin:30px 0 0\">x</p></div>"
+        )
+
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert rect.y == 30
+    end
+
+    test "an absolute box keeps its children's margins inside" do
+      items =
+        mc_layout(
+          "<div style=\"position: absolute; top: 0; background: #0f0\"><div style=\"margin-top: 40px; height: 0\"></div>y</div>"
+        )
+
+      assert mc_y(items, "y") >= 40
+    end
+  end
 end
