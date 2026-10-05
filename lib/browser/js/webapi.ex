@@ -50,8 +50,6 @@ defmodule Browser.JS.WebAPI do
       end)
     )
 
-    Browser.JS.Proxy.install(scope)
-
     case program() do
       {:ok, ast} -> Interp.run_program(ast)
       {:error, msg} -> throw({:syntax, "web api prelude: " <> msg})

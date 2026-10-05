@@ -556,6 +556,38 @@ defmodule Browser.JSTest do
       assert {:error, {:uncaught, _}, _} = Browser.JS.eval("1n + 1")
       assert {:ok, true, _} = Browser.JS.eval("1n == 1 && 2n > 1 && 10n > 9")
     end
+
+    test "Proxy traps and invariants" do
+      src = """
+      var log = [];
+      var p = new Proxy({a: 1}, {
+        get(t, k, r) { log.push('get:' + String(k)); return Reflect.get(t, k, r); },
+        has(t, k) { log.push('has:' + k); return k in t; },
+        ownKeys(t) { log.push('ownKeys'); return Reflect.ownKeys(t); },
+        getOwnPropertyDescriptor(t, k) { log.push('gopd:' + k); return Reflect.getOwnPropertyDescriptor(t, k); }
+      });
+      var f = new Proxy(function (a) { return a + 1; }, { apply(t, th, args) { return t(...args) * 2; } });
+      var frozen = Object.freeze({x: 1});
+      var bad = new Proxy(frozen, { get() { return 2; } });
+      var threw = false;
+      try { bad.x; } catch (e) { threw = e instanceof TypeError; }
+      var r = Proxy.revocable({}, {}); r.revoke();
+      var revokedThrew = false;
+      try { r.proxy.x; } catch (e) { revokedThrew = e instanceof TypeError; }
+      [p.a, 'a' in p, Object.keys(p).join(), f(3), typeof f, threw, revokedThrew,
+       Array.isArray(new Proxy([], {})), log.join()].join('|')
+      """
+
+      assert {:ok, "1|true|a|8|function|true|true|true|get:a,has:a,ownKeys,gopd:a", _} =
+               Browser.JS.eval(src)
+    end
+
+    test "-0 and the Math functions" do
+      assert {:ok, true, _} =
+               Browser.JS.eval("1 / -0 === -Infinity && Object.is(Math.round(-0.2), -0)")
+
+      assert {:ok, 1.0, _} = Browser.JS.eval("Math.asin(1) * 2 / Math.PI")
+    end
   end
 
   describe "promises and async functions" do

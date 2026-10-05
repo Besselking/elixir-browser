@@ -521,9 +521,18 @@ defmodule Browser.JS.Collections do
 
     def_fn(r, "set", fn _, args ->
       case arg(args, 0) do
-        {:obj, _} = o ->
-          Interp.put(o, arg(args, 1), arg(args, 2))
-          true
+        {:obj, id} = o ->
+          if Map.has_key?(deref(id), :proxy) do
+            Browser.JS.Proxy.set(
+              o,
+              to_key(arg(args, 1)),
+              arg(args, 2),
+              if(length(args) > 3, do: arg(args, 3), else: o)
+            )
+          else
+            Interp.put(o, arg(args, 1), arg(args, 2))
+            true
+          end
 
         _ ->
           throw_error("TypeError", "Reflect.set called on non-object")
@@ -559,7 +568,7 @@ defmodule Browser.JS.Collections do
 
     def_fn(r, "getPrototypeOf", fn _, args ->
       case arg(args, 0) do
-        {:obj, id} -> deref(id).proto || :null
+        {:obj, _} = o -> Props.get_prototype_of(o)
         _ -> throw_error("TypeError", "Reflect.getPrototypeOf called on non-object")
       end
     end)
@@ -582,8 +591,18 @@ defmodule Browser.JS.Collections do
     def_fn(r, "isExtensible", fn _, args -> Props.extensible?(arg(args, 0)) end)
 
     def_fn(r, "preventExtensions", fn _, args ->
-      Props.prevent_extensions(arg(args, 0))
-      true
+      case arg(args, 0) do
+        {:obj, id} = o ->
+          if Map.has_key?(deref(id), :proxy) do
+            Browser.JS.Proxy.prevent_extensions(o)
+          else
+            Props.prevent_extensions(o)
+            true
+          end
+
+        _ ->
+          throw_error("TypeError", "Reflect.preventExtensions called on non-object")
+      end
     end)
   end
 

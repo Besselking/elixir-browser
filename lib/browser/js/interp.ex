@@ -472,14 +472,10 @@ defmodule Browser.JS.Interp do
       :function ->
         key = to_key(key)
 
-        case lookup(o, key, {:obj, id}) do
-          :undefined ->
-            if key in ["name", "length"] and key in Map.get(o, :gone, []),
-              do: :undefined,
-              else: function_prop(id, o, key)
-
-          v ->
-            v
+        if Map.has_key?(o, :proxy) do
+          Browser.JS.Proxy.get({:obj, id}, key, {:obj, id})
+        else
+          function_get(id, o, key)
         end
 
       :host ->
@@ -865,6 +861,10 @@ defmodule Browser.JS.Interp do
           :miss -> put_prop(id, o, key, v)
         end
 
+      %{proxy: _} ->
+        Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id})
+        :ok
+
       # a function's own name and length are not writable
       %{class: :function, props: props} when key in ["name", "length"] ->
         unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
@@ -948,6 +948,9 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     case o do
+      %{proxy: _} ->
+        Browser.JS.Proxy.delete({:obj, id}, to_key(key))
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_delete, 2),
           do: mod.host_delete(data, to_key(key)),
@@ -1003,6 +1006,9 @@ defmodule Browser.JS.Interp do
     key_s = to_key(key)
 
     cond do
+      Map.has_key?(o, :proxy) ->
+        Browser.JS.Proxy.has({:obj, id}, key_s)
+
       # what a host object answers for is there (`"foo" in window`)
       o.class == :host and host_has?(o, id, key_s) ->
         true
@@ -1039,6 +1045,9 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     case o do
+      %{proxy: _} ->
+        Browser.JS.Proxy.host_keys(id)
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
           do: mod.host_keys(data),
@@ -1259,6 +1268,15 @@ defmodule Browser.JS.Interp do
 
     nt = new_target || f
 
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.construct(f, args, nt)
+      _ -> construct_bound(f, id, args, new_target, nt)
+    end
+  end
+
+  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
+
+  defp construct_bound(f, id, args, new_target, nt) do
     case Map.get(deref(id), :bound) do
       {target, bound_args} ->
         # a bound function constructs what it is bound to
@@ -1273,14 +1291,14 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def construct(_, _, _), do: throw_error("TypeError", "value is not a constructor")
-
   @doc "IsConstructor: arrows, generators, async functions, methods and built-ins without a `prototype` are not."
   def constructor?({:obj, id} = f) do
     o = deref(id)
 
     function?(f) and
       case o do
+        %{proxy_constructor: c} -> c
+        %{proxy_ctor: true} -> true
         %{bound: {target, _}} -> constructor?(target)
         %{generator: true} -> false
         %{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr] -> false
@@ -1347,8 +1365,8 @@ defmodule Browser.JS.Interp do
     false
   end
 
-  defp walk_protos({:obj, id}, target) do
-    case deref(id).proto do
+  defp walk_protos({:obj, _} = o, target) do
+    case Browser.JS.Props.get_prototype_of(o) do
       {:obj, _} = p -> p == target or walk_protos(p, target)
       _ -> false
     end
@@ -1501,8 +1519,26 @@ defmodule Browser.JS.Interp do
     if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
   end
 
+  defp function_get(id, o, key) do
+    case lookup(o, key, {:obj, id}) do
+      :undefined ->
+        if key in ["name", "length"] and key in Map.get(o, :gone, []),
+          do: :undefined,
+          else: function_prop(id, o, key)
+
+      v ->
+        v
+    end
+  end
+
   @doc "A property read with a given `this` for getters (`super.x`)."
-  def get_with_receiver({:obj, id}, key, receiver), do: lookup(deref(id), to_key(key), receiver)
+  def get_with_receiver({:obj, id} = obj, key, receiver) do
+    case deref(id) do
+      %{proxy: _} -> Browser.JS.Proxy.get(obj, to_key(key), receiver)
+      o -> lookup(o, to_key(key), receiver)
+    end
+  end
+
   def get_with_receiver(_, _, _), do: :undefined
 
   # a parameter list with initialisers gets a temporal dead zone: every name
@@ -2023,7 +2059,9 @@ defmodule Browser.JS.Interp do
       end
 
     if rest do
-      pairs = for k <- own_keys(v), k not in used, do: {k, get(v, k)}
+      pairs =
+        for k <- Browser.JS.Props.enumerable_keys(v, used), do: {k, get(v, k)}
+
       bind(rest, new_object(pairs), env, mode)
     end
 
@@ -2455,7 +2493,9 @@ defmodule Browser.JS.Interp do
   end
 
   defp spread_into(obj, src) do
-    for k <- own_keys(src), do: put(obj, k, get(src, k))
+    unless nullish?(src) or not match?({:obj, _}, src),
+      do: for(k <- Browser.JS.Props.enumerable_keys(src), do: put(obj, k, get(src, k)))
+
     :ok
   end
 
