@@ -436,58 +436,164 @@ defmodule Browser.JS.TypedArrays do
         {:ok, buffer_object(bid)}
 
       _ ->
-        case Integer.parse(key) do
-          {i, ""} when i >= 0 ->
-            if i < len, do: {:ok, elem_at(d, i)}, else: {:ok, :undefined}
-
-          _ ->
-            :miss
+        case canonical(key) do
+          {:index, i} when i < len -> {:ok, elem_at(d, i)}
+          :none -> :miss
+          _ -> {:ok, :undefined}
         end
-    end
-  end
-
-  def host_get({:dv, bid, _, _} = d, key, _self) do
-    case key do
-      "byteLength" ->
-        {_, _, _, len} = dv_eff!(d)
-        {:ok, len * 1.0}
-
-      "byteOffset" ->
-        {_, _, off, _} = dv_eff!(d)
-        {:ok, off * 1.0}
-
-      "buffer" ->
-        {:ok, buffer_object(bid)}
-
-      _ ->
-        :miss
     end
   end
 
   def host_get(_, _, _), do: :miss
 
-  @doc false
-  def host_put({:ta, kind, bid, _, _} = d0, key, v, _self) when is_binary(key) do
-    {off, len} =
-      case eff(d0),
-        do: (
-          :oob -> {0, 0}
-          r -> r
-        )
+  # CanonicalNumericIndexString: `{:index, i}` for a non-negative integer key, `:invalid` for any
+  # other canonical number ("-0", "1.5", "-1", "Infinity", "NaN"), `:none` for every other key
+  defp canonical("-0"), do: :invalid
 
-    d = {:ta, kind, bid, off, len}
-
+  defp canonical(key) do
     case Integer.parse(key) do
-      {i, ""} when i >= 0 ->
-        if i < len, do: put_elem_at(d, i, v)
-        :ok
+      {i, ""} when i >= 0 and i <= 9_007_199_254_740_991 ->
+        if Integer.to_string(i) == key, do: {:index, i}, else: other_canonical(key)
 
       _ ->
+        other_canonical(key)
+    end
+  end
+
+  defp other_canonical(key) do
+    if key in ["Infinity", "-Infinity", "NaN"] or
+         (Regex.match?(~r/\A-?[0-9.e+-]+\z/, key) and to_str(to_num(key)) == key),
+       do: :invalid,
+       else: :none
+  end
+
+  @doc false
+  def host_put({:ta, kind, bid, _, _} = d0, key, v, _self) when is_binary(key) do
+    case canonical(key) do
+      :none ->
         :miss
+
+      c ->
+        # the value is converted first, whatever the index
+        bytes = write(kind, v)
+
+        with {:index, i} <- c,
+             {off, len} when i < len <- eff(d0) do
+          size = size_of(kind)
+          o = deref(bid)
+          pos = off + i * size
+          <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
+          store(bid, %{o | bytes: pre <> bytes <> post})
+        end
+
+        :ok
     end
   end
 
   def host_put(_, _, _, _), do: :miss
+
+  @doc false
+  # a canonical numeric key that is no index of this typed array (nothing can be set there)
+  def invalid_index?({:obj, id}, key) when is_binary(key) do
+    case deref(id) do
+      %{host: {__MODULE__, {:ta, _, _, _, _} = d}} ->
+        case {canonical(key), eff(d)} do
+          {:none, _} -> false
+          {{:index, i}, {_, len}} -> i >= len
+          _ -> true
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  def invalid_index?(_, _), do: false
+
+  @doc false
+  def host_has({:ta, _, _, _, _} = d, key) when is_binary(key) do
+    case {canonical(key), eff(d)} do
+      {{:index, i}, {_, len}} -> i < len
+      _ -> false
+    end
+  end
+
+  def host_has(d, key), do: match?({:ok, v} when v != :undefined, host_get(d, key, nil))
+
+  @doc false
+  def host_delete({:ta, _, _, _, _} = d, key) when is_binary(key) do
+    case canonical(key) do
+      :none ->
+        :default
+
+      {:index, i} ->
+        case eff(d) do
+          {_, len} when i < len -> false
+          _ -> true
+        end
+
+      :invalid ->
+        true
+    end
+  end
+
+  def host_delete(_, _), do: :default
+
+  @doc false
+  # an element as an own property: writable, enumerable and configurable
+  def property({:ta, kind, bid, _, _} = d, key) when is_binary(key) do
+    case {canonical(key), eff(d)} do
+      {{:index, i}, {off, len}} when i < len ->
+        {:data, elem_at({:ta, kind, bid, off, len}, i), true, true, true}
+
+      _ ->
+        nil
+    end
+  end
+
+  def property(_, _), do: nil
+
+  @doc false
+  # `Object.defineProperty` on an element: it can only be given as a plain value
+  def define_own({:ta, kind, _, _, _} = d, key, desc) when is_binary(key) do
+    case canonical(key) do
+      :none ->
+        :ordinary
+
+      c ->
+        valid? =
+          match?({:index, _}, c) and
+            case {c, eff(d)} do
+              {{:index, i}, {_, len}} -> i < len
+              _ -> false
+            end
+
+        ok? =
+          valid? and Map.get(desc, :configurable) != false and Map.get(desc, :enumerable) != false and
+            not (Map.has_key?(desc, :get) or Map.has_key?(desc, :set)) and
+            Map.get(desc, :writable) != false
+
+        unless ok?, do: throw_error("TypeError", "Cannot redefine property: #{key}")
+
+        if Map.has_key?(desc, :value) do
+          bytes = write(kind, desc.value)
+
+          with {:index, i} <- c,
+               {off, len} when i < len <- eff(d) do
+            {:ta, _, bid, _, _} = d
+            size = size_of(kind)
+            o = deref(bid)
+            pos = off + i * size
+            <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
+            store(bid, %{o | bytes: pre <> bytes <> post})
+          end
+        end
+
+        :ok
+    end
+  end
+
+  def define_own(_, _, _), do: :ordinary
 
   # the ArrayBuffer object a view was made on (each view of one buffer shares it)
   defp buffer_object(bid), do: {:obj, bid}
@@ -663,6 +769,56 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     put_tag(p, "ArrayBuffer")
+  end
+
+  # TypedArraySpeciesCreate: a typed array from `this.constructor[@@species]` (or the
+  # intrinsic constructor), checked to be a typed array of the same content type, and at least
+  # as long as the length asked for
+  defp species_create(this, kind, args) do
+    default = Interp.get(proto({:ta, kind}), "constructor")
+    c = Interp.get(this, "constructor")
+
+    ctor =
+      case c do
+        :undefined ->
+          default
+
+        {:obj, _} ->
+          case Interp.get(c, {:symbol, :species, "Symbol.species"}) do
+            s when s in [:undefined, :null] -> default
+            s -> s
+          end
+
+        _ ->
+          throw_error("TypeError", "object.constructor is not an object")
+      end
+
+    unless Interp.constructor?(ctor), do: throw_error("TypeError", "species is not a constructor")
+
+    result = typed_array_create(ctor, args)
+    {:ta, rkind, _, _, _} = data!(result)
+
+    if kind in [:i64, :u64] != rkind in [:i64, :u64],
+      do: throw_error("TypeError", "species created a typed array of another content type")
+
+    result
+  end
+
+  # TypedArrayCreateFromConstructor: `new ctor(...args)` must be a typed array (in bounds), and
+  # at least as long as the length asked for
+  defp typed_array_create(ctor, args) do
+    result = construct(ctor, args)
+    {:ta, _, _, _, rlen} = data!(result)
+
+    case args do
+      [n] when is_float(n) ->
+        if rlen < n, do: throw_error("TypeError", "created a typed array that is too short")
+
+      _ ->
+        :ok
+    end
+
+    result
   end
 
   # ── SharedArrayBuffer and Atomics ──────────────────────────
@@ -1084,24 +1240,52 @@ defmodule Browser.JS.TypedArrays do
       put_const(ctor, "BYTES_PER_ELEMENT", size * 1.0)
       put_const(p, "BYTES_PER_ELEMENT", size * 1.0)
       declare(scope, name, ctor)
-
-      def_fn(ctor, "from", fn _, args ->
-        src = arg(args, 0)
-        f = arg(args, 1)
-        list = source_values(src)
-        list = if f == :undefined, do: list, else: map_with(list, callable!(f), arg(args, 2))
-        make(kind, list)
-      end)
-
-      def_fn(ctor, "of", fn _, args -> make(kind, args) end)
     end
+
+    # %TypedArray%.from and .of build an instance of whatever constructor they are called on
+    def_fn(base_ctor, "from", 1, fn this, args ->
+      unless Interp.constructor?(this), do: throw_error("TypeError", "this is not a constructor")
+      f = arg(args, 1)
+      if f != :undefined, do: callable!(f)
+      src = arg(args, 0)
+
+      iterator =
+        if nullish?(src),
+          do: throw_error("TypeError", "Cannot convert undefined or null to object"),
+          else: Interp.get(src, {:symbol, :iterator, "Symbol.iterator"})
+
+      list =
+        cond do
+          nullish?(iterator) ->
+            array_like_list(src)
+
+          function?(iterator) ->
+            iterate(src)
+
+          true ->
+            throw_error("TypeError", "Symbol.iterator is not a function")
+        end
+
+      target = typed_array_create(this, [length(list) * 1.0])
+
+      for {v, k} <- Enum.with_index(list) do
+        mapped = if f == :undefined, do: v, else: call(f, arg(args, 2), [v, k * 1.0])
+        Interp.put(target, k, mapped)
+      end
+
+      target
+    end)
+
+    def_fn(base_ctor, "of", 0, fn this, args ->
+      unless Interp.constructor?(this), do: throw_error("TypeError", "this is not a constructor")
+      target = typed_array_create(this, [length(args) * 1.0])
+      for {v, k} <- Enum.with_index(args), do: Interp.put(target, k, v)
+      target
+    end)
   end
 
-  defp map_with(list, f, this_arg) do
-    list
-    |> Enum.with_index()
-    |> Enum.map(fn {v, i} -> call(f, this_arg, [v, i * 1.0]) end)
-  end
+  defp array_like_list({:obj, _} = src), do: array_like(src)
+  defp array_like_list(_), do: []
 
   # `new Int8Array(length | buffer, byteOffset, length | typedArray | iterable | array-like)`
   defp build(kind, args) do
@@ -1233,7 +1417,7 @@ defmodule Browser.JS.TypedArrays do
       :undefined
     end)
 
-    def_fn(p, "subarray", fn this, args ->
+    def_fn(p, "subarray", 2, fn this, args ->
       unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
       {:obj, id} = this
       %{host: {__MODULE__, {:ta, kind, bid, off0, len0} = d0}} = deref(id)
@@ -1247,47 +1431,48 @@ defmodule Browser.JS.TypedArrays do
 
       from = rel_index_inf(arg(args, 0), src_len, 0)
       size = size_of(kind)
+      begin = (off0 + from * size) * 1.0
 
-      len =
-        if len0 == :auto and arg(args, 1) == :undefined do
-          :auto
-        else
-          to = rel_index_inf(arg(args, 1), src_len, src_len)
-          max(to - from, 0)
-        end
-
-      view(kind, bid, off0 + from * size, len)
+      if len0 == :auto and arg(args, 1) == :undefined do
+        species_create(this, kind, [buffer_object(bid), begin])
+      else
+        to = rel_index_inf(arg(args, 1), src_len, src_len)
+        species_create(this, kind, [buffer_object(bid), begin, max(to - from, 0) * 1.0])
+      end
     end)
 
-    def_fn(p, "slice", fn this, args ->
+    def_fn(p, "slice", 2, fn this, args ->
       {:ta, kind, _, _, len} = data!(this)
       from = rel_index_inf(arg(args, 0), len, 0)
       to = rel_index_inf(arg(args, 1), len, len)
       count = max(to - from, 0)
       zero = if kind in [:i64, :u64], do: {:bigint, 0}, else: 0.0
+      result = species_create(this, kind, [count * 1.0])
 
-      if count > 0, do: data!(this)
+      if count > 0 do
+        data!(this)
 
-      make(
-        kind,
-        for i <- from..(from + count - 1)//1 do
-          if present?(this, i), do: ta_at(this, i), else: zero
+        for {i, n} <- Enum.with_index(from..(from + count - 1)//1) do
+          Interp.put(result, n, if(present?(this, i), do: ta_at(this, i), else: zero))
         end
-      )
+      end
+
+      result
     end)
 
-    def_fn(p, "map", fn this, args ->
-      {:ta, kind, _, _, _} = data!(this)
+    def_fn(p, "map", 1, fn this, args ->
+      {:ta, kind, _, _, len} = data!(this)
       f = callable!(arg(args, 0))
+      result = species_create(this, kind, [len * 1.0])
 
-      make(
-        kind,
-        live_pairs(this)
-        |> Enum.map(fn {v, i} -> call(f, arg(args, 1), [v, i * 1.0, this]) end)
-      )
+      for {{v, i}, n} <- Stream.with_index(live_pairs(this)) do
+        Interp.put(result, n, call(f, arg(args, 1), [v, i * 1.0, this]))
+      end
+
+      result
     end)
 
-    def_fn(p, "filter", fn this, args ->
+    def_fn(p, "filter", 1, fn this, args ->
       {:ta, kind, _, _, _} = data!(this)
       f = callable!(arg(args, 0))
 
@@ -1296,7 +1481,9 @@ defmodule Browser.JS.TypedArrays do
         |> Enum.filter(fn {v, i} -> truthy(call(f, arg(args, 1), [v, i * 1.0, this])) end)
         |> Enum.map(&elem(&1, 0))
 
-      make(kind, kept)
+      result = species_create(this, kind, [length(kept) * 1.0])
+      for {v, n} <- Enum.with_index(kept), do: Interp.put(result, n, v)
+      result
     end)
 
     def_fn(p, "forEach", fn this, args ->
@@ -1654,7 +1841,10 @@ defmodule Browser.JS.TypedArrays do
     put_proto(:data_view, p)
 
     ctor =
-      native("DataView", fn _, args ->
+      native("DataView", fn this, args ->
+        unless match?({:obj, _}, this),
+          do: throw_error("TypeError", "Constructor DataView requires 'new'")
+
         buf = arg(args, 0)
 
         unless buffer?(buf),
@@ -1690,6 +1880,42 @@ defmodule Browser.JS.TypedArrays do
     put_hidden(p, "constructor", ctor)
     put_tag(p, "DataView")
     declare(scope, "DataView", ctor)
+
+    dv! = fn this ->
+      case this do
+        {:obj, id} ->
+          case deref(id) do
+            %{host: {__MODULE__, {:dv, _, _, _} = d}} -> d
+            _ -> throw_error("TypeError", "this is not a DataView")
+          end
+
+        _ ->
+          throw_error("TypeError", "this is not a DataView")
+      end
+    end
+
+    Props.define_accessor(p, "buffer",
+      get: native("get buffer", fn this, _ -> buffer_object(elem(dv!.(this), 1)) end),
+      enumerable: false
+    )
+
+    Props.define_accessor(p, "byteLength",
+      get:
+        native("get byteLength", fn this, _ ->
+          {_, _, _, len} = dv_eff!(dv!.(this))
+          len * 1.0
+        end),
+      enumerable: false
+    )
+
+    Props.define_accessor(p, "byteOffset",
+      get:
+        native("get byteOffset", fn this, _ ->
+          {_, _, off, _} = dv_eff!(dv!.(this))
+          off * 1.0
+        end),
+      enumerable: false
+    )
 
     for {name, kind} <- @dv_types do
       size = size_of(kind)

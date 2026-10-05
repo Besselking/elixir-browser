@@ -934,6 +934,7 @@ defmodule Browser.JS.Builtins do
           )
 
       o = this_obj(this)
+      len = if plain_elements?(o), do: nil, else: length_of(o, false)
 
       # the values are read first (holes skipped), sorted, then written back and the
       # slots left over deleted, so getters and setters see the spec's order of access
@@ -959,7 +960,6 @@ defmodule Browser.JS.Builtins do
       if plain_elements?(o) do
         put_elems(o, sorted)
       else
-        len = length_of(o, false)
         sorted |> Enum.with_index() |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
 
         for i <- length(sorted)..(len - 1)//1 do
