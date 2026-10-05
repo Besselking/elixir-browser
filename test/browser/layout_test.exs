@@ -4233,6 +4233,19 @@ defmodule Browser.LayoutTest do
     assert Enum.any?(items, &(&1[:text] == "a   b"))
   end
 
+  test "an absolute box is as wide as an empty inline-block in it" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:absolute;left:0;background:#0f0"><div style="display:inline-block;width:96px;height:50px"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+    rect = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert rect.w == 96
+    assert rect.h >= 50
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(
