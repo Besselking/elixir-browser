@@ -565,18 +565,18 @@ defmodule Browser.Layout do
           inline_ops(tag, kids, style, c, acc)
 
         :inline_block ->
-          inline_block_ops(el, parent_style, c, acc)
+          hoist_atom(inline_block_ops(el, parent_style, c, acc))
 
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
           acc = [{:flush} | acc]
-          acc = inline_block_ops(el, parent_style, c, acc, true)
+          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true))
           [{:flush} | acc]
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
           acc = [{:flush} | acc]
-          acc = inline_block_ops(el, parent_style, c, acc, true, true)
+          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
           [{:flush} | acc]
 
         kind ->
@@ -910,6 +910,39 @@ defmodule Browser.Layout do
 
     [{:inline_block, sub, spec, parent_style} | acc]
   end
+
+  # out-of-flow boxes with no positioned ancestor inside the atom are placed against what
+  # contains the atom, not against it
+  defp hoist_atom([{:inline_block, sub, spec, ps} | acc]) do
+    {escaped, sub} = hoist_abs(sub)
+    [{:inline_block, sub, spec, ps} | Enum.reduce(escaped, acc, &[&1 | &2])]
+  end
+
+  # splits the absolute boxes whose containing block is outside of `ops` from the rest
+  defp hoist_abs(ops) do
+    {kept, escaped, _} =
+      Enum.reduce(ops, {[], [], {0, []}}, fn
+        {:abs, _, %{fixed: false}} = a, {kept, esc, {0, _} = d} ->
+          {kept, [a | esc], d}
+
+        op, {kept, esc, d} ->
+          {[op | kept], esc, track_pos(op, d)}
+      end)
+
+    {Enum.reverse(escaped), Enum.reverse(kept)}
+  end
+
+  defp track_pos({:pos_inline}, {n, s}), do: {n + 1, s}
+  defp track_pos({:pos_end}, {n, s}), do: {n - 1, s}
+
+  defp track_pos({:box_start, ref, %{pos: p}}, {n, s}) when p not in [nil, false],
+    do: {n + 1, [ref | s]}
+
+  defp track_pos({:box_end, ref}, {n, s}) do
+    if ref in s, do: {n - 1, List.delete(s, ref)}, else: {n, s}
+  end
+
+  defp track_pos(_, d), do: d
 
   # display -> :block | :list_item | :flex | :inline | :contents
   defp kind(tag, c) do

@@ -4192,6 +4192,19 @@ defmodule Browser.LayoutTest do
     assert index.(&(&1[:text] == "drop")) > drop_bg
   end
 
+  test "an absolute box inside an inline-block is placed against the page when nothing in it is positioned" do
+    page =
+      Browser.Page.build(
+        ~s|<p>pad</p><div style="display:inline-block"><div style="position:absolute;left:50px;top:0;width:30px;height:10px;background:#f00"></div>x</div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    red = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+    assert red.x == 50
+    assert red.y == 0
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(
