@@ -38,6 +38,7 @@ defmodule Browser.JS.Collections do
     Browser.JS.TypedArrays.install(scope)
     Browser.JS.Disposables.install(scope)
     Browser.JS.Iterators.install(scope)
+    Browser.JS.FunctionKinds.install(scope)
     :ok
   end
 
@@ -134,6 +135,58 @@ defmodule Browser.JS.Collections do
 
   # ── iterator objects ───────────────────────────────────────
 
+  # an Array or String iterator: `step` produces the next result object, `next` is on the shared
+  # prototype
+  defp make_kind_iterator(list, kind) do
+    pos = make_ref()
+    Process.put(pos, list)
+
+    step = fn ->
+      case Process.get(pos) do
+        [h | t] ->
+          Process.put(pos, t)
+          new_object([{"value", h}, {"done", false}])
+
+        _ ->
+          new_object([{"value", :undefined}, {"done", true}])
+      end
+    end
+
+    array_iterator(step, kind)
+  end
+
+  @doc "An Array Iterator object (also used for typed arrays) whose `next` runs `step`."
+  def array_iterator(step, kind \\ :array_iterator) do
+    {:obj, id} = it = new_object([], proto(kind))
+    store(id, deref(id) |> Map.put(:iter_kind, kind) |> Map.put(:iter_step, step))
+    it
+  end
+
+  defp install_kind_iterator(kind, tag) do
+    p = new_object([], proto(:iterator))
+    put_proto(kind, p)
+    put_tag(p, tag)
+
+    def_fn(p, "next", fn this, _ ->
+      step =
+        case this do
+          {:obj, id} ->
+            case deref(id) do
+              %{iter_kind: ^kind, iter_step: step} -> step
+              _ -> nil
+            end
+
+          _ ->
+            nil
+        end
+
+      if step == nil,
+        do: throw_error("TypeError", "next method called on an incompatible receiver")
+
+      step.()
+    end)
+  end
+
   @doc "An iterator object over a list (computed up front)."
   def make_iterator(list) do
     pos = make_ref()
@@ -163,10 +216,15 @@ defmodule Browser.JS.Collections do
     put_proto(:iterator, p)
     put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
 
+    install_kind_iterator(:array_iterator, "Array Iterator")
+    install_kind_iterator(:string_iterator, "String Iterator")
+
     # arrays, strings
     array = proto(:array)
 
-    values = native("values", fn this, _ -> make_iterator(iterate(this)) end)
+    values =
+      native("values", fn this, _ -> make_kind_iterator(iterate(this), :array_iterator) end)
+
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
 
@@ -183,17 +241,25 @@ defmodule Browser.JS.Collections do
     store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
 
     def_fn(array, "keys", fn this, _ ->
-      make_iterator(for i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0)
+      make_kind_iterator(
+        for(i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0),
+        :array_iterator
+      )
     end)
 
     def_fn(array, "entries", fn this, _ ->
-      make_iterator(for {v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v]))
+      make_kind_iterator(
+        for({v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v])),
+        :array_iterator
+      )
     end)
 
     put_hidden(
       proto(:string),
       @iterator,
-      native("[Symbol.iterator]", fn this, _ -> make_iterator(String.codepoints(to_str(this))) end)
+      native("[Symbol.iterator]", fn this, _ ->
+        make_kind_iterator(String.codepoints(to_str(this)), :string_iterator)
+      end)
     )
   end
 
@@ -575,6 +641,183 @@ defmodule Browser.JS.Collections do
       get: native("get size", fn this, _ -> map_size(data!(this, :set).data) * 1.0 end),
       enumerable: false
     )
+
+    install_set_methods(p)
+  end
+
+  # ── Set methods (union, intersection, ...) ─────────────────
+
+  # GetSetRecord: the argument must look like a set (`size`, `has`, `keys`)
+  defp set_record(other) do
+    unless match?({:obj, _}, other),
+      do: throw_error("TypeError", "the argument must be an object")
+
+    int =
+      case to_num(Interp.get(other, "size")) do
+        :nan -> throw_error("TypeError", "size is not a number")
+        :infinity -> :infinity
+        :neg_infinity -> -1
+        n -> trunc(n)
+      end
+
+    if int != :infinity and int < 0, do: throw_error("RangeError", "size must not be negative")
+    has = Interp.get(other, "has")
+    unless function?(has), do: throw_error("TypeError", "has is not a function")
+    keys = Interp.get(other, "keys")
+    unless function?(keys), do: throw_error("TypeError", "keys is not a function")
+    %{obj: other, size: int, has: has, keys: keys}
+  end
+
+  # calls `fun` with each value of `rec.keys()` until it says :stop (then the iterator is closed)
+  defp each_key(rec, fun) do
+    it = call(rec.keys, rec.obj, [])
+    unless match?({:obj, _}, it), do: throw_error("TypeError", "keys() did not return an object")
+    next = Interp.get(it, "next")
+    key_loop(it, next, fun)
+  end
+
+  defp key_loop(it, next, fun) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        :done
+
+      {:ok, v} ->
+        case fun.(norm(v)) do
+          :cont ->
+            key_loop(it, next, fun)
+
+          :stop ->
+            Interp.iter_close(it, false)
+            :stopped
+        end
+    end
+  end
+
+  # the values of the receiver, live: what `has` calls add or remove is seen
+  defp each_own(this, fun, cursor \\ 0) do
+    {:obj, id} = this
+
+    case next_from(deref(id), cursor) do
+      :none ->
+        :done
+
+      {seq, k, _} ->
+        case fun.(k) do
+          :cont -> each_own(this, fun, seq + 1)
+          :stop -> :stopped
+        end
+    end
+  end
+
+  defp has?(rec, v), do: truthy(call(rec.has, rec.obj, [v]))
+  defp in_set?(this, v), do: Map.has_key?(deref(elem(this, 1)).data, v)
+  defp set_size(this), do: map_size(deref(elem(this, 1)).data)
+
+  defp copy_set(this) do
+    r = new_collection(:set, :set)
+    for {_, k, _} <- ordered(deref(elem(this, 1))), do: put_entry(r, k, k)
+    r
+  end
+
+  defp remove_value(r, v) do
+    {:obj, rid} = r
+    delete_entry(rid, deref(rid), v)
+  end
+
+  defp install_set_methods(p) do
+    def_set = fn name, fun ->
+      f =
+        native(name, fn this, args ->
+          data!(this, :set)
+          fun.(this, set_record(arg(args, 0)))
+        end)
+
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, 1.0))
+      put_hidden(p, name, f)
+    end
+
+    def_set.("union", fn this, rec ->
+      r = copy_set(this)
+
+      each_key(rec, fn v ->
+        put_entry(r, v, v)
+        :cont
+      end)
+
+      r
+    end)
+
+    def_set.("intersection", fn this, rec ->
+      r = new_collection(:set, :set)
+
+      if set_size(this) <= rec.size do
+        each_own(this, fn e ->
+          if has?(rec, e) and not Map.has_key?(deref(elem(r, 1)).data, e), do: put_entry(r, e, e)
+          :cont
+        end)
+      else
+        each_key(rec, fn v ->
+          if in_set?(this, v), do: put_entry(r, v, v)
+          :cont
+        end)
+      end
+
+      r
+    end)
+
+    def_set.("difference", fn this, rec ->
+      r = copy_set(this)
+
+      if set_size(this) <= rec.size do
+        each_own(this, fn e ->
+          if has?(rec, e), do: remove_value(r, e)
+          :cont
+        end)
+      else
+        each_key(rec, fn v ->
+          remove_value(r, v)
+          :cont
+        end)
+      end
+
+      r
+    end)
+
+    def_set.("symmetricDifference", fn this, rec ->
+      r = copy_set(this)
+
+      each_key(rec, fn v ->
+        if in_set?(this, v), do: remove_value(r, v), else: put_entry(r, v, v)
+        :cont
+      end)
+
+      r
+    end)
+
+    def_set.("isSubsetOf", fn this, rec ->
+      if set_size(this) > rec.size do
+        false
+      else
+        each_own(this, fn e -> if has?(rec, e), do: :cont, else: :stop end) == :done
+      end
+    end)
+
+    def_set.("isSupersetOf", fn this, rec ->
+      if set_size(this) < rec.size do
+        false
+      else
+        each_key(rec, fn v -> if in_set?(this, v), do: :cont, else: :stop end) == :done
+      end
+    end)
+
+    def_set.("isDisjointFrom", fn this, rec ->
+      if set_size(this) <= rec.size do
+        each_own(this, fn e -> if has?(rec, e), do: :stop, else: :cont end) == :done
+      else
+        each_key(rec, fn v -> if in_set?(this, v), do: :stop, else: :cont end) == :done
+      end
+    end)
   end
 
   # WeakMap and WeakSet: keyed by objects, and nothing is ever collected

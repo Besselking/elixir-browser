@@ -289,6 +289,12 @@ defmodule Browser.JS.Iterators do
     weird.("constructor", "get constructor", ctor)
     weird.(tag, "get [Symbol.toStringTag]", "Iterator")
 
+    # prototypes made before %IteratorPrototype% existed
+    case proto(:regexp_string_iterator) do
+      {:obj, rid} -> store(rid, %{deref(rid) | proto: iter_proto})
+      _ -> :ok
+    end
+
     install_helper_proto(iter_proto)
     install_methods(iter_proto)
     install_statics(ctor, iter_proto)

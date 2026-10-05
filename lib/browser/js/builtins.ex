@@ -1608,28 +1608,26 @@ defmodule Browser.JS.Builtins do
       cp_slice(this, start, count)
     end)
 
-    str_fn(p, "match", fn this, args ->
-      Browser.JS.RegExp.string_match(this, to_regexp(arg(args, 0)))
+    def_fn(p, "match", fn this, args -> Browser.JS.RegExp.str_match(this, arg(args, 0)) end)
+
+    def_fn(p, "matchAll", fn this, args ->
+      Browser.JS.RegExp.str_match_all(this, arg(args, 0))
     end)
 
-    str_fn(p, "matchAll", fn this, args ->
-      Browser.JS.RegExp.string_match_all(this, to_regexp(arg(args, 0), "g"))
+    def_fn(p, "search", fn this, args -> Browser.JS.RegExp.str_search(this, arg(args, 0)) end)
+
+    def_fn(p, "split", fn this, args ->
+      Browser.JS.RegExp.str_split(this, arg(args, 0), arg(args, 1))
     end)
 
-    str_fn(p, "search", fn this, args ->
-      Browser.JS.RegExp.string_search(this, to_regexp(arg(args, 0)))
+    def_fn(p, "replace", fn this, args ->
+      Browser.JS.RegExp.str_replace(this, arg(args, 0), arg(args, 1), false)
     end)
 
-    str_fn(p, "split", fn this, args ->
-      sep = arg(args, 0)
-
-      if Browser.JS.RegExp.regexp?(sep),
-        do: Browser.JS.RegExp.string_split(this, sep, arg(args, 1)),
-        else: split_string(this, sep, arg(args, 1))
+    def_fn(p, "replaceAll", fn this, args ->
+      Browser.JS.RegExp.str_replace(this, arg(args, 0), arg(args, 1), true)
     end)
 
-    str_fn(p, "replace", fn this, args -> replace(this, args, false) end)
-    str_fn(p, "replaceAll", fn this, args -> replace(this, args, true) end)
     str_fn(p, "padStart", fn this, args -> pad(this, args, :leading) end)
     str_fn(p, "padEnd", fn this, args -> pad(this, args, :trailing) end)
 
@@ -1657,54 +1655,6 @@ defmodule Browser.JS.Builtins do
   defp cp_slice(s, from, count), do: Str.slice(s, from, count)
 
   defp index_of(s, needle, from), do: Str.index_of(s, needle, from)
-
-  defp split_string(this, sep, limit) do
-    parts =
-      cond do
-        sep == :undefined -> [this]
-        to_str(sep) == "" -> String.codepoints(this)
-        true -> String.split(this, to_str(sep))
-      end
-
-    new_array(if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit)))
-  end
-
-  defp to_regexp(v, flags \\ "") do
-    if Browser.JS.RegExp.regexp?(v), do: v, else: Browser.JS.RegExp.new(to_str(v), flags)
-  end
-
-  defp replace(s, args, all?) do
-    if Browser.JS.RegExp.regexp?(arg(args, 0)),
-      do: Browser.JS.RegExp.string_replace(s, arg(args, 0), arg(args, 1), all?),
-      else: replace_string(s, args, all?)
-  end
-
-  defp replace_string(s, args, all?) do
-    pattern = to_str(arg(args, 0))
-    repl = arg(args, 1)
-
-    fun = fn matched, pos ->
-      if function?(repl),
-        do: to_str(call(repl, :undefined, [matched, float(pos), s])),
-        else: to_str(repl)
-    end
-
-    case :binary.matches(s, pattern) do
-      [] ->
-        s
-
-      matches ->
-        matches = if all?, do: matches, else: Enum.take(matches, 1)
-
-        {out, last} =
-          Enum.reduce(matches, {[], 0}, fn {pos, len}, {acc, from} ->
-            piece = binary_part(s, from, pos - from)
-            {[fun.(pattern, String.length(binary_part(s, 0, pos))), piece | acc], pos + len}
-          end)
-
-        IO.iodata_to_binary(Enum.reverse([binary_part(s, last, byte_size(s) - last) | out]))
-    end
-  end
 
   defp pad(s, args, side) do
     target = to_int(arg(args, 0))

@@ -32,6 +32,9 @@ defmodule Browser.JS.RegExp do
        })}
 
     put_hidden(obj, "lastIndex", 0.0)
+    {:obj, id} = obj
+    o = deref(id)
+    store(id, Map.put(o, :attrs, %{"lastIndex" => %{w: true, c: false, e: false}}))
     obj
   end
 
@@ -302,6 +305,7 @@ defmodule Browser.JS.RegExp do
   defp translate("[^]" <> rest, false, acc), do: translate(rest, false, ["[\\s\\S]" | acc])
   defp translate("[]" <> rest, false, acc), do: translate(rest, false, ["(?!)" | acc])
   defp translate("[" <> rest, false, acc), do: translate(rest, true, ["[" | acc])
+  defp translate("[" <> rest, true, acc), do: translate(rest, true, ["\\[" | acc])
   defp translate("]" <> rest, true, acc), do: translate(rest, false, ["]" | acc])
 
   defp translate(<<c::utf8, rest::binary>>, cls, acc),
@@ -442,178 +446,596 @@ defmodule Browser.JS.RegExp do
     Interp.define_data(arr, "indices", indices)
   end
 
-  defp put(o, k, v), do: Interp.put(o, k, v)
+  # ── the RegExp protocol (exec, @@match, @@replace, ...) ────
 
-  @doc "`re.exec(subject)`: the match array or null, advancing `lastIndex` for g/y regexps."
+  @sym_match {:symbol, :match, "Symbol.match"}
+  @sym_match_all {:symbol, :matchAll, "Symbol.matchAll"}
+  @sym_replace {:symbol, :replace, "Symbol.replace"}
+  @sym_search {:symbol, :search, "Symbol.search"}
+  @sym_split {:symbol, :split, "Symbol.split"}
+  @sym_species {:symbol, :species, "Symbol.species"}
+
+  defp tolen(v), do: v |> to_int() |> max(0) |> min(9_007_199_254_740_991)
+
+  defp strict_set(o, key, v) do
+    unless Props.ordinary_set(o, key, v, o),
+      do: throw_error("TypeError", "Cannot assign to read only property '#{key}'")
+
+    :ok
+  end
+
+  defp object?({:obj, _}), do: true
+  defp object?(_), do: false
+
+  defp require_object(v) do
+    unless object?(v), do: throw_error("TypeError", "RegExp method called on a non-object")
+    v
+  end
+
+  defp same_value?(a, b) when is_number(a) and is_number(b),
+    do: <<a * 1.0::float-64>> == <<b * 1.0::float-64>>
+
+  defp same_value?(a, b), do: a === b
+
+  # GetMethod: nil when undefined or null
+  defp get_method(obj, key) do
+    case Interp.get(obj, key) do
+      v when v in [:undefined, :null] ->
+        nil
+
+      f ->
+        unless function?(f), do: throw_error("TypeError", "method is not a function")
+        f
+    end
+  end
+
+  @doc "IsRegExp."
+  def is_regexp({:obj, _} = v) do
+    case Interp.get(v, @sym_match) do
+      :undefined -> regexp?(v)
+      m -> truthy(m)
+    end
+  end
+
+  def is_regexp(_), do: false
+
+  @doc "RegExpBuiltinExec: the match array or null, advancing `lastIndex` for g/y regexps."
   def exec(re_obj, subject) do
+    last = tolen(Interp.get(re_obj, "lastIndex"))
     global? = flag?(re_obj, "g") or flag?(re_obj, "y")
-    from = if global?, do: to_int(Interp.get(re_obj, "lastIndex")), else: 0
+    from = if global?, do: last, else: 0
 
-    if from > 0 and from > cp_count(subject) do
-      put(re_obj, "lastIndex", 0.0)
+    if from > cp_count(subject) do
+      if global?, do: strict_set(re_obj, "lastIndex", 0.0)
       :null
     else
       case match_at(re_obj, subject, from) do
         nil ->
-          if global?, do: put(re_obj, "lastIndex", 0.0)
+          if global?, do: strict_set(re_obj, "lastIndex", 0.0)
           :null
 
         m ->
-          if global?, do: put(re_obj, "lastIndex", m.stop * 1.0)
+          if global?, do: strict_set(re_obj, "lastIndex", m.stop * 1.0)
           match_array(m, subject)
       end
     end
   end
 
-  @doc "All matches of `re_obj` in `subject`, as match records."
-  def all_matches(re_obj, subject), do: all_matches(re_obj, subject, 0, [])
+  # RegExpExec: the object's own `exec` when it has one
+  defp regexp_exec(rx, s) do
+    case Interp.get(rx, "exec") do
+      f when is_tuple(f) ->
+        if function?(f) do
+          r = call(f, rx, [s])
 
-  defp all_matches(re_obj, subject, from, acc) do
-    if from > cp_count(subject) do
-      Enum.reverse(acc)
-    else
-      case match_at(re_obj, subject, from) do
-        nil ->
-          Enum.reverse(acc)
+          unless r == :null or object?(r),
+            do: throw_error("TypeError", "exec result must be an object or null")
 
-        m ->
-          # an empty match steps on by one so the scan always ends
-          next = if m.stop == m.start, do: m.stop + 1, else: m.stop
-          all_matches(re_obj, subject, next, [m | acc])
-      end
-    end
-  end
-
-  # ── String methods ─────────────────────────────────────────
-
-  def string_match(s, re_obj) do
-    if flag?(re_obj, "g") do
-      case all_matches(re_obj, s) do
-        [] -> :null
-        ms -> new_array(Enum.map(ms, & &1.text))
-      end
-    else
-      put_hidden(re_obj, "lastIndex", 0.0)
-      exec(re_obj, s)
-    end
-  end
-
-  def string_match_all(s, re_obj) do
-    unless flag?(re_obj, "g"),
-      do:
-        throw_error(
-          "TypeError",
-          "String.prototype.matchAll called with a non-global RegExp argument"
-        )
-
-    new_array(Enum.map(all_matches(re_obj, s), &match_array(&1, s)))
-  end
-
-  def string_search(s, re_obj) do
-    case match_at(re_obj, s, 0) do
-      nil -> -1.0
-      m -> m.start * 1.0
-    end
-  end
-
-  def string_split(s, re_obj, limit) do
-    matches =
-      all_matches(re_obj, s)
-      |> Enum.reject(&(&1.stop == &1.start and &1.start >= cp_count(s)))
-
-    {parts, last} =
-      Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
-        if m.stop == m.start and m.start == from and from == 0 do
-          {acc, from}
+          r
         else
-          piece = Str.slice(s, from, m.start - from)
-          caps = for g <- m.groups, do: g
-          {Enum.reverse(caps) ++ [piece | acc], m.stop}
+          builtin_exec!(rx, s)
+        end
+
+      _ ->
+        builtin_exec!(rx, s)
+    end
+  end
+
+  defp builtin_exec!(rx, s) do
+    unless regexp?(rx), do: throw_error("TypeError", "RegExp exec method called on a non-RegExp")
+    exec(rx, s)
+  end
+
+  defp species_constructor(o, default) do
+    c = Interp.get(o, "constructor")
+
+    cond do
+      c == :undefined ->
+        default
+
+      not object?(c) ->
+        throw_error("TypeError", "constructor is not an object")
+
+      true ->
+        case Interp.get(c, @sym_species) do
+          s when s in [:undefined, :null] ->
+            default
+
+          s ->
+            if constructor?(s),
+              do: s,
+              else: throw_error("TypeError", "species is not a constructor")
+        end
+    end
+  end
+
+  defp ctor, do: :erlang.get(:regexp_ctor)
+
+  defp group_text(result, i) do
+    case Interp.get(result, Integer.to_string(i)) do
+      :undefined -> :undefined
+      v -> to_str(v)
+    end
+  end
+
+  # the `@@match` loop of a global regexp and friends: advance past an empty match
+  defp bump_empty(rx, matched) do
+    if matched == "" do
+      this_index = tolen(Interp.get(rx, "lastIndex"))
+      strict_set(rx, "lastIndex", (this_index + 1) * 1.0)
+    end
+  end
+
+  def symbol_match(this, string) do
+    rx = require_object(this)
+    s = to_str(string)
+    flags = to_str(Interp.get(rx, "flags"))
+
+    if not String.contains?(flags, "g") do
+      regexp_exec(rx, s)
+    else
+      strict_set(rx, "lastIndex", 0.0)
+      match_loop(rx, s, [])
+    end
+  end
+
+  defp match_loop(rx, s, acc) do
+    case regexp_exec(rx, s) do
+      :null ->
+        if acc == [], do: :null, else: new_array(Enum.reverse(acc))
+
+      result ->
+        matched = to_str(Interp.get(result, "0"))
+        bump_empty(rx, matched)
+        match_loop(rx, s, [matched | acc])
+    end
+  end
+
+  def symbol_match_all(this, string) do
+    r = require_object(this)
+    s = to_str(string)
+    c = species_constructor(r, ctor())
+    flags = to_str(Interp.get(r, "flags"))
+    matcher = construct(c, [r, flags])
+    strict_set(matcher, "lastIndex", tolen(Interp.get(r, "lastIndex")) * 1.0)
+
+    it = new_object([], proto(:regexp_string_iterator))
+    {:obj, id} = it
+
+    store(
+      id,
+      Map.put(deref(id), :re_iter, {matcher, s, String.contains?(flags, "g"), make_ref()})
+    )
+
+    it
+  end
+
+  defp string_iterator_next({:obj, id} = this) do
+    case Map.get(deref(id), :re_iter) do
+      {rx, s, global?, ref} ->
+        if :erlang.get(ref) == :done do
+          new_object([{"value", :undefined}, {"done", true}])
+        else
+          case regexp_exec(rx, s) do
+            :null ->
+              :erlang.put(ref, :done)
+              new_object([{"value", :undefined}, {"done", true}])
+
+            match ->
+              if global? do
+                bump_empty(rx, to_str(Interp.get(match, "0")))
+              else
+                :erlang.put(ref, :done)
+              end
+
+              new_object([{"value", match}, {"done", false}])
+          end
+        end
+
+      _ ->
+        _ = this
+        throw_error("TypeError", "next called on an incompatible receiver")
+    end
+  end
+
+  defp string_iterator_next(_), do: throw_error("TypeError", "next called on a non-object")
+
+  def symbol_search(this, string) do
+    rx = require_object(this)
+    s = to_str(string)
+    previous = Interp.get(rx, "lastIndex")
+    unless same_value?(previous, 0.0), do: strict_set(rx, "lastIndex", 0.0)
+    result = regexp_exec(rx, s)
+    current = Interp.get(rx, "lastIndex")
+    unless same_value?(current, previous), do: strict_set(rx, "lastIndex", previous)
+    if result == :null, do: -1.0, else: Interp.get(result, "index")
+  end
+
+  def symbol_split(this, string, limit) do
+    rx = require_object(this)
+    s = to_str(string)
+    c = species_constructor(rx, ctor())
+    flags = to_str(Interp.get(rx, "flags"))
+    new_flags = if String.contains?(flags, "y"), do: flags, else: flags <> "y"
+    splitter = construct(c, [rx, new_flags])
+    lim = if limit == :undefined, do: 4_294_967_295, else: to_uint32(limit)
+    size = cp_count(s)
+
+    cond do
+      lim == 0 ->
+        new_array([])
+
+      size == 0 ->
+        if regexp_exec(splitter, s) != :null, do: new_array([]), else: new_array([s])
+
+      true ->
+        split_loop(splitter, s, size, lim, 0, 0, [])
+    end
+  end
+
+  defp to_uint32(v) do
+    case to_num(v) do
+      n when n in [:nan, :infinity, :neg_infinity] -> 0
+      n -> Integer.mod(trunc(n), 4_294_967_296)
+    end
+  end
+
+  defp split_loop(splitter, s, size, lim, p, q, acc) do
+    if q >= size do
+      new_array(Enum.reverse([Str.slice(s, p, size - p) | acc]))
+    else
+      strict_set(splitter, "lastIndex", q * 1.0)
+
+      case regexp_exec(splitter, s) do
+        :null ->
+          split_loop(splitter, s, size, lim, p, q + 1, acc)
+
+        z ->
+          e = min(tolen(Interp.get(splitter, "lastIndex")), size)
+
+          if e == p do
+            split_loop(splitter, s, size, lim, p, q + 1, acc)
+          else
+            acc = [Str.slice(s, p, q - p) | acc]
+
+            if length(acc) == lim do
+              new_array(Enum.reverse(acc))
+            else
+              n = max(tolen(Interp.get(z, "length")) - 1, 0)
+
+              case add_captures(z, 1, n, acc, lim) do
+                {:full, acc} -> new_array(Enum.reverse(acc))
+                {:ok, acc} -> split_loop(splitter, s, size, lim, e, e, acc)
+              end
+            end
+          end
+      end
+    end
+  end
+
+  defp add_captures(_z, i, n, acc, _lim) when i > n, do: {:ok, acc}
+
+  defp add_captures(z, i, n, acc, lim) do
+    acc = [Interp.get(z, Integer.to_string(i)) | acc]
+    if length(acc) == lim, do: {:full, acc}, else: add_captures(z, i + 1, n, acc, lim)
+  end
+
+  def symbol_replace(this, string, replace_value) do
+    rx = require_object(this)
+    s = to_str(string)
+    len = cp_count(s)
+    functional? = function?(replace_value)
+    replace_value = if functional?, do: replace_value, else: to_str(replace_value)
+    flags = to_str(Interp.get(rx, "flags"))
+    global? = String.contains?(flags, "g")
+    if global?, do: strict_set(rx, "lastIndex", 0.0)
+    results = collect_results(rx, s, global?, [])
+
+    {out, next} =
+      Enum.reduce(results, {[], 0}, fn result, {acc, next_pos} ->
+        n_captures = max(tolen(Interp.get(result, "length")) - 1, 0)
+        matched = to_str(Interp.get(result, "0"))
+        match_len = cp_count(matched)
+
+        position =
+          case Interp.get(result, "index") |> to_num() do
+            n when n in [:nan] -> 0
+            :infinity -> len
+            :neg_infinity -> 0
+            n -> trunc(n) |> max(0) |> min(len)
+          end
+
+        captures = for i <- 1..n_captures//1, do: group_text(result, i)
+        named = Interp.get(result, "groups")
+
+        replacement =
+          if functional? do
+            args = [matched | captures] ++ [position * 1.0, s]
+            args = if named == :undefined, do: args, else: args ++ [named]
+            to_str(call(replace_value, :undefined, args))
+          else
+            named = if named == :undefined, do: named, else: to_object(named)
+            get_substitution(matched, s, position, captures, named, replace_value)
+          end
+
+        if position >= next_pos do
+          {[replacement, Str.slice(s, next_pos, position - next_pos) | acc], position + match_len}
+        else
+          {acc, next_pos}
         end
       end)
 
-    parts = Enum.reverse([Str.slice(s, last, cp_count(s)) | parts])
-    parts = if limit == :undefined, do: parts, else: Enum.take(parts, to_int(limit))
-    new_array(parts)
+    tail = if next >= len, do: "", else: Str.slice(s, next, len - next)
+    IO.iodata_to_binary(Enum.reverse([tail | out]))
   end
 
-  @doc "`s.replace(re, repl)` and `s.replaceAll(re, repl)`."
-  def string_replace(s, re_obj, repl, all?) do
-    if all? and not flag?(re_obj, "g"),
-      do: throw_error("TypeError", "replaceAll must be called with a global RegExp")
+  defp to_object({:obj, _} = o), do: o
 
-    matches =
-      if flag?(re_obj, "g"),
-        do: all_matches(re_obj, s),
-        else: List.wrap(match_at(re_obj, s, 0))
+  defp to_object(v) when v in [:undefined, :null],
+    do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-    {out, last} =
-      Enum.reduce(matches, {[], 0}, fn m, {acc, from} ->
-        piece = Str.slice(s, from, m.start - from)
-        {[expand(repl, m, s), piece | acc], m.stop}
-      end)
+  defp to_object(v), do: v
 
-    IO.iodata_to_binary(Enum.reverse([Str.slice(s, last, cp_count(s)) | out]))
-  end
+  defp collect_results(rx, s, global?, acc) do
+    case regexp_exec(rx, s) do
+      :null ->
+        Enum.reverse(acc)
 
-  defp expand(repl, m, s) do
-    if function?(repl) do
-      extra = if m.named, do: [new_object(Enum.map(m.named, fn {k, v} -> {k, v} end))], else: []
-      args = [m.text | m.groups] ++ [m.start * 1.0, s] ++ extra
-      to_str(call(repl, :undefined, args))
-    else
-      substitute(to_str(repl), m, s)
+      result ->
+        if global? do
+          bump_empty(rx, to_str(Interp.get(result, "0")))
+          collect_results(rx, s, true, [result | acc])
+        else
+          Enum.reverse([result | acc])
+        end
     end
   end
 
-  defp substitute(template, m, s), do: substitute(template, m, s, [])
+  @doc "GetSubstitution: expands `$&`, `$1`, `$<name>` and friends in a replacement template."
+  def get_substitution(matched, str, position, captures, named, template),
+    do: subst(template, matched, str, position, captures, named, [])
 
-  defp substitute("", _m, _s, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
-  defp substitute("$$" <> r, m, s, acc), do: substitute(r, m, s, ["$" | acc])
-  defp substitute("$&" <> r, m, s, acc), do: substitute(r, m, s, [m.text | acc])
+  defp subst("", _m, _s, _p, _c, _n, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp subst("$$" <> r, m, s, p, c, n, acc), do: subst(r, m, s, p, c, n, ["$" | acc])
+  defp subst("$&" <> r, m, s, p, c, n, acc), do: subst(r, m, s, p, c, n, [m | acc])
 
-  defp substitute("$`" <> r, m, s, acc),
-    do: substitute(r, m, s, [Str.slice(s, 0, m.start) | acc])
+  defp subst("$`" <> r, m, s, p, c, n, acc),
+    do: subst(r, m, s, p, c, n, [Str.slice(s, 0, p) | acc])
 
-  defp substitute("$'" <> r, m, s, acc),
-    do: substitute(r, m, s, [Str.slice(s, m.stop, cp_count(s)) | acc])
+  defp subst("$'" <> r, m, s, p, c, n, acc) do
+    tail = p + cp_count(m)
+    len = cp_count(s)
+    subst(r, m, s, p, c, n, [if(tail >= len, do: "", else: Str.slice(s, tail, len - tail)) | acc])
+  end
 
-  defp substitute("$<" <> r, m, s, acc) do
-    case String.split(r, ">", parts: 2) do
-      [name, rest] ->
+  defp subst("$<" <> r, m, s, p, c, n, acc) do
+    case {n, String.split(r, ">", parts: 2)} do
+      {:undefined, _} ->
+        subst(r, m, s, p, c, n, ["$<" | acc])
+
+      {_, [name, rest]} ->
         v =
-          if m.named,
-            do: Enum.find_value(m.named, :undefined, fn {k, v} -> if k == name, do: v end),
-            else: :undefined
+          case Interp.get(n, name) do
+            :undefined -> ""
+            v -> to_str(v)
+          end
 
-        substitute(rest, m, s, [if(v == :undefined, do: "", else: v) | acc])
+        subst(rest, m, s, p, c, n, [v | acc])
 
       _ ->
-        substitute(r, m, s, ["$<" | acc])
+        subst(r, m, s, p, c, n, ["$<" | acc])
     end
   end
 
-  defp substitute(<<"$", d, rest::binary>>, m, s, acc) when d in ?1..?9 do
-    # two digits when such a group exists
-    {n, rest} =
+  defp subst(<<"$0", d, rest::binary>>, m, s, p, c, n, acc) when d in ?1..?9 do
+    if d - ?0 <= length(c) do
+      case Enum.at(c, d - ?0 - 1) do
+        :undefined -> subst(rest, m, s, p, c, n, acc)
+        v -> subst(rest, m, s, p, c, n, [v | acc])
+      end
+    else
+      subst(rest, m, s, p, c, n, [<<"$0", d>> | acc])
+    end
+  end
+
+  defp subst(<<"$", d, rest::binary>>, m, s, p, c, n, acc) when d in ?1..?9 do
+    count = length(c)
+
+    {index, digits, rest} =
       case rest do
-        <<d2, rest2::binary>>
-        when d2 in ?0..?9 and (d - ?0) * 10 + (d2 - ?0) <= length(m.groups) ->
-          {(d - ?0) * 10 + (d2 - ?0), rest2}
+        <<d2, rest2::binary>> when d2 in ?0..?9 ->
+          two = (d - ?0) * 10 + (d2 - ?0)
+
+          if two >= 1 and two <= count,
+            do: {two, <<d, d2>>, rest2},
+            else: {d - ?0, <<d>>, rest}
 
         _ ->
-          {d - ?0, rest}
+          {d - ?0, <<d>>, rest}
       end
 
-    case Enum.at(m.groups, n - 1) do
-      nil -> substitute(rest, m, s, ["$#{n}" | acc])
-      :undefined -> substitute(rest, m, s, acc)
-      g -> substitute(rest, m, s, [g | acc])
+    if index >= 1 and index <= count do
+      case Enum.at(c, index - 1) do
+        :undefined -> subst(rest, m, s, p, c, n, acc)
+        v -> subst(rest, m, s, p, c, n, [v | acc])
+      end
+    else
+      subst(rest, m, s, p, c, n, ["$" <> digits | acc])
     end
   end
 
-  defp substitute(<<c::utf8, rest::binary>>, m, s, acc),
-    do: substitute(rest, m, s, [<<c::utf8>> | acc])
+  defp subst(<<c::utf8, rest::binary>>, m, s, p, caps, n, acc),
+    do: subst(rest, m, s, p, caps, n, [<<c::utf8>> | acc])
+
+  # ── String.prototype methods that take a regexp ────────────
+
+  defp coercible!(this, name) do
+    if this in [:undefined, :null],
+      do: throw_error("TypeError", "String.prototype.#{name} called on null or undefined")
+
+    this
+  end
+
+  # `string.match(x)` and `string.search(x)`: the method of `x` if it has one
+  defp via_symbol(this, x, sym, name, flags) do
+    o = coercible!(this, name)
+
+    method =
+      if object?(x), do: get_method(x, sym)
+
+    if method do
+      call(method, x, [o])
+    else
+      s = to_str(o)
+      rx = new(if(x == :undefined, do: "", else: to_str(x)), flags)
+      call(Interp.get(rx, sym), rx, [s])
+    end
+  end
+
+  def str_match(this, x), do: via_symbol(this, x, @sym_match, "match", "")
+  def str_search(this, x), do: via_symbol(this, x, @sym_search, "search", "")
+
+  def str_match_all(this, x) do
+    o = coercible!(this, "matchAll")
+
+    if object?(x) do
+      if is_regexp(x) do
+        flags = Interp.get(x, "flags")
+
+        if flags in [:undefined, :null],
+          do: throw_error("TypeError", "flags is null or undefined")
+
+        unless String.contains?(to_str(flags), "g"),
+          do:
+            throw_error(
+              "TypeError",
+              "String.prototype.matchAll called with a non-global RegExp argument"
+            )
+      end
+    end
+
+    via_symbol(o, x, @sym_match_all, "matchAll", "g")
+  end
+
+  def str_replace(this, search, replace_value, all?) do
+    o = coercible!(this, if(all?, do: "replaceAll", else: "replace"))
+
+    if search not in [:undefined, :null] and all? and is_regexp(search) do
+      flags = Interp.get(search, "flags")
+
+      if flags in [:undefined, :null], do: throw_error("TypeError", "flags is null or undefined")
+
+      unless String.contains?(to_str(flags), "g"),
+        do: throw_error("TypeError", "replaceAll must be called with a global RegExp")
+    end
+
+    replacer = if object?(search), do: get_method(search, @sym_replace)
+
+    if replacer do
+      call(replacer, search, [o, replace_value])
+    else
+      s = to_str(o)
+      pattern = to_str(search)
+      functional? = function?(replace_value)
+      replace_value = if functional?, do: replace_value, else: to_str(replace_value)
+      plen = cp_count(pattern)
+
+      positions =
+        if all? do
+          find_all(s, pattern, plen, 0, cp_count(s), [])
+        else
+          case find_from(s, pattern, 0) do
+            nil -> []
+            i -> [i]
+          end
+        end
+
+      {out, last} =
+        Enum.reduce(positions, {[], 0}, fn pos, {acc, from} ->
+          replacement =
+            if functional?,
+              do: to_str(call(replace_value, :undefined, [pattern, pos * 1.0, s])),
+              else: get_substitution(pattern, s, pos, [], :undefined, replace_value)
+
+          {[replacement, Str.slice(s, from, pos - from) | acc], pos + plen}
+        end)
+
+      IO.iodata_to_binary(Enum.reverse([Str.slice(s, last, cp_count(s) - last) | out]))
+    end
+  end
+
+  # the code point index of `pattern` in `s` at or after `from`
+  defp find_from(s, pattern, from) do
+    fb = byte_of(s, from)
+
+    if fb > byte_size(s) or from > cp_count(s) do
+      nil
+    else
+      if pattern == "" do
+        from
+      else
+        case :binary.match(s, pattern, scope: {fb, byte_size(s) - fb}) do
+          :nomatch -> nil
+          {b, _} -> cp_count(binary_part(s, 0, b))
+        end
+      end
+    end
+  end
+
+  defp find_all(s, pattern, plen, from, len, acc) do
+    if from > len do
+      Enum.reverse(acc)
+    else
+      case find_from(s, pattern, from) do
+        nil -> Enum.reverse(acc)
+        i -> find_all(s, pattern, plen, i + max(1, plen), len, [i | acc])
+      end
+    end
+  end
+
+  def str_split(this, sep, limit) do
+    o = coercible!(this, "split")
+    splitter = if object?(sep), do: get_method(sep, @sym_split)
+
+    if splitter do
+      call(splitter, sep, [o, limit])
+    else
+      s = to_str(o)
+      lim = if limit == :undefined, do: 4_294_967_295, else: to_uint32(limit)
+      r = to_str(sep)
+
+      parts =
+        cond do
+          lim == 0 -> []
+          sep == :undefined -> [s]
+          s == "" -> if r == "", do: [], else: [s]
+          r == "" -> String.codepoints(s)
+          true -> :binary.split(s, r, [:global])
+        end
+
+      new_array(Enum.take(parts, lim))
+    end
+  end
 
   # ── install ────────────────────────────────────────────────
 
@@ -622,27 +1044,37 @@ defmodule Browser.JS.RegExp do
     put_proto(:regexp, p)
 
     ctor =
-      native("RegExp", fn _this, args ->
-        case arg(args, 0) do
-          {:obj, _} = r when is_tuple(r) ->
-            if regexp?(r) do
-              flags =
-                if arg(args, 1) == :undefined,
-                  do: flags_of(r),
-                  else: to_str(arg(args, 1))
+      native("RegExp", fn this, args ->
+        pattern = arg(args, 0)
+        flags = arg(args, 1)
+        plain_call? = not object?(this)
+        pattern_is_regexp = is_regexp(pattern)
 
-              new(source_of(r), flags)
-            else
-              new(to_str(r), flags_arg(args))
+        if plain_call? and pattern_is_regexp and flags == :undefined and
+             Interp.get(pattern, "constructor") == ctor() do
+          pattern
+        else
+          {pat, fl} =
+            cond do
+              regexp?(pattern) ->
+                {source_of(pattern), if(flags == :undefined, do: flags_of(pattern), else: flags)}
+
+              pattern_is_regexp ->
+                {Interp.get(pattern, "source"),
+                 if(flags == :undefined, do: Interp.get(pattern, "flags"), else: flags)}
+
+              true ->
+                {pattern, flags}
             end
 
-          :undefined ->
-            new("(?:)", flags_arg(args))
-
-          v ->
-            new(to_str(v), flags_arg(args))
+          new(
+            if(pat == :undefined, do: "", else: to_str(pat)),
+            if(fl == :undefined, do: "", else: to_str(fl))
+          )
         end
       end)
+
+    :erlang.put(:regexp_ctor, ctor)
 
     put_const(ctor, "prototype", p)
     put_hidden(p, "constructor", ctor)
@@ -734,12 +1166,62 @@ defmodule Browser.JS.RegExp do
       end)
     )
 
-    def_fn(p, "test", fn this, args -> exec(this, to_str(arg(args, 0))) != :null end)
-    def_fn(p, "exec", fn this, args -> exec(this, to_str(arg(args, 0))) end)
+    def_fn1 = fn name, fun ->
+      f = native(name, fun)
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, 1.0))
+      put_hidden(p, name, f)
+    end
+
+    def_fn1.("test", fn this, args ->
+      rx = require_object(this)
+      regexp_exec(rx, to_str(arg(args, 0))) != :null
+    end)
+
+    def_fn1.("exec", fn this, args ->
+      unless regexp?(this),
+        do: throw_error("TypeError", "RegExp.prototype.exec called on a non-RegExp")
+
+      exec(this, to_str(arg(args, 0)))
+    end)
 
     def_fn(p, "toString", fn this, _ ->
-      "/" <> Interp.get(this, "source") <> "/" <> Interp.get(this, "flags")
+      rx = require_object(this)
+      "/" <> to_str(Interp.get(rx, "source")) <> "/" <> to_str(Interp.get(rx, "flags"))
     end)
+
+    def_sym = fn sym, name, arity, fun ->
+      f = native(name, fun)
+      {:obj, fid} = f
+      store(fid, Map.put(deref(fid), :arity, arity * 1.0))
+      put_hidden(p, sym, f)
+    end
+
+    def_sym.(@sym_match, "[Symbol.match]", 1, fn this, args ->
+      symbol_match(this, arg(args, 0))
+    end)
+
+    def_sym.(@sym_match_all, "[Symbol.matchAll]", 1, fn this, args ->
+      symbol_match_all(this, arg(args, 0))
+    end)
+
+    def_sym.(@sym_replace, "[Symbol.replace]", 2, fn this, args ->
+      symbol_replace(this, arg(args, 0), arg(args, 1))
+    end)
+
+    def_sym.(@sym_search, "[Symbol.search]", 1, fn this, args ->
+      symbol_search(this, arg(args, 0))
+    end)
+
+    def_sym.(@sym_split, "[Symbol.split]", 2, fn this, args ->
+      symbol_split(this, arg(args, 0), arg(args, 1))
+    end)
+
+    # %RegExpStringIteratorPrototype%
+    ip = new_object([], Interp.proto(:iterator))
+    put_proto(:regexp_string_iterator, ip)
+    def_fn(ip, "next", fn this, _ -> string_iterator_next(this) end)
+    put_tag(ip, "RegExp String Iterator")
 
     :ok
   end
@@ -795,6 +1277,5 @@ defmodule Browser.JS.RegExp do
   defp hex_escape(c),
     do: "\\x" <> (c |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(2, "0"))
 
-  defp flags_arg(args), do: if(arg(args, 1) == :undefined, do: "", else: to_str(arg(args, 1)))
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
 end

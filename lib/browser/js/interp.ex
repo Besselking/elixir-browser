@@ -721,9 +721,13 @@ defmodule Browser.JS.Interp do
 
   defp function_prop(id, %{generator: true} = o, "prototype") do
     p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
-    put_hidden({:obj, id}, "prototype", p)
+    o = deref(id)
+    attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
+    store(id, o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs))
     p
   end
+
+  defp function_prop(_id, %{async: true}, "prototype"), do: :undefined
 
   defp function_prop(id, o, "prototype") do
     case o.fun do
@@ -787,6 +791,9 @@ defmodule Browser.JS.Interp do
     attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
     store(id, o |> Map.put(:props, Map.put(o.props, key, name)) |> Map.put(:attrs, attrs))
   end
+
+  @doc "Overrides the `length` of a native function."
+  def set_arity({:obj, id}, n), do: store(id, Map.put(deref(id), :arity, n * 1.0))
 
   @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."
   def put_const({:obj, id}, key, v) do
@@ -1590,6 +1597,13 @@ defmodule Browser.JS.Interp do
     if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
   end
 
+  # a generator or async function's `prototype` is its own (or none), never the one its kind's
+  # prototype object carries
+  defp function_get(id, %{props: props} = o, "prototype")
+       when (is_map_key(o, :generator) or is_map_key(o, :async)) and
+              not is_map_key(props, "prototype"),
+       do: function_prop(id, o, "prototype")
+
   defp function_get(id, o, key) do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
@@ -1664,18 +1678,35 @@ defmodule Browser.JS.Interp do
     bind_params_list(ps, rest, scope)
   end
 
+  # generator, async and async generator functions do not inherit from Function.prototype directly
+  defp kind_proto(id) do
+    o = deref(id)
+
+    key =
+      case o do
+        %{generator: true, async: true} -> :async_generator_function
+        %{generator: true} -> :generator_function
+        %{async: true} -> :async_function
+      end
+
+    if p = proto(key), do: store(id, %{o | proto: p})
+    :ok
+  end
+
   defp make_fn(node, env), do: make_fn(node, env, true)
 
   # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
   defp make_fn({:gen, fun}, env, named?) do
     {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :generator, true))
+    kind_proto(id)
     f
   end
 
   defp make_fn({:async, fun}, env, named?) do
     {:obj, id} = f = make_fn(fun, env, named?)
     store(id, Map.put(deref(id), :async, true))
+    kind_proto(id)
     f
   end
 
