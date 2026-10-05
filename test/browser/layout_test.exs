@@ -3005,6 +3005,22 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "bbbb").x == 4
     end
 
+    test "an absolutely positioned child of a table takes no part in the table" do
+      table = fn child ->
+        ~s|<div style="display:table">#{child}<div style="display:table-row"><div style="display:table-cell">xx</div></div></div>|
+      end
+
+      abs =
+        ~s|<div style="position:absolute;display:table-row-group;top:50px;width:30px;height:10px;background:#0a0"></div>|
+
+      {with_abs, _} = fl(table.(abs))
+      {without, _} = fl(table.(""))
+
+      assert word_at(with_abs, "xx").x == word_at(without, "xx").x
+      assert word_at(with_abs, "xx").y == word_at(without, "xx").y
+      assert %{w: 30, h: 10} = Enum.find(with_abs, &(&1.type == :rect))
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(

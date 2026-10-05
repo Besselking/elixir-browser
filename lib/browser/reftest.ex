@@ -12,7 +12,7 @@ defmodule Browser.Reftest do
   """
 
   alias Browser.{Layout, Page}
-  alias Browser.Reftest.Raster
+  alias Browser.Reftest.{Picture, Raster}
 
   @width 800
   @view_height 600
@@ -22,8 +22,8 @@ defmodule Browser.Reftest do
   @unsupported [
     {~r/<script/i, "scripts"},
     {~r/reftest-wait|test-wait/, "waits for script"},
-    {~r/<(img|video|audio|iframe|object|embed|canvas|svg|math|picture)[\s>]/i,
-     "pictures, frames or embedded content"},
+    {~r/<(video|audio|iframe|object|embed|canvas|svg|math|picture)[\s>]/i,
+     "frames, vector pictures or embedded content"},
     {~r/@font-face/i, "web fonts"}
   ]
 
@@ -121,17 +121,21 @@ defmodule Browser.Reftest do
   end
 
   defp run_links(root, rel, path, source, links, opts) do
-    {items, h} = render(root, path, source)
+    case render(root, path, source) do
+      {:skip, _} = skip ->
+        skip
 
-    Enum.reduce_while(links, :pass, fn {kind, href}, :pass ->
-      case check_link(root, rel, path, {items, h}, kind, href, opts) do
-        :pass -> {:cont, :pass}
-        other -> {:halt, other}
-      end
-    end)
+      {:ok, rendered} ->
+        Enum.reduce_while(links, :pass, fn {kind, href}, :pass ->
+          case check_link(root, rel, path, rendered, kind, href, opts) do
+            :pass -> {:cont, :pass}
+            other -> {:halt, other}
+          end
+        end)
+    end
   end
 
-  defp check_link(root, rel, path, {items, h}, kind, href, opts) do
+  defp check_link(root, rel, path, {items, h, pics}, kind, href, opts) do
     ref_path = resolve(root, path, href)
 
     if File.regular?(ref_path) do
@@ -142,18 +146,23 @@ defmodule Browser.Reftest do
           {:skip, "reference: " <> why}
 
         :run ->
-          {ref_items, ref_h} = render(root, ref_path, ref_source)
-          compare(kind, rel, items, h, ref_items, ref_h, opts)
+          case render(root, ref_path, ref_source) do
+            {:skip, why} ->
+              {:skip, "reference: " <> why}
+
+            {:ok, {ref_items, ref_h, ref_pics}} ->
+              compare(kind, rel, {items, h, pics}, {ref_items, ref_h, ref_pics}, opts)
+          end
       end
     else
       {:skip, "reference missing"}
     end
   end
 
-  defp compare(kind, rel, items, h, ref_items, ref_h, opts) do
+  defp compare(kind, rel, {items, h, pics}, {ref_items, ref_h, ref_pics}, opts) do
     height = h |> max(ref_h) |> max(@view_height) |> min(@max_height)
-    a = Raster.paint(items, @width, height)
-    b = Raster.paint(ref_items, @width, height)
+    a = Raster.paint(items, @width, height, pics)
+    b = Raster.paint(ref_items, @width, height, ref_pics)
     diff = Raster.diff(a, b)
 
     case {kind, diff} do
@@ -181,14 +190,40 @@ defmodule Browser.Reftest do
     File.write!(base <> ".ref.ppm", Raster.ppm(b, @width))
   end
 
+  # -> {:ok, {items, height, pictures}} | {:skip, why}
   defp render(root, path, source) do
     html = rewrite_absolute(source, root)
     page = Page.build(html, "file://" <> path, @env)
 
-    Layout.layout(page.nodes, @width, &measure/2, @view_height,
-      images: %{},
-      svg_defs: page.svg_defs
-    )
+    case load_pictures(Page.all_image_urls(page)) do
+      {:ok, pictures} ->
+        images = Map.new(pictures, fn {url, p} -> {url, {:ok, p.w, p.h}} end)
+
+        {items, height} =
+          Layout.layout(page.nodes, @width, &measure/2, @view_height,
+            images: images,
+            svg_defs: page.svg_defs
+          )
+
+        {:ok, {items, height, pictures}}
+
+      {:error, why} ->
+        {:skip, why}
+    end
+  end
+
+  # The pictures a page uses, decoded: `%{url => picture}`. A picture that is not a PNG file on
+  # disk cannot be painted, so a page that needs one is skipped.
+  defp load_pictures(urls) do
+    Enum.reduce_while(urls, {:ok, %{}}, fn url, {:ok, acc} ->
+      with "file://" <> file <- url,
+           {:ok, bytes} <- File.read(URI.decode(file)),
+           {:ok, picture} <- Picture.decode(bytes) do
+        {:cont, {:ok, Map.put(acc, url, picture)}}
+      else
+        _ -> {:halt, {:error, "picture that is not a PNG file"}}
+      end
+    end)
   end
 
   # `/fonts/..` and `/css/..` mean the root of the suite

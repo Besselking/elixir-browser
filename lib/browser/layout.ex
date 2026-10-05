@@ -1120,6 +1120,17 @@ defmodule Browser.Layout do
   # A table is laid out as one unit at placement time (`op({:table, ...})`), when the width
   # its columns share is known.
   defp block_children(_tag, :table, kids, style, c, acc) do
+    # a positioned child is out of flow: no row or caption of the table, placed on its own
+    {positioned, kids} =
+      Enum.split_with(kids, fn
+        {:element, tag, attrs, _} when tag not in @skip ->
+          computed(attrs)["position"] in ["absolute", "fixed"]
+
+        _ ->
+          false
+      end)
+
+    acc = Enum.reduce(positioned, acc, &walk(&1, style, &2))
     model = table_model(kids, style)
 
     if model.rows == [] and model.caption == nil,
