@@ -543,8 +543,13 @@ defmodule Browser.JS.Collections do
               if(length(args) > 3, do: arg(args, 3), else: o)
             )
           else
-            Interp.put(o, arg(args, 1), arg(args, 2))
-            true
+            # a module namespace has nothing that can be set
+            if match?(%{host: {Browser.JS.Modules, _}}, deref(id)) do
+              false
+            else
+              Interp.put(o, arg(args, 1), arg(args, 2))
+              true
+            end
           end
 
         _ ->

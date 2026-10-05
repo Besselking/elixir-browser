@@ -14,7 +14,7 @@ defmodule Browser.JS.Runtime do
   event) and `:console`.
   """
 
-  alias Browser.JS.{Builtins, DOM, Interp, Parser}
+  alias Browser.JS.{Builtins, DOM, Interp, Modules, Parser}
 
   @steps 5_000_000
   @call_timeout 15_000
@@ -116,10 +116,10 @@ defmodule Browser.JS.Runtime do
     DOM.install(scope)
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
-    Process.put(:rt_modules, %{})
+    Modules.reset()
 
     Process.put(:js_import, fn spec, from ->
-      load_module(resolve_specifier(spec, from || base_url()))
+      Modules.import(spec, from || base_url(), loader())
     end)
 
     Process.put(:rt_importmap, %{})
@@ -361,7 +361,9 @@ defmodule Browser.JS.Runtime do
       Process.put(:rt_script, label(s))
 
       with {:ok, src, base} <- script_source(s) do
-        guard(fn -> run_module_source(src, base) end, :ok)
+        # a module from a file runs once, however often it is imported; an inline one is its own
+        key = if is_binary(s.src) and s.src != "", do: base, else: {:inline, make_ref()}
+        guard(fn -> run_module_source(src, key, base) end, :ok)
       end
     end
 
@@ -539,38 +541,26 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp run_module_source(src, base) do
+  defp run_module_source(src, key, base) do
     case Parser.parse(src, module: true) do
-      {:ok, program} ->
-        Interp.run_module(
-          program,
-          fn spec -> load_module(resolve_specifier(spec, base)) end,
-          base
-        )
-
-      {:error, msg} ->
-        throw({:syntax, msg})
+      {:ok, program} -> Modules.run(key, base, program, loader())
+      {:error, msg} -> throw({:syntax, msg})
     end
   end
 
-  defp load_module(url) do
-    case Process.get(:rt_modules) do
-      %{^url => ns} ->
-        ns
-
-      modules ->
-        # a module that imports itself (through others) sees an empty namespace
-        Process.put(:rt_modules, Map.put(modules, url, Interp.new_object()))
-
-        case fetch(url) do
-          {:ok, src, final} ->
-            ns = run_module_source(src, final)
-            Process.put(:rt_modules, Map.put(Process.get(:rt_modules), url, ns))
-            ns
-
-          {:error, msg} ->
-            Interp.throw_error("TypeError", "Failed to fetch module #{url}: #{msg}")
-        end
-    end
+  defp loader do
+    {fn spec, base ->
+       try do
+         {:ok, resolve_specifier(spec, base)}
+       catch
+         {:js_error, _} -> {:error, "Failed to resolve module specifier '#{spec}'"}
+       end
+     end,
+     fn url ->
+       case fetch(url) do
+         {:ok, src, final} -> {:ok, src, final}
+         {:error, msg} -> {:error, msg}
+       end
+     end}
   end
 end

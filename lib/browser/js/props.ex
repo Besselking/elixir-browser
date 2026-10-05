@@ -92,6 +92,11 @@ defmodule Browser.JS.Props do
     end
   end
 
+  # an export of a module namespace
+  defp virtual(_id, %{class: :host, host: {Browser.JS.Modules, data}}, key)
+       when is_binary(key),
+       do: Browser.JS.Modules.property(data, key)
+
   defp virtual(_, _, _), do: nil
 
   @doc "The property descriptor object of an own property, or undefined."
@@ -149,6 +154,9 @@ defmodule Browser.JS.Props do
     case o do
       %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
         Browser.JS.TypedArrays.host_keys(data) ++ own_names_plain2(id, o)
+
+      %{class: :host, host: {Browser.JS.Modules, data}} ->
+        Browser.JS.Modules.names(data) ++ own_names_plain2(id, o)
 
       _ ->
         own_names_plain2(id, o)
@@ -317,12 +325,19 @@ defmodule Browser.JS.Props do
     })
   end
 
-  defp reject(key), do: throw_error("TypeError", "Cannot redefine property: #{key}")
+  defp reject(key), do: throw_error("TypeError", "Cannot redefine property: #{key_name(key)}")
+
+  defp key_name({:symbol, _, desc}), do: desc
+  defp key_name(key), do: key
 
   defp define_own(obj, id, key, desc) do
     o = deref(id)
 
     cond do
+      o.class == :host and match?({Browser.JS.Modules, _}, o.host) and
+          Browser.JS.Modules.define_own(elem(o.host, 1), key, desc) == :ok ->
+        :ok
+
       o.class == :array and is_integer(array_index(key)) ->
         define_element(id, o, key, desc)
 
@@ -336,7 +351,7 @@ defmodule Browser.JS.Props do
               do:
                 throw_error(
                   "TypeError",
-                  "Cannot define property #{key}, object is not extensible"
+                  "Cannot define property #{key_name(key)}, object is not extensible"
                 )
 
             create(id, key, desc)
