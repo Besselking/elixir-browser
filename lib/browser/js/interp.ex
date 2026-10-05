@@ -334,6 +334,14 @@ defmodule Browser.JS.Interp do
 
   def to_key(k) when is_binary(k), do: k
   def to_key({:symbol, _, _} = k), do: k
+
+  def to_key({:obj, _} = o) do
+    case to_primitive(o, "string") do
+      {:symbol, _, _} = s -> s
+      prim -> to_str(prim)
+    end
+  end
+
   def to_key(k), do: to_str(k)
 
   def to_primitive({:obj, _} = o, hint) do
@@ -495,7 +503,20 @@ defmodule Browser.JS.Interp do
         end
 
       _ ->
-        lookup(o, to_key(key), {:obj, id})
+        case o do
+          # a String wrapper's characters
+          %{prim: str} when is_binary(str) ->
+            case index(key) do
+              i when is_integer(i) ->
+                Browser.JS.Str.at(str, i) || lookup(o, to_key(key), {:obj, id})
+
+              _ ->
+                lookup(o, to_key(key), {:obj, id})
+            end
+
+          _ ->
+            lookup(o, to_key(key), {:obj, id})
+        end
     end
   end
 
@@ -1809,7 +1830,8 @@ defmodule Browser.JS.Interp do
   defp lazy_arguments(env) do
     case lookup_var(env, :args) do
       {:ok, args} ->
-        a = new_array(args)
+        {:obj, aid} = a = new_array(args)
+        store(aid, Map.put(deref(aid), :arguments, true))
         owner = scope_with(env, :args)
         declare(owner, "arguments", a)
         a
