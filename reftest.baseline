@@ -1790,6 +1790,8 @@ css/CSS2/normal-flow/width-non-replaced-inline-001.xht
 css/CSS2/normal-flow/width-percentage-001.xht
 css/CSS2/normal-flow/width-percentage-002.xht
 css/CSS2/positioning/absolute-non-replaced-height-002.xht
+css/CSS2/positioning/absolute-non-replaced-height-003.xht
+css/CSS2/positioning/absolute-non-replaced-height-004.xht
 css/CSS2/positioning/absolute-non-replaced-height-005.xht
 css/CSS2/positioning/absolute-non-replaced-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-height-007.xht
@@ -1799,6 +1801,8 @@ css/CSS2/positioning/absolute-non-replaced-height-010.xht
 css/CSS2/positioning/absolute-non-replaced-height-011.xht
 css/CSS2/positioning/absolute-non-replaced-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-002.xht
+css/CSS2/positioning/absolute-non-replaced-max-height-003.xht
+css/CSS2/positioning/absolute-non-replaced-max-height-004.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-005.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-008.xht
@@ -1845,6 +1849,7 @@ css/CSS2/positioning/absolute-replaced-height-024.xht
 css/CSS2/positioning/absolute-replaced-height-029.xht
 css/CSS2/positioning/absolute-replaced-height-030.xht
 css/CSS2/positioning/absolute-replaced-height-031.xht
+css/CSS2/positioning/absolute-replaced-height-036.xht
 css/CSS2/positioning/absolute-replaced-width-001.xht
 css/CSS2/positioning/absolute-replaced-width-006.xht
 css/CSS2/positioning/absolute-replaced-width-008.xht
@@ -3093,6 +3098,7 @@ css/css-sizing/div-min-content-orthogonal-auto-margin-right.tentative.html
 css/css-sizing/div-min-content-orthogonal-auto-margin.tentative.html
 css/css-sizing/div-min-content-orthogonal-block-size.tentative.html
 css/css-sizing/div-orthogonal-left-and-non-auto-margin.tentative.html
+css/css-sizing/div-top-and-non-auto-margin.tentative.html
 css/css-sizing/fit-content-block-size-abspos.html
 css/css-sizing/fit-content-block-size-fixedpos.html
 css/css-sizing/grid-item-image-percentage-min-height-computes-as-0.html

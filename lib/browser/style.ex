@@ -1322,7 +1322,9 @@ defmodule Browser.Style do
   end
 
   # left/right margins keep `auto` (used for centering); top/bottom auto is zero
-  defp typed(prop, "auto", _env, _pc) when prop in ~w(margin-left margin-right), do: {:ok, :auto}
+  defp typed(prop, "auto", _env, _pc)
+       when prop in ~w(margin-left margin-right margin-top margin-bottom),
+       do: {:ok, :auto}
 
   # margins may be negative: they pull a box over its neighbours or out of its container
   defp typed(prop, v, env, _pc)
