@@ -1204,18 +1204,35 @@ defmodule Browser.Layout do
       Map.get(c, "overflow-y", "visible") in ~w(hidden clip scroll auto)
   end
 
+  # the absolutely positioned elements among a table's children, its row groups' and its rows'
+  # (which are no row, group or cell), and what is left
+  defp split_out_of_flow(kids) do
+    Enum.reduce(kids, {[], []}, fn
+      {:element, tag, attrs, ekids} = el, {out, keep} when tag not in @skip ->
+        c = computed(attrs)
+
+        cond do
+          c["position"] in ["absolute", "fixed"] ->
+            {out ++ [el], keep}
+
+          kind_of_table_part(tag, c) in [:group, :row] ->
+            {inner_out, inner_keep} = split_out_of_flow(ekids)
+            {out ++ inner_out, keep ++ [{:element, tag, attrs, inner_keep}]}
+
+          true ->
+            {out, keep ++ [el]}
+        end
+
+      other, {out, keep} ->
+        {out, keep ++ [other]}
+    end)
+  end
+
   # A table is laid out as one unit at placement time (`op({:table, ...})`), when the width
   # its columns share is known.
   defp block_children(_tag, :table, kids, style, c, acc) do
-    # a positioned child is out of flow: no row or caption of the table, placed on its own
-    {positioned, kids} =
-      Enum.split_with(kids, fn
-        {:element, tag, attrs, _} when tag not in @skip ->
-          computed(attrs)["position"] in ["absolute", "fixed"]
-
-        _ ->
-          false
-      end)
+    # a positioned child is out of flow: no row, cell or caption of the table, placed on its own
+    {positioned, kids} = split_out_of_flow(kids)
 
     acc = Enum.reduce(positioned, acc, &walk(&1, style, &2))
     model = table_model(kids, style)

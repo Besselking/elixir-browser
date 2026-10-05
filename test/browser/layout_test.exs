@@ -4258,6 +4258,18 @@ defmodule Browser.LayoutTest do
     assert rect.w == 96
   end
 
+  test "an absolute cell in a table row is placed on its own, not as a cell" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:table"><div style="display:table-row"><div style="display:table-cell">in</div><div style="display:table-cell;position:absolute;left:0;top:0;width:40px;height:30px;background:#0f0"></div></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+    rect = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert {rect.x, rect.y, rect.w, rect.h} == {0, 0, 40, 30}
+  end
+
   test "the gap a legend leaves in a fieldset's border moves with a box that is placed elsewhere" do
     page =
       Browser.Page.build(
