@@ -1726,7 +1726,10 @@ defmodule Browser.Layout do
       fr: 0,
       # the open blocks (innermost first), and where each one ended: what sticky boxes inside stop at
       blocks: [],
-      limits: %{}
+      limits: %{},
+      # the content height of the enclosing block when it has one of its own (for percentages)
+      cbh: nil,
+      cbw: nil
     }
 
     # what is laid out here is a block formatting context of its own: it grows to hold its floats
@@ -2326,6 +2329,8 @@ defmodule Browser.Layout do
       fl0: if(o.clip, do: 0, else: length(st.floats)),
       outer_floats: if(o.clip, do: st.floats),
       ov0: length(st.overlays),
+      pcbh: st.cbh,
+      pcbw: st.cbw,
       saved: {st.left, st.right, st.free}
     }
 
@@ -2333,6 +2338,8 @@ defmodule Browser.Layout do
       st
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
+        cbh: content_height(o),
+        cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.clip, do: [], else: st.floats),
         left: left + bl + o.pl,
         right: st.right + fr + rest + br + o.pr,
@@ -2403,6 +2410,7 @@ defmodule Browser.Layout do
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
     st = %{st | limits: Map.put(st.limits, box.id, box.top + height - bb - o.pb)}
+    st = %{st | cbh: box.pcbh, cbw: box.pcbw}
     {st, box} = if o.rel, do: relative_shift(st, box), else: {st, box}
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st
@@ -2411,10 +2419,12 @@ defmodule Browser.Layout do
   # A relatively positioned box and everything it painted move by its offsets; the space it
   # takes in the flow stays where it was. `top` wins over `bottom` and `left` over `right`.
   defp relative_shift(st, %{o: %{rel: rel}} = box) do
-    cw = max(st.width - 2 * st.margin - st.left - st.right, 0)
-
-    dx = rel_offset(rel.left, cw) || -(rel_offset(rel.right, cw) || 0)
-    dy = rel_offset(rel.top, 0) || -(rel_offset(rel.bottom, 0) || 0)
+    cw = box.pcbw || max(st.width - 2 * st.margin - st.left - st.right, 0)
+    left = rel_offset(rel.left, cw)
+    right = rel_offset(rel.right, cw)
+    # with both given, `left` wins in a left-to-right block and `right` in a right-to-left one
+    dx = if box.o.rtl && right, do: -right, else: left || -(right || 0)
+    dy = rel_offset(rel.top, box.pcbh) || -(rel_offset(rel.bottom, box.pcbh) || 0)
 
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
@@ -2438,8 +2448,16 @@ defmodule Browser.Layout do
   end
 
   defp rel_offset(n, _cw) when is_number(n), do: round(n)
-  defp rel_offset({:pct, f}, base), do: round(f * base)
+  defp rel_offset({:pct, f}, base) when is_number(base), do: round(f * base)
   defp rel_offset(_, _), do: nil
+
+  # the height of a box's content when `height` gives one
+  defp content_height(%{h: h} = o) when is_number(h) do
+    {bt, _, bb, _} = o.bw
+    if o.sizing == :border, do: max(h - bt - bb - o.pt - o.pb, 0), else: h
+  end
+
+  defp content_height(_), do: nil
 
   # everything the box painted sticks with it
   defp stick_new(st, %{o: o} = box, height) do

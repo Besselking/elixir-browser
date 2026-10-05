@@ -1955,10 +1955,13 @@ css/CSS2/positioning/bottom-090.xht
 css/CSS2/positioning/bottom-100.xht
 css/CSS2/positioning/bottom-101.xht
 css/CSS2/positioning/bottom-102.xht
+css/CSS2/positioning/bottom-103.xht
+css/CSS2/positioning/bottom-104.xht
 css/CSS2/positioning/bottom-109.xht
 css/CSS2/positioning/bottom-110.xht
 css/CSS2/positioning/bottom-111.xht
 css/CSS2/positioning/bottom-112.xht
+css/CSS2/positioning/bottom-113.xht
 css/CSS2/positioning/bottom-offset-001.xht
 css/CSS2/positioning/bottom-offset-002.xht
 css/CSS2/positioning/bottom-offset-003.xht
@@ -2035,6 +2038,7 @@ css/CSS2/positioning/position-relative-005.xht
 css/CSS2/positioning/position-relative-006.xht
 css/CSS2/positioning/position-relative-007.xht
 css/CSS2/positioning/position-relative-009.xht
+css/CSS2/positioning/position-relative-010.xht
 css/CSS2/positioning/position-relative-013.xht
 css/CSS2/positioning/position-relative-014.xht
 css/CSS2/positioning/position-relative-015.xht
@@ -2047,10 +2051,15 @@ css/CSS2/positioning/position-relative-028.xht
 css/CSS2/positioning/position-relative-029.xht
 css/CSS2/positioning/position-relative-030.xht
 css/CSS2/positioning/position-relative-037.xht
+css/CSS2/positioning/position-relative-038.xht
 css/CSS2/positioning/position-static-001.xht
+css/CSS2/positioning/relpos-calcs-001.xht
+css/CSS2/positioning/relpos-calcs-002.xht
 css/CSS2/positioning/relpos-calcs-003.xht
 css/CSS2/positioning/relpos-calcs-004.xht
 css/CSS2/positioning/relpos-calcs-005.xht
+css/CSS2/positioning/relpos-calcs-006.xht
+css/CSS2/positioning/relpos-calcs-007.xht
 css/CSS2/positioning/right-004.xht
 css/CSS2/positioning/right-005.xht
 css/CSS2/positioning/right-006.xht
@@ -2147,6 +2156,8 @@ css/CSS2/positioning/top-090.xht
 css/CSS2/positioning/top-100.xht
 css/CSS2/positioning/top-101.xht
 css/CSS2/positioning/top-102.xht
+css/CSS2/positioning/top-103.xht
+css/CSS2/positioning/top-104.xht
 css/CSS2/positioning/top-109.xht
 css/CSS2/positioning/top-110.xht
 css/CSS2/positioning/top-111.xht
