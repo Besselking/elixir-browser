@@ -140,14 +140,15 @@ defmodule Browser.Layout do
     }
 
     # what percentage margins and padding refer to, as the walk goes down the tree
-    Process.put(:layout_cw, max(width - 2 * @margin, 0))
+    margin = Keyword.get(opts, :margin, @margin)
+    Process.put(:layout_cw, max(width - 2 * margin, 0))
     Process.put(:layout_memo, %{})
     Process.put(:layout_metrics, opts[:metrics])
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse()
     t1 = System.monotonic_time(:microsecond)
-    {items, height} = place(ops, width, measure, view_height, opts[:images])
+    {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -1657,8 +1658,8 @@ defmodule Browser.Layout do
   # `n`/`nr` count items/rects so a box can find the ones created inside it;
   # `overlays` are laid-out absolute elements.
 
-  defp place(ops, width, measure, view_height, images) do
-    st = run(ops, width, measure, view_height, @margin, :view, true, images)
+  defp place(ops, width, measure, view_height, images, margin) do
+    st = run(ops, width, measure, view_height, margin, :view, true, images)
     {finalize(st), st.y + st.margin}
   end
 
