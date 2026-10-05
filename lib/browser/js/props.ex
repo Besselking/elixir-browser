@@ -125,6 +125,9 @@ defmodule Browser.JS.Props do
     end
   end
 
+  def descriptor(s, key) when is_binary(s), do: string_descriptor(s, key)
+  def descriptor(_, _), do: :undefined
+
   @doc "The descriptor object for an own-property state (or `undefined`)."
   def state_to_object(nil), do: :undefined
 

@@ -79,13 +79,20 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp class_tag(:undefined), do: "Undefined"
-  defp class_tag(:null), do: "Null"
-  defp class_tag(v) when is_binary(v), do: "String"
-  defp class_tag(v) when is_boolean(v), do: "Boolean"
-  defp class_tag({:symbol, _, _}), do: "Symbol"
-  defp class_tag({:bigint, _}), do: "BigInt"
-  defp class_tag(v) when not is_tuple(v), do: "Number"
+  defp object_to_string(:undefined), do: "[object Undefined]"
+  defp object_to_string(:null), do: "[object Null]"
+
+  defp object_to_string(this) do
+    o = if match?({:obj, _}, this), do: this, else: box(this)
+
+    # the built-in tag is worked out before @@toStringTag is read (which may revoke a proxy)
+    builtin = class_tag(o)
+
+    case Interp.get(o, {:symbol, :toStringTag, "Symbol.toStringTag"}) do
+      tag when is_binary(tag) -> "[object #{tag}]"
+      _ -> "[object #{builtin}]"
+    end
+  end
 
   defp class_tag({:obj, id} = o) do
     case deref(id) do
@@ -95,6 +102,9 @@ defmodule Browser.JS.Builtins do
           function?(o) -> "Function"
           true -> "Object"
         end
+
+      %{arguments: true} ->
+        "Arguments"
 
       %{class: :array} ->
         "Array"
@@ -115,6 +125,9 @@ defmodule Browser.JS.Builtins do
         "Boolean"
 
       %{prim: {:bigint, _}} ->
+        "Object"
+
+      %{prim: {:symbol, _, _}} ->
         "Object"
 
       %{prim: _} ->
@@ -171,7 +184,7 @@ defmodule Browser.JS.Builtins do
       has_own?(this, to_key(arg(args, 0)))
     end)
 
-    def_fn(p, "toString", fn this, _ -> "[object #{class_tag(this)}]" end)
+    def_fn(p, "toString", fn this, _ -> object_to_string(this) end)
     def_fn(p, "valueOf", fn this, _ -> this end)
   end
 
@@ -336,6 +349,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     Browser.JS.Props.install(obj, object_proto)
+    Browser.JS.ObjectStatics.install(obj, object_proto)
   end
 
   # ── Array ──────────────────────────────────────────────────
