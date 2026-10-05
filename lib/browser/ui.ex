@@ -490,6 +490,53 @@ defmodule Browser.UI do
     end
   end
 
+  @doc """
+  Returns a `(%{size, family, bold, italic}) -> {ex, ch}` function: the x-height and the
+  advance of a "0" over the font size, measured from the font itself (the height of the ink
+  of an "x" drawn on a bitmap) and memoized in `cache`.
+  """
+  def font_units(cache) do
+    fn %{size: size, family: family, bold: bold, italic: italic} = style ->
+      key = {:units, size, family, bold, italic}
+
+      case :ets.lookup(cache, key) do
+        [{_, units}] ->
+          units
+
+        [] ->
+          units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
+          :ets.insert(cache, {key, units})
+          units
+      end
+    end
+  end
+
+  defp measure_units(%{size: size} = style) do
+    side = max(ceil(size * 3), 8)
+    bitmap = :wxBitmap.new(side, side)
+    dc = :wxMemoryDC.new(bitmap)
+    :wxDC.setBackground(dc, :wxBrush.new({255, 255, 255}))
+    :wxDC.clear(dc)
+    :wxDC.setFont(dc, font(style))
+    :wxDC.setTextForeground(dc, {0, 0, 0})
+    :wxDC.drawText(dc, ~c"x", {round(size), round(size)})
+    {zero, _} = :wxDC.getTextExtent(dc, ~c"0")
+    :wxMemoryDC.destroy(dc)
+    image = :wxBitmap.convertToImage(bitmap)
+    rows = ink_rows(:wxImage.getData(image), side)
+    :wxImage.destroy(image)
+    :wxBitmap.destroy(bitmap)
+    {max(rows, 1) / size, max(zero, 1) / size}
+  end
+
+  # how many rows of an RGB image `side` pixels wide have anything but white in them
+  defp ink_rows(rgb, side) do
+    rgb
+    |> :binary.bin_to_list()
+    |> Enum.chunk_every(3 * side)
+    |> Enum.count(fn row -> Enum.any?(row, &(&1 < 128)) end)
+  end
+
   # -- pictures of a page without a window ------------------------------------------------
 
   @doc """

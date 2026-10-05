@@ -121,6 +121,7 @@ defmodule Browser.Layout do
       href: nil,
       pre: false,
       ws: :normal,
+      tab: 8,
       hidden: false,
       color: {0, 0, 0},
       underline: false,
@@ -1556,6 +1557,7 @@ defmodule Browser.Layout do
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
+    |> put_if(c["tab-size"], &tab_size(&1, &2))
     |> Map.put(:rtl, c["direction"] == "rtl")
     |> then(&if(c["display"] in [nil, "inline"], do: &1, else: Map.put(&1, :cb, &1.rtl)))
     |> Map.put(:hidden, hidden?(c))
@@ -1566,6 +1568,14 @@ defmodule Browser.Layout do
     do:
       c["visibility"] in ["hidden", "collapse"] or
         (is_number(c["font-size"]) and c["font-size"] < 1)
+
+  # `tab-size`: a number of columns (lengths are not supported)
+  defp tab_size(style, value) do
+    case Integer.parse(to_string(value)) do
+      {n, ""} when n >= 0 -> %{style | tab: n}
+      _ -> style
+    end
+  end
 
   defp white_space(style, value) do
     ws =
@@ -1598,7 +1608,8 @@ defmodule Browser.Layout do
     end
   end
 
-  defp mono_family?(family) do
+  @doc false
+  def mono_family?(family) do
     family
     |> String.split(",")
     |> Enum.map(
@@ -1676,7 +1687,7 @@ defmodule Browser.Layout do
   # the words of one line: `pre` keeps it whole, `pre-wrap` keeps its spaces but may wrap,
   # `pre-line` collapses spaces
   defp line_ops(line, style, :pre),
-    do: [{:word, String.replace(line, "\t", "    "), style, :pre}]
+    do: [{:word, expand_tabs(line, style.tab), style, :pre}]
 
   defp line_ops(line, style, :pre_line) do
     line
@@ -1687,7 +1698,7 @@ defmodule Browser.Layout do
 
   defp line_ops(line, style, :pre_wrap) do
     ~r/ +|[^ ]+/
-    |> Regex.scan(String.replace(line, "\t", "    "))
+    |> Regex.scan(expand_tabs(line, style.tab))
     |> Enum.map(fn [run] ->
       cond do
         run == " " ->
@@ -1700,6 +1711,27 @@ defmodule Browser.Layout do
           {:word, run, style}
       end
     end)
+  end
+
+  # a tab advances to the next multiple of `tab-size` columns
+  defp expand_tabs(line, tab) do
+    if String.contains?(line, "\t") do
+      {parts, _} =
+        line
+        |> String.graphemes()
+        |> Enum.reduce({[], 0}, fn
+          "\t", {acc, col} ->
+            n = if tab == 0, do: 0, else: tab - rem(col, tab)
+            {[String.duplicate(" ", n) | acc], col + n}
+
+          g, {acc, col} ->
+            {[g | acc], col + 1}
+        end)
+
+      parts |> Enum.reverse() |> Enum.join()
+    else
+      line
+    end
   end
 
   # -- ops -> positioned items -------------------------------------------------------

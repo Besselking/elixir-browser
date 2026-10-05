@@ -28,12 +28,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size)
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -217,12 +217,18 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo: MapSet.new()}, fn {rule, order},
-                                                                                  idx ->
-      idx = note_pseudo(idx, rule)
-      rule = Map.put(rule, :order, order)
-      Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
-    end)
+    |> Enum.reduce(
+      %{
+        viewport: {env.width, env.height},
+        font_units: Map.get(env, :font_units),
+        pseudo: MapSet.new()
+      },
+      fn {rule, order}, idx ->
+        idx = note_pseudo(idx, rule)
+        rule = Map.put(rule, :order, order)
+        Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
+      end
+    )
   end
 
   # which pseudo-elements have a rule that gives them `content` (the others make no box)
@@ -1147,6 +1153,26 @@ defmodule Browser.Style do
     end
   end
 
+  # what `ex` (the x-height) and `ch` (the advance of a "0") are as a factor of the font size,
+  # asked of whatever measures fonts (`:font_units` of the environment); without one they are
+  # a guess
+  defp font_units(idx, resolved, inherited, fs) do
+    case Map.get(idx, :font_units) do
+      nil ->
+        {0.5, 0.6}
+
+      units ->
+        pick = fn key -> Map.get(resolved, key) || inherited[key] end
+
+        units.(%{
+          size: fs,
+          family: to_string(pick.("font-family")),
+          bold: pick.("font-weight") == "bold",
+          italic: pick.("font-style") == "italic"
+        })
+    end
+  end
+
   defp compute_declared(idx, tag, decl, pc, parent_custom, parent_root) do
     inherited = Map.take(pc, @inherited)
 
@@ -1171,7 +1197,17 @@ defmodule Browser.Style do
       end
 
     {vw, vh} = Map.get(idx, :viewport, {1024, 768})
-    env = %{fs: fs, root: parent_root || fs, color: color, vw: vw / 100, vh: vh / 100}
+    {ex, ch} = font_units(idx, resolved, inherited, fs)
+
+    env = %{
+      fs: fs,
+      root: parent_root || fs,
+      color: color,
+      vw: vw / 100,
+      vh: vh / 100,
+      ex: ex,
+      ch: ch
+    }
 
     typed =
       for {k, v} <- resolved, k not in ["font-size", "color"], reduce: %{} do
@@ -1599,10 +1635,14 @@ defmodule Browser.Style do
 
   defp unit_px(unit, env) do
     case viewport_unit(unit, env) do
+      nil when unit in ["ex", "ch"] -> env.fs * Map.get(env, unit_key(unit), 0.5)
       nil -> Browser.Calc.unit_px(unit, env.fs, env.root)
       px -> px
     end
   end
+
+  defp unit_key("ex"), do: :ex
+  defp unit_key("ch"), do: :ch
 
   # one viewport unit in px (1vw is a hundredth of the window's width)
   defp viewport_unit(unit, env) do
@@ -1677,9 +1717,9 @@ defmodule Browser.Style do
       "in" -> n * 96
       "cm" -> n * 96 / 2.54
       "mm" -> n * 96 / 25.4
-      "ex" -> n * env.fs / 2
+      "ex" -> n * env.fs * Map.get(env, :ex, 0.5)
       # the width of a "0": near 0.6em in the monospace fonts that `ch` is mostly used with
-      "ch" -> n * env.fs * 0.6
+      "ch" -> n * env.fs * Map.get(env, :ch, 0.6)
       u -> if px = viewport_unit(u, env), do: n * px
     end
   end

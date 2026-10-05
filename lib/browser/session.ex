@@ -46,6 +46,8 @@ defmodule Browser.Session do
       measure: UI.measurer(ui, cache),
       # the same widths for a layout running in the background, which needs a DC of its own
       measure_bg: UI.measurer(ui, cache),
+      # `ex` and `ch` read from the fonts, for the cascade
+      font_units: UI.font_units(cache),
       # a layout running in the background after a resize: {ref, pid}
       layout_job: nil,
       # the page a script's changes are being turned into (`start_page_job/2`), and the newest
@@ -1498,7 +1500,13 @@ defmodule Browser.Session do
 
   # viewport description used to evaluate media queries
   defp env(state) do
-    %{type: "screen", width: state.width, height: UI.client_height(state.ui), dppx: 1.0}
+    %{
+      type: "screen",
+      width: state.width,
+      height: UI.client_height(state.ui),
+      dppx: 1.0,
+      font_units: state.font_units
+    }
   end
 
   # `n` entries back (negative) or forward. Entries the page made itself with `pushState` or
