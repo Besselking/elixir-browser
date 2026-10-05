@@ -765,6 +765,13 @@ defmodule Browser.JS.Interp do
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 
+  @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
+  def define_data({:obj, id}, key, v) do
+    o = deref(id)
+    keys = if Map.has_key?(o.props, key), do: o.keys, else: [key | o.keys]
+    store(id, %{o | props: Map.put(o.props, key, v), keys: keys})
+  end
+
   @doc "Sets `@@toStringTag`: not writable or enumerable, but configurable."
   def put_tag({:obj, id}, name) do
     key = {:symbol, :toStringTag, "Symbol.toStringTag"}

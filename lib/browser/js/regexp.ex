@@ -115,14 +115,15 @@ defmodule Browser.JS.RegExp do
           do: o
         )
 
+    {renamed, names} = rename_groups(source)
+
     pattern =
       if String.contains?(flags, "v"),
-        do: Browser.JS.RegExpSets.translate(source, &translate/1),
-        else: translate(source)
+        do: Browser.JS.RegExpSets.translate(renamed, &translate/1),
+        else: translate(renamed)
 
     case :re.compile(pattern, opts) do
       {:ok, re} ->
-        {:namelist, names} = :re.inspect(re, :namelist)
         {:ok, {re, names}}
 
       {:error, {msg, _}} ->
@@ -131,6 +132,137 @@ defmodule Browser.JS.RegExp do
   catch
     {:re_error, msg} -> {:error, msg}
   end
+
+  # Named groups: JavaScript names (`$`, unicode letters, `\\u{..}` escapes) are not all valid
+  # in PCRE, so each group is renamed `g<number>` and `\\k<name>` follows. Returns the new
+  # pattern and `[{group number, name}]` in pattern order.
+  defp rename_groups(source) do
+    {count, names} = scan_groups(source, 0, false, [])
+
+    if names == [] do
+      {source, {count, []}}
+    else
+      by_name = Map.new(names, fn {i, n} -> {n, i} end)
+      {rewrite_groups(source, false, by_name, []), {count, names}}
+    end
+  end
+
+  # pass 1: the capture groups (counted) and the names of the named ones
+  defp scan_groups("", n, _cls, acc), do: {n, Enum.reverse(acc)}
+
+  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, acc),
+    do: scan_groups(rest, n, cls, acc)
+
+  defp scan_groups("[" <> rest, n, false, acc), do: scan_groups(rest, n, true, acc)
+  defp scan_groups("]" <> rest, n, true, acc), do: scan_groups(rest, n, false, acc)
+
+  defp scan_groups("(?<" <> rest, n, false, acc) do
+    case rest do
+      "=" <> r ->
+        scan_groups(r, n, false, acc)
+
+      "!" <> r ->
+        scan_groups(r, n, false, acc)
+
+      _ ->
+        unless String.contains?(rest, ">"), do: bad_name()
+        {raw, after_name} = split_name(rest)
+        name = decode_name(raw)
+        unless valid_name?(name), do: bad_name()
+        if Enum.any?(acc, fn {_, existing} -> existing == name end), do: bad_name()
+        scan_groups(after_name, n + 1, false, [{n + 1, name} | acc])
+    end
+  end
+
+  defp scan_groups("(?" <> rest, n, false, acc), do: scan_groups(rest, n, false, acc)
+  defp scan_groups("(" <> rest, n, false, acc), do: scan_groups(rest, n + 1, false, acc)
+  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+  defp scan_groups(<<_, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+
+  defp bad_name, do: throw({:re_error, "Invalid capture group name"})
+
+  # an identifier: ID_Start, `$` or `_`, then those and ID_Continue and ZWNJ/ZWJ
+  defp valid_name?(name) do
+    Regex.match?(
+      ~r/\A[\p{L}\p{Nl}$_][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$_\x{200C}\x{200D}]*\z/u,
+      name
+    )
+  end
+
+  defp split_name(rest) do
+    case String.split(rest, ">", parts: 2) do
+      [raw, after_name] -> {raw, after_name}
+      _ -> {rest, ""}
+    end
+  end
+
+  # `\u0041`, `\u{41}` and surrogate pairs in a group name
+  defp decode_name(raw), do: decode_name(raw, [])
+  defp decode_name("", acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp decode_name("\\u{" <> rest, acc) do
+    [hex, r] = String.split(rest, "}", parts: 2)
+    decode_name(r, [<<String.to_integer(hex, 16)::utf8>> | acc])
+  rescue
+    _ -> bad_name()
+  end
+
+  defp decode_name(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
+    with {hi, ""} when hi in 0xD800..0xDBFF <- Integer.parse(hex, 16),
+         <<"\\u", lo_hex::binary-size(4), after_pair::binary>> <- rest,
+         {lo, ""} when lo in 0xDC00..0xDFFF <- Integer.parse(lo_hex, 16) do
+      decode_name(after_pair, [<<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>> | acc])
+    else
+      _ ->
+        case Integer.parse(hex, 16) do
+          {n, ""} when n not in 0xD800..0xDFFF -> decode_name(rest, [<<n::utf8>> | acc])
+          _ -> bad_name()
+        end
+    end
+  end
+
+  defp decode_name(<<c::utf8, rest::binary>>, acc), do: decode_name(rest, [<<c::utf8>> | acc])
+  defp decode_name(<<_, rest::binary>>, acc), do: decode_name(rest, acc)
+
+  # pass 2: the definitions and the references use the new names
+  defp rewrite_groups("", _cls, _by, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp rewrite_groups(<<"\\k<", rest::binary>>, cls, by, acc) do
+    unless String.contains?(rest, ">"), do: bad_name()
+    {raw, after_name} = split_name(rest)
+
+    case Map.fetch(by, decode_name(raw)) do
+      {:ok, i} -> rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
+      :error -> bad_name()
+    end
+  end
+
+  defp rewrite_groups(<<?\\, c::utf8, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<?\\, c::utf8>> | acc])
+
+  defp rewrite_groups("[" <> rest, false, by, acc),
+    do: rewrite_groups(rest, true, by, ["[" | acc])
+
+  defp rewrite_groups("]" <> rest, true, by, acc),
+    do: rewrite_groups(rest, false, by, ["]" | acc])
+
+  defp rewrite_groups("(?<" <> rest, false, by, acc) do
+    case rest do
+      <<c, _::binary>> when c in ~c"=!" ->
+        rewrite_groups(rest, false, by, ["(?<" | acc])
+
+      _ ->
+        {raw, after_name} = split_name(rest)
+        i = Map.fetch!(by, decode_name(raw))
+        rewrite_groups(after_name, false, by, ["(?<g#{i}>" | acc])
+    end
+  end
+
+  defp rewrite_groups(<<c::utf8, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<c::utf8>> | acc])
+
+  defp rewrite_groups(<<c, rest::binary>>, cls, by, acc),
+    do: rewrite_groups(rest, cls, by, [<<c>> | acc])
 
   # JavaScript syntax that PCRE spells differently
   defp translate(source), do: translate(source, false, [])
@@ -203,19 +335,41 @@ defmodule Browser.JS.RegExp do
 
     case :re.run(subject, re, [{:capture, :all, :index}, {:offset, from_byte}]) do
       {:match, [{start, len} | caps]} when not sticky? or start == from_byte ->
+        {count, named_list} = names
+
+        # (PCRE leaves out trailing groups that did not take part)
         groups =
           for {s, l} <- caps do
             if s < 0, do: :undefined, else: binary_part(subject, s, l)
           end
 
-        named = named_groups(names, groups)
+        groups = groups ++ List.duplicate(:undefined, count - length(groups))
+
+        named = named_groups(named_list, groups)
+
+        # (the code point spans of every group, only worked out for the `d` flag)
+        spans =
+          if flag?(re_obj, "d") do
+            spans =
+              for {s, l} <- [{start, len} | caps] do
+                if s < 0,
+                  do: :undefined,
+                  else:
+                    {cp_count(binary_part(subject, 0, s)),
+                     cp_count(binary_part(subject, 0, s + l))}
+              end
+
+            spans ++ List.duplicate(:undefined, count + 1 - length(spans))
+          end
 
         %{
+          spans: spans,
           start: cp_count(binary_part(subject, 0, start)),
           stop: cp_count(binary_part(subject, 0, start + len)),
           text: binary_part(subject, start, len),
           groups: groups,
-          named: named
+          named: named,
+          names: named_list
         }
 
       _ ->
@@ -223,15 +377,11 @@ defmodule Browser.JS.RegExp do
     end
   end
 
-  # the :namelist order is the order of the names in the pattern, which is the group order
-  # for the named groups; their indices are found from the name list of the compiled pattern
+  # `[{name, value}]` of the named groups, in pattern order; nil without any
   defp named_groups([], _), do: nil
 
   defp named_groups(names, groups),
-    do: names |> Enum.zip(named_values(names, groups)) |> Map.new(fn {n, v} -> {n, v} end)
-
-  # (best effort: the groups of a pattern with named groups are mostly all named)
-  defp named_values(names, groups), do: Enum.take(groups, length(names))
+    do: for({i, name} <- names, do: {name, Enum.at(groups, i - 1)})
 
   defp byte_of(subject, cp) do
     byte_of(subject, cp, 0)
@@ -256,17 +406,40 @@ defmodule Browser.JS.RegExp do
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
-    put(arr, "index", m.start * 1.0)
-    put(arr, "input", subject)
+    Interp.define_data(arr, "index", m.start * 1.0)
+    Interp.define_data(arr, "input", subject)
 
     groups =
       case m.named do
         nil -> :undefined
-        named -> new_object(Enum.map(named, fn {k, v} -> {k, v} end))
+        named -> new_object(named, :null)
       end
 
-    put(arr, "groups", groups)
+    Interp.define_data(arr, "groups", groups)
+    if m.spans, do: put_hidden_indices(arr, m)
     arr
+  end
+
+  # `indices` of a match made with the `d` flag: [start, end] pairs, and `groups` by name
+  defp put_hidden_indices(arr, m) do
+    pair = fn
+      :undefined -> :undefined
+      {a, b} -> new_array([a * 1.0, b * 1.0])
+    end
+
+    indices = new_array(Enum.map(m.spans, pair))
+
+    groups =
+      case m.named do
+        nil ->
+          :undefined
+
+        _named ->
+          new_object(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))}), :null)
+      end
+
+    Interp.define_data(indices, "groups", groups)
+    Interp.define_data(arr, "indices", indices)
   end
 
   defp put(o, k, v), do: Interp.put(o, k, v)
@@ -408,7 +581,11 @@ defmodule Browser.JS.RegExp do
   defp substitute("$<" <> r, m, s, acc) do
     case String.split(r, ">", parts: 2) do
       [name, rest] ->
-        v = if m.named, do: Map.get(m.named, name, :undefined), else: :undefined
+        v =
+          if m.named,
+            do: Enum.find_value(m.named, :undefined, fn {k, v} -> if k == name, do: v end),
+            else: :undefined
+
         substitute(rest, m, s, [if(v == :undefined, do: "", else: v) | acc])
 
       _ ->
