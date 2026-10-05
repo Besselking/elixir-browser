@@ -2754,7 +2754,7 @@ defmodule Browser.Layout do
 
     y =
       cond do
-        top && bottom && !spec.autoh && (spec.mta || spec.mba) ->
+        top && bottom && (spec.mta || spec.mba) ->
           # auto vertical margins share what `top`, `bottom` and the height leave over
           free = max(origin.h - top - bottom - height - if(spec.mba, do: 0, else: spec.mb), 0)
           origin.y + top + if(spec.mta, do: if(spec.mba, do: div(free, 2), else: free), else: 0)
@@ -2803,7 +2803,11 @@ defmodule Browser.Layout do
     {before, rest} = Enum.split_while(sub, &(not match?({:box_start, _, _}, &1)))
 
     with [{:box_start, ref, o} | tail] <- rest,
-         true <- Enum.all?(before, &(&1 == {:flush} or match?({:gap, _}, &1))) do
+         true <-
+           Enum.all?(
+             before,
+             &(&1 == {:flush} or match?({tag, _} when tag in [:gap, :anchor], &1))
+           ) do
       {before, ref, o, tail}
     else
       _ ->
@@ -2811,14 +2815,14 @@ defmodule Browser.Layout do
     end
   end
 
-  # the first box of an absolute element is at least `target` tall (margins are ignored)
+  # the first box of an absolute element is `target` tall (max-height and min-height still apply)
   defp stretch(sub, target) do
     case own_box(sub) do
       {before, ref, o, tail} ->
         {bt, _, bb, _} = o.bw
         extra = if o.sizing == :border, do: 0, else: bt + o.pt + o.pb + bb
         target = max(target - extra, 0)
-        before ++ [{:box_start, ref, %{o | min: max(o.min || 0, target)}} | tail]
+        before ++ [{:box_start, ref, %{o | h: target}} | tail]
 
       nil ->
         sub

@@ -126,7 +126,9 @@ defmodule Mix.Tasks.Reftest do
     if File.dir?(Path.join(root, ".git")) do
       Mix.shell().info("Updating web-platform-tests in #{root} ...")
       git!(root, ["sparse-checkout", "set" | dirs])
-      git!(root, ["pull", "--quiet", "--depth", "1"])
+      # a shallow clone cannot be pulled once upstream has moved on: fetch the tip and reset to it
+      git!(root, ["fetch", "--quiet", "--depth", "1", "origin", "HEAD"])
+      git!(root, ["reset", "--quiet", "--hard", "FETCH_HEAD"])
     else
       Mix.shell().info(
         "Cloning web-platform-tests into #{root} (only #{length(dirs)} folders) ..."

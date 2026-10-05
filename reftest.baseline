@@ -1808,6 +1808,7 @@ css/CSS2/positioning/absolute-non-replaced-max-height-006.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-008.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-009.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-010.xht
+css/CSS2/positioning/absolute-non-replaced-max-height-011.xht
 css/CSS2/positioning/absolute-non-replaced-max-height-012.xht
 css/CSS2/positioning/absolute-non-replaced-min-max-001.html
 css/CSS2/positioning/absolute-non-replaced-width-001.xht
@@ -1835,6 +1836,7 @@ css/CSS2/positioning/absolute-non-replaced-width-023.xht
 css/CSS2/positioning/absolute-non-replaced-width-024.xht
 css/CSS2/positioning/absolute-non-replaced-width-025.xht
 css/CSS2/positioning/absolute-non-replaced-width-026.xht
+css/CSS2/positioning/absolute-non-replaced-width-027.xht
 css/CSS2/positioning/absolute-replaced-height-001.xht
 css/CSS2/positioning/absolute-replaced-height-002.xht
 css/CSS2/positioning/absolute-replaced-height-003.xht
@@ -2836,7 +2838,6 @@ css/css-flexbox/percentage-heights-018.html
 css/css-flexbox/percentage-max-height-001.html
 css/css-flexbox/percentage-max-height-004.html
 css/css-flexbox/percentage-padding-005.html
-css/css-flexbox/percentage-widths-001.html
 css/css-flexbox/position-fixed-001.html
 css/css-flexbox/select-element-multiple.html
 css/css-flexbox/select-element-zero-height-001.html

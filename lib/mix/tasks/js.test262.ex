@@ -154,7 +154,9 @@ defmodule Mix.Tasks.Js.Test262 do
 
     if File.dir?(Path.join(root, ".git")) do
       Mix.shell().info("Updating test262 in #{root} ...")
-      git!(root, ["pull", "--quiet", "--depth", "1"])
+      # a shallow clone cannot be pulled once upstream has moved on: fetch the tip and reset to it
+      git!(root, ["fetch", "--quiet", "--depth", "1", "origin", "HEAD"])
+      git!(root, ["reset", "--quiet", "--hard", "FETCH_HEAD"])
       git!(root, ["sparse-checkout", "set" | dirs])
     else
       Mix.shell().info("Cloning test262 into #{root} ...")
