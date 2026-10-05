@@ -18,7 +18,8 @@ defmodule Browser.JS.Num do
   def to_string(f) when f == 0, do: "0"
   def to_string(f) when f < 0, do: "-" <> __MODULE__.to_string(-f)
 
-  def to_string(f) when f == trunc(f) and f < 1.0e21, do: Integer.to_string(trunc(f))
+  def to_string(f) when f < 9.007199254740992e15 and f == trunc(f),
+    do: Integer.to_string(trunc(f))
 
   def to_string(f) do
     {digits, n} = digits(f)
@@ -85,6 +86,9 @@ defmodule Browser.JS.Num do
       Regex.match?(~r/\A0[xX][0-9a-fA-F]+\z/, s) ->
         String.to_integer(binary_part(s, 2, byte_size(s) - 2), 16) * 1.0
 
+      Regex.match?(~r/\A0[oO][0-7]+\z/, s) ->
+        String.to_integer(binary_part(s, 2, byte_size(s) - 2), 8) * 1.0
+
       Regex.match?(~r/\A0[bB][01]+\z/, s) ->
         String.to_integer(binary_part(s, 2, byte_size(s) - 2), 2) * 1.0
 
@@ -99,8 +103,8 @@ defmodule Browser.JS.Num do
   @doc "The longest numeric prefix (what parseFloat reads), or `:nan`."
   def parse_prefix(s) do
     case Regex.run(
-           ~r/\A\s*([+-]?(?:Infinity|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?))/,
-           s
+           ~r/\A([+-]?(?:Infinity|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?))/,
+           Browser.JS.Interp.js_trim_start(s)
          ) do
       [_, m] -> parse(m)
       _ -> :nan
@@ -121,10 +125,21 @@ defmodule Browser.JS.Num do
 
     case Float.parse(s) do
       {f, _} -> f
-      :error -> :nan
+      :error -> out_of_range(s)
     end
   rescue
-    ArgumentError -> :nan
+    ArgumentError -> out_of_range(s)
+  end
+
+  # a float literal out of range: huge exponents overflow, tiny ones underflow
+  defp out_of_range(s) do
+    cond do
+      not Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\z/, s) -> :nan
+      not Regex.match?(~r/[1-9]/, hd(String.split(s, ~r/[eE]/))) -> 0.0
+      Regex.match?(~r/[eE]-/, s) -> if String.starts_with?(s, "-"), do: -0.0, else: 0.0
+      String.starts_with?(s, "-") -> :neg_infinity
+      true -> :infinity
+    end
   end
 
   @doc "ToInt32."
