@@ -3282,6 +3282,18 @@ defmodule Browser.LayoutTest do
       assert rect.w == word_at(items, "ab").w
     end
 
+    test "a relative box's percentage offsets are of its containing block" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="width:200px;height:100px"><div style="position:relative;left:50%;top:10%;width:20px;height:20px;background:#ccc"></div></div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect and &1.w == 20))
+      assert {rect.x, rect.y} == {100, 10}
+    end
+
     test "an absolute box with a percentage height takes it from the window" do
       page =
         Page.build(
