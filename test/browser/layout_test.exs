@@ -3270,6 +3270,18 @@ defmodule Browser.LayoutTest do
       assert {rect.x, rect.y, rect.w, rect.h} == {33, 33, 34, 34}
     end
 
+    test "a shrink-wrapped absolute box ignores percentage widths when measuring its content" do
+      page =
+        Page.build(
+          ~s|<style>body{margin:0}</style><div style="position:absolute"><div style="width:100%;background:#ccc">ab</div></div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert rect.w == word_at(items, "ab").w
+    end
+
     test "an absolute box with a percentage height takes it from the window" do
       page =
         Page.build(

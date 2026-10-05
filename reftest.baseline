@@ -1785,6 +1785,7 @@ css/CSS2/normal-flow/width-104.xht
 css/CSS2/normal-flow/width-applies-to-008.xht
 css/CSS2/normal-flow/width-applies-to-009.xht
 css/CSS2/normal-flow/width-applies-to-015.xht
+css/CSS2/normal-flow/width-applies-to-016.xht
 css/CSS2/normal-flow/width-inherit-001.xht
 css/CSS2/normal-flow/width-non-replaced-inline-001.xht
 css/CSS2/normal-flow/width-percentage-001.xht
@@ -1908,6 +1909,8 @@ css/CSS2/positioning/abspos-overflow-009.xht
 css/CSS2/positioning/abspos-overflow-010.xht
 css/CSS2/positioning/abspos-overflow-011.xht
 css/CSS2/positioning/abspos-overflow-012.xht
+css/CSS2/positioning/abspos-width-002.xht
+css/CSS2/positioning/abspos-width-003.xht
 css/CSS2/positioning/abspos-width-004.xht
 css/CSS2/positioning/abspos-width-005.xht
 css/CSS2/positioning/auto-position-rtl-child-viewport-scrollbar.html
@@ -3017,6 +3020,7 @@ css/css-sizing/aspect-ratio/block-aspect-ratio-046.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-048.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-050.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-056.html
+css/css-sizing/aspect-ratio/block-aspect-ratio-057.tentative.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-058.html
 css/css-sizing/aspect-ratio/fieldset-element-001.html
 css/css-sizing/aspect-ratio/fieldset-element-002.html
