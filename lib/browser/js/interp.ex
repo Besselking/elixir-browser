@@ -737,7 +737,14 @@ defmodule Browser.JS.Interp do
       {:closure, %{mode: mode}} when mode in [false, nil] ->
         p = new_object()
         put_hidden(p, "constructor", {:obj, id})
-        put_hidden({:obj, id}, "prototype", p)
+        o = deref(id)
+        attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
+
+        store(
+          id,
+          o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs)
+        )
+
         p
 
       {:native, _, _} ->
@@ -1050,6 +1057,12 @@ defmodule Browser.JS.Interp do
                 keys: List.delete(o.keys, key)
             }
             |> Map.put(:attrs, attrs)
+            |> then(fn o2 ->
+              # a function's own `name` or `length` that is gone must not reappear as the virtual one
+              if o.class == :function and key in ["name", "length"],
+                do: Map.update(o2, :gone, [key], &[key | &1]),
+                else: o2
+            end)
           )
 
           true
@@ -1429,18 +1442,41 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def instance_of?({:obj, _} = o, {:obj, _} = f) do
-    unless function?(f),
-      do: throw_error("TypeError", "Right-hand side of 'instanceof' is not callable")
+  def instance_of?(o, {:obj, _} = f) do
+    case get(f, {:symbol, :hasInstance, "Symbol.hasInstance"}) do
+      m when m in [:undefined, :null] ->
+        unless function?(f),
+          do: throw_error("TypeError", "Right-hand side of 'instanceof' is not callable")
 
-    walk_protos(o, get(f, "prototype"))
+        ordinary_has_instance(f, o)
+
+      m ->
+        truthy(call(m, f, [o]))
+    end
   end
 
-  def instance_of?(_, f) do
-    unless function?(f),
-      do: throw_error("TypeError", "Right-hand side of 'instanceof' is not callable")
+  def instance_of?(_, _),
+    do: throw_error("TypeError", "Right-hand side of 'instanceof' is not an object")
 
-    false
+  @doc "OrdinaryHasInstance(c, o)."
+  def ordinary_has_instance(c, o) do
+    cond do
+      not function?(c) ->
+        false
+
+      match?(%{bound: {_, _}}, deref(elem(c, 1))) ->
+        {target, _} = deref(elem(c, 1)).bound
+        instance_of?(o, target)
+
+      not match?({:obj, _}, o) ->
+        false
+
+      true ->
+        case get(c, "prototype") do
+          {:obj, _} = p -> walk_protos(o, p)
+          _ -> throw_error("TypeError", "Function has non-object prototype in instanceof check")
+        end
+    end
   end
 
   defp walk_protos({:obj, _} = o, target) do
@@ -1741,20 +1777,32 @@ defmodule Browser.JS.Interp do
   # A function that is not strict gets the global object for a `this` that is undefined or null
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
   # (no page) nothing changes.
-  defp sloppy_this(c, this) when this in [:undefined, :null] do
-    case c.body do
-      [{:expr, {:str, "use strict"}} | _] ->
+  defp sloppy_this(c, this) do
+    strict? =
+      case c.body do
+        [{:expr, {:str, "use strict"}} | _] -> true
+        _ -> false
+      end
+
+    cond do
+      strict? ->
         this
 
-      _ ->
+      this in [:undefined, :null] ->
         case lookup_var(global(), :this) do
           {:ok, w} -> w
           :error -> this
         end
+
+      is_binary(this) or is_number(this) or is_boolean(this) or
+        this in [:nan, :infinity, :neg_infinity] or
+          (is_tuple(this) and elem(this, 0) in [:bigint, :symbol]) ->
+        Browser.JS.Builtins.box(this)
+
+      true ->
+        this
     end
   end
-
-  defp sloppy_this(_c, this), do: this
 
   # `arguments` is only built when a function body asks for it
   defp lazy_arguments(env) do
