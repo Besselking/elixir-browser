@@ -610,7 +610,7 @@ defmodule Browser.JS.Proxy do
   def is_array({:obj, id} = o) do
     case Interp.deref(id) do
       %{proxy: _} -> is_array(elem(state(o), 0))
-      %{class: :array} -> true
+      %{class: :array} = o -> not Map.get(o, :arguments, false)
       _ -> false
     end
   end

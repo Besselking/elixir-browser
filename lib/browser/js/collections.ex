@@ -258,6 +258,13 @@ defmodule Browser.JS.Collections do
       proto(:string),
       @iterator,
       native("[Symbol.iterator]", fn this, _ ->
+        if nullish?(this),
+          do:
+            throw_error(
+              "TypeError",
+              "String.prototype[Symbol.iterator] called on null or undefined"
+            )
+
         make_kind_iterator(String.codepoints(to_str(this)), :string_iterator)
       end)
     )

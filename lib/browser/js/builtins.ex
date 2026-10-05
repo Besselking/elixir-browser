@@ -7,6 +7,7 @@ defmodule Browser.JS.Builtins do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  alias Browser.JS.ArrayGeneric
   alias Browser.JS.Interp
   alias Browser.JS.Str
   alias Browser.JS.Num
@@ -48,6 +49,7 @@ defmodule Browser.JS.Builtins do
     function_methods(function_proto)
     array_methods(proto(:array))
     string_methods(proto(:string))
+    Browser.JS.StringProto.install(proto(:string))
     number_methods(proto(:number))
     install_errors(scope, error_proto)
     install_object(scope, object_proto)
@@ -79,10 +81,10 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp object_to_string(:undefined), do: "[object Undefined]"
-  defp object_to_string(:null), do: "[object Null]"
+  def object_to_string(:undefined), do: "[object Undefined]"
+  def object_to_string(:null), do: "[object Null]"
 
-  defp object_to_string(this) do
+  def object_to_string(this) do
     o = if match?({:obj, _}, this), do: this, else: box(this)
 
     # the built-in tag is worked out before @@toStringTag is read (which may revoke a proxy)
@@ -358,8 +360,8 @@ defmodule Browser.JS.Builtins do
     arr =
       constructor(scope, "Array", array_proto, fn _, args ->
         case args do
-          [n] when is_number(n) ->
-            unless n >= 0 and n == trunc(n) and n < 4_294_967_296,
+          [n] when is_number(n) or n in [:nan, :infinity, :neg_infinity] ->
+            unless is_number(n) and n >= 0 and n == trunc(n) and n < 4_294_967_296,
               do: throw_error("RangeError", "Invalid array length")
 
             array_of(trunc(n), %{})
@@ -377,80 +379,8 @@ defmodule Browser.JS.Builtins do
 
     def_fn(arr, "isArray", fn _, args -> Browser.JS.Proxy.is_array(arg(args, 0)) end)
     put_hidden(arr, "fromAsync", Browser.JS.Prelude.from_async())
-    def_fn(arr, "of", fn _, args -> new_array(args) end)
-
-    def_fn(arr, "from", fn _, args ->
-      src = arg(args, 0)
-      f = arg(args, 1)
-
-      source =
-        if match?({:obj, _}, src) and not array?(src) and iterable?(src),
-          do: Interp.iter_source(src)
-
-      lazy = match?({:proto, _, _}, source)
-
-      list =
-        cond do
-          lazy ->
-            {:proto, it, next} = source
-            from_iterator(it, next, if(function?(f), do: f), 0, [])
-
-          match?({:list, _}, source) ->
-            elem(source, 1)
-
-          is_binary(src) or array?(src) ->
-            iterate(src)
-
-          match?({:obj, _}, src) and iterable?(src) ->
-            iterate(src)
-
-          match?({:obj, _}, src) ->
-            for i <- 0..(to_int(Interp.get(src, "length")) - 1)//1, do: Interp.get(src, float(i))
-
-          true ->
-            []
-        end
-
-      new_array(
-        if function?(f) and not lazy,
-          do:
-            list
-            |> Enum.with_index()
-            |> Enum.map(fn {v, i} -> call(f, :undefined, [v, float(i)]) end),
-          else: list
-      )
-    end)
-  end
-
-  # Array.from over an iterator: each value is mapped as it is pulled, and an error from the
-  # map function closes the iterator
-  defp from_iterator(it, next, f, i, acc) do
-    case Interp.iter_step(it, next) do
-      :done ->
-        Enum.reverse(acc)
-
-      {:ok, v} ->
-        v =
-          if f do
-            try do
-              call(f, :undefined, [v, float(i)])
-            catch
-              kind, e ->
-                Interp.iter_close(it, true)
-                :erlang.raise(kind, e, __STACKTRACE__)
-            end
-          else
-            v
-          end
-
-        from_iterator(it, next, f, i + 1, [v | acc])
-    end
-  end
-
-  defp iterable?({:obj, id} = o) do
-    deref(id).class in [:map, :set] or
-      (match?(f when is_tuple(f), Interp.get(o, {:symbol, :iterator, "Symbol.iterator"})) and
-         function?(Interp.get(o, {:symbol, :iterator, "Symbol.iterator"})))
+    def_fn(arr, "of", fn this, args -> ArrayGeneric.of(this, args) end)
+    def_fn(arr, "from", fn this, args -> ArrayGeneric.from(this, args) end)
   end
 
   # start / end arguments of slice-like methods
@@ -474,13 +404,19 @@ defmodule Browser.JS.Builtins do
 
   defp plain_array?(_), do: false
 
+  # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
+  defp fast_array?(this, extra \\ 0) do
+    plain_array?(this) and
+      elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
+  end
+
   @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
                        findLastIndex flatMap)
 
   # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
   # species constructor
   defp species_target(this, n) do
-    if array?(this) do
+    if Browser.JS.Proxy.is_array(this) do
       c = Interp.get(this, "constructor")
 
       c =
@@ -541,8 +477,11 @@ defmodule Browser.JS.Builtins do
           nullish?(this) ->
             throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
 
-          is_boolean(this) ->
-            wrap(new_object([], proto(:boolean)), this)
+          is_binary(this) ->
+            box(this)
+
+          is_boolean(this) or match?({:symbol, _, _}, this) or match?({:bigint, _}, this) ->
+            box(this)
 
           is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
             wrap(new_object([], proto(:number)), this)
@@ -567,7 +506,7 @@ defmodule Browser.JS.Builtins do
     store(pid, po |> Map.put(:props, Map.put(po.props, "length", 0.0)) |> Map.put(:attrs, attrs))
 
     array_fn(p, "push", fn this, args ->
-      if plain_array?(this) do
+      if fast_array?(this, length(args)) do
         {:obj, id} = this
         o = deref(id)
 
@@ -579,16 +518,12 @@ defmodule Browser.JS.Builtins do
         Interp.store(id, %{o | items: items, len: len})
         float(len)
       else
-        o = this_obj(this)
-        len = length_of(o)
-        args |> Enum.with_index(len) |> Enum.each(fn {v, i} -> Interp.put(o, float(i), v) end)
-        Interp.put(o, "length", float(len + length(args)))
-        float(len + length(args))
+        ArrayGeneric.push(this, args)
       end
     end)
 
     array_fn(p, "pop", fn this, _ ->
-      if plain_array?(this) do
+      if fast_array?(this) do
         {:obj, id} = this
         o = deref(id)
 
@@ -605,76 +540,75 @@ defmodule Browser.JS.Builtins do
           last
         end
       else
-        o = this_obj(this)
-        len = length_of(o)
-
-        if len == 0 do
-          Interp.put(o, "length", 0.0)
-          :undefined
-        else
-          last = Interp.get(o, float(len - 1))
-          Interp.delete(o, float(len - 1))
-          Interp.put(o, "length", float(len - 1))
-          last
-        end
+        ArrayGeneric.pop(this)
       end
     end)
 
     array_fn(p, "shift", fn this, _ ->
-      case elems(this) do
-        [] ->
-          put_elems(this, [])
-          :undefined
+      if fast_array?(this) do
+        case elems(this) do
+          [] ->
+            put_elems(this, [])
+            :undefined
 
-        [first | rest] ->
-          put_elems(this, rest)
-          first
+          [first | rest] ->
+            put_elems(this, rest)
+            first
+        end
+      else
+        ArrayGeneric.shift(this)
       end
     end)
 
     array_fn(p, "unshift", fn this, args ->
-      list = args ++ elems(this)
-      put_elems(this, list)
-      float(length(list))
+      if fast_array?(this, length(args)) do
+        list = args ++ elems(this)
+        put_elems(this, list)
+        float(length(list))
+      else
+        ArrayGeneric.unshift(this, args)
+      end
     end)
 
     array_fn(p, "slice", fn this, args ->
-      list = elems(this)
-      len = length(list)
-      from = rel(arg(args, 0), len, 0)
-      to = rel(arg(args, 1), len, len)
-      target = species_target(this, max(to - from, 0))
+      if fast_array?(this) do
+        list = elems(this)
+        len = length(list)
+        from = rel(arg(args, 0), len, 0)
+        to = rel(arg(args, 1), len, len)
+        target = species_target(this, max(to - from, 0))
 
-      new_array(Enum.slice(list, from, max(to - from, 0)))
-      |> species_fill_from(target, true)
+        new_array(Enum.slice(list, from, max(to - from, 0)))
+        |> species_fill_from(target, true)
+      else
+        ArrayGeneric.slice(this, args)
+      end
     end)
 
     array_fn(p, "splice", fn this, args ->
-      list = elems(this)
-      len = length(list)
-      from = rel(arg(args, 0), len, 0)
+      if fast_array?(this, length(args)) do
+        list = elems(this)
+        len = length(list)
+        from = rel(arg(args, 0), len, 0)
 
-      count =
-        case args do
-          [_] -> len - from
-          [] -> 0
-          [_, c | _] -> c |> to_int() |> max(0) |> min(len - from)
-        end
+        count =
+          case args do
+            [_] -> len - from
+            [] -> 0
+            [_, c | _] -> c |> to_int() |> max(0) |> min(len - from)
+          end
 
-      target = species_target(this, count)
-      {head, rest} = Enum.split(list, from)
-      {removed, tail} = Enum.split(rest, count)
-      put_elems(this, head ++ Enum.drop(args, 2) ++ tail)
-      new_array(removed) |> species_fill_from(target, true)
+        target = species_target(this, count)
+        {head, rest} = Enum.split(list, from)
+        {removed, tail} = Enum.split(rest, count)
+        put_elems(this, head ++ Enum.drop(args, 2) ++ tail)
+        new_array(removed) |> species_fill_from(target, true)
+      else
+        ArrayGeneric.splice(this, args)
+      end
     end)
 
-    array_fn(p, "concat", fn this, args ->
-      target = species_target(this, 0)
-      items = [this_obj(this) | args]
-
-      new_array(Enum.flat_map(items, &concat_items/1))
-      |> species_fill_from(target, true)
-    end)
+    array_fn(p, "concat", fn this, args -> ArrayGeneric.concat(this, args) end)
 
     array_fn(p, "toLocaleString", fn this, _ ->
       len = length_of(this)
@@ -692,105 +626,57 @@ defmodule Browser.JS.Builtins do
       end)
     end)
 
-    array_fn(p, "join", fn this, args ->
-      join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
-    end)
+    array_fn(p, "join", fn this, args -> ArrayGeneric.join(this, arg(args, 0)) end)
 
     array_fn(p, "toString", fn this, _ ->
-      case this do
-        {:obj, _} ->
-          case Interp.get(this, "join") do
-            f when is_tuple(f) -> if function?(f), do: call(f, this, []), else: "[object Object]"
-            _ -> "[object Object]"
-          end
+      case Interp.get(this, "join") do
+        f when is_tuple(f) ->
+          if function?(f), do: call(f, this, []), else: object_to_string(this)
 
         _ ->
-          join(this, ",")
+          object_to_string(this)
       end
     end)
 
     array_fn(p, "reverse", fn this, _ ->
-      put_elems(this, Enum.reverse(elems(this)))
-      this
-    end)
-
-    array_fn(p, "indexOf", fn this, args ->
-      v = arg(args, 0)
-
-      from = from_index(this, args, nil, :asc)
-
-      case Enum.find(pairs(this, :asc, from), fn {_, x} -> strict_eq(x, v) end) do
-        {i, _} -> float(i)
-        nil -> -1.0
+      if fast_array?(this) and not has_holes?(this) do
+        put_elems(this, Enum.reverse(elems(this)))
+        this
+      else
+        ArrayGeneric.reverse(this)
       end
     end)
 
-    array_fn(p, "lastIndexOf", fn this, args ->
-      v = arg(args, 0)
+    array_fn(p, "indexOf", fn this, args -> ArrayGeneric.index_of(this, args) end)
 
-      from = from_index(this, args, nil, :desc)
+    array_fn(p, "lastIndexOf", fn this, args -> ArrayGeneric.last_index_of(this, args) end)
 
-      case this |> pairs(:desc, from) |> Enum.find(fn {_, x} -> strict_eq(x, v) end) do
-        {i, _} -> float(i)
-        nil -> -1.0
-      end
-    end)
+    array_fn(p, "includes", fn this, args -> ArrayGeneric.includes(this, args) end)
 
-    array_fn(p, "includes", fn this, args ->
-      v = arg(args, 0)
-      Enum.any?(elems(this), &same_value_zero(&1, v))
-    end)
-
-    array_fn(p, "at", fn this, args ->
-      list = elems(this)
-      n = to_int(arg(args, 0))
-      Enum.at(list, if(n < 0, do: length(list) + n, else: n), :undefined)
-    end)
+    array_fn(p, "at", fn this, args -> ArrayGeneric.at(this, args) end)
 
     array_fn(p, "fill", fn this, args ->
-      list = elems(this)
-      len = length(list)
-      from = rel(arg(args, 1), len, 0)
-      to = rel(arg(args, 2), len, len)
-      v = arg(args, 0)
+      if fast_array?(this) do
+        list = elems(this)
+        len = length(list)
+        from = rel(arg(args, 1), len, 0)
+        to = rel(arg(args, 2), len, len)
+        v = arg(args, 0)
 
-      put_elems(
-        this,
-        list
-        |> Enum.with_index()
-        |> Enum.map(fn {x, i} -> if i >= from and i < to, do: v, else: x end)
-      )
+        put_elems(
+          this,
+          list
+          |> Enum.with_index()
+          |> Enum.map(fn {x, i} -> if i >= from and i < to, do: v, else: x end)
+        )
 
-      this
-    end)
-
-    array_fn(p, "copyWithin", fn this, args ->
-      o = this_obj(this)
-      len = length_of(o)
-      to = rel(arg(args, 0), len, 0)
-      from = rel(arg(args, 1), len, 0)
-      final = rel(arg(args, 2), len, len)
-      count = min(final - from, len - to)
-
-      {dir, from, to} =
-        if from < to and to < from + count,
-          do: {-1, from + count - 1, to + count - 1},
-          else: {1, from, to}
-
-      for k <- 0..(count - 1)//1 do
-        f = float(from + dir * k)
-        t = float(to + dir * k)
-
-        if Interp.has_property?(o, to_key(f)),
-          do: Interp.put(o, t, Interp.get(o, f)),
-          else:
-            unless(Interp.delete(o, to_key(t)),
-              do: throw_error("TypeError", "Cannot delete property '#{to_str(t)}'")
-            )
+        this
+      else
+        ArrayGeneric.fill(this, args)
       end
-
-      o
     end)
+
+    array_fn(p, "copyWithin", fn this, args -> ArrayGeneric.copy_within(this, args) end)
 
     array_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
@@ -857,47 +743,18 @@ defmodule Browser.JS.Builtins do
       float(idx)
     end)
 
-    array_fn(p, "findLast", fn this, args ->
-      f = callable!(arg(args, 0))
+    array_fn(p, "findLast", fn this, args -> ArrayGeneric.find_last(this, args, false) end)
 
-      Enum.find_value(each_pair(this, :desc), :undefined, fn {v, i} ->
-        if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
-      end)
-    end)
+    array_fn(p, "findLastIndex", fn this, args -> ArrayGeneric.find_last(this, args, true) end)
 
-    array_fn(p, "findLastIndex", fn this, args ->
-      f = callable!(arg(args, 0))
+    array_fn(p, "toReversed", fn this, _ -> ArrayGeneric.to_reversed(this) end)
 
-      idx =
-        Enum.find_value(each_pair(this, :desc), -1, fn {v, i} ->
-          if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
-        end)
+    array_fn(p, "toSorted", fn this, args -> ArrayGeneric.to_sorted(this, args) end)
+    set_arity(Interp.get(p, "toSorted"), 1)
 
-      float(idx)
-    end)
+    array_fn(p, "toSpliced", fn this, args -> ArrayGeneric.to_spliced(this, args) end)
 
-    array_fn(p, "toReversed", fn this, _ -> new_array(Enum.reverse(elems(this))) end)
-
-    array_fn(p, "toSorted", fn this, args ->
-      copy = new_array(elems(this))
-      call(Interp.get(copy, "sort"), copy, args)
-    end)
-
-    array_fn(p, "toSpliced", fn this, args ->
-      copy = new_array(elems(this))
-      call(Interp.get(copy, "splice"), copy, args)
-      copy
-    end)
-
-    array_fn(p, "with", fn this, args ->
-      list = elems(this)
-      len = length(list)
-      n = to_int(arg(args, 0))
-      i = if n < 0, do: len + n, else: n
-
-      if i < 0 or i >= len, do: throw_error("RangeError", "Invalid index")
-      new_array(List.replace_at(list, i, arg(args, 1)))
-    end)
+    array_fn(p, "with", fn this, args -> ArrayGeneric.with_index(this, args) end)
 
     array_fn(p, "some", fn this, args ->
       f = callable!(arg(args, 0))
@@ -990,32 +847,6 @@ defmodule Browser.JS.Builtins do
   end
 
   # the elements `concat` adds for one argument: its elements when it is spreadable
-  defp concat_items({:obj, _} = v) do
-    spreadable? =
-      case Interp.get(v, {:symbol, :isConcatSpreadable, "Symbol.isConcatSpreadable"}) do
-        :undefined -> Browser.JS.Proxy.is_array(v)
-        x -> Interp.truthy(x)
-      end
-
-    cond do
-      not spreadable? ->
-        [v]
-
-      array?(v) ->
-        array_list(v)
-
-      true ->
-        len = v |> Interp.get("length") |> to_length()
-
-        if len > 9_007_199_254_740_991 - 1,
-          do: throw_error("TypeError", "Invalid array length")
-
-        for i <- 0..(len - 1)//1, Interp.has_property?(v, i), do: Interp.get(v, i)
-    end
-  end
-
-  defp concat_items(v), do: [v]
-
   defp to_length(v) do
     case to_num(v) do
       n when is_number(n) -> n |> trunc() |> max(0) |> min(9_007_199_254_740_991)
@@ -1095,22 +926,8 @@ defmodule Browser.JS.Builtins do
 
   defp very_sparse?(_, _), do: false
 
-  # where indexOf/lastIndexOf start, from the `fromIndex` argument
-  defp from_index(this, args, default, dir) do
-    case args do
-      [_, from | _] ->
-        len = length_of(this)
-        n = if len == 0, do: 0, else: to_int(from)
-        n = if n < 0, do: len + n, else: n
-        if dir == :asc, do: max(n, 0), else: min(n, len - 1)
-
-      _ ->
-        default
-    end
-  end
-
   # an array of `len` slots with values at some of them
-  defp array_of(len, items) do
+  def array_of(len, items) do
     arr = new_array([])
     {:obj, id} = arr
     store(id, %{deref(id) | items: items, len: len})
@@ -1160,10 +977,6 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
-  defp join(arr, sep) do
-    arr |> elems() |> Enum.map_join(sep, fn v -> if nullish?(v), do: "", else: to_str(v) end)
-  end
-
   # ── String / Number / Boolean ──────────────────────────────
 
   defp install_primitives(scope) do
@@ -1189,7 +1002,7 @@ defmodule Browser.JS.Builtins do
           end
 
         if wrapper_target?(this, :string) do
-          put_hidden(this, "length", float(String.length(s)))
+          put_const(this, "length", float(String.length(s)))
           wrap(this, s)
         else
           s

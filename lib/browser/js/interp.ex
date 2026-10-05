@@ -313,11 +313,24 @@ defmodule Browser.JS.Interp do
   def to_int(v) do
     case to_num(v) do
       :nan -> 0
-      :infinity -> 1_000_000_000_000
-      :neg_infinity -> -1_000_000_000_000
+      :infinity -> 18_014_398_509_481_984
+      :neg_infinity -> -18_014_398_509_481_984
       n -> trunc(n)
     end
   end
+
+  @doc "ArraySetLength's value check: ToUint32 and ToNumber must agree, or a RangeError."
+  def array_length!(v) do
+    u = uint32(to_num(v))
+
+    case to_num(v) do
+      n when is_number(n) and n == u -> u
+      _ -> throw_error("RangeError", "Invalid array length")
+    end
+  end
+
+  defp uint32(n) when is_number(n), do: n |> trunc() |> Bitwise.band(0xFFFFFFFF)
+  defp uint32(_), do: 0
 
   def to_str(v) when is_binary(v), do: v
 
@@ -433,11 +446,12 @@ defmodule Browser.JS.Interp do
 
   # ── properties ─────────────────────────────────────────────
 
-  defp index(k) when is_number(k) and k >= 0 and k == trunc(k), do: trunc(k)
+  # array indices stop below 2^32 - 1; larger integers are ordinary property names
+  defp index(k) when is_number(k) and k >= 0 and k < 4_294_967_295 and k == trunc(k), do: trunc(k)
 
   defp index(k) when is_binary(k) do
     case Integer.parse(k) do
-      {i, ""} when i >= 0 -> if Integer.to_string(i) == k, do: i
+      {i, ""} when i >= 0 and i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
       _ -> nil
     end
   end
@@ -555,16 +569,42 @@ defmodule Browser.JS.Interp do
         v
 
       _ ->
-        case o.proto do
-          {:obj, pid} ->
-            case deref(pid) do
-              %{proxy: _} -> Browser.JS.Proxy.get({:obj, pid}, key, receiver)
-              po -> lookup(po, key, receiver)
+        case o do
+          # an array further up the prototype chain: its length and elements show through
+          %{class: :array} when key == "length" ->
+            o.len * 1.0
+
+          %{class: :array, items: items} when is_binary(key) ->
+            case index(key) do
+              i when is_integer(i) and is_map_key(items, i) ->
+                case items[i] do
+                  {:accessor, getter, _} ->
+                    if function?(getter), do: call(getter, receiver, []), else: :undefined
+
+                  v ->
+                    v
+                end
+
+              _ ->
+                lookup_proto(o, key, receiver)
             end
 
           _ ->
-            :undefined
+            lookup_proto(o, key, receiver)
         end
+    end
+  end
+
+  defp lookup_proto(o, key, receiver) do
+    case o.proto do
+      {:obj, pid} ->
+        case deref(pid) do
+          %{proxy: _} -> Browser.JS.Proxy.get({:obj, pid}, key, receiver)
+          po -> lookup(po, key, receiver)
+        end
+
+      _ ->
+        :undefined
     end
   end
 
@@ -884,7 +924,7 @@ defmodule Browser.JS.Interp do
 
           nil ->
             if key == "length" do
-              new_len = to_int(v)
+              new_len = array_length!(v)
 
               cond do
                 Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
@@ -1110,6 +1150,10 @@ defmodule Browser.JS.Interp do
         false
 
       o.class == :array and key_s == "length" ->
+        true
+
+      match?(%{prim: str} when is_binary(str), o) and is_integer(index(key)) and
+          index(key) < Browser.JS.Str.length(o.prim) ->
         true
 
       o.class == :array and is_integer(index(key)) ->

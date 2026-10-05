@@ -764,6 +764,10 @@ defmodule Browser.JS.Props do
   end
 
   defp define_length(id, o, desc) do
+    # the value is coerced (twice) before anything else is checked, and may change the array
+    new_len = if Map.has_key?(desc, :value), do: Interp.array_length!(desc.value)
+    o = if new_len, do: deref(id), else: o
+
     cond do
       Map.get(desc, :configurable) == true or Map.get(desc, :enumerable) == true or
         Map.has_key?(desc, :get) or Map.has_key?(desc, :set) ->
@@ -775,15 +779,9 @@ defmodule Browser.JS.Props do
         if read_only? and Map.get(desc, :writable) == true, do: reject("length")
 
         o =
-          if Map.has_key?(desc, :value) do
-            n = to_num(desc.value)
-
-            unless is_number(n) and n >= 0 and n == trunc(n) and n < 4_294_967_296,
-              do: throw_error("RangeError", "Invalid array length")
-
-            len = trunc(n)
-            if read_only? and len != o.len, do: reject("length")
-            shrink(id, o, len)
+          if new_len do
+            if read_only? and new_len != o.len, do: reject("length")
+            shrink(id, o, new_len)
           else
             o
           end

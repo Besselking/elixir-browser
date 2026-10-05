@@ -84,6 +84,8 @@ defmodule Browser.JS.Str do
   end
 
   @doc "The character index of the first `needle` at or after `from`, or -1."
+  def index_of(s, "", from), do: min(from, __MODULE__.length(s))
+
   def index_of(s, needle, from) do
     if ascii?(s) do
       size = byte_size(s)
