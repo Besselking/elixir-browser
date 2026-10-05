@@ -68,6 +68,16 @@ defmodule Browser.JS.Runtime do
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
 
+  @doc """
+  `history.go(n)` between the history entries the page made itself (`pushState`, fragments):
+  the reply has `moved: true` if the page took `n` steps, with `popstate` fired; otherwise
+  the entry is another document's and the caller loads it.
+  """
+  def traverse(pid, n), do: call(pid, {:traverse, n})
+
+  @doc "The browser followed a link to a fragment of this page, now at `url`."
+  def fragment(pid, url), do: call(pid, {:fragment, url})
+
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
@@ -226,6 +236,18 @@ defmodule Browser.JS.Runtime do
 
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
+  end
+
+  defp handle({:traverse, n}) do
+    moved = guard(fn -> DOM.traverse(n) end, :out_of_range) == :moved
+    Browser.JS.Promise.run_microtasks()
+    finish(%{moved: moved})
+  end
+
+  defp handle({:fragment, url}) do
+    guard(fn -> DOM.fragment_navigation(url) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
   end
 
   defp handle({:snapshot, controls}) do

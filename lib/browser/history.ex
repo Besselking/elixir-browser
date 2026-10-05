@@ -11,6 +11,12 @@ defmodule Browser.History do
   def visit(%__MODULE__{} = h, url),
     do: %__MODULE__{back: [h.current | h.back], current: url, forward: []}
 
+  @doc "A new entry after the current one, even at the same address (`history.pushState`)."
+  def push(%__MODULE__{current: nil} = h, url), do: %{h | current: url}
+
+  def push(%__MODULE__{} = h, url),
+    do: %__MODULE__{back: [h.current | h.back], current: url, forward: []}
+
   @doc "The current entry's address changes without a new entry (`history.replaceState`)."
   def replace(%__MODULE__{} = h, url), do: %{h | current: url}
 

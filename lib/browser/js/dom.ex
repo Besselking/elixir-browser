@@ -96,11 +96,15 @@ defmodule Browser.JS.DOM do
       width: info[:width] || 960,
       height: info[:height] || 658,
       doc: nil,
-      state: nil,
+      # the session history entries of this document, `{url, state}`: `pushState`, `replaceState`
+      # and fragment navigations edit them, `history.back()` between them stays in the document
+      hist: [{info.url, :null}],
+      hist_idx: 0,
+      history_before: info[:history_before] || 0,
+      scroll_restoration: "auto",
       session: %{},
       storage_origin: Browser.LocalStorage.origin(info.url),
       usp: 0,
-      history_len: 1,
       ce: %{},
       ce_done: MapSet.new(),
       # where the layout put the elements (`Browser.Nids.rects/2`), the window's scroll
@@ -661,8 +665,12 @@ defmodule Browser.JS.DOM do
   def host_get(:location, key, _self), do: location_get(key)
   def host_get({:usp, k}, key, _self), do: usp_get(k, key)
   def host_get({:storage, area}, key, _self), do: storage_get(area, key)
-  def host_get(:history, "length", _self), do: {:ok, float(st().history_len)}
-  def host_get(:history, "state", _self), do: {:ok, st().state || :null}
+
+  def host_get(:history, "length", _self),
+    do: {:ok, float(st().history_before + length(st().hist))}
+
+  def host_get(:history, "state", _self), do: {:ok, hist_state()}
+  def host_get(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
   def host_get(_other, _key, _self), do: :miss
 
   defp node_get(n, key, self) do
@@ -972,6 +980,12 @@ defmodule Browser.JS.DOM do
   def host_put({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
   def host_put(:window, key, v, _), do: window_put(key, v)
   def host_put(:location, key, v, _), do: location_put(key, v)
+
+  def host_put(:history, "scrollRestoration", v, _) do
+    if to_str(v) in ["auto", "manual"], do: put_st(%{st() | scroll_restoration: to_str(v)})
+    :ok
+  end
+
   def host_put({:storage, area}, key, v, _), do: storage_put(area, key, v)
   def host_put(_other, _key, _v, _self), do: :miss
 
@@ -990,6 +1004,10 @@ defmodule Browser.JS.DOM do
 
       {"title", :document} ->
         set_title(to_str(v))
+        :ok
+
+      {"on" <> event, :document} ->
+        set_inline_handler(n.id, event, if(function?(v), do: v))
         :ok
 
       {"cookie", :document} ->
@@ -1332,7 +1350,8 @@ defmodule Browser.JS.DOM do
 
   # `<button onclick="go()">`: the attribute's code is a handler with `event` and `this`; the
   # handler of `<body onload>` and the like is the window's. Returning false cancels the event.
-  @window_events ~w(load unload beforeunload resize scroll popstate hashchange message focus blur error)
+  @window_events ~w(load unload beforeunload resize scroll popstate hashchange message focus blur error
+                    online offline storage pageshow pagehide languagechange)
 
   defp run_inline_handler(target, type, event) do
     holder =
@@ -1668,6 +1687,9 @@ defmodule Browser.JS.DOM do
       "document" ->
         {:ok, wrap(s.doc)}
 
+      "on" <> event when event in @window_events ->
+        {:ok, window_handler(event)}
+
       "location" ->
         {:ok, aux_host(:location, :location)}
 
@@ -1772,11 +1794,25 @@ defmodule Browser.JS.DOM do
   end
 
   defp window_put(key, v) do
-    if key == "location" do
-      location_put("href", v)
-    else
-      declare(global(), key, v)
-      :ok
+    case key do
+      "location" ->
+        location_put("href", v)
+
+      "on" <> event when event in @window_events ->
+        set_inline_handler(:window, event, if(function?(v), do: v))
+        :ok
+
+      _ ->
+        declare(global(), key, v)
+        :ok
+    end
+  end
+
+  # `window.onload` and the like: the function assigned, or null
+  defp window_handler(event) do
+    case Enum.find(Map.get(st().listeners, :window, []), &(&1.type == event and &1[:inline])) do
+      nil -> :null
+      l -> l.fun
     end
   end
 
@@ -1823,6 +1859,9 @@ defmodule Browser.JS.DOM do
         {:ok,
          if(uri.host, do: (uri.scheme || "http") <> "://" <> host_with_port(uri), else: "null")}
 
+      "ancestorOrigins" ->
+        {:ok, new_array([])}
+
       _ ->
         :miss
     end
@@ -1834,27 +1873,175 @@ defmodule Browser.JS.DOM do
       else: uri.host || ""
   end
 
-  defp location_put("href", v) do
-    out({:navigate, resolve_url(to_str(v))})
-    :ok
+  defp location_put("href", v), do: navigate_to(resolve_url(to_str(v)))
+
+  defp location_put("search", v),
+    do: location_update(&%{&1 | query: nilify(String.trim_leading(to_str(v), "?"))})
+
+  defp location_put("hash", v),
+    do: location_update(&%{&1 | fragment: nilify(String.trim_leading(to_str(v), "#"))})
+
+  defp location_put("pathname", v) do
+    path = to_str(v)
+
+    location_update(
+      &%{&1 | path: if(String.starts_with?(path, "/"), do: path, else: "/" <> path)}
+    )
   end
 
-  defp location_put("search", v) do
-    out({:navigate, resolve_url("?" <> String.trim_leading(to_str(v), "?"))})
-    :ok
+  defp location_put("protocol", v) do
+    scheme = v |> to_str() |> String.trim_trailing(":") |> String.downcase()
+
+    if scheme in ["http", "https"] do
+      location_update(fn uri ->
+        port =
+          if uri.port == URI.default_port(uri.scheme),
+            do: URI.default_port(scheme),
+            else: uri.port
+
+        %{uri | scheme: scheme, port: port}
+      end)
+    else
+      :ok
+    end
   end
 
-  defp location_put("hash", v) do
-    set_url(resolve_url("#" <> String.trim_leading(to_str(v), "#")))
-    out({:history, :push, st().url})
-    :ok
+  defp location_put("host", v) do
+    case String.split(to_str(v), ":", parts: 2) do
+      [host, port] -> location_update(&%{&1 | host: host, port: parse_port(port, &1)})
+      [host] -> location_update(&%{&1 | host: host, port: URI.default_port(&1.scheme)})
+    end
+  end
+
+  defp location_put("hostname", v), do: location_update(&%{&1 | host: to_str(v)})
+
+  defp location_put("port", v) do
+    case to_str(v) do
+      "" -> location_update(&%{&1 | port: URI.default_port(&1.scheme)})
+      port -> location_update(&%{&1 | port: parse_port(port, &1)})
+    end
   end
 
   defp location_put(_, _), do: :miss
 
-  defp resolve_url(href), do: Browser.Fetch.resolve(st().url, href)
+  defp parse_port(text, uri) do
+    case Integer.parse(text) do
+      {n, _} when n in 0..65535 -> n
+      _ -> uri.port
+    end
+  end
 
-  defp set_url(url), do: put_st(%{st() | url: url})
+  defp nilify(""), do: nil
+  defp nilify(s), do: s
+
+  # navigates to the current address with one part changed
+  defp location_update(fun) do
+    uri = URI.parse(st().url)
+
+    if uri.scheme in ["http", "https", "file"],
+      do: navigate_to(uri |> fun.() |> URI.to_string()),
+      else: :ok
+
+    :ok
+  end
+
+  # Where `location.href = ...`, `assign` and `replace` go. An address that differs from this
+  # page's only in its fragment stays in the document: a new history entry (or the current one,
+  # for `replace`), `popstate` and `hashchange`, and the page scrolls to the fragment.
+  defp navigate_to(url, mode \\ :push) do
+    {target, fragment} = Browser.Fetch.split_fragment(url)
+    {here, _} = Browser.Fetch.split_fragment(st().url)
+
+    if fragment != nil and target == here and url != st().url do
+      hash_navigation(url, mode)
+    else
+      out({:navigate, url, mode})
+    end
+
+    :ok
+  end
+
+  defp hash_navigation(url, mode) do
+    old = st().url
+    if mode == :push, do: hist_push(url, :null), else: hist_replace(url, :null)
+    out({:hash, url, mode})
+    fire_popstate(:null)
+    fire_hashchange(old, url)
+  end
+
+  @doc """
+  The session followed a link to a fragment of this page: a new history entry, `popstate` and
+  `hashchange`.
+  """
+  def fragment_navigation(url) do
+    old = st().url
+
+    if url != old do
+      hist_push(url, :null)
+      fire_popstate(:null)
+      fire_hashchange(old, url)
+    end
+
+    :ok
+  end
+
+  @doc """
+  `history.go(n)` between the entries this document made: `:moved` (and `popstate`, and
+  `hashchange` if only the fragment differs) or `:out_of_range`, when going `n` entries
+  leaves the document.
+  """
+  def traverse(n) do
+    s = st()
+    idx = s.hist_idx + n
+
+    if idx >= 0 and idx < length(s.hist) do
+      {url, state} = Enum.at(s.hist, idx)
+      old = s.url
+      put_st(%{s | hist_idx: idx, url: url})
+      fire_popstate(state)
+      if hash_only_change?(old, url), do: fire_hashchange(old, url)
+      :moved
+    else
+      :out_of_range
+    end
+  end
+
+  defp hash_only_change?(a, b) do
+    a != b and
+      elem(Browser.Fetch.split_fragment(a), 0) == elem(Browser.Fetch.split_fragment(b), 0)
+  end
+
+  defp fire_popstate(state) do
+    dispatch(:window, "popstate", %{"state" => state, bubbles: false, cancelable: false})
+  end
+
+  defp fire_hashchange(old, new) do
+    dispatch(:window, "hashchange", %{
+      "oldURL" => old,
+      "newURL" => new,
+      bubbles: false,
+      cancelable: false
+    })
+  end
+
+  defp hist_state do
+    {_, state} = Enum.at(st().hist, st().hist_idx)
+    state
+  end
+
+  # a new entry after the current one (the ones that came after it are gone)
+  defp hist_push(url, state) do
+    s = st()
+    hist = Enum.take(s.hist, s.hist_idx + 1) ++ [{url, state}]
+    put_st(%{s | hist: hist, hist_idx: length(hist) - 1, url: url})
+  end
+
+  defp hist_replace(url, state) do
+    s = st()
+    put_st(%{s | hist: List.replace_at(s.hist, s.hist_idx, {url, state}), url: url})
+  end
+
+  defp resolve_url(href), do: Browser.Fetch.resolve(st().url, href)
 
   # ── Storage ────────────────────────────────────────────────
 
@@ -2739,12 +2926,12 @@ defmodule Browser.JS.DOM do
     loc = proto({:dom, :location})
 
     def_fn(loc, "assign", fn _this, args ->
-      out({:navigate, resolve_url(to_str(arg(args, 0)))})
+      navigate_to(resolve_url(to_str(arg(args, 0))))
       :undefined
     end)
 
     def_fn(loc, "replace", fn _this, args ->
-      out({:navigate, resolve_url(to_str(arg(args, 0)))})
+      navigate_to(resolve_url(to_str(arg(args, 0))), :replace)
       :undefined
     end)
 
@@ -2754,6 +2941,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(loc, "toString", fn _this, _ -> st().url end)
+    def_fn(loc, "valueOf", fn this, _ -> this end)
 
     hist = proto({:dom, :history})
 
@@ -2810,20 +2998,39 @@ defmodule Browser.JS.DOM do
     def_fn(win, "scrollBy", fn _this, args -> scroll_args(args, true) end)
   end
 
+  # `pushState` and `replaceState`: the address must be of this page's origin
   defp history_state(args, kind) do
-    case arg(args, 2) do
-      v when v in [:undefined, :null] ->
-        :ok
+    state = arg(args, 0)
 
-      v ->
-        url = resolve_url(to_str(v))
-        set_url(url)
-        out({:history, kind, url})
-    end
+    url =
+      case arg(args, 2) do
+        v when v in [:undefined, :null] ->
+          st().url
 
-    if kind == :push, do: put_st(%{st() | history_len: st().history_len + 1})
-    put_st(%{st() | state: arg(args, 0)})
+        v ->
+          url = resolve_url(to_str(v))
+
+          if same_origin?(url, st().url),
+            do: url,
+            else:
+              throw_error(
+                "SecurityError",
+                "A history state object with URL '#{url}' cannot be created in a document with origin '#{origin_of(st().url)}'."
+              )
+      end
+
+    if kind == :push, do: hist_push(url, state), else: hist_replace(url, state)
+    out({:history, kind, url})
     :undefined
+  end
+
+  defp same_origin?(a, b), do: origin_of(a) == origin_of(b)
+
+  defp origin_of(url) do
+    case URI.parse(url) do
+      %URI{scheme: "file"} -> "file://"
+      %URI{scheme: scheme, host: host, port: port} -> "#{scheme}://#{host}:#{port}"
+    end
   end
 
   defp classlist_nid({:obj, id}),

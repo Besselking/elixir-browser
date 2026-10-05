@@ -390,11 +390,41 @@ defmodule Browser.JS.WebAPI do
     def("Image", Image);
 
     if (typeof navigator === "object") {
-      if (!navigator.sendBeacon) navigator.sendBeacon = function () { return true; };
-      if (navigator.cookieEnabled === undefined) navigator.cookieEnabled = false;
-      if (navigator.hardwareConcurrency === undefined) navigator.hardwareConcurrency = 4;
-      if (navigator.maxTouchPoints === undefined) navigator.maxTouchPoints = 0;
-      if (!navigator.userAgentData) navigator.userAgentData = undefined;
+      var nav = navigator;
+      function setNav(k, v) { if (nav[k] === undefined) nav[k] = v; }
+      var ua = String(nav.userAgent || "");
+      setNav("appCodeName", "Mozilla");
+      setNav("appName", "Netscape");
+      setNav("appVersion", ua.replace(/^Mozilla\//, ""));
+      setNav("product", "Gecko");
+      setNav("productSub", "20030107");
+      setNav("vendorSub", "");
+      setNav("cookieEnabled", true);
+      setNav("doNotTrack", null);
+      setNav("webdriver", false);
+      setNav("hardwareConcurrency", 4);
+      setNav("deviceMemory", 8);
+      setNav("maxTouchPoints", 0);
+      setNav("pdfViewerEnabled", false);
+      setNav("plugins", []);
+      setNav("mimeTypes", []);
+      setNav("userAgentData", undefined);
+      setNav("javaEnabled", function () { return false; });
+      setNav("sendBeacon", function () { return true; });
+      setNav("vibrate", function () { return false; });
+      setNav("connection", { effectiveType: "4g", downlink: 10, rtt: 50, saveData: false, addEventListener: function () {}, removeEventListener: function () {} });
+      // nothing here asks the person for permission, so the answer is always no
+      function denied(cb) { return new Promise(function (res, rej) { rej(new DOMException("User denied permission.", "NotAllowedError")); }); }
+      setNav("permissions", { query: function (d) { return Promise.resolve({ name: d && d.name, state: "denied", onchange: null, addEventListener: function () {}, removeEventListener: function () {} }); } });
+      setNav("geolocation", {
+        getCurrentPosition: function (ok, err) { if (typeof err === "function") setTimeout(function () { err({ code: 1, message: "User denied Geolocation", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }); }, 0); },
+        watchPosition: function (ok, err) { if (typeof err === "function") setTimeout(function () { err({ code: 1, message: "User denied Geolocation", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }); }, 0); return 1; },
+        clearWatch: function () {}
+      });
+      setNav("mediaDevices", { enumerateDevices: function () { return Promise.resolve([]); }, getUserMedia: denied, getSupportedConstraints: function () { return {}; }, addEventListener: function () {}, removeEventListener: function () {} });
+      // the clipboard holds what the page wrote to it, until the page is closed
+      var clip = "";
+      setNav("clipboard", { writeText: function (t) { clip = String(t); return Promise.resolve(); }, readText: function () { return Promise.resolve(clip); }, write: denied, read: denied });
     }
 
     // `crypto.subtle` and `randomUUID` exist in secure contexts only
