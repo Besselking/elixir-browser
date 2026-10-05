@@ -2912,6 +2912,14 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "aaaa").y == word_at(items, "bbbb").y
     end
 
+    test "Ahem glyphs fill the line when the line-height equals the font size" do
+      {items, _} =
+        fl(~s|<div style="font: 20px/1 Ahem">XX</div><div style="font: 20px/1 Ahem">XX</div>|)
+
+      assert [%{y: 0}, %{y: 20}] =
+               items |> Enum.filter(&(&1.type == :text)) |> Enum.sort_by(& &1.y)
+    end
+
     test "a right float sits at the right edge and shortens the lines beside it" do
       {items, _} =
         fl(
