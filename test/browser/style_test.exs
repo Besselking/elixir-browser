@@ -268,13 +268,21 @@ defmodule Browser.StyleTest do
       assert comp(html, css, "u")["font-size"] == 18.0
     end
 
-    test "ex and ch follow the font: Ahem's x-height is 0.8em and its zero is 1em wide" do
-      html = ~s(<div><p>a</p></div>)
-      css = "div { font: 20px/1 Ahem } p { margin-left: 2ex; padding-left: 3ch } div + div {}"
-      assert comp(html, css, "p")["margin-left"] == 32.0
-      assert comp(html, css, "p")["padding-left"] == 60.0
-      css = "p { font-size: 20px; margin-left: 2ex }"
+    test "ex and ch come from the font measurer of the environment, guessed without one" do
+      html = ~s(<p>a</p>)
+      css = "p { font: 20px/1 Ahem; margin-left: 2ex; padding-left: 3ch }"
+
+      units = fn %{size: 20.0, family: family} ->
+        if String.contains?(String.downcase(family), "ahem"), do: {0.8, 1.0}, else: {0.5, 0.6}
+      end
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0, font_units: units}
+      nodes = Style.prune(HTML.parse(html), Style.index([{:author, css}], env))
+      assert computed_of(nodes, "p")["margin-left"] == 32.0
+      assert computed_of(nodes, "p")["padding-left"] == 60.0
+
       assert comp(html, css, "p")["margin-left"] == 20.0
+      assert comp(html, css, "p")["padding-left"] == 36.0
     end
 
     test "UA defaults: headings, links, bold, monospace" do

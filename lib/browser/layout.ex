@@ -1608,7 +1608,8 @@ defmodule Browser.Layout do
     end
   end
 
-  defp mono_family?(family) do
+  @doc false
+  def mono_family?(family) do
     family
     |> String.split(",")
     |> Enum.map(

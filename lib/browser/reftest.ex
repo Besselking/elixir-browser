@@ -17,7 +17,13 @@ defmodule Browser.Reftest do
   @width 800
   @view_height 600
   @max_height 4000
-  @env %{type: "screen", width: @width, height: @view_height, dppx: 1.0}
+  @env %{
+    type: "screen",
+    width: @width,
+    height: @view_height,
+    dppx: 1.0,
+    font_units: &__MODULE__.font_units/1
+  }
 
   @unsupported [
     {~r/<script/i, "scripts"},
@@ -82,14 +88,23 @@ defmodule Browser.Reftest do
 
   @doc "Measures text with the fixed advances `Browser.Reftest.Raster` paints."
   def measure(text, %{size: size} = style) do
-    advance =
-      cond do
-        String.contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
-        Map.get(style, :mono) -> 0.6
-        true -> 0.52
-      end
+    round(String.length(text) * size * advance(style))
+  end
 
-    round(String.length(text) * size * advance)
+  # the advance of a glyph over the font size in the pictures `Raster` paints
+  defp advance(style) do
+    cond do
+      String.contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
+      Map.get(style, :mono) -> 0.6
+      true -> 0.52
+    end
+  end
+
+  @doc "`ex` and `ch` over the font size for the font `Raster` paints (Ahem's x-height is 0.8em)."
+  def font_units(%{family: family}) do
+    mono = Browser.Layout.mono_family?(family)
+    ahem = String.contains?(String.downcase(family), "ahem")
+    {if(ahem, do: 0.8, else: 0.5), advance(%{family: String.downcase(family), mono: mono})}
   end
 
   @doc """

@@ -217,12 +217,18 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
-    |> Enum.reduce(%{viewport: {env.width, env.height}, pseudo: MapSet.new()}, fn {rule, order},
-                                                                                  idx ->
-      idx = note_pseudo(idx, rule)
-      rule = Map.put(rule, :order, order)
-      Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
-    end)
+    |> Enum.reduce(
+      %{
+        viewport: {env.width, env.height},
+        font_units: Map.get(env, :font_units),
+        pseudo: MapSet.new()
+      },
+      fn {rule, order}, idx ->
+        idx = note_pseudo(idx, rule)
+        rule = Map.put(rule, :order, order)
+        Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
+      end
+    )
   end
 
   # which pseudo-elements have a rule that gives them `content` (the others make no box)
@@ -1147,6 +1153,26 @@ defmodule Browser.Style do
     end
   end
 
+  # what `ex` (the x-height) and `ch` (the advance of a "0") are as a factor of the font size,
+  # asked of whatever measures fonts (`:font_units` of the environment); without one they are
+  # a guess
+  defp font_units(idx, resolved, inherited, fs) do
+    case Map.get(idx, :font_units) do
+      nil ->
+        {0.5, 0.6}
+
+      units ->
+        pick = fn key -> Map.get(resolved, key) || inherited[key] end
+
+        units.(%{
+          size: fs,
+          family: to_string(pick.("font-family")),
+          bold: pick.("font-weight") == "bold",
+          italic: pick.("font-style") == "italic"
+        })
+    end
+  end
+
   defp compute_declared(idx, tag, decl, pc, parent_custom, parent_root) do
     inherited = Map.take(pc, @inherited)
 
@@ -1171,10 +1197,7 @@ defmodule Browser.Style do
       end
 
     {vw, vh} = Map.get(idx, :viewport, {1024, 768})
-    family = to_string(Map.get(resolved, "font-family") || inherited["font-family"])
-    # Ahem, the test font, has a 0.8em x-height and a 1em "0"
-    {ex, ch} =
-      if String.contains?(String.downcase(family), "ahem"), do: {0.8, 1.0}, else: {0.5, 0.6}
+    {ex, ch} = font_units(idx, resolved, inherited, fs)
 
     env = %{
       fs: fs,
