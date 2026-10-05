@@ -359,6 +359,7 @@ defmodule Browser.JS.Interp do
 
   def to_key(k) when is_binary(k), do: k
   def to_key({:symbol, _, _} = k), do: k
+  def to_key({:private, _} = k), do: k
 
   def to_key({:obj, _} = o) do
     case to_primitive(o, "string") do
@@ -567,7 +568,7 @@ defmodule Browser.JS.Interp do
     do:
       throw_error(
         "TypeError",
-        "Cannot read properties of #{to_str(v)} (reading '#{to_str(key)}')"
+        "Cannot read properties of #{to_str(v)} (reading '#{safe_key(key)}')"
       )
 
   # a property found along the prototype chain; a getter is called with the object it was
@@ -996,9 +997,17 @@ defmodule Browser.JS.Interp do
 
   def put(v, key, _) when v in [:undefined, :null],
     do:
-      throw_error("TypeError", "Cannot set properties of #{to_str(v)} (setting '#{to_str(key)}')")
+      throw_error(
+        "TypeError",
+        "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
+      )
 
   def put(_primitive, _key, v), do: v
+
+  # naming a key in an error must not run user code (a toString that throws)
+  defp safe_key(key) when is_binary(key), do: key
+  defp safe_key(key) when is_number(key), do: to_str(key)
+  defp safe_key(_), do: "?"
 
   # an assignment: own accessor or non-writable property, inherited ones, then a new property
   defp put_prop(id, o, key, v) do
@@ -1077,6 +1086,26 @@ defmodule Browser.JS.Interp do
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
       s.parent != nil -> resolvable?(s.parent, name)
       true -> false
+    end
+  end
+
+  # where a name resolves to: the scope declaring it or the `with` object having it
+  defp with_binding(scope, name) do
+    s = deref(scope)
+
+    cond do
+      Map.has_key?(s.vars, name) ->
+        {:var, scope}
+
+      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
+          not unscopable?(s.with, name) ->
+        {:with, s.with}
+
+      s.parent != nil ->
+        with_binding(s.parent, name)
+
+      true ->
+        nil
     end
   end
 
@@ -2780,6 +2809,14 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:unary, "delete", {:member, o, k, _}}, env), do: delete(ev(o, env), ev_key(k, env))
+  # an identifier found on a `with` object is deleted from it
+  def ev({:unary, "delete", {:id, name}}, env) do
+    case with_binding(env, name) do
+      {:with, obj} -> delete(obj, name)
+      _ -> true
+    end
+  end
+
   def ev({:unary, "delete", _}, _), do: true
 
   # in strict code a delete that fails throws
@@ -3050,18 +3087,52 @@ defmodule Browser.JS.Interp do
     {read, write} =
       case target do
         {:id, name} ->
-          resolved? = not strict? or resolvable?(env, name)
+          # the reference is resolved once: a `with` object keeps receiving the write even if
+          # the property is gone by then
+          case with_binding(env, name) do
+            {:with, obj} ->
+              {fn -> get(obj, name) end,
+               fn v ->
+                 if strict? do
+                   unless has_property?(obj, name),
+                     do: throw_error("ReferenceError", "#{name} is not defined")
 
-          {fn -> ev(target, env) end,
-           fn v ->
-             if strict?,
-               do: strict_assign_var(env, name, v, resolved?),
-               else: assign_var(env, name, v)
-           end}
+                   strict_put(obj, name, v)
+                 else
+                   put(obj, name, v)
+                 end
+               end}
+
+            {:var, sid} ->
+              {fn -> ev(target, sid) end,
+               fn v ->
+                 if strict?,
+                   do: strict_assign_var(sid, name, v, true),
+                   else: assign_var(sid, name, v)
+               end}
+
+            nil ->
+              {fn -> ev(target, env) end,
+               fn v ->
+                 if strict?,
+                   do: strict_assign_var(env, name, v, false),
+                   else: assign_var(env, name, v)
+               end}
+          end
 
         {:member, o, k, _} ->
           ov = ev(o, env)
           key = ev_key(k, env)
+
+          if nullish?(ov),
+            do:
+              throw_error(
+                "TypeError",
+                "Cannot read properties of #{to_str(ov)} (reading '#{safe_key(key)}')"
+              )
+
+          # the key is converted once, for the read and for the write
+          key = to_key(key)
 
           {fn -> get(ov, key) end,
            fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
