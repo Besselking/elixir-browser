@@ -206,11 +206,14 @@ defmodule Browser.JS.TypedArrays do
 
   # ── buffers and views ──────────────────────────────────────
 
-  defp new_buffer(bytes) do
+  defp new_buffer(bytes, max \\ nil) do
     {:obj, id} = buf = new_object([], proto(:arraybuffer))
-    store(id, Map.put(deref(id), :bytes, bytes))
+    o = Map.put(deref(id), :bytes, bytes)
+    store(id, if(max, do: Map.put(o, :max, max), else: o))
     buf
   end
+
+  defp resizable?(bid), do: Map.has_key?(deref(bid), :max)
 
   @doc "Detaches an ArrayBuffer (`$262.detachArrayBuffer`): it loses its bytes and its views read as empty."
   def detach({:obj, id} = buf) do
@@ -237,13 +240,33 @@ defmodule Browser.JS.TypedArrays do
     view(kind, buffer_id(buf), 0, length(values))
   end
 
+  # the offset and length a view has now (`:oob` when a detached or shrunk buffer leaves it
+  # out of bounds); a length-tracking view (`:auto`) follows the buffer's size
+  defp eff({:ta, kind, bid, off, len}) do
+    o = deref(bid)
+    total = byte_size(o.bytes)
+
+    cond do
+      Map.get(o, :detached, false) -> :oob
+      len == :auto -> if off > total, do: :oob, else: {off, div(total - off, size_of(kind))}
+      off + len * size_of(kind) > total -> :oob
+      true -> {off, len}
+    end
+  end
+
   defp data!({:obj, id}) do
     case deref(id) do
-      %{host: {__MODULE__, {:ta, _, bid, _, _} = d}} ->
-        if detached?(bid),
-          do: throw_error("TypeError", "cannot perform this operation on a detached ArrayBuffer")
+      %{host: {__MODULE__, {:ta, kind, bid, _, _} = d}} ->
+        case eff(d) do
+          :oob ->
+            throw_error(
+              "TypeError",
+              "cannot perform this operation on a detached or out of bounds typed array"
+            )
 
-        d
+          {off, len} ->
+            {:ta, kind, bid, off, len}
+        end
 
       _ ->
         throw_error("TypeError", "this is not a typed array")
@@ -264,6 +287,81 @@ defmodule Browser.JS.TypedArrays do
     size = size_of(kind)
     bytes = binary_part(deref(bid).bytes, off, len * size)
     for <<chunk::binary-size(^size) <- bytes>>, do: read(kind, chunk)
+  end
+
+  # the elements of a typed array read one at a time, as late as possible: a callback that
+  # resizes the buffer shows up as `undefined` for the elements that are gone
+  defp live_values(this) do
+    {:ta, kind, bid, _, n} = data!(this)
+    {:obj, id} = this
+    %{host: {__MODULE__, d0}} = deref(id)
+    size = size_of(kind)
+
+    Stream.map(0..(n - 1)//1, fn i ->
+      case eff(d0) do
+        {off, len} when i < len ->
+          read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+
+        _ ->
+          :undefined
+      end
+    end)
+  end
+
+  # element `i` as the typed array is now, or `:undefined` past its current length
+  defp ta_at(this, i) do
+    {:obj, id} = this
+    %{host: {__MODULE__, {:ta, kind, bid, _, _} = d0}} = deref(id)
+    size = size_of(kind)
+
+    case eff(d0) do
+      {off, len} when i >= 0 and i < len ->
+        read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+
+      _ ->
+        :undefined
+    end
+  end
+
+  # ToIntegerOrInfinity: an integer, or :infinity / :neg_infinity
+  defp int_or_inf(v) do
+    case to_num(v) do
+      n when n in [:infinity, :neg_infinity] -> n
+      :nan -> 0
+      n -> trunc(n)
+    end
+  end
+
+  defp present?(this, i) do
+    {:obj, id} = this
+    %{host: {__MODULE__, d0}} = deref(id)
+
+    case eff(d0) do
+      {_, len} -> i < len
+      :oob -> false
+    end
+  end
+
+  # `{value, index}` pairs, ascending or descending, read one at a time
+  defp live_pairs(this, dir \\ :asc) do
+    {:ta, kind, bid, _, n} = data!(this)
+    {:obj, id} = this
+    %{host: {__MODULE__, d0}} = deref(id)
+    size = size_of(kind)
+    range = if dir == :asc, do: 0..(n - 1)//1, else: (n - 1)..0//-1
+
+    Stream.map(range, fn i ->
+      v =
+        case eff(d0) do
+          {off, len} when i < len ->
+            read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+
+          _ ->
+            :undefined
+        end
+
+      {v, i}
+    end)
   end
 
   defp put_elem_at({:ta, kind, bid, off, _}, i, value) do
@@ -287,9 +385,27 @@ defmodule Browser.JS.TypedArrays do
 
   # ── host protocol ──────────────────────────────────────────
 
+  # the integer indices of the elements there are now
+  def host_keys({:ta, _, _, _, _} = d) do
+    case eff(d),
+      do: (
+        :oob -> []
+        {_, len} -> for(i <- 0..(len - 1)//1, do: Integer.to_string(i))
+      )
+  end
+
+  def host_keys(_), do: []
+
   @doc false
-  def host_get({:ta, kind, bid, off, len} = d, key, _self) when is_binary(key) do
-    {off, len} = if detached?(bid), do: {0, 0}, else: {off, len}
+  def host_get({:ta, kind, bid, _, _} = d0, key, _self) when is_binary(key) do
+    {off, len} =
+      case eff(d0),
+        do: (
+          :oob -> {0, 0}
+          r -> r
+        )
+
+    d = {:ta, kind, bid, off, len}
 
     case key do
       "length" ->
@@ -315,20 +431,36 @@ defmodule Browser.JS.TypedArrays do
     end
   end
 
-  def host_get({:dv, bid, off, len}, key, _self) do
+  def host_get({:dv, bid, _, _} = d, key, _self) do
     case key do
-      "byteLength" -> {:ok, len * 1.0}
-      "byteOffset" -> {:ok, off * 1.0}
-      "buffer" -> {:ok, buffer_object(bid)}
-      _ -> :miss
+      "byteLength" ->
+        {_, _, _, len} = dv_eff!(d)
+        {:ok, len * 1.0}
+
+      "byteOffset" ->
+        {_, _, off, _} = dv_eff!(d)
+        {:ok, off * 1.0}
+
+      "buffer" ->
+        {:ok, buffer_object(bid)}
+
+      _ ->
+        :miss
     end
   end
 
   def host_get(_, _, _), do: :miss
 
   @doc false
-  def host_put({:ta, _, bid, _, len} = d, key, v, _self) when is_binary(key) do
-    len = if detached?(bid), do: 0, else: len
+  def host_put({:ta, kind, bid, _, _} = d0, key, v, _self) when is_binary(key) do
+    {off, len} =
+      case eff(d0),
+        do: (
+          :oob -> {0, 0}
+          r -> r
+        )
+
+    d = {:ta, kind, bid, off, len}
 
     case Integer.parse(key) do
       {i, ""} when i >= 0 ->
@@ -360,13 +492,27 @@ defmodule Browser.JS.TypedArrays do
     put_proto(:arraybuffer, p)
 
     ctor =
-      native("ArrayBuffer", fn _, args ->
-        n = to_int(arg(args, 0))
+      native("ArrayBuffer", fn this, args ->
+        unless match?({:obj, _}, this),
+          do: throw_error("TypeError", "Constructor ArrayBuffer requires 'new'")
 
-        if n < 0 or n > 1_000_000_000,
-          do: throw_error("RangeError", "Invalid array buffer length")
+        n = to_index(arg(args, 0))
 
-        new_buffer(:binary.copy(<<0>>, n))
+        max =
+          case arg(args, 1) do
+            {:obj, _} = opts ->
+              case Interp.get(opts, "maxByteLength") do
+                :undefined -> nil
+                v -> to_index(v)
+              end
+
+            _ ->
+              nil
+          end
+
+        if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+        if n > 1_000_000_000, do: throw_error("RangeError", "Array buffer allocation failed")
+        new_buffer(:binary.copy(<<0>>, n), max)
       end)
 
     put_const(ctor, "prototype", p)
@@ -389,6 +535,55 @@ defmodule Browser.JS.TypedArrays do
         end),
       enumerable: false
     )
+
+    Props.define_accessor(p, "resizable",
+      get:
+        native("get resizable", fn this, _ ->
+          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          resizable?(buffer_id(this))
+        end),
+      enumerable: false
+    )
+
+    Props.define_accessor(p, "maxByteLength",
+      get:
+        native("get maxByteLength", fn this, _ ->
+          unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          bid = buffer_id(this)
+          o = deref(bid)
+
+          cond do
+            Map.get(o, :detached, false) -> 0.0
+            true -> Map.get(o, :max, byte_size(o.bytes)) * 1.0
+          end
+        end),
+      enumerable: false
+    )
+
+    resize =
+      native("resize", fn this, args ->
+        unless buffer?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+        bid = buffer_id(this)
+        unless resizable?(bid), do: throw_error("TypeError", "ArrayBuffer is not resizable")
+        n = to_index(arg(args, 0))
+        o = deref(bid)
+
+        if Map.get(o, :detached, false),
+          do: throw_error("TypeError", "cannot resize a detached ArrayBuffer")
+
+        if n > o.max, do: throw_error("RangeError", "Invalid array buffer length")
+        bytes = o.bytes
+
+        bytes =
+          if n <= byte_size(bytes),
+            do: binary_part(bytes, 0, n),
+            else: bytes <> :binary.copy(<<0>>, n - byte_size(bytes))
+
+        store(bid, %{o | bytes: bytes})
+        :undefined
+      end)
+
+    put_hidden(p, "resize", resize)
 
     Props.define_accessor(p, "detached",
       get:
@@ -422,7 +617,10 @@ defmodule Browser.JS.TypedArrays do
               do: binary_part(bytes, 0, len),
               else: bytes <> :binary.copy(<<0>>, len - byte_size(bytes))
 
-          buf = new_buffer(moved)
+          max = if name == "transfer", do: Map.get(deref(buffer_id(this)), :max)
+
+          if max && len > max, do: throw_error("RangeError", "Invalid array buffer length")
+          buf = new_buffer(moved, max)
           detach(this)
           buf
         end)
@@ -464,13 +662,30 @@ defmodule Browser.JS.TypedArrays do
       )
     end
 
-    getter.("length", fn {:ta, _, _, _, len}, gone -> if(gone, do: 0, else: len) * 1.0 end)
-
-    getter.("byteLength", fn {:ta, kind, _, _, len}, gone ->
-      if(gone, do: 0, else: len * size_of(kind)) * 1.0
+    getter.("length", fn d, _ ->
+      case eff(d),
+        do: (
+          :oob -> 0.0
+          {_, len} -> len * 1.0
+        )
     end)
 
-    getter.("byteOffset", fn {:ta, _, _, off, _}, gone -> if(gone, do: 0, else: off) * 1.0 end)
+    getter.("byteLength", fn {:ta, kind, _, _, _} = d, _ ->
+      case eff(d),
+        do: (
+          :oob -> 0.0
+          {_, len} -> len * size_of(kind) * 1.0
+        )
+    end)
+
+    getter.("byteOffset", fn d, _ ->
+      case eff(d),
+        do: (
+          :oob -> 0.0
+          {off, _} -> off * 1.0
+        )
+    end)
+
     getter.("buffer", fn {:ta, _, bid, _, _}, _ -> buffer_object(bid) end)
 
     Props.define_accessor(base, {:symbol, :toStringTag, "Symbol.toStringTag"},
@@ -502,6 +717,18 @@ defmodule Browser.JS.TypedArrays do
   defp rel_index(v, len, _default) do
     n = to_int(v)
     if n < 0, do: max(len + n, 0), else: min(n, len)
+  end
+
+  # relative index with infinities
+  defp rel_index_inf(:undefined, _len, default), do: default
+
+  defp rel_index_inf(v, len, _default) do
+    case int_or_inf(v) do
+      :neg_infinity -> 0
+      :infinity -> len
+      n when n < 0 -> max(len + n, 0)
+      n -> min(n, len)
+    end
   end
 
   defp install_typed_arrays(scope) do
@@ -580,24 +807,35 @@ defmodule Browser.JS.TypedArrays do
               throw_error("RangeError", "start offset of #{kind} should be a multiple of #{size}")
 
           len =
-            if arg(args, 2) == :undefined do
-              if rem(total - off, size) != 0 or total < off,
-                do:
-                  throw_error(
-                    "RangeError",
-                    "byte length of #{kind} should be a multiple of #{size}"
-                  )
-
-              div(total - off, size)
+            if arg(args, 2) == :undefined and resizable?(buffer_id(src)) do
+              if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
+              :auto
             else
-              to_int(arg(args, 2))
+              build_len(args, total, off, size, kind)
             end
 
-          if off + len * size > total, do: throw_error("RangeError", "Invalid typed array length")
+          if len != :auto and off + len * size > total,
+            do: throw_error("RangeError", "Invalid typed array length")
+
           view(kind, buffer_id(src), off, len)
         else
           make(kind, source_values(src))
         end
+    end
+  end
+
+  defp build_len(args, total, off, size, kind) do
+    if arg(args, 2) == :undefined do
+      if rem(total - off, size) != 0 or total < off,
+        do:
+          throw_error(
+            "RangeError",
+            "byte length of #{kind} should be a multiple of #{size}"
+          )
+
+      div(total - off, size)
+    else
+      to_int(arg(args, 2))
     end
   end
 
@@ -635,18 +873,28 @@ defmodule Browser.JS.TypedArrays do
 
   defp install_methods(p) do
     def_fn(p, "at", fn this, args ->
-      d = data!(this)
-      len = elem(d, 4)
-      i = to_int(arg(args, 0))
-      i = if i < 0, do: len + i, else: i
-      if i >= 0 and i < len, do: elem_at(d, i), else: :undefined
+      {:ta, _, _, _, len} = data!(this)
+
+      case int_or_inf(arg(args, 0)) do
+        :infinity -> :undefined
+        :neg_infinity -> :undefined
+        i -> ta_at(this, if(i < 0, do: len + i, else: i))
+      end
     end)
 
     def_fn(p, "fill", fn this, args ->
-      {:ta, _, _, _, len} = d = data!(this)
-      from = rel_index(arg(args, 1), len, 0)
-      to = rel_index(arg(args, 2), len, len)
-      if to > from, do: put_all(d, from, List.duplicate(arg(args, 0), to - from))
+      {:ta, kind, _, _, len} = data!(this)
+
+      value =
+        if kind in [:i64, :u64],
+          do: Browser.JS.BigInt.to_bigint(arg(args, 0)),
+          else: to_num(arg(args, 0))
+
+      from = rel_index_inf(arg(args, 1), len, 0)
+      to = rel_index_inf(arg(args, 2), len, len)
+      {:ta, _, _, _, len2} = d = data!(this)
+      to = min(to, len2)
+      if to > from, do: put_all(d, from, List.duplicate(value, to - from))
       this
     end)
 
@@ -663,32 +911,65 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "subarray", fn this, args ->
-      {:ta, kind, bid, off, len} = data!(this)
-      from = rel_index(arg(args, 0), len, 0)
-      to = rel_index(arg(args, 1), len, len)
-      view(kind, bid, off + from * size_of(kind), max(to - from, 0))
+      unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
+      {:obj, id} = this
+      %{host: {__MODULE__, {:ta, kind, bid, off0, len0} = d0}} = deref(id)
+
+      src_len =
+        case eff(d0),
+          do: (
+            :oob -> 0
+            {_, n} -> n
+          )
+
+      from = rel_index_inf(arg(args, 0), src_len, 0)
+      size = size_of(kind)
+
+      len =
+        if len0 == :auto and arg(args, 1) == :undefined do
+          :auto
+        else
+          to = rel_index_inf(arg(args, 1), src_len, src_len)
+          max(to - from, 0)
+        end
+
+      view(kind, bid, off0 + from * size, len)
     end)
 
     def_fn(p, "slice", fn this, args ->
-      {:ta, kind, _, _, len} = d = data!(this)
-      from = rel_index(arg(args, 0), len, 0)
-      to = rel_index(arg(args, 1), len, len)
-      make(kind, d |> values() |> Enum.slice(from, max(to - from, 0)))
+      {:ta, kind, _, _, len} = data!(this)
+      from = rel_index_inf(arg(args, 0), len, 0)
+      to = rel_index_inf(arg(args, 1), len, len)
+      count = max(to - from, 0)
+      zero = if kind in [:i64, :u64], do: {:bigint, 0}, else: 0.0
+
+      if count > 0, do: data!(this)
+
+      make(
+        kind,
+        for i <- from..(from + count - 1)//1 do
+          if present?(this, i), do: ta_at(this, i), else: zero
+        end
+      )
     end)
 
     def_fn(p, "map", fn this, args ->
-      {:ta, kind, _, _, _} = d = data!(this)
-      make(kind, map_with(values(d), callable!(arg(args, 0)), arg(args, 1)))
+      {:ta, kind, _, _, _} = data!(this)
+      f = callable!(arg(args, 0))
+
+      make(
+        kind,
+        live_pairs(this)
+        |> Enum.map(fn {v, i} -> call(f, arg(args, 1), [v, i * 1.0, this]) end)
+      )
     end)
 
     def_fn(p, "filter", fn this, args ->
-      {:ta, kind, _, _, _} = d = data!(this)
+      {:ta, kind, _, _, _} = data!(this)
       f = callable!(arg(args, 0))
 
       kept =
-        d
-        |> values()
-        |> Enum.with_index()
+        live_pairs(this)
         |> Enum.filter(fn {v, i} -> truthy(call(f, arg(args, 1), [v, i * 1.0, this])) end)
         |> Enum.map(&elem(&1, 0))
 
@@ -698,7 +979,7 @@ defmodule Browser.JS.TypedArrays do
     def_fn(p, "forEach", fn this, args ->
       f = callable!(arg(args, 0))
 
-      for {v, i} <- Enum.with_index(values(data!(this))),
+      for {v, i} <- live_pairs(this),
           do: call(f, arg(args, 1), [v, i * 1.0, this])
 
       :undefined
@@ -708,44 +989,97 @@ defmodule Browser.JS.TypedArrays do
     def_fn(p, "reduceRight", fn this, args -> reduce(this, args, true) end)
 
     def_fn(p, "join", fn this, args ->
+      {:ta, _, _, _, len} = data!(this)
       sep = if arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))
-      this |> data!() |> values() |> Enum.map_join(sep, &to_str/1)
+      join_elems(this, len, sep, &to_str/1)
     end)
 
     def_fn(p, "toString", fn this, _ ->
-      this |> data!() |> values() |> Enum.map_join(",", &to_str/1)
+      join = Interp.get(this, "join")
+
+      if function?(join),
+        do: call(join, this, []),
+        else:
+          "[object #{to_str(Interp.get(this, {:symbol, :toStringTag, "Symbol.toStringTag"}))}]"
+    end)
+
+    def_fn(p, "toLocaleString", fn this, _ ->
+      {:ta, _, _, _, len} = data!(this)
+
+      join_elems(this, len, ",", fn
+        v when v in [:undefined, :null] -> ""
+        v -> to_str(call(Interp.get(v, "toLocaleString"), v, []))
+      end)
     end)
 
     def_fn(p, "indexOf", fn this, args ->
+      {:ta, _, _, _, len} = data!(this)
       v = arg(args, 0)
 
-      idx =
-        this |> data!() |> values() |> Enum.find_index(&strict_eq(&1, v))
+      if len == 0 do
+        -1.0
+      else
+        case int_or_inf(arg(args, 1)) do
+          :infinity ->
+            -1.0
 
-      (idx || -1) * 1.0
+          n ->
+            k = if n == :neg_infinity, do: 0, else: if(n >= 0, do: n, else: max(len + n, 0))
+
+            found =
+              Enum.find(k..(len - 1)//1, fn i ->
+                present?(this, i) and strict_eq(ta_at(this, i), v)
+              end)
+
+            (found || -1) * 1.0
+        end
+      end
     end)
 
     def_fn(p, "lastIndexOf", fn this, args ->
+      {:ta, _, _, _, len} = data!(this)
       v = arg(args, 0)
 
-      idx =
-        this
-        |> data!()
-        |> values()
-        |> Enum.with_index()
-        |> Enum.reverse()
-        |> Enum.find_value(fn {x, i} -> if strict_eq(x, v), do: i end)
+      if len == 0 do
+        -1.0
+      else
+        n = if length(args) > 1, do: int_or_inf(arg(args, 1)), else: len - 1
 
-      (idx || -1) * 1.0
+        k =
+          case n do
+            :neg_infinity -> -1
+            :infinity -> len - 1
+            n when n >= 0 -> min(n, len - 1)
+            n -> len + n
+          end
+
+        found =
+          Enum.find(k..0//-1, fn i -> present?(this, i) and strict_eq(ta_at(this, i), v) end)
+
+        (found || -1) * 1.0
+      end
     end)
 
     def_fn(p, "includes", fn this, args ->
+      {:ta, _, _, _, len} = data!(this)
       v = arg(args, 0)
 
-      this
-      |> data!()
-      |> values()
-      |> Enum.any?(fn x -> strict_eq(x, v) or (x == :nan and v == :nan) end)
+      if len == 0 do
+        false
+      else
+        case int_or_inf(arg(args, 1)) do
+          :infinity ->
+            false
+
+          n ->
+            k = if n == :neg_infinity, do: 0, else: if(n >= 0, do: n, else: max(len + n, 0))
+
+            Enum.any?(k..(len - 1)//1, fn i ->
+              x = ta_at(this, i)
+              strict_eq(x, v) or (x == :nan and v == :nan)
+            end)
+        end
+      end
     end)
 
     for {name, from_end?, want} <- [
@@ -756,8 +1090,7 @@ defmodule Browser.JS.TypedArrays do
         ] do
       def_fn(p, name, fn this, args ->
         f = callable!(arg(args, 0))
-        items = this |> data!() |> values() |> Enum.with_index()
-        items = if from_end?, do: Enum.reverse(items), else: items
+        items = live_pairs(this, if(from_end?, do: :desc, else: :asc))
 
         found =
           Enum.find(items, fn {v, i} -> truthy(call(f, arg(args, 1), [v, i * 1.0, this])) end)
@@ -774,33 +1107,27 @@ defmodule Browser.JS.TypedArrays do
     def_fn(p, "every", fn this, args ->
       f = callable!(arg(args, 0))
 
-      this
-      |> data!()
-      |> values()
-      |> Enum.with_index()
+      live_pairs(this)
       |> Enum.all?(fn {v, i} -> truthy(call(f, arg(args, 1), [v, i * 1.0, this])) end)
     end)
 
     def_fn(p, "some", fn this, args ->
       f = callable!(arg(args, 0))
 
-      this
-      |> data!()
-      |> values()
-      |> Enum.with_index()
+      live_pairs(this)
       |> Enum.any?(fn {v, i} -> truthy(call(f, arg(args, 1), [v, i * 1.0, this])) end)
     end)
 
     def_fn(p, "reverse", fn this, _ ->
       d = data!(this)
-      items = d |> values() |> Enum.reverse()
+      items = live_values(this) |> Enum.reverse()
       if items != [], do: put_all(d, 0, items)
       this
     end)
 
     def_fn(p, "toReversed", fn this, _ ->
-      {:ta, kind, _, _, _} = d = data!(this)
-      make(kind, d |> values() |> Enum.reverse())
+      {:ta, kind, _, _, _} = data!(this)
+      make(kind, live_values(this) |> Enum.reverse())
     end)
 
     def_fn(p, "sort", fn this, args ->
@@ -816,19 +1143,33 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "with", fn this, args ->
-      {:ta, kind, _, _, len} = d = data!(this)
-      n = to_int(arg(args, 0))
-      i = if n < 0, do: len + n, else: n
-      if i < 0 or i >= len, do: throw_error("RangeError", "Invalid typed array index")
-      make(kind, List.replace_at(values(d), i, arg(args, 1)))
+      {:ta, kind, _, _, len} = data!(this)
+
+      k =
+        case int_or_inf(arg(args, 0)) do
+          n when n in [:infinity, :neg_infinity] -> -1
+          n when n < 0 -> len + n
+          n -> n
+        end
+
+      value =
+        if kind in [:i64, :u64],
+          do: Browser.JS.BigInt.to_bigint(arg(args, 1)),
+          else: to_num(arg(args, 1))
+
+      unless present?(this, k) and k >= 0,
+        do: throw_error("RangeError", "Invalid typed array index")
+
+      make(kind, for(i <- 0..(len - 1)//1, do: if(i == k, do: value, else: ta_at(this, i))))
     end)
 
     def_fn(p, "copyWithin", fn this, args ->
-      {:ta, _, _, _, len} = d = data!(this)
-      target = rel_index(arg(args, 0), len, 0)
-      from = rel_index(arg(args, 1), len, 0)
-      to = rel_index(arg(args, 2), len, len)
-      count = min(to - from, len - target)
+      {:ta, _, _, _, len} = data!(this)
+      target = rel_index_inf(arg(args, 0), len, 0)
+      from = rel_index_inf(arg(args, 1), len, 0)
+      to = rel_index_inf(arg(args, 2), len, len)
+      {:ta, _, _, _, len2} = d = data!(this)
+      count = min(to - from, len - target) |> min(len2 - from) |> min(len2 - target)
 
       if count > 0 do
         chunk = d |> values() |> Enum.slice(from, count)
@@ -838,43 +1179,93 @@ defmodule Browser.JS.TypedArrays do
       this
     end)
 
-    values_fn =
-      native("values", fn this, _ ->
-        Browser.JS.Collections.make_iterator(this |> data!() |> values())
-      end)
+    values_fn = native("values", fn this, _ -> ta_iterator(this, :values) end)
 
     put_hidden(p, "values", values_fn)
     put_hidden(p, {:symbol, :iterator, "Symbol.iterator"}, values_fn)
+    def_fn(p, "keys", fn this, _ -> ta_iterator(this, :keys) end)
+    def_fn(p, "entries", fn this, _ -> ta_iterator(this, :entries) end)
+  end
 
-    def_fn(p, "keys", fn this, _ ->
-      n = elem(data!(this), 4)
-      Browser.JS.Collections.make_iterator(for i <- 0..(n - 1)//1, do: i * 1.0)
-    end)
+  # an iterator that looks at the typed array each time: an array that shrank out of bounds is a
+  # TypeError, one that grew yields the new elements, and one that ended stays ended
+  defp ta_iterator(this, what) do
+    {:ta, kind, bid, _, _} = data!(this)
+    {:obj, id} = this
+    %{host: {__MODULE__, d0}} = deref(id)
+    size = size_of(kind)
+    pos = make_ref()
+    Process.put(pos, 0)
+    it = new_object([], proto(:iterator))
 
-    def_fn(p, "entries", fn this, _ ->
-      items =
-        this
-        |> data!()
-        |> values()
-        |> Enum.with_index()
-        |> Enum.map(fn {v, i} -> new_array([i * 1.0, v]) end)
+    put_hidden(
+      it,
+      "next",
+      native("next", fn _, _ ->
+        i = Process.get(pos)
 
-      Browser.JS.Collections.make_iterator(items)
+        result =
+          if i == :done do
+            :done
+          else
+            case eff(d0) do
+              :oob ->
+                throw_error(
+                  "TypeError",
+                  "cannot perform this operation on a detached or out of bounds typed array"
+                )
+
+              {off, len} when i < len ->
+                Process.put(pos, i + 1)
+
+                case what do
+                  :keys ->
+                    {:ok, i * 1.0}
+
+                  :values ->
+                    {:ok, read(kind, binary_part(deref(bid).bytes, off + i * size, size))}
+
+                  :entries ->
+                    v = read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+                    {:ok, new_array([i * 1.0, v])}
+                end
+
+              _ ->
+                Process.put(pos, :done)
+                :done
+            end
+          end
+
+        case result do
+          {:ok, v} -> new_object([{"value", v}, {"done", false}])
+          :done -> new_object([{"value", :undefined}, {"done", true}])
+        end
+      end)
+    )
+
+    it
+  end
+
+  defp join_elems(this, len, sep, to_s) do
+    Enum.map_join(0..(len - 1)//1, sep, fn i ->
+      case ta_at(this, i) do
+        :undefined -> to_s.(:undefined) |> then(&if(&1 == "undefined", do: "", else: &1))
+        v -> to_s.(v)
+      end
     end)
   end
 
   defp reduce(this, args, from_right?) do
     f = callable!(arg(args, 0))
-    items = this |> data!() |> values() |> Enum.with_index()
-    items = if from_right?, do: Enum.reverse(items), else: items
+    items = live_pairs(this, if(from_right?, do: :desc, else: :asc))
 
     {acc, rest} =
-      case {items, length(args)} do
+      case {Enum.take(items, 1), length(args)} do
         {_, n} when n >= 2 ->
           {arg(args, 1), items}
 
-        {[{v, _} | tail], _} ->
-          {v, tail}
+        {[{v, _}], _} ->
+          {v, Stream.drop(items, 1)}
 
         {[], _} ->
           throw_error("TypeError", "Reduce of empty array with no initial value")
@@ -958,9 +1349,15 @@ defmodule Browser.JS.TypedArrays do
           do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
 
         total = byte_size(bytes_of(buf))
-        len = if arg(args, 2) == :undefined, do: total - off, else: to_int(arg(args, 2))
 
-        if off < 0 or off > total or len < 0 or off + len > total,
+        len =
+          cond do
+            arg(args, 2) != :undefined -> to_index(arg(args, 2))
+            resizable?(buffer_id(buf)) -> :auto
+            true -> total - off
+          end
+
+        if off < 0 or off > total or (len != :auto and (len < 0 or off + len > total)),
           do: throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
 
         new_host(__MODULE__, {:dv, buffer_id(buf), off, len}, p)
@@ -975,17 +1372,19 @@ defmodule Browser.JS.TypedArrays do
       size = size_of(kind)
 
       def_fn(p, "get" <> name, 1, fn this, args ->
-        {:dv, bid, off, len} = dv!(this)
+        d = dv!(this)
         i = dv_toindex(arg(args, 0))
+        {:dv, bid, off, len} = dv_eff!(d)
         i = dv_check(i, size, len, bid)
         bin = binary_part(deref(bid).bytes, off + i, size)
         read(kind, if(truthy(arg(args, 1)), do: bin, else: swap(bin)))
       end)
 
       def_fn(p, "set" <> name, 2, fn this, args ->
-        {:dv, bid, off, len} = dv!(this)
+        d = dv!(this)
         i = dv_toindex(arg(args, 0))
         enc = write(kind, arg(args, 1))
+        {:dv, bid, off, len} = dv_eff!(d)
         i = dv_check(i, size, len, bid)
         enc = if truthy(arg(args, 2)), do: enc, else: swap(enc)
         o = deref(bid)
@@ -1008,6 +1407,29 @@ defmodule Browser.JS.TypedArrays do
   end
 
   defp dv!(_), do: throw_error("TypeError", "this is not a DataView")
+
+  # the view's offset and length now; a detached buffer or one that shrank under it is a TypeError
+  defp dv_eff!({:dv, bid, off, len}) do
+    o = deref(bid)
+    total = byte_size(o.bytes)
+
+    cond do
+      Map.get(o, :detached, false) ->
+        throw_error("TypeError", "cannot perform this operation on a detached ArrayBuffer")
+
+      len == :auto and off > total ->
+        throw_error("TypeError", "DataView is out of bounds")
+
+      len == :auto ->
+        {:dv, bid, off, total - off}
+
+      off + len > total ->
+        throw_error("TypeError", "DataView is out of bounds")
+
+      true ->
+        {:dv, bid, off, len}
+    end
+  end
 
   defp dv_toindex(v) do
     n = to_num(v)

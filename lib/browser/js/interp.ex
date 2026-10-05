@@ -1049,6 +1049,9 @@ defmodule Browser.JS.Interp do
       %{proxy: _} ->
         Browser.JS.Proxy.host_keys(id)
 
+      %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
+        Browser.JS.TypedArrays.host_keys(data) ++ own_keys_plain(o)
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
           do: with(:default <- mod.host_keys(data), do: own_keys_plain(o)),

@@ -650,6 +650,22 @@ defmodule Browser.JS.Builtins do
       |> species_fill_from(target, true)
     end)
 
+    array_fn(p, "toLocaleString", fn this, _ ->
+      len = length_of(this)
+
+      Enum.map_join(0..(len - 1)//1, ",", fn i ->
+        case Interp.get(this, float(i)) do
+          v when v in [:undefined, :null] ->
+            ""
+
+          v ->
+            f = Interp.get(v, "toLocaleString")
+            callable!(f)
+            to_str(call(f, v, []))
+        end
+      end)
+    end)
+
     array_fn(p, "join", fn this, args ->
       join(this, if(arg(args, 0) == :undefined, do: ",", else: to_str(arg(args, 0))))
     end)
@@ -799,7 +815,7 @@ defmodule Browser.JS.Builtins do
     array_fn(p, "find", fn this, args ->
       f = callable!(arg(args, 0))
 
-      Enum.find_value(Enum.with_index(elems(this)), :undefined, fn {v, i} ->
+      Enum.find_value(each_pair(this, :asc), :undefined, fn {v, i} ->
         if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
       end)
     end)
@@ -808,21 +824,17 @@ defmodule Browser.JS.Builtins do
       f = callable!(arg(args, 0))
 
       idx =
-        Enum.find_index(Enum.with_index(elems(this)), fn {v, i} ->
-          truthy(call(f, arg(args, 1), [v, float(i), this]))
+        Enum.find_value(each_pair(this, :asc), -1, fn {v, i} ->
+          if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
         end)
 
-      float(idx || -1)
+      float(idx)
     end)
 
     array_fn(p, "findLast", fn this, args ->
       f = callable!(arg(args, 0))
 
-      this
-      |> elems()
-      |> Enum.with_index()
-      |> Enum.reverse()
-      |> Enum.find_value(:undefined, fn {v, i} ->
+      Enum.find_value(each_pair(this, :desc), :undefined, fn {v, i} ->
         if truthy(call(f, arg(args, 1), [v, float(i), this])), do: v
       end)
     end)
@@ -831,11 +843,7 @@ defmodule Browser.JS.Builtins do
       f = callable!(arg(args, 0))
 
       idx =
-        this
-        |> elems()
-        |> Enum.with_index()
-        |> Enum.reverse()
-        |> Enum.find_value(-1, fn {v, i} ->
+        Enum.find_value(each_pair(this, :desc), -1, fn {v, i} ->
           if truthy(call(f, arg(args, 1), [v, float(i), this])), do: i
         end)
 
@@ -1011,6 +1019,14 @@ defmodule Browser.JS.Builtins do
       array?(this) and not has_holes?(this) -> array_list(this)
       true -> for i <- 0..(length_of(this) - 1)//1, do: Interp.get(this, float(i))
     end
+  end
+
+  # `{value, index}` of every index below the length (holes read as undefined), each read as it
+  # is consumed so that a callback that changes the object is seen
+  defp each_pair(this, dir) do
+    len = length_of(this)
+    range = if dir == :asc, do: 0..(len - 1)//1, else: (len - 1)..0//-1
+    Stream.map(range, fn i -> {Interp.get(this, float(i)), i} end)
   end
 
   defp has_holes?({:obj, id}) do
@@ -1368,6 +1384,10 @@ defmodule Browser.JS.Builtins do
   end
 
   defp number_methods(p) do
+    def_fn(p, "toLocaleString", fn this, _ ->
+      Num.to_string(this_prim(this, :number, "Number.prototype.toLocaleString"))
+    end)
+
     def_fn(p, "toString", fn this, args ->
       this = this_prim(this, :number, "Number.prototype.toString")
 

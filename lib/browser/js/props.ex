@@ -146,6 +146,16 @@ defmodule Browser.JS.Props do
   def own_names(_), do: []
 
   defp own_names_plain(id, o) do
+    case o do
+      %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
+        Browser.JS.TypedArrays.host_keys(data) ++ own_names_plain2(id, o)
+
+      _ ->
+        own_names_plain2(id, o)
+    end
+  end
+
+  defp own_names_plain2(id, o) do
     base = Enum.reverse(o.keys)
 
     hidden =

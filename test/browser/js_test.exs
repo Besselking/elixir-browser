@@ -582,6 +582,23 @@ defmodule Browser.JSTest do
                Browser.JS.eval(src)
     end
 
+    test "resizable ArrayBuffer and length-tracking views" do
+      src = """
+      var rab = new ArrayBuffer(4, {maxByteLength: 16});
+      var tracking = new Uint8Array(rab);
+      var fixed = new Uint8Array(rab, 0, 4);
+      var before = [rab.resizable, rab.maxByteLength, tracking.length];
+      rab.resize(8);
+      var grown = tracking.length;
+      rab.resize(2);
+      var threw = false;
+      try { fixed.fill(1); } catch (e) { threw = e instanceof TypeError; }
+      [before.join(), grown, tracking.length, fixed.length, threw].join('|')
+      """
+
+      assert {:ok, "true,16,4|8|2|0|true", _} = Browser.JS.eval(src)
+    end
+
     test "-0 and the Math functions" do
       assert {:ok, true, _} =
                Browser.JS.eval("1 / -0 === -Infinity && Object.is(Math.round(-0.2), -0)")
