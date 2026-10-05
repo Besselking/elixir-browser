@@ -1374,6 +1374,7 @@ css/CSS2/normal-flow/block-in-inline-align-justify-001.html
 css/CSS2/normal-flow/block-in-inline-baseline-001.html
 css/CSS2/normal-flow/block-in-inline-first-line-001.html
 css/CSS2/normal-flow/block-in-inline-first-line-002.html
+css/CSS2/normal-flow/block-in-inline-float-between-001.xht
 css/CSS2/normal-flow/block-in-inline-float-in-layer-001.html
 css/CSS2/normal-flow/block-in-inline-margins-001a.xht
 css/CSS2/normal-flow/block-in-inline-margins-001b.xht
@@ -2188,6 +2189,8 @@ css/CSS2/positioning/position-relative-027.xht
 css/CSS2/positioning/position-relative-028.xht
 css/CSS2/positioning/position-relative-029.xht
 css/CSS2/positioning/position-relative-030.xht
+css/CSS2/positioning/position-relative-032.xht
+css/CSS2/positioning/position-relative-033.xht
 css/CSS2/positioning/position-relative-037.xht
 css/CSS2/positioning/position-relative-038.xht
 css/CSS2/positioning/position-static-001.xht

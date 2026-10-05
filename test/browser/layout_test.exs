@@ -4420,4 +4420,39 @@ defmodule Browser.LayoutTest do
       assert mc_y(items, "y") >= 40
     end
   end
+
+  describe "relatively positioned inline elements" do
+    defp ri_layout(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    defp ri_item(items, text), do: Enum.find(items, &(&1[:text] == text))
+
+    test "the text is drawn shifted but keeps its place in the line" do
+      items =
+        ri_layout(
+          "<style>#s { position: relative; top: 25px; left: 10px }</style><div>A<span id=s>B</span>C</div>"
+        )
+
+      a = ri_item(items, "A")
+      assert ri_item(items, "B").y == a.y + 25
+      assert ri_item(items, "B").x == a.x + a.w + 10
+      assert ri_item(items, "C").y == a.y
+      assert ri_item(items, "C").x == a.x + a.w + ri_item(items, "B").w
+    end
+
+    test "bottom and right move it the other way, and nested offsets add up" do
+      items =
+        ri_layout(
+          "<style>.r { position: relative } #o { top: 10px } #i { top: 5px; right: 4px }</style><div>A<span class=r id=o><span class=r id=i>B</span></span></div>"
+        )
+
+      a = ri_item(items, "A")
+      b = ri_item(items, "B")
+      assert b.y == a.y + 15
+      assert b.x == a.x + a.w - 4
+    end
+  end
 end
