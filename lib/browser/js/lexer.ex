@@ -29,8 +29,14 @@ defmodule Browser.JS.Lexer do
 
   defp lex(<<c, rest::binary>>, _nl, acc) when c in [?\n, ?\r], do: lex(rest, true, acc)
   defp lex(<<c, rest::binary>>, nl, acc) when c in [?\s, ?\t, 0x0B, 0x0C], do: lex(rest, nl, acc)
-  defp lex(<<0xC2, 0xA0, rest::binary>>, nl, acc), do: lex(rest, nl, acc)
-  defp lex(<<0xEF, 0xBB, 0xBF, rest::binary>>, nl, acc), do: lex(rest, nl, acc)
+
+  defp lex(<<0xE2, 0x80, c, rest::binary>>, _nl, acc) when c in [0xA8, 0xA9],
+    do: lex(rest, true, acc)
+
+  defp lex(<<c::utf8, rest::binary>> = s, nl, acc) when c > 127 do
+    if space_cp?(c), do: lex(rest, nl, acc), else: lex_ident(s, nl, acc)
+  end
+
   defp lex("//" <> rest, nl, acc), do: lex(skip_line(rest), nl, acc)
 
   defp lex("/*" <> rest, nl, acc) do
@@ -148,9 +154,22 @@ defmodule Browser.JS.Lexer do
   defp escaped?(s, rest),
     do: String.contains?(binary_part(s, 0, byte_size(s) - byte_size(rest)), "\\")
 
-  defp ident(<<c, rest::binary>>, acc)
-       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127,
-       do: ident(rest, [c | acc])
+  # white space and line terminators outside ASCII (Zs, BOM, U+2028, U+2029)
+  defp space_cp?(c),
+    do: c in [0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF, 0x2028, 0x2029] or c in 0x2000..0x200A
+
+  defp ident(<<c, rest::binary>> = s, acc)
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
+    case s do
+      <<cp::utf8, _::binary>> when cp > 127 ->
+        if space_cp?(cp),
+          do: {acc |> Enum.reverse() |> :binary.list_to_bin(), s},
+          else: ident(rest, [c | acc])
+
+      _ ->
+        ident(rest, [c | acc])
+    end
+  end
 
   # \uXXXX and \u{X...} escapes are part of an identifier
   defp ident(<<"\\u{", rest::binary>>, acc) do
