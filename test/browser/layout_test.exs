@@ -4604,4 +4604,45 @@ defmodule Browser.LayoutTest do
       assert texts == ["T", "his", "Text"]
     end
   end
+
+  describe "justified text" do
+    defp just_items(style, html) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"width:100px;#{style}\">#{html}</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items
+    end
+
+    defp just_at(items, text), do: Enum.find(items, &(&1[:text] == text))
+
+    test "a wrapped line is stretched to the full width" do
+      items = just_items("text-align:justify;font-size:10px", "aaa bbb ccc ddd eee fff")
+      first = Enum.filter(items, &(&1.type == :text and &1.y == just_at(items, "aaa").y))
+      last = Enum.max_by(first, & &1.x)
+      assert last.x + last.w == 100
+      assert just_at(items, "aaa").x == 0
+    end
+
+    test "the last line is not stretched" do
+      items = just_items("text-align:justify;font-size:10px", "aaa bbb ccc ddd eee fff")
+      last_y = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.max()
+      row = Enum.filter(items, &(&1.type == :text and &1.y == last_y))
+      assert Enum.min_by(row, & &1.x).x == 0
+      assert Enum.max_by(row, & &1.x).x + 15 < 100
+    end
+
+    test "text-align-last: justify stretches the last line too" do
+      items = just_items("text-align:left;text-align-last:justify;font-size:10px", "aaa bbb")
+      assert just_at(items, "bbb").x + just_at(items, "bbb").w == 100
+    end
+
+    test "text-justify: none leaves the spaces alone" do
+      items = just_items("text-align:justify;text-justify:none;font-size:10px", "aaa bbb ccc ddd")
+      assert just_at(items, "bbb").x == 20
+    end
+  end
 end
