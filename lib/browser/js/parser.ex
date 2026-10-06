@@ -1428,7 +1428,7 @@ defmodule Browser.JS.Parser do
       class_members(ts, [{:cmember, :block, nil, body, true} | acc])
     after
       Process.put(:js_generator, outer)
-      Process.put(:js_static_block, outer_sb)
+      Process.put(:js_static_block, outer_sb || false)
     end
   end
 
@@ -1523,7 +1523,7 @@ defmodule Browser.JS.Parser do
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
-      Process.put(:js_static_block, outer_sb)
+      Process.put(:js_static_block, outer_sb || false)
       Process.put(:js_nt, nt)
     end
   end
@@ -1578,12 +1578,13 @@ defmodule Browser.JS.Parser do
   defp arrow_body(params, [{:p, "{", _} | ts]) do
     outer_sb = Process.put(:js_static_block, false)
     {body, ts} = function_body(ts, params, true)
-    Process.put(:js_static_block, outer_sb)
+    Process.put(:js_static_block, outer_sb || false)
     {{:fn, nil, params, body, :arrow}, ts}
   end
 
   defp arrow_body(params, ts) do
     check_unique_params(params)
+    if strict?(), do: check_strict_params(params)
     {e, ts} = assignment(ts)
     {{:fn, nil, params, e, :arrow_expr}, ts}
   end
@@ -2038,9 +2039,13 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:id, name, _} | ts]) when name not in @reserved do
-    if (name == "await" and Process.get(:js_async, false)) or
+    if (name == "await" and
+          (Process.get(:js_async, false) or Process.get(:js_static_block, false))) or
          (name == "yield" and Process.get(:js_generator, false)),
        do: throw({:syntax, "#{name} is not an identifier here"})
+
+    if strict?() and name in @strict_reserved,
+      do: throw({:syntax, "#{name} is a reserved word in strict mode"})
 
     {{:id, name}, ts}
   end
@@ -2147,6 +2152,10 @@ defmodule Browser.JS.Parser do
         t ->
           name = shorthand || throw({:syntax, "bad object literal"})
           name in @reserved && throw({:syntax, "unexpected token #{inspect(name)}"})
+
+          if strict?() and name in @strict_reserved,
+            do: throw({:syntax, "#{name} is a reserved word here"})
+
           {{:init, key, {:id, name}}, t}
       end
 
@@ -2154,7 +2163,16 @@ defmodule Browser.JS.Parser do
   end
 
   defp object_next([{:p, ",", _} | ts], acc), do: object_literal(ts, acc)
-  defp object_next([{:p, "}", _} | ts], acc), do: {{:object, Enum.reverse(acc)}, ts}
+
+  defp object_next([{:p, "}", _} | ts], acc) do
+    # two `__proto__: v` entries are an error unless the literal turns out to be a pattern
+    if Enum.count(acc, &match?({:proto, _}, &1)) > 1 and
+         not match?([{:p, p, _} | _] when p in ["=", ",", "]", "}"], ts),
+       do: throw({:syntax, "duplicate __proto__ in an object literal"})
+
+    {{:object, Enum.reverse(acc)}, ts}
+  end
+
   defp object_next(_, _), do: throw({:syntax, "bad object literal"})
 
   # ── token helpers ──────────────────────────────────────────
