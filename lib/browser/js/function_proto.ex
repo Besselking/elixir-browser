@@ -95,6 +95,7 @@ defmodule Browser.JS.FunctionProto do
     case deref(id) do
       %{fun: {:closure, %{mode: mode, name: name, body: body}}} = o when mode in [false, nil] ->
         not (Map.get(o, :generator, false) or Map.get(o, :async, false) or
+               Map.get(o, :class_ctor, false) or
                match?({:method, _}, name) or match?([{:expr, {:str, "use strict"}} | _], body))
 
       _ ->
