@@ -20,6 +20,8 @@ defmodule Browser.JS.Lexer do
 
   @doc "`{:ok, tokens}` or `{:error, message}`."
   def tokenize(src) do
+    # a hashbang comment is only allowed at the very start
+    src = if match?("#!" <> _, src), do: skip_line(src), else: src
     {:ok, lex(src, false, [])}
   catch
     {:syntax, msg} -> {:error, msg}
@@ -41,8 +43,11 @@ defmodule Browser.JS.Lexer do
 
   defp lex("/*" <> rest, nl, acc) do
     case String.split(rest, "*/", parts: 2) do
-      [comment, after_comment] -> lex(after_comment, nl or String.contains?(comment, "\n"), acc)
-      _ -> throw({:syntax, "unterminated comment"})
+      [comment, after_comment] ->
+        lex(after_comment, nl or String.contains?(comment, ["\n", "\r", "\u2028", "\u2029"]), acc)
+
+      _ ->
+        throw({:syntax, "unterminated comment"})
     end
   end
 
@@ -141,6 +146,9 @@ defmodule Browser.JS.Lexer do
   defp regex(<<c, _::binary>>, _acc, _cls) when c in [?\n, ?\r],
     do: throw({:syntax, "unterminated regular expression"})
 
+  defp regex(<<0xE2, 0x80, c, _::binary>>, _acc, _cls) when c in [0xA8, 0xA9],
+    do: throw({:syntax, "unterminated regular expression"})
+
   defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
   defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
 
@@ -148,6 +156,7 @@ defmodule Browser.JS.Lexer do
   defp regex_flags(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
   defp skip_line(<<c, _::binary>> = s) when c in [?\n, ?\r], do: s
+  defp skip_line(<<0xE2, 0x80, c, _::binary>> = s) when c in [0xA8, 0xA9], do: s
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)
   defp skip_line(""), do: ""
 
@@ -157,6 +166,12 @@ defmodule Browser.JS.Lexer do
   # white space and line terminators outside ASCII (Zs, BOM, U+2028, U+2029)
   defp space_cp?(c),
     do: c in [0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF, 0x2028, 0x2029] or c in 0x2000..0x200A
+
+  # an escape in an identifier must spell an identifier character
+  defp id_escape?(cp) when cp < 128,
+    do: cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in [?_, ?$]
+
+  defp id_escape?(cp), do: not space_cp?(cp)
 
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
@@ -175,7 +190,7 @@ defmodule Browser.JS.Lexer do
   defp ident(<<"\\u{", rest::binary>>, acc) do
     with [hex, rest] <- String.split(rest, "}", parts: 2),
          {cp, ""} <- Integer.parse(hex, 16),
-         true <- cp in 0..0x10FFFF do
+         true <- cp in 0..0x10FFFF and id_escape?(cp) do
       ident(rest, [<<cp::utf8>> | acc])
     else
       _ -> throw({:syntax, "bad unicode escape in identifier"})
@@ -184,8 +199,13 @@ defmodule Browser.JS.Lexer do
 
   defp ident(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
     case Integer.parse(hex, 16) do
-      {cp, ""} when cp not in 0xD800..0xDFFF -> ident(rest, [<<cp::utf8>> | acc])
-      _ -> throw({:syntax, "bad unicode escape in identifier"})
+      {cp, ""} when cp not in 0xD800..0xDFFF ->
+        if id_escape?(cp),
+          do: ident(rest, [<<cp::utf8>> | acc]),
+          else: throw({:syntax, "bad unicode escape in identifier"})
+
+      _ ->
+        throw({:syntax, "bad unicode escape in identifier"})
     end
   end
 

@@ -2754,7 +2754,18 @@ defmodule Browser.JS.Interp do
         :error -> :undefined
       end
 
-    new_object([{"url", url}])
+    # one object per module
+    metas = Process.get(:js_import_metas) || %{}
+
+    case metas do
+      %{^url => meta} ->
+        meta
+
+      _ ->
+        meta = new_object([{"url", url}])
+        Process.put(:js_import_metas, Map.put(metas, url, meta))
+        meta
+    end
   end
 
   def ev({:class, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
