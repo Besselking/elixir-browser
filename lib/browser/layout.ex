@@ -935,7 +935,7 @@ defmodule Browser.Layout do
     {Enum.reverse(escaped), Enum.reverse(kept)}
   end
 
-  defp track_pos({:pos_inline}, {n, s}), do: {n + 1, s}
+  defp track_pos({:pos_inline, _}, {n, s}), do: {n + 1, s}
   defp track_pos({:pos_end}, {n, s}), do: {n - 1, s}
 
   defp track_pos({:box_start, ref, %{pos: p}}, {n, s}) when p not in [nil, false],
@@ -999,7 +999,12 @@ defmodule Browser.Layout do
   defp inline_ops(tag, kids, style, c, acc) do
     acc = if tag in ~w(td th), do: [{:space, style} | acc], else: acc
     positioned? = c["position"] in ["relative", "sticky"]
-    acc = if positioned?, do: [{:pos_inline} | acc], else: acc
+
+    rel =
+      if c["position"] == "relative",
+        do: %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+
+    acc = if positioned?, do: [{:pos_inline, rel} | acc], else: acc
 
     spec = inline_spec(tag, c, style)
     ref = make_ref()
@@ -1799,6 +1804,8 @@ defmodule Browser.Layout do
       gap: 0,
       # boxes whose top edge waits for the margin that collapses into it (see `start_box`)
       ptop: [],
+      # offsets of the relatively positioned inline elements the layout is inside (or nil)
+      rels: [],
       # the most negative margin waiting to be applied, which adds to the largest positive one
       ngap: 0,
       pending_space: nil,
@@ -2230,6 +2237,8 @@ defmodule Browser.Layout do
   # records where its box starts. On an empty line the space is carried in
   # `lead` and applied when the first word of the line is placed.
   defp op({:inline_open, ref, spec}, st) do
+    spec = Map.put(spec, :rel, current_rel(st))
+
     if st.line == [] do
       {fl, _} = float_offsets(st, st.y + st.gap + st.ngap)
       x = st.margin + st.left + fl + st.lead + spec.ml
@@ -2264,7 +2273,10 @@ defmodule Browser.Layout do
     end
   end
 
-  defp op({:pos_inline}, st) do
+  defp op({:pos_inline, rel}, st) do
+    # text and boxes in a relatively positioned inline are drawn shifted
+    st = %{st | rels: [inline_shift(st, rel) | st.rels]}
+
     {x, y} =
       if st.line == [],
         do: {st.margin + st.left, st.y + st.gap + st.ngap},
@@ -2273,7 +2285,7 @@ defmodule Browser.Layout do
     push_pos(st, %{x: x, y: y, w: max(st.width - st.margin - st.right - x, 0), h: nil})
   end
 
-  defp op({:pos_end}, st), do: %{st | pos: tl(st.pos)}
+  defp op({:pos_end}, st), do: %{st | pos: tl(st.pos), rels: tl(st.rels)}
 
   defp op({:abs, sub, spec}, st) do
     spec = Map.put(spec, :seq, :erlang.unique_integer([:monotonic]))
@@ -2289,6 +2301,42 @@ defmodule Browser.Layout do
     else
       place_absolute(st, sub, spec, origin)
     end
+  end
+
+  defp inline_shift(_st, nil), do: nil
+
+  defp inline_shift(st, rel) do
+    cw = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    left = rel_offset(rel.left, cw)
+    right = rel_offset(rel.right, cw)
+    dx = left || -(right || 0)
+    dy = rel_offset(rel.top, st.cbh) || -(rel_offset(rel.bottom, st.cbh) || 0)
+    if dx == 0 and dy == 0, do: nil, else: {dx, dy, :erlang.unique_integer([:monotonic])}
+  end
+
+  # the offset the relatively positioned inlines around the current place add up to
+  defp current_rel(%{rels: rels}) do
+    case Enum.reject(rels, &is_nil/1) do
+      [] ->
+        nil
+
+      list ->
+        {Enum.sum(for({dx, _, _} <- list, do: dx)), Enum.sum(for({_, dy, _} <- list, do: dy)),
+         elem(hd(list), 2)}
+    end
+  end
+
+  defp atom_items(%{rel: rel, items: items}), do: Enum.map(items, &Map.put(&1, :rel, rel))
+  defp atom_items(%{items: items}), do: items
+
+  defp apply_rel(items) do
+    Enum.map(items, fn
+      %{rel: {dx, dy, seq}} = it ->
+        it |> Map.delete(:rel) |> move(dx, dy) |> Map.merge(%{over: true, pz: seq})
+
+      it ->
+        it
+    end)
   end
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
@@ -2371,6 +2419,7 @@ defmodule Browser.Layout do
     }
 
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
+    atom = if rel = current_rel(st), do: Map.put(atom, :rel, rel), else: atom
     # an atom with nothing drawn in it still takes the room it asks for (one with content is
     # measured by what it draws)
     ext = if extent(atom.items) == 0, do: max(st.ext, x + atom.w + max(extra, 0)), else: st.ext
@@ -3525,6 +3574,7 @@ defmodule Browser.Layout do
       rr: st.right - st.free
     }
 
+    item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
     st = bridge(st, item, space_w)
 
     %{
@@ -3606,6 +3656,8 @@ defmodule Browser.Layout do
               y: st.y + dy + half + normal - it.h - div(normal - it.h, 4)
           }
 
+    placed = apply_rel(placed)
+
     top_of = fn
       %{valign: "top"} -> st.y
       %{valign: "bottom"} = a -> st.y + line_h - a.h
@@ -3615,8 +3667,10 @@ defmodule Browser.Layout do
 
     moved =
       for atom <- Enum.reverse(atoms),
-          sub <- atom.items,
+          sub <- atom_items(atom),
           do: move(sub, atom.x + shift, top_of.(atom))
+
+    moved = apply_rel(moved)
 
     # everything a box paints behind its text: colours, borders, images, shadows
     {rects, others} =
@@ -3716,6 +3770,15 @@ defmodule Browser.Layout do
   end
 
   defp fragment(%{spec: %{paint: false}}, _x1, _last?, _ctx), do: []
+
+  defp fragment(%{spec: %{rel: {_, _, _} = rel}} = box, x1, last?, ctx) do
+    spec = %{box.spec | rel: nil}
+
+    %{box | spec: spec}
+    |> fragment(x1, last?, ctx)
+    |> Enum.map(&Map.put(&1, :rel, rel))
+    |> apply_rel()
+  end
 
   defp fragment(%{spec: spec} = box, x1, last?, ctx) do
     x0 = (box.x || ctx.first_x) + ctx.shift
