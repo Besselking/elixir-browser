@@ -377,7 +377,16 @@ defmodule Browser.JS.Parser do
           else: statement(ts)
 
       [{:id, l, _}, {:p, ":", _} | rest] when allow_function != true and l not in @reserved ->
-        body_statement(rest, false)
+        # a labelled declaration is not allowed here; checking the body must see the label
+        labels = Process.get(:js_labels, [])
+        Process.put(:js_labels, [{l, loop_ahead?(rest)} | labels])
+
+        try do
+          body_statement(rest, false)
+        after
+          Process.put(:js_labels, labels)
+        end
+
         statement(ts)
 
       [{:id, "async", _}, {:id, "function", f} | _] when f != true ->

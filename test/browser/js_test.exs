@@ -1344,7 +1344,10 @@ defmodule Browser.JSTest do
             "a: b: while (1) { continue a; break b }",
             "a: { break a }",
             "switch (1) { case 1: break }",
-            "x: ; x: ;"
+            "x: ; x: ;",
+            # a label right after else/if (React's scheduler is minified like this)
+            "if (a) b(); else l: switch (1) { case 1: break l }",
+            "if (a) l: { break l }"
           ] do
         assert {:ok, _} = Browser.JS.Parser.parse(src), src
       end
