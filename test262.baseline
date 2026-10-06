@@ -25230,6 +25230,7 @@ language/expressions/delete/11.4.1-4.a-6.js
 language/expressions/delete/11.4.1-4.a-8.js
 language/expressions/delete/11.4.1-4.a-9-s.js
 language/expressions/delete/11.4.1-4.a-9.js
+language/expressions/delete/11.4.1-5-2.js
 language/expressions/delete/11.4.1-5-a-27-s.js
 language/expressions/delete/11.4.1-5-a-28-s.js
 language/expressions/delete/11.4.4-4.a-3-s.js
@@ -25258,7 +25259,11 @@ language/expressions/delete/member-computed-reference-undefined.js
 language/expressions/delete/member-identifier-reference-null.js
 language/expressions/delete/member-identifier-reference-undefined.js
 language/expressions/delete/non-reference-return-true.js
+language/expressions/delete/super-property-method.js
+language/expressions/delete/super-property-null-base.js
+language/expressions/delete/super-property-topropertykey.js
 language/expressions/delete/super-property-uninitialized-this.js
+language/expressions/delete/super-property.js
 language/expressions/delete/white-space-line-terminator-between-delete-unaryexpression-allowed.js
 language/expressions/division/S11.5.2_A1.js
 language/expressions/division/S11.5.2_A2.1_T1.js
@@ -37854,6 +37859,7 @@ language/statements/function/S13_A10.js
 language/statements/function/S13_A11_T2.js
 language/statements/function/S13_A11_T3.js
 language/statements/function/S13_A11_T4.js
+language/statements/function/S13_A12_T2.js
 language/statements/function/S13_A13_T1.js
 language/statements/function/S13_A13_T2.js
 language/statements/function/S13_A13_T3.js
@@ -38821,6 +38827,7 @@ language/statements/try/S12.14_A19_T1.js
 language/statements/try/S12.14_A19_T2.js
 language/statements/try/S12.14_A2.js
 language/statements/try/S12.14_A3.js
+language/statements/try/S12.14_A4.js
 language/statements/try/S12.14_A5.js
 language/statements/try/S12.14_A6.js
 language/statements/try/S12.14_A7_T1.js
