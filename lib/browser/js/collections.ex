@@ -101,8 +101,6 @@ defmodule Browser.JS.Collections do
       enumerable: false
     )
 
-    put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
-
     # Symbol.prototype[@@toPrimitive]: not writable, but configurable
     {:obj, tp_id} = to_prim = native("[Symbol.toPrimitive]", fn this, _ -> this_symbol(this) end)
     store(tp_id, Map.put(deref(tp_id), :arity, 1.0))
@@ -153,6 +151,44 @@ defmodule Browser.JS.Collections do
     end
 
     array_iterator(step, kind)
+  end
+
+  # Array.prototype.values/keys/entries: the object is read as the iterator goes (an element
+  # added, changed or removed in between shows), whatever it is, as long as it has a length
+  defp live_array_iterator(this, mode) do
+    o =
+      if nullish?(this),
+        do: throw_error("TypeError", "Array.prototype.values called on null or undefined"),
+        else: if(match?({:obj, _}, this), do: this, else: Browser.JS.Builtins.box(this))
+
+    pos = make_ref()
+    Process.put(pos, 0)
+
+    step = fn ->
+      case Process.get(pos) do
+        :done ->
+          new_object([{"value", :undefined}, {"done", true}])
+
+        i ->
+          if i >= Browser.JS.ArrayGeneric.len(o) do
+            Process.put(pos, :done)
+            new_object([{"value", :undefined}, {"done", true}])
+          else
+            Process.put(pos, i + 1)
+
+            value =
+              case mode do
+                :keys -> i * 1.0
+                :values -> Interp.get(o, Integer.to_string(i))
+                :entries -> new_array([i * 1.0, Interp.get(o, Integer.to_string(i))])
+              end
+
+            new_object([{"value", value}, {"done", false}])
+          end
+      end
+    end
+
+    array_iterator(step, :array_iterator)
   end
 
   @doc "An Array Iterator object (also used for typed arrays) whose `next` runs `step`."
@@ -222,8 +258,7 @@ defmodule Browser.JS.Collections do
     # arrays, strings
     array = proto(:array)
 
-    values =
-      native("values", fn this, _ -> make_kind_iterator(iterate(this), :array_iterator) end)
+    values = native("values", fn this, _ -> live_array_iterator(this, :values) end)
 
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
@@ -240,19 +275,8 @@ defmodule Browser.JS.Collections do
     ao = deref(aid)
     store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
 
-    def_fn(array, "keys", fn this, _ ->
-      make_kind_iterator(
-        for(i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0),
-        :array_iterator
-      )
-    end)
-
-    def_fn(array, "entries", fn this, _ ->
-      make_kind_iterator(
-        for({v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v])),
-        :array_iterator
-      )
-    end)
+    def_fn(array, "keys", fn this, _ -> live_array_iterator(this, :keys) end)
+    def_fn(array, "entries", fn this, _ -> live_array_iterator(this, :entries) end)
 
     put_hidden(
       proto(:string),
