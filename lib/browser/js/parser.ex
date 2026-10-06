@@ -1622,8 +1622,15 @@ defmodule Browser.JS.Parser do
   defp assignment([{:id, "async", _} | [_ | _] = rest] = ts) do
     cond do
       arrow_ahead?(rest) and not match?([{_, _, nl} | _] when nl?(nl), rest) ->
-        {fun, ts} = arrow(rest)
-        {{:async, fun}, ts}
+        # `await` is a keyword in the parameters and the body of an async arrow
+        outer_async = Process.put(:js_async, true)
+
+        try do
+          {fun, ts} = arrow(rest)
+          {{:async, fun}, ts}
+        after
+          Process.put(:js_async, outer_async || false)
+        end
 
       true ->
         assignment_plain(ts)
