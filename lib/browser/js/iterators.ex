@@ -360,6 +360,7 @@ defmodule Browser.JS.Iterators do
       n == :infinity -> :infinity
       n == :neg_infinity -> fail_closing(o, "RangeError", "limit must not be negative")
       trunc(n) < 0 -> fail_closing(o, "RangeError", "limit must not be negative")
+      trunc(n) > 9_007_199_254_740_991 -> fail_closing(o, "RangeError", "limit is too large")
       true -> trunc(n)
     end
   end

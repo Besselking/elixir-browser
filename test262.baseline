@@ -3462,6 +3462,15 @@ built-ins/AsyncGeneratorPrototype/throw/throw-suspendedYield-try-finally-return.
 built-ins/AsyncGeneratorPrototype/throw/throw-suspendedYield-try-finally-throw.js
 built-ins/AsyncGeneratorPrototype/throw/throw-suspendedYield-try-finally.js
 built-ins/AsyncGeneratorPrototype/throw/throw-suspendedYield.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/invokes-return.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/is-function.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/length.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/name.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/prop-desc.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/return-val.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/throw-rejected-return.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/throw-return-getter.js
+built-ins/AsyncIteratorPrototype/Symbol.asyncDispose/throw-return.js
 built-ins/AsyncIteratorPrototype/Symbol.asyncIterator/length.js
 built-ins/AsyncIteratorPrototype/Symbol.asyncIterator/name.js
 built-ins/AsyncIteratorPrototype/Symbol.asyncIterator/prop-desc.js
@@ -5552,6 +5561,8 @@ built-ins/Iterator/prototype/chunks/underlying-iterator-closed-in-parallel.js
 built-ins/Iterator/prototype/chunks/yields-distinct-arrays.js
 built-ins/Iterator/prototype/constructor/prop-desc.js
 built-ins/Iterator/prototype/constructor/weird-setter.js
+built-ins/Iterator/prototype/drop/argument-effect-order.js
+built-ins/Iterator/prototype/drop/argument-validation-failure-closes-underlying.js
 built-ins/Iterator/prototype/drop/callable.js
 built-ins/Iterator/prototype/drop/exhaustion-does-not-call-return.js
 built-ins/Iterator/prototype/drop/get-next-method-only-once.js
@@ -5562,6 +5573,7 @@ built-ins/Iterator/prototype/drop/length.js
 built-ins/Iterator/prototype/drop/limit-equals-total.js
 built-ins/Iterator/prototype/drop/limit-greater-than-total.js
 built-ins/Iterator/prototype/drop/limit-less-than-total.js
+built-ins/Iterator/prototype/drop/limit-rangeerror.js
 built-ins/Iterator/prototype/drop/limit-tonumber-throws.js
 built-ins/Iterator/prototype/drop/limit-tonumber.js
 built-ins/Iterator/prototype/drop/name.js
@@ -5917,6 +5929,8 @@ built-ins/Iterator/prototype/some/result-is-boolean.js
 built-ins/Iterator/prototype/some/this-non-callable-next.js
 built-ins/Iterator/prototype/some/this-non-object.js
 built-ins/Iterator/prototype/some/this-plain-iterator.js
+built-ins/Iterator/prototype/take/argument-effect-order.js
+built-ins/Iterator/prototype/take/argument-validation-failure-closes-underlying.js
 built-ins/Iterator/prototype/take/callable.js
 built-ins/Iterator/prototype/take/exhaustion-calls-return.js
 built-ins/Iterator/prototype/take/get-next-method-only-once.js
@@ -5926,6 +5940,7 @@ built-ins/Iterator/prototype/take/is-function.js
 built-ins/Iterator/prototype/take/length.js
 built-ins/Iterator/prototype/take/limit-greater-than-or-equal-to-total.js
 built-ins/Iterator/prototype/take/limit-less-than-total.js
+built-ins/Iterator/prototype/take/limit-rangeerror.js
 built-ins/Iterator/prototype/take/limit-tonumber-throws.js
 built-ins/Iterator/prototype/take/limit-tonumber.js
 built-ins/Iterator/prototype/take/name.js
@@ -15066,6 +15081,8 @@ built-ins/ThrowTypeError/forbidden-arguments.js
 built-ins/ThrowTypeError/forbidden-caller.js
 built-ins/ThrowTypeError/frozen.js
 built-ins/ThrowTypeError/is-function.js
+built-ins/ThrowTypeError/length.js
+built-ins/ThrowTypeError/name.js
 built-ins/ThrowTypeError/property-order.js
 built-ins/ThrowTypeError/prototype.js
 built-ins/ThrowTypeError/throws-type-error.js

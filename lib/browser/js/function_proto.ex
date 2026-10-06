@@ -73,6 +73,20 @@ defmodule Browser.JS.FunctionProto do
         end
       end)
 
+    # `length` and `name` are own, non-configurable properties of %ThrowTypeError%
+    for {key, value} <- [{"length", 0.0}, {"name", ""}] do
+      Browser.JS.Props.define(
+        f,
+        key,
+        new_object([
+          {"value", value},
+          {"writable", false},
+          {"enumerable", false},
+          {"configurable", false}
+        ])
+      )
+    end
+
     Browser.JS.Props.lock(f, true)
     f
   end
