@@ -4772,4 +4772,18 @@ defmodule Browser.LayoutTest do
       assert row_count("<div style=\"width:min-content\">a<b>b</b> cc</div>") == 2
     end
   end
+
+  describe "shrink-to-fit with empty boxes" do
+    test "a float holding an empty block with a border is as wide as the border" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"float:left;border-right:5px solid red\"><div style=\"border-right:5px solid blue;height:10px\"></div></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert Enum.sort(Enum.map(rects, &{&1.x, &1.w})) == [{0, 5}, {5, 5}]
+    end
+  end
 end
