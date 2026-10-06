@@ -383,6 +383,9 @@ defmodule Browser.JS.Async do
         it = Interp.call(method, target, [])
         {it, Interp.get(it, "next"), false}
 
+      method not in [:undefined, :null] ->
+        Interp.throw_error("TypeError", "Symbol.asyncIterator is not a function")
+
       true ->
         case Interp.iter_source(target) do
           {:proto, it, next} ->
@@ -396,7 +399,7 @@ defmodule Browser.JS.Async do
   end
 
   # `yield*` in an async generator
-  defp adelegate(it, next, msg, ctx, k) do
+  defp adelegate(it, next, msg, ctx, k, sync?) do
     call_result =
       try do
         {:ok, adelegate_call(it, next, msg)}
@@ -425,12 +428,36 @@ defmodule Browser.JS.Async do
               {true, v} ->
                 if match?({:return, _}, msg), do: ctx.ret.(v), else: k.(v)
 
+              {false, v} when sync? ->
+                # a sync iterator's values are awaited first; a rejection ends the `yield*`
+                closing = %{
+                  ctx
+                  | throw: fn e ->
+                      close_sync(it)
+                      ctx.throw.(e)
+                    end
+                }
+
+                await_value(v, closing, fn v2 ->
+                  ctx.yield.(v2, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
+                end)
+
               {false, v} ->
-                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k) end)
+                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
             end
           )
         end)
     end
+  end
+
+  # closes a sync iterator whose value promise was rejected
+  defp close_sync(it) do
+    case Interp.get(it, "return") do
+      r when is_tuple(r) -> if Interp.function?(r), do: Interp.call(r, it, [])
+      _ -> :ok
+    end
+  catch
+    {:js_error, _} -> :ok
   end
 
   defp adelegate_call(it, next, {:next, x}), do: {:result, Interp.call(next, it, [x])}
@@ -443,6 +470,12 @@ defmodule Browser.JS.Async do
           else: Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
 
       _ ->
+        # no `throw` method: the iterator is closed before the TypeError
+        case Interp.get(it, "return") do
+          r when is_tuple(r) -> if Interp.function?(r), do: Interp.call(r, it, [])
+          _ -> :ok
+        end
+
         Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
     end
   end
@@ -568,8 +601,8 @@ defmodule Browser.JS.Async do
 
   defp cev_await({:yield, e, true}, env, %{async_gen: true} = ctx, k) do
     cev(e, env, ctx, fn iterable ->
-      attempt(fn -> async_iterator(iterable) end, ctx, fn {it, next, _sync?} ->
-        adelegate(it, next, {:next, :undefined}, ctx, k)
+      attempt(fn -> async_iterator(iterable) end, ctx, fn {it, next, sync?} ->
+        adelegate(it, next, {:next, :undefined}, ctx, k, sync?)
       end)
     end)
   end

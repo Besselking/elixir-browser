@@ -331,7 +331,7 @@ defmodule Browser.JS.Parser do
 
   # `yield` and `await` cannot be labels where they are keywords
   defp check_strict_name_context(name) do
-    if (name == "yield" and Process.get(:js_generator, false)) or
+    if (name == "yield" and (Process.get(:js_generator, false) or strict?())) or
          (name == "await" and Process.get(:js_async, false)),
        do: throw({:syntax, "#{name} is not a valid label here"})
   end
@@ -1519,6 +1519,7 @@ defmodule Browser.JS.Parser do
 
     try do
       {params, ts} = params(expect(ts, "("), [])
+      if generator?, do: check_no_yield([params, nil])
       ts = expect(ts, "{")
       {body, ts} = function_body(ts, params, match?({:method, _}, name))
       check_super_use(name, [params, body], class_method?)
@@ -1581,6 +1582,7 @@ defmodule Browser.JS.Parser do
 
   defp arrow([{:p, "(", _} | ts]) do
     {params, ts} = params(ts, [])
+    if Process.get(:js_generator, false), do: check_no_yield([params, nil])
     arrow_body(params, expect(ts, "=>"))
   end
 
@@ -2051,6 +2053,9 @@ defmodule Browser.JS.Parser do
         [{:id, n, _} | t] when n not in @reserved -> {n, t}
         t -> {nil, t}
       end
+
+    if generator? and name == "yield",
+      do: throw({:syntax, "yield is not a valid generator expression name"})
 
     if generator?, do: generator_rest(name, ts), else: function_rest(name, ts)
   end
