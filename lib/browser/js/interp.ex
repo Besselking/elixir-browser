@@ -1990,6 +1990,35 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # true when the nearest function scope owns `:args` but not yet an `arguments` binding
+  defp args_shadowed?(scope) when is_integer(scope) or is_reference(scope) or is_tuple(scope) do
+    case deref(scope) do
+      %{vars: %{"arguments" => _}} -> false
+      %{vars: %{args: _}} -> true
+      %{parent: nil} -> false
+      %{parent: parent} -> args_shadowed?(parent)
+      _ -> false
+    end
+  end
+
+  defp args_shadowed?(_), do: false
+
+  defp ev_id({:id, name}, env) do
+    case lookup_var(env, name) do
+      {:ok, :tdz} ->
+        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
+      {:ok, v} ->
+        v
+
+      :error when name == "arguments" ->
+        lazy_arguments(env)
+
+      :error ->
+        named_global(name)
+    end
+  end
+
   # `arguments` is only built when a function body asks for it: an object of its own with
   # the indices, `length`, `callee` (a poison pill in strict code) and the array iterator
   defp lazy_arguments(env) do
@@ -2738,21 +2767,12 @@ defmodule Browser.JS.Interp do
     get_with_receiver(home, ev_key(key, env), this)
   end
 
-  def ev({:id, name}, env) do
-    case lookup_var(env, name) do
-      {:ok, :tdz} ->
-        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
-
-      {:ok, v} ->
-        v
-
-      :error when name == "arguments" ->
-        lazy_arguments(env)
-
-      :error ->
-        named_global(name)
-    end
+  def ev({:id, "arguments"} = e, env) do
+    # a cached `arguments` of an outer function must not leak into an inner function
+    if args_shadowed?(env), do: lazy_arguments(env), else: ev_id(e, env)
   end
+
+  def ev({:id, _} = e, env), do: ev_id(e, env)
 
   # the strings argument of a tagged template: an array with a `raw` twin
   def ev({:tagged_strings, cooked, raw}, _env) do
@@ -2801,6 +2821,7 @@ defmodule Browser.JS.Interp do
       {:init, key, val} ->
         k = key_of(key, env)
         v = ev_named(val, env, if(fname = key_fn_name(k), do: {:id, fname}))
+        if method_node?(val), do: name_fn(v, key_fn_name(k))
         method_home(v, obj)
         define_data(obj, k, v)
 
@@ -2818,14 +2839,14 @@ defmodule Browser.JS.Interp do
         k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        if fname = key_fn_name(k), do: name_fn(f, "get " <> fname)
+        if fname = key_fn_name(k), do: accessor_name(f, "get " <> fname)
         Browser.JS.Props.define_accessor(obj, k, get: f)
 
       {:setter, key, fun} ->
         k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        if fname = key_fn_name(k), do: name_fn(f, "set " <> fname)
+        if fname = key_fn_name(k), do: accessor_name(f, "set " <> fname)
         Browser.JS.Props.define_accessor(obj, k, set: f)
     end)
 
@@ -3335,6 +3356,22 @@ defmodule Browser.JS.Interp do
   defp key_fn_name({:symbol, _, desc}) when is_binary(desc), do: "[" <> desc <> "]"
   defp key_fn_name({:symbol, _, _}), do: ""
   defp key_fn_name(_), do: nil
+
+  defp method_node?({:fn, {:method, _}, _, _, _}), do: true
+  defp method_node?({k, inner}) when k in [:gen, :async], do: method_node?(inner)
+  defp method_node?(_), do: false
+
+  defp accessor_name({:obj, id}, name) do
+    case deref(id) do
+      %{fun: {:closure, %{name: {:method, _}} = c}} = o ->
+        store(id, %{o | fun: {:closure, %{c | name: {:method, name}}}})
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp name_fn(f, nil), do: f
 
   defp name_fn({:obj, id} = f, name) do
     case deref(id) do

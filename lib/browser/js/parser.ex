@@ -70,17 +70,11 @@ defmodule Browser.JS.Parser do
         Process.put(:js_labels, [])
         Process.put(:js_loop, 0)
         Process.put(:js_switch, 0)
-        # no `return` at the top level; a module has no `new.target` there either (a script
-        # may be eval code run inside a function)
+        # no `return` and no `new.target` at the top level (eval code run inside a function
+        # may have one)
         Process.put(:js_fn, false)
 
-        Process.put(
-          :js_nt,
-          if(eval?,
-            do: Keyword.get(opts, :new_target, false),
-            else: not Keyword.get(opts, :module, false)
-          )
-        )
+        Process.put(:js_nt, eval? and Keyword.get(opts, :new_target, false))
 
         program = tokens |> statements()
 
@@ -2099,6 +2093,11 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp object_key([{:priv, _, _} | _]),
+    do: throw({:syntax, "private names are only valid in classes"})
+
+  defp object_key(ts), do: property_key(ts)
+
   defp object_literal([{:p, "}", _} | ts], acc), do: {{:object, Enum.reverse(acc)}, ts}
 
   defp object_literal([{:p, "...", _} | ts], acc) do
@@ -2107,13 +2106,13 @@ defmodule Browser.JS.Parser do
   end
 
   defp object_literal([{:p, "*", _} | rest], acc) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:gen, fun}} | acc])
   end
 
   defp object_literal([{:id, "async", _}, {:p, "*", false} | _] = [_, _ | rest], acc) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:async, {:gen, fun}}} | acc])
@@ -2121,7 +2120,7 @@ defmodule Browser.JS.Parser do
 
   defp object_literal([{:id, "async", _}, {k, v, false} | _] = [_ | rest], acc)
        when k in [:id, :str, :num, :bigint] or (k == :p and v == "[") do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key)
     object_next(ts, [{:init, key, {:async, fun}} | acc])
@@ -2130,7 +2129,7 @@ defmodule Browser.JS.Parser do
   # `get x() {}` and `set x(v) {}`
   defp object_literal([{:id, kind, _}, {k, v, _} | _] = [_ | rest], acc)
        when kind in ["get", "set"] and (k in [:id, :str, :num, :bigint] or (k == :p and v == "[")) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
 
     case after_key do
       [{:p, "(", _} | _] ->
@@ -2154,7 +2153,7 @@ defmodule Browser.JS.Parser do
   defp object_literal(ts, acc), do: object_literal_plain(ts, acc)
 
   defp object_literal_plain(ts, acc) do
-    {key, shorthand, after_key} = property_key(ts)
+    {key, shorthand, after_key} = object_key(ts)
 
     {prop, ts} =
       case after_key do
