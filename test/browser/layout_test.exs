@@ -4786,4 +4786,37 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(Enum.map(rects, &{&1.x, &1.w})) == [{0, 5}, {5, 5}]
     end
   end
+
+  describe "aspect-ratio" do
+    defp ratio_box(style) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"background:green;#{style}\"></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1.type == :rect))
+    end
+
+    test "a width gives the height" do
+      box = ratio_box("width:100px;aspect-ratio:2/1")
+      assert {box.w, box.h} == {100, 50}
+    end
+
+    test "a height gives the width" do
+      box = ratio_box("height:50px;aspect-ratio:2")
+      assert {box.w, box.h} == {100, 50}
+    end
+
+    test "border-box sizing counts the border in the ratio" do
+      box = ratio_box("width:100px;aspect-ratio:1;box-sizing:border-box;border:10px solid blue")
+      assert box.h == 100
+    end
+
+    test "an explicit height wins" do
+      box = ratio_box("width:100px;height:20px;aspect-ratio:1")
+      assert box.h == 20
+    end
+  end
 end

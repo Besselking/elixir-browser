@@ -12,7 +12,7 @@ defmodule Browser.Style do
   alias Browser.{CSS, MediaQuery}
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
-            width height min-height max-height min-width max-width box-sizing clip clip-path
+            width height min-height max-height min-width max-width box-sizing aspect-ratio clip clip-path
             text-indent opacity margin-right padding-right vertical-align
             border-top-width border-right-width border-bottom-width border-left-width
             border-top-style border-right-style border-bottom-style border-left-style
