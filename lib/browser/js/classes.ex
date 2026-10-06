@@ -305,7 +305,13 @@ defmodule Browser.JS.Classes do
             "Super constructor null of anonymous class is not a constructor"
           )
 
-      result = Interp.construct(info.parent, args, nt)
+      # the parent is the constructor's current prototype
+      parent = Browser.JS.Props.get_prototype_of(f)
+
+      unless Interp.constructor?(parent),
+        do: throw_error("TypeError", "Super constructor is not a constructor")
+
+      result = Interp.construct(parent, args, nt)
       Interp.declare(sc, :this, result)
       init_fields(info, result)
       result
