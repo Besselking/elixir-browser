@@ -1317,10 +1317,15 @@ defmodule Browser.JS.Builtins do
   # of the right prototype, which becomes the wrapper
   defp wrapper_target?({:obj, id}, kind) do
     o = deref(id)
-    not Map.has_key?(o, :prim) and o.proto == proto(kind)
+    not Map.has_key?(o, :prim) and inherits_from?(o.proto, proto(kind))
   end
 
   defp wrapper_target?(_, _), do: false
+
+  # a subclass instance has the subclass prototype, which inherits from the wrapper's
+  defp inherits_from?(p, target) when p == target, do: true
+  defp inherits_from?({:obj, id}, target), do: inherits_from?(deref(id).proto, target)
+  defp inherits_from?(_, _), do: false
 
   defp wrap({:obj, id} = o, prim) do
     store(id, Map.put(deref(id), :prim, prim))
