@@ -3323,9 +3323,9 @@ defmodule Browser.JS.Interp do
 
     result =
       case base do
-        "&&" -> if truthy(old), do: {:set, ev(value, env)}, else: :keep
-        "||" -> if truthy(old), do: :keep, else: {:set, ev(value, env)}
-        "??" -> if nullish?(old), do: {:set, ev(value, env)}, else: :keep
+        "&&" -> if truthy(old), do: {:set, ev_named(value, env, target)}, else: :keep
+        "||" -> if truthy(old), do: :keep, else: {:set, ev_named(value, env, target)}
+        "??" -> if nullish?(old), do: {:set, ev_named(value, env, target)}, else: :keep
         _ -> {:set, binop(base, old, ev(value, env))}
       end
 

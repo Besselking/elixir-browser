@@ -19787,8 +19787,13 @@ language/expressions/async-arrow-function/array-destructuring-param-strict-body.
 language/expressions/async-arrow-function/arrow-returns-promise.js
 language/expressions/async-arrow-function/async-lineterminator-identifier-throws.js
 language/expressions/async-arrow-function/await-as-binding-identifier-escaped.js
+language/expressions/async-arrow-function/await-as-binding-identifier.js
 language/expressions/async-arrow-function/await-as-identifier-reference-escaped.js
+language/expressions/async-arrow-function/await-as-identifier-reference.js
 language/expressions/async-arrow-function/await-as-label-identifier-escaped.js
+language/expressions/async-arrow-function/await-as-label-identifier.js
+language/expressions/async-arrow-function/await-as-param-nested-arrow-parameter-position.js
+language/expressions/async-arrow-function/await-as-param-rest-nested-arrow-parameter-position.js
 language/expressions/async-arrow-function/dflt-params-abrupt.js
 language/expressions/async-arrow-function/dflt-params-arg-val-not-undefined.js
 language/expressions/async-arrow-function/dflt-params-arg-val-undefined.js
@@ -19800,6 +19805,8 @@ language/expressions/async-arrow-function/dflt-params-rest.js
 language/expressions/async-arrow-function/dflt-params-trailing-comma.js
 language/expressions/async-arrow-function/early-errors-arrow-NSPL-with-USD.js
 language/expressions/async-arrow-function/early-errors-arrow-arguments-in-formal-parameters.js
+language/expressions/async-arrow-function/early-errors-arrow-await-in-formals-default.js
+language/expressions/async-arrow-function/early-errors-arrow-await-in-formals.js
 language/expressions/async-arrow-function/early-errors-arrow-body-contains-super-call.js
 language/expressions/async-arrow-function/early-errors-arrow-body-contains-super-property.js
 language/expressions/async-arrow-function/early-errors-arrow-duplicate-parameters.js
@@ -26883,6 +26890,9 @@ language/expressions/logical-assignment/left-hand-side-private-reference-readonl
 language/expressions/logical-assignment/lgcl-and-arguments-strict.js
 language/expressions/logical-assignment/lgcl-and-assignment-operator-bigint.js
 language/expressions/logical-assignment/lgcl-and-assignment-operator-lhs-before-rhs.js
+language/expressions/logical-assignment/lgcl-and-assignment-operator-namedevaluation-arrow-function.js
+language/expressions/logical-assignment/lgcl-and-assignment-operator-namedevaluation-class-expression.js
+language/expressions/logical-assignment/lgcl-and-assignment-operator-namedevaluation-function.js
 language/expressions/logical-assignment/lgcl-and-assignment-operator-no-set-put.js
 language/expressions/logical-assignment/lgcl-and-assignment-operator-no-set.js
 language/expressions/logical-assignment/lgcl-and-assignment-operator-non-extensible.js
@@ -26899,6 +26909,9 @@ language/expressions/logical-assignment/lgcl-and-whitespace.js
 language/expressions/logical-assignment/lgcl-nullish-arguments-strict.js
 language/expressions/logical-assignment/lgcl-nullish-assignment-operator-bigint.js
 language/expressions/logical-assignment/lgcl-nullish-assignment-operator-lhs-before-rhs.js
+language/expressions/logical-assignment/lgcl-nullish-assignment-operator-namedevaluation-arrow-function.js
+language/expressions/logical-assignment/lgcl-nullish-assignment-operator-namedevaluation-class-expression.js
+language/expressions/logical-assignment/lgcl-nullish-assignment-operator-namedevaluation-function.js
 language/expressions/logical-assignment/lgcl-nullish-assignment-operator-no-set-put.js
 language/expressions/logical-assignment/lgcl-nullish-assignment-operator-no-set.js
 language/expressions/logical-assignment/lgcl-nullish-assignment-operator-non-extensible.js
@@ -26915,6 +26928,9 @@ language/expressions/logical-assignment/lgcl-nullish-whitespace.js
 language/expressions/logical-assignment/lgcl-or-arguments-strict.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-bigint.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-lhs-before-rhs.js
+language/expressions/logical-assignment/lgcl-or-assignment-operator-namedevaluation-arrow-function.js
+language/expressions/logical-assignment/lgcl-or-assignment-operator-namedevaluation-class-expression.js
+language/expressions/logical-assignment/lgcl-or-assignment-operator-namedevaluation-function.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-no-set-put.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-no-set.js
 language/expressions/logical-assignment/lgcl-or-assignment-operator-non-extensible.js
