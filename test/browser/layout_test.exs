@@ -4578,6 +4578,26 @@ defmodule Browser.LayoutTest do
       assert texts == ["AB", "CD", "Ab", "\"Cd\"", "Ef"]
     end
 
+    test "word-spacing widens every space between words and inside them" do
+      items = ts_items("<p style=\"word-spacing:5px\">ab cd</p>")
+      ab = Enum.find(items, &(&1[:text] == "ab"))
+      cd = Enum.find(items, &(&1[:text] == "cd"))
+      plain = ts_items("<p>ab cd</p>")
+
+      assert cd.x - ab.x ==
+               Enum.find(plain, &(&1[:text] == "cd")).x - Enum.find(plain, &(&1[:text] == "ab")).x +
+                 5
+
+      assert ab.wsp == 5.0
+
+      [pre] =
+        ts_items("<pre style=\"word-spacing:5px\">a b</pre>")
+        |> Enum.filter(&(&1[:text] == "a b"))
+
+      [pre_plain] = ts_items("<pre>a b</pre>") |> Enum.filter(&(&1[:text] == "a b"))
+      assert pre.w == pre_plain.w + 5
+    end
+
     test "capitalize leaves the rest of a word begun before an inline box" do
       items = ts_items("<p>T<span style=\"text-transform:capitalize\">his text</span></p>")
       texts = for %{type: :text, text: t} <- items, do: t

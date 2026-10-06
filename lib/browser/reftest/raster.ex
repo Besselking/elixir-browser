@@ -144,21 +144,21 @@ defmodule Browser.Reftest.Raster do
     {gw, gh, gy} = glyph_box(t, size, ahem?, adv)
     ls = Map.get(t, :ls, 0)
 
-    {grid, _} =
+    wsp = Map.get(t, :wsp, 0)
+
+    {grid, advance_x} =
       t.text
       |> String.graphemes()
-      |> Enum.reduce({grid, 0}, fn ch, {g, i} ->
-        x = t.x + round(i * (adv * size + ls))
-
+      |> Enum.reduce({grid, 0.0}, fn ch, {g, off} ->
         g =
           if String.trim(ch) == "",
             do: g,
-            else: fill(g, x, gy, gw, gh, glyph_color(t.color, ch, t, ahem?), clip)
+            else: fill(g, t.x + round(off), gy, gw, gh, glyph_color(t.color, ch, t, ahem?), clip)
 
-        {g, i + 1}
+        {g, off + adv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
-    width = round(String.length(t.text) * (adv * size + ls))
+    width = round(advance_x)
 
     grid =
       if Map.get(t, :underline),

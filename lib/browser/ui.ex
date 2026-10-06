@@ -743,37 +743,49 @@ defmodule Browser.UI do
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
   # selected text: a translucent wash over it
-  # text with `letter-spacing` goes down a character at a time, each after the width of the
-  # ones before it and the spacing
-  defp draw_gc_text(gc, %{ls: ls} = item, y) when ls != 0 do
+  # text with `letter-spacing` or `word-spacing` goes down a character at a time, each after
+  # the width of the ones before it and the spacing
+  defp draw_gc_text(gc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _, _, _} = :wxGraphicsContext.getTextExtent(gc, prefix)
+        :wxGraphicsContext.drawText(gc, ch, item.x + w + extra, y)
+      end)
+    else
+      :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    end
+  end
+
+  defp draw_dc_text(dc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _} = :wxDC.getTextExtent(dc, prefix)
+        :wxDC.drawText(dc, ch, {round(item.x + w + extra), y})
+      end)
+    else
+      :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    end
+  end
+
+  defp spread?(item) do
+    Map.get(item, :ls, 0) != 0 or
+      (Map.get(item, :wsp, 0) != 0 and String.contains?(item.text, [" ", "\u00A0"]))
+  end
+
+  # calls `fun.(char, text_before_it, spacing_before_it)` for each character of the item
+  defp each_char(item, fun) do
+    ls = Map.get(item, :ls, 0)
+    wsp = Map.get(item, :wsp, 0)
     chars = String.graphemes(item.text)
 
     chars
     |> Enum.with_index()
-    |> Enum.each(fn {ch, i} ->
-      prefix = chars |> Enum.take(i) |> Enum.join() |> String.to_charlist()
-      {w, _, _, _} = :wxGraphicsContext.getTextExtent(gc, prefix)
-      :wxGraphicsContext.drawText(gc, String.to_charlist(ch), item.x + w + i * ls, y)
+    |> Enum.reduce({[], 0}, fn {ch, i}, {before, spaces} ->
+      prefix = before |> Enum.reverse() |> Enum.join() |> String.to_charlist()
+      fun.(String.to_charlist(ch), prefix, i * ls + spaces * wsp)
+      {[ch | before], spaces + if(ch in [" ", "\u00A0"], do: 1, else: 0)}
     end)
   end
-
-  defp draw_gc_text(gc, item, y),
-    do: :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
-
-  defp draw_dc_text(dc, %{ls: ls} = item, y) when ls != 0 do
-    chars = String.graphemes(item.text)
-
-    chars
-    |> Enum.with_index()
-    |> Enum.each(fn {ch, i} ->
-      prefix = chars |> Enum.take(i) |> Enum.join() |> String.to_charlist()
-      {w, _} = :wxDC.getTextExtent(dc, prefix)
-      :wxDC.drawText(dc, String.to_charlist(ch), {round(item.x + w + i * ls), y})
-    end)
-  end
-
-  defp draw_dc_text(dc, item, y),
-    do: :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
 
   defp draw(dc, %{type: :selection} = item, y, _scroll) do
     gc = new_gc(dc)
