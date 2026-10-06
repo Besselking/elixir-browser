@@ -1187,6 +1187,30 @@ defmodule Browser.Layout do
 
   defp blank?({:text, t}), do: String.trim(t) == ""
 
+  # `aspect-ratio: 16 / 9`, `1`, `auto 3 / 2` (a box with no natural ratio uses the given one):
+  # width over height, or nil
+  defp aspect_ratio(nil), do: nil
+
+  defp aspect_ratio(v) when is_binary(v) do
+    case v |> String.trim() |> String.replace_prefix("auto", "") |> String.split("/") do
+      [w] -> ratio_of(w, "1")
+      [w, h] -> ratio_of(w, h)
+      _ -> nil
+    end
+  end
+
+  defp aspect_ratio(_), do: nil
+
+  defp ratio_of(w, h) do
+    with {w, ""} <- w |> String.trim() |> Float.parse(),
+         {h, ""} <- h |> String.trim() |> Float.parse(),
+         true <- w > 0 and h > 0 do
+      w / h
+    else
+      _ -> nil
+    end
+  end
+
   # Boxes whose geometry must be resolved at placement: backgrounds, borders,
   # explicit widths/heights, `auto` margins, clipping and positioned boxes.
   defp box_spec(tag, c, box, style) do
@@ -1216,6 +1240,7 @@ defmodule Browser.Layout do
       nid: style.nid,
       h: num(c["height"]),
       hpct: pct_of(c["height"]),
+      ratio: aspect_ratio(c["aspect-ratio"]),
       root: tag == "html",
       min: num(c["min-height"]),
       max: num(c["max-height"]),
@@ -1234,7 +1259,7 @@ defmodule Browser.Layout do
 
     needed? =
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
-        spec.min ||
+        spec.min || spec.ratio ||
         spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
@@ -2722,7 +2747,7 @@ defmodule Browser.Layout do
     {fl, fr} = if o.clip, do: float_offsets(st, st.y, st.y + max(o.h || 1, 1)), else: {0, 0}
     beside = avail - fl - fr
 
-    cw = to_content.(o.width) || max(beside - ml0 - mr0 - hpad, 0)
+    cw = to_content.(o.width) || ratio_width(o, hpad) || max(beside - ml0 - mr0 - hpad, 0)
     cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
     cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
     box_w = hpad + cw
@@ -2740,6 +2765,12 @@ defmodule Browser.Layout do
       do: place_box(%{st | y: below}, ref, o),
       else: open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free})
   end
+
+  # a box with a height and an aspect ratio takes its width from them when it has none
+  defp ratio_width(%{ratio: r, h: h} = o, hpad) when is_number(r) and is_number(h),
+    do: round(if(o.sizing == :border, do: max(h * r - hpad, 0), else: h * r))
+
+  defp ratio_width(_, _), do: nil
 
   defp open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free}) do
     {bt, br, _bb, bl} = o.bw
@@ -2815,6 +2846,22 @@ defmodule Browser.Layout do
   defp box_mr(%{mr: mr}) when is_number(mr), do: max(mr, 0)
   defp box_mr(_), do: 0
 
+  # without a height, an aspect ratio gives one from the width; content that is taller keeps
+  # its room unless the box clips it
+  defp ratio_height(%{ratio: r} = o, box, content, extra) when is_number(r) do
+    {_, br, _, bl} = o.bw
+    border_h = box.w / r
+
+    h =
+      if o.sizing == :border,
+        do: max(border_h - extra, 0),
+        else: max(box.w - bl - br - o.pl - o.pr, 0) / r
+
+    if o.clip, do: h, else: max(h, content)
+  end
+
+  defp ratio_height(_, _, content, _), do: content
+
   defp finish_box(st, %{o: o} = box) do
     {bt, br, bb, bl} = o.bw
     natural = st.y - box.top
@@ -2824,7 +2871,7 @@ defmodule Browser.Layout do
     # height properties size the content box unless box-sizing is border-box
     inner = fn v -> if o.sizing == :border, do: max(v - extra, 0), else: v end
 
-    used = if o.h, do: inner.(o.h), else: content
+    used = if o.h, do: inner.(o.h), else: ratio_height(o, box, content, extra)
     used = if o.max, do: min(used, inner.(o.max)), else: used
     used = if o.min, do: max(used, inner.(o.min)), else: used
     used = round(used)
