@@ -2315,7 +2315,19 @@ defmodule Browser.JS.Interp do
   def run_program({:program, stmts}, script? \\ false) do
     :erlang.put(:js_last, :undefined)
     scope = global()
-    if script?, do: declare_globals(stmts)
+
+    if script? do
+      declare_globals(stmts)
+      g = deref(scope)
+
+      vars =
+        if match?([{:expr, {:str, "use strict"}} | _], stmts),
+          do: Map.put(g.vars, :strict, true),
+          else: Map.delete(g.vars, :strict)
+
+      store(scope, %{g | vars: vars})
+    end
+
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
@@ -2726,6 +2738,10 @@ defmodule Browser.JS.Interp do
         {:js_error, v} when handler != nil ->
           scope = new_scope(env)
           if param, do: bind(param, v, scope, :let)
+
+          with {:id, pname} <- param,
+               do: declare(scope, :catch_param, pname)
+
           exec(handler, scope)
       end
     after
@@ -3144,9 +3160,25 @@ defmodule Browser.JS.Interp do
       # a declared local binding can not be deleted
       {:var, sc} ->
         cond do
-          deref(sc).parent != nil -> false
-          global_fixed?(name) or global_lexical?(name) -> false
-          true -> Browser.JS.Global.host_delete(:global, name)
+          eval_declared?(sc, name) ->
+            st = deref(sc)
+
+            store(sc, %{
+              st
+              | vars: Map.delete(st.vars, name),
+                consts: MapSet.delete(st.consts, name)
+            })
+
+            true
+
+          deref(sc).parent != nil ->
+            false
+
+          global_fixed?(name) or global_lexical?(name) ->
+            false
+
+          true ->
+            Browser.JS.Global.host_delete(:global, name)
         end
 
       _ ->
@@ -3406,9 +3438,31 @@ defmodule Browser.JS.Interp do
          "arguments" in hoisted_names(stmts),
        do: throw_error("SyntaxError", "Identifier 'arguments' has already been declared")
 
-    vars = Enum.reduce(hoisted_names(stmts), s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
+    var_names = hoisted_names(stmts)
+    fun_decls = fundecls(stmts)
+    if not strict?, do: eval_declaration_checks(env, var_scope, var_names, fun_decls)
+
+    fresh =
+      for n <- var_names ++ Enum.map(fun_decls, &elem(&1, 0)), not Map.has_key?(s.vars, n), do: n
+
+    vars = Enum.reduce(var_names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
     store(var_scope, %{s | vars: vars})
-    for {name, fun} <- fundecls(stmts), do: declare(var_scope, name, make_fn(fun, lex, false))
+
+    # what a sloppy eval creates (rather than finds) can be deleted again
+    if not strict? and fresh != [] do
+      st = deref(var_scope)
+
+      store(
+        var_scope,
+        Map.put(
+          st,
+          :evalvars,
+          MapSet.union(Map.get(st, :evalvars, MapSet.new()), MapSet.new(fresh))
+        )
+      )
+    end
+
+    for {name, fun} <- fun_decls, do: declare(var_scope, name, make_fn(fun, lex, false))
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
     :erlang.put(:js_last, :undefined)
@@ -3416,6 +3470,59 @@ defmodule Browser.JS.Interp do
     result = Process.get(:js_last, :undefined)
     free_scope(lex, before)
     result
+  end
+
+  @doc false
+  # an indirect eval is global code: `var`s and functions go to the global scope (sloppy) and
+  # `let`/`const`/class stay in a scope of its own
+  def indirect_eval({:program, stmts}), do: run_eval(stmts, global(), false)
+
+  defp eval_declared?(scope, name),
+    do: MapSet.member?(Map.get(deref(scope), :evalvars, MapSet.new()), name)
+
+  # EvalDeclarationInstantiation: a `var` may not hoist over a lexical binding of a block it
+  # is written in (or a global `let`/`const`/class), and the global object has to be able to
+  # take the declared names
+  defp eval_declaration_checks(env, var_scope, var_names, fun_decls) do
+    names = var_names ++ Enum.map(fun_decls, &elem(&1, 0))
+
+    clash = fn n ->
+      throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+    end
+
+    lower =
+      Stream.iterate(env, &deref(&1).parent)
+      |> Enum.take_while(&(&1 != var_scope and &1 != nil))
+
+    for sc <- lower, n <- names do
+      st = deref(sc)
+
+      if Map.has_key?(st.vars, n) and Map.get(st.vars, :catch_param) != n, do: clash.(n)
+    end
+
+    if deref(var_scope).parent == nil do
+      for n <- names, global_lexical?(n), do: clash.(n)
+      g = Map.get(deref(var_scope).vars, :this)
+
+      for {n, _} <- fun_decls do
+        ok =
+          case Browser.JS.Props.own_state(g, n) do
+            nil -> Browser.JS.Props.extensible?(g)
+            {_, _, _, _, true} -> true
+            {:data, _, true, true, _} -> true
+            _ -> false
+          end
+
+        unless ok, do: throw_error("TypeError", "Cannot declare global function '#{n}'")
+      end
+
+      for n <- var_names do
+        if Browser.JS.Props.own_state(g, n) == nil and not Browser.JS.Props.extensible?(g),
+          do: throw_error("TypeError", "Cannot declare global variable '#{n}'")
+      end
+    end
+
+    :ok
   end
 
   # the nearest function scope (or the global one) from `env` outwards

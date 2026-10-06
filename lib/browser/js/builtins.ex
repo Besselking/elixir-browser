@@ -77,7 +77,7 @@ defmodule Browser.JS.Builtins do
   # indirect eval and the Function constructor: global code, so no `super` or `new.target`
   defp eval_source(src) do
     case Browser.JS.Parser.parse(src, eval: true) do
-      {:ok, program} -> Interp.run_program(program)
+      {:ok, program} -> Interp.indirect_eval(program)
       {:error, msg} -> throw_error("SyntaxError", msg)
     end
   end

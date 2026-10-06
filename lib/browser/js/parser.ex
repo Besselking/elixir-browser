@@ -563,7 +563,16 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, "for", _}, {:id, "await", _} | ts]) do
-    case for_statement(expect(ts, "(")) do
+    Process.put(:js_for_await, true)
+
+    result =
+      try do
+        for_statement(expect(ts, "("))
+      after
+        Process.put(:js_for_await, false)
+      end
+
+    case result do
       {{:forof, decl, pat, obj, body}, ts} -> {{:forawait, decl, pat, obj, body}, ts}
       _ -> throw({:syntax, "for await needs an of loop"})
     end
@@ -968,6 +977,7 @@ defmodule Browser.JS.Parser do
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
             {body, t} = loop_body(t)
+            if kw != "var", do: check_for_declaration(pat, body)
             {{if(of_in == "of", do: :forof, else: :forin), String.to_atom(kw), pat, obj, body}, t}
 
           _ ->
@@ -1007,7 +1017,7 @@ defmodule Browser.JS.Parser do
 
         case after_lhs do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
-            if lhs == {:import_meta}, do: throw({:syntax, "Invalid left-hand side in for loop"})
+            check_for_target(lhs, ts, of_in)
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
             {body, t} = loop_body(t)
@@ -1018,6 +1028,52 @@ defmodule Browser.JS.Parser do
             for_rest({:expr, e}, t)
         end
     end
+  end
+
+  # early errors of `for (let/const <pattern> of/in ...) body`: a name bound twice, `let` as a
+  # name, or a name that the body also declares with `var`
+  defp check_for_declaration(pat, body) do
+    names = Interp.pattern_names(pat, [])
+
+    if length(names) != length(Enum.uniq(names)) or "let" in names or
+         Enum.any?(names, &(&1 in Interp.var_names([body], []))),
+       do: throw({:syntax, "redeclaration of a lexical name in a for loop head"})
+  end
+
+  # the left-hand side of `for (lhs of/in ...)`: something that can be assigned to. A pattern
+  # was already taken by `destructuring_head`, so an array or object literal here is invalid.
+  defp check_for_target(lhs, ts, of_in) do
+    case lhs do
+      {:import_meta} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag, _} when tag in [:array, :object, :num, :str, :bigint, :regex, :template] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag, _, _} when tag in [:array, :object] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag} when tag in [:this, :super] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:lit, _} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:id, "async"} when of_in == "of" and not is_nil(ts) ->
+        if not Process.get(:js_for_await, false) and
+             match?([{:id, "async", _}, {:id, "of", _} | _], ts),
+           do: throw({:syntax, "for (async of ...) is not allowed"})
+
+      pat ->
+        # a pattern checks like a binding target in strict code
+        if strict?(), do: check_strict_targets(pat)
+    end
+  end
+
+  defp check_strict_targets(pat) do
+    for n <- Interp.pattern_names(pat, []), do: check_strict_name(n)
+  rescue
+    _ -> :ok
   end
 
   # `for (using x of y) body` takes each value into a fresh name and declares `x` from it in
