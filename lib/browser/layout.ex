@@ -2762,6 +2762,7 @@ defmodule Browser.Layout do
     x = st.margin + left
 
     id = make_ref()
+    own_free = if own_width?(o.width) || o.maxw, do: max(rest - mr0, 0), else: 0
 
     box = %{
       id: id,
@@ -2779,7 +2780,8 @@ defmodule Browser.Layout do
       seq: :erlang.unique_integer([:monotonic]),
       pcbh: st.cbh,
       pcbw: st.cbw,
-      saved: {st.left, st.right, st.free}
+      saved: {st.left, st.right, st.free},
+      need: x + bl + o.pl + st.right + fr + rest + br + o.pr - st.free - own_free
     }
 
     st = %{
@@ -2792,7 +2794,7 @@ defmodule Browser.Layout do
         left: left + bl + o.pl,
         right: st.right + fr + rest + br + o.pr,
         # room beside a box with a width is not part of what it needs
-        free: st.free + if(own_width?(o.width) || o.maxw, do: max(rest - mr0, 0), else: 0),
+        free: st.free + own_free,
         y: st.y + bt + o.pt
     }
 
@@ -2839,6 +2841,12 @@ defmodule Browser.Layout do
       if (own_width?(o.width) or o.maxw != nil) and fixed_width?(box),
         do: limit_new_items(%{st | ext: max(st.ext, box.x + box.w + box_mr(o))}, box),
         else: st
+
+    # an empty box is as wide as the insets around its content, for shrink-to-fit
+    st =
+      if own_width?(o.width) or o.maxw != nil,
+        do: st,
+        else: %{st | ext: max(st.ext, box.need)}
 
     st = place_deferred(st, box, height)
 
