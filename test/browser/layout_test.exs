@@ -4755,4 +4755,21 @@ defmodule Browser.LayoutTest do
       assert {first.w, first.hang} == {24, 8}
     end
   end
+
+  describe "width: min-content and max-content" do
+    defp row_count(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq() |> length()
+    end
+
+    test "min-content is the widest word, max-content the whole line" do
+      assert row_count("<div style=\"width:min-content\">aa bbbb cc</div>") == 3
+      assert row_count("<div style=\"width:max-content\">aa bbbb cc</div>") == 1
+    end
+
+    test "words glued across inline boxes stay together in min-content" do
+      assert row_count("<div style=\"width:min-content\">a<b>b</b> cc</div>") == 2
+    end
+  end
 end

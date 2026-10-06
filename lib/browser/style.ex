@@ -1398,6 +1398,9 @@ defmodule Browser.Style do
   defp typed(prop, "auto", _env, _pc) when prop in ["width", "height"], do: {:ok, :auto}
 
   # fit-content: as wide as the content wants (a block that sizes itself like an inline-block)
+  defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
+  defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
+
   defp typed(prop, v, _env, _pc)
        when prop in ["width", "height", "max-height"] and
               v in [

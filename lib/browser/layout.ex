@@ -590,7 +590,9 @@ defmodule Browser.Layout do
           forced -> forced
         end
 
-      fit? = c["width"] == :fit and kind in [:block, :flex, :grid]
+      fit? = c["width"] in [:fit, :minc, :maxc] and kind in [:block, :flex, :grid]
+      # laying a flex or grid container out at width 1 does not give its min-content width
+      c = if c["width"] == :minc and kind != :block, do: Map.put(c, "width", :fit), else: c
       table? = kind == :table and force != :inline_inner
       float? = force == nil and c["float"] in ["left", "right"]
 
@@ -933,10 +935,13 @@ defmodule Browser.Layout do
     spec = %{
       key: make_ref(),
       width: dim(c["width"]),
+      # `min-content` / `max-content`: the narrowest / widest the content can be
+      sizing: if(c["width"] in [:minc, :maxc], do: c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
       extra: if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br),
       mextra: ml + mr,
+      mr: mr,
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
       table?: table?,
@@ -1239,7 +1244,7 @@ defmodule Browser.Layout do
 
   # `auto` is the same as no width/height for everything but images
   defp dim(:auto), do: nil
-  defp dim(:fit), do: nil
+  defp dim(w) when w in [:fit, :minc, :maxc], do: nil
   defp dim(v), do: v
 
   defp num(v) when is_number(v), do: v
@@ -3558,14 +3563,24 @@ defmodule Browser.Layout do
     width =
       case resolve(spec.width, avail) do
         nil ->
-          measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
-          min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
+          content_width(st, sub, spec, avail)
 
         w ->
           w + spec.extra + spec.mextra
       end
 
     clamp_width(width, spec, avail)
+  end
+
+  defp content_width(st, sub, %{sizing: :minc} = spec, _avail),
+    do: min_extent(st, sub, Map.get(spec, :key), Map.get(spec, :mr, 0))
+
+  defp content_width(st, sub, %{sizing: :maxc} = spec, _avail),
+    do: shrink_extent(st, sub, @unbounded, Map.get(spec, :key))
+
+  defp content_width(st, sub, spec, avail) do
+    measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
+    min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
   end
 
   # natural width of the content when wrapped at `width`: lines are measured
@@ -3584,43 +3599,57 @@ defmodule Browser.Layout do
   # every line. Content made of words, blocks and their insets only needs no layout for that:
   # it is as wide as its widest word plus the insets around it. Anything else (boxes, images,
   # floats, inline boxes, preformatted words) is laid out at width 1.
-  defp min_extent(st, sub, key) do
+  defp min_extent(st, sub, key, right_margin \\ 0) do
     memo({:min_extent, key || :erlang.phash2(sub)}, fn ->
       case min_words(sub, st.measure, 0, 0, [], 0) do
-        :layout -> shrink_extent(st, sub, 1, key)
+        :layout -> shrink_extent(st, sub, 1, key) + right_margin
         ext -> ext
       end
     end)
   end
 
-  defp min_words([], _measure, _l, _r, _stack, ext), do: ext
+  # `cur` is the width of the unbreakable run the words so far end in: a word glued to the
+  # one before it (`a<b>b</b>`) extends it
+  defp min_words(ops, measure, l, r, stack, ext, cur \\ 0)
 
-  defp min_words([op | rest], measure, l, r, stack, ext) do
+  defp min_words([], _measure, _l, _r, _stack, ext, _cur), do: ext
+
+  defp min_words([op | rest], measure, l, r, stack, ext, cur) do
     case op do
+      {:word, _, %{wrap_chars: mode}} when mode in [:all, :anywhere] ->
+        :layout
+
+      {:word, _, %{wrap_chars: mode}, _} when mode in [:all, :anywhere] ->
+        :layout
+
       {:word, text, style} ->
-        text = String.trim_trailing(text, "\u3000")
-        min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
+        min_run(rest, measure, l, r, stack, ext, measure.(trim_hang(text), style))
 
       {:word, text, style, :glue} ->
-        min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
+        min_run(rest, measure, l, r, stack, ext, cur + measure.(trim_hang(text), style))
 
       {:inset, dl, dr} ->
-        min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], ext)
+        min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], ext, cur)
 
       {:inset_end} when stack != [] ->
         [{l, r} | stack] = stack
-        min_words(rest, measure, l, r, stack, ext)
+        min_words(rest, measure, l, r, stack, ext, cur)
 
       {tag, _} when tag in [:space, :gap, :pad] ->
-        min_words(rest, measure, l, r, stack, ext)
+        min_words(rest, measure, l, r, stack, ext, 0)
 
       {:flush} ->
-        min_words(rest, measure, l, r, stack, ext)
+        min_words(rest, measure, l, r, stack, ext, 0)
 
       _ ->
         :layout
     end
   end
+
+  defp min_run(rest, measure, l, r, stack, ext, cur),
+    do: min_words(rest, measure, l, r, stack, max(ext, l + r + cur), cur)
+
+  defp trim_hang(text), do: String.trim_trailing(text, "\u3000")
 
   # Nested tables measure and lay out the same cell content again and again (and every level
   # multiplies the passes), so results are remembered for the duration of one layout. The key
@@ -3834,8 +3863,21 @@ defmodule Browser.Layout do
       end)
       |> length()
 
+    fit = if Map.get(style, :wrap_chars) == :all, do: keep_punctuation(chars, fit), else: fit
     {chars |> Enum.take(fit) |> Enum.join(), chars |> Enum.drop(fit) |> Enum.join()}
   end
+
+  # `break-all` does not break before punctuation that cannot start a line: the character before
+  # it goes to the next line too, or when that leaves nothing, the punctuation stays
+  defp keep_punctuation(chars, fit) do
+    cond do
+      fit >= length(chars) or not no_start?(Enum.at(chars, fit)) -> fit
+      fit > 1 -> keep_punctuation(chars, fit - 1)
+      true -> keep_punctuation(chars, fit + 1)
+    end
+  end
+
+  defp no_start?(ch), do: String.contains?(".,;:!?)]}%\u3001\u3002\uFF0C\uFF0E\u2026", ch)
 
   defp word_split({"", rest}, style, st, glue, line_left) do
     st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
@@ -4989,7 +5031,7 @@ defmodule Browser.Layout do
       align: c["align-self"] || "auto",
       order: flex_number(c["order"], 0.0),
       auto_height?: c["height"] in [nil, :auto],
-      fit?: c["width"] == :fit
+      fit?: c["width"] in [:fit, :minc, :maxc]
     }
   end
 
