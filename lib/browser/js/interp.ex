@@ -1665,12 +1665,57 @@ defmodule Browser.JS.Interp do
     bind_params(c.params, args, scope)
 
     if c.mode != :arrow_expr do
-      hoist_vars(c.body, scope)
-      hoist_functions(c.body, scope)
+      hoist_into_body(scope, c, hoisted_names(c.body), fundecls(c.body))
+    else
+      scope
     end
-
-    scope
   end
+
+  # A parameter list with initialisers closes over a scope of its own: the body's `var`s and
+  # functions live in a second scope that starts from the parameters' values. Without
+  # initialisers one scope serves both.
+  defp hoist_into_body(scope, c, names, funs) do
+    if names == [] and funs == [] do
+      scope
+    else
+      if param_exprs?(c.params) do
+        s = deref(scope)
+
+        vars =
+          Map.new(names, fn n ->
+            case s.vars do
+              %{^n => v} -> {n, v}
+              _ -> {n, :undefined}
+            end
+          end)
+
+        body =
+          alloc(%{
+            scope: true,
+            fnscope: true,
+            fid: Map.get(c, :fid),
+            vars: strict_marks(c, vars),
+            consts: MapSet.new(),
+            parent: scope
+          })
+
+        apply_hoist(body, [], funs)
+        body
+      else
+        apply_hoist(scope, names, funs)
+        scope
+      end
+    end
+  end
+
+  defp param_exprs?(params) do
+    not Enum.all?(params, &match?({:id, _}, &1)) and has_default?(params)
+  end
+
+  defp has_default?({:default, _, _}), do: true
+  defp has_default?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_default?()
+  defp has_default?(l) when is_list(l), do: Enum.any?(l, &has_default?/1)
+  defp has_default?(_), do: false
 
   # Drops a scope from the heap once its code has run, unless a closure was created since
   # `fns` was read (`make_fn` counts them): only a closure can keep a scope alive past its code.
@@ -1736,10 +1781,10 @@ defmodule Browser.JS.Interp do
                 _ -> {hoisted_names(c.body), fundecls(c.body)}
               end
 
-            apply_hoist(scope, names, funs)
+            body_scope = hoist_into_body(scope, c, names, funs)
 
             try do
-              exec_list(c.body, scope)
+              exec_list(c.body, body_scope)
               :undefined
             catch
               {:js_return, v} -> v
