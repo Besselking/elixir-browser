@@ -2764,6 +2764,7 @@ defmodule Browser.JS.Interp do
 
   def ev({:super_member, key}, env) do
     {home, this} = Browser.JS.Classes.super_base(env)
+    if home == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
     get_with_receiver(home, ev_key(key, env), this)
   end
 
@@ -2966,6 +2967,15 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:binary, op, l, r}, env), do: binop(op, ev(l, env), ev(r, env))
+
+  def ev({:update, op, prefix?, {:super_member, k}}, env),
+    do: super_update(op, prefix?, k, env, false)
+
+  def ev({:supdate, op, prefix?, {:super_member, k}}, env),
+    do: super_update(op, prefix?, k, env, true)
+
+  def ev({:assign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, false)
+  def ev({:sassign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, true)
 
   def ev({:update, op, prefix?, target}, env) do
     old = numeric(ev(target, env))
@@ -3171,6 +3181,60 @@ defmodule Browser.JS.Interp do
 
   defp method_home(_, _), do: :ok
 
+  defp super_assign(k, value, env, strict?) do
+    {base, this} = Browser.JS.Classes.super_base(env)
+    key = to_key(ev_key(k, env))
+    v = ev(value, env)
+    super_put(base, key, v, this, strict?)
+  end
+
+  defp super_update(op, prefix?, k, env, strict?) do
+    {base, this} = Browser.JS.Classes.super_base(env)
+    key = to_key(ev_key(k, env))
+    old = numeric(get_with_receiver(base, key, this))
+
+    new =
+      case old do
+        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+      end
+
+    super_put(base, key, new, this, strict?)
+    if prefix?, do: new, else: old
+  end
+
+  # [[Set]] on the super base with `this` as the receiver: a setter on the chain runs with
+  # `this`; a data property (or none) is written onto the receiver
+  defp super_put(base, key, v, this, strict?) do
+    if strict?, do: :erlang.put(:js_put_failed, false)
+    super_set(base, key, v, this)
+
+    if strict? and :erlang.get(:js_put_failed) == true do
+      :erlang.put(:js_put_failed, false)
+      throw_error("TypeError", "Cannot assign to read only property '#{to_str(key)}'")
+    end
+
+    v
+  end
+
+  defp super_set({:obj, id} = o, key, v, this) do
+    case Browser.JS.Props.own_state(o, key) do
+      nil ->
+        super_set(deref(id).proto, key, v, this)
+
+      {:accessor, _, setter, _, _} ->
+        if function?(setter), do: call(setter, this, [v]), else: fail_put()
+
+      {:data, _, false, _, _} ->
+        fail_put()
+
+      {:data, _, _, _, _} ->
+        put(this, key, v)
+    end
+  end
+
+  defp super_set(_, key, v, this), do: put(this, key, v)
+
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
     {read, write} =
@@ -3208,6 +3272,13 @@ defmodule Browser.JS.Interp do
                    else: assign_var(env, name, v)
                end}
           end
+
+        {:super_member, k} ->
+          {base, this} = Browser.JS.Classes.super_base(env)
+          key = to_key(ev_key(k, env))
+
+          {fn -> get_with_receiver(base, key, this) end,
+           fn v -> super_put(base, key, v, this, strict?) end}
 
         {:member, o, k, _} ->
           ov = ev(o, env)

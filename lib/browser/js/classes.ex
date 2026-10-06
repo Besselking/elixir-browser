@@ -290,6 +290,13 @@ defmodule Browser.JS.Classes do
   def super_base(env) do
     with {:ok, {:obj, hid}} <- Interp.lookup_scoped(env, :home),
          {:ok, this} <- Interp.lookup_scoped(env, :this) do
+      if this == :uninit_this,
+        do:
+          throw_error(
+            "ReferenceError",
+            "Must call super constructor in derived class before accessing 'this'"
+          )
+
       parent = deref(hid).proto
       {parent || :null, this}
     else

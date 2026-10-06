@@ -78,6 +78,10 @@ defmodule Browser.JS.Parser do
 
         program = tokens |> statements()
 
+        if not eval? and
+             contains_node?(program, &(&1 == {:super} or match?({:super_member, _}, &1))),
+           do: throw({:syntax, "'super' keyword unexpected here"})
+
         if Enum.any?(program, &using_decl?/1),
           do: throw({:syntax, "using declaration at the top level of a script"})
 
@@ -1708,6 +1712,7 @@ defmodule Browser.JS.Parser do
 
   defp assignable?({:id, n}), do: not (strict?() and n in ["eval", "arguments"])
   defp assignable?({:member, _, _, false}), do: true
+  defp assignable?({:super_member, _}), do: true
   defp assignable?(_), do: false
 
   defp conditional(ts) do
