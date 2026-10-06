@@ -187,7 +187,7 @@ defmodule Browser.Reftest.Raster do
   defp glyph_color(color, _ch, _t, true), do: color
 
   defp glyph_color({r, g, b}, ch, t, false) do
-    <<code::utf8>> = ch
+    <<code::utf8, _::binary>> = ch
 
     salt =
       code * 31 + if(Map.get(t, :bold), do: 7, else: 0) + if(Map.get(t, :italic), do: 13, else: 0)
