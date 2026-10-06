@@ -19467,6 +19467,9 @@ language/expressions/assignment/target-newtarget.js
 language/expressions/assignment/target-null.js
 language/expressions/assignment/target-number.js
 language/expressions/assignment/target-string.js
+language/expressions/assignment/target-super-computed-reference-null.js
+language/expressions/assignment/target-super-computed-reference.js
+language/expressions/assignment/target-super-identifier-reference-null.js
 language/expressions/assignment/white-space.js
 language/expressions/assignmenttargettype/direct-additiveexpression-minus-multiplicativeexpression-0.js
 language/expressions/assignmenttargettype/direct-additiveexpression-minus-multiplicativeexpression-1.js
@@ -27102,6 +27105,8 @@ language/expressions/new/S11.2.2_A4_T4.js
 language/expressions/new/S11.2.2_A4_T5.js
 language/expressions/new/ctorExpr-fn-ref-before-args-eval-fn-wrapup.js
 language/expressions/new/ctorExpr-fn-ref-before-args-eval.js
+language/expressions/new/ctorExpr-isCtor-after-args-eval-fn-wrapup.js
+language/expressions/new/ctorExpr-isCtor-after-args-eval.js
 language/expressions/new/spread-err-mult-err-expr-throws.js
 language/expressions/new/spread-err-mult-err-iter-get-value.js
 language/expressions/new/spread-err-mult-err-itr-get-call.js
@@ -28604,6 +28609,7 @@ language/expressions/super/call-construct-error.js
 language/expressions/super/call-construct-invocation.js
 language/expressions/super/call-expr-value.js
 language/expressions/super/call-poisoned-underscore-proto.js
+language/expressions/super/call-proto-not-ctor.js
 language/expressions/super/call-spread-err-mult-err-expr-throws.js
 language/expressions/super/call-spread-err-mult-err-iter-get-value.js
 language/expressions/super/call-spread-err-mult-err-itr-get-call.js

@@ -3144,8 +3144,13 @@ defmodule Browser.JS.Interp do
 
   def ev({:new, callee, args}, env) do
     f = ev(callee, env)
-    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
-    construct(f, eval_list(args, env))
+    # the arguments are evaluated before the callee is checked
+    argv = eval_list(args, env)
+
+    unless function?(f) and constructor?(f),
+      do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+
+    construct(f, argv)
   end
 
   # ── direct eval ────────────────────────────────────────────
@@ -3248,8 +3253,13 @@ defmodule Browser.JS.Interp do
 
   defp super_assign(k, value, env, strict?) do
     {base, this} = Browser.JS.Classes.super_base(env)
-    key = to_key(ev_key(k, env))
+    raw = ev_key(k, env)
     v = ev(value, env)
+    key = to_key(raw)
+
+    if base == :null,
+      do: throw_error("TypeError", "Cannot set properties of null (setting '#{to_str(key)}')")
+
     super_put(base, key, v, this, strict?)
   end
 
