@@ -699,9 +699,13 @@ defmodule Browser.JS.Props do
 
     exists? = Map.has_key?(o.items, i)
 
-    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
-      do: define_element_accessor(id, o, key, i, desc, exists?),
-      else: define_element_data(id, o, key, i, desc, exists?)
+    # a generic descriptor (no value, writable, get or set) keeps an accessor an accessor
+    generic? = not (Map.has_key?(desc, :value) or Map.has_key?(desc, :writable))
+
+    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or
+         (generic? and match?({:accessor, _, _}, o.items[i])),
+       do: define_element_accessor(id, o, key, i, desc, exists?),
+       else: define_element_data(id, o, key, i, desc, exists?)
   end
 
   defp define_element_accessor(id, o, key, i, desc, exists?) do
