@@ -1467,6 +1467,10 @@ defmodule Browser.JS.Interp do
   end
 
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
+  @doc false
+  # the iteration protocol itself, with no shortcut for arrays (a patched iterator is seen)
+  def iterate_protocol_list(v), do: iterate_protocol(v)
+
   defp iterate_protocol(v) do
     case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
       f when is_tuple(f) ->

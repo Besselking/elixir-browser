@@ -1376,7 +1376,7 @@ defmodule Browser.JS.TypedArrays do
 
           f ->
             if function?(f),
-              do: iterate(src),
+              do: Interp.iterate_protocol_list(src),
               else: throw_error("TypeError", "Symbol.iterator is not a function")
         end
 
@@ -1703,7 +1703,19 @@ defmodule Browser.JS.TypedArrays do
     def_fn(p, "sort", fn this, args ->
       d = data!(this)
       sorted = sorted_values(d, arg(args, 0))
-      if sorted != [], do: put_all(d, 0, sorted)
+      {:obj, tid} = this
+      %{host: {__MODULE__, d0}} = deref(tid)
+
+      # the comparator may have detached or shrunk the buffer: write back what still exists
+      case eff(d0) do
+        {off, len} when sorted != [] and len > 0 ->
+          {:ta, kind, bid, _, _} = d0
+          put_all({:ta, kind, bid, off, len}, 0, Enum.take(sorted, len))
+
+        _ ->
+          :ok
+      end
+
       this
     end)
 
