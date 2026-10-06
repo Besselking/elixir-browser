@@ -24082,6 +24082,7 @@ language/expressions/class/elements/static-as-valid-static-field.js
 language/expressions/class/elements/static-comp-name-init-err-contains-arguments.js
 language/expressions/class/elements/static-comp-name-init-err-contains-super.js
 language/expressions/class/elements/static-field-anonymous-function-length.js
+language/expressions/class/elements/static-field-anonymous-function-name.js
 language/expressions/class/elements/static-field-declaration.js
 language/expressions/class/elements/static-field-init-this-inside-arrow-function.js
 language/expressions/class/elements/static-field-init-with-this.js
@@ -24454,6 +24455,8 @@ language/expressions/class/gen-method/yield-spread-arr-multiple.js
 language/expressions/class/gen-method/yield-spread-arr-single.js
 language/expressions/class/gen-method/yield-spread-obj.js
 language/expressions/class/getter-param-dflt.js
+language/expressions/class/heritage-arrow-function.js
+language/expressions/class/heritage-async-arrow-function.js
 language/expressions/class/ident-name-method-def-break-escaped.js
 language/expressions/class/ident-name-method-def-case-escaped.js
 language/expressions/class/ident-name-method-def-catch-escaped.js
@@ -31224,6 +31227,7 @@ language/statements/class/cptn-decl.js
 language/statements/class/definition/accessors.js
 language/statements/class/definition/basics.js
 language/statements/class/definition/class-method-returns-promise.js
+language/statements/class/definition/constructable-but-no-prototype.js
 language/statements/class/definition/constructor-property.js
 language/statements/class/definition/constructor-strict-by-default.js
 language/statements/class/definition/constructor.js
@@ -31237,10 +31241,15 @@ language/statements/class/definition/early-errors-class-method-duplicate-paramet
 language/statements/class/definition/early-errors-class-method-eval-in-formal-parameters.js
 language/statements/class/definition/early-errors-class-method-formals-body-duplicate.js
 language/statements/class/definition/early-errors-class-method-formals-contains-super-call.js
+language/statements/class/definition/fn-name-accessor-get.js
+language/statements/class/definition/fn-name-accessor-set.js
+language/statements/class/definition/fn-name-gen-method.js
+language/statements/class/definition/fn-name-method.js
 language/statements/class/definition/getters-non-configurable-err.js
 language/statements/class/definition/getters-prop-desc.js
 language/statements/class/definition/getters-restricted-ids.js
 language/statements/class/definition/implicit-constructor.js
+language/statements/class/definition/invalid-extends.js
 language/statements/class/definition/methods-async-super-call-body.js
 language/statements/class/definition/methods-async-super-call-param.js
 language/statements/class/definition/methods-gen-no-yield.js
@@ -31264,6 +31273,8 @@ language/statements/class/definition/methods-named-eval-arguments.js
 language/statements/class/definition/methods-restricted-properties.js
 language/statements/class/definition/methods.js
 language/statements/class/definition/numeric-property-names.js
+language/statements/class/definition/prototype-getter.js
+language/statements/class/definition/prototype-setter.js
 language/statements/class/definition/prototype-wiring.js
 language/statements/class/definition/setters-non-configurable-err.js
 language/statements/class/definition/setters-prop-desc.js
@@ -34337,6 +34348,7 @@ language/statements/class/elements/static-as-valid-static-field.js
 language/statements/class/elements/static-comp-name-init-err-contains-arguments.js
 language/statements/class/elements/static-comp-name-init-err-contains-super.js
 language/statements/class/elements/static-field-anonymous-function-length.js
+language/statements/class/elements/static-field-anonymous-function-name.js
 language/statements/class/elements/static-field-declaration.js
 language/statements/class/elements/static-field-init-this-inside-arrow-function.js
 language/statements/class/elements/static-field-init-with-this.js
@@ -34907,6 +34919,7 @@ language/statements/class/subclass/builtin-objects/Array/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Array/super-must-be-called.js
 language/statements/class/subclass/builtin-objects/ArrayBuffer/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/ArrayBuffer/super-must-be-called.js
+language/statements/class/subclass/builtin-objects/Boolean/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Boolean/super-must-be-called.js
 language/statements/class/subclass/builtin-objects/DataView/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/DataView/super-must-be-called.js
@@ -34944,6 +34957,7 @@ language/statements/class/subclass/builtin-objects/NativeError/TypeError-super.j
 language/statements/class/subclass/builtin-objects/NativeError/URIError-message.js
 language/statements/class/subclass/builtin-objects/NativeError/URIError-name.js
 language/statements/class/subclass/builtin-objects/NativeError/URIError-super.js
+language/statements/class/subclass/builtin-objects/Number/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Number/super-must-be-called.js
 language/statements/class/subclass/builtin-objects/Object/constructor-return-undefined-throws.js
 language/statements/class/subclass/builtin-objects/Object/constructor-returns-non-object.js
@@ -34951,11 +34965,14 @@ language/statements/class/subclass/builtin-objects/Object/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Object/replacing-prototype.js
 language/statements/class/subclass/builtin-objects/Promise/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Promise/super-must-be-called.js
+language/statements/class/subclass/builtin-objects/Proxy/no-prototype-throws.js
 language/statements/class/subclass/builtin-objects/RegExp/lastIndex.js
 language/statements/class/subclass/builtin-objects/RegExp/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/RegExp/super-must-be-called.js
 language/statements/class/subclass/builtin-objects/Set/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/Set/super-must-be-called.js
+language/statements/class/subclass/builtin-objects/String/length.js
+language/statements/class/subclass/builtin-objects/String/regular-subclassing.js
 language/statements/class/subclass/builtin-objects/String/super-must-be-called.js
 language/statements/class/subclass/builtin-objects/Symbol/new-symbol-with-super-throws.js
 language/statements/class/subclass/builtin-objects/Symbol/symbol-valid-as-extends-value.js
@@ -34969,6 +34986,7 @@ language/statements/class/subclass/builtins.js
 language/statements/class/subclass/class-definition-evaluation-empty-constructor-heritage-present.js
 language/statements/class/subclass/class-definition-null-proto-contains-return-override.js
 language/statements/class/subclass/class-definition-null-proto-missing-return-override.js
+language/statements/class/subclass/class-definition-null-proto-super.js
 language/statements/class/subclass/class-definition-null-proto-this.js
 language/statements/class/subclass/class-definition-null-proto.js
 language/statements/class/subclass/class-definition-parent-proto-null.js
@@ -34992,7 +35010,11 @@ language/statements/class/subclass/derived-class-return-override-with-string.js
 language/statements/class/subclass/derived-class-return-override-with-symbol.js
 language/statements/class/subclass/derived-class-return-override-with-this.js
 language/statements/class/subclass/derived-class-return-override-with-undefined.js
+language/statements/class/subclass/superclass-arrow-function.js
+language/statements/class/subclass/superclass-async-function.js
+language/statements/class/subclass/superclass-async-generator-function.js
 language/statements/class/subclass/superclass-bound-function.js
+language/statements/class/subclass/superclass-generator-function.js
 language/statements/class/subclass/superclass-prototype-setter-constructor.js
 language/statements/class/subclass/superclass-prototype-setter-method-override.js
 language/statements/class/subclass/superclass-static-method-override.js

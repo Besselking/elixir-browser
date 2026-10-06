@@ -3428,6 +3428,17 @@ defmodule Browser.JS.Interp do
   defp key_fn_name({:symbol, _, _}), do: ""
   defp key_fn_name(_), do: nil
 
+  @doc false
+  # names a class method or accessor from its key (`kind` is :method, :get or :set)
+  def name_method(fun, key, kind) do
+    case {key_fn_name(key), kind} do
+      {nil, _} -> :ok
+      {name, :get} -> accessor_name(fun, "get " <> name)
+      {name, :set} -> accessor_name(fun, "set " <> name)
+      {name, _} -> name_fn(fun, name)
+    end
+  end
+
   defp method_node?({:fn, {:method, _}, _, _, _}), do: true
   defp method_node?({k, inner}) when k in [:gen, :async], do: method_node?(inner)
   defp method_node?(_), do: false

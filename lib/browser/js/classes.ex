@@ -13,6 +13,11 @@ defmodule Browser.JS.Classes do
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props}
 
+  # a proxy would run its traps while being printed
+  defp inspect_heritage(v) do
+    if Browser.JS.Proxy.proxy?(v), do: "[proxy]", else: Browser.JS.Builtins.inspect_js(v, 0, [])
+  end
+
   @doc "Evaluates a class definition: the constructor function."
   def define({:class, name, super_node, members}, env) do
     cenv = Interp.new_scope(env)
@@ -23,11 +28,11 @@ defmodule Browser.JS.Classes do
         node -> Interp.ev(node, env)
       end
 
-    if super_node != nil and parent != :null and not function?(parent),
+    if super_node != nil and parent != :null and not Interp.constructor?(parent),
       do:
         throw_error(
           "TypeError",
-          "Class extends value #{Browser.JS.Builtins.inspect_js(parent, 0, [])} is not a constructor or null"
+          "Class extends value #{inspect_heritage(parent)} is not a constructor or null"
         )
 
     parent_proto =
@@ -36,6 +41,13 @@ defmodule Browser.JS.Classes do
         parent == :null -> :null
         true -> Interp.get(parent, "prototype")
       end
+
+    unless match?({:obj, _}, parent_proto) or parent_proto == :null,
+      do:
+        throw_error(
+          "TypeError",
+          "Class extends value does not have valid prototype property"
+        )
 
     proto = new_object([], parent_proto)
     parent = if parent == :null, do: nil, else: parent
@@ -77,14 +89,18 @@ defmodule Browser.JS.Classes do
           if static? and k == "prototype",
             do: throw_error("TypeError", "Classes may not have a static field named 'prototype'")
 
+          fname = field_fn_name(key, k)
+
           if static?,
-            do: {fields, [{:field, k, init} | statics]},
-            else: {[{k, init} | fields], statics}
+            do: {fields, [{:field, k, init, fname} | statics]},
+            else: {[{k, init, fname} | fields], statics}
 
         {:cmember, kind, {:priv, _} = key, value, static?}, {fields, statics} = acc ->
           k = member_key(key, cenv)
           fun = Interp.ev(value, cenv)
           Interp.set_home(fun, if(static?, do: f, else: proto))
+          {:priv, pname} = key
+          Interp.name_method(fun, "#" <> pname, kind)
 
           if static? do
             put_private(f, k, kind, fun)
@@ -103,6 +119,7 @@ defmodule Browser.JS.Classes do
 
           fun = Interp.ev(value, cenv)
           Interp.set_home(fun, target)
+          Interp.name_method(fun, k, kind)
 
           case kind do
             :method -> put_hidden(target, k, fun)
@@ -140,6 +157,12 @@ defmodule Browser.JS.Classes do
      [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false}
   end
 
+  # the name an anonymous function takes from the field it initializes
+  defp field_fn_name({:priv, n}, _), do: "#" <> n
+  defp field_fn_name(_, k) when is_binary(k), do: k
+  defp field_fn_name(_, {:symbol, _, d}) when is_binary(d), do: "[" <> d <> "]"
+  defp field_fn_name(_, _), do: ""
+
   defp member_key({:str, s}, _), do: s
   defp member_key({:priv, n}, env), do: Interp.private_key(n, env)
   defp member_key({:computed, e}, env), do: to_key(Interp.ev(e, env))
@@ -149,8 +172,8 @@ defmodule Browser.JS.Classes do
       Interp.new_fn_scope(cenv, %{this: f, home: f, new_target: :undefined, field_init: true})
 
     Enum.each(statics, fn
-      {:field, key, init} ->
-        v = if init, do: Interp.ev(init, scope), else: :undefined
+      {:field, key, init, fname} ->
+        v = if init, do: Interp.ev_named(init, scope, {:id, fname}), else: :undefined
         define_field(f, key, v)
 
       {:block, body} ->
@@ -219,8 +242,8 @@ defmodule Browser.JS.Classes do
         {:private_method, key, kind, fun} ->
           put_private(this, key, kind, fun)
 
-        {key, init} ->
-          v = if init, do: Interp.ev(init, scope), else: :undefined
+        {key, init, fname} ->
+          v = if init, do: Interp.ev_named(init, scope, {:id, fname}), else: :undefined
           define_field(this, key, v)
       end
     end
@@ -275,7 +298,11 @@ defmodule Browser.JS.Classes do
       end
 
       unless info.parent,
-        do: throw_error("SyntaxError", "'super' keyword unexpected here")
+        do:
+          throw_error(
+            "TypeError",
+            "Super constructor null of anonymous class is not a constructor"
+          )
 
       result = Interp.construct(info.parent, args, nt)
       Interp.declare(sc, :this, result)
