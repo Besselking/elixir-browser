@@ -1073,6 +1073,10 @@ defmodule Browser.JS.Interp do
             Browser.JS.Proxy.set(proxy, key, v, {:obj, id})
             :ok
 
+          {:typed_array, ta} ->
+            Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id})
+            :ok
+
           :none ->
             if Map.get(o, :ext, true) do
               o2 = %{
@@ -1171,7 +1175,10 @@ defmodule Browser.JS.Interp do
         if writable?(p, key), do: :none, else: :readonly
 
       _ ->
-        inherited_set(p.proto, key)
+        if is_binary(key) and Browser.JS.TypedArrays.typed_array?({:obj, pid}) and
+             Browser.JS.TypedArrays.numeric_key?(key),
+           do: {:typed_array, {:obj, pid}},
+           else: inherited_set(p.proto, key)
     end
   end
 

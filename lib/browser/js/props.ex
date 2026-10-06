@@ -408,12 +408,25 @@ defmodule Browser.JS.Props do
         Browser.JS.Proxy.set(target, key, value, receiver)
 
       o.class == :host ->
+        ta? = Browser.JS.TypedArrays.typed_array?(target)
+        numeric? = ta? and Browser.JS.TypedArrays.numeric_key?(key)
+
         cond do
           match?({Browser.JS.Modules, _}, o.host) ->
             false
 
-          receiver != target and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+          numeric? and receiver == target ->
+            Interp.put(target, key, value)
             true
+
+          numeric? and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+            true
+
+          numeric? ->
+            set_on_receiver(key, value, receiver)
+
+          ta? ->
+            ordinary_set_plain(target, key, value, receiver)
 
           true ->
             Interp.put(target, key, value)
@@ -421,26 +434,30 @@ defmodule Browser.JS.Props do
         end
 
       true ->
-        case state(target, key) do
-          nil ->
-            case get_prototype_of(target) do
-              {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
-              _ -> set_on_receiver(key, value, receiver)
-            end
+        ordinary_set_plain(target, key, value, receiver)
+    end
+  end
 
-          {:data, _, false, _, _} ->
-            false
+  defp ordinary_set_plain(target, key, value, receiver) do
+    case state(target, key) do
+      nil ->
+        case get_prototype_of(target) do
+          {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
+          _ -> set_on_receiver(key, value, receiver)
+        end
 
-          {:data, _, _, _, _} ->
-            set_on_receiver(key, value, receiver)
+      {:data, _, false, _, _} ->
+        false
 
-          {:accessor, _, setter, _, _} ->
-            if function?(setter) do
-              Interp.call(setter, receiver, [value])
-              true
-            else
-              false
-            end
+      {:data, _, _, _, _} ->
+        set_on_receiver(key, value, receiver)
+
+      {:accessor, _, setter, _, _} ->
+        if function?(setter) do
+          Interp.call(setter, receiver, [value])
+          true
+        else
+          false
         end
     end
   end
