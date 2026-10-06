@@ -4483,4 +4483,33 @@ defmodule Browser.LayoutTest do
       assert x.y > 70
     end
   end
+
+  describe "table parts outside a table" do
+    defp tp_layout(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    test "a row group outside a table sits in an anonymous table, beside a float" do
+      items =
+        tp_layout(
+          "<style>body{margin:0} #f{float:left;width:200px;height:50px} #g{display:table-row-group;clear:both} #r{display:table-row} #c{display:table-cell}</style><div id=f></div><div id=g><div id=r><div id=c>cell</div></div></div>"
+        )
+
+      cell = Enum.find(items, &(&1[:text] == "cell"))
+      assert cell.x >= 200
+      assert cell.y < 20
+    end
+
+    test "text in a row sits in an anonymous cell" do
+      items =
+        tp_layout(
+          "<style>body{margin:0} #r{display:table-row}</style><div id=r>loose<span style=\"display:table-cell\">cell</span></div>"
+        )
+
+      assert Enum.any?(items, &(&1[:text] == "loose"))
+      assert Enum.any?(items, &(&1[:text] == "cell"))
+    end
+  end
 end
