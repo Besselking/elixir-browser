@@ -1192,11 +1192,18 @@ defmodule Browser.Layout do
   defp aspect_ratio(nil), do: nil
 
   defp aspect_ratio(v) when is_binary(v) do
-    case v |> String.trim() |> String.replace_prefix("auto", "") |> String.split("/") do
-      [w] -> ratio_of(w, "1")
-      [w, h] -> ratio_of(w, h)
-      _ -> nil
-    end
+    v = String.trim(v)
+    # with `auto` the ratio is for the content box, whatever box-sizing says
+    kind = if String.starts_with?(v, "auto"), do: :content, else: :sizing
+
+    ratio =
+      case v |> String.replace_prefix("auto", "") |> String.split("/") do
+        [w] -> ratio_of(w, "1")
+        [w, h] -> ratio_of(w, h)
+        _ -> nil
+      end
+
+    if ratio, do: {ratio, kind}
   end
 
   defp aspect_ratio(_), do: nil
@@ -1244,6 +1251,7 @@ defmodule Browser.Layout do
       root: tag == "html",
       min: num(c["min-height"]),
       max: num(c["max-height"]),
+      maxpct: pct_of(c["max-height"]),
       clip: clips?(c),
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
@@ -1259,7 +1267,7 @@ defmodule Browser.Layout do
 
     needed? =
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
-        spec.min || spec.ratio ||
+        spec.min || spec.ratio || spec.maxpct ||
         spec.max || spec.pos ||
         spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
@@ -2724,6 +2732,11 @@ defmodule Browser.Layout do
     if is_number(base), do: %{o | h: round(pct * base)}, else: o
   end
 
+  # a percentage max-height of a box with an aspect ratio limits its width too
+  defp percent_height(st, %{ratio: {_, _}, max: nil, maxpct: pct} = o)
+       when is_number(pct) and is_number(st.cbh),
+       do: %{o | max: round(pct * st.cbh)}
+
   defp percent_height(_st, o), do: o
 
   defp place_box(st, ref, o) do
@@ -2748,6 +2761,11 @@ defmodule Browser.Layout do
     beside = avail - fl - fr
 
     cw = to_content.(o.width) || ratio_width(o, hpad) || max(beside - ml0 - mr0 - hpad, 0)
+    flex_item? = st.flex_item and st.blocks == []
+
+    cw =
+      if o.width == nil and o.h == nil and not flex_item?, do: ratio_limits(o, hpad, cw), else: cw
+
     cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
     cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
     box_w = hpad + cw
@@ -2767,10 +2785,28 @@ defmodule Browser.Layout do
   end
 
   # a box with a height and an aspect ratio takes its width from them when it has none
-  defp ratio_width(%{ratio: r, h: h} = o, hpad) when is_number(r) and is_number(h),
-    do: round(if(o.sizing == :border, do: max(h * r - hpad, 0), else: h * r))
+  defp ratio_width(%{ratio: {r, kind}, h: h} = o, hpad) when is_number(h) do
+    {bt, _, bb, _} = o.bw
+    vpad = o.pt + o.pb + bt + bb
+    # the height of the content box, whatever box-sizing says it was given for
+    content_h = if o.sizing == :border, do: max(h - vpad, 0), else: h
+
+    round(
+      if ratio_sizing(o, kind) == :border,
+        do: max((content_h + vpad) * r - hpad, 0),
+        else: content_h * r
+    )
+  end
 
   defp ratio_width(_, _), do: nil
+
+  # `min-height` and `max-height` of a box with an aspect ratio and no width carry over to it
+  defp ratio_limits(%{ratio: {_, _}} = o, hpad, cw) do
+    cw = if o.max, do: min(cw, ratio_width(%{o | h: o.max}, hpad)), else: cw
+    if o.min, do: max(cw, ratio_width(%{o | h: o.min}, hpad)), else: cw
+  end
+
+  defp ratio_limits(_, _, cw), do: cw
 
   defp open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free}) do
     {bt, br, _bb, bl} = o.bw
@@ -2848,12 +2884,12 @@ defmodule Browser.Layout do
 
   # without a height, an aspect ratio gives one from the width; content that is taller keeps
   # its room unless the box clips it
-  defp ratio_height(%{ratio: r} = o, box, content, extra) when is_number(r) do
+  defp ratio_height(%{ratio: {r, kind}} = o, box, content, extra) do
     {_, br, _, bl} = o.bw
     border_h = box.w / r
 
     h =
-      if o.sizing == :border,
+      if ratio_sizing(o, kind) == :border,
         do: max(border_h - extra, 0),
         else: max(box.w - bl - br - o.pl - o.pr, 0) / r
 
@@ -2861,6 +2897,9 @@ defmodule Browser.Layout do
   end
 
   defp ratio_height(_, _, content, _), do: content
+
+  defp ratio_sizing(_o, :content), do: :content
+  defp ratio_sizing(o, :sizing), do: o.sizing
 
   defp finish_box(st, %{o: o} = box) do
     {bt, br, bb, bl} = o.bw
@@ -5086,9 +5125,37 @@ defmodule Browser.Layout do
       align: c["align-self"] || "auto",
       order: flex_number(c["order"], 0.0),
       auto_height?: c["height"] in [nil, :auto],
-      fit?: c["width"] in [:fit, :minc, :maxc]
+      fit?: c["width"] in [:fit, :minc, :maxc],
+      ratio: aspect_ratio(c["aspect-ratio"]),
+      ch: num(c["height"]),
+      hpad: box.pl + box.pr + bl + br
     }
   end
+
+  # the border-box width a flex item's height and aspect ratio give it
+  defp ratio_border_width(%{ratio: {r, kind}, hpad: hpad, vextra: vextra} = it, h) do
+    content_h = if it.sizing == :border, do: max(h - vextra, 0), else: h
+
+    if ratio_sizing(it, kind) == :border,
+      do: round((content_h + vextra) * r),
+      else: round(content_h * r) + hpad
+  end
+
+  # the height a flex item has for its aspect ratio: its own, or the cross size of a row
+  # container with a height that stretches it
+  defp ratio_item_height(%{ch: ch}, _cs) when is_number(ch), do: ch
+
+  defp ratio_item_height(%{ratio: ratio, align: own} = it, %{height: h, dir: dir} = cs)
+       when ratio != nil and is_number(h) and dir in [:row, :row_reverse] do
+    align = if own == "auto", do: cs.align, else: own
+    margins = [it.mt, it.mb]
+
+    if not cs.wrap and it.auto_height? and align in ["stretch", "normal"] and
+         :auto not in margins,
+       do: h - Enum.sum(margins)
+  end
+
+  defp ratio_item_height(_, _), do: nil
 
   defp build_flex_item(tag, el, c, attrs, kids, style, extra_props) do
     if tag in ~w(img svg) do
@@ -5138,7 +5205,7 @@ defmodule Browser.Layout do
   defp flex_natural_width(st, cs, items, avail) do
     widths =
       for it <- items,
-          do: flex_base(st, it, avail) + auto_zero(it.ml) + auto_zero(it.mr)
+          do: flex_base(st, it, avail, cs) + auto_zero(it.ml) + auto_zero(it.mr)
 
     if cs.dir in [:row, :row_reverse],
       do: round(Enum.sum(widths) + cs.col_gap * (length(items) - 1)),
@@ -5161,19 +5228,28 @@ defmodule Browser.Layout do
   defp auto_zero(n), do: n
 
   # the border-box width an item would like
-  defp flex_base(st, it, avail) do
+  defp flex_base(st, it, avail, cs) do
     w =
       cond do
-        it.basis != nil -> len_px(it.basis, avail) + it.extra
-        it.width != nil -> resolve(it.width, avail) + it.extra
-        true -> shrink_extent(st, it.sub, @unbounded, it.key)
+        it.basis != nil ->
+          len_px(it.basis, avail) + it.extra
+
+        it.width != nil ->
+          resolve(it.width, avail) + it.extra
+
+        # a height and an aspect ratio give the width
+        Map.get(it, :ratio) != nil and ratio_item_height(it, cs) != nil ->
+          ratio_border_width(it, ratio_item_height(it, cs))
+
+        true ->
+          shrink_extent(st, it.sub, @unbounded, it.key)
       end
 
     clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
   end
 
   defp flex_row(st, cs, items, avail) do
-    items = Enum.map(items, &Map.put(&1, :hw, flex_base(st, &1, avail) * 1.0))
+    items = Enum.map(items, &Map.put(&1, :hw, flex_base(st, &1, avail, cs) * 1.0))
 
     lines =
       if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
