@@ -232,6 +232,7 @@ defmodule Browser.JS.Interp do
 
           true ->
             :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+            sync_argument(s.vars, name, val)
         end
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
@@ -244,6 +245,39 @@ defmodule Browser.JS.Interp do
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
+    end
+  end
+
+  # a sloppy function's parameter and the `arguments` element it is mapped to follow each other
+  defp sync_argument(%{argmap: {aid, names}}, name, val) do
+    with %{^name => idx} <- names,
+         %{mapped: %{^idx => ^name}} = o <- deref(aid) do
+      store(aid, %{o | items: Map.put(o.items, idx, val)})
+    end
+
+    :ok
+  end
+
+  defp sync_argument(_, _, _), do: :ok
+
+  @doc false
+  # a write to a mapped `arguments` element reaches its parameter
+  def sync_param(%{mapped: mapped, map_scope: scope}, idx, val) do
+    # a scope dropped after its call has no reader left that could see the parameter
+    case mapped do
+      %{^idx => name} -> if Map.has_key?(pget(:js_heap), scope), do: assign_var(scope, name, val)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  @doc false
+  # an element that is deleted, made an accessor or made read-only leaves the mapping
+  def unmap_argument(id, idx) do
+    case deref(id) do
+      %{mapped: mapped} = o -> store(id, %{o | mapped: Map.delete(mapped, idx)})
+      _ -> :ok
     end
   end
 
@@ -940,6 +974,7 @@ defmodule Browser.JS.Interp do
 
               true ->
                 store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+                if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
             end
 
           nil ->
@@ -1185,6 +1220,7 @@ defmodule Browser.JS.Interp do
 
       i ->
         store(id, %{o | items: Map.delete(o.items, i)})
+        if Map.has_key?(o, :mapped), do: unmap_argument(id, i)
         true
 
       true ->
@@ -2094,11 +2130,58 @@ defmodule Browser.JS.Interp do
         end
 
         put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
+        map_arguments(aid, owner, scope, args)
         declare(owner, "arguments", a)
         a
 
       :error ->
         throw_error("ReferenceError", "arguments is not defined")
+    end
+  end
+
+  # A sloppy function with plain parameters maps `arguments[i]` to the i-th parameter. The
+  # last of equal names owns the mapping, and only indices below the argument count map.
+  defp map_arguments(aid, owner, scope, args) do
+    with false <- Map.has_key?(scope.vars, :strict),
+         fid when is_integer(fid) <- Map.get(scope, :fid),
+         %{fun: {:closure, %{params: params}}} <- deref(fid),
+         true <- params != [] and Enum.all?(params, &match?({:id, _}, &1)) do
+      count = length(args)
+
+      {mapped, names} =
+        params
+        |> Enum.with_index()
+        |> Enum.reverse()
+        |> Enum.reduce({%{}, %{}}, fn {{:id, name}, idx}, {m, ns} ->
+          cond do
+            Map.has_key?(ns, name) -> {m, ns}
+            idx < count -> {Map.put(m, idx, name), Map.put(ns, name, idx)}
+            true -> {m, Map.put(ns, name, :none)}
+          end
+        end)
+
+      names = Map.reject(names, fn {_, v} -> v == :none end)
+
+      if mapped != %{} do
+        o = deref(aid)
+
+        items =
+          Enum.reduce(mapped, o.items, fn {idx, name}, acc ->
+            case scope.vars do
+              %{^name => v} -> Map.put(acc, idx, v)
+              _ -> acc
+            end
+          end)
+
+        store(
+          aid,
+          o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner)
+        )
+
+        declare(owner, :argmap, {aid, names})
+      end
+    else
+      _ -> :ok
     end
   end
 

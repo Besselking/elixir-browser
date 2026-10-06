@@ -487,7 +487,39 @@ defmodule Browser.JS.Props do
 
   defp set_on_receiver(_, _, _), do: false
 
+  # an element of a mapped `arguments` object follows [[DefineOwnProperty]] of arguments exotic
+  # objects: it stays mapped unless it becomes an accessor or read-only
   defp define_own(obj, id, key, desc) do
+    o = deref(id)
+
+    with %{mapped: mapped} <- o,
+         i when is_integer(i) <- Interp.array_index(key),
+         %{^i => _name} <- mapped do
+      accessor? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+
+      desc2 =
+        if not accessor? and Map.get(desc, :writable) == false and not Map.has_key?(desc, :value),
+          do: Map.put(desc, :value, Map.get(o.items, i, :undefined)),
+          else: desc
+
+      define_own_plain(obj, id, key, desc2)
+
+      cond do
+        accessor? ->
+          Interp.unmap_argument(id, i)
+
+        true ->
+          if Map.has_key?(desc, :value), do: Interp.sync_param(deref(id), i, desc.value)
+          if Map.get(desc, :writable) == false, do: Interp.unmap_argument(id, i)
+      end
+
+      :ok
+    else
+      _ -> define_own_plain(obj, id, key, desc)
+    end
+  end
+
+  defp define_own_plain(obj, id, key, desc) do
     o = deref(id)
 
     cond do

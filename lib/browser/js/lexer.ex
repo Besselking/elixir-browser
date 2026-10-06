@@ -22,9 +22,18 @@ defmodule Browser.JS.Lexer do
   def tokenize(src) do
     # a hashbang comment is only allowed at the very start
     src = if match?("#!" <> _, src), do: skip_line(src), else: src
-    {:ok, lex(src, false, [])}
-  catch
-    {:syntax, msg} -> {:error, msg}
+    # which `{` opened a block (so a `/` after its `}` starts a regular expression); a
+    # template's `${ }` is tokenized by a nested call, so the state is saved around it
+    saved = {Process.put(:lex_braces, []), Process.put(:lex_block_close, nil)}
+
+    try do
+      {:ok, lex(src, false, [])}
+    catch
+      {:syntax, msg} -> {:error, msg}
+    after
+      Process.put(:lex_braces, elem(saved, 0))
+      Process.put(:lex_block_close, elem(saved, 1))
+    end
   end
 
   defp lex("", _nl, acc), do: Enum.reverse([{:eof, nil, true} | acc])
@@ -92,6 +101,26 @@ defmodule Browser.JS.Lexer do
     end
   end
 
+  defp lex("{" <> rest, nl, acc) do
+    Process.put(:lex_braces, [block_open?(acc) | Process.get(:lex_braces) || []])
+    lex(rest, false, [{:p, "{", nl} | acc])
+  end
+
+  defp lex("}" <> rest, nl, acc) do
+    acc = [{:p, "}", nl} | acc]
+
+    case Process.get(:lex_braces) do
+      [block? | outer] ->
+        Process.put(:lex_braces, outer)
+        if block?, do: Process.put(:lex_block_close, acc)
+
+      _ ->
+        :ok
+    end
+
+    lex(rest, false, acc)
+  end
+
   # `#name`: a private name
   defp lex(<<?#, c, _::binary>> = s, nl, acc)
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
@@ -128,9 +157,53 @@ defmodule Browser.JS.Lexer do
 
   # a `/` starts a regular expression where an operand is expected
   defp regex_allowed?([]), do: true
-  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]", "}"]
+  defp regex_allowed?([{:p, "}", _} | _] = acc), do: Process.get(:lex_block_close) === acc
+  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]"]
   defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
   defp regex_allowed?(_), do: false
+
+  # does the `{` after these tokens open a block (a statement position) rather than an object?
+  defp block_open?(acc) do
+    case acc do
+      [] ->
+        true
+
+      [{:p, p, _} | _] when p in [";", "{", "}"] ->
+        true
+
+      [{:id, kw, _} | _] when kw in ["else", "try", "finally", "do"] ->
+        true
+
+      [{:id, name, _}, {:id, "class", _} | before] when name not in @keywords ->
+        stmt_start?(before)
+
+      [{:p, ")", _} | rest] ->
+        case group_head(rest, 1) do
+          [{:id, kw, _} | _] when kw in ["if", "for", "while", "with", "switch", "catch"] ->
+            true
+
+          [{:id, name, _}, {:id, "function", _} | before] when name not in @keywords ->
+            stmt_start?(before)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp stmt_start?([]), do: true
+  defp stmt_start?([{:p, p, _} | _]), do: p in [";", "{", "}"]
+  defp stmt_start?(_), do: false
+
+  # the tokens before the `(` that matches the `)` just dropped from the front
+  defp group_head([{:p, "(", _} | rest], 1), do: rest
+  defp group_head([{:p, "(", _} | rest], d), do: group_head(rest, d - 1)
+  defp group_head([{:p, ")", _} | rest], d), do: group_head(rest, d + 1)
+  defp group_head([_ | rest], d), do: group_head(rest, d)
+  defp group_head([], _), do: []
 
   defp regex(<<?\\, c::utf8, rest::binary>>, acc, cls),
     do: regex(rest, [<<?\\, c::utf8>> | acc], cls)
