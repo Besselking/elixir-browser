@@ -353,6 +353,44 @@ defmodule Browser.JS.Async do
       Interp.native("[Symbol.asyncIterator]", fn this, _ -> this end)
     )
 
+    async_dispose =
+      Interp.native("[Symbol.asyncDispose]", fn this, _ ->
+        result = Promise.new()
+
+        try do
+          case Interp.get(this, "return") do
+            f when f in [:undefined, :null] ->
+              Promise.resolve(result, :undefined)
+
+            f ->
+              unless Interp.function?(f),
+                do: Interp.throw_error("TypeError", "return is not a function")
+
+              wrapper = Promise.new()
+              Promise.resolve(wrapper, Interp.call(f, this, []))
+
+              Promise.then(
+                wrapper,
+                Interp.native("", fn _, _ ->
+                  Promise.resolve(result, :undefined)
+                  :undefined
+                end),
+                Interp.native("", fn _, args ->
+                  Promise.reject(result, Enum.at(args, 0, :undefined))
+                  :undefined
+                end)
+              )
+          end
+        catch
+          {:js_error, e} -> Promise.reject(result, e)
+        end
+
+        result
+      end)
+
+    Interp.set_arity(async_dispose, 0)
+    Interp.put_hidden(ai, {:symbol, :asyncDispose, "Symbol.asyncDispose"}, async_dispose)
+
     p = Interp.new_object([], ai)
     Interp.put_proto(:async_generator, p)
 
