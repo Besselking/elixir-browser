@@ -2909,10 +2909,19 @@ defmodule Browser.JS.Interp do
     delete(ov, key)
   end
 
+  # `delete super.x` is always a ReferenceError (the key is evaluated, never converted)
+  def ev({:unary, d, {:super_member, key}}, env) when d in ["delete", "sdelete"] do
+    Browser.JS.Classes.super_base(env)
+    ev_key(key, env)
+    throw_error("ReferenceError", "Unsupported reference to 'super'")
+  end
+
   # an identifier found on a `with` object is deleted from it
   def ev({:unary, "delete", {:id, name}}, env) do
     case with_binding(env, name) do
       {:with, obj} -> delete(obj, name)
+      # a declared local binding can not be deleted
+      {:var, sc} -> deref(sc).parent == nil
       _ -> true
     end
   end
