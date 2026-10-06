@@ -112,6 +112,8 @@ defmodule Browser.Layout do
   focused form control and a `:caret` item at the given position of its text.
   """
   def layout(nodes, width, measure, view_height \\ 768, opts \\ []) do
+    measure = spaced(measure)
+
     style = %{
       size: @base,
       bold: false,
@@ -126,6 +128,8 @@ defmodule Browser.Layout do
       color: {0, 0, 0},
       underline: false,
       strike: false,
+      ls: 0.0,
+      tt: :none,
       align: :left,
       # the direction of the text; of the block it is in (`cb`), which settles where a box
       # that is over-constrained goes, and of the block its parent is in (`prtl`)
@@ -168,6 +172,22 @@ defmodule Browser.Layout do
 
       canvas ->
         {[canvas_item(canvas, width, max(height, view_height), opts[:images]) | items], height}
+    end
+  end
+
+  # `letter-spacing` adds its length after every character
+  defp spaced(measure) do
+    fn
+      :content_height, style ->
+        measure.(:content_height, style)
+
+      text, style ->
+        w = measure.(text, style)
+
+        case style do
+          %{ls: ls} when ls != 0 -> w + round(ls * String.length(text))
+          _ -> w
+        end
     end
   end
 
@@ -491,6 +511,9 @@ defmodule Browser.Layout do
 
   # a soft hyphen (U+00AD) is invisible unless a line breaks at it; breaking there is not
   # supported yet, so it is dropped from the laid-out text (the DOM text keeps it)
+  defp walk({:text, t}, %{tt: tt} = style, acc) when is_binary(t) and tt != :none,
+    do: walk({:text, transform_text(t, tt, acc)}, %{style | tt: :none}, acc)
+
   defp walk({:text, t}, style, acc) when is_binary(t) do
     if String.contains?(t, "\u00AD"),
       do: walk({:text, String.replace(t, "\u00AD", "")}, style, acc),
@@ -1614,6 +1637,8 @@ defmodule Browser.Layout do
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
+    |> put_if(c["letter-spacing"], &letter_spacing/2)
+    |> put_if(c["text-transform"], &%{&1 | tt: text_transform(&2)})
     |> put_if(c["tab-size"], &tab_size(&1, &2))
     |> Map.put(:rtl, c["direction"] == "rtl")
     |> then(&if(c["display"] in [nil, "inline"], do: &1, else: Map.put(&1, :cb, &1.rtl)))
@@ -1633,6 +1658,51 @@ defmodule Browser.Layout do
       _ -> style
     end
   end
+
+  # Georgian Mkhedruli letters stay as they are in upper case (their capitals are a style of
+  # their own, not a case)
+  defp transform_text(t, :upper, _acc) do
+    if String.match?(t, ~r/[\x{10D0}-\x{10FF}]/u),
+      do: Regex.replace(~r/[^\x{10D0}-\x{10FF}]+/u, t, &String.upcase/1),
+      else: String.upcase(t)
+  end
+
+  defp transform_text(t, :lower, _acc), do: String.downcase(t)
+
+  # the first letter of a word, after any punctuation that opens it; text that carries on a
+  # word begun in the text before it (`T<b>his`) keeps what it has until its first space
+  defp transform_text(t, :cap, acc) do
+    {head, tail} =
+      if word_begun?(acc),
+        do:
+          case(Regex.run(~r/\A\S*/u, t),
+            do: ([h] -> {h, binary_part(t, byte_size(h), byte_size(t) - byte_size(h))})
+          ),
+        else: {"", t}
+
+    head <>
+      Regex.replace(~r/(^|\s)(\p{P}*)(\p{L})/u, tail, fn _, sp, p, ch ->
+        sp <> p <> String.upcase(ch)
+      end)
+  end
+
+  # true when the words just before (no space between them) hold a letter
+  defp word_begun?([{:word, text, _} | rest]), do: letters?(text) or word_begun?(rest)
+  defp word_begun?([{:word, text, _, _} | rest]), do: letters?(text) or word_begun?(rest)
+  defp word_begun?([{:inline_open, _, _} | rest]), do: word_begun?(rest)
+  defp word_begun?([{:inline_close, _, _} | rest]), do: word_begun?(rest)
+  defp word_begun?(_), do: false
+
+  defp letters?(text), do: String.match?(text, ~r/[\p{L}\p{N}]/u)
+
+  defp letter_spacing(style, {:pct, f}), do: %{style | ls: f * style.size}
+  defp letter_spacing(style, n) when is_number(n), do: %{style | ls: n / 1}
+  defp letter_spacing(style, _), do: style
+
+  defp text_transform("uppercase"), do: :upper
+  defp text_transform("lowercase"), do: :lower
+  defp text_transform("capitalize"), do: :cap
+  defp text_transform(_), do: :none
 
   defp white_space(style, value) do
     ws =
@@ -3623,6 +3693,7 @@ defmodule Browser.Layout do
       color: style.color,
       underline: style.underline,
       strike: style.strike,
+      ls: style.ls,
       align: style.align,
       cid: style.cid,
       nid: style.nid,

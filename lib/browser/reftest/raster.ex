@@ -142,12 +142,13 @@ defmodule Browser.Reftest.Raster do
     ahem? = String.contains?(to_string(Map.get(t, :family)), "ahem")
     adv = advance(t)
     {gw, gh, gy} = glyph_box(t, size, ahem?, adv)
+    ls = Map.get(t, :ls, 0)
 
     {grid, _} =
       t.text
       |> String.graphemes()
       |> Enum.reduce({grid, 0}, fn ch, {g, i} ->
-        x = t.x + round(i * adv * size)
+        x = t.x + round(i * (adv * size + ls))
 
         g =
           if String.trim(ch) == "",
@@ -157,7 +158,7 @@ defmodule Browser.Reftest.Raster do
         {g, i + 1}
       end)
 
-    width = round(String.length(t.text) * adv * size)
+    width = round(String.length(t.text) * (adv * size + ls))
 
     grid =
       if Map.get(t, :underline),

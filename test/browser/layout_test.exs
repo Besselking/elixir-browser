@@ -4544,4 +4544,44 @@ defmodule Browser.LayoutTest do
       assert gl_item(items, "cc").y > gl_item(items, "bb").y
     end
   end
+
+  describe "letter-spacing and text-transform" do
+    defp ts_items(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    test "letter-spacing widens a word by its length after every character" do
+      [plain] = ts_items("<p>abcd</p>") |> Enum.filter(&(&1[:text] == "abcd"))
+
+      [spaced] =
+        ts_items("<p style=\"letter-spacing:3px\">abcd</p>")
+        |> Enum.filter(&(&1[:text] == "abcd"))
+
+      assert spaced.w == plain.w + 12
+      assert spaced.ls == 3.0
+    end
+
+    test "a percentage letter-spacing is of the element's own font size" do
+      items = ts_items("<p style=\"letter-spacing:10%;font-size:20px\">ab</p>")
+      assert Enum.find(items, &(&1[:text] == "ab")).ls == 2.0
+    end
+
+    test "text-transform changes the case of the text laid out" do
+      items =
+        ts_items(
+          "<p style=\"text-transform:uppercase\">ab cd</p><p style=\"text-transform:capitalize\">ab \"cd\" ef</p>"
+        )
+
+      texts = for %{type: :text, text: t} <- items, do: t
+      assert texts == ["AB", "CD", "Ab", "\"Cd\"", "Ef"]
+    end
+
+    test "capitalize leaves the rest of a word begun before an inline box" do
+      items = ts_items("<p>T<span style=\"text-transform:capitalize\">his text</span></p>")
+      texts = for %{type: :text, text: t} <- items, do: t
+      assert texts == ["T", "his", "Text"]
+    end
+  end
 end
