@@ -2301,9 +2301,10 @@ defmodule Browser.JS.Interp do
   # ── statements ─────────────────────────────────────────────
 
   @doc "Runs a whole program in the global scope; returns the completion value."
-  def run_program({:program, stmts}) do
+  def run_program({:program, stmts}, script? \\ false) do
     :erlang.put(:js_last, :undefined)
     scope = global()
+    if script?, do: declare_globals(stmts)
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
@@ -2311,6 +2312,34 @@ defmodule Browser.JS.Interp do
     # (the process dictionary reports a stored :undefined as missing, hence the default)
     Process.get(:js_last, :undefined)
   end
+
+  # GlobalDeclarationInstantiation: a script's `let`/`const`/class names may not collide with
+  # an earlier script's declarations, nor `var`/function names with its lexical ones. What it
+  # declares with `var` or `function` is a non-configurable property of the global object.
+  defp declare_globals(stmts) do
+    lex = Enum.flat_map(stmts, &lexical_names/1)
+    vars = Enum.uniq(hoisted_names(stmts) ++ Enum.map(fundecls(stmts), &elem(&1, 0)))
+    fixed = Process.get(:js_global_fixed) || MapSet.new()
+    lexset = Process.get(:js_global_lex) || MapSet.new()
+
+    for n <- lex,
+        MapSet.member?(lexset, n) or MapSet.member?(fixed, n) or
+          n in ["NaN", "Infinity", "undefined"],
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    for n <- vars,
+        MapSet.member?(lexset, n),
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
+    Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(vars)))
+  end
+
+  @doc false
+  def global_fixed?(name), do: MapSet.member?(Process.get(:js_global_fixed) || MapSet.new(), name)
+
+  @doc false
+  def global_lexical?(name), do: MapSet.member?(Process.get(:js_global_lex) || MapSet.new(), name)
 
   @doc false
   # declares what a module body brings into its scope: `var` names, `let`/`const`/class names
@@ -3047,10 +3076,19 @@ defmodule Browser.JS.Interp do
   # an identifier found on a `with` object is deleted from it
   def ev({:unary, "delete", {:id, name}}, env) do
     case with_binding(env, name) do
-      {:with, obj} -> delete(obj, name)
+      {:with, obj} ->
+        delete(obj, name)
+
       # a declared local binding can not be deleted
-      {:var, sc} -> deref(sc).parent == nil
-      _ -> true
+      {:var, sc} ->
+        cond do
+          deref(sc).parent != nil -> false
+          global_fixed?(name) or global_lexical?(name) -> false
+          true -> Browser.JS.Global.host_delete(:global, name)
+        end
+
+      _ ->
+        true
     end
   end
 

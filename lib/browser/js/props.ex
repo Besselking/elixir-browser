@@ -85,7 +85,7 @@ defmodule Browser.JS.Props do
         builtin? = MapSet.member?(:erlang.get(:js_builtin_names), key)
 
         {:data, v, key not in ["NaN", "Infinity", "undefined"], not builtin?,
-         key not in ["NaN", "Infinity", "undefined"]}
+         key not in ["NaN", "Infinity", "undefined"] and not Interp.global_fixed?(key)}
 
       :miss ->
         nil
