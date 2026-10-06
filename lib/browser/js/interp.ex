@@ -2370,6 +2370,52 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The keys `for (k in o)` visits: the enumerable string keys of `o`, then of each object on
+  # its prototype chain, none twice and none that an object nearer in the chain (enumerable
+  # or not) already has.
+  defp for_in_keys({:obj, id} = o) do
+    if Map.has_key?(deref(id), :proxy) do
+      own_keys(o)
+    else
+      own = own_keys(o)
+
+      case inherited_enumerable(Browser.JS.Props.get_prototype_of(o), []) do
+        [] ->
+          own
+
+        _ ->
+          walk_for_in(o, MapSet.new(), [])
+      end
+    end
+  end
+
+  defp for_in_keys(target), do: own_keys(target)
+
+  # protos on the chain that have an enumerable key of their own
+  defp inherited_enumerable({:obj, id} = p, acc) do
+    if Map.has_key?(deref(id), :proxy) do
+      [p | acc]
+    else
+      acc = if own_keys(p) == [], do: acc, else: [p | acc]
+      inherited_enumerable(Browser.JS.Props.get_prototype_of(p), acc)
+    end
+  end
+
+  defp inherited_enumerable(_, acc), do: acc
+
+  defp walk_for_in({:obj, id} = o, seen, acc) do
+    if Map.has_key?(deref(id), :proxy) do
+      new = Enum.reject(own_keys(o), &MapSet.member?(seen, &1))
+      acc |> then(&[new | &1]) |> Enum.reverse() |> List.flatten()
+    else
+      new = Enum.reject(own_keys(o), &MapSet.member?(seen, &1))
+      seen = Enum.reduce(Browser.JS.Props.own_names(o), seen, &MapSet.put(&2, &1))
+      walk_for_in(Browser.JS.Props.get_prototype_of(o), seen, [new | acc])
+    end
+  end
+
+  defp walk_for_in(_, _seen, acc), do: acc |> Enum.reverse() |> List.flatten()
+
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
 
   @doc "Runs statements as a function body in `scope`: hoists, then executes."
@@ -2606,7 +2652,7 @@ defmodule Browser.JS.Interp do
 
     source =
       case kind do
-        :forin -> {:list, if(nullish?(target), do: [], else: own_keys(target))}
+        :forin -> {:list, if(nullish?(target), do: [], else: for_in_keys(target))}
         :forof -> iter_source(target)
       end
 
@@ -2616,16 +2662,21 @@ defmodule Browser.JS.Interp do
 
       {:list, items} ->
         Enum.reduce_while(items, :ok, fn item, _ ->
-          tick()
-          fns = pget(:js_fns)
-          iter_env = new_scope(env)
-          bind(pat, item, iter_env, mode)
-          outcome = run_body(body, iter_env, labels)
-          free_scope(iter_env, fns)
+          # a key that was deleted before its turn is skipped
+          if kind == :forin and not has_property?(target, item) do
+            {:cont, :ok}
+          else
+            tick()
+            fns = pget(:js_fns)
+            iter_env = new_scope(env)
+            bind(pat, item, iter_env, mode)
+            outcome = run_body(body, iter_env, labels)
+            free_scope(iter_env, fns)
 
-          case outcome do
-            :break -> {:halt, :ok}
-            :next -> {:cont, :ok}
+            case outcome do
+              :break -> {:halt, :ok}
+              :next -> {:cont, :ok}
+            end
           end
         end)
     end

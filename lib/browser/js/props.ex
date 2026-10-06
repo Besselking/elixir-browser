@@ -714,7 +714,7 @@ defmodule Browser.JS.Props do
 
       true ->
         current = if exists?, do: state({:obj, id}, key)
-        if current && !elem(current, 4), do: reject(key)
+        if current, do: validate(current, desc, key)
 
         {g0, s0} =
           case o.items[i] do
@@ -762,7 +762,16 @@ defmodule Browser.JS.Props do
 
         attrs = Map.get(o, :attrs, %{})
         cur = Map.get(attrs, i, %{})
-        w = Map.get(desc, :writable, if(exists?, do: Map.get(cur, :w, true), else: false))
+        # turning an accessor into a data property starts from undefined and read-only
+        was_accessor? = match?({:accessor, _, _}, o.items[i])
+
+        w =
+          Map.get(
+            desc,
+            :writable,
+            if(exists? and not was_accessor?, do: Map.get(cur, :w, true), else: false)
+          )
+
         c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
         e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
         flags = %{w: w, c: c, e: e}
@@ -772,7 +781,12 @@ defmodule Browser.JS.Props do
             do: Map.delete(attrs, i),
             else: Map.put(attrs, i, flags)
 
-        v = Map.get(desc, :value, Map.get(o.items, i, :undefined))
+        v =
+          Map.get(
+            desc,
+            :value,
+            if(was_accessor?, do: :undefined, else: Map.get(o.items, i, :undefined))
+          )
 
         store(
           id,
