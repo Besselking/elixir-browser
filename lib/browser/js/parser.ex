@@ -378,15 +378,22 @@ defmodule Browser.JS.Parser do
           do: throw({:syntax, "using declaration in statement position"}),
           else: statement(ts)
 
-      [{:id, l, _}, {:p, ":", _} | rest] when not allow_function and l not in @reserved ->
+      [{:id, l, _}, {:p, ":", _} | rest] when allow_function != true and l not in @reserved ->
         body_statement(rest, false)
         statement(ts)
 
       [{:id, "async", _}, {:id, "function", f} | _] when f != true ->
         throw({:syntax, "async function declaration in statement position"})
 
-      [{:id, "function", _} | _] when not allow_function ->
+      [{:id, "function", _}, {:p, "*", _} | _] ->
+        throw({:syntax, "generator declaration in statement position"})
+
+      [{:id, "function", _} | _] when allow_function == false ->
         throw({:syntax, "function declaration in statement position"})
+
+      [{:id, "function", _} | _] ->
+        if strict?(), do: throw({:syntax, "function declaration in statement position"})
+        statement(ts)
 
       _ ->
         statement(ts)
@@ -512,11 +519,11 @@ defmodule Browser.JS.Parser do
     ts = expect(ts, "(")
     {c, ts} = expression(ts)
     ts = expect(ts, ")")
-    {a, ts} = body_statement(ts, true)
+    {a, ts} = body_statement(ts, :if)
 
     case ts do
       [{:id, "else", _} | ts] ->
-        {b, ts} = body_statement(ts, true)
+        {b, ts} = body_statement(ts, :if)
         {{:if, c, a, b}, ts}
 
       _ ->
@@ -1226,7 +1233,11 @@ defmodule Browser.JS.Parser do
     {{:str, s}, nil, ts}
   end
 
-  defp property_key([{:num, n, _} | ts]), do: {{:str, Browser.JS.Num.to_string(n)}, nil, ts}
+  defp property_key([{:num, n, mark} | ts]) do
+    check_octal_string(mark)
+    {{:str, Browser.JS.Num.to_string(n)}, nil, ts}
+  end
+
   defp property_key([{:bigint, n, _} | ts]), do: {{:str, Integer.to_string(n)}, nil, ts}
 
   defp property_key([{:p, "[", _} | ts]) do
@@ -1783,6 +1794,9 @@ defmodule Browser.JS.Parser do
     if op == "delete" and private_member?(e),
       do: throw({:syntax, "private fields can not be deleted"})
 
+    if op == "delete" and strict?() and match?({:id, _}, e),
+      do: throw({:syntax, "delete of an identifier in strict mode"})
+
     op = if op == "delete" and strict?(), do: "sdelete", else: op
     {{:unary, op, e}, ts}
   end
@@ -1963,7 +1977,11 @@ defmodule Browser.JS.Parser do
     {parts, raw}
   end
 
-  defp primary([{:num, n, _} | ts]), do: {{:num, n}, ts}
+  defp primary([{:num, n, mark} | ts]) do
+    check_octal_string(mark)
+    {{:num, n}, ts}
+  end
+
   defp primary([{:bigint, n, _} | ts]), do: {{:bigint, n}, ts}
 
   defp primary([{:str, s, mark} | ts]) do
