@@ -1518,10 +1518,11 @@ defmodule Browser.Style do
   defp typed("background-image", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_images(v)}
   defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
 
-  defp typed("background-position", v, _env, _pc),
-    do: {:ok, Browser.Backgrounds.parse_position(v)}
+  defp typed("background-position", v, env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_position(ems_to_px(v, env.fs))}
 
-  defp typed("background-size", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_size(v)}
+  defp typed("background-size", v, env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_size(ems_to_px(v, env.fs))}
 
   defp typed("box-shadow", "none", _env, _pc), do: {:ok, []}
 
@@ -1557,6 +1558,14 @@ defmodule Browser.Style do
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
 
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
+
+  # `em` in a background's position or size is the element's font size
+  defp ems_to_px(v, fs) do
+    Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))em\b/i, v, fn _, n ->
+      {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
+      "#{Float.round(f * fs, 3)}px"
+    end)
+  end
 
   defp radius_pair(h, v) do
     if valid_radius?(h) and valid_radius?(v), do: {:ok, {h, v}}, else: :skip

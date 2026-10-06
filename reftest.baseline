@@ -595,6 +595,7 @@ css/CSS2/borders/border-width-008.xht
 css/CSS2/borders/border-width-011.xht
 css/CSS2/borders/border-width-012.xht
 css/CSS2/borders/border-width-014.xht
+css/CSS2/borders/border-width-applies-to-008.xht
 css/CSS2/borders/border-width-applies-to-009.xht
 css/CSS2/borders/border-width-applies-to-015.xht
 css/CSS2/borders/shand-border-000.xht
@@ -688,26 +689,36 @@ css/CSS2/css1/c536-bgpos-000.xht
 css/CSS2/css1/c536-bgpos-001.xht
 css/CSS2/css1/c545-txttrans-000.xht
 css/CSS2/css1/c547-indent-000.xht
+css/CSS2/css1/c548-leadin-000.xht
 css/CSS2/css1/c548-ln-ht-001.xht
 css/CSS2/css1/c548-ln-ht-003.xht
 css/CSS2/css1/c548-ln-ht-004.xht
+css/CSS2/css1/c5501-imrgn-t-000.xht
 css/CSS2/css1/c5502-imrgn-r-000.xht
 css/CSS2/css1/c5502-imrgn-r-001.xht
 css/CSS2/css1/c5502-mrgn-r-000.xht
 css/CSS2/css1/c5502-mrgn-r-003.xht
+css/CSS2/css1/c5503-imrgn-b-000.xht
 css/CSS2/css1/c5504-imrgn-l-000.xht
+css/CSS2/css1/c5504-imrgn-l-001.xht
+css/CSS2/css1/c5504-imrgn-l-002.xht
 css/CSS2/css1/c5504-mrgn-l-000.xht
 css/CSS2/css1/c5504-mrgn-l-003.xht
 css/CSS2/css1/c5505-mrgn-000.xht
+css/CSS2/css1/c5506-ipadn-t-001.xht
+css/CSS2/css1/c5506-ipadn-t-002.xht
 css/CSS2/css1/c5506-padn-t-000.xht
 css/CSS2/css1/c5507-ipadn-r-000.xht
 css/CSS2/css1/c5507-ipadn-r-001.xht
 css/CSS2/css1/c5507-padn-r-000.xht
 css/CSS2/css1/c5507-padn-r-002.xht
+css/CSS2/css1/c5508-ipadn-b-000.xht
 css/CSS2/css1/c5508-ipadn-b-001.xht
+css/CSS2/css1/c5508-ipadn-b-002.xht
 css/CSS2/css1/c5508-ipadn-b-003.xht
 css/CSS2/css1/c5509-ipadn-l-000.xht
 css/CSS2/css1/c5509-ipadn-l-001.xht
+css/CSS2/css1/c5509-ipadn-l-002.xht
 css/CSS2/css1/c5509-padn-l-000.xht
 css/CSS2/css1/c5509-padn-l-002.xht
 css/CSS2/css1/c5510-padn-000.xht
@@ -902,6 +913,7 @@ css/CSS2/linebox/inline-formatting-context-008.xht
 css/CSS2/linebox/inline-formatting-context-009.xht
 css/CSS2/linebox/inline-formatting-context-011.xht
 css/CSS2/linebox/inline-formatting-context-013.xht
+css/CSS2/linebox/inline-formatting-context-022.xht
 css/CSS2/linebox/leading-001.xht
 css/CSS2/linebox/line-box-height-002.xht
 css/CSS2/linebox/line-breaking-font-size-zero-001.html
@@ -1076,6 +1088,7 @@ css/CSS2/margin-padding-clear/margin-bottom-110.xht
 css/CSS2/margin-padding-clear/margin-bottom-111.xht
 css/CSS2/margin-padding-clear/margin-bottom-112.xht
 css/CSS2/margin-padding-clear/margin-bottom-113.xht
+css/CSS2/margin-padding-clear/margin-bottom-applies-to-008.xht
 css/CSS2/margin-padding-clear/margin-bottom-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-collapse-001.xht
 css/CSS2/margin-padding-clear/margin-collapse-002.xht
@@ -1084,7 +1097,9 @@ css/CSS2/margin-padding-clear/margin-collapse-004.xht
 css/CSS2/margin-padding-clear/margin-collapse-005.xht
 css/CSS2/margin-padding-clear/margin-collapse-006.xht
 css/CSS2/margin-padding-clear/margin-collapse-007.xht
+css/CSS2/margin-padding-clear/margin-collapse-008.xht
 css/CSS2/margin-padding-clear/margin-collapse-009.xht
+css/CSS2/margin-padding-clear/margin-collapse-012.xht
 css/CSS2/margin-padding-clear/margin-collapse-013.xht
 css/CSS2/margin-padding-clear/margin-collapse-014.xht
 css/CSS2/margin-padding-clear/margin-collapse-015.xht
@@ -1103,6 +1118,7 @@ css/CSS2/margin-padding-clear/margin-collapse-155.xht
 css/CSS2/margin-padding-clear/margin-collapse-156.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-011.xht
 css/CSS2/margin-padding-clear/margin-collapse-min-height-002.xht
+css/CSS2/margin-padding-clear/margin-inline-001.xht
 css/CSS2/margin-padding-clear/margin-inline-002.xht
 css/CSS2/margin-padding-clear/margin-left-004.xht
 css/CSS2/margin-padding-clear/margin-left-005.xht
@@ -1681,6 +1697,8 @@ css/CSS2/normal-flow/inline-block-width-002a.xht
 css/CSS2/normal-flow/inline-block-width-002b.xht
 css/CSS2/normal-flow/inline-box-border-line-break.html
 css/CSS2/normal-flow/inline-box-padding-line-break.html
+css/CSS2/normal-flow/inline-non-replaced-height-002.xht
+css/CSS2/normal-flow/inline-non-replaced-height-003.xht
 css/CSS2/normal-flow/inline-non-replaced-width-001.xht
 css/CSS2/normal-flow/inline-non-replaced-width-002.xht
 css/CSS2/normal-flow/inline-replaced-height-001.xht
@@ -1704,6 +1722,7 @@ css/CSS2/normal-flow/inline-table-width-002b.xht
 css/CSS2/normal-flow/inline-table-zorder-003.xht
 css/CSS2/normal-flow/inlines-002.xht
 css/CSS2/normal-flow/inlines-016.xht
+css/CSS2/normal-flow/inlines-017.xht
 css/CSS2/normal-flow/margin-collapse-min-height-003.html
 css/CSS2/normal-flow/max-height-002.xht
 css/CSS2/normal-flow/max-height-003.xht
@@ -1760,6 +1779,7 @@ css/CSS2/normal-flow/max-height-103.xht
 css/CSS2/normal-flow/max-height-104.xht
 css/CSS2/normal-flow/max-height-107.xht
 css/CSS2/normal-flow/max-height-110.xht
+css/CSS2/normal-flow/max-height-applies-to-008.xht
 css/CSS2/normal-flow/max-height-applies-to-009.xht
 css/CSS2/normal-flow/max-height-applies-to-015.xht
 css/CSS2/normal-flow/max-height-applies-to-016.xht
@@ -1837,6 +1857,7 @@ css/CSS2/normal-flow/max-width-105.xht
 css/CSS2/normal-flow/max-width-106.xht
 css/CSS2/normal-flow/max-width-107.xht
 css/CSS2/normal-flow/max-width-110.xht
+css/CSS2/normal-flow/max-width-applies-to-008.xht
 css/CSS2/normal-flow/max-width-applies-to-009.xht
 css/CSS2/normal-flow/max-width-applies-to-013.xht
 css/CSS2/normal-flow/max-width-applies-to-014.xht
@@ -1912,6 +1933,7 @@ css/CSS2/normal-flow/min-height-105.xht
 css/CSS2/normal-flow/min-height-106.xht
 css/CSS2/normal-flow/min-height-111.xht
 css/CSS2/normal-flow/min-height-112.xht
+css/CSS2/normal-flow/min-height-applies-to-008.xht
 css/CSS2/normal-flow/min-height-applies-to-009.xht
 css/CSS2/normal-flow/min-height-applies-to-015.xht
 css/CSS2/normal-flow/min-height-percentage-002.xht
@@ -1983,6 +2005,7 @@ css/CSS2/normal-flow/min-width-101.xht
 css/CSS2/normal-flow/min-width-102.xht
 css/CSS2/normal-flow/min-width-103.xht
 css/CSS2/normal-flow/min-width-applies-to-001.xht
+css/CSS2/normal-flow/min-width-applies-to-008.xht
 css/CSS2/normal-flow/min-width-applies-to-009.xht
 css/CSS2/normal-flow/min-width-applies-to-013.xht
 css/CSS2/normal-flow/min-width-applies-to-015.xht
@@ -2676,6 +2699,8 @@ css/CSS2/text/white-space-applies-to-012.xht
 css/CSS2/text/white-space-applies-to-013.xht
 css/CSS2/text/white-space-applies-to-014.xht
 css/CSS2/text/white-space-applies-to-015.xht
+css/CSS2/text/white-space-collapsing-001.xht
+css/CSS2/text/white-space-collapsing-002.xht
 css/CSS2/text/white-space-collapsing-003.xht
 css/CSS2/text/white-space-collapsing-bidi-003.xht
 css/CSS2/text/white-space-mixed-003.xht
@@ -2721,6 +2746,9 @@ css/CSS2/text/white-space-processing-038.xht
 css/CSS2/text/white-space-processing-039.xht
 css/CSS2/text/white-space-processing-041.xht
 css/CSS2/text/white-space-processing-042.xht
+css/CSS2/text/white-space-processing-043.xht
+css/CSS2/text/white-space-processing-044.xht
+css/CSS2/text/white-space-processing-045.xht
 css/CSS2/text/white-space-processing-046.xht
 css/CSS2/text/white-space-processing-050.xht
 css/CSS2/text/white-space-processing-051.xht
@@ -3710,6 +3738,7 @@ css/css-text/white-space/control-chars-005.html
 css/css-text/white-space/control-chars-006.html
 css/css-text/white-space/control-chars-007.html
 css/css-text/white-space/control-chars-008.html
+css/css-text/white-space/control-chars-00D.html
 css/css-text/white-space/control-chars-00E.html
 css/css-text/white-space/control-chars-00F.html
 css/css-text/white-space/control-chars-010.html

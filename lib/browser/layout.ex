@@ -1051,6 +1051,8 @@ defmodule Browser.Layout do
         bg: box.bg,
         r: box.r,
         size: style.size,
+        # the height of the font's content area, in ems, is the height of the box
+        cf: content_factor(style),
         paint: visible? and not style.hidden
       }
     end
@@ -1704,6 +1706,12 @@ defmodule Browser.Layout do
     leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
     trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
     words = t |> String.split() |> Enum.map(&{:word, &1, style})
+    # without a space before it, the first word is glued to whatever came before
+    words =
+      case words do
+        [{:word, w, st} | more] when leading == [] -> [{:word, w, st, :glue} | more]
+        _ -> words
+      end
 
     case words do
       [] -> if t == "", do: acc, else: [{:space, style} | acc]
@@ -1835,6 +1843,9 @@ defmodule Browser.Layout do
       gap: 0,
       # boxes whose top edge waits for the margin that collapses into it (see `start_box`)
       ptop: [],
+      # a space was taken up by an inline box opening (so what follows is not glued to what
+      # came before)
+      after_space: false,
       # offsets of the relatively positioned inline elements the layout is inside (or nil)
       rels: [],
       # the most negative margin waiting to be applied, which adds to the largest positive one
@@ -1908,6 +1919,7 @@ defmodule Browser.Layout do
   defp op({:space, style}, st), do: if(st.line == [], do: st, else: %{st | pending_space: style})
   defp op({:word, text, style}, st), do: word(text, style, false, st)
   defp op({:word, text, style, :pre}, st), do: word(text, style, true, st)
+  defp op({:word, text, style, :glue}, st), do: word(text, style, false, st, 0, true)
 
   defp op({:marker, m, style}, st) do
     # a marker right after another one (the first item of a list nested in an item) hangs in
@@ -2287,6 +2299,7 @@ defmodule Browser.Layout do
         st
         | x: x + spec.ml + spec.bl + spec.pl,
           pending_space: nil,
+          after_space: st.after_space or space_w > 0,
           marks: [{:start, ref, spec, x + spec.ml} | st.marks]
       }
     end
@@ -3403,6 +3416,9 @@ defmodule Browser.Layout do
       {:word, text, style} ->
         min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
 
+      {:word, text, style, :glue} ->
+        min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
+
       {:inset, dl, dr} ->
         min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], ext)
 
@@ -3561,7 +3577,7 @@ defmodule Browser.Layout do
     }
   end
 
-  defp word(text, style, nowrap?, st, dx \\ 0) do
+  defp word(text, style, nowrap?, st, dx \\ 0, glued? \\ false) do
     w = st.measure.(text, style)
     line_left = st.margin + st.left
 
@@ -3571,18 +3587,27 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
 
     st =
-      if st.line != [] and not nowrap? and
-           st.x + space_w + w > st.width - st.margin - st.right - st.fr do
-        st |> flush() |> apply_gap() |> start_line(line_left, 0)
-      else
-        st
+      cond do
+        st.line == [] or nowrap? or st.x + space_w + w <= st.width - st.margin - st.right - st.fr ->
+          st
+
+        # no space between this word and what comes before: they only break before all of it
+        glued? and space_w == 0 and not st.after_space ->
+          wrap_glued(st, line_left)
+
+        true ->
+          st |> flush() |> apply_gap() |> start_line(line_left, 0)
       end
 
+    glue? = glued? and st.line != [] and space_w == 0 and not st.after_space
     space_w = if st.line == [], do: 0, else: space_w
     x = st.x + space_w
 
     item = %{
       type: :text,
+      glue: glue?,
+      # what the item adds to the metrics of its line, for when it moves to another one
+      lm: {style.size, content_factor(style), line_px(style)},
       x: x,
       y: 0,
       w: w,
@@ -3613,9 +3638,72 @@ defmodule Browser.Layout do
       | line: [item | st.line],
         x: x + w,
         pending_space: nil,
+        after_space: false,
         lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
         lh: max(st.lh, style.size),
         lmax: max(st.lmax, line_px(style))
+    }
+  end
+
+  # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to
+  # the last place a line may break moves to the next line together.
+  defp wrap_glued(st, line_left) do
+    {chain, rest} = Enum.split_while(st.line, &Map.get(&1, :glue, false))
+
+    case rest do
+      [%{type: :text} = first | [_ | _] = older] ->
+        if Enum.all?(chain, &(&1.type == :text)),
+          do: carry_chain(st, line_left, [first | chain], older),
+          else: st |> flush() |> apply_gap() |> start_line(line_left, 0)
+
+      # nothing earlier to break at: the word goes first on the next line, as it would
+      # with a break allowed there
+      _ ->
+        st |> flush() |> apply_gap() |> start_line(line_left, 0)
+    end
+  end
+
+  defp carry_chain(st, line_left, chain_newest_first, older) do
+    chain = Enum.reverse(chain_newest_first)
+    first_x = hd(chain).x
+    # the room inline boxes opened since (margins, borders) took after the last word
+    pending = st.x - (List.last(chain).x + List.last(chain).w)
+
+    {moved, kept} =
+      Enum.split_with(st.marks, fn
+        {:start, _ref, spec, x} -> x + spec.bl + spec.pl >= first_x
+        {:end, _ref, x} -> x >= first_x
+      end)
+
+    st = %{st | line: older, marks: kept, x: List.first(older) |> then(&(&1.x + &1.w))}
+    st = st |> flush() |> apply_gap() |> start_line(line_left, 0)
+    shift = st.x - first_x
+
+    mark_shift = fn
+      {:start, ref, spec, x} -> {:start, ref, spec, x + shift}
+      {:end, ref, x} -> {:end, ref, x + shift}
+    end
+
+    chain = Enum.map(chain, &%{&1 | x: &1.x + shift})
+    last = List.last(chain)
+
+    st =
+      Enum.reduce(chain, st, fn it, acc ->
+        {size, cf, lpx} = it.lm
+
+        %{
+          acc
+          | lf: if(size >= acc.lh, do: cf, else: acc.lf),
+            lh: max(acc.lh, size),
+            lmax: max(acc.lmax, lpx)
+        }
+      end)
+
+    %{
+      st
+      | line: Enum.reverse(chain),
+        x: last.x + last.w + pending,
+        marks: Enum.map(moved, mark_shift) ++ st.marks
     }
   end
 
@@ -3687,7 +3775,7 @@ defmodule Browser.Layout do
               y: st.y + dy + half + normal - it.h - div(normal - it.h, 4)
           }
 
-    placed = apply_rel(placed)
+    placed = placed |> Enum.map(&Map.drop(&1, [:glue, :lm])) |> apply_rel()
 
     top_of = fn
       %{valign: "top"} -> st.y
@@ -3815,7 +3903,7 @@ defmodule Browser.Layout do
     x0 = (box.x || ctx.first_x) + ctx.shift
     w = x1 + ctx.shift - x0
     y = ctx.y_ref.(spec.size) - spec.pt - spec.bt
-    h = round(spec.size * 1.2) + spec.pt + spec.pb + spec.bt + spec.bb
+    h = round(spec.size * Map.get(spec, :cf, 1.2)) + spec.pt + spec.pb + spec.bt + spec.bb
     {tc, rc, bc, lc} = spec.bc
     # a box broken over lines keeps its left edge on the first fragment only and
     # its right edge on the last one
