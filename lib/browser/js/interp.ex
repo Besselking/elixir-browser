@@ -2869,7 +2869,13 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def ev({:unary, "delete", {:member, o, k, _}}, env), do: delete(ev(o, env), ev_key(k, env))
+  def ev({:unary, "delete", {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    key = ev_key(k, env)
+    delete_base_check(ov, key)
+    delete(ov, key)
+  end
+
   # an identifier found on a `with` object is deleted from it
   def ev({:unary, "delete", {:id, name}}, env) do
     case with_binding(env, name) do
@@ -2884,6 +2890,7 @@ defmodule Browser.JS.Interp do
   def ev({:unary, "sdelete", {:member, o, k, _}}, env) do
     ov = ev(o, env)
     key = ev_key(k, env)
+    delete_base_check(ov, key)
 
     if delete(ov, key) == false,
       do: throw_error("TypeError", "Cannot delete property '#{to_str(key)}'"),
@@ -3215,6 +3222,15 @@ defmodule Browser.JS.Interp do
       {:set, v} -> write.(v) && v
     end
   end
+
+  defp delete_base_check(base, key) when base in [:null, :undefined],
+    do:
+      throw_error(
+        "TypeError",
+        "Cannot convert undefined or null to object (delete #{to_str(key)})"
+      )
+
+  defp delete_base_check(_, _), do: :ok
 
   defp describe({:id, n}), do: n
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k

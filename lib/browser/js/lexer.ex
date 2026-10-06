@@ -191,11 +191,31 @@ defmodule Browser.JS.Lexer do
 
   defp ident(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
+  # `010` is octal when every digit is below 8; `08` and `089.5` are plain decimals
+  defp legacy_number(<<?0, rest::binary>> = s) do
+    digits = rest |> :binary.bin_to_list() |> Enum.take_while(&(&1 in ?0..?9))
+    tail = binary_part(rest, length(digits), byte_size(rest) - length(digits))
+
+    if Enum.all?(digits, &(&1 in ?0..?7)),
+      do: {String.to_integer(List.to_string(digits), 8) * 1.0, tail},
+      else: decimal_number(s)
+  end
+
+  defp decimal_number(s) do
+    [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
+    {Browser.JS.Num.parse(lit), binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))}
+  end
+
   defp number(s, nl, acc) do
     s = strip_separators(s)
+    legacy? = match?(<<?0, d, _::binary>> when d in ?0..?9, s)
+    nl = if legacy?, do: if(nl, do: :octal_nl, else: :octal), else: nl
 
     {value, rest} =
       case s do
+        <<?0, d, _::binary>> when d in ?0..?9 ->
+          legacy_number(s)
+
         <<?0, x, digits::binary>> when x in [?x, ?X, ?b, ?B, ?o, ?O] ->
           base = %{?x => 16, ?X => 16, ?b => 2, ?B => 2, ?o => 8, ?O => 8}[x]
 
