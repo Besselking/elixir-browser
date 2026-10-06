@@ -17647,7 +17647,9 @@ language/arguments-object/10.6-2gs.js
 language/arguments-object/10.6-5-1.js
 language/arguments-object/10.6-6-1.js
 language/arguments-object/10.6-6-3-s.js
+language/arguments-object/10.6-6-3.js
 language/arguments-object/10.6-6-4-s.js
+language/arguments-object/10.6-6-4.js
 language/arguments-object/S10.1.6_A1_T2.js
 language/arguments-object/S10.6_A1.js
 language/arguments-object/S10.6_A2.js
@@ -19844,6 +19846,7 @@ language/expressions/async-function/named-rest-params-trailing-comma-early-error
 language/expressions/async-function/named-returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/async-function/named-returns-async-arrow-returns-newtarget.js
 language/expressions/async-function/named-returns-async-arrow.js
+language/expressions/async-function/named-returns-async-function-returns-arguments-from-own-function.js
 language/expressions/async-function/named-returns-async-function-returns-newtarget.js
 language/expressions/async-function/named-returns-async-function.js
 language/expressions/async-function/named-strict-error-reassign-fn-name-in-body-in-arrow.js
@@ -20344,6 +20347,9 @@ language/expressions/async-generator/named-yield-promise-reject-next.js
 language/expressions/async-generator/named-yield-spread-arr-multiple.js
 language/expressions/async-generator/named-yield-spread-arr-single.js
 language/expressions/async-generator/named-yield-spread-obj.js
+language/expressions/async-generator/named-yield-star-async-next.js
+language/expressions/async-generator/named-yield-star-async-return.js
+language/expressions/async-generator/named-yield-star-async-throw.js
 language/expressions/async-generator/named-yield-star-expr-abrupt.js
 language/expressions/async-generator/named-yield-star-getiter-async-get-abrupt.js
 language/expressions/async-generator/named-yield-star-getiter-async-null-sync-get-abrupt.js
@@ -20389,6 +20395,7 @@ language/expressions/async-generator/named-yield-star-next-then-non-callable-str
 language/expressions/async-generator/named-yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/async-generator/named-yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/async-generator/named-yield-star-next-then-returns-abrupt.js
+language/expressions/async-generator/named-yield-star-sync-next.js
 language/expressions/async-generator/named-yield-star-sync-return.js
 language/expressions/async-generator/named-yield-star-sync-throw.js
 language/expressions/async-generator/object-destructuring-param-strict-body.js
@@ -20416,6 +20423,9 @@ language/expressions/async-generator/yield-promise-reject-next.js
 language/expressions/async-generator/yield-spread-arr-multiple.js
 language/expressions/async-generator/yield-spread-arr-single.js
 language/expressions/async-generator/yield-spread-obj.js
+language/expressions/async-generator/yield-star-async-next.js
+language/expressions/async-generator/yield-star-async-return.js
+language/expressions/async-generator/yield-star-async-throw.js
 language/expressions/async-generator/yield-star-expr-abrupt.js
 language/expressions/async-generator/yield-star-getiter-async-get-abrupt.js
 language/expressions/async-generator/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -20462,6 +20472,7 @@ language/expressions/async-generator/yield-star-next-then-non-callable-string-fu
 language/expressions/async-generator/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/async-generator/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/async-generator/yield-star-next-then-returns-abrupt.js
+language/expressions/async-generator/yield-star-sync-next.js
 language/expressions/async-generator/yield-star-sync-return.js
 language/expressions/async-generator/yield-star-sync-throw.js
 language/expressions/async-generator/yield-thenable-create-resolving-functions-reject.js
@@ -20758,6 +20769,9 @@ language/expressions/class/async-gen-method-static/yield-promise-reject-next.js
 language/expressions/class/async-gen-method-static/yield-spread-arr-multiple.js
 language/expressions/class/async-gen-method-static/yield-spread-arr-single.js
 language/expressions/class/async-gen-method-static/yield-spread-obj.js
+language/expressions/class/async-gen-method-static/yield-star-async-next.js
+language/expressions/class/async-gen-method-static/yield-star-async-return.js
+language/expressions/class/async-gen-method-static/yield-star-async-throw.js
 language/expressions/class/async-gen-method-static/yield-star-expr-abrupt.js
 language/expressions/class/async-gen-method-static/yield-star-getiter-async-get-abrupt.js
 language/expressions/class/async-gen-method-static/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -20803,6 +20817,7 @@ language/expressions/class/async-gen-method-static/yield-star-next-then-non-call
 language/expressions/class/async-gen-method-static/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/class/async-gen-method-static/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/class/async-gen-method-static/yield-star-next-then-returns-abrupt.js
+language/expressions/class/async-gen-method-static/yield-star-sync-next.js
 language/expressions/class/async-gen-method-static/yield-star-sync-return.js
 language/expressions/class/async-gen-method-static/yield-star-sync-throw.js
 language/expressions/class/async-gen-method/array-destructuring-param-strict-body.js
@@ -20847,6 +20862,9 @@ language/expressions/class/async-gen-method/yield-promise-reject-next.js
 language/expressions/class/async-gen-method/yield-spread-arr-multiple.js
 language/expressions/class/async-gen-method/yield-spread-arr-single.js
 language/expressions/class/async-gen-method/yield-spread-obj.js
+language/expressions/class/async-gen-method/yield-star-async-next.js
+language/expressions/class/async-gen-method/yield-star-async-return.js
+language/expressions/class/async-gen-method/yield-star-async-throw.js
 language/expressions/class/async-gen-method/yield-star-expr-abrupt.js
 language/expressions/class/async-gen-method/yield-star-getiter-async-get-abrupt.js
 language/expressions/class/async-gen-method/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -20892,6 +20910,7 @@ language/expressions/class/async-gen-method/yield-star-next-then-non-callable-st
 language/expressions/class/async-gen-method/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/class/async-gen-method/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/class/async-gen-method/yield-star-next-then-returns-abrupt.js
+language/expressions/class/async-gen-method/yield-star-sync-next.js
 language/expressions/class/async-gen-method/yield-star-sync-return.js
 language/expressions/class/async-gen-method/yield-star-sync-throw.js
 language/expressions/class/async-method-static/array-destructuring-param-strict-body.js
@@ -20923,6 +20942,7 @@ language/expressions/class/async-method-static/rest-params-trailing-comma-early-
 language/expressions/class/async-method-static/returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/class/async-method-static/returns-async-arrow-returns-newtarget.js
 language/expressions/class/async-method-static/returns-async-arrow.js
+language/expressions/class/async-method-static/returns-async-function-returns-arguments-from-own-function.js
 language/expressions/class/async-method-static/returns-async-function-returns-newtarget.js
 language/expressions/class/async-method-static/returns-async-function.js
 language/expressions/class/async-method/array-destructuring-param-strict-body.js
@@ -20954,6 +20974,7 @@ language/expressions/class/async-method/rest-params-trailing-comma-early-error.j
 language/expressions/class/async-method/returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/class/async-method/returns-async-arrow-returns-newtarget.js
 language/expressions/class/async-method/returns-async-arrow.js
+language/expressions/class/async-method/returns-async-function-returns-arguments-from-own-function.js
 language/expressions/class/async-method/returns-async-function-returns-newtarget.js
 language/expressions/class/async-method/returns-async-function.js
 language/expressions/class/class-name-ident-await-escaped-module.js
@@ -23259,6 +23280,9 @@ language/expressions/class/elements/async-gen-private-method-static/yield-promis
 language/expressions/class/elements/async-gen-private-method-static/yield-spread-arr-multiple.js
 language/expressions/class/elements/async-gen-private-method-static/yield-spread-arr-single.js
 language/expressions/class/elements/async-gen-private-method-static/yield-spread-obj.js
+language/expressions/class/elements/async-gen-private-method-static/yield-star-async-next.js
+language/expressions/class/elements/async-gen-private-method-static/yield-star-async-return.js
+language/expressions/class/elements/async-gen-private-method-static/yield-star-async-throw.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-expr-abrupt.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-getiter-async-get-abrupt.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -23304,6 +23328,7 @@ language/expressions/class/elements/async-gen-private-method-static/yield-star-n
 language/expressions/class/elements/async-gen-private-method-static/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-next-then-returns-abrupt.js
+language/expressions/class/elements/async-gen-private-method-static/yield-star-sync-next.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-sync-return.js
 language/expressions/class/elements/async-gen-private-method-static/yield-star-sync-throw.js
 language/expressions/class/elements/async-gen-private-method/await-as-binding-identifier-escaped.js
@@ -23328,6 +23353,9 @@ language/expressions/class/elements/async-gen-private-method/yield-promise-rejec
 language/expressions/class/elements/async-gen-private-method/yield-spread-arr-multiple.js
 language/expressions/class/elements/async-gen-private-method/yield-spread-arr-single.js
 language/expressions/class/elements/async-gen-private-method/yield-spread-obj.js
+language/expressions/class/elements/async-gen-private-method/yield-star-async-next.js
+language/expressions/class/elements/async-gen-private-method/yield-star-async-return.js
+language/expressions/class/elements/async-gen-private-method/yield-star-async-throw.js
 language/expressions/class/elements/async-gen-private-method/yield-star-expr-abrupt.js
 language/expressions/class/elements/async-gen-private-method/yield-star-getiter-async-get-abrupt.js
 language/expressions/class/elements/async-gen-private-method/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -23373,6 +23401,7 @@ language/expressions/class/elements/async-gen-private-method/yield-star-next-the
 language/expressions/class/elements/async-gen-private-method/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/class/elements/async-gen-private-method/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/class/elements/async-gen-private-method/yield-star-next-then-returns-abrupt.js
+language/expressions/class/elements/async-gen-private-method/yield-star-sync-next.js
 language/expressions/class/elements/async-gen-private-method/yield-star-sync-return.js
 language/expressions/class/elements/async-gen-private-method/yield-star-sync-throw.js
 language/expressions/class/elements/async-private-method-static/await-as-binding-identifier-escaped.js
@@ -23384,6 +23413,7 @@ language/expressions/class/elements/async-private-method-static/await-as-label-i
 language/expressions/class/elements/async-private-method-static/returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/class/elements/async-private-method-static/returns-async-arrow-returns-newtarget.js
 language/expressions/class/elements/async-private-method-static/returns-async-arrow.js
+language/expressions/class/elements/async-private-method-static/returns-async-function-returns-arguments-from-own-function.js
 language/expressions/class/elements/async-private-method-static/returns-async-function-returns-newtarget.js
 language/expressions/class/elements/async-private-method-static/returns-async-function.js
 language/expressions/class/elements/async-private-method/await-as-binding-identifier-escaped.js
@@ -23395,6 +23425,7 @@ language/expressions/class/elements/async-private-method/await-as-label-identifi
 language/expressions/class/elements/async-private-method/returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/class/elements/async-private-method/returns-async-arrow-returns-newtarget.js
 language/expressions/class/elements/async-private-method/returns-async-arrow.js
+language/expressions/class/elements/async-private-method/returns-async-function-returns-arguments-from-own-function.js
 language/expressions/class/elements/async-private-method/returns-async-function-returns-newtarget.js
 language/expressions/class/elements/async-private-method/returns-async-function.js
 language/expressions/class/elements/class-name-static-initializer-decl.js
@@ -27653,6 +27684,8 @@ language/expressions/object/dstr/meth-obj-ptrn-rest-val-obj.js
 language/expressions/object/dstr/object-rest-proxy-get-not-called-on-dontenum-keys.js
 language/expressions/object/dstr/object-rest-proxy-gopd-not-called-on-excluded-keys.js
 language/expressions/object/dstr/object-rest-proxy-ownkeys-returned-keys-order.js
+language/expressions/object/fn-name-accessor-get.js
+language/expressions/object/fn-name-accessor-set.js
 language/expressions/object/fn-name-arrow.js
 language/expressions/object/fn-name-class.js
 language/expressions/object/fn-name-cover.js
@@ -27816,6 +27849,9 @@ language/expressions/object/method-definition/async-gen-yield-promise-reject-nex
 language/expressions/object/method-definition/async-gen-yield-spread-arr-multiple.js
 language/expressions/object/method-definition/async-gen-yield-spread-arr-single.js
 language/expressions/object/method-definition/async-gen-yield-spread-obj.js
+language/expressions/object/method-definition/async-gen-yield-star-async-next.js
+language/expressions/object/method-definition/async-gen-yield-star-async-return.js
+language/expressions/object/method-definition/async-gen-yield-star-async-throw.js
 language/expressions/object/method-definition/async-gen-yield-star-expr-abrupt.js
 language/expressions/object/method-definition/async-gen-yield-star-getiter-async-get-abrupt.js
 language/expressions/object/method-definition/async-gen-yield-star-getiter-async-null-sync-get-abrupt.js
@@ -27861,6 +27897,7 @@ language/expressions/object/method-definition/async-gen-yield-star-next-then-non
 language/expressions/object/method-definition/async-gen-yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/expressions/object/method-definition/async-gen-yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/expressions/object/method-definition/async-gen-yield-star-next-then-returns-abrupt.js
+language/expressions/object/method-definition/async-gen-yield-star-sync-next.js
 language/expressions/object/method-definition/async-gen-yield-star-sync-return.js
 language/expressions/object/method-definition/async-gen-yield-star-sync-throw.js
 language/expressions/object/method-definition/async-meth-array-destructuring-param-strict-body.js
@@ -27883,6 +27920,7 @@ language/expressions/object/method-definition/async-meth-rest-params-trailing-co
 language/expressions/object/method-definition/async-returns-async-arrow-returns-arguments-from-parent-function.js
 language/expressions/object/method-definition/async-returns-async-arrow-returns-newtarget.js
 language/expressions/object/method-definition/async-returns-async-arrow.js
+language/expressions/object/method-definition/async-returns-async-function-returns-arguments-from-own-function.js
 language/expressions/object/method-definition/async-returns-async-function-returns-newtarget.js
 language/expressions/object/method-definition/async-returns-async-function.js
 language/expressions/object/method-definition/async-super-call-body.js
@@ -27899,6 +27937,8 @@ language/expressions/object/method-definition/early-errors-object-method-duplica
 language/expressions/object/method-definition/early-errors-object-method-eval-in-formal-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-formals-body-duplicate.js
 language/expressions/object/method-definition/early-errors-object-method-formals-contains-super-call.js
+language/expressions/object/method-definition/fn-name-fn.js
+language/expressions/object/method-definition/fn-name-gen.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-gen-meth-forbidden-ext-direct-access-prop-arguments.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-gen-meth-forbidden-ext-direct-access-prop-caller.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-meth-forbidden-ext-direct-access-prop-arguments.js
@@ -27953,6 +27993,7 @@ language/expressions/object/method-definition/generator-invoke-fn-strict.js
 language/expressions/object/method-definition/generator-length-dflt.js
 language/expressions/object/method-definition/generator-length.js
 language/expressions/object/method-definition/generator-name-prop-string.js
+language/expressions/object/method-definition/generator-name-prop-symbol.js
 language/expressions/object/method-definition/generator-no-yield.js
 language/expressions/object/method-definition/generator-param-id-yield.js
 language/expressions/object/method-definition/generator-param-redecl-const.js
@@ -27991,6 +28032,7 @@ language/expressions/object/method-definition/name-invoke-fn-strict.js
 language/expressions/object/method-definition/name-length-dflt.js
 language/expressions/object/method-definition/name-length.js
 language/expressions/object/method-definition/name-name-prop-string.js
+language/expressions/object/method-definition/name-name-prop-symbol.js
 language/expressions/object/method-definition/name-param-id-yield.js
 language/expressions/object/method-definition/name-param-init-yield.js
 language/expressions/object/method-definition/name-param-redecl.js
@@ -28012,8 +28054,14 @@ language/expressions/object/method-definition/params-dflt-meth-args-unmapped.js
 language/expressions/object/method-definition/params-dflt-meth-ref-arguments.js
 language/expressions/object/method-definition/private-name-early-error-async-fn-inside-class.js
 language/expressions/object/method-definition/private-name-early-error-async-fn.js
+language/expressions/object/method-definition/private-name-early-error-async-gen-inside-class.js
+language/expressions/object/method-definition/private-name-early-error-async-gen.js
+language/expressions/object/method-definition/private-name-early-error-gen-inside-class.js
+language/expressions/object/method-definition/private-name-early-error-gen.js
 language/expressions/object/method-definition/private-name-early-error-get-method-inside-class.js
 language/expressions/object/method-definition/private-name-early-error-get-method.js
+language/expressions/object/method-definition/private-name-early-error-method-inside-class.js
+language/expressions/object/method-definition/private-name-early-error-method.js
 language/expressions/object/method-definition/private-name-early-error-set-method-inside-class.js
 language/expressions/object/method-definition/private-name-early-error-set-method.js
 language/expressions/object/method-definition/setter-use-strict-with-non-simple-param.js
@@ -28977,6 +29025,8 @@ language/global-code/invalid-private-names-call-expression-bad-reference.js
 language/global-code/invalid-private-names-call-expression-this.js
 language/global-code/invalid-private-names-member-expression-bad-reference.js
 language/global-code/invalid-private-names-member-expression-this.js
+language/global-code/new.target-arrow.js
+language/global-code/new.target.js
 language/global-code/return.js
 language/global-code/script-decl-func-dups.js
 language/global-code/script-decl-lex-deletion.js
@@ -30279,6 +30329,7 @@ language/statements/async-function/rest-params-trailing-comma-early-error.js
 language/statements/async-function/returns-async-arrow-returns-arguments-from-parent-function.js
 language/statements/async-function/returns-async-arrow-returns-newtarget.js
 language/statements/async-function/returns-async-arrow.js
+language/statements/async-function/returns-async-function-returns-arguments-from-own-function.js
 language/statements/async-function/returns-async-function-returns-newtarget.js
 language/statements/async-function/returns-async-function.js
 language/statements/async-function/syntax-declaration-line-terminators-allowed.js
@@ -30526,6 +30577,9 @@ language/statements/async-generator/yield-spread-arr-multiple.js
 language/statements/async-generator/yield-spread-arr-single.js
 language/statements/async-generator/yield-spread-obj.js
 language/statements/async-generator/yield-star-async-from-sync-iterator-inaccessible.js
+language/statements/async-generator/yield-star-async-next.js
+language/statements/async-generator/yield-star-async-return.js
+language/statements/async-generator/yield-star-async-throw.js
 language/statements/async-generator/yield-star-expr-abrupt.js
 language/statements/async-generator/yield-star-getiter-async-get-abrupt.js
 language/statements/async-generator/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -30574,6 +30628,7 @@ language/statements/async-generator/yield-star-next-then-returns-abrupt.js
 language/statements/async-generator/yield-star-normal-notdone-iter-value-throws.js
 language/statements/async-generator/yield-star-return-missing-value-is-awaited.js
 language/statements/async-generator/yield-star-return-notdone-iter-value-throws.js
+language/statements/async-generator/yield-star-sync-next.js
 language/statements/async-generator/yield-star-sync-return.js
 language/statements/async-generator/yield-star-sync-throw.js
 language/statements/async-generator/yield-star-throw-notdone-iter-value-throws.js
@@ -30797,6 +30852,9 @@ language/statements/class/async-gen-method-static/yield-promise-reject-next.js
 language/statements/class/async-gen-method-static/yield-spread-arr-multiple.js
 language/statements/class/async-gen-method-static/yield-spread-arr-single.js
 language/statements/class/async-gen-method-static/yield-spread-obj.js
+language/statements/class/async-gen-method-static/yield-star-async-next.js
+language/statements/class/async-gen-method-static/yield-star-async-return.js
+language/statements/class/async-gen-method-static/yield-star-async-throw.js
 language/statements/class/async-gen-method-static/yield-star-expr-abrupt.js
 language/statements/class/async-gen-method-static/yield-star-getiter-async-get-abrupt.js
 language/statements/class/async-gen-method-static/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -30842,6 +30900,7 @@ language/statements/class/async-gen-method-static/yield-star-next-then-non-calla
 language/statements/class/async-gen-method-static/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/statements/class/async-gen-method-static/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/statements/class/async-gen-method-static/yield-star-next-then-returns-abrupt.js
+language/statements/class/async-gen-method-static/yield-star-sync-next.js
 language/statements/class/async-gen-method-static/yield-star-sync-return.js
 language/statements/class/async-gen-method-static/yield-star-sync-throw.js
 language/statements/class/async-gen-method/array-destructuring-param-strict-body.js
@@ -30886,6 +30945,9 @@ language/statements/class/async-gen-method/yield-promise-reject-next.js
 language/statements/class/async-gen-method/yield-spread-arr-multiple.js
 language/statements/class/async-gen-method/yield-spread-arr-single.js
 language/statements/class/async-gen-method/yield-spread-obj.js
+language/statements/class/async-gen-method/yield-star-async-next.js
+language/statements/class/async-gen-method/yield-star-async-return.js
+language/statements/class/async-gen-method/yield-star-async-throw.js
 language/statements/class/async-gen-method/yield-star-expr-abrupt.js
 language/statements/class/async-gen-method/yield-star-getiter-async-get-abrupt.js
 language/statements/class/async-gen-method/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -30931,6 +30993,7 @@ language/statements/class/async-gen-method/yield-star-next-then-non-callable-str
 language/statements/class/async-gen-method/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/statements/class/async-gen-method/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/statements/class/async-gen-method/yield-star-next-then-returns-abrupt.js
+language/statements/class/async-gen-method/yield-star-sync-next.js
 language/statements/class/async-gen-method/yield-star-sync-return.js
 language/statements/class/async-gen-method/yield-star-sync-throw.js
 language/statements/class/async-meth-escaped-async.js
@@ -30963,6 +31026,7 @@ language/statements/class/async-method-static/rest-params-trailing-comma-early-e
 language/statements/class/async-method-static/returns-async-arrow-returns-arguments-from-parent-function.js
 language/statements/class/async-method-static/returns-async-arrow-returns-newtarget.js
 language/statements/class/async-method-static/returns-async-arrow.js
+language/statements/class/async-method-static/returns-async-function-returns-arguments-from-own-function.js
 language/statements/class/async-method-static/returns-async-function-returns-newtarget.js
 language/statements/class/async-method-static/returns-async-function.js
 language/statements/class/async-method/array-destructuring-param-strict-body.js
@@ -30994,6 +31058,7 @@ language/statements/class/async-method/rest-params-trailing-comma-early-error.js
 language/statements/class/async-method/returns-async-arrow-returns-arguments-from-parent-function.js
 language/statements/class/async-method/returns-async-arrow-returns-newtarget.js
 language/statements/class/async-method/returns-async-arrow.js
+language/statements/class/async-method/returns-async-function-returns-arguments-from-own-function.js
 language/statements/class/async-method/returns-async-function-returns-newtarget.js
 language/statements/class/async-method/returns-async-function.js
 language/statements/class/class-name-ident-await-escaped-module.js
@@ -33351,6 +33416,9 @@ language/statements/class/elements/async-gen-private-method-static/yield-promise
 language/statements/class/elements/async-gen-private-method-static/yield-spread-arr-multiple.js
 language/statements/class/elements/async-gen-private-method-static/yield-spread-arr-single.js
 language/statements/class/elements/async-gen-private-method-static/yield-spread-obj.js
+language/statements/class/elements/async-gen-private-method-static/yield-star-async-next.js
+language/statements/class/elements/async-gen-private-method-static/yield-star-async-return.js
+language/statements/class/elements/async-gen-private-method-static/yield-star-async-throw.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-expr-abrupt.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-getiter-async-get-abrupt.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -33396,6 +33464,7 @@ language/statements/class/elements/async-gen-private-method-static/yield-star-ne
 language/statements/class/elements/async-gen-private-method-static/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-next-then-returns-abrupt.js
+language/statements/class/elements/async-gen-private-method-static/yield-star-sync-next.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-sync-return.js
 language/statements/class/elements/async-gen-private-method-static/yield-star-sync-throw.js
 language/statements/class/elements/async-gen-private-method/await-as-binding-identifier-escaped.js
@@ -33420,6 +33489,9 @@ language/statements/class/elements/async-gen-private-method/yield-promise-reject
 language/statements/class/elements/async-gen-private-method/yield-spread-arr-multiple.js
 language/statements/class/elements/async-gen-private-method/yield-spread-arr-single.js
 language/statements/class/elements/async-gen-private-method/yield-spread-obj.js
+language/statements/class/elements/async-gen-private-method/yield-star-async-next.js
+language/statements/class/elements/async-gen-private-method/yield-star-async-return.js
+language/statements/class/elements/async-gen-private-method/yield-star-async-throw.js
 language/statements/class/elements/async-gen-private-method/yield-star-expr-abrupt.js
 language/statements/class/elements/async-gen-private-method/yield-star-getiter-async-get-abrupt.js
 language/statements/class/elements/async-gen-private-method/yield-star-getiter-async-null-sync-get-abrupt.js
@@ -33465,6 +33537,7 @@ language/statements/class/elements/async-gen-private-method/yield-star-next-then
 language/statements/class/elements/async-gen-private-method/yield-star-next-then-non-callable-symbol-fulfillpromise.js
 language/statements/class/elements/async-gen-private-method/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/statements/class/elements/async-gen-private-method/yield-star-next-then-returns-abrupt.js
+language/statements/class/elements/async-gen-private-method/yield-star-sync-next.js
 language/statements/class/elements/async-gen-private-method/yield-star-sync-return.js
 language/statements/class/elements/async-gen-private-method/yield-star-sync-throw.js
 language/statements/class/elements/async-private-method-static/await-as-binding-identifier-escaped.js
@@ -33476,6 +33549,7 @@ language/statements/class/elements/async-private-method-static/await-as-label-id
 language/statements/class/elements/async-private-method-static/returns-async-arrow-returns-arguments-from-parent-function.js
 language/statements/class/elements/async-private-method-static/returns-async-arrow-returns-newtarget.js
 language/statements/class/elements/async-private-method-static/returns-async-arrow.js
+language/statements/class/elements/async-private-method-static/returns-async-function-returns-arguments-from-own-function.js
 language/statements/class/elements/async-private-method-static/returns-async-function-returns-newtarget.js
 language/statements/class/elements/async-private-method-static/returns-async-function.js
 language/statements/class/elements/async-private-method/await-as-binding-identifier-escaped.js
@@ -33487,6 +33561,7 @@ language/statements/class/elements/async-private-method/await-as-label-identifie
 language/statements/class/elements/async-private-method/returns-async-arrow-returns-arguments-from-parent-function.js
 language/statements/class/elements/async-private-method/returns-async-arrow-returns-newtarget.js
 language/statements/class/elements/async-private-method/returns-async-arrow.js
+language/statements/class/elements/async-private-method/returns-async-function-returns-arguments-from-own-function.js
 language/statements/class/elements/async-private-method/returns-async-function-returns-newtarget.js
 language/statements/class/elements/async-private-method/returns-async-function.js
 language/statements/class/elements/class-field-is-observable-by-proxy.js
@@ -37559,6 +37634,7 @@ language/statements/function/S13_A14_T1.js
 language/statements/function/S13_A15_T1.js
 language/statements/function/S13_A15_T2.js
 language/statements/function/S13_A15_T3.js
+language/statements/function/S13_A15_T5.js
 language/statements/function/S13_A17_T1.js
 language/statements/function/S13_A17_T2.js
 language/statements/function/S13_A18.js
