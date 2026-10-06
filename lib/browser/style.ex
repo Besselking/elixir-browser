@@ -28,12 +28,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing text-transform
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing text-transform)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform)
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -1531,7 +1531,12 @@ defmodule Browser.Style do
     {:ok, Browser.Shadows.parse(v, env.fs, {r, g, b, 255})}
   end
 
-  defp typed("letter-spacing", "normal", _env, _pc), do: {:ok, 0.0}
+  defp typed(prop, "normal", _env, _pc) when prop in ["letter-spacing", "word-spacing"],
+    do: {:ok, 0.0}
+
+  defp typed("word-spacing", v, env, _pc) do
+    if px = length(v, env), do: {:ok, px}, else: :skip
+  end
 
   # a percentage is of the font size, as the em it is a hundredth of; it stays one when
   # inherited, and each element takes its own font size

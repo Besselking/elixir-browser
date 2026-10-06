@@ -129,6 +129,7 @@ defmodule Browser.Layout do
       underline: false,
       strike: false,
       ls: 0.0,
+      wsp: 0.0,
       tt: :none,
       align: :left,
       # the direction of the text; of the block it is in (`cb`), which settles where a box
@@ -175,21 +176,23 @@ defmodule Browser.Layout do
     end
   end
 
-  # `letter-spacing` adds its length after every character
+  # `letter-spacing` adds its length after every character, `word-spacing` after every space
   defp spaced(measure) do
     fn
       :content_height, style ->
         measure.(:content_height, style)
 
       text, style ->
-        w = measure.(text, style)
-
-        case style do
-          %{ls: ls} when ls != 0 -> w + round(ls * String.length(text))
-          _ -> w
-        end
+        measure.(text, style) + extra_width(text, style)
     end
   end
+
+  defp extra_width(text, %{ls: ls, wsp: wsp}) when ls != 0 or wsp != 0,
+    do: round(ls * String.length(text) + wsp * count_spaces(text))
+
+  defp extra_width(_text, _style), do: 0
+
+  defp count_spaces(text), do: text |> String.graphemes() |> Enum.count(&(&1 in [" ", "\u00A0"]))
 
   # -- focus -----------------------------------------------------------------------
 
@@ -1638,6 +1641,7 @@ defmodule Browser.Layout do
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
     |> put_if(c["letter-spacing"], &letter_spacing/2)
+    |> put_if(is_number(c["word-spacing"]) && c["word-spacing"], &%{&1 | wsp: &2 / 1})
     |> put_if(c["text-transform"], &%{&1 | tt: text_transform(&2)})
     |> put_if(c["tab-size"], &tab_size(&1, &2))
     |> Map.put(:rtl, c["direction"] == "rtl")
@@ -3694,6 +3698,7 @@ defmodule Browser.Layout do
       underline: style.underline,
       strike: style.strike,
       ls: style.ls,
+      wsp: style.wsp,
       align: style.align,
       cid: style.cid,
       nid: style.nid,
