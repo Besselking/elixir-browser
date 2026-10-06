@@ -4645,4 +4645,28 @@ defmodule Browser.LayoutTest do
       assert just_at(items, "bbb").x == 20
     end
   end
+
+  describe "white-space: break-spaces" do
+    defp bs_items(html, width) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"width:#{width}px;white-space:break-spaces\">#{html}</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      for %{type: :text} = it <- items, do: {it.text, it.x, it.y}
+    end
+
+    test "preserved spaces wrap to the next line instead of hanging" do
+      texts = bs_items("ab    c", 20)
+      ys = texts |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+      assert length(ys) >= 3
+    end
+
+    test "the first space after text stays with the text, even past the edge" do
+      [{"ab", 0, y1}, {"\u00A0", _, y2} | _] = bs_items("ab cd", 10)
+      assert y1 == y2
+    end
+  end
 end

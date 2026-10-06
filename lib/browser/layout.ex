@@ -1724,7 +1724,7 @@ defmodule Browser.Layout do
       case value do
         "pre" -> :pre
         "pre-wrap" -> :pre_wrap
-        "break-spaces" -> :pre_wrap
+        "break-spaces" -> :break_spaces
         "pre-line" -> :pre_line
         "nowrap" -> :nowrap
         _ -> :normal
@@ -1772,7 +1772,7 @@ defmodule Browser.Layout do
 
   defp walk_text(t, %{pre: true} = style, acc), do: pre_text(t, style, acc)
 
-  defp walk_text(t, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line],
+  defp walk_text(t, %{ws: ws} = style, acc) when ws in [:pre_wrap, :pre_line, :break_spaces],
     do: pre_text(t, style, acc, ws)
 
   defp walk_text(t, %{ws: :nowrap} = style, acc) do
@@ -1828,7 +1828,7 @@ defmodule Browser.Layout do
       a = if i > 0, do: [{:flush} | a], else: a
 
       cond do
-        line != "" -> Enum.reverse(line_ops(line, style, ws)) ++ a
+        line != "" -> Enum.reverse(line_ops(line, style, ws, if(i == 0, do: prev_kind(acc)))) ++ a
         i == last -> a
         true -> [{:word, "\u200B", style, :pre} | a]
       end
@@ -1837,18 +1837,33 @@ defmodule Browser.Layout do
 
   # the words of one line: `pre` keeps it whole, `pre-wrap` keeps its spaces but may wrap,
   # `pre-line` collapses spaces
-  defp line_ops(line, style, :pre),
+  defp line_ops(line, style, :pre, _prev),
     do: [{:word, expand_tabs(line, style.tab), style, :pre}]
 
-  defp line_ops(line, style, :pre_line) do
+  defp line_ops(line, style, :pre_line, _prev) do
     line
     |> String.split()
     |> Enum.map(&{:word, &1, style})
     |> Enum.intersperse({:space, style})
   end
 
+  # `break-spaces`: every preserved space is a word of its own and a line may break after
+  # each of them, so none hangs; the first one after text does not wrap away from it
+  defp line_ops(line, style, :break_spaces, prev) do
+    style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
+
+    ~r/[ \x{3000}]|[^ \x{3000}]+/u
+    |> Regex.scan(line |> String.replace("\r", " ") |> expand_tabs(style.tab))
+    |> Enum.map_reduce(prev, fn
+      [sp], :text when sp in [" ", "\u3000"] -> {{:word, nbsp_of(sp), style, :hold}, :space}
+      [sp], _ when sp in [" ", "\u3000"] -> {{:word, nbsp_of(sp), style}, :space}
+      [run], _ -> {{:word, run, style}, :text}
+    end)
+    |> elem(0)
+  end
+
   # a tab keeps a line from being justified
-  defp line_ops(line, style, :pre_wrap) do
+  defp line_ops(line, style, :pre_wrap, _prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
     ~r/ +|[^ ]+/
@@ -1866,6 +1881,18 @@ defmodule Browser.Layout do
       end
     end)
   end
+
+  # what the text laid out so far ends in: `:text`, or `:space` for a preserved space
+  defp prev_kind([{:word, text, _} | _]), do: word_kind(text)
+  defp prev_kind([{:word, text, _, _} | _]), do: word_kind(text)
+  defp prev_kind([{:inline_open, _, _} | rest]), do: prev_kind(rest)
+  defp prev_kind([{:inline_close, _, _} | rest]), do: prev_kind(rest)
+  defp prev_kind(_), do: nil
+
+  defp word_kind(text), do: if(String.last(text) in ["\u00A0", "\u3000"], do: :space, else: :text)
+
+  defp nbsp_of(" "), do: "\u00A0"
+  defp nbsp_of(other), do: other
 
   # a tab advances to the next multiple of `tab-size` columns
   defp expand_tabs(line, tab) do
@@ -2012,6 +2039,7 @@ defmodule Browser.Layout do
   defp op({:word, text, style}, st), do: word(text, style, false, st)
   defp op({:word, text, style, :pre}, st), do: word(text, style, true, st)
   defp op({:word, text, style, :glue}, st), do: word(text, style, false, st, 0, true)
+  defp op({:word, text, style, :hold}, st), do: word(text, style, false, st, 0, :hold)
 
   defp op({:marker, m, style}, st) do
     # a marker right after another one (the first item of a list nested in an item) hangs in
@@ -3669,7 +3697,8 @@ defmodule Browser.Layout do
     }
   end
 
-  defp word(text, style, nowrap?, st, dx \\ 0, glued? \\ false) do
+  defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
+    glued? = glue != false
     w = st.measure.(text, style)
     line_left = st.margin + st.left
 
@@ -3685,7 +3714,7 @@ defmodule Browser.Layout do
 
         # no space between this word and what comes before: they only break before all of it
         glued? and space_w == 0 and not st.after_space ->
-          wrap_glued(st, line_left)
+          wrap_glued(st, line_left, glue)
 
         true ->
           st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
@@ -3743,21 +3772,27 @@ defmodule Browser.Layout do
 
   # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to
   # the last place a line may break moves to the next line together.
-  defp wrap_glued(st, line_left) do
+  defp wrap_glued(st, line_left, glued) do
     {chain, rest} = Enum.split_while(st.line, &Map.get(&1, :glue, false))
 
     case rest do
       [%{type: :text} = first | [_ | _] = older] ->
         if Enum.all?(chain, &(&1.type == :text)),
           do: carry_chain(st, line_left, [first | chain], older),
-          else: st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+          else: wrap_alone(st, line_left, glued)
 
       # nothing earlier to break at: the word goes first on the next line, as it would
-      # with a break allowed there
+      # with a break allowed there; a space of `break-spaces`, which only ever breaks after
+      # itself, stays on the line it overflows
       _ ->
-        st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+        wrap_alone(st, line_left, glued)
     end
   end
+
+  defp wrap_alone(st, _line_left, :hold), do: st
+
+  defp wrap_alone(st, line_left, _),
+    do: st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
 
   defp carry_chain(st, line_left, chain_newest_first, older) do
     chain = Enum.reverse(chain_newest_first)
