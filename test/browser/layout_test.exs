@@ -4669,4 +4669,48 @@ defmodule Browser.LayoutTest do
       assert y1 == y2
     end
   end
+
+  describe "word-break and overflow-wrap" do
+    defp wb_items(style, html, width) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"width:#{width}px;font-size:10px;#{style}\">#{html}</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      for %{type: :text} = it <- items, do: {it.text, it.y}
+    end
+
+    test "break-all fills the line and breaks the word between characters" do
+      assert [{"abcd", y1}, {"ef", y2}] = wb_items("word-break:break-all", "abcdef", 20)
+      assert y2 > y1
+    end
+
+    test "break-all breaks after what fits on the line when text comes first" do
+      assert [{"a", y1}, {"bcd", y1}, {"ef", y2}] =
+               wb_items("word-break:break-all", "a bcdef", 25)
+
+      assert y2 > y1
+    end
+
+    test "break-word wraps a word that fits a line whole" do
+      assert [{"a", y1}, {"bcd", y2}] = wb_items("overflow-wrap:break-word", "a bcd", 20)
+      assert y2 > y1
+    end
+
+    test "break-word breaks a word too long for any line" do
+      assert [{"abcd", y1}, {"ef", y2}] = wb_items("overflow-wrap:break-word", "abcdef", 20)
+      assert y2 > y1
+    end
+
+    test "normal does not break a long word" do
+      assert [{"abcdef", _}] = wb_items("", "abcdef", 20)
+    end
+
+    test "pre-wrap keeps a space that starts a line" do
+      [{text, _}] = wb_items("white-space:pre-wrap", " ab", 100) |> Enum.take(1)
+      assert text == "\u00A0"
+    end
+  end
 end

@@ -129,6 +129,7 @@ defmodule Browser.Layout do
       underline: false,
       strike: false,
       alast: nil,
+      wrap_chars: :none,
       nojust: false,
       ls: 0.0,
       wsp: 0.0,
@@ -1642,6 +1643,9 @@ defmodule Browser.Layout do
         if c["text-align"] == "justify-all", do: %{s | alast: s.align}, else: s
       end
     )
+    |> put_if(c["word-break"] || c["overflow-wrap"] || c["word-wrap"], fn s, _ ->
+      %{s | wrap_chars: wrap_chars(c)}
+    end)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
     |> put_if(c["text-align-last"], fn s, v ->
       if c["text-align"] == "justify-all",
@@ -1713,6 +1717,18 @@ defmodule Browser.Layout do
   defp letter_spacing(style, {:pct, f}), do: %{style | ls: f * style.size}
   defp letter_spacing(style, n) when is_number(n), do: %{style | ls: n / 1}
   defp letter_spacing(style, _), do: style
+
+  defp wrap_chars(c) do
+    cond do
+      c["word-break"] == "break-all" -> :all
+      c["word-break"] == "break-word" -> :word
+      c["overflow-wrap"] == "anywhere" -> :anywhere
+      c["overflow-wrap"] == "break-word" -> :word
+      c["word-wrap"] == "anywhere" -> :anywhere
+      c["word-wrap"] == "break-word" -> :word
+      true -> :none
+    end
+  end
 
   defp text_transform("uppercase"), do: :upper
   defp text_transform("lowercase"), do: :lower
@@ -1863,13 +1879,18 @@ defmodule Browser.Layout do
   end
 
   # a tab keeps a line from being justified
-  defp line_ops(line, style, :pre_wrap, _prev) do
+  defp line_ops(line, style, :pre_wrap, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
     ~r/ +|[^ ]+/
     |> Regex.scan(expand_tabs(line, style.tab))
-    |> Enum.map(fn [run] ->
+    |> then(&Enum.with_index(&1, fn token, i -> {token, i, i == length(&1) - 1} end))
+    |> Enum.map(fn {[run], i, last?} ->
       cond do
+        # a space that starts or ends a line stays (a lone one would be dropped there)
+        run == " " and ((i == 0 and prev == nil) or (last? and not style.rtl)) ->
+          {:word, "\u00A0", style, :pre}
+
         run == " " ->
           {:space, style}
 
@@ -3698,7 +3719,6 @@ defmodule Browser.Layout do
   end
 
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
-    glued? = glue != false
     w = st.measure.(text, style)
     line_left = st.margin + st.left
 
@@ -3706,6 +3726,85 @@ defmodule Browser.Layout do
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
     st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
+
+    case split_point(text, style, nowrap?, st, w, space_w) do
+      nil -> word_placed(text, style, nowrap?, st, glue, w, space_w, line_left)
+      split -> word_split(split, style, st, glue, line_left)
+    end
+  end
+
+  # `word-break: break-all` and `overflow-wrap: break-word | anywhere` let a word that does not
+  # fit break between its characters. -> nil, or {head, rest}: what fits on the line and the rest
+  # ("" for head when the line has to wrap before anything of the word goes on it)
+  defp split_point(text, style, nowrap?, st, w, space_w) do
+    mode = Map.get(style, :wrap_chars, :none)
+    # break-word's opportunities do not count when sizing to the content; anywhere's do
+    mode = if mode == :word and Process.get(:layout_intrinsic), do: :none, else: mode
+    mode = if mode == :anywhere, do: :word, else: mode
+    right = st.width - st.margin - st.right - st.fr
+    space_w = if st.line == [], do: 0, else: space_w
+
+    cond do
+      nowrap? or mode == :none or String.length(text) < 2 ->
+        nil
+
+      st.x + space_w + w <= right ->
+        nil
+
+      # break-word: a word that fits a line of its own wraps whole first
+      mode == :word and w <= right - st.indent ->
+        nil
+
+      mode == :word and st.line != [] ->
+        {"", text}
+
+      true ->
+        room = right - st.x - space_w
+        {head, rest} = longest_prefix(text, style, st, room)
+
+        if head == "" and st.line == [],
+          do: String.split_at(text, 1),
+          else: {head, rest}
+    end
+  end
+
+  defp longest_prefix(text, style, st, room) do
+    chars = String.graphemes(text)
+
+    fit =
+      chars
+      |> Enum.with_index(1)
+      |> Enum.take_while(fn {_, n} ->
+        st.measure.(chars |> Enum.take(n) |> Enum.join(), style) <= room
+      end)
+      |> length()
+
+    {chars |> Enum.take(fit) |> Enum.join(), chars |> Enum.drop(fit) |> Enum.join()}
+  end
+
+  defp word_split({"", rest}, style, st, glue, line_left) do
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+    word(rest, style, false, st, 0, glue)
+  end
+
+  defp word_split({head, rest}, style, st, glue, line_left) do
+    w = st.measure.(head, style)
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    st = word_placed(head, style, true, st, glue, w, space_w, line_left)
+
+    if rest == "" do
+      st
+    else
+      st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+      word(rest, style, false, st)
+    end
+  end
+
+  defp word_placed(text, style, nowrap?, st, glue, w, space_w, line_left) do
+    glued? = glue != false
 
     st =
       cond do
