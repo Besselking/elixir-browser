@@ -4512,4 +4512,36 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1[:text] == "cell"))
     end
   end
+
+  describe "text with no space between it" do
+    defp gl_layout(html, width) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2)
+      items
+    end
+
+    defp gl_item(items, text), do: Enum.find(items, &(&1[:text] == text))
+
+    test "a word glued to the next one by an inline box moves with it" do
+      items =
+        gl_layout(
+          "<style>body{margin:0}</style>aa bb<span style=\"margin-left:40px\">cc</span>",
+          60
+        )
+
+      assert gl_item(items, "aa").y < gl_item(items, "bb").y
+      assert gl_item(items, "bb").y == gl_item(items, "cc").y
+    end
+
+    test "a space still lets the line break" do
+      items =
+        gl_layout(
+          "<style>body{margin:0}</style>aa bb <span style=\"margin-left:40px\">cc</span>",
+          60
+        )
+
+      assert gl_item(items, "aa").y == gl_item(items, "bb").y
+      assert gl_item(items, "cc").y > gl_item(items, "bb").y
+    end
+  end
 end
