@@ -4713,4 +4713,32 @@ defmodule Browser.LayoutTest do
       assert text == "\u00A0"
     end
   end
+
+  describe "vertical-align on inline boxes" do
+    # how much higher the text of the span sits than the "a" before it
+    defp va_rise(style) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"font-size:10px\">a<span style=\"#{style}\">b</span></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1[:text] == "a")).y - Enum.find(items, &(&1[:text] == "b")).y
+    end
+
+    test "a length raises the text above the baseline, a negative one lowers it" do
+      assert va_rise("vertical-align:6px") == 6
+      assert va_rise("vertical-align:-4px") == -4
+    end
+
+    test "super raises and sub lowers" do
+      assert va_rise("vertical-align:super") > 0
+      assert va_rise("vertical-align:sub") < 0
+    end
+
+    test "other units convert to pixels" do
+      assert va_rise("vertical-align:6pt") == va_rise("vertical-align:8px")
+    end
+  end
 end
