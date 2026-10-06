@@ -509,9 +509,18 @@ defmodule Browser.Layout do
 
     case float_side(c) do
       nil ->
-        if c["position"] in ["absolute", "fixed"],
-          do: abs_ops(el, style, c, acc),
-          else: ops.(acc)
+        cond do
+          c["position"] in ["absolute", "fixed"] ->
+            abs_ops(el, style, c, acc)
+
+          c["position"] == "relative" ->
+            rel = %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+            acc = [{:pos_inline, rel} | acc]
+            [{:pos_end} | ops.(acc)]
+
+          true ->
+            ops.(acc)
+        end
 
       side ->
         # a floated picture is sized by its own content, like any float
@@ -1174,7 +1183,7 @@ defmodule Browser.Layout do
       min: num(c["min-height"]),
       max: num(c["max-height"]),
       clip: clips?(c),
-      pos: c["position"] in ["relative", "sticky"],
+      pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
       rel:
         if(c["position"] == "relative",
@@ -4812,7 +4821,8 @@ defmodule Browser.Layout do
         _ -> {2.0, 2.0}
       end
 
-    %{sx: round(sx), sy: round(sy), collapse?: collapse?}
+    # a table is at least as high as its `height`, the rows share what its content leaves over
+    %{sx: round(sx), sy: round(sy), collapse?: collapse?, h: num(c["height"])}
   end
 
   @cell_tags ~w(td th)
@@ -4998,6 +5008,7 @@ defmodule Browser.Layout do
 
       {caption_items, caption_h} = table_caption_items(st, model.caption, table_w)
       top = caption_h
+      row_heights = grow_rows(row_heights, ts.h, top + sy + sy * nrows)
       ys = row_positions(row_heights, sy, top)
 
       cells =
@@ -5248,6 +5259,35 @@ defmodule Browser.Layout do
 
   # a row is as tall as its tallest cell; cells spanning rows add what is missing to their
   # last row
+  # rows grow in proportion to their height (equally when none has any) to fill `target`
+  defp grow_rows(heights, target, fixed) when is_number(target) do
+    extra = round(target) - fixed - Enum.sum(heights)
+    total = Enum.sum(heights)
+
+    cond do
+      extra <= 0 or heights == [] ->
+        heights
+
+      total == 0 ->
+        n = length(heights)
+
+        heights
+        |> Enum.with_index()
+        |> Enum.map(fn {h, i} -> h + div(extra, n) + if(i < rem(extra, n), do: 1, else: 0) end)
+
+      true ->
+        {grown, _} =
+          Enum.map_reduce(heights, {0, total}, fn h, {given, rest} ->
+            share = if rest == 0, do: 0, else: round((extra - given) * h / rest)
+            {h + share, {given + share, rest - h}}
+          end)
+
+        grown
+    end
+  end
+
+  defp grow_rows(heights, _, _), do: heights
+
   defp table_row_heights(sized, nrows, sy) do
     base = List.duplicate(0, nrows)
 

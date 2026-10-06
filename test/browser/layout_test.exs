@@ -4455,4 +4455,32 @@ defmodule Browser.LayoutTest do
       assert b.x == a.x + a.w - 4
     end
   end
+
+  describe "containing blocks and table heights" do
+    defp cb_layout(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2)
+      items
+    end
+
+    test "a percentage top inside an absolute box refers to that box's height" do
+      items =
+        cb_layout(
+          "<style>body{margin:0} div{position:absolute} #g{height:200px;width:300px;left:0;top:0} #p{top:25%;left:0;width:20px;height:20px;background:#00f}</style><div id=g><div id=p></div></div>"
+        )
+
+      rect = Enum.find(items, &(&1.type == :rect and &1.w == 20))
+      assert rect.y == 50
+    end
+
+    test "a table with a height gives the rows the room, so a cell can sit at the bottom" do
+      items =
+        cb_layout(
+          "<style>body{margin:0} table{border-spacing:0;height:100px} td{padding:0;vertical-align:bottom}</style><table><tr><td>X</td></tr></table>"
+        )
+
+      x = Enum.find(items, &(&1[:text] == "X"))
+      assert x.y > 70
+    end
+  end
 end
