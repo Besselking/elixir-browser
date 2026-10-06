@@ -128,6 +128,8 @@ defmodule Browser.Layout do
       color: {0, 0, 0},
       underline: false,
       strike: false,
+      alast: nil,
+      nojust: false,
       ls: 0.0,
       wsp: 0.0,
       tt: :none,
@@ -1635,8 +1637,17 @@ defmodule Browser.Layout do
     )
     |> put_if(
       c["text-align"] || c["direction"],
-      fn s, _ -> %{s | align: align(c["text-align"] || "start", c["direction"])} end
+      fn s, _ ->
+        s = %{s | align: align(c["text-align"] || "start", c["direction"])}
+        if c["text-align"] == "justify-all", do: %{s | alast: s.align}, else: s
+      end
     )
+    |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
+    |> put_if(c["text-align-last"], fn s, v ->
+      if c["text-align"] == "justify-all",
+        do: s,
+        else: %{s | alast: if(v == "auto", do: nil, else: align(v, c["direction"]))}
+    end)
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
@@ -1793,6 +1804,9 @@ defmodule Browser.Layout do
     end
   end
 
+  defp align(v, dir) when v in ["justify", "justify-all"],
+    do: if(dir == "rtl", do: :rjustify, else: :justify)
+
   defp align("center", _dir), do: :center
   defp align("-webkit-center", _dir), do: :center
   # `:rstart`: against the right edge, and a line too long for the box overflows to the left
@@ -1833,7 +1847,10 @@ defmodule Browser.Layout do
     |> Enum.intersperse({:space, style})
   end
 
+  # a tab keeps a line from being justified
   defp line_ops(line, style, :pre_wrap) do
+    style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
+
     ~r/ +|[^ ]+/
     |> Regex.scan(expand_tabs(line, style.tab))
     |> Enum.map(fn [run] ->
@@ -1920,6 +1937,7 @@ defmodule Browser.Layout do
       # a space was taken up by an inline box opening (so what follows is not glued to what
       # came before)
       after_space: false,
+      soft: false,
       # offsets of the relatively positioned inline elements the layout is inside (or nil)
       rels: [],
       # the most negative margin waiting to be applied, which adds to the largest positive one
@@ -2512,7 +2530,7 @@ defmodule Browser.Layout do
 
     st =
       if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr do
-        st |> flush() |> apply_gap() |> start_atom_line(atom, line_left)
+        st |> wrap_flush() |> apply_gap() |> start_atom_line(atom, line_left)
       else
         st
       end
@@ -3670,7 +3688,7 @@ defmodule Browser.Layout do
           wrap_glued(st, line_left)
 
         true ->
-          st |> flush() |> apply_gap() |> start_line(line_left, 0)
+          st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
       end
 
     glue? = glued? and st.line != [] and space_w == 0 and not st.after_space
@@ -3699,6 +3717,8 @@ defmodule Browser.Layout do
       strike: style.strike,
       ls: style.ls,
       wsp: style.wsp,
+      alast: style.alast,
+      nojust: style.nojust or style.ws == :pre,
       align: style.align,
       cid: style.cid,
       nid: style.nid,
@@ -3730,12 +3750,12 @@ defmodule Browser.Layout do
       [%{type: :text} = first | [_ | _] = older] ->
         if Enum.all?(chain, &(&1.type == :text)),
           do: carry_chain(st, line_left, [first | chain], older),
-          else: st |> flush() |> apply_gap() |> start_line(line_left, 0)
+          else: st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
 
       # nothing earlier to break at: the word goes first on the next line, as it would
       # with a break allowed there
       _ ->
-        st |> flush() |> apply_gap() |> start_line(line_left, 0)
+        st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
     end
   end
 
@@ -3752,7 +3772,7 @@ defmodule Browser.Layout do
       end)
 
     st = %{st | line: older, marks: kept, x: List.first(older) |> then(&(&1.x + &1.w))}
-    st = st |> flush() |> apply_gap() |> start_line(line_left, 0)
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
     shift = st.x - first_x
 
     mark_shift = fn
@@ -3810,7 +3830,7 @@ defmodule Browser.Layout do
         {:end, ref, _x}, active -> Enum.reject(active, &(&1.ref == ref))
       end)
 
-    %{st | pending_space: nil, marks: [], active: active}
+    %{st | pending_space: nil, marks: [], active: active, soft: false}
   end
 
   # A line holds words and inline-block atoms. Baseline-aligned atoms (the
@@ -3852,6 +3872,7 @@ defmodule Browser.Layout do
           }
 
     placed = placed |> Enum.map(&Map.drop(&1, [:glue, :lm])) |> apply_rel()
+    placed = justify(placed, st, List.last(st.line), shift)
 
     top_of = fn
       %{valign: "top"} -> st.y
@@ -3903,9 +3924,13 @@ defmodule Browser.Layout do
         pending_space: nil,
         marks: carried,
         active: active,
-        lead: lead
+        lead: lead,
+        soft: false
     }
   end
+
+  # a line that ends because the next word does not fit (a justified one stretches)
+  defp wrap_flush(st), do: flush(%{st | soft: true})
 
   # -- inline boxes -----------------------------------------------------------------
   #
@@ -4019,20 +4044,76 @@ defmodule Browser.Layout do
   defp align_shift(_items, %{aligned?: false}), do: 0
 
   defp align_shift([first | _] = items, st) do
-    last = List.last(items)
-    # the line runs from its start (inline-box lead included) to wherever the
-    # last box's padding/border ends, which `st.x` tracks
-    left = min(first.x, st.indent)
-    right = max(last.x + last.w, st.x)
-    free = st.width - st.margin - st.right - st.fr - st.indent - (right - left)
+    free = line_free(items, st)
 
-    case first.align do
+    case line_mode(first, st) do
       :center -> max(round(free / 2), 0)
       :right -> max(round(free), 0)
       :rstart -> round(free) - st.line_lead
-      :left -> 0
+      :rjustify -> round(free) - st.line_lead
+      _ -> 0
     end
   end
+
+  # the room left on a line: it runs from its start (inline-box lead included) to wherever the
+  # last box's padding/border ends, which `st.x` tracks
+  defp line_free([first | _] = items, st) do
+    last = List.last(items)
+    left = min(first.x, st.indent)
+    right = max(last.x + last.w, st.x)
+    st.width - st.margin - st.right - st.fr - st.indent - (right - left)
+  end
+
+  # how a line is aligned: a line that is not the last one follows `text-align`; the last
+  # (or one before a forced break) follows `text-align-last`, or starts at its start edge when
+  # the text is justified
+  defp line_mode(first, st) do
+    cond do
+      st.soft ->
+        first.align
+
+      Map.get(first, :alast) ->
+        first.alast
+
+      first.align == :justify ->
+        :left
+
+      first.align == :rjustify ->
+        :rstart
+
+      true ->
+        first.align
+    end
+  end
+
+  # Justified lines share their free room out between the spaces. Lines with inline boxes
+  # that draw something, and text that keeps its white space, are left as they are.
+  defp justify(placed, st, first, shift) do
+    if line_mode(first, st) in [:justify, :rjustify] and not Map.get(first, :nojust, false) and
+         st.marks == [] and
+         st.active == [] and
+         Enum.all?(placed, &(&1.type == :text and not Map.get(&1, :nojust, false))) do
+      ordered = Enum.reverse(placed)
+      free = line_free(Enum.reverse(st.line), st)
+      gaps = ordered |> Enum.chunk_every(2, 1, :discard) |> Enum.count(&gap?/1)
+
+      if free > 0 and gaps > 0 do
+        {out, _, _} =
+          Enum.reduce(ordered, {[], nil, 0}, fn it, {acc, prev, j} ->
+            j = if prev && gap?([prev, it]), do: j + 1, else: j
+            {[%{it | x: it.x - shift + round(j * free / gaps)} | acc], it, j}
+          end)
+
+        out
+      else
+        placed
+      end
+    else
+      placed
+    end
+  end
+
+  defp gap?([a, b]), do: b.x - (a.x + a.w) > 0
 
   # -- flexbox ------------------------------------------------------------------------------
 
