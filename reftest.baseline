@@ -2840,6 +2840,7 @@ css/CSS2/text/white-space-processing-050.xht
 css/CSS2/text/white-space-processing-051.xht
 css/CSS2/text/white-space-processing-052.xht
 css/CSS2/text/white-space-processing-053.xht
+css/CSS2/text/white-space-processing-056.xht
 css/CSS2/text/word-spacing-004.xht
 css/CSS2/text/word-spacing-005.xht
 css/CSS2/text/word-spacing-006.xht
@@ -2903,6 +2904,7 @@ css/CSS2/text/word-spacing-characters-003.xht
 css/CSS2/text/word-spacing-justify-001.xht
 css/CSS2/text/word-spacing-remove-space-001.xht
 css/CSS2/text/word-spacing-remove-space-002.xht
+css/CSS2/text/word-spacing-remove-space-003.xht
 css/CSS2/text/word-spacing-remove-space-004.xht
 css/CSS2/text/word-spacing-remove-space-005.xht
 css/CSS2/text/word-spacing-remove-space-006.xht
@@ -3695,7 +3697,6 @@ css/css-sizing/vert-block-size-small-or-larger-than-container-with-min-or-max-co
 css/css-sizing/whitespace-and-break.html
 css/css-text/bidi/bidi-lines-001.html
 css/css-text/bidi/bidi-tab-001.html
-css/css-text/hanging-punctuation/hanging-punctuation-first-002.html
 css/css-text/hanging-punctuation/hanging-punctuation-inline-001.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html
@@ -3734,7 +3735,6 @@ css/css-text/line-breaking/line-breaking-atomic-002.html
 css/css-text/line-breaking/line-breaking-atomic-007.html
 css/css-text/line-breaking/line-breaking-atomic-008.html
 css/css-text/line-breaking/line-breaking-atomic-009.html
-css/css-text/line-breaking/segment-break-transformation-punctuation-003.html
 css/css-text/line-breaking/segment-break-transformation-rules-004.html
 css/css-text/line-breaking/segment-break-transformation-rules-005.html
 css/css-text/line-breaking/segment-break-transformation-rules-006.html
@@ -3905,6 +3905,7 @@ css/css-text/text-transform/text-transform-full-size-kana-005.html
 css/css-text/text-transform/text-transform-full-size-kana-006.html
 css/css-text/text-transform/text-transform-full-size-kana-007.html
 css/css-text/text-transform/text-transform-fullwidth-006.html
+css/css-text/text-transform/text-transform-fullwidth-007.html
 css/css-text/text-transform/text-transform-letter-spacing-001.html
 css/css-text/text-transform/text-transform-lowercase-101.xht
 css/css-text/text-transform/text-transform-lowercase-102.xht
@@ -4013,7 +4014,6 @@ css/css-text/white-space/control-chars-09D.html
 css/css-text/white-space/control-chars-09E.html
 css/css-text/white-space/control-chars-09F.html
 css/css-text/white-space/full-width-leading-spaces-001.html
-css/css-text/white-space/full-width-leading-spaces-004.html
 css/css-text/white-space/lone-cr-001.tentative.html
 css/css-text/white-space/object-replacement-1.html
 css/css-text/white-space/object-replacement-2.html
@@ -4074,6 +4074,8 @@ css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html
 css/css-text/white-space/textarea-pre-wrap-014.html
 css/css-text/white-space/trailing-ideographic-space-003.html
+css/css-text/white-space/trailing-ideographic-space-006.html
+css/css-text/white-space/trailing-ideographic-space-007.html
 css/css-text/white-space/trailing-ogham-003.html
 css/css-text/white-space/trailing-space-align-start.tentative.html
 css/css-text/white-space/trailing-space-and-text-alignment-002.html

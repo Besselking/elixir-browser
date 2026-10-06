@@ -1820,9 +1820,9 @@ defmodule Browser.Layout do
 
   defp walk_text(t, %{ws: :nowrap} = style, acc) do
     # whitespace collapses, but the words never wrap
-    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
-    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
-    words = t |> String.split() |> Enum.map(&{:word, &1, style, :pre})
+    leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
+    trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
+    words = t |> css_words() |> Enum.map(&{:word, &1, style, :pre})
 
     case words do
       [] -> if t == "", do: acc, else: [{:space, style} | acc]
@@ -1831,9 +1831,9 @@ defmodule Browser.Layout do
   end
 
   defp walk_text(t, style, acc) do
-    leading = if String.match?(t, ~r/\A\s/), do: [{:space, style}], else: []
-    trailing = if String.match?(t, ~r/\S\s+\z/), do: [{:space, style}], else: []
-    words = t |> String.split() |> Enum.map(&{:word, &1, style})
+    leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
+    trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
+    words = t |> css_words() |> Enum.map(&{:word, &1, style})
     # without a space before it, the first word is glued to whatever came before
     words =
       case words do
@@ -1846,6 +1846,22 @@ defmodule Browser.Layout do
       _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
     end
   end
+
+  defp space_start,
+    do:
+      ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+
+  defp space_end,
+    do:
+      ~r/[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}][ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+\z/u
+
+  defp space_run,
+    do:
+      ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+/u
+
+  # words split on white space except the ideographic space and the no-break ones
+  # (an ideographic space is a word character that may hang at the end of a line)
+  defp css_words(t), do: String.split(t, space_run(), trim: true)
 
   defp align(v, dir) when v in ["justify", "justify-all"],
     do: if(dir == "rtl", do: :rjustify, else: :justify)
@@ -3582,6 +3598,7 @@ defmodule Browser.Layout do
   defp min_words([op | rest], measure, l, r, stack, ext) do
     case op do
       {:word, text, style} ->
+        text = String.trim_trailing(text, "\u3000")
         min_words(rest, measure, l, r, stack, max(ext, l + r + measure.(text, style)))
 
       {:word, text, style, :glue} ->
@@ -3680,9 +3697,20 @@ defmodule Browser.Layout do
           (&1.type == :box and fixed_width?(&1) and not Map.get(&1, :anchor, false)) or
           (&1.type == :bgimage and Map.get(&1, :sized, false)))
     )
-    |> Enum.map(&(min(&1.x + &1.w, Map.get(&1, :xlim, @unbounded)) + Map.get(&1, :rr, 0)))
+    |> Enum.map(
+      &(min(&1.x + &1.w - hanging(&1, items), Map.get(&1, :xlim, @unbounded)) +
+          Map.get(&1, :rr, 0))
+    )
     |> Enum.max(fn -> 0 end)
   end
+
+  # what hangs past the end of a line does not count: the width of the item's `hang`, unless
+  # something follows it on its line
+  defp hanging(%{hang: hang, y: y, x: x}, items) do
+    if Enum.any?(items, &(&1.type == :text and &1.y == y and &1.x > x)), do: 0, else: hang
+  end
+
+  defp hanging(_, _), do: 0
 
   # -- words and lines ------------------------------------------------------------------
 
@@ -3832,10 +3860,12 @@ defmodule Browser.Layout do
 
   defp word_placed(text, style, nowrap?, st, glue, w, space_w, line_left) do
     glued? = glue != false
+    hang = hang_width(text, style, st)
 
     st =
       cond do
-        st.line == [] or nowrap? or st.x + space_w + w <= st.width - st.margin - st.right - st.fr ->
+        st.line == [] or nowrap? or hang == w or
+            st.x + space_w + w - hang <= st.width - st.margin - st.right - st.fr ->
           st
 
         # no space between this word and what comes before: they only break before all of it
@@ -3882,6 +3912,7 @@ defmodule Browser.Layout do
       rr: st.right - st.free
     }
 
+    item = if hang > 0, do: Map.put(item, :hang, hang), else: item
     item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
     st = bridge(st, item, space_w)
 
@@ -3895,6 +3926,18 @@ defmodule Browser.Layout do
         lh: max(st.lh, style.size),
         lmax: max(st.lmax, line_px(style))
     }
+  end
+
+  # ideographic spaces at the end of a word hang: they take no room when the line is filled
+  # or the content measured
+  defp hang_width(_text, %{ws: :break_spaces}, _st), do: 0
+
+  defp hang_width(text, style, st) do
+    case String.trim_trailing(text, "\u3000") do
+      ^text -> 0
+      "" -> st.measure.(text, style)
+      body -> st.measure.(text, style) - st.measure.(body, style)
+    end
   end
 
   # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to

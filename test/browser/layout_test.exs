@@ -4741,4 +4741,18 @@ defmodule Browser.LayoutTest do
       assert va_rise("vertical-align:6pt") == va_rise("vertical-align:8px")
     end
   end
+
+  describe "ideographic space" do
+    test "is a character of the word it follows, not collapsible white space" do
+      items = texts(elem(run("<p>ab\u3000cd</p>"), 0))
+      assert items == ["ab\u3000cd"]
+    end
+
+    test "hangs at the end of a line: the content is not wider for it" do
+      html = "<div style=\"width:max-content\">ab\u3000<br>ab</div>"
+      {items, _} = run(html)
+      first = Enum.find(items, &(&1[:text] == "ab\u3000"))
+      assert {first.w, first.hang} == {24, 8}
+    end
+  end
 end
