@@ -998,6 +998,7 @@ defmodule Browser.JS.Parser do
 
         case after_lhs do
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
+            if lhs == {:import_meta}, do: throw({:syntax, "Invalid left-hand side in for loop"})
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
             {body, t} = loop_body(t)
@@ -2016,8 +2017,12 @@ defmodule Browser.JS.Parser do
     {{:import_call, e}, expect(ts, ")")}
   end
 
-  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]),
-    do: {{:import_meta}, ts}
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]) do
+    unless Process.get(:js_module, false),
+      do: throw({:syntax, "Cannot use 'import.meta' outside a module"})
+
+    {{:import_meta}, ts}
+  end
 
   defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
 
