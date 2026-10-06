@@ -129,6 +129,7 @@ defmodule Browser.Layout do
       underline: false,
       strike: false,
       alast: nil,
+      vs: 0,
       wrap_chars: :none,
       nojust: false,
       ls: 0.0,
@@ -1646,6 +1647,7 @@ defmodule Browser.Layout do
     |> put_if(c["word-break"] || c["overflow-wrap"] || c["word-wrap"], fn s, _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
+    |> put_if(c["vertical-align"], &raise_text/2)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
     |> put_if(c["text-align-last"], fn s, v ->
       if c["text-align"] == "justify-all",
@@ -1660,7 +1662,13 @@ defmodule Browser.Layout do
     |> put_if(c["text-transform"], &%{&1 | tt: text_transform(&2)})
     |> put_if(c["tab-size"], &tab_size(&1, &2))
     |> Map.put(:rtl, c["direction"] == "rtl")
-    |> then(&if(c["display"] in [nil, "inline"], do: &1, else: Map.put(&1, :cb, &1.rtl)))
+    |> then(
+      &if(c["display"] in [nil, "inline"],
+        do: &1,
+        else: &1 |> Map.put(:cb, &1.rtl) |> Map.put(:vs, 0)
+      )
+    )
+    |> then(&if(blockified?(c), do: Map.put(&1, :vs, 0), else: &1))
     |> Map.put(:hidden, hidden?(c))
   end
 
@@ -1717,6 +1725,25 @@ defmodule Browser.Layout do
   defp letter_spacing(style, {:pct, f}), do: %{style | ls: f * style.size}
   defp letter_spacing(style, n) when is_number(n), do: %{style | ls: n / 1}
   defp letter_spacing(style, _), do: style
+
+  # absolutely positioned and floated boxes are block-level: vertical-align does not apply
+  defp blockified?(c),
+    do: c["position"] in ["absolute", "fixed"] or c["float"] in ["left", "right"]
+
+  # `vertical-align` on an inline box moves its text (and what is inside it) up or down from the
+  # parent's baseline; boxes of their own start from the baseline again
+  defp raise_text(style, value) do
+    own =
+      case value do
+        "sub" -> -round(style.size / 5)
+        "super" -> round(style.size / 3)
+        n when is_number(n) -> round(n)
+        {:pct, f} -> round(f * line_px(style))
+        _ -> 0
+      end
+
+    %{style | vs: style.vs + own}
+  end
 
   defp wrap_chars(c) do
     cond do
@@ -3844,6 +3871,7 @@ defmodule Browser.Layout do
       underline: style.underline,
       strike: style.strike,
       ls: style.ls,
+      vs: style.vs,
       wsp: style.wsp,
       alast: style.alast,
       nojust: style.nojust or style.ws == :pre,
@@ -3993,6 +4021,8 @@ defmodule Browser.Layout do
 
     base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base))
     below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base))
+    # text raised or lowered by `vertical-align` makes the line taller where it sticks out
+    {base, below} = raised_room(texts, base, below, normal, half, text_base)
     line_h = Enum.reduce(floating, base + below, &max(&2, &1.h))
     shift = align_shift(Enum.reverse(st.line), st)
     dy = base - text_base
@@ -4002,7 +4032,7 @@ defmodule Browser.Layout do
           do: %{
             it
             | x: it.x + shift,
-              y: st.y + dy + half + normal - it.h - div(normal - it.h, 4)
+              y: st.y + dy + half + normal - it.h - div(normal - it.h, 4) - Map.get(it, :vs, 0)
           }
 
     placed = placed |> Enum.map(&Map.drop(&1, [:glue, :lm])) |> apply_rel()
@@ -4065,6 +4095,17 @@ defmodule Browser.Layout do
 
   # a line that ends because the next word does not fit (a justified one stretches)
   defp wrap_flush(st), do: flush(%{st | soft: true})
+
+  defp raised_room(texts, base, below, normal, half, text_base) do
+    Enum.reduce(texts, {base, below}, fn
+      %{vs: vs} = it, {b, bl} when vs != 0 ->
+        y_rel = half + normal - it.h - div(normal - it.h, 4)
+        {max(b, text_base + vs - y_rel), max(bl, y_rel + it.h - vs - text_base)}
+
+      _, acc ->
+        acc
+    end)
+  end
 
   # -- inline boxes -----------------------------------------------------------------
   #
@@ -5439,7 +5480,7 @@ defmodule Browser.Layout do
         for p <- sized do
           rs = min(p.cell.rowspan, nrows - p.row)
           full_h = Enum.sum(Enum.slice(row_heights, p.row, rs)) + sy * (rs - 1)
-          valign = p.cell.valign || p.row_valign || "middle"
+          valign = p.cell.valign || p.row_valign || "top"
 
           extra_top =
             case valign do

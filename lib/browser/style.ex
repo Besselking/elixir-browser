@@ -929,7 +929,7 @@ defmodule Browser.Style do
     else
       ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
       {computed, custom} = compute(idx, ctx, parent)
-      computed = blockify_grid_item(computed, parent)
+      computed = computed |> blockify_grid_item(parent) |> flex_item_align(parent)
       root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
       ctx =
@@ -1118,6 +1118,13 @@ defmodule Browser.Style do
   end
 
   defp blockify_grid_item(computed, _parent), do: computed
+
+  # `vertical-align` does not apply to flex items (they are blockified)
+  defp flex_item_align(computed, %{computed: %{"display" => d}})
+       when d in ["flex", "inline-flex"],
+       do: Map.delete(computed, "vertical-align")
+
+  defp flex_item_align(computed, _parent), do: computed
 
   # -> {computed_map, custom_properties}
   #
@@ -1529,6 +1536,15 @@ defmodule Browser.Style do
   defp typed("box-shadow", v, env, _pc) do
     {r, g, b} = if match?({_, _, _}, env.color), do: env.color, else: {0, 0, 0}
     {:ok, Browser.Shadows.parse(v, env.fs, {r, g, b, 255})}
+  end
+
+  # a length or percentage; the keywords stay as they are
+  defp typed("vertical-align", v, env, _pc) do
+    cond do
+      px = length(v, env) -> {:ok, px}
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> {:ok, v}
+    end
   end
 
   defp typed(prop, "normal", _env, _pc) when prop in ["letter-spacing", "word-spacing"],
