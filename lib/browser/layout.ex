@@ -487,7 +487,7 @@ defmodule Browser.Layout do
   #      {:flush} {:gap, px} {:pad, px} {:hr} {:box_start, ref, color, left} {:box_end, ref}
 
   defp walk(nodes, style, acc) when is_list(nodes),
-    do: Enum.reduce(nodes, acc, &walk(&1, style, &2))
+    do: nodes |> wrap_table_parts() |> Enum.reduce(acc, &walk(&1, style, &2))
 
   # a soft hyphen (U+00AD) is invisible unless a line breaks at it; breaking there is not
   # supported yet, so it is dropped from the laid-out text (the DOM text keeps it)
@@ -1364,6 +1364,28 @@ defmodule Browser.Layout do
   end
 
   defp walk_children(_tag, kids, style, acc), do: walk(kids, style, acc)
+
+  @row_groups ~w(table-row-group table-header-group table-footer-group table-row)
+
+  # rows and row groups outside a table sit in an anonymous table of their own
+  defp wrap_table_parts(nodes) do
+    if Enum.any?(nodes, &table_part?/1) do
+      nodes
+      |> Enum.chunk_by(&table_part?/1)
+      |> Enum.flat_map(fn chunk ->
+        if table_part?(hd(chunk)),
+          do: [{:element, "div", [{"@computed", %{"display" => "table"}}], chunk}],
+          else: chunk
+      end)
+    else
+      nodes
+    end
+  end
+
+  defp table_part?({:element, tag, attrs, _}) when tag not in @skip,
+    do: computed(attrs)["display"] in @row_groups
+
+  defp table_part?(_), do: false
 
   defp list_item(list_tag, n, attrs, kids, style, c, acc) do
     li_style = restyle("li", attrs, style, c)
@@ -4818,7 +4840,7 @@ defmodule Browser.Layout do
       case c["border-spacing"] do
         {h, v} when not collapse? -> {h, v}
         _ when collapse? -> {0.0, 0.0}
-        _ -> {2.0, 2.0}
+        _ -> {0.0, 0.0}
       end
 
     # a table is at least as high as its `height`, the rows share what its content leaves over
@@ -4895,13 +4917,36 @@ defmodule Browser.Layout do
   # a row's background shows behind its cells; a row group's behind its rows
   defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg) do
     cells =
-      for {:element, tag, attrs, _} = el <- kids,
+      for {:element, tag, attrs, _} = el <- anonymous_cells(kids),
           tag not in @skip,
           cc = computed(attrs),
           tag in @cell_tags or cc["display"] == "table-cell",
           do: table_cell(el, cc, style)
 
     %{cells: cells, valign: valign_of(c["vertical-align"]), bg: row_bg(c) || group_bg}
+  end
+
+  # whatever else a row holds sits in an anonymous cell
+  defp anonymous_cells(kids) do
+    cell? = fn
+      {:element, tag, attrs, _} -> tag in @cell_tags or computed(attrs)["display"] == "table-cell"
+      _ -> false
+    end
+
+    skipped? = fn
+      {:element, tag, _, _} -> tag in @skip
+      {:text, t} -> String.trim(t) == ""
+      _ -> true
+    end
+
+    kids
+    |> Enum.reject(skipped?)
+    |> Enum.chunk_by(cell?)
+    |> Enum.flat_map(fn chunk ->
+      if cell?.(hd(chunk)),
+        do: chunk,
+        else: [{:element, "div", [{"@computed", %{"display" => "table-cell"}}], chunk}]
+    end)
   end
 
   defp table_caption({:element, tag, attrs, kids}, style) do
@@ -5458,6 +5503,12 @@ defmodule Browser.Layout do
       _ -> nil
     end
   end
+
+  # `clear` only applies to block-level boxes: not to the parts of a table
+  @table_parts ~w(table-row-group table-header-group table-footer-group table-row table-cell
+                  table-column table-column-group)
+
+  defp clear_side(%{"display" => d}) when d in @table_parts, do: nil
 
   defp clear_side(c) do
     case c["clear"] do
