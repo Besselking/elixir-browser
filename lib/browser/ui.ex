@@ -701,7 +701,7 @@ defmodule Browser.UI do
   defp draw_gc(dc, %{type: :text} = item, y) do
     gc = new_gc(dc)
     :wxGraphicsContext.setFont(gc, font(item), item.color)
-    :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    draw_gc_text(gc, item, y)
 
     if item.underline do
       uy = y + underline_offset(dc, item)
@@ -743,6 +743,38 @@ defmodule Browser.UI do
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
   # selected text: a translucent wash over it
+  # text with `letter-spacing` goes down a character at a time, each after the width of the
+  # ones before it and the spacing
+  defp draw_gc_text(gc, %{ls: ls} = item, y) when ls != 0 do
+    chars = String.graphemes(item.text)
+
+    chars
+    |> Enum.with_index()
+    |> Enum.each(fn {ch, i} ->
+      prefix = chars |> Enum.take(i) |> Enum.join() |> String.to_charlist()
+      {w, _, _, _} = :wxGraphicsContext.getTextExtent(gc, prefix)
+      :wxGraphicsContext.drawText(gc, String.to_charlist(ch), item.x + w + i * ls, y)
+    end)
+  end
+
+  defp draw_gc_text(gc, item, y),
+    do: :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+
+  defp draw_dc_text(dc, %{ls: ls} = item, y) when ls != 0 do
+    chars = String.graphemes(item.text)
+
+    chars
+    |> Enum.with_index()
+    |> Enum.each(fn {ch, i} ->
+      prefix = chars |> Enum.take(i) |> Enum.join() |> String.to_charlist()
+      {w, _} = :wxDC.getTextExtent(dc, prefix)
+      :wxDC.drawText(dc, String.to_charlist(ch), {round(item.x + w + i * ls), y})
+    end)
+  end
+
+  defp draw_dc_text(dc, item, y),
+    do: :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+
   defp draw(dc, %{type: :selection} = item, y, _scroll) do
     gc = new_gc(dc)
     :wxGraphicsContext.setBrush(gc, :wxBrush.new({56, 132, 255, 90}))
@@ -896,7 +928,7 @@ defmodule Browser.UI do
       Process.put(:paint_color, item.color)
     end
 
-    :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    draw_dc_text(dc, item, y)
 
     if item.underline or item.strike do
       :wxDC.setPen(dc, pen(item.color))
