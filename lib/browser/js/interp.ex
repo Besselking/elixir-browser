@@ -1074,7 +1074,7 @@ defmodule Browser.JS.Interp do
             :ok
 
           {:typed_array, ta} ->
-            Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id})
+            unless Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id}), do: fail_put()
             :ok
 
           :none ->
