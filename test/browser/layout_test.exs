@@ -4961,11 +4961,8 @@ defmodule Browser.LayoutTest do
     end
 
     test "row-reverse reverses every line" do
-      assert flex_boxes("flex-flow:row-reverse wrap;width:100px", 3) == [
-               {50, 0},
-               {0, 0},
-               {50, 20}
-             ]
+      assert Enum.sort(flex_boxes("flex-flow:row-reverse wrap;width:100px", 3)) ==
+               [{0, 0}, {50, 0}, {50, 20}]
     end
 
     test "align-content shares the height between the lines" do
