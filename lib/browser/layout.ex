@@ -2064,7 +2064,12 @@ defmodule Browser.Layout do
     |> put_if(
       c["text-align"] || c["direction"],
       fn s, _ ->
-        s = %{s | align: align(c["text-align"] || "start", c["direction"])}
+        # (`match-parent` keeps what the parent resolved, in the parent's direction)
+        s =
+          if c["text-align"] == "match-parent",
+            do: s,
+            else: %{s | align: align(c["text-align"] || "start", c["direction"])}
+
         if c["text-align"] == "justify-all", do: %{s | alast: s.align}, else: s
       end
     )

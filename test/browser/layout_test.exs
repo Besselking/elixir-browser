@@ -3017,6 +3017,21 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "bbbb").x == 4
     end
 
+    test "the dir attribute sets the direction, auto from the first strong letter" do
+      {items, _} =
+        fl(~s|<div dir="rtl">aaaa</div><div dir="rtl"><p dir="auto">bbbb</p></div>|)
+
+      assert word_at(items, "aaaa").x == 208 - 4 - 32
+      assert word_at(items, "bbbb").x < 100
+    end
+
+    test "text-align: match-parent keeps the parent's resolved alignment" do
+      {items, _} =
+        fl(~s|<div style="text-align:right"><p style="text-align:match-parent">cc</p></div>|)
+
+      assert word_at(items, "cc").x > 100
+    end
+
     test "an absolute box without offsets sits at its static position, at the right when rtl" do
       {items, _} =
         fl(

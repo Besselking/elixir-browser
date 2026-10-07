@@ -289,7 +289,7 @@ defmodule Browser.Style do
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
-      for {prop, value} <- hints(own) do
+      for {prop, value} <- dir_hint(own) ++ hints(own) do
         {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
       end
 
@@ -629,6 +629,34 @@ defmodule Browser.Style do
       _ ->
         []
     end
+  end
+
+  # the `dir` attribute sets the direction; `auto` takes it from the first strong letter
+  defp dir_hint(%{attrs: attrs} = ctx) do
+    case attrs |> attr("dir") |> String.downcase() do
+      d when d in ["ltr", "rtl"] -> [{"direction", d}]
+      "auto" -> [{"direction", auto_direction(Map.get(ctx, :kids, []))}]
+      _ -> []
+    end
+  end
+
+  defp auto_direction(kids) do
+    text =
+      kids
+      |> Stream.flat_map(fn
+        {:text, t} -> [t]
+        {:element, tag, _, k} when tag not in ["script", "style"] -> [auto_text(k)]
+        _ -> []
+      end)
+      |> Enum.join()
+
+    if Regex.match?(~r/^[^\p{L}]*[\p{Hebrew}\p{Arabic}\p{Syriac}\p{Thaana}]/u, text),
+      do: "rtl",
+      else: "ltr"
+  end
+
+  defp auto_text(kids) do
+    for {:text, t} <- kids, into: "", do: t
   end
 
   defp hints(%{tag: "input", attrs: attrs}) do
