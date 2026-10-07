@@ -963,6 +963,16 @@ defmodule Browser.JSTest do
   end
 
   describe "classes" do
+    test "arguments in typeof, var and delete" do
+      assert js("function f() { return typeof arguments } f()") == "object"
+      assert js("function f() { var arguments; return typeof arguments } f()") == "object"
+
+      assert js("function f() { return [delete arguments, typeof arguments].join() } f()") ==
+               "false,object"
+
+      assert js("typeof arguments") == "undefined"
+    end
+
     test "constructors, methods, accessors and statics" do
       assert js(
                "class A { constructor(x) { this.x = x } get double() { return this.x * 2 } static make(n) { return new A(n) } add(n) { return this.x + n } } var a = A.make(4); [a.x, a.double, a.add(1), a instanceof A, typeof A].join()"

@@ -2402,6 +2402,14 @@ defmodule Browser.JS.Interp do
   defp apply_hoist(scope, names, funs) do
     if names != [] do
       s = deref(scope)
+
+      # `var arguments;` keeps the arguments object (it only names the binding again)
+      if "arguments" in names and is_map_key(s.vars, :args) and
+           not is_map_key(s.vars, "arguments") and
+           not Enum.any?(funs, &(elem(&1, 0) == "arguments")),
+         do: lazy_arguments(scope)
+
+      s = deref(scope)
       vars = Enum.reduce(names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
       store(scope, %{s | vars: vars})
     end
@@ -2561,8 +2569,38 @@ defmodule Browser.JS.Interp do
         MapSet.member?(lexset, n),
         do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
 
+    check_global_declarable(hoisted_names(stmts), fundecls(stmts))
+
+    # HasRestrictedGlobalProperty: a lexical name may not hide a non-configurable property
+    g = Map.get(deref(global()).vars, :this)
+
+    for n <- lex,
+        match?({_, _, _, _, false}, Browser.JS.Props.own_state(g, n)),
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    # a `var` of a name that already exists leaves that property as it is; a function
+    # declaration takes over a configurable property of the global object
+    fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
+    {:obj, gid} = g
+
+    props_before = deref(gid).props
+
+    for n <- fun_names, Map.has_key?(props_before, n) and not global_fixed?(n) do
+      o = deref(gid)
+
+      if match?({_, _, _, _, true}, Browser.JS.Props.own_state(g, n)),
+        do: store(gid, %{o | props: Map.delete(o.props, n), keys: List.delete(o.keys, n)})
+    end
+
+    gvars = deref(global()).vars
+
+    fresh =
+      for n <- vars,
+          n in fun_names or not (Map.has_key?(gvars, n) or Map.has_key?(props_before, n)),
+          do: n
+
     Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
-    Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(vars)))
+    Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(fresh)))
   end
 
   @doc false
@@ -3414,6 +3452,12 @@ defmodule Browser.JS.Interp do
       {:ok, v} ->
         typeof(v)
 
+      :error when name == "arguments" ->
+        case lookup_var(env, :args) do
+          {:ok, _} -> typeof(ev({:id, "arguments"}, env))
+          :error -> "undefined"
+        end
+
       :error ->
         with {:ok, v} <- Browser.JS.DOM.named_element(name),
              do: typeof(v),
@@ -3447,6 +3491,10 @@ defmodule Browser.JS.Interp do
           deref(sc).parent == nil and name in ["NaN", "Infinity", "undefined"] ->
             false
 
+          # the arguments object of a function is a binding that cannot be deleted
+          name == "arguments" and is_map_key(deref(sc).vars, :args) ->
+            false
+
           eval_declared?(sc, name) ->
             st = deref(sc)
 
@@ -3470,6 +3518,10 @@ defmodule Browser.JS.Interp do
               r -> r
             end
         end
+
+      # the arguments object that is not built yet is still a binding of the function
+      nil when name == "arguments" ->
+        not match?({:ok, _}, lookup_var(env, :args))
 
       _ ->
         true
@@ -3890,24 +3942,32 @@ defmodule Browser.JS.Interp do
 
     if vs.parent == nil do
       for n <- names, global_lexical?(n), do: clash.(n)
-      g = Map.get(deref(var_scope).vars, :this)
+      check_global_declarable(var_names, fun_decls)
+    end
 
-      for {n, _} <- fun_decls do
-        ok =
-          case Browser.JS.Props.own_state(g, n) do
-            nil -> Browser.JS.Props.extensible?(g)
-            {_, _, _, _, true} -> true
-            {:data, _, true, true, _} -> true
-            _ -> false
-          end
+    :ok
+  end
 
-        unless ok, do: throw_error("TypeError", "Cannot declare global function '#{n}'")
-      end
+  # CanDeclareGlobalFunction / CanDeclareGlobalVar: a declaration must not conflict with a
+  # property of the global object that cannot be redefined, nor add one to a sealed object
+  defp check_global_declarable(var_names, fun_decls) do
+    g = Map.get(deref(global()).vars, :this)
 
-      for n <- var_names do
-        if Browser.JS.Props.own_state(g, n) == nil and not Browser.JS.Props.extensible?(g),
-          do: throw_error("TypeError", "Cannot declare global variable '#{n}'")
-      end
+    for {n, _} <- fun_decls do
+      ok =
+        case Browser.JS.Props.own_state(g, n) do
+          nil -> Browser.JS.Props.extensible?(g)
+          {_, _, _, _, true} -> true
+          {:data, _, true, true, _} -> true
+          _ -> false
+        end
+
+      unless ok, do: throw_error("TypeError", "Cannot declare global function '#{n}'")
+    end
+
+    for n <- var_names do
+      if Browser.JS.Props.own_state(g, n) == nil and not Browser.JS.Props.extensible?(g),
+        do: throw_error("TypeError", "Cannot declare global variable '#{n}'")
     end
 
     :ok
