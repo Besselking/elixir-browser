@@ -708,6 +708,19 @@ defmodule Browser.JS.Parser do
     {{:var, :let, [{{:id, name}, node}]}, ts}
   end
 
+  defp statement([{:p, "@", _} | _] = ts) do
+    {decs, ts} = decorators(ts, [])
+
+    case ts do
+      [{:id, "class", _}, {:id, name, _} | _] when name not in @reserved ->
+        {node, ts} = class_rest(tl(ts), decs)
+        {{:var, :let, [{{:id, name}, node}]}, ts}
+
+      _ ->
+        throw({:syntax, "a decorator must be followed by a class"})
+    end
+  end
+
   defp statement([{:id, "import", _}, {:p, p, _} | _] = ts) when p in ["(", "."],
     do: expression_statement(ts)
 
@@ -865,6 +878,22 @@ defmodule Browser.JS.Parser do
         {node, rest} = class_rest(rest)
         {{:export_default, {:classdecl, "*default*", node}}, rest}
 
+      [{:p, "@", _} | _] ->
+        {decs, t} = decorators(ts, [])
+
+        case t do
+          [{:id, "class", _}, {:id, name, _} | _] when name not in @reserved ->
+            {node, rest} = class_rest(tl(t), decs)
+            {{:export_default, {:classdecl, name, node}}, rest}
+
+          [{:id, "class", _} | rest] ->
+            {node, rest} = class_rest(rest, decs)
+            {{:export_default, {:classdecl, "*default*", node}}, rest}
+
+          _ ->
+            throw({:syntax, "a decorator must be followed by a class"})
+        end
+
       _ ->
         {e, ts} = assignment(ts)
         {{:export_default, {:expr, e}}, semi(ts)}
@@ -905,6 +934,10 @@ defmodule Browser.JS.Parser do
   defp module_item([{:id, "export", _} | ts]) do
     case ts do
       [{:id, kw, _} | _] when kw in ["var", "let", "const", "function", "async", "class"] ->
+        {stmt, ts} = statement(ts)
+        {{:export, stmt}, ts}
+
+      [{:p, "@", _} | _] ->
         {stmt, ts} = statement(ts)
         {{:export, stmt}, ts}
 
@@ -1605,7 +1638,7 @@ defmodule Browser.JS.Parser do
             kind != :field ->
           throw({:syntax, "class constructor may not be an accessor, generator or async"})
 
-        kind == :field and name == "constructor" ->
+        kind in [:field, :accessor] and name == "constructor" ->
           throw({:syntax, "classes may not have a field named 'constructor'"})
 
         static? and name == "prototype" and kind != :block ->
@@ -1631,7 +1664,7 @@ defmodule Browser.JS.Parser do
           if contains_node?(value, &match?({:call, {:super}, _, _}, &1)),
             do: throw({:syntax, "'super' call is not allowed in a class static block"})
 
-        :field ->
+        k when k in [:field, :accessor] ->
           if value != nil and contains_node?(value, &(&1 == {:id, "arguments"})),
             do: throw({:syntax, "'arguments' is not allowed in a class field initializer"})
 
@@ -1707,7 +1740,7 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp class_rest(ts) do
+  defp class_rest(ts, class_decorators \\ []) do
     outer_refs = Process.get(:js_priv_refs, [])
     Process.put(:js_priv_refs, [])
 
@@ -1740,15 +1773,76 @@ defmodule Browser.JS.Parser do
     Process.put(:js_nt, nt)
     Process.put(:js_strict, outer)
 
+    # the decorators of the members ride along as a last element of the member list
+    {members, member_decorators} =
+      case List.last(members) do
+        {:decorations, _} = d -> {Enum.drop(members, -1), d}
+        _ -> {members, nil}
+      end
+
     check_class_members(members, super != nil)
     names = check_private_names(members)
     unresolved = Enum.reject(Process.get(:js_priv_refs, []), &(&1 in names))
     Process.put(:js_priv_refs, unresolved ++ outer_refs)
+
+    members =
+      if class_decorators == [] and member_decorators == nil do
+        members
+      else
+        {:decorations, by_index} = member_decorators || {:decorations, %{}}
+        members ++ [{:decorations, class_decorators, by_index}]
+      end
+
     {{:class, name, super, members}, ts}
   end
 
-  defp class_members([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  # `@dec`, `@a.b`, `@a.#b`, `@a.b(args)`, `@(expr)`
+  defp decorators([{:p, "@", _} | ts], acc) do
+    {d, ts} = decorator(ts)
+    decorators(ts, [d | acc])
+  end
+
+  defp decorators(ts, acc), do: {Enum.reverse(acc), ts}
+
+  defp decorator([{:p, "(", _} | ts]) do
+    {e, ts} = expression(ts)
+    {e, expect(ts, ")")}
+  end
+
+  defp decorator([{:id, name, _} | ts])
+       when name not in @reserved or name in ["await", "yield"] do
+    {e, ts} = decorator_chain({:id, name}, ts)
+
+    case ts do
+      [{:p, "(", _} | t] ->
+        {args, t} = arguments(t, [])
+        {{:call, e, args, false}, t}
+
+      _ ->
+        {e, ts}
+    end
+  end
+
+  defp decorator(_), do: throw({:syntax, "invalid decorator"})
+
+  defp decorator_chain(e, [{:p, ".", _}, {:priv, name, _} | ts]) do
+    private_ref(name)
+    decorator_chain({:member, e, {:priv, name}, false}, ts)
+  end
+
+  defp decorator_chain(e, [{:p, ".", _}, {k, name, _} | ts]) when k in [:id, :eid],
+    do: decorator_chain({:member, e, {:str, name}, false}, ts)
+
+  defp decorator_chain(e, ts), do: {e, ts}
+
+  defp class_members([{:p, "}", _} | ts], acc), do: {attach_decorators(Enum.reverse(acc)), ts}
   defp class_members([{:p, ";", _} | ts], acc), do: class_members(ts, acc)
+
+  # decorators before a member: kept in the list until the member itself is parsed
+  defp class_members([{:p, "@", _} | _] = ts, acc) do
+    {decs, ts} = decorators(ts, [])
+    class_members(ts, [{:decor, decs} | acc])
+  end
 
   defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
     outer = Process.get(:js_generator, false)
@@ -1767,7 +1861,8 @@ defmodule Browser.JS.Parser do
 
   defp class_members(ts, acc) do
     {static?, ts} = class_modifier(ts, "static")
-    {async?, ts} = class_modifier(ts, "async")
+    {accessor?, ts} = accessor_modifier(ts)
+    {async?, ts} = if accessor?, do: {false, ts}, else: class_modifier(ts, "async")
 
     {generator?, ts} =
       case ts do
@@ -1810,12 +1905,43 @@ defmodule Browser.JS.Parser do
 
       [{:p, "=", _} | t] ->
         {init, ts} = assignment(t)
-        class_members(semi_field(ts), [{:cmember, :field, key, init, static?} | acc])
+
+        class_members(semi_field(ts), [
+          {:cmember, if(accessor?, do: :accessor, else: :field), key, init, static?} | acc
+        ])
 
       t ->
-        class_members(semi_field(t), [{:cmember, :field, key, nil, static?} | acc])
+        class_members(semi_field(t), [
+          {:cmember, if(accessor?, do: :accessor, else: :field), key, nil, static?} | acc
+        ])
     end
   end
+
+  # the `{:decor, list}` markers become one `{:decorations, %{member index => list}}` element
+  # after the members
+  defp attach_decorators(items) do
+    {members, decorations, _pending} =
+      Enum.reduce(items, {[], %{}, nil}, fn
+        {:decor, decs}, {ms, ds, pending} -> {ms, ds, (pending || []) ++ decs}
+        m, {ms, ds, nil} -> {[m | ms], ds, nil}
+        m, {ms, ds, pending} -> {[m | ms], Map.put(ds, length(ms), pending), nil}
+      end)
+
+    members = Enum.reverse(members)
+    if decorations == %{}, do: members, else: members ++ [{:decorations, decorations}]
+  end
+
+  # `accessor` before a member name on the same line
+  defp accessor_modifier([{:id, "accessor", _}, {t, v, nl} | _] = ts) do
+    cond do
+      nl?(nl) -> {false, ts}
+      t == :p and v not in ["[", "*"] -> {false, ts}
+      t in [:eof] -> {false, ts}
+      true -> {true, tl(ts)}
+    end
+  end
+
+  defp accessor_modifier(ts), do: {false, ts}
 
   # `static` / `async` as a modifier: followed by a member name, not by `(`, `=`, `;` or `}`
   defp class_modifier([{:id, word, _}, {t, v, _} | _] = ts, word) do
@@ -2440,6 +2566,15 @@ defmodule Browser.JS.Parser do
   defp primary([{:id, "this", _} | ts]), do: {{:this}, ts}
 
   defp primary([{:id, "class", _} | ts]), do: class_rest(ts)
+
+  defp primary([{:p, "@", _} | _] = ts) do
+    {decs, ts} = decorators(ts, [])
+
+    case ts do
+      [{:id, "class", _} | t] -> class_rest(t, decs)
+      _ -> throw({:syntax, "a decorator must be followed by a class"})
+    end
+  end
 
   # `import(specifier)`, `import.source(specifier)`, `import.defer(specifier)` and `import.meta`
   defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
