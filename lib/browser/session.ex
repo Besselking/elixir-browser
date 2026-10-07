@@ -123,6 +123,8 @@ defmodule Browser.Session do
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
       active: 0,
+      # a tab was just opened and its address bar is waiting for typing
+      fresh_tab: false,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
       closed: [],
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
@@ -182,7 +184,24 @@ defmodule Browser.Session do
         :history -> state.history
       end
 
-    state = state |> set_url_text(page.url) |> remember(result, mode, page)
+    state = remember(state, result, mode, page)
+
+    # a new tab keeps the address bar focused and selected, unless the user has typed already
+    state =
+      cond do
+        state.fresh_tab and state.url_text != Browser.home() ->
+          state
+
+        state.fresh_tab ->
+          state = set_url_text(state, page.url)
+          UI.focus_url(state.ui)
+          state
+
+        true ->
+          set_url_text(state, page.url)
+      end
+
+    state = %{state | fresh_tab: false}
     UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
     UI.set_status(state.ui, "Done")
 
@@ -461,7 +480,7 @@ defmodule Browser.Session do
       ) do
     new_tab? = ctrl or meta
     UI.hide_suggestions(state.ui)
-    state = %{state | suggest: nil}
+    state = %{state | suggest: nil, fresh_tab: false}
 
     x = wx_x + state.scroll_x
     UI.focus_page(state.ui)
@@ -2560,6 +2579,7 @@ defmodule Browser.Session do
 
   # the tab is left: what was running for it stops, and the rest is put away
   defp park(state) do
+    state = %{state | fresh_tab: false}
     stale? = state.layout_job != nil or state.page_job != nil
     UI.hide_suggestions(state.ui)
 
@@ -2634,7 +2654,9 @@ defmodule Browser.Session do
     state = %{state | tabs: state.tabs ++ [tab]}
     state = state |> Map.merge(tab) |> then(&%{&1 | active: length(&1.tabs) - 1})
     state = resume_blank(state)
-    load(state, Browser.home(), :push)
+    state = set_url_text(state, Browser.home())
+    UI.focus_url(state.ui)
+    load(%{state | fresh_tab: true}, Browser.home(), :push)
   end
 
   # a tab with nothing in it is shown

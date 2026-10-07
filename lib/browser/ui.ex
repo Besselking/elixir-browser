@@ -1543,6 +1543,12 @@ defmodule Browser.UI do
     :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
   end
 
+  @doc "Focuses the address bar with its text selected, so typing replaces it."
+  def focus_url(%{url: url}) do
+    :wxWindow.setFocus(url)
+    :wxTextCtrl.setSelection(url, 0, -1)
+  end
+
   @doc "Moves keyboard focus to the page, so key events reach it."
   def focus_page(%{panel: p}), do: :wxWindow.setFocus(p)
 
