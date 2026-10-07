@@ -21,7 +21,10 @@ defmodule Browser.Interact do
     * `:backspace`, `:delete`, `:enter`, `:tab`, `:shift_tab`, `:escape`
     * `:left`, `:right`, `:up`, `:down`, `:home`, `:end`, `:page_up`, `:page_down`
     * `{:select, :left | :right | :up | :down | :home | :end}` for shift and a movement key
-    * `:paste`, `:copy`, `:cut` and `:select_all` for those shortcuts, `:ignore` for everything else
+    * `:paste`, `:copy`, `:cut` and `:select_all` for those shortcuts
+    * `{:shortcut, letter}` for the control or command key with `b`, `i`, `u`, `z` or `y` (and
+      `"Z"` for shift with `z`), which an editing region takes for formatting and undo
+    * `:ignore` for everything else
   """
   def key(%{ctrl?: ctrl, meta?: meta, alt?: alt} = event) when ctrl or meta or alt do
     cond do
@@ -29,6 +32,7 @@ defmodule Browser.Interact do
       (ctrl or meta) and not alt and letter_key?(event, [?c, ?C, 3]) -> :copy
       (ctrl or meta) and not alt and letter_key?(event, [?a, ?A, 1]) -> :select_all
       (ctrl or meta) and not alt and letter_key?(event, [?x, ?X, 24]) -> :cut
+      (ctrl or meta) and not alt -> shortcut(event)
       alt and not (ctrl or meta) -> printable(event)
       true -> :ignore
     end
@@ -56,6 +60,21 @@ defmodule Browser.Interact do
   def key(%{code: 366}), do: :page_up
   def key(%{code: 367}), do: :page_down
   def key(event), do: printable(event)
+
+  # a letter with the command/control key that an editing region uses
+  defp shortcut(%{shift?: shift} = event) do
+    Enum.find_value(~w(b i u z y), :ignore, fn letter ->
+      if ctrl_letter?(event, letter) do
+        if letter == "z" and shift, do: {:shortcut, "Z"}, else: {:shortcut, letter}
+      end
+    end)
+  end
+
+  # the letter as a character, a control code (Ctrl+B is 2) or the key code of the capital; Tab
+  # is also code 9, so Ctrl+I only counts as the letter
+  defp ctrl_letter?(%{char: char, code: code}, <<l>>) do
+    (char in [l, l - 32, l - 96] and code != 9) or code == l - 32
+  end
 
   # `v` pressed with the command/control key (some platforms send the control code 22)
   defp paste_key?(event), do: letter_key?(event, [?v, ?V, 22])
