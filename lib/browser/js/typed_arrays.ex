@@ -1068,6 +1068,15 @@ defmodule Browser.JS.TypedArrays do
       old
     end)
 
+    def_fn(atomics, "pause", 0, fn _, args ->
+      n = arg(args, 0)
+
+      unless n == :undefined or (is_number(n) and n == trunc(n)),
+        do: throw_error("TypeError", "Atomics.pause: argument must be an integral number")
+
+      :undefined
+    end)
+
     def_fn(atomics, "load", 2, fn _, args ->
       ta = arg(args, 0)
       d = validate.(ta, false)
@@ -1263,6 +1272,8 @@ defmodule Browser.JS.TypedArrays do
       declare(scope, name, ctor)
     end
 
+    install_u8_encoding()
+
     # %TypedArray%.from and .of build an instance of whatever constructor they are called on
     def_fn(base_ctor, "from", 1, fn this, args ->
       unless Interp.constructor?(this), do: throw_error("TypeError", "this is not a constructor")
@@ -1304,6 +1315,124 @@ defmodule Browser.JS.TypedArrays do
       target
     end)
   end
+
+  # Uint8Array.fromBase64/fromHex and the prototype's toBase64/toHex/setFromBase64/setFromHex
+  defp install_u8_encoding do
+    ctor = proto({:ta_ctor, :u8})
+    p = proto({:ta, :u8})
+    max = 9_007_199_254_740_991
+
+    str! = fn s ->
+      unless is_binary(s), do: throw_error("TypeError", "argument must be a string")
+      s
+    end
+
+    options! = fn o ->
+      cond do
+        o == :undefined -> nil
+        match?({:obj, _}, o) -> o
+        true -> throw_error("TypeError", "options must be an object")
+      end
+    end
+
+    option = fn o, key, default, allowed ->
+      v = if o == nil, do: :undefined, else: Interp.get(o, key)
+
+      cond do
+        v == :undefined -> default
+        is_binary(v) and v in allowed -> v
+        true -> throw_error("TypeError", "invalid #{key} option")
+      end
+    end
+
+    decode_opts = fn o ->
+      o = options!.(o)
+      alphabet = option.(o, "alphabet", "base64", ["base64", "base64url"])
+      last = option.(o, "lastChunkHandling", "loose", ["loose", "strict", "stop-before-partial"])
+      {alphabet, last}
+    end
+
+    u8! = fn this ->
+      case this do
+        {:obj, id} ->
+          case deref(id) do
+            %{host: {__MODULE__, {:ta, :u8, _, _, _}}} -> this
+            _ -> throw_error("TypeError", "this is not a Uint8Array")
+          end
+
+        _ ->
+          throw_error("TypeError", "this is not a Uint8Array")
+      end
+    end
+
+    from_bytes = fn bytes -> make(:u8, for(<<b <- bytes>>, do: b * 1.0)) end
+
+    set_bytes = fn this, status, read, bytes ->
+      {:ta, _, bid, off, _} = data!(this)
+      o = deref(bid)
+      n = byte_size(bytes)
+      <<pre::binary-size(^off), _::binary-size(^n), post::binary>> = o.bytes
+      store(bid, %{o | bytes: pre <> bytes <> post})
+      if status == :error, do: throw_error("SyntaxError", "invalid input")
+      res = new_object()
+      Interp.put(res, "read", read * 1.0)
+      Interp.put(res, "written", n * 1.0)
+      res
+    end
+
+    def_fn(ctor, "fromBase64", 1, fn _, args ->
+      s = str!.(arg(args, 0))
+      {alphabet, last} = decode_opts.(arg(args, 1))
+
+      case Browser.JS.BinaryEncoding.decode_base64(s, alphabet, last, max) do
+        {:ok, _, bytes} -> from_bytes.(bytes)
+        {:error, _, _} -> throw_error("SyntaxError", "invalid base64 string")
+      end
+    end)
+
+    def_fn(ctor, "fromHex", 1, fn _, args ->
+      s = str!.(arg(args, 0))
+
+      case Browser.JS.BinaryEncoding.decode_hex(s, max) do
+        {:ok, _, bytes} -> from_bytes.(bytes)
+        {:error, _, _} -> throw_error("SyntaxError", "invalid hex string")
+      end
+    end)
+
+    def_fn(p, "toBase64", 0, fn this, args ->
+      u8!.(this)
+      o = options!.(arg(args, 0))
+      alphabet = option.(o, "alphabet", "base64", ["base64", "base64url"])
+      omit = if o == nil, do: false, else: truthy(Interp.get(o, "omitPadding"))
+      {:ta, _, _, _, _} = d = data!(this)
+      Browser.JS.BinaryEncoding.encode_base64(u8_bytes(d), alphabet, omit)
+    end)
+
+    def_fn(p, "toHex", 0, fn this, _ ->
+      u8!.(this)
+      {:ta, _, _, _, _} = d = data!(this)
+      Browser.JS.BinaryEncoding.encode_hex(u8_bytes(d))
+    end)
+
+    def_fn(p, "setFromBase64", 1, fn this, args ->
+      u8!.(this)
+      s = str!.(arg(args, 0))
+      {alphabet, last} = decode_opts.(arg(args, 1))
+      {:ta, _, _, _, len} = data!(this)
+      {status, read, bytes} = Browser.JS.BinaryEncoding.decode_base64(s, alphabet, last, len)
+      set_bytes.(this, status, read, bytes)
+    end)
+
+    def_fn(p, "setFromHex", 1, fn this, args ->
+      u8!.(this)
+      s = str!.(arg(args, 0))
+      {:ta, _, _, _, len} = data!(this)
+      {status, read, bytes} = Browser.JS.BinaryEncoding.decode_hex(s, len)
+      set_bytes.(this, status, read, bytes)
+    end)
+  end
+
+  defp u8_bytes({:ta, _, bid, off, len}), do: binary_part(deref(bid).bytes, off, len)
 
   defp array_like_list({:obj, _} = src), do: array_like(src)
   defp array_like_list(_), do: []

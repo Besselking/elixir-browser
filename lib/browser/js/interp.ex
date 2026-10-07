@@ -126,9 +126,12 @@ defmodule Browser.JS.Interp do
   def make_error(type, message) do
     err = new_object([{"message", message}], proto({:error, type}))
     mark_error(err)
-    put_hidden(err, "stack", stack_string("#{type}: #{message}"))
+    set_stack(err, stack_string("#{type}: #{message}"))
     err
   end
+
+  @doc "Records the stack string `Error.prototype.stack` reports for an error object."
+  def set_stack({:obj, id}, str), do: store(id, Map.put(deref(id), :stack_str, str))
 
   @doc "Sets the [[ErrorData]] marker `Error.isError` looks for."
   def mark_error({:obj, id} = e) do
@@ -1053,6 +1056,7 @@ defmodule Browser.JS.Interp do
         case mod.host_put(data, key, v, {:obj, id}) do
           :ok -> :ok
           :miss -> put_prop(id, o, key, v)
+          :readonly -> fail_put()
         end
 
       %{proxy: _} ->

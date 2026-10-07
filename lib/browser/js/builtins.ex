@@ -230,9 +230,8 @@ defmodule Browser.JS.Builtins do
              put_hidden(err, "suppressed", sup)
            end
 
-           put_hidden(
+           Interp.set_stack(
              err,
-             "stack",
              Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> msg))
            )
 
@@ -243,6 +242,16 @@ defmodule Browser.JS.Builtins do
       end
 
     error_ctor = ctors |> List.keyfind("Error", 0) |> elem(1)
+
+    stack_of =
+      native("stackOf", fn _, [{:obj, id}] -> Map.get(deref(id), :stack_str, :undefined) end)
+
+    put_hidden(
+      error_proto,
+      "stack",
+      {:accessor, Browser.JS.Prelude.stack_accessor(:get, stack_of),
+       Browser.JS.Prelude.stack_accessor(:set, error_proto)}
+    )
 
     # the other error constructors inherit from Error
     for {t, {:obj, id}} <- ctors, t != "Error", do: store(id, %{deref(id) | proto: error_ctor})
