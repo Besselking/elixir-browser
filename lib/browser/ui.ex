@@ -1499,7 +1499,10 @@ defmodule Browser.UI do
   def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
     {x, _} = :wxWindow.getPosition(url)
     {w, _} = :wxWindow.getSize(url)
-    {_, y} = :wxWindow.getSize(toolbar)
+    # the toolbar sits below the tab strip: the list opens at its bottom edge
+    {_, top} = :wxWindow.getPosition(toolbar)
+    {_, h} = :wxWindow.getSize(toolbar)
+    y = top + h
     :wxListBox.clear(list)
 
     for {u, title} <- items do
