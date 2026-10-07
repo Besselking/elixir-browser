@@ -1376,7 +1376,11 @@ defmodule Browser.JS.TypedArrays do
 
           f ->
             if function?(f),
-              do: Interp.iterate_protocol_list(src),
+              do:
+                if(Interp.array_iteration_pristine?(src),
+                  do: iterate(src),
+                  else: Interp.iterate_protocol_list(src)
+                ),
               else: throw_error("TypeError", "Symbol.iterator is not a function")
         end
 

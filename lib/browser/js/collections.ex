@@ -263,6 +263,10 @@ defmodule Browser.JS.Collections do
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
 
+    # what a pristine array iteration looks like (see `Interp.array_iteration_pristine?/1`)
+    Process.put(:js_arr_values, values)
+    Process.put(:js_arr_next, Interp.get(proto(:array_iterator), "next"))
+
     unscopables = new_object([], :null)
 
     for name <-

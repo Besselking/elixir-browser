@@ -1415,7 +1415,7 @@ defmodule Browser.JS.Interp do
   def iter_source({:obj, id} = v) do
     o = deref(id)
 
-    if o.class in [:array, :map, :set] do
+    if (o.class == :array and array_iteration_pristine?(v)) or o.class in [:map, :set] do
       {:list, iterate(v)}
     else
       case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
@@ -1501,6 +1501,19 @@ defmodule Browser.JS.Interp do
   end
 
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
+  @doc false
+  # is iterating this array the built-in way (nobody replaced `Array.prototype[@@iterator]`,
+  # the array iterator's `next`, or gave the array an iterator of its own)? Then its elements
+  # can be read straight from the list.
+  def array_iteration_pristine?({:obj, id}) do
+    o = deref(id)
+    key = {:symbol, :iterator, "Symbol.iterator"}
+
+    o.class == :array and not Map.has_key?(o.props, key) and o.proto == proto(:array) and
+      Map.get(deref(elem(proto(:array), 1)).props, key) == Process.get(:js_arr_values) and
+      Map.get(deref(elem(proto(:array_iterator), 1)).props, "next") == Process.get(:js_arr_next)
+  end
+
   @doc false
   # the iteration protocol itself, with no shortcut for arrays (a patched iterator is seen)
   def iterate_protocol_list(v), do: iterate_protocol(v)
