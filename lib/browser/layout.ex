@@ -2179,9 +2179,15 @@ defmodule Browser.Layout do
     ~r/[ \x{3000}]|[^ \x{3000}]+/u
     |> Regex.scan(line |> String.replace("\r", " ") |> expand_tabs(style.tab))
     |> Enum.map_reduce(prev, fn
-      [sp], :text when sp in [" ", "\u3000"] -> {{:word, nbsp_of(sp), style, :hold}, :space}
-      [sp], _ when sp in [" ", "\u3000"] -> {{:word, nbsp_of(sp), style}, :space}
-      [run], _ -> {{:word, run, style}, :text}
+      # (`line-break: anywhere` allows a break between a word and the space after it)
+      [sp], :text when sp in [" ", "\u3000"] and style.wrap_chars != :every ->
+        {{:word, nbsp_of(sp), style, :hold}, :space}
+
+      [sp], _ when sp in [" ", "\u3000"] ->
+        {{:word, nbsp_of(sp), style}, :space}
+
+      [run], _ ->
+        {{:word, run, style}, :text}
     end)
     |> elem(0)
   end
@@ -4359,7 +4365,7 @@ defmodule Browser.Layout do
 
         # no space between this word and what comes before: they only break before all of it
         glued? and space_w == 0 and not st.after_space ->
-          wrap_glued(st, line_left, glue)
+          wrap_glued(st, line_left, glue, style)
 
         true ->
           st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
@@ -4431,6 +4437,31 @@ defmodule Browser.Layout do
 
   # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to
   # the last place a line may break moves to the next line together.
+  # (`word-break: break-all` takes the last letter of the word before a space of `break-spaces`
+  # along, since a break may not come between a letter and the space after it)
+  defp wrap_glued(
+         %{line: [%{type: :text, text: text} = it | older]} = st,
+         line_left,
+         :hold,
+         %{wrap_chars: :all} = style
+       )
+       when older != [] or byte_size(text) > 1 do
+    case String.graphemes(text) do
+      [_, _ | _] = chars ->
+        {head, [last]} = Enum.split(chars, length(chars) - 1)
+        head = Enum.join(head)
+        head_w = st.measure.(head, style)
+        st = %{st | line: [%{it | text: head, w: head_w} | older], x: it.x + head_w}
+        st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+        word_placed(last, style, true, st, false, st.measure.(last, style), 0, line_left)
+
+      _ ->
+        wrap_glued(st, line_left, :hold)
+    end
+  end
+
+  defp wrap_glued(st, line_left, glued, _style), do: wrap_glued(st, line_left, glued)
+
   defp wrap_glued(st, line_left, glued) do
     {chain, rest} = Enum.split_while(st.line, &Map.get(&1, :glue, false))
 
