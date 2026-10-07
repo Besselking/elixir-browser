@@ -4438,6 +4438,19 @@ defmodule Browser.LayoutTest do
       assert Enum.find(items, &(&1[:text] == "b")).x >= green.x + 60
     end
 
+    test "an inline-table is as wide as its content, not the room there is" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="position:absolute"><div style="display:inline-table;border:10px solid orange;margin:50px"><div style="display:table-row"><div style="display:table-cell;width:200px;height:20px"></div></div></div></div>|
+
+      top =
+        Enum.find(
+          laid_out(html),
+          &(&1.type == :rect and &1.color == {255, 165, 0} and &1.h == 10 and &1.w > 10)
+        )
+
+      assert top.w == 220
+    end
+
     test "a background is cut where a column ends and a rule is drawn between columns" do
       html =
         ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|

@@ -466,6 +466,7 @@ css/CSS2/borders/border-right-applies-to-007.xht
 css/CSS2/borders/border-right-applies-to-009.xht
 css/CSS2/borders/border-right-applies-to-012.xht
 css/CSS2/borders/border-right-applies-to-013.xht
+css/CSS2/borders/border-right-applies-to-014.xht
 css/CSS2/borders/border-right-applies-to-015.xht
 css/CSS2/borders/border-right-color-129.xht
 css/CSS2/borders/border-right-color-174.xht
@@ -474,6 +475,7 @@ css/CSS2/borders/border-right-color-applies-to-007.xht
 css/CSS2/borders/border-right-color-applies-to-009.xht
 css/CSS2/borders/border-right-color-applies-to-012.xht
 css/CSS2/borders/border-right-color-applies-to-013.xht
+css/CSS2/borders/border-right-color-applies-to-014.xht
 css/CSS2/borders/border-right-color-applies-to-015.xht
 css/CSS2/borders/border-right-style-001.xht
 css/CSS2/borders/border-right-style-002.xht
@@ -538,6 +540,7 @@ css/CSS2/borders/border-right-width-applies-to-007.xht
 css/CSS2/borders/border-right-width-applies-to-009.xht
 css/CSS2/borders/border-right-width-applies-to-012.xht
 css/CSS2/borders/border-right-width-applies-to-013.xht
+css/CSS2/borders/border-right-width-applies-to-014.xht
 css/CSS2/borders/border-right-width-applies-to-015.xht
 css/CSS2/borders/border-shorthands-001.xht
 css/CSS2/borders/border-shorthands-002.xht
@@ -719,6 +722,7 @@ css/CSS2/box-display/descendant-display-override-001.xht
 css/CSS2/box-display/display-001.xht
 css/CSS2/box-display/display-002.xht
 css/CSS2/box-display/display-005.xht
+css/CSS2/box-display/display-007.xht
 css/CSS2/box-display/display-011.xht
 css/CSS2/box-display/display-016.xht
 css/CSS2/box-display/display-017.xht
@@ -971,7 +975,12 @@ css/CSS2/floats-clear/margin-collapse-023.xht
 css/CSS2/floats-clear/margin-collapse-024.xht
 css/CSS2/floats-clear/margin-collapse-027.xht
 css/CSS2/floats-clear/margin-collapse-031.xht
+css/CSS2/floats-clear/margin-collapse-121.xht
+css/CSS2/floats-clear/margin-collapse-122.xht
+css/CSS2/floats-clear/margin-collapse-134.xht
 css/CSS2/floats-clear/margin-collapse-135.xht
+css/CSS2/floats-clear/margin-collapse-142.xht
+css/CSS2/floats-clear/margin-collapse-158.xht
 css/CSS2/floats-clear/margin-collapse-165.xht
 css/CSS2/floats-clear/margin-collapse-clear-002.xht
 css/CSS2/floats-clear/margin-collapse-clear-003.xht
@@ -1132,6 +1141,7 @@ css/CSS2/linebox/line-height-applies-to-008.xht
 css/CSS2/linebox/line-height-applies-to-009.xht
 css/CSS2/linebox/line-height-applies-to-012.xht
 css/CSS2/linebox/line-height-applies-to-013.xht
+css/CSS2/linebox/line-height-applies-to-014.xht
 css/CSS2/linebox/line-height-applies-to-015.xht
 css/CSS2/linebox/line-height-applies-to-016.xht
 css/CSS2/linebox/line-height-bleed-002.xht
@@ -1191,6 +1201,7 @@ css/CSS2/linebox/vertical-align-applies-to-007.xht
 css/CSS2/linebox/vertical-align-applies-to-009.xht
 css/CSS2/linebox/vertical-align-applies-to-012.xht
 css/CSS2/linebox/vertical-align-applies-to-013.xht
+css/CSS2/linebox/vertical-align-applies-to-014.xht
 css/CSS2/linebox/vertical-align-applies-to-015.xht
 css/CSS2/linebox/vertical-align-baseline-001.xht
 css/CSS2/linebox/vertical-align-baseline-002.xht
@@ -1217,6 +1228,7 @@ css/CSS2/margin-padding-clear/margin-applies-to-007.xht
 css/CSS2/margin-padding-clear/margin-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-applies-to-013.xht
+css/CSS2/margin-padding-clear/margin-applies-to-014.xht
 css/CSS2/margin-padding-clear/margin-backgrounds-002.xht
 css/CSS2/margin-padding-clear/margin-backgrounds-003.xht
 css/CSS2/margin-padding-clear/margin-border-padding-001.xht
@@ -1446,6 +1458,7 @@ css/CSS2/margin-padding-clear/margin-right-applies-to-007.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-013.xht
+css/CSS2/margin-padding-clear/margin-right-applies-to-014.xht
 css/CSS2/margin-padding-clear/margin-shorthand-001.xht
 css/CSS2/margin-padding-clear/margin-shorthand-002.xht
 css/CSS2/margin-padding-clear/margin-shorthand-003.xht
@@ -1511,6 +1524,7 @@ css/CSS2/margin-padding-clear/margin-top-applies-to-008.xht
 css/CSS2/margin-padding-clear/margin-top-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-top-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-top-applies-to-013.xht
+css/CSS2/margin-padding-clear/margin-top-applies-to-014.xht
 css/CSS2/margin-padding-clear/margin-top-applies-to-015.xht
 css/CSS2/margin-padding-clear/padding-001.xht
 css/CSS2/margin-padding-clear/padding-002.xht
@@ -1531,6 +1545,7 @@ css/CSS2/margin-padding-clear/padding-applies-to-007.xht
 css/CSS2/margin-padding-clear/padding-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-applies-to-013.xht
+css/CSS2/margin-padding-clear/padding-applies-to-014.xht
 css/CSS2/margin-padding-clear/padding-background-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-002.xht
@@ -1765,6 +1780,7 @@ css/CSS2/margin-padding-clear/padding-right-applies-to-007.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-013.xht
+css/CSS2/margin-padding-clear/padding-right-applies-to-014.xht
 css/CSS2/margin-padding-clear/padding-shorthand-001.xht
 css/CSS2/margin-padding-clear/padding-shorthand-002.xht
 css/CSS2/margin-padding-clear/padding-shorthand-003.xht
@@ -2350,6 +2366,7 @@ css/CSS2/normal-flow/min-width-applies-to-008.xht
 css/CSS2/normal-flow/min-width-applies-to-009.xht
 css/CSS2/normal-flow/min-width-applies-to-012.xht
 css/CSS2/normal-flow/min-width-applies-to-013.xht
+css/CSS2/normal-flow/min-width-applies-to-014.xht
 css/CSS2/normal-flow/min-width-applies-to-015.xht
 css/CSS2/normal-flow/min-width-applies-to-016.xht
 css/CSS2/normal-flow/min-width-percentage-001.xht
