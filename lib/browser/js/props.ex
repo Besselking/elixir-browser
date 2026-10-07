@@ -206,14 +206,14 @@ defmodule Browser.JS.Props do
           base ++ hidden ++ ["length"]
 
       %{class: :function} ->
-        virtual =
+        # length, name and prototype come first, in that order, whether stored or not
+        std =
           for k <- ["length", "name", "prototype"],
-              k not in hidden and k not in base,
-              state({:obj, id}, k) != nil,
+              k in hidden or k in base or state({:obj, id}, k) != nil,
               do: k
 
-        {ints, rest} = Enum.split_with(base, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ virtual ++ rest ++ hidden
+        {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
+        Enum.sort_by(ints, &array_index/1) ++ std ++ rest ++ (hidden -- std)
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)

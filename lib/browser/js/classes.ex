@@ -80,6 +80,15 @@ defmodule Browser.JS.Classes do
     {:obj, fid} = f
     fobj = deref(fid)
     fobj = Map.put(fobj, :class_ctor, true)
+
+    fobj =
+      Map.update(
+        fobj,
+        :attrs,
+        %{"prototype" => %{w: false, c: false}},
+        &Map.put(&1, "prototype", %{w: false, c: false})
+      )
+
     store(fid, if(parent, do: %{fobj | proto: parent}, else: fobj))
 
     # members, in order; static fields and blocks run once everything is defined
