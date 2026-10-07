@@ -2898,7 +2898,13 @@ defmodule Browser.Layout do
     atom = if rel = current_rel(st), do: Map.put(atom, :rel, rel), else: atom
     # an atom with nothing drawn in it still takes the room it asks for (one with content is
     # measured by what it draws)
-    ext = if extent(atom.items) == 0, do: max(st.ext, x + atom.w + max(extra, 0)), else: st.ext
+    # (a width that is no more than the room there is: the width of a flex container measured
+    # without a bound is not what its surroundings need)
+    ext =
+      if extent(atom.items) == 0 or atom.w < @unbounded / 2,
+        do: max(st.ext, x + atom.w + max(extra, 0)),
+        else: st.ext
+
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil, ext: ext}
   end
 
@@ -3135,7 +3141,11 @@ defmodule Browser.Layout do
 
     st =
       if (own_width?(o.width) or o.maxw != nil) and fixed_width?(box),
-        do: limit_new_items(%{st | ext: max(st.ext, box.x + box.w + box_mr(o))}, box),
+        do:
+          limit_new_items(
+            %{st | ext: max(st.ext, box.x + box.w + box_mr(o) + max(st.right - st.free, 0))},
+            box
+          ),
         else: st
 
     # an empty box is as wide as the insets around its content, for shrink-to-fit
@@ -3816,7 +3826,7 @@ defmodule Browser.Layout do
           if left && right && !spec.replaced do
             avail
           else
-            min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)) + spec.rextra)
+            min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)))
           end
 
         w ->
