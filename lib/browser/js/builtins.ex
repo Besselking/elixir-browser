@@ -657,7 +657,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     array_fn(p, "reverse", fn this, _ ->
-      if fast_array?(this) and not has_holes?(this) do
+      if fast_array?(this) and not has_holes?(this) and not has_accessors?(this) do
         put_elems(this, Enum.reverse(elems(this)))
         this
       else
@@ -908,6 +908,9 @@ defmodule Browser.JS.Builtins do
     o = deref(id)
     map_size(o.items) != o.len
   end
+
+  defp has_accessors?({:obj, id}),
+    do: Enum.any?(deref(id).items, fn {_, v} -> match?({:accessor, _, _}, v) end)
 
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
