@@ -59,6 +59,16 @@ defmodule Browser.JS.EditingTest do
            """) == ["ell false", "H<i>ell</i>o <b>world</b>"]
   end
 
+  test "with a live range, inserting an ancestor throws and leaves the tree alone" do
+    assert edit("""
+           var r = document.createRange();
+           r.selectNodeContents(e);
+           var err;
+           try { e.firstChild.appendChild(e); } catch (x) { err = !!x; }
+           console.log(err, e.parentNode === document.body);
+           """) == ["true true"]
+  end
+
   test "execCommand bold wraps the selection and queryCommandState reports it" do
     assert edit("""
            var t = e.firstChild.firstChild;
