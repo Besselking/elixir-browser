@@ -727,15 +727,37 @@ defmodule Browser.JS.Parser do
 
   defp statement(ts), do: expression_statement(ts)
 
+  # `with { type: "json", ... }` after a module specifier: strings only, no key twice. The
+  # attributes are checked and then ignored: no module type takes any.
+  defp with_clause([{:id, "with", _}, {:p, "{", _} | ts]) do
+    {keys, ts} = with_entries(ts, [])
+    if length(keys) != length(Enum.uniq(keys)), do: throw({:syntax, "duplicate import attribute"})
+    ts
+  end
+
+  defp with_clause(ts), do: ts
+
+  defp with_entries([{:p, "}", _} | ts], acc), do: {acc, ts}
+
+  defp with_entries([{k, key, _}, {:p, ":", _}, {:str, _, _} | ts], acc) when k in [:id, :str] do
+    case ts do
+      [{:p, ",", _} | ts] -> with_entries(ts, [key | acc])
+      [{:p, "}", _} | ts] -> {[key | acc], ts}
+      _ -> throw({:syntax, "bad import attributes"})
+    end
+  end
+
+  defp with_entries(_, _), do: throw({:syntax, "bad import attributes"})
+
   defp module_item([{:id, "import", _}, {:str, spec, _} | ts]),
-    do: {{:import, spec, []}, semi(ts)}
+    do: {{:import, spec, []}, semi(with_clause(ts))}
 
   defp module_item([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
     {bindings, ts} = import_bindings(ts, [])
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
       _ -> throw({:syntax, "expected a module name"})
     end
   end
@@ -745,7 +767,7 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
       _ -> throw({:syntax, "expected a module name"})
     end
   end
@@ -755,7 +777,7 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
+      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
       _ -> throw({:syntax, "expected a module name"})
     end
   end
@@ -816,13 +838,16 @@ defmodule Browser.JS.Parser do
     {names, ts} = export_names(ts, [])
 
     case ts do
-      [{:id, "from", _}, {:str, spec, _} | ts] -> {{:export_from, spec, names}, semi(ts)}
-      ts -> {{:export_names, names}, semi(ts)}
+      [{:id, "from", _}, {:str, spec, _} | ts] ->
+        {{:export_from, spec, names}, semi(with_clause(ts))}
+
+      ts ->
+        {{:export_names, names}, semi(ts)}
     end
   end
 
   defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
-    do: {{:export_from, spec, :all}, semi(ts)}
+    do: {{:export_from, spec, :all}, semi(with_clause(ts))}
 
   defp module_item([
          {:id, "export", _},
@@ -832,7 +857,7 @@ defmodule Browser.JS.Parser do
          {:id, "from", _},
          {:str, spec, _} | ts
        ]),
-       do: {{:export_from, spec, [{:star, name}]}, semi(ts)}
+       do: {{:export_from, spec, [{:star, name}]}, semi(with_clause(ts))}
 
   defp module_item([{:id, "export", _} | ts]) do
     case ts do
@@ -2066,11 +2091,15 @@ defmodule Browser.JS.Parser do
     {{:await, e}, ts}
   end
 
-  defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts])
+  defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts] = all)
        when p in ["(", "[", "{", "!", "~"] do
-    await_allowed!()
-    {e, ts} = unary(ts)
-    {{:await, e}, ts}
+    if Process.get(:js_async, false) or Process.get(:js_module, false) do
+      await_allowed!()
+      {e, ts} = unary(ts)
+      {{:await, e}, ts}
+    else
+      postfix(all)
+    end
   end
 
   defp unary([{:id, op, _} | ts]) when op in ["typeof", "void", "delete"] do
@@ -2304,7 +2333,26 @@ defmodule Browser.JS.Parser do
   # `import(specifier)` and `import.meta`
   defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
     {e, ts} = assignment(ts)
-    {{:import_call, e}, expect(ts, ")")}
+
+    case ts do
+      [{:p, ")", _} | ts] ->
+        {{:import_call, e}, ts}
+
+      [{:p, ",", _}, {:p, ")", _} | ts] ->
+        {{:import_call, e}, ts}
+
+      [{:p, ",", _} | ts] ->
+        {opts, ts} = assignment(ts)
+
+        case ts do
+          [{:p, ",", _}, {:p, ")", _} | ts] -> {{:import_call, e, opts}, ts}
+          [{:p, ")", _} | ts] -> {{:import_call, e, opts}, ts}
+          _ -> throw({:syntax, "expected )"})
+        end
+
+      _ ->
+        throw({:syntax, "expected )"})
+    end
   end
 
   defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]) do

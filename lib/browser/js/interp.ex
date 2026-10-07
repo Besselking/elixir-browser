@@ -2639,6 +2639,65 @@ defmodule Browser.JS.Interp do
   @doc false
   def module_exec(stmts, scope), do: exec_list(stmts, scope)
 
+  defp import_call(e, opts, env) do
+    arg = ev(e, env)
+    options = if opts, do: ev(opts, env), else: :undefined
+    p = Browser.JS.Promise.new()
+
+    # the specifier and the options are converted now; the module is loaded in a later job
+    try do
+      spec = to_str(arg)
+      check_import_options(options)
+
+      base =
+        case lookup_var(env, :module_url) do
+          {:ok, b} -> b
+          :error -> nil
+        end
+
+      hook = pget(:js_import)
+
+      Browser.JS.Promise.enqueue(fn ->
+        if hook == nil,
+          do:
+            Browser.JS.Promise.reject(
+              p,
+              make_error("TypeError", "Dynamic import is not available")
+            ),
+          else: hook.(spec, base, p)
+      end)
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+    end
+
+    p
+  end
+
+  # `import(spec, { with: { key: "string" } })`: the options are an object, `with` an object of
+  # strings (a TypeError, as a rejection, otherwise)
+  defp check_import_options(:undefined), do: :ok
+
+  defp check_import_options({:obj, _} = options) do
+    case get(options, "with") do
+      :undefined ->
+        :ok
+
+      {:obj, _} = attrs ->
+        for k <- Browser.JS.Props.enumerable_own_keys(attrs), is_binary(k) do
+          unless is_binary(get(attrs, k)),
+            do: throw_error("TypeError", "Import attribute value must be a string")
+        end
+
+        :ok
+
+      _ ->
+        throw_error("TypeError", "The 'with' option must be an object")
+    end
+  end
+
+  defp check_import_options(_),
+    do: throw_error("TypeError", "The second argument of import() must be an object")
+
   @doc false
   # the current value of a module's variable (`:tdz` while uninitialized)
   def module_binding(scope, name) do
@@ -3272,37 +3331,8 @@ defmodule Browser.JS.Interp do
   end
 
   # `import(specifier)`: a promise for the module's namespace (the host loads it)
-  def ev({:import_call, e}, env) do
-    arg = ev(e, env)
-    p = Browser.JS.Promise.new()
-
-    # the specifier is converted now; the module is loaded in a later job
-    try do
-      spec = to_str(arg)
-
-      base =
-        case lookup_var(env, :module_url) do
-          {:ok, b} -> b
-          :error -> nil
-        end
-
-      hook = pget(:js_import)
-
-      Browser.JS.Promise.enqueue(fn ->
-        if hook == nil,
-          do:
-            Browser.JS.Promise.reject(
-              p,
-              make_error("TypeError", "Dynamic import is not available")
-            ),
-          else: hook.(spec, base, p)
-      end)
-    catch
-      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
-    end
-
-    p
-  end
+  def ev({:import_call, e}, env), do: import_call(e, nil, env)
+  def ev({:import_call, e, opts}, env), do: import_call(e, opts, env)
 
   def ev({:import_meta}, env) do
     url =

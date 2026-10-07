@@ -22,7 +22,7 @@ defmodule Browser.JS.Test262 do
     proxy-missing-checks
     Atomics.waitAsync
     tail-call-optimization Temporal ShadowRealm
-    decorators import-attributes import-text import-bytes json-modules
+    decorators import-text import-bytes json-modules
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names
     regexp-duplicate-named-groups legacy-regexp
