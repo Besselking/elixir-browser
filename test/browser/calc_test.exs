@@ -49,8 +49,10 @@ defmodule Browser.CalcTest do
     assert ev("calc(50% + 25%)") == {:ok, {:pct, 0.75}}
   end
 
-  test "mixing percentages and lengths can't be resolved" do
-    assert ev("calc(100% - 2rem)") == :error
+  test "mixing percentages and lengths waits for the size the percentage is of" do
+    assert ev("calc(100% - 2rem)") == {:ok, {:calc, -32.0, 1.0}}
+    assert ev("calc((50% - 10px) * 2)") == {:ok, {:calc, -20.0, 1.0}}
+    assert ev("min(50%, 10px)") == :error
   end
 
   test "min, max, clamp" do

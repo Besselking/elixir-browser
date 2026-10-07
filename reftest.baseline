@@ -462,6 +462,10 @@ css/CSS2/borders/border-right-005.xht
 css/CSS2/borders/border-right-006.xht
 css/CSS2/borders/border-right-008.xht
 css/CSS2/borders/border-right-018.xht
+css/CSS2/borders/border-right-applies-to-001.xht
+css/CSS2/borders/border-right-applies-to-002.xht
+css/CSS2/borders/border-right-applies-to-003.xht
+css/CSS2/borders/border-right-applies-to-004.xht
 css/CSS2/borders/border-right-applies-to-007.xht
 css/CSS2/borders/border-right-applies-to-009.xht
 css/CSS2/borders/border-right-applies-to-012.xht
@@ -471,6 +475,10 @@ css/CSS2/borders/border-right-applies-to-015.xht
 css/CSS2/borders/border-right-color-129.xht
 css/CSS2/borders/border-right-color-174.xht
 css/CSS2/borders/border-right-color-175.xht
+css/CSS2/borders/border-right-color-applies-to-001.xht
+css/CSS2/borders/border-right-color-applies-to-002.xht
+css/CSS2/borders/border-right-color-applies-to-003.xht
+css/CSS2/borders/border-right-color-applies-to-004.xht
 css/CSS2/borders/border-right-color-applies-to-007.xht
 css/CSS2/borders/border-right-color-applies-to-009.xht
 css/CSS2/borders/border-right-color-applies-to-012.xht
@@ -536,6 +544,10 @@ css/CSS2/borders/border-right-width-084.xht
 css/CSS2/borders/border-right-width-089.xht
 css/CSS2/borders/border-right-width-090.xht
 css/CSS2/borders/border-right-width-091.xht
+css/CSS2/borders/border-right-width-applies-to-001.xht
+css/CSS2/borders/border-right-width-applies-to-002.xht
+css/CSS2/borders/border-right-width-applies-to-003.xht
+css/CSS2/borders/border-right-width-applies-to-004.xht
 css/CSS2/borders/border-right-width-applies-to-007.xht
 css/CSS2/borders/border-right-width-applies-to-009.xht
 css/CSS2/borders/border-right-width-applies-to-012.xht
@@ -1055,6 +1067,7 @@ css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-margin.html
 css/CSS2/floats/new-fc-beside-float-with-min-width.html
 css/CSS2/floats/new-fc-relayout.html
+css/CSS2/floats/overflow-scroll-float-paint-order.html
 css/CSS2/floats/overhanging-float-paint-order.html
 css/CSS2/floats/zero-available-space-float-positioning.html
 css/CSS2/floats/zero-width-floats.html
@@ -3504,7 +3517,10 @@ css/css-flexbox/flex-aspect-ratio-img-row-012.html
 css/css-flexbox/flex-aspect-ratio-img-vert-lr.html
 css/css-flexbox/flex-basis-001.html
 css/css-flexbox/flex-basis-002.html
+css/css-flexbox/flex-basis-003.html
 css/css-flexbox/flex-basis-004.html
+css/css-flexbox/flex-basis-005.html
+css/css-flexbox/flex-basis-006.html
 css/css-flexbox/flex-basis-007.html
 css/css-flexbox/flex-basis-008.html
 css/css-flexbox/flex-basis-010.html
@@ -3584,6 +3600,7 @@ css/css-flexbox/flex-shrink-001.html
 css/css-flexbox/flex-shrink-003.html
 css/css-flexbox/flex-shrink-004.html
 css/css-flexbox/flex-shrink-005.html
+css/css-flexbox/flex-shrink-006.html
 css/css-flexbox/flex-shrink-007.html
 css/css-flexbox/flex-vertical-align-effect.html
 css/css-flexbox/flex-wrap-002.html
@@ -3830,14 +3847,19 @@ css/css-flexbox/gap-002-ltr.html
 css/css-flexbox/gap-002-rl.html
 css/css-flexbox/gap-002-rtl.html
 css/css-flexbox/gap-003-lr.html
+css/css-flexbox/gap-003-ltr.html
 css/css-flexbox/gap-003-rl.html
+css/css-flexbox/gap-003-rtl.html
 css/css-flexbox/gap-006-lr.html
 css/css-flexbox/gap-006-ltr.html
 css/css-flexbox/gap-006-rl.html
 css/css-flexbox/gap-006-rtl.html
+css/css-flexbox/gap-008-ltr.html
+css/css-flexbox/gap-009-ltr.html
 css/css-flexbox/gap-010-ltr.html
 css/css-flexbox/gap-011.html
 css/css-flexbox/gap-012.html
+css/css-flexbox/gap-013.html
 css/css-flexbox/gap-014.html
 css/css-flexbox/gap-016.html
 css/css-flexbox/gap-019.html
@@ -4220,6 +4242,7 @@ css/css-sizing/aspect-ratio/block-aspect-ratio-050.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-052.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-053.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-054.html
+css/css-sizing/aspect-ratio/block-aspect-ratio-058.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-with-margin-collapsing-001.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-with-margin-collapsing-002.html
 css/css-sizing/aspect-ratio/fieldset-element-001.html
@@ -4811,6 +4834,7 @@ css/css-text/white-space/control-chars-09D.html
 css/css-text/white-space/control-chars-09E.html
 css/css-text/white-space/control-chars-09F.html
 css/css-text/white-space/full-width-leading-spaces-001.html
+css/css-text/white-space/full-width-leading-spaces-004.html
 css/css-text/white-space/hanging-whitespace-001.tentative.html
 css/css-text/white-space/lone-cr-001.tentative.html
 css/css-text/white-space/object-replacement-1.html

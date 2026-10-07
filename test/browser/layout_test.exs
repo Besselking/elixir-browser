@@ -5372,6 +5372,20 @@ defmodule Browser.LayoutTest do
   end
 
   describe "flex-basis and background sizes" do
+    test "a width of calc(50% - 10px) is half the container less 10px" do
+      html =
+        ~s|<div style="width:200px"><div style="width:calc(50% - 10px);height:10px;background:red"></div></div>|
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 90))
+    end
+
+    test "a flex item with a zero flex-basis and no grow is zero wide" do
+      html =
+        ~s(<div style="display:flex;width:100px"><div style="flex-basis:0;height:10px;background:red"></div><div style="flex:1;height:10px;background:green"></div></div>)
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 100))
+    end
+
     test "a negative flex-basis is invalid, so the item keeps its width" do
       html =
         ~s(<div style="display:flex;width:100px"><div style="flex-basis:-50px;width:30px;height:10px;background:red"></div></div>)

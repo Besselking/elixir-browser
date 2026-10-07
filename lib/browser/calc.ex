@@ -4,9 +4,9 @@ defmodule Browser.Calc do
 
   `eval/2` takes the function's text, e.g. `"calc(.25rem*6)"`, and `units`, a function from a
   unit name (`"rem"`, `"em"`, ...) to its size in px or nil. The result is `{:px, n}`,
-  `{:pct, fraction}` or `{:num, n}` (a plain number), or `:error` when it can't be worked out:
-  an unknown unit, a bad expression, or percentages mixed with lengths (they depend on a
-  size that isn't known here).
+  `{:pct, fraction}`, `{:calc, px, fraction}` (a length plus a percentage, which depends on a
+  size that isn't known here) or `{:num, n}` (a plain number), or `:error` when it can't be
+  worked out: an unknown unit or a bad expression.
   """
 
   @functions ~w(calc min max clamp)
@@ -179,16 +179,40 @@ defmodule Browser.Calc do
   end
 
   defp same_kind([{kind, _} | _] = values) do
-    if Enum.all?(values, &(elem(&1, 0) == kind)), do: {kind, Enum.map(values, &elem(&1, 1))}
+    if Enum.all?(values, &(tuple_size(&1) == 2 and elem(&1, 0) == kind)),
+      do: {kind, Enum.map(values, &elem(&1, 1))}
   end
 
+  defp same_kind(_), do: nil
+
   defp add({kind, a}, {kind, b}, sign), do: {:ok, {kind, a + sign * b}}
-  defp add(_, _, _), do: :error
+
+  # a length and a percentage together: `{:calc, px, fraction}`, worked out once the size
+  # the percentage refers to is known
+  defp add(a, b, sign) do
+    with {pa, fa} <- linear(a), {pb, fb} <- linear(b) do
+      {:ok, {:calc, pa + sign * pb, fa + sign * fb}}
+    else
+      _ -> :error
+    end
+  end
+
+  defp linear({:px, n}), do: {n, 0.0}
+  defp linear({:pct, f}), do: {0.0, f}
+  defp linear({:calc, n, f}), do: {n, f}
+  defp linear(_), do: nil
 
   defp scale({:num, a}, {kind, b}, ?*), do: {:ok, {kind, a * b}}
   defp scale({kind, a}, {:num, b}, ?*), do: {:ok, {kind, a * b}}
   defp scale({kind, a}, {:num, b}, ?/) when b != 0 and b != 0.0, do: {:ok, {kind, a / b}}
+  defp scale({:num, a}, {:calc, p, f}, ?*), do: {:ok, {:calc, a * p, a * f}}
+  defp scale({:calc, p, f}, {:num, b}, ?*), do: {:ok, {:calc, p * b, f * b}}
+
+  defp scale({:calc, p, f}, {:num, b}, ?/) when b != 0 and b != 0.0,
+    do: {:ok, {:calc, p / b, f / b}}
+
   defp scale(_, _, _), do: :error
 
+  defp negate({:calc, p, f}), do: {:calc, -p, -f}
   defp negate({kind, n}), do: {kind, -n}
 end

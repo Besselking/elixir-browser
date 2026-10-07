@@ -1645,6 +1645,7 @@ defmodule Browser.Style do
         case Browser.Calc.eval(v, &unit_px(&1, env)) do
           {:ok, {:pct, f}} -> {:ok, {:pct, f}}
           {:ok, {:px, n}} -> {:ok, n}
+          {:ok, {:calc, _, _} = mixed} when prop in ~w(width min-width max-width) -> {:ok, mixed}
           _ -> :skip
         end
 
@@ -1720,7 +1721,12 @@ defmodule Browser.Style do
 
   defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
     px = if v == "normal", do: 0.0, else: length(v, env)
-    if px && px >= 0, do: {:ok, px}, else: :skip
+
+    cond do
+      px && px >= 0 -> {:ok, px}
+      pct = percentage(v) -> if pct >= 0, do: {:ok, {:pct, pct}}, else: :skip
+      true -> :skip
+    end
   end
 
   defp typed("column-count", v, _env, _pc) do
