@@ -681,8 +681,17 @@ defmodule Browser.JS.Interp do
     case o.proto do
       {:obj, pid} ->
         case deref(pid) do
-          %{proxy: _} -> Browser.JS.Proxy.get({:obj, pid}, key, receiver)
-          po -> lookup(po, key, receiver)
+          %{proxy: _} ->
+            Browser.JS.Proxy.get({:obj, pid}, key, receiver)
+
+          %{class: :host, host: {mod, data}} = po ->
+            case mod.host_get(data, key, receiver) do
+              {:ok, v} -> v
+              :miss -> lookup(po, key, receiver)
+            end
+
+          po ->
+            lookup(po, key, receiver)
         end
 
       _ ->
@@ -2681,7 +2690,29 @@ defmodule Browser.JS.Interp do
   @doc false
   def module_exec(stmts, scope), do: exec_list(stmts, scope)
 
-  defp import_call(e, opts, env) do
+  # `import.source(x)`: a source text module has no source to give, so the promise rejects
+  # with a SyntaxError once the specifier and the options have been converted
+  defp import_phase(:source, args, env) do
+    [e | rest] = args
+    arg = ev(e, env)
+    options = if rest == [], do: :undefined, else: ev(hd(rest), env)
+    p = Browser.JS.Promise.new()
+
+    try do
+      to_str(arg)
+      check_import_options(options)
+      Browser.JS.Promise.reject(p, make_error("SyntaxError", "Module has no source"))
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+    end
+
+    p
+  end
+
+  defp import_phase(:defer, [e | rest], env),
+    do: import_call(e, if(rest == [], do: nil, else: hd(rest)), env, true)
+
+  defp import_call(e, opts, env, defer? \\ false) do
     arg = ev(e, env)
     options = if opts, do: ev(opts, env), else: :undefined
     p = Browser.JS.Promise.new()
@@ -2706,7 +2737,7 @@ defmodule Browser.JS.Interp do
               p,
               make_error("TypeError", "Dynamic import is not available")
             ),
-          else: hook.(spec, base, p, type)
+          else: hook.(spec, base, p, if(defer?, do: {:defer, type}, else: type))
       end)
     catch
       {:js_error, err} -> Browser.JS.Promise.reject(p, err)
@@ -3487,6 +3518,7 @@ defmodule Browser.JS.Interp do
   # `import(specifier)`: a promise for the module's namespace (the host loads it)
   def ev({:import_call, e}, env), do: import_call(e, nil, env)
   def ev({:import_call, e, opts}, env), do: import_call(e, opts, env)
+  def ev({:import_phase, phase, args}, env), do: import_phase(phase, args, env)
 
   def ev({:import_meta}, env) do
     url =

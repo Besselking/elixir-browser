@@ -317,14 +317,24 @@ defmodule Browser.JS.Props do
   def own_symbols({:obj, id}) do
     o = deref(id)
 
-    if Map.has_key?(o, :proxy) do
-      for k <- Browser.JS.Proxy.own_keys({:obj, id}), match?({:symbol, _, _}, k), do: k
-    else
-      o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+    case o do
+      %{proxy: _} ->
+        for k <- Browser.JS.Proxy.own_keys({:obj, id}), match?({:symbol, _, _}, k), do: k
+
+      # a deferred namespace evaluates its module for any key listing
+      %{class: :host, host: {Browser.JS.Modules, {:dns, _} = data}} ->
+        Browser.JS.Modules.names(data)
+        own_symbols_plain(o)
+
+      _ ->
+        own_symbols_plain(o)
     end
   end
 
   def own_symbols(_), do: []
+
+  defp own_symbols_plain(o),
+    do: o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
 
   # ── defining ───────────────────────────────────────────────
 
