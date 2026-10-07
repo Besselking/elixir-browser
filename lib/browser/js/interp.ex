@@ -230,6 +230,10 @@ defmodule Browser.JS.Interp do
           MapSet.member?(s.consts, {:fname, name}) ->
             :fname_ignored
 
+          # the global `undefined`, `NaN` and `Infinity` can not be assigned
+          s.parent == nil and name in ["undefined", "NaN", "Infinity"] ->
+            :fname_ignored
+
           true ->
             :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
             sync_argument(s.vars, name, val)
@@ -3225,6 +3229,9 @@ defmodule Browser.JS.Interp do
       # a declared local binding can not be deleted
       {:var, sc} ->
         cond do
+          deref(sc).parent == nil and name in ["NaN", "Infinity", "undefined"] ->
+            false
+
           eval_declared?(sc, name) ->
             st = deref(sc)
 
@@ -3251,7 +3258,10 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def ev({:unary, "delete", _}, _), do: true
+  def ev({:unary, "delete", e}, env) do
+    ev(e, env)
+    true
+  end
 
   # in strict code a delete that fails throws
   def ev({:unary, "sdelete", {:member, o, k, _}}, env) do
@@ -3425,6 +3435,16 @@ defmodule Browser.JS.Interp do
           ov = ev(o, env)
           if mopt and nullish?(ov), do: throw(:js_short)
           {get(ov, ev_key(k, env)), ov}
+
+        # `(a?.b)()` keeps `a` as `this`; a short-circuited chain is `undefined`
+        {:chain, {:member, o, k, mopt}} ->
+          try do
+            ov = ev(o, env)
+            if mopt and nullish?(ov), do: throw(:js_short)
+            {get(ov, ev_key(k, env)), ov}
+          catch
+            :js_short -> {:undefined, :undefined}
+          end
 
         {:id, name} when is_binary(name) ->
           # a function found on a `with` object is called with that object as `this`
