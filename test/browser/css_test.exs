@@ -177,6 +177,32 @@ defmodule Browser.CSSTest do
     assert :error = CSS.parse_selector("li:nth-child(foo)")
   end
 
+  test ":nth-child(an+b of S) counts only the siblings that match S" do
+    a = ctx("li", [{"class", "x"}], index: 1, count: 3)
+    b = ctx("li", [], index: 2, count: 3, prev: [a])
+    c = ctx("li", [{"class", "x"}], index: 3, count: 3, prev: [b, a])
+    assert sm?("li:nth-child(2 of .x)", c)
+    refute sm?("li:nth-child(2 of .x)", a)
+    refute sm?("li:nth-child(1 of .x)", b)
+    assert sm?(":nth-child(even of *|*)", b)
+    assert {:ok, %{spec: {0, 2, 0}}} = CSS.parse_selector(":nth-child(2 of .x)")
+    assert :error = CSS.parse_selector(":nth-of-type(2 of .x)")
+  end
+
+  test ":lang(), :dir() and :scope" do
+    html = ctx("html", [{"lang", "en-US"}, {"dir", "rtl"}])
+    p = ctx("p", [], parent: html)
+    assert sm?(":lang(en)", p)
+    assert sm?(":lang(EN-us)", p)
+    refute sm?(":lang(de)", p)
+    assert :error = CSS.parse_selector(":lang(0)")
+    assert sm?(":dir(rtl)", p)
+    refute sm?(":dir(ltr)", p)
+    assert sm?(":dir(ltr)", ctx("p"))
+    assert sm?(":scope", html)
+    refute sm?(":scope", p)
+  end
+
   test ":nth-of-type, :first-of-type and :empty" do
     a = ctx("b", [], index: 1, count: 3)
     p = ctx("p", [], index: 2, count: 3, prev: [a])
