@@ -247,6 +247,7 @@ defmodule Browser.JS.Lexer do
     do: throw({:syntax, "unterminated regular expression"})
 
   defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
+  defp regex(<<b, rest::binary>>, acc, cls), do: regex(rest, [<<b>> | acc], cls)
   defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
 
   defp regex_flags(<<c, rest::binary>>, acc) when c in ?a..?z, do: regex_flags(rest, [c | acc])

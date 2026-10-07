@@ -254,11 +254,15 @@ defmodule Browser.JS.Str do
 
   @doc "`s` with every lone surrogate replaced by U+FFFD."
   def well_formed(s) do
-    if lone?(s),
-      do:
-        s |> units() |> Enum.map(&if(&1 in 0xD800..0xDFFF, do: 0xFFFD, else: &1)) |> from_units(),
-      else: s
+    if lone?(s), do: s |> units() |> repair([]) |> from_units(), else: s
   end
+
+  defp repair([h, l | rest], acc) when h in 0xD800..0xDBFF and l in 0xDC00..0xDFFF,
+    do: repair(rest, [l, h | acc])
+
+  defp repair([u | rest], acc) when u in 0xD800..0xDFFF, do: repair(rest, [0xFFFD | acc])
+  defp repair([u | rest], acc), do: repair(rest, [u | acc])
+  defp repair([], acc), do: Enum.reverse(acc)
 
   # ── joining and comparing ──────────────────────────────────
 

@@ -313,6 +313,8 @@ defmodule Browser.JSTest do
       assert js("'a😀b'.indexOf('b')") == 3.0
       assert js("'\\uD83D'.isWellFormed()") == false
       assert js("'a\\uD83Db'.toWellFormed()") == "a�b"
+      assert js("'a😀\\uD83D'.toWellFormed()") == "a😀\uFFFD"
+      assert js("[...'a😀b'.matchAll(/(?:)/gu)].length") == 4.0
       assert js("JSON.stringify('\\uD83D')") == ~s("\\ud83d")
       assert js("JSON.parse('\"\\\\ud834\"').length") == 1.0
       assert js("String.fromCharCode(0xD83D, 0xDE00) === '😀'") == true
