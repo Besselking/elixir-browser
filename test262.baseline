@@ -441,6 +441,7 @@ built-ins/Array/prototype/every/15.4.4.16-2-11.js
 built-ins/Array/prototype/every/15.4.4.16-2-12.js
 built-ins/Array/prototype/every/15.4.4.16-2-13.js
 built-ins/Array/prototype/every/15.4.4.16-2-14.js
+built-ins/Array/prototype/every/15.4.4.16-2-17.js
 built-ins/Array/prototype/every/15.4.4.16-2-18.js
 built-ins/Array/prototype/every/15.4.4.16-2-19.js
 built-ins/Array/prototype/every/15.4.4.16-2-2.js
@@ -1054,6 +1055,7 @@ built-ins/Array/prototype/forEach/15.4.4.18-2-11.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-12.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-13.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-14.js
+built-ins/Array/prototype/forEach/15.4.4.18-2-17.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-18.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-19.js
 built-ins/Array/prototype/forEach/15.4.4.18-2-2.js
@@ -1275,6 +1277,7 @@ built-ins/Array/prototype/indexOf/15.4.4.14-2-11.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-12.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-13.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-14.js
+built-ins/Array/prototype/indexOf/15.4.4.14-2-17.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-18.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-19.js
 built-ins/Array/prototype/indexOf/15.4.4.14-2-2.js
@@ -1506,6 +1509,7 @@ built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-11.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-12.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-13.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-14.js
+built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-17.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-18.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-19.js
 built-ins/Array/prototype/lastIndexOf/15.4.4.15-2-2.js
@@ -1907,6 +1911,7 @@ built-ins/Array/prototype/pop/S15.4.4.6_A2_T4.js
 built-ins/Array/prototype/pop/S15.4.4.6_A3_T1.js
 built-ins/Array/prototype/pop/S15.4.4.6_A3_T2.js
 built-ins/Array/prototype/pop/S15.4.4.6_A3_T3.js
+built-ins/Array/prototype/pop/S15.4.4.6_A4_T1.js
 built-ins/Array/prototype/pop/S15.4.4.6_A4_T2.js
 built-ins/Array/prototype/pop/call-with-boolean.js
 built-ins/Array/prototype/pop/clamps-to-integer-limit.js
@@ -1915,6 +1920,8 @@ built-ins/Array/prototype/pop/length.js
 built-ins/Array/prototype/pop/name.js
 built-ins/Array/prototype/pop/not-a-constructor.js
 built-ins/Array/prototype/pop/prop-desc.js
+built-ins/Array/prototype/pop/set-length-array-is-frozen.js
+built-ins/Array/prototype/pop/set-length-array-length-is-non-writable.js
 built-ins/Array/prototype/pop/set-length-zero-array-is-frozen.js
 built-ins/Array/prototype/pop/set-length-zero-array-length-is-non-writable.js
 built-ins/Array/prototype/pop/throws-with-string-receiver.js
@@ -1937,6 +1944,8 @@ built-ins/Array/prototype/push/length.js
 built-ins/Array/prototype/push/name.js
 built-ins/Array/prototype/push/not-a-constructor.js
 built-ins/Array/prototype/push/prop-desc.js
+built-ins/Array/prototype/push/set-length-array-is-frozen.js
+built-ins/Array/prototype/push/set-length-array-length-is-non-writable.js
 built-ins/Array/prototype/push/set-length-zero-array-is-frozen.js
 built-ins/Array/prototype/push/set-length-zero-array-length-is-non-writable.js
 built-ins/Array/prototype/push/throws-if-integer-limit-exceeded.js
@@ -1970,6 +1979,7 @@ built-ins/Array/prototype/reduce/15.4.4.21-2-11.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-12.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-13.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-14.js
+built-ins/Array/prototype/reduce/15.4.4.21-2-17.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-18.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-19.js
 built-ins/Array/prototype/reduce/15.4.4.21-2-2.js
@@ -2492,6 +2502,8 @@ built-ins/Array/prototype/shift/length.js
 built-ins/Array/prototype/shift/name.js
 built-ins/Array/prototype/shift/not-a-constructor.js
 built-ins/Array/prototype/shift/prop-desc.js
+built-ins/Array/prototype/shift/set-length-array-is-frozen.js
+built-ins/Array/prototype/shift/set-length-array-length-is-non-writable.js
 built-ins/Array/prototype/shift/set-length-zero-array-is-frozen.js
 built-ins/Array/prototype/shift/set-length-zero-array-length-is-non-writable.js
 built-ins/Array/prototype/shift/throws-when-this-value-length-is-writable-false.js
@@ -2585,6 +2597,7 @@ built-ins/Array/prototype/some/15.4.4.17-2-11.js
 built-ins/Array/prototype/some/15.4.4.17-2-12.js
 built-ins/Array/prototype/some/15.4.4.17-2-13.js
 built-ins/Array/prototype/some/15.4.4.17-2-14.js
+built-ins/Array/prototype/some/15.4.4.17-2-17.js
 built-ins/Array/prototype/some/15.4.4.17-2-18.js
 built-ins/Array/prototype/some/15.4.4.17-2-19.js
 built-ins/Array/prototype/some/15.4.4.17-2-2.js
@@ -3021,6 +3034,8 @@ built-ins/Array/prototype/unshift/name.js
 built-ins/Array/prototype/unshift/not-a-constructor.js
 built-ins/Array/prototype/unshift/prop-desc.js
 built-ins/Array/prototype/unshift/read-only-property.js
+built-ins/Array/prototype/unshift/set-length-array-is-frozen.js
+built-ins/Array/prototype/unshift/set-length-array-length-is-non-writable.js
 built-ins/Array/prototype/unshift/set-length-zero-array-is-frozen.js
 built-ins/Array/prototype/unshift/set-length-zero-array-length-is-non-writable.js
 built-ins/Array/prototype/unshift/throws-if-integer-limit-exceeded.js
@@ -4751,6 +4766,7 @@ built-ins/Date/prototype/valueOf/length.js
 built-ins/Date/prototype/valueOf/name.js
 built-ins/Date/prototype/valueOf/not-a-constructor.js
 built-ins/Date/prototype/valueOf/prop-desc.js
+built-ins/Date/subclassing.js
 built-ins/Date/value-get-symbol-to-prim-err.js
 built-ins/Date/value-symbol-to-prim-err.js
 built-ins/Date/value-symbol-to-prim-invocation.js
@@ -10602,6 +10618,7 @@ built-ins/Object/setPrototypeOf/set-error.js
 built-ins/Object/setPrototypeOf/set-failure-cycle.js
 built-ins/Object/setPrototypeOf/set-failure-non-extensible.js
 built-ins/Object/setPrototypeOf/success.js
+built-ins/Object/subclass-object-arg.js
 built-ins/Object/symbol_object-returns-fresh-symbol.js
 built-ins/Object/values/exception-during-enumeration.js
 built-ins/Object/values/exception-not-object-coercible.js
@@ -13982,6 +13999,7 @@ built-ins/String/fromCodePoint/number-is-out-of-range.js
 built-ins/String/fromCodePoint/return-string-value.js
 built-ins/String/fromCodePoint/to-number-conversions.js
 built-ins/String/is-a-constructor.js
+built-ins/String/numeric-properties.js
 built-ins/String/prop-desc.js
 built-ins/String/prototype/S15.5.3.1_A1.js
 built-ins/String/prototype/S15.5.3.1_A2.js
@@ -18428,6 +18446,7 @@ language/computed-property-names/class/method/constructor-duplicate-2.js
 language/computed-property-names/class/method/constructor-duplicate-3.js
 language/computed-property-names/class/method/constructor.js
 language/computed-property-names/class/method/generator.js
+language/computed-property-names/class/method/number.js
 language/computed-property-names/class/method/string.js
 language/computed-property-names/class/method/symbol.js
 language/computed-property-names/class/static/generator-constructor.js
@@ -18435,6 +18454,7 @@ language/computed-property-names/class/static/generator-prototype.js
 language/computed-property-names/class/static/getter-constructor.js
 language/computed-property-names/class/static/getter-prototype.js
 language/computed-property-names/class/static/method-constructor.js
+language/computed-property-names/class/static/method-number-order.js
 language/computed-property-names/class/static/method-number.js
 language/computed-property-names/class/static/method-prototype.js
 language/computed-property-names/class/static/method-string-order.js
@@ -18456,6 +18476,7 @@ language/computed-property-names/object/method/super.js
 language/computed-property-names/object/method/symbol.js
 language/computed-property-names/object/property/number-duplicates.js
 language/computed-property-names/to-name-side-effects/class.js
+language/computed-property-names/to-name-side-effects/numbers-class.js
 language/computed-property-names/to-name-side-effects/numbers-object.js
 language/computed-property-names/to-name-side-effects/object.js
 language/destructuring/binding/initialization-requires-object-coercible-null.js
@@ -19193,6 +19214,7 @@ language/expressions/arrow-function/dstr/syntax-error-ident-ref-continue-escaped
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-debugger-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-default-escaped-ext.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-default-escaped.js
+language/expressions/arrow-function/dstr/syntax-error-ident-ref-default.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-delete-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-do-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-else-escaped.js
@@ -19200,6 +19222,7 @@ language/expressions/arrow-function/dstr/syntax-error-ident-ref-enum-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-export-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-extends-escaped-ext.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-extends-escaped.js
+language/expressions/arrow-function/dstr/syntax-error-ident-ref-extends.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-finally-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-for-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-function-escaped.js
@@ -19260,6 +19283,7 @@ language/expressions/arrow-function/params-trailing-comma-single.js
 language/expressions/arrow-function/prototype-rules.js
 language/expressions/arrow-function/rest-param-strict-body.js
 language/expressions/arrow-function/rest-params-trailing-comma-early-error.js
+language/expressions/arrow-function/scope-body-lex-distinct.js
 language/expressions/arrow-function/scope-param-elem-var-close.js
 language/expressions/arrow-function/scope-param-elem-var-open.js
 language/expressions/arrow-function/scope-param-rest-elem-var-close.js
@@ -19664,6 +19688,7 @@ language/expressions/assignment/dstr/obj-rest-non-string-computed-property-array
 language/expressions/assignment/dstr/obj-rest-non-string-computed-property-string-1.js
 language/expressions/assignment/dstr/obj-rest-not-last-element-invalid.js
 language/expressions/assignment/dstr/obj-rest-number.js
+language/expressions/assignment/dstr/obj-rest-order.js
 language/expressions/assignment/dstr/obj-rest-put-const.js
 language/expressions/assignment/dstr/obj-rest-same-name.js
 language/expressions/assignment/dstr/obj-rest-skip-non-enumerable.js
@@ -19683,6 +19708,7 @@ language/expressions/assignment/dstr/syntax-error-ident-ref-continue-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-debugger-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-default-escaped-ext.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-default-escaped.js
+language/expressions/assignment/dstr/syntax-error-ident-ref-default.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-delete-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-do-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-else-escaped.js
@@ -19690,6 +19716,7 @@ language/expressions/assignment/dstr/syntax-error-ident-ref-enum-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-export-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-extends-escaped-ext.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-extends-escaped.js
+language/expressions/assignment/dstr/syntax-error-ident-ref-extends.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-finally-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-for-escaped.js
 language/expressions/assignment/dstr/syntax-error-ident-ref-function-escaped.js
@@ -26667,6 +26694,7 @@ language/expressions/function/params-trailing-comma-multiple.js
 language/expressions/function/params-trailing-comma-single.js
 language/expressions/function/rest-param-strict-body.js
 language/expressions/function/rest-params-trailing-comma-early-error.js
+language/expressions/function/scope-body-lex-distinct.js
 language/expressions/function/scope-name-var-close.js
 language/expressions/function/scope-name-var-open-non-strict.js
 language/expressions/function/scope-name-var-open-strict.js
@@ -26929,6 +26957,7 @@ language/expressions/generators/prototype-value.js
 language/expressions/generators/rest-param-strict-body.js
 language/expressions/generators/rest-params-trailing-comma-early-error.js
 language/expressions/generators/return.js
+language/expressions/generators/scope-body-lex-distinct.js
 language/expressions/generators/scope-name-var-close.js
 language/expressions/generators/scope-name-var-open-non-strict.js
 language/expressions/generators/scope-name-var-open-strict.js
@@ -28714,18 +28743,22 @@ language/expressions/object/prop-dup-set-get-set.js
 language/expressions/object/prop-dup-set-set.js
 language/expressions/object/properties-names-eval-arguments.js
 language/expressions/object/property-name-yield.js
+language/expressions/object/scope-gen-meth-body-lex-distinct.js
 language/expressions/object/scope-gen-meth-param-elem-var-close.js
 language/expressions/object/scope-gen-meth-param-elem-var-open.js
 language/expressions/object/scope-gen-meth-param-rest-elem-var-close.js
 language/expressions/object/scope-gen-meth-param-rest-elem-var-open.js
 language/expressions/object/scope-gen-meth-paramsbody-var-close.js
 language/expressions/object/scope-gen-meth-paramsbody-var-open.js
+language/expressions/object/scope-getter-body-lex-distinc.js
+language/expressions/object/scope-meth-body-lex-distinct.js
 language/expressions/object/scope-meth-param-elem-var-close.js
 language/expressions/object/scope-meth-param-elem-var-open.js
 language/expressions/object/scope-meth-param-rest-elem-var-close.js
 language/expressions/object/scope-meth-param-rest-elem-var-open.js
 language/expressions/object/scope-meth-paramsbody-var-close.js
 language/expressions/object/scope-meth-paramsbody-var-open.js
+language/expressions/object/scope-setter-body-lex-distinc.js
 language/expressions/object/scope-setter-paramsbody-var-close.js
 language/expressions/object/scope-setter-paramsbody-var-open.js
 language/expressions/object/setter-body-strict-inside.js
@@ -37399,8 +37432,10 @@ language/statements/for-of/Array.prototype.Symbol.iterator.js
 language/statements/for-of/Array.prototype.entries.js
 language/statements/for-of/Array.prototype.keys.js
 language/statements/for-of/arguments-mapped-aliasing.js
+language/statements/for-of/arguments-mapped-mutation.js
 language/statements/for-of/arguments-mapped.js
 language/statements/for-of/arguments-unmapped-aliasing.js
+language/statements/for-of/arguments-unmapped-mutation.js
 language/statements/for-of/arguments-unmapped.js
 language/statements/for-of/array-contract-expand.js
 language/statements/for-of/array-contract.js
@@ -37901,6 +37936,7 @@ language/statements/for-of/dstr/obj-rest-non-string-computed-property-array-1e0.
 language/statements/for-of/dstr/obj-rest-non-string-computed-property-string-1.js
 language/statements/for-of/dstr/obj-rest-not-last-element-invalid.js
 language/statements/for-of/dstr/obj-rest-number.js
+language/statements/for-of/dstr/obj-rest-order.js
 language/statements/for-of/dstr/obj-rest-put-const.js
 language/statements/for-of/dstr/obj-rest-same-name.js
 language/statements/for-of/dstr/obj-rest-skip-non-enumerable.js
@@ -38952,6 +38988,7 @@ language/statements/function/params-trailing-comma-multiple.js
 language/statements/function/params-trailing-comma-single.js
 language/statements/function/rest-param-strict-body.js
 language/statements/function/rest-params-trailing-comma-early-error.js
+language/statements/function/scope-body-lex-distinct.js
 language/statements/function/scope-param-elem-var-close.js
 language/statements/function/scope-param-elem-var-open.js
 language/statements/function/scope-param-rest-elem-var-close.js
@@ -39192,6 +39229,7 @@ language/statements/generators/rest-param-strict-body.js
 language/statements/generators/rest-params-trailing-comma-early-error.js
 language/statements/generators/restricted-properties.js
 language/statements/generators/return.js
+language/statements/generators/scope-body-lex-distinct.js
 language/statements/generators/scope-param-elem-var-close.js
 language/statements/generators/scope-param-elem-var-open.js
 language/statements/generators/scope-param-rest-elem-var-close.js
