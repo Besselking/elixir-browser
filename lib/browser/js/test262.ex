@@ -269,7 +269,7 @@ defmodule Browser.JS.Test262 do
 
           if module?,
             do: Modules.run(path, path, program, loader()),
-            else: Interp.run_program(program)
+            else: Interp.run_program(program, true)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
           {:ok, printed()}
@@ -385,7 +385,7 @@ defmodule Browser.JS.Test262 do
       "evalScript",
       Interp.native("evalScript", fn _, args ->
         case Parser.parse(Interp.to_str(Enum.at(args, 0, ""))) do
-          {:ok, program} -> Interp.run_program(program)
+          {:ok, program} -> Interp.run_program(program, true)
           {:error, msg} -> Interp.throw_error("SyntaxError", msg)
         end
       end)
