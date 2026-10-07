@@ -24,4 +24,15 @@ defmodule Browser.TabStripTest do
     assert TabStrip.clip("a\n  b") == "a b"
     assert String.length(TabStrip.clip(String.duplicate("x", 500))) == 80
   end
+
+  test "the palette follows the toolbar colour, light or dark" do
+    light = TabStrip.palette({240, 240, 240}, {160, 160, 160}, {0, 0, 0})
+    assert light.active == {240, 240, 240}
+    assert elem(light.strip, 0) < 240
+
+    dark = TabStrip.palette({40, 40, 40}, {90, 90, 90}, {230, 230, 230})
+    assert dark.active == {40, 40, 40}
+    assert elem(dark.strip, 0) < 40
+    assert dark.text == {230, 230, 230}
+  end
 end

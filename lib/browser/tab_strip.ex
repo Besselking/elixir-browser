@@ -70,9 +70,11 @@ defmodule Browser.TabStrip do
     [{:tabs, titles, active}] = :ets.lookup(@table, :tabs)
     {width, _} = :wxWindow.getClientSize(panel)
 
-    :wxDC.setBackground(dc, :wxBrush.new({218, 221, 227}))
+    colors = colors()
+    Process.put(:tab_colors, colors)
+    :wxDC.setBackground(dc, :wxBrush.new(colors.strip))
     :wxDC.clear(dc)
-    :wxDC.setPen(dc, :wxPen.new({170, 174, 182}))
+    :wxDC.setPen(dc, :wxPen.new(colors.line))
 
     titles
     |> Enum.zip(layout(length(titles), width))
@@ -80,11 +82,11 @@ defmodule Browser.TabStrip do
     |> Enum.each(fn {{title, {x, w}}, i} -> paint_tab(dc, title, x, w, i == active) end)
 
     {px, pw} = plus(length(titles), width)
-    :wxDC.setTextForeground(dc, {60, 60, 60})
+    :wxDC.setTextForeground(dc, colors.text)
     {tw, th} = :wxDC.getTextExtent(dc, ~c"+")
     :wxDC.drawText(dc, ~c"+", {px + div(pw - tw, 2), div(@height - th, 2)})
 
-    :wxDC.setPen(dc, :wxPen.new({170, 174, 182}))
+    :wxDC.setPen(dc, :wxPen.new(colors.line))
     :wxDC.drawLine(dc, {0, @height - 1}, {width, @height - 1})
     :wxPaintDC.destroy(dc)
     :ok
@@ -92,12 +94,13 @@ defmodule Browser.TabStrip do
 
   defp paint_tab(dc, title, x, w, active?) do
     top = if active?, do: 3, else: 5
-    bg = if active?, do: {255, 255, 255}, else: {200, 204, 212}
+    c = Process.get(:tab_colors)
+    bg = if active?, do: c.active, else: c.inactive
     :wxDC.setBrush(dc, :wxBrush.new(bg))
     :wxDC.drawRoundedRectangle(dc, {x, top, w - 2, @height - top + 6}, 6.0)
     if active?, do: erase_bottom(dc, x, w)
 
-    :wxDC.setTextForeground(dc, {30, 30, 30})
+    :wxDC.setTextForeground(dc, c.text)
     avail = w - @close - 22
     :wxDC.setClippingRegion(dc, {x + 8, 0, max(avail, 1), @height})
     {_, th} = :wxDC.getTextExtent(dc, ~c"Ag")
@@ -108,18 +111,46 @@ defmodule Browser.TabStrip do
     # the close box: a cross
     cx = x + w - @close - 4
     cy = div(@height - 8, 2) + 1
-    :wxDC.setPen(dc, :wxPen.new({90, 90, 90}, width: 1))
+    :wxDC.setPen(dc, :wxPen.new(c.text, width: 1))
     :wxDC.drawLine(dc, {cx + 4, cy}, {cx + 12, cy + 8})
     :wxDC.drawLine(dc, {cx + 12, cy}, {cx + 4, cy + 8})
-    :wxDC.setPen(dc, :wxPen.new({170, 174, 182}))
+    :wxDC.setPen(dc, :wxPen.new(c.line))
   end
 
   # the active tab is open at the bottom, into the page's toolbar
   defp erase_bottom(dc, x, w) do
-    :wxDC.setPen(dc, :wxPen.new({255, 255, 255}))
+    c = Process.get(:tab_colors)
+    :wxDC.setPen(dc, :wxPen.new(c.active))
     :wxDC.drawLine(dc, {x + 1, @height - 1}, {x + w - 2, @height - 1})
-    :wxDC.setPen(dc, :wxPen.new({170, 174, 182}))
+    :wxDC.setPen(dc, :wxPen.new(c.line))
   end
+
+  # wxSYS_COLOUR_BTNFACE, BTNSHADOW and BTNTEXT: the toolbar's colours, so the strip follows
+  # the system theme (dark mode) like the address bar does
+  @face 15
+  @shadow 16
+  @btn_text 18
+
+  @doc "The strip's colours for a toolbar face colour, shadow and text colour."
+  def palette({fr, fg, fb}, line, text) do
+    dark? = 0.299 * fr + 0.587 * fg + 0.114 * fb < 128
+    shade = fn k -> {round(fr * k), round(fg * k), round(fb * k)} end
+    # the strip is a step away from the toolbar, inactive tabs are in between
+    {strip, inactive} =
+      if dark?, do: {shade.(0.55), shade.(0.78)}, else: {shade.(0.92), shade.(0.96)}
+
+    %{strip: strip, inactive: inactive, active: {fr, fg, fb}, line: line, text: text}
+  end
+
+  defp colors do
+    [face, line, text] =
+      for id <- [@face, @shadow, @btn_text], do: :wxSystemSettings.getColour(id) |> rgb()
+
+    palette(face, line, text)
+  end
+
+  defp rgb({r, g, b, _a}), do: {r, g, b}
+  defp rgb({r, g, b}), do: {r, g, b}
 
   # the title shortened with an ellipsis to `avail` px
   defp fit(dc, text, avail) do
