@@ -199,6 +199,19 @@ defmodule Browser.JS.Interp do
               do: {:ok, get(obj, name)},
               else: lookup_var(s.parent, name, heap)
 
+          %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
+            # a property defined on the global object itself (an accessor, say) is a variable too
+            case Map.fetch!(heap, gid) do
+              %{props: %{^name => {:accessor, g, _}}} ->
+                {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
+
+              %{props: %{^name => v}} ->
+                {:ok, v}
+
+              _ ->
+                :error
+            end
+
           _ ->
             lookup_var(s.parent, name, heap)
         end
@@ -246,11 +259,19 @@ defmodule Browser.JS.Interp do
       s.parent != nil ->
         assign_var(s.parent, name, val, heap)
 
+      s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
+        put(s.vars.this, name, val)
+
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
     end
   end
+
+  defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
+    do: match?(%{props: %{^name => _}}, deref(gid))
+
+  defp global_own_property?(_, _), do: false
 
   # a sloppy function's parameter and the `arguments` element it is mapped to follow each other
   defp sync_argument(%{argmap: {aid, names}}, name, val) do
@@ -1147,6 +1168,7 @@ defmodule Browser.JS.Interp do
       Map.has_key?(s.vars, name) -> true
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
       s.parent != nil -> resolvable?(s.parent, name)
+      is_binary(name) -> global_own_property?(s, name)
       true -> false
     end
   end
@@ -3294,7 +3316,10 @@ defmodule Browser.JS.Interp do
             false
 
           true ->
-            Browser.JS.Global.host_delete(:global, name)
+            case Browser.JS.Global.host_delete(:global, name) do
+              :default -> delete(Map.get(deref(sc).vars, :this), name)
+              r -> r
+            end
         end
 
       _ ->
