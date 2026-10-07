@@ -1002,6 +1002,13 @@ defmodule Browser.JSTest do
              ) == "functionundefinedtrue"
     end
 
+    test "escaped static and async are names; parenthesized targets do not name functions" do
+      assert js("var st\\u0061tic = 2; { let st\\u0061tic = 3; } static") == 2.0
+
+      assert js("var f; (f) = function() {}; var g; g = function() {}; f.name + '|' + g.name") ==
+               "|g"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

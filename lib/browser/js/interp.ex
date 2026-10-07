@@ -2211,7 +2211,18 @@ defmodule Browser.JS.Interp do
               not is_map_key(props, "prototype"),
        do: function_prop(id, o, "prototype")
 
-  defp function_get(id, o, key) do
+  # the lazily made own `prototype` shadows anything the prototype chain has
+  defp function_get(id, %{props: props} = o, "prototype")
+       when not is_map_key(props, "prototype") do
+    case function_prop(id, o, "prototype") do
+      :undefined -> function_get_chain(id, o, "prototype")
+      p -> p
+    end
+  end
+
+  defp function_get(id, o, key), do: function_get_chain(id, o, key)
+
+  defp function_get_chain(id, o, key) do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
         cond do
@@ -3952,6 +3963,8 @@ defmodule Browser.JS.Interp do
       v
     end
   end
+
+  def ev({:unnamed, e}, env), do: ev(e, env)
 
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do
     ov = ev(o, env)

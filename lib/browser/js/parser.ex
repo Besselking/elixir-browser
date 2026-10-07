@@ -523,6 +523,7 @@ defmodule Browser.JS.Parser do
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
       [{:id, name, _} | _] when name not in ["in", "instanceof"] -> let_decl(ts)
+      [{:eid, name, _} | _] when name in ["static", "async"] -> let_decl(ts)
       [{:p, p, _} | _] when p in ["[", "{"] -> let_decl(ts)
       _ -> expression_statement(all)
     end
@@ -1496,6 +1497,9 @@ defmodule Browser.JS.Parser do
 
   defp pattern([{:id, _, _} | _] = ts, allow_default), do: pattern_id(ts, allow_default)
 
+  defp pattern([{:eid, name, nl} | ts], allow_default) when name in ["static", "async"],
+    do: pattern_id([{:id, name, nl} | ts], allow_default)
+
   # in an assignment pattern `{}[k]` or `[a].b` is a property target, not a nested pattern
   defp pattern([{:p, open, _} | _] = ts, allow_default) when open in ["[", "{"] do
     if Process.get(:js_assign_pattern, false) do
@@ -2356,7 +2360,14 @@ defmodule Browser.JS.Parser do
 
   defp destructuring_ahead?([_ | ts], d), do: destructuring_ahead?(ts, d)
 
-  defp assignment_value(ts) do
+  # `(f) = function() {}` is no identifier reference, so the function stays anonymous
+  defp unnamed({:id, _}, {tag, _, _, _, _, _} = fun) when tag == :fn, do: {:unnamed, fun}
+  defp unnamed({:id, _}, {:class, nil, _, _, _} = c), do: {:unnamed, c}
+  defp unnamed(_, right), do: right
+
+  defp assignment_value(ts0) do
+    ts = ts0
+
     if arrow_ahead?(ts) do
       arrow(ts)
     else
@@ -2366,6 +2377,7 @@ defmodule Browser.JS.Parser do
         [{:p, op, _} | rest] when op in @assign_ops ->
           unless assignable?(left), do: throw({:syntax, "invalid assignment target"})
           {right, rest} = assignment(rest)
+          right = if match?([{:p, "(", _} | _], ts0), do: unnamed(left, right), else: right
           {{if(strict?(), do: :sassign, else: :assign), op, left, right}, rest}
 
         _ ->
@@ -2875,6 +2887,14 @@ defmodule Browser.JS.Parser do
          (name == "yield" and Process.get(:js_generator, false)),
        do: throw({:syntax, "#{name} is not an identifier here"})
 
+    if strict?() and name in @strict_reserved,
+      do: throw({:syntax, "#{name} is a reserved word in strict mode"})
+
+    {{:id, name}, ts}
+  end
+
+  # `st\u0061tic` and `\u0061sync` are plain names, only their keyword roles are lost
+  defp primary([{:eid, name, _} | ts]) when name in ["static", "async"] do
     if strict?() and name in @strict_reserved,
       do: throw({:syntax, "#{name} is a reserved word in strict mode"})
 
