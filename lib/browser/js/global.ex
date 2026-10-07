@@ -64,6 +64,14 @@ defmodule Browser.JS.Global do
   end
 
   # the built-ins are not enumerable; what a script declares is
+  @doc "Every own string-keyed property of the global object, built-ins included."
+  def all_names do
+    for k <- Map.keys(Interp.deref(Interp.global()).vars),
+        is_binary(k),
+        not Interp.global_lexical?(k),
+        do: k
+  end
+
   def host_keys(:global) do
     builtin = :erlang.get(:js_builtin_names)
 

@@ -186,6 +186,10 @@ defmodule Browser.JS.Props do
       %{class: :host, host: {Browser.JS.Modules, data}} ->
         Browser.JS.Modules.names(data) ++ own_names_plain2(id, o)
 
+      # every global, the built-ins (not enumerable) included
+      %{class: :host, host: {Browser.JS.Global, :global}} ->
+        Browser.JS.Global.all_names() ++ own_names_plain2(id, o)
+
       _ ->
         own_names_plain2(id, o)
     end

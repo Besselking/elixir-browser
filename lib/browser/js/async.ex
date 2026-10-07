@@ -918,6 +918,25 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  defp cs({:with, obj, body}, env, ctx, k, _labels) do
+    cev(obj, env, ctx, fn o ->
+      if o in [:undefined, :null] do
+        guarded(
+          fn -> Interp.throw_error("TypeError", "Cannot convert undefined or null to object") end,
+          ctx,
+          fn -> k.(:ok) end
+        )
+      else
+        Process.put(:js_with_used, true)
+        scope = Interp.new_scope(env)
+        sc = Interp.deref(scope)
+        object = if match?({:obj, _}, o), do: o, else: Interp.new_object()
+        Interp.store(scope, Map.put(sc, :with, object))
+        cexec(body, scope, ctx, k)
+      end
+    end)
+  end
+
   defp cs({:labeled, l, s}, env, ctx, k, labels) do
     ctx = %{ctx | brk: Map.put(ctx.brk, l, k)}
     cexec(s, env, ctx, k, [l | labels])
