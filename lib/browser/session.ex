@@ -120,7 +120,9 @@ defmodule Browser.Session do
       scripts_pending: false,
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
-      active: 0
+      active: 0,
+      # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
+      closed: []
     }
 
     publish_tabs(state)
@@ -378,6 +380,9 @@ defmodule Browser.Session do
 
   def handle_info(wx(id: 5101, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, close_tab(state, state.active)}
+
+  def handle_info(wx(id: 5102, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, reopen_tab(state)}
 
   # Edit > Cut, Copy and Select All (wxID_CUT, wxID_COPY, wxID_SELECTALL)
   def handle_info(wx(id: 5031, event: wxCommand(type: :command_menu_selected)), state),
@@ -2118,6 +2123,7 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) when i == state.active do
+    state = remember_closed(state, i, state)
     state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
     UI.hide_suggestions(state.ui)
     tabs = List.delete_at(state.tabs, i)
@@ -2126,13 +2132,42 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) do
-    case Enum.at(state.tabs, i) do
+    tab = Enum.at(state.tabs, i)
+    state = remember_closed(state, i, tab)
+
+    case tab do
       %{js: pid} when is_pid(pid) -> Browser.JS.Runtime.stop(pid)
       _ -> :ok
     end
 
     active = if i < state.active, do: state.active - 1, else: state.active
     publish_tabs(%{state | tabs: List.delete_at(state.tabs, i), active: active})
+  end
+
+  @closed_kept 20
+
+  # the closed tab's history and page are kept to open it again (not its scroll or form edits)
+  defp remember_closed(state, i, %{history: h, loading: loading}) do
+    entry =
+      cond do
+        h.current != nil -> {i, h, {h.current, :history, []}}
+        loading != nil -> {i, History.new(), loading}
+        true -> nil
+      end
+
+    if entry, do: %{state | closed: Enum.take([entry | state.closed], @closed_kept)}, else: state
+  end
+
+  # Ctrl+Shift+T: the tab closed last comes back where it was, and is shown
+  defp reopen_tab(%{closed: []} = state), do: state
+
+  defp reopen_tab(%{closed: [{i, history, {url, mode, opts}} | rest]} = state) do
+    state = park(%{state | closed: rest})
+    i = min(i, length(state.tabs))
+    tab = %{blank_tab() | history: history}
+    state = %{state | tabs: List.insert_at(state.tabs, i, tab), active: i}
+    state = state |> Map.merge(tab) |> resume_blank()
+    load(state, url, mode, opts)
   end
 
   defp tab_click(state, x, y, button) do
