@@ -35,7 +35,8 @@ defmodule Browser.JS.Promise do
   def promise?({:obj, id}), do: match?(%{class: :promise}, deref(id))
   def promise?(_), do: false
 
-  defp data({:obj, id}), do: deref(id)
+  @doc false
+  def data({:obj, id}), do: deref(id)
 
   defp update({:obj, id}, fun), do: store(id, fun.(deref(id)))
 

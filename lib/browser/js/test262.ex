@@ -19,11 +19,8 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    proxy-missing-checks
-    Atomics.waitAsync
-    immutable-arraybuffer
-    tail-call-optimization Temporal ShadowRealm
-    decorators import-attributes import-text import-bytes json-modules top-level-await
+    Temporal ShadowRealm
+    decorators
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names
     regexp-duplicate-named-groups legacy-regexp
@@ -216,6 +213,8 @@ defmodule Browser.JS.Test262 do
         module? = "module" in flags
 
         spawn_and_wait(timeout, fn ->
+          Process.put(:js_cannot_block, "CanBlockIsFalse" in flags)
+
           execute(programs, source, max_steps, async?, "regExpUtils.js" in names, path, module?)
         end)
         |> judge(negative, async?)
@@ -255,7 +254,9 @@ defmodule Browser.JS.Test262 do
     # `import()` (and a module's imports) load files next to the test
     if path,
       do:
-        Process.put(:js_import, fn spec, from -> Modules.import(spec, from || path, loader()) end)
+        Process.put(:js_import, fn spec, from, p, type ->
+          Modules.import(spec, from || path, loader(), p, type)
+        end)
 
     try do
       case Parser.parse(source, module: module?) do
