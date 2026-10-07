@@ -52,6 +52,12 @@ defmodule Browser.InteractTest do
       assert Interact.key(ev(?c, meta?: true, alt?: true)) != :copy
     end
 
+    test "formatting and undo shortcuts" do
+      assert Interact.key(ev(?b, ctrl?: true)) == {:shortcut, "b"}
+      assert Interact.key(ev(?z, meta?: true)) == {:shortcut, "z"}
+      assert Interact.key(ev(?z, meta?: true, shift?: true)) == {:shortcut, "Z"}
+    end
+
     test "cut, and shift with movement keys" do
       assert Interact.key(ev(?x, meta?: true)) == :cut
       assert Interact.key(ev(24, ctrl?: true, char: 24)) == :cut
@@ -70,8 +76,8 @@ defmodule Browser.InteractTest do
     end
 
     test "other shortcuts do nothing, and alt keeps typing characters" do
-      assert Interact.key(ev(?y, meta?: true)) == :ignore
-      assert Interact.key(ev(?z, ctrl?: true)) == :ignore
+      assert Interact.key(ev(?q, meta?: true)) == :ignore
+      assert Interact.key(ev(?k, ctrl?: true)) == :ignore
       assert Interact.key(ev(?e, alt?: true, char: 0xE9)) == {:char, "é"}
     end
   end

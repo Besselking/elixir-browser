@@ -375,7 +375,20 @@ defmodule Browser.JS.WebAPI do
     def("PerformanceObserver", function (cb) { this.observe = function () {}; this.disconnect = function () {}; this.takeRecords = function () { return []; }; });
     g.PerformanceObserver.supportedEntryTypes = [];
 
-    def("getSelection", function () { return { rangeCount: 0, isCollapsed: true, removeAllRanges: function () {}, addRange: function () {}, toString: function () { return ""; } }; });
+    // ranges, the selection and execCommand are in priv/js/editing.js, loaded on first use
+    var editing = (function () {
+      var loaded = false;
+      function load() { if (!loaded) { loaded = true; __load_editing(); } }
+      function lazy(obj, name, onGlobal) {
+        Object.defineProperty(obj, name, { value: function () {
+          load();
+          var real = obj[name];
+          return real.apply(onGlobal ? g : this, arguments);
+        }, writable: true, configurable: true, enumerable: false });
+      }
+      lazy(g, "getSelection", true);
+      return { load: load, lazy: lazy };
+    })();
 
     var fonts = { ready: Promise.resolve(), status: "loaded", load: function () { return Promise.resolve([]); }, check: function () { return true; },
       add: function (f) { return fonts; }, "delete": function () { return false; }, clear: function () {}, forEach: function () {},
@@ -494,8 +507,6 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "draggable", function () { return false; });
     getter(EP, "spellcheck", function () { return true; });
     getter(EP, "accessKey", function () { return ""; });
-    getter(EP, "contentEditable", function () { return "inherit"; });
-    getter(EP, "isContentEditable", function () { return false; });
     getter(EP, "inert", function () { return false; });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
@@ -521,20 +532,10 @@ defmodule Browser.JS.WebAPI do
       if (b.contains && b.contains(a)) return 10;
       return 4;
     });
-    addTo(DP, "createRange", function () {
-      var r = { startContainer: document, endContainer: document, startOffset: 0, endOffset: 0, collapsed: true, commonAncestorContainer: document };
-      r.setStart = function (n, o) { r.startContainer = n; r.startOffset = o; };
-      r.setEnd = function (n, o) { r.endContainer = n; r.endOffset = o; };
-      r.setStartBefore = r.setStartAfter = r.setEndBefore = r.setEndAfter = function () {};
-      r.selectNode = r.selectNodeContents = function (n) { r.startContainer = r.endContainer = r.commonAncestorContainer = n; };
-      r.collapse = function () {}; r.deleteContents = function () {}; r.detach = function () {};
-      r.cloneRange = function () { return document.createRange(); };
-      r.getBoundingClientRect = function () { return r.commonAncestorContainer.getBoundingClientRect ? r.commonAncestorContainer.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 }; };
-      r.getClientRects = function () { return []; };
-      r.toString = function () { return ""; };
-      r.createContextualFragment = function (html) { var t = document.createElement("template"); t.innerHTML = html; var f = document.createDocumentFragment(); while (t.firstChild) f.appendChild(t.firstChild); return f; };
-      return r;
-    });
+    ["createRange", "execCommand", "queryCommandState", "queryCommandEnabled", "queryCommandValue", "queryCommandSupported", "queryCommandIndeterm", "getSelection"].forEach(function (n) { editing.lazy(DP, n, false); });
+    function Range() { editing.load(); return new g.Range(); }
+    function Selection() {}
+    def("Range", Range); def("Selection", Selection);
     function defDoc(name, fn) { if (!(name in document)) Object.defineProperty(document, name, { get: fn, configurable: true }); }
     defDoc("scrollingElement", function () { return document.documentElement; });
     defDoc("styleSheets", function () { return []; });
@@ -545,7 +546,6 @@ defmodule Browser.JS.WebAPI do
     defDoc("scripts", function () { return document.querySelectorAll("script"); });
     defDoc("all", function () { return document.querySelectorAll("*"); });
     defDoc("dir", function () { return "ltr"; });
-    defDoc("designMode", function () { return "off"; });
     defDoc("lastModified", function () { return new Date().toString(); });
     defDoc("domain", function () { return location.hostname; });
     defDoc("implementation", function () {
@@ -609,7 +609,7 @@ defmodule Browser.JS.WebAPI do
     evClass("PointerEvent", ["pointerId", "pointerType", "clientX", "clientY", "button", "buttons"]);
     evClass("TouchEvent", ["touches", "targetTouches", "changedTouches"]);
 
-    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleSheet", "CSSStyleDeclaration", "Range", "Selection", "Window", "ReadableStream", "WritableStream", "TransformStream"].forEach(function (n) { def(n, function () {}); });
+    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleSheet", "CSSStyleDeclaration", "Window", "ReadableStream", "WritableStream", "TransformStream"].forEach(function (n) { def(n, function () {}); });
 
     function Blob(parts, opts) {
       parts = parts || []; var text = "";

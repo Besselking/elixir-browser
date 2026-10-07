@@ -281,8 +281,51 @@ defmodule Browser.Page do
     cid_nids(kids, acc)
   end
 
-  @doc "True when the page has a `<script>` element."
-  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script")
+  @doc """
+  Runs the page's scripts in a runtime of its own, lets `fun` do something with the runtime
+  (`Browser.JS.Runtime`) and returns the page as the scripts left it. For tools that have no
+  window (`mix browser.screenshot --js`, `mix browser.layout --js`) and tests; the session keeps
+  a runtime for as long as the page is shown instead.
+  """
+  def run_js(%__MODULE__{} = page, env, fun \\ fn _pid -> :ok end) do
+    if scripts?(page) do
+      alias Browser.JS.Runtime
+
+      info = %{
+        url: page.url,
+        base: page.base || page.url,
+        width: env.width,
+        height: env.height,
+        history_before: 0,
+        fetch: &Browser.Fetch.load(&1, initiator: page.url),
+        request: &Browser.Fetch.load(&1, [initiator: page.url] ++ &2)
+      }
+
+      pid = Runtime.start(page.raw, info)
+      Runtime.run_scripts(pid)
+      Runtime.flush(pid)
+      fun.(pid)
+      reply = Runtime.snapshot(pid)
+      Runtime.stop(pid)
+      if reply.raw, do: from_raw(page, reply.raw, env), else: page
+    else
+      page
+    end
+  end
+
+  @doc "True when the page has a `<script>` element or something editable (the runtime holds its document)."
+  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script") or editable?(raw)
+
+  defp editable?(nodes) when is_list(nodes), do: Enum.any?(nodes, &editable?/1)
+
+  defp editable?({:element, _tag, attrs, kids}) do
+    case List.keyfind(attrs, "contenteditable", 0) do
+      {_, v} when v in ["", "true", "plaintext-only"] -> true
+      _ -> editable?(kids)
+    end
+  end
+
+  defp editable?(_), do: false
 
   # the element stays (scripts and frameworks expect it in the tree), its content does not
   defp empty_tag(nodes, tag) when is_list(nodes), do: Enum.map(nodes, &empty_tag(&1, tag))
