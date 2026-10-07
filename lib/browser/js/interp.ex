@@ -3906,7 +3906,9 @@ defmodule Browser.JS.Interp do
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to
   def ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
-  def ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+
+  def ev_named({:class, nil, _, _} = e, env, {:id, name}),
+    do: Browser.JS.Classes.define(e, env, name)
 
   def ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
     do: name_fn(ev(e, env), name)
