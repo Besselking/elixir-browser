@@ -6844,6 +6844,7 @@ defmodule Browser.Layout do
     # with collapsed borders the group's own borders are those of the rows at its edges
     last = length(rows) - 1
     group = edges_of(gc)
+    gimg = bg_pictures(gc)
 
     rows
     |> Enum.with_index()
@@ -6861,7 +6862,7 @@ defmodule Browser.Layout do
         |> Map.put(:left, best_edge(edges.left, group.left))
         |> Map.put(:right, best_edge(edges.right, group.right))
 
-      %{row | edges: edges, shift: add_shift(row.shift, rel_shift(gc))}
+      %{row | edges: edges, gimg: gimg, shift: add_shift(row.shift, rel_shift(gc))}
     end)
   end
 
@@ -6920,9 +6921,17 @@ defmodule Browser.Layout do
       cells: cells,
       valign: valign_of(c["vertical-align"]),
       bg: row_bg(c) || group_bg,
+      bgimg: bg_pictures(c),
+      gimg: nil,
       edges: edges_of(c),
       shift: rel_shift(c)
     }
+  end
+
+  # the background pictures of a row, row group or column, painted over the cells it holds
+  defp bg_pictures(c) do
+    with spec when spec != nil <- bgimg_spec(c),
+         do: %{spec: spec, color: c["color"] || {0, 0, 0}, ref: make_ref()}
   end
 
   # whatever else a row holds sits in an anonymous cell
@@ -7024,6 +7033,37 @@ defmodule Browser.Layout do
     c["table-layout"] == "fixed" and c["width"] not in [nil, :auto]
   end
 
+  # the pictures of a row group and a row, in the coordinates of the cell they are painted for:
+  # placed against the box of the row (group), clipped to the cell
+  defp row_pictures(st, p, {dx, dy, full_h}, {table_w, sx, ys, row_heights, groups}) do
+    box = fn
+      %{ref: ref} when is_map_key(groups, ref) ->
+        {first, last} = Map.fetch!(groups, ref)
+        top = Enum.at(ys, first)
+        {sx, top, table_w - 2 * sx, Enum.at(ys, last) + Enum.at(row_heights, last) - top}
+
+      _ ->
+        {sx, Enum.at(ys, p.row), table_w - 2 * sx, Enum.at(row_heights, p.row)}
+    end
+
+    for img <- [p.grp_img, p.row_img], img != nil, p.w > 0, full_h > 0 do
+      {bx, by, bw, bh} = box.(img)
+      area = {bx - dx, by - dy, bw, bh}
+
+      layers =
+        Backgrounds.paint_layers(
+          img.spec,
+          area,
+          {0, 0, p.w, full_h},
+          st.images,
+          color4(img.color)
+        )
+
+      %{type: :bgimage, layers: layers, x: 0, y: 0, w: p.w, h: full_h, radius: nil}
+    end
+    |> Enum.reject(&(&1.layers == []))
+  end
+
   # -> {items, table width, height}
   defp table_layout(st, ts, model, avail) do
     placed = table_grid(model.rows)
@@ -7079,6 +7119,18 @@ defmodule Browser.Layout do
       row_heights = grow_rows(row_heights, ts.h, top + sy + sy * nrows)
       ys = row_positions(row_heights, sy, top)
 
+      # the rows each row group with a background picture spans
+      groups =
+        model.rows
+        |> Enum.with_index()
+        |> Enum.reduce(%{}, fn
+          {%{gimg: %{ref: ref}}, r}, acc ->
+            Map.update(acc, ref, {r, r}, fn {first, _} -> {first, r} end)
+
+          _, acc ->
+            acc
+        end)
+
       cells =
         for p <- sized do
           rs = min(p.cell.rowspan, nrows - p.row)
@@ -7119,6 +7171,11 @@ defmodule Browser.Layout do
           dy = Enum.at(ys, p.row) + sdy
           behind = column_backgrounds(model.cols, widths, sx, p, full_h)
           behind = behind ++ if(p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: [])
+
+          behind =
+            behind ++
+              row_pictures(st, p, {dx, dy, full_h}, {table_w, sx, ys, row_heights, groups})
+
           moved = for item <- behind ++ items, do: move(item, dx, dy)
 
           # what is moved is positioned: it paints above what is not
@@ -7247,6 +7304,8 @@ defmodule Browser.Layout do
               col: col,
               row_valign: row.valign,
               row_bg: row.bg,
+              row_img: row.bgimg,
+              grp_img: row.gimg,
               shift: row.shift,
               redges: row.edges,
               top_edge: top,

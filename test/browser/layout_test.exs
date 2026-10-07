@@ -2106,6 +2106,16 @@ defmodule Browser.LayoutTest do
              ] = of_type(items, :bgimage)
     end
 
+    test "a row group's picture is placed against the group, not each cell" do
+      html =
+        ~s|<table style="border-spacing:0"><tbody style="background: url(a.png) right bottom no-repeat"><tr><td style="width:20px;height:20px;padding:0"></td><td style="width:20px;height:20px;padding:0"></td></tr><tr><td style="width:20px;height:20px;padding:0"></td><td style="width:20px;height:20px;padding:0"></td></tr></tbody></table>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      tiles = for %{layers: layers} <- of_type(items, :bgimage), l <- layers, do: l.tile
+      # one tile in the corner of the group (4 + 40 - 10, 40 - 10), which every cell shares
+      assert Enum.uniq(tiles) == [{34, 30, 10, 10}]
+    end
+
     test "positioning, size and repeat apply" do
       html =
         ~s|<div style="background: url(a.png) right bottom / 40px auto no-repeat; height: 60px; width: 200px">x</div>|
