@@ -1845,6 +1845,10 @@ defmodule Browser.JS.Parser do
     try do
       {params, ts} = params(expect(ts, "("), [])
       if generator?, do: check_no_yield([params, nil])
+
+      if Process.get(:js_async, false) and contains_node?(params, &match?({:await, _}, &1)),
+        do: throw({:syntax, "await expression in async function parameters"})
+
       ts = expect(ts, "{")
       {body, ts} = function_body(ts, params, match?({:method, _}, name))
       check_super_use(name, [params, body], class_method?)
@@ -2498,6 +2502,10 @@ defmodule Browser.JS.Parser do
         [{:id, n, _} | t] when n not in @reserved -> {n, t}
         t -> {nil, t}
       end
+
+    # the name of an async function expression is bound inside it, where `await` is reserved
+    if name == "await" and Process.get(:js_async_next, false),
+      do: throw({:syntax, "await is not a valid name for an async function expression"})
 
     if generator? and name == "yield",
       do: throw({:syntax, "yield is not a valid generator expression name"})

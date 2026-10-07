@@ -292,7 +292,11 @@ defmodule Browser.JS.Date do
   # [year, month0, day, h, m, s, ms] (integers, any size) -> time value
   defp compose([y, m, d, h, mi, s, ms]) do
     days = days_from_civil(y + Integer.floor_div(m, 12), Integer.mod(m, 12) + 1, 1) + d - 1
-    clip((days * @ms_day + h * 3_600_000 + mi * 60_000 + s * 1000 + ms) * 1.0)
+    # MakeTime and MakeDate are floating-point arithmetic (rounding, then overflow to NaN)
+    time = h * 3_600_000.0 + mi * 60_000.0 + s * 1000.0 + ms
+    clip(days * @ms_day * 1.0 + time)
+  rescue
+    ArithmeticError -> :nan
   end
 
   # [year, month0, day, hours, minutes, seconds, ms, weekday]
