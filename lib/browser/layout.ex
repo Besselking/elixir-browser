@@ -5889,7 +5889,7 @@ defmodule Browser.Layout do
           [table_row(el, c, kids, style, nil)]
 
         {:group, _el, tag, c, kids} ->
-          if group_kind(tag) == wanted, do: group_rows(kids, style, row_bg(c)), else: []
+          if group_kind(tag) == wanted, do: group_rows(kids, style, row_bg(c), c), else: []
 
         _ ->
           []
@@ -5923,13 +5923,63 @@ defmodule Browser.Layout do
   defp group_kind("tfoot"), do: :foot
   defp group_kind(_), do: :body
 
-  defp group_rows(kids, style, bg) do
-    for {:element, tag, attrs, ekids} = el <- kids,
-        tag not in @skip,
-        c = computed(attrs),
-        tag == "tr" or c["display"] == "table-row",
-        do: table_row(el, c, ekids, style, bg)
+  defp group_rows(kids, style, bg, gc) do
+    rows =
+      for {:element, tag, attrs, ekids} = el <- kids,
+          tag not in @skip,
+          c = computed(attrs),
+          tag == "tr" or c["display"] == "table-row",
+          do: table_row(el, c, ekids, style, bg)
+
+    # with collapsed borders the group's own borders are those of the rows at its edges
+    last = length(rows) - 1
+    group = edges_of(gc)
+
+    rows
+    |> Enum.with_index()
+    |> Enum.map(fn {row, i} ->
+      edges = row.edges
+      edges = if i == 0, do: Map.put(edges, :top, best_edge(edges.top, group.top)), else: edges
+
+      edges =
+        if i == last,
+          do: Map.put(edges, :bottom, best_edge(edges.bottom, group.bottom)),
+          else: edges
+
+      edges =
+        edges
+        |> Map.put(:left, best_edge(edges.left, group.left))
+        |> Map.put(:right, best_edge(edges.right, group.right))
+
+      %{row | edges: edges}
+    end)
   end
+
+  # the borders an element (a row or a row group) brings to a table with collapsed borders
+  defp edges_of(c) do
+    for side <- ~w(top bottom left right), into: %{} do
+      w = border_w(c, side)
+
+      edge =
+        if w > 0 do
+          %{
+            w: w,
+            props: %{
+              "border-#{side}-width" => w * 1.0,
+              "border-#{side}-style" => c["border-#{side}-style"],
+              "border-#{side}-color" => c["border-#{side}-color"]
+            }
+          }
+        end
+
+      {String.to_atom(side), edge}
+    end
+  end
+
+  # the wider border wins, the first of two equals
+  defp best_edge(nil, b), do: b
+  defp best_edge(a, nil), do: a
+  defp best_edge(a, b), do: if(b.w > a.w, do: b, else: a)
 
   defp row_bg(c), do: if(color?(c["background-color"]), do: c["background-color"])
 
@@ -5942,7 +5992,12 @@ defmodule Browser.Layout do
           tag in @cell_tags or cc["display"] == "table-cell",
           do: table_cell(el, cc, style)
 
-    %{cells: cells, valign: valign_of(c["vertical-align"]), bg: row_bg(c) || group_bg}
+    %{
+      cells: cells,
+      valign: valign_of(c["vertical-align"]),
+      bg: row_bg(c) || group_bg,
+      edges: edges_of(c)
+    }
   end
 
   # whatever else a row holds sits in an anonymous cell
@@ -6006,6 +6061,7 @@ defmodule Browser.Layout do
           xform_spec(c) == nil and not clips?(c) and
           c["position"] not in ["relative", "sticky"],
       vextra: box.pt + box.pb + bt + bb,
+      bw: box.bw,
       sizing: if(border_box?, do: :border, else: :content)
     }
   end
@@ -6064,8 +6120,10 @@ defmodule Browser.Layout do
       sized =
         Enum.map(placed, fn p ->
           w = max(span_w.(p.col, p.cell.colspan), 1)
-          {items0, h, _} = layout_atom(st, p.cell.sub, w, p.cell.key)
-          Map.merge(p, %{w: w, h0: h, items0: items0})
+          {eprops, vdelta} = if ts.collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
+          sub = if eprops == %{}, do: p.cell.sub, else: p.cell.build.(eprops)
+          {items0, h, _} = layout_atom(st, sub, w, if(eprops == %{}, do: p.cell.key))
+          Map.merge(p, %{w: w, h0: h, items0: items0, eprops: eprops, vdelta: vdelta})
         end)
 
       row_heights = table_row_heights(sized, nrows, sy)
@@ -6091,18 +6149,19 @@ defmodule Browser.Layout do
           min_h =
             if p.cell.sizing == :border,
               do: full_h,
-              else: max(full_h - p.cell.vextra - extra_top, 0)
+              else: max(full_h - p.cell.vextra - p.vdelta - extra_top, 0)
 
-          props = %{
-            "padding-top" => (p.cell.pt + extra_top) * 1.0,
-            "min-height" => min_h * 1.0
-          }
+          props =
+            Map.merge(p.eprops, %{
+              "padding-top" => (p.cell.pt + extra_top) * 1.0,
+              "min-height" => min_h * 1.0
+            })
 
           props = if ts.collapse?, do: collapse_borders(props, p, ncols, nrows), else: props
           # a plain cell looks the same at its final height, just lower when it is centred or
           # at the bottom
           items =
-            if p.cell.plain and not ts.collapse? do
+            if p.cell.plain and not ts.collapse? and p.eprops == %{} do
               if extra_top == 0, do: p.items0, else: Enum.map(p.items0, &move(&1, 0, extra_top))
             else
               {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
@@ -6133,6 +6192,32 @@ defmodule Browser.Layout do
     {items, h}
   end
 
+  # the borders a row or a row group puts on a cell at its edge, where they are wider than the
+  # cell's own -> {properties, the height they add}
+  defp edge_props(p, ncols, nrows) do
+    {tbw, rbw, bbw, lbw} = p.cell.bw
+    last_col? = p.col + p.cell.colspan >= ncols
+    last_row? = p.row + min(p.cell.rowspan, nrows - p.row) >= nrows
+
+    candidates = [
+      {p.top_edge, tbw, :v},
+      {if(last_row?, do: p.bottom_edge), bbw, :v},
+      {if(p.col == 0, do: p.redges.left), lbw, :h},
+      {if(last_col?, do: p.redges.right), rbw, :h}
+    ]
+
+    Enum.reduce(candidates, {%{}, 0}, fn
+      {nil, _, _}, acc ->
+        acc
+
+      {e, own, _}, acc when e.w <= own ->
+        acc
+
+      {e, own, axis}, {props, v} ->
+        {Map.merge(props, e.props), if(axis == :v, do: v + e.w - own, else: v)}
+    end)
+  end
+
   # with collapsed borders neighbouring cells share one line: the right and bottom
   # borders only belong to the cells at the edge
   defp collapse_borders(props, p, ncols, nrows) do
@@ -6149,6 +6234,9 @@ defmodule Browser.Layout do
   # cells at their row and column; a cell with a rowspan or colspan takes the places below
   # and beside it
   defp table_grid(rows) do
+    nrows = length(rows)
+    edges = Enum.map(rows, & &1.edges)
+
     {placed, _taken} =
       rows
       |> Enum.with_index()
@@ -6160,7 +6248,26 @@ defmodule Browser.Layout do
             spots =
               for dr <- 0..(cell.rowspan - 1), dc <- 0..(cell.colspan - 1), do: {r + dr, col + dc}
 
-            entry = %{cell: cell, row: r, col: col, row_valign: row.valign, row_bg: row.bg}
+            # a border between two rows is the wider of the one below the upper and the one above
+            # the lower
+            top =
+              if r > 0,
+                do: best_edge(row.edges.top, Enum.at(edges, r - 1).bottom),
+                else: row.edges.top
+
+            last_row = Enum.at(edges, min(r + cell.rowspan, nrows) - 1)
+
+            entry = %{
+              cell: cell,
+              row: r,
+              col: col,
+              row_valign: row.valign,
+              row_bg: row.bg,
+              redges: row.edges,
+              top_edge: top,
+              bottom_edge: last_row.bottom
+            }
+
             {[entry | placed], Enum.into(spots, taken), col + cell.colspan}
           end)
 

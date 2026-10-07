@@ -186,6 +186,9 @@ defmodule Browser.Reftest.Raster do
 
   defp glyph_color(color, _ch, _t, true), do: color
 
+  # white text is how tests hide their labels on a white page: it must not show up in colour
+  defp glyph_color({255, 255, 255} = white, _ch, _t, false), do: white
+
   defp glyph_color({r, g, b}, ch, t, false) do
     <<code::utf8, _::binary>> = ch
 

@@ -5023,4 +5023,47 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{0, 0, 400, 50}]
     end
   end
+
+  describe "collapsed borders from rows and row groups" do
+    defp table_rects(css, rows) do
+      html =
+        "<style>body{margin:0}table{border-collapse:collapse;width:100px;table-layout:fixed}td{height:20px;padding:0}#{css}</style><table>#{rows}</table>"
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y, &1.w, &1.h})
+    end
+
+    test "a row's top border is drawn across its cells" do
+      rects =
+        table_rects(
+          "tr{border-top:3px solid green}",
+          "<tr><td></td><td></td></tr>"
+        )
+
+      assert Enum.sort(rects) == [{0, 0, 50, 3}, {50, 0, 50, 3}]
+    end
+
+    test "a row group's border-bottom is drawn under its last row" do
+      rects =
+        table_rects(
+          "tbody{border-bottom:3px solid green}",
+          "<tbody><tr><td></td></tr><tr><td></td></tr></tbody>"
+        )
+
+      assert Enum.map(rects, &elem(&1, 3)) == [3]
+      assert [{0, y, 100, 3}] = rects
+      assert y == 37
+    end
+
+    test "the wider of two borders between rows wins" do
+      rects =
+        table_rects(
+          "#a{border-bottom:2px solid green}#b{border-top:4px solid green}",
+          "<tr id=a><td></td></tr><tr id=b><td></td></tr>"
+        )
+
+      assert Enum.map(rects, &elem(&1, 3)) == [4]
+    end
+  end
 end
