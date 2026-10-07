@@ -11889,6 +11889,7 @@ built-ins/Proxy/defineProperty/targetdesc-not-compatible-descriptor.js
 built-ins/Proxy/defineProperty/targetdesc-not-configurable-writable-desc-not-writable.js
 built-ins/Proxy/defineProperty/targetdesc-undefined-not-configurable-descriptor.js
 built-ins/Proxy/defineProperty/targetdesc-undefined-target-is-not-extensible.js
+built-ins/Proxy/defineProperty/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/defineProperty/trap-is-not-callable.js
 built-ins/Proxy/defineProperty/trap-is-null-target-is-proxy.js
 built-ins/Proxy/defineProperty/trap-is-undefined-target-is-proxy.js
@@ -11906,6 +11907,7 @@ built-ins/Proxy/deleteProperty/targetdesc-is-not-configurable.js
 built-ins/Proxy/deleteProperty/targetdesc-is-undefined-return-true.js
 built-ins/Proxy/deleteProperty/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/deleteProperty/trap-is-not-callable.js
+built-ins/Proxy/deleteProperty/trap-is-null-target-is-proxy.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-not-strict.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-strict.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-target-is-proxy.js
@@ -11924,6 +11926,7 @@ built-ins/Proxy/get/return-trap-result-same-value-configurable-false-writable-fa
 built-ins/Proxy/get/return-trap-result.js
 built-ins/Proxy/get/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/get/trap-is-not-callable.js
+built-ins/Proxy/get/trap-is-null-target-is-proxy.js
 built-ins/Proxy/get/trap-is-undefined-no-property.js
 built-ins/Proxy/get/trap-is-undefined-receiver.js
 built-ins/Proxy/get/trap-is-undefined-target-is-proxy.js
@@ -11942,6 +11945,7 @@ built-ins/Proxy/getOwnPropertyDescriptor/resultdesc-is-not-configurable-targetde
 built-ins/Proxy/getOwnPropertyDescriptor/resultdesc-return-configurable.js
 built-ins/Proxy/getOwnPropertyDescriptor/resultdesc-return-not-configurable.js
 built-ins/Proxy/getOwnPropertyDescriptor/return-is-abrupt.js
+built-ins/Proxy/getOwnPropertyDescriptor/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/getOwnPropertyDescriptor/trap-is-not-callable.js
 built-ins/Proxy/getOwnPropertyDescriptor/trap-is-null-target-is-proxy.js
 built-ins/Proxy/getOwnPropertyDescriptor/trap-is-undefined-target-is-proxy.js
@@ -12025,6 +12029,7 @@ built-ins/Proxy/ownKeys/return-type-throws-undefined.js
 built-ins/Proxy/ownKeys/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/ownKeys/trap-is-not-callable.js
 built-ins/Proxy/ownKeys/trap-is-null-target-is-proxy.js
+built-ins/Proxy/ownKeys/trap-is-undefined-target-is-proxy.js
 built-ins/Proxy/ownKeys/trap-is-undefined.js
 built-ins/Proxy/preventExtensions/call-parameters.js
 built-ins/Proxy/preventExtensions/null-handler.js
@@ -12065,6 +12070,7 @@ built-ins/Proxy/set/boolean-trap-result-is-false-number-return-false.js
 built-ins/Proxy/set/boolean-trap-result-is-false-string-return-false.js
 built-ins/Proxy/set/boolean-trap-result-is-false-undefined-return-false.js
 built-ins/Proxy/set/call-parameters-prototype-dunder-proto.js
+built-ins/Proxy/set/call-parameters-prototype-index.js
 built-ins/Proxy/set/call-parameters-prototype.js
 built-ins/Proxy/set/call-parameters.js
 built-ins/Proxy/set/null-handler.js
@@ -12080,6 +12086,7 @@ built-ins/Proxy/set/trap-is-missing-receiver-multiple-calls.js
 built-ins/Proxy/set/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/set/trap-is-not-callable.js
 built-ins/Proxy/set/trap-is-null-receiver.js
+built-ins/Proxy/set/trap-is-null-target-is-proxy.js
 built-ins/Proxy/set/trap-is-undefined-no-property.js
 built-ins/Proxy/set/trap-is-undefined-target-is-proxy.js
 built-ins/Proxy/set/trap-is-undefined.js
@@ -38988,6 +38995,7 @@ language/statements/for-in/head-lhs-cover-non-asnmt-trgt.js
 language/statements/for-in/head-lhs-cover.js
 language/statements/for-in/head-lhs-invalid-asnmt-ptrn-ary.js
 language/statements/for-in/head-lhs-invalid-asnmt-ptrn-obj.js
+language/statements/for-in/head-lhs-let.js
 language/statements/for-in/head-lhs-member.js
 language/statements/for-in/head-lhs-non-asnmt-trgt.js
 language/statements/for-in/head-var-bound-names-dup.js
