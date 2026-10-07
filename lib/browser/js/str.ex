@@ -44,10 +44,14 @@ defmodule Browser.JS.Str do
   def length(s) do
     cond do
       ascii?(s) -> byte_size(s)
-      byte_size(s) <= @small -> String.length(s)
+      byte_size(s) <= @small -> codepoint_count(s)
       true -> tuple_size(chars(s))
     end
   end
+
+  # UTF-8 lead bytes: every byte that is not a continuation byte starts a character (unlike
+  # `String.length/1`, a combining mark or an emoji sequence is more than one character)
+  defp codepoint_count(s), do: for(<<b <- s>>, b < 0x80 or b > 0xBF, reduce: 0, do: (n -> n + 1))
 
   @doc "The character at `i` (a string of it) or nil."
   def at(s, i) when i < 0,
@@ -58,7 +62,7 @@ defmodule Browser.JS.Str do
       if i < byte_size(s), do: binary_part(s, i, 1)
     else
       if byte_size(s) <= @small do
-        String.at(s, i)
+        s |> String.codepoints() |> Enum.at(i)
       else
         t = chars(s)
         if i < tuple_size(t), do: elem(t, i)
@@ -99,7 +103,7 @@ defmodule Browser.JS.Str do
       rest = slice(s, from, nil)
 
       case :binary.match(rest, needle) do
-        {pos, _} -> from + String.length(binary_part(rest, 0, pos))
+        {pos, _} -> from + codepoint_count(binary_part(rest, 0, pos))
         :nomatch -> -1
       end
     end

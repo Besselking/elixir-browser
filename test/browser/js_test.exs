@@ -303,6 +303,15 @@ defmodule Browser.JSTest do
                "30,2,4"
     end
 
+    test "a combining mark is a character of its own" do
+      assert js(
+               "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"
+             ) ==
+               "3,769,x,1"
+
+      assert js("'\\u00e9'.normalize('NFD').length") == 2.0
+    end
+
     test "string methods" do
       assert js("'abc'.toUpperCase().padStart(6, '*')") == "***ABC"
       assert js("'a-b-c'.split('-').length") == 3.0
@@ -696,6 +705,8 @@ defmodule Browser.JSTest do
                m('d'), await null, m('e'); log.push('|');
                [m(1), await m(2), m(3)]; log.push('|');
                ({ a: m(4), b: await m(5) }); log.push('|');
+               `${m(7)}${await m(8)}`; log.push('|');
+               ({ [m('k1')]: m(9), [await m('k2')]: m(10) }); log.push('|');
                m(6)(await 0);
              }
              f().catch(() => 0).then(() => console.log(log.join('')));
@@ -703,7 +714,7 @@ defmodule Browser.JSTest do
              total = 100;
              g().then(() => console.log(total));
              total = 1000;
-             """) == ["105", "abc|de|123|45|6"]
+             """) == ["105", "abc|de|123|45|78|k19k210|6"]
     end
 
     test "await inside loops, try, switch, labels and expressions" do

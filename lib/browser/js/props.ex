@@ -227,7 +227,7 @@ defmodule Browser.JS.Props do
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
 
-        for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i)) ++
+        for(i <- 0..(Browser.JS.Str.length(s) - 1)//1, do: Integer.to_string(i)) ++
           Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ ((rest ++ hidden) -- ["length"])
 
       _ ->
@@ -1357,7 +1357,7 @@ defmodule Browser.JS.Props do
         end
 
       is_binary(this) ->
-        is_integer(array_index(key)) and array_index(key) < String.length(this)
+        is_integer(array_index(key)) and array_index(key) < Browser.JS.Str.length(this)
 
       true ->
         false
@@ -1432,15 +1432,15 @@ defmodule Browser.JS.Props do
     cond do
       key == "length" ->
         new_object([
-          {"value", String.length(s) * 1.0},
+          {"value", Browser.JS.Str.length(s) * 1.0},
           {"writable", false},
           {"enumerable", false},
           {"configurable", false}
         ])
 
-      is_integer(array_index(key)) and array_index(key) < String.length(s) ->
+      is_integer(array_index(key)) and array_index(key) < Browser.JS.Str.length(s) ->
         new_object([
-          {"value", String.at(s, array_index(key))},
+          {"value", Browser.JS.Str.at(s, array_index(key))},
           {"writable", false},
           {"enumerable", true},
           {"configurable", false}

@@ -1358,7 +1358,7 @@ defmodule Browser.JS.Interp do
       # the indices and `length` of a String wrapper are not configurable
       match?(%{prim: str} when is_binary(str), o) and
           (to_key(key) == "length" or
-             (is_integer(index(key)) and index(key) < String.length(o.prim))) ->
+             (is_integer(index(key)) and index(key) < Browser.JS.Str.length(o.prim))) ->
         false
 
       o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
@@ -1492,7 +1492,7 @@ defmodule Browser.JS.Interp do
   end
 
   def own_keys(s) when is_binary(s),
-    do: for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i))
+    do: for(i <- 0..(Browser.JS.Str.length(s) - 1)//1, do: Integer.to_string(i))
 
   def own_keys(_), do: []
 
@@ -1514,7 +1514,7 @@ defmodule Browser.JS.Interp do
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
 
-        for(i <- 0..(String.length(str) - 1)//1, do: Integer.to_string(i)) ++
+        for(i <- 0..(Browser.JS.Str.length(str) - 1)//1, do: Integer.to_string(i)) ++
           Enum.sort_by(ints, &index/1) ++ rest
 
       _ ->

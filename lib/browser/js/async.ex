@@ -866,11 +866,25 @@ defmodule Browser.JS.Async do
     {:ok, [t, value], fn [t2, v] -> {kind, "=", t, {:binary, bin, t2, v}} end}
   end
 
+  defp ordered({:tmpl, parts}) do
+    {:ok, Enum.reject(parts, &is_binary/1),
+     fn kids ->
+       {rebuilt, []} =
+         Enum.map_reduce(parts, kids, fn
+           bin, rest when is_binary(bin) -> {bin, rest}
+           _, [k | rest] -> {k, rest}
+         end)
+
+       {:tmpl, rebuilt}
+     end}
+  end
+
   defp ordered({:object, props}) do
-    if Enum.all?(props, &match?({:init, {:str, _}, _}, &1)) do
-      {:ok, for({:init, _, v} <- props, do: v),
+    if Enum.all?(props, &object_prop_ordered?/1) do
+      {:ok, Enum.flat_map(props, &prop_kids/1),
        fn kids ->
-         {:object, Enum.zip_with(props, kids, fn {:init, key, _}, v -> {:init, key, v} end)}
+         {rebuilt, []} = Enum.map_reduce(props, kids, &prop_rebuild/2)
+         {:object, rebuilt}
        end}
     else
       :none
@@ -878,6 +892,23 @@ defmodule Browser.JS.Async do
   end
 
   defp ordered(_), do: :none
+
+  defp object_prop_ordered?({:init, _, _}), do: true
+  defp object_prop_ordered?({:spread, _}), do: true
+  defp object_prop_ordered?({:proto, _}), do: true
+  defp object_prop_ordered?(_), do: false
+
+  defp prop_kids({:init, {:computed, ke}, v}), do: [ke, v]
+  defp prop_kids({:init, _, v}), do: [v]
+  defp prop_kids({:spread, e}), do: [e]
+  defp prop_kids({:proto, v}), do: [v]
+
+  defp prop_rebuild({:init, {:computed, _}, _}, [ke, v | rest]),
+    do: {{:init, {:computed, ke}, v}, rest}
+
+  defp prop_rebuild({:init, key, _}, [v | rest]), do: {{:init, key, v}, rest}
+  defp prop_rebuild({:spread, _}, [e | rest]), do: {{:spread, e}, rest}
+  defp prop_rebuild({:proto, _}, [v | rest]), do: {{:proto, v}, rest}
 
   defp unspread({:spread, e}), do: e
   defp unspread(e), do: e
@@ -889,6 +920,8 @@ defmodule Browser.JS.Async do
 
   defp pure?({tag, _}) when tag in [:lit, :num, :str, :bigint, :val, :gen, :async], do: true
   defp pure?({:fn, _, _, _, _}), do: true
+  # a class expression keeps the name its property gives it
+  defp pure?({:class, _, _, _}), do: true
   defp pure?(_), do: false
 
   defp lift_list(items, leaves) do
