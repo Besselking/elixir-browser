@@ -891,6 +891,9 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        # an inline-level box is where it would be on a line: beside the floats
+        inline: kind(tag, c) in [:inline, :inline_block],
+        align: parent_style.align,
         autoh: not replaced? and c["height"] in [nil, :auto] and c["max-height"] != :fit,
         mta: c["margin-top"] == :auto,
         mba: c["margin-bottom"] == :auto,
@@ -3590,9 +3593,29 @@ defmodule Browser.Layout do
     cw = origin.w
 
     {static_x, static_y} =
-      if st.line == [],
-        do: {st.margin + st.left, st.y + st.gap + st.ngap},
-        else: {st.x, st.y}
+      cond do
+        st.line != [] ->
+          {st.x, st.y}
+
+        Map.get(spec, :inline) ->
+          y = st.y + st.gap + st.ngap
+          {fl, fr} = float_offsets(st, y)
+          left = st.margin + st.left + fl
+          room = st.width - st.margin - st.right - fr - left
+
+          # the static position of the box is that of an empty one on the line
+          shift =
+            case Map.get(spec, :align) do
+              :center -> max(round(room / 2), 0)
+              align when align in [:right, :rstart] -> max(room, 0)
+              _ -> 0
+            end
+
+          {left + shift, y}
+
+        true ->
+          {st.margin + st.left, st.y + st.gap + st.ngap}
+      end
 
     static_right = st.width - st.margin - st.right
 

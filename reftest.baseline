@@ -3950,7 +3950,12 @@ css/css-position/position-relative-table-caption.html
 css/css-position/position-relative-table-td-left.html
 css/css-position/position-relative-table-td-top.html
 css/css-position/position-static-001.html
+css/css-position/static-position/inline-level-absolute-in-block-level-context-001.html
+css/css-position/static-position/inline-level-absolute-in-block-level-context-002.html
+css/css-position/static-position/inline-level-absolute-in-block-level-context-003.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-004.html
+css/css-position/static-position/inline-level-absolute-in-block-level-context-005.html
+css/css-position/static-position/inline-level-absolute-in-block-level-context-006.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-007.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-013.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-014.html
