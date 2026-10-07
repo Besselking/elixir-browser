@@ -22317,6 +22317,14 @@ language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-numeric-literal.js
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-string-literal.js
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-yield-expression.js
+language/expressions/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+language/expressions/class/decorator/syntax/valid/decorator-call-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-call-expr-identifier-reference.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-decorator-member-expr.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-identifier-reference.js
+language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err.js
@@ -24717,6 +24725,7 @@ language/expressions/class/elements/evaluation-error/computed-name-toprimitive-r
 language/expressions/class/elements/evaluation-error/computed-name-tostring-err.js
 language/expressions/class/elements/evaluation-error/computed-name-valueof-err.js
 language/expressions/class/elements/field-declaration.js
+language/expressions/class/elements/field-definition-accessor-no-line-terminator.js
 language/expressions/class/elements/fields-anonymous-function-length.js
 language/expressions/class/elements/fields-asi-1.js
 language/expressions/class/elements/fields-asi-2.js
@@ -25589,6 +25598,7 @@ language/expressions/class/elements/syntax/early-errors/private-member-exp-canno
 language/expressions/class/elements/syntax/early-errors/private-method-cannot-escape-token.js
 language/expressions/class/elements/syntax/early-errors/super-private-access-invalid.js
 language/expressions/class/elements/syntax/valid/grammar-class-body-ctor-no-heritage.js
+language/expressions/class/elements/syntax/valid/grammar-field-accessor.js
 language/expressions/class/elements/syntax/valid/grammar-field-classelementname-initializer-alt.js
 language/expressions/class/elements/syntax/valid/grammar-field-classelementname-initializer.js
 language/expressions/class/elements/syntax/valid/grammar-field-identifier-alt.js
@@ -33525,6 +33535,18 @@ language/statements/class/cpn-class-decl-fields-methods-computed-property-name-f
 language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-string-literal.js
 language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-yield-expression.js
 language/statements/class/cptn-decl.js
+language/statements/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-call-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-member-expr-decorator-member-expr.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-member-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-parenthesized-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-call-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-call-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-decorator-member-expr.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/statements/class/definition/accessors.js
 language/statements/class/definition/basics.js
 language/statements/class/definition/class-method-returns-promise.js
@@ -35990,6 +36012,7 @@ language/statements/class/elements/evaluation-error/computed-name-toprimitive-re
 language/statements/class/elements/evaluation-error/computed-name-tostring-err.js
 language/statements/class/elements/evaluation-error/computed-name-valueof-err.js
 language/statements/class/elements/field-declaration.js
+language/statements/class/elements/field-definition-accessor-no-line-terminator.js
 language/statements/class/elements/fielddefinition-initializer-abrupt-completion.js
 language/statements/class/elements/fields-anonymous-function-length.js
 language/statements/class/elements/fields-asi-1.js
@@ -36965,6 +36988,7 @@ language/statements/class/elements/syntax/early-errors/private-member-exp-cannot
 language/statements/class/elements/syntax/early-errors/private-method-cannot-escape-token.js
 language/statements/class/elements/syntax/early-errors/super-private-access-invalid.js
 language/statements/class/elements/syntax/valid/grammar-class-body-ctor-no-heritage.js
+language/statements/class/elements/syntax/valid/grammar-field-accessor.js
 language/statements/class/elements/syntax/valid/grammar-field-classelementname-initializer-alt.js
 language/statements/class/elements/syntax/valid/grammar-field-classelementname-initializer.js
 language/statements/class/elements/syntax/valid/grammar-field-identifier-alt.js

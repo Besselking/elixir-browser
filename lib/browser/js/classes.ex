@@ -22,6 +22,16 @@ defmodule Browser.JS.Classes do
   def define(class, env, inferred \\ nil)
 
   def define({:class, name, super_node, members}, env, inferred) do
+    # decorators ride along as a last element of the member list; their expressions are
+    # evaluated first, in order, class decorators before those of the members
+    {members, class_decs, member_decs} =
+      case List.last(members) do
+        {:decorations, cd, md} -> {Enum.drop(members, -1), cd, md}
+        _ -> {members, [], %{}}
+      end
+
+    class_decs = eval_decorators(class_decs, env)
+    metadata = Interp.new_object([], :null)
     cenv = Interp.new_scope(env)
 
     # the heritage is evaluated inside the class scope, where the class's own name is still
@@ -97,43 +107,72 @@ defmodule Browser.JS.Classes do
 
     # members, in order; static fields and blocks run once everything is defined
     {fields, statics} =
-      Enum.reduce(members, {[], []}, fn
-        {:cmember, :method, {:str, "constructor"}, _, false}, acc ->
+      members
+      |> Enum.with_index()
+      |> Enum.reduce({[], []}, fn
+        {{:cmember, :method, {:str, "constructor"}, _, false}, _}, acc ->
           acc
 
-        {:cmember, :block, _, body, true}, {fields, statics} ->
+        {{:cmember, :block, _, body, true}, _}, {fields, statics} ->
           {fields, [{:block, body} | statics]}
 
-        {:cmember, :field, key, init, static?}, {fields, statics} ->
+        {{:cmember, :field, key, init, static?}, idx}, {fields, statics} ->
           k = member_key(key, cenv)
+          decs = eval_decorators(Map.get(member_decs, idx, []), cenv)
 
           if static? and k == "prototype",
             do: throw_error("TypeError", "Classes may not have a static field named 'prototype'")
 
           fname = field_fn_name(key, k)
 
-          if static?,
-            do: {fields, [{:field, k, init, fname} | statics]},
-            else: {[{k, init, fname} | fields], statics}
+          {wrappers, inits} =
+            decorate_field(decs, "field", member_name(key, k), static?, key, k, metadata)
 
-        {:cmember, kind, {:priv, _} = key, value, static?}, {fields, statics} = acc ->
+          init = if wrappers == [], do: init, else: {:decorated_init, init, wrappers}
+          late = for i <- inits, do: {:init_fn, i, :late}
+
+          if static?,
+            do: {fields, Enum.reverse(late) ++ [{:field, k, init, fname} | statics]},
+            else: {Enum.reverse(late) ++ [{k, init, fname} | fields], statics}
+
+        {{:cmember, :accessor, key, init, static?}, idx}, {fields, statics} ->
           k = member_key(key, cenv)
+          decs = eval_decorators(Map.get(member_decs, idx, []), cenv)
+
+          if static? and k == "prototype",
+            do: throw_error("TypeError", "Classes may not have a static member named 'prototype'")
+
+          define_auto_accessor(
+            {key, k, init, static?, decs},
+            {f, proto, metadata},
+            {fields, statics}
+          )
+
+        {{:cmember, kind, {:priv, _} = key, value, static?}, idx}, {fields, statics} = acc ->
+          k = member_key(key, cenv)
+          decs = eval_decorators(Map.get(member_decs, idx, []), cenv)
           fun = Interp.ev(value, cenv)
           Interp.set_home(fun, if(static?, do: f, else: proto))
           {:priv, pname} = key
           Interp.name_method(fun, "#" <> pname, kind)
 
+          {fun, inits} =
+            decorate_method(decs, kind, fun, "#" <> pname, static?, key, k, metadata)
+
+          early = for i <- inits, do: {:init_fn, i, :early}
+
           if static? do
             put_private(f, k, kind, fun)
-            acc
+            {fields, Enum.reverse(early) ++ statics}
           else
-            {fields, statics} = {fields, statics}
-            {[{:private_method, k, kind, fun} | fields], statics}
+            _ = acc
+            {Enum.reverse(early) ++ [{:private_method, k, kind, fun} | fields], statics}
           end
 
-        {:cmember, kind, key, value, static?}, acc ->
+        {{:cmember, kind, key, value, static?}, idx}, {fields, statics} ->
           target = if static?, do: f, else: proto
           k = member_key(key, cenv)
+          decs = eval_decorators(Map.get(member_decs, idx, []), cenv)
 
           if static? and k == "prototype",
             do: throw_error("TypeError", "Classes may not have a static member named 'prototype'")
@@ -142,17 +181,27 @@ defmodule Browser.JS.Classes do
           Interp.set_home(fun, target)
           Interp.name_method(fun, k, kind)
 
+          {fun, inits} =
+            decorate_method(decs, kind, fun, member_name(key, k), static?, key, k, metadata)
+
+          early = for i <- inits, do: {:init_fn, i, :early}
+
           case kind do
             :method -> put_hidden(target, k, fun)
             :get -> Props.define_accessor(target, k, get: fun, enumerable: false)
             :set -> Props.define_accessor(target, k, set: fun, enumerable: false)
           end
 
-          acc
+          if static?,
+            do: {fields, Enum.reverse(early) ++ statics},
+            else: {Enum.reverse(early) ++ fields, statics}
       end)
 
-    # private methods and accessors are installed before any field is initialised
+    # private methods and accessors are installed before any field is initialised; the
+    # initializers methods asked for come next
     {methods, fields} = Enum.split_with(fields, &match?({:private_method, _, _, _}, &1))
+    {early, fields} = Enum.split_with(fields, &match?({:init_fn, _, :early}, &1))
+    methods = methods ++ early
 
     info = %{
       parent: parent,
@@ -166,7 +215,15 @@ defmodule Browser.JS.Classes do
     obj = deref(fid)
     store(fid, Map.put(obj, :class_info, info))
 
-    run_statics(Enum.reverse(statics), f, cenv)
+    {early_statics, statics} =
+      statics |> Enum.reverse() |> Enum.split_with(&match?({:init_fn, _, :early}, &1))
+
+    run_statics(early_statics ++ statics, f, cenv)
+
+    # the class decorators run last; what they return takes the class's place
+    {f, class_inits} = decorate_class(class_decs, f, name, metadata)
+    if name && f != nil, do: Interp.declare(cenv, name, f, true)
+    for i <- class_inits, do: Interp.call(i, f, [])
     f
   end
 
@@ -192,13 +249,357 @@ defmodule Browser.JS.Classes do
       Interp.new_fn_scope(cenv, %{this: f, home: f, new_target: :undefined, field_init: true})
 
     Enum.each(statics, fn
+      {:init_fn, fun, _} ->
+        Interp.call(fun, f, [])
+
       {:field, key, init, fname} ->
-        v = if init, do: Interp.ev_named(init, scope, {:id, fname}), else: :undefined
-        define_field(f, key, v)
+        define_field(f, key, field_value(init, scope, fname, f))
 
       {:block, body} ->
         inner = Interp.new_fn_scope(scope, %{})
         Interp.run_body(body, inner)
+    end)
+  end
+
+  # the initial value of a field; decorators may have wrapped the initializer
+  defp field_value({:decorated_init, init, wrappers}, scope, fname, this) do
+    v = field_value(init, scope, fname, this)
+    Enum.reduce(wrappers, v, fn w, v -> Interp.call(w, this, [v]) end)
+  end
+
+  defp field_value(nil, _scope, _fname, _this), do: :undefined
+  defp field_value(init, scope, fname, _this), do: Interp.ev_named(init, scope, {:id, fname})
+
+  # ── decorators ─────────────────────────────────────────────
+
+  defp eval_decorators(decs, env) do
+    for d <- decs do
+      v = Interp.ev(d, env)
+
+      unless Interp.function?(v),
+        do: throw_error("TypeError", "Decorator must be a function")
+
+      v
+    end
+  end
+
+  defp member_name({:priv, n}, _), do: "#" <> n
+  defp member_name(_, k), do: k
+
+  # the context object a decorator is called with, and the key its `addInitializer` fills
+  defp decorator_context(kind, name, static?, private?, access, metadata) do
+    ref = make_ref()
+    Process.put({:deco_inits, ref}, {:open, []})
+
+    add_initializer =
+      native("addInitializer", fn _, args ->
+        fun = List.first(args, :undefined)
+
+        case Process.get({:deco_inits, ref}) do
+          {:open, list} ->
+            unless Interp.function?(fun),
+              do: throw_error("TypeError", "addInitializer needs a function")
+
+            Process.put({:deco_inits, ref}, {:open, list ++ [fun]})
+            :undefined
+
+          _ ->
+            throw_error("TypeError", "addInitializer cannot be called after decoration finished")
+        end
+      end)
+
+    base = [
+      {"kind", kind},
+      {"name", name},
+      {"metadata", metadata}
+    ]
+
+    base =
+      if kind == "class",
+        do: base ++ [{"addInitializer", add_initializer}],
+        else:
+          base ++
+            [
+              {"static", static?},
+              {"private", private?},
+              {"access", access},
+              {"addInitializer", add_initializer}
+            ]
+
+    {Interp.new_object(base), ref}
+  end
+
+  defp finish_context(ref) do
+    {:open, list} = Process.get({:deco_inits, ref})
+    Process.put({:deco_inits, ref}, {:closed, list})
+    list
+  end
+
+  defp key_access(k, parts) do
+    has =
+      native("has", fn _, args ->
+        case List.first(args, :undefined) do
+          {:obj, id} = o ->
+            case k do
+              {:private, _} -> Map.has_key?(deref(id).props, k)
+              _ -> Interp.has_property?(o, k)
+            end
+
+          _ ->
+            throw_error("TypeError", "access.has needs an object")
+        end
+      end)
+
+    get = native("get", fn _, args -> Interp.get(access_obj(args), k) end)
+
+    set =
+      native("set", fn _, args ->
+        Interp.put(access_obj(args), k, Enum.at(args, 1, :undefined))
+        :undefined
+      end)
+
+    pairs =
+      for {name, fun} <- [{"has", has}, {"get", get}, {"set", set}],
+          name in parts,
+          do: {name, fun}
+
+    Interp.new_object(pairs)
+  end
+
+  defp access_obj(args) do
+    case List.first(args, :undefined) do
+      {:obj, _} = o -> o
+      _ -> throw_error("TypeError", "access needs an object")
+    end
+  end
+
+  defp call_decorator(dec, value, ctx) do
+    Interp.call(dec, :undefined, [value, ctx])
+  end
+
+  # methods, getters and setters: a decorator may return a replacement function
+  defp decorate_method([], _kind, fun, _name, _static?, _key, _k, _metadata), do: {fun, []}
+
+  defp decorate_method(decs, kind, fun, name, static?, key, k, metadata) do
+    kind_name = Atom.to_string(if kind == :method, do: :method, else: kind) <> ""
+
+    kind_name =
+      if kind == :get, do: "getter", else: if(kind == :set, do: "setter", else: kind_name)
+
+    parts = if kind == :set, do: ["has", "set"], else: ["has", "get"]
+
+    decs
+    |> Enum.reverse()
+    |> Enum.reduce({fun, []}, fn dec, {value, inits} ->
+      {ctx, ref} =
+        decorator_context(
+          kind_name,
+          name,
+          static?,
+          match?({:priv, _}, key),
+          key_access(k, parts),
+          metadata
+        )
+
+      result = call_decorator(dec, value, ctx)
+      new_inits = finish_context(ref)
+
+      value =
+        cond do
+          result == :undefined ->
+            value
+
+          Interp.function?(result) ->
+            result
+
+          true ->
+            throw_error("TypeError", "A method decorator must return a function or undefined")
+        end
+
+      {value, inits ++ new_inits}
+    end)
+  end
+
+  # fields: a decorator may return a function that maps the initial value
+  defp decorate_field([], _kind, _name, _static?, _key, _k, _metadata), do: {[], []}
+
+  defp decorate_field(decs, kind, name, static?, key, k, metadata) do
+    decs
+    |> Enum.reverse()
+    |> Enum.reduce({[], []}, fn dec, {wrappers, inits} ->
+      {ctx, ref} =
+        decorator_context(
+          kind,
+          name,
+          static?,
+          match?({:priv, _}, key),
+          key_access(k, ["has", "get", "set"]),
+          metadata
+        )
+
+      result = call_decorator(dec, :undefined, ctx)
+      new_inits = finish_context(ref)
+
+      wrappers =
+        cond do
+          result == :undefined ->
+            wrappers
+
+          Interp.function?(result) ->
+            wrappers ++ [result]
+
+          true ->
+            throw_error("TypeError", "A field decorator must return a function or undefined")
+        end
+
+      {wrappers, inits ++ new_inits}
+    end)
+  end
+
+  # `accessor x = 1`: a getter and a setter over a private slot
+  defp define_auto_accessor(
+         {key, k, init, static?, decs},
+         {f, proto, metadata},
+         {fields, statics}
+       ) do
+    storage = {:private, make_ref()}
+    target = if static?, do: f, else: proto
+    name = member_name(key, k)
+    private? = match?({:priv, _}, key)
+
+    getter =
+      native("get " <> to_string_name(name), fn this, _ ->
+        accessor_slot!(this, storage)
+        Interp.get(this, storage)
+      end)
+
+    setter =
+      native("set " <> to_string_name(name), fn this, args ->
+        accessor_slot!(this, storage)
+        Interp.put(this, storage, Enum.at(args, 0, :undefined))
+        :undefined
+      end)
+
+    Interp.set_home(getter, target)
+    Interp.set_home(setter, target)
+
+    {getter, setter, wrappers, inits} =
+      decs
+      |> Enum.reverse()
+      |> Enum.reduce({getter, setter, [], []}, fn dec, {g, s, wrappers, inits} ->
+        {ctx, ref} =
+          decorator_context(
+            "accessor",
+            name,
+            static?,
+            private?,
+            key_access(k, ["has", "get", "set"]),
+            metadata
+          )
+
+        value = Interp.new_object([{"get", g}, {"set", s}])
+        result = call_decorator(dec, value, ctx)
+        new_inits = finish_context(ref)
+
+        case result do
+          :undefined ->
+            {g, s, wrappers, inits ++ new_inits}
+
+          {:obj, _} = r ->
+            g2 = accessor_part(Interp.get(r, "get"), g)
+            s2 = accessor_part(Interp.get(r, "set"), s)
+
+            w =
+              case Interp.get(r, "init") do
+                :undefined ->
+                  wrappers
+
+                i ->
+                  if Interp.function?(i),
+                    do: wrappers ++ [i],
+                    else: throw_error("TypeError", "accessor init must be a function")
+              end
+
+            {g2, s2, w, inits ++ new_inits}
+
+          _ ->
+            throw_error("TypeError", "An accessor decorator must return an object or undefined")
+        end
+      end)
+
+    init = if wrappers == [], do: init, else: {:decorated_init, init, wrappers}
+    late = for i <- inits, do: {:init_fn, i, :late}
+    fname = field_fn_name(key, k)
+
+    cond do
+      private? and static? ->
+        put_private(f, k, :get, getter)
+        put_private(f, k, :set, setter)
+        {fields, Enum.reverse(late) ++ [{:field, storage, init, fname} | statics]}
+
+      private? ->
+        {Enum.reverse(late) ++
+           [
+             {storage, init, fname},
+             {:private_method, k, :set, setter},
+             {:private_method, k, :get, getter} | fields
+           ], statics}
+
+      true ->
+        Props.define_accessor(target, k, get: getter, set: setter, enumerable: false)
+
+        if static?,
+          do: {fields, Enum.reverse(late) ++ [{:field, storage, init, fname} | statics]},
+          else: {Enum.reverse(late) ++ [{storage, init, fname} | fields], statics}
+    end
+  end
+
+  defp accessor_part(:undefined, current), do: current
+
+  defp accessor_part(fun, _current) do
+    if Interp.function?(fun),
+      do: fun,
+      else: throw_error("TypeError", "accessor get and set must be functions")
+  end
+
+  defp accessor_slot!({:obj, id}, storage) do
+    unless Map.has_key?(deref(id).props, storage),
+      do: throw_error("TypeError", "Cannot access an auto-accessor on an object that lacks it")
+  end
+
+  defp accessor_slot!(_, _),
+    do: throw_error("TypeError", "Cannot access an auto-accessor on a non-object")
+
+  defp to_string_name(n) when is_binary(n), do: n
+  defp to_string_name({:symbol, _, d}) when is_binary(d), do: "[" <> d <> "]"
+  defp to_string_name(_), do: ""
+
+  # class decorators, last first; each may return a replacement class
+  defp decorate_class([], f, _name, _metadata), do: {f, []}
+
+  defp decorate_class(decs, f, name, metadata) do
+    decs
+    |> Enum.reverse()
+    |> Enum.reduce({f, []}, fn dec, {value, inits} ->
+      {ctx, ref} =
+        decorator_context("class", name || :undefined, false, false, :undefined, metadata)
+
+      result = call_decorator(dec, value, ctx)
+      new_inits = finish_context(ref)
+
+      value =
+        cond do
+          result == :undefined ->
+            value
+
+          Interp.constructor?(result) ->
+            result
+
+          true ->
+            throw_error("TypeError", "A class decorator must return a constructor or undefined")
+        end
+
+      {value, inits ++ new_inits}
     end)
   end
 
@@ -262,9 +663,11 @@ defmodule Browser.JS.Classes do
         {:private_method, key, kind, fun} ->
           put_private(this, key, kind, fun)
 
+        {:init_fn, fun, _} ->
+          Interp.call(fun, this, [])
+
         {key, init, fname} ->
-          v = if init, do: Interp.ev_named(init, scope, {:id, fname}), else: :undefined
-          define_field(this, key, v)
+          define_field(this, key, field_value(init, scope, fname, this))
       end
     end
 

@@ -10,7 +10,7 @@ defmodule Browser.JS.Lexer do
   """
 
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
-             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = ."
+             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
 
   @keywords ~w(break case catch class const continue debugger default delete do else enum export

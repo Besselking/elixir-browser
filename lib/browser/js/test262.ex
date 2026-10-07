@@ -20,7 +20,6 @@ defmodule Browser.JS.Test262 do
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
     Temporal ShadowRealm
-    decorators
     source-phase-imports-module-source
     regexp-duplicate-named-groups legacy-regexp
     nonextensible-applies-to-private
