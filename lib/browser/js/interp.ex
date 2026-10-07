@@ -1065,6 +1065,8 @@ defmodule Browser.JS.Interp do
           nil ->
             if key == "length" do
               new_len = array_length!(v)
+              # the coercion may have run code that changed the array
+              o = deref(id)
 
               cond do
                 Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
@@ -1319,6 +1321,7 @@ defmodule Browser.JS.Interp do
   # a missing array element: an index setter or a proxy further up the prototype chain
   defp index_hook({:obj, pid}, i) do
     p = deref(pid)
+    k = Integer.to_string(i)
 
     cond do
       is_map_key(p, :proxy) ->
@@ -1330,6 +1333,13 @@ defmodule Browser.JS.Interp do
 
       match?(%{class: :array, items: %{^i => _}}, p) ->
         :none
+
+      Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
+        :none
+
+      match?(%{props: %{^k => {:accessor, _, _}}}, p) ->
+        {:accessor, _, setter} = p.props[k]
+        if function?(setter), do: {:setter, setter}, else: :none
 
       true ->
         index_hook(p.proto, i)
@@ -2464,7 +2474,8 @@ defmodule Browser.JS.Interp do
         thrower = :erlang.get(:js_throw_type_error)
 
         cond do
-          Map.has_key?(scope.vars, :strict) and thrower != :undefined ->
+          (Map.has_key?(scope.vars, :strict) or not simple_params?(scope)) and
+              thrower != :undefined ->
             Browser.JS.Props.define_accessor(a, "callee",
               get: thrower,
               set: thrower,
@@ -2491,6 +2502,20 @@ defmodule Browser.JS.Interp do
 
   # A sloppy function with plain parameters maps `arguments[i]` to the i-th parameter. The
   # last of equal names owns the mapping, and only indices below the argument count map.
+  # a function with defaults, a rest parameter or patterns gets an unmapped arguments object
+  defp simple_params?(scope) do
+    case Map.get(scope, :fid) do
+      fid when is_integer(fid) ->
+        case deref(fid) do
+          %{fun: {:closure, %{params: params}}} -> Enum.all?(params, &match?({:id, _}, &1))
+          _ -> true
+        end
+
+      _ ->
+        true
+    end
+  end
+
   defp map_arguments(aid, owner, scope, args) do
     with false <- Map.has_key?(scope.vars, :strict),
          fid when is_integer(fid) <- Map.get(scope, :fid),

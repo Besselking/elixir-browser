@@ -1009,6 +1009,21 @@ defmodule Browser.JSTest do
                "|g"
     end
 
+    test "indexed setters on a prototype run for holes and the arguments of non-simple functions are unmapped" do
+      assert js("""
+             var l = [];
+             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l.push(v) }, configurable: true});
+             var a = [, 1]; a[0] = 5;
+             delete Object.prototype[0];
+             l.join() + '|' + a.hasOwnProperty(0)
+             """) == "5|false"
+
+      assert js(
+               "function f(a, b = 1) { a = 7; return arguments[0] + ',' + typeof Object.getOwnPropertyDescriptor(arguments, 'callee').get } f(1)"
+             ) ==
+               "1,function"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
