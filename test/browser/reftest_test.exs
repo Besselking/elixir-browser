@@ -127,6 +127,12 @@ defmodule Browser.ReftestTest do
     assert Raster.diff(a, b) == {2, {1, 1}}
   end
 
+  test "the raster rounds fractional coordinates from layout" do
+    a = Raster.paint([%{type: :rect, x: 1.0, y: 1.0, w: 2.0, h: 1.0, color: {0, 0, 0}}], 4, 2)
+    b = Raster.paint([%{type: :rect, x: 1, y: 1, w: 2, h: 1, color: {0, 0, 0}}], 4, 2)
+    assert Raster.diff(a, b) == nil
+  end
+
   # a PNG of the given colour type, 8 bits, from rows of bytes (filter 0)
   defp png(w, h, ctype, rows, extra \\ []) do
     chunk = fn type, data ->

@@ -3189,7 +3189,7 @@ defmodule Browser.Layout do
 
     {ml, _mr} =
       case {o.ml, o.mr} do
-        {:auto, :auto} -> {max(div(free, 2), 0), max(free - div(free, 2), 0)}
+        {:auto, :auto} -> {max(floor(free / 2), 0), max(free - floor(free / 2), 0)}
         {:auto, _} -> {max(free, 0), mr0}
         {_, :auto} -> {ml0, max(free, 0)}
         # over-constrained: the margin at the end of the line gives way, so a box with a width
@@ -3701,6 +3701,7 @@ defmodule Browser.Layout do
           {st.margin + st.left, st.y + st.gap + st.ngap}
       end
 
+    static_x = round(static_x)
     static_right = st.width - st.margin - st.right
 
     left = resolve_h(spec.left, cw)
@@ -6757,7 +6758,7 @@ defmodule Browser.Layout do
       |> Enum.with_index()
       |> Enum.sort_by(fn {w, i} -> {-(w - floor(w)), i} end)
       |> Enum.map(&elem(&1, 1))
-      |> Enum.take(max(missing, 0))
+      |> Enum.take(max(round(missing), 0))
 
     floors |> Enum.with_index() |> Enum.map(fn {w, i} -> if i in order, do: w + 1, else: w end)
   end
