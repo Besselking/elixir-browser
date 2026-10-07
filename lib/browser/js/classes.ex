@@ -21,7 +21,7 @@ defmodule Browser.JS.Classes do
   @doc "Evaluates a class definition: the constructor function."
   def define(class, env, inferred \\ nil)
 
-  def define({:class, name, super_node, members}, env, inferred) do
+  def define({:class, name, super_node, members, class_src}, env, inferred) do
     # decorators ride along as a last element of the member list; their expressions are
     # evaluated first, in order, class decorators before those of the members
     {members, class_decs, member_decs} =
@@ -71,8 +71,11 @@ defmodule Browser.JS.Classes do
 
     ctor_node =
       case Enum.find(members, &match?({:cmember, :method, {:str, "constructor"}, _, false}, &1)) do
-        {:cmember, _, _, {:fn, _, params, body, mode}, _} -> {:fn, name, params, body, mode}
-        nil -> default_constructor(name, derived?)
+        {:cmember, _, _, {:fn, _, params, body, mode, _}, _} ->
+          {:fn, name, params, body, mode, class_src}
+
+        nil ->
+          default_constructor(name, derived?, class_src)
       end
 
     # each private name of the class gets a key of its own, visible to the class body
@@ -227,11 +230,11 @@ defmodule Browser.JS.Classes do
     f
   end
 
-  defp default_constructor(name, false), do: {:fn, name, [], [], false}
+  defp default_constructor(name, false, src), do: {:fn, name, [], [], false, src}
 
-  defp default_constructor(name, true) do
+  defp default_constructor(name, true, src) do
     {:fn, name, [{:rest, {:id, "args"}}],
-     [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false}
+     [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false, src}
   end
 
   # the name an anonymous function takes from the field it initializes

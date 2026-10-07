@@ -2320,7 +2320,7 @@ defmodule Browser.JS.Interp do
     f
   end
 
-  defp make_fn({:fn, name, params, body, mode}, env, named?) do
+  defp make_fn({:fn, name, params, body, mode, src}, env, named?) do
     named? = named? and is_binary(name) and mode == false
 
     env =
@@ -2338,7 +2338,8 @@ defmodule Browser.JS.Interp do
       {:obj,
        alloc(%{
          class: :function,
-         fun: {:closure, %{name: name, params: params, body: body, mode: mode, scope: env}},
+         fun:
+           {:closure, %{name: name, params: params, body: body, mode: mode, scope: env, src: src}},
          props: %{},
          keys: [],
          proto: proto(:function)
@@ -3597,7 +3598,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def ev({:class, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
+  def ev({:class, _, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
 
   def ev({:call, {:super}, args, _}, env),
     do: Browser.JS.Classes.super_call(eval_list(args, env), env)
@@ -3704,7 +3705,7 @@ defmodule Browser.JS.Interp do
     obj
   end
 
-  def ev({:fn, _, _, _, _} = f, env), do: make_fn(f, env)
+  def ev({:fn, _, _, _, _, _} = f, env), do: make_fn(f, env)
 
   def ev({:seq, es}, env), do: Enum.reduce(es, :undefined, fn e, _ -> ev(e, env) end)
 
@@ -4475,15 +4476,15 @@ defmodule Browser.JS.Interp do
   def binop("in", a, b), do: has_property?(b, a)
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to
-  def ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+  def ev_named({:fn, nil, _, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
 
-  def ev_named({:class, nil, _, _} = e, env, {:id, name}),
+  def ev_named({:class, nil, _, _, _} = e, env, {:id, name}),
     do: Browser.JS.Classes.define(e, env, name)
 
-  def ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
+  def ev_named({k, {:fn, nil, _, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
     do: name_fn(ev(e, env), name)
 
-  def ev_named({:async, {:gen, {:fn, nil, _, _, _}}} = e, env, {:id, name}),
+  def ev_named({:async, {:gen, {:fn, nil, _, _, _, _}}} = e, env, {:id, name}),
     do: name_fn(ev(e, env), name)
 
   def ev_named(e, env, _), do: ev(e, env)
@@ -4505,7 +4506,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp method_node?({:fn, {:method, _}, _, _, _}), do: true
+  defp method_node?({:fn, {:method, _}, _, _, _, _}), do: true
   defp method_node?({k, inner}) when k in [:gen, :async], do: method_node?(inner)
   defp method_node?(_), do: false
 

@@ -58,6 +58,18 @@ defmodule Browser.JS.Parser do
     Process.delete(:lex_esc_await)
 
     with {:ok, tokens} <- Lexer.tokenize(src) do
+      # where the tokens lie in the source, so a function can keep its own text
+      {text, starts, ends} = Process.get(:lex_table)
+      n = length(tokens)
+
+      Process.delete(:js_cur_start)
+      Process.delete(:js_cur_end)
+
+      Process.put(
+        :js_srctab,
+        if(n <= 400_000, do: {text, starts, ends, List.to_tuple(tokens), n})
+      )
+
       try do
         eval? = Keyword.get(opts, :eval, false)
 
@@ -1720,10 +1732,10 @@ defmodule Browser.JS.Parser do
 
   # the parameters and body of a method value, whatever generator/async wrapping it has
   defp method_code({tag, fun}) when tag in [:async, :gen], do: method_code(fun)
-  defp method_code({:fn, _, params, body, _}), do: [params, body]
+  defp method_code({:fn, _, params, body, _, _}), do: [params, body]
   defp method_code(other), do: other
 
-  defp plain_method?({:fn, _, _, _, _}), do: true
+  defp plain_method?({:fn, _, _, _, _, _}), do: true
   defp plain_method?(_), do: false
 
   # does `ast` hold a node satisfying `pred`, outside nested non-arrow functions and classes?
@@ -1732,12 +1744,12 @@ defmodule Browser.JS.Parser do
       pred.(ast) ->
         true
 
-      match?({:fn, _, _, _, m} when m not in [:arrow, :arrow_expr], ast) ->
+      match?({:fn, _, _, _, m, _} when m not in [:arrow, :arrow_expr], ast) ->
         false
 
       # a nested class's heritage and computed keys are evaluated in the enclosing code
-      match?({:class, _, _, _}, ast) ->
-        {:class, _, heritage, members} = ast
+      match?({:class, _, _, _, _}, ast) ->
+        {:class, _, heritage, members, _} = ast
 
         contains_node?(heritage, pred) or
           Enum.any?(members, fn
@@ -1757,6 +1769,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp class_rest(ts, class_decorators \\ []) do
+    open = token_index(ts, :js_cur_start)
     outer_refs = Process.get(:js_priv_refs, [])
     Process.put(:js_priv_refs, [])
 
@@ -1809,7 +1822,7 @@ defmodule Browser.JS.Parser do
         members ++ [{:decorations, class_decorators, by_index}]
       end
 
-    {{:class, name, super, members}, ts}
+    {{:class, name, super, members, class_src(open, ts)}, ts}
   end
 
   # `@dec`, `@a.b`, `@a.#b`, `@a.b(args)`, `@(expr)`
@@ -1906,7 +1919,7 @@ defmodule Browser.JS.Parser do
         if async?, do: Process.put(:js_async_next, true)
         Process.put(:js_class_method, true)
 
-        {{:fn, _, _, _, _} = fun, ts} =
+        {{:fn, _, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
 
         value =
@@ -1973,6 +1986,140 @@ defmodule Browser.JS.Parser do
 
   # ── functions ──────────────────────────────────────────────
 
+  # ── source text of functions ───────────────────────────────
+
+  # a function longer than this keeps no text of its own (`toString` shows `[native code]`)
+  @max_src 65_536
+
+  # the text of a function whose parameter list opens at `open` and whose body ended before `after_ts`
+  defp fn_src(name, p, after_ts) do
+    with {text, starts, ends, toks, n} <- Process.get(:js_srctab), true <- p != nil do
+      j = n - remaining(after_ts, :js_cur_end) - 1
+      i = fn_start(toks, p - 1, name)
+      slice_src(text, starts, ends, i, j)
+    else
+      _ -> nil
+    end
+  end
+
+  # the index of the first token left in `ts`, or nil when the source is not tracked
+  defp token_index(ts, cursor) do
+    case Process.get(:js_srctab) do
+      {_, _, _, _, n} -> n - remaining(ts, cursor)
+      _ -> nil
+    end
+  end
+
+  # How many tokens are left in `ts`. The parser asks about positions that move forward, so
+  # each cursor counts from the position it was last asked about; asking about an earlier one
+  # counts the whole list.
+  defp remaining(ts, cursor) do
+    count =
+      with {ptr, left} <- Process.get(cursor),
+           {:ok, count} <- walk_to(ptr, ts, left) do
+        count
+      else
+        _ -> length(ts)
+      end
+
+    Process.put(cursor, {ts, count})
+    count
+  end
+
+  defp walk_to(ptr, target, left) do
+    cond do
+      :erts_debug.same(ptr, target) -> {:ok, left}
+      ptr == [] -> :behind
+      true -> walk_to(tl(ptr), target, left - 1)
+    end
+  end
+
+  # (a copy: a piece that points into the whole script would count the script's size against
+  # every process the function is handed to)
+  defp slice_src(text, starts, ends, i, j) when i >= 0 and j >= i do
+    size = elem(ends, j) - elem(starts, i)
+
+    if size <= @max_src,
+      do: :binary.copy(binary_part(text, elem(starts, i), size))
+  end
+
+  defp slice_src(_, _, _, _, _), do: nil
+
+  # the first token of a function whose parameter list opens just after token `i`
+  defp fn_start(toks, i, {:method, _}), do: member_start(toks, key_start(toks, i))
+
+  defp fn_start(toks, i, _name) do
+    i = if match?({:id, n, _} when n != "function", elem(toks, max(i, 0))), do: i - 1, else: i
+    i = if match?({:p, "*", _}, elem(toks, max(i, 0))), do: i - 1, else: i
+
+    if match?({:id, "function", _}, elem(toks, max(i, 0))) do
+      if i > 0 and match?({:id, "async", _}, elem(toks, i - 1)) and
+           not nl_before?(toks, i),
+         do: i - 1,
+         else: i
+    else
+      -1
+    end
+  end
+
+  defp nl_before?(toks, i), do: elem(elem(toks, i), 2) == true
+
+  # a method key: one token, or a computed key back to its `[`
+  defp key_start(toks, i) do
+    case elem(toks, max(i, 0)) do
+      {:p, "]", _} -> bracket_back(toks, i - 1, 1)
+      _ -> i
+    end
+  end
+
+  defp bracket_back(_, i, _) when i < 0, do: -1
+
+  defp bracket_back(toks, i, d) do
+    case elem(toks, i) do
+      {:p, "]", _} -> bracket_back(toks, i - 1, d + 1)
+      {:p, "[", _} when d == 1 -> i
+      {:p, "[", _} -> bracket_back(toks, i - 1, d - 1)
+      _ -> bracket_back(toks, i - 1, d)
+    end
+  end
+
+  # `async`, `*`, `get` and `set` in front of a method key belong to the method
+  defp member_start(_, i) when i < 1, do: i
+
+  defp member_start(toks, i) do
+    case elem(toks, i - 1) do
+      {:p, "*", _} -> member_start(toks, i - 1)
+      {:id, w, _} when w in ["async", "get", "set"] -> member_start(toks, i - 1)
+      _ -> i
+    end
+  end
+
+  # an arrow function: from its first token (`async` before it counts)
+  defp arrow_src(i, after_ts) do
+    with {text, starts, ends, toks, n} <- Process.get(:js_srctab), true <- i != nil do
+      i =
+        if i > 0 and match?({:id, "async", _}, elem(toks, i - 1)) and not nl_before?(toks, i),
+          do: i - 1,
+          else: i
+
+      slice_src(text, starts, ends, i, n - remaining(after_ts, :js_cur_end) - 1)
+    else
+      _ -> nil
+    end
+  end
+
+  # a class: from its `class` keyword
+  defp class_src(p, after_ts) do
+    with {text, starts, ends, _toks, n} <- Process.get(:js_srctab), true <- p != nil do
+      slice_src(text, starts, ends, p - 1, n - remaining(after_ts, :js_cur_end) - 1)
+    else
+      _ -> nil
+    end
+  end
+
+  defp put_src({:fn, a, b, c, d, _}, src), do: {:fn, a, b, c, d, src}
+  defp put_src({tag, fun}, src) when tag in [:async, :gen], do: {tag, put_src(fun, src)}
+
   # after `function name?` — at the parameter list
   defp function_rest(name, ts, generator? \\ false) do
     outer = Process.get(:js_generator, false)
@@ -1983,6 +2130,8 @@ defmodule Browser.JS.Parser do
     class_method? = Process.delete(:js_class_method) == true
     nt = Process.put(:js_nt, true)
     outer_fn = Process.put(:js_fn, true)
+
+    open = token_index(ts, :js_cur_start)
 
     try do
       {params, ts} = params(expect(ts, "("), [])
@@ -2000,7 +2149,7 @@ defmodule Browser.JS.Parser do
            (name in ["eval", "arguments"] or name in @strict_reserved),
          do: throw({:syntax, "unexpected #{name} as the name of a strict function"})
 
-      {{:fn, name, params, body, false}, ts}
+      {{:fn, name, params, body, false, fn_src(name, open, ts)}, ts}
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
@@ -2050,9 +2199,15 @@ defmodule Browser.JS.Parser do
   defp arrow_after_parens([{:p, ")", _} | ts], d), do: arrow_after_parens(ts, d - 1)
   defp arrow_after_parens([_ | ts], d), do: arrow_after_parens(ts, d)
 
-  defp arrow([{:id, name, _}, {:p, "=>", _} | ts]), do: arrow_body([{:id, name}], ts)
+  defp arrow(ts) do
+    start = token_index(ts, :js_cur_start)
+    {fun, rest} = arrow_nodes(ts)
+    {put_src(fun, arrow_src(start, rest)), rest}
+  end
 
-  defp arrow([{:p, "(", _} | ts]) do
+  defp arrow_nodes([{:id, name, _}, {:p, "=>", _} | ts]), do: arrow_body([{:id, name}], ts)
+
+  defp arrow_nodes([{:p, "(", _} | ts]) do
     {params, ts} = params(ts, [])
     if Process.get(:js_generator, false), do: check_no_yield([params, nil])
     arrow_body(params, expect(ts, "=>"))
@@ -2062,14 +2217,14 @@ defmodule Browser.JS.Parser do
     outer_sb = Process.put(:js_static_block, false)
     {body, ts} = function_body(ts, params, true)
     Process.put(:js_static_block, outer_sb || false)
-    {{:fn, nil, params, body, :arrow}, ts}
+    {{:fn, nil, params, body, :arrow, nil}, ts}
   end
 
   defp arrow_body(params, ts) do
     check_unique_params(params)
     if strict?(), do: check_strict_params(params)
     {e, ts} = assignment(ts)
-    {{:fn, nil, params, e, :arrow_expr}, ts}
+    {{:fn, nil, params, e, :arrow_expr, nil}, ts}
   end
 
   # ── expressions ────────────────────────────────────────────
@@ -2515,9 +2670,16 @@ defmodule Browser.JS.Parser do
     parts =
       Enum.map(parts, fn
         {:expr, toks} ->
-          {e, rest} = expression(toks)
-          match?([{:eof, _, _}], rest) || throw({:syntax, "bad template expression"})
-          e
+          # (these tokens are a list of their own: a function in here keeps no text)
+          saved = Process.put(:js_srctab, nil)
+
+          try do
+            {e, rest} = expression(toks)
+            match?([{:eof, _, _}], rest) || throw({:syntax, "bad template expression"})
+            e
+          after
+            Process.put(:js_srctab, saved)
+          end
 
         s ->
           s
@@ -2749,7 +2911,7 @@ defmodule Browser.JS.Parser do
 
     case after_key do
       [{:p, "(", _} | _] ->
-        {{:fn, _, params, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
+        {{:fn, _, params, _, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
 
         case {kind, params} do
           {"get", []} -> :ok

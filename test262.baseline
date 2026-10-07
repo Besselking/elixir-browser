@@ -5805,6 +5805,7 @@ built-ins/Function/prototype/toString/method-class-expression-static.js
 built-ins/Function/prototype/toString/method-class-expression.js
 built-ins/Function/prototype/toString/method-class-statement-static.js
 built-ins/Function/prototype/toString/method-class-statement.js
+built-ins/Function/prototype/toString/method-computed-property-name.js
 built-ins/Function/prototype/toString/method-object.js
 built-ins/Function/prototype/toString/name.js
 built-ins/Function/prototype/toString/not-a-constructor.js

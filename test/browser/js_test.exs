@@ -340,6 +340,24 @@ defmodule Browser.JSTest do
       assert js("parseInt('1Z\\u00DF', 36)") == 71.0
     end
 
+    test "Function.prototype.toString gives the source text" do
+      assert js("function foo ( a , b ) { return a /* c */ }; foo.toString()") ==
+               "function foo ( a , b ) { return a /* c */ }"
+
+      assert js("var f = async (a) => a + 1; f.toString()") == "async (a) => a + 1"
+
+      assert js(
+               "var o = { get g(){ return 2 }, async *ag(){} }; " <>
+                 "[Object.getOwnPropertyDescriptor(o,'g').get, o.ag].map(String).join('|')"
+             ) ==
+               "get g(){ return 2 }|async *ag(){}"
+
+      assert js("class A { static s(){ } }; [String(A), String(A.s)].join('|')") ==
+               "class A { static s(){ } }|s(){ }"
+
+      assert js("String(Math.max)") == "function max() { [native code] }"
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

@@ -638,7 +638,7 @@ defmodule Browser.JS.Async do
   defp has_await?({:forawait, _, _, _, _}), do: true
   defp has_await?({:using, :await_using, _, _, _}), do: true
   defp has_await?({:gen, _}), do: false
-  defp has_await?({:fn, _, _, _, _}), do: false
+  defp has_await?({:fn, _, _, _, _, _}), do: false
   defp has_await?({:async, _}), do: false
   defp has_await?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_await?/1)
   defp has_await?(l) when is_list(l), do: Enum.any?(l, &has_await?/1)
@@ -919,9 +919,9 @@ defmodule Browser.JS.Async do
   defp respread_all(orig, kids), do: Enum.zip_with(orig, kids, &respread/2)
 
   defp pure?({tag, _}) when tag in [:lit, :num, :str, :bigint, :val, :gen, :async], do: true
-  defp pure?({:fn, _, _, _, _}), do: true
+  defp pure?({:fn, _, _, _, _, _}), do: true
   # a class expression keeps the name its property gives it
-  defp pure?({:class, _, _, _}), do: true
+  defp pure?({:class, _, _, _, _}), do: true
   defp pure?(_), do: false
 
   defp lift_list(items, leaves) do
