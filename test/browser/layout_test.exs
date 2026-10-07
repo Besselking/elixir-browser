@@ -4382,6 +4382,22 @@ defmodule Browser.LayoutTest do
       assert col_at(items, "item3").x > col_at(items, "item2").x
     end
 
+    test "a column-span: all child runs across the columns, the content around it has its own" do
+      html =
+        ~s|<style>body{margin:0}p{margin:0}</style><div style="columns:2;column-gap:0;width:200px"><p>aa</p><p>bb</p><h4 style="column-span:all;margin:0;background:red;height:10px"></h4><p>cc</p><p>dd</p></div>|
+
+      items = laid_out(html)
+      red = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert red.x == 0 and red.w == 200
+      aa = col_at(items, "aa")
+      bb = col_at(items, "bb")
+      cc = col_at(items, "cc")
+      dd = col_at(items, "dd")
+      assert aa.y == bb.y and aa.x < bb.x
+      assert cc.y == dd.y and cc.y > red.y
+      assert aa.y < red.y
+    end
+
     test "a background is cut where a column ends and a rule is drawn between columns" do
       html =
         ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|

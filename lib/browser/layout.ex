@@ -1622,12 +1622,47 @@ defmodule Browser.Layout do
         walk_children(tag, kids, style, acc)
 
       cs ->
-        sub = tag |> walk_children(kids, style, []) |> Enum.reverse()
-        [{:columns, Map.put(cs, :height, columns_height(tag, c)), sub, style} | acc]
+        case split_spanners(kids) do
+          [{:flow, _}] ->
+            sub = tag |> walk_children(kids, style, []) |> Enum.reverse()
+            [{:columns, Map.put(cs, :height, columns_height(tag, c)), sub, style} | acc]
+
+          parts ->
+            # `column-span: all` children run across all the columns: the content before and
+            # after them is poured into columns of its own
+            Enum.reduce(parts, acc, fn
+              {:flow, flow}, acc ->
+                sub = tag |> walk_children(flow, style, []) |> Enum.reverse()
+                [{:columns, Map.put(cs, :height, nil), sub, style} | acc]
+
+              {:span, node}, acc ->
+                walk_children(tag, [node], style, acc)
+            end)
+        end
     end
   end
 
   defp block_children(tag, _kind, kids, style, _c, acc), do: walk_children(tag, kids, style, acc)
+
+  # the children of a multicol container as runs of flow and the `column-span: all` ones
+  defp split_spanners(kids) do
+    kids
+    |> Enum.chunk_by(&spanner?/1)
+    |> Enum.map(fn [first | _] = run ->
+      if spanner?(first), do: {:span_run, run}, else: {:flow, run}
+    end)
+    |> Enum.flat_map(fn
+      {:span_run, run} -> Enum.map(run, &{:span, &1})
+      flow -> [flow]
+    end)
+  end
+
+  defp spanner?({:element, tag, attrs, _kids}) do
+    c = computed(attrs)
+    c["column-span"] == "all" and kind(tag, c) == :block and c["float"] in [nil, "none"]
+  end
+
+  defp spanner?(_), do: false
 
   defp columns_spec(c) do
     count = c["column-count"]
