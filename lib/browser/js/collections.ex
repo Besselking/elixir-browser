@@ -302,7 +302,7 @@ defmodule Browser.JS.Collections do
               "String.prototype[Symbol.iterator] called on null or undefined"
             )
 
-        make_kind_iterator(String.codepoints(to_str(this)), :string_iterator)
+        make_kind_iterator(Browser.JS.Str.codepoints(to_str(this)), :string_iterator)
       end)
     )
   end

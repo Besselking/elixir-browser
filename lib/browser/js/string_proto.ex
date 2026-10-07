@@ -3,7 +3,7 @@ defmodule Browser.JS.StringProto do
   The `String.prototype` methods whose argument handling the specification pins down:
   `includes`, `startsWith`, `endsWith`, `indexOf`, `lastIndexOf`, `repeat`, the index methods,
   case conversion (with the final sigma rule), `normalize`, `localeCompare` and the well-formed
-  helpers. Strings are sequences of code points, so a lone surrogate cannot occur.
+  helpers. Strings are measured in UTF-16 code units (see `Browser.JS.Str`).
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
@@ -84,7 +84,7 @@ defmodule Browser.JS.StringProto do
     end)
 
     str_fn(p, "charCodeAt", 1, fn s, args ->
-      case code_point_at(s, to_int(arg(args, 0))) do
+      case Str.code_unit_at(s, to_int(arg(args, 0))) do
         nil -> :nan
         c -> float(c)
       end
@@ -101,8 +101,8 @@ defmodule Browser.JS.StringProto do
     str_fn(p, "toLocaleLowerCase", 0, fn s, _ -> lower(s) end)
     str_fn(p, "toUpperCase", 0, fn s, _ -> String.upcase(s) end)
     str_fn(p, "toLocaleUpperCase", 0, fn s, _ -> String.upcase(s) end)
-    str_fn(p, "isWellFormed", 0, fn _, _ -> true end)
-    str_fn(p, "toWellFormed", 0, fn s, _ -> s end)
+    str_fn(p, "isWellFormed", 0, fn s, _ -> not Str.lone?(s) end)
+    str_fn(p, "toWellFormed", 0, fn s, _ -> Str.well_formed(s) end)
 
     str_fn(p, "normalize", 0, fn s, args ->
       form =
@@ -156,29 +156,22 @@ defmodule Browser.JS.StringProto do
 
   defp clamp(n, len), do: n |> max(0) |> min(len)
 
-  defp code_point_at(_s, i) when i < 0, do: nil
-
-  defp code_point_at(s, i) do
-    case Str.at(s, i) do
-      nil -> nil
-      <<c::utf8, _::binary>> -> c
-    end
-  end
+  defp code_point_at(s, i), do: Str.code_point_at(s, i)
 
   # the largest index <= `from` at which `needle` occurs, or -1
   defp last_index_of(s, needle, from) do
-    cps = s |> String.codepoints() |> List.to_tuple()
-    want = String.codepoints(needle)
+    us = s |> Str.units() |> List.to_tuple()
+    want = Str.units(needle)
     n = length(want)
-    top = min(from, tuple_size(cps) - n)
+    top = min(from, tuple_size(us) - n)
 
-    Enum.find(top..0//-1, -1, fn i -> matches_at?(cps, i, want) end)
+    Enum.find(top..0//-1, -1, fn i -> matches_at?(us, i, want) end)
   end
 
-  defp matches_at?(_cps, _i, []), do: true
+  defp matches_at?(_us, _i, []), do: true
 
-  defp matches_at?(cps, i, [c | rest]),
-    do: elem(cps, i) == c and matches_at?(cps, i + 1, rest)
+  defp matches_at?(us, i, [c | rest]),
+    do: elem(us, i) == c and matches_at?(us, i + 1, rest)
 
   defp normalize(s, "NFC"), do: :unicode.characters_to_nfc_binary(s)
   defp normalize(s, "NFD"), do: :unicode.characters_to_nfd_binary(s)

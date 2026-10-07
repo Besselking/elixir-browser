@@ -996,9 +996,9 @@ defmodule Browser.JS.Parser do
   defp str_local(:id, name), do: name
   defp str_local(:str, name), do: {:str, well_formed(:str, name)}
 
-  # the lexer turns a lone surrogate into U+FFFD, which a module export name must not contain
+  # a module export name must not hold a lone surrogate
   defp well_formed(:str, name) do
-    if String.contains?(name, "\uFFFD"),
+    if Browser.JS.Str.lone?(name),
       do: throw({:syntax, "a module export name must be well-formed unicode"}),
       else: name
   end

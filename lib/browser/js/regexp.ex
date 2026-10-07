@@ -465,26 +465,10 @@ defmodule Browser.JS.RegExp do
     end
   end
 
-  defp byte_of(subject, cp) do
-    byte_of(subject, cp, 0)
-  end
+  defp byte_of(subject, units), do: Str.byte_offset(subject, units)
 
-  # byte offset of the code point index `n` (strings are indexed by code point)
-  defp byte_of(_, n, acc) when n <= 0, do: acc
-  defp byte_of(<<c::utf8, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + utf8_size(c))
-  defp byte_of(<<>>, _, acc), do: acc
-  defp byte_of(<<_, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + 1)
-
-  defp utf8_size(c) when c < 0x80, do: 1
-  defp utf8_size(c) when c < 0x800, do: 2
-  defp utf8_size(c) when c < 0x10000, do: 3
-  defp utf8_size(_), do: 4
-
-  # the number of code points (what `.length` and match positions count)
-  defp cp_count(bin), do: cp_count(bin, 0)
-  defp cp_count(<<_::utf8, rest::binary>>, n), do: cp_count(rest, n + 1)
-  defp cp_count(<<>>, n), do: n
-  defp cp_count(<<_, rest::binary>>, n), do: cp_count(rest, n + 1)
+  # the number of UTF-16 code units (what `.length` and match positions count)
+  defp cp_count(bin), do: Str.length(bin)
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
@@ -1110,7 +1094,7 @@ defmodule Browser.JS.RegExp do
           lim == 0 -> []
           sep == :undefined -> [s]
           s == "" -> if r == "", do: [], else: [s]
-          r == "" -> String.codepoints(s)
+          r == "" -> s |> Str.units() |> Enum.map(&Str.from_units([&1]))
           true -> :binary.split(s, r, [:global])
         end
 

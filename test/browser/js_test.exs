@@ -303,6 +303,21 @@ defmodule Browser.JSTest do
                "30,2,4"
     end
 
+    test "strings are measured in UTF-16 code units, with lone surrogates" do
+      assert js("'😀'.length") == 2.0
+      assert js("'😀'[0] === '\\uD83D' && '😀'[1] === '\\uDE00'") == true
+      assert js("'\\uD83D' + '\\uDE00' === '😀'") == true
+      assert js("'😀'.codePointAt(1)") == 56_832.0
+      assert js("'😀'.charCodeAt(0)") == 55_357.0
+      assert js("'\\u{10000}' >= '\\uFFFF'") == false
+      assert js("'a😀b'.indexOf('b')") == 3.0
+      assert js("'\\uD83D'.isWellFormed()") == false
+      assert js("'a\\uD83Db'.toWellFormed()") == "a�b"
+      assert js("JSON.stringify('\\uD83D')") == ~s("\\ud83d")
+      assert js("JSON.parse('\"\\\\ud834\"').length") == 1.0
+      assert js("String.fromCharCode(0xD83D, 0xDE00) === '😀'") == true
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

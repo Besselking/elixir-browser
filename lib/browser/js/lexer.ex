@@ -451,9 +451,11 @@ defmodule Browser.JS.Lexer do
 
   defp escape("u{" <> r) do
     [hex, r] = String.split(r, "}", parts: 2)
-    {<<String.to_integer(hex, 16)::utf8>>, r}
+    cp = String.to_integer(hex, 16)
+    if cp > 0x10FFFF, do: throw({:syntax, "bad \\u escape"})
+    {Browser.JS.Str.from_units([cp]), r}
   rescue
-    _ -> throw({:syntax, "bad \\u escape"})
+    ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
   defp escape(<<"u", h::binary-size(4), r::binary>>) do
@@ -463,11 +465,11 @@ defmodule Browser.JS.Lexer do
              lo when lo in 0xDC00..0xDFFF <- String.to_integer(l, 16) do
           {<<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>>, r2}
         else
-          _ -> {"�", r}
+          _ -> {Browser.JS.Str.from_units([hi]), r}
         end
 
       lo when lo in 0xDC00..0xDFFF ->
-        {"�", r}
+        {Browser.JS.Str.from_units([lo]), r}
 
       cp ->
         {<<cp::utf8>>, r}

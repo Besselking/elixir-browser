@@ -480,12 +480,14 @@ defmodule Browser.JS.ArrayGeneric do
     len = len(o)
     sep = if separator == :undefined, do: ",", else: to_str(separator)
 
-    Enum.map_join(0..(len - 1)//1, sep, fn k ->
+    0..(len - 1)//1
+    |> Enum.map(fn k ->
       case read(o, k) do
         v when v in [:undefined, :null] -> ""
         v -> to_str(v)
       end
     end)
+    |> Browser.JS.Str.join(sep)
   end
 
   def to_sorted(o, args) do
