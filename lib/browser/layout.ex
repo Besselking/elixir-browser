@@ -574,8 +574,162 @@ defmodule Browser.Layout do
 
   defp walk(el, style, acc), do: walk_element(el, style, acc, nil)
 
-  defp walk_element({:element, tag, attrs, kids} = el, parent_style, acc, force) do
+  # `margin-trim`: the container drops the margins of the children at its edges, so they do not
+  # add to the space around it (a block's first and last child, a flex container's first and
+  # last items along either axis)
+  defp trim_margins(kids, c) do
+    case trim_sides(c["margin-trim"]) do
+      [] -> kids
+      sides -> trim_children(kids, sides, c)
+    end
+  end
+
+  defp trim_sides(v) when is_binary(v) do
+    v
+    |> String.split()
+    |> Enum.flat_map(fn
+      "block" -> [:bs, :be]
+      "block-start" -> [:bs]
+      "block-end" -> [:be]
+      "inline" -> [:is, :ie]
+      "inline-start" -> [:is]
+      "inline-end" -> [:ie]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp trim_sides(_), do: []
+
+  defp trim_children(kids, sides, c) do
+    idx =
+      kids
+      |> Enum.with_index()
+      |> Enum.filter(fn
+        {{:element, _, attrs, _}, _} ->
+          ic = computed(attrs)
+
+          not hidden?(ic) and ic["position"] not in ["absolute", "fixed"] and
+            float_side(ic) == nil
+
+        {{:text, t}, _} ->
+          String.trim(t) != ""
+
+        _ ->
+          false
+      end)
+      |> Enum.map(&elem(&1, 1))
+
+    case idx do
+      [] ->
+        kids
+
+      _ ->
+        keys =
+          case c["display"] do
+            d when d in ["flex", "inline-flex"] -> flex_trim(sides, c["flex-direction"], idx)
+            d when d in ["grid", "inline-grid"] -> %{}
+            _ -> block_trim(sides, kids, idx)
+          end
+
+        kids
+        |> Enum.with_index()
+        |> Enum.map(fn
+          {{:element, tag, attrs, sub} = kid, i} ->
+            if props = keys[i], do: trim_element(tag, attrs, sub, props), else: kid
+
+          {kid, _} ->
+            kid
+        end)
+    end
+  end
+
+  # a self-collapsing child at the edge lets the margin of its neighbour through, so that is
+  # trimmed too
+  defp block_trim(sides, kids, idx) do
+    %{}
+    |> trim_run(:bs in sides, kids, idx, :top)
+    |> trim_run(:be in sides, kids, Enum.reverse(idx), :bottom)
+  end
+
+  defp trim_run(m, false, _, _, _), do: m
+
+  defp trim_run(m, true, kids, idx, side) do
+    {empty, rest} = Enum.split_while(idx, &self_collapsing?(Enum.at(kids, &1)))
+    items = if rest == [], do: empty, else: empty ++ [hd(rest)]
+    Enum.reduce(items, m, &add_trim(&2, true, &1, side))
+  end
+
+  defp self_collapsing?({:element, _, attrs, sub}) do
     c = computed(attrs)
+
+    c["display"] in [nil, "block"] and c["height"] in [nil, 0, 0.0] and
+      Enum.all?(
+        sub,
+        &(match?({:text, t} when is_binary(t), &1) and String.trim(elem(&1, 1)) == "")
+      ) and
+      px(c["padding-top"] || 0) == 0 and px(c["padding-bottom"] || 0) == 0 and
+      border_w(c, "top") == 0 and border_w(c, "bottom") == 0
+  end
+
+  defp self_collapsing?(_), do: false
+
+  defp flex_trim(sides, dir, idx) do
+    dir = flex_direction(dir)
+    col? = dir in [:column, :column_reverse]
+    {first, last} = {hd(idx), List.last(idx)}
+
+    {main_start, main_end} =
+      if dir in [:row_reverse, :column_reverse], do: {last, first}, else: {first, last}
+
+    # across the lines every item is at an edge; along them only the first and last are
+    {cross, _} = {idx, nil}
+    {block_items, inline_items} = if col?, do: {[main_start], cross}, else: {cross, [main_start]}
+
+    %{}
+    |> add_trim_all(:bs in sides, block_items, :top)
+    |> add_trim_all(:be in sides, if(col?, do: [main_end], else: cross), :bottom)
+    |> add_trim_all(:is in sides, inline_items, :left)
+    |> add_trim_all(:ie in sides, if(col?, do: cross, else: [main_end]), :right)
+  end
+
+  defp add_trim(m, false, _, _), do: m
+  defp add_trim(m, true, i, side), do: Map.update(m, i, [side], &[side | &1])
+
+  defp add_trim_all(m, cond?, items, side),
+    do: Enum.reduce(items, m, &add_trim(&2, cond?, &1, side))
+
+  defp trim_element(tag, attrs, sub, props) do
+    c = computed(attrs)
+    c = Enum.reduce(props, c, &Map.put(&2, "margin-" <> Atom.to_string(&1), 0))
+    attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", c})
+
+    # a margin that ran through the child to its own first or last child is trimmed too
+    sub =
+      Enum.reduce(props, sub, fn
+        side, sub when side in [:top, :bottom] -> trim_through(sub, side, c)
+        _, sub -> sub
+      end)
+
+    {:element, tag, attrs, sub}
+  end
+
+  defp trim_through(kids, side, c) do
+    open? =
+      if side == :top,
+        do: px(c["padding-top"] || 0) == 0 and border_w(c, "top") == 0,
+        else:
+          px(c["padding-bottom"] || 0) == 0 and border_w(c, "bottom") == 0 and c["height"] == nil
+
+    if open? and c["display"] in [nil, "block"] and c["overflow-x"] in [nil, "visible"],
+      do: trim_children(kids, [if(side == :top, do: :bs, else: :be)], %{}),
+      else: kids
+  end
+
+  defp walk_element({:element, tag, attrs, kids}, parent_style, acc, force) do
+    c = computed(attrs)
+    kids = trim_margins(kids, c)
+    el = {:element, tag, attrs, kids}
 
     if c["position"] in ["absolute", "fixed"] and force not in [:abs_inner, :inline_inner] do
       abs_ops(el, parent_style, c, acc)
@@ -5435,38 +5589,146 @@ defmodule Browser.Layout do
   end
 
   defp flex_column(st, cs, items, avail) do
+    sized = Enum.map(items, &flex_column_item(st, cs, &1, avail))
+    gaps = round(cs.row_gap) * max(length(sized) - 1, 0)
+    outer = & &1.h
+    base = fn it -> it.base end
+    free = if cs.height, do: cs.height - Enum.sum(Enum.map(sized, base)) - gaps, else: 0
+
+    sized =
+      if cs.height,
+        do: flex_column_resize(st, sized, free),
+        else: Enum.map(sized, &flex_column_basis(st, &1))
+
+    used = Enum.sum(Enum.map(sized, outer)) + gaps
+
+    {start, between} =
+      flex_justify(
+        column_justify(cs.justify, cs.dir == :column_reverse),
+        cs.dir == :column_reverse,
+        max((cs.height || 0) - used, 0.0) * 1.0,
+        length(sized)
+      )
+
+    start = if cs.height, do: start, else: 0.0
+
     {laid, y} =
-      Enum.reduce(items, {[], 0}, fn it, {laid, y} ->
-        ml = it.ml
-        mr = it.mr
-        room = avail - auto_zero(ml) - auto_zero(mr)
-        align = flex_align(it, cs.align)
-
-        w =
-          cond do
-            it.width != nil -> resolve(it.width, avail) + it.extra
-            align in ["stretch", "normal"] and not it.fit? -> room
-            true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
-          end
-
-        w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
-        w = max(round(w), 1)
-        {items, h, _} = flex_atom(st, it.sub, w, it.key)
-
-        x =
-          cond do
-            ml == :auto and mr == :auto -> round((avail - w) / 2)
-            ml == :auto -> avail - w - mr
-            align in ["center"] -> round((avail - w) / 2)
-            align in ["flex-end", "end"] -> avail - w - mr
-            true -> ml
-          end
-
-        moved = for item <- items, do: move(item, round(x), y)
-        {[moved | laid], y + h + round(cs.row_gap)}
+      Enum.map_reduce(sized, round(start), fn it, y ->
+        moved = for item <- it.items, do: move(item, round(it.x), y)
+        {moved, y + it.h + round(cs.row_gap + between)}
       end)
 
-    {laid |> Enum.reverse() |> List.flatten(), max(y - round(cs.row_gap), 0)}
+    y = max(y - round(cs.row_gap + between), 0)
+    {List.flatten(laid), if(cs.height, do: max(y, round(cs.height)), else: y)}
+  end
+
+  # `left` and `right` are the (writing mode) start of a column, whichever way it runs
+  defp column_justify(j, reversed?) when j in ["left", "right"],
+    do: if(reversed?, do: "flex-end", else: "flex-start")
+
+  defp column_justify(j, _reversed?), do: j
+
+  defp flex_column_item(st, cs, it, avail) do
+    ml = it.ml
+    mr = it.mr
+    room = avail - auto_zero(ml) - auto_zero(mr)
+    align = flex_align(it, cs.align)
+
+    w =
+      cond do
+        it.width != nil -> resolve(it.width, avail) + it.extra
+        align in ["stretch", "normal"] and not it.fit? -> room
+        true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
+      end
+
+    w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+    w = max(round(w), 1)
+    {items, h, _} = flex_atom(st, it.sub, w, it.key)
+
+    x =
+      cond do
+        ml == :auto and mr == :auto -> round((avail - w) / 2)
+        ml == :auto -> avail - w - mr
+        align in ["center"] -> round((avail - w) / 2)
+        align in ["flex-end", "end"] -> avail - w - mr
+        true -> ml
+      end
+
+    # an item starts from its `flex-basis` when it has one (a size of the box, margins apart)
+    base =
+      case it.basis do
+        nil ->
+          h
+
+        basis ->
+          size = len_px(basis, cs.height || 0) + if(it.sizing == :border, do: 0, else: it.vextra)
+          max(size, it.vextra) + auto_zero(it.mt) + auto_zero(it.mb)
+      end
+
+    Map.merge(it, %{w: w, items: items, h: h, x: x, base: base})
+  end
+
+  # in a column with a height of its own the items grow into what is left, or shrink in
+  # proportion to their heights (down to what their content needs)
+  defp flex_column_resize(st, sized, free) when free > 0 do
+    total = sized |> Enum.map(& &1.grow) |> Enum.sum()
+
+    if total > 0,
+      do: Enum.map(sized, &flex_column_height(st, &1, &1.base + free * &1.grow / total)),
+      else: sized
+  end
+
+  defp flex_column_resize(st, sized, free) when free < 0 do
+    total = sized |> Enum.map(&(&1.shrink * &1.base)) |> Enum.sum()
+
+    if total > 0 do
+      Enum.map(sized, fn it ->
+        target = it.base + free * it.shrink * it.base / total
+
+        if it.shrink > 0 and it.rebuild != nil do
+          {_, floor, _} =
+            flex_atom(
+              st,
+              it.rebuild.(%{"height" => nil, "min-height" => nil}),
+              it.w,
+              {it.key, :min}
+            )
+
+          flex_column_height(st, it, max(target, min(floor, it.base)))
+        else
+          it
+        end
+      end)
+    else
+      sized
+    end
+  end
+
+  defp flex_column_resize(_st, sized, _free), do: sized
+
+  # in a column of automatic height an item with a `flex-basis` is as high as that, or as its
+  # content needs
+  defp flex_column_basis(st, %{basis: basis, rebuild: rebuild} = it)
+       when basis != nil and rebuild != nil do
+    {_, floor, _} =
+      flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
+
+    flex_column_height(st, it, max(it.base, floor))
+  end
+
+  defp flex_column_basis(_st, it), do: it
+
+  defp flex_column_height(st, it, target) do
+    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) do
+      # the height of an item includes its margins
+      box = target - auto_zero(it.mt) - auto_zero(it.mb)
+      content = if it.sizing == :border, do: box, else: box - it.vextra
+      sub = it.rebuild.(%{"height" => max(content, 0) * 1.0, "aspect-ratio" => nil})
+      {items, h, _} = flex_atom(st, sub, it.w, {it.key, round(target)})
+      %{it | items: items, h: max(h, 0)}
+    else
+      it
+    end
   end
 
   # -- tables -------------------------------------------------------------------------------

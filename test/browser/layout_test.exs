@@ -4868,4 +4868,71 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(Enum.map(rects, &{&1.x, &1.w})) == [{0, 5}, {5, 5}]
     end
   end
+
+  describe "margin-trim and column flex" do
+    defp green_rects(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.y, &1.h})
+    end
+
+    test "a block drops the margins of its first and last child" do
+      html = """
+      <div style="margin-trim:block"><div style="margin:20px 0;height:10px;background:green"></div></div>
+      <div style="height:5px;background:green"></div>
+      """
+
+      assert green_rects(html) == [{0, 10}, {10, 5}]
+    end
+
+    test "without margin-trim the margins stay" do
+      html = """
+      <div><div style="margin:20px 0;height:10px;background:green"></div></div>
+      <div style="height:5px;background:green"></div>
+      """
+
+      assert green_rects(html) == [{20, 10}, {50, 5}]
+    end
+
+    test "margin-trim reaches through a self-collapsing last child" do
+      html = """
+      <div style="margin-trim:block-end"><div style="margin-bottom:30px;height:10px;background:green"></div><div></div></div>
+      <div style="height:5px;background:green"></div>
+      """
+
+      assert green_rects(html) == [{0, 10}, {10, 5}]
+    end
+
+    test "a flex container drops the margins of its items on the trimmed side" do
+      html = """
+      <div style="display:flex;margin-trim:block"><div style="margin:10px;width:20px;height:10px;background:green"></div></div>
+      """
+
+      assert green_rects(html) == [{0, 10}]
+    end
+
+    test "column flex items grow into the height of the container" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:100px"><div style="flex:1;background:green"></div></div>
+      """
+
+      assert green_rects(html) == [{0, 100}]
+    end
+
+    test "column flex items shrink to fit the container" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:100px"><div style="height:150px;background:green"></div></div>
+      """
+
+      assert green_rects(html) == [{0, 100}]
+    end
+
+    test "column flex items share the height by their grow factors" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:100px"><div style="flex:3;background:green"></div><div style="flex:1;background:green"></div></div>
+      """
+
+      assert green_rects(html) == [{0, 75}, {75, 25}]
+    end
+  end
 end
