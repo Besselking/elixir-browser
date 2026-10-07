@@ -24,10 +24,14 @@ defmodule Browser.JS.Classes do
   def define({:class, name, super_node, members}, env, inferred) do
     cenv = Interp.new_scope(env)
 
+    # the heritage is evaluated inside the class scope, where the class's own name is still
+    # uninitialized
+    if name, do: Interp.declare(cenv, name, :tdz)
+
     parent =
       case super_node do
         nil -> nil
-        node -> Interp.ev(node, env)
+        node -> Interp.ev(node, cenv)
       end
 
     if super_node != nil and parent != :null and not Interp.constructor?(parent),
