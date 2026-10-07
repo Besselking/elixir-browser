@@ -9388,6 +9388,7 @@ built-ins/Object/entries/getter-removing-future-key.js
 built-ins/Object/entries/inherited-properties-omitted.js
 built-ins/Object/entries/not-a-constructor.js
 built-ins/Object/entries/observable-operations.js
+built-ins/Object/entries/order-after-define-property.js
 built-ins/Object/entries/primitive-booleans.js
 built-ins/Object/entries/primitive-numbers.js
 built-ins/Object/entries/primitive-strings.js
@@ -10178,6 +10179,7 @@ built-ins/Object/keys/15.2.3.14-6-4.js
 built-ins/Object/keys/15.2.3.14-6-5.js
 built-ins/Object/keys/name.js
 built-ins/Object/keys/not-a-constructor.js
+built-ins/Object/keys/order-after-define-property.js
 built-ins/Object/keys/property-traps-order-with-proxied-array.js
 built-ins/Object/keys/proxy-keys.js
 built-ins/Object/keys/proxy-non-enumerable-prop-invariant-1.js
@@ -10589,6 +10591,7 @@ built-ins/Object/values/getter-removing-future-key.js
 built-ins/Object/values/inherited-properties-omitted.js
 built-ins/Object/values/not-a-constructor.js
 built-ins/Object/values/observable-operations.js
+built-ins/Object/values/order-after-define-property.js
 built-ins/Object/values/primitive-booleans.js
 built-ins/Object/values/primitive-numbers.js
 built-ins/Object/values/primitive-strings.js
@@ -19298,6 +19301,10 @@ language/expressions/assignment/S11.13.1_A3.1.js
 language/expressions/assignment/S11.13.1_A3.2.js
 language/expressions/assignment/S11.13.1_A4_T1.js
 language/expressions/assignment/S11.13.1_A4_T2.js
+language/expressions/assignment/S11.13.1_A5_T1.js
+language/expressions/assignment/S11.13.1_A5_T2.js
+language/expressions/assignment/S11.13.1_A5_T3.js
+language/expressions/assignment/S11.13.1_A6_T3.js
 language/expressions/assignment/S11.13.1_A7_T4.js
 language/expressions/assignment/S8.12.4_A1.js
 language/expressions/assignment/S8.12.5_A1.js
@@ -19323,6 +19330,7 @@ language/expressions/assignment/dstr/array-elem-init-yield-ident-invalid.js
 language/expressions/assignment/dstr/array-elem-init-yield-ident-valid.js
 language/expressions/assignment/dstr/array-elem-iter-get-err.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-skip.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elem-iter-thrw-close-skip.js
@@ -19364,10 +19372,12 @@ language/expressions/assignment/dstr/array-elem-target-yield-invalid.js
 language/expressions/assignment/dstr/array-elem-target-yield-valid.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-elision-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-get-err.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-err.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
@@ -19376,6 +19386,7 @@ language/expressions/assignment/dstr/array-elem-trlg-iter-rest-thrw-close-skip.j
 language/expressions/assignment/dstr/array-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-elision-iter-get-err.js
 language/expressions/assignment/dstr/array-elision-iter-nrml-close-err.js
+language/expressions/assignment/dstr/array-elision-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elision-iter-nrml-close-skip.js
 language/expressions/assignment/dstr/array-elision-iter-nrml-close.js
 language/expressions/assignment/dstr/array-elision-val-array.js
@@ -19386,6 +19397,7 @@ language/expressions/assignment/dstr/array-elision-val-string.js
 language/expressions/assignment/dstr/array-elision-val-symbol.js
 language/expressions/assignment/dstr/array-elision-val-undef.js
 language/expressions/assignment/dstr/array-empty-iter-close-err.js
+language/expressions/assignment/dstr/array-empty-iter-close-null.js
 language/expressions/assignment/dstr/array-empty-iter-close.js
 language/expressions/assignment/dstr/array-empty-iter-get-err.js
 language/expressions/assignment/dstr/array-empty-val-array.js
@@ -25425,16 +25437,27 @@ language/expressions/compound-assignment/and-whitespace.js
 language/expressions/compound-assignment/btws-and-non-simple.js
 language/expressions/compound-assignment/btws-or-non-simple.js
 language/expressions/compound-assignment/btws-xor-non-simple.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--1.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--10.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--11.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--12.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--13.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--14.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--15.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--16.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--17.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--18.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--19.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--2.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--20.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--21.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--3.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--4.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--5.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--6.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--7.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--8.js
+language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v--9.js
 language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v-.js
 language/expressions/compound-assignment/div-arguments-strict.js
 language/expressions/compound-assignment/div-eval-strict.js
@@ -28698,6 +28721,9 @@ language/expressions/postfix-decrement/S11.3.2_A4_T2.js
 language/expressions/postfix-decrement/S11.3.2_A4_T3.js
 language/expressions/postfix-decrement/S11.3.2_A4_T4.js
 language/expressions/postfix-decrement/S11.3.2_A4_T5.js
+language/expressions/postfix-decrement/S11.3.2_A5_T1.js
+language/expressions/postfix-decrement/S11.3.2_A5_T2.js
+language/expressions/postfix-decrement/S11.3.2_A5_T3.js
 language/expressions/postfix-decrement/S11.3.2_A6_T1.js
 language/expressions/postfix-decrement/S11.3.2_A6_T2.js
 language/expressions/postfix-decrement/S11.3.2_A6_T3.js
@@ -28710,6 +28736,7 @@ language/expressions/postfix-decrement/line-terminator-carriage-return.js
 language/expressions/postfix-decrement/line-terminator-line-feed.js
 language/expressions/postfix-decrement/line-terminator-line-separator.js
 language/expressions/postfix-decrement/line-terminator-paragraph-separator.js
+language/expressions/postfix-decrement/operator-x-postfix-decrement-calls-putvalue-lhs-newvalue--1.js
 language/expressions/postfix-decrement/operator-x-postfix-decrement-calls-putvalue-lhs-newvalue-.js
 language/expressions/postfix-decrement/target-cover-id.js
 language/expressions/postfix-decrement/target-cover-newtarget.js
@@ -28732,6 +28759,9 @@ language/expressions/postfix-increment/S11.3.1_A4_T2.js
 language/expressions/postfix-increment/S11.3.1_A4_T3.js
 language/expressions/postfix-increment/S11.3.1_A4_T4.js
 language/expressions/postfix-increment/S11.3.1_A4_T5.js
+language/expressions/postfix-increment/S11.3.1_A5_T1.js
+language/expressions/postfix-increment/S11.3.1_A5_T2.js
+language/expressions/postfix-increment/S11.3.1_A5_T3.js
 language/expressions/postfix-increment/S11.3.1_A6_T1.js
 language/expressions/postfix-increment/S11.3.1_A6_T2.js
 language/expressions/postfix-increment/S11.3.1_A6_T3.js
@@ -28744,6 +28774,7 @@ language/expressions/postfix-increment/line-terminator-carriage-return.js
 language/expressions/postfix-increment/line-terminator-line-feed.js
 language/expressions/postfix-increment/line-terminator-line-separator.js
 language/expressions/postfix-increment/line-terminator-paragraph-separator.js
+language/expressions/postfix-increment/operator-x-postfix-increment-calls-putvalue-lhs-newvalue--1.js
 language/expressions/postfix-increment/operator-x-postfix-increment-calls-putvalue-lhs-newvalue-.js
 language/expressions/postfix-increment/target-cover-id.js
 language/expressions/postfix-increment/target-cover-newtarget.js
@@ -28766,6 +28797,9 @@ language/expressions/prefix-decrement/S11.4.5_A4_T2.js
 language/expressions/prefix-decrement/S11.4.5_A4_T3.js
 language/expressions/prefix-decrement/S11.4.5_A4_T4.js
 language/expressions/prefix-decrement/S11.4.5_A4_T5.js
+language/expressions/prefix-decrement/S11.4.5_A5_T1.js
+language/expressions/prefix-decrement/S11.4.5_A5_T2.js
+language/expressions/prefix-decrement/S11.4.5_A5_T3.js
 language/expressions/prefix-decrement/S11.4.5_A6_T1.js
 language/expressions/prefix-decrement/S11.4.5_A6_T2.js
 language/expressions/prefix-decrement/S11.4.5_A6_T3.js
@@ -28774,6 +28808,7 @@ language/expressions/prefix-decrement/arguments.js
 language/expressions/prefix-decrement/bigint.js
 language/expressions/prefix-decrement/eval-nostrict.js
 language/expressions/prefix-decrement/eval.js
+language/expressions/prefix-decrement/operator-prefix-decrement-x-calls-putvalue-lhs-newvalue--1.js
 language/expressions/prefix-decrement/operator-prefix-decrement-x-calls-putvalue-lhs-newvalue-.js
 language/expressions/prefix-decrement/target-cover-id.js
 language/expressions/prefix-decrement/target-cover-newtarget.js
@@ -28795,6 +28830,9 @@ language/expressions/prefix-increment/S11.4.4_A4_T2.js
 language/expressions/prefix-increment/S11.4.4_A4_T3.js
 language/expressions/prefix-increment/S11.4.4_A4_T4.js
 language/expressions/prefix-increment/S11.4.4_A4_T5.js
+language/expressions/prefix-increment/S11.4.4_A5_T1.js
+language/expressions/prefix-increment/S11.4.4_A5_T2.js
+language/expressions/prefix-increment/S11.4.4_A5_T3.js
 language/expressions/prefix-increment/S11.4.4_A6_T1.js
 language/expressions/prefix-increment/S11.4.4_A6_T2.js
 language/expressions/prefix-increment/S11.4.4_A6_T3.js
@@ -28803,6 +28841,7 @@ language/expressions/prefix-increment/arguments.js
 language/expressions/prefix-increment/bigint.js
 language/expressions/prefix-increment/eval-nostrict.js
 language/expressions/prefix-increment/eval.js
+language/expressions/prefix-increment/operator-prefix-increment-x-calls-putvalue-lhs-newvalue--1.js
 language/expressions/prefix-increment/operator-prefix-increment-x-calls-putvalue-lhs-newvalue-.js
 language/expressions/prefix-increment/target-cover-id.js
 language/expressions/prefix-increment/target-cover-newtarget.js
@@ -29152,6 +29191,7 @@ language/expressions/typeof/built-in-exotic-objects-no-call.js
 language/expressions/typeof/built-in-functions.js
 language/expressions/typeof/built-in-ordinary-objects-no-call.js
 language/expressions/typeof/get-value-ref-err.js
+language/expressions/typeof/get-value.js
 language/expressions/typeof/native-call.js
 language/expressions/typeof/null.js
 language/expressions/typeof/number.js
@@ -36537,6 +36577,7 @@ language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-gen
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-in.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-order.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-simple-no-strict.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-get-err.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-err.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-null.js
@@ -36547,10 +36588,12 @@ language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-nul
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined-hole.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined-own.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-null.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined-hole.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined-own.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-const.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-prop-ref-no-get.js
@@ -36559,6 +36602,7 @@ language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-prop-ref.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-unresolvable-no-strict.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-unresolvable-strict.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-target-simple-no-strict.js
+language/statements/for-await-of/async-gen-decl-dstr-array-elem-target-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-err.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-null.js
 language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-skip.js
@@ -36585,15 +36629,18 @@ language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-nul
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined-hole.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined-own.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined.js
+language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-null.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined-hole.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined-own.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined.js
+language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-put-prop-ref-no-get.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-put-prop-ref.js
 language/statements/for-await-of/async-gen-decl-dstr-array-rest-put-unresolvable-no-strict.js
+language/statements/for-await-of/async-gen-decl-dstr-array-rest-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-empty-bool.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-empty-num.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-empty-obj.js
@@ -36617,6 +36664,7 @@ language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-gen.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-in.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-order.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-simple-no-strict.js
+language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-id-put-unresolvable-no-strict.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-id-simple-no-strict.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-assignment-missing.js
@@ -36630,13 +36678,17 @@ language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-fn.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-gen.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-in.js
+language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-yield-expr.js
+language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-target-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-first.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-last.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-lone.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-middle.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-trlng.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-name-evaluation.js
+language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-array-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-array.js
+language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-obj-yield-expr.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-obj.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-order.js
 language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-prop-ref-no-get.js
@@ -37238,6 +37290,7 @@ language/statements/for-in/labelled-fn-stmt-var.js
 language/statements/for-in/let-array-with-newline.js
 language/statements/for-in/let-block-with-newline.js
 language/statements/for-in/let-identifier-with-newline.js
+language/statements/for-in/order-after-define-property.js
 language/statements/for-in/order-enumerable-shadowed.js
 language/statements/for-in/order-property-added.js
 language/statements/for-in/order-property-on-prototype.js
@@ -37314,10 +37367,12 @@ language/statements/for-of/dstr/array-elem-init-in.js
 language/statements/for-of/dstr/array-elem-init-let.js
 language/statements/for-of/dstr/array-elem-init-order.js
 language/statements/for-of/dstr/array-elem-init-simple-no-strict.js
+language/statements/for-of/dstr/array-elem-init-yield-expr.js
 language/statements/for-of/dstr/array-elem-init-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-init-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-iter-get-err.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-skip.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close.js
 language/statements/for-of/dstr/array-elem-iter-thrw-close-skip.js
@@ -37326,6 +37381,7 @@ language/statements/for-of/dstr/array-elem-nested-array-null.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined-hole.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined-own.js
 language/statements/for-of/dstr/array-elem-nested-array-undefined.js
+language/statements/for-of/dstr/array-elem-nested-array-yield-expr.js
 language/statements/for-of/dstr/array-elem-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-nested-array-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-nested-array.js
@@ -37335,6 +37391,7 @@ language/statements/for-of/dstr/array-elem-nested-obj-null.js
 language/statements/for-of/dstr/array-elem-nested-obj-undefined-hole.js
 language/statements/for-of/dstr/array-elem-nested-obj-undefined-own.js
 language/statements/for-of/dstr/array-elem-nested-obj-undefined.js
+language/statements/for-of/dstr/array-elem-nested-obj-yield-expr.js
 language/statements/for-of/dstr/array-elem-nested-obj-yield-ident-invalid.js
 language/statements/for-of/dstr/array-elem-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-nested-obj.js
@@ -37352,14 +37409,17 @@ language/statements/for-of/dstr/array-elem-put-unresolvable-strict.js
 language/statements/for-of/dstr/array-elem-target-identifier.js
 language/statements/for-of/dstr/array-elem-target-simple-no-strict.js
 language/statements/for-of/dstr/array-elem-target-simple-strict.js
+language/statements/for-of/dstr/array-elem-target-yield-expr.js
 language/statements/for-of/dstr/array-elem-target-yield-invalid.js
 language/statements/for-of/dstr/array-elem-target-yield-valid.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-abpt.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js
 language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close.js
 language/statements/for-of/dstr/array-elem-trlg-iter-get-err.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-err.js
+language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
@@ -37368,6 +37428,7 @@ language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js
 language/statements/for-of/dstr/array-elision-iter-abpt.js
 language/statements/for-of/dstr/array-elision-iter-get-err.js
 language/statements/for-of/dstr/array-elision-iter-nrml-close-err.js
+language/statements/for-of/dstr/array-elision-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elision-iter-nrml-close-skip.js
 language/statements/for-of/dstr/array-elision-iter-nrml-close.js
 language/statements/for-of/dstr/array-elision-val-array.js
@@ -37378,6 +37439,7 @@ language/statements/for-of/dstr/array-elision-val-string.js
 language/statements/for-of/dstr/array-elision-val-symbol.js
 language/statements/for-of/dstr/array-elision-val-undef.js
 language/statements/for-of/dstr/array-empty-iter-close-err.js
+language/statements/for-of/dstr/array-empty-iter-close-null.js
 language/statements/for-of/dstr/array-empty-iter-close.js
 language/statements/for-of/dstr/array-empty-iter-get-err.js
 language/statements/for-of/dstr/array-empty-val-array.js
@@ -37407,6 +37469,7 @@ language/statements/for-of/dstr/array-rest-nested-array-null.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-hole.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined-own.js
 language/statements/for-of/dstr/array-rest-nested-array-undefined.js
+language/statements/for-of/dstr/array-rest-nested-array-yield-expr.js
 language/statements/for-of/dstr/array-rest-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/array-rest-nested-array-yield-ident-valid.js
 language/statements/for-of/dstr/array-rest-nested-array.js
@@ -37415,6 +37478,7 @@ language/statements/for-of/dstr/array-rest-nested-obj-null.js
 language/statements/for-of/dstr/array-rest-nested-obj-undefined-hole.js
 language/statements/for-of/dstr/array-rest-nested-obj-undefined-own.js
 language/statements/for-of/dstr/array-rest-nested-obj-undefined.js
+language/statements/for-of/dstr/array-rest-nested-obj-yield-expr.js
 language/statements/for-of/dstr/array-rest-nested-obj-yield-ident-invalid.js
 language/statements/for-of/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-rest-nested-obj.js
@@ -37426,6 +37490,7 @@ language/statements/for-of/dstr/array-rest-put-prop-ref-user-err.js
 language/statements/for-of/dstr/array-rest-put-prop-ref.js
 language/statements/for-of/dstr/array-rest-put-unresolvable-no-strict.js
 language/statements/for-of/dstr/array-rest-put-unresolvable-strict.js
+language/statements/for-of/dstr/array-rest-yield-expr.js
 language/statements/for-of/dstr/array-rest-yield-ident-invalid.js
 language/statements/for-of/dstr/array-rest-yield-ident-valid.js
 language/statements/for-of/dstr/const-ary-init-iter-close.js
@@ -37652,6 +37717,7 @@ language/statements/for-of/dstr/obj-id-init-let.js
 language/statements/for-of/dstr/obj-id-init-order.js
 language/statements/for-of/dstr/obj-id-init-simple-no-strict.js
 language/statements/for-of/dstr/obj-id-init-simple-strict.js
+language/statements/for-of/dstr/obj-id-init-yield-expr.js
 language/statements/for-of/dstr/obj-id-init-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-id-init-yield-ident-valid.js
 language/statements/for-of/dstr/obj-id-put-const.js
@@ -37672,6 +37738,7 @@ language/statements/for-of/dstr/obj-prop-elem-init-fn-name-fn.js
 language/statements/for-of/dstr/obj-prop-elem-init-fn-name-gen.js
 language/statements/for-of/dstr/obj-prop-elem-init-in.js
 language/statements/for-of/dstr/obj-prop-elem-init-let.js
+language/statements/for-of/dstr/obj-prop-elem-init-yield-expr.js
 language/statements/for-of/dstr/obj-prop-elem-init-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-elem-init-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-elem-target-memberexpr-optchain-prop-ref-init.js
@@ -37679,6 +37746,7 @@ language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-optchain-prop-r
 language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref-init-active.js
 language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref-init.js
 language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref.js
+language/statements/for-of/dstr/obj-prop-elem-target-yield-expr.js
 language/statements/for-of/dstr/obj-prop-elem-target-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-elem-target-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-identifier-resolution-first.js
@@ -37692,6 +37760,7 @@ language/statements/for-of/dstr/obj-prop-nested-array-invalid.js
 language/statements/for-of/dstr/obj-prop-nested-array-null.js
 language/statements/for-of/dstr/obj-prop-nested-array-undefined-own.js
 language/statements/for-of/dstr/obj-prop-nested-array-undefined.js
+language/statements/for-of/dstr/obj-prop-nested-array-yield-expr.js
 language/statements/for-of/dstr/obj-prop-nested-array-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-nested-array-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-nested-array.js
@@ -37699,6 +37768,7 @@ language/statements/for-of/dstr/obj-prop-nested-obj-invalid.js
 language/statements/for-of/dstr/obj-prop-nested-obj-null.js
 language/statements/for-of/dstr/obj-prop-nested-obj-undefined-own.js
 language/statements/for-of/dstr/obj-prop-nested-obj-undefined.js
+language/statements/for-of/dstr/obj-prop-nested-obj-yield-expr.js
 language/statements/for-of/dstr/obj-prop-nested-obj-yield-ident-invalid.js
 language/statements/for-of/dstr/obj-prop-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-nested-obj.js
@@ -37890,6 +37960,7 @@ language/statements/for-of/int32array.js
 language/statements/for-of/int8array-mutate.js
 language/statements/for-of/int8array.js
 language/statements/for-of/iterator-as-proxy.js
+language/statements/for-of/iterator-close-non-object.js
 language/statements/for-of/iterator-close-non-throw-get-method-abrupt.js
 language/statements/for-of/iterator-close-non-throw-get-method-is-null.js
 language/statements/for-of/iterator-close-throw-get-method-abrupt.js
@@ -40070,6 +40141,7 @@ language/statements/with/strict-fn-expr.js
 language/statements/with/strict-fn-method.js
 language/statements/with/strict-script.js
 language/statements/with/unscopables-get-err.js
+language/statements/with/unscopables-inc-dec.js
 language/statements/with/unscopables-not-referenced-for-undef.js
 language/statements/with/unscopables-prop-get-err.js
 language/types/boolean/S8.3_A1_T1.js

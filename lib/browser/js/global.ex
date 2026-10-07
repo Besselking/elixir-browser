@@ -41,7 +41,8 @@ defmodule Browser.JS.Global do
       Interp.store(scope, %{s | vars: Map.delete(s.vars, key)})
       true
     else
-      not Map.has_key?(s.vars, key)
+      # what is no variable may be a property defined on the object itself
+      if Map.has_key?(s.vars, key), do: false, else: :default
     end
   end
 

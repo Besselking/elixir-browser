@@ -710,7 +710,12 @@ defmodule Browser.JS.Props do
         do: Map.delete(attrs, key),
         else: Map.put(attrs, key, flags)
 
-    keys = o.keys |> List.delete(key) |> then(&if(e, do: [key | &1], else: &1))
+    keys =
+      cond do
+        e and key in o.keys -> o.keys
+        e -> [key | o.keys]
+        true -> List.delete(o.keys, key)
+      end
 
     # a function's own name, length and prototype become real properties
     store(

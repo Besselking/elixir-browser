@@ -199,6 +199,19 @@ defmodule Browser.JS.Interp do
               do: {:ok, get(obj, name)},
               else: lookup_var(s.parent, name, heap)
 
+          %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
+            # a property defined on the global object itself (an accessor, say) is a variable too
+            case Map.fetch!(heap, gid) do
+              %{props: %{^name => {:accessor, g, _}}} ->
+                {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
+
+              %{props: %{^name => v}} ->
+                {:ok, v}
+
+              _ ->
+                :error
+            end
+
           _ ->
             lookup_var(s.parent, name, heap)
         end
@@ -246,11 +259,19 @@ defmodule Browser.JS.Interp do
       s.parent != nil ->
         assign_var(s.parent, name, val, heap)
 
+      s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
+        put(s.vars.this, name, val)
+
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
     end
   end
+
+  defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
+    do: match?(%{props: %{^name => _}}, deref(gid))
+
+  defp global_own_property?(_, _), do: false
 
   # a sloppy function's parameter and the `arguments` element it is mapped to follow each other
   defp sync_argument(%{argmap: {aid, names}}, name, val) do
@@ -1147,6 +1168,7 @@ defmodule Browser.JS.Interp do
       Map.has_key?(s.vars, name) -> true
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
       s.parent != nil -> resolvable?(s.parent, name)
+      is_binary(name) -> global_own_property?(s, name)
       true -> false
     end
   end
@@ -1471,8 +1493,16 @@ defmodule Browser.JS.Interp do
   def iter_close(it, after_throw?) do
     try do
       case get(it, "return") do
-        f when is_tuple(f) -> if function?(f), do: call(f, it, [])
-        _ -> :ok
+        f when is_tuple(f) ->
+          if function?(f) do
+            r = call(f, it, [])
+
+            unless after_throw? or match?({:obj, _}, r),
+              do: throw_error("TypeError", "Iterator return result is not an object")
+          end
+
+        _ ->
+          :ok
       end
     catch
       {:js_error, _} when after_throw? -> :ok
@@ -2364,7 +2394,15 @@ defmodule Browser.JS.Interp do
 
   # a `let`/`const` name is in its temporal dead zone from the start of its scope
   defp declare_tdz(decl, scope) do
-    for name <- lexical_names(decl), do: declare(scope, name, :tdz)
+    names = lexical_names(decl)
+    for name <- names, do: declare(scope, name, :tdz)
+
+    # remembered so that a direct eval's `var` of the same name can be refused
+    unless names == [] do
+      sc = deref(scope)
+      store(scope, Map.update(sc, :lex, MapSet.new(names), &MapSet.union(&1, MapSet.new(names))))
+    end
+
     :ok
   end
 
@@ -3278,7 +3316,10 @@ defmodule Browser.JS.Interp do
             false
 
           true ->
-            Browser.JS.Global.host_delete(:global, name)
+            case Browser.JS.Global.host_delete(:global, name) do
+              :default -> delete(Map.get(deref(sc).vars, :this), name)
+              r -> r
+            end
         end
 
       _ ->
@@ -3375,17 +3416,38 @@ defmodule Browser.JS.Interp do
     if prefix?, do: new, else: old
   end
 
-  def ev({:update, op, prefix?, target}, env) do
-    old = numeric(ev(target, env))
-    new = bump(op, old)
-    assign_to(target, new, env)
-    if prefix?, do: new, else: old
+  def ev({:update, op, prefix?, {:id, name} = target}, env) do
+    if Process.get(:js_with_used, false) do
+      {read, write} = id_ref(env, name, target, false)
+      old = numeric(read.())
+      new = bump(op, old)
+      write.(new)
+      if prefix?, do: new, else: old
+    else
+      old = numeric(ev(target, env))
+      new = bump(op, old)
+      assign_to(target, new, env)
+      if prefix?, do: new, else: old
+    end
+  end
+
+  # `f()++`: the operand is evaluated, then it is no reference
+  def ev({:update, _op, _prefix?, target}, env) do
+    ev(target, env)
+    throw_error("ReferenceError", "Invalid left-hand side expression in update operation")
   end
 
   def ev({:assign, "=", {:id, name}, value}, env) do
-    v = ev_named(value, env, {:id, name})
-    assign_var(env, name, v)
-    v
+    if Process.get(:js_with_used, false) do
+      {_, write} = id_ref(env, name, {:id, name}, false)
+      v = ev_named(value, env, {:id, name})
+      write.(v)
+      v
+    else
+      v = ev_named(value, env, {:id, name})
+      assign_var(env, name, v)
+      v
+    end
   end
 
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do
@@ -3656,7 +3718,10 @@ defmodule Browser.JS.Interp do
       if Map.has_key?(st.vars, n) and Map.get(st.vars, :catch_param) != n, do: clash.(n)
     end
 
-    if deref(var_scope).parent == nil do
+    vs = deref(var_scope)
+    for n <- names, MapSet.member?(Map.get(vs, :lex, MapSet.new()), n), do: clash.(n)
+
+    if vs.parent == nil do
       for n <- names, global_lexical?(n), do: clash.(n)
       g = Map.get(deref(var_scope).vars, :this)
 
@@ -3756,43 +3821,47 @@ defmodule Browser.JS.Interp do
 
   defp super_set(_, key, v, this), do: put(this, key, v)
 
+  # the reference of a name, resolved once: a `with` object keeps receiving the write even if
+  # the property is gone by then. Returns the reader and the writer.
+  defp id_ref(env, name, target, strict?) do
+    case with_binding(env, name) do
+      {:with, obj} ->
+        {fn -> get(obj, name) end,
+         fn v ->
+           if strict? do
+             unless has_property?(obj, name),
+               do: throw_error("ReferenceError", "#{name} is not defined")
+
+             strict_put(obj, name, v)
+           else
+             put(obj, name, v)
+           end
+         end}
+
+      {:var, sid} ->
+        {fn -> ev(target, sid) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(sid, name, v, true),
+             else: assign_var(sid, name, v)
+         end}
+
+      nil ->
+        {fn -> ev(target, env) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(env, name, v, false),
+             else: assign_var(env, name, v)
+         end}
+    end
+  end
+
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
     {read, write} =
       case target do
         {:id, name} ->
-          # the reference is resolved once: a `with` object keeps receiving the write even if
-          # the property is gone by then
-          case with_binding(env, name) do
-            {:with, obj} ->
-              {fn -> get(obj, name) end,
-               fn v ->
-                 if strict? do
-                   unless has_property?(obj, name),
-                     do: throw_error("ReferenceError", "#{name} is not defined")
-
-                   strict_put(obj, name, v)
-                 else
-                   put(obj, name, v)
-                 end
-               end}
-
-            {:var, sid} ->
-              {fn -> ev(target, sid) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(sid, name, v, true),
-                   else: assign_var(sid, name, v)
-               end}
-
-            nil ->
-              {fn -> ev(target, env) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(env, name, v, false),
-                   else: assign_var(env, name, v)
-               end}
-          end
+          id_ref(env, name, target, strict?)
 
         {:super_member, k} ->
           {base, this} = Browser.JS.Classes.super_base(env)
