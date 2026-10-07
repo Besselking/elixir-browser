@@ -4990,4 +4990,37 @@ defmodule Browser.LayoutTest do
                )
     end
   end
+
+  describe "flex container sizing" do
+    defp flex_rects(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y, &1.w, &1.h})
+    end
+
+    test "a floated flex container is as wide as its items" do
+      html = """
+      <div style="display:flex;float:left;background:blue"><div style="width:20px;height:10px"></div></div>
+      <div style="display:flex;float:left;background:red"><div style="width:30px;height:10px"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 30, 10}]
+    end
+
+    test "column items start from their flex-basis" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:100px"><div style="flex:0 30px;background:green"></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 400, 30}]
+    end
+
+    test "a column item does not go below its content" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:10px"><div style="flex-basis:0;background:green"><div style="height:50px"></div></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 400, 50}]
+    end
+  end
 end

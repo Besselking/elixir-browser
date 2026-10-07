@@ -3192,6 +3192,8 @@ css/css-flexbox/alignment/flow-start-flow-end-reverse.html
 css/css-flexbox/alignment/flow-start-flow-end-wrap-reverse.html
 css/css-flexbox/anonymous-block.html
 css/css-flexbox/anonymous-flex-item-004.html
+css/css-flexbox/aspect-ratio-intrinsic-size-003.html
+css/css-flexbox/aspect-ratio-intrinsic-size-010.html
 css/css-flexbox/aspect-ratio-transferred-max-size.html
 css/css-flexbox/auto-height-column-with-border-and-padding.html
 css/css-flexbox/auto-height-with-flex.html
@@ -3221,7 +3223,9 @@ css/css-flexbox/flex-aspect-ratio-img-column-002.html
 css/css-flexbox/flex-aspect-ratio-img-column-003.html
 css/css-flexbox/flex-aspect-ratio-img-column-004.html
 css/css-flexbox/flex-aspect-ratio-img-column-005.html
+css/css-flexbox/flex-aspect-ratio-img-column-006.html
 css/css-flexbox/flex-aspect-ratio-img-column-007.html
+css/css-flexbox/flex-aspect-ratio-img-column-009.html
 css/css-flexbox/flex-aspect-ratio-img-column-012.html
 css/css-flexbox/flex-aspect-ratio-img-column-016.html
 css/css-flexbox/flex-aspect-ratio-img-row-001.html
@@ -3236,6 +3240,7 @@ css/css-flexbox/flex-basis-007.html
 css/css-flexbox/flex-basis-008.html
 css/css-flexbox/flex-basis-010.html
 css/css-flexbox/flex-basis-011.html
+css/css-flexbox/flex-basis-012.html
 css/css-flexbox/flex-basis-item-margins-001.html
 css/css-flexbox/flex-child-percent-basis-resize-1.html
 css/css-flexbox/flex-container-margin.html
@@ -3262,8 +3267,8 @@ css/css-flexbox/flex-grow-005.html
 css/css-flexbox/flex-grow-006.html
 css/css-flexbox/flex-grow-007.html
 css/css-flexbox/flex-height-min-content.html
+css/css-flexbox/flex-inline.html
 css/css-flexbox/flex-item-and-percentage-abspos.html
-css/css-flexbox/flex-item-max-height-min-content.html
 css/css-flexbox/flex-item-min-height-min-content-overflow.html
 css/css-flexbox/flex-item-min-height-min-content.html
 css/css-flexbox/flex-item-position-relative-001.html
@@ -3323,6 +3328,8 @@ css/css-flexbox/flexbox-baseline-empty-001a.html
 css/css-flexbox/flexbox-baseline-empty-001b.html
 css/css-flexbox/flexbox-baseline-multi-line-horiz-001.html
 css/css-flexbox/flexbox-baseline-multi-line-horiz-002.html
+css/css-flexbox/flexbox-baseline-multi-line-horiz-003.html
+css/css-flexbox/flexbox-baseline-multi-line-horiz-004.html
 css/css-flexbox/flexbox-baseline-multi-line-vert-001.html
 css/css-flexbox/flexbox-baseline-multi-line-vert-002.html
 css/css-flexbox/flexbox-baseline-nested-001.html
@@ -3340,6 +3347,7 @@ css/css-flexbox/flexbox-flex-direction-column-percentage-ignored.html
 css/css-flexbox/flexbox-flex-wrap-default.htm
 css/css-flexbox/flexbox-flex-wrap-flexing.html
 css/css-flexbox/flexbox-flex-wrap-horiz-001.html
+css/css-flexbox/flexbox-flex-wrap-horiz-002.html
 css/css-flexbox/flexbox-flex-wrap-nowrap.htm
 css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
@@ -3371,6 +3379,7 @@ css/css-flexbox/flexbox-safe-overflow-position-005.html
 css/css-flexbox/flexbox-single-line-clamp-2.html
 css/css-flexbox/flexbox-single-line-clamp-3.html
 css/css-flexbox/flexbox-sizing-horiz-002.xhtml
+css/css-flexbox/flexbox-sizing-vert-002.xhtml
 css/css-flexbox/flexbox-table-fixup-001.xhtml
 css/css-flexbox/flexbox-vert-lr-with-img.html
 css/css-flexbox/flexbox-whitespace-handling-001a.xhtml
@@ -3559,13 +3568,16 @@ css/css-flexbox/grandchild-span-height.html
 css/css-flexbox/grid-flex-item-003.html
 css/css-flexbox/grid-flex-item-004.html
 css/css-flexbox/grid-flex-item-006.html
+css/css-flexbox/inline-flex-min-content-height.html
 css/css-flexbox/intrinsic-size/col-wrap-001.html
 css/css-flexbox/intrinsic-size/col-wrap-002.html
 css/css-flexbox/intrinsic-size/col-wrap-007.html
 css/css-flexbox/intrinsic-size/col-wrap-008.html
+css/css-flexbox/intrinsic-size/col-wrap-011.html
 css/css-flexbox/intrinsic-size/col-wrap-013.html
 css/css-flexbox/intrinsic-size/col-wrap-014.html
 css/css-flexbox/intrinsic-size/col-wrap-020.html
+css/css-flexbox/intrinsic-size/row-002.html
 css/css-flexbox/intrinsic-size/row-007.html
 css/css-flexbox/item-with-max-height-and-scrollbar.html
 css/css-flexbox/item-with-table-with-infinite-max-intrinsic-width.html

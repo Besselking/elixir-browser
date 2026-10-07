@@ -1115,6 +1115,7 @@ defmodule Browser.Layout do
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
       table?: table?,
+      flex?: c["display"] in ["flex", "inline-flex"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
         cond do
@@ -3845,7 +3846,10 @@ defmodule Browser.Layout do
     do: shrink_extent(st, sub, @unbounded, Map.get(spec, :key))
 
   defp content_width(st, sub, spec, avail) do
-    measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
+    # a table or a flex container is as wide as its content wants, up to the room there is
+    measure_at =
+      if Map.get(spec, :table?) or Map.get(spec, :flex?), do: @unbounded, else: max(avail, 1)
+
     min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
   end
 
@@ -5782,9 +5786,10 @@ defmodule Browser.Layout do
   defp flex_column_resize(st, sized, free) when free > 0 do
     total = sized |> Enum.map(& &1.grow) |> Enum.sum()
 
-    if total > 0,
-      do: Enum.map(sized, &flex_column_height(st, &1, &1.base + free * &1.grow / total)),
-      else: sized
+    Enum.map(sized, fn it ->
+      share = if total > 0, do: free * it.grow / total, else: 0
+      flex_column_height(st, it, it.base + share)
+    end)
   end
 
   defp flex_column_resize(st, sized, free) when free < 0 do
@@ -5794,26 +5799,15 @@ defmodule Browser.Layout do
       Enum.map(sized, fn it ->
         target = it.base + free * it.shrink * it.base / total
 
-        if it.shrink > 0 and it.rebuild != nil do
-          {_, floor, _} =
-            flex_atom(
-              st,
-              it.rebuild.(%{"height" => nil, "min-height" => nil}),
-              it.w,
-              {it.key, :min}
-            )
-
-          flex_column_height(st, it, max(target, min(floor, it.base)))
-        else
-          it
-        end
+        flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base))
       end)
     else
       sized
     end
   end
 
-  defp flex_column_resize(_st, sized, _free), do: sized
+  defp flex_column_resize(st, sized, _free),
+    do: Enum.map(sized, &flex_column_height(st, &1, &1.base))
 
   # in a column of automatic height an item with a `flex-basis` is as high as that, or as its
   # content needs
@@ -5828,6 +5822,22 @@ defmodule Browser.Layout do
   defp flex_column_basis(_st, it), do: it
 
   defp flex_column_height(st, it, target) do
+    # an item does not go below what its content needs (`min-height: auto`)
+    target =
+      if it.rebuild != nil and target < it.h - 0.5 do
+        {_, floor, _} =
+          flex_atom(
+            st,
+            it.rebuild.(%{"height" => nil, "min-height" => nil}),
+            it.w,
+            {it.key, :min}
+          )
+
+        max(target, min(floor, it.h))
+      else
+        target
+      end
+
     if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
