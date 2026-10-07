@@ -2998,11 +2998,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp bind_proto([{:rest, pat}], it, next, env, mode, done?) do
+    ref = guarded_ref(pat, env, mode, it, done?)
     list = if done?, do: [], else: pull(it, next, [])
-    bind(pat, new_array(list), env, mode)
+    bind_to(pat, ref, new_array(list), env, mode)
   end
 
   defp bind_proto([p | ps], it, next, env, mode, done?) do
+    # a property target is evaluated before the iterator is stepped
+    ref = guarded_ref(p, env, mode, it, done?)
+
     {v, done?} =
       if done? do
         {:undefined, true}
@@ -3015,7 +3019,7 @@ defmodule Browser.JS.Interp do
 
     if p != nil do
       try do
-        bind(p, v, env, mode)
+        bind_to(p, ref, v, env, mode)
       catch
         kind, e ->
           unless done?, do: iter_close(it, true)
@@ -3024,6 +3028,30 @@ defmodule Browser.JS.Interp do
     end
 
     bind_proto(ps, it, next, env, mode, done?)
+  end
+
+  # the reference of a property target (`o[k]`, with or without a default), evaluated early;
+  # a throw while evaluating it closes the iterator that is still open
+  defp guarded_ref(pat, env, mode, it, done?) do
+    target_ref(pat, env, mode)
+  catch
+    kind, e ->
+      unless done?, do: iter_close(it, true)
+      :erlang.raise(kind, e, __STACKTRACE__)
+  end
+
+  defp target_ref({:member, o, k, _}, env, :assign), do: {ev(o, env), to_key(ev_key(k, env)), nil}
+
+  defp target_ref({:default, {:member, o, k, _}, e}, env, :assign),
+    do: {ev(o, env), to_key(ev_key(k, env)), e}
+
+  defp target_ref(_, _, _), do: nil
+
+  defp bind_to(pat, nil, v, env, mode), do: bind(pat, v, env, mode)
+
+  defp bind_to(_pat, {ov, key, dflt}, v, env, _mode) do
+    v = if dflt != nil and v == :undefined, do: ev(dflt, env), else: v
+    put(ov, key, v)
   end
 
   defp bind_name(:let, env, name, v), do: declare(env, name, v)
