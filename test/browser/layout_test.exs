@@ -5141,4 +5141,19 @@ defmodule Browser.LayoutTest do
       assert blue.y == 36
     end
   end
+
+  describe "clearance and the margin of a first child" do
+    test "the margin of the first child of a cleared box is absorbed by the clearance" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="float:left;width:50px;height:100px"></div>
+      <div style="clear:both"><div style="margin-top:10px;height:20px;background:blue"></div></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 100
+    end
+  end
 end

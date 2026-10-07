@@ -2268,6 +2268,7 @@ defmodule Browser.Layout do
       overlays: [],
       deferred: [],
       open: %{},
+      clr: nil,
       pos: [
         %{x: 0, y: 0, w: width, h: if(root_height == :view, do: view_height, else: root_height)}
       ],
@@ -2414,6 +2415,12 @@ defmodule Browser.Layout do
 
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
+
+  defp op({:gap, px}, %{clr: {y0, gap, bottom}, y: bottom} = st) do
+    st = flush(st)
+    %{st | gap: max(st.gap, max(y0 + max(gap, px) - bottom, 0))}
+  end
+
   defp op({:gap, px}, st), do: %{flush(st) | gap: max(st.gap, px)}
 
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
@@ -2447,7 +2454,9 @@ defmodule Browser.Layout do
 
   # `clear`: the next line starts below the floats on that side
   defp op({:clear, side}, st) do
-    st = st |> flush() |> apply_gap()
+    st = flush(st)
+    {y0, gap} = {st.y, max(st.gap, 0)}
+    st = apply_gap(st)
 
     bottom =
       st.floats
@@ -2455,7 +2464,10 @@ defmodule Browser.Layout do
       |> Enum.map(& &1.y1)
       |> Enum.max(fn -> st.y end)
 
-    %{st | y: max(st.y, bottom)}
+    # a margin of a first child collapses with the margin above the cleared box: where the box
+    # ends up is the lower of the floats' bottom and the top its margins alone would give it
+    clr = if bottom > st.y, do: {y0, gap, bottom}
+    %{st | y: max(st.y, bottom), clr: clr}
   end
 
   defp op({:inset, l, r}, st) do
@@ -2845,7 +2857,8 @@ defmodule Browser.Layout do
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
-  defp apply_gap(%{ptop: []} = st), do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0}
+  defp apply_gap(%{ptop: []} = st),
+    do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0, clr: nil}
 
   # the margin of a first child collapsed into the margin above its parent: the parent's top
   # edge is where the merged margin ends
@@ -2861,7 +2874,7 @@ defmodule Browser.Layout do
         {open, pos}
       end)
 
-    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: []}
+    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: [], clr: nil}
   end
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
