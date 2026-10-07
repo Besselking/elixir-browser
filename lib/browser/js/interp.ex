@@ -1449,15 +1449,7 @@ defmodule Browser.JS.Interp do
     if (o.class == :array and array_iteration_pristine?(v)) or o.class in [:map, :set] do
       {:list, iterate(v)}
     else
-      case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
-        f when is_tuple(f) ->
-          unless function?(f), do: throw_error("TypeError", "object is not iterable")
-          it = call(f, v, [])
-          {:proto, it, get(it, "next")}
-
-        _ ->
-          throw_error("TypeError", "object is not iterable")
-      end
+      proto_source(v)
     end
   end
 
@@ -1475,6 +1467,41 @@ defmodule Browser.JS.Interp do
         throw_error("TypeError", "#{to_str(v)} is not iterable")
     end
   end
+
+  defp proto_source(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        unless function?(f), do: throw_error("TypeError", "object is not iterable")
+        it = call(f, v, [])
+        {:proto, it, get(it, "next")}
+
+      _ ->
+        throw_error("TypeError", "object is not iterable")
+    end
+  end
+
+  @doc false
+  # the source of a `for … of` loop: an array or a collection changed by the body is seen
+  # changing, so an array is read by index as the loop goes and a Map or Set is pulled
+  def for_of_source({:obj, id} = v) do
+    o = deref(id)
+
+    cond do
+      o.class == :array and array_iteration_pristine?(v) ->
+        {:list,
+         Stream.unfold(0, fn i ->
+           if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
+         end)}
+
+      o.class in [:map, :set] ->
+        proto_source(v)
+
+      true ->
+        iter_source(v)
+    end
+  end
+
+  def for_of_source(v), do: iter_source(v)
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`
@@ -2787,7 +2814,7 @@ defmodule Browser.JS.Interp do
     source =
       case kind do
         :forin -> {:list, if(nullish?(target), do: [], else: for_in_keys(target))}
-        :forof -> iter_source(target)
+        :forof -> for_of_source(target)
       end
 
     case source do
