@@ -2350,10 +2350,17 @@ defmodule Browser.JS.Interp do
       case unexport(stmt) do
         {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope, false))
         {:using, _, _, _, rest} -> hoist_functions(rest, scope)
+        {:var, kind, _} = d when kind in [:let, :const] -> declare_tdz(d, scope)
         _ -> :ok
       end
     end
 
+    :ok
+  end
+
+  # a `let`/`const` name is in its temporal dead zone from the start of its scope
+  defp declare_tdz(decl, scope) do
+    for name <- lexical_names(decl), do: declare(scope, name, :tdz)
     :ok
   end
 
