@@ -1404,4 +1404,42 @@ defmodule Browser.JSTest do
              ) == "1,2,3"
     end
   end
+
+  describe "decorators" do
+    test "method, field, accessor and class decorators run and may replace their targets" do
+      src = """
+      var log = [];
+      function dm(v, ctx) {
+        log.push(ctx.kind + ":" + ctx.name);
+        ctx.addInitializer(function () { log.push("init " + ctx.name); });
+        return function (...a) { return "wrapped " + v.apply(this, a); };
+      }
+      function df(v, ctx) { return function (x) { return x * 2; }; }
+      function da(v, ctx) { return { get() { return v.get.call(this) + 1; }, init(x) { return x + 10; } }; }
+      function dc(C, ctx) { log.push("class " + ctx.name); return class extends C { extra() { return 1; } }; }
+      @dc class A {
+        @dm m() { return "m"; }
+        @df f = 21;
+        @da accessor acc = 5;
+        accessor plain = 3;
+      }
+      var a = new A();
+      [a.m(), a.f, a.acc, a.extra(), log.join(",")].join("|");
+      """
+
+      assert js(src) == "wrapped m|42|16|1|method:m,class A,init m"
+    end
+
+    test "an auto-accessor is a getter and setter over private storage" do
+      assert js(
+               "class C { accessor x = 1; static accessor y = 2 } var c = new C(); c.x = 5; c.x + C.y"
+             ) ==
+               7.0
+    end
+
+    test "a decorator that is not a function is a TypeError" do
+      assert {:uncaught, "TypeError: Decorator must be a function"} =
+               error("var d = 1; class C { @d m() {} }")
+    end
+  end
 end

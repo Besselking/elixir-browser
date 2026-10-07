@@ -233,8 +233,19 @@ defmodule Browser.JS.Iterators do
         result(:undefined, true)
 
       {state, step, close} ->
-        :erlang.put({:ihelper, ref}, {:done, step, close})
-        close.(state)
+        # a suspended-yield helper is executing while the underlying iterators are closed,
+        # so closing it again from a `return` method is a TypeError
+        :erlang.put(
+          {:ihelper, ref},
+          {if(state == :yield, do: :running, else: :done), step, close}
+        )
+
+        try do
+          close.(state)
+        after
+          :erlang.put({:ihelper, ref}, {:done, step, close})
+        end
+
         result(:undefined, true)
     end
   end

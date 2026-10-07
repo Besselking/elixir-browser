@@ -30,12 +30,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens)
 
   @doc false
   def inherited_props, do: @inherited
@@ -308,9 +308,21 @@ defmodule Browser.Style do
     decls
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
-      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v)
+      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
+        not invalid_color?(p, v)
     end)
   end
+
+  # a colour that is not one is dropped before the cascade, so an earlier declaration still
+  # applies (`color: green; color: invalidValue`)
+  defp invalid_color?(prop, v) when prop in ["color", "background-color"] and is_binary(v) do
+    lower = v |> String.trim() |> String.downcase()
+
+    not (lower in ~w(inherit initial unset revert) or String.contains?(lower, "var(") or
+           Browser.Color.parse_alpha(lower) != nil)
+  end
+
+  defp invalid_color?(_prop, _v), do: false
 
   # a negative width, height, min/max size or padding is invalid: the declaration is dropped
   # before the cascade, so an earlier value still applies

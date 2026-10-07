@@ -109,7 +109,7 @@ defmodule Browser.Reftest do
 
   defp invisible?(cp) do
     cp in 0x200B..0x200F or cp in 0x2060..0x2064 or cp == 0xFEFF or cp == 0x34F or
-      cp in 0xFE00..0xFE0F or cp in 0x180B..0x180E
+      cp in 0xFE00..0xFE0F or cp in 0x180B..0x180E or cp == 0xAD
   end
 
   defp wide?(cp) do

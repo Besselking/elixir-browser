@@ -3477,6 +3477,7 @@ built-ins/AsyncFunction/is-a-constructor.js
 built-ins/AsyncFunction/is-not-a-global.js
 built-ins/AsyncGeneratorFunction/extensibility.js
 built-ins/AsyncGeneratorFunction/has-instance.js
+built-ins/AsyncGeneratorFunction/instance-await-expr-in-param.js
 built-ins/AsyncGeneratorFunction/instance-construct-throws.js
 built-ins/AsyncGeneratorFunction/instance-length.js
 built-ins/AsyncGeneratorFunction/instance-name.js
@@ -4573,6 +4574,7 @@ built-ins/Date/S15.9.4_A5.js
 built-ins/Date/TimeClip_negative_zero.js
 built-ins/Date/UTC/coercion-errors.js
 built-ins/Date/UTC/coercion-order.js
+built-ins/Date/UTC/fp-evaluation-order.js
 built-ins/Date/UTC/infinity-make-day.js
 built-ins/Date/UTC/infinity-make-time.js
 built-ins/Date/UTC/length.js
@@ -5931,6 +5933,7 @@ built-ins/Iterator/concat/return-is-not-forwarded-before-initial-start.js
 built-ins/Iterator/concat/return-method-called-with-zero-arguments.js
 built-ins/Iterator/concat/single-argument.js
 built-ins/Iterator/concat/throws-typeerror-when-generator-is-running-next.js
+built-ins/Iterator/concat/throws-typeerror-when-generator-is-running-return.js
 built-ins/Iterator/concat/throws-typeerror-when-iterable-not-an-object.js
 built-ins/Iterator/concat/throws-typeerror-when-iterator-method-not-callable.js
 built-ins/Iterator/concat/throws-typeerror-when-iterator-not-an-object.js
@@ -6510,6 +6513,8 @@ built-ins/Iterator/zip/result-arrays-are-fresh.js
 built-ins/Iterator/zip/result-is-iterator.js
 built-ins/Iterator/zip/suspended-start-iterator-close-calls-next.js
 built-ins/Iterator/zip/suspended-start-iterator-close-calls-return.js
+built-ins/Iterator/zip/suspended-yield-iterator-close-calls-next.js
+built-ins/Iterator/zip/suspended-yield-iterator-close-calls-return.js
 built-ins/Iterator/zipKeyed/basic-longest.js
 built-ins/Iterator/zipKeyed/basic-shortest.js
 built-ins/Iterator/zipKeyed/basic-strict.js
@@ -6552,6 +6557,8 @@ built-ins/Iterator/zipKeyed/results-object-has-default-attributes.js
 built-ins/Iterator/zipKeyed/results-object-has-no-undefined-iterables-properties.js
 built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-next.js
 built-ins/Iterator/zipKeyed/suspended-start-iterator-close-calls-return.js
+built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-next.js
+built-ins/Iterator/zipKeyed/suspended-yield-iterator-close-calls-return.js
 built-ins/JSON/15.12-0-1.js
 built-ins/JSON/15.12-0-2.js
 built-ins/JSON/15.12-0-3.js
@@ -21418,6 +21425,7 @@ language/expressions/async-generator/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/async-generator/dstr/obj-ptrn-rest-val-obj.js
 language/expressions/async-generator/early-errors-expression-NSPL-with-USD.js
 language/expressions/async-generator/early-errors-expression-arguments-in-formal-parameters.js
+language/expressions/async-generator/early-errors-expression-await-as-function-binding-identifier.js
 language/expressions/async-generator/early-errors-expression-binding-identifier-arguments.js
 language/expressions/async-generator/early-errors-expression-binding-identifier-eval.js
 language/expressions/async-generator/early-errors-expression-body-contains-super-call.js
@@ -21425,6 +21433,7 @@ language/expressions/async-generator/early-errors-expression-body-contains-super
 language/expressions/async-generator/early-errors-expression-eval-in-formal-parameters.js
 language/expressions/async-generator/early-errors-expression-formals-body-duplicate-const.js
 language/expressions/async-generator/early-errors-expression-formals-body-duplicate-let.js
+language/expressions/async-generator/early-errors-expression-formals-contains-await-expr.js
 language/expressions/async-generator/early-errors-expression-formals-contains-await.js
 language/expressions/async-generator/early-errors-expression-formals-contains-super-call.js
 language/expressions/async-generator/early-errors-expression-formals-contains-super-property.js
@@ -22308,6 +22317,14 @@ language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-numeric-literal.js
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-string-literal.js
 language/expressions/class/cpn-class-expr-fields-methods-computed-property-name-from-yield-expression.js
+language/expressions/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+language/expressions/class/decorator/syntax/valid/decorator-call-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-call-expr-identifier-reference.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-decorator-member-expr.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-member-expr-identifier-reference.js
+language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js
+language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-close.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err-array-prototype.js
 language/expressions/class/dstr/async-gen-meth-ary-init-iter-get-err.js
@@ -24708,6 +24725,7 @@ language/expressions/class/elements/evaluation-error/computed-name-toprimitive-r
 language/expressions/class/elements/evaluation-error/computed-name-tostring-err.js
 language/expressions/class/elements/evaluation-error/computed-name-valueof-err.js
 language/expressions/class/elements/field-declaration.js
+language/expressions/class/elements/field-definition-accessor-no-line-terminator.js
 language/expressions/class/elements/fields-anonymous-function-length.js
 language/expressions/class/elements/fields-asi-1.js
 language/expressions/class/elements/fields-asi-2.js
@@ -25580,6 +25598,7 @@ language/expressions/class/elements/syntax/early-errors/private-member-exp-canno
 language/expressions/class/elements/syntax/early-errors/private-method-cannot-escape-token.js
 language/expressions/class/elements/syntax/early-errors/super-private-access-invalid.js
 language/expressions/class/elements/syntax/valid/grammar-class-body-ctor-no-heritage.js
+language/expressions/class/elements/syntax/valid/grammar-field-accessor.js
 language/expressions/class/elements/syntax/valid/grammar-field-classelementname-initializer-alt.js
 language/expressions/class/elements/syntax/valid/grammar-field-classelementname-initializer.js
 language/expressions/class/elements/syntax/valid/grammar-field-identifier-alt.js
@@ -33516,6 +33535,18 @@ language/statements/class/cpn-class-decl-fields-methods-computed-property-name-f
 language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-string-literal.js
 language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-yield-expression.js
 language/statements/class/cptn-decl.js
+language/statements/class/decorator/syntax/class-valid/decorator-member-expr-private-identifier.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-call-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-member-expr-decorator-member-expr.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-member-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/class-element-decorator-parenthesized-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-call-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-call-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-decorator-member-expr.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-member-expr-identifier-reference.js
+language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js
+language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/statements/class/definition/accessors.js
 language/statements/class/definition/basics.js
 language/statements/class/definition/class-method-returns-promise.js
@@ -35981,6 +36012,7 @@ language/statements/class/elements/evaluation-error/computed-name-toprimitive-re
 language/statements/class/elements/evaluation-error/computed-name-tostring-err.js
 language/statements/class/elements/evaluation-error/computed-name-valueof-err.js
 language/statements/class/elements/field-declaration.js
+language/statements/class/elements/field-definition-accessor-no-line-terminator.js
 language/statements/class/elements/fielddefinition-initializer-abrupt-completion.js
 language/statements/class/elements/fields-anonymous-function-length.js
 language/statements/class/elements/fields-asi-1.js
@@ -36956,6 +36988,7 @@ language/statements/class/elements/syntax/early-errors/private-member-exp-cannot
 language/statements/class/elements/syntax/early-errors/private-method-cannot-escape-token.js
 language/statements/class/elements/syntax/early-errors/super-private-access-invalid.js
 language/statements/class/elements/syntax/valid/grammar-class-body-ctor-no-heritage.js
+language/statements/class/elements/syntax/valid/grammar-field-accessor.js
 language/statements/class/elements/syntax/valid/grammar-field-classelementname-initializer-alt.js
 language/statements/class/elements/syntax/valid/grammar-field-classelementname-initializer.js
 language/statements/class/elements/syntax/valid/grammar-field-identifier-alt.js

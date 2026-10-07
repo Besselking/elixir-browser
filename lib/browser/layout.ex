@@ -131,6 +131,7 @@ defmodule Browser.Layout do
       alast: nil,
       vs: 0,
       wrap_chars: :none,
+      shy: true,
       nojust: false,
       ls: 0.0,
       wsp: 0.0,
@@ -516,13 +517,13 @@ defmodule Browser.Layout do
   defp walk(nodes, style, acc) when is_list(nodes),
     do: nodes |> wrap_table_parts() |> Enum.reduce(acc, &walk(&1, style, &2))
 
-  # a soft hyphen (U+00AD) is invisible unless a line breaks at it; breaking there is not
-  # supported yet, so it is dropped from the laid-out text (the DOM text keeps it)
+  # a soft hyphen (U+00AD) is invisible unless a line breaks at it, and `hyphens: none` takes
+  # that away: it is dropped from the laid-out text (the DOM text keeps it)
   defp walk({:text, t}, %{tt: tt} = style, acc) when is_binary(t) and tt != :none,
     do: walk({:text, transform_text(t, tt, acc)}, %{style | tt: :none}, acc)
 
   defp walk({:text, t}, style, acc) when is_binary(t) do
-    if String.contains?(t, "\u00AD"),
+    if String.contains?(t, "\u00AD") and not style.shy,
       do: walk({:text, String.replace(t, "\u00AD", "")}, style, acc),
       else: walk_text(t, style, acc)
   end
@@ -1471,6 +1472,7 @@ defmodule Browser.Layout do
       min: num(c["min-height"]),
       max: num(c["max-height"]),
       maxpct: pct_of(c["max-height"]),
+      minpct: pct_of(c["min-height"]),
       clip: clips?(c),
       bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
@@ -1917,6 +1919,7 @@ defmodule Browser.Layout do
                                                                                              _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
+    |> put_if(c["hyphens"], &%{&1 | shy: &2 != "none"})
     |> put_if(c["vertical-align"], &raise_text/2)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
     |> put_if(c["text-align-last"], fn s, v ->
@@ -2464,10 +2467,17 @@ defmodule Browser.Layout do
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
 
   # a floated box goes to the left or right edge of the line below, and text flows around it
-  defp op({:float, side, sub, spec, _style}, st) do
-    st = flush(st)
+  defp op({:float, side, sub, spec, style}, st) do
+    # a float in the middle of a line that does not wrap goes below that line, which goes on
+    {st, line_bottom} =
+      if style.ws == :nowrap and st.line != [] and
+           st.x + fit_width(st, sub, spec, max(st.width - 2 * st.margin - st.left - st.right, 0)) >
+             st.width - st.margin - st.right,
+         do: {st, st.y + st.lmax},
+         else: {flush(st), nil}
+
     {y0, gap, old} = {st.y, max(st.gap, 0), st.clr}
-    st = apply_gap(st)
+    st = if line_bottom, do: st, else: apply_gap(st)
     # the margin above a float is not used up by it: it goes on collapsing with the margins of
     # the block that follows (see the `gap` op)
     st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
@@ -2476,6 +2486,7 @@ defmodule Browser.Layout do
     {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
     # `clear` puts the float below the earlier floats on that side
     top = clear_top(st, Map.get(spec, :clear))
+    top = if line_bottom, do: max(top, line_bottom), else: top
 
     {x, y} =
       place_float(st, side, w, height, top, st.margin + st.left, st.width - st.margin - st.right)
@@ -3079,19 +3090,27 @@ defmodule Browser.Layout do
     end
   end
 
-  # a percentage height is a share of the enclosing block's height when that is known
-  defp percent_height(st, %{h: nil, hpct: pct} = o) when is_number(pct) do
+  # a percentage height, max-height or min-height is a share of the enclosing block's height
+  # when that is known
+  defp percent_height(st, o) do
     # the root's percentage refers to the window, anything else to the block it sits in
     base = if o.root and st.root_view, do: st.view_h, else: st.cbh
-    if is_number(base), do: %{o | h: round(pct * base)}, else: o
+
+    if is_number(base) do
+      o
+      |> pct_set(:h, o.hpct, base)
+      |> pct_set(:max, o.maxpct, st.cbh)
+      |> pct_set(:min, o.minpct, st.cbh)
+    else
+      o
+    end
   end
 
-  # a percentage max-height of a box with an aspect ratio limits its width too
-  defp percent_height(st, %{ratio: {_, _}, max: nil, maxpct: pct} = o)
-       when is_number(pct) and is_number(st.cbh),
-       do: %{o | max: round(pct * st.cbh)}
+  defp pct_set(o, key, pct, base) when is_number(pct) and is_number(base) do
+    if Map.get(o, key) == nil, do: Map.put(o, key, round(pct * base)), else: o
+  end
 
-  defp percent_height(_st, o), do: o
+  defp pct_set(o, _key, _pct, _base), do: o
 
   defp place_box(st, ref, o) do
     {_bt, br, _bb, bl} = o.bw
@@ -3133,7 +3152,10 @@ defmodule Browser.Layout do
           |> Enum.map(& &1.y1)
           |> Enum.min(fn -> nil end)
 
-    if below && ml0 + box_w + mr0 > beside,
+    # (a positive right margin of a box with a width of its own does not push it below a float)
+    mr_fit = if o.width, do: min(mr0, 0), else: mr0
+
+    if below && ml0 + box_w + mr_fit > beside,
       do: place_box(%{st | y: below}, ref, o),
       else: open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free})
   end
@@ -4290,6 +4312,57 @@ defmodule Browser.Layout do
   end
 
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
+    if String.contains?(text, "\u00AD"),
+      do: shy_word(text, style, nowrap?, st, dx, glue),
+      else: plain_word(text, style, nowrap?, st, dx, glue)
+  end
+
+  # A word with soft hyphens: when it does not fit, the line breaks at the last one that lets
+  # the part before it (and the hyphen shown there) fit.
+  defp shy_word(text, style, nowrap?, st, dx, glue) do
+    clean = String.replace(text, "\u00AD", "")
+    line_left = st.margin + st.left
+    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    room = st.width - st.margin - st.right - st.fr - st.x - space_w
+    segs = String.split(text, "\u00AD")
+
+    cond do
+      # (a soft hyphen's break does not count when sizing to the content)
+      nowrap? || Process.get(:layout_intrinsic, false) || st.measure.(clean, style) <= room ->
+        plain_word(clean, style, nowrap?, st, 0, glue)
+
+      true ->
+        fits =
+          for k <- (length(segs) - 1)..1//-1,
+              head = segs |> Enum.take(k) |> Enum.join(),
+              st.measure.(head <> "-", style) <= room,
+              do: k
+
+        case fits do
+          [k | _] -> shy_break(segs, k, style, st, glue, line_left)
+          [] when st.line != [] -> shy_retry(text, style, st, glue, line_left)
+          [] -> shy_break(segs, 1, style, st, glue, line_left)
+        end
+    end
+  end
+
+  defp shy_retry(text, style, st, glue, line_left) do
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+    shy_word(text, style, false, st, 0, glue)
+  end
+
+  defp shy_break(segs, k, style, st, glue, line_left) do
+    {head, rest} = Enum.split(segs, k)
+    st = plain_word(Enum.join(head) <> "-", style, true, st, 0, glue)
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+    word(Enum.join(rest, "\u00AD"), style, false, st, 0, false)
+  end
+
+  defp plain_word(text, style, nowrap?, st, dx, glue) do
     w = st.measure.(text, style)
     line_left = st.margin + st.left
 
