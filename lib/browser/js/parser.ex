@@ -1150,6 +1150,28 @@ defmodule Browser.JS.Parser do
   end
 
   # a function body starts a new world for labels, loops and switches
+  # `in` is no operator in the head of a `for (init; …)` (it would read as `for (a in b)`),
+  # except inside brackets, a function or a class
+  defp allow_in(fun) do
+    old = Process.put(:js_no_in, false)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_no_in, old)
+    end
+  end
+
+  defp no_in(fun) do
+    old = Process.put(:js_no_in, true)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_no_in, old)
+    end
+  end
+
   defp fresh_jumps(fun, in_fn?) do
     saved =
       {Process.get(:js_labels, []), Process.get(:js_loop, 0), Process.get(:js_switch, 0),
@@ -1161,7 +1183,7 @@ defmodule Browser.JS.Parser do
     Process.put(:js_fn, in_fn?)
 
     try do
-      fun.()
+      allow_in(fun)
     after
       {l, lp, sw, f} = saved
       Process.put(:js_labels, l)
@@ -1210,7 +1232,7 @@ defmodule Browser.JS.Parser do
             {{if(of_in == "of", do: :forof, else: :forin), String.to_atom(kw), pat, obj, body}, t}
 
           _ ->
-            {decl, t} = declaration(kw, rest)
+            {decl, t} = no_in(fn -> declaration(kw, rest) end)
             for_rest(decl, t)
         end
 
@@ -1253,7 +1275,7 @@ defmodule Browser.JS.Parser do
     case after_lhs do
       # `for (async of => {}; ;)` is an arrow function init, not a for-of
       [{:id, "of", _}, {:p, "=>", _} | _] when lhs == {:id, "async"} ->
-        {e, t} = expression(ts)
+        {e, t} = no_in(fn -> expression(ts) end)
         for_rest({:expr, e}, t)
 
       [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
@@ -1264,7 +1286,7 @@ defmodule Browser.JS.Parser do
         {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
 
       _ ->
-        {e, t} = expression(ts)
+        {e, t} = no_in(fn -> expression(ts) end)
         for_rest({:expr, e}, t)
     end
   end
@@ -1768,7 +1790,10 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp class_rest(ts, class_decorators \\ []) do
+  defp class_rest(ts, class_decorators \\ []),
+    do: allow_in(fn -> class_rest_(ts, class_decorators) end)
+
+  defp class_rest_(ts, class_decorators) do
     open = token_index(ts, :js_cur_start)
     outer_refs = Process.get(:js_priv_refs, [])
     Process.put(:js_priv_refs, [])
@@ -2121,7 +2146,10 @@ defmodule Browser.JS.Parser do
   defp put_src({tag, fun}, src) when tag in [:async, :gen], do: {tag, put_src(fun, src)}
 
   # after `function name?` — at the parameter list
-  defp function_rest(name, ts, generator? \\ false) do
+  defp function_rest(name, ts, generator? \\ false),
+    do: allow_in(fn -> function_rest_(name, ts, generator?) end)
+
+  defp function_rest_(name, ts, generator?) do
     outer = Process.get(:js_generator, false)
     outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
@@ -2356,7 +2384,7 @@ defmodule Browser.JS.Parser do
 
     case ts do
       [{:p, "?", _} | ts] ->
-        {a, ts} = assignment(ts)
+        {a, ts} = allow_in(fn -> assignment(ts) end)
         ts = expect(ts, ":")
         {b, ts} = assignment(ts)
         {{:cond, c, a, b}, ts}
@@ -2381,7 +2409,14 @@ defmodule Browser.JS.Parser do
     binary_loop(left, rest, min, ts)
   end
 
-  defp binary_loop(left, [{kind, op, _} | rest] = ts, min, start) when kind in [:p, :id] do
+  # (in the head of a `for (init; …)`, `in` ends the expression)
+  defp binary_loop(left, [{:id, "in", _} | _] = ts, min, start) do
+    if Process.get(:js_no_in, false), do: {left, ts}, else: binary_loop_(left, ts, min, start)
+  end
+
+  defp binary_loop(left, ts, min, start), do: binary_loop_(left, ts, min, start)
+
+  defp binary_loop_(left, [{kind, op, _} | rest] = ts, min, start) when kind in [:p, :id] do
     case @binary[op] do
       prec when is_integer(prec) and prec >= min and (kind == :p or op in ["in", "instanceof"]) ->
         if op in ["&&", "||", "??"] and start != nil, do: check_logical_mix(op, start, ts)
@@ -2407,7 +2442,7 @@ defmodule Browser.JS.Parser do
     end
   end
 
-  defp binary_loop(left, ts, _, _), do: {left, ts}
+  defp binary_loop_(left, ts, _, _), do: {left, ts}
 
   # `a ?? b || c` and `a && b ?? c` need parentheses: the operators written at the top level
   # of an operand (outside brackets) may not mix `??` with `&&` or `||`
@@ -2551,7 +2586,7 @@ defmodule Browser.JS.Parser do
     do: chain({:member, e, {:str, name}, true}, ts, true)
 
   defp chain(e, [{:p, "?.", _}, {:p, "[", _} | ts], _) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     chain({:member, e, k, true}, expect(ts, "]"), true)
   end
 
@@ -2567,7 +2602,7 @@ defmodule Browser.JS.Parser do
   defp chain(e, [{:tmpl, parts, _} | ts], c), do: chain(tagged_call(e, parts), ts, c)
 
   defp chain(e, [{:p, "[", _} | ts], c) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     chain({:member, e, k, false}, expect(ts, "]"), c)
   end
 
@@ -2620,7 +2655,7 @@ defmodule Browser.JS.Parser do
     do: member_only({:member, e, {:str, name}, false}, ts)
 
   defp member_only(e, [{:p, "[", _} | ts]) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     member_only({:member, e, k, false}, expect(ts, "]"))
   end
 
@@ -2639,9 +2674,11 @@ defmodule Browser.JS.Parser do
     {:call, e, [{:tagged_strings, cooked, raw, site} | exprs], false}
   end
 
-  defp arguments([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  defp arguments(ts, acc), do: allow_in(fn -> arguments_(ts, acc) end)
 
-  defp arguments(ts, acc) do
+  defp arguments_([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
+
+  defp arguments_(ts, acc) do
     {arg, ts} =
       case ts do
         [{:p, "...", _} | t] ->
@@ -2653,14 +2690,16 @@ defmodule Browser.JS.Parser do
       end
 
     case ts do
-      [{:p, ",", _} | ts] -> arguments(ts, [arg | acc])
+      [{:p, ",", _} | ts] -> arguments_(ts, [arg | acc])
       [{:p, ")", _} | ts] -> {Enum.reverse([arg | acc]), ts}
       _ -> throw({:syntax, "bad argument list"})
     end
   end
 
   # -> {parts with the expressions parsed (text chunks that are empty are left out), raw chunks}
-  defp template_parts(parts) do
+  defp template_parts(parts), do: allow_in(fn -> template_parts_(parts) end)
+
+  defp template_parts_(parts) do
     {raw, parts} =
       case List.last(parts) do
         {:raw, raw} -> {raw, Enum.drop(parts, -1)}
@@ -2689,7 +2728,9 @@ defmodule Browser.JS.Parser do
   end
 
   # the specifier and the optional options of an import call, after its `(`
-  defp import_args(ts) do
+  defp import_args(ts), do: allow_in(fn -> import_args_(ts) end)
+
+  defp import_args_(ts) do
     {e, ts} = assignment(ts)
 
     case ts do
@@ -2841,12 +2882,12 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:p, "(", _} | ts]) do
-    {e, ts} = expression(ts)
+    {e, ts} = allow_in(fn -> expression(ts) end)
     {e, expect(ts, ")")}
   end
 
-  defp primary([{:p, "[", _} | ts]), do: array_literal(ts, [])
-  defp primary([{:p, "{", _} | ts]), do: object_literal(ts, [])
+  defp primary([{:p, "[", _} | ts]), do: allow_in(fn -> array_literal(ts, []) end)
+  defp primary([{:p, "{", _} | ts]), do: allow_in(fn -> object_literal(ts, []) end)
   defp primary([{:eof, _, _} | _]), do: throw({:syntax, "unexpected end of input"})
   defp primary([{_, v, _} | _]), do: throw({:syntax, "unexpected token #{inspect(v)}"})
 

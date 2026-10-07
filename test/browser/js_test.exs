@@ -358,6 +358,16 @@ defmodule Browser.JSTest do
       assert js("String(Math.max)") == "function max() { [native code] }"
     end
 
+    test "in is no operator in a for head, except inside brackets" do
+      assert js("var n = 0; for (var i = ('a' in {a: 1}) ? 1 : 0; i < 2; i++) n++; n") == 1.0
+
+      assert js(
+               "var r = []; for (var k = [1 in [0, 1]][0]; false; ) ; var o = {x: 1}; for (var p in o) r.push(p); r.join()"
+             ) == "x"
+
+      assert js("for (var i = 0; 'q' in {q: 1} ? false : false; ) ; 'ok'") == "ok"
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

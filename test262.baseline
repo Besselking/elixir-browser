@@ -26485,6 +26485,7 @@ language/expressions/conditional/S11.12_A4_T3.js
 language/expressions/conditional/S11.12_A4_T4.js
 language/expressions/conditional/coalesce-expr-ternary.js
 language/expressions/conditional/in-branch-1.js
+language/expressions/conditional/in-branch-2.js
 language/expressions/conditional/in-condition.js
 language/expressions/conditional/symbol-conditional-evaluation.js
 language/expressions/conditional/tco-cond.js
@@ -30607,6 +30608,7 @@ language/expressions/yield/formal-parameters.js
 language/expressions/yield/from-catch.js
 language/expressions/yield/from-try.js
 language/expressions/yield/from-with.js
+language/expressions/yield/in-iteration-stmt.js
 language/expressions/yield/in-rltn-expr.js
 language/expressions/yield/invalid-left-hand-side.js
 language/expressions/yield/iter-value-specified.js
@@ -30619,6 +30621,7 @@ language/expressions/yield/rhs-template-middle.js
 language/expressions/yield/rhs-unresolvable.js
 language/expressions/yield/rhs-yield.js
 language/expressions/yield/star-array.js
+language/expressions/yield/star-in-iteration-stmt.js
 language/expressions/yield/star-in-rltn-expr.js
 language/expressions/yield/star-iterable.js
 language/expressions/yield/star-return-is-null.js
