@@ -20,6 +20,8 @@ defmodule Browser.Session do
     Interact,
     Layout,
     Page,
+    Scrollbars,
+    Scrollers,
     Selection,
     TextEdit,
     UI,
@@ -77,6 +79,13 @@ defmodule Browser.Session do
       # the same without controls in sticky or fixed boxes, which are found by `UI.sticky_hit/4`
       hit_controls: %{},
       sticky: [],
+      # what the layout made, before the scrolling boxes (`Browser.Scrollers`) are scrolled
+      # (`items` is it as drawn), the scrollers, and how far each is scrolled
+      base: [],
+      scrollers: %{},
+      soff: %{},
+      # the scrollbar being dragged: `%{id, axis, grab}`
+      sbar: nil,
       # decoded pictures by url: {:ok, width, height} or :failed
       images: %{},
       layout_timer: nil,
@@ -215,6 +224,8 @@ defmodule Browser.Session do
         nodes: page.nodes,
         url: page.url,
         scroll: 0,
+        soff: %{},
+        sbar: nil,
         page_edits: %{},
         fragment: pending_fragment(page.url),
         focus: nil,
@@ -311,7 +322,7 @@ defmodule Browser.Session do
 
   def handle_info({:blink, ref}, %{blink: ref} = state) do
     state = %{state | caret_on: not state.caret_on}
-    UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
+    UI.update(state.ui, state.items, overlay(state), state.scroll, state.caret_on, :diff)
     {:noreply, schedule_blink(state, false)}
   end
 
@@ -478,48 +489,18 @@ defmodule Browser.Session do
         ),
         state
       ) do
-    new_tab? = ctrl or meta
-    UI.hide_suggestions(state.ui)
-    state = %{state | suggest: nil, fresh_tab: false}
-
-    x = wx_x + state.scroll_x
-    UI.focus_page(state.ui)
-    py = y + state.scroll
-    {count, state} = register_click(state, x, y, :down)
-
-    case UI.sticky_hit(state.sticky, x, y, state.scroll) do
-      {:control, cid, spy} ->
-        {:noreply, click_control(state, cid, x, spy, count, shift)}
-
-      {:link, href} ->
-        {:noreply, follow(state, href, new_tab?)}
-
-      # a click on a sticky or fixed box that is neither: it does not reach the page below
-      :cover ->
-        {:noreply, if(state.focus, do: blur(state), else: state)}
-
-      nil ->
-        case UI.control_at(state.hit_controls, x, py) do
-          nil ->
-            case editor_at(state, x, py) do
-              nil ->
-                state = if state.focus, do: blur(state), else: state
-                state = if state.efocus, do: blur_editor(state), else: state
-
-                case UI.link_at(state.links, x, py) do
-                  nil -> {:noreply, page_click(state, x, py, count, shift)}
-                  href -> {:noreply, follow(state, href, new_tab?)}
-                end
-
-              host ->
-                state = if state.focus, do: blur(state), else: state
-                {:noreply, editor_click(state, host, x, py, count, shift)}
-            end
-
-          cid ->
-            {:noreply, click_control(state, cid, x, py, count, shift)}
-        end
+    case Scrollbars.hit(bars(state), wx_x, y) do
+      nil -> left_down(wx_x, y, shift, ctrl, meta, state)
+      hit -> {:noreply, bar_down(state, hit, wx_x, y)}
     end
+  end
+
+  # the scrollbar's thumb is dragged
+  def handle_info(
+        wx(event: wxMouse(type: :motion, x: wx_x, y: y, leftDown: down)),
+        %{sbar: %{}} = state
+      ) do
+    if down, do: {:noreply, drag_bar(state, wx_x, y)}, else: {:noreply, end_drag(state)}
   end
 
   def handle_info(wx(event: wxMouse(type: :left_dclick, x: wx_x, y: y)), state) do
@@ -641,20 +622,20 @@ defmodule Browser.Session do
     {:noreply, %{state | hover: {href, kind}}}
   end
 
-  def handle_info({:wheel, rot, delta, lines}, state) do
+  def handle_info({:wheel, rot, delta, lines, x, y}, state) do
     # a trackpad or momentum flick delivers dozens of events a second: fold every wheel event
     # already queued into this one so a burst costs one scroll and one repaint
-    {rot, state} = drain_wheel(wheel_rotation(rot, delta, lines), state)
+    {rot, {x, y}} = drain_wheel(wheel_rotation(rot, delta, lines), {x, y})
     px = state.wheel_rem - rot
     whole = trunc(px)
-    {:noreply, scroll_by(%{state | wheel_rem: px - whole}, whole)}
+    {:noreply, wheel_scroll(%{state | wheel_rem: px - whole}, :y, whole, x, y)}
   end
 
-  def handle_info({:hwheel, rot, delta, lines}, state) do
-    {rot, state} = drain_hwheel(wheel_rotation(rot, delta, lines), state)
+  def handle_info({:hwheel, rot, delta, lines, x, y}, state) do
+    {rot, {x, y}} = drain_hwheel(wheel_rotation(rot, delta, lines), {x, y})
     px = state.wheel_rem_x + rot
     whole = trunc(px)
-    {:noreply, scroll_x_by(%{state | wheel_rem_x: px - whole}, whole)}
+    {:noreply, wheel_scroll(%{state | wheel_rem_x: px - whole}, :x, whole, x, y)}
   end
 
   # A window being dragged to a new size sends a stream of size events, and laying the page out
@@ -1125,7 +1106,7 @@ defmodule Browser.Session do
 
   defp set_overlay(state, items) do
     state = %{state | sel_items: items}
-    UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
+    UI.update(state.ui, state.items, overlay(state), state.scroll, state.caret_on, :diff)
     state
   end
 
@@ -1366,7 +1347,55 @@ defmodule Browser.Session do
     apply_selection(state, Selection.range(state.sel_anchor, head))
   end
 
-  defp end_drag(state), do: %{state | drag: false, fdrag: false, edrag: false}
+  defp left_down(wx_x, y, shift, ctrl, meta, state) do
+    new_tab? = ctrl or meta
+    UI.hide_suggestions(state.ui)
+    state = %{state | suggest: nil, fresh_tab: false}
+
+    x = wx_x + state.scroll_x
+    UI.focus_page(state.ui)
+    py = y + state.scroll
+    {count, state} = register_click(state, x, y, :down)
+
+    case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+      {:control, cid, spy} ->
+        {:noreply, click_control(state, cid, x, spy, count, shift)}
+
+      {:link, href} ->
+        {:noreply, follow(state, href, new_tab?)}
+
+      # a click on a sticky or fixed box that is neither: it does not reach the page below
+      :cover ->
+        {:noreply, if(state.focus, do: blur(state), else: state)}
+
+      nil ->
+        case UI.control_at(state.hit_controls, x, py) do
+          nil ->
+            case editor_at(state, x, py) do
+              nil ->
+                state = if state.focus, do: blur(state), else: state
+                state = if state.efocus, do: blur_editor(state), else: state
+
+                case UI.link_at(state.links, x, py) do
+                  nil -> {:noreply, page_click(state, x, py, count, shift)}
+                  href -> {:noreply, follow(state, href, new_tab?)}
+                end
+
+              host ->
+                state = if state.focus, do: blur(state), else: state
+                {:noreply, editor_click(state, host, x, py, count, shift)}
+            end
+
+          cid ->
+            {:noreply, click_control(state, cid, x, py, count, shift)}
+        end
+    end
+  end
+
+  defp end_drag(%{sbar: nil} = state), do: %{state | drag: false, fdrag: false, edrag: false}
+
+  # the thumb is let go: it is drawn lighter again
+  defp end_drag(state), do: state |> Map.put(:sbar, nil) |> end_drag() |> scroll_by(0)
 
   defp page_selection_key(state, :select_all) do
     {texts, state} = sel_texts(state)
@@ -1395,7 +1424,7 @@ defmodule Browser.Session do
       state
     else
       state = %{state | sel: range, sel_items: items}
-      UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
+      UI.update(state.ui, state.items, overlay(state), state.scroll, state.caret_on, :diff)
       state
     end
   end
@@ -1993,6 +2022,7 @@ defmodule Browser.Session do
 
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
+              scrollers: true,
               metrics: &measure.(:content_height, &1),
               images: images,
               svg_defs: page.svg_defs
@@ -2166,6 +2196,7 @@ defmodule Browser.Session do
 
     {items, height} =
       Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
+        scrollers: true,
         metrics: &state.measure.(:content_height, &1),
         focus: focus_option(state),
         images: state.images,
@@ -2197,6 +2228,7 @@ defmodule Browser.Session do
 
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
+              scrollers: true,
               metrics: &measure.(:content_height, &1),
               focus: focus,
               images: images,
@@ -2218,29 +2250,46 @@ defmodule Browser.Session do
     %{state | layout_job: nil}
   end
 
-  defp apply_layout(state, items, height, width, mode) do
-    state = %{
-      state
-      | items: items,
-        height: height,
-        width: width,
-        links: UI.links(items),
-        controls: Layout.controls(items),
-        hit_controls: Layout.controls(Enum.reject(items, &moved_on_screen?/1)),
-        sticky: items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0)),
-        content_w: Layout.content_width(items, width),
-        sel: nil,
-        sel_anchor: nil,
-        drag: false,
-        sel_texts: nil,
-        sel_items: []
-    }
+  defp apply_layout(state, laid_out, height, width, mode) do
+    {base, scrollers} = Scrollers.index(laid_out)
+    soff = Scrollers.clamp(scrollers, state.soff)
+
+    state =
+      put_items(
+        %{
+          state
+          | base: base,
+            scrollers: scrollers,
+            soff: soff,
+            height: height,
+            width: width,
+            content_w: Layout.content_width(base, width),
+            sel: nil,
+            sel_anchor: nil,
+            drag: false,
+            sel_texts: nil,
+            sel_items: []
+        },
+        Scrollers.apply(base, scrollers, soff)
+      )
 
     state = scroll_x_by(state, 0)
     state = scroll_by(state, 0, mode)
     state = refresh_editor(state)
     send_layout(state)
     scroll_to_fragment(state)
+  end
+
+  # `items` are what is drawn: what the clicks and the pointer find is looked up in them
+  defp put_items(state, items) do
+    %{
+      state
+      | items: items,
+        links: UI.links(items),
+        controls: Layout.controls(items),
+        hit_controls: Layout.controls(Enum.reject(items, &moved_on_screen?/1)),
+        sticky: items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0))
+    }
   end
 
   # -- #fragments ---------------------------------------------------------------
@@ -2367,6 +2416,10 @@ defmodule Browser.Session do
   # laid out items instead of laying out the whole page (see `Layout.patch_field/6`).
   defp relayout_edit(state, _control, nil), do: relayout(state, :diff)
 
+  # (the items of a page with scrolling boxes are not the ones the layout made)
+  defp relayout_edit(%{scrollers: scrollers} = state, _control, _old) when scrollers != %{},
+    do: relayout(state, :diff)
+
   defp relayout_edit(state, control, old_text) do
     if MapSet.member?(state.page.fixed_width, control.cid),
       do: patch_edit(state, control, old_text),
@@ -2466,20 +2519,121 @@ defmodule Browser.Session do
   # devices (macOS trackpads, momentum) send many small fractions of a notch
   defp wheel_rotation(rot, delta, lines), do: rot / max(delta, 1) * max(lines, 1) * @wheel_line
 
-  defp drain_wheel(acc, state) do
+  defp drain_wheel(acc, pos) do
     receive do
-      {:wheel, rot, delta, lines} -> drain_wheel(acc + wheel_rotation(rot, delta, lines), state)
+      {:wheel, rot, delta, lines, x, y} ->
+        drain_wheel(acc + wheel_rotation(rot, delta, lines), {x, y})
     after
-      0 -> {acc, state}
+      0 -> {acc, pos}
     end
   end
 
-  defp drain_hwheel(acc, state) do
+  defp drain_hwheel(acc, pos) do
     receive do
-      {:hwheel, rot, delta, lines} -> drain_hwheel(acc + wheel_rotation(rot, delta, lines), state)
+      {:hwheel, rot, delta, lines, x, y} ->
+        drain_hwheel(acc + wheel_rotation(rot, delta, lines), {x, y})
     after
-      0 -> {acc, state}
+      0 -> {acc, pos}
     end
+  end
+
+  # The wheel scrolls the innermost box under the pointer that can move the way it turned;
+  # one that has reached its end hands the wheel on to the box around it, and then the page.
+  defp wheel_scroll(state, _axis, 0, _x, _y), do: state
+
+  defp wheel_scroll(state, axis, px, x, y) do
+    chain = Scrollers.at(state.scrollers, state.soff, x + state.scroll_x, y + state.scroll)
+
+    case Enum.find(chain, &Scrollers.can_scroll?(state.scrollers, state.soff, &1, axis, px)) do
+      nil when axis == :y -> scroll_by(state, px)
+      nil -> scroll_x_by(state, px)
+      sid -> scroll_box_by(state, sid, axis, px)
+    end
+  end
+
+  defp scroll_box_by(state, sid, axis, delta) do
+    {sx, sy} = Map.get(state.soff, sid, {0, 0})
+    pos = if axis == :x, do: {sx + delta, sy}, else: {sx, sy + delta}
+    set_soff(state, Map.put(state.soff, sid, pos))
+  end
+
+  # scrolls the boxes: the items move (no new layout), and the page shows them again
+  defp set_soff(state, soff) do
+    soff = Scrollers.clamp(state.scrollers, soff)
+
+    if soff == state.soff do
+      state
+    else
+      state =
+        %{state | soff: soff, sel: nil, sel_anchor: nil, sel_texts: nil, sel_items: []}
+        |> put_items(Scrollers.apply(state.base, state.scrollers, soff))
+        |> refresh_editor()
+
+      send_layout(state)
+      scroll_by(state, 0)
+    end
+  end
+
+  # -- scrollbars -----------------------------------------------------------------
+
+  defp bars(state) do
+    Scrollbars.bars(
+      %{
+        w: UI.client_width(state.ui),
+        h: UI.client_height(state.ui),
+        scroll: state.scroll,
+        scroll_x: state.scroll_x,
+        height: state.height,
+        content_w: state.content_w
+      },
+      state.scrollers,
+      state.soff
+    )
+  end
+
+  # what is drawn over the page: the selection, and the scrollbars
+  defp overlay(%{page: nil, sel_items: sel}), do: sel
+
+  defp overlay(state) do
+    case bars(state) do
+      [] ->
+        state.sel_items
+
+      bars ->
+        drag = state.sbar && {state.sbar.id, state.sbar.axis}
+
+        state.sel_items ++
+          Scrollbars.items(bars, state.scroll_x, drag, Scrollbars.dark_page?(state.items))
+    end
+  end
+
+  defp bar_down(state, {:thumb, bar}, x, y) do
+    state = %{state | sbar: %{id: bar.id, axis: bar.axis, grab: Scrollbars.grab(bar, x, y)}}
+    scroll_by(state, 0)
+  end
+
+  defp bar_down(state, {:track, bar, dir}, _x, _y),
+    do: set_bar(state, bar, bar.pos + dir * Scrollbars.page(bar))
+
+  defp drag_bar(state, x, y) do
+    %{id: id, axis: axis, grab: grab} = state.sbar
+
+    case Enum.find(bars(state), &(&1.id == id and &1.axis == axis)) do
+      nil -> end_drag(state)
+      bar -> set_bar(state, bar, Scrollbars.offset_at(bar, x, y, grab))
+    end
+  end
+
+  defp set_bar(state, %{id: :page, axis: :y}, value),
+    do: scroll_by(state, round(value) - state.scroll)
+
+  defp set_bar(state, %{id: :page, axis: :x}, value),
+    do: scroll_x_by(state, round(value) - state.scroll_x)
+
+  defp set_bar(state, %{id: sid, axis: axis}, value) do
+    {sx, sy} = Map.get(state.soff, sid, {0, 0})
+    value = round(value)
+    set_soff(state, Map.put(state.soff, sid, if(axis == :x, do: {value, sy}, else: {sx, value})))
   end
 
   defp scroll_x_by(state, delta) do
@@ -2491,6 +2645,8 @@ defmodule Browser.Session do
     else
       UI.set_scroll_x(state.ui, sx)
       state = %{state | scroll_x: sx}
+      # the scrollbars sit at the edge of the window, not of the page
+      UI.update(state.ui, state.items, overlay(state), state.scroll, state.caret_on, :full)
       notify_scroll(state)
       state
     end
@@ -2503,7 +2659,16 @@ defmodule Browser.Session do
     max_scroll = max(state.height - UI.client_height(state.ui), 0)
     old = state.scroll
     scroll = state.scroll |> Kernel.+(delta) |> max(0) |> min(max_scroll)
-    UI.update(state.ui, state.items, state.sel_items, scroll, state.caret_on, mode)
+
+    UI.update(
+      state.ui,
+      state.items,
+      overlay(%{state | scroll: scroll}),
+      scroll,
+      state.caret_on,
+      mode
+    )
+
     state = %{state | scroll: scroll}
     if scroll != old, do: notify_scroll(state)
     state
@@ -2514,7 +2679,7 @@ defmodule Browser.Session do
   # What belongs to one tab. Everything else (the window, the jobs and timers, the address
   # bar's suggestions, the visited pages) is shared; a tab that is not shown has none of
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
-  @tab_keys ~w(history page nodes items links controls hit_controls sticky images height scroll
+  @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
     sel_items click fanchor fdrag hover js scripts_pending page_edits fragment loading ed efocus
     esel edrag egoal)a
@@ -2529,6 +2694,9 @@ defmodule Browser.Session do
       controls: %{},
       hit_controls: %{},
       sticky: [],
+      base: [],
+      scrollers: %{},
+      soff: %{},
       images: %{},
       height: 0,
       scroll: 0,
@@ -2613,7 +2781,7 @@ defmodule Browser.Session do
     state = %{state | nonce: state.nonce + 1}
 
     UI.set_scroll_x(state.ui, state.scroll_x)
-    UI.update(state.ui, state.items, state.sel_items, state.scroll, true, :full)
+    UI.update(state.ui, state.items, overlay(state), state.scroll, true, :full)
     state = set_url_text(state, state.url || "")
 
     UI.set_title(
