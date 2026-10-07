@@ -76,7 +76,7 @@ defmodule Browser.Reftest.Raster do
   defp draw(grid, %{type: :image} = i, w, h, pics) do
     case Map.get(pics, i.url) do
       nil -> grid
-      picture -> blit(grid, picture, i.x, i.y, i.w, i.h, clip_box(i, w, h))
+      picture -> draw_picture(grid, picture, i, clip_box(i, w, h))
     end
   end
 
@@ -124,6 +124,14 @@ defmodule Browser.Reftest.Raster do
   defp draw(grid, %{type: :text} = t, w, h, _pics), do: text(grid, t, clip_box(t, w, h))
 
   defp draw(grid, _item, _w, _h, _pics), do: grid
+
+  # `object-fit`: the picture at its own size, cut to the item's box
+  defp draw_picture(grid, picture, %{fit: {dx, dy, fw, fh}} = i, {x0, y0, x1, y1}) do
+    clip = {max(x0, i.x), max(y0, i.y), min(x1, i.x + i.w), min(y1, i.y + i.h)}
+    blit(grid, picture, round(i.x + dx), round(i.y + dy), round(fw), round(fh), clip)
+  end
+
+  defp draw_picture(grid, picture, i, clip), do: blit(grid, picture, i.x, i.y, i.w, i.h, clip)
 
   defp clip_box(%{clip: %{x: x, y: y, w: cw, h: ch}}, w, h),
     do: {max(x, 0), max(y, 0), min(x + cw, w), min(y + ch, h)}

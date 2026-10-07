@@ -217,4 +217,26 @@ defmodule Browser.UIPageIndexTest do
     assert UI.item_at(items, 200, 200).nid == 1
     assert UI.item_at(items, 900, 900) == nil
   end
+
+  describe "nid_at" do
+    test "the topmost numbered item at the point; markers and hidden items do not count" do
+      items = [
+        %{type: :rect, nid: 1, x: 0, y: 0, w: 500, h: 500},
+        %{type: :text, nid: 2, x: 10, y: 10, w: 50, h: 16},
+        %{type: :box, nid: 3, x: 0, y: 0, w: 500, h: 40},
+        %{type: :text, nid: 4, x: 10, y: 10, w: 50, h: 16, hidden: true}
+      ]
+
+      assert UI.nid_at(items, 20, 15, 0) == 2
+      assert UI.nid_at(items, 200, 200, 0) == 1
+      assert UI.nid_at(items, 900, 900, 0) == nil
+      # scrolled down 100: the window point is that much further down the page, past the text
+      assert UI.nid_at(items, 20, 15, 100) == 1
+    end
+
+    test "a fixed item is where the window is, not where the page is" do
+      items = [%{type: :rect, nid: 7, x: 0, y: 0, w: 500, h: 40, stick: :fixed}]
+      assert UI.nid_at(items, 20, 20, 300) == 7
+    end
+  end
 end

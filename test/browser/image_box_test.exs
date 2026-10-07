@@ -89,4 +89,38 @@ defmodule Browser.ImageBoxTest do
     refute ImageBox.fixed?(%{w: 5, h: 5}, %{h: :auto})
     refute ImageBox.fixed?(%{}, %{})
   end
+
+  test "a declared aspect-ratio gives the height of a picture with only a width" do
+    assert size({120, 80}, %{}, %{w: 90.0, ratio: {1.0, :sizing}}) == {90, 90}
+    # `auto 1` keeps the picture's own ratio when it has one
+    assert size({120, 80}, %{}, %{w: 90.0, ratio: {1.0, :content}}) == {90, 60}
+    assert size(nil, %{}, %{w: 90.0, ratio: {1.0, :content}}) == {90, 90}
+  end
+
+  describe "fit/4" do
+    test "fill (and unknown sizes) draw into the whole box" do
+      assert ImageBox.fit({200, 100}, {100, 100}, nil, nil) == nil
+      assert ImageBox.fit({200, 100}, {100, 100}, "fill", nil) == nil
+      assert ImageBox.fit(nil, {100, 100}, "cover", nil) == nil
+    end
+
+    test "contain keeps the ratio inside the box and centres it" do
+      assert ImageBox.fit({200, 100}, {100, 100}, "contain", nil) == {0.0, 25.0, 100.0, 50.0}
+    end
+
+    test "cover fills the box, cropping the long side around the centre" do
+      assert ImageBox.fit({200, 100}, {100, 100}, "cover", nil) == {-50.0, 0.0, 200.0, 100.0}
+    end
+
+    test "object-position moves the picture" do
+      pos = {{:pct, 0.0}, {:pct, 0.0}}
+      assert ImageBox.fit({200, 100}, {100, 100}, "cover", pos) == {0.0, 0.0, 200.0, 100.0}
+    end
+
+    test "none keeps the size, scale-down only shrinks" do
+      assert ImageBox.fit({40, 40}, {100, 100}, "none", nil) == {30.0, 30.0, 40.0, 40.0}
+      assert ImageBox.fit({40, 40}, {100, 100}, "scale-down", nil) == {30.0, 30.0, 40.0, 40.0}
+      assert ImageBox.fit({200, 200}, {100, 100}, "scale-down", nil) == {0.0, 0.0, 100.0, 100.0}
+    end
+  end
 end

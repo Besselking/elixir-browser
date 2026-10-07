@@ -4255,6 +4255,10 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-006.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-009.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-011.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-012.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-015.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-016.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-017.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-018.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-019.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-020.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-021.html
@@ -4275,6 +4279,8 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-053.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-054.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-001.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-002.html
+css/css-sizing/aspect-ratio/grid-aspect-ratio-003.html
+css/css-sizing/aspect-ratio/grid-aspect-ratio-004.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-005.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-006.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-007.html
@@ -4304,6 +4310,8 @@ css/css-sizing/aspect-ratio/intrinsic-size-023.html
 css/css-sizing/aspect-ratio/intrinsic-size-024.html
 css/css-sizing/aspect-ratio/intrinsic-size-025.html
 css/css-sizing/aspect-ratio/percentage-resolution-005.html
+css/css-sizing/aspect-ratio/replaced-element-001.html
+css/css-sizing/aspect-ratio/replaced-element-009.html
 css/css-sizing/aspect-ratio/replaced-element-013.html
 css/css-sizing/aspect-ratio/replaced-element-014.html
 css/css-sizing/aspect-ratio/replaced-element-024.html

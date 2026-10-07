@@ -510,7 +510,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
-      [{:id, name, _} | _] when name not in ["in", "of", "instanceof"] -> let_decl(ts)
+      [{:id, name, _} | _] when name not in ["in", "instanceof"] -> let_decl(ts)
       [{:p, p, _} | _] when p in ["[", "{"] -> let_decl(ts)
       _ -> expression_statement(all)
     end

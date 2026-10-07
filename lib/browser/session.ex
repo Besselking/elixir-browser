@@ -103,6 +103,7 @@ defmodule Browser.Session do
       width: UI.client_width(ui),
       nonce: 0,
       hover: {nil, :arrow},
+      hover_nid: nil,
       url: nil,
       # form interaction: the focused control, its caret (graphemes), blink state, and
       # the control whose option menu is open
@@ -619,7 +620,8 @@ defmodule Browser.Session do
     if href != old_href,
       do: UI.set_status(state.ui, if(href, do: Fetch.resolve(base(state), href), else: ""))
 
-    {:noreply, %{state | hover: {href, kind}}}
+    state = pointer_over(%{state | hover: {href, kind}}, x, y)
+    {:noreply, state}
   end
 
   def handle_info({:wheel, rot, delta, lines, x, y}, state) do
@@ -1362,7 +1364,7 @@ defmodule Browser.Session do
         {:noreply, click_control(state, cid, x, spy, count, shift)}
 
       {:link, href} ->
-        {:noreply, follow(state, href, new_tab?)}
+        {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, new_tab?)}
 
       # a click on a sticky or fixed box that is neither: it does not reach the page below
       :cover ->
@@ -1377,8 +1379,12 @@ defmodule Browser.Session do
                 state = if state.efocus, do: blur_editor(state), else: state
 
                 case UI.link_at(state.links, x, py) do
-                  nil -> {:noreply, page_click(state, x, py, count, shift)}
-                  href -> {:noreply, follow(state, href, new_tab?)}
+                  nil ->
+                    state = js_pointer(state, x, y, ["mousedown", "mouseup", "click"])
+                    {:noreply, page_click(state, x, py, count, shift)}
+
+                  href ->
+                    {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, new_tab?)}
                 end
 
               host ->
@@ -1939,10 +1945,39 @@ defmodule Browser.Session do
         send(me, {:js_reply, nonce, pid, Browser.JS.Runtime.run_scripts(pid)})
       end)
 
-      %{state | js: pid, scripts_pending: true}
+      %{state | js: pid, scripts_pending: true, hover_nid: nil}
     else
       state
     end
+  end
+
+  # the pointer is over another element: the page's scripts hear `mouseover`, `mouseenter` and so on
+  # (menus that open on hover)
+  defp pointer_over(%{js: nil} = state, _x, _y), do: state
+
+  defp pointer_over(state, x, y) do
+    case UI.nid_at(state.items, x, y, state.scroll) do
+      nid when nid == state.hover_nid ->
+        state
+
+      nid ->
+        reply = Browser.JS.Runtime.hover(state.js, state.hover_nid, nid)
+        apply_js(%{state | hover_nid: nid}, reply)
+    end
+  end
+
+  # a press or click on the page itself: the element under the pointer hears it (the document, when
+  # nothing is painted there), which is how menus close when one clicks away
+  defp js_pointer(%{js: nil} = state, _x, _y, _types), do: state
+
+  defp js_pointer(state, x, y, types) do
+    target =
+      case UI.nid_at(state.items, x, y, state.scroll) do
+        nil -> :document
+        nid -> {:numbered, nid}
+      end
+
+    Enum.reduce(types, state, fn type, state -> state |> js_event(target, type) |> elem(0) end)
   end
 
   defp stop_js(state) do
@@ -1954,7 +1989,7 @@ defmodule Browser.Session do
 
       pid ->
         Browser.JS.Runtime.stop(pid)
-        %{state | js: nil}
+        %{state | js: nil, hover_nid: nil}
     end
   end
 
@@ -2681,7 +2716,7 @@ defmodule Browser.Session do
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
   @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
-    sel_items click fanchor fdrag hover js scripts_pending page_edits fragment loading ed efocus
+    sel_items click fanchor fdrag hover hover_nid js scripts_pending page_edits fragment loading ed efocus
     esel edrag egoal)a
 
   defp blank_tab do
@@ -2717,6 +2752,7 @@ defmodule Browser.Session do
       fanchor: nil,
       fdrag: false,
       hover: {nil, :arrow},
+      hover_nid: nil,
       js: nil,
       scripts_pending: false,
       page_edits: %{},

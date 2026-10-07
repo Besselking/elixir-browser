@@ -184,7 +184,10 @@ defmodule Browser.JS.Lexer do
   # a `/` starts a regular expression where an operand is expected
   defp regex_allowed?([]), do: true
   defp regex_allowed?([{:p, "}", _} | _] = acc), do: Process.get(:lex_block_close) === acc
-  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]"]
+  # after the `)` of `if (...)`, `while (...)`, `for (...)` and `with (...)` a statement follows
+  defp regex_allowed?([{:p, ")", _} | rest]), do: statement_head?(group_head(rest, 1))
+
+  defp regex_allowed?([{:p, p, _} | _]), do: p != "]"
   # (`of` is only a keyword in a `for (x of /re/...)` head, elsewhere it is a name)
   defp regex_allowed?([{:id, "of", _} | rest]) do
     match?([{:id, "for", _} | _], group_head(rest, 1)) or
@@ -193,6 +196,14 @@ defmodule Browser.JS.Lexer do
 
   defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
   defp regex_allowed?(_), do: false
+
+  # the tokens before a `(`: is it the head of a statement (not a method that happens to be called `if`)?
+  defp statement_head?([{:id, kw, _}, {:p, ".", _} | _]) when kw in ~w(if while for with),
+    do: false
+
+  defp statement_head?([{:id, kw, _} | _]) when kw in ~w(if while for with), do: true
+  defp statement_head?([{:id, "await", _}, {:id, "for", _} | _]), do: true
+  defp statement_head?(_), do: false
 
   # does the `{` after these tokens open a block (a statement position) rather than an object?
   defp block_open?(acc) do

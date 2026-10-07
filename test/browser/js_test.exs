@@ -1524,4 +1524,18 @@ defmodule Browser.JSTest do
                error("var d = 1; class C { @d m() {} }")
     end
   end
+
+  describe "syntax bundlers produce" do
+    test "`of` as the name of a variable" do
+      assert js("'use strict'; let of = 3; of + 1") == 4.0
+    end
+
+    test "a regular expression after the parenthesis of if, for, while and with" do
+      assert js("var n = 0; for (var i = 0; i < 2; i++) /a/.test('a') && n++; n") == 2.0
+      assert js("var n = 0; if (true) /a/.test('a') && n++; n") == 1.0
+      assert js("var i = 0, n = 0; while (i++ < 3) /a/.test('a') && n++; n") == 3.0
+      # a division after the parenthesis of a call or a group stays a division
+      assert js("var a = 8, b = 2, g = 1; (a) / b / g") == 4.0
+    end
+  end
 end

@@ -20,7 +20,7 @@ defmodule Browser.ImageBox do
 
   @spec size({number, number} | nil, map, map, number) :: {non_neg_integer, non_neg_integer}
   def size(intrinsic, attrs, css, avail) do
-    ratio = ratio(intrinsic, attrs)
+    ratio = ratio(intrinsic, attrs, css)
     wspec = spec(css[:w], width(css[:w], avail), width(attrs[:w], avail))
     hspec = spec(css[:h], px(css[:h]), px(attrs[:h]))
 
@@ -38,6 +38,36 @@ defmodule Browser.ImageBox do
   end
 
   @doc """
+  Where the picture goes in its content box for `object-fit` and `object-position`:
+  `{dx, dy, w, h}`, the picture's own box relative to the content box (which clips it), or nil
+  when the picture simply fills the box (`fill`, or no known size).
+  """
+  @spec fit({number, number} | nil, {number, number}, binary | nil, {term, term} | nil) ::
+          {float, float, float, float} | nil
+  def fit({iw, ih}, {cw, ch}, mode, pos) when iw > 0 and ih > 0 and cw > 0 and ch > 0 do
+    scale =
+      case mode do
+        "contain" -> min(cw / iw, ch / ih)
+        "cover" -> max(cw / iw, ch / ih)
+        "none" -> 1.0
+        "scale-down" -> min(1.0, min(cw / iw, ch / ih))
+        _ -> nil
+      end
+
+    if scale do
+      {w, h} = {iw * scale, ih * scale}
+      {px, py} = pos || {{:pct, 0.5}, {:pct, 0.5}}
+      {offset(px, cw - w), offset(py, ch - h), w, h}
+    end
+  end
+
+  def fit(_, _, _, _), do: nil
+
+  defp offset({:pct, f}, free), do: free * f
+  defp offset(n, _free) when is_number(n), do: n * 1.0
+  defp offset(_, free), do: free / 2
+
+  @doc """
   True when `size/4` does not depend on the picture's own size: both dimensions are given
   by the attributes or by CSS, so the box is the same before and after the picture loads.
   """
@@ -50,6 +80,15 @@ defmodule Browser.ImageBox do
   # CSS wins over the attributes; an explicit `auto` switches the attribute off
   defp spec(:auto, _css, _attr), do: nil
   defp spec(_declared, css, attr), do: css || attr
+
+  # a declared `aspect-ratio` is the picture's ratio, unless it says `auto` and the picture has one
+  defp ratio(intrinsic, attrs, css) do
+    case css[:ratio] do
+      {r, :sizing} when is_number(r) -> r
+      {r, _} when is_number(r) -> ratio(intrinsic, attrs) || r
+      _ -> ratio(intrinsic, attrs)
+    end
+  end
 
   defp ratio({iw, ih}, _attrs) when iw > 0 and ih > 0, do: iw / ih
   defp ratio(_, %{w: w, h: h}) when is_number(w) and is_number(h) and w > 0 and h > 0, do: w / h
