@@ -57,6 +57,9 @@ defmodule Browser.JS.Props do
     end
   end
 
+  @doc "Whether the object has the key as an own property (virtual function properties too)."
+  def has_own?(obj, key), do: state(obj, key) != nil
+
   defp state({:obj, id}, key) do
     o = deref(id)
     o = Map.put(o, :attrs_or_default, Map.get(o, :attrs, %{}))

@@ -1029,7 +1029,7 @@ defmodule Browser.JS.Interp do
         end
 
       %{proxy: _} ->
-        Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id})
+        unless Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id}), do: fail_put()
         :ok
 
       # a function's own name and length are not writable
@@ -1089,7 +1089,7 @@ defmodule Browser.JS.Interp do
             fail_put()
 
           {:proxy, proxy} ->
-            Browser.JS.Proxy.set(proxy, key, v, {:obj, id})
+            unless Browser.JS.Proxy.set(proxy, key, v, {:obj, id}), do: fail_put()
             :ok
 
           {:typed_array, ta} ->
@@ -1314,6 +1314,10 @@ defmodule Browser.JS.Interp do
           (match?({:obj, _}, o.proto) and has_property?(o.proto, key_s))
 
       Map.has_key?(o.props, key_s) ->
+        true
+
+      o.class == :function and key_s in ["name", "length", "prototype"] and
+          Browser.JS.Props.has_own?({:obj, id}, key_s) ->
         true
 
       match?({:obj, _}, o.proto) ->

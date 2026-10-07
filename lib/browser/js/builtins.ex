@@ -141,7 +141,9 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp error_object?({:obj, id}), do: inherits_error?(deref(id).proto)
+  # an error prototype itself has no error data
+  defp error_object?({:obj, id} = o),
+    do: inherits_error?(deref(id).proto) and o not in Enum.map(@error_types, &proto({:error, &1}))
 
   defp inherits_error?({:obj, id} = p),
     do: p == proto({:error, "Error"}) or inherits_error?(deref(id).proto)
