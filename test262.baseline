@@ -6790,6 +6790,7 @@ built-ins/NativeErrors/EvalError/prototype.js
 built-ins/NativeErrors/EvalError/prototype/constructor.js
 built-ins/NativeErrors/EvalError/prototype/message.js
 built-ins/NativeErrors/EvalError/prototype/name.js
+built-ins/NativeErrors/EvalError/prototype/not-error-object.js
 built-ins/NativeErrors/EvalError/prototype/proto.js
 built-ins/NativeErrors/RangeError/constructor.js
 built-ins/NativeErrors/RangeError/instance-proto.js
@@ -6803,6 +6804,7 @@ built-ins/NativeErrors/RangeError/prototype.js
 built-ins/NativeErrors/RangeError/prototype/constructor.js
 built-ins/NativeErrors/RangeError/prototype/message.js
 built-ins/NativeErrors/RangeError/prototype/name.js
+built-ins/NativeErrors/RangeError/prototype/not-error-object.js
 built-ins/NativeErrors/RangeError/prototype/proto.js
 built-ins/NativeErrors/ReferenceError/constructor.js
 built-ins/NativeErrors/ReferenceError/instance-proto.js
@@ -6816,6 +6818,7 @@ built-ins/NativeErrors/ReferenceError/prototype.js
 built-ins/NativeErrors/ReferenceError/prototype/constructor.js
 built-ins/NativeErrors/ReferenceError/prototype/message.js
 built-ins/NativeErrors/ReferenceError/prototype/name.js
+built-ins/NativeErrors/ReferenceError/prototype/not-error-object.js
 built-ins/NativeErrors/ReferenceError/prototype/proto.js
 built-ins/NativeErrors/SyntaxError/constructor.js
 built-ins/NativeErrors/SyntaxError/instance-proto.js
@@ -6829,6 +6832,7 @@ built-ins/NativeErrors/SyntaxError/prototype.js
 built-ins/NativeErrors/SyntaxError/prototype/constructor.js
 built-ins/NativeErrors/SyntaxError/prototype/message.js
 built-ins/NativeErrors/SyntaxError/prototype/name.js
+built-ins/NativeErrors/SyntaxError/prototype/not-error-object.js
 built-ins/NativeErrors/SyntaxError/prototype/proto.js
 built-ins/NativeErrors/TypeError/constructor.js
 built-ins/NativeErrors/TypeError/instance-proto.js
@@ -6842,6 +6846,7 @@ built-ins/NativeErrors/TypeError/prototype.js
 built-ins/NativeErrors/TypeError/prototype/constructor.js
 built-ins/NativeErrors/TypeError/prototype/message.js
 built-ins/NativeErrors/TypeError/prototype/name.js
+built-ins/NativeErrors/TypeError/prototype/not-error-object.js
 built-ins/NativeErrors/TypeError/prototype/proto.js
 built-ins/NativeErrors/URIError/constructor.js
 built-ins/NativeErrors/URIError/instance-proto.js
@@ -6855,6 +6860,7 @@ built-ins/NativeErrors/URIError/prototype.js
 built-ins/NativeErrors/URIError/prototype/constructor.js
 built-ins/NativeErrors/URIError/prototype/message.js
 built-ins/NativeErrors/URIError/prototype/name.js
+built-ins/NativeErrors/URIError/prototype/not-error-object.js
 built-ins/NativeErrors/URIError/prototype/proto.js
 built-ins/NativeErrors/cause_property_native_error.js
 built-ins/NativeErrors/message_property_native_error.js
@@ -11463,6 +11469,7 @@ built-ins/Proxy/has/return-is-abrupt-with.js
 built-ins/Proxy/has/return-true-target-prop-exists-using-with.js
 built-ins/Proxy/has/return-true-target-prop-exists.js
 built-ins/Proxy/has/return-true-without-same-target-prop.js
+built-ins/Proxy/has/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/has/trap-is-not-callable-using-with.js
 built-ins/Proxy/has/trap-is-not-callable.js
 built-ins/Proxy/has/trap-is-null-target-is-proxy.js
@@ -11556,9 +11563,11 @@ built-ins/Proxy/set/target-property-is-accessor-not-configurable-set-is-undefine
 built-ins/Proxy/set/target-property-is-not-configurable-not-writable-not-equal-to-v.js
 built-ins/Proxy/set/trap-is-missing-receiver-multiple-calls-index.js
 built-ins/Proxy/set/trap-is-missing-receiver-multiple-calls.js
+built-ins/Proxy/set/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/set/trap-is-not-callable.js
 built-ins/Proxy/set/trap-is-null-receiver.js
 built-ins/Proxy/set/trap-is-undefined-no-property.js
+built-ins/Proxy/set/trap-is-undefined-target-is-proxy.js
 built-ins/Proxy/set/trap-is-undefined.js
 built-ins/Proxy/setPrototypeOf/call-parameters.js
 built-ins/Proxy/setPrototypeOf/internals-call-order.js
