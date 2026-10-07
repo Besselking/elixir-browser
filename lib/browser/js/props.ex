@@ -57,6 +57,9 @@ defmodule Browser.JS.Props do
     end
   end
 
+  @doc "Whether the object has the key as an own property (virtual function properties too)."
+  def has_own?(obj, key), do: state(obj, key) != nil
+
   defp state({:obj, id}, key) do
     o = deref(id)
     o = Map.put(o, :attrs_or_default, Map.get(o, :attrs, %{}))
@@ -190,8 +193,12 @@ defmodule Browser.JS.Props do
   defp own_names_plain2(id, o) do
     base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
-    hidden =
-      (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
+    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
+
+    ordered =
+      o |> Map.get(:horder, []) |> Enum.reverse() |> Enum.uniq() |> Enum.filter(&(&1 in hidden0))
+
+    hidden = ordered ++ Enum.sort(hidden0 -- ordered)
 
     case o do
       %{class: :array} ->
@@ -205,7 +212,8 @@ defmodule Browser.JS.Props do
               state({:obj, id}, k) != nil,
               do: k
 
-        base ++ virtual ++ hidden
+        {ints, rest} = Enum.split_with(base, &index_key?/1)
+        Enum.sort_by(ints, &array_index/1) ++ virtual ++ rest ++ hidden
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
@@ -408,12 +416,25 @@ defmodule Browser.JS.Props do
         Browser.JS.Proxy.set(target, key, value, receiver)
 
       o.class == :host ->
+        ta? = Browser.JS.TypedArrays.typed_array?(target)
+        numeric? = ta? and Browser.JS.TypedArrays.numeric_key?(key)
+
         cond do
           match?({Browser.JS.Modules, _}, o.host) ->
             false
 
-          receiver != target and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+          numeric? and receiver == target ->
+            Interp.put(target, key, value)
             true
+
+          numeric? and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+            true
+
+          numeric? ->
+            set_on_receiver(key, value, receiver)
+
+          ta? ->
+            ordinary_set_plain(target, key, value, receiver)
 
           true ->
             Interp.put(target, key, value)
@@ -421,26 +442,30 @@ defmodule Browser.JS.Props do
         end
 
       true ->
-        case state(target, key) do
-          nil ->
-            case get_prototype_of(target) do
-              {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
-              _ -> set_on_receiver(key, value, receiver)
-            end
+        ordinary_set_plain(target, key, value, receiver)
+    end
+  end
 
-          {:data, _, false, _, _} ->
-            false
+  defp ordinary_set_plain(target, key, value, receiver) do
+    case state(target, key) do
+      nil ->
+        case get_prototype_of(target) do
+          {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
+          _ -> set_on_receiver(key, value, receiver)
+        end
 
-          {:data, _, _, _, _} ->
-            set_on_receiver(key, value, receiver)
+      {:data, _, false, _, _} ->
+        false
 
-          {:accessor, _, setter, _, _} ->
-            if function?(setter) do
-              Interp.call(setter, receiver, [value])
-              true
-            else
-              false
-            end
+      {:data, _, _, _, _} ->
+        set_on_receiver(key, value, receiver)
+
+      {:accessor, _, setter, _, _} ->
+        if function?(setter) do
+          Interp.call(setter, receiver, [value])
+          true
+        else
+          false
         end
     end
   end
@@ -577,6 +602,11 @@ defmodule Browser.JS.Props do
 
     keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
 
+    o =
+      if Map.get(desc, :enumerable, false),
+        do: o,
+        else: Map.update(o, :horder, [key], &[key | &1])
+
     store(
       id,
       o
@@ -699,9 +729,13 @@ defmodule Browser.JS.Props do
 
     exists? = Map.has_key?(o.items, i)
 
-    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
-      do: define_element_accessor(id, o, key, i, desc, exists?),
-      else: define_element_data(id, o, key, i, desc, exists?)
+    # a generic descriptor (no value, writable, get or set) keeps an accessor an accessor
+    generic? = not (Map.has_key?(desc, :value) or Map.has_key?(desc, :writable))
+
+    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or
+         (generic? and match?({:accessor, _, _}, o.items[i])),
+       do: define_element_accessor(id, o, key, i, desc, exists?),
+       else: define_element_data(id, o, key, i, desc, exists?)
   end
 
   defp define_element_accessor(id, o, key, i, desc, exists?) do
@@ -714,7 +748,7 @@ defmodule Browser.JS.Props do
 
       true ->
         current = if exists?, do: state({:obj, id}, key)
-        if current && !elem(current, 4), do: reject(key)
+        if current, do: validate(current, desc, key)
 
         {g0, s0} =
           case o.items[i] do
@@ -762,7 +796,16 @@ defmodule Browser.JS.Props do
 
         attrs = Map.get(o, :attrs, %{})
         cur = Map.get(attrs, i, %{})
-        w = Map.get(desc, :writable, if(exists?, do: Map.get(cur, :w, true), else: false))
+        # turning an accessor into a data property starts from undefined and read-only
+        was_accessor? = match?({:accessor, _, _}, o.items[i])
+
+        w =
+          Map.get(
+            desc,
+            :writable,
+            if(exists? and not was_accessor?, do: Map.get(cur, :w, true), else: false)
+          )
+
         c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
         e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
         flags = %{w: w, c: c, e: e}
@@ -772,7 +815,12 @@ defmodule Browser.JS.Props do
             do: Map.delete(attrs, i),
             else: Map.put(attrs, i, flags)
 
-        v = Map.get(desc, :value, Map.get(o.items, i, :undefined))
+        v =
+          Map.get(
+            desc,
+            :value,
+            if(was_accessor?, do: :undefined, else: Map.get(o.items, i, :undefined))
+          )
 
         store(
           id,

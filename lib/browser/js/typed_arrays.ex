@@ -388,6 +388,15 @@ defmodule Browser.JS.TypedArrays do
     :ok
   end
 
+  defp put_bytes_at({:ta, kind, bid, _, _} = d, i, bytes) do
+    {off, _} = eff(d)
+    size = size_of(kind)
+    o = deref(bid)
+    pos = off + i * size
+    <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
+    store(bid, %{o | bytes: pre <> bytes <> post})
+  end
+
   defp put_all({:ta, kind, bid, off, _}, start, items) do
     size = size_of(kind)
     o = deref(bid)
@@ -509,6 +518,9 @@ defmodule Browser.JS.TypedArrays do
   end
 
   def invalid_index?(_, _), do: false
+
+  @doc false
+  def typed_array?(v), do: ta?(v)
 
   @doc false
   def numeric_key?(key), do: is_binary(key) and canonical(key) != :none
@@ -778,7 +790,7 @@ defmodule Browser.JS.TypedArrays do
   # intrinsic constructor), checked to be a typed array of the same content type, and at least
   # as long as the length asked for
   defp species_create(this, kind, args) do
-    default = Interp.get(proto({:ta, kind}), "constructor")
+    default = proto({:ta_ctor, kind})
     c = Interp.get(this, "constructor")
 
     ctor =
@@ -1134,7 +1146,7 @@ defmodule Browser.JS.TypedArrays do
     getter = fn name, f ->
       Props.define_accessor(base, name,
         get:
-          native(to_string(name), fn this, _ ->
+          native("get " <> to_string(name), fn this, _ ->
             unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
             {:obj, id} = this
             %{host: {__MODULE__, {:ta, _, bid, _, _} = d}} = deref(id)
@@ -1234,10 +1246,16 @@ defmodule Browser.JS.TypedArrays do
       put_proto({:ta, kind}, p)
 
       ctor =
-        native(name, fn _, args -> build(kind, args) end)
+        native(name, fn this, args ->
+          unless match?({:obj, _}, this),
+            do: throw_error("TypeError", "Constructor #{name} requires 'new'")
+
+          build(kind, args)
+        end)
 
       {:obj, cid} = ctor
-      store(cid, %{deref(cid) | proto: base_ctor})
+      store(cid, Map.merge(deref(cid), %{proto: base_ctor, arity: 3.0}))
+      put_proto({:ta_ctor, kind}, ctor)
       put_const(ctor, "prototype", p)
       put_hidden(p, "constructor", ctor)
       put_const(ctor, "BYTES_PER_ELEMENT", size * 1.0)
@@ -1295,58 +1313,54 @@ defmodule Browser.JS.TypedArrays do
     size = size_of(kind)
 
     case arg(args, 0) do
-      :undefined ->
-        make(kind, [])
+      {:obj, _} = src ->
+        if buffer?(src),
+          do: build_view(kind, size, src, args),
+          else: make(kind, source_values(src))
 
-      n when is_number(n) ->
-        len = to_int(n)
-
-        if len < 0 or len > 100_000_000,
-          do: throw_error("RangeError", "Invalid typed array length: #{to_str(n)}")
-
+      n ->
+        len = to_index(n)
+        if len > 100_000_000, do: throw_error("RangeError", "Invalid typed array length: #{len}")
         buf = new_buffer(:binary.copy(<<0>>, len * size))
         view(kind, buffer_id(buf), 0, len)
-
-      src ->
-        if buffer?(src) do
-          total = byte_size(bytes_of(src))
-          off = if arg(args, 1) == :undefined, do: 0, else: to_int(arg(args, 1))
-
-          if off < 0 or rem(off, size) != 0,
-            do:
-              throw_error("RangeError", "start offset of #{kind} should be a multiple of #{size}")
-
-          len =
-            if arg(args, 2) == :undefined and resizable?(buffer_id(src)) do
-              if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
-              :auto
-            else
-              build_len(args, total, off, size, kind)
-            end
-
-          if len != :auto and off + len * size > total,
-            do: throw_error("RangeError", "Invalid typed array length")
-
-          view(kind, buffer_id(src), off, len)
-        else
-          make(kind, source_values(src))
-        end
     end
   end
 
-  defp build_len(args, total, off, size, kind) do
-    if arg(args, 2) == :undefined do
-      if rem(total - off, size) != 0 or total < off,
-        do:
-          throw_error(
-            "RangeError",
-            "byte length of #{kind} should be a multiple of #{size}"
-          )
+  defp build_view(kind, size, src, args) do
+    off = to_index(arg(args, 1))
 
-      div(total - off, size)
-    else
-      to_int(arg(args, 2))
-    end
+    if rem(off, size) != 0,
+      do: throw_error("RangeError", "start offset of #{kind} should be a multiple of #{size}")
+
+    new_len = if arg(args, 2) == :undefined, do: :undefined, else: to_index(arg(args, 2))
+    if detached?(buffer_id(src)), do: throw_error("TypeError", "ArrayBuffer is detached")
+    total = byte_size(bytes_of(src))
+
+    len =
+      cond do
+        new_len == :undefined and resizable?(buffer_id(src)) ->
+          if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
+          :auto
+
+        new_len == :undefined ->
+          if rem(total, size) != 0,
+            do:
+              throw_error(
+                "RangeError",
+                "byte length of #{kind} should be a multiple of #{size}"
+              )
+
+          if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
+          div(total - off, size)
+
+        true ->
+          new_len
+      end
+
+    if len != :auto and off + len * size > total,
+      do: throw_error("RangeError", "Invalid typed array length")
+
+    view(kind, buffer_id(src), off, len)
   end
 
   # the values of a typed array, iterable or array-like
@@ -1357,11 +1371,17 @@ defmodule Browser.JS.TypedArrays do
 
       match?({:obj, _}, src) ->
         case Interp.get(src, {:symbol, :iterator, "Symbol.iterator"}) do
-          f when is_tuple(f) ->
-            if function?(f), do: iterate(src), else: array_like(src)
-
-          _ ->
+          f when f in [:undefined, :null] ->
             array_like(src)
+
+          f ->
+            if function?(f),
+              do:
+                if(Interp.array_iteration_pristine?(src),
+                  do: iterate(src),
+                  else: Interp.iterate_protocol_list(src)
+                ),
+              else: throw_error("TypeError", "Symbol.iterator is not a function")
         end
 
       is_binary(src) ->
@@ -1408,15 +1428,63 @@ defmodule Browser.JS.TypedArrays do
       this
     end)
 
-    def_fn(p, "set", fn this, args ->
-      {:ta, _, _, _, len} = d = data!(this)
-      items = source_values(arg(args, 0))
-      off = if arg(args, 1) == :undefined, do: 0, else: to_int(arg(args, 1))
+    def_fn(p, "set", 1, fn this, args ->
+      unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
+      {:obj, tid} = this
+      %{host: {__MODULE__, {:ta, kind, _, _, _} = d0}} = deref(tid)
+      src = arg(args, 0)
 
-      if off < 0 or off + length(items) > len,
-        do: throw_error("RangeError", "offset is out of bounds")
+      off =
+        case int_or_inf(arg(args, 1)) do
+          :infinity -> :infinity
+          :neg_infinity -> -1
+          n -> n
+        end
 
-      if items != [], do: put_all(d, off, items)
+      if off != :infinity and off < 0, do: throw_error("RangeError", "offset is out of bounds")
+
+      target_len =
+        case eff(d0) do
+          :oob ->
+            throw_error(
+              "TypeError",
+              "cannot perform this operation on a detached or out of bounds typed array"
+            )
+
+          {_, n} ->
+            n
+        end
+
+      if ta?(src) do
+        {:ta, skind, _, _, slen} = sd = data!(src)
+
+        if off == :infinity or off + slen > target_len,
+          do: throw_error("RangeError", "offset is out of bounds")
+
+        if kind in [:i64, :u64] != skind in [:i64, :u64],
+          do: throw_error("TypeError", "Cannot mix BigInt and other types")
+
+        {:ta, _, _, _, _} = td = data!(this)
+        if slen > 0, do: put_all(td, off, values(sd))
+      else
+        if nullish?(src),
+          do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+        n = to_int(Interp.get(src, "length"))
+
+        if off == :infinity or off + n > target_len,
+          do: throw_error("RangeError", "offset is out of bounds")
+
+        for i <- 0..(n - 1)//1 do
+          bytes = write(kind, Interp.get(src, Integer.to_string(i)))
+
+          case eff(d0) do
+            {_, len} when off + i < len -> put_bytes_at(d0, off + i, bytes)
+            _ -> :ok
+          end
+        end
+      end
+
       :undefined
     end)
 
@@ -1507,14 +1575,7 @@ defmodule Browser.JS.TypedArrays do
       join_elems(this, len, sep, &to_str/1)
     end)
 
-    def_fn(p, "toString", fn this, _ ->
-      join = Interp.get(this, "join")
-
-      if function?(join),
-        do: call(join, this, []),
-        else:
-          "[object #{to_str(Interp.get(this, {:symbol, :toStringTag, "Symbol.toStringTag"}))}]"
-    end)
+    put_hidden(p, "toString", Interp.get(proto(:array), "toString"))
 
     def_fn(p, "toLocaleString", fn this, _ ->
       {:ta, _, _, _, len} = data!(this)
@@ -1646,11 +1707,23 @@ defmodule Browser.JS.TypedArrays do
     def_fn(p, "sort", fn this, args ->
       d = data!(this)
       sorted = sorted_values(d, arg(args, 0))
-      if sorted != [], do: put_all(d, 0, sorted)
+      {:obj, tid} = this
+      %{host: {__MODULE__, d0}} = deref(tid)
+
+      # the comparator may have detached or shrunk the buffer: write back what still exists
+      case eff(d0) do
+        {off, len} when sorted != [] and len > 0 ->
+          {:ta, kind, bid, _, _} = d0
+          put_all({:ta, kind, bid, off, len}, 0, Enum.take(sorted, len))
+
+        _ ->
+          :ok
+      end
+
       this
     end)
 
-    def_fn(p, "toSorted", fn this, args ->
+    def_fn(p, "toSorted", 1, fn this, args ->
       {:ta, kind, _, _, _} = d = data!(this)
       make(kind, sorted_values(d, arg(args, 0)))
     end)

@@ -11,7 +11,7 @@ defmodule Browser.JS.Prelude do
   alias Browser.JS.{Interp, Parser}
 
   @doc "A native `name` with `length` `arity` that runs the function expression `source`."
-  def lazy(name, arity, source) do
+  def lazy(name, arity, source, factory_args \\ nil) do
     key = {:js_prelude, name}
 
     f =
@@ -21,6 +21,8 @@ defmodule Browser.JS.Prelude do
             :undefined ->
               {:ok, {:program, [{:expr, expr}]}} = Parser.parse("(" <> source <> ")")
               impl = Interp.ev(expr, Interp.global())
+              # a factory gets the built-in values the function must not look up by name
+              impl = if factory_args, do: call(impl, :undefined, factory_args), else: impl
               :erlang.put(key, impl)
               impl
 
@@ -54,8 +56,8 @@ defmodule Browser.JS.Prelude do
     var define = function (A, k, v) {
       Object.defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true });
     };
-    var usingAsync = method(asyncItems, Symbol.asyncIterator);
-    var usingSync = usingAsync === undefined ? method(asyncItems, Symbol.iterator) : undefined;
+    var usingAsync = method(asyncItems, symAsyncIterator);
+    var usingSync = usingAsync === undefined ? method(asyncItems, symIterator) : undefined;
     var A, k = 0;
     if (usingAsync !== undefined || usingSync !== undefined) {
       A = isCtor(C) ? new C() : [];
@@ -67,7 +69,7 @@ defmodule Browser.JS.Prelude do
         var r = next.call(it);
         if (isAsync) r = await r;
         if (Object(r) !== r) throw new TypeError('iterator result is not an object');
-        if (r.done) { A.length = k; return A; }
+        if (r.done) { setLength(A, k); return A; }
         var value = r.value;
         if (!isAsync) {
           try { value = await value; } catch (e) { try { it.return && it.return(); } catch (_) {} throw e; }
@@ -83,14 +85,14 @@ defmodule Browser.JS.Prelude do
       }
     }
     var arrayLike = Object(asyncItems);
-    var len = Math.min(Math.max(Math.trunc(Number(arrayLike.length)) || 0, 0), 9007199254740991);
+    var len = Math.min(Math.max(Math.trunc(+arrayLike.length) || 0, 0), 9007199254740991);
     A = isCtor(C) ? new C(len) : new Array(len);
     for (; k < len; k++) {
       var kValue = await arrayLike[k];
       if (mapping) kValue = await mapfn.call(thisArg, kValue, k);
       define(A, k, kValue);
     }
-    A.length = len;
+    setLength(A, len);
     return A;
   }
   """
@@ -100,7 +102,11 @@ defmodule Browser.JS.Prelude do
       lazy(
         "fromAsync",
         1,
-        "function(){ var isCtor = function(f){ try { Reflect.construct(Object, [], f); return true; } catch (e) { return false; } }; return (#{@from_async}); }()"
+        "function(symIterator, symAsyncIterator){ var isCtor = function(f){ try { Reflect.construct(Object, [], f); return true; } catch (e) { return false; } }; var setLength = function(A, n){ if (!Reflect.set(A, 'length', n)) throw new TypeError('Cannot set length'); }; return (#{@from_async}); }",
+        [
+          {:symbol, :iterator, "Symbol.iterator"},
+          {:symbol, :asyncIterator, "Symbol.asyncIterator"}
+        ]
       )
 
   @capability """

@@ -19,7 +19,9 @@ defmodule Browser.JS.Classes do
   end
 
   @doc "Evaluates a class definition: the constructor function."
-  def define({:class, name, super_node, members}, env) do
+  def define(class, env, inferred \\ nil)
+
+  def define({:class, name, super_node, members}, env, inferred) do
     cenv = Interp.new_scope(env)
 
     parent =
@@ -63,6 +65,11 @@ defmodule Browser.JS.Classes do
     for n <- Enum.uniq(for {:cmember, _, {:priv, n}, _, _} <- members, do: n) do
       Interp.declare(cenv, {:priv, n}, make_ref())
     end
+
+    ctor_node =
+      if name == nil and inferred != nil,
+        do: put_elem(ctor_node, 1, inferred),
+        else: ctor_node
 
     f = Interp.make_function(ctor_node, cenv)
     if name, do: Interp.declare(cenv, name, f, true)
@@ -133,12 +140,11 @@ defmodule Browser.JS.Classes do
 
     # private methods and accessors are installed before any field is initialised
     {methods, fields} = Enum.split_with(fields, &match?({:private_method, _, _, _}, &1))
-    fields = Enum.reverse(methods) ++ fields
 
     info = %{
       parent: parent,
       derived?: derived?,
-      fields: Enum.reverse(fields),
+      fields: Enum.reverse(methods) ++ Enum.reverse(fields),
       env: cenv,
       name: name,
       proto: proto
@@ -252,9 +258,22 @@ defmodule Browser.JS.Classes do
     :ok
   end
 
-  # a private field is an own property that is not listed; a public one is assigned
+  # a private field is an own property that is not listed; a public one is defined (a setter on
+  # the prototype chain does not run, and a frozen object throws)
   defp define_field(obj, {:private, _} = key, v), do: put_private(obj, key, :field, v)
-  defp define_field(obj, key, v), do: Interp.put(obj, key, v)
+
+  defp define_field(obj, key, v) do
+    Browser.JS.Props.define(
+      obj,
+      key,
+      Interp.new_object([
+        {"value", v},
+        {"writable", true},
+        {"enumerable", true},
+        {"configurable", true}
+      ])
+    )
+  end
 
   # stores a private method, accessor half or field value on an object
   defp put_private({:obj, id}, key, kind, value) do
@@ -293,11 +312,6 @@ defmodule Browser.JS.Classes do
       info = deref(fid).class_info
       sc = Interp.scope_of(env, :ctor_fn)
 
-      case Interp.lookup_scoped(sc, :this) do
-        {:ok, :uninit_this} -> :ok
-        _ -> throw_error("ReferenceError", "Super constructor may only be called once")
-      end
-
       unless info.parent,
         do:
           throw_error(
@@ -312,6 +326,12 @@ defmodule Browser.JS.Classes do
         do: throw_error("TypeError", "Super constructor is not a constructor")
 
       result = Interp.construct(parent, args, nt)
+
+      case Interp.lookup_scoped(sc, :this) do
+        {:ok, :uninit_this} -> :ok
+        _ -> throw_error("ReferenceError", "Super constructor may only be called once")
+      end
+
       Interp.declare(sc, :this, result)
       init_fields(info, result)
       result
