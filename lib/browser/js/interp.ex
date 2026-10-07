@@ -2372,7 +2372,15 @@ defmodule Browser.JS.Interp do
 
   # a `let`/`const` name is in its temporal dead zone from the start of its scope
   defp declare_tdz(decl, scope) do
-    for name <- lexical_names(decl), do: declare(scope, name, :tdz)
+    names = lexical_names(decl)
+    for name <- names, do: declare(scope, name, :tdz)
+
+    # remembered so that a direct eval's `var` of the same name can be refused
+    unless names == [] do
+      sc = deref(scope)
+      store(scope, Map.update(sc, :lex, MapSet.new(names), &MapSet.union(&1, MapSet.new(names))))
+    end
+
     :ok
   end
 
@@ -3685,7 +3693,10 @@ defmodule Browser.JS.Interp do
       if Map.has_key?(st.vars, n) and Map.get(st.vars, :catch_param) != n, do: clash.(n)
     end
 
-    if deref(var_scope).parent == nil do
+    vs = deref(var_scope)
+    for n <- names, MapSet.member?(Map.get(vs, :lex, MapSet.new()), n), do: clash.(n)
+
+    if vs.parent == nil do
       for n <- names, global_lexical?(n), do: clash.(n)
       g = Map.get(deref(var_scope).vars, :this)
 
