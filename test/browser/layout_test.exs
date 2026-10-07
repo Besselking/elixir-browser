@@ -5376,6 +5376,13 @@ defmodule Browser.LayoutTest do
       items = laid_out(~s(<span style="color:transparent">abc</span>))
       assert Enum.any?(items, &(&1.type == :text and &1.hidden))
     end
+
+    test "does not hide the background of its box" do
+      items =
+        laid_out(~s(<span style="color:transparent;background:blue">abc</span>))
+
+      assert Enum.any?(items, &(&1.type == :rect and &1.w > 0))
+    end
   end
 
   describe "display: flow-root, display: contents and line-break: anywhere" do

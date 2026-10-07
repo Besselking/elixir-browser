@@ -128,6 +128,7 @@ defmodule Browser.Layout do
       ws: :normal,
       tab: 8,
       hidden: false,
+      vhidden: false,
       color: {0, 0, 0},
       underline: false,
       strike: false,
@@ -1316,7 +1317,8 @@ defmodule Browser.Layout do
         size: style.size,
         # the height of the font's content area, in ems, is the height of the box
         cf: content_factor(style),
-        paint: visible? and not style.hidden
+        # (transparent text does not hide the box it is in)
+        paint: visible? and not Map.get(style, :vhidden, style.hidden)
       }
     end
   end
@@ -2036,6 +2038,7 @@ defmodule Browser.Layout do
     )
     |> then(&if(blockified?(c), do: Map.put(&1, :vs, 0), else: &1))
     # transparent text takes its room and shows nothing
+    |> Map.put(:vhidden, hidden?(c))
     |> Map.put(:hidden, hidden?(c) or c["color"] == :transparent)
   end
 
