@@ -25489,6 +25489,8 @@ language/expressions/class/elements/syntax/early-errors/delete/method-delete-twi
 language/expressions/class/elements/syntax/early-errors/grammar-class-body-ctor-duplicate.js
 language/expressions/class/elements/syntax/early-errors/grammar-ctor-super-no-heritage.js
 language/expressions/class/elements/syntax/early-errors/grammar-field-identifier-invalid-ues-error.js
+language/expressions/class/elements/syntax/early-errors/grammar-field-identifier-invalid-zwj-error.js
+language/expressions/class/elements/syntax/early-errors/grammar-field-identifier-invalid-zwnj-error.js
 language/expressions/class/elements/syntax/early-errors/grammar-fields-same-line-error.js
 language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-array-literal.js
 language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-chained-usage.js
@@ -25514,6 +25516,8 @@ language/expressions/class/elements/syntax/early-errors/grammar-privatemeth-dupl
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-constructor.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-error.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-ues.js
+language/expressions/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-zwj-error.js
+language/expressions/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-zwnj-error.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-in-computed-property-missing.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-whitespace-error-accessor-get-meth.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatename-whitespace-error-accessor-set-meth.js
@@ -31058,6 +31062,8 @@ language/identifiers/start-unicode-9.0.0-class.js
 language/identifiers/start-unicode-9.0.0-escaped.js
 language/identifiers/start-unicode-9.0.0.js
 language/identifiers/start-unicode-ltr.js
+language/identifiers/start-zwj-escaped.js
+language/identifiers/start-zwnj-escaped.js
 language/identifiers/unicode-escape-nls-err.js
 language/identifiers/val-break-via-escape-hex.js
 language/identifiers/val-break-via-escape-hex4.js
@@ -31260,6 +31266,7 @@ language/import/import-defer/evaluation-triggers/ignore-not-exported-then-super-
 language/import/import-defer/evaluation-triggers/ignore-not-exported-then-super-property-define.js
 language/import/import-defer/evaluation-triggers/ignore-not-exported-then-super-property-set-exported.js
 language/import/import-defer/evaluation-triggers/ignore-preventExtensions.js
+language/import/import-defer/evaluation-triggers/ignore-private-name-access.js
 language/import/import-defer/evaluation-triggers/ignore-set-string-exported.js
 language/import/import-defer/evaluation-triggers/ignore-set-string-not-exported.js
 language/import/import-defer/evaluation-triggers/ignore-setPrototypeOf.js
@@ -36361,6 +36368,7 @@ language/statements/class/elements/private-arrow-fnc-init-err-contains-arguments
 language/statements/class/elements/private-arrow-fnc-init-err-contains-super.js
 language/statements/class/elements/private-async-generator-method-name.js
 language/statements/class/elements/private-async-method-name.js
+language/statements/class/elements/private-class-field-on-nonextensible-objects.js
 language/statements/class/elements/private-derived-cls-direct-eval-contains-superproperty-1.js
 language/statements/class/elements/private-derived-cls-direct-eval-contains-superproperty-2.js
 language/statements/class/elements/private-derived-cls-direct-eval-err-contains-supercall-1.js
@@ -36879,6 +36887,8 @@ language/statements/class/elements/syntax/early-errors/delete/method-delete-twic
 language/statements/class/elements/syntax/early-errors/grammar-class-body-ctor-duplicate.js
 language/statements/class/elements/syntax/early-errors/grammar-ctor-super-no-heritage.js
 language/statements/class/elements/syntax/early-errors/grammar-field-identifier-invalid-ues-error.js
+language/statements/class/elements/syntax/early-errors/grammar-field-identifier-invalid-zwj-error.js
+language/statements/class/elements/syntax/early-errors/grammar-field-identifier-invalid-zwnj-error.js
 language/statements/class/elements/syntax/early-errors/grammar-fields-same-line-error.js
 language/statements/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-array-literal.js
 language/statements/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-chained-usage.js
@@ -36904,6 +36914,8 @@ language/statements/class/elements/syntax/early-errors/grammar-privatemeth-dupli
 language/statements/class/elements/syntax/early-errors/grammar-privatename-constructor.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-error.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-ues.js
+language/statements/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-zwj-error.js
+language/statements/class/elements/syntax/early-errors/grammar-privatename-identifier-invalid-zwnj-error.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-in-computed-property-missing.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-whitespace-error-accessor-get-meth.js
 language/statements/class/elements/syntax/early-errors/grammar-privatename-whitespace-error-accessor-set-meth.js
@@ -37429,6 +37441,7 @@ language/statements/class/subclass/derived-class-return-override-with-string.js
 language/statements/class/subclass/derived-class-return-override-with-symbol.js
 language/statements/class/subclass/derived-class-return-override-with-this.js
 language/statements/class/subclass/derived-class-return-override-with-undefined.js
+language/statements/class/subclass/private-class-field-on-nonextensible-return-override.js
 language/statements/class/subclass/superclass-arrow-function.js
 language/statements/class/subclass/superclass-async-function.js
 language/statements/class/subclass/superclass-async-generator-function.js
@@ -38886,6 +38899,7 @@ language/statements/for-await-of/head-using-init.js
 language/statements/for-await-of/head-var-init.js
 language/statements/for-await-of/iterator-close-non-throw-get-method-abrupt.js
 language/statements/for-await-of/iterator-close-non-throw-get-method-is-null.js
+language/statements/for-await-of/iterator-close-non-throw-get-method-non-callable.js
 language/statements/for-await-of/iterator-close-throw-get-method-abrupt.js
 language/statements/for-await-of/iterator-close-throw-get-method-non-callable.js
 language/statements/for-await-of/let-array-with-newline.js
@@ -39690,6 +39704,7 @@ language/statements/for-of/iterator-as-proxy.js
 language/statements/for-of/iterator-close-non-object.js
 language/statements/for-of/iterator-close-non-throw-get-method-abrupt.js
 language/statements/for-of/iterator-close-non-throw-get-method-is-null.js
+language/statements/for-of/iterator-close-non-throw-get-method-non-callable.js
 language/statements/for-of/iterator-close-throw-get-method-abrupt.js
 language/statements/for-of/iterator-close-throw-get-method-non-callable.js
 language/statements/for-of/iterator-close-via-break.js

@@ -134,6 +134,7 @@ defmodule Browser.JS.Lexer do
   defp lex(<<?#, c, _::binary>> = s, nl, acc)
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
     {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
+    zw_start!(name)
     lex(rest, false, [{:priv, name, nl} | acc])
   end
 
@@ -141,6 +142,7 @@ defmodule Browser.JS.Lexer do
 
   defp lex_ident(s, nl, acc) do
     {name, rest} = ident(s, [])
+    zw_start!(name)
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
@@ -267,6 +269,12 @@ defmodule Browser.JS.Lexer do
     do: cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in [?_, ?$]
 
   defp id_escape?(cp), do: not space_cp?(cp) and cp not in [0x2E2F, 0x180E]
+
+  # ZWNJ and ZWJ continue an identifier but cannot start one
+  defp zw_start!(<<cp::utf8, _::binary>>) when cp in [0x200C, 0x200D],
+    do: throw({:syntax, "invalid identifier start"})
+
+  defp zw_start!(_), do: :ok
 
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
