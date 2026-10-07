@@ -296,11 +296,25 @@ defmodule Browser.Style do
     |> Map.new(fn {prop, {_k, v}} -> {prop, v} end)
   end
 
+  # sizes that cannot be negative: a negative value is invalid and the declaration is dropped
+  @non_negative ~w(width height min-height max-height min-width max-width)
+
   defp relevant(decls) do
     decls
     |> Enum.flat_map(&expand/1)
-    |> Enum.filter(fn {p, _, _} -> p in @props or String.starts_with?(p, "--") end)
+    |> Enum.filter(fn {p, v, _} ->
+      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v)
+    end)
   end
+
+  # a negative width, height, min/max size or padding is invalid: the declaration is dropped
+  # before the cascade, so an earlier value still applies
+  defp negative_size?(prop, "-" <> rest) when is_binary(rest) do
+    (prop in @non_negative or String.starts_with?(prop, "padding-")) and
+      match?({n, _} when n > 0, Float.parse(String.replace_prefix(rest, ".", "0.")))
+  end
+
+  defp negative_size?(_prop, _v), do: false
 
   # Shorthands become longhands so the cascade can order them against each
   # other. A shorthand whose value uses var() can't be split until the
