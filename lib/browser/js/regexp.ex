@@ -154,47 +154,77 @@ defmodule Browser.JS.RegExp do
   # in PCRE, so each group is renamed `g<number>` and `\\k<name>` follows. Returns the new
   # pattern and `[{group number, name}]` in pattern order.
   defp rename_groups(source) do
-    {count, names} = scan_groups(source, 0, false, [])
+    {count, found} = scan_groups(source, 0, false, [{0, 0}], [])
+    names = for {i, n, _path} <- found, do: {i, n}
 
     if names == [] do
       {source, {count, []}}
     else
-      by_name = Map.new(names, fn {i, n} -> {n, i} end)
+      by_name =
+        Enum.reduce(names, %{defs: names}, fn {i, n}, m -> Map.update(m, n, [i], &(&1 ++ [i])) end)
+
       {rewrite_groups(source, false, by_name, []), {count, names}}
     end
   end
 
-  # pass 1: the capture groups (counted) and the names of the named ones
-  defp scan_groups("", n, _cls, acc), do: {n, Enum.reverse(acc)}
+  # pass 1: the capture groups (counted) and the names of the named ones. `frames` is the
+  # path of enclosing groups, each as {group id, index of the alternative being read}: a name
+  # may repeat only in different alternatives of a disjunction.
+  defp scan_groups("", n, _cls, _fr, acc), do: {n, Enum.reverse(acc)}
 
-  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, acc),
-    do: scan_groups(rest, n, cls, acc)
+  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, fr, acc),
+    do: scan_groups(rest, n, cls, fr, acc)
 
-  defp scan_groups("[" <> rest, n, false, acc), do: scan_groups(rest, n, true, acc)
-  defp scan_groups("]" <> rest, n, true, acc), do: scan_groups(rest, n, false, acc)
+  defp scan_groups("[" <> rest, n, false, fr, acc), do: scan_groups(rest, n, true, fr, acc)
+  defp scan_groups("]" <> rest, n, true, fr, acc), do: scan_groups(rest, n, false, fr, acc)
 
-  defp scan_groups("(?<" <> rest, n, false, acc) do
+  defp scan_groups("|" <> rest, n, false, [{id, alt} | outer], acc),
+    do: scan_groups(rest, n, false, [{id, alt + 1} | outer], acc)
+
+  defp scan_groups(")" <> rest, n, false, [_ | [_ | _] = outer], acc),
+    do: scan_groups(rest, n, false, outer, acc)
+
+  defp scan_groups("(?<" <> rest, n, false, fr, acc) do
     case rest do
       "=" <> r ->
-        scan_groups(r, n, false, acc)
+        scan_groups(r, n, false, push_frame(fr), acc)
 
       "!" <> r ->
-        scan_groups(r, n, false, acc)
+        scan_groups(r, n, false, push_frame(fr), acc)
 
       _ ->
         unless String.contains?(rest, ">"), do: bad_name()
         {raw, after_name} = split_name(rest)
         name = decode_name(raw)
         unless valid_name?(name), do: bad_name()
-        if Enum.any?(acc, fn {_, existing} -> existing == name end), do: bad_name()
-        scan_groups(after_name, n + 1, false, [{n + 1, name} | acc])
+        path = Enum.reverse(fr)
+
+        if Enum.any?(acc, fn {_, existing, other} ->
+             existing == name and not apart?(path, other)
+           end),
+           do: bad_name()
+
+        scan_groups(after_name, n + 1, false, push_frame(fr), [{n + 1, name, path} | acc])
     end
   end
 
-  defp scan_groups("(?" <> rest, n, false, acc), do: scan_groups(rest, n, false, acc)
-  defp scan_groups("(" <> rest, n, false, acc), do: scan_groups(rest, n + 1, false, acc)
-  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
-  defp scan_groups(<<_, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+  defp scan_groups("(?" <> rest, n, false, fr, acc),
+    do: scan_groups(rest, n, false, push_frame(fr), acc)
+
+  defp scan_groups("(" <> rest, n, false, fr, acc),
+    do: scan_groups(rest, n + 1, false, push_frame(fr), acc)
+
+  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, fr, acc),
+    do: scan_groups(rest, n, cls, fr, acc)
+
+  defp scan_groups(<<_, rest::binary>>, n, cls, fr, acc), do: scan_groups(rest, n, cls, fr, acc)
+
+  defp push_frame(fr), do: [{:erlang.unique_integer([:positive]), 0} | fr]
+
+  # are two paths (outermost first) in different alternatives of one disjunction?
+  defp apart?([a | ra], [b | rb]) when a == b, do: apart?(ra, rb)
+  defp apart?([{id, x} | _], [{id, y} | _]) when x != y, do: true
+  defp apart?(_, _), do: false
 
   defp bad_name, do: throw({:re_error, "Invalid capture group name"})
 
@@ -249,8 +279,16 @@ defmodule Browser.JS.RegExp do
     {raw, after_name} = split_name(rest)
 
     case Map.fetch(by, decode_name(raw)) do
-      {:ok, i} -> rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
-      :error -> bad_name()
+      {:ok, [i]} ->
+        rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
+
+      # a repeated name refers to whichever of its groups took part
+      {:ok, is} ->
+        alt = is |> Enum.map(&"\\k<g#{&1}>") |> Enum.join("|")
+        rewrite_groups(after_name, cls, by, ["(?:" <> alt <> ")" | acc])
+
+      :error ->
+        bad_name()
     end
   end
 
@@ -269,9 +307,9 @@ defmodule Browser.JS.RegExp do
         rewrite_groups(rest, false, by, ["(?<" | acc])
 
       _ ->
-        {raw, after_name} = split_name(rest)
-        i = Map.fetch!(by, decode_name(raw))
-        rewrite_groups(after_name, false, by, ["(?<g#{i}>" | acc])
+        {_raw, after_name} = split_name(rest)
+        [{i, _} | defs] = by.defs
+        rewrite_groups(after_name, false, %{by | defs: defs}, ["(?<g#{i}>" | acc])
     end
   end
 
@@ -417,7 +455,15 @@ defmodule Browser.JS.RegExp do
   defp named_groups([], _), do: nil
 
   defp named_groups(names, groups),
-    do: for({i, name} <- names, do: {name, Enum.at(groups, i - 1)})
+    do: merge_names(for({i, name} <- names, do: {name, Enum.at(groups, i - 1)}))
+
+  # a name used by several groups gives the value of the one that took part
+  defp merge_names(pairs) do
+    for name <- pairs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() do
+      {name,
+       Enum.find_value(pairs, :undefined, fn {n, v} -> if n == name and v != :undefined, do: v end)}
+    end
+  end
 
   defp byte_of(subject, cp) do
     byte_of(subject, cp, 0)
@@ -471,7 +517,10 @@ defmodule Browser.JS.RegExp do
           :undefined
 
         _named ->
-          new_object(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))}), :null)
+          new_object(
+            merge_names(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))})),
+            :null
+          )
       end
 
     Interp.define_data(indices, "groups", groups)

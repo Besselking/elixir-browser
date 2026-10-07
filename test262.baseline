@@ -12647,6 +12647,7 @@ built-ins/RegExp/character-class-escape-non-whitespace-u180e.js
 built-ins/RegExp/character-class-escape-non-whitespace.js
 built-ins/RegExp/dotall/with-dotall-unicode.js
 built-ins/RegExp/duplicate-flags.js
+built-ins/RegExp/duplicate-named-capturing-groups-syntax.js
 built-ins/RegExp/early-err-modifiers-code-point-repeat-i-1.js
 built-ins/RegExp/early-err-modifiers-code-point-repeat-i-2.js
 built-ins/RegExp/early-err-modifiers-other-code-point-arbitrary.js
@@ -12713,6 +12714,14 @@ built-ins/RegExp/match-indices/indices-groups-object.js
 built-ins/RegExp/match-indices/indices-groups-properties.js
 built-ins/RegExp/match-indices/indices-property.js
 built-ins/RegExp/match-indices/no-indices-array.js
+built-ins/RegExp/named-groups/duplicate-names-group-property-enumeration-order.js
+built-ins/RegExp/named-groups/duplicate-names-match-indices.js
+built-ins/RegExp/named-groups/duplicate-names-matchall.js
+built-ins/RegExp/named-groups/duplicate-names-replace.js
+built-ins/RegExp/named-groups/duplicate-names-replaceall.js
+built-ins/RegExp/named-groups/duplicate-names-search.js
+built-ins/RegExp/named-groups/duplicate-names-split.js
+built-ins/RegExp/named-groups/duplicate-names-test.js
 built-ins/RegExp/named-groups/functional-replace-global.js
 built-ins/RegExp/named-groups/functional-replace-non-global.js
 built-ins/RegExp/named-groups/groups-object-subclass-sans.js
