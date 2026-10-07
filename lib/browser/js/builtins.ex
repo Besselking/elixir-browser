@@ -1031,7 +1031,7 @@ defmodule Browser.JS.Builtins do
           end
 
         if wrapper_target?(this, :string) do
-          put_const(this, "length", float(String.length(s)))
+          put_const(this, "length", float(Str.length(s)))
           wrap(this, s)
         else
           s
@@ -1332,7 +1332,7 @@ defmodule Browser.JS.Builtins do
   @doc false
   def box(v) when is_binary(v) do
     o = new_object([], proto(:string))
-    put_const(o, "length", float(String.length(v)))
+    put_const(o, "length", float(Str.length(v)))
     wrap(o, v)
   end
 
@@ -1432,8 +1432,8 @@ defmodule Browser.JS.Builtins do
       needle = to_str(arg(args, 0))
 
       positions =
-        for i <- 0..max(String.length(this) - String.length(needle), 0)//1,
-            cp_slice(this, i, String.length(needle)) == needle,
+        for i <- 0..max(Str.length(this) - Str.length(needle), 0)//1,
+            cp_slice(this, i, Str.length(needle)) == needle,
             do: i
 
       float(List.last(positions) || -1)
@@ -1534,13 +1534,13 @@ defmodule Browser.JS.Builtins do
   defp pad(s, args, side) do
     target = to_int(arg(args, 0))
     filler = if arg(args, 1) == :undefined, do: " ", else: to_str(arg(args, 1))
-    need = target - String.length(s)
+    need = target - Str.length(s)
 
     if need <= 0 or filler == "" do
       s
     else
       padding =
-        filler |> String.duplicate(div(need, String.length(filler)) + 1) |> cp_slice(0, need)
+        filler |> String.duplicate(div(need, Str.length(filler)) + 1) |> cp_slice(0, need)
 
       if side == :leading, do: padding <> s, else: s <> padding
     end
