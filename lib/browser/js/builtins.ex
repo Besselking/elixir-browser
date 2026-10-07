@@ -505,8 +505,7 @@ defmodule Browser.JS.Builtins do
     # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
     {:obj, pid} = p
     po = deref(pid)
-    attrs = Map.put(Map.get(po, :attrs, %{}), "length", %{w: true, c: false, e: false})
-    store(pid, po |> Map.put(:props, Map.put(po.props, "length", 0.0)) |> Map.put(:attrs, attrs))
+    store(pid, po |> Map.put(:class, :array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
 
     array_fn(p, "push", fn this, args ->
       if fast_array?(this, length(args)) do
@@ -952,26 +951,19 @@ defmodule Browser.JS.Builtins do
 
   defp reduce(this, f, rest, right?) do
     stream = pairs(this, if(right?, do: :desc, else: :asc))
+    init = if rest == [], do: :none, else: {:ok, hd(rest)}
 
-    {acc, stream} =
-      case rest do
-        [init | _] ->
-          {init, stream}
+    # one pass: the first element read is the accumulator when no initial value was given
+    result =
+      Enum.reduce(stream, init, fn
+        {_i, v}, :none -> {:ok, v}
+        {i, v}, {:ok, acc} -> {:ok, call(f, :undefined, [acc, v, float(i), this])}
+      end)
 
-        [] ->
-          case Enum.take(stream, 1) do
-            [{first_i, v}] ->
-              {v,
-               Stream.drop_while(stream, fn {i, _} ->
-                 if right?, do: i >= first_i, else: i <= first_i
-               end)}
-
-            [] ->
-              throw_error("TypeError", "Reduce of empty array with no initial value")
-          end
-      end
-
-    Enum.reduce(stream, acc, fn {i, v}, acc -> call(f, :undefined, [acc, v, float(i), this]) end)
+    case result do
+      {:ok, acc} -> acc
+      :none -> throw_error("TypeError", "Reduce of empty array with no initial value")
+    end
   end
 
   defp flatten(list, depth) do
@@ -985,6 +977,7 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     # the prototypes are themselves a String, a Number and a Boolean
     wrap(proto(:string), "")
+    put_const(proto(:string), "length", 0.0)
     wrap(proto(:number), 0.0)
     wrap(proto(:boolean), false)
 

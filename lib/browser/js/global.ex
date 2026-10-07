@@ -8,24 +8,37 @@ defmodule Browser.JS.Global do
 
   def new, do: Interp.new_host(__MODULE__, :global, Interp.proto(:object))
 
-  def host_get(:global, key, _self) when is_binary(key) do
+  def host_get(:global, key, self) when is_binary(key) do
+    # a property `defineProperty` put on the object itself is read from there
+    if own_defined?(self, key), do: :miss, else: host_get_var(key)
+  end
+
+  def host_get(:global, _key, _self), do: :miss
+
+  defp host_get_var(key) do
     case Interp.lookup_scoped(Interp.global(), key) do
       {:ok, v} -> if Interp.global_lexical?(key), do: :miss, else: {:ok, v}
       :error -> :miss
     end
   end
 
-  def host_get(:global, _key, _self), do: :miss
-
   # NaN, Infinity and undefined are not writable
   def host_put(:global, key, _v, _self) when key in ["NaN", "Infinity", "undefined"], do: :ok
 
-  def host_put(:global, key, v, _self) when is_binary(key) do
-    Interp.declare(Interp.global(), key, v)
-    :ok
+  def host_put(:global, key, v, self) when is_binary(key) do
+    # a property `defineProperty` put on the object itself follows its own attributes
+    if own_defined?(self, key) do
+      :miss
+    else
+      Interp.declare(Interp.global(), key, v)
+      :ok
+    end
   end
 
   def host_put(:global, _key, _v, _self), do: :miss
+
+  defp own_defined?({:obj, id}, key), do: Map.has_key?(Interp.deref(id).props, key)
+  defp own_defined?(_, _), do: false
 
   def host_has(:global, key),
     do:

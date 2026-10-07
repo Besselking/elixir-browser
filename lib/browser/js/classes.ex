@@ -24,10 +24,14 @@ defmodule Browser.JS.Classes do
   def define({:class, name, super_node, members}, env, inferred) do
     cenv = Interp.new_scope(env)
 
+    # the heritage is evaluated inside the class scope, where the class's own name is still
+    # uninitialized
+    if name, do: Interp.declare(cenv, name, :tdz)
+
     parent =
       case super_node do
         nil -> nil
-        node -> Interp.ev(node, env)
+        node -> Interp.ev(node, cenv)
       end
 
     if super_node != nil and parent != :null and not Interp.constructor?(parent),
@@ -80,6 +84,15 @@ defmodule Browser.JS.Classes do
     {:obj, fid} = f
     fobj = deref(fid)
     fobj = Map.put(fobj, :class_ctor, true)
+
+    fobj =
+      Map.update(
+        fobj,
+        :attrs,
+        %{"prototype" => %{w: false, c: false}},
+        &Map.put(&1, "prototype", %{w: false, c: false})
+      )
+
     store(fid, if(parent, do: %{fobj | proto: parent}, else: fobj))
 
     # members, in order; static fields and blocks run once everything is defined

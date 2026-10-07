@@ -277,7 +277,7 @@ defmodule Browser.JS.Collections do
     put_hidden(array, key, unscopables)
     {:obj, aid} = array
     ao = deref(aid)
-    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
+    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false, c: true})))
 
     def_fn(array, "keys", fn this, _ -> live_array_iterator(this, :keys) end)
     def_fn(array, "entries", fn this, _ -> live_array_iterator(this, :entries) end)

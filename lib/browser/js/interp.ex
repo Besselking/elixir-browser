@@ -196,7 +196,8 @@ defmodule Browser.JS.Interp do
         case s do
           %{with: obj} when is_binary(name) ->
             if has_property?(obj, name) and not unscopable?(obj, name),
-              do: {:ok, get(obj, name)},
+              # GetBindingValue asks again whether the binding is still there
+              do: {:ok, if(has_property?(obj, name), do: get(obj, name), else: :undefined)},
               else: lookup_var(s.parent, name, heap)
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
@@ -254,6 +255,8 @@ defmodule Browser.JS.Interp do
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
           not unscopable?(s.with, name) ->
+        # SetMutableBinding asks again whether the binding is still there
+        _ = has_property?(s.with, name)
         put(s.with, name, val)
 
       s.parent != nil ->
@@ -485,6 +488,7 @@ defmodule Browser.JS.Interp do
       num?(a) and is_binary(b) -> Num.equal?(a, to_num(b))
       is_binary(a) and num?(b) -> Num.equal?(to_num(a), b)
       match?({:obj, _}, a) and match?({:obj, _}, b) -> a == b
+      match?({:symbol, _, _}, a) and match?({:symbol, _, _}, b) -> a == b
       match?({:obj, _}, a) -> loose_eq(to_primitive(a, "default"), b)
       match?({:obj, _}, b) -> loose_eq(a, to_primitive(b, "default"))
       true -> false
@@ -1073,7 +1077,28 @@ defmodule Browser.JS.Interp do
         "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
       )
 
-  def put(_primitive, _key, v), do: v
+  # a primitive has no property of its own to set, but a setter (or proxy) on its prototype
+  # chain still runs
+  def put(primitive, key, v) do
+    primitive_set(primitive, key, v)
+    v
+  end
+
+  defp primitive_set(ov, key, v) do
+    k = to_key(key)
+
+    case inherited_set(Browser.JS.Builtins.box(ov), k) do
+      {:setter, setter} ->
+        call(setter, ov, [v])
+        :ok
+
+      {:proxy, proxy} ->
+        if Browser.JS.Proxy.set(proxy, k, v, ov), do: :ok, else: :fail
+
+      _ ->
+        :fail
+    end
+  end
 
   # naming a key in an error must not run user code (a toString that throws)
   defp safe_key(key) when is_binary(key), do: key
@@ -1147,6 +1172,22 @@ defmodule Browser.JS.Interp do
 
   # a failed [[Set]]: sloppy code ignores it, strict code (`strict_put`) throws
   defp fail_put, do: :erlang.put(:js_put_failed, true)
+
+  # a primitive has no property to set: in strict code only a setter on its prototype chain works
+  defp strict_put(ov, key, v)
+       when is_binary(ov) or is_number(ov) or is_boolean(ov) or
+              (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
+    case primitive_set(ov, key, v) do
+      :ok ->
+        v
+
+      :fail ->
+        throw_error(
+          "TypeError",
+          "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
+        )
+    end
+  end
 
   defp strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
@@ -1370,6 +1411,10 @@ defmodule Browser.JS.Interp do
       %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
         Browser.JS.TypedArrays.host_keys(data) ++ own_keys_plain(o)
 
+      # what `defineProperty` stored on the global object itself comes after the variables
+      %{class: :host, host: {Browser.JS.Global, data}} ->
+        Browser.JS.Global.host_keys(data) ++ own_keys_plain(o)
+
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
           do: with(:default <- mod.host_keys(data), do: own_keys_plain(o)),
@@ -1449,15 +1494,7 @@ defmodule Browser.JS.Interp do
     if (o.class == :array and array_iteration_pristine?(v)) or o.class in [:map, :set] do
       {:list, iterate(v)}
     else
-      case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
-        f when is_tuple(f) ->
-          unless function?(f), do: throw_error("TypeError", "object is not iterable")
-          it = call(f, v, [])
-          {:proto, it, get(it, "next")}
-
-        _ ->
-          throw_error("TypeError", "object is not iterable")
-      end
+      proto_source(v)
     end
   end
 
@@ -1475,6 +1512,41 @@ defmodule Browser.JS.Interp do
         throw_error("TypeError", "#{to_str(v)} is not iterable")
     end
   end
+
+  defp proto_source(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        unless function?(f), do: throw_error("TypeError", "object is not iterable")
+        it = call(f, v, [])
+        {:proto, it, get(it, "next")}
+
+      _ ->
+        throw_error("TypeError", "object is not iterable")
+    end
+  end
+
+  @doc false
+  # the source of a `for … of` loop: an array or a collection changed by the body is seen
+  # changing, so an array is read by index as the loop goes and a Map or Set is pulled
+  def for_of_source({:obj, id} = v) do
+    o = deref(id)
+
+    cond do
+      o.class == :array and array_iteration_pristine?(v) ->
+        {:list,
+         Stream.unfold(0, fn i ->
+           if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
+         end)}
+
+      o.class in [:map, :set] ->
+        proto_source(v)
+
+      true ->
+        iter_source(v)
+    end
+  end
+
+  def for_of_source(v), do: iter_source(v)
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`
@@ -1991,10 +2063,19 @@ defmodule Browser.JS.Interp do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
         cond do
-          key in ["name", "length"] and key in Map.get(o, :gone, []) -> :undefined
+          # a deleted own `length` or `name` shows what the prototype chain has
+          key in ["name", "length"] and key in Map.get(o, :gone, []) ->
+            case o.proto do
+              {:obj, _} = p -> get(p, key)
+              _ -> :undefined
+            end
+
           # `f.prototype = undefined` is a value, not a missing property
-          key == "prototype" and Map.has_key?(o.props, "prototype") -> :undefined
-          true -> function_prop(id, o, key)
+          key == "prototype" and Map.has_key?(o.props, "prototype") ->
+            :undefined
+
+          true ->
+            function_prop(id, o, key)
         end
 
       v ->
@@ -2653,9 +2734,21 @@ defmodule Browser.JS.Interp do
   defp exec({:var, kind, decls}, env, _) do
     for {pat, init} <- decls do
       cond do
-        init != nil -> bind(pat, ev_named(init, env, pat), env, kind)
-        kind == :var -> :ok
-        true -> bind(pat, :undefined, env, kind)
+        # `var x = …` inside `with`: the reference is resolved before the initializer runs
+        init != nil and kind == :var and match?({:id, _}, pat) and
+            Process.get(:js_with_used, false) ->
+          {:id, name} = pat
+          {_, write} = id_ref(env, name, pat, false)
+          write.(ev_named(init, env, pat))
+
+        init != nil ->
+          bind(pat, ev_named(init, env, pat), env, kind)
+
+        kind == :var ->
+          :ok
+
+        true ->
+          bind(pat, :undefined, env, kind)
       end
     end
 
@@ -2787,7 +2880,7 @@ defmodule Browser.JS.Interp do
     source =
       case kind do
         :forin -> {:list, if(nullish?(target), do: [], else: for_in_keys(target))}
-        :forof -> iter_source(target)
+        :forof -> for_of_source(target)
       end
 
     case source do
@@ -2971,11 +3064,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp bind_proto([{:rest, pat}], it, next, env, mode, done?) do
+    ref = guarded_ref(pat, env, mode, it, done?)
     list = if done?, do: [], else: pull(it, next, [])
-    bind(pat, new_array(list), env, mode)
+    bind_to(pat, ref, new_array(list), env, mode)
   end
 
   defp bind_proto([p | ps], it, next, env, mode, done?) do
+    # a property target is evaluated before the iterator is stepped
+    ref = guarded_ref(p, env, mode, it, done?)
+
     {v, done?} =
       if done? do
         {:undefined, true}
@@ -2988,7 +3085,7 @@ defmodule Browser.JS.Interp do
 
     if p != nil do
       try do
-        bind(p, v, env, mode)
+        bind_to(p, ref, v, env, mode)
       catch
         kind, e ->
           unless done?, do: iter_close(it, true)
@@ -2997,6 +3094,30 @@ defmodule Browser.JS.Interp do
     end
 
     bind_proto(ps, it, next, env, mode, done?)
+  end
+
+  # the reference of a property target (`o[k]`, with or without a default), evaluated early;
+  # a throw while evaluating it closes the iterator that is still open
+  defp guarded_ref(pat, env, mode, it, done?) do
+    target_ref(pat, env, mode)
+  catch
+    kind, e ->
+      unless done?, do: iter_close(it, true)
+      :erlang.raise(kind, e, __STACKTRACE__)
+  end
+
+  defp target_ref({:member, o, k, _}, env, :assign), do: {ev(o, env), to_key(ev_key(k, env)), nil}
+
+  defp target_ref({:default, {:member, o, k, _}, e}, env, :assign),
+    do: {ev(o, env), to_key(ev_key(k, env)), e}
+
+  defp target_ref(_, _, _), do: nil
+
+  defp bind_to(pat, nil, v, env, mode), do: bind(pat, v, env, mode)
+
+  defp bind_to(_pat, {ov, key, dflt}, v, env, _mode) do
+    v = if dflt != nil and v == :undefined, do: ev(dflt, env), else: v
+    put(ov, key, v)
   end
 
   defp bind_name(:let, env, name, v), do: declare(env, name, v)

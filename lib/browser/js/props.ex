@@ -67,17 +67,8 @@ defmodule Browser.JS.Props do
   end
 
   # `name`, `length` and `prototype` of a function exist without being stored
-  defp virtual(id, %{class: :function}, key) when key in ["name", "length", "prototype"] do
-    case Interp.get({:obj, id}, key) do
-      :undefined ->
-        nil
-
-      v ->
-        case key do
-          "prototype" -> {:data, v, true, false, false}
-          _ -> {:data, v, false, false, true}
-        end
-    end
+  defp virtual(id, %{class: :function} = o, key) when key in ["name", "length", "prototype"] do
+    if key in Map.get(o, :gone, []), do: nil, else: virtual_fn(id, key)
   end
 
   # a variable of the global scope is a property of the global object
@@ -119,6 +110,19 @@ defmodule Browser.JS.Props do
   end
 
   defp virtual(_, _, _), do: nil
+
+  defp virtual_fn(id, key) do
+    case Interp.get({:obj, id}, key) do
+      :undefined ->
+        nil
+
+      v ->
+        case key do
+          "prototype" -> {:data, v, true, false, false}
+          _ -> {:data, v, false, false, true}
+        end
+    end
+  end
 
   @doc "The property descriptor object of an own property, or undefined."
   def descriptor({:obj, id} = obj, key) do
@@ -206,14 +210,14 @@ defmodule Browser.JS.Props do
           base ++ hidden ++ ["length"]
 
       %{class: :function} ->
-        virtual =
+        # length, name and prototype come first, in that order, whether stored or not
+        std =
           for k <- ["length", "name", "prototype"],
-              k not in hidden and k not in base,
-              state({:obj, id}, k) != nil,
+              k in hidden or k in base or state({:obj, id}, k) != nil,
               do: k
 
-        {ints, rest} = Enum.split_with(base, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ virtual ++ rest ++ hidden
+        {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
+        Enum.sort_by(ints, &array_index/1) ++ std ++ rest ++ (hidden -- std)
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)

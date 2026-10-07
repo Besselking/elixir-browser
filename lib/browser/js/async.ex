@@ -683,6 +683,10 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  defp cev_await({:destructure, pat, right}, env, ctx, k) do
+    cev(right, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
+  end
+
   defp cev_await({:cond, c, a, b}, env, ctx, k) do
     cev(c, env, ctx, fn cv ->
       if Interp.truthy(cv), do: cev(a, env, ctx, k), else: cev(b, env, ctx, k)
@@ -729,6 +733,7 @@ defmodule Browser.JS.Async do
   defp leaf?({:yield, _, _}), do: true
   defp leaf?({:logical, _, _, _} = n), do: has_await?(n)
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
+  defp leaf?({:destructure, _, _} = n), do: has_await?(n)
   defp leaf?(_), do: false
 
   defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
@@ -1070,19 +1075,196 @@ defmodule Browser.JS.Async do
   defp await_result(v, ctx, k),
     do: await_value(v, %{ctx | throw: fn e -> k.({:error, e}) end}, fn _ -> k.(:ok) end)
 
-  # binds a pattern; a `yield` or `await` inside it (a default, a key, a target) is evaluated
-  # first, each into a hidden name of the scope the pattern binds in
+  # binds a pattern (`k` runs afterwards). When a `yield` or `await` sits inside it, in a default,
+  # a computed key or a target, the pattern is walked step by step so that the iterator stays
+  # open (and is closed on a throw or `return()`) while the generator is suspended.
   defp cbind(pat, v, mode, env, ctx, k) do
-    if has_await?(pat) do
-      {template, leaves} = lift(pat, [])
+    if has_await?(pat),
+      do: cbind_cps(pat, v, mode, env, ctx, k),
+      else: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+  end
 
-      eval_leaves(Enum.reverse(leaves), 0, env, env, ctx, fn ->
-        guarded(fn -> Interp.bind_pattern(template, v, env, mode) end, ctx, k)
+  defp cbind_cps({:default, _, _} = pat, v, mode, env, ctx, k) do
+    ctarget(pat, mode, env, ctx, fn binder -> binder.(v, k) end)
+  end
+
+  defp cbind_cps({:member, _, _, _} = pat, v, mode, env, ctx, k) do
+    ctarget(pat, mode, env, ctx, fn binder -> binder.(v, k) end)
+  end
+
+  defp cbind_cps({:arrpat, elems}, v, mode, env, ctx, k) do
+    attempt(fn -> Interp.iter_source(v) end, ctx, fn
+      {:list, list} -> celems_list(elems, list, mode, env, ctx, k)
+      {:proto, it, next} -> celems_proto(elems, it, next, false, mode, env, ctx, k)
+    end)
+  end
+
+  defp cbind_cps({:objpat, props, rest}, v, mode, env, ctx, k) do
+    guarded(
+      fn ->
+        if Interp.nullish?(v),
+          do:
+            Interp.throw_error(
+              "TypeError",
+              "Cannot destructure '#{Interp.to_str(v)}' as it is #{Interp.to_str(v)}."
+            )
+      end,
+      ctx,
+      fn -> cobj_props(props, rest, v, [], mode, env, ctx, k) end
+    )
+  end
+
+  defp cbind_cps(pat, v, mode, env, ctx, k),
+    do: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+
+  # a target: its reference is evaluated first (it may suspend); the binder then takes the value
+  defp ctarget({:member, o, key, _}, :assign, env, ctx, kb) do
+    cev(o, env, ctx, fn ov ->
+      ckey(key, env, ctx, fn kv ->
+        kb.(fn val, kk -> guarded(fn -> Interp.put(ov, kv, val) end, ctx, kk) end)
       end)
-    else
-      guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+    end)
+  end
+
+  defp ctarget({:default, inner, e}, mode, env, ctx, kb) do
+    ctarget(inner, mode, env, ctx, fn binder ->
+      kb.(fn
+        :undefined, kk -> cev(e, env, ctx, fn dv -> binder.(dv, kk) end)
+        val, kk -> binder.(val, kk)
+      end)
+    end)
+  end
+
+  defp ctarget(pat, mode, env, ctx, kb),
+    do: kb.(fn val, kk -> cbind(pat, val, mode, env, ctx, kk) end)
+
+  defp ckey({:str, s}, _env, _ctx, k), do: k.(s)
+
+  defp ckey({:priv, name}, env, ctx, k),
+    do: attempt(fn -> Interp.private_key(name, env) end, ctx, k)
+
+  defp ckey(e, env, ctx, k),
+    do: cev(e, env, ctx, fn kv -> attempt(fn -> Interp.to_key(kv) end, ctx, k) end)
+
+  defp celems_list([], _list, _mode, _env, _ctx, k), do: k.()
+
+  defp celems_list([{:rest, p}], list, mode, env, ctx, k) do
+    ctarget(p, mode, env, ctx, fn binder -> binder.(Interp.new_array(list), k) end)
+  end
+
+  defp celems_list([p | ps], list, mode, env, ctx, k) do
+    {val, tail} =
+      case list do
+        [h | t] -> {h, t}
+        [] -> {:undefined, []}
+      end
+
+    next = fn -> celems_list(ps, tail, mode, env, ctx, k) end
+
+    if p == nil,
+      do: next.(),
+      else: ctarget(p, mode, env, ctx, fn binder -> binder.(val, next) end)
+  end
+
+  defp celems_proto([], it, _next, done?, _mode, _env, ctx, k) do
+    if done?, do: k.(), else: guarded(fn -> Interp.iter_close(it, false) end, ctx, k)
+  end
+
+  defp celems_proto([{:rest, p}], it, next, done?, mode, env, ctx, k) do
+    inner = closing_ctx(it, done?, ctx)
+
+    ctarget(p, mode, env, inner, fn binder ->
+      attempt(fn -> if done?, do: [], else: pull_all(it, next, []) end, ctx, fn list ->
+        binder.(Interp.new_array(list), k)
+      end)
+    end)
+  end
+
+  defp celems_proto([p | ps], it, next, done?, mode, env, ctx, k) do
+    inner = closing_ctx(it, done?, ctx)
+
+    cont = fn binder ->
+      attempt(
+        fn ->
+          if done?,
+            do: {:undefined, true},
+            else:
+              (case Interp.iter_step(it, next) do
+                 :done -> {:undefined, true}
+                 {:ok, item} -> {item, false}
+               end)
+        end,
+        ctx,
+        fn {val, done2?} ->
+          after_bind = fn -> celems_proto(ps, it, next, done2?, mode, env, ctx, k) end
+
+          if binder == :skip, do: after_bind.(), else: binder.(val, after_bind)
+        end
+      )
+    end
+
+    if p == nil,
+      do: cont.(:skip),
+      else: ctarget(p, mode, env, inner, cont)
+  end
+
+  defp pull_all(it, next, acc) do
+    case Interp.iter_step(it, next) do
+      :done -> Enum.reverse(acc)
+      {:ok, v} -> pull_all(it, next, [v | acc])
     end
   end
+
+  # while a pattern's iterator is open, a throw or a `return()` at a suspension point closes it
+  defp closing_ctx(_it, true, ctx), do: ctx
+
+  defp closing_ctx(it, false, ctx) do
+    %{
+      ctx
+      | throw: fn e ->
+          try do
+            Interp.iter_close(it, true)
+          catch
+            {:js_error, _} -> :ok
+          end
+
+          ctx.throw.(e)
+        end,
+        ret: fn r ->
+          guarded(fn -> Interp.iter_close(it, false) end, ctx, fn -> ctx.ret.(r) end)
+        end
+    }
+  end
+
+  defp cobj_props([], nil, _v, _used, _mode, _env, _ctx, k), do: k.()
+
+  defp cobj_props([], rest, v, used, mode, env, ctx, k) do
+    ctarget(rest, mode, env, ctx, fn binder ->
+      attempt(
+        fn ->
+          pairs =
+            for key <- Browser.JS.Props.enumerable_keys(v, used), do: {key, Interp.get(v, key)}
+
+          Interp.new_object(pairs)
+        end,
+        ctx,
+        fn obj -> binder.(obj, k) end
+      )
+    end)
+  end
+
+  defp cobj_props([{key, p} | ps], rest, v, used, mode, env, ctx, k) do
+    ckey_of(key, env, ctx, fn kv ->
+      ctarget(p, mode, env, ctx, fn binder ->
+        attempt(fn -> Interp.get(v, kv) end, ctx, fn val ->
+          binder.(val, fn -> cobj_props(ps, rest, v, used ++ [kv], mode, env, ctx, k) end)
+        end)
+      end)
+    end)
+  end
+
+  defp ckey_of({:str, s}, _env, _ctx, k), do: k.(s)
+  defp ckey_of({:computed, e}, env, ctx, k), do: ckey(e, env, ctx, k)
 
   # declarations, one at a time
   defp cdecls([], _kind, _env, _ctx, k), do: k.(:ok)
