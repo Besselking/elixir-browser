@@ -1029,6 +1029,14 @@ defmodule Browser.JSTest do
       assert {:ok, _, _} = JS.eval("class C { static { (() => ({ await })); } }")
     end
 
+    test "arguments length is an ordinary property" do
+      assert js("function f() { arguments.length = 'x'; return arguments.length } f(1)") == "x"
+
+      assert js(
+               "function f() { delete arguments.length; return String(Object.prototype.hasOwnProperty.call(arguments, 'length')) } f(1)"
+             ) == "false"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

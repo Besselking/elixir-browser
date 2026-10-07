@@ -18693,10 +18693,12 @@ language/arguments-object/10.6-14-c-4-s.js
 language/arguments-object/10.6-2gs.js
 language/arguments-object/10.6-5-1.js
 language/arguments-object/10.6-6-1.js
+language/arguments-object/10.6-6-2.js
 language/arguments-object/10.6-6-3-s.js
 language/arguments-object/10.6-6-3.js
 language/arguments-object/10.6-6-4-s.js
 language/arguments-object/10.6-6-4.js
+language/arguments-object/10.6-7-1.js
 language/arguments-object/S10.1.6_A1_T2.js
 language/arguments-object/S10.6_A1.js
 language/arguments-object/S10.6_A2.js
@@ -18708,6 +18710,7 @@ language/arguments-object/S10.6_A4.js
 language/arguments-object/S10.6_A5_T1.js
 language/arguments-object/S10.6_A5_T2.js
 language/arguments-object/S10.6_A5_T3.js
+language/arguments-object/S10.6_A5_T4.js
 language/arguments-object/S10.6_A6.js
 language/arguments-object/S10.6_A7.js
 language/arguments-object/arguments-caller.js

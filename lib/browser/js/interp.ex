@@ -575,7 +575,19 @@ defmodule Browser.JS.Interp do
             end
 
           nil ->
-            if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key), {:obj, id})
+            cond do
+              key == "length" and is_map_key(o, :arguments) and is_map_key(o.props, "length") ->
+                o.props["length"]
+
+              key == "length" and is_map_key(o, :len_gone) ->
+                lookup(o, "length", {:obj, id})
+
+              key == "length" ->
+                o.len * 1.0
+
+              true ->
+                lookup(o, to_key(key), {:obj, id})
+            end
         end
 
       :function ->
@@ -1063,36 +1075,12 @@ defmodule Browser.JS.Interp do
             end
 
           nil ->
-            if key == "length" do
-              new_len = array_length!(v)
-              # the coercion may have run code that changed the array
-              o = deref(id)
-
-              cond do
-                Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
-                  fail_put()
-
-                true ->
-                  # an element that cannot be deleted stops the array from shrinking past it
-                  attrs = Map.get(o, :attrs, %{})
-
-                  stop =
-                    o.items
-                    |> Map.keys()
-                    |> Enum.filter(
-                      &(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false)
-                    )
-                    |> Enum.max(fn -> nil end)
-                    |> then(&if(&1, do: &1 + 1, else: new_len))
-
-                  store(id, %{
-                    o
-                    | items: Map.filter(o.items, fn {i, _} -> i < stop end),
-                      len: stop
-                  })
-              end
+            # an arguments object's `length` is an ordinary property that takes any value
+            if key == "length" and is_map_key(o, :arguments) and not Map.get(o, :frozen, false) do
+              if is_map_key(o, :len_gone), do: store(id, Map.delete(o, :len_gone))
+              put_hidden({:obj, id}, "length", v)
             else
-              put_prop(id, o, to_key(key), v)
+              put_array_prop(id, o, key, v)
             end
         end
 
@@ -1319,6 +1307,32 @@ defmodule Browser.JS.Interp do
   defp inherited_set(_, _), do: :none
 
   # a missing array element: an index setter or a proxy further up the prototype chain
+  defp put_array_prop(id, o, key, v) do
+    if key == "length" do
+      new_len = array_length!(v)
+      # the coercion may have run code that changed the array
+      o = deref(id)
+
+      if Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) do
+        fail_put()
+      else
+        # an element that cannot be deleted stops the array from shrinking past it
+        attrs = Map.get(o, :attrs, %{})
+
+        stop =
+          o.items
+          |> Map.keys()
+          |> Enum.filter(&(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+          |> Enum.max(fn -> nil end)
+          |> then(&if(&1, do: &1 + 1, else: new_len))
+
+        store(id, %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop})
+      end
+    else
+      put_prop(id, o, to_key(key), v)
+    end
+  end
+
   defp index_hook({:obj, pid}, i) do
     p = deref(pid)
     k = Integer.to_string(i)
@@ -1406,6 +1420,11 @@ defmodule Browser.JS.Interp do
 
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
+
+      # an arguments object's `length` can go: reads then see the prototype chain
+      o.class == :array and key == "length" ->
+        store(id, o |> Map.put(:len_gone, true) |> Map.update!(:props, &Map.delete(&1, "length")))
+        true
 
       i ->
         store(id, %{o | items: Map.delete(o.items, i)})

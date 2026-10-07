@@ -38,9 +38,14 @@ defmodule Browser.JS.Props do
             nil
         end
 
-      o.class == :array and key == "length" ->
+      o.class == :array and key == "length" and is_map_key(o, :len_gone) and
+          not Map.has_key?(o.props, "length") ->
+        nil
+
+      o.class == :array and key == "length" and
+          not (is_map_key(o, :arguments) and is_map_key(o.props, "length")) ->
         {:data, o.len * 1.0, not Map.get(o, :frozen, false) and not Map.get(o, :len_ro, false),
-         false, false}
+         false, is_map_key(o, :arguments)}
 
       Map.has_key?(o.props, key) ->
         attrs = Map.get(o.attrs_or_default, key, %{})
