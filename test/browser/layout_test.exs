@@ -5112,4 +5112,62 @@ defmodule Browser.LayoutTest do
       assert {blue.x, blue.w, blue.h} == {170, 30, 20}
     end
   end
+
+  describe "margin after an inline box" do
+    test "the right margin of a span has to fit with its last word" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="width:75px;font:15px/1 monospace"><span style="margin-right:60px">ab cd</span></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      ys = for %{type: :text} = t <- items, uniq: true, do: t.y
+      assert length(ys) == 2
+    end
+  end
+
+  describe "margins of a table" do
+    test "collapse with the margins of the blocks around it" do
+      html = """
+      <style>body{margin:0}</style>
+      <p style="margin:0 0 16px;height:20px"></p>
+      <table style="margin:15px 0;border-spacing:0"><tr><td style="padding:0;height:10px;background:blue"></td></tr></table>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 36
+    end
+  end
+
+  describe "clearance and the margin of a first child" do
+    test "the margin of the first child of a cleared box is absorbed by the clearance" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="float:left;width:50px;height:100px"></div>
+      <div style="clear:both"><div style="margin-top:10px;height:20px;background:blue"></div></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 100
+    end
+  end
+
+  describe "height of a table cell" do
+    test "is the height of its content: borders and padding come on top" do
+      html = """
+      <style>body{margin:0}</style>
+      <table style="border-spacing:0"><tr><td style="border:10px solid orange;height:100px;padding:0;width:50px"></td></tr></table>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      orange = Enum.filter(items, &(&1.type == :rect and &1.color == {255, 165, 0}))
+      assert orange |> Enum.map(&(&1.y + &1.h)) |> Enum.max() == 120
+    end
+  end
 end

@@ -820,9 +820,10 @@ defmodule Browser.Layout do
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
-          acc = [{:flush} | acc]
+          {mt, mb} = vertical_margins(c)
+          acc = [{:gap, mt}, {:flush} | acc]
           acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
-          [{:flush} | acc]
+          [{:gap, mb}, {:flush} | acc]
 
         kind ->
           # an element that can be linked to (`#id`) needs to know where its box starts, which
@@ -1094,6 +1095,13 @@ defmodule Browser.Layout do
   # An inline-block is laid out on its own (a block inside) and then placed in
   # the line as one unit; its width properties size the unit, so they are
   # removed from the element's own box.
+  # the top and bottom margins of a block-level box that is laid out as an atom: they collapse
+  # with their neighbours outside of it
+  defp vertical_margins(c) do
+    box = box("div", c)
+    {box.mt, box.mb}
+  end
+
   defp inline_block_ops(
          {:element, tag, attrs, kids},
          parent_style,
@@ -1111,6 +1119,9 @@ defmodule Browser.Layout do
       |> resolve_box_pct(containing_width())
       |> Map.drop(~w(width min-width max-width))
       |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
+
+    own =
+      if table?, do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}), else: own
 
     attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
 
@@ -1303,7 +1314,7 @@ defmodule Browser.Layout do
     acc =
       case clear_side(c) do
         nil -> [{:gap, box.mt}, {:flush} | acc]
-        side -> [{:gap, box.mt}, {:clear, side}, {:flush} | acc]
+        side -> [{:clear, side}, {:gap, box.mt}, {:flush} | acc]
       end
 
     acc = if Map.get(c, :anchor) && style.nid, do: [{:anchor, style.nid} | acc], else: acc
@@ -2257,6 +2268,7 @@ defmodule Browser.Layout do
       overlays: [],
       deferred: [],
       open: %{},
+      clr: nil,
       pos: [
         %{x: 0, y: 0, w: width, h: if(root_height == :view, do: view_height, else: root_height)}
       ],
@@ -2308,9 +2320,26 @@ defmodule Browser.Layout do
     }
 
     # what is laid out here is a block formatting context of its own: it grows to hold its floats
-    st = ops |> Enum.reduce(st, &op/2) |> flush()
+    st = ops |> tail_extents() |> Enum.reduce(st, &op/2) |> flush()
     contain_floats(st, 0)
   end
+
+  # the right margin, border and padding of an inline box stick to its last word: they have to
+  # fit on the line with it (the word wraps when they do not)
+  defp tail_extents([{:word, text, style} = w | rest]) do
+    case closing_extent(rest, 0) do
+      0 -> [w | tail_extents(rest)]
+      extra -> [{:word, text, Map.put(style, :tail, extra)} | tail_extents(rest)]
+    end
+  end
+
+  defp tail_extents([op | rest]), do: [op | tail_extents(rest)]
+  defp tail_extents([]), do: []
+
+  defp closing_extent([{:inline_close, _, spec} | rest], acc),
+    do: closing_extent(rest, acc + spec.pr + spec.br + spec.mr)
+
+  defp closing_extent(_, acc), do: acc
 
   # paint order: backgrounds, flow content, then absolutely positioned elements
   defp finalize(st) do
@@ -2386,13 +2415,24 @@ defmodule Browser.Layout do
 
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
+
+  defp op({:gap, px}, %{clr: {y0, gap, bottom}} = st) when st.y == bottom do
+    st = flush(st)
+    %{st | gap: max(st.gap, max(y0 + max(gap, px) - bottom, 0))}
+  end
+
   defp op({:gap, px}, st), do: %{flush(st) | gap: max(st.gap, px)}
 
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
 
   # a floated box goes to the left or right edge of the line below, and text flows around it
   defp op({:float, side, sub, spec, _style}, st) do
-    st = st |> flush() |> apply_gap()
+    st = flush(st)
+    {y0, gap, old} = {st.y, max(st.gap, 0), st.clr}
+    st = apply_gap(st)
+    # the margin above a float is not used up by it: it goes on collapsing with the margins of
+    # the block that follows (see the `gap` op)
+    st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
@@ -2419,15 +2459,24 @@ defmodule Browser.Layout do
 
   # `clear`: the next line starts below the floats on that side
   defp op({:clear, side}, st) do
-    st = st |> flush() |> apply_gap()
+    st = flush(st)
 
     bottom =
       st.floats
       |> Enum.filter(&(side == :both or &1.side == side))
       |> Enum.map(& &1.y1)
-      |> Enum.max(fn -> st.y end)
+      |> Enum.max(fn -> nil end)
 
-    %{st | y: max(st.y, bottom)}
+    {y0, gap} = {st.y, max(st.gap, 0)}
+
+    # a box that is not pushed down keeps its margin to collapse with others; when it is, the
+    # margin of a first child collapses with the one above it (see the `gap` op)
+    if bottom && bottom > y0 + gap + min(st.ngap, 0) do
+      st = apply_gap(st)
+      %{st | y: bottom, clr: {y0, gap, bottom}}
+    else
+      st
+    end
   end
 
   defp op({:inset, l, r}, st) do
@@ -2817,7 +2866,8 @@ defmodule Browser.Layout do
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
-  defp apply_gap(%{ptop: []} = st), do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0}
+  defp apply_gap(%{ptop: []} = st),
+    do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0, clr: nil}
 
   # the margin of a first child collapsed into the margin above its parent: the parent's top
   # edge is where the merged margin ends
@@ -2833,7 +2883,7 @@ defmodule Browser.Layout do
         {open, pos}
       end)
 
-    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: []}
+    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: [], clr: nil}
   end
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
@@ -4224,7 +4274,8 @@ defmodule Browser.Layout do
     st =
       cond do
         st.line == [] or nowrap? or hang == w or
-            st.x + space_w + w - hang <= st.width - st.margin - st.right - st.fr ->
+            st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
+              st.width - st.margin - st.right - st.fr ->
           st
 
         # no space between this word and what comes before: they only break before all of it
@@ -6098,7 +6149,12 @@ defmodule Browser.Layout do
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),
-      minh: num(c["height"]) || num(c["min-height"]),
+      # the height of a cell is that of its content (box-sizing decides), the row is as high as
+      # the box around it
+      minh:
+        with h when h != nil <- num(c["height"]) || num(c["min-height"]) do
+          if border_box?, do: h, else: h + box.pt + box.pb + bt + bb
+        end,
       valign: valign_of(c["vertical-align"]),
       extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
       pt: box.pt,
