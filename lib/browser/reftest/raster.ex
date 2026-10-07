@@ -269,11 +269,16 @@ defmodule Browser.Reftest.Raster do
   defp opaque?({_, _, _, a}), do: a >= 128
   defp opaque?(_), do: true
 
+  # (layout can leave a fraction on a coordinate, which pixels do not have)
+  defp fill(grid, x, y, w, h, color, clip)
+       when is_float(x) or is_float(y) or is_float(w) or is_float(h),
+       do: fill(grid, round(x), round(y), round(w), round(h), color, clip)
+
   defp fill(grid, x, y, w, h, color, {cx0, cy0, cx1, cy1}) do
-    x0 = max(x, cx0)
-    y0 = max(y, cy0)
-    x1 = min(x + w, cx1)
-    y1 = min(y + h, cy1)
+    x0 = round(max(x, cx0))
+    y0 = round(max(y, cy0))
+    x1 = round(min(x + w, cx1))
+    y1 = round(min(y + h, cy1))
 
     if x1 <= x0 or y1 <= y0 or not opaque?(color) do
       grid

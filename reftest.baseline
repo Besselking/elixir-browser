@@ -3877,8 +3877,11 @@ css/css-multicol/baseline-001.html
 css/css-multicol/baseline-002.html
 css/css-multicol/baseline-003.html
 css/css-multicol/baseline-005.html
+css/css-multicol/column-balancing-with-floats-001.html
+css/css-multicol/column-balancing-with-floats-002.html
 css/css-multicol/column-pseudo-background-color.html
 css/css-multicol/columnfill-auto-max-height-003.html
+css/css-multicol/composited-under-clip-under-multicol.html
 css/css-multicol/fixed-in-nested-multicol.html
 css/css-multicol/float-with-line-after-spanner.html
 css/css-multicol/inline-block-and-column-span-all.html
@@ -3892,6 +3895,8 @@ css/css-multicol/multicol-basic-005.xht
 css/css-multicol/multicol-basic-006.xht
 css/css-multicol/multicol-basic-007.xht
 css/css-multicol/multicol-basic-008.xht
+css/css-multicol/multicol-block-no-clip-001.xht
+css/css-multicol/multicol-block-no-clip-002.xht
 css/css-multicol/multicol-break-000.xht
 css/css-multicol/multicol-break-001.xht
 css/css-multicol/multicol-clip-001.xht
@@ -3905,12 +3910,14 @@ css/css-multicol/multicol-columns-005.xht
 css/css-multicol/multicol-columns-006.xht
 css/css-multicol/multicol-columns-007.xht
 css/css-multicol/multicol-columns-toolong-001.xht
+css/css-multicol/multicol-contained-absolute.html
 css/css-multicol/multicol-containing-002.xht
 css/css-multicol/multicol-count-001.xht
 css/css-multicol/multicol-count-002.xht
 css/css-multicol/multicol-count-computed-004.xht
 css/css-multicol/multicol-fill-000.xht
 css/css-multicol/multicol-fill-001.xht
+css/css-multicol/multicol-fill-auto-block-children-003.html
 css/css-multicol/multicol-fill-balance-001.xht
 css/css-multicol/multicol-fill-balance-031.html
 css/css-multicol/multicol-fill-balance-032.html
@@ -3927,6 +3934,8 @@ css/css-multicol/multicol-gap-003.xht
 css/css-multicol/multicol-gap-fraction-001.xht
 css/css-multicol/multicol-gap-large-002.xht
 css/css-multicol/multicol-gap-negative-001.xht
+css/css-multicol/multicol-inherit-001.xht
+css/css-multicol/multicol-inherit-002.xht
 css/css-multicol/multicol-list-item-006.html
 css/css-multicol/multicol-list-item-007.html
 css/css-multicol/multicol-list-item-008.html
@@ -3934,10 +3943,14 @@ css/css-multicol/multicol-margin-001.xht
 css/css-multicol/multicol-margin-002.xht
 css/css-multicol/multicol-margin-003.html
 css/css-multicol/multicol-margin-child-001.xht
+css/css-multicol/multicol-nested-002.xht
 css/css-multicol/multicol-nested-011.html
 css/css-multicol/multicol-nested-025.html
 css/css-multicol/multicol-nested-029.html
+css/css-multicol/multicol-nested-margin-001.xht
 css/css-multicol/multicol-overflow-clip-auto-sized.html
+css/css-multicol/multicol-overflow-clip-positioned.html
+css/css-multicol/multicol-overflow-clip.html
 css/css-multicol/multicol-reduce-000.xht
 css/css-multicol/multicol-rule-002.xht
 css/css-multicol/multicol-rule-fraction-003.xht
@@ -3956,6 +3969,7 @@ css/css-multicol/multicol-span-all-fieldset-003.html
 css/css-multicol/multicol-span-all-list-item-001.html
 css/css-multicol/multicol-span-all-list-item-002.html
 css/css-multicol/multicol-span-all-margin-003.html
+css/css-multicol/multicol-span-all-rule-001.html
 css/css-multicol/multicol-span-none-001.xht
 css/css-multicol/multicol-width-001.xht
 css/css-multicol/multicol-width-002.xht
@@ -3969,7 +3983,9 @@ css/css-multicol/multicol-width-small-001.xht
 css/css-multicol/multicol-zero-height-002.html
 css/css-multicol/named-page.html
 css/css-multicol/nested-oofs-in-relative-multicol.html
+css/css-multicol/nested-with-padding-and-spanner.html
 css/css-multicol/nested-with-too-tall-line.html
+css/css-multicol/no-balancing-after-column-span.html
 css/css-multicol/oof-nested-in-single-column.html
 css/css-multicol/orthogonal-writing-mode-shrink-to-fit.html
 css/css-multicol/overflow-unsplittable-001.html
