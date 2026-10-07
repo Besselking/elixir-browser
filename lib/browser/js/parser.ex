@@ -1007,6 +1007,11 @@ defmodule Browser.JS.Parser do
 
   defp for_statement(ts) do
     case ts do
+      # `let` as a plain name: `for (let; ;)`, `for (let in obj)`
+      [{:id, "let", _}, {k, v, _} | _]
+      when (k == :p and v == ";") or (k == :id and v == "in") ->
+        for_lhs_head(ts)
+
       [{:id, kw, _} | rest] when kw in ["var", "let", "const"] ->
         {pat, after_pat} = pattern(rest, false)
 
@@ -1039,37 +1044,42 @@ defmodule Browser.JS.Parser do
         for_rest(nil, ts)
 
       _ ->
-        {lhs, after_lhs} =
-          case destructuring_head(ts) do
-            nil ->
-              try do
-                unary_or_lhs(ts)
-              catch
-                # an init such as `typeof a == "x" && b()` is no left-hand side
-                {:syntax, _} -> {nil, []}
-              end
+        for_lhs_head(ts)
+    end
+  end
 
-            head ->
-              head
+  # `for (lhs of/in …)` or `for (init; …)` whose head is an expression
+  defp for_lhs_head(ts) do
+    {lhs, after_lhs} =
+      case destructuring_head(ts) do
+        nil ->
+          try do
+            unary_or_lhs(ts)
+          catch
+            # an init such as `typeof a == "x" && b()` is no left-hand side
+            {:syntax, _} -> {nil, []}
           end
 
-        case after_lhs do
-          # `for (async of => {}; ;)` is an arrow function init, not a for-of
-          [{:id, "of", _}, {:p, "=>", _} | _] when lhs == {:id, "async"} ->
-            {e, t} = expression(ts)
-            for_rest({:expr, e}, t)
+        head ->
+          head
+      end
 
-          [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
-            check_for_target(lhs, ts, of_in)
-            {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
-            t = expect(t, ")")
-            {body, t} = loop_body(t)
-            {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
+    case after_lhs do
+      # `for (async of => {}; ;)` is an arrow function init, not a for-of
+      [{:id, "of", _}, {:p, "=>", _} | _] when lhs == {:id, "async"} ->
+        {e, t} = expression(ts)
+        for_rest({:expr, e}, t)
 
-          _ ->
-            {e, t} = expression(ts)
-            for_rest({:expr, e}, t)
-        end
+      [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
+        check_for_target(lhs, ts, of_in)
+        {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
+        t = expect(t, ")")
+        {body, t} = loop_body(t)
+        {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
+
+      _ ->
+        {e, t} = expression(ts)
+        for_rest({:expr, e}, t)
     end
   end
 

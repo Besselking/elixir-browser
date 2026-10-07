@@ -488,6 +488,7 @@ defmodule Browser.JS.Interp do
       num?(a) and is_binary(b) -> Num.equal?(a, to_num(b))
       is_binary(a) and num?(b) -> Num.equal?(to_num(a), b)
       match?({:obj, _}, a) and match?({:obj, _}, b) -> a == b
+      match?({:symbol, _, _}, a) and match?({:symbol, _, _}, b) -> a == b
       match?({:obj, _}, a) -> loose_eq(to_primitive(a, "default"), b)
       match?({:obj, _}, b) -> loose_eq(a, to_primitive(b, "default"))
       true -> false

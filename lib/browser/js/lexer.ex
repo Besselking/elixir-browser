@@ -45,7 +45,16 @@ defmodule Browser.JS.Lexer do
     do: lex(rest, true, acc)
 
   defp lex(<<c::utf8, rest::binary>> = s, nl, acc) when c > 127 do
-    if space_cp?(c), do: lex(rest, nl, acc), else: lex_ident(s, nl, acc)
+    cond do
+      space_cp?(c) ->
+        lex(rest, nl, acc)
+
+      c in [0x2E2F, 0x180E] ->
+        throw({:syntax, "unexpected character U+#{Integer.to_string(c, 16)}"})
+
+      true ->
+        lex_ident(s, nl, acc)
+    end
   end
 
   defp lex("//" <> rest, nl, acc), do: lex(skip_line(rest), nl, acc)
@@ -257,13 +266,13 @@ defmodule Browser.JS.Lexer do
   defp id_escape?(cp) when cp < 128,
     do: cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in [?_, ?$]
 
-  defp id_escape?(cp), do: not space_cp?(cp)
+  defp id_escape?(cp), do: not space_cp?(cp) and cp not in [0x2E2F, 0x180E]
 
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
     case s do
       <<cp::utf8, _::binary>> when cp > 127 ->
-        if space_cp?(cp),
+        if space_cp?(cp) or cp in [0x2E2F, 0x180E],
           do: {acc |> Enum.reverse() |> :binary.list_to_bin(), s},
           else: ident(rest, [c | acc])
 

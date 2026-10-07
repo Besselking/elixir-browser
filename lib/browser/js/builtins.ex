@@ -977,6 +977,7 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     # the prototypes are themselves a String, a Number and a Boolean
     wrap(proto(:string), "")
+    put_const(proto(:string), "length", 0.0)
     wrap(proto(:number), 0.0)
     wrap(proto(:boolean), false)
 
