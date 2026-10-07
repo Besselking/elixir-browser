@@ -4123,7 +4123,9 @@ css/css-sizing/abspos-stretch-indefinite-cb.html
 css/css-sizing/aspect-ratio-percentage-height.html
 css/css-sizing/aspect-ratio/abspos-001.html
 css/css-sizing/aspect-ratio/abspos-002.html
+css/css-sizing/aspect-ratio/abspos-003.html
 css/css-sizing/aspect-ratio/abspos-004.html
+css/css-sizing/aspect-ratio/abspos-005.html
 css/css-sizing/aspect-ratio/abspos-006.html
 css/css-sizing/aspect-ratio/abspos-007.html
 css/css-sizing/aspect-ratio/abspos-010.html
@@ -4164,6 +4166,7 @@ css/css-sizing/aspect-ratio/block-aspect-ratio-030.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-033.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-034.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-035.html
+css/css-sizing/aspect-ratio/block-aspect-ratio-036.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-037.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-038.html
 css/css-sizing/aspect-ratio/block-aspect-ratio-039.html

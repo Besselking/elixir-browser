@@ -3843,9 +3843,14 @@ defmodule Browser.Layout do
     # `top` and `bottom` with an auto height stretch the box between them
     sub =
       cond do
-        (spec.autoh and top) && bottom -> stretch(sub, origin.h - top - bottom)
-        is_number(spec.hpct) and origin.h -> set_height(sub, spec.hpct * origin.h)
-        true -> sub
+        (spec.autoh and top) && bottom ->
+          stretch(sub, origin.h - top - bottom, left != nil and right != nil)
+
+        is_number(spec.hpct) and origin.h ->
+          set_height(sub, spec.hpct * origin.h)
+
+        true ->
+          sub
       end
 
     {items, height} = layout_sub(st, sub, width)
@@ -3918,8 +3923,12 @@ defmodule Browser.Layout do
   end
 
   # the first box of an absolute element is `target` tall (max-height and min-height still apply)
-  defp stretch(sub, target) do
+  defp stretch(sub, target, both_sides?) do
     case own_box(sub) do
+      # a box with an aspect ratio whose width is set by `left` and `right` takes its height from it
+      {_before, _ref, %{ratio: {_, _}}, _tail} when both_sides? ->
+        sub
+
       {before, ref, o, tail} ->
         {bt, _, bb, _} = o.bw
         extra = if o.sizing == :border, do: 0, else: bt + o.pt + o.pb + bb
@@ -4204,13 +4213,26 @@ defmodule Browser.Layout do
     width =
       case resolve(spec.width, avail) do
         nil ->
-          content_width(st, sub, spec, avail)
+          case ratio_fit(sub, spec) do
+            nil -> content_width(st, sub, spec, avail)
+            w -> w + spec.extra + spec.mextra
+          end
 
         w ->
           w + spec.extra + spec.mextra
       end
 
     clamp_width(width, spec, avail)
+  end
+
+  # an inline-block that has a height and an aspect ratio is as wide as they make it
+  defp ratio_fit(sub, spec) do
+    with {_before, _ref, %{ratio: {_, _}, h: h} = o, _tail} when is_number(h) <- own_box(sub),
+         true <- spec.sizing not in [:minc, :maxc] do
+      ratio_width(o, spec.extra)
+    else
+      _ -> nil
+    end
   end
 
   defp content_width(st, sub, %{sizing: :minc} = spec, _avail),
