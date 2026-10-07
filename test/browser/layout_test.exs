@@ -2690,6 +2690,28 @@ defmodule Browser.LayoutTest do
       assert at(items, "aa").x == at(items, "c").x
     end
 
+    test "a block-wide cell leaves the others as wide as their unbreakable text" do
+      {items, _} =
+        tbl(
+          ~s|<style>td{white-space:nowrap} .w{width:100%;white-space:normal}| <>
+            ~s|a{display:inline-block;max-width:100%}</style>| <>
+            ~s|<table style="width:100%"><tr><td><a href="#">e20f986af5</a></td>| <>
+            ~s|<td class="w"><a href="#">subject line</a></td></tr></table>|
+        )
+
+      assert at(items, "subject").x >= at(items, "e20f986af5").x + 80
+    end
+
+    test "text-wrap: nowrap keeps a cell's text on one line" do
+      {items, _} =
+        tbl(
+          ~s|<style>td{text-wrap:nowrap}</style><table style="width:100%">| <>
+            ~s|<tr><td>10 days</td><td style="width:100%;text-wrap:wrap">x</td></tr></table>|
+        )
+
+      assert at(items, "10").y == at(items, "days").y
+    end
+
     test "the table is as wide as its columns need, not the whole window" do
       {items, _} =
         tbl(~s|<table style="background:#eee"><tr><td>aa</td><td>bbbb</td></tr></table>|)
