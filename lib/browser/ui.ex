@@ -515,6 +515,9 @@ defmodule Browser.UI do
     end
   end
 
+  # `font-size: 0` is real (icon fonts, hidden text); measure it as 1px so the ratios stay finite
+  defp measure_units(%{size: size} = style) when size < 1, do: measure_units(%{style | size: 1})
+
   defp measure_units(%{size: size} = style) do
     side = max(ceil(size * 3), 8)
     bitmap = :wxBitmap.new(side, side)

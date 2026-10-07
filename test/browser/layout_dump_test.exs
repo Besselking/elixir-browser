@@ -27,4 +27,15 @@ defmodule Browser.LayoutDumpTest do
     out = dump("<div style='margin:4px;border:1px solid red;padding:2px'>x</div>", style: true)
     assert out =~ "m=4,4,4,4 b=1,1,1,1 p=2,2,2,2"
   end
+
+  test "overflow on html and body does not cut the page to the window" do
+    rows = String.duplicate("<div style='height:40px'>row</div>", 60)
+
+    html =
+      "<style>html,body{height:100%;margin:0}html{overflow:hidden;overflow-y:auto}" <>
+        "body{overflow:hidden;height:auto}html,body{overflow-y:inherit}</style>" <> rows
+
+    [_, height] = Regex.run(~r/content height (\d+)/, dump(html))
+    assert String.to_integer(height) > 2000
+  end
 end
