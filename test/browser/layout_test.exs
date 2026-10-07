@@ -3032,6 +3032,14 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "cc").x > 100
     end
 
+    test "a space before an empty inline box and one after it are one space" do
+      {items, _} =
+        fl(~s|<style>i{background:#eee}</style><p>aaaa <i></i> bbbb</p>|, 400)
+
+      {plain, _} = fl(~s|<p>aaaa bbbb</p>|, 400)
+      assert word_at(items, "bbbb").x == word_at(plain, "bbbb").x
+    end
+
     test "an absolute box without offsets sits at its static position, at the right when rtl" do
       {items, _} =
         fl(

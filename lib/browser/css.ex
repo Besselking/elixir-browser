@@ -626,7 +626,12 @@ defmodule Browser.CSS do
       inner
       |> split_top(?,)
       |> Enum.map(fn r ->
-        r |> String.trim() |> String.trim("\"") |> String.trim("'") |> String.downcase()
+        r
+        |> String.trim()
+        |> String.trim("\"")
+        |> String.trim("'")
+        |> String.replace(~r/\\(.)/, "\\1")
+        |> String.downcase()
       end)
 
     # an unquoted range is an identifier, which cannot start with a digit
@@ -1038,8 +1043,22 @@ defmodule Browser.CSS do
     attr_value(ctx.attrs, "lang") || attr_value(ctx.attrs, "xml:lang") || language(ctx.parent)
   end
 
-  defp lang_match?("*", lang), do: lang != ""
-  defp lang_match?(range, lang), do: lang == range or String.starts_with?(lang, range <> "-")
+  # extended filtering (RFC 4647): `*` stands for any subtag, and a range may skip subtags of
+  # the language tag, but not past a singleton such as `x`
+  defp lang_match?(range, lang) do
+    case {String.split(range, "-"), String.split(lang, "-")} do
+      {["*" | rs], [t | ts]} when t != "" -> lang_subtags(rs, ts)
+      {[r | rs], [r | ts]} -> lang_subtags(rs, ts)
+      _ -> false
+    end
+  end
+
+  defp lang_subtags([], _), do: true
+  defp lang_subtags(["*" | rs], ts), do: lang_subtags(rs, ts)
+  defp lang_subtags(_, []), do: false
+  defp lang_subtags([r | rs], [r | ts]), do: lang_subtags(rs, ts)
+  defp lang_subtags(_, [t | _]) when byte_size(t) == 1, do: false
+  defp lang_subtags(rs, [_ | ts]), do: lang_subtags(rs, ts)
 
   defp direction(nil), do: "ltr"
 

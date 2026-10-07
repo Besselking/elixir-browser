@@ -3166,6 +3166,8 @@ css/CSS2/text/white-space-applies-to-015.xht
 css/CSS2/text/white-space-collapsing-001.xht
 css/CSS2/text/white-space-collapsing-002.xht
 css/CSS2/text/white-space-collapsing-003.xht
+css/CSS2/text/white-space-collapsing-004.xht
+css/CSS2/text/white-space-collapsing-005.xht
 css/CSS2/text/white-space-collapsing-bidi-003.xht
 css/CSS2/text/white-space-collapsing-breaks-001.xht
 css/CSS2/text/white-space-mixed-003.xht
@@ -5298,6 +5300,7 @@ css/selectors/nth-child-of-nth-child.html
 css/selectors/nth-child-of-pseudo.html
 css/selectors/nth-child-of-tagname.html
 css/selectors/nth-child-of-universal-selector.html
+css/selectors/nth-child-specificity-1.html
 css/selectors/nth-child-specificity-2.html
 css/selectors/nth-child-specificity-3.html
 css/selectors/nth-child-specificity-4.html
@@ -5309,6 +5312,7 @@ css/selectors/nth-last-child-of-no-space-after-of.html
 css/selectors/nth-last-child-of-style-sharing-1.html
 css/selectors/nth-last-child-of-style-sharing-2.html
 css/selectors/nth-last-child-of-tagname.html
+css/selectors/nth-last-child-specificity-1.html
 css/selectors/nth-last-child-specificity-2.html
 css/selectors/nth-last-child-specificity-3.html
 css/selectors/nth-last-child-specificity-4.html
@@ -5323,13 +5327,21 @@ css/selectors/selectors-4/lang-003.html
 css/selectors/selectors-4/lang-004.html
 css/selectors/selectors-4/lang-005.html
 css/selectors/selectors-4/lang-006.html
+css/selectors/selectors-4/lang-007.html
+css/selectors/selectors-4/lang-008.html
+css/selectors/selectors-4/lang-009.html
+css/selectors/selectors-4/lang-010.html
 css/selectors/selectors-4/lang-011.html
 css/selectors/selectors-4/lang-012.html
 css/selectors/selectors-4/lang-013.html
 css/selectors/selectors-4/lang-014.html
+css/selectors/selectors-4/lang-015.html
 css/selectors/selectors-4/lang-016.html
+css/selectors/selectors-4/lang-017.html
+css/selectors/selectors-4/lang-018.html
 css/selectors/selectors-4/lang-019.html
 css/selectors/selectors-4/lang-020.html
+css/selectors/selectors-4/lang-021.html
 css/selectors/selectors-4/lang-022.html
 css/selectors/selectors-4/lang-023.html
 css/selectors/selectors-4/lang-024.html

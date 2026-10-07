@@ -203,6 +203,16 @@ defmodule Browser.CSSTest do
     refute sm?(":scope", p)
   end
 
+  test ":lang() ranges use extended filtering" do
+    fr = ctx("span", [{"lang", "fr-Latn-FR-x-foobar"}])
+    assert sm?(~s|:lang("*-FR")|, fr)
+    assert sm?(~s|:lang("*-Latn")|, fr)
+    assert sm?(~s|:lang("fr-x-foobar")|, fr)
+    assert sm?(":lang(\\*-FR)", fr)
+    refute sm?(~s|:lang("fr-Cyrl")|, fr)
+    refute sm?(~s|:lang("fr-foobar")|, fr)
+  end
+
   test ":nth-of-type, :first-of-type and :empty" do
     a = ctx("b", [], index: 1, count: 3)
     p = ctx("p", [], index: 2, count: 3, prev: [a])

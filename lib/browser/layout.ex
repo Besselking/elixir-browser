@@ -2629,7 +2629,10 @@ defmodule Browser.Layout do
   defp op({:indent, px}, %{line: []} = st), do: %{st | lead: px}
   defp op({:indent, _px}, st), do: st
 
-  defp op({:space, style}, st), do: if(st.line == [], do: st, else: %{st | pending_space: style})
+  # (a space an inline box opened over already took the room of the one that follows it)
+  defp op({:space, style}, st),
+    do: if(st.line == [] or st.after_space, do: st, else: %{st | pending_space: style})
+
   defp op({:word, text, style}, st), do: word(text, style, false, st)
   defp op({:word, text, style, :pre}, st), do: word(text, style, true, st)
   defp op({:word, text, style, :glue}, st), do: word(text, style, false, st, 0, true)
