@@ -19,14 +19,14 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    symbols-as-weakmap-keys proxy-missing-checks
+    proxy-missing-checks
     Atomics.pause Atomics.waitAsync
-    immutable-arraybuffer WeakRef
-    FinalizationRegistry tail-call-optimization Temporal ShadowRealm
+    immutable-arraybuffer
+    tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names
-    uint8array-base64 upsert
+    uint8array-base64
     regexp-duplicate-named-groups legacy-regexp error-stack-accessor
     json-parse-with-source nonextensible-applies-to-private
   )

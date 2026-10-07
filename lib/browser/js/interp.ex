@@ -1053,6 +1053,7 @@ defmodule Browser.JS.Interp do
         case mod.host_put(data, key, v, {:obj, id}) do
           :ok -> :ok
           :miss -> put_prop(id, o, key, v)
+          :readonly -> fail_put()
         end
 
       %{proxy: _} ->
