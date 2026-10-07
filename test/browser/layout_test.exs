@@ -5199,4 +5199,31 @@ defmodule Browser.LayoutTest do
       assert blue.y == 40
     end
   end
+
+  describe "positioned parts of a table and inline-level absolute boxes" do
+    test "a relatively positioned row moves its cells" do
+      html = """
+      <style>body{margin:0}</style>
+      <table style="border-spacing:0"><tr style="position:relative;left:30px"><td style="padding:0"><div style="width:20px;height:10px;background:blue"></div></td></tr></table>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.x == 30
+    end
+
+    test "an inline-level absolute box sits beside the floats of its line" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="float:left;width:50px;height:20px"></div>
+      <div style="display:inline;position:absolute;width:10px;height:10px;background:blue"></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.x == 50
+    end
+  end
 end

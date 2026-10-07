@@ -891,6 +891,9 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        # an inline-level box is where it would be on a line: beside the floats
+        inline: kind(tag, c) in [:inline, :inline_block],
+        align: parent_style.align,
         autoh: not replaced? and c["height"] in [nil, :auto] and c["max-height"] != :fit,
         mta: c["margin-top"] == :auto,
         mba: c["margin-bottom"] == :auto,
@@ -3590,9 +3593,29 @@ defmodule Browser.Layout do
     cw = origin.w
 
     {static_x, static_y} =
-      if st.line == [],
-        do: {st.margin + st.left, st.y + st.gap + st.ngap},
-        else: {st.x, st.y}
+      cond do
+        st.line != [] ->
+          {st.x, st.y}
+
+        Map.get(spec, :inline) ->
+          y = st.y + st.gap + st.ngap
+          {fl, fr} = float_offsets(st, y)
+          left = st.margin + st.left + fl
+          room = st.width - st.margin - st.right - fr - left
+
+          # the static position of the box is that of an empty one on the line
+          shift =
+            case Map.get(spec, :align) do
+              :center -> max(round(room / 2), 0)
+              align when align in [:right, :rstart] -> max(room, 0)
+              _ -> 0
+            end
+
+          {left + shift, y}
+
+        true ->
+          {st.margin + st.left, st.y + st.gap + st.ngap}
+      end
 
     static_right = st.width - st.margin - st.right
 
@@ -6072,9 +6095,23 @@ defmodule Browser.Layout do
         |> Map.put(:left, best_edge(edges.left, group.left))
         |> Map.put(:right, best_edge(edges.right, group.right))
 
-      %{row | edges: edges}
+      %{row | edges: edges, shift: add_shift(row.shift, rel_shift(gc))}
     end)
   end
+
+  defp paint_above(items, seq), do: Enum.map(items, &Map.merge(&1, %{over: true, pz: seq}))
+
+  # `position: relative` on a part of a table moves what it holds
+  defp rel_shift(c) do
+    if c["position"] == "relative" do
+      num = fn v -> if is_number(v), do: round(v), else: nil end
+      {num.(c["left"]) || -(num.(c["right"]) || 0), num.(c["top"]) || -(num.(c["bottom"]) || 0)}
+    else
+      {0, 0}
+    end
+  end
+
+  defp add_shift({a, b}, {c, d}), do: {a + c, b + d}
 
   # the borders an element (a row or a row group) brings to a table with collapsed borders
   defp edges_of(c) do
@@ -6117,7 +6154,8 @@ defmodule Browser.Layout do
       cells: cells,
       valign: valign_of(c["vertical-align"]),
       bg: row_bg(c) || group_bg,
-      edges: edges_of(c)
+      edges: edges_of(c),
+      shift: rel_shift(c)
     }
   end
 
@@ -6294,10 +6332,16 @@ defmodule Browser.Layout do
               items
             end
 
-          dx = Enum.at(xs, p.col)
-          dy = Enum.at(ys, p.row)
+          {sdx, sdy} = p.shift
+          dx = Enum.at(xs, p.col) + sdx
+          dy = Enum.at(ys, p.row) + sdy
           behind = if p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: []
-          for item <- behind ++ items, do: move(item, dx, dy)
+          moved = for item <- behind ++ items, do: move(item, dx, dy)
+
+          # what is moved is positioned: it paints above what is not
+          if p.shift == {0, 0},
+            do: moved,
+            else: paint_above(moved, :erlang.unique_integer([:monotonic]))
         end
 
       height = top + sy + Enum.sum(row_heights) + sy * nrows
@@ -6389,6 +6433,7 @@ defmodule Browser.Layout do
               col: col,
               row_valign: row.valign,
               row_bg: row.bg,
+              shift: row.shift,
               redges: row.edges,
               top_edge: top,
               bottom_edge: last_row.bottom
