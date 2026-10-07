@@ -10319,6 +10319,7 @@ built-ins/Object/getOwnPropertyNames/15.2.3.4-2-2.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-2-3.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-2-4.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-3-1.js
+built-ins/Object/getOwnPropertyNames/15.2.3.4-4-1.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-4-2.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-4-36.js
 built-ins/Object/getOwnPropertyNames/15.2.3.4-4-37.js
@@ -30569,6 +30570,7 @@ language/expressions/yield/formal-parameters-after-reassignment-strict.js
 language/expressions/yield/formal-parameters.js
 language/expressions/yield/from-catch.js
 language/expressions/yield/from-try.js
+language/expressions/yield/from-with.js
 language/expressions/yield/in-rltn-expr.js
 language/expressions/yield/invalid-left-hand-side.js
 language/expressions/yield/iter-value-specified.js
