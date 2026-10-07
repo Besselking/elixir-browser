@@ -2959,6 +2959,13 @@ defmodule Browser.JS.Interp do
 
   defp bind_name(:let, env, name, v), do: declare(env, name, v)
   defp bind_name(:const, env, name, v), do: declare(env, name, v, true)
+  # a destructuring assignment in strict code throws on a name that does not resolve
+  defp bind_name(:assign, env, name, v) do
+    if lookup_var(env, :strict) == {:ok, true},
+      do: strict_assign_var(env, name, v, resolvable?(env, name)),
+      else: assign_var(env, name, v)
+  end
+
   defp bind_name(_, env, name, v), do: assign_var(env, name, v)
 
   defp key_of({:str, s}, _), do: s
