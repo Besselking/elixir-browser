@@ -2492,6 +2492,8 @@ defmodule Browser.Layout do
   # a block holding nothing but floats still contains them (the usual "clearfix")
   defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
     st = if st.y == y0, do: contain_floats(st, n0), else: st
+    # the margin below a box is not one of a first child
+    st = %{st | clr: nil}
     st = end_block(st)
     %{st | insets: rest, left: l, right: r}
   end
@@ -2575,7 +2577,7 @@ defmodule Browser.Layout do
         st.open[ref].o[:ratio] == nil
 
     st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
-    st = %{st | ptop: List.delete(st.ptop, ref)}
+    st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}
     {box, open} = Map.pop(st.open, ref)
     {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
@@ -2994,7 +2996,13 @@ defmodule Browser.Layout do
       if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
     else
       bfc? = o.clip or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
+      # the margin of a first child still collapses with the clearance of the box above it
+      clr =
+        if bt == 0 and o.pt == 0 and not bfc? and st.y == elem(st.clr || {0, 0, nil}, 2),
+          do: st.clr
+
       st = st |> apply_gap() |> place_box(ref, percent_height(st, o))
+      st = if clr, do: %{st | clr: clr}, else: st
 
       if bfc? and Map.has_key?(st.open, ref),
         do: %{st | open: Map.update!(st.open, ref, &Map.put(&1, :bfc, true))},
