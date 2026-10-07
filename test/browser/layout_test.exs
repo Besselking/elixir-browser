@@ -5341,5 +5341,20 @@ defmodule Browser.LayoutTest do
       assert [%{x: x}] = Enum.filter(items, &(&1.type == :text))
       assert x < 100
     end
+
+    test "a soft hyphen is a place to break, with a hyphen shown there" do
+      html = ~s(<div style="width:40px">ab&shy;cd&shy;ef gh</div>)
+      assert wrapped_lines(laid_out(html)) == ["abcd-", "efgh"]
+    end
+
+    test "a word that fits keeps its soft hyphens out of sight" do
+      html = ~s(<div style="width:200px">ab&shy;cd</div>)
+      assert wrapped_lines(laid_out(html)) == ["abcd"]
+    end
+
+    test "hyphens: none ignores soft hyphens" do
+      html = ~s(<div style="width:32px;hyphens:none">ab&shy;cd&shy;ef</div>)
+      assert wrapped_lines(laid_out(html)) == ["abcdef"]
+    end
   end
 end
