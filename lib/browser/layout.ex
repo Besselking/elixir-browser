@@ -163,6 +163,8 @@ defmodule Browser.Layout do
     ops = nodes |> walk(style, []) |> Enum.reverse()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    # column break markers that no column set read
+    items = Enum.reject(items, &(&1.type == :colbreak))
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -1319,7 +1321,14 @@ defmodule Browser.Layout do
     end
   end
 
+  # `break-before/after: column` leave a marker the column set around the block reads
   defp block_ops(tag, kind, kids, style, c, acc) do
+    acc = if c["break-before"] in ["column", "all"], do: [{:colbreak} | acc], else: acc
+    acc = block_ops_inner(tag, kind, kids, style, c, acc)
+    if c["break-after"] in ["column", "all"], do: [{:colbreak} | acc], else: acc
+  end
+
+  defp block_ops_inner(tag, kind, kids, style, c, acc) do
     box = box(tag, c)
 
     acc =
@@ -1641,12 +1650,47 @@ defmodule Browser.Layout do
         walk_children(tag, kids, style, acc)
 
       cs ->
-        sub = tag |> walk_children(kids, style, []) |> Enum.reverse()
-        [{:columns, cs, sub, style} | acc]
+        case split_spanners(kids) do
+          [{:flow, _}] ->
+            sub = tag |> walk_children(kids, style, []) |> Enum.reverse()
+            [{:columns, Map.put(cs, :height, columns_height(tag, c)), sub, style} | acc]
+
+          parts ->
+            # `column-span: all` children run across all the columns: the content before and
+            # after them is poured into columns of its own
+            Enum.reduce(parts, acc, fn
+              {:flow, flow}, acc ->
+                sub = tag |> walk_children(flow, style, []) |> Enum.reverse()
+                [{:columns, Map.put(cs, :height, nil), sub, style} | acc]
+
+              {:span, node}, acc ->
+                walk_children(tag, [node], style, acc)
+            end)
+        end
     end
   end
 
   defp block_children(tag, _kind, kids, style, _c, acc), do: walk_children(tag, kids, style, acc)
+
+  # the children of a multicol container as runs of flow and the `column-span: all` ones
+  defp split_spanners(kids) do
+    kids
+    |> Enum.chunk_by(&spanner?/1)
+    |> Enum.map(fn [first | _] = run ->
+      if spanner?(first), do: {:span_run, run}, else: {:flow, run}
+    end)
+    |> Enum.flat_map(fn
+      {:span_run, run} -> Enum.map(run, &{:span, &1})
+      flow -> [flow]
+    end)
+  end
+
+  defp spanner?({:element, tag, attrs, _kids}) do
+    c = computed(attrs)
+    c["column-span"] == "all" and kind(tag, c) == :block and c["float"] in [nil, "none"]
+  end
+
+  defp spanner?(_), do: false
 
   defp columns_spec(c) do
     count = c["column-count"]
@@ -1655,7 +1699,36 @@ defmodule Browser.Layout do
     if count || width do
       fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
       gap = if is_number(c["column-gap"]), do: c["column-gap"], else: fs
-      %{count: count, width: width, gap: gap}
+      %{count: count, width: width, gap: gap, fill: c["column-fill"], rule: column_rule(c, fs)}
+    end
+  end
+
+  # the line between columns: {width, color} (`medium` and the text colour when not given)
+  defp column_rule(c, _fs) do
+    w = if is_number(c["column-rule-width"]), do: c["column-rule-width"], else: 3.0
+    # widths are whole pixels: a thin one is rounded up to one, the others down
+    w = if w > 0 and w < 1, do: 1, else: trunc(w)
+
+    if c["column-rule-style"] in [nil, "none", "hidden"] or w <= 0,
+      do: nil,
+      else: {w, c["column-rule-color"] || c["color"] || {0, 0, 0}}
+  end
+
+  # the height a multicol box's columns have (its content height), when it is set
+  defp columns_height(tag, c) do
+    case num(c["height"]) do
+      nil ->
+        # a height limit sets the column height too when the columns fill one after another
+        if c["column-fill"] == "auto", do: num(c["max-height"])
+
+      h ->
+        if c["box-sizing"] == "border-box" do
+          box = box(tag, c)
+          {bt, _br, bb, _bl} = box.bw
+          max(h - bt - bb - box.pt - box.pb, 0)
+        else
+          h
+        end
     end
   end
 
@@ -2595,6 +2668,12 @@ defmodule Browser.Layout do
     %{st | items: [item | st.items], n: st.n + 1, y: st.y + 2}
   end
 
+  # where a column must end (`break-before/after: column`): a marker the columns read
+  defp op({:colbreak}, st) do
+    st = st |> flush() |> apply_gap()
+    %{st | items: [%{type: :colbreak, x: 0, y: st.y, h: 0} | st.items], n: st.n + 1}
+  end
+
   defp op({:box_start, ref, o}, st), do: start_box(st, ref, o)
 
   # A fieldset's legend is laid out on its own, shrink-to-fit, at the top of the fieldset with its
@@ -2728,7 +2807,7 @@ defmodule Browser.Layout do
       Enum.reduce(sub, st, &op/2)
     else
       {items, height, _} = layout_atom(st, sub, colw)
-      {laid, height} = split_columns(items, height, n, colw, cs.gap)
+      {laid, height} = split_columns(items, height, n, colw, cs)
       laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
 
       place_atom(st, %{
@@ -3526,6 +3605,8 @@ defmodule Browser.Layout do
         do: [%{type: :box, x: x, y: y, w: w, h: height}],
         else: []
 
+    # a box that clips its content (overflow) is not split across columns
+    body = if o[:clip], do: Enum.map(body, &Map.put(&1, :mono, true)), else: body
     shadows ++ body ++ marker
   end
 
@@ -5561,9 +5642,11 @@ defmodule Browser.Layout do
     {n, max((avail - (n - 1) * gap) / n, 1)}
   end
 
-  # Cuts laid-out content (`items`, `height` tall) into `n` columns of the least height that
-  # holds it when columns break between lines. -> {the items placed, the height used}
-  defp split_columns(items, height, n, colw, gap) do
+  # Cuts laid-out content (`items`, `height` tall) into columns. With a height of its own (and
+  # `column-fill: auto`) every column is that tall and the rest spills into more columns; else
+  # the columns are as short as the content allows, `n` of them. Lines move whole into the
+  # next column, backgrounds are cut where a column ends. -> {the items placed, the height used}
+  defp split_columns(items, height, n, colw, %{gap: gap} = cs) do
     lines =
       items
       |> Enum.filter(&(&1.type not in [:rect, :box]))
@@ -5571,27 +5654,98 @@ defmodule Browser.Layout do
       |> Enum.uniq()
       |> Enum.sort()
 
-    # the top of each line, with the bottom of the lowest thing on it
-    starts_for = fn h -> column_starts(lines, h) end
-    fits? = fn h -> length(starts_for.(h)) <= n end
+    top0 = with [{t, _} | _] <- lines, do: t, else: (_ -> 0)
+    fixed = cs.height
 
-    low = max(ceil(height / n), 1)
-    best = if fits?.(low), do: low, else: search_height(fits?, low, max(height, low))
-    starts = starts_for.(best)
+    forced =
+      for(%{type: :colbreak, y: y} <- items, y > 0 and y < height, uniq: true, do: y)
+      |> Enum.sort()
 
-    ends = Enum.drop(starts, 1) ++ [height]
-    used = Enum.zip(starts, ends) |> Enum.map(fn {a, b} -> b - a end) |> Enum.max(fn -> 0 end)
-    bounds = Enum.with_index(starts)
+    items = Enum.reject(items, &(&1.type == :colbreak))
+    sliced? = fixed != nil or forced != []
 
-    placed =
-      for it <- items do
-        {start, k} =
-          bounds |> Enum.filter(fn {s, _} -> s <= it.y end) |> List.last() || {0, 0}
+    h =
+      cond do
+        fixed && cs.fill == "auto" ->
+          fixed
 
-        move(it, round(k * (colw + gap)), -start)
+        true ->
+          fits? = fn h -> length(column_starts(lines, height, h, top0, forced, sliced?)) <= n end
+          low = max(ceil(height / n), 1)
+          high = max(ceil(height), low)
+          high = if fixed, do: max(min(high, ceil(fixed)), 1), else: high
+          if fits?.(low), do: low, else: search_height(fits?, low, high)
       end
 
-    {placed, used}
+    starts = lines |> column_starts(height, h, top0, forced, sliced?) |> Enum.map(&round/1)
+    ends = Enum.drop(starts, 1) ++ [:infinity]
+    cols = starts |> Enum.zip(ends) |> Enum.with_index()
+
+    used =
+      cond do
+        fixed ->
+          fixed
+
+        true ->
+          starts
+          |> Enum.zip(Enum.drop(starts, 1) ++ [height])
+          |> Enum.map(fn {a, b} -> b - a end)
+          |> Enum.max(fn -> 0 end)
+      end
+
+    placed =
+      Enum.flat_map(items, fn it ->
+        if sliced? and it.type in [:rect, :box] and not Map.get(it, :mono, false) and
+             Map.get(it, :h, 0) > 0 do
+          cut_rect(it, cols, colw, gap)
+        else
+          {{start, _}, k} =
+            cols |> Enum.filter(fn {{s, _}, _} -> s <= it.y end) |> List.last() || {{0, 0}, 0}
+
+          [move(it, round(k * (colw + gap)), -start)]
+        end
+      end)
+
+    used = round(used)
+    {placed ++ column_rules(cs, length(cols), colw, used), used}
+  end
+
+  # a background or border box cut into the part that lies in each column
+  defp cut_rect(it, cols, colw, gap) do
+    top = it.y
+    bottom = it.y + it.h
+
+    pieces =
+      for {{s, e}, k} <- cols, top < ((e == :infinity && bottom + 1) || e), bottom > s do
+        y0 = max(top, s)
+        y1 = if e == :infinity, do: bottom, else: min(bottom, e)
+        piece = %{it | y: y0, h: y1 - y0}
+
+        piece =
+          case piece do
+            %{border: %{w: {bt, br, bb, bl}} = b} ->
+              bt = if y0 > top, do: 0, else: bt
+              bb = if y1 < bottom, do: 0, else: bb
+              %{piece | border: %{b | w: {bt, br, bb, bl}}}
+
+            _ ->
+              piece
+          end
+
+        move(piece, round(k * (colw + gap)), -s)
+      end
+
+    if pieces == [], do: [it], else: pieces
+  end
+
+  # a rule down the middle of the gap between each two columns that have content
+  defp column_rules(%{rule: nil}, _count, _colw, _h), do: []
+
+  defp column_rules(%{rule: {w, color}, gap: gap}, count, colw, h) do
+    for k <- 1..(count - 1)//1 do
+      x = k * (colw + gap) - gap / 2 - w / 2
+      %{type: :rect, x: round(x), y: 0, w: round(w), h: round(h), color: color, rr: 0}
+    end
   end
 
   # the least height in low..high at which the lines fit the columns (fits? is monotonic)
@@ -5602,17 +5756,47 @@ defmodule Browser.Layout do
     if fits?.(mid), do: search_height(fits?, low, mid), else: search_height(fits?, mid + 1, high)
   end
 
-  # where each column starts when lines are poured into columns of height `h`: the first at the
-  # top, the others as far above their first line as the first column's first line is below it
-  defp column_starts([], _h), do: [0]
+  # where each column starts when content is poured into columns of height `h`: the first at
+  # the top; a line that straddles the end of a column goes to the next, which starts as far
+  # above that line as the first column's first line (`top0`) is below its top
+  defp column_starts(lines, total, h, top0, forced, sliced?) do
+    if sliced?, do: do_starts(lines, total, h, top0, forced, 0, [0]), else: line_starts(lines, h)
+  end
 
-  defp column_starts([{top0, _} | _] = lines, h) do
+  # without a height of its own only lines break (what has no line is not cut: it may be
+  # unsplittable)
+  defp line_starts([], _h), do: [0]
+
+  defp line_starts([{top0, _} | _] = lines, h) do
     {breaks, _} =
       Enum.reduce(lines, {[], top0}, fn {t, b}, {breaks, start} ->
         if b - start > h and t > start, do: {[t | breaks], t}, else: {breaks, start}
       end)
 
     [0 | breaks |> Enum.reverse() |> Enum.map(&(&1 - top0))]
+  end
+
+  defp do_starts(lines, total, h, top0, forced, start, acc) do
+    edge = start + h
+    force = Enum.find(forced, &(&1 > start))
+
+    cond do
+      force != nil and force <= edge ->
+        do_starts(lines, total, h, top0, forced, force, [force | acc])
+
+      edge >= total ->
+        Enum.reverse(acc)
+
+      true ->
+        next =
+          case Enum.find(lines, fn {t, b} -> t < edge and b > edge and t > start + top0 end) do
+            {t, _} -> t - top0
+            nil -> edge
+          end
+
+        next = if next <= start, do: edge, else: next
+        do_starts(lines, total, h, top0, forced, next, [next | acc])
+    end
   end
 
   defp flex_direction("row-reverse"), do: :row_reverse
