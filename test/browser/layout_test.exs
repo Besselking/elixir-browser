@@ -5412,6 +5412,18 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "borders of columns in a collapsed table" do
+    test "a colgroup's top border is drawn along the top of its columns" do
+      html =
+        ~s|<table style="border-collapse:collapse;border-spacing:0"><colgroup style="border-top:3px solid green"><col><col></colgroup><tr><td style="padding:0;width:40px;height:20px"></td><td style="padding:0;width:40px"></td></tr></table>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(&1.type == :rect and &1.color == {0, 128, 0} and &1.h == 3)
+             )
+    end
+  end
+
   describe "table-layout: fixed" do
     test "a zero-wide fixed table has zero-wide cells" do
       html =

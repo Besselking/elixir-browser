@@ -6584,12 +6584,13 @@ defmodule Browser.Layout do
     wid = fn c, inherited -> if is_number(c["width"]), do: c["width"], else: inherited end
 
     col = fn {:element, _, attrs, _}, c, inherited ->
-      List.duplicate(%{bg: row_bg(c) || inherited.bg, w: wid.(c, inherited.w)}, span.(attrs))
+      entry = %{bg: row_bg(c) || inherited.bg, w: wid.(c, inherited.w), edges: edges_of(c)}
+      List.duplicate(entry, span.(attrs))
     end
 
     Enum.flat_map(parts, fn
       {:col, el, _tag, c, _kids} ->
-        col.(el, c, %{bg: nil, w: nil})
+        el |> col.(c, %{bg: nil, w: nil}) |> outer_sides()
 
       {:colgroup, {:element, _, attrs, _}, _tag, c, kids} ->
         inner =
@@ -6600,12 +6601,77 @@ defmodule Browser.Layout do
               entry <- col.(cel, cc, %{bg: row_bg(c), w: wid.(c, nil)}),
               do: entry
 
-        if inner == [],
-          do: List.duplicate(%{bg: row_bg(c), w: wid.(c, nil)}, span.(attrs)),
-          else: inner
+        cols =
+          if inner == [],
+            do:
+              List.duplicate(
+                %{bg: row_bg(c), w: wid.(c, nil), edges: edges_of(c)},
+                span.(attrs)
+              ),
+            else: inner
+
+        group = edges_of(c)
+
+        cols
+        |> Enum.with_index()
+        |> Enum.map(fn {col, i} ->
+          edges = col.edges
+
+          edges = Map.put(edges, :top, best_edge(edges.top, group.top))
+          edges = Map.put(edges, :bottom, best_edge(edges.bottom, group.bottom))
+
+          edges =
+            if i == 0, do: Map.put(edges, :left, best_edge(edges.left, group.left)), else: edges
+
+          edges =
+            if i == length(cols) - 1,
+              do: Map.put(edges, :right, best_edge(edges.right, group.right)),
+              else: edges
+
+          %{col | edges: edges}
+        end)
 
       _ ->
         []
+    end)
+  end
+
+  # with collapsed borders the borders of a column (group) join those of the cells at the edges
+  defp column_edges(placed, cols, nrows) do
+    Enum.map(placed, fn p ->
+      spanned = cols |> Enum.slice(p.col, p.cell.colspan) |> Enum.map(&Map.get(&1, :edges))
+      best = fn side -> Enum.reduce(spanned, nil, &best_edge(&2, &1 && Map.get(&1, side))) end
+      first = Enum.at(cols, p.col)
+      last = Enum.at(cols, p.col + p.cell.colspan - 1)
+
+      redges =
+        p.redges
+        |> Map.put(:left, best_edge(p.redges.left, first && first.edges[:left]))
+        |> Map.put(:right, best_edge(p.redges.right, last && last.edges[:right]))
+
+      %{
+        p
+        | redges: redges,
+          top_edge: if(p.row == 0, do: best_edge(p.top_edge, best.(:top)), else: p.top_edge),
+          bottom_edge:
+            if(p.row + min(p.cell.rowspan, nrows - p.row) >= nrows,
+              do: best_edge(p.bottom_edge, best.(:bottom)),
+              else: p.bottom_edge
+            )
+      }
+    end)
+  end
+
+  # of the columns of one `col` only the first keeps its left border and the last its right one
+  defp outer_sides(cols) do
+    last = length(cols) - 1
+
+    cols
+    |> Enum.with_index()
+    |> Enum.map(fn {col, i} ->
+      edges = if i == 0, do: col.edges, else: Map.put(col.edges, :left, nil)
+      edges = if i == last, do: edges, else: Map.put(edges, :right, nil)
+      %{col | edges: edges}
     end)
   end
 
@@ -6832,6 +6898,7 @@ defmodule Browser.Layout do
     placed = table_grid(model.rows)
     ncols = placed |> Enum.map(&(&1.col + &1.cell.colspan)) |> Enum.max(fn -> 0 end)
     nrows = length(model.rows)
+    placed = if ts.collapse?, do: column_edges(placed, model.cols, nrows), else: placed
     sx = ts.sx
     sy = ts.sy
 

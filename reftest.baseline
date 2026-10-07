@@ -261,6 +261,8 @@ css/CSS2/borders/border-bottom-applies-to-001.xht
 css/CSS2/borders/border-bottom-applies-to-002.xht
 css/CSS2/borders/border-bottom-applies-to-003.xht
 css/CSS2/borders/border-bottom-applies-to-004.xht
+css/CSS2/borders/border-bottom-applies-to-005.xht
+css/CSS2/borders/border-bottom-applies-to-006.xht
 css/CSS2/borders/border-bottom-applies-to-007.xht
 css/CSS2/borders/border-bottom-applies-to-009.xht
 css/CSS2/borders/border-bottom-applies-to-012.xht
@@ -274,6 +276,8 @@ css/CSS2/borders/border-bottom-color-applies-to-001.xht
 css/CSS2/borders/border-bottom-color-applies-to-002.xht
 css/CSS2/borders/border-bottom-color-applies-to-003.xht
 css/CSS2/borders/border-bottom-color-applies-to-004.xht
+css/CSS2/borders/border-bottom-color-applies-to-005.xht
+css/CSS2/borders/border-bottom-color-applies-to-006.xht
 css/CSS2/borders/border-bottom-color-applies-to-007.xht
 css/CSS2/borders/border-bottom-color-applies-to-009.xht
 css/CSS2/borders/border-bottom-color-applies-to-012.xht
@@ -344,6 +348,8 @@ css/CSS2/borders/border-bottom-width-applies-to-001.xht
 css/CSS2/borders/border-bottom-width-applies-to-002.xht
 css/CSS2/borders/border-bottom-width-applies-to-003.xht
 css/CSS2/borders/border-bottom-width-applies-to-004.xht
+css/CSS2/borders/border-bottom-width-applies-to-005.xht
+css/CSS2/borders/border-bottom-width-applies-to-006.xht
 css/CSS2/borders/border-bottom-width-applies-to-007.xht
 css/CSS2/borders/border-bottom-width-applies-to-009.xht
 css/CSS2/borders/border-bottom-width-applies-to-012.xht
@@ -367,6 +373,8 @@ css/CSS2/borders/border-left-applies-to-001.xht
 css/CSS2/borders/border-left-applies-to-002.xht
 css/CSS2/borders/border-left-applies-to-003.xht
 css/CSS2/borders/border-left-applies-to-004.xht
+css/CSS2/borders/border-left-applies-to-005.xht
+css/CSS2/borders/border-left-applies-to-006.xht
 css/CSS2/borders/border-left-applies-to-007.xht
 css/CSS2/borders/border-left-applies-to-009.xht
 css/CSS2/borders/border-left-applies-to-012.xht
@@ -380,6 +388,8 @@ css/CSS2/borders/border-left-color-applies-to-001.xht
 css/CSS2/borders/border-left-color-applies-to-002.xht
 css/CSS2/borders/border-left-color-applies-to-003.xht
 css/CSS2/borders/border-left-color-applies-to-004.xht
+css/CSS2/borders/border-left-color-applies-to-005.xht
+css/CSS2/borders/border-left-color-applies-to-006.xht
 css/CSS2/borders/border-left-color-applies-to-007.xht
 css/CSS2/borders/border-left-color-applies-to-009.xht
 css/CSS2/borders/border-left-color-applies-to-012.xht
@@ -450,6 +460,8 @@ css/CSS2/borders/border-left-width-applies-to-001.xht
 css/CSS2/borders/border-left-width-applies-to-002.xht
 css/CSS2/borders/border-left-width-applies-to-003.xht
 css/CSS2/borders/border-left-width-applies-to-004.xht
+css/CSS2/borders/border-left-width-applies-to-005.xht
+css/CSS2/borders/border-left-width-applies-to-006.xht
 css/CSS2/borders/border-left-width-applies-to-007.xht
 css/CSS2/borders/border-left-width-applies-to-009.xht
 css/CSS2/borders/border-left-width-applies-to-012.xht
@@ -466,6 +478,7 @@ css/CSS2/borders/border-right-applies-to-001.xht
 css/CSS2/borders/border-right-applies-to-002.xht
 css/CSS2/borders/border-right-applies-to-003.xht
 css/CSS2/borders/border-right-applies-to-004.xht
+css/CSS2/borders/border-right-applies-to-005.xht
 css/CSS2/borders/border-right-applies-to-007.xht
 css/CSS2/borders/border-right-applies-to-009.xht
 css/CSS2/borders/border-right-applies-to-012.xht
@@ -479,6 +492,7 @@ css/CSS2/borders/border-right-color-applies-to-001.xht
 css/CSS2/borders/border-right-color-applies-to-002.xht
 css/CSS2/borders/border-right-color-applies-to-003.xht
 css/CSS2/borders/border-right-color-applies-to-004.xht
+css/CSS2/borders/border-right-color-applies-to-005.xht
 css/CSS2/borders/border-right-color-applies-to-007.xht
 css/CSS2/borders/border-right-color-applies-to-009.xht
 css/CSS2/borders/border-right-color-applies-to-012.xht
@@ -548,6 +562,7 @@ css/CSS2/borders/border-right-width-applies-to-001.xht
 css/CSS2/borders/border-right-width-applies-to-002.xht
 css/CSS2/borders/border-right-width-applies-to-003.xht
 css/CSS2/borders/border-right-width-applies-to-004.xht
+css/CSS2/borders/border-right-width-applies-to-005.xht
 css/CSS2/borders/border-right-width-applies-to-007.xht
 css/CSS2/borders/border-right-width-applies-to-009.xht
 css/CSS2/borders/border-right-width-applies-to-012.xht
@@ -579,6 +594,8 @@ css/CSS2/borders/border-top-applies-to-001.xht
 css/CSS2/borders/border-top-applies-to-002.xht
 css/CSS2/borders/border-top-applies-to-003.xht
 css/CSS2/borders/border-top-applies-to-004.xht
+css/CSS2/borders/border-top-applies-to-005.xht
+css/CSS2/borders/border-top-applies-to-006.xht
 css/CSS2/borders/border-top-applies-to-007.xht
 css/CSS2/borders/border-top-applies-to-009.xht
 css/CSS2/borders/border-top-applies-to-012.xht
@@ -592,6 +609,8 @@ css/CSS2/borders/border-top-color-applies-to-001.xht
 css/CSS2/borders/border-top-color-applies-to-002.xht
 css/CSS2/borders/border-top-color-applies-to-003.xht
 css/CSS2/borders/border-top-color-applies-to-004.xht
+css/CSS2/borders/border-top-color-applies-to-005.xht
+css/CSS2/borders/border-top-color-applies-to-006.xht
 css/CSS2/borders/border-top-color-applies-to-007.xht
 css/CSS2/borders/border-top-color-applies-to-009.xht
 css/CSS2/borders/border-top-color-applies-to-012.xht
@@ -662,6 +681,8 @@ css/CSS2/borders/border-top-width-applies-to-001.xht
 css/CSS2/borders/border-top-width-applies-to-002.xht
 css/CSS2/borders/border-top-width-applies-to-003.xht
 css/CSS2/borders/border-top-width-applies-to-004.xht
+css/CSS2/borders/border-top-width-applies-to-005.xht
+css/CSS2/borders/border-top-width-applies-to-006.xht
 css/CSS2/borders/border-top-width-applies-to-007.xht
 css/CSS2/borders/border-top-width-applies-to-009.xht
 css/CSS2/borders/border-top-width-applies-to-012.xht
