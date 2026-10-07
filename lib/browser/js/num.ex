@@ -71,7 +71,7 @@ defmodule Browser.JS.Num do
 
   @doc "ToNumber on a string."
   def parse(s) do
-    s = String.trim(s)
+    s = Browser.JS.Interp.js_trim(s)
 
     cond do
       s == "" ->

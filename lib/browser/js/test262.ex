@@ -21,7 +21,6 @@ defmodule Browser.JS.Test262 do
   @unsupported_features ~w(
     proxy-missing-checks
     Atomics.waitAsync
-    immutable-arraybuffer
     tail-call-optimization Temporal ShadowRealm
     decorators import-attributes import-text import-bytes json-modules top-level-await
     source-phase-imports source-phase-imports-module-source import-defer

@@ -1670,6 +1670,12 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc "The values of `v` iterated with an iterator method already looked up."
+  def iterate_with(v, f) do
+    it = call(f, v, [])
+    pull(it, get(it, "next"), [])
+  end
+
   defp pull(it, next, acc) do
     r = call(next, it, [])
 
