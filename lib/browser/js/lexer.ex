@@ -10,7 +10,7 @@ defmodule Browser.JS.Lexer do
   """
 
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
-             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = ."
+             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
 
   @keywords ~w(break case catch class const continue debugger default delete do else enum export
@@ -20,9 +20,20 @@ defmodule Browser.JS.Lexer do
 
   @doc "`{:ok, tokens}` or `{:error, message}`."
   def tokenize(src) do
-    {:ok, lex(src, false, [])}
-  catch
-    {:syntax, msg} -> {:error, msg}
+    # a hashbang comment is only allowed at the very start
+    src = if match?("#!" <> _, src), do: skip_line(src), else: src
+    # which `{` opened a block (so a `/` after its `}` starts a regular expression); a
+    # template's `${ }` is tokenized by a nested call, so the state is saved around it
+    saved = {Process.put(:lex_braces, []), Process.put(:lex_block_close, nil)}
+
+    try do
+      {:ok, lex(src, false, [])}
+    catch
+      {:syntax, msg} -> {:error, msg}
+    after
+      Process.put(:lex_braces, elem(saved, 0))
+      Process.put(:lex_block_close, elem(saved, 1))
+    end
   end
 
   defp lex("", _nl, acc), do: Enum.reverse([{:eof, nil, true} | acc])
@@ -34,15 +45,27 @@ defmodule Browser.JS.Lexer do
     do: lex(rest, true, acc)
 
   defp lex(<<c::utf8, rest::binary>> = s, nl, acc) when c > 127 do
-    if space_cp?(c), do: lex(rest, nl, acc), else: lex_ident(s, nl, acc)
+    cond do
+      space_cp?(c) ->
+        lex(rest, nl, acc)
+
+      c in [0x2E2F, 0x180E] ->
+        throw({:syntax, "unexpected character U+#{Integer.to_string(c, 16)}"})
+
+      true ->
+        lex_ident(s, nl, acc)
+    end
   end
 
   defp lex("//" <> rest, nl, acc), do: lex(skip_line(rest), nl, acc)
 
   defp lex("/*" <> rest, nl, acc) do
     case String.split(rest, "*/", parts: 2) do
-      [comment, after_comment] -> lex(after_comment, nl or String.contains?(comment, "\n"), acc)
-      _ -> throw({:syntax, "unterminated comment"})
+      [comment, after_comment] ->
+        lex(after_comment, nl or String.contains?(comment, ["\n", "\r", "\u2028", "\u2029"]), acc)
+
+      _ ->
+        throw({:syntax, "unterminated comment"})
     end
   end
 
@@ -87,10 +110,31 @@ defmodule Browser.JS.Lexer do
     end
   end
 
+  defp lex("{" <> rest, nl, acc) do
+    Process.put(:lex_braces, [block_open?(acc) | Process.get(:lex_braces) || []])
+    lex(rest, false, [{:p, "{", nl} | acc])
+  end
+
+  defp lex("}" <> rest, nl, acc) do
+    acc = [{:p, "}", nl} | acc]
+
+    case Process.get(:lex_braces) do
+      [block? | outer] ->
+        Process.put(:lex_braces, outer)
+        if block?, do: Process.put(:lex_block_close, acc)
+
+      _ ->
+        :ok
+    end
+
+    lex(rest, false, acc)
+  end
+
   # `#name`: a private name
   defp lex(<<?#, c, _::binary>> = s, nl, acc)
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
     {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
+    zw_start!(name)
     lex(rest, false, [{:priv, name, nl} | acc])
   end
 
@@ -98,10 +142,18 @@ defmodule Browser.JS.Lexer do
 
   defp lex_ident(s, nl, acc) do
     {name, rest} = ident(s, [])
+    zw_start!(name)
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
-    kind = if (name in @keywords or name == "target") and escaped?(s, rest), do: :eid, else: :id
+    # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
+    kind =
+      if (name in @keywords or name in ~w(target get set of async from as)) and
+           name not in ~w(implements interface package private protected public) and
+           escaped?(s, rest),
+         do: :eid,
+         else: :id
+
     lex(rest, false, [{kind, name, nl} | acc])
   end
 
@@ -119,13 +171,63 @@ defmodule Browser.JS.Lexer do
     end
   end
 
-  @regex_keywords ~w(return typeof instanceof in of new delete void throw case do else yield await)
+  @regex_keywords ~w(return typeof instanceof in new delete void throw case do else yield await)
 
   # a `/` starts a regular expression where an operand is expected
   defp regex_allowed?([]), do: true
-  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]", "}"]
+  defp regex_allowed?([{:p, "}", _} | _] = acc), do: Process.get(:lex_block_close) === acc
+  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]"]
+  # (`of` is only a keyword in a `for (x of /re/...)` head, elsewhere it is a name)
+  defp regex_allowed?([{:id, "of", _} | rest]) do
+    match?([{:id, "for", _} | _], group_head(rest, 1)) or
+      match?([{:id, "await", _}, {:id, "for", _} | _], group_head(rest, 1))
+  end
+
   defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
   defp regex_allowed?(_), do: false
+
+  # does the `{` after these tokens open a block (a statement position) rather than an object?
+  defp block_open?(acc) do
+    case acc do
+      [] ->
+        true
+
+      [{:p, p, _} | _] when p in [";", "{", "}"] ->
+        true
+
+      [{:id, kw, _} | _] when kw in ["else", "try", "finally", "do"] ->
+        true
+
+      [{:id, name, _}, {:id, "class", _} | before] when name not in @keywords ->
+        stmt_start?(before)
+
+      [{:p, ")", _} | rest] ->
+        case group_head(rest, 1) do
+          [{:id, kw, _} | _] when kw in ["if", "for", "while", "with", "switch", "catch"] ->
+            true
+
+          [{:id, name, _}, {:id, "function", _} | before] when name not in @keywords ->
+            stmt_start?(before)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp stmt_start?([]), do: true
+  defp stmt_start?([{:p, p, _} | _]), do: p in [";", "{", "}"]
+  defp stmt_start?(_), do: false
+
+  # the tokens before the `(` that matches the `)` just dropped from the front
+  defp group_head([{:p, "(", _} | rest], 1), do: rest
+  defp group_head([{:p, "(", _} | rest], d), do: group_head(rest, d - 1)
+  defp group_head([{:p, ")", _} | rest], d), do: group_head(rest, d + 1)
+  defp group_head([_ | rest], d), do: group_head(rest, d)
+  defp group_head([], _), do: []
 
   defp regex(<<?\\, c::utf8, rest::binary>>, acc, cls),
     do: regex(rest, [<<?\\, c::utf8>> | acc], cls)
@@ -141,6 +243,9 @@ defmodule Browser.JS.Lexer do
   defp regex(<<c, _::binary>>, _acc, _cls) when c in [?\n, ?\r],
     do: throw({:syntax, "unterminated regular expression"})
 
+  defp regex(<<0xE2, 0x80, c, _::binary>>, _acc, _cls) when c in [0xA8, 0xA9],
+    do: throw({:syntax, "unterminated regular expression"})
+
   defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
   defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
 
@@ -148,6 +253,7 @@ defmodule Browser.JS.Lexer do
   defp regex_flags(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
   defp skip_line(<<c, _::binary>> = s) when c in [?\n, ?\r], do: s
+  defp skip_line(<<0xE2, 0x80, c, _::binary>> = s) when c in [0xA8, 0xA9], do: s
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)
   defp skip_line(""), do: ""
 
@@ -158,11 +264,23 @@ defmodule Browser.JS.Lexer do
   defp space_cp?(c),
     do: c in [0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF, 0x2028, 0x2029] or c in 0x2000..0x200A
 
+  # an escape in an identifier must spell an identifier character
+  defp id_escape?(cp) when cp < 128,
+    do: cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in [?_, ?$]
+
+  defp id_escape?(cp), do: not space_cp?(cp) and cp not in [0x2E2F, 0x180E]
+
+  # ZWNJ and ZWJ continue an identifier but cannot start one
+  defp zw_start!(<<cp::utf8, _::binary>>) when cp in [0x200C, 0x200D],
+    do: throw({:syntax, "invalid identifier start"})
+
+  defp zw_start!(_), do: :ok
+
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
     case s do
       <<cp::utf8, _::binary>> when cp > 127 ->
-        if space_cp?(cp),
+        if space_cp?(cp) or cp in [0x2E2F, 0x180E],
           do: {acc |> Enum.reverse() |> :binary.list_to_bin(), s},
           else: ident(rest, [c | acc])
 
@@ -175,7 +293,7 @@ defmodule Browser.JS.Lexer do
   defp ident(<<"\\u{", rest::binary>>, acc) do
     with [hex, rest] <- String.split(rest, "}", parts: 2),
          {cp, ""} <- Integer.parse(hex, 16),
-         true <- cp in 0..0x10FFFF do
+         true <- cp in 0..0x10FFFF and id_escape?(cp) do
       ident(rest, [<<cp::utf8>> | acc])
     else
       _ -> throw({:syntax, "bad unicode escape in identifier"})
@@ -184,8 +302,13 @@ defmodule Browser.JS.Lexer do
 
   defp ident(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
     case Integer.parse(hex, 16) do
-      {cp, ""} when cp not in 0xD800..0xDFFF -> ident(rest, [<<cp::utf8>> | acc])
-      _ -> throw({:syntax, "bad unicode escape in identifier"})
+      {cp, ""} when cp not in 0xD800..0xDFFF ->
+        if id_escape?(cp),
+          do: ident(rest, [<<cp::utf8>> | acc]),
+          else: throw({:syntax, "bad unicode escape in identifier"})
+
+      _ ->
+        throw({:syntax, "bad unicode escape in identifier"})
     end
   end
 
@@ -318,6 +441,7 @@ defmodule Browser.JS.Lexer do
   defp escape("\r\n" <> r), do: {"", r}
   defp escape("\r" <> r), do: {"", r}
   defp escape("\n" <> r), do: {"", r}
+  defp escape(<<0xE2, 0x80, c, r::binary>>) when c in [0xA8, 0xA9], do: {"", r}
 
   defp escape(<<"x", h::binary-size(2), r::binary>>) do
     {<<String.to_integer(h, 16)::utf8>>, r}
@@ -352,6 +476,7 @@ defmodule Browser.JS.Lexer do
     ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
+  defp escape("u" <> _), do: throw({:syntax, "bad \\u escape"})
   defp escape(<<c::utf8, r::binary>>), do: {<<c::utf8>>, r}
   defp escape(""), do: throw({:syntax, "unterminated string"})
 

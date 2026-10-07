@@ -5,12 +5,14 @@ defmodule Mix.Tasks.Browser.Screenshot do
   Loads a page, lays it out and draws it as SVG (see `Browser.Screenshot`), then turns the SVG
   into a PNG with headless Chromium when one is found (`CHROME` names the binary).
 
-      mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx]
+      mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx] [--js]
 
   With `--wx` the page is painted by the same code as the window, into a bitmap: its fonts,
   pictures and shadows. That needs an Erlang with wx and a display (`xvfb-run -a mix
   browser.screenshot ...` on a machine without one); when wx is not usable the SVG route is
   taken instead.
+
+  With `--js` the page's scripts run first (a page that fills itself in, an editor).
 
   The window is not needed, so this works in CI and in cloud sessions. `--height` is the
   top part of the page to keep (default: all of it, at most 6000 px). The SVG is kept next
@@ -28,7 +30,9 @@ defmodule Mix.Tasks.Browser.Screenshot do
   @impl true
   def run(args) do
     {opts, rest} =
-      OptionParser.parse!(args, strict: [width: :integer, height: :integer, wx: :boolean])
+      OptionParser.parse!(args,
+        strict: [width: :integer, height: :integer, wx: :boolean, js: :boolean]
+      )
 
     [url, out] = rest
 
@@ -38,6 +42,11 @@ defmodule Mix.Tasks.Browser.Screenshot do
     width = opts[:width] || 1000
 
     {:ok, page} = Browser.Page.load(url)
+
+    page =
+      if opts[:js],
+        do: Browser.Page.run_js(page, %{Browser.Style.default_env() | width: width, height: 800}),
+        else: page
 
     if opts[:wx] && wx_screenshot(page, out, width, opts[:height]),
       do: Mix.shell().info("Wrote #{out} (painted by wx)"),

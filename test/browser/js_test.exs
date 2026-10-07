@@ -963,6 +963,16 @@ defmodule Browser.JSTest do
   end
 
   describe "classes" do
+    test "arguments in typeof, var and delete" do
+      assert js("function f() { return typeof arguments } f()") == "object"
+      assert js("function f() { var arguments; return typeof arguments } f()") == "object"
+
+      assert js("function f() { return [delete arguments, typeof arguments].join() } f()") ==
+               "false,object"
+
+      assert js("typeof arguments") == "undefined"
+    end
+
     test "constructors, methods, accessors and statics" do
       assert js(
                "class A { constructor(x) { this.x = x } get double() { return this.x * 2 } static make(n) { return new A(n) } add(n) { return this.x + n } } var a = A.make(4); [a.x, a.double, a.add(1), a instanceof A, typeof A].join()"
@@ -1344,7 +1354,10 @@ defmodule Browser.JSTest do
             "a: b: while (1) { continue a; break b }",
             "a: { break a }",
             "switch (1) { case 1: break }",
-            "x: ; x: ;"
+            "x: ; x: ;",
+            # a label right after else/if (React's scheduler is minified like this)
+            "if (a) b(); else l: switch (1) { case 1: break l }",
+            "if (a) l: { break l }"
           ] do
         assert {:ok, _} = Browser.JS.Parser.parse(src), src
       end
@@ -1389,6 +1402,44 @@ defmodule Browser.JSTest do
       assert js(
                "var fs = []; for (let i = 0; i < 3; fs.push(() => i), i++) {} fs.map(f => f()).join()"
              ) == "1,2,3"
+    end
+  end
+
+  describe "decorators" do
+    test "method, field, accessor and class decorators run and may replace their targets" do
+      src = """
+      var log = [];
+      function dm(v, ctx) {
+        log.push(ctx.kind + ":" + ctx.name);
+        ctx.addInitializer(function () { log.push("init " + ctx.name); });
+        return function (...a) { return "wrapped " + v.apply(this, a); };
+      }
+      function df(v, ctx) { return function (x) { return x * 2; }; }
+      function da(v, ctx) { return { get() { return v.get.call(this) + 1; }, init(x) { return x + 10; } }; }
+      function dc(C, ctx) { log.push("class " + ctx.name); return class extends C { extra() { return 1; } }; }
+      @dc class A {
+        @dm m() { return "m"; }
+        @df f = 21;
+        @da accessor acc = 5;
+        accessor plain = 3;
+      }
+      var a = new A();
+      [a.m(), a.f, a.acc, a.extra(), log.join(",")].join("|");
+      """
+
+      assert js(src) == "wrapped m|42|16|1|method:m,class A,init m"
+    end
+
+    test "an auto-accessor is a getter and setter over private storage" do
+      assert js(
+               "class C { accessor x = 1; static accessor y = 2 } var c = new C(); c.x = 5; c.x + C.y"
+             ) ==
+               7.0
+    end
+
+    test "a decorator that is not a function is a TypeError" do
+      assert {:uncaught, "TypeError: Decorator must be a function"} =
+               error("var d = 1; class C { @d m() {} }")
     end
   end
 end

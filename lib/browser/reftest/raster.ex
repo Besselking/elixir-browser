@@ -142,22 +142,26 @@ defmodule Browser.Reftest.Raster do
     ahem? = String.contains?(to_string(Map.get(t, :family)), "ahem")
     adv = advance(t)
     {gw, gh, gy} = glyph_box(t, size, ahem?, adv)
+    ls = Map.get(t, :ls, 0)
 
-    {grid, _} =
+    wsp = Map.get(t, :wsp, 0)
+
+    {grid, advance_x} =
       t.text
       |> String.graphemes()
-      |> Enum.reduce({grid, 0}, fn ch, {g, i} ->
-        x = t.x + round(i * adv * size)
+      |> Enum.reduce({grid, 0.0}, fn ch, {g, off} ->
+        cadv = Browser.Reftest.char_advance(ch, adv)
+        gw = if cadv == adv, do: gw, else: max(round(cadv * size) - if(ahem?, do: 0, else: 1), 1)
 
         g =
-          if String.trim(ch) == "",
+          if String.trim(ch) == "" or cadv == 0.0,
             do: g,
-            else: fill(g, x, gy, gw, gh, glyph_color(t.color, ch, t, ahem?), clip)
+            else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, i + 1}
+        {g, off + cadv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
-    width = round(String.length(t.text) * adv * size)
+    width = round(advance_x)
 
     grid =
       if Map.get(t, :underline),
@@ -167,6 +171,22 @@ defmodule Browser.Reftest.Raster do
     if Map.get(t, :strike),
       do: fill(grid, t.x, t.y + div(t.h, 2), width, 1, t.color, clip),
       else: grid
+  end
+
+  # text in the colour of what it is on is how tests hide their labels: it must not show up
+  # in the colour the salt gives a character
+  defp ink(grid, t, off, gy, ch, ahem?) do
+    x = max(t.x + round(off), 0)
+
+    with true <- gy >= 0 and gy < tuple_size(grid),
+         row = elem(grid, gy),
+         true <- byte_size(row) >= (x + 1) * 3,
+         <<_::binary-size(^x * 3), under::binary-size(3), _::binary>> <- row,
+         true <- under == pixel(t.color) do
+      t.color
+    else
+      _ -> glyph_color(t.color, ch, t, ahem?)
+    end
   end
 
   # the advance per character, in em (as `Browser.Reftest.measure/2` has it)
@@ -186,7 +206,9 @@ defmodule Browser.Reftest.Raster do
   defp glyph_color(color, _ch, _t, true), do: color
 
   defp glyph_color({r, g, b}, ch, t, false) do
-    <<code::utf8>> = ch
+    <<code::utf8, _::binary>> = ch
+    # the hyphen has two codes (a break puts either one in, depending on the font)
+    code = if code in [0x2010, 0x2011], do: 0x2D, else: code
 
     salt =
       code * 31 + if(Map.get(t, :bold), do: 7, else: 0) + if(Map.get(t, :italic), do: 13, else: 0)
@@ -247,11 +269,16 @@ defmodule Browser.Reftest.Raster do
   defp opaque?({_, _, _, a}), do: a >= 128
   defp opaque?(_), do: true
 
+  # (layout can leave a fraction on a coordinate, which pixels do not have)
+  defp fill(grid, x, y, w, h, color, clip)
+       when is_float(x) or is_float(y) or is_float(w) or is_float(h),
+       do: fill(grid, round(x), round(y), round(w), round(h), color, clip)
+
   defp fill(grid, x, y, w, h, color, {cx0, cy0, cx1, cy1}) do
-    x0 = max(x, cx0)
-    y0 = max(y, cy0)
-    x1 = min(x + w, cx1)
-    y1 = min(y + h, cy1)
+    x0 = round(max(x, cx0))
+    y0 = round(max(y, cy0))
+    x1 = round(min(x + w, cx1))
+    y1 = round(min(y + h, cy1))
 
     if x1 <= x0 or y1 <= y0 or not opaque?(color) do
       grid

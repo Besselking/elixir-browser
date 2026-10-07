@@ -251,4 +251,50 @@ defmodule Browser.CSSTest do
       assert CSS.matches?(rule.selector, ctx)
     end
   end
+
+  describe "@supports conditions" do
+    test "and, or, not and nested groups" do
+      assert CSS.supports?("(display: grid) and (color: red)")
+      assert CSS.supports?("(display: grid) or (--a: b)")
+      refute CSS.supports?("not (display: grid)")
+      refute CSS.supports?("(display: grid) and (not (color: red))")
+    end
+
+    test "unknown properties and bad names are not supported" do
+      refute CSS.supports?("(nope: 1)")
+      refute CSS.supports?("(--: a)")
+      assert CSS.supports?("(--a: a)")
+      assert CSS.supports?("(-webkit-box-orient: vertical)")
+    end
+
+    test "var() needs a clean fallback and braces may nest in values" do
+      assert CSS.supports?("(color: var(--a))")
+      assert CSS.supports?("(color: { [ var(--a) ] })")
+      refute CSS.supports?("(color: var(--a,!))")
+      refute CSS.supports?("(color: var(--a) !important !important)")
+    end
+
+    test "selector() and a prelude with braces" do
+      assert CSS.supports?("selector(a > b)")
+      refute CSS.supports?("selector(a >)")
+
+      css =
+        "@supports (color: { [ var(--a) ] }) { p { x: 1 } } @supports (nope: 1) { q { x: 2 } }"
+
+      assert [%{decls: [{"x", "1", false}]}] = CSS.parse(css)
+    end
+  end
+
+  describe "custom property declarations" do
+    test "names are case-sensitive and may be escaped" do
+      css = "p { --Ab: 1; --\\61 : 2; -\\2d c: 3; --: 4; --d: 5 !important !important }"
+
+      assert [%{decls: [{"--Ab", "1", false}, {"--a", "2", false}, {"--c", "3", false}]}] =
+               CSS.parse(css)
+    end
+
+    test "unbalanced brackets drop the declaration" do
+      assert [%{decls: [{"--a", "ok", false}]}] = CSS.parse("p { --a: ok; --b: red) }")
+    end
+  end
 end

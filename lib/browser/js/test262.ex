@@ -19,16 +19,9 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    symbols-as-weakmap-keys proxy-missing-checks
-    Atomics.pause Atomics.waitAsync
-    immutable-arraybuffer WeakRef
-    FinalizationRegistry tail-call-optimization Temporal ShadowRealm
-    decorators import-attributes import-text import-bytes json-modules top-level-await
-    source-phase-imports source-phase-imports-module-source import-defer
-    arbitrary-module-namespace-names
-    uint8array-base64 upsert
-    regexp-duplicate-named-groups legacy-regexp error-stack-accessor
-    json-parse-with-source nonextensible-applies-to-private
+    Temporal ShadowRealm
+    source-phase-imports-module-source
+    legacy-regexp
   )
 
   def unsupported_features, do: @unsupported_features
@@ -217,6 +210,8 @@ defmodule Browser.JS.Test262 do
         module? = "module" in flags
 
         spawn_and_wait(timeout, fn ->
+          Process.put(:js_cannot_block, "CanBlockIsFalse" in flags)
+
           execute(programs, source, max_steps, async?, "regExpUtils.js" in names, path, module?)
         end)
         |> judge(negative, async?)
@@ -256,7 +251,9 @@ defmodule Browser.JS.Test262 do
     # `import()` (and a module's imports) load files next to the test
     if path,
       do:
-        Process.put(:js_import, fn spec, from -> Modules.import(spec, from || path, loader()) end)
+        Process.put(:js_import, fn spec, from, p, type ->
+          Modules.import(spec, from || path, loader(), p, type)
+        end)
 
     try do
       case Parser.parse(source, module: module?) do
@@ -269,7 +266,7 @@ defmodule Browser.JS.Test262 do
 
           if module?,
             do: Modules.run(path, path, program, loader()),
-            else: Interp.run_program(program)
+            else: Interp.run_program(program, true)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
           {:ok, printed()}
@@ -385,7 +382,7 @@ defmodule Browser.JS.Test262 do
       "evalScript",
       Interp.native("evalScript", fn _, args ->
         case Parser.parse(Interp.to_str(Enum.at(args, 0, ""))) do
-          {:ok, program} -> Interp.run_program(program)
+          {:ok, program} -> Interp.run_program(program, true)
           {:error, msg} -> Interp.throw_error("SyntaxError", msg)
         end
       end)

@@ -56,6 +56,29 @@ defmodule Browser.JS.Async do
     p
   end
 
+  @doc "Whether a module body awaits at its top level (not inside a function)."
+  def has_tla?(stmts), do: Enum.any?(stmts, &has_await?/1)
+
+  @doc "Runs a module body whose top level awaits: starts it and returns its promise."
+  def run_module(stmts, scope) do
+    p = Promise.new()
+
+    ctx = %{
+      ret: fn _ -> Promise.resolve(p, :undefined) end,
+      throw: fn e -> Promise.reject(p, e) end,
+      brk: %{},
+      cont: %{}
+    }
+
+    try do
+      clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end)
+    catch
+      {:js_error, e} -> Promise.reject(p, e)
+    end
+
+    p
+  end
+
   # ── generators ─────────────────────────────────────────────
   #
   # A generator function's body runs in the same continuation-passing style. `yield` hands the
@@ -156,6 +179,7 @@ defmodule Browser.JS.Async do
         end
 
         case Process.delete(:js_gen_out) do
+          {:yield, {:raw, r}} -> r
           {:yield, v} -> iter_result(v, false)
           {:return, v} -> iter_result(v, true)
           {:throw, e} -> throw({:js_error, e})
@@ -353,6 +377,44 @@ defmodule Browser.JS.Async do
       Interp.native("[Symbol.asyncIterator]", fn this, _ -> this end)
     )
 
+    async_dispose =
+      Interp.native("[Symbol.asyncDispose]", fn this, _ ->
+        result = Promise.new()
+
+        try do
+          case Interp.get(this, "return") do
+            f when f in [:undefined, :null] ->
+              Promise.resolve(result, :undefined)
+
+            f ->
+              unless Interp.function?(f),
+                do: Interp.throw_error("TypeError", "return is not a function")
+
+              wrapper = Promise.new()
+              Promise.resolve(wrapper, Interp.call(f, this, []))
+
+              Promise.then(
+                wrapper,
+                Interp.native("", fn _, _ ->
+                  Promise.resolve(result, :undefined)
+                  :undefined
+                end),
+                Interp.native("", fn _, args ->
+                  Promise.reject(result, Enum.at(args, 0, :undefined))
+                  :undefined
+                end)
+              )
+          end
+        catch
+          {:js_error, e} -> Promise.reject(result, e)
+        end
+
+        result
+      end)
+
+    Interp.set_arity(async_dispose, 0)
+    Interp.put_hidden(ai, {:symbol, :asyncDispose, "Symbol.asyncDispose"}, async_dispose)
+
     p = Interp.new_object([], ai)
     Interp.put_proto(:async_generator, p)
 
@@ -383,6 +445,9 @@ defmodule Browser.JS.Async do
         it = Interp.call(method, target, [])
         {it, Interp.get(it, "next"), false}
 
+      method not in [:undefined, :null] ->
+        Interp.throw_error("TypeError", "Symbol.asyncIterator is not a function")
+
       true ->
         case Interp.iter_source(target) do
           {:proto, it, next} ->
@@ -396,7 +461,7 @@ defmodule Browser.JS.Async do
   end
 
   # `yield*` in an async generator
-  defp adelegate(it, next, msg, ctx, k) do
+  defp adelegate(it, next, msg, ctx, k, sync?) do
     call_result =
       try do
         {:ok, adelegate_call(it, next, msg)}
@@ -425,12 +490,36 @@ defmodule Browser.JS.Async do
               {true, v} ->
                 if match?({:return, _}, msg), do: ctx.ret.(v), else: k.(v)
 
+              {false, v} when sync? ->
+                # a sync iterator's values are awaited first; a rejection ends the `yield*`
+                closing = %{
+                  ctx
+                  | throw: fn e ->
+                      close_sync(it)
+                      ctx.throw.(e)
+                    end
+                }
+
+                await_value(v, closing, fn v2 ->
+                  ctx.yield.(v2, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
+                end)
+
               {false, v} ->
-                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k) end)
+                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
             end
           )
         end)
     end
+  end
+
+  # closes a sync iterator whose value promise was rejected
+  defp close_sync(it) do
+    case Interp.get(it, "return") do
+      r when is_tuple(r) -> if Interp.function?(r), do: Interp.call(r, it, [])
+      _ -> :ok
+    end
+  catch
+    {:js_error, _} -> :ok
   end
 
   defp adelegate_call(it, next, {:next, x}), do: {:result, Interp.call(next, it, [x])}
@@ -443,6 +532,12 @@ defmodule Browser.JS.Async do
           else: Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
 
       _ ->
+        # no `throw` method: the iterator is closed before the TypeError
+        case Interp.get(it, "return") do
+          r when is_tuple(r) -> if Interp.function?(r), do: Interp.call(r, it, [])
+          _ -> :ok
+        end
+
         Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
     end
   end
@@ -462,8 +557,9 @@ defmodule Browser.JS.Async do
   # `yield*`: forwards `next`, `throw` and `return` to the inner iterator
   defp delegate(it, next, msg, ctx, k) do
     attempt(fn -> delegate_step(it, next, msg) end, ctx, fn
-      {:yield, v} ->
-        ctx.yield.(v, fn m -> delegate(it, next, m, ctx, k) end)
+      # the inner result object is handed on as it is
+      {:yield, r} ->
+        ctx.yield.({:raw, r}, fn m -> delegate(it, next, m, ctx, k) end)
 
       {:done, v} ->
         k.(v)
@@ -474,14 +570,14 @@ defmodule Browser.JS.Async do
   end
 
   defp delegate_step(it, next, {:next, x}) do
-    check_result(Interp.call(next, it, [x]), :done)
+    check_sync_result(Interp.call(next, it, [x]), :done)
   end
 
   defp delegate_step(it, _next, {:throw, e}) do
     case Interp.get(it, "throw") do
       f when is_tuple(f) ->
         if Interp.function?(f) do
-          check_result(Interp.call(f, it, [e]), :done)
+          check_sync_result(Interp.call(f, it, [e]), :done)
         else
           Interp.iter_close(it, false)
           Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
@@ -497,7 +593,7 @@ defmodule Browser.JS.Async do
     case Interp.get(it, "return") do
       f when is_tuple(f) ->
         if Interp.function?(f),
-          do: check_result(Interp.call(f, it, [v]), :return),
+          do: check_sync_result(Interp.call(f, it, [v]), :return),
           else: {:return, v}
 
       _ ->
@@ -505,13 +601,15 @@ defmodule Browser.JS.Async do
     end
   end
 
-  defp check_result(r, on_done) do
+  # a result of an inner iterator of a `yield*` in a generator: yielded whole (its `value` is
+  # only read once it says it is done)
+  defp check_sync_result(r, on_done) do
     unless match?({:obj, _}, r),
       do: Interp.throw_error("TypeError", "Iterator result is not an object")
 
     if Interp.truthy(Interp.get(r, "done")),
       do: {on_done, Interp.get(r, "value")},
-      else: {:yield, Interp.get(r, "value")}
+      else: {:yield, r}
   end
 
   defp iterator_of(items) do
@@ -568,8 +666,8 @@ defmodule Browser.JS.Async do
 
   defp cev_await({:yield, e, true}, env, %{async_gen: true} = ctx, k) do
     cev(e, env, ctx, fn iterable ->
-      attempt(fn -> async_iterator(iterable) end, ctx, fn {it, next, _sync?} ->
-        adelegate(it, next, {:next, :undefined}, ctx, k)
+      attempt(fn -> async_iterator(iterable) end, ctx, fn {it, next, sync?} ->
+        adelegate(it, next, {:next, :undefined}, ctx, k, sync?)
       end)
     end)
   end
@@ -606,6 +704,10 @@ defmodule Browser.JS.Async do
 
       if short, do: k.(lv), else: cev(r, env, ctx, k)
     end)
+  end
+
+  defp cev_await({:destructure, pat, right}, env, ctx, k) do
+    cev(right, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
   end
 
   defp cev_await({:cond, c, a, b}, env, ctx, k) do
@@ -654,6 +756,7 @@ defmodule Browser.JS.Async do
   defp leaf?({:yield, _, _}), do: true
   defp leaf?({:logical, _, _, _} = n), do: has_await?(n)
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
+  defp leaf?({:destructure, _, _} = n), do: has_await?(n)
   defp leaf?(_), do: false
 
   defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
@@ -682,15 +785,31 @@ defmodule Browser.JS.Async do
   end
 
   defp await_value(v, ctx, k) do
-    p =
-      if Promise.promise?(v) do
-        v
-      else
+    # PromiseResolve: a promise is reused only when its `constructor` is Promise itself; reading
+    # that property may throw
+    case (try do
+            if Promise.promise?(v) and
+                 Interp.get(v, "constructor") == Interp.proto(:promise_ctor),
+               do: {:ok, v},
+               else: {:wrap, v}
+          catch
+            {:js_error, e} -> {:error, e}
+          end) do
+      {:error, e} ->
+        ctx.throw.(e)
+        :suspended
+
+      {:ok, p} ->
+        await_promise(p, ctx, k)
+
+      {:wrap, v} ->
         np = Promise.new()
         Promise.resolve(np, v)
-        np
-      end
+        await_promise(np, ctx, k)
+    end
+  end
 
+  defp await_promise(p, ctx, k) do
     Promise.then(
       p,
       Interp.native("", fn _, args ->
@@ -961,6 +1080,15 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  defp cs({:export, stmt}, env, ctx, k, labels), do: cexec(stmt, env, ctx, k, labels)
+
+  defp cs({:export_default, {:expr, e}}, env, ctx, k, _labels) do
+    cev(e, env, ctx, fn v ->
+      Interp.declare(env, :default_export, v)
+      k.(:ok)
+    end)
+  end
+
   defp cs(stmt, env, ctx, k, labels), do: sync_stmt(stmt, env, ctx, k, labels)
 
   # the initializer, named after the binding when it is an anonymous function
@@ -995,6 +1123,197 @@ defmodule Browser.JS.Async do
   defp await_result(v, ctx, k),
     do: await_value(v, %{ctx | throw: fn e -> k.({:error, e}) end}, fn _ -> k.(:ok) end)
 
+  # binds a pattern (`k` runs afterwards). When a `yield` or `await` sits inside it, in a default,
+  # a computed key or a target, the pattern is walked step by step so that the iterator stays
+  # open (and is closed on a throw or `return()`) while the generator is suspended.
+  defp cbind(pat, v, mode, env, ctx, k) do
+    if has_await?(pat),
+      do: cbind_cps(pat, v, mode, env, ctx, k),
+      else: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+  end
+
+  defp cbind_cps({:default, _, _} = pat, v, mode, env, ctx, k) do
+    ctarget(pat, mode, env, ctx, fn binder -> binder.(v, k) end)
+  end
+
+  defp cbind_cps({:member, _, _, _} = pat, v, mode, env, ctx, k) do
+    ctarget(pat, mode, env, ctx, fn binder -> binder.(v, k) end)
+  end
+
+  defp cbind_cps({:arrpat, elems}, v, mode, env, ctx, k) do
+    attempt(fn -> Interp.iter_source(v) end, ctx, fn
+      {:list, list} -> celems_list(elems, list, mode, env, ctx, k)
+      {:proto, it, next} -> celems_proto(elems, it, next, false, mode, env, ctx, k)
+    end)
+  end
+
+  defp cbind_cps({:objpat, props, rest}, v, mode, env, ctx, k) do
+    guarded(
+      fn ->
+        if Interp.nullish?(v),
+          do:
+            Interp.throw_error(
+              "TypeError",
+              "Cannot destructure '#{Interp.to_str(v)}' as it is #{Interp.to_str(v)}."
+            )
+      end,
+      ctx,
+      fn -> cobj_props(props, rest, v, [], mode, env, ctx, k) end
+    )
+  end
+
+  defp cbind_cps(pat, v, mode, env, ctx, k),
+    do: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+
+  # a target: its reference is evaluated first (it may suspend); the binder then takes the value
+  defp ctarget({:member, o, key, _}, :assign, env, ctx, kb) do
+    cev(o, env, ctx, fn ov ->
+      ckey(key, env, ctx, fn kv ->
+        kb.(fn val, kk -> guarded(fn -> Interp.put(ov, kv, val) end, ctx, kk) end)
+      end)
+    end)
+  end
+
+  defp ctarget({:default, inner, e}, mode, env, ctx, kb) do
+    ctarget(inner, mode, env, ctx, fn binder ->
+      kb.(fn
+        :undefined, kk -> cev(e, env, ctx, fn dv -> binder.(dv, kk) end)
+        val, kk -> binder.(val, kk)
+      end)
+    end)
+  end
+
+  defp ctarget(pat, mode, env, ctx, kb),
+    do: kb.(fn val, kk -> cbind(pat, val, mode, env, ctx, kk) end)
+
+  defp ckey({:str, s}, _env, _ctx, k), do: k.(s)
+
+  defp ckey({:priv, name}, env, ctx, k),
+    do: attempt(fn -> Interp.private_key(name, env) end, ctx, k)
+
+  defp ckey(e, env, ctx, k),
+    do: cev(e, env, ctx, fn kv -> attempt(fn -> Interp.to_key(kv) end, ctx, k) end)
+
+  defp celems_list([], _list, _mode, _env, _ctx, k), do: k.()
+
+  defp celems_list([{:rest, p}], list, mode, env, ctx, k) do
+    ctarget(p, mode, env, ctx, fn binder -> binder.(Interp.new_array(list), k) end)
+  end
+
+  defp celems_list([p | ps], list, mode, env, ctx, k) do
+    {val, tail} =
+      case list do
+        [h | t] -> {h, t}
+        [] -> {:undefined, []}
+      end
+
+    next = fn -> celems_list(ps, tail, mode, env, ctx, k) end
+
+    if p == nil,
+      do: next.(),
+      else: ctarget(p, mode, env, ctx, fn binder -> binder.(val, next) end)
+  end
+
+  defp celems_proto([], it, _next, done?, _mode, _env, ctx, k) do
+    if done?, do: k.(), else: guarded(fn -> Interp.iter_close(it, false) end, ctx, k)
+  end
+
+  defp celems_proto([{:rest, p}], it, next, done?, mode, env, ctx, k) do
+    inner = closing_ctx(it, done?, ctx)
+
+    ctarget(p, mode, env, inner, fn binder ->
+      attempt(fn -> if done?, do: [], else: pull_all(it, next, []) end, ctx, fn list ->
+        binder.(Interp.new_array(list), k)
+      end)
+    end)
+  end
+
+  defp celems_proto([p | ps], it, next, done?, mode, env, ctx, k) do
+    inner = closing_ctx(it, done?, ctx)
+
+    cont = fn binder ->
+      attempt(
+        fn ->
+          if done?,
+            do: {:undefined, true},
+            else:
+              (case Interp.iter_step(it, next) do
+                 :done -> {:undefined, true}
+                 {:ok, item} -> {item, false}
+               end)
+        end,
+        ctx,
+        fn {val, done2?} ->
+          after_bind = fn -> celems_proto(ps, it, next, done2?, mode, env, ctx, k) end
+
+          if binder == :skip, do: after_bind.(), else: binder.(val, after_bind)
+        end
+      )
+    end
+
+    if p == nil,
+      do: cont.(:skip),
+      else: ctarget(p, mode, env, inner, cont)
+  end
+
+  defp pull_all(it, next, acc) do
+    case Interp.iter_step(it, next) do
+      :done -> Enum.reverse(acc)
+      {:ok, v} -> pull_all(it, next, [v | acc])
+    end
+  end
+
+  # while a pattern's iterator is open, a throw or a `return()` at a suspension point closes it
+  defp closing_ctx(_it, true, ctx), do: ctx
+
+  defp closing_ctx(it, false, ctx) do
+    %{
+      ctx
+      | throw: fn e ->
+          try do
+            Interp.iter_close(it, true)
+          catch
+            {:js_error, _} -> :ok
+          end
+
+          ctx.throw.(e)
+        end,
+        ret: fn r ->
+          guarded(fn -> Interp.iter_close(it, false) end, ctx, fn -> ctx.ret.(r) end)
+        end
+    }
+  end
+
+  defp cobj_props([], nil, _v, _used, _mode, _env, _ctx, k), do: k.()
+
+  defp cobj_props([], rest, v, used, mode, env, ctx, k) do
+    ctarget(rest, mode, env, ctx, fn binder ->
+      attempt(
+        fn ->
+          pairs =
+            for key <- Browser.JS.Props.rest_keys(v, used), do: {key, Interp.get(v, key)}
+
+          Interp.new_object(pairs)
+        end,
+        ctx,
+        fn obj -> binder.(obj, k) end
+      )
+    end)
+  end
+
+  defp cobj_props([{key, p} | ps], rest, v, used, mode, env, ctx, k) do
+    ckey_of(key, env, ctx, fn kv ->
+      ctarget(p, mode, env, ctx, fn binder ->
+        attempt(fn -> Interp.get(v, kv) end, ctx, fn val ->
+          binder.(val, fn -> cobj_props(ps, rest, v, used ++ [kv], mode, env, ctx, k) end)
+        end)
+      end)
+    end)
+  end
+
+  defp ckey_of({:str, s}, _env, _ctx, k), do: k.(s)
+  defp ckey_of({:computed, e}, env, ctx, k), do: ckey(e, env, ctx, k)
+
   # declarations, one at a time
   defp cdecls([], _kind, _env, _ctx, k), do: k.(:ok)
 
@@ -1004,7 +1323,7 @@ defmodule Browser.JS.Async do
     cond do
       init != nil ->
         cev(init, env, ctx, fn v ->
-          guarded(fn -> Interp.bind_pattern(pat, v, env, kind) end, ctx, next)
+          cbind(pat, v, kind, env, ctx, next)
         end)
 
       kind == :var ->
@@ -1072,7 +1391,7 @@ defmodule Browser.JS.Async do
     Interp.tick()
     iter_env = Interp.new_scope(env)
 
-    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, ctx, fn ->
+    cbind(pat, item, mode, iter_env, ctx, fn ->
       run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
     end)
   end
@@ -1112,11 +1431,14 @@ defmodule Browser.JS.Async do
       attempt(
         fn ->
           case Interp.get(it, "return") do
-            f when is_tuple(f) ->
-              if Interp.function?(f), do: Interp.call(f, it, []), else: :undefined
-
-            _ ->
+            m when m in [:undefined, :null] ->
               :undefined
+
+            f ->
+              unless Interp.function?(f),
+                do: Interp.throw_error("TypeError", "Iterator return is not a function")
+
+              Interp.call(f, it, [])
           end
         end,
         ctx,
@@ -1142,7 +1464,7 @@ defmodule Browser.JS.Async do
 
     on_break = fn x -> closing.(fn -> k.(x) end) end
 
-    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+    cbind(pat, item, mode, iter_env, inner, fn ->
       run_body(body, iter_env, inner, on_break, labels, fn _ ->
         afor(it, next, sync?, spec, ctx, k, labels)
       end)
@@ -1192,7 +1514,7 @@ defmodule Browser.JS.Async do
 
         on_break = fn x -> closing.(fn -> k.(x) end) end
 
-        guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+        cbind(pat, item, mode, iter_env, inner, fn ->
           run_body(body, iter_env, inner, on_break, labels, fn _ ->
             proto_foreach(it, next, spec, ctx, k, labels)
           end)

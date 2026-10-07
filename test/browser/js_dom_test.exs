@@ -539,7 +539,7 @@ defmodule Browser.JS.DOMTest do
       Runtime.run_scripts(pid)
 
       props = %{"clientX" => 12.0, "clientY" => 3.0, "button" => 2.0}
-      reply = Runtime.dispatch(pid, {:node, nid_of(raw, "a")}, "contextmenu", props)
+      reply = Runtime.dispatch(pid, {:edit_host, nid_of(raw, "a")}, "contextmenu", props)
       assert logs(reply) == ["menu 12 2"]
       assert reply.prevented
     end

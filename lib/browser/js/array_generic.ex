@@ -623,7 +623,7 @@ defmodule Browser.JS.ArrayGeneric do
     sink = fn k, v -> if a, do: create!(a, k, v) end
 
     {list, count} =
-      case Interp.iter_source(items) do
+      case Interp.for_of_source(items) do
         {:list, list} ->
           {mapped, n} =
             Enum.reduce(list, {[], 0}, fn v, {acc, k} ->

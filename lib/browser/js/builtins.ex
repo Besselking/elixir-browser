@@ -77,7 +77,7 @@ defmodule Browser.JS.Builtins do
   # indirect eval and the Function constructor: global code, so no `super` or `new.target`
   defp eval_source(src) do
     case Browser.JS.Parser.parse(src, eval: true) do
-      {:ok, program} -> Interp.run_program(program)
+      {:ok, program} -> Interp.indirect_eval(program)
       {:error, msg} -> throw_error("SyntaxError", msg)
     end
   end
@@ -141,7 +141,9 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp error_object?({:obj, id}), do: inherits_error?(deref(id).proto)
+  # an error prototype itself has no error data
+  defp error_object?({:obj, id} = o),
+    do: inherits_error?(deref(id).proto) and o not in Enum.map(@error_types, &proto({:error, &1}))
 
   defp inherits_error?({:obj, id} = p),
     do: p == proto({:error, "Error"}) or inherits_error?(deref(id).proto)
@@ -228,9 +230,8 @@ defmodule Browser.JS.Builtins do
              put_hidden(err, "suppressed", sup)
            end
 
-           put_hidden(
+           Interp.set_stack(
              err,
-             "stack",
              Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> msg))
            )
 
@@ -241,6 +242,16 @@ defmodule Browser.JS.Builtins do
       end
 
     error_ctor = ctors |> List.keyfind("Error", 0) |> elem(1)
+
+    stack_of =
+      native("stackOf", fn _, [{:obj, id}] -> Map.get(deref(id), :stack_str, :undefined) end)
+
+    put_hidden(
+      error_proto,
+      "stack",
+      {:accessor, Browser.JS.Prelude.stack_accessor(:get, stack_of),
+       Browser.JS.Prelude.stack_accessor(:set, error_proto)}
+    )
 
     # the other error constructors inherit from Error
     for {t, {:obj, id}} <- ctors, t != "Error", do: store(id, %{deref(id) | proto: error_ctor})
@@ -294,11 +305,26 @@ defmodule Browser.JS.Builtins do
 
   defp install_object(scope, object_proto) do
     obj =
-      constructor(scope, "Object", object_proto, fn _, args ->
+      constructor(scope, "Object", object_proto, fn this, args ->
+        # `new` on a subclass (new.target is not Object) makes an object of that class
+        constructing = Process.delete(:js_native_new)
+
+        subclass? =
+          constructing == this and match?({:obj, _}, this) and
+            deref(elem(this, 1)).proto not in [nil, object_proto]
+
         case arg(args, 0) do
-          {:obj, _} = o -> o
-          v when v in [:undefined, :null] -> new_object()
-          v -> box(v)
+          _ when subclass? ->
+            this
+
+          {:obj, _} = o ->
+            o
+
+          v when v in [:undefined, :null] ->
+            new_object()
+
+          v ->
+            box(v)
         end
       end)
 
@@ -407,7 +433,8 @@ defmodule Browser.JS.Builtins do
 
   # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
   defp fast_array?(this, extra \\ 0) do
-    plain_array?(this) and
+    # an element on Array.prototype shows through holes and can run setters: take the generic path
+    plain_array?(this) and Map.get(deref(elem(proto(:array), 1)), :items, %{}) == %{} and
       elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
   end
 
@@ -503,8 +530,7 @@ defmodule Browser.JS.Builtins do
     # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
     {:obj, pid} = p
     po = deref(pid)
-    attrs = Map.put(Map.get(po, :attrs, %{}), "length", %{w: true, c: false, e: false})
-    store(pid, po |> Map.put(:props, Map.put(po.props, "length", 0.0)) |> Map.put(:attrs, attrs))
+    store(pid, po |> Map.put(:class, :array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
 
     array_fn(p, "push", fn this, args ->
       if fast_array?(this, length(args)) do
@@ -640,7 +666,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     array_fn(p, "reverse", fn this, _ ->
-      if fast_array?(this) and not has_holes?(this) do
+      if fast_array?(this) and not has_holes?(this) and not has_accessors?(this) do
         put_elems(this, Enum.reverse(elems(this)))
         this
       else
@@ -892,6 +918,9 @@ defmodule Browser.JS.Builtins do
     map_size(o.items) != o.len
   end
 
+  defp has_accessors?({:obj, id}),
+    do: Enum.any?(deref(id).items, fn {_, v} -> match?({:accessor, _, _}, v) end)
+
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
   defp pairs(this, dir \\ :asc, from \\ nil) do
@@ -950,26 +979,19 @@ defmodule Browser.JS.Builtins do
 
   defp reduce(this, f, rest, right?) do
     stream = pairs(this, if(right?, do: :desc, else: :asc))
+    init = if rest == [], do: :none, else: {:ok, hd(rest)}
 
-    {acc, stream} =
-      case rest do
-        [init | _] ->
-          {init, stream}
+    # one pass: the first element read is the accumulator when no initial value was given
+    result =
+      Enum.reduce(stream, init, fn
+        {_i, v}, :none -> {:ok, v}
+        {i, v}, {:ok, acc} -> {:ok, call(f, :undefined, [acc, v, float(i), this])}
+      end)
 
-        [] ->
-          case Enum.take(stream, 1) do
-            [{first_i, v}] ->
-              {v,
-               Stream.drop_while(stream, fn {i, _} ->
-                 if right?, do: i >= first_i, else: i <= first_i
-               end)}
-
-            [] ->
-              throw_error("TypeError", "Reduce of empty array with no initial value")
-          end
-      end
-
-    Enum.reduce(stream, acc, fn {i, v}, acc -> call(f, :undefined, [acc, v, float(i), this]) end)
+    case result do
+      {:ok, acc} -> acc
+      :none -> throw_error("TypeError", "Reduce of empty array with no initial value")
+    end
   end
 
   defp flatten(list, depth) do
@@ -983,6 +1005,7 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     # the prototypes are themselves a String, a Number and a Boolean
     wrap(proto(:string), "")
+    put_const(proto(:string), "length", 0.0)
     wrap(proto(:number), 0.0)
     wrap(proto(:boolean), false)
 
@@ -1317,10 +1340,15 @@ defmodule Browser.JS.Builtins do
   # of the right prototype, which becomes the wrapper
   defp wrapper_target?({:obj, id}, kind) do
     o = deref(id)
-    not Map.has_key?(o, :prim) and o.proto == proto(kind)
+    not Map.has_key?(o, :prim) and inherits_from?(o.proto, proto(kind))
   end
 
   defp wrapper_target?(_, _), do: false
+
+  # a subclass instance has the subclass prototype, which inherits from the wrapper's
+  defp inherits_from?(p, target) when p == target, do: true
+  defp inherits_from?({:obj, id}, target), do: inherits_from?(deref(id).proto, target)
+  defp inherits_from?(_, _), do: false
 
   defp wrap({:obj, id} = o, prim) do
     store(id, Map.put(deref(id), :prim, prim))
@@ -2068,6 +2096,28 @@ defmodule Browser.JS.Builtins do
     declare(scope, "clearTimeout", native("clearTimeout", clear))
     declare(scope, "clearInterval", native("clearInterval", clear))
   end
+
+  @doc "Schedules the JS function `fun` after `delay` virtual milliseconds; returns the timer id."
+  def add_timer(fun, delay) do
+    seq = Process.get(:js_timer_seq) + 1
+    Process.put(:js_timer_seq, seq)
+
+    timer = %{
+      id: seq,
+      at: Process.get(:js_now) + delay,
+      seq: seq,
+      fun: fun,
+      args: [],
+      interval: nil
+    }
+
+    Process.put(:js_timers, [timer | Process.get(:js_timers)])
+    seq
+  end
+
+  @doc "Cancels a timer made by `add_timer/2`."
+  def clear_timer(id),
+    do: Process.put(:js_timers, Enum.reject(Process.get(:js_timers), &(&1.id == id)))
 
   @doc """
   Runs pending timers in virtual time (no real waiting), earliest first, until none are left

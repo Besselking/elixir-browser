@@ -12,6 +12,7 @@ defmodule Browser.Session do
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1]
 
   alias Browser.{
+    Editing,
     Fetch,
     Forms,
     History,
@@ -121,7 +122,17 @@ defmodule Browser.Session do
       scripts_pending: false,
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
-      active: 0
+      active: 0,
+      # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
+      closed: [],
+      # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
+      # the host that has focus, the selection the page reported in it, whether the mouse is
+      # dragging one out, and the column the caret keeps going up and down
+      ed: nil,
+      efocus: nil,
+      esel: nil,
+      edrag: false,
+      egoal: nil
     }
 
     publish_tabs(state)
@@ -189,6 +200,11 @@ defmodule Browser.Session do
         fragment: pending_fragment(page.url),
         focus: nil,
         caret: 0,
+        ed: nil,
+        efocus: nil,
+        esel: nil,
+        edrag: false,
+        egoal: nil,
         controls: %{},
         # the old page stays on screen until the new one is laid out: nothing on it is live
         links: %{},
@@ -380,6 +396,9 @@ defmodule Browser.Session do
   def handle_info(wx(id: 5101, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, close_tab(state, state.active)}
 
+  def handle_info(wx(id: 5102, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, reopen_tab(state)}
+
   # Edit > Cut, Copy and Select All (wxID_CUT, wxID_COPY, wxID_SELECTALL)
   def handle_info(wx(id: 5031, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, on_key(state, :cut)}
@@ -463,11 +482,19 @@ defmodule Browser.Session do
       nil ->
         case UI.control_at(state.hit_controls, x, py) do
           nil ->
-            state = if state.focus, do: blur(state), else: state
+            case editor_at(state, x, py) do
+              nil ->
+                state = if state.focus, do: blur(state), else: state
+                state = if state.efocus, do: blur_editor(state), else: state
 
-            case UI.link_at(state.links, x, py) do
-              nil -> {:noreply, page_click(state, x, py, count, shift)}
-              href -> {:noreply, follow(state, href, new_tab?)}
+                case UI.link_at(state.links, x, py) do
+                  nil -> {:noreply, page_click(state, x, py, count, shift)}
+                  href -> {:noreply, follow(state, href, new_tab?)}
+                end
+
+              host ->
+                state = if state.focus, do: blur(state), else: state
+                {:noreply, editor_click(state, host, x, py, count, shift)}
             end
 
           cid ->
@@ -512,6 +539,18 @@ defmodule Browser.Session do
 
     if down,
       do: {:noreply, drag_field(state, x, y + state.scroll)},
+      else: {:noreply, end_drag(state)}
+  end
+
+  # dragging out a selection in an editing host
+  def handle_info(
+        wx(event: wxMouse(type: :motion, x: wx_x, y: y, leftDown: down)),
+        %{edrag: true} = state
+      ) do
+    x = wx_x + state.scroll_x
+
+    if down,
+      do: {:noreply, drag_editor(state, x, y)},
       else: {:noreply, end_drag(state)}
   end
 
@@ -561,8 +600,9 @@ defmodule Browser.Session do
             case UI.control_at(state.hit_controls, x, py) do
               nil ->
                 cond do
-                  href -> :hand
+                  href != nil and editor_at(state, x, py) == nil -> :hand
                   Selection.over_text?(texts, x, py) -> :text
+                  editor_at(state, x, py) != nil -> :text
                   true -> :arrow
                 end
 
@@ -719,8 +759,13 @@ defmodule Browser.Session do
     ev = UI.key_event(event)
 
     case tab_key(ev) do
-      nil -> {:noreply, on_key(state, Interact.key(ev))}
-      step -> {:noreply, step_tab(state, step)}
+      nil ->
+        key = Interact.key(ev)
+        key = if key == :enter and ev.shift?, do: :shift_enter, else: key
+        {:noreply, on_key(state, key)}
+
+      step ->
+        {:noreply, step_tab(state, step)}
     end
   end
 
@@ -735,6 +780,8 @@ defmodule Browser.Session do
   defp on_key(state, key) when key in [:ignore, :copy, :select_all, :cut, :paste],
     do: do_key(state, key)
 
+  defp on_key(%{efocus: nil} = state, {:shortcut, _}), do: state
+
   defp on_key(state, key) do
     {state, prevented?} = key_event(state, "keydown", key)
 
@@ -748,10 +795,16 @@ defmodule Browser.Session do
 
   defp press?({:char, _}), do: true
   defp press?(:enter), do: true
+  defp press?(:shift_enter), do: true
   defp press?(_), do: false
 
   defp key_event(state, type, key) do
-    target = if state.focus, do: {:control, state.focus}, else: :document
+    target =
+      cond do
+        state.efocus -> {:edit_host, state.efocus}
+        state.focus -> {:control, state.focus}
+        true -> :document
+      end
 
     reply =
       Browser.JS.Runtime.dispatch(
@@ -772,7 +825,9 @@ defmodule Browser.Session do
     {name, code} =
       case key do
         {:char, c} -> {c, c |> String.upcase() |> String.to_charlist() |> hd()}
+        {:shortcut, c} -> {c, c |> String.upcase() |> String.to_charlist() |> hd()}
         :enter -> {"Enter", 13}
+        :shift_enter -> {"Enter", 13}
         :backspace -> {"Backspace", 8}
         :delete -> {"Delete", 46}
         :tab -> {"Tab", 9}
@@ -794,8 +849,8 @@ defmodule Browser.Session do
       "code" => name,
       "keyCode" => code * 1.0,
       "which" => code * 1.0,
-      "shiftKey" => shift? or key == :shift_tab,
-      "ctrlKey" => false,
+      "shiftKey" => shift? or key in [:shift_tab, :shift_enter, {:shortcut, "Z"}],
+      "ctrlKey" => match?({:shortcut, _}, key),
       "altKey" => false,
       "metaKey" => false,
       "repeat" => false
@@ -803,6 +858,12 @@ defmodule Browser.Session do
   end
 
   defp do_key(state, :ignore), do: state
+
+  defp do_key(%{efocus: host} = state, key) when host != nil, do: editor_key(state, key)
+
+  defp do_key(state, :shift_enter), do: do_key(state, :enter)
+
+  defp do_key(state, {:shortcut, _}), do: state
 
   defp do_key(state, key) when key in [:copy, :select_all, :cut] do
     case editing_control(state) do
@@ -934,6 +995,297 @@ defmodule Browser.Session do
     end
   end
 
+  # -- editing hosts ---------------------------------------------------------
+
+  # what the layout says about the page's editing hosts, after a layout
+  defp refresh_editor(%{js: nil} = state), do: %{state | ed: nil}
+  defp refresh_editor(%{page: nil} = state), do: %{state | ed: nil}
+
+  defp refresh_editor(%{page: page} = state) do
+    tree = page.pruned || []
+    index = Editing.index(tree)
+
+    if index.hosts == [] do
+      drop_editor(%{state | ed: nil})
+    else
+      rects = Browser.Nids.rects(state.items, Browser.Nids.parents(tree))
+      state = %{state | ed: %{index: index, rects: rects}}
+
+      if state.efocus && state.efocus not in index.hosts,
+        do: drop_editor(state),
+        else: show_editor(state, false)
+    end
+  end
+
+  # the host that had focus is gone from the page
+  defp drop_editor(%{efocus: nil} = state), do: state
+
+  defp drop_editor(state) do
+    state = %{state | efocus: nil, esel: nil, edrag: false, egoal: nil}
+    state |> stop_blink() |> set_overlay([])
+  end
+
+  # the editing host the point is in (the innermost one), or nil
+  defp editor_at(%{ed: %{index: index, rects: rects}}, x, py) do
+    index.hosts
+    |> Enum.filter(fn host ->
+      case rects[host] do
+        {hx, hy, w, h} -> x >= hx and x < hx + w and py >= hy and py < hy + h
+        nil -> false
+      end
+    end)
+    |> Enum.min_by(
+      fn host ->
+        {_, _, w, h} = rects[host]
+        w * h
+      end,
+      fn -> nil end
+    )
+  end
+
+  defp editor_at(_state, _x, _py), do: nil
+
+  # what the script said about focus and the selection after a call: the window follows
+  defp sync_editor(state, reply) do
+    sel = Map.get(reply, :sel, state.esel)
+    focus = Map.get(reply, :focus_ed, state.efocus)
+
+    if sel == state.esel and focus == state.efocus do
+      state
+    else
+      was = state.efocus
+      moved? = sel != state.esel
+      state = %{state | esel: sel, efocus: focus}
+
+      state =
+        cond do
+          focus != nil and was != focus -> gain_editor(state, focus)
+          focus == nil and was != nil -> lose_editor(state)
+          true -> state
+        end
+
+      show_editor(state, moved?)
+    end
+  end
+
+  defp gain_editor(state, host) do
+    UI.focus_page(state.ui)
+    had_control = state.focus != nil
+
+    state =
+      %{state | focus: nil, fanchor: nil, fdrag: false, menu: nil, sel: nil, sel_anchor: nil}
+
+    state = if had_control, do: relayout(state), else: state
+
+    # a host that gets focus without a place to type has the caret at its start
+    case state.esel do
+      %{host: ^host} -> state
+      _ -> edit(state, "start", [host])
+    end
+  end
+
+  defp lose_editor(state), do: state |> stop_blink() |> set_overlay([])
+
+  # draws the caret or the selection of the focused host; `scroll?`: bring the caret into view
+  defp show_editor(
+         %{efocus: host, esel: %{host: host} = sel, ed: %{index: index} = ed, page: page} = state,
+         scroll?
+       ) do
+    items =
+      Editing.overlay(index, page.pruned || [], state.items, sel, &ed.rects[&1], state.measure)
+
+    if items == state.sel_items do
+      state
+    else
+      state = state |> reset_blink() |> set_overlay(items)
+      if scroll?, do: reveal_caret(state, items), else: state
+    end
+  end
+
+  defp show_editor(state, _scroll?), do: state
+
+  defp set_overlay(state, items) do
+    state = %{state | sel_items: items}
+    UI.update(state.ui, state.items, state.sel_items, state.scroll, state.caret_on, :diff)
+    state
+  end
+
+  # scrolls so the caret is in the window
+  defp reveal_caret(state, items) do
+    case Enum.find(items, &(&1.type == :caret)) do
+      nil ->
+        state
+
+      c ->
+        view = UI.client_height(state.ui)
+
+        cond do
+          c.y < state.scroll ->
+            scroll_by(state, c.y - 16 - state.scroll)
+
+          c.y + c.h > state.scroll + view ->
+            scroll_by(state, c.y + c.h + 16 - state.scroll - view)
+
+          true ->
+            state
+        end
+    end
+  end
+
+  # asks the script to do something in the focused host and applies what comes back
+  defp edit(%{js: nil} = state, _action, _args), do: state
+
+  defp edit(state, action, args) do
+    state |> apply_js(Browser.JS.Runtime.edit(state.js, action, args))
+  end
+
+  defp edit(state, action), do: edit(state, action, [])
+
+  defp focus_editor(state, host) do
+    state = %{state | sel: nil, sel_items: []}
+    state |> apply_js(Browser.JS.Runtime.edit_focus(state.js, host))
+  end
+
+  defp blur_editor(%{js: nil} = state), do: %{state | efocus: nil, esel: nil}
+
+  defp blur_editor(state) do
+    state = apply_js(state, Browser.JS.Runtime.edit_blur(state.js))
+    state = %{state | efocus: nil, edrag: false, egoal: nil}
+    state |> stop_blink() |> set_overlay([])
+  end
+
+  # a click in an editing host: focus, the caret (or a word, or a paragraph, or a selection that
+  # grows from where the caret was), and a drag selects more
+  defp editor_click(state, host, x, py, count, shift) do
+    {state, prevented} = js_event(state, {:edit_host, host}, "mousedown")
+
+    if prevented do
+      state
+    else
+      state = if state.efocus == host, do: state, else: focus_editor(state, host)
+      %{index: index} = state.ed
+
+      {nid, off} =
+        Editing.point_at(index, state.items, host, x, py, state.measure) || {host, 0}
+
+      state =
+        cond do
+          count >= 3 -> state |> edit("place", [nid, off, false]) |> edit("block", [nid, off])
+          count == 2 -> state |> edit("place", [nid, off, false]) |> edit("word", [nid, off])
+          true -> edit(state, "place", [nid, off, shift and state.efocus == host])
+        end
+
+      %{state | edrag: count == 1, egoal: nil}
+    end
+  end
+
+  # the mouse moved with the button down after a click in an editing host
+  defp drag_editor(%{esel: %{host: host}, ed: %{index: index}} = state, x, y) do
+    view = UI.client_height(state.ui)
+
+    state =
+      cond do
+        y < 0 -> scroll_by(state, -24)
+        y > view -> scroll_by(state, 24)
+        true -> state
+      end
+
+    case Editing.point_at(index, state.items, host, x, y + state.scroll, state.measure) do
+      nil -> state
+      pos when pos == state.esel.focus -> state
+      {nid, off} -> edit(state, "place", [nid, off, true])
+    end
+  end
+
+  defp drag_editor(state, _x, _y), do: %{state | edrag: false}
+
+  # keys in a focused editing host, after the page's own handlers had them
+  defp editor_key(state, key) do
+    vertical? =
+      match?({:select, k} when k in [:up, :down, :page_up, :page_down], key) or
+        key in [:up, :down, :page_up, :page_down]
+
+    state = if vertical?, do: state, else: %{state | egoal: nil}
+
+    case key do
+      {:char, c} -> edit(state, "text", [c])
+      :enter -> edit(state, "enter", [false])
+      :shift_enter -> edit(state, "enter", [true])
+      :backspace -> edit(state, "backspace")
+      :delete -> edit(state, "delete")
+      :left -> edit(state, "move", [-1, false])
+      :right -> edit(state, "move", [1, false])
+      {:select, :left} -> edit(state, "move", [-1, true])
+      {:select, :right} -> edit(state, "move", [1, true])
+      k when k in [:up, :down, :home, :end, :page_up, :page_down] -> editor_move(state, k, false)
+      {:select, k} -> editor_move(state, k, true)
+      :select_all -> edit(state, "selectAll")
+      :copy -> editor_copy(state, "copy")
+      :cut -> editor_copy(state, "cut")
+      :paste -> edit(state, "paste", [UI.clipboard_text()])
+      {:shortcut, c} -> editor_shortcut(state, c)
+      :tab -> state |> blur_editor() |> focus_step(:forward)
+      :shift_tab -> state |> blur_editor() |> focus_step(:backward)
+      :escape -> blur_editor(state)
+      _ -> state
+    end
+  end
+
+  defp editor_copy(state, action) do
+    reply = Browser.JS.Runtime.edit(state.js, action, [])
+
+    case reply[:result] do
+      text when is_binary(text) and text != "" -> UI.set_clipboard_text(text)
+      _ -> :ok
+    end
+
+    apply_js(state, reply)
+  end
+
+  defp editor_shortcut(state, "b"), do: edit(state, "command", ["bold"])
+  defp editor_shortcut(state, "i"), do: edit(state, "command", ["italic"])
+  defp editor_shortcut(state, "u"), do: edit(state, "command", ["underline"])
+  defp editor_shortcut(state, "z"), do: edit(state, "undo")
+  defp editor_shortcut(state, "Z"), do: edit(state, "redo")
+  defp editor_shortcut(state, "y"), do: edit(state, "redo")
+  defp editor_shortcut(state, _), do: state
+
+  # up, down, home, end and the page keys go by what is on the screen: the line above or below at
+  # the column the caret came from, the start or end of its line
+  defp editor_move(%{esel: %{focus: pos, host: host}, ed: %{index: index}} = state, key, extend?) do
+    case Editing.caret_rect(index, state.items, pos, state.measure) do
+      nil ->
+        state
+
+      c ->
+        view = UI.client_height(state.ui)
+        goal = state.egoal || c.x
+        mid = c.y + div(c.h, 2)
+
+        {x, y} =
+          case key do
+            :up -> {goal, c.y - 2}
+            :down -> {goal, c.y + c.h + 2}
+            :home -> {0, mid}
+            :end -> {1_000_000, mid}
+            :page_up -> {goal, c.y - view + 40}
+            :page_down -> {goal, c.y + view - 40}
+          end
+
+        case Editing.point_at(index, state.items, host, x, y, state.measure) do
+          nil ->
+            state
+
+          {nid, off} ->
+            vertical? = key in [:up, :down, :page_up, :page_down]
+            state = %{state | egoal: if(vertical?, do: goal)}
+            edit(state, "place", [nid, off, extend?])
+        end
+    end
+  end
+
+  defp editor_move(state, _key, _extend?), do: state
+
   # -- selecting page text ---------------------------------------------------
 
   defp sel_texts(%{sel_texts: nil} = state) do
@@ -995,7 +1347,7 @@ defmodule Browser.Session do
     apply_selection(state, Selection.range(state.sel_anchor, head))
   end
 
-  defp end_drag(state), do: %{state | drag: false, fdrag: false}
+  defp end_drag(state), do: %{state | drag: false, fdrag: false, edrag: false}
 
   defp page_selection_key(state, :select_all) do
     {texts, state} = sel_texts(state)
@@ -1042,6 +1394,7 @@ defmodule Browser.Session do
 
   # gives `cid` the focus; the caret goes to `where`: :end or an index
   defp focus(state, cid, where) do
+    state = if state.efocus, do: blur_editor(state), else: state
     control = control(state, cid)
     UI.focus_page(state.ui)
 
@@ -1144,7 +1497,10 @@ defmodule Browser.Session do
         state |> focus(cid, 0) |> relayout() |> open_select(control)
 
       button?(control) ->
-        state |> focus(cid, 0) |> relayout() |> activate(control)
+        # a script can keep the focus (and the selection) where it is by cancelling `mousedown`
+        {state, prevented} = js_event(state, {:control, cid}, "mousedown")
+        state = if prevented, do: state, else: state |> focus(cid, 0) |> relayout()
+        activate(state, control)
 
       true ->
         state |> focus(cid, 0) |> relayout()
@@ -1286,7 +1642,7 @@ defmodule Browser.Session do
     target =
       cond do
         cid -> {:control, cid}
-        item -> {:node, item.nid}
+        item -> {:edit_host, item.nid}
         true -> :document
       end
 
@@ -1297,13 +1653,21 @@ defmodule Browser.Session do
     else
       # a right click in a field focuses it, leaving a selection it has alone
       control = cid && control(state, cid)
+      host = if cid == nil, do: editor_at(state, x, py)
 
       state =
-        if control && Forms.editable?(control) && state.focus != cid,
-          do: click_control(state, cid, x, py, 1, false),
-          else: state
+        cond do
+          control && Forms.editable?(control) && state.focus != cid ->
+            click_control(state, cid, x, py, 1, false)
 
-      entries = context_entries(state, control, href, image)
+          host && state.efocus != host ->
+            editor_click(state, host, x, py, 1, false)
+
+          true ->
+            state
+        end
+
+      entries = context_entries(state, control, host, href, image)
       UI.context_menu(state.ui, {wx_x, y}, Enum.map(entries, &context_label/1))
       %{state | ctx: entries}
     end
@@ -1336,8 +1700,8 @@ defmodule Browser.Session do
   defp context_label(:separator), do: :separator
   defp context_label({label, enabled?, _action}), do: {label, enabled?}
 
-  defp context_entries(state, control, href, image) do
-    editing = control && Forms.editable?(control) && control
+  defp context_entries(state, control, host, href, image) do
+    editing = (control && Forms.editable?(control) && control) || (host && :host)
 
     groups =
       [
@@ -1363,8 +1727,15 @@ defmodule Browser.Session do
   end
 
   defp context_edit_entries(state, control) do
-    cur = Forms.current(control, state.page.form_state)
-    selected? = TextEdit.selected(cur.value, TextEdit.selection(state.caret, state.fanchor)) != ""
+    selected? =
+      case control do
+        :host ->
+          match?(%{anchor: a, focus: f} when a != f, state.esel)
+
+        _ ->
+          cur = Forms.current(control, state.page.form_state)
+          TextEdit.selected(cur.value, TextEdit.selection(state.caret, state.fanchor)) != ""
+      end
 
     [
       {"Cut", selected?, {:key, :cut}},
@@ -1572,9 +1943,12 @@ defmodule Browser.Session do
   defp apply_js(state, reply) do
     state = Enum.reduce(reply.outbox, state, &js_effect/2)
 
-    if reply.dirty and reply.raw != nil and state.page != nil,
-      do: start_page_job(state, reply.raw),
-      else: state
+    state =
+      if reply.dirty and reply.raw != nil and state.page != nil,
+        do: start_page_job(state, reply.raw),
+        else: state
+
+    sync_editor(state, reply)
   end
 
   # The changed tree is indexed, styled and laid out in a process of its own, so a script that
@@ -1649,6 +2023,11 @@ defmodule Browser.Session do
 
   # `form.submit()` and `requestSubmit()`: the form goes the way a click on its button sends it
   defp js_effect({:submit, fid}, state) when is_integer(fid), do: navigate_form(state, fid, nil)
+
+  defp js_effect({:clipboard, text}, state) do
+    UI.set_clipboard_text(text)
+    state
+  end
 
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, 0}, state), do: load(state, state.url, :history)
@@ -1840,6 +2219,7 @@ defmodule Browser.Session do
 
     state = scroll_x_by(state, 0)
     state = scroll_by(state, 0, mode)
+    state = refresh_editor(state)
     send_layout(state)
     scroll_to_fragment(state)
   end
@@ -1944,7 +2324,11 @@ defmodule Browser.Session do
   defp send_layout(%{page: nil}), do: :ok
 
   defp send_layout(%{js: pid, page: page} = state) do
-    rects = Browser.Nids.rects(state.items, Browser.Nids.parents(page.pruned || []))
+    rects =
+      case state.ed do
+        %{rects: rects} -> rects
+        nil -> Browser.Nids.rects(state.items, Browser.Nids.parents(page.pruned || []))
+      end
 
     Browser.JS.Runtime.layout(
       pid,
@@ -2113,7 +2497,8 @@ defmodule Browser.Session do
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
   @tab_keys ~w(history page nodes items links controls hit_controls sticky images height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
-    sel_items click fanchor fdrag hover js scripts_pending page_edits fragment loading)a
+    sel_items click fanchor fdrag hover js scripts_pending page_edits fragment loading ed efocus
+    esel edrag egoal)a
 
   defp blank_tab do
     %{
@@ -2149,7 +2534,12 @@ defmodule Browser.Session do
       scripts_pending: false,
       page_edits: %{},
       fragment: nil,
-      loading: nil
+      loading: nil,
+      ed: nil,
+      efocus: nil,
+      esel: nil,
+      edrag: false,
+      egoal: nil
     }
   end
 
@@ -2278,6 +2668,7 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) when i == state.active do
+    state = remember_closed(state, i, state)
     state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
     UI.hide_suggestions(state.ui)
     tabs = List.delete_at(state.tabs, i)
@@ -2286,13 +2677,42 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) do
-    case Enum.at(state.tabs, i) do
+    tab = Enum.at(state.tabs, i)
+    state = remember_closed(state, i, tab)
+
+    case tab do
       %{js: pid} when is_pid(pid) -> Browser.JS.Runtime.stop(pid)
       _ -> :ok
     end
 
     active = if i < state.active, do: state.active - 1, else: state.active
     publish_tabs(%{state | tabs: List.delete_at(state.tabs, i), active: active})
+  end
+
+  @closed_kept 20
+
+  # the closed tab's history and page are kept to open it again (not its scroll or form edits)
+  defp remember_closed(state, i, %{history: h, loading: loading}) do
+    entry =
+      cond do
+        h.current != nil -> {i, h, {h.current, :history, []}}
+        loading != nil -> {i, History.new(), loading}
+        true -> nil
+      end
+
+    if entry, do: %{state | closed: Enum.take([entry | state.closed], @closed_kept)}, else: state
+  end
+
+  # Ctrl+Shift+T: the tab closed last comes back where it was, and is shown
+  defp reopen_tab(%{closed: []} = state), do: state
+
+  defp reopen_tab(%{closed: [{i, history, {url, mode, opts}} | rest]} = state) do
+    state = park(%{state | closed: rest})
+    i = min(i, length(state.tabs))
+    tab = %{blank_tab() | history: history}
+    state = %{state | tabs: List.insert_at(state.tabs, i, tab), active: i}
+    state = state |> Map.merge(tab) |> resume_blank()
+    load(state, url, mode, opts)
   end
 
   defp tab_click(state, x, y, button) do

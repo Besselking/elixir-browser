@@ -57,6 +57,9 @@ defmodule Browser.JS.Props do
     end
   end
 
+  @doc "Whether the object has the key as an own property (virtual function properties too)."
+  def has_own?(obj, key), do: state(obj, key) != nil
+
   defp state({:obj, id}, key) do
     o = deref(id)
     o = Map.put(o, :attrs_or_default, Map.get(o, :attrs, %{}))
@@ -64,17 +67,8 @@ defmodule Browser.JS.Props do
   end
 
   # `name`, `length` and `prototype` of a function exist without being stored
-  defp virtual(id, %{class: :function}, key) when key in ["name", "length", "prototype"] do
-    case Interp.get({:obj, id}, key) do
-      :undefined ->
-        nil
-
-      v ->
-        case key do
-          "prototype" -> {:data, v, true, false, false}
-          _ -> {:data, v, false, false, true}
-        end
-    end
+  defp virtual(id, %{class: :function} = o, key) when key in ["name", "length", "prototype"] do
+    if key in Map.get(o, :gone, []), do: nil, else: virtual_fn(id, key)
   end
 
   # a variable of the global scope is a property of the global object
@@ -85,7 +79,7 @@ defmodule Browser.JS.Props do
         builtin? = MapSet.member?(:erlang.get(:js_builtin_names), key)
 
         {:data, v, key not in ["NaN", "Infinity", "undefined"], not builtin?,
-         key not in ["NaN", "Infinity", "undefined"]}
+         key not in ["NaN", "Infinity", "undefined"] and not Interp.global_fixed?(key)}
 
       :miss ->
         nil
@@ -116,6 +110,19 @@ defmodule Browser.JS.Props do
   end
 
   defp virtual(_, _, _), do: nil
+
+  defp virtual_fn(id, key) do
+    case Interp.get({:obj, id}, key) do
+      :undefined ->
+        nil
+
+      v ->
+        case key do
+          "prototype" -> {:data, v, true, false, false}
+          _ -> {:data, v, false, false, true}
+        end
+    end
+  end
 
   @doc "The property descriptor object of an own property, or undefined."
   def descriptor({:obj, id} = obj, key) do
@@ -190,33 +197,63 @@ defmodule Browser.JS.Props do
   defp own_names_plain2(id, o) do
     base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
-    hidden =
-      (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
+    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
+
+    ordered =
+      o |> Map.get(:horder, []) |> Enum.reverse() |> Enum.uniq() |> Enum.filter(&(&1 in hidden0))
+
+    hidden = ordered ++ Enum.sort(hidden0 -- ordered)
 
     case o do
       %{class: :array} ->
         for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
-          base ++ hidden ++ ["length"]
+          ["length"] ++ base ++ hidden
 
       %{class: :function} ->
-        virtual =
+        # length, name and prototype come first, in that order, whether stored or not
+        std =
           for k <- ["length", "name", "prototype"],
-              k not in hidden and k not in base,
-              state({:obj, id}, k) != nil,
+              k in hidden or k in base or state({:obj, id}, k) != nil,
               do: k
 
-        base ++ virtual ++ hidden
+        {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
+        {hints, hrest} = Enum.split_with(hidden -- std, &index_key?/1)
+        Enum.sort_by(ints ++ hints, &array_index/1) ++ std ++ rest ++ hrest
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
 
         for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i)) ++
-          Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+          Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ ((rest ++ hidden) -- ["length"])
 
       _ ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+        {hints, hidden} = Enum.split_with(hidden, &index_key?/1)
+        ordered = ordered -- hints
+        Enum.sort_by(ints ++ hints, &array_index/1) ++ interleave(rest, ordered, o, hidden)
     end
+  end
+
+  # keys `defineProperty` made non-enumerable go where they were created among the others
+  defp interleave(rest, ordered, o, hidden) do
+    pos = Map.get(o, :hpos, %{})
+    # positions are only known when every hidden key was created by `defineProperty`
+    placed =
+      if Enum.all?(ordered, &Map.has_key?(pos, &1)),
+        do: for(k <- ordered, do: {pos[k], k}),
+        else: []
+
+    done = Enum.map(placed, &elem(&1, 1))
+
+    merged =
+      rest
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {k, i} ->
+        [k | for({n, h} <- placed, n == i + 1, do: h)]
+      end)
+
+    lead = for {0, h} <- placed, do: h
+    lead ++ merged ++ (hidden -- done)
   end
 
   @doc "Every own key, strings first then symbols (a proxy's `ownKeys` result as it is)."
@@ -252,6 +289,15 @@ defmodule Browser.JS.Props do
 
   def enumerable_keys(_, _), do: []
 
+  @doc "The keys an object rest element copies: enumerable own strings then symbols, minus `used`."
+  def rest_keys({:obj, id} = o, used) do
+    if Map.has_key?(deref(id), :proxy),
+      do: enumerable_keys(o, used),
+      else: enumerable_keys(o, used) ++ (enumerable_symbols(o) -- used)
+  end
+
+  def rest_keys(v, used), do: enumerable_keys(v, used)
+
   @doc "Every enumerable own key (CopyDataProperties): strings, then symbols; a proxy's in trap order."
   def enumerable_own_keys({:obj, id} = o) do
     if Map.has_key?(deref(id), :proxy),
@@ -271,14 +317,24 @@ defmodule Browser.JS.Props do
   def own_symbols({:obj, id}) do
     o = deref(id)
 
-    if Map.has_key?(o, :proxy) do
-      for k <- Browser.JS.Proxy.own_keys({:obj, id}), match?({:symbol, _, _}, k), do: k
-    else
-      o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+    case o do
+      %{proxy: _} ->
+        for k <- Browser.JS.Proxy.own_keys({:obj, id}), match?({:symbol, _, _}, k), do: k
+
+      # a deferred namespace evaluates its module for any key listing
+      %{class: :host, host: {Browser.JS.Modules, {:dns, _} = data}} ->
+        Browser.JS.Modules.names(data)
+        own_symbols_plain(o)
+
+      _ ->
+        own_symbols_plain(o)
     end
   end
 
   def own_symbols(_), do: []
+
+  defp own_symbols_plain(o),
+    do: o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
 
   # ── defining ───────────────────────────────────────────────
 
@@ -408,12 +464,25 @@ defmodule Browser.JS.Props do
         Browser.JS.Proxy.set(target, key, value, receiver)
 
       o.class == :host ->
+        ta? = Browser.JS.TypedArrays.typed_array?(target)
+        numeric? = ta? and Browser.JS.TypedArrays.numeric_key?(key)
+
         cond do
           match?({Browser.JS.Modules, _}, o.host) ->
             false
 
-          receiver != target and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+          numeric? and receiver == target ->
+            Interp.put(target, key, value)
             true
+
+          numeric? and Browser.JS.TypedArrays.invalid_index?(target, key) ->
+            true
+
+          numeric? ->
+            set_on_receiver(key, value, receiver)
+
+          ta? ->
+            ordinary_set_plain(target, key, value, receiver)
 
           true ->
             Interp.put(target, key, value)
@@ -421,26 +490,30 @@ defmodule Browser.JS.Props do
         end
 
       true ->
-        case state(target, key) do
-          nil ->
-            case get_prototype_of(target) do
-              {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
-              _ -> set_on_receiver(key, value, receiver)
-            end
+        ordinary_set_plain(target, key, value, receiver)
+    end
+  end
 
-          {:data, _, false, _, _} ->
-            false
+  defp ordinary_set_plain(target, key, value, receiver) do
+    case state(target, key) do
+      nil ->
+        case get_prototype_of(target) do
+          {:obj, _} = parent -> ordinary_set(parent, key, value, receiver)
+          _ -> set_on_receiver(key, value, receiver)
+        end
 
-          {:data, _, _, _, _} ->
-            set_on_receiver(key, value, receiver)
+      {:data, _, false, _, _} ->
+        false
 
-          {:accessor, _, setter, _, _} ->
-            if function?(setter) do
-              Interp.call(setter, receiver, [value])
-              true
-            else
-              false
-            end
+      {:data, _, _, _, _} ->
+        set_on_receiver(key, value, receiver)
+
+      {:accessor, _, setter, _, _} ->
+        if function?(setter) do
+          Interp.call(setter, receiver, [value])
+          true
+        else
+          false
         end
     end
   end
@@ -487,7 +560,39 @@ defmodule Browser.JS.Props do
 
   defp set_on_receiver(_, _, _), do: false
 
+  # an element of a mapped `arguments` object follows [[DefineOwnProperty]] of arguments exotic
+  # objects: it stays mapped unless it becomes an accessor or read-only
   defp define_own(obj, id, key, desc) do
+    o = deref(id)
+
+    with %{mapped: mapped} <- o,
+         i when is_integer(i) <- Interp.array_index(key),
+         %{^i => _name} <- mapped do
+      accessor? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+
+      desc2 =
+        if not accessor? and Map.get(desc, :writable) == false and not Map.has_key?(desc, :value),
+          do: Map.put(desc, :value, Map.get(o.items, i, :undefined)),
+          else: desc
+
+      define_own_plain(obj, id, key, desc2)
+
+      cond do
+        accessor? ->
+          Interp.unmap_argument(id, i)
+
+        true ->
+          if Map.has_key?(desc, :value), do: Interp.sync_param(deref(id), i, desc.value)
+          if Map.get(desc, :writable) == false, do: Interp.unmap_argument(id, i)
+      end
+
+      :ok
+    else
+      _ -> define_own_plain(obj, id, key, desc)
+    end
+  end
+
+  defp define_own_plain(obj, id, key, desc) do
     o = deref(id)
 
     cond do
@@ -544,6 +649,15 @@ defmodule Browser.JS.Props do
         else: Map.put(attrs, key, flags)
 
     keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
+    named = Enum.count(o.keys, &(is_binary(&1) and not index_key?(&1)))
+
+    o =
+      if Map.get(desc, :enumerable, false),
+        do: o,
+        else:
+          o
+          |> Map.update(:horder, [key], &[key | &1])
+          |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
 
     store(
       id,
@@ -648,7 +762,12 @@ defmodule Browser.JS.Props do
         do: Map.delete(attrs, key),
         else: Map.put(attrs, key, flags)
 
-    keys = o.keys |> List.delete(key) |> then(&if(e, do: [key | &1], else: &1))
+    keys =
+      cond do
+        e and key in o.keys -> o.keys
+        e -> [key | o.keys]
+        true -> List.delete(o.keys, key)
+      end
 
     # a function's own name, length and prototype become real properties
     store(
@@ -667,9 +786,13 @@ defmodule Browser.JS.Props do
 
     exists? = Map.has_key?(o.items, i)
 
-    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set),
-      do: define_element_accessor(id, o, key, i, desc, exists?),
-      else: define_element_data(id, o, key, i, desc, exists?)
+    # a generic descriptor (no value, writable, get or set) keeps an accessor an accessor
+    generic? = not (Map.has_key?(desc, :value) or Map.has_key?(desc, :writable))
+
+    if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or
+         (generic? and match?({:accessor, _, _}, o.items[i])),
+       do: define_element_accessor(id, o, key, i, desc, exists?),
+       else: define_element_data(id, o, key, i, desc, exists?)
   end
 
   defp define_element_accessor(id, o, key, i, desc, exists?) do
@@ -682,7 +805,7 @@ defmodule Browser.JS.Props do
 
       true ->
         current = if exists?, do: state({:obj, id}, key)
-        if current && !elem(current, 4), do: reject(key)
+        if current, do: validate(current, desc, key)
 
         {g0, s0} =
           case o.items[i] do
@@ -730,7 +853,16 @@ defmodule Browser.JS.Props do
 
         attrs = Map.get(o, :attrs, %{})
         cur = Map.get(attrs, i, %{})
-        w = Map.get(desc, :writable, if(exists?, do: Map.get(cur, :w, true), else: false))
+        # turning an accessor into a data property starts from undefined and read-only
+        was_accessor? = match?({:accessor, _, _}, o.items[i])
+
+        w =
+          Map.get(
+            desc,
+            :writable,
+            if(exists? and not was_accessor?, do: Map.get(cur, :w, true), else: false)
+          )
+
         c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
         e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
         flags = %{w: w, c: c, e: e}
@@ -740,7 +872,12 @@ defmodule Browser.JS.Props do
             do: Map.delete(attrs, i),
             else: Map.put(attrs, i, flags)
 
-        v = Map.get(desc, :value, Map.get(o.items, i, :undefined))
+        v =
+          Map.get(
+            desc,
+            :value,
+            if(was_accessor?, do: :undefined, else: Map.get(o.items, i, :undefined))
+          )
 
         store(
           id,
@@ -781,7 +918,17 @@ defmodule Browser.JS.Props do
         o =
           if new_len do
             if read_only? and new_len != o.len, do: reject("length")
-            shrink(id, o, new_len)
+
+            try do
+              shrink(id, o, new_len)
+            catch
+              {:js_error, _} = err ->
+                # a blocked shrink still makes the length read-only when that was asked for
+                if Map.get(desc, :writable) == false,
+                  do: store(id, Map.put(deref(id), :len_ro, true))
+
+                throw(err)
+            end
           else
             o
           end
@@ -1209,8 +1356,11 @@ defmodule Browser.JS.Props do
     end
   end
 
-  defp proto_chain_has?({:obj, _} = p, target),
-    do: p == target or proto_chain_has?(get_prototype_of(p), target)
+  # the walk stops at a proxy: its prototype is not ordinary
+  defp proto_chain_has?({:obj, id} = p, target),
+    do:
+      p == target or
+        (not Map.has_key?(deref(id), :proxy) and proto_chain_has?(get_prototype_of(p), target))
 
   defp proto_chain_has?(_, _), do: false
 

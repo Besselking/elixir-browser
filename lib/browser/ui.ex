@@ -85,6 +85,7 @@ defmodule Browser.UI do
     file = :wxMenu.new()
     :wxMenu.append(file, 5100, ~c"New Tab\tCtrl+T")
     :wxMenu.append(file, 5101, ~c"Close Tab\tCtrl+W")
+    :wxMenu.append(file, 5102, ~c"Reopen Closed Tab\tCtrl+Shift+T")
     :wxMenu.appendSeparator(file)
     :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
     menubar = :wxMenuBar.new()
@@ -714,7 +715,7 @@ defmodule Browser.UI do
   defp draw_gc(dc, %{type: :text} = item, y) do
     gc = new_gc(dc)
     :wxGraphicsContext.setFont(gc, font(item), item.color)
-    :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    draw_gc_text(gc, item, y)
 
     if item.underline do
       uy = y + underline_offset(dc, item)
@@ -756,6 +757,50 @@ defmodule Browser.UI do
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
   # selected text: a translucent wash over it
+  # text with `letter-spacing` or `word-spacing` goes down a character at a time, each after
+  # the width of the ones before it and the spacing
+  defp draw_gc_text(gc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _, _, _} = :wxGraphicsContext.getTextExtent(gc, prefix)
+        :wxGraphicsContext.drawText(gc, ch, item.x + w + extra, y)
+      end)
+    else
+      :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    end
+  end
+
+  defp draw_dc_text(dc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _} = :wxDC.getTextExtent(dc, prefix)
+        :wxDC.drawText(dc, ch, {round(item.x + w + extra), y})
+      end)
+    else
+      :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    end
+  end
+
+  defp spread?(item) do
+    Map.get(item, :ls, 0) != 0 or
+      (Map.get(item, :wsp, 0) != 0 and String.contains?(item.text, [" ", "\u00A0"]))
+  end
+
+  # calls `fun.(char, text_before_it, spacing_before_it)` for each character of the item
+  defp each_char(item, fun) do
+    ls = Map.get(item, :ls, 0)
+    wsp = Map.get(item, :wsp, 0)
+    chars = String.graphemes(item.text)
+
+    chars
+    |> Enum.with_index()
+    |> Enum.reduce({[], 0}, fn {ch, i}, {before, spaces} ->
+      prefix = before |> Enum.reverse() |> Enum.join() |> String.to_charlist()
+      fun.(String.to_charlist(ch), prefix, i * ls + spaces * wsp)
+      {[ch | before], spaces + if(ch in [" ", "\u00A0"], do: 1, else: 0)}
+    end)
+  end
+
   defp draw(dc, %{type: :selection} = item, y, _scroll) do
     gc = new_gc(dc)
     :wxGraphicsContext.setBrush(gc, :wxBrush.new({56, 132, 255, 90}))
@@ -909,7 +954,7 @@ defmodule Browser.UI do
       Process.put(:paint_color, item.color)
     end
 
-    :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    draw_dc_text(dc, item, y)
 
     if item.underline or item.strike do
       :wxDC.setPen(dc, pen(item.color))

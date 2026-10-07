@@ -52,21 +52,38 @@ defmodule Browser.CSS do
     |> strip_comments()
     |> split_top(?;)
     |> Enum.flat_map(fn piece ->
-      with false <- String.contains?(piece, "{"),
+      with false <- String.contains?(piece, "{") and not var_reference?(piece),
            [prop, value] <- :binary.split(piece, ":"),
-           prop = prop |> String.trim() |> String.downcase(),
-           true <- prop != "" do
+           prop = prop |> String.trim() |> fold_prop(),
+           true <- prop not in ["", "--"] do
         {value, important?} = split_important(String.trim(value))
-        if valid_value?(prop, value), do: [{prop, value, important?}], else: []
+
+        if valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
+          do: [{prop, value, important?}],
+          else: []
       else
         _ -> []
       end
     end)
   end
 
+  defp var_reference?(piece), do: Regex.match?(~r/var\(/i, piece)
+
+  # custom property names are case-sensitive, everything else is not
+  defp fold_prop(prop) do
+    case if(String.starts_with?(prop, "-"), do: unescape(prop), else: prop) do
+      "--" <> _ = custom -> custom
+      _ -> String.downcase(prop)
+    end
+  end
+
   # a declaration whose value is not allowed is dropped, so the one before it still applies
   defp valid_value?("tab-size", value), do: not String.starts_with?(value, "-")
-  defp valid_value?(_prop, _value), do: true
+
+  defp valid_value?(prop, value) do
+    (not var_reference?(value) or var_references_valid?(value)) and
+      (not String.starts_with?(prop, "--") or balanced?(value))
+  end
 
   defp split_important(value) do
     case Regex.run(~r/\A(.*?)\s*!\s*important\s*\z/is, value, capture: :all_but_first) do
@@ -75,7 +92,30 @@ defmodule Browser.CSS do
     end
   end
 
-  defp strip_comments(css), do: Regex.replace(~r{/\*.*?\*/}s, css, " ")
+  # a comment left open at the end of the input runs to the end
+  defp strip_comments(css), do: Regex.replace(~r{/\*(?:.*?\*/|.*\z)}s, css, " ")
+
+  # no closing bracket without its opener (strings and escapes aside)
+  defp balanced?(value), do: balanced?(value, [])
+  defp balanced?(<<>>, stack), do: stack == []
+  defp balanced?(<<?\\, _, r::binary>>, stack), do: balanced?(r, stack)
+
+  defp balanced?(<<q, r::binary>>, stack) when q in [?", ?'] do
+    case :binary.split(r, <<q>>) do
+      [_, rest] -> balanced?(rest, stack)
+      _ -> false
+    end
+  end
+
+  defp balanced?(<<c, r::binary>>, stack) when c in [?(, ?[, ?{],
+    do: balanced?(r, [c | stack])
+
+  defp balanced?(<<c, r::binary>>, [o | stack])
+       when (c == ?) and o == ?() or (c == ?] and o == ?[) or (c == ?} and o == ?{),
+       do: balanced?(r, stack)
+
+  defp balanced?(<<c, _::binary>>, _stack) when c in [?), ?], ?}], do: false
+  defp balanced?(<<_, r::binary>>, stack), do: balanced?(r, stack)
 
   # -> [{prelude, body, media_conditions}] for each qualified rule, in order
   defp blocks(bin, conds, acc) do
@@ -88,6 +128,13 @@ defmodule Browser.CSS do
         blocks(rest, conds, acc)
 
       "}" <> rest ->
+        blocks(rest, conds, acc)
+
+      # the HTML comment tokens between rules are ignored
+      "<!--" <> rest ->
+        blocks(rest, conds, acc)
+
+      "-->" <> rest ->
         blocks(rest, conds, acc)
 
       b ->
@@ -109,7 +156,7 @@ defmodule Browser.CSS do
   end
 
   defp at_rule(bin, conds, acc) do
-    case :binary.match(bin, ["{", ";"]) do
+    case prelude_end(bin) do
       :nomatch ->
         {acc, ""}
 
@@ -125,7 +172,7 @@ defmodule Browser.CSS do
           inner =
             case String.downcase(name) do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
-              "supports" -> if supports_not?(prelude), do: [], else: blocks(body, conds, [])
+              "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
               "layer" -> blocks(body, conds, [])
               _ -> []
             end
@@ -135,8 +182,220 @@ defmodule Browser.CSS do
     end
   end
 
-  defp supports_not?(prelude),
-    do: prelude |> String.trim() |> String.downcase() |> String.starts_with?("not")
+  # the `{` or `;` that ends an at-rule prelude: braces inside parentheses (`@supports (a: {b})`)
+  # and strings belong to the prelude
+  defp prelude_end(bin), do: prelude_end(bin, 0, 0, nil)
+  defp prelude_end(<<>>, _n, _d, _q), do: :nomatch
+  defp prelude_end(<<?\\, _, r::binary>>, n, d, q), do: prelude_end(r, n + 2, d, q)
+
+  defp prelude_end(<<c, r::binary>>, n, d, q) when q != nil,
+    do: prelude_end(r, n + 1, d, if(c == q, do: nil, else: q))
+
+  defp prelude_end(<<c, r::binary>>, n, d, nil) when c in [?", ?'],
+    do: prelude_end(r, n + 1, d, c)
+
+  defp prelude_end(<<?(, r::binary>>, n, d, nil), do: prelude_end(r, n + 1, d + 1, nil)
+  defp prelude_end(<<?), r::binary>>, n, d, nil), do: prelude_end(r, n + 1, max(d - 1, 0), nil)
+  defp prelude_end(<<c, _::binary>>, n, 0, nil) when c in [?{, ?;], do: {n, 1}
+  defp prelude_end(<<_, r::binary>>, n, d, nil), do: prelude_end(r, n + 1, d, nil)
+
+  @doc """
+  Evaluates an `@supports` condition: `not`, `and`, `or`, parenthesised declarations and
+  `selector()`. A declaration is supported when its name is a valid property name and, if it uses
+  `var()`, the reference is well formed; values are not checked beyond that.
+  """
+  def supports?(prelude) do
+    prelude = String.trim(prelude)
+
+    case Regex.run(~r/\Anot\s*(.*)\z/is, prelude) do
+      [_, rest] ->
+        not supports?(rest)
+
+      nil ->
+        case split_keyword(prelude, ["and", "or"]) do
+          {:ok, op, parts} ->
+            results = Enum.map(parts, &supports?/1)
+            if op == "and", do: Enum.all?(results), else: Enum.any?(results)
+
+          :none ->
+            supports_term(prelude)
+        end
+    end
+  end
+
+  defp supports_term("(" <> _ = term) do
+    term = String.trim_trailing(term)
+    inner = term |> binary_part(1, byte_size(term) - 2) |> String.trim()
+
+    cond do
+      String.starts_with?(inner, "(") or Regex.match?(~r/\Anot[\s(]/i, inner) -> supports?(inner)
+      true -> supports_declaration(inner)
+    end
+  end
+
+  defp supports_term(term) do
+    case Regex.run(~r/\Aselector\((.*)\)\z/is, term) do
+      [_, sel] -> selector_supported?(sel)
+      nil -> false
+    end
+  end
+
+  @properties ~w(
+            align-content align-items align-self all animation animation-delay animation-direction animation-duration
+            animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function appearance aspect-ratio backdrop-filter
+            backface-visibility background background-attachment background-blend-mode background-clip background-color background-image background-origin
+            background-position background-position-x background-position-y background-repeat background-size block-size border border-block
+            border-block-color border-block-end border-block-end-color border-block-end-style border-block-end-width border-block-start border-block-start-color border-block-start-style
+            border-block-start-width border-block-style border-block-width border-bottom border-bottom-color border-bottom-left-radius border-bottom-right-radius border-bottom-style
+            border-bottom-width border-collapse border-color border-end-end-radius border-end-start-radius border-image border-image-outset border-image-repeat
+            border-image-slice border-image-source border-image-width border-inline border-inline-color border-inline-end border-inline-end-color border-inline-end-style
+            border-inline-end-width border-inline-start border-inline-start-color border-inline-start-style border-inline-start-width border-inline-style border-inline-width border-left
+            border-left-color border-left-style border-left-width border-radius border-right border-right-color border-right-style border-right-width
+            border-spacing border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius border-top-right-radius
+            border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after
+            break-before break-inside caption-side caret-color clear clip clip-path color
+            color-scheme column-count column-fill column-gap column-rule column-rule-color column-rule-style column-rule-width
+            column-span column-width columns contain contain-intrinsic-size container container-name container-type
+            content content-visibility counter-increment counter-reset counter-set cursor direction display
+            empty-cells filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink
+            flex-wrap float font font-family font-feature-settings font-kerning font-language-override font-optical-sizing
+            font-size font-size-adjust font-stretch font-style font-synthesis font-variant font-variant-alternates font-variant-caps
+            font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight gap grid
+            grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-gap grid-column-start
+            grid-gap grid-row grid-row-end grid-row-gap grid-row-start grid-template grid-template-areas grid-template-columns
+            grid-template-rows hanging-punctuation height hyphens image-orientation image-rendering inline-size inset
+            inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content
+            justify-items justify-self left letter-spacing line-break line-height list-style list-style-image
+            list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline
+            margin-inline-end margin-inline-start margin-left margin-right margin-top margin-trim mask mask-clip
+            mask-composite mask-image mask-mode mask-origin mask-position mask-repeat mask-size mask-type
+            max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width
+            mix-blend-mode object-fit object-position offset opacity order orphans outline
+            outline-color outline-offset outline-style outline-width overflow overflow-anchor overflow-wrap overflow-x
+            overflow-y overscroll-behavior padding padding-block padding-block-end padding-block-start padding-bottom padding-inline
+            padding-inline-end padding-inline-start padding-left padding-right padding-top page-break-after page-break-before page-break-inside
+            paint-order perspective perspective-origin place-content place-items place-self pointer-events position
+            quotes resize right rotate row-gap ruby-align ruby-position scale
+            scroll-behavior scroll-margin scroll-padding scroll-snap-align scroll-snap-stop scroll-snap-type scrollbar-color scrollbar-gutter
+            scrollbar-width shape-image-threshold shape-margin shape-outside tab-size table-layout text-align text-align-last
+            text-combine-upright text-decoration text-decoration-color text-decoration-line text-decoration-skip-ink text-decoration-style text-decoration-thickness text-emphasis
+            text-emphasis-color text-emphasis-position text-emphasis-style text-indent text-justify text-orientation text-overflow text-rendering
+            text-shadow text-size-adjust text-transform text-underline-offset text-underline-position text-wrap top touch-action
+            transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property
+            transition-timing-function translate unicode-bidi user-select vertical-align visibility white-space widows
+            width will-change word-break word-spacing word-wrap writing-mode z-index zoom
+  )
+
+  defp known_property?("-" <> rest = prop) do
+    String.starts_with?(rest, ["webkit-", "moz-", "ms-", "o-"]) and
+      Regex.match?(~r/\A-[a-z]+-[a-z][\w-]*\z/, prop)
+  end
+
+  defp known_property?(prop), do: String.downcase(prop) in @properties
+
+  # pseudo-elements we don't style are still understood
+  defp selector_supported?(sel) do
+    sel = Regex.replace(~r/::[a-zA-Z-]+(\([^)]*\))?/, sel, "")
+    match?({:ok, _}, parse_selector(if String.trim(sel) == "", do: "*", else: sel))
+  end
+
+  defp supports_declaration(decl) do
+    case :binary.split(decl, ":") do
+      [prop, value] ->
+        prop = String.trim(prop)
+        value = String.trim(value)
+
+        cond do
+          prop == "--" -> false
+          String.starts_with?(prop, "--") -> balanced?(value) and supports_value?(value, true)
+          not known_property?(prop) -> false
+          value == "" -> false
+          true -> supports_value?(value)
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  # one `!important` is fine, anything else with `!` or a top-level `;` is not
+  defp supports_value?(value, custom? \\ false) do
+    {value, _} = split_important(value)
+
+    not top_level_bang?(value) and var_references_valid?(value) and
+      (custom? or balanced?(value))
+  end
+
+  # `var(` needs a name (a valid custom property name) and no top-level `!` or `;` in its fallback
+  defp var_references_valid?(value) do
+    Regex.scan(~r/var\(/i, value, return: :index)
+    |> Enum.all?(fn [{pos, len}] ->
+      rest = binary_part(value, pos + len, byte_size(value) - pos - len)
+      {inner, _} = take_var(rest)
+
+      case split_top(inner, ?,) do
+        [name | fallback] ->
+          String.trim(name) != "" and Enum.all?(fallback, &(not top_level_bang?(&1)))
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  defp top_level_bang?(s),
+    do: s |> String.replace("<!--", "") |> flat_top() |> String.contains?(["!", ";"])
+
+  # `s` with everything inside brackets and strings removed
+  defp flat_top(s),
+    do: Regex.replace(~r/\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}|"[^"]*"|'[^']*'/, s, "")
+
+  defp take_var(rest), do: take_var(rest, rest, 1, 0)
+  defp take_var(<<>>, whole, _d, _n), do: {whole, ""}
+  defp take_var(<<?(, r::binary>>, w, d, n), do: take_var(r, w, d + 1, n + 1)
+
+  defp take_var(<<?), r::binary>>, w, d, n),
+    do: if(d == 1, do: {binary_part(w, 0, n), r}, else: take_var(r, w, d - 1, n + 1))
+
+  defp take_var(<<_, r::binary>>, w, d, n), do: take_var(r, w, d, n + 1)
+
+  # splits at top-level whitespace-delimited `and` / `or`: {:ok, op, parts} | :none
+  defp split_keyword(s, _words) do
+    masked = mask_groups(s)
+
+    case Regex.scan(~r/\s(and|or)\s/i, masked, return: :index) do
+      [] ->
+        :none
+
+      found ->
+        op = found |> hd() |> tl() |> hd() |> then(fn {i, l} -> binary_part(s, i, l) end)
+
+        {parts, last} =
+          Enum.reduce(found, {[], 0}, fn [{i, l}, _], {acc, from} ->
+            {[binary_part(s, from, i - from) | acc], i + l}
+          end)
+
+        {:ok, String.downcase(op),
+         Enum.reverse([binary_part(s, last, byte_size(s) - last) | parts])}
+    end
+  end
+
+  # the same length as `s` with whatever sits inside brackets replaced by underscores
+  defp mask_groups(s) do
+    {out, _} =
+      s
+      |> :binary.bin_to_list()
+      |> Enum.map_reduce(0, fn c, d ->
+        cond do
+          c == ?( -> {?_, d + 1}
+          c == ?) -> {?_, max(d - 1, 0)}
+          d > 0 -> {?_, d}
+          true -> {c, d}
+        end
+      end)
+
+    :erlang.list_to_binary(out)
+  end
 
   # `bin` starts just after an opening "{": returns {body, rest_after_closing_brace}
   defp take_block(bin), do: scan(bin, bin, 1, nil, 0)
@@ -206,12 +465,17 @@ defmodule Browser.CSS do
   # an identifier: name characters and escapes (`\[`, `\:`, `\31 `), as in Tailwind's `.w-\[10px\]`
   @ident ~S"(?:[\w\-\x{80}-\x{10FFFF}]|\\(?:[0-9a-fA-F]{1,6}\s?|[^\n0-9a-fA-F]))+"
 
-  defp unescape(ident) do
+  @doc false
+  def unescape(ident) do
     Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, ident, fn
-      _, hex, "" -> <<String.to_integer(hex, 16)::utf8>>
+      _, hex, "" -> code_point(String.to_integer(hex, 16))
       _, _, char -> char
     end)
   end
+
+  # zero, surrogates and anything past U+10FFFF escape to the replacement character
+  defp code_point(n) when n == 0 or n > 0x10FFFF or n in 0xD800..0xDFFF, do: "\uFFFD"
+  defp code_point(n), do: <<n::utf8>>
 
   defp tokenize("", acc), do: {:ok, Enum.reverse(acc)}
 
@@ -227,11 +491,11 @@ defmodule Browser.CSS do
       String.starts_with?(s, "*") ->
         tokenize(binary_part(s, 1, byte_size(s) - 1), [:any | acc])
 
-      m = Regex.run(~r/\A#(#{@ident})/u, s) ->
+      m = Regex.run(~r/\A#(?!\d|-\d)(#{@ident})/u, s) ->
         [whole, id] = m
         tokenize(drop(s, whole), [{:id, unescape(id)} | acc])
 
-      m = Regex.run(~r/\A\.(#{@ident})/u, s) ->
+      m = Regex.run(~r/\A\.(?!\d|-\d)(#{@ident})/u, s) ->
         [whole, cls] = m
         tokenize(drop(s, whole), [{:class, unescape(cls)} | acc])
 

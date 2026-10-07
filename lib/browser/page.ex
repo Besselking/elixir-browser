@@ -281,8 +281,51 @@ defmodule Browser.Page do
     cid_nids(kids, acc)
   end
 
-  @doc "True when the page has a `<script>` element."
-  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script")
+  @doc """
+  Runs the page's scripts in a runtime of its own, lets `fun` do something with the runtime
+  (`Browser.JS.Runtime`) and returns the page as the scripts left it. For tools that have no
+  window (`mix browser.screenshot --js`, `mix browser.layout --js`) and tests; the session keeps
+  a runtime for as long as the page is shown instead.
+  """
+  def run_js(%__MODULE__{} = page, env, fun \\ fn _pid -> :ok end) do
+    if scripts?(page) do
+      alias Browser.JS.Runtime
+
+      info = %{
+        url: page.url,
+        base: page.base || page.url,
+        width: env.width,
+        height: env.height,
+        history_before: 0,
+        fetch: &Browser.Fetch.load(&1, initiator: page.url),
+        request: &Browser.Fetch.load(&1, [initiator: page.url] ++ &2)
+      }
+
+      pid = Runtime.start(page.raw, info)
+      Runtime.run_scripts(pid)
+      Runtime.flush(pid)
+      fun.(pid)
+      reply = Runtime.snapshot(pid)
+      Runtime.stop(pid)
+      if reply.raw, do: from_raw(page, reply.raw, env), else: page
+    else
+      page
+    end
+  end
+
+  @doc "True when the page has a `<script>` element or something editable (the runtime holds its document)."
+  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script") or editable?(raw)
+
+  defp editable?(nodes) when is_list(nodes), do: Enum.any?(nodes, &editable?/1)
+
+  defp editable?({:element, _tag, attrs, kids}) do
+    case List.keyfind(attrs, "contenteditable", 0) do
+      {_, v} when v in ["", "true", "plaintext-only"] -> true
+      _ -> editable?(kids)
+    end
+  end
+
+  defp editable?(_), do: false
 
   # the element stays (scripts and frameworks expect it in the tree), its content does not
   defp empty_tag(nodes, tag) when is_list(nodes), do: Enum.map(nodes, &empty_tag(&1, tag))
@@ -352,17 +395,67 @@ defmodule Browser.Page do
   defp fetch_sheets(refs, base) do
     refs
     |> Enum.map(&prefetched(&1, base))
-    |> Task.async_stream(&sheet(&1, base),
+    |> Task.async_stream(&(&1 |> sheet(base) |> with_imports(0)),
       max_concurrency: 8,
       timeout: @sheet_timeout,
       on_timeout: :kill_task,
       ordered: true
     )
     |> Enum.flat_map(fn
-      {:ok, {css, _base} = sheet} when is_binary(css) -> [sheet]
+      {:ok, sheets} when is_list(sheets) -> sheets
       _ -> []
     end)
   end
+
+  @max_import_depth 4
+
+  # The `@import`s at the top of a sheet are fetched and come before it, with the statements
+  # themselves removed; an `@import` after any other rule is ignored (so it is left for the
+  # parser to skip). -> [{css, base}]
+  defp with_imports({css, base}, depth) when is_binary(css) do
+    {imports, rest} = leading_imports(css)
+
+    imported =
+      if depth < @max_import_depth do
+        for {href, media} <- imports,
+            url = Fetch.resolve(base, href),
+            allowed?(base, url),
+            {:ok, imported_css, final} <- [Fetch.load(url, initiator: base)],
+            {css, base} <- with_imports({imported_css, final}, depth + 1),
+            do: {media_wrap(css, media), base}
+      else
+        []
+      end
+
+    imported ++ [{rest, base}]
+  end
+
+  defp with_imports(_, _depth), do: []
+
+  @import_re ~r/\A(?:\s|\/\*.*?\*\/|<!--|-->)*@import\s*(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|"([^"]*)"|'([^']*)')\s*([^;{]*);/is
+  @charset_re ~r/\A\s*@charset\s*"[^"]*"\s*;/i
+
+  defp leading_imports(css),
+    do: leading_imports(Regex.replace(@charset_re, css, "", global: false), [])
+
+  defp leading_imports(css, acc) do
+    case Regex.run(@import_re, css) do
+      [whole | groups] ->
+        href = groups |> Enum.take(5) |> Enum.find("", &(&1 != ""))
+        media = groups |> Enum.at(5, "") |> String.trim()
+
+        leading_imports(binary_part(css, byte_size(whole), byte_size(css) - byte_size(whole)), [
+          {href, media} | acc
+        ])
+
+      nil ->
+        {Enum.reverse(acc), css}
+    end
+  end
+
+  # the layer or supports part of an `@import` is not supported: a plain media list is
+  defp media_wrap(css, ""), do: css
+  defp media_wrap(css, media), do: "@media " <> media <> " {" <> css <> "}"
 
   defp prefetched({:link, href} = ref, base) do
     url = Fetch.resolve(base, href)

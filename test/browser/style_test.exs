@@ -438,12 +438,12 @@ defmodule Browser.StyleTest do
       assert comp(html, css, "svg")["scale"] |> String.split() == ["-100%", "1"]
     end
 
-    test "margins may be negative, padding may not" do
+    test "margins may be negative, padding may not (the declaration is dropped)" do
       css = "div { margin: -4px -10% 0 -1rem; padding: -3px 2px }"
       c = computed_of(prune("<div>x</div>", css), "div")
       assert c["margin-top"] == -4.0 and c["margin-left"] == -16.0
       assert c["margin-right"] == {:pct, -0.1}
-      assert c["padding-top"] == 0.0
+      assert c["padding-top"] == nil
       assert c["padding-left"] == 2.0
     end
 
@@ -957,6 +957,76 @@ defmodule Browser.StyleTest do
       [_, d1, _, d2] = nodes
       assert color_of([d1], "div") == @red
       assert color_of([d2], "div") != @red
+    end
+  end
+
+  describe "custom properties" do
+    defp p_color(css, html \\ "<p>x</p>") do
+      page = Page.build("<style>#{css}</style>" <> html, "about:test")
+
+      page.nodes
+      |> Stream.flat_map(&flatten/1)
+      |> Enum.find_value(fn
+        {:element, "p", attrs, _} ->
+          attrs |> List.keyfind("@computed", 0) |> elem(1) |> Map.get("color")
+
+        _ ->
+          nil
+      end)
+    end
+
+    defp flatten({:element, _, _, kids} = el), do: [el | Enum.flat_map(kids, &flatten/1)]
+    defp flatten(_), do: []
+
+    @green {0, 128, 0}
+
+    test "names are case-sensitive" do
+      assert p_color("p { --A: green; color: var(--A) }") == @green
+      assert p_color("p { color: orange; --A: green; color: var(--a, green) }") == @green
+      refute p_color("p { color: orange; --a: green; color: var(--A) }") == @green
+    end
+
+    test "escapes in a name are decoded" do
+      assert p_color("p { --\\30: green; color: var(--\\30 ) }") == @green
+      assert p_color("p { --\\d800: green; color: var(--\\fffd) }") == @green
+    end
+
+    test "a cycle makes the properties invalid, so the fallback is used" do
+      assert p_color("p { --a: var(--a); color: var(--a, green) }") == @green
+      assert p_color("p { --a: var(--b); --b: var(--a); color: var(--a, green) }") == @green
+    end
+
+    test "initial, inherit and unset are taken literally" do
+      css = "body { --a: green } p { --a: initial; color: var(--a, green) }"
+      assert p_color(css) == @green
+      css = "body { --a: green; color: crimson } p { --a: inherit; color: var(--a) }"
+      assert p_color(css) == @green
+      css = "body { --a: green; color: crimson } p { --a: unset; color: var(--a) }"
+      assert p_color(css) == @green
+    end
+
+    test "a property whose var() fails falls back to inheriting" do
+      assert p_color("body { color: green } p { color: red; color: var(--missing) }") == @green
+    end
+
+    test "var is case-insensitive" do
+      assert p_color("p { --a: green; color: VAR(--a) }") == @green
+    end
+
+    test "a wide keyword fallback acts as the keyword" do
+      css = "body { --c: green } p { --c: var(--foo, unset); color: var(--c) }"
+      assert p_color(css) == @green
+    end
+
+    test "an invalid colour is dropped, so an earlier declaration still applies" do
+      assert p_color("p { color: green; color: invalidValue }") == @green
+      assert p_color("p { color: green; color: 12px }") == @green
+      assert p_color("body { color: green } p { color: inherit }") == @green
+    end
+
+    test "a class that starts with a digit is not a selector" do
+      html = ~s(<p class="1">x</p>)
+      assert p_color("body { color: green } .1 { color: red }", html) == @green
     end
   end
 end
