@@ -5585,6 +5585,18 @@ defmodule Browser.LayoutTest do
       assert wrapped_lines(laid_out(html)) == ["X ", "XX X"]
     end
 
+    test "break-word lets a space wrap away from a word alone on its line" do
+      html =
+        ~s(<div style="width:32px;white-space:break-spaces;word-break:break-word">XXXX X</div>)
+
+      assert wrapped_lines(laid_out(html)) == ["XXXX", " X"]
+    end
+
+    test "a tab is one unbreakable word" do
+      html = ~s(<div style="width:8px;white-space:break-spaces">X\t\tX</div>)
+      assert length(wrapped_lines(laid_out(html))) == 3
+    end
+
     test "size containment takes the height from contain-intrinsic-size" do
       html =
         ~s(<div style="background:blue;contain:size;contain-intrinsic-size:111px 22px">xxxx</div>)

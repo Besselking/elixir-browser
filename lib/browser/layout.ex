@@ -2403,18 +2403,27 @@ defmodule Browser.Layout do
   defp line_ops(line, style, :break_spaces, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    ~r/[ \x{3000}]|[^ \x{3000}]+/u
-    |> Regex.scan(line |> String.replace("\r", " ") |> expand_tabs(style.tab))
-    |> Enum.map_reduce(prev, fn
+    ~r/\t|[ \x{3000}]|[^ \x{3000}\t]+/u
+    |> Regex.scan(String.replace(line, "\r", " "))
+    |> Enum.map_reduce({prev, 0}, fn
+      # a tab is one unbreakable word as wide as the spaces it stands for
+      ["\t"], {prev, col} ->
+        n = if style.tab == 0, do: 0, else: style.tab - rem(col, style.tab)
+        word = String.duplicate("\u00A0", n)
+
+        if prev == :text and style.wrap_chars != :every,
+          do: {{:word, word, style, :hold}, {:space, col + n}},
+          else: {{:word, word, style}, {:space, col + n}}
+
       # (`line-break: anywhere` allows a break between a word and the space after it)
-      [sp], :text when sp in [" ", "\u3000"] and style.wrap_chars != :every ->
-        {{:word, nbsp_of(sp), style, :hold}, :space}
+      [sp], {:text, col} when sp in [" ", "\u3000"] and style.wrap_chars != :every ->
+        {{:word, nbsp_of(sp), style, :hold}, {:space, col + 1}}
 
-      [sp], _ when sp in [" ", "\u3000"] ->
-        {{:word, nbsp_of(sp), style}, :space}
+      [sp], {_, col} when sp in [" ", "\u3000"] ->
+        {{:word, nbsp_of(sp), style}, {:space, col + 1}}
 
-      [run], _ ->
-        {{:word, run, style}, :text}
+      [run], {_, col} ->
+        {{:word, run, style}, {:text, col + String.length(run)}}
     end)
     |> elem(0)
   end
@@ -4857,6 +4866,13 @@ defmodule Browser.Layout do
       _ ->
         wrap_glued(st, line_left, :hold)
     end
+  end
+
+  # (`word-break: break-word` lets a space of `break-spaces` wrap away from a word that has no
+  # earlier break opportunity on its line)
+  defp wrap_glued(%{line: [%{type: :text} | older]} = st, line_left, :hold, %{wrap_chars: mode})
+       when older == [] and mode in [:word, :anywhere] do
+    wrap_alone(st, line_left, nil)
   end
 
   defp wrap_glued(st, line_left, glued, _style), do: wrap_glued(st, line_left, glued)
