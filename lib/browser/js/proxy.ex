@@ -598,7 +598,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "construct") do
       nil ->
-        Interp.construct(target, args, if(new_target == p, do: target, else: new_target))
+        Interp.construct(target, args, new_target)
 
       f ->
         r = Interp.call(f, handler, [target, Interp.new_array(args), new_target])

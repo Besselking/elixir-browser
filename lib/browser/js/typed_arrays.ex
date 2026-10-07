@@ -1855,8 +1855,10 @@ defmodule Browser.JS.TypedArrays do
       f = callable!(arg(args, 0))
       result = species_create(this, kind, [len * 1.0])
 
-      for {{v, i}, n} <- Stream.with_index(live_pairs(this)) do
-        Interp.put(result, n, call(f, arg(args, 1), [v, i * 1.0, this]))
+      # the length is fixed up front: elements that went away meanwhile read as undefined
+      for i <- 0..(len - 1)//1 do
+        v = Interp.get(this, i * 1.0)
+        Interp.put(result, i, call(f, arg(args, 1), [v, i * 1.0, this]))
       end
 
       result

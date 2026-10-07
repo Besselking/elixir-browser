@@ -1872,9 +1872,17 @@ defmodule Browser.JS.Interp do
       nil ->
         proto =
           case get(nt, "prototype") do
-            {:obj, _} = p -> p
+            {:obj, _} = p ->
+              p
+
             # a built-in falls back to its own prototype, a plain function to Object.prototype
-            _ -> builtin_prototype(deref(id), f)
+            # (the realm of a revoked proxy cannot be found)
+            _ ->
+              with {:obj, nid} <- nt,
+                   %{proxy: :revoked} <- deref(nid),
+                   do: throw_error("TypeError", "Cannot perform operation on a revoked proxy")
+
+              builtin_prototype(deref(id), f)
           end
 
         if Map.get(deref(id), :no_new), do: throw_error("TypeError", "not a constructor")
