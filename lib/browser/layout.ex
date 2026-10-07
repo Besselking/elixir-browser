@@ -6715,7 +6715,13 @@ defmodule Browser.Layout do
     wid = fn c, inherited -> if is_number(c["width"]), do: c["width"], else: inherited end
 
     col = fn {:element, _, attrs, _}, c, inherited ->
-      entry = %{bg: row_bg(c) || inherited.bg, w: wid.(c, inherited.w), edges: edges_of(c)}
+      entry = %{
+        bg: row_bg(c) || inherited.bg,
+        w: wid.(c, inherited.w),
+        edges: edges_of(c),
+        imgs: Enum.reject([Map.get(inherited, :img), bg_pictures(c)], &is_nil/1)
+      }
+
       List.duplicate(entry, span.(attrs))
     end
 
@@ -6724,19 +6730,26 @@ defmodule Browser.Layout do
         el |> col.(c, %{bg: nil, w: nil}) |> outer_sides()
 
       {:colgroup, {:element, _, attrs, _}, _tag, c, kids} ->
+        gimg = bg_pictures(c)
+
         inner =
           for {:element, ctag, cattrs, _} = cel <- kids,
               ctag not in @skip,
               cc = computed(cattrs),
               ctag == "col" or cc["display"] == "table-column",
-              entry <- col.(cel, cc, %{bg: row_bg(c), w: wid.(c, nil)}),
+              entry <- col.(cel, cc, %{bg: row_bg(c), w: wid.(c, nil), img: gimg}),
               do: entry
 
         cols =
           if inner == [],
             do:
               List.duplicate(
-                %{bg: row_bg(c), w: wid.(c, nil), edges: edges_of(c)},
+                %{
+                  bg: row_bg(c),
+                  w: wid.(c, nil),
+                  edges: edges_of(c),
+                  imgs: Enum.reject([gimg], &is_nil/1)
+                },
                 span.(attrs)
               ),
             else: inner
@@ -7033,6 +7046,33 @@ defmodule Browser.Layout do
     c["table-layout"] == "fixed" and c["width"] not in [nil, :auto]
   end
 
+  # the pictures of the columns a cell spans, each placed against the column (group) and clipped
+  # to the part of the cell in it
+  defp column_pictures(_st, _p, _cell, [], _geo), do: []
+
+  defp column_pictures(st, p, {dx, dy, full_h}, cols, {xs, widths, ys, row_heights, spans}) do
+    top = Enum.at(ys, 0)
+    height = Enum.at(ys, length(row_heights) - 1) + List.last(row_heights) - top
+
+    for i <- p.col..(p.col + p.cell.colspan - 1)//1,
+        %{imgs: imgs} <- [Enum.at(cols, i)],
+        img <- imgs,
+        {first, last} = Map.fetch!(spans, img.ref),
+        w = Enum.at(widths, i, 0),
+        w > 0 and full_h > 0 do
+      left = Enum.at(xs, first)
+      width = Enum.at(xs, last) + Enum.at(widths, last) - left
+      area = {left - dx, top - dy, width, height}
+      clip = {Enum.at(xs, i) - dx, 0, w, full_h}
+      layers = Backgrounds.paint_layers(img.spec, area, clip, st.images, color4(img.color))
+      {clip, layers}
+    end
+    |> Enum.reject(fn {_, layers} -> layers == [] end)
+    |> Enum.map(fn {{x, y, w, h}, layers} ->
+      %{type: :bgimage, layers: layers, x: x, y: y, w: w, h: h, radius: nil}
+    end)
+  end
+
   # the pictures of a row group and a row, in the coordinates of the cell they are painted for:
   # placed against the box of the row (group), clipped to the cell
   defp row_pictures(st, p, {dx, dy, full_h}, {table_w, sx, ys, row_heights, groups}) do
@@ -7119,6 +7159,16 @@ defmodule Browser.Layout do
       row_heights = grow_rows(row_heights, ts.h, top + sy + sy * nrows)
       ys = row_positions(row_heights, sy, top)
 
+      # the columns each column (group) with a background picture spans
+      spans =
+        model.cols
+        |> Enum.with_index()
+        |> Enum.reduce(%{}, fn {col, i}, acc ->
+          Enum.reduce(Map.get(col, :imgs, []), acc, fn %{ref: ref}, acc ->
+            Map.update(acc, ref, {i, i}, fn {first, _} -> {first, i} end)
+          end)
+        end)
+
       # the rows each row group with a background picture spans
       groups =
         model.rows
@@ -7174,6 +7224,13 @@ defmodule Browser.Layout do
 
           behind =
             behind ++
+              column_pictures(
+                st,
+                p,
+                {dx, dy, full_h},
+                model.cols,
+                {xs, widths, ys, row_heights, spans}
+              ) ++
               row_pictures(st, p, {dx, dy, full_h}, {table_w, sx, ys, row_heights, groups})
 
           moved = for item <- behind ++ items, do: move(item, dx, dy)

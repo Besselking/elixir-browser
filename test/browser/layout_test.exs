@@ -2116,6 +2116,19 @@ defmodule Browser.LayoutTest do
       assert Enum.uniq(tiles) == [{34, 30, 10, 10}]
     end
 
+    test "a column's picture is placed against the column and clipped to each cell" do
+      cell = ~s|<td style="width:20px;height:20px;padding:0"></td>|
+
+      html =
+        ~s|<table style="border-spacing:0"><colgroup><col style="background: url(a.png) no-repeat"><col></colgroup><tr>#{cell}#{cell}</tr><tr>#{cell}#{cell}</tr></table>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      tiles = for %{layers: layers} <- of_type(items, :bgimage), l <- layers, do: l.tile
+      # a single tile, at the top left of the column
+      assert Enum.uniq(tiles) == [{4, 0, 10, 10}]
+      assert length(tiles) == 2
+    end
+
     test "positioning, size and repeat apply" do
       html =
         ~s|<div style="background: url(a.png) right bottom / 40px auto no-repeat; height: 60px; width: 200px">x</div>|
