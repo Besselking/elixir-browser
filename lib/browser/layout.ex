@@ -2308,9 +2308,26 @@ defmodule Browser.Layout do
     }
 
     # what is laid out here is a block formatting context of its own: it grows to hold its floats
-    st = ops |> Enum.reduce(st, &op/2) |> flush()
+    st = ops |> tail_extents() |> Enum.reduce(st, &op/2) |> flush()
     contain_floats(st, 0)
   end
+
+  # the right margin, border and padding of an inline box stick to its last word: they have to
+  # fit on the line with it (the word wraps when they do not)
+  defp tail_extents([{:word, text, style} = w | rest]) do
+    case closing_extent(rest, 0) do
+      0 -> [w | tail_extents(rest)]
+      extra -> [{:word, text, Map.put(style, :tail, extra)} | tail_extents(rest)]
+    end
+  end
+
+  defp tail_extents([op | rest]), do: [op | tail_extents(rest)]
+  defp tail_extents([]), do: []
+
+  defp closing_extent([{:inline_close, _, spec} | rest], acc),
+    do: closing_extent(rest, acc + spec.pr + spec.br + spec.mr)
+
+  defp closing_extent(_, acc), do: acc
 
   # paint order: backgrounds, flow content, then absolutely positioned elements
   defp finalize(st) do
@@ -4224,7 +4241,8 @@ defmodule Browser.Layout do
     st =
       cond do
         st.line == [] or nowrap? or hang == w or
-            st.x + space_w + w - hang <= st.width - st.margin - st.right - st.fr ->
+            st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
+              st.width - st.margin - st.right - st.fr ->
           st
 
         # no space between this word and what comes before: they only break before all of it

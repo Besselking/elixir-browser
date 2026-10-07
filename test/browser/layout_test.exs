@@ -5112,4 +5112,18 @@ defmodule Browser.LayoutTest do
       assert {blue.x, blue.w, blue.h} == {170, 30, 20}
     end
   end
+
+  describe "margin after an inline box" do
+    test "the right margin of a span has to fit with its last word" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="width:75px;font:15px/1 monospace"><span style="margin-right:60px">ab cd</span></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      ys = for %{type: :text} = t <- items, uniq: true, do: t.y
+      assert length(ys) == 2
+    end
+  end
 end
