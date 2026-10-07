@@ -463,6 +463,13 @@ defmodule Browser.JS.DOM do
     end)
   end
 
+  @doc "The element the layout knows by number `lnid` (its `\"@nid\"`), or nil."
+  def layout_node(lnid) do
+    Enum.find(elements(st().doc), fn nid ->
+      List.keyfind(node(nid).internal, "@nid", 0) == {"@nid", lnid}
+    end)
+  end
+
   def get_attr(n, name), do: with({_, v} <- List.keyfind(n.attrs, name, 0), do: v)
 
   defp attr_or(n, name, default), do: get_attr(n, name) || default

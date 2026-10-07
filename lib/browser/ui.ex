@@ -121,6 +121,7 @@ defmodule Browser.UI do
     :wxPanel.connect(tabs, :paint, callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs) end)
     :wxPanel.connect(panel, :left_down)
     :wxPanel.connect(panel, :middle_down)
+    :wxPanel.connect(panel, :right_down)
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
@@ -1672,4 +1673,50 @@ defmodule Browser.UI do
   end
 
   def menu_base, do: @menu_base
+
+  # -- context menu -------------------------------------------------------------------
+
+  @context_base 2000
+
+  @doc """
+  Pops up the right-click menu at window position `{x, y}`. `entries` are `{label, enabled?}`
+  or `:separator`; the choice arrives as a `command_menu_selected` event whose id is
+  `context_base() + index` (separators count). It is a native menu, so it follows the
+  system theme.
+  """
+  def context_menu(%{panel: p}, {x, y}, entries) do
+    menu = :wxMenu.new()
+
+    entries
+    |> Enum.with_index()
+    |> Enum.each(fn
+      {:separator, _} ->
+        :wxMenu.appendSeparator(menu)
+
+      {{label, enabled?}, i} ->
+        :wxMenu.append(menu, @context_base + i, String.to_charlist(label))
+        unless enabled?, do: :wxMenu.enable(menu, @context_base + i, false)
+    end)
+
+    :wxMenu.connect(menu, :command_menu_selected)
+    :wxWindow.popupMenu(p, menu, x, y)
+    :ok
+  end
+
+  def context_base, do: @context_base
+
+  @doc """
+  The topmost drawn item at page position `{x, y}` that belongs to a DOM element (it has a
+  `nid`), or nil. Sticky, fixed and transformed boxes are not found.
+  """
+  def item_at(items, x, y) do
+    items
+    |> Enum.filter(fn it ->
+      not Map.has_key?(it, :stick) and not Map.has_key?(it, :xform) and
+        Map.get(it, :nid) != nil and
+        inside?(x, y, it.x, it.y, Map.get(it, :w, 0), Map.get(it, :h, 0)) and
+        clipped_in?(it, x, y)
+    end)
+    |> List.last()
+  end
 end

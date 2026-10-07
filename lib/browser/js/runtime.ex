@@ -257,6 +257,7 @@ defmodule Browser.JS.Runtime do
 
   defp resolve_target({:control, cid}), do: DOM.control_node(cid)
   defp resolve_target({:form, fid}), do: DOM.form_node(fid)
+  defp resolve_target({:node, nid}), do: DOM.layout_node(nid)
   defp resolve_target(:document), do: DOM.document()
   defp resolve_target(:window), do: :window
 

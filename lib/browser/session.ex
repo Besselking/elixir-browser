@@ -101,6 +101,7 @@ defmodule Browser.Session do
       caret_on: true,
       blink: nil,
       menu: nil,
+      ctx: nil,
       # selected page text: the range, its anchor while dragging, the selectable text items
       # (computed when needed) and the highlight items drawn over them
       sel: nil,
@@ -389,6 +390,11 @@ defmodule Browser.Session do
   def handle_info(wx(id: 5035, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, on_key(state, :select_all)}
 
+  # a choice from the right-click menu
+  def handle_info(wx(id: id, event: wxCommand(type: :command_menu_selected)), state)
+      when id >= 2000 and id < 2100,
+      do: {:noreply, context_choose(state, id - UI.context_base())}
+
   # a choice from the open <select> menu
   def handle_info(wx(id: id, event: wxCommand(type: :command_menu_selected)), state) do
     {:noreply, choose_option(state, id - UI.menu_base())}
@@ -401,6 +407,9 @@ defmodule Browser.Session do
   def handle_info(wx(obj: obj, event: wxMouse(type: :middle_down, x: x, y: y)), state)
       when obj == state.ui.tabs,
       do: {:noreply, tab_click(state, x, y, :middle)}
+
+  def handle_info(wx(event: wxMouse(type: :right_down, x: wx_x, y: y)), state),
+    do: {:noreply, context_menu(state, wx_x, y)}
 
   # a middle click on a link opens it in a new tab behind this one
   def handle_info(wx(event: wxMouse(type: :middle_down, x: wx_x, y: y)), state) do
@@ -1248,6 +1257,157 @@ defmodule Browser.Session do
         state
     end
   end
+
+  # -- right-click menu -----------------------------------------------------------
+
+  # fires `contextmenu` at what was clicked and, unless the page cancels it, pops up a
+  # native menu that depends on what that is: a link, an image, a field, a selection or
+  # the page itself
+  defp context_menu(%{page: nil} = state, _wx_x, _y), do: state
+
+  defp context_menu(state, wx_x, y) do
+    UI.hide_suggestions(state.ui)
+    state = %{state | suggest: nil}
+    UI.focus_page(state.ui)
+    x = wx_x + state.scroll_x
+    py = y + state.scroll
+
+    {href, cid} =
+      case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+        {:link, href} -> {href, nil}
+        {:control, cid, _} -> {nil, cid}
+        :cover -> {nil, nil}
+        nil -> context_hit(state, x, py)
+      end
+
+    item = UI.item_at(state.items, x, py)
+    image = if item && item.type == :image && is_binary(item[:url]), do: item.url
+
+    target =
+      cond do
+        cid -> {:control, cid}
+        item -> {:node, item.nid}
+        true -> :document
+      end
+
+    {state, prevented?} = context_event(state, target, x - state.scroll_x, y)
+
+    if prevented? do
+      state
+    else
+      # a right click in a field focuses it, leaving a selection it has alone
+      control = cid && control(state, cid)
+
+      state =
+        if control && Forms.editable?(control) && state.focus != cid,
+          do: click_control(state, cid, x, py, 1, false),
+          else: state
+
+      entries = context_entries(state, control, href, image)
+      UI.context_menu(state.ui, {wx_x, y}, Enum.map(entries, &context_label/1))
+      %{state | ctx: entries}
+    end
+  end
+
+  defp context_hit(state, x, py) do
+    case UI.control_at(state.hit_controls, x, py) do
+      nil -> {UI.link_at(state.links, x, py), nil}
+      cid -> {nil, cid}
+    end
+  end
+
+  defp context_event(%{js: nil} = state, _target, _x, _y), do: {state, false}
+
+  defp context_event(state, target, x, y) do
+    props = %{"clientX" => x * 1.0, "clientY" => y * 1.0, "button" => 2.0, "buttons" => 2.0}
+
+    reply =
+      Browser.JS.Runtime.dispatch(
+        state.js,
+        target,
+        "contextmenu",
+        props,
+        controls_snapshot(state)
+      )
+
+    {apply_js(state, reply), reply.prevented}
+  end
+
+  defp context_label(:separator), do: :separator
+  defp context_label({label, enabled?, _action}), do: {label, enabled?}
+
+  defp context_entries(state, control, href, image) do
+    editing = control && Forms.editable?(control) && control
+
+    groups =
+      [
+        href &&
+          [
+            {"Open Link in New Tab", true, {:tab, href}},
+            {"Copy Link Address", true, {:copy_text, context_url(state, href)}}
+          ],
+        image &&
+          [
+            {"Open Image in New Tab", true, {:tab, image}},
+            {"Copy Image Address", true, {:copy_text, image}}
+          ],
+        editing && context_edit_entries(state, editing),
+        if(!editing && state.sel,
+          do: [{"Copy", true, {:key, :copy}}]
+        ),
+        if(!href && !image && !editing && !state.sel, do: context_nav_entries(state))
+      ]
+      |> Enum.filter(& &1)
+
+    groups |> Enum.intersperse([:separator]) |> Enum.concat()
+  end
+
+  defp context_edit_entries(state, control) do
+    cur = Forms.current(control, state.page.form_state)
+    selected? = TextEdit.selected(cur.value, TextEdit.selection(state.caret, state.fanchor)) != ""
+
+    [
+      {"Cut", selected?, {:key, :cut}},
+      {"Copy", selected?, {:key, :copy}},
+      {"Paste", true, {:key, :paste}},
+      :separator,
+      {"Select All", true, {:key, :select_all}}
+    ]
+  end
+
+  defp context_nav_entries(state) do
+    [
+      {"Back", History.can_back?(state.history), :back},
+      {"Forward", History.can_forward?(state.history), :forward},
+      {"Reload", state.url != nil, :reload}
+    ]
+  end
+
+  defp context_url(state, href), do: Fetch.resolve(base(state), href)
+
+  defp context_choose(%{ctx: nil} = state, _index), do: state
+
+  defp context_choose(state, index) do
+    entries = state.ctx
+    state = %{state | ctx: nil}
+
+    case Enum.at(entries, index) do
+      {_label, true, action} -> context_run(state, action)
+      _ -> state
+    end
+  end
+
+  defp context_run(state, {:tab, href}), do: open_link_tab(state, href)
+
+  defp context_run(state, {:copy_text, text}) do
+    UI.set_clipboard_text(text)
+    state
+  end
+
+  defp context_run(state, {:key, key}), do: on_key(state, key)
+  defp context_run(state, :back), do: history_step(state, -1)
+  defp context_run(state, :forward), do: history_step(state, 1)
+  defp context_run(state, :reload), do: load(state, state.url, :history, cache: :reload)
 
   defp choose_option(%{menu: nil} = state, _index), do: state
 
