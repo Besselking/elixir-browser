@@ -94,7 +94,8 @@ defmodule Browser.Style do
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
   tr { display: table-row; vertical-align: middle }
   td, th { display: table-cell; padding: 1px; vertical-align: inherit }
-  col, colgroup { display: none }
+  colgroup { display: table-column-group }
+  col { display: table-column }
   li { display: list-item }
   body { margin: 8px }
   p, dl, pre, figure { margin: 1em 0 }

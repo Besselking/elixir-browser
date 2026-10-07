@@ -6482,8 +6482,48 @@ defmodule Browser.Layout do
 
     %{
       caption: caption,
-      rows: rows_of.(:head) ++ rows_of.(:body) ++ rows_of.(:foot)
+      rows: rows_of.(:head) ++ rows_of.(:body) ++ rows_of.(:foot),
+      cols: table_columns_bg(parts)
     }
+  end
+
+  # the background of each column, from `col` and `colgroup` (a group's under its columns')
+  defp table_columns_bg(parts) do
+    span = fn attrs ->
+      with v when is_binary(v) <- List.keyfind(attrs, "span", 0) |> then(&(&1 && elem(&1, 1))),
+           {n, _} when n >= 1 <- Integer.parse(v) do
+        min(n, 1000)
+      else
+        _ -> 1
+      end
+    end
+
+    wid = fn c, inherited -> if is_number(c["width"]), do: c["width"], else: inherited end
+
+    col = fn {:element, _, attrs, _}, c, inherited ->
+      List.duplicate(%{bg: row_bg(c) || inherited.bg, w: wid.(c, inherited.w)}, span.(attrs))
+    end
+
+    Enum.flat_map(parts, fn
+      {:col, el, _tag, c, _kids} ->
+        col.(el, c, %{bg: nil, w: nil})
+
+      {:colgroup, {:element, _, attrs, _}, _tag, c, kids} ->
+        inner =
+          for {:element, ctag, cattrs, _} = cel <- kids,
+              ctag not in @skip,
+              cc = computed(cattrs),
+              ctag == "col" or cc["display"] == "table-column",
+              entry <- col.(cel, cc, %{bg: row_bg(c), w: wid.(c, nil)}),
+              do: entry
+
+        if inner == [],
+          do: List.duplicate(%{bg: row_bg(c), w: wid.(c, nil)}, span.(attrs)),
+          else: inner
+
+      _ ->
+        []
+    end)
   end
 
   defp kind_of_table_part(tag, c) do
@@ -6493,6 +6533,12 @@ defmodule Browser.Layout do
 
       tag == "tr" or c["display"] == "table-row" ->
         :row
+
+      tag == "colgroup" or c["display"] == "table-column-group" ->
+        :colgroup
+
+      tag == "col" or c["display"] == "table-column" ->
+        :col
 
       tag in @group_tags or
           c["display"] in ["table-row-group", "table-header-group", "table-footer-group"] ->
@@ -6706,14 +6752,19 @@ defmodule Browser.Layout do
       table_caption_only(st, model, avail)
     else
       natural? = avail > @unbounded / 2
-      {mins, maxs, pcts} = table_columns(st, placed, ncols)
+      {mins, maxs, pcts} = st |> table_columns(placed, ncols) |> column_widths(model.cols)
+
+      exact =
+        for i <- 0..(ncols - 1)//1,
+            do: with(%{w: w} when is_number(w) <- Enum.at(model.cols, i), do: round(w))
+
       spacing = sx * (ncols + 1)
 
       widths =
         if natural? do
           maxs
         else
-          table_widths(mins, maxs, pcts, max(avail - spacing, 0))
+          table_widths(mins, maxs, pcts, max(avail - spacing, 0), exact)
         end
 
       table_w = if natural?, do: Enum.sum(widths) + spacing, else: avail
@@ -6775,7 +6826,8 @@ defmodule Browser.Layout do
           {sdx, sdy} = p.shift
           dx = Enum.at(xs, p.col) + sdx
           dy = Enum.at(ys, p.row) + sdy
-          behind = if p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: []
+          behind = column_backgrounds(model.cols, widths, sx, p, full_h)
+          behind = behind ++ if(p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: [])
           moved = for item <- behind ++ items, do: move(item, dx, dy)
 
           # what is moved is positioned: it paints above what is not
@@ -6787,6 +6839,37 @@ defmodule Browser.Layout do
       height = top + sy + Enum.sum(row_heights) + sy * nrows
       {List.flatten([caption_items | cells]), table_w, height}
     end
+  end
+
+  # a `width` on a `col` or `colgroup` is the least its column can be, and what it wants
+  defp column_widths({mins, maxs, pcts}, cols) do
+    set = fn list ->
+      list
+      |> Enum.with_index()
+      |> Enum.map(fn {v, i} ->
+        case Enum.at(cols, i) do
+          %{w: w} when is_number(w) -> max(v, round(w))
+          _ -> v
+        end
+      end)
+    end
+
+    {set.(mins), set.(maxs), pcts}
+  end
+
+  # the backgrounds of the columns a cell lies in, behind the row's
+  defp column_backgrounds([], _widths, _sx, _p, _h), do: []
+
+  defp column_backgrounds(cols, widths, sx, p, h) do
+    {items, _x} =
+      Enum.reduce(p.col..(p.col + p.cell.colspan - 1)//1, {[], 0}, fn i, {acc, x} ->
+        w = Enum.at(widths, i, 0)
+        bg = with %{bg: bg} <- Enum.at(cols, i), do: bg
+        acc = if bg && w > 0, do: [rect(x, 0, w, h, bg) | acc], else: acc
+        {acc, x + w + sx}
+      end)
+
+    Enum.reverse(items)
   end
 
   # a table with only a caption
@@ -6957,12 +7040,13 @@ defmodule Browser.Layout do
 
   # column widths for `space` px: percentages first, then the others between their narrowest
   # and widest
-  defp table_widths(mins, maxs, pcts, space) do
+  defp table_widths(mins, maxs, pcts, space, exact) do
     fixed =
-      Enum.zip([mins, pcts])
+      Enum.zip([mins, pcts, exact])
       |> Enum.map(fn
-        {mn, nil} -> {nil, mn}
-        {mn, pct} -> {max(round(pct * space), mn), mn}
+        {mn, _, w} when is_integer(w) -> {max(w, mn), mn}
+        {mn, nil, _} -> {nil, mn}
+        {mn, pct, _} -> {max(round(pct * space), mn), mn}
       end)
 
     taken = fixed |> Enum.map(fn {w, _} -> w || 0 end) |> Enum.sum()
