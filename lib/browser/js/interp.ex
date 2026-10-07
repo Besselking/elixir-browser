@@ -1151,6 +1151,22 @@ defmodule Browser.JS.Interp do
   # a failed [[Set]]: sloppy code ignores it, strict code (`strict_put`) throws
   defp fail_put, do: :erlang.put(:js_put_failed, true)
 
+  # a primitive has no property to set: in strict code only a setter on its prototype chain works
+  defp strict_put(ov, key, v)
+       when is_binary(ov) or is_number(ov) or is_boolean(ov) or
+              (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
+    boxed = Browser.JS.Builtins.box(ov)
+
+    case inherited_set(boxed, to_key(key)) do
+      {:setter, setter} ->
+        call(setter, ov, [v])
+        v
+
+      _ ->
+        throw_error("TypeError", "Cannot create property '#{to_str(key)}' on #{typeof(ov)}")
+    end
+  end
+
   defp strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
     put(ov, key, v)
@@ -2021,10 +2037,19 @@ defmodule Browser.JS.Interp do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
         cond do
-          key in ["name", "length"] and key in Map.get(o, :gone, []) -> :undefined
+          # a deleted own `length` or `name` shows what the prototype chain has
+          key in ["name", "length"] and key in Map.get(o, :gone, []) ->
+            case o.proto do
+              {:obj, _} = p -> get(p, key)
+              _ -> :undefined
+            end
+
           # `f.prototype = undefined` is a value, not a missing property
-          key == "prototype" and Map.has_key?(o.props, "prototype") -> :undefined
-          true -> function_prop(id, o, key)
+          key == "prototype" and Map.has_key?(o.props, "prototype") ->
+            :undefined
+
+          true ->
+            function_prop(id, o, key)
         end
 
       v ->

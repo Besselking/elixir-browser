@@ -206,7 +206,11 @@ defmodule Browser.JS.Promise do
     put_proto(:promise, p)
 
     ctor =
-      native("Promise", fn _this, args ->
+      native("Promise", fn this, args ->
+        # called without `new`, `this` is not a fresh object: a Promise needs `new`
+        if this == :undefined or this == :null,
+          do: throw_error("TypeError", "Promise constructor cannot be invoked without 'new'")
+
         executor = arg(args, 0)
 
         unless function?(executor),
