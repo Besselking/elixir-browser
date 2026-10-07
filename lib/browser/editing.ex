@@ -187,16 +187,25 @@ defmodule Browser.Editing do
         {i, col} = Selection.point_at(texts, x, y, measure)
         item = Enum.at(texts, i)
         nid = item.nid
-        text = index.text[nid] || ""
 
-        from =
-          case Enum.find(segments(text, items_of(items, nid)), fn {it, _, _} -> it == item end) do
-            {_, from, _} -> from
-            nil -> 0
-          end
-
-        {nid, from + col}
+        # a line break is its own position: the number of the <br>, not of its stand-in
+        case Enum.find(index.stand_in, fn {_br, text_nid} -> text_nid == nid end) do
+          {br, _} -> {br, 0}
+          nil -> text_position(index, items, item, nid, col)
+        end
     end
+  end
+
+  defp text_position(index, items, item, nid, col) do
+    text = index.text[nid] || ""
+
+    from =
+      case Enum.find(segments(text, items_of(items, nid)), fn {it, _, _} -> it == item end) do
+        {_, from, _} -> from
+        nil -> 0
+      end
+
+    {nid, from + col}
   end
 
   @doc """

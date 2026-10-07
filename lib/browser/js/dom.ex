@@ -1028,6 +1028,34 @@ defmodule Browser.JS.DOM do
       {"isConnected", _} ->
         {:ok, n.id == st().doc or st().doc in ancestors(n.id)}
 
+      {"rows", :element} when n.tag in ["table", "thead", "tbody", "tfoot"] ->
+        {:ok, nodes_array(table_rows(n))}
+
+      {"tBodies", :element} when n.tag == "table" ->
+        {:ok, nodes_array(for id <- element_kids(n.id), node(id).tag == "tbody", do: id)}
+
+      {"tHead", :element} when n.tag == "table" ->
+        {:ok, wrap_or_null(Enum.find(element_kids(n.id), &(node(&1).tag == "thead")))}
+
+      {"tFoot", :element} when n.tag == "table" ->
+        {:ok, wrap_or_null(Enum.find(element_kids(n.id), &(node(&1).tag == "tfoot")))}
+
+      {"cells", :element} when n.tag == "tr" ->
+        {:ok, nodes_array(row_cells(n.id))}
+
+      {"cellIndex", :element} when n.tag in ["td", "th"] ->
+        {:ok, float(position_in(n.id, row_cells(n.parent)))}
+
+      {"rowIndex", :element} when n.tag == "tr" ->
+        table =
+          Enum.find(ancestors(n.id), &(node(&1).kind == :element and node(&1).tag == "table"))
+
+        {:ok, float(if(table, do: position_in(n.id, table_rows(node(table))), else: -1))}
+
+      {"sectionRowIndex", :element} when n.tag == "tr" ->
+        {:ok,
+         float(position_in(n.id, for(id <- element_kids(n.parent), node(id).tag == "tr", do: id)))}
+
       {_, :element} ->
         element_get(n, key, self)
 
@@ -1038,6 +1066,29 @@ defmodule Browser.JS.DOM do
         :miss
     end
   end
+
+  # a table's rows in order: the head's, the bodies' (and rows of the table itself), the foot's
+  defp table_rows(%{tag: "table", id: id}) do
+    kids = element_kids(id)
+    sections = fn tag -> for k <- kids, node(k).tag == tag, do: k end
+
+    Enum.flat_map(sections.("thead"), &section_rows/1) ++
+      Enum.flat_map(kids, fn k ->
+        case node(k).tag do
+          "tbody" -> section_rows(k)
+          "tr" -> [k]
+          _ -> []
+        end
+      end) ++ Enum.flat_map(sections.("tfoot"), &section_rows/1)
+  end
+
+  defp table_rows(%{id: id}), do: section_rows(id)
+
+  defp section_rows(id), do: for(k <- element_kids(id), node(k).tag == "tr", do: k)
+
+  defp row_cells(id), do: for(k <- element_kids(id), node(k).tag in ["td", "th"], do: k)
+
+  defp position_in(id, ids), do: Enum.find_index(ids, &(&1 == id)) || -1
 
   defp sibling_elements(nid, dir) do
     {before, aft} = siblings(nid)
@@ -2177,7 +2228,7 @@ defmodule Browser.JS.DOM do
     do: location_update(&%{&1 | query: nilify(String.trim_leading(to_str(v), "?"))})
 
   defp location_put("hash", v),
-    do: location_update(&%{&1 | fragment: nilify(String.trim_leading(to_str(v), "#"))})
+    do: location_update(&%{&1 | fragment: String.trim_leading(to_str(v), "#")})
 
   defp location_put("pathname", v) do
     path = to_str(v)
@@ -2250,10 +2301,11 @@ defmodule Browser.JS.DOM do
     {target, fragment} = Browser.Fetch.split_fragment(url)
     {here, _} = Browser.Fetch.split_fragment(st().url)
 
-    if fragment != nil and target == here and url != st().url do
-      hash_navigation(url, mode)
-    else
-      out({:navigate, url, mode})
+    cond do
+      # the same address again, or only another fragment: the document stays
+      fragment != nil and target == here and url == st().url -> :ok
+      fragment != nil and target == here -> hash_navigation(url, mode)
+      true -> out({:navigate, url, mode})
     end
 
     :ok

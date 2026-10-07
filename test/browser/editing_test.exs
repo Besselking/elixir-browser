@@ -31,4 +31,10 @@ defmodule Browser.EditingTest do
     measure = fn text, _ -> String.length(text) * 7 end
     assert %{x: 14, y: 0} = Editing.caret_rect(idx, [item("abc", 0)], {1, 2}, measure)
   end
+
+  test "a click on the stand-in of a line break is the position of the break" do
+    idx = %{text: %{9 => "\u200B"}, stand_in: %{4 => 9}, order: %{1 => [9]}, host_of: %{9 => 1}}
+    items = [Map.merge(item("\u200B", 10), %{nid: 9, w: 8})]
+    assert Editing.point_at(idx, items, 1, 12, 5, fn _, _ -> 8 end) == {4, 0}
+  end
 end

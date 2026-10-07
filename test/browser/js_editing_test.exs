@@ -151,4 +151,52 @@ defmodule Browser.JS.EditingTest do
 
     assert logs(r) == ["3 1 http://t.test/x#y"]
   end
+
+  test "queries change nothing and keep a pending format for the next typing" do
+    assert edit("""
+           var t = e.firstChild.firstChild;
+           getSelection().collapse(t, 5);
+           document.execCommand("italic");
+           document.queryCommandState("insertUnorderedList");
+           document.queryCommandState("insertOrderedList");
+           document.queryCommandEnabled("outdent");
+           document.execCommand("insertText", false, "!");
+           console.log(e.innerHTML);
+           """) == ["<div>Hello<i>!</i> <b>world</b></div><p>two</p>"]
+  end
+
+  test "table rows, cells and indexes" do
+    r =
+      run(
+        """
+        var t = document.getElementById("t");
+        var tr = t.rows[1];
+        console.log(t.rows.length, tr.cells.length, tr.cells[1].cellIndex, tr.rowIndex, tr.sectionRowIndex, t.tBodies.length);
+        """,
+        "<table id=t><thead><tr><th>a</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+      )
+
+    assert errors(r) == []
+    assert logs(r) == ["2 2 1 1 0 1"]
+  end
+
+  test "setting location.hash to its current value stays on the page" do
+    {raw, _} =
+      Browser.HTML.parse(
+        "<body><script>location.hash = 'a'; location.hash = 'a'; location.hash = ''</script></body>"
+      )
+      |> Browser.Forms.index()
+
+    pid =
+      Runtime.start(raw, %{
+        url: "http://t.test/p",
+        width: 800,
+        height: 600,
+        fetch: fn _ -> {:error, "404"} end
+      })
+
+    r = Runtime.run_scripts(pid)
+    assert Enum.all?(r.outbox, &match?({:hash, _, _}, &1))
+    assert length(r.outbox) == 2
+  end
 end

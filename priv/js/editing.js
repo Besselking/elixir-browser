@@ -1966,8 +1966,14 @@
     if (FORMATS[n]) return formatState(ctx, n);
     if (n === "insertunorderedlist" || n === "insertorderedlist") {
       var tn = n === "insertunorderedlist" ? "UL" : "OL";
-      var blocks = selectedBlocks(ctx);
-      return blocks.length > 0 && blocks.every(function (b) { return b.nodeName === "LI" && listOf(b) && listOf(b).nodeName === tn; });
+      // a query changes nothing: look at the line each end of the selection is on
+      var r0 = ctx.range;
+      return [canon(r0._sc, r0._so)[0], canon(r0._ec, r0._eo)[0]].every(function (n) {
+        for (var e = n && (isEl(n) ? n : n.parentNode); e && e !== ctx.host; e = e.parentNode) {
+          if (e.nodeName === "LI") return !!e.parentNode && e.parentNode.nodeName === tn;
+        }
+        return false;
+      });
     }
     if (n.indexOf("justify") === 0) {
       var want = { justifyleft: "left", justifycenter: "center", justifyright: "right", justifyfull: "justify" }[n];
@@ -1989,11 +1995,11 @@
     if (n === "undo") return stackOf(ctx.host).undo.length > 0;
     if (n === "redo") return stackOf(ctx.host).redo.length > 0;
     if (n === "outdent") {
-      return selectedBlocks(ctx).some(function (b) {
-        if (b.nodeName === "LI") return true;
-        for (var q = b.parentNode; q && q !== ctx.host; q = q.parentNode) if (q.nodeName === "BLOCKQUOTE") return true;
-        return false;
-      });
+      var o = canon(ctx.range._sc, ctx.range._so)[0];
+      for (var q = o && (isEl(o) ? o : o.parentNode); q && q !== ctx.host; q = q.parentNode) {
+        if (q.nodeName === "LI" || q.nodeName === "BLOCKQUOTE") return true;
+      }
+      return false;
     }
     return true;
   }
