@@ -1163,7 +1163,10 @@ defmodule Browser.JS.Interp do
         v
 
       _ ->
-        throw_error("TypeError", "Cannot create property '#{to_str(key)}' on #{typeof(ov)}")
+        throw_error(
+          "TypeError",
+          "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
+        )
     end
   end
 
@@ -1388,6 +1391,10 @@ defmodule Browser.JS.Interp do
 
       %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
         Browser.JS.TypedArrays.host_keys(data) ++ own_keys_plain(o)
+
+      # what `defineProperty` stored on the global object itself comes after the variables
+      %{class: :host, host: {Browser.JS.Global, data}} ->
+        Browser.JS.Global.host_keys(data) ++ own_keys_plain(o)
 
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),

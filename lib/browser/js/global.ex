@@ -20,12 +20,20 @@ defmodule Browser.JS.Global do
   # NaN, Infinity and undefined are not writable
   def host_put(:global, key, _v, _self) when key in ["NaN", "Infinity", "undefined"], do: :ok
 
-  def host_put(:global, key, v, _self) when is_binary(key) do
-    Interp.declare(Interp.global(), key, v)
-    :ok
+  def host_put(:global, key, v, self) when is_binary(key) do
+    # a property `defineProperty` put on the object itself follows its own attributes
+    if own_defined?(self, key) do
+      :miss
+    else
+      Interp.declare(Interp.global(), key, v)
+      :ok
+    end
   end
 
   def host_put(:global, _key, _v, _self), do: :miss
+
+  defp own_defined?({:obj, id}, key), do: Map.has_key?(Interp.deref(id).props, key)
+  defp own_defined?(_, _), do: false
 
   def host_has(:global, key),
     do:
