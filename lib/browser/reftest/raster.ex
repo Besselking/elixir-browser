@@ -105,6 +105,15 @@ defmodule Browser.Reftest.Raster do
             |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
         end
 
+      %{kind: :linear, tile: {_, _, tw, th} = tile, repeat: repeat, clip: {cx, cy, cw, ch} = lc} =
+          layer,
+      grid ->
+        clip = {max(ix0, cx), max(iy0, cy), min(ix1, cx + cw), min(iy1, cy + ch)}
+
+        tile
+        |> Browser.Backgrounds.tiles(repeat, lc)
+        |> Enum.reduce(grid, fn {x, y}, grid -> gradient(grid, layer, x, y, tw, th, clip) end)
+
       _other, grid ->
         grid
     end)
@@ -257,6 +266,68 @@ defmodule Browser.Reftest.Raster do
       end)
     end
   end
+
+  # a linear gradient tile at `x`, `y`: each pixel takes the colour at its centre
+  defp gradient(grid, _layer, _x, _y, w, h, _clip) when w <= 0 or h <= 0, do: grid
+
+  defp gradient(grid, layer, x, y, w, h, {cx0, cy0, cx1, cy1}) do
+    x0 = max(x, cx0)
+    y0 = max(y, cy0)
+    x1 = min(x + w, cx1)
+    y1 = min(y + h, cy1)
+
+    if x1 <= x0 or y1 <= y0 do
+      grid
+    else
+      {lx1, ly1, lx2, ly2} = layer.line
+      {dx, dy} = {lx2 - lx1, ly2 - ly1}
+      len2 = dx * dx + dy * dy
+      before = x0 * 3
+      len = (x1 - x0) * 3
+
+      Enum.reduce(y0..(y1 - 1)//1, grid, fn row, g ->
+        <<pre::binary-size(^before), old::binary-size(^len), post::binary>> = elem(g, row)
+
+        {_, mixed} =
+          for xx <- x0..(x1 - 1)//1, reduce: {old, []} do
+            {<<o::binary-size(3), rest::binary>>, acc} ->
+              t =
+                if len2 == 0,
+                  do: 0.0,
+                  else: ((xx + 0.5 - x - lx1) * dx + (row + 0.5 - y - ly1) * dy) / len2
+
+              {r, gr, b, a} = stop_color(layer.stops, t)
+              {rest, [blend(o, r, gr, b, a) | acc]}
+          end
+
+        put_elem(g, row, IO.iodata_to_binary([pre, Enum.reverse(mixed), post]))
+      end)
+    end
+  end
+
+  defp stop_color([{_, c} | _], t) when t <= 0, do: round_color(c)
+  defp stop_color(stops, t), do: stop_color(stops, t, nil)
+
+  defp stop_color([], _t, {_, last}), do: round_color(last)
+  defp stop_color([{p, c} | _], t, nil) when t < p, do: round_color(c)
+
+  defp stop_color([{p1, c1} | rest], t, prev) do
+    case prev do
+      {p0, c0} when t >= p0 and t < p1 ->
+        mix(c0, c1, (t - p0) / (p1 - p0))
+
+      _ ->
+        stop_color(rest, t, {p1, c1})
+    end
+  end
+
+  defp mix({r0, g0, b0, a0}, {r1, g1, b1, a1}, f) do
+    m = fn u, v -> round(u + (v - u) * f) end
+    {m.(r0, r1), m.(g0, g1), m.(b0, b1), m.(a0, a1)}
+  end
+
+  defp round_color({r, g, b, a}), do: {round(r), round(g), round(b), round(a)}
+  defp round_color({r, g, b}), do: {round(r), round(g), round(b), 255}
 
   defp blend(_old, r, g, b, 255), do: <<r, g, b>>
   defp blend(old, _r, _g, _b, 0), do: old

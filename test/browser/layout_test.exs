@@ -5371,6 +5371,26 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "flex-basis and background sizes" do
+    test "a negative flex-basis is invalid, so the item keeps its width" do
+      html =
+        ~s(<div style="display:flex;width:100px"><div style="flex-basis:-50px;width:30px;height:10px;background:red"></div></div>)
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 30))
+    end
+
+    test "ch lengths work in a background shorthand's size" do
+      html =
+        ~s|<div style="font:20px Ahem;width:100px;height:40px;background:linear-gradient(red,red) 0 0/2ch 1ch no-repeat"></div>|
+
+      layer =
+        laid_out(html) |> Enum.find(&(&1.type == :bgimage)) |> Map.fetch!(:layers) |> hd()
+
+      assert {_, _, w, h} = layer.tile
+      assert w < 100 and h < 40
+    end
+  end
+
   describe "transparent text" do
     test "takes its room and is not drawn" do
       items = laid_out(~s(<span style="color:transparent">abc</span>))

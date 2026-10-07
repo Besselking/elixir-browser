@@ -304,7 +304,7 @@ defmodule Browser.Style do
   end
 
   # sizes that cannot be negative: a negative value is invalid and the declaration is dropped
-  @non_negative ~w(width height min-height max-height min-width max-width)
+  @non_negative ~w(width height min-height max-height min-width max-width flex-basis)
 
   defp relevant(decls) do
     decls
@@ -1758,10 +1758,10 @@ defmodule Browser.Style do
   defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
 
   defp typed("background-position", v, env, _pc),
-    do: {:ok, Browser.Backgrounds.parse_position(ems_to_px(v, env.fs))}
+    do: {:ok, Browser.Backgrounds.parse_position(font_units_to_px(v, env))}
 
   defp typed("background-size", v, env, _pc),
-    do: {:ok, Browser.Backgrounds.parse_size(ems_to_px(v, env.fs))}
+    do: {:ok, Browser.Backgrounds.parse_size(font_units_to_px(v, env))}
 
   defp typed("box-shadow", "none", _env, _pc), do: {:ok, []}
 
@@ -1825,6 +1825,20 @@ defmodule Browser.Style do
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
 
   # `em` in a background's position or size is the element's font size
+  # em and ch lengths of a background position or size, as pixels
+  defp font_units_to_px(v, env) do
+    ch = env.fs * Map.get(env, :ch, 0.6)
+
+    v
+    |> ems_to_px(env.fs)
+    |> then(
+      &Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i, &1, fn _, n ->
+        {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
+        "#{Float.round(f * ch, 3)}px"
+      end)
+    )
+  end
+
   defp ems_to_px(v, fs) do
     Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))em\b/i, v, fn _, n ->
       {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)

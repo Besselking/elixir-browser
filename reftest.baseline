@@ -3418,6 +3418,10 @@ css/css-flexbox/abspos/position-absolute-008.html
 css/css-flexbox/abspos/position-absolute-009.html
 css/css-flexbox/abspos/position-absolute-010.html
 css/css-flexbox/abspos/position-absolute-011.html
+css/css-flexbox/align-content-001.htm
+css/css-flexbox/align-content-002.htm
+css/css-flexbox/align-content-003.htm
+css/css-flexbox/align-content-005.htm
 css/css-flexbox/align-content-006.htm
 css/css-flexbox/align-content-wrap-004.html
 css/css-flexbox/align-content_center.html
@@ -3426,6 +3430,9 @@ css/css-flexbox/align-content_flex-start.html
 css/css-flexbox/align-content_space-around.html
 css/css-flexbox/align-content_space-between.html
 css/css-flexbox/align-content_stretch.html
+css/css-flexbox/align-items-001.htm
+css/css-flexbox/align-items-002.htm
+css/css-flexbox/align-items-003.htm
 css/css-flexbox/align-items-005.htm
 css/css-flexbox/align-items-006.html
 css/css-flexbox/align-items-009.html
@@ -3497,6 +3504,7 @@ css/css-flexbox/flex-aspect-ratio-img-row-012.html
 css/css-flexbox/flex-aspect-ratio-img-vert-lr.html
 css/css-flexbox/flex-basis-001.html
 css/css-flexbox/flex-basis-002.html
+css/css-flexbox/flex-basis-004.html
 css/css-flexbox/flex-basis-007.html
 css/css-flexbox/flex-basis-008.html
 css/css-flexbox/flex-basis-010.html
@@ -3853,6 +3861,11 @@ css/css-flexbox/intrinsic-size/row-002.html
 css/css-flexbox/intrinsic-size/row-007.html
 css/css-flexbox/item-with-max-height-and-scrollbar.html
 css/css-flexbox/item-with-table-with-infinite-max-intrinsic-width.html
+css/css-flexbox/justify-content-001.htm
+css/css-flexbox/justify-content-002.htm
+css/css-flexbox/justify-content-003.htm
+css/css-flexbox/justify-content-004.htm
+css/css-flexbox/justify-content-005.htm
 css/css-flexbox/layout-algorithm_algo-cross-line-001.html
 css/css-flexbox/layout-algorithm_algo-cross-line-002.html
 css/css-flexbox/min-size-auto-overflow-clip.html
@@ -4798,6 +4811,7 @@ css/css-text/white-space/control-chars-09D.html
 css/css-text/white-space/control-chars-09E.html
 css/css-text/white-space/control-chars-09F.html
 css/css-text/white-space/full-width-leading-spaces-001.html
+css/css-text/white-space/hanging-whitespace-001.tentative.html
 css/css-text/white-space/lone-cr-001.tentative.html
 css/css-text/white-space/object-replacement-1.html
 css/css-text/white-space/object-replacement-2.html
@@ -4861,7 +4875,6 @@ css/css-text/white-space/text-wrap-balance-overflow-001.html
 css/css-text/white-space/text-wrap-nowrap-001.html
 css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html
-css/css-text/white-space/textarea-pre-wrap-014.html
 css/css-text/white-space/trailing-ideographic-space-003.html
 css/css-text/white-space/trailing-ideographic-space-006.html
 css/css-text/white-space/trailing-ideographic-space-007.html
@@ -5127,6 +5140,7 @@ css/css-variables/variable-supports-64.html
 css/css-variables/variable-supports-65.html
 css/css-variables/variable-supports-66.html
 css/css-variables/variable-supports-67.html
+css/css-variables/vars-background-shorthand-001.html
 css/css-variables/wide-keyword-fallback-001.html
 css/css-variables/wide-keyword-fallback-002.html
 css/selectors/dir-pseudo-in-has.html
