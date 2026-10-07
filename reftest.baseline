@@ -3910,6 +3910,8 @@ css/css-multicol/multicol-basic-007.xht
 css/css-multicol/multicol-basic-008.xht
 css/css-multicol/multicol-block-no-clip-001.xht
 css/css-multicol/multicol-block-no-clip-002.xht
+css/css-multicol/multicol-break-000.xht
+css/css-multicol/multicol-break-001.xht
 css/css-multicol/multicol-clip-001.xht
 css/css-multicol/multicol-clip-002.xht
 css/css-multicol/multicol-collapsing-001.xht
@@ -3934,9 +3936,11 @@ css/css-multicol/multicol-fill-001.xht
 css/css-multicol/multicol-fill-auto-001.xht
 css/css-multicol/multicol-fill-auto-002.xht
 css/css-multicol/multicol-fill-auto-003.xht
+css/css-multicol/multicol-fill-auto-005.html
 css/css-multicol/multicol-fill-auto-block-children-001.xht
 css/css-multicol/multicol-fill-auto-block-children-003.html
 css/css-multicol/multicol-fill-balance-001.xht
+css/css-multicol/multicol-fill-balance-002.html
 css/css-multicol/multicol-fill-balance-005.html
 css/css-multicol/multicol-fill-balance-031.html
 css/css-multicol/multicol-fill-balance-032.html
@@ -3946,6 +3950,7 @@ css/css-multicol/multicol-fill-balance-035.html
 css/css-multicol/multicol-fill-balance-037.html
 css/css-multicol/multicol-fill-balance-038.html
 css/css-multicol/multicol-fill-balance-039.html
+css/css-multicol/multicol-fill-balance-040.html
 css/css-multicol/multicol-gap-000.xht
 css/css-multicol/multicol-gap-001.xht
 css/css-multicol/multicol-gap-002.xht

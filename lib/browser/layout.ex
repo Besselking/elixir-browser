@@ -160,6 +160,8 @@ defmodule Browser.Layout do
     ops = nodes |> walk(style, []) |> Enum.reverse()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    # column break markers that no column set read
+    items = Enum.reject(items, &(&1.type == :colbreak))
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -1312,7 +1314,14 @@ defmodule Browser.Layout do
     end
   end
 
+  # `break-before/after: column` leave a marker the column set around the block reads
   defp block_ops(tag, kind, kids, style, c, acc) do
+    acc = if c["break-before"] in ["column", "all"], do: [{:colbreak} | acc], else: acc
+    acc = block_ops_inner(tag, kind, kids, style, c, acc)
+    if c["break-after"] in ["column", "all"], do: [{:colbreak} | acc], else: acc
+  end
+
+  defp block_ops_inner(tag, kind, kids, style, c, acc) do
     box = box(tag, c)
 
     acc =
@@ -2638,6 +2647,12 @@ defmodule Browser.Layout do
     }
 
     %{st | items: [item | st.items], n: st.n + 1, y: st.y + 2}
+  end
+
+  # where a column must end (`break-before/after: column`): a marker the columns read
+  defp op({:colbreak}, st) do
+    st = st |> flush() |> apply_gap()
+    %{st | items: [%{type: :colbreak, x: 0, y: st.y, h: 0} | st.items], n: st.n + 1}
   end
 
   defp op({:box_start, ref, o}, st), do: start_box(st, ref, o)
@@ -5582,20 +5597,27 @@ defmodule Browser.Layout do
     top0 = with [{t, _} | _] <- lines, do: t, else: (_ -> 0)
     fixed = cs.height
 
+    forced =
+      for(%{type: :colbreak, y: y} <- items, y > 0 and y < height, uniq: true, do: y)
+      |> Enum.sort()
+
+    items = Enum.reject(items, &(&1.type == :colbreak))
+    sliced? = fixed != nil or forced != []
+
     h =
       cond do
         fixed && cs.fill == "auto" ->
           fixed
 
         true ->
-          fits? = fn h -> length(column_starts(lines, height, h, top0, fixed != nil)) <= n end
+          fits? = fn h -> length(column_starts(lines, height, h, top0, forced, sliced?)) <= n end
           low = max(ceil(height / n), 1)
           high = max(ceil(height), low)
           high = if fixed, do: max(min(high, ceil(fixed)), 1), else: high
           if fits?.(low), do: low, else: search_height(fits?, low, high)
       end
 
-    starts = lines |> column_starts(height, h, top0, fixed != nil) |> Enum.map(&round/1)
+    starts = lines |> column_starts(height, h, top0, forced, sliced?) |> Enum.map(&round/1)
     ends = Enum.drop(starts, 1) ++ [:infinity]
     cols = starts |> Enum.zip(ends) |> Enum.with_index()
 
@@ -5613,7 +5635,7 @@ defmodule Browser.Layout do
 
     placed =
       Enum.flat_map(items, fn it ->
-        if fixed != nil and it.type in [:rect, :box] and not Map.get(it, :mono, false) and
+        if sliced? and it.type in [:rect, :box] and not Map.get(it, :mono, false) and
              Map.get(it, :h, 0) > 0 do
           cut_rect(it, cols, colw, gap)
         else
@@ -5677,8 +5699,8 @@ defmodule Browser.Layout do
   # where each column starts when content is poured into columns of height `h`: the first at
   # the top; a line that straddles the end of a column goes to the next, which starts as far
   # above that line as the first column's first line (`top0`) is below its top
-  defp column_starts(lines, total, h, top0, sliced?) do
-    if sliced?, do: do_starts(lines, total, h, top0, 0, [0]), else: line_starts(lines, h)
+  defp column_starts(lines, total, h, top0, forced, sliced?) do
+    if sliced?, do: do_starts(lines, total, h, top0, forced, 0, [0]), else: line_starts(lines, h)
   end
 
   # without a height of its own only lines break (what has no line is not cut: it may be
@@ -5694,20 +5716,26 @@ defmodule Browser.Layout do
     [0 | breaks |> Enum.reverse() |> Enum.map(&(&1 - top0))]
   end
 
-  defp do_starts(lines, total, h, top0, start, acc) do
+  defp do_starts(lines, total, h, top0, forced, start, acc) do
     edge = start + h
+    force = Enum.find(forced, &(&1 > start))
 
-    if edge >= total do
-      Enum.reverse(acc)
-    else
-      next =
-        case Enum.find(lines, fn {t, b} -> t < edge and b > edge and t > start + top0 end) do
-          {t, _} -> t - top0
-          nil -> edge
-        end
+    cond do
+      force != nil and force <= edge ->
+        do_starts(lines, total, h, top0, forced, force, [force | acc])
 
-      next = if next <= start, do: edge, else: next
-      do_starts(lines, total, h, top0, next, [next | acc])
+      edge >= total ->
+        Enum.reverse(acc)
+
+      true ->
+        next =
+          case Enum.find(lines, fn {t, b} -> t < edge and b > edge and t > start + top0 end) do
+            {t, _} -> t - top0
+            nil -> edge
+          end
+
+        next = if next <= start, do: edge, else: next
+        do_starts(lines, total, h, top0, forced, next, [next | acc])
     end
   end
 

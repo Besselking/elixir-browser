@@ -4398,6 +4398,18 @@ defmodule Browser.LayoutTest do
       assert aa.y < red.y
     end
 
+    test "break-before: column starts a new column" do
+      html =
+        ~s|<style>body{margin:0}p{margin:0}</style><div style="columns:3;column-gap:0;width:300px;column-fill:auto;height:100px"><p>aa</p><p style="break-before:column">bb</p><p>cc</p><p style="break-after:column">dd</p><p>ee</p></div>|
+
+      items = laid_out(html)
+      x = fn t -> col_at(items, t).x end
+      assert x.("aa") < x.("bb")
+      assert x.("bb") == x.("cc") and x.("cc") == x.("dd")
+      assert x.("ee") > x.("dd")
+      refute Enum.any?(items, &(&1.type == :colbreak))
+    end
+
     test "a background is cut where a column ends and a rule is drawn between columns" do
       html =
         ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|
