@@ -27,7 +27,7 @@ defmodule Browser.Style do
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
+            flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
             row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break overflow-wrap word-wrap
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
@@ -362,6 +362,29 @@ defmodule Browser.Style do
       end
 
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  # `flex-flow: <direction> || <wrap>`: what is not given is the initial value
+  defp expand({"flex-flow", value, imp}) do
+    toks = value |> String.trim() |> String.downcase() |> tokens()
+    dir = Enum.find(toks, &(&1 in ~w(row row-reverse column column-reverse))) || "row"
+    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse))) || "nowrap"
+    [{"flex-direction", dir, imp}, {"flex-wrap", wrap, imp}]
+  end
+
+  # `place-content`/`place-items`/`place-self`: the alignment, then the justification (the
+  # alignment again when only one is given)
+  defp expand({"place-" <> what, value, imp}) when what in ~w(content items self) do
+    {a, j} =
+      case tokens(String.trim(value)) do
+        [a] -> {a, a}
+        [a, j | _] -> {a, j}
+        [] -> {"", ""}
+      end
+
+    if a == "",
+      do: [],
+      else: [{"align-" <> what, a, imp}, {"justify-" <> what, j, imp}]
   end
 
   # `columns: <width> || <count>`, in either order, either of them `auto`

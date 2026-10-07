@@ -627,9 +627,19 @@ defmodule Browser.Layout do
       _ ->
         keys =
           case c["display"] do
-            d when d in ["flex", "inline-flex"] -> flex_trim(sides, c["flex-direction"], idx)
-            d when d in ["grid", "inline-grid"] -> %{}
-            _ -> block_trim(sides, kids, idx)
+            d when d in ["flex", "inline-flex"] ->
+              flex_trim(
+                sides,
+                c["flex-direction"],
+                c["flex-wrap"] in ["wrap", "wrap-reverse"],
+                idx
+              )
+
+            d when d in ["grid", "inline-grid"] ->
+              %{}
+
+            _ ->
+              block_trim(sides, kids, idx)
           end
 
         kids
@@ -674,7 +684,7 @@ defmodule Browser.Layout do
 
   defp self_collapsing?(_), do: false
 
-  defp flex_trim(sides, dir, idx) do
+  defp flex_trim(sides, dir, wrap?, idx) do
     dir = flex_direction(dir)
     col? = dir in [:column, :column_reverse]
     {first, last} = {hd(idx), List.last(idx)}
@@ -689,8 +699,14 @@ defmodule Browser.Layout do
     %{}
     |> add_trim_all(:bs in sides, block_items, :top)
     |> add_trim_all(:be in sides, if(col?, do: [main_end], else: cross), :bottom)
-    |> add_trim_all(:is in sides, inline_items, :left)
-    |> add_trim_all(:ie in sides, if(col?, do: cross, else: [main_end]), :right)
+    # across the lines of a wrapping column it is the first and last line that are trimmed: done
+    # when the lines are known
+    |> add_trim_all(:is in sides and not (col? and wrap?), inline_items, :left)
+    |> add_trim_all(
+      :ie in sides and not (col? and wrap?),
+      if(col?, do: cross, else: [main_end]),
+      :right
+    )
   end
 
   defp add_trim(m, false, _, _), do: m
@@ -1099,6 +1115,7 @@ defmodule Browser.Layout do
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
       table?: table?,
+      flex?: c["display"] in ["flex", "inline-flex"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
         cond do
@@ -3829,7 +3846,10 @@ defmodule Browser.Layout do
     do: shrink_extent(st, sub, @unbounded, Map.get(spec, :key))
 
   defp content_width(st, sub, spec, avail) do
-    measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
+    # a table or a flex container is as wide as its content wants, up to the room there is
+    measure_at =
+      if Map.get(spec, :table?) or Map.get(spec, :flex?), do: @unbounded, else: max(avail, 1)
+
     min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
   end
 
@@ -5136,7 +5156,10 @@ defmodule Browser.Layout do
     %{
       dir: flex_direction(c["flex-direction"]),
       wrap: c["flex-wrap"] in ["wrap", "wrap-reverse"],
+      wrap_reverse: c["flex-wrap"] == "wrap-reverse",
+      trim: trim_sides(c["margin-trim"]),
       justify: c["justify-content"] || "flex-start",
+      content: c["align-content"] || "stretch",
       align: c["align-items"] || "stretch",
       col_gap: num(c["column-gap"]) || 0.0,
       row_gap: num(c["row-gap"]) || 0.0,
@@ -5372,8 +5395,8 @@ defmodule Browser.Layout do
 
   defp flex_layout(st, cs, items, avail) do
     items = Enum.sort_by(items, & &1.order)
-    reverse? = cs.dir in [:row_reverse, :column_reverse]
-    items = if reverse?, do: Enum.reverse(items), else: items
+    # a row is reversed line by line, once it has been broken into lines
+    items = if cs.dir == :column_reverse, do: Enum.reverse(items), else: items
 
     if cs.dir in [:row, :row_reverse],
       do: flex_row(st, cs, items, avail),
@@ -5410,14 +5433,59 @@ defmodule Browser.Layout do
     lines =
       if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
 
-    {laid, y} =
-      Enum.map_reduce(lines, 0, fn line, y ->
-        min_cross = if length(lines) == 1, do: cs.height || 0, else: 0
-        {line_items, cross} = flex_line(st, cs, line, avail, y, min_cross)
-        {line_items, y + cross + round(cs.row_gap)}
+    lines = if cs.dir == :row_reverse, do: Enum.map(lines, &Enum.reverse/1), else: lines
+    # `wrap-reverse` stacks the lines upwards: the first one is last
+    lines = if cs.wrap_reverse, do: Enum.reverse(lines), else: lines
+
+    if cs.wrap and cs.height do
+      flex_wrapped_rows(st, cs, lines, avail)
+    else
+      {laid, y} =
+        Enum.map_reduce(lines, 0, fn line, y ->
+          min_cross = if length(lines) == 1, do: cs.height || 0, else: 0
+          {line_items, cross} = flex_line(st, cs, line, avail, y, min_cross)
+          {line_items, y + cross + round(cs.row_gap)}
+        end)
+
+      {List.flatten(laid), max(y - round(cs.row_gap), 0)}
+    end
+  end
+
+  # lines of a wrapping container with a height share what the lines leave over, by
+  # `align-content` (the default, `stretch`, makes every line higher)
+  defp flex_wrapped_rows(st, cs, lines, avail) do
+    n = length(lines)
+    gap = round(cs.row_gap)
+    laid = Enum.map(lines, &flex_line(st, cs, &1, avail, 0, 0))
+    free = cs.height - Enum.sum(Enum.map(laid, &elem(&1, 1))) - gap * (n - 1)
+
+    {laid, start, between} =
+      cond do
+        free <= 0 ->
+          {laid, 0.0, 0.0}
+
+        cs.content in ["stretch", "normal"] ->
+          extra = free / n
+
+          laid =
+            Enum.map(lines, fn line ->
+              {_, cross} = flex_line(st, cs, line, avail, 0, 0)
+              flex_line(st, cs, line, avail, 0, cross + round(extra))
+            end)
+
+          {laid, 0.0, 0.0}
+
+        true ->
+          {start, between} = flex_justify(cs.content, false, free * 1.0, n)
+          {laid, start, between}
+      end
+
+    {placed, y} =
+      Enum.map_reduce(laid, round(start), fn {items, cross}, y ->
+        {items |> List.flatten() |> Enum.map(&move(&1, 0, y)), y + cross + gap + round(between)}
       end)
 
-    {List.flatten(laid), max(y - round(cs.row_gap), 0)}
+    {List.flatten(placed), max(y - gap - round(between), round(cs.height))}
   end
 
   # wrapping: a new line when the next item no longer fits
@@ -5590,10 +5658,55 @@ defmodule Browser.Layout do
 
   defp flex_column(st, cs, items, avail) do
     sized = Enum.map(items, &flex_column_item(st, cs, &1, avail))
+
+    if cs.wrap and cs.height do
+      # a wrapping column breaks into columns when the next item no longer fits the height
+      cols = flex_column_break(sized, cs.height, round(cs.row_gap))
+      last = length(cols) - 1
+
+      cols =
+        cols
+        |> Enum.with_index()
+        |> Enum.map(fn {col, i} ->
+          Enum.map(col, fn it ->
+            it = if i == 0 and :is in cs.trim, do: %{it | x: it.x - auto_zero(it.ml)}, else: it
+            if i == last and :ie in cs.trim, do: %{it | mr: 0}, else: it
+          end)
+        end)
+
+      cols = if cs.wrap_reverse, do: Enum.reverse(cols), else: cols
+
+      {laid, _x} =
+        Enum.map_reduce(cols, 0, fn col, x ->
+          {items, _y} = flex_column_place(st, cs, col)
+          width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
+          {Enum.map(items, &move(&1, x, 0)), x + width + round(cs.col_gap)}
+        end)
+
+      {List.flatten(laid), round(cs.height)}
+    else
+      flex_column_place(st, cs, sized)
+    end
+  end
+
+  defp flex_column_break(items, height, gap) do
+    {cols, cur, _used} =
+      Enum.reduce(items, {[], [], 0}, fn it, {cols, cur, used} ->
+        needed = if cur == [], do: it.h, else: used + gap + it.h
+
+        if cur != [] and needed > height,
+          do: {[Enum.reverse(cur) | cols], [it], it.h},
+          else: {cols, [it | cur], needed}
+      end)
+
+    Enum.reverse(if cur == [], do: cols, else: [Enum.reverse(cur) | cols])
+  end
+
+  # one column of items: they grow or shrink into the height, then are placed by `justify-content`
+  defp flex_column_place(st, cs, sized) do
     gaps = round(cs.row_gap) * max(length(sized) - 1, 0)
     outer = & &1.h
-    base = fn it -> it.base end
-    free = if cs.height, do: cs.height - Enum.sum(Enum.map(sized, base)) - gaps, else: 0
+    free = if cs.height, do: cs.height - Enum.sum(Enum.map(sized, & &1.base)) - gaps, else: 0
 
     sized =
       if cs.height,
@@ -5673,9 +5786,10 @@ defmodule Browser.Layout do
   defp flex_column_resize(st, sized, free) when free > 0 do
     total = sized |> Enum.map(& &1.grow) |> Enum.sum()
 
-    if total > 0,
-      do: Enum.map(sized, &flex_column_height(st, &1, &1.base + free * &1.grow / total)),
-      else: sized
+    Enum.map(sized, fn it ->
+      share = if total > 0, do: free * it.grow / total, else: 0
+      flex_column_height(st, it, it.base + share)
+    end)
   end
 
   defp flex_column_resize(st, sized, free) when free < 0 do
@@ -5685,26 +5799,15 @@ defmodule Browser.Layout do
       Enum.map(sized, fn it ->
         target = it.base + free * it.shrink * it.base / total
 
-        if it.shrink > 0 and it.rebuild != nil do
-          {_, floor, _} =
-            flex_atom(
-              st,
-              it.rebuild.(%{"height" => nil, "min-height" => nil}),
-              it.w,
-              {it.key, :min}
-            )
-
-          flex_column_height(st, it, max(target, min(floor, it.base)))
-        else
-          it
-        end
+        flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base))
       end)
     else
       sized
     end
   end
 
-  defp flex_column_resize(_st, sized, _free), do: sized
+  defp flex_column_resize(st, sized, _free),
+    do: Enum.map(sized, &flex_column_height(st, &1, &1.base))
 
   # in a column of automatic height an item with a `flex-basis` is as high as that, or as its
   # content needs
@@ -5719,6 +5822,22 @@ defmodule Browser.Layout do
   defp flex_column_basis(_st, it), do: it
 
   defp flex_column_height(st, it, target) do
+    # an item does not go below what its content needs (`min-height: auto`)
+    target =
+      if it.rebuild != nil and target < it.h - 0.5 do
+        {_, floor, _} =
+          flex_atom(
+            st,
+            it.rebuild.(%{"height" => nil, "min-height" => nil}),
+            it.w,
+            {it.key, :min}
+          )
+
+        max(target, min(floor, it.h))
+      else
+        target
+      end
+
     if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)

@@ -4935,4 +4935,92 @@ defmodule Browser.LayoutTest do
       assert green_rects(html) == [{0, 75}, {75, 25}]
     end
   end
+
+  describe "wrapping flex containers" do
+    defp flex_boxes(style, n) do
+      items = String.duplicate("<div style=\"width:50px;height:20px;background:green\"></div>", n)
+
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"display:flex;#{style}\">#{items}</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y})
+    end
+
+    test "flex-flow sets direction and wrap together" do
+      assert flex_boxes("flex-flow:row wrap;width:100px", 3) == [{0, 0}, {50, 0}, {0, 20}]
+      assert flex_boxes("flex-flow:wrap column;height:40px", 3) == [{0, 0}, {0, 20}, {50, 0}]
+    end
+
+    test "wrap-reverse stacks the lines upwards" do
+      assert Enum.sort(flex_boxes("flex-wrap:wrap-reverse;width:100px", 3)) ==
+               [{0, 0}, {0, 20}, {50, 20}]
+    end
+
+    test "row-reverse reverses every line" do
+      assert Enum.sort(flex_boxes("flex-flow:row-reverse wrap;width:100px", 3)) ==
+               [{0, 0}, {50, 0}, {50, 20}]
+    end
+
+    test "align-content shares the height between the lines" do
+      assert flex_boxes("flex-wrap:wrap;width:100px;height:100px;align-content:flex-end", 4) == [
+               {0, 60},
+               {50, 60},
+               {0, 80},
+               {50, 80}
+             ]
+
+      assert flex_boxes("flex-wrap:wrap;width:100px;height:100px;align-content:space-between", 4) ==
+               [{0, 0}, {50, 0}, {0, 80}, {50, 80}]
+    end
+
+    test "lines stretch into the height by default" do
+      assert flex_boxes("flex-wrap:wrap;width:100px;height:100px;align-items:flex-start", 4) ==
+               [{0, 0}, {50, 0}, {0, 50}, {50, 50}]
+    end
+
+    test "place-content sets align-content and justify-content" do
+      assert flex_boxes("flex-wrap:wrap;width:100px;height:100px;place-content:end", 4) ==
+               flex_boxes(
+                 "flex-wrap:wrap;width:100px;height:100px;align-content:end;justify-content:end",
+                 4
+               )
+    end
+  end
+
+  describe "flex container sizing" do
+    defp flex_rects(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y, &1.w, &1.h})
+    end
+
+    test "a floated flex container is as wide as its items" do
+      html = """
+      <div style="display:flex;float:left;background:blue"><div style="width:20px;height:10px"></div></div>
+      <div style="display:flex;float:left;background:red"><div style="width:30px;height:10px"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 30, 10}]
+    end
+
+    test "column items start from their flex-basis" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:100px"><div style="flex:0 30px;background:green"></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 400, 30}]
+    end
+
+    test "a column item does not go below its content" do
+      html = """
+      <div style="display:flex;flex-direction:column;height:10px"><div style="flex-basis:0;background:green"><div style="height:50px"></div></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 400, 50}]
+    end
+  end
 end
