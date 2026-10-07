@@ -1874,8 +1874,15 @@ defmodule Browser.Layout do
 
   defp computed(attrs) do
     case List.keyfind(attrs, "@computed", 0) do
-      {_, map} -> map
-      nil -> %{}
+      # `display: contents` makes no box: only what its children inherit is left
+      {_, %{"display" => "contents"} = map} ->
+        Map.take(map, ["display" | Browser.Style.inherited_props()])
+
+      {_, map} ->
+        map
+
+      nil ->
+        %{}
     end
   end
 

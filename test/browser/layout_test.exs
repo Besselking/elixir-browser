@@ -5323,5 +5323,23 @@ defmodule Browser.LayoutTest do
 
       assert wrapped_lines(laid_out(html)) == ["X ", "XX X"]
     end
+
+    test "size containment takes the height from contain-intrinsic-size" do
+      html =
+        ~s(<div style="background:blue;contain:size;contain-intrinsic-size:111px 22px">xxxx</div>)
+
+      assert Enum.any?(rect_heights(laid_out(html)), &(&1 == 22))
+    end
+
+    test "size containment without an intrinsic size ignores the content" do
+      html = ~s(<div style="background:blue;contain:strict">xxxx</div><p>after</p>)
+      refute Enum.any?(rect_heights(laid_out(html)), &(&1 > 0))
+    end
+
+    test "position on display: contents is ignored" do
+      items = laid_out(~s(<div style="display:contents;position:absolute;right:0">ab</div>))
+      assert [%{x: x}] = Enum.filter(items, &(&1.type == :text))
+      assert x < 100
+    end
   end
 end
