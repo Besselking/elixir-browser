@@ -2568,8 +2568,14 @@ defmodule Browser.Layout do
 
   defp op({:box_end, ref}, st) do
     st = flush(st)
-    # nothing was placed in it: the margin above still decides where it starts
-    st = if ref in st.ptop, do: apply_gap(st), else: st
+    # nothing was placed in it: the margin above still decides where it starts, unless the box
+    # is empty and has no height: then its margins collapse together and with its neighbours'
+    empty? =
+      st.open[ref].o.h == nil and st.open[ref].o.min in [nil, 0, 0.0] and
+        st.open[ref].o[:ratio] == nil
+
+    st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
+    st = %{st | ptop: List.delete(st.ptop, ref)}
     {box, open} = Map.pop(st.open, ref)
     {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
@@ -2581,7 +2587,7 @@ defmodule Browser.Layout do
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
     # child margins stay inside the box only when padding or a border separates them
-    st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
+    st = if box.o.pb > 0 or bb > 0 or Map.get(box, :bfc, false), do: apply_gap(st), else: st
     st = %{st | y: st.y + box.o.pb + bb}
     {l, r, f} = box.saved
     st = %{st | left: l, right: r, free: f}
@@ -2987,7 +2993,12 @@ defmodule Browser.Layout do
       st = place_box(st, ref, percent_height(st, o))
       if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
     else
-      st |> apply_gap() |> place_box(ref, percent_height(st, o))
+      bfc? = o.clip or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
+      st = st |> apply_gap() |> place_box(ref, percent_height(st, o))
+
+      if bfc? and Map.has_key?(st.open, ref),
+        do: %{st | open: Map.update!(st.open, ref, &Map.put(&1, :bfc, true))},
+        else: st
     end
   end
 
