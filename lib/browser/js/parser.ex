@@ -128,7 +128,7 @@ defmodule Browser.JS.Parser do
         {:var, k, decls} when k in [:let, :const, :using, :await_using] ->
           for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: {n, :lexical}
 
-        {:fundecl, n, {:async, _}} when not top? ->
+        {:fundecl, n, {k, _}} when k in [:async, :gen] and not top? ->
           [{n, :lexical}]
 
         {:fundecl, n, _} when not top? ->
@@ -479,6 +479,9 @@ defmodule Browser.JS.Parser do
       _ -> expression_statement(all)
     end
   end
+
+  defp statement([{:id, "function", _}, {:p, "(", _} | _]),
+    do: throw({:syntax, "function statement requires a name"})
 
   defp statement([{:id, "function", _}, {:id, name, _} | ts]) when name not in @reserved do
     {fun, ts} = function_rest(name, ts)
@@ -1096,6 +1099,9 @@ defmodule Browser.JS.Parser do
       {tag} when tag in [:this, :super] ->
         throw({:syntax, "Invalid left-hand side in for loop"})
 
+      {:call, _, _, _} ->
+        if strict?(), do: throw({:syntax, "Invalid left-hand side in for loop"})
+
       {:lit, _} ->
         throw({:syntax, "Invalid left-hand side in for loop"})
 
@@ -1184,6 +1190,15 @@ defmodule Browser.JS.Parser do
 
     ts = expect(ts, ")")
     {body, ts} = loop_body(ts)
+
+    case init do
+      {:var, kind, decls} when kind in [:let, :const] ->
+        check_for_declaration({:arrpat, Enum.map(decls, &elem(&1, 0))}, body)
+
+      _ ->
+        :ok
+    end
+
     {{:for, init, test, update, body}, ts}
   end
 
@@ -1942,6 +1957,16 @@ defmodule Browser.JS.Parser do
   defp private_member?({:chain, e}), do: private_member?(e)
   defp private_member?(_), do: false
 
+  # `await` is an operator in async code and at the top of a module, never in a static block
+  defp await_allowed! do
+    ok =
+      (Process.get(:js_async, false) or
+         (Process.get(:js_module, false) and not Process.get(:js_fn, false))) and
+        not Process.get(:js_static_block, false)
+
+    unless ok, do: throw({:syntax, "await is only valid in async functions"})
+  end
+
   defp unary([{:p, op, _} | ts]) when op in ["!", "-", "+", "~"] do
     {e, ts} = unary(ts)
 
@@ -1960,12 +1985,14 @@ defmodule Browser.JS.Parser do
   defp unary([{:id, "await", _}, {k, v, _} | _] = [_ | ts])
        when k in [:id, :num, :bigint, :str, :tmpl, :regex] and
               (k != :id or v not in ["in", "of", "instanceof"]) do
+    await_allowed!()
     {e, ts} = unary(ts)
     {{:await, e}, ts}
   end
 
   defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts])
        when p in ["(", "[", "{", "!", "~"] do
+    await_allowed!()
     {e, ts} = unary(ts)
     {{:await, e}, ts}
   end
