@@ -531,7 +531,7 @@ defmodule Browser.Session do
             case UI.control_at(state.hit_controls, x, py) do
               nil ->
                 cond do
-                  href and editor_at(state, x, py) == nil -> :hand
+                  href != nil and editor_at(state, x, py) == nil -> :hand
                   Selection.over_text?(texts, x, py) -> :text
                   editor_at(state, x, py) != nil -> :text
                   true -> :arrow
