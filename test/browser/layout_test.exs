@@ -5424,6 +5424,25 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "column geometry" do
+    test "column edges are rounded from their exact positions, so neighbours still touch" do
+      html =
+        ~s|<div style="columns:8;column-gap:5px;column-fill:auto;width:100px;height:100px"><div style="height:800px;background:green"></div></div>|
+
+      cols = for %{type: :rect, color: {0, 128, 0}, h: 100} = r <- laid_out(html), do: r
+      edges = cols |> Enum.map(&{&1.x, &1.x + &1.w}) |> Enum.sort()
+      assert Enum.all?(edges, fn {l, r} -> is_integer(l) and is_integer(r) end)
+    end
+
+    test "a percentage column-gap is of the width of the box" do
+      html =
+        ~s|<div style="columns:2;column-gap:10%;width:200px;font:10px/10px Ahem"><div>a</div><div>b</div></div>|
+
+      xs = for %{type: :text, text: t, x: x} <- laid_out(html), t in ["a", "b"], do: x
+      assert Enum.max(xs) - Enum.min(xs) == 110
+    end
+  end
+
   describe "segment breaks between wide characters" do
     test "a zero-width space is a place to break a line" do
       html = ~s|<div style="width:10px;font:10px/1 Ahem">X&#x200B;X</div>|

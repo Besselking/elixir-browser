@@ -1722,7 +1722,12 @@ defmodule Browser.Layout do
 
     if count || width do
       fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
-      gap = if is_number(c["column-gap"]), do: c["column-gap"], else: fs
+
+      gap =
+        if is_number(c["column-gap"]) or match?({:pct, _}, c["column-gap"]),
+          do: c["column-gap"],
+          else: fs
+
       %{count: count, width: width, gap: gap, fill: c["column-fill"], rule: column_rule(c, fs)}
     end
   end
@@ -2904,6 +2909,8 @@ defmodule Browser.Layout do
   # columns as there are, as even as lines allow, and the pieces are set side by side.
   defp op({:columns, cs, sub, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    # a percentage gap is of the width of the box
+    cs = with %{gap: {:pct, f}} <- cs, do: %{cs | gap: f * avail}
     {n, colw} = column_geometry(cs, avail)
 
     if n <= 1 or avail > @unbounded / 2 do
@@ -5847,7 +5854,7 @@ defmodule Browser.Layout do
           {{start, _}, k} =
             cols |> Enum.filter(fn {{s, _}, _} -> s <= it.y end) |> List.last() || {{0, 0}, 0}
 
-          [move(it, round(k * (colw + gap)), -start)]
+          [column_move(it, k * (colw + gap), -start)]
         end
       end)
 
@@ -5877,11 +5884,22 @@ defmodule Browser.Layout do
               piece
           end
 
-        move(piece, round(k * (colw + gap)), -s)
+        column_move(piece, k * (colw + gap), -s)
       end
 
     if pieces == [], do: [it], else: pieces
   end
+
+  # a box moved to its column keeps its edges on whole pixels: both sides are rounded from the
+  # exact position, so neighbours that touch in layout still touch on the screen
+  defp column_move(%{type: type, x: x, w: w} = it, dx, dy)
+       when type in [:rect, :box] and is_number(w) and is_float(dx) do
+    left = round(x + dx)
+    moved = move(it, round(dx), dy)
+    %{moved | x: left, w: round(x + dx + w) - left}
+  end
+
+  defp column_move(it, dx, dy), do: move(it, round(dx), dy)
 
   # a rule down the middle of the gap between each two columns that have content
   defp column_rules(%{rule: nil}, _count, _colw, _h), do: []

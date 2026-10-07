@@ -3976,6 +3976,7 @@ css/css-multicol/column-pseudo-background-color.html
 css/css-multicol/columnfill-auto-max-height-001.html
 css/css-multicol/columnfill-auto-max-height-002.html
 css/css-multicol/composited-under-clip-under-multicol.html
+css/css-multicol/equal-gap-and-rule.html
 css/css-multicol/fixed-in-nested-multicol.html
 css/css-multicol/float-with-line-after-spanner.html
 css/css-multicol/inline-block-and-column-span-all.html
@@ -4054,6 +4055,7 @@ css/css-multicol/multicol-nested-013.html
 css/css-multicol/multicol-nested-025.html
 css/css-multicol/multicol-nested-027.html
 css/css-multicol/multicol-nested-029.html
+css/css-multicol/multicol-nested-033.html
 css/css-multicol/multicol-nested-column-rule-001.xht
 css/css-multicol/multicol-nested-margin-001.xht
 css/css-multicol/multicol-oof-inline-cb-002.html
