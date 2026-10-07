@@ -1628,6 +1628,25 @@ defmodule Browser.Style do
   defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
   defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
 
+  # stretch: fill the containing block; a block already does, so layout only looks at it for
+  # boxes that would otherwise shrink to fit
+  defp typed(prop, v, _env, _pc)
+       when prop in ["width", "min-width"] and
+              v in ["stretch", "-webkit-fill-available", "-moz-available"],
+       do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
+
+  # fit-content(<length-percentage>): as wide as the content, but at least its narrowest and
+  # at most the length
+  defp typed("width", "fit-content(" <> rest, env, _pc) do
+    arg = rest |> String.trim_trailing(")") |> String.trim()
+
+    cond do
+      pct = percentage(arg) -> {:ok, {:fitc, {:pct, pct}}}
+      px = length(arg, env) -> {:ok, {:fitc, px}}
+      true -> :skip
+    end
+  end
+
   defp typed(prop, v, _env, _pc)
        when prop in ["width", "height", "max-height"] and
               v in [

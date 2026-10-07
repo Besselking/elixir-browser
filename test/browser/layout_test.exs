@@ -5396,6 +5396,22 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "fit-content() and stretch widths" do
+    test "fit-content(L) is as wide as the content, between its narrowest and L" do
+      html =
+        ~s|<div style="width:300px"><div style="width:fit-content(100px);background:green"><span style="display:inline-block;width:60px;height:5px"></span> <span style="display:inline-block;width:60px;height:5px"></span></div></div>|
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 100))
+    end
+
+    test "a float with width: stretch fills the containing block" do
+      html =
+        ~s(<div style="width:200px"><div style="float:left;width:stretch;height:10px;background:green"></div></div>)
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 200))
+    end
+  end
+
   describe "table-layout: fixed" do
     test "a zero-wide fixed table has zero-wide cells" do
       html =

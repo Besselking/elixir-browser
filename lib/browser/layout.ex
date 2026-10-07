@@ -804,7 +804,10 @@ defmodule Browser.Layout do
           forced -> forced
         end
 
-      fit? = c["width"] in [:fit, :minc, :maxc] and kind in [:block, :flex, :grid]
+      fit? =
+        (c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"])) and
+          kind in [:block, :flex, :grid]
+
       # laying a flex or grid container out at width 1 does not give its min-content width
       c = if c["width"] == :minc and kind != :block, do: Map.put(c, "width", :fit), else: c
       table? = kind == :table and force != :inline_inner
@@ -1179,7 +1182,7 @@ defmodule Browser.Layout do
       key: make_ref(),
       width: dim(c["width"]),
       # `min-content` / `max-content`: the narrowest / widest the content can be
-      sizing: if(c["width"] in [:minc, :maxc], do: c["width"]),
+      sizing: if(c["width"] in [:minc, :maxc] or fitc?(c["width"]), do: c["width"]),
       minw: c["min-width"],
       maxw: c["max-width"],
       extra: if(c["box-sizing"] == "border-box", do: 0, else: box.pl + box.pr + bl + br),
@@ -1534,7 +1537,11 @@ defmodule Browser.Layout do
   # `auto` is the same as no width/height for everything but images
   defp dim(:auto), do: nil
   defp dim(w) when w in [:fit, :minc, :maxc], do: nil
+  defp dim({:fitc, _}), do: nil
   defp dim(v), do: v
+
+  defp fitc?({:fitc, _}), do: true
+  defp fitc?(_), do: false
 
   defp num(v) when is_number(v), do: v
   defp num(_), do: nil
@@ -2002,9 +2009,31 @@ defmodule Browser.Layout do
     Enum.reduce(["width", "min-width", "max-width"], map, fn key, acc ->
       case acc[key] do
         {:calc, px, f} -> Map.put(acc, key, max(px + f * containing_width(), 0.0))
+        :stretch -> Map.put(acc, key, stretched(acc))
         _ -> acc
       end
     end)
+  end
+
+  # `width: stretch`: a float or an out-of-flow box fills the containing block less its margins
+  # (and its borders and padding, when the width is the content width); other boxes are as wide as
+  # `auto` makes them
+  defp stretched(c) do
+    if c["float"] in ["left", "right"] do
+      margins = Enum.sum(for k <- ["margin-left", "margin-right"], do: num(c[k]) || 0)
+      edges = if c["box-sizing"] == "border-box", do: 0, else: stretch_edges(c)
+      max(containing_width() - margins - edges, 0.0)
+    else
+      :auto
+    end
+  end
+
+  defp stretch_edges(c) do
+    Enum.sum(
+      for k <-
+            ~w(padding-left padding-right border-left-width border-right-width),
+          do: num(c[k]) || 0
+    )
   end
 
   # Style already resolved inheritance, so present keys simply override.
@@ -4265,7 +4294,7 @@ defmodule Browser.Layout do
   # an inline-block that has a height and an aspect ratio is as wide as they make it
   defp ratio_fit(sub, spec) do
     with {_before, _ref, %{ratio: {_, _}, h: h} = o, _tail} when is_number(h) <- own_box(sub),
-         true <- spec.sizing not in [:minc, :maxc] do
+         true <- spec.sizing not in [:minc, :maxc] and not fitc?(spec.sizing) do
       ratio_width(o, spec.extra)
     else
       _ -> nil
@@ -4274,6 +4303,13 @@ defmodule Browser.Layout do
 
   defp content_width(st, sub, %{sizing: :minc} = spec, _avail),
     do: min_extent(st, sub, Map.get(spec, :key), Map.get(spec, :mr, 0))
+
+  defp content_width(st, sub, %{sizing: {:fitc, limit}} = spec, avail) do
+    limit = if match?({:pct, _}, limit), do: resolve(limit, avail), else: limit
+    narrowest = min_extent(st, sub, Map.get(spec, :key), Map.get(spec, :mr, 0))
+    widest = shrink_extent(st, sub, @unbounded, Map.get(spec, :key))
+    min(widest, max(narrowest, limit))
+  end
 
   defp content_width(st, sub, %{sizing: :maxc} = spec, _avail),
     do: shrink_extent(st, sub, @unbounded, Map.get(spec, :key))
@@ -5929,7 +5965,7 @@ defmodule Browser.Layout do
       align: c["align-self"] || "auto",
       order: flex_number(c["order"], 0.0),
       auto_height?: c["height"] in [nil, :auto],
-      fit?: c["width"] in [:fit, :minc, :maxc],
+      fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
       hpad: box.pl + box.pr + bl + br

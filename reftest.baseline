@@ -4387,6 +4387,11 @@ css/css-sizing/div-orthogonal-left-and-non-auto-margin.tentative.html
 css/css-sizing/div-top-and-non-auto-margin.tentative.html
 css/css-sizing/fit-content-block-size-abspos.html
 css/css-sizing/fit-content-block-size-fixedpos.html
+css/css-sizing/fit-content-length-percentage-001.html
+css/css-sizing/fit-content-length-percentage-002.html
+css/css-sizing/fit-content-length-percentage-004.html
+css/css-sizing/fit-content-length-percentage-005.html
+css/css-sizing/fit-content-length-percentage-011.html
 css/css-sizing/grid-item-image-percentage-min-height-computes-as-0.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2b.html
@@ -4418,6 +4423,8 @@ css/css-sizing/slice-nowrap-intrinsic-size.html
 css/css-sizing/stretch/bfc-next-to-float-1.html
 css/css-sizing/stretch/flexbox-stretch-minimum-001.html
 css/css-sizing/stretch/flexbox-stretch-minimum-002.html
+css/css-sizing/stretch/stretch-float-with-sibling.html
+css/css-sizing/stretch/stretch-float.html
 css/css-sizing/vert-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/whitespace-and-break.html
 css/css-text/bidi/bidi-lines-001.html
