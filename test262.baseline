@@ -19627,7 +19627,9 @@ language/eval-code/indirect/var-env-var-init-global-exstng.js
 language/eval-code/indirect/var-env-var-init-global-new.js
 language/eval-code/indirect/var-env-var-non-strict.js
 language/eval-code/indirect/var-env-var-strict.js
+language/export/escaped-as-export-specifier.js
 language/export/escaped-default.js
+language/export/escaped-from.js
 language/expressions/addition/S11.6.1_A1.js
 language/expressions/addition/S11.6.1_A2.1_T1.js
 language/expressions/addition/S11.6.1_A2.1_T2.js
@@ -29396,6 +29398,14 @@ language/expressions/object/method-definition/early-errors-object-method-duplica
 language/expressions/object/method-definition/early-errors-object-method-eval-in-formal-parameters.js
 language/expressions/object/method-definition/early-errors-object-method-formals-body-duplicate.js
 language/expressions/object/method-definition/early-errors-object-method-formals-contains-super-call.js
+language/expressions/object/method-definition/escaped-get-e.js
+language/expressions/object/method-definition/escaped-get-g.js
+language/expressions/object/method-definition/escaped-get-t.js
+language/expressions/object/method-definition/escaped-get.js
+language/expressions/object/method-definition/escaped-set-e.js
+language/expressions/object/method-definition/escaped-set-s.js
+language/expressions/object/method-definition/escaped-set-t.js
+language/expressions/object/method-definition/escaped-set.js
 language/expressions/object/method-definition/fn-name-fn.js
 language/expressions/object/method-definition/fn-name-gen.js
 language/expressions/object/method-definition/forbidden-ext/b1/async-gen-meth-forbidden-ext-direct-access-prop-arguments.js
@@ -30872,6 +30882,9 @@ language/identifiers/vertical-tilde-continue.js
 language/identifiers/vertical-tilde-start-escaped.js
 language/identifiers/vertical-tilde-start.js
 language/import/dup-bound-names.js
+language/import/escaped-as-import-specifier.js
+language/import/escaped-as-namespace-import.js
+language/import/escaped-from.js
 language/import/import-attributes/json-extensibility-array.js
 language/import/import-attributes/json-extensibility-object.js
 language/import/import-attributes/json-idempotency.js
@@ -38426,6 +38439,7 @@ language/statements/for-await-of/async-gen-dstr-var-obj-ptrn-prop-obj.js
 language/statements/for-await-of/async-gen-dstr-var-obj-ptrn-rest-getter.js
 language/statements/for-await-of/async-gen-dstr-var-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for-await-of/async-gen-dstr-var-obj-ptrn-rest-val-obj.js
+language/statements/for-await-of/escaped-of.js
 language/statements/for-await-of/head-await-using-init.js
 language/statements/for-await-of/head-const-init.js
 language/statements/for-await-of/head-let-init.js
@@ -39175,6 +39189,7 @@ language/statements/for-of/dstr/var-obj-ptrn-prop-obj.js
 language/statements/for-of/dstr/var-obj-ptrn-rest-getter.js
 language/statements/for-of/dstr/var-obj-ptrn-rest-skip-non-enumerable.js
 language/statements/for-of/dstr/var-obj-ptrn-rest-val-obj.js
+language/statements/for-of/escaped-of.js
 language/statements/for-of/float32array-mutate.js
 language/statements/for-of/float32array.js
 language/statements/for-of/float64array-mutate.js
