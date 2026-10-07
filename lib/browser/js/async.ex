@@ -706,6 +706,31 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # an optional chain with an await in it: the first `?.` is settled before anything after it runs
+  defp cev_await({:chain, e}, env, ctx, k) do
+    case opt_node(e) do
+      nil ->
+        cev(e, env, ctx, k)
+
+      {:member, base, key, true} = node ->
+        cev(base, env, ctx, fn v ->
+          if Interp.nullish?(v) do
+            k.(:undefined)
+          else
+            scope = Interp.new_scope(env)
+            name = "\0o#{System.unique_integer([:positive])}"
+            Interp.declare(scope, name, v)
+            plain = {:member, {:id, name}, key, false}
+            cev_await({:chain, replace_node(e, node, plain)}, scope, ctx, k)
+          end
+        end)
+
+      # `f?.(...)` with an await after it is left to the plain evaluator
+      _ ->
+        sync_expr({:chain, e}, env, ctx, k)
+    end
+  end
+
   defp cev_await({:destructure, pat, right}, env, ctx, k) do
     cev(right, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
   end
@@ -725,6 +750,19 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # the innermost `?.` along the spine (object or callee) of a chain
+  defp opt_node({:member, o, _, opt} = n), do: opt_node(o) || if(opt, do: n)
+  defp opt_node({:call, c, _, opt} = n), do: opt_node(c) || if(opt, do: n)
+  defp opt_node(_), do: nil
+
+  defp replace_node(n, n, with), do: with
+
+  defp replace_node({:member, o, k, opt}, n, with),
+    do: {:member, replace_node(o, n, with), k, opt}
+
+  defp replace_node({:call, c, a, opt}, n, with), do: {:call, replace_node(c, n, with), a, opt}
+  defp replace_node(other, _n, _with), do: other
+
   # the awaits (and short-circuit expressions holding one) of an expression, in order, each
   # replaced by a variable the expression is later evaluated with
   defp lift(node, leaves) do
@@ -735,6 +773,32 @@ defmodule Browser.JS.Async do
 
       is_tuple(node) and elem(node, 0) in [:fn, :async] ->
         {node, leaves}
+
+      is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
+        {:ok, kids, rebuild} = ordered(node)
+
+        last =
+          kids
+          |> Enum.map(&has_await?/1)
+          |> Enum.reduce({0, -1}, fn
+            true, {i, _} -> {i + 1, i}
+            false, {i, l} -> {i + 1, l}
+          end)
+          |> elem(1)
+
+        {kids, leaves} =
+          kids
+          |> Enum.with_index()
+          |> Enum.map_reduce(leaves, fn {kid, i}, acc ->
+            if i < last and not has_await?(kid) and not pure?(kid) do
+              name = "\0s#{length(acc)}"
+              {{:id, name}, [kid | acc]}
+            else
+              lift(kid, acc)
+            end
+          end)
+
+        {rebuild.(kids), leaves}
 
       is_tuple(node) ->
         {items, leaves} = lift_list(Tuple.to_list(node), leaves)
@@ -748,6 +812,85 @@ defmodule Browser.JS.Async do
     end
   end
 
+  # the operands of an expression in the order they are evaluated, and how to put them back: an
+  # operand before one that awaits has to be evaluated first, so it is lifted like an await
+  defp ordered({:binary, op, l, r}) when op != "in" or elem(l, 0) != :priv_ref,
+    do: {:ok, [l, r], fn [l, r] -> {:binary, op, l, r} end}
+
+  defp ordered({:seq, es}), do: {:ok, es, fn es -> {:seq, es} end}
+
+  defp ordered({:array, elems}) do
+    {:ok, for(e <- elems, e != :hole, do: unspread(e)),
+     fn kids ->
+       {rebuilt, []} =
+         Enum.map_reduce(elems, kids, fn
+           :hole, rest -> {:hole, rest}
+           e, [k | rest] -> {respread(e, k), rest}
+         end)
+
+       {:array, rebuilt}
+     end}
+  end
+
+  defp ordered({:new, callee, args}) do
+    {:ok, [callee | Enum.map(args, &unspread/1)],
+     fn [callee | kids] -> {:new, callee, respread_all(args, kids)} end}
+  end
+
+  defp ordered({:call, {:member, o, k, false}, args, false}) do
+    {:ok, [o, k | Enum.map(args, &unspread/1)],
+     fn [o, k | kids] -> {:call, {:member, o, k, false}, respread_all(args, kids), false} end}
+  end
+
+  defp ordered({:call, callee, args, false})
+       when elem(callee, 0) not in [:id, :super, :member, :super_member] do
+    {:ok, [callee | Enum.map(args, &unspread/1)],
+     fn [callee | kids] -> {:call, callee, respread_all(args, kids), false} end}
+  end
+
+  defp ordered({:call, {:id, _} = callee, args, false}) when args != [] do
+    {:ok, Enum.map(args, &unspread/1),
+     fn kids -> {:call, callee, respread_all(args, kids), false} end}
+  end
+
+  defp ordered({:member, o, k, false}),
+    do: {:ok, [o, k], fn [o, k] -> {:member, o, k, false} end}
+
+  defp ordered({kind, "=", {:member, o, k, mo}, value}) when kind in [:assign, :sassign],
+    do: {:ok, [o, k, value], fn [o, k, v] -> {kind, "=", {:member, o, k, mo}, v} end}
+
+  defp ordered({kind, op, {:id, _} = t, value})
+       when kind in [:assign, :sassign] and op in ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=) do
+    bin = binary_part(op, 0, byte_size(op) - 1)
+
+    {:ok, [t, value], fn [t2, v] -> {kind, "=", t, {:binary, bin, t2, v}} end}
+  end
+
+  defp ordered({:object, props}) do
+    if Enum.all?(props, &match?({:init, {:str, _}, _}, &1)) do
+      {:ok, for({:init, _, v} <- props, do: v),
+       fn kids ->
+         {:object, Enum.zip_with(props, kids, fn {:init, key, _}, v -> {:init, key, v} end)}
+       end}
+    else
+      :none
+    end
+  end
+
+  defp ordered(_), do: :none
+
+  defp unspread({:spread, e}), do: e
+  defp unspread(e), do: e
+
+  defp respread({:spread, _}, k), do: {:spread, k}
+  defp respread(_, k), do: k
+
+  defp respread_all(orig, kids), do: Enum.zip_with(orig, kids, &respread/2)
+
+  defp pure?({tag, _}) when tag in [:lit, :num, :str, :bigint, :val, :gen, :async], do: true
+  defp pure?({:fn, _, _, _, _}), do: true
+  defp pure?(_), do: false
+
   defp lift_list(items, leaves) do
     Enum.map_reduce(items, leaves, fn item, acc -> lift(item, acc) end)
   end
@@ -756,6 +899,7 @@ defmodule Browser.JS.Async do
   defp leaf?({:yield, _, _}), do: true
   defp leaf?({:logical, _, _, _} = n), do: has_await?(n)
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
+  defp leaf?({:chain, _} = n), do: has_await?(n)
   defp leaf?({:destructure, _, _} = n), do: has_await?(n)
   defp leaf?(_), do: false
 
