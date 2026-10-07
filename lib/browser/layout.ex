@@ -1927,6 +1927,7 @@ defmodule Browser.Layout do
     |> put_if(c["list-style-type"], &%{&1 | list: &2})
     |> put_if(c["line-height"], &%{&1 | lh: &2})
     |> put_if(c["white-space"], &white_space(&1, &2))
+    |> put_if(text_wrap_mode(c), &wrap_mode/2)
     |> put_if(c["letter-spacing"], &letter_spacing/2)
     |> put_if(is_number(c["word-spacing"]) && c["word-spacing"], &%{&1 | wsp: &2 / 1})
     |> put_if(c["text-transform"], &%{&1 | tt: text_transform(&2)})
@@ -2047,6 +2048,22 @@ defmodule Browser.Layout do
 
     %{style | ws: ws, pre: ws == :pre}
   end
+
+  # `text-wrap` (or its `text-wrap-mode` longhand) switches line wrapping on or off
+  # without touching how white space collapses
+  defp text_wrap_mode(c) do
+    case to_string(c["text-wrap-mode"] || c["text-wrap"]) |> String.split() |> List.first() do
+      mode when mode in ["wrap", "nowrap"] -> mode
+      _ -> nil
+    end
+  end
+
+  defp wrap_mode(%{ws: ws} = style, "nowrap") when ws in [:normal, :pre_wrap, :pre_line],
+    do: %{style | ws: :nowrap}
+
+  defp wrap_mode(%{ws: :nowrap} = style, "wrap"), do: %{style | ws: :normal}
+  defp wrap_mode(%{ws: :pre} = style, "wrap"), do: %{style | ws: :pre_wrap, pre: false}
+  defp wrap_mode(style, _mode), do: style
 
   defp put_if(style, nil, _fun), do: style
   defp put_if(style, false, _fun), do: style
@@ -4001,13 +4018,18 @@ defmodule Browser.Layout do
   end
 
   defp clamp_width(width, spec, base) do
+    # while content is measured, a percentage depends on the width being measured: it counts as none
+    intrinsic? = Process.get(:layout_intrinsic) == true
+    maxw = if intrinsic? and match?({:pct, _}, spec.maxw), do: nil, else: spec.maxw
+    minw = if intrinsic? and match?({:pct, _}, spec.minw), do: nil, else: spec.minw
+
     width =
-      case resolve(spec.maxw, base) do
+      case resolve(maxw, base) do
         nil -> width
         m -> min(width, m + spec.extra + spec.mextra)
       end
 
-    case resolve(spec.minw, base) do
+    case resolve(minw, base) do
       nil -> width
       m -> max(width, m + spec.extra + spec.mextra)
     end
@@ -4038,7 +4060,14 @@ defmodule Browser.Layout do
     measure_at =
       if Map.get(spec, :table?) or Map.get(spec, :flex?), do: @unbounded, else: max(avail, 1)
 
-    min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
+    key = Map.get(spec, :key)
+    wanted = shrink_extent(st, sub, measure_at, key)
+
+    # While a table cell is measured at a width of 1, shrink-to-fit is never narrower than the
+    # narrowest the content can be: the inline-block still holds its unbreakable text
+    if wanted <= avail or Process.get(:layout_intrinsic) != true,
+      do: min(avail, wanted),
+      else: min(wanted, max(avail, min_extent(st, sub, key)))
   end
 
   # natural width of the content when wrapped at `width`: lines are measured

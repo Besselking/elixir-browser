@@ -30,12 +30,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap)
 
   @doc false
   def inherited_props, do: @inherited
