@@ -1253,9 +1253,13 @@ defmodule Browser.JS.Parser do
 
   # in a destructuring *assignment* a target can be a property: `({a: o.x, b: o.y[0]} = v)`
   defp pattern([{:id, name, _}, {:p, p, _} | _] = ts, allow_default)
-       when p in [".", "["] and (name not in @reserved or name == "this") do
+       when p in [".", "[", "("] and (name not in @reserved or name == "this") do
     if Process.get(:js_assign_pattern, false) do
       {target, ts} = call_chain(ts)
+
+      unless match?({:member, _, _, _}, target),
+        do: throw({:syntax, "invalid destructuring assignment target"})
+
       with_default(target, ts, allow_default)
     else
       pattern_id(ts, allow_default)
