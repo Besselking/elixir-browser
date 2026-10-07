@@ -133,6 +133,36 @@ defmodule Browser.ReftestTest do
     assert Raster.diff(a, b) == nil
   end
 
+  test "the raster paints linear gradients, hard stops included" do
+    layer = %{
+      kind: :linear,
+      tile: {0, 0, 4, 2},
+      repeat: {:no_repeat, :no_repeat},
+      clip: {0, 0, 4, 2},
+      line: {0.0, 0.0, 4.0, 0.0},
+      stops: [
+        {0.0, {255, 0, 0, 255}},
+        {0.5, {255, 0, 0, 255}},
+        {0.5, {0, 0, 255, 255}},
+        {1.0, {0, 0, 255, 255}}
+      ]
+    }
+
+    item = %{type: :bgimage, x: 0, y: 0, w: 4, h: 2, layers: [layer]}
+
+    red =
+      Raster.paint(
+        [
+          %{type: :rect, x: 0, y: 0, w: 2, h: 2, color: {255, 0, 0}},
+          %{type: :rect, x: 2, y: 0, w: 2, h: 2, color: {0, 0, 255}}
+        ],
+        4,
+        2
+      )
+
+    assert Raster.diff(Raster.paint([item], 4, 2), red) == nil
+  end
+
   # a PNG of the given colour type, 8 bits, from rows of bytes (filter 0)
   defp png(w, h, ctype, rows, extra \\ []) do
     chunk = fn type, data ->

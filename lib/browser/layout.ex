@@ -128,6 +128,7 @@ defmodule Browser.Layout do
       ws: :normal,
       tab: 8,
       hidden: false,
+      vhidden: false,
       color: {0, 0, 0},
       underline: false,
       strike: false,
@@ -1316,7 +1317,8 @@ defmodule Browser.Layout do
         size: style.size,
         # the height of the font's content area, in ems, is the height of the box
         cf: content_factor(style),
-        paint: visible? and not style.hidden
+        # (transparent text does not hide the box it is in)
+        paint: visible? and not Map.get(style, :vhidden, style.hidden)
       }
     end
   end
@@ -1973,11 +1975,21 @@ defmodule Browser.Layout do
         Map.take(map, ["display" | Browser.Style.inherited_props()])
 
       {_, map} ->
-        map
+        resolve_calc(map)
 
       nil ->
         %{}
     end
+  end
+
+  # a width of `calc(50% - 10px)`: the percentage of the width of the containing block
+  defp resolve_calc(map) do
+    Enum.reduce(["width", "min-width", "max-width"], map, fn key, acc ->
+      case acc[key] do
+        {:calc, px, f} -> Map.put(acc, key, max(px + f * containing_width(), 0.0))
+        _ -> acc
+      end
+    end)
   end
 
   # Style already resolved inheritance, so present keys simply override.
@@ -2036,6 +2048,7 @@ defmodule Browser.Layout do
     )
     |> then(&if(blockified?(c), do: Map.put(&1, :vs, 0), else: &1))
     # transparent text takes its room and shows nothing
+    |> Map.put(:vhidden, hidden?(c))
     |> Map.put(:hidden, hidden?(c) or c["color"] == :transparent)
   end
 
@@ -4357,7 +4370,7 @@ defmodule Browser.Layout do
   # (bottom of the last text line, or the bottom edge if there is no text).
   defp layout_atom(st, sub, width, key \\ nil) do
     memo({:atom, key || :erlang.phash2(sub), width}, fn ->
-      sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, true, st.images)
+      sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
       height = sub_st.y + sub_st.gap + sub_st.ngap
       items = finalize(sub_st)
       {items, height, last_baseline(items, height)}
@@ -5626,6 +5639,10 @@ defmodule Browser.Layout do
     end
   end
 
+  # a percentage gap is of the container's height, which it only has when it is set
+  defp row_gap({:pct, f}, height) when is_number(height), do: f * height
+  defp row_gap(gap, _height), do: num(gap) || 0.0
+
   defp flex_spec(tag, c) do
     fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
     box = box(tag, c)
@@ -5643,7 +5660,7 @@ defmodule Browser.Layout do
       content: c["align-content"] || "stretch",
       align: c["align-items"] || "stretch",
       col_gap: num(c["column-gap"]) || 0.0,
-      row_gap: num(c["row-gap"]) || 0.0,
+      row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       fs: fs
     }
@@ -6113,7 +6130,7 @@ defmodule Browser.Layout do
     # lay every item out at its final width, find the height of the line
     sized =
       Enum.map(line, fn it ->
-        w = max(round(it.hw), 1)
+        w = max(round(it.hw), 0)
         {items, h, _base} = flex_atom(st, it.sub, w, it.key)
         Map.merge(it, %{w: w, items: items, h: h})
       end)

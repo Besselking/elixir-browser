@@ -538,8 +538,8 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type)\(\s*([^()]*?)\s*\)/u, s) ->
-        [whole, name, arg] = m
+      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type)\(/u, s) ->
+        [whole, name] = m
 
         kind =
           case name,
@@ -549,9 +549,24 @@ defmodule Browser.CSS do
               _ -> :of_type
             )
 
-        case nth(arg) do
-          nil -> :error
-          ab -> tokenize(drop(s, whole), [{:nth, kind, ab} | acc])
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {arg, of_sels} <- split_of(inner, kind),
+             ab when ab != nil <- nth(arg),
+             {:ok, sels} <- of_selectors(of_sels) do
+          token = if sels == nil, do: {:nth, kind, ab}, else: {:nth_of, kind, ab, sels}
+          tokenize(rest, [token | acc])
+        else
+          _ -> :error
+        end
+
+      m = Regex.run(~r/\A:(lang|dir)\(/u, s) ->
+        [whole, name] = m
+
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {:ok, p} <- lang_dir(name, inner) do
+          tokenize(rest, [{:pseudo, p} | acc])
+        else
+          _ -> :error
         end
 
       m = Regex.run(~r/\A:([a-z-]+)(?![\w\-(])/u, s) ->
@@ -571,10 +586,63 @@ defmodule Browser.CSS do
     end
   end
 
+  # `2n+1 of .a, b > c` -> {"2n+1", ".a, b > c"}; the `of` part is only for the child kinds
+  defp split_of(inner, kind) do
+    case Regex.run(~r/\A(.*?)\s+of(?=[\s\[.#:*]|[\w\-])\s*(.*)\z/su, inner) do
+      [_, arg, sels] when kind != :of_type and sels != "" -> {String.trim(arg), sels}
+      [_, _, _] -> :error
+      nil -> {String.trim(inner), nil}
+    end
+  end
+
+  defp of_selectors(nil), do: {:ok, nil}
+
+  defp of_selectors(str) do
+    # no namespaces here: `*|*` is the same as `*`
+    str
+    |> String.replace("*|", "")
+    |> split_top(?,)
+    |> Enum.reduce_while({:ok, []}, fn part, {:ok, acc} ->
+      case parse_selector(part) do
+        {:ok, %{parts: parts, pseudo: nil}} -> {:cont, {:ok, [parts | acc]}}
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, Enum.reverse(list)}
+      :error -> :error
+    end
+  end
+
+  defp lang_dir("dir", inner) do
+    case inner |> String.trim() |> String.downcase() do
+      d when d in ["ltr", "rtl"] -> {:ok, {:dir, d}}
+      _ -> :error
+    end
+  end
+
+  defp lang_dir("lang", inner) do
+    ranges =
+      inner
+      |> split_top(?,)
+      |> Enum.map(fn r ->
+        r |> String.trim() |> String.trim("\"") |> String.trim("'") |> String.downcase()
+      end)
+
+    # an unquoted range is an identifier, which cannot start with a digit
+    valid? = fn r -> r != "" and (quoted?(inner, r) or not String.match?(r, ~r/\A-?\d/)) end
+
+    if ranges != [] and Enum.all?(ranges, valid?),
+      do: {:ok, {:lang, ranges}},
+      else: :error
+  end
+
+  defp quoted?(inner, range), do: String.contains?(inner, ["\"" <> range, "'" <> range])
+
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root empty first-child last-child only-child first-of-type link any-link disabled enabled checked)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type link any-link disabled enabled checked)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -741,6 +809,7 @@ defmodule Browser.CSS do
       {:fn, _, _} = f, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [f | c.pseudos]}}}
       {:has, _} = h, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [h | c.pseudos]}}}
       {:nth, _, _} = n, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [n | c.pseudos]}}}
+      {:nth_of, _, _, _} = n, {:ok, c} -> {:cont, {:ok, %{c | pseudos: [n | c.pseudos]}}}
       _tag_or_any_mid_compound, _ -> {:halt, :error}
     end)
     |> case do
@@ -764,6 +833,9 @@ defmodule Browser.CSS do
 
       {:fn, _, cmps}, acc ->
         add_spec(acc, cmps |> Enum.map(&compound_spec/1) |> Enum.max())
+
+      {:nth_of, _, _, sels}, {a, b, t} ->
+        add_spec({a, b + 1, t}, sels |> Enum.map(&specificity/1) |> Enum.max())
 
       {:has, []}, acc ->
         acc
@@ -831,6 +903,16 @@ defmodule Browser.CSS do
   defp attr_op("$=", v, val), do: val != "" and String.ends_with?(v, val)
   defp attr_op("*=", v, val), do: val != "" and String.contains?(v, val)
 
+  defp pseudo?(:scope, ctx), do: pseudo?(:root, ctx)
+  defp pseudo?({:dir, d}, ctx), do: direction(ctx) == d
+
+  defp pseudo?({:lang, ranges}, ctx) do
+    case language(ctx) do
+      nil -> false
+      lang -> Enum.any?(ranges, &lang_match?(&1, String.downcase(lang)))
+    end
+  end
+
   defp pseudo?(:root, ctx), do: ctx.parent == nil and ctx.tag == "html"
   defp pseudo?(:first_child, ctx), do: ctx.first?
   defp pseudo?(:last_child, ctx), do: ctx.last?
@@ -853,6 +935,17 @@ defmodule Browser.CSS do
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:nth, kind, {a, b}}, ctx), do: nth_match?(a, b, position(kind, ctx))
+
+  # `:nth-child(an+b of S)`: the element matches S and counts among the siblings that do
+  defp pseudo?({:nth_of, kind, {a, b}, sels}, ctx) do
+    in_list? = fn c -> Enum.any?(sels, &matches?(&1, c)) end
+
+    in_list?.(ctx) and
+      case kind do
+        :child -> nth_match?(a, b, 1 + Enum.count(ctx.prev, in_list?))
+        :last_child -> nth_match?(a, b, 1 + Enum.count(next_contexts(ctx), in_list?))
+      end
+  end
 
   # `:has(lead parts)`: some element the relative selector reaches from `ctx`. The selector is
   # matched as `parts` with `ctx` itself (an :anchor) at its left end, joined by `lead`.
@@ -935,6 +1028,31 @@ defmodule Browser.CSS do
     case List.keyfind(attrs, name, 0) do
       {_, v} -> v
       nil -> nil
+    end
+  end
+
+  # the nearest `lang` (or `xml:lang`) of the element or its ancestors
+  defp language(nil), do: nil
+
+  defp language(ctx) do
+    attr_value(ctx.attrs, "lang") || attr_value(ctx.attrs, "xml:lang") || language(ctx.parent)
+  end
+
+  defp lang_match?("*", lang), do: lang != ""
+  defp lang_match?(range, lang), do: lang == range or String.starts_with?(lang, range <> "-")
+
+  defp direction(nil), do: "ltr"
+
+  defp direction(ctx) do
+    case attr_value(ctx.attrs, "dir") do
+      d when is_binary(d) ->
+        case String.downcase(d) do
+          x when x in ["ltr", "rtl"] -> x
+          _ -> direction(ctx.parent)
+        end
+
+      _ ->
+        direction(ctx.parent)
     end
   end
 
