@@ -153,7 +153,7 @@ defmodule Browser.Reftest.Raster do
         g =
           if String.trim(ch) == "",
             do: g,
-            else: fill(g, t.x + round(off), gy, gw, gh, glyph_color(t.color, ch, t, ahem?), clip)
+            else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
         {g, off + adv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
@@ -168,6 +168,22 @@ defmodule Browser.Reftest.Raster do
     if Map.get(t, :strike),
       do: fill(grid, t.x, t.y + div(t.h, 2), width, 1, t.color, clip),
       else: grid
+  end
+
+  # text in the colour of what it is on is how tests hide their labels: it must not show up
+  # in the colour the salt gives a character
+  defp ink(grid, t, off, gy, ch, ahem?) do
+    x = max(t.x + round(off), 0)
+
+    with true <- gy >= 0 and gy < tuple_size(grid),
+         row = elem(grid, gy),
+         true <- byte_size(row) >= (x + 1) * 3,
+         <<_::binary-size(^x * 3), under::binary-size(3), _::binary>> <- row,
+         true <- under == pixel(t.color) do
+      t.color
+    else
+      _ -> glyph_color(t.color, ch, t, ahem?)
+    end
   end
 
   # the advance per character, in em (as `Browser.Reftest.measure/2` has it)
