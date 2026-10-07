@@ -190,8 +190,12 @@ defmodule Browser.JS.Props do
   defp own_names_plain2(id, o) do
     base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
-    hidden =
-      (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1) |> Enum.sort()
+    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
+
+    ordered =
+      o |> Map.get(:horder, []) |> Enum.reverse() |> Enum.uniq() |> Enum.filter(&(&1 in hidden0))
+
+    hidden = ordered ++ Enum.sort(hidden0 -- ordered)
 
     case o do
       %{class: :array} ->
@@ -205,7 +209,8 @@ defmodule Browser.JS.Props do
               state({:obj, id}, k) != nil,
               do: k
 
-        base ++ virtual ++ hidden
+        {ints, rest} = Enum.split_with(base, &index_key?/1)
+        Enum.sort_by(ints, &array_index/1) ++ virtual ++ rest ++ hidden
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
@@ -593,6 +598,11 @@ defmodule Browser.JS.Props do
         else: Map.put(attrs, key, flags)
 
     keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
+
+    o =
+      if Map.get(desc, :enumerable, false),
+        do: o,
+        else: Map.update(o, :horder, [key], &[key | &1])
 
     store(
       id,

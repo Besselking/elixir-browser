@@ -901,6 +901,7 @@ defmodule Browser.JS.Interp do
   @doc "Sets an own property without making it show up in `Object.keys`."
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
+    o = if Map.has_key?(o.props, key), do: o, else: Map.update(o, :horder, [key], &[key | &1])
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 
