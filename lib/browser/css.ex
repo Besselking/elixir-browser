@@ -130,6 +130,13 @@ defmodule Browser.CSS do
       "}" <> rest ->
         blocks(rest, conds, acc)
 
+      # the HTML comment tokens between rules are ignored
+      "<!--" <> rest ->
+        blocks(rest, conds, acc)
+
+      "-->" <> rest ->
+        blocks(rest, conds, acc)
+
       b ->
         case :binary.match(b, ["{", ";"]) do
           :nomatch ->
@@ -484,11 +491,11 @@ defmodule Browser.CSS do
       String.starts_with?(s, "*") ->
         tokenize(binary_part(s, 1, byte_size(s) - 1), [:any | acc])
 
-      m = Regex.run(~r/\A#(#{@ident})/u, s) ->
+      m = Regex.run(~r/\A#(?!\d|-\d)(#{@ident})/u, s) ->
         [whole, id] = m
         tokenize(drop(s, whole), [{:id, unescape(id)} | acc])
 
-      m = Regex.run(~r/\A\.(#{@ident})/u, s) ->
+      m = Regex.run(~r/\A\.(?!\d|-\d)(#{@ident})/u, s) ->
         [whole, cls] = m
         tokenize(drop(s, whole), [{:class, unescape(cls)} | acc])
 

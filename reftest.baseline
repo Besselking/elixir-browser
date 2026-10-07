@@ -731,8 +731,10 @@ css/CSS2/box-display/multiple-block-in-inlines-margins-collapse.html
 css/CSS2/box-display/nested-spans-with-block-in-inline-margin.html
 css/CSS2/box-display/three-block-in-inlines-cascading-margins.html
 css/CSS2/box-display/two-block-in-inlines-with-text-between.html
+css/CSS2/css1/c11-import-000.xht
 css/CSS2/css1/c12-grouping-000.xht
 css/CSS2/css1/c13-inheritance-000.xht
+css/CSS2/css1/c14-classes-000.xht
 css/CSS2/css1/c15-ids-000.xht
 css/CSS2/css1/c15-ids-001.xht
 css/CSS2/css1/c16-descendant-000.xht
@@ -838,6 +840,8 @@ css/CSS2/css1/c5526-fltclr-000.xht
 css/CSS2/css1/c562-white-sp-000.xht
 css/CSS2/css1/c61-rel-len-000.xht
 css/CSS2/css1/c62-percent-000.xht
+css/CSS2/css1/c64-uri-000.xht
+css/CSS2/css1/c71-fwd-parsing-000.xht
 css/CSS2/css1/c71-fwd-parsing-001.xht
 css/CSS2/css1/c71-fwd-parsing-004.xht
 css/CSS2/floats-clear/adjacent-floats-001.xht

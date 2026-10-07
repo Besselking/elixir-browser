@@ -308,9 +308,21 @@ defmodule Browser.Style do
     decls
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
-      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v)
+      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
+        not invalid_color?(p, v)
     end)
   end
+
+  # a colour that is not one is dropped before the cascade, so an earlier declaration still
+  # applies (`color: green; color: invalidValue`)
+  defp invalid_color?(prop, v) when prop in ["color", "background-color"] and is_binary(v) do
+    lower = v |> String.trim() |> String.downcase()
+
+    not (lower in ~w(inherit initial unset revert) or String.contains?(lower, "var(") or
+           Browser.Color.parse_alpha(lower) != nil)
+  end
+
+  defp invalid_color?(_prop, _v), do: false
 
   # a negative width, height, min/max size or padding is invalid: the declaration is dropped
   # before the cascade, so an earlier value still applies

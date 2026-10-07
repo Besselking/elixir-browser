@@ -1017,5 +1017,16 @@ defmodule Browser.StyleTest do
       css = "body { --c: green } p { --c: var(--foo, unset); color: var(--c) }"
       assert p_color(css) == @green
     end
+
+    test "an invalid colour is dropped, so an earlier declaration still applies" do
+      assert p_color("p { color: green; color: invalidValue }") == @green
+      assert p_color("p { color: green; color: 12px }") == @green
+      assert p_color("body { color: green } p { color: inherit }") == @green
+    end
+
+    test "a class that starts with a digit is not a selector" do
+      html = ~s(<p class="1">x</p>)
+      assert p_color("body { color: green } .1 { color: red }", html) == @green
+    end
   end
 end

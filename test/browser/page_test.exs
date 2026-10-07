@@ -329,4 +329,42 @@ defmodule Browser.PageTest do
     page = Page.build(styles <> ~s|<style>.late{display:none}</style><p class="late">x</p>|, @url)
     assert Enum.any?(page.rules, &(inspect(&1.selector) =~ "late"))
   end
+
+  describe "@import" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "import_test_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      {:ok, dir: dir, base: "file://" <> dir <> "/page.html"}
+    end
+
+    defp rule_colors(page) do
+      for %{origin: :author, decls: decls} <- page.rules, {"color", v, _} <- decls, do: v
+    end
+
+    test "imported sheets come before the importing one", %{dir: dir, base: base} do
+      File.write!(Path.join(dir, "a.css"), "p { color: red }")
+      File.write!(Path.join(dir, "b.css"), "p { color: blue }")
+
+      html =
+        ~s|<style>@import url(a.css); @import "b.css"; p { color: green }</style><p>x</p>|
+
+      assert rule_colors(Page.build(html, base)) == ["red", "blue", "green"]
+    end
+
+    test "an @import after another rule is ignored", %{dir: dir, base: base} do
+      File.write!(Path.join(dir, "late.css"), "p { color: red }")
+      html = ~s|<style>p { color: green } @import url(late.css);</style><p>x</p>|
+      assert rule_colors(Page.build(html, base)) == ["green"]
+    end
+
+    test "imports nest and a media list wraps the imported rules", %{dir: dir, base: base} do
+      File.write!(Path.join(dir, "inner.css"), "p { color: red }")
+      File.write!(Path.join(dir, "outer.css"), "@import 'inner.css'; p { color: blue }")
+      html = ~s|<style>@import url(outer.css) print;</style><p>x</p>|
+      page = Page.build(html, base)
+      assert rule_colors(page) == ["red", "blue"]
+      assert page.rules |> Enum.filter(&(&1.origin == :author)) |> Enum.all?(&(&1.media != []))
+    end
+  end
 end
