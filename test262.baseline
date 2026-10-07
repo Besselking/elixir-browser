@@ -18132,6 +18132,7 @@ language/arguments-object/meth-args-trailing-comma-null.js
 language/arguments-object/meth-args-trailing-comma-single-args.js
 language/arguments-object/meth-args-trailing-comma-spread-operator.js
 language/arguments-object/meth-args-trailing-comma-undefined.js
+language/arguments-object/non-strict-arguments-object-is-immutable.js
 language/arguments-object/unmapped/Symbol.iterator.js
 language/arguments-object/unmapped/via-params-dflt.js
 language/arguments-object/unmapped/via-params-dstr.js
@@ -24726,6 +24727,7 @@ language/expressions/class/elements/syntax/early-errors/grammar-private-environm
 language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-obj-literal.js
 language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-recursive.js
 language/expressions/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage.js
+language/expressions/class/elements/syntax/early-errors/grammar-private-field-on-object-destructuring.js
 language/expressions/class/elements/syntax/early-errors/grammar-private-field-super-access.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatemeth-duplicate-async-gen.js
 language/expressions/class/elements/syntax/early-errors/grammar-privatemeth-duplicate-async.js
@@ -25676,6 +25678,7 @@ language/expressions/delete/11.4.1-4.a-12.js
 language/expressions/delete/11.4.1-4.a-13.js
 language/expressions/delete/11.4.1-4.a-14.js
 language/expressions/delete/11.4.1-4.a-15.js
+language/expressions/delete/11.4.1-4.a-16.js
 language/expressions/delete/11.4.1-4.a-17.js
 language/expressions/delete/11.4.1-4.a-2.js
 language/expressions/delete/11.4.1-4.a-3-s.js
@@ -27140,7 +27143,9 @@ language/expressions/in/S8.12.6_A1.js
 language/expressions/in/S8.12.6_A2_T1.js
 language/expressions/in/S8.12.6_A2_T2.js
 language/expressions/in/S8.12.6_A3.js
+language/expressions/in/private-field-in-nested.js
 language/expressions/in/private-field-in.js
+language/expressions/in/private-field-invalid-assignment-reference.js
 language/expressions/in/private-field-invalid-assignment-target.js
 language/expressions/in/private-field-invalid-identifier-complex.js
 language/expressions/in/private-field-invalid-identifier-simple.js
@@ -29747,12 +29752,18 @@ language/global-code/new.target-arrow.js
 language/global-code/new.target.js
 language/global-code/return.js
 language/global-code/script-decl-func-dups.js
+language/global-code/script-decl-func-err-non-configurable.js
+language/global-code/script-decl-func-err-non-extensible.js
+language/global-code/script-decl-func.js
 language/global-code/script-decl-lex-deletion.js
 language/global-code/script-decl-lex-lex.js
+language/global-code/script-decl-lex-restricted-global.js
 language/global-code/script-decl-lex-var-declared-via-eval.js
 language/global-code/script-decl-lex-var.js
 language/global-code/script-decl-lex.js
 language/global-code/script-decl-var-collision.js
+language/global-code/script-decl-var-err.js
+language/global-code/script-decl-var.js
 language/global-code/super-call-arrow.js
 language/global-code/super-call.js
 language/global-code/super-prop-arrow.js
@@ -35320,6 +35331,7 @@ language/statements/class/elements/syntax/early-errors/grammar-private-environme
 language/statements/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-obj-literal.js
 language/statements/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage-recursive.js
 language/statements/class/elements/syntax/early-errors/grammar-private-environment-on-class-heritage.js
+language/statements/class/elements/syntax/early-errors/grammar-private-field-on-object-destructuring.js
 language/statements/class/elements/syntax/early-errors/grammar-private-field-super-access.js
 language/statements/class/elements/syntax/early-errors/grammar-privatemeth-duplicate-async-gen.js
 language/statements/class/elements/syntax/early-errors/grammar-privatemeth-duplicate-async.js
@@ -38704,6 +38716,7 @@ language/statements/function/S13.2_A8_T1.js
 language/statements/function/S13.2_A8_T2.js
 language/statements/function/S13_A1.js
 language/statements/function/S13_A10.js
+language/statements/function/S13_A11_T1.js
 language/statements/function/S13_A11_T2.js
 language/statements/function/S13_A11_T3.js
 language/statements/function/S13_A11_T4.js
@@ -38716,6 +38729,7 @@ language/statements/function/S13_A14_T1.js
 language/statements/function/S13_A15_T1.js
 language/statements/function/S13_A15_T2.js
 language/statements/function/S13_A15_T3.js
+language/statements/function/S13_A15_T4.js
 language/statements/function/S13_A15_T5.js
 language/statements/function/S13_A17_T1.js
 language/statements/function/S13_A17_T2.js

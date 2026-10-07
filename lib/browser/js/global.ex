@@ -54,7 +54,8 @@ defmodule Browser.JS.Global do
     if Map.has_key?(s.vars, key) and not MapSet.member?(s.consts, key) and
          not Interp.global_fixed?(key) do
       Interp.store(scope, %{s | vars: Map.delete(s.vars, key)})
-      true
+      # a property of the same name that `defineProperty` put on the object goes too
+      if own_defined?(Map.get(s.vars, :this), key), do: :default, else: true
     else
       # what is no variable may be a property defined on the object itself
       if Map.has_key?(s.vars, key), do: false, else: :default

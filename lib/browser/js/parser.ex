@@ -1103,6 +1103,9 @@ defmodule Browser.JS.Parser do
       {:import_meta} ->
         throw({:syntax, "Invalid left-hand side in for loop"})
 
+      {:priv_ref, _} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
       {tag, _} when tag in [:array, :object, :num, :str, :bigint, :regex, :template] ->
         throw({:syntax, "Invalid left-hand side in for loop"})
 
@@ -1375,6 +1378,7 @@ defmodule Browser.JS.Parser do
 
   defp object_pattern(ts, acc, rest) do
     {key, shorthand, ts} = property_key(ts)
+    if match?({:priv, _}, key), do: throw({:syntax, "a private name is not a pattern key"})
 
     {prop, ts} =
       case ts do
@@ -1956,6 +1960,10 @@ defmodule Browser.JS.Parser do
         # `**` is right-associative, everything else left
         {right, rest2} = binary(rest, if(op == "**", do: prec, else: prec + 1))
         if op in ["&&", "||", "??"], do: check_logical_mix(op, rest, rest2)
+
+        if match?({:priv_ref, _}, right),
+          do: throw({:syntax, "a private name is only valid on the left of `in`"})
+
         rest = rest2
 
         node =
