@@ -35,7 +35,8 @@ defmodule Browser.JS.Promise do
   def promise?({:obj, id}), do: match?(%{class: :promise}, deref(id))
   def promise?(_), do: false
 
-  defp data({:obj, id}), do: deref(id)
+  @doc false
+  def data({:obj, id}), do: deref(id)
 
   defp update({:obj, id}, fun), do: store(id, fun.(deref(id)))
 
@@ -206,7 +207,13 @@ defmodule Browser.JS.Promise do
     put_proto(:promise, p)
 
     ctor =
-      native("Promise", fn _this, args ->
+      native("Promise", fn this, args ->
+        # called without `new`, `this` is not a fresh object: a Promise needs `new`
+        constructing = Process.delete(:js_native_new)
+
+        if this == :undefined or this == :null or constructing != this,
+          do: throw_error("TypeError", "Promise constructor cannot be invoked without 'new'")
+
         executor = arg(args, 0)
 
         unless function?(executor),
@@ -325,12 +332,23 @@ defmodule Browser.JS.Promise do
           {pr, res, rej} = capability(this)
 
           try do
-            call(res, :undefined, [call(arg(args, 0), :undefined, Enum.drop(args, 1))])
-          catch
-            {:js_error, e} -> call(rej, :undefined, [e])
-          end
+            r = call(arg(args, 0), :undefined, Enum.drop(args, 1))
 
-          pr
+            # a promise of this very constructor comes back as it is
+            if promise?(r) and Interp.get(r, "constructor") == this do
+              {:same, r}
+            else
+              call(res, :undefined, [r])
+              pr
+            end
+          catch
+            {:js_error, e} ->
+              call(rej, :undefined, [e])
+              pr
+          else
+            {:same, r} -> r
+            other -> other
+          end
         end),
         1
       )

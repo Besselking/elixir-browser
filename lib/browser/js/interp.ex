@@ -126,9 +126,12 @@ defmodule Browser.JS.Interp do
   def make_error(type, message) do
     err = new_object([{"message", message}], proto({:error, type}))
     mark_error(err)
-    put_hidden(err, "stack", stack_string("#{type}: #{message}"))
+    set_stack(err, stack_string("#{type}: #{message}"))
     err
   end
+
+  @doc "Records the stack string `Error.prototype.stack` reports for an error object."
+  def set_stack({:obj, id}, str), do: store(id, Map.put(deref(id), :stack_str, str))
 
   @doc "Sets the [[ErrorData]] marker `Error.isError` looks for."
   def mark_error({:obj, id} = e) do
@@ -196,8 +199,22 @@ defmodule Browser.JS.Interp do
         case s do
           %{with: obj} when is_binary(name) ->
             if has_property?(obj, name) and not unscopable?(obj, name),
-              do: {:ok, get(obj, name)},
+              # GetBindingValue asks again whether the binding is still there
+              do: {:ok, if(has_property?(obj, name), do: get(obj, name), else: :undefined)},
               else: lookup_var(s.parent, name, heap)
+
+          %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
+            # a property defined on the global object itself (an accessor, say) is a variable too
+            case Map.fetch!(heap, gid) do
+              %{props: %{^name => {:accessor, g, _}}} ->
+                {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
+
+              %{props: %{^name => v}} ->
+                {:ok, v}
+
+              _ ->
+                :error
+            end
 
           _ ->
             lookup_var(s.parent, name, heap)
@@ -230,20 +247,68 @@ defmodule Browser.JS.Interp do
           MapSet.member?(s.consts, {:fname, name}) ->
             :fname_ignored
 
+          # the global `undefined`, `NaN` and `Infinity` can not be assigned
+          s.parent == nil and name in ["undefined", "NaN", "Infinity"] ->
+            :fname_ignored
+
           true ->
             :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+            sync_argument(s.vars, name, val)
         end
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
           not unscopable?(s.with, name) ->
+        # SetMutableBinding asks again whether the binding is still there
+        _ = has_property?(s.with, name)
         put(s.with, name, val)
 
       s.parent != nil ->
         assign_var(s.parent, name, val, heap)
 
+      s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
+        put(s.vars.this, name, val)
+
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
+    end
+  end
+
+  defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
+    do: match?(%{props: %{^name => _}}, deref(gid))
+
+  defp global_own_property?(_, _), do: false
+
+  # a sloppy function's parameter and the `arguments` element it is mapped to follow each other
+  defp sync_argument(%{argmap: {aid, names}}, name, val) do
+    with %{^name => idx} <- names,
+         %{mapped: %{^idx => ^name}} = o <- deref(aid) do
+      store(aid, %{o | items: Map.put(o.items, idx, val)})
+    end
+
+    :ok
+  end
+
+  defp sync_argument(_, _, _), do: :ok
+
+  @doc false
+  # a write to a mapped `arguments` element reaches its parameter
+  def sync_param(%{mapped: mapped, map_scope: scope}, idx, val) do
+    # a scope dropped after its call has no reader left that could see the parameter
+    case mapped do
+      %{^idx => name} -> if Map.has_key?(pget(:js_heap), scope), do: assign_var(scope, name, val)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  @doc false
+  # an element that is deleted, made an accessor or made read-only leaves the mapping
+  def unmap_argument(id, idx) do
+    case deref(id) do
+      %{mapped: mapped} = o -> store(id, %{o | mapped: Map.delete(mapped, idx)})
+      _ -> :ok
     end
   end
 
@@ -426,6 +491,7 @@ defmodule Browser.JS.Interp do
       num?(a) and is_binary(b) -> Num.equal?(a, to_num(b))
       is_binary(a) and num?(b) -> Num.equal?(to_num(a), b)
       match?({:obj, _}, a) and match?({:obj, _}, b) -> a == b
+      match?({:symbol, _, _}, a) and match?({:symbol, _, _}, b) -> a == b
       match?({:obj, _}, a) -> loose_eq(to_primitive(a, "default"), b)
       match?({:obj, _}, b) -> loose_eq(a, to_primitive(b, "default"))
       true -> false
@@ -488,6 +554,9 @@ defmodule Browser.JS.Interp do
         )
     end
   end
+
+  def get(_, {:private, _}),
+    do: throw_error("TypeError", "Cannot read private member from a non-object")
 
   def get({:obj, id}, key) do
     o = deref(id)
@@ -612,8 +681,17 @@ defmodule Browser.JS.Interp do
     case o.proto do
       {:obj, pid} ->
         case deref(pid) do
-          %{proxy: _} -> Browser.JS.Proxy.get({:obj, pid}, key, receiver)
-          po -> lookup(po, key, receiver)
+          %{proxy: _} ->
+            Browser.JS.Proxy.get({:obj, pid}, key, receiver)
+
+          %{class: :host, host: {mod, data}} = po ->
+            case mod.host_get(data, key, receiver) do
+              {:ok, v} -> v
+              :miss -> lookup(po, key, receiver)
+            end
+
+          po ->
+            lookup(po, key, receiver)
         end
 
       _ ->
@@ -860,6 +938,7 @@ defmodule Browser.JS.Interp do
   @doc "Sets an own property without making it show up in `Object.keys`."
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
+    o = if Map.has_key?(o.props, key), do: o, else: Map.update(o, :horder, [key], &[key | &1])
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 
@@ -913,6 +992,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  def put(_, {:private, _}, _),
+    do: throw_error("TypeError", "Cannot write private member to a non-object")
+
   def put({:obj, id}, key, v) do
     o = deref(id)
 
@@ -939,7 +1021,10 @@ defmodule Browser.JS.Interp do
                 fail_put()
 
               true ->
-                store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+                # an arguments object's `length` is an ordinary property: it does not grow
+                len = if Map.has_key?(o, :arguments), do: o.len, else: max(o.len, i + 1)
+                store(id, %{o | items: Map.put(o.items, i, v), len: len})
+                if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
             end
 
           nil ->
@@ -980,10 +1065,11 @@ defmodule Browser.JS.Interp do
         case mod.host_put(data, key, v, {:obj, id}) do
           :ok -> :ok
           :miss -> put_prop(id, o, key, v)
+          :readonly -> fail_put()
         end
 
       %{proxy: _} ->
-        Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id})
+        unless Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id}), do: fail_put()
         :ok
 
       # a function's own name and length are not writable
@@ -1006,7 +1092,28 @@ defmodule Browser.JS.Interp do
         "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
       )
 
-  def put(_primitive, _key, v), do: v
+  # a primitive has no property of its own to set, but a setter (or proxy) on its prototype
+  # chain still runs
+  def put(primitive, key, v) do
+    primitive_set(primitive, key, v)
+    v
+  end
+
+  defp primitive_set(ov, key, v) do
+    k = to_key(key)
+
+    case inherited_set(Browser.JS.Builtins.box(ov), k) do
+      {:setter, setter} ->
+        call(setter, ov, [v])
+        :ok
+
+      {:proxy, proxy} ->
+        if Browser.JS.Proxy.set(proxy, k, v, ov), do: :ok, else: :fail
+
+      _ ->
+        :fail
+    end
+  end
 
   # naming a key in an error must not run user code (a toString that throws)
   defp safe_key(key) when is_binary(key), do: key
@@ -1025,6 +1132,14 @@ defmodule Browser.JS.Interp do
           do: store(id, %{o | props: Map.put(o.props, key, v)}),
           else: fail_put()
 
+      # a generator function's own `prototype` is made on first use and shadows the one of
+      # its kind's prototype object
+      :error
+      when key == "prototype" and is_map_key(o, :generator) and
+             not is_map_key(o.props, "prototype") ->
+        function_prop(id, o, "prototype")
+        put({:obj, id}, key, v)
+
       :error ->
         case inherited_set(o.proto, key) do
           {:setter, setter} ->
@@ -1035,7 +1150,11 @@ defmodule Browser.JS.Interp do
             fail_put()
 
           {:proxy, proxy} ->
-            Browser.JS.Proxy.set(proxy, key, v, {:obj, id})
+            unless Browser.JS.Proxy.set(proxy, key, v, {:obj, id}), do: fail_put()
+            :ok
+
+          {:typed_array, ta} ->
+            unless Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id}), do: fail_put()
             :ok
 
           :none ->
@@ -1069,6 +1188,22 @@ defmodule Browser.JS.Interp do
   # a failed [[Set]]: sloppy code ignores it, strict code (`strict_put`) throws
   defp fail_put, do: :erlang.put(:js_put_failed, true)
 
+  # a primitive has no property to set: in strict code only a setter on its prototype chain works
+  defp strict_put(ov, key, v)
+       when is_binary(ov) or is_number(ov) or is_boolean(ov) or
+              (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
+    case primitive_set(ov, key, v) do
+      :ok ->
+        v
+
+      :fail ->
+        throw_error(
+          "TypeError",
+          "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
+        )
+    end
+  end
+
   defp strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
     put(ov, key, v)
@@ -1089,6 +1224,7 @@ defmodule Browser.JS.Interp do
       Map.has_key?(s.vars, name) -> true
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
       s.parent != nil -> resolvable?(s.parent, name)
+      is_binary(name) -> global_own_property?(s, name)
       true -> false
     end
   end
@@ -1136,7 +1272,10 @@ defmodule Browser.JS.Interp do
         if writable?(p, key), do: :none, else: :readonly
 
       _ ->
-        inherited_set(p.proto, key)
+        if is_binary(key) and Browser.JS.TypedArrays.typed_array?({:obj, pid}) and
+             Browser.JS.TypedArrays.numeric_key?(key),
+           do: {:typed_array, {:obj, pid}},
+           else: inherited_set(p.proto, key)
     end
   end
 
@@ -1180,11 +1319,24 @@ defmodule Browser.JS.Interp do
         store(id, Map.update(o, :gone, [key], &[key | &1]))
         true
 
+      # the `prototype` a function has of its own cannot be deleted
+      o.class == :function and key == "prototype" and not Map.has_key?(o.props, key) and
+          Browser.JS.Props.has_own?({:obj, id}, key) ->
+        false
+
       i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
+        false
+
+      # a frozen or sealed array keeps its elements, and `length` is never configurable
+      i && (Map.get(o, :frozen, false) or Map.get(o, :sealed, false)) && Map.has_key?(o.items, i) ->
+        false
+
+      o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
 
       i ->
         store(id, %{o | items: Map.delete(o.items, i)})
+        if Map.has_key?(o, :mapped), do: unmap_argument(id, i)
         true
 
       true ->
@@ -1247,6 +1399,10 @@ defmodule Browser.JS.Interp do
       Map.has_key?(o.props, key_s) ->
         true
 
+      o.class == :function and key_s in ["name", "length", "prototype"] and
+          Browser.JS.Props.has_own?({:obj, id}, key_s) ->
+        true
+
       match?({:obj, _}, o.proto) ->
         has_property?(o.proto, key_s)
 
@@ -1274,6 +1430,10 @@ defmodule Browser.JS.Interp do
 
       %{class: :host, host: {Browser.JS.TypedArrays, data}} ->
         Browser.JS.TypedArrays.host_keys(data) ++ own_keys_plain(o)
+
+      # what `defineProperty` stored on the global object itself comes after the variables
+      %{class: :host, host: {Browser.JS.Global, data}} ->
+        Browser.JS.Global.host_keys(data) ++ own_keys_plain(o)
 
       %{class: :host, host: {mod, data}} ->
         if function_exported?(mod, :host_keys, 1),
@@ -1304,9 +1464,24 @@ defmodule Browser.JS.Interp do
           do: Integer.to_string(i)
         ) ++ base
 
+      %{prim: str} when is_binary(str) ->
+        {ints, rest} =
+          Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
+
+        for(i <- 0..(String.length(str) - 1)//1, do: Integer.to_string(i)) ++
+          Enum.sort_by(ints, &index/1) ++ rest
+
       _ ->
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
+
+        rest =
+          if o[:class] == :function do
+            std = for k <- ["length", "name", "prototype"], k in rest, do: k
+            std ++ (rest -- std)
+          else
+            rest
+          end
 
         Enum.sort_by(ints, &index/1) ++ rest
     end
@@ -1351,22 +1526,62 @@ defmodule Browser.JS.Interp do
   def iter_source({:obj, id} = v) do
     o = deref(id)
 
-    if o.class in [:array, :map, :set] do
+    if (o.class == :array and array_iteration_pristine?(v)) or o.class in [:map, :set] do
       {:list, iterate(v)}
     else
-      case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
-        f when is_tuple(f) ->
-          unless function?(f), do: throw_error("TypeError", "object is not iterable")
-          it = call(f, v, [])
-          {:proto, it, get(it, "next")}
-
-        _ ->
-          throw_error("TypeError", "object is not iterable")
-      end
+      proto_source(v)
     end
   end
 
-  def iter_source(v), do: {:list, iterate(v)}
+  def iter_source(v) when is_binary(v) or v in [:undefined, :null], do: {:list, iterate(v)}
+
+  # any other primitive is iterated through its wrapper's `Symbol.iterator`
+  def iter_source(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        unless function?(f), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+        it = call(f, v, [])
+        {:proto, it, get(it, "next")}
+
+      _ ->
+        throw_error("TypeError", "#{to_str(v)} is not iterable")
+    end
+  end
+
+  defp proto_source(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        unless function?(f), do: throw_error("TypeError", "object is not iterable")
+        it = call(f, v, [])
+        {:proto, it, get(it, "next")}
+
+      _ ->
+        throw_error("TypeError", "object is not iterable")
+    end
+  end
+
+  @doc false
+  # the source of a `for … of` loop: an array or a collection changed by the body is seen
+  # changing, so an array is read by index as the loop goes and a Map or Set is pulled
+  def for_of_source({:obj, id} = v) do
+    o = deref(id)
+
+    cond do
+      o.class == :array and array_iteration_pristine?(v) ->
+        {:list,
+         Stream.unfold(0, fn i ->
+           if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
+         end)}
+
+      o.class in [:map, :set] ->
+        proto_source(v)
+
+      true ->
+        iter_source(v)
+    end
+  end
+
+  def for_of_source(v), do: iter_source(v)
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`
@@ -1385,8 +1600,15 @@ defmodule Browser.JS.Interp do
   def iter_close(it, after_throw?) do
     try do
       case get(it, "return") do
-        f when is_tuple(f) -> if function?(f), do: call(f, it, [])
-        _ -> :ok
+        m when m in [:undefined, :null] ->
+          :ok
+
+        f ->
+          unless function?(f), do: throw_error("TypeError", "Iterator return is not a function")
+          r = call(f, it, [])
+
+          unless after_throw? or match?({:obj, _}, r),
+            do: throw_error("TypeError", "Iterator return result is not an object")
       end
     catch
       {:js_error, _} when after_throw? -> :ok
@@ -1424,6 +1646,23 @@ defmodule Browser.JS.Interp do
   end
 
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
+  @doc false
+  # is iterating this array the built-in way (nobody replaced `Array.prototype[@@iterator]`,
+  # the array iterator's `next`, or gave the array an iterator of its own)? Then its elements
+  # can be read straight from the list.
+  def array_iteration_pristine?({:obj, id}) do
+    o = deref(id)
+    key = {:symbol, :iterator, "Symbol.iterator"}
+
+    o.class == :array and not Map.has_key?(o.props, key) and o.proto == proto(:array) and
+      Map.get(deref(elem(proto(:array), 1)).props, key) == Process.get(:js_arr_values) and
+      Map.get(deref(elem(proto(:array_iterator), 1)).props, "next") == Process.get(:js_arr_next)
+  end
+
+  @doc false
+  # the iteration protocol itself, with no shortcut for arrays (a patched iterator is seen)
+  def iterate_protocol_list(v), do: iterate_protocol(v)
+
   defp iterate_protocol(v) do
     case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
       f when is_tuple(f) ->
@@ -1437,6 +1676,12 @@ defmodule Browser.JS.Interp do
       _ ->
         throw_error("TypeError", "object is not iterable")
     end
+  end
+
+  @doc "The values of `v` iterated with an iterator method already looked up."
+  def iterate_with(v, f) do
+    it = call(f, v, [])
+    pull(it, get(it, "next"), [])
   end
 
   defp pull(it, next, acc) do
@@ -1469,15 +1714,15 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}, generator: true, async: true} ->
         tick()
-        Browser.JS.Async.call_async_generator({:obj, id}, c, this, args)
+        Browser.JS.Async.call_async_generator({:obj, id}, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}, generator: true} ->
         tick()
-        Browser.JS.Async.call_generator({:obj, id}, c, this, args)
+        Browser.JS.Async.call_generator({:obj, id}, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
-        Browser.JS.Async.call_closure(c, this, args)
+        Browser.JS.Async.call_closure(with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
@@ -1573,7 +1818,10 @@ defmodule Browser.JS.Interp do
               elem(run_closure_scope(c, this, args, [{:new_target, nt}]), 0)
 
             _ ->
-              call(f, this, args)
+              Process.put(:js_native_new, this)
+              r = call(f, this, args)
+              Process.delete(:js_native_new)
+              r
           end
 
         case result do
@@ -1665,12 +1913,57 @@ defmodule Browser.JS.Interp do
     bind_params(c.params, args, scope)
 
     if c.mode != :arrow_expr do
-      hoist_vars(c.body, scope)
-      hoist_functions(c.body, scope)
+      hoist_into_body(scope, c, hoisted_names(c.body), fundecls(c.body))
+    else
+      scope
     end
-
-    scope
   end
+
+  # A parameter list with initialisers closes over a scope of its own: the body's `var`s and
+  # functions live in a second scope that starts from the parameters' values. Without
+  # initialisers one scope serves both.
+  defp hoist_into_body(scope, c, names, funs) do
+    if names == [] and funs == [] do
+      scope
+    else
+      if param_exprs?(c.params) do
+        s = deref(scope)
+
+        vars =
+          Map.new(names, fn n ->
+            case s.vars do
+              %{^n => v} -> {n, v}
+              _ -> {n, :undefined}
+            end
+          end)
+
+        body =
+          alloc(%{
+            scope: true,
+            fnscope: true,
+            fid: Map.get(c, :fid),
+            vars: strict_marks(c, vars),
+            consts: MapSet.new(),
+            parent: scope
+          })
+
+        apply_hoist(body, [], funs)
+        body
+      else
+        apply_hoist(scope, names, funs)
+        scope
+      end
+    end
+  end
+
+  defp param_exprs?(params) do
+    not Enum.all?(params, &match?({:id, _}, &1)) and has_default?(params)
+  end
+
+  defp has_default?({:default, _, _}), do: true
+  defp has_default?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_default?()
+  defp has_default?(l) when is_list(l), do: Enum.any?(l, &has_default?/1)
+  defp has_default?(_), do: false
 
   # Drops a scope from the heap once its code has run, unless a closure was created since
   # `fns` was read (`make_fn` counts them): only a closure can keep a scope alive past its code.
@@ -1689,7 +1982,46 @@ defmodule Browser.JS.Interp do
     before = pget(:js_fns)
     {result, scope} = run_closure_scope(c, this, args, [])
     free_scope(scope, before)
-    result
+
+    case result do
+      {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+      _ -> result
+    end
+  end
+
+  # A strict function's `return f(x)` hands the call back here instead of nesting it, so a
+  # chain of tail calls runs in constant stack depth.
+  defp tail_loop({:obj, id} = f, this, args) do
+    case deref(id) do
+      %{class: :function, fun: {:closure, c}} = o
+      when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+             not is_map_key(o, :class_info) ->
+        tick()
+        c = with_hoist(id, c)
+        before = pget(:js_fns)
+        {result, scope} = run_closure_scope(c, this, args, [])
+        free_scope(scope, before)
+
+        case result do
+          {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+          _ -> result
+        end
+
+      _ ->
+        call(f, this, args)
+    end
+  end
+
+  defp tail_loop(f, this, args), do: call(f, this, args)
+
+  defp no_tail(fun) do
+    old = Process.put(:js_tail, false)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_tail, old)
+    end
   end
 
   @doc false
@@ -1701,6 +2033,7 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_depth, depth + 1)
     stack = Process.get(:js_stack, [])
     :erlang.put(:js_stack, [c.name | stack])
+    old_tail = Process.put(:js_tail, extra == [])
 
     try do
       vars =
@@ -1736,18 +2069,20 @@ defmodule Browser.JS.Interp do
                 _ -> {hoisted_names(c.body), fundecls(c.body)}
               end
 
-            apply_hoist(scope, names, funs)
+            body_scope = hoist_into_body(scope, c, names, funs)
 
             try do
-              exec_list(c.body, scope)
+              exec_list(c.body, body_scope)
               :undefined
             catch
               {:js_return, v} -> v
+              {:js_tail, f, t, a} -> {:js_tailcall, f, t, a}
             end
         end
 
       {result, scope}
     after
+      Process.put(:js_tail, old_tail)
       :erlang.put(:js_depth, depth)
       :erlang.put(:js_stack, stack)
     end
@@ -1813,10 +2148,19 @@ defmodule Browser.JS.Interp do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
         cond do
-          key in ["name", "length"] and key in Map.get(o, :gone, []) -> :undefined
+          # a deleted own `length` or `name` shows what the prototype chain has
+          key in ["name", "length"] and key in Map.get(o, :gone, []) ->
+            case o.proto do
+              {:obj, _} = p -> get(p, key)
+              _ -> :undefined
+            end
+
           # `f.prototype = undefined` is a value, not a missing property
-          key == "prototype" and Map.has_key?(o.props, "prototype") -> :undefined
-          true -> function_prop(id, o, key)
+          key in ["name", "length", "prototype"] and Map.has_key?(o.props, key) ->
+            :undefined
+
+          true ->
+            function_prop(id, o, key)
         end
 
       v ->
@@ -1990,6 +2334,35 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # true when the nearest function scope owns `:args` but not yet an `arguments` binding
+  defp args_shadowed?(scope) when is_integer(scope) or is_reference(scope) or is_tuple(scope) do
+    case deref(scope) do
+      %{vars: %{"arguments" => _}} -> false
+      %{vars: %{args: _}} -> true
+      %{parent: nil} -> false
+      %{parent: parent} -> args_shadowed?(parent)
+      _ -> false
+    end
+  end
+
+  defp args_shadowed?(_), do: false
+
+  defp ev_id({:id, name}, env) do
+    case lookup_var(env, name) do
+      {:ok, :tdz} ->
+        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
+      {:ok, v} ->
+        v
+
+      :error when name == "arguments" ->
+        lazy_arguments(env)
+
+      :error ->
+        named_global(name)
+    end
+  end
+
   # `arguments` is only built when a function body asks for it: an object of its own with
   # the indices, `length`, `callee` (a poison pill in strict code) and the array iterator
   defp lazy_arguments(env) do
@@ -2020,11 +2393,58 @@ defmodule Browser.JS.Interp do
         end
 
         put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
+        map_arguments(aid, owner, scope, args)
         declare(owner, "arguments", a)
         a
 
       :error ->
         throw_error("ReferenceError", "arguments is not defined")
+    end
+  end
+
+  # A sloppy function with plain parameters maps `arguments[i]` to the i-th parameter. The
+  # last of equal names owns the mapping, and only indices below the argument count map.
+  defp map_arguments(aid, owner, scope, args) do
+    with false <- Map.has_key?(scope.vars, :strict),
+         fid when is_integer(fid) <- Map.get(scope, :fid),
+         %{fun: {:closure, %{params: params}}} <- deref(fid),
+         true <- params != [] and Enum.all?(params, &match?({:id, _}, &1)) do
+      count = length(args)
+
+      {mapped, names} =
+        params
+        |> Enum.with_index()
+        |> Enum.reverse()
+        |> Enum.reduce({%{}, %{}}, fn {{:id, name}, idx}, {m, ns} ->
+          cond do
+            Map.has_key?(ns, name) -> {m, ns}
+            idx < count -> {Map.put(m, idx, name), Map.put(ns, name, idx)}
+            true -> {m, Map.put(ns, name, :none)}
+          end
+        end)
+
+      names = Map.reject(names, fn {_, v} -> v == :none end)
+
+      if mapped != %{} do
+        o = deref(aid)
+
+        items =
+          Enum.reduce(mapped, o.items, fn {idx, name}, acc ->
+            case scope.vars do
+              %{^name => v} -> Map.put(acc, idx, v)
+              _ -> acc
+            end
+          end)
+
+        store(
+          aid,
+          o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner)
+        )
+
+        declare(owner, :argmap, {aid, names})
+      end
+    else
+      _ -> :ok
     end
   end
 
@@ -2041,6 +2461,14 @@ defmodule Browser.JS.Interp do
   # declares `var` names (undefined unless already a parameter) and function declarations
   defp apply_hoist(scope, names, funs) do
     if names != [] do
+      s = deref(scope)
+
+      # `var arguments;` keeps the arguments object (it only names the binding again)
+      if "arguments" in names and is_map_key(s.vars, :args) and
+           not is_map_key(s.vars, "arguments") and
+           not Enum.any?(funs, &(elem(&1, 0) == "arguments")),
+         do: lazy_arguments(scope)
+
       s = deref(scope)
       vars = Enum.reduce(names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
       store(scope, %{s | vars: vars})
@@ -2130,8 +2558,23 @@ defmodule Browser.JS.Interp do
       case unexport(stmt) do
         {:fundecl, name, fun} -> declare(scope, name, make_fn(fun, scope, false))
         {:using, _, _, _, rest} -> hoist_functions(rest, scope)
+        {:var, kind, _} = d when kind in [:let, :const] -> declare_tdz(d, scope)
         _ -> :ok
       end
+    end
+
+    :ok
+  end
+
+  # a `let`/`const` name is in its temporal dead zone from the start of its scope
+  defp declare_tdz(decl, scope) do
+    names = lexical_names(decl)
+    for name <- names, do: declare(scope, name, :tdz)
+
+    # remembered so that a direct eval's `var` of the same name can be refused
+    unless names == [] do
+      sc = deref(scope)
+      store(scope, Map.update(sc, :lex, MapSet.new(names), &MapSet.union(&1, MapSet.new(names))))
     end
 
     :ok
@@ -2144,9 +2587,22 @@ defmodule Browser.JS.Interp do
   # ── statements ─────────────────────────────────────────────
 
   @doc "Runs a whole program in the global scope; returns the completion value."
-  def run_program({:program, stmts}) do
+  def run_program({:program, stmts}, script? \\ false) do
     :erlang.put(:js_last, :undefined)
     scope = global()
+
+    if script? do
+      declare_globals(stmts)
+      g = deref(scope)
+
+      vars =
+        if match?([{:expr, {:str, "use strict"}} | _], stmts),
+          do: Map.put(g.vars, :strict, true),
+          else: Map.delete(g.vars, :strict)
+
+      store(scope, %{g | vars: vars})
+    end
+
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
@@ -2154,6 +2610,64 @@ defmodule Browser.JS.Interp do
     # (the process dictionary reports a stored :undefined as missing, hence the default)
     Process.get(:js_last, :undefined)
   end
+
+  # GlobalDeclarationInstantiation: a script's `let`/`const`/class names may not collide with
+  # an earlier script's declarations, nor `var`/function names with its lexical ones. What it
+  # declares with `var` or `function` is a non-configurable property of the global object.
+  defp declare_globals(stmts) do
+    lex = Enum.flat_map(stmts, &lexical_names/1)
+    vars = Enum.uniq(hoisted_names(stmts) ++ Enum.map(fundecls(stmts), &elem(&1, 0)))
+    fixed = Process.get(:js_global_fixed) || MapSet.new()
+    lexset = Process.get(:js_global_lex) || MapSet.new()
+
+    for n <- lex,
+        MapSet.member?(lexset, n) or MapSet.member?(fixed, n) or
+          n in ["NaN", "Infinity", "undefined"],
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    for n <- vars,
+        MapSet.member?(lexset, n),
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    check_global_declarable(hoisted_names(stmts), fundecls(stmts))
+
+    # HasRestrictedGlobalProperty: a lexical name may not hide a non-configurable property
+    g = Map.get(deref(global()).vars, :this)
+
+    for n <- lex,
+        match?({_, _, _, _, false}, Browser.JS.Props.own_state(g, n)),
+        do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+
+    # a `var` of a name that already exists leaves that property as it is; a function
+    # declaration takes over a configurable property of the global object
+    fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
+    {:obj, gid} = g
+
+    props_before = deref(gid).props
+
+    for n <- fun_names, Map.has_key?(props_before, n) and not global_fixed?(n) do
+      o = deref(gid)
+
+      if match?({_, _, _, _, true}, Browser.JS.Props.own_state(g, n)),
+        do: store(gid, %{o | props: Map.delete(o.props, n), keys: List.delete(o.keys, n)})
+    end
+
+    gvars = deref(global()).vars
+
+    fresh =
+      for n <- vars,
+          n in fun_names or not (Map.has_key?(gvars, n) or Map.has_key?(props_before, n)),
+          do: n
+
+    Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
+    Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(fresh)))
+  end
+
+  @doc false
+  def global_fixed?(name), do: MapSet.member?(Process.get(:js_global_fixed) || MapSet.new(), name)
+
+  @doc false
+  def global_lexical?(name), do: MapSet.member?(Process.get(:js_global_lex) || MapSet.new(), name)
 
   @doc false
   # declares what a module body brings into its scope: `var` names, `let`/`const`/class names
@@ -2175,6 +2689,96 @@ defmodule Browser.JS.Interp do
   @doc false
   def module_exec(stmts, scope), do: exec_list(stmts, scope)
 
+  # `import.source(x)`: a source text module has no source to give, so the promise rejects
+  # with a SyntaxError once the specifier and the options have been converted
+  defp import_phase(:source, args, env) do
+    [e | rest] = args
+    arg = ev(e, env)
+    options = if rest == [], do: :undefined, else: ev(hd(rest), env)
+    p = Browser.JS.Promise.new()
+
+    try do
+      to_str(arg)
+      check_import_options(options)
+      Browser.JS.Promise.reject(p, make_error("SyntaxError", "Module has no source"))
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+    end
+
+    p
+  end
+
+  defp import_phase(:defer, [e | rest], env),
+    do: import_call(e, if(rest == [], do: nil, else: hd(rest)), env, true)
+
+  defp import_call(e, opts, env, defer? \\ false) do
+    arg = ev(e, env)
+    options = if opts, do: ev(opts, env), else: :undefined
+    p = Browser.JS.Promise.new()
+
+    # the specifier and the options are converted now; the module is loaded in a later job
+    try do
+      spec = to_str(arg)
+      type = check_import_options(options)
+
+      base =
+        case lookup_var(env, :module_url) do
+          {:ok, b} -> b
+          :error -> nil
+        end
+
+      hook = pget(:js_import)
+
+      Browser.JS.Promise.enqueue(fn ->
+        if hook == nil,
+          do:
+            Browser.JS.Promise.reject(
+              p,
+              make_error("TypeError", "Dynamic import is not available")
+            ),
+          else: hook.(spec, base, p, if(defer?, do: {:defer, type}, else: type))
+      end)
+    catch
+      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
+    end
+
+    p
+  end
+
+  # `import(spec, { with: { key: "string" } })`: the options are an object, `with` an object of
+  # strings (a TypeError, as a rejection, otherwise)
+  defp check_import_options(:undefined), do: nil
+
+  defp check_import_options({:obj, _} = options) do
+    case get(options, "with") do
+      :undefined ->
+        nil
+
+      {:obj, _} = attrs ->
+        pairs =
+          for k <- Browser.JS.Props.enumerable_own_keys(attrs),
+              is_binary(k),
+              do: {k, get(attrs, k)}
+
+        for {_, v} <- pairs do
+          unless is_binary(v),
+            do: throw_error("TypeError", "Import attribute value must be a string")
+        end
+
+        case pairs do
+          [] -> nil
+          [{"type", type}] -> type
+          _ -> throw_error("SyntaxError", "Unsupported import attribute")
+        end
+
+      _ ->
+        throw_error("TypeError", "The 'with' option must be an object")
+    end
+  end
+
+  defp check_import_options(_),
+    do: throw_error("TypeError", "The second argument of import() must be an object")
+
   @doc false
   # the current value of a module's variable (`:tdz` while uninitialized)
   def module_binding(scope, name) do
@@ -2183,6 +2787,52 @@ defmodule Browser.JS.Interp do
       :error -> :undefined
     end
   end
+
+  # The keys `for (k in o)` visits: the enumerable string keys of `o`, then of each object on
+  # its prototype chain, none twice and none that an object nearer in the chain (enumerable
+  # or not) already has.
+  defp for_in_keys({:obj, id} = o) do
+    if Map.has_key?(deref(id), :proxy) do
+      own_keys(o)
+    else
+      own = own_keys(o)
+
+      case inherited_enumerable(Browser.JS.Props.get_prototype_of(o), []) do
+        [] ->
+          own
+
+        _ ->
+          walk_for_in(o, MapSet.new(), [])
+      end
+    end
+  end
+
+  defp for_in_keys(target), do: own_keys(target)
+
+  # protos on the chain that have an enumerable key of their own
+  defp inherited_enumerable({:obj, id} = p, acc) do
+    if Map.has_key?(deref(id), :proxy) do
+      [p | acc]
+    else
+      acc = if own_keys(p) == [], do: acc, else: [p | acc]
+      inherited_enumerable(Browser.JS.Props.get_prototype_of(p), acc)
+    end
+  end
+
+  defp inherited_enumerable(_, acc), do: acc
+
+  defp walk_for_in({:obj, id} = o, seen, acc) do
+    if Map.has_key?(deref(id), :proxy) do
+      new = Enum.reject(own_keys(o), &MapSet.member?(seen, &1))
+      acc |> then(&[new | &1]) |> Enum.reverse() |> List.flatten()
+    else
+      new = Enum.reject(own_keys(o), &MapSet.member?(seen, &1))
+      seen = Enum.reduce(Browser.JS.Props.own_names(o), seen, &MapSet.put(&2, &1))
+      walk_for_in(Browser.JS.Props.get_prototype_of(o), seen, [new | acc])
+    end
+  end
+
+  defp walk_for_in(_, _seen, acc), do: acc |> Enum.reverse() |> List.flatten()
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
 
@@ -2297,9 +2947,21 @@ defmodule Browser.JS.Interp do
   defp exec({:var, kind, decls}, env, _) do
     for {pat, init} <- decls do
       cond do
-        init != nil -> bind(pat, ev_named(init, env, pat), env, kind)
-        kind == :var -> :ok
-        true -> bind(pat, :undefined, env, kind)
+        # `var x = …` inside `with`: the reference is resolved before the initializer runs
+        init != nil and kind == :var and match?({:id, _}, pat) and
+            Process.get(:js_with_used, false) ->
+          {:id, name} = pat
+          {_, write} = id_ref(env, name, pat, false)
+          write.(ev_named(init, env, pat))
+
+        init != nil ->
+          bind(pat, ev_named(init, env, pat), env, kind)
+
+        kind == :var ->
+          :ok
+
+        true ->
+          bind(pat, :undefined, env, kind)
       end
     end
 
@@ -2315,7 +2977,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        exec_list(rest, env)
+        no_tail(fn -> exec_list(rest, env) end)
         :ok
       catch
         t -> {:thrown, t}
@@ -2331,10 +2993,11 @@ defmodule Browser.JS.Interp do
     if o in [:undefined, :null],
       do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
+    Process.put(:js_with_used, true)
     scope = new_scope(env)
     s = deref(scope)
     store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
-    exec(body, scope, [])
+    no_tail(fn -> exec(body, scope, []) end)
   end
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
@@ -2362,7 +3025,13 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
-  defp exec({:return, e}, env, _), do: throw({:js_return, ev(e, env)})
+
+  defp exec({:return, e}, env, _) do
+    if Process.get(:js_tail) == true and lookup_var(env, :strict) == {:ok, true},
+      do: tail_return(e, env),
+      else: throw({:js_return, ev(e, env)})
+  end
+
   defp exec({:throw, e}, env, _), do: throw({:js_error, ev(e, env)})
   defp exec({:break, label}, _, _), do: throw({:js_break, label})
   defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
@@ -2412,38 +3081,8 @@ defmodule Browser.JS.Interp do
     for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
   end
 
-  defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
-    :erlang.put(:js_last, :undefined)
-    target = ev(obj, env)
-
-    mode = if decl == nil, do: :assign, else: decl
-
-    source =
-      case kind do
-        :forin -> {:list, if(nullish?(target), do: [], else: own_keys(target))}
-        :forof -> iter_source(target)
-      end
-
-    case source do
-      {:proto, it, next} ->
-        proto_loop(it, next, {pat, mode, body, env}, labels)
-
-      {:list, items} ->
-        Enum.reduce_while(items, :ok, fn item, _ ->
-          tick()
-          fns = pget(:js_fns)
-          iter_env = new_scope(env)
-          bind(pat, item, iter_env, mode)
-          outcome = run_body(body, iter_env, labels)
-          free_scope(iter_env, fns)
-
-          case outcome do
-            :break -> {:halt, :ok}
-            :next -> {:cont, :ok}
-          end
-        end)
-    end
-  end
+  defp exec({kind, _, _, _, _} = node, env, labels) when kind in [:forin, :forof],
+    do: no_tail(fn -> exec_for_each(node, env, labels) end)
 
   defp exec({:switch, disc, cases}, env, _) do
     :erlang.put(:js_last, :undefined)
@@ -2473,22 +3112,168 @@ defmodule Browser.JS.Interp do
 
     try do
       try do
-        exec(block, env)
+        no_tail(fn -> exec(block, env) end)
       catch
         {:js_error, v} when handler != nil ->
           scope = new_scope(env)
           if param, do: bind(param, v, scope, :let)
-          exec(handler, scope)
+
+          with {:id, pname} <- param,
+               do: declare(scope, :catch_param, pname)
+
+          if finalizer, do: no_tail(fn -> exec(handler, scope) end), else: exec(handler, scope)
       end
     after
       # a finalizer that completes normally leaves the try statement's own value
       if finalizer do
         saved = :erlang.get(:js_last)
+        :erlang.put(:js_last, :undefined)
         exec(finalizer, env)
         :erlang.put(:js_last, saved)
       end
     end
   end
+
+  defp call_target(callee, env) do
+    case callee do
+      {:super_member, key} ->
+        {home, this} = Browser.JS.Classes.super_base(env)
+        {get_with_receiver(home, ev_key(key, env), this), this}
+
+      {:member, o, k, mopt} ->
+        ov = ev(o, env)
+        if mopt and nullish?(ov), do: throw(:js_short)
+        {get(ov, ev_key(k, env)), ov}
+
+      # `(a?.b)()` keeps `a` as `this`; a short-circuited chain is `undefined`
+      {:chain, {:member, o, k, mopt}} ->
+        try do
+          ov = ev(o, env)
+          if mopt and nullish?(ov), do: throw(:js_short)
+          {get(ov, ev_key(k, env)), ov}
+        catch
+          :js_short -> {:undefined, :undefined}
+        end
+
+      {:id, name} when is_binary(name) ->
+        # a function found on a `with` object is called with that object as `this`
+        if Process.get(:js_with_used, false) do
+          case with_binding(env, name) do
+            {:with, obj} ->
+              # GetBindingValue asks again whether the binding is still there
+              {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
+
+            {:var, sc} ->
+              case Map.fetch(deref(sc).vars, name) do
+                {:ok, v} when v != :tdz -> {v, :undefined}
+                _ -> {ev(callee, env), :undefined}
+              end
+
+            _ ->
+              {ev(callee, env), :undefined}
+          end
+        else
+          {ev(callee, env), :undefined}
+        end
+
+      _ ->
+        {ev(callee, env), :undefined}
+    end
+  end
+
+  defp exec_for_each({kind, decl, pat, obj, body}, env, labels) do
+    :erlang.put(:js_last, :undefined)
+
+    # the head's own names are in their temporal dead zone while the object is evaluated
+    target =
+      if decl in [:let, :const] do
+        tdz = new_scope(env)
+        for name <- pattern_names(pat, []), do: declare(tdz, name, :tdz)
+        ev(obj, tdz)
+      else
+        ev(obj, env)
+      end
+
+    mode = if decl == nil, do: :assign, else: decl
+
+    source =
+      case kind do
+        :forin -> {:list, if(nullish?(target), do: [], else: for_in_keys(target))}
+        :forof -> for_of_source(target)
+      end
+
+    case source do
+      {:proto, it, next} ->
+        proto_loop(it, next, {pat, mode, body, env}, labels)
+
+      {:list, items} ->
+        Enum.reduce_while(items, :ok, fn item, _ ->
+          # a key that was deleted before its turn is skipped
+          if kind == :forin and not has_property?(target, item) do
+            {:cont, :ok}
+          else
+            tick()
+            fns = pget(:js_fns)
+            iter_env = new_scope(env)
+            bind(pat, item, iter_env, mode)
+            outcome = run_body(body, iter_env, labels)
+            free_scope(iter_env, fns)
+
+            case outcome do
+              :break -> {:halt, :ok}
+              :next -> {:cont, :ok}
+            end
+          end
+        end)
+    end
+  end
+
+  # `return <call>` in a strict function: evaluate the callee and arguments, then throw them
+  # to the function's frame, which gives them to `tail_loop`
+  defp tail_return({:call, callee, args, false} = e, env) do
+    case callee do
+      {:id, "eval"} ->
+        if ev(callee, env) == :erlang.get(:js_eval_fn), do: throw({:js_return, ev(e, env)})
+
+      {:chain, _} ->
+        throw({:js_return, ev(e, env)})
+
+      {:member, _, _, true} ->
+        throw({:js_return, ev(e, env)})
+
+      _ ->
+        :ok
+    end
+
+    {f, this} = call_target(callee, env)
+    argv = eval_list(args, env)
+    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
+    throw({:js_tail, f, this, argv})
+  end
+
+  defp tail_return({:cond, c, a, b}, env),
+    do: tail_return(if(truthy(ev(c, env)), do: a, else: b), env)
+
+  defp tail_return({:seq, es}, env) do
+    {init, [last]} = Enum.split(es, -1)
+    Enum.each(init, &ev(&1, env))
+    tail_return(last, env)
+  end
+
+  defp tail_return({:logical, op, l, r}, env) do
+    lv = ev(l, env)
+
+    take_right? =
+      case op do
+        "&&" -> truthy(lv)
+        "||" -> not truthy(lv)
+        "??" -> nullish?(lv)
+      end
+
+    if take_right?, do: tail_return(r, env), else: throw({:js_return, lv})
+  end
+
+  defp tail_return(e, env), do: throw({:js_return, ev(e, env)})
 
   defp while_loop(c, body, env, labels) do
     if truthy(ev(c, env)) do
@@ -2558,13 +3343,14 @@ defmodule Browser.JS.Interp do
     used =
       for {key, pat} <- props do
         k = key_of(key, env)
-        bind(pat, get(v, k), env, mode)
+        ref = target_ref(pat, env, mode)
+        bind_to(pat, ref, get(v, k), env, mode)
         k
       end
 
     if rest do
       pairs =
-        for k <- Browser.JS.Props.enumerable_keys(v, used), do: {k, get(v, k)}
+        for k <- Browser.JS.Props.rest_keys(v, used), do: {k, get(v, k)}
 
       bind(rest, new_object(pairs), env, mode)
     end
@@ -2596,11 +3382,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp bind_proto([{:rest, pat}], it, next, env, mode, done?) do
+    ref = guarded_ref(pat, env, mode, it, done?)
     list = if done?, do: [], else: pull(it, next, [])
-    bind(pat, new_array(list), env, mode)
+    bind_to(pat, ref, new_array(list), env, mode)
   end
 
   defp bind_proto([p | ps], it, next, env, mode, done?) do
+    # a property target is evaluated before the iterator is stepped
+    ref = guarded_ref(p, env, mode, it, done?)
+
     {v, done?} =
       if done? do
         {:undefined, true}
@@ -2613,7 +3403,7 @@ defmodule Browser.JS.Interp do
 
     if p != nil do
       try do
-        bind(p, v, env, mode)
+        bind_to(p, ref, v, env, mode)
       catch
         kind, e ->
           unless done?, do: iter_close(it, true)
@@ -2624,8 +3414,40 @@ defmodule Browser.JS.Interp do
     bind_proto(ps, it, next, env, mode, done?)
   end
 
+  # the reference of a property target (`o[k]`, with or without a default), evaluated early;
+  # a throw while evaluating it closes the iterator that is still open
+  defp guarded_ref(pat, env, mode, it, done?) do
+    target_ref(pat, env, mode)
+  catch
+    kind, e ->
+      unless done?, do: iter_close(it, true)
+      :erlang.raise(kind, e, __STACKTRACE__)
+  end
+
+  # the key is converted only when the value is stored (after the source was read)
+  defp target_ref({:member, o, k, _}, env, :assign), do: {ev(o, env), ev_key(k, env), nil}
+
+  defp target_ref({:default, {:member, o, k, _}, e}, env, :assign),
+    do: {ev(o, env), ev_key(k, env), e}
+
+  defp target_ref(_, _, _), do: nil
+
+  defp bind_to(pat, nil, v, env, mode), do: bind(pat, v, env, mode)
+
+  defp bind_to(_pat, {ov, key, dflt}, v, env, _mode) do
+    v = if dflt != nil and v == :undefined, do: ev(dflt, env), else: v
+    put(ov, to_key(key), v)
+  end
+
   defp bind_name(:let, env, name, v), do: declare(env, name, v)
   defp bind_name(:const, env, name, v), do: declare(env, name, v, true)
+  # a destructuring assignment in strict code throws on a name that does not resolve
+  defp bind_name(:assign, env, name, v) do
+    if lookup_var(env, :strict) == {:ok, true},
+      do: strict_assign_var(env, name, v, resolvable?(env, name)),
+      else: assign_var(env, name, v)
+  end
+
   defp bind_name(_, env, name, v), do: assign_var(env, name, v)
 
   defp key_of({:str, s}, _), do: s
@@ -2641,6 +3463,13 @@ defmodule Browser.JS.Interp do
   defp ev_key({:str, s}, _), do: s
   defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
+
+  defp bump(op, old) do
+    case old do
+      {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+      _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+    end
+  end
 
   # ── expressions ────────────────────────────────────────────
 
@@ -2686,37 +3515,9 @@ defmodule Browser.JS.Interp do
   end
 
   # `import(specifier)`: a promise for the module's namespace (the host loads it)
-  def ev({:import_call, e}, env) do
-    arg = ev(e, env)
-    p = Browser.JS.Promise.new()
-
-    # the specifier is converted now; the module is loaded in a later job
-    try do
-      spec = to_str(arg)
-
-      base =
-        case lookup_var(env, :module_url) do
-          {:ok, b} -> b
-          :error -> nil
-        end
-
-      hook = pget(:js_import)
-
-      Browser.JS.Promise.enqueue(fn ->
-        try do
-          if hook == nil,
-            do: throw_error("TypeError", "Dynamic import is not available"),
-            else: Browser.JS.Promise.resolve(p, hook.(spec, base))
-        catch
-          {:js_error, err} -> Browser.JS.Promise.reject(p, err)
-        end
-      end)
-    catch
-      {:js_error, err} -> Browser.JS.Promise.reject(p, err)
-    end
-
-    p
-  end
+  def ev({:import_call, e}, env), do: import_call(e, nil, env)
+  def ev({:import_call, e, opts}, env), do: import_call(e, opts, env)
+  def ev({:import_phase, phase, args}, env), do: import_phase(phase, args, env)
 
   def ev({:import_meta}, env) do
     url =
@@ -2725,7 +3526,18 @@ defmodule Browser.JS.Interp do
         :error -> :undefined
       end
 
-    new_object([{"url", url}])
+    # one object per module
+    metas = Process.get(:js_import_metas) || %{}
+
+    case metas do
+      %{^url => meta} ->
+        meta
+
+      _ ->
+        meta = new_object([{"url", url}])
+        Process.put(:js_import_metas, Map.put(metas, url, meta))
+        meta
+    end
   end
 
   def ev({:class, _, _, _} = c, env), do: Browser.JS.Classes.define(c, env)
@@ -2735,33 +3547,35 @@ defmodule Browser.JS.Interp do
 
   def ev({:super_member, key}, env) do
     {home, this} = Browser.JS.Classes.super_base(env)
+    if home == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
     get_with_receiver(home, ev_key(key, env), this)
   end
 
-  def ev({:id, name}, env) do
-    case lookup_var(env, name) do
-      {:ok, :tdz} ->
-        throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
-
-      {:ok, v} ->
-        v
-
-      :error when name == "arguments" ->
-        lazy_arguments(env)
-
-      :error ->
-        named_global(name)
-    end
+  def ev({:id, "arguments"} = e, env) do
+    # a cached `arguments` of an outer function must not leak into an inner function
+    if args_shadowed?(env), do: lazy_arguments(env), else: ev_id(e, env)
   end
 
+  def ev({:id, _} = e, env), do: ev_id(e, env)
+
   # the strings argument of a tagged template: an array with a `raw` twin
-  def ev({:tagged_strings, cooked, raw}, _env) do
-    strings = new_array(cooked)
-    raw = new_array(raw)
-    Browser.JS.Props.lock(raw, true)
-    put_hidden(strings, "raw", raw)
-    Browser.JS.Props.lock(strings, true)
-    strings
+  # (made once for each place in the source and then reused)
+  def ev({:tagged_strings, cooked, raw, site}, _env) do
+    cache = Process.get(:js_template_sites) || %{}
+
+    case cache do
+      %{^site => strings} ->
+        strings
+
+      _ ->
+        strings = new_array(cooked)
+        raw = new_array(raw)
+        Browser.JS.Props.lock(raw, true)
+        put_hidden(strings, "raw", raw)
+        Browser.JS.Props.lock(strings, true)
+        Process.put(:js_template_sites, Map.put(cache, site, strings))
+        strings
+    end
   end
 
   def ev({:tmpl, parts}, env) do
@@ -2801,6 +3615,7 @@ defmodule Browser.JS.Interp do
       {:init, key, val} ->
         k = key_of(key, env)
         v = ev_named(val, env, if(fname = key_fn_name(k), do: {:id, fname}))
+        if method_node?(val), do: name_fn(v, key_fn_name(k))
         method_home(v, obj)
         define_data(obj, k, v)
 
@@ -2818,14 +3633,14 @@ defmodule Browser.JS.Interp do
         k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        if fname = key_fn_name(k), do: name_fn(f, "get " <> fname)
+        if fname = key_fn_name(k), do: accessor_name(f, "get " <> fname)
         Browser.JS.Props.define_accessor(obj, k, get: f)
 
       {:setter, key, fun} ->
         k = key_of(key, env)
         f = ev(fun, env)
         method_home(f, obj)
-        if fname = key_fn_name(k), do: name_fn(f, "set " <> fname)
+        if fname = key_fn_name(k), do: accessor_name(f, "set " <> fname)
         Browser.JS.Props.define_accessor(obj, k, set: f)
     end)
 
@@ -2862,6 +3677,12 @@ defmodule Browser.JS.Interp do
       {:ok, v} ->
         typeof(v)
 
+      :error when name == "arguments" ->
+        case lookup_var(env, :args) do
+          {:ok, _} -> typeof(ev({:id, "arguments"}, env))
+          :error -> "undefined"
+        end
+
       :error ->
         with {:ok, v} <- Browser.JS.DOM.named_element(name),
              do: typeof(v),
@@ -2876,15 +3697,66 @@ defmodule Browser.JS.Interp do
     delete(ov, key)
   end
 
+  # `delete super.x` is always a ReferenceError (the key is evaluated, never converted)
+  def ev({:unary, d, {:super_member, key}}, env) when d in ["delete", "sdelete"] do
+    Browser.JS.Classes.super_base(env)
+    ev_key(key, env)
+    throw_error("ReferenceError", "Unsupported reference to 'super'")
+  end
+
   # an identifier found on a `with` object is deleted from it
   def ev({:unary, "delete", {:id, name}}, env) do
     case with_binding(env, name) do
-      {:with, obj} -> delete(obj, name)
-      _ -> true
+      {:with, obj} ->
+        delete(obj, name)
+
+      # a declared local binding can not be deleted
+      {:var, sc} ->
+        cond do
+          deref(sc).parent == nil and name in ["NaN", "Infinity", "undefined"] ->
+            false
+
+          # the arguments object of a function is a binding that cannot be deleted
+          name == "arguments" and is_map_key(deref(sc).vars, :args) ->
+            false
+
+          eval_declared?(sc, name) ->
+            st = deref(sc)
+
+            store(sc, %{
+              st
+              | vars: Map.delete(st.vars, name),
+                consts: MapSet.delete(st.consts, name)
+            })
+
+            true
+
+          deref(sc).parent != nil ->
+            false
+
+          global_fixed?(name) or global_lexical?(name) ->
+            false
+
+          true ->
+            case Browser.JS.Global.host_delete(:global, name) do
+              :default -> delete(Map.get(deref(sc).vars, :this), name)
+              r -> r
+            end
+        end
+
+      # the arguments object that is not built yet is still a binding of the function
+      nil when name == "arguments" ->
+        not match?({:ok, _}, lookup_var(env, :args))
+
+      _ ->
+        true
     end
   end
 
-  def ev({:unary, "delete", _}, _), do: true
+  def ev({:unary, "delete", e}, env) do
+    ev(e, env)
+    true
+  end
 
   # in strict code a delete that fails throws
   def ev({:unary, "sdelete", {:member, o, k, _}}, env) do
@@ -2946,23 +3818,62 @@ defmodule Browser.JS.Interp do
 
   def ev({:binary, op, l, r}, env), do: binop(op, ev(l, env), ev(r, env))
 
-  def ev({:update, op, prefix?, target}, env) do
-    old = numeric(ev(target, env))
+  def ev({:update, op, prefix?, {:super_member, k}}, env),
+    do: super_update(op, prefix?, k, env, false)
 
-    new =
-      case old do
-        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
-        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
-      end
+  def ev({:supdate, op, prefix?, {:super_member, k}}, env),
+    do: super_update(op, prefix?, k, env, true)
 
-    assign_to(target, new, env)
+  def ev({:assign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, false)
+  def ev({:sassign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, true)
+
+  # `++a[k]`: the object and the key are evaluated (and the key converted) once
+  def ev({:update, op, prefix?, {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    raw = ev_key(k, env)
+
+    if nullish?(ov),
+      do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
+
+    key = to_key(raw)
+    old = numeric(get(ov, key))
+    new = bump(op, old)
+    put(ov, key, new)
     if prefix?, do: new, else: old
   end
 
+  def ev({:update, op, prefix?, {:id, name} = target}, env) do
+    if Process.get(:js_with_used, false) do
+      {read, write} = id_ref(env, name, target, false)
+      old = numeric(read.())
+      new = bump(op, old)
+      write.(new)
+      if prefix?, do: new, else: old
+    else
+      old = numeric(ev(target, env))
+      new = bump(op, old)
+      assign_to(target, new, env)
+      if prefix?, do: new, else: old
+    end
+  end
+
+  # `f()++`: the operand is evaluated, then it is no reference
+  def ev({:update, _op, _prefix?, target}, env) do
+    ev(target, env)
+    throw_error("ReferenceError", "Invalid left-hand side expression in update operation")
+  end
+
   def ev({:assign, "=", {:id, name}, value}, env) do
-    v = ev_named(value, env, {:id, name})
-    assign_var(env, name, v)
-    v
+    if Process.get(:js_with_used, false) do
+      {_, write} = id_ref(env, name, {:id, name}, false)
+      v = ev_named(value, env, {:id, name})
+      write.(v)
+      v
+    else
+      v = ev_named(value, env, {:id, name})
+      assign_var(env, name, v)
+      v
+    end
   end
 
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do
@@ -2992,20 +3903,24 @@ defmodule Browser.JS.Interp do
 
   def ev({:sassign, op, target, value}, env), do: compound_assign(op, target, value, env, true)
 
-  def ev({:supdate, op, prefix?, target}, env) do
+  def ev({:supdate, op, prefix?, {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    raw = ev_key(k, env)
+
+    if nullish?(ov),
+      do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
+
+    key = to_key(raw)
+    old = numeric(get(ov, key))
+    new = bump(op, old)
+    strict_put(ov, key, new)
+    if prefix?, do: new, else: old
+  end
+
+  def ev({:supdate, op, prefix?, {:id, name} = target}, env) do
     old = numeric(ev(target, env))
-
-    new =
-      case old do
-        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
-        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
-      end
-
-    case target do
-      {:id, name} -> strict_assign_var(env, name, new, resolvable?(env, name))
-      {:member, o, k, _} -> strict_put(ev(o, env), ev_key(k, env), new)
-    end
-
+    new = bump(op, old)
+    strict_assign_var(env, name, new, resolvable?(env, name))
     if prefix?, do: new, else: old
   end
 
@@ -3026,30 +3941,24 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:call, callee, args, opt}, env) do
-    {f, this} =
-      case callee do
-        {:super_member, key} ->
-          {home, this} = Browser.JS.Classes.super_base(env)
-          {get_with_receiver(home, ev_key(key, env), this), this}
-
-        {:member, o, k, mopt} ->
-          ov = ev(o, env)
-          if mopt and nullish?(ov), do: throw(:js_short)
-          {get(ov, ev_key(k, env)), ov}
-
-        _ ->
-          {ev(callee, env), :undefined}
-      end
+    {f, this} = call_target(callee, env)
 
     if opt and nullish?(f), do: throw(:js_short)
+    # the arguments are evaluated before the callee is checked
+    argv = eval_list(args, env)
     unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-    call(f, this, eval_list(args, env))
+    call(f, this, argv)
   end
 
   def ev({:new, callee, args}, env) do
     f = ev(callee, env)
-    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
-    construct(f, eval_list(args, env))
+    # the arguments are evaluated before the callee is checked
+    argv = eval_list(args, env)
+
+    unless function?(f) and constructor?(f),
+      do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+
+    construct(f, argv)
   end
 
   # ── direct eval ────────────────────────────────────────────
@@ -3122,9 +4031,39 @@ defmodule Browser.JS.Interp do
          "arguments" in hoisted_names(stmts),
        do: throw_error("SyntaxError", "Identifier 'arguments' has already been declared")
 
-    vars = Enum.reduce(hoisted_names(stmts), s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
+    var_names = hoisted_names(stmts)
+    fun_decls = fundecls(stmts)
+
+    # in a parameter expression a `var` may not take the name of a parameter
+    if not strict? and Map.has_key?(s.vars, :in_params) do
+      for n <- var_names ++ Enum.map(fun_decls, &elem(&1, 0)),
+          Map.has_key?(s.vars, n),
+          do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+    end
+
+    if not strict?, do: eval_declaration_checks(env, var_scope, var_names, fun_decls)
+
+    fresh =
+      for n <- var_names ++ Enum.map(fun_decls, &elem(&1, 0)), not Map.has_key?(s.vars, n), do: n
+
+    vars = Enum.reduce(var_names, s.vars, fn n, m -> Map.put_new(m, n, :undefined) end)
     store(var_scope, %{s | vars: vars})
-    for {name, fun} <- fundecls(stmts), do: declare(var_scope, name, make_fn(fun, lex, false))
+
+    # what a sloppy eval creates (rather than finds) can be deleted again
+    if not strict? and fresh != [] do
+      st = deref(var_scope)
+
+      store(
+        var_scope,
+        Map.put(
+          st,
+          :evalvars,
+          MapSet.union(Map.get(st, :evalvars, MapSet.new()), MapSet.new(fresh))
+        )
+      )
+    end
+
+    for {name, fun} <- fun_decls, do: declare(var_scope, name, make_fn(fun, lex, false))
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
     :erlang.put(:js_last, :undefined)
@@ -3132,6 +4071,87 @@ defmodule Browser.JS.Interp do
     result = Process.get(:js_last, :undefined)
     free_scope(lex, before)
     result
+  end
+
+  @doc false
+  # an indirect eval is global code: `var`s and functions go to the global scope (sloppy) and
+  # `let`/`const`/class stay in a scope of its own
+  def indirect_eval({:program, stmts}), do: run_eval(stmts, global(), false)
+
+  defp eval_declared?(scope, name),
+    do: MapSet.member?(Map.get(deref(scope), :evalvars, MapSet.new()), name)
+
+  # EvalDeclarationInstantiation: a `var` may not hoist over a lexical binding of a block it
+  # is written in (or a global `let`/`const`/class), and the global object has to be able to
+  # take the declared names
+  defp eval_declaration_checks(env, var_scope, var_names, fun_decls) do
+    names = var_names ++ Enum.map(fun_decls, &elem(&1, 0))
+
+    clash = fn n ->
+      throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+    end
+
+    lower =
+      Stream.iterate(env, &deref(&1).parent)
+      |> Enum.take_while(&(&1 != var_scope and &1 != nil))
+
+    for sc <- lower, n <- names do
+      st = deref(sc)
+
+      if Map.has_key?(st.vars, n) and Map.get(st.vars, :catch_param) != n, do: clash.(n)
+    end
+
+    vs = deref(var_scope)
+    for n <- names, MapSet.member?(Map.get(vs, :lex, MapSet.new()), n), do: clash.(n)
+
+    # a function body's own let/const/class names (not tracked per call)
+    body_lex =
+      with false <- Map.has_key?(vs.vars, :in_params),
+           fid when fid != nil <- Map.get(vs, :fid),
+           %{fun: {:closure, %{body: body}}} when is_list(body) <- deref(fid) do
+        Enum.flat_map(body, fn stmt ->
+          case unexport(stmt) do
+            {:classdecl, name, _} -> [name]
+            other -> lexical_names(other)
+          end
+        end)
+      else
+        _ -> []
+      end
+
+    for n <- names, n in body_lex, do: clash.(n)
+
+    if vs.parent == nil do
+      for n <- names, global_lexical?(n), do: clash.(n)
+      check_global_declarable(var_names, fun_decls)
+    end
+
+    :ok
+  end
+
+  # CanDeclareGlobalFunction / CanDeclareGlobalVar: a declaration must not conflict with a
+  # property of the global object that cannot be redefined, nor add one to a sealed object
+  defp check_global_declarable(var_names, fun_decls) do
+    g = Map.get(deref(global()).vars, :this)
+
+    for {n, _} <- fun_decls do
+      ok =
+        case Browser.JS.Props.own_state(g, n) do
+          nil -> Browser.JS.Props.extensible?(g)
+          {_, _, _, _, true} -> true
+          {:data, _, true, true, _} -> true
+          _ -> false
+        end
+
+      unless ok, do: throw_error("TypeError", "Cannot declare global function '#{n}'")
+    end
+
+    for n <- var_names do
+      if Browser.JS.Props.own_state(g, n) == nil and not Browser.JS.Props.extensible?(g),
+        do: throw_error("TypeError", "Cannot declare global variable '#{n}'")
+    end
+
+    :ok
   end
 
   # the nearest function scope (or the global one) from `env` outwards
@@ -3150,43 +4170,122 @@ defmodule Browser.JS.Interp do
 
   defp method_home(_, _), do: :ok
 
+  defp super_assign(k, value, env, strict?) do
+    {base, this} = Browser.JS.Classes.super_base(env)
+    raw = ev_key(k, env)
+    v = ev(value, env)
+    key = to_key(raw)
+
+    if base == :null,
+      do: throw_error("TypeError", "Cannot set properties of null (setting '#{to_str(key)}')")
+
+    super_put(base, key, v, this, strict?)
+  end
+
+  defp super_update(op, prefix?, k, env, strict?) do
+    {base, this} = Browser.JS.Classes.super_base(env)
+    key = to_key(ev_key(k, env))
+    old = numeric(get_with_receiver(base, key, this))
+
+    new =
+      case old do
+        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+      end
+
+    super_put(base, key, new, this, strict?)
+    if prefix?, do: new, else: old
+  end
+
+  # [[Set]] on the super base with `this` as the receiver: a setter on the chain runs with
+  # `this`; a data property (or none) is written onto the receiver
+  defp super_put(base, key, v, this, strict?) do
+    if strict?, do: :erlang.put(:js_put_failed, false)
+    super_set(base, key, v, this)
+
+    if strict? and :erlang.get(:js_put_failed) == true do
+      :erlang.put(:js_put_failed, false)
+      throw_error("TypeError", "Cannot assign to read only property '#{to_str(key)}'")
+    end
+
+    v
+  end
+
+  defp super_set({:obj, id} = o, key, v, this) do
+    case Browser.JS.Props.own_state(o, key) do
+      nil ->
+        super_set(deref(id).proto, key, v, this)
+
+      {:accessor, _, setter, _, _} ->
+        if function?(setter), do: call(setter, this, [v]), else: fail_put()
+
+      {:data, _, false, _, _} ->
+        fail_put()
+
+      {:data, _, _, _, _} ->
+        put(this, key, v)
+    end
+  end
+
+  defp super_set(_, key, v, this), do: put(this, key, v)
+
+  # the reference of a name, resolved once: a `with` object keeps receiving the write even if
+  # the property is gone by then. Returns the reader and the writer.
+  defp id_ref(env, name, target, strict?) do
+    case with_binding(env, name) do
+      {:with, obj} ->
+        {fn ->
+           # GetBindingValue asks again whether the binding is still there
+           cond do
+             has_property?(obj, name) -> get(obj, name)
+             strict? -> throw_error("ReferenceError", "#{name} is not defined")
+             true -> :undefined
+           end
+         end,
+         fn v ->
+           # SetMutableBinding asks again whether the binding is still there
+           still? = has_property?(obj, name)
+
+           if strict? do
+             unless still?, do: throw_error("ReferenceError", "#{name} is not defined")
+
+             strict_put(obj, name, v)
+           else
+             put(obj, name, v)
+           end
+         end}
+
+      {:var, sid} ->
+        {fn -> ev(target, sid) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(sid, name, v, true),
+             else: assign_var(sid, name, v)
+         end}
+
+      nil ->
+        {fn -> ev(target, env) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(env, name, v, false),
+             else: assign_var(env, name, v)
+         end}
+    end
+  end
+
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
     {read, write} =
       case target do
         {:id, name} ->
-          # the reference is resolved once: a `with` object keeps receiving the write even if
-          # the property is gone by then
-          case with_binding(env, name) do
-            {:with, obj} ->
-              {fn -> get(obj, name) end,
-               fn v ->
-                 if strict? do
-                   unless has_property?(obj, name),
-                     do: throw_error("ReferenceError", "#{name} is not defined")
+          id_ref(env, name, target, strict?)
 
-                   strict_put(obj, name, v)
-                 else
-                   put(obj, name, v)
-                 end
-               end}
+        {:super_member, k} ->
+          {base, this} = Browser.JS.Classes.super_base(env)
+          key = to_key(ev_key(k, env))
 
-            {:var, sid} ->
-              {fn -> ev(target, sid) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(sid, name, v, true),
-                   else: assign_var(sid, name, v)
-               end}
-
-            nil ->
-              {fn -> ev(target, env) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(env, name, v, false),
-                   else: assign_var(env, name, v)
-               end}
-          end
+          {fn -> get_with_receiver(base, key, this) end,
+           fn v -> super_put(base, key, v, this, strict?) end}
 
         {:member, o, k, _} ->
           ov = ev(o, env)
@@ -3211,9 +4310,9 @@ defmodule Browser.JS.Interp do
 
     result =
       case base do
-        "&&" -> if truthy(old), do: {:set, ev(value, env)}, else: :keep
-        "||" -> if truthy(old), do: :keep, else: {:set, ev(value, env)}
-        "??" -> if nullish?(old), do: {:set, ev(value, env)}, else: :keep
+        "&&" -> if truthy(old), do: {:set, ev_named(value, env, target)}, else: :keep
+        "||" -> if truthy(old), do: :keep, else: {:set, ev_named(value, env, target)}
+        "??" -> if nullish?(old), do: {:set, ev_named(value, env, target)}, else: :keep
         _ -> {:set, binop(base, old, ev(value, env))}
       end
 
@@ -3320,7 +4419,9 @@ defmodule Browser.JS.Interp do
   def binop("instanceof", a, b), do: instance_of?(a, b)
   # an anonymous function or class takes the name of the binding or property it is assigned to
   def ev_named({:fn, nil, _, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
-  def ev_named({:class, nil, _, _} = e, env, {:id, name}), do: name_fn(ev(e, env), name)
+
+  def ev_named({:class, nil, _, _} = e, env, {:id, name}),
+    do: Browser.JS.Classes.define(e, env, name)
 
   def ev_named({k, {:fn, nil, _, _, _}} = e, env, {:id, name}) when k in [:gen, :async],
     do: name_fn(ev(e, env), name)
@@ -3335,6 +4436,33 @@ defmodule Browser.JS.Interp do
   defp key_fn_name({:symbol, _, desc}) when is_binary(desc), do: "[" <> desc <> "]"
   defp key_fn_name({:symbol, _, _}), do: ""
   defp key_fn_name(_), do: nil
+
+  @doc false
+  # names a class method or accessor from its key (`kind` is :method, :get or :set)
+  def name_method(fun, key, kind) do
+    case {key_fn_name(key), kind} do
+      {nil, _} -> :ok
+      {name, :get} -> accessor_name(fun, "get " <> name)
+      {name, :set} -> accessor_name(fun, "set " <> name)
+      {name, _} -> name_fn(fun, name)
+    end
+  end
+
+  defp method_node?({:fn, {:method, _}, _, _, _}), do: true
+  defp method_node?({k, inner}) when k in [:gen, :async], do: method_node?(inner)
+  defp method_node?(_), do: false
+
+  defp accessor_name({:obj, id}, name) do
+    case deref(id) do
+      %{fun: {:closure, %{name: {:method, _}} = c}} = o ->
+        store(id, %{o | fun: {:closure, %{c | name: {:method, name}}}})
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp name_fn(f, nil), do: f
 
   defp name_fn({:obj, id} = f, name) do
     case deref(id) do

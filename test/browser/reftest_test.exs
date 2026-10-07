@@ -81,6 +81,25 @@ defmodule Browser.ReftestTest do
     assert {:fail, _} = Reftest.run_test(root, "css/t/e.html")
   end
 
+  test "text in the colour of its background is invisible", %{root: root} do
+    write(
+      root,
+      "h.html",
+      ~s(<link rel=match href=h-ref.html><div style="background:black;color:black;height:30px">hidden</div>)
+    )
+
+    write(root, "h-ref.html", ~s(<div style="background:black;height:30px"></div>))
+    assert Reftest.run_test(root, "css/t/h.html") == :pass
+
+    write(
+      root,
+      "h2.html",
+      ~s(<link rel=mismatch href=h-ref.html><div style="background:black;color:white;height:30px">shown</div>)
+    )
+
+    assert Reftest.run_test(root, "css/t/h2.html") == :pass
+  end
+
   test "Ahem glyphs are em squares wide", %{root: root} do
     css = "<style>body{margin:0}p{margin:0;font:10px/1 Ahem}</style>"
     write(root, "f.html", ~s(<link rel=match href=f-ref.html>#{css}<p>XX XX</p>))
@@ -106,6 +125,12 @@ defmodule Browser.ReftestTest do
     assert Raster.diff(a, a) == nil
     b = Raster.paint([%{type: :rect, x: 1, y: 1, w: 2, h: 1, color: {0, 0, 0}}], 4, 2)
     assert Raster.diff(a, b) == {2, {1, 1}}
+  end
+
+  test "the raster rounds fractional coordinates from layout" do
+    a = Raster.paint([%{type: :rect, x: 1.0, y: 1.0, w: 2.0, h: 1.0, color: {0, 0, 0}}], 4, 2)
+    b = Raster.paint([%{type: :rect, x: 1, y: 1, w: 2, h: 1, color: {0, 0, 0}}], 4, 2)
+    assert Raster.diff(a, b) == nil
   end
 
   # a PNG of the given colour type, 8 bits, from rows of bytes (filter 0)

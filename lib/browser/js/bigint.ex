@@ -122,6 +122,7 @@ defmodule Browser.JS.BigInt do
   end
 
   defp radix_parse("", _), do: :error
+  defp radix_parse(<<sign, _::binary>>, _) when sign in [?+, ?-], do: :error
 
   defp radix_parse(digits, base) do
     case Integer.parse(digits, base) do

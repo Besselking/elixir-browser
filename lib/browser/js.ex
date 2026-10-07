@@ -69,7 +69,7 @@ defmodule Browser.JS do
     Builtins.install()
 
     try do
-      value = Interp.run_program(program)
+      value = Interp.run_program(program, true)
 
       try do
         Builtins.run_timers(&report_uncaught/1)

@@ -58,6 +58,19 @@ defmodule Browser.JS.Runtime do
   def run_scripts(pid), do: call(pid, :run_scripts)
 
   @doc """
+  Hands the editing host that has focus a key or a click: `action` is one of the names
+  `__ed_action` in `priv/js/editing.js` knows (`"key"`, `"text"`, `"place"`, ...), with its
+  arguments. The reply has `:result` (a string, for copy and cut), `:sel` and `:focus_ed`.
+  """
+  def edit(pid, action, args \\ []), do: call(pid, {:edit, action, args})
+
+  @doc "The user put focus in the editing host the layout numbers `nid`."
+  def edit_focus(pid, nid), do: call(pid, {:edit_focus, nid})
+
+  @doc "The user took focus out of the editing host."
+  def edit_blur(pid), do: call(pid, :edit_blur)
+
+  @doc """
   Fires `type` at `target`: `{:control, cid}`, `{:form, fid}`, `:document` or `:window`.
   `controls` holds the live values of the page's controls (`%{cid => %{value:, checked:,
   selected:}}`), which the script reads through `.value` and friends.
@@ -116,10 +129,11 @@ defmodule Browser.JS.Runtime do
     DOM.install(scope)
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
+    Browser.JS.Editing.install(scope)
     Modules.reset()
 
-    Process.put(:js_import, fn spec, from ->
-      Modules.import(spec, from || base_url(), loader())
+    Process.put(:js_import, fn spec, from, p, type ->
+      Modules.import(spec, from || base_url(), loader(), p, type)
     end)
 
     Process.put(:rt_importmap, %{})
@@ -222,7 +236,8 @@ defmodule Browser.JS.Runtime do
 
   defp handle(:run_scripts) do
     run_all_scripts()
-    finish(%{})
+    # editing hosts are drawn from the runtime's tree: its text and line breaks are numbered
+    finish(%{force_raw: DOM.has_editable?()})
   end
 
   defp handle({:dispatch, target, type, init, controls}) do
@@ -236,6 +251,37 @@ defmodule Browser.JS.Runtime do
 
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
+  end
+
+  # the user's keys and clicks in an editing host: the editing prelude does them
+  defp handle({:edit, action, args}) do
+    guard(fn -> Browser.JS.Editing.load() end, :ok)
+
+    res =
+      guard(
+        fn ->
+          case DOM.ed_call(action, args) do
+            v when is_binary(v) -> v
+            _ -> nil
+          end
+        end,
+        nil
+      )
+
+    Browser.JS.Promise.run_microtasks()
+    finish(%{result: res})
+  end
+
+  defp handle({:edit_focus, nid}) do
+    guard(fn -> DOM.ed_focus(nid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
+  defp handle(:edit_blur) do
+    guard(fn -> DOM.ed_blur() end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
   end
 
   defp handle({:traverse, n}) do
@@ -257,6 +303,7 @@ defmodule Browser.JS.Runtime do
 
   defp resolve_target({:control, cid}), do: DOM.control_node(cid)
   defp resolve_target({:form, fid}), do: DOM.form_node(fid)
+  defp resolve_target({:edit_host, nid}), do: DOM.node_numbered(nid)
   defp resolve_target(:document), do: DOM.document()
   defp resolve_target(:window), do: :window
 
@@ -272,6 +319,8 @@ defmodule Browser.JS.Runtime do
         raw: raw,
         url: DOM.url(),
         outbox: DOM.take_outbox(),
+        sel: DOM.ed_sel(),
+        focus_ed: DOM.ed_focus_nid(),
         prevented: false,
         console: take_console()
       },
@@ -370,6 +419,7 @@ defmodule Browser.JS.Runtime do
     Process.delete(:rt_script)
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
+    guard(fn -> DOM.autofocus() end, :ok)
     Browser.JS.Promise.run_microtasks()
   end
 

@@ -73,6 +73,20 @@ defmodule Browser.JS.FunctionProto do
         end
       end)
 
+    # `length` and `name` are own, non-configurable properties of %ThrowTypeError%
+    for {key, value} <- [{"length", 0.0}, {"name", ""}] do
+      Browser.JS.Props.define(
+        f,
+        key,
+        new_object([
+          {"value", value},
+          {"writable", false},
+          {"enumerable", false},
+          {"configurable", false}
+        ])
+      )
+    end
+
     Browser.JS.Props.lock(f, true)
     f
   end
@@ -81,6 +95,7 @@ defmodule Browser.JS.FunctionProto do
     case deref(id) do
       %{fun: {:closure, %{mode: mode, name: name, body: body}}} = o when mode in [false, nil] ->
         not (Map.get(o, :generator, false) or Map.get(o, :async, false) or
+               Map.get(o, :class_ctor, false) or
                match?({:method, _}, name) or match?([{:expr, {:str, "use strict"}} | _], body))
 
       _ ->
