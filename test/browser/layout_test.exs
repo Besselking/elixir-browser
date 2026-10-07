@@ -5126,4 +5126,19 @@ defmodule Browser.LayoutTest do
       assert length(ys) == 2
     end
   end
+
+  describe "margins of a table" do
+    test "collapse with the margins of the blocks around it" do
+      html = """
+      <style>body{margin:0}</style>
+      <p style="margin:0 0 16px;height:20px"></p>
+      <table style="margin:15px 0;border-spacing:0"><tr><td style="padding:0;height:10px;background:blue"></td></tr></table>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 36
+    end
+  end
 end

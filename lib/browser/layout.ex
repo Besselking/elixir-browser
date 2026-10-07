@@ -820,9 +820,10 @@ defmodule Browser.Layout do
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
-          acc = [{:flush} | acc]
+          {mt, mb} = vertical_margins(c)
+          acc = [{:gap, mt}, {:flush} | acc]
           acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
-          [{:flush} | acc]
+          [{:gap, mb}, {:flush} | acc]
 
         kind ->
           # an element that can be linked to (`#id`) needs to know where its box starts, which
@@ -1094,6 +1095,13 @@ defmodule Browser.Layout do
   # An inline-block is laid out on its own (a block inside) and then placed in
   # the line as one unit; its width properties size the unit, so they are
   # removed from the element's own box.
+  # the top and bottom margins of a block-level box that is laid out as an atom: they collapse
+  # with their neighbours outside of it
+  defp vertical_margins(c) do
+    box = box("div", c)
+    {box.mt, box.mb}
+  end
+
   defp inline_block_ops(
          {:element, tag, attrs, kids},
          parent_style,
@@ -1111,6 +1119,9 @@ defmodule Browser.Layout do
       |> resolve_box_pct(containing_width())
       |> Map.drop(~w(width min-width max-width))
       |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
+
+    own =
+      if table?, do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}), else: own
 
     attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
 
