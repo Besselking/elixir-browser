@@ -2954,6 +2954,13 @@ defmodule Browser.JS.Interp do
   defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
 
+  defp bump(op, old) do
+    case old do
+      {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
+      _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
+    end
+  end
+
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
@@ -3315,15 +3322,24 @@ defmodule Browser.JS.Interp do
   def ev({:assign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, false)
   def ev({:sassign, "=", {:super_member, k}, value}, env), do: super_assign(k, value, env, true)
 
+  # `++a[k]`: the object and the key are evaluated (and the key converted) once
+  def ev({:update, op, prefix?, {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    raw = ev_key(k, env)
+
+    if nullish?(ov),
+      do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
+
+    key = to_key(raw)
+    old = numeric(get(ov, key))
+    new = bump(op, old)
+    put(ov, key, new)
+    if prefix?, do: new, else: old
+  end
+
   def ev({:update, op, prefix?, target}, env) do
     old = numeric(ev(target, env))
-
-    new =
-      case old do
-        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
-        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
-      end
-
+    new = bump(op, old)
     assign_to(target, new, env)
     if prefix?, do: new, else: old
   end
@@ -3361,20 +3377,24 @@ defmodule Browser.JS.Interp do
 
   def ev({:sassign, op, target, value}, env), do: compound_assign(op, target, value, env, true)
 
-  def ev({:supdate, op, prefix?, target}, env) do
+  def ev({:supdate, op, prefix?, {:member, o, k, _}}, env) do
+    ov = ev(o, env)
+    raw = ev_key(k, env)
+
+    if nullish?(ov),
+      do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
+
+    key = to_key(raw)
+    old = numeric(get(ov, key))
+    new = bump(op, old)
+    strict_put(ov, key, new)
+    if prefix?, do: new, else: old
+  end
+
+  def ev({:supdate, op, prefix?, {:id, name} = target}, env) do
     old = numeric(ev(target, env))
-
-    new =
-      case old do
-        {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
-        _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
-      end
-
-    case target do
-      {:id, name} -> strict_assign_var(env, name, new, resolvable?(env, name))
-      {:member, o, k, _} -> strict_put(ev(o, env), ev_key(k, env), new)
-    end
-
+    new = bump(op, old)
+    strict_assign_var(env, name, new, resolvable?(env, name))
     if prefix?, do: new, else: old
   end
 

@@ -160,12 +160,18 @@ defmodule Browser.JS.Lexer do
     end
   end
 
-  @regex_keywords ~w(return typeof instanceof in of new delete void throw case do else yield await)
+  @regex_keywords ~w(return typeof instanceof in new delete void throw case do else yield await)
 
   # a `/` starts a regular expression where an operand is expected
   defp regex_allowed?([]), do: true
   defp regex_allowed?([{:p, "}", _} | _] = acc), do: Process.get(:lex_block_close) === acc
   defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]"]
+  # (`of` is only a keyword in a `for (x of /re/...)` head, elsewhere it is a name)
+  defp regex_allowed?([{:id, "of", _} | rest]) do
+    match?([{:id, "for", _} | _], group_head(rest, 1)) or
+      match?([{:id, "await", _}, {:id, "for", _} | _], group_head(rest, 1))
+  end
+
   defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
   defp regex_allowed?(_), do: false
 
@@ -418,6 +424,7 @@ defmodule Browser.JS.Lexer do
   defp escape("\r\n" <> r), do: {"", r}
   defp escape("\r" <> r), do: {"", r}
   defp escape("\n" <> r), do: {"", r}
+  defp escape(<<0xE2, 0x80, c, r::binary>>) when c in [0xA8, 0xA9], do: {"", r}
 
   defp escape(<<"x", h::binary-size(2), r::binary>>) do
     {<<String.to_integer(h, 16)::utf8>>, r}
@@ -452,6 +459,7 @@ defmodule Browser.JS.Lexer do
     ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
+  defp escape("u" <> _), do: throw({:syntax, "bad \\u escape"})
   defp escape(<<c::utf8, r::binary>>), do: {<<c::utf8>>, r}
   defp escape(""), do: throw({:syntax, "unterminated string"})
 

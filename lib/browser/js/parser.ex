@@ -363,6 +363,11 @@ defmodule Browser.JS.Parser do
       [{:id, "let", _}, {:id, n, false} | _] when n not in ["in", "of", "instanceof"] ->
         throw({:syntax, "lexical declaration in statement position"})
 
+      # `let` and a block on the next line: the name `let`, then ASI
+      [{:id, "let", _}, {:p, "{", true} | _] = all ->
+        if strict?(), do: throw({:syntax, "let is reserved in strict mode"})
+        {{:expr, {:id, "let"}}, tl(all)}
+
       [{:id, kw, _} | _] when kw in ["const", "class"] ->
         throw({:syntax, "#{kw} declaration in statement position"})
 
@@ -613,6 +618,7 @@ defmodule Browser.JS.Parser do
             end
 
           {handler, ts} = statement(ts)
+          check_catch(param, handler)
           {param, handler, ts}
 
         ts ->
@@ -885,6 +891,15 @@ defmodule Browser.JS.Parser do
 
   defp declaration(kind, ts) do
     {decls, ts} = declarators(ts, [])
+
+    for {pat, init} <- decls do
+      if init == nil and (kind == "const" or not match?({:id, _}, pat)),
+        do: throw({:syntax, "missing initializer in declaration"})
+
+      if kind in ["let", "const"] and "let" in Interp.pattern_names(pat, []),
+        do: throw({:syntax, "let is disallowed as a lexically bound name"})
+    end
+
     {{:var, String.to_atom(kind), decls}, ts}
   end
 
@@ -967,6 +982,26 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  # early errors of `catch (param) { body }`: a name bound twice, a body that declares a
+  # parameter's name lexically (or with `var` when the parameter is a pattern)
+  defp check_catch(nil, _), do: :ok
+
+  defp check_catch(param, {:block, stmts}) do
+    names = Interp.pattern_names(param, [])
+
+    if length(names) != length(Enum.uniq(names)),
+      do: throw({:syntax, "duplicate catch parameter name"})
+
+    check_scope(stmts, false, names)
+
+    if not match?({:id, _}, param) and Enum.any?(Interp.var_names(stmts, []), &(&1 in names)),
+      do: throw({:syntax, "catch parameter redeclared with var"})
+
+    :ok
+  end
+
+  defp check_catch(_, _), do: :ok
+
   defp for_statement(ts) do
     case ts do
       [{:id, kw, _} | rest] when kw in ["var", "let", "const"] ->
@@ -1016,6 +1051,11 @@ defmodule Browser.JS.Parser do
           end
 
         case after_lhs do
+          # `for (async of => {}; ;)` is an arrow function init, not a for-of
+          [{:id, "of", _}, {:p, "=>", _} | _] when lhs == {:id, "async"} ->
+            {e, t} = expression(ts)
+            for_rest({:expr, e}, t)
+
           [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
             check_for_target(lhs, ts, of_in)
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
@@ -1817,28 +1857,52 @@ defmodule Browser.JS.Parser do
       throw({:syntax, "unary operator used immediately before exponentiation expression"})
     end
 
-    binary_loop(left, rest, min)
+    binary_loop(left, rest, min, ts)
   end
 
-  defp binary_loop(left, [{kind, op, _} | rest] = ts, min) when kind in [:p, :id] do
+  defp binary_loop(left, [{kind, op, _} | rest] = ts, min, start) when kind in [:p, :id] do
     case @binary[op] do
       prec when is_integer(prec) and prec >= min and (kind == :p or op in ["in", "instanceof"]) ->
+        if op in ["&&", "||", "??"] and start != nil, do: check_logical_mix(op, start, ts)
+
         # `**` is right-associative, everything else left
-        {right, rest} = binary(rest, if(op == "**", do: prec, else: prec + 1))
+        {right, rest2} = binary(rest, if(op == "**", do: prec, else: prec + 1))
+        if op in ["&&", "||", "??"], do: check_logical_mix(op, rest, rest2)
+        rest = rest2
 
         node =
           if op in ["&&", "||", "??"],
             do: {:logical, op, left, right},
             else: {:binary, op, left, right}
 
-        binary_loop(node, rest, min)
+        binary_loop(node, rest, min, start)
 
       _ ->
         {left, ts}
     end
   end
 
-  defp binary_loop(left, ts, _), do: {left, ts}
+  defp binary_loop(left, ts, _, _), do: {left, ts}
+
+  # `a ?? b || c` and `a && b ?? c` need parentheses: the operators written at the top level
+  # of an operand (outside brackets) may not mix `??` with `&&` or `||`
+  defp check_logical_mix(op, from, to) do
+    taken = length(from) - length(to)
+
+    ops =
+      from
+      |> Enum.take(taken)
+      |> Enum.reduce({0, []}, fn
+        {:p, p, _}, {d, acc} when p in ["(", "[", "{"] -> {d + 1, acc}
+        {:p, p, _}, {d, acc} when p in [")", "]", "}"] -> {d - 1, acc}
+        {:p, p, _}, {0, acc} when p in ["&&", "||", "??"] -> {0, [p | acc]}
+        _, st -> st
+      end)
+      |> elem(1)
+
+    other = if op == "??", do: ["&&", "||"], else: ["??"]
+    if Enum.any?(ops, &(&1 in other)), do: throw({:syntax, "cannot mix ?? with && or ||"})
+  end
 
   defp private_member?({:member, _, {:priv, _}, _}), do: true
   defp private_member?({:chain, e}), do: private_member?(e)
