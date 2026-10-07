@@ -731,8 +731,10 @@ css/CSS2/box-display/multiple-block-in-inlines-margins-collapse.html
 css/CSS2/box-display/nested-spans-with-block-in-inline-margin.html
 css/CSS2/box-display/three-block-in-inlines-cascading-margins.html
 css/CSS2/box-display/two-block-in-inlines-with-text-between.html
+css/CSS2/css1/c11-import-000.xht
 css/CSS2/css1/c12-grouping-000.xht
 css/CSS2/css1/c13-inheritance-000.xht
+css/CSS2/css1/c14-classes-000.xht
 css/CSS2/css1/c15-ids-000.xht
 css/CSS2/css1/c15-ids-001.xht
 css/CSS2/css1/c16-descendant-000.xht
@@ -838,6 +840,8 @@ css/CSS2/css1/c5526-fltclr-000.xht
 css/CSS2/css1/c562-white-sp-000.xht
 css/CSS2/css1/c61-rel-len-000.xht
 css/CSS2/css1/c62-percent-000.xht
+css/CSS2/css1/c64-uri-000.xht
+css/CSS2/css1/c71-fwd-parsing-000.xht
 css/CSS2/css1/c71-fwd-parsing-001.xht
 css/CSS2/css1/c71-fwd-parsing-004.xht
 css/CSS2/floats-clear/adjacent-floats-001.xht
@@ -983,8 +987,11 @@ css/CSS2/floats/float-in-inline-002.html
 css/CSS2/floats/float-in-inline-anonymous-block-with-overflow-hidden.html
 css/CSS2/floats/float-in-nested-multicol-001.html
 css/CSS2/floats/float-nowrap-1.html
+css/CSS2/floats/float-nowrap-2.html
+css/CSS2/floats/float-nowrap-3.html
 css/CSS2/floats/float-nowrap-4.html
 css/CSS2/floats/float-nowrap-6.html
+css/CSS2/floats/float-nowrap-9.html
 css/CSS2/floats/float-root.html
 css/CSS2/floats/float-table-align-left-quirk.html
 css/CSS2/floats/float-under-flatten-under-preserve-3d.html
@@ -1034,6 +1041,7 @@ css/CSS2/floats/floats-zero-height-wrap-001.xht
 css/CSS2/floats/floats-zero-height-wrap-002.xht
 css/CSS2/floats/negative-block-margin-pushing-float-out-of-block-formatting-context.html
 css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
+css/CSS2/floats/new-fc-beside-float-with-margin.html
 css/CSS2/floats/new-fc-beside-float-with-min-width.html
 css/CSS2/floats/new-fc-relayout.html
 css/CSS2/floats/overhanging-float-paint-order.html
@@ -2078,6 +2086,12 @@ css/CSS2/normal-flow/max-height-082.xht
 css/CSS2/normal-flow/max-height-083.xht
 css/CSS2/normal-flow/max-height-084.xht
 css/CSS2/normal-flow/max-height-089.xht
+css/CSS2/normal-flow/max-height-090.xht
+css/CSS2/normal-flow/max-height-091.xht
+css/CSS2/normal-flow/max-height-092.xht
+css/CSS2/normal-flow/max-height-093.xht
+css/CSS2/normal-flow/max-height-094.xht
+css/CSS2/normal-flow/max-height-095.xht
 css/CSS2/normal-flow/max-height-100.xht
 css/CSS2/normal-flow/max-height-101.xht
 css/CSS2/normal-flow/max-height-102.xht
@@ -2091,6 +2105,7 @@ css/CSS2/normal-flow/max-height-applies-to-012.xht
 css/CSS2/normal-flow/max-height-applies-to-015.xht
 css/CSS2/normal-flow/max-height-applies-to-016.xht
 css/CSS2/normal-flow/max-height-applies-to-018.html
+css/CSS2/normal-flow/max-height-percentage-001.xht
 css/CSS2/normal-flow/max-height-percentage-002.xht
 css/CSS2/normal-flow/max-height-percentage-003.xht
 css/CSS2/normal-flow/max-width-001.xht
@@ -2235,8 +2250,11 @@ css/CSS2/normal-flow/min-height-083.xht
 css/CSS2/normal-flow/min-height-084.xht
 css/CSS2/normal-flow/min-height-089.xht
 css/CSS2/normal-flow/min-height-090.xht
+css/CSS2/normal-flow/min-height-091.xht
 css/CSS2/normal-flow/min-height-092.xht
 css/CSS2/normal-flow/min-height-093.xht
+css/CSS2/normal-flow/min-height-094.xht
+css/CSS2/normal-flow/min-height-095.xht
 css/CSS2/normal-flow/min-height-100.xht
 css/CSS2/normal-flow/min-height-101.xht
 css/CSS2/normal-flow/min-height-102.xht
@@ -2252,7 +2270,9 @@ css/CSS2/normal-flow/min-height-applies-to-008.xht
 css/CSS2/normal-flow/min-height-applies-to-009.xht
 css/CSS2/normal-flow/min-height-applies-to-012.xht
 css/CSS2/normal-flow/min-height-applies-to-015.xht
+css/CSS2/normal-flow/min-height-percentage-001.xht
 css/CSS2/normal-flow/min-height-percentage-002.xht
+css/CSS2/normal-flow/min-height-percentage-003.xht
 css/CSS2/normal-flow/min-width-001.xht
 css/CSS2/normal-flow/min-width-002.xht
 css/CSS2/normal-flow/min-width-003.xht
@@ -3415,7 +3435,6 @@ css/css-flexbox/break-nested-float-in-flex-item-002-print.html
 css/css-flexbox/column-flex-child-with-max-width.html
 css/css-flexbox/css-flexbox-height-animation-stretch.html
 css/css-flexbox/display-flex-001.htm
-css/css-flexbox/fieldset-as-item-overflow.html
 css/css-flexbox/fit-content-item-002.html
 css/css-flexbox/fit-content-item-003.html
 css/css-flexbox/fit-content-item-004.html

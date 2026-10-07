@@ -5356,5 +5356,36 @@ defmodule Browser.LayoutTest do
       html = ~s(<div style="width:32px;hyphens:none">ab&shy;cd&shy;ef</div>)
       assert wrapped_lines(laid_out(html)) == ["abcdef"]
     end
+
+    test "a percentage max-height is a share of the height of the block it sits in" do
+      html =
+        ~s(<div style="height:100px"><div style="background:red;height:300px;max-height:30%"></div></div>)
+
+      assert Enum.any?(rect_heights(laid_out(html)), &(&1 == 30))
+    end
+
+    test "a percentage min-height is a share of the height of the block it sits in" do
+      html =
+        ~s(<div style="height:100px"><div style="background:red;min-height:40%"></div></div>)
+
+      assert Enum.any?(rect_heights(laid_out(html)), &(&1 == 40))
+    end
+
+    test "the right margin of a box with a width does not push it below a float" do
+      html =
+        ~s(<div style="width:100px"><div style="float:left;width:50px;height:10px"></div><div style="overflow:hidden;margin-right:1px;width:50px;height:10px;background:red"></div></div>)
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.y < 10 and &1.x >= 50))
+    end
+
+    test "a float in the middle of a line that does not wrap goes below the line" do
+      html =
+        ~s(<div style="width:80px;white-space:nowrap">some text <span style="float:right;width:40px;height:10px;background:blue"></span> more text</div>)
+
+      items = laid_out(html)
+      ys = for %{type: :text, y: y} <- items, uniq: true, do: y
+      assert length(ys) == 1
+      assert Enum.any?(items, &(&1.type == :rect and &1.y > hd(ys)))
+    end
   end
 end
