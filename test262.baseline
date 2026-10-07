@@ -21852,6 +21852,12 @@ language/expressions/call/spread-sngl-expr.js
 language/expressions/call/spread-sngl-iter.js
 language/expressions/call/spread-sngl-literal.js
 language/expressions/call/spread-sngl-obj-ident.js
+language/expressions/call/tco-call-args.js
+language/expressions/call/tco-member-args.js
+language/expressions/call/tco-non-eval-function-dynamic.js
+language/expressions/call/tco-non-eval-function.js
+language/expressions/call/tco-non-eval-global.js
+language/expressions/call/tco-non-eval-with.js
 language/expressions/call/trailing-comma.js
 language/expressions/call/with-base-obj.js
 language/expressions/class/accessor-name-inst-computed-in.js
@@ -25910,11 +25916,14 @@ language/expressions/coalesce/short-circuit-number-string.js
 language/expressions/coalesce/short-circuit-number-symbol.js
 language/expressions/coalesce/short-circuit-number-true.js
 language/expressions/coalesce/short-circuit-prevents-evaluation.js
+language/expressions/coalesce/tco-pos-null.js
+language/expressions/coalesce/tco-pos-undefined.js
 language/expressions/comma/S11.14_A1.js
 language/expressions/comma/S11.14_A2.1_T1.js
 language/expressions/comma/S11.14_A2.1_T2.js
 language/expressions/comma/S11.14_A2.1_T3.js
 language/expressions/comma/S11.14_A3.js
+language/expressions/comma/tco-final.js
 language/expressions/compound-assignment/11.13.2-1-s.js
 language/expressions/compound-assignment/11.13.2-10-s.js
 language/expressions/compound-assignment/11.13.2-11-s.js
@@ -26393,6 +26402,8 @@ language/expressions/conditional/coalesce-expr-ternary.js
 language/expressions/conditional/in-branch-1.js
 language/expressions/conditional/in-condition.js
 language/expressions/conditional/symbol-conditional-evaluation.js
+language/expressions/conditional/tco-cond.js
+language/expressions/conditional/tco-pos.js
 language/expressions/delete/11.4.1-0-1.js
 language/expressions/delete/11.4.1-2-2.js
 language/expressions/delete/11.4.1-3-1.js
@@ -28159,6 +28170,7 @@ language/expressions/logical-and/S11.11.1_A4_T2.js
 language/expressions/logical-and/S11.11.1_A4_T3.js
 language/expressions/logical-and/S11.11.1_A4_T4.js
 language/expressions/logical-and/symbol-logical-and-evaluation.js
+language/expressions/logical-and/tco-right.js
 language/expressions/logical-assignment/left-hand-side-private-reference-accessor-property-and.js
 language/expressions/logical-assignment/left-hand-side-private-reference-accessor-property-nullish.js
 language/expressions/logical-assignment/left-hand-side-private-reference-accessor-property-or.js
@@ -28273,6 +28285,7 @@ language/expressions/logical-or/S11.11.2_A4_T2.js
 language/expressions/logical-or/S11.11.2_A4_T3.js
 language/expressions/logical-or/S11.11.2_A4_T4.js
 language/expressions/logical-or/symbol-logical-or-evaluation.js
+language/expressions/logical-or/tco-right.js
 language/expressions/member-expression/computed-reference-null-or-undefined.js
 language/expressions/modulus/S11.5.3_A1.js
 language/expressions/modulus/S11.5.3_A2.1_T1.js
@@ -30035,10 +30048,13 @@ language/expressions/tagged-template/constructor-invocation.js
 language/expressions/tagged-template/invalid-escape-sequences.js
 language/expressions/tagged-template/member-expression-argument-list-evaluation.js
 language/expressions/tagged-template/member-expression-context.js
+language/expressions/tagged-template/tco-call.js
+language/expressions/tagged-template/tco-member.js
 language/expressions/tagged-template/template-object-frozen-non-strict.js
 language/expressions/tagged-template/template-object-frozen-strict.js
 language/expressions/tagged-template/template-object-template-map.js
 language/expressions/tagged-template/template-object.js
+language/expressions/tco-pos.js
 language/expressions/template-literal/evaluation-order.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-1.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-2.js
@@ -32624,6 +32640,8 @@ language/statements/block/labeled-continue.js
 language/statements/block/scope-lex-close.js
 language/statements/block/scope-lex-open.js
 language/statements/block/scope-var-none.js
+language/statements/block/tco-stmt-list.js
+language/statements/block/tco-stmt.js
 language/statements/break/12.8-1.js
 language/statements/break/S12.8_A1_T1.js
 language/statements/break/S12.8_A1_T2.js
@@ -37186,6 +37204,7 @@ language/statements/do-while/decl-gen.js
 language/statements/do-while/decl-let.js
 language/statements/do-while/labelled-fn-stmt.js
 language/statements/do-while/let-array-with-newline.js
+language/statements/do-while/tco-body.js
 language/statements/empty/S12.3_A1.js
 language/statements/empty/cptn-value.js
 language/statements/expression/S12.4_A1.js
@@ -39667,6 +39686,10 @@ language/statements/for/scope-body-var-none.js
 language/statements/for/scope-head-lex-close.js
 language/statements/for/scope-head-lex-open.js
 language/statements/for/scope-head-var-none.js
+language/statements/for/tco-const-body.js
+language/statements/for/tco-let-body.js
+language/statements/for/tco-lhs-body.js
+language/statements/for/tco-var-body.js
 language/statements/function/13.0-12-s.js
 language/statements/function/13.0-13-s.js
 language/statements/function/13.0-14-s.js
@@ -40450,6 +40473,8 @@ language/statements/if/labelled-fn-stmt-second.js
 language/statements/if/let-array-with-newline.js
 language/statements/if/let-block-with-newline.js
 language/statements/if/let-identifier-with-newline.js
+language/statements/if/tco-else-body.js
+language/statements/if/tco-if-body.js
 language/statements/labeled/S12.12_A1_T1.js
 language/statements/labeled/continue.js
 language/statements/labeled/cptn-break.js
@@ -40465,6 +40490,7 @@ language/statements/labeled/let-array-with-newline.js
 language/statements/labeled/let-block-with-newline.js
 language/statements/labeled/let-identifier-with-newline.js
 language/statements/labeled/static-init-invalid-await.js
+language/statements/labeled/tco.js
 language/statements/labeled/value-await-module-escaped.js
 language/statements/labeled/value-await-module.js
 language/statements/labeled/value-await-non-module.js
@@ -40629,6 +40655,7 @@ language/statements/return/S12.9_A3.js
 language/statements/return/S12.9_A4.js
 language/statements/return/S12.9_A5.js
 language/statements/return/line-terminators.js
+language/statements/return/tco.js
 language/statements/switch/S12.11_A1_T1.js
 language/statements/switch/S12.11_A1_T2.js
 language/statements/switch/S12.11_A1_T3.js
@@ -40737,6 +40764,9 @@ language/statements/switch/syntax/redeclaration/var-name-redeclaration-attempt-w
 language/statements/switch/syntax/redeclaration/var-name-redeclaration-attempt-with-generator.js
 language/statements/switch/syntax/redeclaration/var-name-redeclaration-attempt-with-let.js
 language/statements/switch/syntax/redeclaration/var-name-redeclaration-attempt-with-var.js
+language/statements/switch/tco-case-body-dflt.js
+language/statements/switch/tco-case-body.js
+language/statements/switch/tco-dftl-body.js
 language/statements/throw/S12.13_A1.js
 language/statements/throw/S12.13_A2_T1.js
 language/statements/throw/S12.13_A2_T2.js
@@ -40949,6 +40979,9 @@ language/statements/try/scope-catch-param-lex-open.js
 language/statements/try/scope-catch-param-var-none.js
 language/statements/try/static-init-await-binding-invalid.js
 language/statements/try/static-init-await-binding-valid.js
+language/statements/try/tco-catch-finally.js
+language/statements/try/tco-catch.js
+language/statements/try/tco-finally.js
 language/statements/using/Symbol.dispose-getter.js
 language/statements/using/Symbol.dispose-method-called-with-correct-this.js
 language/statements/using/block-local-closure-get-before-initialization.js
@@ -41243,6 +41276,7 @@ language/statements/while/labelled-fn-stmt.js
 language/statements/while/let-array-with-newline.js
 language/statements/while/let-block-with-newline.js
 language/statements/while/let-identifier-with-newline.js
+language/statements/while/tco-body.js
 language/statements/with/12.10-0-1.js
 language/statements/with/12.10-0-10.js
 language/statements/with/12.10-0-11.js

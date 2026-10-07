@@ -19,7 +19,7 @@ defmodule Browser.JS.Test262 do
 
   # language features that are not there yet: tests that need them are skipped
   @unsupported_features ~w(
-    tail-call-optimization Temporal ShadowRealm
+    Temporal ShadowRealm
     decorators
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names

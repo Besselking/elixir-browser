@@ -1974,7 +1974,46 @@ defmodule Browser.JS.Interp do
     before = pget(:js_fns)
     {result, scope} = run_closure_scope(c, this, args, [])
     free_scope(scope, before)
-    result
+
+    case result do
+      {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+      _ -> result
+    end
+  end
+
+  # A strict function's `return f(x)` hands the call back here instead of nesting it, so a
+  # chain of tail calls runs in constant stack depth.
+  defp tail_loop({:obj, id} = f, this, args) do
+    case deref(id) do
+      %{class: :function, fun: {:closure, c}} = o
+      when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+             not is_map_key(o, :class_info) ->
+        tick()
+        c = with_hoist(id, c)
+        before = pget(:js_fns)
+        {result, scope} = run_closure_scope(c, this, args, [])
+        free_scope(scope, before)
+
+        case result do
+          {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+          _ -> result
+        end
+
+      _ ->
+        call(f, this, args)
+    end
+  end
+
+  defp tail_loop(f, this, args), do: call(f, this, args)
+
+  defp no_tail(fun) do
+    old = Process.put(:js_tail, false)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_tail, old)
+    end
   end
 
   @doc false
@@ -1986,6 +2025,7 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_depth, depth + 1)
     stack = Process.get(:js_stack, [])
     :erlang.put(:js_stack, [c.name | stack])
+    old_tail = Process.put(:js_tail, extra == [])
 
     try do
       vars =
@@ -2028,11 +2068,13 @@ defmodule Browser.JS.Interp do
               :undefined
             catch
               {:js_return, v} -> v
+              {:js_tail, f, t, a} -> {:js_tailcall, f, t, a}
             end
         end
 
       {result, scope}
     after
+      Process.put(:js_tail, old_tail)
       :erlang.put(:js_depth, depth)
       :erlang.put(:js_stack, stack)
     end
@@ -2905,7 +2947,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        exec_list(rest, env)
+        no_tail(fn -> exec_list(rest, env) end)
         :ok
       catch
         t -> {:thrown, t}
@@ -2925,7 +2967,7 @@ defmodule Browser.JS.Interp do
     scope = new_scope(env)
     s = deref(scope)
     store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
-    exec(body, scope, [])
+    no_tail(fn -> exec(body, scope, []) end)
   end
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
@@ -2953,7 +2995,13 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
-  defp exec({:return, e}, env, _), do: throw({:js_return, ev(e, env)})
+
+  defp exec({:return, e}, env, _) do
+    if Process.get(:js_tail) == true and lookup_var(env, :strict) == {:ok, true},
+      do: tail_return(e, env),
+      else: throw({:js_return, ev(e, env)})
+  end
+
   defp exec({:throw, e}, env, _), do: throw({:js_error, ev(e, env)})
   defp exec({:break, label}, _, _), do: throw({:js_break, label})
   defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
@@ -3003,7 +3051,107 @@ defmodule Browser.JS.Interp do
     for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
   end
 
-  defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
+  defp exec({kind, _, _, _, _} = node, env, labels) when kind in [:forin, :forof],
+    do: no_tail(fn -> exec_for_each(node, env, labels) end)
+
+  defp exec({:switch, disc, cases}, env, _) do
+    :erlang.put(:js_last, :undefined)
+    v = ev(disc, env)
+    scope = new_scope(env)
+    all = Enum.flat_map(cases, fn {_, body} -> body end)
+    hoist_functions(all, scope)
+
+    start =
+      Enum.find_index(cases, fn {test, _} ->
+        test != :default and strict_eq(v, ev(test, scope))
+      end) ||
+        Enum.find_index(cases, fn {test, _} -> test == :default end)
+
+    try do
+      if start,
+        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, scope) end)
+
+      :ok
+    catch
+      {:js_break, nil} -> :ok
+    end
+  end
+
+  defp exec({:try, block, param, handler, finalizer}, env, _) do
+    :erlang.put(:js_last, :undefined)
+
+    try do
+      try do
+        no_tail(fn -> exec(block, env) end)
+      catch
+        {:js_error, v} when handler != nil ->
+          scope = new_scope(env)
+          if param, do: bind(param, v, scope, :let)
+
+          with {:id, pname} <- param,
+               do: declare(scope, :catch_param, pname)
+
+          if finalizer, do: no_tail(fn -> exec(handler, scope) end), else: exec(handler, scope)
+      end
+    after
+      # a finalizer that completes normally leaves the try statement's own value
+      if finalizer do
+        saved = :erlang.get(:js_last)
+        :erlang.put(:js_last, :undefined)
+        exec(finalizer, env)
+        :erlang.put(:js_last, saved)
+      end
+    end
+  end
+
+  defp call_target(callee, env) do
+    case callee do
+      {:super_member, key} ->
+        {home, this} = Browser.JS.Classes.super_base(env)
+        {get_with_receiver(home, ev_key(key, env), this), this}
+
+      {:member, o, k, mopt} ->
+        ov = ev(o, env)
+        if mopt and nullish?(ov), do: throw(:js_short)
+        {get(ov, ev_key(k, env)), ov}
+
+      # `(a?.b)()` keeps `a` as `this`; a short-circuited chain is `undefined`
+      {:chain, {:member, o, k, mopt}} ->
+        try do
+          ov = ev(o, env)
+          if mopt and nullish?(ov), do: throw(:js_short)
+          {get(ov, ev_key(k, env)), ov}
+        catch
+          :js_short -> {:undefined, :undefined}
+        end
+
+      {:id, name} when is_binary(name) ->
+        # a function found on a `with` object is called with that object as `this`
+        if Process.get(:js_with_used, false) do
+          case with_binding(env, name) do
+            {:with, obj} ->
+              # GetBindingValue asks again whether the binding is still there
+              {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
+
+            {:var, sc} ->
+              case Map.fetch(deref(sc).vars, name) do
+                {:ok, v} when v != :tdz -> {v, :undefined}
+                _ -> {ev(callee, env), :undefined}
+              end
+
+            _ ->
+              {ev(callee, env), :undefined}
+          end
+        else
+          {ev(callee, env), :undefined}
+        end
+
+      _ ->
+        {ev(callee, env), :undefined}
+    end
+  end
+
+  defp exec_for_each({kind, decl, pat, obj, body}, env, labels) do
     :erlang.put(:js_last, :undefined)
 
     # the head's own names are in their temporal dead zone while the object is evaluated
@@ -3050,55 +3198,52 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp exec({:switch, disc, cases}, env, _) do
-    :erlang.put(:js_last, :undefined)
-    v = ev(disc, env)
-    scope = new_scope(env)
-    all = Enum.flat_map(cases, fn {_, body} -> body end)
-    hoist_functions(all, scope)
+  # `return <call>` in a strict function: evaluate the callee and arguments, then throw them
+  # to the function's frame, which gives them to `tail_loop`
+  defp tail_return({:call, callee, args, false} = e, env) do
+    case callee do
+      {:id, "eval"} ->
+        if ev(callee, env) == :erlang.get(:js_eval_fn), do: throw({:js_return, ev(e, env)})
 
-    start =
-      Enum.find_index(cases, fn {test, _} ->
-        test != :default and strict_eq(v, ev(test, scope))
-      end) ||
-        Enum.find_index(cases, fn {test, _} -> test == :default end)
+      {:chain, _} ->
+        throw({:js_return, ev(e, env)})
 
-    try do
-      if start,
-        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, scope) end)
+      {:member, _, _, true} ->
+        throw({:js_return, ev(e, env)})
 
-      :ok
-    catch
-      {:js_break, nil} -> :ok
+      _ ->
+        :ok
     end
+
+    {f, this} = call_target(callee, env)
+    argv = eval_list(args, env)
+    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
+    throw({:js_tail, f, this, argv})
   end
 
-  defp exec({:try, block, param, handler, finalizer}, env, _) do
-    :erlang.put(:js_last, :undefined)
+  defp tail_return({:cond, c, a, b}, env),
+    do: tail_return(if(truthy(ev(c, env)), do: a, else: b), env)
 
-    try do
-      try do
-        exec(block, env)
-      catch
-        {:js_error, v} when handler != nil ->
-          scope = new_scope(env)
-          if param, do: bind(param, v, scope, :let)
-
-          with {:id, pname} <- param,
-               do: declare(scope, :catch_param, pname)
-
-          exec(handler, scope)
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
-    end
+  defp tail_return({:seq, es}, env) do
+    {init, [last]} = Enum.split(es, -1)
+    Enum.each(init, &ev(&1, env))
+    tail_return(last, env)
   end
+
+  defp tail_return({:logical, op, l, r}, env) do
+    lv = ev(l, env)
+
+    take_right? =
+      case op do
+        "&&" -> truthy(lv)
+        "||" -> not truthy(lv)
+        "??" -> nullish?(lv)
+      end
+
+    if take_right?, do: tail_return(r, env), else: throw({:js_return, lv})
+  end
+
+  defp tail_return(e, env), do: throw({:js_return, ev(e, env)})
 
   defp while_loop(c, body, env, labels) do
     if truthy(ev(c, env)) do
@@ -3765,51 +3910,7 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:call, callee, args, opt}, env) do
-    {f, this} =
-      case callee do
-        {:super_member, key} ->
-          {home, this} = Browser.JS.Classes.super_base(env)
-          {get_with_receiver(home, ev_key(key, env), this), this}
-
-        {:member, o, k, mopt} ->
-          ov = ev(o, env)
-          if mopt and nullish?(ov), do: throw(:js_short)
-          {get(ov, ev_key(k, env)), ov}
-
-        # `(a?.b)()` keeps `a` as `this`; a short-circuited chain is `undefined`
-        {:chain, {:member, o, k, mopt}} ->
-          try do
-            ov = ev(o, env)
-            if mopt and nullish?(ov), do: throw(:js_short)
-            {get(ov, ev_key(k, env)), ov}
-          catch
-            :js_short -> {:undefined, :undefined}
-          end
-
-        {:id, name} when is_binary(name) ->
-          # a function found on a `with` object is called with that object as `this`
-          if Process.get(:js_with_used, false) do
-            case with_binding(env, name) do
-              {:with, obj} ->
-                # GetBindingValue asks again whether the binding is still there
-                {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
-
-              {:var, sc} ->
-                case Map.fetch(deref(sc).vars, name) do
-                  {:ok, v} when v != :tdz -> {v, :undefined}
-                  _ -> {ev(callee, env), :undefined}
-                end
-
-              _ ->
-                {ev(callee, env), :undefined}
-            end
-          else
-            {ev(callee, env), :undefined}
-          end
-
-        _ ->
-          {ev(callee, env), :undefined}
-      end
+    {f, this} = call_target(callee, env)
 
     if opt and nullish?(f), do: throw(:js_short)
     # the arguments are evaluated before the callee is checked
