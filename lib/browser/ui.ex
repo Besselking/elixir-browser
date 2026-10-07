@@ -170,12 +170,6 @@ defmodule Browser.UI do
     }
   end
 
-  @doc "Whether the system theme is dark (the toolbar's face colour is)."
-  def dark? do
-    colour = :wxSystemSettings.getColour(15)
-    0.299 * elem(colour, 0) + 0.587 * elem(colour, 1) + 0.114 * elem(colour, 2) < 128
-  end
-
   @doc "Scrolls the page sideways to `sx` pixels."
   def set_scroll_x(%{panel: panel}, sx) do
     :ets.insert(@view, {:sx, sx})

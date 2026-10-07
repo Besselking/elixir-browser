@@ -104,7 +104,9 @@ defmodule Mix.Tasks.Browser.Screenshot do
     }
 
     overlay =
-      view |> Scrollbars.bars(scrollers, soff) |> Scrollbars.items(0, nil, Browser.UI.dark?())
+      view
+      |> Scrollbars.bars(scrollers, soff)
+      |> Scrollbars.items(0, nil, Browser.Scrollbars.dark_page?(items))
 
     Browser.UI.snapshot(items, width, height, out, overlay, scroll)
   catch

@@ -2601,7 +2601,9 @@ defmodule Browser.Session do
 
       bars ->
         drag = state.sbar && {state.sbar.id, state.sbar.axis}
-        state.sel_items ++ Scrollbars.items(bars, state.scroll_x, drag, UI.dark?())
+
+        state.sel_items ++
+          Scrollbars.items(bars, state.scroll_x, drag, Scrollbars.dark_page?(state.items))
     end
   end
 

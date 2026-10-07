@@ -128,10 +128,21 @@ defmodule Browser.Scrollbars do
   def grab(%{axis: :y, thumb: {_, ty, _, _}}, _x, y), do: y - ty
   def grab(%{axis: :x, thumb: {tx, _, _, _}}, x, _y), do: x - tx
 
+  @doc "Whether the page (its `items`) has a dark background, which wants light bars."
+  def dark_page?(items) do
+    case items do
+      [%{type: :canvas, color: color} | _] when is_tuple(color) and tuple_size(color) >= 3 ->
+        0.299 * elem(color, 0) + 0.587 * elem(color, 1) + 0.114 * elem(color, 2) < 128
+
+      _ ->
+        false
+    end
+  end
+
   @doc """
   The items that draw `bars` in the overlay, at fixed places of the window (`scroll_x` is
   added because items are drawn at page x). `dragging` is the id and axis of the bar being
-  dragged. `dark?` picks the colours.
+  dragged. `dark?` (see `dark_page?/1`) picks light bars instead of dark ones.
   """
   def items(bars, scroll_x, dragging, dark?) do
     Enum.flat_map(bars, fn bar ->
@@ -163,8 +174,8 @@ defmodule Browser.Scrollbars do
   end
 
   defp track_color(true), do: {255, 255, 255, 28}
-  defp track_color(false), do: {0, 0, 0, 20}
+  defp track_color(false), do: {0, 0, 0, 28}
 
   defp thumb_color(true, held?), do: {255, 255, 255, if(held?, do: 190, else: 130)}
-  defp thumb_color(false, held?), do: {0, 0, 0, if(held?, do: 170, else: 105)}
+  defp thumb_color(false, held?), do: {0, 0, 0, if(held?, do: 190, else: 135)}
 end
