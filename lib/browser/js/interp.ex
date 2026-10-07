@@ -1967,7 +1967,9 @@ defmodule Browser.JS.Interp do
   # functions live in a second scope that starts from the parameters' values. Without
   # initialisers one scope serves both.
   defp hoist_into_body(scope, c, names, funs) do
-    if names == [] and funs == [] do
+    lex = Map.get(c, :lex, [])
+
+    if names == [] and funs == [] and lex == [] do
       scope
     else
       if param_exprs?(c.params) do
@@ -1992,9 +1994,11 @@ defmodule Browser.JS.Interp do
           })
 
         apply_hoist(body, [], funs)
+        for name <- lex, do: declare(body, name, :tdz)
         body
       else
         apply_hoist(scope, names, funs)
+        for name <- lex, do: declare(scope, name, :tdz)
         scope
       end
     end
@@ -2536,7 +2540,8 @@ defmodule Browser.JS.Interp do
   defp with_hoist(_id, %{mode: :arrow_expr} = c), do: c
 
   defp with_hoist(id, c) do
-    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, fid: id})
+    lex = for stmt <- c.body, name <- lexical_names(stmt), do: name
+    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, lex: lex, fid: id})
     o = deref(id)
     store(id, %{o | fun: {:closure, c}})
     c

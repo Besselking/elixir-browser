@@ -320,6 +320,26 @@ defmodule Browser.JSTest do
       assert js("String.fromCharCode(0xD83D, 0xDE00) === '😀'") == true
     end
 
+    test "a string written with an escape is not a use strict directive" do
+      assert js("(function(){ 'use str\\\nict'; return this === undefined })()") == false
+      assert js("(function(){ 'use\\x20strict'; return this === undefined })()") == false
+      assert js("(function(){ 'use strict'; return this === undefined })()") == true
+    end
+
+    test "let and const names are in their dead zone from the start of a function" do
+      assert js("function g(){ x = 1; let x; } try { g(); 'no' } catch (e) { e.name }") ==
+               "ReferenceError"
+    end
+
+    test "an escaped await or yield is a plain name outside async and generator code" do
+      assert js("var r; aw\\u0061it: r = 1; r") == 1.0
+      assert js("var yi\\u0065ld = 4; yield") == 4.0
+    end
+
+    test "parseInt stops at a non-digit even if it upper-cases to letters" do
+      assert js("parseInt('1Z\\u00DF', 36)") == 71.0
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

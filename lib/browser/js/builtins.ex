@@ -1243,7 +1243,7 @@ defmodule Browser.JS.Builtins do
     if radix < 2 or radix > 36 do
       :nan
     else
-      digits = s |> String.upcase() |> String.to_charlist() |> Enum.take_while(&digit?(&1, radix))
+      digits = s |> :binary.bin_to_list() |> Enum.take_while(&digit?(&1, radix))
 
       case digits do
         [] -> :nan
@@ -1257,6 +1257,7 @@ defmodule Browser.JS.Builtins do
       cond do
         c in ?0..?9 -> c - ?0
         c in ?A..?Z -> c - ?A + 10
+        c in ?a..?z -> c - ?a + 10
         true -> 99
       end
 

@@ -74,7 +74,9 @@ defmodule Browser.JS.Lexer do
 
   defp lex(<<q, rest::binary>>, nl, acc) when q in [?", ?'] do
     Process.put(:js_octal, false)
-    {str, rest} = string(rest, q, [])
+    {str, after_str} = string(rest, q, [])
+    escaped? = str == "use strict" and byte_size(rest) - byte_size(after_str) != 11
+    rest = after_str
     # a string with a legacy octal escape carries `:octal` (`:octal_nl` after a line break)
     # where the newline flag goes, so the parser can refuse it in strict code
     mark =
@@ -83,6 +85,9 @@ defmodule Browser.JS.Lexer do
         nl -> :octal_nl
         true -> :octal
       end
+
+    mark =
+      if escaped? and mark in [true, false], do: if(mark, do: :esc_nl, else: :esc), else: mark
 
     lex(rest, false, [{:str, str, mark} | acc])
   end
@@ -151,8 +156,11 @@ defmodule Browser.JS.Lexer do
       if (name in @keywords or name in ~w(target get set of async from as meta)) and
            name not in ~w(implements interface package private protected public) and
            escaped?(s, rest),
-         do: :eid,
+         do: if(name in ~w(let await yield), do: :id, else: :eid),
          else: :id
+
+    if name == "await" and kind == :id and escaped?(s, rest),
+      do: Process.put(:lex_esc_await, true)
 
     lex(rest, false, [{kind, name, nl} | acc])
   end
