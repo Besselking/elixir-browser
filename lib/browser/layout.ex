@@ -1171,7 +1171,7 @@ defmodule Browser.Layout do
       mr: mr,
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
-      table?: table?,
+      table?: table? or c["display"] == "inline-table",
       flex?: c["display"] in ["flex", "inline-flex"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
