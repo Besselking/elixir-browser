@@ -1070,6 +1070,20 @@ defmodule Browser.JS.Async do
   defp await_result(v, ctx, k),
     do: await_value(v, %{ctx | throw: fn e -> k.({:error, e}) end}, fn _ -> k.(:ok) end)
 
+  # binds a pattern; a `yield` or `await` inside it (a default, a key, a target) is evaluated
+  # first, each into a hidden name of the scope the pattern binds in
+  defp cbind(pat, v, mode, env, ctx, k) do
+    if has_await?(pat) do
+      {template, leaves} = lift(pat, [])
+
+      eval_leaves(Enum.reverse(leaves), 0, env, env, ctx, fn ->
+        guarded(fn -> Interp.bind_pattern(template, v, env, mode) end, ctx, k)
+      end)
+    else
+      guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
+    end
+  end
+
   # declarations, one at a time
   defp cdecls([], _kind, _env, _ctx, k), do: k.(:ok)
 
@@ -1079,7 +1093,7 @@ defmodule Browser.JS.Async do
     cond do
       init != nil ->
         cev(init, env, ctx, fn v ->
-          guarded(fn -> Interp.bind_pattern(pat, v, env, kind) end, ctx, next)
+          cbind(pat, v, kind, env, ctx, next)
         end)
 
       kind == :var ->
@@ -1147,7 +1161,7 @@ defmodule Browser.JS.Async do
     Interp.tick()
     iter_env = Interp.new_scope(env)
 
-    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, ctx, fn ->
+    cbind(pat, item, mode, iter_env, ctx, fn ->
       run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
     end)
   end
@@ -1217,7 +1231,7 @@ defmodule Browser.JS.Async do
 
     on_break = fn x -> closing.(fn -> k.(x) end) end
 
-    guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+    cbind(pat, item, mode, iter_env, inner, fn ->
       run_body(body, iter_env, inner, on_break, labels, fn _ ->
         afor(it, next, sync?, spec, ctx, k, labels)
       end)
@@ -1267,7 +1281,7 @@ defmodule Browser.JS.Async do
 
         on_break = fn x -> closing.(fn -> k.(x) end) end
 
-        guarded(fn -> Interp.bind_pattern(pat, item, iter_env, mode) end, inner, fn ->
+        cbind(pat, item, mode, iter_env, inner, fn ->
           run_body(body, iter_env, inner, on_break, labels, fn _ ->
             proto_foreach(it, next, spec, ctx, k, labels)
           end)
