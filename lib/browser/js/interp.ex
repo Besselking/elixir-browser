@@ -1009,7 +1009,9 @@ defmodule Browser.JS.Interp do
                 fail_put()
 
               true ->
-                store(id, %{o | items: Map.put(o.items, i, v), len: max(o.len, i + 1)})
+                # an arguments object's `length` is an ordinary property: it does not grow
+                len = if Map.has_key?(o, :arguments), do: o.len, else: max(o.len, i + 1)
+                store(id, %{o | items: Map.put(o.items, i, v), len: len})
                 if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
             end
 
@@ -1443,6 +1445,13 @@ defmodule Browser.JS.Interp do
           Map.get(Map.get(attrs, i, %{}), :e, true),
           do: Integer.to_string(i)
         ) ++ base
+
+      %{prim: str} when is_binary(str) ->
+        {ints, rest} =
+          Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
+
+        for(i <- 0..(String.length(str) - 1)//1, do: Integer.to_string(i)) ++
+          Enum.sort_by(ints, &index/1) ++ rest
 
       _ ->
         {ints, rest} =
@@ -3043,7 +3052,7 @@ defmodule Browser.JS.Interp do
 
     if rest do
       pairs =
-        for k <- Browser.JS.Props.enumerable_keys(v, used), do: {k, get(v, k)}
+        for k <- Browser.JS.Props.rest_keys(v, used), do: {k, get(v, k)}
 
       bind(rest, new_object(pairs), env, mode)
     end
@@ -3852,6 +3861,23 @@ defmodule Browser.JS.Interp do
 
     vs = deref(var_scope)
     for n <- names, MapSet.member?(Map.get(vs, :lex, MapSet.new()), n), do: clash.(n)
+
+    # a function body's own let/const/class names (not tracked per call)
+    body_lex =
+      with false <- Map.has_key?(vs.vars, :in_params),
+           fid when fid != nil <- Map.get(vs, :fid),
+           %{fun: {:closure, %{body: body}}} when is_list(body) <- deref(fid) do
+        Enum.flat_map(body, fn stmt ->
+          case unexport(stmt) do
+            {:classdecl, name, _} -> [name]
+            other -> lexical_names(other)
+          end
+        end)
+      else
+        _ -> []
+      end
+
+    for n <- names, n in body_lex, do: clash.(n)
 
     if vs.parent == nil do
       for n <- names, global_lexical?(n), do: clash.(n)

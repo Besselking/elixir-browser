@@ -1378,6 +1378,7 @@ defmodule Browser.JS.Parser do
 
         _ ->
           name = shorthand || throw({:syntax, "bad object pattern"})
+          if name in @reserved, do: throw({:syntax, "unexpected reserved word #{name}"})
           check_strict_name(name)
           {pat, ts} = with_default({:id, name}, ts, true)
           {{key, pat}, ts}

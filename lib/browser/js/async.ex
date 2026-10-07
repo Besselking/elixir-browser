@@ -1259,7 +1259,7 @@ defmodule Browser.JS.Async do
       attempt(
         fn ->
           pairs =
-            for key <- Browser.JS.Props.enumerable_keys(v, used), do: {key, Interp.get(v, key)}
+            for key <- Browser.JS.Props.rest_keys(v, used), do: {key, Interp.get(v, key)}
 
           Interp.new_object(pairs)
         end,

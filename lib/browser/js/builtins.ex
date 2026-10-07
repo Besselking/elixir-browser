@@ -296,11 +296,26 @@ defmodule Browser.JS.Builtins do
 
   defp install_object(scope, object_proto) do
     obj =
-      constructor(scope, "Object", object_proto, fn _, args ->
+      constructor(scope, "Object", object_proto, fn this, args ->
+        # `new` on a subclass (new.target is not Object) makes an object of that class
+        constructing = Process.delete(:js_native_new)
+
+        subclass? =
+          constructing == this and match?({:obj, _}, this) and
+            deref(elem(this, 1)).proto not in [nil, object_proto]
+
         case arg(args, 0) do
-          {:obj, _} = o -> o
-          v when v in [:undefined, :null] -> new_object()
-          v -> box(v)
+          _ when subclass? ->
+            this
+
+          {:obj, _} = o ->
+            o
+
+          v when v in [:undefined, :null] ->
+            new_object()
+
+          v ->
+            box(v)
         end
       end)
 
@@ -409,7 +424,8 @@ defmodule Browser.JS.Builtins do
 
   # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
   defp fast_array?(this, extra \\ 0) do
-    plain_array?(this) and
+    # an element on Array.prototype shows through holes and can run setters: take the generic path
+    plain_array?(this) and Map.get(deref(elem(proto(:array), 1)), :items, %{}) == %{} and
       elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
   end
 

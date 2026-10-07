@@ -217,7 +217,8 @@ defmodule Browser.JS.Props do
               do: k
 
         {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ std ++ rest ++ (hidden -- std)
+        {hints, hrest} = Enum.split_with(hidden -- std, &index_key?/1)
+        Enum.sort_by(ints ++ hints, &array_index/1) ++ std ++ rest ++ hrest
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
@@ -227,7 +228,9 @@ defmodule Browser.JS.Props do
 
       _ ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ interleave(rest, ordered, o, hidden)
+        {hints, hidden} = Enum.split_with(hidden, &index_key?/1)
+        ordered = ordered -- hints
+        Enum.sort_by(ints ++ hints, &array_index/1) ++ interleave(rest, ordered, o, hidden)
     end
   end
 
@@ -285,6 +288,15 @@ defmodule Browser.JS.Props do
     do: Enum.reject(Interp.own_keys(s), &(&1 in exclude))
 
   def enumerable_keys(_, _), do: []
+
+  @doc "The keys an object rest element copies: enumerable own strings then symbols, minus `used`."
+  def rest_keys({:obj, id} = o, used) do
+    if Map.has_key?(deref(id), :proxy),
+      do: enumerable_keys(o, used),
+      else: enumerable_keys(o, used) ++ (enumerable_symbols(o) -- used)
+  end
+
+  def rest_keys(v, used), do: enumerable_keys(v, used)
 
   @doc "Every enumerable own key (CopyDataProperties): strings, then symbols; a proxy's in trap order."
   def enumerable_own_keys({:obj, id} = o) do

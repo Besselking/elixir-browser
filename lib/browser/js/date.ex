@@ -20,7 +20,9 @@ defmodule Browser.JS.Date do
 
     ctor =
       native("Date", fn this, args ->
-        if date_target?(this) do
+        constructing = Process.delete(:js_native_new) == this and match?({:obj, _}, this)
+
+        if constructing or date_target?(this) do
           store_time(this, construct_time(args))
         else
           to_string_time(now())
