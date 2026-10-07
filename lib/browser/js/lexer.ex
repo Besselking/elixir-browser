@@ -13,6 +13,9 @@ defmodule Browser.JS.Lexer do
              { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
 
+  # the punctuators that begin with each byte, longest first
+  @puncts_by_byte Enum.group_by(@puncts, &:binary.first/1)
+
   @keywords ~w(break case catch class const continue debugger default delete do else enum export
     extends false finally for function if import in instanceof new null return super switch this
     throw true try typeof var void while with implements interface let package private protected
@@ -24,16 +27,37 @@ defmodule Browser.JS.Lexer do
     src = if match?("#!" <> _, src), do: skip_line(src), else: src
     # which `{` opened a block (so a `/` after its `}` starts a regular expression); a
     # template's `${ }` is tokenized by a nested call, so the state is saved around it
-    saved = {Process.put(:lex_braces, []), Process.put(:lex_block_close, nil)}
+    saved =
+      {Process.put(:lex_braces, []), Process.put(:lex_block_close, nil),
+       Process.put(:lex_offs, [])}
 
     try do
-      {:ok, lex(src, false, [])}
+      tokens = lex(src, false, [])
+      # where each token starts and ends in the source, for `Function.prototype.toString`
+      total = byte_size(src)
+      offs = Enum.reverse([{0, 0} | Process.get(:lex_offs)])
+
+      Process.put(
+        :lex_table,
+        {src, List.to_tuple(for({a, _} <- offs, do: total - a)),
+         List.to_tuple(for({_, b} <- offs, do: total - b))}
+      )
+
+      {:ok, tokens}
     catch
       {:syntax, msg} -> {:error, msg}
     after
       Process.put(:lex_braces, elem(saved, 0))
       Process.put(:lex_block_close, elem(saved, 1))
+      Process.put(:lex_offs, elem(saved, 2))
     end
+  end
+
+  # pushes a token; `start_size` and the size of `rest` are the bytes of source left at its
+  # start and at its end
+  defp push(tok, start_size, rest, acc) do
+    Process.put(:lex_offs, [{start_size, byte_size(rest)} | Process.get(:lex_offs)])
+    lex(rest, false, [tok | acc])
   end
 
   defp lex("", _nl, acc), do: Enum.reverse([{:eof, nil, true} | acc])
@@ -74,6 +98,7 @@ defmodule Browser.JS.Lexer do
 
   defp lex(<<q, rest::binary>>, nl, acc) when q in [?", ?'] do
     Process.put(:js_octal, false)
+    start_size = byte_size(rest) + 1
     {str, after_str} = string(rest, q, [])
     escaped? = str == "use strict" and byte_size(rest) - byte_size(after_str) != 11
     rest = after_str
@@ -89,7 +114,7 @@ defmodule Browser.JS.Lexer do
     mark =
       if escaped? and mark in [true, false], do: if(mark, do: :esc_nl, else: :esc), else: mark
 
-    lex(rest, false, [{:str, str, mark} | acc])
+    push({:str, str, mark}, start_size, rest, acc)
   end
 
   defp lex("`" <> rest, nl, acc) do
@@ -97,7 +122,13 @@ defmodule Browser.JS.Lexer do
     # the raw text of the chunks, which `String.raw` and other tags read
     raw = binary_part(rest, 0, byte_size(rest) - byte_size(after_tmpl) - 1)
     raw = String.replace(raw, ["\r\n", "\r"], "\n")
-    lex(after_tmpl, false, [{:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl} | acc])
+
+    push(
+      {:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl},
+      byte_size(rest) + 1,
+      after_tmpl,
+      acc
+    )
   end
 
   defp lex(<<?\\, ?u, _::binary>> = s, nl, acc), do: lex_ident(s, nl, acc)
@@ -108,8 +139,9 @@ defmodule Browser.JS.Lexer do
 
   defp lex("/" <> rest, nl, acc) do
     if regex_allowed?(acc) do
+      start_size = byte_size(rest) + 1
       {source, flags, rest} = regex(rest, [], false)
-      lex(rest, false, [{:regex, {source, flags}, nl} | acc])
+      push({:regex, {source, flags}, nl}, start_size, rest, acc)
     else
       punct("/" <> rest, nl, acc)
     end
@@ -117,7 +149,7 @@ defmodule Browser.JS.Lexer do
 
   defp lex("{" <> rest, nl, acc) do
     Process.put(:lex_braces, [block_open?(acc) | Process.get(:lex_braces) || []])
-    lex(rest, false, [{:p, "{", nl} | acc])
+    push({:p, "{", nl}, byte_size(rest) + 1, rest, acc)
   end
 
   defp lex("}" <> rest, nl, acc) do
@@ -132,6 +164,7 @@ defmodule Browser.JS.Lexer do
         :ok
     end
 
+    Process.put(:lex_offs, [{byte_size(rest) + 1, byte_size(rest)} | Process.get(:lex_offs)])
     lex(rest, false, acc)
   end
 
@@ -140,7 +173,7 @@ defmodule Browser.JS.Lexer do
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
     {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
     zw_start!(name)
-    lex(rest, false, [{:priv, name, nl} | acc])
+    push({:priv, name, nl}, byte_size(s), rest, acc)
   end
 
   defp lex(s, nl, acc), do: punct(s, nl, acc)
@@ -162,20 +195,27 @@ defmodule Browser.JS.Lexer do
     if name == "await" and kind == :id and escaped?(s, rest),
       do: Process.put(:lex_esc_await, true)
 
-    lex(rest, false, [{kind, name, nl} | acc])
+    push({kind, name, nl}, byte_size(s), rest, acc)
   end
 
   defp punct(s, nl, acc) do
-    case Enum.find(@puncts, &String.starts_with?(s, &1)) do
+    first = if s == "", do: nil, else: :binary.first(s)
+
+    case Enum.find(Map.get(@puncts_by_byte, first, []), &String.starts_with?(s, &1)) do
       # `a?.5:b` is a conditional, not an optional chain
       "?." when binary_part(s, 2, min(1, byte_size(s) - 2)) in ~w(0 1 2 3 4 5 6 7 8 9) ->
-        lex(binary_part(s, 1, byte_size(s) - 1), false, [{:p, "?", nl} | acc])
+        push({:p, "?", nl}, byte_size(s), binary_part(s, 1, byte_size(s) - 1), acc)
 
       nil ->
         throw({:syntax, "unexpected character #{inspect(String.first(s))}"})
 
       p ->
-        lex(binary_part(s, byte_size(p), byte_size(s) - byte_size(p)), false, [{:p, p, nl} | acc])
+        push(
+          {:p, p, nl},
+          byte_size(s),
+          binary_part(s, byte_size(p), byte_size(s) - byte_size(p)),
+          acc
+        )
     end
   end
 
@@ -339,6 +379,7 @@ defmodule Browser.JS.Lexer do
   end
 
   defp number(s, nl, acc) do
+    start_size = byte_size(s)
     s = strip_separators(s)
     legacy? = match?(<<?0, d, _::binary>> when d in ?0..?9, s)
     nl = if legacy?, do: if(nl, do: :octal_nl, else: :octal), else: nl
@@ -380,8 +421,8 @@ defmodule Browser.JS.Lexer do
 
       _ ->
         case value do
-          {:bigint, n} -> lex(rest, false, [{:bigint, n, nl} | acc])
-          _ -> lex(rest, false, [{:num, value, nl} | acc])
+          {:bigint, n} -> push({:bigint, n, nl}, start_size, rest, acc)
+          _ -> push({:num, value, nl}, start_size, rest, acc)
         end
     end
   end
