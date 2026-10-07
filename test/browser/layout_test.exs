@@ -1809,6 +1809,31 @@ defmodule Browser.LayoutTest do
       assert [%{w: 60, h: 40}] = pics(items)
     end
 
+    test "object-fit draws the picture at its own ratio inside the box" do
+      {items, _} =
+        im(
+          ~s(<img src="a.png" style="width:100px; height:100px; object-fit:cover">),
+          loaded(200, 100)
+        )
+
+      assert [%{w: 100, h: 100, fit: {-50.0, +0.0, 200.0, 100.0}}] = pics(items)
+
+      {items, _} =
+        im(
+          ~s(<img src="a.png" style="width:100px; height:100px; object-fit:contain">),
+          loaded(200, 100)
+        )
+
+      assert [%{fit: {+0.0, 25.0, 100.0, 50.0}}] = pics(items)
+    end
+
+    test "aspect-ratio sets the height from the width of a picture" do
+      {items, _} =
+        im(~s(<img src="a.png" style="width:100px; aspect-ratio:1">), loaded(200, 100))
+
+      assert [%{w: 100, h: 100}] = pics(items)
+    end
+
     test "css width and height win over the attributes" do
       {items, _} =
         im(

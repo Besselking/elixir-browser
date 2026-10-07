@@ -1165,8 +1165,12 @@ defmodule Browser.JS.DOM do
         {:ok, nodes_array(Enum.filter(descendants(n.id), &(node(&1).tag == "option")))}
 
       "attributes" ->
-        {:ok,
-         new_array(Enum.map(n.attrs, fn {k, v} -> new_object([{"name", k}, {"value", v}]) end))}
+        attrs = Enum.map(n.attrs, fn {k, v} -> new_object([{"name", k}, {"value", v}]) end)
+        list = new_array(attrs)
+        # the list is a snapshot, but removing an attribute node through it empties it, so that
+        # `while (el.attributes.length) el.removeAttributeNode(el.attributes[0])` ends
+        for a <- attrs, do: put_hidden(a, "__list", list)
+        {:ok, list}
 
       k when k in ~w(offsetWidth offsetHeight offsetTop offsetLeft clientWidth clientHeight
                      clientTop clientLeft scrollWidth scrollHeight scrollTop scrollLeft) ->
@@ -2831,6 +2835,33 @@ defmodule Browser.JS.DOM do
   @doc "The node (element or text) the layout numbers `n`, or nil."
   def node_numbered(n), do: nid_numbered(n)
 
+  @doc """
+  The pointer moved from the element the layout numbers `old` to the one it numbers `new` (nil:
+  none): `mouseout` and `mouseover` (which bubble, and are what frameworks listen to), and
+  `mouseleave` / `mouseenter` for each element the pointer left or came into.
+  """
+  def hover(old, new) do
+    {old_n, new_n} = {old && nid_numbered(old), new && nid_numbered(new)}
+    chain = fn n -> if n, do: [n | ancestors(n)], else: [] end
+    {old_chain, new_chain} = {chain.(old_n), chain.(new_n)}
+    related = fn n -> %{"relatedTarget" => wrap_or_null(n)} end
+    quiet = %{bubbles: false, cancelable: false}
+
+    if old_n, do: dispatch(old_n, "mouseout", related.(new_n))
+
+    for n <- old_chain,
+        n not in new_chain,
+        do: dispatch(n, "mouseleave", Map.merge(quiet, related.(new_n)))
+
+    if new_n, do: dispatch(new_n, "mouseover", related.(old_n))
+
+    for n <- Enum.reverse(new_chain),
+        n not in old_chain,
+        do: dispatch(n, "mouseenter", Map.merge(quiet, related.(old_n)))
+
+    :ok
+  end
+
   # the node (element or text) the layout numbers `n`
   defp nid_numbered(n) do
     Enum.find_value(st().nodes, fn {id, node} ->
@@ -3265,9 +3296,50 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    for name <- ~w(select showModal close) do
+    for name <- ~w(select showModal close pause load) do
       def_fn(p, name, fn _this, _ -> :undefined end)
     end
+
+    # nothing is played, but a script that starts a video gets its promise
+    def_fn(p, "play", fn _this, _ ->
+      promise = Browser.JS.Promise.new()
+      Browser.JS.Promise.fulfill(promise, :undefined)
+      promise
+    end)
+
+    def_fn(p, "canPlayType", fn _this, _ -> "" end)
+
+    # there is no drawing surface for scripts: the standard way to say so
+    def_fn(p, "getContext", fn _this, _ -> :null end)
+    def_fn(p, "toDataURL", fn _this, _ -> "data:," end)
+
+    def_fn(p, "getAttributeNode", fn this, args ->
+      name = String.downcase(to_str(arg(args, 0)))
+
+      case get_attr(node(this_nid(this)), name) do
+        nil -> :null
+        v -> new_object([{"name", name}, {"value", v}, {"nodeName", name}, {"nodeValue", v}])
+      end
+    end)
+
+    def_fn(p, "removeAttributeNode", fn this, args ->
+      attr = arg(args, 0)
+      remove_attr(this_nid(this), to_str(Interp.get(attr, "name")))
+
+      with {:obj, _} = list <- Interp.get(attr, "__list"),
+           {:obj, _} = splice <- Interp.get(list, "splice") do
+        index = Enum.find_index(array_list(list), &(&1 == attr))
+        if index, do: Interp.call(splice, list, [index * 1.0, 1.0])
+      end
+
+      attr
+    end)
+
+    def_fn(p, "setAttributeNode", fn this, args ->
+      a = arg(args, 0)
+      set_attr(this_nid(this), to_str(Interp.get(a, "name")), to_str(Interp.get(a, "value")))
+      :null
+    end)
 
     def_fn(p, "focus", fn this, _ ->
       focus_element(this_nid(this))

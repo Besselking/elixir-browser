@@ -878,7 +878,16 @@ defmodule Browser.UI do
         if clip = Map.get(item, :clip),
           do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
 
-        :wxGraphicsContext.drawBitmap(gc, bitmap, item.x, y, item.w, item.h)
+        # object-fit: the picture is drawn at its own size and cut to the item's box
+        case Map.get(item, :fit) do
+          {dx, dy, w, h} ->
+            :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
+            :wxGraphicsContext.drawBitmap(gc, bitmap, item.x + dx, y + dy, w, h)
+
+          nil ->
+            :wxGraphicsContext.drawBitmap(gc, bitmap, item.x, y, item.w, item.h)
+        end
+
         :wxGraphicsContext.destroy(gc)
 
       [] ->
@@ -1603,27 +1612,9 @@ defmodule Browser.UI do
   def sticky_hit([], _x, _y, _scroll), do: nil
 
   def sticky_hit(items, x, y, scroll) do
-    at =
-      for it <- items,
-          Map.has_key?(it, :w) and Map.has_key?(it, :h),
-          shift = stick_shift(it, scroll),
-          # the point on the page, as laid out: before sticking and before any transformation
-          {px, py} <- [item_space(it, x, y + scroll - shift)],
-          inside?(
-            px,
-            py,
-            it.x,
-            it.y,
-            it.w,
-            it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
-          ),
-          Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
-        {it, py}
-      end
+    at = hits(items, x, y, scroll)
 
     # the topmost (last painted) item decides; controls and links before plain boxes
-    at = Enum.reverse(at)
-
     control =
       Enum.find_value(at, fn {it, py} ->
         if Map.get(it, :cid) != nil, do: {:control, it.cid, py}
@@ -1644,6 +1635,43 @@ defmodule Browser.UI do
       cover -> :cover
       true -> nil
     end
+  end
+
+  # the items painted at window point `{x, y}` (the window scrolled to `scroll`), topmost first,
+  # each with the y the point has in the item's own space
+  defp hits(items, x, y, scroll) do
+    at =
+      for it <- items,
+          Map.has_key?(it, :w) and Map.has_key?(it, :h),
+          shift = stick_shift(it, scroll),
+          # the point on the page, as laid out: before sticking and before any transformation
+          {px, py} <- [item_space(it, x, y + scroll - shift)],
+          inside?(
+            px,
+            py,
+            it.x,
+            it.y,
+            it.w,
+            it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
+          ),
+          Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
+        {it, py}
+      end
+
+    Enum.reverse(at)
+  end
+
+  @doc """
+  The number of the element painted topmost at window point `{x, y}` (the window scrolled to
+  `scroll`), or nil: what a pointer over the page is over, for the page's scripts.
+  """
+  def nid_at(items, x, y, scroll) do
+    items
+    |> hits(x, y, scroll)
+    |> Enum.find_value(fn {it, _} ->
+      if is_integer(Map.get(it, :nid)) and it.type != :box and not Map.get(it, :hidden, false),
+        do: it.nid
+    end)
   end
 
   # where the item is, for the point `{x, y}` on the page as it is drawn

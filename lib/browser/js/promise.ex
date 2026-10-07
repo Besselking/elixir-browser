@@ -110,11 +110,20 @@ defmodule Browser.JS.Promise do
 
     if d.state == :pending do
       update(p, &%{&1 | state: state, value: v, reactions: []})
+      if state == :rejected and d.reactions == [], do: note_unhandled(p, v)
       for r <- Enum.reverse(d.reactions), do: enqueue(fn -> react(r, state, v) end)
     end
 
     :ok
   end
+
+  # A promise rejected with nobody listening is reported (to the console) once the microtasks
+  # have run, unless a handler arrives by then.
+  defp note_unhandled({:obj, id}, v),
+    do: Process.put(:js_unhandled, [{id, v} | Process.get(:js_unhandled, [])])
+
+  defp forget_unhandled({:obj, id}),
+    do: Process.put(:js_unhandled, List.keydelete(Process.get(:js_unhandled, []), id, 0))
 
   @doc "`p.then(on_fulfilled, on_rejected)`: the derived promise."
   def then(p, on_f, on_r), do: then(p, on_f, on_r, new())
@@ -122,6 +131,7 @@ defmodule Browser.JS.Promise do
   defp then(p, on_f, on_r, child) do
     reaction = %{on_f: on_f, on_r: on_r, child: child}
     d = data(p)
+    if d.state == :rejected, do: forget_unhandled(p)
 
     case d.state do
       :pending -> update(p, &%{&1 | reactions: [reaction | &1.reactions]})

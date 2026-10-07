@@ -984,9 +984,22 @@ defmodule Browser.Layout do
       minw: c["min-width"],
       maxw: c["max-width"],
       minh: c["min-height"],
-      maxh: c["max-height"]
+      maxh: c["max-height"],
+      ratio: aspect_ratio(c["aspect-ratio"])
     }
   end
+
+  # `object-position` as an {x, y} pair of px or fractions; nil is the centre
+  defp object_position(nil), do: nil
+
+  defp object_position(v) when is_binary(v) do
+    case Browser.Backgrounds.parse_position(v) do
+      [{x, y} | _] -> {x, y}
+      _ -> nil
+    end
+  end
+
+  defp object_position(_), do: nil
 
   defp declared_size(attrs) do
     w = attr_width(attrs)
@@ -1084,7 +1097,9 @@ defmodule Browser.Layout do
       nid: style.nid,
       # a block-level picture sits on a line of its own: vertical-align does not apply
       valign: if(block?, do: nil, else: c["vertical-align"]),
-      xform: xform_spec(c)
+      xform: xform_spec(c),
+      fit: c["object-fit"],
+      fit_pos: object_position(c["object-position"])
     }
 
     spec = Map.merge(spec, extra)
@@ -2904,7 +2919,16 @@ defmodule Browser.Layout do
             [Map.merge(item, %{type: :svg, ops: ops})]
 
           _ ->
-            [Map.merge(item, %{type: :image, url: spec.url})]
+            item = Map.merge(item, %{type: :image, url: spec.url})
+
+            case Browser.ImageBox.fit(spec.intrinsic, {cw, ch}, spec[:fit], spec[:fit_pos]) do
+              nil ->
+                [item]
+
+              rect ->
+                # drawn at its own size inside the item's box, which clips it
+                [Map.put(item, :fit, rect)]
+            end
         end
       else
         []

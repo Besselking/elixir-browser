@@ -25,7 +25,7 @@ defmodule Browser.Style do
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
-            scroll-margin-top scroll-padding-top
+            scroll-margin-top scroll-padding-top object-fit object-position
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
