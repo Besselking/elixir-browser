@@ -5156,4 +5156,18 @@ defmodule Browser.LayoutTest do
       assert blue.y == 100
     end
   end
+
+  describe "height of a table cell" do
+    test "is the height of its content: borders and padding come on top" do
+      html = """
+      <style>body{margin:0}</style>
+      <table style="border-spacing:0"><tr><td style="border:10px solid orange;height:100px;padding:0;width:50px"></td></tr></table>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      orange = Enum.filter(items, &(&1.type == :rect and &1.color == {255, 165, 0}))
+      assert orange |> Enum.map(&(&1.y + &1.h)) |> Enum.max() == 120
+    end
+  end
 end

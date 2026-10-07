@@ -6149,7 +6149,12 @@ defmodule Browser.Layout do
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),
-      minh: num(c["height"]) || num(c["min-height"]),
+      # the height of a cell is that of its content (box-sizing decides), the row is as high as
+      # the box around it
+      minh:
+        with h when h != nil <- num(c["height"]) || num(c["min-height"]) do
+          if border_box?, do: h, else: h + box.pt + box.pb + bt + bb
+        end,
       valign: valign_of(c["vertical-align"]),
       extra: if(border_box?, do: 0, else: box.pl + box.pr + bl + br),
       pt: box.pt,
