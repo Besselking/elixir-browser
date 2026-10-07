@@ -742,7 +742,40 @@ defmodule Browser.Layout do
       else: kids
   end
 
-  defp walk_element({:element, tag, attrs, kids}, parent_style, acc, force) do
+  # a floated part of a table is a block that holds an anonymous table around it
+  @float_table_parts ~w(table-row-group table-header-group table-footer-group table-row table-cell table-caption)
+
+  defp walk_element({:element, tag, attrs, kids}, parent_style, acc, nil = force)
+       when tag != "@float" do
+    c = computed(attrs)
+
+    if c["float"] in ["left", "right"] and c["display"] in @float_table_parts do
+      anon = fn display, kids ->
+        {:element, "@float", [{"@computed", %{"display" => display}}], kids}
+      end
+
+      # the rows or cells it held are those of a table of their own
+      kids =
+        case c["display"] do
+          "table-row" -> [anon.("table", [anon.("table-row", kids)])]
+          d when d in ["table-cell", "table-caption"] -> kids
+          _ -> [anon.("table", kids)]
+        end
+
+      el = {:element, tag, put_computed(attrs, Map.put(c, "display", "block")), kids}
+
+      walk_element(el, parent_style, acc, force)
+    else
+      walk_element_inner({:element, tag, attrs, kids}, parent_style, acc, force)
+    end
+  end
+
+  defp walk_element(el, parent_style, acc, force),
+    do: walk_element_inner(el, parent_style, acc, force)
+
+  defp put_computed(attrs, c), do: List.keyreplace(attrs, "@computed", 0, {"@computed", c})
+
+  defp walk_element_inner({:element, tag, attrs, kids}, parent_style, acc, force) do
     c = computed(attrs)
     kids = trim_margins(kids, c)
     el = {:element, tag, attrs, kids}
@@ -1468,6 +1501,10 @@ defmodule Browser.Layout do
 
         cond do
           c["position"] in ["absolute", "fixed"] ->
+            {out ++ [el], keep}
+
+          # a floated part of the table floats beside it
+          c["float"] in ["left", "right"] and c["display"] in @float_table_parts ->
             {out ++ [el], keep}
 
           kind_of_table_part(tag, c) in [:group, :row] ->
