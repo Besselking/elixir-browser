@@ -28,12 +28,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break overflow-wrap word-wrap
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break overflow-wrap word-wrap)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap)
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -1304,23 +1304,40 @@ defmodule Browser.Style do
       {prop, {:sh, short, raw, long}}, acc ->
         with {:ok, v} <- substitute(raw, custom, 0),
              {^long, val} <- List.keyfind(split_shorthand(short, v), long, 0) do
-          Map.put(acc, prop, normalize(val))
+          Map.put(acc, prop, normalize(prop, val))
         else
           _ -> acc
         end
 
       {prop, value}, acc ->
         case substitute(value, custom, 0) do
-          {:ok, v} -> Map.put(acc, prop, normalize(v))
+          {:ok, v} -> Map.put(acc, prop, normalize(prop, v))
           :error -> acc
         end
     end)
   end
 
-  # values are case-insensitive keywords, except the paths inside url()
-  defp normalize(v) do
+  # values are case-insensitive keywords, except the paths inside url() and quoted strings
+  # the text of a string is kept in `content`, `quotes` and the counter properties
+  @string_props ~w(content quotes counter-reset counter-increment counter-set list-style-type
+                   list-style)
+
+  defp normalize(prop, v) do
     v = String.trim(v)
-    if String.contains?(v, "url("), do: v, else: String.downcase(v)
+
+    cond do
+      prop in @string_props -> downcase_outside_strings(v)
+      String.contains?(v, "url(") -> v
+      true -> String.downcase(v)
+    end
+  end
+
+  defp downcase_outside_strings(v) do
+    ~r/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/is
+    |> Regex.split(v, include_captures: true)
+    |> Enum.map_join(fn part ->
+      if Regex.match?(~r/\A(?:"|'|url\()/i, part), do: part, else: String.downcase(part)
+    end)
   end
 
   # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone

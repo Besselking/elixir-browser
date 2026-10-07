@@ -5267,4 +5267,34 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1.type == :text and &1.hidden))
     end
   end
+
+  describe "display: flow-root, display: contents and line-break: anywhere" do
+    defp rect_heights(items), do: for(%{type: :rect, h: h} <- items, do: h)
+
+    test "flow-root grows to hold its floats and keeps the margins of its children inside" do
+      items =
+        laid_out(
+          ~s(<div style="display:flow-root;background:red"><div style="float:left;width:10px;height:40px"></div></div>)
+        )
+
+      assert Enum.any?(rect_heights(items), &(&1 == 40))
+    end
+
+    test "float on display: contents is ignored" do
+      items = laid_out(~s(<div style="display:contents;float:right">ab</div>))
+      assert [%{x: x}] = Enum.filter(items, &(&1.type == :text))
+      assert x < 100
+    end
+
+    test "line-break: anywhere breaks between any characters" do
+      items = laid_out(~s(<div style="width:20px;line-break:anywhere">aaaaaaaa</div>))
+      ys = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(ys) > 1
+    end
+
+    test "the text of a content string keeps its case" do
+      items = laid_out(~s(<style>p::before{content:"AbC"}</style><p>x</p>))
+      assert "AbC" in texts(items) or Enum.any?(texts(items), &String.contains?(&1, "AbC"))
+    end
+  end
 end

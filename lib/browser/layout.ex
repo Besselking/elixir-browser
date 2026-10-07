@@ -800,7 +800,7 @@ defmodule Browser.Layout do
       float? = force == nil and c["float"] in ["left", "right"]
 
       case kind do
-        _ when float? ->
+        _ when float? and kind != :contents ->
           float_ops(el, parent_style, c, acc)
 
         :contents ->
@@ -1472,6 +1472,7 @@ defmodule Browser.Layout do
       max: num(c["max-height"]),
       maxpct: pct_of(c["max-height"]),
       clip: clips?(c),
+      bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
       rel:
@@ -1905,7 +1906,8 @@ defmodule Browser.Layout do
         if c["text-align"] == "justify-all", do: %{s | alast: s.align}, else: s
       end
     )
-    |> put_if(c["word-break"] || c["overflow-wrap"] || c["word-wrap"], fn s, _ ->
+    |> put_if(c["word-break"] || c["line-break"] || c["overflow-wrap"] || c["word-wrap"], fn s,
+                                                                                             _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
     |> put_if(c["vertical-align"], &raise_text/2)
@@ -2009,6 +2011,7 @@ defmodule Browser.Layout do
 
   defp wrap_chars(c) do
     cond do
+      c["line-break"] == "anywhere" -> :every
       c["word-break"] == "break-all" -> :all
       c["word-break"] == "break-word" -> :word
       c["overflow-wrap"] == "anywhere" -> :anywhere
@@ -2592,7 +2595,7 @@ defmodule Browser.Layout do
 
     # a box that clips, or that holds nothing but floats, contains them
     flow? = st.y > box.top + bt + box.o.pt
-    st = if box.o.clip or not flow?, do: contain_floats(st, box.fl0), else: st
+    st = if box.o.bfc or not flow?, do: contain_floats(st, box.fl0), else: st
     st = %{st | blocks: List.delete(st.blocks, box.id)}
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
@@ -3025,13 +3028,13 @@ defmodule Browser.Layout do
 
     # (the outermost box of a layout of its own, an absolute or inline-block one, say, is a
     # block formatting context: its children's margins stay inside)
-    if bt == 0 and o.pt == 0 and not o.clip and not o.root and st.floats == [] and
+    if bt == 0 and o.pt == 0 and not o.bfc and not o.root and st.floats == [] and
          not st.flex_item and
          (st.blocks != [] or st.root_view) do
       st = place_box(st, ref, percent_height(st, o))
       if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
     else
-      bfc? = o.clip or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
+      bfc? = o.bfc or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
       # the margin of a first child still collapses with the clearance of the box above it
       clr =
         if bt == 0 and o.pt == 0 and not bfc? and st.y == elem(st.clr || {0, 0, nil}, 2),
@@ -3078,7 +3081,7 @@ defmodule Browser.Layout do
 
     # a box that clips (overflow other than visible) starts a block formatting context: it does
     # not overlap the floats beside it, but narrows to the room they leave, or moves below them
-    {fl, fr} = if o.clip, do: float_offsets(st, st.y, st.y + max(o.h || 1, 1)), else: {0, 0}
+    {fl, fr} = if o.bfc, do: float_offsets(st, st.y, st.y + max(o.h || 1, 1)), else: {0, 0}
     beside = avail - fl - fr
 
     cw = to_content.(o.width) || ratio_width(o, hpad) || max(beside - ml0 - mr0 - hpad, 0)
@@ -3162,8 +3165,8 @@ defmodule Browser.Layout do
       n0: st.n,
       nr0: st.nr,
       # a box that clips has a block formatting context: the floats outside it do not reach in
-      fl0: if(o.clip, do: 0, else: length(st.floats)),
-      outer_floats: if(o.clip, do: st.floats),
+      fl0: if(o.bfc, do: 0, else: length(st.floats)),
+      outer_floats: if(o.bfc, do: st.floats),
       ov0: length(st.overlays),
       seq: :erlang.unique_integer([:monotonic]),
       pcbh: st.cbh,
@@ -3178,7 +3181,7 @@ defmodule Browser.Layout do
         blocks: [id | st.blocks],
         cbh: if(st.flex_item and st.blocks == [], do: nil, else: content_height(o)),
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
-        floats: if(o.clip, do: [], else: st.floats),
+        floats: if(o.bfc, do: [], else: st.floats),
         left: left + bl + o.pl,
         right: st.right + fr + rest + br + o.pr,
         # room beside a box with a width is not part of what it needs
@@ -4058,10 +4061,10 @@ defmodule Browser.Layout do
 
   defp min_words([op | rest], measure, l, r, stack, ext, cur) do
     case op do
-      {:word, _, %{wrap_chars: mode}} when mode in [:all, :anywhere] ->
+      {:word, _, %{wrap_chars: mode}} when mode in [:all, :every, :anywhere] ->
         :layout
 
-      {:word, _, %{wrap_chars: mode}, _} when mode in [:all, :anywhere] ->
+      {:word, _, %{wrap_chars: mode}, _} when mode in [:all, :every, :anywhere] ->
         :layout
 
       {:word, text, style} ->
@@ -4267,6 +4270,7 @@ defmodule Browser.Layout do
     # break-word's opportunities do not count when sizing to the content; anywhere's do
     mode = if mode == :word and Process.get(:layout_intrinsic), do: :none, else: mode
     mode = if mode == :anywhere, do: :word, else: mode
+    mode = if mode == :every, do: :all, else: mode
     right = st.width - st.margin - st.right - st.fr
     space_w = if st.line == [], do: 0, else: space_w
 
