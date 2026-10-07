@@ -5066,4 +5066,50 @@ defmodule Browser.LayoutTest do
       assert Enum.map(rects, &elem(&1, 3)) == [4]
     end
   end
+
+  describe "absolute boxes sized to their content" do
+    defp abs_width(inner) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"border:10px solid blue;position:absolute\">#{inner}</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items |> Enum.find(&(&1.type == :rect)) |> Map.fetch!(:w)
+    end
+
+    test "an inline-block with a border counts once" do
+      assert abs_width(
+               ~s(<div style="border:10px solid orange;display:inline-block;height:20px;width:200px"></div>)
+             ) == 240
+    end
+
+    test "an inline-block wider than its text counts by its width" do
+      assert abs_width(~s(<span style="display:inline-block;width:40px">a</span>)) == 60
+    end
+
+    test "a block with a width and a border counts once" do
+      assert abs_width(~s(<div style="border:10px solid orange;height:20px;width:200px"></div>)) ==
+               240
+    end
+  end
+
+  describe "floated parts of a table" do
+    test "a floated row group is a block around a table of its rows" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="display:table;width:200px">
+        <div style="display:table-row-group;float:right;background:blue">
+          <div style="display:table-row"><div style="display:table-cell;width:30px;height:20px"></div></div>
+        </div>
+      </div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert {blue.x, blue.w, blue.h} == {170, 30, 20}
+    end
+  end
 end

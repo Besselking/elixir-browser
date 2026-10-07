@@ -742,7 +742,40 @@ defmodule Browser.Layout do
       else: kids
   end
 
-  defp walk_element({:element, tag, attrs, kids}, parent_style, acc, force) do
+  # a floated part of a table is a block that holds an anonymous table around it
+  @float_table_parts ~w(table-row-group table-header-group table-footer-group table-row table-cell table-caption)
+
+  defp walk_element({:element, tag, attrs, kids}, parent_style, acc, nil = force)
+       when tag != "@float" do
+    c = computed(attrs)
+
+    if c["float"] in ["left", "right"] and c["display"] in @float_table_parts do
+      anon = fn display, kids ->
+        {:element, "@float", [{"@computed", %{"display" => display}}], kids}
+      end
+
+      # the rows or cells it held are those of a table of their own
+      kids =
+        case c["display"] do
+          "table-row" -> [anon.("table", [anon.("table-row", kids)])]
+          d when d in ["table-cell", "table-caption"] -> kids
+          _ -> [anon.("table", kids)]
+        end
+
+      el = {:element, tag, put_computed(attrs, Map.put(c, "display", "block")), kids}
+
+      walk_element(el, parent_style, acc, force)
+    else
+      walk_element_inner({:element, tag, attrs, kids}, parent_style, acc, force)
+    end
+  end
+
+  defp walk_element(el, parent_style, acc, force),
+    do: walk_element_inner(el, parent_style, acc, force)
+
+  defp put_computed(attrs, c), do: List.keyreplace(attrs, "@computed", 0, {"@computed", c})
+
+  defp walk_element_inner({:element, tag, attrs, kids}, parent_style, acc, force) do
     c = computed(attrs)
     kids = trim_margins(kids, c)
     el = {:element, tag, attrs, kids}
@@ -1468,6 +1501,10 @@ defmodule Browser.Layout do
 
         cond do
           c["position"] in ["absolute", "fixed"] ->
+            {out ++ [el], keep}
+
+          # a floated part of the table floats beside it
+          c["float"] in ["left", "right"] and c["display"] in @float_table_parts ->
             {out ++ [el], keep}
 
           kind_of_table_part(tag, c) in [:group, :row] ->
@@ -2861,7 +2898,13 @@ defmodule Browser.Layout do
     atom = if rel = current_rel(st), do: Map.put(atom, :rel, rel), else: atom
     # an atom with nothing drawn in it still takes the room it asks for (one with content is
     # measured by what it draws)
-    ext = if extent(atom.items) == 0, do: max(st.ext, x + atom.w + max(extra, 0)), else: st.ext
+    # (a width that is no more than the room there is: the width of a flex container measured
+    # without a bound is not what its surroundings need)
+    ext =
+      if extent(atom.items) == 0 or atom.w < @unbounded / 2,
+        do: max(st.ext, x + atom.w + max(extra, 0)),
+        else: st.ext
+
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil, ext: ext}
   end
 
@@ -3098,7 +3141,11 @@ defmodule Browser.Layout do
 
     st =
       if (own_width?(o.width) or o.maxw != nil) and fixed_width?(box),
-        do: limit_new_items(%{st | ext: max(st.ext, box.x + box.w + box_mr(o))}, box),
+        do:
+          limit_new_items(
+            %{st | ext: max(st.ext, box.x + box.w + box_mr(o) + max(st.right - st.free, 0))},
+            box
+          ),
         else: st
 
     # an empty box is as wide as the insets around its content, for shrink-to-fit
@@ -3779,7 +3826,7 @@ defmodule Browser.Layout do
           if left && right && !spec.replaced do
             avail
           else
-            min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)) + spec.rextra)
+            min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)))
           end
 
         w ->
