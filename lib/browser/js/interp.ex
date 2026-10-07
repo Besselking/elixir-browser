@@ -1077,7 +1077,28 @@ defmodule Browser.JS.Interp do
         "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
       )
 
-  def put(_primitive, _key, v), do: v
+  # a primitive has no property of its own to set, but a setter (or proxy) on its prototype
+  # chain still runs
+  def put(primitive, key, v) do
+    primitive_set(primitive, key, v)
+    v
+  end
+
+  defp primitive_set(ov, key, v) do
+    k = to_key(key)
+
+    case inherited_set(Browser.JS.Builtins.box(ov), k) do
+      {:setter, setter} ->
+        call(setter, ov, [v])
+        :ok
+
+      {:proxy, proxy} ->
+        if Browser.JS.Proxy.set(proxy, k, v, ov), do: :ok, else: :fail
+
+      _ ->
+        :fail
+    end
+  end
 
   # naming a key in an error must not run user code (a toString that throws)
   defp safe_key(key) when is_binary(key), do: key
@@ -1156,14 +1177,11 @@ defmodule Browser.JS.Interp do
   defp strict_put(ov, key, v)
        when is_binary(ov) or is_number(ov) or is_boolean(ov) or
               (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
-    boxed = Browser.JS.Builtins.box(ov)
-
-    case inherited_set(boxed, to_key(key)) do
-      {:setter, setter} ->
-        call(setter, ov, [v])
+    case primitive_set(ov, key, v) do
+      :ok ->
         v
 
-      _ ->
+      :fail ->
         throw_error(
           "TypeError",
           "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
@@ -2716,9 +2734,21 @@ defmodule Browser.JS.Interp do
   defp exec({:var, kind, decls}, env, _) do
     for {pat, init} <- decls do
       cond do
-        init != nil -> bind(pat, ev_named(init, env, pat), env, kind)
-        kind == :var -> :ok
-        true -> bind(pat, :undefined, env, kind)
+        # `var x = …` inside `with`: the reference is resolved before the initializer runs
+        init != nil and kind == :var and match?({:id, _}, pat) and
+            Process.get(:js_with_used, false) ->
+          {:id, name} = pat
+          {_, write} = id_ref(env, name, pat, false)
+          write.(ev_named(init, env, pat))
+
+        init != nil ->
+          bind(pat, ev_named(init, env, pat), env, kind)
+
+        kind == :var ->
+          :ok
+
+        true ->
+          bind(pat, :undefined, env, kind)
       end
     end
 
