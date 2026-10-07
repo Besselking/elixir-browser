@@ -1020,6 +1020,18 @@ defmodule Browser.JS.Interp do
               not writable?(o, i) ->
                 fail_put()
 
+              not is_map_key(o.items, i) and index_hook(o.proto, i) != :none ->
+                case index_hook(o.proto, i) do
+                  {:setter, setter} ->
+                    call(setter, {:obj, id}, [v])
+
+                  {:proxy, proxy} ->
+                    unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
+                      do: fail_put()
+                end
+
+                :ok
+
               true ->
                 # an arguments object's `length` is an ordinary property: it does not grow
                 len = if Map.has_key?(o, :arguments), do: o.len, else: max(o.len, i + 1)
@@ -1281,6 +1293,28 @@ defmodule Browser.JS.Interp do
 
   defp inherited_set(_, _), do: :none
 
+  # a missing array element: an index setter or a proxy further up the prototype chain
+  defp index_hook({:obj, pid}, i) do
+    p = deref(pid)
+
+    cond do
+      is_map_key(p, :proxy) ->
+        {:proxy, {:obj, pid}}
+
+      match?(%{class: :array, items: %{^i => {:accessor, _, _}}}, p) ->
+        {:accessor, _, setter} = p.items[i]
+        if function?(setter), do: {:setter, setter}, else: :none
+
+      match?(%{class: :array, items: %{^i => _}}, p) ->
+        :none
+
+      true ->
+        index_hook(p.proto, i)
+    end
+  end
+
+  defp index_hook(_, _), do: :none
+
   @doc false
   def writable?(o, key), do: match?(%{w: true}, Map.get(Map.get(o, :attrs, %{}), key, %{w: true}))
 
@@ -1315,6 +1349,12 @@ defmodule Browser.JS.Interp do
     i = if o.class == :array, do: index(key)
 
     cond do
+      # the indices and `length` of a String wrapper are not configurable
+      match?(%{prim: str} when is_binary(str), o) and
+          (to_key(key) == "length" or
+             (is_integer(index(key)) and index(key) < String.length(o.prim))) ->
+        false
+
       o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
         store(id, Map.update(o, :gone, [key], &[key | &1]))
         true
@@ -2193,6 +2233,14 @@ defmodule Browser.JS.Interp do
             {:accessor, g, _, _, _} ->
               if function?(g), do: call(g, receiver, []), else: :undefined
           end
+        end
+
+      %{prim: str} = o when is_binary(str) and receiver != obj and is_binary(key) ->
+        # a String wrapper's index and `length` properties are its own
+        case Browser.JS.Props.own_state(obj, key) do
+          nil -> lookup(o, key, receiver)
+          {:data, v, _, _, _} -> v
+          _ -> lookup(o, key, receiver)
         end
 
       o ->

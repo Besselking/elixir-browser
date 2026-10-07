@@ -271,7 +271,9 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "ownKeys") do
       nil ->
-        Props.own_names(target) ++ Props.own_symbols(target)
+        if proxy?(target),
+          do: own_keys(target),
+          else: Props.own_names(target) ++ Props.own_symbols(target)
 
       f ->
         result = Interp.call(f, handler, [target])
@@ -449,8 +451,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "defineProperty") do
       nil ->
-        Props.define(target, key, descriptor)
-        true
+        Props.try_define(target, key, descriptor)
 
       f ->
         if Interp.truthy(Interp.call(f, handler, [target, key_value(key), desc_for_trap(desc)])) do
