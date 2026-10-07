@@ -64,7 +64,7 @@ key = fn cp -> send_ev.(wxKey(type: :char, keyCode: cp, uniChar: cp, controlDown
 # event would otherwise make the next blocking wx call (setCursor) wait behind it and look slow
 motion = fn x, y -> send(session, wx(event: wxMouse(type: :motion, x: x, y: y))); barrier.() end
 wheel = fn rot -> send_ev.(wxMouse(type: :mousewheel, wheelRotation: rot, wheelDelta: 120, linesPerAction: 3)) end
-click = fn x, y -> send_ev.(wxMouse(type: :left_down, x: x, y: y)) end
+click = fn x, y -> send_ev.(wxMouse(type: :left_down, x: x, y: y, shiftDown: false)) end
 
 # focus a field by clicking its box
 focus = fn cid ->
