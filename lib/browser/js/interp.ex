@@ -3375,17 +3375,38 @@ defmodule Browser.JS.Interp do
     if prefix?, do: new, else: old
   end
 
-  def ev({:update, op, prefix?, target}, env) do
-    old = numeric(ev(target, env))
-    new = bump(op, old)
-    assign_to(target, new, env)
-    if prefix?, do: new, else: old
+  def ev({:update, op, prefix?, {:id, name} = target}, env) do
+    if Process.get(:js_with_used, false) do
+      {read, write} = id_ref(env, name, target, false)
+      old = numeric(read.())
+      new = bump(op, old)
+      write.(new)
+      if prefix?, do: new, else: old
+    else
+      old = numeric(ev(target, env))
+      new = bump(op, old)
+      assign_to(target, new, env)
+      if prefix?, do: new, else: old
+    end
+  end
+
+  # `f()++`: the operand is evaluated, then it is no reference
+  def ev({:update, _op, _prefix?, target}, env) do
+    ev(target, env)
+    throw_error("ReferenceError", "Invalid left-hand side expression in update operation")
   end
 
   def ev({:assign, "=", {:id, name}, value}, env) do
-    v = ev_named(value, env, {:id, name})
-    assign_var(env, name, v)
-    v
+    if Process.get(:js_with_used, false) do
+      {_, write} = id_ref(env, name, {:id, name}, false)
+      v = ev_named(value, env, {:id, name})
+      write.(v)
+      v
+    else
+      v = ev_named(value, env, {:id, name})
+      assign_var(env, name, v)
+      v
+    end
   end
 
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do
@@ -3756,43 +3777,47 @@ defmodule Browser.JS.Interp do
 
   defp super_set(_, key, v, this), do: put(this, key, v)
 
+  # the reference of a name, resolved once: a `with` object keeps receiving the write even if
+  # the property is gone by then. Returns the reader and the writer.
+  defp id_ref(env, name, target, strict?) do
+    case with_binding(env, name) do
+      {:with, obj} ->
+        {fn -> get(obj, name) end,
+         fn v ->
+           if strict? do
+             unless has_property?(obj, name),
+               do: throw_error("ReferenceError", "#{name} is not defined")
+
+             strict_put(obj, name, v)
+           else
+             put(obj, name, v)
+           end
+         end}
+
+      {:var, sid} ->
+        {fn -> ev(target, sid) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(sid, name, v, true),
+             else: assign_var(sid, name, v)
+         end}
+
+      nil ->
+        {fn -> ev(target, env) end,
+         fn v ->
+           if strict?,
+             do: strict_assign_var(env, name, v, false),
+             else: assign_var(env, name, v)
+         end}
+    end
+  end
+
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
     {read, write} =
       case target do
         {:id, name} ->
-          # the reference is resolved once: a `with` object keeps receiving the write even if
-          # the property is gone by then
-          case with_binding(env, name) do
-            {:with, obj} ->
-              {fn -> get(obj, name) end,
-               fn v ->
-                 if strict? do
-                   unless has_property?(obj, name),
-                     do: throw_error("ReferenceError", "#{name} is not defined")
-
-                   strict_put(obj, name, v)
-                 else
-                   put(obj, name, v)
-                 end
-               end}
-
-            {:var, sid} ->
-              {fn -> ev(target, sid) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(sid, name, v, true),
-                   else: assign_var(sid, name, v)
-               end}
-
-            nil ->
-              {fn -> ev(target, env) end,
-               fn v ->
-                 if strict?,
-                   do: strict_assign_var(env, name, v, false),
-                   else: assign_var(env, name, v)
-               end}
-          end
+          id_ref(env, name, target, strict?)
 
         {:super_member, k} ->
           {base, this} = Browser.JS.Classes.super_base(env)
