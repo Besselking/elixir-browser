@@ -6095,9 +6095,23 @@ defmodule Browser.Layout do
         |> Map.put(:left, best_edge(edges.left, group.left))
         |> Map.put(:right, best_edge(edges.right, group.right))
 
-      %{row | edges: edges}
+      %{row | edges: edges, shift: add_shift(row.shift, rel_shift(gc))}
     end)
   end
+
+  defp paint_above(items, seq), do: Enum.map(items, &Map.merge(&1, %{over: true, pz: seq}))
+
+  # `position: relative` on a part of a table moves what it holds
+  defp rel_shift(c) do
+    if c["position"] == "relative" do
+      num = fn v -> if is_number(v), do: round(v), else: nil end
+      {num.(c["left"]) || -(num.(c["right"]) || 0), num.(c["top"]) || -(num.(c["bottom"]) || 0)}
+    else
+      {0, 0}
+    end
+  end
+
+  defp add_shift({a, b}, {c, d}), do: {a + c, b + d}
 
   # the borders an element (a row or a row group) brings to a table with collapsed borders
   defp edges_of(c) do
@@ -6140,7 +6154,8 @@ defmodule Browser.Layout do
       cells: cells,
       valign: valign_of(c["vertical-align"]),
       bg: row_bg(c) || group_bg,
-      edges: edges_of(c)
+      edges: edges_of(c),
+      shift: rel_shift(c)
     }
   end
 
@@ -6317,10 +6332,16 @@ defmodule Browser.Layout do
               items
             end
 
-          dx = Enum.at(xs, p.col)
-          dy = Enum.at(ys, p.row)
+          {sdx, sdy} = p.shift
+          dx = Enum.at(xs, p.col) + sdx
+          dy = Enum.at(ys, p.row) + sdy
           behind = if p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: []
-          for item <- behind ++ items, do: move(item, dx, dy)
+          moved = for item <- behind ++ items, do: move(item, dx, dy)
+
+          # what is moved is positioned: it paints above what is not
+          if p.shift == {0, 0},
+            do: moved,
+            else: paint_above(moved, :erlang.unique_integer([:monotonic]))
         end
 
       height = top + sy + Enum.sum(row_heights) + sy * nrows
@@ -6412,6 +6433,7 @@ defmodule Browser.Layout do
               col: col,
               row_valign: row.valign,
               row_bg: row.bg,
+              shift: row.shift,
               redges: row.edges,
               top_edge: top,
               bottom_edge: last_row.bottom
