@@ -168,6 +168,51 @@ defmodule Browser.JS.Prelude do
   };
   """
 
+  @doc "The `get stack` and `set stack` accessor functions of `Error.prototype`."
+  def stack_accessor(:get, stack_of),
+    do:
+      lazy(
+        "get stack",
+        0,
+        """
+        function (stackOf) {
+          "use strict";
+          return function () {
+            if (this === null || (typeof this !== "object" && typeof this !== "function"))
+              throw new TypeError("Error.prototype.stack getter called on a non-object");
+            return stackOf(this);
+          };
+        }
+        """,
+        [stack_of]
+      )
+
+  def stack_accessor(:set, home),
+    do:
+      lazy(
+        "set stack",
+        1,
+        """
+        function (home) {
+          "use strict";
+          var gopd = Reflect.getOwnPropertyDescriptor, define = Reflect.defineProperty, set = Reflect.set;
+          return function (v) {
+            if (this === null || (typeof this !== "object" && typeof this !== "function"))
+              throw new TypeError("Error.prototype.stack setter called on a non-object");
+            if (this === home) throw new TypeError("Cannot set stack on Error.prototype");
+            if (typeof v !== "string") throw new TypeError("stack must be a string");
+            if (gopd(this, "stack") === undefined) {
+              if (!define(this, "stack", { value: v, writable: true, enumerable: true, configurable: true }))
+                throw new TypeError("Cannot define stack");
+            } else if (!set(this, "stack", v)) {
+              throw new TypeError("Cannot assign to stack");
+            }
+          };
+        }
+        """,
+        [home]
+      )
+
   def all_keyed,
     do:
       lazy(

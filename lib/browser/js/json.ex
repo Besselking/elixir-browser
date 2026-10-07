@@ -20,7 +20,9 @@ defmodule Browser.JS.Json do
 
     for {name, arity, fun} <- [
           {"parse", 2, fn _, args -> parse(to_str(arg(args, 0)), arg(args, 1)) end},
-          {"stringify", 3, fn _, args -> stringify(arg(args, 0), arg(args, 1), arg(args, 2)) end}
+          {"stringify", 3, fn _, args -> stringify(arg(args, 0), arg(args, 1), arg(args, 2)) end},
+          {"rawJSON", 1, fn _, args -> raw_json(to_str(arg(args, 0))) end},
+          {"isRawJSON", 1, fn _, args -> raw_json?(arg(args, 0)) end}
         ] do
       f = native(name, fun)
       set_arity(f, arity)
@@ -38,6 +40,33 @@ defmodule Browser.JS.Json do
     end
   end
 
+  # ── rawJSON ────────────────────────────────────────────────
+
+  defp raw_json(text) do
+    first = binary_part(text, 0, min(1, byte_size(text)))
+    last = binary_part(text, max(byte_size(text) - 1, 0), min(1, byte_size(text)))
+
+    if text == "" or first in ["\t", "\n", "\r", " ", "{", "["] or last in ["\t", "\n", "\r", " "],
+      do: throw_error("SyntaxError", "Invalid value for JSON.rawJSON")
+
+    parse(text, :undefined)
+    {:obj, id} = obj = new_object([{"rawJSON", text}], :null)
+
+    store(
+      id,
+      Map.merge(deref(id), %{
+        ext: false,
+        raw_json: true,
+        attrs: %{"rawJSON" => %{w: false, c: false, e: true}}
+      })
+    )
+
+    obj
+  end
+
+  defp raw_json?({:obj, id}), do: Map.get(deref(id), :raw_json, false)
+  defp raw_json?(_), do: false
+
   # ── parse ──────────────────────────────────────────────────
 
   def parse(text, reviver) do
@@ -48,11 +77,79 @@ defmodule Browser.JS.Json do
     if function?(reviver) do
       root = new_object()
       define_data(root, "", value)
-      internalize(root, "", reviver)
+      {src, _} = source_tree(skip_ws(text))
+      internalize(root, "", reviver, snapshot(src, value))
     else
       value
     end
   end
+
+  # the source text of every value in an already validated JSON text, in the shape of the value
+  defp source_tree(s) do
+    case s do
+      "[" <> r ->
+        r = skip_ws(r)
+
+        case r do
+          "]" <> r -> {{:arr, []}, r}
+          _ -> source_items(r, [])
+        end
+
+      "{" <> r ->
+        r = skip_ws(r)
+
+        case r do
+          "}" <> r -> {{:obj, []}, r}
+          _ -> source_members(r, [])
+        end
+
+      "\"" <> r ->
+        {_, rest} = string(r, [])
+        {{:prim, slice(s, rest)}, rest}
+
+      _ ->
+        {_, rest} = value(s)
+        {{:prim, slice(s, rest)}, rest}
+    end
+  end
+
+  defp slice(s, rest), do: binary_part(s, 0, byte_size(s) - byte_size(rest))
+
+  defp source_items(r, acc) do
+    {v, r} = source_tree(skip_ws(r))
+
+    case skip_ws(r) do
+      "," <> r -> source_items(r, [v | acc])
+      "]" <> r -> {{:arr, Enum.reverse([v | acc])}, r}
+    end
+  end
+
+  defp source_members(r, acc) do
+    "\"" <> r = skip_ws(r)
+    {key, r} = string(r, [])
+    ":" <> r = skip_ws(r)
+    {v, r} = source_tree(skip_ws(r))
+
+    case skip_ws(r) do
+      "," <> r -> source_members(r, [{key, v} | acc])
+      "}" <> r -> {{:obj, Enum.reverse([{key, v} | acc])}, r}
+    end
+  end
+
+  # pair the source tree with the parsed values (to tell later whether a value was replaced)
+  defp snapshot({:prim, src}, val), do: {:prim, src, val}
+
+  defp snapshot({:arr, kids}, val) do
+    kids =
+      for {k, i} <- Enum.with_index(kids),
+          into: %{},
+          do: {Integer.to_string(i), snapshot(k, get(val, Integer.to_string(i)))}
+
+    {:node, val, kids}
+  end
+
+  defp snapshot({:obj, pairs}, val),
+    do: {:node, val, Map.new(pairs, fn {k, v} -> {k, snapshot(v, get(val, k))} end)}
 
   defp syntax_error(""), do: throw_error("SyntaxError", "Unexpected end of JSON input")
 
@@ -196,8 +293,20 @@ defmodule Browser.JS.Json do
     end
   end
 
-  defp internalize(holder, name, reviver) do
+  defp internalize(holder, name, reviver, snap) do
     val = get(holder, name)
+
+    {source, kids} =
+      case snap do
+        {:prim, src, pv} when not is_tuple(val) or elem(val, 0) == :bigint ->
+          if pv == val, do: {src, %{}}, else: {nil, %{}}
+
+        {:node, ref, kids} when val == ref ->
+          {nil, kids}
+
+        _ ->
+          {nil, %{}}
+      end
 
     if object?(val) do
       keys =
@@ -209,7 +318,7 @@ defmodule Browser.JS.Json do
         end
 
       for k <- keys do
-        new = internalize(val, k, reviver)
+        new = internalize(val, k, reviver, Map.get(kids, k))
 
         if new == :undefined do
           Interp.delete(val, k)
@@ -228,7 +337,8 @@ defmodule Browser.JS.Json do
       end
     end
 
-    Interp.call(reviver, holder, [name, val])
+    context = new_object(if(source, do: [{"source", source}], else: []))
+    Interp.call(reviver, holder, [name, val, context])
   end
 
   # ── stringify ──────────────────────────────────────────────
@@ -342,6 +452,7 @@ defmodule Browser.JS.Json do
       end
 
     cond do
+      raw_json?(value) -> to_str(get(value, "rawJSON"))
       value == :null -> "null"
       value == true -> "true"
       value == false -> "false"
