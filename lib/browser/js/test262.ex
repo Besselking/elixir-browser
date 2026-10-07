@@ -21,8 +21,7 @@ defmodule Browser.JS.Test262 do
   @unsupported_features ~w(
     Temporal ShadowRealm
     source-phase-imports-module-source
-    regexp-duplicate-named-groups legacy-regexp
-    nonextensible-applies-to-private
+    legacy-regexp
   )
 
   def unsupported_features, do: @unsupported_features

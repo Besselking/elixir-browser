@@ -707,6 +707,9 @@ defmodule Browser.JS.Classes do
     if duplicate?,
       do: throw_error("TypeError", "Cannot initialize a private member twice on the same object")
 
+    if existing == nil and not Browser.JS.Props.extensible?({:obj, id}),
+      do: throw_error("TypeError", "Cannot add a private member to a non-extensible object")
+
     stored =
       case {kind, existing} do
         {:get, {:accessor, _, s}} -> {:accessor, value, s}

@@ -1431,11 +1431,14 @@ defmodule Browser.JS.Async do
       attempt(
         fn ->
           case Interp.get(it, "return") do
-            f when is_tuple(f) ->
-              if Interp.function?(f), do: Interp.call(f, it, []), else: :undefined
-
-            _ ->
+            m when m in [:undefined, :null] ->
               :undefined
+
+            f ->
+              unless Interp.function?(f),
+                do: Interp.throw_error("TypeError", "Iterator return is not a function")
+
+              Interp.call(f, it, [])
           end
         end,
         ctx,
