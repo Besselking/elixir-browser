@@ -4937,7 +4937,7 @@ defmodule Browser.LayoutTest do
   end
 
   describe "wrapping flex containers" do
-    defp flex_boxes(style, n \\ 4) do
+    defp flex_boxes(style, n) do
       items = String.duplicate("<div style=\"width:50px;height:20px;background:green\"></div>", n)
 
       page =
