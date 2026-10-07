@@ -4373,6 +4373,25 @@ defmodule Browser.LayoutTest do
       items = columns("columns: 2 300px", 4, 400)
       assert col_at(items, "item1").x == col_at(items, "item4").x
     end
+
+    test "column-fill: auto fills a column of the set height before the next" do
+      items = columns("columns: 3; column-gap: 0; column-fill: auto; height: 60px", 6, 300)
+      xs = for n <- 1..6, do: col_at(items, "item#{n}").x
+      assert Enum.uniq(xs) |> length() == 3
+      assert col_at(items, "item1").x == col_at(items, "item2").x
+      assert col_at(items, "item3").x > col_at(items, "item2").x
+    end
+
+    test "a background is cut where a column ends and a rule is drawn between columns" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|
+
+      items = laid_out(html)
+      greens = for %{type: :rect, color: {0, 128, 0}} = r <- items, do: r
+      assert length(greens) == 2
+      assert Enum.all?(greens, &(&1.h == 50))
+      assert Enum.any?(items, &(&1.type == :rect and &1.color == {0, 0, 255} and &1.w == 4))
+    end
   end
 
   describe "positioned paint order" do

@@ -30,7 +30,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens
+            row-gap column-gap column-count column-width column-fill column-rule-width column-rule-style column-rule-color order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
@@ -68,6 +68,7 @@ defmodule Browser.Style do
     "border-radius" =>
       ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius
          border-bottom-left-radius),
+    "column-rule" => ~w(column-rule-width column-rule-style column-rule-color),
     "border-top" => ~w(border-top-width border-top-style border-top-color),
     "border-right" => ~w(border-right-width border-right-style border-right-color),
     "border-bottom" => ~w(border-bottom-width border-bottom-style border-bottom-color),
@@ -309,7 +310,7 @@ defmodule Browser.Style do
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
       (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
-        not invalid_color?(p, v)
+        not invalid_color?(p, v) and not percent_width?(p, v)
     end)
   end
 
@@ -323,6 +324,15 @@ defmodule Browser.Style do
   end
 
   defp invalid_color?(_prop, _v), do: false
+
+  # a border or rule width is no percentage: such a declaration is dropped
+  defp percent_width?(prop, v) when is_binary(v) do
+    String.ends_with?(prop, "-width") and
+      (String.starts_with?(prop, "border-") or String.starts_with?(prop, "column-rule")) and
+      String.ends_with?(String.trim(v), "%")
+  end
+
+  defp percent_width?(_prop, _v), do: false
 
   # a negative width, height, min/max size or padding is invalid: the declaration is dropped
   # before the cascade, so an earlier value still applies
@@ -536,6 +546,11 @@ defmodule Browser.Style do
     for side <- ~w(top right bottom left),
         {suffix, val} <- [{"width", w}, {"style", st}, {"color", c}],
         do: {"border-#{side}-#{suffix}", val}
+  end
+
+  defp do_split("column-rule", _v, toks) do
+    {w, st, c} = border_parts(toks)
+    [{"column-rule-width", w}, {"column-rule-style", st}, {"column-rule-color", c}]
   end
 
   defp do_split("border-" <> side, _v, toks) when side in ~w(top right bottom left) do
@@ -1643,8 +1658,10 @@ defmodule Browser.Style do
     end
   end
 
-  @border_widths ~w(border-top-width border-right-width border-bottom-width border-left-width)
-  @border_colors ~w(border-top-color border-right-color border-bottom-color border-left-color)
+  @border_widths ~w(border-top-width border-right-width border-bottom-width border-left-width
+                    column-rule-width)
+  @border_colors ~w(border-top-color border-right-color border-bottom-color border-left-color
+                    column-rule-color)
 
   defp typed(prop, v, env, _pc) when prop in @border_widths do
     px =

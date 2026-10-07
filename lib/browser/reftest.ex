@@ -153,7 +153,9 @@ defmodule Browser.Reftest do
         end
     end
   rescue
-    e -> {:fail, "crash: " <> (Exception.message(e) |> String.split("\n") |> hd())}
+    e ->
+      if System.get_env("REFTEST_TRACE"), do: IO.puts(Exception.format(:error, e, __STACKTRACE__))
+      {:fail, "crash: " <> (Exception.message(e) |> String.split("\n") |> hd())}
   end
 
   defp decide(source) do
