@@ -150,12 +150,15 @@ defmodule Browser.Reftest.Raster do
       t.text
       |> String.graphemes()
       |> Enum.reduce({grid, 0.0}, fn ch, {g, off} ->
+        cadv = Browser.Reftest.char_advance(ch, adv)
+        gw = if cadv == adv, do: gw, else: max(round(cadv * size) - if(ahem?, do: 0, else: 1), 1)
+
         g =
-          if String.trim(ch) == "",
+          if String.trim(ch) == "" or cadv == 0.0,
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, off + adv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
+        {g, off + cadv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
     width = round(advance_x)

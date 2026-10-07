@@ -5226,4 +5226,45 @@ defmodule Browser.LayoutTest do
       assert blue.x == 50
     end
   end
+
+  describe "line breaks next to atomic inlines" do
+    defp laid_out(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      items
+    end
+
+    test "no break between a narrow no-break space and an inline-block" do
+      items =
+        laid_out(
+          ~s(<div style="width:20px">a&#8239;<span style="display:inline-block">b</span></div>)
+        )
+
+      assert items
+             |> Enum.filter(&(&1.type == :text))
+             |> Enum.map(& &1.y)
+             |> Enum.uniq()
+             |> length() == 1
+    end
+
+    test "a break is possible between a no-break space and an inline-block" do
+      items =
+        laid_out(
+          ~s(<div style="width:20px">aaaa&nbsp;<span style="display:inline-block">bbbb</span></div>)
+        )
+
+      assert items
+             |> Enum.filter(&(&1.type == :text))
+             |> Enum.map(& &1.y)
+             |> Enum.uniq()
+             |> length() == 2
+    end
+  end
+
+  describe "transparent text" do
+    test "takes its room and is not drawn" do
+      items = laid_out(~s(<span style="color:transparent">abc</span>))
+      assert Enum.any?(items, &(&1.type == :text and &1.hidden))
+    end
+  end
 end
