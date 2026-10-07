@@ -1306,6 +1306,11 @@ defmodule Browser.JS.Interp do
         store(id, Map.update(o, :gone, [key], &[key | &1]))
         true
 
+      # the `prototype` a function has of its own cannot be deleted
+      o.class == :function and key == "prototype" and not Map.has_key?(o.props, key) and
+          Browser.JS.Props.has_own?({:obj, id}, key) ->
+        false
+
       i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
         false
 
@@ -2091,7 +2096,7 @@ defmodule Browser.JS.Interp do
             end
 
           # `f.prototype = undefined` is a value, not a missing property
-          key == "prototype" and Map.has_key?(o.props, "prototype") ->
+          key in ["name", "length", "prototype"] and Map.has_key?(o.props, key) ->
             :undefined
 
           true ->
@@ -2972,6 +2977,7 @@ defmodule Browser.JS.Interp do
       # a finalizer that completes normally leaves the try statement's own value
       if finalizer do
         saved = :erlang.get(:js_last)
+        :erlang.put(:js_last, :undefined)
         exec(finalizer, env)
         :erlang.put(:js_last, saved)
       end
@@ -3046,7 +3052,8 @@ defmodule Browser.JS.Interp do
     used =
       for {key, pat} <- props do
         k = key_of(key, env)
-        bind(pat, get(v, k), env, mode)
+        ref = target_ref(pat, env, mode)
+        bind_to(pat, ref, get(v, k), env, mode)
         k
       end
 
@@ -3126,10 +3133,11 @@ defmodule Browser.JS.Interp do
       :erlang.raise(kind, e, __STACKTRACE__)
   end
 
-  defp target_ref({:member, o, k, _}, env, :assign), do: {ev(o, env), to_key(ev_key(k, env)), nil}
+  # the key is converted only when the value is stored (after the source was read)
+  defp target_ref({:member, o, k, _}, env, :assign), do: {ev(o, env), ev_key(k, env), nil}
 
   defp target_ref({:default, {:member, o, k, _}, e}, env, :assign),
-    do: {ev(o, env), to_key(ev_key(k, env)), e}
+    do: {ev(o, env), ev_key(k, env), e}
 
   defp target_ref(_, _, _), do: nil
 
@@ -3137,7 +3145,7 @@ defmodule Browser.JS.Interp do
 
   defp bind_to(_pat, {ov, key, dflt}, v, env, _mode) do
     v = if dflt != nil and v == :undefined, do: ev(dflt, env), else: v
-    put(ov, key, v)
+    put(ov, to_key(key), v)
   end
 
   defp bind_name(:let, env, name, v), do: declare(env, name, v)
@@ -3682,7 +3690,8 @@ defmodule Browser.JS.Interp do
           if Process.get(:js_with_used, false) do
             case with_binding(env, name) do
               {:with, obj} ->
-                {get(obj, name), obj}
+                # GetBindingValue asks again whether the binding is still there
+                {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
 
               {:var, sc} ->
                 case Map.fetch(deref(sc).vars, name) do
@@ -3984,11 +3993,20 @@ defmodule Browser.JS.Interp do
   defp id_ref(env, name, target, strict?) do
     case with_binding(env, name) do
       {:with, obj} ->
-        {fn -> get(obj, name) end,
+        {fn ->
+           # GetBindingValue asks again whether the binding is still there
+           cond do
+             has_property?(obj, name) -> get(obj, name)
+             strict? -> throw_error("ReferenceError", "#{name} is not defined")
+             true -> :undefined
+           end
+         end,
          fn v ->
+           # SetMutableBinding asks again whether the binding is still there
+           still? = has_property?(obj, name)
+
            if strict? do
-             unless has_property?(obj, name),
-               do: throw_error("ReferenceError", "#{name} is not defined")
+             unless still?, do: throw_error("ReferenceError", "#{name} is not defined")
 
              strict_put(obj, name, v)
            else

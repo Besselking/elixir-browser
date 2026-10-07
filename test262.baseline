@@ -74,6 +74,8 @@ built-ins/Array/from/calling-from-valid-1-noStrict.js
 built-ins/Array/from/calling-from-valid-1-onlyStrict.js
 built-ins/Array/from/calling-from-valid-2.js
 built-ins/Array/from/elements-added-after.js
+built-ins/Array/from/elements-deleted-after.js
+built-ins/Array/from/elements-updated-after.js
 built-ins/Array/from/from-array.js
 built-ins/Array/from/from-string.js
 built-ins/Array/from/get-iter-method-err.js
@@ -2480,6 +2482,7 @@ built-ins/Array/prototype/reverse/S15.4.4.8_A4_T1.js
 built-ins/Array/prototype/reverse/S15.4.4.8_A4_T2.js
 built-ins/Array/prototype/reverse/array-has-one-entry.js
 built-ins/Array/prototype/reverse/call-with-boolean.js
+built-ins/Array/prototype/reverse/get_if_present_with_delete.js
 built-ins/Array/prototype/reverse/length-exceeding-integer-limit-with-object.js
 built-ins/Array/prototype/reverse/length-exceeding-integer-limit-with-proxy.js
 built-ins/Array/prototype/reverse/length.js
@@ -11440,6 +11443,7 @@ built-ins/Proxy/deleteProperty/return-false-strict.js
 built-ins/Proxy/deleteProperty/return-is-abrupt.js
 built-ins/Proxy/deleteProperty/targetdesc-is-not-configurable.js
 built-ins/Proxy/deleteProperty/targetdesc-is-undefined-return-true.js
+built-ins/Proxy/deleteProperty/trap-is-missing-target-is-proxy.js
 built-ins/Proxy/deleteProperty/trap-is-not-callable.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-not-strict.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-strict.js
@@ -18166,6 +18170,7 @@ language/asi/S7.9_A11_T8.js
 language/asi/S7.9_A11_T9.js
 language/asi/S7.9_A2.js
 language/asi/S7.9_A3.js
+language/asi/S7.9_A4.js
 language/asi/S7.9_A5.1_T1.js
 language/asi/S7.9_A5.2_T1.js
 language/asi/S7.9_A5.3_T1.js
@@ -19373,6 +19378,9 @@ language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
+language/expressions/assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order.js
+language/expressions/assignment/destructuring/keyed-destructuring-property-reference-target-evaluation-order-with-bindings.js
+language/expressions/assignment/destructuring/keyed-destructuring-property-reference-target-evaluation-order.js
 language/expressions/assignment/destructuring/obj-prop-__proto__dup.js
 language/expressions/assignment/destructuring/target-assign-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/target-assign-throws-iterator-return-is-not-callable.js
@@ -32001,11 +32009,13 @@ language/statements/class/definition/early-errors-class-method-eval-in-formal-pa
 language/statements/class/definition/early-errors-class-method-formals-body-duplicate.js
 language/statements/class/definition/early-errors-class-method-formals-contains-super-call.js
 language/statements/class/definition/fn-length-static-precedence-order.js
+language/statements/class/definition/fn-length-static-precedence.js
 language/statements/class/definition/fn-name-accessor-get.js
 language/statements/class/definition/fn-name-accessor-set.js
 language/statements/class/definition/fn-name-gen-method.js
 language/statements/class/definition/fn-name-method.js
 language/statements/class/definition/fn-name-static-precedence-order.js
+language/statements/class/definition/fn-name-static-precedence.js
 language/statements/class/definition/getters-non-configurable-err.js
 language/statements/class/definition/getters-prop-desc.js
 language/statements/class/definition/getters-restricted-ids.js
@@ -34913,6 +34923,7 @@ language/statements/class/elements/privatefieldget-typeerror-3.js
 language/statements/class/elements/privatefieldget-typeerror-4.js
 language/statements/class/elements/privatefieldget-typeerror-5.js
 language/statements/class/elements/privatefieldput-primitive-receiver.js
+language/statements/class/elements/privatefieldset-evaluation-order-1.js
 language/statements/class/elements/privatefieldset-evaluation-order-2.js
 language/statements/class/elements/privatefieldset-evaluation-order-3.js
 language/statements/class/elements/privatefieldset-typeerror-1.js
@@ -35689,6 +35700,7 @@ language/statements/class/static-init-await-binding-invalid.js
 language/statements/class/static-init-await-binding-valid.js
 language/statements/class/static-init-expr-new-target.js
 language/statements/class/static-init-expr-this.js
+language/statements/class/static-init-invalid-arguments.js
 language/statements/class/static-init-invalid-await.js
 language/statements/class/static-init-invalid-label-dup.js
 language/statements/class/static-init-invalid-lex-dup.js
@@ -38538,6 +38550,7 @@ language/statements/for/head-init-var-check-empty-inc-empty-syntax.js
 language/statements/for/head-let-bound-names-in-stmt.js
 language/statements/for/head-let-destructuring.js
 language/statements/for/head-let-fresh-binding-per-iteration.js
+language/statements/for/head-lhs-let.js
 language/statements/for/head-var-bound-names-in-stmt.js
 language/statements/for/labelled-fn-stmt-const.js
 language/statements/for/labelled-fn-stmt-expr.js
@@ -39513,6 +39526,7 @@ language/statements/switch/S12.11_A1_T1.js
 language/statements/switch/S12.11_A1_T2.js
 language/statements/switch/S12.11_A1_T3.js
 language/statements/switch/S12.11_A1_T4.js
+language/statements/switch/S12.11_A2_T1.js
 language/statements/switch/S12.11_A3_T1.js
 language/statements/switch/S12.11_A3_T2.js
 language/statements/switch/S12.11_A3_T3.js
@@ -39707,6 +39721,7 @@ language/statements/try/catch-parameter-boundnames-restriction-eval-negative-ear
 language/statements/try/completion-values-fn-finally-abrupt.js
 language/statements/try/completion-values-fn-finally-normal.js
 language/statements/try/completion-values-fn-finally-return.js
+language/statements/try/completion-values.js
 language/statements/try/cptn-catch-empty-break.js
 language/statements/try/cptn-catch-empty-continue.js
 language/statements/try/cptn-catch-finally-empty-break.js
@@ -40270,6 +40285,7 @@ language/statements/with/decl-const.js
 language/statements/with/decl-fun.js
 language/statements/with/decl-gen.js
 language/statements/with/decl-let.js
+language/statements/with/get-binding-value-call-with-proxy-env.js
 language/statements/with/get-binding-value-idref-with-proxy-env.js
 language/statements/with/get-mutable-binding-binding-deleted-in-get-unscopables.js
 language/statements/with/has-binding-call-with-proxy-env.js
@@ -40283,6 +40299,8 @@ language/statements/with/scope-var-close.js
 language/statements/with/scope-var-open.js
 language/statements/with/set-mutable-binding-binding-deleted-in-get-unscopables.js
 language/statements/with/set-mutable-binding-binding-deleted-with-typed-array-in-proto-chain.js
+language/statements/with/set-mutable-binding-idref-compound-assign-with-proxy-env.js
+language/statements/with/set-mutable-binding-idref-with-proxy-env.js
 language/statements/with/strict-fn-decl-nested-1.js
 language/statements/with/strict-fn-decl-nested-2.js
 language/statements/with/strict-fn-decl.js

@@ -600,6 +600,9 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, "throw", _} | ts]) do
+    if match?([{_, _, nl} | _] when nl?(nl), ts),
+      do: throw({:syntax, "illegal newline after throw"})
+
     {e, ts} = expression(ts)
     {{:throw, e}, semi(ts)}
   end
@@ -1009,7 +1012,7 @@ defmodule Browser.JS.Parser do
     case ts do
       # `let` as a plain name: `for (let; ;)`, `for (let in obj)`
       [{:id, "let", _}, {k, v, _} | _]
-      when (k == :p and v == ";") or (k == :id and v == "in") ->
+      when (k == :p and v not in ["[", "{"]) or (k == :id and v == "in") ->
         for_lhs_head(ts)
 
       [{:id, kw, _} | rest] when kw in ["var", "let", "const"] ->
@@ -1221,6 +1224,9 @@ defmodule Browser.JS.Parser do
       else
         {:default, ts}
       end
+
+    if test == :default and List.keymember?(acc, :default, 0),
+      do: throw({:syntax, "more than one default clause in switch statement"})
 
     ts = expect(ts, ":")
     {body, ts} = case_body(ts, [])
@@ -1544,12 +1550,30 @@ defmodule Browser.JS.Parser do
   # does `ast` hold a node satisfying `pred`, outside nested non-arrow functions and classes?
   defp contains_node?(ast, pred) do
     cond do
-      pred.(ast) -> true
-      match?({:fn, _, _, _, m} when m not in [:arrow, :arrow_expr], ast) -> false
-      match?({:class, _, _, _}, ast) -> false
-      is_tuple(ast) -> ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
-      is_list(ast) -> Enum.any?(ast, &contains_node?(&1, pred))
-      true -> false
+      pred.(ast) ->
+        true
+
+      match?({:fn, _, _, _, m} when m not in [:arrow, :arrow_expr], ast) ->
+        false
+
+      # a nested class's heritage and computed keys are evaluated in the enclosing code
+      match?({:class, _, _, _}, ast) ->
+        {:class, _, heritage, members} = ast
+
+        contains_node?(heritage, pred) or
+          Enum.any?(members, fn
+            {:cmember, _, {:computed, e}, _, _} -> contains_node?(e, pred)
+            _ -> false
+          end)
+
+      is_tuple(ast) ->
+        ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
+
+      is_list(ast) ->
+        Enum.any?(ast, &contains_node?(&1, pred))
+
+      true ->
+        false
     end
   end
 
