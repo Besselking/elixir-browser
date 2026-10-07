@@ -82,7 +82,7 @@ defmodule Browser.JS.Parser do
              contains_node?(program, &(&1 == {:super} or match?({:super_member, _}, &1))),
            do: throw({:syntax, "'super' keyword unexpected here"})
 
-        if Enum.any?(program, &using_decl?/1),
+        if not Keyword.get(opts, :module, false) and Enum.any?(program, &using_decl?/1),
           do: throw({:syntax, "using declaration at the top level of a script"})
 
         program = check_scope(program, true)
@@ -329,10 +329,29 @@ defmodule Browser.JS.Parser do
 
   defp check_octal_string(_), do: :ok
 
+  # a function declaration's name belongs to the enclosing code
+  defp check_decl_name(name) do
+    if name == "await" and await_reserved?(),
+      do: throw({:syntax, "await is reserved here"})
+  end
+
+  # code in which `await` is an operator: an async function, or the top level of a module
+  defp await_context? do
+    Process.get(:js_async, false) or
+      (Process.get(:js_module, false) and not Process.get(:js_fn, false) and
+         not Process.get(:js_static_block, false))
+  end
+
+  # `await` is a keyword in async code, in static blocks and everywhere in a module
+  defp await_reserved? do
+    Process.get(:js_async, false) or Process.get(:js_static_block, false) or
+      Process.get(:js_module, false)
+  end
+
   # `yield` and `await` cannot be labels where they are keywords
   defp check_strict_name_context(name) do
     if (name == "yield" and (Process.get(:js_generator, false) or strict?())) or
-         (name == "await" and Process.get(:js_async, false)),
+         (name == "await" and await_reserved?()),
        do: throw({:syntax, "#{name} is not a valid label here"})
   end
 
@@ -346,7 +365,7 @@ defmodule Browser.JS.Parser do
     if name == "yield" and Process.get(:js_generator, false),
       do: throw({:syntax, "yield is reserved in generators"})
 
-    if name == "await" and (Process.get(:js_async, false) or Process.get(:js_static_block, false)),
+    if name == "await" and await_reserved?(),
       do: throw({:syntax, "await is reserved here"})
   end
 
@@ -464,7 +483,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "await", _}, {:id, "using", _}, {:id, name, false} | ts] = all)
        when name not in @reserved and name not in ["in", "instanceof", "of", "let"] do
-    if Process.get(:js_async, false) do
+    if await_context?() do
       {decls, ts} = using_declarators([{:id, name, false} | ts])
       {{:var, :await_using, decls}, semi(ts)}
     else
@@ -484,18 +503,21 @@ defmodule Browser.JS.Parser do
     do: throw({:syntax, "function statement requires a name"})
 
   defp statement([{:id, "function", _}, {:id, name, _} | ts]) when name not in @reserved do
+    check_decl_name(name)
     {fun, ts} = function_rest(name, ts)
     {{:fundecl, name, fun}, ts}
   end
 
   defp statement([{:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    check_decl_name(name)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, fun}, ts}
   end
 
   defp statement([{:id, "async", _}, {:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
@@ -503,6 +525,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
@@ -1040,7 +1063,7 @@ defmodule Browser.JS.Parser do
 
       [{:id, "await", _}, {:id, "using", _}, {:id, n, false} | rest]
       when n not in @reserved and n not in ["in", "instanceof", "let"] ->
-        unless Process.get(:js_async, false), do: throw({:syntax, "await using outside async"})
+        unless await_context?(), do: throw({:syntax, "await using outside async"})
         using_for(:await_using, [{:id, n, false} | rest])
 
       [{:p, ";", _} | _] ->
@@ -1150,6 +1173,10 @@ defmodule Browser.JS.Parser do
         {obj, t} = assignment(t)
         t = expect(t, ")")
         {body, t} = loop_body(t)
+
+        if name in Interp.var_names([body], []),
+          do: throw({:syntax, "#{name} is declared by the loop head and again with var"})
+
         tmp = " using"
         node = {:using, kind, name, {:id, tmp}, [body]}
         {{:forof, :const, {:id, tmp}, obj, {:block, [node]}}, t}
@@ -1592,7 +1619,7 @@ defmodule Browser.JS.Parser do
       end
 
     if name in @strict_reserved or name in ["eval", "arguments"] or
-         (name == "await" and Process.get(:js_static_block, false)),
+         (name == "await" and await_reserved?()),
        do: throw({:syntax, "#{name} is not a valid class name"})
 
     outer = strict?()
@@ -1714,6 +1741,7 @@ defmodule Browser.JS.Parser do
     outer_sb = Process.put(:js_static_block, false)
     class_method? = Process.delete(:js_class_method) == true
     nt = Process.put(:js_nt, true)
+    outer_fn = Process.put(:js_fn, true)
 
     try do
       {params, ts} = params(expect(ts, "("), [])
@@ -1733,6 +1761,7 @@ defmodule Browser.JS.Parser do
       Process.put(:js_async, outer_async)
       Process.put(:js_static_block, outer_sb || false)
       Process.put(:js_nt, nt)
+      Process.put(:js_fn, outer_fn)
     end
   end
 
@@ -2327,8 +2356,7 @@ defmodule Browser.JS.Parser do
   end
 
   defp primary([{:id, name, _} | ts]) when name not in @reserved do
-    if (name == "await" and
-          (Process.get(:js_async, false) or Process.get(:js_static_block, false))) or
+    if (name == "await" and await_reserved?()) or
          (name == "yield" and Process.get(:js_generator, false)),
        do: throw({:syntax, "#{name} is not an identifier here"})
 

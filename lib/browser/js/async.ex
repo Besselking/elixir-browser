@@ -56,6 +56,29 @@ defmodule Browser.JS.Async do
     p
   end
 
+  @doc "Whether a module body awaits at its top level (not inside a function)."
+  def has_tla?(stmts), do: Enum.any?(stmts, &has_await?/1)
+
+  @doc "Runs a module body whose top level awaits: starts it and returns its promise."
+  def run_module(stmts, scope) do
+    p = Promise.new()
+
+    ctx = %{
+      ret: fn _ -> Promise.resolve(p, :undefined) end,
+      throw: fn e -> Promise.reject(p, e) end,
+      brk: %{},
+      cont: %{}
+    }
+
+    try do
+      clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end)
+    catch
+      {:js_error, e} -> Promise.reject(p, e)
+    end
+
+    p
+  end
+
   # ── generators ─────────────────────────────────────────────
   #
   # A generator function's body runs in the same continuation-passing style. `yield` hands the
@@ -1054,6 +1077,15 @@ defmodule Browser.JS.Async do
           clist(rest, env, wrapped, fn _ -> leave.(fn -> k.(:ok) end, :none) end)
         end
       )
+    end)
+  end
+
+  defp cs({:export, stmt}, env, ctx, k, labels), do: cexec(stmt, env, ctx, k, labels)
+
+  defp cs({:export_default, {:expr, e}}, env, ctx, k, _labels) do
+    cev(e, env, ctx, fn v ->
+      Interp.declare(env, :default_export, v)
+      k.(:ok)
     end)
   end
 

@@ -118,8 +118,8 @@ defmodule Browser.JS.Runtime do
     Browser.JS.WebAPI.install(scope, &http/1)
     Modules.reset()
 
-    Process.put(:js_import, fn spec, from ->
-      Modules.import(spec, from || base_url(), loader())
+    Process.put(:js_import, fn spec, from, p ->
+      Modules.import(spec, from || base_url(), loader(), p)
     end)
 
     Process.put(:rt_importmap, %{})

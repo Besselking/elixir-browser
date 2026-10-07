@@ -3289,13 +3289,13 @@ defmodule Browser.JS.Interp do
       hook = pget(:js_import)
 
       Browser.JS.Promise.enqueue(fn ->
-        try do
-          if hook == nil,
-            do: throw_error("TypeError", "Dynamic import is not available"),
-            else: Browser.JS.Promise.resolve(p, hook.(spec, base))
-        catch
-          {:js_error, err} -> Browser.JS.Promise.reject(p, err)
-        end
+        if hook == nil,
+          do:
+            Browser.JS.Promise.reject(
+              p,
+              make_error("TypeError", "Dynamic import is not available")
+            ),
+          else: hook.(spec, base, p)
       end)
     catch
       {:js_error, err} -> Browser.JS.Promise.reject(p, err)

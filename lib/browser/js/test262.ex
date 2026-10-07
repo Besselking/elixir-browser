@@ -22,7 +22,7 @@ defmodule Browser.JS.Test262 do
     proxy-missing-checks
     Atomics.waitAsync
     tail-call-optimization Temporal ShadowRealm
-    decorators import-attributes import-text import-bytes json-modules top-level-await
+    decorators import-attributes import-text import-bytes json-modules
     source-phase-imports source-phase-imports-module-source import-defer
     arbitrary-module-namespace-names
     regexp-duplicate-named-groups legacy-regexp
@@ -254,7 +254,9 @@ defmodule Browser.JS.Test262 do
     # `import()` (and a module's imports) load files next to the test
     if path,
       do:
-        Process.put(:js_import, fn spec, from -> Modules.import(spec, from || path, loader()) end)
+        Process.put(:js_import, fn spec, from, p ->
+          Modules.import(spec, from || path, loader(), p)
+        end)
 
     try do
       case Parser.parse(source, module: module?) do

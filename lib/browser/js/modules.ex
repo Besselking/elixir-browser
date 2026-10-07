@@ -19,7 +19,7 @@ defmodule Browser.JS.Modules do
   `{:error, message}`, and `fetch.(key)` is `{:ok, source, base}` or `{:error, message}`.
   """
 
-  alias Browser.JS.{Interp, Parser}
+  alias Browser.JS.{Async, Interp, Parser, Promise}
 
   @tag {:symbol, :toStringTag, "Symbol.toStringTag"}
 
@@ -92,6 +92,16 @@ defmodule Browser.JS.Modules do
         base: base,
         status: :new,
         error: nil,
+        eval_error: nil,
+        tla: Async.has_tla?(stmts),
+        async_eval: false,
+        order: 0,
+        pending: 0,
+        parents: [],
+        cycle_root: nil,
+        cap: nil,
+        dfs: 0,
+        anc: 0,
         deps: %{},
         ns: nil,
         scope: Interp.new_scope(Interp.global())
@@ -291,64 +301,257 @@ defmodule Browser.JS.Modules do
   end
 
   # ── evaluating ─────────────────────────────────────────────
+  #
+  # Evaluation follows the specification's cyclic module records with top-level await: a
+  # module that awaits (or imports one that does) is "async": it runs once the async modules
+  # it imports have finished, and the modules that import it wait for it in turn. Everything
+  # else runs at once, depth first. `evaluate/1` returns the promise of the whole graph.
 
   defp evaluate(key) do
+    key =
+      if rec(key).status in [:evaluating_async, :evaluated],
+        do: rec(key).cycle_root || key,
+        else: key
+
+    case rec(key).cap do
+      nil ->
+        cap = Promise.new()
+        set(key, cap: cap)
+
+        case inner(key, [], 0) do
+          {:ok, _, _} ->
+            if rec(key).async_eval == false, do: Promise.resolve(cap, :undefined)
+
+          {:error, e, stack} ->
+            for m <- stack, do: set(m, status: :evaluated, eval_error: {:error, e})
+            Promise.reject(cap, e)
+        end
+
+        cap
+
+      cap ->
+        cap
+    end
+  end
+
+  defp inner(key, stack, index) do
     r = rec(key)
 
     case r.status do
-      :errored ->
-        throw({:js_error, r.error})
-
-      :linked ->
-        set(key, status: :evaluating)
-
-        try do
-          for spec <- r.requests, do: evaluate(r.deps[spec])
-          Interp.module_exec(stmts(key), r.scope)
-          set(key, status: :evaluated)
-        catch
-          {:js_error, e} = t ->
-            set(key, status: :errored, error: e)
-            throw(t)
+      s when s in [:evaluating_async, :evaluated] ->
+        case r.eval_error do
+          nil -> {:ok, index, stack}
+          {:error, e} -> {:error, e, stack}
         end
 
-      # evaluated, or running (a cycle)
-      _ ->
-        :ok
+      :evaluating ->
+        {:ok, index, stack}
+
+      :linked ->
+        set(key, status: :evaluating, dfs: index, anc: index, pending: 0, parents: [])
+
+        with {:ok, index, stack} <- inner_deps(key, r.requests, [key | stack], index + 1),
+             :ok <- run_or_defer(key) do
+          {:ok, index, close_scc(key, stack)}
+        else
+          {:error, e} -> {:error, e, stack}
+          {:error, e, stack} -> {:error, e, stack}
+        end
     end
+  end
+
+  defp inner_deps(_key, [], stack, index), do: {:ok, index, stack}
+
+  defp inner_deps(key, [spec | rest], stack, index) do
+    dep = rec(key).deps[spec]
+
+    with {:ok, index, stack} <- inner(dep, stack, index) do
+      d = rec(dep)
+
+      {eff, err} =
+        if d.status == :evaluating do
+          set(key, anc: min(rec(key).anc, d.anc))
+          {dep, nil}
+        else
+          root = d.cycle_root || dep
+          {root, rec(root).eval_error}
+        end
+
+      case err do
+        {:error, e} ->
+          {:error, e, stack}
+
+        nil ->
+          if rec(eff).async_eval == true do
+            set(key, pending: rec(key).pending + 1)
+            set(eff, parents: rec(eff).parents ++ [key])
+          end
+
+          inner_deps(key, rest, stack, index)
+      end
+    end
+  end
+
+  defp run_or_defer(key) do
+    r = rec(key)
+
+    if r.pending > 0 or r.tla do
+      order = (Process.get(:js_mod_order) || 0) + 1
+      Process.put(:js_mod_order, order)
+      set(key, async_eval: true, order: order)
+      if rec(key).pending == 0, do: exec_async(key)
+      :ok
+    else
+      exec_sync(key)
+    end
+  end
+
+  # the strongly connected component rooted at `key` is complete: its modules leave the stack
+  defp close_scc(key, stack) do
+    r = rec(key)
+
+    if r.anc == r.dfs do
+      pop_scc(key, stack)
+    else
+      stack
+    end
+  end
+
+  defp pop_scc(root, [m | rest]) do
+    status = if rec(m).async_eval == false, do: :evaluated, else: :evaluating_async
+    set(m, status: status, cycle_root: root)
+    if m == root, do: rest, else: pop_scc(root, rest)
+  end
+
+  defp exec_sync(key) do
+    Interp.module_exec(stmts(key), rec(key).scope)
+    :ok
+  catch
+    {:js_error, e} -> {:error, e}
+  end
+
+  defp exec_async(key) do
+    p = Async.run_module(stmts(key), rec(key).scope)
+
+    Promise.then(
+      p,
+      Interp.native("", fn _, _ ->
+        async_fulfilled(key)
+        :undefined
+      end),
+      Interp.native("", fn _, args ->
+        async_rejected(key, Enum.at(args, 0, :undefined))
+        :undefined
+      end)
+    )
 
     :ok
+  end
+
+  defp async_fulfilled(key) do
+    if rec(key).status != :evaluated do
+      set(key, async_eval: false, status: :evaluated)
+      if cap = rec(key).cap, do: Promise.resolve(cap, :undefined)
+
+      for m <- Enum.sort_by(gather(key, []), &rec(&1).order) do
+        mr = rec(m)
+
+        cond do
+          mr.status == :evaluated ->
+            :ok
+
+          mr.tla ->
+            exec_async(m)
+
+          true ->
+            case exec_sync(m) do
+              {:error, e} ->
+                async_rejected(m, e)
+
+              :ok ->
+                set(m, status: :evaluated, async_eval: false)
+                if cap = rec(m).cap, do: Promise.resolve(cap, :undefined)
+            end
+        end
+      end
+    end
+  end
+
+  defp gather(key, acc) do
+    Enum.reduce(rec(key).parents, acc, fn m, acc ->
+      root = rec(m).cycle_root || m
+
+      if m in acc or rec(root).eval_error != nil do
+        acc
+      else
+        set(m, pending: rec(m).pending - 1)
+
+        cond do
+          rec(m).pending != 0 -> acc
+          rec(m).tla -> acc ++ [m]
+          true -> gather(m, acc ++ [m])
+        end
+      end
+    end)
+  end
+
+  defp async_rejected(key, e) do
+    if rec(key).status != :evaluated do
+      set(key, eval_error: {:error, e}, status: :evaluated, async_eval: false)
+      for m <- rec(key).parents, do: async_rejected(m, e)
+      if cap = rec(key).cap, do: Promise.reject(cap, e)
+    end
   end
 
   # ── entry points ───────────────────────────────────────────
 
   @doc """
   Runs `program` as the module `key` (with `base` to resolve its imports against) and returns
-  its namespace.
+  its namespace. A top-level await that has not finished leaves the rest to later jobs; a
+  failure is thrown once the jobs have run.
   """
   def run(key, base, program, loader) do
     new(key, base, program)
-    ns = finish(key, loader)
-    Browser.JS.Promise.run_microtasks()
-    ns
-  end
-
-  @doc "`import(specifier)` from a module (or script) whose base is `from`: the namespace."
-  def import(spec, from, {resolve, _} = loader) do
-    key =
-      case resolve.(spec, from) do
-        {:ok, k} -> ensure(k, loader)
-        {:error, msg} -> Interp.throw_error("TypeError", msg)
-      end
-
-    finish(key, loader)
-  end
-
-  defp finish(key, loader) do
     load(key, loader)
     link(key)
-    evaluate(key)
-    namespace(key)
+    cap = evaluate(key)
+    Promise.run_microtasks()
+
+    case Promise.data(cap) do
+      %{state: :rejected, value: e} -> throw({:js_error, e})
+      _ -> namespace(key)
+    end
+  end
+
+  @doc """
+  `import(specifier)` from a module (or script) whose base is `from`: settles the promise `p`
+  with the namespace once the module has been evaluated.
+  """
+  def import(spec, from, {resolve, _} = loader, p) do
+    try do
+      key =
+        case resolve.(spec, from) do
+          {:ok, k} -> ensure(k, loader)
+          {:error, msg} -> Interp.throw_error("TypeError", msg)
+        end
+
+      load(key, loader)
+      link(key)
+      cap = evaluate(key)
+
+      Promise.then(
+        cap,
+        Interp.native("", fn _, _ -> Promise.resolve(p, namespace(key)) && :undefined end),
+        Interp.native("", fn _, args ->
+          Promise.reject(p, Enum.at(args, 0, :undefined))
+          :undefined
+        end)
+      )
+    catch
+      {:js_error, e} -> Promise.reject(p, e)
+    end
+
+    :ok
   end
 
   # ── namespace objects ──────────────────────────────────────
@@ -409,7 +612,7 @@ defmodule Browser.JS.Modules do
 
   @doc false
   # (assigning is a TypeError in strict code, which is not told apart here: it is ignored)
-  def host_put({:ns, _}, _key, _v, _self), do: :ok
+  def host_put({:ns, _}, _key, _v, _self), do: :readonly
 
   @doc false
   def host_has({:ns, key}, name), do: is_binary(name) and is_map_key(bindings(key), name)
