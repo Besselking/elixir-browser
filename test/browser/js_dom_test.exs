@@ -510,6 +510,41 @@ defmodule Browser.JS.DOMTest do
     end
   end
 
+  describe "contextmenu" do
+    defp nid_of(nodes, id) when is_list(nodes), do: Enum.find_value(nodes, &nid_of(&1, id))
+    defp nid_of({:text, _}, _id), do: nil
+
+    defp nid_of({:element, _tag, attrs, kids}, id) do
+      if {"id", id} in attrs,
+        do: List.keyfind(attrs, "@nid", 0) |> elem(1),
+        else: nid_of(kids, id)
+    end
+
+    test "is dispatched to an element by its layout number and can be cancelled" do
+      {raw, _} =
+        """
+        <p id="a">text</p>
+        <script>
+        document.getElementById("a").addEventListener("contextmenu", function (e) {
+          console.log("menu " + e.clientX + " " + e.button);
+          e.preventDefault();
+        });
+        </script>
+        """
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      raw = Browser.Nids.index(raw)
+      pid = Runtime.start(raw, %{url: "http://t.test/", width: 800, height: 600})
+      Runtime.run_scripts(pid)
+
+      props = %{"clientX" => 12.0, "clientY" => 3.0, "button" => 2.0}
+      reply = Runtime.dispatch(pid, {:edit_host, nid_of(raw, "a")}, "contextmenu", props)
+      assert logs(reply) == ["menu 12 2"]
+      assert reply.prevented
+    end
+  end
+
   describe "layout and scrolling" do
     # a page laid out for real, whose scripts are told where things are
     defp laid_out(html, scroll \\ 0) do

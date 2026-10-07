@@ -204,4 +204,17 @@ defmodule Browser.UIPageIndexTest do
   test "an empty page has one empty band" do
     assert %{bands: {[]}, sticky: [], canvas: nil} = UI.index_page([])
   end
+
+  test "item_at finds the topmost element's item and skips unnumbered or sticky ones" do
+    items = [
+      %{type: :rect, x: 0, y: 0, w: 500, h: 500, nid: 1},
+      %{type: :image, url: "http://t/p.png", x: 10, y: 10, w: 50, h: 40, nid: 2},
+      %{type: :rect, x: 0, y: 0, w: 500, h: 500},
+      %{type: :text, x: 10, y: 10, w: 50, h: 16, nid: 3, stick: %{}}
+    ]
+
+    assert UI.item_at(items, 20, 20).nid == 2
+    assert UI.item_at(items, 200, 200).nid == 1
+    assert UI.item_at(items, 900, 900) == nil
+  end
 end
