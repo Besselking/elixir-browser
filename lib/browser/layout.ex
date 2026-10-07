@@ -2203,6 +2203,8 @@ defmodule Browser.Layout do
       st
       | items: Enum.reverse(moved) ++ st.items,
         n: st.n + length(moved),
+        # a float is part of what its container needs when sizing to the content
+        ext: max(st.ext, x + w + st.right - st.free),
         floats: [float | st.floats]
     }
   end

@@ -4829,4 +4829,43 @@ defmodule Browser.LayoutTest do
       assert box.h == 20
     end
   end
+
+  describe "invalid negative sizes" do
+    defp neg_box(style) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"background:green;#{style}\">x</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1.type == :rect))
+    end
+
+    test "a negative height is dropped and the earlier declaration stays" do
+      assert neg_box("height:30px;height:-1px").h == 30
+    end
+
+    test "a negative width is dropped" do
+      assert neg_box("width:50px;width:-5px").w == 50
+    end
+
+    test "negative zero is valid" do
+      assert neg_box("height:-0px") == nil
+    end
+  end
+
+  describe "floats and shrink-to-fit" do
+    test "a float inside a float adds to its width" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"float:left;border-right:5px solid red\"><div style=\"float:left;border-right:5px solid blue;height:10px\"></div></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert Enum.sort(Enum.map(rects, &{&1.x, &1.w})) == [{0, 5}, {5, 5}]
+    end
+  end
 end

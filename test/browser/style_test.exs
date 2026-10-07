@@ -438,12 +438,12 @@ defmodule Browser.StyleTest do
       assert comp(html, css, "svg")["scale"] |> String.split() == ["-100%", "1"]
     end
 
-    test "margins may be negative, padding may not" do
+    test "margins may be negative, padding may not (the declaration is dropped)" do
       css = "div { margin: -4px -10% 0 -1rem; padding: -3px 2px }"
       c = computed_of(prune("<div>x</div>", css), "div")
       assert c["margin-top"] == -4.0 and c["margin-left"] == -16.0
       assert c["margin-right"] == {:pct, -0.1}
-      assert c["padding-top"] == 0.0
+      assert c["padding-top"] == nil
       assert c["padding-left"] == 2.0
     end
 
