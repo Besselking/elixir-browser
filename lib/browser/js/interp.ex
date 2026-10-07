@@ -2729,7 +2729,16 @@ defmodule Browser.JS.Interp do
 
   defp exec({kind, decl, pat, obj, body}, env, labels) when kind in [:forin, :forof] do
     :erlang.put(:js_last, :undefined)
-    target = ev(obj, env)
+
+    # the head's own names are in their temporal dead zone while the object is evaluated
+    target =
+      if decl in [:let, :const] do
+        tdz = new_scope(env)
+        for name <- pattern_names(pat, []), do: declare(tdz, name, :tdz)
+        ev(obj, tdz)
+      else
+        ev(obj, env)
+      end
 
     mode = if decl == nil, do: :assign, else: decl
 
