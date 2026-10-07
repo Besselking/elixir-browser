@@ -21,8 +21,7 @@ defmodule Browser.JS.Test262 do
   @unsupported_features ~w(
     Temporal ShadowRealm
     decorators
-    source-phase-imports source-phase-imports-module-source import-defer
-    arbitrary-module-namespace-names
+    source-phase-imports-module-source
     regexp-duplicate-named-groups legacy-regexp
     nonextensible-applies-to-private
   )

@@ -41,53 +41,73 @@ defmodule Browser.JS.Modules do
     Process.put({:js_hoist, {:module, key}}, stmts)
 
     info =
-      Enum.reduce(stmts, %{requests: [], imports: [], locals: %{}, indirect: %{}, stars: []}, fn
-        {:import, spec, bindings}, acc ->
-          imports =
-            for b <- bindings do
-              case b do
-                {:default, l} -> {l, spec, "default"}
-                {:ns, l} -> {l, spec, :ns}
-                {:named, imported, l} -> {l, spec, imported}
+      Enum.reduce(
+        stmts,
+        %{
+          requests: [],
+          events: [],
+          normal: [],
+          deferred: [],
+          imports: [],
+          locals: %{},
+          indirect: %{},
+          stars: []
+        },
+        fn
+          {:import, spec, bindings}, acc ->
+            imports =
+              for b <- bindings do
+                case b do
+                  {:default, l} -> {l, spec, "default"}
+                  {:ns, l} -> {l, spec, :ns}
+                  {:defer_ns, l} -> {l, spec, :defer_ns}
+                  {:named, imported, l} -> {l, spec, imported}
+                end
               end
-            end
 
-          request(%{acc | imports: acc.imports ++ imports}, spec)
+            if match?([{:defer_ns, _}], bindings),
+              do: defer_request(%{acc | imports: acc.imports ++ imports}, spec),
+              else: request(%{acc | imports: acc.imports ++ imports}, spec)
 
-        {:export, {:var, _, decls}}, acc ->
-          names = Enum.reduce(decls, [], fn {pat, _}, a -> Interp.pattern_names(pat, a) end)
-          Enum.reduce(names, acc, &local(&2, &1, &1))
+          {:export, {:var, _, decls}}, acc ->
+            names = Enum.reduce(decls, [], fn {pat, _}, a -> Interp.pattern_names(pat, a) end)
+            Enum.reduce(names, acc, &local(&2, &1, &1))
 
-        {:export, {:fundecl, n, _}}, acc ->
-          local(acc, n, n)
+          {:export, {:fundecl, n, _}}, acc ->
+            local(acc, n, n)
 
-        {:export_default, {k, n, _}}, acc when k in [:fundecl, :classdecl] ->
-          local(acc, "default", n)
+          {:export_default, {k, n, _}}, acc when k in [:fundecl, :classdecl] ->
+            local(acc, "default", n)
 
-        {:export_default, {:expr, _}}, acc ->
-          local(acc, "default", :default_export)
+          {:export_default, {:expr, _}}, acc ->
+            local(acc, "default", :default_export)
 
-        {:export_names, names}, acc ->
-          Enum.reduce(names, acc, fn {l, exported}, a -> local(a, exported, l) end)
+          {:export_names, names}, acc ->
+            Enum.reduce(names, acc, fn {l, exported}, a -> local(a, exported, l) end)
 
-        {:export_from, spec, :all}, acc ->
-          acc = request(acc, spec)
-          %{acc | stars: acc.stars ++ [spec]}
+          {:export_from, spec, :all}, acc ->
+            acc = request(acc, spec)
+            %{acc | stars: acc.stars ++ [spec]}
 
-        {:export_from, spec, names}, acc ->
-          acc = request(acc, spec)
+          {:export_from, spec, names}, acc ->
+            acc = request(acc, spec)
 
-          Enum.reduce(names, acc, fn
-            {:star, exported}, a -> indirect(a, exported, {spec, :ns})
-            {imported, exported}, a -> indirect(a, exported, {spec, imported})
-          end)
+            Enum.reduce(names, acc, fn
+              {:star, exported}, a -> indirect(a, exported, {spec, :ns})
+              {imported, exported}, a -> indirect(a, exported, {spec, imported})
+            end)
 
-        _, acc ->
-          acc
-      end)
+          _, acc ->
+            acc
+        end
+      )
 
     put_rec(
       Map.merge(info, %{
+        requests: ordered_requests(info),
+        deferred_only: info.deferred -- info.normal,
+        dns: nil,
+        bind: nil,
         key: key,
         base: base,
         status: :new,
@@ -111,7 +131,22 @@ defmodule Browser.JS.Modules do
   end
 
   defp request(acc, spec),
-    do: if(spec in acc.requests, do: acc, else: %{acc | requests: acc.requests ++ [spec]})
+    do: %{acc | normal: [spec | acc.normal], events: [{spec, :n} | acc.events]}
+
+  # `import defer * as ns from spec`: the module is loaded and linked, not evaluated
+  defp defer_request(acc, spec),
+    do: %{acc | deferred: [spec | acc.deferred], events: [{spec, :d} | acc.events]}
+
+  # the requested modules in order: a module also imported without `defer` counts where it
+  # is first imported that way
+  defp ordered_requests(info) do
+    events = Enum.reverse(info.events)
+
+    events
+    |> Enum.filter(fn {spec, kind} -> kind == :n or spec not in info.normal end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.uniq()
+  end
 
   defp local(acc, exported, name), do: %{acc | locals: Map.put(acc.locals, exported, name)}
   defp indirect(acc, exported, ref), do: %{acc | indirect: Map.put(acc.indirect, exported, ref)}
@@ -242,6 +277,7 @@ defmodule Browser.JS.Modules do
   end
 
   defp through(r, spec, :ns, _seen), do: {:ok, {:ns, r.deps[spec]}}
+  defp through(r, spec, :defer_ns, _seen), do: {:ok, {:dns, r.deps[spec]}}
   defp through(r, spec, imported, seen), do: resolve(r.deps[spec], imported, seen)
 
   defp star_resolve(r, name, seen) do
@@ -296,15 +332,18 @@ defmodule Browser.JS.Modules do
       dep = r.deps[spec]
 
       binding =
-        if imported == :ns do
-          {:ok, {:ns, dep}}
-        else
-          resolve(dep, imported, [])
+        case imported do
+          :ns -> {:ok, {:ns, dep}}
+          :defer_ns -> {:ok, {:dns, dep}}
+          _ -> resolve(dep, imported, [])
         end
 
       case binding do
         {:ok, {:ns, k}} ->
           Interp.declare(scope, local, namespace(k), true)
+
+        {:ok, {:dns, k}} ->
+          Interp.declare(scope, local, deferred_namespace(k), true)
 
         {:ok, {k, name}} ->
           Interp.declare(scope, local, {:alias, rec(k).scope, name}, true)
@@ -374,21 +413,52 @@ defmodule Browser.JS.Modules do
       :linked ->
         set(key, status: :evaluating, dfs: index, anc: index, pending: 0, parents: [])
 
-        with {:ok, index, stack} <- inner_deps(key, r.requests, [key | stack], index + 1),
+        with {:ok, index, stack} <-
+               inner_deps(key, dep_keys(r), [key | stack], index + 1),
              :ok <- run_or_defer(key) do
           {:ok, index, close_scc(key, stack)}
         else
-          {:error, e} -> {:error, e, stack}
+          {:error, e} -> {:error, e, [key | stack]}
           {:error, e, stack} -> {:error, e, stack}
         end
     end
   end
 
+  # the modules evaluated before `r`: its dependencies, but for a module imported only with
+  # `defer` just the asynchronous modules it needs, which cannot be waited for later
+  defp dep_keys(r) do
+    Enum.flat_map(r.requests, fn spec ->
+      if spec in r.deferred_only,
+        do: gather_async(r.deps[spec], []) |> elem(0) |> Enum.reverse(),
+        else: [r.deps[spec]]
+    end)
+  end
+
+  defp gather_async(key, seen) do
+    r = rec(key)
+
+    cond do
+      key in seen or r.status == :evaluated ->
+        {[], seen}
+
+      r.tla ->
+        {[key], [key | seen]}
+
+      true ->
+        Enum.reduce(r.requests, {[], [key | seen]}, fn spec, {acc, sn} ->
+          if spec in r.deferred_only do
+            {acc, sn}
+          else
+            {found, sn} = gather_async(r.deps[spec], sn)
+            {found ++ acc, sn}
+          end
+        end)
+    end
+  end
+
   defp inner_deps(_key, [], stack, index), do: {:ok, index, stack}
 
-  defp inner_deps(key, [spec | rest], stack, index) do
-    dep = rec(key).deps[spec]
-
+  defp inner_deps(key, [dep | rest], stack, index) do
     with {:ok, index, stack} <- inner(dep, stack, index) do
       d = rec(dep)
 
@@ -552,6 +622,12 @@ defmodule Browser.JS.Modules do
   with the namespace once the module has been evaluated.
   """
   def import(spec, from, {resolve, _} = loader, p, type \\ nil) do
+    {defer?, type} =
+      case type do
+        {:defer, t} -> {true, t}
+        t -> {false, t}
+      end
+
     try do
       key =
         case resolve.(spec, from) do
@@ -561,16 +637,14 @@ defmodule Browser.JS.Modules do
 
       load(key, loader)
       link(key)
-      cap = evaluate(key)
 
-      Promise.then(
-        cap,
-        Interp.native("", fn _, _ -> Promise.resolve(p, namespace(key)) && :undefined end),
-        Interp.native("", fn _, args ->
-          Promise.reject(p, Enum.at(args, 0, :undefined))
-          :undefined
-        end)
-      )
+      if defer? do
+        # `import.defer`: only the asynchronous modules the target needs are evaluated now
+        caps = for m <- key |> gather_async([]) |> elem(0) |> Enum.reverse(), do: evaluate(m)
+        await_all(caps, p, fn -> deferred_namespace(key) end)
+      else
+        await_all([evaluate(key)], p, fn -> namespace(key) end)
+      end
     catch
       {:js_error, e} -> Promise.reject(p, e)
     end
@@ -578,7 +652,56 @@ defmodule Browser.JS.Modules do
     :ok
   end
 
+  # settles `p` with `value.()` once every promise in `caps` has fulfilled, or with the first
+  # rejection
+  defp await_all([], p, value), do: Promise.resolve(p, value.())
+
+  defp await_all([cap | rest], p, value) do
+    Promise.then(
+      cap,
+      Interp.native("", fn _, _ -> await_all(rest, p, value) && :undefined end),
+      Interp.native("", fn _, args ->
+        Promise.reject(p, Enum.at(args, 0, :undefined))
+        :undefined
+      end)
+    )
+  end
+
   # ── namespace objects ──────────────────────────────────────
+
+  defp ensure_bindings(key) do
+    case rec(key).bind do
+      nil ->
+        bindings =
+          for name <- exported_names(key, []),
+              {:ok, b} <- [resolve(key, name, [])],
+              into: %{},
+              do: {name, b}
+
+        set(key, bind: bindings)
+        bindings
+
+      bindings ->
+        bindings
+    end
+  end
+
+  defp make_ns(key, tag) do
+    ensure_bindings(key)
+    {:obj, id} = obj = Interp.new_host(__MODULE__, {tag, key}, :null)
+    o = Interp.deref(id)
+    tag_value = if tag == :dns, do: "Deferred Module", else: "Module"
+
+    Interp.store(
+      id,
+      o
+      |> Map.put(:props, %{@tag => tag_value})
+      |> Map.put(:attrs, %{@tag => %{w: false, c: false, e: false}})
+      |> Map.put(:ext, false)
+    )
+
+    obj
+  end
 
   @doc "The namespace object of a module (made once)."
   def namespace(key) do
@@ -587,32 +710,85 @@ defmodule Browser.JS.Modules do
         obj
 
       nil ->
-        bindings =
-          for name <- exported_names(key, []),
-              {:ok, b} <- [resolve(key, name, [])],
-              into: %{},
-              do: {name, b}
-
-        {:obj, id} = obj = Interp.new_host(__MODULE__, {:ns, key}, :null)
-        o = Interp.deref(id)
-
-        Interp.store(
-          id,
-          o
-          |> Map.put(:props, %{@tag => "Module"})
-          |> Map.put(:attrs, %{@tag => %{w: false, c: false, e: false}})
-          |> Map.put(:ext, false)
-        )
-
-        set(key, ns: {obj, bindings})
+        obj = make_ns(key, :ns)
+        set(key, ns: {obj, nil})
         obj
     end
   end
 
-  defp bindings(key), do: elem(rec(key).ns, 1)
+  @doc "The deferred namespace object of a module: reading an export evaluates the module."
+  def deferred_namespace(key) do
+    case rec(key).dns do
+      nil ->
+        obj = make_ns(key, :dns)
+        set(key, dns: obj)
+        obj
+
+      obj ->
+        obj
+    end
+  end
+
+  defp bindings(key), do: ensure_bindings(key)
+
+  # the module of a deferred namespace is evaluated, synchronously, before an export is read
+  defp trigger({:dns, key}, name) when is_binary(name) and name != "then", do: sync_eval(key)
+  defp trigger(_, _), do: :ok
+
+  defp symbol_like?({:dns, _}, "then"), do: true
+  defp symbol_like?(_, _), do: false
+
+  defp sync_eval(key) do
+    r = rec(key)
+
+    cond do
+      r.status == :evaluated ->
+        root = r.cycle_root || key
+
+        case rec(root).eval_error || r.eval_error do
+          {:error, e} -> throw({:js_error, e})
+          nil -> :ok
+        end
+
+      not ready?(key, []) ->
+        Interp.throw_error("TypeError", "The deferred module cannot be evaluated synchronously")
+
+      true ->
+        cap = evaluate(key)
+
+        case Promise.data(cap) do
+          %{state: :rejected, value: e} -> throw({:js_error, e})
+          _ -> :ok
+        end
+    end
+  end
+
+  defp ready?(key, seen) do
+    r = rec(key)
+
+    cond do
+      key in seen ->
+        true
+
+      r.status == :evaluated ->
+        true
+
+      r.status in [:evaluating, :evaluating_async] ->
+        false
+
+      r.tla ->
+        false
+
+      true ->
+        Enum.all?(r.requests, fn spec ->
+          spec in r.deferred_only or ready?(r.deps[spec], [key | seen])
+        end)
+    end
+  end
 
   # the current value of an export (a ReferenceError while it is uninitialized)
   defp read({:ns, k}, _name), do: namespace(k)
+  defp read({:dns, k}, _name), do: deferred_namespace(k)
 
   defp read({k, local}, name) do
     case Interp.module_binding(rec(k).scope, local) do
@@ -625,10 +801,16 @@ defmodule Browser.JS.Modules do
   end
 
   @doc false
-  def host_get({:ns, key}, name, _self) when is_binary(name) do
-    case bindings(key) do
-      %{^name => b} -> {:ok, read(b, name)}
-      _ -> :miss
+  def host_get({tag, key} = data, name, _self) when tag in [:ns, :dns] and is_binary(name) do
+    if symbol_like?(data, name) do
+      :miss
+    else
+      trigger(data, name)
+
+      case bindings(key) do
+        %{^name => b} -> {:ok, read(b, name)}
+        _ -> :miss
+      end
     end
   end
 
@@ -636,42 +818,68 @@ defmodule Browser.JS.Modules do
 
   @doc false
   # (assigning is a TypeError in strict code, which is not told apart here: it is ignored)
-  def host_put({:ns, _}, _key, _v, _self), do: :readonly
+  def host_put({tag, _}, _key, _v, _self) when tag in [:ns, :dns], do: :readonly
 
   @doc false
-  def host_has({:ns, key}, name), do: is_binary(name) and is_map_key(bindings(key), name)
+  def host_has({tag, key} = data, name) when tag in [:ns, :dns] do
+    if is_binary(name) and not symbol_like?(data, name) do
+      trigger(data, name)
+      is_map_key(bindings(key), name)
+    else
+      false
+    end
+  end
 
   @doc false
   # (each export is read: an uninitialized one is a ReferenceError)
-  def host_keys({:ns, key}) do
-    names = names(key)
+  def host_keys({tag, key} = data) when tag in [:ns, :dns] do
+    if tag == :dns, do: sync_eval(key)
+    names = names(data)
     Enum.each(names, &read(bindings(key)[&1], &1))
     names
   end
 
   @doc false
-  def host_delete({:ns, key}, name) do
-    if is_binary(name) and is_map_key(bindings(key), name), do: false, else: :default
+  def host_delete({tag, key} = data, name) when tag in [:ns, :dns] do
+    if is_binary(name) and not symbol_like?(data, name) do
+      trigger(data, name)
+      if is_map_key(bindings(key), name), do: false, else: :default
+    else
+      :default
+    end
   end
 
   @doc "The exported names, in code unit order."
+  def names({:dns, key}) do
+    sync_eval(key)
+    names(key)
+  end
+
   def names({:ns, key}), do: names(key)
   def names(key), do: key |> bindings() |> Map.keys() |> Enum.sort()
 
   @doc false
   # the own property of a namespace: writable, enumerable, not configurable
-  def property({:ns, key}, name) do
-    case bindings(key) do
-      %{^name => b} -> {:data, read(b, name), true, true, false}
-      _ -> nil
+  def property({tag, key} = data, name) when tag in [:ns, :dns] do
+    if symbol_like?(data, name) do
+      nil
+    else
+      trigger(data, name)
+
+      case bindings(key) do
+        %{^name => b} -> {:data, read(b, name), true, true, false}
+        _ -> nil
+      end
     end
   end
 
   @doc false
   # `Object.defineProperty` on an export: only what changes nothing is allowed
-  def define_own({:ns, key}, name, desc) do
-    case bindings(key) do
-      %{^name => b} ->
+  def define_own({tag, key} = data, name, desc) when tag in [:ns, :dns] do
+    trigger(data, name)
+
+    case if(symbol_like?(data, name), do: %{}, else: bindings(key)) do
+      %{^name => b} when not is_nil(name) ->
         current = read(b, name)
 
         ok? =

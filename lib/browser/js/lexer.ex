@@ -146,7 +146,7 @@ defmodule Browser.JS.Lexer do
     # parser has no use for this token, so it is a syntax error wherever it appears
     # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
     kind =
-      if (name in @keywords or name == "target") and
+      if (name in @keywords or name in ~w(target get set of async from as)) and
            name not in ~w(implements interface package private protected public) and
            escaped?(s, rest),
          do: :eid,

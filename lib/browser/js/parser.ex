@@ -184,6 +184,7 @@ defmodule Browser.JS.Parser do
             (case b do
                {:default, l} -> l
                {:ns, l} -> l
+               {:defer_ns, l} -> l
                {:named, _, l} -> l
              end)
 
@@ -757,6 +758,20 @@ defmodule Browser.JS.Parser do
 
   defp with_entries(_, _), do: throw({:syntax, "bad import attributes"})
 
+  # `import defer * as ns from "m"`
+  defp module_item([
+         {:id, "import", _},
+         {:id, "defer", _},
+         {:p, "*", _},
+         {:id, "as", _},
+         {:id, local, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:import, spec, [{:defer_ns, local}]}, semi(ts)}
+  end
+
   defp module_item([{:id, "import", _}, {:str, spec, _} | ts]) do
     {spec, ts} = with_spec(spec, ts)
     {{:import, spec, []}, semi(ts)}
@@ -862,10 +877,10 @@ defmodule Browser.JS.Parser do
     case ts do
       [{:id, "from", _}, {:str, spec, _} | ts] ->
         {spec, ts} = with_spec(spec, ts)
-        {{:export_from, spec, names}, semi(ts)}
+        {{:export_from, spec, from_export_names(names)}, semi(ts)}
 
       ts ->
-        {{:export_names, names}, semi(ts)}
+        {{:export_names, plain_export_names(names)}, semi(ts)}
     end
   end
 
@@ -878,10 +893,11 @@ defmodule Browser.JS.Parser do
          {:id, "export", _},
          {:p, "*", _},
          {:id, "as", _},
-         {:id, name, _},
+         {k, name, _},
          {:id, "from", _},
          {:str, spec, _} | ts
-       ]) do
+       ])
+       when k in [:id, :str] do
     {spec, ts} = with_spec(spec, ts)
     {{:export_from, spec, [{:star, name}]}, semi(ts)}
   end
@@ -918,7 +934,7 @@ defmodule Browser.JS.Parser do
 
   defp import_named([{k, imported, _}, {:id, "as", _}, {:id, local, _} | ts], acc)
        when k in [:id, :str],
-       do: import_named_next(ts, [{:named, imported, local} | acc])
+       do: import_named_next(ts, [{:named, well_formed(k, imported), local} | acc])
 
   defp import_named([{k, name, _} | ts], acc) when k in [:id, :str],
     do: import_named_next(ts, [{:named, name, name} | acc])
@@ -932,12 +948,43 @@ defmodule Browser.JS.Parser do
   defp export_names([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
   defp export_names([{:p, ",", _} | ts], acc), do: export_names(ts, acc)
 
-  defp export_names([{:id, local, _}, {:id, "as", _}, {k, exported, _} | ts], acc)
-       when k in [:id, :str],
-       do: export_names(ts, [{local, exported} | acc])
+  defp export_names([{lk, local, _}, {:id, "as", _}, {k, exported, _} | ts], acc)
+       when lk in [:id, :str] and k in [:id, :str],
+       do: export_names(ts, [{str_local(lk, local), well_formed(k, exported)} | acc])
 
   defp export_names([{:id, name, _} | ts], acc), do: export_names(ts, [{name, name} | acc])
+
+  defp export_names([{:str, name, _} | ts], acc),
+    do: export_names(ts, [{{:str, well_formed(:str, name)}, name} | acc])
+
   defp export_names(_ts, _acc), do: throw({:syntax, "bad export list"})
+
+  # a string can name what is re-exported (`export { "a-b" as c } from "m"`) but not a local binding
+  defp str_local(:id, name), do: name
+  defp str_local(:str, name), do: {:str, well_formed(:str, name)}
+
+  # the lexer turns a lone surrogate into U+FFFD, which a module export name must not contain
+  defp well_formed(:str, name) do
+    if String.contains?(name, "\uFFFD"),
+      do: throw({:syntax, "a module export name must be well-formed unicode"}),
+      else: name
+  end
+
+  defp well_formed(_, name), do: name
+
+  defp plain_export_names(names) do
+    Enum.map(names, fn
+      {{:str, _}, _} -> throw({:syntax, "a string cannot be exported without `from`"})
+      n -> n
+    end)
+  end
+
+  defp from_export_names(names),
+    do:
+      Enum.map(names, fn
+        {{:str, l}, e} -> {l, e}
+        n -> n
+      end)
 
   defp expression_statement(ts) do
     {e, ts} = expression(ts)
@@ -2171,6 +2218,10 @@ defmodule Browser.JS.Parser do
         [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
           throw({:syntax, "new import() is not allowed"})
 
+        [{:id, "new", _}, {:id, "import", _}, {:p, ".", _}, {:id, k, _}, {:p, "(", _} | _]
+        when k in ["source", "defer"] ->
+          throw({:syntax, "new import.#{k}() is not allowed"})
+
         [{:id, "new", _} | ts] ->
           new_expression(ts)
 
@@ -2238,6 +2289,10 @@ defmodule Browser.JS.Parser do
 
         [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
           throw({:syntax, "new import() is not allowed"})
+
+        [{:id, "new", _}, {:id, "import", _}, {:p, ".", _}, {:id, k, _}, {:p, "(", _} | _]
+        when k in ["source", "defer"] ->
+          throw({:syntax, "new import.#{k}() is not allowed"})
 
         [{:id, "new", _} | t] ->
           new_expression(t)
@@ -2325,6 +2380,31 @@ defmodule Browser.JS.Parser do
     {parts, raw}
   end
 
+  # the specifier and the optional options of an import call, after its `(`
+  defp import_args(ts) do
+    {e, ts} = assignment(ts)
+
+    case ts do
+      [{:p, ")", _} | ts] ->
+        {[e], ts}
+
+      [{:p, ",", _}, {:p, ")", _} | ts] ->
+        {[e], ts}
+
+      [{:p, ",", _} | ts] ->
+        {opts, ts} = assignment(ts)
+
+        case ts do
+          [{:p, ",", _}, {:p, ")", _} | ts] -> {[e, opts], ts}
+          [{:p, ")", _} | ts] -> {[e, opts], ts}
+          _ -> throw({:syntax, "expected )"})
+        end
+
+      _ ->
+        throw({:syntax, "expected )"})
+    end
+  end
+
   defp primary([{:num, n, mark} | ts]) do
     check_octal_string(mark)
     {{:num, n}, ts}
@@ -2357,30 +2437,25 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:id, "class", _} | ts]), do: class_rest(ts)
 
-  # `import(specifier)` and `import.meta`
+  # `import(specifier)`, `import.source(specifier)`, `import.defer(specifier)` and `import.meta`
   defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
-    {e, ts} = assignment(ts)
+    {args, ts} = import_args(ts)
 
-    case ts do
-      [{:p, ")", _} | ts] ->
-        {{:import_call, e}, ts}
-
-      [{:p, ",", _}, {:p, ")", _} | ts] ->
-        {{:import_call, e}, ts}
-
-      [{:p, ",", _} | ts] ->
-        {opts, ts} = assignment(ts)
-
-        case ts do
-          [{:p, ",", _}, {:p, ")", _} | ts] -> {{:import_call, e, opts}, ts}
-          [{:p, ")", _} | ts] -> {{:import_call, e, opts}, ts}
-          _ -> throw({:syntax, "expected )"})
-        end
-
-      _ ->
-        throw({:syntax, "expected )"})
+    case args do
+      [e] -> {{:import_call, e}, ts}
+      [e, opts] -> {{:import_call, e, opts}, ts}
     end
   end
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, phase, _}, {:p, "(", _} | ts])
+       when phase in ["source", "defer"] do
+    {args, ts} = import_args(ts)
+    {{:import_phase, String.to_atom(phase), args}, ts}
+  end
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, phase, _} | _])
+       when phase in ["source", "defer"],
+       do: throw({:syntax, "import.#{phase} must be called"})
 
   defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]) do
     unless Process.get(:js_module, false),
