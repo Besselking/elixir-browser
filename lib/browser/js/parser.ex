@@ -1249,18 +1249,52 @@ defmodule Browser.JS.Parser do
 
   defp pattern([{:id, _, _} | _] = ts, allow_default), do: pattern_id(ts, allow_default)
 
-  defp pattern([{:p, "[", _} | ts], allow_default) do
-    {elems, ts} = array_pattern(ts, [])
-    with_default({:arrpat, elems}, ts, allow_default)
-  end
+  # in an assignment pattern `{}[k]` or `[a].b` is a property target, not a nested pattern
+  defp pattern([{:p, open, _} | _] = ts, allow_default) when open in ["[", "{"] do
+    if Process.get(:js_assign_pattern, false) do
+      nested =
+        try do
+          {:ok, nested_pattern(ts, allow_default)}
+        catch
+          {:syntax, _} = err -> {:error, err}
+        end
 
-  defp pattern([{:p, "{", _} | ts], allow_default) do
-    {props, rest, ts} = object_pattern(ts, [], nil)
-    with_default({:objpat, props, rest}, ts, allow_default)
+      case nested do
+        {:ok, {_, [{:p, m, _} | _]} = r} when m not in [".", "["] -> r
+        {:ok, {_, [{:p, "[", _} | _]}} -> member_target(ts, allow_default, nil)
+        {:ok, {_, [{:p, ".", _} | _]}} -> member_target(ts, allow_default, nil)
+        {:ok, r} -> r
+        {:error, err} -> member_target(ts, allow_default, err)
+      end
+    else
+      nested_pattern(ts, allow_default)
+    end
   end
 
   defp pattern([{_, v, _} | _], _),
     do: throw({:syntax, "unexpected token #{inspect(v)} in binding"})
+
+  defp nested_pattern([{:p, "[", _} | ts], allow_default) do
+    {elems, ts} = array_pattern(ts, [])
+    with_default({:arrpat, elems}, ts, allow_default)
+  end
+
+  defp nested_pattern([{:p, "{", _} | ts], allow_default) do
+    {props, rest, ts} = object_pattern(ts, [], nil)
+    with_default({:objpat, props, rest}, ts, allow_default)
+  end
+
+  defp member_target(ts, allow_default, err) do
+    {target, rest} = call_chain(ts)
+
+    if match?({tag, _} when tag in [:array, :object, :chain, :call], target) or
+         match?({tag, _, _} when tag in [:array, :object], target),
+       do: throw(err || {:syntax, "invalid assignment target"})
+
+    with_default(target, rest, allow_default)
+  catch
+    {:syntax, _} = e -> throw(err || e)
+  end
 
   defp pattern_id([{:id, name, _} | ts], allow_default) when name not in @reserved do
     check_strict_name(name)
