@@ -6488,7 +6488,13 @@ defmodule Browser.Layout do
       end
 
     # a table is at least as high as its `height`, the rows share what its content leaves over
-    %{sx: round(sx), sy: round(sy), collapse?: collapse?, h: num(c["height"])}
+    %{
+      sx: round(sx),
+      sy: round(sy),
+      collapse?: collapse?,
+      h: num(c["height"]),
+      fixed?: fixed_table?(c)
+    }
   end
 
   @cell_tags ~w(td th)
@@ -6781,6 +6787,10 @@ defmodule Browser.Layout do
     end
   end
 
+  defp fixed_table?(c) do
+    c["table-layout"] == "fixed" and c["width"] not in [nil, :auto]
+  end
+
   # -> {items, table width, height}
   defp table_layout(st, ts, model, avail) do
     placed = table_grid(model.rows)
@@ -6794,6 +6804,12 @@ defmodule Browser.Layout do
     else
       natural? = avail > @unbounded / 2
       {mins, maxs, pcts} = st |> table_columns(placed, ncols) |> column_widths(model.cols)
+
+      # `table-layout: fixed`: the content decides nothing, columns without a width share what is left
+      {mins, maxs} =
+        if ts.fixed? and not natural?,
+          do: {Enum.map(mins, fn _ -> 0 end), Enum.map(maxs, fn _ -> 0 end)},
+          else: {mins, maxs}
 
       exact =
         for i <- 0..(ncols - 1)//1,
@@ -6815,7 +6831,7 @@ defmodule Browser.Layout do
       # first pass: the height every cell wants at the width of its columns
       sized =
         Enum.map(placed, fn p ->
-          w = max(span_w.(p.col, p.cell.colspan), 1)
+          w = max(span_w.(p.col, p.cell.colspan), 0)
           {eprops, vdelta} = if ts.collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
           sub = if eprops == %{}, do: p.cell.sub, else: p.cell.build.(eprops)
           {items0, h, _} = layout_atom(st, sub, w, if(eprops == %{}, do: p.cell.key))

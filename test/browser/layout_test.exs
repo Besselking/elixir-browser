@@ -5267,7 +5267,7 @@ defmodule Browser.LayoutTest do
       html = """
       <style>body{margin:0}</style>
       <p style="margin:0 0 16px;height:20px"></p>
-      <table style="margin:15px 0;border-spacing:0"><tr><td style="padding:0;height:10px;background:blue"></td></tr></table>
+      <table style="margin:15px 0;border-spacing:0"><tr><td style="padding:0;width:10px;height:10px;background:blue"></td></tr></table>
       """
 
       page = Browser.Page.build(html, "about:home")
@@ -5393,6 +5393,15 @@ defmodule Browser.LayoutTest do
              |> Enum.map(& &1.y)
              |> Enum.uniq()
              |> length() == 2
+    end
+  end
+
+  describe "table-layout: fixed" do
+    test "a zero-wide fixed table has zero-wide cells" do
+      html =
+        ~s(<table style="table-layout:fixed;width:0;border-spacing:0"><tr><td style="padding:0;background:red;height:20px"></td></tr></table>)
+
+      refute Enum.any?(laid_out(html), &(&1.type == :rect and &1.w > 0))
     end
   end
 
