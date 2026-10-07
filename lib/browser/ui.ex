@@ -30,7 +30,8 @@ defmodule Browser.UI do
     :status,
     :cursors,
     :toolbar,
-    :suggest
+    :suggest,
+    :tabs
   ]
 
   def build do
@@ -40,9 +41,11 @@ defmodule Browser.UI do
     set_page([])
     :ets.insert(@view, {:sx, 0})
 
+    Browser.TabStrip.init()
     wx = :wx.new()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
 
+    tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
     toolbar = :wxPanel.new(frame)
     back = :wxButton.new(toolbar, -1, label: ~c"◀", size: {40, -1})
     forward = :wxButton.new(toolbar, -1, label: ~c"▶", size: {40, -1})
@@ -73,12 +76,17 @@ defmodule Browser.UI do
     :wxFrame.setStatusBar(frame, status)
 
     col = :wxBoxSizer.new(@vertical)
+    :wxSizer.add(col, tabs, flag: @expand)
     :wxSizer.add(col, toolbar, flag: @expand)
     :wxSizer.add(col, panel, proportion: 1, flag: @expand)
     :wxWindow.setSizer(frame, col)
 
     # wxID_EXIT is moved into the macOS application menu as "Quit", with Cmd+Q
     file = :wxMenu.new()
+    :wxMenu.append(file, 5100, ~c"New Tab\tCtrl+T")
+    :wxMenu.append(file, 5101, ~c"Close Tab\tCtrl+W")
+    :wxMenu.append(file, 5102, ~c"Reopen Closed Tab\tCtrl+Shift+T")
+    :wxMenu.appendSeparator(file)
     :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
     menubar = :wxMenuBar.new()
     :wxMenuBar.append(menubar, file, ~c"File")
@@ -109,7 +117,11 @@ defmodule Browser.UI do
     :wxWindow.hide(suggest)
     :wxListBox.connect(suggest, :command_listbox_selected)
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
+    :wxPanel.connect(tabs, :left_down)
+    :wxPanel.connect(tabs, :middle_down)
+    :wxPanel.connect(tabs, :paint, callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs) end)
     :wxPanel.connect(panel, :left_down)
+    :wxPanel.connect(panel, :middle_down)
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
@@ -145,6 +157,7 @@ defmodule Browser.UI do
       status: status,
       toolbar: toolbar,
       suggest: suggest,
+      tabs: tabs,
       cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
   end
@@ -1509,6 +1522,15 @@ defmodule Browser.UI do
   end
 
   def select_suggestion(%{suggest: list}, i), do: :wxListBox.setSelection(list, i)
+
+  @doc "Shows the tab strip: the tabs' titles and which one is active."
+  def set_tabs(%{tabs: tabs}, titles, active) do
+    Browser.TabStrip.put(titles, active)
+    :wxWindow.refresh(tabs)
+  end
+
+  def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
+
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
   def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)

@@ -115,6 +115,15 @@ defmodule Browser.Session do
       # one end), and whether the mouse is dragging it out
       fanchor: nil,
       fdrag: false,
+      # the page being fetched, `{url, mode, fetch options}`, until it arrives
+      loading: nil,
+      # the scripts' first run has not reported back yet
+      scripts_pending: false,
+      # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
+      tabs: [%{}],
+      active: 0,
+      # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
+      closed: [],
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
       # the host that has focus, the selection the page reported in it, whether the mouse is
       # dragging one out, and the column the caret keeps going up and down
@@ -125,6 +134,7 @@ defmodule Browser.Session do
       egoal: nil
     }
 
+    publish_tabs(state)
     start = System.get_env("BROWSER_URL") || Browser.home()
     {:ok, state, {:continue, {:go, start}}}
   end
@@ -142,6 +152,7 @@ defmodule Browser.Session do
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
+    state = %{state | loading: {url, mode, fetch_opts}}
     env = env(state)
     Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url, env, fetch_opts)}) end)
     %{state | nonce: nonce}
@@ -179,6 +190,7 @@ defmodule Browser.Session do
       |> stop_blink()
       |> Map.merge(%{
         history: history,
+        loading: nil,
         page: page,
         nodes: page.nodes,
         url: page.url,
@@ -201,12 +213,13 @@ defmodule Browser.Session do
       })
 
     # the pictures download while the page is laid out in the background
+    publish_tabs(state)
     {:noreply, state |> start_images() |> start_layout_job() |> start_js() |> sync_buttons()}
   end
 
   # a runtime's scripts have run
   def handle_info({:js_reply, nonce, pid, reply}, %{nonce: nonce, js: pid} = state),
-    do: {:noreply, apply_js(state, reply)}
+    do: {:noreply, apply_js(%{state | scripts_pending: false}, reply)}
 
   def handle_info({:js_reply, _, _, _}, state), do: {:noreply, state}
 
@@ -375,6 +388,16 @@ defmodule Browser.Session do
     System.halt(0)
   end
 
+  # File > New Tab and Close Tab
+  def handle_info(wx(id: 5100, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, new_tab(state)}
+
+  def handle_info(wx(id: 5101, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, close_tab(state, state.active)}
+
+  def handle_info(wx(id: 5102, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, reopen_tab(state)}
+
   # Edit > Cut, Copy and Select All (wxID_CUT, wxID_COPY, wxID_SELECTALL)
   def handle_info(wx(id: 5031, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, on_key(state, :cut)}
@@ -390,7 +413,44 @@ defmodule Browser.Session do
     {:noreply, choose_option(state, id - UI.menu_base())}
   end
 
-  def handle_info(wx(event: wxMouse(type: :left_down, x: wx_x, y: y, shiftDown: shift)), state) do
+  def handle_info(wx(obj: obj, event: wxMouse(type: :left_down, x: x, y: y)), state)
+      when obj == state.ui.tabs,
+      do: {:noreply, tab_click(state, x, y, :left)}
+
+  def handle_info(wx(obj: obj, event: wxMouse(type: :middle_down, x: x, y: y)), state)
+      when obj == state.ui.tabs,
+      do: {:noreply, tab_click(state, x, y, :middle)}
+
+  # a middle click on a link opens it in a new tab behind this one
+  def handle_info(wx(event: wxMouse(type: :middle_down, x: wx_x, y: y)), state) do
+    x = wx_x + state.scroll_x
+    py = y + state.scroll
+
+    href =
+      case UI.sticky_hit(state.sticky, x, y, state.scroll) do
+        {:link, href} -> href
+        nil -> UI.link_at(state.links, x, py)
+        _ -> nil
+      end
+
+    {:noreply, if(href, do: open_link_tab(state, href), else: state)}
+  end
+
+  def handle_info(
+        wx(
+          event:
+            wxMouse(
+              type: :left_down,
+              x: wx_x,
+              y: y,
+              shiftDown: shift,
+              controlDown: ctrl,
+              metaDown: meta
+            )
+        ),
+        state
+      ) do
+    new_tab? = ctrl or meta
     UI.hide_suggestions(state.ui)
     state = %{state | suggest: nil}
 
@@ -404,7 +464,7 @@ defmodule Browser.Session do
         {:noreply, click_control(state, cid, x, spy, count, shift)}
 
       {:link, href} ->
-        {:noreply, follow(state, href)}
+        {:noreply, follow(state, href, new_tab?)}
 
       # a click on a sticky or fixed box that is neither: it does not reach the page below
       :cover ->
@@ -420,7 +480,7 @@ defmodule Browser.Session do
 
                 case UI.link_at(state.links, x, py) do
                   nil -> {:noreply, page_click(state, x, py, count, shift)}
-                  href -> {:noreply, follow(state, href)}
+                  href -> {:noreply, follow(state, href, new_tab?)}
                 end
 
               host ->
@@ -688,9 +748,16 @@ defmodule Browser.Session do
 
   def handle_info(wx(event: event), state) when elem(event, 0) == :wxKey do
     ev = UI.key_event(event)
-    key = Interact.key(ev)
-    key = if key == :enter and ev.shift?, do: :shift_enter, else: key
-    {:noreply, on_key(state, key)}
+
+    case tab_key(ev) do
+      nil ->
+        key = Interact.key(ev)
+        key = if key == :enter and ev.shift?, do: :shift_enter, else: key
+        {:noreply, on_key(state, key)}
+
+      step ->
+        {:noreply, step_tab(state, step)}
+    end
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -1649,7 +1716,7 @@ defmodule Browser.Session do
         send(me, {:js_reply, nonce, pid, Browser.JS.Runtime.run_scripts(pid)})
       end)
 
-      %{state | js: pid}
+      %{state | js: pid, scripts_pending: true}
     else
       state
     end
@@ -1985,7 +2052,9 @@ defmodule Browser.Session do
   # -- #fragments ---------------------------------------------------------------
 
   # a link to the same document with a fragment only moves within it
-  defp follow(state, href) do
+  defp follow(state, href, true), do: open_link_tab(state, href)
+
+  defp follow(state, href, false) do
     url = Fetch.resolve(base(state), href)
     {target, fragment} = Fetch.split_fragment(url)
     {here, _} = Fetch.split_fragment(state.url || "")
@@ -2245,6 +2314,249 @@ defmodule Browser.Session do
     if scroll != old, do: notify_scroll(state)
     state
   end
+
+  # -- tabs ------------------------------------------------------------------------
+
+  # What belongs to one tab. Everything else (the window, the jobs and timers, the address
+  # bar's suggestions, the visited pages) is shared; a tab that is not shown has none of
+  # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
+  @tab_keys ~w(history page nodes items links controls hit_controls sticky images height scroll
+    scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
+    sel_items click fanchor fdrag hover js scripts_pending page_edits fragment loading ed efocus
+    esel edrag egoal)a
+
+  defp blank_tab do
+    %{
+      history: History.new(),
+      page: nil,
+      nodes: [],
+      items: [],
+      links: %{},
+      controls: %{},
+      hit_controls: %{},
+      sticky: [],
+      images: %{},
+      height: 0,
+      scroll: 0,
+      scroll_x: 0,
+      content_w: 0,
+      wheel_rem: 0.0,
+      wheel_rem_x: 0.0,
+      url: nil,
+      focus: nil,
+      caret: 0,
+      menu: nil,
+      sel: nil,
+      sel_anchor: nil,
+      drag: false,
+      sel_texts: nil,
+      sel_items: [],
+      click: nil,
+      fanchor: nil,
+      fdrag: false,
+      hover: {nil, :arrow},
+      js: nil,
+      scripts_pending: false,
+      page_edits: %{},
+      fragment: nil,
+      loading: nil,
+      ed: nil,
+      efocus: nil,
+      esel: nil,
+      edrag: false,
+      egoal: nil
+    }
+  end
+
+  defp tab_title(%{page: %{title: title}}) when is_binary(title) and title != "", do: title
+  defp tab_title(%{url: url}) when is_binary(url), do: url
+  defp tab_title(%{loading: {url, _, _}}), do: url
+  defp tab_title(_), do: "New Tab"
+
+  defp publish_tabs(state) do
+    titles =
+      state.tabs
+      |> Enum.with_index()
+      |> Enum.map(fn {tab, i} -> tab_title(if i == state.active, do: state, else: tab) end)
+
+    UI.set_tabs(state.ui, titles, state.active)
+    state
+  end
+
+  # the tab is left: what was running for it stops, and the rest is put away
+  defp park(state) do
+    stale? = state.layout_job != nil or state.page_job != nil
+    UI.hide_suggestions(state.ui)
+
+    state =
+      state
+      |> cancel_layout_job()
+      |> cancel_page_job()
+      |> stop_blink()
+
+    tab =
+      state
+      |> Map.take(@tab_keys)
+      |> Map.merge(%{laid_width: state.width, stale: stale?})
+
+    # results still on their way are for a tab that is not shown
+    %{
+      state
+      | tabs: List.replace_at(state.tabs, state.active, tab),
+        nonce: state.nonce + 1,
+        layout_timer: nil,
+        suggest: nil
+    }
+  end
+
+  # a parked tab is shown again
+  defp resume(state, i) do
+    tab = Enum.at(state.tabs, i)
+    stale? = Map.get(tab, :stale, false)
+    laid_width = Map.get(tab, :laid_width)
+    state = state |> Map.merge(Map.take(tab, @tab_keys)) |> Map.put(:active, i)
+    state = %{state | nonce: state.nonce + 1}
+
+    UI.set_scroll_x(state.ui, state.scroll_x)
+    UI.update(state.ui, state.items, state.sel_items, state.scroll, true, :full)
+    state = set_url_text(state, state.url || "")
+
+    UI.set_title(
+      state.ui,
+      if(state.page, do: tab_title(state) <> " — Elixir Browser", else: "Elixir Browser")
+    )
+
+    UI.set_status(state.ui, "")
+    UI.focus_page(state.ui)
+    width = UI.client_width(state.ui)
+
+    state =
+      case state.loading do
+        {url, mode, opts} -> load(state, url, mode, opts)
+        nil -> state
+      end
+
+    state =
+      cond do
+        state.page == nil -> state
+        stale? or width != laid_width -> start_layout_job(%{state | width: width})
+        true -> state
+      end
+
+    # scripts that were cut off in their first run start again
+    state =
+      if state.scripts_pending and state.page != nil, do: start_js(stop_js(state)), else: state
+
+    state = if state.page, do: start_images(state), else: state
+    state = sync_buttons(state)
+    state = if state.focus, do: reset_blink(state), else: state
+    publish_tabs(state)
+  end
+
+  defp new_tab(state) do
+    state = park(state)
+    tab = blank_tab()
+    state = %{state | tabs: state.tabs ++ [tab]}
+    state = state |> Map.merge(tab) |> then(&%{&1 | active: length(&1.tabs) - 1})
+    state = resume_blank(state)
+    load(state, Browser.home(), :push)
+  end
+
+  # a tab with nothing in it is shown
+  defp resume_blank(state) do
+    UI.set_scroll_x(state.ui, 0)
+    UI.update(state.ui, [], [], 0, true, :full)
+    state = set_url_text(state, "")
+    UI.set_title(state.ui, "Elixir Browser")
+    UI.focus_page(state.ui)
+    state |> sync_buttons() |> publish_tabs()
+  end
+
+  # a link opened in a new tab behind this one: it loads when the tab is first shown
+  defp open_link_tab(state, href) do
+    url = Fetch.resolve(base(state), href)
+    tab = Map.put(blank_tab(), :loading, {url, :push, [initiator: state.url]})
+    publish_tabs(%{state | tabs: state.tabs ++ [tab]})
+  end
+
+  defp switch_tab(state, i) when i == state.active, do: state
+  defp switch_tab(state, i), do: state |> park() |> resume(i)
+
+  defp step_tab(state, step) do
+    n = length(state.tabs)
+    if n < 2, do: state, else: switch_tab(state, Integer.mod(state.active + step, n))
+  end
+
+  defp close_tab(%{tabs: [_]}, _i) do
+    Browser.LocalStorage.flush()
+    System.halt(0)
+  end
+
+  defp close_tab(state, i) when i == state.active do
+    state = remember_closed(state, i, state)
+    state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
+    UI.hide_suggestions(state.ui)
+    tabs = List.delete_at(state.tabs, i)
+    next = min(i, length(tabs) - 1)
+    resume(%{state | tabs: tabs, suggest: nil}, next)
+  end
+
+  defp close_tab(state, i) do
+    tab = Enum.at(state.tabs, i)
+    state = remember_closed(state, i, tab)
+
+    case tab do
+      %{js: pid} when is_pid(pid) -> Browser.JS.Runtime.stop(pid)
+      _ -> :ok
+    end
+
+    active = if i < state.active, do: state.active - 1, else: state.active
+    publish_tabs(%{state | tabs: List.delete_at(state.tabs, i), active: active})
+  end
+
+  @closed_kept 20
+
+  # the closed tab's history and page are kept to open it again (not its scroll or form edits)
+  defp remember_closed(state, i, %{history: h, loading: loading}) do
+    entry =
+      cond do
+        h.current != nil -> {i, h, {h.current, :history, []}}
+        loading != nil -> {i, History.new(), loading}
+        true -> nil
+      end
+
+    if entry, do: %{state | closed: Enum.take([entry | state.closed], @closed_kept)}, else: state
+  end
+
+  # Ctrl+Shift+T: the tab closed last comes back where it was, and is shown
+  defp reopen_tab(%{closed: []} = state), do: state
+
+  defp reopen_tab(%{closed: [{i, history, {url, mode, opts}} | rest]} = state) do
+    state = park(%{state | closed: rest})
+    i = min(i, length(state.tabs))
+    tab = %{blank_tab() | history: history}
+    state = %{state | tabs: List.insert_at(state.tabs, i, tab), active: i}
+    state = state |> Map.merge(tab) |> resume_blank()
+    load(state, url, mode, opts)
+  end
+
+  defp tab_click(state, x, y, button) do
+    case Browser.TabStrip.hit(length(state.tabs), UI.tabs_width(state.ui), x, y) do
+      {:tab, i} when button == :left -> switch_tab(state, i)
+      {:tab, i} when button == :middle -> close_tab(state, i)
+      {:close, i} -> close_tab(state, i)
+      :new when button == :left -> new_tab(state)
+      _ -> state
+    end
+  end
+
+  # Ctrl+Tab and Ctrl+Shift+Tab (also Ctrl+Page Down / Up) move between tabs
+  defp tab_key(%{ctrl?: true, alt?: false, code: 9, shift?: shift}),
+    do: if(shift, do: -1, else: 1)
+
+  defp tab_key(%{ctrl?: true, alt?: false, code: 367}), do: 1
+  defp tab_key(%{ctrl?: true, alt?: false, code: 366}), do: -1
+  defp tab_key(_), do: nil
 
   defp sync_buttons(state) do
     UI.enable(state.ui.back, History.can_back?(state.history))
