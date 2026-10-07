@@ -959,4 +959,63 @@ defmodule Browser.StyleTest do
       assert color_of([d2], "div") != @red
     end
   end
+
+  describe "custom properties" do
+    defp p_color(css, html \\ "<p>x</p>") do
+      page = Page.build("<style>#{css}</style>" <> html, "about:test")
+
+      page.nodes
+      |> Stream.flat_map(&flatten/1)
+      |> Enum.find_value(fn
+        {:element, "p", attrs, _} ->
+          attrs |> List.keyfind("@computed", 0) |> elem(1) |> Map.get("color")
+
+        _ ->
+          nil
+      end)
+    end
+
+    defp flatten({:element, _, _, kids} = el), do: [el | Enum.flat_map(kids, &flatten/1)]
+    defp flatten(_), do: []
+
+    @green {0, 128, 0}
+
+    test "names are case-sensitive" do
+      assert p_color("p { --A: green; color: var(--A) }") == @green
+      assert p_color("p { color: orange; --A: green; color: var(--a, green) }") == @green
+      refute p_color("p { color: orange; --a: green; color: var(--A) }") == @green
+    end
+
+    test "escapes in a name are decoded" do
+      assert p_color("p { --\\30: green; color: var(--\\30 ) }") == @green
+      assert p_color("p { --\\d800: green; color: var(--\\fffd) }") == @green
+    end
+
+    test "a cycle makes the properties invalid, so the fallback is used" do
+      assert p_color("p { --a: var(--a); color: var(--a, green) }") == @green
+      assert p_color("p { --a: var(--b); --b: var(--a); color: var(--a, green) }") == @green
+    end
+
+    test "initial, inherit and unset are taken literally" do
+      css = "body { --a: green } p { --a: initial; color: var(--a, green) }"
+      assert p_color(css) == @green
+      css = "body { --a: green; color: crimson } p { --a: inherit; color: var(--a) }"
+      assert p_color(css) == @green
+      css = "body { --a: green; color: crimson } p { --a: unset; color: var(--a) }"
+      assert p_color(css) == @green
+    end
+
+    test "a property whose var() fails falls back to inheriting" do
+      assert p_color("body { color: green } p { color: red; color: var(--missing) }") == @green
+    end
+
+    test "var is case-insensitive" do
+      assert p_color("p { --a: green; color: VAR(--a) }") == @green
+    end
+
+    test "a wide keyword fallback acts as the keyword" do
+      css = "body { --c: green } p { --c: var(--foo, unset); color: var(--c) }"
+      assert p_color(css) == @green
+    end
+  end
 end

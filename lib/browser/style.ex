@@ -440,7 +440,7 @@ defmodule Browser.Style do
   defp expand({prop, value, imp}) when is_map_key(@shorthands, prop) do
     longs = @shorthands[prop]
 
-    if String.contains?(value, "var(") do
+    if has_var?(value) do
       for long <- longs, do: {long, {:sh, prop, value, long}, imp}
     else
       for {long, v} <- split_shorthand(prop, value), do: {long, v, imp}
@@ -1222,7 +1222,7 @@ defmodule Browser.Style do
 
     {customs, normals} = Enum.split_with(decl, fn {k, _} -> String.starts_with?(k, "--") end)
 
-    custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
+    custom = if customs == [], do: parent_custom, else: resolve_customs(customs, parent_custom)
 
     resolved = resolve_vars(normals, custom)
 
@@ -1336,21 +1336,23 @@ defmodule Browser.Style do
     end
   end
 
+  defp has_var?(value), do: Regex.match?(~r/var\(/i, value)
+
   @doc false
   def substitute(value, _custom, depth) when depth > 16,
-    do: if(String.contains?(value, "var("), do: :error, else: {:ok, value})
+    do: if(has_var?(value), do: :error, else: {:ok, value})
 
   def substitute(value, custom, depth) do
-    case :binary.match(value, "var(") do
-      :nomatch ->
+    case Regex.run(~r/var\(/i, value, return: :index) do
+      nil ->
         {:ok, value}
 
-      {pos, 4} ->
+      [{pos, 4}] ->
         before = binary_part(value, 0, pos)
         rest = binary_part(value, pos + 4, byte_size(value) - pos - 4)
         {inner, after_} = take_parens(rest)
         {name, fallback} = split_comma(inner)
-        name = name |> String.trim() |> String.downcase()
+        name = name |> String.trim() |> Browser.CSS.unescape()
 
         replacement =
           case custom do
@@ -1365,6 +1367,90 @@ defmodule Browser.Style do
           {:ok, before <> " " <> String.trim(r) <> " " <> tail}
         end
     end
+  end
+
+  # Custom properties are computed per element: `var()` inside one is substituted against that
+  # element's own values, a cycle makes every property in it guaranteed-invalid (dropped), and
+  # `initial` / `inherit` / `unset` are taken literally. -> the custom properties in effect
+  defp resolve_customs(own, parent) do
+    own =
+      Map.new(own, fn {k, v} ->
+        case v |> String.trim() |> String.downcase() do
+          "initial" -> {k, :invalid}
+          kw when kw in ["inherit", "unset"] -> {k, Map.get(parent, k, :invalid)}
+          _ -> {k, v}
+        end
+      end)
+
+    refs =
+      Map.new(own, fn
+        {k, v} when is_binary(v) ->
+          names =
+            ~r/var\(\s*(--[^\s,)]*)/i
+            |> Regex.scan(v, capture: :all_but_first)
+            |> Enum.map(fn [n] -> Browser.CSS.unescape(n) end)
+
+          {k, Enum.filter(names, &is_map_key(own, &1))}
+
+        {k, _} ->
+          {k, []}
+      end)
+
+    cyclic = for k <- Map.keys(own), reaches?(refs, refs[k], k, MapSet.new()), do: k
+    own = Enum.reduce(cyclic, own, &Map.put(&2, &1, :invalid))
+
+    final =
+      settle(
+        own,
+        Map.drop(parent, Map.keys(own)),
+        parent,
+        Map.new(own, fn {k, _} -> {k, refs[k]} end)
+      )
+
+    Map.reject(final, fn {_, v} -> v == :invalid end)
+  end
+
+  # a substituted value that is a wide keyword acts as that keyword
+  defp wide_keyword(value, name, parent) do
+    case String.downcase(value) do
+      "initial" -> :invalid
+      kw when kw in ["inherit", "unset"] -> Map.get(parent, name, :invalid)
+      _ -> value
+    end
+  end
+
+  defp reaches?(_refs, [], _target, _seen), do: false
+
+  defp reaches?(refs, [n | rest], target, seen) do
+    cond do
+      n == target -> true
+      MapSet.member?(seen, n) -> reaches?(refs, rest, target, seen)
+      true -> reaches?(refs, refs[n] ++ rest, target, MapSet.put(seen, n))
+    end
+  end
+
+  # resolve what no longer waits on another own property, until nothing is left
+  defp settle(pending, done, _parent, _refs) when map_size(pending) == 0, do: done
+
+  defp settle(pending, done, parent, refs) do
+    ready = for {k, _} <- pending, Enum.all?(refs[k], &(not is_map_key(pending, &1))), do: k
+    ready = if ready == [], do: Map.keys(pending), else: ready
+
+    done =
+      Enum.reduce(ready, done, fn k, acc ->
+        case pending[k] do
+          v when is_binary(v) ->
+            case substitute(v, Map.reject(acc, fn {_, x} -> x == :invalid end), 0) do
+              {:ok, r} -> Map.put(acc, k, wide_keyword(String.trim(r), k, parent))
+              :error -> Map.put(acc, k, :invalid)
+            end
+
+          other ->
+            Map.put(acc, k, other)
+        end
+      end)
+
+    settle(Map.drop(pending, ready), done, parent, refs)
   end
 
   # `rest` follows an opening paren: -> {inside, after_closing_paren}
