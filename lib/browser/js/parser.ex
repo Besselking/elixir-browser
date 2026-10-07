@@ -1362,7 +1362,7 @@ defmodule Browser.JS.Parser do
 
         tmp = " using"
         node = {:using, kind, name, {:id, tmp}, [body]}
-        {{:forof, :const, {:id, tmp}, obj, {:block, [node]}}, t}
+        {{:forof, :const, {:id, tmp}, {:tdz_names, [name], obj}, {:block, [node]}}, t}
 
       [{:id, "in", _} | _] ->
         throw({:syntax, "using in a for-in head"})
@@ -2255,7 +2255,9 @@ defmodule Browser.JS.Parser do
   defp arrow_body(params, ts) do
     check_unique_params(params)
     if strict?(), do: check_strict_params(params)
+    outer_sb = Process.put(:js_static_block, false)
     {e, ts} = assignment(ts)
+    Process.put(:js_static_block, outer_sb || false)
     {{:fn, nil, params, e, :arrow_expr, nil}, ts}
   end
 
@@ -3011,6 +3013,10 @@ defmodule Browser.JS.Parser do
 
           if strict?() and name in @strict_reserved,
             do: throw({:syntax, "#{name} is a reserved word here"})
+
+          if (name == "await" and await_reserved?()) or
+               (name == "yield" and Process.get(:js_generator, false)),
+             do: throw({:syntax, "#{name} is a reserved word here"})
 
           {{:init, key, {:id, name}}, t}
       end

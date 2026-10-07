@@ -3999,6 +3999,13 @@ defmodule Browser.JS.Interp do
 
   def ev({:unnamed, e}, env), do: ev(e, env)
 
+  # the expression of a `for (using x of …)` head sees `x` uninitialized
+  def ev({:tdz_names, names, e}, env) do
+    scope = new_scope(env)
+    for n <- names, do: declare(scope, n, :tdz)
+    ev(e, scope)
+  end
+
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do
     ov = ev(o, env)
     key = ev_key(k, env)

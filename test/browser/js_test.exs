@@ -1024,6 +1024,11 @@ defmodule Browser.JSTest do
                "1,function"
     end
 
+    test "shorthand await is reserved in a static block but not in an arrow inside it" do
+      assert {:error, _, _} = JS.eval("class C { static { ({ await }); } }")
+      assert {:ok, _, _} = JS.eval("class C { static { (() => ({ await })); } }")
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

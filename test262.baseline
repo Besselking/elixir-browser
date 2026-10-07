@@ -29635,6 +29635,7 @@ language/expressions/object/identifier-shorthand-package-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-private-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-protected-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-public-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-static-init-await-invalid.js
 language/expressions/object/identifier-shorthand-static-init-await-valid.js
 language/expressions/object/identifier-shorthand-static-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-yield-invalid-strict-mode.js
@@ -39734,6 +39735,7 @@ language/statements/for-of/generator-close-via-throw.js
 language/statements/for-of/generator-next-error.js
 language/statements/for-of/generator.js
 language/statements/for-of/generic-iterable.js
+language/statements/for-of/head-await-using-bound-names-fordecl-tdz.js
 language/statements/for-of/head-await-using-bound-names-in-stmt.js
 language/statements/for-of/head-await-using-bound-names-let.js
 language/statements/for-of/head-await-using-fresh-binding-per-iteration.js
@@ -39767,6 +39769,7 @@ language/statements/for-of/head-lhs-invalid-asnmt-ptrn-obj.js
 language/statements/for-of/head-lhs-let.js
 language/statements/for-of/head-lhs-member.js
 language/statements/for-of/head-lhs-non-asnmt-trgt.js
+language/statements/for-of/head-using-bound-names-fordecl-tdz.js
 language/statements/for-of/head-using-bound-names-in-stmt.js
 language/statements/for-of/head-using-bound-names-let.js
 language/statements/for-of/head-using-fresh-binding-per-iteration.js
