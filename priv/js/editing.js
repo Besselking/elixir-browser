@@ -360,7 +360,9 @@
   wrap(NP, "insertBefore", function (orig) {
     return function (n, ref) {
       if (!live.length) return orig.call(this, n, ref);
-      if (n.nodeType !== FRAGMENT && n.parentNode) n.parentNode.removeChild(n);
+      // a node that holds `this` must reach the native check (HierarchyRequestError) still attached
+      for (var up = this; up && up !== n; up = up.parentNode);
+      if (n.nodeType !== FRAGMENT && n.parentNode && !up) n.parentNode.removeChild(n);
       var count = n.nodeType === FRAGMENT ? n.childNodes.length : 1;
       var i = ref ? idx(ref) : len(this);
       var r = orig.call(this, n, ref);
