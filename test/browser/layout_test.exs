@@ -4814,6 +4814,16 @@ defmodule Browser.LayoutTest do
       assert box.h == 100
     end
 
+    test "auto with a ratio sizes the content box" do
+      box = ratio_box("width:100px;aspect-ratio:auto 1;box-sizing:border-box;padding-left:50px")
+      assert box.h == 50
+    end
+
+    test "max-height carries over to the width" do
+      box = ratio_box("max-height:40px;aspect-ratio:1")
+      assert {box.w, box.h} == {40, 40}
+    end
+
     test "an explicit height wins" do
       box = ratio_box("width:100px;height:20px;aspect-ratio:1")
       assert box.h == 20
