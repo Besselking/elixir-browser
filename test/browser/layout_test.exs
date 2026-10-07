@@ -5425,6 +5425,12 @@ defmodule Browser.LayoutTest do
   end
 
   describe "segment breaks between wide characters" do
+    test "a zero-width space is a place to break a line" do
+      html = ~s|<div style="width:10px;font:10px/1 Ahem">X&#x200B;X</div>|
+      ys = for %{type: :text, y: y, text: t} <- laid_out(html), t != "", uniq: true, do: y
+      assert length(ys) == 2
+    end
+
     test "a line break between two wide characters leaves no space" do
       wide = laid_out("<p>測試\n測試</p>") |> Enum.filter(&(&1.type == :text))
       assert [%{text: "測試測試"}] = Enum.filter(wide, &String.contains?(&1.text, "測"))

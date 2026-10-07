@@ -2272,7 +2272,38 @@ defmodule Browser.Layout do
     end
   end
 
+  # a zero-width space is a place where a line may break, with nothing shown; it also keeps the
+  # spaces on either side of it from collapsing into one
   defp walk_text(t, style, acc) do
+    if String.contains?(t, "\u200B"),
+      do: walk_zwsp_text(t, style, acc),
+      else: walk_plain_text(t, style, acc)
+  end
+
+  defp walk_zwsp_text(t, style, acc) do
+    ops =
+      ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+|\x{200B}|[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{200B}]+/u
+      |> Regex.scan(drop_wide_breaks(t))
+      |> Enum.map(fn
+        [tok] ->
+          if String.match?(
+               tok,
+               ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+             ),
+             do: {:space, style},
+             else: {:word, tok, style}
+      end)
+
+    ops =
+      case ops do
+        [{:word, w, st} | more] -> [{:word, w, st, :glue} | more]
+        _ -> ops
+      end
+
+    Enum.reverse(ops) ++ acc
+  end
+
+  defp walk_plain_text(t, style, acc) do
     t = drop_wide_breaks(t)
     leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
     trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
@@ -2285,8 +2316,13 @@ defmodule Browser.Layout do
       end
 
     case words do
-      [] -> if t == "", do: acc, else: [{:space, style} | acc]
-      _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
+      [] ->
+        if t == "", do: acc, else: [{:space, style} | acc]
+
+      _ ->
+        Enum.reverse(
+          List.flatten(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing)
+        ) ++ acc
     end
   end
 
