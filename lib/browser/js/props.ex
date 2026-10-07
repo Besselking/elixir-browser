@@ -442,6 +442,10 @@ defmodule Browser.JS.Props do
     if Map.has_key?(deref(id), :proxy) do
       Browser.JS.Proxy.define_own_property(obj, key, descriptor, desc)
     else
+      # an invalid array length is a RangeError, not a refusal
+      if key == "length" and is_number(Map.get(desc, :value)) and deref(id).class == :array,
+        do: Interp.array_length!(desc.value)
+
       try do
         define_own(obj, id, key, desc)
         true

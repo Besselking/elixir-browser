@@ -172,6 +172,13 @@ defmodule Browser.JS.Collections do
           new_object([{"value", :undefined}, {"done", true}])
 
         i ->
+          if Browser.JS.TypedArrays.out_of_bounds?(o),
+            do:
+              throw_error(
+                "TypeError",
+                "Cannot perform ArrayIterator.next on an out-of-bounds typed array"
+              )
+
           if i >= Browser.JS.ArrayGeneric.len(o) do
             Process.put(pos, :done)
             new_object([{"value", :undefined}, {"done", true}])
