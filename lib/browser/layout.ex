@@ -131,6 +131,7 @@ defmodule Browser.Layout do
       alast: nil,
       vs: 0,
       wrap_chars: :none,
+      shy: true,
       nojust: false,
       ls: 0.0,
       wsp: 0.0,
@@ -516,13 +517,13 @@ defmodule Browser.Layout do
   defp walk(nodes, style, acc) when is_list(nodes),
     do: nodes |> wrap_table_parts() |> Enum.reduce(acc, &walk(&1, style, &2))
 
-  # a soft hyphen (U+00AD) is invisible unless a line breaks at it; breaking there is not
-  # supported yet, so it is dropped from the laid-out text (the DOM text keeps it)
+  # a soft hyphen (U+00AD) is invisible unless a line breaks at it, and `hyphens: none` takes
+  # that away: it is dropped from the laid-out text (the DOM text keeps it)
   defp walk({:text, t}, %{tt: tt} = style, acc) when is_binary(t) and tt != :none,
     do: walk({:text, transform_text(t, tt, acc)}, %{style | tt: :none}, acc)
 
   defp walk({:text, t}, style, acc) when is_binary(t) do
-    if String.contains?(t, "\u00AD"),
+    if String.contains?(t, "\u00AD") and not style.shy,
       do: walk({:text, String.replace(t, "\u00AD", "")}, style, acc),
       else: walk_text(t, style, acc)
   end
@@ -1917,6 +1918,7 @@ defmodule Browser.Layout do
                                                                                              _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
+    |> put_if(c["hyphens"], &%{&1 | shy: &2 != "none"})
     |> put_if(c["vertical-align"], &raise_text/2)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
     |> put_if(c["text-align-last"], fn s, v ->
@@ -4261,6 +4263,57 @@ defmodule Browser.Layout do
   end
 
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
+    if String.contains?(text, "\u00AD"),
+      do: shy_word(text, style, nowrap?, st, dx, glue),
+      else: plain_word(text, style, nowrap?, st, dx, glue)
+  end
+
+  # A word with soft hyphens: when it does not fit, the line breaks at the last one that lets
+  # the part before it (and the hyphen shown there) fit.
+  defp shy_word(text, style, nowrap?, st, dx, glue) do
+    clean = String.replace(text, "\u00AD", "")
+    line_left = st.margin + st.left
+    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
+
+    space_w =
+      if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
+
+    room = st.width - st.margin - st.right - st.fr - st.x - space_w
+    segs = String.split(text, "\u00AD")
+
+    cond do
+      # (a soft hyphen's break does not count when sizing to the content)
+      nowrap? || Process.get(:layout_intrinsic, false) || st.measure.(clean, style) <= room ->
+        plain_word(clean, style, nowrap?, st, 0, glue)
+
+      true ->
+        fits =
+          for k <- (length(segs) - 1)..1//-1,
+              head = segs |> Enum.take(k) |> Enum.join(),
+              st.measure.(head <> "-", style) <= room,
+              do: k
+
+        case fits do
+          [k | _] -> shy_break(segs, k, style, st, glue, line_left)
+          [] when st.line != [] -> shy_retry(text, style, st, glue, line_left)
+          [] -> shy_break(segs, 1, style, st, glue, line_left)
+        end
+    end
+  end
+
+  defp shy_retry(text, style, st, glue, line_left) do
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+    shy_word(text, style, false, st, 0, glue)
+  end
+
+  defp shy_break(segs, k, style, st, glue, line_left) do
+    {head, rest} = Enum.split(segs, k)
+    st = plain_word(Enum.join(head) <> "-", style, true, st, 0, glue)
+    st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
+    word(Enum.join(rest, "\u00AD"), style, false, st, 0, false)
+  end
+
+  defp plain_word(text, style, nowrap?, st, dx, glue) do
     w = st.measure.(text, style)
     line_left = st.margin + st.left
 

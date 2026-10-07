@@ -207,6 +207,8 @@ defmodule Browser.Reftest.Raster do
 
   defp glyph_color({r, g, b}, ch, t, false) do
     <<code::utf8, _::binary>> = ch
+    # the hyphen has two codes (a break puts either one in, depending on the font)
+    code = if code in [0x2010, 0x2011], do: 0x2D, else: code
 
     salt =
       code * 31 + if(Map.get(t, :bold), do: 7, else: 0) + if(Map.get(t, :italic), do: 13, else: 0)
