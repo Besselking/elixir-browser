@@ -593,9 +593,15 @@ defmodule Browser.JS.Interp do
         key = to_key(key)
         {mod, data} = o.host
 
-        case mod.host_get(data, key, {:obj, id}) do
-          {:ok, v} -> v
-          :miss -> lookup(o, key, {:obj, id})
+        # the typed array accessors are inherited: an own property of the same name wins
+        if key in ["length", "byteLength", "byteOffset", "buffer"] and
+             is_map_key(o.props, key) and match?({Browser.JS.TypedArrays, _}, o.host) do
+          lookup(o, key, {:obj, id})
+        else
+          case mod.host_get(data, key, {:obj, id}) do
+            {:ok, v} -> v
+            :miss -> lookup(o, key, {:obj, id})
+          end
         end
 
       _ ->

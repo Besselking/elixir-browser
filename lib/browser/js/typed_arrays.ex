@@ -544,6 +544,18 @@ defmodule Browser.JS.TypedArrays do
   def typed_array?(v), do: ta?(v)
 
   @doc false
+  # a typed array that a detached or shrunk buffer has left out of bounds
+  def out_of_bounds?({:obj, id} = v) do
+    ta?(v) and
+      (
+        %{host: {_, d}} = deref(id)
+        eff(d) == :oob
+      )
+  end
+
+  def out_of_bounds?(_), do: false
+
+  @doc false
   def numeric_key?(key), do: is_binary(key) and canonical(key) != :none
 
   @doc false

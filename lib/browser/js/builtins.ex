@@ -439,7 +439,7 @@ defmodule Browser.JS.Builtins do
   end
 
   @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
-                       findLastIndex flatMap)
+                       findLastIndex)
 
   # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
   # species constructor
@@ -707,18 +707,17 @@ defmodule Browser.JS.Builtins do
 
     array_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
+      source = pairs(this)
       target = species_target(this, 0)
-      new_array(flatten(elems(this), depth)) |> species_fill_from(target, false)
+      new_array(flatten(source, depth, nil)) |> species_fill_from(target, false)
     end)
 
     array_fn(p, "flatMap", fn this, args ->
+      source = pairs(this)
       f = callable!(arg(args, 0))
       target = species_target(this, 0)
-
-      mapped =
-        for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
-
-      new_array(flatten(mapped, 1)) |> species_fill_from(target, false)
+      mapper = fn i, v -> call(f, arg(args, 1), [v, float(i), this]) end
+      new_array(flatten(source, 1, mapper)) |> species_fill_from(target, false)
     end)
 
     array_fn(p, "forEach", fn this, args ->
@@ -994,9 +993,15 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp flatten(list, depth) do
-    Enum.flat_map(list, fn v ->
-      if array?(v) and depth > 0, do: flatten(array_list(v), depth - 1), else: [v]
+  # FlattenIntoArray over the present elements of `source` ({index, value} pairs); a nested
+  # array-like is read through its own `length` and element accessors
+  defp flatten(source, depth, mapper) do
+    Enum.flat_map(source, fn {i, v} ->
+      v = if mapper, do: mapper.(i, v), else: v
+
+      if depth > 0 and Browser.JS.Proxy.is_array(v),
+        do: flatten(pairs(v), depth - 1, nil),
+        else: [v]
     end)
   end
 

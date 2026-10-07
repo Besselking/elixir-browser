@@ -1513,7 +1513,10 @@ defmodule Browser.UI do
   def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
     {x, _} = :wxWindow.getPosition(url)
     {w, _} = :wxWindow.getSize(url)
-    {_, y} = :wxWindow.getSize(toolbar)
+    # the toolbar sits below the tab strip: the list opens at its bottom edge
+    {_, top} = :wxWindow.getPosition(toolbar)
+    {_, h} = :wxWindow.getSize(toolbar)
+    y = top + h
     :wxListBox.clear(list)
 
     for {u, title} <- items do
@@ -1555,6 +1558,12 @@ defmodule Browser.UI do
   def set_cursor(%{panel: p, cursors: cursors}, kind) do
     kind = if kind in [true, :hand], do: :hand, else: if(kind == :text, do: :text, else: :arrow)
     :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
+  end
+
+  @doc "Focuses the address bar with its text selected, so typing replaces it."
+  def focus_url(%{url: url}) do
+    :wxWindow.setFocus(url)
+    :wxTextCtrl.setSelection(url, 0, -1)
   end
 
   @doc "Moves keyboard focus to the page, so key events reach it."
