@@ -154,7 +154,7 @@ defmodule Browser.Reftest.Raster do
         gw = if cadv == adv, do: gw, else: max(round(cadv * size) - if(ahem?, do: 0, else: 1), 1)
 
         g =
-          if String.trim(ch) == "",
+          if String.trim(ch) == "" or cadv == 0.0,
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 

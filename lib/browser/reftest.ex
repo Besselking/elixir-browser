@@ -93,12 +93,24 @@ defmodule Browser.Reftest do
     round(ems * size)
   end
 
-  @doc "The advance of one character in em: East Asian wide and fullwidth ones are a full em."
+  @doc """
+  The advance of one character in em: East Asian wide and fullwidth ones are a full em, format
+  characters (joiners, word joiner, byte order mark, ...) have none.
+  """
   def char_advance(<<cp::utf8, _::binary>>, base) do
-    if wide?(cp), do: 1.0, else: base
+    cond do
+      wide?(cp) -> 1.0
+      invisible?(cp) -> 0.0
+      true -> base
+    end
   end
 
   def char_advance(_, base), do: base
+
+  defp invisible?(cp) do
+    cp in 0x200B..0x200F or cp in 0x2060..0x2064 or cp == 0xFEFF or cp == 0x34F or
+      cp in 0xFE00..0xFE0F or cp in 0x180B..0x180E
+  end
 
   defp wide?(cp) do
     cp in 0x1100..0x115F or cp in 0x2E80..0xA4CF or cp in 0xAC00..0xD7A3 or

@@ -1930,7 +1930,8 @@ defmodule Browser.Layout do
       )
     )
     |> then(&if(blockified?(c), do: Map.put(&1, :vs, 0), else: &1))
-    |> Map.put(:hidden, hidden?(c))
+    # transparent text takes its room and shows nothing
+    |> Map.put(:hidden, hidden?(c) or c["color"] == :transparent)
   end
 
   # visibility is inherited by Style; a zero font-size hides text too
@@ -2934,7 +2935,8 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_atom_line(atom, line_left), else: st
 
     st =
-      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr do
+      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr and
+           not glued_before?(st, space_w) do
         st |> wrap_flush() |> apply_gap() |> start_atom_line(atom, line_left)
       else
         st
@@ -2972,6 +2974,33 @@ defmodule Browser.Layout do
 
     %{st | line: [atom | st.line], x: x + atom.w, pending_space: nil, ext: ext}
   end
+
+  # characters that forbid a line break on either side of them, also next to an atomic inline
+  @no_break [
+    "\u202F",
+    "\u2060",
+    "\u200D",
+    "\uFEFF",
+    "\u180E",
+    "\u034F",
+    "\u2007",
+    "\u2011",
+    "\u0F08",
+    "\u0F0C",
+    "\u0F12"
+  ]
+
+  # text that ends in one of them, with no space between, stays with the atom that follows
+  defp glued_before?(%{line: [%{type: :text, text: text} | _]}, 0),
+    do: String.ends_with?(text, @no_break)
+
+  defp glued_before?(_, _), do: false
+
+  # ... and the other way round: a word that starts with one stays with the atom before it
+  defp glued_after?(%{line: [%{type: :atom} | _]}, text, 0),
+    do: String.starts_with?(text, @no_break)
+
+  defp glued_after?(_, _, _), do: false
 
   # the tree order of positioned boxes in an atom (laid out earlier, maybe cached) is renewed
   # to come after what the page placed before it
@@ -4319,7 +4348,7 @@ defmodule Browser.Layout do
 
     st =
       cond do
-        st.line == [] or nowrap? or hang == w or
+        st.line == [] or nowrap? or hang == w or glued_after?(st, text, space_w) or
             st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
               st.width - st.margin - st.right - st.fr ->
           st
