@@ -691,8 +691,10 @@ css/CSS2/box-display/block-in-inline-margins-collapse-with-trailing-block.html
 css/CSS2/box-display/block-in-inline-negative-margin-bottom-with-trailing-block.html
 css/CSS2/box-display/block-in-inline-negative-margin-with-intervening-float.html
 css/CSS2/box-display/block-in-inline-negative-mb-collapses-with-positive-mt.html
+css/CSS2/box-display/block-in-inline-self-collapsing-only-child.html
 css/CSS2/box-display/block-in-inline-vertical-margins-on-span-ignored.html
 css/CSS2/box-display/block-in-inline-with-padded-parent.html
+css/CSS2/box-display/block-in-inline-zero-height-margin-collapse.html
 css/CSS2/box-display/block-in-inlines-in-different-spans-margin-collapse.html
 css/CSS2/box-display/containing-block-001.xht
 css/CSS2/box-display/containing-block-003.xht
@@ -1276,7 +1278,10 @@ css/CSS2/margin-padding-clear/margin-collapse-013.xht
 css/CSS2/margin-padding-clear/margin-collapse-014.xht
 css/CSS2/margin-padding-clear/margin-collapse-015.xht
 css/CSS2/margin-padding-clear/margin-collapse-015a.xht
+css/CSS2/margin-padding-clear/margin-collapse-016.xht
 css/CSS2/margin-padding-clear/margin-collapse-017.xht
+css/CSS2/margin-padding-clear/margin-collapse-019.xht
+css/CSS2/margin-padding-clear/margin-collapse-020.xht
 css/CSS2/margin-padding-clear/margin-collapse-021.xht
 css/CSS2/margin-padding-clear/margin-collapse-022.xht
 css/CSS2/margin-padding-clear/margin-collapse-025.xht
@@ -2009,6 +2014,7 @@ css/CSS2/normal-flow/inlines-016.xht
 css/CSS2/normal-flow/inlines-017.xht
 css/CSS2/normal-flow/margin-collapse-min-height-003.html
 css/CSS2/normal-flow/margin-collapse-through-percentage-height-block.html
+css/CSS2/normal-flow/margin-collapse-through-zero-height-block.html
 css/CSS2/normal-flow/margin-collapsing-in-table-caption-001.html
 css/CSS2/normal-flow/margin-collapsing-in-table-caption-002.html
 css/CSS2/normal-flow/max-height-001.xht

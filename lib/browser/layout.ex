@@ -1328,7 +1328,8 @@ defmodule Browser.Layout do
         nil ->
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
-          acc = if box.pt > 0, do: [{:pad, box.pt} | acc], else: acc
+          # the margins of the root element do not collapse with those of its children
+          acc = if box.pt > 0 or tag == "html", do: [{:pad, box.pt} | acc], else: acc
           acc = indent_op(c, box, acc)
 
           acc =
@@ -2572,9 +2573,12 @@ defmodule Browser.Layout do
     st = flush(st)
     # nothing was placed in it: the margin above still decides where it starts, unless the box
     # is empty and has no height: then its margins collapse together and with its neighbours'
+    o = st.open[ref].o
+    {_, _, obb, _} = o.bw
+
     empty? =
-      st.open[ref].o.h == nil and st.open[ref].o.min in [nil, 0, 0.0] and
-        st.open[ref].o[:ratio] == nil
+      o.h in [nil, 0, 0.0] and o.min in [nil, 0, 0.0] and o[:ratio] == nil and o.pb == 0 and
+        obb == 0
 
     st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
     st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}

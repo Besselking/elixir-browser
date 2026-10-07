@@ -5186,4 +5186,17 @@ defmodule Browser.LayoutTest do
       assert blue.y == 60
     end
   end
+
+  describe "margins of the root element" do
+    test "do not collapse with the margins of its children" do
+      html = """
+      <html style="margin-top:20px"><body style="margin:0"><div style="margin-top:20px;height:10px;background:blue"></div></body></html>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 40
+    end
+  end
 end
