@@ -5424,6 +5424,17 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "flex baseline alignment" do
+    test "items aligned on their baselines have their first lines' bottoms at the same height" do
+      html =
+        ~s|<div style="display:flex;align-items:baseline;font-family:Ahem"><div style="font-size:10px;line-height:10px">a</div><div style="font-size:30px;line-height:30px">b</div></div>|
+
+      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + h
+      assert [same] = Enum.uniq(bottoms)
+      assert is_integer(same)
+    end
+  end
+
   describe "column geometry" do
     test "column edges are rounded from their exact positions, so neighbours still touch" do
       html =

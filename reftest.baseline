@@ -3633,6 +3633,7 @@ css/css-flexbox/flex-wrap-004.html
 css/css-flexbox/flexbox-align-self-baseline-compatability.html
 css/css-flexbox/flexbox-align-self-baseline-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
+css/css-flexbox/flexbox-align-self-horiz-002.xhtml
 css/css-flexbox/flexbox-align-self-stretch-vert-001.html
 css/css-flexbox/flexbox-anonymous-items-001.html
 css/css-flexbox/flexbox-baseline-empty-001a.html
@@ -3708,6 +3709,7 @@ css/css-flexbox/flexbox_align-content-spacearound.html
 css/css-flexbox/flexbox_align-content-spacebetween.html
 css/css-flexbox/flexbox_align-content-stretch-2.html
 css/css-flexbox/flexbox_align-content-stretch.html
+css/css-flexbox/flexbox_align-items-baseline.html
 css/css-flexbox/flexbox_align-items-center-2.html
 css/css-flexbox/flexbox_align-items-center-3.html
 css/css-flexbox/flexbox_align-items-center.html
@@ -3966,6 +3968,7 @@ css/css-multicol/baseline-000.html
 css/css-multicol/baseline-001.html
 css/css-multicol/baseline-002.html
 css/css-multicol/baseline-003.html
+css/css-multicol/baseline-004.html
 css/css-multicol/baseline-005.html
 css/css-multicol/baseline-008.html
 css/css-multicol/broken-column-rule-1.html

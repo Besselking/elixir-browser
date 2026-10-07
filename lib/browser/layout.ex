@@ -6259,12 +6259,21 @@ defmodule Browser.Layout do
         Map.merge(it, %{w: w, items: items, h: h})
       end)
 
-    cross = sized |> Enum.map(& &1.h) |> Enum.max() |> max(round(min_cross))
+    # items aligned on their baselines hang from the lowest one
+    sized = baseline_offsets(sized, cs.align)
+
+    cross =
+      sized |> Enum.map(&(&1.h + &1.boff)) |> Enum.max() |> max(round(min_cross))
 
     {placed, _x} =
       Enum.map_reduce(sized, start, fn it, x ->
         it = flex_stretch(st, it, cs.align, cross)
-        dy = flex_offset(flex_align(it, cs.align), cross, it.h)
+
+        dy =
+          if it.boff > 0 or baseline_item?(it, cs.align),
+            do: it.boff,
+            else: flex_offset(flex_align(it, cs.align), cross, it.h)
+
         ix = x + it.ml
         moved = for item <- it.items, do: move(item, round(ix), top + dy)
         {moved, ix + it.w + it.mr + cs.col_gap + between}
@@ -6356,6 +6365,40 @@ defmodule Browser.Layout do
       "space-around" -> {free / n / 2, free / n}
       "space-evenly" -> {free / (n + 1), free / (n + 1)}
       _ -> {0.0, 0.0}
+    end
+  end
+
+  defp baseline_item?(it, container),
+    do: flex_align(it, container) in ["baseline", "first baseline", "first-baseline"]
+
+  # the distance each baseline-aligned item is moved down so that their first baselines meet
+  defp baseline_offsets(sized, container) do
+    bases =
+      for it <- sized, baseline_item?(it, container), do: {it, first_baseline(it.items, it.h)}
+
+    case bases do
+      [] ->
+        Enum.map(sized, &Map.put(&1, :boff, 0))
+
+      _ ->
+        deepest = bases |> Enum.map(&elem(&1, 1)) |> Enum.max()
+        offsets = Map.new(bases, fn {it, b} -> {it.key, deepest - b} end)
+
+        Enum.map(sized, fn it ->
+          Map.put(it, :boff, if(baseline_item?(it, container), do: offsets[it.key], else: 0))
+        end)
+    end
+  end
+
+  # the bottom of the first line of text, or the bottom of the box when there is none
+  defp first_baseline(items, height) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        height
+
+      texts ->
+        first = Enum.min_by(texts, & &1.y)
+        first.y + first.h
     end
   end
 
