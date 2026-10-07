@@ -672,6 +672,40 @@ defmodule Browser.JSTest do
              """) == ["a,b", "a,b,c,d,e,then r"]
     end
 
+    test "an await after a short-circuiting ?. never runs" do
+      assert logs_of("""
+             var o = { b: { c(x) { return this === o.b ? x + 1 : -1 } } };
+             async function f() {
+               var u;
+               console.log(await o?.b.c(await 2));
+               console.log(u?.b.c(await Promise.reject(1)));
+               console.log(await u?.[await Promise.reject(1)]);
+               console.log(o?.['b']?.c(await 5));
+             }
+             f().then(() => console.log('done'));
+             """) == ["3", "undefined", "undefined", "6", "done"]
+    end
+
+    test "operands before an await are evaluated before it" do
+      assert logs_of("""
+             var log = [];
+             function m(x) { log.push(x); return x }
+             var total = 10;
+             async function f() {
+               m('a') + (await m('b')) + m('c'); log.push('|');
+               m('d'), await null, m('e'); log.push('|');
+               [m(1), await m(2), m(3)]; log.push('|');
+               ({ a: m(4), b: await m(5) }); log.push('|');
+               m(6)(await 0);
+             }
+             f().catch(() => 0).then(() => console.log(log.join('')));
+             async function g() { total += await Promise.resolve(5) }
+             total = 100;
+             g().then(() => console.log(total));
+             total = 1000;
+             """) == ["105", "abc|de|123|45|6"]
+    end
+
     test "await inside loops, try, switch, labels and expressions" do
       assert logs_of("""
              async function g(n) { let s = 0; for (let i = 0; i < n; i++) { s += await i } return s }
