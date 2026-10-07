@@ -196,7 +196,8 @@ defmodule Browser.JS.Interp do
         case s do
           %{with: obj} when is_binary(name) ->
             if has_property?(obj, name) and not unscopable?(obj, name),
-              do: {:ok, get(obj, name)},
+              # GetBindingValue asks again whether the binding is still there
+              do: {:ok, if(has_property?(obj, name), do: get(obj, name), else: :undefined)},
               else: lookup_var(s.parent, name, heap)
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
@@ -254,6 +255,8 @@ defmodule Browser.JS.Interp do
 
       is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
           not unscopable?(s.with, name) ->
+        # SetMutableBinding asks again whether the binding is still there
+        _ = has_property?(s.with, name)
         put(s.with, name, val)
 
       s.parent != nil ->
