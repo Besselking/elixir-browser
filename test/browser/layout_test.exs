@@ -5267,4 +5267,79 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1.type == :text and &1.hidden))
     end
   end
+
+  describe "display: flow-root, display: contents and line-break: anywhere" do
+    defp rect_heights(items), do: for(%{type: :rect, h: h} <- items, do: h)
+
+    test "flow-root grows to hold its floats and keeps the margins of its children inside" do
+      items =
+        laid_out(
+          ~s(<div style="display:flow-root;background:red"><div style="float:left;width:10px;height:40px"></div></div>)
+        )
+
+      assert Enum.any?(rect_heights(items), &(&1 == 40))
+    end
+
+    test "float on display: contents is ignored" do
+      items = laid_out(~s(<div style="display:contents;float:right">ab</div>))
+      assert [%{x: x}] = Enum.filter(items, &(&1.type == :text))
+      assert x < 100
+    end
+
+    test "line-break: anywhere breaks between any characters" do
+      items = laid_out(~s(<div style="width:20px;line-break:anywhere">aaaaaaaa</div>))
+      ys = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(ys) > 1
+    end
+
+    test "the text of a content string keeps its case" do
+      items = laid_out(~s(<style>p::before{content:"AbC"}</style><p>x</p>))
+      assert "AbC" in texts(items) or Enum.any?(texts(items), &String.contains?(&1, "AbC"))
+    end
+
+    defp wrapped_lines(items) do
+      items
+      |> Enum.filter(&(&1.type == :text))
+      |> Enum.group_by(& &1.y, & &1.text)
+      |> Enum.sort()
+      |> Enum.map(fn {_, ts} -> ts |> Enum.join() |> String.replace("\u00A0", " ") end)
+    end
+
+    test "break-all takes the last letter along with the space after it" do
+      html =
+        ~s(<div style="width:32px;white-space:break-spaces;word-break:break-all">X XX X</div>)
+
+      assert wrapped_lines(laid_out(html)) == ["X X", "X X"]
+    end
+
+    test "line-break: anywhere may split a word from the space after it" do
+      html = ~s(<div style="width:32px;white-space:break-spaces;line-break:anywhere">X XX X</div>)
+      assert wrapped_lines(laid_out(html)) == ["X XX", " X"]
+    end
+
+    test "overflow-wrap: anywhere keeps the space with its word" do
+      html =
+        ~s(<div style="width:32px;white-space:break-spaces;overflow-wrap:anywhere">X XX X</div>)
+
+      assert wrapped_lines(laid_out(html)) == ["X ", "XX X"]
+    end
+
+    test "size containment takes the height from contain-intrinsic-size" do
+      html =
+        ~s(<div style="background:blue;contain:size;contain-intrinsic-size:111px 22px">xxxx</div>)
+
+      assert Enum.any?(rect_heights(laid_out(html)), &(&1 == 22))
+    end
+
+    test "size containment without an intrinsic size ignores the content" do
+      html = ~s(<div style="background:blue;contain:strict">xxxx</div><p>after</p>)
+      refute Enum.any?(rect_heights(laid_out(html)), &(&1 > 0))
+    end
+
+    test "position on display: contents is ignored" do
+      items = laid_out(~s(<div style="display:contents;position:absolute;right:0">ab</div>))
+      assert [%{x: x}] = Enum.filter(items, &(&1.type == :text))
+      assert x < 100
+    end
+  end
 end

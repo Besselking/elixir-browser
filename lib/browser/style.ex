@@ -12,6 +12,8 @@ defmodule Browser.Style do
   alias Browser.{CSS, MediaQuery}
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
+            contain contain-intrinsic-size contain-intrinsic-width contain-intrinsic-height
+            contain-intrinsic-inline-size contain-intrinsic-block-size
             width height min-height max-height min-width max-width box-sizing aspect-ratio margin-trim clip clip-path
             text-indent opacity margin-right padding-right vertical-align
             border-top-width border-right-width border-bottom-width border-left-width
@@ -28,12 +30,15 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break overflow-wrap word-wrap
+            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break overflow-wrap word-wrap)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size letter-spacing word-spacing text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap)
+
+  @doc false
+  def inherited_props, do: @inherited
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -1262,7 +1267,7 @@ defmodule Browser.Style do
           end
       end
 
-    base = Map.merge(inherited, typed)
+    base = Map.merge(inherited, typed) |> size_containment(resolved, env)
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
@@ -1289,6 +1294,54 @@ defmodule Browser.Style do
     {base, custom}
   end
 
+  # `contain: size` (or `strict`): the content does not size the box, `contain-intrinsic-*` does
+  # (zero when it is not given). Only the height of a block and a width asked for from the
+  # content are known here.
+  defp size_containment(base, resolved, env) do
+    contain = String.split(Map.get(resolved, "contain", ""))
+
+    if "size" in contain or "strict" in contain do
+      {iw, ih} = intrinsic_size(resolved, env)
+
+      base =
+        if Map.get(base, "height", :auto) == :auto, do: Map.put(base, "height", ih), else: base
+
+      if Map.get(base, "width") in [:maxc, :fit, :minc],
+        do: Map.put(base, "width", iw),
+        else: base
+    else
+      base
+    end
+  end
+
+  defp intrinsic_size(resolved, env) do
+    {w, h} =
+      case resolved |> Map.get("contain-intrinsic-size", "") |> intrinsic_lengths(env) do
+        [w, h] -> {w, h}
+        [w] -> {w, w}
+        _ -> {0.0, 0.0}
+      end
+
+    pick = fn key, default ->
+      case resolved |> Map.get(key, "") |> intrinsic_lengths(env) do
+        [v | _] -> v
+        _ -> default
+      end
+    end
+
+    w = pick.("contain-intrinsic-inline-size", w)
+    h = pick.("contain-intrinsic-block-size", h)
+    {pick.("contain-intrinsic-width", w), pick.("contain-intrinsic-height", h)}
+  end
+
+  # `none`, and the `auto` of `auto 10px` (the size last rendered), count for nothing
+  defp intrinsic_lengths(value, env) do
+    value
+    |> String.split()
+    |> Enum.reject(&(&1 in ["auto", "none"]))
+    |> Enum.map(&(length(&1, env) || 0.0))
+  end
+
   # `opacity: 0` with a transition on opacity, on something that takes clicks: a scripted
   # fade-in (a hidden menu or dialog turns pointer events off as well)
   defp reveal?(c) do
@@ -1304,23 +1357,40 @@ defmodule Browser.Style do
       {prop, {:sh, short, raw, long}}, acc ->
         with {:ok, v} <- substitute(raw, custom, 0),
              {^long, val} <- List.keyfind(split_shorthand(short, v), long, 0) do
-          Map.put(acc, prop, normalize(val))
+          Map.put(acc, prop, normalize(prop, val))
         else
           _ -> acc
         end
 
       {prop, value}, acc ->
         case substitute(value, custom, 0) do
-          {:ok, v} -> Map.put(acc, prop, normalize(v))
+          {:ok, v} -> Map.put(acc, prop, normalize(prop, v))
           :error -> acc
         end
     end)
   end
 
-  # values are case-insensitive keywords, except the paths inside url()
-  defp normalize(v) do
+  # values are case-insensitive keywords, except the paths inside url() and quoted strings
+  # the text of a string is kept in `content`, `quotes` and the counter properties
+  @string_props ~w(content quotes counter-reset counter-increment counter-set list-style-type
+                   list-style)
+
+  defp normalize(prop, v) do
     v = String.trim(v)
-    if String.contains?(v, "url("), do: v, else: String.downcase(v)
+
+    cond do
+      prop in @string_props -> downcase_outside_strings(v)
+      String.contains?(v, "url(") -> v
+      true -> String.downcase(v)
+    end
+  end
+
+  defp downcase_outside_strings(v) do
+    ~r/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/is
+    |> Regex.split(v, include_captures: true)
+    |> Enum.map_join(fn part ->
+      if Regex.match?(~r/\A(?:"|'|url\()/i, part), do: part, else: String.downcase(part)
+    end)
   end
 
   # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone
