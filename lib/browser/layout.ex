@@ -1328,7 +1328,8 @@ defmodule Browser.Layout do
         nil ->
           # plain block: just insets
           acc = [{:inset, box.ml + box.pl, box.mr + box.pr} | acc]
-          acc = if box.pt > 0, do: [{:pad, box.pt} | acc], else: acc
+          # the margins of the root element do not collapse with those of its children
+          acc = if box.pt > 0 or tag == "html", do: [{:pad, box.pt} | acc], else: acc
           acc = indent_op(c, box, acc)
 
           acc =
@@ -2492,6 +2493,8 @@ defmodule Browser.Layout do
   # a block holding nothing but floats still contains them (the usual "clearfix")
   defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
     st = if st.y == y0, do: contain_floats(st, n0), else: st
+    # the margin below a box is not one of a first child
+    st = %{st | clr: nil}
     st = end_block(st)
     %{st | insets: rest, left: l, right: r}
   end
@@ -2568,8 +2571,17 @@ defmodule Browser.Layout do
 
   defp op({:box_end, ref}, st) do
     st = flush(st)
-    # nothing was placed in it: the margin above still decides where it starts
-    st = if ref in st.ptop, do: apply_gap(st), else: st
+    # nothing was placed in it: the margin above still decides where it starts, unless the box
+    # is empty and has no height: then its margins collapse together and with its neighbours'
+    o = st.open[ref].o
+    {_, _, obb, _} = o.bw
+
+    empty? =
+      o.h in [nil, 0, 0.0] and o.min in [nil, 0, 0.0] and o[:ratio] == nil and o.pb == 0 and
+        obb == 0
+
+    st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
+    st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}
     {box, open} = Map.pop(st.open, ref)
     {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
@@ -2581,7 +2593,7 @@ defmodule Browser.Layout do
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
     # child margins stay inside the box only when padding or a border separates them
-    st = if box.o.pb > 0 or bb > 0, do: apply_gap(st), else: st
+    st = if box.o.pb > 0 or bb > 0 or Map.get(box, :bfc, false), do: apply_gap(st), else: st
     st = %{st | y: st.y + box.o.pb + bb}
     {l, r, f} = box.saved
     st = %{st | left: l, right: r, free: f}
@@ -2987,7 +2999,18 @@ defmodule Browser.Layout do
       st = place_box(st, ref, percent_height(st, o))
       if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
     else
-      st |> apply_gap() |> place_box(ref, percent_height(st, o))
+      bfc? = o.clip or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
+      # the margin of a first child still collapses with the clearance of the box above it
+      clr =
+        if bt == 0 and o.pt == 0 and not bfc? and st.y == elem(st.clr || {0, 0, nil}, 2),
+          do: st.clr
+
+      st = st |> apply_gap() |> place_box(ref, percent_height(st, o))
+      st = if clr, do: %{st | clr: clr}, else: st
+
+      if bfc? and Map.has_key?(st.open, ref),
+        do: %{st | open: Map.update!(st.open, ref, &Map.put(&1, :bfc, true))},
+        else: st
     end
   end
 

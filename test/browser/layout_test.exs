@@ -5170,4 +5170,33 @@ defmodule Browser.LayoutTest do
       assert orange |> Enum.map(&(&1.y + &1.h)) |> Enum.max() == 120
     end
   end
+
+  describe "margins of empty boxes with a background" do
+    test "collapse through the box like those of an empty box without one" do
+      html = """
+      <style>body{margin:0}</style>
+      <div style="height:20px;background:green"></div>
+      <div style="margin:40px 0;background:red"><div style="margin:40px 0"></div></div>
+      <div style="height:20px;background:blue"></div>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 60
+    end
+  end
+
+  describe "margins of the root element" do
+    test "do not collapse with the margins of its children" do
+      html = """
+      <html style="margin-top:20px"><body style="margin:0"><div style="margin-top:20px;height:10px;background:blue"></div></body></html>
+      """
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 40
+    end
+  end
 end
