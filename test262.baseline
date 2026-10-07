@@ -5512,6 +5512,7 @@ built-ins/Iterator/from/get-next-method-only-once.js
 built-ins/Iterator/from/get-next-method-throws.js
 built-ins/Iterator/from/get-return-method-when-call-return.js
 built-ins/Iterator/from/is-function.js
+built-ins/Iterator/from/iterable-primitives.js
 built-ins/Iterator/from/iterable-to-iterator-fallback.js
 built-ins/Iterator/from/length.js
 built-ins/Iterator/from/name.js
@@ -5730,6 +5731,7 @@ built-ins/Iterator/prototype/flatMap/get-next-method-only-once.js
 built-ins/Iterator/prototype/flatMap/get-next-method-throws.js
 built-ins/Iterator/prototype/flatMap/get-return-method-throws.js
 built-ins/Iterator/prototype/flatMap/is-function.js
+built-ins/Iterator/prototype/flatMap/iterable-primitives-are-not-flattened.js
 built-ins/Iterator/prototype/flatMap/iterable-to-iterator-fallback.js
 built-ins/Iterator/prototype/flatMap/iterator-already-exhausted.js
 built-ins/Iterator/prototype/flatMap/iterator-return-method-throws.js
@@ -9397,8 +9399,10 @@ built-ins/Object/freeze/15.2.3.9-2-3.js
 built-ins/Object/freeze/15.2.3.9-2-4.js
 built-ins/Object/freeze/15.2.3.9-2-a-1.js
 built-ins/Object/freeze/15.2.3.9-2-a-10.js
+built-ins/Object/freeze/15.2.3.9-2-a-11.js
 built-ins/Object/freeze/15.2.3.9-2-a-12.js
 built-ins/Object/freeze/15.2.3.9-2-a-13.js
+built-ins/Object/freeze/15.2.3.9-2-a-14.js
 built-ins/Object/freeze/15.2.3.9-2-a-2.js
 built-ins/Object/freeze/15.2.3.9-2-a-3.js
 built-ins/Object/freeze/15.2.3.9-2-a-4.js
@@ -11382,6 +11386,7 @@ built-ins/Proxy/deleteProperty/targetdesc-is-undefined-return-true.js
 built-ins/Proxy/deleteProperty/trap-is-not-callable.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-not-strict.js
 built-ins/Proxy/deleteProperty/trap-is-undefined-strict.js
+built-ins/Proxy/deleteProperty/trap-is-undefined-target-is-proxy.js
 built-ins/Proxy/enumerate/removed-does-not-trigger.js
 built-ins/Proxy/function-prototype.js
 built-ins/Proxy/get/accessor-get-is-undefined-throws.js
@@ -18477,6 +18482,10 @@ language/directive-prologue/get-accsr-runtime.js
 language/directive-prologue/set-accsr-inside-func-expr-runtime.js
 language/directive-prologue/set-accsr-not-first-runtime.js
 language/directive-prologue/set-accsr-runtime.js
+language/eval-code/direct/arrow-fn-a-following-parameter-is-named-arguments-arrow-func-declare-arguments-assign-incl-def-param-arrow-arguments.js
+language/eval-code/direct/arrow-fn-a-following-parameter-is-named-arguments-arrow-func-declare-arguments-assign.js
+language/eval-code/direct/arrow-fn-a-preceding-parameter-is-named-arguments-arrow-func-declare-arguments-assign-incl-def-param-arrow-arguments.js
+language/eval-code/direct/arrow-fn-a-preceding-parameter-is-named-arguments-arrow-func-declare-arguments-assign.js
 language/eval-code/direct/arrow-fn-body-cntns-arguments-func-decl-arrow-func-declare-arguments-assign-incl-def-param-arrow-arguments.js
 language/eval-code/direct/arrow-fn-body-cntns-arguments-func-decl-arrow-func-declare-arguments-assign.js
 language/eval-code/direct/arrow-fn-body-cntns-arguments-lex-bind-arrow-func-declare-arguments-assign.js
@@ -19162,6 +19171,7 @@ language/expressions/arrow-function/dstr/syntax-error-ident-ref-void-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-while-escaped.js
 language/expressions/arrow-function/dstr/syntax-error-ident-ref-with-escaped.js
 language/expressions/arrow-function/empty-function-body-returns-undefined.js
+language/expressions/arrow-function/eval-var-scope-syntax-err.js
 language/expressions/arrow-function/expression-body-implicit-return.js
 language/expressions/arrow-function/extensibility.js
 language/expressions/arrow-function/forbidden-ext/b1/arrow-function-forbidden-ext-direct-access-prop-arguments.js
@@ -20547,6 +20557,7 @@ language/expressions/async-generator/early-errors-expression-not-simple-assignme
 language/expressions/async-generator/early-errors-expression-yield-as-function-binding-identifier.js
 language/expressions/async-generator/early-errors-expression-yield-star-after-newline.js
 language/expressions/async-generator/escaped-async.js
+language/expressions/async-generator/eval-var-scope-syntax-err.js
 language/expressions/async-generator/expression-await-as-yield-operand.js
 language/expressions/async-generator/expression-await-promise-as-yield-operand.js
 language/expressions/async-generator/expression-await-thenable-as-yield-operand.js
@@ -20582,6 +20593,7 @@ language/expressions/async-generator/named-dflt-params-ref-prior.js
 language/expressions/async-generator/named-dflt-params-ref-self.js
 language/expressions/async-generator/named-dflt-params-rest.js
 language/expressions/async-generator/named-dflt-params-trailing-comma.js
+language/expressions/async-generator/named-eval-var-scope-syntax-err.js
 language/expressions/async-generator/named-no-strict-reassign-fn-name-in-body-in-arrow.js
 language/expressions/async-generator/named-no-strict-reassign-fn-name-in-body-in-eval.js
 language/expressions/async-generator/named-no-strict-reassign-fn-name-in-body.js
@@ -20883,7 +20895,14 @@ language/expressions/bitwise-xor/bigint-toprimitive.js
 language/expressions/bitwise-xor/bigint-wrapped-values.js
 language/expressions/bitwise-xor/bigint.js
 language/expressions/bitwise-xor/order-of-evaluation.js
+language/expressions/call/11.2.3-3_1.js
+language/expressions/call/11.2.3-3_2.js
 language/expressions/call/11.2.3-3_3.js
+language/expressions/call/11.2.3-3_4.js
+language/expressions/call/11.2.3-3_5.js
+language/expressions/call/11.2.3-3_6.js
+language/expressions/call/11.2.3-3_7.js
+language/expressions/call/11.2.3-3_8.js
 language/expressions/call/S11.2.3_A1.js
 language/expressions/call/S11.2.3_A2.js
 language/expressions/call/S11.2.3_A3_T1.js
@@ -20960,6 +20979,7 @@ language/expressions/call/spread-sngl-iter.js
 language/expressions/call/spread-sngl-literal.js
 language/expressions/call/spread-sngl-obj-ident.js
 language/expressions/call/trailing-comma.js
+language/expressions/call/with-base-obj.js
 language/expressions/class/accessor-name-inst-computed-in.js
 language/expressions/class/accessor-name-inst-computed-yield-expr.js
 language/expressions/class/accessor-name-inst/computed-err-evaluation.js
@@ -24138,6 +24158,7 @@ language/expressions/class/elements/private-method-shadowed-on-nested-class.js
 language/expressions/class/elements/private-methods/prod-private-async-generator.js
 language/expressions/class/elements/private-methods/prod-private-async-method.js
 language/expressions/class/elements/private-methods/prod-private-generator.js
+language/expressions/class/elements/private-methods/prod-private-method-initialize-order.js
 language/expressions/class/elements/private-methods/prod-private-method.js
 language/expressions/class/elements/private-setter-access-on-inner-arrow-function.js
 language/expressions/class/elements/private-setter-access-on-inner-function.js
@@ -25447,6 +25468,7 @@ language/expressions/delete/11.4.1-4-a-4-s.js
 language/expressions/delete/11.4.1-4.a-1.js
 language/expressions/delete/11.4.1-4.a-10.js
 language/expressions/delete/11.4.1-4.a-11.js
+language/expressions/delete/11.4.1-4.a-12.js
 language/expressions/delete/11.4.1-4.a-13.js
 language/expressions/delete/11.4.1-4.a-14.js
 language/expressions/delete/11.4.1-4.a-15.js
@@ -26210,6 +26232,13 @@ language/expressions/exponentiation/exp-assignment-operator.js
 language/expressions/exponentiation/exp-operator-evaluation-order.js
 language/expressions/exponentiation/exp-operator-precedence-unary-expression-semantics.js
 language/expressions/exponentiation/exp-operator-precedence-update-expression-semantics.js
+language/expressions/exponentiation/exp-operator-syntax-error-bitnot-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-delete-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-logical-not-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-negate-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-plus-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-typeof-unary-expression-base.js
+language/expressions/exponentiation/exp-operator-syntax-error-void-unary-expression-base.js
 language/expressions/exponentiation/exp-operator.js
 language/expressions/exponentiation/int32_min-exponent.js
 language/expressions/exponentiation/order-of-evaluation.js
@@ -26416,6 +26445,7 @@ language/expressions/function/early-errors/invalid-names-member-expression-bad-r
 language/expressions/function/early-errors/invalid-names-member-expression-this.js
 language/expressions/function/early-params-super-call.js
 language/expressions/function/early-params-super-prop.js
+language/expressions/function/eval-var-scope-syntax-err.js
 language/expressions/function/forbidden-ext/b1/func-expr-strict-forbidden-ext-direct-access-prop-arguments.js
 language/expressions/function/forbidden-ext/b1/func-expr-strict-forbidden-ext-direct-access-prop-caller.js
 language/expressions/function/forbidden-ext/b2/func-expr-forbidden-ext-indirect-access-own-prop-caller-get.js
@@ -26474,6 +26504,7 @@ language/expressions/function/use-strict-with-non-simple-param.js
 language/expressions/generators/arguments-with-arguments-fn.js
 language/expressions/generators/arguments-with-arguments-lex.js
 language/expressions/generators/array-destructuring-param-strict-body.js
+language/expressions/generators/default-proto.js
 language/expressions/generators/dflt-params-abrupt.js
 language/expressions/generators/dflt-params-arg-val-not-undefined.js
 language/expressions/generators/dflt-params-arg-val-undefined.js
@@ -26665,6 +26696,7 @@ language/expressions/generators/dstr/obj-ptrn-prop-obj.js
 language/expressions/generators/dstr/obj-ptrn-rest-getter.js
 language/expressions/generators/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/expressions/generators/dstr/obj-ptrn-rest-val-obj.js
+language/expressions/generators/eval-var-scope-syntax-err.js
 language/expressions/generators/forbidden-ext/b1/gen-func-expr-forbidden-ext-direct-access-prop-arguments.js
 language/expressions/generators/forbidden-ext/b1/gen-func-expr-forbidden-ext-direct-access-prop-caller.js
 language/expressions/generators/forbidden-ext/b2/gen-func-expr-forbidden-ext-indirect-access-own-prop-caller-get.js
@@ -28189,6 +28221,7 @@ language/expressions/object/method-definition/async-gen-meth-dflt-params-ref-sel
 language/expressions/object/method-definition/async-gen-meth-dflt-params-rest.js
 language/expressions/object/method-definition/async-gen-meth-dflt-params-trailing-comma.js
 language/expressions/object/method-definition/async-gen-meth-escaped-async.js
+language/expressions/object/method-definition/async-gen-meth-eval-var-scope-syntax-err.js
 language/expressions/object/method-definition/async-gen-meth-object-destructuring-param-strict-body.js
 language/expressions/object/method-definition/async-gen-meth-params-trailing-comma-multiple.js
 language/expressions/object/method-definition/async-gen-meth-params-trailing-comma-single.js
@@ -28338,6 +28371,7 @@ language/expressions/object/method-definition/gen-meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/gen-meth-dflt-params-ref-self.js
 language/expressions/object/method-definition/gen-meth-dflt-params-rest.js
 language/expressions/object/method-definition/gen-meth-dflt-params-trailing-comma.js
+language/expressions/object/method-definition/gen-meth-eval-var-scope-syntax-err.js
 language/expressions/object/method-definition/gen-meth-object-destructuring-param-strict-body.js
 language/expressions/object/method-definition/gen-meth-params-trailing-comma-multiple.js
 language/expressions/object/method-definition/gen-meth-params-trailing-comma-single.js
@@ -28391,6 +28425,7 @@ language/expressions/object/method-definition/meth-dflt-params-ref-prior.js
 language/expressions/object/method-definition/meth-dflt-params-ref-self.js
 language/expressions/object/method-definition/meth-dflt-params-rest.js
 language/expressions/object/method-definition/meth-dflt-params-trailing-comma.js
+language/expressions/object/method-definition/meth-eval-var-scope-syntax-err.js
 language/expressions/object/method-definition/meth-object-destructuring-param-strict-body.js
 language/expressions/object/method-definition/meth-params-trailing-comma-multiple.js
 language/expressions/object/method-definition/meth-params-trailing-comma-single.js
@@ -28910,23 +28945,30 @@ language/expressions/super/prop-expr-uninitialized-this-putvalue-increment.js
 language/expressions/super/prop-expr-uninitialized-this-putvalue.js
 language/expressions/super/prop-poisoned-underscore-proto.js
 language/expressions/super/super-reference-resolution.js
+language/expressions/tagged-template/cache-different-functions-same-site.js
 language/expressions/tagged-template/cache-differing-expressions-eval.js
 language/expressions/tagged-template/cache-differing-expressions-new-function.js
 language/expressions/tagged-template/cache-differing-expressions.js
 language/expressions/tagged-template/cache-differing-raw-strings.js
 language/expressions/tagged-template/cache-differing-string-count.js
+language/expressions/tagged-template/cache-eval-inner-function.js
 language/expressions/tagged-template/cache-identical-source-eval.js
 language/expressions/tagged-template/cache-identical-source-new-function.js
 language/expressions/tagged-template/cache-identical-source.js
+language/expressions/tagged-template/cache-same-site-top-level.js
+language/expressions/tagged-template/cache-same-site.js
 language/expressions/tagged-template/call-expression-argument-list-evaluation.js
 language/expressions/tagged-template/call-expression-context-no-strict.js
 language/expressions/tagged-template/call-expression-context-strict.js
 language/expressions/tagged-template/chained-application.js
+language/expressions/tagged-template/constructor-invocation.js
 language/expressions/tagged-template/invalid-escape-sequences.js
 language/expressions/tagged-template/member-expression-argument-list-evaluation.js
 language/expressions/tagged-template/member-expression-context.js
 language/expressions/tagged-template/template-object-frozen-non-strict.js
 language/expressions/tagged-template/template-object-frozen-strict.js
+language/expressions/tagged-template/template-object-template-map.js
+language/expressions/tagged-template/template-object.js
 language/expressions/template-literal/evaluation-order.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-1.js
 language/expressions/template-literal/invalid-hexidecimal-character-escape-sequence-truncated-2.js
@@ -29091,6 +29133,7 @@ language/expressions/void/S11.4.2_A4_T5.js
 language/expressions/void/S11.4.2_A4_T6.js
 language/expressions/yield/arguments-object-attributes.js
 language/expressions/yield/captured-free-vars.js
+language/expressions/yield/formal-parameters-after-reassignment-non-strict.js
 language/expressions/yield/formal-parameters-after-reassignment-strict.js
 language/expressions/yield/formal-parameters.js
 language/expressions/yield/from-catch.js
@@ -29107,6 +29150,8 @@ language/expressions/yield/rhs-template-middle.js
 language/expressions/yield/rhs-unresolvable.js
 language/expressions/yield/rhs-yield.js
 language/expressions/yield/star-array.js
+language/expressions/yield/star-in-rltn-expr.js
+language/expressions/yield/star-iterable.js
 language/expressions/yield/star-return-is-null.js
 language/expressions/yield/star-rhs-iter-get-call-err.js
 language/expressions/yield/star-rhs-iter-get-call-non-obj.js
@@ -29116,10 +29161,12 @@ language/expressions/yield/star-rhs-iter-nrml-next-call-non-obj.js
 language/expressions/yield/star-rhs-iter-nrml-next-get-err.js
 language/expressions/yield/star-rhs-iter-nrml-next-invoke.js
 language/expressions/yield/star-rhs-iter-nrml-res-done-err.js
+language/expressions/yield/star-rhs-iter-nrml-res-done-no-value.js
 language/expressions/yield/star-rhs-iter-nrml-res-value-err.js
 language/expressions/yield/star-rhs-iter-nrml-res-value-final.js
 language/expressions/yield/star-rhs-iter-rtrn-no-rtrn.js
 language/expressions/yield/star-rhs-iter-rtrn-res-done-err.js
+language/expressions/yield/star-rhs-iter-rtrn-res-done-no-value.js
 language/expressions/yield/star-rhs-iter-rtrn-res-value-err.js
 language/expressions/yield/star-rhs-iter-rtrn-res-value-final.js
 language/expressions/yield/star-rhs-iter-rtrn-rtrn-call-err.js
@@ -29127,6 +29174,7 @@ language/expressions/yield/star-rhs-iter-rtrn-rtrn-call-non-obj.js
 language/expressions/yield/star-rhs-iter-rtrn-rtrn-get-err.js
 language/expressions/yield/star-rhs-iter-rtrn-rtrn-invoke.js
 language/expressions/yield/star-rhs-iter-thrw-res-done-err.js
+language/expressions/yield/star-rhs-iter-thrw-res-done-no-value.js
 language/expressions/yield/star-rhs-iter-thrw-res-value-err.js
 language/expressions/yield/star-rhs-iter-thrw-res-value-final.js
 language/expressions/yield/star-rhs-iter-thrw-thrw-call-err.js
@@ -29380,24 +29428,30 @@ language/future-reserved-words/implements-strict-escaped.js
 language/future-reserved-words/implements-strict.js
 language/future-reserved-words/implements-titlecase.js
 language/future-reserved-words/implements-uppercase.js
+language/future-reserved-words/implements.js
 language/future-reserved-words/implements0.js
 language/future-reserved-words/implementss.js
 language/future-reserved-words/import.js
 language/future-reserved-words/int.js
 language/future-reserved-words/interface-strict-escaped.js
 language/future-reserved-words/interface-strict.js
+language/future-reserved-words/interface.js
 language/future-reserved-words/let-strict-escaped.js
 language/future-reserved-words/let-strict.js
 language/future-reserved-words/long.js
 language/future-reserved-words/native.js
 language/future-reserved-words/package-strict-escaped.js
 language/future-reserved-words/package-strict.js
+language/future-reserved-words/package.js
 language/future-reserved-words/private-strict-escaped.js
 language/future-reserved-words/private-strict.js
+language/future-reserved-words/private.js
 language/future-reserved-words/protected-strict-escaped.js
 language/future-reserved-words/protected-strict.js
+language/future-reserved-words/protected.js
 language/future-reserved-words/public-strict-escaped.js
 language/future-reserved-words/public-strict.js
+language/future-reserved-words/public.js
 language/future-reserved-words/short.js
 language/future-reserved-words/static-strict-escaped.js
 language/future-reserved-words/static-strict.js
@@ -30759,6 +30813,7 @@ language/statements/async-function/evaluation-body-that-throws-after-await.js
 language/statements/async-function/evaluation-body-that-throws.js
 language/statements/async-function/evaluation-body.js
 language/statements/async-function/evaluation-default-that-throws.js
+language/statements/async-function/evaluation-mapped-arguments.js
 language/statements/async-function/evaluation-this-value-global.js
 language/statements/async-function/evaluation-this-value-passed.js
 language/statements/async-function/evaluation-unmapped-arguments.js
@@ -30991,6 +31046,7 @@ language/statements/async-generator/dstr/obj-ptrn-rest-getter.js
 language/statements/async-generator/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/statements/async-generator/dstr/obj-ptrn-rest-val-obj.js
 language/statements/async-generator/escaped-async.js
+language/statements/async-generator/eval-var-scope-syntax-err.js
 language/statements/async-generator/forbidden-ext/b1/async-gen-func-decl-forbidden-ext-direct-access-prop-arguments.js
 language/statements/async-generator/forbidden-ext/b1/async-gen-func-decl-forbidden-ext-direct-access-prop-caller.js
 language/statements/async-generator/forbidden-ext/b2/async-gen-func-decl-forbidden-ext-indirect-access-own-prop-caller-get.js
@@ -34051,6 +34107,7 @@ language/statements/class/elements/async-private-method/returns-async-function-r
 language/statements/class/elements/async-private-method/returns-async-function-returns-newtarget.js
 language/statements/class/elements/async-private-method/returns-async-function.js
 language/statements/class/elements/class-field-is-observable-by-proxy.js
+language/statements/class/elements/class-field-on-frozen-objects.js
 language/statements/class/elements/comp-name-init-err-contains-arguments.js
 language/statements/class/elements/comp-name-init-err-contains-super.js
 language/statements/class/elements/computed-name-toprimitive-symbol.js
@@ -34455,6 +34512,7 @@ language/statements/class/elements/private-getter-shadowed-by-field-on-nested-cl
 language/statements/class/elements/private-getter-shadowed-by-getter-on-nested-class.js
 language/statements/class/elements/private-getter-shadowed-by-method-on-nested-class.js
 language/statements/class/elements/private-getter-shadowed-by-setter-on-nested-class.js
+language/statements/class/elements/private-getter-visible-to-direct-eval-on-initializer.js
 language/statements/class/elements/private-getter-visible-to-direct-eval.js
 language/statements/class/elements/private-indirect-eval-contains-arguments.js
 language/statements/class/elements/private-indirect-eval-err-contains-newtarget.js
@@ -34483,10 +34541,12 @@ language/statements/class/elements/private-method-shadowed-by-field-on-nested-cl
 language/statements/class/elements/private-method-shadowed-by-getter-on-nested-class.js
 language/statements/class/elements/private-method-shadowed-by-setter-on-nested-class.js
 language/statements/class/elements/private-method-shadowed-on-nested-class.js
+language/statements/class/elements/private-method-visible-to-direct-eval-on-initializer.js
 language/statements/class/elements/private-method-visible-to-direct-eval.js
 language/statements/class/elements/private-methods/prod-private-async-generator.js
 language/statements/class/elements/private-methods/prod-private-async-method.js
 language/statements/class/elements/private-methods/prod-private-generator.js
+language/statements/class/elements/private-methods/prod-private-method-initialize-order.js
 language/statements/class/elements/private-methods/prod-private-method.js
 language/statements/class/elements/private-setter-access-on-inner-arrow-function.js
 language/statements/class/elements/private-setter-access-on-inner-function.js
@@ -34500,6 +34560,7 @@ language/statements/class/elements/private-setter-shadowed-by-field-on-nested-cl
 language/statements/class/elements/private-setter-shadowed-by-getter-on-nested-class.js
 language/statements/class/elements/private-setter-shadowed-by-method-on-nested-class.js
 language/statements/class/elements/private-setter-shadowed-by-setter-on-nested-class.js
+language/statements/class/elements/private-setter-visible-to-direct-eval-on-initializer.js
 language/statements/class/elements/private-setter-visible-to-direct-eval.js
 language/statements/class/elements/private-static-async-generator-method-name.js
 language/statements/class/elements/private-static-async-method-name.js
@@ -34529,6 +34590,7 @@ language/statements/class/elements/private-typeof-init-err-contains-arguments.js
 language/statements/class/elements/private-typeof-init-err-contains-super.js
 language/statements/class/elements/privatefield-on-proxy.js
 language/statements/class/elements/privatefieldadd-typeerror.js
+language/statements/class/elements/privatefieldget-primitive-receiver.js
 language/statements/class/elements/privatefieldget-success-1.js
 language/statements/class/elements/privatefieldget-success-2.js
 language/statements/class/elements/privatefieldget-success-3.js
@@ -34539,6 +34601,7 @@ language/statements/class/elements/privatefieldget-typeerror-2.js
 language/statements/class/elements/privatefieldget-typeerror-3.js
 language/statements/class/elements/privatefieldget-typeerror-4.js
 language/statements/class/elements/privatefieldget-typeerror-5.js
+language/statements/class/elements/privatefieldput-primitive-receiver.js
 language/statements/class/elements/privatefieldset-evaluation-order-2.js
 language/statements/class/elements/privatefieldset-evaluation-order-3.js
 language/statements/class/elements/privatefieldset-typeerror-1.js
@@ -34578,6 +34641,7 @@ language/statements/class/elements/prod-private-method-before-super-return-in-fi
 language/statements/class/elements/prod-private-setter-before-super-return-in-constructor.js
 language/statements/class/elements/prod-private-setter-before-super-return-in-field-initializer.js
 language/statements/class/elements/public-class-field-initialization-is-visible-to-proxy.js
+language/statements/class/elements/public-class-field-initialization-on-super-class-with-setter.js
 language/statements/class/elements/redeclaration-symbol.js
 language/statements/class/elements/redeclaration.js
 language/statements/class/elements/regular-definitions-computed-names.js
@@ -38443,6 +38507,7 @@ language/statements/function/early-params-super-prop.js
 language/statements/function/enable-strict-via-body.js
 language/statements/function/enable-strict-via-outer-body.js
 language/statements/function/enable-strict-via-outer-script.js
+language/statements/function/eval-var-scope-syntax-err.js
 language/statements/function/forbidden-ext/b1/cls-expr-meth-forbidden-ext-direct-access-prop-arguments.js
 language/statements/function/forbidden-ext/b1/cls-expr-meth-forbidden-ext-direct-access-prop-caller.js
 language/statements/function/forbidden-ext/b2/func-decl-forbidden-ext-indirect-access-own-prop-caller-get.js
@@ -38505,6 +38570,7 @@ language/statements/generators/arguments-with-arguments-lex.js
 language/statements/generators/array-destructuring-param-strict-body.js
 language/statements/generators/cptn-decl.js
 language/statements/generators/declaration.js
+language/statements/generators/default-proto.js
 language/statements/generators/dflt-params-abrupt.js
 language/statements/generators/dflt-params-arg-val-not-undefined.js
 language/statements/generators/dflt-params-arg-val-undefined.js
@@ -38696,6 +38762,7 @@ language/statements/generators/dstr/obj-ptrn-prop-obj.js
 language/statements/generators/dstr/obj-ptrn-rest-getter.js
 language/statements/generators/dstr/obj-ptrn-rest-skip-non-enumerable.js
 language/statements/generators/dstr/obj-ptrn-rest-val-obj.js
+language/statements/generators/eval-var-scope-syntax-err.js
 language/statements/generators/forbidden-ext/b1/gen-func-decl-forbidden-ext-direct-access-prop-arguments.js
 language/statements/generators/forbidden-ext/b1/gen-func-decl-forbidden-ext-direct-access-prop-caller.js
 language/statements/generators/forbidden-ext/b2/gen-func-decl-forbidden-ext-indirect-access-own-prop-caller-get.js

@@ -135,7 +135,14 @@ defmodule Browser.JS.Lexer do
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
-    kind = if (name in @keywords or name == "target") and escaped?(s, rest), do: :eid, else: :id
+    # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
+    kind =
+      if (name in @keywords or name == "target") and
+           name not in ~w(implements interface package private protected public) and
+           escaped?(s, rest),
+         do: :eid,
+         else: :id
+
     lex(rest, false, [{kind, name, nl} | acc])
   end
 

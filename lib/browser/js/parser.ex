@@ -1806,8 +1806,18 @@ defmodule Browser.JS.Parser do
   end
 
   defp binary(ts, min) do
-    {left, ts} = unary(ts)
-    binary_loop(left, ts, min)
+    {left, rest} = unary(ts)
+
+    # `-x ** 2` is ambiguous, so it is an error (`(-x) ** 2` and `++x ** 2` are fine)
+    with [{kind, op, _} | _] <- ts,
+         true <-
+           (kind == :p and op in ["!", "-", "+", "~"]) or
+             (kind == :id and op in ["typeof", "void", "delete"]),
+         [{:p, "**", _} | _] <- rest do
+      throw({:syntax, "unary operator used immediately before exponentiation expression"})
+    end
+
+    binary_loop(left, rest, min)
   end
 
   defp binary_loop(left, [{kind, op, _} | rest] = ts, min) when kind in [:p, :id] do
@@ -1945,13 +1955,7 @@ defmodule Browser.JS.Parser do
   defp chain(_e, [{:tmpl, _, _} | _], true),
     do: throw({:syntax, "a template literal cannot follow an optional chain"})
 
-  defp chain(e, [{:tmpl, parts, _} | ts], c) do
-    {parts, raw} = template_parts(parts)
-    is_text = &(is_binary(&1) or &1 == :bad)
-    cooked = parts |> Enum.filter(is_text) |> Enum.map(&if(&1 == :bad, do: :undefined, else: &1))
-    exprs = Enum.reject(parts, is_text)
-    chain({:call, e, [{:tagged_strings, cooked, raw} | exprs], false}, ts, c)
-  end
+  defp chain(e, [{:tmpl, parts, _} | ts], c), do: chain(tagged_call(e, parts), ts, c)
 
   defp chain(e, [{:p, "[", _} | ts], c) do
     {k, ts} = expression(ts)
@@ -2007,7 +2011,20 @@ defmodule Browser.JS.Parser do
     member_only({:member, e, k, false}, expect(ts, "]"))
   end
 
+  # `new tag`x`` constructs what the tagged template evaluates to
+  defp member_only(e, [{:tmpl, parts, _} | ts]), do: member_only(tagged_call(e, parts), ts)
+
   defp member_only(e, ts), do: {e, ts}
+
+  # each template literal site has an id: its strings object is made once per site
+  defp tagged_call(e, parts) do
+    {parts, raw} = template_parts(parts)
+    is_text = &(is_binary(&1) or &1 == :bad)
+    cooked = parts |> Enum.filter(is_text) |> Enum.map(&if(&1 == :bad, do: :undefined, else: &1))
+    exprs = Enum.reject(parts, is_text)
+    site = :erlang.unique_integer([:positive])
+    {:call, e, [{:tagged_strings, cooked, raw, site} | exprs], false}
+  end
 
   defp arguments([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
 

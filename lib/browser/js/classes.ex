@@ -133,12 +133,11 @@ defmodule Browser.JS.Classes do
 
     # private methods and accessors are installed before any field is initialised
     {methods, fields} = Enum.split_with(fields, &match?({:private_method, _, _, _}, &1))
-    fields = Enum.reverse(methods) ++ fields
 
     info = %{
       parent: parent,
       derived?: derived?,
-      fields: Enum.reverse(fields),
+      fields: Enum.reverse(methods) ++ Enum.reverse(fields),
       env: cenv,
       name: name,
       proto: proto
@@ -252,9 +251,22 @@ defmodule Browser.JS.Classes do
     :ok
   end
 
-  # a private field is an own property that is not listed; a public one is assigned
+  # a private field is an own property that is not listed; a public one is defined (a setter on
+  # the prototype chain does not run, and a frozen object throws)
   defp define_field(obj, {:private, _} = key, v), do: put_private(obj, key, :field, v)
-  defp define_field(obj, key, v), do: Interp.put(obj, key, v)
+
+  defp define_field(obj, key, v) do
+    Browser.JS.Props.define(
+      obj,
+      key,
+      Interp.new_object([
+        {"value", v},
+        {"writable", true},
+        {"enumerable", true},
+        {"configurable", true}
+      ])
+    )
+  end
 
   # stores a private method, accessor half or field value on an object
   defp put_private({:obj, id}, key, kind, value) do

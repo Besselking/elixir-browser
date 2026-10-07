@@ -156,6 +156,7 @@ defmodule Browser.JS.Async do
         end
 
         case Process.delete(:js_gen_out) do
+          {:yield, {:raw, r}} -> r
           {:yield, v} -> iter_result(v, false)
           {:return, v} -> iter_result(v, true)
           {:throw, e} -> throw({:js_error, e})
@@ -533,8 +534,9 @@ defmodule Browser.JS.Async do
   # `yield*`: forwards `next`, `throw` and `return` to the inner iterator
   defp delegate(it, next, msg, ctx, k) do
     attempt(fn -> delegate_step(it, next, msg) end, ctx, fn
-      {:yield, v} ->
-        ctx.yield.(v, fn m -> delegate(it, next, m, ctx, k) end)
+      # the inner result object is handed on as it is
+      {:yield, r} ->
+        ctx.yield.({:raw, r}, fn m -> delegate(it, next, m, ctx, k) end)
 
       {:done, v} ->
         k.(v)
@@ -545,14 +547,14 @@ defmodule Browser.JS.Async do
   end
 
   defp delegate_step(it, next, {:next, x}) do
-    check_result(Interp.call(next, it, [x]), :done)
+    check_sync_result(Interp.call(next, it, [x]), :done)
   end
 
   defp delegate_step(it, _next, {:throw, e}) do
     case Interp.get(it, "throw") do
       f when is_tuple(f) ->
         if Interp.function?(f) do
-          check_result(Interp.call(f, it, [e]), :done)
+          check_sync_result(Interp.call(f, it, [e]), :done)
         else
           Interp.iter_close(it, false)
           Interp.throw_error("TypeError", "The iterator does not provide a 'throw' method")
@@ -568,7 +570,7 @@ defmodule Browser.JS.Async do
     case Interp.get(it, "return") do
       f when is_tuple(f) ->
         if Interp.function?(f),
-          do: check_result(Interp.call(f, it, [v]), :return),
+          do: check_sync_result(Interp.call(f, it, [v]), :return),
           else: {:return, v}
 
       _ ->
@@ -576,13 +578,15 @@ defmodule Browser.JS.Async do
     end
   end
 
-  defp check_result(r, on_done) do
+  # a result of an inner iterator of a `yield*` in a generator: yielded whole (its `value` is
+  # only read once it says it is done)
+  defp check_sync_result(r, on_done) do
     unless match?({:obj, _}, r),
       do: Interp.throw_error("TypeError", "Iterator result is not an object")
 
     if Interp.truthy(Interp.get(r, "done")),
       do: {on_done, Interp.get(r, "value")},
-      else: {:yield, Interp.get(r, "value")}
+      else: {:yield, r}
   end
 
   defp iterator_of(items) do

@@ -523,6 +523,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  def get(_, {:private, _}),
+    do: throw_error("TypeError", "Cannot read private member from a non-object")
+
   def get({:obj, id}, key) do
     o = deref(id)
 
@@ -947,6 +950,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  def put(_, {:private, _}, _),
+    do: throw_error("TypeError", "Cannot write private member to a non-object")
+
   def put({:obj, id}, key, v) do
     o = deref(id)
 
@@ -1059,6 +1065,14 @@ defmodule Browser.JS.Interp do
         if writable?(o, key),
           do: store(id, %{o | props: Map.put(o.props, key, v)}),
           else: fail_put()
+
+      # a generator function's own `prototype` is made on first use and shadows the one of
+      # its kind's prototype object
+      :error
+      when key == "prototype" and is_map_key(o, :generator) and
+             not is_map_key(o.props, "prototype") ->
+        function_prop(id, o, "prototype")
+        put({:obj, id}, key, v)
 
       :error ->
         case inherited_set(o.proto, key) do
@@ -1223,6 +1237,13 @@ defmodule Browser.JS.Interp do
         true
 
       i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
+        false
+
+      # a frozen or sealed array keeps its elements, and `length` is never configurable
+      i && (Map.get(o, :frozen, false) or Map.get(o, :sealed, false)) && Map.has_key?(o.items, i) ->
+        false
+
+      o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
 
       i ->
@@ -1409,7 +1430,20 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def iter_source(v), do: {:list, iterate(v)}
+  def iter_source(v) when is_binary(v) or v in [:undefined, :null], do: {:list, iterate(v)}
+
+  # any other primitive is iterated through its wrapper's `Symbol.iterator`
+  def iter_source(v) do
+    case get(v, {:symbol, :iterator, "Symbol.iterator"}) do
+      f when is_tuple(f) ->
+        unless function?(f), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+        it = call(f, v, [])
+        {:proto, it, get(it, "next")}
+
+      _ ->
+        throw_error("TypeError", "#{to_str(v)} is not iterable")
+    end
+  end
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`
@@ -1516,15 +1550,15 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}, generator: true, async: true} ->
         tick()
-        Browser.JS.Async.call_async_generator({:obj, id}, c, this, args)
+        Browser.JS.Async.call_async_generator({:obj, id}, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}, generator: true} ->
         tick()
-        Browser.JS.Async.call_generator({:obj, id}, c, this, args)
+        Browser.JS.Async.call_generator({:obj, id}, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
-        Browser.JS.Async.call_closure(c, this, args)
+        Browser.JS.Async.call_closure(with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
@@ -2586,6 +2620,7 @@ defmodule Browser.JS.Interp do
     if o in [:undefined, :null],
       do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
+    Process.put(:js_with_used, true)
     scope = new_scope(env)
     s = deref(scope)
     store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
@@ -3022,13 +3057,23 @@ defmodule Browser.JS.Interp do
   def ev({:id, _} = e, env), do: ev_id(e, env)
 
   # the strings argument of a tagged template: an array with a `raw` twin
-  def ev({:tagged_strings, cooked, raw}, _env) do
-    strings = new_array(cooked)
-    raw = new_array(raw)
-    Browser.JS.Props.lock(raw, true)
-    put_hidden(strings, "raw", raw)
-    Browser.JS.Props.lock(strings, true)
-    strings
+  # (made once for each place in the source and then reused)
+  def ev({:tagged_strings, cooked, raw, site}, _env) do
+    cache = Process.get(:js_template_sites) || %{}
+
+    case cache do
+      %{^site => strings} ->
+        strings
+
+      _ ->
+        strings = new_array(cooked)
+        raw = new_array(raw)
+        Browser.JS.Props.lock(raw, true)
+        put_hidden(strings, "raw", raw)
+        Browser.JS.Props.lock(strings, true)
+        Process.put(:js_template_sites, Map.put(cache, site, strings))
+        strings
+    end
   end
 
   def ev({:tmpl, parts}, env) do
@@ -3348,13 +3393,35 @@ defmodule Browser.JS.Interp do
           if mopt and nullish?(ov), do: throw(:js_short)
           {get(ov, ev_key(k, env)), ov}
 
+        {:id, name} when is_binary(name) ->
+          # a function found on a `with` object is called with that object as `this`
+          if Process.get(:js_with_used, false) do
+            case with_binding(env, name) do
+              {:with, obj} ->
+                {get(obj, name), obj}
+
+              {:var, sc} ->
+                case Map.fetch(deref(sc).vars, name) do
+                  {:ok, v} when v != :tdz -> {v, :undefined}
+                  _ -> {ev(callee, env), :undefined}
+                end
+
+              _ ->
+                {ev(callee, env), :undefined}
+            end
+          else
+            {ev(callee, env), :undefined}
+          end
+
         _ ->
           {ev(callee, env), :undefined}
       end
 
     if opt and nullish?(f), do: throw(:js_short)
+    # the arguments are evaluated before the callee is checked
+    argv = eval_list(args, env)
     unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-    call(f, this, eval_list(args, env))
+    call(f, this, argv)
   end
 
   def ev({:new, callee, args}, env) do
@@ -3440,6 +3507,14 @@ defmodule Browser.JS.Interp do
 
     var_names = hoisted_names(stmts)
     fun_decls = fundecls(stmts)
+
+    # in a parameter expression a `var` may not take the name of a parameter
+    if not strict? and Map.has_key?(s.vars, :in_params) do
+      for n <- var_names ++ Enum.map(fun_decls, &elem(&1, 0)),
+          Map.has_key?(s.vars, n),
+          do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
+    end
+
     if not strict?, do: eval_declaration_checks(env, var_scope, var_names, fun_decls)
 
     fresh =
