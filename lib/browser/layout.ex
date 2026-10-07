@@ -1314,7 +1314,7 @@ defmodule Browser.Layout do
     acc =
       case clear_side(c) do
         nil -> [{:gap, box.mt}, {:flush} | acc]
-        side -> [{:gap, box.mt}, {:clear, side}, {:flush} | acc]
+        side -> [{:clear, side}, {:gap, box.mt}, {:flush} | acc]
       end
 
     acc = if Map.get(c, :anchor) && style.nid, do: [{:anchor, style.nid} | acc], else: acc
@@ -2416,7 +2416,7 @@ defmodule Browser.Layout do
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
 
-  defp op({:gap, px}, %{clr: {y0, gap, bottom}, y: bottom} = st) do
+  defp op({:gap, px}, %{clr: {y0, gap, bottom}} = st) when st.y == bottom do
     st = flush(st)
     %{st | gap: max(st.gap, max(y0 + max(gap, px) - bottom, 0))}
   end
@@ -2427,7 +2427,12 @@ defmodule Browser.Layout do
 
   # a floated box goes to the left or right edge of the line below, and text flows around it
   defp op({:float, side, sub, spec, _style}, st) do
-    st = st |> flush() |> apply_gap()
+    st = flush(st)
+    {y0, gap, old} = {st.y, max(st.gap, 0), st.clr}
+    st = apply_gap(st)
+    # the margin above a float is not used up by it: it goes on collapsing with the margins of
+    # the block that follows (see the `gap` op)
+    st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
@@ -2455,19 +2460,23 @@ defmodule Browser.Layout do
   # `clear`: the next line starts below the floats on that side
   defp op({:clear, side}, st) do
     st = flush(st)
-    {y0, gap} = {st.y, max(st.gap, 0)}
-    st = apply_gap(st)
 
     bottom =
       st.floats
       |> Enum.filter(&(side == :both or &1.side == side))
       |> Enum.map(& &1.y1)
-      |> Enum.max(fn -> st.y end)
+      |> Enum.max(fn -> nil end)
 
-    # a margin of a first child collapses with the margin above the cleared box: where the box
-    # ends up is the lower of the floats' bottom and the top its margins alone would give it
-    clr = if bottom > st.y, do: {y0, gap, bottom}
-    %{st | y: max(st.y, bottom), clr: clr}
+    {y0, gap} = {st.y, max(st.gap, 0)}
+
+    # a box that is not pushed down keeps its margin to collapse with others; when it is, the
+    # margin of a first child collapses with the one above it (see the `gap` op)
+    if bottom && bottom > y0 + gap + min(st.ngap, 0) do
+      st = apply_gap(st)
+      %{st | y: bottom, clr: {y0, gap, bottom}}
+    else
+      st
+    end
   end
 
   defp op({:inset, l, r}, st) do
