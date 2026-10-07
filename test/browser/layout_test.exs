@@ -4410,6 +4410,24 @@ defmodule Browser.LayoutTest do
       refute Enum.any?(items, &(&1.type == :colbreak))
     end
 
+    test "an inline-block with a height and an aspect ratio is as wide as they make it" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:inline-block;background:green;height:100px;aspect-ratio:0.7"></div><div style="display:inline-block;background:blue;height:100px;width:30px"></div>|
+
+      rects = for %{type: :rect} = r <- laid_out(html), do: r
+      [first, second] = Enum.sort_by(rects, & &1.x)
+      assert first.w == 70
+      assert second.x <= first.x + first.w + 8
+    end
+
+    test "an absolute box with an aspect ratio between left and right gets its height from the width" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="width:100px;height:500px;position:relative"><div style="background:green;aspect-ratio:1/1;position:absolute;left:0;right:0;top:0;bottom:0"></div></div>|
+
+      green = Enum.find(laid_out(html), &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.w == 100 and green.h == 100
+    end
+
     test "a background is cut where a column ends and a rule is drawn between columns" do
       html =
         ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|
