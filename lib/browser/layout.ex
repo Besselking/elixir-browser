@@ -108,6 +108,9 @@ defmodule Browser.Layout do
   Option `metrics: (style -> content_height_px)` gives the height of a font's glyphs (its
   `normal` line-height); without it text is taken to be 1.35 times its size.
 
+  Option `scrollers: true` keeps the `:scroller` items that say where the boxes with
+  `overflow: scroll | auto` are (see `Browser.Scrollers`); without it they are left out.
+
   Option `focus: %{cid: id, caret: {line, column}}` adds a `:ring` item around the
   focused form control and a `:caret` item at the given position of its text.
   """
@@ -171,6 +174,7 @@ defmodule Browser.Layout do
     # absolutely positioned boxes take no room in the flow but do extend the scrollable page
     height = max(height, content_bottom(items))
     items = add_focus(items, measure, opts[:focus])
+    items = if opts[:scrollers], do: items, else: Enum.reject(items, &(&1.type == :scroller))
 
     case canvas do
       nil ->
@@ -263,6 +267,9 @@ defmodule Browser.Layout do
     # a control in a sticky or fixed box has its ring and caret there too
     stick = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :stick)))
     extra = selection_items(texts, cid, focus[:sel], measure) ++ ring ++ caret
+    # and in a scrolling box it scrolls with the control
+    src = Enum.find(items, &(Map.get(&1, :cid) == cid and Map.has_key?(&1, :sc)))
+    extra = if src, do: Enum.map(extra, &Map.merge(&1, Map.take(src, [:sc, :clips]))), else: extra
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
     items ++ extra
   end
@@ -1474,6 +1481,7 @@ defmodule Browser.Layout do
       maxpct: pct_of(c["max-height"]),
       minpct: pct_of(c["min-height"]),
       clip: clips?(c),
+      scroll: scroll_axes(c),
       bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
@@ -1504,6 +1512,17 @@ defmodule Browser.Layout do
 
   defp num(v) when is_number(v), do: v
   defp num(_), do: nil
+
+  # `overflow: scroll | auto` on either axis: the box scrolls its content (see `Browser.Scrollers`)
+  defp scroll_axes(c) do
+    ox = scroll_kind(Map.get(c, "overflow-x", "visible"))
+    oy = scroll_kind(Map.get(c, "overflow-y", "visible"))
+    if ox || oy, do: {ox, oy}
+  end
+
+  defp scroll_kind("scroll"), do: :scroll
+  defp scroll_kind("auto"), do: :auto
+  defp scroll_kind(_), do: nil
 
   defp clips?(c) do
     Map.get(c, "overflow-x", "visible") in ~w(hidden clip scroll auto) or
@@ -3291,7 +3310,8 @@ defmodule Browser.Layout do
     used = if o.min, do: max(used, inner.(o.min)), else: used
     used = round(used)
 
-    clipped? = o.clip and used < content
+    # (what a scrolling box clips is still there: it scrolls into view)
+    clipped? = o.clip and used < content and Map.get(o, :scroll) == nil
     # a too-small height is the height of the box all the same: the content overflows it
     height = used + extra
 
@@ -3324,7 +3344,9 @@ defmodule Browser.Layout do
       h: max(height - bt - bb, 0)
     }
 
-    st = if o.clip, do: clip_new(st, box, clip), else: st
+    sid = if Map.get(o, :scroll), do: o.nid || box.id
+    st = if o.clip, do: clip_new(st, box, clip, sid), else: st
+    st = if sid, do: add_scroller(st, sid, clip, o), else: st
 
     # the box's own background and borders go under whatever is inside it
     outer = outer_rects(box, height, st.images)
@@ -3642,18 +3664,44 @@ defmodule Browser.Layout do
   end
 
   # items and rects created inside a clipping box get (intersected) clip rectangles
-  defp clip_new(st, box, clip) do
+  defp clip_new(st, box, clip, sid) do
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
 
     %{
       st
-      | items: Enum.map(new_items, &put_clip(&1, clip)) ++ old_items,
-        rects: Enum.map(new_rects, &put_clip(&1, clip)) ++ old_rects
+      | items: Enum.map(new_items, &put_clip(&1, clip, sid)) ++ old_items,
+        rects: Enum.map(new_rects, &put_clip(&1, clip, sid)) ++ old_rects
     }
   end
 
-  defp put_clip(item, clip), do: Map.put(item, :clip, intersect(Map.get(item, :clip), clip))
+  # Besides the merged `clip`, an item keeps each clip it got as `{rect, k, scroller}` (`k` is
+  # how many scrollers it was already inside) and the scrollers it is in, innermost first
+  # (`sc`): scrolling one of them moves the item and the clips inside it, not those outside.
+  defp put_clip(item, clip, sid) do
+    sc = Map.get(item, :sc, [])
+    entry = {clip, length(sc), sid}
+    item = Map.put(item, :clip, intersect(Map.get(item, :clip), clip))
+    item = Map.update(item, :clips, [entry], &[entry | &1])
+    if sid, do: Map.put(item, :sc, sc ++ [sid]), else: item
+  end
+
+  # the box that scrolls its content: where it is, and how far its content reaches past it
+  defp add_scroller(st, sid, clip, o) do
+    item = %{
+      type: :scroller,
+      sid: sid,
+      x: clip.x,
+      y: clip.y,
+      w: clip.w,
+      h: clip.h,
+      ov: o.scroll,
+      pb: o.pb,
+      pr: o.pr
+    }
+
+    %{st | items: [item | st.items], n: st.n + 1}
+  end
 
   defp intersect(nil, b), do: b
 
@@ -3898,6 +3946,15 @@ defmodule Browser.Layout do
         _ -> it
       end
 
+    it =
+      case it do
+        %{clips: clips} ->
+          %{it | clips: Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)}
+
+        _ ->
+          it
+      end
+
     # a sticky box's own place moves with it
     it =
       case it do
@@ -3941,6 +3998,9 @@ defmodule Browser.Layout do
         it
     end
   end
+
+  @doc false
+  def shift(it, dx, dy), do: move(it, dx, dy)
 
   defp shift_rect(%{x: x, y: y} = c, dx, dy), do: %{c | x: x + dx, y: y + dy}
   defp shift_box({x, y, w, h}, dx, dy), do: {x + dx, y + dy, w, h}

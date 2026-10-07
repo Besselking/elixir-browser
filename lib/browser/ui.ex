@@ -132,11 +132,18 @@ defmodule Browser.UI do
 
     :wxPanel.connect(panel, :mousewheel,
       callback: fn wx(
-                     event: wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)
+                     event:
+                       wxMouse(
+                         wheelRotation: rot,
+                         wheelDelta: delta,
+                         linesPerAction: lines,
+                         x: x,
+                         y: y
+                       )
                    ),
                    obj ->
         tag = if :wxMouseEvent.getWheelAxis(obj) == 0, do: :wheel, else: :hwheel
-        send(me, {tag, rot, delta, lines})
+        send(me, {tag, rot, delta, lines, x, y})
       end
     )
 
@@ -161,6 +168,12 @@ defmodule Browser.UI do
       tabs: tabs,
       cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
+  end
+
+  @doc "Whether the system theme is dark (the toolbar's face colour is)."
+  def dark? do
+    colour = :wxSystemSettings.getColour(15)
+    0.299 * elem(colour, 0) + 0.587 * elem(colour, 1) + 0.114 * elem(colour, 2) < 128
   end
 
   @doc "Scrolls the page sideways to `sx` pixels."
@@ -578,11 +591,12 @@ defmodule Browser.UI do
 
   @doc """
   Paints `items` the way the window would, into a `width` x `height` bitmap, and saves it as
-  PNG at `path`. Returns `true` when the file was written.
+  PNG at `path`, with `overlay` items over them and the window `scroll` px down the page.
+  Returns `true` when the file was written.
   """
-  def snapshot(items, width, height, path) do
+  def snapshot(items, width, height, path, overlay \\ [], scroll \\ 0) do
     set_page(items)
-    :ets.insert(@view, {:view, [], 0, false})
+    :ets.insert(@view, {:view, overlay, scroll, false})
     bitmap = :wxBitmap.new(width, height)
     dc = :wxMemoryDC.new(bitmap)
     paint_dc(dc)
