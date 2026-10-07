@@ -1471,8 +1471,16 @@ defmodule Browser.JS.Interp do
   def iter_close(it, after_throw?) do
     try do
       case get(it, "return") do
-        f when is_tuple(f) -> if function?(f), do: call(f, it, [])
-        _ -> :ok
+        f when is_tuple(f) ->
+          if function?(f) do
+            r = call(f, it, [])
+
+            unless after_throw? or match?({:obj, _}, r),
+              do: throw_error("TypeError", "Iterator return result is not an object")
+          end
+
+        _ ->
+          :ok
       end
     catch
       {:js_error, _} when after_throw? -> :ok
