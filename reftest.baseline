@@ -109,6 +109,8 @@ css/CSS2/backgrounds/background-applies-to-001.xht
 css/CSS2/backgrounds/background-applies-to-002.xht
 css/CSS2/backgrounds/background-applies-to-003.xht
 css/CSS2/backgrounds/background-applies-to-004.xht
+css/CSS2/backgrounds/background-applies-to-005.xht
+css/CSS2/backgrounds/background-applies-to-006.xht
 css/CSS2/backgrounds/background-applies-to-007.xht
 css/CSS2/backgrounds/background-applies-to-009.xht
 css/CSS2/backgrounds/background-applies-to-012.xht
@@ -124,6 +126,8 @@ css/CSS2/backgrounds/background-color-applies-to-001.xht
 css/CSS2/backgrounds/background-color-applies-to-002.xht
 css/CSS2/backgrounds/background-color-applies-to-003.xht
 css/CSS2/backgrounds/background-color-applies-to-004.xht
+css/CSS2/backgrounds/background-color-applies-to-005.xht
+css/CSS2/backgrounds/background-color-applies-to-006.xht
 css/CSS2/backgrounds/background-color-applies-to-007.xht
 css/CSS2/backgrounds/background-color-applies-to-009.xht
 css/CSS2/backgrounds/background-color-applies-to-012.xht
@@ -212,10 +216,6 @@ css/CSS2/backgrounds/background-position-149.xht
 css/CSS2/backgrounds/background-position-150.xht
 css/CSS2/backgrounds/background-position-151.xht
 css/CSS2/backgrounds/background-position-152.xht
-css/CSS2/backgrounds/background-position-applies-to-005b.xht
-css/CSS2/backgrounds/background-position-applies-to-005c.xht
-css/CSS2/backgrounds/background-position-applies-to-006b.xht
-css/CSS2/backgrounds/background-position-applies-to-006c.xht
 css/CSS2/backgrounds/background-repeat-001.xht
 css/CSS2/backgrounds/background-repeat-002.xht
 css/CSS2/backgrounds/background-repeat-004.xht
@@ -747,6 +747,7 @@ css/CSS2/css1/c31-important-000.xht
 css/CSS2/css1/c32-cascading-000.xht
 css/CSS2/css1/c412-blockw-000.xht
 css/CSS2/css1/c412-hz-box-000.xht
+css/CSS2/css1/c414-flt-fit-000.xht
 css/CSS2/css1/c414-flt-fit-001.xht
 css/CSS2/css1/c414-flt-fit-002.xht
 css/CSS2/css1/c414-flt-fit-003.xht
@@ -1315,6 +1316,7 @@ css/CSS2/margin-padding-clear/margin-collapse-110.xht
 css/CSS2/margin-padding-clear/margin-collapse-111.xht
 css/CSS2/margin-padding-clear/margin-collapse-112.xht
 css/CSS2/margin-padding-clear/margin-collapse-130.xht
+css/CSS2/margin-padding-clear/margin-collapse-131.xht
 css/CSS2/margin-padding-clear/margin-collapse-155.xht
 css/CSS2/margin-padding-clear/margin-collapse-156.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-001.xht
@@ -2100,6 +2102,8 @@ css/CSS2/normal-flow/max-height-103.xht
 css/CSS2/normal-flow/max-height-104.xht
 css/CSS2/normal-flow/max-height-107.xht
 css/CSS2/normal-flow/max-height-110.xht
+css/CSS2/normal-flow/max-height-applies-to-005.xht
+css/CSS2/normal-flow/max-height-applies-to-006.xht
 css/CSS2/normal-flow/max-height-applies-to-008.xht
 css/CSS2/normal-flow/max-height-applies-to-009.xht
 css/CSS2/normal-flow/max-height-applies-to-012.xht
@@ -2426,6 +2430,8 @@ css/CSS2/normal-flow/width-applies-to-001.xht
 css/CSS2/normal-flow/width-applies-to-002.xht
 css/CSS2/normal-flow/width-applies-to-003.xht
 css/CSS2/normal-flow/width-applies-to-004.xht
+css/CSS2/normal-flow/width-applies-to-005.xht
+css/CSS2/normal-flow/width-applies-to-006.xht
 css/CSS2/normal-flow/width-applies-to-007.xht
 css/CSS2/normal-flow/width-applies-to-008.xht
 css/CSS2/normal-flow/width-applies-to-009.xht

@@ -4428,6 +4428,16 @@ defmodule Browser.LayoutTest do
       assert green.w == 100 and green.h == 100
     end
 
+    test "col and colgroup give a column its background and its width" do
+      html =
+        ~s|<style>body{margin:0}table{border-spacing:0}td{padding:0;height:20px}</style><table><colgroup style="background:green"><col style="width:60px"><col></colgroup><tr><td>a</td><td>b</td></tr></table>|
+
+      items = laid_out(html)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.w == 60
+      assert Enum.find(items, &(&1[:text] == "b")).x >= green.x + 60
+    end
+
     test "a background is cut where a column ends and a rule is drawn between columns" do
       html =
         ~s|<style>body{margin:0}</style><div style="columns:2;column-gap:20px;column-fill:auto;column-rule:4px solid blue;width:220px;height:50px"><div style="height:100px;background:green"></div></div>|
