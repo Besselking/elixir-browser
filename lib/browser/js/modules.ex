@@ -92,6 +92,7 @@ defmodule Browser.JS.Modules do
         base: base,
         status: :new,
         error: nil,
+        synthetic: nil,
         eval_error: nil,
         tla: Async.has_tla?(stmts),
         async_eval: false,
@@ -121,14 +122,30 @@ defmodule Browser.JS.Modules do
   defp ensure(key, loader) do
     unless Map.has_key?(recs(), key) do
       {_, fetch} = loader
+      {path, type} = with {p, t} <- key, do: {p, t}, else: (p -> {p, nil})
 
-      case fetch.(key) do
-        {:ok, src, base} -> parse_new(key, base, src)
+      case fetch.(path) do
+        {:ok, src, base} when type == nil -> parse_new(key, base, src)
+        {:ok, src, base} -> typed_new(key, base, type, src)
         {:error, msg} -> Interp.throw_error("TypeError", "Failed to fetch module #{key}: #{msg}")
       end
     end
 
     key
+  end
+
+  # a module made from a file by its `type` attribute: its only export is the default
+  defp typed_new(key, base, type, src) do
+    value =
+      case type do
+        "json" -> Browser.JS.Json.parse(src, :undefined)
+        "text" -> src
+        "bytes" -> Browser.JS.TypedArrays.bytes_view(src)
+        _ -> syntax_error("Unsupported import attribute type: #{inspect(type)}")
+      end
+
+    new(key, base, {:program, []})
+    set(key, locals: %{"default" => :default_export}, synthetic: {:value, value})
   end
 
   defp parse_new(key, base, src) do
@@ -161,9 +178,11 @@ defmodule Browser.JS.Modules do
     r = rec(key)
 
     for spec <- r.requests do
+      {name, type} = with {n, t} <- spec, do: {n, t}, else: (n -> {n, nil})
+
       dep =
-        case resolve.(spec, r.base) do
-          {:ok, k} -> ensure(k, loader)
+        case resolve.(name, r.base) do
+          {:ok, k} -> ensure(if(type, do: {k, type}, else: k), loader)
           {:error, msg} -> Interp.throw_error("TypeError", msg)
         end
 
@@ -292,13 +311,18 @@ defmodule Browser.JS.Modules do
 
         _ ->
           syntax_error(
-            "The requested module '#{spec}' does not provide an export named '#{imported}'"
+            "The requested module '#{spec_name(spec)}' does not provide an export named '#{imported}'"
           )
       end
     end
 
     Interp.module_init(stmts(key), scope)
+
+    with {:value, v} <- r.synthetic, do: Interp.declare(scope, :default_export, v)
   end
+
+  defp spec_name({name, _}), do: name
+  defp spec_name(name), do: name
 
   # ── evaluating ─────────────────────────────────────────────
   #
@@ -527,11 +551,11 @@ defmodule Browser.JS.Modules do
   `import(specifier)` from a module (or script) whose base is `from`: settles the promise `p`
   with the namespace once the module has been evaluated.
   """
-  def import(spec, from, {resolve, _} = loader, p) do
+  def import(spec, from, {resolve, _} = loader, p, type \\ nil) do
     try do
       key =
         case resolve.(spec, from) do
-          {:ok, k} -> ensure(k, loader)
+          {:ok, k} -> ensure(if(type, do: {k, type}, else: k), loader)
           {:error, msg} -> Interp.throw_error("TypeError", msg)
         end
 

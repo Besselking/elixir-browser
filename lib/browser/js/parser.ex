@@ -727,38 +727,52 @@ defmodule Browser.JS.Parser do
 
   defp statement(ts), do: expression_statement(ts)
 
-  # `with { type: "json", ... }` after a module specifier: strings only, no key twice. The
-  # attributes are checked and then ignored: no module type takes any.
-  defp with_clause([{:id, "with", _}, {:p, "{", _} | ts]) do
-    {keys, ts} = with_entries(ts, [])
+  # `with { type: "json", ... }` after a module specifier: strings only, no key twice. A module
+  # that is asked for as a type is the specifier together with the type (`:unsupported` for any
+  # other attribute: the loader refuses it).
+  defp with_spec(spec, [{:id, "with", _}, {:p, "{", _} | ts]) do
+    {attrs, ts} = with_entries(ts, [])
+    keys = Enum.map(attrs, &elem(&1, 0))
     if length(keys) != length(Enum.uniq(keys)), do: throw({:syntax, "duplicate import attribute"})
-    ts
+
+    case attrs do
+      [] -> {spec, ts}
+      [{"type", type}] -> {{spec, type}, ts}
+      _ -> {{spec, :unsupported}, ts}
+    end
   end
 
-  defp with_clause(ts), do: ts
+  defp with_spec(spec, ts), do: {spec, ts}
 
   defp with_entries([{:p, "}", _} | ts], acc), do: {acc, ts}
 
-  defp with_entries([{k, key, _}, {:p, ":", _}, {:str, _, _} | ts], acc) when k in [:id, :str] do
+  defp with_entries([{k, key, _}, {:p, ":", _}, {:str, value, _} | ts], acc)
+       when k in [:id, :str] do
     case ts do
-      [{:p, ",", _} | ts] -> with_entries(ts, [key | acc])
-      [{:p, "}", _} | ts] -> {[key | acc], ts}
+      [{:p, ",", _} | ts] -> with_entries(ts, [{key, value} | acc])
+      [{:p, "}", _} | ts] -> {[{key, value} | acc], ts}
       _ -> throw({:syntax, "bad import attributes"})
     end
   end
 
   defp with_entries(_, _), do: throw({:syntax, "bad import attributes"})
 
-  defp module_item([{:id, "import", _}, {:str, spec, _} | ts]),
-    do: {{:import, spec, []}, semi(with_clause(ts))}
+  defp module_item([{:id, "import", _}, {:str, spec, _} | ts]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:import, spec, []}, semi(ts)}
+  end
 
   defp module_item([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
     {bindings, ts} = import_bindings(ts, [])
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -767,8 +781,12 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -777,8 +795,12 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(with_clause(ts))}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -839,15 +861,18 @@ defmodule Browser.JS.Parser do
 
     case ts do
       [{:id, "from", _}, {:str, spec, _} | ts] ->
-        {{:export_from, spec, names}, semi(with_clause(ts))}
+        {spec, ts} = with_spec(spec, ts)
+        {{:export_from, spec, names}, semi(ts)}
 
       ts ->
         {{:export_names, names}, semi(ts)}
     end
   end
 
-  defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
-    do: {{:export_from, spec, :all}, semi(with_clause(ts))}
+  defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:export_from, spec, :all}, semi(ts)}
+  end
 
   defp module_item([
          {:id, "export", _},
@@ -856,8 +881,10 @@ defmodule Browser.JS.Parser do
          {:id, name, _},
          {:id, "from", _},
          {:str, spec, _} | ts
-       ]),
-       do: {{:export_from, spec, [{:star, name}]}, semi(with_clause(ts))}
+       ]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:export_from, spec, [{:star, name}]}, semi(ts)}
+  end
 
   defp module_item([{:id, "export", _} | ts]) do
     case ts do

@@ -215,6 +215,13 @@ defmodule Browser.JS.TypedArrays do
 
   defp resizable?(bid), do: Map.has_key?(deref(bid), :max)
 
+  @doc "A `Uint8Array` over an immutable ArrayBuffer of `bytes` (the value of a bytes module)."
+  def bytes_view(bytes) do
+    buf = new_buffer(bytes)
+    store(buffer_id(buf), Map.put(deref(buffer_id(buf)), :immutable, true))
+    view(:u8, buffer_id(buf), 0, byte_size(bytes))
+  end
+
   defp immutable?(bid), do: Map.get(deref(bid), :immutable, false)
 
   # a typed array whose buffer can be written to
@@ -1039,6 +1046,8 @@ defmodule Browser.JS.TypedArrays do
     result
   end
 
+  defp waiters, do: Process.get(:js_waiters) || []
+
   @atomic_kinds [:i8, :u8, :i16, :u16, :i32, :u32, :i64, :u64]
 
   defp install_atomics(scope) do
@@ -1175,10 +1184,12 @@ defmodule Browser.JS.TypedArrays do
       int_or_inf(arg(args, 0)) in [1, 2, 4, 8]
     end)
 
-    def_fn(atomics, "wait", 4, fn _, args ->
+    # the shared part of `wait` and `waitAsync`: the element's byte position and whether the
+    # value the caller expects is still there
+    wait_args = fn args ->
       ta = arg(args, 0)
       d = validate.(ta, true)
-      {:ta, kind, bid, _, _} = d
+      {:ta, kind, bid, off, _} = d
 
       unless Map.has_key?(deref(bid), :shared),
         do: throw_error("TypeError", "not a shared typed array")
@@ -1190,23 +1201,102 @@ defmodule Browser.JS.TypedArrays do
           do: elem(Browser.JS.BigInt.to_bigint(arg(args, 2)), 1),
           else: to_integer(arg(args, 2))
 
-      _timeout = to_num(arg(args, 3))
+      timeout =
+        case to_num(arg(args, 3)) do
+          :nan -> :infinity
+          :neg_infinity -> 0
+          :infinity -> :infinity
+          n -> max(n, 0)
+        end
+
       cur = num.(elem_at(d, i))
       as_kind = read(kind, write(kind, if(kind == :i64, do: {:bigint, v}, else: v * 1.0)))
+      {bid, off + i * size_of(kind), timeout, num.(as_kind) == cur}
+    end
+
+    def_fn(atomics, "wait", 4, fn _, args ->
+      {_, _, _, equal?} = wait_args.(args)
+
+      if Process.get(:js_cannot_block, false),
+        do: throw_error("TypeError", "Atomics.wait cannot block this thread")
+
       # (nothing can notify: a wait that finds its value just times out)
-      if num.(as_kind) == cur, do: "timed-out", else: "not-equal"
+      if equal?, do: "timed-out", else: "not-equal"
+    end)
+
+    def_fn(atomics, "waitAsync", 4, fn _, args ->
+      {bid, pos, timeout, equal?} = wait_args.(args)
+      res = new_object()
+
+      cond do
+        not equal? ->
+          Interp.put(res, "async", false)
+          Interp.put(res, "value", "not-equal")
+
+        timeout == 0 ->
+          Interp.put(res, "async", false)
+          Interp.put(res, "value", "timed-out")
+
+        true ->
+          p = Browser.JS.Promise.new()
+          seq = (Process.get(:js_waiter_seq) || 0) + 1
+          Process.put(:js_waiter_seq, seq)
+
+          timer =
+            if timeout != :infinity do
+              Browser.JS.Builtins.add_timer(
+                native("", fn _, _ ->
+                  if Enum.any?(waiters(), &(&1.seq == seq)) do
+                    Process.put(:js_waiters, Enum.reject(waiters(), &(&1.seq == seq)))
+                    Browser.JS.Promise.resolve(p, "timed-out")
+                  end
+
+                  :undefined
+                end),
+                timeout * 1.0
+              )
+            end
+
+          Process.put(
+            :js_waiters,
+            waiters() ++ [%{seq: seq, key: {bid, pos}, p: p, timer: timer}]
+          )
+
+          Interp.put(res, "async", true)
+          Interp.put(res, "value", p)
+      end
+
+      res
     end)
 
     def_fn(atomics, "notify", 3, fn _, args ->
       d = validate.(arg(args, 0), true)
-      _ = index.(d, arg(args, 1))
+      i = index.(d, arg(args, 1))
+      {:ta, kind, bid, off, _} = d
 
-      case arg(args, 2) do
-        :undefined -> :ok
-        c -> int_or_inf(c)
+      count =
+        case arg(args, 2) do
+          :undefined ->
+            :infinity
+
+          c ->
+            with n when is_integer(n) <- int_or_inf(c),
+                 do: max(n, 0),
+                 else: (_ -> if c == :neg_infinity, do: 0, else: :infinity)
+        end
+
+      key = {bid, off + i * size_of(kind)}
+      {here, rest} = Enum.split_with(waiters(), &(&1.key == key))
+      woken = if count == :infinity, do: here, else: Enum.take(here, count)
+      keep = Enum.reject(here, &(&1 in woken))
+      Process.put(:js_waiters, Enum.filter(waiters(), &(&1 in rest or &1 in keep)))
+
+      for w <- woken do
+        if w.timer, do: Browser.JS.Builtins.clear_timer(w.timer)
+        Browser.JS.Promise.enqueue(fn -> Browser.JS.Promise.resolve(w.p, "ok") end)
       end
 
-      0.0
+      length(woken) * 1.0
     end)
 
     :ok

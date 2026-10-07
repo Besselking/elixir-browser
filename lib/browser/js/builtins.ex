@@ -2097,6 +2097,28 @@ defmodule Browser.JS.Builtins do
     declare(scope, "clearInterval", native("clearInterval", clear))
   end
 
+  @doc "Schedules the JS function `fun` after `delay` virtual milliseconds; returns the timer id."
+  def add_timer(fun, delay) do
+    seq = Process.get(:js_timer_seq) + 1
+    Process.put(:js_timer_seq, seq)
+
+    timer = %{
+      id: seq,
+      at: Process.get(:js_now) + delay,
+      seq: seq,
+      fun: fun,
+      args: [],
+      interval: nil
+    }
+
+    Process.put(:js_timers, [timer | Process.get(:js_timers)])
+    seq
+  end
+
+  @doc "Cancels a timer made by `add_timer/2`."
+  def clear_timer(id),
+    do: Process.put(:js_timers, Enum.reject(Process.get(:js_timers), &(&1.id == id)))
+
   @doc """
   Runs pending timers in virtual time (no real waiting), earliest first, until none are left
   or the next one is more than a virtual minute away (so a `setInterval` can't run forever).

@@ -2647,7 +2647,7 @@ defmodule Browser.JS.Interp do
     # the specifier and the options are converted now; the module is loaded in a later job
     try do
       spec = to_str(arg)
-      check_import_options(options)
+      type = check_import_options(options)
 
       base =
         case lookup_var(env, :module_url) do
@@ -2664,7 +2664,7 @@ defmodule Browser.JS.Interp do
               p,
               make_error("TypeError", "Dynamic import is not available")
             ),
-          else: hook.(spec, base, p)
+          else: hook.(spec, base, p, type)
       end)
     catch
       {:js_error, err} -> Browser.JS.Promise.reject(p, err)
@@ -2675,20 +2675,29 @@ defmodule Browser.JS.Interp do
 
   # `import(spec, { with: { key: "string" } })`: the options are an object, `with` an object of
   # strings (a TypeError, as a rejection, otherwise)
-  defp check_import_options(:undefined), do: :ok
+  defp check_import_options(:undefined), do: nil
 
   defp check_import_options({:obj, _} = options) do
     case get(options, "with") do
       :undefined ->
-        :ok
+        nil
 
       {:obj, _} = attrs ->
-        for k <- Browser.JS.Props.enumerable_own_keys(attrs), is_binary(k) do
-          unless is_binary(get(attrs, k)),
+        pairs =
+          for k <- Browser.JS.Props.enumerable_own_keys(attrs),
+              is_binary(k),
+              do: {k, get(attrs, k)}
+
+        for {_, v} <- pairs do
+          unless is_binary(v),
             do: throw_error("TypeError", "Import attribute value must be a string")
         end
 
-        :ok
+        case pairs do
+          [] -> nil
+          [{"type", type}] -> type
+          _ -> throw_error("SyntaxError", "Unsupported import attribute")
+        end
 
       _ ->
         throw_error("TypeError", "The 'with' option must be an object")
