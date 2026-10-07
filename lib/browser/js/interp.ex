@@ -942,7 +942,26 @@ defmodule Browser.JS.Interp do
   @doc "Sets an own property without making it show up in `Object.keys`."
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
-    o = if Map.has_key?(o.props, key), do: o, else: Map.update(o, :horder, [key], &[key | &1])
+
+    o =
+      if Map.has_key?(o.props, key) do
+        o
+      else
+        # (where it stands among the enumerable names, so `ownKeys` can put it in creation order)
+        named =
+          if o.keys == [],
+            do: 0,
+            else:
+              Enum.count(
+                o.keys,
+                &(is_binary(&1) and not (is_integer(index(&1)) and index(&1) < 4_294_967_295))
+              )
+
+        o
+        |> Map.update(:horder, [key], &[key | &1])
+        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
+      end
+
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 

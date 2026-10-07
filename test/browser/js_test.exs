@@ -368,6 +368,23 @@ defmodule Browser.JSTest do
       assert js("for (var i = 0; 'q' in {q: 1} ? false : false; ) ; 'ok'") == "ok"
     end
 
+    test "own keys come in creation order, hidden ones included" do
+      assert js("class C { static m(){} static x = 1 }; Reflect.ownKeys(C).join()") ==
+               "length,name,prototype,m,x"
+
+      assert js("var re = /(?:)/g; re.a = 1; Reflect.ownKeys(re).join()") == "lastIndex,a"
+    end
+
+    test "a typed array with elements cannot be frozen or sealed" do
+      assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("try { Object.seal(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("Object.isFrozen(Object.freeze(new Uint8Array(0)))") == true
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

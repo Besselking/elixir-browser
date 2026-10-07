@@ -544,6 +544,23 @@ defmodule Browser.JS.TypedArrays do
   def typed_array?(v), do: ta?(v)
 
   @doc false
+  # Object.freeze / seal: the elements of a typed array stay configurable, so a typed array
+  # with elements (or one over a resizable buffer, which may grow some) cannot be locked
+  def unlockable?({:obj, id} = v, freeze?) do
+    ta?(v) and
+      (
+        %{host: {_, {:ta, _, bid, _, _} = d}} = deref(id)
+
+        case eff(d) do
+          {_, len} when len > 0 -> true
+          _ -> freeze? and resizable?(bid)
+        end
+      )
+  end
+
+  def unlockable?(_, _), do: false
+
+  @doc false
   # a typed array that a detached or shrunk buffer has left out of bounds
   def out_of_bounds?({:obj, id} = v) do
     ta?(v) and

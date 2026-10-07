@@ -9958,6 +9958,7 @@ built-ins/Object/freeze/not-a-constructor.js
 built-ins/Object/freeze/proxy-no-ownkeys-returned-keys-order.js
 built-ins/Object/freeze/proxy-with-defineProperty-handler.js
 built-ins/Object/freeze/throws-when-false.js
+built-ins/Object/freeze/typedarray-backed-by-resizable-buffer.js
 built-ins/Object/fromEntries/empty-iterable.js
 built-ins/Object/fromEntries/evaluation-order.js
 built-ins/Object/fromEntries/iterator-closed-for-null-entry.js
@@ -10301,6 +10302,7 @@ built-ins/Object/getOwnPropertyDescriptors/inherited-properties-omitted.js
 built-ins/Object/getOwnPropertyDescriptors/normal-object.js
 built-ins/Object/getOwnPropertyDescriptors/not-a-constructor.js
 built-ins/Object/getOwnPropertyDescriptors/observable-operations.js
+built-ins/Object/getOwnPropertyDescriptors/order-after-define-property.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-booleans.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-numbers.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-strings.js
@@ -13560,7 +13562,9 @@ built-ins/RegExp/prototype/exec/name.js
 built-ins/RegExp/prototype/exec/not-a-constructor.js
 built-ins/RegExp/prototype/exec/success-g-lastindex-no-access.js
 built-ins/RegExp/prototype/exec/success-lastindex-access.js
+built-ins/RegExp/prototype/exec/u-captured-value.js
 built-ins/RegExp/prototype/exec/u-lastindex-adv.js
+built-ins/RegExp/prototype/exec/u-lastindex-value.js
 built-ins/RegExp/prototype/exec/y-fail-lastindex-no-write.js
 built-ins/RegExp/prototype/exec/y-fail-lastindex.js
 built-ins/RegExp/prototype/exec/y-fail-return.js
