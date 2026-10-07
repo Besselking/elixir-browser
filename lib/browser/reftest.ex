@@ -88,7 +88,22 @@ defmodule Browser.Reftest do
 
   @doc "Measures text with the fixed advances `Browser.Reftest.Raster` paints."
   def measure(text, %{size: size} = style) do
-    round(String.length(text) * size * advance(style))
+    base = advance(style)
+    ems = text |> String.graphemes() |> Enum.reduce(0.0, &(&2 + char_advance(&1, base)))
+    round(ems * size)
+  end
+
+  @doc "The advance of one character in em: East Asian wide and fullwidth ones are a full em."
+  def char_advance(<<cp::utf8, _::binary>>, base) do
+    if wide?(cp), do: 1.0, else: base
+  end
+
+  def char_advance(_, base), do: base
+
+  defp wide?(cp) do
+    cp in 0x1100..0x115F or cp in 0x2E80..0xA4CF or cp in 0xAC00..0xD7A3 or
+      cp in 0xF900..0xFAFF or cp in 0xFE30..0xFE6F or cp in 0xFF00..0xFF60 or
+      cp in 0xFFE0..0xFFE6 or cp in 0x20000..0x3FFFD
   end
 
   # the advance of a glyph over the font size in the pictures `Raster` paints

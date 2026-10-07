@@ -4201,7 +4201,6 @@ css/css-sizing/vert-block-size-small-or-larger-than-container-with-min-or-max-co
 css/css-sizing/whitespace-and-break.html
 css/css-text/bidi/bidi-lines-001.html
 css/css-text/bidi/bidi-tab-001.html
-css/css-text/hanging-punctuation/hanging-punctuation-inline-001.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html
 css/css-text/hyphens/hyphens-auto-001.html
@@ -4239,6 +4238,7 @@ css/css-text/line-breaking/line-breaking-atomic-002.html
 css/css-text/line-breaking/line-breaking-atomic-007.html
 css/css-text/line-breaking/line-breaking-atomic-008.html
 css/css-text/line-breaking/line-breaking-atomic-009.html
+css/css-text/line-breaking/line-breaking-ic-001.html
 css/css-text/line-breaking/segment-break-transformation-rules-004.html
 css/css-text/line-breaking/segment-break-transformation-rules-005.html
 css/css-text/line-breaking/segment-break-transformation-rules-006.html
@@ -4583,6 +4583,12 @@ css/css-text/white-space/textarea-pre-wrap-014.html
 css/css-text/white-space/trailing-ideographic-space-003.html
 css/css-text/white-space/trailing-ideographic-space-006.html
 css/css-text/white-space/trailing-ideographic-space-007.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-001.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-002.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-003.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-004.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-005.html
+css/css-text/white-space/trailing-ideographic-space-break-spaces-006.html
 css/css-text/white-space/trailing-ogham-001.html
 css/css-text/white-space/trailing-ogham-002.html
 css/css-text/white-space/trailing-ogham-003.html
@@ -4637,10 +4643,12 @@ css/css-text/word-break/word-break-break-all-inline-005.html
 css/css-text/word-break/word-break-break-all-inline-009.html
 css/css-text/word-break/word-break-break-all-inline-010.tentative.html
 css/css-text/word-break/word-break-break-word-overflow-wrap-interactions.html
+css/css-text/word-break/word-break-keep-all-008.html
 css/css-text/word-break/word-break-keep-all-u002d.html
 css/css-text/word-break/word-break-manual-001.html
 css/css-text/word-break/word-break-min-content-002.html
 css/css-text/word-break/word-break-min-content-005.html
+css/css-text/word-space-transform/word-space-transform-020.html
 css/css-text/word-space-transform/word-space-transform-021.html
 css/css-text/word-space-transform/word-space-transform-022.html
 css/css-text/word-space-transform/word-space-transform-024.html
