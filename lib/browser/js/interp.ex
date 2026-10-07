@@ -510,9 +510,7 @@ defmodule Browser.JS.Interp do
     cond do
       is_binary(a) and is_binary(b) ->
         cond do
-          a < b -> :lt
-          a > b -> :gt
-          true -> :eq
+          true -> Browser.JS.Str.compare(a, b)
         end
 
       big?(a) or big?(b) ->
@@ -1562,7 +1560,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def iterate(s) when is_binary(s), do: String.codepoints(s)
+  def iterate(s) when is_binary(s), do: Browser.JS.Str.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
 
   @doc false
@@ -1969,7 +1967,9 @@ defmodule Browser.JS.Interp do
   # functions live in a second scope that starts from the parameters' values. Without
   # initialisers one scope serves both.
   defp hoist_into_body(scope, c, names, funs) do
-    if names == [] and funs == [] do
+    lex = Map.get(c, :lex, [])
+
+    if names == [] and funs == [] and lex == [] do
       scope
     else
       if param_exprs?(c.params) do
@@ -1994,9 +1994,11 @@ defmodule Browser.JS.Interp do
           })
 
         apply_hoist(body, [], funs)
+        for name <- lex, do: declare(body, name, :tdz)
         body
       else
         apply_hoist(scope, names, funs)
+        for name <- lex, do: declare(scope, name, :tdz)
         scope
       end
     end
@@ -2538,7 +2540,8 @@ defmodule Browser.JS.Interp do
   defp with_hoist(_id, %{mode: :arrow_expr} = c), do: c
 
   defp with_hoist(id, c) do
-    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, fid: id})
+    lex = for stmt <- c.body, name <- lexical_names(stmt), do: name
+    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, lex: lex, fid: id})
     o = deref(id)
     store(id, %{o | fun: {:closure, c}})
     c
@@ -3635,7 +3638,7 @@ defmodule Browser.JS.Interp do
   def ev({:tmpl, parts}, env) do
     parts
     |> Enum.map(fn p -> if is_binary(p), do: p, else: to_str(ev(p, env)) end)
-    |> IO.iodata_to_binary()
+    |> Browser.JS.Str.join()
   end
 
   # an elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length
@@ -4426,7 +4429,7 @@ defmodule Browser.JS.Interp do
     b = to_primitive(b, "default")
 
     cond do
-      is_binary(a) or is_binary(b) -> to_str(a) <> to_str(b)
+      is_binary(a) or is_binary(b) -> Browser.JS.Str.cat(to_str(a), to_str(b))
       big?(a) or big?(b) -> Browser.JS.BigInt.arith("+", a, b)
       true -> Num.add(to_num(a), to_num(b))
     end

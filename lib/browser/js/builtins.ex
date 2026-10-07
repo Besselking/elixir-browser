@@ -1058,22 +1058,28 @@ defmodule Browser.JS.Builtins do
 
       subs = Enum.drop(args, 1)
 
-      Enum.map_join(0..(count - 1)//1, fn i ->
-        piece = to_str(Interp.get(raw, Integer.to_string(i)))
-        if i < count - 1 and i < length(subs), do: piece <> to_str(Enum.at(subs, i)), else: piece
-      end)
+      Str.join(
+        Enum.map(0..(count - 1)//1, fn i ->
+          piece = to_str(Interp.get(raw, Integer.to_string(i)))
+
+          if i < count - 1 and i < length(subs),
+            do: Str.cat(piece, to_str(Enum.at(subs, i))),
+            else: piece
+        end)
+      )
     end)
 
     def_fn(str, "fromCodePoint", fn _, args ->
-      Enum.map_join(args, fn v ->
+      Enum.map(args, fn v ->
         n = to_num(v)
 
         unless is_number(n) and n == trunc(n) and n >= 0 and n <= 0x10FFFF,
           do: throw_error("RangeError", "Invalid code point #{to_str(v)}")
 
         n = trunc(n)
-        if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>>
+        Str.from_units(if n >= 0x10000, do: pair(n), else: [n])
       end)
+      |> Str.join()
     end)
 
     # UTF-16 code units: a surrogate pair is one character, a lone surrogate cannot be kept
@@ -1201,6 +1207,8 @@ defmodule Browser.JS.Builtins do
   defp uri_decode(<<c::utf8, rest::binary>>, keep, acc),
     do: uri_decode(rest, keep, [<<c::utf8>> | acc])
 
+  defp uri_decode(<<b, rest::binary>>, keep, acc), do: uri_decode(rest, keep, [<<b>> | acc])
+
   defp uri_continuation(rest, 0, acc), do: {Enum.reverse(acc), rest}
 
   defp uri_continuation(<<"%", h::binary-size(2), rest::binary>>, n, acc) do
@@ -1235,7 +1243,7 @@ defmodule Browser.JS.Builtins do
     if radix < 2 or radix > 36 do
       :nan
     else
-      digits = s |> String.upcase() |> String.to_charlist() |> Enum.take_while(&digit?(&1, radix))
+      digits = s |> :binary.bin_to_list() |> Enum.take_while(&digit?(&1, radix))
 
       case digits do
         [] -> :nan
@@ -1249,6 +1257,7 @@ defmodule Browser.JS.Builtins do
       cond do
         c in ?0..?9 -> c - ?0
         c in ?A..?Z -> c - ?A + 10
+        c in ?a..?z -> c - ?a + 10
         true -> 99
       end
 
@@ -1412,14 +1421,14 @@ defmodule Browser.JS.Builtins do
     str_fn(p, "charCodeAt", fn this, args ->
       case Str.at(this, to_int(arg(args, 0))) do
         nil -> :nan
-        <<c::utf8, _::binary>> -> float(c)
+        u -> float(Str.code_unit_at(u, 0))
       end
     end)
 
     str_fn(p, "codePointAt", fn this, args ->
-      case Str.at(this, to_int(arg(args, 0))) do
+      case Str.code_point_at(this, to_int(arg(args, 0))) do
         nil -> :undefined
-        <<c::utf8, _::binary>> -> float(c)
+        c -> float(c)
       end
     end)
 
@@ -1446,7 +1455,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     str_fn(p, "endsWith", fn this, args -> String.ends_with?(this, to_str(arg(args, 0))) end)
-    str_fn(p, "concat", fn this, args -> this <> Enum.map_join(args, &to_str/1) end)
+    str_fn(p, "concat", fn this, args -> Str.join([this | Enum.map(args, &to_str/1)]) end)
     str_fn(p, "repeat", fn this, args -> String.duplicate(this, max(to_int(arg(args, 0)), 0)) end)
 
     str_fn(p, "slice", fn this, args ->
@@ -1520,12 +1529,10 @@ defmodule Browser.JS.Builtins do
   defp code_unit(n) when is_number(n), do: trunc(n) |> Bitwise.band(0xFFFF)
   defp code_unit(_), do: 0
 
-  defp units_to_string([hi, lo | rest]) when hi in 0xD800..0xDBFF and lo in 0xDC00..0xDFFF,
-    do: <<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>> <> units_to_string(rest)
+  defp pair(n),
+    do: [0xD800 + Bitwise.bsr(n - 0x10000, 10), 0xDC00 + Bitwise.band(n - 0x10000, 0x3FF)]
 
-  defp units_to_string([u | rest]) when u in 0xD800..0xDFFF, do: "\uFFFD" <> units_to_string(rest)
-  defp units_to_string([u | rest]), do: <<u::utf8>> <> units_to_string(rest)
-  defp units_to_string([]), do: ""
+  defp units_to_string(units), do: Str.from_units(units)
 
   defp cp_slice(s, from, count), do: Str.slice(s, from, count)
 
@@ -1542,7 +1549,7 @@ defmodule Browser.JS.Builtins do
       padding =
         filler |> String.duplicate(div(need, Str.length(filler)) + 1) |> cp_slice(0, need)
 
-      if side == :leading, do: padding <> s, else: s <> padding
+      if side == :leading, do: Str.cat(padding, s), else: Str.cat(s, padding)
     end
   end
 

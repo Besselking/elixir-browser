@@ -303,6 +303,43 @@ defmodule Browser.JSTest do
                "30,2,4"
     end
 
+    test "strings are measured in UTF-16 code units, with lone surrogates" do
+      assert js("'😀'.length") == 2.0
+      assert js("'😀'[0] === '\\uD83D' && '😀'[1] === '\\uDE00'") == true
+      assert js("'\\uD83D' + '\\uDE00' === '😀'") == true
+      assert js("'😀'.codePointAt(1)") == 56_832.0
+      assert js("'😀'.charCodeAt(0)") == 55_357.0
+      assert js("'\\u{10000}' >= '\\uFFFF'") == false
+      assert js("'a😀b'.indexOf('b')") == 3.0
+      assert js("'\\uD83D'.isWellFormed()") == false
+      assert js("'a\\uD83Db'.toWellFormed()") == "a�b"
+      assert js("'a😀\\uD83D'.toWellFormed()") == "a😀\uFFFD"
+      assert js("[...'a😀b'.matchAll(/(?:)/gu)].length") == 4.0
+      assert js("JSON.stringify('\\uD83D')") == ~s("\\ud83d")
+      assert js("JSON.parse('\"\\\\ud834\"').length") == 1.0
+      assert js("String.fromCharCode(0xD83D, 0xDE00) === '😀'") == true
+    end
+
+    test "a string written with an escape is not a use strict directive" do
+      assert js("(function(){ 'use str\\\nict'; return this === undefined })()") == false
+      assert js("(function(){ 'use\\x20strict'; return this === undefined })()") == false
+      assert js("(function(){ 'use strict'; return this === undefined })()") == true
+    end
+
+    test "let and const names are in their dead zone from the start of a function" do
+      assert js("function g(){ x = 1; let x; } try { g(); 'no' } catch (e) { e.name }") ==
+               "ReferenceError"
+    end
+
+    test "an escaped await or yield is a plain name outside async and generator code" do
+      assert js("var r; aw\\u0061it: r = 1; r") == 1.0
+      assert js("var yi\\u0065ld = 4; yield") == 4.0
+    end
+
+    test "parseInt stops at a non-digit even if it upper-cases to letters" do
+      assert js("parseInt('1Z\\u00DF', 36)") == 71.0
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"

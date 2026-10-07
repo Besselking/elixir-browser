@@ -55,9 +55,15 @@ defmodule Browser.JS.Parser do
   declarations are lexical, so they clash with `var` and with each other).
   """
   def parse(src, opts \\ []) do
+    Process.delete(:lex_esc_await)
+
     with {:ok, tokens} <- Lexer.tokenize(src) do
       try do
         eval? = Keyword.get(opts, :eval, false)
+
+        # (`await` is reserved in a module, escaped or not)
+        if Keyword.get(opts, :module, false) and Process.get(:lex_esc_await),
+          do: throw({:syntax, "an escaped await is not allowed in a module"})
 
         Process.put(
           :js_strict,
@@ -261,12 +267,22 @@ defmodule Browser.JS.Parser do
 
   # does the token list begin with a "use strict" directive?
   # a token that has a line break before it (`:octal_nl`: a string with a legacy octal escape)
-  defguardp nl?(mark) when mark in [true, :octal_nl]
+  defguardp nl?(mark) when mark in [true, :octal_nl, :esc_nl]
 
-  defp use_strict?([{:str, "use strict", _}, {:p, p, _} | _]) when p in [";", "}"], do: true
-  defp use_strict?([{:str, "use strict", _}, {_, _, nl} | _]) when nl?(nl), do: true
-  defp use_strict?([{:str, "use strict", _}, {:eof, _, _} | _]), do: true
+  # (`:esc`: the same string written with an escape or a line continuation is not a directive)
+  defp use_strict?([{:str, "use strict", m}, {:p, p, _} | _])
+       when p in [";", "}"] and m not in [:esc, :esc_nl],
+       do: true
+
+  defp use_strict?([{:str, "use strict", m}, {_, _, nl} | _])
+       when nl?(nl) and m not in [:esc, :esc_nl],
+       do: true
+
+  defp use_strict?([{:str, "use strict", m}, {:eof, _, _} | _]) when m not in [:esc, :esc_nl],
+    do: true
+
   defp use_strict?([{:str, _, _}, {:p, ";", _} | ts]), do: use_strict?(ts)
+  defp use_strict?([{:str, _, _}, {:str, _, nl} | _] = [_ | ts]) when nl?(nl), do: use_strict?(ts)
   defp use_strict?(_), do: false
 
   # a function body: strict when it opens with the directive (or is inside strict code)
@@ -516,16 +532,16 @@ defmodule Browser.JS.Parser do
     {{:fundecl, name, fun}, ts}
   end
 
-  defp statement([{:id, "async", _}, {:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
-       when name not in @reserved do
+  defp statement([{:id, "async", _}, {:id, "function", f}, {:p, "*", _}, {:id, name, _} | ts])
+       when name not in @reserved and f != true do
     check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
   end
 
-  defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
-       when name not in @reserved do
+  defp statement([{:id, "async", _}, {:id, "function", f}, {:id, name, _} | ts])
+       when name not in @reserved and f != true do
     check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest(name, ts)
@@ -996,9 +1012,9 @@ defmodule Browser.JS.Parser do
   defp str_local(:id, name), do: name
   defp str_local(:str, name), do: {:str, well_formed(:str, name)}
 
-  # the lexer turns a lone surrogate into U+FFFD, which a module export name must not contain
+  # a module export name must not hold a lone surrogate
   defp well_formed(:str, name) do
-    if String.contains?(name, "\uFFFD"),
+    if Browser.JS.Str.lone?(name),
       do: throw({:syntax, "a module export name must be well-formed unicode"}),
       else: name
   end
@@ -2542,6 +2558,9 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:bigint, n, _} | ts]), do: {{:bigint, n}, ts}
 
+  # (an escaped "use strict" in the position of a directive is a plain expression statement)
+  defp primary([{:str, s, mark} | ts]) when mark in [:esc, :esc_nl], do: {{:seq, [{:str, s}]}, ts}
+
   defp primary([{:str, s, mark} | ts]) do
     check_octal_string(mark)
     {{:str, s}, ts}
@@ -2619,7 +2638,7 @@ defmodule Browser.JS.Parser do
     {{:super_member, k}, expect(ts, "]")}
   end
 
-  defp primary([{:id, "async", _}, {:id, "function", _} | _] = [_ | rest]) do
+  defp primary([{:id, "async", _}, {:id, "function", f} | _] = [_ | rest]) when f != true do
     Process.put(:js_async_next, true)
     {fun, ts} = primary(rest)
     {{:async, fun}, ts}

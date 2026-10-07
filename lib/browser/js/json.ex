@@ -258,15 +258,15 @@ defmodule Browser.JS.Json do
               cp = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)
               string(r3, [<<cp::utf8>> | acc])
             else
-              string("\\u" <> r2, ["�" | acc])
+              string("\\u" <> r2, [Browser.JS.Str.from_units([hi]) | acc])
             end
 
           _ ->
-            string(r, ["�" | acc])
+            string(r, [Browser.JS.Str.from_units([hi]) | acc])
         end
 
       hi in 0xDC00..0xDFFF ->
-        string(r, ["�" | acc])
+        string(r, [Browser.JS.Str.from_units([hi]) | acc])
 
       true ->
         string(r, [<<hi::utf8>> | acc])
@@ -525,5 +525,12 @@ defmodule Browser.JS.Json do
 
   defp escape(<<c, r::binary>>, acc) when c < 0x80, do: escape(r, [<<c>> | acc])
   defp escape(<<c::utf8, r::binary>>, acc), do: escape(r, [<<c::utf8>> | acc])
+
+  # a lone surrogate (three bytes, `ED A0..BF xx`) is written as an escape
+  defp escape(<<0xED, b2, b3, r::binary>>, acc) when b2 >= 0xA0 do
+    [u] = Browser.JS.Str.units(<<0xED, b2, b3>>)
+    escape(r, ["\\u" <> String.downcase(Integer.to_string(u, 16)) | acc])
+  end
+
   defp escape(<<_, r::binary>>, acc), do: escape(r, ["�" | acc])
 end

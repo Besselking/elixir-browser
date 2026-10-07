@@ -74,7 +74,9 @@ defmodule Browser.JS.Lexer do
 
   defp lex(<<q, rest::binary>>, nl, acc) when q in [?", ?'] do
     Process.put(:js_octal, false)
-    {str, rest} = string(rest, q, [])
+    {str, after_str} = string(rest, q, [])
+    escaped? = str == "use strict" and byte_size(rest) - byte_size(after_str) != 11
+    rest = after_str
     # a string with a legacy octal escape carries `:octal` (`:octal_nl` after a line break)
     # where the newline flag goes, so the parser can refuse it in strict code
     mark =
@@ -83,6 +85,9 @@ defmodule Browser.JS.Lexer do
         nl -> :octal_nl
         true -> :octal
       end
+
+    mark =
+      if escaped? and mark in [true, false], do: if(mark, do: :esc_nl, else: :esc), else: mark
 
     lex(rest, false, [{:str, str, mark} | acc])
   end
@@ -151,8 +156,11 @@ defmodule Browser.JS.Lexer do
       if (name in @keywords or name in ~w(target get set of async from as meta)) and
            name not in ~w(implements interface package private protected public) and
            escaped?(s, rest),
-         do: :eid,
+         do: if(name in ~w(let await yield), do: :id, else: :eid),
          else: :id
+
+    if name == "await" and kind == :id and escaped?(s, rest),
+      do: Process.put(:lex_esc_await, true)
 
     lex(rest, false, [{kind, name, nl} | acc])
   end
@@ -247,6 +255,7 @@ defmodule Browser.JS.Lexer do
     do: throw({:syntax, "unterminated regular expression"})
 
   defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
+  defp regex(<<b, rest::binary>>, acc, cls), do: regex(rest, [<<b>> | acc], cls)
   defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
 
   defp regex_flags(<<c, rest::binary>>, acc) when c in ?a..?z, do: regex_flags(rest, [c | acc])
@@ -451,9 +460,11 @@ defmodule Browser.JS.Lexer do
 
   defp escape("u{" <> r) do
     [hex, r] = String.split(r, "}", parts: 2)
-    {<<String.to_integer(hex, 16)::utf8>>, r}
+    cp = String.to_integer(hex, 16)
+    if cp > 0x10FFFF, do: throw({:syntax, "bad \\u escape"})
+    {Browser.JS.Str.from_units([cp]), r}
   rescue
-    _ -> throw({:syntax, "bad \\u escape"})
+    ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
   defp escape(<<"u", h::binary-size(4), r::binary>>) do
@@ -463,11 +474,11 @@ defmodule Browser.JS.Lexer do
              lo when lo in 0xDC00..0xDFFF <- String.to_integer(l, 16) do
           {<<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>>, r2}
         else
-          _ -> {"�", r}
+          _ -> {Browser.JS.Str.from_units([hi]), r}
         end
 
       lo when lo in 0xDC00..0xDFFF ->
-        {"�", r}
+        {Browser.JS.Str.from_units([lo]), r}
 
       cp ->
         {<<cp::utf8>>, r}

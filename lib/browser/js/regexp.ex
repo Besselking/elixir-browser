@@ -120,6 +120,9 @@ defmodule Browser.JS.RegExp do
   end
 
   defp build_pattern(source, flags) do
+    # (the engine takes text only: a lone surrogate in a pattern is read as U+FFFD, as in a subject)
+    source = Str.well_formed(source)
+
     opts =
       [:unicode, :dollar_endonly] ++
         for(
@@ -407,7 +410,8 @@ defmodule Browser.JS.RegExp do
     from_byte = byte_of(subject, from)
     sticky? = flag?(re_obj, "y")
 
-    case :re.run(subject, re, [{:capture, :all, :index}, {:offset, from_byte}]) do
+    # (a lone surrogate is as many bytes as U+FFFD: the engine sees that, positions agree)
+    case :re.run(Str.well_formed(subject), re, [{:capture, :all, :index}, {:offset, from_byte}]) do
       {:match, [{start, len} | caps]} when not sticky? or start == from_byte ->
         {count, named_list} = names
 
@@ -465,26 +469,10 @@ defmodule Browser.JS.RegExp do
     end
   end
 
-  defp byte_of(subject, cp) do
-    byte_of(subject, cp, 0)
-  end
+  defp byte_of(subject, units), do: Str.byte_offset(subject, units)
 
-  # byte offset of the code point index `n` (strings are indexed by code point)
-  defp byte_of(_, n, acc) when n <= 0, do: acc
-  defp byte_of(<<c::utf8, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + utf8_size(c))
-  defp byte_of(<<>>, _, acc), do: acc
-  defp byte_of(<<_, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + 1)
-
-  defp utf8_size(c) when c < 0x80, do: 1
-  defp utf8_size(c) when c < 0x800, do: 2
-  defp utf8_size(c) when c < 0x10000, do: 3
-  defp utf8_size(_), do: 4
-
-  # the number of code points (what `.length` and match positions count)
-  defp cp_count(bin), do: cp_count(bin, 0)
-  defp cp_count(<<_::utf8, rest::binary>>, n), do: cp_count(rest, n + 1)
-  defp cp_count(<<>>, n), do: n
-  defp cp_count(<<_, rest::binary>>, n), do: cp_count(rest, n + 1)
+  # the number of UTF-16 code units (what `.length` and match positions count)
+  defp cp_count(bin), do: Str.length(bin)
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
@@ -660,10 +648,19 @@ defmodule Browser.JS.RegExp do
   end
 
   # the `@@match` loop of a global regexp and friends: advance past an empty match
-  defp bump_empty(rx, matched) do
+  # (a unicode regexp steps over a whole surrogate pair)
+  defp bump_empty(rx, matched, s) do
     if matched == "" do
       this_index = tolen(Interp.get(rx, "lastIndex"))
-      strict_set(rx, "lastIndex", (this_index + 1) * 1.0)
+      flags = to_str(Interp.get(rx, "flags"))
+
+      step =
+        if String.contains?(flags, ["u", "v"]) and
+             (Str.code_point_at(s, this_index) || 0) > 0xFFFF,
+           do: 2,
+           else: 1
+
+      strict_set(rx, "lastIndex", (this_index + step) * 1.0)
     end
   end
 
@@ -687,7 +684,7 @@ defmodule Browser.JS.RegExp do
 
       result ->
         matched = to_str(Interp.get(result, "0"))
-        bump_empty(rx, matched)
+        bump_empty(rx, matched, s)
         match_loop(rx, s, [matched | acc])
     end
   end
@@ -724,7 +721,7 @@ defmodule Browser.JS.RegExp do
 
             match ->
               if global? do
-                bump_empty(rx, to_str(Interp.get(match, "0")))
+                bump_empty(rx, to_str(Interp.get(match, "0")), s)
               else
                 :erlang.put(ref, :done)
               end
@@ -884,7 +881,7 @@ defmodule Browser.JS.RegExp do
 
       result ->
         if global? do
-          bump_empty(rx, to_str(Interp.get(result, "0")))
+          bump_empty(rx, to_str(Interp.get(result, "0")), s)
           collect_results(rx, s, true, [result | acc])
         else
           Enum.reverse([result | acc])
@@ -1110,7 +1107,7 @@ defmodule Browser.JS.RegExp do
           lim == 0 -> []
           sep == :undefined -> [s]
           s == "" -> if r == "", do: [], else: [s]
-          r == "" -> String.codepoints(s)
+          r == "" -> s |> Str.units() |> Enum.map(&Str.from_units([&1]))
           true -> :binary.split(s, r, [:global])
         end
 
