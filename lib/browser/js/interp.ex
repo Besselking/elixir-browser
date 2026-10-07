@@ -1448,6 +1448,14 @@ defmodule Browser.JS.Interp do
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
 
+        rest =
+          if o[:class] == :function do
+            std = for k <- ["length", "name", "prototype"], k in rest, do: k
+            std ++ (rest -- std)
+          else
+            rest
+          end
+
         Enum.sort_by(ints, &index/1) ++ rest
     end
   end
@@ -1778,7 +1786,10 @@ defmodule Browser.JS.Interp do
               elem(run_closure_scope(c, this, args, [{:new_target, nt}]), 0)
 
             _ ->
-              call(f, this, args)
+              Process.put(:js_native_new, this)
+              r = call(f, this, args)
+              Process.delete(:js_native_new)
+              r
           end
 
         case result do

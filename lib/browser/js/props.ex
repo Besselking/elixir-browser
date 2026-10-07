@@ -207,7 +207,7 @@ defmodule Browser.JS.Props do
     case o do
       %{class: :array} ->
         for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
-          base ++ hidden ++ ["length"]
+          ["length"] ++ base ++ hidden
 
       %{class: :function} ->
         # length, name and prototype come first, in that order, whether stored or not
@@ -223,12 +223,34 @@ defmodule Browser.JS.Props do
         {ints, rest} = Enum.split_with(base, &index_key?/1)
 
         for(i <- 0..(String.length(s) - 1)//1, do: Integer.to_string(i)) ++
-          Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+          Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ ((rest ++ hidden) -- ["length"])
 
       _ ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
-        Enum.sort_by(ints, &array_index/1) ++ rest ++ hidden
+        Enum.sort_by(ints, &array_index/1) ++ interleave(rest, ordered, o, hidden)
     end
+  end
+
+  # keys `defineProperty` made non-enumerable go where they were created among the others
+  defp interleave(rest, ordered, o, hidden) do
+    pos = Map.get(o, :hpos, %{})
+    # positions are only known when every hidden key was created by `defineProperty`
+    placed =
+      if Enum.all?(ordered, &Map.has_key?(pos, &1)),
+        do: for(k <- ordered, do: {pos[k], k}),
+        else: []
+
+    done = Enum.map(placed, &elem(&1, 1))
+
+    merged =
+      rest
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {k, i} ->
+        [k | for({n, h} <- placed, n == i + 1, do: h)]
+      end)
+
+    lead = for {0, h} <- placed, do: h
+    lead ++ merged ++ (hidden -- done)
   end
 
   @doc "Every own key, strings first then symbols (a proxy's `ownKeys` result as it is)."
@@ -605,11 +627,15 @@ defmodule Browser.JS.Props do
         else: Map.put(attrs, key, flags)
 
     keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
+    named = Enum.count(o.keys, &(is_binary(&1) and not index_key?(&1)))
 
     o =
       if Map.get(desc, :enumerable, false),
         do: o,
-        else: Map.update(o, :horder, [key], &[key | &1])
+        else:
+          o
+          |> Map.update(:horder, [key], &[key | &1])
+          |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
 
     store(
       id,
@@ -870,7 +896,17 @@ defmodule Browser.JS.Props do
         o =
           if new_len do
             if read_only? and new_len != o.len, do: reject("length")
-            shrink(id, o, new_len)
+
+            try do
+              shrink(id, o, new_len)
+            catch
+              {:js_error, _} = err ->
+                # a blocked shrink still makes the length read-only when that was asked for
+                if Map.get(desc, :writable) == false,
+                  do: store(id, Map.put(deref(id), :len_ro, true))
+
+                throw(err)
+            end
           else
             o
           end
@@ -1298,8 +1334,11 @@ defmodule Browser.JS.Props do
     end
   end
 
-  defp proto_chain_has?({:obj, _} = p, target),
-    do: p == target or proto_chain_has?(get_prototype_of(p), target)
+  # the walk stops at a proxy: its prototype is not ordinary
+  defp proto_chain_has?({:obj, id} = p, target),
+    do:
+      p == target or
+        (not Map.has_key?(deref(id), :proxy) and proto_chain_has?(get_prototype_of(p), target))
 
   defp proto_chain_has?(_, _), do: false
 

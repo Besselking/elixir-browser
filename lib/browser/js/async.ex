@@ -762,15 +762,31 @@ defmodule Browser.JS.Async do
   end
 
   defp await_value(v, ctx, k) do
-    p =
-      if Promise.promise?(v) do
-        v
-      else
+    # PromiseResolve: a promise is reused only when its `constructor` is Promise itself; reading
+    # that property may throw
+    case (try do
+            if Promise.promise?(v) and
+                 Interp.get(v, "constructor") == Interp.proto(:promise_ctor),
+               do: {:ok, v},
+               else: {:wrap, v}
+          catch
+            {:js_error, e} -> {:error, e}
+          end) do
+      {:error, e} ->
+        ctx.throw.(e)
+        :suspended
+
+      {:ok, p} ->
+        await_promise(p, ctx, k)
+
+      {:wrap, v} ->
         np = Promise.new()
         Promise.resolve(np, v)
-        np
-      end
+        await_promise(np, ctx, k)
+    end
+  end
 
+  defp await_promise(p, ctx, k) do
     Promise.then(
       p,
       Interp.native("", fn _, args ->

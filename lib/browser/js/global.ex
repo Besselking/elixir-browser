@@ -45,6 +45,8 @@ defmodule Browser.JS.Global do
       is_binary(key) and Interp.lookup_scoped(Interp.global(), key) != :error and
         not Interp.global_lexical?(key)
 
+  def host_delete(:global, key) when key in ["NaN", "Infinity", "undefined"], do: false
+
   def host_delete(:global, key) do
     scope = Interp.global()
     s = Interp.deref(scope)

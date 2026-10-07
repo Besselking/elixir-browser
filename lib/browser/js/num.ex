@@ -195,7 +195,7 @@ defmodule Browser.JS.Num do
   def div(_, :nan), do: :nan
   def div(a, b) when is_atom(a) and is_atom(b), do: :nan
   def div(a, b) when is_atom(a), do: if(sign(b) < 0, do: neg(a), else: a)
-  def div(_, b) when is_atom(b), do: 0.0
+  def div(a, b) when is_atom(b), do: if(sign(a) * sign(b) < 0, do: -0.0, else: 0.0)
 
   def div(a, b) when b == 0 do
     cond do

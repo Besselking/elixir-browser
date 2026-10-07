@@ -27,9 +27,7 @@ defmodule Browser.JS.Proxy do
     # a constructor that has no `prototype`
     Interp.store(elem(ctor, 1), Map.put(Interp.deref(elem(ctor, 1)), :proxy_ctor, true))
 
-    Interp.put_hidden(
-      ctor,
-      "revocable",
+    revocable =
       Interp.native("revocable", fn _, args ->
         p = make(Enum.at(args, 0, :undefined), Enum.at(args, 1, :undefined))
 
@@ -42,7 +40,10 @@ defmodule Browser.JS.Proxy do
 
         Interp.new_object([{"proxy", p}, {"revoke", revoke}])
       end)
-    )
+
+    {:obj, rid} = revocable
+    Interp.store(rid, Map.put(Interp.deref(rid), :arity, 2.0))
+    Interp.put_hidden(ctor, "revocable", revocable)
 
     :ok
   end
