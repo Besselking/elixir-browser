@@ -1293,6 +1293,12 @@ defmodule Browser.Style do
         else: base
 
     base = if color, do: Map.put(base, "color", color), else: base
+
+    # the overflow of the root element, or of `<body>` when that has none, belongs to the
+    # viewport, which this browser always scrolls: neither box clips its own content
+    base =
+      if tag in ["html", "body"], do: Map.drop(base, ["overflow-x", "overflow-y"]), else: base
+
     # a fully transparent element (and, approximately, its subtree) takes space but isn't painted
     base =
       cond do
