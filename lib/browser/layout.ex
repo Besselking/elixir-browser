@@ -2260,6 +2260,7 @@ defmodule Browser.Layout do
     do: pre_text(t, style, acc, ws)
 
   defp walk_text(t, %{ws: :nowrap} = style, acc) do
+    t = drop_wide_breaks(t)
     # whitespace collapses, but the words never wrap
     leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
     trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
@@ -2272,6 +2273,7 @@ defmodule Browser.Layout do
   end
 
   defp walk_text(t, style, acc) do
+    t = drop_wide_breaks(t)
     leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
     trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
     words = t |> css_words() |> Enum.map(&{:word, &1, style})
@@ -2286,6 +2288,14 @@ defmodule Browser.Layout do
       [] -> if t == "", do: acc, else: [{:space, style} | acc]
       _ -> Enum.reverse(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing) ++ acc
     end
+  end
+
+  # a line break between two wide East Asian characters (not Hangul) is removed, not turned into a space
+  @wide "\\x{2E80}-\\x{303E}\\x{3041}-\\x{33FF}\\x{3400}-\\x{4DBF}\\x{4E00}-\\x{9FFF}\\x{F900}-\\x{FAFF}\\x{FE30}-\\x{FE4F}\\x{FF01}-\\x{FF9F}\\x{FFE0}-\\x{FFE6}\\x{20000}-\\x{3FFFD}"
+  @wide_break Regex.compile!("([#{@wide}])[ \\t]*\\n[ \\t]*(?=[#{@wide}])", "u")
+
+  defp drop_wide_breaks(t) do
+    if String.contains?(t, "\n"), do: Regex.replace(@wide_break, t, "\\1"), else: t
   end
 
   defp space_start,

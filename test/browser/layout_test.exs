@@ -5424,6 +5424,18 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "segment breaks between wide characters" do
+    test "a line break between two wide characters leaves no space" do
+      wide = laid_out("<p>測試\n測試</p>") |> Enum.filter(&(&1.type == :text))
+      assert [%{text: "測試測試"}] = Enum.filter(wide, &String.contains?(&1.text, "測"))
+    end
+
+    test "a line break between other characters is a space" do
+      texts = for %{type: :text, text: t} <- laid_out("<p>ab\ncd</p>"), do: t
+      assert texts == ["ab", "cd"]
+    end
+  end
+
   describe "table-layout: fixed" do
     test "a zero-wide fixed table has zero-wide cells" do
       html =
