@@ -1127,8 +1127,14 @@ defmodule Browser.JS.DOM do
       k when k in @bool_attrs ->
         {:ok, get_attr(n, k) != nil}
 
+      k when k in ~w(href src action) ->
+        case get_attr(n, k) do
+          nil -> {:ok, ""}
+          v -> {:ok, resolve_url(String.trim(v))}
+        end
+
       k
-      when k in ~w(href src name placeholder title alt action method target rel for lang dir role) ->
+      when k in ~w(name placeholder title alt method target rel for lang dir role) ->
         {:ok, attr_or(n, k, "")}
 
       "htmlFor" ->
@@ -3718,10 +3724,33 @@ defmodule Browser.JS.DOM do
     {"HTMLProgressElement", ["progress"]}
   ]
 
+  @node_constants [
+    {"ELEMENT_NODE", 1},
+    {"ATTRIBUTE_NODE", 2},
+    {"TEXT_NODE", 3},
+    {"CDATA_SECTION_NODE", 4},
+    {"PROCESSING_INSTRUCTION_NODE", 7},
+    {"COMMENT_NODE", 8},
+    {"DOCUMENT_NODE", 9},
+    {"DOCUMENT_TYPE_NODE", 10},
+    {"DOCUMENT_FRAGMENT_NODE", 11},
+    {"DOCUMENT_POSITION_DISCONNECTED", 1},
+    {"DOCUMENT_POSITION_PRECEDING", 2},
+    {"DOCUMENT_POSITION_FOLLOWING", 4},
+    {"DOCUMENT_POSITION_CONTAINS", 8},
+    {"DOCUMENT_POSITION_CONTAINED_BY", 16},
+    {"DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32}
+  ]
+
   defp install_globals(scope, event_target, node_proto, element, text, document, event) do
     # constructors, so `instanceof` works (and `new Event(...)`)
     ctor(scope, "EventTarget", event_target, fn _, _ -> :undefined end)
-    ctor(scope, "Node", node_proto, fn _, _ -> :undefined end)
+    node_ctor = ctor(scope, "Node", node_proto, fn _, _ -> :undefined end)
+
+    for {name, v} <- @node_constants, target <- [node_ctor, node_proto] do
+      put_hidden(target, name, v)
+    end
+
     ctor(scope, "Element", element, fn _, _ -> :undefined end)
     ctor(scope, "HTMLElement", element, fn this, _ -> html_element_ctor(this) end)
     # `el instanceof HTMLAnchorElement` and the like

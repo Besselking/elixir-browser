@@ -134,4 +134,21 @@ defmodule Browser.JS.EditingTest do
     r = Runtime.run_scripts(pid)
     assert %{anchor: {_, 2}, focus: {_, 2}} = r.sel
   end
+
+  test "focus() alone puts the caret at the start, so a command works on it" do
+    assert edit(
+             "console.log(document.execCommand('insertText', false, 'X'), e.firstChild.textContent)"
+           ) ==
+             ["true XHello world"]
+  end
+
+  test "Node has the node type constants and anchors report resolved addresses" do
+    r =
+      run(
+        "console.log(Node.TEXT_NODE, Node.ELEMENT_NODE, document.getElementById('a').href)",
+        "<a id=a href='x#y'>a</a>"
+      )
+
+    assert logs(r) == ["3 1 http://t.test/x#y"]
+  end
 end

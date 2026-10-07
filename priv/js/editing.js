@@ -649,6 +649,11 @@
 
   // the editing host a position is in, or null when it isn't editable
   function context() {
+    var fh = g.__ed.focused();
+    // focusing an editing host puts the caret at its start unless the selection is already in it
+    if (fh && (!valid(selection) || hostOf(selection._range._sc) !== fh || hostOf(selection._range._ec) !== fh)) {
+      setSel(fh, 0, fh, 0);
+    }
     if (!valid(selection)) return null;
     var r = selection._range;
     var h1 = hostOf(r._sc), h2 = hostOf(r._ec);
