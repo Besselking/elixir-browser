@@ -1561,6 +1561,7 @@ defmodule Browser.Layout do
       maxpct: pct_of(c["max-height"]),
       minpct: pct_of(c["min-height"]),
       clip: clips?(c),
+      cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
       bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
@@ -3765,6 +3766,12 @@ defmodule Browser.Layout do
 
     sid = if Map.get(o, :scroll), do: o.nid || box.id
     st = if o.clip, do: clip_new(st, box, clip, sid), else: st
+
+    st =
+      if o.cpath,
+        do: cpath_new(st, box, %{x: box.x, y: box.top, w: box.w, h: height}),
+        else: st
+
     st = if sid, do: add_scroller(st, sid, clip, o), else: st
 
     # the box's own background and borders go under whatever is inside it
@@ -4095,6 +4102,27 @@ defmodule Browser.Layout do
         rects: Enum.map(new_rects, &put_clip(&1, clip, sid)) ++ old_rects
     }
   end
+
+  # `clip-path: inset(0)` clips the box and everything it paints, a fixed box inside it too (it
+  # is where the window shows the box, so a fixed item has its own clip in page coordinates:
+  # `fclip`)
+  defp cpath_new(st, box, rect) do
+    st = clip_new(st, box, rect, nil)
+    {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
+
+    clip_item = fn
+      %{stick: _} = it -> Map.update(it, :fclip, rect, &intersect(&1, rect))
+      it -> put_clip(it, rect, nil)
+    end
+
+    %{st | overlays: Enum.map(new_over, &Enum.map(&1, clip_item)) ++ old_over}
+  end
+
+  # `inset(0)` with no rounded corners
+  defp plain_inset?(v) when is_binary(v),
+    do: Regex.match?(~r/\Ainset\(\s*0(?:px)?(?:\s+0(?:px)?){0,3}\s*\)\z/, String.trim(v))
+
+  defp plain_inset?(_), do: false
 
   # Besides the merged `clip`, an item keeps each clip it got as `{rect, k, scroller}` (`k` is
   # how many scrollers it was already inside) and the scrollers it is in, innermost first

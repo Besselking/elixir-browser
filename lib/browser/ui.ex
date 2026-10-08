@@ -664,6 +664,9 @@ defmodule Browser.UI do
       y = item.y - sc
       clip = Map.get(item, :clip)
       if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - sc, clip.w, clip.h})
+      # a clip on the page that a fixed or sticky item does not move with
+      fclip = Map.get(item, :fclip)
+      if fclip, do: :wxDC.setClippingRegion(dc, {fclip.x, fclip.y - scroll, fclip.w, fclip.h})
 
       # inside a transformed box everything is drawn through its matrices (see `new_gc/1`)
       xform = Map.get(item, :xform)
@@ -671,7 +674,7 @@ defmodule Browser.UI do
       draw_item(dc, item, y, sc)
       if xform, do: Process.delete(:xform)
 
-      if clip, do: :wxDC.destroyClippingRegion(dc)
+      if clip || fclip, do: :wxDC.destroyClippingRegion(dc)
     end
   end
 
@@ -1661,12 +1664,17 @@ defmodule Browser.UI do
             it.w,
             it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
           ),
+          fclipped_in?(it, x, y + scroll),
           Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
         {it, py}
       end
 
     Enum.reverse(at)
   end
+
+  # (a fixed or sticky item with a clip on the page, see `fclip` in the layout)
+  defp fclipped_in?(%{fclip: c}, x, py), do: inside?(x, py, c.x, c.y, c.w, c.h)
+  defp fclipped_in?(_item, _x, _py), do: true
 
   @doc """
   The number of the element painted topmost at window point `{x, y}` (the window scrolled to
