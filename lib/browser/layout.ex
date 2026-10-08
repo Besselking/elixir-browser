@@ -1537,6 +1537,37 @@ defmodule Browser.Layout do
   # An inline box with nothing in it still makes a line when it has horizontal margins, padding
   # or borders, unless something else comes on that line: an empty word, taken off the line when
   # it is laid out, holds the line open (see `flush/1`).
+  # the absolutely positioned boxes of a multicol container's content that are not inside a
+  # positioned box of it (those are placed against that box) -> {them, the rest}
+  defp split_outer_abs(sub) do
+    {abs, rest, _} =
+      Enum.reduce(sub, {[], [], []}, fn
+        # (one with an automatic offset in either direction goes where it would be in the flow,
+        # which is in a column)
+        {:abs, _, spec} = op, {abs, rest, []}
+        when (spec.top != nil or spec.bottom != nil) and
+               (spec.left != nil or spec.right != nil) ->
+          {[op | abs], rest, []}
+
+        {:box_start, ref, %{pos: true}} = op, {abs, rest, stack} ->
+          {abs, [op | rest], [ref | stack]}
+
+        {:box_end, ref} = op, {abs, rest, [ref | stack]} ->
+          {abs, [op | rest], stack}
+
+        {:pos_inline, _} = op, {abs, rest, stack} ->
+          {abs, [op | rest], [:inline | stack]}
+
+        {:pos_end} = op, {abs, rest, [:inline | stack]} ->
+          {abs, [op | rest], stack}
+
+        op, {abs, rest, stack} ->
+          {abs, [op | rest], stack}
+      end)
+
+    {Enum.reverse(abs), Enum.reverse(rest)}
+  end
+
   defp strut_for_empty(%{line: []} = st, ref, %{style: style} = spec) do
     empty? = Enum.any?(st.marks, &match?({:start, ^ref, _, _}, &1))
     # (the rest of a box that a block split has only its right side to show)
@@ -3557,18 +3588,23 @@ defmodule Browser.Layout do
          avail > @unbounded / 2 do
       Enum.reduce(sub, st, &op/2)
     else
+      # absolutely positioned boxes are placed against their containing block, not a column
+      {abs, sub} = split_outer_abs(sub)
       {items, height, _} = layout_atom(st, sub, colw)
       {laid, height} = split_columns(items, height, n, colw, cs)
       laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
 
-      place_atom(st, %{
-        w: avail,
-        h: height,
-        base: height,
-        items: laid,
-        align: style.align,
-        valign: nil
-      })
+      st =
+        place_atom(st, %{
+          w: avail,
+          h: height,
+          base: height,
+          items: laid,
+          align: style.align,
+          valign: nil
+        })
+
+      Enum.reduce(abs, st, &op/2)
     end
   end
 

@@ -6247,6 +6247,16 @@ defmodule Browser.LayoutTest do
       xs = for %{type: :text, text: t, x: x} <- laid_out(html), t in ["a", "b"], do: x
       assert Enum.max(xs) - Enum.min(xs) == 110
     end
+
+    test "an absolutely positioned box in a multicol container spans the container" do
+      html =
+        ~s|<div style="position:relative;columns:2;column-gap:0;width:200px;height:50px"><div style="position:absolute;left:0;top:0;width:150px;height:10px;background:green"></div><div style="height:20px">a</div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, x: 8, w: 150}, &1)
+             )
+    end
   end
 
   describe "segment breaks between wide characters" do
