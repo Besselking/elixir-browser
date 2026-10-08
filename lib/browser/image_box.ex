@@ -74,7 +74,7 @@ defmodule Browser.ImageBox do
   @spec fixed?(map, map) :: boolean
   def fixed?(attrs, css) do
     spec(css[:w], width(css[:w], 1), attrs[:w]) != nil and
-      spec(css[:h], px(css[:h]), attrs[:h]) != nil
+      spec(css[:h], px(css[:h]), px(attrs[:h])) != nil
   end
 
   # CSS wins over the attributes; an explicit `auto` switches the attribute off

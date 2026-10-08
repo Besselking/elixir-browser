@@ -1188,7 +1188,7 @@ defmodule Browser.Layout do
 
   defp declared_size(attrs) do
     w = attr_width(attrs)
-    h = attr_int(attrs, "height")
+    h = attr_height(attrs)
     if w || h, do: %{w: w, h: h}
   end
 
@@ -1201,8 +1201,10 @@ defmodule Browser.Layout do
     end
   end
 
-  defp attr_int(attrs, name) do
-    case Integer.parse(attr_value(attrs, name)) do
+  # a height attribute may be a percentage of the containing block's height
+  defp attr_height(attrs) do
+    case Integer.parse(attr_value(attrs, "height")) do
+      {n, "%" <> _} when n >= 0 -> {:pct, n / 100}
       {n, _} when n >= 0 -> n
       _ -> nil
     end
@@ -3152,6 +3154,7 @@ defmodule Browser.Layout do
       limits: %{},
       # the content height of the enclosing block when it has one of its own (for percentages)
       cbh: cbh,
+      scbh: cbh,
       cbw: nil,
       root_view: root_height == :view,
       flex_item: Process.get(:layout_flex_item, false)
@@ -3369,7 +3372,10 @@ defmodule Browser.Layout do
 
     %{
       st
-      | insets: [{st.left, st.right, st.y, length(st.floats)} | st.insets],
+      | insets: [{st.left, st.right, st.y, length(st.floats), st.scbh} | st.insets],
+        # (a pictures's percentage height in a block with no height of its own is auto, where
+        # the percentages of boxes go on to refer to the block around, as in quirks mode)
+        scbh: nil,
         blocks: [make_ref() | st.blocks],
         left: st.left + l,
         right: st.right + r,
@@ -3378,7 +3384,7 @@ defmodule Browser.Layout do
     }
   end
 
-  defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
+  defp op({:inset_end}, %{insets: [{l, r, y0, n0, cbh} | rest]} = st) do
     st = adjoin_floats(st, y0, n0)
     # the margin below a box is not one of a first child, unless the box held nothing but the
     # floats that left that margin pending: then it is empty and its margins go on collapsing
@@ -3389,7 +3395,7 @@ defmodule Browser.Layout do
       end
 
     st = end_block(st)
-    %{st | insets: rest, left: l, right: r}
+    %{st | insets: rest, left: l, right: r, scbh: cbh}
   end
 
   # where a block that has an id starts, for `#fragment`s and `scrollIntoView`
@@ -3662,7 +3668,15 @@ defmodule Browser.Layout do
         _ -> spec.intrinsic
       end
 
-    {cw, ch} = Browser.ImageBox.size(intrinsic, spec.attrs, spec.css, avail)
+    # a percentage height is of the containing block's height, when that is known
+    pct_h = fn
+      {:pct, f} -> if is_number(st.scbh), do: f * st.scbh
+      h -> h
+    end
+
+    attrs = Map.update(spec.attrs, :h, nil, pct_h)
+    css = Map.update(spec.css, :h, nil, pct_h)
+    {cw, ch} = Browser.ImageBox.size(intrinsic, attrs, css, avail)
     box = spec.box
     {bt, br, bb, bl} = box.bw
     ml = if box.ml == :auto, do: 0, else: box.ml
@@ -4223,22 +4237,26 @@ defmodule Browser.Layout do
       ov0: length(st.overlays),
       seq: :erlang.unique_integer([:monotonic]),
       pcbh: st.cbh,
+      pscbh: st.scbh,
       pcbw: st.cbw,
       saved: {st.left, st.right, st.free},
       need: x + bl + o.pl + st.right + fr + rest + br + o.pr - st.free - own_free
     }
 
+    new_cbh =
+      if(
+        st.flex_item and st.blocks == [] and not Map.get(o, :definite, false) and
+          not (o.ratio != nil and o.h == nil),
+        do: nil,
+        else: content_height(o) || ratio_content_height(o, box_w)
+      )
+
     st = %{
       st
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
-        cbh:
-          if(
-            st.flex_item and st.blocks == [] and not Map.get(o, :definite, false) and
-              not (o.ratio != nil and o.h == nil),
-            do: nil,
-            else: content_height(o) || ratio_content_height(o, box_w)
-          ),
+        scbh: new_cbh,
+        cbh: new_cbh,
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.bfc, do: [], else: st.floats),
         left: left + bl + o.pl,
@@ -4350,7 +4368,7 @@ defmodule Browser.Layout do
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
     st = %{st | limits: Map.put(st.limits, box.id, box.top + height - bb - o.pb)}
-    st = %{st | cbh: box.pcbh, cbw: box.pcbw}
+    st = %{st | cbh: box.pcbh, scbh: box.pscbh, cbw: box.pcbw}
     {st, box} = if o.rel, do: relative_shift(st, box), else: {st, box}
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st
@@ -7998,9 +8016,23 @@ defmodule Browser.Layout do
       {items, h, _} = flex_atom(st, sub, it.w, {it.key, min_h})
       %{it | items: items, h: max(h, cross)}
     else
+      flex_stretch_picture(st, it, stretch?, cross)
+    end
+  end
+
+  # a picture without a height of its own is stretched to the line like any other item
+  defp flex_stretch_picture(st, %{restretch: build} = it, true, cross)
+       when build != nil and it.rebuild == nil do
+    if it.auto_height? and it.width != nil and it.h < cross do
+      h = max(cross - it.mt - it.mb - if(it.sizing == :border, do: 0, else: it.vextra), 0)
+      {items, h2, _} = flex_atom(st, build.(%{"height" => h * 1.0}), it.w, {it.key, :stretch, h})
+      %{it | items: items, h: max(h2, cross)}
+    else
       it
     end
   end
+
+  defp flex_stretch_picture(_st, it, _stretch?, _cross), do: it
 
   defp flex_column(st, cs, items, avail) do
     sized = Enum.map(items, &flex_column_item(st, cs, &1, avail))

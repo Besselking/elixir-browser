@@ -1890,6 +1890,23 @@ defmodule Browser.LayoutTest do
       assert [%{url: @img, w: 120, h: 80, x: 4}] = pics(items)
     end
 
+    test "a percentage height attribute is of a containing block with a height" do
+      {items, _} =
+        im(~s(<div style="height:200px"><img src="a.png" height="50%"></div>), loaded(30, 30))
+
+      assert [%{h: 100}] = pics(items)
+    end
+
+    test "a percentage height is auto when the block around has none" do
+      {items, _} =
+        im(
+          ~s(<div style="height:200px"><div><img src="a.png" height="50%"></div></div>),
+          loaded(30, 30)
+        )
+
+      assert [%{h: 30}] = pics(items)
+    end
+
     test "the page collects the urls to fetch" do
       page =
         Page.build(~s(<img src="a.png"><p><img src="/b.jpg" alt="b"><img src="a.png"></p>), @base)

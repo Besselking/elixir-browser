@@ -162,6 +162,9 @@ css/CSS2/backgrounds/background-image-applies-to-012.xht
 css/CSS2/backgrounds/background-image-applies-to-013.xht
 css/CSS2/backgrounds/background-image-applies-to-014.xht
 css/CSS2/backgrounds/background-image-applies-to-015.xht
+css/CSS2/backgrounds/background-image-cover-002.xht
+css/CSS2/backgrounds/background-image-cover-004.xht
+css/CSS2/backgrounds/background-image-cover-attachment-001.xht
 css/CSS2/backgrounds/background-image-transparency-001.xht
 css/CSS2/backgrounds/background-position-004.xht
 css/CSS2/backgrounds/background-position-005.xht
@@ -252,6 +255,7 @@ css/CSS2/backgrounds/background-position-applies-to-014.xht
 css/CSS2/backgrounds/background-position-applies-to-015.xht
 css/CSS2/backgrounds/background-repeat-001.xht
 css/CSS2/backgrounds/background-repeat-002.xht
+css/CSS2/backgrounds/background-repeat-003.xht
 css/CSS2/backgrounds/background-repeat-004.xht
 css/CSS2/backgrounds/background-repeat-005.xht
 css/CSS2/backgrounds/background-repeat-applies-to-001.xht
@@ -3870,6 +3874,7 @@ css/css-flexbox/flex-minimum-width-flex-items-009.html
 css/css-flexbox/flex-minimum-width-flex-items-010.html
 css/css-flexbox/flex-minimum-width-flex-items-011.html
 css/css-flexbox/flex-minimum-width-flex-items-012.html
+css/css-flexbox/flex-minimum-width-flex-items-016.html
 css/css-flexbox/flex-order-last-baseline-multiple.html
 css/css-flexbox/flex-order-last-baseline.html
 css/css-flexbox/flex-order-wrap-reverse-baseline.html
@@ -4853,6 +4858,8 @@ css/css-sizing/intrinsic-height-fixedpos-percentage-child.html
 css/css-sizing/intrinsic-percent-non-replaced-004.html
 css/css-sizing/intrinsic-percent-non-replaced-007.html
 css/css-sizing/intrinsic-percent-non-replaced-008.html
+css/css-sizing/intrinsic-percent-replaced-021.html
+css/css-sizing/intrinsic-percent-replaced-022.html
 css/css-sizing/intrinsic-size-min-content-box-sizing.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-001.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-002.html
