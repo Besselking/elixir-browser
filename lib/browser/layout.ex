@@ -4661,6 +4661,11 @@ defmodule Browser.Layout do
 
     {static_x, static_y} =
       cond do
+        # (a block-level box is where a block would be: under the line, at its start)
+        st.line != [] and not Map.get(spec, :inline, true) ->
+          {fl, _} = float_offsets(st, st.y)
+          {st.margin + st.left + fl, st.y + st.lmax}
+
         st.line != [] ->
           {st.x, st.y}
 

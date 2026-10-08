@@ -2066,6 +2066,7 @@ css/CSS2/normal-flow/block-non-replaced-height-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-005.xht
 css/CSS2/normal-flow/block-non-replaced-height-011.xht
 css/CSS2/normal-flow/block-non-replaced-height-013.xht
+css/CSS2/normal-flow/block-non-replaced-width-001.xht
 css/CSS2/normal-flow/block-non-replaced-width-002.xht
 css/CSS2/normal-flow/block-non-replaced-width-003.xht
 css/CSS2/normal-flow/block-non-replaced-width-004.xht
@@ -2745,6 +2746,7 @@ css/CSS2/positioning/absolute-replaced-width-071.xht
 css/CSS2/positioning/absolute-replaced-width-076.xht
 css/CSS2/positioning/abspos-001.xht
 css/CSS2/positioning/abspos-002.xht
+css/CSS2/positioning/abspos-007.xht
 css/CSS2/positioning/abspos-008.xht
 css/CSS2/positioning/abspos-009.xht
 css/CSS2/positioning/abspos-011.xht
@@ -2763,6 +2765,7 @@ css/CSS2/positioning/abspos-026.xht
 css/CSS2/positioning/abspos-027.xht
 css/CSS2/positioning/abspos-028.xht
 css/CSS2/positioning/abspos-029.html
+css/CSS2/positioning/abspos-block-level-001.html
 css/CSS2/positioning/abspos-containing-block-001.xht
 css/CSS2/positioning/abspos-containing-block-002.xht
 css/CSS2/positioning/abspos-containing-block-003.xht
@@ -2773,6 +2776,7 @@ css/CSS2/positioning/abspos-containing-block-007.xht
 css/CSS2/positioning/abspos-containing-block-008.xht
 css/CSS2/positioning/abspos-containing-block-009.xht
 css/CSS2/positioning/abspos-containing-block-010.xht
+css/CSS2/positioning/abspos-negative-margin-001.html
 css/CSS2/positioning/abspos-overflow-001.xht
 css/CSS2/positioning/abspos-overflow-002.xht
 css/CSS2/positioning/abspos-overflow-003.xht
@@ -4471,6 +4475,7 @@ css/css-position/nested-inline-abspos-child.html
 css/css-position/position-absolute-center-007.html
 css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
+css/css-position/position-absolute-in-inline-003.html
 css/css-position/position-absolute-in-inline-004.html
 css/css-position/position-absolute-in-inline-margin-top.html
 css/css-position/position-absolute-large-negative-inset.html

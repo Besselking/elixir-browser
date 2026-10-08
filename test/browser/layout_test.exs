@@ -6848,4 +6848,17 @@ defmodule Browser.LayoutTest do
       assert b.y == 50
     end
   end
+
+  describe "a block-level absolutely positioned box in the middle of a line" do
+    test "starts at the left of the line, under it" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}.a{position:absolute;width:10px;height:10px;background:green}</style><div>abc<div class=a></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.x == 0
+      assert box.y == 20
+    end
+  end
 end
