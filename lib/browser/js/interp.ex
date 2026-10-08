@@ -146,9 +146,15 @@ defmodule Browser.JS.Interp do
   end
 
   def make_error(type, message) do
-    err = new_object([{"message", message}], proto({:error, type}))
-    mark_error(err)
-    set_stack(err, stack_string("#{type}: #{message}"))
+    {:obj, id} = err = new_object([{"message", message}], proto({:error, type}))
+
+    store(
+      id,
+      deref(id)
+      |> Map.put(:errdata, true)
+      |> Map.put(:stack_str, stack_string("#{type}: #{message}"))
+    )
+
     err
   end
 
