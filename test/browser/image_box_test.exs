@@ -9,6 +9,15 @@ defmodule Browser.ImageBoxTest do
     assert size({120, 80}) == {120, 80}
   end
 
+  test "min and max sizes follow the table of CSS 2.1: both broken at once" do
+    # too wide and too short: the picture takes the max width and the min height
+    assert size({300, 150}, %{}, %{maxw: 75, minh: 75}) == {75, 75}
+    # too narrow and too tall
+    assert size({50, 200}, %{}, %{minw: 100, maxh: 100}) == {100, 100}
+    # only too wide: the ratio holds
+    assert size({300, 150}, %{}, %{maxw: 100}) == {100, 50}
+  end
+
   test "nothing known yet: zero" do
     assert size(nil) == {0, 0}
   end

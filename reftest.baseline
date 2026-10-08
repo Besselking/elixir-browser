@@ -4788,6 +4788,7 @@ css/css-sizing/aspect-ratio/replaced-element-014.html
 css/css-sizing/aspect-ratio/replaced-element-024.html
 css/css-sizing/aspect-ratio/replaced-element-029.html
 css/css-sizing/aspect-ratio/replaced-element-030.html
+css/css-sizing/aspect-ratio/replaced-element-041.html
 css/css-sizing/aspect-ratio/zero-or-infinity-001.html
 css/css-sizing/aspect-ratio/zero-or-infinity-002.html
 css/css-sizing/aspect-ratio/zero-or-infinity-003.html
@@ -4815,6 +4816,9 @@ css/css-sizing/box-sizing-border-box-003.xht
 css/css-sizing/box-sizing-border-box-004.xht
 css/css-sizing/box-sizing-content-box-001.xht
 css/css-sizing/box-sizing-content-box-003.xht
+css/css-sizing/box-sizing-replaced-001.xht
+css/css-sizing/box-sizing-replaced-002.xht
+css/css-sizing/box-sizing-replaced-003.xht
 css/css-sizing/calc-margins-block.html
 css/css-sizing/calc-margins-fieldset-content.html
 css/css-sizing/calc-margins-fieldset-legend.html

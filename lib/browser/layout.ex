@@ -1196,6 +1196,26 @@ defmodule Browser.Layout do
     }
   end
 
+  # with `box-sizing: border-box` the sizes of a picture include its padding and border
+  defp content_sizes(css, %{"box-sizing" => "border-box"}, box) do
+    {bt, br, bb, bl} = box.bw
+    hx = box.pl + box.pr + bl + br
+    vx = box.pt + box.pb + bt + bb
+    less = fn v, x -> if is_number(v), do: max(v - x, 0), else: v end
+
+    %{
+      css
+      | w: less.(css.w, hx),
+        minw: less.(css.minw, hx),
+        maxw: less.(css.maxw, hx),
+        h: less.(css.h, vx),
+        minh: less.(css.minh, vx),
+        maxh: less.(css.maxh, vx)
+    }
+  end
+
+  defp content_sizes(css, _c, _box), do: css
+
   # `object-position` as an {x, y} pair of px or fractions; nil is the centre
   defp object_position(nil), do: nil
 
@@ -1291,15 +1311,16 @@ defmodule Browser.Layout do
       end
 
     declared = declared_size(attrs) || %{w: nil, h: nil}
+    css = content_sizes(image_css(c), c, box)
 
     spec = %{
       url: url,
       intrinsic: with({:ok, w, h} <- info, do: {w, h}, else: (_ -> nil)),
       # a picture still loading whose box is already known gets its (not yet drawable) item
       # now, so that the page does not need another layout when the picture arrives
-      paint?: info != nil or (url != nil and Browser.ImageBox.fixed?(declared, image_css(c))),
+      paint?: info != nil or (url != nil and Browser.ImageBox.fixed?(declared, css)),
       attrs: declared,
-      css: image_css(c),
+      css: css,
       box: box,
       href: style.href,
       blank: style.blank,

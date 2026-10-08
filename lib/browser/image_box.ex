@@ -32,8 +32,14 @@ defmodule Browser.ImageBox do
         {w, h} -> {w, h}
       end
 
-    {w, h} = limit_width(w, h, hspec, ratio, css, avail)
-    {w, h} = limit_height(w, h, wspec, ratio, css)
+    {w, h} =
+      if wspec == nil and hspec == nil and w > 0 and h > 0 do
+        constrain(w, h, css, avail)
+      else
+        {w, h} = limit_width(w, h, hspec, ratio, css, avail)
+        limit_height(w, h, wspec, ratio, css)
+      end
+
     {round(max(w, 0)), round(max(h, 0))}
   end
 
@@ -103,6 +109,57 @@ defmodule Browser.ImageBox do
 
   defp derive(_known, _ratio, :width, intrinsic),
     do: if(intrinsic, do: elem(intrinsic, 0), else: 0)
+
+  # the table of CSS 2.1 section 10.4: a picture with neither width nor height keeps its ratio
+  # when min and max sizes change it, whichever of them is broken
+  defp constrain(w, h, css, avail) do
+    maxw = width(css[:maxw], avail)
+    minw = width(css[:minw], avail) || 0
+    maxh = px(css[:maxh])
+    minh = px(css[:minh]) || 0
+    maxw = if maxw, do: max(maxw, minw)
+    maxh = if maxh, do: max(maxh, minh)
+    over_w = maxw != nil and w > maxw
+    under_w = w < minw
+    over_h = maxh != nil and h > maxh
+    under_h = h < minh
+
+    cap_w = fn v -> if maxw, do: min(maxw, v), else: v end
+    cap_h = fn v -> if maxh, do: min(maxh, v), else: v end
+
+    cond do
+      over_w and under_h ->
+        {maxw, minh}
+
+      under_w and over_h ->
+        {minw, maxh}
+
+      over_w and over_h ->
+        if maxw / w <= maxh / h,
+          do: {maxw, max(minh, maxw * h / w)},
+          else: {max(minw, maxh * w / h), maxh}
+
+      under_w and under_h ->
+        if minw / w <= minh / h,
+          do: {cap_w.(minh * w / h), minh},
+          else: {minw, cap_h.(minw * h / w)}
+
+      over_w ->
+        {maxw, max(minh, maxw * h / w)}
+
+      under_w ->
+        {minw, cap_h.(minw * h / w)}
+
+      over_h ->
+        {max(minw, maxh * w / h), maxh}
+
+      under_h ->
+        {cap_w.(minh * w / h), minh}
+
+      true ->
+        {w, h}
+    end
+  end
 
   defp limit_width(w, h, hspec, ratio, css, avail) do
     maxw = width(css[:maxw], avail)
