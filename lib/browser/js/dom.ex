@@ -50,6 +50,41 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # The elements by `id` attribute: name => node ids (any element of any tree, attached or not).
+  # `window.Foo` and bare names that nothing declares look an element up by id, so this is kept
+  # up to date by the writes to the node table instead of being rebuilt after every change.
+  defp element_id(%{kind: :element, attrs: attrs}) do
+    case List.keyfind(attrs, "id", 0) do
+      {_, id} when is_binary(id) and id != "" -> id
+      _ -> nil
+    end
+  end
+
+  defp element_id(_), do: nil
+
+  defp reindex(ids, nid, old, new) do
+    o = element_id(old)
+    n = element_id(new)
+
+    cond do
+      o == n -> ids
+      true -> ids |> unindex(o, nid) |> index_in(n, nid)
+    end
+  end
+
+  defp unindex(ids, nil, _), do: ids
+
+  defp unindex(ids, id, nid) do
+    case ids do
+      %{^id => [^nid]} -> Map.delete(ids, id)
+      %{^id => list} -> Map.put(ids, id, List.delete(list, nid))
+      _ -> ids
+    end
+  end
+
+  defp index_in(ids, nil, _), do: ids
+  defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
+
   defp put_node(n) do
     s = st()
 
@@ -58,7 +93,8 @@ defmodule Browser.JS.DOM do
         do: %{s | dirty: true},
         else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
 
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
+    ids = reindex(s.ids, n.id, Map.get(s.nodes, n.id), n)
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), ids: ids, rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -92,7 +128,15 @@ defmodule Browser.JS.DOM do
 
     # (the checks that frames need are only made once the page has an <iframe>)
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
-    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
+
+    put_st(%{
+      s
+      | next: id + 1,
+        nodes: Map.put(s.nodes, id, n),
+        ids: reindex(s.ids, id, nil, n),
+        rev: s.rev + 1
+    })
+
     id
   end
 
@@ -262,6 +306,8 @@ defmodule Browser.JS.DOM do
     put_st(%{
       s
       | nodes: Map.drop(s.nodes, ids),
+        ids:
+          Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -403,6 +449,7 @@ defmodule Browser.JS.DOM do
   def init(raw, info) do
     put_st(%{
       nodes: %{},
+      ids: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -461,7 +508,15 @@ defmodule Browser.JS.DOM do
 
   defp update_node_quiet(nid, fun) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid))), rev: s.rev + 1})
+    old = node(nid)
+    n = fun.(old)
+
+    put_st(%{
+      s
+      | nodes: Map.put(s.nodes, nid, n),
+        ids: reindex(s.ids, nid, old, n),
+        rev: s.rev + 1
+    })
   end
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
@@ -3004,37 +3059,19 @@ defmodule Browser.JS.DOM do
   def named_element(_), do: :error
 
   # Scripts (and the runtime's own shims) probe undeclared globals (`typeof Foo`, `window.Foo`)
-  # over and over: one pass over the tree makes an index of the ids, kept until the tree changes.
+  # over and over: the index of the ids says which elements might be the one.
   defp named_nid(doc, name) do
-    rev = st().rev
+    case Map.get(st().ids, name) do
+      nil ->
+        nil
 
-    index =
-      case Process.get(:dom_ids) do
-        {^rev, ^doc, m} ->
-          m
-
-        _ ->
-          m = collect_ids(doc, %{})
-          Process.put(:dom_ids, {rev, doc, m})
-          m
-      end
-
-    Map.get(index, name)
-  end
-
-  # id => the first element (in document order) with it
-  defp collect_ids(nid, acc) do
-    Enum.reduce(node(nid).kids, acc, fn k, acc ->
-      n = node(k)
-
-      acc =
-        case n.kind == :element and get_attr(n, "id") do
-          id when is_binary(id) -> Map.put_new(acc, id, k)
-          _ -> acc
+      candidates ->
+        case Enum.filter(candidates, &(List.last([&1 | ancestors(&1)]) == doc)) do
+          [] -> nil
+          [one] -> one
+          _ -> element_by_id(doc, name)
         end
-
-      collect_ids(k, acc)
-    end)
+    end
   end
 
   defp window_put(key, v) do
