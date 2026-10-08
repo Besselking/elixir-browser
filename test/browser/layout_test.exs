@@ -179,7 +179,7 @@ defmodule Browser.LayoutTest do
 
     test "display:inline list items flow on one line" do
       css = "<style>ul { list-style: none; margin: 0; padding: 0 } li { display: inline }</style>"
-      {items, _} = styled(css <> "<ul><li>a</li><li>b</li></ul>")
+      {items, _} = styled(css <> "<ul><li>a</li> <li>b</li></ul>")
       assert word(items, "a").y == word(items, "b").y
     end
 
@@ -280,7 +280,7 @@ defmodule Browser.LayoutTest do
 
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
-        styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
+        styled(~s(<div style="display:inline">a</div> <div style="display:inline">b</div>))
 
       assert word(items, "a").y == word(items, "b").y
 
@@ -2101,7 +2101,7 @@ defmodule Browser.LayoutTest do
     test "while an image loads without declared size it takes no room" do
       {items, _} = im(~s(a<img src="a.png">b), %{"http://example.test/other.png" => {:ok, 1, 1}})
       assert pics(items) == []
-      assert tw(items, "a") && tw(items, "b")
+      assert tw(items, "ab")
     end
 
     test "a failed image shows its alt text, or nothing without one" do
@@ -2109,7 +2109,8 @@ defmodule Browser.LayoutTest do
       assert pics(items) == []
       assert tw(items, "[A") && tw(items, "picture]")
       {items, _} = im(~s(x<img src="a.png">y), %{@img => :failed})
-      assert Enum.filter(items, &(&1.type == :text)) |> length() == 2
+      # (nothing between the two letters, so they are one run)
+      assert Enum.filter(items, &(&1.type == :text)) |> length() == 1
     end
 
     test "without image information the alt text is shown, as before" do
@@ -4367,7 +4368,7 @@ defmodule Browser.LayoutTest do
   test "flex items shrink no further than their min-content next to a very wide item" do
     {items, _} =
       run(
-        ~s|<div style="display:flex"><a style="padding:0 5px">Over</a><a style="padding:0 5px">Store</a><div style="flex-grow:1"><div style="float:right">Login</div></div></div>|,
+        ~s|<div style="display:flex"><a style="padding:0 5px">Over</a> <a style="padding:0 5px">Store</a><div style="flex-grow:1"><div style="float:right">Login</div></div></div>|,
         300
       )
 
@@ -4938,7 +4939,7 @@ defmodule Browser.LayoutTest do
     test "capitalize leaves the rest of a word begun before an inline box" do
       items = ts_items("<p>T<span style=\"text-transform:capitalize\">his text</span></p>")
       texts = for %{type: :text, text: t} <- items, do: t
-      assert texts == ["T", "his", "Text"]
+      assert texts == ["This", "Text"]
     end
   end
 
@@ -5588,7 +5589,8 @@ defmodule Browser.LayoutTest do
       xs = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(&{&1.text, &1.x})
       # a (10), b (10 + 10 spacing), b (10, no spacing after it), c
       assert xs == [{"a", 0}, {"b", 10}, {"b", 30}, {"c", 40}] or
-               Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40}
+               Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40} or
+               xs == [{"a", 0}, {"b", 10}, {"bc", 30}]
     end
   end
 
@@ -6449,20 +6451,16 @@ defmodule Browser.LayoutTest do
     end
 
     test "a run-in becomes the start of the block after it" do
-      [{"head", x1, y1}, {"body", x2, y2}] =
-        run_in_items(~s(<div style="display:run-in">head</div><div>body</div>))
-
-      assert y1 == y2
-      assert x2 > x1
+      # (one line, one run)
+      assert [{"headbody", _, _}] =
+               run_in_items(~s(<div style="display:run-in">head</div><div>body</div>))
     end
 
     test "floats, positioned boxes and white space between do not stop a run-in" do
-      [{"head", _, y1}, {"body", _, y2}] =
-        run_in_items(
-          ~s(<div style="display:run-in">head</div> <div style="position:absolute"></div><div style="float:right"></div><div>body</div>)
-        )
-
-      assert y1 == y2
+      assert [{"headbody", _, _}] =
+               run_in_items(
+                 ~s(<div style="display:run-in">head</div> <div style="position:absolute"></div><div style="float:right"></div> <div>body</div>)
+               )
     end
 
     test "text between, a following run-in that holds a block, or nothing after keep it a block" do
@@ -6827,6 +6825,27 @@ defmodule Browser.LayoutTest do
       blues = Enum.filter(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
       assert length(blues) == 2
       assert Enum.all?(blues, &(&1.y < x.y))
+    end
+  end
+
+  describe "display: contents" do
+    test "text on either side of the box is one run" do
+      html = ~s|<div style="display:contents">PA</div><span style="display:contents">SS</span>|
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert [%{text: "PASS"}] = Enum.filter(items, &(&1.type == :text))
+    end
+  end
+
+  describe "display: flow-root" do
+    test "holds the margins of its children inside" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flow-root"><div style="margin:20px 0;height:10px"></div></div><div id=b style="height:5px;background:red"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      b = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert b.y == 50
     end
   end
 end

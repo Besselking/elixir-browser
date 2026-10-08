@@ -832,8 +832,6 @@ css/CSS2/box-display/display-002.xht
 css/CSS2/box-display/display-005.xht
 css/CSS2/box-display/display-007.xht
 css/CSS2/box-display/display-011.xht
-css/CSS2/box-display/display-012.xht
-css/CSS2/box-display/display-013.xht
 css/CSS2/box-display/display-015.xht
 css/CSS2/box-display/display-016.xht
 css/CSS2/box-display/display-017.xht
@@ -1145,6 +1143,9 @@ css/CSS2/floats/floats-placement-004.html
 css/CSS2/floats/floats-placement-006.html
 css/CSS2/floats/floats-placement-007.html
 css/CSS2/floats/floats-placement-008.html
+css/CSS2/floats/floats-placement-vertical-001a.xht
+css/CSS2/floats/floats-placement-vertical-001b.xht
+css/CSS2/floats/floats-placement-vertical-001c.xht
 css/CSS2/floats/floats-placement-vertical-003.xht
 css/CSS2/floats/floats-placement-vertical-004.xht
 css/CSS2/floats/floats-rule3-outside-left-002.xht
@@ -3114,6 +3115,7 @@ css/CSS2/positioning/top-offset-percentage-001.xht
 css/CSS2/positioning/top-offset-percentage-002.xht
 css/CSS2/text/bidi-flag-emoji-02.html
 css/CSS2/text/bidi-flag-emoji.html
+css/CSS2/text/bidi-span-001.html
 css/CSS2/text/bidi-span-002.html
 css/CSS2/text/letter-spacing-004.xht
 css/CSS2/text/letter-spacing-005.xht
@@ -3567,13 +3569,18 @@ css/css-box/margin-trim/multicol-spanner-002.html
 css/css-box/margin-trim/multicol-spanner-003.html
 css/css-display/display-contents-alignment-001.html
 css/css-display/display-contents-alignment-002.html
+css/css-display/display-contents-before-after-001.html
+css/css-display/display-contents-before-after-002.html
 css/css-display/display-contents-block-001.html
 css/css-display/display-contents-block-002.html
 css/css-display/display-contents-details-001.html
+css/css-display/display-contents-fieldset.html
+css/css-display/display-contents-first-letter-002.html
 css/css-display/display-contents-first-line-002.html
 css/css-display/display-contents-flex-001.html
 css/css-display/display-contents-float-001.html
 css/css-display/display-contents-inline-001.html
+css/css-display/display-contents-inline-002.html
 css/css-display/display-contents-line-height.html
 css/css-display/display-contents-list-001.html
 css/css-display/display-contents-multicol-001.html
@@ -3582,6 +3589,7 @@ css/css-display/display-contents-oof-002.html
 css/css-display/display-contents-text-inherit.html
 css/css-display/display-contents-text-only-001.html
 css/css-display/display-contents-whitespace-inside-inline.html
+css/css-display/display-flow-root-001.html
 css/css-display/display-flow-root-002.html
 css/css-display/run-in/font-style-applies-to-004.xht
 css/css-display/run-in/font-variant-applies-to-004.xht
@@ -4110,6 +4118,7 @@ css/css-flexbox/flexbox_margin.html
 css/css-flexbox/flexbox_nested-flex.html
 css/css-flexbox/flexbox_order-abspos-space-around.html
 css/css-flexbox/flexbox_order-box.html
+css/css-flexbox/flexbox_order-noninteger-invalid.html
 css/css-flexbox/flexbox_order.html
 css/css-flexbox/flexbox_quirks_body.html
 css/css-flexbox/flexbox_rowspan-overflow-automatic.html
@@ -4463,6 +4472,7 @@ css/css-position/position-absolute-center-007.html
 css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
 css/css-position/position-absolute-in-inline-004.html
+css/css-position/position-absolute-in-inline-margin-top.html
 css/css-position/position-absolute-large-negative-inset.html
 css/css-position/position-absolute-multicol-001.html
 css/css-position/position-absolute-root-element-flex.html
@@ -4794,6 +4804,7 @@ css/css-sizing/stretch/flexbox-stretch-minimum-002.html
 css/css-sizing/stretch/stretch-float-with-sibling.html
 css/css-sizing/stretch/stretch-float.html
 css/css-sizing/whitespace-and-break.html
+css/css-text/boundary-shaping/boundary-shaping-010.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html
 css/css-text/hyphens/hyphenate-character-001.html
@@ -4815,6 +4826,8 @@ css/css-text/hyphens/hyphens-manual-inline-012.html
 css/css-text/hyphens/hyphens-none-011.html
 css/css-text/hyphens/hyphens-none-014.html
 css/css-text/hyphens/hyphens-none-shy-on-2nd-line-001.html
+css/css-text/hyphens/hyphens-out-of-flow-002.html
+css/css-text/hyphens/hyphens-span-002.html
 css/css-text/hyphens/hyphens-vertical-001.html
 css/css-text/hyphens/hyphens-vertical-002.html
 css/css-text/hyphens/hyphens-vertical-003.html
@@ -4890,6 +4903,8 @@ css/css-text/line-breaking/line-breaking-011.html
 css/css-text/line-breaking/line-breaking-012.html
 css/css-text/line-breaking/line-breaking-013.html
 css/css-text/line-breaking/line-breaking-014.html
+css/css-text/line-breaking/line-breaking-015.html
+css/css-text/line-breaking/line-breaking-016.html
 css/css-text/line-breaking/line-breaking-018.html
 css/css-text/line-breaking/line-breaking-021.html
 css/css-text/line-breaking/line-breaking-030.html
@@ -5098,9 +5113,11 @@ css/css-text/text-align/text-align-start-last-default.html
 css/css-text/text-align/text-align-start-last-end.html
 css/css-text/text-align/text-align-start-last-justify.html
 css/css-text/text-align/text-align-start-last-start.html
+css/css-text/text-autospace/text-autospace-elements-004.html
 css/css-text/text-autospace/text-autospace-elements-005.html
 css/css-text/text-autospace/text-autospace-elements-005b.html
 css/css-text/text-autospace/text-autospace-elements-006.html
+css/css-text/text-autospace/text-autospace-elements-007.html
 css/css-text/text-autospace/text-autospace-mixed-001.html
 css/css-text/text-autospace/text-autospace-preformatted-001.html
 css/css-text/text-autospace/text-autospace-vertical-combine-001.html

@@ -336,9 +336,18 @@ defmodule Browser.Style do
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
       (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
-        not invalid_color?(p, v) and not percent_width?(p, v)
+        not invalid_color?(p, v) and not percent_width?(p, v) and not invalid_integer?(p, v)
     end)
   end
+
+  # `order` and `z-index` take integers: `1.5` is dropped, so an earlier declaration still applies
+  defp invalid_integer?(prop, v) when prop in ["order", "z-index"] and is_binary(v) do
+    v = String.trim(v)
+
+    simple_value?(v) and v != "auto" and not Regex.match?(~r/\A[+-]?\d+\z/, v)
+  end
+
+  defp invalid_integer?(_prop, _v), do: false
 
   # a colour that is not one is dropped before the cascade, so an earlier declaration still
   # applies (`color: green; color: invalidValue`)

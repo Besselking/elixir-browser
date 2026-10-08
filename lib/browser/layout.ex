@@ -977,8 +977,12 @@ defmodule Browser.Layout do
         _ when float? and kind != :contents ->
           float_ops(el, parent_style, c, acc)
 
+        # (what is in it goes on the line as if it were in the parent: text on either side is
+        # one run)
         :contents ->
-          walk(kids, style, acc)
+          acc = [{:run_on} | acc]
+          acc = walk(kids, style, acc)
+          [{:run_on} | acc]
 
         :inline ->
           inline_ops(tag, kids, style, parent_style, c, acc)
@@ -1773,7 +1777,7 @@ defmodule Browser.Layout do
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
         spec.min || spec.ratio || spec.maxpct ||
         spec.max || spec.pos ||
-        spec.clip || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
+        spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
 
     if needed?, do: spec
@@ -3082,6 +3086,7 @@ defmodule Browser.Layout do
       active: [],
       split: [],
       splitting: false,
+      runon: false,
       lead: 0,
       line_lead: 0,
       lmax: 0,
@@ -3698,6 +3703,8 @@ defmodule Browser.Layout do
 
   # a block inside inline boxes: the boxes have no part in it; they go on after it, as fragments
   # that continue the ones before
+  defp op({:run_on}, st), do: %{st | runon: true}
+
   defp op({:ib_split}, st) do
     # (the part of a box before the block shows its left side, on a line of its own)
     opened =
@@ -5668,10 +5675,50 @@ defmodule Browser.Layout do
     item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
     st = bridge(st, item, space_w)
 
+    # text that continues the text before it in the same style (across the tags of elements that
+    # paint nothing) is one run: it is measured and drawn as such
+    case st.line do
+      [%{type: :text, glue: _} = prev | older]
+      when glue? and hang == 0 and space_w == 0 ->
+        if mergeable?(prev, item) do
+          text = prev.text <> item.text
+          w = st.measure.(text, style)
+          merged = %{prev | text: text, w: w}
+
+          %{
+            st
+            | line: [merged | older],
+              x: prev.x + w,
+              runon: false,
+              pending_space: nil,
+              after_space: false,
+              lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
+              lh: max(st.lh, style.size),
+              lmax: max(st.lmax, line_px(style))
+          }
+        else
+          push_word(st, item, x, w, style)
+        end
+
+      _ ->
+        push_word(st, item, x, w, style)
+    end
+  end
+
+  defp mergeable?(prev, item) do
+    keys = [:x, :w, :text, :glue, :lm, :hang, :nid]
+
+    Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
+      not String.match?(prev.text <> item.text, ~r/\s|[\x{2000}-\x{200A}\x{3000}]/u) and
+      not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
+  end
+
+  defp push_word(st, item, x, w, style) do
     %{
       st
       | line: [item | st.line],
         x: x + w,
+        runon: false,
         pending_space: nil,
         after_space: false,
         lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
