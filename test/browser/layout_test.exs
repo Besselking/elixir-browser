@@ -5604,6 +5604,30 @@ defmodule Browser.LayoutTest do
       assert [{0, 0, 30, 5}] = flex_rects(html)
     end
 
+    test "flex: unset is the initial flex (does not grow), like flex: initial" do
+      html =
+        ~s(<div style="display:flex;width:200px"><div style="flex:unset;width:50px;height:5px;background:red"></div><div style="flex:1;height:5px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 50, 5}, {50, 0, 150, 5}]
+    end
+
+    test "a box scaled to nothing draws nothing" do
+      html =
+        ~s|<div style="width:100px"><div style="height:5px;background:red;transform:scaleX(0)"></div><div style="height:5px;background:blue"></div></div>|
+
+      assert flex_rects(html) == [{0, 5, 100, 5}]
+    end
+
+    test "clip-path: inset(0) clips a fixed box inside it to the box on the page" do
+      html =
+        ~s|<div style="height:50px"></div><div style="position:relative;clip-path:inset(0);height:100px"><div style="position:fixed;top:0;left:0;width:30px;height:200px;background:red"></div></div>|
+
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      [red] = Enum.filter(items, &(&1.type == :rect and Map.get(&1, :stick) == :fixed))
+      assert %{x: 0, y: 50, w: 400, h: 100} = red.fclip
+    end
+
     test "a flex container wider than its parent keeps its width" do
       html =
         ~s(<div style="width:100px"><div style="display:flex;width:190px;justify-content:flex-end"><div style="width:90px;height:5px;background:red"></div></div></div>)
