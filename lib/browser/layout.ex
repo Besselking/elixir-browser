@@ -6378,11 +6378,15 @@ defmodule Browser.Layout do
     {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, free * 1.0, n)
 
     # lay every item out at its final width, find the height of the line
-    sized =
-      Enum.map(line, fn it ->
-        w = max(round(it.hw), 0)
+    # (a width is the distance between the rounded edges, so that fractions do not add up)
+    {sized, _} =
+      Enum.map_reduce(line, start, fn it, x ->
+        ix = x + it.ml
+        right = floor(ix + it.hw + 0.5)
+        w = max(right - floor(ix + 0.5), 0)
         {items, h, _base} = flex_atom(st, it.sub, w, it.key)
-        Map.merge(it, %{w: w, items: items, h: h})
+        next = ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)
+        {Map.merge(it, %{w: w, items: items, h: h}), next}
       end)
 
     # items aligned on their baselines hang from the lowest one
@@ -6408,7 +6412,7 @@ defmodule Browser.Layout do
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
         moved = for item <- it.items, do: move(item, floor(ix + 0.5), top + dy)
-        {moved, floor(ix + 0.5) + it.w + it.mr + cs.col_gap + floor(between + 0.5)}
+        {moved, ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
     {placed, cross}
