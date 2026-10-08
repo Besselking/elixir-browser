@@ -19620,6 +19620,7 @@ language/eval-code/direct/this-value-func-strict-caller.js
 language/eval-code/direct/this-value-func-strict-source.js
 language/eval-code/direct/this-value-global.js
 language/eval-code/direct/var-env-func-init-global-new.js
+language/eval-code/direct/var-env-func-init-global-update-configurable.js
 language/eval-code/direct/var-env-func-init-global-update-non-configurable.js
 language/eval-code/direct/var-env-func-init-local-new-delete.js
 language/eval-code/direct/var-env-func-init-local-new.js
@@ -19692,6 +19693,7 @@ language/eval-code/indirect/switch-dflt-decl-strict.js
 language/eval-code/indirect/this-value-func.js
 language/eval-code/indirect/this-value-global.js
 language/eval-code/indirect/var-env-func-init-global-new.js
+language/eval-code/indirect/var-env-func-init-global-update-configurable.js
 language/eval-code/indirect/var-env-func-init-global-update-non-configurable.js
 language/eval-code/indirect/var-env-func-init-multi.js
 language/eval-code/indirect/var-env-func-non-strict.js
@@ -20175,11 +20177,15 @@ language/expressions/assignment/S11.13.1_A4_T2.js
 language/expressions/assignment/S11.13.1_A5_T1.js
 language/expressions/assignment/S11.13.1_A5_T2.js
 language/expressions/assignment/S11.13.1_A5_T3.js
+language/expressions/assignment/S11.13.1_A6_T1.js
+language/expressions/assignment/S11.13.1_A6_T2.js
 language/expressions/assignment/S11.13.1_A6_T3.js
 language/expressions/assignment/S11.13.1_A7_T4.js
 language/expressions/assignment/S8.12.4_A1.js
 language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
+language/expressions/assignment/assignment-operator-calls-putvalue-lref--rval--1.js
+language/expressions/assignment/assignment-operator-calls-putvalue-lref--rval-.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order.js
