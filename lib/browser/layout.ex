@@ -3164,7 +3164,7 @@ defmodule Browser.Layout do
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
 
   # a floated box goes to the left or right edge of the line below, and text flows around it
-  # a float on the right goes beside the line it comes in when it fits there, at the top of that
+  # a float goes beside the line it comes in when it fits there, at the top of that
   # line; otherwise the line ends and the float goes below it
   defp op({:float, side, sub, spec, style}, st),
     do:
@@ -5221,31 +5221,54 @@ defmodule Browser.Layout do
     }
   end
 
-  defp mid_line_float(%{line: [_ | _]} = st, :right, sub, spec, style) do
+  defp mid_line_float(%{line: [_ | _]} = st, side, sub, spec, _style) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     edge = st.width - st.margin - st.right
 
-    if style.ws != :nowrap and Map.get(spec, :clear) == nil and st.x + w <= edge - st.fr do
+    if Map.get(spec, :clear) == nil and st.x + w <= edge - st.fr do
       {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
-      {x, y} = place_float(st, :right, w, height, st.y, st.margin + st.left, edge)
+      {x, y} = place_float(st, side, w, height, st.y, st.margin + st.left, edge)
 
       if y == st.y do
         moved = for item <- items, do: item |> limit_extent(w) |> move(x, y) |> adopt_sticky(st)
+        float = %{side: side, x0: x, x1: x + w, y0: y, y1: y + height}
 
-        %{
+        st = %{
           st
           | items: Enum.reverse(moved) ++ st.items,
             n: st.n + length(moved),
             ext: max(st.ext, x + w + st.right - st.free),
-            fr: max(st.fr, edge - x),
-            floats: [%{side: :right, x0: x, x1: x + w, y0: y, y1: y + height} | st.floats]
+            floats: [float | st.floats]
         }
+
+        if side == :left,
+          do: shift_line(st, max(x + w - st.indent, 0)),
+          else: %{st | fr: max(st.fr, edge - x)}
       end
     end
   end
 
   defp mid_line_float(_st, _side, _sub, _spec, _style), do: nil
+
+  # the line moves right by `dx`: what is on it, where it started and the inline boxes open on it
+  defp shift_line(st, 0), do: st
+
+  defp shift_line(st, dx) do
+    marks =
+      Enum.map(st.marks, fn
+        {:start, ref, spec, x} -> {:start, ref, spec, x + dx}
+        {:end, ref, x} -> {:end, ref, x + dx}
+      end)
+
+    %{
+      st
+      | line: Enum.map(st.line, &%{&1 | x: &1.x + dx}),
+        x: st.x + dx,
+        indent: st.indent + dx,
+        marks: marks
+    }
+  end
 
   # A line beside floats that a word cannot fit on moves down to where a float ends. (A word that
   # may break between its letters is not moved: some of it fits; nor is a line that cannot wrap.)

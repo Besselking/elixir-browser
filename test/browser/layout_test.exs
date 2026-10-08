@@ -6677,4 +6677,18 @@ defmodule Browser.LayoutTest do
       assert green.y == 30
     end
   end
+
+  describe "a left float that comes in the middle of a line" do
+    test "goes to the left of that line and pushes what is on it to the right" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:200px">ab<span style="float:left;width:20px;height:5px;background:red"></span>cd</div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.x == 0 and float.y == 0
+      text = Enum.find(items, &(&1.type == :text))
+      assert text.x == 20 and text.y < 10
+    end
+  end
 end

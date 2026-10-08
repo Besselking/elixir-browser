@@ -1021,10 +1021,12 @@ css/CSS2/floats-clear/float-replaced-width-003.xht
 css/CSS2/floats-clear/float-replaced-width-004.xht
 css/CSS2/floats-clear/float-replaced-width-005.xht
 css/CSS2/floats-clear/float-replaced-width-006.xht
+css/CSS2/floats-clear/floats-001.xht
 css/CSS2/floats-clear/floats-002.xht
 css/CSS2/floats-clear/floats-003.xht
 css/CSS2/floats-clear/floats-004.xht
 css/CSS2/floats-clear/floats-005.xht
+css/CSS2/floats-clear/floats-006.xht
 css/CSS2/floats-clear/floats-007.xht
 css/CSS2/floats-clear/floats-008.xht
 css/CSS2/floats-clear/floats-009.xht
@@ -1038,6 +1040,8 @@ css/CSS2/floats-clear/floats-025.xht
 css/CSS2/floats-clear/floats-026.xht
 css/CSS2/floats-clear/floats-027.xht
 css/CSS2/floats-clear/floats-028.xht
+css/CSS2/floats-clear/floats-029.xht
+css/CSS2/floats-clear/floats-030.xht
 css/CSS2/floats-clear/floats-038.xht
 css/CSS2/floats-clear/floats-039.xht
 css/CSS2/floats-clear/floats-040.xht
@@ -1046,6 +1050,7 @@ css/CSS2/floats-clear/floats-043.xht
 css/CSS2/floats-clear/floats-111.xht
 css/CSS2/floats-clear/floats-112.xht
 css/CSS2/floats-clear/floats-113.xht
+css/CSS2/floats-clear/floats-114.xht
 css/CSS2/floats-clear/floats-115.xht
 css/CSS2/floats-clear/floats-116.xht
 css/CSS2/floats-clear/floats-117.xht
@@ -1102,6 +1107,7 @@ css/CSS2/floats/float-nowrap-1.html
 css/CSS2/floats/float-nowrap-2.html
 css/CSS2/floats/float-nowrap-3.html
 css/CSS2/floats/float-nowrap-4.html
+css/CSS2/floats/float-nowrap-5.html
 css/CSS2/floats/float-nowrap-6.html
 css/CSS2/floats/float-nowrap-9.html
 css/CSS2/floats/float-nowrap-hyphen-rewind-1.html
@@ -1114,6 +1120,7 @@ css/CSS2/floats/floats-placement-001.html
 css/CSS2/floats/floats-placement-002.html
 css/CSS2/floats/floats-placement-004.html
 css/CSS2/floats/floats-placement-006.html
+css/CSS2/floats/floats-placement-007.html
 css/CSS2/floats/floats-placement-008.html
 css/CSS2/floats/floats-placement-vertical-003.xht
 css/CSS2/floats/floats-placement-vertical-004.xht
@@ -2910,6 +2917,7 @@ css/CSS2/positioning/position-relative-037.xht
 css/CSS2/positioning/position-relative-038.xht
 css/CSS2/positioning/position-relative-nested-001.xht
 css/CSS2/positioning/position-static-001.xht
+css/CSS2/positioning/positioning-float-001.xht
 css/CSS2/positioning/positioning-float-002.xht
 css/CSS2/positioning/relpos-calcs-001.xht
 css/CSS2/positioning/relpos-calcs-002.xht
@@ -4819,6 +4827,7 @@ css/css-text/line-breaking/line-breaking-008.html
 css/css-text/line-breaking/line-breaking-009.html
 css/css-text/line-breaking/line-breaking-010.html
 css/css-text/line-breaking/line-breaking-011.html
+css/css-text/line-breaking/line-breaking-012.html
 css/css-text/line-breaking/line-breaking-013.html
 css/css-text/line-breaking/line-breaking-014.html
 css/css-text/line-breaking/line-breaking-018.html
