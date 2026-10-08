@@ -1517,6 +1517,7 @@ defmodule Browser.Session do
 
   # gives `cid` the focus; the caret goes to `where`: :end or an index
   defp focus(state, cid, where) do
+    old = state.focus
     state = if state.efocus, do: blur_editor(state), else: state
     control = control(state, cid)
     UI.focus_page(state.ui)
@@ -1534,7 +1535,29 @@ defmodule Browser.Session do
       end
 
     state = %{state | focus: cid, caret: caret, menu: nil, fanchor: nil, fdrag: false}
-    if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    state =
+      if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    focus_events(state, old, cid)
+  end
+
+  # `blur` and `focusout` for the control that lost focus, then `focus` and `focusin` for the
+  # one that got it (nil for none)
+  defp focus_events(%{js: nil} = state, _old, _new), do: state
+  defp focus_events(state, same, same), do: state
+
+  defp focus_events(state, old, new) do
+    init = %{bubbles: false, cancelable: false}
+    up = %{bubbles: true, cancelable: false}
+
+    steps =
+      if(old, do: [{old, "blur", init}, {old, "focusout", up}], else: []) ++
+        if new, do: [{new, "focus", init}, {new, "focusin", up}], else: []
+
+    Enum.reduce(steps, state, fn {cid, type, init}, state ->
+      state |> js_event({:control, cid}, type, init) |> elem(0)
+    end)
   end
 
   # a script gave the control with element number `nid` the focus (`:blur`: took it away): at
@@ -1566,7 +1589,13 @@ defmodule Browser.Session do
   end
 
   defp blur(state) do
-    state |> stop_blink() |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false}) |> relayout()
+    old = state.focus
+
+    state
+    |> stop_blink()
+    |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false})
+    |> relayout()
+    |> focus_events(old, nil)
   end
 
   defp ensure_visible(state, cid) do

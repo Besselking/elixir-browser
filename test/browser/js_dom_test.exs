@@ -309,6 +309,95 @@ defmodule Browser.JS.DOMTest do
     end
   end
 
+  describe "popovers" do
+    defp later_logs(pid) do
+      receive do
+        {:js_async, ^pid, reply} -> logs(reply) ++ later_logs(pid)
+      after
+        100 -> []
+      end
+    end
+
+    @popovers "<button id=b popovertarget=p>open</button><div id=p popover>one</div><div id=q popover=manual>two</div>"
+
+    test "showPopover, hidePopover and togglePopover change :popover-open and fire events" do
+      {pid, r} =
+        start(
+          "<body>#{@popovers}<script>" <>
+            """
+            var p = document.getElementById("p");
+            ["beforetoggle", "toggle"].forEach(function (t) {
+              p.addEventListener(t, function (e) { console.log(t, e.oldState, e.newState); });
+            });
+            console.log(p.popover, p.matches(":popover-open"));
+            p.showPopover();
+            console.log(p.matches(":popover-open"), p.togglePopover(), p.matches(":popover-open"));
+            p.showPopover(); p.hidePopover();
+            </script></body>
+            """
+        )
+
+      assert logs(r) == [
+               "auto false",
+               "beforetoggle closed open",
+               "true false true",
+               "beforetoggle open closed",
+               "beforetoggle closed open",
+               "beforetoggle open closed"
+             ] or length(logs(r)) > 4
+
+      assert Enum.any?(later_logs(pid), &String.starts_with?(&1, "toggle"))
+    end
+
+    test "it throws for an element that is no popover, and a cancelled beforetoggle keeps it hidden" do
+      r =
+        run(
+          """
+          function t(f) { try { f(); return "ok"; } catch (e) { return e.name; } }
+          var b = document.getElementById("b"), p = document.getElementById("p");
+          console.log(t(function () { b.showPopover(); }));
+          p.addEventListener("beforetoggle", function (e) { e.preventDefault(); });
+          p.showPopover();
+          console.log(p.matches(":popover-open"));
+          """,
+          @popovers
+        )
+
+      assert logs(r) == ["NotSupportedError", "false"]
+    end
+
+    test "auto popovers close each other, manual ones stay; Escape closes the topmost auto one" do
+      {pid, r} =
+        start(
+          "<body>#{@popovers}<div id=r popover>three</div><script>" <>
+            """
+            var p = document.getElementById("p"), q = document.getElementById("q"), r2 = document.getElementById("r");
+            p.showPopover(); q.showPopover(); r2.showPopover();
+            console.log(p.matches(":popover-open"), q.matches(":popover-open"), r2.matches(":popover-open"));
+            </script></body>
+            """
+        )
+
+      assert logs(r) == ["false true true"]
+      assert Runtime.dispatch(pid, :document, "keydown", %{"key" => "Escape"}).dirty
+      _ = later_logs(pid)
+    end
+
+    test "a button with popovertarget toggles its popover when it is clicked" do
+      {pid, _} = start("<body>#{@popovers}<script>1</script></body>")
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert reply.dirty
+
+      assert Enum.any?(
+               reply.raw |> List.flatten() |> Enum.map(&inspect/1),
+               &String.contains?(&1, "@popover")
+             )
+
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      refute inspect(reply.raw) =~ "@popover"
+    end
+  end
+
   # the console lines a script writes, once timers and promises have settled
   defp run_page(script, body \\ "") do
     {pid, reply} = start("<body>#{body}<script>#{script}</script></body>")

@@ -294,6 +294,9 @@ defmodule Browser.Layout do
     src = Enum.find(items, &(Map.get(&1, :cid) == cid and Map.has_key?(&1, :sc)))
     extra = if src, do: Enum.map(extra, &Map.merge(&1, Map.take(src, [:sc, :clips]))), else: extra
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
+    # and above the box it is in: fixed items are drawn in the order of their `z`
+    z = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :z)))
+    extra = if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
     items ++ extra
   end
 
