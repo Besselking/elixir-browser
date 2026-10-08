@@ -966,7 +966,8 @@ defmodule Browser.Layout do
         end
 
       fit? =
-        (c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]) or kw?(c["max-width"])) and
+        (c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]) or kw?(c["max-width"]) or
+           kw?(c["min-width"])) and
           kind in [:block, :flex, :grid]
 
       # laying a flex or grid container out at width 1 does not give its min-content width
@@ -1789,6 +1790,9 @@ defmodule Browser.Layout do
       root: tag == "html",
       min: num(c["min-height"]),
       max: num(c["max-height"]),
+      # (`min-height: max-content` and its kind: the height of the content)
+      minc: c["min-height"] == :fit,
+      maxc: c["max-height"] == :fit,
       maxpct: pct_of(c["max-height"]),
       minpct: pct_of(c["min-height"]),
       clip: clips?(c),
@@ -1947,9 +1951,12 @@ defmodule Browser.Layout do
           state
       end)
 
+    spec = grid_spec(tag, c)
+
     case Enum.reverse(items) do
-      [] -> acc
-      items -> [{:grid, grid_spec(tag, c), items, style} | acc]
+      # (the rows of an empty grid still take their room)
+      [] when spec.rows == [] -> acc
+      items -> [{:grid, spec, items, style} | acc]
     end
   end
 
@@ -4285,6 +4292,8 @@ defmodule Browser.Layout do
     used = if o.h, do: inner.(o.h), else: ratio_height(o, box, content, extra)
     used = if o.max, do: min(used, inner.(o.max)), else: used
     used = if o.min, do: max(used, inner.(o.min)), else: used
+    used = if Map.get(o, :maxc), do: min(used, max(content, 0)), else: used
+    used = if Map.get(o, :minc), do: max(used, max(content, 0)), else: used
     used = round(used)
 
     # (what a scrolling box clips is still there: it scrolls into view)
@@ -5186,11 +5195,21 @@ defmodule Browser.Layout do
   end
 
   # `max-width: min-content` (and the other keywords) clamp by what the content makes of them
-  defp clamp_keyword(width, st, sub, %{maxw: {:kw, kw}} = spec, avail) do
-    min(width, keyword_width(kw, st, sub, spec, avail))
+  defp clamp_keyword(width, st, sub, spec, avail) do
+    width =
+      case spec.maxw do
+        {:kw, kw} -> min(width, keyword_width(kw, st, sub, spec, avail))
+        _ -> width
+      end
+
+    case spec.minw do
+      {:kw, kw} -> max(width, keyword_width(kw, st, sub, spec, avail))
+      _ -> width
+    end
   end
 
-  defp clamp_keyword(width, _st, _sub, _spec, _avail), do: width
+  defp keyword_width({:fitc, limit}, st, sub, spec, avail),
+    do: content_width(st, sub, %{spec | sizing: {:fitc, limit}}, avail)
 
   defp keyword_width(:fit, st, sub, spec, avail),
     do: content_width(st, sub, %{spec | sizing: {:fitc, avail}}, avail)

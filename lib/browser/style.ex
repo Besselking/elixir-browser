@@ -1797,6 +1797,16 @@ defmodule Browser.Style do
               ],
        do: {:ok, {:kw, %{"min-content" => :minc, "max-content" => :maxc}[v] || :fit}}
 
+  defp typed(prop, "fit-content(" <> rest, env, _pc) when prop in ["min-width", "max-width"] do
+    arg = rest |> String.trim_trailing(")") |> String.trim()
+
+    cond do
+      pct = percentage(arg) -> {:ok, {:kw, {:fitc, {:pct, pct}}}}
+      px = length(arg, env) -> {:ok, {:kw, {:fitc, px}}}
+      true -> :skip
+    end
+  end
+
   # stretch: fill the containing block; a block already does, so layout only looks at it for
   # boxes that would otherwise shrink to fit
   defp typed(prop, v, _env, _pc)
@@ -1817,7 +1827,7 @@ defmodule Browser.Style do
   end
 
   defp typed(prop, v, _env, _pc)
-       when prop in ["width", "height", "max-height"] and
+       when prop in ["width", "height", "min-height", "max-height"] and
               v in [
                 "fit-content",
                 "max-content",

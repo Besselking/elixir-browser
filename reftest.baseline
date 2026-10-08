@@ -3818,6 +3818,8 @@ css/css-flexbox/flex-grow-008.html
 css/css-flexbox/flex-height-min-content.html
 css/css-flexbox/flex-inline.html
 css/css-flexbox/flex-item-and-percentage-abspos.html
+css/css-flexbox/flex-item-content-is-min-width-max-content.html
+css/css-flexbox/flex-item-max-height-min-content.html
 css/css-flexbox/flex-item-min-height-min-content-overflow.html
 css/css-flexbox/flex-item-min-height-min-content.html
 css/css-flexbox/flex-item-min-width-min-content.html
@@ -4749,6 +4751,11 @@ css/css-sizing/aspect-ratio/zero-or-infinity-010.html
 css/css-sizing/auto-scrollbar-inside-stf-abspos.html
 css/css-sizing/block-fit-content-as-initial.html
 css/css-sizing/block-size-with-min-or-max-content-1b.html
+css/css-sizing/block-size-with-min-or-max-content-2.html
+css/css-sizing/block-size-with-min-or-max-content-3.html
+css/css-sizing/block-size-with-min-or-max-content-4.html
+css/css-sizing/block-size-with-min-or-max-content-5.html
+css/css-sizing/block-size-with-min-or-max-content-table-1b.html
 css/css-sizing/border-box-and-max-content-001.html
 css/css-sizing/border-box-and-max-content-002.html
 css/css-sizing/border-box-and-max-content-003.html
@@ -4814,10 +4821,18 @@ css/css-sizing/fit-content-length-percentage-003.html
 css/css-sizing/fit-content-length-percentage-004.html
 css/css-sizing/fit-content-length-percentage-005.html
 css/css-sizing/fit-content-length-percentage-006.html
+css/css-sizing/fit-content-length-percentage-007.html
+css/css-sizing/fit-content-length-percentage-008.html
+css/css-sizing/fit-content-length-percentage-009.html
+css/css-sizing/fit-content-length-percentage-010.html
 css/css-sizing/fit-content-length-percentage-011.html
+css/css-sizing/fit-content-length-percentage-012.html
 css/css-sizing/fit-content-length-percentage-014.html
+css/css-sizing/fit-content-length-percentage-016.html
 css/css-sizing/fit-content-max-inline-size.tentative.html
+css/css-sizing/fit-content-min-inline-size.html
 css/css-sizing/grid-item-image-percentage-min-height-computes-as-0.html
+css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-1.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2b.html
 css/css-sizing/image-max-width-and-height-behaves-as-auto.html
@@ -4839,6 +4854,7 @@ css/css-sizing/margin-collapse-with-indefinite-block-size-003.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-004.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-005.html
 css/css-sizing/min-content-le-max-content.tentative.html
+css/css-sizing/min-content-min-width-000.html
 css/css-sizing/replaced-aspect-ratio-intrinsic-size-001.html
 css/css-sizing/replaced-aspect-ratio-intrinsic-size-002.html
 css/css-sizing/replaced-max-width-with-height-fit-content.html

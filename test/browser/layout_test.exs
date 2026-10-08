@@ -6287,6 +6287,32 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "keyword sizes" do
+    test "min-height: max-content is the height of the content" do
+      html =
+        ~s|<div style="background:green;width:50px;height:0;min-height:max-content"><div style="height:30px"></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 30}, &1))
+    end
+
+    test "min-width: fit-content(<length>) widens a narrow block up to the length" do
+      html =
+        ~s|<div style="background:green;width:10px;min-width:fit-content(100px)"><span style="display:inline-block;width:60px;height:5px"></span> <span style="display:inline-block;width:60px;height:5px"></span></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
+    end
+
+    test "an empty grid keeps its rows" do
+      html =
+        ~s|<div style="background:green;display:grid;grid-template-rows:40px;width:50px"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 40}, &1))
+    end
+  end
+
   describe "grid rows" do
     test "explicit rows have their size, fr rows share the height" do
       html =
