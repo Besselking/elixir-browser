@@ -6287,6 +6287,43 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "grid rows" do
+    test "explicit rows have their size, fr rows share the height" do
+      html =
+        ~s|<div style="display:grid;height:100px;grid-template-rows:20px 1fr 1fr"><div style="background:red"></div><div style="background:green"></div><div style="background:blue"></div></div>|
+
+      rects = for %{type: :rect} = r <- laid_out(html), do: {r.color, r.h}
+      assert {{255, 0, 0}, 20} in rects
+      assert {{0, 128, 0}, 40} in rects
+      assert {{0, 0, 255}, 40} in rects
+    end
+
+    test "an auto row stretches to the height of the container" do
+      html = ~s|<div style="display:grid;height:70px"><div style="background:green"></div></div>|
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 70}, &1))
+    end
+
+    test "grid-template gives rows and columns" do
+      html =
+        ~s|<div style="display:grid;grid-template:30px / 50px"><div style="background:green"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, h: 30, w: 50}, &1)
+             )
+    end
+
+    test "an item with a ratio takes its width from a row it stretches across" do
+      html =
+        ~s|<div style="display:grid;grid-template:40px / 200px"><div style="aspect-ratio:1/1;align-self:stretch;background:green"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, h: 40, w: 40}, &1)
+             )
+    end
+  end
+
   describe "column geometry" do
     test "column edges are rounded from their exact positions, so neighbours still touch" do
       html =

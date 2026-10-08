@@ -6358,11 +6358,29 @@ defmodule Browser.Layout do
 
   # ── grid ─────────────────────────────────────────────────────────────────────────────────
 
-  defp grid_spec(_tag, c) do
+  # the content height of a grid container that has a height of its own
+  defp grid_height(tag, c) do
+    box = box(tag, c)
+    {bt, _br, bb, _bl} = box.bw
+    vextra = if c["box-sizing"] == "border-box", do: box.pt + box.pb + bt + bb, else: 0
+
+    case num(c["height"]) || num(c["min-height"]) do
+      n when is_number(n) -> max(n - vextra, 0)
+      _ -> nil
+    end
+  end
+
+  defp grid_spec(tag, c) do
     fs = if is_number(c["font-size"]), do: c["font-size"], else: 16.0
 
     %{
       tracks: grid_tracks(c["grid-template-columns"], fs),
+      rows: grid_tracks(c["grid-template-rows"], fs),
+      auto_row: c["grid-auto-rows"] |> grid_tracks(fs) |> List.first({:auto}),
+      content: c["align-content"] || "normal",
+      align_set: c["align-items"] == "stretch",
+      justify_set: c["justify-items"] == "stretch",
+      height: grid_height(tag, c),
       col_gap: num(c["column-gap"]) || 0.0,
       row_gap: num(c["row-gap"]) || 0.0,
       align: c["align-items"] || "stretch",
@@ -6545,12 +6563,14 @@ defmodule Browser.Layout do
     xs = sizes |> Enum.scan(0, fn w, x -> x + w + gap end) |> then(&[0 | Enum.drop(&1, -1)])
     width = Enum.sum(sizes) + gap * (ncols - 1)
 
-    rows = placed |> Enum.group_by(& &1.row) |> Enum.sort()
+    groups = Enum.group_by(placed, & &1.row)
+    nrows = max(length(gs.rows), (groups |> Map.keys() |> Enum.max(fn -> -1 end)) + 1)
 
-    {laid, y} =
-      Enum.map_reduce(rows, 0, fn {_row, cells}, y ->
+    # every item laid out at the width of its columns: what a row needs is its tallest item
+    rows =
+      for r <- 0..(nrows - 1)//1 do
         sized =
-          Enum.map(cells, fn it ->
+          for it <- Map.get(groups, r, []) do
             span_w = Enum.sum(Enum.slice(sizes, it.col, it.span)) + gap * (it.span - 1)
             room = max(span_w - auto_zero(it.ml) - auto_zero(it.mr), 1)
 
@@ -6572,13 +6592,21 @@ defmodule Browser.Layout do
             w = max(round(w), 1)
             {items, h, _} = layout_atom(st, it.sub, w, it.key)
             Map.merge(it, %{w: w, items: items, h: h, room: room})
-          end)
+          end
 
-        cross = sized |> Enum.map(&(&1.h + &1.mt + &1.mb)) |> Enum.max() |> max(0)
+        natural = sized |> Enum.map(&(&1.h + &1.mt + &1.mb)) |> Enum.max(fn -> 0 end) |> max(0)
+        {sized, natural}
+      end
 
+    heights = grid_row_heights(gs, rows, round(gs.row_gap))
+
+    {laid, y} =
+      rows
+      |> Enum.zip(heights)
+      |> Enum.map_reduce(0, fn {{sized, _natural}, cross}, y ->
         placed_items =
           Enum.flat_map(sized, fn it ->
-            it = flex_stretch(st, it, gs.align, cross)
+            it = grid_stretch(st, it, gs, cross)
             dy = flex_offset(flex_align(it, gs.align), cross - it.mt - it.mb, it.h)
             dx = grid_justify(it, gs, it.room)
             x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
@@ -6589,6 +6617,142 @@ defmodule Browser.Layout do
       end)
 
     {List.flatten(laid), width, max(y - round(gs.row_gap), 0)}
+  end
+
+  # An item that fills its row: stretched taller, or (with a ratio) sized by the axis it stretches
+  # in. A ratio is given up when both sizes are fixed, by stretching or by a length: only
+  # `align-self`/`justify-self: stretch` set on purpose count as stretching for it.
+  defp grid_stretch(st, %{ratio: {r, _}, rebuild: build} = it, gs, cross)
+       when build != nil and is_number(r) do
+    block? = grid_explicit_stretch?(it.align, gs.align_set)
+    inline? = grid_explicit_stretch?(it.gjustify, gs.justify_set)
+    box_h = max(cross - it.mt - it.mb - if(it.sizing == :border, do: 0, else: it.vextra), 0) * 1.0
+
+    cond do
+      it.hpct != nil and inline? ->
+        h =
+          max(
+            it.hpct * (cross - it.mt - it.mb) - if(it.sizing == :border, do: 0, else: it.vextra),
+            0
+          )
+
+        grid_resize(st, it, build.(%{"height" => h * 1.0, "aspect-ratio" => nil}), it.w, h)
+
+      inline? and it.ch != nil and it.width == nil ->
+        w = max(round(it.room), 1)
+
+        grid_resize(
+          st,
+          it,
+          build.(%{"aspect-ratio" => nil, "width" => w * 1.0 - it.extra}),
+          w,
+          :w
+        )
+
+      it.width != nil and block? and it.auto_height? ->
+        grid_resize(st, it, build.(%{"height" => box_h, "aspect-ratio" => nil}), it.w, box_h)
+
+      it.auto_height? and block? and inline? ->
+        grid_resize(st, it, build.(%{"height" => box_h, "aspect-ratio" => nil}), it.w, box_h)
+
+      it.auto_height? and block? and it.width == nil ->
+        w = max(round(box_h * r) + it.extra, 1)
+        grid_resize(st, it, build.(%{"height" => box_h, "width" => w * 1.0 - it.extra}), w, box_h)
+
+      true ->
+        it
+    end
+  end
+
+  defp grid_stretch(st, it, gs, cross) do
+    if it.width == nil or it.ratio == nil or it.rebuild == nil do
+      flex_stretch(st, it, gs.align, cross)
+    else
+      it
+    end
+  end
+
+  defp grid_explicit_stretch?(self, container),
+    do: self == "stretch" or (self in ["auto", nil] and container)
+
+  defp grid_resize(st, it, sub, w, box_h) do
+    {items, h, _} = flex_atom(st, sub, w, {it.key, :grid, w, box_h})
+    %{it | items: items, h: h, w: w}
+  end
+
+  # The height of every row. A row with a size of its own (`px`) has it; `fr` rows share what a
+  # container with a height leaves; with room to spare, the `auto` rows grow into it.
+  defp grid_row_heights(gs, rows, gap) do
+    tracks =
+      for i <- 0..(length(rows) - 1)//1,
+          do: Enum.at(gs.rows, i) || gs.auto_row
+
+    base =
+      Enum.zip(tracks, rows)
+      |> Enum.map(fn {track, {_, natural}} ->
+        case track do
+          {:px, n} ->
+            n * 1.0
+
+          {:minmax, {:px, lo}, {:px, hi}} ->
+            natural |> max(lo) |> min(max(lo, hi)) |> Kernel.*(1.0)
+
+          {:minmax, {:px, lo}, _} ->
+            max(natural, lo) * 1.0
+
+          _ ->
+            natural * 1.0
+        end
+      end)
+
+    gaps = gap * max(length(rows) - 1, 0)
+
+    frac = fn
+      {:fr, f} -> f
+      {:minmax, _, {:fr, f}} -> f
+      _ -> 0
+    end
+
+    flex_total = tracks |> Enum.map(frac) |> Enum.sum()
+
+    auto? = fn
+      {:auto} -> true
+      {:minmax, _, {:auto}} -> true
+      {:minmax, _, {:maxc}} -> true
+      _ -> false
+    end
+
+    cond do
+      gs.height == nil ->
+        base
+
+      flex_total > 0 ->
+        fixed =
+          Enum.zip(tracks, base)
+          |> Enum.filter(&(frac.(elem(&1, 0)) == 0))
+          |> Enum.map(&elem(&1, 1))
+          |> Enum.sum()
+
+        unit = max(gs.height - gaps - fixed, 0) / max(flex_total, 1.0)
+
+        Enum.zip(tracks, base)
+        |> Enum.map(fn {t, b} -> if frac.(t) > 0, do: max(b, frac.(t) * unit), else: b end)
+
+      gs.content in ["stretch", "normal"] and Enum.any?(tracks, auto?) ->
+        free = gs.height - gaps - Enum.sum(base)
+        n = Enum.count(tracks, auto?)
+
+        if free > 0 do
+          Enum.zip(tracks, base)
+          |> Enum.map(fn {t, b} -> if auto?.(t), do: b + free / n, else: b end)
+        else
+          base
+        end
+
+      true ->
+        base
+    end
+    |> Enum.map(&round/1)
   end
 
   defp justify_shrink?(it, gs),
@@ -7181,6 +7345,9 @@ defmodule Browser.Layout do
       sub: build.(%{}),
       key: make_ref(),
       rebuild: if(tag in ~w(img svg), do: nil, else: build),
+      # a picture that a column stretches across takes the width that is left (its height
+      # follows its ratio)
+      restretch: if(tag == "img", do: build, else: nil),
       grow: nonneg(flex_number(c["flex-grow"], 0.0), 0.0),
       shrink: nonneg(flex_number(c["flex-shrink"], 1.0), 1.0),
       basis: len_value(c["flex-basis"], fs),
@@ -7248,9 +7415,14 @@ defmodule Browser.Layout do
 
   defp ratio_item_height(_, _), do: nil
 
-  defp build_flex_item(tag, el, c, attrs, kids, style, extra_props) do
+  defp build_flex_item(tag, _el, c, attrs, kids, style, extra_props) do
     if tag in ~w(img svg) do
-      el |> walk(style, []) |> Enum.reverse()
+      attrs =
+        if extra_props == %{},
+          do: attrs,
+          else: List.keyreplace(attrs, "@computed", 0, {"@computed", Map.merge(c, extra_props)})
+
+      {:element, tag, attrs, kids} |> walk(style, []) |> Enum.reverse()
     else
       own =
         c
@@ -7965,6 +8137,11 @@ defmodule Browser.Layout do
     flex_atom(st, sub, w, {it.key, :hpct})
   end
 
+  # a picture takes the width the row gave it (its height follows its ratio)
+  defp flex_row_atom(st, _cs, %{restretch: build} = it, w)
+       when build != nil and it.grow > 0 and it.ratio != nil,
+       do: flex_atom(st, build.(%{"width" => w - it.extra * 1.0}), w, {it.key, w})
+
   defp flex_row_atom(st, _cs, it, w), do: flex_atom(st, it.sub, w, it.key)
 
   defp flex_column_item(st, cs, it, avail) do
@@ -7984,6 +8161,15 @@ defmodule Browser.Layout do
 
     w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
     w = max(round(w), 1)
+
+    it =
+      if Map.get(it, :restretch) && it.width == nil && align in ["stretch", "normal"] &&
+           not it.fit? && not wrapped? && it.auto_height? do
+        %{it | sub: it.restretch.(%{"width" => w - it.extra * 1.0})}
+      else
+        it
+      end
+
     {items, h, _} = flex_atom(st, it.sub, w, it.key)
 
     x = column_x(cs, it, align, w, avail)

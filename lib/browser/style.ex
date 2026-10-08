@@ -31,7 +31,7 @@ defmodule Browser.Style do
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
             row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
-            grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
+            grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -473,6 +473,31 @@ defmodule Browser.Style do
     if v == "auto" or Regex.match?(~r/\A\+?0*[1-9]\d*\z/, v) or not simple_value?(v),
       do: [decl],
       else: []
+  end
+
+  # `grid-template: <rows> / <columns>` (the form with named areas is not read)
+  defp expand({"grid-template", value, imp}) do
+    v = String.trim(value)
+
+    cond do
+      v in ["none", ""] ->
+        [{"grid-template-rows", "none", imp}, {"grid-template-columns", "none", imp}]
+
+      String.contains?(v, ["\"", "'"]) ->
+        []
+
+      true ->
+        case String.split(v, "/", parts: 2) do
+          [rows, cols] ->
+            [
+              {"grid-template-rows", String.trim(rows), imp},
+              {"grid-template-columns", String.trim(cols), imp}
+            ]
+
+          _ ->
+            []
+        end
+    end
   end
 
   defp expand({"gap", value, imp}) do
