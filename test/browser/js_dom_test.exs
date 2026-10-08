@@ -176,16 +176,50 @@ defmodule Browser.JS.DOMTest do
       assert lines == ["0 false"]
     end
 
-    test "a canvas has no drawing context, a video can be played" do
+    test "a canvas draws rectangles into a PNG, a video can be played" do
       lines =
         run_page("""
         var c = document.createElement("canvas");
-        console.log(c.getContext("2d"));
+        console.log(c.getContext("webgl"), typeof CanvasRenderingContext2D);
+        c.width = 4; c.height = 2;
+        var g = c.getContext("2d");
+        console.log(g === c.getContext("2d"), g.canvas === c);
+        g.fillStyle = "#ff0000";
+        g.fillRect(0, 0, 2, 2);
+        console.log(c.toDataURL("image/png").slice(0, 30));
         var v = document.createElement("video");
         v.play().then(function () { console.log("playing"); });
         """)
 
-      assert lines == ["null", "playing"]
+      assert lines == [
+               "null function",
+               "true true",
+               "data:image/png;base64,iVBORw0K",
+               "playing"
+             ]
+    end
+
+    test "an image given a data URL fires load, or error when it is no image" do
+      # the events come from a timer, so the page reports once all timers have run
+      lines =
+        run_page("""
+        var seen = [];
+        var c = document.createElement("canvas");
+        c.width = 2; c.height = 2;
+        c.getContext("2d").fillRect(0, 0, 2, 2);
+        var good = document.createElement("img");
+        good.onload = function () { seen.push("good load"); };
+        good.onerror = function () { seen.push("good error"); };
+        good.src = c.toDataURL("image/png");
+        var bad = document.createElement("img");
+        bad.onload = function () { seen.push("bad load"); };
+        bad.onerror = function () { seen.push("bad error"); };
+        bad.src = "data:,hello";
+        seen.push("sync");
+        setTimeout(function () { console.log(seen.join(", ")); }, 50);
+        """)
+
+      assert lines == ["sync, good load, bad error"]
     end
 
     test "a promise rejected with nobody listening is reported" do

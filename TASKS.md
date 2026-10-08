@@ -12,3 +12,11 @@
 - [ ] Table API: `createCaption`, `rows`, `tBodies[].insertRow` (tests 29, 49, 50)
 - [ ] `event.initUIEvent` (test 30)
 - [ ] `getComputedStyle(...).whiteSpace` (test 0)
+
+## Canvas (QR code generator page)
+
+- [x] `getContext("2d")` with `fillRect`, `strokeRect`, `clearRect` and `toDataURL` (PNG) in `Browser.Canvas`; the QR code on mb.bes.is/qrcodeGenerator is drawn as an image, not a stretched table
+- [x] `load` / `error` events for images given a `data:` URL
+- [ ] Show a `<canvas>` on the page (it is `display: none` now; pages that show the canvas itself stay blank)
+- [ ] Paths, text, `drawImage`, `getImageData` and `fillStyle` gradients
+- [ ] `load` / `error` events for images with an http(s) URL made by script
