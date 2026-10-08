@@ -210,7 +210,7 @@ defmodule Browser.Wasm.Validator do
     label = 0
 
     frame = %{kind: :func, ins: [], outs: results, height: 0, unreachable: false, label: label}
-    s = %{vals: [], h: 0, ctrls: [frame], out: [], pc: 0, nlabel: 1, labels: %{}}
+    s = %{vals: [], h: 0, ctrls: [frame], out: [], pc: 0, nlabel: 1, labels: %{}, xl: 0}
     s = walk(c, s, body)
     s = end_ctrl(s)
     s = emit(s, {:return, length(results)})
@@ -219,7 +219,7 @@ defmodule Browser.Wasm.Validator do
 
     %{
       nparams: length(params),
-      zeros: Enum.map(locals, &zero/1),
+      zeros: Enum.map(locals, &zero/1) ++ List.duplicate(:null, s.xl),
       nres: length(results),
       code: code
     }
@@ -254,6 +254,7 @@ defmodule Browser.Wasm.Validator do
 
   defp resolve(other, _), do: other
 
+  defp update_top(s, fun), do: %{s | ctrls: [fun.(hd(s.ctrls)) | tl(s.ctrls)]}
   defp emit(s, ins), do: %{s | out: [ins | s.out], pc: s.pc + 1}
   defp push(s, t), do: %{s | vals: [t | s.vals], h: s.h + 1}
   defp push_all(s, ts), do: Enum.reduce(ts, s, &push(&2, &1))
@@ -430,10 +431,97 @@ defmodule Browser.Wasm.Validator do
     {end_l, s} = new_label(s)
     s = emit(s, {:try_table, handlers, length(ins), {:L, end_l}})
     s = push_ctrl(s, :block, ins, outs, l)
+    s = update_top(s, &Map.put(&1, :try, true))
     s = walk(c, s, body)
     s = define(s, end_l)
     s = emit(s, :try_end)
     end_ctrl(s)
+  end
+
+  # the legacy try: a try_table whose handlers sit after the body; each one first stores the
+  # exception in a hidden local, for `rethrow`
+  defp ins(c, s, {:try, bt, body, catches, delegate}) do
+    {ins, outs} = blocktype(c, bt)
+
+    for {t, _} <- catches, t != :all, t >= tuple_size(c.tags), do: err("unknown tag")
+
+    if delegate != nil and delegate >= length(s.ctrls), do: err("unknown label")
+
+    skip =
+      if delegate, do: s.ctrls |> Enum.take(delegate) |> Enum.count(&Map.get(&1, :try)), else: 0
+
+    s = pop_all(s, ins)
+    {l, s} = new_label(s)
+    {end_l, s} = new_label(s)
+    clauses = if delegate, do: [{:delegate, nil}], else: catches
+    {hlabels, s} = Enum.map_reduce(clauses, s, fn _, s -> new_label(s) end)
+
+    params =
+      for {t, _} <- clauses,
+          do: if(t in [:all, :delegate], do: [], else: elem(elem(c.tags, t), 0))
+
+    handlers =
+      for {{t, _}, hl, ps} <- Enum.zip([clauses, hlabels, params]) do
+        {if(t == :delegate, do: :all, else: t), true, {:L, hl, length(ps) + 1, 0}}
+      end
+
+    hidden = tuple_size(c.locals) + s.xl
+    s = if catches == [], do: s, else: %{s | xl: s.xl + 1}
+
+    s = emit(s, {:try_table, handlers, length(ins), {:L, end_l}})
+    s = push_ctrl(s, :block, ins, outs, l)
+    s = update_top(s, &Map.put(&1, :try, true))
+    s = walk(c, s, body)
+    s = define(s, end_l)
+    s = emit(s, :try_end)
+
+    cond do
+      clauses == [] ->
+        end_ctrl(s)
+
+      delegate ->
+        s = s |> check_end() |> emit({:jump, {:L, l}}) |> define(hd(hlabels))
+        s = emit(s, {:throw_ref_skip, skip})
+        s = push_all(s, outs)
+        end_ctrl(s)
+
+      true ->
+        s = s |> check_end() |> emit({:jump, {:L, l}})
+        last = length(clauses) - 1
+
+        clauses
+        |> Enum.zip(hlabels)
+        |> Enum.zip(params)
+        |> Enum.with_index()
+        |> Enum.reduce(s, fn {{{{_, hbody}, hl}, ps}, i}, s ->
+          s = define(s, hl)
+
+          s =
+            update_top(
+              s,
+              &(&1
+                |> Map.put(:try, false)
+                |> Map.put(:unreachable, false)
+                |> Map.put(:catch_local, hidden))
+            )
+
+          s = s |> push_all(ps) |> emit({:lset, hidden})
+          s = walk(c, s, hbody)
+
+          if i == last do
+            end_ctrl(s)
+          else
+            s |> check_end() |> emit({:jump, {:L, l}})
+          end
+        end)
+    end
+  end
+
+  defp ins(_, s, {:rethrow, depth}) do
+    case Map.get(frame(s, depth), :catch_local) do
+      nil -> err("invalid rethrow label")
+      hidden -> s |> emit({:lget, hidden}) |> emit(:throw_ref) |> unreachable()
+    end
   end
 
   defp ins(_, s, :return) do

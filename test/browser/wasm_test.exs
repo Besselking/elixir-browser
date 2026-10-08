@@ -16,6 +16,8 @@ defmodule Browser.WasmTest do
 
   @simd "AGFzbQEAAAABGAVgAn9/AX9gAX8Bf2AAAX9gAAF9YAABewMHBgABAgIDBAUDAQABBywHA21lbQIABGFkZDQAAARzdW04AAEEbWFzawACBHNodWYAAwJmbAAEAXYABQrNAQYQACAA/REgAf0R/a4B/RsDCyUAQQD9DAECAwQFBgcICQoLDA0ODxD9CwQAQQD9AAQA/X39GQcLFgD9DP8A/wAAAAAAAAAAAAAAAID9ZAs7AP0MAAECAwQFBgcICQoLDA0OD/0MEBESExQVFhcYGRobHB0eH/0NHx4dHAAAAAAAAAAAAAAAAP0bAAssAP0MAADAPwAAIEAAAGBAAACQQP0MAACAPwAAgD8AAIA/AACAP/3kAf0fAgsUAP0MAQAAAAIAAAADAAAABAAAAAs="
 
+  @legacy "AGFzbQEAAAABDQNgAX8AYAAAYAF/AX8DBQQCAgICDQUCAAAAAQceAwVjYXRjaAABB3JldGhyb3cAAghkZWxlZ2F0ZQADClIEBgAgAAgACxcBAX9BBSEBBn8gABAABwAgAWoZQX8LCxcABn8GfyAAEAAHABoJAAsHAEHkAGoLCxkABn8GfwZ/IAAQABgBGUF/CwcAQegHagsL"
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -126,6 +128,13 @@ defmodule Browser.WasmTest do
     call(i, "storeB", [0, 9])
     assert call(i, "loadA", [0]) == [?A]
     assert call(i, "sizeB", []) == [1]
+  end
+
+  test "legacy try, catch, rethrow and delegate" do
+    i = inst(@legacy)
+    assert call(i, "catch", [7]) == [12]
+    assert call(i, "rethrow", [3]) == [103]
+    assert call(i, "delegate", [4]) == [1004]
   end
 
   test "SIMD" do

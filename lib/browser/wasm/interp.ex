@@ -145,12 +145,19 @@ defmodule Browser.Wasm.Interp do
           _ -> trap("null exception reference")
         end
 
+      {:throw_ref_skip, n} ->
+        [{:exn, tag, vals} | _] = stack
+        raise_exc_skip({:wasm_exception, tag, vals}, n, inst, locals)
+
       {:try_table, handlers, np, hi} ->
         nested = %{inst | tr: {pc + 1, hi}}
 
         case run(code, pc + 1, stack, locals, nested, depth) do
           {:__exit, to, st, locals2} ->
             go(code, to, st, locals2, inst, depth)
+
+          {:__exc_skip, n, exc, locals2} ->
+            raise_exc_skip(exc, n - 1, inst, locals2)
 
           {:__exc, {:wasm_exception, tag, vals} = exc, locals2} ->
             case find_handler(handlers, inst, tag) do
@@ -244,6 +251,11 @@ defmodule Browser.Wasm.Interp do
   catch
     :throw, {:wasm_exception, _, _} = exc -> {:__exc, exc, locals}
   end
+
+  # a delegate: skip the next `n` enclosing try blocks
+  defp raise_exc_skip(exc, 0, inst, locals), do: raise_exc(exc, inst, locals)
+  defp raise_exc_skip(exc, _, %{tr: false}, _), do: throw(exc)
+  defp raise_exc_skip(exc, n, _, locals), do: {:__exc_skip, n, exc, locals}
 
   defp raise_exc(exc, %{tr: false}, _), do: throw(exc)
   defp raise_exc(exc, _, locals), do: {:__exc, exc, locals}

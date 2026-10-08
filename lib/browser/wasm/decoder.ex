@@ -414,6 +414,12 @@ defmodule Browser.Wasm.Decoder do
   defp seq(<<>>, _), do: fail("unexpected end")
   defp seq(<<0x0B, r::binary>>, acc), do: {Enum.reverse(acc), :end, r}
   defp seq(<<0x05, r::binary>>, acc), do: {Enum.reverse(acc), :else, r}
+  defp seq(<<0x19, r::binary>>, acc), do: {Enum.reverse(acc), :catch_all, r}
+
+  defp seq(<<op, r::binary>>, acc) when op in [0x07, 0x18] do
+    {i, r} = u32(r)
+    {Enum.reverse(acc), {if(op == 0x07, do: :catch, else: :delegate), i}, r}
+  end
 
   defp seq(bin, acc) do
     {ins, r} = instr(bin)
@@ -456,8 +462,20 @@ defmodule Browser.Wasm.Decoder do
         {els, term, r} = seq(r, [])
         if term != :end, do: fail("END opcode expected")
         {{:if, bt, then, els}, r}
+
+      _ ->
+        fail("END opcode expected")
     end
   end
+
+  # the legacy exception handling: try, catch, catch_all, delegate
+  defp instr(<<0x06, r::binary>>) do
+    {bt, r} = blocktype(r)
+    {body, term, r} = seq(r, [])
+    legacy_try(bt, body, term, [], r)
+  end
+
+  defp instr(<<0x09, r::binary>>), do: idx(:rethrow, r)
 
   defp instr(<<0x08, r::binary>>), do: idx(:throw, r)
   defp instr(<<0x0A, r::binary>>), do: {:throw_ref, r}
@@ -636,6 +654,25 @@ defmodule Browser.Wasm.Decoder do
   end
 
   defp simd_instr(shape, op, nil, r), do: {{:simd, shape, op, nil}, r}
+
+  defp legacy_try(bt, body, :end, catches, r),
+    do: {{:try, bt, body, Enum.reverse(catches), nil}, r}
+
+  defp legacy_try(bt, body, {:delegate, l}, [], r), do: {{:try, bt, body, [], l}, r}
+  defp legacy_try(_, _, {:delegate, _}, _, _), do: fail("END opcode expected")
+
+  defp legacy_try(bt, body, {:catch, t}, catches, r) do
+    {hbody, term, r} = seq(r, [])
+    legacy_try(bt, body, term, [{t, hbody} | catches], r)
+  end
+
+  defp legacy_try(bt, body, :catch_all, catches, r) do
+    {hbody, term, r} = seq(r, [])
+    if term != :end, do: fail("END opcode expected")
+    {{:try, bt, body, Enum.reverse([{:all, hbody} | catches]), nil}, r}
+  end
+
+  defp legacy_try(_, _, _, _, _), do: fail("END opcode expected")
 
   defp catch_clause(<<k, r::binary>>) when k in [0, 1] do
     {t, r} = u32(r)
