@@ -297,6 +297,8 @@ defmodule Browser.Page do
   def run_js(%__MODULE__{} = page, env, fun \\ fn _pid -> :ok end) do
     if scripts?(page) do
       alias Browser.JS.Runtime
+      # (a closure that named `page` would carry the whole page into the runtime's process)
+      initiator = page.url
 
       info = %{
         url: page.url,
@@ -304,8 +306,8 @@ defmodule Browser.Page do
         width: env.width,
         height: env.height,
         history_before: 0,
-        fetch: &Browser.Fetch.load(&1, initiator: page.url),
-        request: &Browser.Fetch.load(&1, [initiator: page.url] ++ &2)
+        fetch: &Browser.Fetch.load(&1, initiator: initiator),
+        request: &Browser.Fetch.load(&1, [initiator: initiator] ++ &2)
       }
 
       pid = Runtime.start(page.raw, info)

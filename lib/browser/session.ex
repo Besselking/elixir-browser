@@ -1989,14 +1989,18 @@ defmodule Browser.Session do
 
   defp start_js(%{page: page} = state) do
     if Page.scripts?(page) do
+      # (a closure that named `page` would carry the whole page into the runtime's process,
+      # copying every shared style of the tree into its own)
+      initiator = page.url
+
       info = %{
         url: page.url,
         base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
         history_before: length(state.history.back),
-        fetch: &Fetch.load(&1, initiator: page.url),
-        request: &Fetch.load(&1, [initiator: page.url] ++ &2)
+        fetch: &Fetch.load(&1, initiator: initiator),
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
