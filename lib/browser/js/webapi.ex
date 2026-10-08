@@ -578,7 +578,7 @@ defmodule Browser.JS.WebAPI do
     });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
-    // a shadow root here is a fragment that is kept, but not drawn
+    // a shadow root here is a fragment; the page shows it in place of the host's children (see DOM.export)
     addTo(EP, "attachShadow", function (init) {
       var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
@@ -1086,15 +1086,20 @@ defmodule Browser.JS.WebAPI do
 
     // ── constructable style sheets (kept as text; adopting one does not restyle) ──
     function CSSStyleSheet(opts) { this.cssRules = []; this.disabled = false; this.media = opts && opts.media || ""; this.ownerNode = null; }
-    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); };
+    // a shadow root that adopts sheets shows them: the page is told their text whenever they change
+    function sheetText(sh) { return sh.disabled ? "" : sh.cssRules.map(function (r) { return r.cssText; }).join("\n"); }
+    function syncAdopted(root) { try { __set_adopted(root, (root.__adopted || []).map(sheetText)); } catch (e) {} }
+    function changed(sh) { if (sh.__owners) sh.__owners.forEach(syncAdopted); }
+    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); changed(this); };
     CSSStyleSheet.prototype.replace = function (text) { this.replaceSync(text); return Promise.resolve(this); };
     CSSStyleSheet.prototype.insertRule = function (rule, index) {
       var rules = parseRules(String(rule));
       index = index === undefined ? 0 : index;
       this.cssRules.splice(index, 0, rules[0] || { cssText: String(rule) });
+      changed(this);
       return index;
     };
-    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); };
+    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); changed(this); };
     CSSStyleSheet.prototype.addRule = function (sel, body, index) { return this.insertRule(sel + " {" + body + "}", index === undefined ? this.cssRules.length : index); };
     CSSStyleSheet.prototype.removeRule = CSSStyleSheet.prototype.deleteRule;
     Object.defineProperty(CSSStyleSheet.prototype, "rules", { get: function () { return this.cssRules; } });
@@ -1113,6 +1118,17 @@ defmodule Browser.JS.WebAPI do
     g.CSSStyleSheet = CSSStyleSheet;
     var adopted = [];
     Object.defineProperty(document, "adoptedStyleSheets", { get: function () { return adopted; }, set: function (v) { adopted = v; }, configurable: true });
+    Object.defineProperty(Object.getPrototypeOf(document.createDocumentFragment()), "adoptedStyleSheets", {
+      get: function () { return this.__adopted || (this.__adopted = []); },
+      set: function (v) {
+        var list = Array.prototype.slice.call(v || []);
+        this.__adopted = list;
+        var me = this;
+        list.forEach(function (sh) { if (sh && sh.cssRules) { var o = sh.__owners || (sh.__owners = []); if (o.indexOf(me) < 0) o.push(me); } });
+        syncAdopted(this);
+      },
+      configurable: true
+    });
 
     // V8's stack trace API, which libraries call when they define an error class
     if (typeof Error.captureStackTrace !== "function") {

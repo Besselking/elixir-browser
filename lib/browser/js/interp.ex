@@ -172,6 +172,10 @@ defmodule Browser.JS.Interp do
     frames =
       Process.get(:js_stack, [])
       |> Enum.take(12)
+      |> Enum.map(fn
+        {:method, name} -> name
+        name -> name
+      end)
       |> Enum.map(fn name ->
         "\n    at " <> if(is_binary(name) and name != "", do: name, else: "<anonymous>")
       end)

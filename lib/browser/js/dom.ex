@@ -586,7 +586,7 @@ defmodule Browser.JS.DOM do
 
       _ ->
         inner = ed_host_for(n, host)
-        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n)
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n) ++ shadow_attr(n)
 
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
@@ -616,6 +616,40 @@ defmodule Browser.JS.DOM do
   end
 
   defp with_frame(el, _nid), do: el
+
+  # `data-b-frame` with a scope of its own marks an element that has a shadow root (see
+  # `Browser.Style.scoped_refs/1`); the shadow tree is styled by the sheets in it
+  defp shadow_attr(%{shadow: root}) when root != nil, do: [{"data-b-frame", "s#{root}"}]
+  defp shadow_attr(_), do: []
+
+  defp attr_of(n, name) do
+    case List.keyfind(n.attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  # the children of `host` that its slot called `name` shows
+  defp assigned(host, name) do
+    Enum.filter(node(host).kids, fn k ->
+      case node(k) do
+        %{kind: :text} -> name == ""
+        %{kind: :element} = e -> (attr_of(e, "slot") || "") == name
+        _ -> false
+      end
+    end)
+  end
+
+  # a node of a host shown in a slot keeps the host's styles (see `Browser.CSS.context/8`)
+  defp export_slotted(nid, root, host) do
+    case export(nid, host) do
+      {:element, tag, attrs, kids} ->
+        {:element, tag, attrs ++ [{"data-b-slotted", "s#{root}"}], kids}
+
+      other ->
+        other
+    end
+  end
 
   # the host the children of `n` are in: `n` itself when it makes them editable, else the host
   # `n` is in, unless `contenteditable=false` ends it
@@ -731,9 +765,37 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp export_kids(n, nil), do: Enum.map(n.kids, &export/1)
+  # a host shows its shadow tree, not its own children, which only a `<slot>` in it brings back
+  defp export_kids(%{shadow: root}, host) when root != nil do
+    adopted =
+      case List.keyfind(node(root).internal, "@adopted", 0) do
+        {_, texts} -> for t <- texts, do: {:element, "style", [], [{:text, t}]}
+        nil -> []
+      end
 
-  defp export_kids(n, host) do
+    adopted ++ Enum.map(node(root).kids, &export(&1, host))
+  end
+
+  defp export_kids(%{tag: "slot"} = n, host) do
+    top = top_of(n.id)
+
+    case node(top) do
+      %{kind: :fragment, shost: h} when h != nil ->
+        case assigned(h, attr_of(n, "name") || "") do
+          [] -> export_plain_kids(n, host)
+          nodes -> Enum.map(nodes, &export_slotted(&1, top, host))
+        end
+
+      _ ->
+        export_plain_kids(n, host)
+    end
+  end
+
+  defp export_kids(n, host), do: export_plain_kids(n, host)
+
+  defp export_plain_kids(n, nil), do: Enum.map(n.kids, &export/1)
+
+  defp export_plain_kids(n, host) do
     Enum.flat_map(n.kids, fn k ->
       case node(k) do
         %{kind: :text} -> ed_text(k, host)
@@ -953,6 +1015,8 @@ defmodule Browser.JS.DOM do
 
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
+    # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
   end
@@ -976,8 +1040,8 @@ defmodule Browser.JS.DOM do
 
     case List.keyfind(n.internal, "@nid", 0) do
       {_, id} ->
-        case st().rects do
-          %{^id => {x, y, w, h}} -> {x, y, w, h}
+        case rects_here() do
+          %{^id => {x, y, w, h}} -> frame_relative({x, y, w, h})
           _ -> inherited_rect(n.parent)
         end
 
@@ -986,7 +1050,25 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  # (a frame is not laid out: its elements are as wide as the frame, and have no height)
+  # the boxes the layout made: for a frame those of the page, whose coordinates are the page's
+  defp rects_here do
+    if st().doc == st().main, do: st().rects, else: Process.get(:dom_page_rects, %{})
+  end
+
+  # in a frame, a box is where it is in the frame: the page coordinates less the frame's corner
+  defp frame_relative(rect) do
+    with false <- st().doc == st().main,
+         %{iframe: i} when i != nil <- Map.get(st().meta, st().doc),
+         {_, id} <- List.keyfind(node(i).internal, "@nid", 0),
+         %{^id => {fx, fy, _, _}} <- Process.get(:dom_page_rects, %{}) do
+      {x, y, w, h} = rect
+      {x - fx, y - fy, w, h}
+    else
+      _ -> rect
+    end
+  end
+
+  # (a frame that was not laid out yet: its elements are as wide as the frame, with no height)
   defp inherited_rect(nil) do
     if st().doc == st().main,
       do: {0.0, 0.0, 0.0, 0.0},
@@ -1750,6 +1832,9 @@ defmodule Browser.JS.DOM do
       "content" when n.tag == "template" ->
         {:ok, wrap(template_content(n.id))}
 
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        {:ok, canvas_size(n, k)}
+
       "contentWindow" when n.tag == "iframe" ->
         {:ok, with(d when d != nil <- frame_doc_of(n.id), do: window_host_of(d)) || :null}
 
@@ -1956,6 +2041,11 @@ defmodule Browser.JS.DOM do
     case key do
       "id" ->
         set_attr(nid, "id", to_str(v))
+        :ok
+
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        num = to_num_or_zero(v)
+        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
         :ok
 
       "className" ->
@@ -4070,6 +4160,22 @@ defmodule Browser.JS.DOM do
       end)
     )
 
+    # the style sheets a shadow root adopts, as text (they apply inside the shadow tree)
+    Interp.declare(
+      scope,
+      "__set_adopted",
+      native("__set_adopted", fn _, [root, list | _] ->
+        r = nid_of(root)
+        texts = if array?(list), do: Enum.map(array_list(list), &to_str/1), else: []
+
+        update_node(r, fn n ->
+          %{n | internal: List.keystore(n.internal, "@adopted", 0, {"@adopted", texts})}
+        end)
+
+        :undefined
+      end)
+    )
+
     Interp.declare(scope, "__cur_doc", native("__cur_doc", fn _, _ -> wrap(st().doc) end))
     Interp.declare(scope, "__cur_loc", native("__cur_loc", fn _, _ -> loc_host() end))
     :ok
@@ -4132,6 +4238,22 @@ defmodule Browser.JS.DOM do
         %Browser.Canvas{w: ^w, h: ^h} = surface -> surface
         _ -> Browser.Canvas.new(w, h)
       end
+    end
+  end
+
+  # `canvas.width` and `.height`: the attribute as a number, else 300 by 150
+  defp canvas_size(n, name) do
+    default = if name == "width", do: 300, else: 150
+
+    case get_attr(n, name) do
+      v when is_binary(v) ->
+        case Integer.parse(String.trim(v)) do
+          {i, _} when i >= 0 -> i * 1.0
+          _ -> default * 1.0
+        end
+
+      _ ->
+        default * 1.0
     end
   end
 
