@@ -21,6 +21,23 @@ defmodule Browser.JS.GC do
   @doc "Switches the collector on for this process."
   def enable, do: Process.put(:js_gc_at, @min_collect)
 
+  # The Erlang collector copies everything alive twice: out of a full young heap, then into the old
+  # heap. A young heap that is small next to what is alive makes that happen often, and what dies a
+  # little after it was made gets copied as well. So the young heap grows with the process, to at
+  # most a part of its size (never down, and never past @max_young words).
+  @min_young 2_000_000
+  @max_young 16_000_000
+
+  defp tune_young_heap do
+    {:total_heap_size, words} = Process.info(self(), :total_heap_size)
+    target = words |> div(2) |> max(@min_young) |> min(@max_young)
+
+    if target > Process.get(:js_young, @min_young) * 5 / 4 do
+      Process.put(:js_young, target)
+      :erlang.process_flag(:min_heap_size, target)
+    end
+  end
+
   @doc "Collects when the heap has grown past the threshold; cheap otherwise."
   def maybe_collect do
     case Process.get(:js_gc_at) do
@@ -28,6 +45,7 @@ defmodule Browser.JS.GC do
         :ok
 
       at ->
+        tune_young_heap()
         if Browser.JS.Interp.heap_size() > at, do: collect(), else: :ok
     end
   end

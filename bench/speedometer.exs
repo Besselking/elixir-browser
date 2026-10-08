@@ -88,7 +88,10 @@ gc_tracer =
               Process.put(:last_info, info)
               tr.(tr, ts, minor, major, nmin, nmaj)
 
-            {:trace_ts, _, :gc_minor_end, _, ts} ->
+            {:trace_ts, _, :gc_minor_end, info, ts} ->
+              if System.get_env("GCDETAIL") && diff.(ts, start) > 30_000,
+                do: IO.puts("minor #{div(diff.(ts, start), 1000)} ms at #{div(diff.(ts, t0_us), 1000)} #{inspect(Keyword.take(info, [:heap_size, :old_heap_size, :recent_size, :mbuf_size, :bin_vheap_size]))}")
+
               tr.(tr, nil, minor + diff.(ts, start), major, nmin + 1, nmaj)
 
             {:trace_ts, _, :gc_major_end, info, ts} ->
