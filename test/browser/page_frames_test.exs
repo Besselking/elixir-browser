@@ -44,4 +44,24 @@ defmodule Browser.PageFramesTest do
     assert [outer, _] = paragraphs(page.pruned)
     assert outer["margin-left"] == 40.0
   end
+
+  defp iframes(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &iframes/1)
+
+  defp iframes({:element, "iframe", attrs, _}), do: [Map.new(attrs)["@computed"]]
+  defp iframes({:element, _, _, kids}), do: iframes(kids)
+  defp iframes(_), do: []
+
+  test "a frame scrolls its document, unless it says scrolling=no" do
+    env = Browser.Style.default_env()
+
+    html = """
+    <body><iframe id=a srcdoc="<p>x</p>"></iframe><iframe id=b scrolling=no srcdoc="<p>y</p>"></iframe>
+    <script>document.title = "t"</script></body>
+    """
+
+    page = "file:///t.html" |> then(&Page.build(html, &1, env)) |> Page.run_js(env)
+    assert [a, b] = iframes(page.pruned)
+    assert a["overflow-y"] == "auto"
+    assert b["overflow-y"] == "hidden"
+  end
 end
