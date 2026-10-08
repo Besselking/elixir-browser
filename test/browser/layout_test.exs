@@ -5270,6 +5270,14 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{47, 0, 10, 5}, {104, 0, 50, 5}]
     end
 
+    test "in a right-to-left column, flex-start items sit at the right" do
+      html = """
+      <div style="display:flex;flex-direction:column;direction:rtl;width:100px;align-items:flex-start"><div style="width:30px;height:5px;background:red"></div></div>
+      """
+
+      assert flex_rects(html) == [{70, 0, 30, 5}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

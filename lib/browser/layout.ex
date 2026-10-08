@@ -5820,6 +5820,7 @@ defmodule Browser.Layout do
       row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
+      rtl: c["direction"] == "rtl" and c["flex-wrap"] not in ["wrap", "wrap-reverse"],
       hpct: pct_of(c["height"]),
       hdef: inner.(num(c["height"])) != nil,
       hx: vextra,
@@ -6618,7 +6619,8 @@ defmodule Browser.Layout do
         ml == :auto and mr == :auto -> round((avail - w) / 2)
         ml == :auto -> avail - w - mr
         align in ["center"] -> round((avail - w) / 2)
-        align in ["flex-end", "end"] -> avail - w - mr
+        align in ["flex-end", "end"] -> if cs.rtl, do: ml, else: avail - w - mr
+        cs.rtl -> avail - w - mr
         true -> ml
       end
 
