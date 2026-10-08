@@ -35,4 +35,13 @@ defmodule Browser.TabStripTest do
     assert elem(dark.strip, 0) < 40
     assert dark.text == {230, 230, 230}
   end
+
+  test "index_at is the tab under x, clamped to the ends" do
+    [{x0, _}, {x1, w1}, {x2, _}] = TabStrip.layout(3, 960)
+    assert 0 == TabStrip.index_at(3, 960, 0)
+    assert 0 == TabStrip.index_at(3, 960, x0 + 5)
+    assert 1 == TabStrip.index_at(3, 960, x1 + w1 - 1)
+    assert 2 == TabStrip.index_at(3, 960, x2 + 5)
+    assert 2 == TabStrip.index_at(3, 960, 5000)
+  end
 end

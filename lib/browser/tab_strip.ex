@@ -56,6 +56,16 @@ defmodule Browser.TabStrip do
 
   def hit(_count, _width, _x, _y), do: nil
 
+  @doc "The index of the tab `x` is over (the nearest one beyond either end), for dragging."
+  def index_at(count, width, x) do
+    tabs = layout(count, width)
+
+    case Enum.find_index(tabs, fn {tx, tw} -> x < tx + tw end) do
+      nil -> count - 1
+      i -> i
+    end
+  end
+
   @doc "Cuts `title` to what a tab can show."
   def clip(title) do
     title = title |> to_string() |> String.replace(~r/\s+/, " ")

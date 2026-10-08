@@ -10,7 +10,7 @@ defmodule Browser.JS.DOM do
   turns it back into that shape, after which the page is rebuilt (see `Browser.Page.from_raw/2`).
 
   Things the script did that reach beyond the tree are queued in the outbox for the session:
-  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:reload}`, `{:submit, form}`.
+  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:open_tab, url}`, `{:reload}`, `{:submit, form}`.
   """
 
   import Kernel, except: [node: 1]
@@ -3681,6 +3681,13 @@ defmodule Browser.JS.DOM do
     for name <- ~w(alert focus blur print) do
       def_fn(win, name, fn _this, _ -> :undefined end)
     end
+
+    # `window.open` opens the address in a new tab; there is no window to hand back
+    def_fn(win, "open", fn _this, args ->
+      url = to_str(arg(args, 0))
+      if url not in ["", "about:blank"], do: out({:open_tab, resolve_url(url)})
+      :null
+    end)
 
     def_fn(win, "scrollTo", fn _this, args -> scroll_args(args, false) end)
     def_fn(win, "scroll", fn _this, args -> scroll_args(args, false) end)

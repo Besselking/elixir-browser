@@ -119,6 +119,8 @@ defmodule Browser.UI do
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
     :wxPanel.connect(tabs, :left_down)
     :wxPanel.connect(tabs, :middle_down)
+    :wxPanel.connect(tabs, :left_up)
+    :wxPanel.connect(tabs, :motion)
     :wxPanel.connect(tabs, :paint, callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs) end)
     :wxPanel.connect(panel, :left_down)
     :wxPanel.connect(panel, :middle_down)
@@ -1484,11 +1486,16 @@ defmodule Browser.UI do
   end
 
   @doc "The href of the first link in the index `links` (see `links/1`) at page position `{x, y}`, or nil."
-  def link_at(links, x, y) do
+  def link_at(links, x, y), do: with(%{href: href} <- link_item_at(links, x, y), do: href)
+
+  @doc "Whether the link at `{x, y}` asks for a new tab (`target=\"_blank\"`)."
+  def link_blank?(links, x, y), do: match?(%{blank: true}, link_item_at(links, x, y))
+
+  defp link_item_at(links, x, y) do
     links
     |> Map.get(band(y), [])
-    |> Enum.find_value(fn it ->
-      if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: it.href
+    |> Enum.find(fn it ->
+      inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y)
     end)
   end
 
