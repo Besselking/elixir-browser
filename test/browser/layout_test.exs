@@ -5278,6 +5278,94 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{70, 0, 30, 5}]
     end
 
+    test "min-width:auto stops shrinking at the smaller of the width and the content" do
+      item = fn style ->
+        ~s(<div style="display:flex;width:1px"><div style="background:red;#{style}"><div style="width:80px;height:5px"></div></div></div>)
+      end
+
+      width = fn style -> flex_rects(item.(style)) |> hd() |> elem(2) end
+      assert width.("width:50px") == 50
+      assert width.("width:100px") == 80
+      assert width.("flex-basis:100px;max-width:50px") == 50
+      assert width.("width:50px;overflow:hidden") == 1
+    end
+
+    test "an auto top margin takes the free cross space, even with baseline alignment" do
+      html =
+        ~s(<div style="display:flex;align-items:baseline;height:40px"><div style="margin-top:auto;height:10px;background:red">a</div></div>)
+
+      assert [{_, 30, _, 10}] = flex_rects(html)
+    end
+
+    test "a collapsed flex item takes no width but keeps its height, and its gap goes" do
+      html = """
+      <div style="display:flex;gap:10px;width:200px"><div style="width:20px;height:5px;background:red"></div><div style="width:50px;height:30px;visibility:collapse;margin:0 7px"></div><div style="width:20px;height:5px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 5}, {30, 0, 20, 5}]
+      assert Enum.all?(flex_rects(html), fn {_, _, _, h} -> h <= 30 end)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      assert {_, 30} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+    end
+
+    test "a flex item with a height of its own gives percentage children something to resolve against" do
+      html = """
+      <div style="display:flex;flex-direction:column"><div style="width:50px;height:40px"><div style="height:50%;background:green"></div></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 50, 20}]
+    end
+
+    test "min-height on column items: raised in an auto-height column, 0 lets it shrink" do
+      grow =
+        ~s(<div style="display:flex;flex-direction:column;width:50px"><div style="flex:1 0 0px;min-height:40px;background:red"></div></div>)
+
+      assert flex_rects(grow) == [{0, 0, 50, 40}]
+
+      shrink =
+        ~s(<div style="display:flex;flex-direction:column;width:50px;height:30px"><div style="min-height:0;background:red"><div style="height:100px"></div></div></div>)
+
+      assert flex_rects(shrink) == [{0, 0, 50, 30}]
+    end
+
+    test "the lines of a wrapping column are as wide as their items, then share the room left" do
+      html = """
+      <div style="display:flex;flex-flow:column wrap;width:100px;height:50px;gap:10px"><div style="height:20px;background:red"><div style="width:30px"></div></div><div style="height:20px;background:green"><div style="width:20px"></div></div><div style="height:20px;background:blue"><div style="width:10px"></div></div></div>
+      """
+
+      # two lines: 30 and 10 wide, 10 apart; the 50 left over is split between them
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 55, 20}, {0, 30, 55, 20}, {65, 0, 35, 20}]
+    end
+
+    test "flex: 0 0 does not take an item below its automatic minimum width" do
+      html = """
+      <div style="display:flex;width:200px"><div style="flex:0 0;width:50px;background:red"><div style="width:30px;height:5px"></div></div></div>
+      """
+
+      assert [{0, 0, 30, 5}] = flex_rects(html)
+    end
+
+    test "a flex container wider than its parent keeps its width" do
+      html =
+        ~s(<div style="width:100px"><div style="display:flex;width:190px;justify-content:flex-end"><div style="width:90px;height:5px;background:red"></div></div></div>)
+
+      assert flex_rects(html) == [{100, 0, 90, 5}]
+    end
+
+    test "flex-grow factors that add up to less than one take only that share of the room" do
+      html =
+        ~s(<div style="display:flex;width:190px"><div style="width:90px;flex-grow:.1;height:5px;background:red"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 5}]
+    end
+
+    test "an item at its max-width is frozen and the others share the rest" do
+      html =
+        ~s(<div style="display:flex;width:100px"><div style="flex-grow:1;max-width:0;height:5px;background:red"></div><div style="flex-grow:1;height:5px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

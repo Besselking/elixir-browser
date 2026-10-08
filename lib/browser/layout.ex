@@ -1622,7 +1622,7 @@ defmodule Browser.Layout do
           ic = computed(attrs)
 
           cond do
-            hidden?(ic) -> {items, acc}
+            hidden?(ic) and ic["visibility"] != "collapse" -> {items, acc}
             ic["position"] in ["absolute", "fixed"] -> {items, walk(el, style, acc)}
             true -> {[flex_element_item(el, ic, style) | items], acc}
           end
@@ -3444,7 +3444,7 @@ defmodule Browser.Layout do
     left = st.left + fl + ml
     # a negative margin lets the box reach into the space beside it
     rest = beside - ml - box_w
-    rest = if ml0 < 0 or mr0 < 0, do: rest, else: max(rest, 0)
+    rest = if ml0 < 0 or mr0 < 0 or own_width?(o.width), do: rest, else: max(rest, 0)
     x = st.margin + left
 
     id = make_ref()
@@ -6038,6 +6038,12 @@ defmodule Browser.Layout do
       align: "auto",
       order: 0,
       auto_height?: true,
+      scroll?: false,
+      mta: false,
+      mba: false,
+      collapsed: false,
+      minh: nil,
+      hpct: nil,
       fit?: false
     }
   end
@@ -6045,6 +6051,27 @@ defmodule Browser.Layout do
   # A child of a flex container: laid out on its own as a block (like an inline-block),
   # with its horizontal margins and its width taken over by the container.
   defp flex_element_item({:element, tag, attrs, kids} = el, c, style) do
+    # a collapsed item is a strut: no main size, but it still counts for the cross size
+    collapsed? = c["visibility"] == "collapse"
+
+    c =
+      if collapsed?,
+        do:
+          Map.merge(c, %{
+            "width" => 0.0,
+            "min-width" => 0.0,
+            "flex-grow" => "0",
+            "flex-shrink" => "0",
+            "flex-basis" => "auto",
+            "margin-left" => 0.0,
+            "margin-right" => 0.0,
+            "padding-left" => 0.0,
+            "padding-right" => 0.0,
+            "border-left-width" => 0.0,
+            "border-right-width" => 0.0
+          }),
+        else: c
+
     box = box(tag, c)
     {bt, br, bb, bl} = box.bw
     border_box? = c["box-sizing"] == "border-box"
@@ -6081,6 +6108,11 @@ defmodule Browser.Layout do
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
+      collapsed: collapsed?,
+      minh: num(c["min-height"]),
+      scroll?: c["overflow-x"] in ~w(hidden scroll auto),
+      mta: c["margin-top"] == :auto,
+      mba: c["margin-bottom"] == :auto,
       hpct:
         case c["height"] do
           {:pct, f} -> f
@@ -6124,6 +6156,15 @@ defmodule Browser.Layout do
         |> resolve_box_pct(containing_width())
         |> Map.drop(~w(width min-width max-width flex-basis))
         |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
+        # a height the author gave is definite for what is inside
+        |> then(
+          &if(
+            is_number(c["height"]) and c["flex-basis"] != "content" and
+              flex_number(c["flex-grow"], 0.0) == 0.0,
+            do: Map.put(&1, "@definite", true),
+            else: &1
+          )
+        )
         |> Map.merge(extra_props)
 
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
@@ -6135,6 +6176,8 @@ defmodule Browser.Layout do
   end
 
   defp flex_number(v, default) when is_binary(v) do
+    v = if String.starts_with?(v, "."), do: "0" <> v, else: v
+
     case Float.parse(v) do
       {n, ""} -> n
       _ -> default
@@ -6312,12 +6355,34 @@ defmodule Browser.Layout do
   end
 
   defp flex_line(st, cs, line, avail, top, min_cross) do
+    # collapsed items only keep their cross size, they take no part in the main axis
+    {struts, line} = Enum.split_with(line, & &1.collapsed)
+
+    min_cross =
+      Enum.reduce(struts, min_cross, fn it, m ->
+        {_, h, _} = flex_atom(st, it.sub, 0, it.key)
+        max(m, h)
+      end)
+
+    if line == [], do: {[], min_cross}, else: flex_line_live(st, cs, line, avail, top, min_cross)
+  end
+
+  defp flex_line_live(st, cs, line, avail, top, min_cross) do
     n = length(line)
     gaps = cs.col_gap * (n - 1)
     outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     line = flex_resize(st, line, free, avail)
+
+    # an explicit flex-basis below the automatic minimum is raised to it
+    line =
+      Enum.map(line, fn it ->
+        if it.basis != nil and flex_auto_min?(it) and it.hw < flex_min(st, it, avail),
+          do: %{it | hw: flex_min(st, it, avail)},
+          else: it
+      end)
+
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     # auto margins take the free space before justify-content does
@@ -6335,11 +6400,15 @@ defmodule Browser.Layout do
     {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, free * 1.0, n)
 
     # lay every item out at its final width, find the height of the line
-    sized =
-      Enum.map(line, fn it ->
-        w = max(round(it.hw), 0)
+    # (a width is the distance between the rounded edges, so that fractions do not add up)
+    {sized, _} =
+      Enum.map_reduce(line, start, fn it, x ->
+        ix = x + it.ml
+        right = floor(ix + it.hw + 0.5)
+        w = max(right - floor(ix + 0.5), 0)
         {items, h, _base} = flex_atom(st, it.sub, w, it.key)
-        Map.merge(it, %{w: w, items: items, h: h})
+        next = ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)
+        {Map.merge(it, %{w: w, items: items, h: h}), next}
       end)
 
     # items aligned on their baselines hang from the lowest one
@@ -6353,38 +6422,27 @@ defmodule Browser.Layout do
         it = flex_stretch(st, it, cs.align, cross)
 
         dy =
-          if it.boff > 0 or baseline_item?(it, cs.align),
-            do: it.boff,
-            else: flex_offset(flex_align(it, cs.align), cross, it.h)
+          cond do
+            # auto margins take the free space, whatever the alignment
+            it.mta and it.mba -> round(max(cross - it.h, 0) / 2)
+            it.mta -> max(cross - it.h, 0)
+            it.mba -> 0
+            it.boff > 0 or baseline_item?(it, cs.align) -> it.boff
+            true -> flex_offset(flex_align(it, cs.align), cross, it.h)
+          end
 
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
         moved = for item <- it.items, do: move(item, floor(ix + 0.5), top + dy)
-        {moved, floor(ix + 0.5) + it.w + it.mr + cs.col_gap + floor(between + 0.5)}
+        {moved, ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
     {placed, cross}
   end
 
   # grow into free space, or shrink in proportion to the base size
-  defp flex_resize(_st, line, free, avail) when free > 0 do
-    total = line |> Enum.map(& &1.grow) |> Enum.sum()
-
-    if total > 0 do
-      Enum.map(line, fn it ->
-        w = it.hw + free * it.grow / total
-
-        %{
-          it
-          | hw:
-              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail) *
-                1.0
-        }
-      end)
-    else
-      line
-    end
-  end
+  defp flex_resize(_st, line, free, avail) when free > 0,
+    do: flex_grow(line, free, avail, MapSet.new())
 
   # shrinking stops at the min-content width (`min-width: auto`); an item that reaches it is
   # frozen there and the others shrink further
@@ -6395,6 +6453,51 @@ defmodule Browser.Layout do
 
   defp flex_resize(_st, line, _free, _avail), do: line
 
+  # items that reach a max-width are frozen there and the others share what is left
+  defp flex_grow(line, free, avail, frozen) do
+    live = Enum.filter(line, &(&1.grow > 0 and &1.key not in frozen))
+    total = live |> Enum.map(& &1.grow) |> Enum.sum()
+
+    if total > 0 do
+      # (factors that add up to less than 1 only take that share of the room)
+      room = if total < 1, do: free * total, else: free
+
+      clamped =
+        Map.new(live, fn it ->
+          w = it.hw + room * it.grow / total
+          c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
+          {it.key, {w, clamp_width(w, c, avail) * 1.0}}
+        end)
+
+      violating = for it <- live, {w, c} = clamped[it.key], abs(w - c) > 0.001, do: it
+
+      if violating == [] do
+        Enum.map(line, fn it ->
+          case clamped[it.key] do
+            {_, c} -> %{it | hw: c}
+            nil -> it
+          end
+        end)
+      else
+        {_, taken} =
+          Enum.map_reduce(violating, 0.0, fn it, acc ->
+            {_, c} = clamped[it.key]
+            {nil, acc + c - it.hw}
+          end)
+
+        line =
+          Enum.map(line, fn it ->
+            if it in violating, do: %{it | hw: elem(clamped[it.key], 1)}, else: it
+          end)
+
+        frozen = Enum.reduce(violating, frozen, &MapSet.put(&2, &1.key))
+        flex_grow(line, free - taken, avail, frozen)
+      end
+    else
+      line
+    end
+  end
+
   defp flex_shrink(st, line, free, avail) do
     live = Enum.reject(line, & &1.frozen)
     total = live |> Enum.map(&(&1.shrink * &1.hw)) |> Enum.sum()
@@ -6403,7 +6506,8 @@ defmodule Browser.Layout do
       # items whose share would go below their floor are pinned there
       {pinned, _} =
         Enum.split_with(live, fn it ->
-          it.width == nil and it.hw + free * it.shrink * it.hw / total < flex_min(st, it)
+          flex_auto_min?(it) and
+            it.hw + free * it.shrink * it.hw / total < flex_min(st, it, avail)
         end)
 
       if pinned == [] do
@@ -6417,11 +6521,13 @@ defmodule Browser.Layout do
           end
         end)
       else
-        gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it), 0.0))
+        gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it, avail), 0.0))
 
         line =
           Enum.map(line, fn it ->
-            if it in pinned, do: %{it | hw: min(flex_min(st, it), it.hw), frozen: true}, else: it
+            if it in pinned,
+              do: %{it | hw: flex_min(st, it, avail), frozen: true},
+              else: it
           end)
 
         flex_shrink(st, line, free + gained, avail)
@@ -6431,7 +6537,21 @@ defmodule Browser.Layout do
     end
   end
 
-  defp flex_min(st, it), do: shrink_extent(st, it.sub, 1, it.key) * 1.0
+  # `min-width: auto`: the content's min-content width, but not more than a width that is set
+  defp flex_auto_min?(it), do: not it.scroll? and (it.width == nil or it.minw in [nil, :auto])
+
+  defp flex_min(st, it, avail) do
+    content = shrink_extent(st, it.sub, 1, it.key) * 1.0
+    content = if is_number(it.maxw), do: min(content, it.maxw + it.extra * 1.0), else: content
+
+    case it.width do
+      width when width != nil ->
+        min(content, resolve(width, avail) + it.extra * 1.0)
+
+      _ ->
+        content
+    end
+  end
 
   # -> {offset before the first item, extra space between items}
   defp flex_justify(justify, reversed?, free, n) do
@@ -6518,6 +6638,7 @@ defmodule Browser.Layout do
       # a wrapping column breaks into columns when the next item no longer fits the height
       sized = Enum.map(sized, &flex_column_basis(st, &1))
       cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
+      cols = flex_column_stretch(st, cs, cols, avail)
       last = length(cols) - 1
 
       cols =
@@ -6543,6 +6664,44 @@ defmodule Browser.Layout do
     else
       flex_column_place(st, cs, sized)
     end
+  end
+
+  # the lines of a wrapping column share the width that is left (`align-content: stretch`), and
+  # the items that stretch fill their line
+  defp flex_column_stretch(st, cs, cols, avail) do
+    outer = fn it -> it.w + auto_zero(it.ml) + auto_zero(it.mr) end
+    widths = Enum.map(cols, fn col -> col |> Enum.map(outer) |> Enum.max() end)
+    free = avail - Enum.sum(widths) - round(cs.col_gap) * (length(cols) - 1)
+
+    extra =
+      if free > 0 and cs.content in ["stretch", "normal"], do: free / length(cols), else: 0
+
+    cols
+    |> Enum.zip(widths)
+    |> Enum.map(fn {col, width} ->
+      cw = width + extra
+
+      Enum.map(col, fn it ->
+        if flex_align(it, cs.align) in ["stretch", "normal"] and it.width == nil and
+             not it.fit? and it.ml != :auto and it.mr != :auto do
+          w = max(round(cw - auto_zero(it.ml) - auto_zero(it.mr)), 1)
+
+          w =
+            max(
+              round(
+                clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+              ),
+              1
+            )
+
+          {items, h, _} = flex_atom(st, it.sub, w, it.key)
+          it = %{it | w: w, items: items, h: max(h, it.h)}
+          %{it | x: column_x(cs, it, flex_align(it, cs.align), w, round(cw))}
+        else
+          %{it | x: column_x(cs, it, flex_align(it, cs.align), it.w, round(cw))}
+        end
+      end)
+    end)
   end
 
   defp flex_column_break(items, height, gap) do
@@ -6597,16 +6756,30 @@ defmodule Browser.Layout do
 
   defp column_justify(j, _reversed?), do: j
 
+  # where an item sits across a column `avail` wide
+  defp column_x(cs, %{ml: ml, mr: mr}, align, w, avail) do
+    cond do
+      ml == :auto and mr == :auto -> round((avail - w) / 2)
+      ml == :auto -> avail - w - mr
+      align in ["center"] -> round((avail - w) / 2)
+      align in ["flex-end", "end"] -> if cs.rtl, do: ml, else: avail - w - mr
+      cs.rtl -> avail - w - mr
+      true -> ml
+    end
+  end
+
   defp flex_column_item(st, cs, it, avail) do
     ml = it.ml
     mr = it.mr
     room = avail - auto_zero(ml) - auto_zero(mr)
     align = flex_align(it, cs.align)
+    # (in a wrapping column the lines are as wide as their items, and are stretched later)
+    wrapped? = cs.wrap and (cs.height || cs.maxh) != nil
 
     w =
       cond do
         it.width != nil -> resolve(it.width, avail) + it.extra
-        align in ["stretch", "normal"] and not it.fit? -> room
+        align in ["stretch", "normal"] and not it.fit? and not wrapped? -> room
         true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
       end
 
@@ -6614,15 +6787,7 @@ defmodule Browser.Layout do
     w = max(round(w), 1)
     {items, h, _} = flex_atom(st, it.sub, w, it.key)
 
-    x =
-      cond do
-        ml == :auto and mr == :auto -> round((avail - w) / 2)
-        ml == :auto -> avail - w - mr
-        align in ["center"] -> round((avail - w) / 2)
-        align in ["flex-end", "end"] -> if cs.rtl, do: ml, else: avail - w - mr
-        cs.rtl -> avail - w - mr
-        true -> ml
-      end
+    x = column_x(cs, it, align, w, avail)
 
     # an item starts from its `flex-basis` when it has one (a size of the box, margins apart)
     base =
@@ -6686,7 +6851,7 @@ defmodule Browser.Layout do
     more =
       if total > 0 do
         for it <- open,
-            it.shrink > 0 and it.auto_height? and it.h > 0,
+            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil,
             it.base + (free + give) * it.shrink * it.base / total < it.h,
             do: it.key
       else
@@ -6706,6 +6871,12 @@ defmodule Browser.Layout do
       flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
 
     # (an item that cannot flex has a definite size when its container has none)
+    # (a `min-height` of the item is not part of the floor above: it is added back here)
+    floor =
+      if it.minh,
+        do: max(floor, it.minh + if(it.sizing == :border, do: 0, else: it.vextra)),
+        else: floor
+
     flex_column_height(st, it, max(it.base, floor), it.grow == 0 and it.shrink == 0)
   end
 
@@ -6715,13 +6886,37 @@ defmodule Browser.Layout do
     # an item does not go below what its content needs (`min-height: auto`)
     target =
       if it.rebuild != nil and target < it.h - 0.5 do
-        {_, floor, _} =
-          flex_atom(
-            st,
-            it.rebuild.(%{"height" => nil, "min-height" => nil}),
-            it.w,
-            {it.key, :min}
-          )
+        floor =
+          if it.minh do
+            # a `min-height` of its own replaces the automatic minimum
+            it.minh + if(it.sizing == :border, do: 0, else: it.vextra)
+          else
+            {_, floor, _} =
+              flex_atom(
+                st,
+                it.rebuild.(%{"height" => nil, "min-height" => nil}),
+                it.w,
+                {it.key, :min}
+              )
+
+            floor
+          end
+
+        # (a size the item is given caps the automatic minimum)
+        floor =
+          cond do
+            it.minh != nil or it.basis != nil ->
+              floor
+
+            is_number(it.ch) ->
+              min(floor, it.ch + if(it.sizing == :border, do: 0, else: it.vextra))
+
+            it.hpct != nil ->
+              min(floor, it.base)
+
+            true ->
+              floor
+          end
 
         max(target, min(floor, it.h))
       else
