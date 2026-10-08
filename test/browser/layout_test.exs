@@ -2774,6 +2774,19 @@ defmodule Browser.LayoutTest do
       assert at(col, "b").x - at(col, "a").x == 80
     end
 
+    test "a caption keeps its margins and makes the table at least as wide as itself" do
+      html = fn margin ->
+        ~s|<table style="border-spacing:0"><caption style="margin-left:#{margin}px"><div style="width:100px">x</div></caption>| <>
+          ~s|<tr><td style="padding:0">a</td><td style="padding:0">b</td></tr></table>|
+      end
+
+      {with, _} = tbl(html.(30))
+      {without, _} = tbl(html.(0))
+      assert at(with, "x").x - at(without, "x").x == 30
+      # the last column took what the caption needed over the cells
+      assert at(without, "b").x - at(without, "a").x >= 50
+    end
+
     test "a block-wide cell leaves the others as wide as their unbreakable text" do
       {items, _} =
         tbl(

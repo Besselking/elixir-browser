@@ -6992,9 +6992,6 @@ defmodule Browser.Layout do
   end
 
   defp table_caption({:element, tag, attrs, kids}, style) do
-    c = computed(attrs)
-    own = Map.merge(c, %{"margin-left" => 0.0, "margin-right" => 0.0})
-    attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
     {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()
   end
 
@@ -7160,7 +7157,19 @@ defmodule Browser.Layout do
           table_widths(mins, maxs, pcts, max(avail - spacing, 0), exact)
         end
 
-      table_w = if natural?, do: Enum.sum(widths) + spacing, else: avail
+      # (a caption is as wide as the table, so the table is at least as wide as its content wants)
+      {widths, table_w} =
+        if natural? do
+          cap = if model.caption, do: shrink_extent(st, model.caption, @unbounded, nil), else: 0
+          w = Enum.sum(widths) + spacing
+
+          if cap > w,
+            do: {List.update_at(widths, ncols - 1, &(&1 + cap - w)), cap},
+            else: {widths, w}
+        else
+          {widths, avail}
+        end
+
       xs = column_positions(widths, sx)
       span_w = fn col, span -> Enum.sum(Enum.slice(widths, col, span)) + sx * (span - 1) end
 

@@ -1280,6 +1280,7 @@ css/CSS2/margin-padding-clear/margin-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-applies-to-013.xht
 css/CSS2/margin-padding-clear/margin-applies-to-014.xht
+css/CSS2/margin-padding-clear/margin-applies-to-015.xht
 css/CSS2/margin-padding-clear/margin-backgrounds-002.xht
 css/CSS2/margin-padding-clear/margin-backgrounds-003.xht
 css/CSS2/margin-padding-clear/margin-border-padding-001.xht
@@ -1449,6 +1450,7 @@ css/CSS2/margin-padding-clear/margin-left-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-013.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-014.xht
+css/CSS2/margin-padding-clear/margin-left-applies-to-015.xht
 css/CSS2/margin-padding-clear/margin-right-004.xht
 css/CSS2/margin-padding-clear/margin-right-005.xht
 css/CSS2/margin-padding-clear/margin-right-006.xht
@@ -1510,6 +1512,7 @@ css/CSS2/margin-padding-clear/margin-right-applies-to-009.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-013.xht
 css/CSS2/margin-padding-clear/margin-right-applies-to-014.xht
+css/CSS2/margin-padding-clear/margin-right-applies-to-015.xht
 css/CSS2/margin-padding-clear/margin-shorthand-001.xht
 css/CSS2/margin-padding-clear/margin-shorthand-002.xht
 css/CSS2/margin-padding-clear/margin-shorthand-003.xht
@@ -1597,6 +1600,7 @@ css/CSS2/margin-padding-clear/padding-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-applies-to-013.xht
 css/CSS2/margin-padding-clear/padding-applies-to-014.xht
+css/CSS2/margin-padding-clear/padding-applies-to-015.xht
 css/CSS2/margin-padding-clear/padding-background-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-002.xht
@@ -1674,6 +1678,7 @@ css/CSS2/margin-padding-clear/padding-bottom-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-bottom-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-bottom-applies-to-013.xht
 css/CSS2/margin-padding-clear/padding-bottom-applies-to-014.xht
+css/CSS2/margin-padding-clear/padding-bottom-applies-to-015.xht
 css/CSS2/margin-padding-clear/padding-left-001.xht
 css/CSS2/margin-padding-clear/padding-left-002.xht
 css/CSS2/margin-padding-clear/padding-left-003.xht
@@ -1832,6 +1837,7 @@ css/CSS2/margin-padding-clear/padding-right-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-013.xht
 css/CSS2/margin-padding-clear/padding-right-applies-to-014.xht
+css/CSS2/margin-padding-clear/padding-right-applies-to-015.xht
 css/CSS2/margin-padding-clear/padding-shorthand-001.xht
 css/CSS2/margin-padding-clear/padding-shorthand-002.xht
 css/CSS2/margin-padding-clear/padding-shorthand-003.xht
@@ -1912,6 +1918,7 @@ css/CSS2/margin-padding-clear/padding-top-applies-to-009.xht
 css/CSS2/margin-padding-clear/padding-top-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-top-applies-to-013.xht
 css/CSS2/margin-padding-clear/padding-top-applies-to-014.xht
+css/CSS2/margin-padding-clear/padding-top-applies-to-015.xht
 css/CSS2/normal-flow/block-formatting-context-height-001.xht
 css/CSS2/normal-flow/block-formatting-context-height-002.xht
 css/CSS2/normal-flow/block-formatting-context-height-003.xht
