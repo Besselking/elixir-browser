@@ -146,6 +146,8 @@ defmodule Browser.Session do
       tab_drag: nil,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
       closed: [],
+      # the developer console: `%{win, pid, seq, hist, hpos}` once opened (see `open_console/1`)
+      console: nil,
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
       # the host that has focus, the selection the page reported in it, whether the mouse is
       # dragging one out, and the column the caret keeps going up and down
@@ -381,6 +383,21 @@ defmodule Browser.Session do
     System.halt(0)
     {:noreply, state}
   end
+
+  # Develop > Developer Console
+  def handle_info(wx(id: 5200, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, open_console(state)}
+
+  # the console window: its clear button, its input line and the keys of the input line
+  def handle_info(wx(id: 5210, event: wxCommand(type: :command_button_clicked)), state),
+    do: {:noreply, clear_console(state)}
+
+  def handle_info(wx(id: 5211, event: wxCommand(type: :command_text_enter)), state),
+    do: {:noreply, console_eval(state)}
+
+  def handle_info({:console_key, key}, state), do: {:noreply, console_history(state, key)}
+
+  def handle_info(:console_tick, state), do: {:noreply, console_tick(state)}
 
   def handle_info(
         wx(obj: obj, event: wxCommand(type: :command_text_enter, cmdString: str)),
@@ -2884,6 +2901,112 @@ defmodule Browser.Session do
     if scroll != old, do: notify_scroll(state)
     state
   end
+
+  # -- developer console -------------------------------------------------------------
+
+  # the window is made on first use and shows the log of the active tab
+  defp open_console(%{console: nil} = state) do
+    win = Browser.ConsoleWindow.new(state.ui.frame)
+    me = self()
+
+    :wxTextCtrl.connect(win.input, :key_down,
+      callback: fn _wx, ev ->
+        k = :wxKeyEvent.getKeyCode(ev)
+        if k in [315, 317], do: send(me, {:console_key, k}), else: :wxEvent.skip(ev)
+      end
+    )
+
+    open_console(%{state | console: %{win: win, pid: :none, seq: 0, hist: [], hpos: nil}})
+  end
+
+  defp open_console(state) do
+    Browser.ConsoleWindow.show(state.console.win)
+    console_tick(state)
+  end
+
+  # the view follows the log: once in a while, and it also notices a tab or page change
+  defp console_tick(%{console: nil} = state), do: state
+
+  defp console_tick(%{console: c} = state) do
+    if Browser.ConsoleWindow.shown?(c.win) do
+      Process.send_after(self(), :console_tick, 250)
+      %{state | console: console_refresh(c, state)}
+    else
+      state
+    end
+  end
+
+  defp console_refresh(c, state) do
+    pid = state.js
+
+    c =
+      if c.pid == pid do
+        c
+      else
+        Browser.ConsoleWindow.clear(c.win)
+        Browser.ConsoleWindow.set_title(c.win, tab_title(state))
+
+        notice = [
+          {0, :log, "(no JavaScript runs on this page)", System.system_time(:millisecond)}
+        ]
+
+        if pid == nil, do: Browser.ConsoleWindow.append(c.win, notice)
+        %{c | pid: pid, seq: 0}
+      end
+
+    case Browser.Console.since(pid, c.seq) do
+      [] ->
+        c
+
+      entries ->
+        Browser.ConsoleWindow.append(c.win, entries)
+        %{c | seq: entries |> List.last() |> elem(0)}
+    end
+  end
+
+  defp clear_console(%{console: nil} = state), do: state
+
+  defp clear_console(%{console: c} = state) do
+    Browser.Console.clear(c.pid)
+    Browser.ConsoleWindow.clear(c.win)
+    %{state | console: %{c | seq: Browser.Console.last_seq(c.pid)}}
+  end
+
+  # the line typed in the console runs in the page
+  defp console_eval(%{console: c} = state) do
+    text = String.trim(Browser.ConsoleWindow.take_input(c.win))
+
+    cond do
+      text == "" ->
+        state
+
+      state.js == nil ->
+        state
+
+      true ->
+        reply = Browser.JS.Runtime.eval(state.js, text)
+        hist = [text | List.delete(c.hist, text)] |> Enum.take(100)
+        state = apply_js(%{state | console: %{c | hist: hist, hpos: nil}}, reply)
+        %{state | console: console_refresh(state.console, state)}
+    end
+  end
+
+  # up and down step through the lines typed before
+  defp console_history(%{console: %{hist: [_ | _] = hist} = c} = state, key) do
+    pos =
+      case {key, c.hpos} do
+        {315, nil} -> 0
+        {315, p} -> min(p + 1, length(hist) - 1)
+        {_, nil} -> nil
+        {_, 0} -> nil
+        {_, p} -> p - 1
+      end
+
+    Browser.ConsoleWindow.put_input(c.win, if(pos, do: Enum.at(hist, pos), else: ""))
+    %{state | console: %{c | hpos: pos}}
+  end
+
+  defp console_history(state, _key), do: state
 
   # -- tabs ------------------------------------------------------------------------
 
