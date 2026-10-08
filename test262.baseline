@@ -19289,6 +19289,7 @@ language/computed-property-names/to-name-side-effects/object.js
 language/destructuring/binding/initialization-requires-object-coercible-null.js
 language/destructuring/binding/initialization-requires-object-coercible-undefined.js
 language/destructuring/binding/initialization-returns-normal-completion-for-empty-objects.js
+language/destructuring/binding/keyed-destructuring-property-reference-target-evaluation-order-with-bindings.js
 language/destructuring/binding/syntax/array-elements-with-initializer.js
 language/destructuring/binding/syntax/array-elements-with-object-patterns.js
 language/destructuring/binding/syntax/array-elements-without-initializer.js
@@ -20976,6 +20977,8 @@ language/expressions/async-arrow-function/await-as-identifier-reference-escaped.
 language/expressions/async-arrow-function/await-as-identifier-reference.js
 language/expressions/async-arrow-function/await-as-label-identifier-escaped.js
 language/expressions/async-arrow-function/await-as-label-identifier.js
+language/expressions/async-arrow-function/await-as-param-ident-nested-arrow-parameter-position.js
+language/expressions/async-arrow-function/await-as-param-nested-arrow-body-position.js
 language/expressions/async-arrow-function/await-as-param-nested-arrow-parameter-position.js
 language/expressions/async-arrow-function/await-as-param-rest-nested-arrow-parameter-position.js
 language/expressions/async-arrow-function/dflt-params-abrupt.js
@@ -42010,6 +42013,7 @@ language/statements/with/decl-gen.js
 language/statements/with/decl-let.js
 language/statements/with/get-binding-value-call-with-proxy-env.js
 language/statements/with/get-binding-value-idref-with-proxy-env.js
+language/statements/with/get-mutable-binding-binding-deleted-in-get-unscopables-strict-mode.js
 language/statements/with/get-mutable-binding-binding-deleted-in-get-unscopables.js
 language/statements/with/has-binding-call-with-proxy-env.js
 language/statements/with/has-binding-idref-with-proxy-env.js
@@ -42020,7 +42024,9 @@ language/statements/with/let-block-with-newline.js
 language/statements/with/let-identifier-with-newline.js
 language/statements/with/scope-var-close.js
 language/statements/with/scope-var-open.js
+language/statements/with/set-mutable-binding-binding-deleted-in-get-unscopables-strict-mode.js
 language/statements/with/set-mutable-binding-binding-deleted-in-get-unscopables.js
+language/statements/with/set-mutable-binding-binding-deleted-with-typed-array-in-proto-chain-strict-mode.js
 language/statements/with/set-mutable-binding-binding-deleted-with-typed-array-in-proto-chain.js
 language/statements/with/set-mutable-binding-idref-compound-assign-with-proxy-env.js
 language/statements/with/set-mutable-binding-idref-with-proxy-env.js
