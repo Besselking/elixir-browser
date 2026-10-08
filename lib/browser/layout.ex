@@ -3164,7 +3164,13 @@ defmodule Browser.Layout do
   defp op({:pad, px}, st), do: st |> flush() |> apply_gap() |> Map.update!(:y, &(&1 + px))
 
   # a floated box goes to the left or right edge of the line below, and text flows around it
-  defp op({:float, side, sub, spec, style}, st) do
+  # a float on the right goes beside the line it comes in when it fits there, at the top of that
+  # line; otherwise the line ends and the float goes below it
+  defp op({:float, side, sub, spec, style}, st),
+    do:
+      mid_line_float(st, side, sub, spec, style) || op({:float_below, side, sub, spec, style}, st)
+
+  defp op({:float_below, side, sub, spec, style}, st) do
     # a float in the middle of a line that does not wrap goes below that line, which goes on
     {st, line_bottom} =
       if style.ws == :nowrap and st.line != [] and
@@ -5216,6 +5222,32 @@ defmodule Browser.Layout do
         fr: fr
     }
   end
+
+  defp mid_line_float(%{line: [_ | _]} = st, :right, sub, spec, style) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    w = fit_width(st, sub, spec, avail)
+    edge = st.width - st.margin - st.right
+
+    if style.ws != :nowrap and Map.get(spec, :clear) == nil and st.x + w <= edge - st.fr do
+      {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+      {x, y} = place_float(st, :right, w, height, st.y, st.margin + st.left, edge)
+
+      if y == st.y do
+        moved = for item <- items, do: item |> limit_extent(w) |> move(x, y) |> adopt_sticky(st)
+
+        %{
+          st
+          | items: Enum.reverse(moved) ++ st.items,
+            n: st.n + length(moved),
+            ext: max(st.ext, x + w + st.right - st.free),
+            fr: max(st.fr, edge - x),
+            floats: [%{side: :right, x0: x, x1: x + w, y0: y, y1: y + height} | st.floats]
+        }
+      end
+    end
+  end
+
+  defp mid_line_float(_st, _side, _sub, _spec, _style), do: nil
 
   # A line beside floats that a word cannot fit on moves down to where a float ends. (A word that
   # may break between its letters is not moved: some of it fits; nor is a line that cannot wrap.)

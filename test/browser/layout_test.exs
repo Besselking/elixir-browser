@@ -6634,4 +6634,27 @@ defmodule Browser.LayoutTest do
       assert y1 == y2
     end
   end
+
+  describe "a right float that comes in the middle of a line" do
+    test "goes to the top of that line when it fits beside what is there" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:200px">ab <span style="float:right;width:20px;height:5px;background:red"></span>cd</div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.y == 0 and float.x == 180
+      assert [_] = Enum.uniq(for(%{type: :text} = t <- items, do: t.y))
+    end
+
+    test "goes below the line when the line is already too long" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:60px">abcdefgh<span style="float:right;width:30px;height:5px;background:red"></span></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.y > 0
+    end
+  end
 end
