@@ -7,6 +7,13 @@ defmodule Browser.HTMLTest do
              HTML.parse("<p>a &amp; b <b>c</b></p>")
   end
 
+  test "aside, figure and fieldset close an open paragraph" do
+    for tag <- ~w(aside figure fieldset details) do
+      assert [{:element, "p", _, _}, {:element, ^tag, _, _}] =
+               HTML.parse("<p>a<#{tag}>b</#{tag}>")
+    end
+  end
+
   test "void elements don't swallow siblings" do
     assert [{:element, "p", _, [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
              HTML.parse("<p>a<br>b</p>")

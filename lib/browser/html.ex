@@ -11,7 +11,9 @@ defmodule Browser.HTML do
   @raw_text ~w(script style)
   @block ~w(p div ul ol li h1 h2 h3 h4 h5 h6 pre blockquote table tr hr dl dt dd
             section article header footer nav main form)
-  @closes_p @block
+  @closes_p @block ++
+              ~w(address aside center details dialog dir fieldset figcaption figure hgroup menu
+                 search)
 
   # the full WHATWG named character reference table (priv/html_entities.txt); keys keep their
   # trailing ";", and the legacy names that may omit it are present without one too

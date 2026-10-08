@@ -4990,7 +4990,8 @@ defmodule Browser.LayoutTest do
   describe "ideographic space" do
     test "is a character of the word it follows, not collapsible white space" do
       items = texts(elem(run("<p>ab\u3000cd</p>"), 0))
-      assert items == ["ab\u3000cd"]
+      # (a line may break after it)
+      assert Enum.join(items) == "ab\u3000cd"
     end
 
     test "hangs at the end of a line: the content is not wider for it" do
@@ -5233,6 +5234,80 @@ defmodule Browser.LayoutTest do
                  "flex-wrap:wrap;width:100px;height:100px;align-content:end;justify-content:end",
                  4
                )
+    end
+  end
+
+  describe "ideographs and letter-spacing" do
+    defp text_rows(html, width) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :text))
+      |> Enum.group_by(& &1.y)
+      |> Enum.sort()
+      |> Enum.map(fn {_, row} -> row |> Enum.sort_by(& &1.x) |> Enum.map_join(& &1.text) end)
+    end
+
+    test "a line breaks between ideographs and next to them" do
+      html = ~s(<div style="font-size:20px">三三三三三三</div>)
+      assert text_rows(html, 40) == ["三三三三", "三三"]
+      html = ~s(<div style="font-size:20px">ab三cd</div>)
+      assert text_rows(html, 30) == ["ab三", "cd"]
+    end
+
+    test "no break before closing punctuation, after an opening bracket or around a joiner" do
+      html = ~s(<div style="font-size:20px">三三。三</div>)
+      assert text_rows(html, 30) == ["三三。", "三"]
+      html = ~s(<div style="font-size:20px">三三「三</div>)
+      assert text_rows(html, 30) == ["三三", "「三"]
+    end
+
+    test "keep-all and auto-phrase keep a run of ideographs together" do
+      html = ~s(<div style="font-size:20px;word-break:keep-all">三三三三三三</div>)
+      assert text_rows(html, 40) == ["三三三三三三"]
+    end
+
+    test "letter-spacing after the last letter of a line does not count towards fitting it" do
+      html = ~s(<div style="font-size:20px;letter-spacing:10px">三三 三</div>)
+      # 10 + 10 + 10 + 10 = 40 wide with the spacing after the second, but only 30 are needed
+      assert text_rows(html, 30) == ["三三", "三"]
+      assert length(text_rows(html, 200)) == 1
+    end
+
+    test "the spacing after the last letter of an inline element is its parent's" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}span{letter-spacing:10px}</style>" <>
+            "<div style=\"font-size:20px\">a<span>bb</span>c</div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      xs = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(&{&1.text, &1.x})
+      # a (10), b (10 + 10 spacing), b (10, no spacing after it), c
+      assert xs == [{"a", 0}, {"b", 10}, {"b", 30}, {"c", 40}] or
+               Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40}
+    end
+  end
+
+  describe "white space at the line edge" do
+    test "spaces before an empty inline box at the end of a line collapse away" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}span span{border-left:30px solid green}</style>" <>
+            "<div style=\"font:30px/30px monospace\"><span>A  <span>  </span>  </span></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+
+      [{x, _, w, _}] =
+        items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y, &1.w, &1.h})
+
+      # the border follows the A directly
+      assert w == 30
+      assert x == 15
     end
   end
 
@@ -5764,7 +5839,8 @@ defmodule Browser.LayoutTest do
 
     test "a line break between two wide characters leaves no space" do
       wide = laid_out("<p>測試\n測試</p>") |> Enum.filter(&(&1.type == :text))
-      assert [%{text: "測試測試"}] = Enum.filter(wide, &String.contains?(&1.text, "測"))
+      # (no space between the lines' words: they sit side by side)
+      assert wide |> Enum.map(& &1.text) |> Enum.join() == "測試測試"
     end
 
     test "a line break between other characters is a space" do

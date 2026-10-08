@@ -4585,10 +4585,14 @@ css/css-text/hyphens/hyphens-vertical-001.html
 css/css-text/hyphens/hyphens-vertical-002.html
 css/css-text/hyphens/hyphens-vs-float-clearance-002.html
 css/css-text/hyphens/i18n/hyphens-i18n-manual-004.html
+css/css-text/letter-spacing/letter-spacing-200.html
 css/css-text/letter-spacing/letter-spacing-211.html
 css/css-text/letter-spacing/letter-spacing-bengali-yaphala-001.html
+css/css-text/letter-spacing/letter-spacing-end-of-line-001.html
 css/css-text/letter-spacing/letter-spacing-end-of-line-002.html
 css/css-text/letter-spacing/letter-spacing-ligatures-004.html
+css/css-text/letter-spacing/letter-spacing-nesting-001.html
+css/css-text/letter-spacing/letter-spacing-nesting-002.html
 css/css-text/letter-spacing/letter-spacing-trim-start-001.html
 css/css-text/line-break/line-break-anywhere-002.html
 css/css-text/line-break/line-break-anywhere-004.html
@@ -4632,7 +4636,9 @@ css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-015.html
 css/css-text/line-break/line-break-anywhere-overrides-uax-behavior-016.html
 css/css-text/line-break/line-break-loose-hyphens-002.html
 css/css-text/line-break/line-break-loose-hyphens-003.html
+css/css-text/line-break/line-break-normal-hyphens-001.html
 css/css-text/line-break/line-break-normal-hyphens-003.html
+css/css-text/line-break/line-break-strict-hyphens-001.html
 css/css-text/line-break/line-break-strict-hyphens-003.html
 css/css-text/line-breaking/line-breaking-001.html
 css/css-text/line-breaking/line-breaking-002.html
@@ -5030,8 +5036,13 @@ css/css-text/white-space/control-chars-09D.html
 css/css-text/white-space/control-chars-09E.html
 css/css-text/white-space/control-chars-09F.html
 css/css-text/white-space/full-width-leading-spaces-001.html
+css/css-text/white-space/full-width-leading-spaces-002.html
+css/css-text/white-space/full-width-leading-spaces-003.html
 css/css-text/white-space/full-width-leading-spaces-004.html
+css/css-text/white-space/full-width-leading-spaces-005.html
 css/css-text/white-space/hanging-whitespace-001.tentative.html
+css/css-text/white-space/line-edge-white-space-collapse-001.html
+css/css-text/white-space/line-edge-white-space-collapse-002.html
 css/css-text/white-space/lone-cr-001.tentative.html
 css/css-text/white-space/object-replacement-1.html
 css/css-text/white-space/object-replacement-2.html
@@ -5149,7 +5160,6 @@ css/css-text/word-break/auto-phrase/word-break-auto-phrase-005.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-006.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-007.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-008.html
-css/css-text/word-break/auto-phrase/word-break-auto-phrase-009.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-001.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-002.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-003.html
