@@ -914,6 +914,21 @@ defmodule Browser.LayoutTest do
     defp wr(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
     defp rr(items), do: Enum.filter(items, &(&1.type == :rect))
 
+    test "an inline-block with a length vertical-align sits that far above the baseline" do
+      box = fn va ->
+        ~s|<div style="line-height:20px">a<span style="display:inline-block;width:10px;height:10px;background:#eee;#{va}"></span></div>|
+      end
+
+      {plain, _} = rb(box.(""))
+      {raised, _} = rb(box.("vertical-align:15px"))
+      # the height of the box above the bottom of the text
+      above = fn items ->
+        wr(items, "a").y + wr(items, "a").h - (hd(rr(items)).y + hd(rr(items)).h)
+      end
+
+      assert above.(raised) - above.(plain) == 15
+    end
+
     test "centered text doesn't inflate a shrink-to-fit unit" do
       html =
         ~s(<span style="display:inline-block; text-align:center; background:#eee">tiny</span>)

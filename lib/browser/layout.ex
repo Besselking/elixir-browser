@@ -5005,8 +5005,15 @@ defmodule Browser.Layout do
     half = if st.lh > 0, do: div(lh - normal, 2), else: 0
     text_base = if st.lh > 0, do: half + normal - div(normal - st.lh, 4), else: 0
 
-    base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base))
-    below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base))
+    # an atom with a length or percentage `vertical-align` sits that far above the baseline
+    raise = fn
+      %{valign: n} when is_number(n) -> round(n)
+      %{valign: {:pct, f}} -> round(f * st.lh)
+      _ -> 0
+    end
+
+    base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base + raise.(&1)))
+    below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base - raise.(&1)))
     # text raised or lowered by `vertical-align` makes the line taller where it sticks out
     {base, below} = raised_room(texts, base, below, normal, half, text_base)
     line_h = Enum.reduce(floating, base + below, &max(&2, &1.h))
@@ -5028,7 +5035,7 @@ defmodule Browser.Layout do
       %{valign: "top"} -> st.y
       %{valign: "bottom"} = a -> st.y + line_h - a.h
       %{valign: "middle"} = a -> st.y + base - round(st.lh * 0.3) - div(a.h, 2)
-      a -> st.y + base - a.base
+      a -> st.y + base - a.base - raise.(a)
     end
 
     moved =
