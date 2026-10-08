@@ -57,6 +57,9 @@ defmodule Browser.JS.DOM do
           text: "",
           # a `<template>`'s content: the fragment that holds what is inside it
           content: nil,
+          # a shadow root (a fragment) knows its host, a host its shadow root
+          shost: nil,
+          shadow: nil,
           # the document the node belongs to (a document node's is itself)
           doc: s.doc
         },
@@ -319,15 +322,25 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # the root a node is in the document's tree through: past a shadow root to its host
   defp root_of(nid) do
     case node(nid).parent do
-      nil -> nid
+      nil -> if node(nid).shost, do: root_of(node(nid).shost), else: nid
       p -> root_of(p)
+    end
+  end
+
+  # the top of the tree the node is in (a shadow root is the top of its own tree)
+  defp top_of(nid) do
+    case node(nid).parent do
+      nil -> nid
+      p -> top_of(p)
     end
   end
 
   defp realm_key_to_doc(:window), do: st().main
   defp realm_key_to_doc({:window, d}), do: d
+  defp realm_key_to_doc({:objt, _}), do: nil
   defp realm_key_to_doc(nid) when is_integer(nid), do: node(nid).doc
 
   @doc "The queued side effects, oldest first; empties the queue."
@@ -418,10 +431,16 @@ defmodule Browser.JS.DOM do
     put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid))), rev: s.rev + 1})
   end
 
+  # what the browser itself puts on elements; any other name starting with `@` is the page's
+  # own (Vue's `@click`, Lit's `@change$lit$`)
+  @internal_attrs ~w(@cid @nid @znid @z @computed @content @marker @placeholder @src @summary
+                     @sized @float @flex_sized @definite @ed @edhost @t)
+
   defp build({:text, t}, parent), do: new_node(%{kind: :text, text: t, parent: parent})
+  defp build({:comment, t}, parent), do: new_node(%{kind: :comment, text: t, parent: parent})
 
   defp build({:element, tag, attrs, kids}, parent) do
-    {internal, visible} = Enum.split_with(attrs, fn {k, _} -> String.starts_with?(k, "@") end)
+    {internal, visible} = Enum.split_with(attrs, fn {k, _} -> k in @internal_attrs end)
     nid = new_node(%{tag: tag, attrs: visible, internal: internal, parent: parent})
     kid_ids = Enum.map(kids, &build(&1, nid))
 
@@ -1176,7 +1195,7 @@ defmodule Browser.JS.DOM do
 
   defp parse_fragment(html) do
     frag = new_node(%{kind: :fragment})
-    for raw <- Browser.HTML.parse(html), do: insert(frag, build(raw, nil), nil)
+    for raw <- Browser.HTML.parse(html, comments: true), do: insert(frag, build(raw, nil), nil)
     node(frag).kids
   end
 
@@ -2015,6 +2034,7 @@ defmodule Browser.JS.DOM do
 
   defp target_obj(:window), do: aux_host(:window, :window)
   defp target_obj({:window, _} = key), do: aux_host(key, :window)
+  defp target_obj({:objt, id}), do: {:obj, id}
   defp target_obj(nid), do: wrap(nid)
 
   @doc """
@@ -2053,7 +2073,8 @@ defmodule Browser.JS.DOM do
       case target do
         :window -> [:window]
         {:window, _} -> [target]
-        nid -> [nid | ancestors(nid)] ++ [window_key_of(nid)]
+        {:objt, _} -> [target]
+        nid -> tree_path(nid, Map.get(init, :composed, true)) ++ [window_key_of(nid)]
       end
 
     # capture: from the outermost down to the target's parent
@@ -2070,6 +2091,16 @@ defmodule Browser.JS.DOM do
     put(event, "currentTarget", :null)
     put(event, "eventPhase", 0.0)
     if truthy(Interp.get(event, "defaultPrevented")), do: :prevented, else: :ok
+  end
+
+  # the node and its ancestors; a composed event goes on from a shadow root to its host
+  defp tree_path(nid, composed) do
+    chain = [nid | ancestors(nid)]
+
+    case node(List.last(chain)).shost do
+      host when composed and host != nil -> chain ++ tree_path(host, composed)
+      _ -> chain
+    end
   end
 
   defp put(o, k, v), do: Interp.put(o, k, v)
@@ -3246,7 +3277,7 @@ defmodule Browser.JS.DOM do
     frames_arriving(nid)
 
     if st().ce != %{} and connected?(nid) do
-      for e <- [nid | elements(nid)], node(e).kind == :element, ctor = registered(node(e).tag) do
+      for e <- elements_deep([nid]), node(e).kind == :element, ctor = registered(node(e).tag) do
         if MapSet.member?(st().ce_done, e) do
           call_callback(e, "connectedCallback", [])
         else
@@ -3256,6 +3287,21 @@ defmodule Browser.JS.DOM do
     end
 
     :ok
+  end
+
+  # the nodes and the elements below them, and the ones in the shadow roots of those
+  defp elements_deep(roots) do
+    Enum.flat_map(roots, fn r ->
+      all = [r | elements(r)]
+
+      all ++
+        Enum.flat_map(all, fn e ->
+          case node(e).shadow do
+            nil -> []
+            sh -> elements_deep([sh])
+          end
+        end)
+    end)
   end
 
   # a node taken into another document (a script put one document's node in another's tree)
@@ -3735,6 +3781,21 @@ defmodule Browser.JS.DOM do
     install_aux()
     install_globals(scope, event_target, node_proto, element, text, document, event)
     Interp.declare(scope, "__ed", ed_object())
+
+    Interp.declare(
+      scope,
+      "__set_shadow",
+      native("__set_shadow", fn _, [host, root | _] ->
+        h = nid_of(host)
+        r = nid_of(root)
+        update_node_quiet(h, &%{&1 | shadow: r})
+        update_node_quiet(r, &%{&1 | shost: h})
+        # (a host that is in the document: what is in its shadow root is too)
+        if connected?(h), do: connect(r)
+        :undefined
+      end)
+    )
+
     Interp.declare(scope, "__cur_doc", native("__cur_doc", fn _, _ -> wrap(st().doc) end))
     Interp.declare(scope, "__cur_loc", native("__cur_loc", fn _, _ -> loc_host() end))
     :ok
@@ -3892,7 +3953,8 @@ defmodule Browser.JS.DOM do
 
       init = %{
         bubbles: truthy(Interp.get(ev, "bubbles")),
-        cancelable: truthy(Interp.get(ev, "cancelable"))
+        cancelable: truthy(Interp.get(ev, "cancelable")),
+        composed: truthy(Interp.get(ev, "composed"))
       }
 
       extra =
@@ -3910,6 +3972,9 @@ defmodule Browser.JS.DOM do
     case deref(id) do
       %{class: :host, host: {__MODULE__, :window}} -> :window
       %{class: :host, host: {__MODULE__, {:window, _} = key}} -> key
+      %{class: :host, host: {__MODULE__, nid}} when is_integer(nid) -> nid
+      # (`new EventTarget()` and the classes that extend it: the object is its own target)
+      %{class: _} -> {:objt, id}
       _ -> this_nid(this)
     end
   end
@@ -3958,7 +4023,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "isSameNode", fn this, args -> this_nid(this) == nid_of(arg(args, 0)) end)
-    def_fn(p, "getRootNode", fn this, _ -> wrap(root_of(this_nid(this))) end)
+    def_fn(p, "getRootNode", fn this, _ -> wrap(top_of(this_nid(this))) end)
 
     def_fn(p, "normalize", fn this, _ ->
       normalize(this_nid(this))

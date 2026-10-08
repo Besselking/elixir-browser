@@ -193,4 +193,75 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["1 2 2 2 1 1 1 1 1 0 1 1"]
   end
+
+  test "attributes that start with @ stay visible to scripts" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const el = document.getElementById("a");
+        const t = document.createElement("template");
+        t.innerHTML = '<input @change$lit$="1" :bind="x">';
+        console.log(el.getAttribute("@click"), el.hasAttribute("@click"), el.attributes.length,
+          t.content.firstChild.getAttributeNames().join());
+        """,
+        ~S|<div id=a @click="go()"></div>|
+      )
+
+    assert errors == []
+    assert logs == ["go() true 2 @change$lit$,:bind"]
+  end
+
+  test "an EventTarget object, and a composed event that leaves a shadow root" do
+    {logs, errors} =
+      run(
+        ~S"""
+        class L extends EventTarget {}
+        const l = new L();
+        l.addEventListener("change", (e) => console.log("got", e.type, e.target === l));
+        l.dispatchEvent(new Event("change"));
+        const host = document.getElementById("h");
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = "<p id=in></p>";
+        host.addEventListener("ping", (e) => console.log("host heard", e.detail));
+        const inner = root.getElementById("in");
+        inner.dispatchEvent(new CustomEvent("ping", { bubbles: true, composed: true, detail: 1 }));
+        inner.dispatchEvent(new CustomEvent("ping", { bubbles: true, detail: 2 }));
+        console.log(inner.getRootNode() === root, host.contains(inner));
+        """,
+        ~S|<div id=h></div>|
+      )
+
+    assert errors == []
+    assert logs == ["got change true", "host heard 1", "true false"]
+  end
+
+  test "custom elements inside a shadow root of a connected element are upgraded" do
+    {logs, errors} =
+      run(
+        ~S"""
+        customElements.define("x-in", class extends HTMLElement {
+          connectedCallback() { console.log("connected", this.parentNode === root); }
+        });
+        const host = document.getElementById("h");
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = "<x-in></x-in>";
+        """,
+        ~S|<div id=h></div>|
+      )
+
+    assert errors == []
+    assert logs == ["connected true"]
+  end
+
+  test "innerHTML keeps comments and <?...> markers as comment nodes" do
+    {logs, errors} =
+      run(~S"""
+      const d = document.createElement("div");
+      d.innerHTML = "a<!--x--><b></b><?lit$1$>c";
+      console.log(d.childNodes.length, [...d.childNodes].map((n) => n.nodeType + ":" + (n.data ?? n.nodeName)).join("|"), d.innerHTML);
+      """)
+
+    assert errors == []
+    assert logs == ["5 3:a|8:x|1:B|8:?lit$1$|3:c a<!--x--><b></b><!--?lit$1$-->c"]
+  end
 end

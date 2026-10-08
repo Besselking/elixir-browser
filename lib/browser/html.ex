@@ -33,8 +33,16 @@ defmodule Browser.HTML do
             end)
 
   @spec parse(binary) :: [term]
-  def parse(html) when is_binary(html) do
-    html |> tokenize([]) |> build([{:root, []}])
+  def parse(html, opts \\ []) when is_binary(html) do
+    # (`comments: true` keeps comments as `{:comment, text}`: scripts see them in the DOM;
+    # layout never does)
+    old = Process.put(:html_comments, opts[:comments] == true)
+
+    try do
+      html |> tokenize([]) |> build([{:root, []}])
+    after
+      Process.put(:html_comments, old || false)
+    end
   end
 
   @doc "Parses a whole page: `parse/1` plus the html, head and body elements it leaves implied."
@@ -98,17 +106,27 @@ defmodule Browser.HTML do
 
   # -- tokenizer ---------------------------------------------------------
 
+  defp keep_comment(text, acc),
+    do: if(Process.get(:html_comments), do: [{:comment, text} | acc], else: acc)
+
   defp tokenize("", acc), do: Enum.reverse(acc)
 
   defp tokenize("<!--" <> rest, acc) do
     case :binary.split(rest, "-->") do
-      [_, after_c] -> tokenize(after_c, acc)
+      [text, after_c] -> tokenize(after_c, keep_comment(text, acc))
       [_] -> Enum.reverse(acc)
     end
   end
 
   defp tokenize("<!" <> rest, acc), do: tokenize(skip_past(rest, ">"), acc)
-  defp tokenize("<?" <> rest, acc), do: tokenize(skip_past(rest, ">"), acc)
+
+  # (`<?...>` is a comment whose text starts with `?`)
+  defp tokenize("<?" <> rest, acc) do
+    case :binary.split(rest, ">") do
+      [text, after_c] -> tokenize(after_c, keep_comment("?" <> text, acc))
+      [_] -> Enum.reverse(acc)
+    end
+  end
 
   defp tokenize("</" <> rest, acc) do
     {name, rest} = take_name(rest)
@@ -252,6 +270,9 @@ defmodule Browser.HTML do
 
   defp build([{:text, t} | rest], [{tag, kids} | stack]),
     do: build(rest, [{tag, [{:text, t} | kids]} | stack])
+
+  defp build([{:comment, t} | rest], [{tag, kids} | stack]),
+    do: build(rest, [{tag, [{:comment, t} | kids]} | stack])
 
   defp build([{:open, name, attrs, self_close?} | rest], stack) do
     stack = implied_close(name, stack)

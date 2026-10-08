@@ -534,6 +534,7 @@ defmodule Browser.JS.WebAPI do
       var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
       this.__shadow = root;
+      __set_shadow(this, root);
       return root;
     });
     var CLP = Object.getPrototypeOf(document.documentElement.classList);
