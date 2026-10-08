@@ -953,6 +953,8 @@ defmodule Browser.JS.DOM do
 
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
+    # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
   end
@@ -976,8 +978,8 @@ defmodule Browser.JS.DOM do
 
     case List.keyfind(n.internal, "@nid", 0) do
       {_, id} ->
-        case st().rects do
-          %{^id => {x, y, w, h}} -> {x, y, w, h}
+        case rects_here() do
+          %{^id => {x, y, w, h}} -> frame_relative({x, y, w, h})
           _ -> inherited_rect(n.parent)
         end
 
@@ -986,7 +988,25 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  # (a frame is not laid out: its elements are as wide as the frame, and have no height)
+  # the boxes the layout made: for a frame those of the page, whose coordinates are the page's
+  defp rects_here do
+    if st().doc == st().main, do: st().rects, else: Process.get(:dom_page_rects, %{})
+  end
+
+  # in a frame, a box is where it is in the frame: the page coordinates less the frame's corner
+  defp frame_relative(rect) do
+    with false <- st().doc == st().main,
+         %{iframe: i} when i != nil <- Map.get(st().meta, st().doc),
+         {_, id} <- List.keyfind(node(i).internal, "@nid", 0),
+         %{^id => {fx, fy, _, _}} <- Process.get(:dom_page_rects, %{}) do
+      {x, y, w, h} = rect
+      {x - fx, y - fy, w, h}
+    else
+      _ -> rect
+    end
+  end
+
+  # (a frame that was not laid out yet: its elements are as wide as the frame, with no height)
   defp inherited_rect(nil) do
     if st().doc == st().main,
       do: {0.0, 0.0, 0.0, 0.0},
@@ -1750,6 +1770,9 @@ defmodule Browser.JS.DOM do
       "content" when n.tag == "template" ->
         {:ok, wrap(template_content(n.id))}
 
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        {:ok, canvas_size(n, k)}
+
       "contentWindow" when n.tag == "iframe" ->
         {:ok, with(d when d != nil <- frame_doc_of(n.id), do: window_host_of(d)) || :null}
 
@@ -1956,6 +1979,11 @@ defmodule Browser.JS.DOM do
     case key do
       "id" ->
         set_attr(nid, "id", to_str(v))
+        :ok
+
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        num = to_num_or_zero(v)
+        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
         :ok
 
       "className" ->
@@ -4132,6 +4160,22 @@ defmodule Browser.JS.DOM do
         %Browser.Canvas{w: ^w, h: ^h} = surface -> surface
         _ -> Browser.Canvas.new(w, h)
       end
+    end
+  end
+
+  # `canvas.width` and `.height`: the attribute as a number, else 300 by 150
+  defp canvas_size(n, name) do
+    default = if name == "width", do: 300, else: 150
+
+    case get_attr(n, name) do
+      v when is_binary(v) ->
+        case Integer.parse(String.trim(v)) do
+          {i, _} when i >= 0 -> i * 1.0
+          _ -> default * 1.0
+        end
+
+      _ ->
+        default * 1.0
     end
   end
 
