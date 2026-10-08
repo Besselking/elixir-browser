@@ -2738,6 +2738,42 @@ defmodule Browser.LayoutTest do
       assert at(items, "aa").x == at(items, "c").x
     end
 
+    test "min-height on the table and height on a row raise the rows" do
+      {tall, _} =
+        tbl(
+          ~s|<table style="border-spacing:0;min-height:100px"><tr><td style="padding:0">a</td></tr></table>|
+        )
+
+      {row, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr style="height:60px"><td style="padding:0;vertical-align:top">a</td></tr><tr><td style="padding:0;vertical-align:top">b</td></tr></table>|
+        )
+
+      {plain, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr><td style="padding:0">a</td></tr><tr><td style="padding:0">b</td></tr></table>|
+        )
+
+      assert at(row, "b").y - at(row, "a").y == 60
+      assert at(plain, "b").y - at(plain, "a").y < 60
+      assert tall |> table_rects() |> Enum.all?(&(&1.h <= 100))
+    end
+
+    test "min-width of a cell or column is the least its column is" do
+      {cell, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr><td style="padding:0;min-width:80px">a</td><td style="padding:0">b</td></tr></table>|
+        )
+
+      {col, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><col style="min-width:80px"><tr><td style="padding:0">a</td><td style="padding:0">b</td></tr></table>|
+        )
+
+      assert at(cell, "b").x - at(cell, "a").x == 80
+      assert at(col, "b").x - at(col, "a").x == 80
+    end
+
     test "a block-wide cell leaves the others as wide as their unbreakable text" do
       {items, _} =
         tbl(

@@ -765,6 +765,7 @@ css/CSS2/box-display/containing-block-022.xht
 css/CSS2/box-display/containing-block-026.xht
 css/CSS2/box-display/containing-block-027.xht
 css/CSS2/box-display/containing-block-028.xht
+css/CSS2/box-display/containing-block-029.xht
 css/CSS2/box-display/containing-block-030.xht
 css/CSS2/box-display/descendant-display-none-001.xht
 css/CSS2/box-display/descendant-display-override-001.xht
@@ -2034,6 +2035,7 @@ css/CSS2/normal-flow/height-104.xht
 css/CSS2/normal-flow/height-111.xht
 css/CSS2/normal-flow/height-112.xht
 css/CSS2/normal-flow/height-113.xht
+css/CSS2/normal-flow/height-applies-to-004.xht
 css/CSS2/normal-flow/height-applies-to-005.xht
 css/CSS2/normal-flow/height-applies-to-006.xht
 css/CSS2/normal-flow/height-applies-to-007.xht
@@ -2255,6 +2257,7 @@ css/CSS2/normal-flow/max-width-applies-to-001.xht
 css/CSS2/normal-flow/max-width-applies-to-002.xht
 css/CSS2/normal-flow/max-width-applies-to-003.xht
 css/CSS2/normal-flow/max-width-applies-to-004.xht
+css/CSS2/normal-flow/max-width-applies-to-006.xht
 css/CSS2/normal-flow/max-width-applies-to-008.xht
 css/CSS2/normal-flow/max-width-applies-to-009.xht
 css/CSS2/normal-flow/max-width-applies-to-012.xht
@@ -2340,6 +2343,8 @@ css/CSS2/normal-flow/min-height-applies-to-006.xht
 css/CSS2/normal-flow/min-height-applies-to-008.xht
 css/CSS2/normal-flow/min-height-applies-to-009.xht
 css/CSS2/normal-flow/min-height-applies-to-012.xht
+css/CSS2/normal-flow/min-height-applies-to-013.xht
+css/CSS2/normal-flow/min-height-applies-to-014.xht
 css/CSS2/normal-flow/min-height-applies-to-015.xht
 css/CSS2/normal-flow/min-height-percentage-001.xht
 css/CSS2/normal-flow/min-height-percentage-002.xht
@@ -2415,6 +2420,9 @@ css/CSS2/normal-flow/min-width-applies-to-001.xht
 css/CSS2/normal-flow/min-width-applies-to-002.xht
 css/CSS2/normal-flow/min-width-applies-to-003.xht
 css/CSS2/normal-flow/min-width-applies-to-004.xht
+css/CSS2/normal-flow/min-width-applies-to-005.xht
+css/CSS2/normal-flow/min-width-applies-to-006.xht
+css/CSS2/normal-flow/min-width-applies-to-007.xht
 css/CSS2/normal-flow/min-width-applies-to-008.xht
 css/CSS2/normal-flow/min-width-applies-to-009.xht
 css/CSS2/normal-flow/min-width-applies-to-012.xht

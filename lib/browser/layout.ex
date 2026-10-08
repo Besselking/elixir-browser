@@ -6659,9 +6659,17 @@ defmodule Browser.Layout do
       sx: round(sx),
       sy: round(sy),
       collapse?: collapse?,
-      h: num(c["height"]),
+      h: table_height(c),
       fixed?: fixed_table?(c)
     }
+  end
+
+  # the height a table is given, which `min-height` raises
+  defp table_height(c) do
+    case {num(c["height"]), num(c["min-height"])} do
+      {nil, nil} -> nil
+      {h, min} -> max(h || 0, min || 0)
+    end
   end
 
   @cell_tags ~w(td th)
@@ -6714,10 +6722,15 @@ defmodule Browser.Layout do
 
     wid = fn c, inherited -> if is_number(c["width"]), do: c["width"], else: inherited end
 
+    capped = fn w, c ->
+      if is_number(w) and is_number(c["max-width"]), do: min(w, c["max-width"]), else: w
+    end
+
     col = fn {:element, _, attrs, _}, c, inherited ->
       entry = %{
         bg: row_bg(c) || inherited.bg,
-        w: wid.(c, inherited.w),
+        w: capped.(wid.(c, inherited.w), c),
+        mw: num(c["min-width"]) || Map.get(inherited, :mw),
         edges: edges_of(c),
         imgs: Enum.reject([Map.get(inherited, :img), bg_pictures(c)], &is_nil/1)
       }
@@ -6737,7 +6750,13 @@ defmodule Browser.Layout do
               ctag not in @skip,
               cc = computed(cattrs),
               ctag == "col" or cc["display"] == "table-column",
-              entry <- col.(cel, cc, %{bg: row_bg(c), w: wid.(c, nil), img: gimg}),
+              entry <-
+                col.(cel, cc, %{
+                  bg: row_bg(c),
+                  w: wid.(c, nil),
+                  mw: num(c["min-width"]),
+                  img: gimg
+                }),
               do: entry
 
         cols =
@@ -6747,6 +6766,7 @@ defmodule Browser.Layout do
                 %{
                   bg: row_bg(c),
                   w: wid.(c, nil),
+                  mw: num(c["min-width"]),
                   edges: edges_of(c),
                   imgs: Enum.reject([gimg], &is_nil/1)
                 },
@@ -6934,6 +6954,7 @@ defmodule Browser.Layout do
       cells: cells,
       valign: valign_of(c["vertical-align"]),
       bg: row_bg(c) || group_bg,
+      h: num(c["height"]),
       bgimg: bg_pictures(c),
       gimg: nil,
       edges: edges_of(c),
@@ -6998,6 +7019,7 @@ defmodule Browser.Layout do
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),
+      minw: num(c["min-width"]),
       # the height of a cell is that of its content (box-sizing decides), the row is as high as
       # the box around it
       minh:
@@ -7153,6 +7175,11 @@ defmodule Browser.Layout do
         end)
 
       row_heights = table_row_heights(sized, nrows, sy)
+      # a row is at least as high as its `height`
+      row_heights =
+        model.rows
+        |> Enum.zip(row_heights)
+        |> Enum.map(fn {row, h} -> max(h, round(row.h || 0)) end)
 
       {caption_items, caption_h} = table_caption_items(st, model.caption, table_w)
       top = caption_h
@@ -7252,10 +7279,9 @@ defmodule Browser.Layout do
       list
       |> Enum.with_index()
       |> Enum.map(fn {v, i} ->
-        case Enum.at(cols, i) do
-          %{w: w} when is_number(w) -> max(v, round(w))
-          _ -> v
-        end
+        col = Enum.at(cols, i) || %{}
+        v = if is_number(col[:w]), do: max(v, round(col.w)), else: v
+        if is_number(col[:mw]), do: max(v, round(col.mw)), else: v
       end)
     end
 
@@ -7396,6 +7422,10 @@ defmodule Browser.Layout do
             {:pct, f} -> {max, f}
             _ -> {max, nil}
           end
+
+        # `min-width` is the least the cell is, whatever its content
+        least = if is_number(cell.minw), do: round(cell.minw) + cell.extra, else: 0
+        {min, max} = {max(min, least), max(max, least)}
 
         {p, min, max(max, min), pct}
       end)
