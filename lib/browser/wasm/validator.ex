@@ -6,7 +6,7 @@ defmodule Browser.Wasm.Validator do
   number of values it drops.
   """
 
-  alias Browser.Wasm.{Error, Ops}
+  alias Browser.Wasm.{Error, Ops, Types}
 
   @sigs Ops.signatures()
   @simd Ops.simd_signatures()
@@ -21,7 +21,9 @@ defmodule Browser.Wasm.Validator do
   @doc "Validates `mod`. Returns it with a `:compiled` list (one entry per defined function)."
   def validate(mod) do
     types = List.to_tuple(mod.types)
+    keys = List.to_tuple(mod.type_keys)
     ntypes = tuple_size(types)
+    check_type_defs(mod.type_keys)
 
     imp = fn kind -> for %{desc: {^kind, d}} <- mod.imports, do: d end
 
@@ -30,14 +32,18 @@ defmodule Browser.Wasm.Validator do
     for %{desc: {:tag, t}} <- mod.imports, t >= ntypes, do: err("unknown type")
     for t <- mod.tags, t >= ntypes, do: err("unknown type")
 
+    for t <- imp.(:func) ++ mod.funcs, do: func_type!(types, t)
+
     tag_types =
-      for(t <- imp.(:tag) ++ mod.tags, do: elem(types, t))
+      for(t <- imp.(:tag) ++ mod.tags, do: func_type!(types, t))
       |> tap(fn ts -> for {_, r} <- ts, r != [], do: err("non-empty tag result type") end)
       |> List.to_tuple()
 
     func_types =
       for(t <- imp.(:func) ++ mod.funcs, do: elem(types, t))
       |> List.to_tuple()
+
+    func_keys = for(t <- imp.(:func) ++ mod.funcs, do: elem(keys, t)) |> List.to_tuple()
 
     tables = (imp.(:table) ++ mod.tables) |> Enum.map(&check_table/1) |> List.to_tuple()
     mems = (imp.(:mem) ++ mod.mems) |> Enum.map(&check_mem/1)
@@ -46,6 +52,8 @@ defmodule Browser.Wasm.Validator do
 
     c = %{
       types: types,
+      keys: keys,
+      fkeys: func_keys,
       funcs: func_types,
       tables: tables,
       nmems: length(mems),
@@ -58,6 +66,20 @@ defmodule Browser.Wasm.Validator do
     }
 
     c = %{c | refs: collect_refs(mod)}
+
+    # table initial values
+    for {{_, rt}, init} <- Enum.zip(mod.tables, mod.table_inits) do
+      cond do
+        init != nil ->
+          const_expr(%{c | globals: take_globals(c.globals, length(imported_globals))}, init, rt)
+
+        not Types.nullable?(rt) ->
+          err("type mismatch")
+
+        true ->
+          :ok
+      end
+    end
 
     # globals
     nimp = length(imported_globals)
@@ -101,7 +123,7 @@ defmodule Browser.Wasm.Validator do
         {:active, t, off} ->
           if t >= tuple_size(c.tables), do: err("unknown table")
           {{_, _, addr}, rt} = elem(c.tables, t)
-          if rt != e.type, do: err("type mismatch")
+          unless Types.sub?(e.type, rt), do: err("type mismatch")
           const_expr(c, off, addr)
 
         _ ->
@@ -150,6 +172,30 @@ defmodule Browser.Wasm.Validator do
     type
   end
 
+  defp func_type!(types, t) do
+    case elem(types, t) do
+      {p, r} = ft when is_list(p) and is_list(r) -> ft
+      _ -> err("type mismatch")
+    end
+  end
+
+  # the declared subtypes: a supertype is an earlier, non-final type that the subtype matches
+  defp check_type_defs(keys) do
+    for {group, i} = key <- keys do
+      {_, supers, _} = elem(group, i)
+      if length(supers) > 1, do: err("sub type")
+      for {:rel, j} <- supers, j >= i, do: err("unknown type")
+
+      %{supers: sups, comp: comp} = Types.definition(key)
+
+      for {:ct, sk} <- sups do
+        sd = Types.definition(sk)
+        if sd.final, do: err("sub type")
+        unless Types.comp_match?(comp, sd.comp), do: err("sub type")
+      end
+    end
+  end
+
   defp collect_refs(mod) do
     from_exports = for %{kind: :func, index: i} <- mod.exports, do: i
 
@@ -159,54 +205,80 @@ defmodule Browser.Wasm.Validator do
 
     from_elems = from_exprs.(Enum.flat_map(mod.elems, & &1.inits))
     from_globals = from_exprs.(Enum.map(mod.globals, & &1.init))
-    MapSet.new(from_exports ++ from_elems ++ from_globals)
+    from_tables = from_exprs.(Enum.reject(mod.table_inits, &is_nil/1))
+    MapSet.new(from_exports ++ from_elems ++ from_globals ++ from_tables)
   end
 
   # ── constant expressions ───────────────────────────────────
 
+  @const_atoms [
+    :i32_add,
+    :i32_sub,
+    :i32_mul,
+    :i64_add,
+    :i64_sub,
+    :i64_mul,
+    :ref_i31,
+    :any_convert_extern,
+    :extern_convert_any
+  ]
+
   defp const_expr(c, expr, type) do
-    stack =
-      Enum.reduce(expr, [], fn
-        {:i32_const, _}, st ->
-          [:i32 | st]
+    for i <- expr, do: check_const(c, i)
+    c = Map.put(c, :locals, {})
 
-        {:i64_const, _}, st ->
-          [:i64 | st]
+    frame = %{
+      kind: :func,
+      ins: [],
+      outs: [type],
+      height: 0,
+      unreachable: false,
+      label: 0,
+      inits: MapSet.new()
+    }
 
-        {:f32_const, _}, st ->
-          [:f32 | st]
+    s = %{
+      vals: [],
+      h: 0,
+      ctrls: [frame],
+      out: [],
+      pc: 0,
+      nlabel: 1,
+      labels: %{},
+      xl: 0,
+      inits: MapSet.new()
+    }
 
-        {:f64_const, _}, st ->
-          [:f64 | st]
-
-        {:simd_const, _}, st ->
-          [:v128 | st]
-
-        {:ref_null, t}, st ->
-          [t | st]
-
-        {:ref_func, i}, st ->
-          if i >= tuple_size(c.funcs), do: err("unknown function")
-          [:funcref | st]
-
-        {:global_get, i}, st ->
-          if i >= tuple_size(c.globals), do: err("unknown global")
-          {t, mut} = elem(c.globals, i)
-          if mut == :var, do: err("constant expression required")
-          [t | st]
-
-        op, [b, a | st] when op in [:i32_add, :i32_sub, :i32_mul] and a == :i32 and b == :i32 ->
-          [:i32 | st]
-
-        op, [b, a | st] when op in [:i64_add, :i64_sub, :i64_mul] and a == :i64 and b == :i64 ->
-          [:i64 | st]
-
-        _, _ ->
-          err("constant expression required")
-      end)
-
-    if stack != [type], do: err("type mismatch")
+    s |> then(&walk(c, &1, expr)) |> check_end()
+    :ok
   end
+
+  defp check_const(_, i) when i in @const_atoms, do: :ok
+
+  defp check_const(c, {:global_get, i}) do
+    if i >= tuple_size(c.globals), do: err("unknown global")
+    {_, mut} = elem(c.globals, i)
+    if mut == :var, do: err("constant expression required")
+  end
+
+  defp check_const(_, {k, _})
+       when k in [
+              :i32_const,
+              :i64_const,
+              :f32_const,
+              :f64_const,
+              :simd_const,
+              :ref_null,
+              :ref_func,
+              :struct_new,
+              :struct_new_default,
+              :array_new,
+              :array_new_default
+            ],
+       do: :ok
+
+  defp check_const(_, {:array_new_fixed, _, _}), do: :ok
+  defp check_const(_, _), do: err("constant expression required")
 
   # ── function bodies ────────────────────────────────────────
 
@@ -214,8 +286,30 @@ defmodule Browser.Wasm.Validator do
     c = Map.put(c, :locals, List.to_tuple(params ++ locals))
     label = 0
 
-    frame = %{kind: :func, ins: [], outs: results, height: 0, unreachable: false, label: label}
-    s = %{vals: [], h: 0, ctrls: [frame], out: [], pc: 0, nlabel: 1, labels: %{}, xl: 0}
+    inits = MapSet.new(0..(length(params) - 1)//1)
+
+    frame = %{
+      kind: :func,
+      ins: [],
+      outs: results,
+      height: 0,
+      unreachable: false,
+      label: label,
+      inits: inits
+    }
+
+    s = %{
+      vals: [],
+      h: 0,
+      ctrls: [frame],
+      out: [],
+      pc: 0,
+      nlabel: 1,
+      labels: %{},
+      xl: 0,
+      inits: inits
+    }
+
     s = walk(c, s, body)
     s = end_ctrl(s)
     s = emit(s, {:return, length(results)})
@@ -235,6 +329,7 @@ defmodule Browser.Wasm.Validator do
   defp zero(:f32), do: 0.0
   defp zero(:f64), do: 0.0
   defp zero(:v128), do: 0
+  defp zero(s) when s in [:i8, :i16], do: 0
   defp zero(_), do: :null
 
   defp resolve({:br, {:L, l}, 0, 0}, labels), do: {:jump, Map.fetch!(labels, l)}
@@ -256,6 +351,12 @@ defmodule Browser.Wasm.Validator do
 
     {:try_table, hs, np, Map.fetch!(labels, end_l)}
   end
+
+  defp resolve({k, {:L, l}, a, d}, labels) when k in [:br_on_null, :br_on_non_null],
+    do: {k, Map.fetch!(labels, l), a, d}
+
+  defp resolve({k, {:L, l}, a, d, n, h}, labels) when k in [:br_on_cast, :br_on_cast_fail],
+    do: {k, Map.fetch!(labels, l), a, d, n, h}
 
   defp resolve(other, _), do: other
 
@@ -282,6 +383,7 @@ defmodule Browser.Wasm.Validator do
       t == :unknown -> {expect, s}
       expect == :unknown -> {t, s}
       t == expect -> {t, s}
+      Types.sub?(t, expect) -> {t, s}
       true -> err("type mismatch")
     end
   end
@@ -300,7 +402,16 @@ defmodule Browser.Wasm.Validator do
   defp define(s, l), do: %{s | labels: Map.put(s.labels, l, s.pc)}
 
   defp push_ctrl(s, kind, ins, outs, label) do
-    f = %{kind: kind, ins: ins, outs: outs, height: s.h, unreachable: false, label: label}
+    f = %{
+      kind: kind,
+      ins: ins,
+      outs: outs,
+      height: s.h,
+      unreachable: false,
+      label: label,
+      inits: s.inits
+    }
+
     push_all(%{s | ctrls: [f | s.ctrls]}, ins)
   end
 
@@ -314,7 +425,7 @@ defmodule Browser.Wasm.Validator do
   defp end_ctrl(s) do
     s = check_end(s)
     [f | rest] = s.ctrls
-    s = %{s | ctrls: rest}
+    s = %{s | ctrls: rest, inits: f.inits}
     s = if f.kind == :loop, do: s, else: define(s, f.label)
     push_all(s, f.outs)
   end
@@ -331,7 +442,7 @@ defmodule Browser.Wasm.Validator do
 
   defp blocktype(c, {:type, i}) do
     if i >= tuple_size(c.types), do: err("unknown type")
-    elem(c.types, i)
+    func_type!(c.types, i)
   end
 
   defp walk(c, s, body), do: Enum.reduce(body, s, &ins(c, &2, &1))
@@ -363,11 +474,14 @@ defmodule Browser.Wasm.Validator do
       s = emit(s, {:jump, {:L, end_l}})
       s = define(s, else_l)
       [f | rest] = s.ctrls
-      s = %{s | ctrls: [%{f | unreachable: false} | rest]}
+      s = %{s | ctrls: [%{f | unreachable: false} | rest], inits: f.inits}
       s = push_all(s, ins)
       s |> then(&walk(c, &1, els)) |> end_ctrl()
     else
-      if ins != outs, do: err("type mismatch")
+      unless length(ins) == length(outs) and
+               Enum.all?(Enum.zip(ins, outs), fn {a, b} -> Types.sub?(a, b) end),
+             do: err("type mismatch")
+
       s = end_ctrl(s)
       define(s, else_l)
     end
@@ -425,7 +539,12 @@ defmodule Browser.Wasm.Validator do
       for clause <- catches do
         {tag, ref?, label, types} = catch_target(c, clause)
         f = frame(s, label)
-        if label_types(f) != types, do: err("type mismatch")
+        lt = label_types(f)
+
+        unless length(lt) == length(types) and
+                 Enum.all?(Enum.zip(types, lt), fn {a, b} -> Types.sub?(a, b) end),
+               do: err("type mismatch")
+
         # the stack is cut back to the height at the try_table, so the values are all there is
         drop = max(0, s.h - length(ins) - f.height)
         {tag, ref?, {:L, f.label, length(types), drop}}
@@ -501,6 +620,8 @@ defmodule Browser.Wasm.Validator do
         |> Enum.reduce(s, fn {{{{_, hbody}, hl}, ps}, i}, s ->
           s = define(s, hl)
 
+          s = %{s | inits: hd(s.ctrls).inits}
+
           s =
             update_top(
               s,
@@ -550,9 +671,9 @@ defmodule Browser.Wasm.Validator do
   defp ins(c, s, {:return_call_indirect, ti, tbl}) do
     if tbl >= tuple_size(c.tables), do: err("unknown table")
     {{_, _, addr}, rt} = elem(c.tables, tbl)
-    if rt != :funcref, do: err("type mismatch")
+    unless Types.sub?(rt, :funcref), do: err("type mismatch")
     if ti >= tuple_size(c.types), do: err("unknown type")
-    {params, results} = elem(c.types, ti)
+    {params, results} = func_type!(c.types, ti)
     check_tail(s, results)
     {_, s} = pop(s, addr)
 
@@ -565,9 +686,9 @@ defmodule Browser.Wasm.Validator do
   defp ins(c, s, {:call_indirect, ti, tbl}) do
     if tbl >= tuple_size(c.tables), do: err("unknown table")
     {{_, _, addr}, rt} = elem(c.tables, tbl)
-    if rt != :funcref, do: err("type mismatch")
+    unless Types.sub?(rt, :funcref), do: err("type mismatch")
     if ti >= tuple_size(c.types), do: err("unknown type")
-    {params, results} = elem(c.types, ti)
+    {params, results} = func_type!(c.types, ti)
     {_, s} = pop(s, addr)
     s |> pop_all(params) |> push_all(results) |> emit({:call_indirect, ti, tbl, length(params)})
   end
@@ -582,7 +703,7 @@ defmodule Browser.Wasm.Validator do
     {t1, s} = pop(s)
     {t2, s} = pop(s)
 
-    if t1 in [:funcref, :externref, :exnref] or t2 in [:funcref, :externref, :exnref],
+    if (t1 != :unknown and Types.ref_type?(t1)) or (t2 != :unknown and Types.ref_type?(t2)),
       do: err("type mismatch")
 
     if t1 != :unknown and t2 != :unknown and t1 != t2, do: err("type mismatch")
@@ -597,18 +718,21 @@ defmodule Browser.Wasm.Validator do
   end
 
   defp ins(c, s, {:local_get, i}) do
-    s |> push(local(c, i)) |> emit({:lget, i})
+    t = local(c, i)
+
+    unless Types.defaultable?(t) or MapSet.member?(s.inits, i), do: err("uninitialized local")
+    s |> push(t) |> emit({:lget, i})
   end
 
   defp ins(c, s, {:local_set, i}) do
     {_, s} = pop(s, local(c, i))
-    emit(s, {:lset, i})
+    emit(%{s | inits: MapSet.put(s.inits, i)}, {:lset, i})
   end
 
   defp ins(c, s, {:local_tee, i}) do
     t = local(c, i)
     {_, s} = pop(s, t)
-    s |> push(t) |> emit({:ltee, i})
+    s |> push(t) |> emit({:ltee, i}) |> then(&%{&1 | inits: MapSet.put(&1.inits, i)})
   end
 
   defp ins(c, s, {:global_get, i}) do
@@ -659,7 +783,7 @@ defmodule Browser.Wasm.Validator do
 
   defp ins(c, s, {:table_copy, d, src}) do
     dt = table_type(c, d)
-    if table_type(c, src) != dt, do: err("type mismatch")
+    unless Types.sub?(table_type(c, src), dt), do: err("type mismatch")
     da = table_addr(c, d)
     sa = table_addr(c, src)
     n = if da == :i64 and sa == :i64, do: :i64, else: :i32
@@ -669,7 +793,7 @@ defmodule Browser.Wasm.Validator do
   defp ins(c, s, {:table_init, e, t}) do
     rt = table_type(c, t)
     if e >= tuple_size(c.elems), do: err("unknown elem segment")
-    if elem(c.elems, e) != rt, do: err("type mismatch")
+    unless Types.sub?(elem(c.elems, e), rt), do: err("type mismatch")
     s |> pop_all([table_addr(c, t), :i32, :i32]) |> emit({:table_init, e, t})
   end
 
@@ -775,18 +899,240 @@ defmodule Browser.Wasm.Validator do
   defp ins(_, s, {:i64_const, v}), do: s |> push(:i64) |> emit({:const, v})
   defp ins(_, s, {:f32_const, v}), do: s |> push(:f32) |> emit({:const, v})
   defp ins(_, s, {:f64_const, v}), do: s |> push(:f64) |> emit({:const, v})
-  defp ins(_, s, {:ref_null, t}), do: s |> push(t) |> emit({:const, :null})
+  defp ins(_, s, {:ref_null, ht}), do: s |> push(Types.ref(true, ht)) |> emit({:const, :null})
 
   defp ins(_, s, :ref_is_null) do
     {t, s} = pop(s)
-    unless t in [:funcref, :externref, :exnref, :unknown], do: err("type mismatch")
+    unless t == :unknown or Types.ref_type?(t), do: err("type mismatch")
     s |> push(:i32) |> emit(:ref_is_null)
   end
 
   defp ins(c, s, {:ref_func, i}) do
     if i >= tuple_size(c.funcs), do: err("unknown function")
     unless MapSet.member?(c.refs, i), do: err("undeclared function reference")
-    s |> push(:funcref) |> emit({:ref_func, i})
+    s |> push(Types.ref(false, {:ct, elem(c.fkeys, i)})) |> emit({:ref_func, i})
+  end
+
+  # ── function references ────────────────────────────────────
+
+  defp ins(c, s, {:call_ref, t}) do
+    {params, results} = ref_func_type(c, t)
+    {_, s} = pop(s, Types.ref(true, {:ct, elem(c.keys, t)}))
+    s |> pop_all(params) |> push_all(results) |> emit({:call_ref, length(params)})
+  end
+
+  defp ins(c, s, {:return_call_ref, t}) do
+    {params, results} = ref_func_type(c, t)
+    check_tail(s, results)
+    {_, s} = pop(s, Types.ref(true, {:ct, elem(c.keys, t)}))
+    s |> pop_all(params) |> emit({:return_call_ref, length(params)}) |> unreachable()
+  end
+
+  defp ins(_, s, :ref_as_non_null) do
+    {t, s} = pop_ref(s)
+    s |> push(non_null(t)) |> emit(:ref_as_non_null)
+  end
+
+  defp ins(_, s, {:br_on_null, depth}) do
+    {t, s} = pop_ref(s)
+    f = frame(s, depth)
+    types = label_types(f)
+    drop = max(0, s.h - f.height - length(types))
+    s = s |> pop_all(types) |> push_all(types)
+    s |> push(non_null(t)) |> emit({:br_on_null, {:L, f.label}, length(types), drop})
+  end
+
+  defp ins(_, s, {:br_on_non_null, depth}) do
+    f = frame(s, depth)
+    types = label_types(f)
+    if types == [], do: err("type mismatch")
+    {t, s} = pop_ref(s)
+    drop = max(0, s.h + 1 - f.height - length(types))
+    prefix = Enum.drop(types, -1)
+    unless Types.sub?(non_null(t), List.last(types)) or t == :unknown, do: err("type mismatch")
+    s = s |> pop_all(prefix) |> push_all(prefix)
+    emit(s, {:br_on_non_null, {:L, f.label}, length(types), drop})
+  end
+
+  defp ins(_, s, :ref_eq) do
+    eq = {:ref, true, :eq}
+    s |> pop_all([eq, eq]) |> push(:i32) |> emit(:ref_eq)
+  end
+
+  # ── structs ────────────────────────────────────────────────
+
+  defp ins(c, s, {:struct_new, t}) do
+    fields = struct_fields(c, t)
+    s = pop_all(s, Enum.map(fields, fn {st, _} -> unpack(st) end))
+    s |> push(type_ref(c, t, false)) |> emit({:struct_new, elem(c.keys, t), packs(fields)})
+  end
+
+  defp ins(c, s, {:struct_new_default, t}) do
+    fields = struct_fields(c, t)
+
+    for {st, _} <- fields,
+        not packed?(st) and not Types.defaultable?(st),
+        do: err("type mismatch")
+
+    zeros = fields |> Enum.map(fn {st, _} -> zero(st) end) |> List.to_tuple()
+    s |> push(type_ref(c, t, false)) |> emit({:struct_new_default, elem(c.keys, t), zeros})
+  end
+
+  defp ins(c, s, {kind, t, f}) when kind in [:struct_get, :struct_get_s, :struct_get_u] do
+    {st, _} = struct_field(c, t, f)
+    if kind == :struct_get == packed?(st), do: err("type mismatch")
+    {_, s} = pop(s, type_ref(c, t, true))
+    s |> push(unpack(st)) |> emit({:struct_get, f, extension(kind, st)})
+  end
+
+  defp ins(c, s, {:struct_set, t, f}) do
+    {st, mut} = struct_field(c, t, f)
+    if mut != :var, do: err("field is immutable")
+    s = pop_all(s, [type_ref(c, t, true), unpack(st)])
+    emit(s, {:struct_set, f, pack(st)})
+  end
+
+  # ── arrays ─────────────────────────────────────────────────
+
+  defp ins(c, s, {:array_new, t}) do
+    {st, _} = array_field(c, t)
+    s = pop_all(s, [unpack(st), :i32])
+    s |> push(type_ref(c, t, false)) |> emit({:array_new, elem(c.keys, t), pack(st)})
+  end
+
+  defp ins(c, s, {:array_new_default, t}) do
+    {st, _} = array_field(c, t)
+    if not packed?(st) and not Types.defaultable?(st), do: err("type mismatch")
+    {_, s} = pop(s, :i32)
+    s |> push(type_ref(c, t, false)) |> emit({:array_new_default, elem(c.keys, t), zero(st)})
+  end
+
+  defp ins(c, s, {:array_new_fixed, t, n}) do
+    {st, _} = array_field(c, t)
+    s = pop_all(s, List.duplicate(unpack(st), n))
+    s |> push(type_ref(c, t, false)) |> emit({:array_new_fixed, elem(c.keys, t), pack(st), n})
+  end
+
+  defp ins(c, s, {:array_new_data, t, d}) do
+    {st, _} = array_field(c, t)
+    unless numeric_storage?(st), do: err("array type is not numeric or vector")
+    data_idx(c, d)
+    s = pop_all(s, [:i32, :i32])
+    s |> push(type_ref(c, t, false)) |> emit({:array_new_data, elem(c.keys, t), st, d})
+  end
+
+  defp ins(c, s, {:array_new_elem, t, e}) do
+    {st, _} = array_field(c, t)
+    elem_seg(c, e, st)
+    s = pop_all(s, [:i32, :i32])
+    s |> push(type_ref(c, t, false)) |> emit({:array_new_elem, elem(c.keys, t), e})
+  end
+
+  defp ins(c, s, {kind, t}) when kind in [:array_get, :array_get_s, :array_get_u] do
+    {st, _} = array_field(c, t)
+    if kind == :array_get == packed?(st), do: err("type mismatch")
+    s = pop_all(s, [type_ref(c, t, true), :i32])
+    s |> push(unpack(st)) |> emit({:array_get, extension(kind, st)})
+  end
+
+  defp ins(c, s, {:array_set, t}) do
+    {st, mut} = array_field(c, t)
+    if mut != :var, do: err("array is immutable")
+    s = pop_all(s, [type_ref(c, t, true), :i32, unpack(st)])
+    emit(s, {:array_set, pack(st)})
+  end
+
+  defp ins(_, s, :array_len) do
+    {_, s} = pop(s, {:ref, true, :array})
+    s |> push(:i32) |> emit(:array_len)
+  end
+
+  defp ins(c, s, {:array_fill, t}) do
+    {st, mut} = array_field(c, t)
+    if mut != :var, do: err("array is immutable")
+    s = pop_all(s, [type_ref(c, t, true), :i32, unpack(st), :i32])
+    emit(s, {:array_fill, pack(st)})
+  end
+
+  defp ins(c, s, {:array_copy, t1, t2}) do
+    {st1, mut} = array_field(c, t1)
+    {st2, _} = array_field(c, t2)
+    if mut != :var, do: err("array is immutable")
+
+    unless Types.sub?(unpack(st2), unpack(st1)) and packed?(st1) == packed?(st2) and
+             (not packed?(st1) or st1 == st2),
+           do: err("array types do not match")
+
+    s = pop_all(s, [type_ref(c, t1, true), :i32, type_ref(c, t2, true), :i32, :i32])
+    emit(s, {:array_copy, pack(st1)})
+  end
+
+  defp ins(c, s, {:array_init_data, t, d}) do
+    {st, mut} = array_field(c, t)
+    if mut != :var, do: err("array is immutable")
+    unless numeric_storage?(st), do: err("array type is not numeric or vector")
+    data_idx(c, d)
+    s = pop_all(s, [type_ref(c, t, true), :i32, :i32, :i32])
+    emit(s, {:array_init_data, st, d})
+  end
+
+  defp ins(c, s, {:array_init_elem, t, e}) do
+    {st, mut} = array_field(c, t)
+    if mut != :var, do: err("array is immutable")
+    elem_seg(c, e, st)
+    s = pop_all(s, [type_ref(c, t, true), :i32, :i32, :i32])
+    emit(s, {:array_init_elem, e})
+  end
+
+  # ── i31, casts, conversions ────────────────────────────────
+
+  defp ins(_, s, :ref_i31) do
+    {_, s} = pop(s, :i32)
+    s |> push({:ref, false, :i31}) |> emit(:ref_i31)
+  end
+
+  defp ins(_, s, kind) when kind in [:i31_get_s, :i31_get_u] do
+    {_, s} = pop(s, {:ref, true, :i31})
+    s |> push(:i32) |> emit(kind)
+  end
+
+  defp ins(_, s, {:ref_test, nullable, ht}) do
+    {_, s} = pop(s, Types.ref(true, Types.top(ht)))
+    s |> push(:i32) |> emit({:ref_test, nullable, ht})
+  end
+
+  defp ins(_, s, {:ref_cast, nullable, ht}) do
+    {_, s} = pop(s, Types.ref(true, Types.top(ht)))
+    s |> push(Types.ref(nullable, ht)) |> emit({:ref_cast, nullable, ht})
+  end
+
+  defp ins(_, s, {kind, depth, {n1, h1}, {n2, h2}})
+       when kind in [:br_on_cast, :br_on_cast_fail] do
+    rt1 = Types.ref(n1, h1)
+    rt2 = Types.ref(n2, h2)
+    unless Types.sub?(rt2, rt1), do: err("type mismatch")
+    diff = Types.ref(n1 and not n2, h1)
+    f = frame(s, depth)
+    types = label_types(f)
+    if types == [], do: err("type mismatch")
+    carried = if kind == :br_on_cast, do: rt2, else: diff
+    unless Types.sub?(carried, List.last(types)), do: err("type mismatch")
+    {_, s} = pop(s, rt1)
+    drop = max(0, s.h + 1 - f.height - length(types))
+    prefix = Enum.drop(types, -1)
+    s = s |> pop_all(prefix) |> push_all(prefix)
+    s = push(s, if(kind == :br_on_cast, do: diff, else: rt2))
+    emit(s, {kind, {:L, f.label}, length(types), drop, n2, h2})
+  end
+
+  defp ins(_, s, :any_convert_extern) do
+    {t, s} = pop(s, :externref)
+    s |> push(Types.ref(nullable_or(t), :any)) |> emit(:any_convert_extern)
+  end
+
+  defp ins(_, s, :extern_convert_any) do
+    {t, s} = pop(s, {:ref, true, :any})
+    s |> push(Types.ref(nullable_or(t), :extern)) |> emit(:extern_convert_any)
   end
 
   defp ins(_, s, op) when is_atom(op) do
@@ -832,6 +1178,72 @@ defmodule Browser.Wasm.Validator do
     if t >= tuple_size(c.tables), do: err("unknown table")
     {{_, _, addr}, _} = elem(c.tables, t)
     addr
+  end
+
+  # ── helpers for references and aggregates ─────────────────
+
+  defp ref_func_type(c, t) do
+    if t >= tuple_size(c.types), do: err("unknown type")
+    func_type!(c.types, t)
+  end
+
+  defp pop_ref(s) do
+    {t, s} = pop(s)
+    unless t == :unknown or Types.ref_type?(t), do: err("type mismatch")
+    {t, s}
+  end
+
+  defp non_null(:unknown), do: :unknown
+  defp non_null(t), do: Types.with_null(t, false)
+
+  defp nullable_or(:unknown), do: true
+  defp nullable_or(t), do: Types.nullable?(t)
+
+  defp type_ref(c, t, nullable), do: Types.ref(nullable, {:ct, elem(c.keys, t)})
+
+  defp struct_fields(c, t) do
+    if t >= tuple_size(c.types), do: err("unknown type")
+
+    case elem(c.types, t) do
+      {:struct, fields} -> fields
+      _ -> err("type mismatch")
+    end
+  end
+
+  defp struct_field(c, t, f) do
+    fields = struct_fields(c, t)
+    if f >= length(fields), do: err("unknown field")
+    Enum.at(fields, f)
+  end
+
+  defp array_field(c, t) do
+    if t >= tuple_size(c.types), do: err("unknown type")
+
+    case elem(c.types, t) do
+      {:array, field} -> field
+      _ -> err("type mismatch")
+    end
+  end
+
+  defp packed?(st), do: st in [:i8, :i16]
+  defp unpack(st) when st in [:i8, :i16], do: :i32
+  defp unpack(st), do: st
+  defp pack(st) when st in [:i8, :i16], do: st
+  defp pack(_), do: nil
+  defp packs(fields), do: fields |> Enum.map(fn {st, _} -> pack(st) end) |> List.to_tuple()
+  defp numeric_storage?(st), do: st in [:i8, :i16, :i32, :i64, :f32, :f64, :v128]
+
+  defp extension(:struct_get, _), do: nil
+  defp extension(:array_get, _), do: nil
+  defp extension(kind, st) when kind in [:struct_get_s, :array_get_s], do: {:s, bits(st)}
+  defp extension(kind, st) when kind in [:struct_get_u, :array_get_u], do: {:u, bits(st)}
+  defp bits(:i8), do: 8
+  defp bits(:i16), do: 16
+
+  # an element segment whose type matches the element type of an array
+  defp elem_seg(c, e, st) do
+    if e >= tuple_size(c.elems), do: err("unknown elem segment")
+    unless Types.sub?(elem(c.elems, e), st), do: err("type mismatch")
   end
 
   # the address type of memory `m`

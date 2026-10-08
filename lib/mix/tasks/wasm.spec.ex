@@ -207,6 +207,7 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp value(%{"type" => "v128", "lane_type" => lt, "value" => vs}),
     do: vs |> Enum.map(&String.to_integer/1) |> Browser.Wasm.Simd.pack(lane_bits(lt))
 
+  defp value(%{"type" => "hostref", "value" => v}), do: {:ext, {:extern, String.to_integer(v)}}
   defp value(%{"type" => "externref", "value" => "null"}), do: :null
   defp value(%{"type" => "externref", "value" => v}), do: {:extern, String.to_integer(v)}
   defp value(%{"type" => "funcref", "value" => "null"}), do: :null
@@ -242,6 +243,19 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp match_value(v, %{"type" => "f64", "value" => e}),
     do: Num.f64_to_bits(v) == String.to_integer(e)
 
+  defp match_value(v, %{"type" => "hostref", "value" => e}),
+    do: v == {:ext, {:extern, String.to_integer(e)}}
+
+  defp match_value(v, %{"type" => "i31ref"}), do: match?({:i31, _}, v)
+  defp match_value(v, %{"type" => "structref"}), do: match?(%Browser.Wasm.Gc.Struct{}, v)
+  defp match_value(v, %{"type" => "arrayref"}), do: match?(%Browser.Wasm.Gc.Array{}, v)
+
+  defp match_value(v, %{"type" => "eqref"}),
+    do:
+      match?({:i31, _}, v) or match?(%Browser.Wasm.Gc.Struct{}, v) or
+        match?(%Browser.Wasm.Gc.Array{}, v)
+
+  defp match_value(v, %{"type" => "anyref"}), do: v != :null
   defp match_value(v, %{"type" => "externref", "value" => "null"}), do: v == :null
 
   defp match_value(v, %{"type" => "externref", "value" => e}),

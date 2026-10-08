@@ -1,7 +1,7 @@
 defmodule Browser.Wasm.Instance do
   @moduledoc "Makes an instance of a validated module: links the imports, creates the state, runs segments and the start function."
 
-  alias Browser.Wasm.{Error, Func, Global, Interp, Memory, Table, Tag}
+  alias Browser.Wasm.{Error, Func, Gc, Global, Interp, Memory, Table, Tag, Types}
 
   defp link_error(msg), do: Error.fail(:link, msg)
 
@@ -13,6 +13,8 @@ defmodule Browser.Wasm.Instance do
   def instantiate(mod, resolve) do
     id = make_ref()
     types = List.to_tuple(mod.types)
+    keys = List.to_tuple(mod.type_keys)
+    tk = {types, keys}
 
     imported =
       for imp <- mod.imports do
@@ -24,7 +26,7 @@ defmodule Browser.Wasm.Instance do
           end
 
         value = resolve.(imp.module, imp.name, desc)
-        check_import(imp, value, types)
+        check_import(imp, value, types, keys)
         {elem(imp.desc, 0), value}
       end
 
@@ -35,15 +37,10 @@ defmodule Browser.Wasm.Instance do
       mod.funcs
       |> Enum.with_index()
       |> Enum.map(fn {t, i} ->
-        %Func{id: make_ref(), type: elem(types, t), impl: {:wasm, id, i}}
+        %Func{id: make_ref(), type: elem(types, t), ct: elem(keys, t), impl: {:wasm, id, i}}
       end)
 
     funcs = List.to_tuple(imported_funcs ++ defined_funcs)
-
-    tables =
-      (imp_of.(:table) ++
-         for({{min, max, addr}, type} <- mod.tables, do: Table.new(type, min, max, :null, addr)))
-      |> List.to_tuple()
 
     mems =
       (imp_of.(:mem) ++
@@ -53,9 +50,24 @@ defmodule Browser.Wasm.Instance do
     globals =
       Enum.reduce(mod.globals, List.to_tuple(imp_of.(:global)), fn g, acc ->
         {t, m} = g.type
-        value = eval(g.init, funcs, acc)
+        value = eval(g.init, funcs, acc, tk)
         Tuple.insert_at(acc, tuple_size(acc), Global.new(t, m == :var, value))
       end)
+
+    tables =
+      (imp_of.(:table) ++
+         for(
+           {{{min, max, addr}, type}, init} <- Enum.zip(mod.tables, mod.table_inits),
+           do:
+             Table.new(
+               type,
+               min,
+               max,
+               if(init, do: eval(init, funcs, globals, tk), else: :null),
+               addr
+             )
+         ))
+      |> List.to_tuple()
 
     tags =
       (imp_of.(:tag) ++ for(t <- mod.tags, do: Tag.new(elem(types, t))))
@@ -78,6 +90,7 @@ defmodule Browser.Wasm.Instance do
     inst = %{
       id: id,
       types: types,
+      keys: keys,
       funcs: funcs,
       tables: tables,
       mems: mems,
@@ -89,7 +102,7 @@ defmodule Browser.Wasm.Instance do
 
     Process.put({:wasm_instance, id}, inst)
 
-    elems = for e <- mod.elems, do: Enum.map(e.inits, &eval(&1, funcs, globals))
+    elems = for e <- mod.elems, do: Enum.map(e.inits, &eval(&1, funcs, globals, tk))
     datas = for d <- mod.datas, do: d.bytes
     Process.put({:wasm_segments, id}, %{elems: List.to_tuple(elems), datas: List.to_tuple(datas)})
 
@@ -99,7 +112,7 @@ defmodule Browser.Wasm.Instance do
     |> Enum.each(fn {e, i} ->
       case e.mode do
         {:active, t, off} ->
-          [o] = [eval(off, funcs, globals)]
+          [o] = [eval(off, funcs, globals, tk)]
           Table.init(elem(tables, t), o, Enum.at(elems, i))
           drop(id, :elems, i)
 
@@ -116,7 +129,7 @@ defmodule Browser.Wasm.Instance do
     |> Enum.each(fn {d, i} ->
       case d.mode do
         {:active, m, off} ->
-          o = eval(off, funcs, globals)
+          o = eval(off, funcs, globals, tk)
           mem = elem(mems, m)
 
           if o + byte_size(d.bytes) > Memory.size(mem) * Memory.page_size(),
@@ -141,7 +154,14 @@ defmodule Browser.Wasm.Instance do
     Process.put({:wasm_segments, id}, Map.update!(segs, key, &put_elem(&1, i, empty)))
   end
 
-  defp eval(expr, funcs, globals) do
+  defp packs({:struct, fields}),
+    do: fields |> Enum.map(fn {s, _} -> if(s in [:i8, :i16], do: s) end) |> List.to_tuple()
+
+  defp zero(s) when s in [:i32, :i64, :i8, :i16, :v128], do: 0
+  defp zero(s) when s in [:f32, :f64], do: 0.0
+  defp zero(_), do: :null
+
+  defp eval(expr, funcs, globals, {types, keys}) do
     [v] =
       Enum.reduce(expr, [], fn
         {c, v}, st when c in [:i32_const, :i64_const, :f32_const, :f64_const] ->
@@ -176,6 +196,29 @@ defmodule Browser.Wasm.Instance do
 
         :i64_mul, [b, a | st] ->
           [Bitwise.band(a * b, 0xFFFFFFFFFFFFFFFF) | st]
+
+        {:struct_new, t}, st ->
+          Gc.exec({:struct_new, elem(keys, t), packs(elem(types, t))}, st)
+
+        {:struct_new_default, t}, st ->
+          {:struct, fields} = elem(types, t)
+          zeros = fields |> Enum.map(fn {s, _} -> zero(s) end) |> List.to_tuple()
+          Gc.exec({:struct_new_default, elem(keys, t), zeros}, st)
+
+        {:array_new, t}, st ->
+          {:array, {s, _}} = elem(types, t)
+          Gc.exec({:array_new, elem(keys, t), if(s in [:i8, :i16], do: s)}, st)
+
+        {:array_new_default, t}, st ->
+          {:array, {s, _}} = elem(types, t)
+          Gc.exec({:array_new_default, elem(keys, t), zero(s)}, st)
+
+        {:array_new_fixed, t, n}, st ->
+          {:array, {s, _}} = elem(types, t)
+          Gc.exec({:array_new_fixed, elem(keys, t), if(s in [:i8, :i16], do: s), n}, st)
+
+        op, st ->
+          Gc.exec(op, st)
       end)
 
     v
@@ -183,33 +226,43 @@ defmodule Browser.Wasm.Instance do
 
   # ── import checks ──────────────────────────────────────────
 
-  defp check_import(imp, nil, _), do: link_error("unknown import #{imp.module}.#{imp.name}")
+  defp check_import(imp, nil, _, _),
+    do: link_error("unknown import #{imp.module}.#{imp.name}")
 
-  defp check_import(%{desc: {:func, t}}, %Func{} = f, types) do
-    if f.type != elem(types, t), do: link_error("incompatible import type")
+  defp check_import(%{desc: {:func, t}}, %Func{} = f, types, keys) do
+    ok =
+      if f.ct,
+        do: Types.key_sub?(f.ct, elem(keys, t)),
+        else: f.type == elem(types, t)
+
+    unless ok, do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:table, {{min, max, addr}, type}}}, %Table{} = t, _) do
+  defp check_import(%{desc: {:table, {{min, max, addr}, type}}}, %Table{} = t, _, _) do
     if t.type != type or t.addr != addr or Table.size(t) < min or limit_mismatch(max, t.max),
       do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:mem, {min, max, shared, addr}}}, %Memory{} = m, _) do
+  defp check_import(%{desc: {:mem, {min, max, shared, addr}}}, %Memory{} = m, _, _) do
     if Memory.size(m) < min or limit_mismatch(max, m.max) or m.shared != shared or
          m.addr != addr,
        do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:tag, t}}, %Tag{} = tag, types) do
+  defp check_import(%{desc: {:tag, t}}, %Tag{} = tag, types, _) do
     if tag.type != elem(types, t), do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:global, {type, mut}}}, %Global{} = g, _) do
-    if g.type != type or (g.mut and mut == :const) or (not g.mut and mut == :var),
-      do: link_error("incompatible import type")
+  defp check_import(%{desc: {:global, {type, mut}}}, %Global{} = g, _, _) do
+    ok =
+      if mut == :var,
+        do: g.mut and g.type == type,
+        else: not g.mut and Types.sub?(g.type, type)
+
+    unless ok, do: link_error("incompatible import type")
   end
 
-  defp check_import(_, _, _), do: link_error("incompatible import type")
+  defp check_import(_, _, _, _), do: link_error("incompatible import type")
 
   defp limit_mismatch(nil, _), do: false
   defp limit_mismatch(_, nil), do: true

@@ -6,7 +6,7 @@ defmodule Browser.Wasm.Interp do
   """
 
   import Bitwise
-  alias Browser.Wasm.{Atomic, Func, Global, Memory, Num, Simd, Table}
+  alias Browser.Wasm.{Atomic, Func, Gc, Global, Memory, Num, Simd, Table, Types}
 
   @max_depth 10_000
 
@@ -133,6 +133,62 @@ defmodule Browser.Wasm.Interp do
         case call(inst, locals, f, Enum.reverse(args), depth) do
           {:__exc, _, _} = exc -> exc
           results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:call_ref, np} ->
+        [f | st] = stack
+        if f == :null, do: trap("null function reference")
+        {args, rest} = Enum.split(st, np)
+
+        case call(inst, locals, f, Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:return_call_ref, np} ->
+        [f | st] = stack
+        if f == :null, do: trap("null function reference")
+        {args, _} = Enum.split(st, np)
+        tail_call(f, Enum.reverse(args), depth)
+
+      {:br_on_null, to, arity, drop} ->
+        [v | st] = stack
+
+        if v == :null do
+          back(to, pc)
+          go(code, to, branch(st, arity, drop), locals, inst, depth)
+        else
+          run(code, pc + 1, stack, locals, inst, depth)
+        end
+
+      {:br_on_non_null, to, arity, drop} ->
+        [v | st] = stack
+
+        if v == :null do
+          run(code, pc + 1, st, locals, inst, depth)
+        else
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
+        end
+
+      {:br_on_cast, to, arity, drop, nullable, ht} ->
+        [v | _] = stack
+
+        if Gc.matches?(v, nullable, ht) do
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
+        else
+          run(code, pc + 1, stack, locals, inst, depth)
+        end
+
+      {:br_on_cast_fail, to, arity, drop, nullable, ht} ->
+        [v | _] = stack
+
+        if Gc.matches?(v, nullable, ht) do
+          run(code, pc + 1, stack, locals, inst, depth)
+        else
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
         end
 
       {:throw, t, np} ->
@@ -282,6 +338,10 @@ defmodule Browser.Wasm.Interp do
     end)
   end
 
+  defp func_matches?(%Func{ct: k}, key, _) when k != nil, do: Types.key_sub?(k, key)
+  defp func_matches?(%Func{type: type}, _, type), do: true
+  defp func_matches?(_, _, _), do: false
+
   defp indirect(inst, ti, tbl, i) do
     table = elem(inst.tables, tbl)
     if i >= Table.size(table), do: trap("undefined element")
@@ -292,7 +352,9 @@ defmodule Browser.Wasm.Interp do
         f -> f
       end
 
-    if f.type != elem(inst.types, ti), do: trap("indirect call type mismatch")
+    unless func_matches?(f, elem(inst.keys, ti), elem(inst.types, ti)),
+      do: trap("indirect call type mismatch")
+
     f
   end
 
@@ -384,6 +446,50 @@ defmodule Browser.Wasm.Interp do
     Memory.fill(elem(inst.mems, m), dst, v &&& 0xFF, n)
     st
   end
+
+  defp bulk({:array_new_data, key, st, d}, [n, off | rest], inst) do
+    bytes = elem(segments(inst.id).datas, d)
+    size = Gc.size(st)
+    if off + n * size > byte_size(bytes), do: trap("out of bounds memory access")
+
+    values =
+      for i <- 0..(n - 1)//1,
+          do: Gc.decode(st, binary_part(bytes, off + i * size, size))
+
+    [Gc.new_array(key, values) | rest]
+  end
+
+  defp bulk({:array_new_elem, key, e}, [n, off | rest], inst) do
+    items = elem(segments(inst.id).elems, e)
+    if off + n > length(items), do: trap("out of bounds table access")
+    [Gc.new_array(key, items |> Enum.drop(off) |> Enum.take(n)) | rest]
+  end
+
+  defp bulk({:array_init_data, st, d}, [n, src, di, arr | rest], inst) do
+    bytes = elem(segments(inst.id).datas, d)
+    size = Gc.size(st)
+    len = Gc.array_len(arr)
+    if di + n > len, do: trap("out of bounds array access")
+    if src + n * size > byte_size(bytes), do: trap("out of bounds memory access")
+
+    values =
+      for i <- 0..(n - 1)//1,
+          do: Gc.decode(st, binary_part(bytes, src + i * size, size))
+
+    Gc.array_write(arr, di, values)
+    rest
+  end
+
+  defp bulk({:array_init_elem, e}, [n, src, di, arr | rest], inst) do
+    items = elem(segments(inst.id).elems, e)
+    len = Gc.array_len(arr)
+    if di + n > len, do: trap("out of bounds array access")
+    if src + n > length(items), do: trap("out of bounds table access")
+    Gc.array_write(arr, di, items |> Enum.drop(src) |> Enum.take(n))
+    rest
+  end
+
+  defp bulk(other, stack, _inst), do: Gc.exec(other, stack)
 
   # ── loads and stores ───────────────────────────────────────
 
