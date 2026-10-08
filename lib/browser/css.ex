@@ -86,7 +86,8 @@ defmodule Browser.CSS do
   end
 
   # a declaration whose value is not allowed is dropped, so the one before it still applies
-  defp valid_value?("tab-size", value), do: not String.starts_with?(value, "-")
+  defp valid_value?("tab-size", value),
+    do: Regex.match?(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)?\z/, value)
 
   defp valid_value?(prop, value) do
     (not var_reference?(value) or var_references_valid?(value)) and
@@ -287,7 +288,7 @@ defmodule Browser.CSS do
             font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight gap grid
             grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-gap grid-column-start
             grid-gap grid-row grid-row-end grid-row-gap grid-row-start grid-template grid-template-areas grid-template-columns
-            grid-template-rows hanging-punctuation height hyphens image-orientation image-rendering inline-size inset
+            grid-template-rows hanging-punctuation height hyphenate-character hyphens image-orientation image-rendering inline-size inset
             inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content
             justify-items justify-self left letter-spacing line-break line-height list-style list-style-image
             list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline

@@ -30,12 +30,12 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens
+            row-gap column-gap column-count column-width column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character)
 
   @doc false
   def inherited_props, do: @inherited
@@ -1692,6 +1692,7 @@ defmodule Browser.Style do
       px = length(v, env) -> {:ok, px}
       # a percentage is of the containing block's width, known only to layout
       pct = percentage(v) -> {:ok, {:pct, pct}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -1701,6 +1702,7 @@ defmodule Browser.Style do
     cond do
       px = length(v, env) -> {:ok, max(px, 0.0)}
       pct = percentage(v) -> {:ok, {:pct, max(pct, 0.0)}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -1715,6 +1717,18 @@ defmodule Browser.Style do
   # fit-content: as wide as the content wants (a block that sizes itself like an inline-block)
   defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
   defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
+
+  # `max-width: min-content` and friends: layout works the keyword out from the content
+  defp typed(prop, v, _env, _pc)
+       when prop in ["min-width", "max-width"] and
+              v in [
+                "min-content",
+                "max-content",
+                "fit-content",
+                "-webkit-fit-content",
+                "-moz-fit-content"
+              ],
+       do: {:ok, {:kw, %{"min-content" => :minc, "max-content" => :maxc}[v] || :fit}}
 
   # stretch: fill the containing block; a block already does, so layout only looks at it for
   # boxes that would otherwise shrink to fit
@@ -1832,6 +1846,7 @@ defmodule Browser.Style do
     cond do
       px && px >= 0 -> {:ok, px}
       pct = percentage(v) -> if pct >= 0, do: {:ok, {:pct, pct}}, else: :skip
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -1913,6 +1928,7 @@ defmodule Browser.Style do
     cond do
       px = length(v, env) -> {:ok, px}
       pct = percentage(v) -> {:ok, {:pct, pct}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -2030,6 +2046,16 @@ defmodule Browser.Style do
     case Browser.Calc.eval(v, &unit_px(&1, env)) do
       {:ok, {:px, n}} -> n
       {:ok, {:num, n}} when n == 0 -> 0.0
+      _ -> nil
+    end
+  end
+
+  # `calc(10% + 100px)`: a length and a share of the containing block's width
+  defp mixed_calc(v, env) do
+    with true <- Browser.Calc.math?(v),
+         {:ok, {:calc, _, _} = mixed} <- Browser.Calc.eval(v, &unit_px(&1, env)) do
+      mixed
+    else
       _ -> nil
     end
   end
