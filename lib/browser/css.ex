@@ -86,7 +86,8 @@ defmodule Browser.CSS do
   end
 
   # a declaration whose value is not allowed is dropped, so the one before it still applies
-  defp valid_value?("tab-size", value), do: not String.starts_with?(value, "-")
+  defp valid_value?("tab-size", value),
+    do: Regex.match?(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)?\z/, value)
 
   defp valid_value?(prop, value) do
     (not var_reference?(value) or var_references_valid?(value)) and

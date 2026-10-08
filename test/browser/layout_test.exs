@@ -5281,6 +5281,40 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "tab-size lengths, calc() text-indent and words beside floats" do
+    defp tab_rows(html), do: wb_rows(html, 400)
+
+    test "a tab-size given as a length is that many pixels of spaces" do
+      html = ~s|<pre style="font-size:10px;tab-size:20px">a\tb</pre>|
+      # a space is 5px wide here, so 20px is four columns: the b starts in column 4
+      assert tab_rows(html) == ["a   b"]
+    end
+
+    test "a word too wide for the room beside a float goes below it" do
+      page =
+        Browser.Page.build(
+          ~s|<style>body{margin:0}</style><div style="width:100px;font-size:10px"><div style="float:left;width:100px;height:50px"></div>wide</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      text = Enum.find(items, &(&1.type == :text))
+      assert text.y >= 50
+    end
+
+    test "preformatted text stays beside a float even when it overflows" do
+      page =
+        Browser.Page.build(
+          ~s|<style>body{margin:0}</style><div style="width:100px;font-size:10px;white-space:pre"><div style="float:left;width:100px;height:50px"></div>wide</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      text = Enum.find(items, &(&1.type == :text))
+      assert text.y < 50
+    end
+  end
+
   describe "invalid negative sizes" do
     defp neg_box(style) do
       page =

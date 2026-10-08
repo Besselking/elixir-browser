@@ -1928,6 +1928,7 @@ defmodule Browser.Style do
     cond do
       px = length(v, env) -> {:ok, px}
       pct = percentage(v) -> {:ok, {:pct, pct}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end

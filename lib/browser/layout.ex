@@ -116,6 +116,8 @@ defmodule Browser.Layout do
   """
   def layout(nodes, width, measure, view_height \\ 768, opts \\ []) do
     measure = spaced(measure)
+    # (a tab-size given as a length is turned into columns with the width of a space)
+    Process.put(:layout_measure, measure)
 
     style = %{
       size: @base,
@@ -1582,6 +1584,7 @@ defmodule Browser.Layout do
     case c["text-indent"] do
       n when is_number(n) and n != 0 -> [{:indent, round(n)} | acc]
       {:pct, f} when f != 0 -> [{:indent, round(f * child_width(c, box))} | acc]
+      {:calc, px, f} -> [{:indent, round(px + f * child_width(c, box))} | acc]
       _ -> acc
     end
   end
@@ -2314,11 +2317,47 @@ defmodule Browser.Layout do
       c["visibility"] in ["hidden", "collapse"] or
         (is_number(c["font-size"]) and c["font-size"] < 1)
 
-  # `tab-size`: a number of columns (lengths are not supported)
+  # `tab-size`: a number of columns, or a length
   defp tab_size(style, value) do
-    case Integer.parse(to_string(value)) do
-      {n, ""} when n >= 0 -> %{style | tab: n}
-      _ -> style
+    text = value |> to_string() |> String.trim()
+
+    case Integer.parse(text) do
+      {n, ""} when n >= 0 ->
+        %{style | tab: n}
+
+      _ ->
+        case Regex.run(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)\z/, text) do
+          [_, num, unit] ->
+            n = if String.starts_with?(num, "."), do: "0" <> num, else: num
+            n = n |> Float.parse() |> elem(0)
+
+            px =
+              case unit do
+                "px" -> n
+                "pt" -> n * 4 / 3
+                u when u in ["em", "ch", "ex"] -> n * style.size
+                "rem" -> n * 16
+              end
+
+            %{style | tab: {:px, px}}
+
+          _ ->
+            style
+        end
+    end
+  end
+
+  # the tab stops in columns: a length is as many spaces as fit in it
+  defp tab_cols(%{tab: n}) when is_integer(n), do: n
+
+  defp tab_cols(%{tab: {:px, px}} = style) do
+    case Process.get(:layout_measure) do
+      nil ->
+        0
+
+      measure ->
+        space = measure.(" ", %{style | ls: 0, wsp: 0})
+        if space > 0, do: max(round(px / space), 0), else: 0
     end
   end
 
@@ -2739,7 +2778,7 @@ defmodule Browser.Layout do
   # the words of one line: `pre` keeps it whole, `pre-wrap` keeps its spaces but may wrap,
   # `pre-line` collapses spaces
   defp line_ops(line, style, :pre, _prev),
-    do: [{:word, expand_tabs(line, style.tab), style, :pre}]
+    do: [{:word, expand_tabs(line, tab_cols(style)), style, :pre}]
 
   defp line_ops(line, style, :pre_line, _prev) do
     line
@@ -2775,7 +2814,8 @@ defmodule Browser.Layout do
     |> Enum.map_reduce({prev, 0}, fn
       # a tab is one unbreakable word as wide as the spaces it stands for
       ["\t"], {prev, col} ->
-        n = if style.tab == 0, do: 0, else: style.tab - rem(col, style.tab)
+        tab = tab_cols(style)
+        n = if tab == 0, do: 0, else: tab - rem(col, tab)
         word = String.duplicate("\u00A0", n)
 
         if prev == :text and style.wrap_chars != :every,
@@ -2801,7 +2841,7 @@ defmodule Browser.Layout do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
     ~r/ +|[^ ]+/
-    |> Regex.scan(expand_tabs(line, style.tab))
+    |> Regex.scan(expand_tabs(line, tab_cols(style)))
     |> then(&Enum.with_index(&1, fn token, i -> {token, i, i == length(&1) - 1} end))
     |> Enum.map(fn {[run], i, last?} ->
       cond do
@@ -5116,6 +5156,36 @@ defmodule Browser.Layout do
     }
   end
 
+  # A line beside floats that a word cannot fit on moves down to where a float ends. (A word that
+  # may break between its letters is not moved: some of it fits; nor is a line that cannot wrap.)
+  defp begin_line(st, line_left, dx, w, style) do
+    first = start_line(st, line_left, dx)
+
+    if st.floats != [] and Map.get(style, :wrap_chars, :none) == :none and
+         style.ws not in [:pre, :nowrap] do
+      narrowed(st, first, line_left, dx, w)
+    else
+      first
+    end
+  end
+
+  defp narrowed(st0, st, line_left, dx, w) do
+    right = st.width - st.margin - st.right - st.fr
+    beside? = st.fr > 0 or st.indent > line_left
+
+    next =
+      if beside? and st.x + w > right do
+        st.floats
+        |> Enum.filter(&(&1.y0 <= st.y and &1.y1 > st.y))
+        |> Enum.map(& &1.y1)
+        |> Enum.min(fn -> nil end)
+      end
+
+    if next && next > st.y,
+      do: narrowed(st0, start_line(%{st0 | y: next}, line_left, dx), line_left, dx, w),
+      else: st
+  end
+
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
     if String.contains?(text, "\u00AD"),
       do: shy_word(text, style, nowrap?, st, dx, glue),
@@ -5174,7 +5244,7 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    st = if st.line == [], do: st |> apply_gap() |> start_line(line_left, dx), else: st
+    st = if st.line == [], do: st |> apply_gap() |> begin_line(line_left, dx, w, style), else: st
 
     case split_point(text, style, nowrap?, st, w, space_w) do
       nil -> word_placed(text, style, nowrap?, st, glue, w, space_w, line_left)

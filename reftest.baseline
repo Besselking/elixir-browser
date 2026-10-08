@@ -1010,6 +1010,7 @@ css/CSS2/floats-clear/floats-118.xht
 css/CSS2/floats-clear/floats-119.xht
 css/CSS2/floats-clear/floats-120.xht
 css/CSS2/floats-clear/floats-122.xht
+css/CSS2/floats-clear/floats-132.xht
 css/CSS2/floats-clear/floats-133.xht
 css/CSS2/floats-clear/floats-134.xht
 css/CSS2/floats-clear/floats-135.xht
@@ -1048,6 +1049,7 @@ css/CSS2/floats/float-in-inline-001.html
 css/CSS2/floats/float-in-inline-002.html
 css/CSS2/floats/float-in-inline-anonymous-block-with-overflow-hidden.html
 css/CSS2/floats/float-in-nested-multicol-001.html
+css/CSS2/floats/float-no-content-beside-001.html
 css/CSS2/floats/float-nowrap-1.html
 css/CSS2/floats/float-nowrap-2.html
 css/CSS2/floats/float-nowrap-3.html
@@ -4887,6 +4889,9 @@ css/css-text/tab-size/tab-size-inline-001.html
 css/css-text/tab-size/tab-size-integer-001.html
 css/css-text/tab-size/tab-size-integer-002.html
 css/css-text/tab-size/tab-size-integer-003.html
+css/css-text/tab-size/tab-size-length-001.html
+css/css-text/tab-size/tab-size-length-002.html
+css/css-text/tab-size/tab-size-percent-001.html
 css/css-text/tab-size/tab-size-spacing-002.html
 css/css-text/text-align/text-align-006.html
 css/css-text/text-align/text-align-007.html
@@ -4970,6 +4975,8 @@ css/css-text/text-autospace/text-autospace-vertical-combine-001.html
 css/css-text/text-autospace/text-autospace-vertical-upright-001.html
 css/css-text/text-autospace/text-autospace-vs-001.html
 css/css-text/text-autospace/text-autospace-zh-001.html
+css/css-text/text-indent/below-float.html
+css/css-text/text-indent/below-float2.html
 css/css-text/text-indent/text-indent-caret-001.html
 css/css-text/text-indent/text-indent-caret-hanging-001.html
 css/css-text/text-indent/text-indent-length-001.html
@@ -4980,6 +4987,7 @@ css/css-text/text-indent/text-indent-overflow.html
 css/css-text/text-indent/text-indent-percentage-001.xht
 css/css-text/text-indent/text-indent-percentage-002.html
 css/css-text/text-indent/text-indent-percentage-003.html
+css/css-text/text-indent/text-indent-percentage-004.html
 css/css-text/text-indent/text-indent-text-align-end.html
 css/css-text/text-justify/text-justify-001.html
 css/css-text/text-justify/text-justify-006.html
@@ -5201,6 +5209,7 @@ css/css-text/white-space/pre-wrap-align-end-001.html
 css/css-text/white-space/pre-wrap-align-left-001.html
 css/css-text/white-space/pre-wrap-align-right-001.html
 css/css-text/white-space/pre-wrap-align-start-001.html
+css/css-text/white-space/pre-wrap-float-001.html
 css/css-text/white-space/pre-wrap-leading-spaces-001.html
 css/css-text/white-space/pre-wrap-leading-spaces-002.html
 css/css-text/white-space/pre-wrap-leading-spaces-003.html
