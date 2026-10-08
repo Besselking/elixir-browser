@@ -43,6 +43,7 @@ defmodule Browser.UI do
 
     Browser.TabStrip.init()
     wx = :wx.new()
+    probe_webp()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
 
     tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
@@ -580,6 +581,7 @@ defmodule Browser.UI do
       :ets.new(name, [:named_table, :public])
     end
 
+    probe_webp()
     :ets.insert(@view, {:view, [], 0, true})
     :ets.insert(@view, {:sx, 0})
     dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
@@ -664,6 +666,9 @@ defmodule Browser.UI do
       y = item.y - sc
       clip = Map.get(item, :clip)
       if clip, do: :wxDC.setClippingRegion(dc, {clip.x, clip.y - sc, clip.w, clip.h})
+      # a clip on the page that a fixed or sticky item does not move with
+      fclip = Map.get(item, :fclip)
+      if fclip, do: :wxDC.setClippingRegion(dc, {fclip.x, fclip.y - scroll, fclip.w, fclip.h})
 
       # inside a transformed box everything is drawn through its matrices (see `new_gc/1`)
       xform = Map.get(item, :xform)
@@ -671,7 +676,7 @@ defmodule Browser.UI do
       draw_item(dc, item, y, sc)
       if xform, do: Process.delete(:xform)
 
-      if clip, do: :wxDC.destroyClippingRegion(dc)
+      if clip || fclip, do: :wxDC.destroyClippingRegion(dc)
     end
   end
 
@@ -1581,9 +1586,24 @@ defmodule Browser.UI do
 
   # -- images ------------------------------------------------------------------------
 
+  # a 1 x 1 lossless WebP, to find out whether this wx can read the format (wxWidgets 3.3+)
+  @webp_probe Base.decode64!("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
+
   @doc """
-  Decodes image bytes (PNG, JPEG, GIF or BMP) into a bitmap the painter can draw, kept
-  under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
+  Whether the toolkit decodes WebP itself. Known once wx has started (`build/0` or
+  `snapshot_start/0` finds out); false before that.
+  """
+  def webp_supported?, do: :persistent_term.get({__MODULE__, :webp}, false)
+
+  defp probe_webp do
+    ok = match?({:ok, 1, 1}, load_image(:webp_probe, @webp_probe, :webp))
+    :ets.delete(@images, :webp_probe)
+    :persistent_term.put({__MODULE__, :webp}, ok)
+  end
+
+  @doc """
+  Decodes image bytes (PNG, JPEG, GIF, BMP, or WebP where `webp_supported?/0`) into a
+  bitmap the painter can draw, kept under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
   so the bytes pass through a temporary one.
   """
   def load_image(url, bytes, format) do
@@ -1661,12 +1681,17 @@ defmodule Browser.UI do
             it.w,
             it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
           ),
+          fclipped_in?(it, x, y + scroll),
           Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
         {it, py}
       end
 
     Enum.reverse(at)
   end
+
+  # (a fixed or sticky item with a clip on the page, see `fclip` in the layout)
+  defp fclipped_in?(%{fclip: c}, x, py), do: inside?(x, py, c.x, c.y, c.w, c.h)
+  defp fclipped_in?(_item, _x, _py), do: true
 
   @doc """
   The number of the element painted topmost at window point `{x, y}` (the window scrolled to

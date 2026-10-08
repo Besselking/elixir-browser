@@ -1,0 +1,37 @@
+# Proposed .github/workflows/toolchain.yml
+# Builds OTP 29 and wxWidgets 3.3 on Ubuntu 24.04 (the same release as the cloud environment) and
+# uploads the archive to the "toolchain" release, where scripts/install-toolchain.sh looks for it.
+name: Toolchain archive
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.tool-versions]
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from source and pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          scripts/install-toolchain.sh --pack "$RUNNER_TEMP/out/toolchain.tar.gz"
+      - name: Upload to the toolchain release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . /etc/os-release
+          OTP=$(awk '$1 == "erlang" { print $2 }' .tool-versions)
+          WX=$(sed -n 's/^WX=\([0-9.]*\).*/\1/p' scripts/install-toolchain.sh)
+          name="toolchain-otp$OTP-wx$WX-$ID$VERSION_ID-$(uname -m).tar.gz"
+          cd "$RUNNER_TEMP/out"
+          mv toolchain.tar.gz "$name"
+          sha256sum "$name" > "$name.sha256"
+          gh release view toolchain >/dev/null 2>&1 || gh release create toolchain --title "Prebuilt toolchain" --notes "Archives made by the Toolchain archive workflow." --repo "$GITHUB_REPOSITORY"
+          gh release upload toolchain "$name" "$name.sha256" --clobber --repo "$GITHUB_REPOSITORY"

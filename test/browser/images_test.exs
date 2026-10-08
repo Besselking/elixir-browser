@@ -154,6 +154,30 @@ defmodule Browser.ImagesTest do
       end
     end
 
+    test "WebP goes to the toolkit as it is when wx reads it" do
+      webp = Base.decode64!("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
+      url = "data:image/webp;base64," <> Base.encode64(webp)
+      key = {Browser.UI, :webp}
+      before = :persistent_term.get(key, :unset)
+
+      on_exit(fn ->
+        if before == :unset,
+          do: :persistent_term.erase(key),
+          else: :persistent_term.put(key, before)
+      end)
+
+      :persistent_term.put(key, true)
+      assert {:ok, ^webp, :webp} = Images.fetch(url, "https://example.com/")
+
+      # wx can't read it: the sips route (macOS only)
+      :persistent_term.put(key, false)
+
+      case Images.fetch(url, "https://example.com/") do
+        {:ok, png, :png} -> assert Images.sniff(png) == :png
+        {:error, "cannot convert webp" <> _} -> refute System.find_executable("sips")
+      end
+    end
+
     test "data URLs work" do
       png = File.read!(Path.join(@dir, "badge.png"))
       url = "data:image/png;base64," <> Base.encode64(png)

@@ -406,6 +406,7 @@ defmodule Browser.Style do
   defp expand({"flex", value, imp}) do
     {grow, shrink, basis} =
       case value |> String.trim() |> String.downcase() |> tokens() do
+        [kw] when kw in ~w(initial inherit unset revert) -> {kw, kw, kw}
         ["none"] -> {"0", "0", "auto"}
         ["auto"] -> {"1", "1", "auto"}
         [one] -> if number?(one), do: {one, "1", "0%"}, else: {"1", "1", one}

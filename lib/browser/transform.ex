@@ -29,8 +29,8 @@ defmodule Browser.Transform do
   end
 
   @doc """
-  The matrix for `c` on the box `{x, y, w, h}`, or nil when it does nothing (or can't be
-  worked out). Option `translate: false` leaves out translations, for boxes whose placement
+  The matrix for `c` on the box `{x, y, w, h}`, nil when it does nothing (or can't be worked
+  out), or `:collapsed` when it squashes the box flat (`scaleX(0)`): nothing of it is drawn. Option `translate: false` leaves out translations, for boxes whose placement
   already took them into account.
   """
   def matrix(c, {x, y, w, h}, opts \\ []) do
@@ -49,14 +49,19 @@ defmodule Browser.Transform do
 
     m = steps |> Enum.reject(&is_nil/1) |> Enum.reduce(@identity, &multiply(&2, &1))
 
-    if m == @identity or not valid?(m) do
-      nil
-    else
-      {ox, oy} = origin(c["transform-origin"], w, h, units)
-      ox = x + ox
-      oy = y + oy
-      # move the origin to (0, 0), transform, move back
-      multiply({1.0, 0.0, 0.0, 1.0, ox, oy}, multiply(m, {1.0, 0.0, 0.0, 1.0, -ox, -oy}))
+    cond do
+      m == @identity ->
+        nil
+
+      not valid?(m) ->
+        :collapsed
+
+      true ->
+        {ox, oy} = origin(c["transform-origin"], w, h, units)
+        ox = x + ox
+        oy = y + oy
+        # move the origin to (0, 0), transform, move back
+        multiply({1.0, 0.0, 0.0, 1.0, ox, oy}, multiply(m, {1.0, 0.0, 0.0, 1.0, -ox, -oy}))
     end
   end
 
