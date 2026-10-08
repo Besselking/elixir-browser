@@ -3170,6 +3170,7 @@ defmodule Browser.Layout do
       # the content height of the enclosing block when it has one of its own (for percentages)
       cbh: cbh,
       scbh: cbh,
+      bstart: {0, 0},
       cbw: nil,
       root_view: root_height == :view,
       flex_item: Process.get(:layout_flex_item, false)
@@ -3371,11 +3372,22 @@ defmodule Browser.Layout do
     # margin of a first child collapses with the one above it (see the `gap` op)
     # (floats in an empty block just above would be pulled down by the margin: they need clearance
     # however large it is)
-    if bottom && (bottom > y0 + gap + min(st.ngap, 0) or (adjoining || 0) > y0) do
+    # the margin of a cleared box that starts its parent would move the floats the parent holds
+    # along with the parent: they reach past the box, so it is cleared (by a negative amount
+    # when the margin was larger)
+    {n0, start_y} = st.bstart
+
+    moved? =
+      gap > 0 and y0 == start_y and
+        st.floats
+        |> Enum.take(length(st.floats) - n0)
+        |> Enum.any?(&((side == :both or &1.side == side) and &1.y0 == y0 and &1.y1 > y0))
+
+    if bottom && (bottom > y0 + gap + min(st.ngap, 0) or (adjoining || 0) > y0 or moved?) do
       # (the margin of the cleared box is not part of its parents': they stay where their own
       # margins put them)
       st = apply_gap(st, true)
-      %{st | y: bottom, clr: {y0, gap, bottom, :clearance}}
+      %{st | y: bottom, clr: {y0, if(moved?, do: 0, else: gap), bottom, :clearance}}
     else
       st
     end
@@ -3387,7 +3399,8 @@ defmodule Browser.Layout do
 
     %{
       st
-      | insets: [{st.left, st.right, st.y, length(st.floats), st.scbh} | st.insets],
+      | insets: [{st.left, st.right, st.y, length(st.floats), st.scbh, st.bstart} | st.insets],
+        bstart: {length(st.floats), st.y},
         # (a pictures's percentage height in a block with no height of its own is auto, where
         # the percentages of boxes go on to refer to the block around, as in quirks mode)
         scbh: nil,
@@ -3399,7 +3412,7 @@ defmodule Browser.Layout do
     }
   end
 
-  defp op({:inset_end}, %{insets: [{l, r, y0, n0, cbh} | rest]} = st) do
+  defp op({:inset_end}, %{insets: [{l, r, y0, n0, cbh, bstart} | rest]} = st) do
     st = adjoin_floats(st, y0, n0)
     # the margin below a box is not one of a first child, unless the box held nothing but the
     # floats that left that margin pending: then it is empty and its margins go on collapsing
@@ -3410,7 +3423,7 @@ defmodule Browser.Layout do
       end
 
     st = end_block(st)
-    %{st | insets: rest, left: l, right: r, scbh: cbh}
+    %{st | insets: rest, left: l, right: r, scbh: cbh, bstart: bstart}
   end
 
   # where a block that has an id starts, for `#fragment`s and `scrollIntoView`
@@ -3920,7 +3933,7 @@ defmodule Browser.Layout do
   defp apply_gap(st, own? \\ false)
 
   defp apply_gap(%{ptop: []} = st, _own?),
-    do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0, clr: nil}
+    do: moved_start(%{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0, clr: nil}, st.y)
 
   # the margin of a first child collapsed into the margin above its parent: the parent's top
   # edge is where the merged margin ends
@@ -3937,8 +3950,12 @@ defmodule Browser.Layout do
         {open, pos}
       end)
 
-    %{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: [], clr: nil}
+    moved_start(%{st | y: y, gap: 0, ngap: 0, open: open, pos: pos, ptop: [], clr: nil}, st.y)
   end
+
+  # the start of the block around moves with the margin that was pending at it
+  defp moved_start(%{bstart: {n, y0}} = st, y) when y0 == y, do: %{st | bstart: {n, st.y}}
+  defp moved_start(st, _y), do: st
 
   # Puts an atomic inline box (`%{w, h, base, items, align, valign}`) on the line,
   # wrapping to a new line if it doesn't fit.
@@ -4253,6 +4270,7 @@ defmodule Browser.Layout do
       seq: :erlang.unique_integer([:monotonic]),
       pcbh: st.cbh,
       pscbh: st.scbh,
+      pbstart: st.bstart,
       pcbw: st.cbw,
       saved: {st.left, st.right, st.free},
       need: x + bl + o.pl + st.right + fr + rest + br + o.pr - st.free - own_free
@@ -4272,6 +4290,8 @@ defmodule Browser.Layout do
         blocks: [id | st.blocks],
         scbh: new_cbh,
         cbh: new_cbh,
+        # (a border or padding keeps the margin of a first child from reaching the box's start)
+        bstart: {length(st.floats), if(bt + o.pt == 0, do: st.y)},
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.bfc, do: [], else: st.floats),
         left: left + bl + o.pl,
@@ -4383,7 +4403,7 @@ defmodule Browser.Layout do
     st = %{st | rects: new ++ Enum.reverse(outer) ++ old, nr: st.nr + length(outer)}
     # sticky boxes inside stop at the bottom of this one's content
     st = %{st | limits: Map.put(st.limits, box.id, box.top + height - bb - o.pb)}
-    st = %{st | cbh: box.pcbh, scbh: box.pscbh, cbw: box.pcbw}
+    st = %{st | cbh: box.pcbh, scbh: box.pscbh, bstart: box.pbstart, cbw: box.pcbw}
     {st, box} = if o.rel, do: relative_shift(st, box), else: {st, box}
     st = if o.xform, do: xform_new(st, box, height), else: st
     if o.sticky, do: stick_new(st, box, height), else: st

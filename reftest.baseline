@@ -986,6 +986,7 @@ css/CSS2/floats-clear/adjacent-floats-001.xht
 css/CSS2/floats-clear/adjoining-float-before-clearance.html
 css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-002.html
 css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-004.html
+css/CSS2/floats-clear/adjoining-float-new-fc.html
 css/CSS2/floats-clear/clear-001.xht
 css/CSS2/floats-clear/clear-002.xht
 css/CSS2/floats-clear/clear-003.xht
@@ -1141,6 +1142,7 @@ css/CSS2/floats-clear/margin-collapse-clear-014.xht
 css/CSS2/floats-clear/margin-collapse-clear-015.xht
 css/CSS2/floats-clear/margin-collapse-clear-016.xht
 css/CSS2/floats-clear/margin-collapse-clear-017.xht
+css/CSS2/floats-clear/negative-clearance-after-adjoining-float.html
 css/CSS2/floats-clear/nested-clearance-new-formatting-context.html
 css/CSS2/floats-clear/no-clearance-adjoining-opposite-float.html
 css/CSS2/floats-clear/no-clearance-due-to-large-margin.html

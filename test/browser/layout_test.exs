@@ -6280,6 +6280,13 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 0, 255}, y: 58}, &1))
     end
 
+    test "a cleared first child clears the floats of its parent whatever its margin" do
+      html =
+        ~s|<div style="width:100px;overflow:hidden"><div><div style="float:left;width:100px;height:50px"></div><div style="margin-top:300px;clear:left;height:50px;background:green"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, y: 58}, &1))
+    end
+
     test "a float on a table column group floats" do
       html =
         ~s|<div style="display:table;width:100%"><div style="display:table-column-group;float:right;width:30px;height:30px;background:blue"></div></div>|
