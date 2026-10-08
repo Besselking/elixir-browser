@@ -431,6 +431,43 @@ defmodule Browser.Wasm.Ops do
   def simd_signatures,
     do: Map.new(simd(), fn {_, shape, op, p, r, imm} -> {{shape, op}, {p, r, imm}} end)
 
+  # ── atomics (0xFE prefix) ──────────────────────────────────
+
+  @atomic_widths [{:i32, 4}, {:i64, 8}, {:i32, 1}, {:i32, 2}, {:i64, 1}, {:i64, 2}, {:i64, 4}]
+  @rmw ~w(add sub and or xor xchg)a
+
+  @doc """
+  The atomic instructions: `{sub opcode, op, width in bytes, params, result}`. `op` is `:load`,
+  `:store`, `{:rmw, name}`, `:cmpxchg`, `:notify`, `:wait32`, `:wait64` or `:fence`.
+  """
+  def atomics do
+    mem =
+      [
+        {0x00, :notify, 4, [:i32, :i32], :i32},
+        {0x01, :wait32, 4, [:i32, :i32, :i64], :i32},
+        {0x02, :wait64, 8, [:i32, :i64, :i64], :i32},
+        {0x03, :fence, 0, [], nil}
+      ] ++
+        for({{ty, w}, i} <- Enum.with_index(@atomic_widths), do: {0x10 + i, :load, w, [:i32], ty}) ++
+        for(
+          {{ty, w}, i} <- Enum.with_index(@atomic_widths),
+          do: {0x17 + i, :store, w, [:i32, ty], nil}
+        ) ++
+        for {op, k} <- Enum.with_index(@rmw),
+            {{ty, w}, i} <- Enum.with_index(@atomic_widths),
+            do: {0x1E + 7 * k + i, {:rmw, op}, w, [:i32, ty], ty}
+
+    cmpxchg =
+      for {{ty, w}, i} <- Enum.with_index(@atomic_widths),
+          do: {0x48 + i, :cmpxchg, w, [:i32, ty, ty], ty}
+
+    mem ++ cmpxchg
+  end
+
+  @doc "`sub opcode => {params, result}` for the atomic instructions."
+  def atomic_signatures,
+    do: Map.new(atomics(), fn {sub, _, _, p, r} -> {sub, {p, r}} end)
+
   def numeric, do: @numeric
   def sat, do: @sat
   def loads, do: @loads

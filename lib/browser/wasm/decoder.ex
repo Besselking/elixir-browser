@@ -11,6 +11,7 @@ defmodule Browser.Wasm.Decoder do
   @numeric Map.new(Ops.numeric(), fn {op, name, _, _} -> {op, name} end)
   @sat Map.new(Ops.sat(), fn {op, name, _, _} -> {op, name} end)
   @simd Map.new(Ops.simd(), fn {sub, shape, op, _, _, imm} -> {sub, {shape, op, imm}} end)
+  @atomics Map.new(Ops.atomics(), fn {sub, op, w, _, _} -> {sub, {op, w}} end)
   @loads Map.new(Ops.loads(), fn {op, kind, _, _} -> {op, kind} end)
   @stores Map.new(Ops.stores(), fn {op, kind, _, _} -> {op, kind} end)
 
@@ -227,7 +228,14 @@ defmodule Browser.Wasm.Decoder do
     {{lim, t}, r}
   end
 
-  defp mem_type(bin), do: limits(bin)
+  defp mem_type(<<f, r::binary>>) when f in 0..3 do
+    {min, r} = u32(r)
+    {max, r} = if (f &&& 1) != 0, do: u32(r), else: {nil, r}
+    {{min, max, (f &&& 2) != 0}, r}
+  end
+
+  defp mem_type(<<>>), do: fail("unexpected end")
+  defp mem_type(_), do: fail("integer too large")
 
   defp tag(<<0, r::binary>>), do: u32(r)
   defp tag(<<>>), do: fail("unexpected end")
@@ -611,6 +619,26 @@ defmodule Browser.Wasm.Decoder do
         idx(:table_fill, r)
 
       true ->
+        fail("illegal opcode")
+    end
+  end
+
+  defp instr(<<0xFE, r::binary>>) do
+    {sub, r} = u32(r)
+
+    case Map.fetch(@atomics, sub) do
+      {:ok, {:fence, _}} ->
+        case r do
+          <<0, r::binary>> -> {{:atomic_fence}, r}
+          <<>> -> fail("unexpected end")
+          _ -> fail("zero byte expected")
+        end
+
+      {:ok, {op, w}} ->
+        {a, o, m, r} = memarg(r)
+        {{:atomic, sub, op, w, a, o, m}, r}
+
+      :error ->
         fail("illegal opcode")
     end
   end

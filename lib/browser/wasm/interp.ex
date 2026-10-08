@@ -6,7 +6,7 @@ defmodule Browser.Wasm.Interp do
   """
 
   import Bitwise
-  alias Browser.Wasm.{Func, Global, Memory, Num, Simd, Table}
+  alias Browser.Wasm.{Atomic, Func, Global, Memory, Num, Simd, Table}
 
   @max_depth 10_000
 
@@ -209,6 +209,20 @@ defmodule Browser.Wasm.Interp do
         {args, st} = Enum.split(stack, n)
         r = Simd.exec(shape, op, Enum.reverse(args), imm)
         run(code, pc + 1, [r | st], locals, inst, depth)
+
+      {:atomic, op, width, off, m, n} ->
+        {args, st} = Enum.split(stack, n)
+
+        st =
+          case Atomic.exec(op, width, off, elem(inst.mems, m), Enum.reverse(args)) do
+            :none -> st
+            r -> [r | st]
+          end
+
+        run(code, pc + 1, st, locals, inst, depth)
+
+      {:atomic_fence} ->
+        run(code, pc + 1, stack, locals, inst, depth)
 
       {:simd_mem, op, off, m, lane} ->
         st = Simd.mem(op, lane, elem(inst.mems, m), off, stack)

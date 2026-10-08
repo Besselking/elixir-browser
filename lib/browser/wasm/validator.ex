@@ -10,6 +10,7 @@ defmodule Browser.Wasm.Validator do
 
   @sigs Ops.signatures()
   @simd Ops.simd_signatures()
+  @atomic Ops.atomic_signatures()
   @loads Map.new(Ops.loads(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @stores Map.new(Ops.stores(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @max_pages 65536
@@ -137,7 +138,9 @@ defmodule Browser.Wasm.Validator do
     table
   end
 
-  defp check_mem({min, max}) do
+  defp check_mem({min, max, shared}) do
+    if shared and max == nil, do: err("shared memory must have maximum")
+
     if min > @max_pages or (max && max > @max_pages),
       do: err("memory size must be at most 65536 pages (4GiB)")
 
@@ -716,6 +719,18 @@ defmodule Browser.Wasm.Validator do
   defp ins(c, s, {:memory_fill, m}) do
     mem(c, m)
     s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_fill, m})
+  end
+
+  defp ins(_, s, {:atomic_fence}), do: emit(s, {:atomic_fence})
+
+  defp ins(c, s, {:atomic, sub, op, width, align, offset, m}) do
+    mem(c, m)
+    {params, result} = Map.fetch!(@atomic, sub)
+    natural = %{1 => 0, 2 => 1, 4 => 2, 8 => 3}[width]
+    if align != natural, do: err("atomic alignment must be natural")
+    s = pop_all(s, params)
+    s = if result, do: push(s, result), else: s
+    emit(s, {:atomic, op, width, offset, m, length(params)})
   end
 
   defp ins(_, s, {:simd_const, v}), do: s |> push(:v128) |> emit({:const, v})

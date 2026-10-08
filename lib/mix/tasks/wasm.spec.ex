@@ -282,6 +282,7 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp spectest("global_f64", _), do: spec_global(:f64, 666.6)
   defp spectest("table", _), do: Table.new(:funcref, 10, 20)
   defp spectest("memory", _), do: Memory.new(1, 2)
+  defp spectest("shared_memory", _), do: Memory.new(1, 2, true)
 
   defp spectest("print" <> _, {:func, type}), do: Func.host(type, fn _ -> [] end)
 

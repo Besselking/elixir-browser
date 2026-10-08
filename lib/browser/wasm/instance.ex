@@ -46,7 +46,7 @@ defmodule Browser.Wasm.Instance do
       |> List.to_tuple()
 
     mems =
-      (imp_of.(:mem) ++ for({min, max} <- mod.mems, do: Memory.new(min, max)))
+      (imp_of.(:mem) ++ for({min, max, shared} <- mod.mems, do: Memory.new(min, max, shared)))
       |> List.to_tuple()
 
     globals =
@@ -193,8 +193,8 @@ defmodule Browser.Wasm.Instance do
       do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:mem, {min, max}}}, %Memory{} = m, _) do
-    if Memory.size(m) < min or limit_mismatch(max, m.max),
+  defp check_import(%{desc: {:mem, {min, max, shared}}}, %Memory{} = m, _) do
+    if Memory.size(m) < min or limit_mismatch(max, m.max) or m.shared != shared,
       do: link_error("incompatible import type")
   end
 

@@ -18,6 +18,8 @@ defmodule Browser.WasmTest do
 
   @legacy "AGFzbQEAAAABDQNgAX8AYAAAYAF/AX8DBQQCAgICDQUCAAAAAQceAwVjYXRjaAABB3JldGhyb3cAAghkZWxlZ2F0ZQADClIEBgAgAAgACxcBAX9BBSEBBn8gABAABwAgAWoZQX8LCxcABn8GfyAAEAAHABoJAAsHAEHkAGoLCxkABn8GfwZ/IAAQABgBGUF/CwcAQegHagsL"
 
+  @atomic "AGFzbQEAAAABFwRgAn9/AX9gAX8Bf2ADf39/AX9gAAF/AwYFAAECAAMFBAEDAQEHKgYDbWVtAgADYWRkAAAEbG9hZAABA2NhcwACBHdhaXQAAwZub3RpZnkABAo6BQoAIAAgAf4eAgALCAAgAP4QAgALDAAgACABIAL+SAIACwwAIAAgAUIA/gECAAsKAEEAQQH+AAIACw=="
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -135,6 +137,21 @@ defmodule Browser.WasmTest do
     assert call(i, "catch", [7]) == [12]
     assert call(i, "rethrow", [3]) == [103]
     assert call(i, "delegate", [4]) == [1004]
+  end
+
+  test "atomics on a shared memory" do
+    i = inst(@atomic)
+    assert call(i, "add", [0, 5]) == [0]
+    assert call(i, "add", [0, 7]) == [5]
+    assert call(i, "load", [0]) == [12]
+    assert call(i, "cas", [0, 99, 1]) == [12]
+    assert call(i, "cas", [0, 12, 1]) == [12]
+    assert call(i, "load", [0]) == [1]
+    # the value differs: 1, equal and nobody wakes it: timed out, 2
+    assert call(i, "wait", [0, 0]) == [1]
+    assert call(i, "wait", [0, 1]) == [2]
+    assert call(i, "notify", []) == [0]
+    assert %Error{kind: :trap, message: "unaligned atomic"} = catch_error(call(i, "load", [2]))
   end
 
   test "SIMD" do
