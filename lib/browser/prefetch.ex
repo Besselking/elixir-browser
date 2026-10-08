@@ -11,7 +11,7 @@ defmodule Browser.Prefetch do
   alias Browser.{Fetch, HTML, Style}
 
   @key {__MODULE__, :state}
-  @max_sheets 24
+  @max_sheets 64
   @link ~r/<link\b[^>]*>/i
 
   @doc "Forgets earlier prefetches in this process."

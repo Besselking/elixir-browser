@@ -891,6 +891,11 @@ defmodule Browser.Layout do
           end
         )
 
+      # a `calc()` with a percentage is of the containing block of this box, not of the box
+      # it was written in: it stays unresolved until the box is placed
+      raw = attrs |> List.keyfind("@computed", 0) |> elem(1)
+      calc = fn key -> match?({:calc, _, _}, raw[key]) && raw[key] end
+
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
       el = {:element, tag, attrs, kids}
 
@@ -910,10 +915,10 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: if(replaced?, do: nil, else: dim(c["width"])),
+        width: if(replaced?, do: nil, else: calc.("width") || dim(c["width"])),
         replaced: replaced?,
-        minw: if(replaced?, do: nil, else: c["min-width"]),
-        maxw: if(replaced?, do: nil, else: c["max-width"]),
+        minw: if(replaced?, do: nil, else: calc.("min-width") || c["min-width"]),
+        maxw: if(replaced?, do: nil, else: calc.("max-width") || c["max-width"]),
         ml: box.ml,
         mr: box.mr,
         rtl: parent_style.cb,
@@ -3102,7 +3107,10 @@ defmodule Browser.Layout do
       base: height,
       items: laid,
       align: style.align,
-      valign: nil
+      valign: nil,
+      # items that overflow it still count towards how wide the content wants to be: a flex
+      # container measured for its min-content (at width 1) is as wide as its items need
+      overflow_counts: true
     })
   end
 
@@ -3420,7 +3428,10 @@ defmodule Browser.Layout do
       atom
       | items:
           atom.items
-          |> Enum.map(&(&1 |> adopt_sticky(st) |> limit_extent(atom.w)))
+          |> Enum.map(fn item ->
+            item = adopt_sticky(item, st)
+            if atom[:overflow_counts], do: item, else: limit_extent(item, atom.w)
+          end)
           |> renumber_pz()
     }
 
@@ -4445,6 +4456,7 @@ defmodule Browser.Layout do
   defp resolve(nil, _base), do: nil
 
   defp resolve({:pct, f}, base), do: round(f * base)
+  defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 
   defp resolve(n, _base) when is_number(n), do: round(n)
 
@@ -5214,7 +5226,22 @@ defmodule Browser.Layout do
     below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base - raise.(&1)))
     # text raised or lowered by `vertical-align` makes the line taller where it sticks out
     {base, below} = raised_room(texts, base, below, normal, half, text_base)
-    line_h = Enum.reduce(floating, base + below, &max(&2, &1.h))
+
+    # a middle-aligned box taller than the line reaches above it: the baseline moves down so that
+    # it still starts at the top of the line
+    mid_up = fn a -> div(a.h, 2) + round(st.lh * 0.3) end
+
+    lift =
+      for(%{valign: "middle"} = a <- floating, do: mid_up.(a) - base) |> Enum.max(fn -> 0 end)
+
+    base = base + max(lift, 0)
+
+    line_h =
+      Enum.reduce(floating, base + below, fn
+        %{valign: "middle"} = a, h -> max(h, base - mid_up.(a) + a.h)
+        a, h -> max(h, a.h)
+      end)
+
     shift = align_shift(Enum.reverse(st.line), st)
     dy = base - text_base
 

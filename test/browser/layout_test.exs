@@ -198,6 +198,86 @@ defmodule Browser.LayoutTest do
       assert word(items, "r").y > word(items, "l").y
     end
 
+    test "a flex row next to a 100% wide sibling keeps its items' min-content widths" do
+      html =
+        ~s(<style>.row{display:flex;width:600px} ul{display:flex;margin:0;padding:0;list-style:none}) <>
+          ~s(.b{display:flex;white-space:nowrap;padding:8px}) <>
+          ~s(</style><div class="row"><nav><ul>) <>
+          ~s(<li><div class="b">alpha<svg width=16 height=16></svg></div></li>) <>
+          ~s(<li><div class="b">bravo<svg width=16 height=16></svg></div></li>) <>
+          ~s(</ul></nav><div style="width:100%">wide</div></div>)
+
+      {items, _} = styled(html)
+      alpha = word(items, "alpha")
+      bravo = word(items, "bravo")
+      # the second item starts after the first one's text, its icon and its padding
+      assert bravo.x >= alpha.x + alpha.w + 16 + 8 + 8
+    end
+
+    test "an inline-block of unbreakable content is as wide as that content, even in a tight flex row" do
+      html =
+        ~s(<style>.row{display:flex;width:300px} .w{display:inline-block}) <>
+          ~s(.w a{display:inline-flex;white-space:nowrap;flex-shrink:0;padding:0 12px}) <>
+          ~s(</style><div class="row"><div style="width:100%">wide</div>) <>
+          ~s(<div class="w"><a>first one</a></div><div class="w"><a>second</a></div></div>)
+
+      {items, _} = styled(html)
+      first = word(items, "first")
+      second = word(items, "second")
+      # the second box starts after the whole first one: its text, and the padding on both sides
+      assert second.x >= first.x + first.w + word(items, "one").w + 12 + 12
+    end
+
+    test "a middle-aligned box taller than the line does not poke out above it" do
+      html =
+        ~s(<style>.a{display:inline-flex;vertical-align:middle;height:40px;width:20px;background:#f00}) <>
+          ~s(</style><div style="margin-top:10px"><span class="a"></span></div>)
+
+      {items, _} = styled(html)
+      box = Enum.find(items, &(&1.type == :rect and &1.h == 40))
+      assert box.y >= 10
+    end
+
+    test "::placeholder can colour or hide the hint of a text control" do
+      html =
+        ~s(<style>.hide::placeholder{opacity:0} .red::placeholder{color:#f00}</style>) <>
+          ~s(<input class="hide" placeholder="gone"><input class="red" placeholder="seen">) <>
+          ~s(<textarea class="hide" placeholder="gone too"></textarea>)
+
+      {items, _} = styled(html)
+      assert word(items, "gone") == nil
+      assert word(items, "too") == nil
+      assert word(items, "seen").color == {255, 0, 0}
+    end
+
+    test "unlayered rules beat layered ones whatever their specificity; later layers beat earlier" do
+      html =
+        ~s(<style>@layer base{#a.x{color:#00f}} .x{color:#f00}) <>
+          ~s(@layer one{.y{color:#00f}} @layer two{.y{color:#0f0}}) <>
+          ~s(@layer one{.z{color:#00f!important}} @layer two{.z{color:#0f0!important}}) <>
+          ~s(.z{color:#f00!important}</style>) <>
+          ~s(<p id=a class=x>un</p><p class=y>lay</p><p class=z>imp</p>)
+
+      {items, _} = styled(html)
+      assert word(items, "un").color == {255, 0, 0}
+      assert word(items, "lay").color == {0, 255, 0}
+      # important reverses it: the earliest layer wins, and unlayered rules come last
+      assert word(items, "imp").color == {0, 0, 255}
+    end
+
+    test "a calc() width with a percentage on an absolute box is of its containing block" do
+      html =
+        ~s|<style>a{position:relative;display:inline-block} a:after{content:"";position:absolute;| <>
+          ~s|left:0;top:0;height:5px;background:#f00;width:calc(100% - 4px)}</style>| <>
+          ~s|<div style="width:500px"><a>link text</a></div>|
+
+      {items, _} = styled(html)
+      bar = Enum.find(items, &(&1.type == :rect and &1.h == 5))
+      text_w = word(items, "text").x + word(items, "text").w - word(items, "link").x
+      # as wide as the link less 4px, not as wide as the 500px block around it
+      assert bar.w == text_w - 4
+    end
+
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
         styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))

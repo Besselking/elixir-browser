@@ -54,7 +54,9 @@ defmodule Mix.Tasks.Browser.Screenshot do
 
     width = opts[:width] || 1000
 
-    {:ok, page} = Browser.Page.load(url)
+    # the cascade is for the picture's own viewport: its media queries see this width
+    env = %{Browser.Style.default_env() | width: width, height: opts[:height] || 800}
+    {:ok, page} = Browser.Page.load(url, env)
 
     page =
       if opts[:js],

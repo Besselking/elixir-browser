@@ -3716,6 +3716,11 @@ css/css-flexbox/flexbox-collapsed-item-horiz-001.html
 css/css-flexbox/flexbox-column-row-gap-003.html
 css/css-flexbox/flexbox-definite-sizes-006.html
 css/css-flexbox/flexbox-flex-direction-column-percentage-ignored.html
+css/css-flexbox/flexbox-flex-direction-column-reverse.htm
+css/css-flexbox/flexbox-flex-direction-column.htm
+css/css-flexbox/flexbox-flex-direction-default.htm
+css/css-flexbox/flexbox-flex-direction-row-reverse.htm
+css/css-flexbox/flexbox-flex-direction-row.htm
 css/css-flexbox/flexbox-flex-flow-001.html
 css/css-flexbox/flexbox-flex-wrap-default.htm
 css/css-flexbox/flexbox-flex-wrap-flexing.html
@@ -3723,6 +3728,8 @@ css/css-flexbox/flexbox-flex-wrap-horiz-001.html
 css/css-flexbox/flexbox-flex-wrap-horiz-002.html
 css/css-flexbox/flexbox-flex-wrap-nowrap.htm
 css/css-flexbox/flexbox-flex-wrap-vert-001.html
+css/css-flexbox/flexbox-flex-wrap-wrap-reverse.htm
+css/css-flexbox/flexbox-flex-wrap-wrap.htm
 css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
 css/css-flexbox/flexbox-items-as-stacking-contexts-002.html
@@ -4425,6 +4432,7 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-050.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-052.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-053.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-054.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-055.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-001.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-002.html
 css/css-sizing/aspect-ratio/grid-aspect-ratio-003.html

@@ -11,12 +11,13 @@ defmodule Browser.CSS do
   pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
   `:not(:focus)` true.
 
-  A selector may end in `::before`, `::after` (or the one-colon forms) or `::marker`: its
-  rule styles the generated box or marker, and carries `pseudo: :before | :after | :marker`
-  (nil for other rules).
-  Selectors using anything else (`::marker`, `:has()`, …) are dropped. `@media` (see
+  A selector may end in `::before`, `::after` (or the one-colon forms), `::marker` or
+  `::placeholder`: its rule styles the generated box, marker or hint, and carries
+  `pseudo: :before | :after | :marker | :placeholder` (nil for other rules).
+  Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
-  and `@layer` blocks are entered; other at-rules (`@import`, `@font-face`,
+  and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
+  cascade); other at-rules (`@import`, `@font-face`,
   `@keyframes`, …) are skipped.
 
   A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds,
@@ -40,7 +41,14 @@ defmodule Browser.CSS do
 
       for sel <- split_top(prelude, ?,),
           {:ok, %{parts: parts, spec: spec, pseudo: pseudo}} <- [parse_selector(sel)] do
-        %{selector: parts, specificity: spec, decls: decls, media: conds, pseudo: pseudo}
+        %{
+          selector: parts,
+          specificity: spec,
+          decls: decls,
+          media: Enum.reject(conds, &match?({:layer, _}, &1)),
+          layer: layer_path(conds),
+          pseudo: pseudo
+        }
       end
     end)
   end
@@ -173,12 +181,28 @@ defmodule Browser.CSS do
             case String.downcase(name) do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
               "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
-              "layer" -> blocks(body, conds, [])
+              "layer" -> blocks(body, conds ++ [{:layer, layer_name(prelude)}], [])
               _ -> []
             end
 
           {Enum.reverse(inner) ++ acc, rest}
         end
+    end
+  end
+
+  # the name of a `@layer` block; an unnamed one is a layer of its own
+  defp layer_name(prelude) do
+    case String.trim(prelude) do
+      "" -> "(anonymous #{:erlang.unique_integer([:positive])})"
+      name -> name
+    end
+  end
+
+  # the layer a rule is in (nested layers are joined with a dot), nil for unlayered rules
+  defp layer_path(conds) do
+    case for {:layer, name} <- conds, do: name do
+      [] -> nil
+      names -> Enum.join(names, ".")
     end
   end
 
@@ -452,7 +476,7 @@ defmodule Browser.CSS do
 
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
-    case Regex.run(~r/\A(.*?)(?:::(before|after|marker)|:(before|after))\z/su, str) do
+    case Regex.run(~r/\A(.*?)(?:::(before|after|marker|placeholder)|:(before|after))\z/su, str) do
       [_, head, which] -> {head_or_any(head), String.to_atom(which)}
       [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
       nil -> {str, nil}
