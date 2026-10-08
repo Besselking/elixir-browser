@@ -706,6 +706,21 @@ defmodule Browser.JS.Lexer do
     expr_source(after_str, d, [consumed, <<q>> | acc])
   end
 
+  # comments hold quotes, braces and slashes of their own
+  defp expr_source("/*" <> rest, d, acc) do
+    case String.split(rest, "*/", parts: 2) do
+      [body, after_comment] -> expr_source(after_comment, d, ["/*" <> body <> "*/" | acc])
+      _ -> throw({:syntax, "unterminated comment"})
+    end
+  end
+
+  defp expr_source("//" <> rest, d, acc) do
+    case String.split(rest, "\n", parts: 2) do
+      [line, after_line] -> expr_source("\n" <> after_line, d, ["//" <> line | acc])
+      [line] -> expr_source("", d, ["//" <> line | acc])
+    end
+  end
+
   # a regular expression literal (it may hold quotes and braces): `/` after an operator or an
   # opening bracket, not a division
   defp expr_source("/" <> rest, d, acc)

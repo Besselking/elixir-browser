@@ -462,7 +462,10 @@ defmodule Browser.JS.Runtime do
 
   defp run_all_scripts do
     doc = DOM.document()
-    scripts = for nid <- DOM.descendants(doc), s = script_info(nid), do: s
+
+    scripts =
+      for nid <- DOM.descendants(doc), s = script_info(nid), not DOM.in_template?(nid), do: s
+
     prefetch(scripts)
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
@@ -502,6 +505,7 @@ defmodule Browser.JS.Runtime do
         for nid <- DOM.descendants(DOM.document()),
             not MapSet.member?(seen, nid),
             s = script_info(nid),
+            not DOM.in_template?(nid),
             s.kind in [:classic, :module],
             external?(s) or String.trim(s.text) != "",
             do: s

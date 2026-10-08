@@ -48,7 +48,9 @@ defmodule Browser.JS.DOM do
           props: %{},
           kids: [],
           parent: nil,
-          text: ""
+          text: "",
+          # a `<template>`'s content: the fragment that holds what is inside it
+          content: nil
         },
         fields
       )
@@ -142,9 +144,36 @@ defmodule Browser.JS.DOM do
     {internal, visible} = Enum.split_with(attrs, fn {k, _} -> String.starts_with?(k, "@") end)
     nid = new_node(%{tag: tag, attrs: visible, internal: internal, parent: parent})
     kid_ids = Enum.map(kids, &build(&1, nid))
-    update_node_quiet(nid, &%{&1 | kids: kid_ids})
+
+    if tag == "template" do
+      # what is inside a template is its content: a fragment of its own, not part of the page
+      frag = new_node(%{kind: :fragment})
+      for k <- kid_ids, do: update_node_quiet(k, &%{&1 | parent: frag})
+      update_node_quiet(frag, &%{&1 | kids: kid_ids})
+      update_node_quiet(nid, &%{&1 | content: frag})
+    else
+      update_node_quiet(nid, &%{&1 | kids: kid_ids})
+    end
+
     nid
   end
+
+  # the fragment that holds a template's content (made when a script created the template)
+  defp template_content(nid) do
+    case node(nid).content do
+      nil ->
+        frag = new_node(%{kind: :fragment})
+        update_node_quiet(nid, &%{&1 | content: frag})
+        frag
+
+      frag ->
+        frag
+    end
+  end
+
+  # the node whose kids `innerHTML` reads and writes
+  defp inner_holder(%{tag: "template", kind: :element} = n), do: template_content(n.id)
+  defp inner_holder(n), do: n.id
 
   @doc "The values of the page's controls, by control id: `%{cid => %{value:, checked:, selected:}}`."
   def apply_controls(controls) do
@@ -706,6 +735,11 @@ defmodule Browser.JS.DOM do
     Enum.flat_map(node(nid).kids, fn k -> [k | descendants(k)] end)
   end
 
+  @doc "True when the node is inside a `<template>` (its content is inert: no script in it runs)."
+  def in_template?(nid) do
+    Enum.any?(ancestors(nid), fn a -> node(a).kind == :element and node(a).tag == "template" end)
+  end
+
   defp elements(nid), do: Enum.filter(descendants(nid), &(node(&1).kind == :element))
 
   # the first element below `nid` in document order that `pred` accepts, without building the
@@ -844,6 +878,11 @@ defmodule Browser.JS.DOM do
 
     if deep? do
       for k <- n.kids, do: insert(copy, clone(k, true), nil)
+
+      if n.content != nil do
+        content = clone(n.content, true)
+        update_node_quiet(copy, &%{&1 | content: content})
+      end
     end
 
     copy
@@ -1125,7 +1164,7 @@ defmodule Browser.JS.DOM do
         {:ok, aux_host({:dataset, n.id}, :dataset)}
 
       "innerHTML" ->
-        {:ok, serialize_kids(n.id)}
+        {:ok, serialize_kids(inner_holder(n))}
 
       "outerHTML" ->
         {:ok, serialize(n.id)}
@@ -1196,7 +1235,7 @@ defmodule Browser.JS.DOM do
         {:ok, attr_or(n, "for", "")}
 
       "content" when n.tag == "template" ->
-        {:ok, :undefined}
+        {:ok, wrap(template_content(n.id))}
 
       _ ->
         :miss
@@ -1397,7 +1436,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       "innerHTML" ->
-        set_children(nid, parse_fragment(to_str_or_empty(v)))
+        set_children(inner_holder(node(nid)), parse_fragment(to_str_or_empty(v)))
         :ok
 
       "outerHTML" ->
@@ -1987,7 +2026,11 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp serialize_kids(nid), do: node(nid).kids |> Enum.map_join(&serialize/1)
+  defp serialize_kids(nid) do
+    n = node(nid)
+    holder = if n.kind == :element and n.tag == "template", do: template_content(nid), else: nid
+    node(holder).kids |> Enum.map_join(&serialize/1)
+  end
 
   defp parent_tag(n), do: n.parent && node(n.parent).tag
 
@@ -4029,7 +4072,18 @@ defmodule Browser.JS.DOM do
       p = new_object([], element)
       for tag <- tags, do: put_proto({:dom, {:tag, tag}}, p)
       ctor(scope, name, p, fn _, _ -> throw_error("TypeError", "Illegal constructor") end)
+      # `Object.prototype.toString.call(el)`: Vue and others tell what is not worth a proxy by it
+      Interp.put_tag(p, name)
     end
+
+    for {proto, tag} <- [
+          {element, "HTMLElement"},
+          {text, "Text"},
+          {document, "HTMLDocument"},
+          {event, "Event"},
+          {node_proto, "Node"}
+        ],
+        do: Interp.put_tag(proto, tag)
 
     for name <- ~w(SVGElement SVGAElement ShadowRoot DocumentFragment Comment KeyframeEffect) do
       ctor(scope, name, new_object([], element), fn _, _ -> :undefined end)

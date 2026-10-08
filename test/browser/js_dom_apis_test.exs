@@ -105,4 +105,57 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["wheel -10 3 true true", "x string"]
   end
+
+  test "Object.prototype.toString names the DOM classes" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const t = (x) => Object.prototype.toString.call(x);
+        console.log(t(document.getElementById("b")), t(document.getElementById("d")), t(document.body.firstChild), t(document));
+        console.log(t(document.createElement("nav")), t(new Event("x")));
+        """,
+        "<button id=b></button><div id=d></div>"
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "[object HTMLButtonElement] [object HTMLDivElement] [object HTMLButtonElement] [object HTMLDocument]",
+             "[object HTMLElement] [object Event]"
+           ]
+  end
+
+  test "a template keeps its content in a fragment of its own" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const t = document.getElementById("t");
+        console.log(t.childNodes.length, t.content.childNodes.length, t.content === t.content);
+        console.log(document.querySelectorAll("p").length, t.content.querySelectorAll("p").length);
+        document.body.appendChild(document.importNode(t.content, true));
+        console.log(document.querySelectorAll("p").length, t.innerHTML);
+        const made = document.createElement("template");
+        made.innerHTML = "<b>x</b><i>y</i>";
+        console.log(made.content.childNodes.length, made.innerHTML, made.cloneNode(true).content.firstChild.tagName);
+        """,
+        ~S|<template id=t><p>one</p></template>|
+      )
+
+    assert errors == []
+    assert logs == ["0 1 true", "0 1", "1 <p>one</p>", "2 <b>x</b><i>y</i> B"]
+  end
+
+  test "scripts inside a template stay quiet" do
+    {logs, errors} =
+      run(
+        ~S"""
+        console.log("main");
+        console.log(document.getElementById("t").content.querySelectorAll("script").length);
+        """,
+        ~S|<template id=t><script>console.log("template script")</script></template>|
+      )
+
+    assert errors == []
+    assert logs == ["main", "1"]
+  end
 end
