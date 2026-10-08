@@ -829,7 +829,7 @@ defmodule Browser.Layout do
               )
 
             d when d in ["grid", "inline-grid"] ->
-              %{}
+              grid_trim(sides, kids, idx, c)
 
             _ ->
               block_trim(sides, kids, idx)
@@ -900,6 +900,42 @@ defmodule Browser.Layout do
       if(col?, do: cross, else: [main_end]),
       :right
     )
+  end
+
+  # the items of a grid that are placed automatically, row by row, are at its edges when they
+  # are in the first or last row or column
+  defp grid_trim(sides, kids, idx, c) do
+    cols = c["grid-template-columns"] |> grid_tracks(16) |> length() |> max(1)
+
+    placed? =
+      Enum.any?(idx, fn i ->
+        case Enum.at(kids, i) do
+          {:element, _, attrs, _} ->
+            ic = computed(attrs)
+            Enum.any?(~w(grid-row grid-column grid-area), &(ic[&1] not in [nil, "auto"]))
+
+          _ ->
+            false
+        end
+      end)
+
+    if placed? or c["grid-auto-flow"] in ["column", "column dense"] do
+      %{}
+    else
+      rows = div(length(idx) + cols - 1, cols)
+
+      idx
+      |> Enum.with_index()
+      |> Enum.reduce(%{}, fn {i, k}, m ->
+        {row, col} = {div(k, cols), rem(k, cols)}
+
+        m
+        |> add_trim(:bs in sides and row == 0, i, :top)
+        |> add_trim(:be in sides and row == rows - 1, i, :bottom)
+        |> add_trim(:is in sides and col == 0, i, :left)
+        |> add_trim(:ie in sides and col == cols - 1, i, :right)
+      end)
+    end
   end
 
   defp add_trim(m, false, _, _), do: m
@@ -6776,7 +6812,8 @@ defmodule Browser.Layout do
             Map.merge(it, %{w: w, items: items, h: h, room: room})
           end
 
-        natural = sized |> Enum.map(&(&1.h + &1.mt + &1.mb)) |> Enum.max(fn -> 0 end) |> max(0)
+        # (what an item laid out includes its own margins)
+        natural = sized |> Enum.map(& &1.h) |> Enum.max(fn -> 0 end) |> max(0)
         {sized, natural}
       end
 
@@ -6789,10 +6826,10 @@ defmodule Browser.Layout do
         placed_items =
           Enum.flat_map(sized, fn it ->
             it = grid_stretch(st, it, gs, cross)
-            dy = flex_offset(flex_align(it, gs.align), cross - it.mt - it.mb, it.h)
+            dy = flex_offset(flex_align(it, gs.align), cross, it.h)
             dx = grid_justify(it, gs, it.room)
             x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
-            for item <- it.items, do: move(item, round(x), y + it.mt + dy)
+            for item <- it.items, do: move(item, round(x), y + dy)
           end)
 
         {placed_items, y + cross + round(gs.row_gap)}

@@ -5338,8 +5338,6 @@ defmodule Browser.LayoutTest do
   end
 
   describe "tab-size lengths, calc() text-indent and words beside floats" do
-    defp tab_rows(html), do: wb_rows(html, 400)
-
     test "a tab-size given as a length is that many pixels" do
       html = ~s|<pre style="font-size:10px;tab-size:20px">a\tb</pre>|
       {items, _} = Layout.layout(Browser.Page.build(html, "about:home").nodes, 400, &measure/2)
@@ -5457,6 +5455,23 @@ defmodule Browser.LayoutTest do
       """
 
       assert green_rects(html) == [{0, 10}, {10, 5}]
+    end
+
+    test "a grid drops the margins of the items at its edges" do
+      item = ~s|<div style="margin:10px 0;height:20px;background:green"></div>|
+
+      html =
+        ~s|<div style="display:grid;grid-template-columns:50% 50%;margin-trim:block">#{item}#{item}#{item}#{item}</div>|
+
+      # (two rows: the first row loses its top margin, the last one its bottom margin)
+      assert green_rects(html) |> Enum.uniq() == [{0, 20}, {40, 20}]
+    end
+
+    test "the margins of grid items count once in a row" do
+      html =
+        ~s|<div style="display:grid"><div style="margin:10px 0;height:20px;width:50px;background:green"></div></div><div style="height:5px;background:blue"></div>|
+
+      assert green_rects(html) == [{40, 5}, {10, 20}]
     end
 
     test "without margin-trim the margins stay" do
