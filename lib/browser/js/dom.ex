@@ -1154,16 +1154,27 @@ defmodule Browser.JS.DOM do
   # ── queries ────────────────────────────────────────────────
 
   @doc "Every `<script>` element's id, in document order."
-  def descendants(nid) do
-    Enum.flat_map(node(nid).kids, fn k -> [k | descendants(k)] end)
-  end
+  def descendants(nid),
+    do: nid |> node() |> Map.fetch!(:kids) |> walk_kids([]) |> :lists.reverse()
+
+  # pre-order, newest first
+  defp walk_kids([], acc), do: acc
+  defp walk_kids([k | rest], acc), do: walk_kids(rest, walk_kids(node(k).kids, [k | acc]))
 
   @doc "True when the node is inside a `<template>` (its content is inert: no script in it runs)."
   def in_template?(nid) do
     Enum.any?(ancestors(nid), fn a -> node(a).kind == :element and node(a).tag == "template" end)
   end
 
-  defp elements(nid), do: Enum.filter(descendants(nid), &(node(&1).kind == :element))
+  defp elements(nid), do: walk_elements(node(nid).kids, []) |> :lists.reverse()
+
+  defp walk_elements([], acc), do: acc
+
+  defp walk_elements([k | rest], acc) do
+    n = node(k)
+    acc = if n.kind == :element, do: [k | acc], else: acc
+    walk_elements(rest, walk_elements(n.kids, acc))
+  end
 
   # the first element below `nid` in document order that `pred` accepts, without building the
   # list of every descendant
@@ -1931,7 +1942,7 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp find_tag(nid, tag), do: Enum.find(descendants(nid), &(node(&1).tag == tag))
+  defp find_tag(nid, tag), do: find_element(nid, &(&1.tag == tag))
 
   # ── host protocol: writes ──────────────────────────────────
 
@@ -2850,7 +2861,22 @@ defmodule Browser.JS.DOM do
 
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
-    Enum.filter(elements(root), &matches?(&1, sels))
+    walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+  end
+
+  # the elements below a node that match, in document order (newest first)
+  defp walk_matches([], _sels, acc), do: acc
+
+  defp walk_matches([k | rest], sels, acc) do
+    n = node(k)
+    acc = if n.kind == :element and matches?(k, sels), do: [k | acc], else: acc
+    walk_matches(rest, sels, walk_matches(n.kids, sels, acc))
+  end
+
+  # the first element below a node that matches
+  defp query_first(root, selector) do
+    sels = parse_selectors(selector)
+    find_element(root, fn n -> matches?(n.id, sels) end)
   end
 
   # ── serialising ────────────────────────────────────────────
@@ -4494,7 +4520,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "querySelector", fn this, args ->
-      wrap_or_null(List.first(query_all(this_nid(this), to_str(arg(args, 0)))))
+      wrap_or_null(query_first(this_nid(this), to_str(arg(args, 0))))
     end)
 
     def_fn(p, "querySelectorAll", fn this, args ->
