@@ -186,11 +186,9 @@ defmodule Browser.JS.Lexer do
     # parser has no use for this token, so it is a syntax error wherever it appears
     # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
     kind =
-      if (name in @keywords or name in ~w(target get set of async from as meta)) and
-           name not in ~w(implements interface package private protected public) and
-           escaped?(s, rest),
-         do: if(name in ~w(let await yield), do: :id, else: :eid),
-         else: :id
+      if escapable_word?(name) and escaped?(s, rest),
+        do: if(name in ~w(let await yield), do: :id, else: :eid),
+        else: :id
 
     if name == "await" and kind == :id and escaped?(s, rest),
       do: Process.put(:lex_esc_await, true)
@@ -200,6 +198,16 @@ defmodule Browser.JS.Lexer do
 
     push({kind, name, nl}, byte_size(s), rest, acc)
   end
+
+  # names whose escaped spelling matters (keywords, minus the strict mode reserved words with no
+  # part in the grammar, and the contextual keywords)
+  for w <-
+        Enum.uniq(@keywords ++ ~w(target get set of async from as meta)) --
+          ~w(implements interface package private protected public) do
+    defp escapable_word?(unquote(w)), do: true
+  end
+
+  defp escapable_word?(_), do: false
 
   defp esc_mark(true), do: :esc_nl
   defp esc_mark(false), do: :esc
@@ -392,8 +400,46 @@ defmodule Browser.JS.Lexer do
   end
 
   defp decimal_number(s) do
-    [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
+    lit = binary_part(s, 0, dec_len(s))
     {Browser.JS.Num.parse(lit), binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))}
+  end
+
+  # the length of the match of `\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?` (0 if none)
+  defp dec_len(s) do
+    int = digits_len(s, 0)
+
+    mant =
+      case s do
+        <<_::binary-size(^int), ?., _::binary>> when int > 0 ->
+          int + 1 + digits_len(s, int + 1)
+
+        <<?., _::binary>> ->
+          frac = digits_len(s, 1)
+          if frac > 0, do: 1 + frac, else: 0
+
+        _ ->
+          int
+      end
+
+    case s do
+      <<_::binary-size(^mant), e, rest::binary>> when mant > 0 and e in [?e, ?E] ->
+        sign = if match?(<<sg, _::binary>> when sg in [?+, ?-], rest), do: 1, else: 0
+        ds = digits_len(rest, sign)
+        if ds > 0, do: mant + 1 + sign + ds, else: mant
+
+      _ ->
+        mant
+    end
+  end
+
+  # how many ASCII digits `s` has from byte offset `from` on
+  defp digits_len(s, from), do: digits_run(s, from, from)
+
+  defp digits_run(s, i, start) do
+    case s do
+      <<_::binary-size(^i), d, _::binary>> when d in ?0..?9 -> digits_run(s, i + 1, start)
+      _ -> i - start
+    end
   end
 
   defp number(s, nl, acc) do
@@ -417,11 +463,11 @@ defmodule Browser.JS.Lexer do
           end
 
         _ ->
-          [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
+          lit = binary_part(s, 0, dec_len(s))
           lit_f = if String.starts_with?(lit, "."), do: "0" <> lit, else: lit
           rest = binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))
 
-          case {rest, Regex.match?(~r/\A(?:0|[1-9]\d*)\z/, lit)} do
+          case {rest, int_literal?(lit)} do
             {<<?n, rest::binary>>, true} ->
               {{:bigint, String.to_integer(lit)}, rest}
 
@@ -450,14 +496,39 @@ defmodule Browser.JS.Lexer do
   @separated_number ~r/\A(?:0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*|0[bB][01](?:_?[01])*|0[oO][0-7](?:_?[0-7])*|(?:[1-9](?:_?[0-9])*|0)?(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?)/
 
   defp strip_separators(s) do
-    [lit] = Regex.run(@separated_number, s)
+    # most numbers have no underscore anywhere near them: skip the regular expression
+    if :binary.match(s, "_", scope: {0, number_run(s, 0)}) == :nomatch do
+      s
+    else
+      [lit] = Regex.run(@separated_number, s)
 
-    if String.contains?(lit, "_"),
-      do:
-        String.replace(lit, "_", "") <>
-          binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit)),
-      else: s
+      if String.contains?(lit, "_"),
+        do:
+          String.replace(lit, "_", "") <>
+            binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit)),
+        else: s
+    end
   end
+
+  # the length of the run of bytes a number literal and a stray suffix could be made of
+  defp number_run(s, i) do
+    case s do
+      <<_::binary-size(^i), c, _::binary>>
+      when c in ?0..?9 or c in ?a..?z or c in ?A..?Z or c in [?_, ?., ?+, ?-] ->
+        number_run(s, i + 1)
+
+      _ ->
+        i
+    end
+  end
+
+  defp int_literal?("0"), do: true
+  defp int_literal?(<<d, rest::binary>>) when d in ?1..?9, do: all_digits?(rest)
+  defp int_literal?(_), do: false
+
+  defp all_digits?(<<d, rest::binary>>) when d in ?0..?9, do: all_digits?(rest)
+  defp all_digits?(""), do: true
+  defp all_digits?(_), do: false
 
   defp string(<<q, rest::binary>>, q, acc),
     do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), rest}

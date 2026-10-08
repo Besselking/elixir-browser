@@ -41,13 +41,27 @@ defmodule Browser.JS do
     end
   end
 
+  @doc """
+  The options a process that runs scripts is spawned with. The JS heap lives in the process
+  dictionary, which every collection of the process walks in full, so collections should be
+  rare: a big young heap, a high threshold for the garbage that binaries (big strings, typed
+  array contents) account for, and no full sweeps.
+  """
+  def process_opts do
+    [min_heap_size: 2_000_000, min_bin_vheap_size: 1_000_000, fullsweep_after: 1_000_000]
+  end
+
   defp run(program, opts) do
     max_steps = Keyword.get(opts, :max_steps, 1_000_000)
     timeout = Keyword.get(opts, :timeout, 5_000)
     parent = self()
     ref = make_ref()
 
-    {pid, mon} = spawn_monitor(fn -> send(parent, {ref, execute(program, max_steps)}) end)
+    {pid, mon} =
+      :erlang.spawn_opt(
+        fn -> send(parent, {ref, execute(program, max_steps)}) end,
+        [:monitor | process_opts()]
+      )
 
     receive do
       {^ref, result} ->

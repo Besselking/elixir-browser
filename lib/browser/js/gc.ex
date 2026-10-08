@@ -28,20 +28,25 @@ defmodule Browser.JS.GC do
         :ok
 
       at ->
-        if map_size(Process.get(:js_heap)) > at, do: collect(), else: :ok
+        if Browser.JS.Interp.heap_size() > at, do: collect(), else: :ok
     end
   end
 
   @doc "Frees every heap entry not reachable from the process dictionary; returns how many."
   def collect do
-    heap = Process.get(:js_heap)
-
-    roots =
-      for {k, v} <- Process.get(), k != :js_heap, not match?({:js_hoist, _}, k), do: v
+    # (the heap's objects are the process dictionary entries under integer keys)
+    {heap, roots} =
+      Enum.reduce(Process.get(), {%{}, []}, fn
+        {k, v}, {heap, roots} when is_integer(k) -> {Map.put(heap, k, v), roots}
+        {{:js_hoist, _}, _}, acc -> acc
+        {:js_heap_n, _}, acc -> acc
+        {_, v}, {heap, roots} -> {heap, [v | roots]}
+      end)
 
     live = mark(roots, heap, %{})
     freed = map_size(heap) - map_size(live)
-    Process.put(:js_heap, Map.take(heap, Map.keys(live)))
+    for {id, _} <- heap, not is_map_key(live, id), do: Process.delete(id)
+    Process.put(:js_heap_n, map_size(live))
     Process.put(:js_gc_at, max(@min_collect, 2 * map_size(live)))
     freed
   end

@@ -11,12 +11,12 @@ defmodule Browser.JSGCTest do
       Builtins.install()
       {:ok, p} = Parser.parse(src)
       Interp.run_program(p)
-      before = map_size(Process.get(:js_heap))
+      before = Browser.JS.Interp.heap_size()
       freed = GC.collect()
       {:ok, p2} = Parser.parse(after_src)
       Interp.run_program(p2)
       Builtins.run_timers(fn v -> throw({:uncaught, v}) end)
-      {freed, before, map_size(Process.get(:js_heap)), Enum.reverse(Process.get(:js_console, []))}
+      {freed, before, Browser.JS.Interp.heap_size(), Enum.reverse(Process.get(:js_console, []))}
     end)
     |> Task.await(30_000)
   end
