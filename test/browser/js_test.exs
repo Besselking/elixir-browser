@@ -1050,6 +1050,15 @@ defmodule Browser.JSTest do
              """) == "ReferenceError"
     end
 
+    test "eval function over a configurable global property" do
+      assert js("""
+             Object.defineProperty(this, 'ef', {enumerable: false, writable: false, configurable: true});
+             eval('function ef() { return 3 }');
+             var d = Object.getOwnPropertyDescriptor(this, 'ef');
+             [d.writable, d.enumerable, d.configurable, ef()].join()
+             """) == "true,true,true,3"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

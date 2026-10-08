@@ -4230,7 +4230,12 @@ defmodule Browser.JS.Interp do
       )
     end
 
-    for {name, fun} <- fun_decls, do: declare(var_scope, name, make_fn(fun, lex, false))
+    for {name, fun} <- fun_decls do
+      f = make_fn(fun, lex, false)
+      declare(var_scope, name, f)
+      if not strict?, do: reopen_global_property(var_scope, name, f)
+    end
+
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
     :erlang.put(:js_last, :undefined)
@@ -4244,6 +4249,20 @@ defmodule Browser.JS.Interp do
   # an indirect eval is global code: `var`s and functions go to the global scope (sloppy) and
   # `let`/`const`/class stay in a scope of its own
   def indirect_eval({:program, stmts}), do: run_eval(stmts, global(), false)
+
+  # a function declared by sloppy eval at global level replaces a configurable global property
+  # by a fully open data property holding the function
+  defp reopen_global_property(scope, name, f) do
+    with %{parent: nil, vars: %{this: {:obj, gid}}} <- deref(scope),
+         %{props: %{^name => _}} = g <- deref(gid),
+         true <- configurable?(g, name) do
+      attrs = Map.put(Map.get(g, :attrs, %{}), name, %{w: true, e: true, c: true})
+      keys = if name in g.keys, do: g.keys, else: [name | g.keys]
+      store(gid, %{g | props: Map.put(g.props, name, f), attrs: attrs, keys: keys})
+    end
+
+    :ok
+  end
 
   defp eval_declared?(scope, name),
     do: MapSet.member?(Map.get(deref(scope), :evalvars, MapSet.new()), name)
