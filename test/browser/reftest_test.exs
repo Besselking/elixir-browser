@@ -75,6 +75,29 @@ defmodule Browser.ReftestTest do
     assert Reftest.run_test(root, "css/t/d.html") == :pass
   end
 
+  test "a test with several matches passes when one of them agrees", %{root: root} do
+    box = ~s(<div style="width:50px;height:20px;background:#0a0"></div>)
+
+    write(
+      root,
+      "m.html",
+      ~s(<link rel=match href=m-ref1.html><link rel=match href=m-ref2.html>) <> box
+    )
+
+    write(root, "m-ref1.html", ~s(<div style="width:60px;height:20px;background:#0a0"></div>))
+    write(root, "m-ref2.html", box)
+    assert Reftest.run_test(root, "css/t/m.html") == :pass
+
+    # every mismatch still has to differ
+    write(
+      root,
+      "n.html",
+      ~s(<link rel=match href=m-ref2.html><link rel=mismatch href=m-ref2.html>) <> box
+    )
+
+    assert {:fail, "" <> _} = Reftest.run_test(root, "css/t/n.html")
+  end
+
   test "text is compared by what it says", %{root: root} do
     write(root, "e.html", ~s(<link rel=match href=e-ref.html><p>abc</p>))
     write(root, "e-ref.html", ~s(<p>abd</p>))

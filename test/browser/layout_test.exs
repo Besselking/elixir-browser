@@ -4913,6 +4913,17 @@ defmodule Browser.LayoutTest do
       [{"ab", 0, y1}, {"\u00A0", _, y2} | _] = bs_items("ab cd", 10)
       assert y1 == y2
     end
+
+    test "other space separators are preserved spaces too, and a line may break after them" do
+      # (measure/2 gives every character the same width, 5px at the page's font size)
+      [{"xx", 0, y1}, {"\u2001", _, y2} | _] = bs_items("xx\u2001ab", 10)
+      assert y1 == y2
+    end
+
+    test "ideographs break between each other under break-spaces" do
+      ys = bs_items("\u3042\u3042\u3001", 10) |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+      assert length(ys) == 2
+    end
   end
 
   describe "word-break and overflow-wrap" do

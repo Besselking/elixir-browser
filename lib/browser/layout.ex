@@ -2622,12 +2622,29 @@ defmodule Browser.Layout do
     |> Enum.intersperse({:space, style})
   end
 
+  @break_spaces [
+    " ",
+    "\u1680",
+    "\u2000",
+    "\u2001",
+    "\u2002",
+    "\u2003",
+    "\u2004",
+    "\u2005",
+    "\u2006",
+    "\u2008",
+    "\u2009",
+    "\u200A",
+    "\u205F",
+    "\u3000"
+  ]
+
   # `break-spaces`: every preserved space is a word of its own and a line may break after
   # each of them, so none hangs; the first one after text does not wrap away from it
   defp line_ops(line, style, :break_spaces, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    ~r/\t|[ \x{3000}]|[^ \x{3000}\t]+/u
+    ~r/\t|[ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}]|[^ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}\t]+/u
     |> Regex.scan(String.replace(line, "\r", " "))
     |> Enum.map_reduce({prev, 0}, fn
       # a tab is one unbreakable word as wide as the spaces it stands for
@@ -2640,16 +2657,17 @@ defmodule Browser.Layout do
           else: {{:word, word, style}, {:space, col + n}}
 
       # (`line-break: anywhere` allows a break between a word and the space after it)
-      [sp], {:text, col} when sp in [" ", "\u3000"] and style.wrap_chars != :every ->
+      [sp], {:text, col} when sp in @break_spaces and style.wrap_chars != :every ->
         {{:word, nbsp_of(sp), style, :hold}, {:space, col + 1}}
 
-      [sp], {_, col} when sp in [" ", "\u3000"] ->
+      [sp], {_, col} when sp in @break_spaces ->
         {{:word, nbsp_of(sp), style}, {:space, col + 1}}
 
       [run], {_, col} ->
-        {{:word, run, style}, {:text, col + String.length(run)}}
+        {ideograph_breaks({:word, run, style}, style), {:text, col + String.length(run)}}
     end)
     |> elem(0)
+    |> List.flatten()
   end
 
   # a tab keeps a line from being justified
@@ -2672,9 +2690,10 @@ defmodule Browser.Layout do
           {:word, String.duplicate("\u00A0", String.length(run)), style, :pre}
 
         true ->
-          {:word, run, style}
+          ideograph_breaks({:word, run, style}, style)
       end
     end)
+    |> List.flatten()
   end
 
   # what the text laid out so far ends in: `:text`, or `:space` for a preserved space
@@ -2684,7 +2703,8 @@ defmodule Browser.Layout do
   defp prev_kind([{:inline_close, _, _} | rest]), do: prev_kind(rest)
   defp prev_kind(_), do: nil
 
-  defp word_kind(text), do: if(String.last(text) in ["\u00A0", "\u3000"], do: :space, else: :text)
+  defp word_kind(text),
+    do: if(String.last(text) in ["\u00A0" | @break_spaces], do: :space, else: :text)
 
   defp nbsp_of(" "), do: "\u00A0"
   defp nbsp_of(other), do: other
