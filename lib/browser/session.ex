@@ -108,6 +108,10 @@ defmodule Browser.Session do
       # form interaction: the focused control, its caret (graphemes), blink state, and
       # the control whose option menu is open
       focus: nil,
+      # where the focus was when each open modal dialog opened (control numbers, newest first),
+      # and the control a script focused that the page does not have yet (`:blur`: none)
+      modal_return: [],
+      pending_focus: nil,
       caret: 0,
       caret_on: true,
       blink: nil,
@@ -769,12 +773,14 @@ defmodule Browser.Session do
         old_nids = Page.cid_nids(state.page)
         new_cids = page |> Page.cid_nids() |> Map.new(fn {cid, nid} -> {nid, cid} end)
         focus = with nid when nid != nil <- old_nids[state.focus], do: new_cids[nid]
+        pending = state.pending_focus
 
         carried =
           for {nid, entry} <- edits, new_cid = new_cids[nid], into: %{}, do: {new_cid, entry}
 
         page = if carried == %{}, do: page, else: Page.render(page, carried)
         state = %{state | page: page, nodes: page.nodes, focus: focus, controls: %{}}
+        state = settle_focus(state, pending, new_cids)
         state = cancel_layout_job(state)
 
         # what the user typed meanwhile is not in what the job laid out: lay out again
@@ -1530,6 +1536,34 @@ defmodule Browser.Session do
     if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
   end
 
+  # a script gave the control with element number `nid` the focus (`:blur`: took it away): at
+  # once if the page has that control, else when the changed page arrives
+  defp focus_nid(%{page: nil} = state, _nid), do: state
+  defp focus_nid(state, :blur), do: %{state | pending_focus: :blur} |> blur_now()
+
+  defp focus_nid(state, nid) do
+    case Enum.find(Page.cid_nids(state.page), fn {_cid, n} -> n == nid end) do
+      {cid, _} -> state |> focus(cid, :end) |> relayout() |> ensure_visible(cid)
+      nil -> %{state | pending_focus: nid}
+    end
+  end
+
+  defp blur_now(%{focus: nil} = state), do: state
+  defp blur_now(state), do: blur(state)
+
+  # the changed page is in: a focus change the old page could not take is made now
+  defp settle_focus(state, nil, _new_cids), do: state
+  defp settle_focus(state, :blur, _new_cids), do: %{state | pending_focus: nil, focus: nil}
+
+  defp settle_focus(state, nid, new_cids) do
+    state = %{state | pending_focus: nil}
+
+    case new_cids[nid] do
+      nil -> state
+      cid -> focus(state, cid, :end)
+    end
+  end
+
   defp blur(state) do
     state |> stop_blink() |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false}) |> relayout()
   end
@@ -1577,7 +1611,7 @@ defmodule Browser.Session do
     control = control(state, cid)
 
     cond do
-      control == nil or control.disabled? ->
+      control == nil or control.disabled? or Map.get(control, :inert?, false) ->
         state
 
       Forms.editable?(control) ->
@@ -1677,6 +1711,7 @@ defmodule Browser.Session do
     case control(state, cid) do
       nil -> :arrow
       %{disabled?: true} -> :arrow
+      %{inert?: true} -> :arrow
       control -> if Forms.editable?(control), do: :text, else: :hand
     end
   end
@@ -1944,7 +1979,20 @@ defmodule Browser.Session do
     if prevented, do: state, else: navigate_form(state, form, clicked)
   end
 
-  defp navigate_form(state, form, clicked) do
+  # `<form method="dialog">` closes the dialog it is in instead of going anywhere
+  defp navigate_form(%{js: js, page: page} = state, form, clicked) when js != nil do
+    case page.forms.forms do
+      %{^form => %{method: "dialog"}} ->
+        apply_js(state, Browser.JS.Runtime.dialog_submit(js, form, clicked))
+
+      _ ->
+        navigate_form_url(state, form, clicked)
+    end
+  end
+
+  defp navigate_form(state, form, clicked), do: navigate_form_url(state, form, clicked)
+
+  defp navigate_form_url(state, form, clicked) do
     page = state.page
 
     request =
@@ -2063,11 +2111,15 @@ defmodule Browser.Session do
   end
 
   # the live values of the controls, which scripts read
-  defp controls_snapshot(%{page: page}) do
-    for {cid, control} <- page.forms.controls, into: %{} do
-      cur = Forms.current(control, page.form_state)
-      {cid, %{value: cur.value, checked: cur.checked, selected: cur.selected}}
-    end
+  defp controls_snapshot(%{page: page} = state) do
+    snapshot =
+      for {cid, control} <- page.forms.controls, into: %{} do
+        cur = Forms.current(control, page.form_state)
+        {cid, %{value: cur.value, checked: cur.checked, selected: cur.selected}}
+      end
+
+    # the control with focus, for `document.activeElement`
+    Map.put(snapshot, :focus, state.focus)
   end
 
   # fires an event in the page's scripts: -> {state, default prevented?}
@@ -2170,6 +2222,19 @@ defmodule Browser.Session do
 
   # `form.submit()` and `requestSubmit()`: the form goes the way a click on its button sends it
   defp js_effect({:submit, fid}, state) when is_integer(fid), do: navigate_form(state, fid, nil)
+
+  # a modal dialog opened: the focus goes into it, and comes back to where it was when it closes
+  defp js_effect({:modal, :open}, state) do
+    nids = if state.page, do: Page.cid_nids(state.page), else: %{}
+    %{state | modal_return: [nids[state.focus] | state.modal_return]}
+  end
+
+  defp js_effect({:modal, :close}, %{modal_return: [back | rest]} = state),
+    do: focus_nid(%{state | modal_return: rest}, back || :blur)
+
+  defp js_effect({:modal, :close}, state), do: state
+  defp js_effect({:modal, :blur}, state), do: blur_now(state)
+  defp js_effect({:focus_control, nid}, state), do: focus_nid(state, nid)
 
   defp js_effect({:clipboard, text}, state) do
     UI.set_clipboard_text(text)

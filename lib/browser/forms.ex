@@ -42,12 +42,15 @@ defmodule Browser.Forms do
   @doc """
   Numbers the controls and forms. Returns `{nodes, %{controls: …, forms: …}}`.
 
-  A control is `%{cid, tag, type, name, form, disabled?, readonly?, value, checked,
+  A control is `%{cid, tag, type, name, form, disabled?, inert?, readonly?, value, checked,
   selected, options}`: `form` is the id of the enclosing `<form>` (or nil), and
   `value`/`checked`/`selected` are its initial state.
   """
   def index(nodes) do
-    {nodes, acc} = index_nodes(nodes, nil, %{n: 0, f: 0, controls: %{}, forms: %{}})
+    # while a modal dialog is open, what is outside the last one is inert, like what has `inert`
+    acc = %{n: 0, f: 0, controls: %{}, forms: %{}, modals: Browser.Modal.count(nodes), seen: 0}
+    acc = Map.put(acc, :inert, acc.modals > 0)
+    {nodes, acc} = index_nodes(nodes, nil, acc)
     {nodes, %{controls: acc.controls, forms: acc.forms}}
   end
 
@@ -55,7 +58,18 @@ defmodule Browser.Forms do
 
   defp index_node({:text, _} = t, _form, acc), do: {t, acc}
 
-  defp index_node({:element, "form", attrs, kids}, _form, acc) do
+  defp index_node({:element, tag, attrs, _} = el, form, acc) do
+    outer = acc.inert
+    modal? = Browser.Modal.modal?(tag, attrs)
+    acc = if modal?, do: %{acc | seen: acc.seen + 1}, else: acc
+    # the last modal dialog and what is in it take part; `inert` takes a whole subtree out
+    inert = if modal? and acc.seen == acc.modals, do: false, else: outer
+    inert = inert or has?(attrs, "inert")
+    {node, acc} = index_el(el, form, %{acc | inert: inert})
+    {node, %{acc | inert: outer}}
+  end
+
+  defp index_el({:element, "form", attrs, kids}, _form, acc) do
     fid = acc.f
 
     info = %{
@@ -68,7 +82,7 @@ defmodule Browser.Forms do
     {{:element, "form", attrs, kids}, acc}
   end
 
-  defp index_node({:element, "details", attrs, kids}, form, acc) do
+  defp index_el({:element, "details", attrs, kids}, form, acc) do
     case Enum.find_index(kids, &match?({:element, "summary", _, _}, &1)) do
       nil ->
         {kids, acc} = index_nodes(kids, form, acc)
@@ -77,7 +91,12 @@ defmodule Browser.Forms do
       at ->
         {:element, "summary", sattrs, skids} = Enum.at(kids, at)
         cid = acc.n
-        control = %{control(cid, "summary", sattrs, skids, form) | checked: has?(attrs, "open")}
+
+        control = %{
+          control(cid, "summary", sattrs, skids, form, acc.inert)
+          | checked: has?(attrs, "open")
+        }
+
         acc = %{acc | n: cid + 1, controls: Map.put(acc.controls, cid, control)}
         {skids, acc} = index_nodes(skids, form, acc)
         summary = {:element, "summary", sattrs ++ [{"@cid", cid}], skids}
@@ -88,20 +107,20 @@ defmodule Browser.Forms do
     end
   end
 
-  defp index_node({:element, tag, attrs, kids}, form, acc) when tag in @controls do
+  defp index_el({:element, tag, attrs, kids}, form, acc) when tag in @controls do
     cid = acc.n
-    control = control(cid, tag, attrs, kids, form)
+    control = control(cid, tag, attrs, kids, form, acc.inert)
     acc = %{acc | n: cid + 1, controls: Map.put(acc.controls, cid, control)}
     {kids, acc} = index_nodes(kids, form, acc)
     {{:element, tag, attrs ++ [{"@cid", cid}], kids}, acc}
   end
 
-  defp index_node({:element, tag, attrs, kids}, form, acc) do
+  defp index_el({:element, tag, attrs, kids}, form, acc) do
     {kids, acc} = index_nodes(kids, form, acc)
     {{:element, tag, attrs, kids}, acc}
   end
 
-  defp control(cid, tag, attrs, kids, form) do
+  defp control(cid, tag, attrs, kids, form, inert?) do
     type = control_type(tag, attrs)
     options = if tag == "select", do: options(kids), else: []
 
@@ -112,6 +131,7 @@ defmodule Browser.Forms do
       name: attr(attrs, "name"),
       form: form,
       disabled?: has?(attrs, "disabled"),
+      inert?: inert?,
       readonly?: has?(attrs, "readonly"),
       value: initial_value(tag, attrs, kids),
       checked: has?(attrs, "checked"),
@@ -436,6 +456,7 @@ defmodule Browser.Forms do
 
   @doc "Whether the control can take keyboard focus."
   def focusable?(%{disabled?: true}), do: false
+  def focusable?(%{inert?: true}), do: false
   def focusable?(%{type: "hidden"}), do: false
   def focusable?(%{tag: "summary"}), do: false
   def focusable?(_control), do: true
@@ -447,6 +468,7 @@ defmodule Browser.Forms do
 
   @doc "Whether typing edits this control's text."
   def editable?(%{disabled?: true}), do: false
+  def editable?(%{inert?: true}), do: false
   def editable?(%{readonly?: true}), do: false
   def editable?(%{tag: "textarea"}), do: true
   def editable?(%{tag: "input", type: type}), do: text_like?(type)

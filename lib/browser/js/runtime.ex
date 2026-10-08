@@ -78,6 +78,9 @@ defmodule Browser.JS.Runtime do
   def dispatch(pid, target, type, init \\ %{}, controls \\ %{}),
     do: call(pid, {:dispatch, target, type, init, controls})
 
+  @doc "A form with `method=\"dialog\"` was submitted, by the control `cid` (nil: by script)."
+  def dialog_submit(pid, fid, cid), do: call(pid, {:dialog_submit, fid, cid})
+
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
@@ -255,11 +258,33 @@ defmodule Browser.JS.Runtime do
         t -> guard(fn -> DOM.dispatch(t, type, init) end, :ok)
       end
 
+    # what the window does when the page did not stop the event: Escape closes a modal dialog,
+    # a click on its backdrop may
+    if prevented != :prevented do
+      case {type, init, target} do
+        {"keydown", %{"key" => "Escape"}, _} ->
+          guard(fn -> DOM.call_global("__dialogEscape", []) end, :ok)
+
+        {"click", _, {:numbered, n}} when n < 0 ->
+          guard(fn -> DOM.dialog_backdrop(n) end, :ok)
+
+        _ ->
+          :ok
+      end
+    end
+
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
   end
 
   # the pointer went from one element (by its layout number) to another
+  # `<form method="dialog">` was submitted (by the control `cid`, or by script): the dialog closes
+  defp handle({:dialog_submit, fid, cid}) do
+    guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
   defp handle({:hover, old, new}) do
     guard(fn -> DOM.hover(old, new) end, :ok)
     Browser.JS.Promise.run_microtasks()

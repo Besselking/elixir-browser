@@ -302,7 +302,11 @@ defmodule Browser.JS.WebAPI do
       return c.signal;
     };
 
-    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = 0; }
+    var domCodes = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5, NoModificationAllowedError: 7,
+      NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10, InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+      NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+      QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
+    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = domCodes[this.name] || 0; }
     DOMException.prototype = Object.create(Error.prototype);
     DOMException.prototype.constructor = DOMException;
 
@@ -507,7 +511,11 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "draggable", function () { return false; });
     getter(EP, "spellcheck", function () { return true; });
     getter(EP, "accessKey", function () { return ""; });
-    getter(EP, "inert", function () { return false; });
+    if (!("inert" in EP)) Object.defineProperty(EP, "inert", {
+      get: function () { return this.hasAttribute("inert"); },
+      set: function (v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); },
+      configurable: true
+    });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
     // a shadow root here is a fragment that is kept, but not drawn
@@ -567,16 +575,120 @@ defmodule Browser.JS.WebAPI do
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = location.origin; e.source = g; g.dispatchEvent(e); }, 0); });
-    // <dialog>: shown while it has the open attribute (a modal one is not modal here)
+    // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
+    // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {
       var DP = HTMLDialogElement.prototype;
-      DP.show = function () { this.setAttribute("open", ""); };
-      DP.showModal = DP.show;
-      DP.close = function (value) {
-        if (!this.hasAttribute("open")) return;
-        if (value !== undefined) this.returnValue = String(value);
-        this.removeAttribute("open");
-        this.dispatchEvent(new Event("close"));
+      // the open modal dialogs, oldest first (one whose open attribute was removed is not one)
+      var modals = [];
+      function openModals() {
+        modals = modals.filter(function (d) { return d.matches(":modal"); });
+        return modals;
+      }
+      function fireLater(el, type) {
+        setTimeout(function () { el.dispatchEvent(new Event(type, { bubbles: false, cancelable: false })); }, 0);
+      }
+      function focusable(el) {
+        if (el.hasAttribute("disabled") || el.hasAttribute("inert") || el.hidden) return false;
+        var t = el.tagName.toLowerCase();
+        if (t === "input") return el.getAttribute("type") !== "hidden";
+        if (t === "select" || t === "textarea" || t === "button") return true;
+        if (t === "a" || t === "area") return el.hasAttribute("href");
+        var ce = el.getAttribute("contenteditable");
+        if (ce !== null && ce !== "false") return true;
+        return el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex")) >= 0;
+      }
+      // the dialog focusing steps: the first element with autofocus, else the first one that can
+      // take focus (a link is not given focus by this browser, so it is only a fallback)
+      function focusInto(dlg, modal) {
+        if (dlg.closest("[inert]")) {
+          var active = document.activeElement;
+          if (modal && active && active !== document.body && active.blur) active.blur();
+          return;
+        }
+        var all = dlg.querySelectorAll("*"), first = null, i;
+        for (i = 0; i < all.length; i++) {
+          if (all[i].hasAttribute("autofocus") && focusable(all[i])) { all[i].focus(); return; }
+        }
+        for (i = 0; i < all.length; i++) {
+          var t = all[i].tagName.toLowerCase();
+          if (focusable(all[i]) && t !== "a" && t !== "area") { first = all[i]; break; }
+        }
+        (first || dlg).focus();
+      }
+      function closeDialog(dlg, value) {
+        if (!dlg.hasAttribute("open")) return;
+        if (value !== undefined) returnValues.set(dlg, String(value));
+        dlg.__setModal(false);
+        dlg.removeAttribute("open");
+        fireLater(dlg, "close");
+      }
+      // the value lives in a slot of its own, so a property a script sets on the element is not hit
+      var returnValues = new WeakMap();
+      Object.defineProperty(DP, "returnValue", {
+        get: function () { return returnValues.has(this) ? returnValues.get(this) : ""; },
+        set: function (v) { returnValues.set(this, String(v)); },
+        configurable: true
+      });
+      DP.show = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) throw new DOMException("The dialog is already open as a modal dialog.", "InvalidStateError");
+          return;
+        }
+        this.setAttribute("open", "");
+        if (this.isConnected) focusInto(this, false);
+      };
+      DP.showModal = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) return;
+          throw new DOMException("The dialog is already open as a non-modal dialog.", "InvalidStateError");
+        }
+        if (!this.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        this.setAttribute("open", "");
+        modals.push(this);
+        this.__setModal(true);
+        focusInto(this, true);
+      };
+      DP.close = function (value) { closeDialog(this, value); };
+      var requesting = new WeakSet();
+      DP.requestClose = function (value) {
+        if (!this.hasAttribute("open") || !this.isConnected || requesting.has(this)) return;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        var ok;
+        requesting.add(this);
+        try { ok = this.dispatchEvent(e); } finally { requesting.delete(this); }
+        if (ok) closeDialog(this, value);
+      };
+      Object.defineProperty(DP, "closedBy", {
+        get: function () {
+          var v = (this.getAttribute("closedby") || "").toLowerCase();
+          return v === "any" || v === "closerequest" || v === "none" ? v : "auto";
+        },
+        set: function (v) { this.setAttribute("closedby", String(v)); }, configurable: true
+      });
+      // what the window does for Escape: ask the topmost modal dialog to close
+      g.__dialogEscape = function () {
+        var open = openModals(), dlg = open[open.length - 1];
+        if (!dlg) return false;
+        var by = dlg.closedBy;
+        if (by === "none") return true;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        return true;
+      };
+      // a click on the backdrop: closes a dialog that says closedby="any"
+      g.__dialogBackdrop = function (dlg) {
+        if (dlg && dlg.closedBy === "any" && dlg.hasAttribute("open")) {
+          var e = new Event("cancel", { bubbles: false, cancelable: true });
+          if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        }
+      };
+      // <form method="dialog">: the submitter's value closes the dialog
+      g.__dialogSubmit = function (form, submitter) {
+        var dlg = form.closest("dialog");
+        if (!dlg) return;
+        var value = submitter && submitter.hasAttribute("value") ? submitter.getAttribute("value") : undefined;
+        closeDialog(dlg, value);
       };
     }
     def("open", function () { return null; });

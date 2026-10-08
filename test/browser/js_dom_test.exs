@@ -60,21 +60,233 @@ defmodule Browser.JS.DOMTest do
     assert logs(r) == ["true true"]
   end
 
-  test "a dialog is shown while it is open" do
-    r =
-      run(
-        """
-        var d = document.getElementById("d");
-        console.log(d.open);
-        d.showModal();
-        console.log(d.open, d.hasAttribute("open"));
-        d.close("done");
-        console.log(d.open, d.returnValue);
-        """,
-        "<dialog id=d><p>x</p></dialog>"
-      )
+  describe "dialogs" do
+    # what the timers that ran by themselves logged (the `close` event comes in its own task)
+    defp later(pid, wait \\ 100) do
+      receive do
+        {:js_async, ^pid, reply} -> logs(reply) ++ later(pid, wait)
+      after
+        wait -> []
+      end
+    end
 
-    assert logs(r) == ["false", "true true", "false done"]
+    @dialog "<button id=before>before</button><dialog id=d><p>x</p><input id=i><button id=ok value=ok>OK</button></dialog>"
+
+    test "a dialog is shown while it is open" do
+      r =
+        run(
+          """
+          var d = document.getElementById("d");
+          console.log(d.open, d.matches(":modal"));
+          d.show();
+          console.log(d.open, d.hasAttribute("open"), d.matches(":modal"));
+          d.close("done");
+          console.log(d.open, d.returnValue);
+          d.open = true;
+          console.log(d.hasAttribute("open"));
+          d.open = false;
+          console.log(d.hasAttribute("open"));
+          """,
+          @dialog
+        )
+
+      assert logs(r) == ["false false", "true true false", "false done", "true", "false"]
+    end
+
+    test "showModal() marks the dialog, close() clears it and fires close later" do
+      {pid, r} =
+        start(
+          "<body>#{@dialog}<script>" <>
+            """
+            var d = document.getElementById("d");
+            d.addEventListener("close", function () { console.log("close", d.returnValue); });
+            d.showModal();
+            console.log(d.open, d.matches(":modal"), d.matches(":open"));
+            d.close("bye");
+            console.log("closed", d.open, d.matches(":modal"));
+            </script></body>
+            """
+        )
+
+      assert logs(r) == ["true true true", "closed false false"]
+      assert {:modal, :open} in r.outbox and {:modal, :close} in r.outbox
+      assert later(pid) == ["close bye"]
+    end
+
+    test "the exported tree tells a modal dialog from a plain one" do
+      {_pid, r} =
+        start("<body>#{@dialog}<script>document.getElementById('d').showModal();</script></body>")
+
+      assert r.dirty
+
+      assert Browser.Modal.count(r.raw) == 1
+
+      {_pid, r} =
+        start("<body>#{@dialog}<script>document.getElementById('d').show();</script></body>")
+
+      assert Browser.Modal.count(r.raw) == 0
+    end
+
+    test "showModal() and show() throw when the state is wrong" do
+      r =
+        run(
+          """
+          function t(f) { try { f(); return "ok"; } catch (e) { return e.name + " " + e.code; } }
+          var d = document.getElementById("d");
+          d.show();
+          console.log(t(function () { d.showModal(); }));
+          d.close();
+          d.showModal();
+          console.log(t(function () { d.showModal(); }), t(function () { d.show(); }));
+          console.log(t(function () { document.createElement("dialog").showModal(); }));
+          d.removeAttribute("open");
+          console.log(d.matches(":modal"), t(function () { d.showModal(); }));
+          """,
+          @dialog
+        )
+
+      assert logs(r) == [
+               "InvalidStateError 11",
+               "ok InvalidStateError 11",
+               "InvalidStateError 11",
+               "false ok"
+             ]
+    end
+
+    test "Escape asks the topmost modal dialog to close, unless the page stops it" do
+      {pid, r} =
+        start(
+          "<body>#{@dialog}<script>" <>
+            """
+            var d = document.getElementById("d");
+            ["cancel", "close"].forEach(function (t) { d.addEventListener(t, function (e) { console.log(t, e.cancelable); }); });
+            d.showModal();
+            </script></body>
+            """
+        )
+
+      escape = %{"key" => "Escape"}
+      first = Runtime.dispatch(pid, :document, "keydown", escape)
+      assert logs(first) ++ later(pid) == ["cancel true", "close false"]
+
+      # the page's own handler can keep the dialog
+      {pid, _} =
+        start(
+          "<body>#{@dialog}<script>" <>
+            """
+            var d = document.getElementById("d");
+            d.addEventListener("close", function () { console.log("close"); });
+            document.addEventListener("keydown", function (e) { e.preventDefault(); });
+            d.showModal();
+            </script></body>
+            """
+        )
+
+      first = Runtime.dispatch(pid, :document, "keydown", escape)
+      assert logs(first) ++ later(pid) == []
+      _ = r
+    end
+
+    test "a cancel event that is stopped keeps the dialog open" do
+      {pid, _} =
+        start(
+          "<body>#{@dialog}<script>" <>
+            """
+            var d = document.getElementById("d");
+            d.addEventListener("cancel", function (e) { e.preventDefault(); console.log("cancel"); });
+            d.addEventListener("close", function () { console.log("close"); });
+            d.showModal();
+            </script></body>
+            """
+        )
+
+      first = Runtime.dispatch(pid, :document, "keydown", %{"key" => "Escape"})
+      assert logs(first) ++ later(pid) == ["cancel"]
+    end
+
+    test "requestClose() fires cancel first and passes its value to close" do
+      r =
+        run(
+          """
+          var d = document.getElementById("d");
+          var stop = true;
+          d.addEventListener("cancel", function (e) { console.log("cancel"); if (stop) e.preventDefault(); });
+          d.showModal();
+          d.requestClose("one");
+          console.log(d.open, JSON.stringify(d.returnValue));
+          stop = false;
+          d.requestClose("two");
+          console.log(d.open, d.returnValue);
+          """,
+          @dialog
+        )
+
+      assert logs(r) == ["cancel", "true \"\"", "cancel", "false two"]
+    end
+
+    test "a form with method=dialog closes its dialog with the value of the button" do
+      {pid, _} =
+        start(
+          "<body><dialog id=d><form method=dialog><button value=no>No</button><button value=yes>Yes</button></form></dialog>" <>
+            "<script>var d = document.getElementById('d'); d.addEventListener('close', function () { console.log('closed', d.returnValue); }); d.showModal();</script></body>"
+        )
+
+      # the second button is the control numbered 1; the form is the first one
+      reply = Runtime.dialog_submit(pid, 0, 1)
+      assert {:modal, :close} in reply.outbox
+      assert later(pid) == ["closed yes"]
+    end
+
+    test "a click on the backdrop closes a dialog that says closedby=any" do
+      {pid, r} =
+        start(
+          "<body><dialog id=d closedby=any><p>x</p></dialog><dialog id=e><p>y</p></dialog><script>" <>
+            "var d = document.getElementById('d'), e = document.getElementById('e');" <>
+            "d.addEventListener('close', function () { console.log('d closed'); });" <>
+            "e.addEventListener('close', function () { console.log('e closed'); });" <>
+            "d.showModal(); console.log(d.closedBy, e.closedBy);</script></body>"
+        )
+
+      assert logs(r) == ["any auto"]
+
+      backdrop = r.raw |> find_dialog() |> backdrop_nid()
+
+      first = Runtime.dispatch(pid, {:numbered, backdrop}, "click")
+      assert logs(first) ++ later(pid) == ["d closed"]
+    end
+
+    defp find_dialog(nodes) when is_list(nodes), do: Enum.find_value(nodes, &find_dialog/1)
+    defp find_dialog({:text, _}), do: nil
+
+    defp find_dialog({:element, "dialog", attrs, kids}),
+      do: if(List.keymember?(attrs, "closedby", 0), do: attrs, else: find_dialog(kids))
+
+    defp find_dialog({:element, _, _, kids}), do: find_dialog(kids)
+
+    # the number the backdrop of the dialog with these attributes has: its own, negated
+    defp backdrop_nid(attrs) do
+      {_, nid} = List.keyfind(attrs, "@nid", 0)
+      -nid - 1
+    end
+
+    test "focus() on a control asks the window to focus it" do
+      r = run("document.getElementById('i').focus();", @dialog)
+      assert Enum.any?(r.outbox, &match?({:focus_control, _}, &1))
+    end
+
+    test "the inert property follows the attribute" do
+      r =
+        run(
+          """
+          var p = document.getElementById("a");
+          console.log(p.inert); p.inert = true; console.log(p.hasAttribute("inert"), p.inert);
+          p.inert = false; console.log(p.hasAttribute("inert"));
+          """,
+          "<p id=a>x</p>"
+        )
+
+      assert logs(r) == ["false", "true true", "false"]
+    end
   end
 
   # the console lines a script writes, once timers and promises have settled
