@@ -11,14 +11,29 @@ timeout = String.to_integer(Enum.at(rest, 1) || "300") * 1000
 Application.put_env(:browser, :gui, false)
 {:ok, _} = Application.ensure_all_started(:browser)
 
-full = url <> "index.html?startAutomatically&iterationCount=1" <> if(suites, do: "&suites=" <> suites, else: "")
+full =
+  url <>
+    "index.html?startAutomatically&iterationCount=1" <>
+    if(suites, do: "&suites=" <> suites, else: "")
+
 {:ok, page} = Page.load(full)
-info = %{url: page.url, base: page.base || page.url, width: 1000, height: 800, fetch: &Fetch.load/1}
+
+info = %{
+  url: page.url,
+  base: page.base || page.url,
+  width: 1000,
+  height: 800,
+  fetch: &Fetch.load/1
+}
+
 t0 = System.monotonic_time(:millisecond)
 pid = Runtime.start(page.raw, info)
+
 print = fn reply ->
   for {level, text} <- Map.get(reply, :console, []) do
-    IO.puts("[#{div(System.monotonic_time(:millisecond) - t0, 1000)}s #{level}] #{String.slice(text, 0, 300)}")
+    IO.puts(
+      "[#{div(System.monotonic_time(:millisecond) - t0, 1000)}s #{level}] #{String.slice(text, 0, 300)}"
+    )
   end
 end
 
@@ -26,6 +41,7 @@ diff = fn
   _, nil -> 0
   {a1, a2, a3}, {b1, b2, b3} -> ((a1 - b1) * 1_000_000 + (a2 - b2)) * 1_000_000 + (a3 - b3)
 end
+
 diff = fn a, b -> div(diff.(a, b), 1) end
 
 # PROF=1 samples the stack of the script process every few ms and prints the hot functions
@@ -65,16 +81,29 @@ gc_tracer =
       spawn(fn ->
         tr = fn tr, start, minor, major, nmin, nmaj ->
           receive do
-            {:trace_ts, _, :gc_minor_start, _, ts} -> tr.(tr, ts, minor, major, nmin, nmaj)
+            {:trace_ts, _, :gc_minor_start, _, ts} ->
+              tr.(tr, ts, minor, major, nmin, nmaj)
+
             {:trace_ts, _, :gc_major_start, info, ts} ->
               Process.put(:last_info, info)
               tr.(tr, ts, minor, major, nmin, nmaj)
-            {:trace_ts, _, :gc_minor_end, _, ts} -> tr.(tr, nil, minor + diff.(ts, start), major, nmin + 1, nmaj)
+
+            {:trace_ts, _, :gc_minor_end, _, ts} ->
+              tr.(tr, nil, minor + diff.(ts, start), major, nmin + 1, nmaj)
+
             {:trace_ts, _, :gc_major_end, info, ts} ->
               d = diff.(ts, start)
-              if d > 100_000, do: IO.puts("MAJOR #{div(d, 1000)} ms at #{div(diff.(ts, t0_us), 1000)}: before #{inspect(Process.get(:last_info) |> Keyword.take([:heap_size, :old_heap_size, :bin_vheap_size]))} after #{inspect(Keyword.take(info, [:heap_size, :old_heap_size]))}")
+
+              if d > 100_000,
+                do:
+                  IO.puts(
+                    "MAJOR #{div(d, 1000)} ms at #{div(diff.(ts, t0_us), 1000)}: before #{inspect(Process.get(:last_info) |> Keyword.take([:heap_size, :old_heap_size, :bin_vheap_size]))} after #{inspect(Keyword.take(info, [:heap_size, :old_heap_size]))}"
+                  )
+
               tr.(tr, nil, minor, major + d, nmin, nmaj + 1)
-            {:stop, from} -> send(from, {:gc, minor, nmin, major, nmaj})
+
+            {:stop, from} ->
+              send(from, {:gc, minor, nmin, major, nmaj})
           end
         end
 
@@ -86,11 +115,27 @@ gc_tracer =
   end
 
 # TPROF=1 counts every call in the JS modules and the time spent in each (slow, but exact)
-js_modules = for m <- Application.spec(:browser, :modules), String.starts_with?(Atom.to_string(m), "Elixir.Browser.JS"), Code.ensure_loaded?(m), do: m
+js_modules =
+  for m <- Application.spec(:browser, :modules),
+      String.starts_with?(Atom.to_string(m), "Elixir.Browser.JS"),
+      Code.ensure_loaded?(m),
+      do: m
 
 if System.get_env("TPROF") do
-  sink = spawn(fn -> Stream.repeatedly(fn -> receive do _ -> :ok end end) |> Stream.run() end)
-  for m <- js_modules, m in [Browser.JS.Interp], do: :erlang.trace_pattern({m, :_, :_}, true, [:call_time, :local])
+  sink =
+    spawn(fn ->
+      Stream.repeatedly(fn ->
+        receive do
+          _ -> :ok
+        end
+      end)
+      |> Stream.run()
+    end)
+
+  for m <- js_modules,
+      m in [Browser.JS.Interp],
+      do: :erlang.trace_pattern({m, :_, :_}, true, [:call_time, :local])
+
   :erlang.trace(pid, true, [:call, {:tracer, sink}])
 end
 
@@ -102,7 +147,10 @@ if System.get_env("MEM") do
 
       case Process.info(pid, [:memory, :total_heap_size]) do
         [memory: m, total_heap_size: h] ->
-          IO.puts("[#{div(System.monotonic_time(:millisecond) - t0, 1000)}s mem] #{div(m, 1_000_000)} MB, heap #{div(h * 8, 1_000_000)} MB")
+          IO.puts(
+            "[#{div(System.monotonic_time(:millisecond) - t0, 1000)}s mem] #{div(m, 1_000_000)} MB, heap #{div(h * 8, 1_000_000)} MB"
+          )
+
           mem.(mem)
 
         _ ->
@@ -122,13 +170,17 @@ loop = fn loop ->
   receive do
     {:js_async, ^pid, reply} ->
       print.(reply)
-      if Enum.any?(reply.console, fn {_, t} -> t == "DONE" or String.starts_with?(t, "ERROR") end), do: :done, else: loop.(loop)
+
+      if Enum.any?(reply.console, fn {_, t} -> t == "DONE" or String.starts_with?(t, "ERROR") end),
+         do: :done,
+         else: loop.(loop)
   after
     max(left, 0) -> :timeout
   end
 end
 
 loop.(loop)
+
 if sampler do
   send(sampler, {:stop, self()})
 
@@ -136,6 +188,7 @@ if sampler do
     {:samples, acc} ->
       n = Enum.count(acc, &match?({:self, _}, &1))
       IO.puts("-- #{n} samples")
+
       for kind <- [:self, :incl] do
         IO.puts("-- #{kind}")
 
@@ -144,7 +197,9 @@ if sampler do
         |> Enum.frequencies()
         |> Enum.sort_by(&elem(&1, 1), :desc)
         |> Enum.take(45)
-        |> Enum.each(fn {{_, {m, f, a}}, c} -> IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}") end)
+        |> Enum.each(fn {{_, {m, f, a}}, c} ->
+          IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+        end)
       end
   end
 end
@@ -160,18 +215,39 @@ end
 
 if System.get_env("TPROF") do
   rows =
-    for m <- js_modules, m in [Browser.JS.Interp], {f, a} <- m.module_info(:functions),
+    for m <- js_modules,
+        m in [Browser.JS.Interp],
+        {f, a} <- m.module_info(:functions),
         {:call_time, ts} when is_list(ts) <- [:erlang.trace_info({m, f, a}, :call_time)],
         {:call_time, ts} = {:call_time, ts},
         ts != [] do
-      {n, t} = Enum.reduce(ts, {0, 0}, fn {_, c, s, us}, {n, t} -> {n + c, t + s * 1_000_000 + us} end)
+      {n, t} =
+        Enum.reduce(ts, {0, 0}, fn {_, c, s, us}, {n, t} -> {n + c, t + s * 1_000_000 + us} end)
+
       {"#{inspect(m)}.#{f}/#{a}", n, t}
     end
 
   IO.puts("-- by time (us, calls)")
-  rows |> Enum.sort_by(&elem(&1, 2), :desc) |> Enum.take(60) |> Enum.each(fn {k, n, t} -> IO.puts("#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}") end)
+
+  rows
+  |> Enum.sort_by(&elem(&1, 2), :desc)
+  |> Enum.take(60)
+  |> Enum.each(fn {k, n, t} ->
+    IO.puts(
+      "#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}"
+    )
+  end)
+
   IO.puts("-- by calls")
-  rows |> Enum.sort_by(&elem(&1, 1), :desc) |> Enum.take(40) |> Enum.each(fn {k, n, t} -> IO.puts("#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}") end)
+
+  rows
+  |> Enum.sort_by(&elem(&1, 1), :desc)
+  |> Enum.take(40)
+  |> Enum.each(fn {k, n, t} ->
+    IO.puts(
+      "#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}"
+    )
+  end)
 end
 
 if System.get_env("PDSTAT") do
@@ -186,12 +262,21 @@ if System.get_env("PDSTAT") do
   |> Enum.reject(fn {k, _} -> is_integer(k) end)
   |> Enum.sort_by(&elem(&1, 1), :desc)
   |> Enum.take(15)
-  |> Enum.each(fn {k, w} -> IO.puts("  #{w} words  #{inspect(k, limit: 5, printable_limit: 40)}") end)
+  |> Enum.each(fn {k, w} ->
+    IO.puts("  #{w} words  #{inspect(k, limit: 5, printable_limit: 40)}")
+  end)
 
   kinds =
     ints
-    |> Enum.map(fn {_, v} -> {if(is_map(v), do: Map.get(v, :class, if(Map.has_key?(v, :scope), do: :scope, else: :map)), else: :other), :erts_debug.flat_size(v)} end)
-    |> Enum.reduce(%{}, fn {k, w}, acc -> Map.update(acc, k, {1, w}, fn {n, t} -> {n + 1, t + w} end) end)
+    |> Enum.map(fn {_, v} ->
+      {if(is_map(v),
+         do: Map.get(v, :class, if(Map.has_key?(v, :scope), do: :scope, else: :map)),
+         else: :other
+       ), :erts_debug.flat_size(v)}
+    end)
+    |> Enum.reduce(%{}, fn {k, w}, acc ->
+      Map.update(acc, k, {1, w}, fn {n, t} -> {n + 1, t + w} end)
+    end)
 
   IO.inspect(kinds, label: "heap objects by kind {count, words}")
 end

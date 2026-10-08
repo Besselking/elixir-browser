@@ -660,8 +660,9 @@ defmodule Browser.JS.Interp do
           function_get(id, o, key)
         end
 
-      :host when is_number(key) and key >= 0 and key == trunc(key) and
-                   :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
+      :host
+      when is_number(key) and key >= 0 and key == trunc(key) and
+             :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
         Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
 
       :host ->

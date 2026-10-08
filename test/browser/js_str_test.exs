@@ -4,7 +4,17 @@ defmodule Browser.JSStrTest do
   alias Browser.JS.Str
 
   # the characters long strings are made of: one, two, three and four bytes, and a lone surrogate
-  @parts ["a", "é", "€", "😀", "bc", "\n", "漢字", Str.from_units([0xD83D]), Str.from_units([0xDE00])]
+  @parts [
+    "a",
+    "é",
+    "€",
+    "😀",
+    "bc",
+    "\n",
+    "漢字",
+    Str.from_units([0xD83D]),
+    Str.from_units([0xDE00])
+  ]
 
   defp random_string(seed, size) do
     :rand.seed(:exsss, {seed, seed, seed})

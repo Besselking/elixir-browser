@@ -48,7 +48,7 @@ defmodule Browser.JS do
   array contents) account for, and no full sweeps.
   """
   def process_opts do
-    [min_heap_size: String.to_integer(System.get_env("JS_MIN_HEAP", "2000000")), min_bin_vheap_size: 1_000_000, fullsweep_after: 1_000_000]
+    [min_heap_size: 2_000_000, min_bin_vheap_size: 1_000_000, fullsweep_after: 1_000_000]
   end
 
   defp run(program, opts) do
