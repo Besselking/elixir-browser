@@ -42,11 +42,12 @@ defmodule Browser.Wasm.Instance do
 
     tables =
       (imp_of.(:table) ++
-         for({{min, max}, type} <- mod.tables, do: Table.new(type, min, max)))
+         for({{min, max, addr}, type} <- mod.tables, do: Table.new(type, min, max, :null, addr)))
       |> List.to_tuple()
 
     mems =
-      (imp_of.(:mem) ++ for({min, max, shared} <- mod.mems, do: Memory.new(min, max, shared)))
+      (imp_of.(:mem) ++
+         for({min, max, shared, addr} <- mod.mems, do: Memory.new(min, max, shared, addr)))
       |> List.to_tuple()
 
     globals =
@@ -188,14 +189,15 @@ defmodule Browser.Wasm.Instance do
     if f.type != elem(types, t), do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:table, {{min, max}, type}}}, %Table{} = t, _) do
-    if t.type != type or Table.size(t) < min or limit_mismatch(max, t.max),
+  defp check_import(%{desc: {:table, {{min, max, addr}, type}}}, %Table{} = t, _) do
+    if t.type != type or t.addr != addr or Table.size(t) < min or limit_mismatch(max, t.max),
       do: link_error("incompatible import type")
   end
 
-  defp check_import(%{desc: {:mem, {min, max, shared}}}, %Memory{} = m, _) do
-    if Memory.size(m) < min or limit_mismatch(max, m.max) or m.shared != shared,
-      do: link_error("incompatible import type")
+  defp check_import(%{desc: {:mem, {min, max, shared, addr}}}, %Memory{} = m, _) do
+    if Memory.size(m) < min or limit_mismatch(max, m.max) or m.shared != shared or
+         m.addr != addr,
+       do: link_error("incompatible import type")
   end
 
   defp check_import(%{desc: {:tag, t}}, %Tag{} = tag, types) do

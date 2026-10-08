@@ -208,15 +208,11 @@ defmodule Browser.Wasm.Decoder do
   defp functype(<<>>), do: fail("unexpected end")
   defp functype(_), do: fail("integer representation too long")
 
-  defp limits(<<0, r::binary>>) do
-    {min, r} = u32(r)
-    {{min, nil}, r}
-  end
-
-  defp limits(<<1, r::binary>>) do
-    {min, r} = u32(r)
-    {max, r} = u32(r)
-    {{min, max}, r}
+  defp limits(<<f, r::binary>>) when f in [0, 1, 4, 5] do
+    read = if f >= 4, do: &u64/1, else: &u32/1
+    {min, r} = read.(r)
+    {max, r} = if (f &&& 1) != 0, do: read.(r), else: {nil, r}
+    {{min, max, if(f >= 4, do: :i64, else: :i32)}, r}
   end
 
   defp limits(<<>>), do: fail("unexpected end")
@@ -228,10 +224,11 @@ defmodule Browser.Wasm.Decoder do
     {{lim, t}, r}
   end
 
-  defp mem_type(<<f, r::binary>>) when f in 0..3 do
-    {min, r} = u32(r)
-    {max, r} = if (f &&& 1) != 0, do: u32(r), else: {nil, r}
-    {{min, max, (f &&& 2) != 0}, r}
+  defp mem_type(<<f, r::binary>>) when f in 0..7 do
+    read = if (f &&& 4) != 0, do: &u64/1, else: &u32/1
+    {min, r} = read.(r)
+    {max, r} = if (f &&& 1) != 0, do: read.(r), else: {nil, r}
+    {{min, max, (f &&& 2) != 0, if((f &&& 4) != 0, do: :i64, else: :i32)}, r}
   end
 
   defp mem_type(<<>>), do: fail("unexpected end")
@@ -725,7 +722,7 @@ defmodule Browser.Wasm.Decoder do
     {a, r} = u32(bin)
     if a >= 128, do: fail("malformed memop flags")
     {m, r} = if (a &&& 64) != 0, do: u32(r), else: {0, r}
-    {o, r} = u32(r)
+    {o, r} = u64(r)
     {a &&& 63, o, m, r}
   end
 end

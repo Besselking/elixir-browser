@@ -233,8 +233,10 @@ defmodule Browser.Wasm.Interp do
 
       {:memory_grow, m} ->
         [d | st] = stack
-        r = Memory.grow(elem(inst.mems, m), d)
-        run(code, pc + 1, [r &&& 0xFFFFFFFF | st], locals, inst, depth)
+        mem = elem(inst.mems, m)
+        r = Memory.grow(mem, d)
+        mask = if mem.addr == :i64, do: 0xFFFFFFFFFFFFFFFF, else: 0xFFFFFFFF
+        run(code, pc + 1, [r &&& mask | st], locals, inst, depth)
 
       :ref_is_null ->
         [v | st] = stack
@@ -325,8 +327,11 @@ defmodule Browser.Wasm.Interp do
 
   defp bulk({:table_size, t}, st, inst), do: [Table.size(elem(inst.tables, t)) | st]
 
-  defp bulk({:table_grow, t}, [n, v | st], inst),
-    do: [Table.grow(elem(inst.tables, t), n, v) &&& 0xFFFFFFFF | st]
+  defp bulk({:table_grow, t}, [n, v | st], inst) do
+    table = elem(inst.tables, t)
+    mask = if table.addr == :i64, do: 0xFFFFFFFFFFFFFFFF, else: 0xFFFFFFFF
+    [Table.grow(table, n, v) &&& mask | st]
+  end
 
   defp bulk({:table_fill, t}, [n, v, i | st], inst) do
     Table.fill(elem(inst.tables, t), i, v, n)

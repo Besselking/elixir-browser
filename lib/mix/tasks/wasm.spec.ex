@@ -281,6 +281,7 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp spectest("global_f32", _), do: spec_global(:f32, Num.round32(666.6))
   defp spectest("global_f64", _), do: spec_global(:f64, 666.6)
   defp spectest("table", _), do: Table.new(:funcref, 10, 20)
+  defp spectest("table64", _), do: Table.new(:funcref, 10, 20, :null, :i64)
   defp spectest("memory", _), do: Memory.new(1, 2)
   defp spectest("shared_memory", _), do: Memory.new(1, 2, true)
 

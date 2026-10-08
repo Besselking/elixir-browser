@@ -12,18 +12,18 @@ defmodule Browser.Wasm.Memory do
   @zero_page <<0::size(524_288)>>
   @max_pages 65536
 
-  defstruct [:id, :max, shared: false]
+  defstruct [:id, :max, shared: false, addr: :i32]
 
   def page_size, do: @page
 
   @doc "A new memory of `min` pages (zeros) that can grow to `max` pages (`nil`: no limit)."
-  def new(min, max, shared \\ false) do
+  def new(min, max, shared \\ false, addr \\ :i32) do
     if min > @max_pages,
       do: Error.fail(:compile, "memory size must be at most 65536 pages (4GiB)")
 
     id = make_ref()
     Process.put({__MODULE__, id}, Tuple.duplicate(@zero_page, min))
-    %__MODULE__{id: id, max: max, shared: shared}
+    %__MODULE__{id: id, max: max, shared: shared, addr: addr}
   end
 
   @doc "The pages as the tuple they are now (it is a new tuple after every change)."

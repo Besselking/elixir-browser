@@ -20,6 +20,8 @@ defmodule Browser.WasmTest do
 
   @atomic "AGFzbQEAAAABFwRgAn9/AX9gAX8Bf2ADf39/AX9gAAF/AwYFAAECAAMFBAEDAQEHKgYDbWVtAgADYWRkAAAEbG9hZAABA2NhcwACBHdhaXQAAwZub3RpZnkABAo6BQoAIAAgAf4eAgALCAAgAP4QAgALDAAgACABIAL+SAIACwwAIAAgAUIA/gECAAsKAEEAQQH+AAIACw=="
 
+  @m64 "AGFzbQEAAAABGAVgAAF/YAJ+fwBgAX4Bf2AAAX5gAX4BfgMHBgABAgMEAgQEAXAEAgUEAQUBAwcxBwNtZW0CAAN0YmwBAAVzdG9yZQABBGxvYWQAAgRzaXplAAMEZ3JvdwAEBGNhbGwABQkHAQBCAQsBAAosBgQAQQcLCQAgACABNgIACwcAIAAoAgALBAA/AAsGACAAQAALBwAgABEAAAs="
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -152,6 +154,20 @@ defmodule Browser.WasmTest do
     assert call(i, "wait", [0, 1]) == [2]
     assert call(i, "notify", []) == [0]
     assert %Error{kind: :trap, message: "unaligned atomic"} = catch_error(call(i, "load", [2]))
+  end
+
+  test "64-bit memories and tables" do
+    i = inst(@m64)
+    call(i, "store", [100, 42])
+    assert call(i, "load", [100]) == [42]
+    assert call(i, "size", []) == [1]
+    assert call(i, "grow", [1]) == [1]
+    assert call(i, "grow", [5]) == [0xFFFFFFFFFFFFFFFF]
+    assert call(i, "size", []) == [2]
+    assert call(i, "call", [1]) == [7]
+
+    assert %Error{kind: :trap, message: "out of bounds memory access"} =
+             catch_error(call(i, "load", [0x1_0000_0000_0000]))
   end
 
   test "SIMD" do

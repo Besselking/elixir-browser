@@ -14,6 +14,7 @@ defmodule Browser.Wasm.Validator do
   @loads Map.new(Ops.loads(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @stores Map.new(Ops.stores(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @max_pages 65536
+  @max_pages64 281_474_976_710_656
 
   defp err(msg), do: Error.fail(:compile, msg)
 
@@ -48,6 +49,7 @@ defmodule Browser.Wasm.Validator do
       funcs: func_types,
       tables: tables,
       nmems: length(mems),
+      memtypes: mems |> Enum.map(&elem(&1, 3)) |> List.to_tuple(),
       tags: tag_types,
       globals: globals,
       elems: mod.elems |> Enum.map(& &1.type) |> List.to_tuple(),
@@ -98,9 +100,9 @@ defmodule Browser.Wasm.Validator do
       case e.mode do
         {:active, t, off} ->
           if t >= tuple_size(c.tables), do: err("unknown table")
-          {_, rt} = elem(c.tables, t)
+          {{_, _, addr}, rt} = elem(c.tables, t)
           if rt != e.type, do: err("type mismatch")
-          const_expr(c, off, :i32)
+          const_expr(c, off, addr)
 
         _ ->
           :ok
@@ -113,8 +115,7 @@ defmodule Browser.Wasm.Validator do
     for d <- mod.datas do
       case d.mode do
         {:active, m, off} ->
-          if m >= c.nmems, do: err("unknown memory")
-          const_expr(c, off, :i32)
+          const_expr(c, off, mem(c, m))
 
         _ ->
           :ok
@@ -133,19 +134,20 @@ defmodule Browser.Wasm.Validator do
 
   defp take_globals(tuple, n), do: tuple |> Tuple.to_list() |> Enum.take(n) |> List.to_tuple()
 
-  defp check_table({{min, max}, _} = table) do
+  defp check_table({{min, max, _}, _} = table) do
     if max && min > max, do: err("size minimum must not be greater than maximum")
     table
   end
 
-  defp check_mem({min, max, shared}) do
+  defp check_mem({min, max, shared, addr} = type) do
     if shared and max == nil, do: err("shared memory must have maximum")
+    limit = if addr == :i64, do: @max_pages64, else: @max_pages
 
-    if min > @max_pages or (max && max > @max_pages),
+    if min > limit or (max && max > limit),
       do: err("memory size must be at most 65536 pages (4GiB)")
 
     if max && min > max, do: err("size minimum must not be greater than maximum")
-    :ok
+    type
   end
 
   defp collect_refs(mod) do
@@ -547,12 +549,12 @@ defmodule Browser.Wasm.Validator do
 
   defp ins(c, s, {:return_call_indirect, ti, tbl}) do
     if tbl >= tuple_size(c.tables), do: err("unknown table")
-    {_, rt} = elem(c.tables, tbl)
+    {{_, _, addr}, rt} = elem(c.tables, tbl)
     if rt != :funcref, do: err("type mismatch")
     if ti >= tuple_size(c.types), do: err("unknown type")
     {params, results} = elem(c.types, ti)
     check_tail(s, results)
-    {_, s} = pop(s, :i32)
+    {_, s} = pop(s, addr)
 
     s
     |> pop_all(params)
@@ -562,11 +564,11 @@ defmodule Browser.Wasm.Validator do
 
   defp ins(c, s, {:call_indirect, ti, tbl}) do
     if tbl >= tuple_size(c.tables), do: err("unknown table")
-    {_, rt} = elem(c.tables, tbl)
+    {{_, _, addr}, rt} = elem(c.tables, tbl)
     if rt != :funcref, do: err("type mismatch")
     if ti >= tuple_size(c.types), do: err("unknown type")
     {params, results} = elem(c.types, ti)
-    {_, s} = pop(s, :i32)
+    {_, s} = pop(s, addr)
     s |> pop_all(params) |> push_all(results) |> emit({:call_indirect, ti, tbl, length(params)})
   end
 
@@ -625,46 +627,50 @@ defmodule Browser.Wasm.Validator do
 
   defp ins(c, s, {:table_get, t}) do
     rt = table_type(c, t)
-    {_, s} = pop(s, :i32)
+    {_, s} = pop(s, table_addr(c, t))
     s |> push(rt) |> emit({:table_get, t})
   end
 
   defp ins(c, s, {:table_set, t}) do
     rt = table_type(c, t)
     {_, s} = pop(s, rt)
-    {_, s} = pop(s, :i32)
+    {_, s} = pop(s, table_addr(c, t))
     emit(s, {:table_set, t})
   end
 
   defp ins(c, s, {:table_size, t}) do
-    table_type(c, t)
-    s |> push(:i32) |> emit({:table_size, t})
+    s |> push(table_addr(c, t)) |> emit({:table_size, t})
   end
 
   defp ins(c, s, {:table_grow, t}) do
     rt = table_type(c, t)
-    {_, s} = pop(s, :i32)
+    addr = table_addr(c, t)
+    {_, s} = pop(s, addr)
     {_, s} = pop(s, rt)
-    s |> push(:i32) |> emit({:table_grow, t})
+    s |> push(addr) |> emit({:table_grow, t})
   end
 
   defp ins(c, s, {:table_fill, t}) do
     rt = table_type(c, t)
-    s = pop_all(s, [:i32, rt, :i32])
+    addr = table_addr(c, t)
+    s = pop_all(s, [addr, rt, addr])
     emit(s, {:table_fill, t})
   end
 
   defp ins(c, s, {:table_copy, d, src}) do
     dt = table_type(c, d)
     if table_type(c, src) != dt, do: err("type mismatch")
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:table_copy, d, src})
+    da = table_addr(c, d)
+    sa = table_addr(c, src)
+    n = if da == :i64 and sa == :i64, do: :i64, else: :i32
+    s |> pop_all([da, sa, n]) |> emit({:table_copy, d, src})
   end
 
   defp ins(c, s, {:table_init, e, t}) do
     rt = table_type(c, t)
     if e >= tuple_size(c.elems), do: err("unknown elem segment")
     if elem(c.elems, e) != rt, do: err("type mismatch")
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:table_init, e, t})
+    s |> pop_all([table_addr(c, t), :i32, :i32]) |> emit({:table_init, e, t})
   end
 
   defp ins(c, s, {:elem_drop, e}) do
@@ -673,36 +679,35 @@ defmodule Browser.Wasm.Validator do
   end
 
   defp ins(c, s, {:load, kind, align, offset, m}) do
-    mem(c, m)
+    a = mem(c, m, offset)
     {t, natural} = Map.fetch!(@loads, kind)
     if align > natural, do: err("alignment must not be larger than natural")
-    {_, s} = pop(s, :i32)
+    {_, s} = pop(s, a)
     s |> push(t) |> emit({:load, kind, offset, m})
   end
 
   defp ins(c, s, {:store, kind, align, offset, m}) do
-    mem(c, m)
+    a = mem(c, m, offset)
     {t, natural} = Map.fetch!(@stores, kind)
     if align > natural, do: err("alignment must not be larger than natural")
-    s = pop_all(s, [:i32, t])
+    s = pop_all(s, [a, t])
     emit(s, {:store, kind, offset, m})
   end
 
   defp ins(c, s, {:memory_size, m}) do
-    mem(c, m)
-    s |> push(:i32) |> emit({:memory_size, m})
+    s |> push(mem(c, m)) |> emit({:memory_size, m})
   end
 
   defp ins(c, s, {:memory_grow, m}) do
-    mem(c, m)
-    {_, s} = pop(s, :i32)
-    s |> push(:i32) |> emit({:memory_grow, m})
+    a = mem(c, m)
+    {_, s} = pop(s, a)
+    s |> push(a) |> emit({:memory_grow, m})
   end
 
   defp ins(c, s, {:memory_init, d, m}) do
-    mem(c, m)
+    a = mem(c, m)
     data_idx(c, d)
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_init, d, m})
+    s |> pop_all([a, :i32, :i32]) |> emit({:memory_init, d, m})
   end
 
   defp ins(c, s, {:data_drop, d}) do
@@ -711,24 +716,25 @@ defmodule Browser.Wasm.Validator do
   end
 
   defp ins(c, s, {:memory_copy, d, src}) do
-    mem(c, d)
-    mem(c, src)
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_copy, d, src})
+    da = mem(c, d)
+    sa = mem(c, src)
+    n = if da == :i64 and sa == :i64, do: :i64, else: :i32
+    s |> pop_all([da, sa, n]) |> emit({:memory_copy, d, src})
   end
 
   defp ins(c, s, {:memory_fill, m}) do
-    mem(c, m)
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_fill, m})
+    a = mem(c, m)
+    s |> pop_all([a, :i32, a]) |> emit({:memory_fill, m})
   end
 
   defp ins(_, s, {:atomic_fence}), do: emit(s, {:atomic_fence})
 
   defp ins(c, s, {:atomic, sub, op, width, align, offset, m}) do
-    mem(c, m)
+    a = mem(c, m, offset)
     {params, result} = Map.fetch!(@atomic, sub)
     natural = %{1 => 0, 2 => 1, 4 => 2, 8 => 3}[width]
     if align != natural, do: err("atomic alignment must be natural")
-    s = pop_all(s, params)
+    s = pop_all(s, [a | tl(params)])
     s = if result, do: push(s, result), else: s
     emit(s, {:atomic, op, width, offset, m, length(params)})
   end
@@ -749,7 +755,7 @@ defmodule Browser.Wasm.Validator do
   end
 
   defp ins(c, s, {:simd_mem, shape, op, align, offset, m, lane}) do
-    mem(c, m)
+    a = mem(c, m, offset)
     {params, result, kind} = Map.fetch!(@simd, {shape, op})
 
     {natural, lanes} =
@@ -760,7 +766,7 @@ defmodule Browser.Wasm.Validator do
 
     if align > natural, do: err("alignment must not be larger than natural")
     if lanes != nil and lane >= lanes, do: err("invalid lane index")
-    s = pop_all(s, params)
+    s = pop_all(s, [a | tl(params)])
     s = if result, do: push(s, result), else: s
     emit(s, {:simd_mem, op, offset, m, lane})
   end
@@ -822,7 +828,23 @@ defmodule Browser.Wasm.Validator do
     rt
   end
 
-  defp mem(c, m), do: if(m >= c.nmems, do: err("unknown memory"))
+  defp table_addr(c, t) do
+    if t >= tuple_size(c.tables), do: err("unknown table")
+    {{_, _, addr}, _} = elem(c.tables, t)
+    addr
+  end
+
+  # the address type of memory `m`
+  defp mem(c, m) do
+    if m >= c.nmems, do: err("unknown memory")
+    elem(c.memtypes, m)
+  end
+
+  defp mem(c, m, offset) do
+    a = mem(c, m)
+    if a == :i32 and offset >= 4_294_967_296, do: err("offset out of range")
+    a
+  end
 
   defp data_idx(c, d) do
     if c.ndatas == nil, do: err("data count section required")
