@@ -540,6 +540,24 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["2 3 hi x 1 4 2 add,default,shown,two"]
     end
 
+    test "a module namespace with exports cannot be frozen" do
+      {_, r} =
+        start(
+          """
+          <body><script type=module>
+          import * as ns from "/lib.js";
+          var t = "no";
+          try { Object.freeze(ns) } catch (e) { t = e.constructor.name }
+          console.log(t, Object.isFrozen(ns));
+          </script></body>
+          """,
+          @files
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["TypeError false"]
+    end
+
     test "an import map redirects specifiers" do
       {_, r} =
         start(

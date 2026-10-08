@@ -32161,6 +32161,7 @@ language/module-code/invalid-private-names-member-expression-bad-reference.js
 language/module-code/invalid-private-names-member-expression-this.js
 language/module-code/namespace/Symbol.iterator.js
 language/module-code/namespace/Symbol.toStringTag.js
+language/module-code/namespace/internals/define-own-property.js
 language/module-code/namespace/internals/delete-exported-init.js
 language/module-code/namespace/internals/delete-exported-uninit.js
 language/module-code/namespace/internals/delete-non-exported.js
