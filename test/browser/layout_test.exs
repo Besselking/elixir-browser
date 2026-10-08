@@ -5316,6 +5316,18 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{0, 0, 50, 20}]
     end
 
+    test "min-height on column items: raised in an auto-height column, 0 lets it shrink" do
+      grow =
+        ~s(<div style="display:flex;flex-direction:column;width:50px"><div style="flex:1 0 0px;min-height:40px;background:red"></div></div>)
+
+      assert flex_rects(grow) == [{0, 0, 50, 40}]
+
+      shrink =
+        ~s(<div style="display:flex;flex-direction:column;width:50px;height:30px"><div style="min-height:0;background:red"><div style="height:100px"></div></div></div>)
+
+      assert flex_rects(shrink) == [{0, 0, 50, 30}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

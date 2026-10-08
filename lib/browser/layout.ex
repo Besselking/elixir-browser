@@ -6042,6 +6042,7 @@ defmodule Browser.Layout do
       mta: false,
       mba: false,
       collapsed: false,
+      minh: nil,
       hpct: nil,
       fit?: false
     }
@@ -6108,6 +6109,7 @@ defmodule Browser.Layout do
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
       collapsed: collapsed?,
+      minh: num(c["min-height"]),
       scroll?: c["overflow-x"] in ~w(hidden scroll auto),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
@@ -6764,7 +6766,7 @@ defmodule Browser.Layout do
     more =
       if total > 0 do
         for it <- open,
-            it.shrink > 0 and it.auto_height? and it.h > 0,
+            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil,
             it.base + (free + give) * it.shrink * it.base / total < it.h,
             do: it.key
       else
@@ -6784,6 +6786,12 @@ defmodule Browser.Layout do
       flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
 
     # (an item that cannot flex has a definite size when its container has none)
+    # (a `min-height` of the item is not part of the floor above: it is added back here)
+    floor =
+      if it.minh,
+        do: max(floor, it.minh + if(it.sizing == :border, do: 0, else: it.vextra)),
+        else: floor
+
     flex_column_height(st, it, max(it.base, floor), it.grow == 0 and it.shrink == 0)
   end
 
@@ -6793,13 +6801,37 @@ defmodule Browser.Layout do
     # an item does not go below what its content needs (`min-height: auto`)
     target =
       if it.rebuild != nil and target < it.h - 0.5 do
-        {_, floor, _} =
-          flex_atom(
-            st,
-            it.rebuild.(%{"height" => nil, "min-height" => nil}),
-            it.w,
-            {it.key, :min}
-          )
+        floor =
+          if it.minh do
+            # a `min-height` of its own replaces the automatic minimum
+            it.minh + if(it.sizing == :border, do: 0, else: it.vextra)
+          else
+            {_, floor, _} =
+              flex_atom(
+                st,
+                it.rebuild.(%{"height" => nil, "min-height" => nil}),
+                it.w,
+                {it.key, :min}
+              )
+
+            floor
+          end
+
+        # (a size the item is given caps the automatic minimum)
+        floor =
+          cond do
+            it.minh != nil or it.basis != nil ->
+              floor
+
+            is_number(it.ch) ->
+              min(floor, it.ch + if(it.sizing == :border, do: 0, else: it.vextra))
+
+            it.hpct != nil ->
+              min(floor, it.base)
+
+            true ->
+              floor
+          end
 
         max(target, min(floor, it.h))
       else
