@@ -5263,6 +5263,23 @@ defmodule Browser.LayoutTest do
       assert text_rows(html, 30) == ["三三", "「三"]
     end
 
+    test "word-space-transform turns <wbr> and zero-width spaces into spaces" do
+      html =
+        ~s(<div style="font-size:20px;word-space-transform:ideographic-space">a<wbr>b&#x200B;c</div>)
+
+      assert text_rows(html, 400) |> Enum.join() == "a\u3000b\u3000c"
+      html = ~s(<div style="font-size:20px;word-space-transform:space">a<wbr>b</div>)
+      assert text_rows(html, 400) == ["a b"] or text_rows(html, 400) == ["ab"]
+    end
+
+    test "a zero-width space takes no room" do
+      html = ~s(<div style="font-size:20px">a&#x200B;b</div>)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      b = Enum.find(items, &(&1.type == :text and &1.text == "b"))
+      assert b.x == 10
+    end
+
     test "keep-all and auto-phrase keep a run of ideographs together" do
       html = ~s(<div style="font-size:20px;word-break:keep-all">三三三三三三</div>)
       assert text_rows(html, 40) == ["三三三三三三"]
@@ -5832,7 +5849,7 @@ defmodule Browser.LayoutTest do
 
   describe "segment breaks between wide characters" do
     test "a zero-width space is a place to break a line" do
-      html = ~s|<div style="width:10px;font:10px/1 Ahem">X&#x200B;X</div>|
+      html = ~s|<div style="width:7px;font:10px/1 Ahem">X&#x200B;X</div>|
       ys = for %{type: :text, y: y, text: t} <- laid_out(html), t != "", uniq: true, do: y
       assert length(ys) == 2
     end

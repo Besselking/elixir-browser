@@ -136,6 +136,7 @@ defmodule Browser.Layout do
       vs: 0,
       wrap_chars: :none,
       keep_all: false,
+      wst: :none,
       shy: true,
       nojust: false,
       ls: 0.0,
@@ -196,7 +197,11 @@ defmodule Browser.Layout do
         measure.(:content_height, style)
 
       text, style ->
-        measure.(text, style) + extra_width(text, style)
+        # (a zero-width space takes no room)
+        measured =
+          if String.contains?(text, "\u200B"), do: String.replace(text, "\u200B", ""), else: text
+
+        measure.(measured, style) + extra_width(text, style)
     end
   end
 
@@ -545,6 +550,12 @@ defmodule Browser.Layout do
 
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
   defp walk({:element, "br", _, _}, style, acc), do: [{:br, style} | acc]
+
+  # <wbr> is a place to break, like a zero-width space
+  defp walk({:element, "wbr", attrs, _}, style, acc) do
+    style = restyle("wbr", attrs, style, computed(attrs))
+    walk_zwsp_text("\u200B", style, acc)
+  end
 
   defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg"] do
     ops = fn acc ->
@@ -2118,6 +2129,7 @@ defmodule Browser.Layout do
                                                                                              _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
+    |> put_if(c["word-space-transform"], &%{&1 | wst: word_space_transform(&2)})
     |> put_if(c["word-break"], &%{&1 | keep_all: &2 in ["keep-all", "auto-phrase"]})
     |> put_if(c["hyphens"], &%{&1 | shy: &2 != "none"})
     |> put_if(c["vertical-align"], &raise_text/2)
@@ -2219,6 +2231,17 @@ defmodule Browser.Layout do
       end
 
     %{style | vs: style.vs + own}
+  end
+
+  # `word-space-transform` turns the zero-width spaces and <wbr> into spaces
+  defp word_space_transform(v) do
+    words = v |> to_string() |> String.split()
+
+    cond do
+      "ideographic-space" in words -> :ideo
+      "space" in words -> :space
+      true -> :none
+    end
   end
 
   defp wrap_chars(c) do
@@ -2332,11 +2355,14 @@ defmodule Browser.Layout do
       else: walk_plain_text(t, style, acc)
   end
 
-  defp walk_zwsp_text(t, style, acc) do
+  defp walk_zwsp_text(t, %{wst: wst} = style, acc) do
     ops =
       ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+|\x{200B}|[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{200B}]+/u
       |> Regex.scan(drop_wide_breaks(t))
       |> Enum.map(fn
+        ["\u200B"] when wst != :none ->
+          if wst == :space, do: {:space, style}, else: {:word, "\u3000", style}
+
         [tok] ->
           if String.match?(
                tok,
@@ -2446,7 +2472,7 @@ defmodule Browser.Layout do
   defp ideograph_edge?(prev, word, keep_all),
     do: break_between?(prev, String.first(word), keep_all)
 
-  defp break_between?(cur, g, keep_all? \\ false) do
+  defp break_between?(cur, g, keep_all?) do
     a = String.last(cur)
     a = if String.ends_with?(cur, "\u200D"), do: "\u200D", else: a
 
