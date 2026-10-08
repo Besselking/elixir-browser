@@ -3643,6 +3643,8 @@ css/css-flexbox/flex-minimum-height-flex-items-024.html
 css/css-flexbox/flex-minimum-height-flex-items-026.html
 css/css-flexbox/flex-minimum-height-flex-items-029.html
 css/css-flexbox/flex-minimum-width-flex-items-001.xht
+css/css-flexbox/flex-minimum-width-flex-items-002.xht
+css/css-flexbox/flex-minimum-width-flex-items-003.xht
 css/css-flexbox/flex-minimum-width-flex-items-004.xht
 css/css-flexbox/flex-minimum-width-flex-items-005.xht
 css/css-flexbox/flex-minimum-width-flex-items-006.xht
@@ -3714,6 +3716,8 @@ css/css-flexbox/flexbox-mbp-horiz-003-reverse.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003v.xhtml
 css/css-flexbox/flexbox-mbp-horiz-004.xhtml
+css/css-flexbox/flexbox-min-width-auto-001.html
+css/css-flexbox/flexbox-min-width-auto-003.html
 css/css-flexbox/flexbox-order-only-flexitems.html
 css/css-flexbox/flexbox-overflow-horiz-003.html
 css/css-flexbox/flexbox-overflow-horiz-004.html

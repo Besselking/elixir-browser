@@ -6038,6 +6038,8 @@ defmodule Browser.Layout do
       align: "auto",
       order: 0,
       auto_height?: true,
+      scroll?: false,
+      hpct: nil,
       fit?: false
     }
   end
@@ -6081,6 +6083,7 @@ defmodule Browser.Layout do
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
+      scroll?: c["overflow-x"] in ~w(hidden scroll auto),
       hpct:
         case c["height"] do
           {:pct, f} -> f
@@ -6403,7 +6406,8 @@ defmodule Browser.Layout do
       # items whose share would go below their floor are pinned there
       {pinned, _} =
         Enum.split_with(live, fn it ->
-          it.width == nil and it.hw + free * it.shrink * it.hw / total < flex_min(st, it)
+          flex_auto_min?(it) and
+            it.hw + free * it.shrink * it.hw / total < flex_min(st, it, avail)
         end)
 
       if pinned == [] do
@@ -6417,11 +6421,13 @@ defmodule Browser.Layout do
           end
         end)
       else
-        gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it), 0.0))
+        gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it, avail), 0.0))
 
         line =
           Enum.map(line, fn it ->
-            if it in pinned, do: %{it | hw: min(flex_min(st, it), it.hw), frozen: true}, else: it
+            if it in pinned,
+              do: %{it | hw: flex_min(st, it, avail), frozen: true},
+              else: it
           end)
 
         flex_shrink(st, line, free + gained, avail)
@@ -6431,7 +6437,21 @@ defmodule Browser.Layout do
     end
   end
 
-  defp flex_min(st, it), do: shrink_extent(st, it.sub, 1, it.key) * 1.0
+  # `min-width: auto`: the content's min-content width, but not more than a width that is set
+  defp flex_auto_min?(it), do: not it.scroll? and (it.width == nil or it.minw in [nil, :auto])
+
+  defp flex_min(st, it, avail) do
+    content = shrink_extent(st, it.sub, 1, it.key) * 1.0
+    content = if is_number(it.maxw), do: min(content, it.maxw + it.extra * 1.0), else: content
+
+    case it.width do
+      width when width != nil and it.basis == nil ->
+        min(content, resolve(width, avail) + it.extra * 1.0)
+
+      _ ->
+        content
+    end
+  end
 
   # -> {offset before the first item, extra space between items}
   defp flex_justify(justify, reversed?, free, n) do

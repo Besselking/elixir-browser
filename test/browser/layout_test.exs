@@ -5278,6 +5278,18 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{70, 0, 30, 5}]
     end
 
+    test "min-width:auto stops shrinking at the smaller of the width and the content" do
+      item = fn style ->
+        ~s(<div style="display:flex;width:1px"><div style="background:red;#{style}"><div style="width:80px;height:5px"></div></div></div>)
+      end
+
+      width = fn style -> flex_rects(item.(style)) |> hd() |> elem(2) end
+      assert width.("width:50px") == 50
+      assert width.("width:100px") == 80
+      assert width.("flex-basis:100px;max-width:50px") == 50
+      assert width.("width:50px;overflow:hidden") == 1
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
