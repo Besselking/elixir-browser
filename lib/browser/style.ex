@@ -43,6 +43,8 @@ defmodule Browser.Style do
                 text-anchor opacity visibility display color font-size font-weight font-style
                 font-family)
   @clips ~w(hidden clip scroll auto)
+  # what the layer of the style attribute is: above every layer, and above unlayered rules
+  @above_layers 2_000_000
   @default_fs 16.0
 
   @shorthands %{
@@ -217,6 +219,12 @@ defmodule Browser.Style do
     rules
     |> Enum.filter(fn rule -> Enum.all?(rule.media, &MediaQuery.eval(&1, env)) end)
     |> Enum.with_index()
+    |> then(fn rules -> {rules, layer_ranks(rules)} end)
+    |> then(fn {rules, ranks} ->
+      Enum.map(rules, fn {rule, order} ->
+        {Map.put(rule, :lrank, Map.get(ranks, Map.get(rule, :layer))), order}
+      end)
+    end)
     |> Enum.reduce(
       %{
         viewport: {env.width, env.height},
@@ -231,7 +239,22 @@ defmodule Browser.Style do
     )
   end
 
+  # Cascade layers rank in the order they first appear; unlayered rules (nil) are above all
+  # of them for normal declarations, and below all of them for `!important` ones.
+  defp layer_ranks(rules) do
+    rules
+    |> Enum.map(fn {rule, _} -> Map.get(rule, :layer) end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.with_index()
+    |> Map.new()
+  end
+
   # which pseudo-elements have a rule that gives them `content` (the others make no box)
+  # a `::placeholder` rule makes no box, but styles the hint of a text control
+  defp note_pseudo(idx, %{pseudo: :placeholder}),
+    do: %{idx | pseudo: MapSet.put(idx.pseudo, :placeholder)}
+
   defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
     if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
       do: %{idx | pseudo: MapSet.put(idx.pseudo, which)},
@@ -269,7 +292,9 @@ defmodule Browser.Style do
           Map.get(rule, :pseudo) == pseudo,
           CSS.matches?(rule.selector, ctx),
           {prop, value, important?} <- rule.decls do
-        {prop, {rank(rule.origin, important?), {0, rule.specificity}, rule.order}, value}
+        {prop,
+         {rank(rule.origin, important?), layer_rank(Map.get(rule, :lrank), important?),
+          {0, rule.specificity}, rule.order}, value}
       end
 
     # inline styles and presentational attributes belong to the element, not its generated boxes
@@ -277,13 +302,13 @@ defmodule Browser.Style do
 
     from_inline =
       for {prop, value, important?} <- inline_decls(own.attrs) do
-        {prop, {rank(:author, important?), {1, {0, 0, 0}}, 0}, value}
+        {prop, {rank(:author, important?), @above_layers, {1, {0, 0, 0}}, 0}, value}
       end
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
       for {prop, value} <- hints(own) do
-        {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
+        {prop, {rank(:author, false), -@above_layers, {-1, {0, 0, 0}}, -1}, value}
       end
 
     (from_hints ++ from_rules ++ from_inline)
@@ -782,6 +807,13 @@ defmodule Browser.Style do
     end
   end
 
+  # a rule in a layer outranks one in an earlier layer, and every layer loses to the rules in
+  # none (`nil`); `!important` reverses all of that
+  defp layer_rank(nil, false), do: 1_000_000
+  defp layer_rank(nil, true), do: -1_000_000
+  defp layer_rank(n, false), do: n
+  defp layer_rank(n, true), do: -n
+
   # important declarations reverse the origin order (UA !important wins overall)
   defp rank(:ua, false), do: 0
   defp rank(:author, false), do: 1
@@ -1010,11 +1042,38 @@ defmodule Browser.Style do
         content -> {unboxed(computed), [{"@content", content} | attrs]}
       end
     else
-      {computed, attrs}
+      {computed, placeholder_style(idx, ctx, attrs)}
     end
   end
 
+  defp marker(idx, %{tag: "textarea"} = ctx, computed, attrs),
+    do: {computed, placeholder_style(idx, ctx, attrs)}
+
   defp marker(_idx, _ctx, computed, attrs), do: {computed, attrs}
+
+  # `::placeholder { color, opacity }` of a text control: `"@placeholder"` holds what it sets.
+  # The opacity is read as written: a hint that fades in on focus has `opacity: 0` and a
+  # transition, which the cascade of a box takes for a reveal animation.
+  defp placeholder_style(idx, ctx, attrs) do
+    with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :placeholder),
+         decl when map_size(decl) > 0 <- declared(idx, ctx, :placeholder) do
+      {computed, _} = compute(idx, ctx, ctx, :placeholder)
+
+      style =
+        Map.take(computed, ["color"])
+        |> Map.take(Map.keys(decl))
+        |> then(fn st ->
+          case Float.parse(Map.get(decl, "opacity", "")) do
+            {n, _} -> Map.put(st, "opacity", n * 1.0)
+            :error -> st
+          end
+        end)
+
+      if map_size(style) > 0, do: [{"@placeholder", style} | attrs], else: attrs
+    else
+      _ -> attrs
+    end
+  end
 
   # text drawn instead of the native box: the box's fixed 13px height (a user-agent value) and
   # its clipping would cut it

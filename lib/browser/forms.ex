@@ -329,10 +329,10 @@ defmodule Browser.Forms do
         [text("Choose file")]
 
       "password" ->
-        shown(bullets(cur.value), cur, placeholder)
+        shown(bullets(cur.value), cur, placeholder, attrs)
 
       _ ->
-        shown(cur.value, cur, placeholder)
+        shown(cur.value, cur, placeholder, attrs)
     end
   end
 
@@ -340,7 +340,7 @@ defmodule Browser.Forms do
   defp content(%{tag: "textarea"}, attrs, cur) do
     case {cur.value, attr(attrs, "placeholder")} do
       {"", placeholder} ->
-        shown("", cur, placeholder)
+        shown("", cur, placeholder, attrs)
 
       {value, _placeholder} ->
         case value |> String.split("\n") |> Enum.drop(cur.scroll) |> Enum.join("\n") do
@@ -380,15 +380,24 @@ defmodule Browser.Forms do
   defp scrolled(display, %{scroll: scroll}), do: String.slice(display, scroll..-1//1)
 
   # the text, scrolled by `scroll` characters; an empty control shows its placeholder instead
-  defp shown("", _cur, ""), do: [text(@empty)]
+  defp shown("", _cur, "", _attrs), do: [text(@empty)]
 
-  defp shown("", _cur, placeholder),
-    do: [
-      {:element, "placeholder", [{"@computed", %{"color" => {117, 117, 117}}}],
-       [text(placeholder)]}
-    ]
+  defp shown("", _cur, placeholder, attrs) do
+    style = %{"color" => {117, 117, 117}}
 
-  defp shown(display, %{scroll: scroll}, _placeholder) do
+    style =
+      case List.keyfind(attrs, "@placeholder", 0) do
+        {_, set} -> Map.merge(style, set)
+        nil -> style
+      end
+
+    # `::placeholder { opacity: 0 }` hides the hint, the way a floating label asks for
+    if style["opacity"] == 0.0,
+      do: [text(@empty)],
+      else: [{:element, "placeholder", [{"@computed", style}], [text(placeholder)]}]
+  end
+
+  defp shown(display, %{scroll: scroll}, _placeholder, _attrs) do
     case scrolled(display, %{scroll: scroll}) do
       "" -> [text(@empty)]
       visible -> [text(visible)]

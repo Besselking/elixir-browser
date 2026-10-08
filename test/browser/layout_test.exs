@@ -238,6 +238,33 @@ defmodule Browser.LayoutTest do
       assert box.y >= 10
     end
 
+    test "::placeholder can colour or hide the hint of a text control" do
+      html =
+        ~s(<style>.hide::placeholder{opacity:0} .red::placeholder{color:#f00}</style>) <>
+          ~s(<input class="hide" placeholder="gone"><input class="red" placeholder="seen">) <>
+          ~s(<textarea class="hide" placeholder="gone too"></textarea>)
+
+      {items, _} = styled(html)
+      assert word(items, "gone") == nil
+      assert word(items, "too") == nil
+      assert word(items, "seen").color == {255, 0, 0}
+    end
+
+    test "unlayered rules beat layered ones whatever their specificity; later layers beat earlier" do
+      html =
+        ~s(<style>@layer base{#a.x{color:#00f}} .x{color:#f00}) <>
+          ~s(@layer one{.y{color:#00f}} @layer two{.y{color:#0f0}}) <>
+          ~s(@layer one{.z{color:#00f!important}} @layer two{.z{color:#0f0!important}}) <>
+          ~s(.z{color:#f00!important}</style>) <>
+          ~s(<p id=a class=x>un</p><p class=y>lay</p><p class=z>imp</p>)
+
+      {items, _} = styled(html)
+      assert word(items, "un").color == {255, 0, 0}
+      assert word(items, "lay").color == {0, 255, 0}
+      # important reverses it: the earliest layer wins, and unlayered rules come last
+      assert word(items, "imp").color == {0, 0, 255}
+    end
+
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
         styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
