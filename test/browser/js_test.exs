@@ -1672,4 +1672,44 @@ defmodule Browser.JSTest do
       assert js("var a = 8, b = 2, g = 1; (a) / b / g") == 4.0
     end
   end
+
+  describe "round 45 early errors and with references" do
+    test "await is reserved in the parameters of arrows inside async code" do
+      assert {:error, {:syntax, _}, _} = JS.eval("async(a = await => {}) => {}")
+      assert {:error, {:syntax, _}, _} = JS.eval("async () => { (a = await 1) => {} }")
+
+      assert js("var f = async () => { var g = (a = 1) => a; return g() }; typeof f") ==
+               "function"
+    end
+
+    test "a strict read or write of a binding removed while unscopables are read is a ReferenceError" do
+      src = """
+      var env = { binding: 0, get [Symbol.unscopables]() { delete env.binding; return null; } };
+      var r = "";
+      with (env) {
+        try { (function() { "use strict"; return binding })() } catch (e) { r += e.constructor.name }
+      }
+      env.binding = 0;
+      with (env) {
+        try { (function() { "use strict"; binding = 1 })() } catch (e) { r += e.constructor.name }
+      }
+      r
+      """
+
+      assert js(src) == "ReferenceErrorReferenceError"
+    end
+
+    test "a var target of a destructuring is looked up before the value is read" do
+      src = """
+      var log = [];
+      var env = new Proxy({}, { has(t, k) { log.push(String(k)); return false } });
+      var src = { get p() { log.push("get"); return 1 } };
+      var t;
+      with (env) { var { p: t } = src; }
+      log.indexOf("t") < log.indexOf("get")
+      """
+
+      assert js(src) == true
+    end
+  end
 end

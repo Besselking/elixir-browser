@@ -198,10 +198,17 @@ defmodule Browser.JS.Interp do
       _ ->
         case s do
           %{with: obj} when is_binary(name) ->
-            if has_property?(obj, name) and not unscopable?(obj, name),
+            if has_property?(obj, name) and not unscopable?(obj, name) do
               # GetBindingValue asks again whether the binding is still there
-              do: {:ok, if(has_property?(obj, name), do: get(obj, name), else: :undefined)},
-              else: lookup_var(s.parent, name, heap)
+              if has_property?(obj, name) do
+                {:ok, get(obj, name)}
+              else
+                Process.put(:js_with_gone, true)
+                {:ok, :undefined}
+              end
+            else
+              lookup_var(s.parent, name, heap)
+            end
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
             # a property defined on the global object itself (an accessor, say) is a variable too
@@ -2526,7 +2533,16 @@ defmodule Browser.JS.Interp do
   defp args_shadowed?(_), do: false
 
   defp ev_id({:id, name}, env) do
+    if Process.get(:js_with_used, false), do: Process.delete(:js_with_gone)
+
     case lookup_var(env, name) do
+      {:ok, :undefined} ->
+        # a binding that left the `with` object while its unscopables were read is a missing
+        # reference in strict code
+        if Process.delete(:js_with_gone) == true and lookup_var(env, :strict) == {:ok, true},
+          do: throw_error("ReferenceError", "#{name} is not defined"),
+          else: :undefined
+
       {:ok, :tdz} ->
         throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
@@ -3624,9 +3640,29 @@ defmodule Browser.JS.Interp do
   defp target_ref({:default, {:member, o, k, _}, e}, env, :assign),
     do: {ev(o, env), ev_key(k, env), e}
 
+  # a name target inside `with` is resolved before the value is read
+  defp target_ref({:id, name}, env, mode) when mode not in [:let, :const] do
+    if Process.get(:js_with_used, false), do: name_ref(name, env, mode, nil), else: nil
+  end
+
+  defp target_ref({:default, {:id, name}, e}, env, mode) when mode not in [:let, :const] do
+    if Process.get(:js_with_used, false), do: name_ref(name, env, mode, e), else: nil
+  end
+
   defp target_ref(_, _, _), do: nil
 
+  defp name_ref(name, env, mode, dflt) do
+    strict? = mode == :assign and lookup_var(env, :strict) == {:ok, true}
+    {_, write} = id_ref(env, name, {:id, name}, strict?)
+    {:name, write, dflt}
+  end
+
   defp bind_to(pat, nil, v, env, mode), do: bind(pat, v, env, mode)
+
+  defp bind_to(pat, {:name, write, dflt}, v, env, _mode) do
+    v = if dflt != nil and v == :undefined, do: ev_named(dflt, env, pat), else: v
+    write.(v)
+  end
 
   defp bind_to(_pat, {ov, key, dflt}, v, env, _mode) do
     v = if dflt != nil and v == :undefined, do: ev(dflt, env), else: v
@@ -4099,17 +4135,24 @@ defmodule Browser.JS.Interp do
 
   # assignments in strict code: a failed [[Set]] or an undeclared name throws
   def ev({:sassign, "=", {:id, name}, value}, env) do
-    resolved? = resolvable?(env, name)
-    v = ev_named(value, env, {:id, name})
-    # the binding may have been deleted while the right-hand side ran
-    strict_assign_var(
-      env,
-      name,
-      v,
-      resolved? and (simple_value?(value) or resolvable?(env, name))
-    )
+    if Process.get(:js_with_used, false) do
+      {_, write} = id_ref(env, name, {:id, name}, true)
+      v = ev_named(value, env, {:id, name})
+      write.(v)
+      v
+    else
+      resolved? = resolvable?(env, name)
+      v = ev_named(value, env, {:id, name})
+      # the binding may have been deleted while the right-hand side ran
+      strict_assign_var(
+        env,
+        name,
+        v,
+        resolved? and (simple_value?(value) or resolvable?(env, name))
+      )
 
-    v
+      v
+    end
   end
 
   def ev({:sassign, "=", {:member, o, k, _}, value}, env) do

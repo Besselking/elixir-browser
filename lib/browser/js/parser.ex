@@ -2237,11 +2237,18 @@ defmodule Browser.JS.Parser do
     {put_src(fun, arrow_src(start, rest)), rest}
   end
 
-  defp arrow_nodes([{:id, name, _}, {:p, "=>", _} | ts]), do: arrow_body([{:id, name}], ts)
+  defp arrow_nodes([{:id, name, _}, {:p, "=>", _} | ts]) do
+    if name == "await" and await_reserved?(), do: throw({:syntax, "await is reserved here"})
+    arrow_body([{:id, name}], ts)
+  end
 
   defp arrow_nodes([{:p, "(", _} | ts]) do
     {params, ts} = params(ts, [])
     if Process.get(:js_generator, false), do: check_no_yield([params, nil])
+
+    if Process.get(:js_async, false) and contains_node?(params, &match?({:await, _}, &1)),
+      do: throw({:syntax, "await expression in arrow function parameters"})
+
     arrow_body(params, expect(ts, "=>"))
   end
 
