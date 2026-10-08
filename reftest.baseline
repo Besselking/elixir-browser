@@ -848,6 +848,8 @@ css/CSS2/css1/c414-flt-fit-001.xht
 css/CSS2/css1/c414-flt-fit-002.xht
 css/CSS2/css1/c414-flt-fit-003.xht
 css/CSS2/css1/c414-flt-fit-004.xht
+css/CSS2/css1/c414-flt-fit-005.xht
+css/CSS2/css1/c414-flt-fit-006.xht
 css/CSS2/css1/c45-bg-canvas-000.xht
 css/CSS2/css1/c526-font-sz-001.xht
 css/CSS2/css1/c531-color-000.xht
@@ -1050,7 +1052,9 @@ css/CSS2/floats-clear/floats-117.xht
 css/CSS2/floats-clear/floats-118.xht
 css/CSS2/floats-clear/floats-119.xht
 css/CSS2/floats-clear/floats-120.xht
+css/CSS2/floats-clear/floats-121.xht
 css/CSS2/floats-clear/floats-122.xht
+css/CSS2/floats-clear/floats-123.xht
 css/CSS2/floats-clear/floats-132.xht
 css/CSS2/floats-clear/floats-133.xht
 css/CSS2/floats-clear/floats-134.xht
@@ -1058,11 +1062,13 @@ css/CSS2/floats-clear/floats-135.xht
 css/CSS2/floats-clear/floats-138.xht
 css/CSS2/floats-clear/floats-139.xht
 css/CSS2/floats-clear/floats-142.xht
+css/CSS2/floats-clear/floats-144.xht
 css/CSS2/floats-clear/floats-145.xht
 css/CSS2/floats-clear/floats-147.xht
-css/CSS2/floats-clear/floats-149.xht
 css/CSS2/floats-clear/floats-bfc-001.xht
 css/CSS2/floats-clear/floats-bfc-002.xht
+css/CSS2/floats-clear/floats-clear-multicol-001.html
+css/CSS2/floats-clear/floats-clear-multicol-balancing-001.html
 css/CSS2/floats-clear/margin-collapse-018.xht
 css/CSS2/floats-clear/margin-collapse-023.xht
 css/CSS2/floats-clear/margin-collapse-024.xht
@@ -1134,6 +1140,7 @@ css/CSS2/floats/floats-wrap-bfc-with-margin-004.html
 css/CSS2/floats/floats-wrap-bfc-with-margin-005.html
 css/CSS2/floats/floats-wrap-bfc-with-margin-006.tentative.html
 css/CSS2/floats/floats-wrap-bfc-with-margin-007.tentative.html
+css/CSS2/floats/floats-wrap-bfc-with-margin-010.html
 css/CSS2/floats/floats-wrap-top-below-bfc-001l.xht
 css/CSS2/floats/floats-wrap-top-below-bfc-001r.xht
 css/CSS2/floats/floats-wrap-top-below-bfc-002l.xht
@@ -1153,6 +1160,8 @@ css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-margin.html
 css/CSS2/floats/new-fc-beside-float-with-min-width.html
 css/CSS2/floats/new-fc-relayout.html
+css/CSS2/floats/new-fc-separates-from-float-4.html
+css/CSS2/floats/new-fc-separates-from-float.html
 css/CSS2/floats/overflow-scroll-float-paint-order.html
 css/CSS2/floats/overhanging-float-paint-order.html
 css/CSS2/floats/zero-available-space-float-positioning.html
@@ -2005,6 +2014,7 @@ css/CSS2/normal-flow/block-in-inline-nested-001.xht
 css/CSS2/normal-flow/block-in-inline-percents-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-005.xht
+css/CSS2/normal-flow/block-non-replaced-height-011.xht
 css/CSS2/normal-flow/block-non-replaced-height-013.xht
 css/CSS2/normal-flow/block-non-replaced-width-002.xht
 css/CSS2/normal-flow/block-non-replaced-width-003.xht
@@ -5346,6 +5356,8 @@ css/css-text/white-space/white-space-intrinsic-size-003.html
 css/css-text/white-space/white-space-intrinsic-size-004.html
 css/css-text/white-space/white-space-intrinsic-size-005.html
 css/css-text/white-space/white-space-intrinsic-size-006.html
+css/css-text/white-space/white-space-intrinsic-size-013.html
+css/css-text/white-space/white-space-intrinsic-size-014.html
 css/css-text/white-space/white-space-intrinsic-size-015.html
 css/css-text/white-space/white-space-intrinsic-size-016.html
 css/css-text/white-space/white-space-intrinsic-size-019.html

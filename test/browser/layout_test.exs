@@ -3400,14 +3400,12 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "text").x == 64
     end
 
-    test "a box holding only floats contains them" do
+    test "a box holding only floats is no higher than what it holds in flow" do
       html =
-        ~s|<div style="background:#eee"><div style="float:left;width:60px;height:100px"></div></div><p>below</p>|
+        ~s|<div><div><div style="float:left;width:60px;height:100px"></div></div><p>below</p></div>|
 
       {items, _} = fl(html)
-      assert box_of(items).h == 100
-      assert word_at(items, "below").y >= 100
-      assert word_at(items, "below").x == 4
+      assert word_at(items, "below").y < 100
     end
 
     test "a box with overflow hidden contains its floats" do
@@ -6655,6 +6653,28 @@ defmodule Browser.LayoutTest do
       {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
       float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
       assert float.y > 0
+    end
+  end
+
+  describe "blocks that hold only floats" do
+    test "have no height of their own" do
+      html =
+        ~s(<style>body{margin:0}</style><div><div><div id=a><div style="float:left;width:10px;height:50px;background:red"></div></div><div id=b style="height:7px;background:green"></div></div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 0
+    end
+
+    test "a box that starts a formatting context moves below a float it does not fit beside, from where its margin put it" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="float:left;width:100px;height:30px"></div><div style="overflow:hidden;width:100px;height:5px;margin-top:30px;background:green"></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 30
     end
   end
 end

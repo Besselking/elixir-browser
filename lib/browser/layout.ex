@@ -3243,9 +3243,7 @@ defmodule Browser.Layout do
     }
   end
 
-  # a block holding nothing but floats still contains them (the usual "clearfix")
-  defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
-    st = if st.y == y0, do: contain_floats(st, n0), else: st
+  defp op({:inset_end}, %{insets: [{l, r, _y0, _n0} | rest]} = st) do
     # the margin below a box is not one of a first child
     st = %{st | clr: nil}
     st = end_block(st)
@@ -3342,12 +3340,11 @@ defmodule Browser.Layout do
     st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
     st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}
     {box, open} = Map.pop(st.open, ref)
-    {bt, _br, bb, _bl} = box.o.bw
+    {_bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
 
-    # a box that clips, or that holds nothing but floats, contains them
-    flow? = st.y > box.top + bt + box.o.pt
-    st = if box.o.bfc or not flow?, do: contain_floats(st, box.fl0), else: st
+    # a box that starts a formatting context contains its floats
+    st = if box.o.bfc or Map.get(box, :bfc, false), do: contain_floats(st, box.fl0), else: st
     st = %{st | blocks: List.delete(st.blocks, box.id)}
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
@@ -3925,8 +3922,9 @@ defmodule Browser.Layout do
     # (a positive right margin of a box with a width of its own does not push it below a float)
     mr_fit = if o.width, do: min(mr0, 0), else: mr0
 
+    # (the margin above it counts from where it was: it can take up the way down)
     if below && ml0 + box_w + mr_fit > beside,
-      do: place_box(%{st | y: below}, ref, o),
+      do: place_box(%{st | y: below, gap: max(st.gap - (below - st.y), 0)}, ref, o),
       else: open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free})
   end
 
