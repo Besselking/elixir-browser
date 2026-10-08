@@ -137,6 +137,7 @@ defmodule Browser.Layout do
       vs: 0,
       wrap_chars: :none,
       keep_all: false,
+      lang: nil,
       wst: :none,
       shy: true,
       nojust: false,
@@ -541,7 +542,12 @@ defmodule Browser.Layout do
   # a soft hyphen (U+00AD) is invisible unless a line breaks at it, and `hyphens: none` takes
   # that away: it is dropped from the laid-out text (the DOM text keeps it)
   defp walk({:text, t}, %{tt: tt} = style, acc) when is_binary(t) and tt != :none,
-    do: walk({:text, transform_text(t, tt, acc)}, %{style | tt: :none}, acc)
+    do:
+      walk(
+        {:text, transform_text(collapse_for(t, tt, style), tt, {acc, style.lang})},
+        %{style | tt: :none},
+        acc
+      )
 
   defp walk({:text, t}, style, acc) when is_binary(t) do
     if String.contains?(t, "\u00AD") and not style.shy,
@@ -2025,6 +2031,15 @@ defmodule Browser.Layout do
       end
 
     style =
+      case List.keyfind(attrs, "lang", 0) do
+        {_, lang} when is_binary(lang) and lang != "" ->
+          %{style | lang: lang |> String.downcase() |> String.split("-") |> hd()}
+
+        _ ->
+          style
+      end
+
+    style =
       case List.keyfind(attrs, "@cid", 0) do
         {_, cid} -> %{style | cid: cid}
         nil -> style
@@ -2183,17 +2198,54 @@ defmodule Browser.Layout do
 
   # Georgian Mkhedruli letters stay as they are in upper case (their capitals are a style of
   # their own, not a case)
-  defp transform_text(t, :upper, _acc) do
-    if String.match?(t, ~r/[\x{10D0}-\x{10FF}]/u),
-      do: Regex.replace(~r/[^\x{10D0}-\x{10FF}]+/u, t, &String.upcase/1),
-      else: String.upcase(t)
+  @full_kana Map.new(
+               Enum.zip(
+                 String.to_charlist("ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿｧｨｩｪｫｯｬｭｮ"),
+                 String.to_charlist("あいうえおつやゆよわかけアイウエオツヤユヨワカケクシストヌハヒフヘホムラリルレロｱｲｳｴｵﾂﾔﾕﾖ")
+               )
+             )
+
+  # (white space is collapsed before `full-width` turns the spaces that are left into wide ones)
+  defp collapse_for(t, tt, %{ws: :normal}) when is_list(tt) do
+    if :full_width in tt, do: Regex.replace(~r/[ \t\n\r\f]+/, t, " "), else: t
+  end
+
+  defp collapse_for(t, _tt, _style), do: t
+
+  defp transform_text(t, kinds, acc) when is_list(kinds),
+    do: Enum.reduce(kinds, t, &transform_text(&2, &1, acc))
+
+  defp transform_text(t, :upper, {_acc, lang}) do
+    upper =
+      if String.match?(t, ~r/[\x{10D0}-\x{10FF}]/u),
+        do: Regex.replace(~r/[^\x{10D0}-\x{10FF}]+/u, t, &String.upcase/1),
+        else: String.upcase(t)
+
+    # (Greek capitals lose their accents but keep the diaeresis)
+    if lang == "el", do: greek_unaccent(upper), else: upper
   end
 
   defp transform_text(t, :lower, _acc), do: String.downcase(t)
 
+  # ASCII letters, digits and punctuation become their full-width forms, a space the ideographic one
+  defp transform_text(t, :full_width, _acc) do
+    for <<c::utf8 <- t>>, into: "" do
+      cond do
+        c == 0x20 -> <<0x3000::utf8>>
+        c in 0x21..0x7E -> <<c + 0xFEE0::utf8>>
+        true -> <<c::utf8>>
+      end
+    end
+  end
+
+  # small kana become the full-size ones
+  defp transform_text(t, :full_kana, _acc) do
+    for <<c::utf8 <- t>>, into: "", do: <<Map.get(@full_kana, c, c)::utf8>>
+  end
+
   # the first letter of a word, after any punctuation that opens it; text that carries on a
   # word begun in the text before it (`T<b>his`) keeps what it has until its first space
-  defp transform_text(t, :cap, acc) do
+  defp transform_text(t, :cap, {acc, lang}) do
     {head, tail} =
       if word_begun?(acc),
         do:
@@ -2202,10 +2254,20 @@ defmodule Browser.Layout do
           ),
         else: {"", t}
 
-    head <>
-      Regex.replace(~r/(^|\s)(\p{P}*)(\p{L})/u, tail, fn _, sp, p, ch ->
-        sp <> p <> String.upcase(ch)
-      end)
+    (head <>
+       Regex.replace(~r/(^|\s)([\p{P}\p{S}]*)(\p{L})/u, tail, fn _, sp, p, ch ->
+         sp <> p <> String.upcase(ch)
+       end))
+    |> then(
+      &if(lang == "nl", do: Regex.replace(~r/(^|\s)([\p{P}\p{S}]*)Ij/u, &1, "\\1\\2IJ"), else: &1)
+    )
+  end
+
+  defp greek_unaccent(t) do
+    t
+    |> String.normalize(:nfd)
+    |> String.replace(~r/[\x{0300}\x{0301}\x{0304}\x{0306}\x{0313}\x{0314}\x{0342}\x{0345}]/u, "")
+    |> String.normalize(:nfc)
   end
 
   # true when the words just before (no space between them) hold a letter
@@ -2264,10 +2326,22 @@ defmodule Browser.Layout do
     end
   end
 
-  defp text_transform("uppercase"), do: :upper
-  defp text_transform("lowercase"), do: :lower
-  defp text_transform("capitalize"), do: :cap
-  defp text_transform(_), do: :none
+  # `text-transform` takes a case keyword and any of `full-width` and `full-size-kana`
+  defp text_transform(value) do
+    kinds =
+      for word <- value |> to_string() |> String.split(),
+          kind = text_transform_kind(word),
+          do: kind
+
+    if kinds == [], do: :none, else: kinds
+  end
+
+  defp text_transform_kind("uppercase"), do: :upper
+  defp text_transform_kind("lowercase"), do: :lower
+  defp text_transform_kind("capitalize"), do: :cap
+  defp text_transform_kind("full-width"), do: :full_width
+  defp text_transform_kind("full-size-kana"), do: :full_kana
+  defp text_transform_kind(_), do: nil
 
   defp white_space(style, value) do
     ws =

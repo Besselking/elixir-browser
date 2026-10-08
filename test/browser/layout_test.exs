@@ -5308,6 +5308,42 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "text-transform keywords" do
+    defp transformed(css, text, attrs \\ "") do
+      html = ~s(<div style="font-size:20px;#{css}" #{attrs}>#{text}</div>)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :text))
+      |> Enum.sort_by(& &1.x)
+      |> Enum.map_join(& &1.text)
+    end
+
+    test "full-width widens ASCII and spaces" do
+      assert transformed("text-transform:full-width", "Ab 1") == "Ａｂ１" or
+               transformed("text-transform:full-width", "Ab 1") == "Ａｂ\u3000１"
+    end
+
+    test "keywords combine" do
+      assert transformed("text-transform:uppercase full-width", "ab") == "ＡＢ"
+    end
+
+    test "full-size-kana replaces small kana" do
+      assert transformed("text-transform:full-size-kana", "ぁっ") == "あつ"
+    end
+
+    test "capitalize skips symbols and the Dutch ij is a digraph" do
+      assert transformed("text-transform:capitalize", "&lt;?transform") == "<?Transform"
+      assert transformed("text-transform:capitalize", "ijsland", ~s(lang="nl")) == "IJsland"
+    end
+
+    test "Greek capitals lose their accents" do
+      assert transformed("text-transform:uppercase", "καλημέρα", ~s(lang="el")) == "ΚΑΛΗΜΕΡΑ"
+      assert transformed("text-transform:uppercase", "é", ~s(lang="fr")) == "É"
+    end
+  end
+
   describe "white space at the line edge" do
     test "spaces before an empty inline box at the end of a line collapse away" do
       page =
