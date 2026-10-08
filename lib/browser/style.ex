@@ -1497,8 +1497,15 @@ defmodule Browser.Style do
     if "size" in contain or "strict" in contain do
       {iw, ih} = intrinsic_size(resolved, env)
 
+      # (a width and an aspect ratio give the height already)
+      ratio? =
+        Map.get(resolved, "aspect-ratio", "auto") not in ["auto", "", "initial"] and
+          Map.get(base, "width", :auto) != :auto
+
       base =
-        if Map.get(base, "height", :auto) == :auto, do: Map.put(base, "height", ih), else: base
+        if Map.get(base, "height", :auto) == :auto and not ratio?,
+          do: Map.put(base, "height", ih),
+          else: base
 
       if Map.get(base, "width") in [:maxc, :fit, :minc],
         do: Map.put(base, "width", iw),

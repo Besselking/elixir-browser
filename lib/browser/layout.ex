@@ -1192,7 +1192,8 @@ defmodule Browser.Layout do
       maxw: c["max-width"],
       minh: c["min-height"],
       maxh: c["max-height"],
-      ratio: aspect_ratio(c["aspect-ratio"])
+      ratio: aspect_ratio(c["aspect-ratio"]),
+      pad: nil
     }
   end
 
@@ -1205,7 +1206,8 @@ defmodule Browser.Layout do
 
     %{
       css
-      | w: less.(css.w, hx),
+      | pad: {hx, vx},
+        w: less.(css.w, hx),
         minw: less.(css.minw, hx),
         maxw: less.(css.maxw, hx),
         h: less.(css.h, vx),

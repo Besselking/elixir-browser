@@ -27,8 +27,8 @@ defmodule Browser.ImageBox do
     {w, h} =
       case {wspec, hspec} do
         {nil, nil} -> intrinsic || {0, 0}
-        {w, nil} -> {w, derive(w, ratio, :height, intrinsic)}
-        {nil, h} -> {derive(h, ratio, :width, intrinsic), h}
+        {w, nil} -> {w, derive_box(w, ratio, :height, intrinsic, css)}
+        {nil, h} -> {derive_box(h, ratio, :width, intrinsic, css), h}
         {w, h} -> {w, h}
       end
 
@@ -99,6 +99,20 @@ defmodule Browser.ImageBox do
   defp ratio({iw, ih}, _attrs) when iw > 0 and ih > 0, do: iw / ih
   defp ratio(_, %{w: w, h: h}) when is_number(w) and is_number(h) and w > 0 and h > 0, do: w / h
   defp ratio(_, _), do: nil
+
+  # a ratio given for the border box (`box-sizing: border-box`) relates the sizes with the padding
+  # and border (`css[:pad]`) added
+  defp derive_box(known, ratio, axis, intrinsic, %{pad: {hx, vx}, ratio: {r, :sizing}})
+       when is_number(r) and r == ratio do
+    case axis do
+      :height -> (known + hx) / ratio - vx
+      :width -> (known + vx) * ratio - hx
+    end
+    |> max(0)
+    |> then(&if(intrinsic == nil and &1 == 0, do: 0, else: &1))
+  end
+
+  defp derive_box(known, ratio, axis, intrinsic, _css), do: derive(known, ratio, axis, intrinsic)
 
   # the other dimension, from the aspect ratio if there is one
   defp derive(known, ratio, :height, _intrinsic) when is_number(ratio), do: known / ratio

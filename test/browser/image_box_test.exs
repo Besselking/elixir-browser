@@ -18,6 +18,12 @@ defmodule Browser.ImageBoxTest do
     assert size({300, 150}, %{}, %{maxw: 100}) == {100, 50}
   end
 
+  test "a ratio for the border box counts the padding and border" do
+    css = %{ratio: {0.25, :sizing}, pad: {15, 0}}
+    # 25px wide with a 15px border: 10px of content, a border box 100px tall
+    assert size({20, 50}, %{}, Map.put(css, :w, 10.0)) == {10, 100}
+  end
+
   test "nothing known yet: zero" do
     assert size(nil) == {0, 0}
   end
