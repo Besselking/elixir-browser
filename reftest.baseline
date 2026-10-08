@@ -3665,6 +3665,7 @@ css/css-flexbox/flex-vertical-align-effect.html
 css/css-flexbox/flex-wrap-002.html
 css/css-flexbox/flex-wrap-003.html
 css/css-flexbox/flex-wrap-004.html
+css/css-flexbox/flexbox-align-items-center-nested-001.html
 css/css-flexbox/flexbox-align-self-baseline-compatability.html
 css/css-flexbox/flexbox-align-self-baseline-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
@@ -3981,6 +3982,7 @@ css/css-flexbox/padding-overflow.html
 css/css-flexbox/percentage-heights-006.html
 css/css-flexbox/percentage-heights-007.html
 css/css-flexbox/percentage-heights-008.html
+css/css-flexbox/percentage-heights-009.html
 css/css-flexbox/percentage-heights-010.html
 css/css-flexbox/percentage-heights-016.html
 css/css-flexbox/percentage-heights-017.html
@@ -3988,6 +3990,7 @@ css/css-flexbox/percentage-heights-018.html
 css/css-flexbox/percentage-max-height-001.html
 css/css-flexbox/percentage-max-height-004.html
 css/css-flexbox/percentage-padding-005.html
+css/css-flexbox/percentage-size-quirks-003.html
 css/css-flexbox/position-fixed-001.html
 css/css-flexbox/select-element-multiple.html
 css/css-flexbox/select-element-zero-height-001.html

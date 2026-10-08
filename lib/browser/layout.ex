@@ -2910,6 +2910,12 @@ defmodule Browser.Layout do
     # when measuring how wide the content wants to be (an unbounded width), the container
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
+    # a percentage height is of the enclosing block's height when that is known
+    cs =
+      if cs.height == nil and cs.hpct != nil and is_number(st.cbh),
+        do: %{cs | height: max(cs.hpct * st.cbh - cs.hx, 0), hdef: true},
+        else: cs
+
     {laid, height} = flex_layout(st, cs, items, avail)
     # lets a measuring layout see how wide the container is (what surrounds it is added when
     # the atom is placed)
@@ -5814,6 +5820,9 @@ defmodule Browser.Layout do
       row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
+      hpct: pct_of(c["height"]),
+      hdef: inner.(num(c["height"])) != nil,
+      hx: vextra,
       fs: fs
     }
   end
@@ -6071,6 +6080,11 @@ defmodule Browser.Layout do
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
+      hpct:
+        case c["height"] do
+          {:pct, f} -> f
+          _ -> nil
+        end,
       hpad: box.pl + box.pr + bl + br
     }
   end
@@ -6611,6 +6625,11 @@ defmodule Browser.Layout do
     # an item starts from its `flex-basis` when it has one (a size of the box, margins apart)
     base =
       case it.basis do
+        nil when it.hpct != nil and cs.height != nil and cs.hdef ->
+          # a percentage height resolves against the container's definite height
+          size = it.hpct * cs.height + if(it.sizing == :border, do: 0, else: it.vextra)
+          max(size, it.vextra) + auto_zero(it.mt) + auto_zero(it.mb)
+
         nil ->
           h
 
@@ -6634,17 +6653,44 @@ defmodule Browser.Layout do
   end
 
   defp flex_column_resize(st, sized, free) when free < 0 do
-    total = sized |> Enum.map(&(&1.shrink * &1.base)) |> Enum.sum()
+    frozen = flex_shrink_frozen(sized, free, MapSet.new())
+    # items held at their minimum no longer share the shrinking
+    free = free + Enum.sum(for it <- sized, it.key in frozen, do: it.base - it.h)
+    total = for(it <- sized, it.key not in frozen, do: it.shrink * it.base) |> Enum.sum()
 
     if total > 0 do
       Enum.map(sized, fn it ->
-        target = it.base + free * it.shrink * it.base / total
+        target =
+          if it.key in frozen,
+            do: it.h,
+            else: it.base + free * it.shrink * it.base / total
 
         flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base), true)
       end)
     else
       sized
     end
+  end
+
+  # the items whose share of a shrink goes below what their content needs
+  defp flex_shrink_frozen(sized, free, frozen) do
+    open = Enum.reject(sized, &(&1.key in frozen))
+    give = Enum.sum(for it <- sized, it.key in frozen, do: it.base - it.h)
+    total = Enum.sum(for it <- open, do: it.shrink * it.base)
+
+    more =
+      if total > 0 do
+        for it <- open,
+            it.shrink > 0 and it.auto_height? and it.h > 0,
+            it.base + (free + give) * it.shrink * it.base / total < it.h,
+            do: it.key
+      else
+        []
+      end
+
+    if more == [],
+      do: frozen,
+      else: flex_shrink_frozen(sized, free, MapSet.union(frozen, MapSet.new(more)))
   end
 
   defp flex_column_resize(st, sized, _free),

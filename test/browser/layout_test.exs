@@ -5252,6 +5252,16 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 30, 10}]
     end
 
+    test "a percentage height item in a column of definite height shrinks, the other keeps its content" do
+      html = """
+      <div style="height:100px;width:100px"><div style="display:flex;flex-direction:column;height:100%">
+      <div style="background:blue"><div style="height:20px"></div></div>
+      <div style="height:100%;background:green"></div></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 20}, {0, 20, 100, 80}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
