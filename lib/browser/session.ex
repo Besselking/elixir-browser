@@ -1470,7 +1470,7 @@ defmodule Browser.Session do
                         true -> false
                       end
 
-                    {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, how)}
+                    {:noreply, click_link(state, x, y, href, how)}
                 end
 
               host ->
@@ -1482,6 +1482,26 @@ defmodule Browser.Session do
             {:noreply, click_control(state, cid, x, py, count, shift)}
         end
     end
+  end
+
+  # The press, release and click of a link are heard by the page's scripts first; one that cancels
+  # the click keeps the link from being followed. A link in a frame is followed by that frame.
+  defp click_link(state, x, y, href, how) do
+    state = js_pointer(state, x, y, ["mousedown", "mouseup"])
+    {state, prevented} = js_pointer_event(state, x, y, "click")
+
+    cond do
+      prevented -> state
+      how == false and state.js != nil -> follow_in_frame(state, x, y, href)
+      true -> follow(state, href, how)
+    end
+  end
+
+  defp follow_in_frame(state, x, y, href) do
+    nid = UI.nid_at(state.items, x, y, state.scroll)
+    reply = Browser.JS.Runtime.follow_link(state.js, nid, href)
+    state = apply_js(state, reply)
+    if reply.frame, do: state, else: follow(state, href, false)
   end
 
   defp end_drag(%{sbar: nil} = state), do: %{state | drag: false, fdrag: false, edrag: false}
@@ -2152,6 +2172,18 @@ defmodule Browser.Session do
       end
 
     Enum.reduce(types, state, fn type, state -> state |> js_event(target, type) |> elem(0) end)
+  end
+
+  defp js_pointer_event(%{js: nil} = state, _x, _y, _type), do: {state, false}
+
+  defp js_pointer_event(state, x, y, type) do
+    target =
+      case UI.nid_at(state.items, x, y, state.scroll) do
+        nil -> :document
+        nid -> {:numbered, nid}
+      end
+
+    js_event(state, target, type)
   end
 
   defp stop_js(state) do

@@ -88,8 +88,10 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
-  canvas, audio, video, iframe, object, embed, applet { display: none }
-  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: hidden; background-color: white }
+  audio, video, iframe, object, embed, applet { display: none }
+  slot { display: contents }
+  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
+  iframe[data-b-frame][scrolling=no] { overflow: hidden }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
@@ -332,6 +334,14 @@ defmodule Browser.Style do
 
   # -- cascade -------------------------------------------------------------------
 
+  # a `:host` rule of the shadow tree that `ctx` is the host of
+  defp from_shadow?(rule, ctx) do
+    scope = Map.get(rule, :scope)
+
+    scope != nil and scope != Map.get(ctx, :scope) and Map.get(ctx, :scope_in) == scope and
+      CSS.host_rule?(rule.selector)
+  end
+
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
   def declared(idx, ctx, pseudo \\ nil) do
     # rules are bucketed by the pseudo-element they are for, and then by their rightmost compound
@@ -344,12 +354,14 @@ defmodule Browser.Style do
     from_rules =
       for rule <- candidates,
           Map.get(rule, :pseudo) == pseudo,
-          rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
+          from_host <- [from_shadow?(rule, ctx)],
+          from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
           CSS.matches?(rule.selector, ctx),
           {prop, value, important?} <- rule.decls do
+        # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
         {prop,
          {rank(rule.origin, important?), layer_rank(Map.get(rule, :lrank), important?),
-          {0, rule.specificity}, rule.order}, value}
+          {if(from_host, do: -1, else: 0), rule.specificity}, rule.order}, value}
       end
 
     # inline styles and presentational attributes belong to the element, not its generated boxes

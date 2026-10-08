@@ -466,7 +466,7 @@ defmodule Browser.JS.DOM do
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
   # own (Vue's `@click`, Lit's `@change$lit$`)
-  @internal_attrs ~w(@cid @nid @znid @z @computed @content @marker @placeholder @src @summary
+  @internal_attrs ~w(@cid @nid @znid @z @computed @content @marker @placeholder @src @summary @canvas
                      @sized @float @flex_sized @definite @ed @edhost @t)
 
   defp build({:text, t}, parent), do: new_node(%{kind: :text, text: t, parent: parent})
@@ -567,6 +567,12 @@ defmodule Browser.JS.DOM do
 
       if internal != n.internal, do: update_node_quiet(nid, &%{&1 | internal: internal})
       if tag not in ["textarea", "select"], do: sync_kids(n.kids, kids)
+
+      # the controls of a frame's document are numbered with the page's
+      case tag == "iframe" && Map.get(st().frames, nid) do
+        doc when is_integer(doc) -> sync_kids(node(doc).kids, kids)
+        _ -> :ok
+      end
     end
   end
 
@@ -586,7 +592,7 @@ defmodule Browser.JS.DOM do
 
       _ ->
         inner = ed_host_for(n, host)
-        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n)
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n) ++ shadow_attr(n)
 
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
@@ -616,6 +622,40 @@ defmodule Browser.JS.DOM do
   end
 
   defp with_frame(el, _nid), do: el
+
+  # `data-b-frame` with a scope of its own marks an element that has a shadow root (see
+  # `Browser.Style.scoped_refs/1`); the shadow tree is styled by the sheets in it
+  defp shadow_attr(%{shadow: root}) when root != nil, do: [{"data-b-frame", "s#{root}"}]
+  defp shadow_attr(_), do: []
+
+  defp attr_of(n, name) do
+    case List.keyfind(n.attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  # the children of `host` that its slot called `name` shows
+  defp assigned(host, name) do
+    Enum.filter(node(host).kids, fn k ->
+      case node(k) do
+        %{kind: :text} -> name == ""
+        %{kind: :element} = e -> (attr_of(e, "slot") || "") == name
+        _ -> false
+      end
+    end)
+  end
+
+  # a node of a host shown in a slot keeps the host's styles (see `Browser.CSS.context/8`)
+  defp export_slotted(nid, root, host) do
+    case export(nid, host) do
+      {:element, tag, attrs, kids} ->
+        {:element, tag, attrs ++ [{"data-b-slotted", "s#{root}"}], kids}
+
+      other ->
+        other
+    end
+  end
 
   # the host the children of `n` are in: `n` itself when it makes them editable, else the host
   # `n` is in, unless `contenteditable=false` ends it
@@ -709,6 +749,17 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # what the scripts drew on a canvas goes to the layout with the element
+  defp export_attrs(%{tag: "canvas"} = n) do
+    case Process.get({:canvas, n.id}) do
+      %Browser.Canvas{w: w, h: h, ops: [_ | _]} = surface ->
+        n.attrs ++ [{"@canvas", {w, h, Browser.Canvas.ops(surface)}}]
+
+      _ ->
+        n.attrs
+    end
+  end
+
   defp export_attrs(n), do: n.attrs
 
   defp export_kids(%{tag: "textarea", props: %{"value" => v}}, _host) when is_binary(v),
@@ -731,9 +782,37 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp export_kids(n, nil), do: Enum.map(n.kids, &export/1)
+  # a host shows its shadow tree, not its own children, which only a `<slot>` in it brings back
+  defp export_kids(%{shadow: root}, host) when root != nil do
+    adopted =
+      case List.keyfind(node(root).internal, "@adopted", 0) do
+        {_, texts} -> for t <- texts, do: {:element, "style", [], [{:text, t}]}
+        nil -> []
+      end
 
-  defp export_kids(n, host) do
+    adopted ++ Enum.map(node(root).kids, &export(&1, host))
+  end
+
+  defp export_kids(%{tag: "slot"} = n, host) do
+    top = top_of(n.id)
+
+    case node(top) do
+      %{kind: :fragment, shost: h} when h != nil ->
+        case assigned(h, attr_of(n, "name") || "") do
+          [] -> export_plain_kids(n, host)
+          nodes -> Enum.map(nodes, &export_slotted(&1, top, host))
+        end
+
+      _ ->
+        export_plain_kids(n, host)
+    end
+  end
+
+  defp export_kids(n, host), do: export_plain_kids(n, host)
+
+  defp export_plain_kids(n, nil), do: Enum.map(n.kids, &export/1)
+
+  defp export_plain_kids(n, host) do
     Enum.flat_map(n.kids, fn k ->
       case node(k) do
         %{kind: :text} -> ed_text(k, host)
@@ -953,6 +1032,8 @@ defmodule Browser.JS.DOM do
 
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
+    # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
   end
@@ -976,8 +1057,8 @@ defmodule Browser.JS.DOM do
 
     case List.keyfind(n.internal, "@nid", 0) do
       {_, id} ->
-        case st().rects do
-          %{^id => {x, y, w, h}} -> {x, y, w, h}
+        case rects_here() do
+          %{^id => {x, y, w, h}} -> frame_relative({x, y, w, h})
           _ -> inherited_rect(n.parent)
         end
 
@@ -986,7 +1067,25 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  # (a frame is not laid out: its elements are as wide as the frame, and have no height)
+  # the boxes the layout made: for a frame those of the page, whose coordinates are the page's
+  defp rects_here do
+    if st().doc == st().main, do: st().rects, else: Process.get(:dom_page_rects, %{})
+  end
+
+  # in a frame, a box is where it is in the frame: the page coordinates less the frame's corner
+  defp frame_relative(rect) do
+    with false <- st().doc == st().main,
+         %{iframe: i} when i != nil <- Map.get(st().meta, st().doc),
+         {_, id} <- List.keyfind(node(i).internal, "@nid", 0),
+         %{^id => {fx, fy, _, _}} <- Process.get(:dom_page_rects, %{}) do
+      {x, y, w, h} = rect
+      {x - fx, y - fy, w, h}
+    else
+      _ -> rect
+    end
+  end
+
+  # (a frame that was not laid out yet: its elements are as wide as the frame, with no height)
   defp inherited_rect(nil) do
     if st().doc == st().main,
       do: {0.0, 0.0, 0.0, 0.0},
@@ -1220,8 +1319,11 @@ defmodule Browser.JS.DOM do
 
   @doc "The node id of the element for the page's control `cid`, or nil."
   def control_node(cid) do
-    Enum.find(elements(st().doc), fn nid ->
-      List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+    # (the controls of the frames are numbered with the page's)
+    Enum.find_value(realm_docs(), fn doc ->
+      Enum.find(elements(doc), fn nid ->
+        List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+      end)
     end)
   end
 
@@ -1750,6 +1852,9 @@ defmodule Browser.JS.DOM do
       "content" when n.tag == "template" ->
         {:ok, wrap(template_content(n.id))}
 
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        {:ok, canvas_size(n, k)}
+
       "contentWindow" when n.tag == "iframe" ->
         {:ok, with(d when d != nil <- frame_doc_of(n.id), do: window_host_of(d)) || :null}
 
@@ -1956,6 +2061,11 @@ defmodule Browser.JS.DOM do
     case key do
       "id" ->
         set_attr(nid, "id", to_str(v))
+        :ok
+
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        num = to_num_or_zero(v)
+        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
         :ok
 
       "className" ->
@@ -3920,6 +4030,48 @@ defmodule Browser.JS.DOM do
   def node_numbered(n), do: nid_numbered(n)
 
   @doc """
+  A click on a link, which the layout reports as `href` over the element it numbers `nid`. When
+  the link is in a frame, the frame follows it (`target="_top"` and `"_parent"` send the
+  page, or the frame around, instead): `:frame`. A link of the page itself is for the session:
+  `:page`.
+  """
+  def follow_link(nid, href) do
+    main = st().main
+
+    with id when id != nil <- nid && nid_numbered(nid),
+         doc when doc != main <- node(id).doc,
+         %{parent: parent} <- frame_of(doc) do
+      target = link_target([id | ancestors(id)])
+
+      case target do
+        t when t in ["_top", "_parent"] ->
+          # the frame's own address is the base of a link that leaves it
+          url = in_realm(doc, fn -> resolve_url(href) end)
+
+          if t == "_top" or parent == st().main do
+            out({:navigate, url, :push})
+          else
+            in_realm(parent, fn -> navigate_to(url) end)
+          end
+
+        _ ->
+          in_realm(doc, fn -> navigate_to(resolve_url(href)) end)
+      end
+
+      :frame
+    else
+      _ -> :page
+    end
+  end
+
+  defp link_target(chain) do
+    Enum.find_value(chain, fn id ->
+      n = node(id)
+      if n.kind == :element and n.tag == "a", do: get_attr(n, "target") || "", else: nil
+    end)
+  end
+
+  @doc """
   The pointer moved from the element the layout numbers `old` to the one it numbers `new` (nil:
   none): `mouseout` and `mouseover` (which bubble, and are what frameworks listen to), and
   `mouseleave` / `mouseenter` for each element the pointer left or came into.
@@ -4070,6 +4222,22 @@ defmodule Browser.JS.DOM do
       end)
     )
 
+    # the style sheets a shadow root adopts, as text (they apply inside the shadow tree)
+    Interp.declare(
+      scope,
+      "__set_adopted",
+      native("__set_adopted", fn _, [root, list | _] ->
+        r = nid_of(root)
+        texts = if array?(list), do: Enum.map(array_list(list), &to_str/1), else: []
+
+        update_node(r, fn n ->
+          %{n | internal: List.keystore(n.internal, "@adopted", 0, {"@adopted", texts})}
+        end)
+
+        :undefined
+      end)
+    )
+
     Interp.declare(scope, "__cur_doc", native("__cur_doc", fn _, _ -> wrap(st().doc) end))
     Interp.declare(scope, "__cur_loc", native("__cur_loc", fn _, _ -> loc_host() end))
     :ok
@@ -4086,8 +4254,14 @@ defmodule Browser.JS.DOM do
 
   # -- canvas 2D ------------------------------------------------------------------
 
-  # `canvas.getContext("2d")`: one context per canvas, drawing into `Browser.Canvas`
-  # (rectangles only). Other kinds of context are not there: null, as the standard says.
+  # `canvas.getContext("2d")`: one context per canvas. What a script draws is kept as a display
+  # list in `Browser.Canvas` (the page paints it; the pixels are only made for `toDataURL`).
+  # The style properties live on the context object, as plain properties.
+  @canvas_props ~w(fillStyle strokeStyle lineWidth lineCap lineJoin miterLimit globalAlpha font
+                   textAlign textBaseline lineDashOffset direction globalCompositeOperation
+                   imageSmoothingEnabled imageSmoothingQuality shadowBlur shadowColor shadowOffsetX
+                   shadowOffsetY filter letterSpacing __dash)
+
   defp canvas_context(this, "2d") do
     nid = this_nid(this)
 
@@ -4100,12 +4274,30 @@ defmodule Browser.JS.DOM do
                 {"fillStyle", "#000000"},
                 {"strokeStyle", "#000000"},
                 {"lineWidth", 1.0},
+                {"lineCap", "butt"},
+                {"lineJoin", "miter"},
+                {"miterLimit", 10.0},
                 {"globalAlpha", 1.0},
+                {"font", "10px sans-serif"},
+                {"textAlign", "start"},
+                {"textBaseline", "alphabetic"},
+                {"lineDashOffset", 0.0},
+                {"direction", "ltr"},
+                {"globalCompositeOperation", "source-over"},
+                {"imageSmoothingEnabled", true},
+                {"imageSmoothingQuality", "low"},
+                {"shadowBlur", 0.0},
+                {"shadowColor", "rgba(0, 0, 0, 0)"},
+                {"shadowOffsetX", 0.0},
+                {"shadowOffsetY", 0.0},
+                {"filter", "none"},
+                {"letterSpacing", "0px"},
                 {"canvas", this}
               ],
               Process.get(:canvas_ctx_proto)
             )
 
+          put_hidden(ctx, "__dash", new_array([]))
           Process.put({:canvas_ctx, nid}, ctx)
           ctx
 
@@ -4135,6 +4327,22 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # `canvas.width` and `.height`: the attribute as a number, else 300 by 150
+  defp canvas_size(n, name) do
+    default = if name == "width", do: 300, else: 150
+
+    case get_attr(n, name) do
+      v when is_binary(v) ->
+        case Integer.parse(String.trim(v)) do
+          {i, _} when i >= 0 -> i * 1.0
+          _ -> default * 1.0
+        end
+
+      _ ->
+        default * 1.0
+    end
+  end
+
   defp canvas_dim(this, nid, name, default) do
     from_prop = Interp.get(this, name)
 
@@ -4148,17 +4356,15 @@ defmodule Browser.JS.DOM do
     if is_number(n) and n >= 0, do: trunc(n), else: default
   end
 
-  defp canvas_color(ctx, prop) do
-    alpha = ctx |> Interp.get("globalAlpha") |> to_num_or_zero() |> min(1) |> max(0)
-
-    case Browser.Color.parse_alpha(to_str(Interp.get(ctx, prop))) do
-      {r, g, b, a} -> {r, g, b, round(a * alpha)}
-      # unparsable colours leave the previous one, which is not tracked: black
-      _ -> {0, 0, 0, round(255 * alpha)}
-    end
+  # `n` finite numbers from the arguments as floats, or nil: a call with a NaN or an infinite
+  # argument does nothing, as the standard says
+  defp canvas_nums(args, n) do
+    vals = for i <- 0..(n - 1)//1, do: to_num(arg(args, i))
+    if Enum.all?(vals, &is_number/1), do: Enum.map(vals, &(&1 * 1.0))
   end
 
-  defp canvas_draw(ctx, fun) do
+  # changes the state of the canvas of `ctx` without drawing (the path, the transform)
+  defp canvas_state(ctx, fun) do
     this = Interp.get(ctx, "canvas")
 
     with surface when surface != nil <- canvas_surface(this) do
@@ -4168,30 +4374,585 @@ defmodule Browser.JS.DOM do
     :undefined
   end
 
-  defp install_canvas_context(p) do
-    def_fn(p, "fillRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
+  # draws on the canvas of `ctx`; the page has to be laid out again to show it
+  defp canvas_draw(ctx, fun) do
+    this = Interp.get(ctx, "canvas")
 
-      canvas_draw(
-        this,
-        &Browser.Canvas.fill_rect(&1, x, y, w, h, canvas_color(this, "fillStyle"))
-      )
+    with surface when surface != nil <- canvas_surface(this) do
+      nid = this_nid(this)
+      Process.put({:canvas, nid}, fun.(surface))
+      update_node(nid, & &1)
+    end
+
+    :undefined
+  end
+
+  defp canvas_alpha(ctx),
+    do: ctx |> Interp.get("globalAlpha") |> to_num_or_zero() |> min(1) |> max(0) |> Kernel.*(1.0)
+
+  # the paint of `fillStyle` or `strokeStyle`: a colour, or a gradient, with the points the
+  # script gave. (Patterns paint nothing.)
+  defp canvas_paint(ctx, prop) do
+    case Interp.get(ctx, prop) do
+      {:obj, id} ->
+        case Process.get({:canvas_grad, id}) do
+          nil -> {:color, {0, 0, 0, 0}}
+          grad -> gradient_paint(grad)
+        end
+
+      v ->
+        case Browser.Color.parse_alpha(to_str(v)) do
+          {r, g, b, a} -> {:color, {r, g, b, a}}
+          _ -> {:color, {0, 0, 0, 255}}
+        end
+    end
+  end
+
+  defp gradient_paint(%{stops: []}), do: {:color, {0, 0, 0, 0}}
+  defp gradient_paint(%{stops: [{_, color}]}), do: {:color, color}
+
+  defp gradient_paint(%{kind: :linear, geom: geom, stops: stops}), do: {:linear, geom, stops}
+
+  defp gradient_paint(%{kind: :radial, geom: {x0, y0, r0, x1, y1, r1}, stops: stops}) do
+    if r1 <= 0 do
+      {:color, stops |> List.last() |> elem(1)}
+    else
+      f = min(r0 / r1, 0.99)
+      stops = if f > 0, do: Enum.map(stops, fn {o, c} -> {f + o * (1 - f), c} end), else: stops
+      {:radial, {x1, y1, r1, x0, y0}, stops}
+    end
+  end
+
+  defp canvas_line_style(ctx) do
+    dash =
+      case Interp.get(ctx, "__dash") do
+        {:obj, _} = list ->
+          nums = list |> array_list() |> Enum.map(&to_num_or_zero/1)
+          if nums != [] and Enum.sum(nums) > 0, do: nums
+
+        _ ->
+          nil
+      end
+
+    %{
+      width: ctx |> Interp.get("lineWidth") |> to_num_or_zero() |> Kernel.*(1.0),
+      cap:
+        case Interp.get(ctx, "lineCap") do
+          "round" -> :round
+          "square" -> :square
+          _ -> :butt
+        end,
+      join:
+        case Interp.get(ctx, "lineJoin") do
+          "round" -> :round
+          "bevel" -> :bevel
+          _ -> :miter
+        end,
+      miter: ctx |> Interp.get("miterLimit") |> to_num_or_zero() |> Kernel.*(1.0),
+      dash: dash
+    }
+  end
+
+  defp canvas_text_style(ctx, prop) do
+    %{
+      paint: canvas_paint(ctx, prop),
+      alpha: canvas_alpha(ctx),
+      font: to_str(Interp.get(ctx, "font")),
+      align:
+        case Interp.get(ctx, "textAlign") do
+          a when a in ["center"] -> :middle
+          a when a in ["right", "end"] -> :end
+          _ -> :start
+        end,
+      baseline:
+        case Interp.get(ctx, "textBaseline") do
+          "top" -> :top
+          "hanging" -> :hanging
+          "middle" -> :middle
+          "bottom" -> :bottom
+          "ideographic" -> :ideographic
+          _ -> :alphabetic
+        end
+    }
+  end
+
+  # a path function shared by the context and `Path2D`: `c` is a `Browser.Canvas`
+  @path_methods ~w(moveTo lineTo bezierCurveTo quadraticCurveTo arc arcTo ellipse rect roundRect
+                   closePath)
+  defp path_call(c, "closePath", _args), do: Browser.Canvas.close_path(c)
+
+  defp path_call(c, name, args) do
+    case path_args(name, args) do
+      nil -> c
+      {:error, kind, msg} -> throw_error(kind, msg)
+      call -> apply_path_call(c, call)
+    end
+  end
+
+  defp path_args(name, args) do
+    n =
+      case name do
+        "moveTo" -> 2
+        "lineTo" -> 2
+        "bezierCurveTo" -> 6
+        "quadraticCurveTo" -> 4
+        "arc" -> 5
+        "arcTo" -> 5
+        "ellipse" -> 7
+        "rect" -> 4
+        "roundRect" -> 4
+      end
+
+    with nums when nums != nil <- canvas_nums(args, n) do
+      case {name, nums} do
+        {"arc", [_, _, r | _]} when r < 0 ->
+          {:error, "IndexSizeError", "The radius provided (#{trunc(r)}) is negative."}
+
+        {"arcTo", [_, _, _, _, r]} when r < 0 ->
+          {:error, "IndexSizeError", "The radius provided (#{trunc(r)}) is negative."}
+
+        {"ellipse", [_, _, rx, ry | _]} when rx < 0 or ry < 0 ->
+          {:error, "IndexSizeError", "The radius provided is negative."}
+
+        {"arc", nums} ->
+          {:arc, nums, truthy(arg(args, 5))}
+
+        {"ellipse", nums} ->
+          {:ellipse, nums, truthy(arg(args, 7))}
+
+        {"roundRect", nums} ->
+          {:round_rect, nums, round_rect_radii(arg(args, 4))}
+
+        {name, nums} ->
+          {String.to_atom(Macro.underscore(name)), nums}
+      end
+    end
+  end
+
+  defp apply_path_call(c, {:move_to, [x, y]}), do: Browser.Canvas.move_to(c, x, y)
+  defp apply_path_call(c, {:line_to, [x, y]}), do: Browser.Canvas.line_to(c, x, y)
+
+  defp apply_path_call(c, {:bezier_curve_to, [a, b, d, e, f, g]}),
+    do: Browser.Canvas.bezier_to(c, a, b, d, e, f, g)
+
+  defp apply_path_call(c, {:quadratic_curve_to, [a, b, d, e]}),
+    do: Browser.Canvas.quad_to(c, a, b, d, e)
+
+  defp apply_path_call(c, {:arc_to, [a, b, d, e, r]}), do: Browser.Canvas.arc_to(c, a, b, d, e, r)
+  defp apply_path_call(c, {:rect, [x, y, w, h]}), do: Browser.Canvas.rect(c, x, y, w, h)
+
+  defp apply_path_call(c, {:arc, [x, y, r, a0, a1], ccw}),
+    do: Browser.Canvas.arc(c, x, y, r, a0, a1, ccw)
+
+  defp apply_path_call(c, {:ellipse, [x, y, rx, ry, rot, a0, a1], ccw}),
+    do: Browser.Canvas.ellipse(c, x, y, rx, ry, rot, a0, a1, ccw)
+
+  defp apply_path_call(c, {:round_rect, [x, y, w, h], radii}),
+    do: Browser.Canvas.round_rect(c, x, y, w, h, radii)
+
+  # `roundRect` radii: a number, or a list of one to four numbers (or `{x, y}` points)
+  defp round_rect_radii(v) do
+    radius = fn
+      {:obj, _} = o -> o |> Interp.get("x") |> to_num_or_zero()
+      n -> to_num_or_zero(n)
+    end
+
+    list =
+      case v do
+        :undefined ->
+          [0]
+
+        {:obj, _} = o ->
+          if Interp.array?(o), do: Enum.map(array_list(o), radius), else: [radius.(o)]
+
+        n ->
+          [radius.(n)]
+      end
+
+    case list do
+      [] -> [0.0, 0.0, 0.0, 0.0]
+      [a] -> [a, a, a, a]
+      [a, b] -> [a, b, a, b]
+      [a, b, c] -> [a, b, c, b]
+      [a, b, c, d | _] -> [a, b, c, d]
+    end
+    |> Enum.map(&(&1 * 1.0))
+  end
+
+  defp matrix_args(args) do
+    case arg(args, 0) do
+      {:obj, _} = m ->
+        vals = for k <- ~w(a b c d e f), do: to_num(Interp.get(m, k))
+        if Enum.all?(vals, &is_number/1), do: List.to_tuple(Enum.map(vals, &(&1 * 1.0)))
+
+      _ ->
+        with nums when nums != nil <- canvas_nums(args, 6), do: List.to_tuple(nums)
+    end
+  end
+
+  defp canvas_fill_args(args) do
+    case arg(args, 0) do
+      {:obj, id} ->
+        case Process.get({:path2d, id}) do
+          nil -> {nil, fill_rule(arg(args, 0))}
+          path -> {path, fill_rule(arg(args, 1))}
+        end
+
+      rule ->
+        {nil, fill_rule(rule)}
+    end
+  end
+
+  defp fill_rule("evenodd"), do: :evenodd
+  defp fill_rule(_), do: :nonzero
+
+  defp install_canvas_context(p) do
+    for name <- @path_methods do
+      def_fn(p, name, fn this, args ->
+        canvas_state(this, &path_call(&1, name, args))
+      end)
+    end
+
+    def_fn(p, "beginPath", fn this, _ -> canvas_state(this, &Browser.Canvas.begin_path/1) end)
+
+    def_fn(p, "fill", fn this, args ->
+      {path, rule} = canvas_fill_args(args)
+      paint = canvas_paint(this, "fillStyle")
+      alpha = canvas_alpha(this)
+      draw = &Browser.Canvas.fill(&1, paint, rule, alpha)
+
+      canvas_draw(this, fn c ->
+        if path, do: Browser.Canvas.with_path(c, path, draw), else: draw.(c)
+      end)
+    end)
+
+    def_fn(p, "stroke", fn this, args ->
+      path =
+        with {:obj, id} <- arg(args, 0), do: Process.get({:path2d, id}), else: (_ -> nil)
+
+      paint = canvas_paint(this, "strokeStyle")
+      alpha = canvas_alpha(this)
+      style = canvas_line_style(this)
+      draw = &Browser.Canvas.stroke(&1, paint, style, alpha)
+
+      canvas_draw(this, fn c ->
+        if path, do: Browser.Canvas.with_path(c, path, draw), else: draw.(c)
+      end)
+    end)
+
+    def_fn(p, "clip", fn this, args ->
+      {path, _rule} = canvas_fill_args(args)
+
+      canvas_state(this, fn c ->
+        if path,
+          do: Browser.Canvas.with_path(c, path, &Browser.Canvas.clip/1),
+          else: Browser.Canvas.clip(c)
+      end)
+    end)
+
+    def_fn(p, "isPointInPath", fn _, _ -> false end)
+    def_fn(p, "isPointInStroke", fn _, _ -> false end)
+
+    def_fn(p, "fillRect", fn this, args ->
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        paint = canvas_paint(this, "fillStyle")
+        alpha = canvas_alpha(this)
+        canvas_draw(this, &Browser.Canvas.fill_rect(&1, x, y, w, h, paint, alpha))
+      else
+        _ -> :undefined
+      end
     end)
 
     def_fn(p, "strokeRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
-      lw = this |> Interp.get("lineWidth") |> to_num_or_zero()
-
-      canvas_draw(
-        this,
-        &Browser.Canvas.stroke_rect(&1, x, y, w, h, lw, canvas_color(this, "strokeStyle"))
-      )
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        paint = canvas_paint(this, "strokeStyle")
+        alpha = canvas_alpha(this)
+        style = canvas_line_style(this)
+        canvas_draw(this, &Browser.Canvas.stroke_rect(&1, x, y, w, h, paint, style, alpha))
+      else
+        _ -> :undefined
+      end
     end)
 
     def_fn(p, "clearRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
-      canvas_draw(this, &Browser.Canvas.clear_rect(&1, x, y, w, h))
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        canvas_draw(this, &Browser.Canvas.clear_rect(&1, x, y, w, h))
+      else
+        _ -> :undefined
+      end
     end)
+
+    for {name, prop} <- [{"fillText", "fillStyle"}, {"strokeText", "strokeStyle"}] do
+      def_fn(p, name, fn this, args ->
+        with [x, y] <- canvas_nums(Enum.drop(args, 1), 2) do
+          style = canvas_text_style(this, prop)
+          canvas_draw(this, &Browser.Canvas.text(&1, to_str(arg(args, 0)), x, y, style))
+        else
+          _ -> :undefined
+        end
+      end)
+    end
+
+    def_fn(p, "measureText", fn this, args ->
+      text = to_str(arg(args, 0))
+      font = Browser.Canvas.parse_font(to_str(Interp.get(this, "font")))
+      w = Browser.Canvas.text_width(text, font)
+      s = font.size
+
+      new_object([
+        {"width", w},
+        {"actualBoundingBoxLeft", 0.0},
+        {"actualBoundingBoxRight", w},
+        {"actualBoundingBoxAscent", 0.72 * s},
+        {"actualBoundingBoxDescent", 0.2 * s},
+        {"fontBoundingBoxAscent", 0.8 * s},
+        {"fontBoundingBoxDescent", 0.2 * s},
+        {"emHeightAscent", 0.8 * s},
+        {"emHeightDescent", 0.2 * s},
+        {"alphabeticBaseline", 0.0}
+      ])
+    end)
+
+    def_fn(p, "save", fn this, _ ->
+      props = for name <- @canvas_props, do: {name, Interp.get(this, name)}
+      canvas_state(this, &Browser.Canvas.save(&1, props))
+    end)
+
+    def_fn(p, "restore", fn this, _ ->
+      canvas_state(this, fn c ->
+        {c, props} = Browser.Canvas.restore(c)
+        for {name, v} <- props || [], do: Interp.put(this, name, v)
+        c
+      end)
+    end)
+
+    def_fn(p, "scale", fn this, args ->
+      with [x, y] <- canvas_nums(args, 2),
+           do: canvas_state(this, &Browser.Canvas.scale(&1, x, y)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "translate", fn this, args ->
+      with [x, y] <- canvas_nums(args, 2),
+           do: canvas_state(this, &Browser.Canvas.translate(&1, x, y)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "rotate", fn this, args ->
+      with [a] <- canvas_nums(args, 1),
+           do: canvas_state(this, &Browser.Canvas.rotate(&1, a)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "transform", fn this, args ->
+      with m when m != nil <- matrix_args(args),
+           do: canvas_state(this, &Browser.Canvas.transform(&1, m)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "setTransform", fn this, args ->
+      with m when m != nil <-
+             if(args == [], do: {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}, else: matrix_args(args)),
+           do: canvas_state(this, &Browser.Canvas.set_transform(&1, m)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "resetTransform", fn this, _ ->
+      canvas_state(this, &Browser.Canvas.reset_transform/1)
+    end)
+
+    def_fn(p, "getTransform", fn this, _ ->
+      {a, b, c, d, e, f} =
+        case canvas_surface(Interp.get(this, "canvas")) do
+          nil -> {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}
+          surface -> Browser.Canvas.matrix(surface)
+        end
+
+      new_object([
+        {"a", a},
+        {"b", b},
+        {"c", c},
+        {"d", d},
+        {"e", e},
+        {"f", f},
+        {"m11", a},
+        {"m12", b},
+        {"m21", c},
+        {"m22", d},
+        {"m41", e},
+        {"m42", f},
+        {"is2D", true},
+        {"isIdentity", {a, b, c, d, e, f} == {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}}
+      ])
+    end)
+
+    def_fn(p, "setLineDash", fn this, args ->
+      segments =
+        case arg(args, 0) do
+          {:obj, _} = list -> Enum.map(array_list(list), &to_num/1)
+          _ -> []
+        end
+
+      # an odd count is repeated; a negative or non-finite length makes the call a no-op
+      if Enum.all?(segments, &(is_number(&1) and &1 >= 0)) do
+        segments = if rem(length(segments), 2) == 1, do: segments ++ segments, else: segments
+        put_hidden(this, "__dash", new_array(Enum.map(segments, &(&1 * 1.0))))
+      end
+
+      :undefined
+    end)
+
+    def_fn(p, "getLineDash", fn this, _ ->
+      case Interp.get(this, "__dash") do
+        {:obj, _} = list -> new_array(array_list(list))
+        _ -> new_array([])
+      end
+    end)
+
+    def_fn(p, "createLinearGradient", fn _this, args ->
+      case canvas_nums(args, 4) do
+        [x0, y0, x1, y1] -> new_gradient(%{kind: :linear, geom: {x0, y0, x1, y1}, stops: []})
+        nil -> throw_error("TypeError", "createLinearGradient: arguments must be finite numbers")
+      end
+    end)
+
+    def_fn(p, "createRadialGradient", fn _this, args ->
+      case canvas_nums(args, 6) do
+        [x0, y0, r0, x1, y1, r1] when r0 >= 0 and r1 >= 0 ->
+          new_gradient(%{kind: :radial, geom: {x0, y0, r0, x1, y1, r1}, stops: []})
+
+        nil ->
+          throw_error("TypeError", "createRadialGradient: arguments must be finite numbers")
+
+        _ ->
+          throw_error("IndexSizeError", "The radius provided is negative.")
+      end
+    end)
+
+    # a conic gradient is drawn as a colour: its first stop
+    def_fn(p, "createConicGradient", fn _this, _ ->
+      new_gradient(%{kind: :linear, geom: {0.0, 0.0, 1.0, 0.0}, stops: []})
+    end)
+
+    def_fn(p, "drawImage", fn this, args ->
+      source = arg(args, 0)
+
+      with {:obj, _} <- source,
+           %Browser.Canvas{} = src <- canvas_source(source),
+           [a, b | rest] <- canvas_nums(Enum.drop(args, 1), min(length(args) - 1, 8)) do
+        {sx, sy, sw, sh, dx, dy, dw, dh} =
+          case rest do
+            [] -> {0.0, 0.0, src.w * 1.0, src.h * 1.0, a, b, src.w * 1.0, src.h * 1.0}
+            [dw, dh] -> {0.0, 0.0, src.w * 1.0, src.h * 1.0, a, b, dw, dh}
+            [sw, sh, dx, dy, dw, dh] -> {a, b, sw, sh, dx, dy, dw, dh}
+            _ -> {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+          end
+
+        alpha = canvas_alpha(this)
+
+        canvas_draw(
+          this,
+          &Browser.Canvas.draw_canvas(&1, src, sx, sy, sw, sh, dx, dy, dw, dh, alpha)
+        )
+      else
+        _ -> :undefined
+      end
+    end)
+  end
+
+  # the pixels of an element used as an image source, if it is a canvas with a surface
+  defp canvas_source({:obj, id}) do
+    case deref(id) do
+      %{class: :host, host: {__MODULE__, nid}} when is_integer(nid) ->
+        if node(nid).tag == "canvas", do: Process.get({:canvas, nid})
+
+      _ ->
+        nil
+    end
+  end
+
+  defp new_gradient(data) do
+    grad = new_object([], Process.get(:canvas_grad_proto))
+    {:obj, id} = grad
+    Process.put({:canvas_grad, id}, data)
+    grad
+  end
+
+  defp install_canvas_gradient(p) do
+    def_fn(p, "addColorStop", fn this, args ->
+      {:obj, id} = this
+      offset = to_num(arg(args, 0))
+
+      unless is_number(offset) and offset >= 0 and offset <= 1,
+        do: throw_error("IndexSizeError", "The provided value is outside the range (0.0, 1.0).")
+
+      case Browser.Color.parse_alpha(to_str(arg(args, 1))) do
+        {r, g, b, a} ->
+          grad = Process.get({:canvas_grad, id})
+          # stops of the same offset keep the order they came in
+          stops = Enum.sort_by(grad.stops ++ [{offset * 1.0, {r, g, b, a}}], &elem(&1, 0))
+          Process.put({:canvas_grad, id}, %{grad | stops: stops})
+
+        _ ->
+          throw_error(
+            "SyntaxError",
+            "The value provided ('#{to_str(arg(args, 1))}') could not be parsed as a color."
+          )
+      end
+
+      :undefined
+    end)
+  end
+
+  # `new Path2D()`, `new Path2D(path)` or `new Path2D("M0 0 L10 10")`: a path kept apart from
+  # any canvas, to be passed to `fill`, `stroke` and `clip`
+  defp install_path2d(scope) do
+    proto = new_object([])
+
+    for name <- @path_methods do
+      def_fn(proto, name, fn this, args -> path2d_update(this, &path_call(&1, name, args)) end)
+    end
+
+    def_fn(proto, "addPath", fn this, args ->
+      other =
+        with {:obj, oid} <- arg(args, 0), do: Process.get({:path2d, oid}), else: (_ -> nil)
+
+      m =
+        case matrix_args([arg(args, 1)]) do
+          nil -> {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}
+          m -> m
+        end
+
+      if other, do: path2d_update(this, &Browser.Canvas.add_path(&1, other, m))
+      :undefined
+    end)
+
+    Process.put(:path2d_proto, proto)
+
+    ctor(scope, "Path2D", proto, fn _this, args ->
+      obj = new_object([], proto)
+      {:obj, id} = obj
+
+      path =
+        case arg(args, 0) do
+          :undefined ->
+            Browser.Canvas.new(1, 1)
+
+          {:obj, oid} = _other ->
+            Process.get({:path2d, oid}) || Browser.Canvas.new(1, 1)
+
+          d ->
+            Browser.Canvas.from_segments(Browser.Svg.PathData.parse(to_str(d)))
+        end
+
+      Process.put({:path2d, id}, path)
+      obj
+    end)
+  end
+
+  defp path2d_update({:obj, id}, fun) do
+    Process.put({:path2d, id}, fun.(Process.get({:path2d, id})))
+    :undefined
   end
 
   defp ctor(scope, name, proto, fun) do
@@ -5371,6 +6132,15 @@ defmodule Browser.JS.DOM do
     ctx_proto = new_object([])
     install_canvas_context(ctx_proto)
     Process.put(:canvas_ctx_proto, ctx_proto)
+    grad_proto = new_object([])
+    install_canvas_gradient(grad_proto)
+    Process.put(:canvas_grad_proto, grad_proto)
+
+    ctor(scope, "CanvasGradient", grad_proto, fn _, _ ->
+      throw_error("TypeError", "Illegal constructor")
+    end)
+
+    install_path2d(scope)
 
     ctor(scope, "CanvasRenderingContext2D", ctx_proto, fn _, _ ->
       throw_error("TypeError", "Illegal constructor")

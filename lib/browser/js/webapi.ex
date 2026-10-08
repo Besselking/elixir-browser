@@ -338,6 +338,36 @@ defmodule Browser.JS.WebAPI do
     IntersectionObserver.prototype.takeRecords = function () { return []; };
 
     // ── timing, idle, encoding ───────────────────────────────
+    // the Prioritized Task Scheduling API: tasks are timers, background ones a tick later
+    function TaskController(init) {
+      var c = new AbortController();
+      this.signal = c.signal;
+      this.signal.priority = (init && init.priority) || "user-visible";
+      Object.defineProperty(this, "_c", { value: c });
+    }
+    TaskController.prototype.abort = function (reason) { this._c.abort(reason); };
+    TaskController.prototype.setPriority = function (p) { this.signal.priority = p; };
+    def("TaskController", TaskController);
+    def("scheduler", {
+      postTask: function postTask(callback, options) {
+        options = options || {};
+        if (typeof callback !== "function") return Promise.reject(new TypeError("Failed to execute 'postTask' on 'Scheduler': The provided callback is no function."));
+        var signal = options.signal || null;
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) { reject(abortError(signal)); return; }
+          var priority = options.priority || (signal && signal.priority) || "user-visible";
+          var timer = null;
+          function onabort() { clearTimeout(timer); reject(abortError(signal)); }
+          if (signal) signal.addEventListener("abort", onabort);
+          timer = setTimeout(function () {
+            if (signal) signal.removeEventListener("abort", onabort);
+            try { resolve(callback()); } catch (e) { reject(e); }
+          }, (options.delay > 0 ? options.delay : 0) + (priority === "background" ? 1 : 0));
+        });
+      },
+      yield: function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+    });
+    if (typeof navigator === "object" && navigator && !navigator.scheduling) navigator.scheduling = { isInputPending: function () { return false; } };
     def("requestIdleCallback", function (cb) { return setTimeout(function () { cb({ didTimeout: false, timeRemaining: function () { return 10; } }); }, 1); });
     def("cancelIdleCallback", function (id) { clearTimeout(id); });
 
@@ -376,6 +406,17 @@ defmodule Browser.JS.WebAPI do
         get: function () { __load_idb(); var d = Object.getOwnPropertyDescriptor(g, n); return d && "value" in d ? d.value : undefined; },
         set: function (v) { Object.defineProperty(g, n, { value: v, writable: true, configurable: true }); } });
     });
+    // for messages between a page and its workers (Browser.JS.Workers): a value as text and back
+    def("__structuredEncode", function (v) { __load_idb(); return g.__idb_encode(v); });
+    def("__structuredDecode", function (s) { __load_idb(); return g.__idb_decode(s); });
+    // WebSocket is in priv/js/websocket.js, loaded on first use
+    Object.defineProperty(g, "WebSocket", { configurable: true, enumerable: false,
+      get: function () { __load_websocket(); var d = Object.getOwnPropertyDescriptor(g, "WebSocket"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "WebSocket", { value: v, writable: true, configurable: true }); } });
+    // Worker is in priv/js/worker.js, loaded on first use
+    Object.defineProperty(g, "Worker", { configurable: true, enumerable: false,
+      get: function () { __load_workers(); var d = Object.getOwnPropertyDescriptor(g, "Worker"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "Worker", { value: v, writable: true, configurable: true }); } });
     def("structuredClone", function structuredClone(v) {
       if (arguments.length === 0) throw new TypeError("structuredClone requires 1 argument.");
       __load_idb();
@@ -537,7 +578,7 @@ defmodule Browser.JS.WebAPI do
     });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
-    // a shadow root here is a fragment that is kept, but not drawn
+    // a shadow root here is a fragment; the page shows it in place of the host's children (see DOM.export)
     addTo(EP, "attachShadow", function (init) {
       var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
@@ -868,6 +909,7 @@ defmodule Browser.JS.WebAPI do
     }
     evClass("MessageEvent", ["data", "origin", "source", "lastEventId", "ports"]);
     evClass("ErrorEvent", ["message", "filename", "lineno", "colno", "error"]);
+    evClass("CloseEvent", ["wasClean", "code", "reason"]);
     evClass("PromiseRejectionEvent", ["promise", "reason"]);
     evClass("PopStateEvent", ["state"]);
     evClass("HashChangeEvent", ["oldURL", "newURL"]);
@@ -1044,15 +1086,20 @@ defmodule Browser.JS.WebAPI do
 
     // ── constructable style sheets (kept as text; adopting one does not restyle) ──
     function CSSStyleSheet(opts) { this.cssRules = []; this.disabled = false; this.media = opts && opts.media || ""; this.ownerNode = null; }
-    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); };
+    // a shadow root that adopts sheets shows them: the page is told their text whenever they change
+    function sheetText(sh) { return sh.disabled ? "" : sh.cssRules.map(function (r) { return r.cssText; }).join("\n"); }
+    function syncAdopted(root) { try { __set_adopted(root, (root.__adopted || []).map(sheetText)); } catch (e) {} }
+    function changed(sh) { if (sh.__owners) sh.__owners.forEach(syncAdopted); }
+    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); changed(this); };
     CSSStyleSheet.prototype.replace = function (text) { this.replaceSync(text); return Promise.resolve(this); };
     CSSStyleSheet.prototype.insertRule = function (rule, index) {
       var rules = parseRules(String(rule));
       index = index === undefined ? 0 : index;
       this.cssRules.splice(index, 0, rules[0] || { cssText: String(rule) });
+      changed(this);
       return index;
     };
-    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); };
+    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); changed(this); };
     CSSStyleSheet.prototype.addRule = function (sel, body, index) { return this.insertRule(sel + " {" + body + "}", index === undefined ? this.cssRules.length : index); };
     CSSStyleSheet.prototype.removeRule = CSSStyleSheet.prototype.deleteRule;
     Object.defineProperty(CSSStyleSheet.prototype, "rules", { get: function () { return this.cssRules; } });
@@ -1071,6 +1118,17 @@ defmodule Browser.JS.WebAPI do
     g.CSSStyleSheet = CSSStyleSheet;
     var adopted = [];
     Object.defineProperty(document, "adoptedStyleSheets", { get: function () { return adopted; }, set: function (v) { adopted = v; }, configurable: true });
+    Object.defineProperty(Object.getPrototypeOf(document.createDocumentFragment()), "adoptedStyleSheets", {
+      get: function () { return this.__adopted || (this.__adopted = []); },
+      set: function (v) {
+        var list = Array.prototype.slice.call(v || []);
+        this.__adopted = list;
+        var me = this;
+        list.forEach(function (sh) { if (sh && sh.cssRules) { var o = sh.__owners || (sh.__owners = []); if (o.indexOf(me) < 0) o.push(me); } });
+        syncAdopted(this);
+      },
+      configurable: true
+    });
 
     // V8's stack trace API, which libraries call when they define an error class
     if (typeof Error.captureStackTrace !== "function") {
@@ -1211,6 +1269,8 @@ defmodule Browser.JS.WebAPI do
     var blobUrls = {}, blobSeq = 0;
     URL.createObjectURL = function (b) { var u = "blob:" + curLoc().origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
     URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
+    // the text of a blob a worker is started from
+    Object.defineProperty(URL, "__blobText", { value: function (u) { var b = blobUrls[u]; return b === undefined ? undefined : b._text; }, configurable: true });
 
     function FormData(form) {
       this._e = [];

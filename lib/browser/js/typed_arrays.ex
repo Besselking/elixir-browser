@@ -213,6 +213,13 @@ defmodule Browser.JS.TypedArrays do
     buf
   end
 
+  @doc "A new ArrayBuffer holding `bytes`."
+  def make_buffer(bytes), do: new_buffer(bytes)
+
+  @doc "The bytes of an ArrayBuffer, or nil for any other value."
+  def buffer_bytes({:obj, id} = buf), do: if(ab?(buf), do: deref(id).bytes)
+  def buffer_bytes(_), do: nil
+
   @doc "A new ArrayBuffer holding the bytes written as hex digits in `hex` (an even number of digits)."
   def buffer_from_hex(hex), do: new_buffer(Base.decode16!(hex, case: :mixed))
 

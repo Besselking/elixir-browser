@@ -106,6 +106,12 @@ defmodule Browser.JS.Runtime do
   @doc "The browser followed a link to a fragment of this page, now at `url`."
   def fragment(pid, url), do: call(pid, {:fragment, url})
 
+  @doc """
+  A click on the link `href` over the element numbered `nid`: `%{frame: true}` when a frame
+  took it (it loads the address itself), else the session follows the link.
+  """
+  def follow_link(pid, nid, href), do: call(pid, {:follow_link, nid, href})
+
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
@@ -138,7 +144,9 @@ defmodule Browser.JS.Runtime do
 
   # ── the process ────────────────────────────────────────────
 
-  defp boot(raw, info) do
+  # (the process of a worker boots the same way, with an empty document)
+  @doc false
+  def boot(raw, info) do
     Interp.init(@steps)
     Browser.JS.GC.enable()
     scope = Builtins.install()
@@ -149,6 +157,8 @@ defmodule Browser.JS.Runtime do
     Browser.JS.Editing.install(scope)
     Browser.JS.WebAssembly.install(scope)
     Browser.JS.IndexedDB.install(scope)
+    Browser.JS.Workers.install(scope)
+    Browser.JS.WebSockets.install(scope)
     Modules.reset()
     Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
@@ -288,6 +298,26 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         guard(fn -> DOM.storage_changed(key, old, new) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:worker, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.Workers.deliver(id, event) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:ws, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.WebSockets.deliver(id, event) end, :ok)
         Browser.JS.Promise.run_microtasks()
         reply = finish(%{})
 
@@ -493,6 +523,12 @@ defmodule Browser.JS.Runtime do
     finish(%{moved: moved})
   end
 
+  defp handle({:follow_link, nid, href}) do
+    frame = guard(fn -> DOM.follow_link(nid, href) end, :page) == :frame
+    Browser.JS.Promise.run_microtasks()
+    finish(%{frame: frame})
+  end
+
   defp handle({:fragment, url}) do
     guard(fn -> DOM.fragment_navigation(url) end, :ok)
     Browser.JS.Promise.run_microtasks()
@@ -597,11 +633,12 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp describe(v) when is_binary(v), do: v
+  @doc false
+  def describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
+  def describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
 
-  defp describe(v), do: Builtins.inspect_js(v, 0, [])
+  def describe(v), do: Builtins.inspect_js(v, 0, [])
 
   # every pending timer, with the database messages that come between them (a message is
   # heard in the task after the one that caused it, as in the loop)
@@ -927,7 +964,8 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp loader do
+  @doc false
+  def loader do
     {fn spec, base ->
        try do
          {:ok, resolve_specifier(spec, base)}

@@ -281,4 +281,58 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["red block 0px static 0px 0 inline"]
   end
+
+  test "scheduler.postTask runs tasks by delay and priority, and can be aborted" do
+    {logs, errors} =
+      run(~S"""
+      const log = (...a) => console.log(...a);
+      scheduler.postTask(() => log("bg"), { priority: "background" });
+      scheduler.postTask(() => log("later"), { delay: 20 });
+      scheduler.postTask(() => 7).then((v) => log("value", v));
+      scheduler.postTask(() => { throw new Error("x"); }).catch((e) => log("rejected", e.message));
+      const c = new TaskController({ priority: "background" });
+      scheduler.postTask(() => log("never"), { signal: c.signal }).catch((e) => log("aborted", e.name));
+      c.abort();
+      scheduler.yield().then(() => log("yielded"));
+      log(c.signal.priority, typeof navigator.scheduling.isInputPending());
+      """)
+
+    assert errors == []
+
+    assert logs == [
+             "background boolean",
+             "aborted AbortError",
+             "value 7",
+             "rejected x",
+             "yielded",
+             "bg",
+             "later"
+           ]
+  end
+
+  test "canvas width and height reflect the attributes, 300 by 150 without them" do
+    {logs, errors} =
+      run(~S"""
+      const c = document.createElement("canvas");
+      console.log(c.width, c.height);
+      c.width = 500; c.height = 40.7;
+      console.log(c.width, c.height, c.getAttribute("width"), c.getAttribute("height"));
+      """)
+
+    assert errors == []
+    assert logs == ["300 150", "500 40 500 40"]
+  end
+
+  test "console.assert reports the names of the methods it was called under" do
+    {_logs, errors} =
+      run(~S"""
+      class Chart { render() { this.check(); } check() { console.assert(false, "bad"); } }
+      new Chart().render();
+      """)
+
+    assert [msg] = errors
+    assert msg =~ "Assertion failed: bad"
+    assert msg =~ "at check"
+    assert msg =~ "at render"
+  end
 end

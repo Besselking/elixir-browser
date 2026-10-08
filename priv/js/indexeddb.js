@@ -396,6 +396,9 @@
   function clone(v) { return dec(enc(v)); }
   // `structuredClone` of the web API prelude calls this one
   hide(g, "__structuredClone", function (v) { return clone(v); });
+  // the same form as a text, for a message from one worker to another (`Browser.JS.Workers`)
+  hide(g, "__idb_encode", function (v) { return JSON.stringify(enc(v)); });
+  hide(g, "__idb_decode", function (s) { return dec(JSON.parse(s)); });
 
   // ── keys ──────────────────────────────────────────────────
 
