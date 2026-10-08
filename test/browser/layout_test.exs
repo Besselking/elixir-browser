@@ -6222,4 +6222,48 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1.type == :rect and &1.y > hd(ys)))
     end
   end
+
+  describe "display: run-in and anonymous table rows" do
+    defp run_in_items(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      for %{type: :text} = it <- items, do: {it.text, it.x, it.y}
+    end
+
+    test "a run-in becomes the start of the block after it" do
+      [{"head", x1, y1}, {"body", x2, y2}] =
+        run_in_items(~s(<div style="display:run-in">head</div><div>body</div>))
+
+      assert y1 == y2
+      assert x2 > x1
+    end
+
+    test "floats, positioned boxes and white space between do not stop a run-in" do
+      [{"head", _, y1}, {"body", _, y2}] =
+        run_in_items(
+          ~s(<div style="display:run-in">head</div> <div style="position:absolute"></div><div style="float:right"></div><div>body</div>)
+        )
+
+      assert y1 == y2
+    end
+
+    test "text between, a following run-in that holds a block, or nothing after keep it a block" do
+      [{"head", _, y1}, {"text", _, y2} | _] =
+        run_in_items(~s(<div style="display:run-in">head</div>text<div>body</div>))
+
+      assert y2 > y1
+
+      [{"head", _, y1}, {"last", _, y2}] =
+        run_in_items(
+          ~s(<div style="display:run-in">head</div><div style="display:run-in">last</div>)
+        )
+
+      assert y2 > y1
+    end
+
+    test "text directly in a table sits in an anonymous row and cell" do
+      items = run_in_items(~s(<div style="display:table">cell text</div>))
+      assert Enum.map(items, &elem(&1, 0)) == ["cell", "text"]
+    end
+  end
 end

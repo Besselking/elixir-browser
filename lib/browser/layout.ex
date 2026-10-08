@@ -536,8 +536,116 @@ defmodule Browser.Layout do
   # ops: {:word, text, style[, :pre]} {:space, style} {:marker, text, style}
   #      {:flush} {:gap, px} {:pad, px} {:hr} {:box_start, ref, color, left} {:box_end, ref}
 
+  # `display: run-in`: a run-in box becomes the first inline box of the block that follows it
+  # (floats, positioned boxes and white space between them do not count); without such a block,
+  # or when it holds blocks itself, it is a block of its own
+  defp run_ins(nodes, style) do
+    if Enum.any?(nodes, &run_in?/1) do
+      keep = style.ws not in [:normal, :nowrap]
+
+      # the block each run-in runs into, by position: %{run-in index => block index}
+      into =
+        for {node, i} <- Enum.with_index(nodes),
+            run_in?(node),
+            not run_in_blocks?(node),
+            {between, _target, _rest} <- [run_in_target(Enum.drop(nodes, i + 1), [], keep)],
+            into: %{},
+            do: {i, i + length(between) + 1}
+
+      runners = Map.new(into, fn {i, j} -> {j, Enum.at(nodes, i)} end)
+
+      nodes
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {node, i} ->
+        cond do
+          Map.has_key?(into, i) ->
+            []
+
+          run_in?(node) ->
+            [set_display(node, "block")]
+
+          runner = runners[i] ->
+            # (`clear` on a run-in applies to the block it runs into)
+            node =
+              case computed(elem(runner, 2)) do
+                %{"clear" => clear} -> set_prop(node, "clear", clear)
+                _ -> node
+              end
+
+            {:element, tag, attrs, kids} = node
+            [{:element, tag, attrs, [set_display(runner, "inline") | kids]}]
+
+          true ->
+            [node]
+        end
+      end)
+    else
+      nodes
+    end
+  end
+
+  # the first thing after a run-in that is not skipped: {skipped nodes, it, the rest}
+  defp run_in_target(nodes, between, keep)
+
+  defp run_in_target([{:text, t} = node | rest], between, keep) when is_binary(t) do
+    if String.trim(t) == "" and not keep,
+      do: run_in_target(rest, [node | between], keep),
+      else: nil
+  end
+
+  defp run_in_target([{:element, tag, attrs, _} = node | rest], between, keep) do
+    c = computed(attrs)
+
+    cond do
+      tag in @skip or c["display"] == "none" ->
+        run_in_target(rest, [node | between], keep)
+
+      c["position"] in ["absolute", "fixed"] or float_side(c) != nil ->
+        run_in_target(rest, [node | between], keep)
+
+      c["display"] in ["block", "flow-root", "list-item"] or
+          (c["display"] == nil and legacy_kind(tag) == :block) ->
+        {Enum.reverse(between), node, rest}
+
+      true ->
+        nil
+    end
+  end
+
+  defp run_in_target(_nodes, _between, _keep), do: nil
+
+  defp run_in?({:element, _tag, attrs, _}) do
+    c = computed(attrs)
+
+    c["display"] == "run-in" and c["position"] not in ["absolute", "fixed"] and
+      float_side(c) == nil
+  end
+
+  defp run_in?(_), do: false
+
+  defp run_in_blocks?({:element, _, _, kids}) do
+    Enum.any?(kids, fn
+      {:element, tag, attrs, _} ->
+        kind(tag, computed(attrs)) in [:block, :list_item, :table, :flex, :grid]
+
+      _ ->
+        false
+    end)
+  end
+
+  defp set_display(node, display), do: set_prop(node, "display", display)
+
+  defp set_prop({:element, tag, attrs, kids}, prop, value) do
+    attrs =
+      List.update_at(attrs, Enum.find_index(attrs, &match?({"@computed", _}, &1)), fn {k, c} ->
+        {k, Map.put(c, prop, value)}
+      end)
+
+    {:element, tag, attrs, kids}
+  end
+
   defp walk(nodes, style, acc) when is_list(nodes),
-    do: nodes |> wrap_table_parts() |> Enum.reduce(acc, &walk(&1, style, &2))
+    do: nodes |> run_ins(style) |> wrap_table_parts() |> Enum.reduce(acc, &walk(&1, style, &2))
 
   # a soft hyphen (U+00AD) is invisible unless a line breaks at it, and `hyphens: none` takes
   # that away: it is dropped from the laid-out text (the DOM text keeps it)
@@ -4693,7 +4801,8 @@ defmodule Browser.Layout do
 
     # While a table cell is measured at a width of 1, shrink-to-fit is never narrower than the
     # narrowest the content can be: the inline-block still holds its unbreakable text
-    if wanted <= avail or Process.get(:layout_intrinsic) != true,
+    # (a table is never narrower than its narrowest content)
+    if wanted <= avail or (Process.get(:layout_intrinsic) != true and not Map.get(spec, :table?)),
       do: min(avail, wanted),
       else: min(wanted, max(avail, min_extent(st, sub, key)))
   end
@@ -7367,6 +7476,8 @@ defmodule Browser.Layout do
 
   # the caption and the rows of a table, in display order: header rows, body rows, footer rows
   defp table_model(kids, style) do
+    kids = anonymous_rows(kids)
+
     parts =
       for {:element, tag, attrs, ekids} = el <- kids, tag not in @skip do
         c = computed(attrs)
@@ -7397,6 +7508,28 @@ defmodule Browser.Layout do
       rows: rows_of.(:head) ++ rows_of.(:body) ++ rows_of.(:foot),
       cols: table_columns_bg(parts)
     }
+  end
+
+  # content of a table that is not a row, group, caption or column sits in an anonymous row
+  defp anonymous_rows(kids) do
+    neutral? = fn
+      {:element, tag, _, _} when tag in @skip -> true
+      {:text, t} -> String.trim(t) == ""
+      {:element, tag, attrs, _} -> kind_of_table_part(tag, computed(attrs)) != :other
+      _ -> true
+    end
+
+    if Enum.all?(kids, neutral?) do
+      kids
+    else
+      kids
+      |> Enum.chunk_by(neutral?)
+      |> Enum.flat_map(fn chunk ->
+        if neutral?.(hd(chunk)),
+          do: chunk,
+          else: [{:element, "tr", [{"@computed", %{"display" => "table-row"}}], chunk}]
+      end)
+    end
   end
 
   # the background of each column, from `col` and `colgroup` (a group's under its columns')
