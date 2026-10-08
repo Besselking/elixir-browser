@@ -1121,7 +1121,16 @@ defmodule Browser.Layout do
         if replaced? do
           el |> image_sub(parent_style) |> Enum.reverse()
         else
-          el |> walk_element(parent_style, [], :abs_inner) |> Enum.reverse()
+          # a `calc()` with a percentage in it is of this box's width, when that is given
+          walk = fn -> el |> walk_element(parent_style, [], :abs_inner) |> Enum.reverse() end
+
+          case dim(c["width"]) do
+            w when is_number(w) or (is_tuple(w) and elem(w, 0) == :pct) ->
+              with_cw(child_width(c, box), walk)
+
+            _ ->
+              walk.()
+          end
         end
 
       {_, br, _, bl} = box.bw

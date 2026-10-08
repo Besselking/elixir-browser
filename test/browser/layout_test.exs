@@ -4493,6 +4493,18 @@ defmodule Browser.LayoutTest do
     assert green.w > 4
   end
 
+  test "a calc() percentage in an absolute box's child is of the box's own width" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:absolute;width:300px;height:100px"><div style="float:left;width:calc(50% - 10px);height:10px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.w == 140
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
