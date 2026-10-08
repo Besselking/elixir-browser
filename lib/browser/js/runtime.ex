@@ -471,7 +471,10 @@ defmodule Browser.JS.Runtime do
         do: log(:error, "Uncaught (in promise) " <> describe(reason))
 
     Process.put(:js_unhandled, [])
-    dirty = DOM.dirty?() or Map.get(extra, :force_raw, false)
+    # (a frame's document is part of the tree the page shows)
+    dirty =
+      DOM.dirty?() or MapSet.size(DOM.changed_frames()) > 0 or Map.get(extra, :force_raw, false)
+
     raw = if dirty, do: DOM.to_raw()
     if raw, do: DOM.sync_cids(raw)
     DOM.clean()

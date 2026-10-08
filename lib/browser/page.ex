@@ -29,6 +29,10 @@ defmodule Browser.Page do
     viewport_units: false,
     svg_defs: %{},
     fixed_width: MapSet.new(),
+    # the stylesheets the rules came from (`Browser.Style.scoped_refs/1`) and what each one
+    # parsed to: a tree that kept its sheets keeps its rules, a script's new sheet is added
+    sheet_refs: [],
+    sheet_cache: %{},
     # the cascade for the window sizes seen so far, by media key: resizing back is free
     style_cache: %{},
     # what the cascade worked out per element (`Browser.Style.prune/3`), for the media key it
@@ -111,14 +115,8 @@ defmodule Browser.Page do
     base = base_href(raw, url)
     {raw, image_urls} = Images.index(raw, base)
 
-    author =
-      raw
-      |> Style.sheet_refs()
-      |> cap_links()
-      |> fetch_sheets(base)
-      |> Enum.map(fn {css, base} -> {:author, css, base} end)
-
-    rules = Style.parse_sheets([{:ua, Style.ua_css()} | author])
+    refs = raw |> Style.scoped_refs() |> cap_links()
+    {rules, sheet_cache} = sheet_rules(refs, base, %{})
     queries = Style.media_queries(rules)
 
     restyle(
@@ -129,6 +127,8 @@ defmodule Browser.Page do
         raw: raw,
         rules: rules,
         queries: queries,
+        sheet_refs: refs,
+        sheet_cache: sheet_cache,
         forms: forms,
         image_urls: image_urls,
         viewport_units: viewport_units?(rules, raw)
@@ -362,21 +362,85 @@ defmodule Browser.Page do
     {raw, image_urls} = Images.index(raw, base)
 
     restyle(
-      %{
-        page
-        | raw: raw,
-          base: base,
-          title: Layout.title(raw),
-          forms: forms,
-          image_urls: image_urls,
-          form_state: %{},
-          key: nil,
-          pruned: nil,
-          nodes: nil,
-          style_cache: %{}
-      },
+      refresh_sheets(
+        %{
+          page
+          | raw: raw,
+            base: base,
+            title: Layout.title(raw),
+            forms: forms,
+            image_urls: image_urls,
+            form_state: %{},
+            key: nil,
+            pruned: nil,
+            nodes: nil,
+            style_cache: %{}
+        },
+        raw,
+        base
+      ),
       env
     )
+  end
+
+  # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
+  # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
+  defp refresh_sheets(page, raw, base) do
+    refs = raw |> Style.scoped_refs() |> cap_links()
+
+    if refs == page.sheet_refs do
+      page
+    else
+      {rules, cache} = sheet_rules(refs, base, page.sheet_cache)
+
+      %{
+        page
+        | rules: rules,
+          queries: Style.media_queries(rules),
+          sheet_refs: refs,
+          sheet_cache: cache,
+          viewport_units: viewport_units?(rules, raw),
+          memo: nil
+      }
+    end
+  end
+
+  # the rules of `refs` (`{ref, scope, base}`, in document order), the user agent's first;
+  # `cache` has what earlier calls parsed
+  defp sheet_rules(refs, base, cache) do
+    cache =
+      Map.put_new_lazy(cache, :ua, fn -> Style.parse_sheets([{:ua, Style.ua_css()}]) end)
+
+    missing = Enum.reject(refs, &Map.has_key?(cache, &1))
+
+    # (the prefetch results belong to this process)
+    jobs =
+      Enum.map(missing, fn {ref, scope, from} = key ->
+        at = from || base
+        {key, if(scope == nil, do: prefetched(ref, at), else: ref), at}
+      end)
+
+    parsed =
+      jobs
+      |> Task.async_stream(
+        fn {key, ref, at} ->
+          {_, scope, _} = key
+          sheets = ref |> sheet(at) |> with_imports(0)
+          {key, Style.parse_sheets(for {css, from} <- sheets, do: {:author, css, from, scope})}
+        end,
+        max_concurrency: 8,
+        timeout: @sheet_timeout,
+        on_timeout: :kill_task,
+        ordered: true
+      )
+      |> Enum.zip(jobs)
+      |> Enum.reduce(cache, fn
+        {{:ok, {key, rules}}, _}, cache -> Map.put(cache, key, rules)
+        {_, {key, _, _}}, cache -> Map.put(cache, key, [])
+      end)
+
+    rules = Enum.flat_map([:ua | refs], &Map.get(parsed, &1, []))
+    {rules, Map.take(parsed, [:ua | refs])}
   end
 
   @doc """
@@ -396,31 +460,18 @@ defmodule Browser.Page do
   defp cap_links(refs) do
     {kept, _} =
       Enum.flat_map_reduce(refs, MapSet.new(), fn
-        {:link, href} = ref, seen ->
-          if MapSet.member?(seen, href) or MapSet.size(seen) >= @max_sheets,
+        {{:link, href}, scope, from} = ref, seen ->
+          key = {href, scope, from}
+
+          if MapSet.member?(seen, key) or MapSet.size(seen) >= @max_sheets,
             do: {[], seen},
-            else: {[ref], MapSet.put(seen, href)}
+            else: {[ref], MapSet.put(seen, key)}
 
         ref, seen ->
           {[ref], seen}
       end)
 
     kept
-  end
-
-  defp fetch_sheets(refs, base) do
-    refs
-    |> Enum.map(&prefetched(&1, base))
-    |> Task.async_stream(&(&1 |> sheet(base) |> with_imports(0)),
-      max_concurrency: 8,
-      timeout: @sheet_timeout,
-      on_timeout: :kill_task,
-      ordered: true
-    )
-    |> Enum.flat_map(fn
-      {:ok, sheets} when is_list(sheets) -> sheets
-      _ -> []
-    end)
   end
 
   @max_import_depth 4

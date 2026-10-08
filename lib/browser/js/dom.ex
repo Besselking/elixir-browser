@@ -585,9 +585,31 @@ defmodule Browser.JS.DOM do
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
 
-        {:element, n.tag, attrs, export_kids(n, inner)}
+        {:element, n.tag, attrs, export_kids(n, inner)} |> with_frame(nid)
     end
   end
+
+  # An `<iframe>` that holds a document takes the content of that document as its children, marked
+  # with the frame's number and address: the frame's sheets apply inside it only, and its relative
+  # addresses resolve against its own.
+  defp with_frame({:element, "iframe", attrs, _} = el, nid) do
+    case Map.get(st().frames, nid) do
+      nil ->
+        el
+
+      doc ->
+        url = get_in(st().realms, [doc, :fields, :url])
+        kids = Enum.map(node(doc).kids, &export/1)
+
+        marks =
+          [{"data-b-frame", Integer.to_string(doc)}] ++
+            if(is_binary(url), do: [{"data-b-base", url}], else: [])
+
+        {:element, "iframe", attrs ++ marks, kids}
+    end
+  end
+
+  defp with_frame(el, _nid), do: el
 
   # the host the children of `n` are in: `n` itself when it makes them editable, else the host
   # `n` is in, unless `contenteditable=false` ends it
@@ -4497,6 +4519,30 @@ defmodule Browser.JS.DOM do
   # `document.write`: what is written goes in after the running script (after what an earlier
   # write of the same script put there), or at the end of the body when nothing is running
   defp write_html(html) do
+    case Process.get({:dom_open, st().doc}) do
+      nil -> write_into_page(html)
+      buf -> rewrite_document(buf <> html)
+    end
+
+    :undefined
+  end
+
+  # after `document.open()` what is written is the new content of the document
+  defp rewrite_document(buf) do
+    doc = st().doc
+    Process.put({:dom_open, doc}, buf)
+
+    kids =
+      buf
+      |> Browser.HTML.parse_document()
+      |> Enum.map(&build(&1, doc))
+
+    for k <- node(doc).kids, do: update_node(k, &%{&1 | parent: nil})
+    update_node(doc, &%{&1 | kids: []})
+    Enum.each(kids, &insert(doc, &1, nil))
+  end
+
+  defp write_into_page(html) do
     ids = parse_fragment(html)
     s = st()
 
@@ -4515,7 +4561,6 @@ defmodule Browser.JS.DOM do
     end
 
     if ids != [], do: put_st(%{st() | write_after: List.last(ids)})
-    :undefined
   end
 
   defp install_document(p) do
@@ -4526,9 +4571,16 @@ defmodule Browser.JS.DOM do
       end)
     end
 
-    for name <- ~w(open close) do
-      def_fn(p, name, fn _this, _ -> :undefined end)
-    end
+    def_fn(p, "open", fn _this, _ ->
+      # (a document that is still being parsed keeps what it has)
+      if st().current_script == nil, do: rewrite_document("")
+      :undefined
+    end)
+
+    def_fn(p, "close", fn _this, _ ->
+      Process.delete({:dom_open, st().doc})
+      :undefined
+    end)
 
     def_fn(p, "getElementById", fn _this, args ->
       id = to_str(arg(args, 0))
