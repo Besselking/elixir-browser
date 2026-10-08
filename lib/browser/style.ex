@@ -91,6 +91,11 @@ defmodule Browser.Style do
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
   html, legend, main, menu, nav, ol, p, pre, section, summary, ul { display: block }
+  dialog { position: absolute; inset-inline: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 1em; background-color: #ffffff; color: #000000 }
+  dialog:modal { position: fixed; inset-block: 0; z-index: 2147483647; overflow: auto;
+    max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em) }
+  ::backdrop { display: block; position: fixed; inset: 0; z-index: 2147483646; background-color: rgba(0, 0, 0, 0.1) }
   table { display: table; border-spacing: 2px; box-sizing: border-box }
   caption { display: table-caption; text-align: center }
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }

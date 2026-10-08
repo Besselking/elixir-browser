@@ -6,7 +6,7 @@ defmodule Browser.CSS do
   `|=`, `^=`, `$=`, `*=`, `i` flag), the descendant/child/next-sibling/
   subsequent-sibling combinators, and these pseudo-classes: `:root`, `:empty`,
   `:first-child`, `:last-child`, `:only-child`, `:first-of-type`, `:nth-child()`,
-  `:nth-last-child()`, `:nth-of-type()`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
+  `:nth-last-child()`, `:nth-of-type()`, `:modal`, `:open`, `::backdrop`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
   `:not()`/`:is()`/`:where()` over lists of compound selectors. State-dependent
   pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
   `:not(:focus)` true.
@@ -477,7 +477,12 @@ defmodule Browser.CSS do
 
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
-    case Regex.run(~r/\A(.*?)(?:::(before|after|marker|placeholder)|:(before|after))\z/su, str) do
+    case Regex.run(
+           ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su,
+           str
+         ) do
+      # a backdrop is a box of its own (see `Browser.Modal`) that only these rules match
+      [_, head, "backdrop"] -> {head_or_any(head) <> ":mb-backdrop", nil}
       [_, head, which] -> {head_or_any(head), String.to_atom(which)}
       [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
       nil -> {str, nil}
@@ -678,7 +683,7 @@ defmodule Browser.CSS do
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -914,7 +919,9 @@ defmodule Browser.CSS do
   defp match_rel(:subsequent, rest, %{prev: prev}), do: Enum.any?(prev, &match_parts(rest, &1))
 
   defp match_compound(c, ctx) do
-    (c.tag in [nil, :any] or c.tag == ctx.tag) and
+    # the backdrop of a dialog is only styled by its own rules, not by those for the dialog
+    (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
+      (c.tag in [nil, :any] or c.tag == ctx.tag) and
       (c.id == nil or c.id == ctx.id) and
       Enum.all?(c.classes, &(&1 in ctx.classes)) and
       Enum.all?(c.attrs, &attr_match?(&1, ctx.attrs)) and
@@ -961,6 +968,12 @@ defmodule Browser.CSS do
 
   defp pseudo?(link, ctx) when link in [:link, :any_link],
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
+
+  defp pseudo?(:modal, ctx), do: List.keymember?(ctx.attrs, "@modal", 0)
+  defp pseudo?(:mb_backdrop, ctx), do: List.keymember?(ctx.attrs, "@backdrop", 0)
+
+  defp pseudo?(:open, ctx),
+    do: ctx.tag in ["dialog", "details"] and List.keymember?(ctx.attrs, "open", 0)
 
   defp pseudo?(:disabled, ctx), do: List.keymember?(ctx.attrs, "disabled", 0)
 

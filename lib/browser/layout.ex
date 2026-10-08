@@ -1049,6 +1049,8 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        # `width: fit-content` between two insets shrinks to the content, not stretches
+        fit: c["width"] in [:fit, :minc, :maxc],
         # an inline-level box is where it would be on a line: beside the floats
         inline: kind(tag, c) in [:inline, :inline_block],
         align: parent_style.align,
@@ -4844,7 +4846,7 @@ defmodule Browser.Layout do
               do: @unbounded,
               else: avail
 
-          if left && right && !spec.replaced do
+          if left && right && !spec.replaced && !Map.get(spec, :fit, false) do
             avail
           else
             min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)))
