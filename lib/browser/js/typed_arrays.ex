@@ -704,6 +704,9 @@ defmodule Browser.JS.TypedArrays do
 
         if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
 
+        # the prototype of the new target is read before the memory is allocated
+        Interp.late_proto()
+
         if max && max > 1_000_000_000_000,
           do: throw_error("RangeError", "Array buffer allocation failed")
 
@@ -964,6 +967,9 @@ defmodule Browser.JS.TypedArrays do
           end
 
         if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+
+        # the prototype of the new target is read before the memory is allocated
+        Interp.late_proto()
 
         if max && max > 1_000_000_000_000,
           do: throw_error("RangeError", "Array buffer allocation failed")
@@ -1440,6 +1446,14 @@ defmodule Browser.JS.TypedArrays do
           unless match?({:obj, _}, this),
             do: throw_error("TypeError", "Constructor #{name} requires 'new'")
 
+          # a length argument is checked before the prototype of the new target is read
+          case arg(args, 0) do
+            {:obj, _} -> :ok
+            :undefined -> :ok
+            first -> to_index(first)
+          end
+
+          Interp.late_proto()
           build(kind, args)
         end)
 
@@ -2250,20 +2264,34 @@ defmodule Browser.JS.TypedArrays do
 
         if off < 0, do: throw_error("RangeError", "Start offset #{off} is outside the bounds")
 
-        if detached?(buffer_id(buf)),
-          do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
+        check = fn ->
+          if detached?(buffer_id(buf)),
+            do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
 
-        total = byte_size(bytes_of(buf))
+          total = byte_size(bytes_of(buf))
 
-        len =
-          cond do
-            arg(args, 2) != :undefined -> to_index(arg(args, 2))
-            resizable?(buffer_id(buf)) -> :auto
-            true -> total - off
-          end
+          if off > total,
+            do:
+              throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
 
-        if off < 0 or off > total or (len != :auto and (len < 0 or off + len > total)),
-          do: throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
+          len =
+            cond do
+              arg(args, 2) != :undefined -> to_index(arg(args, 2))
+              resizable?(buffer_id(buf)) -> :auto
+              true -> total - off
+            end
+
+          if len != :auto and (len < 0 or off + len > total),
+            do:
+              throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
+
+          len
+        end
+
+        check.()
+        # reading the prototype can run code that detaches or resizes the buffer
+        Interp.late_proto()
+        len = check.()
 
         new_host(__MODULE__, {:dv, buffer_id(buf), off, len}, p)
       end)

@@ -1059,6 +1059,17 @@ defmodule Browser.JSTest do
              """) == "true,true,true,3"
     end
 
+    test "constructors check arguments before reading new.target.prototype" do
+      assert js("""
+             var nt = Object.defineProperty(function() {}.bind(null), 'prototype', {get() { throw new Error('proto') }});
+             var r = [];
+             try { Reflect.construct(Promise, [], nt) } catch (e) { r.push(e.constructor === TypeError) }
+             try { Reflect.construct(ArrayBuffer, [10, {maxByteLength: 0}], nt) } catch (e) { r.push(e.constructor === RangeError) }
+             try { Reflect.construct(ArrayBuffer, [1], nt) } catch (e) { r.push(e.message) }
+             r.join()
+             """) == "true,true,proto"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

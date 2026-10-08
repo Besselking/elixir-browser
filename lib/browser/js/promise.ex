@@ -229,6 +229,7 @@ defmodule Browser.JS.Promise do
         unless function?(executor),
           do: throw_error("TypeError", "Promise resolver #{to_str(executor)} is not a function")
 
+        Interp.late_proto()
         promise = new()
         {res, rej} = once_pair(promise)
 
