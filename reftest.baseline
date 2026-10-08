@@ -803,6 +803,8 @@ css/CSS2/box-display/block-in-inline-vertical-margins-on-span-ignored.html
 css/CSS2/box-display/block-in-inline-with-padded-parent.html
 css/CSS2/box-display/block-in-inline-zero-height-margin-collapse.html
 css/CSS2/box-display/block-in-inlines-in-different-spans-margin-collapse.html
+css/CSS2/box-display/box-generation-001.xht
+css/CSS2/box-display/box-generation-002.xht
 css/CSS2/box-display/containing-block-001.xht
 css/CSS2/box-display/containing-block-003.xht
 css/CSS2/box-display/containing-block-004.xht
@@ -827,6 +829,8 @@ css/CSS2/box-display/display-002.xht
 css/CSS2/box-display/display-005.xht
 css/CSS2/box-display/display-007.xht
 css/CSS2/box-display/display-011.xht
+css/CSS2/box-display/display-012.xht
+css/CSS2/box-display/display-013.xht
 css/CSS2/box-display/display-015.xht
 css/CSS2/box-display/display-016.xht
 css/CSS2/box-display/display-017.xht
@@ -1074,6 +1078,8 @@ css/CSS2/floats-clear/floats-120.xht
 css/CSS2/floats-clear/floats-121.xht
 css/CSS2/floats-clear/floats-122.xht
 css/CSS2/floats-clear/floats-123.xht
+css/CSS2/floats-clear/floats-124.xht
+css/CSS2/floats-clear/floats-125.xht
 css/CSS2/floats-clear/floats-132.xht
 css/CSS2/floats-clear/floats-133.xht
 css/CSS2/floats-clear/floats-134.xht
@@ -1195,6 +1201,10 @@ css/CSS2/linebox/border-padding-bleed-003.xht
 css/CSS2/linebox/empty-inline-001.xht
 css/CSS2/linebox/fractional-line-height.html
 css/CSS2/linebox/inline-formatting-context-001.xht
+css/CSS2/linebox/inline-formatting-context-004.xht
+css/CSS2/linebox/inline-formatting-context-005.xht
+css/CSS2/linebox/inline-formatting-context-006.xht
+css/CSS2/linebox/inline-formatting-context-007.xht
 css/CSS2/linebox/inline-formatting-context-008.xht
 css/CSS2/linebox/inline-formatting-context-009.xht
 css/CSS2/linebox/inline-formatting-context-011.xht
@@ -1686,6 +1696,8 @@ css/CSS2/margin-padding-clear/padding-applies-to-012.xht
 css/CSS2/margin-padding-clear/padding-applies-to-013.xht
 css/CSS2/margin-padding-clear/padding-applies-to-014.xht
 css/CSS2/margin-padding-clear/padding-applies-to-015.xht
+css/CSS2/margin-padding-clear/padding-applies-to-016.xht
+css/CSS2/margin-padding-clear/padding-applies-to-017.xht
 css/CSS2/margin-padding-clear/padding-background-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-001.xht
 css/CSS2/margin-padding-clear/padding-bottom-002.xht
@@ -2056,6 +2068,8 @@ css/CSS2/normal-flow/blocks-013.xht
 css/CSS2/normal-flow/blocks-014.xht
 css/CSS2/normal-flow/blocks-015.xht
 css/CSS2/normal-flow/blocks-016.xht
+css/CSS2/normal-flow/blocks-018.xht
+css/CSS2/normal-flow/blocks-019.xht
 css/CSS2/normal-flow/blocks-020.xht
 css/CSS2/normal-flow/blocks-021.xht
 css/CSS2/normal-flow/blocks-022.xht
@@ -2165,6 +2179,7 @@ css/CSS2/normal-flow/inline-block-width-002a.xht
 css/CSS2/normal-flow/inline-block-width-002b.xht
 css/CSS2/normal-flow/inline-block-zorder-001.xht
 css/CSS2/normal-flow/inline-block-zorder-002.xht
+css/CSS2/normal-flow/inline-block-zorder-003.xht
 css/CSS2/normal-flow/inline-block-zorder-004.xht
 css/CSS2/normal-flow/inline-box-border-line-break.html
 css/CSS2/normal-flow/inline-box-padding-line-break.html
@@ -5339,6 +5354,7 @@ css/css-text/white-space/text-wrap-balance-overflow-001.html
 css/css-text/white-space/text-wrap-nowrap-001.html
 css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html
+css/css-text/white-space/trailing-ideographic-space-001.html
 css/css-text/white-space/trailing-ideographic-space-003.html
 css/css-text/white-space/trailing-ideographic-space-006.html
 css/css-text/white-space/trailing-ideographic-space-007.html

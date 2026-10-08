@@ -5978,8 +5978,17 @@ defmodule Browser.Layout do
   defp fragment(%{spec: spec} = box, x1, last?, ctx) do
     x0 = (box.x || ctx.first_x) + ctx.shift
     w = x1 + ctx.shift - x0
-    y = ctx.y_ref.(spec.size) - spec.pt - spec.bt
-    h = round(spec.size * Map.get(spec, :cf, 1.2)) + spec.pt + spec.pb + spec.bt + spec.bb
+    content = round(spec.size * Map.get(spec, :cf, 1.2))
+    # With a guessed content height (no font was measured) the text sits a little low in its line,
+    # and the box around it spans the content area from the top of the line. A measured font is
+    # drawn from the top of that area.
+    above =
+      if Process.get(:layout_metrics) || content <= spec.size,
+        do: 0,
+        else: content - spec.size - div(content - spec.size, 4)
+
+    y = ctx.y_ref.(spec.size) - above - spec.pt - spec.bt
+    h = content + spec.pt + spec.pb + spec.bt + spec.bb
     {tc, rc, bc, lc} = spec.bc
     # a box broken over lines keeps its left edge on the first fragment only and
     # its right edge on the last one

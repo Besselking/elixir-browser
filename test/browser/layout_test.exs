@@ -6734,4 +6734,16 @@ defmodule Browser.LayoutTest do
       assert Enum.map(rects, & &1.color) == [{255, 0, 0}, {0, 128, 0}]
     end
   end
+
+  describe "boxes around inline text" do
+    test "span the content area from the top of the line when no font was measured" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:normal}</style><div>x<span style="background:green">y</span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, h} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.y == 0 and box.h == h
+    end
+  end
 end
