@@ -712,6 +712,21 @@ defmodule Browser.JS.Modules do
     obj
   end
 
+  @doc false
+  # exported bindings are writable data properties that cannot be changed, so a namespace with
+  # any export cannot be frozen
+  def unlockable?({:obj, id}, freeze?) do
+    case Interp.deref(id) do
+      %{host: {__MODULE__, {tag, key}}} when tag in [:ns, :dns] ->
+        freeze? and map_size(ensure_bindings(key)) > 0
+
+      _ ->
+        false
+    end
+  end
+
+  def unlockable?(_, _), do: false
+
   @doc "The namespace object of a module (made once)."
   def namespace(key) do
     case rec(key).ns do

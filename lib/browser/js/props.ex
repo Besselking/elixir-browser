@@ -1016,6 +1016,9 @@ defmodule Browser.JS.Props do
           "Cannot #{if freeze?, do: "freeze", else: "seal"} array buffer views with elements"
         )
 
+      Browser.JS.Modules.unlockable?(obj, freeze?) ->
+        throw_error("TypeError", "Cannot freeze a module namespace object with exports")
+
       true ->
         lock_plain(obj, id, o, freeze?)
     end
@@ -1066,9 +1069,11 @@ defmodule Browser.JS.Props do
   def locked?({:obj, id} = obj, freeze?) do
     o = deref(id)
 
-    if Map.has_key?(o, :proxy),
-      do: locked_proxy?(obj, freeze?),
-      else: locked_plain?(o, freeze?)
+    cond do
+      Map.has_key?(o, :proxy) -> locked_proxy?(obj, freeze?)
+      Browser.JS.Modules.unlockable?(obj, freeze?) -> false
+      true -> locked_plain?(o, freeze?)
+    end
   end
 
   def locked?(_, _), do: true

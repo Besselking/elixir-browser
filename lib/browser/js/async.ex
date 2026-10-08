@@ -358,15 +358,24 @@ defmodule Browser.JS.Async do
     :done
   end
 
+  defp ag_yield(gid, {:ag_raw, v}, resume) do
+    ag_suspend(gid, v, resume)
+    :suspended
+  end
+
   defp ag_yield(gid, v, resume) do
     await_value(v, %{throw: fn e -> resume.({:throw, e}) end}, fn v2 ->
-      g = agen(gid)
-      update_agen(gid, %{state: :suspended, resume: resume, running: false, cur: nil})
-      Promise.resolve(g.cur, iter_result(v2, false))
-      ag_drain(gid)
+      ag_suspend(gid, v2, resume)
     end)
 
     :suspended
+  end
+
+  defp ag_suspend(gid, v, resume) do
+    g = agen(gid)
+    update_agen(gid, %{state: :suspended, resume: resume, running: false, cur: nil})
+    Promise.resolve(g.cur, iter_result(v, false))
+    ag_drain(gid)
   end
 
   @doc "`AsyncGenerator.prototype`."
@@ -503,14 +512,33 @@ defmodule Browser.JS.Async do
                 }
 
                 await_value(v, closing, fn v2 ->
-                  ctx.yield.(v2, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
+                  ctx.yield.({:ag_raw, v2}, resume_delegate(it, next, ctx, k, sync?))
                 end)
 
               {false, v} ->
-                ctx.yield.(v, fn m -> adelegate(it, next, m, ctx, k, sync?) end)
+                # the values of an async iterator are passed on as they are
+                ctx.yield.({:ag_raw, v}, resume_delegate(it, next, ctx, k, sync?))
             end
           )
         end)
+    end
+  end
+
+  # the value of a `return()` that resumes a `yield*` is awaited before it reaches the inner
+  # iterator; a rejection goes in as a throw
+  defp resume_delegate(it, next, ctx, k, sync?) do
+    fn
+      {:return, v} ->
+        await_value(
+          v,
+          %{ctx | throw: fn e -> adelegate(it, next, {:throw, e}, ctx, k, sync?) end},
+          fn v2 ->
+            adelegate(it, next, {:return, v2}, ctx, k, sync?)
+          end
+        )
+
+      m ->
+        adelegate(it, next, m, ctx, k, sync?)
     end
   end
 

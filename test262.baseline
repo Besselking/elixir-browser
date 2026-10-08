@@ -32161,6 +32161,7 @@ language/module-code/invalid-private-names-member-expression-bad-reference.js
 language/module-code/invalid-private-names-member-expression-this.js
 language/module-code/namespace/Symbol.iterator.js
 language/module-code/namespace/Symbol.toStringTag.js
+language/module-code/namespace/internals/define-own-property.js
 language/module-code/namespace/internals/delete-exported-init.js
 language/module-code/namespace/internals/delete-exported-uninit.js
 language/module-code/namespace/internals/delete-non-exported.js
@@ -33057,8 +33058,10 @@ language/statements/async-generator/yield-star-next-then-non-callable-symbol-ful
 language/statements/async-generator/yield-star-next-then-non-callable-undefined-fulfillpromise.js
 language/statements/async-generator/yield-star-next-then-returns-abrupt.js
 language/statements/async-generator/yield-star-normal-notdone-iter-value-throws.js
+language/statements/async-generator/yield-star-promise-not-unwrapped.js
 language/statements/async-generator/yield-star-return-missing-value-is-awaited.js
 language/statements/async-generator/yield-star-return-notdone-iter-value-throws.js
+language/statements/async-generator/yield-star-return-then-getter-ticks.js
 language/statements/async-generator/yield-star-sync-next.js
 language/statements/async-generator/yield-star-sync-return.js
 language/statements/async-generator/yield-star-sync-throw.js
@@ -37529,6 +37532,7 @@ language/statements/class/subclass/derived-class-return-override-catch.js
 language/statements/class/subclass/derived-class-return-override-finally-super-arrow.js
 language/statements/class/subclass/derived-class-return-override-finally-super.js
 language/statements/class/subclass/derived-class-return-override-for-of-arrow.js
+language/statements/class/subclass/derived-class-return-override-for-of.js
 language/statements/class/subclass/derived-class-return-override-with-boolean.js
 language/statements/class/subclass/derived-class-return-override-with-empty.js
 language/statements/class/subclass/derived-class-return-override-with-null.js
