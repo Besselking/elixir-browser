@@ -3444,7 +3444,7 @@ defmodule Browser.Layout do
     left = st.left + fl + ml
     # a negative margin lets the box reach into the space beside it
     rest = beside - ml - box_w
-    rest = if ml0 < 0 or mr0 < 0, do: rest, else: max(rest, 0)
+    rest = if ml0 < 0 or mr0 < 0 or own_width?(o.width), do: rest, else: max(rest, 0)
     x = st.margin + left
 
     id = make_ref()
@@ -6176,6 +6176,8 @@ defmodule Browser.Layout do
   end
 
   defp flex_number(v, default) when is_binary(v) do
+    v = if String.starts_with?(v, "."), do: "0" <> v, else: v
+
     case Float.parse(v) do
       {n, ""} -> n
       _ -> default
@@ -6439,24 +6441,8 @@ defmodule Browser.Layout do
   end
 
   # grow into free space, or shrink in proportion to the base size
-  defp flex_resize(_st, line, free, avail) when free > 0 do
-    total = line |> Enum.map(& &1.grow) |> Enum.sum()
-
-    if total > 0 do
-      Enum.map(line, fn it ->
-        w = it.hw + free * it.grow / total
-
-        %{
-          it
-          | hw:
-              clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail) *
-                1.0
-        }
-      end)
-    else
-      line
-    end
-  end
+  defp flex_resize(_st, line, free, avail) when free > 0,
+    do: flex_grow(line, free, avail, MapSet.new())
 
   # shrinking stops at the min-content width (`min-width: auto`); an item that reaches it is
   # frozen there and the others shrink further
@@ -6466,6 +6452,51 @@ defmodule Browser.Layout do
   end
 
   defp flex_resize(_st, line, _free, _avail), do: line
+
+  # items that reach a max-width are frozen there and the others share what is left
+  defp flex_grow(line, free, avail, frozen) do
+    live = Enum.filter(line, &(&1.grow > 0 and &1.key not in frozen))
+    total = live |> Enum.map(& &1.grow) |> Enum.sum()
+
+    if total > 0 do
+      # (factors that add up to less than 1 only take that share of the room)
+      room = if total < 1, do: free * total, else: free
+
+      clamped =
+        Map.new(live, fn it ->
+          w = it.hw + room * it.grow / total
+          c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
+          {it.key, {w, clamp_width(w, c, avail) * 1.0}}
+        end)
+
+      violating = for it <- live, {w, c} = clamped[it.key], abs(w - c) > 0.001, do: it
+
+      if violating == [] do
+        Enum.map(line, fn it ->
+          case clamped[it.key] do
+            {_, c} -> %{it | hw: c}
+            nil -> it
+          end
+        end)
+      else
+        {_, taken} =
+          Enum.map_reduce(violating, 0.0, fn it, acc ->
+            {_, c} = clamped[it.key]
+            {nil, acc + c - it.hw}
+          end)
+
+        line =
+          Enum.map(line, fn it ->
+            if it in violating, do: %{it | hw: elem(clamped[it.key], 1)}, else: it
+          end)
+
+        frozen = Enum.reduce(violating, frozen, &MapSet.put(&2, &1.key))
+        flex_grow(line, free - taken, avail, frozen)
+      end
+    else
+      line
+    end
+  end
 
   defp flex_shrink(st, line, free, avail) do
     live = Enum.reject(line, & &1.frozen)
@@ -6664,9 +6695,10 @@ defmodule Browser.Layout do
             )
 
           {items, h, _} = flex_atom(st, it.sub, w, it.key)
-          %{it | w: w, items: items, h: max(h, it.h)}
+          it = %{it | w: w, items: items, h: max(h, it.h)}
+          %{it | x: column_x(cs, it, flex_align(it, cs.align), w, round(cw))}
         else
-          it
+          %{it | x: column_x(cs, it, flex_align(it, cs.align), it.w, round(cw))}
         end
       end)
     end)
@@ -6724,6 +6756,18 @@ defmodule Browser.Layout do
 
   defp column_justify(j, _reversed?), do: j
 
+  # where an item sits across a column `avail` wide
+  defp column_x(cs, %{ml: ml, mr: mr}, align, w, avail) do
+    cond do
+      ml == :auto and mr == :auto -> round((avail - w) / 2)
+      ml == :auto -> avail - w - mr
+      align in ["center"] -> round((avail - w) / 2)
+      align in ["flex-end", "end"] -> if cs.rtl, do: ml, else: avail - w - mr
+      cs.rtl -> avail - w - mr
+      true -> ml
+    end
+  end
+
   defp flex_column_item(st, cs, it, avail) do
     ml = it.ml
     mr = it.mr
@@ -6743,15 +6787,7 @@ defmodule Browser.Layout do
     w = max(round(w), 1)
     {items, h, _} = flex_atom(st, it.sub, w, it.key)
 
-    x =
-      cond do
-        ml == :auto and mr == :auto -> round((avail - w) / 2)
-        ml == :auto -> avail - w - mr
-        align in ["center"] -> round((avail - w) / 2)
-        align in ["flex-end", "end"] -> if cs.rtl, do: ml, else: avail - w - mr
-        cs.rtl -> avail - w - mr
-        true -> ml
-      end
+    x = column_x(cs, it, align, w, avail)
 
     # an item starts from its `flex-basis` when it has one (a size of the box, margins apart)
     base =

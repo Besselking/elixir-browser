@@ -2091,6 +2091,7 @@ css/CSS2/normal-flow/inline-replaced-width-006.xht
 css/CSS2/normal-flow/inline-replaced-width-011.xht
 css/CSS2/normal-flow/inline-replaced-width-012.xht
 css/CSS2/normal-flow/inline-replaced-width-013.xht
+css/CSS2/normal-flow/inline-replaced-width-014.xht
 css/CSS2/normal-flow/inline-replaced-width-016.xht
 css/CSS2/normal-flow/inline-replaced-width-017.xht
 css/CSS2/normal-flow/inline-table-height-001.xht
@@ -3613,6 +3614,7 @@ css/css-flexbox/flex-grow-004.html
 css/css-flexbox/flex-grow-005.html
 css/css-flexbox/flex-grow-006.html
 css/css-flexbox/flex-grow-007.html
+css/css-flexbox/flex-grow-008.html
 css/css-flexbox/flex-height-min-content.html
 css/css-flexbox/flex-inline.html
 css/css-flexbox/flex-item-and-percentage-abspos.html
@@ -3673,6 +3675,7 @@ css/css-flexbox/flex-vertical-align-effect.html
 css/css-flexbox/flex-wrap-002.html
 css/css-flexbox/flex-wrap-003.html
 css/css-flexbox/flex-wrap-004.html
+css/css-flexbox/flex-wrap-005.html
 css/css-flexbox/flexbox-align-items-center-nested-001.html
 css/css-flexbox/flexbox-align-self-baseline-compatability.html
 css/css-flexbox/flexbox-align-self-baseline-horiz-002.xhtml
@@ -3879,6 +3882,7 @@ css/css-flexbox/flexbox_flex-natural-mixed-basis-auto.html
 css/css-flexbox/flexbox_flex-natural-mixed-basis.html
 css/css-flexbox/flexbox_flex-natural-variable-auto-basis.html
 css/css-flexbox/flexbox_flex-natural-variable-zero-basis.html
+css/css-flexbox/flexbox_flex-natural.html
 css/css-flexbox/flexbox_flex-none-wrappable-content.html
 css/css-flexbox/flexbox_flex-none.html
 css/css-flexbox/flexbox_flow-column-wrap-reverse.html
@@ -4138,6 +4142,7 @@ css/css-multicol/multicol-gap-fraction-001.xht
 css/css-multicol/multicol-gap-large-002.xht
 css/css-multicol/multicol-gap-negative-001.xht
 css/css-multicol/multicol-height-001.xht
+css/css-multicol/multicol-height-block-child-001.xht
 css/css-multicol/multicol-inherit-001.xht
 css/css-multicol/multicol-inherit-002.xht
 css/css-multicol/multicol-list-item-006.html
@@ -4147,6 +4152,7 @@ css/css-multicol/multicol-margin-002.xht
 css/css-multicol/multicol-margin-003.html
 css/css-multicol/multicol-margin-child-001.xht
 css/css-multicol/multicol-nested-002.xht
+css/css-multicol/multicol-nested-005.xht
 css/css-multicol/multicol-nested-013.html
 css/css-multicol/multicol-nested-025.html
 css/css-multicol/multicol-nested-027.html
@@ -4234,6 +4240,7 @@ css/css-multicol/orthogonal-writing-mode-shrink-to-fit.html
 css/css-multicol/overflow-unsplittable-001.html
 css/css-multicol/overflow-unsplittable-002.html
 css/css-multicol/overflow-unsplittable-003.html
+css/css-multicol/page-property-ignored.html
 css/css-multicol/spanner-fragmentation-003.html
 css/css-multicol/spanner-fragmentation-006.html
 css/css-multicol/spanner-fragmentation-007.html
@@ -4289,7 +4296,6 @@ css/css-position/sticky/position-sticky-bottom-004.html
 css/css-position/sticky/position-sticky-bottom-005.html
 css/css-position/sticky/position-sticky-bottom-006.html
 css/css-position/sticky/position-sticky-margins-002.html
-css/css-position/sticky/position-sticky-margins-003.html
 css/css-position/sticky/position-sticky-table-pixel-rounding.html
 css/css-position/sticky/position-sticky-table-td-subpixel-zoom.html
 css/css-sizing/abspos-auto-sizing-fit-content-percentage-002.html

@@ -5345,6 +5345,27 @@ defmodule Browser.LayoutTest do
       assert [{0, 0, 30, 5}] = flex_rects(html)
     end
 
+    test "a flex container wider than its parent keeps its width" do
+      html =
+        ~s(<div style="width:100px"><div style="display:flex;width:190px;justify-content:flex-end"><div style="width:90px;height:5px;background:red"></div></div></div>)
+
+      assert flex_rects(html) == [{100, 0, 90, 5}]
+    end
+
+    test "flex-grow factors that add up to less than one take only that share of the room" do
+      html =
+        ~s(<div style="display:flex;width:190px"><div style="width:90px;flex-grow:.1;height:5px;background:red"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 5}]
+    end
+
+    test "an item at its max-width is frozen and the others share the rest" do
+      html =
+        ~s(<div style="display:flex;width:100px"><div style="flex-grow:1;max-width:0;height:5px;background:red"></div><div style="flex-grow:1;height:5px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
