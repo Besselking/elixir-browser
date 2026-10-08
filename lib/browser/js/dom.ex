@@ -2682,8 +2682,30 @@ defmodule Browser.JS.DOM do
       end
     end
 
+    image_src_changed(nid, name, new)
     :ok
   end
+
+  # An image with a `data:` URL is decoded at once, so its `load` or `error` event can come
+  # right after the script that set the source (other URLs load with the page).
+  defp image_src_changed(nid, "src", "data:" <> _ = url) do
+    if node(nid).tag == "img" do
+      fire = fn _this, _ ->
+        ok? =
+          match?({:ok, bytes} when bytes != "", Browser.Images.decode_data_url(url)) and
+            Browser.Images.sniff(elem(Browser.Images.decode_data_url(url), 1)) != :unknown
+
+        dispatch(nid, if(ok?, do: "load", else: "error"), %{bubbles: false, cancelable: false})
+        :undefined
+      end
+
+      Browser.JS.Builtins.add_timer(native("", fire), 0.0)
+    end
+
+    :ok
+  end
+
+  defp image_src_changed(_nid, _name, _value), do: :ok
 
   defp define_element(name, ctor) do
     name = String.downcase(to_str(name))
@@ -2972,6 +2994,116 @@ defmodule Browser.JS.DOM do
   end
 
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+
+  # -- canvas 2D ------------------------------------------------------------------
+
+  # `canvas.getContext("2d")`: one context per canvas, drawing into `Browser.Canvas`
+  # (rectangles only). Other kinds of context are not there: null, as the standard says.
+  defp canvas_context(this, "2d") do
+    nid = this_nid(this)
+
+    if node(nid).tag == "canvas" do
+      case Process.get({:canvas_ctx, nid}) do
+        nil ->
+          ctx =
+            new_object(
+              [
+                {"fillStyle", "#000000"},
+                {"strokeStyle", "#000000"},
+                {"lineWidth", 1.0},
+                {"globalAlpha", 1.0},
+                {"canvas", this}
+              ],
+              Process.get(:canvas_ctx_proto)
+            )
+
+          Process.put({:canvas_ctx, nid}, ctx)
+          ctx
+
+        ctx ->
+          ctx
+      end
+    else
+      :null
+    end
+  end
+
+  defp canvas_context(_this, _kind), do: :null
+
+  # The surface of a canvas, made when first needed and again when the script changes the
+  # canvas's size (which also clears it).
+  defp canvas_surface(this) do
+    nid = this_nid(this)
+
+    if node(nid).tag == "canvas" do
+      w = canvas_dim(this, nid, "width", 300)
+      h = canvas_dim(this, nid, "height", 150)
+
+      case Process.get({:canvas, nid}) do
+        %Browser.Canvas{w: ^w, h: ^h} = surface -> surface
+        _ -> Browser.Canvas.new(w, h)
+      end
+    end
+  end
+
+  defp canvas_dim(this, nid, name, default) do
+    from_prop = Interp.get(this, name)
+
+    n =
+      cond do
+        is_number(from_prop) -> from_prop
+        v = get_attr(node(nid), name) -> to_num(v)
+        true -> default
+      end
+
+    if is_number(n) and n >= 0, do: trunc(n), else: default
+  end
+
+  defp canvas_color(ctx, prop) do
+    alpha = ctx |> Interp.get("globalAlpha") |> to_num_or_zero() |> min(1) |> max(0)
+
+    case Browser.Color.parse_alpha(to_str(Interp.get(ctx, prop))) do
+      {r, g, b, a} -> {r, g, b, round(a * alpha)}
+      # unparsable colours leave the previous one, which is not tracked: black
+      _ -> {0, 0, 0, round(255 * alpha)}
+    end
+  end
+
+  defp canvas_draw(ctx, fun) do
+    this = Interp.get(ctx, "canvas")
+
+    with surface when surface != nil <- canvas_surface(this) do
+      Process.put({:canvas, this_nid(this)}, fun.(surface))
+    end
+
+    :undefined
+  end
+
+  defp install_canvas_context(p) do
+    def_fn(p, "fillRect", fn this, args ->
+      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
+
+      canvas_draw(
+        this,
+        &Browser.Canvas.fill_rect(&1, x, y, w, h, canvas_color(this, "fillStyle"))
+      )
+    end)
+
+    def_fn(p, "strokeRect", fn this, args ->
+      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
+      lw = this |> Interp.get("lineWidth") |> to_num_or_zero()
+
+      canvas_draw(
+        this,
+        &Browser.Canvas.stroke_rect(&1, x, y, w, h, lw, canvas_color(this, "strokeStyle"))
+      )
+    end)
+
+    def_fn(p, "clearRect", fn this, args ->
+      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
+      canvas_draw(this, &Browser.Canvas.clear_rect(&1, x, y, w, h))
+    end)
+  end
 
   defp ctor(scope, name, proto, fun) do
     f = native(name, fun)
@@ -3309,9 +3441,14 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "canPlayType", fn _this, _ -> "" end)
 
-    # there is no drawing surface for scripts: the standard way to say so
-    def_fn(p, "getContext", fn _this, _ -> :null end)
-    def_fn(p, "toDataURL", fn _this, _ -> "data:," end)
+    def_fn(p, "getContext", fn this, args -> canvas_context(this, to_str(arg(args, 0))) end)
+
+    def_fn(p, "toDataURL", fn this, _ ->
+      case canvas_surface(this) do
+        nil -> "data:,"
+        surface -> Browser.Canvas.to_data_url(surface)
+      end
+    end)
 
     def_fn(p, "getAttributeNode", fn this, args ->
       name = String.downcase(to_str(arg(args, 0)))
@@ -3894,6 +4031,14 @@ defmodule Browser.JS.DOM do
     for name <- ~w(SVGElement SVGAElement ShadowRoot DocumentFragment Comment KeyframeEffect) do
       ctor(scope, name, new_object([], element), fn _, _ -> :undefined end)
     end
+
+    ctx_proto = new_object([])
+    install_canvas_context(ctx_proto)
+    Process.put(:canvas_ctx_proto, ctx_proto)
+
+    ctor(scope, "CanvasRenderingContext2D", ctx_proto, fn _, _ ->
+      throw_error("TypeError", "Illegal constructor")
+    end)
 
     ctor(scope, "Text", text, fn _, _ -> :undefined end)
     ctor(scope, "Document", document, fn _, _ -> :undefined end)
