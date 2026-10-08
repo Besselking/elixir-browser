@@ -1889,11 +1889,42 @@ defmodule Browser.JS.Interp do
 
   defp builtin_prototype(_, _), do: proto(:object)
 
+  @late_proto ~w(Promise ArrayBuffer SharedArrayBuffer DataView Int8Array Uint8Array
+    Uint8ClampedArray Int16Array Uint16Array Int32Array Uint32Array Float16Array Float32Array
+    Float64Array BigInt64Array BigUint64Array)
+
+  @doc """
+  Called by a built-in constructor at the point where the spec reads `newTarget.prototype`
+  (after the checks that come first): reads it now, and a throw there ends the construction.
+  """
+  def late_proto do
+    case Process.get(:js_late_nt) do
+      nil ->
+        :ok
+
+      nt ->
+        Process.delete(:js_late_nt)
+
+        case get(nt, "prototype") do
+          {:obj, _} = p -> Process.put(:js_late_done, {:ok, p})
+          _ -> Process.put(:js_late_done, {:ok, :none})
+        end
+
+        :ok
+    end
+  end
+
   defp construct_plain({:obj, _} = f, id, nt, new_target, args) do
     case Map.get(deref(id), :class_info) do
       nil ->
+        # these built-ins read the prototype of the new target themselves, once their
+        # arguments have been checked (see `late_proto/0`)
+        late_name? = match?(%{fun: {:native, name, _}} when name in @late_proto, deref(id))
+        late? = nt != f and late_name?
+        if late_name? and not late?, do: Process.delete(:js_late_nt)
+
         proto =
-          case get(nt, "prototype") do
+          case if(late?, do: :undefined, else: get(nt, "prototype")) do
             {:obj, _} = p ->
               p
 
@@ -1911,6 +1942,11 @@ defmodule Browser.JS.Interp do
 
         this = new_object([], proto)
 
+        if late? do
+          Process.delete(:js_late_done)
+          Process.put(:js_late_nt, nt)
+        end
+
         result =
           case deref(id) do
             %{fun: {:closure, _}, async: true} ->
@@ -1925,6 +1961,20 @@ defmodule Browser.JS.Interp do
               r = call(f, this, args)
               Process.delete(:js_native_new)
               r
+          end
+
+        proto =
+          if late? do
+            late = Process.delete(:js_late_done)
+            Process.delete(:js_late_nt)
+
+            case late do
+              {:ok, :none} -> proto
+              {:ok, p} -> p
+              nil -> with({:obj, _} = p <- get(nt, "prototype"), do: p, else: (_ -> proto))
+            end
+          else
+            proto
           end
 
         case result do

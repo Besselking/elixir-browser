@@ -238,15 +238,17 @@ defmodule Browser.JS.Async do
     }
 
     ctx =
-      Map.put(base, :ret, fn v ->
-        await_value(v, base, fn v2 -> ag_finish(gid, {:return, v2}) end)
+      Map.put(base, :ret, fn
+        :ag_bare -> ag_finish(gid, {:return, :undefined})
+        {:ag_done, v} -> ag_finish(gid, {:return, v})
+        v -> await_value(v, base, fn v2 -> ag_finish(gid, {:return, v2}) end)
       end)
 
     start = fn
       {:next, _} ->
         case c.mode do
           :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
-          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:ag_bare) end)
         end
 
       {:throw, e} ->
@@ -657,9 +659,19 @@ defmodule Browser.JS.Async do
   defp cev_await({:yield, e, false}, env, ctx, k) do
     cev(e, env, ctx, fn v ->
       ctx.yield.(v, fn
-        {:next, x} -> k.(x)
-        {:throw, err} -> ctx.throw.(err)
-        {:return, r} -> ctx.ret.(r)
+        {:next, x} ->
+          k.(x)
+
+        {:throw, err} ->
+          ctx.throw.(err)
+
+        # in an async generator the value of a `return()` is awaited first, and a rejection
+        # is thrown at the `yield`
+        {:return, r} when is_map_key(ctx, :async_gen) ->
+          await_value(r, ctx, fn v -> ctx.ret.({:ag_done, v}) end)
+
+        {:return, r} ->
+          ctx.ret.(r)
       end)
     end)
   end
@@ -1009,7 +1021,12 @@ defmodule Browser.JS.Async do
   defp clist([s | rest], env, ctx, k),
     do: cexec(s, env, ctx, fn _ -> clist(rest, env, ctx, k) end)
 
-  defp cexec(stmt, env, ctx, k, labels \\ []) do
+  defp cexec(stmt, env, ctx, k, labels \\ [])
+
+  defp cexec({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels),
+    do: ctx.ret.(:ag_bare)
+
+  defp cexec(stmt, env, ctx, k, labels) do
     if has_await?(stmt),
       do: cs(stmt, env, ctx, k, labels),
       else: sync_stmt(stmt, env, ctx, k, labels)
@@ -1074,6 +1091,8 @@ defmodule Browser.JS.Async do
 
   defp cs({:var, kind, decls}, env, ctx, k, _labels), do: cdecls(decls, kind, env, ctx, k)
 
+  # in an async generator `return;` and falling off the end finish without awaiting a value
+  defp cs({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels), do: ctx.ret.(:ag_bare)
   defp cs({:return, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
   defp cs({:throw, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.throw)
 
@@ -1595,46 +1614,53 @@ defmodule Browser.JS.Async do
   # `for await`: each step's result is awaited, and so is each value of a sync iterator
   defp afor(it, next, sync?, spec, ctx, k, labels) do
     attempt(fn -> Interp.call(next, it, []) end, ctx, fn r ->
-      await_value(r, ctx, fn r2 ->
-        attempt(
-          fn ->
-            unless match?({:obj, _}, r2),
-              do: Interp.throw_error("TypeError", "Iterator result is not an object")
-
-            {Interp.truthy(Interp.get(r2, "done")), Interp.get(r2, "value")}
-          end,
-          ctx,
-          fn
-            {true, _} ->
-              k.(:ok)
-
-            {false, v} ->
-              if sync? do
-                # a rejected value closes the sync iterator before the loop throws
-                closing = %{
-                  ctx
-                  | throw: fn e ->
-                      try do
-                        case Interp.get(it, "return") do
-                          m when m in [:undefined, :null] -> :ok
-                          f -> Interp.call(f, it, [])
-                        end
-                      catch
-                        {:js_error, _} -> :ok
-                      end
-
-                      ctx.throw.(e)
-                    end
-                }
-
-                await_value(v, closing, &afor_body(&1, it, next, sync?, spec, ctx, k, labels))
-              else
-                afor_body(v, it, next, sync?, spec, ctx, k, labels)
+      if sync? do
+        # AsyncFromSyncIteratorContinuation: the value is resolved, and the loop awaits the
+        # promise that `then` on it settles
+        attempt(fn -> afor_result(r) end, ctx, fn {done?, v} ->
+          p = Promise.new()
+          # a rejected value closes the sync iterator and rejects the promise the loop awaits
+          reject = fn e ->
+            unless done? do
+              try do
+                case Interp.get(it, "return") do
+                  m when m in [:undefined, :null] -> :ok
+                  f -> Interp.call(f, it, [])
+                end
+              catch
+                {:js_error, _} -> :ok
               end
+            end
+
+            Promise.reject(p, e)
           end
-        )
-      end)
+
+          wrapper_ctx = %{ctx | throw: reject}
+
+          await_value(v, wrapper_ctx, fn val -> Promise.resolve(p, val) end)
+
+          await_value(p, ctx, fn val ->
+            if done?,
+              do: k.(:ok),
+              else: afor_body(val, it, next, sync?, spec, ctx, k, labels)
+          end)
+        end)
+      else
+        await_value(r, ctx, fn r2 ->
+          attempt(fn -> afor_result(r2) end, ctx, fn
+            {true, _} -> k.(:ok)
+            {false, v} -> afor_body(v, it, next, sync?, spec, ctx, k, labels)
+          end)
+        end)
+      end
     end)
+  end
+
+  defp afor_result(r) do
+    unless match?({:obj, _}, r),
+      do: Interp.throw_error("TypeError", "Iterator result is not an object")
+
+    {Interp.truthy(Interp.get(r, "done")), Interp.get(r, "value")}
   end
 
   defp afor_body(item, it, next, sync?, {pat, mode, body, env} = spec, ctx, k, labels) do
