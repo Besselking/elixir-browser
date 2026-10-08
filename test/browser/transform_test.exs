@@ -136,9 +136,9 @@ defmodule Browser.TransformTest do
     assert m(%{"transform" => "matrix(1,2,3)"}) == nil
   end
 
-  test "a flat matrix is refused" do
-    assert m(%{"transform" => "scale(0)"}) == nil
-    assert m(%{"transform" => "scaleX(0)"}) == nil
+  test "a flat matrix collapses the box" do
+    assert m(%{"transform" => "scale(0)"}) == :collapsed
+    assert m(%{"transform" => "scaleX(0)"}) == :collapsed
   end
 
   test "moved/3 keeps the transformation the same for the item that moved" do

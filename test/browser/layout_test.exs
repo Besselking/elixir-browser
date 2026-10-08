@@ -5557,6 +5557,20 @@ defmodule Browser.LayoutTest do
       assert [{0, 0, 30, 5}] = flex_rects(html)
     end
 
+    test "flex: unset is the initial flex (does not grow), like flex: initial" do
+      html =
+        ~s(<div style="display:flex;width:200px"><div style="flex:unset;width:50px;height:5px;background:red"></div><div style="flex:1;height:5px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 50, 5}, {50, 0, 150, 5}]
+    end
+
+    test "a box scaled to nothing draws nothing" do
+      html =
+        ~s|<div style="width:100px"><div style="height:5px;background:red;transform:scaleX(0)"></div><div style="height:5px;background:blue"></div></div>|
+
+      assert flex_rects(html) == [{0, 5, 100, 5}]
+    end
+
     test "a flex container wider than its parent keeps its width" do
       html =
         ~s(<div style="width:100px"><div style="display:flex;width:190px;justify-content:flex-end"><div style="width:90px;height:5px;background:red"></div></div></div>)

@@ -8321,6 +8321,17 @@ defmodule Browser.Layout do
       nil ->
         st
 
+      # squashed flat (`scaleX(0)`): the box and all it holds are not drawn
+      :collapsed ->
+        %{
+          st
+          | items: Enum.drop(st.items, st.n - box.n0),
+            n: box.n0,
+            rects: Enum.drop(st.rects, st.nr - box.nr0),
+            nr: box.nr0,
+            overlays: Enum.drop(st.overlays, length(st.overlays) - box.ov0)
+        }
+
       matrix ->
         {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
         {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
@@ -8341,6 +8352,7 @@ defmodule Browser.Layout do
   defp transformed_picture(%{xform: xform}, items, rect) do
     case xform_matrix(xform, rect) do
       nil -> items
+      :collapsed -> []
       matrix -> with_xform(items, matrix)
     end
   end
