@@ -3700,6 +3700,11 @@ css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
 css/css-flexbox/flexbox-items-as-stacking-contexts-002.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-003.html
+css/css-flexbox/flexbox-justify-content-horiz-003.xhtml
+css/css-flexbox/flexbox-justify-content-vert-001a.xhtml
+css/css-flexbox/flexbox-justify-content-vert-001b.xhtml
+css/css-flexbox/flexbox-justify-content-vert-002.xhtml
+css/css-flexbox/flexbox-justify-content-vert-005.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003-reverse.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003v.xhtml
@@ -3942,6 +3947,8 @@ css/css-flexbox/grid-flex-item-006.html
 css/css-flexbox/inline-flex-min-content-height.html
 css/css-flexbox/intrinsic-size/col-wrap-001.html
 css/css-flexbox/intrinsic-size/col-wrap-002.html
+css/css-flexbox/intrinsic-size/col-wrap-003.html
+css/css-flexbox/intrinsic-size/col-wrap-006.html
 css/css-flexbox/intrinsic-size/col-wrap-007.html
 css/css-flexbox/intrinsic-size/col-wrap-008.html
 css/css-flexbox/intrinsic-size/col-wrap-011.html

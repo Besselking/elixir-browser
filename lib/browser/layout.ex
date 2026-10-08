@@ -5806,6 +5806,7 @@ defmodule Browser.Layout do
       col_gap: num(c["column-gap"]) || 0.0,
       row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
+      maxh: inner.(num(c["max-height"])),
       fs: fs
     }
   end
@@ -6138,13 +6139,42 @@ defmodule Browser.Layout do
   defp len_px({:pct, f}, base), do: f * base
 
   defp flex_natural_width(st, cs, items, avail) do
+    # (in a column the basis is a height: the items are as wide as they are)
+    row? = cs.dir in [:row, :row_reverse]
+
     widths =
       for it <- items,
+          it = if(row?, do: it, else: %{it | basis: nil}),
           do: flex_base(st, it, avail, cs) + auto_zero(it.ml) + auto_zero(it.mr)
 
-    if cs.dir in [:row, :row_reverse],
-      do: round(Enum.sum(widths) + cs.col_gap * (length(items) - 1)),
-      else: round(Enum.max(widths, fn -> 0 end))
+    widest = round(Enum.max(widths, fn -> 0 end))
+
+    cond do
+      row? ->
+        round(Enum.sum(widths) + cs.col_gap * (length(items) - 1))
+
+      # a column that wraps is as wide as the columns it breaks into
+      cs.wrap and (cs.height || cs.maxh) ->
+        items =
+          items
+          |> Enum.sort_by(& &1.order)
+          |> Enum.map(fn it ->
+            st
+            |> flex_column_item(cs, %{it | fit?: true}, widest)
+            |> then(&flex_column_basis(st, &1))
+          end)
+
+        cols = flex_column_break(items, cs.height || cs.maxh, round(cs.row_gap))
+
+        widths =
+          for col <- cols,
+              do: col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max(fn -> 0 end)
+
+        round(Enum.sum(widths) + cs.col_gap * (length(cols) - 1))
+
+      true ->
+        widest
+    end
   end
 
   defp flex_layout(_st, _cs, [], _avail), do: {[], 0}
@@ -6280,7 +6310,7 @@ defmodule Browser.Layout do
         {Enum.map(line, &%{&1 | ml: auto_zero(&1.ml), mr: auto_zero(&1.mr)}), free}
       end
 
-    {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, max(free, 0.0), n)
+    {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, free * 1.0, n)
 
     # lay every item out at its final width, find the height of the line
     sized =
@@ -6306,7 +6336,8 @@ defmodule Browser.Layout do
             else: flex_offset(flex_align(it, cs.align), cross, it.h)
 
         ix = x + it.ml
-        moved = for item <- it.items, do: move(item, round(ix), top + dy)
+        # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
+        moved = for item <- it.items, do: move(item, floor(ix + 0.5), top + dy)
         {moved, ix + it.w + it.mr + cs.col_gap + between}
       end)
 
@@ -6392,6 +6423,9 @@ defmodule Browser.Layout do
     case justify do
       j when j in ["flex-end", "end", "right"] -> {free, 0.0}
       "center" -> {free / 2, 0.0}
+      # with no room left the spaced values fall back to the start (`safe center` for the
+      # round ones)
+      j when j in ["space-between", "space-around", "space-evenly"] and free < 0 -> {0.0, 0.0}
       "space-between" when n > 1 -> {0.0, free / (n - 1)}
       "space-around" -> {free / n / 2, free / n}
       "space-evenly" -> {free / (n + 1), free / (n + 1)}
@@ -6458,9 +6492,10 @@ defmodule Browser.Layout do
   defp flex_column(st, cs, items, avail) do
     sized = Enum.map(items, &flex_column_item(st, cs, &1, avail))
 
-    if cs.wrap and cs.height do
+    if cs.wrap and (cs.height || cs.maxh) do
       # a wrapping column breaks into columns when the next item no longer fits the height
-      cols = flex_column_break(sized, cs.height, round(cs.row_gap))
+      sized = Enum.map(sized, &flex_column_basis(st, &1))
+      cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
       last = length(cols) - 1
 
       cols =
@@ -6475,14 +6510,14 @@ defmodule Browser.Layout do
 
       cols = if cs.wrap_reverse, do: Enum.reverse(cols), else: cols
 
-      {laid, _x} =
-        Enum.map_reduce(cols, 0, fn col, x ->
-          {items, _y} = flex_column_place(st, cs, col)
+      {laid, {_x, tallest}} =
+        Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
+          {items, y} = flex_column_place(st, cs, col)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
-          {Enum.map(items, &move(&1, x, 0)), x + width + round(cs.col_gap)}
+          {Enum.map(items, &move(&1, x, 0)), {x + width + round(cs.col_gap), max(tallest, y)}}
         end)
 
-      {List.flatten(laid), round(cs.height)}
+      {List.flatten(laid), round(cs.height || tallest)}
     else
       flex_column_place(st, cs, sized)
     end
@@ -6518,7 +6553,7 @@ defmodule Browser.Layout do
       flex_justify(
         column_justify(cs.justify, cs.dir == :column_reverse),
         cs.dir == :column_reverse,
-        max((cs.height || 0) - used, 0.0) * 1.0,
+        ((cs.height || 0) - used) * 1.0,
         length(sized)
       )
 

@@ -5252,6 +5252,31 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 30, 10}]
     end
 
+    test "a floated column container is as wide as its items, whatever their flex-basis" do
+      html = """
+      <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
+      <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 20, 10}]
+    end
+
+    test "a wrapping column with a max-content width is as wide as its columns" do
+      html = """
+      <div style="display:flex;flex-flow:column wrap;height:100px;width:max-content;background:#eee"><div style="width:50px;flex:0 0 100px;background:green"></div><div style="width:30px;flex:0 0 100px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 50, 100}, {0, 0, 80, 100}, {50, 0, 30, 100}]
+    end
+
+    test "justify-content: center and flex-end let items overflow at the start side" do
+      html = """
+      <div style="display:flex;width:30px;justify-content:flex-end"><div style="flex:0 0 40px;height:10px;background:green"></div></div>
+      """
+
+      assert [{-10, 0, 40, 10}] = flex_rects(html)
+    end
+
     test "column items start from their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;height:100px"><div style="flex:0 30px;background:green"></div></div>
