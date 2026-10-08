@@ -2568,7 +2568,7 @@ defmodule Browser.Layout do
 
     ops =
       case ops do
-        [{:word, w, st} | more] -> [{:word, w, st, :glue} | more]
+        [{:word, w, st} | more] when w != "\u200B" -> [{:word, w, st, :glue} | more]
         _ -> ops
       end
 
@@ -2670,9 +2670,9 @@ defmodule Browser.Layout do
     a = String.last(cur)
     a = if String.ends_with?(cur, "\u200D"), do: "\u200D", else: a
 
-    # (`keep-all` leaves only the break after an ideographic space)
+    # (`keep-all` leaves only the break after an ideographic space and a CJK comma or full stop)
     (Regex.match?(@wide_re, a) or Regex.match?(@wide_re, g)) and
-      (not keep_all? or a == "\u3000") and
+      (not keep_all? or a in ["\u3000", "\u3001", "\u3002", "\uFF0C", "\uFF0E"]) and
       not String.contains?(@no_start, g) and not String.contains?(@no_end, a)
   end
 
@@ -3010,6 +3010,10 @@ defmodule Browser.Layout do
     do: if(st.line == [] or st.after_space, do: st, else: %{st | pending_space: style})
 
   defp op({:word, text, style}, st), do: word(text, style, false, st)
+  # (a zero-width space before it is a place where the line may break)
+  defp op({:word, text, %{ws: :pre} = style, :pre}, %{line: [%{text: "\u200B"} | _]} = st),
+    do: word(text, style, false, st)
+
   defp op({:word, text, style, :pre}, st), do: word(text, style, true, st)
   defp op({:word, text, style, :glue}, st), do: word(text, style, false, st, 0, true)
   defp op({:word, text, style, :hold}, st), do: word(text, style, false, st, 0, :hold)
@@ -5233,6 +5237,7 @@ defmodule Browser.Layout do
     }
 
     item = if hang > 0, do: Map.put(item, :hang, hang), else: item
+    item = if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
     item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
     st = bridge(st, item, space_w)
 
@@ -5294,6 +5299,21 @@ defmodule Browser.Layout do
   defp wrap_glued(%{line: [%{type: :text} | older]} = st, line_left, :hold, %{wrap_chars: mode})
        when older == [] and mode in [:word, :anywhere] do
     wrap_alone(st, line_left, nil)
+  end
+
+  # (a line that is all one unbreakable run overflows)
+  defp wrap_glued(%{line: line} = st, line_left, true, %{wrap_chars: :none}) do
+    {chain, rest} = Enum.split_while(line, &Map.get(&1, :glue, false))
+
+    case rest do
+      [%{type: :text}] ->
+        if Enum.all?(chain ++ rest, &(&1.type == :text and not is_map_key(&1, :wc))),
+          do: st,
+          else: wrap_glued(st, line_left, true)
+
+      _ ->
+        wrap_glued(st, line_left, true)
+    end
   end
 
   defp wrap_glued(st, line_left, glued, _style), do: wrap_glued(st, line_left, glued)

@@ -1241,6 +1241,8 @@ css/CSS2/linebox/vertical-align-092.xht
 css/CSS2/linebox/vertical-align-100.xht
 css/CSS2/linebox/vertical-align-101.xht
 css/CSS2/linebox/vertical-align-102.xht
+css/CSS2/linebox/vertical-align-103.xht
+css/CSS2/linebox/vertical-align-104.xht
 css/CSS2/linebox/vertical-align-109.xht
 css/CSS2/linebox/vertical-align-110.xht
 css/CSS2/linebox/vertical-align-111.xht
@@ -3053,8 +3055,10 @@ css/CSS2/text/letter-spacing-applies-to-014.xht
 css/CSS2/text/letter-spacing-applies-to-015.xht
 css/CSS2/text/letter-spacing-justify-001.xht
 css/CSS2/text/text-align-justify-with-overflow.html
+css/CSS2/text/text-align-white-space-001.xht
 css/CSS2/text/text-align-white-space-002.xht
 css/CSS2/text/text-align-white-space-004.xht
+css/CSS2/text/text-align-white-space-005.xht
 css/CSS2/text/text-align-white-space-006.xht
 css/CSS2/text/text-align-white-space-008.xht
 css/CSS2/text/text-decoration-applies-to-001.xht
@@ -3262,6 +3266,7 @@ css/CSS2/text/white-space-processing-044.xht
 css/CSS2/text/white-space-processing-045.xht
 css/CSS2/text/white-space-processing-046.xht
 css/CSS2/text/white-space-processing-047.xht
+css/CSS2/text/white-space-processing-049.xht
 css/CSS2/text/white-space-processing-050.xht
 css/CSS2/text/white-space-processing-051.xht
 css/CSS2/text/white-space-processing-052.xht
@@ -4715,7 +4720,9 @@ css/css-text/line-breaking/line-breaking-005.html
 css/css-text/line-breaking/line-breaking-006.html
 css/css-text/line-breaking/line-breaking-007.html
 css/css-text/line-breaking/line-breaking-008.html
+css/css-text/line-breaking/line-breaking-009.html
 css/css-text/line-breaking/line-breaking-010.html
+css/css-text/line-breaking/line-breaking-011.html
 css/css-text/line-breaking/line-breaking-013.html
 css/css-text/line-breaking/line-breaking-014.html
 css/css-text/line-breaking/line-breaking-018.html
@@ -4741,9 +4748,13 @@ css/css-text/line-breaking/line-breaking-atomic-016.html
 css/css-text/line-breaking/line-breaking-atomic-017.html
 css/css-text/line-breaking/line-breaking-atomic-018.html
 css/css-text/line-breaking/line-breaking-atomic-019.html
+css/css-text/line-breaking/line-breaking-atomic-020.html
 css/css-text/line-breaking/line-breaking-atomic-021.html
+css/css-text/line-breaking/line-breaking-atomic-022.html
 css/css-text/line-breaking/line-breaking-atomic-023.html
+css/css-text/line-breaking/line-breaking-atomic-024.html
 css/css-text/line-breaking/line-breaking-atomic-025.html
+css/css-text/line-breaking/line-breaking-atomic-026.html
 css/css-text/line-breaking/line-breaking-atomic-027.html
 css/css-text/line-breaking/line-breaking-ic-001.html
 css/css-text/line-breaking/segment-break-transformation-currency-001.html
@@ -5300,6 +5311,7 @@ css/css-text/word-break/word-break-keep-all-005.html
 css/css-text/word-break/word-break-keep-all-006.html
 css/css-text/word-break/word-break-keep-all-007.html
 css/css-text/word-break/word-break-keep-all-008.html
+css/css-text/word-break/word-break-keep-all-011.html
 css/css-text/word-break/word-break-keep-all-u002d.html
 css/css-text/word-break/word-break-manual-001.html
 css/css-text/word-break/word-break-min-content-002.html

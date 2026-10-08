@@ -6266,4 +6266,36 @@ defmodule Browser.LayoutTest do
       assert Enum.map(items, &elem(&1, 0)) == ["cell", "text"]
     end
   end
+
+  describe "unbreakable runs and zero-width spaces" do
+    defp run_rows(html, width) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :text and &1.text != "\u200B"))
+      |> Enum.group_by(& &1.y)
+      |> Enum.sort()
+      |> Enum.map(fn {_, row} -> row |> Enum.sort_by(& &1.x) |> Enum.map_join(& &1.text) end)
+    end
+
+    test "a zero-width space between two white-space: pre spans is a place to break" do
+      html =
+        ~s(<div style="width:5px;font-size:10px"><span style="white-space:pre">X</span>&#x200B;<span style="white-space:pre">X</span></div>)
+
+      assert run_rows(html, 400) == ["X", "X"]
+    end
+
+    test "text split by empty inline boxes stays one unbreakable word" do
+      html = ~s(<div style="width:0;font-size:10px">un<span></span>bro<b></b>ken</div>)
+      assert run_rows(html, 400) == ["unbroken"]
+    end
+
+    test "keep-all still breaks after an ideographic comma" do
+      html =
+        ~s(<div style="width:18px;font-size:10px;word-break:keep-all">\u5B57\u5B57<span>\u3001</span>\u5B57\u5B57</div>)
+
+      assert run_rows(html, 400) == ["\u5B57\u5B57\u3001", "\u5B57\u5B57"]
+    end
+  end
 end
