@@ -6861,4 +6861,16 @@ defmodule Browser.LayoutTest do
       assert box.y == 20
     end
   end
+
+  describe "initial on an inherited property" do
+    test "stops the value of the parent from reaching the element" do
+      html =
+        ~s|<style>body{margin:0}.p{text-indent:20px}.c{text-indent:initial}</style><div class=p><div class=c>x</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.x == 0
+    end
+  end
 end

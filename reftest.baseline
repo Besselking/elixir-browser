@@ -4509,6 +4509,7 @@ css/css-position/position-relative-table-tr-left.html
 css/css-position/position-relative-table-tr-top-absolute-child.html
 css/css-position/position-relative-table-tr-top.html
 css/css-position/position-static-001.html
+css/css-position/static-position/htb-ltr-ltr.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-001.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-002.html
 css/css-position/static-position/inline-level-absolute-in-block-level-context-003.html

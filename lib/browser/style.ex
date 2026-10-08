@@ -1418,7 +1418,14 @@ defmodule Browser.Style do
           end
       end
 
-    base = Map.merge(inherited, typed) |> size_containment(resolved, env)
+    # (`initial` on an inherited property cuts the value off the parent's)
+    reset = for {k, v} <- resolved, v == "initial", k not in ["font-size", "color"], do: k
+
+    base =
+      inherited
+      |> Map.drop(reset)
+      |> Map.merge(typed)
+      |> size_containment(resolved, env)
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
