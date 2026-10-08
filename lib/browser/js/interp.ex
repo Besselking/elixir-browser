@@ -333,11 +333,20 @@ defmodule Browser.JS.Interp do
       s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
         put(s.vars.this, name, val)
 
+      # `onmessage = f` and `name = "x"` set the window's own property, when it has one
+      s.parent == nil and is_binary(name) and window_property?(s, name) ->
+        put(s.vars.this, name, val)
+
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
     end
   end
+
+  defp window_property?(%{vars: %{this: {:obj, _} = window}}, name),
+    do: has_property?(window, name)
+
+  defp window_property?(_, _), do: false
 
   defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
     do: match?(%{props: %{^name => _}}, deref(gid))

@@ -67,3 +67,19 @@ Pages can use `indexedDB`. Each origin has its own databases. The browser keeps 
 Data in a database can be of any type that `structuredClone` supports, including `Blob` and `File`. The size limit of one database is 256 MB.
 
 To run the web-platform-tests for IndexedDB, use a sparse checkout of the `IndexedDB` and `resources` folders and run `mix run --no-start scripts/wpt-indexeddb.exs WPT_DIR [FILTER] [--verbose]`. Set `WPT_CALL_TIMEOUT` (in milliseconds) if a test file needs more than 5 minutes.
+
+## Web Workers
+
+Pages can use `new Worker(url, options)`. A worker runs its script in its own Elixir process, with its own JavaScript heap. It can run at the same time as the page.
+
+The page and the worker send messages with `postMessage`. The browser copies each message with the structured clone algorithm. A worker has `importScripts`, `close`, timers, `fetch` and `console`. The browser shows the `console` output of a worker in the console of the page. An uncaught error in a worker becomes an `error` event on the `Worker` object. `worker.terminate()` stops the process.
+
+The options `name` and `type: "module"` work. A blob URL can be the script. A worker has no `window` and no `document`. `SharedWorker`, nested transfer of ports and `SharedArrayBuffer` are not supported.
+
+## WebSocket
+
+Pages can use `WebSocket`. The browser implements the protocol (RFC 6455) in Elixir and uses no library. The code is in `Browser.WebSocket` (handshake and frames) and `Browser.WebSocket.Client` (one connection in one process).
+
+A `wss` address uses TLS with the same trusted roots as the HTTP layer (`SSL_CERT_FILE` is also read). If `https_proxy` or `http_proxy` is set, the browser opens a `CONNECT` tunnel through the proxy, unless `no_proxy` matches the host. The browser sends the cookies of the host in the handshake and keeps the cookies from the answer.
+
+The browser answers `ping` frames, joins fragmented messages, and does the close handshake. It does not support extensions such as `permessage-deflate`. `bufferedAmount` is always 0.
