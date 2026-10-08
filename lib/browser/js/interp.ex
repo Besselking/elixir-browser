@@ -1274,6 +1274,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  defp simple_value?({tag, _}) when tag in [:lit, :id, :num, :str], do: true
+  defp simple_value?(_), do: false
+
   defp strict_assign_var(env, name, v, resolved?) do
     unless resolved?, do: throw_error("ReferenceError", "#{name} is not defined")
 
@@ -4010,8 +4013,16 @@ defmodule Browser.JS.Interp do
       write.(v)
       v
     else
+      # the reference is made before the right-hand side runs: an `eval("var x")` in it
+      # declares a new `x` that this assignment must not reach
+      home = if simple_value?(value), do: nil, else: with_binding(env, name)
       v = ev_named(value, env, {:id, name})
-      assign_var(env, name, v)
+
+      case home do
+        {:var, scope} -> assign_var(scope, name, v)
+        _ -> assign_var(env, name, v)
+      end
+
       v
     end
   end
@@ -4039,7 +4050,14 @@ defmodule Browser.JS.Interp do
   def ev({:sassign, "=", {:id, name}, value}, env) do
     resolved? = resolvable?(env, name)
     v = ev_named(value, env, {:id, name})
-    strict_assign_var(env, name, v, resolved?)
+    # the binding may have been deleted while the right-hand side ran
+    strict_assign_var(
+      env,
+      name,
+      v,
+      resolved? and (simple_value?(value) or resolvable?(env, name))
+    )
+
     v
   end
 

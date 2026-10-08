@@ -20175,11 +20175,15 @@ language/expressions/assignment/S11.13.1_A4_T2.js
 language/expressions/assignment/S11.13.1_A5_T1.js
 language/expressions/assignment/S11.13.1_A5_T2.js
 language/expressions/assignment/S11.13.1_A5_T3.js
+language/expressions/assignment/S11.13.1_A6_T1.js
+language/expressions/assignment/S11.13.1_A6_T2.js
 language/expressions/assignment/S11.13.1_A6_T3.js
 language/expressions/assignment/S11.13.1_A7_T4.js
 language/expressions/assignment/S8.12.4_A1.js
 language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
+language/expressions/assignment/assignment-operator-calls-putvalue-lref--rval--1.js
+language/expressions/assignment/assignment-operator-calls-putvalue-lref--rval-.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order.js

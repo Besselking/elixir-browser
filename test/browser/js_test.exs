@@ -1037,6 +1037,19 @@ defmodule Browser.JSTest do
              ) == "false"
     end
 
+    test "an assignment resolves its target before the right-hand side" do
+      assert js(
+               "var x = 0; var inner = (function() { x = (eval('var x;'), 1); return x })(); inner + ',' + x"
+             ) ==
+               "undefined,1"
+
+      assert js("""
+             var o = {y: 1}; var r;
+             with (o) { (function() { 'use strict'; try { y = (delete o.y, 2) } catch (e) { r = e.name } })() }
+             r
+             """) == "ReferenceError"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
