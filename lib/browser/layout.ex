@@ -1083,15 +1083,15 @@ defmodule Browser.Layout do
 
     cond do
       match?({:ok, _, _}, info) ->
-        image_atom(url, info, attrs, c, style, acc)
+        image_atom(url, info, attrs, c, style, acc, %{pstyle: parent_style})
 
       match?({:svg, _, _, _}, info) ->
         {:svg, w, h, scene} = info
         extra = %{scene: scene, intrinsic: {w, h}, paint?: true, current: color4(c["color"])}
-        image_atom(url, nil, attrs, c, style, acc, extra)
+        image_atom(url, nil, attrs, c, style, acc, Map.put(extra, :pstyle, parent_style))
 
       url != nil and info == nil and is_map(images) and declared != nil ->
-        image_atom(url, nil, attrs, c, style, acc)
+        image_atom(url, nil, attrs, c, style, acc, %{pstyle: parent_style})
 
       url != nil and info == nil and is_map(images) ->
         acc
@@ -1207,7 +1207,7 @@ defmodule Browser.Layout do
     image_atom(nil, nil, attrs, c, style, acc, extra)
   end
 
-  defp image_atom(url, info, attrs, c, style, acc, extra \\ %{}) do
+  defp image_atom(url, info, attrs, c, style, acc, extra) do
     tag = Map.get(extra, :tag, "img")
     kind = kind(tag, c)
     block? = kind in [:block, :list_item, :flex, :grid]
@@ -1299,6 +1299,9 @@ defmodule Browser.Layout do
 
     own =
       if table?, do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}), else: own
+
+    # (a table is told its width was given: with collapsed borders that is the width of its columns)
+    own = if table? and dim(c["width"]) != nil, do: Map.put(own, "@sized", true), else: own
 
     attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
 
@@ -3516,7 +3519,7 @@ defmodule Browser.Layout do
 
     height = box.mt + box_h + box.mb
 
-    place_atom(st, %{
+    place_atom(strut(st, Map.get(spec, :pstyle, style)), %{
       w: ml + box_w + mr,
       h: height,
       # the baseline of a replaced element is its bottom margin edge
@@ -3684,6 +3687,21 @@ defmodule Browser.Layout do
   # counting its content at the box's right edge (`xlim`, which moves with the item)
   defp limit_extent(%{xlim: l} = item, w), do: %{item | xlim: min(l, w)}
   defp limit_extent(item, w), do: Map.put(item, :xlim, w)
+
+  # A line made of nothing but boxes still has the height of the font and line height around
+  # them (the strut)
+  # (only a line height taller than the font's own counts: the font metrics are approximate, so
+  # a strut of the normal height would move pictures)
+  defp strut(%{line: [], lh: 0} = st, style) do
+    lf = content_factor(style)
+    px = line_px(style)
+
+    if px > round(style.size * lf),
+      do: %{st | lh: style.size, lf: lf, lmax: px},
+      else: st
+  end
+
+  defp strut(st, _style), do: st
 
   defp place_atom(st, atom) do
     line_left = st.margin + st.left
@@ -7705,6 +7723,7 @@ defmodule Browser.Layout do
       sx: round(sx),
       sy: round(sy),
       collapse?: collapse?,
+      sized?: c["@sized"] == true,
       h: table_height(c),
       fixed?: fixed_table?(c)
     }
@@ -8206,6 +8225,13 @@ defmodule Browser.Layout do
       table_caption_only(st, model, avail)
     else
       natural? = avail > @unbounded / 2
+      # a width given to a table with collapsed borders is that of its columns: half of the
+      # outermost borders is added to it
+      avail =
+        if ts.collapse? and ts.sized? and not natural?,
+          do: avail + outer_borders(placed, ncols),
+          else: avail
+
       {mins, maxs, pcts} = st |> table_columns(placed, ncols) |> column_widths(model.cols)
 
       # `table-layout: fixed`: the content decides nothing, columns without a width share what is left
@@ -8393,6 +8419,20 @@ defmodule Browser.Layout do
   defp table_caption_items(st, sub, w) do
     {items, h, _} = layout_atom(st, sub, max(w, 1))
     {items, h}
+  end
+
+  # the widths of the borders at the left and right edges of a table with collapsed borders
+  defp outer_borders(placed, ncols) do
+    side = fn edge, own -> max(if(edge, do: edge.w, else: 0), own) end
+
+    left = for p <- placed, p.col == 0, do: side.(p.redges.left, elem(p.cell.bw, 3))
+
+    right =
+      for p <- placed,
+          p.col + p.cell.colspan >= ncols,
+          do: side.(p.redges.right, elem(p.cell.bw, 1))
+
+    div(Enum.max(left, fn -> 0 end) + Enum.max(right, fn -> 0 end), 2)
   end
 
   # the borders a row or a row group puts on a cell at its edge, where they are wider than the
@@ -8670,6 +8710,12 @@ defmodule Browser.Layout do
 
   defp grow_rows(heights, _, _), do: heights
 
+  # the height of a cell's box: borders that a row or group brings add to what `height` gives
+  defp cell_minh(%{cell: %{minh: nil}}), do: 0
+
+  defp cell_minh(%{cell: cell, vdelta: vdelta}),
+    do: round(cell.minh) + if(cell.sizing == :border, do: 0, else: vdelta)
+
   defp table_row_heights(sized, nrows, sy) do
     base = List.duplicate(0, nrows)
 
@@ -8677,7 +8723,7 @@ defmodule Browser.Layout do
       sized
       |> Enum.filter(&(min(&1.cell.rowspan, nrows - &1.row) == 1))
       |> Enum.reduce(base, fn p, heights ->
-        List.update_at(heights, p.row, &max(&1, max(p.h0, round(p.cell.minh || 0))))
+        List.update_at(heights, p.row, &max(&1, max(p.h0, cell_minh(p))))
       end)
 
     sized
@@ -8686,7 +8732,7 @@ defmodule Browser.Layout do
     |> Enum.reduce(single, fn p, heights ->
       rs = min(p.cell.rowspan, nrows - p.row)
       have = heights |> Enum.slice(p.row, rs) |> Enum.sum() |> Kernel.+(sy * (rs - 1))
-      need = max(p.h0, round(p.cell.minh || 0)) - have
+      need = max(p.h0, cell_minh(p)) - have
       if need > 0, do: List.update_at(heights, p.row + rs - 1, &(&1 + need)), else: heights
     end)
   end
