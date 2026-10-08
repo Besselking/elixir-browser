@@ -162,6 +162,8 @@ defmodule Browser.BackgroundsTest do
     test "keywords and lengths" do
       assert B.parse_position("left top") == [{{:pct, +0.0}, {:pct, +0.0}}]
       assert B.parse_position("top left") == [{{:pct, +0.0}, {:pct, +0.0}}]
+      assert B.parse_position("center left") == [{{:pct, +0.0}, {:pct, 0.5}}]
+      assert B.parse_position("center right") == [{{:pct, 1.0}, {:pct, 0.5}}]
       assert B.parse_position("right bottom") == [{{:pct, 1.0}, {:pct, 1.0}}]
       assert B.parse_position("center") == [{{:pct, 0.5}, {:pct, 0.5}}]
       assert B.parse_position("center top") == [{{:pct, 0.5}, {:pct, +0.0}}]

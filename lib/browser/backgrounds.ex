@@ -301,6 +301,7 @@ defmodule Browser.Backgrounds do
   # "top left" and "left top" both work; lengths take the order x y
   defp two_positions(a, b) do
     case {axis_keyword(a), axis_keyword(b)} do
+      {{:both, y}, {:x, x}} -> {x, y}
       {{:y, y}, {kind, x}} when kind in [:x, :both] -> {x, y}
       {{kind, x}, {:x, _}} when kind in [:x, :both] -> {x, {:pct, 0.5}}
       {{kind, x}, {kind2, y}} when kind in [:x, :both] and kind2 in [:y, :both] -> {x, y}
