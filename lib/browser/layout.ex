@@ -3816,6 +3816,10 @@ defmodule Browser.Layout do
 
   defp ratio_width(_, _), do: nil
 
+  # a box whose width comes from its height and aspect ratio is that wide whatever it holds
+  defp ratio_sized?(%{width: nil, ratio: {_, _}, h: h}) when is_number(h), do: true
+  defp ratio_sized?(_), do: false
+
   # `min-height` and `max-height` of a box with an aspect ratio and no width carry over to it
   defp ratio_limits(%{ratio: {_, _}} = o, hpad, cw) do
     cw = if o.max, do: min(cw, ratio_width(%{o | h: o.max}, hpad)), else: cw
@@ -3874,7 +3878,7 @@ defmodule Browser.Layout do
         cbh:
           if(st.flex_item and st.blocks == [] and not Map.get(o, :definite, false),
             do: nil,
-            else: content_height(o)
+            else: content_height(o) || ratio_content_height(o, box_w)
           ),
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.bfc, do: [], else: st.floats),
@@ -3945,7 +3949,7 @@ defmodule Browser.Layout do
     st = %{st | y: box.top + height}
 
     st =
-      if (own_width?(o.width) or o.maxw != nil) and fixed_width?(box),
+      if (own_width?(o.width) or o.maxw != nil or ratio_sized?(o)) and fixed_width?(box),
         do:
           limit_new_items(
             %{st | ext: max(st.ext, box.x + box.w + box_mr(o) + max(st.right - st.free, 0))},
@@ -3955,7 +3959,7 @@ defmodule Browser.Layout do
 
     # an empty box is as wide as the insets around its content, for shrink-to-fit
     st =
-      if own_width?(o.width) or o.maxw != nil,
+      if own_width?(o.width) or o.maxw != nil or ratio_sized?(o),
         do: st,
         else: %{st | ext: max(st.ext, box.need)}
 
@@ -4033,6 +4037,16 @@ defmodule Browser.Layout do
   end
 
   defp content_height(_), do: nil
+
+  # a box with an aspect ratio and no height has the height its width gives it (when its
+  # content is not taller), which is what the percentages of its children refer to
+  defp ratio_content_height(%{h: nil, ratio: {_, _}, clip: false} = o, box_w) do
+    {bt, _, bb, _} = o.bw
+    h = ratio_height(o, %{w: box_w}, 0, bt + o.pt + o.pb + bb)
+    if o.max == nil and o.min == nil, do: h
+  end
+
+  defp ratio_content_height(_, _), do: nil
 
   # everything the box painted sticks with it
   defp stick_new(st, %{o: o} = box, height) do

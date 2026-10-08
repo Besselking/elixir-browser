@@ -5165,6 +5165,28 @@ defmodule Browser.LayoutTest do
       box = ratio_box("width:100px;height:20px;aspect-ratio:1")
       assert box.h == 20
     end
+
+    test "a percentage height inside a ratio-sized box resolves against the ratio height" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"width:100px;aspect-ratio:2\"><div style=\"height:50%;background:green\"></div></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :rect)).h == 25
+    end
+
+    test "a float with a height and a ratio-sized child is as wide as the ratio makes it" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"float:left;height:50px\"><div style=\"height:100%;aspect-ratio:2;background:green\"></div></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :rect)).w == 100
+    end
   end
 
   describe "invalid negative sizes" do
