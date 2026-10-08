@@ -2443,13 +2443,34 @@ defmodule Browser.JS.DOM do
 
   # ── selectors ──────────────────────────────────────────────
 
-  # a selector list: [[{combinator, compound}, ...], ...], leftmost first
+  # a selector list: [[{combinator, compound}, ...], ...], leftmost first. Scripts ask the same
+  # few selectors again and again, so what was parsed is kept.
   defp parse_selectors(str) do
-    str
-    |> split_top(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.map(&parse_complex/1)
+    memo({:sel, str}, fn ->
+      str
+      |> split_top(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&parse_complex/1)
+    end)
+  end
+
+  @memo_max 2_000
+
+  defp memo(key, fun) do
+    cache = :erlang.get(:js_memo)
+    cache = if cache == :undefined, do: %{}, else: cache
+
+    case cache do
+      %{^key => v} ->
+        v
+
+      _ ->
+        v = fun.()
+        cache = if map_size(cache) >= @memo_max, do: %{}, else: cache
+        :erlang.put(:js_memo, Map.put(cache, key, v))
+        v
+    end
   end
 
   defp split_top(str, sep), do: split_top(String.graphemes(str), sep, 0, nil, [], [])
@@ -2702,11 +2723,13 @@ defmodule Browser.JS.DOM do
 
   # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
   defp nth_match(n, arg, from_end?, siblings_fun) do
-    {formula, of_sel} =
-      case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
-        [f, sel] -> {f, parse_selectors(sel)}
-        [f] -> {f, nil}
-      end
+    {anb, of_sel} =
+      memo({:nth, arg}, fn ->
+        case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+          [f, sel] -> {parse_anb(f), parse_selectors(sel)}
+          [f] -> {parse_anb(f), nil}
+        end
+      end)
 
     kids = siblings_fun.(n)
     kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
@@ -2717,7 +2740,7 @@ defmodule Browser.JS.DOM do
         false
 
       i ->
-        case parse_anb(formula) do
+        case anb do
           {a, b} ->
             pos = i + 1
 

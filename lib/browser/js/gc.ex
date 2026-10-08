@@ -39,6 +39,7 @@ defmodule Browser.JS.GC do
       Enum.reduce(Process.get(), {%{}, []}, fn
         {k, v}, {heap, roots} when is_integer(k) -> {Map.put(heap, k, v), roots}
         {{:js_hoist, _}, _}, acc -> acc
+        {:js_memo, _}, acc -> acc
         {:js_heap_n, _}, acc -> acc
         {_, v}, {heap, roots} -> {heap, [v | roots]}
       end)

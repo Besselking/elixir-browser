@@ -660,6 +660,10 @@ defmodule Browser.JS.Interp do
           function_get(id, o, key)
         end
 
+      :host when is_number(key) and key >= 0 and key == trunc(key) and
+                   :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
+        Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
+
       :host ->
         key = to_key(key)
         {mod, data} = o.host
@@ -1146,6 +1150,13 @@ defmodule Browser.JS.Interp do
             else
               put_array_prop(id, o, key, v)
             end
+        end
+
+      %{class: :host, host: {Browser.JS.TypedArrays, data}}
+      when is_number(key) and key >= 0 and key == trunc(key) ->
+        case Browser.JS.TypedArrays.put_index(data, trunc(key), v) do
+          :ok -> :ok
+          :readonly -> fail_put()
         end
 
       %{class: :host, host: {mod, data}} ->
