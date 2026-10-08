@@ -22,7 +22,7 @@ defmodule Browser.JSGCTest do
   end
 
   test "frees unreachable objects and keeps what timers, globals and closures still use" do
-    {freed, _, _, console} =
+    {freed, before, _, console} =
       run(
         """
         var keep = { n: 1, list: [1, 2, 3] };
@@ -40,6 +40,7 @@ defmodule Browser.JSGCTest do
       )
 
     assert freed > 4000
+    assert freed < before
     assert console == [{:log, "after 1"}, {:log, "from a timer 3 2"}]
   end
 
