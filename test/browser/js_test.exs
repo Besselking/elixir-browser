@@ -1712,4 +1712,15 @@ defmodule Browser.JSTest do
       assert js(src) == true
     end
   end
+
+  test "an array whose prototype is a typed array does not create an index outside it" do
+    src = """
+    var ta = new Int32Array(1);
+    var a = Object.setPrototypeOf([], ta);
+    a[1] = 5; a[0] = 7;
+    [a.hasOwnProperty(1), a.hasOwnProperty(0), a.length].join()
+    """
+
+    assert js(src) == "false,true,1"
+  end
 end

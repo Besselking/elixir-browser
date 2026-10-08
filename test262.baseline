@@ -17870,6 +17870,7 @@ built-ins/TypedArrayConstructors/internals/Set/BigInt/detached-buffer-key-is-not
 built-ins/TypedArrayConstructors/internals/Set/BigInt/detached-buffer-key-is-symbol.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/detached-buffer.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/indexed-value.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-canonical-invalid-index-prototype-chain-set.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-canonical-invalid-index-reflect-set.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-minus-zero.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-not-canonical-index.js
@@ -17895,6 +17896,7 @@ built-ins/TypedArrayConstructors/internals/Set/detached-buffer-key-is-not-numeri
 built-ins/TypedArrayConstructors/internals/Set/detached-buffer-key-is-symbol.js
 built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js
 built-ins/TypedArrayConstructors/internals/Set/indexed-value.js
+built-ins/TypedArrayConstructors/internals/Set/key-is-canonical-invalid-index-prototype-chain-set.js
 built-ins/TypedArrayConstructors/internals/Set/key-is-canonical-invalid-index-reflect-set.js
 built-ins/TypedArrayConstructors/internals/Set/key-is-in-bounds-receiver-is-not-typed-array.js
 built-ins/TypedArrayConstructors/internals/Set/key-is-minus-zero.js
