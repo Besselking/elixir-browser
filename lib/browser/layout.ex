@@ -124,6 +124,7 @@ defmodule Browser.Layout do
       mono: false,
       family: nil,
       href: nil,
+      blank: false,
       pre: false,
       ws: :normal,
       tab: 8,
@@ -1096,6 +1097,7 @@ defmodule Browser.Layout do
       css: image_css(c),
       box: box,
       href: style.href,
+      blank: style.blank,
       hidden: style.hidden,
       nid: style.nid,
       # a block-level picture sits on a line of its own: vertical-align does not apply
@@ -2000,8 +2002,12 @@ defmodule Browser.Layout do
 
   defp link_style(style, attrs) do
     case List.keyfind(attrs, "href", 0) do
-      {_, href} -> %{style | href: href, color: {0, 0, 238}, underline: true}
-      nil -> style
+      {_, href} ->
+        blank = List.keyfind(attrs, "target", 0) == {"target", "_blank"}
+        %{style | href: href, blank: blank, color: {0, 0, 238}, underline: true}
+
+      nil ->
+        style
     end
   end
 
@@ -3023,6 +3029,7 @@ defmodule Browser.Layout do
           w: cw,
           h: ch,
           href: spec.href,
+          blank: Map.get(spec, :blank, false),
           hidden: spec.hidden,
           nid: Map.get(spec, :nid),
           rr: box.pr + br + mr
@@ -4827,6 +4834,7 @@ defmodule Browser.Layout do
       mono: style.mono,
       family: style.family,
       href: if(style.hidden, do: nil, else: style.href),
+      blank: style.blank,
       hidden: style.hidden,
       color: style.color,
       underline: style.underline,

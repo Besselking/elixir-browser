@@ -138,6 +138,8 @@ defmodule Browser.Session do
       jobs: %{},
       # a tab was just opened and its address bar is waiting for typing
       fresh_tab: false,
+      # the index of the tab being dragged along the strip
+      tab_drag: nil,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
       closed: [],
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
@@ -479,6 +481,19 @@ defmodule Browser.Session do
   def handle_info(wx(obj: obj, event: wxMouse(type: :middle_down, x: x, y: y)), state)
       when obj == state.ui.tabs,
       do: {:noreply, tab_click(state, x, y, :middle)}
+
+  def handle_info(wx(obj: obj, event: wxMouse(type: :left_up)), state)
+      when obj == state.ui.tabs,
+      do: {:noreply, %{state | tab_drag: nil}}
+
+  # dragging a tab along the strip puts it in the place it is over
+  def handle_info(wx(obj: obj, event: wxMouse(type: :motion, x: x, leftDown: true)), state)
+      when obj == state.ui.tabs and state.tab_drag != nil,
+      do: {:noreply, drag_tab(state, x)}
+
+  def handle_info(wx(obj: obj, event: wxMouse(type: :motion)), state)
+      when obj == state.ui.tabs,
+      do: {:noreply, state}
 
   def handle_info(wx(event: wxMouse(type: :right_down, x: wx_x, y: y)), state),
     do: {:noreply, context_menu(state, wx_x, y)}
@@ -1409,7 +1424,15 @@ defmodule Browser.Session do
                     {:noreply, page_click(state, x, py, count, shift)}
 
                   href ->
-                    {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, new_tab?)}
+                    # Ctrl/Cmd+click opens behind this tab, target="_blank" in front of it
+                    how =
+                      cond do
+                        new_tab? -> true
+                        UI.link_blank?(state.links, x, py) -> :foreground
+                        true -> false
+                      end
+
+                    {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, how)}
                 end
 
               host ->
@@ -2109,6 +2132,7 @@ defmodule Browser.Session do
     sync_buttons(%{state | history: history, url: url, page: page})
   end
 
+  defp js_effect({:open_tab, url}, state), do: open_foreground_tab(state, url)
   defp js_effect({:navigate, url, mode}, state), do: load(state, url, mode, initiator: state.url)
 
   # `location.hash = ...`: an entry in the page's history, and the page scrolls to the fragment
@@ -2356,6 +2380,9 @@ defmodule Browser.Session do
 
   # a link to the same document with a fragment only moves within it
   defp follow(state, href, true), do: open_link_tab(state, href)
+
+  defp follow(state, href, :foreground),
+    do: open_foreground_tab(state, Fetch.resolve(base(state), href))
 
   defp follow(state, href, false) do
     url = Fetch.resolve(base(state), href)
@@ -2935,6 +2962,17 @@ defmodule Browser.Session do
     state |> sync_buttons() |> publish_tabs()
   end
 
+  # a page opened in a new tab that is shown at once (`target=\"_blank\"`, `window.open`)
+  defp open_foreground_tab(state, url) do
+    from = state.url
+    state = park(state)
+    tab = blank_tab()
+    state = %{state | tabs: state.tabs ++ [tab]}
+    state = state |> Map.merge(tab) |> then(&%{&1 | active: length(&1.tabs) - 1})
+    state = resume_blank(state)
+    load(state, url, :push, initiator: from)
+  end
+
   # a link opened in a new tab behind this one: it loads in the background
   defp open_link_tab(state, href) do
     url = Fetch.resolve(base(state), href)
@@ -3012,9 +3050,21 @@ defmodule Browser.Session do
     load(state, url, mode, opts)
   end
 
+  defp drag_tab(state, x) do
+    to = Browser.TabStrip.index_at(length(state.tabs), UI.tabs_width(state.ui), x)
+    from = state.tab_drag
+
+    if to == from do
+      state
+    else
+      {tab, rest} = List.pop_at(state.tabs, from)
+      publish_tabs(%{state | tabs: List.insert_at(rest, to, tab), active: to, tab_drag: to})
+    end
+  end
+
   defp tab_click(state, x, y, button) do
     case Browser.TabStrip.hit(length(state.tabs), UI.tabs_width(state.ui), x, y) do
-      {:tab, i} when button == :left -> switch_tab(state, i)
+      {:tab, i} when button == :left -> %{switch_tab(state, i) | tab_drag: i}
       {:tab, i} when button == :middle -> close_tab(state, i)
       {:close, i} -> close_tab(state, i)
       :new when button == :left -> new_tab(state)
