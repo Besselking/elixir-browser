@@ -1281,6 +1281,7 @@ css/CSS2/margin-padding-clear/margin-applies-to-012.xht
 css/CSS2/margin-padding-clear/margin-applies-to-013.xht
 css/CSS2/margin-padding-clear/margin-applies-to-014.xht
 css/CSS2/margin-padding-clear/margin-applies-to-015.xht
+css/CSS2/margin-padding-clear/margin-auto-on-block-box.html
 css/CSS2/margin-padding-clear/margin-backgrounds-002.xht
 css/CSS2/margin-padding-clear/margin-backgrounds-003.xht
 css/CSS2/margin-padding-clear/margin-border-padding-001.xht
@@ -4861,6 +4862,8 @@ css/css-text/text-autospace/text-autospace-vs-001.html
 css/css-text/text-autospace/text-autospace-zh-001.html
 css/css-text/text-indent/text-indent-caret-001.html
 css/css-text/text-indent/text-indent-caret-hanging-001.html
+css/css-text/text-indent/text-indent-length-001.html
+css/css-text/text-indent/text-indent-length-002.html
 css/css-text/text-indent/text-indent-list-001.html
 css/css-text/text-indent/text-indent-min-max-content-001.html
 css/css-text/text-indent/text-indent-overflow.html
@@ -5152,6 +5155,7 @@ css/css-text/white-space/white-space-pre-wrap-trailing-spaces-011.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-022.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-023.html
 css/css-text/white-space/white-space-vs-joiners-002.html
+css/css-text/white-space/white-space-zero-fontsize-001.html
 css/css-text/white-space/ws-break-spaces-applies-to-012.html
 css/css-text/white-space/ws-break-spaces-applies-to-013.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-003.html

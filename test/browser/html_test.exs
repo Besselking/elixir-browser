@@ -14,6 +14,20 @@ defmodule Browser.HTMLTest do
     end
   end
 
+  test "the newline right after <pre> is dropped, except in XML documents" do
+    assert [
+             {:element, "html", _,
+              [_, {:element, "body", _, [{:element, "pre", _, [{:text, "a\nb"}]}]}]}
+           ] =
+             HTML.parse_document("<pre>\na\nb</pre>")
+
+    assert [
+             {:element, "html", _,
+              [_, {:element, "body", _, [{:element, "pre", _, [{:text, "\na"}]}]}]}
+           ] =
+             HTML.parse_document("<pre>\na</pre>", xml: true)
+  end
+
   test "void elements don't swallow siblings" do
     assert [{:element, "p", _, [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
              HTML.parse("<p>a<br>b</p>")
