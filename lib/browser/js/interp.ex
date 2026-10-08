@@ -1725,7 +1725,8 @@ defmodule Browser.JS.Interp do
             run_body(body, iter_env, labels)
           catch
             kind, e ->
-              iter_close(it, true)
+              # an error from `return` replaces a return or labeled break, not a throw
+              iter_close(it, not match?({:js_return, _}, e) and not match?({:js_break, _}, e))
               :erlang.raise(kind, e, __STACKTRACE__)
           end
 

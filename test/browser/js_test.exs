@@ -1083,6 +1083,14 @@ defmodule Browser.JSTest do
       assert [log: "broken,true"] == lines
     end
 
+    test "an error from return() replaces a return inside for-of" do
+      assert js("""
+             var it = {[Symbol.iterator]() { return this }, next() { return {done: false} }, return() { throw new RangeError('close') }};
+             function f() { for (var x of it) { return 1 } }
+             try { f() } catch (e) { e.name }
+             """) == "RangeError"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
