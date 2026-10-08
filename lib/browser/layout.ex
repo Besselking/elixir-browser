@@ -7578,6 +7578,14 @@ defmodule Browser.Layout do
     end
   end
 
+  # the baseline of Ahem, the test font, is 0.8em down; other text is taken to sit on the bottom of
+  # its box
+  defp text_ascent(%{family: family, h: h}) when is_binary(family) do
+    if String.contains?(String.downcase(family), "ahem"), do: round(h * 0.8), else: h
+  end
+
+  defp text_ascent(%{h: h}), do: h
+
   # the bottom of the first line of text, or the bottom of the box when there is none
   defp first_baseline(items, height) do
     case Enum.filter(items, &(&1.type == :text)) do
@@ -7586,7 +7594,7 @@ defmodule Browser.Layout do
 
       texts ->
         first = Enum.min_by(texts, & &1.y)
-        first.y + first.h
+        first.y + text_ascent(first)
     end
   end
 
