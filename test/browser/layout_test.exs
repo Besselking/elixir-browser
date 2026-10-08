@@ -5277,6 +5277,21 @@ defmodule Browser.LayoutTest do
       assert [{-10, 0, 40, 10}] = flex_rects(html)
     end
 
+    test "a percentage height inside a column item that cannot flex refers to its flexed size" do
+      fixed =
+        ~s|<div style="display:flex;flex-direction:column"><div style="flex:0 0 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      flexible =
+        ~s|<div style="display:flex;flex-direction:column"><div style="flex:1 1 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      tall =
+        ~s|<div style="display:flex;flex-direction:column;height:200px"><div style="flex:1 1 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      assert [{0, 0, 100, 100}] = flex_rects(fixed)
+      assert flex_rects(flexible) == []
+      assert [{0, 0, 100, 200}] = flex_rects(tall)
+    end
+
     test "column items start from their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;height:100px"><div style="flex:0 30px;background:green"></div></div>

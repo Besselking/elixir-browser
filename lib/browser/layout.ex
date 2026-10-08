@@ -1503,6 +1503,7 @@ defmodule Browser.Layout do
       nid: style.nid,
       h: num(c["height"]),
       hpct: pct_of(c["height"]),
+      definite: box.definite,
       ratio: aspect_ratio(c["aspect-ratio"]),
       root: tag == "html",
       min: num(c["min-height"]),
@@ -1882,6 +1883,8 @@ defmodule Browser.Layout do
       bg: if(color?(c["background-color"]), do: c["background-color"]),
       r: radii_spec(c),
       bgimg: bgimg_spec(c),
+      # the height was settled by flexing, which makes percentages of it definite
+      definite: c["@definite"] == true,
       shadows: c["box-shadow"] || [],
       color: color
     }
@@ -3465,7 +3468,11 @@ defmodule Browser.Layout do
       st
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
-        cbh: if(st.flex_item and st.blocks == [], do: nil, else: content_height(o)),
+        cbh:
+          if(st.flex_item and st.blocks == [] and not Map.get(o, :definite, false),
+            do: nil,
+            else: content_height(o)
+          ),
         cbw: max(box_w - bl - br - o.pl - o.pr, 0),
         floats: if(o.bfc, do: [], else: st.floats),
         left: left + bl + o.pl,
@@ -6622,7 +6629,7 @@ defmodule Browser.Layout do
 
     Enum.map(sized, fn it ->
       share = if total > 0, do: free * it.grow / total, else: 0
-      flex_column_height(st, it, it.base + share)
+      flex_column_height(st, it, it.base + share, true)
     end)
   end
 
@@ -6633,7 +6640,7 @@ defmodule Browser.Layout do
       Enum.map(sized, fn it ->
         target = it.base + free * it.shrink * it.base / total
 
-        flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base))
+        flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base), true)
       end)
     else
       sized
@@ -6641,7 +6648,7 @@ defmodule Browser.Layout do
   end
 
   defp flex_column_resize(st, sized, _free),
-    do: Enum.map(sized, &flex_column_height(st, &1, &1.base))
+    do: Enum.map(sized, &flex_column_height(st, &1, &1.base, true))
 
   # in a column of automatic height an item with a `flex-basis` is as high as that, or as its
   # content needs
@@ -6650,12 +6657,13 @@ defmodule Browser.Layout do
     {_, floor, _} =
       flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
 
-    flex_column_height(st, it, max(it.base, floor))
+    # (an item that cannot flex has a definite size when its container has none)
+    flex_column_height(st, it, max(it.base, floor), it.grow == 0 and it.shrink == 0)
   end
 
   defp flex_column_basis(_st, it), do: it
 
-  defp flex_column_height(st, it, target) do
+  defp flex_column_height(st, it, target, definite?) do
     # an item does not go below what its content needs (`min-height: auto`)
     target =
       if it.rebuild != nil and target < it.h - 0.5 do
@@ -6676,7 +6684,9 @@ defmodule Browser.Layout do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
       content = if it.sizing == :border, do: box, else: box - it.vextra
-      sub = it.rebuild.(%{"height" => max(content, 0) * 1.0, "aspect-ratio" => nil})
+      props = %{"height" => max(content, 0) * 1.0, "aspect-ratio" => nil}
+      props = if definite?, do: Map.put(props, "@definite", true), else: props
+      sub = it.rebuild.(props)
       {items, h, _} = flex_atom(st, sub, it.w, {it.key, round(target)})
       %{it | items: items, h: max(h, 0)}
     else
