@@ -3308,6 +3308,9 @@ defmodule Browser.Layout do
   end
 
   defp op({:inset, l, r}, st) do
+    # (the indent of the block around it is for its own first line)
+    st = if st.line == [], do: %{st | lead: 0}, else: st
+
     %{
       st
       | insets: [{st.left, st.right, st.y, length(st.floats)} | st.insets],
@@ -3368,7 +3371,8 @@ defmodule Browser.Layout do
     %{st | items: [%{type: :colbreak, x: 0, y: st.y, h: 0} | st.items], n: st.n + 1}
   end
 
-  defp op({:box_start, ref, o}, st), do: start_box(st, ref, o)
+  defp op({:box_start, ref, o}, st),
+    do: start_box(if(st.line == [], do: %{st | lead: 0}, else: st), ref, o)
 
   # A fieldset's legend is laid out on its own, shrink-to-fit, at the top of the fieldset with its
   # middle on the border. The content starts below it, and the border has a gap where it is.
