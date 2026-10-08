@@ -570,6 +570,16 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
+      m = Regex.run(~r/\A:host\(/u, s) ->
+        [whole] = m
+
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {:ok, cmps} <- compound_list(inner) do
+          tokenize(rest, [{:fn, :host, cmps} | acc])
+        else
+          _ -> :error
+        end
+
       m = Regex.run(~r/\A:(not|is|where|matches|-webkit-any|-moz-any)\(/u, s) ->
         [whole, name] = m
 
@@ -703,7 +713,7 @@ defmodule Browser.CSS do
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop popover-open)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop popover-open host)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -1006,6 +1016,11 @@ defmodule Browser.CSS do
   defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
   defp pseudo?({:anchor, key}, ctx), do: ctx.key == key
   defp pseudo?({:has, rels}, ctx), do: Enum.any?(rels, &has?(&1, ctx))
+  defp pseudo?(:host, ctx), do: shadow_host?(ctx)
+
+  defp pseudo?({:fn, :host, cmps}, ctx),
+    do: shadow_host?(ctx) and Enum.any?(cmps, &match_compound(&1, ctx))
+
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:nth, kind, {a, b}}, ctx), do: nth_match?(a, b, position(kind, ctx))
@@ -1081,7 +1096,13 @@ defmodule Browser.CSS do
   """
   def context(tag, attrs, kids, parent, prev, i, count, rest) do
     # the content of a frame is styled by the frame's own sheets (see `Browser.Style.scoped_refs/1`)
-    scope = parent && parent.scope_in
+    # and a shadow tree by the sheets in it; a node of the host that a slot shows (marked
+    # `data-b-slotted` with the shadow tree's scope) is still styled by the host's sheets
+    scope =
+      case attr_value(attrs, "data-b-slotted") do
+        nil -> parent && parent.scope_in
+        shadow -> slotted_scope(parent, shadow)
+      end
 
     %{
       scope: scope,
@@ -1101,6 +1122,37 @@ defmodule Browser.CSS do
       next: rest,
       key: {parent && parent.key, i}
     }
+  end
+
+  # the scope of the host of the shadow tree `shadow`, which is above `ctx`
+  defp slotted_scope(nil, _shadow), do: nil
+
+  defp slotted_scope(ctx, shadow) do
+    if ctx.scope_in == shadow and ctx.scope != shadow,
+      do: ctx.scope,
+      else: slotted_scope(ctx.parent, shadow)
+  end
+
+  @doc "True for an element that has a shadow root (see `Browser.JS.DOM`)."
+  def shadow_host?(%{attrs: attrs}) do
+    case List.keyfind(attrs, "data-b-frame", 0) do
+      {_, "s" <> _} -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  True for a rule with `:host` in its last compound: it styles the element that has the shadow
+  root, though its sheet is in the shadow tree.
+  """
+  def host_rule?(parts) do
+    {cmp, _} = List.first(parts)
+
+    Enum.any?(cmp.pseudos, fn
+      :host -> true
+      {:fn, :host, _} -> true
+      _ -> false
+    end)
   end
 
   defp attr_value(attrs, name) do
