@@ -5953,7 +5953,7 @@ defmodule Browser.LayoutTest do
 
       assert Enum.map(rects, &elem(&1, 3)) == [3]
       assert [{0, y, 100, 3}] = rects
-      assert y == 37
+      assert y == 40
     end
 
     test "the wider of two borders between rows wins" do
@@ -6541,6 +6541,27 @@ defmodule Browser.LayoutTest do
       page = Browser.Page.build("<style>body{margin:0}</style>" <> fits, "about:home")
       {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
       assert Enum.all?(items, &(not Map.has_key?(&1, :hang)))
+    end
+  end
+
+  describe "borders of a row group in a table with collapsed borders" do
+    defp group_table(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+    end
+
+    test "add to the height of the rows and half of them to the width the table was given" do
+      html =
+        ~s(<div style="display:table;border-collapse:collapse;table-layout:fixed;width:100px">) <>
+          ~s(<div style="display:table-row-group;border:4px solid green">) <>
+          ~s(<div style="display:table-row"><div style="display:table-cell;height:48px">a</div></div>) <>
+          ~s(<div style="display:table-row"><div style="display:table-cell;height:48px">b</div></div>) <>
+          "</div></div>"
+
+      {items, h} = group_table(html)
+      assert h == 104
+      rects = for %{type: :rect, color: {0, 128, 0}} = r <- items, do: r
+      assert Enum.max(Enum.map(rects, &(&1.x + &1.w))) == 104
     end
   end
 end
