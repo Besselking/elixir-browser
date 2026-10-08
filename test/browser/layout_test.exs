@@ -5381,6 +5381,13 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{0, 0, 50, 5}]
     end
 
+    test "a floated list item is a box with a size of its own" do
+      html =
+        ~s(<ul style="margin:0;padding:0"><li style="float:left;list-style:none;width:30px;height:10px;background:red"></li></ul>)
+
+      assert flex_rects(html) == [{0, 0, 30, 10}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

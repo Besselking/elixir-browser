@@ -1769,10 +1769,17 @@ defmodule Browser.Layout do
       {:element, "li", attrs, li_kids} = li, {a, n} ->
         c = computed(attrs)
 
-        if kind("li", c) == :list_item do
-          {list_item(tag, n, attrs, li_kids, style, c, a), n + 1}
-        else
-          {walk(li, style, a), n}
+        cond do
+          # a floated or positioned item is a box of its own, without a marker
+          kind("li", c) == :list_item and
+              (float_side(c) != nil or c["position"] in ["absolute", "fixed"]) ->
+            {walk(li, style, a), n + 1}
+
+          kind("li", c) == :list_item ->
+            {list_item(tag, n, attrs, li_kids, style, c, a), n + 1}
+
+          true ->
+            {walk(li, style, a), n}
         end
 
       other, {a, n} ->
