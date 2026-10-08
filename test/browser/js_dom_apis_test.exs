@@ -264,4 +264,21 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["5 3:a|8:x|1:B|8:?lit$1$|3:c a<!--x--><b></b><!--?lit$1$-->c"]
   end
+
+  test "getComputedStyle gives the declared value, then usual defaults, and getPropertyValue agrees" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const el = document.getElementById("a");
+        const cs = getComputedStyle(el);
+        console.log(cs.color, cs.display, cs.paddingLeft, cs.getPropertyValue("position"),
+          cs.getPropertyValue("width"), parseFloat(cs.width) - (parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)),
+          getComputedStyle(document.getElementById("b")).display);
+        """,
+        ~S|<div id=a style="color: red"></div><span id=b></span>|
+      )
+
+    assert errors == []
+    assert logs == ["red block 0px static 0px 0 inline"]
+  end
 end

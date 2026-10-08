@@ -267,6 +267,13 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  defp split_realm({:style, nid, :computed} = data) when is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, data}
+      _ -> {nil, data}
+    end
+  end
+
   defp split_realm({k, nid} = data)
        when k in [:classlist, :style, :dataset] and is_integer(nid) do
     case st().nodes do
@@ -922,11 +929,16 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp inherited_rect(nil), do: {0.0, 0.0, 0.0, 0.0}
+  # (a frame is not laid out: its elements are as wide as the frame, and have no height)
+  defp inherited_rect(nil) do
+    if st().doc == st().main,
+      do: {0.0, 0.0, 0.0, 0.0},
+      else: {0.0, 0.0, st().width * 1.0, st().height * 1.0}
+  end
 
   defp inherited_rect(parent) do
     case page_rect(parent) do
-      {x, y, _, _} -> {x, y, 0.0, 0.0}
+      {x, y, w, _} -> {x, y, if(st().doc == st().main, do: 0.0, else: w), 0.0}
     end
   end
 
@@ -1288,6 +1300,7 @@ defmodule Browser.JS.DOM do
 
   defp hget({:classlist, nid}, key, _self), do: classlist_get(nid, key)
   defp hget({:style, nid}, key, _self), do: style_get(nid, key)
+  defp hget({:style, nid, :computed}, key, _self), do: computed_get(nid, key)
   defp hget({:dataset, nid}, key, _self), do: dataset_get(nid, key)
   defp hget(:window, key, _self), do: window_get(key)
   defp hget(:location, key, _self), do: location_get(key)
@@ -1947,6 +1960,60 @@ defmodule Browser.JS.DOM do
     name
     |> String.replace(~r/[A-Z]/, fn c -> "-" <> String.downcase(c) end)
     |> then(fn k -> if String.starts_with?(k, "css-float"), do: "float", else: k end)
+  end
+
+  # `getComputedStyle(el)`: what the element declares itself, then the size it was laid out at
+  # (a frame's elements as wide as the frame), then the browser's usual values
+  @block_tags ~w(html body div p section article aside header footer main nav ul ol li dl dt dd h1 h2 h3 h4 h5 h6
+                 form fieldset table pre blockquote figure figcaption address hr details summary dialog)
+
+  defp computed_get(_nid, key) when not is_binary(key), do: :miss
+  defp computed_get(_nid, "length"), do: {:ok, 0.0}
+
+  defp computed_get(nid, key) do
+    if key in ~w(setProperty getPropertyValue removeProperty item getPropertyPriority) do
+      :miss
+    else
+      n = node(nid)
+      prop = kebab(key)
+
+      case List.keyfind(style_decls(nid), prop, 0) do
+        {_, v} -> {:ok, v}
+        nil -> {:ok, computed_default(n, prop)}
+      end
+    end
+  end
+
+  defp computed_default(n, prop) do
+    {_, _, w, h} = page_rect(n.id)
+    px = fn v -> "#{round(v)}px" end
+
+    case prop do
+      "width" -> px.(w)
+      "height" -> px.(h)
+      "display" -> if(n.tag in @block_tags, do: "block", else: "inline")
+      "position" -> "static"
+      "visibility" -> "visible"
+      "opacity" -> "1"
+      "overflow" -> "visible"
+      "float" -> "none"
+      "z-index" -> "auto"
+      "box-sizing" -> "content-box"
+      "color" -> "rgb(0, 0, 0)"
+      "background-color" -> "rgba(0, 0, 0, 0)"
+      "font-size" -> "16px"
+      "font-weight" -> "400"
+      "line-height" -> "normal"
+      "text-align" -> "start"
+      "direction" -> "ltr"
+      "cursor" -> "auto"
+      "transform" -> "none"
+      "pointer-events" -> "auto"
+      "padding" <> _ -> "0px"
+      "margin" <> _ -> "0px"
+      "border" <> _ -> if String.ends_with?(prop, "width"), do: "0px", else: ""
+      _ -> ""
+    end
   end
 
   defp style_get(nid, "cssText"), do: {:ok, attr_or(node(nid), "style", "")}
@@ -4595,9 +4662,18 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(sp, "getPropertyValue", fn this, args ->
-      style_decls(style_nid(this))
-      |> List.keyfind(String.downcase(to_str(arg(args, 0))), 0)
-      |> then(&if(&1, do: elem(&1, 1), else: ""))
+      name = String.downcase(to_str(arg(args, 0)))
+
+      if computed_style?(this) do
+        case computed_get(style_nid(this), name) do
+          {:ok, v} -> v
+          _ -> ""
+        end
+      else
+        style_decls(style_nid(this))
+        |> List.keyfind(name, 0)
+        |> then(&if(&1, do: elem(&1, 1), else: ""))
+      end
     end)
 
     def_fn(sp, "removeProperty", fn this, args ->
@@ -4728,7 +4804,16 @@ defmodule Browser.JS.DOM do
   defp classlist_nid({:obj, id}),
     do: with(%{host: {__MODULE__, {:classlist, nid}}} <- deref(id), do: nid)
 
-  defp style_nid({:obj, id}), do: with(%{host: {__MODULE__, {:style, nid}}} <- deref(id), do: nid)
+  defp style_nid({:obj, id}) do
+    case deref(id) do
+      %{host: {__MODULE__, {:style, nid}}} -> nid
+      %{host: {__MODULE__, {:style, nid, :computed}}} -> nid
+      _ -> nil
+    end
+  end
+
+  defp computed_style?({:obj, id}),
+    do: match?(%{host: {__MODULE__, {:style, _, :computed}}}, deref(id))
 
   defp install_usp(p) do
     def_fn(p, "get", fn this, args ->
@@ -5138,7 +5223,7 @@ defmodule Browser.JS.DOM do
       "getComputedStyle",
       native("getComputedStyle", fn _, args ->
         el = arg(args, 0)
-        aux_host({:style, nid_of(el)}, :style)
+        aux_host({:style, nid_of(el), :computed}, :style)
       end)
     )
 
