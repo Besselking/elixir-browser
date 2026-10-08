@@ -4,7 +4,19 @@
 #   Debian/Ubuntu:  wxWidgets 3.3 (reads WebP images) and OTP built against it, from source under
 #                   $PREFIX (default /usr/local), Elixir precompiled
 # Versions match .tool-versions; asdf/mise users can run `asdf install` / `mise install` instead.
+#
+# The Linux source build takes 30+ minutes. To skip it, the script first tries a prebuilt archive of
+# $PREFIX/otp and $PREFIX/wx33 (a release asset of this repository, one per OTP, wx and Ubuntu version).
+# It checks the SHA-256 sum and, if the download or the check fails, builds from source.
+#   scripts/install-toolchain.sh --pack OUT.tar.gz   after an install: write the archive and OUT.tar.gz.sha256
+#   PREBUILT_URL=...   use another archive location (PREBUILT_URL=none: always build from source)
 set -euo pipefail
+
+pack=""
+if [ "${1:-}" = "--pack" ]; then
+  pack=${2:?usage: install-toolchain.sh --pack OUT.tar.gz}
+  case "$pack" in /*) ;; *) pack=$PWD/$pack ;; esac
+fi
 
 cd "$(dirname "$0")/.."
 OTP=$(awk '$1 == "erlang" { print $2 }' .tool-versions)
@@ -34,8 +46,31 @@ Linux)
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
 
-  if ! "$PREFIX/otp/bin/erl" -noshell -eval "io:put_chars(erlang:system_info(otp_release)), halt()." 2>/dev/null | grep -qx "$OTP_MAJOR" ||
-    [ ! -x "$PREFIX/wx33/bin/wx-config" ]; then
+  have_toolchain() {
+    "$PREFIX/otp/bin/erl" -noshell -eval "io:put_chars(erlang:system_info(otp_release)), halt()." 2>/dev/null | grep -qx "$OTP_MAJOR" &&
+      [ -x "$PREFIX/wx33/bin/wx-config" ]
+  }
+
+  if [ -z "$pack" ] && ! have_toolchain; then
+    # prebuilt archive: the build is only valid for the same OS release, so the name has it
+    . /etc/os-release
+    asset="toolchain-otp$OTP-wx$WX-$ID$VERSION_ID-$(uname -m).tar.gz"
+    url=${PREBUILT_URL:-https://github.com/Besselking/elixir-browser/releases/download/toolchain/$asset}
+    if [ "$url" != none ] &&
+      curl -fsSL -o "$work/prebuilt.tar.gz" "$url" &&
+      curl -fsSL -o "$work/prebuilt.sha256" "$url.sha256" &&
+      [ "$(sha256sum <"$work/prebuilt.tar.gz" | cut -d' ' -f1)" = "$(cut -d' ' -f1 <"$work/prebuilt.sha256")" ]; then
+      $sudo rm -rf "$PREFIX/otp" "$PREFIX/wx33"
+      $sudo tar -xzf "$work/prebuilt.tar.gz" -C "$PREFIX"
+      echo "$PREFIX/wx33/lib" | $sudo tee /etc/ld.so.conf.d/wx33.conf >/dev/null
+      $sudo ldconfig
+      echo "Installed the prebuilt toolchain $asset"
+    else
+      echo "No usable prebuilt toolchain; building from source." >&2
+    fi
+  fi
+
+  if ! have_toolchain; then
     # wxWidgets 3.3. --enable-compat30: OTP's wx still uses wxWidgets 3.0 names.
     curl -fsSL -o "$work/wx.tar.bz2" "https://github.com/wxWidgets/wxWidgets/releases/download/v$WX/wxWidgets-$WX.tar.bz2"
     mkdir "$work/wx" && tar -xjf "$work/wx.tar.bz2" -C "$work/wx" --strip-components=1
@@ -71,6 +106,12 @@ Linux)
   for b in erl erlc escript; do $sudo ln -sf "$PREFIX/otp/bin/$b" "$PREFIX/bin/$b"; done
   # fail if the build quietly left wx out
   "$PREFIX/otp/bin/erl" -noshell -eval 'true = filelib:is_file(filename:join(code:lib_dir(wx), "priv/wxe_driver.so")), halt().'
+
+  if [ -n "$pack" ]; then
+    tar -czf "$pack" -C "$PREFIX" otp wx33
+    (cd "$(dirname "$pack")" && sha256sum "$(basename "$pack")" >"$pack.sha256")
+    echo "Wrote $pack"
+  fi
 
   curl -fsSL -o "$work/elixir.zip" "https://github.com/elixir-lang/elixir/releases/download/v$ELIXIR/elixir-otp-$OTP_MAJOR.zip"
   $sudo rm -rf "$PREFIX/elixir" && $sudo mkdir -p "$PREFIX/elixir"
