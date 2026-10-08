@@ -559,6 +559,68 @@ defmodule Browser.JS.DOMTest do
              ]
     end
 
+    test "the drawing context keeps its state, and Path2D, gradients and measureText work" do
+      lines =
+        run_page("""
+        var g = document.createElement("canvas").getContext("2d");
+        g.lineWidth = 3; g.fillStyle = "blue";
+        g.save();
+        g.lineWidth = 8; g.fillStyle = "red"; g.setLineDash([4, 2, 1]);
+        console.log(g.lineWidth, g.getLineDash().join());
+        g.restore();
+        console.log(g.lineWidth, g.fillStyle);
+        g.translate(10, 20); g.scale(2, 3);
+        var m = g.getTransform();
+        console.log(m.a, m.d, m.e, m.f);
+        var p = new Path2D("M0 0 L10 0 L10 10 Z");
+        var q = new Path2D(); q.rect(0, 0, 5, 5); q.addPath(p);
+        g.fill(q); g.stroke(p);
+        var grad = g.createLinearGradient(0, 0, 100, 0);
+        grad.addColorStop(0, "red"); grad.addColorStop(1, "rgba(0, 0, 255, 0.5)");
+        g.fillStyle = grad; g.fillRect(0, 0, 100, 10);
+        g.font = "20px Arial";
+        var w = g.measureText("Hello").width;
+        console.log(w > 30 && w < 80, g.isPointInPath(1, 1));
+        try { g.arc(0, 0, -1, 0, 1); } catch (e) { console.log(e.message); }
+        try { grad.addColorStop(2, "red"); } catch (e) { console.log(e.message); }
+        """)
+
+      assert lines == [
+               "8 4,2,1,4,2,1",
+               "3 blue",
+               "2 3 10 20",
+               "true false",
+               "The radius provided (-1) is negative.",
+               "The provided value is outside the range (0.0, 1.0)."
+             ]
+    end
+
+    test "what a script draws on a canvas is laid out and painted like an svg" do
+      html = """
+      <body><canvas id=c width=100 height=50></canvas>
+      <canvas id=d width=100 height=50 style="width: 200px; height: 100px"></canvas><script>
+      ["c", "d"].forEach(function (id) {
+        var g = document.getElementById(id).getContext("2d");
+        g.fillStyle = "red"; g.beginPath(); g.arc(50, 25, 20, 0, 6.28); g.fill();
+        g.fillStyle = "black"; g.font = "10px sans-serif"; g.fillText("hi", 5, 10);
+      });
+      </script></body>
+      """
+
+      {_pid, reply} = start(html)
+      page = Browser.Page.build(html, "http://t.test/")
+      page = Browser.Page.from_raw(page, reply.raw, Browser.Style.default_env())
+      measure = fn t, s -> String.length(t) * div(s.size, 2) end
+      {items, _} = Browser.Layout.layout(page.nodes, 400, measure, 600)
+
+      assert [
+               %{w: 100, h: 50, ops: [%{kind: :path}, %{kind: :text, size: 10.0}]},
+               %{w: 200, h: 100, ops: [%{kind: :path}, %{kind: :text, size: size}]}
+             ] = Enum.filter(items, &(&1.type == :svg))
+
+      assert size == 20.0
+    end
+
     test "an image given a data URL fires load, or error when it is no image" do
       # the events come from a timer, so the page reports once all timers have run
       lines =
