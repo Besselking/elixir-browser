@@ -225,12 +225,6 @@ defmodule Browser.JS.TypedArrays do
 
   defp resizable?(bid), do: Map.has_key?(Interp.deref(bid), :max)
 
-  @doc "A new ArrayBuffer holding `bytes`."
-  def make_buffer(bytes), do: new_buffer(bytes)
-
-  @doc "The bytes of an ArrayBuffer."
-  def buffer_bytes({:obj, _} = buf), do: bytes_of(buf)
-
   @doc "Replaces the bytes of an ArrayBuffer (a WebAssembly memory writes its pages back)."
   def set_buffer_bytes({:obj, id}, bytes) do
     o = deref(id)
