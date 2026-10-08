@@ -1070,6 +1070,9 @@ defmodule Browser.JS.Interp do
                   {:proxy, proxy} ->
                     unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
                       do: fail_put()
+
+                  :skip ->
+                    :ok
                 end
 
                 :ok
@@ -1359,7 +1362,8 @@ defmodule Browser.JS.Interp do
         :none
 
       Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
-        :none
+        # an index outside a typed array in the chain stops the set without creating it
+        if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, k), do: :skip, else: :none
 
       match?(%{props: %{^k => {:accessor, _, _}}}, p) ->
         {:accessor, _, setter} = p.props[k]
