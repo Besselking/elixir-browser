@@ -224,7 +224,12 @@ defmodule Browser.JS.Test262 do
   defp spawn_and_wait(timeout, fun) do
     parent = self()
     ref = make_ref()
-    {pid, mon} = spawn_monitor(fn -> send(parent, {ref, fun.()}) end)
+
+    {pid, mon} =
+      :erlang.spawn_opt(
+        fn -> send(parent, {ref, fun.()}) end,
+        [:monitor | Browser.JS.process_opts()]
+      )
 
     receive do
       {^ref, result} ->

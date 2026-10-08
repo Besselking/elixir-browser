@@ -1427,7 +1427,7 @@ defmodule Browser.JS.Props do
         :cycle
 
       true ->
-        store(id, %{rec | proto: if(p == :null, do: nil, else: p)}) && true
+        store(id, %{rec | proto: if(p == :null, do: nil, else: p)})
     end
   end
 

@@ -11,7 +11,7 @@ defmodule Browser.JS.TypedArrays do
   """
 
   import Bitwise, only: [<<<: 2, |||: 2]
-  import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.JS.Interp, except: [get: 2, put: 3, deref: 1]
   alias Browser.JS.{Interp, Num, Props}
 
   @kinds [
@@ -213,7 +213,7 @@ defmodule Browser.JS.TypedArrays do
     buf
   end
 
-  defp resizable?(bid), do: Map.has_key?(deref(bid), :max)
+  defp resizable?(bid), do: Map.has_key?(Interp.deref(bid), :max)
 
   @doc "A `Uint8Array` over an immutable ArrayBuffer of `bytes` (the value of a bytes module)."
   def bytes_view(bytes) do
@@ -222,7 +222,7 @@ defmodule Browser.JS.TypedArrays do
     view(:u8, buffer_id(buf), 0, byte_size(bytes))
   end
 
-  defp immutable?(bid), do: Map.get(deref(bid), :immutable, false)
+  defp immutable?(bid), do: Map.get(Interp.deref(bid), :immutable, false)
 
   # a typed array whose buffer can be written to
   defp mut!({:ta, _, bid, _, _} = d) do
@@ -237,7 +237,7 @@ defmodule Browser.JS.TypedArrays do
     :undefined
   end
 
-  defp detached?(bid), do: Map.get(deref(bid), :detached, false)
+  defp detached?(bid), do: Map.get(Interp.deref(bid), :detached, false)
 
   defp buffer?({:obj, id}), do: Map.has_key?(deref(id), :bytes)
   defp buffer?(_), do: false
@@ -258,6 +258,82 @@ defmodule Browser.JS.TypedArrays do
   defp sab?(_), do: false
 
   defp bytes_of({:obj, id}), do: deref(id).bytes
+
+  # Element writes are batched: a buffer holds them in `:pend` (byte position => the encoded
+  # element, all of `:pend_size` bytes and aligned to it, so none overlaps another) and merges
+  # them into `:bytes` when something else needs the contents. Copying the whole buffer for each
+  # write made a loop over a big typed array quadratic. Every other access goes through `deref`.
+  @pend_max 256
+
+  defp deref(id) do
+    case Interp.deref(id) do
+      %{pend: pend} = o when map_size(pend) > 0 -> flush(id, o)
+      o -> o
+    end
+  end
+
+  defp flush(id, o) do
+    {parts, at} =
+      o.pend
+      |> Enum.sort()
+      |> Enum.reduce({[], 0}, fn {pos, enc}, {acc, at} ->
+        {[enc, binary_part(o.bytes, at, pos - at) | acc], pos + byte_size(enc)}
+      end)
+
+    tail = binary_part(o.bytes, at, byte_size(o.bytes) - at)
+    bytes = IO.iodata_to_binary(Enum.reverse([tail | parts]))
+    o = o |> Map.delete(:pend) |> Map.delete(:pend_size) |> Map.put(:bytes, bytes)
+    store(id, o)
+    o
+  end
+
+  # the `size` bytes at byte position `pos`, with the batched writes in
+  defp read_el(bid, pos, size) do
+    o = Interp.deref(bid)
+
+    case o do
+      %{pend: pend, pend_size: ^size} when rem(pos, size) == 0 and map_size(pend) > 0 ->
+        case pend do
+          %{^pos => enc} -> enc
+          _ -> binary_part(o.bytes, pos, size)
+        end
+
+      %{pend: pend} when map_size(pend) > 0 ->
+        binary_part(flush(bid, o).bytes, pos, size)
+
+      _ ->
+        binary_part(o.bytes, pos, size)
+    end
+  end
+
+  # writes the encoded element `enc` at byte position `pos` (in bounds)
+  defp buffer_put(bid, pos, enc) do
+    size = byte_size(enc)
+    o = Interp.deref(bid)
+
+    o =
+      case o do
+        %{pend: pend, pend_size: psize} when map_size(pend) > 0 and psize != size -> flush(bid, o)
+        _ -> o
+      end
+
+    if rem(pos, size) == 0 do
+      pend = Map.put(Map.get(o, :pend, %{}), pos, enc)
+
+      if map_size(pend) >= @pend_max do
+        flush(bid, Map.merge(o, %{pend: pend, pend_size: size}))
+      else
+        store(bid, Map.merge(o, %{pend: pend, pend_size: size}))
+      end
+    else
+      o = deref(bid)
+      <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
+      store(bid, %{o | bytes: pre <> enc <> post})
+    end
+
+    :ok
+  end
+
   defp buffer_id({:obj, id}), do: id
 
   defp view(kind, bid, offset, length),
@@ -273,7 +349,7 @@ defmodule Browser.JS.TypedArrays do
   # the offset and length a view has now (`:oob` when a detached or shrunk buffer leaves it
   # out of bounds); a length-tracking view (`:auto`) follows the buffer's size
   defp eff({:ta, kind, bid, off, len}) do
-    o = deref(bid)
+    o = Interp.deref(bid)
     total = byte_size(o.bytes)
 
     cond do
@@ -310,7 +386,7 @@ defmodule Browser.JS.TypedArrays do
 
   defp elem_at({:ta, kind, bid, off, _len}, i) do
     size = size_of(kind)
-    read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+    read(kind, read_el(bid, off + i * size, size))
   end
 
   defp values({:ta, kind, bid, off, len}) do
@@ -330,7 +406,7 @@ defmodule Browser.JS.TypedArrays do
     Stream.map(0..(n - 1)//1, fn i ->
       case eff(d0) do
         {off, len} when i < len ->
-          read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+          read(kind, read_el(bid, off + i * size, size))
 
         _ ->
           :undefined
@@ -346,7 +422,7 @@ defmodule Browser.JS.TypedArrays do
 
     case eff(d0) do
       {off, len} when i >= 0 and i < len ->
-        read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+        read(kind, read_el(bid, off + i * size, size))
 
       _ ->
         :undefined
@@ -384,7 +460,7 @@ defmodule Browser.JS.TypedArrays do
       v =
         case eff(d0) do
           {off, len} when i < len ->
-            read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+            read(kind, read_el(bid, off + i * size, size))
 
           _ ->
             :undefined
@@ -395,21 +471,12 @@ defmodule Browser.JS.TypedArrays do
   end
 
   defp put_elem_at({:ta, kind, bid, off, _}, i, value) do
-    size = size_of(kind)
-    o = deref(bid)
-    pos = off + i * size
-    <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-    store(bid, %{o | bytes: pre <> write(kind, value) <> post})
-    :ok
+    buffer_put(bid, off + i * size_of(kind), write(kind, value))
   end
 
   defp put_bytes_at({:ta, kind, bid, _, _} = d, i, bytes) do
     {off, _} = eff(d)
-    size = size_of(kind)
-    o = deref(bid)
-    pos = off + i * size
-    <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-    store(bid, %{o | bytes: pre <> bytes <> post})
+    buffer_put(bid, off + i * size_of(kind), bytes)
   end
 
   defp put_all({:ta, kind, bid, off, _}, start, items) do
@@ -506,12 +573,7 @@ defmodule Browser.JS.TypedArrays do
             if immutable?(bid) do
               :readonly
             else
-              size = size_of(kind)
-              o = deref(bid)
-              pos = off + i * size
-              <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-              store(bid, %{o | bytes: pre <> bytes <> post})
-              :ok
+              buffer_put(bid, off + i * size_of(kind), bytes)
             end
 
           _ ->
@@ -650,11 +712,7 @@ defmodule Browser.JS.TypedArrays do
             if immutable?(bid),
               do: throw_error("TypeError", "the typed array's buffer is immutable")
 
-            size = size_of(kind)
-            o = deref(bid)
-            pos = off + i * size
-            <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-            store(bid, %{o | bytes: pre <> bytes <> post})
+            buffer_put(bid, off + i * size_of(kind), bytes)
           end
         end
 
@@ -2140,10 +2198,10 @@ defmodule Browser.JS.TypedArrays do
                   {:ok, i * 1.0}
 
                 :values ->
-                  {:ok, read(kind, binary_part(deref(bid).bytes, off + i * size, size))}
+                  {:ok, read(kind, read_el(bid, off + i * size, size))}
 
                 :entries ->
-                  v = read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+                  v = read(kind, read_el(bid, off + i * size, size))
                   {:ok, new_array([i * 1.0, v])}
               end
 
@@ -2360,10 +2418,7 @@ defmodule Browser.JS.TypedArrays do
         {:dv, bid, off, len} = dv_eff!(d)
         i = dv_check(i, size, len, bid)
         enc = if truthy(arg(args, 2)), do: enc, else: swap(enc)
-        o = deref(bid)
-        pos = off + i
-        <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-        store(bid, %{o | bytes: pre <> enc <> post})
+        buffer_put(bid, off + i, enc)
         :undefined
       end)
     end

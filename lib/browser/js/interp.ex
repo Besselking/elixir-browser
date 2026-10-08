@@ -42,7 +42,9 @@ defmodule Browser.JS.Interp do
 
   @doc "Starts a fresh heap in this process. `max_steps` bounds how much work a script may do."
   def init(max_steps) do
-    :erlang.put(:js_heap, %{})
+    # the heap's objects are entries of the process dictionary under their integer ids: a write
+    # replaces one entry in place instead of copying the path to it through a big map
+    :erlang.put(:js_heap_n, 0)
     :erlang.put(:js_next, 0)
     :erlang.put(:js_steps, max_steps)
     :erlang.put(:js_depth, 0)
@@ -51,14 +53,34 @@ defmodule Browser.JS.Interp do
   end
 
   def alloc(obj) do
-    id = pget(:js_next)
+    id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
-    :erlang.put(:js_heap, Map.put(pget(:js_heap), id, obj))
+    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
+    :erlang.put(id, obj)
     id
   end
 
-  def deref(id), do: Map.fetch!(pget(:js_heap), id)
-  def store(id, obj), do: :erlang.put(:js_heap, Map.put(pget(:js_heap), id, obj))
+  def deref(id) do
+    case :erlang.get(id) do
+      :undefined -> raise KeyError, key: id, term: :js_heap
+      obj -> obj
+    end
+  end
+
+  def store(id, obj) do
+    :erlang.put(id, obj)
+    true
+  end
+
+  @doc "How many objects the heap holds."
+  def heap_size, do: :erlang.get(:js_heap_n)
+
+  @doc false
+  # drops a heap entry (a scope that nothing can reach any more)
+  def free(id) do
+    if :erlang.erase(id) != :undefined, do: :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+    :ok
+  end
 
   @doc "The built-in prototype object registered under `name` (`:object`, `:array`, ...)."
   def proto(name), do: Process.get({:proto, name})
@@ -180,17 +202,15 @@ defmodule Browser.JS.Interp do
     })
   end
 
-  defp lookup_var(scope, name), do: lookup_var(scope, name, pget(:js_heap))
+  # walks the scope chain
+  defp lookup_var(nil, _), do: :error
 
-  # walks the scope chain over one read of the heap
-  defp lookup_var(nil, _, _), do: :error
-
-  defp lookup_var(scope, name, heap) do
-    s = Map.fetch!(heap, scope)
+  defp lookup_var(scope, name) do
+    s = deref(scope)
 
     case s.vars do
       %{^name => {:alias, target, var}} ->
-        lookup_var(target, var, heap)
+        lookup_var(target, var)
 
       %{^name => v} ->
         {:ok, v}
@@ -207,12 +227,12 @@ defmodule Browser.JS.Interp do
                 {:ok, :undefined}
               end
             else
-              lookup_var(s.parent, name, heap)
+              lookup_var(s.parent, name)
             end
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
             # a property defined on the global object itself (an accessor, say) is a variable too
-            case Map.fetch!(heap, gid) do
+            case deref(gid) do
               %{props: %{^name => {:accessor, g, _}}} ->
                 {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
 
@@ -224,7 +244,7 @@ defmodule Browser.JS.Interp do
             end
 
           _ ->
-            lookup_var(s.parent, name, heap)
+            lookup_var(s.parent, name)
         end
     end
   end
@@ -237,10 +257,8 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp assign_var(scope, name, val), do: assign_var(scope, name, val, pget(:js_heap))
-
-  defp assign_var(scope, name, val, heap) do
-    s = Map.fetch!(heap, scope)
+  defp assign_var(scope, name, val) do
+    s = deref(scope)
 
     cond do
       Map.has_key?(s.vars, name) ->
@@ -259,7 +277,7 @@ defmodule Browser.JS.Interp do
             :fname_ignored
 
           true ->
-            :erlang.put(:js_heap, Map.put(heap, scope, %{s | vars: Map.put(s.vars, name, val)}))
+            :erlang.put(scope, %{s | vars: Map.put(s.vars, name, val)})
             sync_argument(s.vars, name, val)
         end
 
@@ -270,7 +288,7 @@ defmodule Browser.JS.Interp do
         put(s.with, name, val)
 
       s.parent != nil ->
-        assign_var(s.parent, name, val, heap)
+        assign_var(s.parent, name, val)
 
       s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
         put(s.vars.this, name, val)
@@ -303,7 +321,7 @@ defmodule Browser.JS.Interp do
   def sync_param(%{mapped: mapped, map_scope: scope}, idx, val) do
     # a scope dropped after its call has no reader left that could see the parameter
     case mapped do
-      %{^idx => name} -> if Map.has_key?(pget(:js_heap), scope), do: assign_var(scope, name, val)
+      %{^idx => name} -> if :erlang.get(scope) != :undefined, do: assign_var(scope, name, val)
       _ -> :ok
     end
 
@@ -2137,8 +2155,7 @@ defmodule Browser.JS.Interp do
   # Drops a scope from the heap once its code has run, unless a closure was created since
   # `fns` was read (`make_fn` counts them): only a closure can keep a scope alive past its code.
   defp free_scope(scope, fns) do
-    if pget(:js_fns) == fns,
-      do: :erlang.put(:js_heap, Map.delete(pget(:js_heap), scope))
+    if pget(:js_fns) == fns, do: free(scope)
 
     :ok
   end
@@ -2794,6 +2811,23 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
+  # does a block declare anything (a function, class, `let`, `const`, `using`) that is its own?
+  defp scoped_block?([]), do: false
+
+  defp scoped_block?([stmt | rest]) do
+    case stmt do
+      {:expr, _} -> scoped_block?(rest)
+      {:fundecl, _, _} -> true
+      {:var, kind, _} when kind in [:let, :const] -> true
+      {:var, :var, _} -> scoped_block?(rest)
+      {:using, _, _, _, _} -> true
+      {:classdecl, _, _} -> true
+      {:export, _} -> true
+      {:export_default, _} -> true
+      _ -> scoped_block?(rest)
+    end
+  end
+
   defp unexport({:export, stmt}), do: stmt
   defp unexport({:export_default, {:fundecl, _, _} = stmt}), do: stmt
   defp unexport(stmt), do: stmt
@@ -3238,12 +3272,17 @@ defmodule Browser.JS.Interp do
   defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
-    fns = pget(:js_fns)
-    scope = new_scope(env)
-    hoist_functions(stmts, scope)
-    result = exec_list(stmts, scope)
-    free_scope(scope, fns)
-    result
+    if scoped_block?(stmts) do
+      fns = pget(:js_fns)
+      scope = new_scope(env)
+      hoist_functions(stmts, scope)
+      result = exec_list(stmts, scope)
+      free_scope(scope, fns)
+      result
+    else
+      # nothing in the block binds a name: it needs no scope of its own
+      exec_list(stmts, env)
+    end
   end
 
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
@@ -3290,8 +3329,11 @@ defmodule Browser.JS.Interp do
 
   defp exec({:for, init, test, update, body}, env, labels) do
     :erlang.put(:js_last, :undefined)
-    loop_env = new_scope(env)
+    # only `let` and `const` bind names of the loop's own
+    lexical? = match?({:var, kind, _} when kind in [:let, :const], init)
+    loop_env = if lexical?, do: new_scope(env), else: env
     per_iteration? = match?({:var, :let, _}, init)
+    fns = pget(:js_fns)
 
     case init do
       {:var, _, _} = d -> exec(d, loop_env)
@@ -3299,7 +3341,11 @@ defmodule Browser.JS.Interp do
       nil -> :ok
     end
 
-    first = if per_iteration?, do: copy_scope(loop_env, env), else: loop_env
+    # each iteration has a copy of the `let` bindings, but only a closure made since can see
+    # which one it is: with none, one scope serves every iteration
+    first =
+      if per_iteration? and pget(:js_fns) != fns, do: copy_scope(loop_env, env), else: loop_env
+
     for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
   end
 
@@ -3521,8 +3567,9 @@ defmodule Browser.JS.Interp do
           :ok
 
         :next ->
-          next_env = if copy?, do: copy_scope(iter_env, env), else: iter_env
-          if copy?, do: free_scope(iter_env, fns)
+          next_env =
+            if copy? and pget(:js_fns) != fns, do: copy_scope(iter_env, env), else: iter_env
+
           next_fns = pget(:js_fns)
           if update, do: ev(update, next_env)
           for_loop(test, update, body, env, next_env, copy?, labels, next_fns)

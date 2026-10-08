@@ -34,14 +34,12 @@ defmodule Browser.JS.Runtime do
   def start(raw, info) do
     owner = self()
 
-    # the heap lives in the process dictionary and only grows, so avoid repeated full sweeps
     :erlang.spawn_opt(
       fn ->
         boot(raw, Map.put(info, :owner, owner))
         loop(System.monotonic_time(:millisecond))
       end,
-      min_heap_size: 2_000_000,
-      fullsweep_after: 1_000_000
+      Browser.JS.process_opts()
     )
   end
 

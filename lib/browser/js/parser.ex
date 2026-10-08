@@ -2484,21 +2484,35 @@ defmodule Browser.JS.Parser do
   # `a ?? b || c` and `a && b ?? c` need parentheses: the operators written at the top level
   # of an operand (outside brackets) may not mix `??` with `&&` or `||`
   defp check_logical_mix(op, from, to) do
-    taken = length(from) - length(to)
-
-    ops =
-      from
-      |> Enum.take(taken)
-      |> Enum.reduce({0, []}, fn
-        {:p, p, _}, {d, acc} when p in ["(", "[", "{"] -> {d + 1, acc}
-        {:p, p, _}, {d, acc} when p in [")", "]", "}"] -> {d - 1, acc}
-        {:p, p, _}, {0, acc} when p in ["&&", "||", "??"] -> {0, [p | acc]}
-        _, st -> st
-      end)
-      |> elem(1)
-
     other = if op == "??", do: ["&&", "||"], else: ["??"]
-    if Enum.any?(ops, &(&1 in other)), do: throw({:syntax, "cannot mix ?? with && or ||"})
+    mix_scan(from, to, 0, other)
+  end
+
+  # walks the operand's tokens (up to the list `to`, by identity, so the cost is the operand's
+  # length and not the rest of the script's)
+  defp mix_scan(ts, to, d, other) do
+    if :erts_debug.same(ts, to) or ts == [] do
+      :ok
+    else
+      [{kind, p, _} = _tok | rest] = ts
+
+      cond do
+        kind != :p ->
+          mix_scan(rest, to, d, other)
+
+        p in ["(", "[", "{"] ->
+          mix_scan(rest, to, d + 1, other)
+
+        p in [")", "]", "}"] ->
+          mix_scan(rest, to, d - 1, other)
+
+        d == 0 and p in other ->
+          throw({:syntax, "cannot mix ?? with && or ||"})
+
+        true ->
+          mix_scan(rest, to, d, other)
+      end
+    end
   end
 
   defp private_member?({:member, _, {:priv, _}, _}), do: true

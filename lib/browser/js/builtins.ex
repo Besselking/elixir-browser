@@ -1183,7 +1183,7 @@ defmodule Browser.JS.Builtins do
   defp uri_decode("", _, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp uri_decode(<<"%", h::binary-size(2), rest::binary>>, keep, acc) do
-    with {:ok, <<b>>} <- Base.decode16(h, case: :mixed) do
+    with {:ok, b} <- hex_byte(h) do
       if b < 0x80 do
         if b in keep,
           do: uri_decode(rest, keep, [<<"%", h::binary>> | acc]),
@@ -1209,11 +1209,21 @@ defmodule Browser.JS.Builtins do
 
   defp uri_decode(<<b, rest::binary>>, keep, acc), do: uri_decode(rest, keep, [<<b>> | acc])
 
+  # two hex digits to a byte (`Base.decode16` raises and rescues on bad input: slow)
+  defp hex_byte(<<a, b>>) do
+    with x when x != nil <- hex_digit(a), y when y != nil <- hex_digit(b), do: {:ok, x * 16 + y}
+  end
+
+  defp hex_digit(c) when c in ?0..?9, do: c - ?0
+  defp hex_digit(c) when c in ?a..?f, do: c - ?a + 10
+  defp hex_digit(c) when c in ?A..?F, do: c - ?A + 10
+  defp hex_digit(_), do: nil
+
   defp uri_continuation(rest, 0, acc), do: {Enum.reverse(acc), rest}
 
   defp uri_continuation(<<"%", h::binary-size(2), rest::binary>>, n, acc) do
-    case Base.decode16(h, case: :mixed) do
-      {:ok, <<b>>} when b in 0x80..0xBF -> uri_continuation(rest, n - 1, [<<b>> | acc])
+    case hex_byte(h) do
+      {:ok, b} when b in 0x80..0xBF -> uri_continuation(rest, n - 1, [<<b>> | acc])
       _ -> throw_error("URIError", "URI malformed")
     end
   end
