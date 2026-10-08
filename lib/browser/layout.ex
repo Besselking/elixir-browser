@@ -1519,6 +1519,19 @@ defmodule Browser.Layout do
 
   # An inline element needs its own box only if it has a background, borders,
   # or horizontal padding/margins (vertical padding alone paints nothing).
+  # An inline box with nothing in it still makes a line when it has horizontal margins, padding
+  # or borders, unless something else comes on that line: an empty word, taken off the line when
+  # it is laid out, holds the line open (see `flush/1`).
+  defp strut_for_empty(%{line: []} = st, ref, %{style: style} = spec) do
+    empty? = Enum.any?(st.marks, &match?({:start, ^ref, _, _}, &1))
+
+    if empty? and spec.ml + spec.mr + spec.pl + spec.pr + spec.bl + spec.br > 0,
+      do: %{st | strut: style},
+      else: st
+  end
+
+  defp strut_for_empty(st, _ref, _spec), do: st
+
   defp inline_spec(_tag, c, _style) when map_size(c) == 0, do: nil
 
   defp inline_spec(tag, c, style) do
@@ -1544,6 +1557,7 @@ defmodule Browser.Layout do
         bg: box.bg,
         r: box.r,
         size: style.size,
+        style: style,
         # the height of the font's content area, in ems, is the height of the box
         cf: content_factor(style),
         # (transparent text does not hide the box it is in)
@@ -3015,6 +3029,7 @@ defmodule Browser.Layout do
       open: %{},
       clr: nil,
       adj: nil,
+      strut: nil,
       pos: [
         %{x: 0, y: 0, w: width, h: if(root_height == :view, do: view_height, else: root_height)}
       ],
@@ -3633,6 +3648,7 @@ defmodule Browser.Layout do
   end
 
   defp op({:inline_close, ref, spec}, st) do
+    st = strut_for_empty(st, ref, spec)
     right = spec.pr + spec.br
 
     if st.line == [] do
@@ -5752,6 +5768,11 @@ defmodule Browser.Layout do
 
   # Nothing on the line: boxes opened/closed here only change which boxes are
   # open. Newly opened ones are `pending` until a line with content paints them.
+  defp flush(%{line: [], strut: %{} = style} = st) do
+    st = word("", style, false, %{st | strut: nil})
+    flush(%{st | line: [Map.put(hd(st.line), :strut, true) | tl(st.line)]})
+  end
+
   defp flush(%{line: []} = st) do
     active =
       st.marks
@@ -5826,7 +5847,12 @@ defmodule Browser.Layout do
               y: st.y + dy + half + normal - it.h - div(normal - it.h, 4) - Map.get(it, :vs, 0)
           }
 
-    placed = placed |> Enum.map(&Map.drop(&1, [:glue, :lm])) |> apply_rel()
+    placed =
+      placed
+      |> Enum.reject(&Map.get(&1, :strut))
+      |> Enum.map(&Map.drop(&1, [:glue, :lm]))
+      |> apply_rel()
+
     placed = justify(placed, st, List.last(st.line), shift)
 
     top_of = fn
@@ -5881,6 +5907,7 @@ defmodule Browser.Layout do
         nr: st.nr + length(rects),
         line: [],
         y: st.y + line_h,
+        strut: nil,
         lh: 0,
         lf: @content_factor,
         lmax: 0,

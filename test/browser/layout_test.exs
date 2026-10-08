@@ -6746,4 +6746,26 @@ defmodule Browser.LayoutTest do
       assert box.y == 0 and box.h == h
     end
   end
+
+  describe "empty inline boxes" do
+    test "with a border make a line of their own" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}</style><div><div><span style="padding-right:10px;border:5px solid blue;border-left:none"></span></div></div><div id=b>x</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.y >= 20
+    end
+
+    test "add no line when text follows on the same line" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}</style><div><div><span style="padding-right:10px"></span>a</div></div><div>x</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.y < 40
+    end
+  end
 end
