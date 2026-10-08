@@ -3348,9 +3348,11 @@ defmodule Browser.Layout do
           if Map.get(spec, :table?) do
             min(avail, shrink_extent(st, sub, @unbounded, Map.get(spec, :key)))
           else
-            # content that cannot wrap (a nowrap word, a fixed-size box) makes the box wider than
-            # `avail`: shrink-to-fit never goes below the min-content width
-            shrink_extent(st, sub, max(avail, 1), Map.get(spec, :key))
+            ext = shrink_extent(st, sub, max(avail, 1), Map.get(spec, :key))
+
+            # measuring the narrowest content can be (a word on every line): content that cannot
+            # wrap (a nowrap word, a fixed-size box) makes the box that wide, not 1px
+            if avail <= 1 and Process.get(:layout_intrinsic), do: ext, else: min(avail, ext)
           end
 
         w ->

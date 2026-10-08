@@ -2900,9 +2900,12 @@ css/css-flexbox/flexbox-break-request-horiz-002a.html
 css/css-flexbox/flexbox-break-request-horiz-002b.html
 css/css-flexbox/flexbox-definite-sizes-006.html
 css/css-flexbox/flexbox-flex-direction-column-percentage-ignored.html
+css/css-flexbox/flexbox-flex-direction-default.htm
+css/css-flexbox/flexbox-flex-direction-row.htm
 css/css-flexbox/flexbox-flex-wrap-default.htm
 css/css-flexbox/flexbox-flex-wrap-flexing.html
 css/css-flexbox/flexbox-flex-wrap-nowrap.htm
+css/css-flexbox/flexbox-flex-wrap-wrap.htm
 css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
 css/css-flexbox/flexbox-items-as-stacking-contexts-002.html
