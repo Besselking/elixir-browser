@@ -1980,7 +1980,18 @@ defmodule Browser.Layout do
           do: c["column-gap"],
           else: fs
 
-      %{count: count, width: width, gap: gap, fill: c["column-fill"], rule: column_rule(c, fs)}
+      %{
+        count: count,
+        width: width,
+        gap: gap,
+        fill: c["column-fill"],
+        rule: column_rule(c, fs),
+        # `column-height` makes the columns that tall, and the ones that do not fit the row
+        # wrap into rows of their own (unless `column-wrap: nowrap`)
+        colh: if(is_number(c["column-height"]), do: c["column-height"]),
+        wrap: c["column-wrap"],
+        rowgap: if(is_number(c["row-gap"]), do: c["row-gap"], else: 0)
+      }
     end
   end
 
@@ -3541,7 +3552,9 @@ defmodule Browser.Layout do
     cs = with %{gap: {:pct, f}} <- cs, do: %{cs | gap: f * avail}
     {n, colw} = column_geometry(cs, avail)
 
-    if n <= 1 or avail > @unbounded / 2 do
+    # (one column of a set height still has the rest of the content spill into more of them)
+    if (n <= 1 and not ((cs.height != nil and cs.fill == "auto") or cs[:colh] != nil)) or
+         avail > @unbounded / 2 do
       Enum.reduce(sub, st, &op/2)
     else
       {items, height, _} = layout_atom(st, sub, colw)
@@ -6838,7 +6851,11 @@ defmodule Browser.Layout do
       |> Enum.sort()
 
     top0 = with [{t, _} | _] <- lines, do: t, else: (_ -> 0)
-    fixed = cs.height
+    # (`column-wrap: wrap` alone wraps columns of the height of the box)
+    colh = cs[:colh] || if cs[:wrap] == "wrap", do: cs.height
+    fixed = colh || cs.height
+    wrap? = colh != nil and cs[:wrap] != "nowrap"
+    rowgap = cs[:rowgap] || 0
 
     forced =
       for(%{type: :colbreak, y: y} <- items, y > 0 and y < height, uniq: true, do: y)
@@ -6849,6 +6866,9 @@ defmodule Browser.Layout do
 
     h =
       cond do
+        colh ->
+          colh
+
         fixed && cs.fill == "auto" ->
           fixed
 
@@ -6864,8 +6884,13 @@ defmodule Browser.Layout do
     ends = Enum.drop(starts, 1) ++ [:infinity]
     cols = starts |> Enum.zip(ends) |> Enum.with_index()
 
+    rows = if wrap?, do: max(div(length(cols) + n - 1, n), 1), else: 1
+
     used =
       cond do
+        wrap? ->
+          rows * colh + (rows - 1) * rowgap
+
         fixed ->
           fixed
 
@@ -6876,25 +6901,36 @@ defmodule Browser.Layout do
           |> Enum.max(fn -> 0 end)
       end
 
+    # where column k goes: its place in the row, and the rows above it
+    slot = fn k ->
+      if wrap?,
+        do: {rem(k, n) * (colw + gap), div(k, n) * (colh + rowgap)},
+        else: {k * (colw + gap), 0}
+    end
+
     placed =
       Enum.flat_map(items, fn it ->
         if sliced? and it.type in [:rect, :box] and not Map.get(it, :mono, false) and
              Map.get(it, :h, 0) > 0 do
-          cut_rect(it, cols, colw, gap)
+          cut_rect(it, cols, slot)
         else
           {{start, _}, k} =
             cols |> Enum.filter(fn {{s, _}, _} -> s <= it.y end) |> List.last() || {{0, 0}, 0}
 
-          [column_move(it, k * (colw + gap), -start)]
+          {dx, dy} = slot.(k)
+          [column_move(it, dx, dy - start)]
         end
       end)
 
     used = round(used)
-    {placed ++ column_rules(cs, length(cols), colw, used), used}
+
+    {placed ++
+       column_rules(cs, if(wrap?, do: min(length(cols), n), else: length(cols)), colw, used),
+     used}
   end
 
   # a background or border box cut into the part that lies in each column
-  defp cut_rect(it, cols, colw, gap) do
+  defp cut_rect(it, cols, slot) do
     top = it.y
     bottom = it.y + it.h
 
@@ -6915,7 +6951,8 @@ defmodule Browser.Layout do
               piece
           end
 
-        column_move(piece, k * (colw + gap), -s)
+        {dx, dy} = slot.(k)
+        column_move(piece, dx, dy - s)
       end
 
     if pieces == [], do: [it], else: pieces

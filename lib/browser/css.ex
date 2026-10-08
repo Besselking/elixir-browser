@@ -279,7 +279,7 @@ defmodule Browser.CSS do
             border-spacing border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius border-top-right-radius
             border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after
             break-before break-inside caption-side caret-color clear clip clip-path color
-            color-scheme column-count column-fill column-gap column-rule column-rule-color column-rule-style column-rule-width
+            color-scheme column-count column-fill column-gap column-height column-wrap column-rule column-rule-color column-rule-style column-rule-width
             column-span column-width columns contain contain-intrinsic-size container container-name container-type
             content content-visibility counter-increment counter-reset counter-set cursor direction display
             empty-cells filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink

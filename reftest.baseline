@@ -4288,6 +4288,16 @@ css/css-multicol/broken-column-rule-1.html
 css/css-multicol/column-balancing-paged-001-print.html
 css/css-multicol/column-balancing-with-floats-001.html
 css/css-multicol/column-balancing-with-floats-002.html
+css/css-multicol/column-height-001.html
+css/css-multicol/column-height-005.html
+css/css-multicol/column-height-010.html
+css/css-multicol/column-height-011.html
+css/css-multicol/column-height-014.html
+css/css-multicol/column-height-015.html
+css/css-multicol/column-height-016.html
+css/css-multicol/column-height-024.html
+css/css-multicol/column-height-026.html
+css/css-multicol/column-height-030.html
 css/css-multicol/column-pseudo-background-color.html
 css/css-multicol/columnfill-auto-max-height-001.html
 css/css-multicol/columnfill-auto-max-height-002.html
@@ -4408,7 +4418,6 @@ css/css-multicol/multicol-rule-inset-000.xht
 css/css-multicol/multicol-rule-large-001.xht
 css/css-multicol/multicol-rule-nested-balancing-001.html
 css/css-multicol/multicol-rule-nested-balancing-003.html
-css/css-multicol/multicol-rule-nested-balancing-004.html
 css/css-multicol/multicol-rule-none-000.xht
 css/css-multicol/multicol-rule-outset-000.xht
 css/css-multicol/multicol-rule-percent-001.xht

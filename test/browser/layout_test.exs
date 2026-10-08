@@ -4597,6 +4597,21 @@ defmodule Browser.LayoutTest do
       end
     end
 
+    test "column-height makes the columns that tall and wraps the rest into rows" do
+      items = columns("columns: 2; column-gap: 0; column-height: 60px; row-gap: 10px", 8, 400)
+      first = col_at(items, "item1")
+      # two lines fill a column; two columns make a row
+      assert col_at(items, "item2").x == first.x
+      assert col_at(items, "item3").x > first.x
+      assert col_at(items, "item5").x == first.x
+      assert col_at(items, "item5").y > first.y + 60
+    end
+
+    test "one column of a set height with column-fill: auto spills into another" do
+      items = columns("columns: 1; column-fill: auto; height: 40px; column-gap: 0", 6, 400)
+      assert col_at(items, "item4").x > col_at(items, "item1").x
+    end
+
     test "a column width that does not fit twice leaves one column" do
       items = columns("columns: 2 300px", 4, 400)
       assert col_at(items, "item1").x == col_at(items, "item4").x
