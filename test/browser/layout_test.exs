@@ -6313,6 +6313,18 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "shrink-to-fit with auto margins" do
+    test "an absolute box is as wide as a child with auto margins, not the room around it" do
+      html =
+        ~s|<div style="position:absolute;background:green"><div style="width:100px;height:5px;margin:auto"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
+    end
+  end
+
   describe "table and inline-block widths" do
     test "a table is as wide as its columns need, even in a narrower box" do
       html =

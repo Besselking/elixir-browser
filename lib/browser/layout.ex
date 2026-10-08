@@ -4183,9 +4183,13 @@ defmodule Browser.Layout do
 
   defp open_box(st, ref, o, {fl, fr, beside}, {ml0, mr0, box_w, free}) do
     {bt, br, _bb, bl} = o.bw
+    intrinsic? = Process.get(:layout_intrinsic, false)
 
     {ml, _mr} =
       case {o.ml, o.mr} do
+        # (while measuring how wide content wants to be, auto margins are none)
+        {:auto, _} when intrinsic? -> {ml0, mr0}
+        {_, :auto} when intrinsic? -> {ml0, mr0}
         {:auto, :auto} -> {max(floor(free / 2), 0), max(free - floor(free / 2), 0)}
         {:auto, _} -> {max(free, 0), mr0}
         {_, :auto} -> {ml0, max(free, 0)}
@@ -5367,14 +5371,17 @@ defmodule Browser.Layout do
   defp atom_cbh(_st, _spec), do: nil
 
   defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
-    memo({:atom, key || :erlang.phash2(sub), width, cbh}, fn ->
-      # (the height of the box a float or inline-block sits in is what its own percentage
-      # heights refer to)
-      sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images, cbh)
-      height = sub_st.y + sub_st.gap + sub_st.ngap
-      items = finalize(sub_st)
-      {items, height, last_baseline(items, height)}
-    end)
+    memo(
+      {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false)},
+      fn ->
+        # (the height of the box a float or inline-block sits in is what its own percentage
+        # heights refer to)
+        sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images, cbh)
+        height = sub_st.y + sub_st.gap + sub_st.ngap
+        items = finalize(sub_st)
+        {items, height, last_baseline(items, height)}
+      end
+    )
   end
 
   # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
