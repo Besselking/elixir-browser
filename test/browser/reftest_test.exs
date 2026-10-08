@@ -236,13 +236,13 @@ defmodule Browser.ReftestTest do
     write(
       root,
       "q.html",
-      ~s|<link rel=match href=q-ref.html><div style="width:30px;height:10px;background:url(support/G.png)"></div>|
+      ~s|<link rel=match href=q-ref.html><div style="width:30px;height:10px;background:url(support/missing.png)"></div>|
     )
 
     write(root, "q-ref.html", ~s(<div style="width:30px;height:10px;background:#008000"></div>))
 
     assert Reftest.run_test(root, "css/t/p.html") == :pass
-    # the file is called g.png: the address of a background keeps its case, so this one is missing
+    # there is no such file (not a case trick: on macOS G.png would find g.png)
     assert {:skip, "picture that is not a PNG file"} = Reftest.run_test(root, "css/t/q.html")
   end
 end
