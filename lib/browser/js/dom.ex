@@ -586,7 +586,7 @@ defmodule Browser.JS.DOM do
 
       _ ->
         inner = ed_host_for(n, host)
-        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n)
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n) ++ shadow_attr(n)
 
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
@@ -616,6 +616,40 @@ defmodule Browser.JS.DOM do
   end
 
   defp with_frame(el, _nid), do: el
+
+  # `data-b-frame` with a scope of its own marks an element that has a shadow root (see
+  # `Browser.Style.scoped_refs/1`); the shadow tree is styled by the sheets in it
+  defp shadow_attr(%{shadow: root}) when root != nil, do: [{"data-b-frame", "s#{root}"}]
+  defp shadow_attr(_), do: []
+
+  defp attr_of(n, name) do
+    case List.keyfind(n.attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  # the children of `host` that its slot called `name` shows
+  defp assigned(host, name) do
+    Enum.filter(node(host).kids, fn k ->
+      case node(k) do
+        %{kind: :text} -> name == ""
+        %{kind: :element} = e -> (attr_of(e, "slot") || "") == name
+        _ -> false
+      end
+    end)
+  end
+
+  # a node of a host shown in a slot keeps the host's styles (see `Browser.CSS.context/8`)
+  defp export_slotted(nid, root, host) do
+    case export(nid, host) do
+      {:element, tag, attrs, kids} ->
+        {:element, tag, attrs ++ [{"data-b-slotted", "s#{root}"}], kids}
+
+      other ->
+        other
+    end
+  end
 
   # the host the children of `n` are in: `n` itself when it makes them editable, else the host
   # `n` is in, unless `contenteditable=false` ends it
@@ -731,9 +765,37 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp export_kids(n, nil), do: Enum.map(n.kids, &export/1)
+  # a host shows its shadow tree, not its own children, which only a `<slot>` in it brings back
+  defp export_kids(%{shadow: root}, host) when root != nil do
+    adopted =
+      case List.keyfind(node(root).internal, "@adopted", 0) do
+        {_, texts} -> for t <- texts, do: {:element, "style", [], [{:text, t}]}
+        nil -> []
+      end
 
-  defp export_kids(n, host) do
+    adopted ++ Enum.map(node(root).kids, &export(&1, host))
+  end
+
+  defp export_kids(%{tag: "slot"} = n, host) do
+    top = top_of(n.id)
+
+    case node(top) do
+      %{kind: :fragment, shost: h} when h != nil ->
+        case assigned(h, attr_of(n, "name") || "") do
+          [] -> export_plain_kids(n, host)
+          nodes -> Enum.map(nodes, &export_slotted(&1, top, host))
+        end
+
+      _ ->
+        export_plain_kids(n, host)
+    end
+  end
+
+  defp export_kids(n, host), do: export_plain_kids(n, host)
+
+  defp export_plain_kids(n, nil), do: Enum.map(n.kids, &export/1)
+
+  defp export_plain_kids(n, host) do
     Enum.flat_map(n.kids, fn k ->
       case node(k) do
         %{kind: :text} -> ed_text(k, host)
@@ -4066,6 +4128,22 @@ defmodule Browser.JS.DOM do
         update_node_quiet(r, &%{&1 | shost: h})
         # (a host that is in the document: what is in its shadow root is too)
         if connected?(h), do: connect(r)
+        :undefined
+      end)
+    )
+
+    # the style sheets a shadow root adopts, as text (they apply inside the shadow tree)
+    Interp.declare(
+      scope,
+      "__set_adopted",
+      native("__set_adopted", fn _, [root, list | _] ->
+        r = nid_of(root)
+        texts = if array?(list), do: Enum.map(array_list(list), &to_str/1), else: []
+
+        update_node(r, fn n ->
+          %{n | internal: List.keystore(n.internal, "@adopted", 0, {"@adopted", texts})}
+        end)
+
         :undefined
       end)
     )
