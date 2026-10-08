@@ -1586,18 +1586,16 @@ defmodule Browser.UI do
 
   # -- images ------------------------------------------------------------------------
 
-  # a 1 x 1 lossless WebP, to find out whether this wx can read the format (wxWidgets 3.3+)
-  @webp_probe Base.decode64!("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
-
   @doc """
-  Whether the toolkit decodes WebP itself. Known once wx has started (`build/0` or
-  `snapshot_start/0` finds out); false before that.
+  Whether the toolkit decodes WebP itself (wxWidgets 3.3 and newer). Known once wx has
+  started (`build/0` or `snapshot_start/0` finds out); false before that.
   """
   def webp_supported?, do: :persistent_term.get({__MODULE__, :webp}, false)
 
+  # Asks wx for the file types its image handlers read. Decoding a sample instead would make
+  # wx 3.2 log an error, and on macOS that shows as a dialog.
   defp probe_webp do
-    ok = match?({:ok, 1, 1}, load_image(:webp_probe, @webp_probe, :webp))
-    :ets.delete(@images, :webp_probe)
+    ok = :wxImage.getImageExtWildcard() |> to_string() |> String.contains?("*.webp")
     :persistent_term.put({__MODULE__, :webp}, ok)
   end
 
