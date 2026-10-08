@@ -166,6 +166,7 @@ defmodule Browser.Layout do
     margin = Keyword.get(opts, :margin, @margin)
     Process.put(:layout_cw, max(width - 2 * margin, 0))
     Process.put(:layout_memo, %{})
+    Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
@@ -491,7 +492,7 @@ defmodule Browser.Layout do
     end
   end
 
-  @background_keys ~w(background-color background-image background-repeat background-position background-size)
+  @background_keys ~w(background-color background-image background-attachment background-repeat background-position background-size)
 
   defp has_background?(c), do: color?(c["background-color"]) or bgimg_spec(c) != nil
 
@@ -530,11 +531,22 @@ defmodule Browser.Layout do
 
     layers =
       if canvas.bgimg,
-        do: Backgrounds.paint_layers(canvas.bgimg, area, area, images, color4(canvas.current)),
+        do:
+          Backgrounds.paint_layers(
+            canvas.bgimg,
+            area,
+            area,
+            images,
+            color4(canvas.current),
+            viewport_area()
+          ),
         else: []
 
     %{type: :canvas, color: canvas.color, layers: layers, x: 0, y: 0, w: width, h: height}
   end
+
+  # the window a `fixed` background is placed against
+  defp viewport_area, do: Process.get(:layout_viewport)
 
   defp color4({r, g, b}), do: {r, g, b, 255}
   defp color4(_), do: {0, 0, 0, 255}
@@ -2108,6 +2120,7 @@ defmodule Browser.Layout do
     if is_list(images) and Enum.any?(images, &(&1 != :none)) do
       %{
         images: images,
+        attachment: c["background-attachment"] || [],
         repeat: c["background-repeat"] || [],
         position: c["background-position"] || [],
         size: c["background-size"] || []
@@ -4267,7 +4280,8 @@ defmodule Browser.Layout do
             padding_box,
             border_box,
             images,
-            color4(Map.get(o, :color) || {0, 0, 0})
+            color4(Map.get(o, :color) || {0, 0, 0}),
+            viewport_area()
           ),
         else: []
 
@@ -4836,6 +4850,10 @@ defmodule Browser.Layout do
 
   defp shift_rect(%{x: x, y: y} = c, dx, dy), do: %{c | x: x + dx, y: y + dy}
   defp shift_box({x, y, w, h}, dx, dy), do: {x + dx, y + dy, w, h}
+
+  # (a `fixed` layer is placed against the window: only the part it shows moves)
+  defp shift_layer(%{fixed: true} = layer, dx, dy),
+    do: %{layer | clip: shift_box(layer.clip, dx, dy)}
 
   defp shift_layer(layer, dx, dy),
     do: %{layer | tile: shift_box(layer.tile, dx, dy), clip: shift_box(layer.clip, dx, dy)}
@@ -8357,7 +8375,17 @@ defmodule Browser.Layout do
       width = Enum.at(xs, last) + Enum.at(widths, last) - left
       area = {left - dx, top - dy, width, height}
       clip = {Enum.at(xs, i) - dx, 0, w, full_h}
-      layers = Backgrounds.paint_layers(img.spec, area, clip, st.images, color4(img.color))
+
+      layers =
+        Backgrounds.paint_layers(
+          img.spec,
+          area,
+          clip,
+          st.images,
+          color4(img.color),
+          viewport_area()
+        )
+
       {clip, layers}
     end
     |> Enum.reject(fn {_, layers} -> layers == [] end)
@@ -8389,7 +8417,8 @@ defmodule Browser.Layout do
           area,
           {0, 0, p.w, full_h},
           st.images,
-          color4(img.color)
+          color4(img.color),
+          viewport_area()
         )
 
       %{type: :bgimage, layers: layers, x: 0, y: 0, w: p.w, h: full_h, radius: nil}

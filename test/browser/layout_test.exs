@@ -6703,4 +6703,23 @@ defmodule Browser.LayoutTest do
       assert green.y == 50
     end
   end
+
+  describe "background-attachment: fixed" do
+    test "places the picture against the window, the box only shows part of it" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:50px"></div><div style="height:40px;background:url(p.png) fixed no-repeat"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+
+      {items, _} =
+        Layout.layout(page.nodes, 400, &measure/2, 300,
+          margin: 0,
+          images: %{"about:p.png" => {:ok, 30, 80}}
+        )
+
+      assert %{layers: [layer]} = Enum.find(items, &(&1.type == :bgimage))
+      assert layer.fixed and layer.tile == {0, 0, 30, 80}
+      assert layer.clip == {0, 50, 400, 40}
+    end
+  end
 end

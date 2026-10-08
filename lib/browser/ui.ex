@@ -1063,6 +1063,9 @@ defmodule Browser.UI do
 
   # One background layer: a picture or gradient, repeated as the layer says, and
   # clipped to the area it paints into.
+  defp draw_layer(gc, %{fixed: true, tile: {x, y, w, h}} = layer, radii, scroll),
+    do: draw_layer(gc, %{layer | tile: {x, y + scroll, w, h}, fixed: false}, radii, scroll)
+
   defp draw_layer(gc, layer, radii, scroll) do
     {cx, cy, cw, ch} = layer.clip
     :wxGraphicsContext.clip(gc, cx, cy - scroll, cw, ch)

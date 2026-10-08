@@ -21,7 +21,7 @@ defmodule Browser.Style do
             border-top-color border-right-color border-bottom-color border-left-color
             border-top-left-radius border-top-right-radius border-bottom-right-radius
             border-bottom-left-radius line-height
-            background-image background-repeat background-position background-size box-shadow
+            background-image background-attachment background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
@@ -60,7 +60,7 @@ defmodule Browser.Style do
     "text-decoration" => ~w(text-decoration-line),
     "font" => ~w(font-style font-weight font-size line-height font-family),
     "background" =>
-      ~w(background-color background-image background-repeat background-position background-size),
+      ~w(background-color background-image background-attachment background-repeat background-position background-size),
     "border-width" =>
       ~w(border-top-width border-right-width border-bottom-width border-left-width),
     "border-style" =>
@@ -614,6 +614,7 @@ defmodule Browser.Style do
     [
       {"background-color", parts.color},
       {"background-image", parts.image},
+      {"background-attachment", parts.attachment},
       {"background-repeat", parts.repeat},
       {"background-position", parts.position},
       {"background-size", parts.size}
@@ -1884,6 +1885,9 @@ defmodule Browser.Style do
 
   defp typed("background-image", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_images(v)}
   defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
+
+  defp typed("background-attachment", v, _env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_attachment(v)}
 
   defp typed("background-position", v, env, _pc),
     do: {:ok, Browser.Backgrounds.parse_position(font_units_to_px(v, env))}

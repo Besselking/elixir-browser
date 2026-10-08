@@ -259,6 +259,16 @@ defmodule Browser.Backgrounds do
   defp repeat_mode("no-repeat"), do: :no_repeat
   defp repeat_mode(_), do: :repeat
 
+  def parse_attachment(value), do: value |> split_top() |> Enum.map(&attachment_layer/1)
+
+  defp attachment_layer(layer) do
+    case String.downcase(String.trim(layer)) do
+      "fixed" -> :fixed
+      "local" -> :local
+      _ -> :scroll
+    end
+  end
+
   def parse_position(value), do: value |> split_top() |> Enum.map(&position_layer/1)
 
   defp position_layer(layer), do: layer |> String.downcase() |> tokens() |> position_pair()
@@ -351,7 +361,8 @@ defmodule Browser.Backgrounds do
   # -- the shorthand ---------------------------------------------------------------
 
   @repeat_words ~w(repeat repeat-x repeat-y no-repeat space round)
-  @ignored_words ~w(scroll fixed local border-box padding-box content-box)
+  @ignored_words ~w(border-box padding-box content-box)
+  @attachment_words ~w(scroll fixed local)
 
   @doc """
   Splits a `background` value into longhand CSS text:
@@ -365,6 +376,7 @@ defmodule Browser.Backgrounds do
     %{
       color: last.color || "transparent",
       image: join(layers, :image),
+      attachment: join(layers, :attachment),
       repeat: join(layers, :repeat),
       position: join(layers, :position),
       size: join(layers, :size)
@@ -379,14 +391,22 @@ defmodule Browser.Backgrounds do
     {acc, _} =
       Enum.reduce(
         toks,
-        {%{color: nil, image: "none", repeat: "repeat", position: [], size: [], phase: :pos},
-         nil},
+        {%{
+           color: nil,
+           image: "none",
+           attachment: "scroll",
+           repeat: "repeat",
+           position: [],
+           size: [],
+           phase: :pos
+         }, nil},
         &shorthand_token/2
       )
 
     %{
       color: acc.color,
       image: acc.image,
+      attachment: acc.attachment,
       repeat: acc.repeat,
       position:
         if(acc.position == [],
@@ -408,6 +428,9 @@ defmodule Browser.Backgrounds do
     cond do
       lower in @ignored_words ->
         {acc, x}
+
+      lower in @attachment_words ->
+        {%{acc | attachment: lower}, x}
 
       lower in @repeat_words ->
         {%{acc | repeat: lower}, x}
@@ -594,9 +617,7 @@ defmodule Browser.Backgrounds do
   A layer is `%{kind: :image | :svg | :linear | :radial, tile: {x, y, w, h}, repeat: {rx, ry},
   clip: clip, ...}` where gradient geometry is relative to the tile's top-left corner.
   """
-  def paint_layers(spec, area, clip, sizes, current) do
-    {ax, ay, aw, ah} = area
-
+  def paint_layers(spec, area, clip, sizes, current, viewport \\ nil) do
     spec.images
     |> Enum.with_index()
     |> Enum.flat_map(fn {image, i} ->
@@ -607,6 +628,9 @@ defmodule Browser.Backgrounds do
       size = pick.(spec.size, {:auto, :auto})
       pos = pick.(spec.position, {0.0, 0.0})
       repeat = pick.(spec.repeat, {:repeat, :repeat})
+      # `fixed`: placed against the window, which the page scrolls past
+      fixed? = viewport != nil and pick.(Map.get(spec, :attachment, []), :scroll) == :fixed
+      {ax, ay, aw, ah} = if fixed?, do: viewport, else: area
 
       with {kind, payload, intrinsic} <- image_content(image, sizes),
            {tw, th} when tw >= 1 and th >= 1 <- tile_size(size, {aw, ah}, intrinsic) do
@@ -619,6 +643,8 @@ defmodule Browser.Backgrounds do
           repeat: repeat,
           clip: clip
         }
+
+        layer = if fixed?, do: Map.put(layer, :fixed, true), else: layer
 
         [Map.merge(layer, finish(kind, payload, tw, th, current))]
       else

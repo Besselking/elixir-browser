@@ -207,6 +207,7 @@ defmodule Browser.BackgroundsTest do
       assert B.shorthand("#fff") == %{
                color: "#fff",
                image: "none",
+               attachment: "scroll",
                repeat: "repeat",
                position: "0% 0%",
                size: "auto"
@@ -215,6 +216,7 @@ defmodule Browser.BackgroundsTest do
       assert B.shorthand("none") == %{
                color: "transparent",
                image: "none",
+               attachment: "scroll",
                repeat: "repeat",
                position: "0% 0%",
                size: "auto"
@@ -226,6 +228,12 @@ defmodule Browser.BackgroundsTest do
       assert %{color: "#eee", image: "url(a.png)", repeat: "no-repeat"} = s
       s = B.shorthand("no-repeat url(a.png) red")
       assert %{color: "red", image: "url(a.png)", repeat: "no-repeat"} = s
+    end
+
+    test "attachment, with one value for each layer" do
+      assert %{attachment: "fixed"} = B.shorthand("url(a.png) fixed no-repeat")
+      assert %{attachment: "fixed, scroll"} = B.shorthand("url(a.png) fixed, url(b.png)")
+      assert B.parse_attachment("fixed, local, scroll") == [:fixed, :local, :scroll]
     end
 
     test "position and size around the slash" do
