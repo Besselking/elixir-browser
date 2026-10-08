@@ -6154,6 +6154,15 @@ defmodule Browser.Layout do
         |> resolve_box_pct(containing_width())
         |> Map.drop(~w(width min-width max-width flex-basis))
         |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
+        # a height the author gave is definite for what is inside
+        |> then(
+          &if(
+            is_number(c["height"]) and c["flex-basis"] != "content" and
+              flex_number(c["flex-grow"], 0.0) == 0.0,
+            do: Map.put(&1, "@definite", true),
+            else: &1
+          )
+        )
         |> Map.merge(extra_props)
 
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})

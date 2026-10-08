@@ -5308,6 +5308,14 @@ defmodule Browser.LayoutTest do
       assert {_, 30} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
     end
 
+    test "a flex item with a height of its own gives percentage children something to resolve against" do
+      html = """
+      <div style="display:flex;flex-direction:column"><div style="width:50px;height:40px"><div style="height:50%;background:green"></div></div></div>
+      """
+
+      assert flex_rects(html) == [{0, 0, 50, 20}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

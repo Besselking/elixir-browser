@@ -3992,6 +3992,7 @@ css/css-flexbox/overflow-area-001.html
 css/css-flexbox/overflow-area-002.html
 css/css-flexbox/overflow-area-003.html
 css/css-flexbox/padding-overflow.html
+css/css-flexbox/percentage-heights-005.html
 css/css-flexbox/percentage-heights-006.html
 css/css-flexbox/percentage-heights-007.html
 css/css-flexbox/percentage-heights-008.html
@@ -4002,6 +4003,7 @@ css/css-flexbox/percentage-heights-017.html
 css/css-flexbox/percentage-heights-018.html
 css/css-flexbox/percentage-max-height-001.html
 css/css-flexbox/percentage-max-height-004.html
+css/css-flexbox/percentage-max-height-005.html
 css/css-flexbox/percentage-padding-005.html
 css/css-flexbox/percentage-size-quirks-003.html
 css/css-flexbox/position-fixed-001.html
