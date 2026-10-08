@@ -354,7 +354,8 @@ defmodule Browser.UI do
             weight
           )
 
-        if face, do: :wxFont.setFaceName(f, face)
+        # wxWidgets 3.3 invalidates the font when the face is unknown; keep the family's font then
+        if face && not :wxFont.setFaceName(f, face), do: :wxFont.setFamily(f, wx_family)
         Process.put(key, f)
         f
 
@@ -1285,7 +1286,11 @@ defmodule Browser.UI do
     [{_, first} | _] = stops
     {_, last} = List.last(stops)
     gs = :wxGraphicsGradientStops.new([{:startCol, first}, {:endCol, last}])
-    Enum.each(stops, fn {pos, color} -> :wxGraphicsGradientStops.add(gs, color, pos) end)
+    # wxWidgets 3.3 asserts on positions outside 0..1
+    Enum.each(stops, fn {pos, color} ->
+      :wxGraphicsGradientStops.add(gs, color, min(max(pos, 0.0), 1.0) * 1.0)
+    end)
+
     gs
   end
 
