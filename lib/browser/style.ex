@@ -2039,6 +2039,14 @@ defmodule Browser.Style do
     {:ok, if(bold?, do: "bold", else: "normal")}
   end
 
+  # a length is computed where it is declared (the inherited value is absolute)
+  defp typed("tab-size", v, env, _pc) do
+    case Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, v) do
+      true -> {:ok, v}
+      false -> if px = length(v, env), do: {:ok, "#{px}px"}, else: {:ok, v}
+    end
+  end
+
   defp typed("font-style", v, _env, _pc),
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
 

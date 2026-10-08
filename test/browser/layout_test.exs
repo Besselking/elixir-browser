@@ -4481,18 +4481,20 @@ defmodule Browser.LayoutTest do
     assert red.h < 50
   end
 
+  defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
+
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
     page = Browser.Page.build("<pre>ab\tc\n\td</pre>", "about:home")
     {items, _} = Layout.layout(page.nodes, 600, &measure/2)
-    words = for %{type: :text, text: t} <- items, do: t
-    assert Enum.any?(words, &(&1 == "ab" <> String.duplicate(" ", 6) <> "c"))
-    assert Enum.any?(words, &(&1 == String.duplicate(" ", 8) <> "d"))
+    # (a column is 8px wide here)
+    assert word_x(items, "c") - word_x(items, "ab") == 64
+    assert word_x(items, "d") - word_x(items, "ab") == 64
   end
 
   test "tab-size sets the columns a tab spans" do
     page = Browser.Page.build(~s|<pre style="tab-size:4">a\tb</pre>|, "about:home")
     {items, _} = Layout.layout(page.nodes, 600, &measure/2)
-    assert Enum.any?(items, &(&1[:text] == "a   b"))
+    assert word_x(items, "b") - word_x(items, "a") == 32
   end
 
   test "an absolute box is as wide as an empty inline-block in it" do
@@ -5338,10 +5340,10 @@ defmodule Browser.LayoutTest do
   describe "tab-size lengths, calc() text-indent and words beside floats" do
     defp tab_rows(html), do: wb_rows(html, 400)
 
-    test "a tab-size given as a length is that many pixels of spaces" do
+    test "a tab-size given as a length is that many pixels" do
       html = ~s|<pre style="font-size:10px;tab-size:20px">a\tb</pre>|
-      # a space is 5px wide here, so 20px is four columns: the b starts in column 4
-      assert tab_rows(html) == ["a   b"]
+      {items, _} = Layout.layout(Browser.Page.build(html, "about:home").nodes, 400, &measure/2)
+      assert word_x(items, "b") - word_x(items, "a") == 20
     end
 
     test "a word too wide for the room beside a float goes below it" do
@@ -6285,6 +6287,15 @@ defmodule Browser.LayoutTest do
         ~s|<div style="width:100px;overflow:hidden"><div><div style="float:left;width:100px;height:50px"></div><div style="margin-top:300px;clear:left;height:50px;background:green"></div></div></div>|
 
       assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, y: 58}, &1))
+    end
+
+    test "a tab in preserved text goes to the next tab stop of the block container" do
+      html =
+        ~s|<div style="font:10px/1 Ahem;white-space:pre;tab-size:4"><span style="font-size:20px">\tc</span></div>|
+
+      texts = for %{type: :text} = t <- laid_out(html), do: {t.text, t.x}
+      # (a tab stop is 4 spaces of the block's 10px font, whatever the font of the text)
+      assert {"c", 28} in texts
     end
 
     test "a float on a table column group floats" do

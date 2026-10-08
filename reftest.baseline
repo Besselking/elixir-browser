@@ -5152,14 +5152,17 @@ css/css-text/overflow-wrap/overflow-wrap-min-content-size-009.html
 css/css-text/overflow-wrap/word-wrap-001.html
 css/css-text/overflow-wrap/word-wrap-002.html
 css/css-text/overflow-wrap/word-wrap-004.html
+css/css-text/tab-size/tab-size-block-ancestor.html
 css/css-text/tab-size/tab-size-inline-001.html
 css/css-text/tab-size/tab-size-integer-001.html
 css/css-text/tab-size/tab-size-integer-002.html
 css/css-text/tab-size/tab-size-integer-003.html
+css/css-text/tab-size/tab-size-integer-004.html
 css/css-text/tab-size/tab-size-length-001.html
 css/css-text/tab-size/tab-size-length-002.html
 css/css-text/tab-size/tab-size-percent-001.html
 css/css-text/tab-size/tab-size-spacing-002.html
+css/css-text/tab-size/tab-size-spacing-003.html
 css/css-text/text-align/text-align-006.html
 css/css-text/text-align/text-align-007.html
 css/css-text/text-align/text-align-center-last-center.html

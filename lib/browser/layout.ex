@@ -132,6 +132,10 @@ defmodule Browser.Layout do
       # inside an inline box (a block in it splits the box)
       inl: false,
       tab: 8,
+      # the width of a space in the font of the block container: what `tab-size` counts in
+      bspace: nil,
+      # a fixed width in px for the text: a tab
+      fixw: nil,
       hyph: "-",
       hidden: false,
       tiny: false,
@@ -208,6 +212,9 @@ defmodule Browser.Layout do
       # (text of a font size under one pixel takes no room)
       _text, %{tiny: true} ->
         0
+
+      _text, %{fixw: w} when is_number(w) ->
+        w
 
       text, style ->
         # (a zero-width space takes no room)
@@ -2447,7 +2454,7 @@ defmodule Browser.Layout do
     |> then(
       &if(c["display"] in [nil, "inline"],
         do: &1,
-        else: &1 |> Map.put(:cb, &1.rtl) |> Map.put(:vs, 0)
+        else: &1 |> Map.put(:cb, &1.rtl) |> Map.put(:vs, 0) |> block_space()
       )
     )
     |> then(&if(blockified?(c), do: Map.put(&1, :vs, 0), else: &1))
@@ -2484,9 +2491,9 @@ defmodule Browser.Layout do
   defp tab_size(style, value) do
     text = value |> to_string() |> String.trim()
 
-    case Integer.parse(text) do
+    case Float.parse(text) do
       {n, ""} when n >= 0 ->
-        %{style | tab: n}
+        %{style | tab: if(n == trunc(n), do: trunc(n), else: n)}
 
       _ ->
         case Regex.run(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)\z/, text) do
@@ -2510,19 +2517,28 @@ defmodule Browser.Layout do
     end
   end
 
-  # the tab stops in columns: a length is as many spaces as fit in it
-  defp tab_cols(%{tab: n}) when is_integer(n), do: n
-
-  defp tab_cols(%{tab: {:px, px}} = style) do
+  # the width of the space in the font of a block container
+  defp block_space(style) do
     case Process.get(:layout_measure) do
-      nil ->
-        0
-
-      measure ->
-        space = measure.(" ", %{style | ls: 0, wsp: 0})
-        if space > 0, do: max(round(px / space), 0), else: 0
+      nil -> style
+      measure -> %{style | bspace: measure.(" ", style)}
     end
   end
+
+  # the tab stops in columns of spaces
+  defp tab_cols(style) do
+    with measure when measure != nil <- Process.get(:layout_measure),
+         space when space > 0 <- measure.(" ", %{style | ls: 0, wsp: 0}) do
+      max(round(tab_px(style, space) / space), 0)
+    else
+      _ -> 0
+    end
+  end
+
+  # the distance between tab stops in px: a number of the spaces of the block container's font,
+  # or a length
+  defp tab_px(%{tab: {:px, px}}, _space), do: px
+  defp tab_px(%{tab: n} = style, space), do: n * (style.bspace || space)
 
   # Georgian Mkhedruli letters stay as they are in upper case (their capitals are a style of
   # their own, not a case)
@@ -2941,8 +2957,11 @@ defmodule Browser.Layout do
 
   # the words of one line: `pre` keeps it whole, `pre-wrap` keeps its spaces but may wrap,
   # `pre-line` collapses spaces
-  defp line_ops(line, style, :pre, _prev),
-    do: [{:word, expand_tabs(line, tab_cols(style)), style, :pre}]
+  defp line_ops(line, style, :pre, _prev) do
+    if String.contains?(line, "\t"),
+      do: pre_words(line, style),
+      else: [{:word, line, style, :pre}]
+  end
 
   defp line_ops(line, style, :pre_line, _prev) do
     line
@@ -3005,7 +3024,7 @@ defmodule Browser.Layout do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
     ~r/ +|[^ ]+/
-    |> Regex.scan(expand_tabs(line, tab_cols(style)))
+    |> Regex.scan(expand_tabs(line, style))
     |> then(&Enum.with_index(&1, fn token, i -> {token, i, i == length(&1) - 1} end))
     |> Enum.map(fn {[run], i, last?} ->
       cond do
@@ -3039,25 +3058,52 @@ defmodule Browser.Layout do
   defp nbsp_of(" "), do: "\u00A0"
   defp nbsp_of(other), do: other
 
-  # a tab advances to the next multiple of `tab-size` columns
-  defp expand_tabs(line, tab) do
-    if String.contains?(line, "\t") do
+  # a tab advances to the next multiple of `tab-size`, as many spaces of the text's font
+  defp expand_tabs(line, style) do
+    with true <- String.contains?(line, "\t"),
+         measure when measure != nil <- Process.get(:layout_measure),
+         plain = %{style | ls: 0, wsp: 0},
+         space when space > 0 <- measure.(" ", plain) do
+      tabw = tab_px(style, space)
+
       {parts, _} =
         line
         |> String.graphemes()
         |> Enum.reduce({[], 0}, fn
-          "\t", {acc, col} ->
-            n = if tab == 0, do: 0, else: tab - rem(col, tab)
-            {[String.duplicate(" ", n) | acc], col + n}
+          "\t", {acc, off} ->
+            n = if tabw <= 0, do: 0, else: round(((trunc(off / tabw) + 1) * tabw - off) / space)
+            {[String.duplicate(" ", n) | acc], off + n * space}
 
-          g, {acc, col} ->
-            {[g | acc], col + 1}
+          g, {acc, off} ->
+            {[g | acc], off + measure.(g, plain)}
         end)
 
       parts |> Enum.reverse() |> Enum.join()
     else
-      line
+      _ -> line
     end
+  end
+
+  # the pieces of a preserved line with tabs: each tab is a space as wide as the way to the next
+  # tab stop, counted from the start of the line
+  defp pre_words(line, style) do
+    measure = Process.get(:layout_measure)
+    plain = %{style | fixw: nil}
+    tabw = tab_px(style, measure.(" ", plain))
+
+    {words, _} =
+      ~r/\t|[^\t]+/
+      |> Regex.scan(line)
+      |> Enum.map_reduce(0, fn
+        ["\t"], off ->
+          w = if tabw <= 0, do: 0, else: round((trunc(off / tabw) + 1) * tabw - off)
+          {{:word, " ", %{style | fixw: w}, :pre}, off + w}
+
+        [text], off ->
+          {{:word, text, style, :pre}, off + measure.(text, plain)}
+      end)
+
+    words
   end
 
   # collapsible spaces at the end of a line vanish even when only empty inline boxes stand
