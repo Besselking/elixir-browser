@@ -6474,6 +6474,20 @@ defmodule Browser.LayoutTest do
       texts = for %{type: :text, text: t} <- laid_out("<p>ab\ncd</p>"), do: t
       assert texts == ["ab", "cd"]
     end
+
+    test "a line break next to a zero-width space or CJK punctuation leaves no space" do
+      for html <- ["<p>測試\u200B\n\n測試</p>", "<p>ab。\nCD</p>", "<p>ab\n・\nCD</p>"] do
+        text = laid_out(html) |> Enum.filter(&(&1.type == :text)) |> Enum.map_join(& &1.text)
+        refute String.contains?(text, " "), html
+      end
+    end
+
+    test "a line break next to a fullwidth letter is a space" do
+      words = for %{type: :text} = t <- laid_out("<p>ＦＵＬＬ\nnarrow</p>"), do: t
+      {last, narrow} = {Enum.at(words, -2), List.last(words)}
+      assert narrow.text == "narrow"
+      assert narrow.x > last.x + last.w
+    end
   end
 
   describe "table-layout: fixed" do

@@ -2841,10 +2841,37 @@ defmodule Browser.Layout do
 
   # a line break between two wide East Asian characters (not Hangul) is removed, not turned into a space
   @wide "\\x{2E80}-\\x{303E}\\x{3041}-\\x{33FF}\\x{3400}-\\x{4DBF}\\x{4E00}-\\x{9FFF}\\x{F900}-\\x{FAFF}\\x{FE30}-\\x{FE4F}\\x{FF01}-\\x{FF9F}\\x{FFE0}-\\x{FFE6}\\x{20000}-\\x{3FFFD}"
-  @wide_break Regex.compile!("([#{@wide}])[ \\t]*\\n[ \\t]*(?=[#{@wide}])", "u")
+  # (variation selectors, soft hyphens and direction marks are invisible between the two)
+  @ignorable "\\x{FE00}-\\x{FE0F}\\x{E0100}-\\x{E01EF}\\x{AD}\\x{200E}\\x{200F}"
+  @wide_break Regex.compile!(
+                "([#{@wide}][#{@ignorable}]*)[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@ignorable}]*[#{@wide}])",
+                "u"
+              )
+  # (CJK punctuation, also the half- and fullwidth forms of it)
+  @cjk_punct "\\x{3001}-\\x{303F}\\x{30FB}\\x{FF01}-\\x{FF0F}\\x{FF1A}-\\x{FF20}\\x{FF3B}-\\x{FF40}\\x{FF5B}-\\x{FF65}"
+  @punct_break Regex.compile!(
+                 "([#{@cjk_punct}])[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@cjk_punct}])",
+                 "u"
+               )
+  # (a segment break next to a zero-width space goes as well)
+  @zwsp_break Regex.compile!(
+                "\\x{200B}[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=\\x{200B})",
+                "u"
+              )
 
   defp drop_wide_breaks(t) do
-    if String.contains?(t, "\n"), do: Regex.replace(@wide_break, t, "\\1"), else: t
+    if String.contains?(t, "\n") do
+      t
+      |> then(&Regex.replace(@wide_break, &1, "\\1"))
+      |> then(&Regex.replace(@punct_break, &1, "\\1"))
+      |> then(
+        &Regex.replace(@zwsp_break, &1, fn m ->
+          if String.starts_with?(m, "\u200B"), do: "\u200B", else: ""
+        end)
+      )
+    else
+      t
+    end
   end
 
   # a line may break between an ideograph (or kana) and the character next to it, except before

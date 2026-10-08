@@ -5058,6 +5058,13 @@ css/css-text/line-breaking/line-breaking-atomic-026.html
 css/css-text/line-breaking/line-breaking-atomic-027.html
 css/css-text/line-breaking/line-breaking-ic-001.html
 css/css-text/line-breaking/segment-break-transformation-currency-001.html
+css/css-text/line-breaking/segment-break-transformation-ignorable-1.html
+css/css-text/line-breaking/segment-break-transformation-punctuation-001.html
+css/css-text/line-breaking/segment-break-transformation-punctuation-002.html
+css/css-text/line-breaking/segment-break-transformation-removable-1.html
+css/css-text/line-breaking/segment-break-transformation-removable-2.html
+css/css-text/line-breaking/segment-break-transformation-removable-3.html
+css/css-text/line-breaking/segment-break-transformation-removable-4.html
 css/css-text/line-breaking/segment-break-transformation-rules-001.html
 css/css-text/line-breaking/segment-break-transformation-rules-002.html
 css/css-text/line-breaking/segment-break-transformation-rules-003.html
