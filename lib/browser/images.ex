@@ -5,7 +5,7 @@ defmodule Browser.Images do
   `index/2` runs on the parsed tree: every `<img>` that has a usable source gets an
   `"@src"` attribute holding the absolute URL, and the distinct URLs are returned so
   the session can fetch them. `fetch/2` produces image bytes that the window toolkit
-  can decode (PNG, JPEG, GIF or BMP), converting other formats with macOS's `sips`.
+  can decode (PNG, JPEG, GIF, BMP, or WebP when wx reads it), converting other formats with macOS's `sips`.
   """
 
   alias Browser.Fetch
@@ -91,7 +91,7 @@ defmodule Browser.Images do
 
   @doc """
   Fetches the image at `url` (for a page at `base`): `{:ok, bytes, format}` with
-  `format` one of `:png | :jpeg | :gif | :bmp`, or `{:error, reason}`. An SVG
+  `format` one of `:png | :jpeg | :gif | :bmp | :webp`, or `{:error, reason}`. An SVG
   comes back parsed: `{:ok, scene, :svg}` (see `Browser.Svg`).
   """
   def fetch(url, base) do
@@ -177,13 +177,24 @@ defmodule Browser.Images do
 
   def sniff(_), do: :unknown
 
-  # formats the toolkit reads directly; anything `sips` can read is converted to PNG
+  # formats the toolkit reads directly (WebP too, with wxWidgets 3.3 or newer); anything
+  # else `sips` can read is converted to PNG
   defp prepare(bytes) do
     case sniff(bytes) do
-      format when format in [:png, :jpeg, :gif, :bmp] -> {:ok, bytes, format}
-      format when format in [:webp, :avif, :heic, :tiff] -> convert(bytes, format)
-      :svg -> with {:ok, scene} <- Browser.Svg.from_source(bytes), do: {:ok, scene, :svg}
-      :unknown -> {:error, "unknown image format"}
+      :webp ->
+        if Browser.UI.webp_supported?(), do: {:ok, bytes, :webp}, else: convert(bytes, :webp)
+
+      format when format in [:png, :jpeg, :gif, :bmp] ->
+        {:ok, bytes, format}
+
+      format when format in [:webp, :avif, :heic, :tiff] ->
+        convert(bytes, format)
+
+      :svg ->
+        with {:ok, scene} <- Browser.Svg.from_source(bytes), do: {:ok, scene, :svg}
+
+      :unknown ->
+        {:error, "unknown image format"}
     end
   end
 

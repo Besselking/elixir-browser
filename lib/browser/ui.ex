@@ -43,6 +43,7 @@ defmodule Browser.UI do
 
     Browser.TabStrip.init()
     wx = :wx.new()
+    probe_webp()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
 
     tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
@@ -580,6 +581,7 @@ defmodule Browser.UI do
       :ets.new(name, [:named_table, :public])
     end
 
+    probe_webp()
     :ets.insert(@view, {:view, [], 0, true})
     :ets.insert(@view, {:sx, 0})
     dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
@@ -1581,9 +1583,24 @@ defmodule Browser.UI do
 
   # -- images ------------------------------------------------------------------------
 
+  # a 1 x 1 lossless WebP, to find out whether this wx can read the format (wxWidgets 3.3+)
+  @webp_probe Base.decode64!("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
+
   @doc """
-  Decodes image bytes (PNG, JPEG, GIF or BMP) into a bitmap the painter can draw, kept
-  under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
+  Whether the toolkit decodes WebP itself. Known once wx has started (`build/0` or
+  `snapshot_start/0` finds out); false before that.
+  """
+  def webp_supported?, do: :persistent_term.get({__MODULE__, :webp}, false)
+
+  defp probe_webp do
+    ok = match?({:ok, 1, 1}, load_image(:webp_probe, @webp_probe, :webp))
+    :ets.delete(@images, :webp_probe)
+    :persistent_term.put({__MODULE__, :webp}, ok)
+  end
+
+  @doc """
+  Decodes image bytes (PNG, JPEG, GIF, BMP, or WebP where `webp_supported?/0`) into a
+  bitmap the painter can draw, kept under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
   so the bytes pass through a temporary one.
   """
   def load_image(url, bytes, format) do

@@ -20,6 +20,10 @@ Requires Elixir 1.20+ and Erlang/OTP 29+ with the `wx` application; only the lat
 supported. `scripts/install-toolchain.sh` installs them (Homebrew on macOS, a source build with wx on
 Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
 
+WebP images need wxWidgets 3.3 or newer with libwebp. With wxWidgets 3.2 the browser shows the alt
+text, except on macOS, where it converts WebP with `sips`. OTP 29.1.1 builds its `wx` against 3.3
+only after a few patches; see `scripts/install-wx33.sh`.
+
 ## Crash reports
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
