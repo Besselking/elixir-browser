@@ -543,6 +543,23 @@ defmodule Browser.JS.WebAPI do
     addTo(CLP, "values", function () { return tokens(this)[Symbol.iterator](); });
     addTo(CLP, "keys", function () { return tokens(this).keys(); });
     addTo(CLP, "entries", function () { return tokens(this).entries(); });
+    // the rest of the 2D context: drawing other than rectangles is not drawn, but calling it works
+    try {
+      var CP = Object.getPrototypeOf(document.createElement("canvas").getContext("2d"));
+      ["save", "restore", "scale", "rotate", "translate", "transform", "setTransform", "resetTransform", "beginPath", "closePath",
+       "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect", "fill", "stroke",
+       "clip", "fillText", "strokeText", "drawImage", "putImageData", "setLineDash", "drawFocusIfNeeded"].forEach(function (n) { addTo(CP, n, function () {}); });
+      addTo(CP, "measureText", function (t) { var w = String(t).length * 6; return { width: w, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 3 }; });
+      ["createLinearGradient", "createRadialGradient", "createConicGradient"].forEach(function (n) { addTo(CP, n, function () { return { addColorStop: function () {} }; }); });
+      addTo(CP, "createPattern", function () { return { setTransform: function () {} }; });
+      function imageData(w, h) { return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }; }
+      addTo(CP, "getImageData", function (x, y, w, h) { return imageData(w, h); });
+      addTo(CP, "createImageData", function (w, h) { return typeof w === "object" ? imageData(w.width, w.height) : imageData(w, h); });
+      addTo(CP, "getLineDash", function () { return []; });
+      addTo(CP, "isPointInPath", function () { return false; });
+      addTo(CP, "isPointInStroke", function () { return false; });
+      addTo(CP, "getTransform", function () { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; });
+    } catch (e) {}
     var SP = Object.getPrototypeOf(document.documentElement.style);
     addTo(SP, Symbol.iterator, function () { var a = []; for (var i = 0; i < this.length; i++) a.push(this.item(i)); return a[Symbol.iterator](); });
     var UP = Object.getPrototypeOf(new URLSearchParams());
