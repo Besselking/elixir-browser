@@ -784,8 +784,9 @@ defmodule Browser.Session do
         state = cancel_layout_job(state)
 
         # what the user typed meanwhile is not in what the job laid out: lay out again
+        # (the job does not draw the focus ring and caret: a focused control needs its own)
         state =
-          if carried == %{},
+          if carried == %{} and state.focus == nil,
             do: apply_layout(state, items, height, width, :full),
             else: start_layout_job(state)
 
@@ -1950,10 +1951,16 @@ defmodule Browser.Session do
   end
 
   defp activate(state, %{type: "reset"} = control) do
-    state.page.form_state
-    |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
-    |> then(&set_form_state(state, &1))
-    |> relayout()
+    case js_event(state, {:control, control.cid}, "click") do
+      {state, true} ->
+        state
+
+      {state, false} ->
+        state.page.form_state
+        |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
+        |> then(&set_form_state(state, &1))
+        |> relayout()
+    end
   end
 
   defp activate(state, %{type: type} = control) when type in ["submit", "image"],
@@ -1973,24 +1980,24 @@ defmodule Browser.Session do
       case if(clicked, do: js_event(state, {:control, clicked}, "click"), else: {state, false}) do
         {state, true} -> {state, true}
         {state, false} when form == nil -> {state, true}
-        {state, false} -> js_event(state, {:form, form}, "submit")
+        # (the script runtime closes the dialog of a `method="dialog"` form after the event)
+        {state, false} -> js_event(state, {:form, form}, "submit", %{"submitter" => clicked})
       end
 
-    if prevented, do: state, else: navigate_form(state, form, clicked)
+    if prevented or dialog_form?(state, form),
+      do: state,
+      else: navigate_form(state, form, clicked)
   end
 
-  # `<form method="dialog">` closes the dialog it is in instead of going anywhere
-  defp navigate_form(%{js: js, page: page} = state, form, clicked) when js != nil do
-    case page.forms.forms do
-      %{^form => %{method: "dialog"}} ->
-        apply_js(state, Browser.JS.Runtime.dialog_submit(js, form, clicked))
+  defp dialog_form?(%{page: %{forms: %{forms: forms}}}, form),
+    do: match?(%{^form => %{method: "dialog"}}, forms)
 
-      _ ->
-        navigate_form_url(state, form, clicked)
-    end
+  defp dialog_form?(_state, _form), do: false
+
+  # `form.submit()` of a script and the like come here: a dialog form goes nowhere
+  defp navigate_form(state, form, clicked) do
+    if dialog_form?(state, form), do: state, else: navigate_form_url(state, form, clicked)
   end
-
-  defp navigate_form(state, form, clicked), do: navigate_form_url(state, form, clicked)
 
   defp navigate_form_url(state, form, clicked) do
     page = state.page
@@ -2125,8 +2132,8 @@ defmodule Browser.Session do
   # fires an event in the page's scripts: -> {state, default prevented?}
   defp js_event(%{js: nil} = state, _target, _type), do: {state, false}
 
-  defp js_event(state, target, type) do
-    reply = Browser.JS.Runtime.dispatch(state.js, target, type, %{}, controls_snapshot(state))
+  defp js_event(state, target, type, init \\ %{}) do
+    reply = Browser.JS.Runtime.dispatch(state.js, target, type, init, controls_snapshot(state))
     {apply_js(state, reply), reply.prevented}
   end
 

@@ -763,6 +763,28 @@ defmodule Browser.JS.DOM do
       nil ->
         :ok
 
+      form when is_integer(form) ->
+        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+             not formmethod_dialog?(cid),
+           do: :ok,
+           else: do_dialog_submit(form, cid)
+    end
+  end
+
+  defp formmethod_dialog?(nil), do: false
+
+  defp formmethod_dialog?(cid) do
+    case control_node(cid) do
+      nil -> false
+      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+    end
+  end
+
+  defp do_dialog_submit(form, cid) do
+    case form do
+      nil ->
+        :ok
+
       form ->
         submitter = cid && control_node(cid)
 

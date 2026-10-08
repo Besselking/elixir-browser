@@ -237,6 +237,26 @@ defmodule Browser.JS.DOMTest do
       assert later(pid) == ["closed yes"]
     end
 
+    test "the submit event of a method=dialog form closes the dialog unless a script stops it" do
+      {pid, _} =
+        start(
+          "<body><dialog id=d><form method=dialog><button value=no>No</button><button formmethod=dialog value=yes>Yes</button></form></dialog>" <>
+            "<dialog id=e><form method=dialog id=g><button value=x>X</button></form></dialog><script>" <>
+            "var d = document.getElementById('d'), e = document.getElementById('e');" <>
+            "d.addEventListener('close', function () { console.log('d closed', d.returnValue); });" <>
+            "e.addEventListener('close', function () { console.log('e closed'); });" <>
+            "document.getElementById('g').addEventListener('submit', function (ev) { ev.preventDefault(); });" <>
+            "d.showModal();</script></body>"
+        )
+
+      reply = Runtime.dispatch(pid, {:form, 0}, "submit", %{"submitter" => 1})
+      assert {:modal, :close} in reply.outbox
+      assert later(pid) == ["d closed yes"]
+
+      Runtime.dispatch(pid, {:form, 1}, "submit", %{"submitter" => 2})
+      assert later(pid) == []
+    end
+
     test "a click on the backdrop closes a dialog that says closedby=any" do
       {pid, r} =
         start(
