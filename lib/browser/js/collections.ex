@@ -1,7 +1,7 @@
 defmodule Browser.JS.Collections do
   @moduledoc """
-  `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, iterator objects, `setImmediate` and
-  `MessageChannel` for the JavaScript runtime.
+  `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, iterator objects and `setImmediate`
+  for the JavaScript runtime.
 
   A symbol is `{:symbol, id, description}`; the well-known ones have atoms for their id
   (`{:symbol, :iterator, "Symbol.iterator"}`). A symbol-keyed property is an ordinary entry in the
@@ -1197,7 +1197,7 @@ defmodule Browser.JS.Collections do
     end
   end
 
-  # ── setImmediate, MessageChannel ───────────────────────────
+  # ── setImmediate ───────────────────────────
 
   defp install_host(scope) do
     timeout = fn -> Map.fetch!(deref(global()).vars, "setTimeout") end
@@ -1218,47 +1218,6 @@ defmodule Browser.JS.Collections do
       end)
     )
 
-    port_proto = new_object()
-
-    ctor =
-      native("MessageChannel", fn _, _ ->
-        p1 = new_object([], port_proto)
-        p2 = new_object([], port_proto)
-        link(p1, p2, timeout)
-        link(p2, p1, timeout)
-        new_object([{"port1", p1}, {"port2", p2}])
-      end)
-
-    declare(scope, "MessageChannel", ctor)
-  end
-
-  # `a.postMessage(x)` later calls `b.onmessage({data: x})`
-  defp link(from, to, timeout) do
-    put_hidden(
-      from,
-      "postMessage",
-      native("postMessage", fn _, args ->
-        data = arg(args, 0)
-
-        deliver =
-          native("", fn _, _ ->
-            case Interp.get(to, "onmessage") do
-              f when is_tuple(f) ->
-                if function?(f), do: call(f, to, [new_object([{"data", data}])])
-
-              _ ->
-                :ok
-            end
-
-            :undefined
-          end)
-
-        call(timeout.(), :undefined, [deliver, 0.0])
-        :undefined
-      end)
-    )
-
-    put_hidden(from, "close", native("close", fn _, _ -> :undefined end))
-    put_hidden(from, "start", native("start", fn _, _ -> :undefined end))
+    :ok
   end
 end

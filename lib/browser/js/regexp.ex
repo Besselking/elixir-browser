@@ -326,6 +326,9 @@ defmodule Browser.JS.RegExp do
   @space_items "\\t\\n\\x{b}\\f\\r \\x{a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}\\x{feff}"
   @nonspace_items "\\x{0}-\\x{8}\\x{e}-\\x{1f}\\x{21}-\\x{9f}\\x{a1}-\\x{167f}\\x{1681}-\\x{1fff}\\x{200b}-\\x{2027}\\x{202a}-\\x{202e}\\x{2030}-\\x{205e}\\x{2060}-\\x{2fff}\\x{3001}-\\x{fefe}\\x{ff00}-\\x{10ffff}"
 
+  # a character no string has: what a surrogate in a class becomes (a class cannot be left empty)
+  @never "\\x{FFFF}"
+
   defp translate(source), do: translate(source, false, [])
 
   defp translate("", _cls, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
@@ -367,6 +370,30 @@ defmodule Browser.JS.RegExp do
         if(cls, do: @nonspace_items, else: "[" <> @nonspace_items <> "]") | acc
       ])
 
+  # `\p{Name}` / `\p{Name=Value}`: ECMAScript's names, which PCRE does not all know
+  defp translate(<<?\\, pc, "{", rest::binary>> = whole, cls, acc) when pc in [?p, ?P] do
+    with [body, after_prop] <- String.split(rest, "}", parts: 2),
+         {:ok, items} <- property_items(body) do
+      negated? = pc == ?P
+
+      piece =
+        case {items, cls, negated?} do
+          {{:pcre, name}, _, _} -> "\\#{<<pc>>}{#{name}}"
+          {{:class, text}, true, false} -> text
+          {{:class, text}, false, false} -> "[" <> text <> "]"
+          {{:class, text}, false, true} -> "[^" <> text <> "]"
+          # (a negated set inside a class has no PCRE spelling: what it holds is left out)
+          {{:class, _}, true, true} -> @never
+        end
+
+      translate(after_prop, cls, [piece | acc])
+    else
+      _ ->
+        <<_, _, rest::binary>> = whole
+        translate(rest, cls, [<<?\\, pc>> | acc])
+    end
+  end
+
   # an escaped letter that JavaScript gives no meaning is that letter (PCRE has `\A`, `\e`, ...)
   defp translate(<<?\\, c, rest::binary>>, cls, acc)
        when (c in ?a..?z or c in ?A..?Z) and c not in ~c"dDwWbBfnrtvcxukpP",
@@ -384,8 +411,140 @@ defmodule Browser.JS.RegExp do
   defp translate(<<c::utf8, rest::binary>>, cls, acc),
     do: translate(rest, cls, [<<c::utf8>> | acc])
 
-  # a character no string has: what a surrogate in a class becomes (a class cannot be left empty)
-  @never "\\x{FFFF}"
+  @general_categories %{
+    "Cased_Letter" => "LC",
+    "Close_Punctuation" => "Pe",
+    "Connector_Punctuation" => "Pc",
+    "Control" => "Cc",
+    "cntrl" => "Cc",
+    "Currency_Symbol" => "Sc",
+    "Dash_Punctuation" => "Pd",
+    "Decimal_Number" => "Nd",
+    "digit" => "Nd",
+    "Enclosing_Mark" => "Me",
+    "Final_Punctuation" => "Pf",
+    "Format" => "Cf",
+    "Initial_Punctuation" => "Pi",
+    "Letter" => "L",
+    "Letter_Number" => "Nl",
+    "Line_Separator" => "Zl",
+    "Lowercase_Letter" => "Ll",
+    "Mark" => "M",
+    "Combining_Mark" => "M",
+    "Math_Symbol" => "Sm",
+    "Modifier_Letter" => "Lm",
+    "Modifier_Symbol" => "Sk",
+    "Nonspacing_Mark" => "Mn",
+    "Number" => "N",
+    "Open_Punctuation" => "Ps",
+    "Other" => "C",
+    "Other_Letter" => "Lo",
+    "Other_Number" => "No",
+    "Other_Punctuation" => "Po",
+    "Other_Symbol" => "So",
+    "Paragraph_Separator" => "Zp",
+    "Private_Use" => "Co",
+    "Punctuation" => "P",
+    "punct" => "P",
+    "Separator" => "Z",
+    "Space_Separator" => "Zs",
+    "Spacing_Mark" => "Mc",
+    "Surrogate" => "Cs",
+    "Symbol" => "S",
+    "Titlecase_Letter" => "Lt",
+    "Unassigned" => "Cn",
+    "Uppercase_Letter" => "Lu"
+  }
+
+  @short_categories ~w(C Cc Cf Cn Co Cs L LC Ll Lm Lo Lt Lu M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps S Sc Sk Sm So Z Zl Zp Zs)
+
+  # binary properties PCRE does not have, as class items (the emoji ones are the blocks that hold
+  # them: close, not exact)
+  @pictographs "\\x{a9}\\x{ae}\\x{203c}\\x{2049}\\x{2122}\\x{2139}\\x{2194}-\\x{21aa}\\x{231a}-\\x{23ff}\\x{24c2}\\x{25aa}-\\x{25fe}\\x{2600}-\\x{27bf}\\x{2934}\\x{2935}\\x{2b05}-\\x{2b55}\\x{3030}\\x{303d}\\x{3297}\\x{3299}\\x{1f000}-\\x{1faff}"
+  @binary_properties %{
+    "ASCII" => "\\x{0}-\\x{7f}",
+    "Assigned" => "\\x{0}-\\x{10ffff}",
+    "ASCII_Hex_Digit" => "0-9a-fA-F",
+    "AHex" => "0-9a-fA-F",
+    "Hex_Digit" => "0-9a-fA-F\\x{ff10}-\\x{ff19}\\x{ff21}-\\x{ff26}\\x{ff41}-\\x{ff46}",
+    "Alphabetic" => "\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}",
+    "Alpha" => "\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}",
+    "Uppercase" => "\\p{Lu}",
+    "Upper" => "\\p{Lu}",
+    "Lowercase" => "\\p{Ll}",
+    "Lower" => "\\p{Ll}",
+    "White_Space" => @space_items,
+    "space" => @space_items,
+    "ID_Start" => "\\p{L}\\p{Nl}",
+    "IDS" => "\\p{L}\\p{Nl}",
+    "ID_Continue" => "\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}\\p{Nd}\\p{Pc}",
+    "IDC" => "\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}\\p{Nd}\\p{Pc}",
+    "XID_Start" => "\\p{L}\\p{Nl}",
+    "XID_Continue" => "\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}\\p{Nd}\\p{Pc}",
+    "Emoji_Modifier" => "\\x{1f3fb}-\\x{1f3ff}",
+    "EMod" => "\\x{1f3fb}-\\x{1f3ff}",
+    "Emoji_Modifier_Base" =>
+      "\\x{261d}\\x{26f9}\\x{270a}-\\x{270d}\\x{1f385}\\x{1f3c2}-\\x{1f3cc}\\x{1f442}-\\x{1f4aa}\\x{1f574}-\\x{1f64f}\\x{1f6a3}-\\x{1f6cc}\\x{1f90c}-\\x{1f9dd}",
+    "EBase" =>
+      "\\x{261d}\\x{26f9}\\x{270a}-\\x{270d}\\x{1f385}\\x{1f3c2}-\\x{1f3cc}\\x{1f442}-\\x{1f4aa}\\x{1f574}-\\x{1f64f}\\x{1f6a3}-\\x{1f6cc}\\x{1f90c}-\\x{1f9dd}",
+    "Emoji_Component" =>
+      "#*0-9\\x{200d}\\x{20e3}\\x{fe0f}\\x{1f1e6}-\\x{1f1ff}\\x{1f3fb}-\\x{1f3ff}\\x{1f9b0}-\\x{1f9b3}\\x{e0020}-\\x{e007f}",
+    "EComp" =>
+      "#*0-9\\x{200d}\\x{20e3}\\x{fe0f}\\x{1f1e6}-\\x{1f1ff}\\x{1f3fb}-\\x{1f3ff}\\x{1f9b0}-\\x{1f9b3}\\x{e0020}-\\x{e007f}",
+    "Emoji" => "#*0-9" <> @pictographs,
+    "Emoji_Presentation" => @pictographs,
+    "EPres" => @pictographs,
+    "Extended_Pictographic" => @pictographs,
+    "ExtPict" => @pictographs,
+    "Regional_Indicator" => "\\x{1f1e6}-\\x{1f1ff}",
+    "RI" => "\\x{1f1e6}-\\x{1f1ff}",
+    "Variation_Selector" => "\\x{180b}-\\x{180d}\\x{fe00}-\\x{fe0f}\\x{e0100}-\\x{e01ef}",
+    "VS" => "\\x{180b}-\\x{180d}\\x{fe00}-\\x{fe0f}\\x{e0100}-\\x{e01ef}",
+    "Join_Control" => "\\x{200c}\\x{200d}",
+    "Join_C" => "\\x{200c}\\x{200d}",
+    "Noncharacter_Code_Point" => "\\x{fdd0}-\\x{fdef}\\x{fffe}\\x{ffff}",
+    "NChar" => "\\x{fdd0}-\\x{fdef}\\x{fffe}\\x{ffff}",
+    "Math" => "\\p{Sm}",
+    "Dash" => "\\p{Pd}",
+    "Ideographic" =>
+      "\\x{3006}\\x{3007}\\x{3021}-\\x{3029}\\x{3038}-\\x{303a}\\x{3400}-\\x{4dbf}\\x{4e00}-\\x{9fff}\\x{f900}-\\x{faff}\\x{20000}-\\x{3ffff}",
+    "Ideo" =>
+      "\\x{3006}\\x{3007}\\x{3021}-\\x{3029}\\x{3038}-\\x{303a}\\x{3400}-\\x{4dbf}\\x{4e00}-\\x{9fff}\\x{f900}-\\x{faff}\\x{20000}-\\x{3ffff}"
+  }
+
+  # `{:pcre, name}` for what PCRE knows under that name, `{:class, items}` for a set it is
+  # given by hand, `:error` for what this does not know
+  defp property_items(body) do
+    case String.split(body, "=", parts: 2) do
+      [name] ->
+        cond do
+          name in @short_categories or name == "Any" -> {:ok, {:pcre, name}}
+          Map.has_key?(@general_categories, name) -> {:ok, {:pcre, @general_categories[name]}}
+          # (PCRE has the exact tables for most binary properties; the hand-made sets are for
+          # what it lacks)
+          Map.has_key?(@binary_properties, name) and pcre_knows?(name) -> {:ok, {:pcre, name}}
+          Map.has_key?(@binary_properties, name) -> {:ok, {:class, @binary_properties[name]}}
+          true -> :error
+        end
+
+      [key, value] when key in ["General_Category", "gc"] ->
+        cond do
+          value in @short_categories -> {:ok, {:pcre, value}}
+          Map.has_key?(@general_categories, value) -> {:ok, {:pcre, @general_categories[value]}}
+          true -> :error
+        end
+
+      [key, value] when key in ["Script", "sc", "Script_Extensions", "scx"] ->
+        # (a bare script name in PCRE is the script extensions: `sc:` is the plain script)
+        prefix = if key in ["Script", "sc"], do: "sc:", else: "scx:"
+        if value =~ ~r/^[A-Za-z_]+$/, do: {:ok, {:pcre, prefix <> value}}, else: :error
+
+      _ ->
+        :error
+    end
+  end
+
+  defp pcre_knows?(name), do: match?({:ok, _}, :re.compile("\\p{#{name}}", [:unicode, :ucp]))
 
   # A string here is made of whole characters, so a lone surrogate in a pattern never matches:
   # outside a class that is `(?!)`, inside one the character (or a range of them) is left out.

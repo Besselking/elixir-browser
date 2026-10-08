@@ -179,6 +179,32 @@ defmodule Browser.JS.Interp do
     header <> Enum.join(frames)
   end
 
+  @doc "`Name: message` of an error object, with the function names it was thrown under."
+  def describe_error({:obj, id} = v) do
+    case get(v, "message") do
+      m when is_binary(m) ->
+        head =
+          case get(v, "name") do
+            n when is_binary(n) -> n <> ": " <> m
+            _ -> m
+          end
+
+        case deref(id) do
+          %{stack_str: s} ->
+            case String.split(s, "\n", parts: 2) do
+              [_, frames] -> head <> "\n" <> frames
+              _ -> head
+            end
+
+          _ ->
+            head
+        end
+
+      _ ->
+        nil
+    end
+  end
+
   def throw_error(type, message), do: throw({:js_error, make_error(type, message)})
 
   @doc false
@@ -191,6 +217,10 @@ defmodule Browser.JS.Interp do
   def new_fn_scope(parent, vars \\ %{}) do
     alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: parent})
   end
+
+  @doc "A global scope that starts with the variables `vars` (a frame's), not made the current one."
+  def new_scope_with(vars),
+    do: alloc(%{scope: true, vars: vars, consts: MapSet.new(), parent: nil})
 
   def new_global_scope do
     id = new_scope(nil)

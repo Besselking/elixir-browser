@@ -149,13 +149,119 @@ defmodule Browser.JS.Runtime do
     Browser.JS.Editing.install(scope)
     Browser.JS.IndexedDB.install(scope)
     Modules.reset()
-
-    Process.put(:js_import, fn spec, from, p, type ->
-      Modules.import(spec, from || base_url(), loader(), p, type)
-    end)
-
+    Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
+    # what a frame's global scope starts with: the built-ins and the page's own window-level
+    # names (`DOM.declare_window/1` gives it its own `window`, `document` and so on)
+    Process.put(:rt_base_vars, Interp.deref(Interp.global()).vars)
+    Process.put(:rt_load_frame, &load_frame/3)
+    Process.put(:rt_blank_frame, &blank_frame/1)
   end
+
+  defp import_fun do
+    fn spec, from, p, type ->
+      Modules.import(spec, from || base_url(), loader(), p, type)
+    end
+  end
+
+  # ── frames ─────────────────────────────────────────────────
+
+  # the realm of a new frame: its own global scope, module table and script bookkeeping
+  defp make_frame(iframe, html, url) do
+    scope = Interp.new_scope_with(Process.get(:rt_base_vars))
+    info = Process.get(:rt_info) |> Map.merge(%{url: url, base: url})
+
+    keys = %{
+      js_global: scope,
+      js_global_fixed: :__unset,
+      js_global_lex: :__unset,
+      js_modules: %{},
+      js_import: import_fun(),
+      rt_info: info,
+      rt_importmap: %{},
+      rt_seen_scripts: :__unset,
+      rt_prefetched: %{},
+      rt_script: :__unset
+    }
+
+    raw = html |> Browser.HTML.parse_document() |> with_head()
+    doc = DOM.new_realm(iframe, raw, url, keys)
+    DOM.in_realm(doc, fn -> DOM.declare_window(scope) end)
+    doc
+  end
+
+  # (a page that starts with its `<body>` has no `<head>`: `document.head` is still there)
+  defp with_head(raw) do
+    Enum.map(raw, fn
+      {:element, "html", attrs, kids} ->
+        if Enum.any?(kids, &match?({:element, "head", _, _}, &1)),
+          do: {:element, "html", attrs, kids},
+          else: {:element, "html", attrs, [{:element, "head", [], []} | kids]}
+
+      other ->
+        other
+    end)
+  end
+
+  # `contentDocument` of a frame that has not loaded anything yet: an empty page
+  defp blank_frame(iframe), do: make_frame(iframe, "", "about:blank")
+
+  # the load of an `<iframe>`: its page is fetched, parsed and its scripts run; then the element
+  # hears `load`
+  defp load_frame(iframe, source, page_doc) do
+    DOM.in_realm(page_doc, fn ->
+      if DOM.frame_doc(iframe) && source != :blank do
+        DOM.destroy_realm(DOM.frame_doc(iframe))
+      end
+
+      Process.put(:js_steps, @steps)
+
+      {html, url, ok?} =
+        case source do
+          {:srcdoc, html} ->
+            {html, "about:srcdoc", true}
+
+          {:url, url} ->
+            case fetch(url) do
+              {:ok, body, final} -> {frame_html(body), final, true}
+              {:error, msg} -> {"", url, log(:error, "Failed to load #{url}: #{msg}") && false}
+            end
+
+          :blank ->
+            {"", "about:blank", true}
+        end
+
+      doc =
+        case DOM.frame_doc(iframe) do
+          nil -> make_frame(iframe, html, url)
+          d -> d
+        end
+
+      if ok? do
+        DOM.in_realm(doc, fn ->
+          Process.put(:js_steps, @steps)
+          run_all_scripts()
+        end)
+      end
+
+      Process.put(:js_steps, @steps)
+
+      guard(
+        fn ->
+          DOM.dispatch(iframe, if(ok?, do: "load", else: "error"), %{
+            bubbles: false,
+            cancelable: false
+          })
+        end,
+        :ok
+      )
+
+      Browser.JS.Promise.run_microtasks()
+    end)
+  end
+
+  defp frame_html(body) when is_binary(body), do: body
+  defp frame_html(body), do: IO.iodata_to_binary(body)
 
   # `t0` is when the runtime started: timers are timed from it
   defp loop(t0) do
@@ -427,7 +533,10 @@ defmodule Browser.JS.Runtime do
         do: log(:error, "Uncaught (in promise) " <> describe(reason))
 
     Process.put(:js_unhandled, [])
-    dirty = DOM.dirty?() or Map.get(extra, :force_raw, false)
+    # (a frame's document is part of the tree the page shows)
+    dirty =
+      DOM.dirty?() or MapSet.size(DOM.changed_frames()) > 0 or Map.get(extra, :force_raw, false)
+
     raw = if dirty, do: DOM.to_raw()
     if raw, do: DOM.sync_cids(raw)
     DOM.clean()
@@ -489,18 +598,7 @@ defmodule Browser.JS.Runtime do
 
   defp describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v) do
-    case Interp.get(v, "message") do
-      m when is_binary(m) ->
-        case Interp.get(v, "name") do
-          n when is_binary(n) -> n <> ": " <> m
-          _ -> m
-        end
-
-      _ ->
-        Builtins.inspect_js(v, 0, [])
-    end
-  end
+  defp describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
 
   defp describe(v), do: Builtins.inspect_js(v, 0, [])
 
@@ -525,7 +623,10 @@ defmodule Browser.JS.Runtime do
 
   defp run_all_scripts do
     doc = DOM.document()
-    scripts = for nid <- DOM.descendants(doc), s = script_info(nid), do: s
+
+    scripts =
+      for nid <- DOM.descendants(doc), s = script_info(nid), not DOM.in_template?(nid), do: s
+
     prefetch(scripts)
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
@@ -549,6 +650,7 @@ defmodule Browser.JS.Runtime do
 
     Process.put(:rt_seen_scripts, MapSet.new(scripts, & &1.nid))
     Process.delete(:rt_script)
+    DOM.load_initial_frames()
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
     guard(fn -> DOM.autofocus() end, :ok)
@@ -565,6 +667,7 @@ defmodule Browser.JS.Runtime do
         for nid <- DOM.descendants(DOM.document()),
             not MapSet.member?(seen, nid),
             s = script_info(nid),
+            not DOM.in_template?(nid),
             s.kind in [:classic, :module],
             external?(s) or String.trim(s.text) != "",
             do: s

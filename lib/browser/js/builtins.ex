@@ -1993,6 +1993,10 @@ defmodule Browser.JS.Builtins do
           {"log", :log},
           {"info", :log},
           {"debug", :log},
+          {"trace", :log},
+          {"dir", :log},
+          {"dirxml", :log},
+          {"table", :log},
           {"warn", :warn},
           {"error", :error}
         ] do
@@ -2001,6 +2005,21 @@ defmodule Browser.JS.Builtins do
         Process.put(:js_console, [{level, line} | Process.get(:js_console, [])])
         :undefined
       end)
+    end
+
+    def_fn(console, "assert", fn _, args ->
+      if !truthy(arg(args, 0)) do
+        rest = args |> Enum.drop(1) |> Enum.map(&inspect_arg/1)
+        line = Enum.join(["Assertion failed" | rest], ": ")
+        Process.put(:js_console, [{:error, line} | Process.get(:js_console, [])])
+      end
+
+      :undefined
+    end)
+
+    for name <-
+          ~w(group groupCollapsed groupEnd time timeEnd timeLog count countReset clear profile profileEnd timeStamp) do
+      def_fn(console, name, fn _, _ -> :undefined end)
     end
   end
 
@@ -2099,7 +2118,8 @@ defmodule Browser.JS.Builtins do
           seq: seq,
           fun: f,
           args: Enum.drop(args, 2),
-          interval: if(interval?, do: max(delay, 1.0))
+          interval: if(interval?, do: max(delay, 1.0)),
+          realm: Browser.JS.DOM.timer_realm()
         }
 
         Process.put(:js_timers, [timer | Process.get(:js_timers)])
@@ -2130,7 +2150,8 @@ defmodule Browser.JS.Builtins do
       seq: seq,
       fun: fun,
       args: [],
-      interval: nil
+      interval: nil,
+      realm: Browser.JS.DOM.timer_realm()
     }
 
     Process.put(:js_timers, [timer | Process.get(:js_timers)])
@@ -2177,7 +2198,11 @@ defmodule Browser.JS.Builtins do
         end
 
         try do
-          call(t.fun, :undefined, t.args)
+          # (a timer of a frame runs in the frame; one of a frame that has gone does not run)
+          if Browser.JS.DOM.realm_alive?(t[:realm]) do
+            Browser.JS.DOM.in_realm(t[:realm], fn -> call(t.fun, :undefined, t.args) end)
+          end
+
           Browser.JS.Promise.run_microtasks()
         catch
           {:js_error, v} -> on_error.(v)

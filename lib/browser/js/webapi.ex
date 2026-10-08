@@ -78,6 +78,8 @@ defmodule Browser.JS.WebAPI do
   @prelude ~S"""
   (function (g) {
     function def(name, value) { if (!(name in g)) g[name] = value; }
+    // the document and location of the page or frame that is running (this code is shared)
+    var curDoc = __cur_doc, curLoc = __cur_loc;
 
     // ── fetch and XMLHttpRequest ─────────────────────────────
     function Headers(init) {
@@ -129,7 +131,7 @@ defmodule Browser.JS.WebAPI do
       var list = [], ctype = enc[1];
       headers.forEach(function (v, k) { if (k === "content-type") ctype = v; else list.push([k, v]); });
       if (enc[0] === null) ctype = null;
-      return __fetch(method, new URL(url, document.baseURI || location.href).href, enc[0], list, ctype, credentials);
+      return __fetch(method, new URL(url, curDoc().baseURI || curLoc().href).href, enc[0], list, ctype, credentials);
     }
 
     function Response(body, init) {
@@ -415,12 +417,12 @@ defmodule Browser.JS.WebAPI do
       add: function (f) { return fonts; }, "delete": function () { return false; }, clear: function () {}, forEach: function () {},
       addEventListener: function () {}, removeEventListener: function () {} };
     fonts.ready = Promise.resolve(fonts);
-    try { document.fonts = fonts; } catch (e) {}
+    try { Object.defineProperty(Object.getPrototypeOf(document), "fonts", { get: function () { return fonts; }, configurable: true }); } catch (e) {}
     function FontFace(family, source, desc) { this.family = family; this.status = "loaded"; this.loaded = Promise.resolve(this); }
     FontFace.prototype.load = function () { return Promise.resolve(this); };
     def("FontFace", FontFace);
 
-    function Image(w, h) { var i = document.createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
+    function Image(w, h) { var i = curDoc().createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
     def("Image", Image);
 
     if (typeof navigator === "object") {
@@ -537,15 +539,45 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "assignedSlot", function () { return null; });
     // a shadow root here is a fragment that is kept, but not drawn
     addTo(EP, "attachShadow", function (init) {
-      var root = document.createDocumentFragment();
+      var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
       this.__shadow = root;
+      __set_shadow(this, root);
       return root;
     });
+    var CLP = Object.getPrototypeOf(document.documentElement.classList);
+    function tokens(l) { var a = []; for (var i = 0; i < l.length; i++) a.push(l.item(i)); return a; }
+    addTo(CLP, Symbol.iterator, function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "values", function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "keys", function () { return tokens(this).keys(); });
+    addTo(CLP, "entries", function () { return tokens(this).entries(); });
+    // the rest of the 2D context: drawing other than rectangles is not drawn, but calling it works
+    try {
+      var CP = Object.getPrototypeOf(document.createElement("canvas").getContext("2d"));
+      ["save", "restore", "scale", "rotate", "translate", "transform", "setTransform", "resetTransform", "beginPath", "closePath",
+       "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect", "fill", "stroke",
+       "clip", "fillText", "strokeText", "drawImage", "putImageData", "setLineDash", "drawFocusIfNeeded"].forEach(function (n) { addTo(CP, n, function () {}); });
+      addTo(CP, "measureText", function (t) { var w = String(t).length * 6; return { width: w, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 3 }; });
+      ["createLinearGradient", "createRadialGradient", "createConicGradient"].forEach(function (n) { addTo(CP, n, function () { return { addColorStop: function () {} }; }); });
+      addTo(CP, "createPattern", function () { return { setTransform: function () {} }; });
+      function imageData(w, h) { return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }; }
+      addTo(CP, "getImageData", function (x, y, w, h) { return imageData(w, h); });
+      addTo(CP, "createImageData", function (w, h) { return typeof w === "object" ? imageData(w.width, w.height) : imageData(w, h); });
+      addTo(CP, "getLineDash", function () { return []; });
+      addTo(CP, "isPointInPath", function () { return false; });
+      addTo(CP, "isPointInStroke", function () { return false; });
+      addTo(CP, "getTransform", function () { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; });
+    } catch (e) {}
+    var SP = Object.getPrototypeOf(document.documentElement.style);
+    addTo(SP, Symbol.iterator, function () { var a = []; for (var i = 0; i < this.length; i++) a.push(this.item(i)); return a[Symbol.iterator](); });
+    var UP = Object.getPrototypeOf(new URLSearchParams());
+    if (UP.entries) addTo(UP, Symbol.iterator, function () { return this.entries()[Symbol.iterator](); });
+    var FP = Object.getPrototypeOf(document.createDocumentFragment());
+    if (!("getElementById" in FP)) addTo(FP, "getElementById", function (id) { return this.querySelector('[id="' + String(id).replace(/(["\\])/g, "\\$1") + '"]'); });
     getter(EP, "shadowRoot", function () { return this.__shadow && this.__shadow.mode === "open" ? this.__shadow : null; });
 
     var DP = Object.getPrototypeOf(document);
-    addTo(DP, "createElementNS", function (ns, tag) { return document.createElement(tag); });
+    addTo(DP, "createElementNS", function (ns, tag) { return this.createElement(tag); });
     addTo(DP, "importNode", function (n, deep) { return n.cloneNode(deep); });
     addTo(DP, "adoptNode", function (n) { return n; });
     addTo(DP, "elementFromPoint", function () { return null; });
@@ -561,37 +593,37 @@ defmodule Browser.JS.WebAPI do
     function Range() { editing.load(); return new g.Range(); }
     function Selection() {}
     def("Range", Range); def("Selection", Selection);
-    function defDoc(name, fn) { if (!(name in document)) Object.defineProperty(document, name, { get: fn, configurable: true }); }
-    defDoc("scrollingElement", function () { return document.documentElement; });
+    function defDoc(name, fn) { if (!(name in Object.getPrototypeOf(document))) Object.defineProperty(Object.getPrototypeOf(document), name, { get: fn, configurable: true }); }
+    defDoc("scrollingElement", function () { return this.documentElement; });
     defDoc("styleSheets", function () { return []; });
-    defDoc("adoptedStyleSheets", function () { return []; });
-    defDoc("forms", function () { return document.querySelectorAll("form"); });
-    defDoc("images", function () { return document.querySelectorAll("img"); });
-    defDoc("links", function () { return document.querySelectorAll("a[href], area[href]"); });
-    defDoc("scripts", function () { return document.querySelectorAll("script"); });
-    defDoc("all", function () { return document.querySelectorAll("*"); });
+    defDoc("forms", function () { return this.querySelectorAll("form"); });
+    defDoc("images", function () { return this.querySelectorAll("img"); });
+    defDoc("links", function () { return this.querySelectorAll("a[href], area[href]"); });
+    defDoc("scripts", function () { return this.querySelectorAll("script"); });
+    defDoc("all", function () { return this.querySelectorAll("*"); });
     defDoc("dir", function () { return "ltr"; });
     defDoc("lastModified", function () { return new Date().toString(); });
-    defDoc("domain", function () { return location.hostname; });
+    defDoc("domain", function () { return curLoc().hostname; });
     defDoc("implementation", function () {
+      var doc = this;
       return {
         hasFeature: function () { return true; },
         createHTMLDocument: function (title) {
-          var html = document.createElement("html"), head = document.createElement("head"), body = document.createElement("body");
+          var html = doc.createElement("html"), head = doc.createElement("head"), body = doc.createElement("body");
           html.appendChild(head); html.appendChild(body);
           return { documentElement: html, head: head, body: body, title: title || "",
-            createElement: function (t) { return document.createElement(t); }, createTextNode: function (t) { return document.createTextNode(t); },
-            createDocumentFragment: function () { return document.createDocumentFragment(); },
+            createElement: function (t) { return doc.createElement(t); }, createTextNode: function (t) { return doc.createTextNode(t); },
+            createDocumentFragment: function () { return doc.createDocumentFragment(); },
             querySelector: function (s) { return html.querySelector(s); }, querySelectorAll: function (s) { return html.querySelectorAll(s); },
             getElementById: function (id) { return html.querySelector("#" + id); }, getElementsByTagName: function (t) { return html.getElementsByTagName(t); },
-            implementation: document.implementation };
+            implementation: doc.implementation };
         }
       };
     });
 
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
-    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = location.origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
     // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
     // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {
@@ -824,11 +856,15 @@ defmodule Browser.JS.WebAPI do
     def("unescape", function (s) { return decodeURIComponent(s); });
 
     function evClass(name, fields) {
-      def(name, function (type, init) {
+      var F = function (type, init) {
         var e = new Event(type, init); init = init || {};
+        Object.setPrototypeOf(e, F.prototype);
         fields.forEach(function (f) { e[f] = init[f] === undefined ? null : init[f]; });
         return e;
-      });
+      };
+      F.prototype = Object.create(Event.prototype);
+      F.prototype.constructor = F;
+      def(name, F);
     }
     evClass("MessageEvent", ["data", "origin", "source", "lastEventId", "ports"]);
     evClass("ErrorEvent", ["message", "filename", "lineno", "colno", "error"]);
@@ -837,8 +873,212 @@ defmodule Browser.JS.WebAPI do
     evClass("HashChangeEvent", ["oldURL", "newURL"]);
     evClass("PointerEvent", ["pointerId", "pointerType", "clientX", "clientY", "button", "buttons"]);
     evClass("TouchEvent", ["touches", "targetTouches", "changedTouches"]);
+    evClass("UIEvent", ["view", "detail"]);
+    evClass("WheelEvent", ["deltaX", "deltaY", "deltaZ", "deltaMode", "clientX", "clientY", "screenX", "screenY", "button", "buttons", "ctrlKey", "shiftKey", "altKey", "metaKey"]);
+    evClass("DragEvent", ["dataTransfer", "clientX", "clientY"]);
+    evClass("CompositionEvent", ["data"]);
+    evClass("ClipboardEvent", ["clipboardData"]);
+    evClass("ProgressEvent", ["lengthComputable", "loaded", "total"]);
+    evClass("TransitionEvent", ["propertyName", "elapsedTime", "pseudoElement"]);
+    evClass("AnimationEvent", ["animationName", "elapsedTime", "pseudoElement"]);
+    evClass("StorageEvent", ["key", "oldValue", "newValue", "url", "storageArea"]);
 
-    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleSheet", "CSSStyleDeclaration", "Window"].forEach(function (n) { def(n, function () {}); });
+    // ── MessageChannel: two ports; a message arrives in a task of its own ──
+    function MessagePort() { this._peer = null; this._queue = []; this._started = false; this._closed = false; this._l = []; this._onmessage = null; }
+    MessagePort.prototype.addEventListener = function (type, fn) { if (type === "message" && fn) this._l.push(fn); };
+    MessagePort.prototype.removeEventListener = function (type, fn) { var i = this._l.indexOf(fn); if (i >= 0) this._l.splice(i, 1); };
+    MessagePort.prototype.dispatchEvent = function (ev) {
+      if (typeof this._onmessage === "function") this._onmessage.call(this, ev);
+      this._l.slice().forEach(function (f) { typeof f === "function" ? f.call(this, ev) : f.handleEvent(ev); }, this);
+      return true;
+    };
+    Object.defineProperty(MessagePort.prototype, "onmessage", {
+      get: function () { return this._onmessage; },
+      set: function (f) { this._onmessage = f; this.start(); },
+      configurable: true
+    });
+    MessagePort.prototype.start = function () {
+      var self = this;
+      if (self._started) return;
+      self._started = true;
+      if (self._queue.length) setTimeout(function () { self._flush(); }, 0);
+    };
+    MessagePort.prototype._flush = function () {
+      while (this._queue.length && this._started && !this._closed) {
+        var ev = new MessageEvent("message", { data: this._queue.shift(), origin: "", source: null, ports: [] });
+        this.dispatchEvent(ev);
+      }
+    };
+    MessagePort.prototype.postMessage = function (data) {
+      var peer = this._peer;
+      if (this._closed || !peer || peer._closed) return;
+      try { data = structuredClone(data); } catch (e) {}
+      peer._queue.push(data);
+      setTimeout(function () { peer._flush(); }, 0);
+    };
+    MessagePort.prototype.close = function () { this._closed = true; };
+    function MessageChannel() {
+      this.port1 = new MessagePort(); this.port2 = new MessagePort();
+      this.port1._peer = this.port2; this.port2._peer = this.port1;
+    }
+    g.MessageChannel = MessageChannel; g.MessagePort = MessagePort;
+
+    // ── TreeWalker and NodeIterator, over the document order ──
+    var NodeFilter = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+      SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 1, SHOW_ATTRIBUTE: 2, SHOW_TEXT: 4, SHOW_CDATA_SECTION: 8, SHOW_PROCESSING_INSTRUCTION: 64,
+      SHOW_COMMENT: 128, SHOW_DOCUMENT: 256, SHOW_DOCUMENT_TYPE: 512, SHOW_DOCUMENT_FRAGMENT: 1024 };
+    def("NodeFilter", NodeFilter);
+    function accept(w, node) {
+      if (!(w._what & (1 << (node.nodeType - 1)))) return 3;
+      var f = w.filter;
+      if (!f) return 1;
+      return typeof f === "function" ? f(node) : f.acceptNode(node);
+    }
+    function nextInOrder(node, root, skipKids) {
+      if (!skipKids && node.firstChild) return node.firstChild;
+      while (node && node !== root) {
+        if (node.nextSibling) return node.nextSibling;
+        node = node.parentNode;
+      }
+      return null;
+    }
+    function TreeWalker(root, what, filter) {
+      this.root = root; this._what = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.currentNode = root;
+    }
+    Object.defineProperty(TreeWalker.prototype, "whatToShow", { get: function () { return this._what; } });
+    TreeWalker.prototype.nextNode = function () {
+      var n = this.currentNode, skip = false;
+      for (;;) {
+        n = nextInOrder(n, this.root, skip);
+        if (!n) return null;
+        var r = accept(this, n);
+        if (r === 1) { this.currentNode = n; return n; }
+        skip = r === 2;
+      }
+    };
+    TreeWalker.prototype.previousNode = function () {
+      var n = this.currentNode;
+      while (n && n !== this.root) {
+        var s = n.previousSibling;
+        if (s) {
+          n = s;
+          while (accept(this, n) !== 2 && n.lastChild) n = n.lastChild;
+        } else n = n.parentNode;
+        if (n && n !== this.root && accept(this, n) === 1) { this.currentNode = n; return n; }
+        if (n === this.root) return null;
+      }
+      return null;
+    };
+    TreeWalker.prototype.parentNode = function () {
+      var n = this.currentNode;
+      while (n && n !== this.root) {
+        n = n.parentNode;
+        if (n && accept(this, n) === 1) { this.currentNode = n; return n; }
+      }
+      return null;
+    };
+    function walkChild(w, first) {
+      var n = first ? w.currentNode.firstChild : w.currentNode.lastChild;
+      while (n) {
+        var r = accept(w, n);
+        if (r === 1) { w.currentNode = n; return n; }
+        var inner = r === 3 ? (first ? n.firstChild : n.lastChild) : null;
+        if (inner) { n = inner; continue; }
+        while (n) {
+          var sib = first ? n.nextSibling : n.previousSibling;
+          if (sib) { n = sib; break; }
+          n = n.parentNode;
+          if (!n || n === w.root || n === w.currentNode) return null;
+        }
+      }
+      return null;
+    }
+    TreeWalker.prototype.firstChild = function () { return walkChild(this, true); };
+    TreeWalker.prototype.lastChild = function () { return walkChild(this, false); };
+    function walkSibling(w, next) {
+      var n = w.currentNode;
+      if (n === w.root) return null;
+      for (;;) {
+        var s = next ? n.nextSibling : n.previousSibling;
+        while (s) {
+          var r = accept(w, s);
+          if (r === 1) { w.currentNode = s; return s; }
+          var inner = r === 3 ? (next ? s.firstChild : s.lastChild) : null;
+          s = inner || (next ? s.nextSibling : s.previousSibling);
+        }
+        n = n.parentNode;
+        if (!n || n === w.root || accept(w, n) === 1) return null;
+      }
+    }
+    TreeWalker.prototype.nextSibling = function () { return walkSibling(this, true); };
+    TreeWalker.prototype.previousSibling = function () { return walkSibling(this, false); };
+    function NodeIterator(root, what, filter) {
+      this.root = root; this._what = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null;
+      this.referenceNode = root; this.pointerBeforeReferenceNode = true;
+    }
+    Object.defineProperty(NodeIterator.prototype, "whatToShow", { get: function () { return this._what; } });
+    NodeIterator.prototype.nextNode = function () {
+      var n = this.referenceNode, before = this.pointerBeforeReferenceNode;
+      for (;;) {
+        if (before) before = false; else { n = nextInOrder(n, this.root, false); if (!n) return null; }
+        if (accept(this, n) === 1) { this.referenceNode = n; this.pointerBeforeReferenceNode = false; return n; }
+      }
+    };
+    NodeIterator.prototype.previousNode = function () {
+      var n = this.referenceNode, before = this.pointerBeforeReferenceNode;
+      for (;;) {
+        if (!before) before = true;
+        else {
+          if (n === this.root) return null;
+          var s = n.previousSibling;
+          if (s) { n = s; while (n.lastChild) n = n.lastChild; } else n = n.parentNode;
+          if (!n) return null;
+        }
+        if (accept(this, n) === 1) { this.referenceNode = n; this.pointerBeforeReferenceNode = true; return n; }
+      }
+    };
+    NodeIterator.prototype.detach = function () {};
+    def("TreeWalker", TreeWalker); def("NodeIterator", NodeIterator);
+    addTo(Object.getPrototypeOf(document), "createTreeWalker", function (root, what, filter) { return new TreeWalker(root, what, filter); });
+    addTo(Object.getPrototypeOf(document), "createNodeIterator", function (root, what, filter) { return new NodeIterator(root, what, filter); });
+
+    // ── constructable style sheets (kept as text; adopting one does not restyle) ──
+    function CSSStyleSheet(opts) { this.cssRules = []; this.disabled = false; this.media = opts && opts.media || ""; this.ownerNode = null; }
+    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); };
+    CSSStyleSheet.prototype.replace = function (text) { this.replaceSync(text); return Promise.resolve(this); };
+    CSSStyleSheet.prototype.insertRule = function (rule, index) {
+      var rules = parseRules(String(rule));
+      index = index === undefined ? 0 : index;
+      this.cssRules.splice(index, 0, rules[0] || { cssText: String(rule) });
+      return index;
+    };
+    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); };
+    CSSStyleSheet.prototype.addRule = function (sel, body, index) { return this.insertRule(sel + " {" + body + "}", index === undefined ? this.cssRules.length : index); };
+    CSSStyleSheet.prototype.removeRule = CSSStyleSheet.prototype.deleteRule;
+    Object.defineProperty(CSSStyleSheet.prototype, "rules", { get: function () { return this.cssRules; } });
+    function parseRules(text) {
+      var out = [], depth = 0, start = 0, i;
+      text = text.replace(/\/\*[\s\S]*?\*\//g, "");
+      for (i = 0; i < text.length; i++) {
+        var c = text[i];
+        if (c === "{") depth++;
+        else if (c === "}") { depth--; if (depth === 0) { out.push(makeRule(text.slice(start, i + 1).trim())); start = i + 1; } }
+        else if (c === ";" && depth === 0) { var t = text.slice(start, i + 1).trim(); if (t.length > 1) out.push(makeRule(t)); start = i + 1; }
+      }
+      return out;
+    }
+    function makeRule(css) { var b = css.indexOf("{"); return { cssText: css, selectorText: b > 0 ? css.slice(0, b).trim() : "" }; }
+    g.CSSStyleSheet = CSSStyleSheet;
+    var adopted = [];
+    Object.defineProperty(document, "adoptedStyleSheets", { get: function () { return adopted; }, set: function (v) { adopted = v; }, configurable: true });
+
+    // V8's stack trace API, which libraries call when they define an error class
+    if (typeof Error.captureStackTrace !== "function") {
+      Error.captureStackTrace = function (obj) { if (obj && typeof obj === "object" && !("stack" in obj)) obj.stack = String(obj.name || "Error") + (obj.message ? ": " + obj.message : ""); };
+    }
+    if (Error.stackTraceLimit === undefined) Error.stackTraceLimit = 10;
+
+    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleDeclaration", "Window"].forEach(function (n) { def(n, function () {}); });
 
     // streams: enough of the standard for frameworks that read a body or feed data through one
     function ReadableStream(source, strategy) {
@@ -968,6 +1208,9 @@ defmodule Browser.JS.WebAPI do
     FileReader.prototype.readAsDataURL = function (b) { var self = this; setTimeout(function () { self.result = "data:" + (b.type || "application/octet-stream") + ";base64," + btoa(b._text); self.readyState = 2; if (self.onload) self.onload({ target: self }); if (self.onloadend) self.onloadend({ target: self }); }, 0); };
     FileReader.prototype.addEventListener = function (t, f) { this["on" + t] = f; };
     def("Blob", Blob); def("File", File); def("FileReader", FileReader);
+    var blobUrls = {}, blobSeq = 0;
+    URL.createObjectURL = function (b) { var u = "blob:" + curLoc().origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
+    URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
 
     function FormData(form) {
       this._e = [];
@@ -992,10 +1235,10 @@ defmodule Browser.JS.WebAPI do
     FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
     def("FormData", FormData);
 
-    def("DOMParser", function () { this.parseFromString = function (html) { var d = document.implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
+    def("DOMParser", function () { this.parseFromString = function (html) { var d = curDoc().implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
     def("XMLSerializer", function () { this.serializeToString = function (n) { return n.outerHTML !== undefined ? n.outerHTML : String(n); }; });
-    def("Option", function (text, value) { var o = document.createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
-    def("Audio", function (src) { var a = document.createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
+    def("Option", function (text, value) { var o = curDoc().createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
+    def("Audio", function (src) { var a = curDoc().createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
 
     def("Headers", Headers); def("Response", Response); def("Request", Request); def("fetch", fetchImpl);
     def("XMLHttpRequest", XMLHttpRequest);

@@ -1741,4 +1741,32 @@ defmodule Browser.JSTest do
   test "an escaped let followed by a name on the next line is an expression statement" do
     assert js("var l\\u0065t = 1; l\\u0065t\nvar a = 2; a + let") == 3.0
   end
+
+  test "regular expression property escapes take ECMAScript's long names and binary properties" do
+    src = ~S"""
+    [
+      /[\p{Combining_Mark}\p{Emoji_Modifier}]+/u.test("a\u0301"),
+      /^\p{Uppercase_Letter}\p{Lowercase_Letter}+$/u.test("Hello"),
+      /\P{Letter}/u.test("abc"),
+      /\p{Script=Greek}/u.test("\u03b1"),
+      /\p{Emoji_Modifier}/u.test("\u{1F3FD}"),
+      /[^\p{White_Space}]+/u.exec("  ab  ")[0],
+      /\p{ASCII}+/u.exec("h\u00e9llo")[0],
+      /\p{General_Category=Decimal_Number}/u.test("5"),
+      /\P{Script=Devanagari}/u.test("\u0951"),
+      /\p{Script_Extensions=Devanagari}/u.test("\u0951")
+    ].join()
+    """
+
+    assert js(src) == "true,true,false,true,true,ab,h,true,true,true"
+  end
+
+  test "a comment inside a template expression may hold quotes and slashes" do
+    src = """
+    `${(1 /* a ' " ` */ + 2) // it's
+    }`
+    """
+
+    assert js(src) == "3"
+  end
 end

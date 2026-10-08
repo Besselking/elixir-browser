@@ -40,7 +40,8 @@ defmodule Browser.JS.IndexedDBTest do
   defp run(script, expected_errors) do
     {pid, first} = start(origin(), script)
     all = finish(pid, first)
-    errors = for {:error, t} <- all, do: t
+    # (an error report also lists the functions it was thrown under: the first line is the error)
+    errors = for {:error, t} <- all, do: t |> String.split("\n") |> hd()
     assert errors == expected_errors
     for {:log, t} <- all, do: t
   end

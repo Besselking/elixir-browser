@@ -976,7 +976,9 @@ defmodule Browser.CSS do
     end
   end
 
-  defp pseudo?(:root, ctx), do: ctx.parent == nil and ctx.tag == "html"
+  defp pseudo?(:root, ctx),
+    do: ctx.tag == "html" and (ctx.parent == nil or ctx.parent.tag == "iframe")
+
   defp pseudo?(:first_child, ctx), do: ctx.first?
   defp pseudo?(:last_child, ctx), do: ctx.last?
   defp pseudo?(:only_child, ctx), do: ctx.first? and ctx.last?
@@ -1078,7 +1080,12 @@ defmodule Browser.CSS do
   0-based position among the elements and `count` how many elements there are in all.
   """
   def context(tag, attrs, kids, parent, prev, i, count, rest) do
+    # the content of a frame is styled by the frame's own sheets (see `Browser.Style.scoped_refs/1`)
+    scope = parent && parent.scope_in
+
     %{
+      scope: scope,
+      scope_in: attr_value(attrs, "data-b-frame") || scope,
       tag: tag,
       attrs: attrs,
       id: attr_value(attrs, "id"),
