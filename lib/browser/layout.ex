@@ -6672,6 +6672,9 @@ defmodule Browser.Layout do
     end
   end
 
+  defp flex_column_resize(st, sized, _free),
+    do: Enum.map(sized, &flex_column_height(st, &1, &1.base, true))
+
   # the items whose share of a shrink goes below what their content needs
   defp flex_shrink_frozen(sized, free, frozen) do
     open = Enum.reject(sized, &(&1.key in frozen))
@@ -6692,9 +6695,6 @@ defmodule Browser.Layout do
       do: frozen,
       else: flex_shrink_frozen(sized, free, MapSet.union(frozen, MapSet.new(more)))
   end
-
-  defp flex_column_resize(st, sized, _free),
-    do: Enum.map(sized, &flex_column_height(st, &1, &1.base, true))
 
   # in a column of automatic height an item with a `flex-basis` is as high as that, or as its
   # content needs
