@@ -129,6 +129,8 @@ defmodule Browser.Layout do
       blank: false,
       pre: false,
       ws: :normal,
+      # inside an inline box (a block in it splits the box)
+      inl: false,
       tab: 8,
       hyph: "-",
       hidden: false,
@@ -1001,7 +1003,16 @@ defmodule Browser.Layout do
           # an element that can be linked to (`#id`) needs to know where its box starts, which
           # nothing drawn says for a plain block
           c = if List.keymember?(attrs, "id", 0), do: Map.put(c, :anchor, true), else: c
-          block_ops(tag, kind, kids, style, c, acc)
+
+          # a block inside an inline box splits the box: what is before and after it
+          # are fragments of their own
+          if parent_style.inl do
+            acc = [{:ib_split} | acc]
+            acc = block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
+            [{:ib_join} | acc]
+          else
+            block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
+          end
       end
     end
   end
@@ -1485,7 +1496,7 @@ defmodule Browser.Layout do
     spec = inline_spec(tag, c, style)
     ref = make_ref()
     acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
-    acc = walk_children(tag, kids, style, acc)
+    acc = walk_children(tag, kids, if(spec, do: %{style | inl: true}, else: style), acc)
     acc = edge_spacing(acc, style, parent_style)
     acc = if spec, do: [{:inline_close, ref, spec} | acc], else: acc
 
@@ -1524,10 +1535,15 @@ defmodule Browser.Layout do
   # it is laid out, holds the line open (see `flush/1`).
   defp strut_for_empty(%{line: []} = st, ref, %{style: style} = spec) do
     empty? = Enum.any?(st.marks, &match?({:start, ^ref, _, _}, &1))
+    # (the rest of a box that a block split has only its right side to show)
+    rest? = Enum.any?(st.active, &(&1.ref == ref and Map.get(&1, :joined, false)))
 
-    if empty? and spec.ml + spec.mr + spec.pl + spec.pr + spec.bl + spec.br > 0,
-      do: %{st | strut: style},
-      else: st
+    sides =
+      if empty?,
+        do: spec.ml + spec.mr + spec.pl + spec.pr + spec.bl + spec.br,
+        else: if(rest?, do: spec.mr + spec.pr + spec.br, else: 0)
+
+    if sides > 0, do: %{st | strut: style}, else: st
   end
 
   defp strut_for_empty(st, _ref, _spec), do: st
@@ -3064,6 +3080,8 @@ defmodule Browser.Layout do
       images: images,
       marks: [],
       active: [],
+      split: [],
+      splitting: false,
       lead: 0,
       line_lead: 0,
       lmax: 0,
@@ -3203,7 +3221,8 @@ defmodule Browser.Layout do
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
 
-  defp op({:gap, px}, %{clr: {y0, gap, bottom}} = st) when st.y == bottom do
+  defp op({:gap, px}, %{clr: clr} = st) when is_tuple(clr) and st.y == elem(clr, 2) do
+    {y0, gap, bottom} = {elem(clr, 0), elem(clr, 1), elem(clr, 2)}
     st = flush(st)
     %{st | gap: max(st.gap, max(y0 + max(gap, px) - bottom, 0))}
   end
@@ -3277,7 +3296,7 @@ defmodule Browser.Layout do
     # however large it is)
     if bottom && (bottom > y0 + gap + min(st.ngap, 0) or (adjoining || 0) > y0) do
       st = apply_gap(st)
-      %{st | y: bottom, clr: {y0, gap, bottom}}
+      %{st | y: bottom, clr: {y0, gap, bottom, :clearance}}
     else
       st
     end
@@ -3297,8 +3316,14 @@ defmodule Browser.Layout do
 
   defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
     st = adjoin_floats(st, y0, n0)
-    # the margin below a box is not one of a first child
-    st = %{st | clr: nil}
+    # the margin below a box is not one of a first child, unless the box held nothing but the
+    # floats that left that margin pending: then it is empty and its margins go on collapsing
+    st =
+      case st.clr do
+        {c0, _, bottom} when bottom == st.y and c0 >= y0 -> st
+        _ -> %{st | clr: nil}
+      end
+
     st = end_block(st)
     %{st | insets: rest, left: l, right: r}
   end
@@ -3391,7 +3416,18 @@ defmodule Browser.Layout do
         obb == 0
 
     st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
-    st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}
+
+    # an empty box that held floats leaves the margin above them pending, to collapse on
+    clr =
+      case st.clr do
+        {c0, _, bottom} = clr when empty? and bottom == st.y ->
+          if c0 >= st.open[ref].top or st.y == st.open[ref].top, do: clr
+
+        _ ->
+          nil
+      end
+
+    st = %{st | ptop: List.delete(st.ptop, ref), clr: clr}
     {box, open} = Map.pop(st.open, ref)
     {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
@@ -3660,6 +3696,33 @@ defmodule Browser.Layout do
     end
   end
 
+  # a block inside inline boxes: the boxes have no part in it; they go on after it, as fragments
+  # that continue the ones before
+  defp op({:ib_split}, st) do
+    # (the part of a box before the block shows its left side, on a line of its own)
+    opened =
+      if st.line == [],
+        do:
+          Enum.find(
+            st.marks,
+            &match?({:start, _, %{ml: ml, bl: bl, pl: pl}, _} when ml + bl + pl > 0, &1)
+          )
+
+    st = if opened, do: %{st | strut: elem(opened, 2).style}, else: st
+    st = flush(%{st | splitting: true})
+    %{st | split: [st.active | st.split], active: [], lead: 0, splitting: false}
+  end
+
+  defp op({:ib_join}, st) do
+    st = flush(st)
+    [saved | rest] = st.split
+
+    active =
+      for e <- saved, do: e |> Map.delete(:pending) |> Map.put(:joined, true)
+
+    %{st | split: rest, active: active, lead: 0}
+  end
+
   defp op({:pos_inline, rel}, st) do
     # text and boxes in a relatively positioned inline are drawn shifted
     st = %{st | rels: [inline_shift(st, rel) | st.rels]}
@@ -3677,7 +3740,17 @@ defmodule Browser.Layout do
   defp op({:abs, sub, spec}, st) do
     spec = Map.put(spec, :seq, :erlang.unique_integer([:monotonic]))
     # the boxes it is placed against must know where they start
-    st = if st.ptop == [], do: st, else: apply_gap(st)
+    st =
+      if st.ptop == [] do
+        st
+      else
+        # the margin above is not used up by it: it goes on collapsing with the ones below
+        # (see the `gap` op)
+        {y0, gap, old, neg} = {st.y, max(st.gap, 0), st.clr, st.ngap}
+        st = apply_gap(st)
+        %{st | clr: if(gap > 0 and neg == 0, do: {y0, gap, st.y}, else: old)}
+      end
+
     origin = if spec.fixed, do: List.last(st.pos), else: hd(st.pos)
 
     # `bottom` and a percentage `top` need the containing box's height, known only once it closes
@@ -5884,8 +5957,9 @@ defmodule Browser.Layout do
 
     ctx = %{
       shift: shift,
-      first_x: st.line |> List.last() |> Map.fetch!(:x),
+      first_x: (st.line |> List.last() |> Map.fetch!(:x)) - st.line_lead,
       last_right: (fn l -> l.x + l.w end).(hd(st.line)),
+      split: st.splitting,
       y_ref: fn size ->
         if normal > 0,
           do: st.y + dy + half + normal - size - div(normal - size, 4),
@@ -5964,7 +6038,7 @@ defmodule Browser.Layout do
       |> Enum.reverse()
       |> Enum.reduce({open0, [], [], st.lead, length(open0)}, fn
         {:start, ref, spec, x}, {open, done, carried, lead, seq} ->
-          if x >= ctx.last_right and not MapSet.member?(ended, ref) do
+          if x >= ctx.last_right and not ctx.split and not MapSet.member?(ended, ref) do
             # no content after the box's start on this line: it starts on the next one
             mark = {:start, ref, spec, st.indent + lead + spec.ml}
             {open, done, [mark | carried], lead + spec.ml + spec.bl + spec.pl, seq}
@@ -5980,7 +6054,16 @@ defmodule Browser.Layout do
           end
       end)
 
-    done = Enum.reduce(open, done, fn box, acc -> [{box, ctx.last_right, false} | acc] end)
+    done =
+      Enum.reduce(open, done, fn box, acc ->
+        # (a box that a block splits, with nothing in it before the block, shows its left side)
+        # (it follows the text, the space between them being at the end of the line)
+        if ctx.split and is_number(box.x) and box.x >= ctx.last_right do
+          [{%{box | x: ctx.last_right}, ctx.last_right + box.spec.bl + box.spec.pl, false} | acc]
+        else
+          [{box, ctx.last_right, false} | acc]
+        end
+      end)
 
     boxes =
       done

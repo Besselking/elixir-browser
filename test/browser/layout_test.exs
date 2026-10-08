@@ -6768,4 +6768,50 @@ defmodule Browser.LayoutTest do
       assert x.y < 40
     end
   end
+
+  describe "margins that run through an empty block holding only floats or positioned boxes" do
+    for {name, kid} <- [
+          {"a float", "<div style='float:left;width:10px;height:10px'></div>"},
+          {"an absolute box", "<div style='position:absolute;width:10px;height:10px'></div>"}
+        ] do
+      for style <- ["", "position:relative"] do
+        test "still collapse with the margin below (#{name}, #{inspect(style)})" do
+          html =
+            ~s|<style>body{margin:0}.a{margin-bottom:10px;height:10px}.b{margin-top:20px;#{unquote(style)}}.c{margin-top:30px;height:10px;background:aqua}</style><div class=a></div><div class=b>#{unquote(kid)}</div><div class=c></div>|
+
+          page = Browser.Page.build(html, "about:home")
+          {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+          c = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 255}))
+          # 10 (a) + 30 (the largest of the margins), not 10 + 20 + 30
+          assert c.y == 40
+        end
+      end
+    end
+  end
+
+  describe "a block inside an inline box" do
+    test "is not covered by the box, whose right side comes in a line after it" do
+      html =
+        ~s|<style>body{margin:0}</style><span style="border:5px solid blue;border-left:none;border-right:none;padding-right:10px"><span style="display:block">x</span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      blues = Enum.filter(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert length(blues) == 2
+      assert Enum.all?(blues, &(&1.y > x.y and &1.w == 10))
+    end
+
+    test "has the left side of the box in a line before it" do
+      html =
+        ~s|<style>body{margin:0}</style><span style="border:5px solid blue;border-left:none;border-right:none;padding-left:10px"><span style="display:block">x</span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      blues = Enum.filter(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert length(blues) == 2
+      assert Enum.all?(blues, &(&1.y < x.y))
+    end
+  end
 end

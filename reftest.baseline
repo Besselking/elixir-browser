@@ -778,6 +778,9 @@ css/CSS2/borders/shand-border-000.xht
 css/CSS2/box-display/anonymous-box-generation-001.xht
 css/CSS2/box-display/anonymous-boxes-inheritance-001.xht
 css/CSS2/box-display/anonymous-inline-whitespace-001.xht
+css/CSS2/box-display/block-in-inline-001.xht
+css/CSS2/box-display/block-in-inline-002.xht
+css/CSS2/box-display/block-in-inline-003.xht
 css/CSS2/box-display/block-in-inline-007.xht
 css/CSS2/box-display/block-in-inline-008.xht
 css/CSS2/box-display/block-in-inline-at-start-with-margin-top-collapses-with-parent.html
@@ -1200,6 +1203,7 @@ css/CSS2/linebox/border-padding-bleed-002.xht
 css/CSS2/linebox/border-padding-bleed-003.xht
 css/CSS2/linebox/empty-inline-001.xht
 css/CSS2/linebox/fractional-line-height.html
+css/CSS2/linebox/inline-box-001.xht
 css/CSS2/linebox/inline-formatting-context-001.xht
 css/CSS2/linebox/inline-formatting-context-004.xht
 css/CSS2/linebox/inline-formatting-context-005.xht
@@ -1474,6 +1478,10 @@ css/CSS2/margin-padding-clear/margin-collapse-106.xht
 css/CSS2/margin-padding-clear/margin-collapse-110.xht
 css/CSS2/margin-padding-clear/margin-collapse-111.xht
 css/CSS2/margin-padding-clear/margin-collapse-112.xht
+css/CSS2/margin-padding-clear/margin-collapse-113.xht
+css/CSS2/margin-padding-clear/margin-collapse-114.xht
+css/CSS2/margin-padding-clear/margin-collapse-115.xht
+css/CSS2/margin-padding-clear/margin-collapse-116.xht
 css/CSS2/margin-padding-clear/margin-collapse-130.xht
 css/CSS2/margin-padding-clear/margin-collapse-131.xht
 css/CSS2/margin-padding-clear/margin-collapse-155.xht
@@ -2036,6 +2044,8 @@ css/CSS2/normal-flow/block-in-inline-align-001.html
 css/CSS2/normal-flow/block-in-inline-align-justify-001.html
 css/CSS2/normal-flow/block-in-inline-align-last-001.html
 css/CSS2/normal-flow/block-in-inline-baseline-001.html
+css/CSS2/normal-flow/block-in-inline-empty-001.xht
+css/CSS2/normal-flow/block-in-inline-empty-003.xht
 css/CSS2/normal-flow/block-in-inline-first-line-001.html
 css/CSS2/normal-flow/block-in-inline-first-line-002.html
 css/CSS2/normal-flow/block-in-inline-float-between-001.xht
@@ -2048,7 +2058,9 @@ css/CSS2/normal-flow/block-in-inline-margins-003.html
 css/CSS2/normal-flow/block-in-inline-margins-004.html
 css/CSS2/normal-flow/block-in-inline-margins-005.html
 css/CSS2/normal-flow/block-in-inline-nested-001.xht
+css/CSS2/normal-flow/block-in-inline-nested-002.xht
 css/CSS2/normal-flow/block-in-inline-percents-001.xht
+css/CSS2/normal-flow/block-in-inline-whitespace-001a.xht
 css/CSS2/normal-flow/block-non-replaced-height-001.xht
 css/CSS2/normal-flow/block-non-replaced-height-005.xht
 css/CSS2/normal-flow/block-non-replaced-height-011.xht
