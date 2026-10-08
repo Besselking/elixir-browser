@@ -30977,6 +30977,7 @@ language/global-code/S10.4.1_A1_T2.js
 language/global-code/block-decl-strict.js
 language/global-code/decl-func-dup.js
 language/global-code/decl-func.js
+language/global-code/decl-lex-configurable-global.js
 language/global-code/decl-lex-deletion.js
 language/global-code/decl-lex-restricted-global.js
 language/global-code/decl-lex.js
@@ -41200,6 +41201,7 @@ language/statements/let/global-use-before-initialization-in-prior-statement.js
 language/statements/let/redeclaration-error-from-within-strict-mode-function.js
 language/statements/let/static-init-await-binding-invalid.js
 language/statements/let/static-init-await-binding-valid.js
+language/statements/let/syntax/escaped-let.js
 language/statements/let/syntax/identifier-let-allowed-as-lefthandside-expression-strict.js
 language/statements/let/syntax/identifier-let-disallowed-as-boundname.js
 language/statements/let/syntax/let-closure-inside-condition.js

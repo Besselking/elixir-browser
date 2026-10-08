@@ -2873,6 +2873,14 @@ defmodule Browser.JS.Interp do
           n in fun_names or not (Map.has_key?(gvars, n) or Map.has_key?(props_before, n)),
           do: n
 
+    # a lexical name hides a configurable built-in: the global object keeps its own property
+    for n <- lex,
+        MapSet.member?(Process.get(:js_builtin_names) || MapSet.new(), n),
+        n not in ["NaN", "Infinity", "undefined"],
+        Map.has_key?(gvars, n),
+        not Map.has_key?(deref(gid).props, n),
+        do: put_hidden(g, n, Map.fetch!(gvars, n))
+
     Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
     Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(fresh)))
   end

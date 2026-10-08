@@ -520,6 +520,9 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp statement([{:id, "let", mark} | _] = all) when mark in [:esc, :esc_nl],
+    do: expression_statement(all)
+
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
       [{:id, name, _} | _] when name not in ["in", "instanceof"] -> let_decl(ts)
