@@ -3578,6 +3578,7 @@ css/css-flexbox/flex-aspect-ratio-img-row-003.html
 css/css-flexbox/flex-aspect-ratio-img-row-007.html
 css/css-flexbox/flex-aspect-ratio-img-row-012.html
 css/css-flexbox/flex-aspect-ratio-img-vert-lr.html
+css/css-flexbox/flex-base-size-ignores-max-width.html
 css/css-flexbox/flex-basis-001.html
 css/css-flexbox/flex-basis-002.html
 css/css-flexbox/flex-basis-003.html
@@ -3666,6 +3667,7 @@ css/css-flexbox/flex-order-last-baseline.html
 css/css-flexbox/flex-order-wrap-reverse-baseline.html
 css/css-flexbox/flex-order.html
 css/css-flexbox/flex-shrink-001.html
+css/css-flexbox/flex-shrink-002.html
 css/css-flexbox/flex-shrink-003.html
 css/css-flexbox/flex-shrink-004.html
 css/css-flexbox/flex-shrink-005.html

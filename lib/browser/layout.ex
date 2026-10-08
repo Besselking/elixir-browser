@@ -6088,8 +6088,8 @@ defmodule Browser.Layout do
       sub: build.(%{}),
       key: make_ref(),
       rebuild: if(tag in ~w(img svg), do: nil, else: build),
-      grow: flex_number(c["flex-grow"], 0.0),
-      shrink: flex_number(c["flex-shrink"], 1.0),
+      grow: nonneg(flex_number(c["flex-grow"], 0.0), 0.0),
+      shrink: nonneg(flex_number(c["flex-shrink"], 1.0), 1.0),
       basis: len_value(c["flex-basis"], fs),
       width: dim(c["width"]),
       minw: c["min-width"],
@@ -6186,6 +6186,9 @@ defmodule Browser.Layout do
 
   defp flex_number(_v, default), do: default
 
+  # (a negative factor is not valid: the property keeps its initial value)
+  defp nonneg(n, default), do: if(n < 0, do: default, else: n)
+
   # a length or percentage written as text: `{:px, n}`, `{:pct, f}`, or nil (auto, content)
   defp len_value(text, fs) when is_binary(text) do
     text = String.trim(text)
@@ -6210,7 +6213,12 @@ defmodule Browser.Layout do
     widths =
       for it <- items,
           it = if(row?, do: it, else: %{it | basis: nil}),
-          do: flex_base(st, it, avail, cs) + auto_zero(it.ml) + auto_zero(it.mr)
+          do:
+            clamp_width(
+              flex_base(st, it, avail, cs),
+              %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0},
+              avail
+            ) + auto_zero(it.ml) + auto_zero(it.mr)
 
     widest = round(Enum.max(widths, fn -> 0 end))
 
@@ -6275,7 +6283,8 @@ defmodule Browser.Layout do
           shrink_extent(st, it.sub, @unbounded, it.key)
       end
 
-    clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+    # (the flex base size is not limited by `max-width`: that only caps the result)
+    clamp_width(w, %{maxw: nil, minw: it.minw, extra: it.extra, mextra: 0}, avail)
   end
 
   defp flex_row(st, cs, items, avail) do
@@ -6374,6 +6383,13 @@ defmodule Browser.Layout do
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     line = flex_resize(st, line, free, avail)
+
+    # (what is left is held to the min and max widths)
+    line =
+      Enum.map(line, fn it ->
+        c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
+        %{it | hw: clamp_width(it.hw, c, avail) * 1.0}
+      end)
 
     # an explicit flex-basis below the automatic minimum is raised to it
     line =
@@ -6511,15 +6527,35 @@ defmodule Browser.Layout do
         end)
 
       if pinned == [] do
-        Enum.map(line, fn it ->
-          if it.frozen do
-            it
-          else
+        tentative =
+          Map.new(live, fn it ->
             w = max(it.hw + free * it.shrink * it.hw / total, it.extra + 0.0)
             c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
-            %{it | hw: clamp_width(w, c, avail) * 1.0}
-          end
-        end)
+            {it.key, {w, clamp_width(w, c, avail) * 1.0}}
+          end)
+
+        # an item that would end up above its max-width is held there, the rest shrink further
+        maxed = for it <- live, {w, c} = tentative[it.key], w > c + 0.001, do: it
+
+        if maxed != [] do
+          gained = Enum.sum(for it <- maxed, do: it.hw - elem(tentative[it.key], 1))
+
+          line =
+            Enum.map(line, fn it ->
+              if it in maxed,
+                do: %{it | hw: elem(tentative[it.key], 1), frozen: true},
+                else: it
+            end)
+
+          flex_shrink(st, line, free + gained, avail)
+        else
+          Enum.map(line, fn it ->
+            case tentative[it.key] do
+              {_, c} -> %{it | hw: c}
+              nil -> it
+            end
+          end)
+        end
       else
         gained = Enum.sum(for it <- pinned, do: max(it.hw - flex_min(st, it, avail), 0.0))
 
@@ -6538,7 +6574,7 @@ defmodule Browser.Layout do
   end
 
   # `min-width: auto`: the content's min-content width, but not more than a width that is set
-  defp flex_auto_min?(it), do: not it.scroll? and (it.width == nil or it.minw in [nil, :auto])
+  defp flex_auto_min?(it), do: not it.scroll? and it.minw in [nil, :auto]
 
   defp flex_min(st, it, avail) do
     content = shrink_extent(st, it.sub, 1, it.key) * 1.0

@@ -5366,6 +5366,21 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}]
     end
 
+    test "the flex base size ignores max-width, which then freezes the item while shrinking" do
+      html = """
+      <div style="display:flex;width:300px"><div style="min-width:0;max-width:100px;background:red"><div style="width:300px;height:5px"></div></div><div style="min-width:0;background:blue"><div style="width:300px;height:5px"></div></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}, {100, 0, 200, 5}]
+    end
+
+    test "a negative flex-shrink is invalid and leaves the initial 1" do
+      html =
+        ~s(<div style="display:flex;width:50px"><div style="width:100px;flex-shrink:-2;min-width:0;height:5px;background:red"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 50, 5}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
