@@ -6,7 +6,7 @@ alias Browser.{Fetch, Page}
 alias Browser.JS.Runtime
 
 [url | rest] = System.argv()
-suites = Enum.at(rest, 0)
+suites = if Enum.at(rest, 0) in [nil, "", "all"], do: nil, else: Enum.at(rest, 0)
 timeout = String.to_integer(Enum.at(rest, 1) || "300") * 1000
 Application.put_env(:browser, :gui, false)
 {:ok, _} = Application.ensure_all_started(:browser)
@@ -57,6 +57,8 @@ sampler =
   end
 
 # GCTRACE=1 adds up the time the script process spends in garbage collection
+t0_us = :os.timestamp()
+
 gc_tracer =
   if System.get_env("GCTRACE") do
     tracer =
@@ -64,9 +66,14 @@ gc_tracer =
         tr = fn tr, start, minor, major, nmin, nmaj ->
           receive do
             {:trace_ts, _, :gc_minor_start, _, ts} -> tr.(tr, ts, minor, major, nmin, nmaj)
-            {:trace_ts, _, :gc_major_start, _, ts} -> tr.(tr, ts, minor, major, nmin, nmaj)
+            {:trace_ts, _, :gc_major_start, info, ts} ->
+              Process.put(:last_info, info)
+              tr.(tr, ts, minor, major, nmin, nmaj)
             {:trace_ts, _, :gc_minor_end, _, ts} -> tr.(tr, nil, minor + diff.(ts, start), major, nmin + 1, nmaj)
-            {:trace_ts, _, :gc_major_end, _, ts} -> tr.(tr, nil, minor, major + diff.(ts, start), nmin, nmaj + 1)
+            {:trace_ts, _, :gc_major_end, info, ts} ->
+              d = diff.(ts, start)
+              if d > 100_000, do: IO.puts("MAJOR #{div(d, 1000)} ms at #{div(diff.(ts, t0_us), 1000)}: before #{inspect(Process.get(:last_info) |> Keyword.take([:heap_size, :old_heap_size, :bin_vheap_size]))} after #{inspect(Keyword.take(info, [:heap_size, :old_heap_size]))}")
+              tr.(tr, nil, minor, major + d, nmin, nmaj + 1)
             {:stop, from} -> send(from, {:gc, minor, nmin, major, nmaj})
           end
         end
@@ -85,6 +92,26 @@ if System.get_env("TPROF") do
   sink = spawn(fn -> Stream.repeatedly(fn -> receive do _ -> :ok end end) |> Stream.run() end)
   for m <- js_modules, m in [Browser.JS.Interp], do: :erlang.trace_pattern({m, :_, :_}, true, [:call_time, :local])
   :erlang.trace(pid, true, [:call, {:tracer, sink}])
+end
+
+# MEM=1 prints the size of the script process every 5 s
+if System.get_env("MEM") do
+  spawn(fn ->
+    mem = fn mem ->
+      Process.sleep(5000)
+
+      case Process.info(pid, [:memory, :total_heap_size]) do
+        [memory: m, total_heap_size: h] ->
+          IO.puts("[#{div(System.monotonic_time(:millisecond) - t0, 1000)}s mem] #{div(m, 1_000_000)} MB, heap #{div(h * 8, 1_000_000)} MB")
+          mem.(mem)
+
+        _ ->
+          :ok
+      end
+    end
+
+    mem.(mem)
+  end)
 end
 
 print.(Runtime.run_scripts(pid))
@@ -145,6 +172,28 @@ if System.get_env("TPROF") do
   rows |> Enum.sort_by(&elem(&1, 2), :desc) |> Enum.take(60) |> Enum.each(fn {k, n, t} -> IO.puts("#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}") end)
   IO.puts("-- by calls")
   rows |> Enum.sort_by(&elem(&1, 1), :desc) |> Enum.take(40) |> Enum.each(fn {k, n, t} -> IO.puts("#{String.pad_leading(Integer.to_string(t), 10)} #{String.pad_leading(Integer.to_string(n), 9)} #{k}") end)
+end
+
+if System.get_env("PDSTAT") do
+  {:dictionary, pd} = Process.info(pid, :dictionary)
+  ints = Enum.filter(pd, fn {k, _} -> is_integer(k) end)
+  IO.puts("pd entries #{length(pd)}, integer keys #{length(ints)}")
+  words = Enum.reduce(pd, 0, fn {_, v}, acc -> acc + :erts_debug.flat_size(v) end)
+  IO.puts("pd flat words #{words} (#{div(words * 8, 1_000_000)} MB)")
+
+  pd
+  |> Enum.map(fn {k, v} -> {k, :erts_debug.flat_size(v)} end)
+  |> Enum.reject(fn {k, _} -> is_integer(k) end)
+  |> Enum.sort_by(&elem(&1, 1), :desc)
+  |> Enum.take(15)
+  |> Enum.each(fn {k, w} -> IO.puts("  #{w} words  #{inspect(k, limit: 5, printable_limit: 40)}") end)
+
+  kinds =
+    ints
+    |> Enum.map(fn {_, v} -> {if(is_map(v), do: Map.get(v, :class, if(Map.has_key?(v, :scope), do: :scope, else: :map)), else: :other), :erts_debug.flat_size(v)} end)
+    |> Enum.reduce(%{}, fn {k, w}, acc -> Map.update(acc, k, {1, w}, fn {n, t} -> {n + 1, t + w} end) end)
+
+  IO.inspect(kinds, label: "heap objects by kind {count, words}")
 end
 
 IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")

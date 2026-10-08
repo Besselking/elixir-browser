@@ -601,8 +601,8 @@ defmodule Browser.JS.RegExp do
 
         %{
           spans: spans,
-          start: cp_count(binary_part(subject, 0, start)),
-          stop: cp_count(binary_part(subject, 0, start + len)),
+          start: Str.units_before(subject, start),
+          stop: Str.units_before(subject, start + len),
           text: binary_part(subject, start, len),
           groups: groups,
           named: named,
