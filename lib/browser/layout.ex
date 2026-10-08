@@ -1374,6 +1374,7 @@ defmodule Browser.Layout do
       mr: mr,
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
+      cell?: c["display"] == "table-cell",
       table?: table? or c["display"] == "inline-table",
       flex?: c["display"] in ["flex", "inline-flex"],
       # a block-level box with auto side margins sits in the middle (or at the right)
@@ -3408,7 +3409,8 @@ defmodule Browser.Layout do
       base: base,
       items: items,
       align: Map.get(spec, :malign) || style.align,
-      valign: spec.valign
+      valign: spec.valign,
+      block: Map.get(spec, :cell?, false)
     })
   end
 
@@ -5837,13 +5839,20 @@ defmodule Browser.Layout do
     moved =
       for atom <- Enum.reverse(atoms),
           sub <- atom_items(atom),
-          do: move(sub, atom.x + shift, top_of.(atom))
+          do: move(sub, atom.x + shift, top_of.(atom)) |> Map.put(:blk, Map.get(atom, :block))
 
     moved = apply_rel(moved)
 
     # everything a box paints behind its text: colours, borders, images, shadows
-    {rects, others} =
+    {behind, others} =
       Enum.split_with(moved, &(&1.type in @behind_text and !Map.get(&1, :over)))
+
+    # (a table cell outside a table is a block of its own; what an inline-block paints is inline
+    # content, above the backgrounds of blocks)
+    {rects, inline_rects} = Enum.split_with(behind, &Map.get(&1, :blk))
+    others = Enum.map(others, &Map.delete(&1, :blk))
+    rects = Enum.map(rects, &Map.delete(&1, :blk))
+    inline_rects = Enum.map(inline_rects, &Map.delete(&1, :blk))
 
     new_items = Enum.reverse(others) ++ placed
 
@@ -5860,14 +5869,16 @@ defmodule Browser.Layout do
 
     {boxes, active, carried, lead} = inline_boxes(st, ctx)
     # `boxes` is already newest-first like st.rects
-    all_rects = Enum.reverse(rects) ++ boxes
+    inline_rects = Enum.reverse(inline_rects) ++ boxes
 
+    # (what a line holds paints as inline content: above the backgrounds of the blocks, whatever
+    # their order in the page)
     %{
       st
-      | items: new_items ++ st.items,
-        n: st.n + length(new_items),
-        rects: all_rects ++ st.rects,
-        nr: st.nr + length(rects) + length(boxes),
+      | items: new_items ++ inline_rects ++ st.items,
+        n: st.n + length(new_items) + length(inline_rects),
+        rects: Enum.reverse(rects) ++ st.rects,
+        nr: st.nr + length(rects),
         line: [],
         y: st.y + line_h,
         lh: 0,

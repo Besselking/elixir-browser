@@ -6722,4 +6722,16 @@ defmodule Browser.LayoutTest do
       assert layer.clip == {0, 50, 400, 40}
     end
   end
+
+  describe "paint order of inline content" do
+    test "an inline-block paints above the background of the block after it" do
+      html =
+        ~s|<style>body{margin:0}div{width:20px;height:10px}span{display:inline-block;vertical-align:top;width:20px;height:10px;background:green}#b{margin-top:-10px;background:red}</style><div><span>&nbsp;</span></div><div id=b>&nbsp;</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert Enum.map(rects, & &1.color) == [{255, 0, 0}, {0, 128, 0}]
+    end
+  end
 end

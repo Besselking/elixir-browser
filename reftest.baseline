@@ -903,6 +903,7 @@ css/CSS2/css1/c5504-imrgn-l-002.xht
 css/CSS2/css1/c5504-mrgn-l-000.xht
 css/CSS2/css1/c5504-mrgn-l-003.xht
 css/CSS2/css1/c5505-mrgn-000.xht
+css/CSS2/css1/c5506-ipadn-t-000.xht
 css/CSS2/css1/c5506-ipadn-t-001.xht
 css/CSS2/css1/c5506-ipadn-t-002.xht
 css/CSS2/css1/c5506-padn-t-000.xht
@@ -1188,6 +1189,9 @@ css/CSS2/floats/zero-available-space-float-positioning.html
 css/CSS2/floats/zero-width-floats.html
 css/CSS2/linebox/anonymous-inline-inherit-001.html
 css/CSS2/linebox/baseline-block-with-overflow-001.html
+css/CSS2/linebox/border-padding-bleed-001.xht
+css/CSS2/linebox/border-padding-bleed-002.xht
+css/CSS2/linebox/border-padding-bleed-003.xht
 css/CSS2/linebox/empty-inline-001.xht
 css/CSS2/linebox/fractional-line-height.html
 css/CSS2/linebox/inline-formatting-context-001.xht
@@ -1255,6 +1259,7 @@ css/CSS2/linebox/line-height-105.xht
 css/CSS2/linebox/line-height-106.xht
 css/CSS2/linebox/line-height-112.xht
 css/CSS2/linebox/line-height-121.xht
+css/CSS2/linebox/line-height-125.xht
 css/CSS2/linebox/line-height-126.xht
 css/CSS2/linebox/line-height-128.xht
 css/CSS2/linebox/line-height-129.xht
@@ -2158,6 +2163,9 @@ css/CSS2/normal-flow/inline-block-width-001a.xht
 css/CSS2/normal-flow/inline-block-width-001b.xht
 css/CSS2/normal-flow/inline-block-width-002a.xht
 css/CSS2/normal-flow/inline-block-width-002b.xht
+css/CSS2/normal-flow/inline-block-zorder-001.xht
+css/CSS2/normal-flow/inline-block-zorder-002.xht
+css/CSS2/normal-flow/inline-block-zorder-004.xht
 css/CSS2/normal-flow/inline-box-border-line-break.html
 css/CSS2/normal-flow/inline-box-padding-line-break.html
 css/CSS2/normal-flow/inline-non-replaced-height-002.xht
@@ -2183,6 +2191,8 @@ css/CSS2/normal-flow/inline-table-width-001a.xht
 css/CSS2/normal-flow/inline-table-width-001b.xht
 css/CSS2/normal-flow/inline-table-width-002a.xht
 css/CSS2/normal-flow/inline-table-width-002b.xht
+css/CSS2/normal-flow/inline-table-zorder-001.xht
+css/CSS2/normal-flow/inline-table-zorder-002.xht
 css/CSS2/normal-flow/inline-table-zorder-003.xht
 css/CSS2/normal-flow/inlines-002.xht
 css/CSS2/normal-flow/inlines-016.xht
@@ -2526,6 +2536,7 @@ css/CSS2/normal-flow/min-width-percentage-001.xht
 css/CSS2/normal-flow/negative-margin-001.html
 css/CSS2/normal-flow/negative-margin-shrinking-container-size-001.html
 css/CSS2/normal-flow/negative-margin-shrinking-container-size-002.html
+css/CSS2/normal-flow/overflow-scroll-paint-order.html
 css/CSS2/normal-flow/root-box-001.xht
 css/CSS2/normal-flow/table-in-inline-001.xht
 css/CSS2/normal-flow/width-001.xht
