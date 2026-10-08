@@ -520,6 +520,9 @@ defmodule Browser.JS.RegExp do
         cond do
           name in @short_categories or name == "Any" -> {:ok, {:pcre, name}}
           Map.has_key?(@general_categories, name) -> {:ok, {:pcre, @general_categories[name]}}
+          # (PCRE has the exact tables for most binary properties; the hand-made sets are for
+          # what it lacks)
+          Map.has_key?(@binary_properties, name) and pcre_knows?(name) -> {:ok, {:pcre, name}}
           Map.has_key?(@binary_properties, name) -> {:ok, {:class, @binary_properties[name]}}
           true -> :error
         end
@@ -532,12 +535,16 @@ defmodule Browser.JS.RegExp do
         end
 
       [key, value] when key in ["Script", "sc", "Script_Extensions", "scx"] ->
-        if value =~ ~r/^[A-Za-z_]+$/, do: {:ok, {:pcre, value}}, else: :error
+        # (a bare script name in PCRE is the script extensions: `sc:` is the plain script)
+        prefix = if key in ["Script", "sc"], do: "sc:", else: "scx:"
+        if value =~ ~r/^[A-Za-z_]+$/, do: {:ok, {:pcre, prefix <> value}}, else: :error
 
       _ ->
         :error
     end
   end
+
+  defp pcre_knows?(name), do: match?({:ok, _}, :re.compile("\\p{#{name}}", [:unicode, :ucp]))
 
   # A string here is made of whole characters, so a lone surrogate in a pattern never matches:
   # outside a class that is `(?!)`, inside one the character (or a range of them) is left out.

@@ -1752,11 +1752,13 @@ defmodule Browser.JSTest do
       /\p{Emoji_Modifier}/u.test("\u{1F3FD}"),
       /[^\p{White_Space}]+/u.exec("  ab  ")[0],
       /\p{ASCII}+/u.exec("h\u00e9llo")[0],
-      /\p{General_Category=Decimal_Number}/u.test("5")
+      /\p{General_Category=Decimal_Number}/u.test("5"),
+      /\P{Script=Devanagari}/u.test("\u0951"),
+      /\p{Script_Extensions=Devanagari}/u.test("\u0951")
     ].join()
     """
 
-    assert js(src) == "true,true,false,true,true,ab,h,true"
+    assert js(src) == "true,true,false,true,true,ab,h,true,true,true"
   end
 
   test "a comment inside a template expression may hold quotes and slashes" do
