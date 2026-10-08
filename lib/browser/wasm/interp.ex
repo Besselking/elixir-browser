@@ -1,0 +1,284 @@
+defmodule Browser.Wasm.Interp do
+  @moduledoc """
+  Runs the flat code that `Browser.Wasm.Validator` makes. The operand stack is a list (top
+  first), the locals are a tuple. A call is a recursive call of `invoke/3`; the depth is
+  limited like a real stack.
+  """
+
+  import Bitwise
+  alias Browser.Wasm.{Func, Global, Memory, Num, Table}
+
+  @max_depth 10_000
+
+  defp trap(msg), do: Num.trap(msg)
+
+  # counts a step against the budget of the JavaScript runtime that runs this code, if any, so
+  # that a loop in a module cannot hang the page
+  defp tick do
+    case Process.get(:js_steps) do
+      nil -> :ok
+      n when n <= 0 -> throw(:js_limit)
+      n -> Process.put(:js_steps, n - 1)
+    end
+  end
+
+  defp back(to, pc) when to <= pc, do: tick()
+  defp back(_, _), do: :ok
+
+  @doc "The instance record of an instance id."
+  def instance(id), do: Process.get({:wasm_instance, id})
+
+  @doc "The data and element segments that are not dropped yet."
+  def segments(id), do: Process.get({:wasm_segments, id})
+
+  @doc "Calls a function instance with a list of arguments; returns the list of results."
+  def invoke(func, args, depth \\ 0)
+  def invoke(%Func{impl: {:host, fun}}, args, _), do: fun.(args)
+
+  def invoke(%Func{impl: {:wasm, iid, idx}}, args, depth) do
+    if depth > @max_depth, do: trap("call stack exhausted")
+    tick()
+    inst = instance(iid)
+    fc = elem(inst.code, idx)
+    locals = List.to_tuple(args ++ fc.zeros)
+    run(fc.code, 0, [], locals, inst, depth + 1)
+  end
+
+  defp run(code, pc, stack, locals, inst, depth) do
+    case elem(code, pc) do
+      {:const, v} ->
+        run(code, pc + 1, [v | stack], locals, inst, depth)
+
+      {:lget, i} ->
+        run(code, pc + 1, [elem(locals, i) | stack], locals, inst, depth)
+
+      {:lset, i} ->
+        [v | st] = stack
+        run(code, pc + 1, st, put_elem(locals, i, v), inst, depth)
+
+      {:ltee, i} ->
+        [v | _] = stack
+        run(code, pc + 1, stack, put_elem(locals, i, v), inst, depth)
+
+      {:bin, op} ->
+        [b, a | st] = stack
+        run(code, pc + 1, [Num.binop(op, a, b) | st], locals, inst, depth)
+
+      {:un, op} ->
+        [a | st] = stack
+        run(code, pc + 1, [Num.unop(op, a) | st], locals, inst, depth)
+
+      {:jump, to} ->
+        back(to, pc)
+        run(code, to, stack, locals, inst, depth)
+
+      {:jump_unless, to} ->
+        [c | st] = stack
+        run(code, if(c == 0, do: to, else: pc + 1), st, locals, inst, depth)
+
+      {:jump_if, to} ->
+        [c | st] = stack
+        if c != 0, do: back(to, pc)
+        run(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
+
+      {:br, to, arity, drop} ->
+        back(to, pc)
+        run(code, to, branch(stack, arity, drop), locals, inst, depth)
+
+      {:br_if, to, arity, drop} ->
+        [c | st] = stack
+
+        if c == 0 do
+          run(code, pc + 1, st, locals, inst, depth)
+        else
+          back(to, pc)
+          run(code, to, branch(st, arity, drop), locals, inst, depth)
+        end
+
+      {:br_table, targets, default} ->
+        [i | st] = stack
+
+        {to, arity, drop} =
+          if i < tuple_size(targets), do: elem(targets, i), else: default
+
+        back(to, pc)
+        run(code, to, branch(st, arity, drop), locals, inst, depth)
+
+      {:return, n} ->
+        stack |> Enum.take(n) |> Enum.reverse()
+
+      {:call, idx, np} ->
+        {args, rest} = Enum.split(stack, np)
+        results = invoke(elem(inst.funcs, idx), Enum.reverse(args), depth)
+        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+      {:call_indirect, ti, tbl, np} ->
+        [i | st] = stack
+        table = elem(inst.tables, tbl)
+        if i >= Table.size(table), do: trap("undefined element")
+
+        f =
+          case Table.get(table, i) do
+            :null -> trap("uninitialized element")
+            f -> f
+          end
+
+        if f.type != elem(inst.types, ti), do: trap("indirect call type mismatch")
+        {args, rest} = Enum.split(st, np)
+        results = invoke(f, Enum.reverse(args), depth)
+        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+      :drop ->
+        run(code, pc + 1, tl(stack), locals, inst, depth)
+
+      :select ->
+        [c, b, a | st] = stack
+        run(code, pc + 1, [if(c != 0, do: a, else: b) | st], locals, inst, depth)
+
+      :unreachable ->
+        trap("unreachable")
+
+      {:gget, i} ->
+        run(code, pc + 1, [Global.get(elem(inst.globals, i)) | stack], locals, inst, depth)
+
+      {:gset, i} ->
+        [v | st] = stack
+        Global.set(elem(inst.globals, i), v)
+        run(code, pc + 1, st, locals, inst, depth)
+
+      {:load, kind, off} ->
+        [base | st] = stack
+        v = load(elem(inst.mems, 0), kind, base + off)
+        run(code, pc + 1, [v | st], locals, inst, depth)
+
+      {:store, kind, off} ->
+        [v, base | st] = stack
+        store(elem(inst.mems, 0), kind, base + off, v)
+        run(code, pc + 1, st, locals, inst, depth)
+
+      :memory_size ->
+        run(code, pc + 1, [Memory.size(elem(inst.mems, 0)) | stack], locals, inst, depth)
+
+      :memory_grow ->
+        [d | st] = stack
+        r = Memory.grow(elem(inst.mems, 0), d)
+        run(code, pc + 1, [r &&& 0xFFFFFFFF | st], locals, inst, depth)
+
+      :ref_is_null ->
+        [v | st] = stack
+        run(code, pc + 1, [if(v == :null, do: 1, else: 0) | st], locals, inst, depth)
+
+      {:ref_func, i} ->
+        run(code, pc + 1, [elem(inst.funcs, i) | stack], locals, inst, depth)
+
+      other ->
+        st = bulk(other, stack, inst)
+        run(code, pc + 1, st, locals, inst, depth)
+    end
+  end
+
+  defp branch(stack, 0, 0), do: stack
+  defp branch(stack, 0, drop), do: Enum.drop(stack, drop)
+
+  defp branch(stack, arity, drop) do
+    {vals, rest} = Enum.split(stack, arity)
+    vals ++ Enum.drop(rest, drop)
+  end
+
+  defp push_results(results, stack), do: Enum.reduce(results, stack, &[&1 | &2])
+
+  # ── tables, segments, bulk memory ──────────────────────────
+
+  defp bulk({:table_get, t}, [i | st], inst), do: [Table.get(elem(inst.tables, t), i) | st]
+
+  defp bulk({:table_set, t}, [v, i | st], inst) do
+    Table.set(elem(inst.tables, t), i, v)
+    st
+  end
+
+  defp bulk({:table_size, t}, st, inst), do: [Table.size(elem(inst.tables, t)) | st]
+
+  defp bulk({:table_grow, t}, [n, v | st], inst),
+    do: [Table.grow(elem(inst.tables, t), n, v) &&& 0xFFFFFFFF | st]
+
+  defp bulk({:table_fill, t}, [n, v, i | st], inst) do
+    Table.fill(elem(inst.tables, t), i, v, n)
+    st
+  end
+
+  defp bulk({:table_copy, d, s}, [n, src, dst | st], inst) do
+    Table.copy(elem(inst.tables, d), dst, elem(inst.tables, s), src, n)
+    st
+  end
+
+  defp bulk({:table_init, e, t}, [n, src, dst | st], inst) do
+    segs = segments(inst.id)
+    items = elem(segs.elems, e)
+    if src + n > length(items), do: trap("out of bounds table access")
+    table = elem(inst.tables, t)
+    if dst + n > Table.size(table), do: trap("out of bounds table access")
+    Table.init(table, dst, items |> Enum.drop(src) |> Enum.take(n))
+    st
+  end
+
+  defp bulk({:elem_drop, e}, st, inst) do
+    segs = segments(inst.id)
+    Process.put({:wasm_segments, inst.id}, %{segs | elems: put_elem(segs.elems, e, [])})
+    st
+  end
+
+  defp bulk({:memory_init, d}, [n, src, dst | st], inst) do
+    segs = segments(inst.id)
+    bytes = elem(segs.datas, d)
+    mem = elem(inst.mems, 0)
+    if src + n > byte_size(bytes), do: trap("out of bounds memory access")
+    if dst + n > Memory.size(mem) * Memory.page_size(), do: trap("out of bounds memory access")
+    if n > 0, do: Memory.write(mem, dst, binary_part(bytes, src, n))
+    st
+  end
+
+  defp bulk({:data_drop, d}, st, inst) do
+    segs = segments(inst.id)
+    Process.put({:wasm_segments, inst.id}, %{segs | datas: put_elem(segs.datas, d, <<>>)})
+    st
+  end
+
+  defp bulk(:memory_copy, [n, src, dst | st], inst) do
+    Memory.copy(elem(inst.mems, 0), dst, src, n)
+    st
+  end
+
+  defp bulk(:memory_fill, [n, v, dst | st], inst) do
+    Memory.fill(elem(inst.mems, 0), dst, v &&& 0xFF, n)
+    st
+  end
+
+  # ── loads and stores ───────────────────────────────────────
+
+  defp load(m, kind, a), do: decode(kind, Memory.read(m, a, width(kind)))
+
+  defp width(k) when k in [:i32, :f32, :i64_32u, :i64_32s], do: 4
+  defp width(k) when k in [:i64, :f64], do: 8
+  defp width(k) when k in [:i32_8u, :i64_8u, :i32_8s, :i64_8s], do: 1
+  defp width(_), do: 2
+
+  defp decode(:i32, <<v::little-32>>), do: v
+  defp decode(:i64, <<v::little-64>>), do: v
+  defp decode(:f32, <<v::little-32>>), do: Num.f32_from_bits(v)
+  defp decode(:f64, <<v::little-64>>), do: Num.f64_from_bits(v)
+  defp decode(k, <<v::8>>) when k in [:i32_8u, :i64_8u], do: v
+  defp decode(k, <<v::little-16>>) when k in [:i32_16u, :i64_16u], do: v
+  defp decode(:i64_32u, <<v::little-32>>), do: v
+  defp decode(:i32_8s, <<v::signed-8>>), do: v &&& 0xFFFFFFFF
+  defp decode(:i32_16s, <<v::little-signed-16>>), do: v &&& 0xFFFFFFFF
+  defp decode(:i64_8s, <<v::signed-8>>), do: v &&& 0xFFFFFFFFFFFFFFFF
+  defp decode(:i64_16s, <<v::little-signed-16>>), do: v &&& 0xFFFFFFFFFFFFFFFF
+  defp decode(:i64_32s, <<v::little-signed-32>>), do: v &&& 0xFFFFFFFFFFFFFFFF
+
+  defp store(m, k, a, v) when k in [:i32, :i64_32], do: Memory.write(m, a, <<v::little-32>>)
+  defp store(m, :i64, a, v), do: Memory.write(m, a, <<v::little-64>>)
+  defp store(m, :f32, a, v), do: Memory.write(m, a, <<Num.f32_to_bits(v)::little-32>>)
+  defp store(m, :f64, a, v), do: Memory.write(m, a, <<Num.f64_to_bits(v)::little-64>>)
+  defp store(m, k, a, v) when k in [:i32_8, :i64_8], do: Memory.write(m, a, <<v::8>>)
+  defp store(m, k, a, v) when k in [:i32_16, :i64_16], do: Memory.write(m, a, <<v::little-16>>)
+end
