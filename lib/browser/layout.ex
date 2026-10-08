@@ -6359,7 +6359,7 @@ defmodule Browser.Layout do
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
         moved = for item <- it.items, do: move(item, floor(ix + 0.5), top + dy)
-        {moved, ix + it.w + it.mr + cs.col_gap + between}
+        {moved, floor(ix + 0.5) + it.w + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
     {placed, cross}

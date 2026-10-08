@@ -5262,6 +5262,14 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 20}, {0, 20, 100, 80}]
     end
 
+    test "space-evenly rounds each gap, as margins would be" do
+      html = """
+      <div style="display:flex;width:200px;justify-content:space-evenly"><div style="width:10px;height:5px;background:red"></div><div style="width:50px;height:5px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{47, 0, 10, 5}, {104, 0, 50, 5}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

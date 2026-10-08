@@ -3701,6 +3701,9 @@ css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
 css/css-flexbox/flexbox-items-as-stacking-contexts-002.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-003.html
+css/css-flexbox/flexbox-justify-content-horiz-001a.xhtml
+css/css-flexbox/flexbox-justify-content-horiz-001b.xhtml
+css/css-flexbox/flexbox-justify-content-horiz-002.xhtml
 css/css-flexbox/flexbox-justify-content-horiz-003.xhtml
 css/css-flexbox/flexbox-justify-content-vert-001a.xhtml
 css/css-flexbox/flexbox-justify-content-vert-001b.xhtml
