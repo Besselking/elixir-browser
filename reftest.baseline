@@ -4569,6 +4569,9 @@ css/css-sizing/box-sizing-border-box-003.xht
 css/css-sizing/box-sizing-border-box-004.xht
 css/css-sizing/box-sizing-content-box-001.xht
 css/css-sizing/box-sizing-content-box-003.xht
+css/css-sizing/calc-margins-block.html
+css/css-sizing/calc-margins-fieldset-content.html
+css/css-sizing/calc-margins-fieldset-legend.html
 css/css-sizing/clone-intrinsic-size.html
 css/css-sizing/clone-nowrap-intrinsic-size-bidi.html
 css/css-sizing/clone-nowrap-intrinsic-size.html
@@ -4629,6 +4632,7 @@ css/css-sizing/grid-item-image-percentage-min-height-computes-as-0.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2b.html
 css/css-sizing/image-max-width-and-height-behaves-as-auto.html
+css/css-sizing/inline-intrinsic-size-calc.html
 css/css-sizing/intrinsic-fixed-width-with-max-content-height.html
 css/css-sizing/intrinsic-fixed-width-with-min-content-height.html
 css/css-sizing/intrinsic-height-abspos-percentage-child-002.html

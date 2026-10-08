@@ -1305,8 +1305,9 @@ defmodule Browser.Layout do
 
     reference =
       case dim(c["width"]) do
+        # (percentages of a box that is as wide as its content count as zero)
         nil ->
-          outer
+          if c["width"] in [:minc, :maxc], do: 0, else: outer
 
         w ->
           sized_by(w, outer) +
@@ -2128,6 +2129,7 @@ defmodule Browser.Layout do
   # a percentage margin or padding is of the width of the containing block
   defp px(:auto), do: 0
   defp px({:pct, f}), do: round(f * containing_width())
+  defp px({:calc, px, f}), do: round(px + f * containing_width())
   defp px(n), do: round(n)
 
   defp containing_width, do: Process.get(:layout_cw, 0)
@@ -3142,7 +3144,9 @@ defmodule Browser.Layout do
       | insets: [{st.left, st.right, st.y, length(st.floats)} | st.insets],
         blocks: [make_ref() | st.blocks],
         left: st.left + l,
-        right: st.right + r
+        right: st.right + r,
+        # (a block with nothing in it is still as wide as the insets around it, for shrink-to-fit)
+        ext: max(st.ext, st.margin + st.left + l + st.right + r - st.free)
     }
   end
 
@@ -3298,6 +3302,12 @@ defmodule Browser.Layout do
     # when measuring how wide the content wants to be (an unbounded width), the container
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
+
+    cs =
+      if cs.col_pct > 0 and avail < @unbounded / 2,
+        do: %{cs | col_gap: max(round(cs.col_gap + cs.col_pct * avail) * 1.0, 0.0)},
+        else: cs
+
     # a percentage height is of the enclosing block's height when that is known
     cs =
       if cs.height == nil and cs.hpct != nil and is_number(st.cbh),
@@ -4898,7 +4908,8 @@ defmodule Browser.Layout do
         min_run(rest, measure, l, r, stack, ext, cur + measure.(trim_hang(text), style))
 
       {:inset, dl, dr} ->
-        min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], ext, cur)
+        # (a box with nothing in it still takes the room of its margins, borders and padding)
+        min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], max(ext, l + dl + r + dr), cur)
 
       {:inset_end} when stack != [] ->
         [{l, r} | stack] = stack
@@ -6312,6 +6323,14 @@ defmodule Browser.Layout do
   end
 
   # a percentage gap is of the container's height, which it only has when it is set
+  # a gap given as a percentage (or `calc(10% - 1rem)`) is of the container's width
+  defp gap_px({:calc, px, _f}), do: px * 1.0
+  defp gap_px(_), do: 0.0
+
+  defp gap_pct({:pct, f}), do: f
+  defp gap_pct({:calc, _px, f}), do: f
+  defp gap_pct(_), do: 0.0
+
   defp row_gap({:pct, f}, height) when is_number(height), do: f * height
   defp row_gap(gap, _height), do: num(gap) || 0.0
 
@@ -6331,7 +6350,8 @@ defmodule Browser.Layout do
       justify: c["justify-content"] || "flex-start",
       content: c["align-content"] || "stretch",
       align: c["align-items"] || "stretch",
-      col_gap: num(c["column-gap"]) || 0.0,
+      col_gap: num(c["column-gap"]) || gap_px(c["column-gap"]),
+      col_pct: gap_pct(c["column-gap"]),
       row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
@@ -8565,6 +8585,7 @@ defmodule Browser.Layout do
     Enum.reduce(@box_props, c, fn key, acc ->
       case acc[key] do
         {:pct, f} -> Map.put(acc, key, f * outer * 1.0)
+        {:calc, px, f} -> Map.put(acc, key, px + f * outer * 1.0)
         _ -> acc
       end
     end)

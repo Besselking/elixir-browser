@@ -5249,6 +5249,38 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "calc() margins and gaps with a percentage" do
+    test "a margin of calc(10% + 100px) counts as 100px when the box is as wide as its content" do
+      [box] =
+        pct_rects(
+          ~s|<div style="float:left;width:min-content;height:100px;background:green"><div style="margin-left:calc(10% + 100px)"></div></div>|
+        )
+
+      assert box.w == 100
+    end
+
+    test "a margin of calc() with a percentage is of the containing block" do
+      page =
+        Browser.Page.build(
+          ~s|<style>body{margin:0}</style><div style="width:200px"><div style="margin-left:calc(10% + 5px);background:green;height:10px"></div></div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      rect = Enum.find(items, &(&1.type == :rect))
+      assert {rect.x, rect.w} == {25, 175}
+    end
+
+    test "a percentage gap in a flex container is of its width" do
+      rects =
+        pct_rects(
+          ~s|<div style="display:flex;width:200px;gap:10%"><div style="flex:1;background:green;height:10px"></div><div style="flex:1;background:blue;height:10px"></div></div>|
+        )
+
+      assert Enum.map(rects, &{&1.x, &1.w}) == [{0, 90}, {110, 90}]
+    end
+  end
+
   describe "invalid negative sizes" do
     defp neg_box(style) do
       page =

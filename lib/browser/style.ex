@@ -1691,6 +1691,7 @@ defmodule Browser.Style do
       px = length(v, env) -> {:ok, px}
       # a percentage is of the containing block's width, known only to layout
       pct = percentage(v) -> {:ok, {:pct, pct}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -1700,6 +1701,7 @@ defmodule Browser.Style do
     cond do
       px = length(v, env) -> {:ok, max(px, 0.0)}
       pct = percentage(v) -> {:ok, {:pct, max(pct, 0.0)}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -1843,6 +1845,7 @@ defmodule Browser.Style do
     cond do
       px && px >= 0 -> {:ok, px}
       pct = percentage(v) -> if pct >= 0, do: {:ok, {:pct, pct}}, else: :skip
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -2041,6 +2044,16 @@ defmodule Browser.Style do
     case Browser.Calc.eval(v, &unit_px(&1, env)) do
       {:ok, {:px, n}} -> n
       {:ok, {:num, n}} when n == 0 -> 0.0
+      _ -> nil
+    end
+  end
+
+  # `calc(10% + 100px)`: a length and a share of the containing block's width
+  defp mixed_calc(v, env) do
+    with true <- Browser.Calc.math?(v),
+         {:ok, {:calc, _, _} = mixed} <- Browser.Calc.eval(v, &unit_px(&1, env)) do
+      mixed
+    else
       _ -> nil
     end
   end
