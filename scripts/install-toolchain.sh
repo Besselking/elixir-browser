@@ -96,10 +96,13 @@ Linux)
       sed -i -E '/wxSTC_VISUALPROLOG_(STRING_VERBATIM_EOL|STRING_VERBATIM_SPECIAL|STRING_VERBATIM|STRING_EOL_OPEN|CHARACTER_ESCAPE_ERROR|CHARACTER_TOO_MANY|CHARACTER)[,"]/d; /wxSTC_CSS_MEDIA"/d; s/rt\.make_int\((wxPreviewFrame_[A-Za-z]+)\)/rt.make_int(static_cast<int>(\1))/' \
         lib/wx/c_src/gen/wxe_init.cpp
       # the release tarball has dependency files with a build path of OTP's own CI
-      grep -rl "/buildroot/otp" --include=deps.mk lib erts | xargs -r sed -i "s#/buildroot/otp#$ERL_TOP#g"
+      # (the tarball has none of them in some releases: grep then finds nothing, which must not stop the script)
+      { grep -rl "/buildroot/otp" --include=deps.mk lib erts || true; } | xargs -r sed -i "s#/buildroot/otp#$ERL_TOP#g"
+      # an OTP installed from an earlier run goes first: the build finds its libraries (include_lib
+      # dependencies) and then fails in `make install` when they are removed
+      $sudo rm -rf "$PREFIX/otp"
       ./configure --prefix="$PREFIX/otp" --without-javac --without-odbc --without-jinterface --without-megaco
       make -j"$(nproc)"
-      $sudo rm -rf "$PREFIX/otp"
       $sudo make install
     )
   fi
