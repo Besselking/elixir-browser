@@ -53,60 +53,109 @@ defmodule Browser.JS.GC do
   @doc "Frees every heap entry not reachable from the process dictionary; returns how many."
   def collect do
     # (the heap's objects are the process dictionary entries under integer keys)
-    {heap, roots} =
-      Enum.reduce(Process.get(), {%{}, []}, fn
-        {k, v}, {heap, roots} when is_integer(k) -> {Map.put(heap, k, v), roots}
-        {{:js_hoist, _}, _}, acc -> acc
-        {:js_memo, _}, acc -> acc
-        {:js_heap_n, _}, acc -> acc
-        {_, v}, {heap, roots} -> {heap, [v | roots]}
-      end)
+    {ids, roots} =
+      :lists.foldl(
+        fn
+          {k, _}, {ids, roots} when is_integer(k) -> {[k | ids], roots}
+          {{:js_hoist, _}, _}, acc -> acc
+          {:js_memo, _}, acc -> acc
+          {:js_heap_n, _}, acc -> acc
+          {_, v}, {ids, roots} -> {ids, [v | roots]}
+        end,
+        {[], []},
+        Process.get()
+      )
 
-    live = mark(roots, heap, %{})
-    freed = map_size(heap) - map_size(live)
-    for {id, _} <- heap, not is_map_key(live, id), do: Process.delete(id)
-    Process.put(:js_heap_n, map_size(live))
-    Process.put(:js_gc_at, max(@min_collect, 2 * map_size(live)))
-    freed
-  end
+    # (the marks live in a table of their own: no garbage for the process's collector to sweep)
+    marks = :ets.new(:js_marks, [:set, :private])
 
-  defp mark([], _heap, live), do: live
+    try do
+      mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
+      live = :ets.info(marks, :size)
 
-  defp mark([t | rest], heap, live) when is_integer(t) do
-    case heap do
-      %{^t => obj} when not is_map_key(live, t) ->
-        mark([obj | rest], heap, Map.put(live, t, true))
+      freed =
+        :lists.foldl(
+          fn id, n ->
+            if :ets.member(marks, id) do
+              n
+            else
+              :erlang.erase(id)
+              n + 1
+            end
+          end,
+          0,
+          ids
+        )
 
-      _ ->
-        mark(rest, heap, live)
+      Process.put(:js_heap_n, live)
+      Process.put(:js_gc_at, max(@min_collect, 2 * live))
+      freed
+    after
+      :ets.delete(marks)
     end
   end
 
-  defp mark([%{params: _, body: _} = closure | rest], heap, live),
-    do: mark([Map.get(closure, :scope), Map.get(closure, :home) | rest], heap, live)
+  # `stack` holds what is still to be looked at: only terms that can lead to heap entries
+  defp mark([], _marks), do: :ok
 
-  defp mark([t | rest], heap, live) when is_tuple(t),
-    do: mark(Tuple.to_list(t) ++ rest, heap, live)
+  defp mark([t | rest], marks) when is_tuple(t),
+    do: mark(push_tuple(t, tuple_size(t), rest, marks), marks)
 
-  defp mark([[h | t] | rest], heap, live), do: mark([h, t | rest], heap, live)
+  defp mark([[] | rest], marks), do: mark(rest, marks)
+  defp mark([[_ | _] = l | rest], marks), do: mark(push_list(l, rest, marks), marks)
 
-  defp mark([t | rest], heap, live) when is_map(t) do
+  defp mark([%{params: _, body: _} = closure | rest], marks) do
+    stack = push(Map.get(closure, :scope), rest, marks)
+    mark(push(Map.get(closure, :home), stack, marks), marks)
+  end
+
+  defp mark([t | rest], marks) when is_map(t) do
     # integer keys are array indices: skip them, not references
-    items =
-      Enum.flat_map(:maps.to_list(t), fn
-        {k, v} when is_integer(k) -> [v]
-        {k, v} -> [k, v]
-      end)
+    stack =
+      :maps.fold(
+        fn
+          k, v, acc when is_integer(k) -> push(v, acc, marks)
+          k, v, acc -> push(v, push(k, acc, marks), marks)
+        end,
+        rest,
+        t
+      )
 
-    mark(items ++ rest, heap, live)
+    mark(stack, marks)
   end
 
-  defp mark([t | rest], heap, live) when is_function(t) do
+  defp mark([t | rest], marks) when is_function(t) do
     case :erlang.fun_info(t, :env) do
-      {:env, env} -> mark(env ++ rest, heap, live)
-      _ -> mark(rest, heap, live)
+      {:env, env} -> mark(push_list(env, rest, marks), marks)
+      _ -> mark(rest, marks)
     end
   end
 
-  defp mark([_ | rest], heap, live), do: mark(rest, heap, live)
+  defp mark([_ | rest], marks), do: mark(rest, marks)
+
+  defp push_tuple(_t, 0, stack, _marks), do: stack
+
+  defp push_tuple(t, n, stack, marks),
+    do: push_tuple(t, n - 1, push(elem(t, n - 1), stack, marks), marks)
+
+  defp push_list([h | t], stack, marks) when is_list(t),
+    do: push_list(t, push(h, stack, marks), marks)
+
+  defp push_list([h | t], stack, marks), do: push(t, push(h, stack, marks), marks)
+  defp push_list(_, stack, _marks), do: stack
+
+  # a heap id is marked when it is first reached, and its entry is looked at then
+  defp push(t, stack, marks) when is_integer(t) do
+    case :erlang.get(t) do
+      :undefined -> stack
+      obj -> if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+    end
+  end
+
+  defp push([], stack, _marks), do: stack
+
+  defp push(t, stack, _marks) when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
+    do: [t | stack]
+
+  defp push(_, stack, _marks), do: stack
 end
