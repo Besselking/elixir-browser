@@ -1,7 +1,7 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
-  alias Browser.{Cookies, HttpCache}
+  alias Browser.{Cookies, HttpCache, Proxy}
 
   @max_redirects 8
 
@@ -224,20 +224,25 @@ defmodule Browser.Fetch do
 
     request = build_request(url, method, body, headers, ctx)
 
-    http_opts = [
-      autoredirect: false,
-      timeout: 15_000,
-      ssl: [
-        verify: :verify_peer,
-        cacerts: :public_key.cacerts_get(),
-        customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
-      ]
-    ]
+    {profile, proxy_opts} = Proxy.route(url)
+
+    http_opts =
+      [
+        autoredirect: false,
+        timeout: 15_000,
+        ssl: [
+          verify: :verify_peer,
+          cacerts: Proxy.cacerts(),
+          customize_hostname_check: [
+            match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+          ]
+        ]
+      ] ++ proxy_opts
 
     result =
       if method == :get and ctx.on_chunk,
-        do: stream_get(request, http_opts, url, ctx.on_chunk),
-        else: :httpc.request(method, request, http_opts, body_format: :binary)
+        do: stream_get(request, http_opts, url, ctx.on_chunk, profile),
+        else: :httpc.request(method, request, http_opts, [body_format: :binary], profile)
 
     with true <- cookies?, {:ok, {_, resp_headers, _}} <- result do
       store_cookies(url, resp_headers, cookie_opts)
@@ -393,18 +398,20 @@ defmodule Browser.Fetch do
   # A GET answered in pieces: each is handed to `on_chunk` (gunzipped on the side) while the
   # raw body is collected, so the result looks like a plain `:httpc.request` reply.
   # Anything but a 200 is not streamed by httpc and arrives whole.
-  defp stream_get(request, http_opts, url, on_chunk) do
-    case :httpc.request(:get, request, http_opts,
-           sync: false,
-           stream: :self,
-           body_format: :binary
+  defp stream_get(request, http_opts, url, on_chunk, profile) do
+    case :httpc.request(
+           :get,
+           request,
+           http_opts,
+           [sync: false, stream: :self, body_format: :binary],
+           profile
          ) do
-      {:ok, ref} -> stream_loop(ref, url, on_chunk, nil, [], nil)
+      {:ok, ref} -> stream_loop(ref, url, on_chunk, profile, nil, [], nil)
       {:error, _} = err -> err
     end
   end
 
-  defp stream_loop(ref, url, on_chunk, z, acc, headers) do
+  defp stream_loop(ref, url, on_chunk, profile, z, acc, headers) do
     receive do
       {:http, {^ref, :stream_start, hs}} ->
         z =
@@ -418,11 +425,11 @@ defmodule Browser.Fetch do
               nil
           end
 
-        stream_loop(ref, url, on_chunk, z, acc, hs)
+        stream_loop(ref, url, on_chunk, profile, z, acc, hs)
 
       {:http, {^ref, :stream, chunk}} ->
         notify(on_chunk, z, chunk, url)
-        stream_loop(ref, url, on_chunk, z, [acc | chunk], headers)
+        stream_loop(ref, url, on_chunk, profile, z, [acc | chunk], headers)
 
       {:http, {^ref, :stream_end, hs}} ->
         z && :zlib.close(z)
@@ -436,7 +443,7 @@ defmodule Browser.Fetch do
         {:ok, whole}
     after
       20_000 ->
-        :httpc.cancel_request(ref)
+        :httpc.cancel_request(ref, profile)
         z && :zlib.close(z)
         {:error, :timeout}
     end
