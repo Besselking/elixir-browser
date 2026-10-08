@@ -3723,7 +3723,6 @@ css/css-flexbox/auto-margins-002.html
 css/css-flexbox/balance/balance-004.html
 css/css-flexbox/balance/balance-min-line-count-007.html
 css/css-flexbox/balance/balance-min-line-count-008.html
-css/css-flexbox/balance/balance-percentage-size-002.html
 css/css-flexbox/baseline-outside-flex-item.html
 css/css-flexbox/break-nested-float-in-flex-item-001-print.html
 css/css-flexbox/break-nested-float-in-flex-item-002-print.html
@@ -4624,6 +4623,8 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-019.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-020.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-021.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-031.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-032.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-033.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-034.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-035.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-036.html
@@ -4634,6 +4635,7 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-043.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-044.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-045.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-046.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-047.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-048.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-050.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-051.html

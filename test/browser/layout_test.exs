@@ -6873,4 +6873,25 @@ defmodule Browser.LayoutTest do
       assert x.x == 0
     end
   end
+
+  describe "flex items with an aspect ratio" do
+    test "a percentage height of a row container with a height and the ratio give the width" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;width:0;height:100px"><div style="background:green;aspect-ratio:1;height:100%"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.w, box.h} == {100, 100}
+    end
+
+    test "a child with a percentage height fills a ratio-sized item" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;flex-direction:column;width:100px"><div style="aspect-ratio:1;background:red"><div style="height:100%;background:green"></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.any?(items, &(&1.type == :rect and &1.color == {0, 128, 0} and &1.h == 100))
+    end
+  end
 end

@@ -4146,7 +4146,9 @@ defmodule Browser.Layout do
       | open: Map.put(st.open, ref, box),
         blocks: [id | st.blocks],
         cbh:
-          if(st.flex_item and st.blocks == [] and not Map.get(o, :definite, false),
+          if(
+            st.flex_item and st.blocks == [] and not Map.get(o, :definite, false) and
+              not (o.ratio != nil and o.h == nil),
             do: nil,
             else: content_height(o) || ratio_content_height(o, box_w)
           ),
@@ -7088,6 +7090,7 @@ defmodule Browser.Layout do
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
+      chp: pct_of(c["height"]),
       collapsed: collapsed?,
       minh: num(c["min-height"]),
       scroll?: c["overflow-x"] in ~w(hidden scroll auto),
@@ -7114,6 +7117,11 @@ defmodule Browser.Layout do
   # the height a flex item has for its aspect ratio: its own, or the cross size of a row
   # container with a height that stretches it
   defp ratio_item_height(%{ch: ch}, _cs) when is_number(ch), do: ch
+
+  # (a percentage of a container height that is known)
+  defp ratio_item_height(%{chp: f, ratio: ratio}, %{height: h})
+       when ratio != nil and is_number(f) and is_number(h),
+       do: f * h
 
   defp ratio_item_height(%{ratio: ratio, align: own} = it, %{height: h, dir: dir} = cs)
        when ratio != nil and is_number(h) and dir in [:row, :row_reverse] do
