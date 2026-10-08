@@ -6372,6 +6372,15 @@ defmodule Browser.Layout do
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     line = flex_resize(st, line, free, avail)
+
+    # an explicit flex-basis below the automatic minimum is raised to it
+    line =
+      Enum.map(line, fn it ->
+        if it.basis != nil and flex_auto_min?(it) and it.hw < flex_min(st, it, avail),
+          do: %{it | hw: flex_min(st, it, avail)},
+          else: it
+      end)
+
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
 
     # auto margins take the free space before justify-content does
@@ -6505,7 +6514,7 @@ defmodule Browser.Layout do
     content = if is_number(it.maxw), do: min(content, it.maxw + it.extra * 1.0), else: content
 
     case it.width do
-      width when width != nil and it.basis == nil ->
+      width when width != nil ->
         min(content, resolve(width, avail) + it.extra * 1.0)
 
       _ ->

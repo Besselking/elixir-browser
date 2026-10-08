@@ -5337,6 +5337,14 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 55, 20}, {0, 30, 55, 20}, {65, 0, 35, 20}]
     end
 
+    test "flex: 0 0 does not take an item below its automatic minimum width" do
+      html = """
+      <div style="display:flex;width:200px"><div style="flex:0 0;width:50px;background:red"><div style="width:30px;height:5px"></div></div></div>
+      """
+
+      assert [{0, 0, 30, 5}] = flex_rects(html)
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
