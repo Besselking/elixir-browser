@@ -520,6 +520,9 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp statement([{:id, "let", mark} | _] = all) when mark in [:esc, :esc_nl],
+    do: expression_statement(all)
+
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
       [{:id, name, _} | _] when name not in ["in", "instanceof"] -> let_decl(ts)
@@ -812,6 +815,19 @@ defmodule Browser.JS.Parser do
        ]) do
     {spec, ts} = with_spec(spec, ts)
     {{:import, spec, [{:defer_ns, local}]}, semi(ts)}
+  end
+
+  # `import source x from "m"`: a module has no source phase representation here, so the
+  # loader refuses the request (`source` and `from` can be the binding)
+  defp module_item([
+         {:id, "import", _},
+         {:id, "source", _},
+         {:id, _, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]) do
+    {_spec, ts} = with_spec(spec, ts)
+    {{:import, {spec, :unsupported}, []}, semi(ts)}
   end
 
   defp module_item([{:id, "import", _}, {:str, spec, _} | ts]) do

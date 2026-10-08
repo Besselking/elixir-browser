@@ -1723,4 +1723,12 @@ defmodule Browser.JSTest do
 
     assert js(src) == "false,true,1"
   end
+
+  test "a global let hides a built-in without removing the property of the global object" do
+    assert js("let Array; typeof this.Array + typeof Array") == "functionundefined"
+  end
+
+  test "an escaped let followed by a name on the next line is an expression statement" do
+    assert js("var l\\u0065t = 1; l\\u0065t\nvar a = 2; a + let") == 3.0
+  end
 end

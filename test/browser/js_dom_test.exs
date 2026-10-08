@@ -558,6 +558,28 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["TypeError false"]
     end
 
+    test "an import with the source phase is refused when its module is loaded" do
+      {_, r} =
+        start(
+          """
+          <body><script type=module>
+          let name = "none";
+          try { await import("/src.js") } catch (e) { name = e.constructor.name }
+          console.log(name);
+          </script></body>
+          """,
+          %{
+            "http://t.test/src.js" => ~S"""
+            import source s from "/missing.js";
+            export const x = 1;
+            """
+          }
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["TypeError"]
+    end
+
     test "an import map redirects specifiers" do
       {_, r} =
         start(

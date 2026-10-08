@@ -195,8 +195,15 @@ defmodule Browser.JS.Lexer do
     if name == "await" and kind == :id and escaped?(s, rest),
       do: Process.put(:lex_esc_await, true)
 
+    # an escaped `let` never starts a declaration: its mark says so
+    nl = if name == "let" and kind == :id and escaped?(s, rest), do: esc_mark(nl), else: nl
+
     push({kind, name, nl}, byte_size(s), rest, acc)
   end
+
+  defp esc_mark(true), do: :esc_nl
+  defp esc_mark(false), do: :esc
+  defp esc_mark(other), do: other
 
   defp punct(s, nl, acc) do
     first = if s == "", do: nil, else: :binary.first(s)

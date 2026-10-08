@@ -171,7 +171,7 @@ defmodule Browser.JS.Modules do
       case fetch.(path) do
         {:ok, src, base} when type == nil -> parse_new(key, base, src)
         {:ok, src, base} -> typed_new(key, base, type, src)
-        {:error, msg} -> Interp.throw_error("TypeError", "Failed to fetch module #{key}: #{msg}")
+        {:error, msg} -> Interp.throw_error("TypeError", "Failed to fetch module #{path}: #{msg}")
       end
     end
 
@@ -447,8 +447,16 @@ defmodule Browser.JS.Modules do
     r = rec(key)
 
     cond do
-      key in seen or r.status == :evaluated ->
+      key in seen ->
         {[], seen}
+
+      # a module evaluated with the rest of its cycle waits for the root of that cycle
+      r.status == :evaluated ->
+        root = r.cycle_root || key
+
+        if root != key and rec(root).status == :evaluating_async,
+          do: {[root], [key | seen]},
+          else: {[], [key | seen]}
 
       r.tla ->
         {[key], [key | seen]}
@@ -601,8 +609,8 @@ defmodule Browser.JS.Modules do
   defp async_rejected(key, e) do
     if rec(key).status != :evaluated do
       set(key, eval_error: {:error, e}, status: :evaluated, async_eval: false)
-      for m <- rec(key).parents, do: async_rejected(m, e)
       if cap = rec(key).cap, do: Promise.reject(cap, e)
+      for m <- rec(key).parents, do: async_rejected(m, e)
     end
   end
 
@@ -804,9 +812,7 @@ defmodule Browser.JS.Modules do
         false
 
       true ->
-        Enum.all?(r.requests, fn spec ->
-          spec in r.deferred_only or ready?(r.deps[spec], [key | seen])
-        end)
+        Enum.all?(r.requests, fn spec -> ready?(r.deps[spec], [key | seen]) end)
     end
   end
 
