@@ -891,6 +891,11 @@ defmodule Browser.Layout do
           end
         )
 
+      # a `calc()` with a percentage is of the containing block of this box, not of the box
+      # it was written in: it stays unresolved until the box is placed
+      raw = attrs |> List.keyfind("@computed", 0) |> elem(1)
+      calc = fn key -> match?({:calc, _, _}, raw[key]) && raw[key] end
+
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
       el = {:element, tag, attrs, kids}
 
@@ -910,10 +915,10 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: if(replaced?, do: nil, else: dim(c["width"])),
+        width: if(replaced?, do: nil, else: calc.("width") || dim(c["width"])),
         replaced: replaced?,
-        minw: if(replaced?, do: nil, else: c["min-width"]),
-        maxw: if(replaced?, do: nil, else: c["max-width"]),
+        minw: if(replaced?, do: nil, else: calc.("min-width") || c["min-width"]),
+        maxw: if(replaced?, do: nil, else: calc.("max-width") || c["max-width"]),
         ml: box.ml,
         mr: box.mr,
         rtl: parent_style.cb,
@@ -4451,6 +4456,7 @@ defmodule Browser.Layout do
   defp resolve(nil, _base), do: nil
 
   defp resolve({:pct, f}, base), do: round(f * base)
+  defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 
   defp resolve(n, _base) when is_number(n), do: round(n)
 

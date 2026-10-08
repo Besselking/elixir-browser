@@ -265,6 +265,19 @@ defmodule Browser.LayoutTest do
       assert word(items, "imp").color == {0, 0, 255}
     end
 
+    test "a calc() width with a percentage on an absolute box is of its containing block" do
+      html =
+        ~s|<style>a{position:relative;display:inline-block} a:after{content:"";position:absolute;| <>
+          ~s|left:0;top:0;height:5px;background:#f00;width:calc(100% - 4px)}</style>| <>
+          ~s|<div style="width:500px"><a>link text</a></div>|
+
+      {items, _} = styled(html)
+      bar = Enum.find(items, &(&1.type == :rect and &1.h == 5))
+      text_w = word(items, "text").x + word(items, "text").w - word(items, "link").x
+      # as wide as the link less 4px, not as wide as the 500px block around it
+      assert bar.w == text_w - 4
+    end
+
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
         styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
