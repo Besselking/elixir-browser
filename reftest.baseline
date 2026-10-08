@@ -4308,6 +4308,8 @@ css/css-multicol/multicol-columns-004.xht
 css/css-multicol/multicol-columns-005.xht
 css/css-multicol/multicol-columns-006.xht
 css/css-multicol/multicol-columns-007.xht
+css/css-multicol/multicol-columns-invalid-001.xht
+css/css-multicol/multicol-columns-invalid-002.xht
 css/css-multicol/multicol-columns-toolong-001.xht
 css/css-multicol/multicol-contained-absolute.html
 css/css-multicol/multicol-containing-002.xht
@@ -4317,6 +4319,11 @@ css/css-multicol/multicol-count-002.xht
 css/css-multicol/multicol-count-computed-003.xht
 css/css-multicol/multicol-count-computed-004.xht
 css/css-multicol/multicol-count-computed-005.xht
+css/css-multicol/multicol-count-negative-001.xht
+css/css-multicol/multicol-count-negative-002.xht
+css/css-multicol/multicol-count-non-integer-001.xht
+css/css-multicol/multicol-count-non-integer-002.xht
+css/css-multicol/multicol-count-non-integer-003.xht
 css/css-multicol/multicol-fill-000.xht
 css/css-multicol/multicol-fill-001.xht
 css/css-multicol/multicol-fill-auto-001.xht

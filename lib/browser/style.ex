@@ -443,11 +443,27 @@ defmodule Browser.Style do
 
   # `columns: <width> || <count>`, in either order, either of them `auto`
   defp expand({"columns", value, imp}) do
-    for t <- tokens(String.trim(value)), t != "auto" do
-      if Regex.match?(~r/\A\d+\z/, t),
-        do: {"column-count", t, imp},
-        else: {"column-width", t, imp}
+    toks = tokens(String.trim(value))
+
+    # (a declaration with a part that is no count or width is dropped as a whole)
+    if length(toks) in 1..2 and Enum.all?(toks, &valid_column_token?/1) do
+      for t <- toks, t != "auto" do
+        if Regex.match?(~r/\A\d+\z/, t),
+          do: {"column-count", t, imp},
+          else: {"column-width", t, imp}
+      end
+    else
+      []
     end
+  end
+
+  # an invalid `column-count` is dropped when the stylesheet is read, so an earlier one stays
+  defp expand({"column-count", value, _imp} = decl) do
+    v = String.trim(value)
+
+    if v == "auto" or Regex.match?(~r/\A\+?0*[1-9]\d*\z/, v) or not simple_value?(v),
+      do: [decl],
+      else: []
   end
 
   defp expand({"gap", value, imp}) do
@@ -502,6 +518,15 @@ defmodule Browser.Style do
   end
 
   defp expand(decl), do: [decl]
+
+  defp valid_column_token?(t),
+    do:
+      t == "auto" or Regex.match?(~r/\A\+?\d+\z/, t) or Regex.match?(~r/\A\+?[\d.]+[a-z]+\z/i, t) or
+        not simple_value?(t)
+
+  # false for values the reader cannot judge: `var()`, `calc()` and the like
+  defp simple_value?(v),
+    do: not String.contains?(v, "(") and v not in ~w(inherit initial unset revert)
 
   @keywords ~w(inherit initial unset revert)
 

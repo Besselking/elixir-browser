@@ -4582,6 +4582,20 @@ defmodule Browser.LayoutTest do
       assert length(xs) == 3
     end
 
+    test "an invalid column-count or columns leaves the earlier declaration in force" do
+      for bad <- ["column-count: -1", "column-count: 2.1", "columns: 8 normal"] do
+        items = columns("column-count: 3; column-gap: 10px; " <> bad, 6, 400)
+
+        xs =
+          items
+          |> Enum.filter(&String.starts_with?(&1[:text] || "", "item"))
+          |> Enum.map(& &1.x)
+          |> Enum.uniq()
+
+        assert length(xs) == 3, bad
+      end
+    end
+
     test "a column width that does not fit twice leaves one column" do
       items = columns("columns: 2 300px", 4, 400)
       assert col_at(items, "item1").x == col_at(items, "item4").x
@@ -6192,7 +6206,8 @@ defmodule Browser.LayoutTest do
       html =
         ~s|<div style="display:flex;align-items:baseline;font-family:Ahem"><div style="font-size:10px;line-height:10px">a</div><div style="font-size:30px;line-height:30px">b</div></div>|
 
-      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + h
+      # (the baseline of Ahem is 0.8em down)
+      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + round(h * 0.8)
       assert [same] = Enum.uniq(bottoms)
       assert is_integer(same)
     end
