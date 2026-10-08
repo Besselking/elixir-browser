@@ -787,7 +787,18 @@
       startTx(tx);
     }
   }
+  // A transaction that can write waits for its turn among the transactions of all pages of the
+  // origin; one that only reads sees what was committed when it starts.
+  var lockWait = {};
   function startTx(tx) {
+    var s = S(tx);
+    if (s.mode !== "readonly") {
+      s.lockId = nextOp++;
+      if (!g.__idb_lock(s.name, s.lockId)) { lockWait[s.lockId] = tx; return; }
+    }
+    beginTx(tx);
+  }
+  function beginTx(tx) {
     var s = S(tx);
     s.data = freshData(s.name);
     task(function () { runNext(tx); });
@@ -926,6 +937,7 @@
     if (at >= 0) cs.txs.splice(at, 1);
     var r = runner(s.name);
     if (r.cur === tx) r.cur = null;
+    if (s.lockId) { delete lockWait[s.lockId]; g.__idb_unlock(s.name, s.lockId); s.lockId = 0; }
     if (s.onfinish) s.onfinish(ok);
     if (cs.closePending && cs.txs.length === 0) finalClose(s.conn);
     drain(s.name);
@@ -1781,7 +1793,10 @@
 
   // a message from the store: another page (or this one) wants to change a database
   function onMessage(kind, a, b, c, d) {
-    if (kind === "ready") {
+    if (kind === "locked") {
+      var lt = lockWait[a];
+      if (lt) { delete lockWait[a]; beginTx(lt); }
+    } else if (kind === "ready") {
       var op = pendingOps[a];
       if (op && !op.proceeded) proceed(op);
     } else if (kind === "blocked") {

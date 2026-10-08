@@ -71,6 +71,18 @@ defmodule Browser.IndexedDB do
   def finish(origin, name, token, conn, server \\ __MODULE__),
     do: GenServer.call(server, {:finish, origin, name, token, conn, self()})
 
+  @doc """
+  Asks for the write lock of a database, for a transaction that can change it (`id` is the page's
+  own number). `:granted` means go on; `:wait` means the store sends `{:idb, :locked, id}` when it
+  is the turn of the page. Transactions of all pages of the origin run one after the other.
+  """
+  def lock(origin, name, id, server \\ __MODULE__),
+    do: GenServer.call(server, {:lock, origin, name, id, self()})
+
+  @doc "The transaction of `lock/4` with `id` is over (or does not need the lock any more)."
+  def unlock(origin, name, id, server \\ __MODULE__),
+    do: GenServer.call(server, {:unlock, origin, name, id, self()})
+
   @doc "The connection `conn` of this page is closed."
   def close(origin, name, conn, server \\ __MODULE__),
     do: GenServer.call(server, {:close, origin, name, conn, self()})
@@ -126,7 +138,9 @@ defmodule Browser.IndexedDB do
       bytes: 0,
       rev: rev,
       conns: [],
-      ops: []
+      ops: [],
+      lock: nil,
+      lock_queue: []
     }
 
   @impl true
@@ -231,6 +245,28 @@ defmodule Browser.IndexedDB do
     end
   end
 
+  def handle_call({:lock, origin, name, id, pid}, _from, s) do
+    key = {origin, name}
+    s = monitor(s, pid)
+    db = s.dbs[key] || new_db(0, nil, 0)
+
+    if db.lock == nil do
+      {:reply, :granted, %{s | dbs: Map.put(s.dbs, key, %{db | lock: {pid, id}})}}
+    else
+      db = %{db | lock_queue: db.lock_queue ++ [{pid, id}]}
+      {:reply, :wait, %{s | dbs: Map.put(s.dbs, key, db)}}
+    end
+  end
+
+  def handle_call({:unlock, origin, name, id, pid}, _from, s) do
+    key = {origin, name}
+
+    case s.dbs[key] do
+      nil -> {:reply, :ok, s}
+      db -> {:reply, :ok, %{s | dbs: Map.put(s.dbs, key, release(db, {pid, id}))}}
+    end
+  end
+
   def handle_call(:flush, _from, s), do: {:reply, :ok, save(s)}
 
   def handle_call({:settled, origin, name, token, pid}, _from, s) do
@@ -256,11 +292,14 @@ defmodule Browser.IndexedDB do
     dbs =
       for {key, db} <- s.dbs, into: %{} do
         {key,
-         %{
-           db
-           | conns: Enum.reject(db.conns, fn {p, _} -> p == pid end),
-             ops: Enum.reject(db.ops, &(&1.pid == pid))
-         }}
+         drop_locks(
+           %{
+             db
+             | conns: Enum.reject(db.conns, fn {p, _} -> p == pid end),
+               ops: Enum.reject(db.ops, &(&1.pid == pid))
+           },
+           pid
+         )}
       end
 
     s = %{s | dbs: dbs}
@@ -271,6 +310,29 @@ defmodule Browser.IndexedDB do
 
   @impl true
   def terminate(_reason, s), do: save(s)
+
+  # takes `holder` out of the lock or of the queue; the next page in the queue gets the lock
+  defp release(db, holder) do
+    if db.lock == holder,
+      do: next_lock(%{db | lock: nil}),
+      else: %{db | lock_queue: List.delete(db.lock_queue, holder)}
+  end
+
+  defp next_lock(%{lock: nil, lock_queue: [{pid, id} = next | rest]} = db) do
+    send(pid, {:idb, :locked, id})
+    %{db | lock: next, lock_queue: rest}
+  end
+
+  defp next_lock(db), do: db
+
+  defp drop_locks(db, pid) do
+    db = %{db | lock_queue: Enum.reject(db.lock_queue, fn {p, _} -> p == pid end)}
+
+    case db.lock do
+      {^pid, _} -> next_lock(%{db | lock: nil})
+      _ -> db
+    end
+  end
 
   defp monitor(s, pid) do
     if Map.has_key?(s.monitors, pid),

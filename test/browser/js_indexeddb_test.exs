@@ -948,6 +948,42 @@ defmodule Browser.JS.IndexedDBTest do
              ]
     end
 
+    test "read-modify-write transactions of two pages do not lose updates" do
+      origin = origin()
+
+      script = fn tag ->
+        @helpers <>
+          """
+          (async function () {
+            var db = await open("counter", 1, function (db) { db.createObjectStore("s"); });
+            for (var i = 0; i < 15; i++) {
+              var tx = db.transaction("s", "readwrite");
+              var s = tx.objectStore("s");
+              var cur = await p(s.get("n"));
+              s.put((cur || 0) + 1, "n");
+              await txDone(tx);
+            }
+            log("#{tag} done", await p(db.transaction("s").objectStore("s").get("n")) >= 15);
+          })().catch(fail);
+          """
+      end
+
+      {a, fa} = start(origin, script.("a"))
+      {b, fb} = start(origin, script.("b"))
+      all = settle([{a, fa}, {b, fb}], 60)
+      assert {:log, "a done true"} in all
+      assert {:log, "b done true"} in all
+
+      {c, fc} =
+        start(
+          origin,
+          @helpers <>
+            "(async function () { var db = await open(\"counter\", 1); log(\"total\", await p(db.transaction(\"s\").objectStore(\"s\").get(\"n\"))); })().catch(fail);"
+        )
+
+      assert {:log, "total 30"} in finish(c, fc)
+    end
+
     test "databases are kept per origin" do
       a = origin()
       b = origin()

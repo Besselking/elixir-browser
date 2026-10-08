@@ -47,7 +47,7 @@ TLS checks stay on. If a proxy signs TLS with its own CA, put the CA file in
 
 ## IndexedDB
 
-Pages can use `indexedDB`. Each origin has its own databases. The browser keeps them in memory and writes them to the folder `indexed_db` in the user data directory, one file for each database. A transaction sends only what it changed (the records it put or deleted, and the indexes it touched), not the whole database. When two pages of the same origin write to one database, the last writer wins.
+Pages can use `indexedDB`. Each origin has its own databases. The browser keeps them in memory and writes them to the folder `indexed_db` in the user data directory, one file for each database. A transaction sends only what it changed (the records it put or deleted, and the indexes it touched), not the whole database. Transactions that can write run one after the other, also across the pages (tabs) of one origin, so no update is lost. A page that only reads sees what was committed when its transaction starts.
 
 Data in a database can be of any type that `structuredClone` supports, including `Blob` and `File`. The size limit of one database is 256 MB.
 

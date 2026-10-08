@@ -81,6 +81,16 @@ defmodule Browser.JS.IndexedDB do
       Interp.new_array([token * 1.0, state == :ready])
     end)
 
+    # (name, id) -> true when the lock is granted now; else a "locked" message comes later
+    def_fn(scope, "__idb_lock", fn [name, id | _] ->
+      Browser.IndexedDB.lock(origin(), name, trunc(id)) == :granted
+    end)
+
+    def_fn(scope, "__idb_unlock", fn [name, id | _] ->
+      Browser.IndexedDB.unlock(origin(), name, trunc(id))
+      :undefined
+    end)
+
     def_fn(scope, "__idb_settled", fn [name, token | _] ->
       Browser.IndexedDB.settled(origin(), name, trunc(token))
       :undefined
