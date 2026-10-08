@@ -19,8 +19,29 @@ defmodule Browser.JS.WebAssembly do
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp heap(id), do: Interp.deref(id)
 
-  @doc "Declares `WebAssembly` in the global scope."
+  @doc """
+  Declares `WebAssembly` in the global scope. Building it takes a few milliseconds, so the
+  global is an accessor that does it on the first use and then turns itself into a value.
+  """
   def install(scope) do
+    getter = native("get WebAssembly", fn _, _ -> build(scope) end)
+
+    {:ok, {:program, [{:expr, expr}]}} =
+      Parser.parse("""
+      (function (get) {
+        Object.defineProperty(globalThis, 'WebAssembly', {
+          get: get,
+          set: function (v) { Object.defineProperty(globalThis, 'WebAssembly', { value: v, writable: true, configurable: true }); },
+          configurable: true
+        });
+      })
+      """)
+
+    call(Interp.ev(expr, scope), :undefined, [getter])
+    :ok
+  end
+
+  defp build(scope) do
     w = new_object()
 
     for {name, arity, fun} <- natives() do
@@ -30,15 +51,9 @@ defmodule Browser.JS.WebAssembly do
     end
 
     case program() do
-      {:ok, ast} ->
-        factory = Interp.ev(ast, scope)
-        call(factory, :undefined, [w])
-
-      {:error, msg} ->
-        throw({:syntax, "webassembly: " <> msg})
+      {:ok, ast} -> call(Interp.ev(ast, scope), :undefined, [w])
+      {:error, msg} -> throw({:syntax, "webassembly: " <> msg})
     end
-
-    :ok
   end
 
   defp program do

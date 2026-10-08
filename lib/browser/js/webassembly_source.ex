@@ -229,6 +229,7 @@ defmodule Browser.JS.WebAssemblySource do
     }
     Object.defineProperty(WebAssembly, Symbol.toStringTag, { value: 'WebAssembly', configurable: true });
     Object.defineProperty(g, 'WebAssembly', { value: WebAssembly, writable: true, configurable: true, enumerable: false });
+    return WebAssembly;
   }
   """
 
