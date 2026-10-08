@@ -2364,7 +2364,7 @@ defmodule Browser.Layout do
     words =
       case words do
         [{:word, w, st} | more] when leading == [] ->
-          if ideograph_edge?(prev_char(acc), w),
+          if ideograph_edge?(prev_char(acc), w, st.keep_all),
             do: [{:word, w, st} | more],
             else: [{:word, w, st, :glue} | more]
 
@@ -2402,9 +2402,6 @@ defmodule Browser.Layout do
   @no_start "-.,;:!?)]}%\u00B7\u2019\u201D\u2026\u2010\u2013\u3001\u3002\u3005\u3009\u300B\u300D\u300F\u3011\u3015\u3017\u3019\u301C\u30FB\u30FC\u3041\u3043\u3045\u3047\u3049\u3063\u3083\u3085\u3087\u308E\u3095\u3096\u309D\u309E\u30A1\u30A3\u30A5\u30A7\u30A9\u30C3\u30E3\u30E5\u30E7\u30EE\u30F5\u30F6\u30FD\u30FE\uFF01\uFF09\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\uFF3D\uFF5D\uFF5E\uFF60\u200D\u3000"
   @no_end "([{\u2018\u201C\u3008\u300A\u300C\u300E\u3010\u3014\u3016\u3018\uFF08\uFF3B\uFF5B\uFF5F\u200D"
 
-  defp ideograph_breaks({:word, _, %{keep_all: true}} = op, _style), do: op
-  defp ideograph_breaks({:word, _, %{keep_all: true}, _} = op, _style), do: op
-
   defp ideograph_breaks(op, _style) do
     {text, style, glue} =
       case op do
@@ -2416,8 +2413,11 @@ defmodule Browser.Layout do
       text
       |> String.graphemes()
       |> Enum.reduce([], fn
-        g, [] -> [g]
-        g, [cur | done] = acc -> if break_between?(cur, g), do: [g | acc], else: [cur <> g | done]
+        g, [] ->
+          [g]
+
+        g, [cur | done] = acc ->
+          if break_between?(cur, g, style.keep_all), do: [g | acc], else: [cur <> g | done]
       end)
       |> Enum.reverse()
       |> Enum.with_index()
@@ -2440,15 +2440,19 @@ defmodule Browser.Layout do
   defp prev_char(_), do: nil
 
   # whether a line may break between the character before and the start of the next word
-  defp ideograph_edge?(nil, _word), do: false
-  defp ideograph_edge?(_prev, ""), do: false
-  defp ideograph_edge?(prev, word), do: break_between?(prev, String.first(word))
+  defp ideograph_edge?(nil, _word, _keep_all), do: false
+  defp ideograph_edge?(_prev, "", _keep_all), do: false
 
-  defp break_between?(cur, g) do
+  defp ideograph_edge?(prev, word, keep_all),
+    do: break_between?(prev, String.first(word), keep_all)
+
+  defp break_between?(cur, g, keep_all? \\ false) do
     a = String.last(cur)
     a = if String.ends_with?(cur, "\u200D"), do: "\u200D", else: a
 
+    # (`keep-all` leaves only the break after an ideographic space)
     (Regex.match?(@wide_re, a) or Regex.match?(@wide_re, g)) and
+      (not keep_all? or a == "\u3000") and
       not String.contains?(@no_start, g) and not String.contains?(@no_end, a)
   end
 
