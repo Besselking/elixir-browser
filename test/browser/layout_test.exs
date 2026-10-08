@@ -5366,6 +5366,43 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}]
     end
 
+    test "the flex base size ignores max-width, which then freezes the item while shrinking" do
+      html = """
+      <div style="display:flex;width:300px"><div style="min-width:0;max-width:100px;background:red"><div style="width:300px;height:5px"></div></div><div style="min-width:0;background:blue"><div style="width:300px;height:5px"></div></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 5}, {100, 0, 200, 5}]
+    end
+
+    test "a negative flex-shrink is invalid and leaves the initial 1" do
+      html =
+        ~s(<div style="display:flex;width:50px"><div style="width:100px;flex-shrink:-2;min-width:0;height:5px;background:red"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 50, 5}]
+    end
+
+    test "a floated list item is a box with a size of its own" do
+      html =
+        ~s(<ul style="margin:0;padding:0"><li style="float:left;list-style:none;width:30px;height:10px;background:red"></li></ul>)
+
+      assert flex_rects(html) == [{0, 0, 30, 10}]
+    end
+
+    test "align-content: center lets lines overflow evenly on both sides" do
+      html =
+        ~s(<div style="display:flex;flex-wrap:wrap;align-content:center;width:50px;height:20px"><div style="width:50px;height:20px;background:red"></div><div style="width:50px;height:20px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, -10, 50, 20}, {0, 10, 50, 20}]
+    end
+
+    test "a column-reverse container breaks into columns in order, each packed at the bottom" do
+      html = """
+      <div style="display:flex;flex-flow:column-reverse wrap;align-items:flex-start;width:200px;max-height:100px"><div style="width:50px;height:40px;background:red"></div><div style="width:50px;height:80px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 40, 50, 40}, {50, 0, 50, 80}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
