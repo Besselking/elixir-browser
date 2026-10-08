@@ -8409,9 +8409,15 @@ defmodule Browser.Layout do
 
     w =
       cond do
-        it.width != nil -> resolve(it.width, avail) + it.extra
-        align in ["stretch", "normal"] and not it.fit? and not wrapped? -> room
-        true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
+        it.width != nil ->
+          resolve(it.width, avail) + it.extra
+
+        align in ["stretch", "normal"] and not it.fit? and not wrapped? ->
+          room
+
+        true ->
+          max_c = shrink_extent(st, it.sub, @unbounded, it.key)
+          if max_c <= room, do: max_c, else: max(room, min_extent(st, it.sub, it.key))
       end
 
     w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)

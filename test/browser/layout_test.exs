@@ -4481,6 +4481,18 @@ defmodule Browser.LayoutTest do
     assert red.h < 50
   end
 
+  test "a column flex item that is not stretched is no narrower than its longest word" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:flex;flex-direction:column;width:4px"><div style="align-self:flex-start;background:#0f0">start</div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.w > 4
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
