@@ -1083,15 +1083,15 @@ defmodule Browser.Layout do
 
     cond do
       match?({:ok, _, _}, info) ->
-        image_atom(url, info, attrs, c, style, acc)
+        image_atom(url, info, attrs, c, style, acc, %{pstyle: parent_style})
 
       match?({:svg, _, _, _}, info) ->
         {:svg, w, h, scene} = info
         extra = %{scene: scene, intrinsic: {w, h}, paint?: true, current: color4(c["color"])}
-        image_atom(url, nil, attrs, c, style, acc, extra)
+        image_atom(url, nil, attrs, c, style, acc, Map.put(extra, :pstyle, parent_style))
 
       url != nil and info == nil and is_map(images) and declared != nil ->
-        image_atom(url, nil, attrs, c, style, acc)
+        image_atom(url, nil, attrs, c, style, acc, %{pstyle: parent_style})
 
       url != nil and info == nil and is_map(images) ->
         acc
@@ -1207,7 +1207,7 @@ defmodule Browser.Layout do
     image_atom(nil, nil, attrs, c, style, acc, extra)
   end
 
-  defp image_atom(url, info, attrs, c, style, acc, extra \\ %{}) do
+  defp image_atom(url, info, attrs, c, style, acc, extra) do
     tag = Map.get(extra, :tag, "img")
     kind = kind(tag, c)
     block? = kind in [:block, :list_item, :flex, :grid]
@@ -3516,7 +3516,7 @@ defmodule Browser.Layout do
 
     height = box.mt + box_h + box.mb
 
-    place_atom(st, %{
+    place_atom(strut(st, Map.get(spec, :pstyle, style)), %{
       w: ml + box_w + mr,
       h: height,
       # the baseline of a replaced element is its bottom margin edge
@@ -3684,6 +3684,21 @@ defmodule Browser.Layout do
   # counting its content at the box's right edge (`xlim`, which moves with the item)
   defp limit_extent(%{xlim: l} = item, w), do: %{item | xlim: min(l, w)}
   defp limit_extent(item, w), do: Map.put(item, :xlim, w)
+
+  # A line made of nothing but boxes still has the height of the font and line height around
+  # them (the strut)
+  # (only a line height taller than the font's own counts: the font metrics are approximate, so
+  # a strut of the normal height would move pictures)
+  defp strut(%{line: [], lh: 0} = st, style) do
+    lf = content_factor(style)
+    px = line_px(style)
+
+    if px > round(style.size * lf),
+      do: %{st | lh: style.size, lf: lf, lmax: px},
+      else: st
+  end
+
+  defp strut(st, _style), do: st
 
   defp place_atom(st, atom) do
     line_left = st.margin + st.left

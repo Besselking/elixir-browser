@@ -5329,6 +5329,25 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "the strut of a line that holds only a picture" do
+    test "a line height taller than the font makes the line as tall" do
+      {_, height} =
+        im(
+          ~s|<div style="line-height:96px"><img src="a.png" style="vertical-align:bottom"></div>|,
+          loaded(15, 15)
+        )
+
+      assert height >= 96
+    end
+
+    test "the line height of the picture itself does not count" do
+      {_, height} =
+        im(~s|<div><img src="a.png" style="line-height:96px"></div>|, loaded(15, 15))
+
+      assert height < 30
+    end
+  end
+
   describe "invalid negative sizes" do
     defp neg_box(style) do
       page =
