@@ -2584,6 +2584,7 @@ defmodule Browser.Layout do
   defp letters?(text), do: String.match?(text, ~r/[\p{L}\p{N}]/u)
 
   defp letter_spacing(style, {:pct, f}), do: %{style | ls: f * style.size}
+  defp letter_spacing(style, {:calc, px, f}), do: %{style | ls: px + f * style.size}
   defp letter_spacing(style, n) when is_number(n), do: %{style | ls: n / 1}
   defp letter_spacing(style, _), do: style
 

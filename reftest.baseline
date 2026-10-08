@@ -4878,6 +4878,7 @@ css/css-text/letter-spacing/letter-spacing-end-of-line-002.html
 css/css-text/letter-spacing/letter-spacing-ligatures-004.html
 css/css-text/letter-spacing/letter-spacing-nesting-001.html
 css/css-text/letter-spacing/letter-spacing-nesting-002.html
+css/css-text/letter-spacing/letter-spacing-percent-001.html
 css/css-text/letter-spacing/letter-spacing-trim-start-001.html
 css/css-text/line-break/line-break-anywhere-002.html
 css/css-text/line-break/line-break-anywhere-004.html
@@ -5680,7 +5681,9 @@ css/css-variables/variable-reference-28.html
 css/css-variables/variable-reference-29.html
 css/css-variables/variable-reference-30.html
 css/css-variables/variable-reference-31.html
+css/css-variables/variable-reference-32.html
 css/css-variables/variable-reference-33.html
+css/css-variables/variable-reference-34.html
 css/css-variables/variable-reference-35.html
 css/css-variables/variable-reference-38.html
 css/css-variables/variable-reference-39.html
@@ -5851,6 +5854,7 @@ css/selectors/selectors-4/lang-023.html
 css/selectors/selectors-4/lang-024.html
 css/selectors/selectors-4/lang-025.html
 css/selectors/selectors-attr-many.html
+css/selectors/selectors-attr-white-space-001.html
 css/selectors/text-emphasis-visited-inheritance.html
 css/selectors/text-fill-color-visited-inheritance.html
 css/selectors/text-stroke-color-visited-inheritance.html

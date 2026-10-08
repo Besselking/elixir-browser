@@ -6264,6 +6264,11 @@ defmodule Browser.LayoutTest do
              )
     end
 
+    test "letter-spacing takes a length mixed with a percentage" do
+      html = ~s|<div style="font:20px/1 Ahem;letter-spacing:calc(5px + 10%)">XX</div>|
+      assert [%{w: 34}] = for(%{type: :text, text: "XX"} = t <- laid_out(html), do: t)
+    end
+
     test "a table with clear goes below the float" do
       html =
         ~s|<div style="float:left;width:10px;height:30px"></div><div style="clear:both;display:table;width:50px;height:20px;background:blue"></div>|

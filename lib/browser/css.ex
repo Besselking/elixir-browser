@@ -64,9 +64,10 @@ defmodule Browser.CSS do
            [prop, value] <- :binary.split(piece, ":"),
            prop = prop |> String.trim() |> fold_prop(),
            true <- prop not in ["", "--"] do
+        bad? = bad_string?(value)
         {value, important?} = split_important(String.trim(value))
 
-        if valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
+        if not bad? and valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
           do: [{prop, value, important?}],
           else: []
       else
@@ -74,6 +75,20 @@ defmodule Browser.CSS do
       end
     end)
   end
+
+  # a string cut short by a line break is a bad string, which makes the declaration invalid (one
+  # that the input's end cuts short is closed there)
+  defp bad_string?(<<>>), do: false
+  defp bad_string?(<<?\\, _, r::binary>>), do: bad_string?(r)
+
+  defp bad_string?(<<q, r::binary>>) when q in [?", ?'] do
+    case Regex.run(~r/\A(?:[^\\\n#{<<q>>}]|\\.)*(.?)/s, r) do
+      [_, "\n"] -> true
+      [whole, _] -> bad_string?(binary_part(r, byte_size(whole), byte_size(r) - byte_size(whole)))
+    end
+  end
+
+  defp bad_string?(<<_, r::binary>>), do: bad_string?(r)
 
   defp var_reference?(piece), do: Regex.match?(~r/var\(/i, piece)
 
@@ -526,7 +541,7 @@ defmodule Browser.CSS do
 
       m =
           Regex.run(
-            ~r/\A\[\s*([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
+            ~r/\A\[\s*\|?([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
             s
           ) ->
         [whole, name | rest] = m

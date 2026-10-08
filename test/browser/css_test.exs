@@ -346,5 +346,17 @@ defmodule Browser.CSSTest do
     test "unbalanced brackets drop the declaration" do
       assert [%{decls: [{"--a", "ok", false}]}] = CSS.parse("p { --a: ok; --b: red) }")
     end
+
+    test "a string cut short by a line break drops the declaration, the end of input closes it" do
+      assert [%{decls: [{"color", "green", false}]}] =
+               CSS.parse("p { color: green; color: var(--a, \"\n}")
+
+      assert [%{decls: [{"color", "var(--a, url(\"", false}]}] =
+               CSS.parse("p { color: var(--a, url(\"")
+    end
+
+    test "an attribute selector may name the null namespace" do
+      assert [%{decls: [{"color", "green", false}]}] = CSS.parse("[|a] { color: green }")
+    end
   end
 end
