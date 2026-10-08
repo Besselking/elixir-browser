@@ -6564,4 +6564,74 @@ defmodule Browser.LayoutTest do
       assert Enum.max(Enum.map(rects, &(&1.x + &1.w))) == 104
     end
   end
+
+  describe "conflicts between collapsed borders" do
+    defp collapsed_rects(css, body) do
+      html =
+        "<style>body{margin:0}table{border-collapse:collapse;float:left}td{padding:0}#{css}</style>#{body}"
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      for %{type: :rect} = r <- items, do: {r.color, r.x + r.w}
+    end
+
+    test "a row's hidden border removes the borders of its cells" do
+      assert collapsed_rects(
+               "tr{border:5px hidden}td{border:5px solid red}",
+               "<table><tr><td></td></tr></table>"
+             ) == []
+    end
+
+    test "a cell's border wins over the table's of the same size" do
+      rects =
+        collapsed_rects(
+          ".t{border:5px solid red}.c{border:5px solid green}",
+          ~s(<table class=t><td class=c></td></table>)
+        )
+
+      assert rects != [] and Enum.all?(rects, &(elem(&1, 0) == {0, 128, 0}))
+      assert rects |> Enum.map(&elem(&1, 1)) |> Enum.max() == 10
+    end
+
+    test "the border of a column group makes the table as wide as it needs" do
+      rects =
+        collapsed_rects(
+          "colgroup{border:5px solid green}",
+          "<table><colgroup></colgroup><td></td></table>"
+        )
+
+      assert rects |> Enum.map(&elem(&1, 1)) |> Enum.max() == 10
+    end
+
+    test "the right border of a column is drawn between it and the next" do
+      rects =
+        collapsed_rects(
+          "col.a{border-right:4px solid green}td{width:30px}",
+          "<table><col class=a><col><tr><td></td><td></td></tr></table>"
+        )
+
+      assert Enum.any?(rects, &(elem(&1, 1) == 34))
+    end
+
+    test "a line break with clear moves below floats without a line of its own" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"float:left;height:30px;width:10px\"></div><br style=\"clear:both\"><span>x</span>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :text)).y >= 30
+    end
+
+    test "cells straight in a row group sit in an anonymous row" do
+      {items, _} =
+        group_table(
+          "<div style=\"display:table\"><div style=\"display:table-row-group\"><div style=\"display:table-cell\">a</div><div style=\"display:table-cell\">b</div></div></div>"
+        )
+
+      assert [%{y: y1}, %{y: y2}] = for(%{type: :text} = t <- items, do: t)
+      assert y1 == y2
+    end
+  end
 end

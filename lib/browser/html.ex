@@ -254,6 +254,12 @@ defmodule Browser.HTML do
     do: build(rest, [{tag, [{:text, t} | kids]} | stack])
 
   defp build([{:open, name, attrs, self_close?} | rest], stack) do
+    # (a column group ends where the rows begin)
+    stack =
+      if name in ~w(td th tr thead tbody tfoot caption),
+        do: close_within(stack, ["colgroup"], "table"),
+        else: stack
+
     stack = implied_close(name, stack)
 
     if name in @void or self_close? do

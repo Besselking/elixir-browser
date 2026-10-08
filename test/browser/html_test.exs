@@ -2,6 +2,16 @@ defmodule Browser.HTMLTest do
   use ExUnit.Case, async: true
   alias Browser.HTML
 
+  test "a table cell ends an open column group" do
+    assert [
+             {:element, "table", [],
+              [
+                {:element, "colgroup", [], []},
+                {:element, "td", [], [{:text, "a"}]}
+              ]}
+           ] = HTML.parse("<table><colgroup></col><td>a</table>")
+  end
+
   test "nests elements and decodes entities" do
     assert [{:element, "p", [], [{:text, "a & b "}, {:element, "b", [], [{:text, "c"}]}]}] =
              HTML.parse("<p>a &amp; b <b>c</b></p>")

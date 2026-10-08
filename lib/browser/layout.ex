@@ -672,7 +672,14 @@ defmodule Browser.Layout do
   end
 
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
-  defp walk({:element, "br", _, _}, style, acc), do: [{:br, style} | acc]
+  # a line break that clears floats ends the line and moves down below them, taking no line of
+  # its own
+  defp walk({:element, "br", attrs, _}, style, acc) do
+    case clear_side(computed(attrs)) do
+      nil -> [{:br, style} | acc]
+      side -> [{:clear, side}, {:flush} | acc]
+    end
+  end
 
   # <wbr> is a place to break, like a zero-width space
   defp walk({:element, "wbr", attrs, _}, style, acc) do
@@ -1279,6 +1286,21 @@ defmodule Browser.Layout do
     {box.mt, box.mb}
   end
 
+  # the border of a table with collapsed borders is one more border for its cells' to be
+  # resolved with (see `table_edges/4`), it takes no room of its own
+  defp collapsed_table_border(%{"border-collapse" => "collapse", "display" => d} = c)
+       when d in ["table", "inline-table"] do
+    Map.merge(c, %{
+      "@tedges" => edges_of(c),
+      "border-top-width" => 0.0,
+      "border-right-width" => 0.0,
+      "border-bottom-width" => 0.0,
+      "border-left-width" => 0.0
+    })
+  end
+
+  defp collapsed_table_border(c), do: c
+
   defp inline_block_ops(
          {:element, tag, attrs, kids},
          parent_style,
@@ -1287,6 +1309,7 @@ defmodule Browser.Layout do
          block? \\ false,
          table? \\ false
        ) do
+    c = collapsed_table_border(c)
     box = box(tag, c)
     ml = if box.ml == :auto, do: 0, else: box.ml
     mr = if box.mr == :auto, do: 0, else: box.mr
@@ -7724,6 +7747,7 @@ defmodule Browser.Layout do
       sy: round(sy),
       collapse?: collapse?,
       sized?: c["@sized"] == true,
+      tedges: c["@tedges"],
       h: table_height(c),
       fixed?: fixed_table?(c)
     }
@@ -7902,15 +7926,46 @@ defmodule Browser.Layout do
         |> Map.put(:left, best_edge(p.redges.left, first && first.edges[:left]))
         |> Map.put(:right, best_edge(p.redges.right, last && last.edges[:right]))
 
+      # (between two columns the border of both is the one the cell on the right draws)
+      between =
+        if p.col > 0 do
+          before = (Enum.at(cols, p.col - 1) || %{})[:edges][:right]
+          before = before && %{before | props: left_props(before.props)}
+          best_edge(first && first.edges[:left], before)
+        end
+
       %{
         p
         | redges: redges,
+          between: between,
           top_edge: if(p.row == 0, do: best_edge(p.top_edge, best.(:top)), else: p.top_edge),
           bottom_edge:
             if(p.row + min(p.cell.rowspan, nrows - p.row) >= nrows,
               do: best_edge(p.bottom_edge, best.(:bottom)),
               else: p.bottom_edge
             )
+      }
+    end)
+  end
+
+  # the border of the table itself is the weakest of those at its edge
+  defp table_edges(placed, t, ncols, nrows) do
+    Enum.map(placed, fn p ->
+      last_col? = p.col + p.cell.colspan >= ncols
+      last_row? = p.row + min(p.cell.rowspan, nrows - p.row) >= nrows
+      redges = p.redges
+
+      redges =
+        if p.col == 0, do: Map.put(redges, :left, best_edge(redges.left, t.left)), else: redges
+
+      redges =
+        if last_col?, do: Map.put(redges, :right, best_edge(redges.right, t.right)), else: redges
+
+      %{
+        p
+        | redges: redges,
+          top_edge: if(p.row == 0, do: best_edge(p.top_edge, t.top), else: p.top_edge),
+          bottom_edge: if(last_row?, do: best_edge(p.bottom_edge, t.bottom), else: p.bottom_edge)
       }
     end)
   end
@@ -7957,7 +8012,7 @@ defmodule Browser.Layout do
 
   defp group_rows(kids, style, bg, gc) do
     rows =
-      for {:element, tag, attrs, ekids} = el <- kids,
+      for {:element, tag, attrs, ekids} = el <- loose_cells(kids),
           tag not in @skip,
           c = computed(attrs),
           tag == "tr" or c["display"] == "table-row",
@@ -7988,6 +8043,38 @@ defmodule Browser.Layout do
     end)
   end
 
+  # cells straight in a row group sit in an anonymous row
+  defp loose_cells(kids) do
+    cell? = fn
+      {:element, tag, attrs, _} -> tag in @cell_tags or computed(attrs)["display"] == "table-cell"
+      _ -> false
+    end
+
+    if Enum.any?(kids, cell?) do
+      kids
+      |> Enum.chunk_while(
+        [],
+        fn kid, acc ->
+          cond do
+            cell?.(kid) -> {:cont, [kid | acc]}
+            acc == [] -> {:cont, kid, []}
+            true -> {:cont, [anonymous_row(Enum.reverse(acc)), kid], []}
+          end
+        end,
+        fn
+          [] -> {:cont, []}
+          acc -> {:cont, [anonymous_row(Enum.reverse(acc))], []}
+        end
+      )
+      |> List.flatten()
+    else
+      kids
+    end
+  end
+
+  defp anonymous_row(cells),
+    do: {:element, "div", [{"@computed", %{"display" => "table-row"}}], cells}
+
   defp paint_above(items, seq), do: Enum.map(items, &Map.merge(&1, %{over: true, pz: seq}))
 
   # `position: relative` on a part of a table moves what it holds
@@ -8002,21 +8089,37 @@ defmodule Browser.Layout do
 
   defp add_shift({a, b}, {c, d}), do: {a + c, b + d}
 
+  # the properties of a right border as those of the left border it is on the next cell
+  defp left_props(props),
+    do: Map.new(props, fn {k, v} -> {String.replace(k, "border-right", "border-left"), v} end)
+
   # the borders an element (a row or a row group) brings to a table with collapsed borders
   defp edges_of(c) do
     for side <- ~w(top bottom left right), into: %{} do
       w = border_w(c, side)
 
       edge =
-        if w > 0 do
+        if c["border-#{side}-style"] == "hidden" do
+          # (`hidden` removes every border at that edge, whatever their width)
           %{
-            w: w,
+            w: 0,
+            hidden: true,
             props: %{
-              "border-#{side}-width" => w * 1.0,
-              "border-#{side}-style" => c["border-#{side}-style"],
-              "border-#{side}-color" => c["border-#{side}-color"]
+              "border-#{side}-width" => 0.0,
+              "border-#{side}-style" => "hidden"
             }
           }
+        else
+          if w > 0 do
+            %{
+              w: w,
+              props: %{
+                "border-#{side}-width" => w * 1.0,
+                "border-#{side}-style" => c["border-#{side}-style"],
+                "border-#{side}-color" => c["border-#{side}-color"]
+              }
+            }
+          end
         end
 
       {String.to_atom(side), edge}
@@ -8026,6 +8129,8 @@ defmodule Browser.Layout do
   # the wider border wins, the first of two equals
   defp best_edge(nil, b), do: b
   defp best_edge(a, nil), do: a
+  defp best_edge(%{hidden: true} = a, _), do: a
+  defp best_edge(_, %{hidden: true} = b), do: b
   defp best_edge(a, b), do: if(b.w > a.w, do: b, else: a)
 
   defp row_bg(c), do: if(color?(c["background-color"]), do: c["background-color"])
@@ -8218,6 +8323,7 @@ defmodule Browser.Layout do
     ncols = placed |> Enum.map(&(&1.col + &1.cell.colspan)) |> Enum.max(fn -> 0 end)
     nrows = length(model.rows)
     placed = if ts.collapse?, do: column_edges(placed, model.cols, nrows), else: placed
+    placed = if ts.tedges, do: table_edges(placed, ts.tedges, ncols, nrows), else: placed
     sx = ts.sx
     sy = ts.sy
 
@@ -8232,7 +8338,8 @@ defmodule Browser.Layout do
           do: avail + outer_borders(placed, ncols),
           else: avail
 
-      {mins, maxs, pcts} = st |> table_columns(placed, ncols) |> column_widths(model.cols)
+      {mins, maxs, pcts} =
+        st |> table_columns(placed, ncols, nrows, ts.collapse?) |> column_widths(model.cols)
 
       # `table-layout: fixed`: the content decides nothing, columns without a width share what is left
       {mins, maxs} =
@@ -8445,7 +8552,7 @@ defmodule Browser.Layout do
     candidates = [
       {p.top_edge, tbw, :v},
       {if(last_row?, do: p.bottom_edge), bbw, :v},
-      {if(p.col == 0, do: p.redges.left), lbw, :h},
+      {if(p.col == 0, do: p.redges.left, else: p.between), lbw, :h},
       {if(last_col?, do: p.redges.right), rbw, :h}
     ]
 
@@ -8453,12 +8560,31 @@ defmodule Browser.Layout do
       {nil, _, _}, acc ->
         acc
 
+      {%{hidden: true} = e, own, axis}, {props, v} ->
+        {Map.merge(props, e.props), if(axis == :v, do: v - own, else: v)}
+
       {e, own, _}, acc when e.w <= own ->
         acc
 
       {e, own, axis}, {props, v} ->
         {Map.merge(props, e.props), if(axis == :v, do: v + e.w - own, else: v)}
     end)
+  end
+
+  # the width the borders at the sides of a cell add to its own (or take away, when hidden)
+  defp edge_hdelta(p, ncols) do
+    {_, rbw, _, lbw} = p.cell.bw
+    last_col? = p.col + p.cell.colspan >= ncols
+    left = if p.col == 0, do: p.redges.left, else: p.between
+    right = if last_col?, do: p.redges.right
+
+    delta = fn
+      nil, _ -> 0
+      %{hidden: true}, own -> -own
+      e, own -> max(e.w - own, 0)
+    end
+
+    delta.(left, lbw) + delta.(right, rbw)
   end
 
   # with collapsed borders neighbouring cells share one line: the right and bottom
@@ -8511,6 +8637,7 @@ defmodule Browser.Layout do
               shift: row.shift,
               redges: row.edges,
               top_edge: top,
+              between: nil,
               bottom_edge: last_row.bottom
             }
 
@@ -8528,22 +8655,29 @@ defmodule Browser.Layout do
 
   # the narrowest and widest each column can be, from its cells: wide cells that span several
   # columns add what is missing equally; percentage widths are kept per column
-  defp table_columns(st, placed, ncols) do
+  defp table_columns(st, placed, ncols, nrows, collapse?) do
     measured =
       Enum.map(placed, fn p ->
         cell = p.cell
-        min = min_extent(st, cell.sub, cell.key)
-        max = shrink_extent(st, cell.sub, @unbounded, cell.key)
+        # the borders a row, column or the table brings to a cell at its edge take room too
+        {eprops, _} = if collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
+
+        {sub, key} =
+          if eprops == %{}, do: {cell.sub, cell.key}, else: {cell.build.(eprops), nil}
+
+        min = min_extent(st, sub, key)
+        max = shrink_extent(st, sub, @unbounded, key)
+        extra = cell.extra + if(eprops == %{}, do: 0, else: edge_hdelta(p, ncols))
 
         {max, pct} =
           case cell.width do
-            w when is_number(w) -> {max(min, round(w) + cell.extra), nil}
+            w when is_number(w) -> {max(min, round(w) + extra), nil}
             {:pct, f} -> {max, f}
             _ -> {max, nil}
           end
 
         # `min-width` is the least the cell is, whatever its content
-        least = if is_number(cell.minw), do: round(cell.minw) + cell.extra, else: 0
+        least = if is_number(cell.minw), do: round(cell.minw) + extra, else: 0
         {min, max} = {max(min, least), max(max, least)}
 
         {p, min, max(max, min), pct}
