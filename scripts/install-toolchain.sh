@@ -40,8 +40,9 @@ Linux)
     curl -fsSL -o "$work/wx.tar.bz2" "https://github.com/wxWidgets/wxWidgets/releases/download/v$WX/wxWidgets-$WX.tar.bz2"
     mkdir "$work/wx" && tar -xjf "$work/wx.tar.bz2" -C "$work/wx" --strip-components=1
     (
-      mkdir "$work/wx/build" && cd "$work/wx/build"
-      ../configure --prefix="$PREFIX/wx33" --with-gtk=3 --enable-shared --with-libwebp=sys \
+      # a directory of our own: the tarball already has a build/ directory
+      mkdir "$work/wx-build" && cd "$work/wx-build"
+      "$work/wx/configure" --prefix="$PREFIX/wx33" --with-gtk=3 --enable-shared --with-libwebp=sys \
         --with-opengl --enable-compat30 --disable-tests
       make -j"$(nproc)"
       $sudo make install
