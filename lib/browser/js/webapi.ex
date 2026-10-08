@@ -963,6 +963,9 @@ defmodule Browser.JS.WebAPI do
     FileReader.prototype.readAsDataURL = function (b) { var self = this; setTimeout(function () { self.result = "data:" + (b.type || "application/octet-stream") + ";base64," + btoa(b._text); self.readyState = 2; if (self.onload) self.onload({ target: self }); if (self.onloadend) self.onloadend({ target: self }); }, 0); };
     FileReader.prototype.addEventListener = function (t, f) { this["on" + t] = f; };
     def("Blob", Blob); def("File", File); def("FileReader", FileReader);
+    var blobUrls = {}, blobSeq = 0;
+    URL.createObjectURL = function (b) { var u = "blob:" + location.origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
+    URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
 
     function FormData(form) {
       this._e = [];

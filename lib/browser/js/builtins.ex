@@ -1993,6 +1993,10 @@ defmodule Browser.JS.Builtins do
           {"log", :log},
           {"info", :log},
           {"debug", :log},
+          {"trace", :log},
+          {"dir", :log},
+          {"dirxml", :log},
+          {"table", :log},
           {"warn", :warn},
           {"error", :error}
         ] do
@@ -2001,6 +2005,21 @@ defmodule Browser.JS.Builtins do
         Process.put(:js_console, [{level, line} | Process.get(:js_console, [])])
         :undefined
       end)
+    end
+
+    def_fn(console, "assert", fn _, args ->
+      if !truthy(arg(args, 0)) do
+        rest = args |> Enum.drop(1) |> Enum.map(&inspect_arg/1)
+        line = Enum.join(["Assertion failed" | rest], ": ")
+        Process.put(:js_console, [{:error, line} | Process.get(:js_console, [])])
+      end
+
+      :undefined
+    end)
+
+    for name <-
+          ~w(group groupCollapsed groupEnd time timeEnd timeLog count countReset clear profile profileEnd timeStamp) do
+      def_fn(console, name, fn _, _ -> :undefined end)
     end
   end
 
