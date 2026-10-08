@@ -3651,9 +3651,11 @@ css/css-display/display-contents-list-001.html
 css/css-display/display-contents-multicol-001.html
 css/css-display/display-contents-oof-001.html
 css/css-display/display-contents-oof-002.html
+css/css-display/display-contents-table-002.html
 css/css-display/display-contents-td-001.html
 css/css-display/display-contents-text-inherit.html
 css/css-display/display-contents-text-only-001.html
+css/css-display/display-contents-tr-001.html
 css/css-display/display-contents-whitespace-inside-inline.html
 css/css-display/display-flow-root-001.html
 css/css-display/display-flow-root-002.html
@@ -4292,6 +4294,7 @@ css/css-flexbox/layout-algorithm_algo-cross-line-002.html
 css/css-flexbox/min-size-auto-overflow-clip.html
 css/css-flexbox/multiline-column-max-height.html
 css/css-flexbox/multiline-last-baseline-item-count.html
+css/css-flexbox/multiline-shrink-to-fit.html
 css/css-flexbox/negative-margins-001.html
 css/css-flexbox/nested-flex-image-loading-invalidates-intrinsic-sizes.html
 css/css-flexbox/order-painting.html

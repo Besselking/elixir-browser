@@ -4517,6 +4517,18 @@ defmodule Browser.LayoutTest do
     assert blue.x == 58
   end
 
+  test "cells of rows with display: contents share one anonymous row" do
+    page =
+      Browser.Page.build(
+        ~s|<style>tr{display:contents}</style><table cellpadding="0" cellspacing="0"><tr><td>P</td></tr>\n<tr><td>S</td></tr></table>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    text = fn t -> Enum.find(items, &(&1[:text] == t)) end
+    assert text.("P").y == text.("S").y
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

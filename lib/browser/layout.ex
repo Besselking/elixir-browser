@@ -8640,7 +8640,7 @@ defmodule Browser.Layout do
 
   # the caption and the rows of a table, in display order: header rows, body rows, footer rows
   defp table_model(kids, style) do
-    kids = anonymous_rows(kids)
+    kids = kids |> flatten_contents() |> anonymous_rows()
 
     parts =
       for {:element, tag, attrs, ekids} = el <- kids, tag not in @skip do
@@ -8674,6 +8674,43 @@ defmodule Browser.Layout do
     }
   end
 
+  # white space between two kids that `loose?` accepts is dropped, so they chunk together
+  defp drop_joining_blanks(kids, loose?) do
+    blank? = fn
+      {:text, t} -> String.trim(t) == ""
+      _ -> false
+    end
+
+    kids
+    |> Enum.chunk_by(blank?)
+    |> then(fn chunks ->
+      chunks
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {chunk, i} ->
+        before = if i > 0, do: chunks |> Enum.at(i - 1) |> List.last()
+        after_ = Enum.at(chunks, i + 1)
+
+        if blank?.(hd(chunk)) and before != nil and after_ != nil and loose?.(before) and
+             loose?.(hd(after_)),
+           do: [],
+           else: chunk
+      end)
+    end)
+  end
+
+  # an element with `display: contents` makes no box: its children take its place
+  defp flatten_contents(kids) do
+    Enum.flat_map(kids, fn
+      {:element, tag, attrs, ekids} = el when tag not in @skip ->
+        if computed(attrs)["display"] == "contents",
+          do: flatten_contents(ekids),
+          else: [el]
+
+      other ->
+        [other]
+    end)
+  end
+
   # content of a table that is not a row, group, caption or column sits in an anonymous row
   defp anonymous_rows(kids) do
     neutral? = fn
@@ -8682,6 +8719,9 @@ defmodule Browser.Layout do
       {:element, tag, attrs, _} -> kind_of_table_part(tag, computed(attrs)) != :other
       _ -> true
     end
+
+    # (white space between two pieces of loose content stays in the one anonymous row)
+    kids = drop_joining_blanks(kids, fn kid -> not neutral?.(kid) end)
 
     if Enum.all?(kids, neutral?) do
       kids
@@ -8923,6 +8963,8 @@ defmodule Browser.Layout do
       {:element, tag, attrs, _} -> tag in @cell_tags or computed(attrs)["display"] == "table-cell"
       _ -> false
     end
+
+    kids = kids |> flatten_contents() |> drop_joining_blanks(cell?)
 
     if Enum.any?(kids, cell?) do
       kids
