@@ -283,7 +283,21 @@ defmodule Browser.Session do
   def handle_info({:js_async, pid, reply}, %{js: pid} = state),
     do: {:noreply, apply_js(state, reply)}
 
-  def handle_info({:js_async, _, _}, state), do: {:noreply, state}
+  # ... in a tab that is not shown: what it changed waits in the tab and is applied when it is
+  def handle_info({:js_async, pid, reply}, state) do
+    tabs =
+      state.tabs
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {%{js: ^pid} = tab, i} when i != state.active ->
+          Map.put(tab, :async, merge_async(Map.get(tab, :async), reply))
+
+        {tab, _} ->
+          tab
+      end)
+
+    {:noreply, %{state | tabs: tabs}}
+  end
 
   # -- images arriving -------------------------------------------------------
 
@@ -2872,6 +2886,20 @@ defmodule Browser.Session do
     }
   end
 
+  # Replies that pile up for a tab in the background become one: the newest page tree (it
+  # holds all the changes so far), every effect, and the newest selection.
+  defp merge_async(nil, reply), do: reply
+
+  defp merge_async(old, new) do
+    %{
+      new
+      | outbox: old.outbox ++ new.outbox,
+        dirty: old.dirty or new.dirty,
+        raw: if(new.dirty, do: new.raw, else: old.raw),
+        console: new.console
+    }
+  end
+
   # a parked tab is shown again
   defp resume(state, i) do
     tab = Enum.at(state.tabs, i)
@@ -2902,11 +2930,13 @@ defmodule Browser.Session do
         state
 
       nil ->
-        resume_page(state, stale?, laid_width, width)
+        # what scripts did while the tab was away (not when they are to start again)
+        async = if state.scripts_pending, do: nil, else: Map.get(tab, :async)
+        resume_page(state, stale?, laid_width, width, async)
     end
   end
 
-  defp resume_page(state, stale?, laid_width, width) do
+  defp resume_page(state, stale?, laid_width, width, async) do
     state =
       case state.loading do
         {url, mode, opts} ->
@@ -2936,6 +2966,7 @@ defmodule Browser.Session do
       if state.scripts_pending and state.page != nil, do: start_js(stop_js(state)), else: state
 
     state = if state.page, do: start_images(state), else: state
+    state = if async, do: apply_js(state, async), else: state
     state = sync_buttons(state)
     state = if state.focus, do: reset_blink(state), else: state
     publish_tabs(state)
