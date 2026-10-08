@@ -58,7 +58,25 @@ sampler =
                 {_, [_ | _] = st} ->
                   [{m, f, a, _} | _] = st
                   fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
-                  Enum.reduce(fs, [{:self, {m, f, a}} | acc], fn k, acc -> [{:incl, k} | acc] end)
+                  acc = Enum.reduce(fs, [{:self, {m, f, a}} | acc], fn k, acc -> [{:incl, k} | acc] end)
+
+                  # PROFCALLER=name also counts who called a function with that name (the first
+                  # frame above its last call)
+                  case System.get_env("PROFCALLER") do
+                    nil ->
+                      acc
+
+                    name ->
+                      rest =
+                        fs
+                        |> Enum.drop_while(fn {_, f, _} -> Atom.to_string(f) != name end)
+                        |> Enum.drop_while(fn {_, f, _} -> Atom.to_string(f) == name end)
+
+                      case rest do
+                        [k | _] -> [{:caller, k} | acc]
+                        _ -> acc
+                      end
+                  end
 
                 _ ->
                   acc
@@ -192,7 +210,7 @@ if sampler do
       n = Enum.count(acc, &match?({:self, _}, &1))
       IO.puts("-- #{n} samples")
 
-      for kind <- [:self, :incl] do
+      for kind <- [:self, :incl, :caller] do
         IO.puts("-- #{kind}")
 
         acc

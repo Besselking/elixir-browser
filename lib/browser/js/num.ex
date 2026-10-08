@@ -71,6 +71,16 @@ defmodule Browser.JS.Num do
 
   @doc "ToNumber on a string."
   def parse(<<c, _::binary>> = s) when c in ?0..?9 do
+    parse_plain(s)
+  end
+
+  def parse(<<sign, c, _::binary>> = s) when sign in [?-, ?+] and c in ?0..?9 do
+    parse_plain(s)
+  end
+
+  def parse(s), do: parse_slow(s)
+
+  defp parse_plain(s) do
     # plain decimal numbers need no regular expressions
     case Float.parse(s) do
       {f, ""} -> f
@@ -79,8 +89,6 @@ defmodule Browser.JS.Num do
   rescue
     ArgumentError -> parse_slow(s)
   end
-
-  def parse(s), do: parse_slow(s)
 
   defp parse_slow(s) do
     s = Browser.JS.Interp.js_trim(s)

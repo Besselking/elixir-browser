@@ -185,12 +185,22 @@ defmodule Browser.HTML do
   end
 
   defp take_name(bin) do
-    case Regex.run(~r/\A([^\s\/>]*)/, bin, capture: :all_but_first) do
-      [name] ->
-        {String.downcase(name),
-         binary_part(bin, byte_size(name), byte_size(bin) - byte_size(name))}
-    end
+    n = name_len(bin, 0, false)
+    {down(binary_part(bin, 0, n)), binary_part(bin, n, byte_size(bin) - n)}
   end
+
+  # how many bytes before white space, `/` or `>` (and `=` for an attribute name)
+  defp name_len(<<c, _::binary>>, n, _eq) when c in [?\s, ?\t, ?\n, ?\r, ?\f, 11, ?/, ?>], do: n
+  defp name_len(<<?=, _::binary>>, n, true) when n > 0, do: n
+  defp name_len(<<_, rest::binary>>, n, eq), do: name_len(rest, n + 1, eq)
+  defp name_len(<<>>, n, _eq), do: n
+
+  # tag and attribute names are nearly always plain lower case ASCII already
+  defp down(s), do: if(plain_lower?(s), do: s, else: String.downcase(s))
+
+  defp plain_lower?(<<c, rest::binary>>) when c < 128 and c not in ?A..?Z, do: plain_lower?(rest)
+  defp plain_lower?(<<>>), do: true
+  defp plain_lower?(_), do: false
 
   defp take_attrs(bin, acc) do
     bin = String.trim_leading(bin)
@@ -209,10 +219,11 @@ defmodule Browser.HTML do
         take_attrs(rest, acc)
 
       _ ->
-        [name] = Regex.run(~r/\A[^\s=\/>]+/, bin)
-        rest = binary_part(bin, byte_size(name), byte_size(bin) - byte_size(name))
+        n = name_len(bin, 0, true)
+        name = binary_part(bin, 0, n)
+        rest = binary_part(bin, n, byte_size(bin) - n)
         {value, rest} = take_value(String.trim_leading(rest))
-        take_attrs(rest, [{String.downcase(name), value} | acc])
+        take_attrs(rest, [{down(name), value} | acc])
     end
   end
 

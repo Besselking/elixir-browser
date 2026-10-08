@@ -2185,8 +2185,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp kebab(name) do
-    name
-    |> String.replace(~r/[A-Z]/, fn c -> "-" <> String.downcase(c) end)
+    for(<<c <- name>>, into: "", do: if(c in ?A..?Z, do: <<?-, c + 32>>, else: <<c>>))
     |> then(fn k -> if String.starts_with?(k, "css-float"), do: "float", else: k end)
   end
 
