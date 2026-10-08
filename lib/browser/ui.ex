@@ -97,6 +97,10 @@ defmodule Browser.UI do
     :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
     :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
     :wxMenuBar.append(menubar, edit, ~c"Edit")
+
+    develop = :wxMenu.new()
+    :wxMenu.append(develop, 5200, Browser.ConsoleWindow.menu_label())
+    :wxMenuBar.append(menubar, develop, ~c"Develop")
     :wxFrame.setMenuBar(frame, menubar)
 
     :wxFrame.connect(frame, :close_window)

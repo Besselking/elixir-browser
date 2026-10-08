@@ -53,7 +53,16 @@ defmodule Browser.JS.Runtime do
   @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
   def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
 
-  def stop(pid), do: Process.exit(pid, :kill)
+  def stop(pid) do
+    Process.exit(pid, :kill)
+    Browser.Console.drop(pid)
+  end
+
+  @doc """
+  Runs `source` in the page, as the developer console does: the console shows the line and its
+  value (or the error it threw), and the page changes like for any script.
+  """
+  def eval(pid, source), do: call(pid, {:eval, source})
 
   def run_scripts(pid), do: call(pid, :run_scripts, @scripts_timeout)
 
@@ -115,6 +124,7 @@ defmodule Browser.JS.Runtime do
     after
       timeout ->
         Process.demonitor(ref, [:flush])
+        Browser.Console.add(pid, [{:error, "script timed out"}])
 
         %{
           dirty: false,
@@ -382,6 +392,22 @@ defmodule Browser.JS.Runtime do
     finish(%{})
   end
 
+  defp handle({:eval, source}) do
+    log(:input, source)
+
+    guard(
+      fn ->
+        case Parser.parse(source) do
+          {:ok, program} -> log(:result, Builtins.inspect_js(Interp.run_program(program), 0, []))
+          {:error, msg} -> log(:error, "SyntaxError: " <> msg)
+        end
+      end,
+      :ok
+    )
+
+    finish(%{})
+  end
+
   defp handle({:snapshot, controls}) do
     DOM.apply_controls(controls)
     finish(%{force_raw: true})
@@ -424,6 +450,7 @@ defmodule Browser.JS.Runtime do
   defp take_console do
     c = Enum.reverse(Process.get(:js_console, []))
     Process.put(:js_console, [])
+    Browser.Console.add(self(), c)
     c
   end
 

@@ -25,6 +25,21 @@ text, except on macOS, where it converts WebP with `sips`. Homebrew's `erlang` i
 wxWidgets 3.2. On macOS (into `~/.local`) and Debian/Ubuntu, `scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
 patches for that, which the script applies).
 
+## Developer console
+
+Press Cmd+Option+J on macOS, or Ctrl+Shift+J on other systems. You can also choose
+Develop > Developer Console. A separate window opens.
+
+The window shows the console of the current tab. It shows the output of `console.log`,
+`console.info`, `console.warn` and `console.error`. It also shows uncaught errors and
+unhandled promise rejections. Each line has a time, and a colour for its level.
+
+Type JavaScript in the input line at the bottom and press Enter. The code runs in the page.
+The window shows the value of the code, or the error it threw. The Up and Down keys show the
+lines you typed before. The Clear button empties the window.
+
+The console keeps the last 1000 lines of a page. A page that has no scripts has no console.
+
 ## Crash reports
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
