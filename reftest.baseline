@@ -4257,6 +4257,7 @@ css/css-flexbox/grandchild-span-height.html
 css/css-flexbox/grid-flex-item-003.html
 css/css-flexbox/grid-flex-item-004.html
 css/css-flexbox/grid-flex-item-006.html
+css/css-flexbox/grid-flex-item-007.html
 css/css-flexbox/inline-flex-min-content-height.html
 css/css-flexbox/intrinsic-size/col-wrap-001.html
 css/css-flexbox/intrinsic-size/col-wrap-002.html
@@ -4703,6 +4704,10 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-019.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-020.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-021.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-023.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-027.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-028.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-029.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-030.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-031.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-032.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-033.html

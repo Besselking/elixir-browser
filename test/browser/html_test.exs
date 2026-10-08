@@ -128,6 +128,17 @@ defmodule Browser.HTMLTest do
                HTML.parse_document("<html><head></head><body class=a>x</body></html>")
     end
 
+    test "content before a body tag is in that body" do
+      assert [
+               {:element, "html", [],
+                [
+                  {:element, "title", [], _},
+                  {:element, "body", [{"class", "a"}],
+                   [{:element, "p", [], _}, {:element, "div", [], _}]}
+                ]}
+             ] = HTML.parse_document("<title>t</title><p>x</p></head><body class=a><div>y</div>")
+    end
+
     test "style text loses the CDATA markers of XHTML pages" do
       assert [{:element, "style", [], [text: css]}] =
                HTML.parse("<style><![CDATA[ div { color: red } ]]></style>")
