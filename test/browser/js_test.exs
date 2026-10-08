@@ -1070,6 +1070,19 @@ defmodule Browser.JSTest do
              """) == "true,true,proto"
     end
 
+    test "async generator return() awaits at the yield" do
+      assert {:ok, _, lines} =
+               JS.eval("""
+               var p = Promise.resolve(42);
+               Object.defineProperty(p, 'constructor', {get() { throw new Error('broken') }});
+               async function* g() { try { yield; } catch (e) { return e.message } }
+               var it = g();
+               it.next().then(() => it.return(p)).then(r => console.log(r.value + ',' + r.done));
+               """)
+
+      assert [log: "broken,true"] == lines
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
