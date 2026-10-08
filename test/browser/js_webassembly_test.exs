@@ -211,6 +211,22 @@ defmodule Browser.JS.WebAssemblyTest do
     assert logs == ["42 31 32773 4.5", "TypeError"]
   end
 
+  test "GC references: structs are opaque objects, small integers are i31 values" do
+    {logs, errors} =
+      run(~S"""
+      const G = b64("AGFzbQEAAAABGgVfAX8AYAF/AW5gAW4Bf2ABbgFuYAFkbgF/AwYFAQICAwQHHgUCbWsAAANnZXQAAQVpc2kzMQACAmlkAAMCbm4ABAonBQcAIAD7AAALCwAgAPsWAPsCAAALBwAgAPsUbAsEACAACwQAQQEL");
+      const i = new WebAssembly.Instance(new WebAssembly.Module(G)).exports;
+      const o = i.mk(7);
+      console.log(typeof o, i.get(o), i.mk(7) === o, i.id(o) === o);
+      console.log(i.isi31(5), i.isi31("x"), i.id(5), i.id(null), i.id("s"));
+      try { i.get("x"); } catch (e) { console.log(e.constructor.name); }
+      try { i.nn(null); } catch (e) { console.log(e.constructor.name); }
+      """)
+
+    assert errors == []
+    assert logs == ["object 7 false true", "1 0 5 null s", "RuntimeError", "TypeError"]
+  end
+
   test "exceptions: catch, locals survive, uncaught become WebAssembly.Exception, JS can throw into the module" do
     {logs, errors} =
       run(~S"""

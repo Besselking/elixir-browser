@@ -134,6 +134,67 @@ defmodule Browser.JS.WebAssembly do
   defp to_wasm(:funcref, _),
     do: throw_error("TypeError", "the value is not null or an exported WebAssembly function")
 
+  defp to_wasm({:ref, nullable, ht}, v) do
+    r =
+      case Wasm.Types.top(ht) do
+        :func -> fun_to_wasm(v)
+        :extern -> v
+        _ -> any_to_wasm(v)
+      end
+
+    cond do
+      r == :null and nullable -> :null
+      r == :null -> throw_error("TypeError", "type incompatible with the reference type")
+      Wasm.Gc.matches?(r, nullable, ht) -> r
+      true -> throw_error("TypeError", "type incompatible with the reference type")
+    end
+  end
+
+  defp fun_to_wasm(:null), do: :null
+
+  defp fun_to_wasm({:obj, id}) do
+    case Process.get({:wasm_fn_of, id}) do
+      %Func{} = f -> f
+      _ -> throw_error("TypeError", "the value is not null or an exported WebAssembly function")
+    end
+  end
+
+  defp fun_to_wasm(_),
+    do: throw_error("TypeError", "the value is not null or an exported WebAssembly function")
+
+  # a JavaScript value in the world of `anyref`: a small integer is an i31, an opaque
+  # structure or array comes back as itself, anything else is wrapped
+  defp any_to_wasm(:null), do: :null
+
+  defp any_to_wasm(n) when is_number(n) and n == trunc(n) and n >= -0x40000000 and n < 0x40000000,
+    do: Wasm.Gc.i31(trunc(n))
+
+  defp any_to_wasm({:obj, id} = v) do
+    case Process.get({:wasm_gc_of, id}) do
+      nil -> {:ext, v}
+      gc -> gc
+    end
+  end
+
+  defp any_to_wasm(v), do: {:ext, v}
+
+  defp any_to_js(:null), do: :null
+  defp any_to_js({:ext, v}), do: v
+  defp any_to_js({:i31, _} = v), do: to_js(:i32, Wasm.Gc.i31_get_s(v))
+
+  defp any_to_js(gc) do
+    case Process.get({:wasm_gcobj, gc.id}) do
+      nil ->
+        {:obj, id} = obj = new_object()
+        Process.put({:wasm_gcobj, gc.id}, obj)
+        Process.put({:wasm_gc_of, id}, gc)
+        obj
+
+      obj ->
+        obj
+    end
+  end
+
   defp to_js(:i32, v), do: if(v >= 0x80000000, do: v - 0x100000000, else: v) * 1.0
 
   defp to_js(:i64, v),
@@ -145,6 +206,14 @@ defmodule Browser.JS.WebAssembly do
   defp to_js(:funcref, :null), do: :null
   defp to_js(:funcref, %Func{} = f), do: wrap_func(f)
   defp to_js(:externref, v), do: v
+
+  defp to_js({:ref, _, ht}, v) do
+    case Wasm.Types.top(ht) do
+      :func -> to_js(:funcref, v)
+      :extern -> v
+      _ -> any_to_js(v)
+    end
+  end
 
   defp results_to_js([], _), do: :undefined
   defp results_to_js([t], [v]), do: to_js(t, v)

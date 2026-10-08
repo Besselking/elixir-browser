@@ -22,6 +22,9 @@ defmodule Browser.WasmTest do
 
   @m64 "AGFzbQEAAAABGAVgAAF/YAJ+fwBgAX4Bf2AAAX5gAX4BfgMHBgABAgMEAgQEAXAEAgUEAQUBAwcxBwNtZW0CAAN0YmwBAAVzdG9yZQABBGxvYWQAAgRzaXplAAMEZ3JvdwAEBGNhbGwABQkHAQBCAQsBAAosBgQAQQcLCQAgACABNgIACwcAIAAoAgALBAA/AAsGACAAQAALBwAgABEAAAs="
 
+  # structs, arrays, i31, casts and call_ref (made with binaryen)
+  @gc "AGFzbQEAAAABIgZfAn8BeABefwFQAF8BfwBQAQJfAn8AfwBgAX8Bf2AAAX8DCQgEBAQFBAQFBAc2BwVwb2ludAABA3N1bQACA29vYgADA2kzMQAEBGNhc3QABQdiYWRjYXN0AAYHY2FsbHJlZgAHCQUBAwABAArKAQgHACAAQQJsCysBAWQAIABBrAL7AAAhASABIAH7AgAAQQFq+wUAACAB+wIAACAB+wQAAWoLOgIBZAECf0EDIAD7BgEhASABQQFBCvsOAQNAIAMgASAC+wsBaiEDIAJBAWohAiACIAH7D0kNAAsgAwsMAEEC+wcBQQX7CwELCAAgAPsc+x0LLAEBYwIgAARjAkEBQQL7AAMFQQn7AAILIQEgAfsUAwR/QeQABSAB+wICAAsLDQBBAfsAAvsWcRpBAAsIACAA0gAUBAs="
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -202,5 +205,18 @@ defmodule Browser.WasmTest do
     assert Num.unop(:f64_trunc, -0.5) |> Num.f64_to_bits() == 0x8000000000000000
     assert Num.unop(:i32_trunc_sat_f64_s, 1.0e20) == 0x7FFFFFFF
     assert Num.unop(:f32_convert_i64_u, 0xFFFFFFFFFFFFFFFF) == 1.8446744073709552e19
+  end
+
+  test "garbage collection: structs, arrays, i31, casts and typed function references" do
+    i = inst(@gc)
+    assert call(i, "point", [5]) == [6 + 44]
+    assert call(i, "sum", [4]) == [3 + 10 + 3 + 3]
+    assert call(i, "i31", [0x7FFFFFFF]) == [0xFFFFFFFF]
+    assert call(i, "cast", [1]) == [100]
+    assert call(i, "cast", [0]) == [9]
+    assert call(i, "callref", [21]) == [42]
+
+    assert_raise Error, ~r/out of bounds array access/, fn -> call(i, "oob", []) end
+    assert_raise Error, ~r/cast failure/, fn -> call(i, "badcast", []) end
   end
 end
