@@ -21,8 +21,9 @@ supported. `scripts/install-toolchain.sh` installs them (Homebrew on macOS, a so
 Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
 
 WebP images need wxWidgets 3.3 or newer with libwebp. With wxWidgets 3.2 the browser shows the alt
-text, except on macOS, where it converts WebP with `sips`. OTP 29.1.1 builds its `wx` against 3.3
-only after a few patches; see `scripts/install-wx33.sh`.
+text, except on macOS, where it converts WebP with `sips`. On Debian/Ubuntu,
+`scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
+patches for that, which the script applies).
 
 ## Crash reports
 
