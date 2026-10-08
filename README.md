@@ -24,6 +24,18 @@ Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
 
+## Proxy
+
+The browser uses a proxy when the usual environment variables are set: `https_proxy`,
+`http_proxy` and `no_proxy` (the upper-case names also work). HTTPS pages use a CONNECT
+tunnel. Plain HTTP pages use an absolute-form request. A `user:pass@` part in the proxy
+URL is sent as `Proxy-Authorization`.
+
+`no_proxy` is a comma-separated list of host names, IP addresses, CIDR ranges or `*`.
+
+TLS checks stay on. If a proxy signs TLS with its own CA, put the CA file in
+`SSL_CERT_FILE`. The browser trusts that file and the system store.
+
 ## License
 
 [MIT](LICENSE). `priv/public_suffix_list.dat` is the Public Suffix List, licensed under MPL-2.0 (see the header of that file).
