@@ -1549,6 +1549,7 @@ defmodule Browser.Layout do
       hpct: pct_of(c["height"]),
       definite: box.definite,
       ratio: aspect_ratio(c["aspect-ratio"]),
+      flex_sized: c["@flex_sized"] == true,
       root: tag == "html",
       min: num(c["min-height"]),
       max: num(c["max-height"]),
@@ -3081,6 +3082,15 @@ defmodule Browser.Layout do
         do: %{cs | height: max(cs.hpct * st.cbh - cs.hx, 0), hdef: true},
         else: cs
 
+    # a wrapping column takes its height from its width and ratio, to know where to wrap
+    cs =
+      with %{height: nil, maxh: nil, wrap: true, dir: dir, ratio: {r, _}} <- cs,
+           true <- dir in [:column, :column_reverse] and avail < @unbounded / 2 do
+        %{cs | height: avail / r, hdef: true}
+      else
+        _ -> cs
+      end
+
     {laid, height} = flex_layout(st, cs, items, avail)
     # lets a measuring layout see how wide the container is (what surrounds it is added when
     # the atom is placed)
@@ -3542,8 +3552,12 @@ defmodule Browser.Layout do
     {fl, fr} = if o.bfc, do: float_offsets(st, st.y, st.y + max(o.h || 1, 1)), else: {0, 0}
     beside = avail - fl - fr
 
-    cw = to_content.(o.width) || ratio_width(o, hpad) || max(beside - ml0 - mr0 - hpad, 0)
     flex_item? = st.flex_item and st.blocks == []
+
+    # (a flex item is as wide as the flex algorithm made it, which has taken its ratio into account)
+    cw =
+      to_content.(o.width) || (not (flex_item? and o.flex_sized) && ratio_width(o, hpad)) ||
+        max(beside - ml0 - mr0 - hpad, 0)
 
     cw =
       if o.width == nil and o.h == nil and not flex_item?, do: ratio_limits(o, hpad, cw), else: cw
@@ -5994,6 +6008,7 @@ defmodule Browser.Layout do
       dir_rtl: c["direction"] == "rtl",
       rtl: c["direction"] == "rtl" and c["flex-wrap"] not in ["wrap", "wrap-reverse"],
       hpct: pct_of(c["height"]),
+      ratio: aspect_ratio(c["aspect-ratio"]),
       hdef: inner.(num(c["height"])) != nil,
       hx: vextra,
       fs: fs
@@ -6313,7 +6328,7 @@ defmodule Browser.Layout do
     margins = [it.mt, it.mb]
 
     if not cs.wrap and it.auto_height? and align in ["stretch", "normal"] and
-         :auto not in margins,
+         :auto not in margins and not it.mta and not it.mba,
        do: h - Enum.sum(margins)
   end
 
@@ -6328,6 +6343,8 @@ defmodule Browser.Layout do
         |> resolve_box_pct(containing_width())
         |> Map.drop(~w(width min-width max-width flex-basis))
         |> Map.merge(%{"margin-left" => 0.0, "margin-right" => 0.0})
+        # an item the author gave no width is as wide as the flex algorithm makes it
+        |> then(&if(c["width"] in [nil, :auto], do: Map.put(&1, "@flex_sized", true), else: &1))
         # a height the author gave is definite for what is inside
         |> then(
           &if(
@@ -6464,7 +6481,16 @@ defmodule Browser.Layout do
   end
 
   defp flex_row(st, cs, items, avail) do
-    items = Enum.map(items, &Map.put(&1, :hw, flex_base(st, &1, avail, cs) * 1.0))
+    items =
+      Enum.map(items, fn it ->
+        # (a ratio and a definite cross size give an item without a width a minimum width)
+        rmin =
+          if Map.get(it, :ratio) != nil and it.width == nil and ratio_item_height(it, cs) != nil,
+            do: ratio_border_width(it, ratio_item_height(it, cs)) * 1.0,
+            else: 0.0
+
+        it |> Map.put(:rmin, rmin) |> Map.put(:hw, flex_base(st, it, avail, cs) * 1.0)
+      end)
 
     lines =
       if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
@@ -6570,9 +6596,10 @@ defmodule Browser.Layout do
     # an explicit flex-basis below the automatic minimum is raised to it
     line =
       Enum.map(line, fn it ->
-        if it.basis != nil and flex_auto_min?(it) and it.hw < flex_min(st, it, avail),
-          do: %{it | hw: flex_min(st, it, avail)},
-          else: it
+        if (it.basis != nil or (it.width == nil and Map.get(it, :ratio) != nil)) and
+             flex_auto_min?(it) and it.hw < flex_min(st, it, avail),
+           do: %{it | hw: flex_min(st, it, avail)},
+           else: it
       end)
 
     free = avail - Enum.sum(Enum.map(line, outer)) - gaps
@@ -6753,7 +6780,12 @@ defmodule Browser.Layout do
   defp flex_auto_min?(it), do: not it.scroll? and it.minw in [nil, :auto]
 
   defp flex_min(st, it, avail) do
-    content = shrink_extent(st, it.sub, 1, it.key) * 1.0
+    # (an aspect ratio gives a box its width from its height: the content is measured without it)
+    content =
+      if Map.get(it, :ratio) != nil and it.rebuild != nil,
+        do: shrink_extent(st, it.rebuild.(%{"aspect-ratio" => nil}), 1, nil) * 1.0,
+        else: shrink_extent(st, it.sub, 1, it.key) * 1.0
+
     content = if is_number(it.maxw), do: min(content, it.maxw + it.extra * 1.0), else: content
 
     case it.width do
@@ -6761,7 +6793,7 @@ defmodule Browser.Layout do
         min(content, resolve(width, avail) + it.extra * 1.0)
 
       _ ->
-        content
+        max(content, Map.get(it, :rmin, 0.0))
     end
   end
 
@@ -7165,9 +7197,15 @@ defmodule Browser.Layout do
       content = if it.sizing == :border, do: box, else: box - it.vextra
       props = %{"height" => max(content, 0) * 1.0, "aspect-ratio" => nil}
       props = if definite?, do: Map.put(props, "@definite", true), else: props
+      # (an item with a ratio and no width of its own is as wide as its final height makes it)
+      w =
+        if Map.get(it, :ratio) != nil and it.width == nil,
+          do: ratio_border_width(it, max(content, 0)) * 1.0,
+          else: it.w
+
       sub = it.rebuild.(props)
-      {items, h, _} = flex_atom(st, sub, it.w, {it.key, round(target)})
-      %{it | items: items, h: max(h, 0)}
+      {items, h, _} = flex_atom(st, sub, w, {it.key, round(target)})
+      %{it | items: items, h: max(h, 0), w: w}
     else
       it
     end

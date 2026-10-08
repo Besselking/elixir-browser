@@ -5335,6 +5335,46 @@ defmodule Browser.LayoutTest do
       items |> Enum.filter(&(&1.type == :rect)) |> Enum.map(&{&1.x, &1.y, &1.w, &1.h})
     end
 
+    test "a row item with an aspect ratio is at least as wide as its content" do
+      html =
+        ~s(<div style="display:flex"><div style="background:green;height:100px;aspect-ratio:1/2;flex-basis:0"><div style="width:100px"></div></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 100}]
+
+      html =
+        ~s(<div style="display:flex"><div style="background:green;height:100px;aspect-ratio:1/2"><div style="width:100px"></div></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 100}]
+    end
+
+    test "a column item with an aspect ratio is as wide as its final height makes it" do
+      html =
+        ~s(<div style="display:inline-flex;flex-direction:column;flex-wrap:wrap;height:100px"><div style="background:green;aspect-ratio:1/1;min-height:0;height:50px;flex:1"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 100}]
+    end
+
+    test "a stretched item with a ratio is at least as wide as its height makes it" do
+      html =
+        ~s(<div style="display:flex;width:0;height:100px"><div style="background:green;aspect-ratio:1"></div></div>)
+
+      assert flex_rects(html) == [{0, 0, 100, 100}]
+    end
+
+    test "an item with auto cross margins does not stretch to give its ratio a width" do
+      html =
+        ~s(<div style="display:flex;height:100px"><div style="background:red;aspect-ratio:1;min-width:0;margin:auto 0"></div><div style="background:green;height:100px;width:100px"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) |> List.last() == {0, 0, 100, 100}
+    end
+
+    test "a wrapping column takes its height from its width and ratio" do
+      html =
+        ~s(<div style="display:flex;flex-direction:column;flex-wrap:wrap;width:100px;aspect-ratio:1"><div style="background:green;width:50px;height:100px"></div><div style="background:green;width:50px;height:100px"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 50, 100}, {50, 0, 50, 100}]
+    end
+
     test "a floated flex container is as wide as its items" do
       html = """
       <div style="display:flex;float:left;background:blue"><div style="width:20px;height:10px"></div></div>
