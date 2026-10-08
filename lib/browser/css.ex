@@ -35,6 +35,7 @@ defmodule Browser.CSS do
     css
     |> String.replace_invalid()
     |> strip_comments()
+    |> strip_markup_comments()
     |> xml_entities()
     |> blocks([], [])
     |> Enum.flat_map(fn {prelude, body, conds} ->
@@ -52,6 +53,14 @@ defmodule Browser.CSS do
         }
       end
     end)
+  end
+
+  # an XML comment (`<!-- text -->`) in a stylesheet of an XHTML page is no part of it; one that
+  # holds rules is the old way to hide them from browsers that know no style, and stays
+  defp strip_markup_comments(css) do
+    if String.contains?(css, "<!--"),
+      do: Regex.replace(~r/<!--([^{}]*?)-->/s, css, ""),
+      else: css
   end
 
   # In an XHTML page the `>` of a child selector is written `&gt;`: outside of strings, the three

@@ -364,4 +364,13 @@ defmodule Browser.CSSTest do
       assert [%{decls: [{"color", "green", false}]}] = CSS.parse("[|a] { color: green }")
     end
   end
+
+  describe "markup comments" do
+    test "an XML comment without braces is dropped, one holding rules stays" do
+      assert [%{decls: [{"color", "green", false}]}] =
+               CSS.parse("<!-- note --> p { color: green }")
+
+      assert [%{decls: [{"color", "red", false}]}] = CSS.parse("<!-- p { color: red } -->")
+    end
+  end
 end
