@@ -5827,6 +5827,7 @@ defmodule Browser.Layout do
       row_gap: row_gap(c["row-gap"], inner.(num(c["height"]))),
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
+      dir_rtl: c["direction"] == "rtl",
       rtl: c["direction"] == "rtl" and c["flex-wrap"] not in ["wrap", "wrap-reverse"],
       hpct: pct_of(c["height"]),
       hdef: inner.(num(c["height"])) != nil,
@@ -6262,7 +6263,11 @@ defmodule Browser.Layout do
   defp flex_layout(st, cs, items, avail) do
     items = Enum.sort_by(items, & &1.order)
     # a row is reversed line by line, once it has been broken into lines
-    items = if cs.dir == :column_reverse, do: Enum.reverse(items), else: items
+    # (a wrapping column breaks into columns first, and is reversed column by column)
+    items =
+      if cs.dir == :column_reverse and not (cs.wrap and (cs.height || cs.maxh) != nil),
+        do: Enum.reverse(items),
+        else: items
 
     if cs.dir in [:row, :row_reverse],
       do: flex_row(st, cs, items, avail),
@@ -6328,7 +6333,7 @@ defmodule Browser.Layout do
 
     {laid, start, between} =
       cond do
-        free <= 0 ->
+        free <= 0 and cs.content in ["stretch", "normal"] ->
           {laid, 0.0, 0.0}
 
         cs.content in ["stretch", "normal"] ->
@@ -6682,6 +6687,7 @@ defmodule Browser.Layout do
       sized = Enum.map(sized, &flex_column_basis(st, &1))
       cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
       cols = flex_column_stretch(st, cs, cols, avail)
+      cols = if cs.dir == :column_reverse, do: Enum.map(cols, &Enum.reverse/1), else: cols
       last = length(cols) - 1
 
       cols =
@@ -6694,14 +6700,37 @@ defmodule Browser.Layout do
           end)
         end)
 
-      cols = if cs.wrap_reverse, do: Enum.reverse(cols), else: cols
+      cols = if cs.wrap_reverse != cs.dir_rtl, do: Enum.reverse(cols), else: cols
 
-      {laid, {_x, tallest}} =
+      {laid, {x_end, tallest}} =
         Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
           {items, y} = flex_column_place(st, cs, col)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
-          {Enum.map(items, &move(&1, x, 0)), {x + width + round(cs.col_gap), max(tallest, y)}}
+
+          {Enum.map(items, &{&1, y}) |> Enum.map(fn {i, y} -> {move(i, x, 0), y} end),
+           {x + width + round(cs.col_gap), max(tallest, y)}}
         end)
+
+      # lines that start at the right edge are packed there
+      right_shift =
+        if cs.dir_rtl and not cs.wrap_reverse,
+          do: max(avail - (x_end - round(cs.col_gap)), 0),
+          else: 0
+
+      laid = for col <- laid, do: for({item, y} <- col, do: {move(item, right_shift, 0), y})
+
+      # (a column that packs at the end of an automatic height sits at the bottom)
+      end? = cs.justify in ["flex-end", "end"]
+      start? = cs.justify in ["flex-start", "start", "normal", "left", "right"]
+
+      at_end? =
+        cs.height == nil and
+          if(cs.dir == :column_reverse, do: start?, else: end?)
+
+      laid =
+        for col <- laid do
+          for {item, y} <- col, do: if(at_end?, do: move(item, 0, tallest - y), else: item)
+        end
 
       {List.flatten(laid), round(cs.height || tallest)}
     else

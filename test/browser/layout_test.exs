@@ -5388,6 +5388,21 @@ defmodule Browser.LayoutTest do
       assert flex_rects(html) == [{0, 0, 30, 10}]
     end
 
+    test "align-content: center lets lines overflow evenly on both sides" do
+      html =
+        ~s(<div style="display:flex;flex-wrap:wrap;align-content:center;width:50px;height:20px"><div style="width:50px;height:20px;background:red"></div><div style="width:50px;height:20px;background:blue"></div></div>)
+
+      assert Enum.sort(flex_rects(html)) == [{0, -10, 50, 20}, {0, 10, 50, 20}]
+    end
+
+    test "a column-reverse container breaks into columns in order, each packed at the bottom" do
+      html = """
+      <div style="display:flex;flex-flow:column-reverse wrap;align-items:flex-start;width:200px;max-height:100px"><div style="width:50px;height:40px;background:red"></div><div style="width:50px;height:80px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 40, 50, 40}, {50, 0, 50, 80}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
