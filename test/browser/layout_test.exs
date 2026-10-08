@@ -2196,6 +2196,15 @@ defmodule Browser.LayoutTest do
       assert [{+0.0, {255, 0, 0, 255}}, {1.0, {0, 0, 255, 255}}] = layer.stops
     end
 
+    test "the canvas places its image in the root element's padding box" do
+      html =
+        ~s|<html style="margin:20px;border:5px solid blue;padding:3px"><body style="background:url(a.png) no-repeat">x</body></html>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      [%{layers: [%{tile: {x, y, 10, 10}}]}] = of_type(items, :canvas)
+      assert {x, y} == {25, 25}
+    end
+
     test "an image layer appears once its size is known" do
       html = ~s|<div style="background: url(a.png) no-repeat; height: 30px">x</div>|
       {loading, _} = bgl(html, %{})

@@ -1411,8 +1411,13 @@ defmodule Browser.Style do
 
     fs =
       case resolved do
-        %{"font-size" => v} -> font_size(v, pfs, parent_root || @default_fs) || pfs
-        _ -> pfs
+        %{"font-size" => v} ->
+          font_size(v, pfs, parent_root || @default_fs, fn ->
+            font_units(idx, %{}, inherited, pfs)
+          end) || pfs
+
+        _ ->
+          pfs
       end
 
     color =
@@ -2042,16 +2047,14 @@ defmodule Browser.Style do
   # `em` in a background's position or size is the element's font size
   # em and ch lengths of a background position or size, as pixels
   defp font_units_to_px(v, env) do
-    ch = env.fs * Map.get(env, :ch, 0.6)
+    units = [{"ch", env.fs * Map.get(env, :ch, 0.6)}, {"ex", env.fs * Map.get(env, :ex, 0.5)}]
 
-    v
-    |> ems_to_px(env.fs)
-    |> then(
-      &Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i, &1, fn _, n ->
+    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit, size}, acc ->
+      Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))#{unit}\b/i, acc, fn _, n ->
         {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
-        "#{Float.round(f * ch, 3)}px"
+        "#{Float.round(f * size, 3)}px"
       end)
-    )
+    end)
   end
 
   defp ems_to_px(v, fs) do
@@ -2095,7 +2098,7 @@ defmodule Browser.Style do
     "xxx-large" => 48.0
   }
 
-  defp font_size(v, pfs, root) do
+  defp font_size(v, pfs, root, units) do
     cond do
       Map.has_key?(@font_keywords, v) ->
         @font_keywords[v]
@@ -2111,6 +2114,11 @@ defmodule Browser.Style do
 
       m = Regex.run(~r/\A([\d.]+)%\z/, v) ->
         pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
+
+      # (an `ex` or `ch` in a font size is of the parent's font)
+      Regex.match?(~r/(ex|ch)\b/i, v) ->
+        {ex, ch} = units.()
+        length(v, %{fs: pfs, root: root, ex: ex, ch: ch})
 
       true ->
         length(v, %{fs: pfs, root: root})

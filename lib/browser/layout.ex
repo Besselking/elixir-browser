@@ -195,7 +195,7 @@ defmodule Browser.Layout do
         {items, height}
 
       canvas ->
-        {[canvas_item(canvas, width, max(height, view_height), opts[:images]) | items], height}
+        {[canvas_item(canvas, width, height, view_height, opts[:images]) | items], height}
     end
   end
 
@@ -478,13 +478,13 @@ defmodule Browser.Layout do
       cond do
         has_background?(computed(hattrs)) ->
           html = {:element, "html", without_background(hattrs), kids}
-          {List.replace_at(nodes, i, html), canvas_style(computed(hattrs))}
+          {List.replace_at(nodes, i, html), canvas_style(computed(hattrs), computed(hattrs))}
 
         body && has_background?(computed(elem(body, 2))) ->
           {:element, "body", battrs, bkids} = body
           body = {:element, "body", without_background(battrs), bkids}
           html = {:element, "html", hattrs, List.replace_at(kids, body_i, body)}
-          {List.replace_at(nodes, i, html), canvas_style(computed(battrs))}
+          {List.replace_at(nodes, i, html), canvas_style(computed(battrs), computed(hattrs))}
 
         true ->
           {nodes, nil}
@@ -520,16 +520,31 @@ defmodule Browser.Layout do
     )
   end
 
-  defp canvas_style(c) do
+  defp canvas_style(c, root) do
     %{
+      root: box("html", root),
       color: if(color?(c["background-color"]), do: over_white(c["background-color"])),
       bgimg: bgimg_spec(c),
       current: if(match?({_, _, _}, c["color"]), do: c["color"], else: {0, 0, 0})
     }
   end
 
-  defp canvas_item(canvas, width, height, images) do
-    area = {0, 0, width, height}
+  defp canvas_item(canvas, width, doc_height, view_height, images) do
+    height = max(doc_height, view_height)
+    clip = {0, 0, width, height}
+
+    # the images are placed in the root element's padding box
+    area =
+      case canvas.root do
+        %{bw: {bt, br, bb, bl}} = r ->
+          ml = auto_zero(r.ml)
+          mr = auto_zero(r.mr)
+          mt = r.mt
+          {ml + bl, mt + bt, max(width - ml - mr - bl - br, 0), max(doc_height - mt - bt - bb, 0)}
+
+        _ ->
+          clip
+      end
 
     layers =
       if canvas.bgimg,
@@ -537,7 +552,7 @@ defmodule Browser.Layout do
           Backgrounds.paint_layers(
             canvas.bgimg,
             area,
-            area,
+            clip,
             images,
             color4(canvas.current),
             viewport_area()

@@ -285,6 +285,19 @@ defmodule Browser.StyleTest do
       assert comp(html, css, "p")["padding-left"] == 36.0
     end
 
+    test "ex in a font size is of the parent's font" do
+      html = ~s(<div><p>a</p></div>)
+      css = "div { font: 20px/1 Ahem } p { font-size: 2.5ex }"
+
+      units = fn %{family: family} ->
+        if String.contains?(String.downcase(family), "ahem"), do: {0.8, 1.0}, else: {0.5, 0.6}
+      end
+
+      env = %{type: "screen", width: 800, height: 600, dppx: 1.0, font_units: units}
+      nodes = Style.prune(HTML.parse(html), Style.index([{:author, css}], env))
+      assert computed_of(nodes, "p")["font-size"] == 40.0
+    end
+
     test "UA defaults: headings, links, bold, monospace" do
       html = ~s(<h2>a</h2><a href="/x">b</a><b>c</b><code>d</code>)
       assert comp(html, "", "h2")["font-size"] == 24.0

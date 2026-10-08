@@ -418,7 +418,7 @@ defmodule Browser.Backgrounds do
   end
 
   # a length in `ch`, which the style turns into pixels before this module sees it
-  defp ch?(tok), do: Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)ch\z/, tok)
+  defp ch?(tok), do: Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:ch|ex)\z/, tok)
 
   defp shorthand_token("/", {acc, x}), do: {%{acc | phase: :size}, x}
 

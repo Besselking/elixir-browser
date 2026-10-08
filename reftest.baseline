@@ -130,6 +130,9 @@ css/CSS2/backgrounds/background-attachment-applies-to-012.xht
 css/CSS2/backgrounds/background-attachment-applies-to-013.xht
 css/CSS2/backgrounds/background-attachment-applies-to-014.xht
 css/CSS2/backgrounds/background-attachment-applies-to-015.xht
+css/CSS2/backgrounds/background-bg-pos-204.xht
+css/CSS2/backgrounds/background-bg-pos-206.xht
+css/CSS2/backgrounds/background-bg-pos-208.xht
 css/CSS2/backgrounds/background-body-001.xht
 css/CSS2/backgrounds/background-color-129.xht
 css/CSS2/backgrounds/background-color-174.xht
@@ -166,6 +169,8 @@ css/CSS2/backgrounds/background-image-cover-002.xht
 css/CSS2/backgrounds/background-image-cover-004.xht
 css/CSS2/backgrounds/background-image-cover-attachment-001.xht
 css/CSS2/backgrounds/background-image-transparency-001.xht
+css/CSS2/backgrounds/background-position-001.xht
+css/CSS2/backgrounds/background-position-002.xht
 css/CSS2/backgrounds/background-position-004.xht
 css/CSS2/backgrounds/background-position-005.xht
 css/CSS2/backgrounds/background-position-006.xht
@@ -272,13 +277,17 @@ css/CSS2/backgrounds/background-repeat-applies-to-014.xht
 css/CSS2/backgrounds/background-repeat-applies-to-015.xht
 css/CSS2/backgrounds/background-reset-001.xht
 css/CSS2/backgrounds/background-root-001.xht
+css/CSS2/backgrounds/background-root-002.xht
 css/CSS2/backgrounds/background-root-004.xht
 css/CSS2/backgrounds/background-root-005.xht
 css/CSS2/backgrounds/background-root-006.xht
+css/CSS2/backgrounds/background-root-007.xht
 css/CSS2/backgrounds/background-root-008.xht
 css/CSS2/backgrounds/background-root-009.xht
 css/CSS2/backgrounds/background-root-010.xht
 css/CSS2/backgrounds/background-root-011.xht
+css/CSS2/backgrounds/background-root-012a.xht
+css/CSS2/backgrounds/background-root-012b.xht
 css/CSS2/backgrounds/background-root-013a.xht
 css/CSS2/backgrounds/background-root-013b.xht
 css/CSS2/backgrounds/background-root-014a.xht
@@ -286,8 +295,11 @@ css/CSS2/backgrounds/background-root-014b.xht
 css/CSS2/backgrounds/background-root-015.xht
 css/CSS2/backgrounds/background-root-016.xht
 css/CSS2/backgrounds/background-root-017.xht
+css/CSS2/backgrounds/background-root-018.xht
 css/CSS2/backgrounds/background-root-019.xht
 css/CSS2/backgrounds/background-root-020.xht
+css/CSS2/backgrounds/background-root-023.xht
+css/CSS2/backgrounds/background-root-024.xht
 css/CSS2/borders/border-001.xht
 css/CSS2/borders/border-003.xht
 css/CSS2/borders/border-applies-to-001.xht
@@ -824,6 +836,7 @@ css/CSS2/box-display/containing-block-019.xht
 css/CSS2/box-display/containing-block-020.xht
 css/CSS2/box-display/containing-block-021.xht
 css/CSS2/box-display/containing-block-022.xht
+css/CSS2/box-display/containing-block-023.xht
 css/CSS2/box-display/containing-block-026.xht
 css/CSS2/box-display/containing-block-027.xht
 css/CSS2/box-display/containing-block-028.xht
@@ -873,6 +886,7 @@ css/CSS2/css1/c414-flt-fit-005.xht
 css/CSS2/css1/c414-flt-fit-006.xht
 css/CSS2/css1/c45-bg-canvas-000.xht
 css/CSS2/css1/c526-font-sz-001.xht
+css/CSS2/css1/c526-font-sz-002.xht
 css/CSS2/css1/c531-color-000.xht
 css/CSS2/css1/c532-bgcolor-000.xht
 css/CSS2/css1/c532-bgcolor-001.xht
