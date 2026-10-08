@@ -2542,6 +2542,9 @@ defmodule Browser.JS.DOM do
 
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
 
+  @doc "The address of the page, for the origin of its databases."
+  def page_url, do: st().url
+
   @doc """
   Another page changed `localStorage`: fires `storage` on the window with what changed
   (`key` is nil for `clear`).

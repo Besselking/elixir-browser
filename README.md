@@ -44,3 +44,9 @@ TLS checks stay on. If a proxy signs TLS with its own CA, put the CA file in
 ## License
 
 [MIT](LICENSE). `priv/public_suffix_list.dat` is the Public Suffix List, licensed under MPL-2.0 (see the header of that file).
+
+## IndexedDB
+
+Pages can use `indexedDB`. Each origin has its own databases. The browser keeps them in memory and writes them to `indexed_db.etf` in the user data directory. A database is written as one JSON text each time a transaction commits. When two pages of the same origin write to one database, the last writer wins.
+
+To run the web-platform-tests for IndexedDB, use a sparse checkout of the `IndexedDB` and `resources` folders and run `mix run --no-start scripts/wpt-indexeddb.exs WPT_DIR [FILTER] [--verbose]`. Tests with very large values (more than 100 KB per record) time out, because the JavaScript interpreter is slow with big buffers.
