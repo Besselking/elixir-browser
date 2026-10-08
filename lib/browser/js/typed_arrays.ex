@@ -213,6 +213,9 @@ defmodule Browser.JS.TypedArrays do
     buf
   end
 
+  @doc "A new ArrayBuffer holding the bytes written as hex digits in `hex` (an even number of digits)."
+  def buffer_from_hex(hex), do: new_buffer(Base.decode16!(hex, case: :mixed))
+
   defp resizable?(bid), do: Map.has_key?(Interp.deref(bid), :max)
 
   @doc "A `Uint8Array` over an immutable ArrayBuffer of `bytes` (the value of a bytes module)."

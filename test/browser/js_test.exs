@@ -592,6 +592,16 @@ defmodule Browser.JSTest do
       assert js(~S'/a\/b/.source') == "a\\/b"
     end
 
+    test "split with a regular expression: groups, limit, empty matches, long text" do
+      assert js(~S'JSON.stringify("a1b22c".split(/(\d)+/))') == ~S'["a","1","b","2","c"]'
+      assert js(~S'JSON.stringify("a1b22c".split(/(\d)+/, 3))') == ~S'["a","1","b"]'
+      assert js(~S'JSON.stringify("abc".split(/(?:)/))') == ~S'["a","b","c"]'
+      assert js(~S'JSON.stringify("abc".split(/b*/))') == ~S'["a","c"]'
+      assert js(~S'JSON.stringify("x,y".split(/(,)|(;)/))') == ~S'["x",",",null,"y"]'
+      assert js(~S'JSON.stringify(",é,😀,".split(/,/))') == ~S'["","é","😀",""]'
+      assert js(~S'new Array(50001).join("ab,").split(/,/).length') == 50_001.0
+    end
+
     test "string methods with a regular expression" do
       assert js(~S'"a1b22c".replace(/\d+/g, m => "<" + m + ">")') == "a<1>b<22>c"
       assert js(~S'"John Smith".replace(/(\w+) (\w+)/, "$2, $1")') == "Smith, John"

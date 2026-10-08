@@ -755,20 +755,112 @@ defmodule Browser.JS.RegExp do
     c = species_constructor(rx, ctor())
     flags = to_str(Interp.get(rx, "flags"))
     new_flags = if String.contains?(flags, "y"), do: flags, else: flags <> "y"
-    splitter = construct(c, [rx, new_flags])
     lim = if limit == :undefined, do: 4_294_967_295, else: to_uint32(limit)
-    size = cp_count(s)
 
-    cond do
-      lim == 0 ->
-        new_array([])
+    if lim > 0 and s != "" and c == ctor() and plain_regexp?(rx) and
+         not String.contains?(flags, "y") do
+      # a RegExp that nothing has changed: the same result, without one match for each position
+      scan_split(rx, s, lim)
+    else
+      splitter = construct(c, [rx, new_flags])
+      size = cp_count(s)
 
-      size == 0 ->
-        if regexp_exec(splitter, s) != :null, do: new_array([]), else: new_array([s])
+      cond do
+        lim == 0 ->
+          new_array([])
 
-      true ->
-        split_loop(splitter, s, size, lim, 0, 0, [])
+        size == 0 ->
+          if regexp_exec(splitter, s) != :null, do: new_array([]), else: new_array([s])
+
+        true ->
+          split_loop(splitter, s, size, lim, 0, 0, [])
+      end
     end
+  end
+
+  defp plain_regexp?(rx) do
+    regexp?(rx) and Interp.get(rx, "exec") == :erlang.get(:regexp_builtin_exec)
+  end
+
+  # `split` for a plain RegExp: the matches are searched from left to right in the text (with the
+  # byte positions of the engine), and the pieces cut out of it
+  defp scan_split(rx, s, lim) do
+    %{re: re, names: {count, _}} = deref(elem(rx, 1))
+    wf = Str.well_formed(s)
+    size = byte_size(s)
+
+    # (one search for all the matches: the engine checks the whole text each time it is called)
+    case :re.run(wf, re, [:global, {:capture, :all, :index}]) do
+      {:match, matches} ->
+        if Enum.any?(matches, fn [{_, len} | _] -> len == 0 end) do
+          scan_split(re, count, s, wf, size, lim, 0, 0, [], 0)
+        else
+          cut_matches(matches, count, s, size, lim, 0, [], 0)
+        end
+
+      :nomatch ->
+        new_array([s])
+    end
+  end
+
+  # no match is empty: each one ends a piece (and its groups follow)
+  defp cut_matches([[{ms, ml} | caps] | rest], count, s, size, lim, p, acc, n) do
+    groups = for {gs, gl} <- caps, do: if(gs < 0, do: :undefined, else: binary_part(s, gs, gl))
+    groups = groups ++ List.duplicate(:undefined, count - length(groups))
+    acc = Enum.reverse(groups, [binary_part(s, p, ms - p) | acc])
+    n = n + 1 + length(groups)
+
+    if n >= lim,
+      do: new_array(acc |> Enum.reverse() |> Enum.take(lim)),
+      else: cut_matches(rest, count, s, size, lim, ms + ml, acc, n)
+  end
+
+  defp cut_matches([], _count, s, size, lim, p, acc, _n),
+    do: new_array(Enum.reverse([binary_part(s, p, size - p) | acc]) |> Enum.take(lim))
+
+  defp scan_split(re, count, s, wf, size, lim, p, q, acc, n) do
+    found =
+      if q < size, do: :re.run(wf, re, [{:capture, :all, :index}, {:offset, q}]), else: :nomatch
+
+    case found do
+      {:match, [{ms, ml} | caps]} when ms < size ->
+        e = ms + ml
+
+        if e == p do
+          scan_split(re, count, s, wf, size, lim, p, next_char(wf, ms), acc, n)
+        else
+          acc = [binary_part(s, p, ms - p) | acc]
+
+          groups =
+            for {gs, gl} <- caps, do: if(gs < 0, do: :undefined, else: binary_part(s, gs, gl))
+
+          groups = groups ++ List.duplicate(:undefined, count - length(groups))
+          acc = Enum.reverse(groups, acc)
+          n = n + 1 + length(groups)
+
+          if n >= lim do
+            new_array(acc |> Enum.reverse() |> Enum.take(lim))
+          else
+            scan_split(re, count, s, wf, size, lim, e, e, acc, n)
+          end
+        end
+
+      _ ->
+        new_array(Enum.reverse([binary_part(s, p, size - p) | acc]) |> Enum.take(lim))
+    end
+  end
+
+  # the byte position after the character that starts at `pos`
+  defp next_char(bin, pos) do
+    size =
+      case :binary.at(bin, pos) do
+        b when b < 0x80 -> 1
+        b when b < 0xE0 -> 2
+        b when b < 0xF0 -> 3
+        _ -> 4
+      end
+
+    pos + size
   end
 
   defp to_uint32(v) do
@@ -1262,6 +1354,8 @@ defmodule Browser.JS.RegExp do
 
       exec(this, to_str(arg(args, 0)))
     end)
+
+    :erlang.put(:regexp_builtin_exec, Interp.get(p, "exec"))
 
     def_fn(p, "toString", fn this, _ ->
       rx = require_object(this)

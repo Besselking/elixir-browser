@@ -97,7 +97,8 @@ defmodule Browser.JS.Runtime do
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
-  defp call(pid, request, timeout \\ @call_timeout) do
+  defp call(pid, request, timeout \\ nil) do
+    timeout = timeout || Application.get_env(:browser, :js_call_timeout, @call_timeout)
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
 
@@ -133,6 +134,7 @@ defmodule Browser.JS.Runtime do
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
     Browser.JS.Editing.install(scope)
+    Browser.JS.IndexedDB.install(scope)
     Modules.reset()
 
     Process.put(:js_import, fn spec, from, p, type ->
@@ -172,6 +174,14 @@ defmodule Browser.JS.Runtime do
         if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
+      {:idb, _, _} = msg ->
+        idb_message(t0, msg)
+        loop(t0)
+
+      {:idb, :versionchange, _, _, _, _, _} = msg ->
+        idb_message(t0, msg)
+        loop(t0)
+
       {:scrolled, x, y} ->
         # only the newest position matters when several have piled up
         {x, y} = latest_scroll(x, y)
@@ -194,6 +204,33 @@ defmodule Browser.JS.Runtime do
         fire_due(t0)
         loop(t0)
     end
+  end
+
+  # another page (or this one) changes a database: the connections hear of it
+  defp idb_message(t0, msg) do
+    Process.put(:js_now, elapsed(t0))
+    Process.put(:js_steps, @steps)
+    guard(fn -> Browser.JS.IndexedDB.deliver(msg) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    reply = finish(%{})
+
+    if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+  end
+
+  # the messages about databases that are waiting, for `flush`
+  defp drain_idb do
+    receive do
+      {:idb, _, _} = msg -> idb_message_now(msg)
+      {:idb, :versionchange, _, _, _, _, _} = msg -> idb_message_now(msg)
+    after
+      0 -> false
+    end
+  end
+
+  defp idb_message_now(msg) do
+    guard(fn -> Browser.JS.IndexedDB.deliver(msg) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    true
   end
 
   defp latest_scroll(x, y) do
@@ -404,11 +441,21 @@ defmodule Browser.JS.Runtime do
 
   defp describe(v), do: Builtins.inspect_js(v, 0, [])
 
+  # every pending timer, with the database messages that come between them (a message is
+  # heard in the task after the one that caused it, as in the loop)
   defp run_timers do
-    guard(
-      fn -> Builtins.run_timers(fn v -> log(:error, "Uncaught " <> describe(v)) end) end,
-      :ok
-    )
+    on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end
+    guard(fn -> timers_and_messages(on_error) end, :ok)
+  end
+
+  defp timers_and_messages(on_error) do
+    drained = drain_idb()
+
+    cond do
+      Builtins.run_next_timer(on_error) -> timers_and_messages(on_error)
+      drained -> timers_and_messages(on_error)
+      true -> :ok
+    end
   end
 
   # ── scripts ────────────────────────────────────────────────

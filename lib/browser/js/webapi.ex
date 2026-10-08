@@ -357,7 +357,24 @@ defmodule Browser.JS.WebAPI do
       return out;
     });
 
-    def("structuredClone", function (v) { return v === undefined ? v : JSON.parse(JSON.stringify(v)); });
+    if (typeof URL === "function") {
+      if (!URL.canParse) URL.canParse = function canParse(u, b) { try { new URL(u, b); return true; } catch (e) { return false; } };
+      if (!URL.parse) URL.parse = function parse(u, b) { try { return new URL(u, b); } catch (e) { return null; } };
+    }
+
+    // indexedDB and its classes are in priv/js/indexeddb.js, which replaces these on first use;
+    // so does structuredClone (it needs the same tagged form)
+    ["indexedDB", "IDBFactory", "IDBDatabase", "IDBObjectStore", "IDBIndex", "IDBCursor", "IDBCursorWithValue", "IDBRecord", "IDBTransaction",
+     "IDBRequest", "IDBOpenDBRequest", "IDBKeyRange", "IDBVersionChangeEvent"].forEach(function (n) {
+      Object.defineProperty(g, n, { configurable: true, enumerable: false,
+        get: function () { __load_idb(); var d = Object.getOwnPropertyDescriptor(g, n); return d && "value" in d ? d.value : undefined; },
+        set: function (v) { Object.defineProperty(g, n, { value: v, writable: true, configurable: true }); } });
+    });
+    def("structuredClone", function structuredClone(v) {
+      if (arguments.length === 0) throw new TypeError("structuredClone requires 1 argument.");
+      __load_idb();
+      return g.__structuredClone(v);
+    });
 
     // ── performance, selection, fonts, misc ──────────────────
     if (typeof performance === "object") {
