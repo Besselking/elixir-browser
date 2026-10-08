@@ -23,6 +23,21 @@ defmodule Browser.ModalTest do
   defp word(items, text), do: Enum.find(items, &(&1[:text] == text))
 
   describe "the top layer" do
+    test "the ring and caret of a field in a modal dialog are drawn above the dialog" do
+      page = modal_page("<dialog open><input id=i placeholder=v></dialog>")
+
+      cid =
+        page.forms.controls |> Map.values() |> Enum.find(&(&1.tag == "input")) |> Map.get(:cid)
+
+      {items, _} =
+        Layout.layout(page.nodes, 800, &measure/2, 600, focus: %{cid: cid, caret: {0, 0}})
+
+      for type <- [:ring, :caret] do
+        item = Enum.find(items, &(&1.type == type))
+        assert item.z == 2_147_483_647
+      end
+    end
+
     test "a modal dialog is centred in the window, above the page" do
       items = lay(modal_page("<p>behind</p><dialog open><p>inside</p></dialog>"))
       inside = word(items, "inside")
@@ -131,6 +146,43 @@ defmodule Browser.ModalTest do
       page = Page.build("<style>#{css}</style><dialog open>p</dialog>", "about:test")
       items = elem(Layout.layout(page.nodes, 800, &measure/2, 600), 0)
       refute word(items, "p").color == {1, 2, 3}
+    end
+  end
+
+  describe "popovers" do
+    defp open_popover(page) do
+      mark = fn
+        {:element, "div", attrs, kids}, f ->
+          attrs =
+            if List.keymember?(attrs, "popover", 0), do: attrs ++ [{"@popover", ""}], else: attrs
+
+          {:element, "div", attrs, Enum.map(kids, &f.(&1, f))}
+
+        {:element, t, a, k}, f ->
+          {:element, t, a, Enum.map(k, &f.(&1, f))}
+
+        other, _ ->
+          other
+      end
+
+      Page.from_raw(page, Enum.map(page.raw, &mark.(&1, mark)), Style.default_env())
+    end
+
+    test "a popover is hidden until it is open, then centred in the window above the page" do
+      page = Page.build("<p>behind</p><div popover>inside</div>", "about:test")
+      refute word(lay(page), "inside")
+
+      items = page |> open_popover() |> lay()
+      inside = word(items, "inside")
+      assert inside.stick == :fixed
+      assert inside.x > 300 and inside.x < 500
+      assert inside.z > Map.get(word(items, "behind"), :z, 0)
+    end
+
+    test "an open popover leaves the page's controls usable" do
+      page = Page.build("<input><div popover><button>x</button></div>", "about:test")
+      page = open_popover(page)
+      assert Forms.focus_order(page.forms.controls) |> length() == 2
     end
   end
 end

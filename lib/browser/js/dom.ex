@@ -300,8 +300,9 @@ defmodule Browser.JS.DOM do
   end
 
   # a dialog shown with `showModal()` (see `Browser.Modal`)
-  defp modal_attr(n),
-    do: if(List.keymember?(n.internal, "@modal", 0), do: [{"@modal", ""}], else: [])
+  defp modal_attr(n) do
+    for key <- ["@modal", "@popover"], List.keymember?(n.internal, key, 0), do: {key, ""}
+  end
 
   defp export_attrs(%{tag: "input"} = n) do
     attrs = n.attrs
@@ -749,6 +750,37 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  @doc "What a click that no script stopped does to popovers: the button's target, light dismiss."
+  def popover_click(target) do
+    nid =
+      case target do
+        {:control, cid} -> control_node(cid)
+        {:numbered, n} -> nid_numbered(n)
+        _ -> nil
+      end
+
+    call_global("__popoverClick", [if(nid, do: wrap(nid), else: :null)])
+  end
+
+  @doc "The controls in the form numbered `fid` go back to the values their markup gives."
+  def reset_form(fid) do
+    case form_node(fid) do
+      nil -> :ok
+      nid -> reset_controls(nid)
+    end
+  end
+
+  # the same for the form with element number `nid`
+  def reset_controls(nid) do
+    for el <- elements(nid), node(el).tag in ["input", "textarea", "select", "option"] do
+      update_node(el, fn n ->
+        %{n | props: Map.drop(n.props, ["value", "checked", "selectedIndex", "selected"])}
+      end)
+    end
+
+    :ok
+  end
+
   @doc "A click on the backdrop of the dialog whose number, made negative, is `n`."
   def dialog_backdrop(n) do
     case nid_numbered(n) do
@@ -760,6 +792,28 @@ defmodule Browser.JS.DOM do
   @doc "`<form method=dialog>` number `fid` was submitted by the control `cid` (nil: by script)."
   def dialog_submit(fid, cid) do
     case form_node(fid) do
+      nil ->
+        :ok
+
+      form when is_integer(form) ->
+        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+             not formmethod_dialog?(cid),
+           do: :ok,
+           else: do_dialog_submit(form, cid)
+    end
+  end
+
+  defp formmethod_dialog?(nil), do: false
+
+  defp formmethod_dialog?(cid) do
+    case control_node(cid) do
+      nil -> false
+      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+    end
+  end
+
+  defp do_dialog_submit(form, cid) do
+    case form do
       nil ->
         :ok
 
@@ -1999,6 +2053,7 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:pseudo, "enabled", _}), do: get_attr(n, "disabled") == nil
   defp match_cond(n, {:pseudo, "root", _}), do: n.tag == "html"
   defp match_cond(n, {:pseudo, "modal", _}), do: List.keymember?(n.internal, "@modal", 0)
+  defp match_cond(n, {:pseudo, "popover-open", _}), do: List.keymember?(n.internal, "@popover", 0)
 
   defp match_cond(n, {:pseudo, "open", _}),
     do: n.tag in ["dialog", "details"] and open_of(n) == true
@@ -3646,6 +3701,18 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
+    # a popover is (or is no longer) showing
+    def_fn(p, "__setPopover", fn this, args ->
+      on? = truthy(arg(args, 0))
+
+      update_node(this_nid(this), fn n ->
+        internal = List.keydelete(n.internal, "@popover", 0)
+        %{n | internal: if(on?, do: internal ++ [{"@popover", 1}], else: internal)}
+      end)
+
+      :undefined
+    end)
+
     def_fn(p, "click", fn this, _ ->
       nid = this_nid(this)
       if dispatch(nid, "click", %{}) == :ok, do: activate(nid)
@@ -3662,7 +3729,14 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    def_fn(p, "reset", fn _this, _ -> :undefined end)
+    def_fn(p, "reset", fn this, _ ->
+      nid = this_nid(this)
+
+      if dispatch(nid, "reset", %{bubbles: true, cancelable: true}) != :prevented,
+        do: reset_controls(nid)
+
+      :undefined
+    end)
 
     def_fn(p, "getBoundingClientRect", fn this, _ -> rect_object(this_nid(this)) end)
 
@@ -3703,6 +3777,10 @@ defmodule Browser.JS.DOM do
   # what a click does when no script stopped it: a submit button submits its form
   defp activate(nid) do
     n = node(nid)
+
+    if n.tag in ["button", "input"] and get_attr(n, "popovertarget") != nil and
+         get_attr(n, "disabled") == nil,
+       do: call_global("__popoverInvoke", [wrap(nid)])
 
     submit? =
       get_attr(n, "disabled") == nil and

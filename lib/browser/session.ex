@@ -784,8 +784,9 @@ defmodule Browser.Session do
         state = cancel_layout_job(state)
 
         # what the user typed meanwhile is not in what the job laid out: lay out again
+        # (the job does not draw the focus ring and caret: a focused control needs its own)
         state =
-          if carried == %{},
+          if carried == %{} and state.focus == nil,
             do: apply_layout(state, items, height, width, :full),
             else: start_layout_job(state)
 
@@ -1516,6 +1517,7 @@ defmodule Browser.Session do
 
   # gives `cid` the focus; the caret goes to `where`: :end or an index
   defp focus(state, cid, where) do
+    old = state.focus
     state = if state.efocus, do: blur_editor(state), else: state
     control = control(state, cid)
     UI.focus_page(state.ui)
@@ -1533,7 +1535,29 @@ defmodule Browser.Session do
       end
 
     state = %{state | focus: cid, caret: caret, menu: nil, fanchor: nil, fdrag: false}
-    if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    state =
+      if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    focus_events(state, old, cid)
+  end
+
+  # `blur` and `focusout` for the control that lost focus, then `focus` and `focusin` for the
+  # one that got it (nil for none)
+  defp focus_events(%{js: nil} = state, _old, _new), do: state
+  defp focus_events(state, same, same), do: state
+
+  defp focus_events(state, old, new) do
+    init = %{bubbles: false, cancelable: false}
+    up = %{bubbles: true, cancelable: false}
+
+    steps =
+      if(old, do: [{old, "blur", init}, {old, "focusout", up}], else: []) ++
+        if new, do: [{new, "focus", init}, {new, "focusin", up}], else: []
+
+    Enum.reduce(steps, state, fn {cid, type, init}, state ->
+      state |> js_event({:control, cid}, type, init) |> elem(0)
+    end)
   end
 
   # a script gave the control with element number `nid` the focus (`:blur`: took it away): at
@@ -1565,7 +1589,13 @@ defmodule Browser.Session do
   end
 
   defp blur(state) do
-    state |> stop_blink() |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false}) |> relayout()
+    old = state.focus
+
+    state
+    |> stop_blink()
+    |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false})
+    |> relayout()
+    |> focus_events(old, nil)
   end
 
   defp ensure_visible(state, cid) do
@@ -1950,10 +1980,23 @@ defmodule Browser.Session do
   end
 
   defp activate(state, %{type: "reset"} = control) do
-    state.page.form_state
-    |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
-    |> then(&set_form_state(state, &1))
-    |> relayout()
+    case js_event(state, {:control, control.cid}, "click") do
+      {state, true} ->
+        state
+
+      {state, false} ->
+        # the scripts reset their controls in the `reset` event's default action
+        case js_event(state, {:form, control.form}, "reset") do
+          {state, true} ->
+            state
+
+          {state, false} ->
+            state.page.form_state
+            |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
+            |> then(&set_form_state(state, &1))
+            |> relayout()
+        end
+    end
   end
 
   defp activate(state, %{type: type} = control) when type in ["submit", "image"],
@@ -1973,24 +2016,24 @@ defmodule Browser.Session do
       case if(clicked, do: js_event(state, {:control, clicked}, "click"), else: {state, false}) do
         {state, true} -> {state, true}
         {state, false} when form == nil -> {state, true}
-        {state, false} -> js_event(state, {:form, form}, "submit")
+        # (the script runtime closes the dialog of a `method="dialog"` form after the event)
+        {state, false} -> js_event(state, {:form, form}, "submit", %{"submitter" => clicked})
       end
 
-    if prevented, do: state, else: navigate_form(state, form, clicked)
+    if prevented or dialog_form?(state, form),
+      do: state,
+      else: navigate_form(state, form, clicked)
   end
 
-  # `<form method="dialog">` closes the dialog it is in instead of going anywhere
-  defp navigate_form(%{js: js, page: page} = state, form, clicked) when js != nil do
-    case page.forms.forms do
-      %{^form => %{method: "dialog"}} ->
-        apply_js(state, Browser.JS.Runtime.dialog_submit(js, form, clicked))
+  defp dialog_form?(%{page: %{forms: %{forms: forms}}}, form),
+    do: match?(%{^form => %{method: "dialog"}}, forms)
 
-      _ ->
-        navigate_form_url(state, form, clicked)
-    end
+  defp dialog_form?(_state, _form), do: false
+
+  # `form.submit()` of a script and the like come here: a dialog form goes nowhere
+  defp navigate_form(state, form, clicked) do
+    if dialog_form?(state, form), do: state, else: navigate_form_url(state, form, clicked)
   end
-
-  defp navigate_form(state, form, clicked), do: navigate_form_url(state, form, clicked)
 
   defp navigate_form_url(state, form, clicked) do
     page = state.page
@@ -2125,8 +2168,8 @@ defmodule Browser.Session do
   # fires an event in the page's scripts: -> {state, default prevented?}
   defp js_event(%{js: nil} = state, _target, _type), do: {state, false}
 
-  defp js_event(state, target, type) do
-    reply = Browser.JS.Runtime.dispatch(state.js, target, type, %{}, controls_snapshot(state))
+  defp js_event(state, target, type, init \\ %{}) do
+    reply = Browser.JS.Runtime.dispatch(state.js, target, type, init, controls_snapshot(state))
     {apply_js(state, reply), reply.prevented}
   end
 
@@ -2142,7 +2185,9 @@ defmodule Browser.Session do
 
     state =
       if reply.dirty and reply.raw != nil and state.page != nil,
-        do: start_page_job(state, reply.raw),
+        # the tree has the values the user had typed (the scripts were given them, and may have
+        # changed them since): only what is typed from now on is carried over to the new page
+        do: start_page_job(%{state | page_edits: %{}}, reply.raw),
         else: state
 
     sync_editor(state, reply)

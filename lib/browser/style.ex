@@ -95,6 +95,10 @@ defmodule Browser.Style do
     border: solid; padding: 1em; background-color: #ffffff; color: #000000 }
   dialog:modal { position: fixed; inset-block: 0; z-index: 2147483647; overflow: auto;
     max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em) }
+  [popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 0.25em; overflow: auto; color: #000000; background-color: #ffffff }
+  [popover]:not(:popover-open):not(dialog[open]) { display: none }
+  [popover]:popover-open { z-index: 2147483645 }
   ::backdrop { display: block; position: fixed; inset: 0; z-index: 2147483646; background-color: rgba(0, 0, 0, 0.1) }
   table { display: table; border-spacing: 2px; box-sizing: border-box }
   caption { display: table-caption; text-align: center }

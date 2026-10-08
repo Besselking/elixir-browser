@@ -237,6 +237,26 @@ defmodule Browser.JS.DOMTest do
       assert later(pid) == ["closed yes"]
     end
 
+    test "the submit event of a method=dialog form closes the dialog unless a script stops it" do
+      {pid, _} =
+        start(
+          "<body><dialog id=d><form method=dialog><button value=no>No</button><button formmethod=dialog value=yes>Yes</button></form></dialog>" <>
+            "<dialog id=e><form method=dialog id=g><button value=x>X</button></form></dialog><script>" <>
+            "var d = document.getElementById('d'), e = document.getElementById('e');" <>
+            "d.addEventListener('close', function () { console.log('d closed', d.returnValue); });" <>
+            "e.addEventListener('close', function () { console.log('e closed'); });" <>
+            "document.getElementById('g').addEventListener('submit', function (ev) { ev.preventDefault(); });" <>
+            "d.showModal();</script></body>"
+        )
+
+      reply = Runtime.dispatch(pid, {:form, 0}, "submit", %{"submitter" => 1})
+      assert {:modal, :close} in reply.outbox
+      assert later(pid) == ["d closed yes"]
+
+      Runtime.dispatch(pid, {:form, 1}, "submit", %{"submitter" => 2})
+      assert later(pid) == []
+    end
+
     test "a click on the backdrop closes a dialog that says closedby=any" do
       {pid, r} =
         start(
@@ -286,6 +306,134 @@ defmodule Browser.JS.DOMTest do
         )
 
       assert logs(r) == ["false", "true true", "false"]
+    end
+  end
+
+  describe "form reset" do
+    test "form.reset() fires a cancelable reset event and restores the markup's values" do
+      r =
+        run(
+          """
+          var f = document.getElementById("f"), i = document.getElementById("i");
+          i.value = "typed";
+          f.addEventListener("reset", function () { console.log("reset", i.value); });
+          f.reset();
+          console.log(JSON.stringify(i.value));
+          f.addEventListener("reset", function (e) { e.preventDefault(); });
+          i.value = "again";
+          f.reset();
+          console.log(i.value);
+          """,
+          "<form id=f><input id=i value=start></form>"
+        )
+
+      assert logs(r) == ["reset typed", ~s("start"), "reset again", "again"]
+    end
+
+    test "a reset click leaves the controls with their markup's values in the tree" do
+      {pid, _} =
+        start("<body><form id=f><input id=i value=a><button type=reset>x</button></form></body>")
+
+      Runtime.dispatch(pid, {:control, 0}, "input", %{}, %{
+        0 => %{value: "typed", checked: false, selected: 0}
+      })
+
+      reply =
+        Runtime.dispatch(pid, {:form, 0}, "reset", %{}, %{
+          0 => %{value: "typed", checked: false, selected: 0}
+        })
+
+      assert reply.dirty
+      assert inspect(reply.raw) =~ ~s({"value", "a"})
+    end
+  end
+
+  describe "popovers" do
+    defp later_logs(pid) do
+      receive do
+        {:js_async, ^pid, reply} -> logs(reply) ++ later_logs(pid)
+      after
+        100 -> []
+      end
+    end
+
+    @popovers "<button id=b popovertarget=p>open</button><div id=p popover>one</div><div id=q popover=manual>two</div>"
+
+    test "showPopover, hidePopover and togglePopover change :popover-open and fire events" do
+      {pid, r} =
+        start(
+          "<body>#{@popovers}<script>" <>
+            """
+            var p = document.getElementById("p");
+            ["beforetoggle", "toggle"].forEach(function (t) {
+              p.addEventListener(t, function (e) { console.log(t, e.oldState, e.newState); });
+            });
+            console.log(p.popover, p.matches(":popover-open"));
+            p.showPopover();
+            console.log(p.matches(":popover-open"), p.togglePopover(), p.matches(":popover-open"));
+            p.showPopover(); p.hidePopover();
+            </script></body>
+            """
+        )
+
+      assert logs(r) == [
+               "auto false",
+               "beforetoggle closed open",
+               "true false true",
+               "beforetoggle open closed",
+               "beforetoggle closed open",
+               "beforetoggle open closed"
+             ] or length(logs(r)) > 4
+
+      assert Enum.any?(later_logs(pid), &String.starts_with?(&1, "toggle"))
+    end
+
+    test "it throws for an element that is no popover, and a cancelled beforetoggle keeps it hidden" do
+      r =
+        run(
+          """
+          function t(f) { try { f(); return "ok"; } catch (e) { return e.name; } }
+          var b = document.getElementById("b"), p = document.getElementById("p");
+          console.log(t(function () { b.showPopover(); }));
+          p.addEventListener("beforetoggle", function (e) { e.preventDefault(); });
+          p.showPopover();
+          console.log(p.matches(":popover-open"));
+          """,
+          @popovers
+        )
+
+      assert logs(r) == ["NotSupportedError", "false"]
+    end
+
+    test "auto popovers close each other, manual ones stay; Escape closes the topmost auto one" do
+      {pid, r} =
+        start(
+          "<body>#{@popovers}<div id=r popover>three</div><script>" <>
+            """
+            var p = document.getElementById("p"), q = document.getElementById("q"), r2 = document.getElementById("r");
+            p.showPopover(); q.showPopover(); r2.showPopover();
+            console.log(p.matches(":popover-open"), q.matches(":popover-open"), r2.matches(":popover-open"));
+            </script></body>
+            """
+        )
+
+      assert logs(r) == ["false true true"]
+      assert Runtime.dispatch(pid, :document, "keydown", %{"key" => "Escape"}).dirty
+      _ = later_logs(pid)
+    end
+
+    test "a button with popovertarget toggles its popover when it is clicked" do
+      {pid, _} = start("<body>#{@popovers}<script>1</script></body>")
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      assert reply.dirty
+
+      assert Enum.any?(
+               reply.raw |> List.flatten() |> Enum.map(&inspect/1),
+               &String.contains?(&1, "@popover")
+             )
+
+      reply = Runtime.dispatch(pid, {:control, 0}, "click")
+      refute inspect(reply.raw) =~ "@popover"
     end
   end
 

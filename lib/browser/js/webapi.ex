@@ -685,6 +685,7 @@ defmodule Browser.JS.WebAPI do
       });
       // what the window does for Escape: ask the topmost modal dialog to close
       g.__dialogEscape = function () {
+        if (g.__popoverEscape && g.__popoverEscape()) return true;
         var open = openModals(), dlg = open[open.length - 1];
         if (!dlg) return false;
         var by = dlg.closedBy;
@@ -708,6 +709,105 @@ defmodule Browser.JS.WebAPI do
         closeDialog(dlg, value);
       };
     }
+    // the Popover API: a `popover` element in the top layer, hidden again by Escape or a click elsewhere
+    (function () {
+      var stack = [];
+      function type(el) {
+        var v = el.getAttribute("popover");
+        if (v === null) return null;
+        v = v.toLowerCase();
+        return v === "" || v === "auto" ? "auto" : v === "hint" ? "hint" : "manual";
+      }
+      function shown() {
+        stack = stack.filter(function (p) { return p.matches(":popover-open"); });
+        return stack;
+      }
+      function toggleEvent(el, name, oldState, newState, cancelable) {
+        var e = new Event(name, { bubbles: false, cancelable: cancelable });
+        e.oldState = oldState; e.newState = newState;
+        return el.dispatchEvent(e);
+      }
+      function later(el, oldState, newState) {
+        setTimeout(function () { toggleEvent(el, "toggle", oldState, newState, false); }, 0);
+      }
+      // false: nothing to do; throws when the element cannot be one
+      function valid(el) {
+        if (type(el) === null) throw new DOMException("The element has no popover attribute.", "NotSupportedError");
+        if (!el.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        if (el.matches("dialog:modal")) throw new DOMException("The element is a modal dialog.", "InvalidStateError");
+      }
+      function hide(el, fireEvents) {
+        if (!el.matches(":popover-open")) return;
+        // what was opened above it goes first
+        var i = shown().indexOf(el);
+        if (i >= 0) stack.slice(i + 1).reverse().forEach(function (p) { hide(p, true); });
+        if (fireEvents) toggleEvent(el, "beforetoggle", "open", "closed", false);
+        el.__setPopover(false);
+        stack = stack.filter(function (p) { return p !== el; });
+        if (fireEvents) later(el, "open", "closed");
+      }
+      function show(el) {
+        valid(el);
+        if (el.matches(":popover-open") || el.matches("dialog[open]")) return;
+        if (!toggleEvent(el, "beforetoggle", "closed", "open", true)) return;
+        if (el.matches(":popover-open") || !el.isConnected) return;
+        if (type(el) === "auto") {
+          shown().slice().reverse().forEach(function (p) {
+            if (type(p) === "auto" && !p.contains(el)) hide(p, true);
+          });
+        }
+        el.__setPopover(true);
+        // manual popovers are not part of the stack that light dismiss and Escape work on
+        if (type(el) !== "manual") stack.push(el);
+        var all = el.querySelectorAll("[autofocus]");
+        for (var i = 0; i < all.length; i++) { all[i].focus(); break; }
+        later(el, "closed", "open");
+      }
+      var P = Element.prototype;
+      P.showPopover = function () { show(this); };
+      P.hidePopover = function () { valid(this); hide(this, true); };
+      P.togglePopover = function (force) {
+        valid(this);
+        var open = this.matches(":popover-open");
+        if (open && force !== true) hide(this, true);
+        else if (!open && force !== false) show(this);
+        return this.matches(":popover-open");
+      };
+      Object.defineProperty(P, "popover", {
+        get: function () { var t = type(this); return t; },
+        set: function (v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", String(v)); },
+        configurable: true
+      });
+      // a button with popovertarget
+      g.__popoverInvoke = function (button) {
+        var target = document.getElementById(button.getAttribute("popovertarget"));
+        if (!target || type(target) === null) return;
+        var action = (button.getAttribute("popovertargetaction") || "toggle").toLowerCase();
+        var open = target.matches(":popover-open");
+        if (open && action !== "show") hide(target, true);
+        else if (!open && action !== "hide") show(target);
+      };
+      // a click nothing stopped: the button's target, and light dismiss of the other popovers
+      g.__popoverClick = function (target) {
+        var button = target && target.closest ? target.closest("[popovertarget]") : null;
+        var invoked = button ? document.getElementById(button.getAttribute("popovertarget")) : null;
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          var p = open[i];
+          if (type(p) !== "auto") continue;
+          if (p === invoked || (target && p.contains(target))) break;
+          hide(p, true);
+        }
+        if (button && !button.hasAttribute("disabled")) g.__popoverInvoke(button);
+      };
+      g.__popoverEscape = function () {
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          if (type(open[i]) !== "manual") { hide(open[i], true); return true; }
+        }
+        return false;
+      };
+    })();
     def("open", function () { return null; });
     def("close", function () {});
     def("stop", function () {});

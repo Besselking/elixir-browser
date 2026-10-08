@@ -683,7 +683,7 @@ defmodule Browser.CSS do
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop popover-open)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -970,6 +970,7 @@ defmodule Browser.CSS do
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
 
   defp pseudo?(:modal, ctx), do: List.keymember?(ctx.attrs, "@modal", 0)
+  defp pseudo?(:popover_open, ctx), do: List.keymember?(ctx.attrs, "@popover", 0)
   defp pseudo?(:mb_backdrop, ctx), do: List.keymember?(ctx.attrs, "@backdrop", 0)
 
   defp pseudo?(:open, ctx),
