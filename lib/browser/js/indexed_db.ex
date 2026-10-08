@@ -25,6 +25,10 @@ defmodule Browser.JS.IndexedDB do
       :undefined
     end)
 
+    def_fn(scope, "__idb_unhex", fn [hex | _] ->
+      Browser.JS.TypedArrays.buffer_from_hex(hex)
+    end)
+
     def_fn(scope, "__idb_names", fn _ ->
       Interp.new_array(
         for {name, version} <- Browser.IndexedDB.names(origin()),
@@ -42,8 +46,18 @@ defmodule Browser.JS.IndexedDB do
       end
     end)
 
-    def_fn(scope, "__idb_save", fn [name, version, data | _] ->
-      case Browser.IndexedDB.save(origin(), name, trunc(version), data) do
+    # (name, version, [[store, meta, [[index, meta], ...]], ...], [[op, ...], ...]) -> revision, or
+    # -1 when the database is too big
+    def_fn(scope, "__idb_save", fn [name, version, schema, ops | _] ->
+      schema =
+        for st <- Interp.array_list(schema) do
+          [store, meta, indexes] = Interp.array_list(st)
+          [store, meta, for(ix <- Interp.array_list(indexes), do: Interp.array_list(ix))]
+        end
+
+      ops = for op <- Interp.array_list(ops), do: Interp.array_list(op)
+
+      case Browser.IndexedDB.save(origin(), name, trunc(version), schema, ops) do
         :quota -> -1.0
         rev -> rev * 1.0
       end

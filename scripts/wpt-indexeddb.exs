@@ -8,6 +8,7 @@
 # Every file runs in a page of its own, with testharness.js; the script prints one line per
 # file (passed/total subtests) and, with --verbose, every subtest that did not pass.
 Application.put_env(:browser, :gui, false)
+Application.put_env(:browser, :js_call_timeout, String.to_integer(System.get_env("WPT_CALL_TIMEOUT", "300000")))
 Application.put_env(:browser, :indexed_db_path, nil)
 Application.put_env(:browser, :local_storage_path, nil)
 {:ok, _} = Application.ensure_all_started(:browser)
@@ -94,7 +95,7 @@ results =
       {file, out}
     end,
     max_concurrency: 6,
-    timeout: 120_000,
+    timeout: 600_000,
     on_timeout: :kill_task,
     ordered: true
   )

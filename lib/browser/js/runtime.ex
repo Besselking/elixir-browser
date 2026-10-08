@@ -97,7 +97,8 @@ defmodule Browser.JS.Runtime do
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
-  defp call(pid, request, timeout \\ @call_timeout) do
+  defp call(pid, request, timeout \\ nil) do
+    timeout = timeout || Application.get_env(:browser, :js_call_timeout, @call_timeout)
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
 

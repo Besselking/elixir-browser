@@ -769,6 +769,77 @@ defmodule Browser.JS.IndexedDBTest do
     end
   end
 
+  describe "order of the steps of a transaction" do
+    test "an index is filled after the requests made before it, and a unique one can abort the upgrade" do
+      assert page(
+               """
+               var r = indexedDB.open("u", 1);
+               var events = [];
+               r.onupgradeneeded = function () {
+                 var db = r.result, tx = r.transaction;
+                 tx.onabort = function () { events.push("abort " + tx.error.name); };
+                 var s = db.createObjectStore("s");
+                 s.add({a: 1}, 1);
+                 s.add({a: 1}, 2);
+                 s.createIndex("i", "a", {unique: true});
+                 var third = s.add({a: 2}, 3);
+                 third.onerror = function (e) { events.push("third " + third.error.name); e.preventDefault(); };
+               };
+               r.onerror = function () { events.push("open " + r.error.name); log(events.join(", ")); };
+               """,
+               []
+             ) == ["third AbortError, abort ConstraintError, open AbortError"]
+    end
+
+    test "a request made before deleteIndex still sees the index" do
+      assert page("""
+             var db = await open("d", 1, function (db, e, tx) {
+               var s = db.createObjectStore("s");
+               s.add({a: 1}, 1);
+               s.createIndex("i", "a", {unique: true});
+               var dup = s.add({a: 1}, 2);
+               dup.onerror = function (ev) { ev.preventDefault(); log("dup", dup.error.name); };
+               s.deleteIndex("i");
+               s.add({a: 1}, 3).onsuccess = function () { log("third ok", Array.from(s.indexNames).length); };
+             });
+             log(await p(db.transaction("s").objectStore("s").count()));
+             """) == ["dup ConstraintError", "third ok 0", "2"]
+    end
+
+    test "commit() ends the transaction, and abort() then fails" do
+      assert page("""
+             var db = await open("c", 1, function (db) { db.createObjectStore("s"); });
+             var tx = db.transaction("s", "readwrite");
+             var s = tx.objectStore("s");
+             s.put(1, "a").onsuccess = function () {
+               try { s.put(2, "b"); } catch (e) { log("inactive", e.name); }
+             };
+             tx.commit();
+             try { s.put(3, "c"); } catch (e) { log("after commit", e.name); }
+             try { tx.abort(); } catch (e) { log("abort", e.name); }
+             await txDone(tx);
+             log(await p(db.transaction("s").objectStore("s").count()));
+             """) == [
+               "after commit TransactionInactiveError",
+               "abort InvalidStateError",
+               "inactive TransactionInactiveError",
+               "1"
+             ]
+    end
+
+    test "Blob, File and BigInt objects are stored" do
+      assert page("""
+             var db = await open("b", 1, function (db) { db.createObjectStore("s"); });
+             var tx = db.transaction("s", "readwrite");
+             var s = tx.objectStore("s");
+             s.put({b: new Blob(["hello"], {type: "text/plain"}), f: new File(["x"], "n.txt", {type: "text/x"}), n: Object(5n)}, 1);
+             await txDone(tx);
+             var v = await p(db.transaction("s").objectStore("s").get(1));
+             log(v.b instanceof Blob, v.b.type, await v.b.text(), v.f instanceof File, v.f.name, v.f.type, typeof v.n.valueOf(), String(v.n));
+             """) == ["true text/plain hello true n.txt text/x bigint 5"]
+    end
+  end
+
   describe "pages of one origin" do
     test "a second page sees what the first one stored, and hears of its version changes" do
       origin = origin()
@@ -812,6 +883,69 @@ defmodule Browser.JS.IndexedDBTest do
       assert {:log, ~s(b: read {"from":"page a"})} in all
       assert {:log, "a: versionchange 1 2"} in all
       assert {:log, "b: upgraded 2 [\"s\",\"t\"]"} in all
+    end
+
+    test "a second page reads records, indexes and generators written by changes of several transactions" do
+      origin = origin()
+
+      {a, fa} =
+        start(
+          origin,
+          @helpers <>
+            """
+            (async function () {
+              var db = await open("rt", 1, function (db) {
+                var s = db.createObjectStore("people", {keyPath: "id", autoIncrement: true});
+                s.createIndex("tag", "tags", {multiEntry: true});
+                s.createIndex("name", "name", {unique: true});
+                db.createObjectStore("gone");
+              });
+              var tx = db.transaction("people", "readwrite");
+              var s = tx.objectStore("people");
+              for (var i = 0; i < 12; i++) s.add({name: "n" + i, tags: i % 2 ? ["odd", "t" + i] : ["even"], bin: new Uint8Array([i, 255 - i]), when: new Date(1000 * i)});
+              await txDone(tx);
+              tx = db.transaction("people", "readwrite");
+              s = tx.objectStore("people");
+              s.delete(IDBKeyRange.bound(3, 5));
+              s.put({id: 7, name: "seven", tags: ["lucky"]});
+              await txDone(tx);
+              db.close();
+              var db2 = await open("rt", 2, function (db, e, tx) { db.deleteObjectStore("gone"); tx.objectStore("people").deleteIndex("name"); });
+              db2.close();
+              log("a: written");
+            })().catch(fail);
+            """
+        )
+
+      assert finish(a, fa) == [log: "a: written"]
+
+      {b, fb} =
+        start(
+          origin,
+          @helpers <>
+            """
+            (async function () {
+              var db = await open("rt", 2);
+              log(Array.from(db.objectStoreNames), Array.from(db.transaction("people").objectStore("people").indexNames));
+              var tx = db.transaction("people", "readwrite");
+              var s = tx.objectStore("people");
+              log(await p(s.count()), (await p(s.getAllKeys())).join(), (await p(s.get(7))).name);
+              log((await p(s.index("tag").getAllKeys("odd"))).join(), (await p(s.index("tag").getAllKeys("lucky"))).join(), await p(s.index("tag").count("even")));
+              var r = await p(s.get(1));
+              log(r.bin.join(), r.when.getTime(), r.when instanceof Date);
+              log(await p(s.add({name: "new"})));
+              await txDone(tx);
+            })().catch(fail);
+            """
+        )
+
+      assert finish(b, fb) == [
+               log: ~s(["people"] ["tag"]),
+               log: "9 1,2,6,7,8,9,10,11,12 seven",
+               log: "2,6,8,10,12 7 3",
+               log: "0,255 0 true",
+               log: "13"
+             ]
     end
 
     test "databases are kept per origin" do

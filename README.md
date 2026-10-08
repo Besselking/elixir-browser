@@ -47,6 +47,8 @@ TLS checks stay on. If a proxy signs TLS with its own CA, put the CA file in
 
 ## IndexedDB
 
-Pages can use `indexedDB`. Each origin has its own databases. The browser keeps them in memory and writes them to `indexed_db.etf` in the user data directory. A database is written as one JSON text each time a transaction commits. When two pages of the same origin write to one database, the last writer wins.
+Pages can use `indexedDB`. Each origin has its own databases. The browser keeps them in memory and writes them to the folder `indexed_db` in the user data directory, one file for each database. A transaction sends only what it changed (the records it put or deleted, and the indexes it touched), not the whole database. When two pages of the same origin write to one database, the last writer wins.
 
-To run the web-platform-tests for IndexedDB, use a sparse checkout of the `IndexedDB` and `resources` folders and run `mix run --no-start scripts/wpt-indexeddb.exs WPT_DIR [FILTER] [--verbose]`. Tests with very large values (more than 100 KB per record) time out, because the JavaScript interpreter is slow with big buffers.
+Data in a database can be of any type that `structuredClone` supports, including `Blob` and `File`. The size limit of one database is 256 MB.
+
+To run the web-platform-tests for IndexedDB, use a sparse checkout of the `IndexedDB` and `resources` folders and run `mix run --no-start scripts/wpt-indexeddb.exs WPT_DIR [FILTER] [--verbose]`. Set `WPT_CALL_TIMEOUT` (in milliseconds) if a test file needs more than 5 minutes.

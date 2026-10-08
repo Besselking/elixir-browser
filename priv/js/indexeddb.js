@@ -174,7 +174,11 @@
       if (cb === null || cb === undefined) continue;
       try {
         if (typeof cb === "function") cb.call(t, ev);
-        else if (typeof cb.handleEvent === "function") cb.handleEvent(ev);
+        else {
+          var he = cb.handleEvent;
+          if (typeof he !== "function") throw new TypeError("The event listener's handleEvent is not callable.");
+          he.call(cb, ev);
+        }
       } catch (e) {
         threw = true;
         reportLater(e);
@@ -232,22 +236,14 @@
 
   // ── structured clone ──────────────────────────────────────
 
-  var HEX = [];
-  var NIB = {};
-  for (var hi = 0; hi < 256; hi++) HEX.push((hi < 16 ? "0" : "") + hi.toString(16));
-  for (var ni = 0; ni < 16; ni++) { NIB[ni.toString(16)] = ni; }
   function bytesOf(v) {
     return v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
   }
   function hexOf(v) {
-    var u = bytesOf(v), out = [];
-    for (var i = 0; i < u.length; i++) out.push(HEX[u[i]]);
-    return out.join("");
+    return bytesOf(v).toHex();
   }
   function bufOf(hex) {
-    var n = hex.length >> 1, u = new Uint8Array(n);
-    for (var i = 0; i < n; i++) u[i] = (NIB[hex.charAt(2 * i)] << 4) | NIB[hex.charAt(2 * i + 1)];
-    return u.buffer;
+    return g.__idb_unhex(hex);
   }
 
   var TYPED = ["Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
@@ -307,14 +303,17 @@
         var name = ERRORS.indexOf(v.name) >= 0 ? v.name : "Error";
         return { "$": "e", n: name, m: v.message === undefined ? undefined : String(v.message) };
       }
+      if (Object.prototype.toString.call(v) === "[object BigInt]") return { "$": "w", t: "i", v: String(v.valueOf()) };
+      if (g.Blob && v instanceof g.Blob)
+        return { "$": "bl", t: v._text, y: v.type, f: g.File && v instanceof g.File ? [v.name, v.lastModified] : null };
       if (v instanceof Boolean) return { "$": "w", t: "b", v: v.valueOf() };
       if (v instanceof Number) return { "$": "w", t: "n", v: walk(v.valueOf()) };
       if (v instanceof String) return { "$": "w", t: "s", v: v.valueOf() };
-      if ((g.Node && v instanceof g.Node) || (g.Promise && v instanceof g.Promise) || (g.WeakMap && v instanceof g.WeakMap) ||
+      if (v === g || (g.Node && v instanceof g.Node) || (g.Promise && v instanceof g.Promise) || (g.WeakMap && v instanceof g.WeakMap) ||
           (g.WeakSet && v instanceof g.WeakSet) || (g.WeakRef && v instanceof g.WeakRef) || states.has(v))
         throw cloneError("#<" + (v.constructor && v.constructor.name || "Object") + ">");
       var o = {}, keys = Object.keys(v);
-      for (i = 0; i < keys.length; i++) o[keys[i]] = walk(v[keys[i]]);
+      for (i = 0; i < keys.length; i++) put(o, keys[i], walk(v[keys[i]]));
       return { "$": "o", v: o };
     }
     return walk(root);
@@ -370,7 +369,14 @@
           objs.push(er);
           return er;
         }
+        case "bl": {
+          var bl = x.f ? new g.File([x.t], x.f[0], { type: x.y }) : new g.Blob([x.t], { type: x.y });
+          if (x.f) bl.lastModified = x.f[1];
+          objs.push(bl);
+          return bl;
+        }
         case "w": {
+          if (x.t === "i") { var bw = Object(g.BigInt(x.v)); objs.push(bw); return bw; }
           var w = x.t === "b" ? new Boolean(x.v) : x.t === "s" ? new String(x.v) : new Number(0);
           objs.push(w);
           if (x.t === "n") w = new Number(node(x.v));
@@ -379,7 +385,7 @@
         default: {
           var o = {};
           objs.push(o);
-          for (var key in x.v) o[key] = node(x.v[key]);
+          for (var key in x.v) Object.defineProperty(o, key, { value: node(x.v[key]), writable: true, enumerable: true, configurable: true });
           return o;
         }
       }
@@ -457,12 +463,12 @@
   }
 
   // key paths
-  var PATH = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
+  var PATH = /^[\p{L}\p{Nl}_$][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$\u200c\u200d]*(\.[\p{L}\p{Nl}_$][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$\u200c\u200d]*)*$/u;
   function validPath(p) {
     if (typeof p === "string") return p === "" || PATH.test(p);
     if (Array.isArray(p)) {
       if (p.length === 0) return false;
-      for (var i = 0; i < p.length; i++) if (typeof p[i] !== "string" || !PATH.test(p[i])) return false;
+      for (var i = 0; i < p.length; i++) if (typeof p[i] !== "string" || (p[i] !== "" && !PATH.test(p[i]))) return false;
       return true;
     }
     return false;
@@ -471,6 +477,7 @@
     if (p === undefined || p === null) return null;
     if (typeof p !== "string" && !Array.isArray(p) && typeof p === "object" && p !== null && typeof p[Symbol.iterator] === "function") p = Array.from(p);
     if (typeof p !== "string" && !Array.isArray(p)) p = String(p);
+    if (Array.isArray(p)) p = Array.prototype.map.call(p, String);
     if (!validPath(p)) throw err("SyntaxError", "The keyPath argument contains an invalid key path.");
     return Array.isArray(p) ? p.slice() : p;
   }
@@ -517,13 +524,15 @@
     }
     return true;
   }
+  // an own property, whatever the prototypes have for the name
+  function put(o, k, v) { Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
   function inject(v, kp, key) {
     var parts = kp.split("."), cur = v;
     for (var i = 0; i < parts.length - 1; i++) {
-      if (!hasOwn.call(cur, parts[i])) cur[parts[i]] = {};
+      if (!hasOwn.call(cur, parts[i])) put(cur, parts[i], {});
       cur = cur[parts[i]];
     }
-    cur[parts[parts.length - 1]] = fromKey(key);
+    put(cur, parts[parts.length - 1], fromKey(key));
   }
 
   // ── key ranges ────────────────────────────────────────────
@@ -534,10 +543,11 @@
   function makeRange(lower, upper, lo, uo, hasL, hasU) {
     return make(KRP, { lower: lower, upper: upper, lowerOpen: lo, upperOpen: uo, hasLower: hasL, hasUpper: hasU });
   }
-  hide(IDBKeyRange, "only", function only(v) { var k = needKey(v); return makeRange(k, k, false, false, true, true); });
-  hide(IDBKeyRange, "lowerBound", function lowerBound(v, open) { return makeRange(needKey(v), undefined, !!open, true, true, false); });
-  hide(IDBKeyRange, "upperBound", function upperBound(v, open) { return makeRange(undefined, needKey(v), true, !!open, false, true); });
+  hide(IDBKeyRange, "only", function only(v) { need1(arguments); var k = needKey(v); return makeRange(k, k, false, false, true, true); });
+  hide(IDBKeyRange, "lowerBound", function lowerBound(v, open) { need1(arguments); return makeRange(needKey(v), undefined, !!open, true, true, false); });
+  hide(IDBKeyRange, "upperBound", function upperBound(v, open) { need1(arguments); return makeRange(undefined, needKey(v), true, !!open, false, true); });
   hide(IDBKeyRange, "bound", function bound(l, u, lo, uo) {
+    if (arguments.length < 2) throw new TypeError("2 arguments required, but only " + arguments.length + " present.");
     var a = needKey(l), b = needKey(u), c = cmp(a, b);
     if (c > 0 || (c === 0 && (lo || uo))) throw err("DataError", "The lower key is greater than the upper key.");
     return makeRange(a, b, !!lo, !!uo, true, true);
@@ -546,7 +556,7 @@
   getter(KRP, "upper", function () { var s = S(this); return s.hasUpper ? fromKey(s.upper) : undefined; });
   getter(KRP, "lowerOpen", function () { return S(this).lowerOpen; });
   getter(KRP, "upperOpen", function () { return S(this).upperOpen; });
-  hide(KRP, "includes", function includes(v) { return inRange(S(this), needKey(v)); });
+  hide(KRP, "includes", function includes(v) { need1(arguments); return inRange(S(this), needKey(v)); });
 
   function inRange(r, k) {
     if (!r) return true;
@@ -618,10 +628,22 @@
     r = toKey(x);
     return r === undefined ? [] : [r];
   }
+  // the indexes a write to the store has to keep up to date: not one that is still being built,
+  // but also one that was deleted by a request that has not run yet
+  function eachIndex(st, fn) {
+    st.indexes.forEach(function (ix) { if (!ix.pending) fn(ix); });
+    if (st.dying) st.dying.forEach(fn);
+  }
+  function allIndexes(st, fn) {
+    st.indexes.forEach(fn);
+    if (st.dying) st.dying.forEach(fn);
+  }
   function idxAdd(ix, pk, keys) {
+    ix.dirty = true;
     for (var i = 0; i < keys.length; i++) ix.entries.splice(LB(ix.entries, keys[i], pk), 0, { k: keys[i], pk: pk });
   }
   function idxRemove(ix, pk, keys) {
+    ix.dirty = true;
     for (var i = 0; i < keys.length; i++) {
       var at = LB(ix.entries, keys[i], pk);
       if (at < ix.entries.length && cmp(ix.entries[at].k, keys[i]) === 0 && cmp(ix.entries[at].pk, pk) === 0) ix.entries.splice(at, 1);
@@ -638,26 +660,13 @@
     return false;
   }
 
-  function serialize(db) {
-    var stores = [];
-    db.stores.forEach(function (st) {
-      var ixs = [];
-      st.indexes.forEach(function (ix) {
-        ixs.push({ n: ix.name, k: ix.keyPath, u: ix.unique, m: ix.multi,
-          e: ix.entries.map(function (e) { return [keyJSON(e.k), keyJSON(e.pk)]; }) });
-      });
-      stores.push({ n: st.name, k: st.keyPath, a: st.auto, g: st.nextKey, i: ixs,
-        r: st.records.map(function (r) { return [keyJSON(r.k), r.v]; }) });
-    });
-    return { v: db.version, s: stores };
-  }
   function parseDb(name, text) {
     var j = JSON.parse(text);
     var db = newDb(name);
     db.version = j.v;
     j.s.forEach(function (sj) {
       var st = newStore(sj.n, sj.k, sj.a);
-      st.nextKey = sj.g;
+      st.nextKey = sj.g === "inf" ? Infinity : sj.g;
       st.records = sj.r.map(function (r) { var k = keyFromJSON(r[0]); return { k: k, pk: k, v: r[1] }; });
       sj.i.forEach(function (ij) {
         var ix = newIndex(ij.n, ij.k, ij.u, ij.m);
@@ -681,11 +690,28 @@
     cache[name] = { rev: r[0], data: data };
     return data;
   }
-  function persist(name, data) {
-    var rev = g.__idb_save(name, data.version, JSON.stringify(serialize(data)));
+  // writes what the transaction changed: the schema, the operations on records it made, and the
+  // entries of the indexes it touched
+  function persist(name, data, ops) {
+    var stores = [];
+    data.stores.forEach(function (st) {
+      var ixs = [];
+      st.indexes.forEach(function (ix) {
+        ixs.push([ix.name, JSON.stringify({ n: ix.name, k: ix.keyPath, u: ix.unique, m: ix.multi })]);
+        if (ix.dirty) {
+          ix.dirty = false;
+          ops.push(["e", st.name, ix.name, JSON.stringify(ix.entries.map(function (e) { return [keyJSON(e.k), keyJSON(e.pk)]; }))]);
+        }
+      });
+      stores.push([st.name, JSON.stringify({ n: st.name, k: st.keyPath, a: st.auto, g: st.nextKey === Infinity ? "inf" : st.nextKey }), ixs]);
+    });
+    var rev = g.__idb_save(name, data.version, stores, ops);
     if (rev < 0) return false;
     cache[name] = { rev: rev, data: data };
     return true;
+  }
+  function clearDirty(data) {
+    data.stores.forEach(function (st) { st.indexes.forEach(function (ix) { ix.dirty = false; }); });
   }
 
   // ── requests ──────────────────────────────────────────────
@@ -734,8 +760,8 @@
     var cs = S(conn);
     var tx = make(TP, newState({
       conn: conn, name: cs.name, mode: mode, names: names, active: true, finished: false, aborted: false, queue: [],
-      undo: new Map(), schemaUndo: null, dirty: false, error: null, wrappers: new Map(), data: null, ready: false,
-      onfinish: null, parent: conn, commitRequested: false
+      undo: new Map(), ops: [], schemaUndo: null, dirty: false, error: null, wrappers: new Map(), data: null, ready: false,
+      onfinish: null, parent: conn, committing: false
     }));
     var s = S(tx);
     cs.txs.push(tx);
@@ -767,14 +793,37 @@
     task(function () { runNext(tx); });
   }
 
+  // The transaction is active while its callbacks run, with the promise jobs they start. A task
+  // that is queued before the callbacks run (so also before the timers they set) makes it inactive.
+  function deactivateLater(tx) {
+    task(function () {
+      var s = S(tx);
+      s.active = false;
+      // nothing is left to run: the transaction is committing, and can not be aborted any more
+      if (!s.finished && s.queue.length === 0) s.committing = true;
+    });
+  }
+
   function runNext(tx) {
     var s = S(tx);
     if (s.finished) return;
     s.active = false;
     var req = s.queue.shift();
     if (!req) { commit(tx); return; }
-    s.active = true;
     var rs = S(req);
+    if (rs.silent) {
+      try {
+        rs.op();
+      } catch (e) {
+        if (e instanceof DOMEx) { abortTx(tx, e); return; }
+        abortTx(tx, err("UnknownError", String(e)));
+        throw e;
+      }
+      task(function () { runNext(tx); });
+      return;
+    }
+    s.active = true;
+    deactivateLater(tx);
     var error = null, result;
     try {
       result = rs.op();
@@ -795,7 +844,7 @@
       rs.error = null;
       ev = mkEvent("success", false, false);
       res = dispatch(ev, pathOf(req));
-      if (res.threw && !s.finished) abortTx(tx, err("AbortError"));
+      if (res.threw && !s.finished && !s.committing) abortTx(tx, err("AbortError"));
     }
     if (!s.finished) task(function () { runNext(tx); });
   }
@@ -803,20 +852,23 @@
   function commit(tx) {
     var s = S(tx);
     s.finished = true;
+    if (s.mode === "versionchange") s.names = sortedNames(s.data.stores);
     if (s.dirty && s.mode !== "readonly") {
-      if (!persist(s.name, s.data)) {
+      if (!persist(s.name, s.data, s.ops)) {
         s.finished = false;
         abortTx(tx, err("QuotaExceededError", "The database is too big."));
         return;
       }
     }
     task(function () {
+      s.over = true;
       dispatch(mkEvent("complete", false, false), pathOf(tx));
       finishTx(tx, true);
     });
   }
 
   function rollback(s) {
+    clearDirty(s.data || { stores: new Map() });
     s.undo.forEach(function (u, st) {
       st.records = u.records;
       st.nextKey = u.nextKey;
@@ -827,10 +879,12 @@
       data.version = su.version;
       data.stores = su.stores;
       su.indexes.forEach(function (map, st) { st.indexes = map; });
+      su.names.forEach(function (n, meta) { meta.name = n; });
       su.created.forEach(function (ix) { ix.deleted = true; });
-      su.createdStores.forEach(function (st) { st.deleted = true; });
-      su.stores.forEach(function (st) { st.deleted = false; st.indexes.forEach(function (ix) { ix.deleted = false; }); });
+      su.createdStores.forEach(function (st) { st.deleted = true; st.indexes = new Map(); });
+      su.stores.forEach(function (st) { st.deleted = st.gone = false; st.dying = []; st.indexes.forEach(function (ix) { ix.deleted = ix.gone = false; ix.pending = false; }); });
       if (su.isNew) delete cache[s.name];
+      clearDirty(data);
     }
   }
 
@@ -842,11 +896,13 @@
     s.active = false;
     s.error = error || null;
     rollback(s);
+    if (s.mode === "versionchange") s.names = sortedNames(s.data.stores);
     var pend = s.queue;
     s.queue = [];
     (function next() {
       task(function () {
         var req = pend.shift();
+        while (req && S(req).silent) req = pend.shift();
         if (req) {
           var rs = S(req);
           rs.done = true;
@@ -855,7 +911,8 @@
           dispatch(mkEvent("error", true, true), pathOf(req));
           next();
         } else {
-          dispatch(mkEvent("abort", true, false), pathOf(tx));
+          s.over = true;
+      dispatch(mkEvent("abort", true, false), pathOf(tx));
           finishTx(tx, false);
         }
       });
@@ -880,7 +937,7 @@
   getter(TP, "error", function () { return S(this).error; });
   getter(TP, "objectStoreNames", function () {
     var s = S(this);
-    return strList(s.mode === "versionchange" ? sortedNames(s.data.stores) : s.names);
+    return strList(s.mode === "versionchange" && !s.finished ? sortedNames(s.data.stores) : s.names);
   });
   hide(TP, "objectStore", function objectStore(name) {
     var s = S(this);
@@ -893,14 +950,14 @@
   });
   hide(TP, "abort", function abort() {
     var s = S(this);
-    if (s.finished) throw err("InvalidStateError", "The transaction has finished.");
+    if (s.finished || s.committing) throw err("InvalidStateError", "The transaction has " + (s.finished ? "finished" : "started to commit") + ".");
     abortTx(this, null);
   });
   hide(TP, "commit", function commitTx() {
     var s = S(this);
     if (s.finished || !s.active) throw err("InvalidStateError", "The transaction is not active.");
     // nothing more can be added; it commits when the requests so far are done
-    s.commitRequested = true;
+    s.committing = true;
     s.active = false;
   });
 
@@ -920,26 +977,38 @@
   function own(s, st) {
     if (s.undo.has(st)) return;
     var ix = [];
-    st.indexes.forEach(function (index) { ix.push({ index: index, entries: index.entries }); });
+    allIndexes(st, function (index) { ix.push({ index: index, entries: index.entries }); });
     s.undo.set(st, { records: st.records, nextKey: st.nextKey, ix: ix });
     st.records = st.records.slice();
-    st.indexes.forEach(function (index) { index.entries = index.entries.slice(); });
+    allIndexes(st, function (index) { index.entries = index.entries.slice(); });
   }
   function snapshotSchema(data, isNew) {
     var indexes = new Map();
-    data.stores.forEach(function (st) { indexes.set(st, new Map(st.indexes)); });
-    return { version: data.version, stores: new Map(data.stores), indexes: indexes, isNew: isNew, created: [], createdStores: [], deleted: [] };
+    var names = new Map();
+    data.stores.forEach(function (st) {
+      indexes.set(st, new Map(st.indexes));
+      names.set(st, st.name);
+      st.indexes.forEach(function (ix) { names.set(ix, ix.name); });
+    });
+    return { names: names, version: data.version, stores: new Map(data.stores), indexes: indexes, isNew: isNew, created: [], createdStores: [], deleted: [] };
   }
 
   function enqueue(tx, source, op, existing) {
     var s = S(tx);
-    if (s.finished || !s.active) throw err("TransactionInactiveError", s.finished ? "The transaction has finished." : "The transaction is not active.");
+    if (s.finished || !s.active || s.committing) throw err("TransactionInactiveError", s.finished ? "The transaction has finished." : "The transaction is not active.");
     var req = existing || makeRequest(source, tx);
     var rs = S(req);
     rs.op = op;
     if (existing) { rs.done = false; rs.result = undefined; rs.error = null; }
     s.queue.push(req);
     return req;
+  }
+
+  // a step of a versionchange transaction that is done in the order of the requests, without a
+  // request of its own (no events); when it throws, the transaction aborts
+  function silent(tx, op) {
+    var req = enqueue(tx, null, op);
+    S(req).silent = true;
   }
 
   // ── object stores ─────────────────────────────────────────
@@ -962,7 +1031,7 @@
   // wrappers hold is the live data; otherwise it is looked up again, by name, in the data the
   // transaction loaded.
   function storeFor(ts, meta) {
-    if (meta.deleted) throw err("InvalidStateError", "The object store has been deleted.");
+    if (meta.gone) throw err("InvalidStateError", "The object store has been deleted.");
     if (ts.mode === "versionchange") return meta;
     var st = ts.data.stores.get(meta.name);
     if (!st) throw err("InvalidStateError", "The object store has been deleted.");
@@ -970,7 +1039,7 @@
   }
   function indexFor(ts, smeta, imeta) {
     var st = storeFor(ts, smeta);
-    if (imeta.deleted) throw err("InvalidStateError", "The index has been deleted.");
+    if (imeta.gone) throw err("InvalidStateError", "The index has been deleted.");
     if (ts.mode === "versionchange") return { st: st, ix: imeta };
     var ix = st.indexes.get(imeta.name);
     if (!ix) throw err("InvalidStateError", "The index has been deleted.");
@@ -1016,11 +1085,12 @@
     },
     enumerable: true, configurable: true
   });
-  function pathOut(meta) {
-    if (!Array.isArray(meta.keyPath)) return meta.keyPath;
-    return meta.kpOut || (meta.kpOut = meta.keyPath.slice());
+  // an array key path is one array for each object that reports it
+  function pathOut(w) {
+    if (!Array.isArray(w.meta.keyPath)) return w.meta.keyPath;
+    return w.kpOut || (w.kpOut = w.meta.keyPath.slice());
   }
-  getter(OSP, "keyPath", function () { return pathOut(S(this).meta); });
+  getter(OSP, "keyPath", function () { return pathOut(S(this)); });
   getter(OSP, "indexNames", function () { return strList(sortedNames(S(this).meta.indexes)); });
   getter(OSP, "transaction", function () { return S(this).tx; });
   getter(OSP, "autoIncrement", function () { return S(this).meta.auto; });
@@ -1059,6 +1129,7 @@
   // the work of add/put (and of cursor.update): returns the key
   function putRecord(ts, st, k, encoded, cloned, generate, noOverwrite) {
     if (generate) {
+      if (!(st.nextKey <= 9007199254740992)) throw err("ConstraintError", "The key generator has reached its limit.");
       k = st.nextKey;
       if (st.keyPath !== null) {
         cloned = cloned || dec(encoded);
@@ -1072,7 +1143,7 @@
     var value = null;
     function valueOf() { return value || (value = cloned || dec(encoded)); }
     var newKeys = [];
-    st.indexes.forEach(function (ix) { newKeys.push([ix, indexKeys(ix, valueOf())]); });
+    eachIndex(st, function (ix) { newKeys.push([ix, indexKeys(ix, valueOf())]); });
     for (var i = 0; i < newKeys.length; i++)
       if (newKeys[i][0].unique && idxConflict(newKeys[i][0], k, newKeys[i][1])) throw err("ConstraintError", "A unique index would have two records with the same key.");
     own(ts, st);
@@ -1085,8 +1156,9 @@
     } else {
       st.records.splice(at, 0, { k: k, pk: k, v: encoded });
     }
+    ts.ops.push(["p", st.name, JSON.stringify(keyJSON(k)), JSON.stringify(encoded)]);
     for (var m = 0; m < newKeys.length; m++) idxAdd(newKeys[m][0], k, newKeys[m][1]);
-    if (typeof k === "number" && k >= st.nextKey) st.nextKey = Math.min(Math.floor(k) + 1, 9007199254740992);
+    if (typeof k === "number" && k >= st.nextKey) st.nextKey = k >= 9007199254740992 ? Infinity : Math.floor(k) + 1;
     ts.dirty = true;
     return fromKey(k);
   }
@@ -1099,12 +1171,14 @@
     if (to <= from) return;
     own(ts, st);
     var gone = st.records.splice(from, to - from);
-    if (st.indexes.size) {
-      gone.forEach(function (rec) {
-        var v = dec(rec.v);
-        st.indexes.forEach(function (ix) { idxRemove(ix, rec.k, indexKeys(ix, v)); });
+    gone.forEach(function (rec) { ts.ops.push(["d", st.name, JSON.stringify(keyJSON(rec.k))]); });
+    gone.forEach(function (rec) {
+      var v = null;
+      eachIndex(st, function (ix) {
+        v = v || dec(rec.v);
+        idxRemove(ix, rec.k, indexKeys(ix, v));
       });
-    }
+    });
     ts.dirty = true;
   }
 
@@ -1124,7 +1198,8 @@
       if (st.records.length) {
         own(ts, st);
         st.records = [];
-        st.indexes.forEach(function (ix) { ix.entries = []; });
+        ts.ops.push(["c", st.name]);
+        eachIndex(st, function (ix) { ix.entries = []; ix.dirty = true; });
         ts.dirty = true;
       }
       return undefined;
@@ -1179,6 +1254,13 @@
     return dec(store.records[LB(store.records, e.pk)].v);
   }
 
+  function IDBRecord() { illegal(); }
+  var RECP = IDBRecord.prototype;
+  tag(RECP, "IDBRecord");
+  getter(RECP, "key", function () { return S(this).key; });
+  getter(RECP, "primaryKey", function () { return S(this).primaryKey; });
+  getter(RECP, "value", function () { return S(this).value; });
+
   // the query methods of a store (`imeta` is null) or an index
   function queries(self, tx, smeta, imeta) {
     var isIndex = !!imeta;
@@ -1198,7 +1280,7 @@
         return enqueue(tx, self, function () {
           var src = sourceOf(ts, smeta, imeta);
           return entriesIn(src.list, a.range, a.dir, a.count).map(function (e) {
-            if (records) return { key: fromKey(e.k), primaryKey: fromKey(e.pk), value: valueOfEntry(src.store, e) };
+            if (records) return make(RECP, { key: fromKey(e.k), primaryKey: fromKey(e.pk), value: valueOfEntry(src.store, e) });
             return kind === "value" ? valueOfEntry(src.store, e) : fromKey(e.pk);
           });
         });
@@ -1235,26 +1317,33 @@
     if (arguments.length < 2) throw new TypeError("2 arguments required, but only " + arguments.length + " present.");
     var w = S(this);
     name = String(name);
-    var kp = normPath(keyPath);
     var ts = inVersionChange(w, "Creating an index");
     var st = w.meta;
     if (st.indexes.has(name)) throw err("ConstraintError", "An index with the name already exists.");
+    var kp = normPath(keyPath);
     var unique = !!(options && options.unique), multi = !!(options && options.multiEntry);
     if (multi && Array.isArray(kp)) throw err("InvalidAccessError", "A multiEntry index cannot have an array key path.");
     var ix = newIndex(name, kp, unique, multi);
-    var bad = false;
+    ix.dirty = true;
+    ix.pending = true;
     own(ts, st);
     st.indexes.set(name, ix);
     ts.schemaUndo.created.push(ix);
-    st.records.forEach(function (rec) {
-      var keys = indexKeys(ix, dec(rec.v));
-      if (unique && idxConflict(ix, rec.k, keys)) bad = true;
-      idxAdd(ix, rec.k, keys);
-    });
     ts.dirty = true;
-    var out = indexWrapper(this, ix);
-    if (bad) task(function () { abortTx(w.tx, err("ConstraintError", "Records already have the same key in a unique index.")); });
-    return out;
+    // the index is filled when its turn comes: after the requests made before it
+    silent(w.tx, function () {
+      if (st.deleted || ix.deleted) return;
+      ix.pending = false;
+      ix.entries = [];
+      var bad = false;
+      st.records.forEach(function (rec) {
+        var keys = indexKeys(ix, dec(rec.v));
+        if (unique && idxConflict(ix, rec.k, keys)) bad = true;
+        idxAdd(ix, rec.k, keys);
+      });
+      if (bad) throw err("ConstraintError", "Records already have the same key in a unique index.");
+    });
+    return indexWrapper(this, ix);
   });
   hide(OSP, "deleteIndex", function deleteIndex(name) {
     need1(arguments);
@@ -1264,10 +1353,18 @@
     var st = w.meta;
     var ix = st.indexes.get(name);
     if (!ix) throw err("NotFoundError", "There is no index with that name.");
+    own(ts, st);
     st.indexes = new Map(st.indexes);
     st.indexes["delete"](name);
     ix.deleted = true;
+    // requests made before this one still keep the index up to date (and can fail on it)
+    (st.dying || (st.dying = [])).push(ix);
     ts.dirty = true;
+    silent(w.tx, function () {
+      ix.gone = true;
+      var at = st.dying ? st.dying.indexOf(ix) : -1;
+      if (at >= 0) st.dying.splice(at, 1);
+    });
   });
   hide(OSP, "index", function index(name) {
     need1(arguments);
@@ -1297,7 +1394,7 @@
   }
   function ixQ(self) { var w = S(self); return queries(self, w.tx, w.smeta, w.meta); }
   getter(IXP, "objectStore", function () { return S(this).store; });
-  getter(IXP, "keyPath", function () { return pathOut(S(this).meta); });
+  getter(IXP, "keyPath", function () { return pathOut(S(this)); });
   getter(IXP, "multiEntry", function () { return S(this).meta.multi; });
   getter(IXP, "unique", function () { return S(this).meta.unique; });
   hide(IXP, "get", function get(query) { need1(arguments); return ixQ(this).get(query, "value"); });
@@ -1457,14 +1554,14 @@
       if (r === INVALID || r === NOKEY || cmp(r, cs.pk) !== 0) throw err("DataError", "The key of the value is not the key of the cursor.");
     }
     var pk = cs.pk;
-    return enqueue(cs.tx, cs.source, function () {
+    return enqueue(cs.tx, this, function () {
       return putRecord(ts, storeFor(ts, smeta), pk, encoded, cloned, false, false);
     });
   });
   hide(CP, "delete", function () {
     var cs = cursorWrite(this), ts = S(cs.tx), pk = cs.pk, smeta = cs.smeta;
     var range = { lower: pk, upper: pk, lowerOpen: false, upperOpen: false, hasLower: true, hasUpper: true };
-    return enqueue(cs.tx, cs.source, function () {
+    return enqueue(cs.tx, this, function () {
       removeRange(ts, storeFor(ts, smeta), range);
       return undefined;
     });
@@ -1509,26 +1606,26 @@
     var s = S(this);
     if (arguments.length === 0) throw new TypeError("1 argument required, but only 0 present.");
     var names = typeof storeNames === "string" ? [storeNames] : Array.prototype.slice.call(storeNames).map(String);
-    if (mode === undefined) mode = "readonly";
-    mode = String(mode);
-    if (mode !== "readonly" && mode !== "readwrite") throw new TypeError("The provided value '" + mode + "' is not a valid enum value of type IDBTransactionMode.");
-    if (options && options.durability !== undefined && ["default", "strict", "relaxed"].indexOf(String(options.durability)) < 0)
-      throw new TypeError("The provided value is not a valid enum value of type IDBTransactionDurability.");
     var i;
     for (i = 0; i < s.txs.length; i++) if (S(s.txs[i]).mode === "versionchange" && !S(s.txs[i]).finished) throw err("InvalidStateError", "A version change transaction is running.");
     if (s.closePending) throw err("InvalidStateError", "The database connection is closing.");
     names = names.filter(function (n, at) { return names.indexOf(n) === at; }).sort();
     if (names.length === 0) throw err("InvalidAccessError", "The storeNames parameter is empty.");
     for (i = 0; i < names.length; i++) if (!s.data.stores.has(names[i])) throw err("NotFoundError", "The object store '" + names[i] + "' does not exist.");
+    if (mode === undefined) mode = "readonly";
+    mode = String(mode);
+    if (mode !== "readonly" && mode !== "readwrite") throw new TypeError("The provided value '" + mode + "' is not a valid enum value of type IDBTransactionMode.");
+    if (options && options.durability !== undefined && ["default", "strict", "relaxed"].indexOf(String(options.durability)) < 0)
+      throw new TypeError("The provided value is not a valid enum value of type IDBTransactionDurability.");
     return makeTx(this, names, mode, false);
   });
   hide(DP, "createObjectStore", function createObjectStore(name, options) {
     var s = S(this);
     var tx = null;
-    for (var i = 0; i < s.txs.length; i++) if (S(s.txs[i]).mode === "versionchange" && !S(s.txs[i]).finished) tx = s.txs[i];
+    for (var i = 0; i < s.txs.length; i++) if (S(s.txs[i]).mode === "versionchange" && !S(s.txs[i]).over) tx = s.txs[i];
     if (!tx) throw err("InvalidStateError", "The database is not running a version change transaction.");
     var ts = S(tx);
-    if (!ts.active) throw err("TransactionInactiveError", "The transaction is not active.");
+    if (!ts.active || ts.finished) throw err("TransactionInactiveError", "The transaction is not active.");
     name = String(name);
     var kp = options && options.keyPath !== undefined ? normPath(options.keyPath) : null;
     var auto = !!(options && options.autoIncrement);
@@ -1537,20 +1634,29 @@
     var st = newStore(name, kp, auto);
     s.data.stores.set(name, st);
     ts.schemaUndo.createdStores.push(st);
+    silent(tx, function () { ts.ops.push(["c", name]); });
     ts.dirty = true;
     return storeWrapper(tx, st);
   });
   hide(DP, "deleteObjectStore", function deleteObjectStore(name) {
     var s = S(this);
     var tx = null;
-    for (var i = 0; i < s.txs.length; i++) if (S(s.txs[i]).mode === "versionchange" && !S(s.txs[i]).finished) tx = s.txs[i];
+    for (var i = 0; i < s.txs.length; i++) if (S(s.txs[i]).mode === "versionchange" && !S(s.txs[i]).over) tx = s.txs[i];
     if (!tx) throw err("InvalidStateError", "The database is not running a version change transaction.");
-    if (!S(tx).active) throw err("TransactionInactiveError", "The transaction is not active.");
+    if (!S(tx).active || S(tx).finished) throw err("TransactionInactiveError", "The transaction is not active.");
     name = String(name);
     if (!s.data.stores.has(name)) throw err("NotFoundError", "The object store '" + name + "' does not exist.");
     var gone = s.data.stores.get(name);
+    var goneIx = Array.from(gone.indexes.values());
     s.data.stores["delete"](name);
     gone.deleted = true;
+    goneIx.forEach(function (ix) { ix.deleted = true; });
+    gone.indexes = new Map();
+    // requests made before this one still find the store
+    silent(tx, function () {
+      gone.gone = true;
+      goneIx.forEach(function (ix) { ix.gone = true; });
+    });
     S(tx).dirty = true;
   });
 
@@ -1667,6 +1773,7 @@
         fail(op, err("AbortError", ok ? "The connection was closed." : "The upgrade transaction was aborted."));
       }
     };
+    deactivateLater(tx);
     var res = dispatch(versionEvent("upgradeneeded", cur, version), pathOf(req));
     if (res.threw) abortTx(tx, err("AbortError"));
     task(function () { runNext(tx); });
@@ -1703,6 +1810,7 @@
   global("IDBObjectStore", IDBObjectStore);
   global("IDBIndex", IDBIndex);
   global("IDBCursor", IDBCursor);
+  global("IDBRecord", IDBRecord);
   global("IDBCursorWithValue", IDBCursorWithValue);
   global("IDBTransaction", IDBTransaction);
   global("IDBRequest", IDBRequest);
