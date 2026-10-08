@@ -26,6 +26,7 @@ defmodule Browser.Wasm.Decoder do
           tables: [],
           mems: [],
           globals: [],
+          tags: [],
           exports: [],
           start: nil,
           elems: [],
@@ -62,6 +63,7 @@ defmodule Browser.Wasm.Decoder do
   defp rank(3), do: 3
   defp rank(4), do: 4
   defp rank(5), do: 5
+  defp rank(13), do: 5.5
   defp rank(6), do: 6
   defp rank(7), do: 7
   defp rank(8), do: 8
@@ -104,6 +106,7 @@ defmodule Browser.Wasm.Decoder do
   defp section(3, p, mod), do: %{mod | funcs: whole(vec(p, &u32/1))}
   defp section(4, p, mod), do: %{mod | tables: whole(vec(p, &table_type/1))}
   defp section(5, p, mod), do: %{mod | mems: whole(vec(p, &mem_type/1))}
+  defp section(13, p, mod), do: %{mod | tags: whole(vec(p, &tag/1))}
   defp section(6, p, mod), do: %{mod | globals: whole(vec(p, &global/1))}
   defp section(7, p, mod), do: %{mod | exports: whole(vec(p, &export/1))}
   defp section(8, p, mod), do: %{mod | start: whole(u32(p))}
@@ -184,11 +187,13 @@ defmodule Browser.Wasm.Decoder do
   defp valtype(<<0x7B, _::binary>>), do: fail("v128 is not supported")
   defp valtype(<<0x70, r::binary>>), do: {:funcref, r}
   defp valtype(<<0x6F, r::binary>>), do: {:externref, r}
+  defp valtype(<<0x69, r::binary>>), do: {:exnref, r}
   defp valtype(<<>>), do: fail("unexpected end")
   defp valtype(_), do: fail("malformed value type")
 
   defp reftype(<<0x70, r::binary>>), do: {:funcref, r}
   defp reftype(<<0x6F, r::binary>>), do: {:externref, r}
+  defp reftype(<<0x69, r::binary>>), do: {:exnref, r}
   defp reftype(<<>>), do: fail("unexpected end")
   defp reftype(_), do: fail("malformed reference type")
 
@@ -222,6 +227,10 @@ defmodule Browser.Wasm.Decoder do
   end
 
   defp mem_type(bin), do: limits(bin)
+
+  defp tag(<<0, r::binary>>), do: u32(r)
+  defp tag(<<>>), do: fail("unexpected end")
+  defp tag(_), do: fail("malformed tag attribute")
 
   defp global_type(bin) do
     {t, r} = valtype(bin)
@@ -264,6 +273,10 @@ defmodule Browser.Wasm.Decoder do
           {t, r} = global_type(r)
           {{:global, t}, r}
 
+        <<4, r::binary>> ->
+          {t, r} = tag(r)
+          {{:tag, t}, r}
+
         <<>> ->
           fail("unexpected end")
 
@@ -278,9 +291,9 @@ defmodule Browser.Wasm.Decoder do
     {n, r} = name(bin)
 
     case r do
-      <<k, r::binary>> when k in 0..3 ->
+      <<k, r::binary>> when k in 0..4 ->
         {i, r} = u32(r)
-        {%{name: n, kind: Enum.at([:func, :table, :mem, :global], k), index: i}, r}
+        {%{name: n, kind: Enum.at([:func, :table, :mem, :global, :tag], k), index: i}, r}
 
       <<>> ->
         fail("unexpected end")
@@ -408,7 +421,7 @@ defmodule Browser.Wasm.Decoder do
 
   defp blocktype(<<0x40, r::binary>>), do: {:empty, r}
 
-  defp blocktype(<<b, _::binary>> = bin) when b in [0x7F, 0x7E, 0x7D, 0x7C, 0x70, 0x6F] do
+  defp blocktype(<<b, _::binary>> = bin) when b in [0x7F, 0x7E, 0x7D, 0x7C, 0x70, 0x6F, 0x69] do
     {t, r} = valtype(bin)
     {{:val, t}, r}
   end
@@ -442,6 +455,17 @@ defmodule Browser.Wasm.Decoder do
         if term != :end, do: fail("END opcode expected")
         {{:if, bt, then, els}, r}
     end
+  end
+
+  defp instr(<<0x08, r::binary>>), do: idx(:throw, r)
+  defp instr(<<0x0A, r::binary>>), do: {:throw_ref, r}
+
+  defp instr(<<0x1F, r::binary>>) do
+    {bt, r} = blocktype(r)
+    {catches, r} = vec(r, &catch_clause/1)
+    {body, term, r} = seq(r, [])
+    if term != :end, do: fail("END opcode expected")
+    {{:try_table, bt, catches, body}, r}
   end
 
   defp instr(<<0x0C, r::binary>>), do: idx(:br, r)
@@ -574,6 +598,20 @@ defmodule Browser.Wasm.Decoder do
   defp instr(<<op, r::binary>>) when is_map_key(@numeric, op), do: {Map.fetch!(@numeric, op), r}
   defp instr(<<>>), do: fail("unexpected end")
   defp instr(_), do: fail("illegal opcode")
+
+  defp catch_clause(<<k, r::binary>>) when k in [0, 1] do
+    {t, r} = u32(r)
+    {l, r} = u32(r)
+    {{if(k == 0, do: :catch, else: :catch_ref), t, l}, r}
+  end
+
+  defp catch_clause(<<k, r::binary>>) when k in [2, 3] do
+    {l, r} = u32(r)
+    {{if(k == 2, do: :catch_all, else: :catch_all_ref), l}, r}
+  end
+
+  defp catch_clause(<<>>), do: fail("unexpected end")
+  defp catch_clause(_), do: fail("malformed catch clause")
 
   defp idx(name, bin) do
     {i, r} = u32(bin)

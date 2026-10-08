@@ -70,20 +70,20 @@ defmodule Browser.Wasm.Interp do
 
       {:jump, to} ->
         back(to, pc)
-        run(code, to, stack, locals, inst, depth)
+        go(code, to, stack, locals, inst, depth)
 
       {:jump_unless, to} ->
         [c | st] = stack
-        run(code, if(c == 0, do: to, else: pc + 1), st, locals, inst, depth)
+        go(code, if(c == 0, do: to, else: pc + 1), st, locals, inst, depth)
 
       {:jump_if, to} ->
         [c | st] = stack
         if c != 0, do: back(to, pc)
-        run(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
+        go(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
 
       {:br, to, arity, drop} ->
         back(to, pc)
-        run(code, to, branch(stack, arity, drop), locals, inst, depth)
+        go(code, to, branch(stack, arity, drop), locals, inst, depth)
 
       {:br_if, to, arity, drop} ->
         [c | st] = stack
@@ -92,7 +92,7 @@ defmodule Browser.Wasm.Interp do
           run(code, pc + 1, st, locals, inst, depth)
         else
           back(to, pc)
-          run(code, to, branch(st, arity, drop), locals, inst, depth)
+          go(code, to, branch(st, arity, drop), locals, inst, depth)
         end
 
       {:br_table, targets, default} ->
@@ -102,15 +102,18 @@ defmodule Browser.Wasm.Interp do
           if i < tuple_size(targets), do: elem(targets, i), else: default
 
         back(to, pc)
-        run(code, to, branch(st, arity, drop), locals, inst, depth)
+        go(code, to, branch(st, arity, drop), locals, inst, depth)
 
       {:return, n} ->
         stack |> Enum.take(n) |> Enum.reverse()
 
       {:call, idx, np} ->
         {args, rest} = Enum.split(stack, np)
-        results = invoke(elem(inst.funcs, idx), Enum.reverse(args), depth)
-        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+        case call(inst, locals, elem(inst.funcs, idx), Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
 
       {:return_call, idx, np} ->
         {args, _} = Enum.split(stack, np)
@@ -126,8 +129,46 @@ defmodule Browser.Wasm.Interp do
         [i | st] = stack
         f = indirect(inst, ti, tbl, i)
         {args, rest} = Enum.split(st, np)
-        results = invoke(f, Enum.reverse(args), depth)
-        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+        case call(inst, locals, f, Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:throw, t, np} ->
+        {args, _} = Enum.split(stack, np)
+        raise_exc({:wasm_exception, elem(inst.tags, t), Enum.reverse(args)}, inst, locals)
+
+      :throw_ref ->
+        case stack do
+          [{:exn, tag, vals} | _] -> raise_exc({:wasm_exception, tag, vals}, inst, locals)
+          _ -> trap("null exception reference")
+        end
+
+      {:try_table, handlers, np, hi} ->
+        nested = %{inst | tr: {pc + 1, hi}}
+
+        case run(code, pc + 1, stack, locals, nested, depth) do
+          {:__exit, to, st, locals2} ->
+            go(code, to, st, locals2, inst, depth)
+
+          {:__exc, {:wasm_exception, tag, vals} = exc, locals2} ->
+            case find_handler(handlers, inst, tag) do
+              nil ->
+                raise_exc(exc, inst, locals2)
+
+              {ref?, to, arity, drop} ->
+                pushed = push_results(vals, Enum.drop(stack, np))
+                pushed = if ref?, do: [{:exn, tag, vals} | pushed], else: pushed
+                go(code, to, branch(pushed, arity, drop), locals2, inst, depth)
+            end
+
+          results ->
+            results
+        end
+
+      :try_end ->
+        {:__exit, pc + 1, stack, locals}
 
       :drop ->
         run(code, pc + 1, tl(stack), locals, inst, depth)
@@ -176,6 +217,32 @@ defmodule Browser.Wasm.Interp do
         st = bulk(other, stack, inst)
         run(code, pc + 1, st, locals, inst, depth)
     end
+  end
+
+  # a branch; inside a try_table, one that leaves its code ends the nested run
+  defp go(code, to, stack, locals, %{tr: tr} = inst, depth) do
+    case tr do
+      {lo, hi} when to < lo or to > hi -> {:__exit, to, stack, locals}
+      _ -> run(code, to, stack, locals, inst, depth)
+    end
+  end
+
+  # a call; in a try_table an exception comes back as a value, so the locals are not lost
+  defp call(%{tr: false}, _, f, args, depth), do: invoke(f, args, depth)
+
+  defp call(_, locals, f, args, depth) do
+    invoke(f, args, depth)
+  catch
+    :throw, {:wasm_exception, _, _} = exc -> {:__exc, exc, locals}
+  end
+
+  defp raise_exc(exc, %{tr: false}, _), do: throw(exc)
+  defp raise_exc(exc, _, locals), do: {:__exc, exc, locals}
+
+  defp find_handler(handlers, inst, tag) do
+    Enum.find_value(handlers, fn {t, ref?, to, arity, drop} ->
+      if t == :all or elem(inst.tags, t) == tag, do: {ref?, to, arity, drop}
+    end)
   end
 
   defp indirect(inst, ti, tbl, i) do

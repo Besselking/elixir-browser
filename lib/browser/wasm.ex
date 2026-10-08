@@ -30,6 +30,7 @@ defmodule Browser.Wasm do
       desc =
         case i.desc do
           {:func, t} -> {:func, elem(types, t)}
+          {:tag, t} -> {:tag, elem(types, t)}
           other -> other
         end
 

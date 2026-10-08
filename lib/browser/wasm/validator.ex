@@ -24,6 +24,13 @@ defmodule Browser.Wasm.Validator do
 
     for %{desc: {:func, t}} <- mod.imports, t >= ntypes, do: err("unknown type")
     for t <- mod.funcs, t >= ntypes, do: err("unknown type")
+    for %{desc: {:tag, t}} <- mod.imports, t >= ntypes, do: err("unknown type")
+    for t <- mod.tags, t >= ntypes, do: err("unknown type")
+
+    tag_types =
+      for(t <- imp.(:tag) ++ mod.tags, do: elem(types, t))
+      |> tap(fn ts -> for {_, r} <- ts, r != [], do: err("non-empty tag result type") end)
+      |> List.to_tuple()
 
     func_types =
       for(t <- imp.(:func) ++ mod.funcs, do: elem(types, t))
@@ -39,6 +46,7 @@ defmodule Browser.Wasm.Validator do
       funcs: func_types,
       tables: tables,
       nmems: length(mems),
+      tags: tag_types,
       globals: globals,
       elems: mod.elems |> Enum.map(& &1.type) |> List.to_tuple(),
       ndatas: mod.data_count,
@@ -68,6 +76,7 @@ defmodule Browser.Wasm.Validator do
           :table -> tuple_size(c.tables)
           :mem -> c.nmems
           :global -> tuple_size(c.globals)
+          :tag -> tuple_size(c.tags)
         end
 
       if e.index >= limit, do: err("unknown #{e.kind}")
@@ -230,6 +239,14 @@ defmodule Browser.Wasm.Validator do
     {:br_table, List.to_tuple(ts), {Map.fetch!(labels, dl), da, dd}}
   end
 
+  defp resolve({:try_table, handlers, np, {:L, end_l}}, labels) do
+    hs =
+      for {tag, ref?, {:L, l, arity, drop}} <- handlers,
+          do: {tag, ref?, Map.fetch!(labels, l), arity, drop}
+
+    {:try_table, hs, np, Map.fetch!(labels, end_l)}
+  end
+
   defp resolve(other, _), do: other
 
   defp emit(s, ins), do: %{s | out: [ins | s.out], pc: s.pc + 1}
@@ -379,6 +396,41 @@ defmodule Browser.Wasm.Validator do
     s |> emit({:br_table, targets, {:L, dl, da, dd}}) |> unreachable()
   end
 
+  defp ins(c, s, {:throw, t}) do
+    if t >= tuple_size(c.tags), do: err("unknown tag")
+    {params, _} = elem(c.tags, t)
+    s |> pop_all(params) |> emit({:throw, t, length(params)}) |> unreachable()
+  end
+
+  defp ins(_, s, :throw_ref) do
+    {_, s} = pop(s, :exnref)
+    s |> emit(:throw_ref) |> unreachable()
+  end
+
+  defp ins(c, s, {:try_table, bt, catches, body}) do
+    {ins, outs} = blocktype(c, bt)
+
+    handlers =
+      for clause <- catches do
+        {tag, ref?, label, types} = catch_target(c, clause)
+        f = frame(s, label)
+        if label_types(f) != types, do: err("type mismatch")
+        # the stack is cut back to the height at the try_table, so the values are all there is
+        drop = max(0, s.h - length(ins) - f.height)
+        {tag, ref?, {:L, f.label, length(types), drop}}
+      end
+
+    s = pop_all(s, ins)
+    {l, s} = new_label(s)
+    {end_l, s} = new_label(s)
+    s = emit(s, {:try_table, handlers, length(ins), {:L, end_l}})
+    s = push_ctrl(s, :block, ins, outs, l)
+    s = walk(c, s, body)
+    s = define(s, end_l)
+    s = emit(s, :try_end)
+    end_ctrl(s)
+  end
+
   defp ins(_, s, :return) do
     [f | _] = Enum.reverse(s.ctrls)
     s |> pop_all(f.outs) |> emit({:return, length(f.outs)}) |> unreachable()
@@ -432,7 +484,9 @@ defmodule Browser.Wasm.Validator do
     {t1, s} = pop(s)
     {t2, s} = pop(s)
 
-    if t1 in [:funcref, :externref] or t2 in [:funcref, :externref], do: err("type mismatch")
+    if t1 in [:funcref, :externref, :exnref] or t2 in [:funcref, :externref, :exnref],
+      do: err("type mismatch")
+
     if t1 != :unknown and t2 != :unknown and t1 != t2, do: err("type mismatch")
     s |> push(if(t1 == :unknown, do: t2, else: t1)) |> emit(:select)
   end
@@ -579,7 +633,7 @@ defmodule Browser.Wasm.Validator do
 
   defp ins(_, s, :ref_is_null) do
     {t, s} = pop(s)
-    unless t in [:funcref, :externref, :unknown], do: err("type mismatch")
+    unless t in [:funcref, :externref, :exnref, :unknown], do: err("type mismatch")
     s |> push(:i32) |> emit(:ref_is_null)
   end
 
@@ -606,6 +660,16 @@ defmodule Browser.Wasm.Validator do
     [f | _] = Enum.reverse(s.ctrls)
     if f.outs != results, do: err("type mismatch")
   end
+
+  defp catch_target(c, {kind, t, l}) when kind in [:catch, :catch_ref] do
+    if t >= tuple_size(c.tags), do: err("unknown tag")
+    {params, _} = elem(c.tags, t)
+    ref? = kind == :catch_ref
+    {t, ref?, l, if(ref?, do: params ++ [:exnref], else: params)}
+  end
+
+  defp catch_target(_, {:catch_all, l}), do: {:all, false, l, []}
+  defp catch_target(_, {:catch_all_ref, l}), do: {:all, true, l, [:exnref]}
 
   defp local(c, i) do
     if i >= tuple_size(c.locals), do: err("unknown local")

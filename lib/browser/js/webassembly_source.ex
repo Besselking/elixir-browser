@@ -20,7 +20,6 @@ defmodule Browser.JS.WebAssemblySource do
     var CompileError = named(class extends Error {}, 'CompileError');
     var LinkError = named(class extends Error {}, 'LinkError');
     var RuntimeError = named(class extends Error {}, 'RuntimeError');
-    W.init(CompileError, LinkError, RuntimeError);
 
     function toU32(v, what) {
       var n = Number(v);
@@ -131,10 +130,45 @@ defmodule Browser.JS.WebAssemblySource do
     });
     Global.prototype.valueOf = function valueOf() { return W.globGet(handleOf(this, 'WebAssembly.Global')); };
 
+    // ── Tag and Exception ────────────────────────────────────
+    function Tag(desc) {
+      if (!new.target) throw new TypeError("WebAssembly.Tag must be invoked with 'new'");
+      need(desc, 'WebAssembly.Tag()');
+      if (desc.parameters === undefined) throw new TypeError("WebAssembly.Tag(): Argument 0 must be a tag type with 'parameters'");
+      adopt(this, W.tagNew(Array.from(desc.parameters, String)));
+    }
+    defineClass(Tag, 'Tag');
+    function Exception(tag, payload, options) {
+      if (!new.target) throw new TypeError("WebAssembly.Exception must be invoked with 'new'");
+      if (!(tag instanceof Tag)) throw new TypeError('WebAssembly.Exception(): Argument 0 must be a WebAssembly tag');
+      var h = W.excNew(H.get(tag), payload);
+      W.link(this, h);
+      adopt(this, h);
+    }
+    defineClass(Exception, 'Exception');
+    function excHandle(self) {
+      var h = H.get(self);
+      if (h === undefined) throw new TypeError('Receiver is not a WebAssembly.Exception');
+      return h;
+    }
+    Exception.prototype.is = function is(tag) {
+      if (!(tag instanceof Tag)) throw new TypeError('WebAssembly.Exception.is(): Argument 0 must be a WebAssembly tag');
+      return W.excIs(excHandle(this), H.get(tag));
+    };
+    Exception.prototype.getArg = function getArg(tag, index) {
+      if (!(tag instanceof Tag)) throw new TypeError('WebAssembly.Exception.getArg(): Argument 0 must be a WebAssembly tag');
+      return W.excGet(excHandle(this), H.get(tag), toU32(index, 'Argument 1'));
+    };
+    W.init(CompileError, LinkError, RuntimeError, function (h) {
+      var e = Object.create(Exception.prototype);
+      W.link(e, h);
+      return adopt(e, h);
+    });
+
     function wrap(kind, h) {
       var w = wrappers.get(h);
       if (w) return w;
-      var C = kind === 'memory' ? Memory : kind === 'table' ? Table : Global;
+      var C = kind === 'memory' ? Memory : kind === 'table' ? Table : kind === 'tag' ? Tag : Global;
       w = Object.create(C.prototype);
       return adopt(w, h);
     }
@@ -219,7 +253,7 @@ defmodule Browser.JS.WebAssemblySource do
 
     var WebAssembly = {};
     var api = {
-      Module: Module, Instance: Instance, Memory: Memory, Table: Table, Global: Global,
+      Module: Module, Instance: Instance, Memory: Memory, Table: Table, Global: Global, Tag: Tag, Exception: Exception,
       CompileError: CompileError, LinkError: LinkError, RuntimeError: RuntimeError,
       validate: validate, compile: compile, instantiate: instantiate,
       compileStreaming: compileStreaming, instantiateStreaming: instantiateStreaming

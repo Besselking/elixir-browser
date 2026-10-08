@@ -1,7 +1,7 @@
 defmodule Browser.Wasm.Instance do
   @moduledoc "Makes an instance of a validated module: links the imports, creates the state, runs segments and the start function."
 
-  alias Browser.Wasm.{Error, Func, Global, Interp, Memory, Table}
+  alias Browser.Wasm.{Error, Func, Global, Interp, Memory, Table, Tag}
 
   defp link_error(msg), do: Error.fail(:link, msg)
 
@@ -19,6 +19,7 @@ defmodule Browser.Wasm.Instance do
         desc =
           case imp.desc do
             {:func, t} -> {:func, elem(types, t)}
+            {:tag, t} -> {:tag, elem(types, t)}
             other -> other
           end
 
@@ -55,6 +56,10 @@ defmodule Browser.Wasm.Instance do
         Tuple.insert_at(acc, tuple_size(acc), Global.new(t, m == :var, value))
       end)
 
+    tags =
+      (imp_of.(:tag) ++ for(t <- mod.tags, do: Tag.new(elem(types, t))))
+      |> List.to_tuple()
+
     exports =
       for e <- mod.exports do
         value =
@@ -63,6 +68,7 @@ defmodule Browser.Wasm.Instance do
             :table -> elem(tables, e.index)
             :mem -> elem(mems, e.index)
             :global -> elem(globals, e.index)
+            :tag -> elem(tags, e.index)
           end
 
         {e.name, e.kind, value}
@@ -75,6 +81,8 @@ defmodule Browser.Wasm.Instance do
       tables: tables,
       mems: mems,
       globals: globals,
+      tags: tags,
+      tr: false,
       code: List.to_tuple(mod.compiled)
     }
 
@@ -185,6 +193,10 @@ defmodule Browser.Wasm.Instance do
   defp check_import(%{desc: {:mem, {min, max}}}, %Memory{} = m, _) do
     if Memory.size(m) < min or limit_mismatch(max, m.max),
       do: link_error("incompatible import type")
+  end
+
+  defp check_import(%{desc: {:tag, t}}, %Tag{} = tag, types) do
+    if tag.type != elem(types, t), do: link_error("incompatible import type")
   end
 
   defp check_import(%{desc: {:global, {type, mut}}}, %Global{} = g, _) do
