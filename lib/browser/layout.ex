@@ -2430,7 +2430,7 @@ defmodule Browser.Layout do
     cond do
       c["line-break"] == "anywhere" -> :every
       c["word-break"] == "break-all" -> :all
-      c["word-break"] == "break-word" -> :word
+      c["word-break"] == "break-word" -> :anywhere
       c["overflow-wrap"] == "anywhere" -> :anywhere
       c["overflow-wrap"] == "break-word" -> :word
       c["word-wrap"] == "anywhere" -> :anywhere
@@ -4805,9 +4805,8 @@ defmodule Browser.Layout do
 
     # While a table cell is measured at a width of 1, shrink-to-fit is never narrower than the
     # narrowest the content can be: the inline-block still holds its unbreakable text
-    # (a table is never narrower than its narrowest content)
-    if wanted <= avail or (Process.get(:layout_intrinsic) != true and not Map.get(spec, :table?)),
-      do: min(avail, wanted),
+    if wanted <= avail,
+      do: wanted,
       else: min(wanted, max(avail, min_extent(st, sub, key)))
   end
 
@@ -5151,13 +5150,28 @@ defmodule Browser.Layout do
   # it goes to the next line too, or when that leaves nothing, the punctuation stays
   defp keep_punctuation(chars, fit) do
     cond do
-      fit >= length(chars) or not no_start?(Enum.at(chars, fit)) -> fit
-      fit > 1 -> keep_punctuation(chars, fit - 1)
-      true -> keep_punctuation(chars, fit + 1)
+      fit >= length(chars) ->
+        fit
+
+      not (no_start?(Enum.at(chars, fit)) or prefix?(Enum.at(chars, fit - 1)) or
+             glue_char?(Enum.at(chars, fit)) or glue_char?(Enum.at(chars, fit - 1))) ->
+        fit
+
+      fit > 1 ->
+        keep_punctuation(chars, fit - 1)
+
+      true ->
+        keep_punctuation(chars, fit + 1)
     end
   end
 
-  defp no_start?(ch), do: String.contains?(".,;:!?)]}%\u3001\u3002\uFF0C\uFF0E\u2026", ch)
+  defp no_start?(ch), do: String.contains?("./,;:!?)]}%\u3001\u3002\uFF0C\uFF0E\u2026", ch)
+
+  # a prefix symbol (a currency sign, a backslash) never ends a line: `word-break: break-all`
+  # does not change that
+  defp glue_char?(ch), do: ch in ["\u00A0" | @no_break]
+
+  defp prefix?(ch), do: String.contains?("$\\+\u00A3\u00A4\u00A5\u20AC\u00B1", ch)
 
   defp word_split({"", rest}, style, st, glue, line_left) do
     st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
@@ -5193,6 +5207,12 @@ defmodule Browser.Layout do
 
         # no space between this word and what comes before: they only break before all of it
         glued? and space_w == 0 and not st.after_space ->
+          # (under `break-all` a closing punctuation mark takes the last letter before it along)
+          glue =
+            if glue == true and style.wrap_chars == :all and no_start?(String.first(text)),
+              do: :hold,
+              else: glue
+
           wrap_glued(st, line_left, glue, style)
 
         true ->
@@ -5257,7 +5277,19 @@ defmodule Browser.Layout do
   # or the content measured
   defp hang_width(_text, %{ws: :break_spaces}, _st), do: 0
 
-  defp hang_width(text, style, st) do
+  # (the spaces `pre-wrap` preserves hang when they do not fit)
+  defp hang_width(text, %{ws: :pre_wrap} = style, st) do
+    w = st.measure.(text, style)
+
+    if text != "" and String.trim(text, "\u00A0") == "" and
+         st.x + w > st.width - st.margin - st.right - st.fr,
+       do: w,
+       else: ideographic_hang(text, style, st)
+  end
+
+  defp hang_width(text, style, st), do: ideographic_hang(text, style, st)
+
+  defp ideographic_hang(text, style, st) do
     hang =
       case String.trim_trailing(text, "\u3000") do
         ^text -> 0

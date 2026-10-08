@@ -6298,4 +6298,44 @@ defmodule Browser.LayoutTest do
       assert run_rows(html, 400) == ["\u5B57\u5B57\u3001", "\u5B57\u5B57"]
     end
   end
+
+  describe "break-all next to punctuation, anywhere sizing and pre-wrap hanging" do
+    defp wb_rows(html, width) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, width, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :text))
+      |> Enum.group_by(& &1.y)
+      |> Enum.sort()
+      |> Enum.map(fn {_, row} -> row |> Enum.sort_by(& &1.x) |> Enum.map_join(& &1.text) end)
+    end
+
+    test "break-all does not break after a prefix symbol or before a no-break space" do
+      box = &~s(<div style="width:20px;font-size:10px;word-break:break-all">#{&1}</div>)
+      assert wb_rows(box.("XXX\\\\X"), 400) == ["XXX", "\\\\X"]
+      assert wb_rows(box.("XXXX\u00A0XXXX"), 400) == ["XXX", "X\u00A0XX", "XX"]
+    end
+
+    test "a closing mark in another span takes the last letter of break-all text along" do
+      html =
+        ~s(<div style="width:10px;font-size:10px;word-break:break-all"><span>X</span><span>.</span></div>)
+
+      assert wb_rows(html, 400) == ["X."]
+    end
+
+    test "word-break: break-word sizes a float by the widest letter, like overflow-wrap: anywhere" do
+      html =
+        ~s(<div style="width:0;font-size:10px;word-break:break-word"><div style="float:left">XXXX</div></div>)
+
+      assert wb_rows(html, 400) == ["X", "X", "X", "X"]
+    end
+
+    test "preserved spaces hang only when they do not fit" do
+      fits = ~s(<div style="font-size:10px;white-space:pre-wrap;float:left">X </div>)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> fits, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.all?(items, &(not Map.has_key?(&1, :hang)))
+    end
+  end
 end
