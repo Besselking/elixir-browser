@@ -1622,7 +1622,7 @@ defmodule Browser.Layout do
           ic = computed(attrs)
 
           cond do
-            hidden?(ic) -> {items, acc}
+            hidden?(ic) and ic["visibility"] != "collapse" -> {items, acc}
             ic["position"] in ["absolute", "fixed"] -> {items, walk(el, style, acc)}
             true -> {[flex_element_item(el, ic, style) | items], acc}
           end
@@ -6041,6 +6041,7 @@ defmodule Browser.Layout do
       scroll?: false,
       mta: false,
       mba: false,
+      collapsed: false,
       hpct: nil,
       fit?: false
     }
@@ -6049,6 +6050,27 @@ defmodule Browser.Layout do
   # A child of a flex container: laid out on its own as a block (like an inline-block),
   # with its horizontal margins and its width taken over by the container.
   defp flex_element_item({:element, tag, attrs, kids} = el, c, style) do
+    # a collapsed item is a strut: no main size, but it still counts for the cross size
+    collapsed? = c["visibility"] == "collapse"
+
+    c =
+      if collapsed?,
+        do:
+          Map.merge(c, %{
+            "width" => 0.0,
+            "min-width" => 0.0,
+            "flex-grow" => "0",
+            "flex-shrink" => "0",
+            "flex-basis" => "auto",
+            "margin-left" => 0.0,
+            "margin-right" => 0.0,
+            "padding-left" => 0.0,
+            "padding-right" => 0.0,
+            "border-left-width" => 0.0,
+            "border-right-width" => 0.0
+          }),
+        else: c
+
     box = box(tag, c)
     {bt, br, bb, bl} = box.bw
     border_box? = c["box-sizing"] == "border-box"
@@ -6085,6 +6107,7 @@ defmodule Browser.Layout do
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
+      collapsed: collapsed?,
       scroll?: c["overflow-x"] in ~w(hidden scroll auto),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
@@ -6319,6 +6342,19 @@ defmodule Browser.Layout do
   end
 
   defp flex_line(st, cs, line, avail, top, min_cross) do
+    # collapsed items only keep their cross size, they take no part in the main axis
+    {struts, line} = Enum.split_with(line, & &1.collapsed)
+
+    min_cross =
+      Enum.reduce(struts, min_cross, fn it, m ->
+        {_, h, _} = flex_atom(st, it.sub, 0, it.key)
+        max(m, h)
+      end)
+
+    if line == [], do: {[], min_cross}, else: flex_line_live(st, cs, line, avail, top, min_cross)
+  end
+
+  defp flex_line_live(st, cs, line, avail, top, min_cross) do
     n = length(line)
     gaps = cs.col_gap * (n - 1)
     outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end

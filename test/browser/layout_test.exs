@@ -5297,6 +5297,17 @@ defmodule Browser.LayoutTest do
       assert [{_, 30, _, 10}] = flex_rects(html)
     end
 
+    test "a collapsed flex item takes no width but keeps its height, and its gap goes" do
+      html = """
+      <div style="display:flex;gap:10px;width:200px"><div style="width:20px;height:5px;background:red"></div><div style="width:50px;height:30px;visibility:collapse;margin:0 7px"></div><div style="width:20px;height:5px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 5}, {30, 0, 20, 5}]
+      assert Enum.all?(flex_rects(html), fn {_, _, _, h} -> h <= 30 end)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      assert {_, 30} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
