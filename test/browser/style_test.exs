@@ -44,9 +44,13 @@ defmodule Browser.StyleTest do
 
   test "embedded content we can't draw is hidden, so its fallback text doesn't leak" do
     html =
-      "<p>a</p><canvas>no canvas</canvas><video>no video</video><iframe>frame</iframe><i>b</i>"
+      "<p>a</p><video>no video</video><iframe>frame</iframe><i>b</i>"
 
     assert tags(prune(html)) == ["p", "i"]
+  end
+
+  test "a canvas is drawn, and its fallback text is not" do
+    assert tags(prune("<p>a</p><canvas>no canvas</canvas><i>b</i>")) == ["p", "canvas", "i"]
   end
 
   test "svg is drawn, with its shapes" do

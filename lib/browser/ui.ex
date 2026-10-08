@@ -912,7 +912,12 @@ defmodule Browser.UI do
     gc = new_gc(dc)
     clip_to(gc, item, scroll)
     :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
-    draw_svg(gc, item.ops, item.x, y)
+
+    draw_svg(gc, item.ops, item.x, y, fn gc ->
+      clip_to(gc, item, scroll)
+      :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
+    end)
+
     :wxGraphicsContext.destroy(gc)
   end
 
@@ -1127,16 +1132,34 @@ defmodule Browser.UI do
   # scaled back down: quarter-pixel precision.
   @stroke_scale 4
 
-  defp draw_svg(gc, ops, ox, oy) do
-    Enum.each(ops, fn
-      %{kind: :path} = op ->
-        if op.fill, do: svg_fill(gc, op, ox, oy)
-        if op.stroke, do: svg_stroke(gc, op, ox, oy)
+  defp draw_svg(gc, ops, ox, oy, restore \\ fn _ -> :ok end) do
+    Enum.each(ops, fn op ->
+      case Map.get(op, :clip) do
+        nil ->
+          draw_svg_op(gc, op, ox, oy)
 
-      %{kind: :text} = op ->
-        svg_text(gc, op, ox, oy)
+        # (a canvas item holds the box it was clipped to)
+        {x0, y0, x1, y1} when x1 > x0 and y1 > y0 ->
+          # (no way to undo one clip: start again from the clip of the item)
+          :wxGraphicsContext.resetClip(gc)
+          restore.(gc)
+          :wxGraphicsContext.clip(gc, ox + x0, oy + y0, x1 - x0, y1 - y0)
+          draw_svg_op(gc, op, ox, oy)
+          :wxGraphicsContext.resetClip(gc)
+          restore.(gc)
+
+        _ ->
+          :ok
+      end
     end)
   end
+
+  defp draw_svg_op(gc, %{kind: :path} = op, ox, oy) do
+    if op.fill, do: svg_fill(gc, op, ox, oy)
+    if op.stroke, do: svg_stroke(gc, op, ox, oy)
+  end
+
+  defp draw_svg_op(gc, %{kind: :text} = op, ox, oy), do: svg_text(gc, op, ox, oy)
 
   defp svg_path(gc, segments, ox, oy, k) do
     path = :wxGraphicsContext.createPath(gc)

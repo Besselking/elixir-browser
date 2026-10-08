@@ -88,7 +88,7 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
-  canvas, audio, video, iframe, object, embed, applet { display: none }
+  audio, video, iframe, object, embed, applet { display: none }
   slot { display: contents }
   iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: hidden; background-color: white }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
