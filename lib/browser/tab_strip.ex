@@ -22,7 +22,7 @@ defmodule Browser.TabStrip do
     put([], 0)
   end
 
-  @doc "Sets what is drawn: the tab titles and the index of the active tab."
+  @doc "Sets what is drawn: each tab's `{title, loading?}` and the index of the active tab."
   def put(titles, active), do: :ets.insert(@table, {:tabs, titles, active})
 
   @doc "The `{x, width}` of each of `count` tabs in a strip `width` px wide."
@@ -79,7 +79,9 @@ defmodule Browser.TabStrip do
     titles
     |> Enum.zip(layout(length(titles), width))
     |> Enum.with_index()
-    |> Enum.each(fn {{title, {x, w}}, i} -> paint_tab(dc, title, x, w, i == active) end)
+    |> Enum.each(fn {{{title, loading?}, {x, w}}, i} ->
+      paint_tab(dc, title, loading?, x, w, i == active)
+    end)
 
     {px, pw} = plus(length(titles), width)
     :wxDC.setTextForeground(dc, colors.text)
@@ -92,7 +94,7 @@ defmodule Browser.TabStrip do
     :ok
   end
 
-  defp paint_tab(dc, title, x, w, active?) do
+  defp paint_tab(dc, title, loading?, x, w, active?) do
     top = if active?, do: 3, else: 5
     c = Process.get(:tab_colors)
     bg = if active?, do: c.active, else: c.inactive
@@ -101,11 +103,20 @@ defmodule Browser.TabStrip do
     if active?, do: erase_bottom(dc, x, w)
 
     :wxDC.setTextForeground(dc, c.text)
-    avail = w - @close - 22
-    :wxDC.setClippingRegion(dc, {x + 8, 0, max(avail, 1), @height})
+    # a dot before the title while the tab's page is loading
+    dot = if loading?, do: 14, else: 0
+
+    if loading? do
+      :wxDC.setBrush(dc, :wxBrush.new({70, 130, 230}))
+      :wxDC.setPen(dc, :wxPen.new({70, 130, 230}))
+      :wxDC.drawCircle(dc, {x + 15, div(@height, 2) + 1}, 4)
+    end
+
+    avail = w - @close - 22 - dot
+    :wxDC.setClippingRegion(dc, {x + 8 + dot, 0, max(avail, 1), @height})
     {_, th} = :wxDC.getTextExtent(dc, ~c"Ag")
     text = fit(dc, clip(title), avail)
-    :wxDC.drawText(dc, String.to_charlist(text), {x + 10, div(@height - th, 2) + 1})
+    :wxDC.drawText(dc, String.to_charlist(text), {x + 10 + dot, div(@height - th, 2) + 1})
     :wxDC.destroyClippingRegion(dc)
 
     # the close box: a cross
