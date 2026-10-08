@@ -1985,10 +1985,17 @@ defmodule Browser.Session do
         state
 
       {state, false} ->
-        state.page.form_state
-        |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
-        |> then(&set_form_state(state, &1))
-        |> relayout()
+        # the scripts reset their controls in the `reset` event's default action
+        case js_event(state, {:form, control.form}, "reset") do
+          {state, true} ->
+            state
+
+          {state, false} ->
+            state.page.form_state
+            |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
+            |> then(&set_form_state(state, &1))
+            |> relayout()
+        end
     end
   end
 
@@ -2178,7 +2185,9 @@ defmodule Browser.Session do
 
     state =
       if reply.dirty and reply.raw != nil and state.page != nil,
-        do: start_page_job(state, reply.raw),
+        # the tree has the values the user had typed (the scripts were given them, and may have
+        # changed them since): only what is typed from now on is carried over to the new page
+        do: start_page_job(%{state | page_edits: %{}}, reply.raw),
         else: state
 
     sync_editor(state, reply)

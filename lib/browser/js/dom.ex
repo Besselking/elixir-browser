@@ -762,6 +762,25 @@ defmodule Browser.JS.DOM do
     call_global("__popoverClick", [if(nid, do: wrap(nid), else: :null)])
   end
 
+  @doc "The controls in the form numbered `fid` go back to the values their markup gives."
+  def reset_form(fid) do
+    case form_node(fid) do
+      nil -> :ok
+      nid -> reset_controls(nid)
+    end
+  end
+
+  # the same for the form with element number `nid`
+  def reset_controls(nid) do
+    for el <- elements(nid), node(el).tag in ["input", "textarea", "select", "option"] do
+      update_node(el, fn n ->
+        %{n | props: Map.drop(n.props, ["value", "checked", "selectedIndex", "selected"])}
+      end)
+    end
+
+    :ok
+  end
+
   @doc "A click on the backdrop of the dialog whose number, made negative, is `n`."
   def dialog_backdrop(n) do
     case nid_numbered(n) do
@@ -3710,7 +3729,14 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    def_fn(p, "reset", fn _this, _ -> :undefined end)
+    def_fn(p, "reset", fn this, _ ->
+      nid = this_nid(this)
+
+      if dispatch(nid, "reset", %{bubbles: true, cancelable: true}) != :prevented,
+        do: reset_controls(nid)
+
+      :undefined
+    end)
 
     def_fn(p, "getBoundingClientRect", fn this, _ -> rect_object(this_nid(this)) end)
 

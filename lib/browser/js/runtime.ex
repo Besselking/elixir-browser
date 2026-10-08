@@ -308,6 +308,10 @@ defmodule Browser.JS.Runtime do
         {"click", _, target} ->
           guard(fn -> DOM.popover_click(target) end, :ok)
 
+        # a form was reset: its controls go back to their markup's values
+        {"reset", _, {:form, fid}} ->
+          guard(fn -> DOM.reset_form(fid) end, :ok)
+
         # a `method="dialog"` form was submitted: its dialog closes
         {"submit", %{"submitter" => cid}, {:form, fid}} ->
           guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)

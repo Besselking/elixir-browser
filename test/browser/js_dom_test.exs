@@ -309,6 +309,45 @@ defmodule Browser.JS.DOMTest do
     end
   end
 
+  describe "form reset" do
+    test "form.reset() fires a cancelable reset event and restores the markup's values" do
+      r =
+        run(
+          """
+          var f = document.getElementById("f"), i = document.getElementById("i");
+          i.value = "typed";
+          f.addEventListener("reset", function () { console.log("reset", i.value); });
+          f.reset();
+          console.log(JSON.stringify(i.value));
+          f.addEventListener("reset", function (e) { e.preventDefault(); });
+          i.value = "again";
+          f.reset();
+          console.log(i.value);
+          """,
+          "<form id=f><input id=i value=start></form>"
+        )
+
+      assert logs(r) == ["reset typed", ~s("start"), "reset again", "again"]
+    end
+
+    test "a reset click leaves the controls with their markup's values in the tree" do
+      {pid, _} =
+        start("<body><form id=f><input id=i value=a><button type=reset>x</button></form></body>")
+
+      Runtime.dispatch(pid, {:control, 0}, "input", %{}, %{
+        0 => %{value: "typed", checked: false, selected: 0}
+      })
+
+      reply =
+        Runtime.dispatch(pid, {:form, 0}, "reset", %{}, %{
+          0 => %{value: "typed", checked: false, selected: 0}
+        })
+
+      assert reply.dirty
+      assert inspect(reply.raw) =~ ~s({"value", "a"})
+    end
+  end
+
   describe "popovers" do
     defp later_logs(pid) do
       receive do
