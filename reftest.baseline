@@ -1932,6 +1932,7 @@ css/CSS2/normal-flow/block-formatting-contexts-004.xht
 css/CSS2/normal-flow/block-formatting-contexts-005.xht
 css/CSS2/normal-flow/block-formatting-contexts-006.xht
 css/CSS2/normal-flow/block-formatting-contexts-007.xht
+css/CSS2/normal-flow/block-formatting-contexts-008.xht
 css/CSS2/normal-flow/block-formatting-contexts-009.xht
 css/CSS2/normal-flow/block-formatting-contexts-010.xht
 css/CSS2/normal-flow/block-formatting-contexts-012.xht
@@ -1978,6 +1979,7 @@ css/CSS2/normal-flow/blocks-021.xht
 css/CSS2/normal-flow/blocks-022.xht
 css/CSS2/normal-flow/blocks-026.xht
 css/CSS2/normal-flow/child-bottom-margin-in-unresolvable-percentage-height.html
+css/CSS2/normal-flow/float-percentage-resolution-quirks-mode.html
 css/CSS2/normal-flow/height-001.xht
 css/CSS2/normal-flow/height-002.xht
 css/CSS2/normal-flow/height-003.xht
@@ -3356,6 +3358,8 @@ css/CSS2/visudet/inline-block-baseline-011.xht
 css/CSS2/visudet/inline-block-baseline-012.xht
 css/CSS2/visudet/inline-block-baseline-013.xht
 css/CSS2/visudet/inline-block-baseline-014.xht
+css/CSS2/visudet/inline-block-baseline-015.html
+css/CSS2/visudet/inline-block-baseline-016.html
 css/CSS2/visufx/clip-004.xht
 css/CSS2/visufx/clip-005.xht
 css/CSS2/visufx/clip-006.xht
@@ -3735,6 +3739,8 @@ css/css-flexbox/flexbox-align-self-baseline-compatability.html
 css/css-flexbox/flexbox-align-self-baseline-horiz-002.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
+css/css-flexbox/flexbox-align-self-horiz-001-block.xhtml
+css/css-flexbox/flexbox-align-self-horiz-001-table.xhtml
 css/css-flexbox/flexbox-align-self-horiz-002.xhtml
 css/css-flexbox/flexbox-align-self-stretch-vert-001.html
 css/css-flexbox/flexbox-align-self-stretch-vert-002.html
@@ -4485,6 +4491,7 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-045.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-046.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-048.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-050.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-051.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-052.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-053.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-054.html
@@ -4558,7 +4565,9 @@ css/css-sizing/border-box-and-max-content-002.html
 css/css-sizing/border-box-and-max-content-003.html
 css/css-sizing/box-sizing-border-box-001.xht
 css/css-sizing/box-sizing-border-box-002.xht
+css/css-sizing/box-sizing-border-box-003.xht
 css/css-sizing/box-sizing-border-box-004.xht
+css/css-sizing/box-sizing-content-box-001.xht
 css/css-sizing/box-sizing-content-box-003.xht
 css/css-sizing/clone-intrinsic-size.html
 css/css-sizing/clone-nowrap-intrinsic-size-bidi.html
@@ -4609,9 +4618,13 @@ css/css-sizing/fit-content-block-size-abspos.html
 css/css-sizing/fit-content-block-size-fixedpos.html
 css/css-sizing/fit-content-length-percentage-001.html
 css/css-sizing/fit-content-length-percentage-002.html
+css/css-sizing/fit-content-length-percentage-003.html
 css/css-sizing/fit-content-length-percentage-004.html
 css/css-sizing/fit-content-length-percentage-005.html
+css/css-sizing/fit-content-length-percentage-006.html
 css/css-sizing/fit-content-length-percentage-011.html
+css/css-sizing/fit-content-length-percentage-014.html
+css/css-sizing/fit-content-max-inline-size.tentative.html
 css/css-sizing/grid-item-image-percentage-min-height-computes-as-0.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/hori-block-size-small-or-larger-than-container-with-min-or-max-content-2b.html
@@ -4632,11 +4645,13 @@ css/css-sizing/margin-collapse-with-indefinite-block-size-002.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-003.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-004.html
 css/css-sizing/margin-collapse-with-indefinite-block-size-005.html
+css/css-sizing/min-content-le-max-content.tentative.html
 css/css-sizing/replaced-aspect-ratio-intrinsic-size-001.html
 css/css-sizing/replaced-aspect-ratio-intrinsic-size-002.html
 css/css-sizing/replaced-max-width-with-height-fit-content.html
 css/css-sizing/replaced-max-width-with-height-max-content.html
 css/css-sizing/replaced-max-width-with-height-min-content.html
+css/css-sizing/shrink-to-fit-sizing-max-width-min-content.html
 css/css-sizing/slice-intrinsic-size.html
 css/css-sizing/slice-nowrap-intrinsic-size-bidi.html
 css/css-sizing/slice-nowrap-intrinsic-size.html
@@ -4646,7 +4661,6 @@ css/css-sizing/stretch/flexbox-stretch-minimum-001.html
 css/css-sizing/stretch/flexbox-stretch-minimum-002.html
 css/css-sizing/stretch/stretch-float-with-sibling.html
 css/css-sizing/stretch/stretch-float.html
-css/css-sizing/vert-block-size-small-or-larger-than-container-with-min-or-max-content-2a.html
 css/css-sizing/whitespace-and-break.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html

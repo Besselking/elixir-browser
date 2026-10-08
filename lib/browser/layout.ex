@@ -129,6 +129,7 @@ defmodule Browser.Layout do
       ws: :normal,
       tab: 8,
       hidden: false,
+      tiny: false,
       vhidden: false,
       color: {0, 0, 0},
       underline: false,
@@ -197,6 +198,10 @@ defmodule Browser.Layout do
     fn
       :content_height, style ->
         measure.(:content_height, style)
+
+      # (text of a font size under one pixel takes no room)
+      _text, %{tiny: true} ->
+        0
 
       text, style ->
         # (a zero-width space takes no room)
@@ -936,7 +941,7 @@ defmodule Browser.Layout do
         end
 
       fit? =
-        (c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"])) and
+        (c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]) or kw?(c["max-width"])) and
           kind in [:block, :flex, :grid]
 
       # laying a flex or grid container out at width 1 does not give its min-content width
@@ -1708,6 +1713,9 @@ defmodule Browser.Layout do
   defp fitc?({:fitc, _}), do: true
   defp fitc?(_), do: false
 
+  defp kw?({:kw, _}), do: true
+  defp kw?(_), do: false
+
   defp num(v) when is_number(v), do: v
   defp num(_), do: nil
 
@@ -2234,7 +2242,9 @@ defmodule Browser.Layout do
 
     style
     |> put_if(c["font-size"], fn s, fs ->
-      if fs < 1, do: %{s | size: 1, hidden: true}, else: %{s | size: round(fs)}
+      if fs < 1,
+        do: %{s | size: 1, hidden: true, tiny: true},
+        else: %{s | size: round(fs), tiny: false}
     end)
     |> put_if(c["font-weight"], &%{&1 | bold: &2 == "bold"})
     |> put_if(c["font-style"], &%{&1 | italic: &2 == "italic"})
@@ -2889,7 +2899,8 @@ defmodule Browser.Layout do
          margin,
          root_height,
          aligned?,
-         images
+         images,
+         cbh \\ nil
        ) do
     st = %{
       items: [],
@@ -2944,7 +2955,7 @@ defmodule Browser.Layout do
       blocks: [],
       limits: %{},
       # the content height of the enclosing block when it has one of its own (for percentages)
-      cbh: nil,
+      cbh: cbh,
       cbw: nil,
       root_view: root_height == :view,
       flex_item: Process.get(:layout_flex_item, false)
@@ -3080,7 +3091,7 @@ defmodule Browser.Layout do
     st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key))
+    {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
     # `clear` puts the float below the earlier floats on that side
     top = clear_top(st, Map.get(spec, :clear))
     top = if line_bottom, do: max(top, line_bottom), else: top
@@ -3758,6 +3769,7 @@ defmodule Browser.Layout do
     to_content = fn
       nil -> nil
       {:pct, _} when intrinsic? -> nil
+      {:kw, _} -> nil
       v -> v |> resolve(avail) |> then(&if(o.sizing == :border, do: max(&1 - hpad, 0), else: &1))
     end
 
@@ -4675,6 +4687,7 @@ defmodule Browser.Layout do
 
   defp resolve(nil, _base), do: nil
 
+  defp resolve({:kw, _}, _base), do: nil
   defp resolve({:pct, f}, base), do: round(f * base)
   defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 
@@ -4783,8 +4796,23 @@ defmodule Browser.Layout do
           w + spec.extra + spec.mextra
       end
 
-    clamp_width(width, spec, avail)
+    width
+    |> clamp_width(spec, avail)
+    |> clamp_keyword(st, sub, spec, avail)
   end
+
+  # `max-width: min-content` (and the other keywords) clamp by what the content makes of them
+  defp clamp_keyword(width, st, sub, %{maxw: {:kw, kw}} = spec, avail) do
+    min(width, keyword_width(kw, st, sub, spec, avail))
+  end
+
+  defp clamp_keyword(width, _st, _sub, _spec, _avail), do: width
+
+  defp keyword_width(:fit, st, sub, spec, avail),
+    do: content_width(st, sub, %{spec | sizing: {:fitc, avail}}, avail)
+
+  defp keyword_width(kw, st, sub, spec, avail),
+    do: content_width(st, sub, %{spec | sizing: kw}, avail)
 
   # an inline-block that has a height and an aspect ratio is as wide as they make it
   defp ratio_fit(sub, spec) do
@@ -4923,9 +4951,15 @@ defmodule Browser.Layout do
   # An inline-block's content: laid out at `width`; returns its items (relative
   # to its top-left), its height including trailing margin, and its baseline
   # (bottom of the last text line, or the bottom edge if there is no text).
-  defp layout_atom(st, sub, width, key \\ nil) do
-    memo({:atom, key || :erlang.phash2(sub), width}, fn ->
-      sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
+  # a float with a percentage height refers to the height of the box it sits in
+  defp atom_cbh(st, %{hpct_atom: pct}) when pct != nil, do: st.cbh
+  defp atom_cbh(_st, _spec), do: nil
+
+  defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
+    memo({:atom, key || :erlang.phash2(sub), width, cbh}, fn ->
+      # (the height of the box a float or inline-block sits in is what its own percentage
+      # heights refer to)
+      sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images, cbh)
       height = sub_st.y + sub_st.gap + sub_st.ngap
       items = finalize(sub_st)
       {items, height, last_baseline(items, height)}
@@ -6921,7 +6955,7 @@ defmodule Browser.Layout do
         ix = x + it.ml
         right = floor(ix + it.hw + 0.5)
         w = max(right - floor(ix + 0.5), 0)
-        {items, h, _base} = flex_atom(st, it.sub, w, it.key)
+        {items, h, _base} = flex_row_atom(st, cs, it, w)
         next = ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)
         {Map.merge(it, %{w: w, items: items, h: h}), next}
       end)
@@ -7073,7 +7107,7 @@ defmodule Browser.Layout do
   end
 
   # `min-width: auto`: the content's min-content width, but not more than a width that is set
-  defp flex_auto_min?(it), do: not it.scroll? and it.minw in [nil, :auto]
+  defp flex_auto_min?(it), do: not it.scroll? and (it.minw in [nil, :auto] or kw?(it.minw))
 
   defp flex_min(st, it, avail) do
     # (an aspect ratio gives a box its width from its height: the content is measured without it)
@@ -7331,6 +7365,15 @@ defmodule Browser.Layout do
       true -> ml
     end
   end
+
+  # an item in a row with a percentage height takes it from the container's definite height
+  defp flex_row_atom(st, cs, %{hpct: pct, rebuild: rebuild} = it, w)
+       when pct != nil and rebuild != nil and cs.height != nil and cs.hdef do
+    sub = rebuild.(%{"height" => pct * cs.height, "aspect-ratio" => nil})
+    flex_atom(st, sub, w, {it.key, :hpct})
+  end
+
+  defp flex_row_atom(st, _cs, it, w), do: flex_atom(st, it.sub, w, it.key)
 
   defp flex_column_item(st, cs, it, avail) do
     ml = it.ml
@@ -8682,7 +8725,8 @@ defmodule Browser.Layout do
     [{:inline_block, sub, spec, style}] =
       inline_block_ops(el, parent_style, c, [], true, c["display"] == "table")
 
-    [{:float, side, sub, Map.put(spec, :clear, clear_side(c)), style} | acc]
+    spec = spec |> Map.put(:clear, clear_side(c)) |> Map.put(:hpct_atom, pct_of(c["height"]))
+    [{:float, side, sub, spec, style} | acc]
   end
 
   defp clear_top(st, nil), do: st.y

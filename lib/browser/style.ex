@@ -1715,6 +1715,18 @@ defmodule Browser.Style do
   defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
   defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
 
+  # `max-width: min-content` and friends: layout works the keyword out from the content
+  defp typed(prop, v, _env, _pc)
+       when prop in ["min-width", "max-width"] and
+              v in [
+                "min-content",
+                "max-content",
+                "fit-content",
+                "-webkit-fit-content",
+                "-moz-fit-content"
+              ],
+       do: {:ok, {:kw, %{"min-content" => :minc, "max-content" => :maxc}[v] || :fit}}
+
   # stretch: fill the containing block; a block already does, so layout only looks at it for
   # boxes that would otherwise shrink to fit
   defp typed(prop, v, _env, _pc)

@@ -5189,6 +5189,66 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "max-width with a sizing keyword" do
+    defp kw_rect(style) do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"width:300px\"><div style=\"#{style}\"><span style=\"font-size:10px\">xx yyyy</span></div></div>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1.type == :rect))
+    end
+
+    test "max-width: min-content keeps a wide box as narrow as its longest word" do
+      assert kw_rect("background:green;width:200px;max-width:min-content").w == 20
+    end
+
+    test "max-width: max-content keeps a wide box as narrow as its line" do
+      assert kw_rect("background:green;width:200px;max-width:max-content").w == 35
+    end
+
+    test "max-width: fit-content is the line unless the room is smaller" do
+      assert kw_rect("background:green;width:500px;max-width:fit-content").w == 35
+    end
+  end
+
+  describe "percentage heights of floats and flex items, and tiny fonts" do
+    defp pct_rects(html) do
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.filter(items, &(&1.type == :rect))
+    end
+
+    test "a float with height: 100% fills a parent that has a height" do
+      [_, float] =
+        pct_rects(
+          ~s(<div style="height:110px;background:red"><div style="float:left;height:100%;width:50px;background:green"></div></div>)
+        )
+
+      assert float.h == 110
+    end
+
+    test "a flex item in a row with height: 100% fills a container that has a height" do
+      [_, item] =
+        pct_rects(
+          ~s(<div style="display:flex;height:60px;background:red"><div style="height:100%;width:30px;background:green"></div></div>)
+        )
+
+      assert item.h == 60
+    end
+
+    test "text with a font size under one pixel takes no room" do
+      [box] =
+        pct_rects(
+          ~s(<div style="float:left;font-size:0;background:green"><div style="display:inline-block;width:50px;height:10px"></div> <div style="display:inline-block;width:50px;height:10px"></div></div>)
+        )
+
+      assert box.w == 100
+    end
+  end
+
   describe "invalid negative sizes" do
     defp neg_box(style) do
       page =
