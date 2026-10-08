@@ -6247,6 +6247,30 @@ defmodule Browser.LayoutTest do
   end
 
   describe "margins after a float" do
+    test "a min-height taller than the content drops the last child's bottom margin" do
+      html =
+        ~s|<div style="min-height:50px;background:green;width:20px"><div style="height:10px;margin-bottom:40px"></div></div><div style="height:5px;background:blue;width:20px"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 0, 255}, y: 58}, &1))
+    end
+
+    test "a float on a table column group floats" do
+      html =
+        ~s|<div style="display:table;width:100%"><div style="display:table-column-group;float:right;width:30px;height:30px;background:blue"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 0, 255}, w: 30, h: 30}, &1)
+             )
+    end
+
+    test "a table with clear goes below the float" do
+      html =
+        ~s|<div style="float:left;width:10px;height:30px"></div><div style="clear:both;display:table;width:50px;height:20px;background:blue"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 0, 255}, y: 38}, &1))
+    end
+
     test "a box's top follows the margin of its first child when a float comes before it" do
       html =
         ~s|<div style="float:left;width:10px;height:10px"></div><div style="background:red;width:50px"><div style="margin-top:30px;height:20px"></div></div>|

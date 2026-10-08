@@ -914,7 +914,8 @@ defmodule Browser.Layout do
   end
 
   # a floated part of a table is a block that holds an anonymous table around it
-  @float_table_parts ~w(table-row-group table-header-group table-footer-group table-row table-cell table-caption)
+  @float_table_parts ~w(table-row-group table-header-group table-footer-group table-row table-cell table-caption table-column
+                         table-column-group)
 
   defp walk_element({:element, tag, attrs, kids}, parent_style, acc, nil = force)
        when tag != "@float" do
@@ -992,6 +993,7 @@ defmodule Browser.Layout do
 
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
+          acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
           acc = [{:flush} | acc]
           acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true))
           [{:flush} | acc]
@@ -999,6 +1001,7 @@ defmodule Browser.Layout do
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
           {mt, mb} = vertical_margins(c)
+          acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
           acc = [{:gap, mt}, {:flush} | acc]
           acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
           [{:gap, mb}, {:flush} | acc]
@@ -3495,7 +3498,20 @@ defmodule Browser.Layout do
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 
     # child margins stay inside the box only when padding or a border separates them
-    st = if box.o.pb > 0 or bb > 0 or Map.get(box, :bfc, false), do: apply_gap(st), else: st
+
+    ch = st.y - (box.top + bt + box.o.pt)
+
+    # (`max-height` has no say in it: CSS2 test margin-collapse-038)
+    sized? = is_number(box.o.min) and box.o.min > ch
+
+    st =
+      cond do
+        box.o.pb > 0 or bb > 0 or Map.get(box, :bfc, false) -> apply_gap(st)
+        # (the margin below the last child is lost: the height is the one that was set)
+        sized? -> %{st | gap: 0, ngap: 0, clr: nil}
+        true -> st
+      end
+
     st = %{st | y: st.y + box.o.pb + bb}
     {l, r, f} = box.saved
     st = %{st | left: l, right: r, free: f}

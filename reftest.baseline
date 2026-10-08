@@ -982,6 +982,7 @@ css/CSS2/floats-clear/clear-applies-to-006.xht
 css/CSS2/floats-clear/clear-applies-to-007.xht
 css/CSS2/floats-clear/clear-applies-to-009.xht
 css/CSS2/floats-clear/clear-applies-to-012.xht
+css/CSS2/floats-clear/clear-applies-to-013.xht
 css/CSS2/floats-clear/clear-applies-to-014.xht
 css/CSS2/floats-clear/clear-clearance-calculation-001.xht
 css/CSS2/floats-clear/clear-clearance-calculation-002.xht
@@ -1012,6 +1013,8 @@ css/CSS2/floats-clear/float-applies-to-002.xht
 css/CSS2/floats-clear/float-applies-to-003.xht
 css/CSS2/floats-clear/float-applies-to-004.xht
 css/CSS2/floats-clear/float-applies-to-004a.xht
+css/CSS2/floats-clear/float-applies-to-005.xht
+css/CSS2/floats-clear/float-applies-to-006.xht
 css/CSS2/floats-clear/float-applies-to-007.xht
 css/CSS2/floats-clear/float-applies-to-008.xht
 css/CSS2/floats-clear/float-applies-to-008a.xht
@@ -2232,6 +2235,8 @@ css/CSS2/normal-flow/inlines-002.xht
 css/CSS2/normal-flow/inlines-016.xht
 css/CSS2/normal-flow/inlines-017.xht
 css/CSS2/normal-flow/inlines-020.xht
+css/CSS2/normal-flow/margin-collapse-min-height-001.html
+css/CSS2/normal-flow/margin-collapse-min-height-002.html
 css/CSS2/normal-flow/margin-collapse-min-height-003.html
 css/CSS2/normal-flow/margin-collapse-through-percentage-height-block-inside-table-cell.html
 css/CSS2/normal-flow/margin-collapse-through-percentage-height-block.html
@@ -2486,6 +2491,7 @@ css/CSS2/normal-flow/min-height-applies-to-015.xht
 css/CSS2/normal-flow/min-height-percentage-001.xht
 css/CSS2/normal-flow/min-height-percentage-002.xht
 css/CSS2/normal-flow/min-height-percentage-003.xht
+css/CSS2/normal-flow/min-height-separates-margin.html
 css/CSS2/normal-flow/min-width-001.xht
 css/CSS2/normal-flow/min-width-002.xht
 css/CSS2/normal-flow/min-width-003.xht
