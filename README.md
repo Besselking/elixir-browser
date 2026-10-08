@@ -17,12 +17,12 @@ software painter (no window needed) and compares the pixels; `mix help reftest` 
 (`--check` against `reftest.baseline`, `--dump DIR` to save the pictures of failing pairs).
 
 Requires Elixir 1.20+ and Erlang/OTP 29+ with the `wx` application; only the latest versions are
-supported. `scripts/install-toolchain.sh` installs them (Homebrew on macOS, a source build with wx on
+supported. `scripts/install-toolchain.sh` installs them (a source build with wx 3.3 on macOS and
 Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
 
 WebP images need wxWidgets 3.3 or newer with libwebp. With wxWidgets 3.2 the browser shows the alt
-text, except on macOS, where it converts WebP with `sips`. On Debian/Ubuntu,
-`scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
+text, except on macOS, where it converts WebP with `sips`. Homebrew's `erlang` is linked against
+wxWidgets 3.2. On macOS (into `~/.local`) and Debian/Ubuntu, `scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
 patches for that, which the script applies).
 
 ## Crash reports
