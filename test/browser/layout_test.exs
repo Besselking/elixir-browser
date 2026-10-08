@@ -198,6 +198,46 @@ defmodule Browser.LayoutTest do
       assert word(items, "r").y > word(items, "l").y
     end
 
+    test "a flex row next to a 100% wide sibling keeps its items' min-content widths" do
+      html =
+        ~s(<style>.row{display:flex;width:600px} ul{display:flex;margin:0;padding:0;list-style:none}) <>
+          ~s(.b{display:flex;white-space:nowrap;padding:8px}) <>
+          ~s(</style><div class="row"><nav><ul>) <>
+          ~s(<li><div class="b">alpha<svg width=16 height=16></svg></div></li>) <>
+          ~s(<li><div class="b">bravo<svg width=16 height=16></svg></div></li>) <>
+          ~s(</ul></nav><div style="width:100%">wide</div></div>)
+
+      {items, _} = styled(html)
+      alpha = word(items, "alpha")
+      bravo = word(items, "bravo")
+      # the second item starts after the first one's text, its icon and its padding
+      assert bravo.x >= alpha.x + alpha.w + 16 + 8 + 8
+    end
+
+    test "an inline-block of unbreakable content is as wide as that content, even in a tight flex row" do
+      html =
+        ~s(<style>.row{display:flex;width:300px} .w{display:inline-block}) <>
+          ~s(.w a{display:inline-flex;white-space:nowrap;flex-shrink:0;padding:0 12px}) <>
+          ~s(</style><div class="row"><div style="width:100%">wide</div>) <>
+          ~s(<div class="w"><a>first one</a></div><div class="w"><a>second</a></div></div>)
+
+      {items, _} = styled(html)
+      first = word(items, "first")
+      second = word(items, "second")
+      # the second box starts after the whole first one: its text, and the padding on both sides
+      assert second.x >= first.x + first.w + word(items, "one").w + 12 + 12
+    end
+
+    test "a middle-aligned box taller than the line does not poke out above it" do
+      html =
+        ~s(<style>.a{display:inline-flex;vertical-align:middle;height:40px;width:20px;background:#f00}) <>
+          ~s(</style><div style="margin-top:10px"><span class="a"></span></div>)
+
+      {items, _} = styled(html)
+      box = Enum.find(items, &(&1.type == :rect and &1.h == 40))
+      assert box.y >= 10
+    end
+
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
         styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))

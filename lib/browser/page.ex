@@ -6,7 +6,7 @@ defmodule Browser.Page do
 
   alias Browser.{Fetch, Forms, HTML, Images, Layout, Prefetch, Style}
 
-  @max_sheets 24
+  @max_sheets 64
   @sheet_timeout 10_000
 
   # `pruned` is the styled tree before form controls get their content, `nodes`
@@ -338,12 +338,19 @@ defmodule Browser.Page do
 
   # Sheets `Browser.Prefetch` started while the HTML arrived are collected here, in the
   # process that received it; the rest are fetched in parallel now.
-  # at most @max_sheets linked sheets are fetched; inline <style> blocks cost nothing, so all stay
+  # at most @max_sheets different linked sheets are fetched; a sheet linked again (frameworks
+  # that add their stylesheet once per component do) is applied once, and costs no slot.
+  # inline <style> blocks cost nothing, so all stay
   defp cap_links(refs) do
     {kept, _} =
-      Enum.flat_map_reduce(refs, 0, fn
-        {:link, _} = ref, n -> if n < @max_sheets, do: {[ref], n + 1}, else: {[], n}
-        ref, n -> {[ref], n}
+      Enum.flat_map_reduce(refs, MapSet.new(), fn
+        {:link, href} = ref, seen ->
+          if MapSet.member?(seen, href) or MapSet.size(seen) >= @max_sheets,
+            do: {[], seen},
+            else: {[ref], MapSet.put(seen, href)}
+
+        ref, seen ->
+          {[ref], seen}
       end)
 
     kept

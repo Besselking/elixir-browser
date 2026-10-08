@@ -2109,7 +2109,7 @@ defmodule Browser.Layout do
     # when measuring how wide the content wants to be (an unbounded width), the container
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
-    {laid, height} = flex_layout(st, cs, items, avail)
+    {laid, height, base} = flex_layout(st, cs, items, avail)
     # lets a measuring layout see how wide the container is (what surrounds it is added when
     # the atom is placed)
     laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
@@ -2117,10 +2117,13 @@ defmodule Browser.Layout do
     place_atom(st, %{
       w: avail,
       h: height,
-      base: height,
+      base: base || height,
       items: laid,
       align: style.align,
-      valign: nil
+      valign: nil,
+      # items that overflow it still count towards how wide the content wants to be: a flex
+      # container measured for its min-content (at width 1) is as wide as its items need
+      overflow_counts: true
     })
   end
 
@@ -2423,7 +2426,10 @@ defmodule Browser.Layout do
       atom
       | items:
           atom.items
-          |> Enum.map(&(&1 |> adopt_sticky(st) |> limit_extent(atom.w)))
+          |> Enum.map(fn item ->
+            item = adopt_sticky(item, st)
+            if atom[:overflow_counts], do: item, else: limit_extent(item, atom.w)
+          end)
           |> renumber_pz()
     }
 
@@ -3339,8 +3345,13 @@ defmodule Browser.Layout do
     width =
       case resolve(spec.width, avail) do
         nil ->
-          measure_at = if Map.get(spec, :table?), do: @unbounded, else: max(avail, 1)
-          min(avail, shrink_extent(st, sub, measure_at, Map.get(spec, :key)))
+          if Map.get(spec, :table?) do
+            min(avail, shrink_extent(st, sub, @unbounded, Map.get(spec, :key)))
+          else
+            # content that cannot wrap (a nowrap word, a fixed-size box) makes the box wider than
+            # `avail`: shrink-to-fit never goes below the min-content width
+            shrink_extent(st, sub, max(avail, 1), Map.get(spec, :key))
+          end
 
         w ->
           w + spec.extra + spec.mextra
@@ -3653,7 +3664,22 @@ defmodule Browser.Layout do
 
     base = Enum.reduce(on_baseline, text_base, &max(&2, &1.base))
     below = Enum.reduce(on_baseline, lh - text_base, &max(&2, &1.h - &1.base))
-    line_h = Enum.reduce(floating, base + below, &max(&2, &1.h))
+
+    # a middle-aligned box taller than the line reaches above it: the baseline moves down so that
+    # it still starts at the top of the line
+    mid_up = fn a -> div(a.h, 2) + round(st.lh * 0.3) end
+
+    lift =
+      for(%{valign: "middle"} = a <- floating, do: mid_up.(a) - base) |> Enum.max(fn -> 0 end)
+
+    base = base + max(lift, 0)
+
+    line_h =
+      Enum.reduce(floating, base + below, fn
+        %{valign: "middle"} = a, h -> max(h, base - mid_up.(a) + a.h)
+        a, h -> max(h, a.h)
+      end)
+
     shift = align_shift(Enum.reverse(st.line), st)
     dy = base - text_base
 
@@ -4563,7 +4589,7 @@ defmodule Browser.Layout do
       else: round(Enum.max(widths, fn -> 0 end))
   end
 
-  defp flex_layout(_st, _cs, [], _avail), do: {[], 0}
+  defp flex_layout(_st, _cs, [], _avail), do: {[], 0, nil}
 
   defp flex_layout(st, cs, items, avail) do
     items = Enum.sort_by(items, & &1.order)
@@ -4599,11 +4625,13 @@ defmodule Browser.Layout do
     {laid, y} =
       Enum.map_reduce(lines, 0, fn line, y ->
         min_cross = if length(lines) == 1, do: cs.height || 0, else: 0
-        {line_items, cross} = flex_line(st, cs, line, avail, y, min_cross)
-        {line_items, y + cross + round(cs.row_gap)}
+        {line_items, cross, base} = flex_line(st, cs, line, avail, y, min_cross)
+        {{line_items, y + base}, y + cross + round(cs.row_gap)}
       end)
 
-    {List.flatten(laid), max(y - round(cs.row_gap), 0)}
+    # an inline flex container sits on the baseline of its first item
+    [{_, first_base} | _] = laid
+    {laid |> Enum.flat_map(&elem(&1, 0)), max(y - round(cs.row_gap), 0), first_base}
   end
 
   # wrapping: a new line when the next item no longer fits
@@ -4648,8 +4676,8 @@ defmodule Browser.Layout do
     sized =
       Enum.map(line, fn it ->
         w = max(round(it.hw), 1)
-        {items, h, _base} = flex_atom(st, it.sub, w, it.key)
-        Map.merge(it, %{w: w, items: items, h: h})
+        {items, h, base} = flex_atom(st, it.sub, w, it.key)
+        Map.merge(it, %{w: w, items: items, h: h, base: base})
       end)
 
     cross = sized |> Enum.map(& &1.h) |> Enum.max() |> max(round(min_cross))
@@ -4660,10 +4688,11 @@ defmodule Browser.Layout do
         dy = flex_offset(flex_align(it, cs.align), cross, it.h)
         ix = x + it.ml
         moved = for item <- it.items, do: move(item, round(ix), top + dy)
-        {moved, ix + it.w + it.mr + cs.col_gap + between}
+        {{moved, dy + it.base}, ix + it.w + it.mr + cs.col_gap + between}
       end)
 
-    {placed, cross}
+    {_, first_base} = hd(placed)
+    {Enum.flat_map(placed, &elem(&1, 0)), cross, first_base}
   end
 
   # grow into free space, or shrink in proportion to the base size
@@ -4806,7 +4835,7 @@ defmodule Browser.Layout do
         {[moved | laid], y + h + round(cs.row_gap)}
       end)
 
-    {laid |> Enum.reverse() |> List.flatten(), max(y - round(cs.row_gap), 0)}
+    {laid |> Enum.reverse() |> List.flatten(), max(y - round(cs.row_gap), 0), nil}
   end
 
   # -- tables -------------------------------------------------------------------------------
