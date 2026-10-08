@@ -338,6 +338,36 @@ defmodule Browser.JS.WebAPI do
     IntersectionObserver.prototype.takeRecords = function () { return []; };
 
     // ── timing, idle, encoding ───────────────────────────────
+    // the Prioritized Task Scheduling API: tasks are timers, background ones a tick later
+    function TaskController(init) {
+      var c = new AbortController();
+      this.signal = c.signal;
+      this.signal.priority = (init && init.priority) || "user-visible";
+      Object.defineProperty(this, "_c", { value: c });
+    }
+    TaskController.prototype.abort = function (reason) { this._c.abort(reason); };
+    TaskController.prototype.setPriority = function (p) { this.signal.priority = p; };
+    def("TaskController", TaskController);
+    def("scheduler", {
+      postTask: function postTask(callback, options) {
+        options = options || {};
+        if (typeof callback !== "function") return Promise.reject(new TypeError("Failed to execute 'postTask' on 'Scheduler': The provided callback is no function."));
+        var signal = options.signal || null;
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) { reject(abortError(signal)); return; }
+          var priority = options.priority || (signal && signal.priority) || "user-visible";
+          var timer = null;
+          function onabort() { clearTimeout(timer); reject(abortError(signal)); }
+          if (signal) signal.addEventListener("abort", onabort);
+          timer = setTimeout(function () {
+            if (signal) signal.removeEventListener("abort", onabort);
+            try { resolve(callback()); } catch (e) { reject(e); }
+          }, (options.delay > 0 ? options.delay : 0) + (priority === "background" ? 1 : 0));
+        });
+      },
+      yield: function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+    });
+    if (typeof navigator === "object" && navigator && !navigator.scheduling) navigator.scheduling = { isInputPending: function () { return false; } };
     def("requestIdleCallback", function (cb) { return setTimeout(function () { cb({ didTimeout: false, timeRemaining: function () { return 10; } }); }, 1); });
     def("cancelIdleCallback", function (id) { clearTimeout(id); });
 
@@ -376,6 +406,13 @@ defmodule Browser.JS.WebAPI do
         get: function () { __load_idb(); var d = Object.getOwnPropertyDescriptor(g, n); return d && "value" in d ? d.value : undefined; },
         set: function (v) { Object.defineProperty(g, n, { value: v, writable: true, configurable: true }); } });
     });
+    // for messages between a page and its workers (Browser.JS.Workers): a value as text and back
+    def("__structuredEncode", function (v) { __load_idb(); return g.__idb_encode(v); });
+    def("__structuredDecode", function (s) { __load_idb(); return g.__idb_decode(s); });
+    // Worker is in priv/js/worker.js, loaded on first use
+    Object.defineProperty(g, "Worker", { configurable: true, enumerable: false,
+      get: function () { __load_workers(); var d = Object.getOwnPropertyDescriptor(g, "Worker"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "Worker", { value: v, writable: true, configurable: true }); } });
     def("structuredClone", function structuredClone(v) {
       if (arguments.length === 0) throw new TypeError("structuredClone requires 1 argument.");
       __load_idb();
@@ -1211,6 +1248,8 @@ defmodule Browser.JS.WebAPI do
     var blobUrls = {}, blobSeq = 0;
     URL.createObjectURL = function (b) { var u = "blob:" + curLoc().origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
     URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
+    // the text of a blob a worker is started from
+    Object.defineProperty(URL, "__blobText", { value: function (u) { var b = blobUrls[u]; return b === undefined ? undefined : b._text; }, configurable: true });
 
     function FormData(form) {
       this._e = [];

@@ -138,7 +138,9 @@ defmodule Browser.JS.Runtime do
 
   # ── the process ────────────────────────────────────────────
 
-  defp boot(raw, info) do
+  # (the process of a worker boots the same way, with an empty document)
+  @doc false
+  def boot(raw, info) do
     Interp.init(@steps)
     Browser.JS.GC.enable()
     scope = Builtins.install()
@@ -148,6 +150,7 @@ defmodule Browser.JS.Runtime do
     Browser.JS.WebAPI.install(scope, &http/1)
     Browser.JS.Editing.install(scope)
     Browser.JS.IndexedDB.install(scope)
+    Browser.JS.Workers.install(scope)
     Modules.reset()
     Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
@@ -287,6 +290,16 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         guard(fn -> DOM.storage_changed(key, old, new) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:worker, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.Workers.deliver(id, event) end, :ok)
         Browser.JS.Promise.run_microtasks()
         reply = finish(%{})
 
@@ -596,11 +609,12 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp describe(v) when is_binary(v), do: v
+  @doc false
+  def describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
+  def describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
 
-  defp describe(v), do: Builtins.inspect_js(v, 0, [])
+  def describe(v), do: Builtins.inspect_js(v, 0, [])
 
   # every pending timer, with the database messages that come between them (a message is
   # heard in the task after the one that caused it, as in the loop)
@@ -926,7 +940,8 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp loader do
+  @doc false
+  def loader do
     {fn spec, base ->
        try do
          {:ok, resolve_specifier(spec, base)}

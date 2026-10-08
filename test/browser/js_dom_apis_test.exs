@@ -281,4 +281,32 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["red block 0px static 0px 0 inline"]
   end
+
+  test "scheduler.postTask runs tasks by delay and priority, and can be aborted" do
+    {logs, errors} =
+      run(~S"""
+      const log = (...a) => console.log(...a);
+      scheduler.postTask(() => log("bg"), { priority: "background" });
+      scheduler.postTask(() => log("later"), { delay: 20 });
+      scheduler.postTask(() => 7).then((v) => log("value", v));
+      scheduler.postTask(() => { throw new Error("x"); }).catch((e) => log("rejected", e.message));
+      const c = new TaskController({ priority: "background" });
+      scheduler.postTask(() => log("never"), { signal: c.signal }).catch((e) => log("aborted", e.name));
+      c.abort();
+      scheduler.yield().then(() => log("yielded"));
+      log(c.signal.priority, typeof navigator.scheduling.isInputPending());
+      """)
+
+    assert errors == []
+
+    assert logs == [
+             "background boolean",
+             "aborted AbortError",
+             "value 7",
+             "rejected x",
+             "yielded",
+             "bg",
+             "later"
+           ]
+  end
 end
