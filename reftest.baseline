@@ -3911,6 +3911,14 @@ css/css-flexbox/gap-003-lr.html
 css/css-flexbox/gap-003-ltr.html
 css/css-flexbox/gap-003-rl.html
 css/css-flexbox/gap-003-rtl.html
+css/css-flexbox/gap-004-lr.html
+css/css-flexbox/gap-004-ltr.html
+css/css-flexbox/gap-004-rl.html
+css/css-flexbox/gap-004-rtl.html
+css/css-flexbox/gap-005-lr.html
+css/css-flexbox/gap-005-ltr.html
+css/css-flexbox/gap-005-rl.html
+css/css-flexbox/gap-005-rtl.html
 css/css-flexbox/gap-006-lr.html
 css/css-flexbox/gap-006-ltr.html
 css/css-flexbox/gap-006-rl.html
@@ -5286,6 +5294,7 @@ css/css-variables/variable-supports-67.html
 css/css-variables/vars-background-shorthand-001.html
 css/css-variables/wide-keyword-fallback-001.html
 css/css-variables/wide-keyword-fallback-002.html
+css/selectors/child-indexed-no-parent.html
 css/selectors/dir-pseudo-in-has.html
 css/selectors/dir-selector-ltr-001.html
 css/selectors/dir-selector-ltr-002.html
@@ -5353,6 +5362,7 @@ css/selectors/nth-of-invalid.html
 css/selectors/nth-of-selector-before.html
 css/selectors/root-siblings.html
 css/selectors/scope-without-scoping.html
+css/selectors/selector-structural-pseudo-root.html
 css/selectors/selectors-4/lang-000.html
 css/selectors/selectors-4/lang-001.html
 css/selectors/selectors-4/lang-002.html

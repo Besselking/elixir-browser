@@ -14,7 +14,8 @@ defmodule Browser.CSSTest do
       last?: Keyword.get(opts, :last?, true),
       index: Keyword.get(opts, :index, 1),
       count: Keyword.get(opts, :count, 1),
-      empty?: Keyword.get(opts, :empty?, false)
+      empty?: Keyword.get(opts, :empty?, false),
+      next: Keyword.get(opts, :next, [])
     }
   end
 
@@ -211,6 +212,19 @@ defmodule Browser.CSSTest do
     assert sm?(":lang(\\*-FR)", fr)
     refute sm?(~s|:lang("fr-Cyrl")|, fr)
     refute sm?(~s|:lang("fr-foobar")|, fr)
+  end
+
+  test ":last-of-type, :only-of-type and :nth-last-of-type look at the elements after" do
+    later = {:element, "p", [], []}
+    first = ctx("p", [], index: 1, count: 3, next: [later, {:element, "b", [], []}])
+    last = ctx("p", [], index: 2, count: 3, prev: [first], next: [{:element, "b", [], []}])
+    other = ctx("b", [], index: 3, count: 3, next: [])
+    assert sm?("p:last-of-type", last)
+    refute sm?("p:last-of-type", first)
+    assert sm?("b:only-of-type", other)
+    refute sm?("p:only-of-type", last)
+    assert sm?("p:nth-last-of-type(2)", first)
+    assert sm?("p:nth-last-of-type(1)", last)
   end
 
   test ":nth-of-type, :first-of-type and :empty" do
