@@ -4507,11 +4507,21 @@ defmodule Browser.JS.Interp do
         fail_put()
 
       {:data, _, _, _, _} ->
-        put(this, key, v)
+        super_receiver_put(this, key, v)
     end
   end
 
-  defp super_set(_, key, v, this), do: put(this, key, v)
+  defp super_set(_, key, v, this), do: super_receiver_put(this, key, v)
+
+  # the receiver is asked for its own property first: that evaluates a deferred namespace
+  defp super_receiver_put({:obj, id} = this, key, v) do
+    if match?(%{class: :host, host: {Browser.JS.Modules, _}}, deref(id)),
+      do: Browser.JS.Props.own_state(this, key)
+
+    put(this, key, v)
+  end
+
+  defp super_receiver_put(this, key, v), do: put(this, key, v)
 
   # the reference of a name, resolved once: a `with` object keeps receiving the write even if
   # the property is gone by then. Returns the reader and the writer.

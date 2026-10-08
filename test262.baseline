@@ -31323,6 +31323,7 @@ language/import/import-defer/deferred-namespace-object/identity.js
 language/import/import-defer/deferred-namespace-object/json-module.js
 language/import/import-defer/deferred-namespace-object/reexport-deferred-ns-evaluation.js
 language/import/import-defer/deferred-namespace-object/to-string-tag.js
+language/import/import-defer/errors/get-other-while-dep-evaluating-async/main.js
 language/import/import-defer/errors/get-other-while-dep-evaluating/main.js
 language/import/import-defer/errors/get-other-while-evaluating-async/main.js
 language/import/import-defer/errors/get-other-while-evaluating/main.js
@@ -31335,6 +31336,7 @@ language/import/import-defer/errors/module-throws/trigger-evaluation.js
 language/import/import-defer/errors/resolution-error/import-defer-of-missing-module-fails.js
 language/import/import-defer/evaluation-sync/import-defer-does-not-evaluate.js
 language/import/import-defer/evaluation-sync/module-imported-defer-and-eager.js
+language/import/import-defer/evaluation-top-level-await/async-cycle-dependency-of-deferred-module/main.js
 language/import/import-defer/evaluation-top-level-await/flattening-order/main.js
 language/import/import-defer/evaluation-top-level-await/import-defer-async-module/main.js
 language/import/import-defer/evaluation-top-level-await/import-defer-transitive-async-module/main.js
@@ -31395,6 +31397,7 @@ language/import/import-defer/evaluation-triggers/trigger-exported-string-hasProp
 language/import/import-defer/evaluation-triggers/trigger-exported-string-hasProperty.js
 language/import/import-defer/evaluation-triggers/trigger-exported-string-super-get.js
 language/import/import-defer/evaluation-triggers/trigger-exported-string-super-property-define.js
+language/import/import-defer/evaluation-triggers/trigger-exported-string-super-property-set-exported.js
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-defineOwnProperty.js
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-delete.js
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-get-in-prototype.js
@@ -31404,6 +31407,7 @@ language/import/import-defer/evaluation-triggers/trigger-not-exported-string-has
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-hasProperty.js
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-super-get.js
 language/import/import-defer/evaluation-triggers/trigger-not-exported-string-super-property-define.js
+language/import/import-defer/evaluation-triggers/trigger-not-exported-string-super-property-set-exported.js
 language/import/import-defer/evaluation-triggers/trigger-ownPropertyKey-names.js
 language/import/import-defer/evaluation-triggers/trigger-ownPropertyKeys-symbols.js
 language/import/import-defer/evaluation-triggers/trigger-ownPropertyKeys.js
@@ -32200,6 +32204,7 @@ language/module-code/namespace/internals/prevent-extensions.js
 language/module-code/namespace/internals/set-prototype-of-null.js
 language/module-code/namespace/internals/set-prototype-of.js
 language/module-code/namespace/internals/set.js
+language/module-code/namespace/internals/super-access-to-tdz-binding.js
 language/module-code/namespace/internals/super-set-to-tdz-binding-with-accessor.js
 language/module-code/parse-err-decl-pos-export-arrow-function.js
 language/module-code/parse-err-decl-pos-export-block-stmt-list.js
@@ -32315,6 +32320,7 @@ language/module-code/privatename-not-valid-earlyerr-module-6.js
 language/module-code/privatename-not-valid-earlyerr-module-7.js
 language/module-code/privatename-not-valid-earlyerr-module-8.js
 language/module-code/privatename-valid-no-earlyerr.js
+language/module-code/source-phase-import/import-source.js
 language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js
 language/module-code/top-level-await/await-awaits-thenable-not-callable.js
 language/module-code/top-level-await/await-awaits-thenables-that-throw.js
@@ -32349,6 +32355,7 @@ language/module-code/top-level-await/new-await-script-code.js
 language/module-code/top-level-await/new-await.js
 language/module-code/top-level-await/no-operand.js
 language/module-code/top-level-await/pending-async-dep-from-cycle.js
+language/module-code/top-level-await/rejection-order.js
 language/module-code/top-level-await/syntax/await-expr-dyn-import.js
 language/module-code/top-level-await/syntax/block-await-expr-array-literal.js
 language/module-code/top-level-await/syntax/block-await-expr-func-expression.js

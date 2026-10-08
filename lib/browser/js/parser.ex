@@ -814,6 +814,19 @@ defmodule Browser.JS.Parser do
     {{:import, spec, [{:defer_ns, local}]}, semi(ts)}
   end
 
+  # `import source x from "m"`: a module has no source phase representation here, so the
+  # loader refuses the request (`source` and `from` can be the binding)
+  defp module_item([
+         {:id, "import", _},
+         {:id, "source", _},
+         {:id, _, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]) do
+    {_spec, ts} = with_spec(spec, ts)
+    {{:import, {spec, :unsupported}, []}, semi(ts)}
+  end
+
   defp module_item([{:id, "import", _}, {:str, spec, _} | ts]) do
     {spec, ts} = with_spec(spec, ts)
     {{:import, spec, []}, semi(ts)}
