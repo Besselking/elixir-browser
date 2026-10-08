@@ -7810,7 +7810,10 @@ defmodule Browser.Layout do
       {laid, y} =
         Enum.map_reduce(lines, 0, fn line, y ->
           min_cross = if length(lines) == 1, do: cs.height || 0, else: 0
-          {line_items, cross} = flex_line(st, cs, line, avail, y, min_cross)
+
+          {line_items, cross} =
+            flex_line(st, cs, line, avail, y, min_cross, length(lines) == 1 and not cs.wrap)
+
           {line_items, y + cross + round(cs.row_gap)}
         end)
 
@@ -7870,7 +7873,7 @@ defmodule Browser.Layout do
     Enum.reverse(if current == [], do: lines, else: [Enum.reverse(current) | lines])
   end
 
-  defp flex_line(st, cs, line, avail, top, min_cross) do
+  defp flex_line(st, cs, line, avail, top, min_cross, single? \\ false) do
     # collapsed items only keep their cross size, they take no part in the main axis
     {struts, line} = Enum.split_with(line, & &1.collapsed)
 
@@ -7880,10 +7883,12 @@ defmodule Browser.Layout do
         max(m, h)
       end)
 
-    if line == [], do: {[], min_cross}, else: flex_line_live(st, cs, line, avail, top, min_cross)
+    if line == [],
+      do: {[], min_cross},
+      else: flex_line_live(st, cs, line, avail, top, min_cross, single?)
   end
 
-  defp flex_line_live(st, cs, line, avail, top, min_cross) do
+  defp flex_line_live(st, cs, line, avail, top, min_cross, single?) do
     n = length(line)
     gaps = cs.col_gap * (n - 1)
     outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end
@@ -7938,8 +7943,11 @@ defmodule Browser.Layout do
     # items aligned on their baselines hang from the lowest one
     sized = baseline_offsets(sized, cs.align)
 
+    # (the only line of a container with a height is as high as the container)
     cross =
-      sized |> Enum.map(&(&1.h + &1.boff)) |> Enum.max() |> max(round(min_cross))
+      if single? and cs.height != nil and cs.hdef,
+        do: round(min_cross),
+        else: sized |> Enum.map(&(&1.h + &1.boff)) |> Enum.max() |> max(round(min_cross))
 
     {placed, _x} =
       Enum.map_reduce(sized, start, fn it, x ->
@@ -8177,6 +8185,20 @@ defmodule Browser.Layout do
   defp flex_stretch(st, it, container_align, cross) do
     stretch? = flex_align(it, container_align) in ["stretch", "normal"]
 
+    if stretch? and it.auto_height? and it.rebuild != nil and it.h > cross and cross >= 0 and
+         it.mta == false and it.mba == false do
+      # an item taller than the line (of a container with a height) is cut down to it
+      box_h = cross - it.mt - it.mb
+      h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
+      sub = it.rebuild.(%{"height" => max(h, 0) * 1.0})
+      {items, h2, _} = flex_atom(st, sub, it.w, {it.key, :cut, h})
+      %{it | items: items, h: h2}
+    else
+      flex_stretch_grow(st, it, stretch?, cross)
+    end
+  end
+
+  defp flex_stretch_grow(st, it, stretch?, cross) do
     if stretch? and it.auto_height? and it.rebuild != nil and it.h < cross do
       box_h = cross - it.mt - it.mb
       min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra

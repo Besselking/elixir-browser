@@ -5474,6 +5474,14 @@ defmodule Browser.LayoutTest do
       assert green_rects(html) == [{40, 5}, {10, 20}]
     end
 
+    test "an item of a flex container with a height is stretched to it, shorter or taller" do
+      html =
+        ~s|<div style="display:flex;height:20px"><div style="width:30px;background:green">a</div><div style="width:30px;height:5px;background:blue"></div></div><div style="display:flex;height:4px"><div style="width:30px;background:green;font-size:16px;line-height:16px">a</div></div>|
+
+      assert green_rects(html) |> Enum.map(&elem(&1, 1)) |> Enum.take(1) == [20]
+      assert Enum.any?(green_rects(html), &(&1 == {20, 4}))
+    end
+
     test "without margin-trim the margins stay" do
       html = """
       <div><div style="margin:20px 0;height:10px;background:green"></div></div>

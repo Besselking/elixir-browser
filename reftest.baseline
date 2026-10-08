@@ -3940,6 +3940,8 @@ css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
 css/css-flexbox/flexbox-align-self-horiz-001-block.xhtml
 css/css-flexbox/flexbox-align-self-horiz-001-table.xhtml
 css/css-flexbox/flexbox-align-self-horiz-002.xhtml
+css/css-flexbox/flexbox-align-self-horiz-003.xhtml
+css/css-flexbox/flexbox-align-self-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-stretch-vert-001.html
 css/css-flexbox/flexbox-align-self-stretch-vert-002.html
 css/css-flexbox/flexbox-anonymous-items-001.html
@@ -4001,6 +4003,7 @@ css/css-flexbox/flexbox-min-width-auto-001.html
 css/css-flexbox/flexbox-min-width-auto-003.html
 css/css-flexbox/flexbox-min-width-auto-004.html
 css/css-flexbox/flexbox-order-only-flexitems.html
+css/css-flexbox/flexbox-overflow-horiz-002.html
 css/css-flexbox/flexbox-overflow-horiz-003.html
 css/css-flexbox/flexbox-overflow-horiz-004.html
 css/css-flexbox/flexbox-overflow-horiz-005.html
@@ -4727,6 +4730,7 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-045.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-046.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-047.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-048.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-049.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-050.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-051.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-052.html
