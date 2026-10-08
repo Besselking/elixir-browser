@@ -1282,8 +1282,39 @@ defmodule Browser.JS.DOM do
   defp hget(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
   defp hget(_other, _key, _self), do: :miss
 
+  # the event handler properties an element has (`"onclick" in el`; `el.onclick` is null)
+  @on_events ~w(click dblclick auxclick mousedown mouseup mousemove mouseover mouseout mouseenter
+                mouseleave keydown keyup keypress input change submit reset focus blur focusin
+                focusout select scroll wheel contextmenu touchstart touchend touchmove touchcancel
+                pointerdown pointerup pointermove pointerover pointerout pointerenter pointerleave
+                pointercancel gotpointercapture lostpointercapture drag dragstart dragend dragover
+                dragenter dragleave drop copy cut paste load error abort cancel close toggle
+                beforeinput compositionstart compositionend compositionupdate animationstart
+                animationend animationiteration transitionend transitionstart transitionrun
+                transitioncancel resize invalid play pause ended canplay loadeddata loadedmetadata
+                timeupdate volumechange seeking seeked readystatechange visibilitychange
+                fullscreenchange selectionchange beforecopy beforecut beforepaste search selectstart
+                securitypolicyviolation slotchange)
+
   defp node_get(n, key, self) do
     case {key, n.kind} do
+      {"on" <> ev, k} when k in [:element, :document] and ev in @on_events ->
+        handler =
+          case Enum.find(Map.get(st().listeners, n.id, []), &(&1.type == ev and &1[:inline])) do
+            %{fun: f} ->
+              f
+
+            nil ->
+              with code when is_binary(code) <- if(k == :element, do: get_attr(n, key)),
+                   f when is_tuple(f) <- inline_function(n.id, ev, code) do
+                f
+              else
+                _ -> :null
+              end
+          end
+
+        {:ok, handler}
+
       {"nodeType", k} ->
         {:ok, float(%{element: 1, text: 3, comment: 8, document: 9, fragment: 11}[k])}
 
@@ -2142,12 +2173,8 @@ defmodule Browser.JS.DOM do
 
   defp describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v) do
-    case Interp.get(v, "message") do
-      m when is_binary(m) -> m
-      _ -> Browser.JS.Builtins.inspect_js(v, 0, [])
-    end
-  end
+  defp describe({:obj, _} = v),
+    do: Interp.describe_error(v) || Browser.JS.Builtins.inspect_js(v, 0, [])
 
   defp describe(v), do: Browser.JS.Builtins.inspect_js(v, 0, [])
 
@@ -2311,6 +2338,84 @@ defmodule Browser.JS.DOM do
     do: List.last(element_kids(n.parent || -1)) == n.id
 
   defp match_cond(n, {:pseudo, "only-child", _}), do: element_kids(n.parent || -1) == [n.id]
+
+  defp match_cond(n, {:pseudo, "first-of-type", _}),
+    do: List.first(same_type_kids(n)) == n.id
+
+  defp match_cond(n, {:pseudo, "last-of-type", _}), do: List.last(same_type_kids(n)) == n.id
+  defp match_cond(n, {:pseudo, "only-of-type", _}), do: same_type_kids(n) == [n.id]
+
+  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, &kid_elements/1)
+
+  defp match_cond(n, {:pseudo, "nth-last-child", arg}),
+    do: nth_match(n, arg, true, &kid_elements/1)
+
+  defp match_cond(n, {:pseudo, "nth-of-type", arg}),
+    do: nth_match(n, arg, false, &same_type_kids/1)
+
+  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}),
+    do: nth_match(n, arg, true, &same_type_kids/1)
+
+  defp match_cond(n, {:pseudo, "has", arg}) when is_binary(arg) do
+    arg
+    |> split_top(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.any?(fn rel ->
+      {comb, rest} =
+        case rel do
+          <<c, r::binary>> when c in [?>, ?+, ?~] -> {<<c>>, String.trim(r)}
+          _ -> {" ", rel}
+        end
+
+      sels = parse_selectors(rest)
+      {_, after_sibs} = siblings(n.id)
+      after_els = Enum.filter(after_sibs, &(node(&1).kind == :element))
+
+      candidates =
+        case comb do
+          " " -> elements(n.id)
+          ">" -> element_kids(n.id)
+          "+" -> Enum.take(after_els, 1)
+          "~" -> after_els
+        end
+
+      candidates =
+        if comb in ["+", "~"],
+          do: candidates ++ Enum.flat_map(candidates, &elements/1),
+          else: candidates
+
+      (comb in ["+", "~"] &&
+         Enum.any?(
+           Enum.take(after_els, if(comb == "+", do: 1, else: length(after_els))),
+           &matches?(&1, sels)
+         )) or
+        (comb in [" ", ">"] and Enum.any?(candidates, &matches?(&1, sels)))
+    end)
+  end
+
+  defp match_cond(n, {:pseudo, "link", _}),
+    do: n.tag in ["a", "area"] and get_attr(n, "href") != nil
+
+  defp match_cond(n, {:pseudo, "any-link", _}),
+    do: n.tag in ["a", "area"] and get_attr(n, "href") != nil
+
+  defp match_cond(n, {:pseudo, "required", _}), do: get_attr(n, "required") != nil
+  defp match_cond(n, {:pseudo, "optional", _}), do: get_attr(n, "required") == nil
+
+  defp match_cond(n, {:pseudo, "read-only", _}),
+    do:
+      not (n.tag in ["input", "textarea"] and get_attr(n, "readonly") == nil and
+             get_attr(n, "disabled") == nil)
+
+  defp match_cond(n, {:pseudo, "read-write", _}),
+    do:
+      n.tag in ["input", "textarea"] and get_attr(n, "readonly") == nil and
+        get_attr(n, "disabled") == nil
+
+  defp match_cond(n, {:pseudo, "defined", _}),
+    do: not String.contains?(n.tag || "", "-") or registered(n.tag) != nil
+
+  defp match_cond(_n, {:pseudo, "scope", _}), do: false
   defp match_cond(n, {:pseudo, "empty", _}), do: n.kids == []
   defp match_cond(n, {:pseudo, "checked", _}), do: checked_of(n) == true
   defp match_cond(n, {:pseudo, "disabled", _}), do: get_attr(n, "disabled") != nil
@@ -2321,6 +2426,75 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:pseudo, "where", arg}), do: matches?(n.id, parse_selectors(arg))
   defp match_cond(_n, {:pseudo, _, _}), do: false
   defp match_cond(_n, _), do: false
+
+  defp kid_elements(n), do: if(n.parent, do: element_kids(n.parent), else: [n.id])
+
+  # the element children of the parent that have the element's tag
+  defp same_type_kids(n) do
+    Enum.filter(kid_elements(n), &(node(&1).tag == n.tag))
+  end
+
+  # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
+  defp nth_match(n, arg, from_end?, siblings_fun) do
+    {formula, of_sel} =
+      case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+        [f, sel] -> {f, parse_selectors(sel)}
+        [f] -> {f, nil}
+      end
+
+    kids = siblings_fun.(n)
+    kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
+    kids = if from_end?, do: Enum.reverse(kids), else: kids
+
+    case Enum.find_index(kids, &(&1 == n.id)) do
+      nil ->
+        false
+
+      i ->
+        case parse_anb(formula) do
+          {a, b} ->
+            pos = i + 1
+
+            if a == 0,
+              do: pos == b,
+              else: rem(pos - b, a) == 0 and div(pos - b, a) >= 0
+
+          :error ->
+            false
+        end
+    end
+  end
+
+  defp parse_anb(f) do
+    f = f |> String.downcase() |> String.replace(~r/\s+/, "")
+
+    case f do
+      "odd" ->
+        {2, 1}
+
+      "even" ->
+        {2, 0}
+
+      _ ->
+        case Regex.run(~r/^([+-]?\d*)n([+-]\d+)?$/, f) do
+          [_, a] ->
+            {anb_coef(a), 0}
+
+          [_, a, b] ->
+            {anb_coef(a), String.to_integer(String.trim_leading(b, "+"))}
+
+          nil ->
+            case Integer.parse(f) do
+              {b, ""} -> {0, b}
+              _ -> :error
+            end
+        end
+    end
+  end
+
+  defp anb_coef(a) when a in ["", "+"], do: 1
+  defp anb_coef("-"), do: -1
+  defp anb_coef(a), do: String.to_integer(String.trim_leading(a, "+"))
 
   defp attr_match(nil, _v, _), do: true
   defp attr_match("=", v, val), do: v == val

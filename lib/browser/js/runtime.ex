@@ -532,18 +532,7 @@ defmodule Browser.JS.Runtime do
 
   defp describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v) do
-    case Interp.get(v, "message") do
-      m when is_binary(m) ->
-        case Interp.get(v, "name") do
-          n when is_binary(n) -> n <> ": " <> m
-          _ -> m
-        end
-
-      _ ->
-        Builtins.inspect_js(v, 0, [])
-    end
-  end
+  defp describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
 
   defp describe(v), do: Builtins.inspect_js(v, 0, [])
 

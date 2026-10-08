@@ -177,4 +177,20 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["x|y y color a,1|b,2 2 hi <p id=\"q\">hi</p><p></p>"]
   end
+
+  test "querySelector knows the structural pseudo-classes" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const q = (s) => document.querySelectorAll(s).length;
+        console.log(q("li:nth-child(2)"), q("li:nth-child(odd)"), q("li:nth-child(2n+2)"), q("li:nth-child(-n+2)"),
+          q("li:nth-last-child(1)"), q("li:first-of-type"), q("p:nth-of-type(2)"), q("li:nth-child(1) .t"),
+          q("ul:has(> li.x)"), q("ul:has(.nope)"), q("li:nth-child(even of .x)"), q("p:only-of-type"));
+        """,
+        ~S|<ul><li><b class=t></b></li><li class=x></li><li class=x></li><li></li></ul><p></p><p></p><div><p></p></div>|
+      )
+
+    assert errors == []
+    assert logs == ["1 2 2 2 1 1 1 1 1 0 1 1"]
+  end
 end
