@@ -89,7 +89,8 @@ defmodule Browser.Style do
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
   canvas, audio, video, iframe, object, embed, applet { display: none }
-  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: hidden; background-color: white }
+  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
+  iframe[data-b-frame][scrolling=no] { overflow: hidden }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,

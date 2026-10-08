@@ -567,6 +567,12 @@ defmodule Browser.JS.DOM do
 
       if internal != n.internal, do: update_node_quiet(nid, &%{&1 | internal: internal})
       if tag not in ["textarea", "select"], do: sync_kids(n.kids, kids)
+
+      # the controls of a frame's document are numbered with the page's
+      case tag == "iframe" && Map.get(st().frames, nid) do
+        doc when is_integer(doc) -> sync_kids(node(doc).kids, kids)
+        _ -> :ok
+      end
     end
   end
 
@@ -1220,8 +1226,11 @@ defmodule Browser.JS.DOM do
 
   @doc "The node id of the element for the page's control `cid`, or nil."
   def control_node(cid) do
-    Enum.find(elements(st().doc), fn nid ->
-      List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+    # (the controls of the frames are numbered with the page's)
+    Enum.find_value(realm_docs(), fn doc ->
+      Enum.find(elements(doc), fn nid ->
+        List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+      end)
     end)
   end
 
@@ -3918,6 +3927,48 @@ defmodule Browser.JS.DOM do
 
   @doc "The node (element or text) the layout numbers `n`, or nil."
   def node_numbered(n), do: nid_numbered(n)
+
+  @doc """
+  A click on a link, which the layout reports as `href` over the element it numbers `nid`. When
+  the link is in a frame, the frame follows it (`target="_top"` and `"_parent"` send the
+  page, or the frame around, instead): `:frame`. A link of the page itself is for the session:
+  `:page`.
+  """
+  def follow_link(nid, href) do
+    main = st().main
+
+    with id when id != nil <- nid && nid_numbered(nid),
+         doc when doc != main <- node(id).doc,
+         %{parent: parent} <- frame_of(doc) do
+      target = link_target([id | ancestors(id)])
+
+      case target do
+        t when t in ["_top", "_parent"] ->
+          # the frame's own address is the base of a link that leaves it
+          url = in_realm(doc, fn -> resolve_url(href) end)
+
+          if t == "_top" or parent == st().main do
+            out({:navigate, url, :push})
+          else
+            in_realm(parent, fn -> navigate_to(url) end)
+          end
+
+        _ ->
+          in_realm(doc, fn -> navigate_to(resolve_url(href)) end)
+      end
+
+      :frame
+    else
+      _ -> :page
+    end
+  end
+
+  defp link_target(chain) do
+    Enum.find_value(chain, fn id ->
+      n = node(id)
+      if n.kind == :element and n.tag == "a", do: get_attr(n, "target") || "", else: nil
+    end)
+  end
 
   @doc """
   The pointer moved from the element the layout numbers `old` to the one it numbers `new` (nil:

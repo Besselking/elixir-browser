@@ -106,6 +106,12 @@ defmodule Browser.JS.Runtime do
   @doc "The browser followed a link to a fragment of this page, now at `url`."
   def fragment(pid, url), do: call(pid, {:fragment, url})
 
+  @doc """
+  A click on the link `href` over the element numbered `nid`: `%{frame: true}` when a frame
+  took it (it loads the address itself), else the session follows the link.
+  """
+  def follow_link(pid, nid, href), do: call(pid, {:follow_link, nid, href})
+
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
@@ -490,6 +496,12 @@ defmodule Browser.JS.Runtime do
     moved = guard(fn -> DOM.traverse(n) end, :out_of_range) == :moved
     Browser.JS.Promise.run_microtasks()
     finish(%{moved: moved})
+  end
+
+  defp handle({:follow_link, nid, href}) do
+    frame = guard(fn -> DOM.follow_link(nid, href) end, :page) == :frame
+    Browser.JS.Promise.run_microtasks()
+    finish(%{frame: frame})
   end
 
   defp handle({:fragment, url}) do
