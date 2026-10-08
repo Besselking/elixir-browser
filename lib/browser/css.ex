@@ -17,7 +17,7 @@ defmodule Browser.CSS do
   Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
-  cascade); other at-rules (`@import`, `@font-face`,
+  cascade), and `@property` gives a custom property its initial value; other at-rules (`@import`, `@font-face`,
   `@keyframes`, …) are skipped.
 
   A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds,
@@ -45,10 +45,11 @@ defmodule Browser.CSS do
           selector: parts,
           specificity: spec,
           decls: decls,
-          media: Enum.reject(conds, &match?({:layer, _}, &1)),
+          media: Enum.reject(conds, &(match?({:layer, _}, &1) or &1 == :registered)),
           layer: layer_path(conds),
           pseudo: pseudo
         }
+        |> then(&if(:registered in conds, do: Map.put(&1, :registered, true), else: &1))
       end
     end)
   end
@@ -183,11 +184,30 @@ defmodule Browser.CSS do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
               "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
               "layer" -> blocks(body, conds ++ [{:layer, layer_name(prelude)}], [])
+              "property" -> registered_default(prelude, body, conds)
               _ -> []
             end
 
           {Enum.reverse(inner) ++ acc, rest}
         end
+    end
+  end
+
+  # `@property --x { initial-value: v; inherits: bool }` gives `--x` a value where nothing sets
+  # it: a rule of the lowest rank (`:registered`) on every element, or on the root when the
+  # property inherits
+  defp registered_default(prelude, body, conds) do
+    name = String.trim(prelude)
+    decls = parse_declarations(body)
+    initial = for {"initial-value", v, _} <- decls, do: v
+    inherits? = Enum.any?(decls, fn {p, v, _} -> p == "inherits" and String.trim(v) == "true" end)
+
+    case initial do
+      [v | _] when binary_part(name, 0, min(2, byte_size(name))) == "--" ->
+        [{if(inherits?, do: ":root", else: "*"), "#{name}: #{v}", conds ++ [:registered]}]
+
+      _ ->
+        []
     end
   end
 

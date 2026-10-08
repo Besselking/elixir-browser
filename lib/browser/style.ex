@@ -50,6 +50,8 @@ defmodule Browser.Style do
   @clips ~w(hidden clip scroll auto)
   # what the layer of the style attribute is: above every layer, and above unlayered rules
   @above_layers 2_000_000
+  # the rank of the initial values of `@property` registrations: below every layer
+  @registered_rank 1_500_000
   @default_fs 16.0
 
   @shorthands %{
@@ -238,7 +240,12 @@ defmodule Browser.Style do
     |> then(fn rules -> {rules, layer_ranks(rules)} end)
     |> then(fn {rules, ranks} ->
       Enum.map(rules, fn {rule, order} ->
-        {Map.put(rule, :lrank, Map.get(ranks, Map.get(rule, :layer))), order}
+        lrank =
+          if Map.get(rule, :registered),
+            do: -@registered_rank,
+            else: Map.get(ranks, Map.get(rule, :layer))
+
+        {Map.put(rule, :lrank, lrank), order}
       end)
     end)
     |> Enum.reduce(
