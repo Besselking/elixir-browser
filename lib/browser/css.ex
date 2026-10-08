@@ -538,7 +538,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type)\(/u, s) ->
+      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type|nth-last-of-type)\(/u, s) ->
         [whole, name] = m
 
         kind =
@@ -546,6 +546,7 @@ defmodule Browser.CSS do
             do: (
               "nth-child" -> :child
               "nth-last-child" -> :last_child
+              "nth-last-of-type" -> :last_of_type
               _ -> :of_type
             )
 
@@ -589,9 +590,14 @@ defmodule Browser.CSS do
   # `2n+1 of .a, b > c` -> {"2n+1", ".a, b > c"}; the `of` part is only for the child kinds
   defp split_of(inner, kind) do
     case Regex.run(~r/\A(.*?)\s+of(?=[\s\[.#:*]|[\w\-])\s*(.*)\z/su, inner) do
-      [_, arg, sels] when kind != :of_type and sels != "" -> {String.trim(arg), sels}
-      [_, _, _] -> :error
-      nil -> {String.trim(inner), nil}
+      [_, arg, sels] when kind not in [:of_type, :last_of_type] and sels != "" ->
+        {String.trim(arg), sels}
+
+      [_, _, _] ->
+        :error
+
+      nil ->
+        {String.trim(inner), nil}
     end
   end
 
@@ -626,7 +632,12 @@ defmodule Browser.CSS do
       inner
       |> split_top(?,)
       |> Enum.map(fn r ->
-        r |> String.trim() |> String.trim("\"") |> String.trim("'") |> String.downcase()
+        r
+        |> String.trim()
+        |> String.trim("\"")
+        |> String.trim("'")
+        |> String.replace(~r/\\(.)/, "\\1")
+        |> String.downcase()
       end)
 
     # an unquoted range is an identifier, which cannot start with a digit
@@ -642,7 +653,7 @@ defmodule Browser.CSS do
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type link any-link disabled enabled checked)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -920,6 +931,8 @@ defmodule Browser.CSS do
   defp pseudo?(:never, _ctx), do: false
   defp pseudo?(:empty, ctx), do: ctx.empty?
   defp pseudo?(:first_of_type, ctx), do: not Enum.any?(ctx.prev, &(&1.tag == ctx.tag))
+  defp pseudo?(:last_of_type, ctx), do: later_of_type(ctx) == 0
+  defp pseudo?(:only_of_type, ctx), do: pseudo?(:first_of_type, ctx) and later_of_type(ctx) == 0
 
   defp pseudo?(link, ctx) when link in [:link, :any_link],
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
@@ -1038,8 +1051,22 @@ defmodule Browser.CSS do
     attr_value(ctx.attrs, "lang") || attr_value(ctx.attrs, "xml:lang") || language(ctx.parent)
   end
 
-  defp lang_match?("*", lang), do: lang != ""
-  defp lang_match?(range, lang), do: lang == range or String.starts_with?(lang, range <> "-")
+  # extended filtering (RFC 4647): `*` stands for any subtag, and a range may skip subtags of
+  # the language tag, but not past a singleton such as `x`
+  defp lang_match?(range, lang) do
+    case {String.split(range, "-"), String.split(lang, "-")} do
+      {["*" | rs], [t | ts]} when t != "" -> lang_subtags(rs, ts)
+      {[r | rs], [r | ts]} -> lang_subtags(rs, ts)
+      _ -> false
+    end
+  end
+
+  defp lang_subtags([], _), do: true
+  defp lang_subtags(["*" | rs], ts), do: lang_subtags(rs, ts)
+  defp lang_subtags(_, []), do: false
+  defp lang_subtags([r | rs], [r | ts]), do: lang_subtags(rs, ts)
+  defp lang_subtags(_, [t | _]) when byte_size(t) == 1, do: false
+  defp lang_subtags(rs, [_ | ts]), do: lang_subtags(rs, ts)
 
   defp direction(nil), do: "ltr"
 
@@ -1059,6 +1086,12 @@ defmodule Browser.CSS do
   defp position(:child, ctx), do: ctx.index
   defp position(:last_child, ctx), do: ctx.count - ctx.index + 1
   defp position(:of_type, ctx), do: 1 + Enum.count(ctx.prev, &(&1.tag == ctx.tag))
+  defp position(:last_of_type, ctx), do: 1 + later_of_type(ctx)
+
+  # how many elements of the same type follow this one
+  defp later_of_type(ctx),
+    do:
+      Enum.count(Map.get(ctx, :next, []), &match?({:element, tag, _, _} when tag == ctx.tag, &1))
 
   # does some n >= 0 satisfy a*n + b == pos?
   defp nth_match?(0, b, pos), do: pos == b

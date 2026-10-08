@@ -914,6 +914,21 @@ defmodule Browser.LayoutTest do
     defp wr(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
     defp rr(items), do: Enum.filter(items, &(&1.type == :rect))
 
+    test "an inline-block with a length vertical-align sits that far above the baseline" do
+      box = fn va ->
+        ~s|<div style="line-height:20px">a<span style="display:inline-block;width:10px;height:10px;background:#eee;#{va}"></span></div>|
+      end
+
+      {plain, _} = rb(box.(""))
+      {raised, _} = rb(box.("vertical-align:15px"))
+      # the height of the box above the bottom of the text
+      above = fn items ->
+        wr(items, "a").y + wr(items, "a").h - (hd(rr(items)).y + hd(rr(items)).h)
+      end
+
+      assert above.(raised) - above.(plain) == 15
+    end
+
     test "centered text doesn't inflate a shrink-to-fit unit" do
       html =
         ~s(<span style="display:inline-block; text-align:center; background:#eee">tiny</span>)
@@ -2106,6 +2121,29 @@ defmodule Browser.LayoutTest do
              ] = of_type(items, :bgimage)
     end
 
+    test "a row group's picture is placed against the group, not each cell" do
+      html =
+        ~s|<table style="border-spacing:0"><tbody style="background: url(a.png) right bottom no-repeat"><tr><td style="width:20px;height:20px;padding:0"></td><td style="width:20px;height:20px;padding:0"></td></tr><tr><td style="width:20px;height:20px;padding:0"></td><td style="width:20px;height:20px;padding:0"></td></tr></tbody></table>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      tiles = for %{layers: layers} <- of_type(items, :bgimage), l <- layers, do: l.tile
+      # one tile in the corner of the group (4 + 40 - 10, 40 - 10), which every cell shares
+      assert Enum.uniq(tiles) == [{34, 30, 10, 10}]
+    end
+
+    test "a column's picture is placed against the column and clipped to each cell" do
+      cell = ~s|<td style="width:20px;height:20px;padding:0"></td>|
+
+      html =
+        ~s|<table style="border-spacing:0"><colgroup><col style="background: url(a.png) no-repeat"><col></colgroup><tr>#{cell}#{cell}</tr><tr>#{cell}#{cell}</tr></table>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      tiles = for %{layers: layers} <- of_type(items, :bgimage), l <- layers, do: l.tile
+      # a single tile, at the top left of the column
+      assert Enum.uniq(tiles) == [{4, 0, 10, 10}]
+      assert length(tiles) == 2
+    end
+
     test "positioning, size and repeat apply" do
       html =
         ~s|<div style="background: url(a.png) right bottom / 40px auto no-repeat; height: 60px; width: 200px">x</div>|
@@ -2715,6 +2753,55 @@ defmodule Browser.LayoutTest do
       assert at(items, "aa").x == at(items, "c").x
     end
 
+    test "min-height on the table and height on a row raise the rows" do
+      {tall, _} =
+        tbl(
+          ~s|<table style="border-spacing:0;min-height:100px"><tr><td style="padding:0">a</td></tr></table>|
+        )
+
+      {row, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr style="height:60px"><td style="padding:0;vertical-align:top">a</td></tr><tr><td style="padding:0;vertical-align:top">b</td></tr></table>|
+        )
+
+      {plain, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr><td style="padding:0">a</td></tr><tr><td style="padding:0">b</td></tr></table>|
+        )
+
+      assert at(row, "b").y - at(row, "a").y == 60
+      assert at(plain, "b").y - at(plain, "a").y < 60
+      assert tall |> table_rects() |> Enum.all?(&(&1.h <= 100))
+    end
+
+    test "min-width of a cell or column is the least its column is" do
+      {cell, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><tr><td style="padding:0;min-width:80px">a</td><td style="padding:0">b</td></tr></table>|
+        )
+
+      {col, _} =
+        tbl(
+          ~s|<table style="border-spacing:0"><col style="min-width:80px"><tr><td style="padding:0">a</td><td style="padding:0">b</td></tr></table>|
+        )
+
+      assert at(cell, "b").x - at(cell, "a").x == 80
+      assert at(col, "b").x - at(col, "a").x == 80
+    end
+
+    test "a caption keeps its margins and makes the table at least as wide as itself" do
+      html = fn margin ->
+        ~s|<table style="border-spacing:0"><caption style="margin-left:#{margin}px"><div style="width:100px">x</div></caption>| <>
+          ~s|<tr><td style="padding:0">a</td><td style="padding:0">b</td></tr></table>|
+      end
+
+      {with, _} = tbl(html.(30))
+      {without, _} = tbl(html.(0))
+      assert at(with, "x").x - at(without, "x").x == 30
+      # the last column took what the caption needed over the cells
+      assert at(without, "b").x - at(without, "a").x >= 50
+    end
+
     test "a block-wide cell leaves the others as wide as their unbreakable text" do
       {items, _} =
         tbl(
@@ -3015,6 +3102,29 @@ defmodule Browser.LayoutTest do
 
       assert word_at(items, "aaaa").x == 208 - 4 - 32
       assert word_at(items, "bbbb").x == 4
+    end
+
+    test "the dir attribute sets the direction, auto from the first strong letter" do
+      {items, _} =
+        fl(~s|<div dir="rtl">aaaa</div><div dir="rtl"><p dir="auto">bbbb</p></div>|)
+
+      assert word_at(items, "aaaa").x == 208 - 4 - 32
+      assert word_at(items, "bbbb").x < 100
+    end
+
+    test "text-align: match-parent keeps the parent's resolved alignment" do
+      {items, _} =
+        fl(~s|<div style="text-align:right"><p style="text-align:match-parent">cc</p></div>|)
+
+      assert word_at(items, "cc").x > 100
+    end
+
+    test "a space before an empty inline box and one after it are one space" do
+      {items, _} =
+        fl(~s|<style>i{background:#eee}</style><p>aaaa <i></i> bbbb</p>|, 400)
+
+      {plain, _} = fl(~s|<p>aaaa bbbb</p>|, 400)
+      assert word_at(items, "bbbb").x == word_at(plain, "bbbb").x
     end
 
     test "an absolute box without offsets sits at its static position, at the right when rtl" do
@@ -5142,6 +5252,72 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 30, 10}]
     end
 
+    test "a percentage height item in a column of definite height shrinks, the other keeps its content" do
+      html = """
+      <div style="height:100px;width:100px"><div style="display:flex;flex-direction:column;height:100%">
+      <div style="background:blue"><div style="height:20px"></div></div>
+      <div style="height:100%;background:green"></div></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 100, 20}, {0, 20, 100, 80}]
+    end
+
+    test "space-evenly rounds each gap, as margins would be" do
+      html = """
+      <div style="display:flex;width:200px;justify-content:space-evenly"><div style="width:10px;height:5px;background:red"></div><div style="width:50px;height:5px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{47, 0, 10, 5}, {104, 0, 50, 5}]
+    end
+
+    test "in a right-to-left column, flex-start items sit at the right" do
+      html = """
+      <div style="display:flex;flex-direction:column;direction:rtl;width:100px;align-items:flex-start"><div style="width:30px;height:5px;background:red"></div></div>
+      """
+
+      assert flex_rects(html) == [{70, 0, 30, 5}]
+    end
+
+    test "a floated column container is as wide as its items, whatever their flex-basis" do
+      html = """
+      <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
+      <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 20, 10}, {20, 0, 20, 10}]
+    end
+
+    test "a wrapping column with a max-content width is as wide as its columns" do
+      html = """
+      <div style="display:flex;flex-flow:column wrap;height:100px;width:max-content;background:#eee"><div style="width:50px;flex:0 0 100px;background:green"></div><div style="width:30px;flex:0 0 100px;background:blue"></div></div>
+      """
+
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 50, 100}, {0, 0, 80, 100}, {50, 0, 30, 100}]
+    end
+
+    test "justify-content: center and flex-end let items overflow at the start side" do
+      html = """
+      <div style="display:flex;width:30px;justify-content:flex-end"><div style="flex:0 0 40px;height:10px;background:green"></div></div>
+      """
+
+      assert [{-10, 0, 40, 10}] = flex_rects(html)
+    end
+
+    test "a percentage height inside a column item that cannot flex refers to its flexed size" do
+      fixed =
+        ~s|<div style="display:flex;flex-direction:column"><div style="flex:0 0 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      flexible =
+        ~s|<div style="display:flex;flex-direction:column"><div style="flex:1 1 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      tall =
+        ~s|<div style="display:flex;flex-direction:column;height:200px"><div style="flex:1 1 100px"><div style="width:100px;height:100%;background:green"></div></div></div>|
+
+      assert [{0, 0, 100, 100}] = flex_rects(fixed)
+      assert flex_rects(flexible) == []
+      assert [{0, 0, 100, 200}] = flex_rects(tall)
+    end
+
     test "column items start from their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;height:100px"><div style="flex:0 30px;background:green"></div></div>
@@ -5396,6 +5572,82 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "fit-content() and stretch widths" do
+    test "fit-content(L) is as wide as the content, between its narrowest and L" do
+      html =
+        ~s|<div style="width:300px"><div style="width:fit-content(100px);background:green"><span style="display:inline-block;width:60px;height:5px"></span> <span style="display:inline-block;width:60px;height:5px"></span></div></div>|
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 100))
+    end
+
+    test "a float with width: stretch fills the containing block" do
+      html =
+        ~s(<div style="width:200px"><div style="float:left;width:stretch;height:10px;background:green"></div></div>)
+
+      assert Enum.any?(laid_out(html), &(&1.type == :rect and &1.w == 200))
+    end
+  end
+
+  describe "borders of columns in a collapsed table" do
+    test "a colgroup's top border is drawn along the top of its columns" do
+      html =
+        ~s|<table style="border-collapse:collapse;border-spacing:0"><colgroup style="border-top:3px solid green"><col><col></colgroup><tr><td style="padding:0;width:40px;height:20px"></td><td style="padding:0;width:40px"></td></tr></table>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(&1.type == :rect and &1.color == {0, 128, 0} and &1.h == 3)
+             )
+    end
+  end
+
+  describe "flex baseline alignment" do
+    test "items aligned on their baselines have their first lines' bottoms at the same height" do
+      html =
+        ~s|<div style="display:flex;align-items:baseline;font-family:Ahem"><div style="font-size:10px;line-height:10px">a</div><div style="font-size:30px;line-height:30px">b</div></div>|
+
+      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + h
+      assert [same] = Enum.uniq(bottoms)
+      assert is_integer(same)
+    end
+  end
+
+  describe "column geometry" do
+    test "column edges are rounded from their exact positions, so neighbours still touch" do
+      html =
+        ~s|<div style="columns:8;column-gap:5px;column-fill:auto;width:100px;height:100px"><div style="height:800px;background:green"></div></div>|
+
+      cols = for %{type: :rect, color: {0, 128, 0}, h: 100} = r <- laid_out(html), do: r
+      edges = cols |> Enum.map(&{&1.x, &1.x + &1.w}) |> Enum.sort()
+      assert Enum.all?(edges, fn {l, r} -> is_integer(l) and is_integer(r) end)
+    end
+
+    test "a percentage column-gap is of the width of the box" do
+      html =
+        ~s|<div style="columns:2;column-gap:10%;width:200px;font:10px/10px Ahem"><div>a</div><div>b</div></div>|
+
+      xs = for %{type: :text, text: t, x: x} <- laid_out(html), t in ["a", "b"], do: x
+      assert Enum.max(xs) - Enum.min(xs) == 110
+    end
+  end
+
+  describe "segment breaks between wide characters" do
+    test "a zero-width space is a place to break a line" do
+      html = ~s|<div style="width:10px;font:10px/1 Ahem">X&#x200B;X</div>|
+      ys = for %{type: :text, y: y, text: t} <- laid_out(html), t != "", uniq: true, do: y
+      assert length(ys) == 2
+    end
+
+    test "a line break between two wide characters leaves no space" do
+      wide = laid_out("<p>測試\n測試</p>") |> Enum.filter(&(&1.type == :text))
+      assert [%{text: "測試測試"}] = Enum.filter(wide, &String.contains?(&1.text, "測"))
+    end
+
+    test "a line break between other characters is a space" do
+      texts = for %{type: :text, text: t} <- laid_out("<p>ab\ncd</p>"), do: t
+      assert texts == ["ab", "cd"]
+    end
+  end
+
   describe "table-layout: fixed" do
     test "a zero-wide fixed table has zero-wide cells" do
       html =
@@ -5507,6 +5759,18 @@ defmodule Browser.LayoutTest do
         ~s(<div style="width:32px;white-space:break-spaces;overflow-wrap:anywhere">X XX X</div>)
 
       assert wrapped_lines(laid_out(html)) == ["X ", "XX X"]
+    end
+
+    test "break-word lets a space wrap away from a word alone on its line" do
+      html =
+        ~s(<div style="width:32px;white-space:break-spaces;word-break:break-word">XXXX X</div>)
+
+      assert wrapped_lines(laid_out(html)) == ["XXXX", " X"]
+    end
+
+    test "a tab is one unbreakable word" do
+      html = ~s(<div style="width:8px;white-space:break-spaces">X\t\tX</div>)
+      assert length(wrapped_lines(laid_out(html))) == 3
     end
 
     test "size containment takes the height from contain-intrinsic-size" do

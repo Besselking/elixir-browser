@@ -289,7 +289,7 @@ defmodule Browser.Style do
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
-      for {prop, value} <- hints(own) do
+      for {prop, value} <- dir_hint(own) ++ hints(own) do
         {prop, {rank(:author, false), {-1, {0, 0, 0}}, -1}, value}
       end
 
@@ -629,6 +629,34 @@ defmodule Browser.Style do
       _ ->
         []
     end
+  end
+
+  # the `dir` attribute sets the direction; `auto` takes it from the first strong letter
+  defp dir_hint(%{attrs: attrs} = ctx) do
+    case attrs |> attr("dir") |> String.downcase() do
+      d when d in ["ltr", "rtl"] -> [{"direction", d}]
+      "auto" -> [{"direction", auto_direction(Map.get(ctx, :kids, []))}]
+      _ -> []
+    end
+  end
+
+  defp auto_direction(kids) do
+    text =
+      kids
+      |> Stream.flat_map(fn
+        {:text, t} -> [t]
+        {:element, tag, _, k} when tag not in ["script", "style"] -> [auto_text(k)]
+        _ -> []
+      end)
+      |> Enum.join()
+
+    if Regex.match?(~r/^[^\p{L}]*[\p{Hebrew}\p{Arabic}\p{Syriac}\p{Thaana}]/u, text),
+      do: "rtl",
+      else: "ltr"
+  end
+
+  defp auto_text(kids) do
+    for {:text, t} <- kids, into: "", do: t
   end
 
   defp hints(%{tag: "input", attrs: attrs}) do
@@ -1627,6 +1655,25 @@ defmodule Browser.Style do
   # fit-content: as wide as the content wants (a block that sizes itself like an inline-block)
   defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
   defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
+
+  # stretch: fill the containing block; a block already does, so layout only looks at it for
+  # boxes that would otherwise shrink to fit
+  defp typed(prop, v, _env, _pc)
+       when prop in ["width", "min-width"] and
+              v in ["stretch", "-webkit-fill-available", "-moz-available"],
+       do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
+
+  # fit-content(<length-percentage>): as wide as the content, but at least its narrowest and
+  # at most the length
+  defp typed("width", "fit-content(" <> rest, env, _pc) do
+    arg = rest |> String.trim_trailing(")") |> String.trim()
+
+    cond do
+      pct = percentage(arg) -> {:ok, {:fitc, {:pct, pct}}}
+      px = length(arg, env) -> {:ok, {:fitc, px}}
+      true -> :skip
+    end
+  end
 
   defp typed(prop, v, _env, _pc)
        when prop in ["width", "height", "max-height"] and
