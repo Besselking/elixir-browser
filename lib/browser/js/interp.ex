@@ -192,6 +192,10 @@ defmodule Browser.JS.Interp do
     alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: parent})
   end
 
+  @doc "A global scope that starts with the variables `vars` (a frame's), not made the current one."
+  def new_scope_with(vars),
+    do: alloc(%{scope: true, vars: vars, consts: MapSet.new(), parent: nil})
+
   def new_global_scope do
     id = new_scope(nil)
     :erlang.put(:js_global, id)

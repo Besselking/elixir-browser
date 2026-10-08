@@ -28,7 +28,13 @@ defmodule Browser.JS.DOM do
 
   defp put_node(n) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), dirty: true, rev: s.rev + 1})
+
+    s =
+      if n.doc == s.main or n.doc == nil,
+        do: %{s | dirty: true},
+        else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
+
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -50,18 +56,279 @@ defmodule Browser.JS.DOM do
           parent: nil,
           text: "",
           # a `<template>`'s content: the fragment that holds what is inside it
-          content: nil
+          content: nil,
+          # the document the node belongs to (a document node's is itself)
+          doc: s.doc
         },
         fields
       )
 
+    # (the checks that frames need are only made once the page has an <iframe>)
+    if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
     put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
     id
   end
 
   @doc "True when the script changed the tree since the last `clean/0`."
   def dirty?, do: st().dirty
-  def clean, do: put_st(%{st() | dirty: false})
+  def clean, do: put_st(%{st() | dirty: false, fdirty: MapSet.new()})
+
+  @doc "The documents of frames that scripts changed since the last `clean/0`."
+  def changed_frames, do: st().fdirty
+
+  # ── realms: the page, and the documents of its frames ──────
+  #
+  # A frame has a document, a window with its own global scope, location and history. They all
+  # live in this process and share the node table, so a script of the page reaches into a frame
+  # (`frame.contentDocument.body`) as into its own document. What belongs to one document
+  # alone (`@realm_fields` here, `@realm_keys` of the process dictionary) is swapped in while
+  # that document is the one running (`in_realm/2`); the rest of the state is shared.
+
+  @realm_fields ~w(doc url hist hist_idx history_before scroll_restoration width height scroll
+                   content rects current_script storage_origin ce ce_done write_after)a
+  @realm_keys ~w(js_global js_global_fixed js_global_lex js_modules js_import rt_info rt_importmap
+                 rt_seen_scripts rt_prefetched rt_script)a
+
+  defp take_keys, do: Map.new(@realm_keys, &{&1, Process.get(&1, :__unset)})
+
+  defp put_keys(keys) do
+    Enum.each(keys, fn
+      {k, :__unset} -> Process.delete(k)
+      {k, v} -> Process.put(k, v)
+    end)
+  end
+
+  @doc """
+  Runs `fun` with the document `doc` (a frame's, or the page's) as the running one: `window`,
+  `document`, `location` and the global scope are its own while `fun` runs.
+  """
+  def in_realm(doc, fun) do
+    s = st()
+
+    cond do
+      doc == nil or doc == s.doc -> fun.()
+      not is_map_key(s.realms, doc) -> fun.()
+      true -> enter_realm(doc, fun)
+    end
+  end
+
+  defp enter_realm(doc, fun) do
+    prev = swap_realm(doc)
+
+    try do
+      fun.()
+    after
+      swap_realm(prev)
+      # a script that took its own frame away: what it left in the table goes with it
+      if Process.get(:dom_dead) == doc do
+        Process.delete(:dom_dead)
+        put_st(%{st() | realms: Map.delete(st().realms, doc)})
+      end
+    end
+  end
+
+  # makes `doc` the running document; returns the one that was
+  defp swap_realm(doc) do
+    s = st()
+    prev = s.doc
+    %{fields: fields, keys: keys} = Map.fetch!(s.realms, doc)
+    saved = %{fields: Map.take(s, @realm_fields), keys: take_keys()}
+    realms = s.realms |> Map.delete(doc) |> Map.put(prev, saved)
+    put_st(Map.merge(%{s | realms: realms}, fields))
+    put_keys(keys)
+    prev
+  end
+
+  @doc "The frame document a timer made now belongs to (nil in the page's own document)."
+  def timer_realm do
+    case Process.get(:dom) do
+      %{doc: d, main: m} when d != m -> d
+      _ -> nil
+    end
+  end
+
+  @doc "False for the document of a frame that has gone."
+  def realm_alive?(nil), do: true
+  def realm_alive?(doc), do: is_map_key(st().realms, doc) or st().doc == doc
+
+  @doc "True when the page has frames."
+  def frames?, do: map_size(st().realms) > 0
+
+  @doc "The page's own document."
+  def main_doc, do: st().main
+
+  @doc "The document of the running realm."
+  def current_doc, do: st().doc
+
+  @doc "The documents of every realm, the page's first."
+  def realm_docs, do: [st().main | st().frames |> Map.values() |> Enum.sort()]
+
+  @doc "The document of the frame held by the `<iframe>` element, or nil."
+  def frame_doc(iframe), do: Map.get(st().frames, iframe)
+
+  @doc "`%{iframe: element, parent: document}` of a frame's document."
+  def frame_of(doc), do: Map.get(st().meta, doc)
+
+  @doc """
+  Makes the document of a frame in the `<iframe>` element `iframe` out of the parsed tree `raw`.
+  `keys` are what the process dictionary holds for it (see `@realm_keys`: its global scope, its
+  `info`, ...). Returns the document's node id.
+  """
+  def new_realm(iframe, raw, url, keys, size \\ nil) do
+    parent = node(iframe).doc
+    doc = new_node(%{kind: :document})
+    update_node_quiet(doc, &%{&1 | doc: doc})
+    s = st()
+    {w, h} = size || {s.width, s.height}
+
+    fields = %{
+      doc: doc,
+      url: url,
+      hist: [{url, :null}],
+      hist_idx: 0,
+      history_before: 0,
+      scroll_restoration: "auto",
+      width: w,
+      height: h,
+      scroll: {0.0, 0.0},
+      content: {0.0, 0.0},
+      rects: %{},
+      current_script: nil,
+      storage_origin: Browser.LocalStorage.origin(url),
+      ce: %{},
+      ce_done: MapSet.new(),
+      write_after: nil
+    }
+
+    realms = Map.put(s.realms, doc, %{fields: fields, keys: keys})
+    meta = Map.merge(Map.get(s, :meta, %{}), %{doc => %{iframe: iframe, parent: parent}})
+    meta = Map.put_new(meta, s.main, %{iframe: nil, parent: nil})
+
+    put_st(Map.merge(s, %{realms: realms, meta: meta, frames: Map.put(s.frames, iframe, doc)}))
+
+    in_realm(doc, fn ->
+      kids = Enum.map(raw, &build(&1, doc))
+      update_node_quiet(doc, &%{&1 | kids: kids})
+    end)
+
+    doc
+  end
+
+  @doc "Takes a frame's document away: its nodes, its realm, the frames inside it."
+  def destroy_realm(doc) do
+    s = st()
+    inner = for {d, %{parent: ^doc}} <- s.meta, do: d
+    Enum.each(inner, &destroy_realm/1)
+    s = st()
+    ids = for {id, n} <- s.nodes, n.doc == doc, do: id
+    iframe = s.meta |> Map.get(doc, %{}) |> Map.get(:iframe)
+    frames = if iframe, do: Map.delete(s.frames, iframe), else: s.frames
+    drop = MapSet.new(ids)
+
+    listeners =
+      s.listeners
+      |> Map.drop([{:window, doc} | ids])
+
+    realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
+    if s.doc == doc, do: Process.put(:dom_dead, doc)
+
+    put_st(%{
+      s
+      | nodes: Map.drop(s.nodes, ids),
+        wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
+        listeners: listeners,
+        realms: realms,
+        frames: frames,
+        meta: Map.delete(s.meta, doc),
+        fdirty: MapSet.delete(s.fdirty, doc),
+        rev: s.rev + 1
+    })
+
+    _ = drop
+    :ok
+  end
+
+  # what the host object `data` belongs to: the realm to run in, and the data as that realm
+  # knows it (`:window` stands for the window of the running realm)
+  defp split_realm({:window, d}), do: {d, :window}
+  defp split_realm({:location, d}), do: {d, :location}
+  defp split_realm({:history, d}), do: {d, :history}
+  defp split_realm({:storage, area, d}), do: {d, {:storage, area}}
+  defp split_realm(k) when k in [:window, :location, :history], do: {st().main, k}
+  defp split_realm({:storage, _} = data), do: {st().main, data}
+
+  defp split_realm(nid) when is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, nid}
+      _ -> {nil, nid}
+    end
+  end
+
+  defp split_realm({k, nid} = data)
+       when k in [:classlist, :style, :dataset] and is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, data}
+      _ -> {nil, data}
+    end
+  end
+
+  defp split_realm(data), do: {nil, data}
+
+  # runs `fun` in the realm of `this` (a host object of a document of a frame)
+  defp maybe_realm(this, fun) do
+    if map_size(st().realms) == 0 do
+      fun.()
+    else
+      case this do
+        {:obj, id} ->
+          case deref(id) do
+            %{class: :host, host: {__MODULE__, data}} -> in_realm(elem(split_realm(data), 0), fun)
+            _ -> fun.()
+          end
+
+        _ ->
+          fun.()
+      end
+    end
+  end
+
+  # the host object of this realm's window, location and history
+  defp win_data, do: if(st().doc == st().main, do: :window, else: {:window, st().doc})
+  defp win_host, do: aux_host(win_data(), :window)
+  defp loc_host, do: aux_host(loc_data(), :location)
+  defp hist_host, do: aux_host(hist_data(), :history)
+  defp loc_data, do: if(st().doc == st().main, do: :location, else: {:location, st().doc})
+  defp hist_data, do: if(st().doc == st().main, do: :history, else: {:history, st().doc})
+
+  defp storage_host(area),
+    do:
+      aux_host(
+        if(st().doc == st().main, do: {:storage, area}, else: {:storage, area, st().doc}),
+        :storage
+      )
+
+  # the key window listeners are kept under
+  defp win_key, do: if(st().doc == st().main, do: :window, else: {:window, st().doc})
+
+  # a node's window: the one of the document it is in
+  defp window_key_of(nid) do
+    case root_of(nid) do
+      root ->
+        d = node(root).doc
+        if d == st().main, do: :window, else: {:window, d}
+    end
+  end
+
+  defp root_of(nid) do
+    case node(nid).parent do
+      nil -> nid
+      p -> root_of(p)
+    end
+  end
+
+  defp realm_key_to_doc(:window), do: st().main
+  defp realm_key_to_doc({:window, d}), do: d
+  defp realm_key_to_doc(nid) when is_integer(nid), do: node(nid).doc
 
   @doc "The queued side effects, oldest first; empties the queue."
   def take_outbox do
@@ -70,7 +337,11 @@ defmodule Browser.JS.DOM do
     Enum.reverse(s.outbox)
   end
 
-  defp out(item), do: put_st(%{st() | outbox: [item | st().outbox]})
+  # what a script did that the session should hear of; a frame's does not reach it (what a
+  # frame takes in as its address is done by `navigate_to/2`)
+  defp out(item) do
+    if st().doc == st().main, do: put_st(%{st() | outbox: [item | st().outbox]}), else: :ok
+  end
 
   def url, do: st().url
 
@@ -98,6 +369,15 @@ defmodule Browser.JS.DOM do
       width: info[:width] || 960,
       height: info[:height] || 658,
       doc: nil,
+      # the page's own document (`doc` is the one of the realm that is running: see `in_realm/2`)
+      main: nil,
+      # the other realms, by document: what `in_realm/2` swapped out; and the documents of
+      # frames, by the `<iframe>` element
+      realms: %{},
+      frames: %{},
+      meta: %{},
+      # frame documents a script changed since the last `clean/0`
+      fdirty: MapSet.new(),
       # the session history entries of this document, `{url, state}`: `pushState`, `replaceState`
       # and fragment navigations edit them, `history.back()` between them stays in the document
       hist: [{info.url, :null}],
@@ -126,9 +406,9 @@ defmodule Browser.JS.DOM do
 
     doc = new_node(%{kind: :document})
     s = st()
-    put_st(%{s | doc: doc})
+    put_st(%{s | doc: doc, main: doc})
     kids = Enum.map(raw, &build(&1, doc))
-    update_node_quiet(doc, &%{&1 | kids: kids})
+    update_node_quiet(doc, &%{&1 | kids: kids, doc: doc})
     clean()
     doc
   end
@@ -814,6 +1094,7 @@ defmodule Browser.JS.DOM do
     n = node(nid)
 
     if n.parent do
+      frames_leaving(nid)
       update_node(n.parent, &%{&1 | kids: List.delete(&1.kids, nid)})
       update_node(nid, &%{&1 | parent: nil})
     end
@@ -843,12 +1124,17 @@ defmodule Browser.JS.DOM do
           %{p | kids: kids}
         end)
 
+        adopt(child, node(parent).doc)
         connect(child)
     end
   end
 
   defp set_children(nid, kid_ids) do
-    for k <- node(nid).kids, do: update_node(k, &%{&1 | parent: nil})
+    for k <- node(nid).kids do
+      frames_leaving(k)
+      update_node(k, &%{&1 | parent: nil})
+    end
+
     update_node(nid, &%{&1 | kids: []})
     for k <- kid_ids, do: insert(nid, k, nil)
   end
@@ -967,25 +1253,34 @@ defmodule Browser.JS.DOM do
   # ── host protocol: reads ───────────────────────────────────
 
   @doc false
-  def host_get(nid, key, self) when is_integer(nid) do
+  def host_get(data, key, self) do
+    if map_size(st().realms) == 0 do
+      hget(data, key, self)
+    else
+      {doc, data} = split_realm(data)
+      in_realm(doc, fn -> hget(data, key, self) end)
+    end
+  end
+
+  defp hget(nid, key, self) when is_integer(nid) do
     n = node(nid)
     node_get(n, key, self)
   end
 
-  def host_get({:classlist, nid}, key, _self), do: classlist_get(nid, key)
-  def host_get({:style, nid}, key, _self), do: style_get(nid, key)
-  def host_get({:dataset, nid}, key, _self), do: dataset_get(nid, key)
-  def host_get(:window, key, _self), do: window_get(key)
-  def host_get(:location, key, _self), do: location_get(key)
-  def host_get({:usp, k}, key, _self), do: usp_get(k, key)
-  def host_get({:storage, area}, key, _self), do: storage_get(area, key)
+  defp hget({:classlist, nid}, key, _self), do: classlist_get(nid, key)
+  defp hget({:style, nid}, key, _self), do: style_get(nid, key)
+  defp hget({:dataset, nid}, key, _self), do: dataset_get(nid, key)
+  defp hget(:window, key, _self), do: window_get(key)
+  defp hget(:location, key, _self), do: location_get(key)
+  defp hget({:usp, k}, key, _self), do: usp_get(k, key)
+  defp hget({:storage, area}, key, _self), do: storage_get(area, key)
 
-  def host_get(:history, "length", _self),
+  defp hget(:history, "length", _self),
     do: {:ok, float(st().history_before + length(st().hist))}
 
-  def host_get(:history, "state", _self), do: {:ok, hist_state()}
-  def host_get(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
-  def host_get(_other, _key, _self), do: :miss
+  defp hget(:history, "state", _self), do: {:ok, hist_state()}
+  defp hget(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
+  defp hget(_other, _key, _self), do: :miss
 
   defp node_get(n, key, self) do
     case {key, n.kind} do
@@ -1062,10 +1357,10 @@ defmodule Browser.JS.DOM do
         {:ok, float(cp_len(n.text))}
 
       {"ownerDocument", _} ->
-        {:ok, wrap(st().doc)}
+        {:ok, if(n.kind == :document, do: :null, else: wrap(n.doc))}
 
       {"isConnected", _} ->
-        {:ok, n.id == st().doc or st().doc in ancestors(n.id)}
+        {:ok, connected?(n.id)}
 
       {"rows", :element} when n.tag in ["table", "thead", "tbody", "tfoot"] ->
         {:ok, nodes_array(table_rows(n))}
@@ -1237,6 +1532,15 @@ defmodule Browser.JS.DOM do
       "content" when n.tag == "template" ->
         {:ok, wrap(template_content(n.id))}
 
+      "contentWindow" when n.tag == "iframe" ->
+        {:ok, with(d when d != nil <- frame_doc_of(n.id), do: window_host_of(d)) || :null}
+
+      "contentDocument" when n.tag == "iframe" ->
+        {:ok, with(d when d != nil <- frame_doc_of(n.id), do: wrap(d)) || :null}
+
+      "srcdoc" when n.tag == "iframe" ->
+        {:ok, attr_or(n, "srcdoc", "")}
+
       _ ->
         :miss
     end
@@ -1311,10 +1615,10 @@ defmodule Browser.JS.DOM do
          |> String.trim()}
 
       "location" ->
-        {:ok, aux_host(:location, :location)}
+        {:ok, loc_host()}
 
       "defaultView" ->
-        {:ok, aux_host(:window, :window)}
+        {:ok, win_host()}
 
       "readyState" ->
         {:ok, "complete"}
@@ -1359,23 +1663,32 @@ defmodule Browser.JS.DOM do
   # ── host protocol: writes ──────────────────────────────────
 
   @doc false
-  def host_put(nid, key, v, _self) when is_integer(nid) do
+  def host_put(data, key, v, self) do
+    if map_size(st().realms) == 0 do
+      hput(data, key, v, self)
+    else
+      {doc, data} = split_realm(data)
+      in_realm(doc, fn -> hput(data, key, v, self) end)
+    end
+  end
+
+  defp hput(nid, key, v, _self) when is_integer(nid) do
     n = node(nid)
     node_put(n, key, v)
   end
 
-  def host_put({:style, nid}, key, v, _), do: style_put(nid, key, v)
-  def host_put({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
-  def host_put(:window, key, v, _), do: window_put(key, v)
-  def host_put(:location, key, v, _), do: location_put(key, v)
+  defp hput({:style, nid}, key, v, _), do: style_put(nid, key, v)
+  defp hput({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
+  defp hput(:window, key, v, _), do: window_put(key, v)
+  defp hput(:location, key, v, _), do: location_put(key, v)
 
-  def host_put(:history, "scrollRestoration", v, _) do
+  defp hput(:history, "scrollRestoration", v, _) do
     if to_str(v) in ["auto", "manual"], do: put_st(%{st() | scroll_restoration: to_str(v)})
     :ok
   end
 
-  def host_put({:storage, area}, key, v, _), do: storage_put(area, key, v)
-  def host_put(_other, _key, _v, _self), do: :miss
+  defp hput({:storage, area}, key, v, _), do: storage_put(area, key, v)
+  defp hput(_other, _key, _v, _self), do: :miss
 
   defp node_put(n, key, v) do
     case {key, n.kind} do
@@ -1476,7 +1789,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       k
-      when k in ~w(href src name placeholder title alt action method target rel lang dir role type) ->
+      when k in ~w(href src srcdoc name placeholder title alt action method target rel lang dir role type) ->
         set_attr(nid, k, to_str(v))
         :ok
 
@@ -1653,6 +1966,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp target_obj(:window), do: aux_host(:window, :window)
+  defp target_obj({:window, _} = key), do: aux_host(key, :window)
   defp target_obj(nid), do: wrap(nid)
 
   @doc """
@@ -1661,6 +1975,12 @@ defmodule Browser.JS.DOM do
   `:bubbles`/`:cancelable`. Returns `:prevented` or `:ok`.
   """
   def dispatch(target, type, init \\ %{}) do
+    # (`:window` is the window of the document that is running)
+    target = if target == :window, do: win_key(), else: target
+    in_realm(realm_key_to_doc(target), fn -> do_dispatch(target, type, init) end)
+  end
+
+  defp do_dispatch(target, type, init) do
     bubbles = Map.get(init, :bubbles, true)
     cancelable = Map.get(init, :cancelable, true)
 
@@ -1684,7 +2004,8 @@ defmodule Browser.JS.DOM do
     path =
       case target do
         :window -> [:window]
-        nid -> [nid | ancestors(nid)] ++ [:window]
+        {:window, _} -> [target]
+        nid -> [nid | ancestors(nid)] ++ [window_key_of(nid)]
       end
 
     # capture: from the outermost down to the target's parent
@@ -1748,7 +2069,8 @@ defmodule Browser.JS.DOM do
   defp run_inline_handler(target, type, event) do
     holder =
       case target do
-        :window when type in @window_events -> find_tag(st().doc, "body")
+        :window when type in @window_events -> find_tag(st().main, "body")
+        {:window, d} when type in @window_events -> find_tag(d, "body")
         nid when is_integer(nid) -> nid
         _ -> nil
       end
@@ -2077,8 +2399,29 @@ defmodule Browser.JS.DOM do
     s = st()
 
     case key do
-      k when k in ["window", "self", "top", "parent", "globalThis", "frames"] ->
+      k when k in ["window", "self", "globalThis", "frames"] ->
+        {:ok, win_host()}
+
+      "top" ->
         {:ok, aux_host(:window, :window)}
+
+      "parent" ->
+        case Map.get(s.meta, s.doc) do
+          %{parent: p} when p != nil ->
+            {:ok, aux_host(if(p == s.main, do: :window, else: {:window, p}), :window)}
+
+          _ ->
+            {:ok, win_host()}
+        end
+
+      "frameElement" ->
+        case Map.get(s.meta, s.doc) do
+          %{iframe: i} when i != nil -> {:ok, wrap(i)}
+          _ -> {:ok, :null}
+        end
+
+      "length" ->
+        {:ok, float(length(child_frames(s.doc)))}
 
       "document" ->
         {:ok, wrap(s.doc)}
@@ -2087,10 +2430,10 @@ defmodule Browser.JS.DOM do
         {:ok, window_handler(event)}
 
       "location" ->
-        {:ok, aux_host(:location, :location)}
+        {:ok, loc_host()}
 
       "history" ->
-        {:ok, aux_host(:history, :history)}
+        {:ok, hist_host()}
 
       "innerWidth" ->
         {:ok, float(s.width)}
@@ -2117,10 +2460,10 @@ defmodule Browser.JS.DOM do
         {:ok, elem(s.scroll, 1)}
 
       "localStorage" ->
-        {:ok, aux_host({:storage, :local}, :storage)}
+        {:ok, storage_host(:local)}
 
       "sessionStorage" ->
-        {:ok, aux_host({:storage, :session}, :storage)}
+        {:ok, storage_host(:session)}
 
       "navigator" ->
         {:ok, Process.get(:dom_navigator, :undefined)}
@@ -2132,11 +2475,34 @@ defmodule Browser.JS.DOM do
             {:ok, v}
 
           :error ->
-            case named_element(key) do
-              {:ok, _} = found -> found
-              :error -> :miss
+            case frame_by_index(key) do
+              {:ok, _} = frame ->
+                frame
+
+              :error ->
+                case named_element(key) do
+                  {:ok, _} = found -> found
+                  :error -> :miss
+                end
             end
         end
+    end
+  end
+
+  # the documents of the frames in the document `doc`, oldest element first
+  defp child_frames(doc) do
+    for({d, %{parent: ^doc, iframe: i}} <- st().meta, is_integer(i), do: {i, d})
+    |> Enum.sort()
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  # `window[0]`: the window of a frame
+  defp frame_by_index(key) do
+    with {i, ""} <- Integer.parse(key),
+         d when d != nil <- Enum.at(child_frames(st().doc), i) do
+      {:ok, aux_host(if(d == st().main, do: :window, else: {:window, d}), :window)}
+    else
+      _ -> :error
     end
   end
 
@@ -2162,12 +2528,12 @@ defmodule Browser.JS.DOM do
 
     index =
       case Process.get(:dom_ids) do
-        {^rev, m} ->
+        {^rev, ^doc, m} ->
           m
 
         _ ->
           m = collect_ids(doc, %{})
-          Process.put(:dom_ids, {rev, m})
+          Process.put(:dom_ids, {rev, doc, m})
           m
       end
 
@@ -2195,7 +2561,7 @@ defmodule Browser.JS.DOM do
         location_put("href", v)
 
       "on" <> event when event in @window_events ->
-        set_inline_handler(:window, event, if(function?(v), do: v))
+        set_inline_handler(win_key(), event, if(function?(v), do: v))
         :ok
 
       _ ->
@@ -2206,7 +2572,7 @@ defmodule Browser.JS.DOM do
 
   # `window.onload` and the like: the function assigned, or null
   defp window_handler(event) do
-    case Enum.find(Map.get(st().listeners, :window, []), &(&1.type == event and &1[:inline])) do
+    case Enum.find(Map.get(st().listeners, win_key(), []), &(&1.type == event and &1[:inline])) do
       nil -> :null
       l -> l.fun
     end
@@ -2352,7 +2718,33 @@ defmodule Browser.JS.DOM do
       # the same address again, or only another fragment: the document stays
       fragment != nil and target == here and url == st().url -> :ok
       fragment != nil and target == here -> hash_navigation(url, mode)
+      st().doc != st().main -> navigate_frame(url)
       true -> out({:navigate, url, mode})
+    end
+
+    :ok
+  end
+
+  # a frame goes to another page: its element loads it
+  defp navigate_frame(url) do
+    iframe = st().meta |> Map.get(st().doc, %{}) |> Map.get(:iframe)
+
+    if iframe do
+      page = node(iframe).doc
+      source = {:url, url}
+      tok = make_ref()
+      Process.put({:dom_frame_tok, iframe}, tok)
+
+      fire = fn _this, _ ->
+        with true <- Process.get({:dom_frame_tok, iframe}) == tok,
+             hook when is_function(hook) <- Process.get(:rt_load_frame) do
+          hook.(iframe, source, page)
+        end
+
+        :undefined
+      end
+
+      Browser.JS.Builtins.add_timer(native("", fire), 0.0)
     end
 
     :ok
@@ -2656,10 +3048,12 @@ defmodule Browser.JS.DOM do
 
   defp set_proto({:obj, id}, proto), do: store(id, %{deref(id) | proto: proto})
 
-  defp connected?(nid), do: nid == st().doc or st().doc in ancestors(nid)
+  defp connected?(nid), do: node(root_of(nid)).kind == :document
 
   # an element that is in the document gets upgraded, or told it was connected again
   defp connect(nid) do
+    frames_arriving(nid)
+
     if st().ce != %{} and connected?(nid) do
       for e <- [nid | elements(nid)], node(e).kind == :element, ctor = registered(node(e).tag) do
         if MapSet.member?(st().ce_done, e) do
@@ -2672,6 +3066,113 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # a node taken into another document (a script put one document's node in another's tree)
+  defp adopt(nid, doc) do
+    n = node(nid)
+
+    if n.doc != doc do
+      update_node_quiet(nid, &%{&1 | doc: doc})
+      for k <- n.kids, do: adopt(k, doc)
+      if n.content != nil, do: adopt(n.content, doc)
+    end
+
+    :ok
+  end
+
+  # ── frames ─────────────────────────────────────────────────
+
+  # `<iframe>`s in the subtree that a script is putting into the document
+  defp frames_arriving(nid) do
+    if Process.get(:dom_has_iframe) && connected?(nid) do
+      for e <- [nid | descendants(nid)], node(e).kind == :element, node(e).tag == "iframe" do
+        load_frame(e)
+      end
+    end
+
+    :ok
+  end
+
+  # the realms of the frames in a subtree that is leaving the document go with it
+  defp frames_leaving(nid) do
+    if Process.get(:dom_has_iframe) && st().frames != %{} do
+      for e <- [nid | descendants(nid)],
+          node(e).kind == :element,
+          node(e).tag == "iframe" do
+        cancel_frame_load(e)
+        if d = Map.get(st().frames, e), do: destroy_realm(d)
+      end
+    end
+
+    :ok
+  end
+
+  @doc "The `<iframe>`s of the page's document that have not been loaded yet get their load."
+  def load_initial_frames do
+    if Process.get(:dom_has_iframe) do
+      for e <- elements(st().doc), node(e).tag == "iframe", not is_map_key(st().frames, e) do
+        load_frame(e)
+      end
+    end
+
+    :ok
+  end
+
+  # what an `<iframe>` shows: its `srcdoc`, the page at its `src`, or an empty page
+  defp frame_source(n) do
+    cond do
+      (v = get_attr(n, "srcdoc")) != nil ->
+        {:srcdoc, v}
+
+      (v = get_attr(n, "src")) not in [nil, "", "about:blank"] ->
+        {:url, resolve_url(String.trim(v))}
+
+      true ->
+        :blank
+    end
+  end
+
+  defp cancel_frame_load(iframe), do: Process.put({:dom_frame_tok, iframe}, make_ref())
+
+  # loads the frame in a task of its own (the runtime does it: `:rt_load_frame`)
+  defp load_frame(iframe) do
+    source = frame_source(node(iframe))
+    tok = make_ref()
+    Process.put({:dom_frame_tok, iframe}, tok)
+    page = st().doc
+
+    fire = fn _this, _ ->
+      with true <- Process.get({:dom_frame_tok, iframe}) == tok,
+           hook when is_function(hook) <- Process.get(:rt_load_frame) do
+        hook.(iframe, source, page)
+      end
+
+      :undefined
+    end
+
+    Browser.JS.Builtins.add_timer(native("", fire), 0.0)
+  end
+
+  # `contentWindow` and `contentDocument` of a frame that is in a document: until it has loaded
+  # something, an empty page
+  defp frame_doc_of(nid) do
+    case Map.get(st().frames, nid) do
+      nil ->
+        with true <- connected?(nid),
+             hook when is_function(hook) <- Process.get(:rt_blank_frame),
+             d when is_integer(d) <- hook.(nid) do
+          d
+        else
+          _ -> nil
+        end
+
+      d ->
+        d
+    end
+  end
+
+  defp window_host_of(d),
+    do: aux_host(if(d == st().main, do: :window, else: {:window, d}), :window)
 
   defp upgrade(nid, ctor) do
     put_st(%{st() | ce_done: MapSet.put(st().ce_done, nid)})
@@ -2729,6 +3230,13 @@ defmodule Browser.JS.DOM do
     end
 
     image_src_changed(nid, name, new)
+
+    if name in ["src", "srcdoc"] and node(nid).tag == "iframe" and
+         (old != new or name == "srcdoc") and connected?(nid) do
+      if d = Map.get(st().frames, nid), do: destroy_realm(d)
+      load_frame(nid)
+    end
+
     :ok
   end
 
@@ -3039,7 +3547,14 @@ defmodule Browser.JS.DOM do
     :ok
   end
 
-  defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+  # (a method called on a node of a frame's document runs as that document's script would)
+  defp def_fn(obj, name, fun),
+    do:
+      put_hidden(
+        obj,
+        name,
+        native(name, fn this, args -> maybe_realm(this, fn -> fun.(this, args) end) end)
+      )
 
   # -- canvas 2D ------------------------------------------------------------------
 
@@ -3201,6 +3716,7 @@ defmodule Browser.JS.DOM do
   defp listener_target({:obj, id} = this) do
     case deref(id) do
       %{class: :host, host: {__MODULE__, :window}} -> :window
+      %{class: :host, host: {__MODULE__, {:window, _} = key}} -> key
       _ -> this_nid(this)
     end
   end
@@ -3249,7 +3765,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "isSameNode", fn this, args -> this_nid(this) == nid_of(arg(args, 0)) end)
-    def_fn(p, "getRootNode", fn _this, _ -> wrap(st().doc) end)
+    def_fn(p, "getRootNode", fn this, _ -> wrap(root_of(this_nid(this))) end)
 
     def_fn(p, "normalize", fn this, _ ->
       normalize(this_nid(this))
@@ -4056,6 +4572,64 @@ defmodule Browser.JS.DOM do
     {"DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32}
   ]
 
+  # the window-level names of the running realm: `window`, `document`, `location`, its size, ...
+  @doc false
+  def declare_window(scope) do
+    # globals that point into the document
+    window = win_host()
+    declare(scope, "window", window)
+    # `this` at the top of a classic script is the window
+    declare(scope, :this, window)
+    declare(scope, "self", window)
+    # there are no frames: the window is its own top and parent
+    declare(scope, "top", aux_host(:window, :window))
+    declare(scope, "parent", Interp.get(window, "parent"))
+    declare(scope, "frames", window)
+    declare(scope, "opener", :null)
+    declare(scope, "closed", false)
+    declare(scope, "name", "")
+    declare(scope, "isSecureContext", secure_context?(st().url))
+    declare(scope, "globalThis", window)
+    declare(scope, "document", wrap(st().doc))
+    declare(scope, "location", loc_host())
+    declare(scope, "history", hist_host())
+    declare(scope, "localStorage", storage_host(:local))
+    declare(scope, "sessionStorage", storage_host(:session))
+
+    for {name, v} <- [
+          {"innerWidth", float(st().width)},
+          {"innerHeight", float(st().height)},
+          {"outerWidth", float(st().width)},
+          {"outerHeight", float(st().height)},
+          {"devicePixelRatio", 1.0},
+          {"scrollX", 0.0},
+          {"scrollY", 0.0},
+          {"pageXOffset", 0.0},
+          {"pageYOffset", 0.0}
+        ] do
+      declare(scope, name, v)
+    end
+
+    for name <- ~w(alert focus blur print) do
+      declare(scope, name, native(name, fn _, _ -> :undefined end))
+    end
+
+    for {name, relative?} <- [{"scrollTo", false}, {"scroll", false}, {"scrollBy", true}] do
+      declare(scope, name, native(name, fn _, args -> scroll_args(args, relative?) end))
+    end
+
+    # `addEventListener(...)` without `window.` is the window's
+    for name <- ~w(addEventListener removeEventListener dispatchEvent) do
+      declare(
+        scope,
+        name,
+        native(name, fn _, args ->
+          call(Interp.get(proto({:dom, :window}), name), window, args)
+        end)
+      )
+    end
+  end
+
   defp install_globals(scope, event_target, node_proto, element, text, document, event) do
     # constructors, so `instanceof` works (and `new Event(...)`)
     ctor(scope, "EventTarget", event_target, fn _, _ -> :undefined end)
@@ -4246,60 +4820,8 @@ defmodule Browser.JS.DOM do
 
     def_fn(registry, "upgrade", fn _, _ -> :undefined end)
 
-    # globals that point into the document
-    window = aux_host(:window, :window)
-    declare(scope, "window", window)
-    # `this` at the top of a classic script is the window
-    declare(scope, :this, window)
-    declare(scope, "self", window)
-    # there are no frames: the window is its own top and parent
-    declare(scope, "top", window)
-    declare(scope, "parent", window)
-    declare(scope, "frames", window)
-    declare(scope, "opener", :null)
-    declare(scope, "closed", false)
-    declare(scope, "name", "")
-    declare(scope, "isSecureContext", secure_context?(st().url))
-    declare(scope, "globalThis", window)
-    declare(scope, "document", wrap(st().doc))
-    declare(scope, "location", aux_host(:location, :location))
-    declare(scope, "history", aux_host(:history, :history))
-    declare(scope, "localStorage", aux_host({:storage, :local}, :storage))
-    declare(scope, "sessionStorage", aux_host({:storage, :session}, :storage))
+    declare_window(scope)
     subscribe_storage()
-
-    for {name, v} <- [
-          {"innerWidth", float(st().width)},
-          {"innerHeight", float(st().height)},
-          {"outerWidth", float(st().width)},
-          {"outerHeight", float(st().height)},
-          {"devicePixelRatio", 1.0},
-          {"scrollX", 0.0},
-          {"scrollY", 0.0},
-          {"pageXOffset", 0.0},
-          {"pageYOffset", 0.0}
-        ] do
-      declare(scope, name, v)
-    end
-
-    for name <- ~w(alert focus blur print) do
-      declare(scope, name, native(name, fn _, _ -> :undefined end))
-    end
-
-    for {name, relative?} <- [{"scrollTo", false}, {"scroll", false}, {"scrollBy", true}] do
-      declare(scope, name, native(name, fn _, args -> scroll_args(args, relative?) end))
-    end
-
-    # `addEventListener(...)` without `window.` is the window's
-    for name <- ~w(addEventListener removeEventListener dispatchEvent) do
-      declare(
-        scope,
-        name,
-        native(name, fn _, args ->
-          call(Interp.get(proto({:dom, :window}), name), window, args)
-        end)
-      )
-    end
 
     navigator =
       new_object([
