@@ -26,6 +26,9 @@ defmodule Browser.Wasm.Memory do
     %__MODULE__{id: id, max: max}
   end
 
+  @doc "The pages as the tuple they are now (it is a new tuple after every change)."
+  def pages(%__MODULE__{id: id}), do: Process.get({__MODULE__, id})
+
   @doc "The size in pages."
   def size(%__MODULE__{id: id}), do: tuple_size(Process.get({__MODULE__, id}))
 

@@ -147,6 +147,7 @@ defmodule Browser.JS.Runtime do
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
     Browser.JS.Editing.install(scope)
+    Browser.JS.WebAssembly.install(scope)
     Browser.JS.IndexedDB.install(scope)
     Modules.reset()
     Process.put(:js_import, import_fun())

@@ -12,6 +12,19 @@ defmodule Browser.Wasm.Interp do
 
   defp trap(msg), do: Num.trap(msg)
 
+  # counts a step against the budget of the JavaScript runtime that runs this code, if any, so
+  # that a loop in a module cannot hang the page
+  defp tick do
+    case Process.get(:js_steps) do
+      nil -> :ok
+      n when n <= 0 -> throw(:js_limit)
+      n -> Process.put(:js_steps, n - 1)
+    end
+  end
+
+  defp back(to, pc) when to <= pc, do: tick()
+  defp back(_, _), do: :ok
+
   @doc "The instance record of an instance id."
   def instance(id), do: Process.get({:wasm_instance, id})
 
@@ -24,6 +37,7 @@ defmodule Browser.Wasm.Interp do
 
   def invoke(%Func{impl: {:wasm, iid, idx}}, args, depth) do
     if depth > @max_depth, do: trap("call stack exhausted")
+    tick()
     inst = instance(iid)
     fc = elem(inst.code, idx)
     locals = List.to_tuple(args ++ fc.zeros)
@@ -55,6 +69,7 @@ defmodule Browser.Wasm.Interp do
         run(code, pc + 1, [Num.unop(op, a) | st], locals, inst, depth)
 
       {:jump, to} ->
+        back(to, pc)
         run(code, to, stack, locals, inst, depth)
 
       {:jump_unless, to} ->
@@ -63,17 +78,22 @@ defmodule Browser.Wasm.Interp do
 
       {:jump_if, to} ->
         [c | st] = stack
+        if c != 0, do: back(to, pc)
         run(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
 
       {:br, to, arity, drop} ->
+        back(to, pc)
         run(code, to, branch(stack, arity, drop), locals, inst, depth)
 
       {:br_if, to, arity, drop} ->
         [c | st] = stack
 
-        if c == 0,
-          do: run(code, pc + 1, st, locals, inst, depth),
-          else: run(code, to, branch(st, arity, drop), locals, inst, depth)
+        if c == 0 do
+          run(code, pc + 1, st, locals, inst, depth)
+        else
+          back(to, pc)
+          run(code, to, branch(st, arity, drop), locals, inst, depth)
+        end
 
       {:br_table, targets, default} ->
         [i | st] = stack
@@ -81,6 +101,7 @@ defmodule Browser.Wasm.Interp do
         {to, arity, drop} =
           if i < tuple_size(targets), do: elem(targets, i), else: default
 
+        back(to, pc)
         run(code, to, branch(st, arity, drop), locals, inst, depth)
 
       {:return, n} ->

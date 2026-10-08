@@ -218,6 +218,44 @@ defmodule Browser.JS.TypedArrays do
 
   defp resizable?(bid), do: Map.has_key?(Interp.deref(bid), :max)
 
+  @doc "A new ArrayBuffer holding `bytes`."
+  def make_buffer(bytes), do: new_buffer(bytes)
+
+  @doc "The bytes of an ArrayBuffer."
+  def buffer_bytes({:obj, _} = buf), do: bytes_of(buf)
+
+  @doc "Replaces the bytes of an ArrayBuffer (a WebAssembly memory writes its pages back)."
+  def set_buffer_bytes({:obj, id}, bytes) do
+    o = deref(id)
+    store(id, Map.put(o, :bytes, bytes))
+    :ok
+  end
+
+  @doc "The bytes of a BufferSource (ArrayBuffer, typed array or DataView): `{:ok, bytes}` or `:error`."
+  def source_bytes({:obj, id} = v) do
+    cond do
+      buffer?(v) ->
+        {:ok, bytes_of(v)}
+
+      true ->
+        case Interp.deref(id) do
+          %{host: {__MODULE__, {:ta, kind, bid, _, _} = d}} ->
+            case eff(d) do
+              {off, len} -> {:ok, binary_part(deref(bid).bytes, off, len * size_of(kind))}
+              :oob -> :error
+            end
+
+          %{host: {__MODULE__, {:dv, bid, off, len}}} when is_integer(len) ->
+            {:ok, binary_part(deref(bid).bytes, off, len)}
+
+          _ ->
+            :error
+        end
+    end
+  end
+
+  def source_bytes(_), do: :error
+
   @doc "A `Uint8Array` over an immutable ArrayBuffer of `bytes` (the value of a bytes module)."
   def bytes_view(bytes) do
     buf = new_buffer(bytes)
