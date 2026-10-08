@@ -2920,8 +2920,8 @@ defmodule Browser.LayoutTest do
 
       {items, _} = tbl(html, 60)
       [r] = table_rects(items)
-      # the same width the cells get when laid out one word per line
-      assert r.w == 52
+      # the columns need 50 + 42 and the spacing: a table is not narrower than that
+      assert r.w == 98
       assert at(items, "aa").y < at(items, "bbbbbb").y
       assert at(items, "dd").y < at(items, "eeee").y
     end
@@ -6310,6 +6310,28 @@ defmodule Browser.LayoutTest do
         ~s|<div style="background:green;display:grid;grid-template-rows:40px;width:50px"></div>|
 
       assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 40}, &1))
+    end
+  end
+
+  describe "table and inline-block widths" do
+    test "a table is as wide as its columns need, even in a narrower box" do
+      html =
+        ~s|<div style="width:100px"><div style="display:table;background:green"><div style="width:200px;height:5px"></div></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 200)
+             )
+    end
+
+    test "an inline-block whose text wraps fills the room, it is not cut to the longest line" do
+      html =
+        ~s|<div style="width:100px"><span style="display:inline-block;background:green">aaaa bbbb cccc dddd eeee ffff</span></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
     end
   end
 

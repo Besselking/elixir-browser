@@ -355,6 +355,11 @@ defmodule Browser.CSSTest do
                CSS.parse("p { color: var(--a, url(\"")
     end
 
+    test "XHTML entities in a selector stand for their characters, strings keep theirs" do
+      assert [%{selector: [_, _], decls: [{"content", "\"&amp;\"", false}]}] =
+               CSS.parse("a &gt; b { content: \"&amp;\" }")
+    end
+
     test "an attribute selector may name the null namespace" do
       assert [%{decls: [{"color", "green", false}]}] = CSS.parse("[|a] { color: green }")
     end

@@ -35,6 +35,7 @@ defmodule Browser.CSS do
     css
     |> String.replace_invalid()
     |> strip_comments()
+    |> xml_entities()
     |> blocks([], [])
     |> Enum.flat_map(fn {prelude, body, conds} ->
       decls = parse_declarations(body)
@@ -52,6 +53,26 @@ defmodule Browser.CSS do
       end
     end)
   end
+
+  # In an XHTML page the `>` of a child selector is written `&gt;`: outside of strings, the three
+  # entities XML defines stand for their characters.
+  defp xml_entities(css) do
+    if String.contains?(css, ["&gt;", "&lt;", "&amp;"]),
+      do: xml_entities(css, nil, []),
+      else: css
+  end
+
+  defp xml_entities(<<>>, _q, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp xml_entities(<<?\\, c, r::binary>>, q, acc), do: xml_entities(r, q, [<<?\\, c>> | acc])
+
+  defp xml_entities(<<c, r::binary>>, nil, acc) when c in [?", ?'],
+    do: xml_entities(r, c, [<<c>> | acc])
+
+  defp xml_entities(<<c, r::binary>>, c, acc), do: xml_entities(r, nil, [<<c>> | acc])
+  defp xml_entities(<<"&gt;", r::binary>>, nil, acc), do: xml_entities(r, nil, [">" | acc])
+  defp xml_entities(<<"&lt;", r::binary>>, nil, acc), do: xml_entities(r, nil, ["<" | acc])
+  defp xml_entities(<<"&amp;", r::binary>>, nil, acc), do: xml_entities(r, nil, ["&" | acc])
+  defp xml_entities(<<c, r::binary>>, q, acc), do: xml_entities(r, q, [<<c>> | acc])
 
   @doc "Parses the contents of a declaration block / `style` attribute."
   def parse_declarations(body) when is_binary(body) do

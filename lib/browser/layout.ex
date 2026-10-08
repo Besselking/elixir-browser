@@ -5248,6 +5248,13 @@ defmodule Browser.Layout do
     key = Map.get(spec, :key)
     wanted = shrink_extent(st, sub, measure_at, key)
 
+    # (text that wraps fills the room there is: the box is not tightened to its longest line)
+    wanted =
+      if wanted < avail and measure_at == max(avail, 1) and
+           shrink_extent(st, sub, @unbounded, key) > avail,
+         do: avail,
+         else: wanted
+
     # While a table cell is measured at a width of 1, shrink-to-fit is never narrower than the
     # narrowest the content can be: the inline-block still holds its unbreakable text
     if wanted <= avail,
@@ -8367,7 +8374,8 @@ defmodule Browser.Layout do
       sized?: c["@sized"] == true,
       tedges: c["@tedges"],
       h: table_height(c),
-      fixed?: fixed_table?(c)
+      fixed?: fixed_table?(c),
+      fixed_css?: c["table-layout"] == "fixed"
     }
   end
 
@@ -8999,7 +9007,8 @@ defmodule Browser.Layout do
             do: {List.update_at(widths, ncols - 1, &(&1 + cap - w)), cap},
             else: {widths, w}
         else
-          {widths, avail}
+          # (a table is never narrower than its columns need, whatever room there is)
+          {widths, if(ts.fixed_css?, do: avail, else: max(avail, Enum.sum(widths) + spacing))}
         end
 
       xs = column_positions(widths, sx)

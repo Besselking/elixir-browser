@@ -1044,6 +1044,7 @@ css/CSS2/floats-clear/float-replaced-width-003.xht
 css/CSS2/floats-clear/float-replaced-width-004.xht
 css/CSS2/floats-clear/float-replaced-width-005.xht
 css/CSS2/floats-clear/float-replaced-width-006.xht
+css/CSS2/floats-clear/float-replaced-width-011.xht
 css/CSS2/floats-clear/floats-001.xht
 css/CSS2/floats-clear/floats-002.xht
 css/CSS2/floats-clear/floats-003.xht
@@ -2202,6 +2203,7 @@ css/CSS2/normal-flow/inline-block-zorder-001.xht
 css/CSS2/normal-flow/inline-block-zorder-002.xht
 css/CSS2/normal-flow/inline-block-zorder-003.xht
 css/CSS2/normal-flow/inline-block-zorder-004.xht
+css/CSS2/normal-flow/inline-block-zorder-005.xht
 css/CSS2/normal-flow/inline-box-border-line-break.html
 css/CSS2/normal-flow/inline-box-padding-line-break.html
 css/CSS2/normal-flow/inline-non-replaced-height-002.xht
@@ -2231,6 +2233,8 @@ css/CSS2/normal-flow/inline-table-width-002b.xht
 css/CSS2/normal-flow/inline-table-zorder-001.xht
 css/CSS2/normal-flow/inline-table-zorder-002.xht
 css/CSS2/normal-flow/inline-table-zorder-003.xht
+css/CSS2/normal-flow/inline-table-zorder-004.xht
+css/CSS2/normal-flow/inline-table-zorder-005.xht
 css/CSS2/normal-flow/inlines-002.xht
 css/CSS2/normal-flow/inlines-016.xht
 css/CSS2/normal-flow/inlines-017.xht
@@ -3284,6 +3288,7 @@ css/CSS2/text/text-indent-applies-to-013.xht
 css/CSS2/text/text-indent-applies-to-014.xht
 css/CSS2/text/text-indent-applies-to-015.xht
 css/CSS2/text/text-indent-inherited-001.xht
+css/CSS2/text/text-indent-intrinsic-002.xht
 css/CSS2/text/text-indent-overflow-001.xht
 css/CSS2/text/text-indent-overflow-002.xht
 css/CSS2/text/text-indent-overflow-003.xht
