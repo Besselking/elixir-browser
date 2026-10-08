@@ -3106,6 +3106,7 @@ defmodule Browser.Layout do
       gap: 0,
       # boxes whose top edge waits for the margin that collapses into it (see `start_box`)
       ptop: [],
+      pstart: %{},
       # a space was taken up by an inline box opening (so what follows is not glued to what
       # came before)
       after_space: false,
@@ -3342,7 +3343,9 @@ defmodule Browser.Layout do
     # (floats in an empty block just above would be pulled down by the margin: they need clearance
     # however large it is)
     if bottom && (bottom > y0 + gap + min(st.ngap, 0) or (adjoining || 0) > y0) do
-      st = apply_gap(st)
+      # (the margin of the cleared box is not part of its parents': they stay where their own
+      # margins put them)
+      st = apply_gap(st, true)
       %{st | y: bottom, clr: {y0, gap, bottom, :clearance}}
     else
       st
@@ -3861,18 +3864,21 @@ defmodule Browser.Layout do
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
-  defp apply_gap(%{ptop: []} = st),
+  defp apply_gap(st, own? \\ false)
+
+  defp apply_gap(%{ptop: []} = st, _own?),
     do: %{st | y: st.y + st.gap + st.ngap, gap: 0, ngap: 0, clr: nil}
 
   # the margin of a first child collapsed into the margin above its parent: the parent's top
   # edge is where the merged margin ends
-  defp apply_gap(st) do
+  defp apply_gap(st, own?) do
     y = st.y + st.gap + st.ngap
 
     {open, pos} =
       Enum.reduce(st.ptop, {st.open, st.pos}, fn ref, {open, pos} ->
-        delta = y - open[ref].top
-        open = Map.update!(open, ref, &%{&1 | top: y})
+        top = if own?, do: min(y, st.y + Map.get(st.pstart, ref, st.gap + st.ngap)), else: y
+        delta = top - open[ref].top
+        open = Map.update!(open, ref, &%{&1 | top: top})
         # the box a positioned descendant is placed against moves with it
         pos = Enum.map(pos, fn e -> if e[:ref] == ref, do: %{e | y: e.y + delta}, else: e end)
         {open, pos}
@@ -4022,11 +4028,15 @@ defmodule Browser.Layout do
 
     # (the outermost box of a layout of its own, an absolute or inline-block one, say, is a
     # block formatting context: its children's margins stay inside)
-    if bt == 0 and o.pt == 0 and not o.bfc and not o.root and st.floats == [] and
+    if bt == 0 and o.pt == 0 and not o.bfc and not o.root and
          not st.flex_item and
          (st.blocks != [] or st.root_view) do
+      own = st.gap + st.ngap
       st = place_box(st, ref, percent_height(st, o))
-      if Map.has_key?(st.open, ref), do: %{st | ptop: [ref | st.ptop]}, else: st
+
+      if Map.has_key?(st.open, ref),
+        do: %{st | ptop: [ref | st.ptop], pstart: Map.put(st.pstart, ref, own)},
+        else: st
     else
       bfc? = o.bfc or o.root or st.flex_item or (st.blocks == [] and not st.root_view)
       # the margin of a first child still collapses with the clearance of the box above it

@@ -6246,6 +6246,18 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "margins after a float" do
+    test "a box's top follows the margin of its first child when a float comes before it" do
+      html =
+        ~s|<div style="float:left;width:10px;height:10px"></div><div style="background:red;width:50px"><div style="margin-top:30px;height:20px"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {255, 0, 0}, y: 30, h: 20}, &1)
+             )
+    end
+  end
+
   describe "column geometry" do
     test "column edges are rounded from their exact positions, so neighbours still touch" do
       html =

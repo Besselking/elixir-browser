@@ -985,6 +985,7 @@ css/CSS2/floats-clear/clear-applies-to-012.xht
 css/CSS2/floats-clear/clear-applies-to-014.xht
 css/CSS2/floats-clear/clear-clearance-calculation-001.xht
 css/CSS2/floats-clear/clear-clearance-calculation-002.xht
+css/CSS2/floats-clear/clear-clearance-calculation-003.xht
 css/CSS2/floats-clear/clear-clearance-calculation-004.xht
 css/CSS2/floats-clear/clear-clearance-calculation-005.xht
 css/CSS2/floats-clear/clear-default-inheritance-001.xht
@@ -1102,6 +1103,7 @@ css/CSS2/floats-clear/margin-collapse-027.xht
 css/CSS2/floats-clear/margin-collapse-031.xht
 css/CSS2/floats-clear/margin-collapse-121.xht
 css/CSS2/floats-clear/margin-collapse-122.xht
+css/CSS2/floats-clear/margin-collapse-123.xht
 css/CSS2/floats-clear/margin-collapse-134.xht
 css/CSS2/floats-clear/margin-collapse-135.xht
 css/CSS2/floats-clear/margin-collapse-142.xht
@@ -1116,6 +1118,8 @@ css/CSS2/floats-clear/margin-collapse-clear-015.xht
 css/CSS2/floats-clear/margin-collapse-clear-016.xht
 css/CSS2/floats-clear/margin-collapse-clear-017.xht
 css/CSS2/floats-clear/nested-clearance-new-formatting-context.html
+css/CSS2/floats-clear/no-clearance-adjoining-opposite-float.html
+css/CSS2/floats-clear/no-clearance-due-to-large-margin.html
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block-after-margin.html
 css/CSS2/floats-clear/second-float-inside-empty-cleared-block.html
 css/CSS2/floats/float-after-block-with-collapsed-margin-inside-inline.html
@@ -2212,6 +2216,7 @@ css/CSS2/normal-flow/inline-replaced-width-011.xht
 css/CSS2/normal-flow/inline-replaced-width-012.xht
 css/CSS2/normal-flow/inline-replaced-width-013.xht
 css/CSS2/normal-flow/inline-replaced-width-014.xht
+css/CSS2/normal-flow/inline-replaced-width-015.xht
 css/CSS2/normal-flow/inline-replaced-width-016.xht
 css/CSS2/normal-flow/inline-replaced-width-017.xht
 css/CSS2/normal-flow/inline-table-height-001.xht
