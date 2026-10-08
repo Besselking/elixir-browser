@@ -6598,6 +6598,7 @@ defmodule Browser.Layout do
       # a wrapping column breaks into columns when the next item no longer fits the height
       sized = Enum.map(sized, &flex_column_basis(st, &1))
       cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
+      cols = flex_column_stretch(st, cs, cols, avail)
       last = length(cols) - 1
 
       cols =
@@ -6623,6 +6624,43 @@ defmodule Browser.Layout do
     else
       flex_column_place(st, cs, sized)
     end
+  end
+
+  # the lines of a wrapping column share the width that is left (`align-content: stretch`), and
+  # the items that stretch fill their line
+  defp flex_column_stretch(st, cs, cols, avail) do
+    outer = fn it -> it.w + auto_zero(it.ml) + auto_zero(it.mr) end
+    widths = Enum.map(cols, fn col -> col |> Enum.map(outer) |> Enum.max() end)
+    free = avail - Enum.sum(widths) - round(cs.col_gap) * (length(cols) - 1)
+
+    extra =
+      if free > 0 and cs.content in ["stretch", "normal"], do: free / length(cols), else: 0
+
+    cols
+    |> Enum.zip(widths)
+    |> Enum.map(fn {col, width} ->
+      cw = width + extra
+
+      Enum.map(col, fn it ->
+        if flex_align(it, cs.align) in ["stretch", "normal"] and it.width == nil and
+             not it.fit? and it.ml != :auto and it.mr != :auto do
+          w = max(round(cw - auto_zero(it.ml) - auto_zero(it.mr)), 1)
+
+          w =
+            max(
+              round(
+                clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+              ),
+              1
+            )
+
+          {items, h, _} = flex_atom(st, it.sub, w, it.key)
+          %{it | w: w, items: items, h: max(h, it.h)}
+        else
+          it
+        end
+      end)
+    end)
   end
 
   defp flex_column_break(items, height, gap) do
@@ -6682,11 +6720,13 @@ defmodule Browser.Layout do
     mr = it.mr
     room = avail - auto_zero(ml) - auto_zero(mr)
     align = flex_align(it, cs.align)
+    # (in a wrapping column the lines are as wide as their items, and are stretched later)
+    wrapped? = cs.wrap and (cs.height || cs.maxh) != nil
 
     w =
       cond do
         it.width != nil -> resolve(it.width, avail) + it.extra
-        align in ["stretch", "normal"] and not it.fit? -> room
+        align in ["stretch", "normal"] and not it.fit? and not wrapped? -> room
         true -> min(room, shrink_extent(st, it.sub, @unbounded, it.key))
       end
 

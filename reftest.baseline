@@ -3520,6 +3520,7 @@ css/css-flexbox/align-self-009.html
 css/css-flexbox/align-self-011.html
 css/css-flexbox/align-self-012.html
 css/css-flexbox/align-self-013.html
+css/css-flexbox/align-self-015.html
 css/css-flexbox/alignment/flex-align-baseline-column-rtl-direction.html
 css/css-flexbox/alignment/flow-start-flow-end-align-properties.html
 css/css-flexbox/alignment/flow-start-flow-end-justify-content.html
@@ -3678,6 +3679,7 @@ css/css-flexbox/flexbox-align-self-baseline-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
 css/css-flexbox/flexbox-align-self-horiz-002.xhtml
 css/css-flexbox/flexbox-align-self-stretch-vert-001.html
+css/css-flexbox/flexbox-align-self-stretch-vert-002.html
 css/css-flexbox/flexbox-anonymous-items-001.html
 css/css-flexbox/flexbox-baseline-empty-001a.html
 css/css-flexbox/flexbox-baseline-empty-001b.html
@@ -3694,6 +3696,8 @@ css/css-flexbox/flexbox-break-request-horiz-001a.html
 css/css-flexbox/flexbox-break-request-horiz-001b.html
 css/css-flexbox/flexbox-break-request-horiz-002a.html
 css/css-flexbox/flexbox-break-request-horiz-002b.html
+css/css-flexbox/flexbox-break-request-vert-001a.html
+css/css-flexbox/flexbox-break-request-vert-001b.html
 css/css-flexbox/flexbox-break-request-vert-002a.html
 css/css-flexbox/flexbox-break-request-vert-002b.html
 css/css-flexbox/flexbox-collapsed-item-horiz-001.html
@@ -3705,6 +3709,7 @@ css/css-flexbox/flexbox-flex-wrap-flexing.html
 css/css-flexbox/flexbox-flex-wrap-horiz-001.html
 css/css-flexbox/flexbox-flex-wrap-horiz-002.html
 css/css-flexbox/flexbox-flex-wrap-nowrap.htm
+css/css-flexbox/flexbox-flex-wrap-vert-001.html
 css/css-flexbox/flexbox-gap-position-absolute.html
 css/css-flexbox/flexbox-items-as-stacking-contexts-001.xhtml
 css/css-flexbox/flexbox-items-as-stacking-contexts-002.html
@@ -3944,6 +3949,10 @@ css/css-flexbox/gap-006-lr.html
 css/css-flexbox/gap-006-ltr.html
 css/css-flexbox/gap-006-rl.html
 css/css-flexbox/gap-006-rtl.html
+css/css-flexbox/gap-007-lr.html
+css/css-flexbox/gap-007-ltr.html
+css/css-flexbox/gap-007-rl.html
+css/css-flexbox/gap-007-rtl.html
 css/css-flexbox/gap-008-ltr.html
 css/css-flexbox/gap-009-ltr.html
 css/css-flexbox/gap-010-ltr.html
@@ -3983,6 +3992,7 @@ css/css-flexbox/justify-content-005.htm
 css/css-flexbox/layout-algorithm_algo-cross-line-001.html
 css/css-flexbox/layout-algorithm_algo-cross-line-002.html
 css/css-flexbox/min-size-auto-overflow-clip.html
+css/css-flexbox/multiline-column-max-height.html
 css/css-flexbox/multiline-last-baseline-item-count.html
 css/css-flexbox/negative-margins-001.html
 css/css-flexbox/nested-flex-image-loading-invalidates-intrinsic-sizes.html

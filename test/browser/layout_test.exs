@@ -5328,6 +5328,15 @@ defmodule Browser.LayoutTest do
       assert flex_rects(shrink) == [{0, 0, 50, 30}]
     end
 
+    test "the lines of a wrapping column are as wide as their items, then share the room left" do
+      html = """
+      <div style="display:flex;flex-flow:column wrap;width:100px;height:50px;gap:10px"><div style="height:20px;background:red"><div style="width:30px"></div></div><div style="height:20px;background:green"><div style="width:20px"></div></div><div style="height:20px;background:blue"><div style="width:10px"></div></div></div>
+      """
+
+      # two lines: 30 and 10 wide, 10 apart; the 50 left over is split between them
+      assert Enum.sort(flex_rects(html)) == [{0, 0, 55, 20}, {0, 30, 55, 20}, {65, 0, 35, 20}]
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>
