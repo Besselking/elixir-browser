@@ -133,6 +133,9 @@ defmodule Browser.Session do
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
       active: 0,
+      # the active tab's identity, and loads still running for tabs that are not shown: `%{nonce => tab id}`
+      tid: make_ref(),
+      jobs: %{},
       # a tab was just opened and its address bar is waiting for typing
       fresh_tab: false,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
@@ -168,10 +171,29 @@ defmodule Browser.Session do
     state = %{state | loading: {url, mode, fetch_opts}}
     env = env(state)
     Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url, env, fetch_opts)}) end)
-    %{state | nonce: nonce}
+    publish_tabs(%{state | nonce: nonce})
   end
 
   @impl true
+  # a page that was loading for a tab that is not shown arrives: it waits in the tab until it is
+  def handle_info({:loaded, nonce, url, mode, result}, %{jobs: jobs} = state)
+      when is_map_key(jobs, nonce) and nonce != state.nonce do
+    {tid, jobs} = Map.pop(jobs, nonce)
+
+    tabs =
+      state.tabs
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {%{tid: ^tid} = tab, i} when i != state.active ->
+          tab |> Map.put(:loading, nil) |> Map.put(:loaded, {url, mode, result})
+
+        {tab, _} ->
+          tab
+      end)
+
+    {:noreply, publish_tabs(%{state | jobs: jobs, tabs: tabs})}
+  end
+
   def handle_info({:loaded, nonce, _, _, _}, %{nonce: n} = state) when nonce != n,
     do: {:noreply, state}
 
@@ -765,6 +787,9 @@ defmodule Browser.Session do
         key = Interact.key(ev)
         key = if key == :enter and ev.shift?, do: :shift_enter, else: key
         {:noreply, on_key(state, key)}
+
+      {:goto, n} ->
+        {:noreply, goto_tab(state, n)}
 
       step ->
         {:noreply, step_tab(state, step)}
@@ -2716,11 +2741,12 @@ defmodule Browser.Session do
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
   @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
-    sel_items click fanchor fdrag hover hover_nid js scripts_pending page_edits fragment loading ed efocus
+    sel_items click fanchor fdrag hover hover_nid js scripts_pending page_edits fragment loading tid ed efocus
     esel edrag egoal)a
 
   defp blank_tab do
     %{
+      tid: make_ref(),
       history: History.new(),
       page: nil,
       nodes: [],
@@ -2766,6 +2792,10 @@ defmodule Browser.Session do
     }
   end
 
+  defp tab_title(%{loaded: {_, _, {:ok, %{title: title}}}}) when is_binary(title) and title != "",
+    do: title
+
+  defp tab_title(%{loaded: {url, _, {:ok, _}}}), do: url
   defp tab_title(%{page: %{title: title}}) when is_binary(title) and title != "", do: title
   defp tab_title(%{url: url}) when is_binary(url), do: url
   defp tab_title(%{loading: {url, _, _}}), do: url
@@ -2775,7 +2805,10 @@ defmodule Browser.Session do
     titles =
       state.tabs
       |> Enum.with_index()
-      |> Enum.map(fn {tab, i} -> tab_title(if i == state.active, do: state, else: tab) end)
+      |> Enum.map(fn {tab, i} ->
+        tab = if i == state.active, do: state, else: tab
+        {tab_title(tab), tab.loading != nil}
+      end)
 
     UI.set_tabs(state.ui, titles, state.active)
     state
@@ -2798,10 +2831,14 @@ defmodule Browser.Session do
       |> Map.take(@tab_keys)
       |> Map.merge(%{laid_width: state.width, stale: stale?})
 
-    # results still on their way are for a tab that is not shown
+    # a page still on its way keeps loading: it is handed to the tab when it arrives. Other
+    # results (pictures, scripts) are for a tab that is not shown and are dropped.
+    jobs = if state.loading, do: Map.put(state.jobs, state.nonce, state.tid), else: state.jobs
+
     %{
       state
       | tabs: List.replace_at(state.tabs, state.active, tab),
+        jobs: jobs,
         nonce: state.nonce + 1,
         layout_timer: nil,
         suggest: nil
@@ -2829,10 +2866,35 @@ defmodule Browser.Session do
     UI.focus_page(state.ui)
     width = UI.client_width(state.ui)
 
+    case Map.get(tab, :loaded) do
+      {url, mode, result} ->
+        # the page arrived while the tab was in the background: it is shown now
+        {:noreply, state} =
+          handle_info({:loaded, state.nonce, url, mode, result}, %{state | loading: nil})
+
+        state
+
+      nil ->
+        resume_page(state, stale?, laid_width, width)
+    end
+  end
+
+  defp resume_page(state, stale?, laid_width, width) do
     state =
       case state.loading do
-        {url, mode, opts} -> load(state, url, mode, opts)
-        nil -> state
+        {url, mode, opts} ->
+          # the load that was left running is taken over, or started again
+          case Enum.find(state.jobs, fn {_, tid} -> tid == state.tid end) do
+            {nonce, _} ->
+              UI.set_status(state.ui, "Loading #{url}…")
+              %{state | nonce: nonce, jobs: Map.delete(state.jobs, nonce)}
+
+            nil ->
+              load(state, url, mode, opts)
+          end
+
+        nil ->
+          state
       end
 
     state =
@@ -2873,11 +2935,16 @@ defmodule Browser.Session do
     state |> sync_buttons() |> publish_tabs()
   end
 
-  # a link opened in a new tab behind this one: it loads when the tab is first shown
+  # a link opened in a new tab behind this one: it loads in the background
   defp open_link_tab(state, href) do
     url = Fetch.resolve(base(state), href)
-    tab = Map.put(blank_tab(), :loading, {url, :push, [initiator: state.url]})
-    publish_tabs(%{state | tabs: state.tabs ++ [tab]})
+    opts = [initiator: state.url]
+    tab = Map.put(blank_tab(), :loading, {url, :push, opts})
+    me = self()
+    ref = make_ref()
+    env = env(state)
+    Task.start(fn -> send(me, {:loaded, ref, url, :push, Page.load(url, env, opts)}) end)
+    publish_tabs(%{state | tabs: state.tabs ++ [tab], jobs: Map.put(state.jobs, ref, tab.tid)})
   end
 
   defp switch_tab(state, i) when i == state.active, do: state
@@ -2887,6 +2954,10 @@ defmodule Browser.Session do
     n = length(state.tabs)
     if n < 2, do: state, else: switch_tab(state, Integer.mod(state.active + step, n))
   end
+
+  defp goto_tab(state, 9), do: switch_tab(state, length(state.tabs) - 1)
+  defp goto_tab(state, n) when n <= length(state.tabs), do: switch_tab(state, n - 1)
+  defp goto_tab(state, _n), do: state
 
   defp close_tab(%{tabs: [_]}, _i) do
     Browser.LocalStorage.flush()
@@ -2954,6 +3025,11 @@ defmodule Browser.Session do
   # Ctrl+Tab and Ctrl+Shift+Tab (also Ctrl+Page Down / Up) move between tabs
   defp tab_key(%{ctrl?: true, alt?: false, code: 9, shift?: shift}),
     do: if(shift, do: -1, else: 1)
+
+  # Ctrl/Cmd+1..8 go to that tab, 9 to the last one
+  defp tab_key(%{code: code, alt?: false, shift?: false} = ev)
+       when code in 49..57 and (ev.ctrl? or ev.meta?),
+       do: {:goto, code - 48}
 
   defp tab_key(%{ctrl?: true, alt?: false, code: 367}), do: 1
   defp tab_key(%{ctrl?: true, alt?: false, code: 366}), do: -1
