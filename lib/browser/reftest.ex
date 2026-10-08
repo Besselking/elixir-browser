@@ -89,8 +89,12 @@ defmodule Browser.Reftest do
   @doc "Measures text with the fixed advances `Browser.Reftest.Raster` paints."
   def measure(text, %{size: size} = style) do
     base = advance(style)
-    ems = text |> String.graphemes() |> Enum.reduce(0.0, &(&2 + char_advance(&1, base)))
-    round(ems * size)
+
+    # (every character advances by whole pixels, so that text laid out in pieces lines up with the
+    # same text in one piece)
+    text
+    |> String.graphemes()
+    |> Enum.reduce(0, &(&2 + round(char_advance(&1, base) * size)))
   end
 
   @doc """
@@ -128,10 +132,13 @@ defmodule Browser.Reftest do
   end
 
   @doc "`ex` and `ch` over the font size for the font `Raster` paints (Ahem's x-height is 0.8em)."
-  def font_units(%{family: family}) do
+  def font_units(%{family: family} = font) do
     mono = Browser.Layout.mono_family?(family)
     ahem = String.contains?(String.downcase(family), "ahem")
-    {if(ahem, do: 0.8, else: 0.5), advance(%{family: String.downcase(family), mono: mono})}
+    adv = advance(%{family: String.downcase(family), mono: mono})
+    # (a character is a whole number of pixels wide, see `measure/2`)
+    adv = if font[:size] not in [nil, 0, 0.0], do: round(adv * font.size) / font.size, else: adv
+    {if(ahem, do: 0.8, else: 0.5), adv}
   end
 
   @doc """

@@ -849,8 +849,14 @@ css/CSS2/box-display/descendant-display-override-001.xht
 css/CSS2/box-display/display-001.xht
 css/CSS2/box-display/display-002.xht
 css/CSS2/box-display/display-005.xht
+css/CSS2/box-display/display-006.xht
 css/CSS2/box-display/display-007.xht
+css/CSS2/box-display/display-008.xht
+css/CSS2/box-display/display-009.xht
 css/CSS2/box-display/display-011.xht
+css/CSS2/box-display/display-012.xht
+css/CSS2/box-display/display-013.xht
+css/CSS2/box-display/display-014.xht
 css/CSS2/box-display/display-015.xht
 css/CSS2/box-display/display-016.xht
 css/CSS2/box-display/display-017.xht
@@ -974,6 +980,7 @@ css/CSS2/css1/c5525-fltblck-000.xht
 css/CSS2/css1/c5525-fltinln-000.xht
 css/CSS2/css1/c5525-fltmult-000.xht
 css/CSS2/css1/c5525-fltwidth-001.xht
+css/CSS2/css1/c5525-fltwidth-003.xht
 css/CSS2/css1/c5526-fltclr-000.xht
 css/CSS2/css1/c562-white-sp-000.xht
 css/CSS2/css1/c61-rel-len-000.xht
@@ -1001,6 +1008,7 @@ css/CSS2/floats-clear/clear-applies-to-004.xht
 css/CSS2/floats-clear/clear-applies-to-005.xht
 css/CSS2/floats-clear/clear-applies-to-006.xht
 css/CSS2/floats-clear/clear-applies-to-007.xht
+css/CSS2/floats-clear/clear-applies-to-008.xht
 css/CSS2/floats-clear/clear-applies-to-009.xht
 css/CSS2/floats-clear/clear-applies-to-012.xht
 css/CSS2/floats-clear/clear-applies-to-013.xht
@@ -1087,6 +1095,7 @@ css/CSS2/floats-clear/floats-027.xht
 css/CSS2/floats-clear/floats-028.xht
 css/CSS2/floats-clear/floats-029.xht
 css/CSS2/floats-clear/floats-030.xht
+css/CSS2/floats-clear/floats-036.xht
 css/CSS2/floats-clear/floats-038.xht
 css/CSS2/floats-clear/floats-039.xht
 css/CSS2/floats-clear/floats-040.xht
@@ -1114,6 +1123,7 @@ css/CSS2/floats-clear/floats-135.xht
 css/CSS2/floats-clear/floats-138.xht
 css/CSS2/floats-clear/floats-139.xht
 css/CSS2/floats-clear/floats-142.xht
+css/CSS2/floats-clear/floats-143.xht
 css/CSS2/floats-clear/floats-144.xht
 css/CSS2/floats-clear/floats-145.xht
 css/CSS2/floats-clear/floats-147.xht
@@ -2205,6 +2215,7 @@ css/CSS2/normal-flow/height-percentage-001.xht
 css/CSS2/normal-flow/height-percentage-002.xht
 css/CSS2/normal-flow/height-percentage-003.xht
 css/CSS2/normal-flow/height-percentage-005.xht
+css/CSS2/normal-flow/inline-block-000.xht
 css/CSS2/normal-flow/inline-block-height-001.xht
 css/CSS2/normal-flow/inline-block-height-002.xht
 css/CSS2/normal-flow/inline-block-non-replaced-height-001.xht
@@ -2218,6 +2229,8 @@ css/CSS2/normal-flow/inline-block-replaced-height-002.xht
 css/CSS2/normal-flow/inline-block-replaced-height-003.xht
 css/CSS2/normal-flow/inline-block-replaced-width-001.xht
 css/CSS2/normal-flow/inline-block-replaced-width-006.xht
+css/CSS2/normal-flow/inline-block-valign-001.xht
+css/CSS2/normal-flow/inline-block-valign-002.xht
 css/CSS2/normal-flow/inline-block-width-001a.xht
 css/CSS2/normal-flow/inline-block-width-001b.xht
 css/CSS2/normal-flow/inline-block-width-002a.xht
@@ -2247,6 +2260,7 @@ css/CSS2/normal-flow/inline-replaced-width-014.xht
 css/CSS2/normal-flow/inline-replaced-width-015.xht
 css/CSS2/normal-flow/inline-replaced-width-016.xht
 css/CSS2/normal-flow/inline-replaced-width-017.xht
+css/CSS2/normal-flow/inline-table-003.xht
 css/CSS2/normal-flow/inline-table-height-001.xht
 css/CSS2/normal-flow/inline-table-height-002.xht
 css/CSS2/normal-flow/inline-table-width-001a.xht
@@ -3006,6 +3020,7 @@ css/CSS2/positioning/position-relative-027.xht
 css/CSS2/positioning/position-relative-028.xht
 css/CSS2/positioning/position-relative-029.xht
 css/CSS2/positioning/position-relative-030.xht
+css/CSS2/positioning/position-relative-031.xht
 css/CSS2/positioning/position-relative-032.xht
 css/CSS2/positioning/position-relative-033.xht
 css/CSS2/positioning/position-relative-037.xht
@@ -3343,6 +3358,8 @@ css/CSS2/text/text-transform-applies-to-013.xht
 css/CSS2/text/text-transform-applies-to-014.xht
 css/CSS2/text/text-transform-applies-to-015.xht
 css/CSS2/text/text-transform-cap-001.xht
+css/CSS2/text/text-transform-cap-002.xht
+css/CSS2/text/text-transform-cap-003.xht
 css/CSS2/text/text-transform-lowercase-001.xht
 css/CSS2/text/text-transform-unicase-001.xht
 css/CSS2/text/text-transform-uppercase-001.xht
@@ -3630,6 +3647,7 @@ css/css-display/display-contents-list-001.html
 css/css-display/display-contents-multicol-001.html
 css/css-display/display-contents-oof-001.html
 css/css-display/display-contents-oof-002.html
+css/css-display/display-contents-td-001.html
 css/css-display/display-contents-text-inherit.html
 css/css-display/display-contents-text-only-001.html
 css/css-display/display-contents-whitespace-inside-inline.html
@@ -3662,8 +3680,11 @@ css/css-display/run-in/run-in-breaking-001.xht
 css/css-display/run-in/run-in-clear-001.xht
 css/css-display/run-in/run-in-contains-block-001.xht
 css/css-display/run-in/run-in-contains-block-inside-inline-001.xht
+css/css-display/run-in/run-in-contains-float-001.xht
 css/css-display/run-in/run-in-contains-inline-001.xht
 css/css-display/run-in/run-in-contains-inline-002.xht
+css/css-display/run-in/run-in-contains-inline-004.xht
+css/css-display/run-in/run-in-contains-inline-007.xht
 css/css-display/run-in/run-in-contains-inline-block-001.xht
 css/css-display/run-in/run-in-contains-inline-table-001.xht
 css/css-display/run-in/run-in-contains-relpos-block-001.xht
@@ -5193,6 +5214,7 @@ css/css-text/text-align/text-align-last-start.html
 css/css-text/text-align/text-align-last-wins-001.html
 css/css-text/text-align/text-align-match-parent-001.html
 css/css-text/text-align/text-align-match-parent-01.html
+css/css-text/text-align/text-align-match-parent-05.html
 css/css-text/text-align/text-align-match-parent-root-logical.html
 css/css-text/text-align/text-align-match-parent-root-ltr.html
 css/css-text/text-align/text-align-start-001.html
@@ -5449,6 +5471,7 @@ css/css-text/white-space/pre-wrap-013.html
 css/css-text/white-space/pre-wrap-015.html
 css/css-text/white-space/pre-wrap-016.html
 css/css-text/white-space/pre-wrap-017.html
+css/css-text/white-space/pre-wrap-018.html
 css/css-text/white-space/pre-wrap-019.html
 css/css-text/white-space/pre-wrap-020.html
 css/css-text/white-space/pre-wrap-051.html
@@ -5493,8 +5516,11 @@ css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html
 css/css-text/white-space/trailing-ideographic-space-001.html
 css/css-text/white-space/trailing-ideographic-space-003.html
+css/css-text/white-space/trailing-ideographic-space-004.html
+css/css-text/white-space/trailing-ideographic-space-005.html
 css/css-text/white-space/trailing-ideographic-space-006.html
 css/css-text/white-space/trailing-ideographic-space-007.html
+css/css-text/white-space/trailing-ideographic-space-009.html
 css/css-text/white-space/trailing-ideographic-space-011.html
 css/css-text/white-space/trailing-ideographic-space-012.html
 css/css-text/white-space/trailing-ideographic-space-013.html
@@ -5551,7 +5577,13 @@ css/css-text/white-space/white-space-intrinsic-size-020.html
 css/css-text/white-space/white-space-intrinsic-size-024.html
 css/css-text/white-space/white-space-intrinsic-size-025.html
 css/css-text/white-space/white-space-letter-spacing-001.html
+css/css-text/white-space/white-space-normal-011.html
+css/css-text/white-space/white-space-nowrap-011.html
 css/css-text/white-space/white-space-pre-011.html
+css/css-text/white-space/white-space-pre-031.html
+css/css-text/white-space/white-space-pre-032.html
+css/css-text/white-space/white-space-pre-034.html
+css/css-text/white-space/white-space-pre-035.html
 css/css-text/white-space/white-space-pre-051.html
 css/css-text/white-space/white-space-pre-052.html
 css/css-text/white-space/white-space-pre-wrap-justify-001.html
@@ -5573,8 +5605,12 @@ css/css-text/white-space/white-space-pre-wrap-trailing-spaces-022.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-023.html
 css/css-text/white-space/white-space-vs-joiners-002.html
 css/css-text/white-space/white-space-zero-fontsize-001.html
+css/css-text/white-space/ws-break-spaces-applies-to-001.html
+css/css-text/white-space/ws-break-spaces-applies-to-002.html
+css/css-text/white-space/ws-break-spaces-applies-to-005.html
 css/css-text/white-space/ws-break-spaces-applies-to-012.html
 css/css-text/white-space/ws-break-spaces-applies-to-013.html
+css/css-text/white-space/ws-break-spaces-applies-to-015.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-003.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-004.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-005.html
@@ -5584,6 +5620,7 @@ css/css-text/word-break/auto-phrase/word-break-auto-phrase-008.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-001.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-002.html
 css/css-text/word-break/auto-phrase/word-break-auto-phrase-fallback-003.html
+css/css-text/word-break/break-boundary-2-chars-002.html
 css/css-text/word-break/word-break-break-all-010.html
 css/css-text/word-break/word-break-break-all-011.html
 css/css-text/word-break/word-break-break-all-012.html
@@ -5631,6 +5668,8 @@ css/css-text/word-break/word-break-min-content-006.html
 css/css-text/word-break/word-break-min-content-007.html
 css/css-text/word-space-transform/word-space-transform-001.html
 css/css-text/word-space-transform/word-space-transform-002.html
+css/css-text/word-space-transform/word-space-transform-004.html
+css/css-text/word-space-transform/word-space-transform-005.html
 css/css-text/word-space-transform/word-space-transform-006.html
 css/css-text/word-space-transform/word-space-transform-007.html
 css/css-text/word-space-transform/word-space-transform-013.html

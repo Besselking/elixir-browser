@@ -179,7 +179,7 @@ defmodule Browser.Reftest.Raster do
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, off + cadv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
+        {g, off + round(cadv * size) + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
     width = round(advance_x)
