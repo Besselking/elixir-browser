@@ -4505,6 +4505,18 @@ defmodule Browser.LayoutTest do
     assert green.w == 140
   end
 
+  test "an inline grid with auto columns is as wide as its items' widths" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:inline-grid;grid-template-columns:auto auto"><div style="width:50px;height:10px;background:#0f0"></div><div style="width:50px;height:10px;background:#00f"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.x == 58
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

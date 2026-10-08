@@ -1487,7 +1487,7 @@ defmodule Browser.Layout do
       valign: c["vertical-align"],
       cell?: c["display"] == "table-cell",
       table?: table? or c["display"] == "inline-table",
-      flex?: c["display"] in ["flex", "inline-flex"],
+      flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
         cond do
@@ -7083,16 +7083,12 @@ defmodule Browser.Layout do
 
         min =
           singles
-          |> Enum.map(
-            &(shrink_extent(st, &1.sub, 1, &1.key) + auto_zero(&1.ml) + auto_zero(&1.mr))
-          )
+          |> Enum.map(&(grid_extent(st, &1, 1) + auto_zero(&1.ml) + auto_zero(&1.mr)))
           |> Enum.max(fn -> 0 end)
 
         max =
           singles
-          |> Enum.map(
-            &(shrink_extent(st, &1.sub, @unbounded, &1.key) + auto_zero(&1.ml) + auto_zero(&1.mr))
-          )
+          |> Enum.map(&(grid_extent(st, &1, @unbounded) + auto_zero(&1.ml) + auto_zero(&1.mr)))
           |> Enum.max(fn -> 0 end)
 
         {min, max(max, min)}
@@ -7111,6 +7107,14 @@ defmodule Browser.Layout do
     else
       widths = for {base, _} <- limits, do: base * 1.0
       grow_tracks(limits, widths, avail - gaps)
+    end
+  end
+
+  # what a grid item asks of its column: a width of its own, else what its content makes of it
+  defp grid_extent(st, it, width) do
+    case it.width do
+      w when is_number(w) -> w + it.extra
+      _ -> shrink_extent(st, it.sub, width, it.key)
     end
   end
 
