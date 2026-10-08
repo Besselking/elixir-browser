@@ -9,6 +9,7 @@ defmodule Browser.Wasm.Validator do
   alias Browser.Wasm.{Error, Ops}
 
   @sigs Ops.signatures()
+  @simd Ops.simd_signatures()
   @loads Map.new(Ops.loads(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @stores Map.new(Ops.stores(), fn {_, kind, t, a} -> {kind, {t, a}} end)
   @max_pages 65536
@@ -173,6 +174,9 @@ defmodule Browser.Wasm.Validator do
         {:f64_const, _}, st ->
           [:f64 | st]
 
+        {:simd_const, _}, st ->
+          [:v128 | st]
+
         {:ref_null, t}, st ->
           [t | st]
 
@@ -225,6 +229,7 @@ defmodule Browser.Wasm.Validator do
   defp zero(:i64), do: 0
   defp zero(:f32), do: 0.0
   defp zero(:f64), do: 0.0
+  defp zero(:v128), do: 0
   defp zero(_), do: :null
 
   defp resolve({:br, {:L, l}, 0, 0}, labels), do: {:jump, Map.fetch!(labels, l)}
@@ -623,6 +628,38 @@ defmodule Browser.Wasm.Validator do
   defp ins(c, s, {:memory_fill, m}) do
     mem(c, m)
     s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_fill, m})
+  end
+
+  defp ins(_, s, {:simd_const, v}), do: s |> push(:v128) |> emit({:const, v})
+
+  defp ins(_, s, {:simd, shape, op, imm}) do
+    {params, result, kind} = Map.fetch!(@simd, {shape, op})
+
+    case kind do
+      {:lane, n} -> if imm >= n, do: err("invalid lane index")
+      :shuffle -> if Enum.any?(imm, &(&1 >= 32)), do: err("invalid lane index")
+      nil -> :ok
+    end
+
+    s = pop_all(s, params)
+    emit(push(s, result), {:simd, shape, op, imm, length(params)})
+  end
+
+  defp ins(c, s, {:simd_mem, shape, op, align, offset, m, lane}) do
+    mem(c, m)
+    {params, result, kind} = Map.fetch!(@simd, {shape, op})
+
+    {natural, lanes} =
+      case kind do
+        {:mem, a} -> {a, nil}
+        {:mem_lane, a, n} -> {a, n}
+      end
+
+    if align > natural, do: err("alignment must not be larger than natural")
+    if lanes != nil and lane >= lanes, do: err("invalid lane index")
+    s = pop_all(s, params)
+    s = if result, do: push(s, result), else: s
+    emit(s, {:simd_mem, op, offset, m, lane})
   end
 
   defp ins(_, s, {:i32_const, v}), do: s |> push(:i32) |> emit({:const, v})

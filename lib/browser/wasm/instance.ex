@@ -146,6 +146,9 @@ defmodule Browser.Wasm.Instance do
         {c, v}, st when c in [:i32_const, :i64_const, :f32_const, :f64_const] ->
           [v | st]
 
+        {:simd_const, v}, st ->
+          [v | st]
+
         {:ref_null, _}, st ->
           [:null | st]
 

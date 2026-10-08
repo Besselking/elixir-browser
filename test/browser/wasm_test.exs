@@ -14,6 +14,8 @@ defmodule Browser.WasmTest do
   @tail "AGFzbQEAAAABBwFgAn9/AX8DAwIAAAQFAXABAQEHGAIJY291bnRkb3duAAAIdmlhVGFibGUAAQkHAQBBAAsBAAolAhcAIABFBH8gAQUgAEEBayABQQJqEgALCwsAIAAgAUEAEwAACw=="
   @multi "AGFzbQEAAAABEgRgAABgAX8Bf2ACf38AYAABfwMGBQABAQIDBQUCAAEAAQcpBQRjb3B5AAAFbG9hZEEAAQVsb2FkQgACBnN0b3JlQgADBXNpemVCAAQKLwUMAEEKQQBBAvwKAQALBwAgAC0AAAsIACAALUABAAsKACAAIAE6QAEACwQAPwELCwgBAEEACwJBQg=="
 
+  @simd "AGFzbQEAAAABGAVgAn9/AX9gAX8Bf2AAAX9gAAF9YAABewMHBgABAgIDBAUDAQABBywHA21lbQIABGFkZDQAAARzdW04AAEEbWFzawACBHNodWYAAwJmbAAEAXYABQrNAQYQACAA/REgAf0R/a4B/RsDCyUAQQD9DAECAwQFBgcICQoLDA0ODxD9CwQAQQD9AAQA/X39GQcLFgD9DP8A/wAAAAAAAAAAAAAAAID9ZAs7AP0MAAECAwQFBgcICQoLDA0OD/0MEBESExQVFhcYGRobHB0eH/0NHx4dHAAAAAAAAAAAAAAAAP0bAAssAP0MAADAPwAAIEAAAGBAAACQQP0MAACAPwAAgD8AAIA/AACAP/3kAf0fAgsUAP0MAQAAAAIAAAADAAAABAAAAAs="
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -124,6 +126,18 @@ defmodule Browser.WasmTest do
     call(i, "storeB", [0, 9])
     assert call(i, "loadA", [0]) == [?A]
     assert call(i, "sizeB", []) == [1]
+  end
+
+  test "SIMD" do
+    i = inst(@simd)
+    assert call(i, "add4", [40, 2]) == [42]
+    # the sum of 15 and 16 (the last pair of the bytes 1..16)
+    assert call(i, "sum8", [0]) == [31]
+    assert call(i, "mask", []) == [0b1000000000000101]
+    # lanes 31 30 29 28 of the concatenated inputs: the bytes 0x1F 0x1E 0x1D 0x1C
+    assert call(i, "shuf", []) == [0x1C1D1E1F]
+    assert call(i, "fl", []) == [4.5]
+    assert call(i, "v", []) == [0x00000004_00000003_00000002_00000001]
   end
 
   test "malformed and invalid modules" do

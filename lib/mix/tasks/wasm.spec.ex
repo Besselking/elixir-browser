@@ -203,9 +203,27 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp value(%{"type" => "i64", "value" => v}), do: String.to_integer(v)
   defp value(%{"type" => "f32", "value" => v}), do: Num.f32_from_bits(String.to_integer(v))
   defp value(%{"type" => "f64", "value" => v}), do: Num.f64_from_bits(String.to_integer(v))
+
+  defp value(%{"type" => "v128", "lane_type" => lt, "value" => vs}),
+    do: vs |> Enum.map(&String.to_integer/1) |> Browser.Wasm.Simd.pack(lane_bits(lt))
+
   defp value(%{"type" => "externref", "value" => "null"}), do: :null
   defp value(%{"type" => "externref", "value" => v}), do: {:extern, String.to_integer(v)}
   defp value(%{"type" => "funcref", "value" => "null"}), do: :null
+
+  defp match_value(v, %{"type" => "v128", "lane_type" => lt, "value" => es}) do
+    b = lane_bits(lt)
+    ft = if lt in ["f32", "f64"], do: lt
+
+    is_integer(v) and
+      Enum.all?(Enum.zip(Browser.Wasm.Simd.lanes(v, b), es), fn {x, e} ->
+        case e do
+          "nan:canonical" -> x in canonical(ft)
+          "nan:arithmetic" -> arithmetic_nan?(ft, x)
+          _ -> x == String.to_integer(e)
+        end
+      end)
+  end
 
   defp match_value(v, %{"type" => t, "value" => "nan:canonical"}) do
     case v do
@@ -232,6 +250,11 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp match_value(v, %{"type" => "funcref", "value" => "null"}), do: v == :null
   defp match_value(v, %{"type" => "funcref"}), do: match?(%Func{}, v)
   defp match_value(v, %{"type" => "externref"}), do: v != :null
+
+  defp lane_bits(lt), do: lt |> String.slice(1..-1//1) |> String.to_integer()
+
+  defp arithmetic_nan?("f32", x), do: Num.f32_from_bits(x) |> then(&match?({:nan, _}, &1))
+  defp arithmetic_nan?("f64", x), do: Num.f64_from_bits(x) |> then(&match?({:nan, _}, &1))
 
   defp canonical("f32"), do: [0x7FC00000, 0xFFC00000]
   defp canonical("f64"), do: [0x7FF8000000000000, 0xFFF8000000000000]

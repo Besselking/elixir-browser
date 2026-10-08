@@ -10,6 +10,7 @@ defmodule Browser.Wasm.Decoder do
 
   @numeric Map.new(Ops.numeric(), fn {op, name, _, _} -> {op, name} end)
   @sat Map.new(Ops.sat(), fn {op, name, _, _} -> {op, name} end)
+  @simd Map.new(Ops.simd(), fn {sub, shape, op, _, _, imm} -> {sub, {shape, op, imm}} end)
   @loads Map.new(Ops.loads(), fn {op, kind, _, _} -> {op, kind} end)
   @stores Map.new(Ops.stores(), fn {op, kind, _, _} -> {op, kind} end)
 
@@ -184,7 +185,7 @@ defmodule Browser.Wasm.Decoder do
   defp valtype(<<0x7E, r::binary>>), do: {:i64, r}
   defp valtype(<<0x7D, r::binary>>), do: {:f32, r}
   defp valtype(<<0x7C, r::binary>>), do: {:f64, r}
-  defp valtype(<<0x7B, _::binary>>), do: fail("v128 is not supported")
+  defp valtype(<<0x7B, r::binary>>), do: {:v128, r}
   defp valtype(<<0x70, r::binary>>), do: {:funcref, r}
   defp valtype(<<0x6F, r::binary>>), do: {:externref, r}
   defp valtype(<<0x69, r::binary>>), do: {:exnref, r}
@@ -421,7 +422,8 @@ defmodule Browser.Wasm.Decoder do
 
   defp blocktype(<<0x40, r::binary>>), do: {:empty, r}
 
-  defp blocktype(<<b, _::binary>> = bin) when b in [0x7F, 0x7E, 0x7D, 0x7C, 0x70, 0x6F, 0x69] do
+  defp blocktype(<<b, _::binary>> = bin)
+       when b in [0x7F, 0x7E, 0x7D, 0x7C, 0x7B, 0x70, 0x6F, 0x69] do
     {t, r} = valtype(bin)
     {{:val, t}, r}
   end
@@ -595,9 +597,45 @@ defmodule Browser.Wasm.Decoder do
     end
   end
 
+  defp instr(<<0xFD, r::binary>>) do
+    {sub, r} = u32(r)
+
+    case Map.fetch(@simd, sub) do
+      {:ok, {shape, op, imm}} -> simd_instr(shape, op, imm, r)
+      :error -> fail("illegal opcode")
+    end
+  end
+
   defp instr(<<op, r::binary>>) when is_map_key(@numeric, op), do: {Map.fetch!(@numeric, op), r}
   defp instr(<<>>), do: fail("unexpected end")
   defp instr(_), do: fail("illegal opcode")
+
+  defp simd_instr(_, _, :const, <<v::little-128, r::binary>>), do: {{:simd_const, v}, r}
+  defp simd_instr(_, _, :const, _), do: fail("unexpected end")
+
+  defp simd_instr(shape, op, :shuffle, <<lanes::binary-16, r::binary>>),
+    do: {{:simd, shape, op, :binary.bin_to_list(lanes)}, r}
+
+  defp simd_instr(_, _, :shuffle, _), do: fail("unexpected end")
+
+  defp simd_instr(shape, op, {:lane, _}, <<l, r::binary>>), do: {{:simd, shape, op, l}, r}
+  defp simd_instr(_, _, {:lane, _}, _), do: fail("unexpected end")
+
+  defp simd_instr(shape, op, {:mem, _}, r) do
+    {a, o, m, r} = memarg(r)
+    {{:simd_mem, shape, op, a, o, m, nil}, r}
+  end
+
+  defp simd_instr(shape, op, {:mem_lane, _, _}, r) do
+    {a, o, m, r} = memarg(r)
+
+    case r do
+      <<l, r::binary>> -> {{:simd_mem, shape, op, a, o, m, l}, r}
+      _ -> fail("unexpected end")
+    end
+  end
+
+  defp simd_instr(shape, op, nil, r), do: {{:simd, shape, op, nil}, r}
 
   defp catch_clause(<<k, r::binary>>) when k in [0, 1] do
     {t, r} = u32(r)

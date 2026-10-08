@@ -120,6 +120,7 @@ defmodule Browser.JS.WebAssembly do
     end
   end
 
+  defp to_wasm(:v128, _), do: throw_error("TypeError", "type incompatible with JavaScript (v128)")
   defp to_wasm(:externref, v), do: v
   defp to_wasm(:funcref, :null), do: :null
 
@@ -140,6 +141,7 @@ defmodule Browser.JS.WebAssembly do
 
   defp to_js(t, {:nan, _}) when t in [:f32, :f64], do: :nan
   defp to_js(t, v) when t in [:f32, :f64], do: v
+  defp to_js(:v128, _), do: throw_error("TypeError", "type incompatible with JavaScript (v128)")
   defp to_js(:funcref, :null), do: :null
   defp to_js(:funcref, %Func{} = f), do: wrap_func(f)
   defp to_js(:externref, v), do: v
@@ -160,6 +162,7 @@ defmodule Browser.JS.WebAssembly do
   defp zero(:i32), do: 0
   defp zero(:i64), do: 0
   defp zero(t) when t in [:f32, :f64], do: 0.0
+  defp zero(:v128), do: 0
   defp zero(_), do: :null
 
   # ── functions ──────────────────────────────────────────────

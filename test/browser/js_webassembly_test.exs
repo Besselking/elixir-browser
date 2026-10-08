@@ -198,6 +198,19 @@ defmodule Browser.JS.WebAssemblyTest do
              ])
   end
 
+  test "SIMD: the module runs, v128 does not cross into JavaScript" do
+    {logs, errors} =
+      run(~S"""
+      const SIMD = b64("AGFzbQEAAAABGAVgAn9/AX9gAX8Bf2AAAX9gAAF9YAABewMHBgABAgIDBAUDAQABBywHA21lbQIABGFkZDQAAARzdW04AAEEbWFzawACBHNodWYAAwJmbAAEAXYABQrNAQYQACAA/REgAf0R/a4B/RsDCyUAQQD9DAECAwQFBgcICQoLDA0ODxD9CwQAQQD9AAQA/X39GQcLFgD9DP8A/wAAAAAAAAAAAAAAAID9ZAs7AP0MAAECAwQFBgcICQoLDA0OD/0MEBESExQVFhcYGRobHB0eH/0NHx4dHAAAAAAAAAAAAAAAAP0bAAssAP0MAADAPwAAIEAAAGBAAACQQP0MAACAPwAAgD8AAIA/AACAP/3kAf0fAgsUAP0MAQAAAAIAAAADAAAABAAAAAs=");
+      const i = new WebAssembly.Instance(new WebAssembly.Module(SIMD)).exports;
+      console.log(i.add4(40, 2), i.sum8(0), i.mask(), i.fl());
+      try { i.v(); } catch (e) { console.log(e.constructor.name); }
+      """)
+
+    assert errors == []
+    assert logs == ["42 31 32773 4.5", "TypeError"]
+  end
+
   test "exceptions: catch, locals survive, uncaught become WebAssembly.Exception, JS can throw into the module" do
     {logs, errors} =
       run(~S"""
