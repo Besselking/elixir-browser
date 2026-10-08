@@ -7,6 +7,27 @@ defmodule Browser.HTMLTest do
              HTML.parse("<p>a &amp; b <b>c</b></p>")
   end
 
+  test "aside, figure and fieldset close an open paragraph" do
+    for tag <- ~w(aside figure fieldset details) do
+      assert [{:element, "p", _, _}, {:element, ^tag, _, _}] =
+               HTML.parse("<p>a<#{tag}>b</#{tag}>")
+    end
+  end
+
+  test "the newline right after <pre> is dropped, except in XML documents" do
+    assert [
+             {:element, "html", _,
+              [_, {:element, "body", _, [{:element, "pre", _, [{:text, "a\nb"}]}]}]}
+           ] =
+             HTML.parse_document("<pre>\na\nb</pre>")
+
+    assert [
+             {:element, "html", _,
+              [_, {:element, "body", _, [{:element, "pre", _, [{:text, "\na"}]}]}]}
+           ] =
+             HTML.parse_document("<pre>\na</pre>", xml: true)
+  end
+
   test "void elements don't swallow siblings" do
     assert [{:element, "p", _, [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
              HTML.parse("<p>a<br>b</p>")

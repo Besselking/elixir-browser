@@ -136,6 +136,8 @@ defmodule Browser.Layout do
       alast: nil,
       vs: 0,
       wrap_chars: :none,
+      keep_all: false,
+      wst: :none,
       shy: true,
       nojust: false,
       ls: 0.0,
@@ -162,7 +164,7 @@ defmodule Browser.Layout do
     Process.put(:layout_metrics, opts[:metrics])
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
-    ops = nodes |> walk(style, []) |> Enum.reverse()
+    ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
     # column break markers that no column set read
@@ -196,7 +198,11 @@ defmodule Browser.Layout do
         measure.(:content_height, style)
 
       text, style ->
-        measure.(text, style) + extra_width(text, style)
+        # (a zero-width space takes no room)
+        measured =
+          if String.contains?(text, "\u200B"), do: String.replace(text, "\u200B", ""), else: text
+
+        measure.(measured, style) + extra_width(text, style)
     end
   end
 
@@ -204,6 +210,10 @@ defmodule Browser.Layout do
     do: round(ls * String.length(text) + wsp * count_spaces(text))
 
   defp extra_width(_text, _style), do: 0
+
+  # the spacing after the last letter of a line does not count towards fitting it
+  defp trailing_ls(%{ls: ls}) when ls > 0, do: round(ls)
+  defp trailing_ls(_style), do: 0
 
   defp count_spaces(text), do: text |> String.graphemes() |> Enum.count(&(&1 in [" ", "\u00A0"]))
 
@@ -542,6 +552,12 @@ defmodule Browser.Layout do
   defp walk({:element, tag, _, _}, _style, acc) when tag in @skip, do: acc
   defp walk({:element, "br", _, _}, style, acc), do: [{:br, style} | acc]
 
+  # <wbr> is a place to break, like a zero-width space
+  defp walk({:element, "wbr", attrs, _}, style, acc) do
+    style = restyle("wbr", attrs, style, computed(attrs))
+    walk_zwsp_text("\u200B", style, acc)
+  end
+
   defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg"] do
     ops = fn acc ->
       if tag == "img", do: image_ops(el, style, acc), else: svg_ops(el, style, acc)
@@ -822,7 +838,7 @@ defmodule Browser.Layout do
           walk(kids, style, acc)
 
         :inline ->
-          inline_ops(tag, kids, style, c, acc)
+          inline_ops(tag, kids, style, parent_style, c, acc)
 
         :inline_block ->
           hoist_atom(inline_block_ops(el, parent_style, c, acc))
@@ -1289,7 +1305,7 @@ defmodule Browser.Layout do
   defp legacy_kind(tag) when tag in @block_tags, do: :block
   defp legacy_kind(_), do: :inline
 
-  defp inline_ops(tag, kids, style, c, acc) do
+  defp inline_ops(tag, kids, style, parent_style, c, acc) do
     acc = if tag in ~w(td th), do: [{:space, style} | acc], else: acc
     positioned? = c["position"] in ["relative", "sticky"]
 
@@ -1303,10 +1319,36 @@ defmodule Browser.Layout do
     ref = make_ref()
     acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
     acc = walk_children(tag, kids, style, acc)
+    acc = edge_spacing(acc, style, parent_style)
     acc = if spec, do: [{:inline_close, ref, spec} | acc], else: acc
 
     if positioned?, do: [{:pos_end} | acc], else: acc
   end
+
+  # the spacing between the last letter of an inline element and what follows is the one of
+  # the element's parent, which is the closest element the two letters have in common
+  defp edge_spacing([op | rest], %{ls: ls}, %{ls: pls})
+       when ls != pls and ls > 0 and elem(op, 0) == :word do
+    {text, style, tag} =
+      case op do
+        {:word, t, st} -> {t, st, nil}
+        {:word, t, st, g} -> {t, st, g}
+      end
+
+    chars = String.graphemes(text)
+    last = {:word, List.last(chars), %{style | ls: pls}, :glue}
+
+    case Enum.drop(chars, -1) do
+      [] ->
+        [last | rest]
+
+      init ->
+        init = Enum.join(init)
+        [last, if(tag, do: {:word, init, style, tag}, else: {:word, init, style}) | rest]
+    end
+  end
+
+  defp edge_spacing(acc, _style, _parent), do: acc
 
   # An inline element needs its own box only if it has a background, borders,
   # or horizontal padding/margins (vertical padding alone paints nothing).
@@ -2093,6 +2135,8 @@ defmodule Browser.Layout do
                                                                                              _ ->
       %{s | wrap_chars: wrap_chars(c)}
     end)
+    |> put_if(c["word-space-transform"], &%{&1 | wst: word_space_transform(&2)})
+    |> put_if(c["word-break"], &%{&1 | keep_all: &2 in ["keep-all", "auto-phrase"]})
     |> put_if(c["hyphens"], &%{&1 | shy: &2 != "none"})
     |> put_if(c["vertical-align"], &raise_text/2)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
@@ -2193,6 +2237,17 @@ defmodule Browser.Layout do
       end
 
     %{style | vs: style.vs + own}
+  end
+
+  # `word-space-transform` turns the zero-width spaces and <wbr> into spaces
+  defp word_space_transform(v) do
+    words = v |> to_string() |> String.split()
+
+    cond do
+      "ideographic-space" in words -> :ideo
+      "space" in words -> :space
+      true -> :none
+    end
   end
 
   defp wrap_chars(c) do
@@ -2306,11 +2361,14 @@ defmodule Browser.Layout do
       else: walk_plain_text(t, style, acc)
   end
 
-  defp walk_zwsp_text(t, style, acc) do
+  defp walk_zwsp_text(t, %{wst: wst} = style, acc) do
     ops =
       ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+|\x{200B}|[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{200B}]+/u
       |> Regex.scan(drop_wide_breaks(t))
       |> Enum.map(fn
+        ["\u200B"] when wst != :none ->
+          if wst == :space, do: {:space, style}, else: {:word, "\u3000", style}
+
         [tok] ->
           if String.match?(
                tok,
@@ -2337,8 +2395,13 @@ defmodule Browser.Layout do
     # without a space before it, the first word is glued to whatever came before
     words =
       case words do
-        [{:word, w, st} | more] when leading == [] -> [{:word, w, st, :glue} | more]
-        _ -> words
+        [{:word, w, st} | more] when leading == [] ->
+          if ideograph_edge?(prev_char(acc), w, st.keep_all),
+            do: [{:word, w, st} | more],
+            else: [{:word, w, st, :glue} | more]
+
+        _ ->
+          words
       end
 
     case words do
@@ -2347,7 +2410,11 @@ defmodule Browser.Layout do
 
       _ ->
         Enum.reverse(
-          List.flatten(leading ++ Enum.intersperse(words, {:space, style}) ++ trailing)
+          List.flatten(
+            leading ++
+              Enum.intersperse(Enum.map(words, &ideograph_breaks(&1, style)), {:space, style}) ++
+              trailing
+          )
         ) ++ acc
     end
   end
@@ -2358,6 +2425,67 @@ defmodule Browser.Layout do
 
   defp drop_wide_breaks(t) do
     if String.contains?(t, "\n"), do: Regex.replace(@wide_break, t, "\\1"), else: t
+  end
+
+  # a line may break between an ideograph (or kana) and the character next to it, except before
+  # punctuation that cannot start a line and after an opening bracket; the pieces of a word
+  # follow each other without a space
+  @wide_re Regex.compile!("[#{@wide}]", "u")
+  @no_start "-.,;:!?)]}%\u00B7\u2019\u201D\u2026\u2010\u2013\u3001\u3002\u3005\u3009\u300B\u300D\u300F\u3011\u3015\u3017\u3019\u301C\u30FB\u30FC\u3041\u3043\u3045\u3047\u3049\u3063\u3083\u3085\u3087\u308E\u3095\u3096\u309D\u309E\u30A1\u30A3\u30A5\u30A7\u30A9\u30C3\u30E3\u30E5\u30E7\u30EE\u30F5\u30F6\u30FD\u30FE\uFF01\uFF09\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\uFF3D\uFF5D\uFF5E\uFF60\u200D\u3000"
+  @no_end "([{\u2018\u201C\u3008\u300A\u300C\u300E\u3010\u3014\u3016\u3018\uFF08\uFF3B\uFF5B\uFF5F\u200D"
+
+  defp ideograph_breaks(op, _style) do
+    {text, style, glue} =
+      case op do
+        {:word, t, st} -> {t, st, nil}
+        {:word, t, st, g} -> {t, st, g}
+      end
+
+    if String.length(text) > 1 and Regex.match?(@wide_re, text) do
+      text
+      |> String.graphemes()
+      |> Enum.reduce([], fn
+        g, [] ->
+          [g]
+
+        g, [cur | done] = acc ->
+          if break_between?(cur, g, style.keep_all), do: [g | acc], else: [cur <> g | done]
+      end)
+      |> Enum.reverse()
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {w, 0} when glue != nil -> {:word, w, style, glue}
+        {w, _} -> {:word, w, style}
+      end)
+    else
+      op
+    end
+  end
+
+  # the last character laid out before, looking through the edges of inline boxes
+  defp prev_char([{:word, text, _} | _]), do: String.last(text)
+  defp prev_char([{:word, text, _, _} | _]), do: String.last(text)
+
+  defp prev_char([{tag, _, _} | rest]) when tag in [:inline_open, :inline_close],
+    do: prev_char(rest)
+
+  defp prev_char(_), do: nil
+
+  # whether a line may break between the character before and the start of the next word
+  defp ideograph_edge?(nil, _word, _keep_all), do: false
+  defp ideograph_edge?(_prev, "", _keep_all), do: false
+
+  defp ideograph_edge?(prev, word, keep_all),
+    do: break_between?(prev, String.first(word), keep_all)
+
+  defp break_between?(cur, g, keep_all?) do
+    a = String.last(cur)
+    a = if String.ends_with?(cur, "\u200D"), do: "\u200D", else: a
+
+    # (`keep-all` leaves only the break after an ideographic space)
+    (Regex.match?(@wide_re, a) or Regex.match?(@wide_re, g)) and
+      (not keep_all? or a == "\u3000") and
+      not String.contains?(@no_start, g) and not String.contains?(@no_end, a)
   end
 
   defp space_start,
@@ -2505,6 +2633,30 @@ defmodule Browser.Layout do
     else
       line
     end
+  end
+
+  # collapsible spaces at the end of a line vanish even when only empty inline boxes stand
+  # between them and the line break, which is why they are dropped before those boxes open
+  defp trim_line_end_spaces(ops) do
+    ops
+    |> Enum.reverse()
+    |> Enum.reduce({[], true}, fn
+      {:space, _}, {acc, true} ->
+        {acc, true}
+
+      {tag, _, _} = op, {acc, edge?} when tag in [:inline_open, :inline_close] ->
+        {[op | acc], edge?}
+
+      {tag, _} = op, {acc, _} when tag in [:br] ->
+        {[op | acc], true}
+
+      {:flush} = op, {acc, _} ->
+        {[op | acc], true}
+
+      op, {acc, _} ->
+        {[op | acc], false}
+    end)
+    |> elem(0)
   end
 
   # -- ops -> positioned items -------------------------------------------------------
@@ -4727,7 +4879,7 @@ defmodule Browser.Layout do
       nowrap? or mode == :none or String.length(text) < 2 ->
         nil
 
-      st.x + space_w + w <= right ->
+      st.x + space_w + w - trailing_ls(style) <= right ->
         nil
 
       # break-word: a word that fits a line of its own wraps whole first
@@ -4754,7 +4906,7 @@ defmodule Browser.Layout do
       chars
       |> Enum.with_index(1)
       |> Enum.take_while(fn {_, n} ->
-        st.measure.(chars |> Enum.take(n) |> Enum.join(), style) <= room
+        st.measure.(chars |> Enum.take(n) |> Enum.join(), style) - trailing_ls(style) <= room
       end)
       |> length()
 
@@ -4872,11 +5024,15 @@ defmodule Browser.Layout do
   defp hang_width(_text, %{ws: :break_spaces}, _st), do: 0
 
   defp hang_width(text, style, st) do
-    case String.trim_trailing(text, "\u3000") do
-      ^text -> 0
-      "" -> st.measure.(text, style)
-      body -> st.measure.(text, style) - st.measure.(body, style)
-    end
+    hang =
+      case String.trim_trailing(text, "\u3000") do
+        ^text -> 0
+        "" -> st.measure.(text, style)
+        body -> st.measure.(text, style) - st.measure.(body, style)
+      end
+
+    # (the spacing after the last letter of a line is not shown nor counted)
+    min(hang + trailing_ls(style), st.measure.(text, style))
   end
 
   # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to

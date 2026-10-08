@@ -94,9 +94,16 @@ defmodule Browser.Page do
       |> String.replace("<", "&lt;")
       |> String.replace("\"", "&quot;")
 
+  defp xml_url?(url) when is_binary(url) do
+    path = url |> String.split(["?", "#"]) |> hd() |> String.downcase()
+    String.ends_with?(path, [".xht", ".xhtml", ".xml"])
+  end
+
+  defp xml_url?(_url), do: false
+
   @doc "Builds a page from an HTML string fetched from `url`."
   def build(body, url, env \\ Style.default_env()) do
-    parsed = body |> String.replace_invalid() |> HTML.parse_document()
+    parsed = body |> String.replace_invalid() |> HTML.parse_document(xml: xml_url?(url))
     # scripts run, so what is meant for browsers without them is not shown
     parsed = if has_tag?(parsed, "script"), do: empty_tag(parsed, "noscript"), else: parsed
     {raw, forms} = Forms.index(parsed)

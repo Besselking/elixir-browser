@@ -283,7 +283,7 @@ defmodule Browser.CSS do
             text-shadow text-size-adjust text-transform text-underline-offset text-underline-position text-wrap top touch-action
             transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property
             transition-timing-function translate unicode-bidi user-select vertical-align visibility white-space widows
-            width will-change word-break word-spacing word-wrap writing-mode z-index zoom
+            width will-change word-break word-spacing word-space-transform word-wrap writing-mode z-index zoom
   )
 
   defp known_property?("-" <> rest = prop) do

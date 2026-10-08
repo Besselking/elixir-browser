@@ -11,7 +11,9 @@ defmodule Browser.HTML do
   @raw_text ~w(script style)
   @block ~w(p div ul ol li h1 h2 h3 h4 h5 h6 pre blockquote table tr hr dl dt dd
             section article header footer nav main form)
-  @closes_p @block
+  @closes_p @block ++
+              ~w(address aside center details dialog dir fieldset figcaption figure hgroup menu
+                 search)
 
   # the full WHATWG named character reference table (priv/html_entities.txt); keys keep their
   # trailing ";", and the legacy names that may omit it are present without one too
@@ -36,8 +38,26 @@ defmodule Browser.HTML do
   end
 
   @doc "Parses a whole page: `parse/1` plus the html, head and body elements it leaves implied."
-  @spec parse_document(binary) :: [term]
-  def parse_document(html) when is_binary(html), do: html |> parse() |> implied_structure()
+  @spec parse_document(binary, keyword) :: [term]
+  def parse_document(html, opts \\ []) when is_binary(html) do
+    nodes = html |> parse() |> implied_structure()
+    # (XML documents keep the newline after a start tag, HTML ones drop it)
+    if opts[:xml], do: nodes, else: drop_first_newlines(nodes)
+  end
+
+  # a newline right after the start tag of pre, listing or textarea is not part of its text
+  defp drop_first_newlines(nodes) when is_list(nodes), do: Enum.map(nodes, &drop_first_newlines/1)
+
+  defp drop_first_newlines({:element, name, attrs, [{:text, "\n" <> t} | kids]})
+       when name in ["pre", "listing", "textarea"] do
+    kids = if t == "", do: kids, else: [{:text, t} | kids]
+    {:element, name, attrs, drop_first_newlines(kids)}
+  end
+
+  defp drop_first_newlines({:element, name, attrs, kids}),
+    do: {:element, name, attrs, drop_first_newlines(kids)}
+
+  defp drop_first_newlines(other), do: other
 
   # What HTML parsing makes of a document without `<html>`, `<head>` or `<body>` tags: the
   # leading title, meta, link, style, script... go in the head and the rest in the body (which
