@@ -304,7 +304,11 @@ defmodule Browser.JS.WebAPI do
       return c.signal;
     };
 
-    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = 0; }
+    var domCodes = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5, NoModificationAllowedError: 7,
+      NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10, InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+      NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+      QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
+    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = domCodes[this.name] || 0; }
     DOMException.prototype = Object.create(Error.prototype);
     DOMException.prototype.constructor = DOMException;
 
@@ -526,7 +530,11 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "draggable", function () { return false; });
     getter(EP, "spellcheck", function () { return true; });
     getter(EP, "accessKey", function () { return ""; });
-    getter(EP, "inert", function () { return false; });
+    if (!("inert" in EP)) Object.defineProperty(EP, "inert", {
+      get: function () { return this.hasAttribute("inert"); },
+      set: function (v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); },
+      configurable: true
+    });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
     // a shadow root here is a fragment that is kept, but not drawn
@@ -616,18 +624,222 @@ defmodule Browser.JS.WebAPI do
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
-    // <dialog>: shown while it has the open attribute (a modal one is not modal here)
+    // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
+    // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {
       var DP = HTMLDialogElement.prototype;
-      DP.show = function () { this.setAttribute("open", ""); };
-      DP.showModal = DP.show;
-      DP.close = function (value) {
-        if (!this.hasAttribute("open")) return;
-        if (value !== undefined) this.returnValue = String(value);
-        this.removeAttribute("open");
-        this.dispatchEvent(new Event("close"));
+      // the open modal dialogs, oldest first (one whose open attribute was removed is not one)
+      var modals = [];
+      function openModals() {
+        modals = modals.filter(function (d) { return d.matches(":modal"); });
+        return modals;
+      }
+      function fireLater(el, type) {
+        setTimeout(function () { el.dispatchEvent(new Event(type, { bubbles: false, cancelable: false })); }, 0);
+      }
+      function focusable(el) {
+        if (el.hasAttribute("disabled") || el.hasAttribute("inert") || el.hidden) return false;
+        var t = el.tagName.toLowerCase();
+        if (t === "input") return el.getAttribute("type") !== "hidden";
+        if (t === "select" || t === "textarea" || t === "button") return true;
+        if (t === "a" || t === "area") return el.hasAttribute("href");
+        var ce = el.getAttribute("contenteditable");
+        if (ce !== null && ce !== "false") return true;
+        return el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex")) >= 0;
+      }
+      // the dialog focusing steps: the first element with autofocus, else the first one that can
+      // take focus (a link is not given focus by this browser, so it is only a fallback)
+      function focusInto(dlg, modal) {
+        if (dlg.closest("[inert]")) {
+          var active = document.activeElement;
+          if (modal && active && active !== document.body && active.blur) active.blur();
+          return;
+        }
+        var all = dlg.querySelectorAll("*"), first = null, i;
+        for (i = 0; i < all.length; i++) {
+          if (all[i].hasAttribute("autofocus") && focusable(all[i])) { all[i].focus(); return; }
+        }
+        for (i = 0; i < all.length; i++) {
+          var t = all[i].tagName.toLowerCase();
+          if (focusable(all[i]) && t !== "a" && t !== "area") { first = all[i]; break; }
+        }
+        (first || dlg).focus();
+      }
+      function closeDialog(dlg, value) {
+        if (!dlg.hasAttribute("open")) return;
+        if (value !== undefined) returnValues.set(dlg, String(value));
+        dlg.__setModal(false);
+        dlg.removeAttribute("open");
+        fireLater(dlg, "close");
+      }
+      // the value lives in a slot of its own, so a property a script sets on the element is not hit
+      var returnValues = new WeakMap();
+      Object.defineProperty(DP, "returnValue", {
+        get: function () { return returnValues.has(this) ? returnValues.get(this) : ""; },
+        set: function (v) { returnValues.set(this, String(v)); },
+        configurable: true
+      });
+      DP.show = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) throw new DOMException("The dialog is already open as a modal dialog.", "InvalidStateError");
+          return;
+        }
+        this.setAttribute("open", "");
+        if (this.isConnected) focusInto(this, false);
+      };
+      DP.showModal = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) return;
+          throw new DOMException("The dialog is already open as a non-modal dialog.", "InvalidStateError");
+        }
+        if (!this.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        this.setAttribute("open", "");
+        modals.push(this);
+        this.__setModal(true);
+        focusInto(this, true);
+      };
+      DP.close = function (value) { closeDialog(this, value); };
+      var requesting = new WeakSet();
+      DP.requestClose = function (value) {
+        if (!this.hasAttribute("open") || !this.isConnected || requesting.has(this)) return;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        var ok;
+        requesting.add(this);
+        try { ok = this.dispatchEvent(e); } finally { requesting.delete(this); }
+        if (ok) closeDialog(this, value);
+      };
+      Object.defineProperty(DP, "closedBy", {
+        get: function () {
+          var v = (this.getAttribute("closedby") || "").toLowerCase();
+          return v === "any" || v === "closerequest" || v === "none" ? v : "auto";
+        },
+        set: function (v) { this.setAttribute("closedby", String(v)); }, configurable: true
+      });
+      // what the window does for Escape: ask the topmost modal dialog to close
+      g.__dialogEscape = function () {
+        if (g.__popoverEscape && g.__popoverEscape()) return true;
+        var open = openModals(), dlg = open[open.length - 1];
+        if (!dlg) return false;
+        var by = dlg.closedBy;
+        if (by === "none") return true;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        return true;
+      };
+      // a click on the backdrop: closes a dialog that says closedby="any"
+      g.__dialogBackdrop = function (dlg) {
+        if (dlg && dlg.closedBy === "any" && dlg.hasAttribute("open")) {
+          var e = new Event("cancel", { bubbles: false, cancelable: true });
+          if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        }
+      };
+      // <form method="dialog">: the submitter's value closes the dialog
+      g.__dialogSubmit = function (form, submitter) {
+        var dlg = form.closest("dialog");
+        if (!dlg) return;
+        var value = submitter && submitter.hasAttribute("value") ? submitter.getAttribute("value") : undefined;
+        closeDialog(dlg, value);
       };
     }
+    // the Popover API: a `popover` element in the top layer, hidden again by Escape or a click elsewhere
+    (function () {
+      var stack = [];
+      function type(el) {
+        var v = el.getAttribute("popover");
+        if (v === null) return null;
+        v = v.toLowerCase();
+        return v === "" || v === "auto" ? "auto" : v === "hint" ? "hint" : "manual";
+      }
+      function shown() {
+        stack = stack.filter(function (p) { return p.matches(":popover-open"); });
+        return stack;
+      }
+      function toggleEvent(el, name, oldState, newState, cancelable) {
+        var e = new Event(name, { bubbles: false, cancelable: cancelable });
+        e.oldState = oldState; e.newState = newState;
+        return el.dispatchEvent(e);
+      }
+      function later(el, oldState, newState) {
+        setTimeout(function () { toggleEvent(el, "toggle", oldState, newState, false); }, 0);
+      }
+      // false: nothing to do; throws when the element cannot be one
+      function valid(el) {
+        if (type(el) === null) throw new DOMException("The element has no popover attribute.", "NotSupportedError");
+        if (!el.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        if (el.matches("dialog:modal")) throw new DOMException("The element is a modal dialog.", "InvalidStateError");
+      }
+      function hide(el, fireEvents) {
+        if (!el.matches(":popover-open")) return;
+        // what was opened above it goes first
+        var i = shown().indexOf(el);
+        if (i >= 0) stack.slice(i + 1).reverse().forEach(function (p) { hide(p, true); });
+        if (fireEvents) toggleEvent(el, "beforetoggle", "open", "closed", false);
+        el.__setPopover(false);
+        stack = stack.filter(function (p) { return p !== el; });
+        if (fireEvents) later(el, "open", "closed");
+      }
+      function show(el) {
+        valid(el);
+        if (el.matches(":popover-open") || el.matches("dialog[open]")) return;
+        if (!toggleEvent(el, "beforetoggle", "closed", "open", true)) return;
+        if (el.matches(":popover-open") || !el.isConnected) return;
+        if (type(el) === "auto") {
+          shown().slice().reverse().forEach(function (p) {
+            if (type(p) === "auto" && !p.contains(el)) hide(p, true);
+          });
+        }
+        el.__setPopover(true);
+        // manual popovers are not part of the stack that light dismiss and Escape work on
+        if (type(el) !== "manual") stack.push(el);
+        var all = el.querySelectorAll("[autofocus]");
+        for (var i = 0; i < all.length; i++) { all[i].focus(); break; }
+        later(el, "closed", "open");
+      }
+      var P = Element.prototype;
+      P.showPopover = function () { show(this); };
+      P.hidePopover = function () { valid(this); hide(this, true); };
+      P.togglePopover = function (force) {
+        valid(this);
+        var open = this.matches(":popover-open");
+        if (open && force !== true) hide(this, true);
+        else if (!open && force !== false) show(this);
+        return this.matches(":popover-open");
+      };
+      Object.defineProperty(P, "popover", {
+        get: function () { var t = type(this); return t; },
+        set: function (v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", String(v)); },
+        configurable: true
+      });
+      // a button with popovertarget
+      g.__popoverInvoke = function (button) {
+        var target = document.getElementById(button.getAttribute("popovertarget"));
+        if (!target || type(target) === null) return;
+        var action = (button.getAttribute("popovertargetaction") || "toggle").toLowerCase();
+        var open = target.matches(":popover-open");
+        if (open && action !== "show") hide(target, true);
+        else if (!open && action !== "hide") show(target);
+      };
+      // a click nothing stopped: the button's target, and light dismiss of the other popovers
+      g.__popoverClick = function (target) {
+        var button = target && target.closest ? target.closest("[popovertarget]") : null;
+        var invoked = button ? document.getElementById(button.getAttribute("popovertarget")) : null;
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          var p = open[i];
+          if (type(p) !== "auto") continue;
+          if (p === invoked || (target && p.contains(target))) break;
+          hide(p, true);
+        }
+        if (button && !button.hasAttribute("disabled")) g.__popoverInvoke(button);
+      };
+      g.__popoverEscape = function () {
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          if (type(open[i]) !== "manual") { hide(open[i], true); return true; }
+        }
+        return false;
+      };
+    })();
     def("open", function () { return null; });
     def("close", function () {});
     def("stop", function () {});

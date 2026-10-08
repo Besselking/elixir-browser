@@ -50,6 +50,8 @@ defmodule Browser.Style do
   @clips ~w(hidden clip scroll auto)
   # what the layer of the style attribute is: above every layer, and above unlayered rules
   @above_layers 2_000_000
+  # the rank of the initial values of `@property` registrations: below every layer
+  @registered_rank 1_500_000
   @default_fs 16.0
 
   @shorthands %{
@@ -92,6 +94,15 @@ defmodule Browser.Style do
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
   html, legend, main, menu, nav, ol, p, pre, section, summary, ul { display: block }
+  dialog { position: absolute; inset-inline: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 1em; background-color: #ffffff; color: #000000 }
+  dialog:modal { position: fixed; inset-block: 0; z-index: 2147483647; overflow: auto;
+    max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em) }
+  [popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 0.25em; overflow: auto; color: #000000; background-color: #ffffff }
+  [popover]:not(:popover-open):not(dialog[open]) { display: none }
+  [popover]:popover-open { z-index: 2147483645 }
+  ::backdrop { display: block; position: fixed; inset: 0; z-index: 2147483646; background-color: rgba(0, 0, 0, 0.1) }
   table { display: table; border-spacing: 2px; box-sizing: border-box }
   caption { display: table-caption; text-align: center }
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
@@ -260,7 +271,12 @@ defmodule Browser.Style do
     |> then(fn rules -> {rules, layer_ranks(rules)} end)
     |> then(fn {rules, ranks} ->
       Enum.map(rules, fn {rule, order} ->
-        {Map.put(rule, :lrank, Map.get(ranks, Map.get(rule, :layer))), order}
+        lrank =
+          if Map.get(rule, :registered),
+            do: -@registered_rank,
+            else: Map.get(ranks, Map.get(rule, :layer))
+
+        {Map.put(rule, :lrank, lrank), order}
       end)
     end)
     |> Enum.reduce(

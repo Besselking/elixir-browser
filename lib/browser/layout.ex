@@ -294,6 +294,9 @@ defmodule Browser.Layout do
     src = Enum.find(items, &(Map.get(&1, :cid) == cid and Map.has_key?(&1, :sc)))
     extra = if src, do: Enum.map(extra, &Map.merge(&1, Map.take(src, [:sc, :clips]))), else: extra
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
+    # and above the box it is in: fixed items are drawn in the order of their `z`
+    z = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :z)))
+    extra = if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
     items ++ extra
   end
 
@@ -1049,6 +1052,8 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        # `width: fit-content` between two insets shrinks to the content, not stretches
+        fit: c["width"] in [:fit, :minc, :maxc],
         # an inline-level box is where it would be on a line: beside the floats
         inline: kind(tag, c) in [:inline, :inline_block],
         align: parent_style.align,
@@ -4844,7 +4849,7 @@ defmodule Browser.Layout do
               do: @unbounded,
               else: avail
 
-          if left && right && !spec.replaced do
+          if left && right && !spec.replaced && !Map.get(spec, :fit, false) do
             avail
           else
             min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)))

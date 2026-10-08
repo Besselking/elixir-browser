@@ -442,6 +442,8 @@ defmodule Browser.JS.DOM do
       # last reported (`report_selection/1`)
       design_mode: false,
       focus_ed: nil,
+      # the form control that has focus (a node id)
+      focus_ctl: nil,
       ed_sel: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
@@ -507,6 +509,10 @@ defmodule Browser.JS.DOM do
 
   @doc "The values of the page's controls, by control id: `%{cid => %{value:, checked:, selected:}}`."
   def apply_controls(controls) do
+    # `:focus` is the control the window has focused, by control id
+    {focus, controls} = Map.pop(controls, :focus, :keep)
+    if focus != :keep, do: put_st(%{st() | focus_ctl: focus && control_node(focus)})
+
     for {nid, n} <- st().nodes,
         n.kind == :element,
         {_, cid} <- [List.keyfind(n.internal, "@cid", 0)] do
@@ -580,7 +586,7 @@ defmodule Browser.JS.DOM do
 
       _ ->
         inner = ed_host_for(n, host)
-        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}]
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n)
 
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
@@ -672,6 +678,11 @@ defmodule Browser.JS.DOM do
         update_node_quiet(nid, &%{&1 | internal: &1.internal ++ [{"@nid", v}]})
         v
     end
+  end
+
+  # a dialog shown with `showModal()` (see `Browser.Modal`)
+  defp modal_attr(n) do
+    for key <- ["@modal", "@popover"], List.keymember?(n.internal, key, 0), do: {key, ""}
   end
 
   defp export_attrs(%{tag: "input"} = n) do
@@ -1122,6 +1133,91 @@ defmodule Browser.JS.DOM do
     Enum.find_index(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), &(&1 == nid))
   end
 
+  @doc "Calls the page-global function `name` (a hook the prelude defines), if there is one."
+  def call_global(name, args) do
+    case deref_global(name) do
+      f when is_tuple(f) -> if function?(f), do: call(f, :undefined, args), else: :ok
+      _ -> :ok
+    end
+  end
+
+  @doc "What a click that no script stopped does to popovers: the button's target, light dismiss."
+  def popover_click(target) do
+    nid =
+      case target do
+        {:control, cid} -> control_node(cid)
+        {:numbered, n} -> nid_numbered(n)
+        _ -> nil
+      end
+
+    call_global("__popoverClick", [if(nid, do: wrap(nid), else: :null)])
+  end
+
+  @doc "The controls in the form numbered `fid` go back to the values their markup gives."
+  def reset_form(fid) do
+    case form_node(fid) do
+      nil -> :ok
+      nid -> reset_controls(nid)
+    end
+  end
+
+  # the same for the form with element number `nid`
+  def reset_controls(nid) do
+    for el <- elements(nid), node(el).tag in ["input", "textarea", "select", "option"] do
+      update_node(el, fn n ->
+        %{n | props: Map.drop(n.props, ["value", "checked", "selectedIndex", "selected"])}
+      end)
+    end
+
+    :ok
+  end
+
+  @doc "A click on the backdrop of the dialog whose number, made negative, is `n`."
+  def dialog_backdrop(n) do
+    case nid_numbered(n) do
+      nil -> :ok
+      nid -> call_global("__dialogBackdrop", [wrap(nid)])
+    end
+  end
+
+  @doc "`<form method=dialog>` number `fid` was submitted by the control `cid` (nil: by script)."
+  def dialog_submit(fid, cid) do
+    case form_node(fid) do
+      nil ->
+        :ok
+
+      form when is_integer(form) ->
+        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+             not formmethod_dialog?(cid),
+           do: :ok,
+           else: do_dialog_submit(form, cid)
+    end
+  end
+
+  defp formmethod_dialog?(nil), do: false
+
+  defp formmethod_dialog?(cid) do
+    case control_node(cid) do
+      nil -> false
+      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+    end
+  end
+
+  defp do_dialog_submit(form, cid) do
+    case form do
+      nil ->
+        :ok
+
+      form ->
+        submitter = cid && control_node(cid)
+
+        call_global("__dialogSubmit", [
+          wrap(form),
+          if(submitter, do: wrap(submitter), else: :null)
+        ])
+    end
+  end
+
   @doc "The node id of the element for the page's control `cid`, or nil."
   def control_node(cid) do
     Enum.find(elements(st().doc), fn nid ->
@@ -1282,7 +1378,15 @@ defmodule Browser.JS.DOM do
 
   defp remove_attr(nid, name) do
     name = String.downcase(name)
-    update_node(nid, fn n -> %{n | attrs: List.keydelete(n.attrs, name, 0)} end)
+
+    # a dialog that is not open is not modal any more
+    if name == "open" and List.keymember?(node(nid).internal, "@modal", 0),
+      do: out({:modal, :close})
+
+    update_node(nid, fn n ->
+      n = %{n | attrs: List.keydelete(n.attrs, name, 0)}
+      if name == "open", do: %{n | internal: List.keydelete(n.internal, "@modal", 0)}, else: n
+    end)
   end
 
   # ── wrappers ───────────────────────────────────────────────
@@ -1598,7 +1702,7 @@ defmodule Browser.JS.DOM do
         {:ok, checked_of(n)}
 
       "open" ->
-        {:ok, open_of(n)}
+        {:ok, if(n.tag == "dialog", do: get_attr(n, "open") != nil, else: open_of(n))}
 
       "selectedIndex" ->
         {:ok, float(Map.get(n.props, "selectedIndex") || 0)}
@@ -1756,7 +1860,7 @@ defmodule Browser.JS.DOM do
         {:ok, "text/html"}
 
       "activeElement" ->
-        {:ok, wrap_or_null(ed_focused() || find_tag(s.doc, "body"))}
+        {:ok, wrap_or_null(ed_focused() || ctl_focused() || find_tag(s.doc, "body"))}
 
       "designMode" ->
         {:ok, if(s.design_mode, do: "on", else: "off")}
@@ -1888,7 +1992,17 @@ defmodule Browser.JS.DOM do
         :ok
 
       "open" ->
-        update_node(nid, &%{&1 | props: Map.put(&1.props, "open", truthy(v))})
+        cond do
+          node(nid).tag != "dialog" ->
+            update_node(nid, &%{&1 | props: Map.put(&1.props, "open", truthy(v))})
+
+          truthy(v) ->
+            set_attr(nid, "open", "")
+
+          true ->
+            remove_attr(nid, "open")
+        end
+
         :ok
 
       "selectedIndex" ->
@@ -2567,6 +2681,12 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:pseudo, "disabled", _}), do: get_attr(n, "disabled") != nil
   defp match_cond(n, {:pseudo, "enabled", _}), do: get_attr(n, "disabled") == nil
   defp match_cond(n, {:pseudo, "root", _}), do: n.tag == "html"
+  defp match_cond(n, {:pseudo, "modal", _}), do: List.keymember?(n.internal, "@modal", 0)
+  defp match_cond(n, {:pseudo, "popover-open", _}), do: List.keymember?(n.internal, "@popover", 0)
+
+  defp match_cond(n, {:pseudo, "open", _}),
+    do: n.tag in ["dialog", "details"] and open_of(n) == true
+
   defp match_cond(n, {:pseudo, "not", arg}), do: not matches?(n.id, parse_selectors(arg))
   defp match_cond(n, {:pseudo, "is", arg}), do: matches?(n.id, parse_selectors(arg))
   defp match_cond(n, {:pseudo, "where", arg}), do: matches?(n.id, parse_selectors(arg))
@@ -3681,6 +3801,14 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # the focused form control, if it is still in the document
+  defp ctl_focused do
+    case st().focus_ctl do
+      nil -> nil
+      nid -> if Map.has_key?(st().nodes, nid) and connected?(nid), do: nid
+    end
+  end
+
   # the focused host, if it is still in the document
   defp ed_focused do
     case st().focus_ed do
@@ -3708,9 +3836,35 @@ defmodule Browser.JS.DOM do
         dispatch(nid, "focusin", %{bubbles: true, cancelable: false})
         :ok
 
+      # a form control: the window gives it focus
+      control?(nid) ->
+        put_st(%{st() | focus_ctl: nid})
+        out({:focus_control, ensure_nid(nid)})
+        :ok
+
+      # other elements a script may focus: the window has nothing to show for them
+      script_focusable?(nid) ->
+        put_st(%{st() | focus_ctl: nid})
+        :ok
+
       true ->
         :ok
     end
+  end
+
+  defp script_focusable?(nid) do
+    n = node(nid)
+
+    n.kind == :element and
+      (n.tag == "dialog" or get_attr(n, "tabindex") != nil or
+         (n.tag == "a" and get_attr(n, "href") != nil))
+  end
+
+  defp control?(nid) do
+    n = node(nid)
+
+    n.kind == :element and n.tag in ["input", "select", "textarea", "button"] and
+      get_attr(n, "disabled") == nil and not (n.tag == "input" and type_of(n) == "hidden")
   end
 
   defp blur_focused do
@@ -3793,6 +3947,9 @@ defmodule Browser.JS.DOM do
   end
 
   # the node (element or text) the layout numbers `n`
+  # (the backdrop of a modal dialog, which has the dialog's number made negative, is the dialog)
+  defp nid_numbered(n) when is_integer(n) and n < 0, do: nid_numbered(-n - 1)
+
   defp nid_numbered(n) do
     Enum.find_value(st().nodes, fn {id, node} ->
       if List.keyfind(node.internal, "@nid", 0) == {"@nid", n}, do: id
@@ -4421,7 +4578,14 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "blur", fn this, _ ->
-      if st().focus_ed == this_nid(this), do: ed_blur()
+      nid = this_nid(this)
+
+      if st().focus_ctl == nid do
+        put_st(%{st() | focus_ctl: nil})
+        out({:modal, :blur})
+      end
+
+      if st().focus_ed == nid, do: ed_blur()
       :undefined
     end)
 
@@ -4455,23 +4619,58 @@ defmodule Browser.JS.DOM do
       scroll_to(elem(st().scroll, 0), target)
     end)
 
+    # the dialog is (or is no longer) shown modally; see `Browser.Modal`
+    def_fn(p, "__setModal", fn this, args ->
+      nid = this_nid(this)
+      on? = truthy(arg(args, 0))
+      was? = List.keymember?(node(nid).internal, "@modal", 0)
+
+      update_node(nid, fn n ->
+        internal = List.keydelete(n.internal, "@modal", 0)
+        %{n | internal: if(on?, do: internal ++ [{"@modal", 1}], else: internal)}
+      end)
+
+      # the window remembers where the focus was, and gives it back when the dialog closes
+      if on? != was?, do: out({:modal, if(on?, do: :open, else: :close)})
+      :undefined
+    end)
+
+    # a popover is (or is no longer) showing
+    def_fn(p, "__setPopover", fn this, args ->
+      on? = truthy(arg(args, 0))
+
+      update_node(this_nid(this), fn n ->
+        internal = List.keydelete(n.internal, "@popover", 0)
+        %{n | internal: if(on?, do: internal ++ [{"@popover", 1}], else: internal)}
+      end)
+
+      :undefined
+    end)
+
     def_fn(p, "click", fn this, _ ->
-      dispatch(this_nid(this), "click", %{})
+      nid = this_nid(this)
+      if dispatch(nid, "click", %{}) == :ok, do: activate(nid)
       :undefined
     end)
 
     def_fn(p, "submit", fn this, _ ->
-      out({:submit, form_index(this_nid(this))})
+      submit_form(this_nid(this), nil)
       :undefined
     end)
 
-    def_fn(p, "requestSubmit", fn this, _ ->
+    def_fn(p, "requestSubmit", fn this, args ->
+      request_submit(this_nid(this), submitter_arg(arg(args, 0)))
+      :undefined
+    end)
+
+    def_fn(p, "reset", fn this, _ ->
       nid = this_nid(this)
-      if dispatch(nid, "submit", %{}) == :ok, do: out({:submit, form_index(nid)})
+
+      if dispatch(nid, "reset", %{bubbles: true, cancelable: true}) != :prevented,
+        do: reset_controls(nid)
+
       :undefined
     end)
-
-    def_fn(p, "reset", fn _this, _ -> :undefined end)
 
     def_fn(p, "getBoundingClientRect", fn this, _ -> rect_object(this_nid(this)) end)
 
@@ -4483,6 +4682,50 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "animate", fn _this, _ -> new_object([]) end)
+  end
+
+  defp submitter_arg({:obj, _} = o), do: nid_of(o)
+  defp submitter_arg(_), do: nil
+
+  # the submit event, then the submission unless a script stopped it
+  defp request_submit(form, submitter) do
+    if dispatch(form, "submit", %{}) == :ok, do: submit_form(form, submitter)
+  end
+
+  # `<form method="dialog">` closes its dialog (see `Browser.Modal`); any other goes to the window
+  defp submit_form(form, submitter) do
+    method =
+      with s when s != nil <- submitter && get_attr(node(submitter), "formmethod") do
+        s
+      else
+        _ -> get_attr(node(form), "method") || ""
+      end
+
+    if String.downcase(method) == "dialog" do
+      call_global("__dialogSubmit", [wrap(form), if(submitter, do: wrap(submitter), else: :null)])
+    else
+      out({:submit, form_index(form)})
+    end
+  end
+
+  # what a click does when no script stopped it: a submit button submits its form
+  defp activate(nid) do
+    n = node(nid)
+
+    if n.tag in ["button", "input"] and get_attr(n, "popovertarget") != nil and
+         get_attr(n, "disabled") == nil,
+       do: call_global("__popoverInvoke", [wrap(nid)])
+
+    submit? =
+      get_attr(n, "disabled") == nil and
+        ((n.tag == "button" and type_of(n) == "submit") or
+           (n.tag == "input" and type_of(n) in ["submit", "image"]))
+
+    with true <- submit?, form when form != nil <- form_of(nid) do
+      request_submit(form, nid)
+    end
+
+    :ok
   end
 
   defp adjacent(nid, position, ids) do

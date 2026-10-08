@@ -197,7 +197,7 @@ defmodule Browser.Page do
           cache ->
             index = Style.index_rules(page.rules, env)
             old = with {^key, memo} <- page.memo, do: memo, else: (_ -> nil)
-            {pruned, memo} = Style.prune(page.raw, index, old)
+            {pruned, memo} = Style.prune(Browser.Modal.backdrops(page.raw), index, old)
             defs = Browser.Svg.defs(page.raw, pruned)
             fixed = fixed_width(pruned)
             cache = if map_size(cache) >= 4, do: %{}, else: cache

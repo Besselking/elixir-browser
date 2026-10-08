@@ -355,6 +355,20 @@ defmodule Browser.StyleTest do
       assert comp("<p>a</p>", css, "p")["color"] == {255, 0, 0}
     end
 
+    test "@property gives a custom property its initial value, the lowest in the cascade" do
+      css = """
+      @property --sx { syntax: "*"; inherits: false; initial-value: 1 }
+      @property --sy { syntax: "*"; inherits: false; initial-value: 1 }
+      @property --pad { syntax: "*"; inherits: true; initial-value: 4px }
+      @layer utilities { .flip { --sx: -100%; scale: var(--sx) var(--sy) } }
+      p { padding-left: var(--pad) }
+      """
+
+      html = ~s|<html><body><p class="flip">a</p></body></html>|
+      assert comp(html, css, "p")["scale"] |> String.split() == ["-100%", "1"]
+      assert comp(html, css, "p")["padding-left"] == 4.0
+    end
+
     test "currentcolor and inherit" do
       css =
         "div { color: #00f } p { background-color: currentcolor; margin-top: inherit } div { margin-top: 9px }"

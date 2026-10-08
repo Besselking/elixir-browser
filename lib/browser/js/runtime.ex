@@ -53,7 +53,16 @@ defmodule Browser.JS.Runtime do
   @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
   def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
 
-  def stop(pid), do: Process.exit(pid, :kill)
+  def stop(pid) do
+    Process.exit(pid, :kill)
+    Browser.Console.drop(pid)
+  end
+
+  @doc """
+  Runs `source` in the page, as the developer console does: the console shows the line and its
+  value (or the error it threw), and the page changes like for any script.
+  """
+  def eval(pid, source), do: call(pid, {:eval, source})
 
   def run_scripts(pid), do: call(pid, :run_scripts, @scripts_timeout)
 
@@ -77,6 +86,9 @@ defmodule Browser.JS.Runtime do
   """
   def dispatch(pid, target, type, init \\ %{}, controls \\ %{}),
     do: call(pid, {:dispatch, target, type, init, controls})
+
+  @doc "A form with `method=\"dialog\"` was submitted, by the control `cid` (nil: by script)."
+  def dialog_submit(pid, fid, cid), do: call(pid, {:dialog_submit, fid, cid})
 
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
@@ -112,6 +124,7 @@ defmodule Browser.JS.Runtime do
     after
       timeout ->
         Process.demonitor(ref, [:flush])
+        Browser.Console.add(pid, [{:error, "script timed out"}])
 
         %{
           dirty: false,
@@ -398,11 +411,44 @@ defmodule Browser.JS.Runtime do
         t -> guard(fn -> DOM.dispatch(t, type, init) end, :ok)
       end
 
+    # what the window does when the page did not stop the event: Escape closes a modal dialog,
+    # a click on its backdrop may
+    if prevented != :prevented do
+      case {type, init, target} do
+        {"keydown", %{"key" => "Escape"}, _} ->
+          guard(fn -> DOM.call_global("__dialogEscape", []) end, :ok)
+
+        {"click", _, {:numbered, n}} when n < 0 ->
+          guard(fn -> DOM.dialog_backdrop(n) end, :ok)
+
+        {"click", _, target} ->
+          guard(fn -> DOM.popover_click(target) end, :ok)
+
+        # a form was reset: its controls go back to their markup's values
+        {"reset", _, {:form, fid}} ->
+          guard(fn -> DOM.reset_form(fid) end, :ok)
+
+        # a `method="dialog"` form was submitted: its dialog closes
+        {"submit", %{"submitter" => cid}, {:form, fid}} ->
+          guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+
+        _ ->
+          :ok
+      end
+    end
+
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
   end
 
   # the pointer went from one element (by its layout number) to another
+  # `<form method="dialog">` was submitted (by the control `cid`, or by script): the dialog closes
+  defp handle({:dialog_submit, fid, cid}) do
+    guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
   defp handle({:hover, old, new}) do
     guard(fn -> DOM.hover(old, new) end, :ok)
     Browser.JS.Promise.run_microtasks()
@@ -452,6 +498,22 @@ defmodule Browser.JS.Runtime do
     finish(%{})
   end
 
+  defp handle({:eval, source}) do
+    log(:input, source)
+
+    guard(
+      fn ->
+        case Parser.parse(source) do
+          {:ok, program} -> log(:result, Builtins.inspect_js(Interp.run_program(program), 0, []))
+          {:error, msg} -> log(:error, "SyntaxError: " <> msg)
+        end
+      end,
+      :ok
+    )
+
+    finish(%{})
+  end
+
   defp handle({:snapshot, controls}) do
     DOM.apply_controls(controls)
     finish(%{force_raw: true})
@@ -497,6 +559,7 @@ defmodule Browser.JS.Runtime do
   defp take_console do
     c = Enum.reverse(Process.get(:js_console, []))
     Process.put(:js_console, [])
+    Browser.Console.add(self(), c)
     c
   end
 
