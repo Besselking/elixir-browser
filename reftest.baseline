@@ -4671,6 +4671,10 @@ css/css-sizing/stretch/stretch-float.html
 css/css-sizing/whitespace-and-break.html
 css/css-text/hanging-punctuation/hanging-punctuation-variable-font-size.html
 css/css-text/hanging-punctuation/hanging-punctuation-with-bidi.html
+css/css-text/hyphens/hyphenate-character-001.html
+css/css-text/hyphens/hyphenate-character-003.html
+css/css-text/hyphens/hyphenate-character-004.html
+css/css-text/hyphens/hyphenate-character-005.html
 css/css-text/hyphens/hyphens-auto-001.html
 css/css-text/hyphens/hyphens-auto-002.html
 css/css-text/hyphens/hyphens-auto-003.html
@@ -4688,6 +4692,8 @@ css/css-text/hyphens/hyphens-none-014.html
 css/css-text/hyphens/hyphens-none-shy-on-2nd-line-001.html
 css/css-text/hyphens/hyphens-vertical-001.html
 css/css-text/hyphens/hyphens-vertical-002.html
+css/css-text/hyphens/hyphens-vertical-003.html
+css/css-text/hyphens/hyphens-vertical-004.html
 css/css-text/hyphens/hyphens-vs-float-clearance-002.html
 css/css-text/hyphens/i18n/hyphens-i18n-manual-004.html
 css/css-text/letter-spacing/letter-spacing-200.html

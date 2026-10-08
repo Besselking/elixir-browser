@@ -5315,6 +5315,20 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "hyphenate-character" do
+    test "a soft hyphen break shows the character the page chooses" do
+      html =
+        ~s|<div style="width:15px;font-size:10px;hyphenate-character:'\\2022'">ab&shy;cd</div>|
+
+      assert wb_rows(html, 400) == ["ab\u2022", "cd"]
+    end
+
+    test "an empty hyphenate-character shows nothing" do
+      html = ~s|<div style="width:15px;font-size:10px;hyphenate-character:''">ab&shy;cd</div>|
+      assert wb_rows(html, 400) == ["ab", "cd"]
+    end
+  end
+
   describe "invalid negative sizes" do
     defp neg_box(style) do
       page =

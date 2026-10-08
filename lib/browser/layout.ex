@@ -130,6 +130,7 @@ defmodule Browser.Layout do
       pre: false,
       ws: :normal,
       tab: 8,
+      hyph: "-",
       hidden: false,
       tiny: false,
       vhidden: false,
@@ -2283,6 +2284,7 @@ defmodule Browser.Layout do
     |> put_if(c["word-space-transform"], &%{&1 | wst: word_space_transform(&2)})
     |> put_if(c["word-break"], &%{&1 | keep_all: &2 in ["keep-all", "auto-phrase"]})
     |> put_if(c["hyphens"], &%{&1 | shy: &2 != "none"})
+    |> put_if(c["hyphenate-character"], &%{&1 | hyph: hyphen_char(&2)})
     |> put_if(c["vertical-align"], &raise_text/2)
     |> put_if(c["text-justify"], &%{&1 | nojust: &2 == "none"})
     |> put_if(c["text-align-last"], fn s, v ->
@@ -2316,6 +2318,24 @@ defmodule Browser.Layout do
     do:
       c["visibility"] in ["hidden", "collapse"] or
         (is_number(c["font-size"]) and c["font-size"] < 1)
+
+  # `hyphenate-character`: `auto` is a hyphen; a string may use CSS escapes (`"\\2022"`)
+  defp hyphen_char(value) do
+    case String.trim(to_string(value)) do
+      <<q, rest::binary>> when q in [?", ?'] ->
+        rest
+        |> String.trim_trailing(<<q>>)
+        |> then(
+          &Regex.replace(~r/\\([0-9a-fA-F]{1,6})\s?|\\(.)/su, &1, fn
+            _, hex, "" -> <<String.to_integer(hex, 16)::utf8>>
+            _, _, ch -> ch
+          end)
+        )
+
+      _ ->
+        "-"
+    end
+  end
 
   # `tab-size`: a number of columns, or a length
   defp tab_size(style, value) do
@@ -5214,7 +5234,7 @@ defmodule Browser.Layout do
         fits =
           for k <- (length(segs) - 1)..1//-1,
               head = segs |> Enum.take(k) |> Enum.join(),
-              st.measure.(head <> "-", style) <= room,
+              st.measure.(head <> style.hyph, style) <= room,
               do: k
 
         case fits do
@@ -5232,7 +5252,7 @@ defmodule Browser.Layout do
 
   defp shy_break(segs, k, style, st, glue, line_left) do
     {head, rest} = Enum.split(segs, k)
-    st = plain_word(Enum.join(head) <> "-", style, true, st, 0, glue)
+    st = plain_word(Enum.join(head) <> style.hyph, style, true, st, 0, glue)
     st = st |> wrap_flush() |> apply_gap() |> start_line(line_left, 0)
     word(Enum.join(rest, "\u00AD"), style, false, st, 0, false)
   end
