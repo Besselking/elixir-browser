@@ -1609,9 +1609,28 @@ defmodule Browser.JS.Async do
               k.(:ok)
 
             {false, v} ->
-              if sync?,
-                do: await_value(v, ctx, &afor_body(&1, it, next, sync?, spec, ctx, k, labels)),
-                else: afor_body(v, it, next, sync?, spec, ctx, k, labels)
+              if sync? do
+                # a rejected value closes the sync iterator before the loop throws
+                closing = %{
+                  ctx
+                  | throw: fn e ->
+                      try do
+                        case Interp.get(it, "return") do
+                          m when m in [:undefined, :null] -> :ok
+                          f -> Interp.call(f, it, [])
+                        end
+                      catch
+                        {:js_error, _} -> :ok
+                      end
+
+                      ctx.throw.(e)
+                    end
+                }
+
+                await_value(v, closing, &afor_body(&1, it, next, sync?, spec, ctx, k, labels))
+              else
+                afor_body(v, it, next, sync?, spec, ctx, k, labels)
+              end
           end
         )
       end)

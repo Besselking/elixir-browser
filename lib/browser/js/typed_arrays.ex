@@ -544,6 +544,23 @@ defmodule Browser.JS.TypedArrays do
   def typed_array?(v), do: ta?(v)
 
   @doc false
+  # Object.freeze / seal: the elements of a typed array stay configurable, so a typed array
+  # with elements (or one over a resizable buffer, which may grow some) cannot be locked
+  def unlockable?({:obj, id} = v, freeze?) do
+    ta?(v) and
+      (
+        %{host: {_, {:ta, _, bid, _, _} = d}} = deref(id)
+
+        case eff(d) do
+          {_, len} when len > 0 -> true
+          _ -> freeze? and resizable?(bid)
+        end
+      )
+  end
+
+  def unlockable?(_, _), do: false
+
+  @doc false
   # a typed array that a detached or shrunk buffer has left out of bounds
   def out_of_bounds?({:obj, id} = v) do
     ta?(v) and
@@ -1838,8 +1855,10 @@ defmodule Browser.JS.TypedArrays do
       f = callable!(arg(args, 0))
       result = species_create(this, kind, [len * 1.0])
 
-      for {{v, i}, n} <- Stream.with_index(live_pairs(this)) do
-        Interp.put(result, n, call(f, arg(args, 1), [v, i * 1.0, this]))
+      # the length is fixed up front: elements that went away meanwhile read as undefined
+      for i <- 0..(len - 1)//1 do
+        v = Interp.get(this, i * 1.0)
+        Interp.put(result, i, call(f, arg(args, 1), [v, i * 1.0, this]))
       end
 
       result

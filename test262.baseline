@@ -261,6 +261,7 @@ built-ins/Array/length/S15.4.5.1_A1.2_T3.js
 built-ins/Array/length/S15.4.5.1_A1.3_T1.js
 built-ins/Array/length/S15.4.5.1_A1.3_T2.js
 built-ins/Array/length/S15.4.5.2_A3_T4.js
+built-ins/Array/length/define-own-prop-length-coercion-order-set.js
 built-ins/Array/length/define-own-prop-length-coercion-order.js
 built-ins/Array/length/define-own-prop-length-error.js
 built-ins/Array/length/define-own-prop-length-no-value-order.js
@@ -2846,6 +2847,7 @@ built-ins/Array/prototype/sort/precise-getter-increases-length.js
 built-ins/Array/prototype/sort/precise-getter-pops-elements.js
 built-ins/Array/prototype/sort/precise-getter-sets-predecessor.js
 built-ins/Array/prototype/sort/precise-getter-sets-successor.js
+built-ins/Array/prototype/sort/precise-prototype-accessors.js
 built-ins/Array/prototype/sort/precise-prototype-element.js
 built-ins/Array/prototype/sort/precise-setter-appends-elements.js
 built-ins/Array/prototype/sort/precise-setter-decreases-length.js
@@ -3435,6 +3437,8 @@ built-ins/AsyncDisposableStack/prototype/use/throws-if-value-missing-Symbol.asyn
 built-ins/AsyncDisposableStack/prototype/use/throws-if-value-not-object.js
 built-ins/AsyncDisposableStack/undefined-newtarget-throws.js
 built-ins/AsyncFromSyncIteratorPrototype/next/absent-value-not-passed.js
+built-ins/AsyncFromSyncIteratorPrototype/next/for-await-iterator-next-rejected-promise-close.js
+built-ins/AsyncFromSyncIteratorPrototype/next/for-await-next-rejected-promise-close.js
 built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-poisoned-done.js
 built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-poisoned-value.js
 built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-poisoned-wrapper.js
@@ -5510,6 +5514,7 @@ built-ins/Function/StrictFunction_reservedwords_with.js
 built-ins/Function/StrictFunction_restricted-properties.js
 built-ins/Function/instance-name.js
 built-ins/Function/internals/Call/class-ctor.js
+built-ins/Function/internals/Construct/base-ctor-revoked-proxy.js
 built-ins/Function/internals/Construct/derived-return-val.js
 built-ins/Function/internals/Construct/derived-this-uninitialized.js
 built-ins/Function/is-a-constructor.js
@@ -9958,6 +9963,7 @@ built-ins/Object/freeze/not-a-constructor.js
 built-ins/Object/freeze/proxy-no-ownkeys-returned-keys-order.js
 built-ins/Object/freeze/proxy-with-defineProperty-handler.js
 built-ins/Object/freeze/throws-when-false.js
+built-ins/Object/freeze/typedarray-backed-by-resizable-buffer.js
 built-ins/Object/fromEntries/empty-iterable.js
 built-ins/Object/fromEntries/evaluation-order.js
 built-ins/Object/fromEntries/iterator-closed-for-null-entry.js
@@ -10301,6 +10307,7 @@ built-ins/Object/getOwnPropertyDescriptors/inherited-properties-omitted.js
 built-ins/Object/getOwnPropertyDescriptors/normal-object.js
 built-ins/Object/getOwnPropertyDescriptors/not-a-constructor.js
 built-ins/Object/getOwnPropertyDescriptors/observable-operations.js
+built-ins/Object/getOwnPropertyDescriptors/order-after-define-property.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-booleans.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-numbers.js
 built-ins/Object/getOwnPropertyDescriptors/primitive-strings.js
@@ -13560,7 +13567,9 @@ built-ins/RegExp/prototype/exec/name.js
 built-ins/RegExp/prototype/exec/not-a-constructor.js
 built-ins/RegExp/prototype/exec/success-g-lastindex-no-access.js
 built-ins/RegExp/prototype/exec/success-lastindex-access.js
+built-ins/RegExp/prototype/exec/u-captured-value.js
 built-ins/RegExp/prototype/exec/u-lastindex-adv.js
+built-ins/RegExp/prototype/exec/u-lastindex-value.js
 built-ins/RegExp/prototype/exec/y-fail-lastindex-no-write.js
 built-ins/RegExp/prototype/exec/y-fail-lastindex.js
 built-ins/RegExp/prototype/exec/y-fail-return.js
@@ -15818,6 +15827,7 @@ built-ins/ThrowTypeError/property-order.js
 built-ins/ThrowTypeError/prototype.js
 built-ins/ThrowTypeError/throws-type-error.js
 built-ins/ThrowTypeError/unique-per-realm-function-proto.js
+built-ins/ThrowTypeError/unique-per-realm-non-simple.js
 built-ins/ThrowTypeError/unique-per-realm-unmapped-args.js
 built-ins/TypedArray/Symbol.species/length.js
 built-ins/TypedArray/Symbol.species/name.js
@@ -16681,6 +16691,8 @@ built-ins/TypedArray/prototype/map/speciesctor-get-species-custom-ctor.js
 built-ins/TypedArray/prototype/map/speciesctor-get-species-returns-throws.js
 built-ins/TypedArray/prototype/map/speciesctor-get-species-use-default-ctor.js
 built-ins/TypedArray/prototype/map/speciesctor-get-species.js
+built-ins/TypedArray/prototype/map/speciesctor-resizable-buffer-grow.js
+built-ins/TypedArray/prototype/map/speciesctor-resizable-buffer-shrink.js
 built-ins/TypedArray/prototype/map/this-is-not-object.js
 built-ins/TypedArray/prototype/map/this-is-not-typedarray-instance.js
 built-ins/TypedArray/prototype/map/values-are-not-cached.js
@@ -18681,10 +18693,12 @@ language/arguments-object/10.6-14-c-4-s.js
 language/arguments-object/10.6-2gs.js
 language/arguments-object/10.6-5-1.js
 language/arguments-object/10.6-6-1.js
+language/arguments-object/10.6-6-2.js
 language/arguments-object/10.6-6-3-s.js
 language/arguments-object/10.6-6-3.js
 language/arguments-object/10.6-6-4-s.js
 language/arguments-object/10.6-6-4.js
+language/arguments-object/10.6-7-1.js
 language/arguments-object/S10.1.6_A1_T2.js
 language/arguments-object/S10.6_A1.js
 language/arguments-object/S10.6_A2.js
@@ -18696,6 +18710,7 @@ language/arguments-object/S10.6_A4.js
 language/arguments-object/S10.6_A5_T1.js
 language/arguments-object/S10.6_A5_T2.js
 language/arguments-object/S10.6_A5_T3.js
+language/arguments-object/S10.6_A5_T4.js
 language/arguments-object/S10.6_A6.js
 language/arguments-object/S10.6_A7.js
 language/arguments-object/arguments-caller.js
@@ -20546,6 +20561,7 @@ language/expressions/assignment/fn-name-class.js
 language/expressions/assignment/fn-name-cover.js
 language/expressions/assignment/fn-name-fn.js
 language/expressions/assignment/fn-name-gen.js
+language/expressions/assignment/fn-name-lhs-cover.js
 language/expressions/assignment/fn-name-lhs-member.js
 language/expressions/assignment/id-arguments-strict.js
 language/expressions/assignment/id-eval-strict.js
@@ -20971,6 +20987,7 @@ language/expressions/async-arrow-function/early-errors-arrow-formals-body-duplic
 language/expressions/async-arrow-function/early-errors-arrow-formals-contains-super-call.js
 language/expressions/async-arrow-function/early-errors-arrow-formals-contains-super-property.js
 language/expressions/async-arrow-function/early-errors-arrow-formals-lineterminator.js
+language/expressions/async-arrow-function/escaped-async-line-terminator.js
 language/expressions/async-arrow-function/escaped-async.js
 language/expressions/async-arrow-function/eval-var-scope-syntax-err.js
 language/expressions/async-arrow-function/forbidden-ext/b1/async-arrow-function-forbidden-ext-direct-access-prop-arguments.js
@@ -26485,6 +26502,7 @@ language/expressions/conditional/S11.12_A4_T3.js
 language/expressions/conditional/S11.12_A4_T4.js
 language/expressions/conditional/coalesce-expr-ternary.js
 language/expressions/conditional/in-branch-1.js
+language/expressions/conditional/in-branch-2.js
 language/expressions/conditional/in-condition.js
 language/expressions/conditional/symbol-conditional-evaluation.js
 language/expressions/conditional/tco-cond.js
@@ -28380,6 +28398,7 @@ language/expressions/instanceof/S15.3.5.3_A3_T1.js
 language/expressions/instanceof/S15.3.5.3_A3_T2.js
 language/expressions/instanceof/primitive-prototype-with-object.js
 language/expressions/instanceof/primitive-prototype-with-primitive.js
+language/expressions/instanceof/prototype-getter-with-object-throws.js
 language/expressions/instanceof/prototype-getter-with-object.js
 language/expressions/instanceof/prototype-getter-with-primitive.js
 language/expressions/instanceof/symbol-hasinstance-get-err.js
@@ -29619,6 +29638,7 @@ language/expressions/object/identifier-shorthand-package-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-private-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-protected-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-public-invalid-strict-mode.js
+language/expressions/object/identifier-shorthand-static-init-await-invalid.js
 language/expressions/object/identifier-shorthand-static-init-await-valid.js
 language/expressions/object/identifier-shorthand-static-invalid-strict-mode.js
 language/expressions/object/identifier-shorthand-yield-invalid-strict-mode.js
@@ -30607,6 +30627,7 @@ language/expressions/yield/formal-parameters.js
 language/expressions/yield/from-catch.js
 language/expressions/yield/from-try.js
 language/expressions/yield/from-with.js
+language/expressions/yield/in-iteration-stmt.js
 language/expressions/yield/in-rltn-expr.js
 language/expressions/yield/invalid-left-hand-side.js
 language/expressions/yield/iter-value-specified.js
@@ -30619,6 +30640,7 @@ language/expressions/yield/rhs-template-middle.js
 language/expressions/yield/rhs-unresolvable.js
 language/expressions/yield/rhs-yield.js
 language/expressions/yield/star-array.js
+language/expressions/yield/star-in-iteration-stmt.js
 language/expressions/yield/star-in-rltn-expr.js
 language/expressions/yield/star-iterable.js
 language/expressions/yield/star-return-is-null.js
@@ -30924,6 +30946,7 @@ language/future-reserved-words/public.js
 language/future-reserved-words/short.js
 language/future-reserved-words/static-strict-escaped.js
 language/future-reserved-words/static-strict.js
+language/future-reserved-words/static.js
 language/future-reserved-words/super.js
 language/future-reserved-words/synchronized.js
 language/future-reserved-words/throws.js
@@ -33064,6 +33087,7 @@ language/statements/await-using/initializer-Symbol.asyncDispose-called-at-end-of
 language/statements/await-using/initializer-Symbol.asyncDispose-called-at-end-of-forstatement.js
 language/statements/await-using/initializer-Symbol.asyncDispose-called-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/await-using/initializer-Symbol.asyncDispose-called-if-subsequent-initializer-throws.js
+language/statements/await-using/initializer-Symbol.asyncDispose-disposed-at-end-of-imported-module.js
 language/statements/await-using/initializer-Symbol.asyncDispose-disposed-at-end-of-module.js
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-asyncfunctionbody.js
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-asyncgeneratorbody.js
@@ -33072,6 +33096,7 @@ language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-each
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-forstatement.js
 language/statements/await-using/initializer-Symbol.dispose-called-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/await-using/initializer-Symbol.dispose-called-if-subsequent-initializer-throws.js
+language/statements/await-using/initializer-Symbol.dispose-disposed-at-end-of-imported-module.js
 language/statements/await-using/initializer-Symbol.dispose-disposed-at-end-of-module.js
 language/statements/await-using/multiple-resources-disposed-in-reverse-order.js
 language/statements/await-using/puts-initializer-on-top-of-disposableresourcestack-multiple-bindings.js
@@ -39713,6 +39738,7 @@ language/statements/for-of/generator-close-via-throw.js
 language/statements/for-of/generator-next-error.js
 language/statements/for-of/generator.js
 language/statements/for-of/generic-iterable.js
+language/statements/for-of/head-await-using-bound-names-fordecl-tdz.js
 language/statements/for-of/head-await-using-bound-names-in-stmt.js
 language/statements/for-of/head-await-using-bound-names-let.js
 language/statements/for-of/head-await-using-fresh-binding-per-iteration.js
@@ -39736,6 +39762,7 @@ language/statements/for-of/head-let-destructuring.js
 language/statements/for-of/head-let-fresh-binding-per-iteration.js
 language/statements/for-of/head-let-init.js
 language/statements/for-of/head-lhs-async-dot.js
+language/statements/for-of/head-lhs-async-escaped.js
 language/statements/for-of/head-lhs-async-invalid.js
 language/statements/for-of/head-lhs-async-parens.js
 language/statements/for-of/head-lhs-cover-non-asnmt-trgt.js
@@ -39745,6 +39772,7 @@ language/statements/for-of/head-lhs-invalid-asnmt-ptrn-obj.js
 language/statements/for-of/head-lhs-let.js
 language/statements/for-of/head-lhs-member.js
 language/statements/for-of/head-lhs-non-asnmt-trgt.js
+language/statements/for-of/head-using-bound-names-fordecl-tdz.js
 language/statements/for-of/head-using-bound-names-in-stmt.js
 language/statements/for-of/head-using-bound-names-let.js
 language/statements/for-of/head-using-fresh-binding-per-iteration.js
@@ -40257,6 +40285,7 @@ language/statements/function/13.2-15-s.js
 language/statements/function/13.2-16-s.js
 language/statements/function/13.2-17-1.js
 language/statements/function/13.2-17-s.js
+language/statements/function/13.2-18-1.js
 language/statements/function/13.2-18-s.js
 language/statements/function/13.2-19-b-3gs.js
 language/statements/function/13.2-19-s.js
@@ -41537,6 +41566,7 @@ language/statements/using/initializer-disposed-at-end-of-block.js
 language/statements/using/initializer-disposed-at-end-of-forstatement.js
 language/statements/using/initializer-disposed-at-end-of-functionbody.js
 language/statements/using/initializer-disposed-at-end-of-generatorbody.js
+language/statements/using/initializer-disposed-at-end-of-imported-module.js
 language/statements/using/initializer-disposed-at-end-of-module.js
 language/statements/using/initializer-disposed-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/using/initializer-disposed-if-subsequent-initializer-throws.js

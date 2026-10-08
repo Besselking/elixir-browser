@@ -37,12 +37,21 @@ defmodule Browser.JS.Modules do
   defp syntax_error(msg), do: Interp.throw_error("SyntaxError", msg)
 
   # creates the record of a parsed module
+  # `using` nests the rest of the module body in one node; the declarations in it are still the
+  # module's own
+  defp flat_using(stmts) do
+    Enum.flat_map(stmts, fn
+      {:using, _, _, _, rest} -> flat_using(rest)
+      s -> [s]
+    end)
+  end
+
   defp new(key, base, {:program, stmts}) do
     Process.put({:js_hoist, {:module, key}}, stmts)
 
     info =
       Enum.reduce(
-        stmts,
+        flat_using(stmts),
         %{
           requests: [],
           events: [],

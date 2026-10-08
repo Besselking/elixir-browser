@@ -358,6 +358,33 @@ defmodule Browser.JSTest do
       assert js("String(Math.max)") == "function max() { [native code] }"
     end
 
+    test "in is no operator in a for head, except inside brackets" do
+      assert js("var n = 0; for (var i = ('a' in {a: 1}) ? 1 : 0; i < 2; i++) n++; n") == 1.0
+
+      assert js(
+               "var r = []; for (var k = [1 in [0, 1]][0]; false; ) ; var o = {x: 1}; for (var p in o) r.push(p); r.join()"
+             ) == "x"
+
+      assert js("for (var i = 0; 'q' in {q: 1} ? false : false; ) ; 'ok'") == "ok"
+    end
+
+    test "own keys come in creation order, hidden ones included" do
+      assert js("class C { static m(){} static x = 1 }; Reflect.ownKeys(C).join()") ==
+               "length,name,prototype,m,x"
+
+      assert js("var re = /(?:)/g; re.a = 1; Reflect.ownKeys(re).join()") == "lastIndex,a"
+    end
+
+    test "a typed array with elements cannot be frozen or sealed" do
+      assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("try { Object.seal(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("Object.isFrozen(Object.freeze(new Uint8Array(0)))") == true
+    end
+
     test "a combining mark is a character of its own" do
       assert js(
                "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"
@@ -973,6 +1000,41 @@ defmodule Browser.JSTest do
       assert js(
                "var d = Object.getOwnPropertyDescriptor({get x() { return 1 }}, 'x'); typeof d.get + typeof d.set + d.enumerable"
              ) == "functionundefinedtrue"
+    end
+
+    test "escaped static and async are names; parenthesized targets do not name functions" do
+      assert js("var st\\u0061tic = 2; { let st\\u0061tic = 3; } static") == 2.0
+
+      assert js("var f; (f) = function() {}; var g; g = function() {}; f.name + '|' + g.name") ==
+               "|g"
+    end
+
+    test "indexed setters on a prototype run for holes and the arguments of non-simple functions are unmapped" do
+      assert js("""
+             var l = [];
+             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l.push(v) }, configurable: true});
+             var a = [, 1]; a[0] = 5;
+             delete Object.prototype[0];
+             l.join() + '|' + a.hasOwnProperty(0)
+             """) == "5|false"
+
+      assert js(
+               "function f(a, b = 1) { a = 7; return arguments[0] + ',' + typeof Object.getOwnPropertyDescriptor(arguments, 'callee').get } f(1)"
+             ) ==
+               "1,function"
+    end
+
+    test "shorthand await is reserved in a static block but not in an arrow inside it" do
+      assert {:error, _, _} = JS.eval("class C { static { ({ await }); } }")
+      assert {:ok, _, _} = JS.eval("class C { static { (() => ({ await })); } }")
+    end
+
+    test "arguments length is an ordinary property" do
+      assert js("function f() { arguments.length = 'x'; return arguments.length } f(1)") == "x"
+
+      assert js(
+               "function f() { delete arguments.length; return String(Object.prototype.hasOwnProperty.call(arguments, 'length')) } f(1)"
+             ) == "false"
     end
 
     test "freeze, seal and preventExtensions" do

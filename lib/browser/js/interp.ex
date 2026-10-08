@@ -575,7 +575,19 @@ defmodule Browser.JS.Interp do
             end
 
           nil ->
-            if key == "length", do: o.len * 1.0, else: lookup(o, to_key(key), {:obj, id})
+            cond do
+              key == "length" and is_map_key(o, :arguments) and is_map_key(o.props, "length") ->
+                o.props["length"]
+
+              key == "length" and is_map_key(o, :len_gone) ->
+                lookup(o, "length", {:obj, id})
+
+              key == "length" ->
+                o.len * 1.0
+
+              true ->
+                lookup(o, to_key(key), {:obj, id})
+            end
         end
 
       :function ->
@@ -942,7 +954,26 @@ defmodule Browser.JS.Interp do
   @doc "Sets an own property without making it show up in `Object.keys`."
   def put_hidden({:obj, id}, key, v) do
     o = deref(id)
-    o = if Map.has_key?(o.props, key), do: o, else: Map.update(o, :horder, [key], &[key | &1])
+
+    o =
+      if Map.has_key?(o.props, key) do
+        o
+      else
+        # (where it stands among the enumerable names, so `ownKeys` can put it in creation order)
+        named =
+          if o.keys == [],
+            do: 0,
+            else:
+              Enum.count(
+                o.keys,
+                &(is_binary(&1) and not (is_integer(index(&1)) and index(&1) < 4_294_967_295))
+              )
+
+        o
+        |> Map.update(:horder, [key], &[key | &1])
+        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
+      end
+
     store(id, %{o | props: Map.put(o.props, key, v)})
   end
 
@@ -1044,34 +1075,12 @@ defmodule Browser.JS.Interp do
             end
 
           nil ->
-            if key == "length" do
-              new_len = array_length!(v)
-
-              cond do
-                Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) ->
-                  fail_put()
-
-                true ->
-                  # an element that cannot be deleted stops the array from shrinking past it
-                  attrs = Map.get(o, :attrs, %{})
-
-                  stop =
-                    o.items
-                    |> Map.keys()
-                    |> Enum.filter(
-                      &(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false)
-                    )
-                    |> Enum.max(fn -> nil end)
-                    |> then(&if(&1, do: &1 + 1, else: new_len))
-
-                  store(id, %{
-                    o
-                    | items: Map.filter(o.items, fn {i, _} -> i < stop end),
-                      len: stop
-                  })
-              end
+            # an arguments object's `length` is an ordinary property that takes any value
+            if key == "length" and is_map_key(o, :arguments) and not Map.get(o, :frozen, false) do
+              if is_map_key(o, :len_gone), do: store(id, Map.delete(o, :len_gone))
+              put_hidden({:obj, id}, "length", v)
             else
-              put_prop(id, o, to_key(key), v)
+              put_array_prop(id, o, key, v)
             end
         end
 
@@ -1298,8 +1307,35 @@ defmodule Browser.JS.Interp do
   defp inherited_set(_, _), do: :none
 
   # a missing array element: an index setter or a proxy further up the prototype chain
+  defp put_array_prop(id, o, key, v) do
+    if key == "length" do
+      new_len = array_length!(v)
+      # the coercion may have run code that changed the array
+      o = deref(id)
+
+      if Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) do
+        fail_put()
+      else
+        # an element that cannot be deleted stops the array from shrinking past it
+        attrs = Map.get(o, :attrs, %{})
+
+        stop =
+          o.items
+          |> Map.keys()
+          |> Enum.filter(&(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+          |> Enum.max(fn -> nil end)
+          |> then(&if(&1, do: &1 + 1, else: new_len))
+
+        store(id, %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop})
+      end
+    else
+      put_prop(id, o, to_key(key), v)
+    end
+  end
+
   defp index_hook({:obj, pid}, i) do
     p = deref(pid)
+    k = Integer.to_string(i)
 
     cond do
       is_map_key(p, :proxy) ->
@@ -1311,6 +1347,13 @@ defmodule Browser.JS.Interp do
 
       match?(%{class: :array, items: %{^i => _}}, p) ->
         :none
+
+      Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
+        :none
+
+      match?(%{props: %{^k => {:accessor, _, _}}}, p) ->
+        {:accessor, _, setter} = p.props[k]
+        if function?(setter), do: {:setter, setter}, else: :none
 
       true ->
         index_hook(p.proto, i)
@@ -1377,6 +1420,11 @@ defmodule Browser.JS.Interp do
 
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
+
+      # an arguments object's `length` can go: reads then see the prototype chain
+      o.class == :array and key == "length" ->
+        store(id, o |> Map.put(:len_gone, true) |> Map.update!(:props, &Map.delete(&1, "length")))
+        true
 
       i ->
         store(id, %{o | items: Map.delete(o.items, i)})
@@ -1843,9 +1891,17 @@ defmodule Browser.JS.Interp do
       nil ->
         proto =
           case get(nt, "prototype") do
-            {:obj, _} = p -> p
+            {:obj, _} = p ->
+              p
+
             # a built-in falls back to its own prototype, a plain function to Object.prototype
-            _ -> builtin_prototype(deref(id), f)
+            # (the realm of a revoked proxy cannot be found)
+            _ ->
+              with {:obj, nid} <- nt,
+                   %{proxy: :revoked} <- deref(nid),
+                   do: throw_error("TypeError", "Cannot perform operation on a revoked proxy")
+
+              builtin_prototype(deref(id), f)
           end
 
         if Map.get(deref(id), :no_new), do: throw_error("TypeError", "not a constructor")
@@ -2192,7 +2248,18 @@ defmodule Browser.JS.Interp do
               not is_map_key(props, "prototype"),
        do: function_prop(id, o, "prototype")
 
-  defp function_get(id, o, key) do
+  # the lazily made own `prototype` shadows anything the prototype chain has
+  defp function_get(id, %{props: props} = o, "prototype")
+       when not is_map_key(props, "prototype") do
+    case function_prop(id, o, "prototype") do
+      :undefined -> function_get_chain(id, o, "prototype")
+      p -> p
+    end
+  end
+
+  defp function_get(id, o, key), do: function_get_chain(id, o, key)
+
+  defp function_get_chain(id, o, key) do
     case lookup(o, key, {:obj, id}) do
       :undefined ->
         cond do
@@ -2434,7 +2501,8 @@ defmodule Browser.JS.Interp do
         thrower = :erlang.get(:js_throw_type_error)
 
         cond do
-          Map.has_key?(scope.vars, :strict) and thrower != :undefined ->
+          (Map.has_key?(scope.vars, :strict) or not simple_params?(scope)) and
+              thrower != :undefined ->
             Browser.JS.Props.define_accessor(a, "callee",
               get: thrower,
               set: thrower,
@@ -2461,6 +2529,20 @@ defmodule Browser.JS.Interp do
 
   # A sloppy function with plain parameters maps `arguments[i]` to the i-th parameter. The
   # last of equal names owns the mapping, and only indices below the argument count map.
+  # a function with defaults, a rest parameter or patterns gets an unmapped arguments object
+  defp simple_params?(scope) do
+    case Map.get(scope, :fid) do
+      fid when is_integer(fid) ->
+        case deref(fid) do
+          %{fun: {:closure, %{params: params}}} -> Enum.all?(params, &match?({:id, _}, &1))
+          _ -> true
+        end
+
+      _ ->
+        true
+    end
+  end
+
   defp map_arguments(aid, owner, scope, args) do
     with false <- Map.has_key?(scope.vars, :strict),
          fid when is_integer(fid) <- Map.get(scope, :fid),
@@ -3932,6 +4014,15 @@ defmodule Browser.JS.Interp do
       assign_var(env, name, v)
       v
     end
+  end
+
+  def ev({:unnamed, e}, env), do: ev(e, env)
+
+  # the expression of a `for (using x of …)` head sees `x` uninitialized
+  def ev({:tdz_names, names, e}, env) do
+    scope = new_scope(env)
+    for n <- names, do: declare(scope, n, :tdz)
+    ev(e, scope)
   end
 
   def ev({:assign, "=", {:member, o, k, _}, value}, env) do

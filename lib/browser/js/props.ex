@@ -38,9 +38,14 @@ defmodule Browser.JS.Props do
             nil
         end
 
-      o.class == :array and key == "length" ->
+      o.class == :array and key == "length" and is_map_key(o, :len_gone) and
+          not Map.has_key?(o.props, "length") ->
+        nil
+
+      o.class == :array and key == "length" and
+          not (is_map_key(o, :arguments) and is_map_key(o.props, "length")) ->
         {:data, o.len * 1.0, not Map.get(o, :frozen, false) and not Map.get(o, :len_ro, false),
-         false, false}
+         false, is_map_key(o, :arguments)}
 
       Map.has_key?(o.props, key) ->
         attrs = Map.get(o.attrs_or_default, key, %{})
@@ -222,7 +227,9 @@ defmodule Browser.JS.Props do
 
         {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
         {hints, hrest} = Enum.split_with(hidden -- std, &index_key?/1)
-        Enum.sort_by(ints ++ hints, &array_index/1) ++ std ++ rest ++ hrest
+
+        Enum.sort_by(ints ++ hints, &array_index/1) ++
+          std ++ interleave(rest, ordered -- (std ++ hints), o, hrest)
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
@@ -999,9 +1006,19 @@ defmodule Browser.JS.Props do
   def lock({:obj, id} = obj, freeze?) do
     o = deref(id)
 
-    if Map.has_key?(o, :proxy),
-      do: lock_proxy(obj, freeze?),
-      else: lock_plain(obj, id, o, freeze?)
+    cond do
+      Map.has_key?(o, :proxy) ->
+        lock_proxy(obj, freeze?)
+
+      Browser.JS.TypedArrays.unlockable?(obj, freeze?) ->
+        throw_error(
+          "TypeError",
+          "Cannot #{if freeze?, do: "freeze", else: "seal"} array buffer views with elements"
+        )
+
+      true ->
+        lock_plain(obj, id, o, freeze?)
+    end
   end
 
   def lock(v, _), do: v
