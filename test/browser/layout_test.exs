@@ -6691,4 +6691,16 @@ defmodule Browser.LayoutTest do
       assert text.x == 20 and text.y < 10
     end
   end
+
+  describe "clearance next to floats in an empty block" do
+    test "is applied however large the margin of the cleared block is" do
+      html =
+        ~s(<style>body{margin:0}</style><div><div><div style="float:left;width:10px;height:50px"></div></div><div id=c style="margin-top:400px;clear:left;height:5px;background:green"></div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 50
+    end
+  end
 end

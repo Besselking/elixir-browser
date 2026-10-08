@@ -3000,6 +3000,7 @@ defmodule Browser.Layout do
       deferred: [],
       open: %{},
       clr: nil,
+      adj: nil,
       pos: [
         %{x: 0, y: 0, w: width, h: if(root_height == :view, do: view_height, else: root_height)}
       ],
@@ -3092,6 +3093,25 @@ defmodule Browser.Layout do
   end
 
   # A block ends: its content bottom is as far as sticky boxes inside it can go.
+  # an empty block that held floats: they come up against the margin of what follows
+  defp adjoin_floats(st, _y0, n0) do
+    added = length(st.floats) - n0
+
+    if added > 0 and st.y == hd(st.floats).y0,
+      do: %{st | adj: {st.y, Enum.take(st.floats, added)}},
+      else: st
+  end
+
+  # the bottom of the floats on `side` that such a block held, while nothing has come after it
+  defp adjoining_bottom(%{adj: {y, floats}} = st, side) when y == st.y do
+    floats
+    |> Enum.filter(&(side == :both or &1.side == side))
+    |> Enum.map(& &1.y1)
+    |> Enum.max(fn -> nil end)
+  end
+
+  defp adjoining_bottom(_st, _side), do: nil
+
   defp end_block(%{blocks: [id | rest]} = st),
     do: %{st | blocks: rest, limits: Map.put(st.limits, id, st.y)}
 
@@ -3211,6 +3231,7 @@ defmodule Browser.Layout do
 
   # `clear`: the next line starts below the floats on that side
   defp op({:clear, side}, st) do
+    adjoining = adjoining_bottom(st, side)
     st = flush(st)
 
     bottom =
@@ -3223,7 +3244,9 @@ defmodule Browser.Layout do
 
     # a box that is not pushed down keeps its margin to collapse with others; when it is, the
     # margin of a first child collapses with the one above it (see the `gap` op)
-    if bottom && bottom > y0 + gap + min(st.ngap, 0) do
+    # (floats in an empty block just above would be pulled down by the margin: they need clearance
+    # however large it is)
+    if bottom && (bottom > y0 + gap + min(st.ngap, 0) or (adjoining || 0) > y0) do
       st = apply_gap(st)
       %{st | y: bottom, clr: {y0, gap, bottom}}
     else
@@ -3243,7 +3266,8 @@ defmodule Browser.Layout do
     }
   end
 
-  defp op({:inset_end}, %{insets: [{l, r, _y0, _n0} | rest]} = st) do
+  defp op({:inset_end}, %{insets: [{l, r, y0, n0} | rest]} = st) do
+    st = adjoin_floats(st, y0, n0)
     # the margin below a box is not one of a first child
     st = %{st | clr: nil}
     st = end_block(st)
@@ -3340,11 +3364,14 @@ defmodule Browser.Layout do
     st = if ref in st.ptop and not empty?, do: apply_gap(st), else: st
     st = %{st | ptop: List.delete(st.ptop, ref), clr: nil}
     {box, open} = Map.pop(st.open, ref)
-    {_bt, _br, bb, _bl} = box.o.bw
+    {bt, _br, bb, _bl} = box.o.bw
     st = %{st | open: open}
 
     # a box that starts a formatting context contains its floats
-    st = if box.o.bfc or Map.get(box, :bfc, false), do: contain_floats(st, box.fl0), else: st
+    flow? = st.y > box.top + bt + box.o.pt
+    bfc? = box.o.bfc or Map.get(box, :bfc, false)
+    st = if bfc?, do: contain_floats(st, box.fl0), else: st
+    st = if bfc? or flow?, do: st, else: adjoin_floats(st, box.top, box.fl0)
     st = %{st | blocks: List.delete(st.blocks, box.id)}
     st = if box.outer_floats, do: %{st | floats: box.outer_floats}, else: st
 

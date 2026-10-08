@@ -945,6 +945,7 @@ css/CSS2/css1/c71-fwd-parsing-000.xht
 css/CSS2/css1/c71-fwd-parsing-001.xht
 css/CSS2/css1/c71-fwd-parsing-004.xht
 css/CSS2/floats-clear/adjacent-floats-001.xht
+css/CSS2/floats-clear/adjoining-float-before-clearance.html
 css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-002.html
 css/CSS2/floats-clear/adjoining-float-nested-forced-clearance-004.html
 css/CSS2/floats-clear/clear-001.xht
