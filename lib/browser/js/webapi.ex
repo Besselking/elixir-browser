@@ -78,6 +78,8 @@ defmodule Browser.JS.WebAPI do
   @prelude ~S"""
   (function (g) {
     function def(name, value) { if (!(name in g)) g[name] = value; }
+    // the document and location of the page or frame that is running (this code is shared)
+    var curDoc = __cur_doc, curLoc = __cur_loc;
 
     // ── fetch and XMLHttpRequest ─────────────────────────────
     function Headers(init) {
@@ -129,7 +131,7 @@ defmodule Browser.JS.WebAPI do
       var list = [], ctype = enc[1];
       headers.forEach(function (v, k) { if (k === "content-type") ctype = v; else list.push([k, v]); });
       if (enc[0] === null) ctype = null;
-      return __fetch(method, new URL(url, document.baseURI || location.href).href, enc[0], list, ctype, credentials);
+      return __fetch(method, new URL(url, curDoc().baseURI || curLoc().href).href, enc[0], list, ctype, credentials);
     }
 
     function Response(body, init) {
@@ -411,12 +413,12 @@ defmodule Browser.JS.WebAPI do
       add: function (f) { return fonts; }, "delete": function () { return false; }, clear: function () {}, forEach: function () {},
       addEventListener: function () {}, removeEventListener: function () {} };
     fonts.ready = Promise.resolve(fonts);
-    try { document.fonts = fonts; } catch (e) {}
+    try { Object.defineProperty(Object.getPrototypeOf(document), "fonts", { get: function () { return fonts; }, configurable: true }); } catch (e) {}
     function FontFace(family, source, desc) { this.family = family; this.status = "loaded"; this.loaded = Promise.resolve(this); }
     FontFace.prototype.load = function () { return Promise.resolve(this); };
     def("FontFace", FontFace);
 
-    function Image(w, h) { var i = document.createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
+    function Image(w, h) { var i = curDoc().createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
     def("Image", Image);
 
     if (typeof navigator === "object") {
@@ -529,15 +531,27 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "assignedSlot", function () { return null; });
     // a shadow root here is a fragment that is kept, but not drawn
     addTo(EP, "attachShadow", function (init) {
-      var root = document.createDocumentFragment();
+      var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
       this.__shadow = root;
       return root;
     });
+    var CLP = Object.getPrototypeOf(document.documentElement.classList);
+    function tokens(l) { var a = []; for (var i = 0; i < l.length; i++) a.push(l.item(i)); return a; }
+    addTo(CLP, Symbol.iterator, function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "values", function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "keys", function () { return tokens(this).keys(); });
+    addTo(CLP, "entries", function () { return tokens(this).entries(); });
+    var SP = Object.getPrototypeOf(document.documentElement.style);
+    addTo(SP, Symbol.iterator, function () { var a = []; for (var i = 0; i < this.length; i++) a.push(this.item(i)); return a[Symbol.iterator](); });
+    var UP = Object.getPrototypeOf(new URLSearchParams());
+    if (UP.entries) addTo(UP, Symbol.iterator, function () { return this.entries()[Symbol.iterator](); });
+    var FP = Object.getPrototypeOf(document.createDocumentFragment());
+    if (!("getElementById" in FP)) addTo(FP, "getElementById", function (id) { return this.querySelector('[id="' + String(id).replace(/(["\\])/g, "\\$1") + '"]'); });
     getter(EP, "shadowRoot", function () { return this.__shadow && this.__shadow.mode === "open" ? this.__shadow : null; });
 
     var DP = Object.getPrototypeOf(document);
-    addTo(DP, "createElementNS", function (ns, tag) { return document.createElement(tag); });
+    addTo(DP, "createElementNS", function (ns, tag) { return this.createElement(tag); });
     addTo(DP, "importNode", function (n, deep) { return n.cloneNode(deep); });
     addTo(DP, "adoptNode", function (n) { return n; });
     addTo(DP, "elementFromPoint", function () { return null; });
@@ -553,36 +567,37 @@ defmodule Browser.JS.WebAPI do
     function Range() { editing.load(); return new g.Range(); }
     function Selection() {}
     def("Range", Range); def("Selection", Selection);
-    function defDoc(name, fn) { if (!(name in document)) Object.defineProperty(document, name, { get: fn, configurable: true }); }
-    defDoc("scrollingElement", function () { return document.documentElement; });
+    function defDoc(name, fn) { if (!(name in Object.getPrototypeOf(document))) Object.defineProperty(Object.getPrototypeOf(document), name, { get: fn, configurable: true }); }
+    defDoc("scrollingElement", function () { return this.documentElement; });
     defDoc("styleSheets", function () { return []; });
-    defDoc("forms", function () { return document.querySelectorAll("form"); });
-    defDoc("images", function () { return document.querySelectorAll("img"); });
-    defDoc("links", function () { return document.querySelectorAll("a[href], area[href]"); });
-    defDoc("scripts", function () { return document.querySelectorAll("script"); });
-    defDoc("all", function () { return document.querySelectorAll("*"); });
+    defDoc("forms", function () { return this.querySelectorAll("form"); });
+    defDoc("images", function () { return this.querySelectorAll("img"); });
+    defDoc("links", function () { return this.querySelectorAll("a[href], area[href]"); });
+    defDoc("scripts", function () { return this.querySelectorAll("script"); });
+    defDoc("all", function () { return this.querySelectorAll("*"); });
     defDoc("dir", function () { return "ltr"; });
     defDoc("lastModified", function () { return new Date().toString(); });
-    defDoc("domain", function () { return location.hostname; });
+    defDoc("domain", function () { return curLoc().hostname; });
     defDoc("implementation", function () {
+      var doc = this;
       return {
         hasFeature: function () { return true; },
         createHTMLDocument: function (title) {
-          var html = document.createElement("html"), head = document.createElement("head"), body = document.createElement("body");
+          var html = doc.createElement("html"), head = doc.createElement("head"), body = doc.createElement("body");
           html.appendChild(head); html.appendChild(body);
           return { documentElement: html, head: head, body: body, title: title || "",
-            createElement: function (t) { return document.createElement(t); }, createTextNode: function (t) { return document.createTextNode(t); },
-            createDocumentFragment: function () { return document.createDocumentFragment(); },
+            createElement: function (t) { return doc.createElement(t); }, createTextNode: function (t) { return doc.createTextNode(t); },
+            createDocumentFragment: function () { return doc.createDocumentFragment(); },
             querySelector: function (s) { return html.querySelector(s); }, querySelectorAll: function (s) { return html.querySelectorAll(s); },
             getElementById: function (id) { return html.querySelector("#" + id); }, getElementsByTagName: function (t) { return html.getElementsByTagName(t); },
-            implementation: document.implementation };
+            implementation: doc.implementation };
         }
       };
     });
 
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
-    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = location.origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
     // <dialog>: shown while it has the open attribute (a modal one is not modal here)
     if (typeof HTMLDialogElement === "function") {
       var DP = HTMLDialogElement.prototype;
@@ -964,7 +979,7 @@ defmodule Browser.JS.WebAPI do
     FileReader.prototype.addEventListener = function (t, f) { this["on" + t] = f; };
     def("Blob", Blob); def("File", File); def("FileReader", FileReader);
     var blobUrls = {}, blobSeq = 0;
-    URL.createObjectURL = function (b) { var u = "blob:" + location.origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
+    URL.createObjectURL = function (b) { var u = "blob:" + curLoc().origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
     URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
 
     function FormData(form) {
@@ -990,10 +1005,10 @@ defmodule Browser.JS.WebAPI do
     FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
     def("FormData", FormData);
 
-    def("DOMParser", function () { this.parseFromString = function (html) { var d = document.implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
+    def("DOMParser", function () { this.parseFromString = function (html) { var d = curDoc().implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
     def("XMLSerializer", function () { this.serializeToString = function (n) { return n.outerHTML !== undefined ? n.outerHTML : String(n); }; });
-    def("Option", function (text, value) { var o = document.createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
-    def("Audio", function (src) { var a = document.createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
+    def("Option", function (text, value) { var o = curDoc().createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
+    def("Audio", function (src) { var a = curDoc().createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
 
     def("Headers", Headers); def("Response", Response); def("Request", Request); def("fetch", fetchImpl);
     def("XMLHttpRequest", XMLHttpRequest);

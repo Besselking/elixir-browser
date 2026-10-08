@@ -158,4 +158,23 @@ defmodule Browser.JS.DOMApisTest do
     assert errors == []
     assert logs == ["main", "1"]
   end
+
+  test "classList, style and URLSearchParams can be iterated; a shadow root has innerHTML" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const el = document.getElementById("a");
+        el.style.color = "red";
+        const root = el.attachShadow({ mode: "open" });
+        root.innerHTML = "<p id=q>hi</p><p></p>";
+        console.log([...el.classList].join("|"), el.classList[1], [...el.style].join("|"),
+          [...new URLSearchParams("a=1&b=2")].join("|"), root.querySelectorAll("p").length,
+          root.getElementById("q").textContent, root.innerHTML);
+        """,
+        ~S|<div id=a class="x y"></div>|
+      )
+
+    assert errors == []
+    assert logs == ["x|y y color a,1|b,2 2 hi <p id=\"q\">hi</p><p></p>"]
+  end
 end

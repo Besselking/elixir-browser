@@ -107,4 +107,17 @@ defmodule Browser.JS.IframeTest do
     assert errors == []
     assert logs == ["null 1"]
   end
+
+  test "document helpers of the web API work for a frame's own document" do
+    {logs, errors} =
+      run(~S"""
+      const f = document.createElement("iframe");
+      f.srcdoc = "<form></form><form></form><script>parent.res = [document.forms.length, new Image().ownerDocument === document, new Option('a').ownerDocument === document].join()<\/script>";
+      f.onload = () => console.log(window.res, document.forms.length);
+      document.body.appendChild(f);
+      """)
+
+    assert errors == []
+    assert logs == ["2,true,true 0"]
+  end
 end

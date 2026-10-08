@@ -1302,6 +1302,9 @@ defmodule Browser.JS.DOM do
       {"nodeName", :fragment} ->
         {:ok, "#document-fragment"}
 
+      {"innerHTML", :fragment} ->
+        {:ok, serialize_kids(n.id)}
+
       {"parentNode", _} ->
         {:ok, wrap_or_null(n.parent)}
 
@@ -1707,6 +1710,11 @@ defmodule Browser.JS.DOM do
         set_title(to_str(v))
         :ok
 
+      # (a shadow root is a fragment)
+      {"innerHTML", :fragment} ->
+        set_children(n.id, parse_fragment(to_str_or_empty(v)))
+        :ok
+
       {"on" <> event, :document} ->
         set_inline_handler(n.id, event, if(function?(v), do: v))
         :ok
@@ -1858,6 +1866,14 @@ defmodule Browser.JS.DOM do
 
   defp classlist_get(nid, "length"), do: {:ok, float(length(classes(nid)))}
   defp classlist_get(nid, "value"), do: {:ok, attr_or(node(nid), "class", "")}
+
+  defp classlist_get(nid, key) when is_binary(key) do
+    case Integer.parse(key) do
+      {i, ""} when i >= 0 -> with c when is_binary(c) <- Enum.at(classes(nid), i), do: {:ok, c}
+      _ -> :miss
+    end
+  end
+
   defp classlist_get(_nid, _), do: :miss
 
   defp style_decls(nid) do
@@ -1885,6 +1901,7 @@ defmodule Browser.JS.DOM do
 
   defp style_get(nid, "cssText"), do: {:ok, attr_or(node(nid), "style", "")}
   defp style_get(nid, "length"), do: {:ok, float(length(style_decls(nid)))}
+  defp style_get(_nid, key) when not is_binary(key), do: :miss
 
   defp style_get(nid, key) do
     if key in ~w(setProperty getPropertyValue removeProperty item),
@@ -3544,6 +3561,8 @@ defmodule Browser.JS.DOM do
     install_aux()
     install_globals(scope, event_target, node_proto, element, text, document, event)
     Interp.declare(scope, "__ed", ed_object())
+    Interp.declare(scope, "__cur_doc", native("__cur_doc", fn _, _ -> wrap(st().doc) end))
+    Interp.declare(scope, "__cur_loc", native("__cur_loc", fn _, _ -> loc_host() end))
     :ok
   end
 
@@ -4202,7 +4221,8 @@ defmodule Browser.JS.DOM do
     def_fn(p, "createDocumentFragment", fn _this, _ -> wrap(new_node(%{kind: :fragment})) end)
 
     def_fn(p, "createEvent", fn _this, _ ->
-      new_object([], proto({:dom, :event}))
+      ev = deref_global("Event")
+      construct(ev, [""], ev)
     end)
 
     def_fn(p, "hasFocus", fn _this, _ -> true end)
@@ -4226,7 +4246,38 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "composedPath", fn _this, _ -> new_array([]) end)
-    def_fn(p, "initEvent", fn _this, _ -> :undefined end)
+
+    # the old way to fill in an event made by `document.createEvent` (type, bubbles, cancelable,
+    # then the extra arguments of each kind)
+    init = fn extra ->
+      fn this, args ->
+        put(this, "type", to_str(arg(args, 0)))
+        put(this, "bubbles", truthy(arg(args, 1)))
+        put(this, "cancelable", truthy(arg(args, 2)))
+
+        for {name, i} <- Enum.with_index(extra, 3), name != nil, do: put(this, name, arg(args, i))
+
+        :undefined
+      end
+    end
+
+    def_fn(p, "initEvent", init.([]))
+    def_fn(p, "initCustomEvent", init.(["detail"]))
+    def_fn(p, "initUIEvent", init.(["view", "detail"]))
+
+    def_fn(
+      p,
+      "initMouseEvent",
+      init.(
+        ~w(view detail screenX screenY clientX clientY ctrlKey altKey shiftKey metaKey button relatedTarget)
+      )
+    )
+
+    def_fn(
+      p,
+      "initKeyboardEvent",
+      init.(["view", "key", "location", "ctrlKey", "altKey", "shiftKey", "metaKey"])
+    )
   end
 
   defp install_aux do
@@ -4286,6 +4337,13 @@ defmodule Browser.JS.DOM do
     end)
 
     sp = proto({:dom, :style})
+
+    def_fn(sp, "item", fn this, args ->
+      case Enum.at(style_decls(style_nid(this)), to_int(arg(args, 0))) do
+        {k, _} -> k
+        nil -> ""
+      end
+    end)
 
     def_fn(sp, "setProperty", fn this, args ->
       set_style(
