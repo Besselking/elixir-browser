@@ -63,6 +63,22 @@ defmodule Browser.Proxy do
     end
   end
 
+  @doc """
+  The proxy a connection to `ws` or `wss` address `uri` is tunnelled through (`CONNECT`):
+  `{host, port, auth}` with `auth` nil or `{user, password}` as charlists, or nil to connect
+  directly. A `wss` address uses `https_proxy`, a `ws` address `http_proxy`.
+  """
+  def tunnel(%URI{scheme: scheme, host: host}) when is_binary(host) do
+    config = :persistent_term.get({__MODULE__, :config}, nil) || empty()
+
+    with {_, _, _} = proxy <- proxy_for(config, if(scheme == "wss", do: "https", else: "http")),
+         false <- bypass?(config.no_proxy, host) do
+      proxy
+    else
+      _ -> nil
+    end
+  end
+
   @doc false
   def from_env(env \\ &System.get_env/1) do
     %{

@@ -409,6 +409,10 @@ defmodule Browser.JS.WebAPI do
     // for messages between a page and its workers (Browser.JS.Workers): a value as text and back
     def("__structuredEncode", function (v) { __load_idb(); return g.__idb_encode(v); });
     def("__structuredDecode", function (s) { __load_idb(); return g.__idb_decode(s); });
+    // WebSocket is in priv/js/websocket.js, loaded on first use
+    Object.defineProperty(g, "WebSocket", { configurable: true, enumerable: false,
+      get: function () { __load_websocket(); var d = Object.getOwnPropertyDescriptor(g, "WebSocket"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "WebSocket", { value: v, writable: true, configurable: true }); } });
     // Worker is in priv/js/worker.js, loaded on first use
     Object.defineProperty(g, "Worker", { configurable: true, enumerable: false,
       get: function () { __load_workers(); var d = Object.getOwnPropertyDescriptor(g, "Worker"); return d && "value" in d ? d.value : undefined; },
@@ -905,6 +909,7 @@ defmodule Browser.JS.WebAPI do
     }
     evClass("MessageEvent", ["data", "origin", "source", "lastEventId", "ports"]);
     evClass("ErrorEvent", ["message", "filename", "lineno", "colno", "error"]);
+    evClass("CloseEvent", ["wasClean", "code", "reason"]);
     evClass("PromiseRejectionEvent", ["promise", "reason"]);
     evClass("PopStateEvent", ["state"]);
     evClass("HashChangeEvent", ["oldURL", "newURL"]);

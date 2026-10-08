@@ -151,6 +151,7 @@ defmodule Browser.JS.Runtime do
     Browser.JS.Editing.install(scope)
     Browser.JS.IndexedDB.install(scope)
     Browser.JS.Workers.install(scope)
+    Browser.JS.WebSockets.install(scope)
     Modules.reset()
     Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
@@ -300,6 +301,16 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         guard(fn -> Browser.JS.Workers.deliver(id, event) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:ws, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.WebSockets.deliver(id, event) end, :ok)
         Browser.JS.Promise.run_microtasks()
         reply = finish(%{})
 
