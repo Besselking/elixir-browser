@@ -4847,18 +4847,29 @@ defmodule Browser.Layout do
         {bt, _, bb, _} = o.bw
         extra = if o.sizing == :border, do: 0, else: bt + o.pt + o.pb + bb
         target = max(target - extra, 0)
-        before ++ [{:box_start, ref, %{o | h: target}} | tail]
+        before ++ [{:box_start, ref, %{o | h: target}} | flex_height(tail, target)]
 
       nil ->
-        sub
+        flex_height(sub, target)
     end
+  end
+
+  # a flex container takes the height it is given (a definite one for its items' percentages)
+  defp flex_height(sub, target) do
+    Enum.map(sub, fn
+      {:flex, %{height: nil} = cs, items, style} ->
+        {:flex, %{cs | height: max(target - cs.hx, 0), hdef: true}, items, style}
+
+      op ->
+        op
+    end)
   end
 
   # an absolute element's percentage height is of its containing block
   defp set_height(sub, h) do
     case own_box(sub) do
-      {before, ref, o, tail} -> before ++ [{:box_start, ref, %{o | h: h}} | tail]
-      nil -> sub
+      {before, ref, o, tail} -> before ++ [{:box_start, ref, %{o | h: h}} | flex_height(tail, h)]
+      nil -> flex_height(sub, h)
     end
   end
 
@@ -7166,7 +7177,9 @@ defmodule Browser.Layout do
       chp: pct_of(c["height"]),
       collapsed: collapsed?,
       minh: num(c["min-height"]),
-      scroll?: c["overflow-x"] in ~w(hidden scroll auto),
+      scroll?:
+        c["overflow-x"] in ~w(hidden scroll auto) or
+          (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
       hpct:

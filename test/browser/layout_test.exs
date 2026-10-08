@@ -6230,6 +6230,22 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "flex containers between offsets and overflow" do
+    test "an absolute flex column between top and bottom gives its items percentage heights" do
+      html =
+        ~s|<div style="position:relative;width:200px;height:100px"><div style="position:absolute;top:0;bottom:0;left:0;right:0;display:flex;flex-direction:column"><div style="height:10%;background:green"></div><div style="flex:1;background:blue"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 10}, &1))
+    end
+
+    test "overflow-y: hidden makes the automatic minimum width zero" do
+      html =
+        ~s|<div style="display:flex;width:30px"><div style="overflow-y:hidden;background:red"><div style="width:80px;height:10px;background:green"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {255, 0, 0}, w: 30}, &1))
+    end
+  end
+
   describe "column geometry" do
     test "column edges are rounded from their exact positions, so neighbours still touch" do
       html =
