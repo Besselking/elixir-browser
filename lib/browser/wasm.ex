@@ -5,7 +5,7 @@ defmodule Browser.Wasm do
   (`Browser.Wasm.Interp`). The JavaScript `WebAssembly` object sits on top of this module.
 
   Supported: the WebAssembly 2.0 core without SIMD (multi-value, reference types, bulk memory,
-  sign extension, saturating conversions). Errors are `Browser.Wasm.Error` with kind `:compile`,
+  sign extension, saturating conversions) plus tail calls, multiple memories and extended constant expressions. Errors are `Browser.Wasm.Error` with kind `:compile`,
   `:link` or `:trap`.
   """
 

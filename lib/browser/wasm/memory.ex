@@ -108,11 +108,10 @@ defmodule Browser.Wasm.Memory do
     :ok
   end
 
-  @doc "Copies `n` bytes inside the memory (the ranges may overlap)."
-  def copy(mem, dst, src, n) do
-    size = size(mem) * @page
-    if src + n > size or dst + n > size, do: oob()
-    if n > 0, do: write(mem, dst, read(mem, src, n))
+  @doc "Copies `n` bytes from `src_mem` to `mem` (the ranges may overlap when it is one memory)."
+  def copy(mem, dst, src_mem, src, n) do
+    if src + n > size(src_mem) * @page or dst + n > size(mem) * @page, do: oob()
+    if n > 0, do: write(mem, dst, read(src_mem, src, n))
     :ok
   end
 

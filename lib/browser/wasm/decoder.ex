@@ -455,6 +455,13 @@ defmodule Browser.Wasm.Decoder do
 
   defp instr(<<0x0F, r::binary>>), do: {:return, r}
   defp instr(<<0x10, r::binary>>), do: idx(:call, r)
+  defp instr(<<0x12, r::binary>>), do: idx(:return_call, r)
+
+  defp instr(<<0x13, r::binary>>) do
+    {t, r} = u32(r)
+    {tbl, r} = u32(r)
+    {{:return_call_indirect, t, tbl}, r}
+  end
 
   defp instr(<<0x11, r::binary>>) do
     {t, r} = u32(r)
@@ -480,18 +487,17 @@ defmodule Browser.Wasm.Decoder do
   defp instr(<<0x26, r::binary>>), do: idx(:table_set, r)
 
   defp instr(<<op, r::binary>>) when is_map_key(@loads, op) do
-    {a, o, r} = memarg(r)
-    {{:load, Map.fetch!(@loads, op), a, o}, r}
+    {a, o, m, r} = memarg(r)
+    {{:load, Map.fetch!(@loads, op), a, o, m}, r}
   end
 
   defp instr(<<op, r::binary>>) when is_map_key(@stores, op) do
-    {a, o, r} = memarg(r)
-    {{:store, Map.fetch!(@stores, op), a, o}, r}
+    {a, o, m, r} = memarg(r)
+    {{:store, Map.fetch!(@stores, op), a, o, m}, r}
   end
 
-  defp instr(<<0x3F, 0, r::binary>>), do: {:memory_size, r}
-  defp instr(<<0x40, 0, r::binary>>), do: {:memory_grow, r}
-  defp instr(<<op, _::binary>>) when op in [0x3F, 0x40], do: fail("zero byte expected")
+  defp instr(<<0x3F, r::binary>>), do: idx(:memory_size, r)
+  defp instr(<<0x40, r::binary>>), do: idx(:memory_grow, r)
 
   defp instr(<<0x41, r::binary>>) do
     {v, r} = s32(r)
@@ -524,21 +530,19 @@ defmodule Browser.Wasm.Decoder do
 
       sub == 8 ->
         {d, r} = u32(r)
-        {m, r} = zero(r)
-        _ = m
-        {{:memory_init, d}, r}
+        {m, r} = u32(r)
+        {{:memory_init, d, m}, r}
 
       sub == 9 ->
         idx(:data_drop, r)
 
       sub == 10 ->
-        {_, r} = zero(r)
-        {_, r} = zero(r)
-        {:memory_copy, r}
+        {d, r} = u32(r)
+        {src, r} = u32(r)
+        {{:memory_copy, d, src}, r}
 
       sub == 11 ->
-        {_, r} = zero(r)
-        {:memory_fill, r}
+        idx(:memory_fill, r)
 
       sub == 12 ->
         {e, r} = u32(r)
@@ -576,14 +580,11 @@ defmodule Browser.Wasm.Decoder do
     {{name, i}, r}
   end
 
-  defp zero(<<0, r::binary>>), do: {0, r}
-  defp zero(<<>>), do: fail("unexpected end")
-  defp zero(_), do: fail("zero byte expected")
-
   defp memarg(bin) do
     {a, r} = u32(bin)
-    if a >= 64, do: fail("malformed memop flags")
+    if a >= 128, do: fail("malformed memop flags")
+    {m, r} = if (a &&& 64) != 0, do: u32(r), else: {0, r}
     {o, r} = u32(r)
-    {a, o, r}
+    {a &&& 63, o, m, r}
   end
 end

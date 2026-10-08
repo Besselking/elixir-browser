@@ -112,18 +112,19 @@ defmodule Browser.Wasm.Interp do
         results = invoke(elem(inst.funcs, idx), Enum.reverse(args), depth)
         run(code, pc + 1, push_results(results, rest), locals, inst, depth)
 
+      {:return_call, idx, np} ->
+        {args, _} = Enum.split(stack, np)
+        tail_call(elem(inst.funcs, idx), Enum.reverse(args), depth)
+
+      {:return_call_indirect, ti, tbl, np} ->
+        [i | st] = stack
+        f = indirect(inst, ti, tbl, i)
+        {args, _} = Enum.split(st, np)
+        tail_call(f, Enum.reverse(args), depth)
+
       {:call_indirect, ti, tbl, np} ->
         [i | st] = stack
-        table = elem(inst.tables, tbl)
-        if i >= Table.size(table), do: trap("undefined element")
-
-        f =
-          case Table.get(table, i) do
-            :null -> trap("uninitialized element")
-            f -> f
-          end
-
-        if f.type != elem(inst.types, ti), do: trap("indirect call type mismatch")
+        f = indirect(inst, ti, tbl, i)
         {args, rest} = Enum.split(st, np)
         results = invoke(f, Enum.reverse(args), depth)
         run(code, pc + 1, push_results(results, rest), locals, inst, depth)
@@ -146,22 +147,22 @@ defmodule Browser.Wasm.Interp do
         Global.set(elem(inst.globals, i), v)
         run(code, pc + 1, st, locals, inst, depth)
 
-      {:load, kind, off} ->
+      {:load, kind, off, m} ->
         [base | st] = stack
-        v = load(elem(inst.mems, 0), kind, base + off)
+        v = load(elem(inst.mems, m), kind, base + off)
         run(code, pc + 1, [v | st], locals, inst, depth)
 
-      {:store, kind, off} ->
+      {:store, kind, off, m} ->
         [v, base | st] = stack
-        store(elem(inst.mems, 0), kind, base + off, v)
+        store(elem(inst.mems, m), kind, base + off, v)
         run(code, pc + 1, st, locals, inst, depth)
 
-      :memory_size ->
-        run(code, pc + 1, [Memory.size(elem(inst.mems, 0)) | stack], locals, inst, depth)
+      {:memory_size, m} ->
+        run(code, pc + 1, [Memory.size(elem(inst.mems, m)) | stack], locals, inst, depth)
 
-      :memory_grow ->
+      {:memory_grow, m} ->
         [d | st] = stack
-        r = Memory.grow(elem(inst.mems, 0), d)
+        r = Memory.grow(elem(inst.mems, m), d)
         run(code, pc + 1, [r &&& 0xFFFFFFFF | st], locals, inst, depth)
 
       :ref_is_null ->
@@ -176,6 +177,30 @@ defmodule Browser.Wasm.Interp do
         run(code, pc + 1, st, locals, inst, depth)
     end
   end
+
+  defp indirect(inst, ti, tbl, i) do
+    table = elem(inst.tables, tbl)
+    if i >= Table.size(table), do: trap("undefined element")
+
+    f =
+      case Table.get(table, i) do
+        :null -> trap("uninitialized element")
+        f -> f
+      end
+
+    if f.type != elem(inst.types, ti), do: trap("indirect call type mismatch")
+    f
+  end
+
+  # runs the callee in place of the caller: the depth does not grow
+  defp tail_call(%Func{impl: {:wasm, iid, idx}}, args, depth) do
+    tick()
+    inst = instance(iid)
+    fc = elem(inst.code, idx)
+    run(fc.code, 0, [], List.to_tuple(args ++ fc.zeros), inst, depth)
+  end
+
+  defp tail_call(func, args, depth), do: invoke(func, args, depth)
 
   defp branch(stack, 0, 0), do: stack
   defp branch(stack, 0, drop), do: Enum.drop(stack, drop)
@@ -227,10 +252,10 @@ defmodule Browser.Wasm.Interp do
     st
   end
 
-  defp bulk({:memory_init, d}, [n, src, dst | st], inst) do
+  defp bulk({:memory_init, d, m}, [n, src, dst | st], inst) do
     segs = segments(inst.id)
     bytes = elem(segs.datas, d)
-    mem = elem(inst.mems, 0)
+    mem = elem(inst.mems, m)
     if src + n > byte_size(bytes), do: trap("out of bounds memory access")
     if dst + n > Memory.size(mem) * Memory.page_size(), do: trap("out of bounds memory access")
     if n > 0, do: Memory.write(mem, dst, binary_part(bytes, src, n))
@@ -243,13 +268,13 @@ defmodule Browser.Wasm.Interp do
     st
   end
 
-  defp bulk(:memory_copy, [n, src, dst | st], inst) do
-    Memory.copy(elem(inst.mems, 0), dst, src, n)
+  defp bulk({:memory_copy, d, s}, [n, src, dst | st], inst) do
+    Memory.copy(elem(inst.mems, d), dst, elem(inst.mems, s), src, n)
     st
   end
 
-  defp bulk(:memory_fill, [n, v, dst | st], inst) do
-    Memory.fill(elem(inst.mems, 0), dst, v &&& 0xFF, n)
+  defp bulk({:memory_fill, m}, [n, v, dst | st], inst) do
+    Memory.fill(elem(inst.mems, m), dst, v &&& 0xFF, n)
     st
   end
 

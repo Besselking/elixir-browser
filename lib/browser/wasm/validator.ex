@@ -31,7 +31,6 @@ defmodule Browser.Wasm.Validator do
 
     tables = (imp.(:table) ++ mod.tables) |> Enum.map(&check_table/1) |> List.to_tuple()
     mems = (imp.(:mem) ++ mod.mems) |> Enum.map(&check_mem/1)
-    if length(mems) > 1, do: err("multiple memories")
     imported_globals = imp.(:global)
     globals = (imported_globals ++ Enum.map(mod.globals, & &1.type)) |> List.to_tuple()
 
@@ -391,6 +390,28 @@ defmodule Browser.Wasm.Validator do
     s |> pop_all(params) |> push_all(results) |> emit({:call, i, length(params)})
   end
 
+  defp ins(c, s, {:return_call, i}) do
+    if i >= tuple_size(c.funcs), do: err("unknown function")
+    {params, results} = elem(c.funcs, i)
+    check_tail(s, results)
+    s |> pop_all(params) |> emit({:return_call, i, length(params)}) |> unreachable()
+  end
+
+  defp ins(c, s, {:return_call_indirect, ti, tbl}) do
+    if tbl >= tuple_size(c.tables), do: err("unknown table")
+    {_, rt} = elem(c.tables, tbl)
+    if rt != :funcref, do: err("type mismatch")
+    if ti >= tuple_size(c.types), do: err("unknown type")
+    {params, results} = elem(c.types, ti)
+    check_tail(s, results)
+    {_, s} = pop(s, :i32)
+
+    s
+    |> pop_all(params)
+    |> emit({:return_call_indirect, ti, tbl, length(params)})
+    |> unreachable()
+  end
+
   defp ins(c, s, {:call_indirect, ti, tbl}) do
     if tbl >= tuple_size(c.tables), do: err("unknown table")
     {_, rt} = elem(c.tables, tbl)
@@ -501,37 +522,37 @@ defmodule Browser.Wasm.Validator do
     emit(s, {:elem_drop, e})
   end
 
-  defp ins(c, s, {:load, kind, align, offset}) do
-    mem(c)
+  defp ins(c, s, {:load, kind, align, offset, m}) do
+    mem(c, m)
     {t, natural} = Map.fetch!(@loads, kind)
     if align > natural, do: err("alignment must not be larger than natural")
     {_, s} = pop(s, :i32)
-    s |> push(t) |> emit({:load, kind, offset})
+    s |> push(t) |> emit({:load, kind, offset, m})
   end
 
-  defp ins(c, s, {:store, kind, align, offset}) do
-    mem(c)
+  defp ins(c, s, {:store, kind, align, offset, m}) do
+    mem(c, m)
     {t, natural} = Map.fetch!(@stores, kind)
     if align > natural, do: err("alignment must not be larger than natural")
     s = pop_all(s, [:i32, t])
-    emit(s, {:store, kind, offset})
+    emit(s, {:store, kind, offset, m})
   end
 
-  defp ins(c, s, :memory_size) do
-    mem(c)
-    s |> push(:i32) |> emit(:memory_size)
+  defp ins(c, s, {:memory_size, m}) do
+    mem(c, m)
+    s |> push(:i32) |> emit({:memory_size, m})
   end
 
-  defp ins(c, s, :memory_grow) do
-    mem(c)
+  defp ins(c, s, {:memory_grow, m}) do
+    mem(c, m)
     {_, s} = pop(s, :i32)
-    s |> push(:i32) |> emit(:memory_grow)
+    s |> push(:i32) |> emit({:memory_grow, m})
   end
 
-  defp ins(c, s, {:memory_init, d}) do
-    mem(c)
+  defp ins(c, s, {:memory_init, d, m}) do
+    mem(c, m)
     data_idx(c, d)
-    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_init, d})
+    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_init, d, m})
   end
 
   defp ins(c, s, {:data_drop, d}) do
@@ -539,9 +560,15 @@ defmodule Browser.Wasm.Validator do
     emit(s, {:data_drop, d})
   end
 
-  defp ins(c, s, op) when op in [:memory_copy, :memory_fill] do
-    mem(c)
-    s |> pop_all([:i32, :i32, :i32]) |> emit(op)
+  defp ins(c, s, {:memory_copy, d, src}) do
+    mem(c, d)
+    mem(c, src)
+    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_copy, d, src})
+  end
+
+  defp ins(c, s, {:memory_fill, m}) do
+    mem(c, m)
+    s |> pop_all([:i32, :i32, :i32]) |> emit({:memory_fill, m})
   end
 
   defp ins(_, s, {:i32_const, v}), do: s |> push(:i32) |> emit({:const, v})
@@ -574,6 +601,12 @@ defmodule Browser.Wasm.Validator do
     end
   end
 
+  # a tail call returns the results of the callee, so they must be the results of the function
+  defp check_tail(s, results) do
+    [f | _] = Enum.reverse(s.ctrls)
+    if f.outs != results, do: err("type mismatch")
+  end
+
   defp local(c, i) do
     if i >= tuple_size(c.locals), do: err("unknown local")
     elem(c.locals, i)
@@ -585,7 +618,7 @@ defmodule Browser.Wasm.Validator do
     rt
   end
 
-  defp mem(c), do: if(c.nmems == 0, do: err("unknown memory"))
+  defp mem(c, m), do: if(m >= c.nmems, do: err("unknown memory"))
 
   defp data_idx(c, d) do
     if c.ndatas == nil, do: err("data count section required")

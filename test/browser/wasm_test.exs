@@ -11,6 +11,9 @@ defmodule Browser.WasmTest do
   @imp "AGFzbQEAAAABDAJgAn9/AX9gAX8BfwIUAgNlbnYDYWRkAAADZW52AWcDfwEDAgEBBgYBfwFBAAsHDQIDY250AwEDcnVuAAEKFQETACAAIwAQACQAIwFBAWokASMACw=="
   @ctl "AGFzbQEAAAABIgZgAX8Bf2ACf38Bf2AAAGACf38Cf39gAn19AX1gAn5+AX4DCAcAAAECAwQFBy0HAnN3AAADc3VtAAEDZGl2AAIEdHJhcAADBHN3YXAABAFmAAUGaTY0bXVsAAYKYQcaAAJAAkACQCAADgIAAQILQQoPC0EUDwtBHgshAQF/AkADQCAARQ0BIAEgAGohASAAQQFrIQAMAAsLIAELBwAgACABbQsDAAALBgAgASAACwcAIAAgAZILBwAgACABfgs="
 
+  @tail "AGFzbQEAAAABBwFgAn9/AX8DAwIAAAQFAXABAQEHGAIJY291bnRkb3duAAAIdmlhVGFibGUAAQkHAQBBAAsBAAolAhcAIABFBH8gAQUgAEEBayABQQJqEgALCwsAIAAgAUEAEwAACw=="
+  @multi "AGFzbQEAAAABEgRgAABgAX8Bf2ACf38AYAABfwMGBQABAQIDBQUCAAEAAQcpBQRjb3B5AAAFbG9hZEEAAQVsb2FkQgACBnN0b3JlQgADBXNpemVCAAQKLwUMAEEKQQBBAvwKAQALBwAgAC0AAAsIACAALUABAAsKACAAIAE6QAEACwQAPwELCwgBAEEACwJBQg=="
+
   defp inst(b64, resolve \\ fn _, _, _ -> nil end) do
     b64 |> Base.decode64!() |> Wasm.compile() |> Wasm.instantiate(resolve)
   end
@@ -103,6 +106,24 @@ defmodule Browser.WasmTest do
     assert call(i, "f", [3.4028234663852886e38, 3.4028234663852886e38]) == [:infinity]
     assert {:nan, _} = hd(call(i, "f", [:infinity, :neg_infinity]))
     assert call(i, "i64mul", [0xFFFFFFFFFFFFFFFF, 2]) == [0xFFFFFFFFFFFFFFFE]
+  end
+
+  test "tail calls do not grow the stack" do
+    i = inst(@tail)
+    assert call(i, "countdown", [1_000_000, 0]) == [2_000_000]
+    assert call(i, "viaTable", [50_000, 1]) == [100_001]
+  end
+
+  test "several memories" do
+    i = inst(@multi)
+    assert call(i, "loadA", [1]) == [?B]
+    assert call(i, "loadB", [10]) == [0]
+    call(i, "copy", [])
+    assert call(i, "loadB", [10]) == [?A]
+    assert call(i, "loadB", [11]) == [?B]
+    call(i, "storeB", [0, 9])
+    assert call(i, "loadA", [0]) == [?A]
+    assert call(i, "sizeB", []) == [1]
   end
 
   test "malformed and invalid modules" do
