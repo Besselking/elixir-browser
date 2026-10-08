@@ -4993,6 +4993,17 @@ defmodule Browser.LayoutTest do
       [{"ab", 0, y1}, {"\u00A0", _, y2} | _] = bs_items("ab cd", 10)
       assert y1 == y2
     end
+
+    test "other space separators are preserved spaces too, and a line may break after them" do
+      # (measure/2 gives every character the same width, 5px at the page's font size)
+      [{"xx", 0, y1}, {"\u2001", _, y2} | _] = bs_items("xx\u2001ab", 10)
+      assert y1 == y2
+    end
+
+    test "ideographs break between each other under break-spaces" do
+      ys = bs_items("\u3042\u3042\u3001", 10) |> Enum.map(&elem(&1, 2)) |> Enum.uniq()
+      assert length(ys) == 2
+    end
   end
 
   describe "word-break and overflow-wrap" do
@@ -5385,6 +5396,42 @@ defmodule Browser.LayoutTest do
       # a (10), b (10 + 10 spacing), b (10, no spacing after it), c
       assert xs == [{"a", 0}, {"b", 10}, {"b", 30}, {"c", 40}] or
                Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40}
+    end
+  end
+
+  describe "text-transform keywords" do
+    defp transformed(css, text, attrs \\ "") do
+      html = ~s(<div style="font-size:20px;#{css}" #{attrs}>#{text}</div>)
+      page = Browser.Page.build("<style>body{margin:0}</style>" <> html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :text))
+      |> Enum.sort_by(& &1.x)
+      |> Enum.map_join(& &1.text)
+    end
+
+    test "full-width widens ASCII and spaces" do
+      assert transformed("text-transform:full-width", "Ab 1") == "Ａｂ１" or
+               transformed("text-transform:full-width", "Ab 1") == "Ａｂ\u3000１"
+    end
+
+    test "keywords combine" do
+      assert transformed("text-transform:uppercase full-width", "ab") == "ＡＢ"
+    end
+
+    test "full-size-kana replaces small kana" do
+      assert transformed("text-transform:full-size-kana", "ぁっ") == "あつ"
+    end
+
+    test "capitalize skips symbols and the Dutch ij is a digraph" do
+      assert transformed("text-transform:capitalize", "&lt;?transform") == "<?Transform"
+      assert transformed("text-transform:capitalize", "ijsland", ~s(lang="nl")) == "IJsland"
+    end
+
+    test "Greek capitals lose their accents" do
+      assert transformed("text-transform:uppercase", "καλημέρα", ~s(lang="el")) == "ΚΑΛΗΜΕΡΑ"
+      assert transformed("text-transform:uppercase", "é", ~s(lang="fr")) == "É"
     end
   end
 

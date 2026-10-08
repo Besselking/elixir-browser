@@ -170,12 +170,24 @@ defmodule Browser.Reftest do
         skip
 
       {:ok, rendered} ->
-        Enum.reduce_while(links, :pass, fn {kind, href}, :pass ->
-          case check_link(root, rel, path, rendered, kind, href, opts) do
-            :pass -> {:cont, :pass}
-            other -> {:halt, other}
-          end
-        end)
+        # (as in wptrunner, a test with several `match` references passes when any one of them
+        # agrees; every `mismatch` reference must differ)
+        results =
+          Enum.map(links, fn {kind, href} ->
+            {kind, check_link(root, rel, path, rendered, kind, href, opts)}
+          end)
+
+        {matches, mismatches} = Enum.split_with(results, &(elem(&1, 0) == :match))
+        matches = Enum.map(matches, &elem(&1, 1))
+        mismatches = Enum.map(mismatches, &elem(&1, 1))
+
+        cond do
+          matches != [] and :pass not in matches ->
+            Enum.find(matches, hd(matches), &match?({:fail, _}, &1))
+
+          true ->
+            Enum.find(mismatches, :pass, &(&1 != :pass))
+        end
     end
   end
 
