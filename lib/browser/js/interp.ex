@@ -171,7 +171,7 @@ defmodule Browser.JS.Interp do
   def stack_string(header) do
     frames =
       Process.get(:js_stack, [])
-      |> Enum.take(30)
+      |> Enum.take(12)
       |> Enum.map(fn name ->
         "\n    at " <> if(is_binary(name) and name != "", do: name, else: "<anonymous>")
       end)

@@ -24,7 +24,31 @@ defmodule Browser.JS.DOM do
   defp st, do: Process.get(:dom)
   defp put_st(s), do: Process.put(:dom, s)
 
-  defp node(nid), do: Map.fetch!(st().nodes, nid)
+  # a node of a frame that was torn down is gone from the map, but a page may still hold it:
+  # it then reads as an empty, detached node
+  defp node(nid) do
+    case st().nodes do
+      %{^nid => n} ->
+        n
+
+      _ ->
+        %{
+          id: nid,
+          kind: :text,
+          tag: nil,
+          attrs: [],
+          internal: [],
+          props: %{},
+          kids: [],
+          parent: nil,
+          text: "",
+          content: nil,
+          shost: nil,
+          shadow: nil,
+          doc: nil
+        }
+    end
+  end
 
   defp put_node(n) do
     s = st()
@@ -1096,10 +1120,12 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # a node of a frame that was removed is gone from the map; it has no ancestors
   defp ancestors(nid) do
-    case node(nid).parent do
-      nil -> []
-      p -> [p | ancestors(p)]
+    case st().nodes do
+      %{^nid => %{parent: nil}} -> []
+      %{^nid => %{parent: p}} -> [p | ancestors(p)]
+      _ -> []
     end
   end
 
@@ -2786,7 +2812,7 @@ defmodule Browser.JS.DOM do
   end
 
   # `window[0]`: the window of a frame
-  defp frame_by_index(key) do
+  defp frame_by_index(key) when is_binary(key) do
     with {i, ""} <- Integer.parse(key),
          d when d != nil <- Enum.at(child_frames(st().doc), i) do
       {:ok, aux_host(if(d == st().main, do: :window, else: {:window, d}), :window)}
@@ -2794,6 +2820,8 @@ defmodule Browser.JS.DOM do
       _ -> :error
     end
   end
+
+  defp frame_by_index(_), do: :error
 
   @doc """
   Named access on the window: an element with that `id` is a global (`<div id=log>` is `log`),
