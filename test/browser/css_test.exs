@@ -14,7 +14,8 @@ defmodule Browser.CSSTest do
       last?: Keyword.get(opts, :last?, true),
       index: Keyword.get(opts, :index, 1),
       count: Keyword.get(opts, :count, 1),
-      empty?: Keyword.get(opts, :empty?, false)
+      empty?: Keyword.get(opts, :empty?, false),
+      next: Keyword.get(opts, :next, [])
     }
   end
 
@@ -177,6 +178,55 @@ defmodule Browser.CSSTest do
     assert :error = CSS.parse_selector("li:nth-child(foo)")
   end
 
+  test ":nth-child(an+b of S) counts only the siblings that match S" do
+    a = ctx("li", [{"class", "x"}], index: 1, count: 3)
+    b = ctx("li", [], index: 2, count: 3, prev: [a])
+    c = ctx("li", [{"class", "x"}], index: 3, count: 3, prev: [b, a])
+    assert sm?("li:nth-child(2 of .x)", c)
+    refute sm?("li:nth-child(2 of .x)", a)
+    refute sm?("li:nth-child(1 of .x)", b)
+    assert sm?(":nth-child(even of *|*)", b)
+    assert {:ok, %{spec: {0, 2, 0}}} = CSS.parse_selector(":nth-child(2 of .x)")
+    assert :error = CSS.parse_selector(":nth-of-type(2 of .x)")
+  end
+
+  test ":lang(), :dir() and :scope" do
+    html = ctx("html", [{"lang", "en-US"}, {"dir", "rtl"}])
+    p = ctx("p", [], parent: html)
+    assert sm?(":lang(en)", p)
+    assert sm?(":lang(EN-us)", p)
+    refute sm?(":lang(de)", p)
+    assert :error = CSS.parse_selector(":lang(0)")
+    assert sm?(":dir(rtl)", p)
+    refute sm?(":dir(ltr)", p)
+    assert sm?(":dir(ltr)", ctx("p"))
+    assert sm?(":scope", html)
+    refute sm?(":scope", p)
+  end
+
+  test ":lang() ranges use extended filtering" do
+    fr = ctx("span", [{"lang", "fr-Latn-FR-x-foobar"}])
+    assert sm?(~s|:lang("*-FR")|, fr)
+    assert sm?(~s|:lang("*-Latn")|, fr)
+    assert sm?(~s|:lang("fr-x-foobar")|, fr)
+    assert sm?(":lang(\\*-FR)", fr)
+    refute sm?(~s|:lang("fr-Cyrl")|, fr)
+    refute sm?(~s|:lang("fr-foobar")|, fr)
+  end
+
+  test ":last-of-type, :only-of-type and :nth-last-of-type look at the elements after" do
+    later = {:element, "p", [], []}
+    first = ctx("p", [], index: 1, count: 3, next: [later, {:element, "b", [], []}])
+    last = ctx("p", [], index: 2, count: 3, prev: [first], next: [{:element, "b", [], []}])
+    other = ctx("b", [], index: 3, count: 3, next: [])
+    assert sm?("p:last-of-type", last)
+    refute sm?("p:last-of-type", first)
+    assert sm?("b:only-of-type", other)
+    refute sm?("p:only-of-type", last)
+    assert sm?("p:nth-last-of-type(2)", first)
+    assert sm?("p:nth-last-of-type(1)", last)
+  end
+
   test ":nth-of-type, :first-of-type and :empty" do
     a = ctx("b", [], index: 1, count: 3)
     p = ctx("p", [], index: 2, count: 3, prev: [a])
@@ -249,6 +299,52 @@ defmodule Browser.CSSTest do
       }
 
       assert CSS.matches?(rule.selector, ctx)
+    end
+  end
+
+  describe "@supports conditions" do
+    test "and, or, not and nested groups" do
+      assert CSS.supports?("(display: grid) and (color: red)")
+      assert CSS.supports?("(display: grid) or (--a: b)")
+      refute CSS.supports?("not (display: grid)")
+      refute CSS.supports?("(display: grid) and (not (color: red))")
+    end
+
+    test "unknown properties and bad names are not supported" do
+      refute CSS.supports?("(nope: 1)")
+      refute CSS.supports?("(--: a)")
+      assert CSS.supports?("(--a: a)")
+      assert CSS.supports?("(-webkit-box-orient: vertical)")
+    end
+
+    test "var() needs a clean fallback and braces may nest in values" do
+      assert CSS.supports?("(color: var(--a))")
+      assert CSS.supports?("(color: { [ var(--a) ] })")
+      refute CSS.supports?("(color: var(--a,!))")
+      refute CSS.supports?("(color: var(--a) !important !important)")
+    end
+
+    test "selector() and a prelude with braces" do
+      assert CSS.supports?("selector(a > b)")
+      refute CSS.supports?("selector(a >)")
+
+      css =
+        "@supports (color: { [ var(--a) ] }) { p { x: 1 } } @supports (nope: 1) { q { x: 2 } }"
+
+      assert [%{decls: [{"x", "1", false}]}] = CSS.parse(css)
+    end
+  end
+
+  describe "custom property declarations" do
+    test "names are case-sensitive and may be escaped" do
+      css = "p { --Ab: 1; --\\61 : 2; -\\2d c: 3; --: 4; --d: 5 !important !important }"
+
+      assert [%{decls: [{"--Ab", "1", false}, {"--a", "2", false}, {"--c", "3", false}]}] =
+               CSS.parse(css)
+    end
+
+    test "unbalanced brackets drop the declaration" do
+      assert [%{decls: [{"--a", "ok", false}]}] = CSS.parse("p { --a: ok; --b: red) }")
     end
   end
 end

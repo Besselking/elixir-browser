@@ -76,7 +76,7 @@ defmodule Browser.Reftest.Raster do
   defp draw(grid, %{type: :image} = i, w, h, pics) do
     case Map.get(pics, i.url) do
       nil -> grid
-      picture -> blit(grid, picture, i.x, i.y, i.w, i.h, clip_box(i, w, h))
+      picture -> draw_picture(grid, picture, i, clip_box(i, w, h))
     end
   end
 
@@ -105,6 +105,15 @@ defmodule Browser.Reftest.Raster do
             |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
         end
 
+      %{kind: :linear, tile: {_, _, tw, th} = tile, repeat: repeat, clip: {cx, cy, cw, ch} = lc} =
+          layer,
+      grid ->
+        clip = {max(ix0, cx), max(iy0, cy), min(ix1, cx + cw), min(iy1, cy + ch)}
+
+        tile
+        |> Browser.Backgrounds.tiles(repeat, lc)
+        |> Enum.reduce(grid, fn {x, y}, grid -> gradient(grid, layer, x, y, tw, th, clip) end)
+
       _other, grid ->
         grid
     end)
@@ -115,6 +124,14 @@ defmodule Browser.Reftest.Raster do
   defp draw(grid, %{type: :text} = t, w, h, _pics), do: text(grid, t, clip_box(t, w, h))
 
   defp draw(grid, _item, _w, _h, _pics), do: grid
+
+  # `object-fit`: the picture at its own size, cut to the item's box
+  defp draw_picture(grid, picture, %{fit: {dx, dy, fw, fh}} = i, {x0, y0, x1, y1}) do
+    clip = {max(x0, i.x), max(y0, i.y), min(x1, i.x + i.w), min(y1, i.y + i.h)}
+    blit(grid, picture, round(i.x + dx), round(i.y + dy), round(fw), round(fh), clip)
+  end
+
+  defp draw_picture(grid, picture, i, clip), do: blit(grid, picture, i.x, i.y, i.w, i.h, clip)
 
   defp clip_box(%{clip: %{x: x, y: y, w: cw, h: ch}}, w, h),
     do: {max(x, 0), max(y, 0), min(x + cw, w), min(y + ch, h)}
@@ -142,22 +159,26 @@ defmodule Browser.Reftest.Raster do
     ahem? = String.contains?(to_string(Map.get(t, :family)), "ahem")
     adv = advance(t)
     {gw, gh, gy} = glyph_box(t, size, ahem?, adv)
+    ls = Map.get(t, :ls, 0)
 
-    {grid, _} =
+    wsp = Map.get(t, :wsp, 0)
+
+    {grid, advance_x} =
       t.text
       |> String.graphemes()
-      |> Enum.reduce({grid, 0}, fn ch, {g, i} ->
-        x = t.x + round(i * adv * size)
+      |> Enum.reduce({grid, 0.0}, fn ch, {g, off} ->
+        cadv = Browser.Reftest.char_advance(ch, adv)
+        gw = if cadv == adv, do: gw, else: max(round(cadv * size) - if(ahem?, do: 0, else: 1), 1)
 
         g =
-          if String.trim(ch) == "",
+          if String.trim(ch) == "" or cadv == 0.0,
             do: g,
-            else: fill(g, x, gy, gw, gh, glyph_color(t.color, ch, t, ahem?), clip)
+            else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, i + 1}
+        {g, off + cadv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
-    width = round(String.length(t.text) * adv * size)
+    width = round(advance_x)
 
     grid =
       if Map.get(t, :underline),
@@ -167,6 +188,22 @@ defmodule Browser.Reftest.Raster do
     if Map.get(t, :strike),
       do: fill(grid, t.x, t.y + div(t.h, 2), width, 1, t.color, clip),
       else: grid
+  end
+
+  # text in the colour of what it is on is how tests hide their labels: it must not show up
+  # in the colour the salt gives a character
+  defp ink(grid, t, off, gy, ch, ahem?) do
+    x = max(t.x + round(off), 0)
+
+    with true <- gy >= 0 and gy < tuple_size(grid),
+         row = elem(grid, gy),
+         true <- byte_size(row) >= (x + 1) * 3,
+         <<_::binary-size(^x * 3), under::binary-size(3), _::binary>> <- row,
+         true <- under == pixel(t.color) do
+      t.color
+    else
+      _ -> glyph_color(t.color, ch, t, ahem?)
+    end
   end
 
   # the advance per character, in em (as `Browser.Reftest.measure/2` has it)
@@ -186,7 +223,9 @@ defmodule Browser.Reftest.Raster do
   defp glyph_color(color, _ch, _t, true), do: color
 
   defp glyph_color({r, g, b}, ch, t, false) do
-    <<code::utf8>> = ch
+    <<code::utf8, _::binary>> = ch
+    # the hyphen has two codes (a break puts either one in, depending on the font)
+    code = if code in [0x2010, 0x2011], do: 0x2D, else: code
 
     salt =
       code * 31 + if(Map.get(t, :bold), do: 7, else: 0) + if(Map.get(t, :italic), do: 13, else: 0)
@@ -236,6 +275,68 @@ defmodule Browser.Reftest.Raster do
     end
   end
 
+  # a linear gradient tile at `x`, `y`: each pixel takes the colour at its centre
+  defp gradient(grid, _layer, _x, _y, w, h, _clip) when w <= 0 or h <= 0, do: grid
+
+  defp gradient(grid, layer, x, y, w, h, {cx0, cy0, cx1, cy1}) do
+    x0 = max(x, cx0)
+    y0 = max(y, cy0)
+    x1 = min(x + w, cx1)
+    y1 = min(y + h, cy1)
+
+    if x1 <= x0 or y1 <= y0 do
+      grid
+    else
+      {lx1, ly1, lx2, ly2} = layer.line
+      {dx, dy} = {lx2 - lx1, ly2 - ly1}
+      len2 = dx * dx + dy * dy
+      before = x0 * 3
+      len = (x1 - x0) * 3
+
+      Enum.reduce(y0..(y1 - 1)//1, grid, fn row, g ->
+        <<pre::binary-size(^before), old::binary-size(^len), post::binary>> = elem(g, row)
+
+        {_, mixed} =
+          for xx <- x0..(x1 - 1)//1, reduce: {old, []} do
+            {<<o::binary-size(3), rest::binary>>, acc} ->
+              t =
+                if len2 == 0,
+                  do: 0.0,
+                  else: ((xx + 0.5 - x - lx1) * dx + (row + 0.5 - y - ly1) * dy) / len2
+
+              {r, gr, b, a} = stop_color(layer.stops, t)
+              {rest, [blend(o, r, gr, b, a) | acc]}
+          end
+
+        put_elem(g, row, IO.iodata_to_binary([pre, Enum.reverse(mixed), post]))
+      end)
+    end
+  end
+
+  defp stop_color([{_, c} | _], t) when t <= 0, do: round_color(c)
+  defp stop_color(stops, t), do: stop_color(stops, t, nil)
+
+  defp stop_color([], _t, {_, last}), do: round_color(last)
+  defp stop_color([{p, c} | _], t, nil) when t < p, do: round_color(c)
+
+  defp stop_color([{p1, c1} | rest], t, prev) do
+    case prev do
+      {p0, c0} when t >= p0 and t < p1 ->
+        mix(c0, c1, (t - p0) / (p1 - p0))
+
+      _ ->
+        stop_color(rest, t, {p1, c1})
+    end
+  end
+
+  defp mix({r0, g0, b0, a0}, {r1, g1, b1, a1}, f) do
+    m = fn u, v -> round(u + (v - u) * f) end
+    {m.(r0, r1), m.(g0, g1), m.(b0, b1), m.(a0, a1)}
+  end
+
+  defp round_color({r, g, b, a}), do: {round(r), round(g), round(b), round(a)}
+  defp round_color({r, g, b}), do: {round(r), round(g), round(b), 255}
+
   defp blend(_old, r, g, b, 255), do: <<r, g, b>>
   defp blend(old, _r, _g, _b, 0), do: old
 
@@ -247,11 +348,16 @@ defmodule Browser.Reftest.Raster do
   defp opaque?({_, _, _, a}), do: a >= 128
   defp opaque?(_), do: true
 
+  # (layout can leave a fraction on a coordinate, which pixels do not have)
+  defp fill(grid, x, y, w, h, color, clip)
+       when is_float(x) or is_float(y) or is_float(w) or is_float(h),
+       do: fill(grid, round(x), round(y), round(w), round(h), color, clip)
+
   defp fill(grid, x, y, w, h, color, {cx0, cy0, cx1, cy1}) do
-    x0 = max(x, cx0)
-    y0 = max(y, cy0)
-    x1 = min(x + w, cx1)
-    y1 = min(y + h, cy1)
+    x0 = round(max(x, cx0))
+    y0 = round(max(y, cy0))
+    x1 = round(min(x + w, cx1))
+    y1 = round(min(y + h, cy1))
 
     if x1 <= x0 or y1 <= y0 or not opaque?(color) do
       grid

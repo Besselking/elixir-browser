@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Browser.Layout do
   Loads a page (a URL or a file), lays it out and prints the boxes as an indented tree, so
   that a layout can be read, and two layouts compared, without looking at a picture.
 
-      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style]
+      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style] [--js]
 
   Each line is one element: its tag with `#id` and `.classes`, the border box that holds
   everything drawn for it and its descendants as `x,y WxH` in page coordinates, then its
@@ -20,6 +20,8 @@ defmodule Mix.Tasks.Browser.Layout do
   * `--viewport WxH` is the window the page is laid out in (default 800x600, which is what
     the reftests use for width).
   * `--style` adds the margin, border width and padding of each box, as `m=t,r,b,l`.
+  * `--js` runs the page's scripts first and lays out what they leave (text and line breaks in
+    an editable region show up as `<@t>` elements with a box of their own).
   * `--all` also lists elements that are not drawn (`<head>`, `<script>`, `display: none`).
 
   Needs no window, so it works in CI and cloud sessions, and on local files such as WPT
@@ -32,7 +34,9 @@ defmodule Mix.Tasks.Browser.Layout do
   @impl true
   def run(args) do
     {opts, rest} =
-      OptionParser.parse!(args, strict: [viewport: :string, all: :boolean, style: :boolean])
+      OptionParser.parse!(args,
+        strict: [viewport: :string, all: :boolean, style: :boolean, js: :boolean]
+      )
 
     [input] = rest
     {width, height} = viewport(opts[:viewport] || "800x600")
@@ -43,8 +47,12 @@ defmodule Mix.Tasks.Browser.Layout do
     env = %{Browser.Style.default_env() | width: width, height: height}
 
     case Page.load(Browser.Fetch.normalize(input), env) do
-      {:ok, page} -> Mix.shell().info(dump(page, width, height, opts))
-      {:error, why} -> Mix.raise("Could not load #{input}: #{inspect(why)}")
+      {:ok, page} ->
+        page = if opts[:js], do: Page.run_js(page, env), else: page
+        Mix.shell().info(dump(page, width, height, opts))
+
+      {:error, why} ->
+        Mix.raise("Could not load #{input}: #{inspect(why)}")
     end
   end
 

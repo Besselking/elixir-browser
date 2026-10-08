@@ -77,6 +77,162 @@ defmodule Browser.JS.DOMTest do
     assert logs(r) == ["false", "true true", "false done"]
   end
 
+  # the console lines a script writes, once timers and promises have settled
+  defp run_page(script, body \\ "") do
+    {pid, reply} = start("<body>#{body}<script>#{script}</script></body>")
+    flushed = Runtime.flush(pid)
+    logs(reply) ++ logs(flushed)
+  end
+
+  describe "streams" do
+    test "a ReadableStream gives its chunks to a reader, then ends" do
+      lines =
+        run_page("""
+        var s = new ReadableStream({
+          start(c) { c.enqueue("a"); c.enqueue("b"); c.close(); }
+        });
+        var r = s.getReader();
+        r.read().then(function (x) {
+          console.log(x.value, x.done);
+          return r.read();
+        }).then(function (x) {
+          console.log(x.value, x.done);
+          return r.read();
+        }).then(function (x) { console.log(String(x.value), x.done); });
+        """)
+
+      assert lines == ["a false", "b false", "undefined true"]
+    end
+
+    test "a pull source is asked for more when the reader wants it" do
+      lines =
+        run_page("""
+        var n = 0;
+        var s = new ReadableStream({
+          pull(c) { n++; if (n > 2) c.close(); else c.enqueue(n); }
+        });
+        var r = s.getReader(), out = [];
+        function next() {
+          return r.read().then(function (x) {
+            if (x.done) { console.log(out.join(",")); return; }
+            out.push(x.value); return next();
+          });
+        }
+        next();
+        """)
+
+      assert lines == ["1,2"]
+    end
+  end
+
+  describe "scripts that scripts add" do
+    test "an inserted script with a src runs after the turn and its element hears load" do
+      html = """
+      <body><script>
+      var s = document.createElement("script");
+      s.src = "/chunk.js";
+      s.onload = function () { console.log("loaded", window.chunk); };
+      document.body.appendChild(s);
+      console.log("added");
+      </script></body>
+      """
+
+      {pid, reply} = start(html, %{"http://t.test/chunk.js" => "window.chunk = 42;"})
+      flushed = Runtime.flush(pid)
+      assert errors(reply) == []
+      assert logs(reply) ++ logs(flushed) == ["added", "loaded 42"]
+    end
+
+    test "a script that cannot be fetched gets error, not load" do
+      html = """
+      <body><script>
+      var s = document.createElement("script");
+      s.src = "/missing.js";
+      s.onload = function () { console.log("load"); };
+      s.onerror = function () { console.log("error"); };
+      document.body.appendChild(s);
+      </script></body>
+      """
+
+      {pid, reply} = start(html)
+      flushed = Runtime.flush(pid)
+      assert logs(reply) ++ logs(flushed) == ["error"]
+    end
+  end
+
+  describe "elements" do
+    test "removing attribute nodes until none are left ends" do
+      lines =
+        run_page(
+          """
+          var el = document.getElementById("a");
+          var list = el.attributes;
+          while (list.length) el.removeAttributeNode(list[0]);
+          console.log(el.attributes.length, el.hasAttribute("title"));
+          """,
+          ~s(<p id="a" title="t" class="c">x</p>)
+        )
+
+      assert lines == ["0 false"]
+    end
+
+    test "a canvas has no drawing context, a video can be played" do
+      lines =
+        run_page("""
+        var c = document.createElement("canvas");
+        console.log(c.getContext("2d"));
+        var v = document.createElement("video");
+        v.play().then(function () { console.log("playing"); });
+        """)
+
+      assert lines == ["null", "playing"]
+    end
+
+    test "a promise rejected with nobody listening is reported" do
+      {pid, reply} = start("<body><script>Promise.reject(new Error('nope'))</script></body>")
+      flushed = Runtime.flush(pid)
+      assert errors(reply) ++ errors(flushed) == ["Uncaught (in promise) Error: nope"]
+    end
+  end
+
+  describe "the pointer" do
+    test "moving from one element to another fires mouseover, mouseout, mouseenter and mouseleave" do
+      {raw, _} =
+        """
+        <div id="a"><p id="b">x</p></div><div id="c">y</div>
+        <script>
+        var log = [];
+        ["a", "b", "c"].forEach(function (id) {
+          var el = document.getElementById(id);
+          ["mouseover", "mouseout", "mouseenter", "mouseleave"].forEach(function (t) {
+            el.addEventListener(t, function (e) {
+              log.push(t + ":" + id + ">" + (e.relatedTarget && e.relatedTarget.id));
+            });
+          });
+        });
+        window.addEventListener("dump", function () { console.log(log.join(" ")); });
+        </script>
+        """
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      raw = Browser.Nids.index(raw)
+      pid = Runtime.start(raw, %{url: "http://t.test/", width: 800, height: 600})
+      Runtime.run_scripts(pid)
+
+      {b, c} = {nid_of(raw, "b"), nid_of(raw, "c")}
+      Runtime.hover(pid, nil, b)
+      Runtime.hover(pid, b, c)
+      reply = Runtime.dispatch(pid, :window, "dump", %{bubbles: false})
+
+      assert logs(reply) == [
+               # entering b: the event bubbles, and the elements above hear mouseenter outermost first
+               "mouseover:b>null mouseover:a>null mouseenter:a>null mouseenter:b>null " <>
+                 "mouseout:b>c mouseout:a>c mouseleave:b>c mouseleave:a>c mouseover:c>b mouseenter:c>b"
+             ]
+    end
+  end
+
   describe "the tree" do
     test "queries, text and attributes" do
       r =
@@ -384,6 +540,46 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["2 3 hi x 1 4 2 add,default,shown,two"]
     end
 
+    test "a module namespace with exports cannot be frozen" do
+      {_, r} =
+        start(
+          """
+          <body><script type=module>
+          import * as ns from "/lib.js";
+          var t = "no";
+          try { Object.freeze(ns) } catch (e) { t = e.constructor.name }
+          console.log(t, Object.isFrozen(ns));
+          </script></body>
+          """,
+          @files
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["TypeError false"]
+    end
+
+    test "an import with the source phase is refused when its module is loaded" do
+      {_, r} =
+        start(
+          """
+          <body><script type=module>
+          let name = "none";
+          try { await import("/src.js") } catch (e) { name = e.constructor.name }
+          console.log(name);
+          </script></body>
+          """,
+          %{
+            "http://t.test/src.js" => ~S"""
+            import source s from "/missing.js";
+            export const x = 1;
+            """
+          }
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["TypeError"]
+    end
+
     test "an import map redirects specifiers" do
       {_, r} =
         start(
@@ -507,6 +703,41 @@ defmodule Browser.JS.DOMTest do
       assert errors(r) == []
       reply = Runtime.dispatch(pid, {:control, 0}, "click")
       assert logs(reply) == ["clicked"]
+    end
+  end
+
+  describe "contextmenu" do
+    defp nid_of(nodes, id) when is_list(nodes), do: Enum.find_value(nodes, &nid_of(&1, id))
+    defp nid_of({:text, _}, _id), do: nil
+
+    defp nid_of({:element, _tag, attrs, kids}, id) do
+      if {"id", id} in attrs,
+        do: List.keyfind(attrs, "@nid", 0) |> elem(1),
+        else: nid_of(kids, id)
+    end
+
+    test "is dispatched to an element by its layout number and can be cancelled" do
+      {raw, _} =
+        """
+        <p id="a">text</p>
+        <script>
+        document.getElementById("a").addEventListener("contextmenu", function (e) {
+          console.log("menu " + e.clientX + " " + e.button);
+          e.preventDefault();
+        });
+        </script>
+        """
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      raw = Browser.Nids.index(raw)
+      pid = Runtime.start(raw, %{url: "http://t.test/", width: 800, height: 600})
+      Runtime.run_scripts(pid)
+
+      props = %{"clientX" => 12.0, "clientY" => 3.0, "button" => 2.0}
+      reply = Runtime.dispatch(pid, {:edit_host, nid_of(raw, "a")}, "contextmenu", props)
+      assert logs(reply) == ["menu 12 2"]
+      assert reply.prevented
     end
   end
 

@@ -18,6 +18,8 @@ defmodule Browser.JS.Runtime do
 
   @steps 5_000_000
   @call_timeout 15_000
+  # a page with many scripts takes its time to fetch and run them all
+  @scripts_timeout 60_000
   @slice_ms 30
 
   # ── API ────────────────────────────────────────────────────
@@ -32,14 +34,12 @@ defmodule Browser.JS.Runtime do
   def start(raw, info) do
     owner = self()
 
-    # the heap lives in the process dictionary and only grows, so avoid repeated full sweeps
     :erlang.spawn_opt(
       fn ->
         boot(raw, Map.put(info, :owner, owner))
         loop(System.monotonic_time(:millisecond))
       end,
-      min_heap_size: 2_000_000,
-      fullsweep_after: 1_000_000
+      Browser.JS.process_opts()
     )
   end
 
@@ -55,7 +55,20 @@ defmodule Browser.JS.Runtime do
 
   def stop(pid), do: Process.exit(pid, :kill)
 
-  def run_scripts(pid), do: call(pid, :run_scripts)
+  def run_scripts(pid), do: call(pid, :run_scripts, @scripts_timeout)
+
+  @doc """
+  Hands the editing host that has focus a key or a click: `action` is one of the names
+  `__ed_action` in `priv/js/editing.js` knows (`"key"`, `"text"`, `"place"`, ...), with its
+  arguments. The reply has `:result` (a string, for copy and cut), `:sel` and `:focus_ed`.
+  """
+  def edit(pid, action, args \\ []), do: call(pid, {:edit, action, args})
+
+  @doc "The user put focus in the editing host the layout numbers `nid`."
+  def edit_focus(pid, nid), do: call(pid, {:edit_focus, nid})
+
+  @doc "The user took focus out of the editing host."
+  def edit_blur(pid), do: call(pid, :edit_blur)
 
   @doc """
   Fires `type` at `target`: `{:control, cid}`, `{:form, fid}`, `:document` or `:window`.
@@ -64,6 +77,9 @@ defmodule Browser.JS.Runtime do
   """
   def dispatch(pid, target, type, init \\ %{}, controls \\ %{}),
     do: call(pid, {:dispatch, target, type, init, controls})
+
+  @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
+  def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
@@ -81,7 +97,7 @@ defmodule Browser.JS.Runtime do
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
-  defp call(pid, request) do
+  defp call(pid, request, timeout \\ @call_timeout) do
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
 
@@ -93,7 +109,7 @@ defmodule Browser.JS.Runtime do
       {:DOWN, ^ref, _, _, reason} ->
         %{dirty: false, raw: nil, outbox: [], console: [], prevented: false, crashed: reason}
     after
-      @call_timeout ->
+      timeout ->
         Process.demonitor(ref, [:flush])
 
         %{
@@ -116,10 +132,11 @@ defmodule Browser.JS.Runtime do
     DOM.install(scope)
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
+    Browser.JS.Editing.install(scope)
     Modules.reset()
 
-    Process.put(:js_import, fn spec, from ->
-      Modules.import(spec, from || base_url(), loader())
+    Process.put(:js_import, fn spec, from, p, type ->
+      Modules.import(spec, from || base_url(), loader(), p, type)
     end)
 
     Process.put(:rt_importmap, %{})
@@ -211,6 +228,9 @@ defmodule Browser.JS.Runtime do
   defp while_due(now, deadline) do
     on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end
 
+    # every task has the whole budget: a framework's work spread over many tasks is not one script
+    Process.put(:js_steps, @steps)
+
     if System.monotonic_time(:millisecond) < deadline and Builtins.run_next_timer(on_error, now),
       do: while_due(now, deadline)
   end
@@ -222,7 +242,8 @@ defmodule Browser.JS.Runtime do
 
   defp handle(:run_scripts) do
     run_all_scripts()
-    finish(%{})
+    # editing hosts are drawn from the runtime's tree: its text and line breaks are numbered
+    finish(%{force_raw: DOM.has_editable?()})
   end
 
   defp handle({:dispatch, target, type, init, controls}) do
@@ -236,6 +257,44 @@ defmodule Browser.JS.Runtime do
 
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
+  end
+
+  # the pointer went from one element (by its layout number) to another
+  defp handle({:hover, old, new}) do
+    guard(fn -> DOM.hover(old, new) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
+  # the user's keys and clicks in an editing host: the editing prelude does them
+  defp handle({:edit, action, args}) do
+    guard(fn -> Browser.JS.Editing.load() end, :ok)
+
+    res =
+      guard(
+        fn ->
+          case DOM.ed_call(action, args) do
+            v when is_binary(v) -> v
+            _ -> nil
+          end
+        end,
+        nil
+      )
+
+    Browser.JS.Promise.run_microtasks()
+    finish(%{result: res})
+  end
+
+  defp handle({:edit_focus, nid}) do
+    guard(fn -> DOM.ed_focus(nid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
+  defp handle(:edit_blur) do
+    guard(fn -> DOM.ed_blur() end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
   end
 
   defp handle({:traverse, n}) do
@@ -257,10 +316,18 @@ defmodule Browser.JS.Runtime do
 
   defp resolve_target({:control, cid}), do: DOM.control_node(cid)
   defp resolve_target({:form, fid}), do: DOM.form_node(fid)
+  defp resolve_target({:edit_host, nid}), do: DOM.node_numbered(nid)
+  defp resolve_target({:numbered, nid}), do: DOM.node_numbered(nid)
   defp resolve_target(:document), do: DOM.document()
   defp resolve_target(:window), do: :window
 
   defp finish(extra) do
+    run_new_scripts()
+
+    for {_id, reason} <- Enum.reverse(Process.get(:js_unhandled, [])),
+        do: log(:error, "Uncaught (in promise) " <> describe(reason))
+
+    Process.put(:js_unhandled, [])
     dirty = DOM.dirty?() or Map.get(extra, :force_raw, false)
     raw = if dirty, do: DOM.to_raw()
     if raw, do: DOM.sync_cids(raw)
@@ -272,6 +339,8 @@ defmodule Browser.JS.Runtime do
         raw: raw,
         url: DOM.url(),
         outbox: DOM.take_outbox(),
+        sel: DOM.ed_sel(),
+        focus_ed: DOM.ed_focus_nid(),
         prevented: false,
         console: take_console()
       },
@@ -347,6 +416,7 @@ defmodule Browser.JS.Runtime do
   defp run_all_scripts do
     doc = DOM.document()
     scripts = for nid <- DOM.descendants(doc), s = script_info(nid), do: s
+    prefetch(scripts)
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
 
@@ -367,10 +437,101 @@ defmodule Browser.JS.Runtime do
       end
     end
 
+    Process.put(:rt_seen_scripts, MapSet.new(scripts, & &1.nid))
     Process.delete(:rt_script)
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
+    guard(fn -> DOM.autofocus() end, :ok)
     Browser.JS.Promise.run_microtasks()
+  end
+
+  # Scripts that scripts put in the document (a loader adding a chunk with `createElement("script")`)
+  # run after the turn that added them, and the element hears `load` (or `error`).
+  defp run_new_scripts(rounds \\ 0) do
+    seen = Process.get(:rt_seen_scripts)
+
+    if seen != nil and rounds < 20 and DOM.dirty?() do
+      fresh =
+        for nid <- DOM.descendants(DOM.document()),
+            not MapSet.member?(seen, nid),
+            s = script_info(nid),
+            s.kind in [:classic, :module],
+            external?(s) or String.trim(s.text) != "",
+            do: s
+
+      if fresh != [] do
+        Process.put(:rt_seen_scripts, Enum.reduce(fresh, seen, &MapSet.put(&2, &1.nid)))
+        prefetch(fresh)
+        Enum.each(fresh, &run_inserted/1)
+        Process.put(:js_steps, @steps)
+        guard(&Browser.JS.Promise.run_microtasks/0, :ok)
+        run_new_scripts(rounds + 1)
+      end
+    end
+  end
+
+  defp external?(%{src: src}), do: is_binary(src) and src != ""
+
+  defp run_inserted(s) do
+    Process.put(:rt_script, label(s))
+    Process.put(:js_steps, @steps)
+    DOM.set_current_script(s.nid)
+
+    loaded? =
+      case script_source(s) do
+        {:ok, src, base} ->
+          guard(fn -> run_source(s.kind, src, base, s) end, :ok)
+          true
+
+        :error ->
+          false
+      end
+
+    DOM.set_current_script(nil)
+    Process.delete(:rt_script)
+
+    if external?(s) do
+      event = if loaded?, do: "load", else: "error"
+      Process.put(:js_steps, @steps)
+      guard(fn -> DOM.dispatch(s.nid, event, %{bubbles: false, cancelable: false}) end, :ok)
+    end
+  end
+
+  defp run_source(:classic, src, base, _s), do: run_classic(src, base)
+
+  defp run_source(:module, src, base, s) do
+    key = if external?(s), do: base, else: {:inline, make_ref()}
+    run_module_source(src, key, base)
+  end
+
+  # the files of external scripts are fetched side by side; `script_source/1` takes them from here
+  defp prefetch(scripts) do
+    fetch = Process.get(:rt_info)[:fetch]
+
+    urls =
+      for %{kind: kind, src: src} = s <- scripts,
+          kind in [:classic, :module],
+          external?(s),
+          url = Browser.Fetch.resolve(base_url(), src),
+          allowed_url?(url),
+          is_function(fetch, 1),
+          uniq: true,
+          do: url
+
+    done =
+      urls
+      |> Task.async_stream(fn url -> {url, fetch.(url)} end,
+        max_concurrency: 8,
+        timeout: 30_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.flat_map(fn
+        {:ok, {url, {:ok, _, _} = ok}} -> [{url, ok}]
+        _ -> []
+      end)
+      |> Map.new()
+
+    Process.put(:rt_prefetched, Map.merge(Process.get(:rt_prefetched, %{}), done))
   end
 
   defp script_info(nid) do
@@ -400,7 +561,10 @@ defmodule Browser.JS.Runtime do
   defp script_source(%{src: src}) when is_binary(src) and src != "" do
     url = Browser.Fetch.resolve(base_url(), src)
 
-    case fetch(url) do
+    {pre, rest} = Map.pop(Process.get(:rt_prefetched, %{}), url)
+    Process.put(:rt_prefetched, rest)
+
+    case pre || fetch(url) do
       {:ok, body, final} ->
         {:ok, body, final}
 
@@ -460,10 +624,11 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp fetch(url) do
-    allowed? = page_scheme() == "file" or URI.parse(url).scheme in ["http", "https", "data"]
+  defp allowed_url?(url),
+    do: page_scheme() == "file" or URI.parse(url).scheme in ["http", "https", "data"]
 
-    if allowed? do
+  defp fetch(url) do
+    if allowed_url?(url) do
       case Process.get(:rt_info).fetch.(url) do
         {:ok, body, final} -> {:ok, body, final}
         {:error, msg} -> {:error, to_string(msg)}

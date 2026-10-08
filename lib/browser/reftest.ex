@@ -26,7 +26,7 @@ defmodule Browser.Reftest do
   }
 
   @unsupported [
-    {~r/<script/i, "scripts"},
+    {~r/<script|\bonload\s*=/i, "scripts"},
     {~r/reftest-wait|test-wait/, "waits for script"},
     {~r/<(video|audio|iframe|object|embed|canvas|svg|math|picture)[\s>:]/i,
      "frames, vector pictures or embedded content"},
@@ -88,7 +88,34 @@ defmodule Browser.Reftest do
 
   @doc "Measures text with the fixed advances `Browser.Reftest.Raster` paints."
   def measure(text, %{size: size} = style) do
-    round(String.length(text) * size * advance(style))
+    base = advance(style)
+    ems = text |> String.graphemes() |> Enum.reduce(0.0, &(&2 + char_advance(&1, base)))
+    round(ems * size)
+  end
+
+  @doc """
+  The advance of one character in em: East Asian wide and fullwidth ones are a full em, format
+  characters (joiners, word joiner, byte order mark, ...) have none.
+  """
+  def char_advance(<<cp::utf8, _::binary>>, base) do
+    cond do
+      wide?(cp) -> 1.0
+      invisible?(cp) -> 0.0
+      true -> base
+    end
+  end
+
+  def char_advance(_, base), do: base
+
+  defp invisible?(cp) do
+    cp in 0x200B..0x200F or cp in 0x2060..0x2064 or cp == 0xFEFF or cp == 0x34F or
+      cp in 0xFE00..0xFE0F or cp in 0x180B..0x180E or cp == 0xAD
+  end
+
+  defp wide?(cp) do
+    cp in 0x1100..0x115F or cp in 0x2E80..0xA4CF or cp in 0xAC00..0xD7A3 or
+      cp in 0xF900..0xFAFF or cp in 0xFE30..0xFE6F or cp in 0xFF00..0xFF60 or
+      cp in 0xFFE0..0xFFE6 or cp in 0x20000..0x3FFFD
   end
 
   # the advance of a glyph over the font size in the pictures `Raster` paints
@@ -126,7 +153,9 @@ defmodule Browser.Reftest do
         end
     end
   rescue
-    e -> {:fail, "crash: " <> (Exception.message(e) |> String.split("\n") |> hd())}
+    e ->
+      if System.get_env("REFTEST_TRACE"), do: IO.puts(Exception.format(:error, e, __STACKTRACE__))
+      {:fail, "crash: " <> (Exception.message(e) |> String.split("\n") |> hd())}
   end
 
   defp decide(source) do

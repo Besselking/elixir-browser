@@ -397,6 +397,9 @@ defmodule Browser.Backgrounds do
     }
   end
 
+  # a length in `ch`, which the style turns into pixels before this module sees it
+  defp ch?(tok), do: Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)ch\z/, tok)
+
   defp shorthand_token("/", {acc, x}), do: {%{acc | phase: :size}, x}
 
   defp shorthand_token(tok, {acc, x}) do
@@ -413,11 +416,13 @@ defmodule Browser.Backgrounds do
         {%{acc | image: tok}, x}
 
       # after the slash only size values belong to the size; a colour can still follow
-      acc.phase == :size and (lower in ~w(auto cover contain) or dimension(lower) != nil) ->
+      acc.phase == :size and
+          (lower in ~w(auto cover contain) or dimension(lower) != nil or ch?(lower)) ->
         {%{acc | size: [lower | acc.size]}, x}
 
       acc.phase == :pos and
-          (lower in ~w(left right top bottom center auto cover contain) or dimension(lower) != nil) ->
+          (lower in ~w(left right top bottom center auto cover contain) or dimension(lower) != nil or
+             ch?(lower)) ->
         {%{acc | position: [lower | acc.position]}, x}
 
       Color.parse(tok) != nil ->

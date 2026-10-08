@@ -10,7 +10,7 @@ defmodule Browser.JS.DOM do
   turns it back into that shape, after which the page is rebuilt (see `Browser.Page.from_raw/2`).
 
   Things the script did that reach beyond the tree are queued in the outbox for the session:
-  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:reload}`, `{:submit, form}`.
+  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:open_tab, url}`, `{:reload}`, `{:submit, form}`.
   """
 
   import Kernel, except: [node: 1]
@@ -112,6 +112,11 @@ defmodule Browser.JS.DOM do
       rects: %{},
       current_script: nil,
       write_after: nil,
+      # editing: `designMode`, the focused editing host (a node id) and the selection the page
+      # last reported (`report_selection/1`)
+      design_mode: false,
+      focus_ed: nil,
+      ed_sel: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
       next_nid: Browser.Nids.max_nid(raw, -1) + 1
@@ -202,7 +207,9 @@ defmodule Browser.JS.DOM do
 
   defp sync_node(_, _), do: :ok
 
-  defp export(nid) do
+  # `host` is the layout number of the editing host the node is in, or nil: text and line breaks
+  # in a host are exported with numbers of their own, so the layout can say where each one is
+  defp export(nid, host \\ nil) do
     n = node(nid)
 
     case n.kind do
@@ -213,10 +220,61 @@ defmodule Browser.JS.DOM do
         {:text, ""}
 
       _ ->
+        inner = ed_host_for(n, host)
         attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}]
-        kids = export_kids(n)
-        {:element, n.tag, attrs, kids}
+
+        attrs =
+          if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
+
+        {:element, n.tag, attrs, export_kids(n, inner)}
     end
+  end
+
+  # the host the children of `n` are in: `n` itself when it makes them editable, else the host
+  # `n` is in, unless `contenteditable=false` ends it
+  defp ed_host_for(n, host) do
+    cond do
+      n.kind != :element -> host
+      edit_attr(n) == true -> host || ensure_nid(n.id)
+      edit_attr(n) == false -> nil
+      host == nil and st().design_mode and n.tag == "body" -> ensure_nid(n.id)
+      true -> host
+    end
+  end
+
+  # numbers the text node or line break `nid` for the layout (`@znid` for the stand-in of a break)
+  defp ed_text(nid, host) do
+    n = node(nid)
+
+    cond do
+      n.kind == :text and n.text != "" ->
+        [{:element, "@t", [{"@nid", ensure_nid(nid)}, {"@ed", host}], [{:text, n.text}]}]
+
+      n.kind == :text ->
+        []
+
+      true ->
+        []
+    end
+  end
+
+  defp ed_break(nid, host) do
+    n = node(nid)
+
+    stand_in =
+      case List.keyfind(n.internal, "@znid", 0) do
+        {_, v} ->
+          v
+
+        nil ->
+          v = st().next_nid
+          put_st(%{st() | next_nid: v + 1})
+          update_node_quiet(nid, &%{&1 | internal: &1.internal ++ [{"@znid", v}]})
+          v
+      end
+
+    {:element, "@t", [{"@nid", stand_in}, {"@ed", host}, {"@z", ensure_nid(nid)}],
+     [{:text, "\u200B"}]}
   end
 
   # the number the layout knows an element by; elements scripts made get one on their way out
@@ -261,9 +319,10 @@ defmodule Browser.JS.DOM do
 
   defp export_attrs(n), do: n.attrs
 
-  defp export_kids(%{tag: "textarea", props: %{"value" => v}}) when is_binary(v), do: [{:text, v}]
+  defp export_kids(%{tag: "textarea", props: %{"value" => v}}, _host) when is_binary(v),
+    do: [{:text, v}]
 
-  defp export_kids(%{tag: "select"} = n) do
+  defp export_kids(%{tag: "select"} = n, _host) do
     selected = n.props["selectedIndex"]
 
     n.kids
@@ -280,7 +339,223 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp export_kids(n), do: Enum.map(n.kids, &export/1)
+  defp export_kids(n, nil), do: Enum.map(n.kids, &export/1)
+
+  defp export_kids(n, host) do
+    Enum.flat_map(n.kids, fn k ->
+      case node(k) do
+        %{kind: :text} -> ed_text(k, host)
+        %{kind: :element, tag: "br"} -> [ed_break(k, host), export(k, host)]
+        _ -> [export(k, host)]
+      end
+    end)
+  end
+
+  # ── text positions (JavaScript strings here count code points) ──
+
+  defp cp_len(text), do: text |> String.to_charlist() |> length()
+
+  defp cp_split(text, at) do
+    {l, r} = text |> String.to_charlist() |> Enum.split(max(at, 0))
+    {List.to_string(l), List.to_string(r)}
+  end
+
+  defp offset_arg(v) do
+    case to_num_or_zero(v) do
+      n when is_number(n) and n >= 0 -> trunc(n)
+      _ -> 0
+    end
+  end
+
+  defp char_data(nid) do
+    n = node(nid)
+
+    if n.kind not in [:text, :comment],
+      do: throw_error("TypeError", "Not a CharacterData node.")
+
+    n
+  end
+
+  # `(offset, count)` arguments clamped to the node's text
+  defp data_range(n, args) do
+    len = cp_len(n.text)
+    from = offset_arg(arg(args, 0))
+
+    if from > len,
+      do:
+        throw_error(
+          "IndexSizeError",
+          "The offset #{from} is larger than the node's length (#{len})."
+        )
+
+    {from, min(offset_arg(arg(args, 1)), len - from)}
+  end
+
+  # merges neighbouring text nodes below `nid` and drops empty ones
+  defp normalize(nid) do
+    kids = node(nid).kids
+    for k <- kids, node(k).kind == :element, do: normalize(k)
+
+    kids
+    |> Enum.chunk_by(&(node(&1).kind == :text))
+    |> Enum.each(fn [first | rest] = run ->
+      if node(first).kind == :text do
+        text = Enum.map_join(run, &node(&1).text)
+
+        if text == "" do
+          Enum.each(run, &detach/1)
+        else
+          update_node(first, &%{&1 | text: text})
+          Enum.each(rest, &detach/1)
+        end
+      end
+    end)
+  end
+
+  # what `a.compareDocumentPosition(b)` says: 2 b precedes, 4 b follows, +8 b contains a, +16 b is
+  # inside a
+  defp compare_position(a, b) do
+    pa = Enum.reverse([a | ancestors(a)])
+    pb = Enum.reverse([b | ancestors(b)])
+
+    cond do
+      a == b -> 0
+      hd(pa) != hd(pb) -> 1 + 32 + 4
+      b in ancestors(a) -> 8 + 2
+      a in ancestors(b) -> 16 + 4
+      true -> if branch_before?(pa, pb), do: 4, else: 2
+    end
+  end
+
+  defp branch_before?([x | ra], [x | rb]), do: branch_before?(ra, rb)
+
+  defp branch_before?([x | _], [y | _]) do
+    kids = node(node(x).parent).kids
+    Enum.find_index(kids, &(&1 == x)) < Enum.find_index(kids, &(&1 == y))
+  end
+
+  @block_tags ~w(address article aside blockquote body dd details div dl dt fieldset figcaption figure
+                 footer form h1 h2 h3 h4 h5 h6 header hr html li main nav ol p pre section table ul)
+
+  # `innerText`: the rendered text, with line breaks where blocks and `<br>` put them (white
+  # space collapsed unless the text is preformatted)
+  defp inner_text(nid) do
+    nid
+    |> inner_parts(false)
+    |> List.flatten()
+    |> collapse_breaks([])
+    |> Enum.reverse()
+    |> Enum.join()
+    |> String.trim("\n")
+  end
+
+  defp inner_parts(nid, pre?) do
+    n = node(nid)
+
+    case n.kind do
+      :text ->
+        [if(pre?, do: n.text, else: Regex.replace(~r/[ \t\n\r\f]+/, n.text, " "))]
+
+      :element when n.tag in ~w(script style template) ->
+        []
+
+      :element when n.tag == "br" ->
+        ["\n"]
+
+      :element ->
+        pre? = pre? or n.tag in ~w(pre textarea)
+        kids = Enum.map(n.kids, &inner_parts(&1, pre?))
+
+        cond do
+          n.tag in ~w(td th) -> [kids, "\t"]
+          n.tag == "tr" -> [kids |> trim_tab(), {:break, 1}]
+          n.tag in ~w(p) -> [{:break, 2}, kids, {:break, 2}]
+          n.tag in @block_tags -> [{:break, 1}, kids, {:break, 1}]
+          true -> kids
+        end
+
+      _ ->
+        Enum.map(n.kids, &inner_parts(&1, pre?))
+    end
+  end
+
+  defp trim_tab(kids) do
+    case List.flatten(kids) do
+      [] -> []
+      flat -> if List.last(flat) == "\t", do: List.delete_at(flat, -1), else: flat
+    end
+  end
+
+  # runs of required breaks become the longest of them; spaces at line ends and starts go
+  defp collapse_breaks([], acc), do: acc
+
+  defp collapse_breaks([{:break, n} | rest], acc) do
+    {more, rest} = Enum.split_while(rest, &match?({:break, _}, &1))
+    count = Enum.max([n | for({:break, m} <- more, do: m)])
+    acc = trim_line_end(acc)
+    # breaks at the very start are dropped; a `<br>` already put a newline there
+    acc =
+      cond do
+        acc == [] -> acc
+        true -> missing_breaks(acc, count) ++ acc
+      end
+
+    collapse_breaks(rest, acc)
+  end
+
+  defp collapse_breaks([text | rest], acc) when is_binary(text) do
+    acc =
+      case {acc, text} do
+        {[], _} ->
+          [String.trim_leading(text, " ")]
+
+        {["\n" | _], _} ->
+          [String.trim_leading(text, " ") | acc]
+
+        {[prev | _], " " <> _} ->
+          if String.ends_with?(prev, " "),
+            do: [String.trim_leading(text, " ") | acc],
+            else: [text | acc]
+
+        _ ->
+          [text | acc]
+      end
+
+    collapse_breaks(rest, acc)
+  end
+
+  defp trim_line_end([prev | rest]) when is_binary(prev) and prev != "\n",
+    do: [String.trim_trailing(prev, " ") | rest]
+
+  defp trim_line_end(acc), do: acc
+
+  # the newlines to add so the text ends with `count` of them (a `<br>` counts as one)
+  defp missing_breaks(acc, count) do
+    have = acc |> Enum.take_while(&(&1 == "\n" or &1 == "")) |> Enum.count(&(&1 == "\n"))
+    List.duplicate("\n", max(count - have, 0))
+  end
+
+  # ── contenteditable ────────────────────────────────────────
+
+  # true, false or nil (not set) from the `contenteditable` attribute of an element
+  defp edit_attr(n) do
+    case get_attr(n, "contenteditable") do
+      nil -> nil
+      v -> String.downcase(v) in ["", "true", "plaintext-only"]
+    end
+  end
+
+  # is the node editable: by its own attribute or the nearest ancestor that has one, or `designMode`
+  defp editable?(nid) do
+    Enum.reduce_while([nid | ancestors(nid)], st().design_mode, fn id, default ->
+      n = node(id)
+
+      case n.kind == :element && edit_attr(n) do
+        v when is_boolean(v) -> {:halt, v}
+        _ -> {:cont, default}
+      end
+    end)
+  end
 
   # ── layout ─────────────────────────────────────────────────
 
@@ -745,13 +1020,41 @@ defmodule Browser.JS.DOM do
         {:ok, n.text}
 
       {"length", k} when k in [:text, :comment] ->
-        {:ok, float(String.length(n.text))}
+        {:ok, float(cp_len(n.text))}
 
       {"ownerDocument", _} ->
         {:ok, wrap(st().doc)}
 
       {"isConnected", _} ->
         {:ok, n.id == st().doc or st().doc in ancestors(n.id)}
+
+      {"rows", :element} when n.tag in ["table", "thead", "tbody", "tfoot"] ->
+        {:ok, nodes_array(table_rows(n))}
+
+      {"tBodies", :element} when n.tag == "table" ->
+        {:ok, nodes_array(for id <- element_kids(n.id), node(id).tag == "tbody", do: id)}
+
+      {"tHead", :element} when n.tag == "table" ->
+        {:ok, wrap_or_null(Enum.find(element_kids(n.id), &(node(&1).tag == "thead")))}
+
+      {"tFoot", :element} when n.tag == "table" ->
+        {:ok, wrap_or_null(Enum.find(element_kids(n.id), &(node(&1).tag == "tfoot")))}
+
+      {"cells", :element} when n.tag == "tr" ->
+        {:ok, nodes_array(row_cells(n.id))}
+
+      {"cellIndex", :element} when n.tag in ["td", "th"] ->
+        {:ok, float(position_in(n.id, row_cells(n.parent)))}
+
+      {"rowIndex", :element} when n.tag == "tr" ->
+        table =
+          Enum.find(ancestors(n.id), &(node(&1).kind == :element and node(&1).tag == "table"))
+
+        {:ok, float(if(table, do: position_in(n.id, table_rows(node(table))), else: -1))}
+
+      {"sectionRowIndex", :element} when n.tag == "tr" ->
+        {:ok,
+         float(position_in(n.id, for(id <- element_kids(n.parent), node(id).tag == "tr", do: id)))}
 
       {_, :element} ->
         element_get(n, key, self)
@@ -763,6 +1066,29 @@ defmodule Browser.JS.DOM do
         :miss
     end
   end
+
+  # a table's rows in order: the head's, the bodies' (and rows of the table itself), the foot's
+  defp table_rows(%{tag: "table", id: id}) do
+    kids = element_kids(id)
+    sections = fn tag -> for k <- kids, node(k).tag == tag, do: k end
+
+    Enum.flat_map(sections.("thead"), &section_rows/1) ++
+      Enum.flat_map(kids, fn k ->
+        case node(k).tag do
+          "tbody" -> section_rows(k)
+          "tr" -> [k]
+          _ -> []
+        end
+      end) ++ Enum.flat_map(sections.("tfoot"), &section_rows/1)
+  end
+
+  defp table_rows(%{id: id}), do: section_rows(id)
+
+  defp section_rows(id), do: for(k <- element_kids(id), node(k).tag == "tr", do: k)
+
+  defp row_cells(id), do: for(k <- element_kids(id), node(k).tag in ["td", "th"], do: k)
+
+  defp position_in(id, ids), do: Enum.find_index(ids, &(&1 == id)) || -1
 
   defp sibling_elements(nid, dir) do
     {before, aft} = siblings(nid)
@@ -805,7 +1131,17 @@ defmodule Browser.JS.DOM do
         {:ok, serialize(n.id)}
 
       "innerText" ->
-        {:ok, text_content(n.id)}
+        {:ok, inner_text(n.id)}
+
+      "contentEditable" ->
+        {:ok,
+         case get_attr(n, "contenteditable") do
+           nil -> "inherit"
+           v -> if String.downcase(v) in ["", "true"], do: "true", else: String.downcase(v)
+         end}
+
+      "isContentEditable" ->
+        {:ok, editable?(n.id)}
 
       "value" ->
         {:ok, value_of(n)}
@@ -829,8 +1165,12 @@ defmodule Browser.JS.DOM do
         {:ok, nodes_array(Enum.filter(descendants(n.id), &(node(&1).tag == "option")))}
 
       "attributes" ->
-        {:ok,
-         new_array(Enum.map(n.attrs, fn {k, v} -> new_object([{"name", k}, {"value", v}]) end))}
+        attrs = Enum.map(n.attrs, fn {k, v} -> new_object([{"name", k}, {"value", v}]) end)
+        list = new_array(attrs)
+        # the list is a snapshot, but removing an attribute node through it empties it, so that
+        # `while (el.attributes.length) el.removeAttributeNode(el.attributes[0])` ends
+        for a <- attrs, do: put_hidden(a, "__list", list)
+        {:ok, list}
 
       k when k in ~w(offsetWidth offsetHeight offsetTop offsetLeft clientWidth clientHeight
                      clientTop clientLeft scrollWidth scrollHeight scrollTop scrollLeft) ->
@@ -842,8 +1182,14 @@ defmodule Browser.JS.DOM do
       k when k in @bool_attrs ->
         {:ok, get_attr(n, k) != nil}
 
+      k when k in ~w(href src action) ->
+        case get_attr(n, k) do
+          nil -> {:ok, ""}
+          v -> {:ok, resolve_url(String.trim(v))}
+        end
+
       k
-      when k in ~w(href src name placeholder title alt action method target rel for lang dir role) ->
+      when k in ~w(name placeholder title alt method target rel for lang dir role) ->
         {:ok, attr_or(n, k, "")}
 
       "htmlFor" ->
@@ -953,7 +1299,10 @@ defmodule Browser.JS.DOM do
         {:ok, "text/html"}
 
       "activeElement" ->
-        {:ok, wrap_or_null(find_tag(s.doc, "body"))}
+        {:ok, wrap_or_null(ed_focused() || find_tag(s.doc, "body"))}
+
+      "designMode" ->
+        {:ok, if(s.design_mode, do: "on", else: "off")}
 
       "hidden" ->
         {:ok, false}
@@ -1012,6 +1361,10 @@ defmodule Browser.JS.DOM do
 
       {"cookie", :document} ->
         Browser.Cookies.set_from_script(st().url, to_str(v))
+        :ok
+
+      {"designMode", :document} ->
+        put_st(%{st() | design_mode: String.downcase(to_str(v)) == "on"})
         :ok
 
       _ ->
@@ -1879,7 +2232,7 @@ defmodule Browser.JS.DOM do
     do: location_update(&%{&1 | query: nilify(String.trim_leading(to_str(v), "?"))})
 
   defp location_put("hash", v),
-    do: location_update(&%{&1 | fragment: nilify(String.trim_leading(to_str(v), "#"))})
+    do: location_update(&%{&1 | fragment: String.trim_leading(to_str(v), "#")})
 
   defp location_put("pathname", v) do
     path = to_str(v)
@@ -1952,10 +2305,11 @@ defmodule Browser.JS.DOM do
     {target, fragment} = Browser.Fetch.split_fragment(url)
     {here, _} = Browser.Fetch.split_fragment(st().url)
 
-    if fragment != nil and target == here and url != st().url do
-      hash_navigation(url, mode)
-    else
-      out({:navigate, url, mode})
+    cond do
+      # the same address again, or only another fragment: the document stays
+      fragment != nil and target == here and url == st().url -> :ok
+      fragment != nil and target == here -> hash_navigation(url, mode)
+      true -> out({:navigate, url, mode})
     end
 
     :ok
@@ -2374,6 +2728,212 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # ── editing: focus, the selection report, the hooks the editing prelude calls ──
+
+  @doc """
+  The selection as the page last reported it: `nil` when there is none, else `%{anchor: {nid,
+  offset}, focus: {nid, offset}, host: nid}` with the numbers the layout knows the nodes by
+  (`Browser.Nids`) and offsets in characters of a text node.
+  """
+  def ed_sel, do: st().ed_sel
+
+  @doc "True when the document has an editing host or is in `designMode`."
+  def has_editable? do
+    st().design_mode or
+      Enum.any?(st().nodes, fn {_, n} -> n.kind == :element and edit_attr(n) == true end)
+  end
+
+  @doc "The editing host (a layout number) that has focus, or nil."
+  def ed_focus_nid do
+    case ed_focused() do
+      nil -> nil
+      nid -> ensure_nid(nid)
+    end
+  end
+
+  # the focused host, if it is still in the document
+  defp ed_focused do
+    case st().focus_ed do
+      nil -> nil
+      nid -> if Map.has_key?(st().nodes, nid) and connected?(nid), do: nid
+    end
+  end
+
+  # an element that makes its contents editable: `contenteditable` itself, not inherited
+  defp ed_host?(nid) do
+    n = node(nid)
+    n.kind == :element and edit_attr(n) == true
+  end
+
+  defp focus_element(nid) do
+    cond do
+      st().focus_ed == nid ->
+        :ok
+
+      ed_host?(nid) ->
+        blur_focused()
+        put_st(%{st() | focus_ed: nid})
+        out({:focus_edit, ensure_nid(nid)})
+        dispatch(nid, "focus", %{bubbles: false, cancelable: false})
+        dispatch(nid, "focusin", %{bubbles: true, cancelable: false})
+        :ok
+
+      true ->
+        :ok
+    end
+  end
+
+  defp blur_focused do
+    case st().focus_ed do
+      nil ->
+        :ok
+
+      nid ->
+        put_st(%{st() | focus_ed: nil})
+        if Map.has_key?(st().nodes, nid), do: blur_events(nid)
+        :ok
+    end
+  end
+
+  defp blur_events(nid) do
+    dispatch(nid, "blur", %{bubbles: false, cancelable: false})
+    dispatch(nid, "focusout", %{bubbles: true, cancelable: false})
+  end
+
+  @doc "The session focused the editing host numbered `layout_nid` (a click, Tab or autofocus)."
+  def ed_focus(layout_nid) do
+    case nid_numbered(layout_nid) do
+      nil -> :ok
+      nid -> focus_element(nid)
+    end
+  end
+
+  @doc "The session took focus away from the editing host (a click elsewhere, Tab, Escape)."
+  def ed_blur do
+    case st().focus_ed do
+      nil ->
+        :ok
+
+      nid ->
+        put_st(%{st() | focus_ed: nil})
+        if Map.has_key?(st().nodes, nid), do: blur_events(nid)
+        :ok
+    end
+  end
+
+  @doc "Focuses the first editing host with `autofocus`, once the page has loaded."
+  def autofocus do
+    case Enum.find(elements(st().doc), fn id ->
+           n = node(id)
+           ed_host?(id) and get_attr(n, "autofocus") != nil
+         end) do
+      nil -> :ok
+      nid -> focus_element(nid)
+    end
+  end
+
+  @doc "The node (element or text) the layout numbers `n`, or nil."
+  def node_numbered(n), do: nid_numbered(n)
+
+  @doc """
+  The pointer moved from the element the layout numbers `old` to the one it numbers `new` (nil:
+  none): `mouseout` and `mouseover` (which bubble, and are what frameworks listen to), and
+  `mouseleave` / `mouseenter` for each element the pointer left or came into.
+  """
+  def hover(old, new) do
+    {old_n, new_n} = {old && nid_numbered(old), new && nid_numbered(new)}
+    chain = fn n -> if n, do: [n | ancestors(n)], else: [] end
+    {old_chain, new_chain} = {chain.(old_n), chain.(new_n)}
+    related = fn n -> %{"relatedTarget" => wrap_or_null(n)} end
+    quiet = %{bubbles: false, cancelable: false}
+
+    if old_n, do: dispatch(old_n, "mouseout", related.(new_n))
+
+    for n <- old_chain,
+        n not in new_chain,
+        do: dispatch(n, "mouseleave", Map.merge(quiet, related.(new_n)))
+
+    if new_n, do: dispatch(new_n, "mouseover", related.(old_n))
+
+    for n <- Enum.reverse(new_chain),
+        n not in old_chain,
+        do: dispatch(n, "mouseenter", Map.merge(quiet, related.(old_n)))
+
+    :ok
+  end
+
+  # the node (element or text) the layout numbers `n`
+  defp nid_numbered(n) do
+    Enum.find_value(st().nodes, fn {id, node} ->
+      if List.keyfind(node.internal, "@nid", 0) == {"@nid", n}, do: id
+    end)
+  end
+
+  @doc """
+  Runs the editing prelude's `__ed_action(name, args...)`: what the session does for the user's
+  keys and clicks in an editing host (typing, deleting, moving the caret, placing it).
+  """
+  def ed_call(name, args) do
+    case Interp.get(deref_global("__ed"), "action") do
+      :undefined ->
+        :ok
+
+      f ->
+        call(f, :undefined, [name | Enum.map(args, &if(is_integer(&1), do: &1 * 1.0, else: &1))])
+    end
+  end
+
+  defp ed_object do
+    new_object([
+      {"nid", native("nid", fn _this, args -> float(ensure_nid(nid_of(arg(args, 0)))) end)},
+      {"node",
+       native("node", fn _this, args ->
+         case nid_numbered(offset_arg(arg(args, 0))) do
+           nil -> :null
+           nid -> wrap(nid)
+         end
+       end)},
+      {"report",
+       native("report", fn _this, args ->
+         sel =
+           case args do
+             [a, ao, f, fo, host] when is_tuple(a) ->
+               %{
+                 anchor: {ensure_nid(nid_of(a)), offset_arg(ao)},
+                 focus: {ensure_nid(nid_of(f)), offset_arg(fo)},
+                 host: ensure_nid(nid_of(host))
+               }
+
+             _ ->
+               nil
+           end
+
+         put_st(%{st() | ed_sel: sel})
+         :undefined
+       end)},
+      {"focused",
+       native("focused", fn _this, _ ->
+         case ed_focused() do
+           nil -> :null
+           nid -> wrap(nid)
+         end
+       end)},
+      {"focus",
+       native("focus", fn _this, args ->
+         focus_element(nid_of(arg(args, 0)))
+         :undefined
+       end)},
+      {"isHost", native("isHost", fn _this, args -> ed_host?(nid_of(arg(args, 0))) end)},
+      {"editable", native("editable", fn _this, args -> editable?(nid_of(arg(args, 0))) end)},
+      {"clipboard",
+       native("clipboard", fn _this, args ->
+         out({:clipboard, to_str(arg(args, 0))})
+         :undefined
+       end)},
+      {"designMode", native("designMode", fn _this, _ -> st().design_mode end)}
+    ])
+  end
+
   # ── install ────────────────────────────────────────────────
 
   @doc "Defines the DOM prototypes and the `window`, `document`, ... globals."
@@ -2407,6 +2967,7 @@ defmodule Browser.JS.DOM do
     install_event(event)
     install_aux()
     install_globals(scope, event_target, node_proto, element, text, document, event)
+    Interp.declare(scope, "__ed", ed_object())
     :ok
   end
 
@@ -2511,7 +3072,85 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "isSameNode", fn this, args -> this_nid(this) == nid_of(arg(args, 0)) end)
     def_fn(p, "getRootNode", fn _this, _ -> wrap(st().doc) end)
-    def_fn(p, "normalize", fn _this, _ -> :undefined end)
+
+    def_fn(p, "normalize", fn this, _ ->
+      normalize(this_nid(this))
+      :undefined
+    end)
+
+    def_fn(p, "splitText", fn this, args ->
+      nid = this_nid(this)
+      n = node(nid)
+      len = cp_len(n.text)
+      at = offset_arg(arg(args, 0))
+
+      if n.kind != :text, do: throw_error("TypeError", "splitText: not a Text node")
+
+      if at > len,
+        do:
+          throw_error(
+            "IndexSizeError",
+            "The offset #{at} is larger than the node's length (#{len})."
+          )
+
+      {left, right} = cp_split(n.text, at)
+      fresh = new_node(%{kind: :text, text: right})
+      update_node(nid, &%{&1 | text: left})
+
+      if parent = n.parent, do: insert(parent, fresh, elem(siblings(nid), 1) |> List.first())
+      wrap(fresh)
+    end)
+
+    def_fn(p, "compareDocumentPosition", fn this, args ->
+      float(compare_position(this_nid(this), nid_of(arg(args, 0))))
+    end)
+
+    # CharacterData
+    def_fn(p, "substringData", fn this, args ->
+      n = char_data(this_nid(this))
+      {from, count} = data_range(n, args)
+      n.text |> cp_split(from) |> elem(1) |> cp_split(count) |> elem(0)
+    end)
+
+    def_fn(p, "appendData", fn this, args ->
+      nid = this_nid(this)
+      n = char_data(nid)
+      update_node(nid, &%{&1 | text: n.text <> to_str(arg(args, 0))})
+      :undefined
+    end)
+
+    def_fn(p, "insertData", fn this, args ->
+      nid = this_nid(this)
+      n = char_data(nid)
+      at = offset_arg(arg(args, 0))
+
+      if at > cp_len(n.text),
+        do: throw_error("IndexSizeError", "The offset is larger than the node's length.")
+
+      {l, r} = cp_split(n.text, at)
+      update_node(nid, &%{&1 | text: l <> to_str(arg(args, 1)) <> r})
+      :undefined
+    end)
+
+    def_fn(p, "deleteData", fn this, args ->
+      nid = this_nid(this)
+      n = char_data(nid)
+      {from, count} = data_range(n, args)
+      {l, rest} = cp_split(n.text, from)
+      {_, r} = cp_split(rest, count)
+      update_node(nid, &%{&1 | text: l <> r})
+      :undefined
+    end)
+
+    def_fn(p, "replaceData", fn this, args ->
+      nid = this_nid(this)
+      n = char_data(nid)
+      {from, count} = data_range(n, args)
+      {l, rest} = cp_split(n.text, from)
+      {_, r} = cp_split(rest, count)
+      update_node(nid, &%{&1 | text: l <> to_str(arg(args, 2)) <> r})
+      :undefined
+    end)
 
     def_fn(p, "remove", fn this, _ ->
       detach(this_nid(this))
@@ -2657,9 +3296,60 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    for name <- ~w(focus blur select showModal close) do
+    for name <- ~w(select showModal close pause load) do
       def_fn(p, name, fn _this, _ -> :undefined end)
     end
+
+    # nothing is played, but a script that starts a video gets its promise
+    def_fn(p, "play", fn _this, _ ->
+      promise = Browser.JS.Promise.new()
+      Browser.JS.Promise.fulfill(promise, :undefined)
+      promise
+    end)
+
+    def_fn(p, "canPlayType", fn _this, _ -> "" end)
+
+    # there is no drawing surface for scripts: the standard way to say so
+    def_fn(p, "getContext", fn _this, _ -> :null end)
+    def_fn(p, "toDataURL", fn _this, _ -> "data:," end)
+
+    def_fn(p, "getAttributeNode", fn this, args ->
+      name = String.downcase(to_str(arg(args, 0)))
+
+      case get_attr(node(this_nid(this)), name) do
+        nil -> :null
+        v -> new_object([{"name", name}, {"value", v}, {"nodeName", name}, {"nodeValue", v}])
+      end
+    end)
+
+    def_fn(p, "removeAttributeNode", fn this, args ->
+      attr = arg(args, 0)
+      remove_attr(this_nid(this), to_str(Interp.get(attr, "name")))
+
+      with {:obj, _} = list <- Interp.get(attr, "__list"),
+           {:obj, _} = splice <- Interp.get(list, "splice") do
+        index = Enum.find_index(array_list(list), &(&1 == attr))
+        if index, do: Interp.call(splice, list, [index * 1.0, 1.0])
+      end
+
+      attr
+    end)
+
+    def_fn(p, "setAttributeNode", fn this, args ->
+      a = arg(args, 0)
+      set_attr(this_nid(this), to_str(Interp.get(a, "name")), to_str(Interp.get(a, "value")))
+      :null
+    end)
+
+    def_fn(p, "focus", fn this, _ ->
+      focus_element(this_nid(this))
+      :undefined
+    end)
+
+    def_fn(p, "blur", fn this, _ ->
+      if st().focus_ed == this_nid(this), do: ed_blur()
+      :undefined
+    end)
 
     # scrolling an element's own contents is not supported; the page itself is
     for name <- ~w(scrollTo scroll scrollBy) do
@@ -2817,7 +3507,6 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "hasFocus", fn _this, _ -> true end)
-    def_fn(p, "execCommand", fn _this, _ -> false end)
   end
 
   defp install_event(p) do
@@ -2993,6 +3682,13 @@ defmodule Browser.JS.DOM do
       def_fn(win, name, fn _this, _ -> :undefined end)
     end
 
+    # `window.open` opens the address in a new tab; there is no window to hand back
+    def_fn(win, "open", fn _this, args ->
+      url = to_str(arg(args, 0))
+      if url not in ["", "about:blank"], do: out({:open_tab, resolve_url(url)})
+      :null
+    end)
+
     def_fn(win, "scrollTo", fn _this, args -> scroll_args(args, false) end)
     def_fn(win, "scroll", fn _this, args -> scroll_args(args, false) end)
     def_fn(win, "scrollBy", fn _this, args -> scroll_args(args, true) end)
@@ -3159,10 +3855,33 @@ defmodule Browser.JS.DOM do
     {"HTMLProgressElement", ["progress"]}
   ]
 
+  @node_constants [
+    {"ELEMENT_NODE", 1},
+    {"ATTRIBUTE_NODE", 2},
+    {"TEXT_NODE", 3},
+    {"CDATA_SECTION_NODE", 4},
+    {"PROCESSING_INSTRUCTION_NODE", 7},
+    {"COMMENT_NODE", 8},
+    {"DOCUMENT_NODE", 9},
+    {"DOCUMENT_TYPE_NODE", 10},
+    {"DOCUMENT_FRAGMENT_NODE", 11},
+    {"DOCUMENT_POSITION_DISCONNECTED", 1},
+    {"DOCUMENT_POSITION_PRECEDING", 2},
+    {"DOCUMENT_POSITION_FOLLOWING", 4},
+    {"DOCUMENT_POSITION_CONTAINS", 8},
+    {"DOCUMENT_POSITION_CONTAINED_BY", 16},
+    {"DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32}
+  ]
+
   defp install_globals(scope, event_target, node_proto, element, text, document, event) do
     # constructors, so `instanceof` works (and `new Event(...)`)
     ctor(scope, "EventTarget", event_target, fn _, _ -> :undefined end)
-    ctor(scope, "Node", node_proto, fn _, _ -> :undefined end)
+    node_ctor = ctor(scope, "Node", node_proto, fn _, _ -> :undefined end)
+
+    for {name, v} <- @node_constants, target <- [node_ctor, node_proto] do
+      put_hidden(target, name, v)
+    end
+
     ctor(scope, "Element", element, fn _, _ -> :undefined end)
     ctor(scope, "HTMLElement", element, fn this, _ -> html_element_ctor(this) end)
     # `el instanceof HTMLAnchorElement` and the like

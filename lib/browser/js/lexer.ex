@@ -10,8 +10,11 @@ defmodule Browser.JS.Lexer do
   """
 
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
-             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = ."
+             { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
+
+  # the punctuators that begin with each byte, longest first
+  @puncts_by_byte Enum.group_by(@puncts, &:binary.first/1)
 
   @keywords ~w(break case catch class const continue debugger default delete do else enum export
     extends false finally for function if import in instanceof new null return super switch this
@@ -20,9 +23,41 @@ defmodule Browser.JS.Lexer do
 
   @doc "`{:ok, tokens}` or `{:error, message}`."
   def tokenize(src) do
-    {:ok, lex(src, false, [])}
-  catch
-    {:syntax, msg} -> {:error, msg}
+    # a hashbang comment is only allowed at the very start
+    src = if match?("#!" <> _, src), do: skip_line(src), else: src
+    # which `{` opened a block (so a `/` after its `}` starts a regular expression); a
+    # template's `${ }` is tokenized by a nested call, so the state is saved around it
+    saved =
+      {Process.put(:lex_braces, []), Process.put(:lex_block_close, nil),
+       Process.put(:lex_offs, [])}
+
+    try do
+      tokens = lex(src, false, [])
+      # where each token starts and ends in the source, for `Function.prototype.toString`
+      total = byte_size(src)
+      offs = Enum.reverse([{0, 0} | Process.get(:lex_offs)])
+
+      Process.put(
+        :lex_table,
+        {src, List.to_tuple(for({a, _} <- offs, do: total - a)),
+         List.to_tuple(for({_, b} <- offs, do: total - b))}
+      )
+
+      {:ok, tokens}
+    catch
+      {:syntax, msg} -> {:error, msg}
+    after
+      Process.put(:lex_braces, elem(saved, 0))
+      Process.put(:lex_block_close, elem(saved, 1))
+      Process.put(:lex_offs, elem(saved, 2))
+    end
+  end
+
+  # pushes a token; `start_size` and the size of `rest` are the bytes of source left at its
+  # start and at its end
+  defp push(tok, start_size, rest, acc) do
+    Process.put(:lex_offs, [{start_size, byte_size(rest)} | Process.get(:lex_offs)])
+    lex(rest, false, [tok | acc])
   end
 
   defp lex("", _nl, acc), do: Enum.reverse([{:eof, nil, true} | acc])
@@ -34,15 +69,27 @@ defmodule Browser.JS.Lexer do
     do: lex(rest, true, acc)
 
   defp lex(<<c::utf8, rest::binary>> = s, nl, acc) when c > 127 do
-    if space_cp?(c), do: lex(rest, nl, acc), else: lex_ident(s, nl, acc)
+    cond do
+      space_cp?(c) ->
+        lex(rest, nl, acc)
+
+      c in [0x2E2F, 0x180E] ->
+        throw({:syntax, "unexpected character U+#{Integer.to_string(c, 16)}"})
+
+      true ->
+        lex_ident(s, nl, acc)
+    end
   end
 
   defp lex("//" <> rest, nl, acc), do: lex(skip_line(rest), nl, acc)
 
   defp lex("/*" <> rest, nl, acc) do
     case String.split(rest, "*/", parts: 2) do
-      [comment, after_comment] -> lex(after_comment, nl or String.contains?(comment, "\n"), acc)
-      _ -> throw({:syntax, "unterminated comment"})
+      [comment, after_comment] ->
+        lex(after_comment, nl or String.contains?(comment, ["\n", "\r", "\u2028", "\u2029"]), acc)
+
+      _ ->
+        throw({:syntax, "unterminated comment"})
     end
   end
 
@@ -51,7 +98,10 @@ defmodule Browser.JS.Lexer do
 
   defp lex(<<q, rest::binary>>, nl, acc) when q in [?", ?'] do
     Process.put(:js_octal, false)
-    {str, rest} = string(rest, q, [])
+    start_size = byte_size(rest) + 1
+    {str, after_str} = string(rest, q, [])
+    escaped? = str == "use strict" and byte_size(rest) - byte_size(after_str) != 11
+    rest = after_str
     # a string with a legacy octal escape carries `:octal` (`:octal_nl` after a line break)
     # where the newline flag goes, so the parser can refuse it in strict code
     mark =
@@ -61,7 +111,10 @@ defmodule Browser.JS.Lexer do
         true -> :octal
       end
 
-    lex(rest, false, [{:str, str, mark} | acc])
+    mark =
+      if escaped? and mark in [true, false], do: if(mark, do: :esc_nl, else: :esc), else: mark
+
+    push({:str, str, mark}, start_size, rest, acc)
   end
 
   defp lex("`" <> rest, nl, acc) do
@@ -69,7 +122,13 @@ defmodule Browser.JS.Lexer do
     # the raw text of the chunks, which `String.raw` and other tags read
     raw = binary_part(rest, 0, byte_size(rest) - byte_size(after_tmpl) - 1)
     raw = String.replace(raw, ["\r\n", "\r"], "\n")
-    lex(after_tmpl, false, [{:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl} | acc])
+
+    push(
+      {:tmpl, parts ++ [{:raw, raw_chunks(raw, [], [])}], nl},
+      byte_size(rest) + 1,
+      after_tmpl,
+      acc
+    )
   end
 
   defp lex(<<?\\, ?u, _::binary>> = s, nl, acc), do: lex_ident(s, nl, acc)
@@ -80,52 +139,169 @@ defmodule Browser.JS.Lexer do
 
   defp lex("/" <> rest, nl, acc) do
     if regex_allowed?(acc) do
+      start_size = byte_size(rest) + 1
       {source, flags, rest} = regex(rest, [], false)
-      lex(rest, false, [{:regex, {source, flags}, nl} | acc])
+      push({:regex, {source, flags}, nl}, start_size, rest, acc)
     else
       punct("/" <> rest, nl, acc)
     end
+  end
+
+  defp lex("{" <> rest, nl, acc) do
+    Process.put(:lex_braces, [block_open?(acc) | Process.get(:lex_braces) || []])
+    push({:p, "{", nl}, byte_size(rest) + 1, rest, acc)
+  end
+
+  defp lex("}" <> rest, nl, acc) do
+    acc = [{:p, "}", nl} | acc]
+
+    case Process.get(:lex_braces) do
+      [block? | outer] ->
+        Process.put(:lex_braces, outer)
+        if block?, do: Process.put(:lex_block_close, acc)
+
+      _ ->
+        :ok
+    end
+
+    Process.put(:lex_offs, [{byte_size(rest) + 1, byte_size(rest)} | Process.get(:lex_offs)])
+    lex(rest, false, acc)
   end
 
   # `#name`: a private name
   defp lex(<<?#, c, _::binary>> = s, nl, acc)
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
     {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
-    lex(rest, false, [{:priv, name, nl} | acc])
+    zw_start!(name)
+    push({:priv, name, nl}, byte_size(s), rest, acc)
   end
 
   defp lex(s, nl, acc), do: punct(s, nl, acc)
 
   defp lex_ident(s, nl, acc) do
     {name, rest} = ident(s, [])
+    zw_start!(name)
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
-    kind = if (name in @keywords or name == "target") and escaped?(s, rest), do: :eid, else: :id
-    lex(rest, false, [{kind, name, nl} | acc])
+    # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
+    kind =
+      if escapable_word?(name) and escaped?(s, rest),
+        do: if(name in ~w(let await yield), do: :id, else: :eid),
+        else: :id
+
+    if name == "await" and kind == :id and escaped?(s, rest),
+      do: Process.put(:lex_esc_await, true)
+
+    # an escaped `let` never starts a declaration: its mark says so
+    nl = if name == "let" and kind == :id and escaped?(s, rest), do: esc_mark(nl), else: nl
+
+    push({kind, name, nl}, byte_size(s), rest, acc)
   end
 
+  # names whose escaped spelling matters (keywords, minus the strict mode reserved words with no
+  # part in the grammar, and the contextual keywords)
+  for w <-
+        Enum.uniq(@keywords ++ ~w(target get set of async from as meta)) --
+          ~w(implements interface package private protected public) do
+    defp escapable_word?(unquote(w)), do: true
+  end
+
+  defp escapable_word?(_), do: false
+
+  defp esc_mark(true), do: :esc_nl
+  defp esc_mark(false), do: :esc
+  defp esc_mark(other), do: other
+
   defp punct(s, nl, acc) do
-    case Enum.find(@puncts, &String.starts_with?(s, &1)) do
+    first = if s == "", do: nil, else: :binary.first(s)
+
+    case Enum.find(Map.get(@puncts_by_byte, first, []), &String.starts_with?(s, &1)) do
       # `a?.5:b` is a conditional, not an optional chain
       "?." when binary_part(s, 2, min(1, byte_size(s) - 2)) in ~w(0 1 2 3 4 5 6 7 8 9) ->
-        lex(binary_part(s, 1, byte_size(s) - 1), false, [{:p, "?", nl} | acc])
+        push({:p, "?", nl}, byte_size(s), binary_part(s, 1, byte_size(s) - 1), acc)
 
       nil ->
         throw({:syntax, "unexpected character #{inspect(String.first(s))}"})
 
       p ->
-        lex(binary_part(s, byte_size(p), byte_size(s) - byte_size(p)), false, [{:p, p, nl} | acc])
+        push(
+          {:p, p, nl},
+          byte_size(s),
+          binary_part(s, byte_size(p), byte_size(s) - byte_size(p)),
+          acc
+        )
     end
   end
 
-  @regex_keywords ~w(return typeof instanceof in of new delete void throw case do else yield await)
+  @regex_keywords ~w(return typeof instanceof in new delete void throw case do else yield await)
 
   # a `/` starts a regular expression where an operand is expected
   defp regex_allowed?([]), do: true
-  defp regex_allowed?([{:p, p, _} | _]), do: p not in [")", "]", "}"]
+  defp regex_allowed?([{:p, "}", _} | _] = acc), do: Process.get(:lex_block_close) === acc
+  # after the `)` of `if (...)`, `while (...)`, `for (...)` and `with (...)` a statement follows
+  defp regex_allowed?([{:p, ")", _} | rest]), do: statement_head?(group_head(rest, 1))
+
+  defp regex_allowed?([{:p, p, _} | _]), do: p != "]"
+  # (`of` is only a keyword in a `for (x of /re/...)` head, elsewhere it is a name)
+  defp regex_allowed?([{:id, "of", _} | rest]) do
+    match?([{:id, "for", _} | _], group_head(rest, 1)) or
+      match?([{:id, "await", _}, {:id, "for", _} | _], group_head(rest, 1))
+  end
+
   defp regex_allowed?([{:id, name, _} | _]), do: name in @regex_keywords
   defp regex_allowed?(_), do: false
+
+  # the tokens before a `(`: is it the head of a statement (not a method that happens to be called `if`)?
+  defp statement_head?([{:id, kw, _}, {:p, ".", _} | _]) when kw in ~w(if while for with),
+    do: false
+
+  defp statement_head?([{:id, kw, _} | _]) when kw in ~w(if while for with), do: true
+  defp statement_head?([{:id, "await", _}, {:id, "for", _} | _]), do: true
+  defp statement_head?(_), do: false
+
+  # does the `{` after these tokens open a block (a statement position) rather than an object?
+  defp block_open?(acc) do
+    case acc do
+      [] ->
+        true
+
+      [{:p, p, _} | _] when p in [";", "{", "}"] ->
+        true
+
+      [{:id, kw, _} | _] when kw in ["else", "try", "finally", "do"] ->
+        true
+
+      [{:id, name, _}, {:id, "class", _} | before] when name not in @keywords ->
+        stmt_start?(before)
+
+      [{:p, ")", _} | rest] ->
+        case group_head(rest, 1) do
+          [{:id, kw, _} | _] when kw in ["if", "for", "while", "with", "switch", "catch"] ->
+            true
+
+          [{:id, name, _}, {:id, "function", _} | before] when name not in @keywords ->
+            stmt_start?(before)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp stmt_start?([]), do: true
+  defp stmt_start?([{:p, p, _} | _]), do: p in [";", "{", "}"]
+  defp stmt_start?(_), do: false
+
+  # the tokens before the `(` that matches the `)` just dropped from the front
+  defp group_head([{:p, "(", _} | rest], 1), do: rest
+  defp group_head([{:p, "(", _} | rest], d), do: group_head(rest, d - 1)
+  defp group_head([{:p, ")", _} | rest], d), do: group_head(rest, d + 1)
+  defp group_head([_ | rest], d), do: group_head(rest, d)
+  defp group_head([], _), do: []
 
   defp regex(<<?\\, c::utf8, rest::binary>>, acc, cls),
     do: regex(rest, [<<?\\, c::utf8>> | acc], cls)
@@ -141,13 +317,18 @@ defmodule Browser.JS.Lexer do
   defp regex(<<c, _::binary>>, _acc, _cls) when c in [?\n, ?\r],
     do: throw({:syntax, "unterminated regular expression"})
 
+  defp regex(<<0xE2, 0x80, c, _::binary>>, _acc, _cls) when c in [0xA8, 0xA9],
+    do: throw({:syntax, "unterminated regular expression"})
+
   defp regex(<<c::utf8, rest::binary>>, acc, cls), do: regex(rest, [<<c::utf8>> | acc], cls)
+  defp regex(<<b, rest::binary>>, acc, cls), do: regex(rest, [<<b>> | acc], cls)
   defp regex("", _acc, _cls), do: throw({:syntax, "unterminated regular expression"})
 
   defp regex_flags(<<c, rest::binary>>, acc) when c in ?a..?z, do: regex_flags(rest, [c | acc])
   defp regex_flags(rest, acc), do: {acc |> Enum.reverse() |> :binary.list_to_bin(), rest}
 
   defp skip_line(<<c, _::binary>> = s) when c in [?\n, ?\r], do: s
+  defp skip_line(<<0xE2, 0x80, c, _::binary>> = s) when c in [0xA8, 0xA9], do: s
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)
   defp skip_line(""), do: ""
 
@@ -158,11 +339,23 @@ defmodule Browser.JS.Lexer do
   defp space_cp?(c),
     do: c in [0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF, 0x2028, 0x2029] or c in 0x2000..0x200A
 
+  # an escape in an identifier must spell an identifier character
+  defp id_escape?(cp) when cp < 128,
+    do: cp in ?a..?z or cp in ?A..?Z or cp in ?0..?9 or cp in [?_, ?$]
+
+  defp id_escape?(cp), do: not space_cp?(cp) and cp not in [0x2E2F, 0x180E]
+
+  # ZWNJ and ZWJ continue an identifier but cannot start one
+  defp zw_start!(<<cp::utf8, _::binary>>) when cp in [0x200C, 0x200D],
+    do: throw({:syntax, "invalid identifier start"})
+
+  defp zw_start!(_), do: :ok
+
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
     case s do
       <<cp::utf8, _::binary>> when cp > 127 ->
-        if space_cp?(cp),
+        if space_cp?(cp) or cp in [0x2E2F, 0x180E],
           do: {acc |> Enum.reverse() |> :binary.list_to_bin(), s},
           else: ident(rest, [c | acc])
 
@@ -175,7 +368,7 @@ defmodule Browser.JS.Lexer do
   defp ident(<<"\\u{", rest::binary>>, acc) do
     with [hex, rest] <- String.split(rest, "}", parts: 2),
          {cp, ""} <- Integer.parse(hex, 16),
-         true <- cp in 0..0x10FFFF do
+         true <- cp in 0..0x10FFFF and id_escape?(cp) do
       ident(rest, [<<cp::utf8>> | acc])
     else
       _ -> throw({:syntax, "bad unicode escape in identifier"})
@@ -184,8 +377,13 @@ defmodule Browser.JS.Lexer do
 
   defp ident(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
     case Integer.parse(hex, 16) do
-      {cp, ""} when cp not in 0xD800..0xDFFF -> ident(rest, [<<cp::utf8>> | acc])
-      _ -> throw({:syntax, "bad unicode escape in identifier"})
+      {cp, ""} when cp not in 0xD800..0xDFFF ->
+        if id_escape?(cp),
+          do: ident(rest, [<<cp::utf8>> | acc]),
+          else: throw({:syntax, "bad unicode escape in identifier"})
+
+      _ ->
+        throw({:syntax, "bad unicode escape in identifier"})
     end
   end
 
@@ -202,11 +400,50 @@ defmodule Browser.JS.Lexer do
   end
 
   defp decimal_number(s) do
-    [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
+    lit = binary_part(s, 0, dec_len(s))
     {Browser.JS.Num.parse(lit), binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))}
   end
 
+  # the length of the match of `\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?` (0 if none)
+  defp dec_len(s) do
+    int = digits_len(s, 0)
+
+    mant =
+      case s do
+        <<_::binary-size(^int), ?., _::binary>> when int > 0 ->
+          int + 1 + digits_len(s, int + 1)
+
+        <<?., _::binary>> ->
+          frac = digits_len(s, 1)
+          if frac > 0, do: 1 + frac, else: 0
+
+        _ ->
+          int
+      end
+
+    case s do
+      <<_::binary-size(^mant), e, rest::binary>> when mant > 0 and e in [?e, ?E] ->
+        sign = if match?(<<sg, _::binary>> when sg in [?+, ?-], rest), do: 1, else: 0
+        ds = digits_len(rest, sign)
+        if ds > 0, do: mant + 1 + sign + ds, else: mant
+
+      _ ->
+        mant
+    end
+  end
+
+  # how many ASCII digits `s` has from byte offset `from` on
+  defp digits_len(s, from), do: digits_run(s, from, from)
+
+  defp digits_run(s, i, start) do
+    case s do
+      <<_::binary-size(^i), d, _::binary>> when d in ?0..?9 -> digits_run(s, i + 1, start)
+      _ -> i - start
+    end
+  end
+
   defp number(s, nl, acc) do
+    start_size = byte_size(s)
     s = strip_separators(s)
     legacy? = match?(<<?0, d, _::binary>> when d in ?0..?9, s)
     nl = if legacy?, do: if(nl, do: :octal_nl, else: :octal), else: nl
@@ -226,11 +463,11 @@ defmodule Browser.JS.Lexer do
           end
 
         _ ->
-          [lit] = Regex.run(~r/\A(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/, s)
+          lit = binary_part(s, 0, dec_len(s))
           lit_f = if String.starts_with?(lit, "."), do: "0" <> lit, else: lit
           rest = binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit))
 
-          case {rest, Regex.match?(~r/\A(?:0|[1-9]\d*)\z/, lit)} do
+          case {rest, int_literal?(lit)} do
             {<<?n, rest::binary>>, true} ->
               {{:bigint, String.to_integer(lit)}, rest}
 
@@ -248,8 +485,8 @@ defmodule Browser.JS.Lexer do
 
       _ ->
         case value do
-          {:bigint, n} -> lex(rest, false, [{:bigint, n, nl} | acc])
-          _ -> lex(rest, false, [{:num, value, nl} | acc])
+          {:bigint, n} -> push({:bigint, n, nl}, start_size, rest, acc)
+          _ -> push({:num, value, nl}, start_size, rest, acc)
         end
     end
   end
@@ -259,14 +496,39 @@ defmodule Browser.JS.Lexer do
   @separated_number ~r/\A(?:0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*|0[bB][01](?:_?[01])*|0[oO][0-7](?:_?[0-7])*|(?:[1-9](?:_?[0-9])*|0)?(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?)/
 
   defp strip_separators(s) do
-    [lit] = Regex.run(@separated_number, s)
+    # most numbers have no underscore anywhere near them: skip the regular expression
+    if :binary.match(s, "_", scope: {0, number_run(s, 0)}) == :nomatch do
+      s
+    else
+      [lit] = Regex.run(@separated_number, s)
 
-    if String.contains?(lit, "_"),
-      do:
-        String.replace(lit, "_", "") <>
-          binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit)),
-      else: s
+      if String.contains?(lit, "_"),
+        do:
+          String.replace(lit, "_", "") <>
+            binary_part(s, byte_size(lit), byte_size(s) - byte_size(lit)),
+        else: s
+    end
   end
+
+  # the length of the run of bytes a number literal and a stray suffix could be made of
+  defp number_run(s, i) do
+    case s do
+      <<_::binary-size(^i), c, _::binary>>
+      when c in ?0..?9 or c in ?a..?z or c in ?A..?Z or c in [?_, ?., ?+, ?-] ->
+        number_run(s, i + 1)
+
+      _ ->
+        i
+    end
+  end
+
+  defp int_literal?("0"), do: true
+  defp int_literal?(<<d, rest::binary>>) when d in ?1..?9, do: all_digits?(rest)
+  defp int_literal?(_), do: false
+
+  defp all_digits?(<<d, rest::binary>>) when d in ?0..?9, do: all_digits?(rest)
+  defp all_digits?(""), do: true
+  defp all_digits?(_), do: false
 
   defp string(<<q, rest::binary>>, q, acc),
     do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), rest}
@@ -318,6 +580,7 @@ defmodule Browser.JS.Lexer do
   defp escape("\r\n" <> r), do: {"", r}
   defp escape("\r" <> r), do: {"", r}
   defp escape("\n" <> r), do: {"", r}
+  defp escape(<<0xE2, 0x80, c, r::binary>>) when c in [0xA8, 0xA9], do: {"", r}
 
   defp escape(<<"x", h::binary-size(2), r::binary>>) do
     {<<String.to_integer(h, 16)::utf8>>, r}
@@ -327,9 +590,11 @@ defmodule Browser.JS.Lexer do
 
   defp escape("u{" <> r) do
     [hex, r] = String.split(r, "}", parts: 2)
-    {<<String.to_integer(hex, 16)::utf8>>, r}
+    cp = String.to_integer(hex, 16)
+    if cp > 0x10FFFF, do: throw({:syntax, "bad \\u escape"})
+    {Browser.JS.Str.from_units([cp]), r}
   rescue
-    _ -> throw({:syntax, "bad \\u escape"})
+    ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
   defp escape(<<"u", h::binary-size(4), r::binary>>) do
@@ -339,11 +604,11 @@ defmodule Browser.JS.Lexer do
              lo when lo in 0xDC00..0xDFFF <- String.to_integer(l, 16) do
           {<<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>>, r2}
         else
-          _ -> {"�", r}
+          _ -> {Browser.JS.Str.from_units([hi]), r}
         end
 
       lo when lo in 0xDC00..0xDFFF ->
-        {"�", r}
+        {Browser.JS.Str.from_units([lo]), r}
 
       cp ->
         {<<cp::utf8>>, r}
@@ -352,6 +617,7 @@ defmodule Browser.JS.Lexer do
     ArgumentError -> throw({:syntax, "bad \\u escape"})
   end
 
+  defp escape("u" <> _), do: throw({:syntax, "bad \\u escape"})
   defp escape(<<c::utf8, r::binary>>), do: {<<c::utf8>>, r}
   defp escape(""), do: throw({:syntax, "unterminated string"})
 

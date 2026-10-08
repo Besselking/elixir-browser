@@ -30,7 +30,8 @@ defmodule Browser.UI do
     :status,
     :cursors,
     :toolbar,
-    :suggest
+    :suggest,
+    :tabs
   ]
 
   def build do
@@ -40,9 +41,11 @@ defmodule Browser.UI do
     set_page([])
     :ets.insert(@view, {:sx, 0})
 
+    Browser.TabStrip.init()
     wx = :wx.new()
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
 
+    tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
     toolbar = :wxPanel.new(frame)
     back = :wxButton.new(toolbar, -1, label: ~c"◀", size: {40, -1})
     forward = :wxButton.new(toolbar, -1, label: ~c"▶", size: {40, -1})
@@ -73,12 +76,17 @@ defmodule Browser.UI do
     :wxFrame.setStatusBar(frame, status)
 
     col = :wxBoxSizer.new(@vertical)
+    :wxSizer.add(col, tabs, flag: @expand)
     :wxSizer.add(col, toolbar, flag: @expand)
     :wxSizer.add(col, panel, proportion: 1, flag: @expand)
     :wxWindow.setSizer(frame, col)
 
     # wxID_EXIT is moved into the macOS application menu as "Quit", with Cmd+Q
     file = :wxMenu.new()
+    :wxMenu.append(file, 5100, ~c"New Tab\tCtrl+T")
+    :wxMenu.append(file, 5101, ~c"Close Tab\tCtrl+W")
+    :wxMenu.append(file, 5102, ~c"Reopen Closed Tab\tCtrl+Shift+T")
+    :wxMenu.appendSeparator(file)
     :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
     menubar = :wxMenuBar.new()
     :wxMenuBar.append(menubar, file, ~c"File")
@@ -109,7 +117,14 @@ defmodule Browser.UI do
     :wxWindow.hide(suggest)
     :wxListBox.connect(suggest, :command_listbox_selected)
     for b <- [back, forward, reload], do: :wxButton.connect(b, :command_button_clicked)
+    :wxPanel.connect(tabs, :left_down)
+    :wxPanel.connect(tabs, :middle_down)
+    :wxPanel.connect(tabs, :left_up)
+    :wxPanel.connect(tabs, :motion)
+    :wxPanel.connect(tabs, :paint, callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs) end)
     :wxPanel.connect(panel, :left_down)
+    :wxPanel.connect(panel, :middle_down)
+    :wxPanel.connect(panel, :right_down)
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
@@ -119,11 +134,18 @@ defmodule Browser.UI do
 
     :wxPanel.connect(panel, :mousewheel,
       callback: fn wx(
-                     event: wxMouse(wheelRotation: rot, wheelDelta: delta, linesPerAction: lines)
+                     event:
+                       wxMouse(
+                         wheelRotation: rot,
+                         wheelDelta: delta,
+                         linesPerAction: lines,
+                         x: x,
+                         y: y
+                       )
                    ),
                    obj ->
         tag = if :wxMouseEvent.getWheelAxis(obj) == 0, do: :wheel, else: :hwheel
-        send(me, {tag, rot, delta, lines})
+        send(me, {tag, rot, delta, lines, x, y})
       end
     )
 
@@ -145,6 +167,7 @@ defmodule Browser.UI do
       status: status,
       toolbar: toolbar,
       suggest: suggest,
+      tabs: tabs,
       cursors: Map.new([arrow: 1, hand: 6, text: 7], fn {k, id} -> {k, :wxCursor.new(id)} end)
     }
   end
@@ -515,6 +538,9 @@ defmodule Browser.UI do
     end
   end
 
+  # `font-size: 0` is real (icon fonts, hidden text); measure it as 1px so the ratios stay finite
+  defp measure_units(%{size: size} = style) when size < 1, do: measure_units(%{style | size: 1})
+
   defp measure_units(%{size: size} = style) do
     side = max(ceil(size * 3), 8)
     bitmap = :wxBitmap.new(side, side)
@@ -561,11 +587,12 @@ defmodule Browser.UI do
 
   @doc """
   Paints `items` the way the window would, into a `width` x `height` bitmap, and saves it as
-  PNG at `path`. Returns `true` when the file was written.
+  PNG at `path`, with `overlay` items over them and the window `scroll` px down the page.
+  Returns `true` when the file was written.
   """
-  def snapshot(items, width, height, path) do
+  def snapshot(items, width, height, path, overlay \\ [], scroll \\ 0) do
     set_page(items)
-    :ets.insert(@view, {:view, [], 0, false})
+    :ets.insert(@view, {:view, overlay, scroll, false})
     bitmap = :wxBitmap.new(width, height)
     dc = :wxMemoryDC.new(bitmap)
     paint_dc(dc)
@@ -701,7 +728,7 @@ defmodule Browser.UI do
   defp draw_gc(dc, %{type: :text} = item, y) do
     gc = new_gc(dc)
     :wxGraphicsContext.setFont(gc, font(item), item.color)
-    :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    draw_gc_text(gc, item, y)
 
     if item.underline do
       uy = y + underline_offset(dc, item)
@@ -743,6 +770,50 @@ defmodule Browser.UI do
   # an outer shadow: translucent shapes stacked from the biggest to the smallest, which
   # fades the edge like a blur
   # selected text: a translucent wash over it
+  # text with `letter-spacing` or `word-spacing` goes down a character at a time, each after
+  # the width of the ones before it and the spacing
+  defp draw_gc_text(gc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _, _, _} = :wxGraphicsContext.getTextExtent(gc, prefix)
+        :wxGraphicsContext.drawText(gc, ch, item.x + w + extra, y)
+      end)
+    else
+      :wxGraphicsContext.drawText(gc, String.to_charlist(item.text), item.x, y)
+    end
+  end
+
+  defp draw_dc_text(dc, item, y) do
+    if spread?(item) do
+      each_char(item, fn ch, prefix, extra ->
+        {w, _} = :wxDC.getTextExtent(dc, prefix)
+        :wxDC.drawText(dc, ch, {round(item.x + w + extra), y})
+      end)
+    else
+      :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    end
+  end
+
+  defp spread?(item) do
+    Map.get(item, :ls, 0) != 0 or
+      (Map.get(item, :wsp, 0) != 0 and String.contains?(item.text, [" ", "\u00A0"]))
+  end
+
+  # calls `fun.(char, text_before_it, spacing_before_it)` for each character of the item
+  defp each_char(item, fun) do
+    ls = Map.get(item, :ls, 0)
+    wsp = Map.get(item, :wsp, 0)
+    chars = String.graphemes(item.text)
+
+    chars
+    |> Enum.with_index()
+    |> Enum.reduce({[], 0}, fn {ch, i}, {before, spaces} ->
+      prefix = before |> Enum.reverse() |> Enum.join() |> String.to_charlist()
+      fun.(String.to_charlist(ch), prefix, i * ls + spaces * wsp)
+      {[ch | before], spaces + if(ch in [" ", "\u00A0"], do: 1, else: 0)}
+    end)
+  end
+
   defp draw(dc, %{type: :selection} = item, y, _scroll) do
     gc = new_gc(dc)
     :wxGraphicsContext.setBrush(gc, :wxBrush.new({56, 132, 255, 90}))
@@ -809,7 +880,16 @@ defmodule Browser.UI do
         if clip = Map.get(item, :clip),
           do: :wxGraphicsContext.clip(gc, clip.x, clip.y - scroll, clip.w, clip.h)
 
-        :wxGraphicsContext.drawBitmap(gc, bitmap, item.x, y, item.w, item.h)
+        # object-fit: the picture is drawn at its own size and cut to the item's box
+        case Map.get(item, :fit) do
+          {dx, dy, w, h} ->
+            :wxGraphicsContext.clip(gc, item.x, y, item.w, item.h)
+            :wxGraphicsContext.drawBitmap(gc, bitmap, item.x + dx, y + dy, w, h)
+
+          nil ->
+            :wxGraphicsContext.drawBitmap(gc, bitmap, item.x, y, item.w, item.h)
+        end
+
         :wxGraphicsContext.destroy(gc)
 
       [] ->
@@ -896,7 +976,7 @@ defmodule Browser.UI do
       Process.put(:paint_color, item.color)
     end
 
-    :wxDC.drawText(dc, String.to_charlist(item.text), {item.x, y})
+    draw_dc_text(dc, item, y)
 
     if item.underline or item.strike do
       :wxDC.setPen(dc, pen(item.color))
@@ -1406,11 +1486,16 @@ defmodule Browser.UI do
   end
 
   @doc "The href of the first link in the index `links` (see `links/1`) at page position `{x, y}`, or nil."
-  def link_at(links, x, y) do
+  def link_at(links, x, y), do: with(%{href: href} <- link_item_at(links, x, y), do: href)
+
+  @doc "Whether the link at `{x, y}` asks for a new tab (`target=\"_blank\"`)."
+  def link_blank?(links, x, y), do: match?(%{blank: true}, link_item_at(links, x, y))
+
+  defp link_item_at(links, x, y) do
     links
     |> Map.get(band(y), [])
-    |> Enum.find_value(fn it ->
-      if inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y), do: it.href
+    |> Enum.find(fn it ->
+      inside?(x, y, it.x, it.y, it.w, it.h + 4) and clipped_in?(it, x, y)
     end)
   end
 
@@ -1438,7 +1523,10 @@ defmodule Browser.UI do
   def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
     {x, _} = :wxWindow.getPosition(url)
     {w, _} = :wxWindow.getSize(url)
-    {_, y} = :wxWindow.getSize(toolbar)
+    # the toolbar sits below the tab strip: the list opens at its bottom edge
+    {_, top} = :wxWindow.getPosition(toolbar)
+    {_, h} = :wxWindow.getSize(toolbar)
+    y = top + h
     :wxListBox.clear(list)
 
     for {u, title} <- items do
@@ -1462,6 +1550,15 @@ defmodule Browser.UI do
   end
 
   def select_suggestion(%{suggest: list}, i), do: :wxListBox.setSelection(list, i)
+
+  @doc "Shows the tab strip: the tabs' titles and which one is active."
+  def set_tabs(%{tabs: tabs}, titles, active) do
+    Browser.TabStrip.put(titles, active)
+    :wxWindow.refresh(tabs)
+  end
+
+  def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
+
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
   def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
@@ -1471,6 +1568,12 @@ defmodule Browser.UI do
   def set_cursor(%{panel: p, cursors: cursors}, kind) do
     kind = if kind in [true, :hand], do: :hand, else: if(kind == :text, do: :text, else: :arrow)
     :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
+  end
+
+  @doc "Focuses the address bar with its text selected, so typing replaces it."
+  def focus_url(%{url: url}) do
+    :wxWindow.setFocus(url)
+    :wxTextCtrl.setSelection(url, 0, -1)
   end
 
   @doc "Moves keyboard focus to the page, so key events reach it."
@@ -1516,27 +1619,9 @@ defmodule Browser.UI do
   def sticky_hit([], _x, _y, _scroll), do: nil
 
   def sticky_hit(items, x, y, scroll) do
-    at =
-      for it <- items,
-          Map.has_key?(it, :w) and Map.has_key?(it, :h),
-          shift = stick_shift(it, scroll),
-          # the point on the page, as laid out: before sticking and before any transformation
-          {px, py} <- [item_space(it, x, y + scroll - shift)],
-          inside?(
-            px,
-            py,
-            it.x,
-            it.y,
-            it.w,
-            it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
-          ),
-          Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
-        {it, py}
-      end
+    at = hits(items, x, y, scroll)
 
     # the topmost (last painted) item decides; controls and links before plain boxes
-    at = Enum.reverse(at)
-
     control =
       Enum.find_value(at, fn {it, py} ->
         if Map.get(it, :cid) != nil, do: {:control, it.cid, py}
@@ -1557,6 +1642,43 @@ defmodule Browser.UI do
       cover -> :cover
       true -> nil
     end
+  end
+
+  # the items painted at window point `{x, y}` (the window scrolled to `scroll`), topmost first,
+  # each with the y the point has in the item's own space
+  defp hits(items, x, y, scroll) do
+    at =
+      for it <- items,
+          Map.has_key?(it, :w) and Map.has_key?(it, :h),
+          shift = stick_shift(it, scroll),
+          # the point on the page, as laid out: before sticking and before any transformation
+          {px, py} <- [item_space(it, x, y + scroll - shift)],
+          inside?(
+            px,
+            py,
+            it.x,
+            it.y,
+            it.w,
+            it.h + if(it.type in [:text, :image, :svg], do: 4, else: 0)
+          ),
+          Map.has_key?(it, :xform) or clipped_in?(it, px, py) do
+        {it, py}
+      end
+
+    Enum.reverse(at)
+  end
+
+  @doc """
+  The number of the element painted topmost at window point `{x, y}` (the window scrolled to
+  `scroll`), or nil: what a pointer over the page is over, for the page's scripts.
+  """
+  def nid_at(items, x, y, scroll) do
+    items
+    |> hits(x, y, scroll)
+    |> Enum.find_value(fn {it, _} ->
+      if is_integer(Map.get(it, :nid)) and it.type != :box and not Map.get(it, :hidden, false),
+        do: it.nid
+    end)
   end
 
   # where the item is, for the point `{x, y}` on the page as it is drawn
@@ -1651,4 +1773,50 @@ defmodule Browser.UI do
   end
 
   def menu_base, do: @menu_base
+
+  # -- context menu -------------------------------------------------------------------
+
+  @context_base 2000
+
+  @doc """
+  Pops up the right-click menu at window position `{x, y}`. `entries` are `{label, enabled?}`
+  or `:separator`; the choice arrives as a `command_menu_selected` event whose id is
+  `context_base() + index` (separators count). It is a native menu, so it follows the
+  system theme.
+  """
+  def context_menu(%{panel: p}, {x, y}, entries) do
+    menu = :wxMenu.new()
+
+    entries
+    |> Enum.with_index()
+    |> Enum.each(fn
+      {:separator, _} ->
+        :wxMenu.appendSeparator(menu)
+
+      {{label, enabled?}, i} ->
+        :wxMenu.append(menu, @context_base + i, String.to_charlist(label))
+        unless enabled?, do: :wxMenu.enable(menu, @context_base + i, false)
+    end)
+
+    :wxMenu.connect(menu, :command_menu_selected)
+    :wxWindow.popupMenu(p, menu, x, y)
+    :ok
+  end
+
+  def context_base, do: @context_base
+
+  @doc """
+  The topmost drawn item at page position `{x, y}` that belongs to a DOM element (it has a
+  `nid`), or nil. Sticky, fixed and transformed boxes are not found.
+  """
+  def item_at(items, x, y) do
+    items
+    |> Enum.filter(fn it ->
+      not Map.has_key?(it, :stick) and not Map.has_key?(it, :xform) and
+        Map.get(it, :nid) != nil and
+        inside?(x, y, it.x, it.y, Map.get(it, :w, 0), Map.get(it, :h, 0)) and
+        clipped_in?(it, x, y)
+    end)
+    |> List.last()
+  end
 end

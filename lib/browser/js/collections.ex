@@ -33,6 +33,7 @@ defmodule Browser.JS.Collections do
     install_map(scope)
     install_set(scope)
     install_weak(scope)
+    install_weakref(scope)
     install_reflect(scope)
     install_host(scope)
     Browser.JS.TypedArrays.install(scope)
@@ -76,6 +77,7 @@ defmodule Browser.JS.Collections do
           :counters.add(counter, 1, 1)
           sym = {:symbol, :counters.get(counter, 1), key}
           :ets.insert(registry, {key, sym})
+          Process.put({:js_registered_symbol, sym}, true)
           sym
       end
     end)
@@ -100,8 +102,6 @@ defmodule Browser.JS.Collections do
       get: native("description", fn this, _ -> desc_or_undefined(this_symbol(this)) end),
       enumerable: false
     )
-
-    put_hidden(p, @iterator, native("[Symbol.iterator]", fn this, _ -> this end))
 
     # Symbol.prototype[@@toPrimitive]: not writable, but configurable
     {:obj, tp_id} = to_prim = native("[Symbol.toPrimitive]", fn this, _ -> this_symbol(this) end)
@@ -153,6 +153,51 @@ defmodule Browser.JS.Collections do
     end
 
     array_iterator(step, kind)
+  end
+
+  # Array.prototype.values/keys/entries: the object is read as the iterator goes (an element
+  # added, changed or removed in between shows), whatever it is, as long as it has a length
+  defp live_array_iterator(this, mode) do
+    o =
+      if nullish?(this),
+        do: throw_error("TypeError", "Array.prototype.values called on null or undefined"),
+        else: if(match?({:obj, _}, this), do: this, else: Browser.JS.Builtins.box(this))
+
+    pos = make_ref()
+    Process.put(pos, 0)
+
+    step = fn ->
+      case Process.get(pos) do
+        :done ->
+          new_object([{"value", :undefined}, {"done", true}])
+
+        i ->
+          if Browser.JS.TypedArrays.out_of_bounds?(o),
+            do:
+              throw_error(
+                "TypeError",
+                "Cannot perform ArrayIterator.next on an out-of-bounds typed array"
+              )
+
+          if i >= Browser.JS.ArrayGeneric.len(o) do
+            Process.put(pos, :done)
+            new_object([{"value", :undefined}, {"done", true}])
+          else
+            Process.put(pos, i + 1)
+
+            value =
+              case mode do
+                :keys -> i * 1.0
+                :values -> Interp.get(o, Integer.to_string(i))
+                :entries -> new_array([i * 1.0, Interp.get(o, Integer.to_string(i))])
+              end
+
+            new_object([{"value", value}, {"done", false}])
+          end
+      end
+    end
+
+    array_iterator(step, :array_iterator)
   end
 
   @doc "An Array Iterator object (also used for typed arrays) whose `next` runs `step`."
@@ -222,11 +267,14 @@ defmodule Browser.JS.Collections do
     # arrays, strings
     array = proto(:array)
 
-    values =
-      native("values", fn this, _ -> make_kind_iterator(iterate(this), :array_iterator) end)
+    values = native("values", fn this, _ -> live_array_iterator(this, :values) end)
 
     put_hidden(array, "values", values)
     put_hidden(array, @iterator, values)
+
+    # what a pristine array iteration looks like (see `Interp.array_iteration_pristine?/1`)
+    Process.put(:js_arr_values, values)
+    Process.put(:js_arr_next, Interp.get(proto(:array_iterator), "next"))
 
     unscopables = new_object([], :null)
 
@@ -238,21 +286,10 @@ defmodule Browser.JS.Collections do
     put_hidden(array, key, unscopables)
     {:obj, aid} = array
     ao = deref(aid)
-    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false})))
+    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false, c: true})))
 
-    def_fn(array, "keys", fn this, _ ->
-      make_kind_iterator(
-        for(i <- 0..(length(iterate(this)) - 1)//1, do: i * 1.0),
-        :array_iterator
-      )
-    end)
-
-    def_fn(array, "entries", fn this, _ ->
-      make_kind_iterator(
-        for({v, i} <- Enum.with_index(iterate(this)), do: new_array([i * 1.0, v])),
-        :array_iterator
-      )
-    end)
+    def_fn(array, "keys", fn this, _ -> live_array_iterator(this, :keys) end)
+    def_fn(array, "entries", fn this, _ -> live_array_iterator(this, :entries) end)
 
     put_hidden(
       proto(:string),
@@ -265,7 +302,7 @@ defmodule Browser.JS.Collections do
               "String.prototype[Symbol.iterator] called on null or undefined"
             )
 
-        make_kind_iterator(String.codepoints(to_str(this)), :string_iterator)
+        make_kind_iterator(Browser.JS.Str.codepoints(to_str(this)), :string_iterator)
       end)
     )
   end
@@ -532,6 +569,8 @@ defmodule Browser.JS.Collections do
     end)
 
     def_fn(p, "has", fn this, args -> Map.has_key?(data!(this, :map).data, norm(arg(args, 0))) end)
+
+    install_upsert(p, :map, &norm/1, fn _ -> true end)
 
     def_fn(p, "delete", fn this, args ->
       o = data!(this, :map)
@@ -857,6 +896,8 @@ defmodule Browser.JS.Collections do
 
     def_fn(wm, "has", fn this, args -> Map.has_key?(data!(this, :weakmap).data, arg(args, 0)) end)
 
+    install_upsert(wm, :weakmap, & &1, &weak_key?/1)
+
     def_fn(wm, "delete", fn this, args ->
       o = data!(this, :weakmap)
       {:obj, id} = this
@@ -894,11 +935,138 @@ defmodule Browser.JS.Collections do
   end
 
   defp put_weak(this, key, value) do
-    unless match?({:obj, _}, key),
+    unless weak_key?(key),
       do: throw_error("TypeError", "Invalid value used as weak map key")
 
     put_entry(this, key, value)
   end
+
+  # Map.prototype.getOrInsert / getOrInsertComputed (and the WeakMap versions)
+  defp install_upsert(proto, class, normf, valid?) do
+    def_fn(proto, "getOrInsert", fn this, args ->
+      o = data!(this, class)
+      key = arg(args, 0)
+      unless valid?.(key), do: throw_error("TypeError", "Invalid value used as weak map key")
+      nk = normf.(key)
+
+      case o.data do
+        %{^nk => {_, _, v}} ->
+          v
+
+        _ ->
+          put_entry(this, nk, arg(args, 1))
+          arg(args, 1)
+      end
+    end)
+
+    def_fn(proto, "getOrInsertComputed", fn this, args ->
+      o = data!(this, class)
+      key = arg(args, 0)
+      f = arg(args, 1)
+      unless valid?.(key), do: throw_error("TypeError", "Invalid value used as weak map key")
+      unless function?(f), do: throw_error("TypeError", "callback is not a function")
+      nk = normf.(key)
+
+      case o.data do
+        %{^nk => {_, _, v}} ->
+          v
+
+        _ ->
+          v = call(f, :undefined, [nk])
+          put_entry(this, nk, v)
+          v
+      end
+    end)
+
+    set_arity(Interp.get(proto, "getOrInsert"), 2)
+    set_arity(Interp.get(proto, "getOrInsertComputed"), 2)
+  end
+
+  defp install_weakref(scope) do
+    p = new_object()
+    put_proto(:weakref, p)
+
+    ctor =
+      native("WeakRef", fn this, args ->
+        unless match?({:obj, _}, this) and deref(elem(this, 1)).class == :object,
+          do: throw_error("TypeError", "Constructor WeakRef requires 'new'")
+
+        t = arg(args, 0)
+
+        unless weak_key?(t),
+          do: throw_error("TypeError", "WeakRef: invalid target")
+
+        {:obj, id} = this
+        store(id, Map.merge(deref(id), %{class: :weakref, target: t}))
+        this
+      end)
+
+    set_arity(ctor, 1)
+    put_const(ctor, "prototype", p)
+    put_hidden(p, "constructor", ctor)
+    declare(scope, "WeakRef", ctor)
+    put_tag(p, "WeakRef")
+
+    def_fn(p, "deref", fn this, _ -> data!(this, :weakref).target end)
+
+    fp = new_object()
+    put_proto(:finreg, fp)
+
+    fctor =
+      native("FinalizationRegistry", fn this, args ->
+        unless match?({:obj, _}, this) and deref(elem(this, 1)).class == :object,
+          do: throw_error("TypeError", "Constructor FinalizationRegistry requires 'new'")
+
+        unless function?(arg(args, 0)),
+          do: throw_error("TypeError", "cleanup callback must be callable")
+
+        {:obj, id} = this
+        store(id, Map.merge(deref(id), %{class: :finreg, tokens: []}))
+        this
+      end)
+
+    set_arity(fctor, 1)
+    put_const(fctor, "prototype", fp)
+    put_hidden(fp, "constructor", fctor)
+    declare(scope, "FinalizationRegistry", fctor)
+    put_tag(fp, "FinalizationRegistry")
+
+    def_fn(fp, "register", fn this, args ->
+      data!(this, :finreg)
+      t = arg(args, 0)
+      held = arg(args, 1)
+      token = arg(args, 2)
+      unless weak_key?(t), do: throw_error("TypeError", "register: invalid target")
+      if t == held, do: throw_error("TypeError", "target and holdings must not be same")
+
+      unless token == :undefined or weak_key?(token),
+        do: throw_error("TypeError", "register: invalid unregister token")
+
+      if token != :undefined do
+        {:obj, id} = this
+        o = deref(id)
+        store(id, %{o | tokens: [token | o.tokens]})
+      end
+
+      :undefined
+    end)
+
+    def_fn(fp, "unregister", fn this, args ->
+      o = data!(this, :finreg)
+      token = arg(args, 0)
+      unless weak_key?(token), do: throw_error("TypeError", "unregister: invalid token")
+      {:obj, id} = this
+      store(id, %{o | tokens: Enum.reject(o.tokens, &(&1 == token))})
+      token in o.tokens
+    end)
+
+    set_arity(Interp.get(fp, "register"), 2)
+    set_arity(Interp.get(fp, "unregister"), 1)
+  end
+
+  defp weak_key?({:obj, _}), do: true
+  defp weak_key?({:symbol, _, _} = sym), do: Process.get({:js_registered_symbol, sym}) != true
+  defp weak_key?(_), do: false
 
   # ── Reflect ────────────────────────────────────────────────
 

@@ -55,9 +55,27 @@ defmodule Browser.JS.Parser do
   declarations are lexical, so they clash with `var` and with each other).
   """
   def parse(src, opts \\ []) do
+    Process.delete(:lex_esc_await)
+
     with {:ok, tokens} <- Lexer.tokenize(src) do
+      # where the tokens lie in the source, so a function can keep its own text
+      {text, starts, ends} = Process.get(:lex_table)
+      n = length(tokens)
+
+      Process.delete(:js_cur_start)
+      Process.delete(:js_cur_end)
+
+      Process.put(
+        :js_srctab,
+        if(n <= 400_000, do: {text, starts, ends, List.to_tuple(tokens), n})
+      )
+
       try do
         eval? = Keyword.get(opts, :eval, false)
+
+        # (`await` is reserved in a module, escaped or not)
+        if Keyword.get(opts, :module, false) and Process.get(:lex_esc_await),
+          do: throw({:syntax, "an escaped await is not allowed in a module"})
 
         Process.put(
           :js_strict,
@@ -70,21 +88,19 @@ defmodule Browser.JS.Parser do
         Process.put(:js_labels, [])
         Process.put(:js_loop, 0)
         Process.put(:js_switch, 0)
-        # no `return` at the top level; a module has no `new.target` there either (a script
-        # may be eval code run inside a function)
+        # no `return` and no `new.target` at the top level (eval code run inside a function
+        # may have one)
         Process.put(:js_fn, false)
 
-        Process.put(
-          :js_nt,
-          if(eval?,
-            do: Keyword.get(opts, :new_target, false),
-            else: not Keyword.get(opts, :module, false)
-          )
-        )
+        Process.put(:js_nt, eval? and Keyword.get(opts, :new_target, false))
 
         program = tokens |> statements()
 
-        if Enum.any?(program, &using_decl?/1),
+        if not eval? and
+             contains_node?(program, &(&1 == {:super} or match?({:super_member, _}, &1))),
+           do: throw({:syntax, "'super' keyword unexpected here"})
+
+        if not Keyword.get(opts, :module, false) and Enum.any?(program, &using_decl?/1),
           do: throw({:syntax, "using declaration at the top level of a script"})
 
         program = check_scope(program, true)
@@ -130,7 +146,7 @@ defmodule Browser.JS.Parser do
         {:var, k, decls} when k in [:let, :const, :using, :await_using] ->
           for {pat, _} <- decls, n <- Interp.pattern_names(pat, []), do: {n, :lexical}
 
-        {:fundecl, n, {:async, _}} when not top? ->
+        {:fundecl, n, {k, _}} when k in [:async, :gen] and not top? ->
           [{n, :lexical}]
 
         {:fundecl, n, _} when not top? ->
@@ -186,6 +202,7 @@ defmodule Browser.JS.Parser do
             (case b do
                {:default, l} -> l
                {:ns, l} -> l
+               {:defer_ns, l} -> l
                {:named, _, l} -> l
              end)
 
@@ -262,12 +279,22 @@ defmodule Browser.JS.Parser do
 
   # does the token list begin with a "use strict" directive?
   # a token that has a line break before it (`:octal_nl`: a string with a legacy octal escape)
-  defguardp nl?(mark) when mark in [true, :octal_nl]
+  defguardp nl?(mark) when mark in [true, :octal_nl, :esc_nl]
 
-  defp use_strict?([{:str, "use strict", _}, {:p, p, _} | _]) when p in [";", "}"], do: true
-  defp use_strict?([{:str, "use strict", _}, {_, _, nl} | _]) when nl?(nl), do: true
-  defp use_strict?([{:str, "use strict", _}, {:eof, _, _} | _]), do: true
+  # (`:esc`: the same string written with an escape or a line continuation is not a directive)
+  defp use_strict?([{:str, "use strict", m}, {:p, p, _} | _])
+       when p in [";", "}"] and m not in [:esc, :esc_nl],
+       do: true
+
+  defp use_strict?([{:str, "use strict", m}, {_, _, nl} | _])
+       when nl?(nl) and m not in [:esc, :esc_nl],
+       do: true
+
+  defp use_strict?([{:str, "use strict", m}, {:eof, _, _} | _]) when m not in [:esc, :esc_nl],
+    do: true
+
   defp use_strict?([{:str, _, _}, {:p, ";", _} | ts]), do: use_strict?(ts)
+  defp use_strict?([{:str, _, _}, {:str, _, nl} | _] = [_ | ts]) when nl?(nl), do: use_strict?(ts)
   defp use_strict?(_), do: false
 
   # a function body: strict when it opens with the directive (or is inside strict code)
@@ -331,10 +358,29 @@ defmodule Browser.JS.Parser do
 
   defp check_octal_string(_), do: :ok
 
+  # a function declaration's name belongs to the enclosing code
+  defp check_decl_name(name) do
+    if name == "await" and await_reserved?(),
+      do: throw({:syntax, "await is reserved here"})
+  end
+
+  # code in which `await` is an operator: an async function, or the top level of a module
+  defp await_context? do
+    Process.get(:js_async, false) or
+      (Process.get(:js_module, false) and not Process.get(:js_fn, false) and
+         not Process.get(:js_static_block, false))
+  end
+
+  # `await` is a keyword in async code, in static blocks and everywhere in a module
+  defp await_reserved? do
+    Process.get(:js_async, false) or Process.get(:js_static_block, false) or
+      Process.get(:js_module, false)
+  end
+
   # `yield` and `await` cannot be labels where they are keywords
   defp check_strict_name_context(name) do
-    if (name == "yield" and Process.get(:js_generator, false)) or
-         (name == "await" and Process.get(:js_async, false)),
+    if (name == "yield" and (Process.get(:js_generator, false) or strict?())) or
+         (name == "await" and await_reserved?()),
        do: throw({:syntax, "#{name} is not a valid label here"})
   end
 
@@ -348,7 +394,7 @@ defmodule Browser.JS.Parser do
     if name == "yield" and Process.get(:js_generator, false),
       do: throw({:syntax, "yield is reserved in generators"})
 
-    if name == "await" and (Process.get(:js_async, false) or Process.get(:js_static_block, false)),
+    if name == "await" and await_reserved?(),
       do: throw({:syntax, "await is reserved here"})
   end
 
@@ -365,6 +411,11 @@ defmodule Browser.JS.Parser do
       [{:id, "let", _}, {:id, n, false} | _] when n not in ["in", "of", "instanceof"] ->
         throw({:syntax, "lexical declaration in statement position"})
 
+      # `let` and a block on the next line: the name `let`, then ASI
+      [{:id, "let", _}, {:p, "{", true} | _] = all ->
+        if strict?(), do: throw({:syntax, "let is reserved in strict mode"})
+        {{:expr, {:id, "let"}}, tl(all)}
+
       [{:id, kw, _} | _] when kw in ["const", "class"] ->
         throw({:syntax, "#{kw} declaration in statement position"})
 
@@ -379,7 +430,16 @@ defmodule Browser.JS.Parser do
           else: statement(ts)
 
       [{:id, l, _}, {:p, ":", _} | rest] when allow_function != true and l not in @reserved ->
-        body_statement(rest, false)
+        # a labelled declaration is not allowed here; checking the body must see the label
+        labels = Process.get(:js_labels, [])
+        Process.put(:js_labels, [{l, loop_ahead?(rest)} | labels])
+
+        try do
+          body_statement(rest, false)
+        after
+          Process.put(:js_labels, labels)
+        end
+
         statement(ts)
 
       [{:id, "async", _}, {:id, "function", f} | _] when f != true ->
@@ -452,7 +512,7 @@ defmodule Browser.JS.Parser do
 
   defp statement([{:id, "await", _}, {:id, "using", _}, {:id, name, false} | ts] = all)
        when name not in @reserved and name not in ["in", "instanceof", "of", "let"] do
-    if Process.get(:js_async, false) do
+    if await_context?() do
       {decls, ts} = using_declarators([{:id, name, false} | ts])
       {{:var, :await_using, decls}, semi(ts)}
     else
@@ -460,34 +520,45 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp statement([{:id, "let", mark} | _] = all) when mark in [:esc, :esc_nl],
+    do: expression_statement(all)
+
   defp statement([{:id, "let", _} | ts] = all) do
     case ts do
-      [{:id, name, _} | _] when name not in ["in", "of", "instanceof"] -> let_decl(ts)
+      [{:id, name, _} | _] when name not in ["in", "instanceof"] -> let_decl(ts)
+      [{:eid, name, _} | _] when name in ["static", "async"] -> let_decl(ts)
       [{:p, p, _} | _] when p in ["[", "{"] -> let_decl(ts)
       _ -> expression_statement(all)
     end
   end
 
+  defp statement([{:id, "function", _}, {:p, "(", _} | _]),
+    do: throw({:syntax, "function statement requires a name"})
+
   defp statement([{:id, "function", _}, {:id, name, _} | ts]) when name not in @reserved do
+    check_decl_name(name)
     {fun, ts} = function_rest(name, ts)
     {{:fundecl, name, fun}, ts}
   end
 
   defp statement([{:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
        when name not in @reserved do
+    check_decl_name(name)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, fun}, ts}
   end
 
-  defp statement([{:id, "async", _}, {:id, "function", _}, {:p, "*", _}, {:id, name, _} | ts])
-       when name not in @reserved do
+  defp statement([{:id, "async", _}, {:id, "function", f}, {:p, "*", _}, {:id, name, _} | ts])
+       when name not in @reserved and f != true do
+    check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = generator_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
   end
 
-  defp statement([{:id, "async", _}, {:id, "function", _}, {:id, name, _} | ts])
-       when name not in @reserved do
+  defp statement([{:id, "async", _}, {:id, "function", f}, {:id, name, _} | ts])
+       when name not in @reserved and f != true do
+    check_decl_name(name)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest(name, ts)
     {{:fundecl, name, {:async, fun}}, ts}
@@ -556,7 +627,16 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, "for", _}, {:id, "await", _} | ts]) do
-    case for_statement(expect(ts, "(")) do
+    Process.put(:js_for_await, true)
+
+    result =
+      try do
+        for_statement(expect(ts, "("))
+      after
+        Process.put(:js_for_await, false)
+      end
+
+    case result do
       {{:forof, decl, pat, obj, body}, ts} -> {{:forawait, decl, pat, obj, body}, ts}
       _ -> throw({:syntax, "for await needs an of loop"})
     end
@@ -576,6 +656,9 @@ defmodule Browser.JS.Parser do
   end
 
   defp statement([{:id, "throw", _} | ts]) do
+    if match?([{_, _, nl} | _] when nl?(nl), ts),
+      do: throw({:syntax, "illegal newline after throw"})
+
     {e, ts} = expression(ts)
     {{:throw, e}, semi(ts)}
   end
@@ -597,6 +680,7 @@ defmodule Browser.JS.Parser do
             end
 
           {handler, ts} = statement(ts)
+          check_catch(param, handler)
           {param, handler, ts}
 
         ts ->
@@ -656,6 +740,19 @@ defmodule Browser.JS.Parser do
     {{:var, :let, [{{:id, name}, node}]}, ts}
   end
 
+  defp statement([{:p, "@", _} | _] = ts) do
+    {decs, ts} = decorators(ts, [])
+
+    case ts do
+      [{:id, "class", _}, {:id, name, _} | _] when name not in @reserved ->
+        {node, ts} = class_rest(tl(ts), decs)
+        {{:var, :let, [{{:id, name}, node}]}, ts}
+
+      _ ->
+        throw({:syntax, "a decorator must be followed by a class"})
+    end
+  end
+
   defp statement([{:id, "import", _}, {:p, p, _} | _] = ts) when p in ["(", "."],
     do: expression_statement(ts)
 
@@ -676,16 +773,79 @@ defmodule Browser.JS.Parser do
 
   defp statement(ts), do: expression_statement(ts)
 
-  defp module_item([{:id, "import", _}, {:str, spec, _} | ts]),
-    do: {{:import, spec, []}, semi(ts)}
+  # `with { type: "json", ... }` after a module specifier: strings only, no key twice. A module
+  # that is asked for as a type is the specifier together with the type (`:unsupported` for any
+  # other attribute: the loader refuses it).
+  defp with_spec(spec, [{:id, "with", _}, {:p, "{", _} | ts]) do
+    {attrs, ts} = with_entries(ts, [])
+    keys = Enum.map(attrs, &elem(&1, 0))
+    if length(keys) != length(Enum.uniq(keys)), do: throw({:syntax, "duplicate import attribute"})
+
+    case attrs do
+      [] -> {spec, ts}
+      [{"type", type}] -> {{spec, type}, ts}
+      _ -> {{spec, :unsupported}, ts}
+    end
+  end
+
+  defp with_spec(spec, ts), do: {spec, ts}
+
+  defp with_entries([{:p, "}", _} | ts], acc), do: {acc, ts}
+
+  defp with_entries([{k, key, _}, {:p, ":", _}, {:str, value, _} | ts], acc)
+       when k in [:id, :str] do
+    case ts do
+      [{:p, ",", _} | ts] -> with_entries(ts, [{key, value} | acc])
+      [{:p, "}", _} | ts] -> {[{key, value} | acc], ts}
+      _ -> throw({:syntax, "bad import attributes"})
+    end
+  end
+
+  defp with_entries(_, _), do: throw({:syntax, "bad import attributes"})
+
+  # `import defer * as ns from "m"`
+  defp module_item([
+         {:id, "import", _},
+         {:id, "defer", _},
+         {:p, "*", _},
+         {:id, "as", _},
+         {:id, local, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:import, spec, [{:defer_ns, local}]}, semi(ts)}
+  end
+
+  # `import source x from "m"`: a module has no source phase representation here, so the
+  # loader refuses the request (`source` and `from` can be the binding)
+  defp module_item([
+         {:id, "import", _},
+         {:id, "source", _},
+         {:id, _, _},
+         {:id, "from", _},
+         {:str, spec, _} | ts
+       ]) do
+    {_spec, ts} = with_spec(spec, ts)
+    {{:import, {spec, :unsupported}, []}, semi(ts)}
+  end
+
+  defp module_item([{:id, "import", _}, {:str, spec, _} | ts]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:import, spec, []}, semi(ts)}
+  end
 
   defp module_item([{:id, "import", _} | [{k, _, _} | _] = ts]) when k in [:id] do
     {bindings, ts} = import_bindings(ts, [])
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -694,8 +854,12 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -704,8 +868,12 @@ defmodule Browser.JS.Parser do
     ts = expect_id(ts, "from")
 
     case ts do
-      [{:str, spec, _} | ts] -> {{:import, spec, bindings}, semi(ts)}
-      _ -> throw({:syntax, "expected a module name"})
+      [{:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:import, spec, bindings}, semi(ts)}
+
+      _ ->
+        throw({:syntax, "expected a module name"})
     end
   end
 
@@ -755,6 +923,22 @@ defmodule Browser.JS.Parser do
         {node, rest} = class_rest(rest)
         {{:export_default, {:classdecl, "*default*", node}}, rest}
 
+      [{:p, "@", _} | _] ->
+        {decs, t} = decorators(ts, [])
+
+        case t do
+          [{:id, "class", _}, {:id, name, _} | _] when name not in @reserved ->
+            {node, rest} = class_rest(tl(t), decs)
+            {{:export_default, {:classdecl, name, node}}, rest}
+
+          [{:id, "class", _} | rest] ->
+            {node, rest} = class_rest(rest, decs)
+            {{:export_default, {:classdecl, "*default*", node}}, rest}
+
+          _ ->
+            throw({:syntax, "a decorator must be followed by a class"})
+        end
+
       _ ->
         {e, ts} = assignment(ts)
         {{:export_default, {:expr, e}}, semi(ts)}
@@ -765,27 +949,40 @@ defmodule Browser.JS.Parser do
     {names, ts} = export_names(ts, [])
 
     case ts do
-      [{:id, "from", _}, {:str, spec, _} | ts] -> {{:export_from, spec, names}, semi(ts)}
-      ts -> {{:export_names, names}, semi(ts)}
+      [{:id, "from", _}, {:str, spec, _} | ts] ->
+        {spec, ts} = with_spec(spec, ts)
+        {{:export_from, spec, from_export_names(names)}, semi(ts)}
+
+      ts ->
+        {{:export_names, plain_export_names(names)}, semi(ts)}
     end
   end
 
-  defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]),
-    do: {{:export_from, spec, :all}, semi(ts)}
+  defp module_item([{:id, "export", _}, {:p, "*", _}, {:id, "from", _}, {:str, spec, _} | ts]) do
+    {spec, ts} = with_spec(spec, ts)
+    {{:export_from, spec, :all}, semi(ts)}
+  end
 
   defp module_item([
          {:id, "export", _},
          {:p, "*", _},
          {:id, "as", _},
-         {:id, name, _},
+         {k, name, _},
          {:id, "from", _},
          {:str, spec, _} | ts
-       ]),
-       do: {{:export_from, spec, [{:star, name}]}, semi(ts)}
+       ])
+       when k in [:id, :str] do
+    {spec, ts} = with_spec(spec, ts)
+    {{:export_from, spec, [{:star, name}]}, semi(ts)}
+  end
 
   defp module_item([{:id, "export", _} | ts]) do
     case ts do
       [{:id, kw, _} | _] when kw in ["var", "let", "const", "function", "async", "class"] ->
+        {stmt, ts} = statement(ts)
+        {{:export, stmt}, ts}
+
+      [{:p, "@", _} | _] ->
         {stmt, ts} = statement(ts)
         {{:export, stmt}, ts}
 
@@ -815,7 +1012,7 @@ defmodule Browser.JS.Parser do
 
   defp import_named([{k, imported, _}, {:id, "as", _}, {:id, local, _} | ts], acc)
        when k in [:id, :str],
-       do: import_named_next(ts, [{:named, imported, local} | acc])
+       do: import_named_next(ts, [{:named, well_formed(k, imported), local} | acc])
 
   defp import_named([{k, name, _} | ts], acc) when k in [:id, :str],
     do: import_named_next(ts, [{:named, name, name} | acc])
@@ -829,12 +1026,43 @@ defmodule Browser.JS.Parser do
   defp export_names([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
   defp export_names([{:p, ",", _} | ts], acc), do: export_names(ts, acc)
 
-  defp export_names([{:id, local, _}, {:id, "as", _}, {k, exported, _} | ts], acc)
-       when k in [:id, :str],
-       do: export_names(ts, [{local, exported} | acc])
+  defp export_names([{lk, local, _}, {:id, "as", _}, {k, exported, _} | ts], acc)
+       when lk in [:id, :str] and k in [:id, :str],
+       do: export_names(ts, [{str_local(lk, local), well_formed(k, exported)} | acc])
 
   defp export_names([{:id, name, _} | ts], acc), do: export_names(ts, [{name, name} | acc])
+
+  defp export_names([{:str, name, _} | ts], acc),
+    do: export_names(ts, [{{:str, well_formed(:str, name)}, name} | acc])
+
   defp export_names(_ts, _acc), do: throw({:syntax, "bad export list"})
+
+  # a string can name what is re-exported (`export { "a-b" as c } from "m"`) but not a local binding
+  defp str_local(:id, name), do: name
+  defp str_local(:str, name), do: {:str, well_formed(:str, name)}
+
+  # a module export name must not hold a lone surrogate
+  defp well_formed(:str, name) do
+    if Browser.JS.Str.lone?(name),
+      do: throw({:syntax, "a module export name must be well-formed unicode"}),
+      else: name
+  end
+
+  defp well_formed(_, name), do: name
+
+  defp plain_export_names(names) do
+    Enum.map(names, fn
+      {{:str, _}, _} -> throw({:syntax, "a string cannot be exported without `from`"})
+      n -> n
+    end)
+  end
+
+  defp from_export_names(names),
+    do:
+      Enum.map(names, fn
+        {{:str, l}, e} -> {l, e}
+        n -> n
+      end)
 
   defp expression_statement(ts) do
     {e, ts} = expression(ts)
@@ -869,6 +1097,15 @@ defmodule Browser.JS.Parser do
 
   defp declaration(kind, ts) do
     {decls, ts} = declarators(ts, [])
+
+    for {pat, init} <- decls do
+      if init == nil and (kind == "const" or not match?({:id, _}, pat)),
+        do: throw({:syntax, "missing initializer in declaration"})
+
+      if kind in ["let", "const"] and "let" in Interp.pattern_names(pat, []),
+        do: throw({:syntax, "let is disallowed as a lexically bound name"})
+    end
+
     {{:var, String.to_atom(kind), decls}, ts}
   end
 
@@ -930,6 +1167,28 @@ defmodule Browser.JS.Parser do
   end
 
   # a function body starts a new world for labels, loops and switches
+  # `in` is no operator in the head of a `for (init; …)` (it would read as `for (a in b)`),
+  # except inside brackets, a function or a class
+  defp allow_in(fun) do
+    old = Process.put(:js_no_in, false)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_no_in, old)
+    end
+  end
+
+  defp no_in(fun) do
+    old = Process.put(:js_no_in, true)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_no_in, old)
+    end
+  end
+
   defp fresh_jumps(fun, in_fn?) do
     saved =
       {Process.get(:js_labels, []), Process.get(:js_loop, 0), Process.get(:js_switch, 0),
@@ -941,7 +1200,7 @@ defmodule Browser.JS.Parser do
     Process.put(:js_fn, in_fn?)
 
     try do
-      fun.()
+      allow_in(fun)
     after
       {l, lp, sw, f} = saved
       Process.put(:js_labels, l)
@@ -951,8 +1210,33 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  # early errors of `catch (param) { body }`: a name bound twice, a body that declares a
+  # parameter's name lexically (or with `var` when the parameter is a pattern)
+  defp check_catch(nil, _), do: :ok
+
+  defp check_catch(param, {:block, stmts}) do
+    names = Interp.pattern_names(param, [])
+
+    if length(names) != length(Enum.uniq(names)),
+      do: throw({:syntax, "duplicate catch parameter name"})
+
+    check_scope(stmts, false, names)
+
+    if not match?({:id, _}, param) and Enum.any?(Interp.var_names(stmts, []), &(&1 in names)),
+      do: throw({:syntax, "catch parameter redeclared with var"})
+
+    :ok
+  end
+
+  defp check_catch(_, _), do: :ok
+
   defp for_statement(ts) do
     case ts do
+      # `let` as a plain name: `for (let; ;)`, `for (let in obj)`
+      [{:id, "let", _}, {k, v, _} | _]
+      when (k == :p and v not in ["[", "{"]) or (k == :id and v == "in") ->
+        for_lhs_head(ts)
+
       [{:id, kw, _} | rest] when kw in ["var", "let", "const"] ->
         {pat, after_pat} = pattern(rest, false)
 
@@ -961,10 +1245,11 @@ defmodule Browser.JS.Parser do
             {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
             t = expect(t, ")")
             {body, t} = loop_body(t)
+            if kw != "var", do: check_for_declaration(pat, body)
             {{if(of_in == "of", do: :forof, else: :forin), String.to_atom(kw), pat, obj, body}, t}
 
           _ ->
-            {decl, t} = declaration(kw, rest)
+            {decl, t} = no_in(fn -> declaration(kw, rest) end)
             for_rest(decl, t)
         end
 
@@ -977,39 +1262,102 @@ defmodule Browser.JS.Parser do
 
       [{:id, "await", _}, {:id, "using", _}, {:id, n, false} | rest]
       when n not in @reserved and n not in ["in", "instanceof", "let"] ->
-        unless Process.get(:js_async, false), do: throw({:syntax, "await using outside async"})
+        unless await_context?(), do: throw({:syntax, "await using outside async"})
         using_for(:await_using, [{:id, n, false} | rest])
 
       [{:p, ";", _} | _] ->
         for_rest(nil, ts)
 
       _ ->
-        {lhs, after_lhs} =
-          case destructuring_head(ts) do
-            nil ->
-              try do
-                unary_or_lhs(ts)
-              catch
-                # an init such as `typeof a == "x" && b()` is no left-hand side
-                {:syntax, _} -> {nil, []}
-              end
+        for_lhs_head(ts)
+    end
+  end
 
-            head ->
-              head
+  # `for (lhs of/in …)` or `for (init; …)` whose head is an expression
+  defp for_lhs_head(ts) do
+    {lhs, after_lhs} =
+      case destructuring_head(ts) do
+        nil ->
+          try do
+            unary_or_lhs(ts)
+          catch
+            # an init such as `typeof a == "x" && b()` is no left-hand side
+            {:syntax, _} -> {nil, []}
           end
 
-        case after_lhs do
-          [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
-            {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
-            t = expect(t, ")")
-            {body, t} = loop_body(t)
-            {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
+        head ->
+          head
+      end
 
-          _ ->
-            {e, t} = expression(ts)
-            for_rest({:expr, e}, t)
-        end
+    case after_lhs do
+      # `for (async of => {}; ;)` is an arrow function init, not a for-of
+      [{:id, "of", _}, {:p, "=>", _} | _] when lhs == {:id, "async"} ->
+        {e, t} = no_in(fn -> expression(ts) end)
+        for_rest({:expr, e}, t)
+
+      [{:id, of_in, _} | t] when of_in in ["of", "in"] ->
+        check_for_target(lhs, ts, of_in)
+        {obj, t} = if of_in == "of", do: assignment(t), else: expression(t)
+        t = expect(t, ")")
+        {body, t} = loop_body(t)
+        {{if(of_in == "of", do: :forof, else: :forin), nil, lhs, obj, body}, t}
+
+      _ ->
+        {e, t} = no_in(fn -> expression(ts) end)
+        for_rest({:expr, e}, t)
     end
+  end
+
+  # early errors of `for (let/const <pattern> of/in ...) body`: a name bound twice, `let` as a
+  # name, or a name that the body also declares with `var`
+  defp check_for_declaration(pat, body) do
+    names = Interp.pattern_names(pat, [])
+
+    if length(names) != length(Enum.uniq(names)) or "let" in names or
+         Enum.any?(names, &(&1 in Interp.var_names([body], []))),
+       do: throw({:syntax, "redeclaration of a lexical name in a for loop head"})
+  end
+
+  # the left-hand side of `for (lhs of/in ...)`: something that can be assigned to. A pattern
+  # was already taken by `destructuring_head`, so an array or object literal here is invalid.
+  defp check_for_target(lhs, ts, of_in) do
+    case lhs do
+      {:import_meta} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:priv_ref, _} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag, _} when tag in [:array, :object, :num, :str, :bigint, :regex, :template] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag, _, _} when tag in [:array, :object] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {tag} when tag in [:this, :super] ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:call, _, _, _} ->
+        if strict?(), do: throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:lit, _} ->
+        throw({:syntax, "Invalid left-hand side in for loop"})
+
+      {:id, "async"} when of_in == "of" and not is_nil(ts) ->
+        if not Process.get(:js_for_await, false) and
+             match?([{:id, "async", _}, {:id, "of", _} | _], ts),
+           do: throw({:syntax, "for (async of ...) is not allowed"})
+
+      pat ->
+        # a pattern checks like a binding target in strict code
+        if strict?(), do: check_strict_targets(pat)
+    end
+  end
+
+  defp check_strict_targets(pat) do
+    for n <- Interp.pattern_names(pat, []), do: check_strict_name(n)
+  rescue
+    _ -> :ok
   end
 
   # `for (using x of y) body` takes each value into a fresh name and declares `x` from it in
@@ -1024,9 +1372,13 @@ defmodule Browser.JS.Parser do
         {obj, t} = assignment(t)
         t = expect(t, ")")
         {body, t} = loop_body(t)
+
+        if name in Interp.var_names([body], []),
+          do: throw({:syntax, "#{name} is declared by the loop head and again with var"})
+
         tmp = " using"
         node = {:using, kind, name, {:id, tmp}, [body]}
-        {{:forof, :const, {:id, tmp}, obj, {:block, [node]}}, t}
+        {{:forof, :const, {:id, tmp}, {:tdz_names, [name], obj}, {:block, [node]}}, t}
 
       [{:id, "in", _} | _] ->
         throw({:syntax, "using in a for-in head"})
@@ -1080,6 +1432,15 @@ defmodule Browser.JS.Parser do
 
     ts = expect(ts, ")")
     {body, ts} = loop_body(ts)
+
+    case init do
+      {:var, kind, decls} when kind in [:let, :const] ->
+        check_for_declaration({:arrpat, Enum.map(decls, &elem(&1, 0))}, body)
+
+      _ ->
+        :ok
+    end
+
     {{:for, init, test, update, body}, ts}
   end
 
@@ -1092,6 +1453,9 @@ defmodule Browser.JS.Parser do
       else
         {:default, ts}
       end
+
+    if test == :default and List.keymember?(acc, :default, 0),
+      do: throw({:syntax, "more than one default clause in switch statement"})
 
     ts = expect(ts, ":")
     {body, ts} = case_body(ts, [])
@@ -1134,9 +1498,13 @@ defmodule Browser.JS.Parser do
 
   # in a destructuring *assignment* a target can be a property: `({a: o.x, b: o.y[0]} = v)`
   defp pattern([{:id, name, _}, {:p, p, _} | _] = ts, allow_default)
-       when p in [".", "["] and (name not in @reserved or name == "this") do
+       when p in [".", "[", "("] and (name not in @reserved or name == "this") do
     if Process.get(:js_assign_pattern, false) do
       {target, ts} = call_chain(ts)
+
+      unless match?({:member, _, _, _}, target),
+        do: throw({:syntax, "invalid destructuring assignment target"})
+
       with_default(target, ts, allow_default)
     else
       pattern_id(ts, allow_default)
@@ -1145,18 +1513,55 @@ defmodule Browser.JS.Parser do
 
   defp pattern([{:id, _, _} | _] = ts, allow_default), do: pattern_id(ts, allow_default)
 
-  defp pattern([{:p, "[", _} | ts], allow_default) do
-    {elems, ts} = array_pattern(ts, [])
-    with_default({:arrpat, elems}, ts, allow_default)
-  end
+  defp pattern([{:eid, name, nl} | ts], allow_default) when name in ["static", "async"],
+    do: pattern_id([{:id, name, nl} | ts], allow_default)
 
-  defp pattern([{:p, "{", _} | ts], allow_default) do
-    {props, rest, ts} = object_pattern(ts, [], nil)
-    with_default({:objpat, props, rest}, ts, allow_default)
+  # in an assignment pattern `{}[k]` or `[a].b` is a property target, not a nested pattern
+  defp pattern([{:p, open, _} | _] = ts, allow_default) when open in ["[", "{"] do
+    if Process.get(:js_assign_pattern, false) do
+      nested =
+        try do
+          {:ok, nested_pattern(ts, allow_default)}
+        catch
+          {:syntax, _} = err -> {:error, err}
+        end
+
+      case nested do
+        {:ok, {_, [{:p, m, _} | _]} = r} when m not in [".", "["] -> r
+        {:ok, {_, [{:p, "[", _} | _]}} -> member_target(ts, allow_default, nil)
+        {:ok, {_, [{:p, ".", _} | _]}} -> member_target(ts, allow_default, nil)
+        {:ok, r} -> r
+        {:error, err} -> member_target(ts, allow_default, err)
+      end
+    else
+      nested_pattern(ts, allow_default)
+    end
   end
 
   defp pattern([{_, v, _} | _], _),
     do: throw({:syntax, "unexpected token #{inspect(v)} in binding"})
+
+  defp nested_pattern([{:p, "[", _} | ts], allow_default) do
+    {elems, ts} = array_pattern(ts, [])
+    with_default({:arrpat, elems}, ts, allow_default)
+  end
+
+  defp nested_pattern([{:p, "{", _} | ts], allow_default) do
+    {props, rest, ts} = object_pattern(ts, [], nil)
+    with_default({:objpat, props, rest}, ts, allow_default)
+  end
+
+  defp member_target(ts, allow_default, err) do
+    {target, rest} = call_chain(ts)
+
+    if match?({tag, _} when tag in [:array, :object, :chain, :call], target) or
+         match?({tag, _, _} when tag in [:array, :object], target),
+       do: throw(err || {:syntax, "invalid assignment target"})
+
+    with_default(target, rest, allow_default)
+  catch
+    {:syntax, _} = e -> throw(err || e)
+  end
 
   defp pattern_id([{:id, name, _} | ts], allow_default) when name not in @reserved do
     check_strict_name(name)
@@ -1202,6 +1607,7 @@ defmodule Browser.JS.Parser do
 
   defp object_pattern(ts, acc, rest) do
     {key, shorthand, ts} = property_key(ts)
+    if match?({:priv, _}, key), do: throw({:syntax, "a private name is not a pattern key"})
 
     {prop, ts} =
       case ts do
@@ -1211,6 +1617,7 @@ defmodule Browser.JS.Parser do
 
         _ ->
           name = shorthand || throw({:syntax, "bad object pattern"})
+          if name in @reserved, do: throw({:syntax, "unexpected reserved word #{name}"})
           check_strict_name(name)
           {pat, ts} = with_default({:id, name}, ts, true)
           {{key, pat}, ts}
@@ -1301,7 +1708,7 @@ defmodule Browser.JS.Parser do
             kind != :field ->
           throw({:syntax, "class constructor may not be an accessor, generator or async"})
 
-        kind == :field and name == "constructor" ->
+        kind in [:field, :accessor] and name == "constructor" ->
           throw({:syntax, "classes may not have a field named 'constructor'"})
 
         static? and name == "prototype" and kind != :block ->
@@ -1327,7 +1734,7 @@ defmodule Browser.JS.Parser do
           if contains_node?(value, &match?({:call, {:super}, _, _}, &1)),
             do: throw({:syntax, "'super' call is not allowed in a class static block"})
 
-        :field ->
+        k when k in [:field, :accessor] ->
           if value != nil and contains_node?(value, &(&1 == {:id, "arguments"})),
             do: throw({:syntax, "'arguments' is not allowed in a class field initializer"})
 
@@ -1367,25 +1774,47 @@ defmodule Browser.JS.Parser do
 
   # the parameters and body of a method value, whatever generator/async wrapping it has
   defp method_code({tag, fun}) when tag in [:async, :gen], do: method_code(fun)
-  defp method_code({:fn, _, params, body, _}), do: [params, body]
+  defp method_code({:fn, _, params, body, _, _}), do: [params, body]
   defp method_code(other), do: other
 
-  defp plain_method?({:fn, _, _, _, _}), do: true
+  defp plain_method?({:fn, _, _, _, _, _}), do: true
   defp plain_method?(_), do: false
 
   # does `ast` hold a node satisfying `pred`, outside nested non-arrow functions and classes?
   defp contains_node?(ast, pred) do
     cond do
-      pred.(ast) -> true
-      match?({:fn, _, _, _, m} when m not in [:arrow, :arrow_expr], ast) -> false
-      match?({:class, _, _, _}, ast) -> false
-      is_tuple(ast) -> ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
-      is_list(ast) -> Enum.any?(ast, &contains_node?(&1, pred))
-      true -> false
+      pred.(ast) ->
+        true
+
+      match?({:fn, _, _, _, m, _} when m not in [:arrow, :arrow_expr], ast) ->
+        false
+
+      # a nested class's heritage and computed keys are evaluated in the enclosing code
+      match?({:class, _, _, _, _}, ast) ->
+        {:class, _, heritage, members, _} = ast
+
+        contains_node?(heritage, pred) or
+          Enum.any?(members, fn
+            {:cmember, _, {:computed, e}, _, _} -> contains_node?(e, pred)
+            _ -> false
+          end)
+
+      is_tuple(ast) ->
+        ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
+
+      is_list(ast) ->
+        Enum.any?(ast, &contains_node?(&1, pred))
+
+      true ->
+        false
     end
   end
 
-  defp class_rest(ts) do
+  defp class_rest(ts, class_decorators \\ []),
+    do: allow_in(fn -> class_rest_(ts, class_decorators) end)
+
+  defp class_rest_(ts, class_decorators) do
+    open = token_index(ts, :js_cur_start)
     outer_refs = Process.get(:js_priv_refs, [])
     Process.put(:js_priv_refs, [])
 
@@ -1396,7 +1825,7 @@ defmodule Browser.JS.Parser do
       end
 
     if name in @strict_reserved or name in ["eval", "arguments"] or
-         (name == "await" and Process.get(:js_static_block, false)),
+         (name == "await" and await_reserved?()),
        do: throw({:syntax, "#{name} is not a valid class name"})
 
     outer = strict?()
@@ -1418,15 +1847,76 @@ defmodule Browser.JS.Parser do
     Process.put(:js_nt, nt)
     Process.put(:js_strict, outer)
 
+    # the decorators of the members ride along as a last element of the member list
+    {members, member_decorators} =
+      case List.last(members) do
+        {:decorations, _} = d -> {Enum.drop(members, -1), d}
+        _ -> {members, nil}
+      end
+
     check_class_members(members, super != nil)
     names = check_private_names(members)
     unresolved = Enum.reject(Process.get(:js_priv_refs, []), &(&1 in names))
     Process.put(:js_priv_refs, unresolved ++ outer_refs)
-    {{:class, name, super, members}, ts}
+
+    members =
+      if class_decorators == [] and member_decorators == nil do
+        members
+      else
+        {:decorations, by_index} = member_decorators || {:decorations, %{}}
+        members ++ [{:decorations, class_decorators, by_index}]
+      end
+
+    {{:class, name, super, members, class_src(open, ts)}, ts}
   end
 
-  defp class_members([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  # `@dec`, `@a.b`, `@a.#b`, `@a.b(args)`, `@(expr)`
+  defp decorators([{:p, "@", _} | ts], acc) do
+    {d, ts} = decorator(ts)
+    decorators(ts, [d | acc])
+  end
+
+  defp decorators(ts, acc), do: {Enum.reverse(acc), ts}
+
+  defp decorator([{:p, "(", _} | ts]) do
+    {e, ts} = expression(ts)
+    {e, expect(ts, ")")}
+  end
+
+  defp decorator([{:id, name, _} | ts])
+       when name not in @reserved or name in ["await", "yield"] do
+    {e, ts} = decorator_chain({:id, name}, ts)
+
+    case ts do
+      [{:p, "(", _} | t] ->
+        {args, t} = arguments(t, [])
+        {{:call, e, args, false}, t}
+
+      _ ->
+        {e, ts}
+    end
+  end
+
+  defp decorator(_), do: throw({:syntax, "invalid decorator"})
+
+  defp decorator_chain(e, [{:p, ".", _}, {:priv, name, _} | ts]) do
+    private_ref(name)
+    decorator_chain({:member, e, {:priv, name}, false}, ts)
+  end
+
+  defp decorator_chain(e, [{:p, ".", _}, {k, name, _} | ts]) when k in [:id, :eid],
+    do: decorator_chain({:member, e, {:str, name}, false}, ts)
+
+  defp decorator_chain(e, ts), do: {e, ts}
+
+  defp class_members([{:p, "}", _} | ts], acc), do: {attach_decorators(Enum.reverse(acc)), ts}
   defp class_members([{:p, ";", _} | ts], acc), do: class_members(ts, acc)
+
+  # decorators before a member: kept in the list until the member itself is parsed
+  defp class_members([{:p, "@", _} | _] = ts, acc) do
+    {decs, ts} = decorators(ts, [])
+    class_members(ts, [{:decor, decs} | acc])
+  end
 
   defp class_members([{:id, "static", _}, {:p, "{", _} | ts], acc) do
     outer = Process.get(:js_generator, false)
@@ -1445,7 +1935,8 @@ defmodule Browser.JS.Parser do
 
   defp class_members(ts, acc) do
     {static?, ts} = class_modifier(ts, "static")
-    {async?, ts} = class_modifier(ts, "async")
+    {accessor?, ts} = accessor_modifier(ts)
+    {async?, ts} = if accessor?, do: {false, ts}, else: class_modifier(ts, "async")
 
     {generator?, ts} =
       case ts do
@@ -1473,7 +1964,7 @@ defmodule Browser.JS.Parser do
         if async?, do: Process.put(:js_async_next, true)
         Process.put(:js_class_method, true)
 
-        {{:fn, _, _, _, _} = fun, ts} =
+        {{:fn, _, _, _, _, _} = fun, ts} =
           function_rest({:method, shorthand}, after_key, generator?)
 
         value =
@@ -1488,12 +1979,43 @@ defmodule Browser.JS.Parser do
 
       [{:p, "=", _} | t] ->
         {init, ts} = assignment(t)
-        class_members(semi_field(ts), [{:cmember, :field, key, init, static?} | acc])
+
+        class_members(semi_field(ts), [
+          {:cmember, if(accessor?, do: :accessor, else: :field), key, init, static?} | acc
+        ])
 
       t ->
-        class_members(semi_field(t), [{:cmember, :field, key, nil, static?} | acc])
+        class_members(semi_field(t), [
+          {:cmember, if(accessor?, do: :accessor, else: :field), key, nil, static?} | acc
+        ])
     end
   end
+
+  # the `{:decor, list}` markers become one `{:decorations, %{member index => list}}` element
+  # after the members
+  defp attach_decorators(items) do
+    {members, decorations, _pending} =
+      Enum.reduce(items, {[], %{}, nil}, fn
+        {:decor, decs}, {ms, ds, pending} -> {ms, ds, (pending || []) ++ decs}
+        m, {ms, ds, nil} -> {[m | ms], ds, nil}
+        m, {ms, ds, pending} -> {[m | ms], Map.put(ds, length(ms), pending), nil}
+      end)
+
+    members = Enum.reverse(members)
+    if decorations == %{}, do: members, else: members ++ [{:decorations, decorations}]
+  end
+
+  # `accessor` before a member name on the same line
+  defp accessor_modifier([{:id, "accessor", _}, {t, v, nl} | _] = ts) do
+    cond do
+      nl?(nl) -> {false, ts}
+      t == :p and v not in ["[", "*"] -> {false, ts}
+      t in [:eof] -> {false, ts}
+      true -> {true, tl(ts)}
+    end
+  end
+
+  defp accessor_modifier(ts), do: {false, ts}
 
   # `static` / `async` as a modifier: followed by a member name, not by `(`, `=`, `;` or `}`
   defp class_modifier([{:id, word, _}, {t, v, _} | _] = ts, word) do
@@ -1509,8 +2031,145 @@ defmodule Browser.JS.Parser do
 
   # ── functions ──────────────────────────────────────────────
 
+  # ── source text of functions ───────────────────────────────
+
+  # a function longer than this keeps no text of its own (`toString` shows `[native code]`)
+  @max_src 65_536
+
+  # the text of a function whose parameter list opens at `open` and whose body ended before `after_ts`
+  defp fn_src(name, p, after_ts) do
+    with {text, starts, ends, toks, n} <- Process.get(:js_srctab), true <- p != nil do
+      j = n - remaining(after_ts, :js_cur_end) - 1
+      i = fn_start(toks, p - 1, name)
+      slice_src(text, starts, ends, i, j)
+    else
+      _ -> nil
+    end
+  end
+
+  # the index of the first token left in `ts`, or nil when the source is not tracked
+  defp token_index(ts, cursor) do
+    case Process.get(:js_srctab) do
+      {_, _, _, _, n} -> n - remaining(ts, cursor)
+      _ -> nil
+    end
+  end
+
+  # How many tokens are left in `ts`. The parser asks about positions that move forward, so
+  # each cursor counts from the position it was last asked about; asking about an earlier one
+  # counts the whole list.
+  defp remaining(ts, cursor) do
+    count =
+      with {ptr, left} <- Process.get(cursor),
+           {:ok, count} <- walk_to(ptr, ts, left) do
+        count
+      else
+        _ -> length(ts)
+      end
+
+    Process.put(cursor, {ts, count})
+    count
+  end
+
+  defp walk_to(ptr, target, left) do
+    cond do
+      :erts_debug.same(ptr, target) -> {:ok, left}
+      ptr == [] -> :behind
+      true -> walk_to(tl(ptr), target, left - 1)
+    end
+  end
+
+  # (a copy: a piece that points into the whole script would count the script's size against
+  # every process the function is handed to)
+  defp slice_src(text, starts, ends, i, j) when i >= 0 and j >= i do
+    size = elem(ends, j) - elem(starts, i)
+
+    if size <= @max_src,
+      do: :binary.copy(binary_part(text, elem(starts, i), size))
+  end
+
+  defp slice_src(_, _, _, _, _), do: nil
+
+  # the first token of a function whose parameter list opens just after token `i`
+  defp fn_start(toks, i, {:method, _}), do: member_start(toks, key_start(toks, i))
+
+  defp fn_start(toks, i, _name) do
+    i = if match?({:id, n, _} when n != "function", elem(toks, max(i, 0))), do: i - 1, else: i
+    i = if match?({:p, "*", _}, elem(toks, max(i, 0))), do: i - 1, else: i
+
+    if match?({:id, "function", _}, elem(toks, max(i, 0))) do
+      if i > 0 and match?({:id, "async", _}, elem(toks, i - 1)) and
+           not nl_before?(toks, i),
+         do: i - 1,
+         else: i
+    else
+      -1
+    end
+  end
+
+  defp nl_before?(toks, i), do: elem(elem(toks, i), 2) == true
+
+  # a method key: one token, or a computed key back to its `[`
+  defp key_start(toks, i) do
+    case elem(toks, max(i, 0)) do
+      {:p, "]", _} -> bracket_back(toks, i - 1, 1)
+      _ -> i
+    end
+  end
+
+  defp bracket_back(_, i, _) when i < 0, do: -1
+
+  defp bracket_back(toks, i, d) do
+    case elem(toks, i) do
+      {:p, "]", _} -> bracket_back(toks, i - 1, d + 1)
+      {:p, "[", _} when d == 1 -> i
+      {:p, "[", _} -> bracket_back(toks, i - 1, d - 1)
+      _ -> bracket_back(toks, i - 1, d)
+    end
+  end
+
+  # `async`, `*`, `get` and `set` in front of a method key belong to the method
+  defp member_start(_, i) when i < 1, do: i
+
+  defp member_start(toks, i) do
+    case elem(toks, i - 1) do
+      {:p, "*", _} -> member_start(toks, i - 1)
+      {:id, w, _} when w in ["async", "get", "set"] -> member_start(toks, i - 1)
+      _ -> i
+    end
+  end
+
+  # an arrow function: from its first token (`async` before it counts)
+  defp arrow_src(i, after_ts) do
+    with {text, starts, ends, toks, n} <- Process.get(:js_srctab), true <- i != nil do
+      i =
+        if i > 0 and match?({:id, "async", _}, elem(toks, i - 1)) and not nl_before?(toks, i),
+          do: i - 1,
+          else: i
+
+      slice_src(text, starts, ends, i, n - remaining(after_ts, :js_cur_end) - 1)
+    else
+      _ -> nil
+    end
+  end
+
+  # a class: from its `class` keyword
+  defp class_src(p, after_ts) do
+    with {text, starts, ends, _toks, n} <- Process.get(:js_srctab), true <- p != nil do
+      slice_src(text, starts, ends, p - 1, n - remaining(after_ts, :js_cur_end) - 1)
+    else
+      _ -> nil
+    end
+  end
+
+  defp put_src({:fn, a, b, c, d, _}, src), do: {:fn, a, b, c, d, src}
+  defp put_src({tag, fun}, src) when tag in [:async, :gen], do: {tag, put_src(fun, src)}
+
   # after `function name?` — at the parameter list
-  defp function_rest(name, ts, generator? \\ false) do
+  defp function_rest(name, ts, generator? \\ false),
+    do: allow_in(fn -> function_rest_(name, ts, generator?) end)
+
+  defp function_rest_(name, ts, generator?) do
     outer = Process.get(:js_generator, false)
     outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
@@ -1518,9 +2177,17 @@ defmodule Browser.JS.Parser do
     outer_sb = Process.put(:js_static_block, false)
     class_method? = Process.delete(:js_class_method) == true
     nt = Process.put(:js_nt, true)
+    outer_fn = Process.put(:js_fn, true)
+
+    open = token_index(ts, :js_cur_start)
 
     try do
       {params, ts} = params(expect(ts, "("), [])
+      if generator?, do: check_no_yield([params, nil])
+
+      if Process.get(:js_async, false) and contains_node?(params, &match?({:await, _}, &1)),
+        do: throw({:syntax, "await expression in async function parameters"})
+
       ts = expect(ts, "{")
       {body, ts} = function_body(ts, params, match?({:method, _}, name))
       check_super_use(name, [params, body], class_method?)
@@ -1530,12 +2197,13 @@ defmodule Browser.JS.Parser do
            (name in ["eval", "arguments"] or name in @strict_reserved),
          do: throw({:syntax, "unexpected #{name} as the name of a strict function"})
 
-      {{:fn, name, params, body, false}, ts}
+      {{:fn, name, params, body, false, fn_src(name, open, ts)}, ts}
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
       Process.put(:js_static_block, outer_sb || false)
       Process.put(:js_nt, nt)
+      Process.put(:js_fn, outer_fn)
     end
   end
 
@@ -1579,10 +2247,24 @@ defmodule Browser.JS.Parser do
   defp arrow_after_parens([{:p, ")", _} | ts], d), do: arrow_after_parens(ts, d - 1)
   defp arrow_after_parens([_ | ts], d), do: arrow_after_parens(ts, d)
 
-  defp arrow([{:id, name, _}, {:p, "=>", _} | ts]), do: arrow_body([{:id, name}], ts)
+  defp arrow(ts) do
+    start = token_index(ts, :js_cur_start)
+    {fun, rest} = arrow_nodes(ts)
+    {put_src(fun, arrow_src(start, rest)), rest}
+  end
 
-  defp arrow([{:p, "(", _} | ts]) do
+  defp arrow_nodes([{:id, name, _}, {:p, "=>", _} | ts]) do
+    if name == "await" and await_reserved?(), do: throw({:syntax, "await is reserved here"})
+    arrow_body([{:id, name}], ts)
+  end
+
+  defp arrow_nodes([{:p, "(", _} | ts]) do
     {params, ts} = params(ts, [])
+    if Process.get(:js_generator, false), do: check_no_yield([params, nil])
+
+    if Process.get(:js_async, false) and contains_node?(params, &match?({:await, _}, &1)),
+      do: throw({:syntax, "await expression in arrow function parameters"})
+
     arrow_body(params, expect(ts, "=>"))
   end
 
@@ -1590,14 +2272,16 @@ defmodule Browser.JS.Parser do
     outer_sb = Process.put(:js_static_block, false)
     {body, ts} = function_body(ts, params, true)
     Process.put(:js_static_block, outer_sb || false)
-    {{:fn, nil, params, body, :arrow}, ts}
+    {{:fn, nil, params, body, :arrow, nil}, ts}
   end
 
   defp arrow_body(params, ts) do
     check_unique_params(params)
     if strict?(), do: check_strict_params(params)
+    outer_sb = Process.put(:js_static_block, false)
     {e, ts} = assignment(ts)
-    {{:fn, nil, params, e, :arrow_expr}, ts}
+    Process.put(:js_static_block, outer_sb || false)
+    {{:fn, nil, params, e, :arrow_expr, nil}, ts}
   end
 
   # ── expressions ────────────────────────────────────────────
@@ -1621,8 +2305,15 @@ defmodule Browser.JS.Parser do
   defp assignment([{:id, "async", _} | [_ | _] = rest] = ts) do
     cond do
       arrow_ahead?(rest) and not match?([{_, _, nl} | _] when nl?(nl), rest) ->
-        {fun, ts} = arrow(rest)
-        {{:async, fun}, ts}
+        # `await` is a keyword in the parameters and the body of an async arrow
+        outer_async = Process.put(:js_async, true)
+
+        try do
+          {fun, ts} = arrow(rest)
+          {{:async, fun}, ts}
+        after
+          Process.put(:js_async, outer_async || false)
+        end
 
       true ->
         assignment_plain(ts)
@@ -1694,7 +2385,14 @@ defmodule Browser.JS.Parser do
 
   defp destructuring_ahead?([_ | ts], d), do: destructuring_ahead?(ts, d)
 
-  defp assignment_value(ts) do
+  # `(f) = function() {}` is no identifier reference, so the function stays anonymous
+  defp unnamed({:id, _}, {tag, _, _, _, _, _} = fun) when tag == :fn, do: {:unnamed, fun}
+  defp unnamed({:id, _}, {:class, nil, _, _, _} = c), do: {:unnamed, c}
+  defp unnamed(_, right), do: right
+
+  defp assignment_value(ts0) do
+    ts = ts0
+
     if arrow_ahead?(ts) do
       arrow(ts)
     else
@@ -1704,6 +2402,7 @@ defmodule Browser.JS.Parser do
         [{:p, op, _} | rest] when op in @assign_ops ->
           unless assignable?(left), do: throw({:syntax, "invalid assignment target"})
           {right, rest} = assignment(rest)
+          right = if match?([{:p, "(", _} | _], ts0), do: unnamed(left, right), else: right
           {{if(strict?(), do: :sassign, else: :assign), op, left, right}, rest}
 
         _ ->
@@ -1714,6 +2413,7 @@ defmodule Browser.JS.Parser do
 
   defp assignable?({:id, n}), do: not (strict?() and n in ["eval", "arguments"])
   defp assignable?({:member, _, _, false}), do: true
+  defp assignable?({:super_member, _}), do: true
   defp assignable?(_), do: false
 
   defp conditional(ts) do
@@ -1721,7 +2421,7 @@ defmodule Browser.JS.Parser do
 
     case ts do
       [{:p, "?", _} | ts] ->
-        {a, ts} = assignment(ts)
+        {a, ts} = allow_in(fn -> assignment(ts) end)
         ts = expect(ts, ":")
         {b, ts} = assignment(ts)
         {{:cond, c, a, b}, ts}
@@ -1732,33 +2432,102 @@ defmodule Browser.JS.Parser do
   end
 
   defp binary(ts, min) do
-    {left, ts} = unary(ts)
-    binary_loop(left, ts, min)
+    {left, rest} = unary(ts)
+
+    # `-x ** 2` is ambiguous, so it is an error (`(-x) ** 2` and `++x ** 2` are fine)
+    with [{kind, op, _} | _] <- ts,
+         true <-
+           (kind == :p and op in ["!", "-", "+", "~"]) or
+             (kind == :id and op in ["typeof", "void", "delete"]),
+         [{:p, "**", _} | _] <- rest do
+      throw({:syntax, "unary operator used immediately before exponentiation expression"})
+    end
+
+    binary_loop(left, rest, min, ts)
   end
 
-  defp binary_loop(left, [{kind, op, _} | rest] = ts, min) when kind in [:p, :id] do
+  # (in the head of a `for (init; …)`, `in` ends the expression)
+  defp binary_loop(left, [{:id, "in", _} | _] = ts, min, start) do
+    if Process.get(:js_no_in, false), do: {left, ts}, else: binary_loop_(left, ts, min, start)
+  end
+
+  defp binary_loop(left, ts, min, start), do: binary_loop_(left, ts, min, start)
+
+  defp binary_loop_(left, [{kind, op, _} | rest] = ts, min, start) when kind in [:p, :id] do
     case @binary[op] do
       prec when is_integer(prec) and prec >= min and (kind == :p or op in ["in", "instanceof"]) ->
+        if op in ["&&", "||", "??"] and start != nil, do: check_logical_mix(op, start, ts)
+
         # `**` is right-associative, everything else left
-        {right, rest} = binary(rest, if(op == "**", do: prec, else: prec + 1))
+        {right, rest2} = binary(rest, if(op == "**", do: prec, else: prec + 1))
+        if op in ["&&", "||", "??"], do: check_logical_mix(op, rest, rest2)
+
+        if match?({:priv_ref, _}, right),
+          do: throw({:syntax, "a private name is only valid on the left of `in`"})
+
+        rest = rest2
 
         node =
           if op in ["&&", "||", "??"],
             do: {:logical, op, left, right},
             else: {:binary, op, left, right}
 
-        binary_loop(node, rest, min)
+        binary_loop(node, rest, min, start)
 
       _ ->
         {left, ts}
     end
   end
 
-  defp binary_loop(left, ts, _), do: {left, ts}
+  defp binary_loop_(left, ts, _, _), do: {left, ts}
+
+  # `a ?? b || c` and `a && b ?? c` need parentheses: the operators written at the top level
+  # of an operand (outside brackets) may not mix `??` with `&&` or `||`
+  defp check_logical_mix(op, from, to) do
+    other = if op == "??", do: ["&&", "||"], else: ["??"]
+    mix_scan(from, to, 0, other)
+  end
+
+  # walks the operand's tokens (up to the list `to`, by identity, so the cost is the operand's
+  # length and not the rest of the script's)
+  defp mix_scan(ts, to, d, other) do
+    if :erts_debug.same(ts, to) or ts == [] do
+      :ok
+    else
+      [{kind, p, _} = _tok | rest] = ts
+
+      cond do
+        kind != :p ->
+          mix_scan(rest, to, d, other)
+
+        p in ["(", "[", "{"] ->
+          mix_scan(rest, to, d + 1, other)
+
+        p in [")", "]", "}"] ->
+          mix_scan(rest, to, d - 1, other)
+
+        d == 0 and p in other ->
+          throw({:syntax, "cannot mix ?? with && or ||"})
+
+        true ->
+          mix_scan(rest, to, d, other)
+      end
+    end
+  end
 
   defp private_member?({:member, _, {:priv, _}, _}), do: true
   defp private_member?({:chain, e}), do: private_member?(e)
   defp private_member?(_), do: false
+
+  # `await` is an operator in async code and at the top of a module, never in a static block
+  defp await_allowed! do
+    ok =
+      (Process.get(:js_async, false) or
+         (Process.get(:js_module, false) and not Process.get(:js_fn, false))) and
+        not Process.get(:js_static_block, false)
+
+    unless ok, do: throw({:syntax, "await is only valid in async functions"})
+  end
 
   defp unary([{:p, op, _} | ts]) when op in ["!", "-", "+", "~"] do
     {e, ts} = unary(ts)
@@ -1778,14 +2547,20 @@ defmodule Browser.JS.Parser do
   defp unary([{:id, "await", _}, {k, v, _} | _] = [_ | ts])
        when k in [:id, :num, :bigint, :str, :tmpl, :regex] and
               (k != :id or v not in ["in", "of", "instanceof"]) do
+    await_allowed!()
     {e, ts} = unary(ts)
     {{:await, e}, ts}
   end
 
-  defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts])
+  defp unary([{:id, "await", _}, {:p, p, _} | _] = [_ | ts] = all)
        when p in ["(", "[", "{", "!", "~"] do
-    {e, ts} = unary(ts)
-    {{:await, e}, ts}
+    if Process.get(:js_async, false) or Process.get(:js_module, false) do
+      await_allowed!()
+      {e, ts} = unary(ts)
+      {{:await, e}, ts}
+    else
+      postfix(all)
+    end
   end
 
   defp unary([{:id, op, _} | ts]) when op in ["typeof", "void", "delete"] do
@@ -1830,6 +2605,10 @@ defmodule Browser.JS.Parser do
         [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
           throw({:syntax, "new import() is not allowed"})
 
+        [{:id, "new", _}, {:id, "import", _}, {:p, ".", _}, {:id, k, _}, {:p, "(", _} | _]
+        when k in ["source", "defer"] ->
+          throw({:syntax, "new import.#{k}() is not allowed"})
+
         [{:id, "new", _} | ts] ->
           new_expression(ts)
 
@@ -1858,7 +2637,7 @@ defmodule Browser.JS.Parser do
     do: chain({:member, e, {:str, name}, true}, ts, true)
 
   defp chain(e, [{:p, "?.", _}, {:p, "[", _} | ts], _) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     chain({:member, e, k, true}, expect(ts, "]"), true)
   end
 
@@ -1871,16 +2650,10 @@ defmodule Browser.JS.Parser do
   defp chain(_e, [{:tmpl, _, _} | _], true),
     do: throw({:syntax, "a template literal cannot follow an optional chain"})
 
-  defp chain(e, [{:tmpl, parts, _} | ts], c) do
-    {parts, raw} = template_parts(parts)
-    is_text = &(is_binary(&1) or &1 == :bad)
-    cooked = parts |> Enum.filter(is_text) |> Enum.map(&if(&1 == :bad, do: :undefined, else: &1))
-    exprs = Enum.reject(parts, is_text)
-    chain({:call, e, [{:tagged_strings, cooked, raw} | exprs], false}, ts, c)
-  end
+  defp chain(e, [{:tmpl, parts, _} | ts], c), do: chain(tagged_call(e, parts), ts, c)
 
   defp chain(e, [{:p, "[", _} | ts], c) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     chain({:member, e, k, false}, expect(ts, "]"), c)
   end
 
@@ -1903,6 +2676,10 @@ defmodule Browser.JS.Parser do
 
         [{:id, "new", _}, {:id, "import", _}, {:p, "(", _} | _] ->
           throw({:syntax, "new import() is not allowed"})
+
+        [{:id, "new", _}, {:id, "import", _}, {:p, ".", _}, {:id, k, _}, {:p, "(", _} | _]
+        when k in ["source", "defer"] ->
+          throw({:syntax, "new import.#{k}() is not allowed"})
 
         [{:id, "new", _} | t] ->
           new_expression(t)
@@ -1929,15 +2706,30 @@ defmodule Browser.JS.Parser do
     do: member_only({:member, e, {:str, name}, false}, ts)
 
   defp member_only(e, [{:p, "[", _} | ts]) do
-    {k, ts} = expression(ts)
+    {k, ts} = allow_in(fn -> expression(ts) end)
     member_only({:member, e, k, false}, expect(ts, "]"))
   end
 
+  # `new tag`x`` constructs what the tagged template evaluates to
+  defp member_only(e, [{:tmpl, parts, _} | ts]), do: member_only(tagged_call(e, parts), ts)
+
   defp member_only(e, ts), do: {e, ts}
 
-  defp arguments([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  # each template literal site has an id: its strings object is made once per site
+  defp tagged_call(e, parts) do
+    {parts, raw} = template_parts(parts)
+    is_text = &(is_binary(&1) or &1 == :bad)
+    cooked = parts |> Enum.filter(is_text) |> Enum.map(&if(&1 == :bad, do: :undefined, else: &1))
+    exprs = Enum.reject(parts, is_text)
+    site = :erlang.unique_integer([:positive])
+    {:call, e, [{:tagged_strings, cooked, raw, site} | exprs], false}
+  end
 
-  defp arguments(ts, acc) do
+  defp arguments(ts, acc), do: allow_in(fn -> arguments_(ts, acc) end)
+
+  defp arguments_([{:p, ")", _} | ts], acc), do: {Enum.reverse(acc), ts}
+
+  defp arguments_(ts, acc) do
     {arg, ts} =
       case ts do
         [{:p, "...", _} | t] ->
@@ -1949,14 +2741,16 @@ defmodule Browser.JS.Parser do
       end
 
     case ts do
-      [{:p, ",", _} | ts] -> arguments(ts, [arg | acc])
+      [{:p, ",", _} | ts] -> arguments_(ts, [arg | acc])
       [{:p, ")", _} | ts] -> {Enum.reverse([arg | acc]), ts}
       _ -> throw({:syntax, "bad argument list"})
     end
   end
 
   # -> {parts with the expressions parsed (text chunks that are empty are left out), raw chunks}
-  defp template_parts(parts) do
+  defp template_parts(parts), do: allow_in(fn -> template_parts_(parts) end)
+
+  defp template_parts_(parts) do
     {raw, parts} =
       case List.last(parts) do
         {:raw, raw} -> {raw, Enum.drop(parts, -1)}
@@ -1966,9 +2760,16 @@ defmodule Browser.JS.Parser do
     parts =
       Enum.map(parts, fn
         {:expr, toks} ->
-          {e, rest} = expression(toks)
-          match?([{:eof, _, _}], rest) || throw({:syntax, "bad template expression"})
-          e
+          # (these tokens are a list of their own: a function in here keeps no text)
+          saved = Process.put(:js_srctab, nil)
+
+          try do
+            {e, rest} = expression(toks)
+            match?([{:eof, _, _}], rest) || throw({:syntax, "bad template expression"})
+            e
+          after
+            Process.put(:js_srctab, saved)
+          end
 
         s ->
           s
@@ -1977,12 +2778,42 @@ defmodule Browser.JS.Parser do
     {parts, raw}
   end
 
+  # the specifier and the optional options of an import call, after its `(`
+  defp import_args(ts), do: allow_in(fn -> import_args_(ts) end)
+
+  defp import_args_(ts) do
+    {e, ts} = assignment(ts)
+
+    case ts do
+      [{:p, ")", _} | ts] ->
+        {[e], ts}
+
+      [{:p, ",", _}, {:p, ")", _} | ts] ->
+        {[e], ts}
+
+      [{:p, ",", _} | ts] ->
+        {opts, ts} = assignment(ts)
+
+        case ts do
+          [{:p, ",", _}, {:p, ")", _} | ts] -> {[e, opts], ts}
+          [{:p, ")", _} | ts] -> {[e, opts], ts}
+          _ -> throw({:syntax, "expected )"})
+        end
+
+      _ ->
+        throw({:syntax, "expected )"})
+    end
+  end
+
   defp primary([{:num, n, mark} | ts]) do
     check_octal_string(mark)
     {{:num, n}, ts}
   end
 
   defp primary([{:bigint, n, _} | ts]), do: {{:bigint, n}, ts}
+
+  # (an escaped "use strict" in the position of a directive is a plain expression statement)
+  defp primary([{:str, s, mark} | ts]) when mark in [:esc, :esc_nl], do: {{:seq, [{:str, s}]}, ts}
 
   defp primary([{:str, s, mark} | ts]) do
     check_octal_string(mark)
@@ -2009,14 +2840,41 @@ defmodule Browser.JS.Parser do
 
   defp primary([{:id, "class", _} | ts]), do: class_rest(ts)
 
-  # `import(specifier)` and `import.meta`
-  defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
-    {e, ts} = assignment(ts)
-    {{:import_call, e}, expect(ts, ")")}
+  defp primary([{:p, "@", _} | _] = ts) do
+    {decs, ts} = decorators(ts, [])
+
+    case ts do
+      [{:id, "class", _} | t] -> class_rest(t, decs)
+      _ -> throw({:syntax, "a decorator must be followed by a class"})
+    end
   end
 
-  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]),
-    do: {{:import_meta}, ts}
+  # `import(specifier)`, `import.source(specifier)`, `import.defer(specifier)` and `import.meta`
+  defp primary([{:id, "import", _}, {:p, "(", _} | ts]) do
+    {args, ts} = import_args(ts)
+
+    case args do
+      [e] -> {{:import_call, e}, ts}
+      [e, opts] -> {{:import_call, e, opts}, ts}
+    end
+  end
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, phase, _}, {:p, "(", _} | ts])
+       when phase in ["source", "defer"] do
+    {args, ts} = import_args(ts)
+    {{:import_phase, String.to_atom(phase), args}, ts}
+  end
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, phase, _} | _])
+       when phase in ["source", "defer"],
+       do: throw({:syntax, "import.#{phase} must be called"})
+
+  defp primary([{:id, "import", _}, {:p, ".", _}, {:id, "meta", _} | ts]) do
+    unless Process.get(:js_module, false),
+      do: throw({:syntax, "Cannot use 'import.meta' outside a module"})
+
+    {{:import_meta}, ts}
+  end
 
   defp primary([{:id, "super", _}, {:p, "(", _} | _] = [_ | ts]), do: {{:super}, ts}
 
@@ -2034,7 +2892,7 @@ defmodule Browser.JS.Parser do
     {{:super_member, k}, expect(ts, "]")}
   end
 
-  defp primary([{:id, "async", _}, {:id, "function", _} | _] = [_ | rest]) do
+  defp primary([{:id, "async", _}, {:id, "function", f} | _] = [_ | rest]) when f != true do
     Process.put(:js_async_next, true)
     {fun, ts} = primary(rest)
     {{:async, fun}, ts}
@@ -2053,12 +2911,18 @@ defmodule Browser.JS.Parser do
         t -> {nil, t}
       end
 
+    # the name of an async function expression is bound inside it, where `await` is reserved
+    if name == "await" and Process.get(:js_async_next, false),
+      do: throw({:syntax, "await is not a valid name for an async function expression"})
+
+    if generator? and name == "yield",
+      do: throw({:syntax, "yield is not a valid generator expression name"})
+
     if generator?, do: generator_rest(name, ts), else: function_rest(name, ts)
   end
 
   defp primary([{:id, name, _} | ts]) when name not in @reserved do
-    if (name == "await" and
-          (Process.get(:js_async, false) or Process.get(:js_static_block, false))) or
+    if (name == "await" and await_reserved?()) or
          (name == "yield" and Process.get(:js_generator, false)),
        do: throw({:syntax, "#{name} is not an identifier here"})
 
@@ -2068,13 +2932,21 @@ defmodule Browser.JS.Parser do
     {{:id, name}, ts}
   end
 
+  # `st\u0061tic` and `\u0061sync` are plain names, only their keyword roles are lost
+  defp primary([{:eid, name, _} | ts]) when name in ["static", "async"] do
+    if strict?() and name in @strict_reserved,
+      do: throw({:syntax, "#{name} is a reserved word in strict mode"})
+
+    {{:id, name}, ts}
+  end
+
   defp primary([{:p, "(", _} | ts]) do
-    {e, ts} = expression(ts)
+    {e, ts} = allow_in(fn -> expression(ts) end)
     {e, expect(ts, ")")}
   end
 
-  defp primary([{:p, "[", _} | ts]), do: array_literal(ts, [])
-  defp primary([{:p, "{", _} | ts]), do: object_literal(ts, [])
+  defp primary([{:p, "[", _} | ts]), do: allow_in(fn -> array_literal(ts, []) end)
+  defp primary([{:p, "{", _} | ts]), do: allow_in(fn -> object_literal(ts, []) end)
   defp primary([{:eof, _, _} | _]), do: throw({:syntax, "unexpected end of input"})
   defp primary([{_, v, _} | _]), do: throw({:syntax, "unexpected token #{inspect(v)}"})
 
@@ -2099,6 +2971,11 @@ defmodule Browser.JS.Parser do
     end
   end
 
+  defp object_key([{:priv, _, _} | _]),
+    do: throw({:syntax, "private names are only valid in classes"})
+
+  defp object_key(ts), do: property_key(ts)
+
   defp object_literal([{:p, "}", _} | ts], acc), do: {{:object, Enum.reverse(acc)}, ts}
 
   defp object_literal([{:p, "...", _} | ts], acc) do
@@ -2107,13 +2984,13 @@ defmodule Browser.JS.Parser do
   end
 
   defp object_literal([{:p, "*", _} | rest], acc) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:gen, fun}} | acc])
   end
 
   defp object_literal([{:id, "async", _}, {:p, "*", false} | _] = [_, _ | rest], acc) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key, true)
     object_next(ts, [{:init, key, {:async, {:gen, fun}}} | acc])
@@ -2121,7 +2998,7 @@ defmodule Browser.JS.Parser do
 
   defp object_literal([{:id, "async", _}, {k, v, false} | _] = [_ | rest], acc)
        when k in [:id, :str, :num, :bigint] or (k == :p and v == "[") do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
     Process.put(:js_async_next, true)
     {fun, ts} = function_rest({:method, shorthand}, after_key)
     object_next(ts, [{:init, key, {:async, fun}} | acc])
@@ -2130,11 +3007,11 @@ defmodule Browser.JS.Parser do
   # `get x() {}` and `set x(v) {}`
   defp object_literal([{:id, kind, _}, {k, v, _} | _] = [_ | rest], acc)
        when kind in ["get", "set"] and (k in [:id, :str, :num, :bigint] or (k == :p and v == "[")) do
-    {key, shorthand, after_key} = property_key(rest)
+    {key, shorthand, after_key} = object_key(rest)
 
     case after_key do
       [{:p, "(", _} | _] ->
-        {{:fn, _, params, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
+        {{:fn, _, params, _, _, _} = fun, ts} = function_rest({:method, shorthand}, after_key)
 
         case {kind, params} do
           {"get", []} -> :ok
@@ -2154,7 +3031,7 @@ defmodule Browser.JS.Parser do
   defp object_literal(ts, acc), do: object_literal_plain(ts, acc)
 
   defp object_literal_plain(ts, acc) do
-    {key, shorthand, after_key} = property_key(ts)
+    {key, shorthand, after_key} = object_key(ts)
 
     {prop, ts} =
       case after_key do
@@ -2173,6 +3050,10 @@ defmodule Browser.JS.Parser do
 
           if strict?() and name in @strict_reserved,
             do: throw({:syntax, "#{name} is a reserved word here"})
+
+          if (name == "await" and await_reserved?()) or
+               (name == "yield" and Process.get(:js_generator, false)),
+             do: throw({:syntax, "#{name} is a reserved word here"})
 
           {{:init, key, {:id, name}}, t}
       end

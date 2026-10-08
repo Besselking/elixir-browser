@@ -27,9 +27,7 @@ defmodule Browser.JS.Proxy do
     # a constructor that has no `prototype`
     Interp.store(elem(ctor, 1), Map.put(Interp.deref(elem(ctor, 1)), :proxy_ctor, true))
 
-    Interp.put_hidden(
-      ctor,
-      "revocable",
+    revocable =
       Interp.native("revocable", fn _, args ->
         p = make(Enum.at(args, 0, :undefined), Enum.at(args, 1, :undefined))
 
@@ -42,7 +40,10 @@ defmodule Browser.JS.Proxy do
 
         Interp.new_object([{"proxy", p}, {"revoke", revoke}])
       end)
-    )
+
+    {:obj, rid} = revocable
+    Interp.store(rid, Map.put(Interp.deref(rid), :arity, 2.0))
+    Interp.put_hidden(ctor, "revocable", revocable)
 
     :ok
   end
@@ -170,7 +171,9 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "set") do
       nil ->
-        Props.ordinary_set(target, key, value, receiver)
+        if proxy?(target),
+          do: set(target, key, value, receiver),
+          else: Props.ordinary_set(target, key, value, receiver)
 
       f ->
         if Interp.truthy(Interp.call(f, handler, [target, key_value(key), value, receiver])) do
@@ -201,7 +204,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "has") do
       nil ->
-        Interp.has_property?(target, key)
+        if proxy?(target), do: has(target, key), else: Interp.has_property?(target, key)
 
       f ->
         r = Interp.truthy(Interp.call(f, handler, [target, key_value(key)]))
@@ -232,7 +235,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "deleteProperty") do
       nil ->
-        Interp.delete(target, key)
+        if proxy?(target), do: delete(target, key), else: Interp.delete(target, key)
 
       f ->
         r = Interp.truthy(Interp.call(f, handler, [target, key_value(key)]))
@@ -268,7 +271,9 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "ownKeys") do
       nil ->
-        Props.own_names(target) ++ Props.own_symbols(target)
+        if proxy?(target),
+          do: own_keys(target),
+          else: Props.own_names(target) ++ Props.own_symbols(target)
 
       f ->
         result = Interp.call(f, handler, [target])
@@ -446,8 +451,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "defineProperty") do
       nil ->
-        Props.define(target, key, descriptor)
-        true
+        Props.try_define(target, key, descriptor)
 
       f ->
         if Interp.truthy(Interp.call(f, handler, [target, key_value(key), desc_for_trap(desc)])) do
@@ -594,7 +598,7 @@ defmodule Browser.JS.Proxy do
 
     case trap(handler, "construct") do
       nil ->
-        Interp.construct(target, args, if(new_target == p, do: target, else: new_target))
+        Interp.construct(target, args, new_target)
 
       f ->
         r = Interp.call(f, handler, [target, Interp.new_array(args), new_target])
@@ -624,7 +628,7 @@ defmodule Browser.JS.Proxy do
   def host_get(id, key, self), do: {:ok, get({:obj, id}, key, self)}
 
   def host_put(id, key, value, self) do
-    unless set({:obj, id}, key, value, self), do: :ok
+    unless set({:obj, id}, key, value, self), do: :erlang.put(:js_put_failed, true)
     :ok
   end
 

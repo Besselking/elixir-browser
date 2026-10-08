@@ -120,6 +120,9 @@ defmodule Browser.JS.RegExp do
   end
 
   defp build_pattern(source, flags) do
+    # (the engine takes text only: a lone surrogate in a pattern is read as U+FFFD, as in a subject)
+    source = Str.well_formed(source)
+
     opts =
       [:unicode, :dollar_endonly] ++
         for(
@@ -154,47 +157,77 @@ defmodule Browser.JS.RegExp do
   # in PCRE, so each group is renamed `g<number>` and `\\k<name>` follows. Returns the new
   # pattern and `[{group number, name}]` in pattern order.
   defp rename_groups(source) do
-    {count, names} = scan_groups(source, 0, false, [])
+    {count, found} = scan_groups(source, 0, false, [{0, 0}], [])
+    names = for {i, n, _path} <- found, do: {i, n}
 
     if names == [] do
       {source, {count, []}}
     else
-      by_name = Map.new(names, fn {i, n} -> {n, i} end)
+      by_name =
+        Enum.reduce(names, %{defs: names}, fn {i, n}, m -> Map.update(m, n, [i], &(&1 ++ [i])) end)
+
       {rewrite_groups(source, false, by_name, []), {count, names}}
     end
   end
 
-  # pass 1: the capture groups (counted) and the names of the named ones
-  defp scan_groups("", n, _cls, acc), do: {n, Enum.reverse(acc)}
+  # pass 1: the capture groups (counted) and the names of the named ones. `frames` is the
+  # path of enclosing groups, each as {group id, index of the alternative being read}: a name
+  # may repeat only in different alternatives of a disjunction.
+  defp scan_groups("", n, _cls, _fr, acc), do: {n, Enum.reverse(acc)}
 
-  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, acc),
-    do: scan_groups(rest, n, cls, acc)
+  defp scan_groups(<<?\\, _::utf8, rest::binary>>, n, cls, fr, acc),
+    do: scan_groups(rest, n, cls, fr, acc)
 
-  defp scan_groups("[" <> rest, n, false, acc), do: scan_groups(rest, n, true, acc)
-  defp scan_groups("]" <> rest, n, true, acc), do: scan_groups(rest, n, false, acc)
+  defp scan_groups("[" <> rest, n, false, fr, acc), do: scan_groups(rest, n, true, fr, acc)
+  defp scan_groups("]" <> rest, n, true, fr, acc), do: scan_groups(rest, n, false, fr, acc)
 
-  defp scan_groups("(?<" <> rest, n, false, acc) do
+  defp scan_groups("|" <> rest, n, false, [{id, alt} | outer], acc),
+    do: scan_groups(rest, n, false, [{id, alt + 1} | outer], acc)
+
+  defp scan_groups(")" <> rest, n, false, [_ | [_ | _] = outer], acc),
+    do: scan_groups(rest, n, false, outer, acc)
+
+  defp scan_groups("(?<" <> rest, n, false, fr, acc) do
     case rest do
       "=" <> r ->
-        scan_groups(r, n, false, acc)
+        scan_groups(r, n, false, push_frame(fr), acc)
 
       "!" <> r ->
-        scan_groups(r, n, false, acc)
+        scan_groups(r, n, false, push_frame(fr), acc)
 
       _ ->
         unless String.contains?(rest, ">"), do: bad_name()
         {raw, after_name} = split_name(rest)
         name = decode_name(raw)
         unless valid_name?(name), do: bad_name()
-        if Enum.any?(acc, fn {_, existing} -> existing == name end), do: bad_name()
-        scan_groups(after_name, n + 1, false, [{n + 1, name} | acc])
+        path = Enum.reverse(fr)
+
+        if Enum.any?(acc, fn {_, existing, other} ->
+             existing == name and not apart?(path, other)
+           end),
+           do: bad_name()
+
+        scan_groups(after_name, n + 1, false, push_frame(fr), [{n + 1, name, path} | acc])
     end
   end
 
-  defp scan_groups("(?" <> rest, n, false, acc), do: scan_groups(rest, n, false, acc)
-  defp scan_groups("(" <> rest, n, false, acc), do: scan_groups(rest, n + 1, false, acc)
-  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
-  defp scan_groups(<<_, rest::binary>>, n, cls, acc), do: scan_groups(rest, n, cls, acc)
+  defp scan_groups("(?" <> rest, n, false, fr, acc),
+    do: scan_groups(rest, n, false, push_frame(fr), acc)
+
+  defp scan_groups("(" <> rest, n, false, fr, acc),
+    do: scan_groups(rest, n + 1, false, push_frame(fr), acc)
+
+  defp scan_groups(<<_::utf8, rest::binary>>, n, cls, fr, acc),
+    do: scan_groups(rest, n, cls, fr, acc)
+
+  defp scan_groups(<<_, rest::binary>>, n, cls, fr, acc), do: scan_groups(rest, n, cls, fr, acc)
+
+  defp push_frame(fr), do: [{:erlang.unique_integer([:positive]), 0} | fr]
+
+  # are two paths (outermost first) in different alternatives of one disjunction?
+  defp apart?([a | ra], [b | rb]) when a == b, do: apart?(ra, rb)
+  defp apart?([{id, x} | _], [{id, y} | _]) when x != y, do: true
+  defp apart?(_, _), do: false
 
   defp bad_name, do: throw({:re_error, "Invalid capture group name"})
 
@@ -249,8 +282,16 @@ defmodule Browser.JS.RegExp do
     {raw, after_name} = split_name(rest)
 
     case Map.fetch(by, decode_name(raw)) do
-      {:ok, i} -> rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
-      :error -> bad_name()
+      {:ok, [i]} ->
+        rewrite_groups(after_name, cls, by, ["\\k<g#{i}>" | acc])
+
+      # a repeated name refers to whichever of its groups took part
+      {:ok, is} ->
+        alt = is |> Enum.map(&"\\k<g#{&1}>") |> Enum.join("|")
+        rewrite_groups(after_name, cls, by, ["(?:" <> alt <> ")" | acc])
+
+      :error ->
+        bad_name()
     end
   end
 
@@ -269,9 +310,9 @@ defmodule Browser.JS.RegExp do
         rewrite_groups(rest, false, by, ["(?<" | acc])
 
       _ ->
-        {raw, after_name} = split_name(rest)
-        i = Map.fetch!(by, decode_name(raw))
-        rewrite_groups(after_name, false, by, ["(?<g#{i}>" | acc])
+        {_raw, after_name} = split_name(rest)
+        [{i, _} | defs] = by.defs
+        rewrite_groups(after_name, false, %{by | defs: defs}, ["(?<g#{i}>" | acc])
     end
   end
 
@@ -369,7 +410,8 @@ defmodule Browser.JS.RegExp do
     from_byte = byte_of(subject, from)
     sticky? = flag?(re_obj, "y")
 
-    case :re.run(subject, re, [{:capture, :all, :index}, {:offset, from_byte}]) do
+    # (a lone surrogate is as many bytes as U+FFFD: the engine sees that, positions agree)
+    case :re.run(Str.well_formed(subject), re, [{:capture, :all, :index}, {:offset, from_byte}]) do
       {:match, [{start, len} | caps]} when not sticky? or start == from_byte ->
         {count, named_list} = names
 
@@ -417,28 +459,20 @@ defmodule Browser.JS.RegExp do
   defp named_groups([], _), do: nil
 
   defp named_groups(names, groups),
-    do: for({i, name} <- names, do: {name, Enum.at(groups, i - 1)})
+    do: merge_names(for({i, name} <- names, do: {name, Enum.at(groups, i - 1)}))
 
-  defp byte_of(subject, cp) do
-    byte_of(subject, cp, 0)
+  # a name used by several groups gives the value of the one that took part
+  defp merge_names(pairs) do
+    for name <- pairs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() do
+      {name,
+       Enum.find_value(pairs, :undefined, fn {n, v} -> if n == name and v != :undefined, do: v end)}
+    end
   end
 
-  # byte offset of the code point index `n` (strings are indexed by code point)
-  defp byte_of(_, n, acc) when n <= 0, do: acc
-  defp byte_of(<<c::utf8, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + utf8_size(c))
-  defp byte_of(<<>>, _, acc), do: acc
-  defp byte_of(<<_, rest::binary>>, n, acc), do: byte_of(rest, n - 1, acc + 1)
+  defp byte_of(subject, units), do: Str.byte_offset(subject, units)
 
-  defp utf8_size(c) when c < 0x80, do: 1
-  defp utf8_size(c) when c < 0x800, do: 2
-  defp utf8_size(c) when c < 0x10000, do: 3
-  defp utf8_size(_), do: 4
-
-  # the number of code points (what `.length` and match positions count)
-  defp cp_count(bin), do: cp_count(bin, 0)
-  defp cp_count(<<_::utf8, rest::binary>>, n), do: cp_count(rest, n + 1)
-  defp cp_count(<<>>, n), do: n
-  defp cp_count(<<_, rest::binary>>, n), do: cp_count(rest, n + 1)
+  # the number of UTF-16 code units (what `.length` and match positions count)
+  defp cp_count(bin), do: Str.length(bin)
 
   defp match_array(m, subject) do
     arr = new_array([m.text | m.groups])
@@ -471,7 +505,10 @@ defmodule Browser.JS.RegExp do
           :undefined
 
         _named ->
-          new_object(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))}), :null)
+          new_object(
+            merge_names(for({i, name} <- m.names, do: {name, pair.(Enum.at(m.spans, i))})),
+            :null
+          )
       end
 
     Interp.define_data(indices, "groups", groups)
@@ -611,10 +648,19 @@ defmodule Browser.JS.RegExp do
   end
 
   # the `@@match` loop of a global regexp and friends: advance past an empty match
-  defp bump_empty(rx, matched) do
+  # (a unicode regexp steps over a whole surrogate pair)
+  defp bump_empty(rx, matched, s) do
     if matched == "" do
       this_index = tolen(Interp.get(rx, "lastIndex"))
-      strict_set(rx, "lastIndex", (this_index + 1) * 1.0)
+      flags = to_str(Interp.get(rx, "flags"))
+
+      step =
+        if String.contains?(flags, ["u", "v"]) and
+             (Str.code_point_at(s, this_index) || 0) > 0xFFFF,
+           do: 2,
+           else: 1
+
+      strict_set(rx, "lastIndex", (this_index + step) * 1.0)
     end
   end
 
@@ -638,7 +684,7 @@ defmodule Browser.JS.RegExp do
 
       result ->
         matched = to_str(Interp.get(result, "0"))
-        bump_empty(rx, matched)
+        bump_empty(rx, matched, s)
         match_loop(rx, s, [matched | acc])
     end
   end
@@ -675,7 +721,7 @@ defmodule Browser.JS.RegExp do
 
             match ->
               if global? do
-                bump_empty(rx, to_str(Interp.get(match, "0")))
+                bump_empty(rx, to_str(Interp.get(match, "0")), s)
               else
                 :erlang.put(ref, :done)
               end
@@ -835,7 +881,7 @@ defmodule Browser.JS.RegExp do
 
       result ->
         if global? do
-          bump_empty(rx, to_str(Interp.get(result, "0")))
+          bump_empty(rx, to_str(Interp.get(result, "0")), s)
           collect_results(rx, s, true, [result | acc])
         else
           Enum.reverse([result | acc])
@@ -1061,7 +1107,7 @@ defmodule Browser.JS.RegExp do
           lim == 0 -> []
           sep == :undefined -> [s]
           s == "" -> if r == "", do: [], else: [s]
-          r == "" -> String.codepoints(s)
+          r == "" -> s |> Str.units() |> Enum.map(&Str.from_units([&1]))
           true -> :binary.split(s, r, [:global])
         end
 

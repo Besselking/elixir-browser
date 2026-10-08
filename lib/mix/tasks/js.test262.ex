@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Js.Test262 do
     built-ins/StringIteratorPrototype built-ins/ThrowTypeError built-ins/Uint8Array
     built-ins/WeakMap built-ins/WeakRef built-ins/WeakSet built-ins/decodeURI
     built-ins/decodeURIComponent built-ins/encodeURI built-ins/encodeURIComponent built-ins/eval
-    built-ins/global
+    built-ins/global built-ins/Atomics built-ins/SharedArrayBuffer
     language/computed-property-names language/directive-prologue language/eval-code
     language/global-code language/identifier-resolution language/line-terminators
     language/source-text language/statementList

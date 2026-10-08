@@ -34,7 +34,14 @@ defmodule Browser.JS.FunctionProto do
 
     def_fn(p, "toString", 0, fn this, _ ->
       callable!(this, "Function.prototype.toString")
-      "function #{String.trim_leading(to_str(get(this, "name")), "#")}() { [native code] }"
+
+      case source_text(this) do
+        nil ->
+          "function #{String.trim_leading(to_str(get(this, "name")), "#")}() { [native code] }"
+
+        text ->
+          text
+      end
     end)
 
     has_instance =
@@ -73,14 +80,39 @@ defmodule Browser.JS.FunctionProto do
         end
       end)
 
+    # `length` and `name` are own, non-configurable properties of %ThrowTypeError%
+    for {key, value} <- [{"length", 0.0}, {"name", ""}] do
+      Browser.JS.Props.define(
+        f,
+        key,
+        new_object([
+          {"value", value},
+          {"writable", false},
+          {"enumerable", false},
+          {"configurable", false}
+        ])
+      )
+    end
+
     Browser.JS.Props.lock(f, true)
     f
   end
+
+  # the source text a script function was parsed from
+  defp source_text({:obj, id}) do
+    case deref(id) do
+      %{fun: {:closure, %{src: src}}} when is_binary(src) -> src
+      _ -> nil
+    end
+  end
+
+  defp source_text(_), do: nil
 
   defp sloppy_function?({:obj, id}) do
     case deref(id) do
       %{fun: {:closure, %{mode: mode, name: name, body: body}}} = o when mode in [false, nil] ->
         not (Map.get(o, :generator, false) or Map.get(o, :async, false) or
+               Map.get(o, :class_ctor, false) or
                match?({:method, _}, name) or match?([{:expr, {:str, "use strict"}} | _], body))
 
       _ ->

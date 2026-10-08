@@ -11,7 +11,7 @@ defmodule Browser.JS.TypedArrays do
   """
 
   import Bitwise, only: [<<<: 2, |||: 2]
-  import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.JS.Interp, except: [get: 2, put: 3, deref: 1]
   alias Browser.JS.{Interp, Num, Props}
 
   @kinds [
@@ -213,7 +213,22 @@ defmodule Browser.JS.TypedArrays do
     buf
   end
 
-  defp resizable?(bid), do: Map.has_key?(deref(bid), :max)
+  defp resizable?(bid), do: Map.has_key?(Interp.deref(bid), :max)
+
+  @doc "A `Uint8Array` over an immutable ArrayBuffer of `bytes` (the value of a bytes module)."
+  def bytes_view(bytes) do
+    buf = new_buffer(bytes)
+    store(buffer_id(buf), Map.put(deref(buffer_id(buf)), :immutable, true))
+    view(:u8, buffer_id(buf), 0, byte_size(bytes))
+  end
+
+  defp immutable?(bid), do: Map.get(Interp.deref(bid), :immutable, false)
+
+  # a typed array whose buffer can be written to
+  defp mut!({:ta, _, bid, _, _} = d) do
+    if immutable?(bid), do: throw_error("TypeError", "the typed array's buffer is immutable")
+    d
+  end
 
   @doc "Detaches an ArrayBuffer (`$262.detachArrayBuffer`): it loses its bytes and its views read as empty."
   def detach({:obj, id} = buf) do
@@ -222,7 +237,7 @@ defmodule Browser.JS.TypedArrays do
     :undefined
   end
 
-  defp detached?(bid), do: Map.get(deref(bid), :detached, false)
+  defp detached?(bid), do: Map.get(Interp.deref(bid), :detached, false)
 
   defp buffer?({:obj, id}), do: Map.has_key?(deref(id), :bytes)
   defp buffer?(_), do: false
@@ -243,6 +258,82 @@ defmodule Browser.JS.TypedArrays do
   defp sab?(_), do: false
 
   defp bytes_of({:obj, id}), do: deref(id).bytes
+
+  # Element writes are batched: a buffer holds them in `:pend` (byte position => the encoded
+  # element, all of `:pend_size` bytes and aligned to it, so none overlaps another) and merges
+  # them into `:bytes` when something else needs the contents. Copying the whole buffer for each
+  # write made a loop over a big typed array quadratic. Every other access goes through `deref`.
+  @pend_max 256
+
+  defp deref(id) do
+    case Interp.deref(id) do
+      %{pend: pend} = o when map_size(pend) > 0 -> flush(id, o)
+      o -> o
+    end
+  end
+
+  defp flush(id, o) do
+    {parts, at} =
+      o.pend
+      |> Enum.sort()
+      |> Enum.reduce({[], 0}, fn {pos, enc}, {acc, at} ->
+        {[enc, binary_part(o.bytes, at, pos - at) | acc], pos + byte_size(enc)}
+      end)
+
+    tail = binary_part(o.bytes, at, byte_size(o.bytes) - at)
+    bytes = IO.iodata_to_binary(Enum.reverse([tail | parts]))
+    o = o |> Map.delete(:pend) |> Map.delete(:pend_size) |> Map.put(:bytes, bytes)
+    store(id, o)
+    o
+  end
+
+  # the `size` bytes at byte position `pos`, with the batched writes in
+  defp read_el(bid, pos, size) do
+    o = Interp.deref(bid)
+
+    case o do
+      %{pend: pend, pend_size: ^size} when rem(pos, size) == 0 and map_size(pend) > 0 ->
+        case pend do
+          %{^pos => enc} -> enc
+          _ -> binary_part(o.bytes, pos, size)
+        end
+
+      %{pend: pend} when map_size(pend) > 0 ->
+        binary_part(flush(bid, o).bytes, pos, size)
+
+      _ ->
+        binary_part(o.bytes, pos, size)
+    end
+  end
+
+  # writes the encoded element `enc` at byte position `pos` (in bounds)
+  defp buffer_put(bid, pos, enc) do
+    size = byte_size(enc)
+    o = Interp.deref(bid)
+
+    o =
+      case o do
+        %{pend: pend, pend_size: psize} when map_size(pend) > 0 and psize != size -> flush(bid, o)
+        _ -> o
+      end
+
+    if rem(pos, size) == 0 do
+      pend = Map.put(Map.get(o, :pend, %{}), pos, enc)
+
+      if map_size(pend) >= @pend_max do
+        flush(bid, Map.merge(o, %{pend: pend, pend_size: size}))
+      else
+        store(bid, Map.merge(o, %{pend: pend, pend_size: size}))
+      end
+    else
+      o = deref(bid)
+      <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
+      store(bid, %{o | bytes: pre <> enc <> post})
+    end
+
+    :ok
+  end
+
   defp buffer_id({:obj, id}), do: id
 
   defp view(kind, bid, offset, length),
@@ -258,7 +349,7 @@ defmodule Browser.JS.TypedArrays do
   # the offset and length a view has now (`:oob` when a detached or shrunk buffer leaves it
   # out of bounds); a length-tracking view (`:auto`) follows the buffer's size
   defp eff({:ta, kind, bid, off, len}) do
-    o = deref(bid)
+    o = Interp.deref(bid)
     total = byte_size(o.bytes)
 
     cond do
@@ -295,7 +386,7 @@ defmodule Browser.JS.TypedArrays do
 
   defp elem_at({:ta, kind, bid, off, _len}, i) do
     size = size_of(kind)
-    read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+    read(kind, read_el(bid, off + i * size, size))
   end
 
   defp values({:ta, kind, bid, off, len}) do
@@ -315,7 +406,7 @@ defmodule Browser.JS.TypedArrays do
     Stream.map(0..(n - 1)//1, fn i ->
       case eff(d0) do
         {off, len} when i < len ->
-          read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+          read(kind, read_el(bid, off + i * size, size))
 
         _ ->
           :undefined
@@ -331,7 +422,7 @@ defmodule Browser.JS.TypedArrays do
 
     case eff(d0) do
       {off, len} when i >= 0 and i < len ->
-        read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+        read(kind, read_el(bid, off + i * size, size))
 
       _ ->
         :undefined
@@ -369,7 +460,7 @@ defmodule Browser.JS.TypedArrays do
       v =
         case eff(d0) do
           {off, len} when i < len ->
-            read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+            read(kind, read_el(bid, off + i * size, size))
 
           _ ->
             :undefined
@@ -380,12 +471,12 @@ defmodule Browser.JS.TypedArrays do
   end
 
   defp put_elem_at({:ta, kind, bid, off, _}, i, value) do
-    size = size_of(kind)
-    o = deref(bid)
-    pos = off + i * size
-    <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-    store(bid, %{o | bytes: pre <> write(kind, value) <> post})
-    :ok
+    buffer_put(bid, off + i * size_of(kind), write(kind, value))
+  end
+
+  defp put_bytes_at({:ta, kind, bid, _, _} = d, i, bytes) do
+    {off, _} = eff(d)
+    buffer_put(bid, off + i * size_of(kind), bytes)
   end
 
   defp put_all({:ta, kind, bid, off, _}, start, items) do
@@ -477,16 +568,17 @@ defmodule Browser.JS.TypedArrays do
         # the value is converted first, whatever the index
         bytes = write(kind, v)
 
-        with {:index, i} <- c,
-             {off, len} when i < len <- eff(d0) do
-          size = size_of(kind)
-          o = deref(bid)
-          pos = off + i * size
-          <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-          store(bid, %{o | bytes: pre <> bytes <> post})
-        end
+        case {c, eff(d0)} do
+          {{:index, i}, {off, len}} when i < len ->
+            if immutable?(bid) do
+              :readonly
+            else
+              buffer_put(bid, off + i * size_of(kind), bytes)
+            end
 
-        :ok
+          _ ->
+            :ok
+        end
     end
   end
 
@@ -509,6 +601,38 @@ defmodule Browser.JS.TypedArrays do
   end
 
   def invalid_index?(_, _), do: false
+
+  @doc false
+  def typed_array?(v), do: ta?(v)
+
+  @doc false
+  # Object.freeze / seal: the elements of a typed array stay configurable, so a typed array
+  # with elements (or one over a resizable buffer, which may grow some) cannot be locked
+  def unlockable?({:obj, id} = v, freeze?) do
+    ta?(v) and
+      (
+        %{host: {_, {:ta, _, bid, _, _} = d}} = deref(id)
+
+        case eff(d) do
+          {_, len} when len > 0 -> true
+          _ -> freeze? and resizable?(bid)
+        end
+      )
+  end
+
+  def unlockable?(_, _), do: false
+
+  @doc false
+  # a typed array that a detached or shrunk buffer has left out of bounds
+  def out_of_bounds?({:obj, id} = v) do
+    ta?(v) and
+      (
+        %{host: {_, d}} = deref(id)
+        eff(d) == :oob
+      )
+  end
+
+  def out_of_bounds?(_), do: false
 
   @doc false
   def numeric_key?(key), do: is_binary(key) and canonical(key) != :none
@@ -584,11 +708,11 @@ defmodule Browser.JS.TypedArrays do
           with {:index, i} <- c,
                {off, len} when i < len <- eff(d) do
             {:ta, _, bid, _, _} = d
-            size = size_of(kind)
-            o = deref(bid)
-            pos = off + i * size
-            <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-            store(bid, %{o | bytes: pre <> bytes <> post})
+
+            if immutable?(bid),
+              do: throw_error("TypeError", "the typed array's buffer is immutable")
+
+            buffer_put(bid, off + i * size_of(kind), bytes)
           end
         end
 
@@ -637,6 +761,9 @@ defmodule Browser.JS.TypedArrays do
           end
 
         if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+
+        # the prototype of the new target is read before the memory is allocated
+        Interp.late_proto()
 
         if max && max > 1_000_000_000_000,
           do: throw_error("RangeError", "Array buffer allocation failed")
@@ -717,6 +844,15 @@ defmodule Browser.JS.TypedArrays do
     store(rid, Map.put(deref(rid), :arity, 1.0))
     put_hidden(p, "resize", resize)
 
+    Props.define_accessor(p, "immutable",
+      get:
+        native("get immutable", fn this, _ ->
+          unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+          immutable?(buffer_id(this))
+        end),
+      enumerable: false
+    )
+
     Props.define_accessor(p, "detached",
       get:
         native("get detached", fn this, _ ->
@@ -728,7 +864,7 @@ defmodule Browser.JS.TypedArrays do
 
     # transfer(newLength) / transferToFixedLength(newLength): the bytes move to a new buffer
     # (cut or zero-padded to the length) and this one is detached
-    for name <- ["transfer", "transferToFixedLength"] do
+    for name <- ["transfer", "transferToFixedLength", "transferToImmutable"] do
       f =
         native(name, fn this, args ->
           unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
@@ -742,6 +878,9 @@ defmodule Browser.JS.TypedArrays do
           if detached?(buffer_id(this)),
             do: throw_error("TypeError", "cannot transfer a detached ArrayBuffer")
 
+          if immutable?(buffer_id(this)),
+            do: throw_error("TypeError", "cannot transfer an immutable ArrayBuffer")
+
           bytes = bytes_of(this)
 
           moved =
@@ -753,6 +892,10 @@ defmodule Browser.JS.TypedArrays do
 
           if max && len > max, do: throw_error("RangeError", "Invalid array buffer length")
           buf = new_buffer(moved, max)
+
+          if name == "transferToImmutable",
+            do: store(buffer_id(buf), Map.put(deref(buffer_id(buf)), :immutable, true))
+
           detach(this)
           buf
         end)
@@ -771,6 +914,29 @@ defmodule Browser.JS.TypedArrays do
       slice_buffer(this, args, :arraybuffer, &ab?/1, &new_buffer(&1, nil))
     end)
 
+    def_fn(p, "sliceToImmutable", 2, fn this, args ->
+      unless ab?(this), do: throw_error("TypeError", "not an ArrayBuffer")
+
+      if detached?(buffer_id(this)),
+        do: throw_error("TypeError", "cannot slice a detached ArrayBuffer")
+
+      len = byte_size(bytes_of(this))
+      from = rel_index(arg(args, 0), len, 0)
+      to = rel_index(arg(args, 1), len, len)
+
+      if detached?(buffer_id(this)),
+        do: throw_error("TypeError", "cannot slice a detached ArrayBuffer")
+
+      n = max(to - from, 0)
+      bytes = bytes_of(this)
+
+      if byte_size(bytes) < from + n, do: throw_error("RangeError", "slice is out of bounds")
+
+      buf = new_buffer(binary_part(bytes, from, n))
+      store(buffer_id(buf), Map.put(deref(buffer_id(buf)), :immutable, true))
+      buf
+    end)
+
     put_tag(p, "ArrayBuffer")
   end
 
@@ -778,7 +944,7 @@ defmodule Browser.JS.TypedArrays do
   # intrinsic constructor), checked to be a typed array of the same content type, and at least
   # as long as the length asked for
   defp species_create(this, kind, args) do
-    default = Interp.get(proto({:ta, kind}), "constructor")
+    default = proto({:ta_ctor, kind})
     c = Interp.get(this, "constructor")
 
     ctor =
@@ -811,7 +977,9 @@ defmodule Browser.JS.TypedArrays do
   # at least as long as the length asked for
   defp typed_array_create(ctor, args) do
     result = construct(ctor, args)
-    {:ta, _, _, _, rlen} = data!(result)
+    {:ta, _, _, _, rlen} = d = data!(result)
+    # (a result that is written to must not sit on an immutable buffer; `subarray` just shares)
+    if match?([_], args), do: mut!(d)
 
     case args do
       [n] when is_float(n) ->
@@ -857,6 +1025,9 @@ defmodule Browser.JS.TypedArrays do
           end
 
         if max && n > max, do: throw_error("RangeError", "Invalid array buffer max length")
+
+        # the prototype of the new target is read before the memory is allocated
+        Interp.late_proto()
 
         if max && max > 1_000_000_000_000,
           do: throw_error("RangeError", "Array buffer allocation failed")
@@ -948,6 +1119,9 @@ defmodule Browser.JS.TypedArrays do
 
         if r == this, do: throw_error("TypeError", "species returned the same buffer")
 
+        if immutable?(buffer_id(r)),
+          do: throw_error("TypeError", "species created an immutable buffer")
+
         if byte_size(bytes_of(r)) < n,
           do: throw_error("TypeError", "species created a buffer that is too small")
 
@@ -964,6 +1138,8 @@ defmodule Browser.JS.TypedArrays do
 
     result
   end
+
+  defp waiters, do: Process.get(:js_waiters) || []
 
   @atomic_kinds [:i8, :u8, :i16, :u16, :i32, :u32, :i64, :u64]
 
@@ -1007,7 +1183,7 @@ defmodule Browser.JS.TypedArrays do
     modify = fn name, fun ->
       def_fn(atomics, name, 3, fn _, args ->
         ta = arg(args, 0)
-        d = validate.(ta, false)
+        d = validate.(ta, false) |> mut!()
         i = index.(d, arg(args, 1))
         {:ta, kind, _, _, _} = d
         v = operand.(kind, arg(args, 2))
@@ -1030,7 +1206,7 @@ defmodule Browser.JS.TypedArrays do
 
     def_fn(atomics, "compareExchange", 4, fn _, args ->
       ta = arg(args, 0)
-      d = validate.(ta, false)
+      d = validate.(ta, false) |> mut!()
       i = index.(d, arg(args, 1))
       {:ta, kind, _, _, _} = d
       expected = operand.(kind, arg(args, 2))
@@ -1056,6 +1232,15 @@ defmodule Browser.JS.TypedArrays do
       old
     end)
 
+    def_fn(atomics, "pause", 0, fn _, args ->
+      n = arg(args, 0)
+
+      unless n == :undefined or (is_number(n) and n == trunc(n)),
+        do: throw_error("TypeError", "Atomics.pause: argument must be an integral number")
+
+      :undefined
+    end)
+
     def_fn(atomics, "load", 2, fn _, args ->
       ta = arg(args, 0)
       d = validate.(ta, false)
@@ -1066,7 +1251,7 @@ defmodule Browser.JS.TypedArrays do
 
     def_fn(atomics, "store", 3, fn _, args ->
       ta = arg(args, 0)
-      d = validate.(ta, false)
+      d = validate.(ta, false) |> mut!()
       i = index.(d, arg(args, 1))
       {:ta, kind, _, _, _} = d
       v = operand.(kind, arg(args, 2))
@@ -1092,10 +1277,12 @@ defmodule Browser.JS.TypedArrays do
       int_or_inf(arg(args, 0)) in [1, 2, 4, 8]
     end)
 
-    def_fn(atomics, "wait", 4, fn _, args ->
+    # the shared part of `wait` and `waitAsync`: the element's byte position and whether the
+    # value the caller expects is still there
+    wait_args = fn args ->
       ta = arg(args, 0)
       d = validate.(ta, true)
-      {:ta, kind, bid, _, _} = d
+      {:ta, kind, bid, off, _} = d
 
       unless Map.has_key?(deref(bid), :shared),
         do: throw_error("TypeError", "not a shared typed array")
@@ -1107,23 +1294,102 @@ defmodule Browser.JS.TypedArrays do
           do: elem(Browser.JS.BigInt.to_bigint(arg(args, 2)), 1),
           else: to_integer(arg(args, 2))
 
-      _timeout = to_num(arg(args, 3))
+      timeout =
+        case to_num(arg(args, 3)) do
+          :nan -> :infinity
+          :neg_infinity -> 0
+          :infinity -> :infinity
+          n -> max(n, 0)
+        end
+
       cur = num.(elem_at(d, i))
       as_kind = read(kind, write(kind, if(kind == :i64, do: {:bigint, v}, else: v * 1.0)))
+      {bid, off + i * size_of(kind), timeout, num.(as_kind) == cur}
+    end
+
+    def_fn(atomics, "wait", 4, fn _, args ->
+      {_, _, _, equal?} = wait_args.(args)
+
+      if Process.get(:js_cannot_block, false),
+        do: throw_error("TypeError", "Atomics.wait cannot block this thread")
+
       # (nothing can notify: a wait that finds its value just times out)
-      if num.(as_kind) == cur, do: "timed-out", else: "not-equal"
+      if equal?, do: "timed-out", else: "not-equal"
+    end)
+
+    def_fn(atomics, "waitAsync", 4, fn _, args ->
+      {bid, pos, timeout, equal?} = wait_args.(args)
+      res = new_object()
+
+      cond do
+        not equal? ->
+          Interp.put(res, "async", false)
+          Interp.put(res, "value", "not-equal")
+
+        timeout == 0 ->
+          Interp.put(res, "async", false)
+          Interp.put(res, "value", "timed-out")
+
+        true ->
+          p = Browser.JS.Promise.new()
+          seq = (Process.get(:js_waiter_seq) || 0) + 1
+          Process.put(:js_waiter_seq, seq)
+
+          timer =
+            if timeout != :infinity do
+              Browser.JS.Builtins.add_timer(
+                native("", fn _, _ ->
+                  if Enum.any?(waiters(), &(&1.seq == seq)) do
+                    Process.put(:js_waiters, Enum.reject(waiters(), &(&1.seq == seq)))
+                    Browser.JS.Promise.resolve(p, "timed-out")
+                  end
+
+                  :undefined
+                end),
+                timeout * 1.0
+              )
+            end
+
+          Process.put(
+            :js_waiters,
+            waiters() ++ [%{seq: seq, key: {bid, pos}, p: p, timer: timer}]
+          )
+
+          Interp.put(res, "async", true)
+          Interp.put(res, "value", p)
+      end
+
+      res
     end)
 
     def_fn(atomics, "notify", 3, fn _, args ->
       d = validate.(arg(args, 0), true)
-      _ = index.(d, arg(args, 1))
+      i = index.(d, arg(args, 1))
+      {:ta, kind, bid, off, _} = d
 
-      case arg(args, 2) do
-        :undefined -> :ok
-        c -> int_or_inf(c)
+      count =
+        case arg(args, 2) do
+          :undefined ->
+            :infinity
+
+          c ->
+            with n when is_integer(n) <- int_or_inf(c),
+                 do: max(n, 0),
+                 else: (_ -> if c == :neg_infinity, do: 0, else: :infinity)
+        end
+
+      key = {bid, off + i * size_of(kind)}
+      {here, rest} = Enum.split_with(waiters(), &(&1.key == key))
+      woken = if count == :infinity, do: here, else: Enum.take(here, count)
+      keep = Enum.reject(here, &(&1 in woken))
+      Process.put(:js_waiters, Enum.filter(waiters(), &(&1 in rest or &1 in keep)))
+
+      for w <- woken do
+        if w.timer, do: Browser.JS.Builtins.clear_timer(w.timer)
+        Browser.JS.Promise.enqueue(fn -> Browser.JS.Promise.resolve(w.p, "ok") end)
       end
 
-      0.0
+      length(woken) * 1.0
     end)
 
     :ok
@@ -1134,7 +1400,7 @@ defmodule Browser.JS.TypedArrays do
     getter = fn name, f ->
       Props.define_accessor(base, name,
         get:
-          native(to_string(name), fn this, _ ->
+          native("get " <> to_string(name), fn this, _ ->
             unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
             {:obj, id} = this
             %{host: {__MODULE__, {:ta, _, bid, _, _} = d}} = deref(id)
@@ -1234,16 +1500,32 @@ defmodule Browser.JS.TypedArrays do
       put_proto({:ta, kind}, p)
 
       ctor =
-        native(name, fn _, args -> build(kind, args) end)
+        native(name, fn this, args ->
+          unless match?({:obj, _}, this),
+            do: throw_error("TypeError", "Constructor #{name} requires 'new'")
+
+          # a length argument is checked before the prototype of the new target is read
+          case arg(args, 0) do
+            {:obj, _} -> :ok
+            :undefined -> :ok
+            first -> to_index(first)
+          end
+
+          Interp.late_proto()
+          build(kind, args)
+        end)
 
       {:obj, cid} = ctor
-      store(cid, %{deref(cid) | proto: base_ctor})
+      store(cid, Map.merge(deref(cid), %{proto: base_ctor, arity: 3.0}))
+      put_proto({:ta_ctor, kind}, ctor)
       put_const(ctor, "prototype", p)
       put_hidden(p, "constructor", ctor)
       put_const(ctor, "BYTES_PER_ELEMENT", size * 1.0)
       put_const(p, "BYTES_PER_ELEMENT", size * 1.0)
       declare(scope, name, ctor)
     end
+
+    install_u8_encoding()
 
     # %TypedArray%.from and .of build an instance of whatever constructor they are called on
     def_fn(base_ctor, "from", 1, fn this, args ->
@@ -1257,26 +1539,35 @@ defmodule Browser.JS.TypedArrays do
           do: throw_error("TypeError", "Cannot convert undefined or null to object"),
           else: Interp.get(src, {:symbol, :iterator, "Symbol.iterator"})
 
-      list =
-        cond do
-          nullish?(iterator) ->
-            array_like_list(src)
+      cond do
+        nullish?(iterator) ->
+          # the result is constructed before any element of an array-like source is read
+          n = if match?({:obj, _}, src), do: to_int(Interp.get(src, "length")), else: 0
+          if n > 100_000_000, do: throw_error("RangeError", "Invalid typed array length: #{n}")
+          target = typed_array_create(this, [n * 1.0])
 
-          function?(iterator) ->
-            iterate(src)
+          for k <- 0..(n - 1)//1 do
+            v = Interp.get(src, Integer.to_string(k))
+            mapped = if f == :undefined, do: v, else: call(f, arg(args, 2), [v, k * 1.0])
+            Interp.put(target, k, mapped)
+          end
 
-          true ->
-            throw_error("TypeError", "Symbol.iterator is not a function")
-        end
+          target
 
-      target = typed_array_create(this, [length(list) * 1.0])
+        function?(iterator) ->
+          list = Interp.iterate_with(src, iterator)
+          target = typed_array_create(this, [length(list) * 1.0])
 
-      for {v, k} <- Enum.with_index(list) do
-        mapped = if f == :undefined, do: v, else: call(f, arg(args, 2), [v, k * 1.0])
-        Interp.put(target, k, mapped)
+          for {v, k} <- Enum.with_index(list) do
+            mapped = if f == :undefined, do: v, else: call(f, arg(args, 2), [v, k * 1.0])
+            Interp.put(target, k, mapped)
+          end
+
+          target
+
+        true ->
+          throw_error("TypeError", "Symbol.iterator is not a function")
       end
-
-      target
     end)
 
     def_fn(base_ctor, "of", 0, fn this, args ->
@@ -1287,66 +1578,179 @@ defmodule Browser.JS.TypedArrays do
     end)
   end
 
-  defp array_like_list({:obj, _} = src), do: array_like(src)
-  defp array_like_list(_), do: []
+  # Uint8Array.fromBase64/fromHex and the prototype's toBase64/toHex/setFromBase64/setFromHex
+  defp install_u8_encoding do
+    ctor = proto({:ta_ctor, :u8})
+    p = proto({:ta, :u8})
+    max = 9_007_199_254_740_991
+
+    str! = fn s ->
+      unless is_binary(s), do: throw_error("TypeError", "argument must be a string")
+      s
+    end
+
+    options! = fn o ->
+      cond do
+        o == :undefined -> nil
+        match?({:obj, _}, o) -> o
+        true -> throw_error("TypeError", "options must be an object")
+      end
+    end
+
+    option = fn o, key, default, allowed ->
+      v = if o == nil, do: :undefined, else: Interp.get(o, key)
+
+      cond do
+        v == :undefined -> default
+        is_binary(v) and v in allowed -> v
+        true -> throw_error("TypeError", "invalid #{key} option")
+      end
+    end
+
+    decode_opts = fn o ->
+      o = options!.(o)
+      alphabet = option.(o, "alphabet", "base64", ["base64", "base64url"])
+      last = option.(o, "lastChunkHandling", "loose", ["loose", "strict", "stop-before-partial"])
+      {alphabet, last}
+    end
+
+    u8! = fn this ->
+      case this do
+        {:obj, id} ->
+          case deref(id) do
+            %{host: {__MODULE__, {:ta, :u8, _, _, _}}} -> this
+            _ -> throw_error("TypeError", "this is not a Uint8Array")
+          end
+
+        _ ->
+          throw_error("TypeError", "this is not a Uint8Array")
+      end
+    end
+
+    from_bytes = fn bytes -> make(:u8, for(<<b <- bytes>>, do: b * 1.0)) end
+
+    set_bytes = fn this, status, read, bytes ->
+      {:ta, _, bid, off, _} = data!(this)
+      o = deref(bid)
+      n = byte_size(bytes)
+      <<pre::binary-size(^off), _::binary-size(^n), post::binary>> = o.bytes
+      store(bid, %{o | bytes: pre <> bytes <> post})
+      if status == :error, do: throw_error("SyntaxError", "invalid input")
+      res = new_object()
+      Interp.put(res, "read", read * 1.0)
+      Interp.put(res, "written", n * 1.0)
+      res
+    end
+
+    def_fn(ctor, "fromBase64", 1, fn _, args ->
+      s = str!.(arg(args, 0))
+      {alphabet, last} = decode_opts.(arg(args, 1))
+
+      case Browser.JS.BinaryEncoding.decode_base64(s, alphabet, last, max) do
+        {:ok, _, bytes} -> from_bytes.(bytes)
+        {:error, _, _} -> throw_error("SyntaxError", "invalid base64 string")
+      end
+    end)
+
+    def_fn(ctor, "fromHex", 1, fn _, args ->
+      s = str!.(arg(args, 0))
+
+      case Browser.JS.BinaryEncoding.decode_hex(s, max) do
+        {:ok, _, bytes} -> from_bytes.(bytes)
+        {:error, _, _} -> throw_error("SyntaxError", "invalid hex string")
+      end
+    end)
+
+    def_fn(p, "toBase64", 0, fn this, args ->
+      u8!.(this)
+      o = options!.(arg(args, 0))
+      alphabet = option.(o, "alphabet", "base64", ["base64", "base64url"])
+      omit = if o == nil, do: false, else: truthy(Interp.get(o, "omitPadding"))
+      {:ta, _, _, _, _} = d = data!(this)
+      Browser.JS.BinaryEncoding.encode_base64(u8_bytes(d), alphabet, omit)
+    end)
+
+    def_fn(p, "toHex", 0, fn this, _ ->
+      u8!.(this)
+      {:ta, _, _, _, _} = d = data!(this)
+      Browser.JS.BinaryEncoding.encode_hex(u8_bytes(d))
+    end)
+
+    def_fn(p, "setFromBase64", 1, fn this, args ->
+      u8!.(this)
+      mut!(data!(this))
+      s = str!.(arg(args, 0))
+      {alphabet, last} = decode_opts.(arg(args, 1))
+      {:ta, _, _, _, len} = data!(this)
+      {status, read, bytes} = Browser.JS.BinaryEncoding.decode_base64(s, alphabet, last, len)
+      set_bytes.(this, status, read, bytes)
+    end)
+
+    def_fn(p, "setFromHex", 1, fn this, args ->
+      u8!.(this)
+      mut!(data!(this))
+      s = str!.(arg(args, 0))
+      {:ta, _, _, _, len} = data!(this)
+      {status, read, bytes} = Browser.JS.BinaryEncoding.decode_hex(s, len)
+      set_bytes.(this, status, read, bytes)
+    end)
+  end
+
+  defp u8_bytes({:ta, _, bid, off, len}), do: binary_part(deref(bid).bytes, off, len)
 
   # `new Int8Array(length | buffer, byteOffset, length | typedArray | iterable | array-like)`
   defp build(kind, args) do
     size = size_of(kind)
 
     case arg(args, 0) do
-      :undefined ->
-        make(kind, [])
+      {:obj, _} = src ->
+        if buffer?(src),
+          do: build_view(kind, size, src, args),
+          else: make(kind, source_values(src))
 
-      n when is_number(n) ->
-        len = to_int(n)
-
-        if len < 0 or len > 100_000_000,
-          do: throw_error("RangeError", "Invalid typed array length: #{to_str(n)}")
-
+      n ->
+        len = to_index(n)
+        if len > 100_000_000, do: throw_error("RangeError", "Invalid typed array length: #{len}")
         buf = new_buffer(:binary.copy(<<0>>, len * size))
         view(kind, buffer_id(buf), 0, len)
-
-      src ->
-        if buffer?(src) do
-          total = byte_size(bytes_of(src))
-          off = if arg(args, 1) == :undefined, do: 0, else: to_int(arg(args, 1))
-
-          if off < 0 or rem(off, size) != 0,
-            do:
-              throw_error("RangeError", "start offset of #{kind} should be a multiple of #{size}")
-
-          len =
-            if arg(args, 2) == :undefined and resizable?(buffer_id(src)) do
-              if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
-              :auto
-            else
-              build_len(args, total, off, size, kind)
-            end
-
-          if len != :auto and off + len * size > total,
-            do: throw_error("RangeError", "Invalid typed array length")
-
-          view(kind, buffer_id(src), off, len)
-        else
-          make(kind, source_values(src))
-        end
     end
   end
 
-  defp build_len(args, total, off, size, kind) do
-    if arg(args, 2) == :undefined do
-      if rem(total - off, size) != 0 or total < off,
-        do:
-          throw_error(
-            "RangeError",
-            "byte length of #{kind} should be a multiple of #{size}"
-          )
+  defp build_view(kind, size, src, args) do
+    off = to_index(arg(args, 1))
 
-      div(total - off, size)
-    else
-      to_int(arg(args, 2))
-    end
+    if rem(off, size) != 0,
+      do: throw_error("RangeError", "start offset of #{kind} should be a multiple of #{size}")
+
+    new_len = if arg(args, 2) == :undefined, do: :undefined, else: to_index(arg(args, 2))
+    if detached?(buffer_id(src)), do: throw_error("TypeError", "ArrayBuffer is detached")
+    total = byte_size(bytes_of(src))
+
+    len =
+      cond do
+        new_len == :undefined and resizable?(buffer_id(src)) ->
+          if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
+          :auto
+
+        new_len == :undefined ->
+          if rem(total, size) != 0,
+            do:
+              throw_error(
+                "RangeError",
+                "byte length of #{kind} should be a multiple of #{size}"
+              )
+
+          if off > total, do: throw_error("RangeError", "Start offset is outside the bounds")
+          div(total - off, size)
+
+        true ->
+          new_len
+      end
+
+    if len != :auto and off + len * size > total,
+      do: throw_error("RangeError", "Invalid typed array length")
+
+    view(kind, buffer_id(src), off, len)
   end
 
   # the values of a typed array, iterable or array-like
@@ -1357,11 +1761,17 @@ defmodule Browser.JS.TypedArrays do
 
       match?({:obj, _}, src) ->
         case Interp.get(src, {:symbol, :iterator, "Symbol.iterator"}) do
-          f when is_tuple(f) ->
-            if function?(f), do: iterate(src), else: array_like(src)
-
-          _ ->
+          f when f in [:undefined, :null] ->
             array_like(src)
+
+          f ->
+            if function?(f),
+              do:
+                if(Interp.array_iteration_pristine?(src),
+                  do: iterate(src),
+                  else: Interp.iterate_protocol_list(src)
+                ),
+              else: throw_error("TypeError", "Symbol.iterator is not a function")
         end
 
       is_binary(src) ->
@@ -1393,7 +1803,7 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "fill", fn this, args ->
-      {:ta, kind, _, _, len} = data!(this)
+      {:ta, kind, _, _, len} = data!(this) |> mut!()
 
       value =
         if kind in [:i64, :u64],
@@ -1408,15 +1818,64 @@ defmodule Browser.JS.TypedArrays do
       this
     end)
 
-    def_fn(p, "set", fn this, args ->
-      {:ta, _, _, _, len} = d = data!(this)
-      items = source_values(arg(args, 0))
-      off = if arg(args, 1) == :undefined, do: 0, else: to_int(arg(args, 1))
+    def_fn(p, "set", 1, fn this, args ->
+      unless ta?(this), do: throw_error("TypeError", "this is not a typed array")
+      {:obj, tid} = this
+      %{host: {__MODULE__, {:ta, kind, _, _, _} = d0}} = deref(tid)
+      mut!(d0)
+      src = arg(args, 0)
 
-      if off < 0 or off + length(items) > len,
-        do: throw_error("RangeError", "offset is out of bounds")
+      off =
+        case int_or_inf(arg(args, 1)) do
+          :infinity -> :infinity
+          :neg_infinity -> -1
+          n -> n
+        end
 
-      if items != [], do: put_all(d, off, items)
+      if off != :infinity and off < 0, do: throw_error("RangeError", "offset is out of bounds")
+
+      target_len =
+        case eff(d0) do
+          :oob ->
+            throw_error(
+              "TypeError",
+              "cannot perform this operation on a detached or out of bounds typed array"
+            )
+
+          {_, n} ->
+            n
+        end
+
+      if ta?(src) do
+        {:ta, skind, _, _, slen} = sd = data!(src)
+
+        if off == :infinity or off + slen > target_len,
+          do: throw_error("RangeError", "offset is out of bounds")
+
+        if kind in [:i64, :u64] != skind in [:i64, :u64],
+          do: throw_error("TypeError", "Cannot mix BigInt and other types")
+
+        {:ta, _, _, _, _} = td = data!(this)
+        if slen > 0, do: put_all(td, off, values(sd))
+      else
+        if nullish?(src),
+          do: throw_error("TypeError", "Cannot convert undefined or null to object")
+
+        n = to_int(Interp.get(src, "length"))
+
+        if off == :infinity or off + n > target_len,
+          do: throw_error("RangeError", "offset is out of bounds")
+
+        for i <- 0..(n - 1)//1 do
+          bytes = write(kind, Interp.get(src, Integer.to_string(i)))
+
+          case eff(d0) do
+            {_, len} when off + i < len -> put_bytes_at(d0, off + i, bytes)
+            _ -> :ok
+          end
+        end
+      end
+
       :undefined
     end)
 
@@ -1468,8 +1927,10 @@ defmodule Browser.JS.TypedArrays do
       f = callable!(arg(args, 0))
       result = species_create(this, kind, [len * 1.0])
 
-      for {{v, i}, n} <- Stream.with_index(live_pairs(this)) do
-        Interp.put(result, n, call(f, arg(args, 1), [v, i * 1.0, this]))
+      # the length is fixed up front: elements that went away meanwhile read as undefined
+      for i <- 0..(len - 1)//1 do
+        v = Interp.get(this, i * 1.0)
+        Interp.put(result, i, call(f, arg(args, 1), [v, i * 1.0, this]))
       end
 
       result
@@ -1507,14 +1968,7 @@ defmodule Browser.JS.TypedArrays do
       join_elems(this, len, sep, &to_str/1)
     end)
 
-    def_fn(p, "toString", fn this, _ ->
-      join = Interp.get(this, "join")
-
-      if function?(join),
-        do: call(join, this, []),
-        else:
-          "[object #{to_str(Interp.get(this, {:symbol, :toStringTag, "Symbol.toStringTag"}))}]"
-    end)
+    put_hidden(p, "toString", Interp.get(proto(:array), "toString"))
 
     def_fn(p, "toLocaleString", fn this, _ ->
       {:ta, _, _, _, len} = data!(this)
@@ -1632,7 +2086,7 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "reverse", fn this, _ ->
-      d = data!(this)
+      d = data!(this) |> mut!()
       items = live_values(this) |> Enum.reverse()
       if items != [], do: put_all(d, 0, items)
       this
@@ -1644,13 +2098,25 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "sort", fn this, args ->
-      d = data!(this)
+      d = data!(this) |> mut!()
       sorted = sorted_values(d, arg(args, 0))
-      if sorted != [], do: put_all(d, 0, sorted)
+      {:obj, tid} = this
+      %{host: {__MODULE__, d0}} = deref(tid)
+
+      # the comparator may have detached or shrunk the buffer: write back what still exists
+      case eff(d0) do
+        {off, len} when sorted != [] and len > 0 ->
+          {:ta, kind, bid, _, _} = d0
+          put_all({:ta, kind, bid, off, len}, 0, Enum.take(sorted, len))
+
+        _ ->
+          :ok
+      end
+
       this
     end)
 
-    def_fn(p, "toSorted", fn this, args ->
+    def_fn(p, "toSorted", 1, fn this, args ->
       {:ta, kind, _, _, _} = d = data!(this)
       make(kind, sorted_values(d, arg(args, 0)))
     end)
@@ -1677,7 +2143,7 @@ defmodule Browser.JS.TypedArrays do
     end)
 
     def_fn(p, "copyWithin", fn this, args ->
-      {:ta, _, _, _, len} = data!(this)
+      {:ta, _, _, _, len} = data!(this) |> mut!()
       target = rel_index_inf(arg(args, 0), len, 0)
       from = rel_index_inf(arg(args, 1), len, 0)
       to = rel_index_inf(arg(args, 2), len, len)
@@ -1732,10 +2198,10 @@ defmodule Browser.JS.TypedArrays do
                   {:ok, i * 1.0}
 
                 :values ->
-                  {:ok, read(kind, binary_part(deref(bid).bytes, off + i * size, size))}
+                  {:ok, read(kind, read_el(bid, off + i * size, size))}
 
                 :entries ->
-                  v = read(kind, binary_part(deref(bid).bytes, off + i * size, size))
+                  v = read(kind, read_el(bid, off + i * size, size))
                   {:ok, new_array([i * 1.0, v])}
               end
 
@@ -1856,20 +2322,34 @@ defmodule Browser.JS.TypedArrays do
 
         if off < 0, do: throw_error("RangeError", "Start offset #{off} is outside the bounds")
 
-        if detached?(buffer_id(buf)),
-          do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
+        check = fn ->
+          if detached?(buffer_id(buf)),
+            do: throw_error("TypeError", "cannot construct a DataView on a detached ArrayBuffer")
 
-        total = byte_size(bytes_of(buf))
+          total = byte_size(bytes_of(buf))
 
-        len =
-          cond do
-            arg(args, 2) != :undefined -> to_index(arg(args, 2))
-            resizable?(buffer_id(buf)) -> :auto
-            true -> total - off
-          end
+          if off > total,
+            do:
+              throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
 
-        if off < 0 or off > total or (len != :auto and (len < 0 or off + len > total)),
-          do: throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
+          len =
+            cond do
+              arg(args, 2) != :undefined -> to_index(arg(args, 2))
+              resizable?(buffer_id(buf)) -> :auto
+              true -> total - off
+            end
+
+          if len != :auto and (len < 0 or off + len > total),
+            do:
+              throw_error("RangeError", "Start offset #{off} is outside the bounds of the buffer")
+
+          len
+        end
+
+        check.()
+        # reading the prototype can run code that detaches or resizes the buffer
+        Interp.late_proto()
+        len = check.()
 
         new_host(__MODULE__, {:dv, buffer_id(buf), off, len}, p)
       end)
@@ -1929,15 +2409,16 @@ defmodule Browser.JS.TypedArrays do
 
       def_fn(p, "set" <> name, 2, fn this, args ->
         d = dv!(this)
+
+        if immutable?(elem(d, 1)),
+          do: throw_error("TypeError", "the DataView's buffer is immutable")
+
         i = dv_toindex(arg(args, 0))
         enc = write(kind, arg(args, 1))
         {:dv, bid, off, len} = dv_eff!(d)
         i = dv_check(i, size, len, bid)
         enc = if truthy(arg(args, 2)), do: enc, else: swap(enc)
-        o = deref(bid)
-        pos = off + i
-        <<pre::binary-size(^pos), _::binary-size(^size), post::binary>> = o.bytes
-        store(bid, %{o | bytes: pre <> enc <> post})
+        buffer_put(bid, off + i, enc)
         :undefined
       end)
     end

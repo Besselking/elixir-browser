@@ -12,7 +12,9 @@ defmodule Browser.Style do
   alias Browser.{CSS, MediaQuery}
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
-            width height min-height max-height min-width max-width box-sizing clip clip-path
+            contain contain-intrinsic-size contain-intrinsic-width contain-intrinsic-height
+            contain-intrinsic-inline-size contain-intrinsic-block-size
+            width height min-height max-height min-width max-width box-sizing aspect-ratio margin-trim clip clip-path
             text-indent opacity margin-right padding-right vertical-align
             border-top-width border-right-width border-bottom-width border-left-width
             border-top-style border-right-style border-bottom-style border-left-style
@@ -23,17 +25,20 @@ defmodule Browser.Style do
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
-            scroll-margin-top scroll-padding-top
+            scroll-margin-top scroll-padding-top object-fit object-position
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width order border-spacing border-collapse float clear rotate scale transform-origin z-index white-space tab-size
+            flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
+            row-gap column-gap column-count column-width column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens
             grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space tab-size)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens)
+
+  @doc false
+  def inherited_props, do: @inherited
 
   # SVG presentation attributes: they act like author rules of the lowest priority
   @svg_tags ~w(svg g path rect circle ellipse line polyline polygon text tspan use stop
@@ -65,6 +70,7 @@ defmodule Browser.Style do
     "border-radius" =>
       ~w(border-top-left-radius border-top-right-radius border-bottom-right-radius
          border-bottom-left-radius),
+    "column-rule" => ~w(column-rule-width column-rule-style column-rule-color),
     "border-top" => ~w(border-top-width border-top-style border-top-color),
     "border-right" => ~w(border-right-width border-right-style border-right-color),
     "border-bottom" => ~w(border-bottom-width border-bottom-style border-bottom-color),
@@ -90,7 +96,8 @@ defmodule Browser.Style do
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
   tr { display: table-row; vertical-align: middle }
   td, th { display: table-cell; padding: 1px; vertical-align: inherit }
-  col, colgroup { display: none }
+  colgroup { display: table-column-group }
+  col { display: table-column }
   li { display: list-item }
   body { margin: 8px }
   p, dl, pre, figure { margin: 1em 0 }
@@ -307,7 +314,7 @@ defmodule Browser.Style do
 
     # presentational attributes (size, cols, rows) rank below every author rule
     from_hints =
-      for {prop, value} <- hints(own) do
+      for {prop, value} <- dir_hint(own) ++ hints(own) do
         {prop, {rank(:author, false), -@above_layers, {-1, {0, 0, 0}}, -1}, value}
       end
 
@@ -321,11 +328,46 @@ defmodule Browser.Style do
     |> Map.new(fn {prop, {_k, v}} -> {prop, v} end)
   end
 
+  # sizes that cannot be negative: a negative value is invalid and the declaration is dropped
+  @non_negative ~w(width height min-height max-height min-width max-width flex-basis)
+
   defp relevant(decls) do
     decls
     |> Enum.flat_map(&expand/1)
-    |> Enum.filter(fn {p, _, _} -> p in @props or String.starts_with?(p, "--") end)
+    |> Enum.filter(fn {p, v, _} ->
+      (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
+        not invalid_color?(p, v) and not percent_width?(p, v)
+    end)
   end
+
+  # a colour that is not one is dropped before the cascade, so an earlier declaration still
+  # applies (`color: green; color: invalidValue`)
+  defp invalid_color?(prop, v) when prop in ["color", "background-color"] and is_binary(v) do
+    lower = v |> String.trim() |> String.downcase()
+
+    not (lower in ~w(inherit initial unset revert) or String.contains?(lower, "var(") or
+           Browser.Color.parse_alpha(lower) != nil)
+  end
+
+  defp invalid_color?(_prop, _v), do: false
+
+  # a border or rule width is no percentage: such a declaration is dropped
+  defp percent_width?(prop, v) when is_binary(v) do
+    String.ends_with?(prop, "-width") and
+      (String.starts_with?(prop, "border-") or String.starts_with?(prop, "column-rule")) and
+      String.ends_with?(String.trim(v), "%")
+  end
+
+  defp percent_width?(_prop, _v), do: false
+
+  # a negative width, height, min/max size or padding is invalid: the declaration is dropped
+  # before the cascade, so an earlier value still applies
+  defp negative_size?(prop, "-" <> rest) when is_binary(rest) do
+    (prop in @non_negative or String.starts_with?(prop, "padding-")) and
+      match?({n, _} when n > 0, Float.parse(String.replace_prefix(rest, ".", "0.")))
+  end
+
+  defp negative_size?(_prop, _v), do: false
 
   # Shorthands become longhands so the cascade can order them against each
   # other. A shorthand whose value uses var() can't be split until the
@@ -373,6 +415,29 @@ defmodule Browser.Style do
       end
 
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  # `flex-flow: <direction> || <wrap>`: what is not given is the initial value
+  defp expand({"flex-flow", value, imp}) do
+    toks = value |> String.trim() |> String.downcase() |> tokens()
+    dir = Enum.find(toks, &(&1 in ~w(row row-reverse column column-reverse))) || "row"
+    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse))) || "nowrap"
+    [{"flex-direction", dir, imp}, {"flex-wrap", wrap, imp}]
+  end
+
+  # `place-content`/`place-items`/`place-self`: the alignment, then the justification (the
+  # alignment again when only one is given)
+  defp expand({"place-" <> what, value, imp}) when what in ~w(content items self) do
+    {a, j} =
+      case tokens(String.trim(value)) do
+        [a] -> {a, a}
+        [a, j | _] -> {a, j}
+        [] -> {"", ""}
+      end
+
+    if a == "",
+      do: [],
+      else: [{"align-" <> what, a, imp}, {"justify-" <> what, j, imp}]
   end
 
   # `columns: <width> || <count>`, in either order, either of them `auto`
@@ -428,7 +493,7 @@ defmodule Browser.Style do
   defp expand({prop, value, imp}) when is_map_key(@shorthands, prop) do
     longs = @shorthands[prop]
 
-    if String.contains?(value, "var(") do
+    if has_var?(value) do
       for long <- longs, do: {long, {:sh, prop, value, long}, imp}
     else
       for {long, v} <- split_shorthand(prop, value), do: {long, v, imp}
@@ -509,6 +574,11 @@ defmodule Browser.Style do
         do: {"border-#{side}-#{suffix}", val}
   end
 
+  defp do_split("column-rule", _v, toks) do
+    {w, st, c} = border_parts(toks)
+    [{"column-rule-width", w}, {"column-rule-style", st}, {"column-rule-color", c}]
+  end
+
   defp do_split("border-" <> side, _v, toks) when side in ~w(top right bottom left) do
     {w, st, c} = border_parts(toks)
     [{"border-#{side}-width", w}, {"border-#{side}-style", st}, {"border-#{side}-color", c}]
@@ -584,6 +654,34 @@ defmodule Browser.Style do
       _ ->
         []
     end
+  end
+
+  # the `dir` attribute sets the direction; `auto` takes it from the first strong letter
+  defp dir_hint(%{attrs: attrs} = ctx) do
+    case attrs |> attr("dir") |> String.downcase() do
+      d when d in ["ltr", "rtl"] -> [{"direction", d}]
+      "auto" -> [{"direction", auto_direction(Map.get(ctx, :kids, []))}]
+      _ -> []
+    end
+  end
+
+  defp auto_direction(kids) do
+    text =
+      kids
+      |> Stream.flat_map(fn
+        {:text, t} -> [t]
+        {:element, tag, _, k} when tag not in ["script", "style"] -> [auto_text(k)]
+        _ -> []
+      end)
+      |> Enum.join()
+
+    if Regex.match?(~r/^[^\p{L}]*[\p{Hebrew}\p{Arabic}\p{Syriac}\p{Thaana}]/u, text),
+      do: "rtl",
+      else: "ltr"
+  end
+
+  defp auto_text(kids) do
+    for {:text, t} <- kids, into: "", do: t
   end
 
   defp hints(%{tag: "input", attrs: attrs}) do
@@ -961,7 +1059,7 @@ defmodule Browser.Style do
     else
       ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
       {computed, custom} = compute(idx, ctx, parent)
-      computed = blockify_grid_item(computed, parent)
+      computed = computed |> blockify_grid_item(parent) |> flex_item_align(parent)
       root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
       ctx =
@@ -1178,6 +1276,13 @@ defmodule Browser.Style do
 
   defp blockify_grid_item(computed, _parent), do: computed
 
+  # `vertical-align` does not apply to flex items (they are blockified)
+  defp flex_item_align(computed, %{computed: %{"display" => d}})
+       when d in ["flex", "inline-flex"],
+       do: Map.delete(computed, "vertical-align")
+
+  defp flex_item_align(computed, _parent), do: computed
+
   # -> {computed_map, custom_properties}
   #
   # What an element computes to follows from what the cascade declared for it and what its parent
@@ -1237,7 +1342,7 @@ defmodule Browser.Style do
 
     {customs, normals} = Enum.split_with(decl, fn {k, _} -> String.starts_with?(k, "--") end)
 
-    custom = if customs == [], do: parent_custom, else: Map.merge(parent_custom, Map.new(customs))
+    custom = if customs == [], do: parent_custom, else: resolve_customs(customs, parent_custom)
 
     resolved = resolve_vars(normals, custom)
 
@@ -1277,7 +1382,7 @@ defmodule Browser.Style do
           end
       end
 
-    base = Map.merge(inherited, typed)
+    base = Map.merge(inherited, typed) |> size_containment(resolved, env)
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
@@ -1291,6 +1396,12 @@ defmodule Browser.Style do
         else: base
 
     base = if color, do: Map.put(base, "color", color), else: base
+
+    # the overflow of the root element, or of `<body>` when that has none, belongs to the
+    # viewport, which this browser always scrolls: neither box clips its own content
+    base =
+      if tag in ["html", "body"], do: Map.drop(base, ["overflow-x", "overflow-y"]), else: base
+
     # a fully transparent element (and, approximately, its subtree) takes space but isn't painted
     base =
       cond do
@@ -1302,6 +1413,54 @@ defmodule Browser.Style do
       end
 
     {base, custom}
+  end
+
+  # `contain: size` (or `strict`): the content does not size the box, `contain-intrinsic-*` does
+  # (zero when it is not given). Only the height of a block and a width asked for from the
+  # content are known here.
+  defp size_containment(base, resolved, env) do
+    contain = String.split(Map.get(resolved, "contain", ""))
+
+    if "size" in contain or "strict" in contain do
+      {iw, ih} = intrinsic_size(resolved, env)
+
+      base =
+        if Map.get(base, "height", :auto) == :auto, do: Map.put(base, "height", ih), else: base
+
+      if Map.get(base, "width") in [:maxc, :fit, :minc],
+        do: Map.put(base, "width", iw),
+        else: base
+    else
+      base
+    end
+  end
+
+  defp intrinsic_size(resolved, env) do
+    {w, h} =
+      case resolved |> Map.get("contain-intrinsic-size", "") |> intrinsic_lengths(env) do
+        [w, h] -> {w, h}
+        [w] -> {w, w}
+        _ -> {0.0, 0.0}
+      end
+
+    pick = fn key, default ->
+      case resolved |> Map.get(key, "") |> intrinsic_lengths(env) do
+        [v | _] -> v
+        _ -> default
+      end
+    end
+
+    w = pick.("contain-intrinsic-inline-size", w)
+    h = pick.("contain-intrinsic-block-size", h)
+    {pick.("contain-intrinsic-width", w), pick.("contain-intrinsic-height", h)}
+  end
+
+  # `none`, and the `auto` of `auto 10px` (the size last rendered), count for nothing
+  defp intrinsic_lengths(value, env) do
+    value
+    |> String.split()
+    |> Enum.reject(&(&1 in ["auto", "none"]))
+    |> Enum.map(&(length(&1, env) || 0.0))
   end
 
   # `opacity: 0` with a transition on opacity, on something that takes clicks: a scripted
@@ -1319,23 +1478,40 @@ defmodule Browser.Style do
       {prop, {:sh, short, raw, long}}, acc ->
         with {:ok, v} <- substitute(raw, custom, 0),
              {^long, val} <- List.keyfind(split_shorthand(short, v), long, 0) do
-          Map.put(acc, prop, normalize(val))
+          Map.put(acc, prop, normalize(prop, val))
         else
           _ -> acc
         end
 
       {prop, value}, acc ->
         case substitute(value, custom, 0) do
-          {:ok, v} -> Map.put(acc, prop, normalize(v))
+          {:ok, v} -> Map.put(acc, prop, normalize(prop, v))
           :error -> acc
         end
     end)
   end
 
-  # values are case-insensitive keywords, except the paths inside url()
-  defp normalize(v) do
+  # values are case-insensitive keywords, except the paths inside url() and quoted strings
+  # the text of a string is kept in `content`, `quotes` and the counter properties
+  @string_props ~w(content quotes counter-reset counter-increment counter-set list-style-type
+                   list-style)
+
+  defp normalize(prop, v) do
     v = String.trim(v)
-    if String.contains?(v, "url("), do: v, else: String.downcase(v)
+
+    cond do
+      prop in @string_props -> downcase_outside_strings(v)
+      String.contains?(v, "url(") -> v
+      true -> String.downcase(v)
+    end
+  end
+
+  defp downcase_outside_strings(v) do
+    ~r/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/is
+    |> Regex.split(v, include_captures: true)
+    |> Enum.map_join(fn part ->
+      if Regex.match?(~r/\A(?:"|'|url\()/i, part), do: part, else: String.downcase(part)
+    end)
   end
 
   # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone
@@ -1351,21 +1527,23 @@ defmodule Browser.Style do
     end
   end
 
+  defp has_var?(value), do: Regex.match?(~r/var\(/i, value)
+
   @doc false
   def substitute(value, _custom, depth) when depth > 16,
-    do: if(String.contains?(value, "var("), do: :error, else: {:ok, value})
+    do: if(has_var?(value), do: :error, else: {:ok, value})
 
   def substitute(value, custom, depth) do
-    case :binary.match(value, "var(") do
-      :nomatch ->
+    case Regex.run(~r/var\(/i, value, return: :index) do
+      nil ->
         {:ok, value}
 
-      {pos, 4} ->
+      [{pos, 4}] ->
         before = binary_part(value, 0, pos)
         rest = binary_part(value, pos + 4, byte_size(value) - pos - 4)
         {inner, after_} = take_parens(rest)
         {name, fallback} = split_comma(inner)
-        name = name |> String.trim() |> String.downcase()
+        name = name |> String.trim() |> Browser.CSS.unescape()
 
         replacement =
           case custom do
@@ -1380,6 +1558,90 @@ defmodule Browser.Style do
           {:ok, before <> " " <> String.trim(r) <> " " <> tail}
         end
     end
+  end
+
+  # Custom properties are computed per element: `var()` inside one is substituted against that
+  # element's own values, a cycle makes every property in it guaranteed-invalid (dropped), and
+  # `initial` / `inherit` / `unset` are taken literally. -> the custom properties in effect
+  defp resolve_customs(own, parent) do
+    own =
+      Map.new(own, fn {k, v} ->
+        case v |> String.trim() |> String.downcase() do
+          "initial" -> {k, :invalid}
+          kw when kw in ["inherit", "unset"] -> {k, Map.get(parent, k, :invalid)}
+          _ -> {k, v}
+        end
+      end)
+
+    refs =
+      Map.new(own, fn
+        {k, v} when is_binary(v) ->
+          names =
+            ~r/var\(\s*(--[^\s,)]*)/i
+            |> Regex.scan(v, capture: :all_but_first)
+            |> Enum.map(fn [n] -> Browser.CSS.unescape(n) end)
+
+          {k, Enum.filter(names, &is_map_key(own, &1))}
+
+        {k, _} ->
+          {k, []}
+      end)
+
+    cyclic = for k <- Map.keys(own), reaches?(refs, refs[k], k, MapSet.new()), do: k
+    own = Enum.reduce(cyclic, own, &Map.put(&2, &1, :invalid))
+
+    final =
+      settle(
+        own,
+        Map.drop(parent, Map.keys(own)),
+        parent,
+        Map.new(own, fn {k, _} -> {k, refs[k]} end)
+      )
+
+    Map.reject(final, fn {_, v} -> v == :invalid end)
+  end
+
+  # a substituted value that is a wide keyword acts as that keyword
+  defp wide_keyword(value, name, parent) do
+    case String.downcase(value) do
+      "initial" -> :invalid
+      kw when kw in ["inherit", "unset"] -> Map.get(parent, name, :invalid)
+      _ -> value
+    end
+  end
+
+  defp reaches?(_refs, [], _target, _seen), do: false
+
+  defp reaches?(refs, [n | rest], target, seen) do
+    cond do
+      n == target -> true
+      MapSet.member?(seen, n) -> reaches?(refs, rest, target, seen)
+      true -> reaches?(refs, refs[n] ++ rest, target, MapSet.put(seen, n))
+    end
+  end
+
+  # resolve what no longer waits on another own property, until nothing is left
+  defp settle(pending, done, _parent, _refs) when map_size(pending) == 0, do: done
+
+  defp settle(pending, done, parent, refs) do
+    ready = for {k, _} <- pending, Enum.all?(refs[k], &(not is_map_key(pending, &1))), do: k
+    ready = if ready == [], do: Map.keys(pending), else: ready
+
+    done =
+      Enum.reduce(ready, done, fn k, acc ->
+        case pending[k] do
+          v when is_binary(v) ->
+            case substitute(v, Map.reject(acc, fn {_, x} -> x == :invalid end), 0) do
+              {:ok, r} -> Map.put(acc, k, wide_keyword(String.trim(r), k, parent))
+              :error -> Map.put(acc, k, :invalid)
+            end
+
+          other ->
+            Map.put(acc, k, other)
+        end
+      end)
+
+    settle(Map.drop(pending, ready), done, parent, refs)
   end
 
   # `rest` follows an opening paren: -> {inside, after_closing_paren}
@@ -1450,6 +1712,28 @@ defmodule Browser.Style do
   defp typed(prop, "auto", _env, _pc) when prop in ["width", "height"], do: {:ok, :auto}
 
   # fit-content: as wide as the content wants (a block that sizes itself like an inline-block)
+  defp typed("width", "min-content", _env, _pc), do: {:ok, :minc}
+  defp typed("width", "max-content", _env, _pc), do: {:ok, :maxc}
+
+  # stretch: fill the containing block; a block already does, so layout only looks at it for
+  # boxes that would otherwise shrink to fit
+  defp typed(prop, v, _env, _pc)
+       when prop in ["width", "min-width"] and
+              v in ["stretch", "-webkit-fill-available", "-moz-available"],
+       do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
+
+  # fit-content(<length-percentage>): as wide as the content, but at least its narrowest and
+  # at most the length
+  defp typed("width", "fit-content(" <> rest, env, _pc) do
+    arg = rest |> String.trim_trailing(")") |> String.trim()
+
+    cond do
+      pct = percentage(arg) -> {:ok, {:fitc, {:pct, pct}}}
+      px = length(arg, env) -> {:ok, {:fitc, px}}
+      true -> :skip
+    end
+  end
+
   defp typed(prop, v, _env, _pc)
        when prop in ["width", "height", "max-height"] and
               v in [
@@ -1467,6 +1751,7 @@ defmodule Browser.Style do
         case Browser.Calc.eval(v, &unit_px(&1, env)) do
           {:ok, {:pct, f}} -> {:ok, {:pct, f}}
           {:ok, {:px, n}} -> {:ok, n}
+          {:ok, {:calc, _, _} = mixed} when prop in ~w(width min-width max-width) -> {:ok, mixed}
           _ -> :skip
         end
 
@@ -1481,8 +1766,10 @@ defmodule Browser.Style do
     end
   end
 
-  @border_widths ~w(border-top-width border-right-width border-bottom-width border-left-width)
-  @border_colors ~w(border-top-color border-right-color border-bottom-color border-left-color)
+  @border_widths ~w(border-top-width border-right-width border-bottom-width border-left-width
+                    column-rule-width)
+  @border_colors ~w(border-top-color border-right-color border-bottom-color border-left-color
+                    column-rule-color)
 
   defp typed(prop, v, env, _pc) when prop in @border_widths do
     px =
@@ -1540,7 +1827,12 @@ defmodule Browser.Style do
 
   defp typed(prop, v, env, _pc) when prop in ["row-gap", "column-gap"] do
     px = if v == "normal", do: 0.0, else: length(v, env)
-    if px && px >= 0, do: {:ok, px}, else: :skip
+
+    cond do
+      px && px >= 0 -> {:ok, px}
+      pct = percentage(v) -> if pct >= 0, do: {:ok, {:pct, pct}}, else: :skip
+      true -> :skip
+    end
   end
 
   defp typed("column-count", v, _env, _pc) do
@@ -1577,16 +1869,43 @@ defmodule Browser.Style do
   defp typed("background-image", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_images(v)}
   defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
 
-  defp typed("background-position", v, _env, _pc),
-    do: {:ok, Browser.Backgrounds.parse_position(v)}
+  defp typed("background-position", v, env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_position(font_units_to_px(v, env))}
 
-  defp typed("background-size", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_size(v)}
+  defp typed("background-size", v, env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_size(font_units_to_px(v, env))}
 
   defp typed("box-shadow", "none", _env, _pc), do: {:ok, []}
 
   defp typed("box-shadow", v, env, _pc) do
     {r, g, b} = if match?({_, _, _}, env.color), do: env.color, else: {0, 0, 0}
     {:ok, Browser.Shadows.parse(v, env.fs, {r, g, b, 255})}
+  end
+
+  # a length or percentage; the keywords stay as they are
+  defp typed("vertical-align", v, env, _pc) do
+    cond do
+      px = length(v, env) -> {:ok, px}
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> {:ok, v}
+    end
+  end
+
+  defp typed(prop, "normal", _env, _pc) when prop in ["letter-spacing", "word-spacing"],
+    do: {:ok, 0.0}
+
+  defp typed("word-spacing", v, env, _pc) do
+    if px = length(v, env), do: {:ok, px}, else: :skip
+  end
+
+  # a percentage is of the font size, as the em it is a hundredth of; it stays one when
+  # inherited, and each element takes its own font size
+  defp typed("letter-spacing", v, env, _pc) do
+    cond do
+      px = length(v, env) -> {:ok, px}
+      pct = percentage(v) -> {:ok, {:pct, pct}}
+      true -> :skip
+    end
   end
 
   defp typed("text-indent", v, env, _pc) do
@@ -1616,6 +1935,28 @@ defmodule Browser.Style do
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
 
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
+
+  # `em` in a background's position or size is the element's font size
+  # em and ch lengths of a background position or size, as pixels
+  defp font_units_to_px(v, env) do
+    ch = env.fs * Map.get(env, :ch, 0.6)
+
+    v
+    |> ems_to_px(env.fs)
+    |> then(
+      &Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i, &1, fn _, n ->
+        {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
+        "#{Float.round(f * ch, 3)}px"
+      end)
+    )
+  end
+
+  defp ems_to_px(v, fs) do
+    Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))em\b/i, v, fn _, n ->
+      {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
+      "#{Float.round(f * fs, 3)}px"
+    end)
+  end
 
   defp radius_pair(h, v) do
     if valid_radius?(h) and valid_radius?(v), do: {:ok, {h, v}}, else: :skip

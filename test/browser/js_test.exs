@@ -303,6 +303,97 @@ defmodule Browser.JSTest do
                "30,2,4"
     end
 
+    test "strings are measured in UTF-16 code units, with lone surrogates" do
+      assert js("'😀'.length") == 2.0
+      assert js("'😀'[0] === '\\uD83D' && '😀'[1] === '\\uDE00'") == true
+      assert js("'\\uD83D' + '\\uDE00' === '😀'") == true
+      assert js("'😀'.codePointAt(1)") == 56_832.0
+      assert js("'😀'.charCodeAt(0)") == 55_357.0
+      assert js("'\\u{10000}' >= '\\uFFFF'") == false
+      assert js("'a😀b'.indexOf('b')") == 3.0
+      assert js("'\\uD83D'.isWellFormed()") == false
+      assert js("'a\\uD83Db'.toWellFormed()") == "a�b"
+      assert js("'a😀\\uD83D'.toWellFormed()") == "a😀\uFFFD"
+      assert js("[...'a😀b'.matchAll(/(?:)/gu)].length") == 4.0
+      assert js("JSON.stringify('\\uD83D')") == ~s("\\ud83d")
+      assert js("JSON.parse('\"\\\\ud834\"').length") == 1.0
+      assert js("String.fromCharCode(0xD83D, 0xDE00) === '😀'") == true
+    end
+
+    test "a string written with an escape is not a use strict directive" do
+      assert js("(function(){ 'use str\\\nict'; return this === undefined })()") == false
+      assert js("(function(){ 'use\\x20strict'; return this === undefined })()") == false
+      assert js("(function(){ 'use strict'; return this === undefined })()") == true
+    end
+
+    test "let and const names are in their dead zone from the start of a function" do
+      assert js("function g(){ x = 1; let x; } try { g(); 'no' } catch (e) { e.name }") ==
+               "ReferenceError"
+    end
+
+    test "an escaped await or yield is a plain name outside async and generator code" do
+      assert js("var r; aw\\u0061it: r = 1; r") == 1.0
+      assert js("var yi\\u0065ld = 4; yield") == 4.0
+    end
+
+    test "parseInt stops at a non-digit even if it upper-cases to letters" do
+      assert js("parseInt('1Z\\u00DF', 36)") == 71.0
+    end
+
+    test "Function.prototype.toString gives the source text" do
+      assert js("function foo ( a , b ) { return a /* c */ }; foo.toString()") ==
+               "function foo ( a , b ) { return a /* c */ }"
+
+      assert js("var f = async (a) => a + 1; f.toString()") == "async (a) => a + 1"
+
+      assert js(
+               "var o = { get g(){ return 2 }, async *ag(){} }; " <>
+                 "[Object.getOwnPropertyDescriptor(o,'g').get, o.ag].map(String).join('|')"
+             ) ==
+               "get g(){ return 2 }|async *ag(){}"
+
+      assert js("class A { static s(){ } }; [String(A), String(A.s)].join('|')") ==
+               "class A { static s(){ } }|s(){ }"
+
+      assert js("String(Math.max)") == "function max() { [native code] }"
+    end
+
+    test "in is no operator in a for head, except inside brackets" do
+      assert js("var n = 0; for (var i = ('a' in {a: 1}) ? 1 : 0; i < 2; i++) n++; n") == 1.0
+
+      assert js(
+               "var r = []; for (var k = [1 in [0, 1]][0]; false; ) ; var o = {x: 1}; for (var p in o) r.push(p); r.join()"
+             ) == "x"
+
+      assert js("for (var i = 0; 'q' in {q: 1} ? false : false; ) ; 'ok'") == "ok"
+    end
+
+    test "own keys come in creation order, hidden ones included" do
+      assert js("class C { static m(){} static x = 1 }; Reflect.ownKeys(C).join()") ==
+               "length,name,prototype,m,x"
+
+      assert js("var re = /(?:)/g; re.a = 1; Reflect.ownKeys(re).join()") == "lastIndex,a"
+    end
+
+    test "a typed array with elements cannot be frozen or sealed" do
+      assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("try { Object.seal(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
+               "TypeError"
+
+      assert js("Object.isFrozen(Object.freeze(new Uint8Array(0)))") == true
+    end
+
+    test "a combining mark is a character of its own" do
+      assert js(
+               "var s = 'e\\u0301x'; [s.length, s.charCodeAt(1), s[2], s.slice(1, 2).length].join()"
+             ) ==
+               "3,769,x,1"
+
+      assert js("'\\u00e9'.normalize('NFD').length") == 2.0
+    end
+
     test "string methods" do
       assert js("'abc'.toUpperCase().padStart(6, '*')") == "***ABC"
       assert js("'a-b-c'.split('-').length") == 3.0
@@ -672,6 +763,42 @@ defmodule Browser.JSTest do
              """) == ["a,b", "a,b,c,d,e,then r"]
     end
 
+    test "an await after a short-circuiting ?. never runs" do
+      assert logs_of("""
+             var o = { b: { c(x) { return this === o.b ? x + 1 : -1 } } };
+             async function f() {
+               var u;
+               console.log(await o?.b.c(await 2));
+               console.log(u?.b.c(await Promise.reject(1)));
+               console.log(await u?.[await Promise.reject(1)]);
+               console.log(o?.['b']?.c(await 5));
+             }
+             f().then(() => console.log('done'));
+             """) == ["3", "undefined", "undefined", "6", "done"]
+    end
+
+    test "operands before an await are evaluated before it" do
+      assert logs_of("""
+             var log = [];
+             function m(x) { log.push(x); return x }
+             var total = 10;
+             async function f() {
+               m('a') + (await m('b')) + m('c'); log.push('|');
+               m('d'), await null, m('e'); log.push('|');
+               [m(1), await m(2), m(3)]; log.push('|');
+               ({ a: m(4), b: await m(5) }); log.push('|');
+               `${m(7)}${await m(8)}`; log.push('|');
+               ({ [m('k1')]: m(9), [await m('k2')]: m(10) }); log.push('|');
+               m(6)(await 0);
+             }
+             f().catch(() => 0).then(() => console.log(log.join('')));
+             async function g() { total += await Promise.resolve(5) }
+             total = 100;
+             g().then(() => console.log(total));
+             total = 1000;
+             """) == ["105", "abc|de|123|45|78|k19k210|6"]
+    end
+
     test "await inside loops, try, switch, labels and expressions" do
       assert logs_of("""
              async function g(n) { let s = 0; for (let i = 0; i < n; i++) { s += await i } return s }
@@ -875,6 +1002,95 @@ defmodule Browser.JSTest do
              ) == "functionundefinedtrue"
     end
 
+    test "escaped static and async are names; parenthesized targets do not name functions" do
+      assert js("var st\\u0061tic = 2; { let st\\u0061tic = 3; } static") == 2.0
+
+      assert js("var f; (f) = function() {}; var g; g = function() {}; f.name + '|' + g.name") ==
+               "|g"
+    end
+
+    test "indexed setters on a prototype run for holes and the arguments of non-simple functions are unmapped" do
+      assert js("""
+             var l = [];
+             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l.push(v) }, configurable: true});
+             var a = [, 1]; a[0] = 5;
+             delete Object.prototype[0];
+             l.join() + '|' + a.hasOwnProperty(0)
+             """) == "5|false"
+
+      assert js(
+               "function f(a, b = 1) { a = 7; return arguments[0] + ',' + typeof Object.getOwnPropertyDescriptor(arguments, 'callee').get } f(1)"
+             ) ==
+               "1,function"
+    end
+
+    test "shorthand await is reserved in a static block but not in an arrow inside it" do
+      assert {:error, _, _} = JS.eval("class C { static { ({ await }); } }")
+      assert {:ok, _, _} = JS.eval("class C { static { (() => ({ await })); } }")
+    end
+
+    test "arguments length is an ordinary property" do
+      assert js("function f() { arguments.length = 'x'; return arguments.length } f(1)") == "x"
+
+      assert js(
+               "function f() { delete arguments.length; return String(Object.prototype.hasOwnProperty.call(arguments, 'length')) } f(1)"
+             ) == "false"
+    end
+
+    test "an assignment resolves its target before the right-hand side" do
+      assert js(
+               "var x = 0; var inner = (function() { x = (eval('var x;'), 1); return x })(); inner + ',' + x"
+             ) ==
+               "undefined,1"
+
+      assert js("""
+             var o = {y: 1}; var r;
+             with (o) { (function() { 'use strict'; try { y = (delete o.y, 2) } catch (e) { r = e.name } })() }
+             r
+             """) == "ReferenceError"
+    end
+
+    test "eval function over a configurable global property" do
+      assert js("""
+             Object.defineProperty(this, 'ef', {enumerable: false, writable: false, configurable: true});
+             eval('function ef() { return 3 }');
+             var d = Object.getOwnPropertyDescriptor(this, 'ef');
+             [d.writable, d.enumerable, d.configurable, ef()].join()
+             """) == "true,true,true,3"
+    end
+
+    test "constructors check arguments before reading new.target.prototype" do
+      assert js("""
+             var nt = Object.defineProperty(function() {}.bind(null), 'prototype', {get() { throw new Error('proto') }});
+             var r = [];
+             try { Reflect.construct(Promise, [], nt) } catch (e) { r.push(e.constructor === TypeError) }
+             try { Reflect.construct(ArrayBuffer, [10, {maxByteLength: 0}], nt) } catch (e) { r.push(e.constructor === RangeError) }
+             try { Reflect.construct(ArrayBuffer, [1], nt) } catch (e) { r.push(e.message) }
+             r.join()
+             """) == "true,true,proto"
+    end
+
+    test "async generator return() awaits at the yield" do
+      assert {:ok, _, lines} =
+               JS.eval("""
+               var p = Promise.resolve(42);
+               Object.defineProperty(p, 'constructor', {get() { throw new Error('broken') }});
+               async function* g() { try { yield; } catch (e) { return e.message } }
+               var it = g();
+               it.next().then(() => it.return(p)).then(r => console.log(r.value + ',' + r.done));
+               """)
+
+      assert [log: "broken,true"] == lines
+    end
+
+    test "an error from return() replaces a return inside for-of" do
+      assert js("""
+             var it = {[Symbol.iterator]() { return this }, next() { return {done: false} }, return() { throw new RangeError('close') }};
+             function f() { for (var x of it) { return 1 } }
+             try { f() } catch (e) { e.name }
+             """) == "RangeError"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
@@ -963,6 +1179,16 @@ defmodule Browser.JSTest do
   end
 
   describe "classes" do
+    test "arguments in typeof, var and delete" do
+      assert js("function f() { return typeof arguments } f()") == "object"
+      assert js("function f() { var arguments; return typeof arguments } f()") == "object"
+
+      assert js("function f() { return [delete arguments, typeof arguments].join() } f()") ==
+               "false,object"
+
+      assert js("typeof arguments") == "undefined"
+    end
+
     test "constructors, methods, accessors and statics" do
       assert js(
                "class A { constructor(x) { this.x = x } get double() { return this.x * 2 } static make(n) { return new A(n) } add(n) { return this.x + n } } var a = A.make(4); [a.x, a.double, a.add(1), a instanceof A, typeof A].join()"
@@ -1344,7 +1570,10 @@ defmodule Browser.JSTest do
             "a: b: while (1) { continue a; break b }",
             "a: { break a }",
             "switch (1) { case 1: break }",
-            "x: ; x: ;"
+            "x: ; x: ;",
+            # a label right after else/if (React's scheduler is minified like this)
+            "if (a) b(); else l: switch (1) { case 1: break l }",
+            "if (a) l: { break l }"
           ] do
         assert {:ok, _} = Browser.JS.Parser.parse(src), src
       end
@@ -1390,5 +1619,116 @@ defmodule Browser.JSTest do
                "var fs = []; for (let i = 0; i < 3; fs.push(() => i), i++) {} fs.map(f => f()).join()"
              ) == "1,2,3"
     end
+  end
+
+  describe "decorators" do
+    test "method, field, accessor and class decorators run and may replace their targets" do
+      src = """
+      var log = [];
+      function dm(v, ctx) {
+        log.push(ctx.kind + ":" + ctx.name);
+        ctx.addInitializer(function () { log.push("init " + ctx.name); });
+        return function (...a) { return "wrapped " + v.apply(this, a); };
+      }
+      function df(v, ctx) { return function (x) { return x * 2; }; }
+      function da(v, ctx) { return { get() { return v.get.call(this) + 1; }, init(x) { return x + 10; } }; }
+      function dc(C, ctx) { log.push("class " + ctx.name); return class extends C { extra() { return 1; } }; }
+      @dc class A {
+        @dm m() { return "m"; }
+        @df f = 21;
+        @da accessor acc = 5;
+        accessor plain = 3;
+      }
+      var a = new A();
+      [a.m(), a.f, a.acc, a.extra(), log.join(",")].join("|");
+      """
+
+      assert js(src) == "wrapped m|42|16|1|method:m,class A,init m"
+    end
+
+    test "an auto-accessor is a getter and setter over private storage" do
+      assert js(
+               "class C { accessor x = 1; static accessor y = 2 } var c = new C(); c.x = 5; c.x + C.y"
+             ) ==
+               7.0
+    end
+
+    test "a decorator that is not a function is a TypeError" do
+      assert {:uncaught, "TypeError: Decorator must be a function"} =
+               error("var d = 1; class C { @d m() {} }")
+    end
+  end
+
+  describe "syntax bundlers produce" do
+    test "`of` as the name of a variable" do
+      assert js("'use strict'; let of = 3; of + 1") == 4.0
+    end
+
+    test "a regular expression after the parenthesis of if, for, while and with" do
+      assert js("var n = 0; for (var i = 0; i < 2; i++) /a/.test('a') && n++; n") == 2.0
+      assert js("var n = 0; if (true) /a/.test('a') && n++; n") == 1.0
+      assert js("var i = 0, n = 0; while (i++ < 3) /a/.test('a') && n++; n") == 3.0
+      # a division after the parenthesis of a call or a group stays a division
+      assert js("var a = 8, b = 2, g = 1; (a) / b / g") == 4.0
+    end
+  end
+
+  describe "round 45 early errors and with references" do
+    test "await is reserved in the parameters of arrows inside async code" do
+      assert {:error, {:syntax, _}, _} = JS.eval("async(a = await => {}) => {}")
+      assert {:error, {:syntax, _}, _} = JS.eval("async () => { (a = await 1) => {} }")
+
+      assert js("var f = async () => { var g = (a = 1) => a; return g() }; typeof f") ==
+               "function"
+    end
+
+    test "a strict read or write of a binding removed while unscopables are read is a ReferenceError" do
+      src = """
+      var env = { binding: 0, get [Symbol.unscopables]() { delete env.binding; return null; } };
+      var r = "";
+      with (env) {
+        try { (function() { "use strict"; return binding })() } catch (e) { r += e.constructor.name }
+      }
+      env.binding = 0;
+      with (env) {
+        try { (function() { "use strict"; binding = 1 })() } catch (e) { r += e.constructor.name }
+      }
+      r
+      """
+
+      assert js(src) == "ReferenceErrorReferenceError"
+    end
+
+    test "a var target of a destructuring is looked up before the value is read" do
+      src = """
+      var log = [];
+      var env = new Proxy({}, { has(t, k) { log.push(String(k)); return false } });
+      var src = { get p() { log.push("get"); return 1 } };
+      var t;
+      with (env) { var { p: t } = src; }
+      log.indexOf("t") < log.indexOf("get")
+      """
+
+      assert js(src) == true
+    end
+  end
+
+  test "an array whose prototype is a typed array does not create an index outside it" do
+    src = """
+    var ta = new Int32Array(1);
+    var a = Object.setPrototypeOf([], ta);
+    a[1] = 5; a[0] = 7;
+    [a.hasOwnProperty(1), a.hasOwnProperty(0), a.length].join()
+    """
+
+    assert js(src) == "false,true,1"
+  end
+
+  test "a global let hides a built-in without removing the property of the global object" do
+    assert js("let Array; typeof this.Array + typeof Array") == "functionundefined"
+  end
+
+  test "an escaped let followed by a name on the next line is an expression statement" do
+    assert js("var l\\u0065t = 1; l\\u0065t\nvar a = 2; a + let") == 3.0
   end
 end

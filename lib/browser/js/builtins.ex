@@ -77,7 +77,7 @@ defmodule Browser.JS.Builtins do
   # indirect eval and the Function constructor: global code, so no `super` or `new.target`
   defp eval_source(src) do
     case Browser.JS.Parser.parse(src, eval: true) do
-      {:ok, program} -> Interp.run_program(program)
+      {:ok, program} -> Interp.indirect_eval(program)
       {:error, msg} -> throw_error("SyntaxError", msg)
     end
   end
@@ -141,7 +141,9 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  defp error_object?({:obj, id}), do: inherits_error?(deref(id).proto)
+  # an error prototype itself has no error data
+  defp error_object?({:obj, id} = o),
+    do: inherits_error?(deref(id).proto) and o not in Enum.map(@error_types, &proto({:error, &1}))
 
   defp inherits_error?({:obj, id} = p),
     do: p == proto({:error, "Error"}) or inherits_error?(deref(id).proto)
@@ -228,9 +230,8 @@ defmodule Browser.JS.Builtins do
              put_hidden(err, "suppressed", sup)
            end
 
-           put_hidden(
+           Interp.set_stack(
              err,
-             "stack",
              Interp.stack_string(t <> if(msg == :undefined, do: "", else: ": " <> msg))
            )
 
@@ -241,6 +242,16 @@ defmodule Browser.JS.Builtins do
       end
 
     error_ctor = ctors |> List.keyfind("Error", 0) |> elem(1)
+
+    stack_of =
+      native("stackOf", fn _, [{:obj, id}] -> Map.get(deref(id), :stack_str, :undefined) end)
+
+    put_hidden(
+      error_proto,
+      "stack",
+      {:accessor, Browser.JS.Prelude.stack_accessor(:get, stack_of),
+       Browser.JS.Prelude.stack_accessor(:set, error_proto)}
+    )
 
     # the other error constructors inherit from Error
     for {t, {:obj, id}} <- ctors, t != "Error", do: store(id, %{deref(id) | proto: error_ctor})
@@ -294,11 +305,26 @@ defmodule Browser.JS.Builtins do
 
   defp install_object(scope, object_proto) do
     obj =
-      constructor(scope, "Object", object_proto, fn _, args ->
+      constructor(scope, "Object", object_proto, fn this, args ->
+        # `new` on a subclass (new.target is not Object) makes an object of that class
+        constructing = Process.delete(:js_native_new)
+
+        subclass? =
+          constructing == this and match?({:obj, _}, this) and
+            deref(elem(this, 1)).proto not in [nil, object_proto]
+
         case arg(args, 0) do
-          {:obj, _} = o -> o
-          v when v in [:undefined, :null] -> new_object()
-          v -> box(v)
+          _ when subclass? ->
+            this
+
+          {:obj, _} = o ->
+            o
+
+          v when v in [:undefined, :null] ->
+            new_object()
+
+          v ->
+            box(v)
         end
       end)
 
@@ -407,12 +433,13 @@ defmodule Browser.JS.Builtins do
 
   # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
   defp fast_array?(this, extra \\ 0) do
-    plain_array?(this) and
+    # an element on Array.prototype shows through holes and can run setters: take the generic path
+    plain_array?(this) and Map.get(deref(elem(proto(:array), 1)), :items, %{}) == %{} and
       elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
   end
 
   @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
-                       findLastIndex flatMap)
+                       findLastIndex)
 
   # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
   # species constructor
@@ -503,8 +530,7 @@ defmodule Browser.JS.Builtins do
     # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
     {:obj, pid} = p
     po = deref(pid)
-    attrs = Map.put(Map.get(po, :attrs, %{}), "length", %{w: true, c: false, e: false})
-    store(pid, po |> Map.put(:props, Map.put(po.props, "length", 0.0)) |> Map.put(:attrs, attrs))
+    store(pid, po |> Map.put(:class, :array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
 
     array_fn(p, "push", fn this, args ->
       if fast_array?(this, length(args)) do
@@ -640,7 +666,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     array_fn(p, "reverse", fn this, _ ->
-      if fast_array?(this) and not has_holes?(this) do
+      if fast_array?(this) and not has_holes?(this) and not has_accessors?(this) do
         put_elems(this, Enum.reverse(elems(this)))
         this
       else
@@ -681,18 +707,17 @@ defmodule Browser.JS.Builtins do
 
     array_fn(p, "flat", fn this, args ->
       depth = if arg(args, 0) == :undefined, do: 1, else: to_int(arg(args, 0))
+      source = pairs(this)
       target = species_target(this, 0)
-      new_array(flatten(elems(this), depth)) |> species_fill_from(target, false)
+      new_array(flatten(source, depth, nil)) |> species_fill_from(target, false)
     end)
 
     array_fn(p, "flatMap", fn this, args ->
+      source = pairs(this)
       f = callable!(arg(args, 0))
       target = species_target(this, 0)
-
-      mapped =
-        for {i, v} <- pairs(this), do: call(f, arg(args, 1), [v, float(i), this])
-
-      new_array(flatten(mapped, 1)) |> species_fill_from(target, false)
+      mapper = fn i, v -> call(f, arg(args, 1), [v, float(i), this]) end
+      new_array(flatten(source, 1, mapper)) |> species_fill_from(target, false)
     end)
 
     array_fn(p, "forEach", fn this, args ->
@@ -892,6 +917,9 @@ defmodule Browser.JS.Builtins do
     map_size(o.items) != o.len
   end
 
+  defp has_accessors?({:obj, id}),
+    do: Enum.any?(deref(id).items, fn {_, v} -> match?({:accessor, _, _}, v) end)
+
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
   defp pairs(this, dir \\ :asc, from \\ nil) do
@@ -950,31 +978,30 @@ defmodule Browser.JS.Builtins do
 
   defp reduce(this, f, rest, right?) do
     stream = pairs(this, if(right?, do: :desc, else: :asc))
+    init = if rest == [], do: :none, else: {:ok, hd(rest)}
 
-    {acc, stream} =
-      case rest do
-        [init | _] ->
-          {init, stream}
+    # one pass: the first element read is the accumulator when no initial value was given
+    result =
+      Enum.reduce(stream, init, fn
+        {_i, v}, :none -> {:ok, v}
+        {i, v}, {:ok, acc} -> {:ok, call(f, :undefined, [acc, v, float(i), this])}
+      end)
 
-        [] ->
-          case Enum.take(stream, 1) do
-            [{first_i, v}] ->
-              {v,
-               Stream.drop_while(stream, fn {i, _} ->
-                 if right?, do: i >= first_i, else: i <= first_i
-               end)}
-
-            [] ->
-              throw_error("TypeError", "Reduce of empty array with no initial value")
-          end
-      end
-
-    Enum.reduce(stream, acc, fn {i, v}, acc -> call(f, :undefined, [acc, v, float(i), this]) end)
+    case result do
+      {:ok, acc} -> acc
+      :none -> throw_error("TypeError", "Reduce of empty array with no initial value")
+    end
   end
 
-  defp flatten(list, depth) do
-    Enum.flat_map(list, fn v ->
-      if array?(v) and depth > 0, do: flatten(array_list(v), depth - 1), else: [v]
+  # FlattenIntoArray over the present elements of `source` ({index, value} pairs); a nested
+  # array-like is read through its own `length` and element accessors
+  defp flatten(source, depth, mapper) do
+    Enum.flat_map(source, fn {i, v} ->
+      v = if mapper, do: mapper.(i, v), else: v
+
+      if depth > 0 and Browser.JS.Proxy.is_array(v),
+        do: flatten(pairs(v), depth - 1, nil),
+        else: [v]
     end)
   end
 
@@ -983,6 +1010,7 @@ defmodule Browser.JS.Builtins do
   defp install_primitives(scope) do
     # the prototypes are themselves a String, a Number and a Boolean
     wrap(proto(:string), "")
+    put_const(proto(:string), "length", 0.0)
     wrap(proto(:number), 0.0)
     wrap(proto(:boolean), false)
 
@@ -1003,7 +1031,7 @@ defmodule Browser.JS.Builtins do
           end
 
         if wrapper_target?(this, :string) do
-          put_const(this, "length", float(String.length(s)))
+          put_const(this, "length", float(Str.length(s)))
           wrap(this, s)
         else
           s
@@ -1030,22 +1058,28 @@ defmodule Browser.JS.Builtins do
 
       subs = Enum.drop(args, 1)
 
-      Enum.map_join(0..(count - 1)//1, fn i ->
-        piece = to_str(Interp.get(raw, Integer.to_string(i)))
-        if i < count - 1 and i < length(subs), do: piece <> to_str(Enum.at(subs, i)), else: piece
-      end)
+      Str.join(
+        Enum.map(0..(count - 1)//1, fn i ->
+          piece = to_str(Interp.get(raw, Integer.to_string(i)))
+
+          if i < count - 1 and i < length(subs),
+            do: Str.cat(piece, to_str(Enum.at(subs, i))),
+            else: piece
+        end)
+      )
     end)
 
     def_fn(str, "fromCodePoint", fn _, args ->
-      Enum.map_join(args, fn v ->
+      Enum.map(args, fn v ->
         n = to_num(v)
 
         unless is_number(n) and n == trunc(n) and n >= 0 and n <= 0x10FFFF,
           do: throw_error("RangeError", "Invalid code point #{to_str(v)}")
 
         n = trunc(n)
-        if n in 0xD800..0xDFFF, do: "\uFFFD", else: <<n::utf8>>
+        Str.from_units(if n >= 0x10000, do: pair(n), else: [n])
       end)
+      |> Str.join()
     end)
 
     # UTF-16 code units: a surrogate pair is one character, a lone surrogate cannot be kept
@@ -1149,7 +1183,7 @@ defmodule Browser.JS.Builtins do
   defp uri_decode("", _, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp uri_decode(<<"%", h::binary-size(2), rest::binary>>, keep, acc) do
-    with {:ok, <<b>>} <- Base.decode16(h, case: :mixed) do
+    with {:ok, b} <- hex_byte(h) do
       if b < 0x80 do
         if b in keep,
           do: uri_decode(rest, keep, [<<"%", h::binary>> | acc]),
@@ -1173,11 +1207,23 @@ defmodule Browser.JS.Builtins do
   defp uri_decode(<<c::utf8, rest::binary>>, keep, acc),
     do: uri_decode(rest, keep, [<<c::utf8>> | acc])
 
+  defp uri_decode(<<b, rest::binary>>, keep, acc), do: uri_decode(rest, keep, [<<b>> | acc])
+
+  # two hex digits to a byte (`Base.decode16` raises and rescues on bad input: slow)
+  defp hex_byte(<<a, b>>) do
+    with x when x != nil <- hex_digit(a), y when y != nil <- hex_digit(b), do: {:ok, x * 16 + y}
+  end
+
+  defp hex_digit(c) when c in ?0..?9, do: c - ?0
+  defp hex_digit(c) when c in ?a..?f, do: c - ?a + 10
+  defp hex_digit(c) when c in ?A..?F, do: c - ?A + 10
+  defp hex_digit(_), do: nil
+
   defp uri_continuation(rest, 0, acc), do: {Enum.reverse(acc), rest}
 
   defp uri_continuation(<<"%", h::binary-size(2), rest::binary>>, n, acc) do
-    case Base.decode16(h, case: :mixed) do
-      {:ok, <<b>>} when b in 0x80..0xBF -> uri_continuation(rest, n - 1, [<<b>> | acc])
+    case hex_byte(h) do
+      {:ok, b} when b in 0x80..0xBF -> uri_continuation(rest, n - 1, [<<b>> | acc])
       _ -> throw_error("URIError", "URI malformed")
     end
   end
@@ -1207,7 +1253,7 @@ defmodule Browser.JS.Builtins do
     if radix < 2 or radix > 36 do
       :nan
     else
-      digits = s |> String.upcase() |> String.to_charlist() |> Enum.take_while(&digit?(&1, radix))
+      digits = s |> :binary.bin_to_list() |> Enum.take_while(&digit?(&1, radix))
 
       case digits do
         [] -> :nan
@@ -1221,6 +1267,7 @@ defmodule Browser.JS.Builtins do
       cond do
         c in ?0..?9 -> c - ?0
         c in ?A..?Z -> c - ?A + 10
+        c in ?a..?z -> c - ?a + 10
         true -> 99
       end
 
@@ -1304,7 +1351,7 @@ defmodule Browser.JS.Builtins do
   @doc false
   def box(v) when is_binary(v) do
     o = new_object([], proto(:string))
-    put_const(o, "length", float(String.length(v)))
+    put_const(o, "length", float(Str.length(v)))
     wrap(o, v)
   end
 
@@ -1317,10 +1364,15 @@ defmodule Browser.JS.Builtins do
   # of the right prototype, which becomes the wrapper
   defp wrapper_target?({:obj, id}, kind) do
     o = deref(id)
-    not Map.has_key?(o, :prim) and o.proto == proto(kind)
+    not Map.has_key?(o, :prim) and inherits_from?(o.proto, proto(kind))
   end
 
   defp wrapper_target?(_, _), do: false
+
+  # a subclass instance has the subclass prototype, which inherits from the wrapper's
+  defp inherits_from?(p, target) when p == target, do: true
+  defp inherits_from?({:obj, id}, target), do: inherits_from?(deref(id).proto, target)
+  defp inherits_from?(_, _), do: false
 
   defp wrap({:obj, id} = o, prim) do
     store(id, Map.put(deref(id), :prim, prim))
@@ -1379,14 +1431,14 @@ defmodule Browser.JS.Builtins do
     str_fn(p, "charCodeAt", fn this, args ->
       case Str.at(this, to_int(arg(args, 0))) do
         nil -> :nan
-        <<c::utf8, _::binary>> -> float(c)
+        u -> float(Str.code_unit_at(u, 0))
       end
     end)
 
     str_fn(p, "codePointAt", fn this, args ->
-      case Str.at(this, to_int(arg(args, 0))) do
+      case Str.code_point_at(this, to_int(arg(args, 0))) do
         nil -> :undefined
-        <<c::utf8, _::binary>> -> float(c)
+        c -> float(c)
       end
     end)
 
@@ -1399,8 +1451,8 @@ defmodule Browser.JS.Builtins do
       needle = to_str(arg(args, 0))
 
       positions =
-        for i <- 0..max(String.length(this) - String.length(needle), 0)//1,
-            cp_slice(this, i, String.length(needle)) == needle,
+        for i <- 0..max(Str.length(this) - Str.length(needle), 0)//1,
+            cp_slice(this, i, Str.length(needle)) == needle,
             do: i
 
       float(List.last(positions) || -1)
@@ -1413,7 +1465,7 @@ defmodule Browser.JS.Builtins do
     end)
 
     str_fn(p, "endsWith", fn this, args -> String.ends_with?(this, to_str(arg(args, 0))) end)
-    str_fn(p, "concat", fn this, args -> this <> Enum.map_join(args, &to_str/1) end)
+    str_fn(p, "concat", fn this, args -> Str.join([this | Enum.map(args, &to_str/1)]) end)
     str_fn(p, "repeat", fn this, args -> String.duplicate(this, max(to_int(arg(args, 0)), 0)) end)
 
     str_fn(p, "slice", fn this, args ->
@@ -1487,12 +1539,10 @@ defmodule Browser.JS.Builtins do
   defp code_unit(n) when is_number(n), do: trunc(n) |> Bitwise.band(0xFFFF)
   defp code_unit(_), do: 0
 
-  defp units_to_string([hi, lo | rest]) when hi in 0xD800..0xDBFF and lo in 0xDC00..0xDFFF,
-    do: <<0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)::utf8>> <> units_to_string(rest)
+  defp pair(n),
+    do: [0xD800 + Bitwise.bsr(n - 0x10000, 10), 0xDC00 + Bitwise.band(n - 0x10000, 0x3FF)]
 
-  defp units_to_string([u | rest]) when u in 0xD800..0xDFFF, do: "\uFFFD" <> units_to_string(rest)
-  defp units_to_string([u | rest]), do: <<u::utf8>> <> units_to_string(rest)
-  defp units_to_string([]), do: ""
+  defp units_to_string(units), do: Str.from_units(units)
 
   defp cp_slice(s, from, count), do: Str.slice(s, from, count)
 
@@ -1501,15 +1551,15 @@ defmodule Browser.JS.Builtins do
   defp pad(s, args, side) do
     target = to_int(arg(args, 0))
     filler = if arg(args, 1) == :undefined, do: " ", else: to_str(arg(args, 1))
-    need = target - String.length(s)
+    need = target - Str.length(s)
 
     if need <= 0 or filler == "" do
       s
     else
       padding =
-        filler |> String.duplicate(div(need, String.length(filler)) + 1) |> cp_slice(0, need)
+        filler |> String.duplicate(div(need, Str.length(filler)) + 1) |> cp_slice(0, need)
 
-      if side == :leading, do: padding <> s, else: s <> padding
+      if side == :leading, do: Str.cat(padding, s), else: Str.cat(s, padding)
     end
   end
 
@@ -2068,6 +2118,28 @@ defmodule Browser.JS.Builtins do
     declare(scope, "clearTimeout", native("clearTimeout", clear))
     declare(scope, "clearInterval", native("clearInterval", clear))
   end
+
+  @doc "Schedules the JS function `fun` after `delay` virtual milliseconds; returns the timer id."
+  def add_timer(fun, delay) do
+    seq = Process.get(:js_timer_seq) + 1
+    Process.put(:js_timer_seq, seq)
+
+    timer = %{
+      id: seq,
+      at: Process.get(:js_now) + delay,
+      seq: seq,
+      fun: fun,
+      args: [],
+      interval: nil
+    }
+
+    Process.put(:js_timers, [timer | Process.get(:js_timers)])
+    seq
+  end
+
+  @doc "Cancels a timer made by `add_timer/2`."
+  def clear_timer(id),
+    do: Process.put(:js_timers, Enum.reject(Process.get(:js_timers), &(&1.id == id)))
 
   @doc """
   Runs pending timers in virtual time (no real waiting), earliest first, until none are left

@@ -5,12 +5,19 @@ defmodule Mix.Tasks.Browser.Screenshot do
   Loads a page, lays it out and draws it as SVG (see `Browser.Screenshot`), then turns the SVG
   into a PNG with headless Chromium when one is found (`CHROME` names the binary).
 
-      mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx]
+      mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx] [--js]
+          [--window 600 [--scroll 0]] [--box-scroll 0]
 
   With `--wx` the page is painted by the same code as the window, into a bitmap: its fonts,
   pictures and shadows. That needs an Erlang with wx and a display (`xvfb-run -a mix
   browser.screenshot ...` on a machine without one); when wx is not usable the SVG route is
   taken instead.
+
+  With `--js` the page's scripts run first (a page that fills itself in, an editor).
+
+  With `--wx` the scrollbars are drawn too. `--window 600` shows only a window of that height,
+  `--scroll` px down the page (as the browser would, with the page's scrollbars), and
+  `--box-scroll` scrolls every box that scrolls its content by that many px.
 
   The window is not needed, so this works in CI and in cloud sessions. `--height` is the
   top part of the page to keep (default: all of it, at most 6000 px). The SVG is kept next
@@ -28,7 +35,17 @@ defmodule Mix.Tasks.Browser.Screenshot do
   @impl true
   def run(args) do
     {opts, rest} =
-      OptionParser.parse!(args, strict: [width: :integer, height: :integer, wx: :boolean])
+      OptionParser.parse!(args,
+        strict: [
+          width: :integer,
+          height: :integer,
+          wx: :boolean,
+          js: :boolean,
+          window: :integer,
+          scroll: :integer,
+          box_scroll: :integer
+        ]
+      )
 
     [url, out] = rest
 
@@ -41,25 +58,59 @@ defmodule Mix.Tasks.Browser.Screenshot do
     env = %{Browser.Style.default_env() | width: width, height: opts[:height] || 800}
     {:ok, page} = Browser.Page.load(url, env)
 
-    if opts[:wx] && wx_screenshot(page, out, width, opts[:height]),
+    page =
+      if opts[:js],
+        do: Browser.Page.run_js(page, %{Browser.Style.default_env() | width: width, height: 800}),
+        else: page
+
+    if opts[:wx] && wx_screenshot(page, out, width, opts),
       do: Mix.shell().info("Wrote #{out} (painted by wx)"),
       else: svg_screenshot(page, out, width, opts[:height])
   end
 
   # -> true when the picture was written
-  defp wx_screenshot(page, out, width, max_height) do
+  defp wx_screenshot(page, out, width, opts) do
+    alias Browser.{Scrollbars, Scrollers}
     measure = Browser.UI.snapshot_start()
     images = fetch_images(page)
 
-    {items, height} =
+    {laid_out, page_height} =
       Browser.Layout.layout(page.nodes, width, measure, 800,
+        scrollers: true,
         metrics: &measure.(:content_height, &1),
         images: images,
         svg_defs: page.svg_defs
       )
 
-    height = min(max_height || height, 6000) |> max(1)
-    Browser.UI.snapshot(items, width, height, out)
+    {base, scrollers} = Scrollers.index(laid_out)
+
+    soff =
+      Scrollers.clamp(
+        scrollers,
+        Map.new(scrollers, fn {sid, _} -> {sid, {0, opts[:box_scroll] || 0}} end)
+      )
+
+    items = Scrollers.apply(base, scrollers, soff)
+
+    height = if opts[:window], do: opts[:window], else: min(opts[:height] || page_height, 6000)
+    height = max(height, 1)
+    scroll = min(opts[:scroll] || 0, max(page_height - height, 0))
+
+    view = %{
+      w: width,
+      h: height,
+      scroll: scroll,
+      scroll_x: 0,
+      height: page_height,
+      content_w: Browser.Layout.content_width(base, width)
+    }
+
+    overlay =
+      view
+      |> Scrollbars.bars(scrollers, soff)
+      |> Scrollbars.items(0, nil, Browser.Scrollbars.dark_page?(items))
+
+    Browser.UI.snapshot(items, width, height, out, overlay, scroll)
   catch
     kind, reason ->
       Mix.shell().info("wx is not usable here (#{inspect({kind, reason})}); drawing SVG instead")
