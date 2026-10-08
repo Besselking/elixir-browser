@@ -5290,6 +5290,13 @@ defmodule Browser.LayoutTest do
       assert width.("width:50px;overflow:hidden") == 1
     end
 
+    test "an auto top margin takes the free cross space, even with baseline alignment" do
+      html =
+        ~s(<div style="display:flex;align-items:baseline;height:40px"><div style="margin-top:auto;height:10px;background:red">a</div></div>)
+
+      assert [{_, 30, _, 10}] = flex_rects(html)
+    end
+
     test "a floated column container is as wide as its items, whatever their flex-basis" do
       html = """
       <div style="display:flex;flex-direction:column;float:left;height:100px"><div style="width:20px;flex:0 10px;background:green"></div></div>

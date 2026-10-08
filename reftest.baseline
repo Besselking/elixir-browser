@@ -3533,6 +3533,7 @@ css/css-flexbox/aspect-ratio-intrinsic-size-010.html
 css/css-flexbox/aspect-ratio-transferred-max-size.html
 css/css-flexbox/auto-height-column-with-border-and-padding.html
 css/css-flexbox/auto-height-with-flex.html
+css/css-flexbox/auto-margins-002.html
 css/css-flexbox/balance/balance-004.html
 css/css-flexbox/balance/balance-min-line-count-007.html
 css/css-flexbox/balance/balance-min-line-count-008.html
@@ -3670,6 +3671,7 @@ css/css-flexbox/flex-wrap-003.html
 css/css-flexbox/flex-wrap-004.html
 css/css-flexbox/flexbox-align-items-center-nested-001.html
 css/css-flexbox/flexbox-align-self-baseline-compatability.html
+css/css-flexbox/flexbox-align-self-baseline-horiz-002.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-004.xhtml
 css/css-flexbox/flexbox-align-self-baseline-horiz-005.xhtml
 css/css-flexbox/flexbox-align-self-horiz-002.xhtml
@@ -3712,6 +3714,7 @@ css/css-flexbox/flexbox-justify-content-vert-001a.xhtml
 css/css-flexbox/flexbox-justify-content-vert-001b.xhtml
 css/css-flexbox/flexbox-justify-content-vert-002.xhtml
 css/css-flexbox/flexbox-justify-content-vert-005.xhtml
+css/css-flexbox/flexbox-margin-auto-horiz-002.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003-reverse.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003.xhtml
 css/css-flexbox/flexbox-mbp-horiz-003v.xhtml

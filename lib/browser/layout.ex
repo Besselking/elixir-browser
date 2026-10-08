@@ -6039,6 +6039,8 @@ defmodule Browser.Layout do
       order: 0,
       auto_height?: true,
       scroll?: false,
+      mta: false,
+      mba: false,
       hpct: nil,
       fit?: false
     }
@@ -6084,6 +6086,8 @@ defmodule Browser.Layout do
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
       scroll?: c["overflow-x"] in ~w(hidden scroll auto),
+      mta: c["margin-top"] == :auto,
+      mba: c["margin-bottom"] == :auto,
       hpct:
         case c["height"] do
           {:pct, f} -> f
@@ -6356,9 +6360,14 @@ defmodule Browser.Layout do
         it = flex_stretch(st, it, cs.align, cross)
 
         dy =
-          if it.boff > 0 or baseline_item?(it, cs.align),
-            do: it.boff,
-            else: flex_offset(flex_align(it, cs.align), cross, it.h)
+          cond do
+            # auto margins take the free space, whatever the alignment
+            it.mta and it.mba -> round(max(cross - it.h, 0) / 2)
+            it.mta -> max(cross - it.h, 0)
+            it.mba -> 0
+            it.boff > 0 or baseline_item?(it, cs.align) -> it.boff
+            true -> flex_offset(flex_align(it, cs.align), cross, it.h)
+          end
 
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
