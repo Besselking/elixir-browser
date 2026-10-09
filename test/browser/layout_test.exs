@@ -7832,4 +7832,21 @@ defmodule Browser.LayoutTest do
       assert a.y == b.y
     end
   end
+
+  describe "small text beside an inline-block with larger text" do
+    test "sits where it would beside inline larger text" do
+      ib =
+        ~s|<style>body{margin:0}</style>XXXXX<span style="display:inline-block;font-size:2em">XXXXX</span>|
+
+      inline = ~s|<style>body{margin:0}</style>XXXXX<span style="font-size:2em">XXXXX</span>|
+
+      y = fn html ->
+        page = Browser.Page.build(html, "about:home")
+        {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+        Enum.find(laid, &(&1.type == :text)).y
+      end
+
+      assert y.(ib) == y.(inline)
+    end
+  end
 end

@@ -3918,7 +3918,8 @@ defmodule Browser.Layout do
       align: Map.get(spec, :malign) || style.align,
       valign: spec.valign,
       block: Map.get(spec, :cell?, false),
-      block_line?: Map.get(spec, :block_line?, false)
+      block_line?: Map.get(spec, :block_line?, false),
+      tn: last_line_tn(items)
     })
   end
 
@@ -6106,6 +6107,18 @@ defmodule Browser.Layout do
     end
   end
 
+  # the `normal` line height of the last line of text in an atom
+  defp last_line_tn(items) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        0
+
+      texts ->
+        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
+        for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
+    end
+  end
+
   defp last_baseline(items, height) do
     case Enum.filter(items, &(&1.type == :text)) do
       [] ->
@@ -6816,18 +6829,25 @@ defmodule Browser.Layout do
     shift = static_shift(Enum.reverse(st.line), st)
     dy = base - text_base
 
+    # (text next to an inline-block sits as high above the baseline as the text in the box is
+    # tall)
+    fnormal = Enum.reduce(on_baseline, normal, &max(&2, Map.get(&1, :tn, 0)))
+    lift_fudge = if fnormal > normal, do: div(normal - st.lh, 4), else: 0
+
     placed =
       for it <- texts,
           do: %{
             it
             | x: it.x + shift,
-              y: st.y + dy + half + normal - it.h - div(normal - it.h, 4) - Map.get(it, :vs, 0)
+              y:
+                st.y + dy + half + normal - it.h - div(fnormal - it.h, 4) + lift_fudge -
+                  Map.get(it, :vs, 0)
           }
 
     placed =
       placed
       |> Enum.reject(&Map.get(&1, :strut))
-      |> Enum.map(&Map.drop(&1, [:glue, :lm]))
+      |> Enum.map(&(&1 |> Map.drop([:glue, :lm]) |> Map.put(:tn, normal)))
       |> apply_rel()
 
     {placed, st, widen} = justify(placed, st, List.last(st.line), shift)
