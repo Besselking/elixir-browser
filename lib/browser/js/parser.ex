@@ -64,6 +64,10 @@ defmodule Browser.JS.Parser do
 
       Process.delete(:js_cur_start)
       Process.delete(:js_cur_end)
+      Process.delete(:js_cur_line)
+      Process.delete(:js_line_at)
+      Process.delete(:js_pos_line)
+      Process.put(:js_file, Keyword.get(opts, :file))
 
       Process.put(
         :js_srctab,
@@ -481,13 +485,13 @@ defmodule Browser.JS.Parser do
   end
 
   defp module_statements(ts) do
-    {stmt, ts} = module_item(ts)
-    [stmt | statements(ts)]
+    {stmt, rest} = module_item(ts)
+    posted(ts, stmt) ++ statements(rest)
   end
 
   defp script_statements(ts) do
-    {stmt, ts} = statement(ts)
-    [stmt | statements(ts)]
+    {stmt, rest} = statement(ts)
+    posted(ts, stmt) ++ statements(rest)
   end
 
   # ── statements ─────────────────────────────────────────────
@@ -1064,6 +1068,44 @@ defmodule Browser.JS.Parser do
         n -> n
       end)
 
+  # ── positions of statements ────────────────────────────────
+
+  # `[stmt]`, or `[{:pos, {file, line}}, stmt]` when the script has a file name: running the
+  # `:pos` node tells the interpreter where it is, for the lines of error stacks. A statement on
+  # the line of the one before it in the same block, and statements that cannot fail, get none.
+  defp posted(ts, stmt) do
+    with file when file != nil <- Process.get(:js_file),
+         true <- positioned?(stmt),
+         line when line != nil <- line_of(ts),
+         true <- Process.put(:js_pos_line, line) != line do
+      [{:pos, {file, line}}, stmt]
+    else
+      _ -> [stmt]
+    end
+  end
+
+  defp positioned?({:empty}), do: false
+  defp positioned?({:block, _}), do: false
+  defp positioned?({:fundecl, _, _}), do: false
+  defp positioned?({:classdecl, _, _}), do: false
+  defp positioned?({:expr, {:str, _}}), do: false
+  defp positioned?(_), do: true
+
+  # the line of the first token in `ts` (the lines are counted on from the one asked for last)
+  defp line_of(ts) do
+    with i when i != nil <- token_index(ts, :js_cur_line),
+         {text, starts, _, _, n} when i < n <- Process.get(:js_srctab) do
+      off = elem(starts, i)
+      {from, line} = Process.get(:js_line_at, {0, 1})
+      {from, line} = if off < from, do: {0, 1}, else: {from, line}
+      count = :binary.matches(binary_part(text, from, off - from), "\n") |> length()
+      Process.put(:js_line_at, {off, line + count})
+      line + count
+    else
+      _ -> nil
+    end
+  end
+
   defp expression_statement(ts) do
     {e, ts} = expression(ts)
     {{:expr, e}, semi(ts)}
@@ -1464,25 +1506,38 @@ defmodule Browser.JS.Parser do
 
   defp switch_cases(_, _), do: throw({:syntax, "bad switch body"})
 
-  defp case_body([{:id, kw, _} | _] = ts, acc) when kw in ["case", "default"],
-    do: {Enum.reverse(acc), ts}
+  defp case_body([{:id, kw, _} | _] = ts, acc) when kw in ["case", "default"] do
+    Process.put(:js_pos_line, nil)
+    {Enum.reverse(acc), ts}
+  end
 
-  defp case_body([{:p, "}", _} | _] = ts, acc), do: {Enum.reverse(acc), ts}
+  defp case_body([{:p, "}", _} | _] = ts, acc) do
+    Process.put(:js_pos_line, nil)
+    {Enum.reverse(acc), ts}
+  end
 
   defp case_body(ts, acc) do
-    {stmt, ts} = statement(ts)
+    if acc == [], do: Process.put(:js_pos_line, nil)
+    {stmt, rest} = statement(ts)
 
     if using_decl?(stmt), do: throw({:syntax, "using declaration in a case clause"})
 
-    case_body(ts, [stmt | acc])
+    case_body(rest, Enum.reverse(posted(ts, stmt), acc))
   end
 
-  defp block_body([{:p, "}", _} | ts], acc), do: {Enum.reverse(acc), ts}
+  defp block_body([{:p, "}", _} | ts], acc) do
+    # what follows the block cannot count on the position of its last statement
+    Process.put(:js_pos_line, nil)
+    {Enum.reverse(acc), ts}
+  end
+
   defp block_body([{:eof, _, _} | _], _), do: throw({:syntax, "missing }"})
 
   defp block_body(ts, acc) do
-    {stmt, ts} = statement(ts)
-    block_body(ts, [stmt | acc])
+    # the first statement of a block always says where it is (see `posted/2`)
+    if acc == [], do: Process.put(:js_pos_line, nil)
+    {stmt, rest} = statement(ts)
+    block_body(rest, Enum.reverse(posted(ts, stmt), acc))
   end
 
   # automatic semicolon insertion

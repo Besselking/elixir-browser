@@ -613,7 +613,7 @@ defmodule Browser.JS.Runtime do
       default
   catch
     {:js_error, v} ->
-      log(:error, "Uncaught " <> describe(v) <> where())
+      log(:error, "Uncaught " <> describe(v) <> thrown_at(v) <> where())
       default
 
     :js_limit ->
@@ -623,6 +623,22 @@ defmodule Browser.JS.Runtime do
     {:syntax, msg} ->
       log(:error, "SyntaxError: " <> msg <> where())
       default
+  end
+
+  # where `throw "text"` was run (an error object has the lines of its stack)
+  defp thrown_at({:obj, _} = v) do
+    with nil <- Interp.describe_error(v), {file, line} <- Process.get(:js_throw_pos) do
+      " (#{file}:#{line})"
+    else
+      _ -> ""
+    end
+  end
+
+  defp thrown_at(_) do
+    case Process.get(:js_throw_pos) do
+      {file, line} -> " (#{file}:#{line})"
+      _ -> ""
+    end
   end
 
   # which script was running, for the console
@@ -672,7 +688,10 @@ defmodule Browser.JS.Runtime do
     for s <- scripts, s.kind == :classic do
       Process.put(:rt_script, label(s))
       DOM.set_current_script(s.nid)
-      with {:ok, src, base} <- script_source(s), do: guard(fn -> run_classic(src, base) end, :ok)
+
+      with {:ok, src, base} <- script_source(s),
+           do: guard(fn -> run_classic(src, file_for(s, base)) end, :ok)
+
       DOM.set_current_script(nil)
     end
 
@@ -682,7 +701,7 @@ defmodule Browser.JS.Runtime do
       with {:ok, src, base} <- script_source(s) do
         # a module from a file runs once, however often it is imported; an inline one is its own
         key = if is_binary(s.src) and s.src != "", do: base, else: {:inline, make_ref()}
-        guard(fn -> run_module_source(src, key, base) end, :ok)
+        guard(fn -> run_module_source(src, key, base, file_for(s, base)) end, :ok)
       end
     end
 
@@ -748,11 +767,22 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp run_source(:classic, src, base, _s), do: run_classic(src, base)
+  defp run_source(:classic, src, base, s), do: run_classic(src, file_for(s, base))
 
   defp run_source(:module, src, base, s) do
     key = if external?(s), do: base, else: {:inline, make_ref()}
-    run_module_source(src, key, base)
+    run_module_source(src, key, base, file_for(s, base))
+  end
+
+  # what error stacks call the script: its address, or "inline script" and a number
+  defp file_for(s, base) do
+    if external?(s) do
+      base
+    else
+      n = Process.get(:rt_inline, 0) + 1
+      Process.put(:rt_inline, n)
+      "inline script #{n}"
+    end
   end
 
   # the files of external scripts are fetched side by side; `script_source/1` takes them from here
@@ -891,8 +921,8 @@ defmodule Browser.JS.Runtime do
 
   defp page_scheme, do: URI.parse(page_url()).scheme
 
-  defp run_classic(src, _base) do
-    case Parser.parse(src) do
+  defp run_classic(src, file) do
+    case Parser.parse(src, file: file) do
       {:ok, program} -> Interp.run_program(program)
       {:error, msg} -> throw({:syntax, msg})
     end
@@ -957,8 +987,8 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp run_module_source(src, key, base) do
-    case Parser.parse(src, module: true) do
+  defp run_module_source(src, key, base, file) do
+    case Parser.parse(src, module: true, file: file) do
       {:ok, program} -> Modules.run(key, base, program, loader())
       {:error, msg} -> throw({:syntax, msg})
     end

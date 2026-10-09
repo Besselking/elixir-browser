@@ -167,20 +167,40 @@ defmodule Browser.JS.Interp do
     e
   end
 
-  @doc "`Error.stack`: the header and the names of the functions being run, innermost first."
+  @doc """
+  `Error.stack`: the header and the functions being run, innermost first, each with the file
+  and line it was at (`at name (file:line)`) when the script has a file name.
+  """
   def stack_string(header) do
-    frames =
-      Process.get(:js_stack, [])
-      |> Enum.take(12)
-      |> Enum.map(fn
-        {:method, name} -> name
-        name -> name
-      end)
-      |> Enum.map(fn name ->
-        "\n    at " <> if(is_binary(name) and name != "", do: name, else: "<anonymous>")
+    stack = Process.get(:js_stack, [])
+
+    {frames, top} =
+      Enum.map_reduce(stack, Process.get(:js_pos), fn {name, call_pos}, loc ->
+        {frame_line(name, loc), call_pos}
       end)
 
+    frames = Enum.take(frames, 12)
+    # the script's own code, when it is in sight
+    frames =
+      if top != nil and length(stack) < 12, do: frames ++ [frame_line(nil, top)], else: frames
+
     header <> Enum.join(frames)
+  end
+
+  defp frame_line(name, loc) do
+    name =
+      case name do
+        {:method, n} -> n
+        n -> n
+      end
+
+    named? = is_binary(name) and name != ""
+
+    case loc do
+      {file, line} when named? -> "\n    at #{name} (#{file}:#{line})"
+      {file, line} -> "\n    at #{file}:#{line}"
+      _ -> "\n    at " <> if(named?, do: name, else: "<anonymous>")
+    end
   end
 
   @doc "`Name: message` of an error object, with the function names it was thrown under."
@@ -2279,7 +2299,8 @@ defmodule Browser.JS.Interp do
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     :erlang.put(:js_depth, depth + 1)
     stack = Process.get(:js_stack, [])
-    :erlang.put(:js_stack, [c.name | stack])
+    pos = Process.get(:js_pos)
+    :erlang.put(:js_stack, [{c.name, pos} | stack])
     old_tail = Process.put(:js_tail, extra == [])
 
     try do
@@ -2334,6 +2355,7 @@ defmodule Browser.JS.Interp do
       Process.put(:js_tail, old_tail)
       :erlang.put(:js_depth, depth)
       :erlang.put(:js_stack, stack)
+      :erlang.put(:js_pos, pos)
     end
   end
 
@@ -3153,12 +3175,27 @@ defmodule Browser.JS.Interp do
 
   defp walk_for_in(_, _seen, acc), do: acc |> Enum.reverse() |> List.flatten()
 
-  defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
+  defp exec_list([], _env), do: :ok
+
+  defp exec_list([{:pos, loc} | rest], env) do
+    :erlang.put(:js_pos, loc)
+    exec_list(rest, env)
+  end
+
+  defp exec_list([stmt | rest], env) do
+    exec(stmt, env, [])
+    exec_list(rest, env)
+  end
 
   # A function body: a `return` that is reached through `if` and block statements only gives its
   # value back as `{:ret, value}` instead of being thrown. A `return` of a call (or of a form that
   # holds one in tail position) is left to `exec/3`, which may turn it into a tail call.
   defp exec_fn([], _env), do: :ok
+
+  defp exec_fn([{:pos, loc} | rest], env) do
+    :erlang.put(:js_pos, loc)
+    exec_fn(rest, env)
+  end
 
   defp exec_fn([stmt | rest], env) do
     case exec_fn_stmt(stmt, env) do
@@ -3297,6 +3334,12 @@ defmodule Browser.JS.Interp do
 
   defp exec(stmt, env), do: exec(stmt, env, [])
 
+  # where the script is: the file and line of the statement that follows (see the parser)
+  defp exec({:pos, loc}, _, _) do
+    :erlang.put(:js_pos, loc)
+    :ok
+  end
+
   defp exec({:expr, e}, env, _) do
     :erlang.put(:js_last, ev(e, env))
     :ok
@@ -3395,7 +3438,13 @@ defmodule Browser.JS.Interp do
       else: throw({:js_return, ev(e, env)})
   end
 
-  defp exec({:throw, e}, env, _), do: throw({:js_error, ev(e, env)})
+  defp exec({:throw, e}, env, _) do
+    v = ev(e, env)
+    # (a thrown value that is no error object has no stack to say where it was thrown)
+    :erlang.put(:js_throw_pos, Process.get(:js_pos))
+    throw({:js_error, v})
+  end
+
   defp exec({:break, label}, _, _), do: throw({:js_break, label})
   defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
 

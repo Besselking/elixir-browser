@@ -10,7 +10,7 @@ defmodule Browser.Console do
   An entry is `{seq, level, text, time}`. `seq` counts up from 1 for one page and is never
   reused, even after `clear/1`, so a reader that remembers the last `seq` it saw gets only
   what is new. `level` is `:log`, `:warn`, `:error`, `:input` (a line typed in the console)
-  or `:result` (its value).
+  `:result` (its value) or `:clear` (`console.clear()`: what came before is no longer shown).
   """
 
   use Agent
@@ -18,7 +18,7 @@ defmodule Browser.Console do
   @table :browser_console
   @keep 1000
 
-  @type level :: :log | :warn | :error | :input | :result
+  @type level :: :log | :warn | :error | :input | :result | :clear
   @type entry :: {pos_integer, level, String.t(), integer}
 
   @doc false

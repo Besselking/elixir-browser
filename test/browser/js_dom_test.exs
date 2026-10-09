@@ -647,7 +647,10 @@ defmodule Browser.JS.DOMTest do
     test "a promise rejected with nobody listening is reported" do
       {pid, reply} = start("<body><script>Promise.reject(new Error('nope'))</script></body>")
       flushed = Runtime.flush(pid)
-      assert errors(reply) ++ errors(flushed) == ["Uncaught (in promise) Error: nope"]
+
+      assert errors(reply) ++ errors(flushed) == [
+               "Uncaught (in promise) Error: nope\n    at inline script 1:1"
+             ]
     end
   end
 
