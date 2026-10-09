@@ -7729,4 +7729,16 @@ defmodule Browser.LayoutTest do
       assert widths == [100]
     end
   end
+
+  describe "calc() sizes of boxes inside a bordered absolutely positioned box" do
+    test "percentages are of its content width and a float's calc height is of its container" do
+      html =
+        ~s|<style>body{margin:0}.c{width:300px;height:100px;border:2px solid black;position:absolute}.b{width:calc(50% - 10px);height:calc(100% - 10px);padding:5px;float:left;background:green}</style><div class="c"><div class="b">L</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.w, box.h} == {150, 100}
+    end
+  end
 end

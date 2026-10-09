@@ -1182,6 +1182,16 @@ defmodule Browser.Layout do
       raw = attrs |> List.keyfind("@computed", 0) |> elem(1)
       calc = fn key -> match?({:calc, _, _}, raw[key]) && raw[key] end
 
+      # (its width is gone from `own`: what its children's percentages are of is kept)
+      own =
+        case dim(c["width"]) do
+          w when is_number(w) or (is_tuple(w) and elem(w, 0) == :pct) ->
+            Map.put(own, "@child_w", child_width(c, box))
+
+          _ ->
+            own
+        end
+
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
       el = {:element, tag, attrs, kids}
 
@@ -10524,6 +10534,8 @@ defmodule Browser.Layout do
 
   # the width of a block's content box, which its children's percentages refer to: its width
   # (or what is left of the container) less padding and borders
+  defp child_width(%{"@child_w" => w}, _box), do: w
+
   defp child_width(c, box) do
     outer = containing_width()
     {_bt, br, _bb, bl} = box.bw
@@ -10667,7 +10679,11 @@ defmodule Browser.Layout do
     [{:inline_block, sub, spec, style}] =
       inline_block_ops(el, parent_style, c, [], true, c["display"] == "table")
 
-    spec = spec |> Map.put(:clear, clear_side(c)) |> Map.put(:hpct_atom, pct_of(c["height"]))
+    spec =
+      spec
+      |> Map.put(:clear, clear_side(c))
+      |> Map.put(:hpct_atom, pct_of(c["height"]) || calc_pct(c["height"]))
+
     [{:float, side, sub, spec, style} | acc]
   end
 
