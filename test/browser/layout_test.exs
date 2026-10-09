@@ -7500,4 +7500,17 @@ defmodule Browser.LayoutTest do
       assert green.x == 25
     end
   end
+
+  describe "tables beside floats" do
+    test "an auto-width table narrows to the room a float leaves instead of moving below" do
+      html =
+        ~s|<style>body{margin:0}table{border-spacing:0}td{padding:0}span{display:inline-block;width:150px;height:50px;background:purple}</style><table width="300"><tr><td><div style="float:left;width:100px;height:100px;background:blue"></div><table style="background:yellow"><tr><td><span></span> <span></span></td></tr></table></td></tr></table>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      yellow = Enum.find(items, &(&1.type == :rect and &1[:color] == {255, 255, 0}))
+      assert yellow.x == 100
+      assert yellow.y == 0
+    end
+  end
 end

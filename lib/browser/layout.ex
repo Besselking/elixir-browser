@@ -240,6 +240,35 @@ defmodule Browser.Layout do
 
   defp count_spaces(text), do: text |> String.graphemes() |> Enum.count(&(&1 in [" ", "\u00A0"]))
 
+  # A block-level table too wide for the room the floats leave beside it is laid out again in
+  # that room, when it can be that narrow, rather than moved below them.
+  defp table_beside_floats(
+         %{floats: [_ | _]} = st,
+         sub,
+         %{block_table?: true, width: nil} = spec,
+         avail,
+         {w, _, h, _} = first
+       ) do
+    y = st.y + st.gap + st.ngap
+    {fl, fr} = float_offsets(st, y, y + max(h, 1))
+    beside = avail - fl - fr
+
+    if (fl > 0 or fr > 0) and w > beside and beside > 0 do
+      w2 = fit_width(st, sub, spec, beside)
+
+      if w2 <= beside do
+        {items, height, base} = layout_atom(st, sub, w2, Map.get(spec, :key))
+        {w2, items, height, base}
+      else
+        first
+      end
+    else
+      first
+    end
+  end
+
+  defp table_beside_floats(_st, _sub, _spec, _avail, first), do: first
+
   # -- focus -----------------------------------------------------------------------
 
   @ring_color {26, 115, 232}
@@ -1552,6 +1581,7 @@ defmodule Browser.Layout do
       valign: c["vertical-align"],
       cell?: c["display"] == "table-cell",
       table?: table? or c["display"] == "inline-table",
+      block_table?: table? and block?,
       flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
@@ -3827,6 +3857,9 @@ defmodule Browser.Layout do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key))
+
+    {w, items, height, base} =
+      table_beside_floats(st, sub, spec, avail, {w, items, height, base})
 
     place_atom(st, %{
       w: w,

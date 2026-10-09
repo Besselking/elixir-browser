@@ -1218,7 +1218,9 @@ css/CSS2/floats/floats-wrap-bfc-001-left-table.xht
 css/CSS2/floats/floats-wrap-bfc-001-right-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-001-right-table.xht
 css/CSS2/floats/floats-wrap-bfc-002-left-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-002-left-table.xht
 css/CSS2/floats/floats-wrap-bfc-002-right-overflow.xht
+css/CSS2/floats/floats-wrap-bfc-002-right-table.xht
 css/CSS2/floats/floats-wrap-bfc-003-left-overflow.xht
 css/CSS2/floats/floats-wrap-bfc-003-left-table.xht
 css/CSS2/floats/floats-wrap-bfc-003-right-overflow.xht
@@ -1256,6 +1258,7 @@ css/CSS2/floats/new-fc-separates-from-float-4.html
 css/CSS2/floats/new-fc-separates-from-float.html
 css/CSS2/floats/overflow-scroll-float-paint-order.html
 css/CSS2/floats/overhanging-float-paint-order.html
+css/CSS2/floats/table-sizing-with-adjacent-floats.html
 css/CSS2/floats/zero-available-space-float-positioning.html
 css/CSS2/floats/zero-width-floats.html
 css/CSS2/linebox/anonymous-inline-inherit-001.html
