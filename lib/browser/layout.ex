@@ -7996,6 +7996,7 @@ defmodule Browser.Layout do
       mba: false,
       collapsed: false,
       minh: nil,
+      minhpct: nil,
       hpct: nil,
       fit?: false
     }
@@ -8070,6 +8071,7 @@ defmodule Browser.Layout do
       chp: pct_of(c["height"]),
       collapsed: collapsed?,
       minh: num(c["min-height"]),
+      minhpct: pct_of(c["min-height"]),
       scroll?:
         c["overflow-x"] in ~w(hidden scroll auto) or
           (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
@@ -8739,7 +8741,8 @@ defmodule Browser.Layout do
     if stretch? and it.auto_height? and it.rebuild != nil and it.h < cross do
       box_h = cross - it.mt - it.mb
       min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
-      sub = it.rebuild.(%{"min-height" => max(min_h, 0) * 1.0})
+      # (its size is the line's, so what is a percentage of it is definite)
+      sub = it.rebuild.(%{"height" => max(min_h, 0) * 1.0})
       {items, h, _} = flex_atom(st, sub, it.w, {it.key, min_h})
       %{it | items: items, h: max(h, cross)}
     else
@@ -9025,6 +9028,12 @@ defmodule Browser.Layout do
        when pct != nil and rebuild != nil and cs.height != nil and cs.hdef do
     sub = rebuild.(%{"height" => pct * cs.height, "aspect-ratio" => nil})
     flex_atom(st, sub, w, {it.key, :hpct})
+  end
+
+  # (and so does a percentage min-height)
+  defp flex_row_atom(st, cs, %{minhpct: pct, rebuild: rebuild} = it, w)
+       when pct != nil and rebuild != nil and cs.height != nil and cs.hdef do
+    flex_atom(st, rebuild.(%{"min-height" => pct * cs.height}), w, {it.key, :minhpct})
   end
 
   # a picture takes the width the row gave it (its height follows its ratio)

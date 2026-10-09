@@ -4041,6 +4041,7 @@ css/css-flexbox/flexbox-break-request-vert-002a.html
 css/css-flexbox/flexbox-break-request-vert-002b.html
 css/css-flexbox/flexbox-collapsed-item-horiz-001.html
 css/css-flexbox/flexbox-column-row-gap-003.html
+css/css-flexbox/flexbox-definite-sizes-001.html
 css/css-flexbox/flexbox-definite-sizes-006.html
 css/css-flexbox/flexbox-flex-direction-column-percentage-ignored.html
 css/css-flexbox/flexbox-flex-direction-column-reverse.htm
@@ -4396,6 +4397,7 @@ css/css-flexbox/select-element-multiple.html
 css/css-flexbox/select-element-zero-height-001.html
 css/css-flexbox/select-element-zero-height-002.html
 css/css-flexbox/stretch-obeys-min-max-001.html
+css/css-flexbox/stretch-obeys-min-max-002.html
 css/css-flexbox/stretch-obeys-min-max-003.html
 css/css-flexbox/stretch-requires-computed-auto-size.html
 css/css-flexbox/stretched-child-in-nested-flexbox-001.html

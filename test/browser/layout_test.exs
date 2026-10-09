@@ -7670,6 +7670,15 @@ defmodule Browser.LayoutTest do
       assert first.h == 100
     end
 
+    test "a percentage min-height inside a stretched flex item is of the line height" do
+      html =
+        ~s|<style>body{margin:0}div{display:flex}.i{width:100px;align-items:center}.i span{min-height:100%;width:100%;background:green}</style><div style="height:100px"><div class="i"><span></span></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(
