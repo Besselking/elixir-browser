@@ -4541,6 +4541,17 @@ defmodule Browser.LayoutTest do
     assert {green.x, green.y} == {38, 48}
   end
 
+  test "a tab after an inline box runs to the next tab stop of the line" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="white-space:pre;tab-size:8"><span style="display:inline-block;width:20px;height:5px"></span>\tP</div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    assert word_x(items, "P") == 8 + 64
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

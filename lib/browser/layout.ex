@@ -134,8 +134,8 @@ defmodule Browser.Layout do
       tab: 8,
       # the width of a space in the font of the block container: what `tab-size` counts in
       bspace: nil,
-      # a fixed width in px for the text: a tab
-      fixw: nil,
+      # a tab: `{tab-size in px, half a space}`, its width depends on where it falls on the line
+      tabw: nil,
       hyph: "-",
       hidden: false,
       tiny: false,
@@ -212,9 +212,6 @@ defmodule Browser.Layout do
       # (text of a font size under one pixel takes no room)
       _text, %{tiny: true} ->
         0
-
-      _text, %{fixw: w} when is_number(w) ->
-        w
 
       text, style ->
         # (a zero-width space takes no room)
@@ -3185,25 +3182,26 @@ defmodule Browser.Layout do
   end
 
   # the pieces of a preserved line with tabs: each tab is a space as wide as the way to the next
-  # tab stop, counted from the start of the line
+  # tab stop, counted from the start of the line when it is placed (`tab_width/3`)
   defp pre_words(line, style) do
     measure = Process.get(:layout_measure)
-    plain = %{style | fixw: nil}
-    tabw = tab_px(style, measure.(" ", plain))
+    space = measure.(" ", %{style | tabw: nil})
+    tab = %{style | tabw: {tab_px(style, space), space / 2}}
 
-    {words, _} =
-      ~r/\t|[^\t]+/
-      |> Regex.scan(line)
-      |> Enum.map_reduce(0, fn
-        ["\t"], off ->
-          w = if tabw <= 0, do: 0, else: round((trunc(off / tabw) + 1) * tabw - off)
-          {{:word, " ", %{style | fixw: w}, :pre}, off + w}
+    ~r/\t|[^\t]+/
+    |> Regex.scan(line)
+    |> Enum.map(fn
+      ["\t"] -> {:word, " ", tab, :pre}
+      [text] -> {:word, text, style, :pre}
+    end)
+  end
 
-        [text], off ->
-          {{:word, text, style, :pre}, off + measure.(text, plain)}
-      end)
+  # a tab runs to the next tab stop, or to the one after it when that is less than half a space
+  defp tab_width({tabw, _}, _off) when tabw <= 0, do: 0
 
-    words
+  defp tab_width({tabw, threshold}, off) do
+    left = tabw - :math.fmod(off, tabw)
+    round(if left < threshold, do: left + tabw, else: left)
   end
 
   # collapsible spaces at the end of a line vanish even when only empty inline boxes stand
@@ -5882,7 +5880,15 @@ defmodule Browser.Layout do
   end
 
   defp plain_word(text, style, nowrap?, st, dx, glue) do
-    w = st.measure.(text, style)
+    w =
+      case style.tabw do
+        nil ->
+          st.measure.(text, style)
+
+        tab ->
+          tab_width(tab, if(st.line == [], do: dx + st.lead, else: st.x - st.indent))
+      end
+
     line_left = st.margin + st.left
 
     space_w =
