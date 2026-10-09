@@ -165,6 +165,9 @@ defmodule Browser.Reftest.Raster do
 
   # -- text ---------------------------------------------------------------------------------
 
+  # zero-width format characters get no letter-spacing
+  @zero_width ["\u200B", "\u200C", "\u200D", "\u2060", "\uFEFF"]
+
   defp text(grid, t, clip) do
     size = t.size
     ahem? = String.contains?(to_string(Map.get(t, :family)), "ahem")
@@ -186,7 +189,9 @@ defmodule Browser.Reftest.Raster do
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, off + round(cadv * size) + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
+        {g,
+         off + round(cadv * size) + if(ch in @zero_width, do: 0, else: ls) +
+           if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
     width = round(advance_x)

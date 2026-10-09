@@ -223,13 +223,20 @@ defmodule Browser.Layout do
   end
 
   defp extra_width(text, %{ls: ls, wsp: wsp}) when ls != 0 or wsp != 0,
-    do: round(ls * String.length(text) + wsp * count_spaces(text))
+    do: round(ls * spaced_length(text) + wsp * count_spaces(text))
 
   defp extra_width(_text, _style), do: 0
 
   # the spacing after the last letter of a line does not count towards fitting it
   defp trailing_ls(%{ls: ls}) when ls > 0, do: round(ls)
   defp trailing_ls(_style), do: 0
+
+  # zero-width format characters receive no letter-spacing
+  defp spaced_length(text) do
+    if String.match?(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u),
+      do: String.length(String.replace(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u, "")),
+      else: String.length(text)
+  end
 
   defp count_spaces(text), do: text |> String.graphemes() |> Enum.count(&(&1 in [" ", "\u00A0"]))
 

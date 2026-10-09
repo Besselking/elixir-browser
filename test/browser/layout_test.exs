@@ -5112,6 +5112,16 @@ defmodule Browser.LayoutTest do
       assert spaced.ls == 3.0
     end
 
+    test "zero-width format characters get no letter-spacing" do
+      [plain] = ts_items("<p>abcd</p>") |> Enum.filter(&(&1[:text] == "abcd"))
+
+      [spaced] =
+        ts_items("<p style=\"letter-spacing:3px\">ab\u200Dcd</p>")
+        |> Enum.filter(&(&1[:text] == "ab\u200Dcd"))
+
+      assert spaced.w == plain.w + 12
+    end
+
     test "a percentage letter-spacing is of the element's own font size" do
       items = ts_items("<p style=\"letter-spacing:10%;font-size:20px\">ab</p>")
       assert Enum.find(items, &(&1[:text] == "ab")).ls == 2.0
