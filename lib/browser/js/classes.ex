@@ -71,8 +71,9 @@ defmodule Browser.JS.Classes do
 
     ctor_node =
       case Enum.find(members, &match?({:cmember, :method, {:str, "constructor"}, _, false}, &1)) do
-        {:cmember, _, _, {:fn, _, params, body, mode, _}, _} ->
-          {:fn, name, params, body, mode, class_src}
+        {:cmember, _, _, {:fn, _, params, body, mode, src}, _} ->
+          # the constructor's source is the whole class; its resolver facts stay
+          {:fn, name, params, body, mode, Browser.JS.Resolve.with_src(src, class_src)}
 
         nil ->
           default_constructor(name, derived?, class_src)

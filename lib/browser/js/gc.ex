@@ -104,6 +104,11 @@ defmodule Browser.JS.GC do
   defp mark([[] | rest], marks), do: mark(rest, marks)
   defp mark([[_ | _] = l | rest], marks), do: mark(push_list(l, rest, marks), marks)
 
+  # the resolver's facts hold names, numbers, atoms and syntax, never a heap id:
+  # a frame carries one in its header, so the walk must not read it as ids
+  defp mark([%Browser.JS.Resolve.Info{} | rest], marks), do: mark(rest, marks)
+  defp mark([%Browser.JS.Resolve.Scope{} | rest], marks), do: mark(rest, marks)
+
   defp mark([%{params: _, body: _} = closure | rest], marks) do
     stack = push(Map.get(closure, :scope), rest, marks)
     mark(push(Map.get(closure, :home), stack, marks), marks)

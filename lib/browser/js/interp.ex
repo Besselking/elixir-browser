@@ -2608,6 +2608,8 @@ defmodule Browser.JS.Interp do
 
   defp make_fn({:fn, name, params, body, mode, src}, env, named?) do
     named? = named? and is_binary(name) and mode == false
+    # the resolver, when it ran, left its facts in the place of the source text
+    {src, info} = Browser.JS.Resolve.unpack(src)
 
     env =
       if named? do
@@ -2625,7 +2627,16 @@ defmodule Browser.JS.Interp do
        alloc(%{
          class: :function,
          fun:
-           {:closure, %{name: name, params: params, body: body, mode: mode, scope: env, src: src}},
+           {:closure,
+            %{
+              name: name,
+              params: params,
+              body: body,
+              mode: mode,
+              scope: env,
+              src: src,
+              info: info
+            }},
          props: %{},
          keys: [],
          proto: proto(:function)
