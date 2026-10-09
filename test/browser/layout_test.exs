@@ -7701,6 +7701,15 @@ defmodule Browser.LayoutTest do
       assert Enum.find(laid, &(&1.type == :rect and &1.color == {255, 0, 0})).h == 100
     end
 
+    test "percentage margins of flex items count as zero in min-content width" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;width:min-content;height:10px;background:green"><div style="width:100px;margin-left:50%"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(

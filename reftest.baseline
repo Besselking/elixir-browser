@@ -4936,6 +4936,8 @@ css/css-sizing/box-sizing-replaced-003.xht
 css/css-sizing/calc-margins-block.html
 css/css-sizing/calc-margins-fieldset-content.html
 css/css-sizing/calc-margins-fieldset-legend.html
+css/css-sizing/calc-margins-flex.html
+css/css-sizing/calc-margins-percent-flex.html
 css/css-sizing/clone-intrinsic-size.html
 css/css-sizing/clone-nowrap-intrinsic-size-bidi.html
 css/css-sizing/clone-nowrap-intrinsic-size.html

@@ -2502,6 +2502,9 @@ defmodule Browser.Layout do
 
   defp containing_width, do: Process.get(:layout_cw, 0)
 
+  defp intrinsic_cw,
+    do: if(Process.get(:layout_intrinsic, false), do: 0, else: containing_width())
+
   # -- styles ----------------------------------------------------------------------
 
   defp restyle_inline(style, attrs), do: apply_computed(style, computed(attrs))
@@ -3909,6 +3912,13 @@ defmodule Browser.Layout do
 
   defp op({:flex, cs, items, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+
+    # (measuring how wide the container wants to be, a percentage margin is of nothing)
+    items =
+      if Process.get(:layout_intrinsic, false),
+        do: Enum.map(items, &intrinsic_margins/1),
+        else: items
+
     # a balanced column without a height is as tall as holds its items in that many columns
     cs =
       if cs.height == nil and cs.maxh == nil and cs.wrap and Map.get(cs, :balance) == true and
@@ -8057,6 +8067,8 @@ defmodule Browser.Layout do
       rextra: box.pr + br,
       ml: box.ml,
       mr: box.mr,
+      mlraw: c["margin-left"],
+      mrraw: c["margin-right"],
       mt: box.mt,
       mb: box.mb,
       vextra: box.pt + box.pb + bt + bb,
@@ -8197,6 +8209,15 @@ defmodule Browser.Layout do
       length(flex_break(pseudo, gap, room)) <= lines
     end)
   end
+
+  defp intrinsic_margins(%{mlraw: l, mrraw: r} = it),
+    do: %{it | ml: intrinsic_margin(l, it.ml), mr: intrinsic_margin(r, it.mr)}
+
+  defp intrinsic_margins(it), do: it
+
+  defp intrinsic_margin({:pct, _}, _), do: 0
+  defp intrinsic_margin({:calc, px, _}, _), do: round(px)
+  defp intrinsic_margin(_, current), do: current
 
   defp flex_widest(st, cs, items, avail) do
     items
