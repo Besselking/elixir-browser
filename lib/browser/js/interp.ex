@@ -3534,7 +3534,8 @@ defmodule Browser.JS.Interp do
               {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
 
             {:var, sc} ->
-              case Map.fetch(deref(sc).vars, name) do
+              # (an import is a live binding: the slot holds an alias, not the value)
+              case lookup_var(sc, name) do
                 {:ok, v} when v != :tdz -> {v, :undefined}
                 _ -> {ev(callee, env), :undefined}
               end
