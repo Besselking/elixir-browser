@@ -6,6 +6,7 @@ defmodule Browser.UI do
   Record.defrecord(:wxMouse, Record.extract(:wxMouse, from_lib: "wx/include/wx.hrl"))
   Record.defrecord(:wxCommand, Record.extract(:wxCommand, from_lib: "wx/include/wx.hrl"))
   Record.defrecord(:wxSize, Record.extract(:wxSize, from_lib: "wx/include/wx.hrl"))
+  Record.defrecord(:wxList, Record.extract(:wxList, from_lib: "wx/include/wx.hrl"))
   Record.defrecord(:wxKey, Record.extract(:wxKey, from_lib: "wx/include/wx.hrl"))
 
   @view :browser_view
@@ -100,6 +101,7 @@ defmodule Browser.UI do
 
     develop = :wxMenu.new()
     :wxMenu.append(develop, 5200, Browser.ConsoleWindow.menu_label())
+    :wxMenu.append(develop, 5201, Browser.NetworkWindow.menu_label())
     :wxMenuBar.append(menubar, develop, ~c"Develop")
     :wxFrame.setMenuBar(frame, menubar)
 

@@ -1985,46 +1985,7 @@ defmodule Browser.JS.Builtins do
 
   # ── console ────────────────────────────────────────────────
 
-  defp install_console(scope) do
-    console = new_object()
-    declare(scope, "console", console)
-
-    for {name, level} <- [
-          {"log", :log},
-          {"info", :log},
-          {"debug", :log},
-          {"trace", :log},
-          {"dir", :log},
-          {"dirxml", :log},
-          {"table", :log},
-          {"warn", :warn},
-          {"error", :error}
-        ] do
-      def_fn(console, name, fn _, args ->
-        line = args |> Enum.map(&inspect_arg/1) |> Enum.join(" ")
-        Process.put(:js_console, [{level, line} | Process.get(:js_console, [])])
-        :undefined
-      end)
-    end
-
-    def_fn(console, "assert", fn _, args ->
-      if !truthy(arg(args, 0)) do
-        rest = args |> Enum.drop(1) |> Enum.map(&inspect_arg/1)
-        line = Interp.stack_string(Enum.join(["Assertion failed" | rest], ": "))
-        Process.put(:js_console, [{:error, line} | Process.get(:js_console, [])])
-      end
-
-      :undefined
-    end)
-
-    for name <-
-          ~w(group groupCollapsed groupEnd time timeEnd timeLog count countReset clear profile profileEnd timeStamp) do
-      def_fn(console, name, fn _, _ -> :undefined end)
-    end
-  end
-
-  defp inspect_arg(v) when is_binary(v), do: v
-  defp inspect_arg(v), do: inspect_js(v, 0, [])
+  defp install_console(scope), do: Browser.JS.ConsoleApi.install(scope)
 
   @doc "Node-style one-line rendering of a value, as `console.log` prints it."
   def inspect_js(v, depth, seen) do

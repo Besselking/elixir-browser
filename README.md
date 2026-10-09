@@ -40,6 +40,31 @@ lines you typed before. The Clear button empties the window.
 
 The console keeps the last 1000 lines of a page. A page that has no scripts has no console.
 
+An error shows the file and the line where it happened. For example,
+`at start (https://example.com/app.js:12)`. A script in the page is called `inline script 1`,
+`inline script 2`, and so on. The line number is the line in the script, not in the page.
+
+These console methods work: `log`, `info`, `debug`, `warn`, `error`, `dir`, `trace`, `assert`,
+`group`, `groupCollapsed`, `groupEnd`, `time`, `timeLog`, `timeEnd`, `count`, `countReset`,
+`table` and `clear`. The text can have the formats `%s`, `%d`, `%i`, `%f`, `%o`, `%O` and `%c`.
+The lines in a group have an indent. `console.table` draws a table of text.
+
+## Network panel
+
+Press Cmd+Option+E on macOS, or Ctrl+Shift+E on other systems. You can also choose
+Develop > Network. A separate window opens.
+
+The window lists each request that the browser makes: documents, style sheets, scripts, images,
+and `fetch` and `XMLHttpRequest` calls. A redirect shows one line for each step. Each line shows
+the status, the method, the type, the size, the time and the address. Select a line to see the
+request headers and the response headers below the list.
+
+A request that came from the cache shows `(cache)`. A request that the server answered with
+304 shows `304 (cached)`. A failed request shows `(failed)` and the error.
+
+Type text in the Filter box to show only the requests whose address has that text. The Clear
+button empties the list. The list keeps the last 500 requests. It shows the requests of all tabs.
+
 ## Crash reports
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.

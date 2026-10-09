@@ -96,7 +96,19 @@ defmodule Browser.ConsoleWindow do
   @doc "Adds entries (`Browser.Console.entry/0`) to the end of the view."
   def append(_win, []), do: :ok
 
-  def append(%{log: log}, entries) do
+  def append(%{log: log} = win, entries) do
+    # (`console.clear()` empties the view: only what follows it stays)
+    case entries |> Enum.reverse() |> Enum.split_while(&(elem(&1, 1) != :clear)) do
+      {_, []} ->
+        append_entries(log, entries)
+
+      {after_clear, _} ->
+        clear(win)
+        append_entries(log, Enum.reverse(after_clear))
+    end
+  end
+
+  defp append_entries(log, entries) do
     for {_seq, level, text, time} <- entries do
       {fg, bg} = colours(level)
       attr = :wxTextAttr.new(fg, colBack: bg)
@@ -113,7 +125,9 @@ defmodule Browser.ConsoleWindow do
     {_, {h, m, s}} = :calendar.system_time_to_local_time(time, :millisecond)
     stamp = :io_lib.format(~c"~2..0B:~2..0B:~2..0B ", [h, m, s]) |> to_string()
     mark = Map.get(%{input: "› ", result: "← ", warn: "⚠ ", error: "✖ "}, level, "")
-    String.to_charlist(stamp <> mark <> text <> "\n")
+    # the lines after the first of an entry (a stack, a table) line up with its first
+    lead = String.duplicate(" ", String.length(stamp <> mark))
+    String.to_charlist(stamp <> mark <> String.replace(text, "\n", "\n" <> lead) <> "\n")
   end
 
   # text and background colour of each level
