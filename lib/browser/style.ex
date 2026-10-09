@@ -1946,10 +1946,18 @@ defmodule Browser.Style do
     cond do
       Browser.Calc.math?(v) ->
         case Browser.Calc.eval(v, &unit_px(&1, env)) do
-          {:ok, {:pct, f}} -> {:ok, {:pct, f}}
-          {:ok, {:px, n}} -> {:ok, n}
-          {:ok, {:calc, _, _} = mixed} when prop in ~w(width min-width max-width) -> {:ok, mixed}
-          _ -> :skip
+          {:ok, {:pct, f}} ->
+            {:ok, {:pct, f}}
+
+          {:ok, {:px, n}} ->
+            {:ok, n}
+
+          {:ok, {:calc, _, _} = mixed}
+          when prop in ~w(width min-width max-width height min-height max-height) ->
+            {:ok, mixed}
+
+          _ ->
+            :skip
         end
 
       m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) ->

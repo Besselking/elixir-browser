@@ -837,6 +837,7 @@ defmodule Browser.UI do
 
   # only marks where a control is
   defp draw(_dc, %{type: :box}, _y, _scroll), do: :ok
+  defp draw(_dc, %{type: :bounds}, _y, _scroll), do: :ok
 
   defp draw(dc, %{type: :shadow} = item, _y, scroll) do
     gc = new_gc(dc)

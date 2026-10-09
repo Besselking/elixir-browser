@@ -203,9 +203,28 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp value(%{"type" => "i64", "value" => v}), do: String.to_integer(v)
   defp value(%{"type" => "f32", "value" => v}), do: Num.f32_from_bits(String.to_integer(v))
   defp value(%{"type" => "f64", "value" => v}), do: Num.f64_from_bits(String.to_integer(v))
+
+  defp value(%{"type" => "v128", "lane_type" => lt, "value" => vs}),
+    do: vs |> Enum.map(&String.to_integer/1) |> Browser.Wasm.Simd.pack(lane_bits(lt))
+
+  defp value(%{"type" => "hostref", "value" => v}), do: {:ext, {:extern, String.to_integer(v)}}
   defp value(%{"type" => "externref", "value" => "null"}), do: :null
   defp value(%{"type" => "externref", "value" => v}), do: {:extern, String.to_integer(v)}
   defp value(%{"type" => "funcref", "value" => "null"}), do: :null
+
+  defp match_value(v, %{"type" => "v128", "lane_type" => lt, "value" => es}) do
+    b = lane_bits(lt)
+    ft = if lt in ["f32", "f64"], do: lt
+
+    is_integer(v) and
+      Enum.all?(Enum.zip(Browser.Wasm.Simd.lanes(v, b), es), fn {x, e} ->
+        case e do
+          "nan:canonical" -> x in canonical(ft)
+          "nan:arithmetic" -> arithmetic_nan?(ft, x)
+          _ -> x == String.to_integer(e)
+        end
+      end)
+  end
 
   defp match_value(v, %{"type" => t, "value" => "nan:canonical"}) do
     case v do
@@ -224,6 +243,19 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp match_value(v, %{"type" => "f64", "value" => e}),
     do: Num.f64_to_bits(v) == String.to_integer(e)
 
+  defp match_value(v, %{"type" => "hostref", "value" => e}),
+    do: v == {:ext, {:extern, String.to_integer(e)}}
+
+  defp match_value(v, %{"type" => "i31ref"}), do: match?({:i31, _}, v)
+  defp match_value(v, %{"type" => "structref"}), do: match?(%Browser.Wasm.Gc.Struct{}, v)
+  defp match_value(v, %{"type" => "arrayref"}), do: match?(%Browser.Wasm.Gc.Array{}, v)
+
+  defp match_value(v, %{"type" => "eqref"}),
+    do:
+      match?({:i31, _}, v) or match?(%Browser.Wasm.Gc.Struct{}, v) or
+        match?(%Browser.Wasm.Gc.Array{}, v)
+
+  defp match_value(v, %{"type" => "anyref"}), do: v != :null
   defp match_value(v, %{"type" => "externref", "value" => "null"}), do: v == :null
 
   defp match_value(v, %{"type" => "externref", "value" => e}),
@@ -232,6 +264,11 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp match_value(v, %{"type" => "funcref", "value" => "null"}), do: v == :null
   defp match_value(v, %{"type" => "funcref"}), do: match?(%Func{}, v)
   defp match_value(v, %{"type" => "externref"}), do: v != :null
+
+  defp lane_bits(lt), do: lt |> String.slice(1..-1//1) |> String.to_integer()
+
+  defp arithmetic_nan?("f32", x), do: Num.f32_from_bits(x) |> then(&match?({:nan, _}, &1))
+  defp arithmetic_nan?("f64", x), do: Num.f64_from_bits(x) |> then(&match?({:nan, _}, &1))
 
   defp canonical("f32"), do: [0x7FC00000, 0xFFC00000]
   defp canonical("f64"), do: [0x7FF8000000000000, 0xFFF8000000000000]
@@ -258,7 +295,9 @@ defmodule Mix.Tasks.Wasm.Spec do
   defp spectest("global_f32", _), do: spec_global(:f32, Num.round32(666.6))
   defp spectest("global_f64", _), do: spec_global(:f64, 666.6)
   defp spectest("table", _), do: Table.new(:funcref, 10, 20)
+  defp spectest("table64", _), do: Table.new(:funcref, 10, 20, :null, :i64)
   defp spectest("memory", _), do: Memory.new(1, 2)
+  defp spectest("shared_memory", _), do: Memory.new(1, 2, true)
 
   defp spectest("print" <> _, {:func, type}), do: Func.host(type, fn _ -> [] end)
 

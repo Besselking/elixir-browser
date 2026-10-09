@@ -673,6 +673,11 @@ defmodule Browser.JS.Interp do
           function_get(id, o, key)
         end
 
+      :host
+      when is_number(key) and key >= 0 and key == trunc(key) and
+             :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
+        Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
+
       :host ->
         key = to_key(key)
         {mod, data} = o.host
@@ -1159,6 +1164,13 @@ defmodule Browser.JS.Interp do
             else
               put_array_prop(id, o, key, v)
             end
+        end
+
+      %{class: :host, host: {Browser.JS.TypedArrays, data}}
+      when is_number(key) and key >= 0 and key == trunc(key) ->
+        case Browser.JS.TypedArrays.put_index(data, trunc(key), v) do
+          :ok -> :ok
+          :readonly -> fail_put()
         end
 
       %{class: :host, host: {mod, data}} ->
@@ -2307,8 +2319,10 @@ defmodule Browser.JS.Interp do
             body_scope = hoist_into_body(scope, c, names, funs)
 
             try do
-              exec_list(c.body, body_scope)
-              :undefined
+              case exec_fn(c.body, body_scope) do
+                {:ret, v} -> v
+                :ok -> :undefined
+              end
             catch
               {:js_return, v} -> v
               {:js_tail, f, t, a} -> {:js_tailcall, f, t, a}
@@ -3141,6 +3155,45 @@ defmodule Browser.JS.Interp do
 
   defp exec_list(stmts, env), do: Enum.each(stmts, &exec(&1, env, []))
 
+  # A function body: a `return` that is reached through `if` and block statements only gives its
+  # value back as `{:ret, value}` instead of being thrown. A `return` of a call (or of a form that
+  # holds one in tail position) is left to `exec/3`, which may turn it into a tail call.
+  defp exec_fn([], _env), do: :ok
+
+  defp exec_fn([stmt | rest], env) do
+    case exec_fn_stmt(stmt, env) do
+      :ok -> exec_fn(rest, env)
+      {:ret, _} = ret -> ret
+    end
+  end
+
+  defp exec_fn_stmt({:return, nil}, _env), do: {:ret, :undefined}
+
+  defp exec_fn_stmt({:return, e}, env)
+       when not (is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical]),
+       do: {:ret, ev(e, env)}
+
+  defp exec_fn_stmt({:if, c, a, b}, env) do
+    :erlang.put(:js_last, :undefined)
+
+    cond do
+      truthy(ev(c, env)) -> exec_fn_stmt(a, env)
+      b != nil -> exec_fn_stmt(b, env)
+      true -> :ok
+    end
+  end
+
+  defp exec_fn_stmt({:block, stmts}, env) do
+    if scoped_block?(stmts), do: exec_other({:block, stmts}, env), else: exec_fn(stmts, env)
+  end
+
+  defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
+
+  defp exec_other(stmt, env) do
+    exec(stmt, env, [])
+    :ok
+  end
+
   @doc "Runs statements as a function body in `scope`: hoists, then executes."
   def run_body(stmts, scope) do
     hoist_vars(stmts, scope)
@@ -3481,7 +3534,8 @@ defmodule Browser.JS.Interp do
               {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
 
             {:var, sc} ->
-              case Map.fetch(deref(sc).vars, name) do
+              # (an import is a live binding: the slot holds an alias, not the value)
+              case lookup_var(sc, name) do
                 {:ok, v} when v != :tdz -> {v, :undefined}
                 _ -> {ev(callee, env), :undefined}
               end

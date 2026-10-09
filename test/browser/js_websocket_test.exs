@@ -92,16 +92,20 @@ defmodule Browser.JS.WebSocketTest do
     info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
     pid = Runtime.start(raw, info)
     r = Runtime.run_scripts(pid)
-    lines = for({_, t} <- r.console, do: t) ++ collect(pid, wait, [])
+    sync = for({_, t} <- r.console, do: t)
+    # (nothing logged yet: the first event may be slow to come on a busy machine)
+    first = if sync == [], do: max(wait, 5000), else: wait
+    lines = sync ++ collect(pid, first, wait, [])
     Runtime.stop(pid)
     lines
   end
 
-  defp collect(pid, wait, acc) do
+  defp collect(pid, first, wait, acc) do
     receive do
-      {:js_async, ^pid, reply} -> collect(pid, wait, acc ++ for({_, t} <- reply.console, do: t))
+      {:js_async, ^pid, reply} ->
+        collect(pid, wait, wait, acc ++ for({_, t} <- reply.console, do: t))
     after
-      wait -> acc
+      first -> acc
     end
   end
 

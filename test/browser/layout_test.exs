@@ -7333,6 +7333,79 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "heights with calc()" do
+    test "a height of a percentage less a length is of the height of the box around it" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:200px"><div style="height:calc(100% - 30px);background:green"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.h == 170
+    end
+
+    test "a min-height and a max-height can be a calc() with a percentage too" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:200px"><div style="min-height:calc(50% + 10px);background:green">x</div></div>| <>
+          ~s|<div style="height:200px"><div style="max-height:calc(50% - 10px);background:red;height:150px"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 110
+      assert Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0})).h == 90
+    end
+  end
+
+  describe "boxes: true" do
+    @plain ~s|<style>body{margin:0}</style><div id=a><div id=b><p>text</p></div></div>|
+
+    test "every element has a box of its own, drawn or not" do
+      page = Browser.Page.build(@plain, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0, boxes: true)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+
+      nid = fn id ->
+        Enum.find_value(page.pruned |> flat(), fn {i, n} -> if i == id, do: n end)
+      end
+
+      assert {0, 0, 400, h} = rects[nid.("b")]
+      assert h > 0
+      assert Enum.any?(items, &(&1.type == :bounds))
+    end
+
+    test "there are none without the option" do
+      page = Browser.Page.build(@plain, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      refute Enum.any?(items, &(&1.type == :bounds))
+    end
+
+    test "a box below the end of a box that clips keeps its bounds" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:50px;overflow:hidden"><div style="height:80px"></div><div id=late style="height:40px;background:red"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0, boxes: true)
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned))
+      nid = Enum.find_value(flat(page.pruned), fn {i, n} -> if i == "late", do: n end)
+      assert rects[nid] == {0, 80, 400, 40}
+    end
+  end
+
+  # {id attribute, @nid} of every element that has an id
+  defp flat(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &flat/1)
+  defp flat({:text, _}), do: []
+
+  defp flat({:element, _, attrs, kids}) do
+    own =
+      with {_, id} <- List.keyfind(attrs, "id", 0), {_, nid} <- List.keyfind(attrs, "@nid", 0) do
+        [{id, nid}]
+      else
+        _ -> []
+      end
+
+    own ++ flat(kids)
+  end
+
   describe "empty inline boxes, display: contents roots and anonymous table cells" do
     test "an empty span with a tall line height makes its line tall" do
       html =

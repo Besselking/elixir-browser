@@ -351,14 +351,21 @@ defmodule Browser.JS.Props do
 
   # the fields of a descriptor object that are present: %{value:, writable:, get:, set:, ...}
   defp to_desc({:obj, _} = o) do
-    field = fn name ->
-      if has_property?(o, name), do: [{String.to_atom(name), Interp.get(o, name)}], else: []
-    end
-
     desc =
-      ~w(enumerable configurable value writable get set)
-      |> Enum.flat_map(field)
-      |> Map.new()
+      Enum.reduce(
+        [
+          {"enumerable", :enumerable},
+          {"configurable", :configurable},
+          {"value", :value},
+          {"writable", :writable},
+          {"get", :get},
+          {"set", :set}
+        ],
+        %{},
+        fn {name, key}, acc ->
+          if has_property?(o, name), do: Map.put(acc, key, Interp.get(o, name)), else: acc
+        end
+      )
 
     desc =
       desc
@@ -549,6 +556,9 @@ defmodule Browser.JS.Props do
         state(receiver, key)
       end
 
+    o = deref(rid)
+    plain? = o.class == :object and not is_map_key(o, :proxy) and not is_map_key(o, :mapped)
+
     case existing do
       {:accessor, _, _, _, _} ->
         false
@@ -556,8 +566,21 @@ defmodule Browser.JS.Props do
       {:data, _, false, _, _} ->
         false
 
+      # a plain object whose property only gets a new value: no descriptor object is needed
+      {:data, _, true, _, _} when plain? ->
+        store(rid, %{o | props: Map.put(o.props, key, value)})
+        true
+
       {:data, _, _, _, _} ->
         try_define(receiver, key, new_object([{"value", value}]))
+
+      nil when plain? and is_binary(key) ->
+        if Map.get(o, :ext, true) do
+          create(rid, key, %{value: value, writable: true, enumerable: true, configurable: true})
+          true
+        else
+          false
+        end
 
       nil ->
         try_define(
@@ -664,15 +687,17 @@ defmodule Browser.JS.Props do
         else: Map.put(attrs, key, flags)
 
     keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
-    named = Enum.count(o.keys, &(is_binary(&1) and not index_key?(&1)))
 
     o =
-      if Map.get(desc, :enumerable, false),
-        do: o,
-        else:
-          o
-          |> Map.update(:horder, [key], &[key | &1])
-          |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
+      if Map.get(desc, :enumerable, false) do
+        o
+      else
+        named = Enum.count(o.keys, &(is_binary(&1) and not index_key?(&1)))
+
+        o
+        |> Map.update(:horder, [key], &[key | &1])
+        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
+      end
 
     store(
       id,

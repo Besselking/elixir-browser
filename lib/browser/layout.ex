@@ -108,6 +108,9 @@ defmodule Browser.Layout do
   Option `metrics: (style -> content_height_px)` gives the height of a font's glyphs (its
   `normal` line-height); without it text is taken to be 1.35 times its size.
 
+  Option `boxes: true` gives every element its own box in the result (a `:box` item when it
+  draws nothing), for scripts that ask for the size of any element.
+
   Option `scrollers: true` keeps the `:scroller` items that say where the boxes with
   `overflow: scroll | auto` are (see `Browser.Scrollers`); without it they are left out.
 
@@ -118,6 +121,7 @@ defmodule Browser.Layout do
     measure = spaced(measure)
     # (a tab-size given as a length is turned into columns with the width of a space)
     Process.put(:layout_measure, measure)
+    Process.put(:layout_boxes, Keyword.get(opts, :boxes, false))
 
     style = %{
       size: @base,
@@ -1990,7 +1994,8 @@ defmodule Browser.Layout do
       cid: style.cid,
       nid: style.nid,
       h: num(c["height"]),
-      hpct: pct_of(c["height"]),
+      hpct: pct_of(c["height"]) || calc_pct(c["height"]),
+      hoff: calc_px(c["height"]),
       hstretch: :hstretch in [c["height"], c["min-height"], c["max-height"]],
       hstretch_for: for(k <- ~w(height min-height max-height), c[k] == :hstretch, do: k),
       definite: box.definite,
@@ -2002,8 +2007,10 @@ defmodule Browser.Layout do
       # (`min-height: max-content` and its kind: the height of the content)
       minc: c["min-height"] == :fit,
       maxc: c["max-height"] == :fit,
-      maxpct: pct_of(c["max-height"]),
-      minpct: pct_of(c["min-height"]),
+      maxpct: pct_of(c["max-height"]) || calc_pct(c["max-height"]),
+      maxoff: calc_px(c["max-height"]),
+      minpct: pct_of(c["min-height"]) || calc_pct(c["min-height"]),
+      minoff: calc_px(c["min-height"]),
       clip: clips?(c),
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
@@ -2028,7 +2035,7 @@ defmodule Browser.Layout do
         spec.max || spec.pos || spec.cisw ||
         spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag)) ||
-        spec.hstretch
+        spec.hstretch || (spec.nid != nil and Process.get(:layout_boxes, false))
 
     if needed?, do: spec
   end
@@ -4548,9 +4555,9 @@ defmodule Browser.Layout do
 
     if is_number(base) do
       o
-      |> pct_set(:h, o.hpct, base)
-      |> pct_set(:max, o.maxpct, st.cbh)
-      |> pct_set(:min, o.minpct, st.cbh)
+      |> pct_set(:h, o.hpct, base, Map.get(o, :hoff, 0))
+      |> pct_set(:max, o.maxpct, st.cbh, Map.get(o, :maxoff, 0))
+      |> pct_set(:min, o.minpct, st.cbh, Map.get(o, :minoff, 0))
     else
       o
     end
@@ -4573,11 +4580,13 @@ defmodule Browser.Layout do
 
   defp stretch_height(o, _base), do: o
 
-  defp pct_set(o, key, pct, base) when is_number(pct) and is_number(base) do
-    if Map.get(o, key) == nil, do: Map.put(o, key, round(pct * base)), else: o
+  defp pct_set(o, key, pct, base, off) when is_number(pct) and is_number(base) do
+    if Map.get(o, key) == nil,
+      do: Map.put(o, key, max(round(pct * base + off), 0)),
+      else: o
   end
 
-  defp pct_set(o, _key, _pct, _base), do: o
+  defp pct_set(o, _key, _pct, _base, _off), do: o
 
   defp place_box(st, ref, o) do
     {_bt, br, _bb, bl} = o.bw
@@ -5035,9 +5044,16 @@ defmodule Browser.Layout do
         do: [%{type: :box, x: x, y: y, w: w, h: height}],
         else: []
 
+    # (with the `boxes` option every element keeps its box, for the scripts that ask for its size
+    # or position: a container that draws nothing itself, or one scrolled or clipped out of sight)
+    bounds =
+      if Map.get(o, :nid) && Process.get(:layout_boxes, false) && w > 0 && height > 0,
+        do: [%{type: :bounds, x: x, y: y, w: w, h: height}],
+        else: []
+
     # a box that clips its content (overflow) is not split across columns
     body = if o[:clip], do: Enum.map(body, &Map.put(&1, :mono, true)), else: body
-    shadows ++ body ++ marker
+    shadows ++ body ++ marker ++ bounds
   end
 
   # the box around all of a shadow's layers, so it is drawn whenever any of it is visible
@@ -5158,12 +5174,14 @@ defmodule Browser.Layout do
     end)
   end
 
-  # drop whatever was created inside the box entirely below `limit`
+  # drop whatever was created inside the box entirely below `limit` (an element still has its
+  # box for the scripts, drawn or not: `:bounds` stay)
   defp drop_below(st, box, limit) do
+    keep? = &(&1.y < limit or &1.type == :bounds)
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
-    kept_items = Enum.filter(new_items, &(&1.y < limit))
+    kept_items = Enum.filter(new_items, keep?)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
-    kept_rects = Enum.filter(new_rects, &(&1.y < limit))
+    kept_rects = Enum.filter(new_rects, keep?)
 
     %{
       st
@@ -5385,6 +5403,12 @@ defmodule Browser.Layout do
 
   defp pct_of({:pct, f}), do: f
   defp pct_of(_), do: nil
+
+  # a height of `calc(100% - 2rem)`: a share of the enclosing height, and a length
+  defp calc_pct({:calc, _px, f}), do: f
+  defp calc_pct(_), do: nil
+  defp calc_px({:calc, px, _f}), do: px
+  defp calc_px(_), do: 0
 
   # the static position of an absolute child of a flex container, moved by the container's
   # alignment (when the container's size on that axis is known)

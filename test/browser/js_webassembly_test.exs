@@ -9,6 +9,7 @@ defmodule Browser.JS.WebAssemblyTest do
   const MEM = b64("AGFzbQEAAAABDwNgAX8Bf2ACf38AYAABfwMGBQABAAACBQQBAQECBzAGA21lbQIABWxvYWQ4AAAHc3RvcmUzMgABBmxvYWQzMgACBGdyb3cAAwRzaXplAAQKJwUHACAALQAACwkAIAAgATYCAAsHACAAKAIACwYAIABAAAsEAD8ACwsLAQBBCAsFaGVsbG8=");
   const TBL = b64("AGFzbQEAAAABDAJgAX8Bf2ACf38BfwMEAwAAAQQEAXAAAwcOAgN0YmwBAARjYWxsAAIJCAEAQQALAgABChsDBwAgAEECbAsHACAAQQNsCwkAIAEgABEAAAs=");
   const IMP = b64("AGFzbQEAAAABDAJgAn9/AX9gAX8BfwIUAgNlbnYDYWRkAAADZW52AWcDfwEDAgEBBgYBfwFBAAsHDQIDY250AwEDcnVuAAEKFQETACAAIwAQACQAIwFBAWokASMACw==");
+  const EXC = b64("AGFzbQEAAAABFgVgAABgAX8AYAF/AX9gAAF/YAACf2kCDwEDZW52B2pzdGhyb3cAAAMHBgECAwEDAQ0FAgABAAAHNwYBZQQAB2NhdGNoSXQAAghjYXRjaEFsbAADCHVuY2F1Z2h0AAQFdmlhSnMABQdyZXRocm93AAYKagYGACAACAALIAEBf0HkACEBAn8ffwEAAABBByEBIAAQAUF/CwsgAWoLEgACQB9AAQIACAELQQAPC0EBCwYAIAAQAQsSAAJAH0ABAgAQAEEADwsLQQELEwACBB8EAQEAACAAEAEACwsKGgs=");
   const CTL = b64("AGFzbQEAAAABIgZgAX8Bf2ACf38Bf2AAAGACf38Cf39gAn19AX1gAn5+AX4DCAcAAAECAwQFBy0HAnN3AAADc3VtAAEDZGl2AAIEdHJhcAADBHN3YXAABAFmAAUGaTY0bXVsAAYKYQcaAAJAAkACQCAADgIAAQILQQoPC0EUDwtBHgshAQF/AkADQCAARQ0BIAEgAGohASAAQQFrIQAMAAsLIAELBwAgACABbQsDAAALBgAgASAACwcAIAAgAZILBwAgACABfgs=");
   """
 
@@ -195,5 +196,70 @@ defmodule Browser.JS.WebAssemblyTest do
                "rejected CompileError",
                "rejected TypeError"
              ])
+  end
+
+  test "SIMD: the module runs, v128 does not cross into JavaScript" do
+    {logs, errors} =
+      run(~S"""
+      const SIMD = b64("AGFzbQEAAAABGAVgAn9/AX9gAX8Bf2AAAX9gAAF9YAABewMHBgABAgIDBAUDAQABBywHA21lbQIABGFkZDQAAARzdW04AAEEbWFzawACBHNodWYAAwJmbAAEAXYABQrNAQYQACAA/REgAf0R/a4B/RsDCyUAQQD9DAECAwQFBgcICQoLDA0ODxD9CwQAQQD9AAQA/X39GQcLFgD9DP8A/wAAAAAAAAAAAAAAAID9ZAs7AP0MAAECAwQFBgcICQoLDA0OD/0MEBESExQVFhcYGRobHB0eH/0NHx4dHAAAAAAAAAAAAAAAAP0bAAssAP0MAADAPwAAIEAAAGBAAACQQP0MAACAPwAAgD8AAIA/AACAP/3kAf0fAgsUAP0MAQAAAAIAAAADAAAABAAAAAs=");
+      const i = new WebAssembly.Instance(new WebAssembly.Module(SIMD)).exports;
+      console.log(i.add4(40, 2), i.sum8(0), i.mask(), i.fl());
+      try { i.v(); } catch (e) { console.log(e.constructor.name); }
+      """)
+
+    assert errors == []
+    assert logs == ["42 31 32773 4.5", "TypeError"]
+  end
+
+  test "GC references: structs are opaque objects, small integers are i31 values" do
+    {logs, errors} =
+      run(~S"""
+      const G = b64("AGFzbQEAAAABGgVfAX8AYAF/AW5gAW4Bf2ABbgFuYAFkbgF/AwYFAQICAwQHHgUCbWsAAANnZXQAAQVpc2kzMQACAmlkAAMCbm4ABAonBQcAIAD7AAALCwAgAPsWAPsCAAALBwAgAPsUbAsEACAACwQAQQEL");
+      const i = new WebAssembly.Instance(new WebAssembly.Module(G)).exports;
+      const o = i.mk(7);
+      console.log(typeof o, i.get(o), i.mk(7) === o, i.id(o) === o);
+      console.log(i.isi31(5), i.isi31("x"), i.id(5), i.id(null), i.id("s"));
+      try { i.get("x"); } catch (e) { console.log(e.constructor.name); }
+      try { i.nn(null); } catch (e) { console.log(e.constructor.name); }
+      """)
+
+    assert errors == []
+    assert logs == ["object 7 false true", "1 0 5 null s", "RuntimeError", "TypeError"]
+  end
+
+  test "exceptions: catch, locals survive, uncaught become WebAssembly.Exception, JS can throw into the module" do
+    {logs, errors} =
+      run(~S"""
+      const jsthrow = () => { throw new WebAssembly.Exception(tagFromModule, [42]); };
+      let tagFromModule;
+      const m = new WebAssembly.Module(EXC);
+      console.log(JSON.stringify(WebAssembly.Module.exports(m).map((e) => e.kind + ":" + e.name)));
+      // a module that throws into a catch_all through an import: the import throws a plain Error first
+      const inst = new WebAssembly.Instance(m, { env: { jsthrow: () => { throw new WebAssembly.Exception(tagFromModule, [1]); } } });
+      tagFromModule = inst.exports.e;
+      const x = inst.exports;
+      console.log(x.e instanceof WebAssembly.Tag, x.catchIt(5), x.catchAll(), x.viaJs());
+      try { x.uncaught(9); } catch (e) {
+        console.log(e instanceof WebAssembly.Exception, e.is(x.e), e.getArg(x.e, 0), String(e));
+      }
+      try { x.rethrow(3); } catch (e) { console.log("rethrown", e.getArg(x.e, 0)); }
+      const other = new WebAssembly.Tag({ parameters: ["i32"] });
+      const ex = new WebAssembly.Exception(other, [7]);
+      console.log(ex.is(other), ex.is(x.e));
+      try { ex.getArg(x.e, 0); } catch (e) { console.log(e.constructor.name); }
+      try { new WebAssembly.Exception(other, []); } catch (e) { console.log(e.constructor.name); }
+      """)
+
+    assert errors == []
+
+    assert logs == [
+             ~s(["tag:e","function:catchIt","function:catchAll","function:uncaught","function:viaJs","function:rethrow"]),
+             "true 12 1 1",
+             "true true 9 [object WebAssembly.Exception]",
+             "rethrown 3",
+             "true false",
+             "TypeError",
+             "TypeError"
+           ]
   end
 end

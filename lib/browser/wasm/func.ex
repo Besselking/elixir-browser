@@ -4,7 +4,7 @@ defmodule Browser.Wasm.Func do
   `fun` takes the argument list and returns the list of results.
   """
 
-  defstruct [:id, :type, :impl]
+  defstruct [:id, :type, :impl, :ct]
 
   def host(type, fun), do: %__MODULE__{id: make_ref(), type: type, impl: {:host, fun}}
 end

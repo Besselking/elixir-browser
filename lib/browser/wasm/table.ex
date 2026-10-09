@@ -6,12 +6,12 @@ defmodule Browser.Wasm.Table do
 
   alias Browser.Wasm.Error
 
-  defstruct [:id, :type, :max]
+  defstruct [:id, :type, :max, addr: :i32]
 
-  def new(type, min, max, init \\ :null) do
+  def new(type, min, max, init \\ :null, addr \\ :i32) do
     id = make_ref()
     Process.put({__MODULE__, id}, Tuple.duplicate(init, min))
-    %__MODULE__{id: id, type: type, max: max}
+    %__MODULE__{id: id, type: type, max: max, addr: addr}
   end
 
   def size(%__MODULE__{id: id}), do: tuple_size(Process.get({__MODULE__, id}))
