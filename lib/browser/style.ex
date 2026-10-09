@@ -1913,6 +1913,12 @@ defmodule Browser.Style do
               v in ["stretch", "-webkit-fill-available", "-moz-available"],
        do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
 
+  # `height: stretch`: the room the containing block's (definite) height leaves
+  defp typed(prop, v, _env, _pc)
+       when prop in ["height", "min-height", "max-height"] and
+              v in ["stretch", "-webkit-fill-available", "-moz-available"],
+       do: {:ok, :hstretch}
+
   # fit-content(<length-percentage>): as wide as the content, but at least its narrowest and
   # at most the length
   defp typed("width", "fit-content(" <> rest, env, _pc) do

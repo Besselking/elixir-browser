@@ -1552,6 +1552,7 @@ css/CSS2/margin-padding-clear/margin-collapse-130.xht
 css/CSS2/margin-padding-clear/margin-collapse-131.xht
 css/CSS2/margin-padding-clear/margin-collapse-155.xht
 css/CSS2/margin-padding-clear/margin-collapse-156.xht
+css/CSS2/margin-padding-clear/margin-collapse-159.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-001.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-007.xht
 css/CSS2/margin-padding-clear/margin-collapse-clear-011.xht
@@ -5014,6 +5015,10 @@ css/css-sizing/slice-intrinsic-size.html
 css/css-sizing/slice-nowrap-intrinsic-size-bidi.html
 css/css-sizing/slice-nowrap-intrinsic-size.html
 css/css-sizing/stretch/bfc-next-to-float-1.html
+css/css-sizing/stretch/block-height-003.html
+css/css-sizing/stretch/block-height-006.html
+css/css-sizing/stretch/block-height-009.html
+css/css-sizing/stretch/block-height-010.html
 css/css-sizing/stretch/fixed-table-1.html
 css/css-sizing/stretch/flexbox-stretch-minimum-001.html
 css/css-sizing/stretch/flexbox-stretch-minimum-002.html

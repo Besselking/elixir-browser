@@ -1934,6 +1934,8 @@ defmodule Browser.Layout do
       nid: style.nid,
       h: num(c["height"]),
       hpct: pct_of(c["height"]),
+      hstretch: :hstretch in [c["height"], c["min-height"], c["max-height"]],
+      hstretch_for: for(k <- ~w(height min-height max-height), c[k] == :hstretch, do: k),
       definite: box.definite,
       ratio: aspect_ratio(c["aspect-ratio"]),
       flex_sized: c["@flex_sized"] == true,
@@ -1968,7 +1970,8 @@ defmodule Browser.Layout do
         spec.min || spec.ratio || spec.maxpct ||
         spec.max || spec.pos || spec.cisw ||
         spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
-        spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
+        spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag)) ||
+        spec.hstretch
 
     if needed?, do: spec
   end
@@ -3772,7 +3775,7 @@ defmodule Browser.Layout do
     ch = st.y - (box.top + bt + box.o.pt)
 
     # (`max-height` has no say in it: CSS2 test margin-collapse-038)
-    sized? = is_number(box.o.min) and box.o.min > ch
+    sized? = (is_number(box.o.min) and box.o.min > ch) or (is_number(box.o.h) and box.o.h > 0)
 
     st =
       cond do
@@ -4382,6 +4385,7 @@ defmodule Browser.Layout do
   defp percent_height(st, o) do
     # the root's percentage refers to the window, anything else to the block it sits in
     base = if o.root and st.root_view, do: st.view_h, else: st.cbh
+    o = stretch_height(o, base)
 
     if is_number(base) do
       o
@@ -4392,6 +4396,23 @@ defmodule Browser.Layout do
       o
     end
   end
+
+  # `height: stretch`: the containing block's (definite) height, less the padding and borders
+  # when it is for the content box. The margins in the block direction are left out: they
+  # collapse with the container's or fall outside it.
+  defp stretch_height(%{hstretch: true} = o, base) when is_number(base) do
+    {bt, _, bb, _} = o.bw
+    inner = if o.sizing == :border, do: 0, else: o.pt + o.pb + bt + bb
+    h = round(max(base - inner, 0))
+
+    Enum.reduce(o.hstretch_for, o, fn
+      "height", o -> if o.h == nil, do: %{o | h: h}, else: o
+      "min-height", o -> if o.min == nil, do: %{o | min: h}, else: o
+      "max-height", o -> if o.max == nil, do: %{o | max: h}, else: o
+    end)
+  end
+
+  defp stretch_height(o, _base), do: o
 
   defp pct_set(o, key, pct, base) when is_number(pct) and is_number(base) do
     if Map.get(o, key) == nil, do: Map.put(o, key, round(pct * base)), else: o
