@@ -6,7 +6,7 @@ defmodule Browser.Wasm.Interp do
   """
 
   import Bitwise
-  alias Browser.Wasm.{Func, Global, Memory, Num, Table}
+  alias Browser.Wasm.{Atomic, Func, Gc, Global, Memory, Num, Simd, Table, Types}
 
   @max_depth 10_000
 
@@ -70,20 +70,20 @@ defmodule Browser.Wasm.Interp do
 
       {:jump, to} ->
         back(to, pc)
-        run(code, to, stack, locals, inst, depth)
+        go(code, to, stack, locals, inst, depth)
 
       {:jump_unless, to} ->
         [c | st] = stack
-        run(code, if(c == 0, do: to, else: pc + 1), st, locals, inst, depth)
+        go(code, if(c == 0, do: to, else: pc + 1), st, locals, inst, depth)
 
       {:jump_if, to} ->
         [c | st] = stack
         if c != 0, do: back(to, pc)
-        run(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
+        go(code, if(c == 0, do: pc + 1, else: to), st, locals, inst, depth)
 
       {:br, to, arity, drop} ->
         back(to, pc)
-        run(code, to, branch(stack, arity, drop), locals, inst, depth)
+        go(code, to, branch(stack, arity, drop), locals, inst, depth)
 
       {:br_if, to, arity, drop} ->
         [c | st] = stack
@@ -92,7 +92,7 @@ defmodule Browser.Wasm.Interp do
           run(code, pc + 1, st, locals, inst, depth)
         else
           back(to, pc)
-          run(code, to, branch(st, arity, drop), locals, inst, depth)
+          go(code, to, branch(st, arity, drop), locals, inst, depth)
         end
 
       {:br_table, targets, default} ->
@@ -102,31 +102,136 @@ defmodule Browser.Wasm.Interp do
           if i < tuple_size(targets), do: elem(targets, i), else: default
 
         back(to, pc)
-        run(code, to, branch(st, arity, drop), locals, inst, depth)
+        go(code, to, branch(st, arity, drop), locals, inst, depth)
 
       {:return, n} ->
         stack |> Enum.take(n) |> Enum.reverse()
 
       {:call, idx, np} ->
         {args, rest} = Enum.split(stack, np)
-        results = invoke(elem(inst.funcs, idx), Enum.reverse(args), depth)
-        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+        case call(inst, locals, elem(inst.funcs, idx), Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:return_call, idx, np} ->
+        {args, _} = Enum.split(stack, np)
+        tail_call(elem(inst.funcs, idx), Enum.reverse(args), depth)
+
+      {:return_call_indirect, ti, tbl, np} ->
+        [i | st] = stack
+        f = indirect(inst, ti, tbl, i)
+        {args, _} = Enum.split(st, np)
+        tail_call(f, Enum.reverse(args), depth)
 
       {:call_indirect, ti, tbl, np} ->
         [i | st] = stack
-        table = elem(inst.tables, tbl)
-        if i >= Table.size(table), do: trap("undefined element")
-
-        f =
-          case Table.get(table, i) do
-            :null -> trap("uninitialized element")
-            f -> f
-          end
-
-        if f.type != elem(inst.types, ti), do: trap("indirect call type mismatch")
+        f = indirect(inst, ti, tbl, i)
         {args, rest} = Enum.split(st, np)
-        results = invoke(f, Enum.reverse(args), depth)
-        run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+
+        case call(inst, locals, f, Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:call_ref, np} ->
+        [f | st] = stack
+        if f == :null, do: trap("null function reference")
+        {args, rest} = Enum.split(st, np)
+
+        case call(inst, locals, f, Enum.reverse(args), depth) do
+          {:__exc, _, _} = exc -> exc
+          results -> run(code, pc + 1, push_results(results, rest), locals, inst, depth)
+        end
+
+      {:return_call_ref, np} ->
+        [f | st] = stack
+        if f == :null, do: trap("null function reference")
+        {args, _} = Enum.split(st, np)
+        tail_call(f, Enum.reverse(args), depth)
+
+      {:br_on_null, to, arity, drop} ->
+        [v | st] = stack
+
+        if v == :null do
+          back(to, pc)
+          go(code, to, branch(st, arity, drop), locals, inst, depth)
+        else
+          run(code, pc + 1, stack, locals, inst, depth)
+        end
+
+      {:br_on_non_null, to, arity, drop} ->
+        [v | st] = stack
+
+        if v == :null do
+          run(code, pc + 1, st, locals, inst, depth)
+        else
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
+        end
+
+      {:br_on_cast, to, arity, drop, nullable, ht} ->
+        [v | _] = stack
+
+        if Gc.matches?(v, nullable, ht) do
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
+        else
+          run(code, pc + 1, stack, locals, inst, depth)
+        end
+
+      {:br_on_cast_fail, to, arity, drop, nullable, ht} ->
+        [v | _] = stack
+
+        if Gc.matches?(v, nullable, ht) do
+          run(code, pc + 1, stack, locals, inst, depth)
+        else
+          back(to, pc)
+          go(code, to, branch(stack, arity, drop), locals, inst, depth)
+        end
+
+      {:throw, t, np} ->
+        {args, _} = Enum.split(stack, np)
+        raise_exc({:wasm_exception, elem(inst.tags, t), Enum.reverse(args)}, inst, locals)
+
+      :throw_ref ->
+        case stack do
+          [{:exn, tag, vals} | _] -> raise_exc({:wasm_exception, tag, vals}, inst, locals)
+          _ -> trap("null exception reference")
+        end
+
+      {:throw_ref_skip, n} ->
+        [{:exn, tag, vals} | _] = stack
+        raise_exc_skip({:wasm_exception, tag, vals}, n, inst, locals)
+
+      {:try_table, handlers, np, hi} ->
+        nested = %{inst | tr: {pc + 1, hi}}
+
+        case run(code, pc + 1, stack, locals, nested, depth) do
+          {:__exit, to, st, locals2} ->
+            go(code, to, st, locals2, inst, depth)
+
+          {:__exc_skip, n, exc, locals2} ->
+            raise_exc_skip(exc, n - 1, inst, locals2)
+
+          {:__exc, {:wasm_exception, tag, vals} = exc, locals2} ->
+            case find_handler(handlers, inst, tag) do
+              nil ->
+                raise_exc(exc, inst, locals2)
+
+              {ref?, to, arity, drop} ->
+                pushed = push_results(vals, Enum.drop(stack, np))
+                pushed = if ref?, do: [{:exn, tag, vals} | pushed], else: pushed
+                go(code, to, branch(pushed, arity, drop), locals2, inst, depth)
+            end
+
+          results ->
+            results
+        end
+
+      :try_end ->
+        {:__exit, pc + 1, stack, locals}
 
       :drop ->
         run(code, pc + 1, tl(stack), locals, inst, depth)
@@ -146,23 +251,48 @@ defmodule Browser.Wasm.Interp do
         Global.set(elem(inst.globals, i), v)
         run(code, pc + 1, st, locals, inst, depth)
 
-      {:load, kind, off} ->
+      {:load, kind, off, m} ->
         [base | st] = stack
-        v = load(elem(inst.mems, 0), kind, base + off)
+        v = load(elem(inst.mems, m), kind, base + off)
         run(code, pc + 1, [v | st], locals, inst, depth)
 
-      {:store, kind, off} ->
+      {:store, kind, off, m} ->
         [v, base | st] = stack
-        store(elem(inst.mems, 0), kind, base + off, v)
+        store(elem(inst.mems, m), kind, base + off, v)
         run(code, pc + 1, st, locals, inst, depth)
 
-      :memory_size ->
-        run(code, pc + 1, [Memory.size(elem(inst.mems, 0)) | stack], locals, inst, depth)
+      {:simd, shape, op, imm, n} ->
+        {args, st} = Enum.split(stack, n)
+        r = Simd.exec(shape, op, Enum.reverse(args), imm)
+        run(code, pc + 1, [r | st], locals, inst, depth)
 
-      :memory_grow ->
+      {:atomic, op, width, off, m, n} ->
+        {args, st} = Enum.split(stack, n)
+
+        st =
+          case Atomic.exec(op, width, off, elem(inst.mems, m), Enum.reverse(args)) do
+            :none -> st
+            r -> [r | st]
+          end
+
+        run(code, pc + 1, st, locals, inst, depth)
+
+      {:atomic_fence} ->
+        run(code, pc + 1, stack, locals, inst, depth)
+
+      {:simd_mem, op, off, m, lane} ->
+        st = Simd.mem(op, lane, elem(inst.mems, m), off, stack)
+        run(code, pc + 1, st, locals, inst, depth)
+
+      {:memory_size, m} ->
+        run(code, pc + 1, [Memory.size(elem(inst.mems, m)) | stack], locals, inst, depth)
+
+      {:memory_grow, m} ->
         [d | st] = stack
-        r = Memory.grow(elem(inst.mems, 0), d)
-        run(code, pc + 1, [r &&& 0xFFFFFFFF | st], locals, inst, depth)
+        mem = elem(inst.mems, m)
+        r = Memory.grow(mem, d)
+        mask = if mem.addr == :i64, do: 0xFFFFFFFFFFFFFFFF, else: 0xFFFFFFFF
+        run(code, pc + 1, [r &&& mask | st], locals, inst, depth)
 
       :ref_is_null ->
         [v | st] = stack
@@ -176,6 +306,67 @@ defmodule Browser.Wasm.Interp do
         run(code, pc + 1, st, locals, inst, depth)
     end
   end
+
+  # a branch; inside a try_table, one that leaves its code ends the nested run
+  defp go(code, to, stack, locals, %{tr: tr} = inst, depth) do
+    case tr do
+      {lo, hi} when to < lo or to > hi -> {:__exit, to, stack, locals}
+      _ -> run(code, to, stack, locals, inst, depth)
+    end
+  end
+
+  # a call; in a try_table an exception comes back as a value, so the locals are not lost
+  defp call(%{tr: false}, _, f, args, depth), do: invoke(f, args, depth)
+
+  defp call(_, locals, f, args, depth) do
+    invoke(f, args, depth)
+  catch
+    :throw, {:wasm_exception, _, _} = exc -> {:__exc, exc, locals}
+  end
+
+  # a delegate: skip the next `n` enclosing try blocks
+  defp raise_exc_skip(exc, 0, inst, locals), do: raise_exc(exc, inst, locals)
+  defp raise_exc_skip(exc, _, %{tr: false}, _), do: throw(exc)
+  defp raise_exc_skip(exc, n, _, locals), do: {:__exc_skip, n, exc, locals}
+
+  defp raise_exc(exc, %{tr: false}, _), do: throw(exc)
+  defp raise_exc(exc, _, locals), do: {:__exc, exc, locals}
+
+  defp find_handler(handlers, inst, tag) do
+    Enum.find_value(handlers, fn {t, ref?, to, arity, drop} ->
+      if t == :all or elem(inst.tags, t) == tag, do: {ref?, to, arity, drop}
+    end)
+  end
+
+  defp func_matches?(%Func{ct: k}, key, _) when k != nil, do: Types.key_sub?(k, key)
+  defp func_matches?(%Func{type: type}, _, type), do: true
+  defp func_matches?(_, _, _), do: false
+
+  defp indirect(inst, ti, tbl, i) do
+    table = elem(inst.tables, tbl)
+    if i >= Table.size(table), do: trap("undefined element")
+
+    f =
+      case Table.get(table, i) do
+        :null -> trap("uninitialized element")
+        f -> f
+      end
+
+    unless func_matches?(f, elem(inst.keys, ti), elem(inst.types, ti)),
+      do: trap("indirect call type mismatch")
+
+    f
+  end
+
+  # runs the callee in place of the caller: the depth does not grow
+  defp tail_call(%Func{impl: {:wasm, iid, idx}}, args, depth) do
+    tick()
+    inst = instance(iid)
+    fc = elem(inst.code, idx)
+    run(fc.code, 0, [], List.to_tuple(args ++ fc.zeros), inst, depth)
+  end
+
+  defp tail_call(func, args, depth), do: invoke(func, args, depth)
 
   defp branch(stack, 0, 0), do: stack
   defp branch(stack, 0, drop), do: Enum.drop(stack, drop)
@@ -198,8 +389,11 @@ defmodule Browser.Wasm.Interp do
 
   defp bulk({:table_size, t}, st, inst), do: [Table.size(elem(inst.tables, t)) | st]
 
-  defp bulk({:table_grow, t}, [n, v | st], inst),
-    do: [Table.grow(elem(inst.tables, t), n, v) &&& 0xFFFFFFFF | st]
+  defp bulk({:table_grow, t}, [n, v | st], inst) do
+    table = elem(inst.tables, t)
+    mask = if table.addr == :i64, do: 0xFFFFFFFFFFFFFFFF, else: 0xFFFFFFFF
+    [Table.grow(table, n, v) &&& mask | st]
+  end
 
   defp bulk({:table_fill, t}, [n, v, i | st], inst) do
     Table.fill(elem(inst.tables, t), i, v, n)
@@ -227,10 +421,10 @@ defmodule Browser.Wasm.Interp do
     st
   end
 
-  defp bulk({:memory_init, d}, [n, src, dst | st], inst) do
+  defp bulk({:memory_init, d, m}, [n, src, dst | st], inst) do
     segs = segments(inst.id)
     bytes = elem(segs.datas, d)
-    mem = elem(inst.mems, 0)
+    mem = elem(inst.mems, m)
     if src + n > byte_size(bytes), do: trap("out of bounds memory access")
     if dst + n > Memory.size(mem) * Memory.page_size(), do: trap("out of bounds memory access")
     if n > 0, do: Memory.write(mem, dst, binary_part(bytes, src, n))
@@ -243,15 +437,59 @@ defmodule Browser.Wasm.Interp do
     st
   end
 
-  defp bulk(:memory_copy, [n, src, dst | st], inst) do
-    Memory.copy(elem(inst.mems, 0), dst, src, n)
+  defp bulk({:memory_copy, d, s}, [n, src, dst | st], inst) do
+    Memory.copy(elem(inst.mems, d), dst, elem(inst.mems, s), src, n)
     st
   end
 
-  defp bulk(:memory_fill, [n, v, dst | st], inst) do
-    Memory.fill(elem(inst.mems, 0), dst, v &&& 0xFF, n)
+  defp bulk({:memory_fill, m}, [n, v, dst | st], inst) do
+    Memory.fill(elem(inst.mems, m), dst, v &&& 0xFF, n)
     st
   end
+
+  defp bulk({:array_new_data, key, st, d}, [n, off | rest], inst) do
+    bytes = elem(segments(inst.id).datas, d)
+    size = Gc.size(st)
+    if off + n * size > byte_size(bytes), do: trap("out of bounds memory access")
+
+    values =
+      for i <- 0..(n - 1)//1,
+          do: Gc.decode(st, binary_part(bytes, off + i * size, size))
+
+    [Gc.new_array(key, values) | rest]
+  end
+
+  defp bulk({:array_new_elem, key, e}, [n, off | rest], inst) do
+    items = elem(segments(inst.id).elems, e)
+    if off + n > length(items), do: trap("out of bounds table access")
+    [Gc.new_array(key, items |> Enum.drop(off) |> Enum.take(n)) | rest]
+  end
+
+  defp bulk({:array_init_data, st, d}, [n, src, di, arr | rest], inst) do
+    bytes = elem(segments(inst.id).datas, d)
+    size = Gc.size(st)
+    len = Gc.array_len(arr)
+    if di + n > len, do: trap("out of bounds array access")
+    if src + n * size > byte_size(bytes), do: trap("out of bounds memory access")
+
+    values =
+      for i <- 0..(n - 1)//1,
+          do: Gc.decode(st, binary_part(bytes, src + i * size, size))
+
+    Gc.array_write(arr, di, values)
+    rest
+  end
+
+  defp bulk({:array_init_elem, e}, [n, src, di, arr | rest], inst) do
+    items = elem(segments(inst.id).elems, e)
+    len = Gc.array_len(arr)
+    if di + n > len, do: trap("out of bounds array access")
+    if src + n > length(items), do: trap("out of bounds table access")
+    Gc.array_write(arr, di, items |> Enum.drop(src) |> Enum.take(n))
+    rest
+  end
+
+  defp bulk(other, stack, _inst), do: Gc.exec(other, stack)
 
   # ── loads and stores ───────────────────────────────────────
 

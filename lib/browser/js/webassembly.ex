@@ -14,7 +14,7 @@ defmodule Browser.JS.WebAssembly do
   import Browser.JS.Interp, except: [get: 2, put: 3, deref: 1]
   alias Browser.JS.{Interp, Parser, TypedArrays}
   alias Browser.Wasm
-  alias Browser.Wasm.{Error, Func, Global, Memory, Num, Table}
+  alias Browser.Wasm.{Error, Func, Global, Memory, Num, Table, Tag}
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp heap(id), do: Interp.deref(id)
@@ -120,6 +120,7 @@ defmodule Browser.JS.WebAssembly do
     end
   end
 
+  defp to_wasm(:v128, _), do: throw_error("TypeError", "type incompatible with JavaScript (v128)")
   defp to_wasm(:externref, v), do: v
   defp to_wasm(:funcref, :null), do: :null
 
@@ -133,6 +134,67 @@ defmodule Browser.JS.WebAssembly do
   defp to_wasm(:funcref, _),
     do: throw_error("TypeError", "the value is not null or an exported WebAssembly function")
 
+  defp to_wasm({:ref, nullable, ht}, v) do
+    r =
+      case Wasm.Types.top(ht) do
+        :func -> fun_to_wasm(v)
+        :extern -> v
+        _ -> any_to_wasm(v)
+      end
+
+    cond do
+      r == :null and nullable -> :null
+      r == :null -> throw_error("TypeError", "type incompatible with the reference type")
+      Wasm.Gc.matches?(r, nullable, ht) -> r
+      true -> throw_error("TypeError", "type incompatible with the reference type")
+    end
+  end
+
+  defp fun_to_wasm(:null), do: :null
+
+  defp fun_to_wasm({:obj, id}) do
+    case Process.get({:wasm_fn_of, id}) do
+      %Func{} = f -> f
+      _ -> throw_error("TypeError", "the value is not null or an exported WebAssembly function")
+    end
+  end
+
+  defp fun_to_wasm(_),
+    do: throw_error("TypeError", "the value is not null or an exported WebAssembly function")
+
+  # a JavaScript value in the world of `anyref`: a small integer is an i31, an opaque
+  # structure or array comes back as itself, anything else is wrapped
+  defp any_to_wasm(:null), do: :null
+
+  defp any_to_wasm(n) when is_number(n) and n == trunc(n) and n >= -0x40000000 and n < 0x40000000,
+    do: Wasm.Gc.i31(trunc(n))
+
+  defp any_to_wasm({:obj, id} = v) do
+    case Process.get({:wasm_gc_of, id}) do
+      nil -> {:ext, v}
+      gc -> gc
+    end
+  end
+
+  defp any_to_wasm(v), do: {:ext, v}
+
+  defp any_to_js(:null), do: :null
+  defp any_to_js({:ext, v}), do: v
+  defp any_to_js({:i31, _} = v), do: to_js(:i32, Wasm.Gc.i31_get_s(v))
+
+  defp any_to_js(gc) do
+    case Process.get({:wasm_gcobj, gc.id}) do
+      nil ->
+        {:obj, id} = obj = new_object()
+        Process.put({:wasm_gcobj, gc.id}, obj)
+        Process.put({:wasm_gc_of, id}, gc)
+        obj
+
+      obj ->
+        obj
+    end
+  end
+
   defp to_js(:i32, v), do: if(v >= 0x80000000, do: v - 0x100000000, else: v) * 1.0
 
   defp to_js(:i64, v),
@@ -140,9 +202,18 @@ defmodule Browser.JS.WebAssembly do
 
   defp to_js(t, {:nan, _}) when t in [:f32, :f64], do: :nan
   defp to_js(t, v) when t in [:f32, :f64], do: v
+  defp to_js(:v128, _), do: throw_error("TypeError", "type incompatible with JavaScript (v128)")
   defp to_js(:funcref, :null), do: :null
   defp to_js(:funcref, %Func{} = f), do: wrap_func(f)
   defp to_js(:externref, v), do: v
+
+  defp to_js({:ref, _, ht}, v) do
+    case Wasm.Types.top(ht) do
+      :func -> to_js(:funcref, v)
+      :extern -> v
+      _ -> any_to_js(v)
+    end
+  end
 
   defp results_to_js([], _), do: :undefined
   defp results_to_js([t], [v]), do: to_js(t, v)
@@ -160,6 +231,7 @@ defmodule Browser.JS.WebAssembly do
   defp zero(:i32), do: 0
   defp zero(:i64), do: 0
   defp zero(t) when t in [:f32, :f64], do: 0.0
+  defp zero(:v128), do: 0
   defp zero(_), do: :null
 
   # ── functions ──────────────────────────────────────────────
@@ -201,10 +273,22 @@ defmodule Browser.JS.WebAssembly do
         push_all()
         raise_js(e)
     catch
+      :throw, {:wasm_exception, _, _} = exc ->
+        push_all()
+        throw_exception(exc)
+
       kind, val ->
         push_all()
         :erlang.raise(kind, val, __STACKTRACE__)
     end
+  end
+
+  # an exception that nothing in the module caught is thrown as a WebAssembly.Exception
+  defp throw_exception({:wasm_exception, tag, vals}) do
+    h = new_object()
+    {:obj, id} = h
+    store(id, Map.put(heap(id), :wasm, {:wasm_exn, tag, vals}))
+    throw({:js_error, call(Process.get(:wasm_exception_factory), :undefined, [h])})
   end
 
   defp host_func(type, jsfn) do
@@ -215,12 +299,23 @@ defmodule Browser.JS.WebAssembly do
 
       try do
         js_args = Enum.zip_with(params, args, &to_js/2)
-        r = call(jsfn, :undefined, js_args)
+        r = call_js(jsfn, js_args)
         host_results(results, r)
       after
         pull_all()
       end
     end)
+  end
+
+  # a WebAssembly.Exception thrown by JavaScript goes on as an exception of the module
+  defp call_js(jsfn, js_args) do
+    call(jsfn, :undefined, js_args)
+  catch
+    :throw, {:js_error, {:obj, id}} = thrown ->
+      case heap(id) do
+        %{wasm: {:wasm_exn, tag, vals}} -> throw({:wasm_exception, tag, vals})
+        _ -> :erlang.raise(:throw, thrown, __STACKTRACE__)
+      end
   end
 
   defp host_results([], _), do: []
@@ -357,6 +452,7 @@ defmodule Browser.JS.WebAssembly do
     end
   end
 
+  defp import_value({:tag, _}, {:obj, id} = v), do: wasm_handle(id, Tag, v)
   defp import_value({:table, _}, {:obj, id} = v), do: wasm_handle(id, Table, v)
   defp import_value({:mem, _}, {:obj, id} = v), do: wasm_handle(id, Memory, v)
 
@@ -411,11 +507,13 @@ defmodule Browser.JS.WebAssembly do
 
   defp natives do
     [
-      {"init", 3,
+      {"init", 4,
        fn _, args ->
          for {name, i} <- [{"CompileError", 0}, {"LinkError", 1}, {"RuntimeError", 2}] do
            Process.put({:wasm_error, name}, arg(args, i))
          end
+
+         Process.put(:wasm_exception_factory, arg(args, 3))
 
          :undefined
        end},
@@ -498,6 +596,10 @@ defmodule Browser.JS.WebAssembly do
              end
            )
          catch
+           :throw, {:wasm_exception, _, _} = exc ->
+             push_all()
+             throw_exception(exc)
+
            kind, val ->
              push_all()
              :erlang.raise(kind, val, __STACKTRACE__)
@@ -587,6 +689,87 @@ defmodule Browser.JS.WebAssembly do
          unless g.mut, do: throw_error("TypeError", "Can't set the value of an immutable global.")
          Global.set(g, to_wasm(g.type, arg(args, 1)))
          :undefined
+       end},
+      {"tagNew", 1,
+       fn _, args ->
+         types =
+           for t <- array_list(arg(args, 0)) do
+             case to_str(t) do
+               "i32" ->
+                 :i32
+
+               "i64" ->
+                 :i64
+
+               "f32" ->
+                 :f32
+
+               "f64" ->
+                 :f64
+
+               "externref" ->
+                 :externref
+
+               "anyfunc" ->
+                 :funcref
+
+               "funcref" ->
+                 :funcref
+
+               _ ->
+                 throw_error("TypeError", "WebAssembly.Tag(): invalid value type in parameters")
+             end
+           end
+
+         handle(Tag.new({types, []}))
+       end},
+      {"link", 2,
+       fn _, args ->
+         {:obj, id} = arg(args, 0)
+         store(id, Map.put(heap(id), :wasm, struct_of(arg(args, 1))))
+         :undefined
+       end},
+      {"excNew", 2,
+       fn _, args ->
+         tag = struct_of(arg(args, 0))
+         {params, _} = tag.type
+         vals = iterate(arg(args, 1))
+
+         if length(vals) != length(params),
+           do:
+             throw_error(
+               "TypeError",
+               "WebAssembly.Exception(): Number of exception values does not match signature length"
+             )
+
+         {:obj, id} = h = new_object()
+         wasm = {:wasm_exn, tag, Enum.zip_with(params, vals, &to_wasm/2)}
+         store(id, Map.put(heap(id), :wasm, wasm))
+         h
+       end},
+      {"excIs", 2,
+       fn _, args ->
+         {:wasm_exn, tag, _} = struct_of(arg(args, 0))
+         tag == struct_of(arg(args, 1))
+       end},
+      {"excGet", 3,
+       fn _, args ->
+         {:wasm_exn, tag, vals} = struct_of(arg(args, 0))
+
+         if tag != struct_of(arg(args, 1)),
+           do:
+             throw_error(
+               "TypeError",
+               "WebAssembly.Exception.getArg(): First argument does not match the exception tag"
+             )
+
+         i = limits(arg(args, 2))
+         {params, _} = tag.type
+
+         if i >= length(params),
+           do: throw_error("RangeError", "WebAssembly.Exception.getArg(): Index out of range")
+
+         to_js(Enum.at(params, i), Enum.at(vals, i))
        end},
       {"globType", 1,
        fn _, args ->
