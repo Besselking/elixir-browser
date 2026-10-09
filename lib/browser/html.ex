@@ -136,7 +136,11 @@ defmodule Browser.HTML do
 
   defp tokenize("</" <> rest, acc) do
     {name, rest} = take_name(rest)
-    tokenize(skip_past(rest, ">"), [{:close, name} | acc])
+
+    # (a stray `</br>` is a `<br>`)
+    if String.downcase(name) == "br",
+      do: tokenize(skip_past(rest, ">"), [{:open, "br", [], false} | acc]),
+      else: tokenize(skip_past(rest, ">"), [{:close, name} | acc])
   end
 
   defp tokenize(<<"<", c, _::binary>> = "<" <> rest, acc) when c in ?a..?z or c in ?A..?Z do

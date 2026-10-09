@@ -817,10 +817,12 @@ defmodule Browser.UI do
 
     chars
     |> Enum.with_index()
-    |> Enum.reduce({[], 0}, fn {ch, i}, {before, spaces} ->
+    |> Enum.reduce({[], 0, 0}, fn {ch, _i}, {before, spaces, spaced} ->
       prefix = before |> Enum.reverse() |> Enum.join() |> String.to_charlist()
-      fun.(String.to_charlist(ch), prefix, i * ls + spaces * wsp)
-      {[ch | before], spaces + if(ch in [" ", "\u00A0"], do: 1, else: 0)}
+      fun.(String.to_charlist(ch), prefix, spaced * ls + spaces * wsp)
+
+      {[ch | before], spaces + if(ch in [" ", "\u00A0"], do: 1, else: 0),
+       spaced + if(ch in ["\u200B", "\u200C", "\u200D", "\u2060", "\uFEFF"], do: 0, else: 1)}
     end)
   end
 

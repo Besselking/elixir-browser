@@ -227,7 +227,7 @@ defmodule Browser.Layout do
   end
 
   defp extra_width(text, %{ls: ls, wsp: wsp}) when ls != 0 or wsp != 0,
-    do: round(ls * String.length(text) + wsp * count_spaces(text))
+    do: round(ls * spaced_length(text) + wsp * count_spaces(text))
 
   defp extra_width(_text, _style), do: 0
 
@@ -235,7 +235,43 @@ defmodule Browser.Layout do
   defp trailing_ls(%{ls: ls}) when ls > 0, do: round(ls)
   defp trailing_ls(_style), do: 0
 
+  # zero-width format characters receive no letter-spacing
+  defp spaced_length(text) do
+    if String.match?(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u),
+      do: String.length(String.replace(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u, "")),
+      else: String.length(text)
+  end
+
   defp count_spaces(text), do: text |> String.graphemes() |> Enum.count(&(&1 in [" ", "\u00A0"]))
+
+  # A block-level table too wide for the room the floats leave beside it is laid out again in
+  # that room, when it can be that narrow, rather than moved below them.
+  defp table_beside_floats(
+         %{floats: [_ | _]} = st,
+         sub,
+         %{block_table?: true, width: nil} = spec,
+         avail,
+         {w, _, h, _} = first
+       ) do
+    y = st.y + st.gap + st.ngap
+    {fl, fr} = float_offsets(st, y, y + max(h, 1))
+    beside = avail - fl - fr
+
+    if (fl > 0 or fr > 0) and w > beside and beside > 0 do
+      w2 = fit_width(st, sub, spec, beside)
+
+      if w2 <= beside do
+        {items, height, base} = layout_atom(st, sub, w2, Map.get(spec, :key))
+        {w2, items, height, base}
+      else
+        first
+      end
+    else
+      first
+    end
+  end
+
+  defp table_beside_floats(_st, _sub, _spec, _avail, first), do: first
 
   # -- focus -----------------------------------------------------------------------
 
@@ -487,9 +523,12 @@ defmodule Browser.Layout do
       body = body_i && Enum.at(kids, body_i)
 
       cond do
-        has_background?(computed(hattrs)) ->
+        # (the root's background goes to the canvas even with `display: contents`)
+        has_background?(root_computed(hattrs)) ->
           html = {:element, "html", without_background(hattrs), kids}
-          {List.replace_at(nodes, i, html), canvas_style(computed(hattrs), computed(hattrs))}
+
+          {List.replace_at(nodes, i, html),
+           canvas_style(root_computed(hattrs), root_computed(hattrs))}
 
         body && has_background?(computed(elem(body, 2))) ->
           {:element, "body", battrs, bkids} = body
@@ -506,6 +545,13 @@ defmodule Browser.Layout do
   end
 
   @background_keys ~w(background-color background-image background-attachment background-repeat background-position background-size)
+
+  defp root_computed(attrs) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, map} -> map
+      nil -> %{}
+    end
+  end
 
   defp has_background?(c), do: color?(c["background-color"]) or bgimg_spec(c) != nil
 
@@ -533,7 +579,7 @@ defmodule Browser.Layout do
 
   defp canvas_style(c, root) do
     %{
-      root: box("html", root),
+      root: if(root["display"] != "contents", do: box("html", root)),
       color: if(color?(c["background-color"]), do: over_white(c["background-color"])),
       bgimg: bgimg_spec(c),
       current: if(match?({_, _, _}, c["color"]), do: c["color"], else: {0, 0, 0})
@@ -832,7 +878,7 @@ defmodule Browser.Layout do
               flex_trim(
                 sides,
                 c["flex-direction"],
-                c["flex-wrap"] in ["wrap", "wrap-reverse"],
+                wraps?(c["flex-wrap"]),
                 idx
               )
 
@@ -867,8 +913,13 @@ defmodule Browser.Layout do
 
   defp trim_run(m, true, kids, idx, side) do
     {empty, rest} = Enum.split_while(idx, &self_collapsing?(Enum.at(kids, &1)))
-    items = if rest == [], do: empty, else: empty ++ [hd(rest)]
-    Enum.reduce(items, m, &add_trim(&2, true, &1, side))
+    # (a self-collapsing box has no margin of its own: its top and bottom both run through it)
+    m =
+      Enum.reduce(empty, m, fn i, m ->
+        m |> add_trim(true, i, :top) |> add_trim(true, i, :bottom)
+      end)
+
+    if rest == [], do: m, else: add_trim(m, true, hd(rest), side)
   end
 
   defp self_collapsing?({:element, _, attrs, sub}) do
@@ -1036,8 +1087,16 @@ defmodule Browser.Layout do
            kw?(c["min-width"])) and
           kind in [:block, :flex, :grid]
 
-      # laying a flex or grid container out at width 1 does not give its min-content width
-      c = if c["width"] == :minc and kind != :block, do: Map.put(c, "width", :fit), else: c
+      # laying a flex or grid container out at width 1 does not give its min-content width (a
+      # wrapping row does: every item is on a line of its own)
+      c =
+        if c["width"] == :minc and kind != :block and
+             not (kind in [:flex, :inline_block] and inner_kind(c) == :flex and
+                    wraps?(c["flex-wrap"]) and
+                    c["flex-direction"] in [nil, "row", "row-reverse"]),
+           do: Map.put(c, "width", :fit),
+           else: c
+
       table? = kind == :table and force != :inline_inner
       float? = force == nil and c["float"] in ["left", "right"]
 
@@ -1151,7 +1210,12 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: if(replaced?, do: nil, else: calc.("width") || dim(c["width"])),
+        width:
+          if(replaced? or raw["width"] == :stretch,
+            do: nil,
+            else: calc.("width") || dim(c["width"])
+          ),
+        stretch: raw["width"] == :stretch,
         replaced: replaced?,
         minw: if(replaced?, do: nil, else: calc.("min-width") || c["min-width"]),
         maxw: if(replaced?, do: nil, else: calc.("max-width") || c["max-width"]),
@@ -1164,7 +1228,9 @@ defmodule Browser.Layout do
         mextra: 0,
         fixed: c["position"] == "fixed",
         # `width: fit-content` between two insets shrinks to the content, not stretches
-        fit: c["width"] in [:fit, :minc, :maxc],
+        fit:
+          c["width"] in [:fit, :minc, :maxc] or tag == "table" or
+            c["display"] in ["table", "inline-table"],
         # an inline-level box is where it would be on a line: beside the floats
         inline: kind(tag, c) in [:inline, :inline_block],
         align: parent_style.align,
@@ -1172,6 +1238,7 @@ defmodule Browser.Layout do
         mta: c["margin-top"] == :auto,
         mba: c["margin-bottom"] == :auto,
         mb: box.mb,
+        hstretch: c["height"] == :hstretch,
         hpct:
           case c["height"] do
             {:pct, f} -> f
@@ -1531,6 +1598,7 @@ defmodule Browser.Layout do
       valign: c["vertical-align"],
       cell?: c["display"] == "table-cell",
       table?: table? or c["display"] == "inline-table",
+      block_table?: table? and block?,
       flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
@@ -1640,6 +1708,12 @@ defmodule Browser.Layout do
     spec = inline_spec(tag, c, style)
     ref = make_ref()
     acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
+
+    acc =
+      if kids == [] and !spec and style.lh != parent_style.lh,
+        do: [{:empty_inline, style} | acc],
+        else: acc
+
     acc = walk_children(tag, kids, if(spec, do: %{style | inl: true}, else: style), acc)
     acc = edge_spacing(acc, style, parent_style)
     acc = if spec, do: [{:inline_close, ref, spec} | acc], else: acc
@@ -1791,7 +1865,7 @@ defmodule Browser.Layout do
           acc =
             with_cw(child_width(c, box), fn ->
               with_definite(own_definite?(tag, c), fn ->
-                block_children(tag, kind, kids, style, c, acc)
+                balanced_children(tag, kind, kids, style, c, acc)
               end)
             end)
 
@@ -1810,7 +1884,7 @@ defmodule Browser.Layout do
           acc =
             with_cw(child_width(c, box), fn ->
               with_definite(own_definite?(tag, c), fn ->
-                block_children(tag, kind, kids, style, c, acc)
+                balanced_children(tag, kind, kids, style, c, acc)
               end)
             end)
 
@@ -1821,6 +1895,20 @@ defmodule Browser.Layout do
       end
     end
   end
+
+  # `text-wrap: balance`: the lines of a block of text are as even as the same number of lines
+  # can be. Its content is laid out at a width found when the block is reached.
+  defp balanced_children(tag, kind, kids, style, c, acc) do
+    if balance_text?(c) and kind in [:block, :list_item] do
+      inner = tag |> block_children(kind, kids, style, c, []) |> Enum.reverse()
+      [{:balance, inner} | acc]
+    else
+      block_children(tag, kind, kids, style, c, acc)
+    end
+  end
+
+  defp balance_text?(c),
+    do: "balance" in String.split(to_string(c["text-wrap-style"] || c["text-wrap"]))
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -1921,6 +2009,8 @@ defmodule Browser.Layout do
       h: num(c["height"]),
       hpct: pct_of(c["height"]) || calc_pct(c["height"]),
       hoff: calc_px(c["height"]),
+      hstretch: :hstretch in [c["height"], c["min-height"], c["max-height"]],
+      hstretch_for: for(k <- ~w(height min-height max-height), c[k] == :hstretch, do: k),
       definite: box.definite,
       ratio: aspect_ratio(c["aspect-ratio"]),
       flex_sized: c["@flex_sized"] == true,
@@ -1937,6 +2027,8 @@ defmodule Browser.Layout do
       clip: clips?(c),
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
+      # (`contain: size`: asked how wide it wants to be, it says its `contain-intrinsic-size`)
+      cisw: c["@cis_w"],
       bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
@@ -1953,10 +2045,10 @@ defmodule Browser.Layout do
     needed? =
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
         spec.min || spec.ratio || spec.maxpct ||
-        spec.max || spec.pos ||
+        spec.max || spec.pos || spec.cisw ||
         spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag)) ||
-        (spec.nid != nil and Process.get(:layout_boxes, false))
+        spec.hstretch || (spec.nid != nil and Process.get(:layout_boxes, false))
 
     if needed?, do: spec
   end
@@ -3338,6 +3430,7 @@ defmodule Browser.Layout do
       soft: false,
       # offsets of the relatively positioned inline elements the layout is inside (or nil)
       rels: [],
+      bal: 0,
       # the most negative margin waiting to be applied, which adds to the largest positive one
       ngap: 0,
       pending_space: nil,
@@ -3760,7 +3853,7 @@ defmodule Browser.Layout do
     ch = st.y - (box.top + bt + box.o.pt)
 
     # (`max-height` has no say in it: CSS2 test margin-collapse-038)
-    sized? = is_number(box.o.min) and box.o.min > ch
+    sized? = (is_number(box.o.min) and box.o.min > ch) or (is_number(box.o.h) and box.o.h > 0)
 
     st =
       cond do
@@ -3784,6 +3877,9 @@ defmodule Browser.Layout do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
     {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key))
+
+    {w, items, height, base} =
+      table_beside_floats(st, sub, spec, avail, {w, items, height, base})
 
     place_atom(st, %{
       w: w,
@@ -3813,9 +3909,40 @@ defmodule Browser.Layout do
 
   defp op({:flex, cs, items, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    # a balanced column without a height is as tall as holds its items in that many columns
+    cs =
+      if cs.height == nil and cs.maxh == nil and cs.wrap and Map.get(cs, :balance) == true and
+           (cs.line_count || 0) > 1 and cs.dir in [:column, :column_reverse] do
+        widest = flex_widest(st, %{cs | dir: :row}, items, avail)
+
+        sized =
+          items
+          |> Enum.sort_by(& &1.order)
+          |> Enum.map(fn it ->
+            st
+            |> flex_column_item(cs, %{it | fit?: true}, widest)
+            |> then(&flex_column_basis(st, &1))
+          end)
+
+        %{
+          cs
+          | height: balanced_width(Enum.map(sized, & &1.h), cs.row_gap, cs.line_count) * 1.0,
+            hdef: true
+        }
+      else
+        cs
+      end
+
     # when measuring how wide the content wants to be (an unbounded width), the container
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
+
+    # measured for its min-content (at width 1), a wrapping row is as wide as its widest item
+    avail =
+      if avail <= 1 and cs.wrap and cs.dir in [:row, :row_reverse] and
+           Process.get(:layout_intrinsic, false),
+         do: max(avail, flex_widest(st, cs, items, avail)),
+         else: avail
 
     cs =
       if cs.col_pct > 0 and avail < @unbounded / 2,
@@ -4033,6 +4160,26 @@ defmodule Browser.Layout do
     end
   end
 
+  # an empty inline box with its own line height still makes the line at least that tall
+  defp op({:empty_inline, style}, %{line: []} = st), do: strut(st, style)
+
+  defp op({:empty_inline, style}, st) do
+    %{st | lmax: max(st.lmax, line_px(style))}
+  end
+
+  # the narrowest room that keeps the number of lines: the lines of each run of text between
+  # blocks and forced breaks are then the evenest the text allows. Only where lines may wrap
+  # does the room shrink: the box and the alignment keep their width.
+  defp op({:balance, inner}, st) do
+    inner
+    |> tail_extents()
+    |> balance_runs()
+    |> Enum.reduce(st, fn
+      {:run, run}, st -> balance_run(st, run)
+      {:ops, ops}, st -> Enum.reduce(ops, st, &op/2)
+    end)
+  end
+
   defp op({:inline_close, ref, spec}, st) do
     st = strut_for_empty(st, ref, spec)
     right = spec.pr + spec.br
@@ -4208,6 +4355,90 @@ defmodule Browser.Layout do
   # them (the strut)
   # (only a line height taller than the font's own counts: the font metrics are approximate, so
   # a strut of the normal height would move pictures)
+  # the runs of text that belong to the block itself, between its forced breaks and the blocks
+  # inside it (the text of those is theirs); the rest as it is
+  defp balance_runs(ops) do
+    {parts, cur, _depth} =
+      Enum.reduce(ops, {[], [], 0}, fn op, {parts, cur, depth} ->
+        kind = elem(op, 0)
+
+        depth =
+          cond do
+            kind in [:inset, :box_start] -> depth + 1
+            kind in [:inset_end, :box_end] -> depth - 1
+            true -> depth
+          end
+
+        inline? = balance_inline?(op) and depth == 0
+
+        case cur do
+          [{inl, _} | _] when inl == inline? -> {parts, [{inline?, op} | cur], depth}
+          _ -> {flush_balance_part(parts, cur), [{inline?, op}], depth}
+        end
+      end)
+
+    Enum.reverse(flush_balance_part(parts, cur))
+  end
+
+  defp flush_balance_part(parts, []), do: parts
+
+  defp flush_balance_part(parts, cur) do
+    ops = cur |> Enum.map(&elem(&1, 1)) |> Enum.reverse()
+    [{inline_part(cur), ops} | parts]
+  end
+
+  defp inline_part([{inl, _} | _] = cur),
+    do: if(inl and Enum.any?(cur, &(elem(elem(&1, 1), 0) == :word)), do: :run, else: :ops)
+
+  defp balance_inline?(op),
+    do: elem(op, 0) in [:word, :space, :inline_open, :inline_close, :pos_inline, :pos_end]
+
+  defp balance_run(st, run) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right - st.fr, 1)
+    n = balance_line_count(st, run, avail)
+
+    # (floats beside the lines change how wide each is: left as they are)
+    if n < 2 or Enum.any?(st.floats, &(&1.y1 > st.y)) do
+      Enum.reduce(run, st, &op/2)
+    else
+      # (no narrower than the longest word: a word that may break anywhere does not count)
+      longest =
+        run
+        |> Enum.map(fn
+          {:word, text, style} -> st.measure.(text, style)
+          {:word, text, style, _} -> st.measure.(text, style)
+          _ -> 0
+        end)
+        |> Enum.max()
+
+      narrow =
+        balance_width(min(max(longest, 1), avail), avail, fn w ->
+          balance_line_count(st, run, w) <= n
+        end)
+
+      st = Enum.reduce(run, %{st | bal: avail - narrow}, &op/2)
+      %{st | bal: 0}
+    end
+  end
+
+  defp balance_line_count(st, ops, width) do
+    sub = run(ops, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+
+    sub
+    |> finalize()
+    |> Enum.filter(&(&1.type == :text))
+    |> Enum.map(& &1.y)
+    |> Enum.uniq()
+    |> length()
+  end
+
+  defp balance_width(lo, hi, _fits?) when lo >= hi, do: hi
+
+  defp balance_width(lo, hi, fits?) do
+    mid = div(lo + hi, 2)
+    if fits?.(mid), do: balance_width(lo, mid, fits?), else: balance_width(mid + 1, hi, fits?)
+  end
+
   defp strut(%{line: [], lh: 0} = st, style) do
     lf = content_factor(style)
     px = line_px(style)
@@ -4228,7 +4459,8 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_atom_line(atom, line_left), else: st
 
     st =
-      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr and
+      if st.line != [] and
+           st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr - st.bal and
            not glued_before?(st, space_w) do
         st |> wrap_flush() |> apply_gap() |> start_atom_line(atom, line_left)
       else
@@ -4363,6 +4595,7 @@ defmodule Browser.Layout do
   defp percent_height(st, o) do
     # the root's percentage refers to the window, anything else to the block it sits in
     base = if o.root and st.root_view, do: st.view_h, else: st.cbh
+    o = stretch_height(o, base)
 
     if is_number(base) do
       o
@@ -4373,6 +4606,23 @@ defmodule Browser.Layout do
       o
     end
   end
+
+  # `height: stretch`: the containing block's (definite) height, less the padding and borders
+  # when it is for the content box. The margins in the block direction are left out: they
+  # collapse with the container's or fall outside it.
+  defp stretch_height(%{hstretch: true} = o, base) when is_number(base) do
+    {bt, _, bb, _} = o.bw
+    inner = if o.sizing == :border, do: 0, else: o.pt + o.pb + bt + bb
+    h = round(max(base - inner, 0))
+
+    Enum.reduce(o.hstretch_for, o, fn
+      "height", o -> if o.h == nil, do: %{o | h: h}, else: o
+      "min-height", o -> if o.min == nil, do: %{o | min: h}, else: o
+      "max-height", o -> if o.max == nil, do: %{o | max: h}, else: o
+    end)
+  end
+
+  defp stretch_height(o, _base), do: o
 
   defp pct_set(o, key, pct, base, off) when is_number(pct) and is_number(base) do
     if Map.get(o, key) == nil,
@@ -4408,7 +4658,8 @@ defmodule Browser.Layout do
 
     # (a flex item is as wide as the flex algorithm made it, which has taken its ratio into account)
     cw =
-      to_content.(o.width) || (not (flex_item? and o.flex_sized) && ratio_width(o, hpad)) ||
+      to_content.(o.width) || (intrinsic? && o.cisw && round(o.cisw)) ||
+        (not (flex_item? and o.flex_sized) && ratio_width(o, hpad)) ||
         max(beside - ml0 - mr0 - hpad, 0)
 
     cw =
@@ -4489,7 +4740,11 @@ defmodule Browser.Layout do
     x = st.margin + left
 
     id = make_ref()
-    own_free = if own_width?(o.width) || o.maxw, do: max(rest - mr0, 0), else: 0
+
+    own_free =
+      if own_width?(o.width) || o.maxw || (intrinsic? && o.cisw),
+        do: max(rest - mr0, 0),
+        else: 0
 
     box = %{
       id: id,
@@ -4614,6 +4869,12 @@ defmodule Browser.Layout do
         do: st,
         else: %{st | ext: max(st.ext, box.need)}
 
+    # (a size-contained box is as wide as its `contain-intrinsic-size` says, whatever it holds)
+    st =
+      if o.cisw != nil and Process.get(:layout_intrinsic, false),
+        do: %{st | ext: max(st.ext, box.x + box.w + box_mr(o) + max(st.right - st.free, 0))},
+        else: st
+
     st = place_deferred(st, box, height)
 
     # overflow clips to the padding box
@@ -4655,6 +4916,12 @@ defmodule Browser.Layout do
     # with both given, `left` wins in a left-to-right block and `right` in a right-to-left one
     dx = if box.o.rtl && right, do: -right, else: left || -(right || 0)
     dy = rel_offset(rel.top, box.pcbh) || -(rel_offset(rel.bottom, box.pcbh) || 0)
+    # (a block inside a relatively positioned inline goes along with it)
+    {dx, dy} =
+      case current_rel(st) do
+        {rx, ry, _} -> {dx + rx, dy + ry}
+        nil -> {dx, dy}
+      end
 
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
@@ -5082,7 +5349,13 @@ defmodule Browser.Layout do
       end
 
     static_x = round(static_x)
-    static_right = st.width - st.margin - st.right
+
+    # a right-to-left box ends where the empty line would put it (a box on a line is at the
+    # line's start edge)
+    static_right =
+      if spec.rtl and st.line == [] and Map.get(spec, :inline),
+        do: round(static_x),
+        else: st.width - st.margin - st.right
 
     left = resolve_h(spec.left, cw)
     right = resolve_h(spec.right, cw)
@@ -5099,6 +5372,10 @@ defmodule Browser.Layout do
 
         is_number(spec.hpct) and origin.h ->
           set_height(sub, spec.hpct * origin.h)
+
+        # `height: stretch`: what the insets leave of the containing block
+        spec.hstretch and origin.h ->
+          set_height(sub, max(origin.h - (top || 0) - (bottom || 0) - auto_zero(spec.mb), 0))
 
         true ->
           sub
@@ -5471,6 +5748,13 @@ defmodule Browser.Layout do
 
     width =
       case resolve(spec.width, cw) do
+        # `width: stretch`: what the insets and margins leave of the containing block
+        nil when spec.stretch ->
+          max(
+            cw - (left || 0) - (right || 0) - (ml || 0) - (mr || 0) - spec.extra + spec.extra,
+            0
+          )
+
         nil ->
           avail =
             cond do
@@ -5954,7 +6238,7 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    room = st.width - st.margin - st.right - st.fr - st.x - space_w
+    room = st.width - st.margin - st.right - st.fr - st.bal - st.x - space_w
     segs = String.split(text, "\u00AD")
 
     cond do
@@ -6021,7 +6305,7 @@ defmodule Browser.Layout do
     mode = if mode == :word and Process.get(:layout_intrinsic), do: :none, else: mode
     mode = if mode == :anywhere, do: :word, else: mode
     mode = if mode == :every, do: :all, else: mode
-    right = st.width - st.margin - st.right - st.fr
+    right = st.width - st.margin - st.right - st.fr - st.bal
     space_w = if st.line == [], do: 0, else: space_w
 
     cond do
@@ -6119,7 +6403,7 @@ defmodule Browser.Layout do
       cond do
         st.line == [] or nowrap? or hang == w or glued_after?(st, text, space_w) or
             st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
-              st.width - st.margin - st.right - st.fr ->
+              st.width - st.margin - st.right - st.fr - st.bal ->
           st
 
         # no space between this word and what comes before: they only break before all of it
@@ -6239,7 +6523,7 @@ defmodule Browser.Layout do
     w = st.measure.(text, style)
 
     if text != "" and String.trim(text, "\u00A0") == "" and
-         st.x + w > st.width - st.margin - st.right - st.fr,
+         st.x + w > st.width - st.margin - st.right - st.fr - st.bal,
        do: w,
        else: ideographic_hang(text, style, st)
   end
@@ -7450,8 +7734,10 @@ defmodule Browser.Layout do
 
     %{
       dir: flex_direction(c["flex-direction"]),
-      wrap: c["flex-wrap"] in ["wrap", "wrap-reverse"],
-      wrap_reverse: c["flex-wrap"] == "wrap-reverse",
+      wrap: wraps?(c["flex-wrap"]),
+      balance: wrap_words(c["flex-wrap"]) |> Enum.member?("balance"),
+      line_count: flex_line_count(c["flex-line-count"]),
+      wrap_reverse: wrap_words(c["flex-wrap"]) |> Enum.member?("wrap-reverse"),
       trim: trim_sides(c["margin-trim"]),
       justify: c["justify-content"] || "flex-start",
       content: c["align-content"] || "stretch",
@@ -7462,7 +7748,7 @@ defmodule Browser.Layout do
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
       dir_rtl: c["direction"] == "rtl",
-      rtl: c["direction"] == "rtl" and c["flex-wrap"] not in ["wrap", "wrap-reverse"],
+      rtl: c["direction"] == "rtl" and not wraps?(c["flex-wrap"]),
       hpct: pct_of(c["height"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       hdef: inner.(num(c["height"])) != nil,
@@ -7710,6 +7996,7 @@ defmodule Browser.Layout do
       mba: false,
       collapsed: false,
       minh: nil,
+      minhpct: nil,
       hpct: nil,
       fit?: false
     }
@@ -7776,13 +8063,15 @@ defmodule Browser.Layout do
       order: flex_number(c["order"], 0.0),
       # a flex item with a `z-index` is a stacking context even when it is not positioned
       zi: if(c["position"] in [nil, "static"] and c["z-index"] != nil, do: z_index(c)),
-      auto_height?: c["height"] in [nil, :auto],
+      # (the height `contain-intrinsic-size` gives is an automatic one: it stretches)
+      auto_height?: c["height"] in [nil, :auto] or c["@cis_h"] != nil,
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
       chp: pct_of(c["height"]),
       collapsed: collapsed?,
       minh: num(c["min-height"]),
+      minhpct: pct_of(c["min-height"]),
       scroll?:
         c["overflow-x"] in ~w(hidden scroll auto) or
           (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
@@ -7862,6 +8151,9 @@ defmodule Browser.Layout do
     end
   end
 
+  # (an infinite factor takes all the room, whatever the other factors are)
+  defp flex_number("calc(infinity)", _default), do: 1.0e12
+
   defp flex_number(v, default) when is_binary(v) do
     v = if String.starts_with?(v, "."), do: "0" <> v, else: v
 
@@ -7893,6 +8185,30 @@ defmodule Browser.Layout do
   defp len_px({:px, n}, _base), do: n
   defp len_px({:pct, f}, base), do: f * base
 
+  # the narrowest room that holds the sizes in `lines` lines (taken in order)
+  defp balanced_width(sizes, gap, lines) do
+    pseudo = for w <- sizes, do: %{hw: w * 1.0, ml: 0, mr: 0}
+    widest = round(Enum.max(sizes, fn -> 0 end))
+    total = round(Enum.sum(sizes) + gap * (length(sizes) - 1))
+
+    Enum.find(widest..max(total, widest), total, fn room ->
+      length(flex_break(pseudo, gap, room)) <= lines
+    end)
+  end
+
+  defp flex_widest(st, cs, items, avail) do
+    items
+    |> Enum.map(fn it ->
+      clamp_width(
+        flex_base(st, it, avail, cs),
+        %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0},
+        avail
+      ) + auto_zero(it.ml) + auto_zero(it.mr)
+    end)
+    |> Enum.max(fn -> 0 end)
+    |> round()
+  end
+
   defp flex_natural_width(st, cs, items, avail) do
     # (in a column the basis is a height: the items are as wide as they are)
     row? = cs.dir in [:row, :row_reverse]
@@ -7910,6 +8226,10 @@ defmodule Browser.Layout do
     widest = round(Enum.max(widths, fn -> 0 end))
 
     cond do
+      # balanced lines: as narrow as holds the items in that many lines
+      row? and cs.wrap and Map.get(cs, :balance) == true and (cs.line_count || 0) > 1 ->
+        balanced_width(widths, cs.col_gap, cs.line_count)
+
       row? ->
         round(Enum.sum(widths) + cs.col_gap * (length(items) - 1))
 
@@ -7991,7 +8311,7 @@ defmodule Browser.Layout do
       end)
 
     lines =
-      if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
+      if cs.wrap, do: flex_lines(items, cs, avail), else: [items]
 
     lines = if cs.dir == :row_reverse, do: Enum.map(lines, &Enum.reverse/1), else: lines
     # `wrap-reverse` stacks the lines upwards: the first one is last
@@ -8052,10 +8372,34 @@ defmodule Browser.Layout do
   end
 
   # wrapping: a new line when the next item no longer fits
+  # `flex-wrap` is `nowrap | wrap | wrap-reverse | balance`, or `balance` with `wrap-reverse`
+  defp wrap_words(v) when is_binary(v), do: String.split(v)
+  defp wrap_words(_), do: []
+
+  defp wraps?(v), do: Enum.any?(wrap_words(v), &(&1 in ["wrap", "wrap-reverse", "balance"]))
+
+  defp flex_line_count(v) do
+    case Integer.parse(to_string(v)) do
+      {n, ""} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  # `flex-wrap: balance`: as many lines as filling them in order would make, but as evenly
+  # filled as the narrowest room that still gives that many
+  defp flex_lines(items, %{balance: true, col_gap: gap} = cs, avail) do
+    sizes = Enum.map(items, &(&1.hw + auto_zero(&1.ml) + auto_zero(&1.mr)))
+    lines = flex_break(items, gap, avail)
+    balance_lines(items, sizes, gap, avail, length(lines), cs.line_count) || lines
+  end
+
+  defp flex_lines(items, cs, avail), do: flex_break(items, cs.col_gap, avail)
+
   defp flex_break(items, gap, avail) do
     {lines, current, _used} =
       Enum.reduce(items, {[], [], 0.0}, fn it, {lines, cur, used} ->
-        outer = it.hw + auto_zero(it.ml) + auto_zero(it.mr)
+        # (an item never takes less than no room on a line)
+        outer = max(it.hw + auto_zero(it.ml) + auto_zero(it.mr), 0)
         needed = if cur == [], do: outer, else: used + gap + outer
 
         if cur != [] and needed > avail,
@@ -8142,6 +8486,12 @@ defmodule Browser.Layout do
         do: round(min_cross),
         else: sized |> Enum.map(&(&1.h + &1.boff)) |> Enum.max() |> max(round(min_cross))
 
+    # (and a line that is alone is held to the container's `max-height`)
+    cross =
+      if single? and is_number(cs.maxh),
+        do: max(min(cross, round(cs.maxh)), round(min_cross)),
+        else: cross
+
     {placed, _x} =
       Enum.map_reduce(sized, start, fn it, x ->
         it = flex_stretch(st, it, cs.align, cross)
@@ -8173,7 +8523,9 @@ defmodule Browser.Layout do
   # frozen there and the others shrink further
   defp flex_resize(st, line, free, avail) when free < 0 do
     line = Enum.map(line, &Map.put(&1, :frozen, false))
-    flex_shrink(st, line, free, avail)
+    # (factors that add up to less than 1 only take that share of the overflow)
+    sum = line |> Enum.map(& &1.shrink) |> Enum.sum()
+    flex_shrink(st, line, if(sum < 1, do: free * sum, else: free), avail)
   end
 
   defp flex_resize(_st, line, _free, _avail), do: line
@@ -8395,7 +8747,8 @@ defmodule Browser.Layout do
     if stretch? and it.auto_height? and it.rebuild != nil and it.h < cross do
       box_h = cross - it.mt - it.mb
       min_h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
-      sub = it.rebuild.(%{"min-height" => max(min_h, 0) * 1.0})
+      # (its size is the line's, so what is a percentage of it is definite)
+      sub = it.rebuild.(%{"height" => max(min_h, 0) * 1.0})
       {items, h, _} = flex_atom(st, sub, it.w, {it.key, min_h})
       %{it | items: items, h: max(h, cross)}
     else
@@ -8423,7 +8776,7 @@ defmodule Browser.Layout do
     if cs.wrap and (cs.height || cs.maxh) do
       # a wrapping column breaks into columns when the next item no longer fits the height
       sized = Enum.map(sized, &flex_column_basis(st, &1))
-      cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
+      cols = flex_column_lines(sized, cs, cs.height || cs.maxh, round(cs.row_gap))
       cols = flex_column_stretch(st, cs, cols, avail)
       cols = if cs.dir == :column_reverse, do: Enum.map(cols, &Enum.reverse/1), else: cols
       last = length(cols) - 1
@@ -8440,9 +8793,25 @@ defmodule Browser.Layout do
 
       cols = if cs.wrap_reverse != cs.dir_rtl, do: Enum.reverse(cols), else: cols
 
+      # (with only a `max-height` the container is as tall as its tallest column, and every
+      # column is flexed to that)
+      pcs =
+        if cs.height == nil and length(cols) > 1 do
+          tall =
+            cols
+            |> Enum.map(
+              &(Enum.sum(Enum.map(&1, fn it -> it.h end)) + round(cs.row_gap) * (length(&1) - 1))
+            )
+            |> Enum.max()
+
+          %{cs | height: min(tall, cs.maxh) * 1.0}
+        else
+          cs
+        end
+
       {laid, {x_end, tallest}} =
         Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
-          {items, y} = flex_column_place(st, cs, col)
+          {items, y} = flex_column_place(st, pcs, col)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
 
           {Enum.map(items, &{&1, y}) |> Enum.map(fn {i, y} -> {move(i, x, 0), y} end),
@@ -8514,6 +8883,88 @@ defmodule Browser.Layout do
     end)
   end
 
+  # `flex-wrap: balance`: the shortest height that still gives as many columns
+  defp flex_column_lines(items, %{balance: true} = cs, height, gap) do
+    cols = flex_column_break(items, height, gap)
+    sizes = Enum.map(items, & &1.h)
+    balance_lines(items, sizes, gap, height, length(cols), cs.line_count) || cols
+  end
+
+  defp flex_column_lines(items, _cs, height, gap), do: flex_column_break(items, height, gap)
+
+  # `flex-wrap: balance`: the same number of lines as filling them in order makes (or the
+  # `flex-line-count` if that is more), with the items spread over them as evenly as can be:
+  # the least sum of squared line sizes, the earlier lines the longer on a tie
+  defp balance_lines(items, sizes, gap, avail, n, min_count) do
+    count = length(items)
+    t = min(max(n, min_count || 0), count)
+
+    if t < 2 or count > 300 do
+      nil
+    else
+      pre = Enum.scan(sizes, 0, &(&1 + &2)) |> then(&List.to_tuple([0 | &1]))
+      width = fn i, j -> elem(pre, i + j) - elem(pre, i) + gap * (j - 1) end
+
+      {best, _memo} = balance_cut(0, t, count, width, avail, %{})
+      best && cut_lines(items, best)
+    end
+  end
+
+  defp cut_lines(_items, []), do: []
+
+  defp cut_lines(items, [j | rest]) do
+    {line, others} = Enum.split(items, j)
+    [line | cut_lines(others, rest)]
+  end
+
+  # {line lengths from item i on in k lines | nil, memo}; the cost is the sum of the squares
+  defp balance_cut(i, 1, count, width, avail, memo) do
+    j = count - i
+    {if(j == 1 or width.(i, j) <= avail, do: [j]), memo}
+  end
+
+  defp balance_cut(i, k, count, width, avail, memo) do
+    case memo do
+      %{{^i, ^k} => hit} ->
+        {hit, memo}
+
+      _ ->
+        most = count - i - (k - 1)
+
+        {best, memo} =
+          Enum.reduce(most..1//-1, {nil, memo}, fn j, {best, memo} ->
+            if j > 1 and width.(i, j) > avail do
+              {best, memo}
+            else
+              {rest, memo} = balance_cut(i + j, k - 1, count, width, avail, memo)
+
+              if rest do
+                total = {line_cost([j | rest], i, width), -j}
+
+                if best == nil or total < elem(best, 0),
+                  do: {{total, [j | rest]}, memo},
+                  else: {best, memo}
+              else
+                {best, memo}
+              end
+            end
+          end)
+
+        result = best && elem(best, 1)
+        {result, Map.put(memo, {i, k}, result)}
+    end
+  end
+
+  defp line_cost(lens, i, width) do
+    {sum, _} =
+      Enum.reduce(lens, {0, i}, fn l, {sum, at} ->
+        w = width.(at, l)
+        {sum + w * w, at + l}
+      end)
+
+    sum
+  end
+
   defp flex_column_break(items, height, gap) do
     {cols, cur, _used} =
       Enum.reduce(items, {[], [], 0}, fn it, {cols, cur, used} ->
@@ -8583,6 +9034,12 @@ defmodule Browser.Layout do
        when pct != nil and rebuild != nil and cs.height != nil and cs.hdef do
     sub = rebuild.(%{"height" => pct * cs.height, "aspect-ratio" => nil})
     flex_atom(st, sub, w, {it.key, :hpct})
+  end
+
+  # (and so does a percentage min-height)
+  defp flex_row_atom(st, cs, %{minhpct: pct, rebuild: rebuild} = it, w)
+       when pct != nil and rebuild != nil and cs.height != nil and cs.hdef do
+    flex_atom(st, rebuild.(%{"min-height" => pct * cs.height}), w, {it.key, :minhpct})
   end
 
   # a picture takes the width the row gave it (its height follows its ratio)
@@ -9110,7 +9567,7 @@ defmodule Browser.Layout do
           tag not in @skip,
           c = computed(attrs),
           tag == "tr" or c["display"] == "table-row",
-          do: table_row(el, c, ekids, style, bg)
+          do: table_row(el, c, ekids, style, bg, num(gc["height"]))
 
     # with collapsed borders the group's own borders are those of the rows at its edges
     last = length(rows) - 1
@@ -9174,9 +9631,14 @@ defmodule Browser.Layout do
   defp paint_above(items, seq), do: Enum.map(items, &Map.merge(&1, %{over: true, pz: seq}))
 
   # `position: relative` on a part of a table moves what it holds
-  defp rel_shift(c) do
+  defp rel_shift(c, base \\ nil) do
     if c["position"] == "relative" do
-      num = fn v -> if is_number(v), do: round(v), else: nil end
+      num = fn
+        v when is_number(v) -> round(v)
+        {:pct, f} when is_number(base) -> round(f * base)
+        _ -> nil
+      end
+
       {num.(c["left"]) || -(num.(c["right"]) || 0), num.(c["top"]) || -(num.(c["bottom"]) || 0)}
     else
       {0, 0}
@@ -9232,9 +9694,9 @@ defmodule Browser.Layout do
   defp row_bg(c), do: if(color?(c["background-color"]), do: c["background-color"])
 
   # a row's background shows behind its cells; a row group's behind its rows
-  defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg) do
+  defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg, parent_h \\ nil) do
     cells =
-      for {:element, tag, attrs, _} = el <- anonymous_cells(kids),
+      for {:element, tag, attrs, _} = el <- anonymous_cells(kids, c),
           tag not in @skip,
           cc = computed(attrs),
           tag in @cell_tags or cc["display"] == "table-cell",
@@ -9248,7 +9710,7 @@ defmodule Browser.Layout do
       bgimg: bg_pictures(c),
       gimg: nil,
       edges: edges_of(c),
-      shift: rel_shift(c)
+      shift: rel_shift(c, parent_h)
     }
   end
 
@@ -9259,7 +9721,7 @@ defmodule Browser.Layout do
   end
 
   # whatever else a row holds sits in an anonymous cell
-  defp anonymous_cells(kids) do
+  defp anonymous_cells(kids, row) do
     cell? = fn
       {:element, tag, attrs, _} -> tag in @cell_tags or computed(attrs)["display"] == "table-cell"
       _ -> false
@@ -9277,9 +9739,13 @@ defmodule Browser.Layout do
     |> Enum.flat_map(fn chunk ->
       if cell?.(hd(chunk)),
         do: chunk,
-        else: [{:element, "div", [{"@computed", %{"display" => "table-cell"}}], chunk}]
+        else: [{:element, "div", [{"@computed", anonymous_cell_style(row)}], chunk}]
     end)
   end
+
+  # (the cell takes what the row passes down: its colour, font and so on)
+  defp anonymous_cell_style(row),
+    do: row |> Map.take(Browser.Style.inherited_props()) |> Map.put("display", "table-cell")
 
   defp table_caption({:element, tag, attrs, kids}, style) do
     {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()

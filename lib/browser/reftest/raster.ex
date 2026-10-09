@@ -100,9 +100,16 @@ defmodule Browser.Reftest.Raster do
           picture ->
             clip = {max(ix0, cx), max(iy0, cy), min(ix1, cx + cw), min(iy1, cy + ch)}
 
-            tile
-            |> Browser.Backgrounds.tiles(repeat, lc)
-            |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
+            if tw == 1 and th == 1 and picture.w == 1 and picture.h == 1 and
+                 repeat == {:repeat, :repeat} do
+              # (a one pixel picture repeated is a fill: far more tiles than the tiler's cap)
+              {x0, y0, x1, y1} = clip
+              blit(grid, picture, x0, y0, x1 - x0, y1 - y0, clip)
+            else
+              tile
+              |> Browser.Backgrounds.tiles(repeat, lc)
+              |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
+            end
         end
 
       %{kind: :linear, tile: {_, _, tw, th} = tile, repeat: repeat, clip: {cx, cy, cw, ch} = lc} =
@@ -158,6 +165,9 @@ defmodule Browser.Reftest.Raster do
 
   # -- text ---------------------------------------------------------------------------------
 
+  # zero-width format characters get no letter-spacing
+  @zero_width ["\u200B", "\u200C", "\u200D", "\u2060", "\uFEFF"]
+
   defp text(grid, t, clip) do
     size = t.size
     ahem? = String.contains?(to_string(Map.get(t, :family)), "ahem")
@@ -179,7 +189,9 @@ defmodule Browser.Reftest.Raster do
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, off + round(cadv * size) + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
+        {g,
+         off + round(cadv * size) + if(ch in @zero_width, do: 0, else: ls) +
+           if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
     width = round(advance_x)

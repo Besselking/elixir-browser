@@ -2,6 +2,11 @@ defmodule Browser.HTMLTest do
   use ExUnit.Case, async: true
   alias Browser.HTML
 
+  test "a stray end tag for br is a br" do
+    assert [{:element, "p", [], [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
+             HTML.parse("<p>a</br>b</p>")
+  end
+
   test "a table cell ends an open column group" do
     assert [
              {:element, "table", [],

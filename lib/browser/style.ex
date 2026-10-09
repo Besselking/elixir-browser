@@ -29,13 +29,13 @@ defmodule Browser.Style do
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
+            flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
-                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character)
+                stroke-linejoin stroke-miterlimit stroke-dasharray text-anchor pointer-events white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character)
 
   @doc false
   def inherited_props, do: @inherited
@@ -496,7 +496,7 @@ defmodule Browser.Style do
   defp expand({"flex-flow", value, imp}) do
     toks = value |> String.trim() |> String.downcase() |> tokens()
     dir = Enum.find(toks, &(&1 in ~w(row row-reverse column column-reverse))) || "row"
-    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse))) || "nowrap"
+    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse balance))) || "nowrap"
     [{"flex-direction", dir, imp}, {"flex-wrap", wrap, imp}]
   end
 
@@ -1578,8 +1578,10 @@ defmodule Browser.Style do
 
       base =
         if Map.get(base, "height", :auto) == :auto and not ratio?,
-          do: Map.put(base, "height", ih),
+          do: base |> Map.put("height", ih) |> Map.put("@cis_h", ih),
           else: base
+
+      base = Map.put(base, "@cis_w", iw)
 
       if Map.get(base, "width") in [:maxc, :fit, :minc],
         do: Map.put(base, "width", iw),
@@ -1910,6 +1912,12 @@ defmodule Browser.Style do
        when prop in ["width", "min-width"] and
               v in ["stretch", "-webkit-fill-available", "-moz-available"],
        do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
+
+  # `height: stretch`: the room the containing block's (definite) height leaves
+  defp typed(prop, v, _env, _pc)
+       when prop in ["height", "min-height", "max-height"] and
+              v in ["stretch", "-webkit-fill-available", "-moz-available"],
+       do: {:ok, :hstretch}
 
   # fit-content(<length-percentage>): as wide as the content, but at least its narrowest and
   # at most the length

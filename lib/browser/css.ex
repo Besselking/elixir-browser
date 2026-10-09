@@ -348,7 +348,7 @@ defmodule Browser.CSS do
             column-span column-width columns contain contain-intrinsic-size container container-name container-type
             content content-visibility counter-increment counter-reset counter-set cursor direction display
             empty-cells filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink
-            flex-wrap float font font-family font-feature-settings font-kerning font-language-override font-optical-sizing
+            flex-wrap flex-line-count float font font-family font-feature-settings font-kerning font-language-override font-optical-sizing
             font-size font-size-adjust font-stretch font-style font-synthesis font-variant font-variant-alternates font-variant-caps
             font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight gap grid
             grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-gap grid-column-start
@@ -370,7 +370,7 @@ defmodule Browser.CSS do
             scrollbar-width shape-image-threshold shape-margin shape-outside tab-size table-layout text-align text-align-last
             text-combine-upright text-decoration text-decoration-color text-decoration-line text-decoration-skip-ink text-decoration-style text-decoration-thickness text-emphasis
             text-emphasis-color text-emphasis-position text-emphasis-style text-indent text-justify text-orientation text-overflow text-rendering
-            text-shadow text-size-adjust text-transform text-underline-offset text-underline-position text-wrap top touch-action
+            text-shadow text-size-adjust text-transform text-underline-offset text-underline-position text-wrap text-wrap-mode text-wrap-style top touch-action
             transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property
             transition-timing-function translate unicode-bidi user-select vertical-align visibility white-space widows
             width will-change word-break word-spacing word-space-transform word-wrap writing-mode z-index zoom

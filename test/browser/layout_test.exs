@@ -5112,6 +5112,16 @@ defmodule Browser.LayoutTest do
       assert spaced.ls == 3.0
     end
 
+    test "zero-width format characters get no letter-spacing" do
+      [plain] = ts_items("<p>abcd</p>") |> Enum.filter(&(&1[:text] == "abcd"))
+
+      [spaced] =
+        ts_items("<p style=\"letter-spacing:3px\">ab\u200Dcd</p>")
+        |> Enum.filter(&(&1[:text] == "ab\u200Dcd"))
+
+      assert spaced.w == plain.w + 12
+    end
+
     test "a percentage letter-spacing is of the element's own font size" do
       items = ts_items("<p style=\"letter-spacing:10%;font-size:20px\">ab</p>")
       assert Enum.find(items, &(&1[:text] == "ab")).ls == 2.0
@@ -7394,5 +7404,298 @@ defmodule Browser.LayoutTest do
       end
 
     own ++ flat(kids)
+  end
+
+  describe "empty inline boxes, display: contents roots and anonymous table cells" do
+    test "an empty span with a tall line height makes its line tall" do
+      html =
+        ~s|<style>body{margin:0}div{background:green;line-height:1}span{line-height:5}</style><div><span></span>X</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.h == 80
+    end
+
+    test "the background of a display: contents root still paints the canvas" do
+      html = ~s|<style>:root{display:contents;background:green}</style><p>x</p>|
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      canvas = Enum.find(items, &(&1.type == :canvas))
+      assert canvas.color == {0, 128, 0}
+    end
+
+    test "text directly in a table row takes the row's colour" do
+      html =
+        ~s|<div style="color:red"><div style="display:table-row;color:blue">only</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :text)).color == {0, 0, 255}
+    end
+  end
+
+  describe "relative positioning of inlines and table parts" do
+    test "a positioned block in a relative inline moves with the inline" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="width:100px;height:100px"><span style="position:relative;top:100px;left:100px"><div style="width:10px;height:10px;background:green;position:relative;top:-100px;left:-100px"></div></span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.x, box.y} == {0, 0}
+    end
+
+    test "an absolutely positioned table between left and right shrinks and centres with auto margins" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="position:relative;width:200px;height:50px"><div style="display:table;position:absolute;left:0;right:0;margin:auto;background:green"><div style="width:100px;height:50px"></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.x, box.w} == {50, 100}
+    end
+  end
+
+  describe "flex-wrap: balance" do
+    defp balanced(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :rect and &1.color == {0, 128, 0}))
+      |> Enum.map(&{&1.x, &1.y})
+      |> Enum.sort()
+    end
+
+    test "four items that would wrap as three and one go two and two" do
+      html =
+        ~s|<style>body{margin:0}div div{width:25px;height:25px;background:green}</style><div style="display:flex;flex-wrap:balance;width:90px;gap:10px"><div></div><div></div><div></div><div></div></div>|
+
+      assert balanced(html) == [{0, 0}, {0, 35}, {35, 0}, {35, 35}]
+    end
+
+    test "flex-line-count asks for at least that many lines" do
+      html =
+        ~s|<style>body{margin:0}div div{width:20px;height:20px;background:green}</style><div style="display:flex;flex-wrap:balance;flex-line-count:3;width:200px"><div></div><div></div><div></div></div>|
+
+      assert balanced(html) == [{0, 0}, {0, 20}, {0, 40}]
+    end
+  end
+
+  describe "contain: size boxes asked how big they want to be" do
+    test "a max-content parent is as wide as the contain-intrinsic-size of its child" do
+      html =
+        ~s|<style>body{margin:0}#b{width:max-content;border:1px solid black}#t{background:blue;contain:size;contain-intrinsic-size:111px 22px}</style><div id="b"><div id="t"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert {box.w, box.h} == {111, 22}
+    end
+
+    test "a stretched flex item takes the line's height, not its contain-intrinsic-size" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;height:100px;width:300px}#t{background:blue;contain:size;contain-intrinsic-size:50px 10px}</style><div id="f"><div id="t"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert {box.w, box.h} == {50, 100}
+    end
+  end
+
+  describe "stretch sizes and fixed heights" do
+    defp green_box(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+    end
+
+    test "height: stretch fills the height of the containing block" do
+      box =
+        green_box(
+          ~s|<style>body{margin:0}</style><div style="height:100px"><div style="width:50px;height:stretch;margin-bottom:50px;background:green;display:flow-root"></div></div>|
+        )
+
+      assert {box.w, box.h} == {50, 100}
+    end
+
+    test "an absolutely positioned box with width and height stretch fills its containing block" do
+      box =
+        green_box(
+          ~s|<style>body{margin:0}</style><div style="position:relative;width:100px;height:80px"><div style="position:absolute;width:stretch;height:stretch;background:green"></div></div>|
+        )
+
+      assert {box.w, box.h} == {100, 80}
+    end
+
+    test "the bottom margin of the last child stays inside a box with a set height" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:100px"><div style="height:40px;margin-bottom:60px"></div></div><div style="height:10px;background:green"></div>|
+
+      assert green_box(html).y == 100
+    end
+  end
+
+  describe "text-wrap: balance" do
+    test "four words that wrap as three and one go two and two" do
+      html =
+        ~s|<style>body{margin:0}div{width:80px;text-wrap:balance}</style><div>aa bb cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      lines = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(lines) == 2
+      firsts = for %{type: :text, text: t, y: y} <- items, y == hd(lines), do: t
+      assert length(firsts) == 2
+    end
+
+    test "text-wrap-style: stable does not balance" do
+      html =
+        ~s|<style>body{margin:0}div{width:80px;text-wrap:balance;text-wrap-style:stable}</style><div>aa bb cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      first_y = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.min()
+      assert Enum.count(items, &(&1.type == :text and &1.y == first_y)) == 3
+    end
+  end
+
+  describe "static position of an inline-level absolute box in rtl" do
+    test "it ends at the aligned point of the line beside a float" do
+      html =
+        ~s|<style>body{margin:0}#c{position:relative;width:100px;height:100px;direction:rtl;text-align:center}#f{float:left;width:50px;height:50px}#a{display:inline;position:absolute;width:50px;height:50px;background:green}</style><div id=c><div id=f></div><div id=a></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1[:color] == {0, 128, 0}))
+      assert green.x == 25
+    end
+  end
+
+  describe "tables beside floats" do
+    test "an auto-width table narrows to the room a float leaves instead of moving below" do
+      html =
+        ~s|<style>body{margin:0}table{border-spacing:0}td{padding:0}span{display:inline-block;width:150px;height:50px;background:purple}</style><table width="300"><tr><td><div style="float:left;width:100px;height:100px;background:blue"></div><table style="background:yellow"><tr><td><span></span> <span></span></td></tr></table></td></tr></table>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      yellow = Enum.find(items, &(&1.type == :rect and &1[:color] == {255, 255, 0}))
+      assert yellow.x == 100
+      assert yellow.y == 0
+    end
+  end
+
+  describe "margin-trim with self-collapsing children" do
+    test "trailing empty boxes lose their margins on both sides" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="margin-trim:block-end;border:solid green;background:red"><div style="height:94px;background:green"></div><div style="margin-top:222px"></div><div style="margin-top:222px"></div></div><div style="height:10px;background:blue"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 100
+    end
+  end
+
+  describe "intrinsic size of balanced and wrapping flex containers" do
+    defp flex_green(style, items) do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:inline-flex;background:green;#{style}">#{items}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+    end
+
+    test "a balanced row is as wide as its widest line" do
+      items = String.duplicate(~s|<div style="width:40px"></div>|, 3)
+      box = flex_green("gap:20px;flex-wrap:balance;flex-line-count:2;height:100px", items)
+      assert box.w == 100
+    end
+
+    test "a balanced column is as tall as its tallest column" do
+      items = String.duplicate(~s|<div style="width:40px;height:40px"></div>|, 3)
+
+      box =
+        flex_green("gap:20px;flex-direction:column;flex-wrap:balance;flex-line-count:2", items)
+
+      assert {box.w, box.h} == {100, 100}
+    end
+
+    test "an item with negative margins does not fit on a line it would overflow" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;flex-wrap:wrap;width:100px;background:green}#f>div{height:50px}</style><div id="f"><div style="width:150px"></div><div style="width:0;margin:0 -50px"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+
+    test "min-content of a wrapping row is its widest item" do
+      items = String.duplicate(~s|<div style="width:100px"></div>|, 3)
+      box = flex_green("width:min-content;gap:20px;flex-wrap:wrap;height:10px", items)
+      assert box.w == 100
+    end
+  end
+
+  describe "flex factors" do
+    defp flex_widths(css, items) do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;width:100px}#f>div{height:10px}#{css}</style><div id="f">#{items}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      for %{type: :rect, color: {_, _, _} = c, w: w} <- laid, c != {0, 0, 0}, do: w
+    end
+
+    test "an infinite grow factor takes all the room" do
+      widths =
+        flex_widths(
+          "#a{flex:calc(infinity) 0 0px;background:green}#b{flex:1 0 0px;background:red}",
+          ~s|<div id="a"></div><div id="b"></div>|
+        )
+
+      assert Enum.max(widths) == 100
+    end
+
+    test "a wrapping column with a max-height flexes each column to the tallest" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;flex-direction:column;flex-wrap:wrap;max-height:100px;width:100px}</style><div id="f"><div style="background:green;width:50px;height:50px;flex-grow:1"></div><div style="background:green;width:50px;height:100px"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      first = Enum.min_by(Enum.filter(laid, &(&1.type == :rect)), & &1.x)
+      assert first.h == 100
+    end
+
+    test "a percentage min-height inside a stretched flex item is of the line height" do
+      html =
+        ~s|<style>body{margin:0}div{display:flex}.i{width:100px;align-items:center}.i span{min-height:100%;width:100%;background:green}</style><div style="height:100px"><div class="i"><span></span></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+
+    test "the only line of a row is held to the max-height of its container" do
+      html =
+        ~s|<style>body{margin:0}.o{display:flex;width:100px;max-height:100px;background:green}.n{display:flex;width:100px;align-items:flex-end;background:red}</style><div class="o"><div class="n"><div style="width:100px;max-height:100%;background:green"><div style="height:999px"></div></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {255, 0, 0})).h == 100
+    end
+
+    test "shrink factors under one only take their share of the overflow" do
+      widths =
+        flex_widths(
+          "#f{width:50px}#a{flex-shrink:0.5;width:150px;background:green}",
+          ~s|<div id="a"></div>|
+        )
+
+      assert widths == [100]
+    end
   end
 end
