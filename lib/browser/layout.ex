@@ -5360,8 +5360,10 @@ defmodule Browser.Layout do
         Map.get(spec, :inline) ->
           y = st.y + st.gap + st.ngap
           {fl, fr} = float_offsets(st, y)
-          left = st.margin + st.left + fl
-          room = st.width - st.margin - st.right - fr - left
+          # (the first line's indent, and any open inline box, come before the empty box)
+          base = st.margin + st.left + fl
+          room = st.width - st.margin - st.right - fr - base - st.lead
+          left = if spec.rtl, do: base, else: base + st.lead
 
           # the static position of the box is that of an empty one on the line
           shift =
@@ -5382,9 +5384,17 @@ defmodule Browser.Layout do
     # a right-to-left box ends where the empty line would put it (a box on a line is at the
     # line's start edge)
     static_right =
-      if spec.rtl and st.line == [] and Map.get(spec, :inline),
-        do: round(static_x),
-        else: st.width - st.margin - st.right
+      cond do
+        spec.rtl and st.line == [] and Map.get(spec, :inline) ->
+          round(static_x)
+
+        # after the text on its line, which runs in from the right edge
+        spec.rtl and st.line != [] and Map.get(spec, :inline, true) ->
+          st.width - st.margin - st.right - (round(st.x) - (st.margin + st.left))
+
+        true ->
+          st.width - st.margin - st.right
+      end
 
     left = resolve_h(spec.left, cw)
     right = resolve_h(spec.right, cw)

@@ -7775,4 +7775,23 @@ defmodule Browser.LayoutTest do
       assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
     end
   end
+
+  describe "static position of an absolute box with text-indent" do
+    defp abs_blue(style, inner) do
+      html =
+        ~s|<style>body{margin:0}.c{width:100px;height:20px;font:10px monospace;#{style}}.i{display:inline;position:absolute;width:20px;height:20px;background:blue}</style><div class="c">#{inner}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(laid, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    end
+
+    test "it starts after the indent of the first line" do
+      assert abs_blue("text-indent:20px", ~s|<div class="i"></div>|).x == 20
+    end
+
+    test "in rtl it ends before the indent, and after the text" do
+      assert abs_blue("direction:rtl;text-indent:20px", ~s|<div class="i"></div>|).x == 60
+    end
+  end
 end
