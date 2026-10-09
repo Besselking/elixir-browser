@@ -3021,10 +3021,20 @@ defmodule Browser.Layout do
   end
 
   defp walk_plain_text(t, style, acc) do
-    t = drop_wide_breaks(t)
-    leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
-    trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
-    words = t |> css_words() |> Enum.map(&{:word, &1, style})
+    ascii? = ascii?(t)
+    t = if ascii?, do: t, else: drop_wide_breaks(t)
+
+    leading =
+      if (ascii? and ascii_space_start?(t)) or (not ascii? and String.match?(t, space_start())),
+        do: [{:space, style}],
+        else: []
+
+    trailing =
+      if (ascii? and ascii_space_end?(t)) or (not ascii? and String.match?(t, space_end())),
+        do: [{:space, style}],
+        else: []
+
+    words = t |> css_words(ascii?) |> Enum.map(&{:word, &1, style})
     # without a space before it, the first word is glued to whatever came before
     words =
       case words do
@@ -3101,7 +3111,7 @@ defmodule Browser.Layout do
         {:word, t, st, g} -> {t, st, g}
       end
 
-    if String.length(text) > 1 and Regex.match?(@wide_re, text) do
+    if not ascii?(text) and String.length(text) > 1 and Regex.match?(@wide_re, text) do
       text
       |> String.graphemes()
       |> Enum.reduce([], fn
@@ -3163,6 +3173,29 @@ defmodule Browser.Layout do
   # words split on white space except the ideographic space and the no-break ones
   # (an ideographic space is a word character that may hang at the end of a line)
   defp css_words(t), do: String.split(t, space_run(), trim: true)
+
+  @ascii_spaces [" ", "\t", "\n", "\r", "\f", "\v"]
+
+  defp css_words(t, true), do: :binary.split(t, @ascii_spaces, [:global, :trim_all])
+  defp css_words(t, false), do: css_words(t)
+
+  # plain ASCII text (nearly all of it) needs no regular expression for white space
+  defp ascii?(<<c, rest::binary>>) when c < 128, do: ascii?(rest)
+  defp ascii?(<<>>), do: true
+  defp ascii?(_), do: false
+
+  defp ascii_space_start?(<<c, _::binary>>), do: c in ~c" \t\n\r\f\v"
+  defp ascii_space_start?(<<>>), do: false
+
+  # white space at the end, and something else before it
+  defp ascii_space_end?(t),
+    do:
+      ascii_space_start?(binary_part(t, byte_size(t), -min(1, byte_size(t)))) and
+        not ascii_blank?(t)
+
+  defp ascii_blank?(<<c, rest::binary>>) when c in ~c" \t\n\r\f\v", do: ascii_blank?(rest)
+  defp ascii_blank?(<<>>), do: true
+  defp ascii_blank?(_), do: false
 
   defp align(v, dir) when v in ["justify", "justify-all"],
     do: if(dir == "rtl", do: :rjustify, else: :justify)
