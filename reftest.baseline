@@ -3730,6 +3730,8 @@ css/css-flexbox/abspos/flex-abspos-staticpos-align-self-safe-002.html
 css/css-flexbox/abspos/flex-abspos-staticpos-align-self-safe-003.html
 css/css-flexbox/abspos/flex-abspos-staticpos-justify-self-001.html
 css/css-flexbox/abspos/flex-abspos-staticpos-margin-001.html
+css/css-flexbox/abspos/flex-abspos-staticpos-margin-002.html
+css/css-flexbox/abspos/flex-abspos-staticpos-margin-003.html
 css/css-flexbox/abspos/flexbox-abspos-child-001a.html
 css/css-flexbox/abspos/flexbox-abspos-child-001b.html
 css/css-flexbox/abspos/flexbox_absolute-atomic.html
@@ -3740,6 +3742,8 @@ css/css-flexbox/abspos/position-absolute-008.html
 css/css-flexbox/abspos/position-absolute-009.html
 css/css-flexbox/abspos/position-absolute-010.html
 css/css-flexbox/abspos/position-absolute-011.html
+css/css-flexbox/abspos/position-absolute-containing-block-001.html
+css/css-flexbox/abspos/position-absolute-containing-block-002.html
 css/css-flexbox/align-content-001.htm
 css/css-flexbox/align-content-002.htm
 css/css-flexbox/align-content-003.htm
@@ -4565,6 +4569,8 @@ css/css-multicol/table/multicol-table-cell-height-001.xht
 css/css-multicol/table/table-cell-multicol-nested-003.html
 css/css-position/nested-inline-abspos-child-with-siblings.html
 css/css-position/nested-inline-abspos-child.html
+css/css-position/position-absolute-center-003.html
+css/css-position/position-absolute-center-004.html
 css/css-position/position-absolute-center-007.html
 css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html

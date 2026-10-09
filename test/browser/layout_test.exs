@@ -4529,6 +4529,18 @@ defmodule Browser.LayoutTest do
     assert text.("P").y == text.("S").y
   end
 
+  test "an absolute child of a flex container is centred by justify-content and align-items" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:relative;display:flex;width:100px;height:100px;align-items:center;justify-content:center"><div style="position:absolute;width:40px;height:20px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert {green.x, green.y} == {38, 48}
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

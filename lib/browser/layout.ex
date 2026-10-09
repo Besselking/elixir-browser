@@ -2003,9 +2003,14 @@ defmodule Browser.Layout do
           ic = computed(attrs)
 
           cond do
-            hidden?(ic) and ic["visibility"] != "collapse" -> {items, acc}
-            ic["position"] in ["absolute", "fixed"] -> {items, walk(el, style, acc)}
-            true -> {[flex_element_item(el, ic, style) | items], acc}
+            hidden?(ic) and ic["visibility"] != "collapse" ->
+              {items, acc}
+
+            ic["position"] in ["absolute", "fixed"] ->
+              {items, el |> walk(style, acc) |> flex_static(c, ic)}
+
+            true ->
+              {[flex_element_item(el, ic, style) | items], acc}
           end
 
         _, state ->
@@ -5020,6 +5025,7 @@ defmodule Browser.Layout do
           static_y
       end
 
+    {x, y} = flex_aligned(spec, st, origin, {x, y}, {width, height}, {left, right, top, bottom})
     {tx, ty} = resolve_translate(spec.translate, width, height)
     # a negative `z-index` puts the box behind the flow: above the page's background only
     layer = if spec.z < 0 and !spec.fixed, do: :under, else: :over
@@ -5037,8 +5043,62 @@ defmodule Browser.Layout do
     %{st | overlays: [moved | st.overlays]}
   end
 
+  # an absolute child of a flex container sits where it would be as the only flex item: its
+  # static position is aligned by `justify-content` and `align-items` within the container
+  defp flex_static([{:abs, sub, spec} | rest], c, ic) do
+    if c["writing-mode"] in [nil, "horizontal-tb"] and c["direction"] in [nil, "ltr"],
+      do: [{:abs, sub, Map.put(spec, :fpos, flex_fpos(c, ic))} | rest],
+      else: [{:abs, sub, spec} | rest]
+  end
+
+  defp flex_static(acc, _c, _ic), do: acc
+
+  defp flex_fpos(c, ic) do
+    align = ic["align-self"]
+    align = if align in [nil, "auto"], do: c["align-items"], else: align
+
+    %{
+      column?: c["flex-direction"] in ["column", "column-reverse"],
+      justify: c["justify-content"],
+      align: align,
+      w: num(c["width"]),
+      h: num(c["height"])
+    }
+  end
+
   defp pct_of({:pct, f}), do: f
   defp pct_of(_), do: nil
+
+  # the static position of an absolute child of a flex container, moved by the container's
+  # alignment (when the container's size on that axis is known)
+  defp flex_aligned(%{fpos: f} = spec, st, origin, {x, y}, {w, h}, {left, right, top, bottom}) do
+    room_w = f.w || max(st.width - 2 * st.margin - st.left - st.right, 0)
+    mx = auto_zero(spec.ml) + auto_zero(spec.mr)
+    my = auto_zero(spec.mb)
+
+    {jx, jy} = if f.column?, do: {f.align, f.justify}, else: {f.justify, f.align}
+
+    nx = if left || right, do: x, else: x + abs_main_shift(jx, room_w - w - mx)
+    ny = if top || bottom || f.h == nil, do: y, else: y + abs_main_shift(jy, f.h - h - my)
+
+    # (`safe` alignment keeps the box inside its containing block)
+    nx = if safe?(jx), do: keep_inside(nx, x, w, origin.x, origin.w), else: nx
+    ny = if safe?(jy) and origin.h, do: keep_inside(ny, y, h, origin.y, origin.h), else: ny
+    {nx, ny}
+  end
+
+  defp flex_aligned(_spec, _st, _origin, pos, _size, _offsets), do: pos
+
+  defp safe?(mode), do: is_binary(mode) and String.starts_with?(mode, "safe ")
+
+  defp keep_inside(new, old, size, start, extent),
+    do: if(new < start or new + size > start + extent, do: old, else: new)
+
+  defp abs_main_shift("safe " <> mode, free), do: abs_main_shift(mode, free)
+  defp abs_main_shift("unsafe " <> mode, free), do: abs_main_shift(mode, free)
+  defp abs_main_shift("center", free), do: round(free / 2)
+  defp abs_main_shift(mode, free) when mode in ["flex-end", "end", "self-end"], do: free
+  defp abs_main_shift(_mode, _free), do: 0
 
   # the height of a positioned box's padding edge when its `height` is given: a length, or a
   # percentage of the window's height for the root
@@ -5307,6 +5367,8 @@ defmodule Browser.Layout do
           avail =
             cond do
               left && right -> cw - left - right
+              # (a child of a flex container is aligned within the container, not stretched)
+              Map.has_key?(spec, :fpos) and left == static_x - origin.x -> cw
               left -> cw - left
               true -> cw - right
             end
@@ -6281,7 +6343,7 @@ defmodule Browser.Layout do
         a, h -> max(h, a.h)
       end)
 
-    shift = align_shift(Enum.reverse(st.line), st)
+    shift = static_shift(Enum.reverse(st.line), st)
     dy = base - text_base
 
     placed =
@@ -6507,9 +6569,9 @@ defmodule Browser.Layout do
     if radii == {{0, 0}, {0, 0}, {0, 0}, {0, 0}}, do: nil, else: radii
   end
 
-  defp align_shift(_items, %{aligned?: false}), do: 0
+  defp static_shift(_items, %{aligned?: false}), do: 0
 
-  defp align_shift([first | _] = items, st) do
+  defp static_shift([first | _] = items, st) do
     free = line_free(items, st)
 
     case line_mode(first, st) do
