@@ -7639,4 +7639,35 @@ defmodule Browser.LayoutTest do
       assert box.w == 100
     end
   end
+
+  describe "flex factors" do
+    defp flex_widths(css, items) do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;width:100px}#f>div{height:10px}#{css}</style><div id="f">#{items}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      for %{type: :rect, color: {_, _, _} = c, w: w} <- laid, c != {0, 0, 0}, do: w
+    end
+
+    test "an infinite grow factor takes all the room" do
+      widths =
+        flex_widths(
+          "#a{flex:calc(infinity) 0 0px;background:green}#b{flex:1 0 0px;background:red}",
+          ~s|<div id="a"></div><div id="b"></div>|
+        )
+
+      assert Enum.max(widths) == 100
+    end
+
+    test "shrink factors under one only take their share of the overflow" do
+      widths =
+        flex_widths(
+          "#f{width:50px}#a{flex-shrink:0.5;width:150px;background:green}",
+          ~s|<div id="a"></div>|
+        )
+
+      assert widths == [100]
+    end
+  end
 end

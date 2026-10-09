@@ -3936,6 +3936,7 @@ css/css-flexbox/flex-grow-005.html
 css/css-flexbox/flex-grow-006.html
 css/css-flexbox/flex-grow-007.html
 css/css-flexbox/flex-grow-008.html
+css/css-flexbox/flex-grow-009.html
 css/css-flexbox/flex-height-min-content.html
 css/css-flexbox/flex-inline.html
 css/css-flexbox/flex-item-and-percentage-abspos.html
@@ -3998,6 +3999,7 @@ css/css-flexbox/flex-shrink-004.html
 css/css-flexbox/flex-shrink-005.html
 css/css-flexbox/flex-shrink-006.html
 css/css-flexbox/flex-shrink-007.html
+css/css-flexbox/flex-shrink-008.html
 css/css-flexbox/flex-vertical-align-effect.html
 css/css-flexbox/flex-wrap-002.html
 css/css-flexbox/flex-wrap-003.html

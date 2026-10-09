@@ -8149,6 +8149,9 @@ defmodule Browser.Layout do
     end
   end
 
+  # (an infinite factor takes all the room, whatever the other factors are)
+  defp flex_number("calc(infinity)", _default), do: 1.0e12
+
   defp flex_number(v, default) when is_binary(v) do
     v = if String.starts_with?(v, "."), do: "0" <> v, else: v
 
@@ -8512,7 +8515,9 @@ defmodule Browser.Layout do
   # frozen there and the others shrink further
   defp flex_resize(st, line, free, avail) when free < 0 do
     line = Enum.map(line, &Map.put(&1, :frozen, false))
-    flex_shrink(st, line, free, avail)
+    # (factors that add up to less than 1 only take that share of the overflow)
+    sum = line |> Enum.map(& &1.shrink) |> Enum.sum()
+    flex_shrink(st, line, if(sum < 1, do: free * sum, else: free), avail)
   end
 
   defp flex_resize(_st, line, _free, _avail), do: line
