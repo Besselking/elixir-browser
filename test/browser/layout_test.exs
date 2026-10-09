@@ -7598,4 +7598,36 @@ defmodule Browser.LayoutTest do
       assert blue.y == 100
     end
   end
+
+  describe "intrinsic size of balanced and wrapping flex containers" do
+    defp flex_green(style, items) do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:inline-flex;background:green;#{style}">#{items}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+    end
+
+    test "a balanced row is as wide as its widest line" do
+      items = String.duplicate(~s|<div style="width:40px"></div>|, 3)
+      box = flex_green("gap:20px;flex-wrap:balance;flex-line-count:2;height:100px", items)
+      assert box.w == 100
+    end
+
+    test "a balanced column is as tall as its tallest column" do
+      items = String.duplicate(~s|<div style="width:40px;height:40px"></div>|, 3)
+
+      box =
+        flex_green("gap:20px;flex-direction:column;flex-wrap:balance;flex-line-count:2", items)
+
+      assert {box.w, box.h} == {100, 100}
+    end
+
+    test "min-content of a wrapping row is its widest item" do
+      items = String.duplicate(~s|<div style="width:100px"></div>|, 3)
+      box = flex_green("width:min-content;gap:20px;flex-wrap:wrap;height:10px", items)
+      assert box.w == 100
+    end
+  end
 end

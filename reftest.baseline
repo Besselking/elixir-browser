@@ -3834,6 +3834,13 @@ css/css-flexbox/balance/balance-005.html
 css/css-flexbox/balance/balance-available-size-002.html
 css/css-flexbox/balance/balance-complex.html
 css/css-flexbox/balance/balance-flex-grow.html
+css/css-flexbox/balance/balance-line-count-intrinsic-001.html
+css/css-flexbox/balance/balance-line-count-intrinsic-002.html
+css/css-flexbox/balance/balance-line-count-intrinsic-003.html
+css/css-flexbox/balance/balance-line-count-intrinsic-004.html
+css/css-flexbox/balance/balance-line-count-intrinsic-005.html
+css/css-flexbox/balance/balance-line-count-intrinsic-006.html
+css/css-flexbox/balance/balance-line-count-intrinsic-007.html
 css/css-flexbox/balance/balance-min-line-count-001.html
 css/css-flexbox/balance/balance-min-line-count-002.html
 css/css-flexbox/balance/balance-min-line-count-003.html

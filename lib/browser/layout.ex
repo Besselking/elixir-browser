@@ -1087,8 +1087,16 @@ defmodule Browser.Layout do
            kw?(c["min-width"])) and
           kind in [:block, :flex, :grid]
 
-      # laying a flex or grid container out at width 1 does not give its min-content width
-      c = if c["width"] == :minc and kind != :block, do: Map.put(c, "width", :fit), else: c
+      # laying a flex or grid container out at width 1 does not give its min-content width (a
+      # wrapping row does: every item is on a line of its own)
+      c =
+        if c["width"] == :minc and kind != :block and
+             not (kind in [:flex, :inline_block] and inner_kind(c) == :flex and
+                    wraps?(c["flex-wrap"]) and
+                    c["flex-direction"] in [nil, "row", "row-reverse"]),
+           do: Map.put(c, "width", :fit),
+           else: c
+
       table? = kind == :table and force != :inline_inner
       float? = force == nil and c["float"] in ["left", "right"]
 
@@ -3901,9 +3909,40 @@ defmodule Browser.Layout do
 
   defp op({:flex, cs, items, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+    # a balanced column without a height is as tall as holds its items in that many columns
+    cs =
+      if cs.height == nil and cs.maxh == nil and cs.wrap and Map.get(cs, :balance) == true and
+           (cs.line_count || 0) > 1 and cs.dir in [:column, :column_reverse] do
+        widest = flex_widest(st, %{cs | dir: :row}, items, avail)
+
+        sized =
+          items
+          |> Enum.sort_by(& &1.order)
+          |> Enum.map(fn it ->
+            st
+            |> flex_column_item(cs, %{it | fit?: true}, widest)
+            |> then(&flex_column_basis(st, &1))
+          end)
+
+        %{
+          cs
+          | height: balanced_width(Enum.map(sized, & &1.h), cs.row_gap, cs.line_count) * 1.0,
+            hdef: true
+        }
+      else
+        cs
+      end
+
     # when measuring how wide the content wants to be (an unbounded width), the container
     # is as wide as its items, rather than spreading them over the whole width
     avail = if avail > @unbounded / 2, do: flex_natural_width(st, cs, items, avail), else: avail
+
+    # measured for its min-content (at width 1), a wrapping row is as wide as its widest item
+    avail =
+      if avail <= 1 and cs.wrap and cs.dir in [:row, :row_reverse] and
+           Process.get(:layout_intrinsic, false),
+         do: max(avail, flex_widest(st, cs, items, avail)),
+         else: avail
 
     cs =
       if cs.col_pct > 0 and avail < @unbounded / 2,
@@ -8141,6 +8180,30 @@ defmodule Browser.Layout do
   defp len_px({:px, n}, _base), do: n
   defp len_px({:pct, f}, base), do: f * base
 
+  # the narrowest room that holds the sizes in `lines` lines (taken in order)
+  defp balanced_width(sizes, gap, lines) do
+    pseudo = for w <- sizes, do: %{hw: w * 1.0, ml: 0, mr: 0}
+    widest = round(Enum.max(sizes, fn -> 0 end))
+    total = round(Enum.sum(sizes) + gap * (length(sizes) - 1))
+
+    Enum.find(widest..max(total, widest), total, fn room ->
+      length(flex_break(pseudo, gap, room)) <= lines
+    end)
+  end
+
+  defp flex_widest(st, cs, items, avail) do
+    items
+    |> Enum.map(fn it ->
+      clamp_width(
+        flex_base(st, it, avail, cs),
+        %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0},
+        avail
+      ) + auto_zero(it.ml) + auto_zero(it.mr)
+    end)
+    |> Enum.max(fn -> 0 end)
+    |> round()
+  end
+
   defp flex_natural_width(st, cs, items, avail) do
     # (in a column the basis is a height: the items are as wide as they are)
     row? = cs.dir in [:row, :row_reverse]
@@ -8158,6 +8221,10 @@ defmodule Browser.Layout do
     widest = round(Enum.max(widths, fn -> 0 end))
 
     cond do
+      # balanced lines: as narrow as holds the items in that many lines
+      row? and cs.wrap and Map.get(cs, :balance) == true and (cs.line_count || 0) > 1 ->
+        balanced_width(widths, cs.col_gap, cs.line_count)
+
       row? ->
         round(Enum.sum(widths) + cs.col_gap * (length(items) - 1))
 
