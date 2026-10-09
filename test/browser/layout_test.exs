@@ -7753,4 +7753,15 @@ defmodule Browser.LayoutTest do
       assert Enum.max(texts) < 100
     end
   end
+
+  describe "percentage heights of inline-blocks" do
+    test "an inline-block child is a percentage of its parent's used height" do
+      html =
+        ~s|<style>body{margin:0}#p{display:inline-block;height:200px;max-height:100px;background:red}#c{display:inline-block;width:100px;height:100%;background:green}</style><div id="p"><span id="c"></span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+  end
 end

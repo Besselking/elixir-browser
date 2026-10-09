@@ -1607,6 +1607,7 @@ defmodule Browser.Layout do
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
       cell?: c["display"] == "table-cell",
+      hpct_atom: pct_of(c["height"]) || calc_pct(c["height"]),
       table?: table? or c["display"] == "inline-table",
       block_table?: table? and block?,
       flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
@@ -3886,7 +3887,7 @@ defmodule Browser.Layout do
   defp op({:inline_block, sub, spec, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key))
+    {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
 
     {w, items, height, base} =
       table_beside_floats(st, sub, spec, avail, {w, items, height, base})

@@ -2391,6 +2391,7 @@ css/CSS2/normal-flow/max-height-applies-to-013.xht
 css/CSS2/normal-flow/max-height-applies-to-014.xht
 css/CSS2/normal-flow/max-height-applies-to-015.xht
 css/CSS2/normal-flow/max-height-applies-to-016.xht
+css/CSS2/normal-flow/max-height-applies-to-017.html
 css/CSS2/normal-flow/max-height-applies-to-018.html
 css/CSS2/normal-flow/max-height-percentage-001.xht
 css/CSS2/normal-flow/max-height-percentage-002.xht
@@ -4299,6 +4300,7 @@ css/css-flexbox/flexbox_wrap-long.html
 css/css-flexbox/flexbox_wrap-reverse.html
 css/css-flexbox/flexbox_wrap.html
 css/css-flexbox/flexible-order.html
+css/css-flexbox/flexitem-stretch-range.html
 css/css-flexbox/gap-001-lr.html
 css/css-flexbox/gap-001-ltr.html
 css/css-flexbox/gap-001-rl.html
@@ -4379,6 +4381,7 @@ css/css-flexbox/overflow-area-001.html
 css/css-flexbox/overflow-area-002.html
 css/css-flexbox/overflow-area-003.html
 css/css-flexbox/padding-overflow.html
+css/css-flexbox/percentage-descendant-of-anonymous-flex-item.html
 css/css-flexbox/percentage-heights-002.html
 css/css-flexbox/percentage-heights-005.html
 css/css-flexbox/percentage-heights-006.html
