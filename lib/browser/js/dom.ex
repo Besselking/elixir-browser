@@ -1088,6 +1088,9 @@ defmodule Browser.JS.DOM do
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
     # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    # (a layout made for the scripts knew elements that the page's layout, made from an older tree,
+    # does not: they keep the boxes they have until the page's layout has them)
+    rects = Map.merge(Process.get(:dom_forced_rects, %{}), rects)
     Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
@@ -1129,7 +1132,7 @@ defmodule Browser.JS.DOM do
 
       nil ->
         # (an element no layout was asked about has no number yet: laying out numbers it)
-        with true <- layout_now(),
+        with true <- layout_now(true),
              {_, id} <- List.keyfind(node(nid).internal, "@nid", 0),
              %{^id => {x, y, w, h}} <- rects_here() do
           frame_relative({x, y, w, h})
@@ -1150,22 +1153,29 @@ defmodule Browser.JS.DOM do
   defp rect_of(id) do
     case rects_here() do
       %{^id => rect} -> rect
-      _ -> layout_now() && Map.get(rects_here(), id)
+      _ -> layout_now(id >= Process.get(:dom_forced_next, 0)) && Map.get(rects_here(), id)
     end
   end
 
   # A layout for the scripts, made while they wait. It costs as much as the layout of the
-  # page, so it is made only when the tree changed since the last one, and no more than
-  # about a fifth of the time (an element that is not drawn has no box, and each question
-  # about it would ask for a layout again).
-  defp layout_now do
+  # page, so it is made only when the tree changed since the last one. An element that is not
+  # drawn has no box however often it is asked for, so a question about an element that an
+  # earlier layout knew has to wait for as long as four such layouts take; an element made
+  # since then (`new?`) is laid out for at once, while the layouts made so far have taken less
+  # than a few seconds and a third of the time the scripts have run.
+  defp layout_now(new?) do
     info = Process.get(:rt_info, %{})
     rev = st().rev
     now = System.monotonic_time(:millisecond)
     {last_rev, last_end, cost} = Process.get(:dom_forced, {nil, nil, 0})
+    {first_at, spent} = Process.get(:dom_forced_spent, {now, 0})
 
-    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev &&
-         (last_end == nil or now - last_end >= 4 * cost) do
+    allowed =
+      if new?,
+        do: spent <= 2_000 + div(now - first_at, 3),
+        else: last_end == nil or now - last_end >= 4 * cost
+
+    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev && allowed do
       raw = Enum.map(node(st().main).kids, &export/1)
       ref = make_ref()
       send(info.owner, {:layout_now, self(), ref, raw})
@@ -1179,8 +1189,11 @@ defmodule Browser.JS.DOM do
 
       done = System.monotonic_time(:millisecond)
       Process.put(:dom_forced, {rev, done, done - now})
+      Process.put(:dom_forced_spent, {first_at, spent + done - now})
+      Process.put(:dom_forced_next, st().next_nid)
 
       with {rects, content} <- result do
+        Process.put(:dom_forced_rects, rects)
         Process.put(:dom_page_rects, rects)
         put_st(%{st() | rects: rects, content: content})
         true

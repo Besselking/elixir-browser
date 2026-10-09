@@ -1073,6 +1073,69 @@ defmodule Browser.JS.DOMTest do
       refute_received {:layout_now, _, _, _}
     end
 
+    test "boxes from a layout made for the scripts stay when the page's older layout arrives" do
+      raw =
+        ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>
+          ~s|window.measure = function () { return d.getBoundingClientRect().width }; console.log(measure())</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      receive do
+        {:layout_now, ^pid, ref, tree} ->
+          nid = nid_of_id(tree, "x")
+          send(pid, {:layout_now_done, ref, %{nid => {10, 20, 300, 40}}, {800.0, 600.0}})
+      after
+        1000 -> flunk("no layout asked for")
+      end
+
+      assert logs(Task.await(task)) == ["300"]
+      # the page's own layout, made before the element existed, does not have it
+      Runtime.layout(pid, %{}, 0, 0, {800.0, 600.0})
+      assert logs(Runtime.eval(pid, "console.log(measure())")) == ["300"]
+    end
+
+    test "an element made just after a layout for the scripts gets a layout of its own" do
+      raw =
+        ~s|<body><script>function make(id) { var d = document.createElement('div'); d.id = id; document.body.appendChild(d); return d.getBoundingClientRect().width }| <>
+          ~s|console.log(make('a'), make('b'))</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      for {id, w} <- [{"a", 100}, {"b", 200}] do
+        receive do
+          {:layout_now, ^pid, ref, tree} ->
+            nid = nid_of_id(tree, id)
+            send(pid, {:layout_now_done, ref, %{nid => {0, 0, w, 10}}, {800.0, 600.0}})
+        after
+          1000 -> flunk("no layout asked for #{id}")
+        end
+      end
+
+      assert logs(Task.await(task)) == ["100 200"]
+    end
+
     test "a module namespace with exports cannot be frozen" do
       {_, r} =
         start(
