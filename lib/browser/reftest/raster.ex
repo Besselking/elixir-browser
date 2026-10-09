@@ -100,9 +100,16 @@ defmodule Browser.Reftest.Raster do
           picture ->
             clip = {max(ix0, cx), max(iy0, cy), min(ix1, cx + cw), min(iy1, cy + ch)}
 
-            tile
-            |> Browser.Backgrounds.tiles(repeat, lc)
-            |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
+            if tw == 1 and th == 1 and picture.w == 1 and picture.h == 1 and
+                 repeat == {:repeat, :repeat} do
+              # (a one pixel picture repeated is a fill: far more tiles than the tiler's cap)
+              {x0, y0, x1, y1} = clip
+              blit(grid, picture, x0, y0, x1 - x0, y1 - y0, clip)
+            else
+              tile
+              |> Browser.Backgrounds.tiles(repeat, lc)
+              |> Enum.reduce(grid, fn {x, y}, grid -> blit(grid, picture, x, y, tw, th, clip) end)
+            end
         end
 
       %{kind: :linear, tile: {_, _, tw, th} = tile, repeat: repeat, clip: {cx, cy, cw, ch} = lc} =

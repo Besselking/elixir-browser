@@ -7322,4 +7322,33 @@ defmodule Browser.LayoutTest do
       assert Enum.any?(items, &(&1.type == :rect and &1.color == {0, 128, 0} and &1.h == 100))
     end
   end
+
+  describe "empty inline boxes, display: contents roots and anonymous table cells" do
+    test "an empty span with a tall line height makes its line tall" do
+      html =
+        ~s|<style>body{margin:0}div{background:green;line-height:1}span{line-height:5}</style><div><span></span>X</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.h == 80
+    end
+
+    test "the background of a display: contents root still paints the canvas" do
+      html = ~s|<style>:root{display:contents;background:green}</style><p>x</p>|
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      canvas = Enum.find(items, &(&1.type == :canvas))
+      assert canvas.color == {0, 128, 0}
+    end
+
+    test "text directly in a table row takes the row's colour" do
+      html =
+        ~s|<div style="color:red"><div style="display:table-row;color:blue">only</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :text)).color == {0, 0, 255}
+    end
+  end
 end

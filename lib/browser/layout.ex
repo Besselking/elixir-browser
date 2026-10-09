@@ -483,9 +483,12 @@ defmodule Browser.Layout do
       body = body_i && Enum.at(kids, body_i)
 
       cond do
-        has_background?(computed(hattrs)) ->
+        # (the root's background goes to the canvas even with `display: contents`)
+        has_background?(root_computed(hattrs)) ->
           html = {:element, "html", without_background(hattrs), kids}
-          {List.replace_at(nodes, i, html), canvas_style(computed(hattrs), computed(hattrs))}
+
+          {List.replace_at(nodes, i, html),
+           canvas_style(root_computed(hattrs), root_computed(hattrs))}
 
         body && has_background?(computed(elem(body, 2))) ->
           {:element, "body", battrs, bkids} = body
@@ -502,6 +505,13 @@ defmodule Browser.Layout do
   end
 
   @background_keys ~w(background-color background-image background-attachment background-repeat background-position background-size)
+
+  defp root_computed(attrs) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, map} -> map
+      nil -> %{}
+    end
+  end
 
   defp has_background?(c), do: color?(c["background-color"]) or bgimg_spec(c) != nil
 
@@ -529,7 +539,7 @@ defmodule Browser.Layout do
 
   defp canvas_style(c, root) do
     %{
-      root: box("html", root),
+      root: if(root["display"] != "contents", do: box("html", root)),
       color: if(color?(c["background-color"]), do: over_white(c["background-color"])),
       bgimg: bgimg_spec(c),
       current: if(match?({_, _, _}, c["color"]), do: c["color"], else: {0, 0, 0})
@@ -1636,6 +1646,12 @@ defmodule Browser.Layout do
     spec = inline_spec(tag, c, style)
     ref = make_ref()
     acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
+
+    acc =
+      if kids == [] and !spec and style.lh != parent_style.lh,
+        do: [{:empty_inline, style} | acc],
+        else: acc
+
     acc = walk_children(tag, kids, if(spec, do: %{style | inl: true}, else: style), acc)
     acc = edge_spacing(acc, style, parent_style)
     acc = if spec, do: [{:inline_close, ref, spec} | acc], else: acc
@@ -4023,6 +4039,13 @@ defmodule Browser.Layout do
           marks: [{:start, ref, spec, x + spec.ml} | st.marks]
       }
     end
+  end
+
+  # an empty inline box with its own line height still makes the line at least that tall
+  defp op({:empty_inline, style}, %{line: []} = st), do: strut(st, style)
+
+  defp op({:empty_inline, style}, st) do
+    %{st | lmax: max(st.lmax, line_px(style))}
   end
 
   defp op({:inline_close, ref, spec}, st) do
@@ -9209,7 +9232,7 @@ defmodule Browser.Layout do
   # a row's background shows behind its cells; a row group's behind its rows
   defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg) do
     cells =
-      for {:element, tag, attrs, _} = el <- anonymous_cells(kids),
+      for {:element, tag, attrs, _} = el <- anonymous_cells(kids, c),
           tag not in @skip,
           cc = computed(attrs),
           tag in @cell_tags or cc["display"] == "table-cell",
@@ -9234,7 +9257,7 @@ defmodule Browser.Layout do
   end
 
   # whatever else a row holds sits in an anonymous cell
-  defp anonymous_cells(kids) do
+  defp anonymous_cells(kids, row) do
     cell? = fn
       {:element, tag, attrs, _} -> tag in @cell_tags or computed(attrs)["display"] == "table-cell"
       _ -> false
@@ -9252,9 +9275,13 @@ defmodule Browser.Layout do
     |> Enum.flat_map(fn chunk ->
       if cell?.(hd(chunk)),
         do: chunk,
-        else: [{:element, "div", [{"@computed", %{"display" => "table-cell"}}], chunk}]
+        else: [{:element, "div", [{"@computed", anonymous_cell_style(row)}], chunk}]
     end)
   end
+
+  # (the cell takes what the row passes down: its colour, font and so on)
+  defp anonymous_cell_style(row),
+    do: row |> Map.take(Browser.Style.inherited_props()) |> Map.put("display", "table-cell")
 
   defp table_caption({:element, tag, attrs, kids}, style) do
     {:element, tag, attrs, kids} |> walk_element(style, [], :inline_inner) |> Enum.reverse()

@@ -906,6 +906,7 @@ css/CSS2/css1/c526-font-sz-002.xht
 css/CSS2/css1/c531-color-000.xht
 css/CSS2/css1/c532-bgcolor-000.xht
 css/CSS2/css1/c532-bgcolor-001.xht
+css/CSS2/css1/c533-bgimage-000.xht
 css/CSS2/css1/c533-bgimage-001.xht
 css/CSS2/css1/c534-bgre-000.xht
 css/CSS2/css1/c534-bgre-001.xht
@@ -1263,6 +1264,7 @@ css/CSS2/linebox/border-padding-bleed-001.xht
 css/CSS2/linebox/border-padding-bleed-002.xht
 css/CSS2/linebox/border-padding-bleed-003.xht
 css/CSS2/linebox/empty-inline-001.xht
+css/CSS2/linebox/empty-inline-003.xht
 css/CSS2/linebox/fractional-line-height.html
 css/CSS2/linebox/inline-box-001.xht
 css/CSS2/linebox/inline-formatting-context-001.xht
@@ -3674,6 +3676,8 @@ css/css-display/display-contents-list-001.html
 css/css-display/display-contents-multicol-001.html
 css/css-display/display-contents-oof-001.html
 css/css-display/display-contents-oof-002.html
+css/css-display/display-contents-root-background.html
+css/css-display/display-contents-table-001.html
 css/css-display/display-contents-table-002.html
 css/css-display/display-contents-td-001.html
 css/css-display/display-contents-text-inherit.html
