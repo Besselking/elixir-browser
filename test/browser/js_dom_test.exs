@@ -1995,4 +1995,85 @@ defmodule Browser.JS.DOMTest do
       do: attrs |> List.keyfind("@nid", 0) |> elem(1),
       else: nid_of_id(kids, id)
   end
+
+  describe "a page in a tab behind others" do
+    @ticker """
+    <body><script>
+    var n = 0;
+    setInterval(() => { n++; console.log("tick " + n); }, 10);
+    </script></body>
+    """
+
+    defp ticks(pid, wait) do
+      Process.sleep(wait)
+      collect(pid, [])
+    end
+
+    defp collect(pid, acc) do
+      receive do
+        {:js_async, ^pid, reply} -> collect(pid, acc ++ logs(reply))
+      after
+        0 -> acc
+      end
+    end
+
+    defp start_owned(html, extra) do
+      {raw, _} = html |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      info =
+        Map.merge(
+          %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "x"} end},
+          extra
+        )
+
+      pid = Runtime.start(raw, info)
+      Runtime.run_scripts(pid)
+      pid
+    end
+
+    test "a shown page's timers run as they are due" do
+      pid = start_owned(@ticker, %{})
+      assert length(Enum.filter(ticks(pid, 300), &String.starts_with?(&1, "tick"))) > 5
+      Runtime.stop(pid)
+    end
+
+    test "a hidden page's timers run once a second at most" do
+      pid = start_owned(@ticker, %{hidden: true})
+      log = ticks(pid, 400)
+      assert length(Enum.filter(log, &String.starts_with?(&1, "tick"))) <= 1
+      Runtime.stop(pid)
+    end
+
+    test "showing and hiding a page changes document.hidden and fires visibilitychange" do
+      html = """
+      <body><script>
+      document.addEventListener("visibilitychange",
+        () => console.log("vis " + document.visibilityState + " " + document.hidden));
+      </script></body>
+      """
+
+      pid = start_owned(html, %{})
+      Runtime.visible(pid, false)
+      Runtime.visible(pid, true)
+      Runtime.visible(pid, true)
+      assert ticks(pid, 100) == ["vis hidden true", "vis visible false"]
+      Runtime.stop(pid)
+    end
+
+    test "a page that starts hidden says so" do
+      {_pid, reply} =
+        start(
+          "<body><script>console.log(document.hidden, document.visibilityState)</script></body>",
+          %{},
+          %{hidden: true}
+        )
+
+      assert logs(reply) == ["true hidden"]
+    end
+
+    test "window.open from an inline onclick handler asks for a tab" do
+      {pid, _} = start(~S|<body><button onclick="window.open('/x')">go</button></body>|)
+      assert Runtime.dispatch(pid, {:control, 0}, "click").outbox == [open_tab: "http://t.test/x"]
+    end
+  end
 end

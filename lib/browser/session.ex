@@ -134,6 +134,8 @@ defmodule Browser.Session do
       loading: nil,
       # the scripts' first run has not reported back yet
       scripts_pending: false,
+      # a script runtime started while the tab was behind others, taken over when it is shown
+      adopt_js: nil,
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
       active: 0,
@@ -193,7 +195,10 @@ defmodule Browser.Session do
       |> Enum.with_index()
       |> Enum.map(fn
         {%{tid: ^tid} = tab, i} when i != state.active ->
-          tab |> Map.put(:loading, nil) |> Map.put(:loaded, {url, mode, result})
+          tab
+          |> Map.put(:loading, nil)
+          |> Map.put(:loaded, {url, mode, result})
+          |> start_background_js(state, mode, result)
 
         {tab, _} ->
           tab
@@ -206,7 +211,8 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
-    state = stop_js(state)
+    state =
+      if state.adopt_js != nil and state.adopt_js == state.js, do: state, else: stop_js(state)
 
     page =
       case result do
@@ -276,7 +282,9 @@ defmodule Browser.Session do
 
     # the pictures download while the page is laid out in the background
     publish_tabs(state)
-    {:noreply, state |> start_images() |> start_layout_job() |> start_js() |> sync_buttons()}
+
+    {:noreply,
+     state |> start_images() |> start_layout_job() |> adopt_or_start_js() |> sync_buttons()}
   end
 
   # a runtime's scripts have run
@@ -284,6 +292,31 @@ defmodule Browser.Session do
     do: {:noreply, apply_js(%{state | scripts_pending: false}, reply)}
 
   def handle_info({:js_reply, _, _, _}, state), do: {:noreply, state}
+
+  # the scripts of a page that loaded in a tab behind others have run: the tab is shown already, or
+  # what they did waits in the tab
+  def handle_info({:js_first, tid, pid, reply}, %{tid: tid, js: pid} = state),
+    do: {:noreply, apply_js(%{state | scripts_pending: false}, reply)}
+
+  def handle_info({:js_first, tid, pid, reply}, state) do
+    tabs =
+      Enum.map(state.tabs, fn
+        %{tid: ^tid, js: ^pid, loaded: _} = tab ->
+          first = if tab[:async], do: merge_async(reply, tab.async), else: reply
+          tab |> Map.put(:async, first) |> Map.put(:scripts_pending, false)
+
+        tab ->
+          tab
+      end)
+
+    {:noreply, %{state | tabs: tabs}}
+  end
+
+  # `window.open` of the page in the tab `tid`
+  def handle_info({:open_tab, tid, url}, %{tid: tid} = state),
+    do: {:noreply, open_foreground_tab(state, url)}
+
+  def handle_info({:open_tab, _tid, _url}, state), do: {:noreply, state}
 
   # a timer or a promise changed the page after the call that started it had returned
   def handle_info({:js_async, pid, reply}, %{js: pid} = state),
@@ -2147,6 +2180,12 @@ defmodule Browser.Session do
   defp base(%{page: %{base: base}}) when is_binary(base), do: base
   defp base(state), do: state.url
 
+  # the runtime that was started while the tab was behind others goes on; else one is started
+  defp adopt_or_start_js(%{adopt_js: pid, js: pid} = state) when pid != nil,
+    do: %{state | adopt_js: nil, hover_nid: nil}
+
+  defp adopt_or_start_js(state), do: start_js(%{state | adopt_js: nil})
+
   defp start_js(%{page: page} = state) do
     if Page.scripts?(page) do
       # (a closure that named `page` would carry the whole page into the runtime's process,
@@ -2333,7 +2372,13 @@ defmodule Browser.Session do
     sync_buttons(%{state | history: history, url: url, page: page})
   end
 
-  defp js_effect({:open_tab, url}, state), do: open_foreground_tab(state, url)
+  # (the tab opens when the click or the timer that asked for it is done: the code that went on
+  # with the event would otherwise work on the new tab)
+  defp js_effect({:open_tab, url}, state) do
+    send(self(), {:open_tab, state.tid, url})
+    state
+  end
+
   defp js_effect({:navigate, url, mode}, state), do: load(state, url, mode, initiator: state.url)
 
   # `location.hash = ...`: an entry in the page's history, and the page scrolls to the fragment
@@ -3176,6 +3221,8 @@ defmodule Browser.Session do
       |> cancel_page_job()
       |> stop_blink()
 
+    if state.js, do: Browser.JS.Runtime.visible(state.js, false)
+
     tab =
       state
       |> Map.take(@tab_keys)
@@ -3216,6 +3263,7 @@ defmodule Browser.Session do
     laid_width = Map.get(tab, :laid_width)
     state = state |> Map.merge(Map.take(tab, @tab_keys)) |> Map.put(:active, i)
     state = %{state | nonce: state.nonce + 1}
+    if state.js, do: Browser.JS.Runtime.visible(state.js, true)
 
     UI.set_scroll_x(state.ui, state.scroll_x)
     UI.update(state.ui, state.items, overlay(state), state.scroll, true, :full)
@@ -3233,10 +3281,14 @@ defmodule Browser.Session do
     case Map.get(tab, :loaded) do
       {url, mode, result} ->
         # the page arrived while the tab was in the background: it is shown now
+        # (scripts that already run for it are kept, with what they did meanwhile)
         {:noreply, state} =
-          handle_info({:loaded, state.nonce, url, mode, result}, %{state | loading: nil})
+          handle_info(
+            {:loaded, state.nonce, url, mode, result},
+            %{state | loading: nil, adopt_js: state.js}
+          )
 
-        state
+        if async = Map.get(tab, :async), do: apply_js(state, async), else: state
 
       nil ->
         # what scripts did while the tab was away (not when they are to start again)
@@ -3279,6 +3331,48 @@ defmodule Browser.Session do
     state = sync_buttons(state)
     state = if state.focus, do: reset_blink(state), else: state
     publish_tabs(state)
+  end
+
+  # The scripts of a page that finished loading in a tab behind others start at once, with the page
+  # hidden (timers slowed down); what they change is applied when the tab is shown.
+  defp start_background_js(tab, state, mode, result) do
+    case tab do
+      %{js: pid} when is_pid(pid) -> Browser.JS.Runtime.stop(pid)
+      _ -> :ok
+    end
+
+    tab = tab |> Map.delete(:async) |> Map.merge(%{js: nil, scripts_pending: false})
+
+    with {:ok, page} <- result,
+         true <- Page.scripts?(page) do
+      history_before =
+        case mode do
+          :push -> length(History.visit(tab.history, page.url).back)
+          _ -> length(tab.history.back)
+        end
+
+      initiator = page.url
+
+      info = %{
+        url: page.url,
+        base: page.base || page.url,
+        width: state.width,
+        height: UI.client_height(state.ui),
+        history_before: history_before,
+        layout_now: false,
+        hidden: true,
+        fetch: &Fetch.load(&1, initiator: initiator),
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
+      }
+
+      pid = Browser.JS.Runtime.start(page.raw, info)
+      me = self()
+      tid = tab.tid
+      Task.start(fn -> send(me, {:js_first, tid, pid, Browser.JS.Runtime.run_scripts(pid)}) end)
+      %{tab | js: pid, scripts_pending: true}
+    else
+      _ -> tab
+    end
   end
 
   defp new_tab(state) do
