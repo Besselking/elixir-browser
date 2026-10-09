@@ -4552,6 +4552,29 @@ defmodule Browser.LayoutTest do
     assert word_x(items, "P") == 8 + 64
   end
 
+  test "a relatively positioned box paints above a later absolute one only through tree order and z-index" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:relative"><div style="position:absolute;width:10px;height:10px;background:#f00"></div><div style="position:relative;width:10px;height:10px;background:#00f"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    rects = Enum.filter(items, &(&1.type == :rect))
+    assert List.last(rects).color == {0, 0, 255}
+  end
+
+  test "a negative border width is dropped, the shorthand with one too" do
+    page =
+      Browser.Page.build(
+        ~s|<style>div{border:0 solid;border-width:-4px}p{border:0 solid;border:red solid -1px}</style><div>a</div><p>b</p>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    assert Enum.filter(items, &(&1.type == :rect)) == []
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

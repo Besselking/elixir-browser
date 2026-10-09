@@ -169,6 +169,7 @@ css/CSS2/backgrounds/background-image-cover-002.xht
 css/CSS2/backgrounds/background-image-cover-004.xht
 css/CSS2/backgrounds/background-image-cover-attachment-001.xht
 css/CSS2/backgrounds/background-image-transparency-001.xht
+css/CSS2/backgrounds/background-intrinsic-010.xht
 css/CSS2/backgrounds/background-position-001.xht
 css/CSS2/backgrounds/background-position-002.xht
 css/CSS2/backgrounds/background-position-004.xht
@@ -304,6 +305,9 @@ css/CSS2/backgrounds/background-root-023.xht
 css/CSS2/backgrounds/background-root-024.xht
 css/CSS2/borders/border-001.xht
 css/CSS2/borders/border-003.xht
+css/CSS2/borders/border-005.xht
+css/CSS2/borders/border-006.xht
+css/CSS2/borders/border-008.xht
 css/CSS2/borders/border-applies-to-001.xht
 css/CSS2/borders/border-applies-to-002.xht
 css/CSS2/borders/border-applies-to-003.xht
@@ -424,6 +428,8 @@ css/CSS2/borders/border-color-001.xht
 css/CSS2/borders/border-color-005.xht
 css/CSS2/borders/border-color-006.xht
 css/CSS2/borders/border-color-010.xht
+css/CSS2/borders/border-color-011.xht
+css/CSS2/borders/border-color-012.xht
 css/CSS2/borders/border-color-applies-to-001.xht
 css/CSS2/borders/border-color-applies-to-002.xht
 css/CSS2/borders/border-color-applies-to-003.xht
@@ -780,6 +786,8 @@ css/CSS2/borders/border-width-005.xht
 css/CSS2/borders/border-width-006.xht
 css/CSS2/borders/border-width-007.xht
 css/CSS2/borders/border-width-008.xht
+css/CSS2/borders/border-width-009.xht
+css/CSS2/borders/border-width-010.xht
 css/CSS2/borders/border-width-011.xht
 css/CSS2/borders/border-width-012.xht
 css/CSS2/borders/border-width-013.xht
@@ -1031,7 +1039,9 @@ css/CSS2/floats-clear/clear-initial-001.xht
 css/CSS2/floats-clear/clear-inline-001.xht
 css/CSS2/floats-clear/clear-on-child-with-margins-2.html
 css/CSS2/floats-clear/clear-on-child-with-margins.html
+css/CSS2/floats-clear/clear-on-parent-with-margins-no-clearance.html
 css/CSS2/floats-clear/clear-on-parent.html
+css/CSS2/floats-clear/clear-with-top-margin-after-cleared-empty-block.html
 css/CSS2/floats-clear/clearance-006.xht
 css/CSS2/floats-clear/float-003.xht
 css/CSS2/floats-clear/float-005.xht
@@ -1583,6 +1593,7 @@ css/CSS2/margin-padding-clear/margin-left-109.xht
 css/CSS2/margin-padding-clear/margin-left-110.xht
 css/CSS2/margin-padding-clear/margin-left-111.xht
 css/CSS2/margin-padding-clear/margin-left-112.xht
+css/CSS2/margin-padding-clear/margin-left-113.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-001.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-002.xht
 css/CSS2/margin-padding-clear/margin-left-applies-to-003.xht
@@ -3885,6 +3896,7 @@ css/css-flexbox/flex-item-min-width-min-content.html
 css/css-flexbox/flex-item-position-relative-001.html
 css/css-flexbox/flex-item-vertical-align.html
 css/css-flexbox/flex-item-z-ordering-001.html
+css/css-flexbox/flex-item-z-ordering-002.html
 css/css-flexbox/flex-lines/multi-line-wrap-reverse-row-reverse.html
 css/css-flexbox/flex-lines/multi-line-wrap-with-row-reverse.html
 css/css-flexbox/flex-margin-no-collapse.html
@@ -4458,6 +4470,7 @@ css/css-multicol/multicol-gap-001.xht
 css/css-multicol/multicol-gap-002.xht
 css/css-multicol/multicol-gap-003.xht
 css/css-multicol/multicol-gap-fraction-001.xht
+css/css-multicol/multicol-gap-fraction-002.html
 css/css-multicol/multicol-gap-large-002.xht
 css/css-multicol/multicol-gap-negative-001.xht
 css/css-multicol/multicol-height-001.xht

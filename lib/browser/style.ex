@@ -372,11 +372,16 @@ defmodule Browser.Style do
   # a negative width, height, min/max size or padding is invalid: the declaration is dropped
   # before the cascade, so an earlier value still applies
   defp negative_size?(prop, "-" <> rest) when is_binary(rest) do
-    (prop in @non_negative or String.starts_with?(prop, "padding-")) and
+    (prop in @non_negative or String.starts_with?(prop, "padding-") or border_width_prop?(prop)) and
       match?({n, _} when n > 0, Float.parse(String.replace_prefix(rest, ".", "0.")))
   end
 
   defp negative_size?(_prop, _v), do: false
+
+  defp negative_width?(w), do: is_binary(w) and negative_size?("border-top-width", w)
+
+  defp border_width_prop?(prop),
+    do: String.ends_with?(prop, "-width") and String.starts_with?(prop, "border-")
 
   # Shorthands become longhands so the cascade can order them against each
   # other. A shorthand whose value uses var() can't be split until the
@@ -626,11 +631,13 @@ defmodule Browser.Style do
         do: {long, "#{a} #{b}"}
   end
 
+  # (a negative width makes the whole shorthand invalid)
   defp do_split("border", _v, toks) do
     {w, st, c} = border_parts(toks)
 
     for side <- ~w(top right bottom left),
         {suffix, val} <- [{"width", w}, {"style", st}, {"color", c}],
+        not negative_width?(w),
         do: {"border-#{side}-#{suffix}", val}
   end
 
@@ -641,7 +648,14 @@ defmodule Browser.Style do
 
   defp do_split("border-" <> side, _v, toks) when side in ~w(top right bottom left) do
     {w, st, c} = border_parts(toks)
-    [{"border-#{side}-width", w}, {"border-#{side}-style", st}, {"border-#{side}-color", c}]
+
+    if negative_width?(w),
+      do: [],
+      else: [
+        {"border-#{side}-width", w},
+        {"border-#{side}-style", st},
+        {"border-#{side}-color", c}
+      ]
   end
 
   defp do_split("overflow", _v, toks) do
@@ -1746,6 +1760,17 @@ defmodule Browser.Style do
   defp split_comma(<<_, r::binary>>, s, d, n), do: split_comma(r, s, d, n + 1)
 
   # -- typed values --------------------------------------------------------------------
+
+  # (an inherited border colour that is the parent's `currentcolor` stays `currentcolor`: it is
+  # the colour of this element)
+  defp typed(prop, "inherit", env, pc)
+       when prop in ~w(border-top-color border-right-color border-bottom-color border-left-color) do
+    case pc do
+      %{^prop => c, "color" => c} when is_tuple(c) -> {:ok, env.color}
+      %{^prop => c} -> {:ok, c}
+      _ -> :skip
+    end
+  end
 
   defp typed(prop, v, _env, pc) when v in @keywords do
     if v == "inherit" and Map.has_key?(pc, prop), do: {:ok, pc[prop]}, else: :skip

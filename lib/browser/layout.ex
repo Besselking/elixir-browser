@@ -3355,7 +3355,7 @@ defmodule Browser.Layout do
 
     {under_flow, flow} = Enum.split_with(flow, &Map.get(&1, :under))
     # positioned boxes paint in tree order, whichever of the two lists they came through
-    positioned = Enum.sort_by(overlays ++ over, &Map.get(&1, :pz, 0))
+    positioned = Enum.sort_by(overlays ++ over, &pz_key(Map.get(&1, :pz, 0)))
     all = under ++ under_flow ++ flow ++ positioned
 
     if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
@@ -4221,13 +4221,25 @@ defmodule Browser.Layout do
 
   # the tree order of positioned boxes in an atom (laid out earlier, maybe cached) is renewed
   # to come after what the page placed before it
+  defp pz_key({z, seq}), do: {z, seq}
+  defp pz_key(seq), do: {0, seq}
+
   defp renumber_pz(items) do
-    order = items |> Enum.flat_map(&List.wrap(Map.get(&1, :pz))) |> Enum.uniq() |> Enum.sort()
+    order =
+      items
+      |> Enum.flat_map(&List.wrap(Map.get(&1, :pz)))
+      |> Enum.uniq()
+      |> Enum.sort_by(&pz_key/1)
 
     if order == [] do
       items
     else
-      fresh = Map.new(order, &{&1, :erlang.unique_integer([:monotonic])})
+      fresh =
+        Map.new(order, fn
+          {z, _} = pz -> {pz, {z, :erlang.unique_integer([:monotonic])}}
+          pz -> {pz, :erlang.unique_integer([:monotonic])}
+        end)
+
       Enum.map(items, fn it -> if pz = Map.get(it, :pz), do: %{it | pz: fresh[pz]}, else: it end)
     end
   end
@@ -4567,14 +4579,12 @@ defmodule Browser.Layout do
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
 
-    # a box that moved paints above the non-positioned content of the flow
+    # a positioned box paints above the non-positioned content of the flow
     shift = fn list ->
-      if dx == 0 and dy == 0,
-        do: list,
-        else:
-          Enum.map(list, fn it ->
-            it |> move(dx, dy) |> Map.put(:over, true) |> Map.put_new(:pz, box.seq)
-          end)
+      Enum.map(list, fn it ->
+        layer = if box.o.z < 0, do: :under, else: :over
+        it |> move(dx, dy) |> Map.put(layer, true) |> Map.put_new(:pz, z_order(box.seq, box.o.z))
+      end)
     end
 
     st = %{
@@ -5030,7 +5040,11 @@ defmodule Browser.Layout do
 
     moved =
       for it <- items,
-          do: it |> move(x + tx, y + ty) |> Map.put(layer, true) |> Map.put_new(:pz, spec.seq)
+          do:
+            it
+            |> move(x + tx, y + ty)
+            |> Map.put(layer, true)
+            |> Map.put_new(:pz, z_order(spec.seq, spec.z))
 
     # a fixed box stays where it is in the window while the page scrolls
     moved =
@@ -6906,7 +6920,7 @@ defmodule Browser.Layout do
             dy = flex_offset(flex_align(it, gs.align), cross, it.h)
             dx = grid_justify(it, gs, it.room)
             x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
-            for item <- it.items, do: move(item, round(x), y + dy)
+            for item <- z_items(it), do: move(item, round(x), y + dy)
           end)
 
         {placed_items, y + cross + round(gs.row_gap)}
@@ -7664,6 +7678,8 @@ defmodule Browser.Layout do
       sizing: if(border_box?, do: :border, else: :content),
       align: c["align-self"] || "auto",
       order: flex_number(c["order"], 0.0),
+      # a flex item with a `z-index` is a stacking context even when it is not positioned
+      zi: if(c["position"] in [nil, "static"] and c["z-index"] != nil, do: z_index(c)),
       auto_height?: c["height"] in [nil, :auto],
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
@@ -8046,7 +8062,7 @@ defmodule Browser.Layout do
 
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
-        moved = for item <- it.items, do: move(item, floor(ix + 0.5), top + dy)
+        moved = for item <- z_items(it), do: move(item, floor(ix + 0.5), top + dy)
         {moved, ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
@@ -8440,7 +8456,7 @@ defmodule Browser.Layout do
 
     {laid, y} =
       Enum.map_reduce(sized, round(start), fn it, y ->
-        moved = for item <- it.items, do: move(item, round(it.x), y)
+        moved = for item <- z_items(it), do: move(item, round(it.x), y)
         {moved, y + it.h + round(cs.row_gap + between)}
       end)
 
@@ -10013,6 +10029,20 @@ defmodule Browser.Layout do
     do: Enum.map(items, &Map.update(&1, :xform, [matrix], fn list -> list ++ [matrix] end))
 
   # -- floats --------------------------------------------------------------------------------
+
+  # the items of a flex or grid item that has a `z-index`: they paint with the positioned boxes
+  defp z_items(%{zi: zi, items: items}) when is_integer(zi) do
+    layer = if zi < 0, do: :under, else: :over
+    seq = :erlang.unique_integer([:monotonic])
+    Enum.map(items, &(&1 |> Map.put(layer, true) |> Map.put_new(:pz, z_order(seq, zi))))
+  end
+
+  defp z_items(%{items: items}), do: items
+
+  # the paint order of positioned boxes: a bigger `z-index` above, then the order in the tree
+  # (`{z, tree order}` when there is a positive `z-index`, else the tree order)
+  defp z_order(seq, z) when is_integer(z) and z > 0, do: {z, seq}
+  defp z_order(seq, _z), do: seq
 
   # `z-index`: the order sticky and fixed boxes are painted in
   defp z_index(c) do
