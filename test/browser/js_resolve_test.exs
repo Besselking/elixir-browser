@@ -96,6 +96,29 @@ defmodule Browser.JS.ResolveTest do
   @s23d "await 1; x"
   @s23e "function* f() { yield 1 }"
   @s24 "function f() { let fs = []; { let x; fs.push((p) => p + x) } }"
+  # Field initializers as closure boundaries: a loop, a block and the parameter phase.
+  @s30a "function f(cs) { for (let i = 0; i < 2; i++) { cs.push(class { x = i; accessor y = i }) } }"
+  @s30b "function f(fs) { for (let k of [1,2]) { let v = k; fs.push(class { x = v }) } }"
+  @s30c "function f(a, C = class { x = a }) { var a = 2; return new C().x }"
+  @s30d "function f() { let x = 1; return class { static s = x } }"
+  @s31 "function f() { let x = 1; return new (class { y = eval(\"x\"); static z = eval(\"x\"); accessor w = eval(\"x\") })().y }"
+  @s32a "function f(a = () => arguments) { var arguments = 5; return [typeof a(), arguments] }"
+  @s32b "function f(a = arguments) { var arguments; return arguments }"
+  @s32c "function f(a = () => arguments) { function arguments() {} return arguments }"
+  @s32d "function f(p = () => arguments) { let arguments = 1; return arguments }"
+  @s33a "function f(a = 1, g = () => a) { var a; function a() {} }"
+  @s33b "function f(a, b = () => a, c) { var a; }"
+  @s33c "function f(a = () => a) { var a; function a(){} return a }"
+  @s34a "class C { m() { return () => super.y } }"
+  @s34b "class B extends A { constructor() { (() => super())() } }"
+  @s35 "using x = y; import { a } from \"m\"; export const b = 1; function f() { return a + b + x }"
+  @s36 "function f(xs) { for (using x of (() => eval(\"x\"))()) {} }"
+  @s37a "async function f() { for (let i = 0; i < 1; i++) { await x } }"
+  @s37b "async function f() { const g = async () => { await x }; y }"
+  @s37c "async function f() { for await (const x of y) {} await using r = z; w }"
+  @s38a "function f(fs) { { let a; let b; fs.push(() => a + b); { function g(){} let c } } }"
+  @s38b "(class A { constructor() {} })"
+  @s38c "(class B extends A { constructor(...args) { super(...args) } })"
 
   # Every source of this file with its parse options, for the flag-off and scope-count tests.
   @cases Enum.map(
@@ -157,7 +180,28 @@ defmodule Browser.JS.ResolveTest do
              @s23b,
              @s23c,
              @s23e,
-             @s24
+             @s24,
+             @s30a,
+             @s30b,
+             @s30c,
+             @s30d,
+             @s31,
+             @s32a,
+             @s32b,
+             @s32c,
+             @s32d,
+             @s33a,
+             @s33b,
+             @s33c,
+             @s34a,
+             @s34b,
+             @s36,
+             @s37a,
+             @s37b,
+             @s37c,
+             @s38a,
+             @s38b,
+             @s38c
            ] ++ @s22_tail ++ @s22_no_tail,
            &{&1, []}
          ) ++
@@ -169,7 +213,8 @@ defmodule Browser.JS.ResolveTest do
              {@s18a, [module: true]},
              {@s18b, [module: true]},
              {@s18c, [module: true]},
-             {@s23d, [module: true]}
+             {@s23d, [module: true]},
+             {@s35, [module: true]}
            ]
 
   # The scripts of the `functions`, `classes`, `scope lifetime` and `explicit resource
@@ -255,7 +300,19 @@ defmodule Browser.JS.ResolveTest do
     """,
     "{ using x; }",
     "{ using x = 1 }",
-    "{ using x = {} }"
+    "{ using x = {} }",
+    # The sources of tests 30 to 36, run so that the facts the resolver attaches never
+    # change what the interpreter answers.
+    "var cs = []; #{@s30a} f(cs); [new cs[0]().x, new cs[1]().x, new cs[0]().y, new cs[1]().y].join()",
+    "var fs = []; #{@s30b} f(fs); [new fs[0]().x, new fs[1]().x].join()",
+    "#{@s30c} f(1)",
+    "#{@s30d} f().s",
+    "#{@s31} f()",
+    "#{@s32a} f().join()",
+    "#{@s32c} typeof f()",
+    "#{@s32d} f()",
+    "#{@s33c} typeof f()",
+    "#{@s36} try { f([]) } catch (e) { e.name + ': ' + e.message }"
   ]
 
   # The `early errors` group of js_test.exs: scripts that must or must not parse. Some of the
@@ -494,7 +551,7 @@ defmodule Browser.JS.ResolveTest do
   end
 
   # Runs the pass on a flag-off tree the way the parser's hook does.
-  defp program(tree, level, opts \\ []) do
+  defp program(tree, level, opts) do
     Resolve.program(tree,
       level: level,
       top: top_of(opts),
@@ -504,9 +561,10 @@ defmodule Browser.JS.ResolveTest do
 
   # ── the corpus ──────────────────────────────────────────────
 
-  # `{label, src}` pairs: every test262 test and harness file that parses as a script, the
-  # nine bench programs and the JavaScript preludes of the engine. Module tests are skipped,
-  # as the task of this test asks; the count of skips comes back with the list.
+  # `{label, src, opts}` triples: every test262 test and harness file, the nine bench
+  # programs and the JavaScript preludes of the engine. A test262 file with the `module`
+  # flag carries `module: true`, so that the module top, its imports and the top-level
+  # await rules get corpus coverage too (design 6, test 27: every file under the root).
   defp corpus do
     root = Path.expand(".test262")
 
@@ -514,22 +572,20 @@ defmodule Browser.JS.ResolveTest do
       Path.wildcard(Path.join(root, "test/**/*.js")) ++
         Path.wildcard(Path.join(root, "harness/*.js"))
 
-    {tests, skipped_modules} =
-      Enum.reduce(files, {[], 0}, fn path, {acc, skips} ->
+    tests =
+      Enum.map(files, fn path ->
         src = File.read!(path)
         meta = Browser.JS.Test262.parse_meta(src)
-
-        if "module" in List.wrap(meta["flags"]),
-          do: {acc, skips + 1},
-          else: {[{Path.relative_to(path, root), src} | acc], skips}
+        module? = "module" in List.wrap(meta["flags"])
+        {Path.relative_to(path, root), src, if(module?, do: [module: true], else: [])}
       end)
 
     benches =
       Enum.with_index(@bench_bodies, fn body, i ->
-        {"bench #{i}", "(function(){ function f(){ #{body} } return f() })()"}
+        {"bench #{i}", "(function(){ function f(){ #{body} } return f() })()", []}
       end)
 
-    {Enum.reverse(tests) ++ benches ++ prelude_sources(), skipped_modules}
+    tests ++ benches ++ Enum.map(prelude_sources(), fn {label, src} -> {label, src, []} end)
   end
 
   # The JavaScript sources the engine parses for its own built-ins: the files under priv/js,
@@ -597,16 +653,19 @@ defmodule Browser.JS.ResolveTest do
     extra_lex = using_lexicals(stmts)
     await_vars = forawait_vars(stmts)
     strict? = match?([{:expr, {:str, "use strict"}} | _], stmts)
-    args_var? = "arguments" in vars and "arguments" not in fnames
+    # A parameter named `arguments` defeats the object too: the run time's `call_frame` tests
+    # the bound names (interp.ex), not only the function declarations.
+    args_var? =
+      "arguments" in vars and "arguments" not in fnames and "arguments" not in pnames
+
     named = for {n, _} <- i.slots, is_binary(n), do: n
 
     checks =
       [
         {i.params == expected_params, "params #{inspect(i.params)}, oracle #{expected_params}"},
-        # The design calls `nparams` the positional count; a rest parameter may or may not
-        # count as a position, so both readings pass.
-        {i.nparams in [length(params), length(params) - if(i.rest?, do: 1, else: 0)],
-         "nparams #{i.nparams}, oracle #{length(params)}"},
+        # `nparams` is the positional count without the rest parameter (deviation 6).
+        {i.nparams == length(params) - if(i.rest?, do: 1, else: 0),
+         "nparams #{i.nparams}, oracle #{length(params) - if(i.rest?, do: 1, else: 0)}"},
         {mode == :arrow_expr or i.strict == strict?, "strict #{i.strict}, oracle #{strict?}"},
         {i.args_var == args_var?, "args_var #{i.args_var}, oracle #{args_var?}"},
         {tuple_size(i.kinds) == i.size,
@@ -645,11 +704,8 @@ defmodule Browser.JS.ResolveTest do
   end
 
   # The template holds `:undefined` for var and function slots and `:tdz` for the lexical
-  # ones; it starts after the parameter and hidden slots (design 3.1). With initializers in
-  # the parameters the design lets the template cover the parameter slots too, so that case
-  # is not checked.
-  defp template_checks(%Info{params: :exprs}), do: []
-
+  # ones; it starts after the parameter and hidden slots and never covers a parameter slot,
+  # with or without initializers (design 3.1, deviation 2).
   defp template_checks(%Info{} = i) do
     first = 6 + Enum.count(Tuple.to_list(i.kinds), &(&1 == :param)) + length(i.hidden)
     by_index = Map.new(i.slots, fn {n, idx} -> {idx, n} end)
@@ -895,7 +951,8 @@ defmodule Browser.JS.ResolveTest do
     assert %Scope{kind: :switch, frame: false, slots: %{"a" => 7, "g" => 8}} = sc
     assert %Scope{kinds: %{7 => :let, 8 => :fun}, hoist: [{8, g}]} = sc
     assert fn_name(g) == "g"
-    assert 7 in sc.tdz
+    # Only the `let` starts in its TDZ; the function slot 8 is hoisted (design 3.4).
+    assert sc.tdz == [7]
     assert [{:switch, {:slot, 0, 6, "v"}, [{{:num, 1.0}, _}], %Scope{}}] = body(f)
 
     f = fun(resolve(@s8b), "f")
@@ -921,6 +978,26 @@ defmodule Browser.JS.ResolveTest do
     assert %Scope{kind: :catch, frame: true, slots: %{"e" => 6}} = scope_of(f, 0)
     assert forms(arrow(f)) == [{:slot, 1, 6, "e"}]
     assert {:slot, 1, 6, "fs"} in forms(f)
+
+    # Annex B.3.4: a `var` of the catch parameter's name writes the catch binding (slot 7)
+    # and the function's own `e` (slot 6) stays undefined.
+    f = fun(resolve("function f() { try { throw 1 } catch (e) { var e = 2 } return e }"), "f")
+    assert slots(info(f)) == [{6, "e", :var}] and info(f).template == [:undefined, :tdz]
+
+    assert [
+             {:try, {:block, [throw: {:num, 1.0}], nil}, {:slot, 0, 7, "e"},
+              {:block, [{:var, :var, [{{:slot, 0, 7, "e"}, {:num, 2.0}}]}], nil}, nil,
+              %Scope{kind: :catch, frame: false, slots: %{"e" => 7}, tdz: [7]}},
+             {:return, {:slot, 0, 6, "e"}}
+           ] = body(f)
+
+    # A catch parameter shadows a parameter of the same name.
+    f = fun(resolve("function f(e) { try {} catch (e) { e } }"), "f")
+
+    assert [
+             {:try, _, {:slot, 0, 7, "e"}, {:block, [expr: {:slot, 0, 7, "e"}], nil}, nil,
+              %Scope{slots: %{"e" => 7}}}
+           ] = body(f)
   end
 
   test "9. a using declaration is a const with a TDZ for what follows it" do
@@ -962,6 +1039,22 @@ defmodule Browser.JS.ResolveTest do
     assert info(g).self == nil
     assert info(g).hidden == []
     assert forms(body(g)) == [{:gref, "g"}]
+
+    # An arrow captures the self slot like any other slot of the frame (design 3.2).
+    g = fun(resolve("(function g() { return () => g })"), "g")
+    assert info(g).self == 6
+    assert forms(arrow(g)) == [{:slot, 1, 6, "g"}]
+    assert info(g).captured == MapSet.new([6])
+
+    # The self name is omitted when the body declares the name (design 4.5): the `var`
+    # takes slot 6.
+    g = fun(resolve("(function g() { var g; return g })"), "g")
+    assert info(g).self == nil and info(g).hidden == []
+    assert slots(info(g)) == [{6, "g", :var}]
+    assert forms(body(g)) == [{:slot, 0, 6, "g"}, {:slot, 0, 6, "g"}]
+
+    # A generator expression keeps its self slot.
+    assert info(fun(resolve("(function* g() { g })"), "g")).self == 6
   end
 
   test "11. const writes, deletes of slots and of free names" do
@@ -976,6 +1069,19 @@ defmodule Browser.JS.ResolveTest do
              {:expr, {:unary, "delete", {:slot, 0, 6, "c"}}},
              {:expr, {:unary, "delete", {:gref, "y"}}}
            ]
+
+    # Every write to a const takes `{:cslot}`, whatever its syntax (design 3.4): an update
+    # and a compound assignment go through the target path, a pattern through the
+    # destructuring path. `typeof` reads, so it keeps the slot form.
+    f = fun(resolve("function f() { const c = 1; c++; c += 1; typeof c; [c] = [2] }"), "f")
+
+    assert body(f) == [
+             {:var, :const, [{{:slot, 0, 6, "c"}, {:num, 1.0}}]},
+             {:expr, {:update, "++", false, {:cslot, 0, 6, "c"}}},
+             {:expr, {:assign, "+=", {:cslot, 0, 6, "c"}, {:num, 1.0}}},
+             {:expr, {:unary, "typeof", {:slot, 0, 6, "c"}}},
+             {:expr, {:destructure, {:arrpat, [{:cslot, 0, 6, "c"}]}, {:array, [num: 2.0]}}}
+           ]
   end
 
   test "12. arguments: mapped parameters, the hidden slots and the owner of an arrow" do
@@ -985,14 +1091,24 @@ defmodule Browser.JS.ResolveTest do
     assert i.uses_arguments
     assert i.argmap == %{"a" => 0}
     assert i.hidden == [:args, :arguments]
-    # The object's slot is the one `arguments` reads by name (design 3.1, group 2).
-    ai = i.slots["arguments"] || i.slots[:arguments]
-    assert is_integer(ai)
+    # The hidden slots follow the parameters in `hidden` order (design 3.1, group 2): the
+    # raw argument list at 7, then the object, which `arguments` reads by name at 8.
+    assert i.slots == %{"a" => 6, "arguments" => 8, args: 7}
+    assert i.size == 8
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :hidden, :hidden}
 
     assert forms(body(f)) == [
-             {:slot, 0, ai, "arguments"},
+             {:slot, 0, 8, "arguments"},
              {:mslot, 0, 6, "a", 0},
              {:slot, 0, 6, "a"}
+           ]
+
+    # A `var` of a mapped parameter writes through the mapping, so `arguments[0]` follows.
+    f = fun(resolve("function f(a) { var a = 1; return arguments[0] }"), "f")
+
+    assert body(f) == [
+             {:var, :var, [{{:mslot, 0, 6, "a", 0}, {:num, 1.0}}]},
+             {:return, {:member, {:slot, 0, 8, "arguments"}, {:num, 0.0}, false}}
            ]
 
     f = fun(resolve(@s12b), "f")
@@ -1007,8 +1123,16 @@ defmodule Browser.JS.ResolveTest do
     assert info(f).uses_arguments
 
     f = fun(resolve(@s12d), "f")
-    assert info(f).uses_arguments
-    assert info(f).args_var
+    i = info(f)
+    assert i.uses_arguments
+    assert i.args_var
+    # Without parameter initializers the `var` itself holds the object (deviation 8): the
+    # raw list is the only hidden slot and the `var` is an ordinary slot after it.
+    assert i.hidden == [:args]
+    assert i.slots == %{"arguments" => 7, args: 6}
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :hidden, :var}
+    assert i.template == [:undefined]
+    assert forms(body(f)) == [{:slot, 0, 7, "arguments"}, {:slot, 0, 7, "arguments"}]
 
     f = fun(resolve(@s12e), "f")
     refute info(f).uses_arguments
@@ -1019,12 +1143,19 @@ defmodule Browser.JS.ResolveTest do
     refute info(f).uses_arguments
     assert slots(info(f)) == [{6, "arguments", :param}]
 
+    # A parameter of that name defeats `args_var` as well: the `var` shares its slot (the
+    # run time's `call_frame` tests the bound names, not only the functions).
+    f = fun(resolve("function f(arguments) { var arguments; return arguments }"), "f")
+    refute info(f).args_var
+    assert slots(info(f)) == [{6, "arguments", :param}]
+
     f = fun(resolve(@s12g), "f")
     i = info(f)
     assert i.uses_arguments
     assert i.level == 3
-    ai = i.slots["arguments"] || i.slots[:arguments]
-    assert forms(arrow(f)) == [{:slot, 1, ai, "arguments"}]
+    assert i.slots == %{"a" => 6, "arguments" => 8, args: 7}
+    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert i.captured == MapSet.new([8])
   end
 
   test "13. this: a method's hidden slot, an arrow inside it, a field initializer" do
@@ -1057,22 +1188,48 @@ defmodule Browser.JS.ResolveTest do
     # Hidden slots are added as used (design 4.7): `super()` reads `:ctor_fn`, `:new_target`
     # and `:this` (classes.ex `super_call`), never `:home`, which only `super.x` reads.
     assert i.hidden == [:this, :new_target, :ctor_fn]
-    nt = i.slots[:new_target]
-    assert is_integer(nt)
-    assert {:call, {:super}, [], false} = find(c, &match?({:call, {:super}, _, _}, &1))
-    assert {:return, {:slot, 0, ^nt, :new_target}} = find(c, &match?({:return, _}, &1))
+    # `hidden` lists the slots in slot order, which 2d's frame builder follows.
+    assert i.slots == %{this: 6, new_target: 7, ctor_fn: 8}
+    assert i.size == 8
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :hidden, :hidden, :hidden}
 
+    assert [_, {:expr, {:call, {:super}, [], false}}, {:return, {:slot, 0, 7, :new_target}}] =
+             body(c)
+
+    # `super.m()` adds `:home`, which comes before `:ctor_fn` in the slot order.
+    c = fun(resolve("class B extends A { constructor() { super(); super.m() } }"), "constructor")
+    assert info(c).hidden == [:this, :new_target, :home, :ctor_fn]
+    assert info(c).slots == %{this: 6, new_target: 7, home: 8, ctor_fn: 9}
+
+    # An arrow that calls `super()` captures every hidden slot the call reads or writes:
+    # `:this` too, since `super()` binds it (test 34), so the review's `[7, 8]` is `[6, 7, 8]`.
+    c =
+      fun(
+        resolve(
+          "class B extends A { constructor() { const f = () => super(); f(); return () => new.target } }"
+        ),
+        "constructor"
+      )
+
+    assert info(c).slots == %{"f" => 9, this: 6, new_target: 7, ctor_fn: 8}
+    assert info(c).captured == MapSet.new([6, 7, 8])
+    assert forms(arrow(c, 1)) == [{:slot, 1, 7, :new_target}]
+
+    # The derived default constructor takes its rest parameter at 6 and the three hidden
+    # slots after it; the base one has only `:this`.
     d = Resolve.default_ctor_info(true, @s14)
     assert %Info{kind: :derived_ctor, src: @s14, rest?: true} = d
-    assert d.slots["args"] == 6
-    assert :erlang.element(6, d.kinds) == :param
-    assert Enum.sort(d.hidden) == [:ctor_fn, :new_target, :this]
+    assert d.hidden == [:this, :new_target, :ctor_fn]
+    assert d.slots == %{"args" => 6, this: 7, new_target: 8, ctor_fn: 9}
+    assert d.size == 9 and d.nparams == 0 and d.params == :patterns
+
+    assert d.kinds ==
+             {:parent, :rec, :caller, :call_pos, :root, :param, :hidden, :hidden, :hidden}
 
     b = Resolve.default_ctor_info(false, "class A {}")
     assert %Info{kind: :ctor, src: "class A {}"} = b
-    assert :this in b.hidden
+    assert b.hidden == [:this] and b.slots == %{this: 6} and b.size == 6
     assert b.level == 3
-    refute Enum.any?(b.slots, fn {n, _} -> is_binary(n) end)
   end
 
   test "15. direct eval makes a function and everything inside it dynamic" do
@@ -1183,10 +1340,11 @@ defmodule Browser.JS.ResolveTest do
     assert forms(m) == [{:mref, 1, "A"}, {:slot, 2, 6, "v"}]
     outer = fun(tree, "outer")
     # `v` is slot 6 and the class declaration slot 7 (design 3.1, group 4). The parser folds
-    # a class declaration into `{:var, :let, ...}`, so the kind may be `:let` or `:class`.
+    # a class declaration into `{:var, :let, ...}`, so its kind is `:let` (resolve.ex,
+    # the decisions of the moduledoc).
     assert info(outer).slots == %{"v" => 6, "A" => 7}
     assert kind(info(outer), "v") == :let
-    assert kind(info(outer), "A") in [:let, :class]
+    assert kind(info(outer), "A") == :let
 
     assert {:cmember, :block, nil, [{:var, :var, [{{:id, "s"}, nil}]}, {:expr, {:id, "s"}}], true} =
              find(tree, &match?({:cmember, :block, _, _, _}, &1))
@@ -1217,13 +1375,26 @@ defmodule Browser.JS.ResolveTest do
     # The default runs in the function's own frame, one hop from the arrow (design 4.5).
     assert forms(arrow(f)) == [{:slot, 1, 6, "a"}]
 
+    assert params(f) == [
+             {:default, {:slot, 0, 6, "a"}, {:num, 1.0}},
+             {:default, {:slot, 0, 7, "g"}, arrow(f)}
+           ]
+
+    # The body's `var a` is the copied slot 8, never the parameter slot 6.
+    assert body(f) == [{:var, :var, [{{:slot, 0, 8, "a"}, nil}]}]
+    assert i.template == [:undefined]
+    assert 6 in i.captured
+
     f = fun(resolve(@s20b), "f")
     assert slots(info(f)) == [{6, "a", :param}]
     assert info(f).copies == []
     assert info(f).size == 6
 
     f = fun(resolve(@s20c), "f")
-    assert {:gref, "b"} in forms(params(f))
+    # The body's `var b` is not visible from the parameter phase, so the default reads the
+    # global (design 4.5).
+    assert params(f) == [{:default, {:slot, 0, 6, "a"}, {:gref, "b"}}]
+    assert body(f) == [{:var, :var, [{{:slot, 0, 7, "b"}, nil}]}]
     assert slots(info(f)) == [{6, "a", :param}, {7, "b", :var}]
 
     f = fun(resolve(@s20d), "f")
@@ -1231,6 +1402,20 @@ defmodule Browser.JS.ResolveTest do
     assert info(f).nparams == 2
     assert slots(info(f)) == [{6, "a", :param}, {7, "b", :param}, {8, "c", :param}]
     assert info(f).size == 8
+
+    assert params(f) == [
+             {:objpat, [{{:str, "a"}, {:slot, 0, 6, "a"}}, {{:str, "b"}, {:slot, 0, 7, "b"}}],
+              nil},
+             {:arrpat, [{:slot, 0, 8, "c"}]}
+           ]
+
+    # A rest parameter makes the parameters patterns and is not counted (deviation 6).
+    f = fun(resolve("function f(a, ...r) { return r }"), "f")
+    i = info(f)
+    assert i.params == :patterns and i.rest? and i.nparams == 1
+    assert slots(i) == [{6, "a", :param}, {7, "r", :param}] and i.size == 7
+    assert params(f) == [{:slot, 0, 6, "a"}, {:rest, {:slot, 0, 7, "r"}}]
+    assert body(f) == [{:return, {:slot, 0, 7, "r"}}]
   end
 
   test "21. strictness comes from the directive, the file position follows it" do
@@ -1363,25 +1548,23 @@ defmodule Browser.JS.ResolveTest do
   @tag :corpus
   @tag timeout: :infinity
   test "27. round trip and check over the corpus" do
-    {sources, skipped_modules} = corpus()
-
     {failures, parsed, unparsed} =
-      Enum.reduce(sources, {[], 0, 0}, fn {label, src}, {failures, parsed, unparsed} ->
-        case Parser.parse(src) do
+      Enum.reduce(corpus(), {[], 0, 0}, fn {label, src, opts}, {failures, parsed, unparsed} ->
+        case Parser.parse(src, opts) do
           {:error, _} ->
             {failures, parsed, unparsed + 1}
 
           {:ok, tree} ->
             bad =
               Enum.flat_map(@levels, fn level ->
-                resolved = program(tree, level)
+                resolved = program(tree, level, opts)
 
                 cond do
                   Resolve.strip(resolved) != tree ->
                     ["#{label}: strip at #{level} differs"]
 
-                  level == 4 and Resolve.check(resolved) != :ok ->
-                    ["#{label}: #{inspect(Resolve.check(resolved))}"]
+                  level == 4 and Resolve.check(resolved, top: top_of(opts)) != :ok ->
+                    ["#{label}: #{inspect(Resolve.check(resolved, top: top_of(opts)))}"]
 
                   true ->
                     []
@@ -1395,23 +1578,21 @@ defmodule Browser.JS.ResolveTest do
     assert parsed > 0
 
     assert failures == [],
-           "#{length(failures)} failures (#{parsed} parsed, #{unparsed} unparsed, #{skipped_modules} module tests skipped):\n" <>
+           "#{length(failures)} failures (#{parsed} parsed, #{unparsed} unparsed):\n" <>
              Enum.join(Enum.take(Enum.reverse(failures), 20), "\n")
   end
 
   @tag :corpus
   @tag timeout: :infinity
   test "28. the Info of every function agrees with the interpreter's hoisting helpers" do
-    {sources, _skipped_modules} = corpus()
-
     {failures, functions} =
-      Enum.reduce(sources, {[], 0}, fn {label, src}, {failures, functions} ->
-        case Parser.parse(src) do
+      Enum.reduce(corpus(), {[], 0}, fn {label, src, opts}, {failures, functions} ->
+        case Parser.parse(src, opts) do
           {:error, _} ->
             {failures, functions}
 
           {:ok, tree} ->
-            nodes = fns(program(tree, :info))
+            nodes = fns(program(tree, :info, opts))
             bad = for node <- nodes, msg <- oracle_failures(node), do: "#{label}: #{msg}"
             {bad ++ failures, functions + length(nodes)}
         end
@@ -1428,5 +1609,390 @@ defmodule Browser.JS.ResolveTest do
     for {src, opts} <- @cases, level <- @levels do
       assert {:program, _} = program(off(src, opts), level, opts), "#{src} at #{level}"
     end
+  end
+
+  # ── tests from the review of the pass ───────────────────────
+
+  test "30. an instance field initializer is a closure boundary" do
+    # The loop head gets a per-iteration frame: each class reads its own `i` (the
+    # initializer runs at `new` time, after the loop moved on). The read is two hops from
+    # the field scope: the class scope, then the loop frame.
+    f = fun(resolve(@s30a), "f")
+    assert %Scope{kind: :loop, frame: true, per_iter: true, slots: %{"i" => 6}} = scope_of(f, 0)
+    refute Map.has_key?(info(f).slots, "i")
+
+    assert [
+             {:cmember, :field, _, {:slot, 2, 6, "i"}, false},
+             {:cmember, :accessor, _, {:slot, 2, 6, "i"}, false}
+           ] =
+             find(f, &match?({:class, _, _, _, _}, &1)) |> elem(3)
+
+    # The block around the class gets a frame for `v`.
+    f = fun(resolve(@s30b), "f")
+    assert %Scope{kind: :block, frame: true, slots: %{"v" => 6}} = scope_of(f, 1)
+
+    assert [{:cmember, :field, _, {:slot, 2, 6, "v"}, false}] =
+             find(f, &match?({:class, _, _, _, _}, &1)) |> elem(3)
+
+    # A class in a default value captures the parameter: the body's `var a` gets a slot
+    # of its own, copied from the parameter, and the initializer keeps the parameter.
+    f = fun(resolve(@s30c), "f")
+    i = info(f)
+    assert i.copies == [{6, 8}]
+    assert i.captured == MapSet.new([6])
+    # `slots` keeps the body's entry for `a`; the parameter slot 6 stays in `kinds`.
+    assert slots(i) == [{7, "C", :param}, {8, "a", :var}]
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :param, :var}
+
+    assert [{:cmember, :field, _, {:slot, 2, 6, "a"}, false}] =
+             find(f, &match?({:class, _, _, _, _}, &1)) |> elem(3)
+
+    assert [{:var, :var, [{{:slot, 0, 8, "a"}, _}]} | _] = body(f)
+
+    # A static initializer runs inline: no capture, no frame.
+    f = fun(resolve(@s30d), "f")
+    assert info(f).captured == MapSet.new()
+
+    assert [{:cmember, :field, _, {:slot, 2, 6, "x"}, true}] =
+             find(f, &match?({:class, _, _, _, _}, &1)) |> elem(3)
+  end
+
+  test "31. a direct eval in a field initializer keeps its callee and the names around it" do
+    f = fun(resolve(@s31), "f")
+    assert info(f).rewritten
+    refute info(f).dynamic
+    # The three initializers (instance, static, accessor) keep `{:id, "eval"}`, which the
+    # interpreter's direct-eval clause matches.
+    assert {:class, _, _, members, _} = find(f, &match?({:class, _, _, _, _}, &1))
+
+    assert Enum.map(members, fn {:cmember, _, _, init, _} -> init end) ==
+             List.duplicate({:call, {:id, "eval"}, [{:str, "x"}], false}, 3)
+
+    assert Resolve.check(resolve(@s31)) == :ok
+
+    # `check/1` rejects a direct eval whose callee was rewritten.
+    assert {:error, _} =
+             Resolve.check(
+               {:program,
+                [
+                  {:fundecl, "f",
+                   {:fn, "f", [], [{:expr, {:call, {:gref, "eval"}, [], false}}], false,
+                    %Info{rewritten: true, level: 1}}}
+                ]}
+             )
+  end
+
+  test "32. var arguments under parameter initializers keeps the object in a hidden slot" do
+    f = fun(resolve(@s32a), "f")
+    i = info(f)
+    assert i.args_var
+    assert i.hidden == [:args, :arguments]
+
+    assert slots(i) == [
+             {6, "a", :param},
+             {7, :args, :hidden},
+             {8, :arguments, :hidden},
+             {9, "arguments", :var}
+           ]
+
+    # The body's `var` is filled from the object at body entry.
+    assert i.copies == [{8, 9}]
+    assert i.captured == MapSet.new([8])
+    # The closure in the default reads the object; the body reads and writes the `var`.
+    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+
+    assert [
+             {:var, :var, [{{:slot, 0, 9, "arguments"}, _}]},
+             {:return, {:array, [_, {:slot, 0, 9, "arguments"}]}}
+           ] = body(f)
+
+    assert Resolve.check(resolve(@s32a)) == :ok
+
+    f = fun(resolve(@s32b), "f")
+    assert forms(params(f)) == [{:slot, 0, 6, "a"}, {:slot, 0, 8, "arguments"}]
+    assert forms(body(f)) == [{:slot, 0, 9, "arguments"}, {:slot, 0, 9, "arguments"}]
+    assert Resolve.check(resolve(@s32b)) == :ok
+
+    # Without parameter initializers the `var` slot keeps the object, as before.
+    f = fun(resolve(@s12d), "f")
+    assert info(f).hidden == [:args]
+    assert info(f).copies == []
+
+    # `captured` names the object's slot, not the slot of the function or lexical that
+    # takes the name in the body.
+    f = fun(resolve(@s32c), "f")
+    assert info(f).slots[:arguments] == 8
+    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert info(f).captured == MapSet.new([8])
+    f = fun(resolve(@s32d), "f")
+    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert info(f).captured == MapSet.new([8])
+  end
+
+  test "33. a function declaration takes over the own slot of a default-captured var" do
+    f = fun(resolve(@s33a), "f")
+    i = info(f)
+    assert slots(i) == [{7, "g", :param}, {8, "a", :fun}]
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :param, :fun}
+    assert i.copies == [{6, 8}]
+    assert [{8, _}] = i.hoist
+    assert i.size == 8
+
+    # Only the parameter slot is captured: the body's `var` is read by no closure.
+    f = fun(resolve(@s33b), "f")
+    assert info(f).captured == MapSet.new([6])
+    assert info(f).copies == [{6, 9}]
+
+    f = fun(resolve(@s33c), "f")
+    i = info(f)
+    assert slots(i) == [{7, "a", :fun}]
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :fun}
+    assert i.copies == [{6, 7}]
+    assert [{7, _}] = i.hoist
+    assert i.size == 7
+    # Every read of `a` in the body is slot 7: the `var` target and the return.
+    assert forms(body(f)) == [{:slot, 0, 7, "a"}, {:slot, 0, 7, "a"}]
+    assert Resolve.check(resolve(@s33c)) == :ok
+  end
+
+  test "34. captured lists every hidden slot that super() and super.x read or write" do
+    m = fun(resolve(@s34a), "m")
+    assert info(m).slots == %{this: 6, home: 7}
+    assert info(m).captured == MapSet.new([6, 7])
+
+    c = fun(resolve(@s34b), "constructor")
+    assert info(c).slots == %{this: 6, new_target: 7, ctor_fn: 8}
+    assert info(c).captured == MapSet.new([6, 7, 8])
+  end
+
+  test "35. imports after a top-level using are module names" do
+    tree = resolve(@s35, module: true)
+    f = fun(tree, "f")
+    assert forms(f) == [{:mref, 1, "a"}, {:mref, 1, "b"}, {:mref, 1, "x"}]
+    # `check/1` infers the module from the statements inside the `using` rest.
+    assert Resolve.check(tree) == :ok
+  end
+
+  test "36. a direct eval in a for-using head keeps the function name-based" do
+    f = fun(resolve(@s36), "f")
+    assert info(f).dynamic
+    refute info(f).rewritten
+    assert [{:forof, :const, _, {:tdz_names, ["x"], _}, _}] = body(f)
+    assert forms(f) == []
+  end
+
+  test "37. the await wrap follows the statement's own awaits, not a nested function's" do
+    f = fun(resolve(@s37a), "f")
+
+    assert [{:aw, {:for, _, _, _, {:aw, {:block, [{:aw, {:expr, {:await, _}}}], nil}}, %Scope{}}}] =
+             body(f)
+
+    f = fun(resolve(@s37b), "f")
+    assert [{:var, :const, _}, {:expr, {:gref, "y"}}] = body(f)
+    assert [{:aw, {:expr, {:await, _}}}] = body(arrow(f))
+    # The await belongs to the arrow (design 4.9: the walk stops at function nodes).
+    refute info(f).has_await
+    assert info(arrow(f)).has_await
+    assert info(fun(resolve(@s37a), "f")).has_await
+    refute info(fun(resolve(@s23c), "f")).has_await
+
+    f = fun(resolve(@s37c), "f")
+
+    assert [
+             {:aw, {:forawait, _, _, _, _, _}},
+             {:aw, {:using, :await_using, _, _, [{:expr, {:gref, "w"}}]}}
+           ] = body(f)
+  end
+
+  test "38. templates of framed scopes and the default constructor constants" do
+    # The block frame holds `a`, `b` and then the names of the frameless block under it,
+    # its lexical names first: `c` in its TDZ, then the function `g` as undefined.
+    f = fun(resolve(@s38a), "f")
+    assert %Scope{frame: true, slots: %{"a" => 6, "b" => 7}, size: 9} = sc = scope_of(f, 0)
+    assert sc.template == [:tdz, :tdz, :tdz, :undefined]
+    assert %Scope{frame: false, slots: %{"c" => 8, "g" => 9}, hoist: [{9, _}]} = scope_of(f, 1)
+
+    # The constants agree with the resolver's own Info for the same text, except for the
+    # source and `rewritten` (which step 2d sets).
+    for {src, derived?} <- [{@s38b, false}, {@s38c, true}] do
+      i = info(fun(resolve(src), "constructor"))
+      d = Resolve.default_ctor_info(derived?, i.src)
+      assert %{i | rewritten: false} == d, src
+    end
+  end
+
+  # ── tests from the review of the tests ──────────────────────
+
+  test "39. for (using x of e): three distinct slots" do
+    # The parser's synthetic head const takes slot 7, the pseudo-slot that the iterable
+    # reads as `x` in its TDZ is 8 (written by nothing), and the body's `using x` is 9
+    # (design 3.4 and deviation 4).
+    src = "function f(xs) { for (using x of (() => x)()) { x } }"
+    f = fun(resolve(src), "f")
+    i = info(f)
+    assert i.size == 9
+    assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :const, :const, :using}
+    assert i.template == [:tdz, :tdz, :tdz]
+    refute Map.has_key?(i.slots, "x")
+
+    assert [
+             {:forof, :const, {:slot, 0, 7, _}, {:in_tdz, ["x"], {:call, arrow, [], false}},
+              {:block,
+               [
+                 {:using, :using, {:slot, 0, 9, "x"}, {:slot, 0, 7, _},
+                  [{:block, [expr: {:slot, 0, 9, "x"}], nil}]}
+               ],
+               %Scope{
+                 kind: :block,
+                 frame: false,
+                 slots: %{"x" => 9},
+                 kinds: %{9 => :using},
+                 tdz: [9]
+               }}, %Scope{kind: :each, frame: false, slots: head_slots, tdz: [7]}}
+           ] = body(f)
+
+    assert Map.values(head_slots) == [7]
+    assert {:fn, nil, [], {:slot, 1, 8, "x"}, :arrow_expr, %Info{}} = arrow
+    assert i.captured == MapSet.new([8])
+    assert Resolve.strip(f) == fun(off(src), "f")
+  end
+
+  test "40. a for-of head is in its TDZ over its own iterable; a framed block under a framed head" do
+    # Design 4.2: the iterable sees the head names as `:tdz` in the same slots, so `g(x)`
+    # reads the head slot 8, not the parameter 6.
+    f = fun(resolve("function f(x, g) { for (const x of g(x)) {} }"), "f")
+
+    assert [
+             {:forof, :const, {:slot, 0, 8, "x"},
+              {:call, {:slot, 0, 7, "g"}, [{:slot, 0, 8, "x"}], false}, {:block, [], nil},
+              %Scope{kind: :each, frame: false, slots: %{"x" => 8}, tdz: [8]}}
+           ] = body(f)
+
+    assert info(f).template == [:tdz]
+
+    # The arrow counts two hops to the head name through the framed block (design 3.3).
+    f =
+      fun(
+        resolve("function f(xs, fs) { for (const x of xs) { let y; fs.push(() => x + y) } }"),
+        "f"
+      )
+
+    assert %Scope{kind: :each, frame: true, slots: %{"x" => 6}} = scope_of(f, 0)
+    assert %Scope{kind: :block, frame: true, slots: %{"y" => 6}} = scope_of(f, 1)
+    assert forms(arrow(f)) == [{:slot, 2, 6, "x"}, {:slot, 1, 6, "y"}]
+    assert {:slot, 2, 7, "fs"} in forms(f)
+  end
+
+  test "41. depths through the class, field, static and static-block scopes" do
+    # A function in a static block: its frame, the static block, the static scope, the
+    # class scope, then `outer` (design 4.7).
+    tree =
+      resolve(
+        "function outer() { let v; class A { static { var s; function g() { return s + v } } } }"
+      )
+
+    assert forms(fun(tree, "g")) == [{:mref, 1, "s"}, {:slot, 4, 6, "v"}]
+
+    # An arrow in a field initializer: its frame, the field scope, the class scope, then
+    # `outer`; the plain initializer is one hop less.
+    tree =
+      resolve("function outer() { let v; class A { x = () => v; static y = () => v; z = v } }")
+
+    assert forms(arrow(tree, 0)) == [{:slot, 3, 6, "v"}]
+    assert forms(arrow(tree, 1)) == [{:slot, 3, 6, "v"}]
+
+    assert {:cmember, :field, {:str, "z"}, {:slot, 2, 6, "v"}, false} =
+             find(tree, &match?({:cmember, :field, {:str, "z"}, _, _}, &1))
+
+    # The heritage and a computed key run in the class scope, one hop from `f`.
+    f = fun(resolve("function f(B, k) { class A extends B { [k]() {} } }"), "f")
+
+    assert {:class, "A", {:slot, 1, 6, "B"},
+            [{:cmember, :method, {:computed, {:slot, 1, 7, "k"}}, _, false}], _} =
+             find(f, &match?({:class, _, _, _, _}, &1))
+
+    # A class expression's own name is a name of the class scope.
+    assert forms(fun(resolve("function f() { return class A { m() { return A } } }"), "m")) ==
+             [{:mref, 1, "A"}]
+  end
+
+  test "42. a top-level block blocks the hop-counted forms and passes {:gref} through" do
+    # Design 4.1: the block is not a frame, so its names and every name beyond it stay
+    # `{:id}`; only a name that no scope declares becomes `{:gref}`.
+    g = fun(resolve("{ let z = 1; function g() { return z + w } }"), "g")
+    assert info(g).rewritten
+    assert body(g) == [{:return, {:binary, "+", {:id, "z"}, {:gref, "w"}}}]
+
+    g =
+      fun(resolve("const b = 1; { let z; function g() { return b + z + c } }", module: true), "g")
+
+    assert [_, {:return, {:binary, "+", {:binary, "+", {:id, "b"}, {:id, "z"}}, {:gref, "c"}}}] =
+             body(g)
+  end
+
+  test "43. a function as the sole if-branch or labeled body, new.target in an arrow, strict eval" do
+    # Design 4.2: such a declaration is never instantiated, so the resolver declares
+    # nothing and the read of `g` is free.
+    f = fun(resolve("function f(c) { if (c) function g() {} return g }"), "f")
+    assert info(f).slots == %{"c" => 6} and info(f).hoist == []
+
+    assert [
+             {:if, {:slot, 0, 6, "c"},
+              {:fundecl, "g", {:fn, "g", [], [], false, %Info{rewritten: true}}}, nil},
+             {:return, {:gref, "g"}}
+           ] = body(f)
+
+    f = fun(resolve("function f() { l: function g() {} return g }"), "f")
+    assert info(f).slots == %{}
+    assert [{:labeled, "l", {:fundecl, "g", _}}, {:return, {:gref, "g"}}] = body(f)
+
+    # Design 4.4: `new.target` in an arrow is a hidden slot of the nearest function.
+    f = fun(resolve("function f() { return () => new.target }"), "f")
+    assert info(f).level == 3 and info(f).hidden == [:new_target]
+    assert info(f).slots == %{new_target: 6}
+    assert forms(arrow(f)) == [{:slot, 1, 6, :new_target}] and info(f).captured == MapSet.new([6])
+
+    # Design 4.6: a strict direct eval keeps its vars and functions in its own scope, from
+    # the directive or from the caller's `strict: true`; a sloppy one leaves them by name.
+    f =
+      fun(
+        resolve(
+          "\"use strict\"; var v = 1; function g() {} function f() { return v + g + l } let l",
+          eval: true
+        ),
+        "f"
+      )
+
+    assert forms(f) == [{:mref, 1, "v"}, {:mref, 1, "g"}, {:mref, 1, "l"}]
+
+    assert forms(
+             fun(resolve("var v = 1; function f() { return v }", eval: true, strict: true), "f")
+           ) ==
+             [{:mref, 1, "v"}]
+
+    assert [{:return, {:id, "v"}}] =
+             body(fun(resolve("var v = 1; function f() { return v }", eval: true), "f"))
+  end
+end
+
+defmodule Browser.JS.ResolveEnvTest do
+  # The application env is the second source of the flag (design 1), and it is global, so
+  # this module runs on its own after the async one.
+  use ExUnit.Case, async: false
+
+  alias Browser.JS.Parser
+  alias Browser.JS.Resolve.Info
+
+  test "the application env is the second source of the flag" do
+    Application.put_env(:browser, :js_resolve, :info)
+    on_exit(fn -> Application.delete_env(:browser, :js_resolve) end)
+
+    assert {:ok,
+            {:program, [{:fundecl, "f", {:fn, "f", [], [], false, %Info{rewritten: false}}}]}} =
+             Parser.parse("function f() {}")
+
+    # The parse option comes first.
+    assert {:ok, {:program, [{:fundecl, "f", {:fn, "f", [], [], false, "function f() {}"}}]}} =
+             Parser.parse("function f() {}", resolve: :off)
   end
 end

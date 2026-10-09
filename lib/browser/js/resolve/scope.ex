@@ -8,9 +8,9 @@ defmodule Browser.JS.Resolve.Scope do
   it without a scan.
 
   A scope gets a frame of its own (`frame: true`) only when an inner function
-  captures one of its names, or when a dynamic function sits inside it. A
-  frameless scope keeps its names in slots of the nearest frame; the statement
-  resets those slots to `:tdz` at entry.
+  or an instance field initializer captures one of its names, or when a
+  dynamic function sits inside it. A frameless scope keeps its names in slots
+  of the nearest frame; the statement resets those slots to `:tdz` at entry.
 
   The fields:
 
@@ -18,7 +18,8 @@ defmodule Browser.JS.Resolve.Scope do
   - `frame`: true when the scope has a frame of its own (step 2c).
   - `slots`: name to slot index. For a frameless scope the index is a slot of
     the home frame.
-  - `kinds`: slot index to `:let`, `:const`, `:class`, `:using` or `:fun`.
+  - `kinds`: slot index to `:let`, `:const`, `:using` or `:fun` (a class
+    declaration is a `:let`, see `Browser.JS.Resolve.Info`).
   - `hoist`: `{slot, function_node}` pairs to instantiate at entry.
   - `size`, `template`: the frame size and the initial values of the slots
     from position 6, for a framed scope only.

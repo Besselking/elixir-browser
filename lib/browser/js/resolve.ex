@@ -39,9 +39,26 @@ defmodule Browser.JS.Resolve do
   - A constructor gets the hidden slots it uses: `:this` always, `:new_target`
     and `:ctor_fn` for a `super()` call, `:home` for a `super.x` access.
   - `nparams` does not count a rest parameter.
-  - The outer binding of a class declaration has the kind `:class` and is
-    written with `{:slot}`: the binding is mutable, only the class's own
-    name inside its body is a constant.
+  - A class declaration inside a function is a `:let` slot like any other
+    lexical name: the parser gives it the `{:var, :let, ...}` form. Only
+    `export default class` keeps the `{:classdecl}` form, which declares the
+    kind `:class` in the module map scope, never in a frame.
+  - An instance or accessor field initializer is a closure boundary like a
+    function: it runs at each construction, after the block, the loop
+    iteration or the parameter phase around the class has ended. A name it
+    reads from outside the class is a capture. Static initializers and static
+    blocks run inline and are not boundaries.
+  - A direct `eval` inside a field initializer makes the field scope dynamic,
+    not the function around the class. The initializers of that scope then
+    keep every name as `{:id}`, as the statements of a static block do.
+  - A direct `eval` inside a `for (using x of e)` head also makes the
+    function around the head dynamic, so the TDZ pseudo-slots of the head
+    stay out of the by-name walk of the eval code.
+  - `var arguments` in a function with parameter initializers keeps the
+    arguments object in a hidden slot under the atom `:arguments` for the
+    parameter phase, and gives the `var` a slot of its own that `copies`
+    fills from the object at body entry: a closure made in an initializer
+    must keep the object when the body assigns the `var`.
   """
 
   alias Browser.JS.Interp
@@ -55,6 +72,9 @@ defmodule Browser.JS.Resolve do
   @map_kinds [:module, :class, :field, :static, :static_block, :eval]
   @block_kinds [:block, :loop, :each, :switch, :catch, :tdz]
   @owner_kinds [:fn, :field, :static, :static_block]
+  # The scopes whose code runs later than the scope around them: a function
+  # and an instance field scope, whose initializers run at each construction.
+  @closure_kinds [:fn, :field]
 
   # ── the hook ───────────────────────────────────────────────
 
@@ -142,6 +162,7 @@ defmodule Browser.JS.Resolve do
     %Info{
       src: src,
       kind: :ctor,
+      name: "constructor",
       level: 3,
       strict: true,
       params: :plain,
@@ -160,6 +181,7 @@ defmodule Browser.JS.Resolve do
     %Info{
       src: src,
       kind: :derived_ctor,
+      name: "constructor",
       level: 3,
       strict: true,
       params: :patterns,
@@ -171,6 +193,9 @@ defmodule Browser.JS.Resolve do
       kinds: {:parent, :rec, :caller, :call_pos, :root, :param, :hidden, :hidden, :hidden},
       template: [],
       uses_this: true,
+      # (`super()` reads `new.target`, as `layout_fn` records for every
+      # constructor that calls it)
+      uses_new_target: true,
       uses_super: true,
       free: :counter
     }
@@ -282,9 +307,10 @@ defmodule Browser.JS.Resolve do
     end)
   end
 
-  # The lexical names at the top of a list as `[{name, kind}]`: `let`, `const`,
-  # `using` and class declarations, through `using` rests (which the
-  # interpreter forgets today) and exports.
+  # The lexical names at the top of a list as `[{name, kind}]`: `let`, `const`
+  # and `using` declarations, through `using` rests (which the interpreter
+  # forgets today) and exports. A class declaration parses as a `let`; only
+  # `export default class` keeps its own form, at the top of a module.
   defp lexicals(stmts) do
     Enum.flat_map(stmts, fn
       {:var, kind, decls} when kind in [:let, :const] ->
@@ -292,9 +318,6 @@ defmodule Browser.JS.Resolve do
 
       {:using, _, name, _, rest} ->
         [{name, :using} | lexicals(rest)]
-
-      {:classdecl, n, _} ->
-        [{n, :class}]
 
       {:export, stmt} ->
         lexicals([stmt])
@@ -307,6 +330,9 @@ defmodule Browser.JS.Resolve do
     end)
   end
 
+  # The local names of the imports of a module, through `using` rests: a
+  # top-level `using` owns every statement after it (parser.ex), the imports
+  # included.
   defp imports(stmts) do
     Enum.flat_map(stmts, fn
       {:import, _, bindings} ->
@@ -314,6 +340,9 @@ defmodule Browser.JS.Resolve do
           {:named, _, local} -> local
           {_, local} -> local
         end)
+
+      {:using, _, _, _, rest} ->
+        imports(rest)
 
       _ ->
         []
@@ -331,12 +360,23 @@ defmodule Browser.JS.Resolve do
     st = a_declare_top(st, sid, top, stmts, strict)
 
     st =
-      if top == :module and Enum.any?(stmts, &awaits?/1),
-        do: a_tla_stmts(stmts, st),
-        else: a_stmts(stmts, st)
+      case tla_flags(stmts, top) do
+        nil -> a_stmts(stmts, st)
+        flags -> a_tla_stmts(Enum.zip(stmts, flags), st)
+      end
 
     a_close(st)
   end
+
+  # Whether each top-level statement of a module awaits, or `nil` when none
+  # does (or the code is not a module), so that the walk runs once per
+  # statement and both passes read the same answer.
+  defp tla_flags(stmts, :module) do
+    flags = Enum.map(stmts, &awaits?/1)
+    if Enum.any?(flags), do: flags, else: nil
+  end
+
+  defp tla_flags(_stmts, _top), do: nil
 
   defp top_scope_kind(:script), do: :global
   defp top_scope_kind(:module), do: :module
@@ -421,10 +461,12 @@ defmodule Browser.JS.Resolve do
     do: Enum.reduce(lex, st, fn {n, k}, st -> a_declare(st, sid, n, k) end)
 
   # Resolves a name along the chain and records a capture when the walk passes
-  # a function scope before it finds the declaring scope. A capture during the
-  # parameter phase of the declaring function comes from a closure in a default
-  # value; `layout` gives such a parameter a slot of its own when a body `var`
-  # shares its name.
+  # a closure boundary before it finds the declaring scope. A function is a
+  # boundary, and so is an instance field scope: its initializers run at each
+  # construction, after the scope that made the class has moved on. A capture
+  # during the parameter phase of the declaring function comes from a closure
+  # in a default value; `layout` gives such a parameter a slot of its own when
+  # a body `var` shares its name.
   defp a_ref(st, name), do: a_ref(st, st.chain, name, false)
 
   defp a_ref(st, [], _name, _passed), do: st
@@ -434,7 +476,7 @@ defmodule Browser.JS.Resolve do
 
     if visible?(s, name),
       do: if(passed, do: a_capture(st, sid, name), else: st),
-      else: a_ref(st, rest, name, passed or s.kind == :fn)
+      else: a_ref(st, rest, name, passed or s.kind in @closure_kinds)
   end
 
   # Parameter defaults see the parameters and the self name of their function,
@@ -447,13 +489,14 @@ defmodule Browser.JS.Resolve do
     end
   end
 
+  # A capture in the parameter phase of a function goes into
+  # `default_captured` only: it reads the parameter's slot, which a body
+  # `var` of the same name may hide in `slots` later (see `finish_scope`).
   defp a_capture(st, sid, name) do
     a_update(st, sid, fn s ->
-      s = %{s | captured: MapSet.put(s.captured, name)}
-
       if s.kind == :fn and s.phase == :params,
         do: %{s | default_captured: MapSet.put(s.default_captured, name)},
-        else: s
+        else: %{s | captured: MapSet.put(s.captured, name)}
     end)
   end
 
@@ -469,11 +512,12 @@ defmodule Browser.JS.Resolve do
       # `var arguments` without a function of that name keeps the object in
       # the `var` slot (interp.ex `args_var?`); any other declaration hides
       # it, but not from the parameter defaults, which run before the body's
-      # names are bound.
+      # names are bound. The capture is of the object, under the atom, so
+      # that `finish_scope` finds the object's slot and not a declaration's.
       s.kind == :fn and not s.arrow? and
           (not visible?(s, "arguments") or s.decls["arguments"] == :var) ->
         st = a_update(st, sid, &%{&1 | uses_arguments: true})
-        if passed, do: a_capture(st, sid, "arguments"), else: st
+        if passed, do: a_capture(st, sid, :arguments), else: st
 
       visible?(s, "arguments") ->
         if passed, do: a_capture(st, sid, "arguments"), else: st
@@ -509,11 +553,25 @@ defmodule Browser.JS.Resolve do
 
   # A direct `eval` or a `with` makes the nearest function-like scope dynamic:
   # eval code adds names to the nearest `fnscope` at run time (interp.ex
-  # `variable_scope`), which a field or static scope is too.
-  defp a_dynamic(st) do
-    case Enum.find(st.chain, &(a_scope(st, &1).kind in @owner_kinds)) do
-      nil -> st
-      sid -> a_update(st, sid, &%{&1 | own_dynamic: true})
+  # `variable_scope`), which a field or static scope is too. When the walk
+  # then passes a `:tdz` scope (the head of a `for (using x of e)`), the next
+  # function-like scope above it is dynamic too: the TDZ names have no frame
+  # and no slot, so only a by-name walk through today's `{:tdz_names}` scope
+  # can give the eval code the TDZ error.
+  defp a_dynamic(st), do: a_dynamic(st, st.chain, true)
+
+  defp a_dynamic(st, [], _mark), do: st
+
+  defp a_dynamic(st, [sid | rest], mark) do
+    case a_scope(st, sid).kind do
+      k when k in @owner_kinds and mark ->
+        a_dynamic(a_update(st, sid, &%{&1 | own_dynamic: true}), rest, false)
+
+      :tdz ->
+        a_dynamic(st, rest, true)
+
+      _ ->
+        a_dynamic(st, rest, mark)
     end
   end
 
@@ -532,14 +590,14 @@ defmodule Browser.JS.Resolve do
   # Top-level statements of a module that awaits run through the CPS
   # evaluator, which creates functions inside scopes of its own (async.ex
   # `eval_leaves`). Such a statement is a leaf region: hop counts stop at it.
-  defp a_tla_stmts(stmts, st) do
-    Enum.reduce(stmts, st, fn stmt, st ->
-      if awaits?(stmt) do
+  defp a_tla_stmts(stmts_with_flags, st) do
+    Enum.reduce(stmts_with_flags, st, fn
+      {stmt, true}, st ->
         {_, st} = a_open(st, :cps_leaf, stmt)
         a_stmt(stmt, st) |> a_close()
-      else
+
+      {stmt, false}, st ->
         a_stmt(stmt, st)
-      end
     end)
   end
 
@@ -556,16 +614,9 @@ defmodule Browser.JS.Resolve do
   defp a_stmt({:empty}, st), do: st
   defp a_stmt({:expr, e}, st), do: a_expr(e, st)
 
-  defp a_stmt({:var, kind, decls}, st) when kind in [:var, :let, :const] do
-    Enum.reduce(decls, st, fn {pat, init}, st ->
-      st = if init, do: a_expr(init, st), else: st
-      a_pat(pat, st)
-    end)
-  end
-
   # A `using` inside a static block (the only place the `{:var, :using}` form
   # survives) leaks its names at run time; nothing declares them.
-  defp a_stmt({:var, kind, decls}, st) when kind in [:using, :await_using] do
+  defp a_stmt({:var, kind, decls}, st) when kind in [:var, :let, :const, :using, :await_using] do
     Enum.reduce(decls, st, fn {pat, init}, st ->
       st = if init, do: a_expr(init, st), else: st
       a_pat(pat, st)
@@ -579,7 +630,6 @@ defmodule Browser.JS.Resolve do
   end
 
   defp a_stmt({:fundecl, _, f}, st), do: a_function(f, :fn, false, st)
-  defp a_stmt({:classdecl, _, c}, st), do: a_class(c, st)
   defp a_stmt({:return, nil}, st), do: st
   defp a_stmt({:return, e}, st), do: a_expr(e, st)
   defp a_stmt({:throw, e}, st), do: a_expr(e, st)
@@ -720,10 +770,11 @@ defmodule Browser.JS.Resolve do
   defp a_pat({:call, _, _, _} = c, st), do: a_expr(c, st)
   defp a_pat(other, _st), do: raise("resolver: unknown pattern #{inspect(other, limit: 5)}")
 
+  # The keys of members, properties and patterns. A static block carries a
+  # `nil` key, which `a_member` handles without this function.
   defp a_key({:computed, e}, st), do: a_expr(e, st)
   defp a_key({:str, _}, st), do: st
   defp a_key({:priv, _}, st), do: st
-  defp a_key(nil, st), do: st
 
   defp a_exprs(es, st), do: Enum.reduce(es, st, &a_expr/2)
 
@@ -744,7 +795,7 @@ defmodule Browser.JS.Resolve do
   defp a_expr({:unnamed, e}, st), do: a_expr(e, st)
   defp a_expr({:class, _, _, _, _} = c, st), do: a_class(c, st)
 
-  defp a_expr({:member, o, {:priv, _}, _}, st), do: a_priv(a_expr(o, st))
+  # (a private key goes through `a_key_or_expr`, which marks the function)
   defp a_expr({:member, o, k, _}, st), do: a_key_or_expr(k, a_expr(o, st))
   defp a_expr({:chain, e}, st), do: a_expr(e, st)
 
@@ -799,7 +850,7 @@ defmodule Browser.JS.Resolve do
   end
 
   defp a_expr({:unary, _, e}, st), do: a_expr(e, st)
-  defp a_expr({:binary, _, {:priv_ref, _}, r}, st), do: a_priv(a_expr(r, st))
+  # (`#p in o` has a `{:priv_ref}` left side, which marks the function below)
   defp a_expr({:binary, _, l, r}, st), do: a_expr(r, a_expr(l, st))
   defp a_expr({:logical, _, l, r}, st), do: a_expr(r, a_expr(l, st))
   defp a_expr({:cond, c, a, b}, st), do: a_expr(b, a_expr(a, a_expr(c, st)))
@@ -899,7 +950,9 @@ defmodule Browser.JS.Resolve do
         uses_super_call: false,
         uses_home: false,
         priv: false,
-        has_await: awaits?(body)
+        # Only an async or generator body can hold an await, a yield, a `for
+        # await` or an `await using`; the walk would find nothing elsewhere.
+        has_await: (flags.async? or flags.generator?) and awaits?(body)
       })
 
     st = a_declare_names(st, sid, param_names, :param)
@@ -1090,50 +1143,108 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  # The slot groups of a function frame, in order: parameters, hidden slots,
-  # `var` names, function declarations, the body's lexical names. The names of
-  # frameless scopes inside come later, when `layout_block` meets them.
+  # The slot groups of a function frame, in the order of design 3.1:
+  # parameters, hidden slots, `var` names, function declarations, the body's
+  # lexical names. The names of frameless scopes inside come later, when
+  # `layout_block` meets them. Each group takes and returns a layout
+  # accumulator: `index` (name to slot), `kinds` (slot to kind), `next` (the
+  # first free slot), `template` (the initial values after the parameters and
+  # the hidden slots, reversed while the layout grows) and `copies`.
   defp layout_fn(s, level) do
-    params = s.params_list
-    pkind = params_kind(params)
-    rest? = match?({:rest, _}, List.last(params))
-    nparams = if rest?, do: length(params) - 1, else: length(params)
+    pkind = params_kind(s.params_list)
+    uses = fn_uses(s, pkind)
+
+    acc = %{index: %{}, kinds: %{}, next: @header + 1, template: [], copies: []}
+    acc = layout_params(acc, s, pkind)
+    # The parameter slots by name, before a body `var` of the same name can
+    # take another slot: the parameter defaults resolve through this map.
+    param_index = acc.index
+    {acc, hidden, self} = layout_hidden(acc, s, uses)
+    acc = layout_vars(acc, s, pkind, uses)
+    acc = layout_funs(acc, s, pkind)
+    acc = layout_lex(acc, s)
+
+    level_of = fn_level(s, uses)
+    rewritten = is_integer(level) and level_of != nil and level_of <= level
+    info = build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten)
+
+    Map.merge(s, %{
+      info: info,
+      index: acc.index,
+      param_index: param_index,
+      home: nil,
+      rewritten: rewritten,
+      next_slot: acc.next
+    })
+  end
+
+  # Gives the next slot to `key`. A `var`, function or lexical slot has an
+  # initial value in the template; a parameter or hidden slot has none.
+  defp take(acc, key, kind, init \\ nil) do
+    template = if init, do: [init | acc.template], else: acc.template
+
+    %{
+      acc
+      | index: Map.put(acc.index, key, acc.next),
+        kinds: Map.put(acc.kinds, acc.next, kind),
+        next: acc.next + 1,
+        template: template
+    }
+  end
+
+  # Gives `name` a `var` slot of its own that the frame builder fills from
+  # slot `from` at body entry.
+  defp take_copy(acc, name, from) do
+    to = acc.next
+    acc = take(acc, name, :var, :undefined)
+    %{acc | copies: [{from, to} | acc.copies]}
+  end
+
+  # The facts about the hidden bindings a function uses. An arrow owns none
+  # of them; a constructor always has `this`.
+  defp fn_uses(s, pkind) do
     ctor? = s.fn_kind in [:ctor, :derived_ctor]
+    uses_arguments = s.uses_arguments and not s.arrow?
 
-    # Duplicate plain parameters: every position gets a slot, the last
-    # position owns the name (`bind_plain`, `map_arguments`). `kinds` maps a
-    # slot to its kind while the layout grows; `finish_scope` makes the tuple.
-    {index, kinds, next} =
-      case pkind do
-        :plain ->
-          Enum.reduce(params, {%{}, %{}, @header + 1}, fn {:id, n}, {index, kinds, next} ->
-            {Map.put(index, n, next), Map.put(kinds, next, :param), next + 1}
-          end)
-
-        _ ->
-          Enum.reduce(s.param_names, {%{}, %{}, @header + 1}, fn n, {index, kinds, next} ->
-            {Map.put(index, n, next), Map.put(kinds, next, :param), next + 1}
-          end)
-      end
-
-    # The parameter slots by name, before a body `var` of the same name can take
-    # another slot: the parameter defaults resolve through this map.
-    param_index = index
-
+    # (syntactic, as `with_flags` in interp.ex: the body names the binding,
+    # whether or not anything reads it; an arrow has no `:args` to build from)
     args_var =
       "arguments" in s.vars and "arguments" not in s.fun_names and
         "arguments" not in s.param_names
 
-    uses_arguments = s.uses_arguments and not s.arrow?
-    # `super.x` reads `:home` and `:this` (classes.ex `super_base`).
-    uses_this = ((s.uses_this or s.uses_home) and not s.arrow?) or ctor?
-    uses_super = s.uses_super_call or s.uses_home
-
-    wanted = [
-      this: uses_this,
-      args: uses_arguments,
-      arguments: uses_arguments and not args_var,
+    %{
+      ctor?: ctor?,
+      # `super.x` reads `:home` and `:this` (classes.ex `super_base`).
+      this: ((s.uses_this or s.uses_home) and not s.arrow?) or ctor?,
+      arguments: uses_arguments,
+      args_var: args_var,
+      # `var arguments` keeps the object in the `var` slot (interp.ex
+      # `call_frame`), unless a parameter initializer can close over the
+      # object before the body binds the `var`: the object then needs a
+      # hidden slot for the parameter phase (see `layout_vars`).
+      arguments_slot: uses_arguments and (not args_var or pkind == :exprs),
       new_target: (s.uses_new_target and not s.arrow?) or s.uses_super_call,
+      super: s.uses_super_call or s.uses_home
+    }
+  end
+
+  # Group 1. Duplicate plain parameters: every position gets a slot, the last
+  # position owns the name (`bind_plain`, `map_arguments`). A pattern binds
+  # each name once.
+  defp layout_params(acc, s, :plain),
+    do: Enum.reduce(s.params_list, acc, fn {:id, n}, acc -> take(acc, n, :param) end)
+
+  defp layout_params(acc, s, _pkind),
+    do: Enum.reduce(s.param_names, acc, &take(&2, &1, :param))
+
+  # Group 2. The hidden slots the function uses, in `@hidden_order`. Returns
+  # the accumulator, the list of hidden slots and the self slot.
+  defp layout_hidden(acc, s, uses) do
+    wanted = [
+      this: uses.this,
+      args: uses.arguments,
+      arguments: uses.arguments_slot,
+      new_target: uses.new_target,
       home: s.uses_home,
       ctor_fn: s.uses_super_call,
       self: s.self != nil
@@ -1142,96 +1253,104 @@ defmodule Browser.JS.Resolve do
     hidden = for h <- @hidden_order, wanted[h], do: h
     body_names = s.fun_names ++ for({n, _} <- s.lex, do: n)
 
-    {index, kinds, next, self} =
-      Enum.reduce(hidden, {index, kinds, next, nil}, fn h, {index, kinds, next, self} ->
-        case h do
-          # The object sits under the name, unless the body declares a
-          # function or a lexical `arguments` that takes the name once the
-          # body runs: then the object is reachable from the parameter
-          # defaults only, under the atom.
-          :arguments ->
-            key = if "arguments" in body_names, do: :arguments, else: "arguments"
-            {Map.put(index, key, next), Map.put(kinds, next, :hidden), next + 1, self}
+    Enum.reduce(hidden, {acc, hidden, nil}, fn
+      # The object sits under the name, unless the body takes the name once
+      # it runs (a function, a lexical or a `var` of that name): then the
+      # object is reachable from the parameter defaults only, under the atom.
+      :arguments, {acc, hidden, self} ->
+        key = if "arguments" in body_names or uses.args_var, do: :arguments, else: "arguments"
+        {take(acc, key, :hidden), hidden, self}
 
-          :self ->
-            {Map.put(index, s.self, next), Map.put(kinds, next, :self), next + 1, next}
+      :self, {acc, hidden, _} ->
+        {take(acc, s.self, :self), hidden, acc.next}
 
-          _ ->
-            {Map.put(index, h, next), Map.put(kinds, next, :hidden), next + 1, self}
-        end
-      end)
+      h, {acc, hidden, self} ->
+        {take(acc, h, :hidden), hidden, self}
+    end)
+  end
 
-    # A `var` with a parameter's name shares the slot, unless a closure in a
-    # default value captured the parameter: the body must then get a slot of
-    # its own with the parameter's value copied in (`hoist_into_body`).
-    own_slot? = fn n ->
-      n in s.param_names and pkind == :exprs and MapSet.member?(s.default_captured, n)
-    end
+  # A parameter that a closure in a default value captured, when a body
+  # `var` or function shares its name: the parameter keeps its slot and the
+  # body name gets one of its own.
+  defp own_slot?(s, pkind, n),
+    do: n in s.param_names and pkind == :exprs and MapSet.member?(s.default_captured, n)
 
-    {index, kinds, next, template, copies} =
-      Enum.reduce(s.vars, {index, kinds, next, [], []}, fn n,
-                                                           {index, kinds, next, template, copies} ->
-        cond do
-          own_slot?.(n) ->
-            {Map.put(index, n, next), Map.put(kinds, next, :var), next + 1,
-             [:undefined | template], [{index[n], next} | copies]}
-
-          n in s.param_names ->
-            {index, kinds, next, template, copies}
-
-          true ->
-            {Map.put(index, n, next), Map.put(kinds, next, :var), next + 1,
-             [:undefined | template], copies}
-        end
-      end)
-
-    # A function declaration with a `var`'s name takes over the slot; the
-    # hoist at entry writes the function into it.
-    {index, kinds, next, template} =
-      Enum.reduce(s.fun_names, {index, kinds, next, template}, fn n,
-                                                                  {index, kinds, next, template} ->
-        cond do
-          own_slot?.(n) ->
-            {Map.put(index, n, next), Map.put(kinds, next, :fun), next + 1,
-             [:undefined | template]}
-
-          n in s.param_names ->
-            {index, kinds, next, template}
-
-          n in s.vars ->
-            {index, Map.put(kinds, index[n], :fun), next, template}
-
-          true ->
-            {Map.put(index, n, next), Map.put(kinds, next, :fun), next + 1,
-             [:undefined | template]}
-        end
-      end)
-
-    {index, kinds, next, template} =
-      Enum.reduce(s.lex, {index, kinds, next, template}, fn {n, k},
-                                                            {index, kinds, next, template} ->
-        {Map.put(index, n, next), Map.put(kinds, next, k), next + 1, [:tdz | template]}
-      end)
-
-    priv = s.priv
-
-    level_of =
+  # Group 3. A `var` with a parameter's name shares the slot, unless a closure
+  # in a default value captured the parameter: the body must then get a slot
+  # of its own with the parameter's value copied in (`hoist_into_body`).
+  # `var arguments` under parameter initializers is the same case for the
+  # arguments object: the `var` gets its own slot, filled from the object's
+  # hidden slot, so that a closure made in an initializer keeps the object.
+  defp layout_vars(acc, s, pkind, uses) do
+    Enum.reduce(s.vars, acc, fn n, acc ->
       cond do
-        s.dynamic -> nil
-        s.async? or s.generator? -> 4
-        uses_arguments or uses_super or ctor? or priv or (s.uses_new_target and not s.arrow?) -> 3
-        s.makes_closures -> 2
-        true -> 1
-      end
+        own_slot?(s, pkind, n) ->
+          take_copy(acc, n, acc.index[n])
 
-    rewritten = is_integer(level) and level_of != nil and level_of <= level
+        n == "arguments" and uses.args_var and uses.arguments_slot ->
+          take_copy(acc, n, acc.index[:arguments])
+
+        n in s.param_names ->
+          acc
+
+        true ->
+          take(acc, n, :var, :undefined)
+      end
+    end)
+  end
+
+  # Group 4. A function declaration with a `var`'s name takes over the slot;
+  # the hoist at entry writes the function into it. With a parameter's name
+  # it shares the parameter's slot, unless a default's closure captured the
+  # parameter: then it takes the body's own slot, the one `layout_vars` made
+  # when a `var` shares the name too, or a new one.
+  defp layout_funs(acc, s, pkind) do
+    Enum.reduce(s.fun_names, acc, fn n, acc ->
+      cond do
+        n in s.param_names and not own_slot?(s, pkind, n) -> acc
+        n in s.vars -> %{acc | kinds: Map.put(acc.kinds, acc.index[n], :fun)}
+        true -> take(acc, n, :fun, :undefined)
+      end
+    end)
+  end
+
+  # Group 5. The body's lexical names, each in its TDZ at entry.
+  defp layout_lex(acc, s),
+    do: Enum.reduce(s.lex, acc, fn {n, k}, acc -> take(acc, n, k, :tdz) end)
+
+  # The smallest level that can run the function with slots (design 3.2), or
+  # `nil` for a dynamic function.
+  defp fn_level(s, uses) do
+    cond do
+      s.dynamic ->
+        nil
+
+      s.async? or s.generator? ->
+        4
+
+      uses.arguments or uses.super or uses.ctor? or s.priv or
+          (s.uses_new_target and not s.arrow?) ->
+        3
+
+      s.makes_closures ->
+        2
+
+      true ->
+        1
+    end
+  end
+
+  defp build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten) do
+    params = s.params_list
+    rest? = match?({:rest, _}, List.last(params))
+    nparams = if rest?, do: length(params) - 1, else: length(params)
 
     argmap =
-      if uses_arguments and not s.strict and pkind == :plain and nparams > 0,
+      if uses.arguments and not s.strict and pkind == :plain and nparams > 0,
         do: Map.new(Enum.with_index(params), fn {{:id, n}, i} -> {n, i} end),
         else: nil
 
-    info = %Info{
+    %Info{
       src: nil,
       kind: s.fn_kind,
       name: s.name,
@@ -1244,42 +1363,33 @@ defmodule Browser.JS.Resolve do
       params: pkind,
       nparams: nparams,
       rest?: rest?,
-      size: next - 1,
-      slots: index,
+      size: acc.next - 1,
+      slots: acc.index,
       hidden: hidden,
-      kinds: kinds,
-      template: template,
+      kinds: acc.kinds,
+      template: acc.template,
       hoist: [],
-      copies: Enum.reverse(copies),
+      copies: Enum.reverse(acc.copies),
       self: self,
       argmap: argmap,
-      uses_this: uses_this,
-      uses_arguments: uses_arguments,
-      uses_new_target: (s.uses_new_target and not s.arrow?) or s.uses_super_call,
-      uses_super: uses_super,
-      # (syntactic, as `with_flags` in interp.ex: the body names the binding,
-      # whether or not anything reads it; an arrow has no `:args` to build from)
-      args_var: args_var,
+      uses_this: uses.this,
+      uses_arguments: uses.arguments,
+      uses_new_target: uses.new_target,
+      uses_super: uses.super,
+      args_var: uses.args_var,
       makes_closures: s.makes_closures,
       has_await: s.has_await,
       captured: MapSet.new(),
       free: if(level_of == 1, do: :always, else: :counter),
       tail_sites: 0
     }
-
-    Map.merge(s, %{
-      info: info,
-      index: index,
-      param_index: param_index,
-      home: nil,
-      rewritten: rewritten,
-      next_slot: next
-    })
   end
 
   # A block-like scope: with a frame, its names get slots from 6 in a frame of
   # its own; without one, they get fresh slots in the home frame, so that a
-  # shadowing `let` never shares a slot with the name it shadows.
+  # shadowing `let` never shares a slot with the name it shadows. The template
+  # is reversed while the layout grows, as a function's is; `finish_scope`
+  # puts it in order.
   defp layout_block(scopes, sid, s) do
     names = Enum.reverse(s.order)
     home = home_of(scopes, sid)
@@ -1289,12 +1399,7 @@ defmodule Browser.JS.Resolve do
         Map.put(scopes, sid, Map.merge(s, %{index: %{}, home: home, scope: nil}))
 
       s.frame ->
-        {index, kinds, next, template} =
-          Enum.reduce(names, {%{}, %{}, @header + 1, []}, fn n, {index, kinds, next, template} ->
-            k = s.decls[n]
-            init = if k == :fun, do: :undefined, else: :tdz
-            {Map.put(index, n, next), Map.put(kinds, next, k), next + 1, [init | template]}
-          end)
+        {index, kinds, next, template} = block_slots(names, s.decls, @header + 1)
 
         scope = %Scope{
           kind: s.kind,
@@ -1302,7 +1407,7 @@ defmodule Browser.JS.Resolve do
           slots: index,
           kinds: kinds,
           size: next - 1,
-          template: Enum.reverse(template),
+          template: template,
           per_iter: s.kind == :loop and s.head == :let
         }
 
@@ -1317,15 +1422,7 @@ defmodule Browser.JS.Resolve do
         Map.put(scopes, sid, Map.merge(s, %{index: %{}, home: nil, scope: nil}))
 
       true ->
-        h = scopes[home]
-
-        {index, kinds, next, template} =
-          Enum.reduce(names, {%{}, %{}, h.next_slot, []}, fn n, {index, kinds, next, template} ->
-            k = s.decls[n]
-            init = if k == :fun, do: :undefined, else: :tdz
-            {Map.put(index, n, next), Map.put(kinds, next, k), next + 1, [init | template]}
-          end)
-
+        {index, kinds, next, template} = block_slots(names, s.decls, scopes[home].next_slot)
         tdz = for {n, i} <- index, s.decls[n] != :fun, do: i
 
         scope =
@@ -1344,37 +1441,40 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  # Adds the slots of a frameless scope to its home frame. A function keeps
-  # its template reversed until `finish_scope`; a framed scope keeps it in
-  # order.
-  defp home_add(scopes, home, next, kinds, template) do
-    Map.update!(scopes, home, fn h ->
-      case h do
-        %{info: info} ->
-          info = %{
-            info
-            | size: next - 1,
-              kinds: Map.merge(info.kinds, kinds),
-              template: template ++ info.template
-          }
-
-          %{h | info: info, next_slot: next}
-
-        %{scope: scope} ->
-          scope = %{
-            scope
-            | size: next - 1,
-              kinds: Map.merge(scope.kinds, kinds),
-              template: scope.template ++ Enum.reverse(template)
-          }
-
-          %{h | scope: scope, next_slot: next}
-      end
+  # The slots of a block's names from `first`, with the reversed template: a
+  # function declaration starts as `undefined`, every other name in its TDZ.
+  defp block_slots(names, decls, first) do
+    Enum.reduce(names, {%{}, %{}, first, []}, fn n, {index, kinds, next, template} ->
+      k = decls[n]
+      init = if k == :fun, do: :undefined, else: :tdz
+      {Map.put(index, n, next), Map.put(kinds, next, k), next + 1, [init | template]}
     end)
   end
 
+  # Adds the slots of a frameless scope to its home frame, a function or a
+  # framed scope. Both keep their template reversed until `finish_scope`.
+  defp home_add(scopes, home, next, kinds, template) do
+    Map.update!(scopes, home, fn
+      %{info: info} = h ->
+        %{h | info: grow(info, next, kinds, template), next_slot: next}
+
+      %{scope: scope} = h ->
+        %{h | scope: grow(scope, next, kinds, template), next_slot: next}
+    end)
+  end
+
+  defp grow(struct, next, kinds, template) do
+    %{
+      struct
+      | size: next - 1,
+        kinds: Map.merge(struct.kinds, kinds),
+        template: template ++ struct.template
+    }
+  end
+
   # Turns the kinds map and the reversed template of a function layout into
-  # their final shape and fills `captured` with slot indexes.
+  # their final shape and fills `captured` with slot indexes; puts the
+  # template of a framed scope in order.
   defp finish_scope(scopes, sid, frameless) do
     case scopes[sid] do
       %{kind: :fn, info: info} = s ->
@@ -1383,14 +1483,7 @@ defmodule Browser.JS.Resolve do
 
         captured =
           s.captured
-          |> Enum.map(fn
-            :uses_this -> info.slots[:this]
-            :uses_new_target -> info.slots[:new_target]
-            :uses_super_call -> info.slots[:ctor_fn]
-            :uses_home -> info.slots[:home]
-            n -> info.slots[n]
-          end)
-          |> Enum.reject(&is_nil/1)
+          |> Enum.flat_map(&captured_slots(info, &1))
           |> MapSet.new()
 
         captured =
@@ -1399,30 +1492,51 @@ defmodule Browser.JS.Resolve do
           end)
 
         # A closure in a default value reads the parameter's own slot, which a
-        # body `var` of the same name hides in `slots` (see `copies`).
+        # body `var` of the same name hides in `slots` (see `copies`). Any
+        # other name it reads has the slot a body closure would read.
         captured =
           Enum.reduce(s.default_captured, captured, fn n, acc ->
             case s.param_index do
               %{^n => i} -> MapSet.put(acc, i)
-              _ -> acc
+              _ -> Enum.reduce(captured_slots(info, n), acc, &MapSet.put(&2, &1))
             end
           end)
 
+        captured = captured |> Enum.reject(&is_nil/1) |> MapSet.new()
         info = %{info | kinds: kinds, template: Enum.reverse(info.template), captured: captured}
         Map.put(scopes, sid, %{s | info: info})
+
+      %{kind: k, frame: true, scope: %Scope{} = sc} = s when k in @block_kinds ->
+        Map.put(scopes, sid, %{s | scope: %{sc | template: Enum.reverse(sc.template)}})
 
       _ ->
         scopes
     end
   end
 
+  # The slots that a captured name or flag stands for. `super()` reads
+  # `:ctor_fn` and `:new_target` and writes `:this` (classes.ex `super_call`);
+  # `super.x` reads `:home` and `:this` (`super_base`); the arguments object
+  # sits under the atom or under the name (`layout_hidden`). A slot that the
+  # layout did not make (an arrow's `this`, for example) comes back as `nil`.
+  defp captured_slots(info, :uses_this), do: [info.slots[:this]]
+  defp captured_slots(info, :uses_new_target), do: [info.slots[:new_target]]
+
+  defp captured_slots(info, :uses_super_call),
+    do: [info.slots[:ctor_fn], info.slots[:new_target], info.slots[:this]]
+
+  defp captured_slots(info, :uses_home), do: [info.slots[:home], info.slots[:this]]
+  defp captured_slots(info, :arguments), do: [info.slots[:arguments] || info.slots["arguments"]]
+  defp captured_slots(info, n), do: [info.slots[n]]
+
   # ── pass 2: rewrite ────────────────────────────────────────
 
   # The state of pass 2: the finished scopes, the chain, the next number, the
   # resolve level, and the context of the function being walked: whether its
   # names are rewritten, its strictness, whether a `return` here can be a
-  # tail call, whether statements with awaits are wrapped, and the hoist
-  # lists and tail counts collected per scope.
+  # tail call, whether statements with awaits are wrapped (`aw`) and whether
+  # the statement being walked has met one (`awaited`), and the hoist lists
+  # and tail counts collected per scope.
   defp rewrite(stmts, scopes, top, strict, level) do
     st = %{
       scopes: scopes,
@@ -1434,6 +1548,7 @@ defmodule Browser.JS.Resolve do
       rewriting: false,
       tail_ok: false,
       aw: false,
+      awaited: false,
       hoists: %{},
       tails: %{}
     }
@@ -1441,9 +1556,10 @@ defmodule Browser.JS.Resolve do
     {_, st} = r_open(st, top_scope_kind(top), stmts)
 
     {stmts, st} =
-      if top == :module and Enum.any?(stmts, &awaits?/1),
-        do: r_tla_stmts(stmts, st),
-        else: r_stmts(stmts, st)
+      case tla_flags(stmts, top) do
+        nil -> r_stmts(stmts, st)
+        flags -> r_tla_stmts(Enum.zip(stmts, flags), st)
+      end
 
     {stmts, r_close(st)}
   end
@@ -1471,15 +1587,15 @@ defmodule Browser.JS.Resolve do
 
   defp r_scope(st, sid), do: Map.fetch!(st.scopes, sid)
 
-  defp r_tla_stmts(stmts, st) do
-    map_st(stmts, st, fn stmt, st ->
-      if awaits?(stmt) do
+  defp r_tla_stmts(stmts_with_flags, st) do
+    map_st(stmts_with_flags, st, fn
+      {stmt, true}, st ->
         {_, st} = r_open(st, :cps_leaf, stmt)
         {stmt, st} = r_stmt(stmt, st)
         {stmt, r_close(st)}
-      else
+
+      {stmt, false}, st ->
         r_stmt(stmt, st)
-      end
     end)
   end
 
@@ -1586,13 +1702,23 @@ defmodule Browser.JS.Resolve do
     s = r_scope(st, sid)
 
     cond do
+      # In the parameter phase the object is under the atom when the body
+      # takes the name later (a lexical, a function or a `var` of that name);
+      # in the body phase `var arguments` holds it under the name.
       s.kind == :fn and not s.arrow? and
           (not visible?(s, "arguments") or s.decls["arguments"] == :var) ->
-        if blocked or not s.rewritten,
-          do: {:id, "arguments"},
-          else:
+        cond do
+          blocked or not s.rewritten ->
+            {:id, "arguments"}
+
+          s.phase == :params ->
             {:slot, d, Map.get(s.index, :arguments) || Map.fetch!(s.index, "arguments"),
              "arguments"}
+
+          true ->
+            {:slot, d, Map.get(s.index, "arguments") || Map.fetch!(s.index, :arguments),
+             "arguments"}
+        end
 
       visible?(s, "arguments") ->
         resolve(st, [sid | rest], "arguments", role, d, blocked)
@@ -1638,7 +1764,7 @@ defmodule Browser.JS.Resolve do
   # current scope's frame. The same node as the sole branch of an `if` or a
   # labeled body is never instantiated, so `r_substmt` only resolves it.
   defp r_substmt({:fundecl, n, f}, st) do
-    {f, st} = r_function(f, :fn, false, st)
+    {f, st} = r_function(f, st)
     {{:fundecl, n, f}, st}
   end
 
@@ -1646,12 +1772,21 @@ defmodule Browser.JS.Resolve do
 
   # Inside the body of a rewritten async or generator function, a statement
   # that awaits is wrapped so that the CPS evaluator knows without a walk.
+  # The walk of the statement itself sets `awaited` when it meets an await,
+  # a yield, a `for await` or an `await using` (the test of `awaits?/1`), and
+  # a nested function keeps its awaits to itself (`r_function`). The flag of
+  # the statement around this one stays set when this one awaited.
   defp r_stmt(stmt, %{aw: true} = st) do
-    {out, st} = r_stmt1(stmt, st)
-    if awaits?(stmt), do: {{:aw, out}, st}, else: {out, st}
+    outer = st.awaited
+    {out, st} = r_stmt1(stmt, %{st | awaited: false})
+    awaited = st.awaited
+    st = %{st | awaited: outer or awaited}
+    if awaited, do: {{:aw, out}, st}, else: {out, st}
   end
 
   defp r_stmt(stmt, st), do: r_stmt1(stmt, st)
+
+  defp r_awaited(st), do: %{st | awaited: true}
 
   defp r_stmt1({:pos, _} = p, st), do: {p, st}
   defp r_stmt1({:empty} = e, st), do: {e, st}
@@ -1675,6 +1810,7 @@ defmodule Browser.JS.Resolve do
   end
 
   defp r_stmt1({:using, kind, name, init, rest}, st) do
+    st = if kind == :await_using, do: r_awaited(st), else: st
     {init, st} = r_expr(init, st)
     target = if st.rewriting, do: resolve(st, name, :bind), else: name
     # The rest of the list runs under the `using` cleanup, where a `return`
@@ -1684,13 +1820,8 @@ defmodule Browser.JS.Resolve do
   end
 
   defp r_stmt1({:fundecl, n, f}, st) do
-    {f, st} = r_function(f, :fn, false, st)
+    {f, st} = r_function(f, st)
     {{:fundecl, n, f}, r_hoist(st, n, f)}
-  end
-
-  defp r_stmt1({:classdecl, n, c}, st) do
-    {c, st} = r_class(c, st)
-    {{:classdecl, n, c}, st}
   end
 
   defp r_stmt1({:return, nil} = r, st), do: {r, st}
@@ -1739,7 +1870,7 @@ defmodule Browser.JS.Resolve do
     {sid, st} = r_open(st, :block, stmts)
     {stmts, st} = r_stmts(stmts, st)
     {sc, st} = r_leave(st, sid)
-    {with_scope({:block, stmts}, sc, st), st}
+    {with_scope({:block, stmts}, sc), st}
   end
 
   defp r_stmt1({:for, init, test, update, body}, st) do
@@ -1756,10 +1887,11 @@ defmodule Browser.JS.Resolve do
     {update, st} = if update, do: r_expr(update, st), else: {nil, st}
     {body, st} = r_substmt(body, st)
     {sc, st} = r_leave(st, sid)
-    {with_scope({:for, init, test, update, body}, sc, st), st}
+    {with_scope({:for, init, test, update, body}, sc), st}
   end
 
   defp r_stmt1({k, decl, pat, obj, body}, st) when k in [:forin, :forof, :forawait] do
+    st = if k == :forawait, do: r_awaited(st), else: st
     {sid, st} = r_open(st, :each, {decl, pat, obj, body})
     {obj, st} = r_expr(obj, st)
     {pat, st} = r_pat(pat, if(decl in [:let, :const], do: :bind, else: :write), st)
@@ -1767,7 +1899,7 @@ defmodule Browser.JS.Resolve do
     # `return` cannot be a tail call (interp.ex `no_tail`).
     {body, st} = with_tail(st, false, &r_substmt(body, &1))
     {sc, st} = r_leave(st, sid)
-    {with_scope({k, decl, pat, obj, body}, sc, st), st}
+    {with_scope({k, decl, pat, obj, body}, sc), st}
   end
 
   defp r_stmt1({:switch, disc, cases}, st) do
@@ -1782,7 +1914,7 @@ defmodule Browser.JS.Resolve do
       end)
 
     {sc, st} = r_leave(st, sid)
-    {with_scope({:switch, disc, cases}, sc, st), st}
+    {with_scope({:switch, disc, cases}, sc), st}
   end
 
   defp r_stmt1({:try, block, param, handler, finalizer}, st) do
@@ -1797,7 +1929,7 @@ defmodule Browser.JS.Resolve do
 
     {sc, st} = r_leave(st, sid)
     {finalizer, st} = if finalizer, do: r_substmt(finalizer, st), else: {nil, st}
-    {with_scope({:try, block, param, handler, finalizer}, sc, st), st}
+    {with_scope({:try, block, param, handler, finalizer}, sc), st}
   end
 
   defp r_stmt1({:with, obj, body}, st) do
@@ -1815,7 +1947,7 @@ defmodule Browser.JS.Resolve do
   end
 
   defp r_stmt1({:export_default, {:fundecl, n, f}}, st) do
-    {f, st} = r_function(f, :fn, false, st)
+    {f, st} = r_function(f, st)
     {{:export_default, {:fundecl, n, f}}, st}
   end
 
@@ -1856,8 +1988,8 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  defp with_scope(node, :unmodelled, _st), do: node
-  defp with_scope(node, sc, _st), do: Tuple.insert_at(node, tuple_size(node), sc)
+  defp with_scope(node, :unmodelled), do: node
+  defp with_scope(node, sc), do: Tuple.insert_at(node, tuple_size(node), sc)
 
   # Records a hoisted function for the scope that declares it.
   defp r_hoist(st, name, node) do
@@ -1927,8 +2059,10 @@ defmodule Browser.JS.Resolve do
   defp r_pat(other, _mode, _st),
     do: raise("resolver: unknown pattern #{inspect(other, limit: 5)}")
 
+  # The keys `a_key` accepts; an unknown key raises here as it does in pass 1.
   defp r_key({:computed, e}, st), do: with_st(r_expr(e, st), &{:computed, &1})
-  defp r_key(key, st), do: {key, st}
+  defp r_key({:str, _} = key, st), do: {key, st}
+  defp r_key({:priv, _} = key, st), do: {key, st}
 
   defp r_exprs(es, st), do: map_st(es, st, &r_expr/2)
 
@@ -1950,9 +2084,9 @@ defmodule Browser.JS.Resolve do
     {{:super_member, k}, st}
   end
 
-  defp r_expr({:fn, _, _, _, _, _} = f, st), do: r_function(f, :fn, true, st)
-  defp r_expr({:gen, _} = f, st), do: r_function(f, :fn, true, st)
-  defp r_expr({:async, _} = f, st), do: r_function(f, :fn, true, st)
+  defp r_expr({:fn, _, _, _, _, _} = f, st), do: r_function(f, st)
+  defp r_expr({:gen, _} = f, st), do: r_function(f, st)
+  defp r_expr({:async, _} = f, st), do: r_function(f, st)
   defp r_expr({:unnamed, e}, st), do: with_st(r_expr(e, st), &{:unnamed, &1})
   defp r_expr({:class, _, _, _, _} = c, st), do: r_class(c, st)
 
@@ -1997,22 +2131,8 @@ defmodule Browser.JS.Resolve do
   defp r_expr({:object, props}, st) do
     {props, st} =
       map_st(props, st, fn
-        {:init, key, {:fn, {:method, _}, _, _, _, _} = f}, st ->
-          {key, st} = r_key(key, st)
-          {f, st} = r_function(f, :method, false, st)
-          {{:init, key, f}, st}
-
-        {:init, key, {w, _} = f}, st when w in [:gen, :async] ->
-          {key, st} = r_key(key, st)
-          {inner, _} = unwrap(f, %{})
-
-          {f, st} =
-            if match?({:fn, {:method, _}, _, _, _, _}, inner),
-              do: r_function(f, :method, false, st),
-              else: r_expr(f, st)
-
-          {{:init, key, f}, st}
-
+        # (a method, a getter or a setter is a function node; pass 1 fixed
+        # its kind, so pass 2 walks every property value the same way)
         {:init, key, v}, st ->
           {key, st} = r_key(key, st)
           {v, st} = r_expr(v, st)
@@ -2020,12 +2140,12 @@ defmodule Browser.JS.Resolve do
 
         {:getter, key, f}, st ->
           {key, st} = r_key(key, st)
-          {f, st} = r_function(f, :get, false, st)
+          {f, st} = r_function(f, st)
           {{:getter, key, f}, st}
 
         {:setter, key, f}, st ->
           {key, st} = r_key(key, st)
-          {f, st} = r_function(f, :set, false, st)
+          {f, st} = r_function(f, st)
           {{:setter, key, f}, st}
 
         {:spread, e}, st ->
@@ -2084,10 +2204,10 @@ defmodule Browser.JS.Resolve do
     {{:destructure, pat, right}, st}
   end
 
-  defp r_expr({:await, e}, st), do: with_st(r_expr(e, st), &{:await, &1})
+  defp r_expr({:await, e}, st), do: with_st(r_expr(e, r_awaited(st)), &{:await, &1})
 
   defp r_expr({:yield, e, d}, st) do
-    {e, st} = r_expr(e, st)
+    {e, st} = r_expr(e, r_awaited(st))
     {{:yield, e, d}, st}
   end
 
@@ -2142,13 +2262,16 @@ defmodule Browser.JS.Resolve do
 
   # ── pass 2: functions and classes ──────────────────────────
 
-  defp r_function(node, _kind, _expr?, st) do
+  # The kind of the function and its self name were fixed in pass 1; pass 2
+  # reads them from the scope record. An await inside the function belongs to
+  # the function, not to the statement around it, so `awaited` is restored.
+  defp r_function(node, st) do
     {{:fn, name, params, body, mode, src}, _} = unwrap(node, %{})
     {sid, st} = r_open(st, :fn, node)
     s = r_scope(st, sid)
     info = s.info
 
-    outer = Map.take(st, [:rewriting, :strict, :tail_ok, :aw])
+    outer = Map.take(st, [:rewriting, :strict, :tail_ok, :aw, :awaited])
 
     tail_ok =
       s.rewritten and s.strict and not s.async? and not s.generator? and
@@ -2200,7 +2323,6 @@ defmodule Browser.JS.Resolve do
     st = r_close(st)
     {static_sid, st} = r_open(st, :static, {:static, node})
     st = r_close(st)
-    derived? = heritage != nil
 
     {members, {member_decs, st}} =
       plain_members
@@ -2216,7 +2338,7 @@ defmodule Browser.JS.Resolve do
               {member_decs, st}
           end
 
-        {member, st} = r_member(member, derived?, field_sid, static_sid, st)
+        {member, st} = r_member(member, field_sid, static_sid, st)
         {member, {member_decs, st}}
       end)
 
@@ -2231,27 +2353,30 @@ defmodule Browser.JS.Resolve do
     {{:class, name, heritage, members, src}, st}
   end
 
-  defp r_member({:cmember, :method, {:str, "constructor"} = key, f, false}, derived?, _, _, st) do
-    {f, st} = r_function(f, if(derived?, do: :derived_ctor, else: :ctor), false, st)
-    {{:cmember, :method, key, f, false}, st}
-  end
-
-  defp r_member({:cmember, kind, key, f, static?}, _, _, _, st)
+  defp r_member({:cmember, kind, key, f, static?}, _, _, st)
        when kind in [:method, :get, :set] do
     {key, st} = r_key(key, st)
-    {f, st} = r_function(f, kind, false, st)
+    {f, st} = r_function(f, st)
     {{:cmember, kind, key, f, static?}, st}
   end
 
-  defp r_member({:cmember, kind, key, init, static?}, _, field_sid, static_sid, st)
+  # A field initializer runs in the field or static scope. When a direct
+  # `eval` made that scope dynamic, its initializers keep their names, as the
+  # statements of a static block do: the eval code can add names to the
+  # scope, and the direct eval itself must keep its `{:id, "eval"}` callee
+  # for the interpreter to recognise it.
+  defp r_member({:cmember, kind, key, init, static?}, field_sid, static_sid, st)
        when kind in [:field, :accessor] do
     {key, st} = r_key(key, st)
 
     {init, st} =
       if init do
-        st = %{st | chain: [if(static?, do: static_sid, else: field_sid) | st.chain]}
+        sid = if static?, do: static_sid, else: field_sid
+        outer = Map.take(st, [:rewriting, :chain])
+        rewriting = st.rewriting and not r_scope(st, sid).dynamic
+        st = %{st | chain: [sid | st.chain], rewriting: rewriting}
         {init, st} = r_expr(init, st)
-        {init, r_close(st)}
+        {init, Map.merge(st, outer)}
       else
         {nil, st}
       end
@@ -2261,7 +2386,7 @@ defmodule Browser.JS.Resolve do
 
   # A static block is top-level code of its own scope: its statements keep
   # their shapes and names, and only the functions inside it are rewritten.
-  defp r_member({:cmember, :block, nil, stmts, true}, _, _, static_sid, st) do
+  defp r_member({:cmember, :block, nil, stmts, true}, _, static_sid, st) do
     st = %{st | chain: [static_sid | st.chain]}
     {_, st} = r_open(st, :static_block, stmts)
     outer = Map.take(st, [:rewriting, :tail_ok, :aw])
@@ -2361,8 +2486,11 @@ defmodule Browser.JS.Resolve do
     end
   end
 
+  # (a top-level `using` owns the statements after it, imports and exports
+  # included)
   defp module_stmt?({k, _, _}) when k in [:import, :export_from], do: true
   defp module_stmt?({k, _}) when k in [:export, :export_default, :export_names], do: true
+  defp module_stmt?({:using, _, _, _, rest}), do: Enum.any?(rest, &module_stmt?/1)
   defp module_stmt?(_), do: false
 
   defp fail(msg), do: throw({:check, msg})
@@ -2398,7 +2526,6 @@ defmodule Browser.JS.Resolve do
   end
 
   defp c_stmt({:fundecl, _, f}, ctx), do: c_expr(f, ctx)
-  defp c_stmt({:classdecl, _, c}, ctx), do: c_expr(c, ctx)
   defp c_stmt({:return, nil}, _ctx), do: :ok
   defp c_stmt({:return, e}, ctx), do: c_expr(e, ctx)
 
@@ -2592,6 +2719,14 @@ defmodule Browser.JS.Resolve do
 
   defp c_expr({:chain, e}, ctx), do: c_expr(e, ctx)
 
+  # A direct eval is decided by its `{:id, "eval"}` callee (interp.ex `ev`);
+  # a callee in slot form would run as an indirect eval, in the global scope.
+  defp c_expr({:call, callee, args, false}, ctx) do
+    if direct_eval_callee?(callee), do: fail("a direct eval with a rewritten callee")
+    c_expr(callee, ctx)
+    c_args(args, ctx)
+  end
+
   defp c_expr({:call, callee, args, _}, ctx) do
     c_expr(callee, ctx)
     c_args(args, ctx)
@@ -2690,6 +2825,12 @@ defmodule Browser.JS.Resolve do
   defp c_expr(form, ctx), do: c_form(form, ctx)
 
   defp c_args(args, ctx), do: Enum.each(args, &c_expr(&1, ctx))
+
+  defp direct_eval_callee?({:gref, "eval"}), do: true
+  defp direct_eval_callee?({k, _, _, "eval"}) when k in [:slot, :cslot, :fname], do: true
+  defp direct_eval_callee?({:mslot, _, _, "eval", _}), do: true
+  defp direct_eval_callee?({:mref, _, "eval"}), do: true
+  defp direct_eval_callee?(_), do: false
   defp c_key_or_expr({:str, _}, _ctx), do: :ok
   defp c_key_or_expr({:priv, _}, _ctx), do: :ok
   defp c_key_or_expr(e, ctx), do: c_expr(e, ctx)

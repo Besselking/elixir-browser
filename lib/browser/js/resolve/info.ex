@@ -34,22 +34,27 @@ defmodule Browser.JS.Resolve.Info do
   - `slots`: name or hidden atom to slot index. A name-based lookup on a frame
     reads this map. Block names are not in it. The arguments object sits
     under the name `"arguments"`, or under the atom `:arguments` when the
-    body declares a function or a lexical of that name (the object is then
-    visible from the parameter defaults only).
+    body takes the name once it runs: a function or a lexical of that name,
+    or a `var` of that name under parameter initializers (the object is then
+    visible from the parameter defaults only; the `var` has its own slot
+    under the name, see `copies`).
   - `hidden`: the hidden slots in slot order: `:this`, `:args`, `:arguments`,
     `:new_target`, `:home`, `:ctor_fn`, `:self`.
   - `kinds`: a tuple with one element per frame position. Positions 1 to 5
     name the header (`:parent`, `:rec`, `:caller`, `:call_pos`, `:root`).
-    From position 6: `:param`, `:var`, `:fun`, `:let`, `:const`, `:class`,
-    `:using`, `:hidden` or `:self`.
+    From position 6: `:param`, `:var`, `:fun`, `:let`, `:const`, `:using`,
+    `:hidden` or `:self`. A class declaration is a `:let` slot: the parser
+    gives it that form inside a function.
   - `template`: the initial values of the slots after the parameters and the
     hidden slots, in slot order (`:undefined` or `:tdz`). The parameter slots
     are not in it: a frame builder fills them from the arguments, and sets
     them to `:tdz` first when `params` is `:exprs`.
   - `hoist`: `{slot, function_node}` pairs to instantiate at entry, in source
     order. The last pair for a slot wins.
-  - `copies`: `{from, to}` slot pairs copied at body entry (a `var` that has a
-    parameter's name, when a closure in an initializer captures the parameter).
+  - `copies`: `{from, to}` slot pairs copied at body entry: a `var` that has a
+    parameter's name, when a closure in an initializer captures the parameter,
+    and `var arguments` under parameter initializers, filled from the hidden
+    slot of the arguments object.
   - `self`: the slot of the function's own name, or `nil`.
   - `argmap`: parameter name to argument index for a mapped `arguments`
     object, or `nil`.
@@ -59,7 +64,10 @@ defmodule Browser.JS.Resolve.Info do
   - `makes_closures`: a function or class node is inside this function.
   - `has_await`: a statement of the body contains `await`, `yield` or
     `for await`.
-  - `captured`: the slots that an inner function reads or writes.
+  - `captured`: the slots that an inner function or an instance field
+    initializer reads or writes, the hidden slots included: `super()` in an
+    arrow captures `:ctor_fn`, `:new_target` and `:this`, `super.x` captures
+    `:home` and `:this`, and `arguments` captures the object's slot.
   - `free`: `:always` when the frame is erased on return, `:counter` when the
     closure counter decides (step 2c).
   - `tail_sites`: the number of `return` statements marked as tail calls.
