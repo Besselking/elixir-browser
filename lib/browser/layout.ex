@@ -9460,7 +9460,7 @@ defmodule Browser.Layout do
         for p <- sized do
           rs = min(p.cell.rowspan, nrows - p.row)
           full_h = Enum.sum(Enum.slice(row_heights, p.row, rs)) + sy * (rs - 1)
-          valign = p.cell.valign || p.row_valign || "top"
+          valign = p.cell.valign || "top"
 
           extra_top =
             case valign do

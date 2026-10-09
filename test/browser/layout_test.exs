@@ -4636,6 +4636,19 @@ defmodule Browser.LayoutTest do
     assert {255, 255, 0} in colors
   end
 
+  test "a table cell made from a div does not take its row's vertical-align" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:table"><div style="display:table-row;vertical-align:bottom"><div style="display:table-cell;height:100px">a</div></div></div><table><tr style="vertical-align:bottom"><td style="height:100px">b</td></tr></table>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    text = fn t -> Enum.find(items, &(&1[:text] == t)) end
+    assert text.("a").y < 20
+    assert text.("b").y > 50
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
