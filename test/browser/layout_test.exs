@@ -7399,4 +7399,26 @@ defmodule Browser.LayoutTest do
       assert balanced(html) == [{0, 0}, {0, 20}, {0, 40}]
     end
   end
+
+  describe "contain: size boxes asked how big they want to be" do
+    test "a max-content parent is as wide as the contain-intrinsic-size of its child" do
+      html =
+        ~s|<style>body{margin:0}#b{width:max-content;border:1px solid black}#t{background:blue;contain:size;contain-intrinsic-size:111px 22px}</style><div id="b"><div id="t"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert {box.w, box.h} == {111, 22}
+    end
+
+    test "a stretched flex item takes the line's height, not its contain-intrinsic-size" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;height:100px;width:300px}#t{background:blue;contain:size;contain-intrinsic-size:50px 10px}</style><div id="f"><div id="t"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert {box.w, box.h} == {50, 100}
+    end
+  end
 end

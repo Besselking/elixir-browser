@@ -1578,8 +1578,10 @@ defmodule Browser.Style do
 
       base =
         if Map.get(base, "height", :auto) == :auto and not ratio?,
-          do: Map.put(base, "height", ih),
+          do: base |> Map.put("height", ih) |> Map.put("@cis_h", ih),
           else: base
+
+      base = Map.put(base, "@cis_w", iw)
 
       if Map.get(base, "width") in [:maxc, :fit, :minc],
         do: Map.put(base, "width", iw),

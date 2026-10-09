@@ -1948,6 +1948,8 @@ defmodule Browser.Layout do
       clip: clips?(c),
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
+      # (`contain: size`: asked how wide it wants to be, it says its `contain-intrinsic-size`)
+      cisw: c["@cis_w"],
       bfc: clips?(c) or c["display"] == "flow-root" or columns_spec(c) != nil,
       pos: c["position"] in ["relative", "sticky", "absolute", "fixed"],
       # `position: relative`: the box is drawn shifted by `top`/`left` (or `bottom`/`right`)
@@ -1964,7 +1966,7 @@ defmodule Browser.Layout do
     needed? =
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
         spec.min || spec.ratio || spec.maxpct ||
-        spec.max || spec.pos ||
+        spec.max || spec.pos || spec.cisw ||
         spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag))
 
@@ -4423,7 +4425,8 @@ defmodule Browser.Layout do
 
     # (a flex item is as wide as the flex algorithm made it, which has taken its ratio into account)
     cw =
-      to_content.(o.width) || (not (flex_item? and o.flex_sized) && ratio_width(o, hpad)) ||
+      to_content.(o.width) || (intrinsic? && o.cisw && round(o.cisw)) ||
+        (not (flex_item? and o.flex_sized) && ratio_width(o, hpad)) ||
         max(beside - ml0 - mr0 - hpad, 0)
 
     cw =
@@ -4504,7 +4507,11 @@ defmodule Browser.Layout do
     x = st.margin + left
 
     id = make_ref()
-    own_free = if own_width?(o.width) || o.maxw, do: max(rest - mr0, 0), else: 0
+
+    own_free =
+      if own_width?(o.width) || o.maxw || (intrinsic? && o.cisw),
+        do: max(rest - mr0, 0),
+        else: 0
 
     box = %{
       id: id,
@@ -4628,6 +4635,12 @@ defmodule Browser.Layout do
       if own_width?(o.width) or o.maxw != nil or ratio_sized?(o),
         do: st,
         else: %{st | ext: max(st.ext, box.need)}
+
+    # (a size-contained box is as wide as its `contain-intrinsic-size` says, whatever it holds)
+    st =
+      if o.cisw != nil and Process.get(:layout_intrinsic, false),
+        do: %{st | ext: max(st.ext, box.x + box.w + box_mr(o) + max(st.right - st.free, 0))},
+        else: st
 
     st = place_deferred(st, box, height)
 
@@ -7784,7 +7797,8 @@ defmodule Browser.Layout do
       order: flex_number(c["order"], 0.0),
       # a flex item with a `z-index` is a stacking context even when it is not positioned
       zi: if(c["position"] in [nil, "static"] and c["z-index"] != nil, do: z_index(c)),
-      auto_height?: c["height"] in [nil, :auto],
+      # (the height `contain-intrinsic-size` gives is an automatic one: it stretches)
+      auto_height?: c["height"] in [nil, :auto] or c["@cis_h"] != nil,
       fit?: c["width"] in [:fit, :minc, :maxc] or fitc?(c["width"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       ch: num(c["height"]),
