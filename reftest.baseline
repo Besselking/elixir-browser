@@ -6004,7 +6004,9 @@ css/selectors/nth-of-invalid.html
 css/selectors/nth-of-selector-before.html
 css/selectors/root-siblings.html
 css/selectors/scope-without-scoping.html
+css/selectors/selector-required.html
 css/selectors/selector-structural-pseudo-root.html
+css/selectors/selectors-4/details-open-pseudo-001.html
 css/selectors/selectors-4/lang-000.html
 css/selectors/selectors-4/lang-001.html
 css/selectors/selectors-4/lang-002.html

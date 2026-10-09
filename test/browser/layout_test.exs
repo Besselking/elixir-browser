@@ -4623,6 +4623,19 @@ defmodule Browser.LayoutTest do
     assert blue.y == 8
   end
 
+  test ":required, :optional, :read-only and :open match form controls and details" do
+    html =
+      ~s|<style>input:required{background:#f00}input:optional{background:#0f0}div:read-only{background:#00f}details:open{background:#ff0}</style><input required><input readonly><div>x</div><details open><summary>s</summary></details>|
+
+    page = Browser.Page.build(html, "about:home")
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+    colors = for %{type: :rect, color: c} <- items, do: c
+    assert {255, 0, 0} in colors
+    assert {0, 255, 0} in colors
+    assert {0, 0, 255} in colors
+    assert {255, 255, 0} in colors
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do

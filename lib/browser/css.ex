@@ -722,8 +722,45 @@ defmodule Browser.CSS do
 
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
+  @form_controls ~w(input select textarea)
+  @text_inputs [
+    nil,
+    "text",
+    "search",
+    "url",
+    "tel",
+    "email",
+    "password",
+    "number",
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week"
+  ]
+
+  # a text field the user can edit, or content made editable
+  defp editable?(ctx) do
+    attr = fn name -> List.keyfind(ctx.attrs, name, 0) end
+
+    case ctx.tag do
+      "input" ->
+        type = with {_, t} <- attr.("type"), do: String.downcase(t)
+
+        type in @text_inputs and not List.keymember?(ctx.attrs, "readonly", 0) and
+          not List.keymember?(ctx.attrs, "disabled", 0)
+
+      "textarea" ->
+        not List.keymember?(ctx.attrs, "readonly", 0) and
+          not List.keymember?(ctx.attrs, "disabled", 0)
+
+      _ ->
+        match?({_, v} when v in ["", "true", "plaintext-only"], attr.("contenteditable"))
+    end
+  end
+
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only open)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -1013,6 +1050,18 @@ defmodule Browser.CSS do
     do: List.keymember?(ctx.attrs, "checked", 0) or List.keymember?(ctx.attrs, "selected", 0)
 
   defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
+
+  defp pseudo?(:required, ctx),
+    do: ctx.tag in @form_controls and List.keymember?(ctx.attrs, "required", 0)
+
+  defp pseudo?(:optional, ctx),
+    do: ctx.tag in @form_controls and not List.keymember?(ctx.attrs, "required", 0)
+
+  defp pseudo?(:open, ctx),
+    do: ctx.tag in ~w(details dialog) and List.keymember?(ctx.attrs, "open", 0)
+
+  defp pseudo?(:read_write, ctx), do: editable?(ctx)
+  defp pseudo?(:read_only, ctx), do: not editable?(ctx)
   defp pseudo?({:anchor, key}, ctx), do: ctx.key == key
   defp pseudo?({:has, rels}, ctx), do: Enum.any?(rels, &has?(&1, ctx))
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
