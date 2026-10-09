@@ -10221,8 +10221,16 @@ defmodule Browser.Layout do
 
   # a table with only a caption
   defp table_caption_only(st, model, avail) do
-    {items, h} = table_caption_items(st, model.caption, avail)
-    {items, avail, h}
+    # (as wide as its caption wants, when no width was given)
+    w =
+      if model.caption && avail > @unbounded / 2 do
+        shrink_extent(st, model.caption, @unbounded, nil)
+      else
+        avail
+      end
+
+    {items, h} = table_caption_items(st, model.caption, w)
+    {items, w, h}
   end
 
   defp table_caption_items(_st, nil, _w), do: {[], 0}

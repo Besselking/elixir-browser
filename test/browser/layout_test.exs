@@ -7849,4 +7849,16 @@ defmodule Browser.LayoutTest do
       assert y.(ib) == y.(inline)
     end
   end
+
+  describe "a table with only a caption" do
+    test "is as wide as the caption" do
+      html =
+        ~s|<style>body{margin:0}table{background:green}</style><table><caption>abcde</caption></table><p>x</p>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      cap = Enum.find(laid, &(&1.type == :text and &1.text == "abcde"))
+      assert cap.x == 0
+    end
+  end
 end
