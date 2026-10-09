@@ -2408,6 +2408,11 @@ defmodule Browser.JS.Interp do
   @doc false
   def make_function(node, env), do: make_fn(node, env)
 
+  # `named?: false` makes no self-name scope: a class constructor gets its name
+  # from the class scope, so an anonymous class expression must not bind the
+  # name it inferred (`let X = class { constructor() { X = 5 } }` writes the `let`).
+  def make_function(node, env, named?), do: make_fn(node, env, named?)
+
   @doc false
   # sets a field of a function's closure (the `home` object of a method)
   def set_home({:obj, id}, home) do

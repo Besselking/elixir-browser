@@ -88,7 +88,7 @@ defmodule Browser.JS.Classes do
         do: put_elem(ctor_node, 1, inferred),
         else: ctor_node
 
-    f = Interp.make_function(ctor_node, cenv)
+    f = Interp.make_function(ctor_node, cenv, false)
     if name, do: Interp.declare(cenv, name, f, true)
     Interp.set_home(f, proto)
     put_hidden(f, "prototype", proto)
