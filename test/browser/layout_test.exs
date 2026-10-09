@@ -7421,4 +7421,37 @@ defmodule Browser.LayoutTest do
       assert {box.w, box.h} == {50, 100}
     end
   end
+
+  describe "stretch sizes and fixed heights" do
+    defp green_box(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+    end
+
+    test "height: stretch fills the height of the containing block" do
+      box =
+        green_box(
+          ~s|<style>body{margin:0}</style><div style="height:100px"><div style="width:50px;height:stretch;margin-bottom:50px;background:green;display:flow-root"></div></div>|
+        )
+
+      assert {box.w, box.h} == {50, 100}
+    end
+
+    test "an absolutely positioned box with width and height stretch fills its containing block" do
+      box =
+        green_box(
+          ~s|<style>body{margin:0}</style><div style="position:relative;width:100px;height:80px"><div style="position:absolute;width:stretch;height:stretch;background:green"></div></div>|
+        )
+
+      assert {box.w, box.h} == {100, 80}
+    end
+
+    test "the bottom margin of the last child stays inside a box with a set height" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:100px"><div style="height:40px;margin-bottom:60px"></div></div><div style="height:10px;background:green"></div>|
+
+      assert green_box(html).y == 100
+    end
+  end
 end

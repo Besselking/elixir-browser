@@ -1157,7 +1157,12 @@ defmodule Browser.Layout do
         left: c["left"],
         right: c["right"],
         bottom: c["bottom"],
-        width: if(replaced?, do: nil, else: calc.("width") || dim(c["width"])),
+        width:
+          if(replaced? or raw["width"] == :stretch,
+            do: nil,
+            else: calc.("width") || dim(c["width"])
+          ),
+        stretch: raw["width"] == :stretch,
         replaced: replaced?,
         minw: if(replaced?, do: nil, else: calc.("min-width") || c["min-width"]),
         maxw: if(replaced?, do: nil, else: calc.("max-width") || c["max-width"]),
@@ -1180,6 +1185,7 @@ defmodule Browser.Layout do
         mta: c["margin-top"] == :auto,
         mba: c["margin-bottom"] == :auto,
         mb: box.mb,
+        hstretch: c["height"] == :hstretch,
         hpct:
           case c["height"] do
             {:pct, f} -> f
@@ -5146,6 +5152,10 @@ defmodule Browser.Layout do
         is_number(spec.hpct) and origin.h ->
           set_height(sub, spec.hpct * origin.h)
 
+        # `height: stretch`: what the insets leave of the containing block
+        spec.hstretch and origin.h ->
+          set_height(sub, max(origin.h - (top || 0) - (bottom || 0) - auto_zero(spec.mb), 0))
+
         true ->
           sub
       end
@@ -5511,6 +5521,13 @@ defmodule Browser.Layout do
 
     width =
       case resolve(spec.width, cw) do
+        # `width: stretch`: what the insets and margins leave of the containing block
+        nil when spec.stretch ->
+          max(
+            cw - (left || 0) - (right || 0) - (ml || 0) - (mr || 0) - spec.extra + spec.extra,
+            0
+          )
+
         nil ->
           avail =
             cond do

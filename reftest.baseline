@@ -4685,6 +4685,7 @@ css/css-sizing/abspos-auto-sizing-fit-content-percentage-006.html
 css/css-sizing/abspos-auto-sizing-fit-content-percentage-007.html
 css/css-sizing/abspos-auto-sizing-fit-content-percentage-008.html
 css/css-sizing/abspos-stretch-indefinite-cb.html
+css/css-sizing/abspos-stretch-replaced-percentage-child.html
 css/css-sizing/aspect-ratio-percentage-height.html
 css/css-sizing/aspect-ratio/abspos-001.html
 css/css-sizing/aspect-ratio/abspos-002.html
@@ -4991,6 +4992,7 @@ css/css-sizing/intrinsic-height-abspos-percentage-child-002.html
 css/css-sizing/intrinsic-height-abspos-percentage-child-003.html
 css/css-sizing/intrinsic-height-abspos-percentage-child-004.html
 css/css-sizing/intrinsic-height-abspos-percentage-child.html
+css/css-sizing/intrinsic-height-abspos-stretch-percentage-child.html
 css/css-sizing/intrinsic-height-fixedpos-percentage-child.html
 css/css-sizing/intrinsic-percent-non-replaced-004.html
 css/css-sizing/intrinsic-percent-non-replaced-007.html
@@ -5014,6 +5016,8 @@ css/css-sizing/shrink-to-fit-sizing-max-width-min-content.html
 css/css-sizing/slice-intrinsic-size.html
 css/css-sizing/slice-nowrap-intrinsic-size-bidi.html
 css/css-sizing/slice-nowrap-intrinsic-size.html
+css/css-sizing/stretch/abspos-1.html
+css/css-sizing/stretch/abspos-2.html
 css/css-sizing/stretch/bfc-next-to-float-1.html
 css/css-sizing/stretch/block-height-003.html
 css/css-sizing/stretch/block-height-006.html
