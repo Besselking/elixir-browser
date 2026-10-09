@@ -50,6 +50,8 @@ defmodule Browser.Style do
   @clips ~w(hidden clip scroll auto)
   # what the layer of the style attribute is: above every layer, and above unlayered rules
   @above_layers 2_000_000
+  # the rank of the initial values of `@property` registrations: below every layer
+  @registered_rank 1_500_000
   @default_fs 16.0
 
   @shorthands %{
@@ -86,11 +88,23 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
-  canvas, audio, video, iframe, object, embed, applet { display: none }
+  audio, video, iframe, object, embed, applet { display: none }
+  slot { display: contents }
+  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
+  iframe[data-b-frame][scrolling=no] { overflow: hidden }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
   html, legend, main, menu, nav, ol, p, pre, section, summary, ul { display: block }
+  dialog { position: absolute; inset-inline: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 1em; background-color: #ffffff; color: #000000 }
+  dialog:modal { position: fixed; inset-block: 0; z-index: 2147483647; overflow: auto;
+    max-width: calc(100% - 6px - 2em); max-height: calc(100% - 6px - 2em) }
+  [popover] { position: fixed; inset: 0; width: fit-content; height: fit-content; margin: auto;
+    border: solid; padding: 0.25em; overflow: auto; color: #000000; background-color: #ffffff }
+  [popover]:not(:popover-open):not(dialog[open]) { display: none }
+  [popover]:popover-open { z-index: 2147483645 }
+  ::backdrop { display: block; position: fixed; inset: 0; z-index: 2147483646; background-color: rgba(0, 0, 0, 0.1) }
   table { display: table; border-spacing: 2px; box-sizing: border-box }
   caption { display: table-caption; text-align: center }
   thead, tbody, tfoot { display: table-row-group; vertical-align: middle }
@@ -150,6 +164,35 @@ defmodule Browser.Style do
 
   defp refs(nodes, acc), do: Enum.reduce(nodes, acc, &ref/2)
 
+  @doc """
+  Like `sheet_refs/1`, but each reference comes as `{ref, scope, base}`. The content of a frame
+  (an element with `data-b-frame`, see `Browser.JS.DOM`) is a scope of its own: its sheets apply
+  inside it only, and its links resolve against the frame's address (`data-b-base`).
+  """
+  def scoped_refs(nodes), do: nodes |> scoped(nil, nil, []) |> Enum.reverse()
+
+  defp scoped(nodes, scope, base, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &scoped(&1, scope, base, &2))
+
+  defp scoped({:text, _}, _scope, _base, acc), do: acc
+
+  defp scoped({:element, tag, _attrs, _kids} = node, scope, base, acc)
+       when tag in ["style", "link"],
+       do: Enum.reduce(ref(node, []), acc, fn ref, acc -> [{ref, scope, base} | acc] end)
+
+  defp scoped({:element, _tag, attrs, kids}, scope, base, acc) do
+    case List.keyfind(attrs, "data-b-frame", 0) do
+      {_, id} ->
+        inner_base =
+          with {_, b} <- List.keyfind(attrs, "data-b-base", 0), do: b, else: (_ -> base)
+
+        scoped(kids, id, inner_base, acc)
+
+      nil ->
+        scoped(kids, scope, base, acc)
+    end
+  end
+
   defp ref({:text, _}, acc), do: acc
 
   defp ref({:element, "style", attrs, kids}, acc) do
@@ -191,16 +234,17 @@ defmodule Browser.Style do
   @doc "Parses `[{origin, css}]` (origin `:ua` or `:author`, in cascade order) into rules."
   def parse_sheets(sheets) do
     Enum.flat_map(sheets, fn sheet ->
-      {origin, css, base} =
+      {origin, css, base, scope} =
         case sheet do
-          {origin, css} -> {origin, css, nil}
-          {origin, css, base} -> {origin, css, base}
+          {origin, css} -> {origin, css, nil, nil}
+          {origin, css, base} -> {origin, css, base, nil}
+          {origin, css, base, scope} -> {origin, css, base, scope}
         end
 
       for rule <- CSS.parse(css),
           decls = rule.decls |> absolutize_urls(base) |> relevant(),
           decls != [],
-          do: %{rule | decls: decls} |> Map.put(:origin, origin)
+          do: %{rule | decls: decls} |> Map.put(:origin, origin) |> Map.put(:scope, scope)
     end)
   end
 
@@ -229,7 +273,12 @@ defmodule Browser.Style do
     |> then(fn rules -> {rules, layer_ranks(rules)} end)
     |> then(fn {rules, ranks} ->
       Enum.map(rules, fn {rule, order} ->
-        {Map.put(rule, :lrank, Map.get(ranks, Map.get(rule, :layer))), order}
+        lrank =
+          if Map.get(rule, :registered),
+            do: -@registered_rank,
+            else: Map.get(ranks, Map.get(rule, :layer))
+
+        {Map.put(rule, :lrank, lrank), order}
       end)
     end)
     |> Enum.reduce(
@@ -285,6 +334,14 @@ defmodule Browser.Style do
 
   # -- cascade -------------------------------------------------------------------
 
+  # a `:host` rule of the shadow tree that `ctx` is the host of
+  defp from_shadow?(rule, ctx) do
+    scope = Map.get(rule, :scope)
+
+    scope != nil and scope != Map.get(ctx, :scope) and Map.get(ctx, :scope_in) == scope and
+      CSS.host_rule?(rule.selector)
+  end
+
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
   def declared(idx, ctx, pseudo \\ nil) do
     # rules are bucketed by the pseudo-element they are for, and then by their rightmost compound
@@ -297,11 +354,14 @@ defmodule Browser.Style do
     from_rules =
       for rule <- candidates,
           Map.get(rule, :pseudo) == pseudo,
+          from_host <- [from_shadow?(rule, ctx)],
+          from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
           CSS.matches?(rule.selector, ctx),
           {prop, value, important?} <- rule.decls do
+        # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
         {prop,
          {rank(rule.origin, important?), layer_rank(Map.get(rule, :lrank), important?),
-          {0, rule.specificity}, rule.order}, value}
+          {if(from_host, do: -1, else: 0), rule.specificity}, rule.order}, value}
       end
 
     # inline styles and presentational attributes belong to the element, not its generated boxes

@@ -53,7 +53,16 @@ defmodule Browser.JS.Runtime do
   @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
   def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
 
-  def stop(pid), do: Process.exit(pid, :kill)
+  def stop(pid) do
+    Process.exit(pid, :kill)
+    Browser.Console.drop(pid)
+  end
+
+  @doc """
+  Runs `source` in the page, as the developer console does: the console shows the line and its
+  value (or the error it threw), and the page changes like for any script.
+  """
+  def eval(pid, source), do: call(pid, {:eval, source})
 
   def run_scripts(pid), do: call(pid, :run_scripts, @scripts_timeout)
 
@@ -78,6 +87,9 @@ defmodule Browser.JS.Runtime do
   def dispatch(pid, target, type, init \\ %{}, controls \\ %{}),
     do: call(pid, {:dispatch, target, type, init, controls})
 
+  @doc "A form with `method=\"dialog\"` was submitted, by the control `cid` (nil: by script)."
+  def dialog_submit(pid, fid, cid), do: call(pid, {:dialog_submit, fid, cid})
+
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
@@ -94,10 +106,17 @@ defmodule Browser.JS.Runtime do
   @doc "The browser followed a link to a fragment of this page, now at `url`."
   def fragment(pid, url), do: call(pid, {:fragment, url})
 
+  @doc """
+  A click on the link `href` over the element numbered `nid`: `%{frame: true}` when a frame
+  took it (it loads the address itself), else the session follows the link.
+  """
+  def follow_link(pid, nid, href), do: call(pid, {:follow_link, nid, href})
+
   @doc "The page as it stands (after changes the session made to control state)."
   def snapshot(pid, controls \\ %{}), do: call(pid, {:snapshot, controls})
 
-  defp call(pid, request, timeout \\ @call_timeout) do
+  defp call(pid, request, timeout \\ nil) do
+    timeout = timeout || Application.get_env(:browser, :js_call_timeout, @call_timeout)
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
 
@@ -111,6 +130,7 @@ defmodule Browser.JS.Runtime do
     after
       timeout ->
         Process.demonitor(ref, [:flush])
+        Browser.Console.add(pid, [{:error, "script timed out"}])
 
         %{
           dirty: false,
@@ -124,7 +144,9 @@ defmodule Browser.JS.Runtime do
 
   # ── the process ────────────────────────────────────────────
 
-  defp boot(raw, info) do
+  # (the process of a worker boots the same way, with an empty document)
+  @doc false
+  def boot(raw, info) do
     Interp.init(@steps)
     Browser.JS.GC.enable()
     scope = Builtins.install()
@@ -133,14 +155,124 @@ defmodule Browser.JS.Runtime do
     Process.put(:rt_info, info)
     Browser.JS.WebAPI.install(scope, &http/1)
     Browser.JS.Editing.install(scope)
+    Browser.JS.WebAssembly.install(scope)
+    Browser.JS.IndexedDB.install(scope)
+    Browser.JS.Workers.install(scope)
+    Browser.JS.WebSockets.install(scope)
     Modules.reset()
-
-    Process.put(:js_import, fn spec, from, p, type ->
-      Modules.import(spec, from || base_url(), loader(), p, type)
-    end)
-
+    Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
+    # what a frame's global scope starts with: the built-ins and the page's own window-level
+    # names (`DOM.declare_window/1` gives it its own `window`, `document` and so on)
+    Process.put(:rt_base_vars, Interp.deref(Interp.global()).vars)
+    Process.put(:rt_load_frame, &load_frame/3)
+    Process.put(:rt_blank_frame, &blank_frame/1)
   end
+
+  defp import_fun do
+    fn spec, from, p, type ->
+      Modules.import(spec, from || base_url(), loader(), p, type)
+    end
+  end
+
+  # ── frames ─────────────────────────────────────────────────
+
+  # the realm of a new frame: its own global scope, module table and script bookkeeping
+  defp make_frame(iframe, html, url) do
+    scope = Interp.new_scope_with(Process.get(:rt_base_vars))
+    info = Process.get(:rt_info) |> Map.merge(%{url: url, base: url})
+
+    keys = %{
+      js_global: scope,
+      js_global_fixed: :__unset,
+      js_global_lex: :__unset,
+      js_modules: %{},
+      js_import: import_fun(),
+      rt_info: info,
+      rt_importmap: %{},
+      rt_seen_scripts: :__unset,
+      rt_prefetched: %{},
+      rt_script: :__unset
+    }
+
+    raw = html |> Browser.HTML.parse_document() |> with_head()
+    doc = DOM.new_realm(iframe, raw, url, keys)
+    DOM.in_realm(doc, fn -> DOM.declare_window(scope) end)
+    doc
+  end
+
+  # (a page that starts with its `<body>` has no `<head>`: `document.head` is still there)
+  defp with_head(raw) do
+    Enum.map(raw, fn
+      {:element, "html", attrs, kids} ->
+        if Enum.any?(kids, &match?({:element, "head", _, _}, &1)),
+          do: {:element, "html", attrs, kids},
+          else: {:element, "html", attrs, [{:element, "head", [], []} | kids]}
+
+      other ->
+        other
+    end)
+  end
+
+  # `contentDocument` of a frame that has not loaded anything yet: an empty page
+  defp blank_frame(iframe), do: make_frame(iframe, "", "about:blank")
+
+  # the load of an `<iframe>`: its page is fetched, parsed and its scripts run; then the element
+  # hears `load`
+  defp load_frame(iframe, source, page_doc) do
+    DOM.in_realm(page_doc, fn ->
+      if DOM.frame_doc(iframe) && source != :blank do
+        DOM.destroy_realm(DOM.frame_doc(iframe))
+      end
+
+      Process.put(:js_steps, @steps)
+
+      {html, url, ok?} =
+        case source do
+          {:srcdoc, html} ->
+            {html, "about:srcdoc", true}
+
+          {:url, url} ->
+            case fetch(url) do
+              {:ok, body, final} -> {frame_html(body), final, true}
+              {:error, msg} -> {"", url, log(:error, "Failed to load #{url}: #{msg}") && false}
+            end
+
+          :blank ->
+            {"", "about:blank", true}
+        end
+
+      doc =
+        case DOM.frame_doc(iframe) do
+          nil -> make_frame(iframe, html, url)
+          d -> d
+        end
+
+      if ok? do
+        DOM.in_realm(doc, fn ->
+          Process.put(:js_steps, @steps)
+          run_all_scripts()
+        end)
+      end
+
+      Process.put(:js_steps, @steps)
+
+      guard(
+        fn ->
+          DOM.dispatch(iframe, if(ok?, do: "load", else: "error"), %{
+            bubbles: false,
+            cancelable: false
+          })
+        end,
+        :ok
+      )
+
+      Browser.JS.Promise.run_microtasks()
+    end)
+  end
+
+  defp frame_html(body) when is_binary(body), do: body
+  defp frame_html(body), do: IO.iodata_to_binary(body)
 
   # `t0` is when the runtime started: timers are timed from it
   defp loop(t0) do
@@ -172,6 +304,34 @@ defmodule Browser.JS.Runtime do
         if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
+      {:worker, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.Workers.deliver(id, event) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:ws, id, event} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> Browser.JS.WebSockets.deliver(id, event) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:idb, _, _} = msg ->
+        idb_message(t0, msg)
+        loop(t0)
+
+      {:idb, :versionchange, _, _, _, _, _} = msg ->
+        idb_message(t0, msg)
+        loop(t0)
+
       {:scrolled, x, y} ->
         # only the newest position matters when several have piled up
         {x, y} = latest_scroll(x, y)
@@ -194,6 +354,33 @@ defmodule Browser.JS.Runtime do
         fire_due(t0)
         loop(t0)
     end
+  end
+
+  # another page (or this one) changes a database: the connections hear of it
+  defp idb_message(t0, msg) do
+    Process.put(:js_now, elapsed(t0))
+    Process.put(:js_steps, @steps)
+    guard(fn -> Browser.JS.IndexedDB.deliver(msg) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    reply = finish(%{})
+
+    if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+  end
+
+  # the messages about databases that are waiting, for `flush`
+  defp drain_idb do
+    receive do
+      {:idb, _, _} = msg -> idb_message_now(msg)
+      {:idb, :versionchange, _, _, _, _, _} = msg -> idb_message_now(msg)
+    after
+      0 -> false
+    end
+  end
+
+  defp idb_message_now(msg) do
+    guard(fn -> Browser.JS.IndexedDB.deliver(msg) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    true
   end
 
   defp latest_scroll(x, y) do
@@ -255,11 +442,44 @@ defmodule Browser.JS.Runtime do
         t -> guard(fn -> DOM.dispatch(t, type, init) end, :ok)
       end
 
+    # what the window does when the page did not stop the event: Escape closes a modal dialog,
+    # a click on its backdrop may
+    if prevented != :prevented do
+      case {type, init, target} do
+        {"keydown", %{"key" => "Escape"}, _} ->
+          guard(fn -> DOM.call_global("__dialogEscape", []) end, :ok)
+
+        {"click", _, {:numbered, n}} when n < 0 ->
+          guard(fn -> DOM.dialog_backdrop(n) end, :ok)
+
+        {"click", _, target} ->
+          guard(fn -> DOM.popover_click(target) end, :ok)
+
+        # a form was reset: its controls go back to their markup's values
+        {"reset", _, {:form, fid}} ->
+          guard(fn -> DOM.reset_form(fid) end, :ok)
+
+        # a `method="dialog"` form was submitted: its dialog closes
+        {"submit", %{"submitter" => cid}, {:form, fid}} ->
+          guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+
+        _ ->
+          :ok
+      end
+    end
+
     Browser.JS.Promise.run_microtasks()
     finish(%{prevented: prevented == :prevented})
   end
 
   # the pointer went from one element (by its layout number) to another
+  # `<form method="dialog">` was submitted (by the control `cid`, or by script): the dialog closes
+  defp handle({:dialog_submit, fid, cid}) do
+    guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
   defp handle({:hover, old, new}) do
     guard(fn -> DOM.hover(old, new) end, :ok)
     Browser.JS.Promise.run_microtasks()
@@ -303,9 +523,31 @@ defmodule Browser.JS.Runtime do
     finish(%{moved: moved})
   end
 
+  defp handle({:follow_link, nid, href}) do
+    frame = guard(fn -> DOM.follow_link(nid, href) end, :page) == :frame
+    Browser.JS.Promise.run_microtasks()
+    finish(%{frame: frame})
+  end
+
   defp handle({:fragment, url}) do
     guard(fn -> DOM.fragment_navigation(url) end, :ok)
     Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
+  defp handle({:eval, source}) do
+    log(:input, source)
+
+    guard(
+      fn ->
+        case Parser.parse(source) do
+          {:ok, program} -> log(:result, Builtins.inspect_js(Interp.run_program(program), 0, []))
+          {:error, msg} -> log(:error, "SyntaxError: " <> msg)
+        end
+      end,
+      :ok
+    )
+
     finish(%{})
   end
 
@@ -328,7 +570,10 @@ defmodule Browser.JS.Runtime do
         do: log(:error, "Uncaught (in promise) " <> describe(reason))
 
     Process.put(:js_unhandled, [])
-    dirty = DOM.dirty?() or Map.get(extra, :force_raw, false)
+    # (a frame's document is part of the tree the page shows)
+    dirty =
+      DOM.dirty?() or MapSet.size(DOM.changed_frames()) > 0 or Map.get(extra, :force_raw, false)
+
     raw = if dirty, do: DOM.to_raw()
     if raw, do: DOM.sync_cids(raw)
     DOM.clean()
@@ -351,6 +596,7 @@ defmodule Browser.JS.Runtime do
   defp take_console do
     c = Enum.reverse(Process.get(:js_console, []))
     Process.put(:js_console, [])
+    Browser.Console.add(self(), c)
     c
   end
 
@@ -387,35 +633,38 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp describe(v) when is_binary(v), do: v
+  @doc false
+  def describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v) do
-    case Interp.get(v, "message") do
-      m when is_binary(m) ->
-        case Interp.get(v, "name") do
-          n when is_binary(n) -> n <> ": " <> m
-          _ -> m
-        end
+  def describe({:obj, _} = v), do: Interp.describe_error(v) || Builtins.inspect_js(v, 0, [])
 
-      _ ->
-        Builtins.inspect_js(v, 0, [])
-    end
+  def describe(v), do: Builtins.inspect_js(v, 0, [])
+
+  # every pending timer, with the database messages that come between them (a message is
+  # heard in the task after the one that caused it, as in the loop)
+  defp run_timers do
+    on_error = fn v -> log(:error, "Uncaught " <> describe(v)) end
+    guard(fn -> timers_and_messages(on_error) end, :ok)
   end
 
-  defp describe(v), do: Builtins.inspect_js(v, 0, [])
+  defp timers_and_messages(on_error) do
+    drained = drain_idb()
 
-  defp run_timers do
-    guard(
-      fn -> Builtins.run_timers(fn v -> log(:error, "Uncaught " <> describe(v)) end) end,
-      :ok
-    )
+    cond do
+      Builtins.run_next_timer(on_error) -> timers_and_messages(on_error)
+      drained -> timers_and_messages(on_error)
+      true -> :ok
+    end
   end
 
   # ── scripts ────────────────────────────────────────────────
 
   defp run_all_scripts do
     doc = DOM.document()
-    scripts = for nid <- DOM.descendants(doc), s = script_info(nid), do: s
+
+    scripts =
+      for nid <- DOM.descendants(doc), s = script_info(nid), not DOM.in_template?(nid), do: s
+
     prefetch(scripts)
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
@@ -439,6 +688,7 @@ defmodule Browser.JS.Runtime do
 
     Process.put(:rt_seen_scripts, MapSet.new(scripts, & &1.nid))
     Process.delete(:rt_script)
+    DOM.load_initial_frames()
     guard(fn -> DOM.dispatch(doc, "DOMContentLoaded", %{cancelable: false}) end, :ok)
     guard(fn -> DOM.dispatch(:window, "load", %{bubbles: false, cancelable: false}) end, :ok)
     guard(fn -> DOM.autofocus() end, :ok)
@@ -455,6 +705,7 @@ defmodule Browser.JS.Runtime do
         for nid <- DOM.descendants(DOM.document()),
             not MapSet.member?(seen, nid),
             s = script_info(nid),
+            not DOM.in_template?(nid),
             s.kind in [:classic, :module],
             external?(s) or String.trim(s.text) != "",
             do: s
@@ -713,7 +964,8 @@ defmodule Browser.JS.Runtime do
     end
   end
 
-  defp loader do
+  @doc false
+  def loader do
     {fn spec, base ->
        try do
          {:ok, resolve_specifier(spec, base)}

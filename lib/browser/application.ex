@@ -10,7 +10,13 @@ defmodule Browser.Application do
     Browser.Proxy.setup()
 
     children =
-      [Browser.HttpCache, Browser.Cookies, Browser.LocalStorage] ++
+      [
+        Browser.Console,
+        Browser.HttpCache,
+        Browser.Cookies,
+        Browser.LocalStorage,
+        Browser.IndexedDB
+      ] ++
         if Application.get_env(:browser, :gui, true) do
           [{Browser.Session, []}]
         else

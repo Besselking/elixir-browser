@@ -6,7 +6,7 @@ defmodule Browser.CSS do
   `|=`, `^=`, `$=`, `*=`, `i` flag), the descendant/child/next-sibling/
   subsequent-sibling combinators, and these pseudo-classes: `:root`, `:empty`,
   `:first-child`, `:last-child`, `:only-child`, `:first-of-type`, `:nth-child()`,
-  `:nth-last-child()`, `:nth-of-type()`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
+  `:nth-last-child()`, `:nth-of-type()`, `:modal`, `:open`, `::backdrop`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
   `:not()`/`:is()`/`:where()` over lists of compound selectors. State-dependent
   pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
   `:not(:focus)` true.
@@ -17,7 +17,7 @@ defmodule Browser.CSS do
   Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
-  cascade); other at-rules (`@import`, `@font-face`,
+  cascade), and `@property` gives a custom property its initial value; other at-rules (`@import`, `@font-face`,
   `@keyframes`, …) are skipped.
 
   A rule is `%{selector: parts, specificity: {ids, classes, types}, decls: decls, media: conds,
@@ -47,10 +47,11 @@ defmodule Browser.CSS do
           selector: parts,
           specificity: spec,
           decls: decls,
-          media: Enum.reject(conds, &match?({:layer, _}, &1)),
+          media: Enum.reject(conds, &(match?({:layer, _}, &1) or &1 == :registered)),
           layer: layer_path(conds),
           pseudo: pseudo
         }
+        |> then(&if(:registered in conds, do: Map.put(&1, :registered, true), else: &1))
       end
     end)
   end
@@ -228,11 +229,30 @@ defmodule Browser.CSS do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
               "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
               "layer" -> blocks(body, conds ++ [{:layer, layer_name(prelude)}], [])
+              "property" -> registered_default(prelude, body, conds)
               _ -> []
             end
 
           {Enum.reverse(inner) ++ acc, rest}
         end
+    end
+  end
+
+  # `@property --x { initial-value: v; inherits: bool }` gives `--x` a value where nothing sets
+  # it: a rule of the lowest rank (`:registered`) on every element, or on the root when the
+  # property inherits
+  defp registered_default(prelude, body, conds) do
+    name = String.trim(prelude)
+    decls = parse_declarations(body)
+    initial = for {"initial-value", v, _} <- decls, do: v
+    inherits? = Enum.any?(decls, fn {p, v, _} -> p == "inherits" and String.trim(v) == "true" end)
+
+    case initial do
+      [v | _] when binary_part(name, 0, min(2, byte_size(name))) == "--" ->
+        [{if(inherits?, do: ":root", else: "*"), "#{name}: #{v}", conds ++ [:registered]}]
+
+      _ ->
+        []
     end
   end
 
@@ -522,7 +542,12 @@ defmodule Browser.CSS do
 
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
-    case Regex.run(~r/\A(.*?)(?:::(before|after|marker|placeholder)|:(before|after))\z/su, str) do
+    case Regex.run(
+           ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su,
+           str
+         ) do
+      # a backdrop is a box of its own (see `Browser.Modal`) that only these rules match
+      [_, head, "backdrop"] -> {head_or_any(head) <> ":mb-backdrop", nil}
       [_, head, which] -> {head_or_any(head), String.to_atom(which)}
       [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
       nil -> {str, nil}
@@ -586,6 +611,16 @@ defmodule Browser.CSS do
         with {inner, rest} <- balanced(drop(s, whole)),
              {:ok, rels} <- relative_list(inner) do
           tokenize(rest, [{:has, rels} | acc])
+        else
+          _ -> :error
+        end
+
+      m = Regex.run(~r/\A:host\(/u, s) ->
+        [whole] = m
+
+        with {inner, rest} <- balanced(drop(s, whole)),
+             {:ok, cmps} <- compound_list(inner) do
+          tokenize(rest, [{:fn, :host, cmps} | acc])
         else
           _ -> :error
         end
@@ -760,7 +795,7 @@ defmodule Browser.CSS do
   end
 
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only open)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only modal open mb-backdrop popover-open host)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -996,7 +1031,9 @@ defmodule Browser.CSS do
   defp match_rel(:subsequent, rest, %{prev: prev}), do: Enum.any?(prev, &match_parts(rest, &1))
 
   defp match_compound(c, ctx) do
-    (c.tag in [nil, :any] or c.tag == ctx.tag) and
+    # the backdrop of a dialog is only styled by its own rules, not by those for the dialog
+    (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
+      (c.tag in [nil, :any] or c.tag == ctx.tag) and
       (c.id == nil or c.id == ctx.id) and
       Enum.all?(c.classes, &(&1 in ctx.classes)) and
       Enum.all?(c.attrs, &attr_match?(&1, ctx.attrs)) and
@@ -1031,7 +1068,9 @@ defmodule Browser.CSS do
     end
   end
 
-  defp pseudo?(:root, ctx), do: ctx.parent == nil and ctx.tag == "html"
+  defp pseudo?(:root, ctx),
+    do: ctx.tag == "html" and (ctx.parent == nil or ctx.parent.tag == "iframe")
+
   defp pseudo?(:first_child, ctx), do: ctx.first?
   defp pseudo?(:last_child, ctx), do: ctx.last?
   defp pseudo?(:only_child, ctx), do: ctx.first? and ctx.last?
@@ -1043,6 +1082,13 @@ defmodule Browser.CSS do
 
   defp pseudo?(link, ctx) when link in [:link, :any_link],
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
+
+  defp pseudo?(:modal, ctx), do: List.keymember?(ctx.attrs, "@modal", 0)
+  defp pseudo?(:popover_open, ctx), do: List.keymember?(ctx.attrs, "@popover", 0)
+  defp pseudo?(:mb_backdrop, ctx), do: List.keymember?(ctx.attrs, "@backdrop", 0)
+
+  defp pseudo?(:open, ctx),
+    do: ctx.tag in ["dialog", "details"] and List.keymember?(ctx.attrs, "open", 0)
 
   defp pseudo?(:disabled, ctx), do: List.keymember?(ctx.attrs, "disabled", 0)
 
@@ -1057,13 +1103,15 @@ defmodule Browser.CSS do
   defp pseudo?(:optional, ctx),
     do: ctx.tag in @form_controls and not List.keymember?(ctx.attrs, "required", 0)
 
-  defp pseudo?(:open, ctx),
-    do: ctx.tag in ~w(details dialog) and List.keymember?(ctx.attrs, "open", 0)
-
   defp pseudo?(:read_write, ctx), do: editable?(ctx)
   defp pseudo?(:read_only, ctx), do: not editable?(ctx)
   defp pseudo?({:anchor, key}, ctx), do: ctx.key == key
   defp pseudo?({:has, rels}, ctx), do: Enum.any?(rels, &has?(&1, ctx))
+  defp pseudo?(:host, ctx), do: shadow_host?(ctx)
+
+  defp pseudo?({:fn, :host, cmps}, ctx),
+    do: shadow_host?(ctx) and Enum.any?(cmps, &match_compound(&1, ctx))
+
   defp pseudo?({:fn, :not, cmps}, ctx), do: not Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:fn, _, cmps}, ctx), do: Enum.any?(cmps, &match_compound(&1, ctx))
   defp pseudo?({:nth, kind, {a, b}}, ctx), do: nth_match?(a, b, position(kind, ctx))
@@ -1138,7 +1186,18 @@ defmodule Browser.CSS do
   0-based position among the elements and `count` how many elements there are in all.
   """
   def context(tag, attrs, kids, parent, prev, i, count, rest) do
+    # the content of a frame is styled by the frame's own sheets (see `Browser.Style.scoped_refs/1`)
+    # and a shadow tree by the sheets in it; a node of the host that a slot shows (marked
+    # `data-b-slotted` with the shadow tree's scope) is still styled by the host's sheets
+    scope =
+      case attr_value(attrs, "data-b-slotted") do
+        nil -> parent && parent.scope_in
+        shadow -> slotted_scope(parent, shadow)
+      end
+
     %{
+      scope: scope,
+      scope_in: attr_value(attrs, "data-b-frame") || scope,
       tag: tag,
       attrs: attrs,
       id: attr_value(attrs, "id"),
@@ -1154,6 +1213,37 @@ defmodule Browser.CSS do
       next: rest,
       key: {parent && parent.key, i}
     }
+  end
+
+  # the scope of the host of the shadow tree `shadow`, which is above `ctx`
+  defp slotted_scope(nil, _shadow), do: nil
+
+  defp slotted_scope(ctx, shadow) do
+    if ctx.scope_in == shadow and ctx.scope != shadow,
+      do: ctx.scope,
+      else: slotted_scope(ctx.parent, shadow)
+  end
+
+  @doc "True for an element that has a shadow root (see `Browser.JS.DOM`)."
+  def shadow_host?(%{attrs: attrs}) do
+    case List.keyfind(attrs, "data-b-frame", 0) do
+      {_, "s" <> _} -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  True for a rule with `:host` in its last compound: it styles the element that has the shadow
+  root, though its sheet is in the shadow tree.
+  """
+  def host_rule?(parts) do
+    {cmp, _} = List.first(parts)
+
+    Enum.any?(cmp.pseudos, fn
+      :host -> true
+      {:fn, :host, _} -> true
+      _ -> false
+    end)
   end
 
   defp attr_value(attrs, name) do

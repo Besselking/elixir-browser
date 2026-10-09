@@ -44,9 +44,13 @@ defmodule Browser.StyleTest do
 
   test "embedded content we can't draw is hidden, so its fallback text doesn't leak" do
     html =
-      "<p>a</p><canvas>no canvas</canvas><video>no video</video><iframe>frame</iframe><i>b</i>"
+      "<p>a</p><video>no video</video><iframe>frame</iframe><i>b</i>"
 
     assert tags(prune(html)) == ["p", "i"]
+  end
+
+  test "a canvas is drawn, and its fallback text is not" do
+    assert tags(prune("<p>a</p><canvas>no canvas</canvas><i>b</i>")) == ["p", "canvas", "i"]
   end
 
   test "svg is drawn, with its shapes" do
@@ -366,6 +370,20 @@ defmodule Browser.StyleTest do
     test "custom properties inside var() with nested fallback" do
       css = "p { color: var(--a, var(--b, red)) }"
       assert comp("<p>a</p>", css, "p")["color"] == {255, 0, 0}
+    end
+
+    test "@property gives a custom property its initial value, the lowest in the cascade" do
+      css = """
+      @property --sx { syntax: "*"; inherits: false; initial-value: 1 }
+      @property --sy { syntax: "*"; inherits: false; initial-value: 1 }
+      @property --pad { syntax: "*"; inherits: true; initial-value: 4px }
+      @layer utilities { .flip { --sx: -100%; scale: var(--sx) var(--sy) } }
+      p { padding-left: var(--pad) }
+      """
+
+      html = ~s|<html><body><p class="flip">a</p></body></html>|
+      assert comp(html, css, "p")["scale"] |> String.split() == ["-100%", "1"]
+      assert comp(html, css, "p")["padding-left"] == 4.0
     end
 
     test "currentcolor and inherit" do

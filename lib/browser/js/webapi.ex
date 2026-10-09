@@ -78,6 +78,8 @@ defmodule Browser.JS.WebAPI do
   @prelude ~S"""
   (function (g) {
     function def(name, value) { if (!(name in g)) g[name] = value; }
+    // the document and location of the page or frame that is running (this code is shared)
+    var curDoc = __cur_doc, curLoc = __cur_loc;
 
     // ── fetch and XMLHttpRequest ─────────────────────────────
     function Headers(init) {
@@ -129,7 +131,7 @@ defmodule Browser.JS.WebAPI do
       var list = [], ctype = enc[1];
       headers.forEach(function (v, k) { if (k === "content-type") ctype = v; else list.push([k, v]); });
       if (enc[0] === null) ctype = null;
-      return __fetch(method, new URL(url, document.baseURI || location.href).href, enc[0], list, ctype, credentials);
+      return __fetch(method, new URL(url, curDoc().baseURI || curLoc().href).href, enc[0], list, ctype, credentials);
     }
 
     function Response(body, init) {
@@ -302,7 +304,11 @@ defmodule Browser.JS.WebAPI do
       return c.signal;
     };
 
-    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = 0; }
+    var domCodes = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5, NoModificationAllowedError: 7,
+      NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10, InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+      NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+      QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25 };
+    function DOMException(message, name) { this.message = message || ""; this.name = name || "Error"; this.code = domCodes[this.name] || 0; }
     DOMException.prototype = Object.create(Error.prototype);
     DOMException.prototype.constructor = DOMException;
 
@@ -332,6 +338,36 @@ defmodule Browser.JS.WebAPI do
     IntersectionObserver.prototype.takeRecords = function () { return []; };
 
     // ── timing, idle, encoding ───────────────────────────────
+    // the Prioritized Task Scheduling API: tasks are timers, background ones a tick later
+    function TaskController(init) {
+      var c = new AbortController();
+      this.signal = c.signal;
+      this.signal.priority = (init && init.priority) || "user-visible";
+      Object.defineProperty(this, "_c", { value: c });
+    }
+    TaskController.prototype.abort = function (reason) { this._c.abort(reason); };
+    TaskController.prototype.setPriority = function (p) { this.signal.priority = p; };
+    def("TaskController", TaskController);
+    def("scheduler", {
+      postTask: function postTask(callback, options) {
+        options = options || {};
+        if (typeof callback !== "function") return Promise.reject(new TypeError("Failed to execute 'postTask' on 'Scheduler': The provided callback is no function."));
+        var signal = options.signal || null;
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) { reject(abortError(signal)); return; }
+          var priority = options.priority || (signal && signal.priority) || "user-visible";
+          var timer = null;
+          function onabort() { clearTimeout(timer); reject(abortError(signal)); }
+          if (signal) signal.addEventListener("abort", onabort);
+          timer = setTimeout(function () {
+            if (signal) signal.removeEventListener("abort", onabort);
+            try { resolve(callback()); } catch (e) { reject(e); }
+          }, (options.delay > 0 ? options.delay : 0) + (priority === "background" ? 1 : 0));
+        });
+      },
+      yield: function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+    });
+    if (typeof navigator === "object" && navigator && !navigator.scheduling) navigator.scheduling = { isInputPending: function () { return false; } };
     def("requestIdleCallback", function (cb) { return setTimeout(function () { cb({ didTimeout: false, timeRemaining: function () { return 10; } }); }, 1); });
     def("cancelIdleCallback", function (id) { clearTimeout(id); });
 
@@ -357,7 +393,35 @@ defmodule Browser.JS.WebAPI do
       return out;
     });
 
-    def("structuredClone", function (v) { return v === undefined ? v : JSON.parse(JSON.stringify(v)); });
+    if (typeof URL === "function") {
+      if (!URL.canParse) URL.canParse = function canParse(u, b) { try { new URL(u, b); return true; } catch (e) { return false; } };
+      if (!URL.parse) URL.parse = function parse(u, b) { try { return new URL(u, b); } catch (e) { return null; } };
+    }
+
+    // indexedDB and its classes are in priv/js/indexeddb.js, which replaces these on first use;
+    // so does structuredClone (it needs the same tagged form)
+    ["indexedDB", "IDBFactory", "IDBDatabase", "IDBObjectStore", "IDBIndex", "IDBCursor", "IDBCursorWithValue", "IDBRecord", "IDBTransaction",
+     "IDBRequest", "IDBOpenDBRequest", "IDBKeyRange", "IDBVersionChangeEvent"].forEach(function (n) {
+      Object.defineProperty(g, n, { configurable: true, enumerable: false,
+        get: function () { __load_idb(); var d = Object.getOwnPropertyDescriptor(g, n); return d && "value" in d ? d.value : undefined; },
+        set: function (v) { Object.defineProperty(g, n, { value: v, writable: true, configurable: true }); } });
+    });
+    // for messages between a page and its workers (Browser.JS.Workers): a value as text and back
+    def("__structuredEncode", function (v) { __load_idb(); return g.__idb_encode(v); });
+    def("__structuredDecode", function (s) { __load_idb(); return g.__idb_decode(s); });
+    // WebSocket is in priv/js/websocket.js, loaded on first use
+    Object.defineProperty(g, "WebSocket", { configurable: true, enumerable: false,
+      get: function () { __load_websocket(); var d = Object.getOwnPropertyDescriptor(g, "WebSocket"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "WebSocket", { value: v, writable: true, configurable: true }); } });
+    // Worker is in priv/js/worker.js, loaded on first use
+    Object.defineProperty(g, "Worker", { configurable: true, enumerable: false,
+      get: function () { __load_workers(); var d = Object.getOwnPropertyDescriptor(g, "Worker"); return d && "value" in d ? d.value : undefined; },
+      set: function (v) { Object.defineProperty(g, "Worker", { value: v, writable: true, configurable: true }); } });
+    def("structuredClone", function structuredClone(v) {
+      if (arguments.length === 0) throw new TypeError("structuredClone requires 1 argument.");
+      __load_idb();
+      return g.__structuredClone(v);
+    });
 
     // ── performance, selection, fonts, misc ──────────────────
     if (typeof performance === "object") {
@@ -394,12 +458,12 @@ defmodule Browser.JS.WebAPI do
       add: function (f) { return fonts; }, "delete": function () { return false; }, clear: function () {}, forEach: function () {},
       addEventListener: function () {}, removeEventListener: function () {} };
     fonts.ready = Promise.resolve(fonts);
-    try { document.fonts = fonts; } catch (e) {}
+    try { Object.defineProperty(Object.getPrototypeOf(document), "fonts", { get: function () { return fonts; }, configurable: true }); } catch (e) {}
     function FontFace(family, source, desc) { this.family = family; this.status = "loaded"; this.loaded = Promise.resolve(this); }
     FontFace.prototype.load = function () { return Promise.resolve(this); };
     def("FontFace", FontFace);
 
-    function Image(w, h) { var i = document.createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
+    function Image(w, h) { var i = curDoc().createElement("img"); if (w !== undefined) i.setAttribute("width", w); if (h !== undefined) i.setAttribute("height", h); return i; }
     def("Image", Image);
 
     if (typeof navigator === "object") {
@@ -507,20 +571,54 @@ defmodule Browser.JS.WebAPI do
     getter(EP, "draggable", function () { return false; });
     getter(EP, "spellcheck", function () { return true; });
     getter(EP, "accessKey", function () { return ""; });
-    getter(EP, "inert", function () { return false; });
+    if (!("inert" in EP)) Object.defineProperty(EP, "inert", {
+      get: function () { return this.hasAttribute("inert"); },
+      set: function (v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); },
+      configurable: true
+    });
     getter(EP, "slot", function () { return ""; });
     getter(EP, "assignedSlot", function () { return null; });
-    // a shadow root here is a fragment that is kept, but not drawn
+    // a shadow root here is a fragment; the page shows it in place of the host's children (see DOM.export)
     addTo(EP, "attachShadow", function (init) {
-      var root = document.createDocumentFragment();
+      var root = this.ownerDocument.createDocumentFragment();
       root.host = this; root.mode = (init && init.mode) || "open";
       this.__shadow = root;
+      __set_shadow(this, root);
       return root;
     });
+    var CLP = Object.getPrototypeOf(document.documentElement.classList);
+    function tokens(l) { var a = []; for (var i = 0; i < l.length; i++) a.push(l.item(i)); return a; }
+    addTo(CLP, Symbol.iterator, function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "values", function () { return tokens(this)[Symbol.iterator](); });
+    addTo(CLP, "keys", function () { return tokens(this).keys(); });
+    addTo(CLP, "entries", function () { return tokens(this).entries(); });
+    // the rest of the 2D context: drawing other than rectangles is not drawn, but calling it works
+    try {
+      var CP = Object.getPrototypeOf(document.createElement("canvas").getContext("2d"));
+      ["save", "restore", "scale", "rotate", "translate", "transform", "setTransform", "resetTransform", "beginPath", "closePath",
+       "moveTo", "lineTo", "bezierCurveTo", "quadraticCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect", "fill", "stroke",
+       "clip", "fillText", "strokeText", "drawImage", "putImageData", "setLineDash", "drawFocusIfNeeded"].forEach(function (n) { addTo(CP, n, function () {}); });
+      addTo(CP, "measureText", function (t) { var w = String(t).length * 6; return { width: w, actualBoundingBoxLeft: 0, actualBoundingBoxRight: w, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 3 }; });
+      ["createLinearGradient", "createRadialGradient", "createConicGradient"].forEach(function (n) { addTo(CP, n, function () { return { addColorStop: function () {} }; }); });
+      addTo(CP, "createPattern", function () { return { setTransform: function () {} }; });
+      function imageData(w, h) { return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }; }
+      addTo(CP, "getImageData", function (x, y, w, h) { return imageData(w, h); });
+      addTo(CP, "createImageData", function (w, h) { return typeof w === "object" ? imageData(w.width, w.height) : imageData(w, h); });
+      addTo(CP, "getLineDash", function () { return []; });
+      addTo(CP, "isPointInPath", function () { return false; });
+      addTo(CP, "isPointInStroke", function () { return false; });
+      addTo(CP, "getTransform", function () { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; });
+    } catch (e) {}
+    var SP = Object.getPrototypeOf(document.documentElement.style);
+    addTo(SP, Symbol.iterator, function () { var a = []; for (var i = 0; i < this.length; i++) a.push(this.item(i)); return a[Symbol.iterator](); });
+    var UP = Object.getPrototypeOf(new URLSearchParams());
+    if (UP.entries) addTo(UP, Symbol.iterator, function () { return this.entries()[Symbol.iterator](); });
+    var FP = Object.getPrototypeOf(document.createDocumentFragment());
+    if (!("getElementById" in FP)) addTo(FP, "getElementById", function (id) { return this.querySelector('[id="' + String(id).replace(/(["\\])/g, "\\$1") + '"]'); });
     getter(EP, "shadowRoot", function () { return this.__shadow && this.__shadow.mode === "open" ? this.__shadow : null; });
 
     var DP = Object.getPrototypeOf(document);
-    addTo(DP, "createElementNS", function (ns, tag) { return document.createElement(tag); });
+    addTo(DP, "createElementNS", function (ns, tag) { return this.createElement(tag); });
     addTo(DP, "importNode", function (n, deep) { return n.cloneNode(deep); });
     addTo(DP, "adoptNode", function (n) { return n; });
     addTo(DP, "elementFromPoint", function () { return null; });
@@ -536,49 +634,253 @@ defmodule Browser.JS.WebAPI do
     function Range() { editing.load(); return new g.Range(); }
     function Selection() {}
     def("Range", Range); def("Selection", Selection);
-    function defDoc(name, fn) { if (!(name in document)) Object.defineProperty(document, name, { get: fn, configurable: true }); }
-    defDoc("scrollingElement", function () { return document.documentElement; });
+    function defDoc(name, fn) { if (!(name in Object.getPrototypeOf(document))) Object.defineProperty(Object.getPrototypeOf(document), name, { get: fn, configurable: true }); }
+    defDoc("scrollingElement", function () { return this.documentElement; });
     defDoc("styleSheets", function () { return []; });
-    defDoc("adoptedStyleSheets", function () { return []; });
-    defDoc("forms", function () { return document.querySelectorAll("form"); });
-    defDoc("images", function () { return document.querySelectorAll("img"); });
-    defDoc("links", function () { return document.querySelectorAll("a[href], area[href]"); });
-    defDoc("scripts", function () { return document.querySelectorAll("script"); });
-    defDoc("all", function () { return document.querySelectorAll("*"); });
+    defDoc("forms", function () { return this.querySelectorAll("form"); });
+    defDoc("images", function () { return this.querySelectorAll("img"); });
+    defDoc("links", function () { return this.querySelectorAll("a[href], area[href]"); });
+    defDoc("scripts", function () { return this.querySelectorAll("script"); });
+    defDoc("all", function () { return this.querySelectorAll("*"); });
     defDoc("dir", function () { return "ltr"; });
     defDoc("lastModified", function () { return new Date().toString(); });
-    defDoc("domain", function () { return location.hostname; });
+    defDoc("domain", function () { return curLoc().hostname; });
     defDoc("implementation", function () {
+      var doc = this;
       return {
         hasFeature: function () { return true; },
         createHTMLDocument: function (title) {
-          var html = document.createElement("html"), head = document.createElement("head"), body = document.createElement("body");
+          var html = doc.createElement("html"), head = doc.createElement("head"), body = doc.createElement("body");
           html.appendChild(head); html.appendChild(body);
           return { documentElement: html, head: head, body: body, title: title || "",
-            createElement: function (t) { return document.createElement(t); }, createTextNode: function (t) { return document.createTextNode(t); },
-            createDocumentFragment: function () { return document.createDocumentFragment(); },
+            createElement: function (t) { return doc.createElement(t); }, createTextNode: function (t) { return doc.createTextNode(t); },
+            createDocumentFragment: function () { return doc.createDocumentFragment(); },
             querySelector: function (s) { return html.querySelector(s); }, querySelectorAll: function (s) { return html.querySelectorAll(s); },
             getElementById: function (id) { return html.querySelector("#" + id); }, getElementsByTagName: function (t) { return html.getElementsByTagName(t); },
-            implementation: document.implementation };
+            implementation: doc.implementation };
         }
       };
     });
 
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
-    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = location.origin; e.source = g; g.dispatchEvent(e); }, 0); });
-    // <dialog>: shown while it has the open attribute (a modal one is not modal here)
+    def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
+    // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {
       var DP = HTMLDialogElement.prototype;
-      DP.show = function () { this.setAttribute("open", ""); };
-      DP.showModal = DP.show;
-      DP.close = function (value) {
-        if (!this.hasAttribute("open")) return;
-        if (value !== undefined) this.returnValue = String(value);
-        this.removeAttribute("open");
-        this.dispatchEvent(new Event("close"));
+      // the open modal dialogs, oldest first (one whose open attribute was removed is not one)
+      var modals = [];
+      function openModals() {
+        modals = modals.filter(function (d) { return d.matches(":modal"); });
+        return modals;
+      }
+      function fireLater(el, type) {
+        setTimeout(function () { el.dispatchEvent(new Event(type, { bubbles: false, cancelable: false })); }, 0);
+      }
+      function focusable(el) {
+        if (el.hasAttribute("disabled") || el.hasAttribute("inert") || el.hidden) return false;
+        var t = el.tagName.toLowerCase();
+        if (t === "input") return el.getAttribute("type") !== "hidden";
+        if (t === "select" || t === "textarea" || t === "button") return true;
+        if (t === "a" || t === "area") return el.hasAttribute("href");
+        var ce = el.getAttribute("contenteditable");
+        if (ce !== null && ce !== "false") return true;
+        return el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex")) >= 0;
+      }
+      // the dialog focusing steps: the first element with autofocus, else the first one that can
+      // take focus (a link is not given focus by this browser, so it is only a fallback)
+      function focusInto(dlg, modal) {
+        if (dlg.closest("[inert]")) {
+          var active = document.activeElement;
+          if (modal && active && active !== document.body && active.blur) active.blur();
+          return;
+        }
+        var all = dlg.querySelectorAll("*"), first = null, i;
+        for (i = 0; i < all.length; i++) {
+          if (all[i].hasAttribute("autofocus") && focusable(all[i])) { all[i].focus(); return; }
+        }
+        for (i = 0; i < all.length; i++) {
+          var t = all[i].tagName.toLowerCase();
+          if (focusable(all[i]) && t !== "a" && t !== "area") { first = all[i]; break; }
+        }
+        (first || dlg).focus();
+      }
+      function closeDialog(dlg, value) {
+        if (!dlg.hasAttribute("open")) return;
+        if (value !== undefined) returnValues.set(dlg, String(value));
+        dlg.__setModal(false);
+        dlg.removeAttribute("open");
+        fireLater(dlg, "close");
+      }
+      // the value lives in a slot of its own, so a property a script sets on the element is not hit
+      var returnValues = new WeakMap();
+      Object.defineProperty(DP, "returnValue", {
+        get: function () { return returnValues.has(this) ? returnValues.get(this) : ""; },
+        set: function (v) { returnValues.set(this, String(v)); },
+        configurable: true
+      });
+      DP.show = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) throw new DOMException("The dialog is already open as a modal dialog.", "InvalidStateError");
+          return;
+        }
+        this.setAttribute("open", "");
+        if (this.isConnected) focusInto(this, false);
+      };
+      DP.showModal = function () {
+        if (this.hasAttribute("open")) {
+          if (this.matches(":modal")) return;
+          throw new DOMException("The dialog is already open as a non-modal dialog.", "InvalidStateError");
+        }
+        if (!this.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        this.setAttribute("open", "");
+        modals.push(this);
+        this.__setModal(true);
+        focusInto(this, true);
+      };
+      DP.close = function (value) { closeDialog(this, value); };
+      var requesting = new WeakSet();
+      DP.requestClose = function (value) {
+        if (!this.hasAttribute("open") || !this.isConnected || requesting.has(this)) return;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        var ok;
+        requesting.add(this);
+        try { ok = this.dispatchEvent(e); } finally { requesting.delete(this); }
+        if (ok) closeDialog(this, value);
+      };
+      Object.defineProperty(DP, "closedBy", {
+        get: function () {
+          var v = (this.getAttribute("closedby") || "").toLowerCase();
+          return v === "any" || v === "closerequest" || v === "none" ? v : "auto";
+        },
+        set: function (v) { this.setAttribute("closedby", String(v)); }, configurable: true
+      });
+      // what the window does for Escape: ask the topmost modal dialog to close
+      g.__dialogEscape = function () {
+        if (g.__popoverEscape && g.__popoverEscape()) return true;
+        var open = openModals(), dlg = open[open.length - 1];
+        if (!dlg) return false;
+        var by = dlg.closedBy;
+        if (by === "none") return true;
+        var e = new Event("cancel", { bubbles: false, cancelable: true });
+        if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        return true;
+      };
+      // a click on the backdrop: closes a dialog that says closedby="any"
+      g.__dialogBackdrop = function (dlg) {
+        if (dlg && dlg.closedBy === "any" && dlg.hasAttribute("open")) {
+          var e = new Event("cancel", { bubbles: false, cancelable: true });
+          if (dlg.dispatchEvent(e)) closeDialog(dlg);
+        }
+      };
+      // <form method="dialog">: the submitter's value closes the dialog
+      g.__dialogSubmit = function (form, submitter) {
+        var dlg = form.closest("dialog");
+        if (!dlg) return;
+        var value = submitter && submitter.hasAttribute("value") ? submitter.getAttribute("value") : undefined;
+        closeDialog(dlg, value);
       };
     }
+    // the Popover API: a `popover` element in the top layer, hidden again by Escape or a click elsewhere
+    (function () {
+      var stack = [];
+      function type(el) {
+        var v = el.getAttribute("popover");
+        if (v === null) return null;
+        v = v.toLowerCase();
+        return v === "" || v === "auto" ? "auto" : v === "hint" ? "hint" : "manual";
+      }
+      function shown() {
+        stack = stack.filter(function (p) { return p.matches(":popover-open"); });
+        return stack;
+      }
+      function toggleEvent(el, name, oldState, newState, cancelable) {
+        var e = new Event(name, { bubbles: false, cancelable: cancelable });
+        e.oldState = oldState; e.newState = newState;
+        return el.dispatchEvent(e);
+      }
+      function later(el, oldState, newState) {
+        setTimeout(function () { toggleEvent(el, "toggle", oldState, newState, false); }, 0);
+      }
+      // false: nothing to do; throws when the element cannot be one
+      function valid(el) {
+        if (type(el) === null) throw new DOMException("The element has no popover attribute.", "NotSupportedError");
+        if (!el.isConnected) throw new DOMException("The element is not connected.", "InvalidStateError");
+        if (el.matches("dialog:modal")) throw new DOMException("The element is a modal dialog.", "InvalidStateError");
+      }
+      function hide(el, fireEvents) {
+        if (!el.matches(":popover-open")) return;
+        // what was opened above it goes first
+        var i = shown().indexOf(el);
+        if (i >= 0) stack.slice(i + 1).reverse().forEach(function (p) { hide(p, true); });
+        if (fireEvents) toggleEvent(el, "beforetoggle", "open", "closed", false);
+        el.__setPopover(false);
+        stack = stack.filter(function (p) { return p !== el; });
+        if (fireEvents) later(el, "open", "closed");
+      }
+      function show(el) {
+        valid(el);
+        if (el.matches(":popover-open") || el.matches("dialog[open]")) return;
+        if (!toggleEvent(el, "beforetoggle", "closed", "open", true)) return;
+        if (el.matches(":popover-open") || !el.isConnected) return;
+        if (type(el) === "auto") {
+          shown().slice().reverse().forEach(function (p) {
+            if (type(p) === "auto" && !p.contains(el)) hide(p, true);
+          });
+        }
+        el.__setPopover(true);
+        // manual popovers are not part of the stack that light dismiss and Escape work on
+        if (type(el) !== "manual") stack.push(el);
+        var all = el.querySelectorAll("[autofocus]");
+        for (var i = 0; i < all.length; i++) { all[i].focus(); break; }
+        later(el, "closed", "open");
+      }
+      var P = Element.prototype;
+      P.showPopover = function () { show(this); };
+      P.hidePopover = function () { valid(this); hide(this, true); };
+      P.togglePopover = function (force) {
+        valid(this);
+        var open = this.matches(":popover-open");
+        if (open && force !== true) hide(this, true);
+        else if (!open && force !== false) show(this);
+        return this.matches(":popover-open");
+      };
+      Object.defineProperty(P, "popover", {
+        get: function () { var t = type(this); return t; },
+        set: function (v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", String(v)); },
+        configurable: true
+      });
+      // a button with popovertarget
+      g.__popoverInvoke = function (button) {
+        var target = document.getElementById(button.getAttribute("popovertarget"));
+        if (!target || type(target) === null) return;
+        var action = (button.getAttribute("popovertargetaction") || "toggle").toLowerCase();
+        var open = target.matches(":popover-open");
+        if (open && action !== "show") hide(target, true);
+        else if (!open && action !== "hide") show(target);
+      };
+      // a click nothing stopped: the button's target, and light dismiss of the other popovers
+      g.__popoverClick = function (target) {
+        var button = target && target.closest ? target.closest("[popovertarget]") : null;
+        var invoked = button ? document.getElementById(button.getAttribute("popovertarget")) : null;
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          var p = open[i];
+          if (type(p) !== "auto") continue;
+          if (p === invoked || (target && p.contains(target))) break;
+          hide(p, true);
+        }
+        if (button && !button.hasAttribute("disabled")) g.__popoverInvoke(button);
+      };
+      g.__popoverEscape = function () {
+        var open = shown();
+        for (var i = open.length - 1; i >= 0; i--) {
+          if (type(open[i]) !== "manual") { hide(open[i], true); return true; }
+        }
+        return false;
+      };
+    })();
     def("open", function () { return null; });
     def("close", function () {});
     def("stop", function () {});
@@ -595,21 +897,246 @@ defmodule Browser.JS.WebAPI do
     def("unescape", function (s) { return decodeURIComponent(s); });
 
     function evClass(name, fields) {
-      def(name, function (type, init) {
+      var F = function (type, init) {
         var e = new Event(type, init); init = init || {};
+        Object.setPrototypeOf(e, F.prototype);
         fields.forEach(function (f) { e[f] = init[f] === undefined ? null : init[f]; });
         return e;
-      });
+      };
+      F.prototype = Object.create(Event.prototype);
+      F.prototype.constructor = F;
+      def(name, F);
     }
     evClass("MessageEvent", ["data", "origin", "source", "lastEventId", "ports"]);
     evClass("ErrorEvent", ["message", "filename", "lineno", "colno", "error"]);
+    evClass("CloseEvent", ["wasClean", "code", "reason"]);
     evClass("PromiseRejectionEvent", ["promise", "reason"]);
     evClass("PopStateEvent", ["state"]);
     evClass("HashChangeEvent", ["oldURL", "newURL"]);
     evClass("PointerEvent", ["pointerId", "pointerType", "clientX", "clientY", "button", "buttons"]);
     evClass("TouchEvent", ["touches", "targetTouches", "changedTouches"]);
+    evClass("UIEvent", ["view", "detail"]);
+    evClass("WheelEvent", ["deltaX", "deltaY", "deltaZ", "deltaMode", "clientX", "clientY", "screenX", "screenY", "button", "buttons", "ctrlKey", "shiftKey", "altKey", "metaKey"]);
+    evClass("DragEvent", ["dataTransfer", "clientX", "clientY"]);
+    evClass("CompositionEvent", ["data"]);
+    evClass("ClipboardEvent", ["clipboardData"]);
+    evClass("ProgressEvent", ["lengthComputable", "loaded", "total"]);
+    evClass("TransitionEvent", ["propertyName", "elapsedTime", "pseudoElement"]);
+    evClass("AnimationEvent", ["animationName", "elapsedTime", "pseudoElement"]);
+    evClass("StorageEvent", ["key", "oldValue", "newValue", "url", "storageArea"]);
 
-    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleSheet", "CSSStyleDeclaration", "Window"].forEach(function (n) { def(n, function () {}); });
+    // ── MessageChannel: two ports; a message arrives in a task of its own ──
+    function MessagePort() { this._peer = null; this._queue = []; this._started = false; this._closed = false; this._l = []; this._onmessage = null; }
+    MessagePort.prototype.addEventListener = function (type, fn) { if (type === "message" && fn) this._l.push(fn); };
+    MessagePort.prototype.removeEventListener = function (type, fn) { var i = this._l.indexOf(fn); if (i >= 0) this._l.splice(i, 1); };
+    MessagePort.prototype.dispatchEvent = function (ev) {
+      if (typeof this._onmessage === "function") this._onmessage.call(this, ev);
+      this._l.slice().forEach(function (f) { typeof f === "function" ? f.call(this, ev) : f.handleEvent(ev); }, this);
+      return true;
+    };
+    Object.defineProperty(MessagePort.prototype, "onmessage", {
+      get: function () { return this._onmessage; },
+      set: function (f) { this._onmessage = f; this.start(); },
+      configurable: true
+    });
+    MessagePort.prototype.start = function () {
+      var self = this;
+      if (self._started) return;
+      self._started = true;
+      if (self._queue.length) setTimeout(function () { self._flush(); }, 0);
+    };
+    MessagePort.prototype._flush = function () {
+      while (this._queue.length && this._started && !this._closed) {
+        var ev = new MessageEvent("message", { data: this._queue.shift(), origin: "", source: null, ports: [] });
+        this.dispatchEvent(ev);
+      }
+    };
+    MessagePort.prototype.postMessage = function (data) {
+      var peer = this._peer;
+      if (this._closed || !peer || peer._closed) return;
+      try { data = structuredClone(data); } catch (e) {}
+      peer._queue.push(data);
+      setTimeout(function () { peer._flush(); }, 0);
+    };
+    MessagePort.prototype.close = function () { this._closed = true; };
+    function MessageChannel() {
+      this.port1 = new MessagePort(); this.port2 = new MessagePort();
+      this.port1._peer = this.port2; this.port2._peer = this.port1;
+    }
+    g.MessageChannel = MessageChannel; g.MessagePort = MessagePort;
+
+    // ── TreeWalker and NodeIterator, over the document order ──
+    var NodeFilter = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+      SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 1, SHOW_ATTRIBUTE: 2, SHOW_TEXT: 4, SHOW_CDATA_SECTION: 8, SHOW_PROCESSING_INSTRUCTION: 64,
+      SHOW_COMMENT: 128, SHOW_DOCUMENT: 256, SHOW_DOCUMENT_TYPE: 512, SHOW_DOCUMENT_FRAGMENT: 1024 };
+    def("NodeFilter", NodeFilter);
+    function accept(w, node) {
+      if (!(w._what & (1 << (node.nodeType - 1)))) return 3;
+      var f = w.filter;
+      if (!f) return 1;
+      return typeof f === "function" ? f(node) : f.acceptNode(node);
+    }
+    function nextInOrder(node, root, skipKids) {
+      if (!skipKids && node.firstChild) return node.firstChild;
+      while (node && node !== root) {
+        if (node.nextSibling) return node.nextSibling;
+        node = node.parentNode;
+      }
+      return null;
+    }
+    function TreeWalker(root, what, filter) {
+      this.root = root; this._what = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null; this.currentNode = root;
+    }
+    Object.defineProperty(TreeWalker.prototype, "whatToShow", { get: function () { return this._what; } });
+    TreeWalker.prototype.nextNode = function () {
+      var n = this.currentNode, skip = false;
+      for (;;) {
+        n = nextInOrder(n, this.root, skip);
+        if (!n) return null;
+        var r = accept(this, n);
+        if (r === 1) { this.currentNode = n; return n; }
+        skip = r === 2;
+      }
+    };
+    TreeWalker.prototype.previousNode = function () {
+      var n = this.currentNode;
+      while (n && n !== this.root) {
+        var s = n.previousSibling;
+        if (s) {
+          n = s;
+          while (accept(this, n) !== 2 && n.lastChild) n = n.lastChild;
+        } else n = n.parentNode;
+        if (n && n !== this.root && accept(this, n) === 1) { this.currentNode = n; return n; }
+        if (n === this.root) return null;
+      }
+      return null;
+    };
+    TreeWalker.prototype.parentNode = function () {
+      var n = this.currentNode;
+      while (n && n !== this.root) {
+        n = n.parentNode;
+        if (n && accept(this, n) === 1) { this.currentNode = n; return n; }
+      }
+      return null;
+    };
+    function walkChild(w, first) {
+      var n = first ? w.currentNode.firstChild : w.currentNode.lastChild;
+      while (n) {
+        var r = accept(w, n);
+        if (r === 1) { w.currentNode = n; return n; }
+        var inner = r === 3 ? (first ? n.firstChild : n.lastChild) : null;
+        if (inner) { n = inner; continue; }
+        while (n) {
+          var sib = first ? n.nextSibling : n.previousSibling;
+          if (sib) { n = sib; break; }
+          n = n.parentNode;
+          if (!n || n === w.root || n === w.currentNode) return null;
+        }
+      }
+      return null;
+    }
+    TreeWalker.prototype.firstChild = function () { return walkChild(this, true); };
+    TreeWalker.prototype.lastChild = function () { return walkChild(this, false); };
+    function walkSibling(w, next) {
+      var n = w.currentNode;
+      if (n === w.root) return null;
+      for (;;) {
+        var s = next ? n.nextSibling : n.previousSibling;
+        while (s) {
+          var r = accept(w, s);
+          if (r === 1) { w.currentNode = s; return s; }
+          var inner = r === 3 ? (next ? s.firstChild : s.lastChild) : null;
+          s = inner || (next ? s.nextSibling : s.previousSibling);
+        }
+        n = n.parentNode;
+        if (!n || n === w.root || accept(w, n) === 1) return null;
+      }
+    }
+    TreeWalker.prototype.nextSibling = function () { return walkSibling(this, true); };
+    TreeWalker.prototype.previousSibling = function () { return walkSibling(this, false); };
+    function NodeIterator(root, what, filter) {
+      this.root = root; this._what = what === undefined ? 0xFFFFFFFF : what >>> 0; this.filter = filter || null;
+      this.referenceNode = root; this.pointerBeforeReferenceNode = true;
+    }
+    Object.defineProperty(NodeIterator.prototype, "whatToShow", { get: function () { return this._what; } });
+    NodeIterator.prototype.nextNode = function () {
+      var n = this.referenceNode, before = this.pointerBeforeReferenceNode;
+      for (;;) {
+        if (before) before = false; else { n = nextInOrder(n, this.root, false); if (!n) return null; }
+        if (accept(this, n) === 1) { this.referenceNode = n; this.pointerBeforeReferenceNode = false; return n; }
+      }
+    };
+    NodeIterator.prototype.previousNode = function () {
+      var n = this.referenceNode, before = this.pointerBeforeReferenceNode;
+      for (;;) {
+        if (!before) before = true;
+        else {
+          if (n === this.root) return null;
+          var s = n.previousSibling;
+          if (s) { n = s; while (n.lastChild) n = n.lastChild; } else n = n.parentNode;
+          if (!n) return null;
+        }
+        if (accept(this, n) === 1) { this.referenceNode = n; this.pointerBeforeReferenceNode = true; return n; }
+      }
+    };
+    NodeIterator.prototype.detach = function () {};
+    def("TreeWalker", TreeWalker); def("NodeIterator", NodeIterator);
+    addTo(Object.getPrototypeOf(document), "createTreeWalker", function (root, what, filter) { return new TreeWalker(root, what, filter); });
+    addTo(Object.getPrototypeOf(document), "createNodeIterator", function (root, what, filter) { return new NodeIterator(root, what, filter); });
+
+    // ── constructable style sheets (kept as text; adopting one does not restyle) ──
+    function CSSStyleSheet(opts) { this.cssRules = []; this.disabled = false; this.media = opts && opts.media || ""; this.ownerNode = null; }
+    // a shadow root that adopts sheets shows them: the page is told their text whenever they change
+    function sheetText(sh) { return sh.disabled ? "" : sh.cssRules.map(function (r) { return r.cssText; }).join("\n"); }
+    function syncAdopted(root) { try { __set_adopted(root, (root.__adopted || []).map(sheetText)); } catch (e) {} }
+    function changed(sh) { if (sh.__owners) sh.__owners.forEach(syncAdopted); }
+    CSSStyleSheet.prototype.replaceSync = function (text) { this.cssRules = parseRules(String(text)); changed(this); };
+    CSSStyleSheet.prototype.replace = function (text) { this.replaceSync(text); return Promise.resolve(this); };
+    CSSStyleSheet.prototype.insertRule = function (rule, index) {
+      var rules = parseRules(String(rule));
+      index = index === undefined ? 0 : index;
+      this.cssRules.splice(index, 0, rules[0] || { cssText: String(rule) });
+      changed(this);
+      return index;
+    };
+    CSSStyleSheet.prototype.deleteRule = function (index) { this.cssRules.splice(index, 1); changed(this); };
+    CSSStyleSheet.prototype.addRule = function (sel, body, index) { return this.insertRule(sel + " {" + body + "}", index === undefined ? this.cssRules.length : index); };
+    CSSStyleSheet.prototype.removeRule = CSSStyleSheet.prototype.deleteRule;
+    Object.defineProperty(CSSStyleSheet.prototype, "rules", { get: function () { return this.cssRules; } });
+    function parseRules(text) {
+      var out = [], depth = 0, start = 0, i;
+      text = text.replace(/\/\*[\s\S]*?\*\//g, "");
+      for (i = 0; i < text.length; i++) {
+        var c = text[i];
+        if (c === "{") depth++;
+        else if (c === "}") { depth--; if (depth === 0) { out.push(makeRule(text.slice(start, i + 1).trim())); start = i + 1; } }
+        else if (c === ";" && depth === 0) { var t = text.slice(start, i + 1).trim(); if (t.length > 1) out.push(makeRule(t)); start = i + 1; }
+      }
+      return out;
+    }
+    function makeRule(css) { var b = css.indexOf("{"); return { cssText: css, selectorText: b > 0 ? css.slice(0, b).trim() : "" }; }
+    g.CSSStyleSheet = CSSStyleSheet;
+    var adopted = [];
+    Object.defineProperty(document, "adoptedStyleSheets", { get: function () { return adopted; }, set: function (v) { adopted = v; }, configurable: true });
+    Object.defineProperty(Object.getPrototypeOf(document.createDocumentFragment()), "adoptedStyleSheets", {
+      get: function () { return this.__adopted || (this.__adopted = []); },
+      set: function (v) {
+        var list = Array.prototype.slice.call(v || []);
+        this.__adopted = list;
+        var me = this;
+        list.forEach(function (sh) { if (sh && sh.cssRules) { var o = sh.__owners || (sh.__owners = []); if (o.indexOf(me) < 0) o.push(me); } });
+        syncAdopted(this);
+      },
+      configurable: true
+    });
+
+    // V8's stack trace API, which libraries call when they define an error class
+    if (typeof Error.captureStackTrace !== "function") {
+      Error.captureStackTrace = function (obj) { if (obj && typeof obj === "object" && !("stack" in obj)) obj.stack = String(obj.name || "Error") + (obj.message ? ": " + obj.message : ""); };
+    }
+    if (Error.stackTraceLimit === undefined) Error.stackTraceLimit = 10;
+
+    ["NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleDeclaration", "Window"].forEach(function (n) { def(n, function () {}); });
 
     // streams: enough of the standard for frameworks that read a body or feed data through one
     function ReadableStream(source, strategy) {
@@ -739,6 +1266,11 @@ defmodule Browser.JS.WebAPI do
     FileReader.prototype.readAsDataURL = function (b) { var self = this; setTimeout(function () { self.result = "data:" + (b.type || "application/octet-stream") + ";base64," + btoa(b._text); self.readyState = 2; if (self.onload) self.onload({ target: self }); if (self.onloadend) self.onloadend({ target: self }); }, 0); };
     FileReader.prototype.addEventListener = function (t, f) { this["on" + t] = f; };
     def("Blob", Blob); def("File", File); def("FileReader", FileReader);
+    var blobUrls = {}, blobSeq = 0;
+    URL.createObjectURL = function (b) { var u = "blob:" + curLoc().origin + "/" + (++blobSeq).toString(16) + "-0000"; blobUrls[u] = b; return u; };
+    URL.revokeObjectURL = function (u) { delete blobUrls[u]; };
+    // the text of a blob a worker is started from
+    Object.defineProperty(URL, "__blobText", { value: function (u) { var b = blobUrls[u]; return b === undefined ? undefined : b._text; }, configurable: true });
 
     function FormData(form) {
       this._e = [];
@@ -763,10 +1295,10 @@ defmodule Browser.JS.WebAPI do
     FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
     def("FormData", FormData);
 
-    def("DOMParser", function () { this.parseFromString = function (html) { var d = document.implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
+    def("DOMParser", function () { this.parseFromString = function (html) { var d = curDoc().implementation.createHTMLDocument(""); d.body.innerHTML = html; return d; }; });
     def("XMLSerializer", function () { this.serializeToString = function (n) { return n.outerHTML !== undefined ? n.outerHTML : String(n); }; });
-    def("Option", function (text, value) { var o = document.createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
-    def("Audio", function (src) { var a = document.createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
+    def("Option", function (text, value) { var o = curDoc().createElement("option"); if (text !== undefined) o.textContent = text; if (value !== undefined) o.value = value; return o; });
+    def("Audio", function (src) { var a = curDoc().createElement("audio"); if (src) a.src = src; a.play = function () { return Promise.resolve(); }; a.pause = function () {}; return a; });
 
     def("Headers", Headers); def("Response", Response); def("Request", Request); def("fetch", fetchImpl);
     def("XMLHttpRequest", XMLHttpRequest);

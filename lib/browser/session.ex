@@ -108,6 +108,10 @@ defmodule Browser.Session do
       # form interaction: the focused control, its caret (graphemes), blink state, and
       # the control whose option menu is open
       focus: nil,
+      # where the focus was when each open modal dialog opened (control numbers, newest first),
+      # and the control a script focused that the page does not have yet (`:blur`: none)
+      modal_return: [],
+      pending_focus: nil,
       caret: 0,
       caret_on: true,
       blink: nil,
@@ -142,6 +146,8 @@ defmodule Browser.Session do
       tab_drag: nil,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
       closed: [],
+      # the developer console: `%{win, pid, seq, hist, hpos}` once opened (see `open_console/1`)
+      console: nil,
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
       # the host that has focus, the selection the page reported in it, whether the mouse is
       # dragging one out, and the column the caret keeps going up and down
@@ -377,6 +383,21 @@ defmodule Browser.Session do
     System.halt(0)
     {:noreply, state}
   end
+
+  # Develop > Developer Console
+  def handle_info(wx(id: 5200, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, open_console(state)}
+
+  # the console window: its clear button, its input line and the keys of the input line
+  def handle_info(wx(id: 5210, event: wxCommand(type: :command_button_clicked)), state),
+    do: {:noreply, clear_console(state)}
+
+  def handle_info(wx(id: 5211, event: wxCommand(type: :command_text_enter)), state),
+    do: {:noreply, console_eval(state)}
+
+  def handle_info({:console_key, key}, state), do: {:noreply, console_history(state, key)}
+
+  def handle_info(:console_tick, state), do: {:noreply, console_tick(state)}
 
   def handle_info(
         wx(obj: obj, event: wxCommand(type: :command_text_enter, cmdString: str)),
@@ -769,17 +790,20 @@ defmodule Browser.Session do
         old_nids = Page.cid_nids(state.page)
         new_cids = page |> Page.cid_nids() |> Map.new(fn {cid, nid} -> {nid, cid} end)
         focus = with nid when nid != nil <- old_nids[state.focus], do: new_cids[nid]
+        pending = state.pending_focus
 
         carried =
           for {nid, entry} <- edits, new_cid = new_cids[nid], into: %{}, do: {new_cid, entry}
 
         page = if carried == %{}, do: page, else: Page.render(page, carried)
         state = %{state | page: page, nodes: page.nodes, focus: focus, controls: %{}}
+        state = settle_focus(state, pending, new_cids)
         state = cancel_layout_job(state)
 
         # what the user typed meanwhile is not in what the job laid out: lay out again
+        # (the job does not draw the focus ring and caret: a focused control needs its own)
         state =
-          if carried == %{},
+          if carried == %{} and state.focus == nil,
             do: apply_layout(state, items, height, width, :full),
             else: start_layout_job(state)
 
@@ -1446,7 +1470,7 @@ defmodule Browser.Session do
                         true -> false
                       end
 
-                    {:noreply, state |> js_pointer(x, y, ["mousedown"]) |> follow(href, how)}
+                    {:noreply, click_link(state, x, y, href, how)}
                 end
 
               host ->
@@ -1458,6 +1482,26 @@ defmodule Browser.Session do
             {:noreply, click_control(state, cid, x, py, count, shift)}
         end
     end
+  end
+
+  # The press, release and click of a link are heard by the page's scripts first; one that cancels
+  # the click keeps the link from being followed. A link in a frame is followed by that frame.
+  defp click_link(state, x, y, href, how) do
+    state = js_pointer(state, x, y, ["mousedown", "mouseup"])
+    {state, prevented} = js_pointer_event(state, x, y, "click")
+
+    cond do
+      prevented -> state
+      how == false and state.js != nil -> follow_in_frame(state, x, y, href)
+      true -> follow(state, href, how)
+    end
+  end
+
+  defp follow_in_frame(state, x, y, href) do
+    nid = UI.nid_at(state.items, x, y, state.scroll)
+    reply = Browser.JS.Runtime.follow_link(state.js, nid, href)
+    state = apply_js(state, reply)
+    if reply.frame, do: state, else: follow(state, href, false)
   end
 
   defp end_drag(%{sbar: nil} = state), do: %{state | drag: false, fdrag: false, edrag: false}
@@ -1510,6 +1554,7 @@ defmodule Browser.Session do
 
   # gives `cid` the focus; the caret goes to `where`: :end or an index
   defp focus(state, cid, where) do
+    old = state.focus
     state = if state.efocus, do: blur_editor(state), else: state
     control = control(state, cid)
     UI.focus_page(state.ui)
@@ -1527,11 +1572,67 @@ defmodule Browser.Session do
       end
 
     state = %{state | focus: cid, caret: caret, menu: nil, fanchor: nil, fdrag: false}
-    if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    state =
+      if control && Forms.editable?(control), do: reset_blink(state), else: stop_blink(state)
+
+    focus_events(state, old, cid)
+  end
+
+  # `blur` and `focusout` for the control that lost focus, then `focus` and `focusin` for the
+  # one that got it (nil for none)
+  defp focus_events(%{js: nil} = state, _old, _new), do: state
+  defp focus_events(state, same, same), do: state
+
+  defp focus_events(state, old, new) do
+    init = %{bubbles: false, cancelable: false}
+    up = %{bubbles: true, cancelable: false}
+
+    steps =
+      if(old, do: [{old, "blur", init}, {old, "focusout", up}], else: []) ++
+        if new, do: [{new, "focus", init}, {new, "focusin", up}], else: []
+
+    Enum.reduce(steps, state, fn {cid, type, init}, state ->
+      state |> js_event({:control, cid}, type, init) |> elem(0)
+    end)
+  end
+
+  # a script gave the control with element number `nid` the focus (`:blur`: took it away): at
+  # once if the page has that control, else when the changed page arrives
+  defp focus_nid(%{page: nil} = state, _nid), do: state
+  defp focus_nid(state, :blur), do: %{state | pending_focus: :blur} |> blur_now()
+
+  defp focus_nid(state, nid) do
+    case Enum.find(Page.cid_nids(state.page), fn {_cid, n} -> n == nid end) do
+      {cid, _} -> state |> focus(cid, :end) |> relayout() |> ensure_visible(cid)
+      nil -> %{state | pending_focus: nid}
+    end
+  end
+
+  defp blur_now(%{focus: nil} = state), do: state
+  defp blur_now(state), do: blur(state)
+
+  # the changed page is in: a focus change the old page could not take is made now
+  defp settle_focus(state, nil, _new_cids), do: state
+  defp settle_focus(state, :blur, _new_cids), do: %{state | pending_focus: nil, focus: nil}
+
+  defp settle_focus(state, nid, new_cids) do
+    state = %{state | pending_focus: nil}
+
+    case new_cids[nid] do
+      nil -> state
+      cid -> focus(state, cid, :end)
+    end
   end
 
   defp blur(state) do
-    state |> stop_blink() |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false}) |> relayout()
+    old = state.focus
+
+    state
+    |> stop_blink()
+    |> Map.merge(%{focus: nil, fanchor: nil, fdrag: false})
+    |> relayout()
+    |> focus_events(old, nil)
   end
 
   defp ensure_visible(state, cid) do
@@ -1577,7 +1678,7 @@ defmodule Browser.Session do
     control = control(state, cid)
 
     cond do
-      control == nil or control.disabled? ->
+      control == nil or control.disabled? or Map.get(control, :inert?, false) ->
         state
 
       Forms.editable?(control) ->
@@ -1677,6 +1778,7 @@ defmodule Browser.Session do
     case control(state, cid) do
       nil -> :arrow
       %{disabled?: true} -> :arrow
+      %{inert?: true} -> :arrow
       control -> if Forms.editable?(control), do: :text, else: :hand
     end
   end
@@ -1915,10 +2017,23 @@ defmodule Browser.Session do
   end
 
   defp activate(state, %{type: "reset"} = control) do
-    state.page.form_state
-    |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
-    |> then(&set_form_state(state, &1))
-    |> relayout()
+    case js_event(state, {:control, control.cid}, "click") do
+      {state, true} ->
+        state
+
+      {state, false} ->
+        # the scripts reset their controls in the `reset` event's default action
+        case js_event(state, {:form, control.form}, "reset") do
+          {state, true} ->
+            state
+
+          {state, false} ->
+            state.page.form_state
+            |> then(&Forms.reset(&1, state.page.forms.controls, control.form))
+            |> then(&set_form_state(state, &1))
+            |> relayout()
+        end
+    end
   end
 
   defp activate(state, %{type: type} = control) when type in ["submit", "image"],
@@ -1938,13 +2053,26 @@ defmodule Browser.Session do
       case if(clicked, do: js_event(state, {:control, clicked}, "click"), else: {state, false}) do
         {state, true} -> {state, true}
         {state, false} when form == nil -> {state, true}
-        {state, false} -> js_event(state, {:form, form}, "submit")
+        # (the script runtime closes the dialog of a `method="dialog"` form after the event)
+        {state, false} -> js_event(state, {:form, form}, "submit", %{"submitter" => clicked})
       end
 
-    if prevented, do: state, else: navigate_form(state, form, clicked)
+    if prevented or dialog_form?(state, form),
+      do: state,
+      else: navigate_form(state, form, clicked)
   end
 
+  defp dialog_form?(%{page: %{forms: %{forms: forms}}}, form),
+    do: match?(%{^form => %{method: "dialog"}}, forms)
+
+  defp dialog_form?(_state, _form), do: false
+
+  # `form.submit()` of a script and the like come here: a dialog form goes nowhere
   defp navigate_form(state, form, clicked) do
+    if dialog_form?(state, form), do: state, else: navigate_form_url(state, form, clicked)
+  end
+
+  defp navigate_form_url(state, form, clicked) do
     page = state.page
 
     request =
@@ -1989,14 +2117,18 @@ defmodule Browser.Session do
 
   defp start_js(%{page: page} = state) do
     if Page.scripts?(page) do
+      # (a closure that named `page` would carry the whole page into the runtime's process,
+      # copying every shared style of the tree into its own)
+      initiator = page.url
+
       info = %{
         url: page.url,
         base: page.base || page.url,
         width: state.width,
         height: UI.client_height(state.ui),
         history_before: length(state.history.back),
-        fetch: &Fetch.load(&1, initiator: page.url),
-        request: &Fetch.load(&1, [initiator: page.url] ++ &2)
+        fetch: &Fetch.load(&1, initiator: initiator),
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
@@ -2042,6 +2174,18 @@ defmodule Browser.Session do
     Enum.reduce(types, state, fn type, state -> state |> js_event(target, type) |> elem(0) end)
   end
 
+  defp js_pointer_event(%{js: nil} = state, _x, _y, _type), do: {state, false}
+
+  defp js_pointer_event(state, x, y, type) do
+    target =
+      case UI.nid_at(state.items, x, y, state.scroll) do
+        nil -> :document
+        nid -> {:numbered, nid}
+      end
+
+    js_event(state, target, type)
+  end
+
   defp stop_js(state) do
     state = cancel_page_job(state)
 
@@ -2063,18 +2207,22 @@ defmodule Browser.Session do
   end
 
   # the live values of the controls, which scripts read
-  defp controls_snapshot(%{page: page}) do
-    for {cid, control} <- page.forms.controls, into: %{} do
-      cur = Forms.current(control, page.form_state)
-      {cid, %{value: cur.value, checked: cur.checked, selected: cur.selected}}
-    end
+  defp controls_snapshot(%{page: page} = state) do
+    snapshot =
+      for {cid, control} <- page.forms.controls, into: %{} do
+        cur = Forms.current(control, page.form_state)
+        {cid, %{value: cur.value, checked: cur.checked, selected: cur.selected}}
+      end
+
+    # the control with focus, for `document.activeElement`
+    Map.put(snapshot, :focus, state.focus)
   end
 
   # fires an event in the page's scripts: -> {state, default prevented?}
   defp js_event(%{js: nil} = state, _target, _type), do: {state, false}
 
-  defp js_event(state, target, type) do
-    reply = Browser.JS.Runtime.dispatch(state.js, target, type, %{}, controls_snapshot(state))
+  defp js_event(state, target, type, init \\ %{}) do
+    reply = Browser.JS.Runtime.dispatch(state.js, target, type, init, controls_snapshot(state))
     {apply_js(state, reply), reply.prevented}
   end
 
@@ -2090,7 +2238,9 @@ defmodule Browser.Session do
 
     state =
       if reply.dirty and reply.raw != nil and state.page != nil,
-        do: start_page_job(state, reply.raw),
+        # the tree has the values the user had typed (the scripts were given them, and may have
+        # changed them since): only what is typed from now on is carried over to the new page
+        do: start_page_job(%{state | page_edits: %{}}, reply.raw),
         else: state
 
     sync_editor(state, reply)
@@ -2170,6 +2320,19 @@ defmodule Browser.Session do
 
   # `form.submit()` and `requestSubmit()`: the form goes the way a click on its button sends it
   defp js_effect({:submit, fid}, state) when is_integer(fid), do: navigate_form(state, fid, nil)
+
+  # a modal dialog opened: the focus goes into it, and comes back to where it was when it closes
+  defp js_effect({:modal, :open}, state) do
+    nids = if state.page, do: Page.cid_nids(state.page), else: %{}
+    %{state | modal_return: [nids[state.focus] | state.modal_return]}
+  end
+
+  defp js_effect({:modal, :close}, %{modal_return: [back | rest]} = state),
+    do: focus_nid(%{state | modal_return: rest}, back || :blur)
+
+  defp js_effect({:modal, :close}, state), do: state
+  defp js_effect({:modal, :blur}, state), do: blur_now(state)
+  defp js_effect({:focus_control, nid}, state), do: focus_nid(state, nid)
 
   defp js_effect({:clipboard, text}, state) do
     UI.set_clipboard_text(text)
@@ -2774,6 +2937,112 @@ defmodule Browser.Session do
     if scroll != old, do: notify_scroll(state)
     state
   end
+
+  # -- developer console -------------------------------------------------------------
+
+  # the window is made on first use and shows the log of the active tab
+  defp open_console(%{console: nil} = state) do
+    win = Browser.ConsoleWindow.new(state.ui.frame)
+    me = self()
+
+    :wxTextCtrl.connect(win.input, :key_down,
+      callback: fn _wx, ev ->
+        k = :wxKeyEvent.getKeyCode(ev)
+        if k in [315, 317], do: send(me, {:console_key, k}), else: :wxEvent.skip(ev)
+      end
+    )
+
+    open_console(%{state | console: %{win: win, pid: :none, seq: 0, hist: [], hpos: nil}})
+  end
+
+  defp open_console(state) do
+    Browser.ConsoleWindow.show(state.console.win)
+    console_tick(state)
+  end
+
+  # the view follows the log: once in a while, and it also notices a tab or page change
+  defp console_tick(%{console: nil} = state), do: state
+
+  defp console_tick(%{console: c} = state) do
+    if Browser.ConsoleWindow.shown?(c.win) do
+      Process.send_after(self(), :console_tick, 250)
+      %{state | console: console_refresh(c, state)}
+    else
+      state
+    end
+  end
+
+  defp console_refresh(c, state) do
+    pid = state.js
+
+    c =
+      if c.pid == pid do
+        c
+      else
+        Browser.ConsoleWindow.clear(c.win)
+        Browser.ConsoleWindow.set_title(c.win, tab_title(state))
+
+        notice = [
+          {0, :log, "(no JavaScript runs on this page)", System.system_time(:millisecond)}
+        ]
+
+        if pid == nil, do: Browser.ConsoleWindow.append(c.win, notice)
+        %{c | pid: pid, seq: 0}
+      end
+
+    case Browser.Console.since(pid, c.seq) do
+      [] ->
+        c
+
+      entries ->
+        Browser.ConsoleWindow.append(c.win, entries)
+        %{c | seq: entries |> List.last() |> elem(0)}
+    end
+  end
+
+  defp clear_console(%{console: nil} = state), do: state
+
+  defp clear_console(%{console: c} = state) do
+    Browser.Console.clear(c.pid)
+    Browser.ConsoleWindow.clear(c.win)
+    %{state | console: %{c | seq: Browser.Console.last_seq(c.pid)}}
+  end
+
+  # the line typed in the console runs in the page
+  defp console_eval(%{console: c} = state) do
+    text = String.trim(Browser.ConsoleWindow.take_input(c.win))
+
+    cond do
+      text == "" ->
+        state
+
+      state.js == nil ->
+        state
+
+      true ->
+        reply = Browser.JS.Runtime.eval(state.js, text)
+        hist = [text | List.delete(c.hist, text)] |> Enum.take(100)
+        state = apply_js(%{state | console: %{c | hist: hist, hpos: nil}}, reply)
+        %{state | console: console_refresh(state.console, state)}
+    end
+  end
+
+  # up and down step through the lines typed before
+  defp console_history(%{console: %{hist: [_ | _] = hist} = c} = state, key) do
+    pos =
+      case {key, c.hpos} do
+        {315, nil} -> 0
+        {315, p} -> min(p + 1, length(hist) - 1)
+        {_, nil} -> nil
+        {_, 0} -> nil
+        {_, p} -> p - 1
+      end
+
+    Browser.ConsoleWindow.put_input(c.win, if(pos, do: Enum.at(hist, pos), else: ""))
+    %{state | console: %{c | hpos: pos}}
+  end
+
+  defp console_history(state, _key), do: state
 
   # -- tabs ------------------------------------------------------------------------
 

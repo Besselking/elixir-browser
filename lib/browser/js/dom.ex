@@ -24,11 +24,41 @@ defmodule Browser.JS.DOM do
   defp st, do: Process.get(:dom)
   defp put_st(s), do: Process.put(:dom, s)
 
-  defp node(nid), do: Map.fetch!(st().nodes, nid)
+  # a node of a frame that was torn down is gone from the map, but a page may still hold it:
+  # it then reads as an empty, detached node
+  defp node(nid) do
+    case st().nodes do
+      %{^nid => n} ->
+        n
+
+      _ ->
+        %{
+          id: nid,
+          kind: :text,
+          tag: nil,
+          attrs: [],
+          internal: [],
+          props: %{},
+          kids: [],
+          parent: nil,
+          text: "",
+          content: nil,
+          shost: nil,
+          shadow: nil,
+          doc: nil
+        }
+    end
+  end
 
   defp put_node(n) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), dirty: true, rev: s.rev + 1})
+
+    s =
+      if n.doc == s.main or n.doc == nil,
+        do: %{s | dirty: true},
+        else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
+
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -48,18 +78,301 @@ defmodule Browser.JS.DOM do
           props: %{},
           kids: [],
           parent: nil,
-          text: ""
+          text: "",
+          # a `<template>`'s content: the fragment that holds what is inside it
+          content: nil,
+          # a shadow root (a fragment) knows its host, a host its shadow root
+          shost: nil,
+          shadow: nil,
+          # the document the node belongs to (a document node's is itself)
+          doc: s.doc
         },
         fields
       )
 
+    # (the checks that frames need are only made once the page has an <iframe>)
+    if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
     put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
     id
   end
 
   @doc "True when the script changed the tree since the last `clean/0`."
   def dirty?, do: st().dirty
-  def clean, do: put_st(%{st() | dirty: false})
+  def clean, do: put_st(%{st() | dirty: false, fdirty: MapSet.new()})
+
+  @doc "The documents of frames that scripts changed since the last `clean/0`."
+  def changed_frames, do: st().fdirty
+
+  # ── realms: the page, and the documents of its frames ──────
+  #
+  # A frame has a document, a window with its own global scope, location and history. They all
+  # live in this process and share the node table, so a script of the page reaches into a frame
+  # (`frame.contentDocument.body`) as into its own document. What belongs to one document
+  # alone (`@realm_fields` here, `@realm_keys` of the process dictionary) is swapped in while
+  # that document is the one running (`in_realm/2`); the rest of the state is shared.
+
+  @realm_fields ~w(doc url hist hist_idx history_before scroll_restoration width height scroll
+                   content rects current_script storage_origin ce ce_done write_after)a
+  @realm_keys ~w(js_global js_global_fixed js_global_lex js_modules js_import rt_info rt_importmap
+                 rt_seen_scripts rt_prefetched rt_script)a
+
+  defp take_keys, do: Map.new(@realm_keys, &{&1, Process.get(&1, :__unset)})
+
+  defp put_keys(keys) do
+    Enum.each(keys, fn
+      {k, :__unset} -> Process.delete(k)
+      {k, v} -> Process.put(k, v)
+    end)
+  end
+
+  @doc """
+  Runs `fun` with the document `doc` (a frame's, or the page's) as the running one: `window`,
+  `document`, `location` and the global scope are its own while `fun` runs.
+  """
+  def in_realm(doc, fun) do
+    s = st()
+
+    cond do
+      doc == nil or doc == s.doc -> fun.()
+      not is_map_key(s.realms, doc) -> fun.()
+      true -> enter_realm(doc, fun)
+    end
+  end
+
+  defp enter_realm(doc, fun) do
+    prev = swap_realm(doc)
+
+    try do
+      fun.()
+    after
+      swap_realm(prev)
+      # a script that took its own frame away: what it left in the table goes with it
+      if Process.get(:dom_dead) == doc do
+        Process.delete(:dom_dead)
+        put_st(%{st() | realms: Map.delete(st().realms, doc)})
+      end
+    end
+  end
+
+  # makes `doc` the running document; returns the one that was
+  defp swap_realm(doc) do
+    s = st()
+    prev = s.doc
+    %{fields: fields, keys: keys} = Map.fetch!(s.realms, doc)
+    saved = %{fields: Map.take(s, @realm_fields), keys: take_keys()}
+    realms = s.realms |> Map.delete(doc) |> Map.put(prev, saved)
+    put_st(Map.merge(%{s | realms: realms}, fields))
+    put_keys(keys)
+    prev
+  end
+
+  @doc "The frame document a timer made now belongs to (nil in the page's own document)."
+  def timer_realm do
+    case Process.get(:dom) do
+      %{doc: d, main: m} when d != m -> d
+      _ -> nil
+    end
+  end
+
+  @doc "False for the document of a frame that has gone."
+  def realm_alive?(nil), do: true
+  def realm_alive?(doc), do: is_map_key(st().realms, doc) or st().doc == doc
+
+  @doc "True when the page has frames."
+  def frames?, do: map_size(st().realms) > 0
+
+  @doc "The page's own document."
+  def main_doc, do: st().main
+
+  @doc "The document of the running realm."
+  def current_doc, do: st().doc
+
+  @doc "The documents of every realm, the page's first."
+  def realm_docs, do: [st().main | st().frames |> Map.values() |> Enum.sort()]
+
+  @doc "The document of the frame held by the `<iframe>` element, or nil."
+  def frame_doc(iframe), do: Map.get(st().frames, iframe)
+
+  @doc "`%{iframe: element, parent: document}` of a frame's document."
+  def frame_of(doc), do: Map.get(st().meta, doc)
+
+  @doc """
+  Makes the document of a frame in the `<iframe>` element `iframe` out of the parsed tree `raw`.
+  `keys` are what the process dictionary holds for it (see `@realm_keys`: its global scope, its
+  `info`, ...). Returns the document's node id.
+  """
+  def new_realm(iframe, raw, url, keys, size \\ nil) do
+    parent = node(iframe).doc
+    doc = new_node(%{kind: :document})
+    update_node_quiet(doc, &%{&1 | doc: doc})
+    s = st()
+    {w, h} = size || {s.width, s.height}
+
+    fields = %{
+      doc: doc,
+      url: url,
+      hist: [{url, :null}],
+      hist_idx: 0,
+      history_before: 0,
+      scroll_restoration: "auto",
+      width: w,
+      height: h,
+      scroll: {0.0, 0.0},
+      content: {0.0, 0.0},
+      rects: %{},
+      current_script: nil,
+      storage_origin: Browser.LocalStorage.origin(url),
+      ce: %{},
+      ce_done: MapSet.new(),
+      write_after: nil
+    }
+
+    realms = Map.put(s.realms, doc, %{fields: fields, keys: keys})
+    meta = Map.merge(Map.get(s, :meta, %{}), %{doc => %{iframe: iframe, parent: parent}})
+    meta = Map.put_new(meta, s.main, %{iframe: nil, parent: nil})
+
+    put_st(Map.merge(s, %{realms: realms, meta: meta, frames: Map.put(s.frames, iframe, doc)}))
+
+    in_realm(doc, fn ->
+      kids = Enum.map(raw, &build(&1, doc))
+      update_node_quiet(doc, &%{&1 | kids: kids})
+    end)
+
+    doc
+  end
+
+  @doc "Takes a frame's document away: its nodes, its realm, the frames inside it."
+  def destroy_realm(doc) do
+    s = st()
+    inner = for {d, %{parent: ^doc}} <- s.meta, do: d
+    Enum.each(inner, &destroy_realm/1)
+    s = st()
+    ids = for {id, n} <- s.nodes, n.doc == doc, do: id
+    iframe = s.meta |> Map.get(doc, %{}) |> Map.get(:iframe)
+    frames = if iframe, do: Map.delete(s.frames, iframe), else: s.frames
+    drop = MapSet.new(ids)
+
+    listeners =
+      s.listeners
+      |> Map.drop([{:window, doc} | ids])
+
+    realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
+    if s.doc == doc, do: Process.put(:dom_dead, doc)
+
+    put_st(%{
+      s
+      | nodes: Map.drop(s.nodes, ids),
+        wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
+        listeners: listeners,
+        realms: realms,
+        frames: frames,
+        meta: Map.delete(s.meta, doc),
+        fdirty: MapSet.delete(s.fdirty, doc),
+        rev: s.rev + 1
+    })
+
+    _ = drop
+    :ok
+  end
+
+  # what the host object `data` belongs to: the realm to run in, and the data as that realm
+  # knows it (`:window` stands for the window of the running realm)
+  defp split_realm({:window, d}), do: {d, :window}
+  defp split_realm({:location, d}), do: {d, :location}
+  defp split_realm({:history, d}), do: {d, :history}
+  defp split_realm({:storage, area, d}), do: {d, {:storage, area}}
+  defp split_realm(k) when k in [:window, :location, :history], do: {st().main, k}
+  defp split_realm({:storage, _} = data), do: {st().main, data}
+
+  defp split_realm(nid) when is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, nid}
+      _ -> {nil, nid}
+    end
+  end
+
+  defp split_realm({:style, nid, :computed} = data) when is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, data}
+      _ -> {nil, data}
+    end
+  end
+
+  defp split_realm({k, nid} = data)
+       when k in [:classlist, :style, :dataset] and is_integer(nid) do
+    case st().nodes do
+      %{^nid => n} -> {n.doc, data}
+      _ -> {nil, data}
+    end
+  end
+
+  defp split_realm(data), do: {nil, data}
+
+  # runs `fun` in the realm of `this` (a host object of a document of a frame)
+  defp maybe_realm(this, fun) do
+    if map_size(st().realms) == 0 do
+      fun.()
+    else
+      case this do
+        {:obj, id} ->
+          case deref(id) do
+            %{class: :host, host: {__MODULE__, data}} -> in_realm(elem(split_realm(data), 0), fun)
+            _ -> fun.()
+          end
+
+        _ ->
+          fun.()
+      end
+    end
+  end
+
+  # the host object of this realm's window, location and history
+  defp win_data, do: if(st().doc == st().main, do: :window, else: {:window, st().doc})
+  defp win_host, do: aux_host(win_data(), :window)
+  defp loc_host, do: aux_host(loc_data(), :location)
+  defp hist_host, do: aux_host(hist_data(), :history)
+  defp loc_data, do: if(st().doc == st().main, do: :location, else: {:location, st().doc})
+  defp hist_data, do: if(st().doc == st().main, do: :history, else: {:history, st().doc})
+
+  defp storage_host(area),
+    do:
+      aux_host(
+        if(st().doc == st().main, do: {:storage, area}, else: {:storage, area, st().doc}),
+        :storage
+      )
+
+  # the key window listeners are kept under
+  defp win_key, do: if(st().doc == st().main, do: :window, else: {:window, st().doc})
+
+  # a node's window: the one of the document it is in
+  defp window_key_of(nid) do
+    case root_of(nid) do
+      root ->
+        d = node(root).doc
+        if d == st().main, do: :window, else: {:window, d}
+    end
+  end
+
+  # the root a node is in the document's tree through: past a shadow root to its host
+  defp root_of(nid) do
+    case node(nid).parent do
+      nil -> if node(nid).shost, do: root_of(node(nid).shost), else: nid
+      p -> root_of(p)
+    end
+  end
+
+  # the top of the tree the node is in (a shadow root is the top of its own tree)
+  defp top_of(nid) do
+    case node(nid).parent do
+      nil -> nid
+      p -> top_of(p)
+    end
+  end
+
+  defp realm_key_to_doc(:window), do: st().main
+  defp realm_key_to_doc({:window, d}), do: d
+  defp realm_key_to_doc({:objt, _}), do: nil
+  defp realm_key_to_doc(nid) when is_integer(nid), do: node(nid).doc
 
   @doc "The queued side effects, oldest first; empties the queue."
   def take_outbox do
@@ -68,7 +381,11 @@ defmodule Browser.JS.DOM do
     Enum.reverse(s.outbox)
   end
 
-  defp out(item), do: put_st(%{st() | outbox: [item | st().outbox]})
+  # what a script did that the session should hear of; a frame's does not reach it (what a
+  # frame takes in as its address is done by `navigate_to/2`)
+  defp out(item) do
+    if st().doc == st().main, do: put_st(%{st() | outbox: [item | st().outbox]}), else: :ok
+  end
 
   def url, do: st().url
 
@@ -96,6 +413,15 @@ defmodule Browser.JS.DOM do
       width: info[:width] || 960,
       height: info[:height] || 658,
       doc: nil,
+      # the page's own document (`doc` is the one of the realm that is running: see `in_realm/2`)
+      main: nil,
+      # the other realms, by document: what `in_realm/2` swapped out; and the documents of
+      # frames, by the `<iframe>` element
+      realms: %{},
+      frames: %{},
+      meta: %{},
+      # frame documents a script changed since the last `clean/0`
+      fdirty: MapSet.new(),
       # the session history entries of this document, `{url, state}`: `pushState`, `replaceState`
       # and fragment navigations edit them, `history.back()` between them stays in the document
       hist: [{info.url, :null}],
@@ -116,6 +442,8 @@ defmodule Browser.JS.DOM do
       # last reported (`report_selection/1`)
       design_mode: false,
       focus_ed: nil,
+      # the form control that has focus (a node id)
+      focus_ctl: nil,
       ed_sel: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
@@ -124,9 +452,9 @@ defmodule Browser.JS.DOM do
 
     doc = new_node(%{kind: :document})
     s = st()
-    put_st(%{s | doc: doc})
+    put_st(%{s | doc: doc, main: doc})
     kids = Enum.map(raw, &build(&1, doc))
-    update_node_quiet(doc, &%{&1 | kids: kids})
+    update_node_quiet(doc, &%{&1 | kids: kids, doc: doc})
     clean()
     doc
   end
@@ -136,18 +464,55 @@ defmodule Browser.JS.DOM do
     put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid))), rev: s.rev + 1})
   end
 
+  # what the browser itself puts on elements; any other name starting with `@` is the page's
+  # own (Vue's `@click`, Lit's `@change$lit$`)
+  @internal_attrs ~w(@cid @nid @znid @z @computed @content @marker @placeholder @src @summary @canvas
+                     @sized @float @flex_sized @definite @ed @edhost @t)
+
   defp build({:text, t}, parent), do: new_node(%{kind: :text, text: t, parent: parent})
+  defp build({:comment, t}, parent), do: new_node(%{kind: :comment, text: t, parent: parent})
 
   defp build({:element, tag, attrs, kids}, parent) do
-    {internal, visible} = Enum.split_with(attrs, fn {k, _} -> String.starts_with?(k, "@") end)
+    {internal, visible} = Enum.split_with(attrs, fn {k, _} -> k in @internal_attrs end)
     nid = new_node(%{tag: tag, attrs: visible, internal: internal, parent: parent})
     kid_ids = Enum.map(kids, &build(&1, nid))
-    update_node_quiet(nid, &%{&1 | kids: kid_ids})
+
+    if tag == "template" do
+      # what is inside a template is its content: a fragment of its own, not part of the page
+      frag = new_node(%{kind: :fragment})
+      for k <- kid_ids, do: update_node_quiet(k, &%{&1 | parent: frag})
+      update_node_quiet(frag, &%{&1 | kids: kid_ids})
+      update_node_quiet(nid, &%{&1 | content: frag})
+    else
+      update_node_quiet(nid, &%{&1 | kids: kid_ids})
+    end
+
     nid
   end
 
+  # the fragment that holds a template's content (made when a script created the template)
+  defp template_content(nid) do
+    case node(nid).content do
+      nil ->
+        frag = new_node(%{kind: :fragment})
+        update_node_quiet(nid, &%{&1 | content: frag})
+        frag
+
+      frag ->
+        frag
+    end
+  end
+
+  # the node whose kids `innerHTML` reads and writes
+  defp inner_holder(%{tag: "template", kind: :element} = n), do: template_content(n.id)
+  defp inner_holder(n), do: n.id
+
   @doc "The values of the page's controls, by control id: `%{cid => %{value:, checked:, selected:}}`."
   def apply_controls(controls) do
+    # `:focus` is the control the window has focused, by control id
+    {focus, controls} = Map.pop(controls, :focus, :keep)
+    if focus != :keep, do: put_st(%{st() | focus_ctl: focus && control_node(focus)})
+
     for {nid, n} <- st().nodes,
         n.kind == :element,
         {_, cid} <- [List.keyfind(n.internal, "@cid", 0)] do
@@ -202,6 +567,12 @@ defmodule Browser.JS.DOM do
 
       if internal != n.internal, do: update_node_quiet(nid, &%{&1 | internal: internal})
       if tag not in ["textarea", "select"], do: sync_kids(n.kids, kids)
+
+      # the controls of a frame's document are numbered with the page's
+      case tag == "iframe" && Map.get(st().frames, nid) do
+        doc when is_integer(doc) -> sync_kids(node(doc).kids, kids)
+        _ -> :ok
+      end
     end
   end
 
@@ -221,12 +592,68 @@ defmodule Browser.JS.DOM do
 
       _ ->
         inner = ed_host_for(n, host)
-        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}]
+        attrs = export_attrs(n) ++ [{"@nid", ensure_nid(nid)}] ++ modal_attr(n) ++ shadow_attr(n)
 
         attrs =
           if inner != nil and edit_attr(n) == true, do: attrs ++ [{"@edhost", 1}], else: attrs
 
-        {:element, n.tag, attrs, export_kids(n, inner)}
+        {:element, n.tag, attrs, export_kids(n, inner)} |> with_frame(nid)
+    end
+  end
+
+  # An `<iframe>` that holds a document takes the content of that document as its children, marked
+  # with the frame's number and address: the frame's sheets apply inside it only, and its relative
+  # addresses resolve against its own.
+  defp with_frame({:element, "iframe", attrs, _} = el, nid) do
+    case Map.get(st().frames, nid) do
+      nil ->
+        el
+
+      doc ->
+        url = get_in(st().realms, [doc, :fields, :url])
+        kids = Enum.map(node(doc).kids, &export/1)
+
+        marks =
+          [{"data-b-frame", Integer.to_string(doc)}] ++
+            if(is_binary(url), do: [{"data-b-base", url}], else: [])
+
+        {:element, "iframe", attrs ++ marks, kids}
+    end
+  end
+
+  defp with_frame(el, _nid), do: el
+
+  # `data-b-frame` with a scope of its own marks an element that has a shadow root (see
+  # `Browser.Style.scoped_refs/1`); the shadow tree is styled by the sheets in it
+  defp shadow_attr(%{shadow: root}) when root != nil, do: [{"data-b-frame", "s#{root}"}]
+  defp shadow_attr(_), do: []
+
+  defp attr_of(n, name) do
+    case List.keyfind(n.attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  # the children of `host` that its slot called `name` shows
+  defp assigned(host, name) do
+    Enum.filter(node(host).kids, fn k ->
+      case node(k) do
+        %{kind: :text} -> name == ""
+        %{kind: :element} = e -> (attr_of(e, "slot") || "") == name
+        _ -> false
+      end
+    end)
+  end
+
+  # a node of a host shown in a slot keeps the host's styles (see `Browser.CSS.context/8`)
+  defp export_slotted(nid, root, host) do
+    case export(nid, host) do
+      {:element, tag, attrs, kids} ->
+        {:element, tag, attrs ++ [{"data-b-slotted", "s#{root}"}], kids}
+
+      other ->
+        other
     end
   end
 
@@ -293,6 +720,11 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # a dialog shown with `showModal()` (see `Browser.Modal`)
+  defp modal_attr(n) do
+    for key <- ["@modal", "@popover"], List.keymember?(n.internal, key, 0), do: {key, ""}
+  end
+
   defp export_attrs(%{tag: "input"} = n) do
     attrs = n.attrs
 
@@ -314,6 +746,17 @@ defmodule Browser.JS.DOM do
       %{"open" => true} -> List.keystore(n.attrs, "open", 0, {"open", ""})
       %{"open" => false} -> List.keydelete(n.attrs, "open", 0)
       _ -> n.attrs
+    end
+  end
+
+  # what the scripts drew on a canvas goes to the layout with the element
+  defp export_attrs(%{tag: "canvas"} = n) do
+    case Process.get({:canvas, n.id}) do
+      %Browser.Canvas{w: w, h: h, ops: [_ | _]} = surface ->
+        n.attrs ++ [{"@canvas", {w, h, Browser.Canvas.ops(surface)}}]
+
+      _ ->
+        n.attrs
     end
   end
 
@@ -339,9 +782,37 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp export_kids(n, nil), do: Enum.map(n.kids, &export/1)
+  # a host shows its shadow tree, not its own children, which only a `<slot>` in it brings back
+  defp export_kids(%{shadow: root}, host) when root != nil do
+    adopted =
+      case List.keyfind(node(root).internal, "@adopted", 0) do
+        {_, texts} -> for t <- texts, do: {:element, "style", [], [{:text, t}]}
+        nil -> []
+      end
 
-  defp export_kids(n, host) do
+    adopted ++ Enum.map(node(root).kids, &export(&1, host))
+  end
+
+  defp export_kids(%{tag: "slot"} = n, host) do
+    top = top_of(n.id)
+
+    case node(top) do
+      %{kind: :fragment, shost: h} when h != nil ->
+        case assigned(h, attr_of(n, "name") || "") do
+          [] -> export_plain_kids(n, host)
+          nodes -> Enum.map(nodes, &export_slotted(&1, top, host))
+        end
+
+      _ ->
+        export_plain_kids(n, host)
+    end
+  end
+
+  defp export_kids(n, host), do: export_plain_kids(n, host)
+
+  defp export_plain_kids(n, nil), do: Enum.map(n.kids, &export/1)
+
+  defp export_plain_kids(n, host) do
     Enum.flat_map(n.kids, fn k ->
       case node(k) do
         %{kind: :text} -> ed_text(k, host)
@@ -561,6 +1032,8 @@ defmodule Browser.JS.DOM do
 
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
+    # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
   end
@@ -584,8 +1057,8 @@ defmodule Browser.JS.DOM do
 
     case List.keyfind(n.internal, "@nid", 0) do
       {_, id} ->
-        case st().rects do
-          %{^id => {x, y, w, h}} -> {x, y, w, h}
+        case rects_here() do
+          %{^id => {x, y, w, h}} -> frame_relative({x, y, w, h})
           _ -> inherited_rect(n.parent)
         end
 
@@ -594,11 +1067,34 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp inherited_rect(nil), do: {0.0, 0.0, 0.0, 0.0}
+  # the boxes the layout made: for a frame those of the page, whose coordinates are the page's
+  defp rects_here do
+    if st().doc == st().main, do: st().rects, else: Process.get(:dom_page_rects, %{})
+  end
+
+  # in a frame, a box is where it is in the frame: the page coordinates less the frame's corner
+  defp frame_relative(rect) do
+    with false <- st().doc == st().main,
+         %{iframe: i} when i != nil <- Map.get(st().meta, st().doc),
+         {_, id} <- List.keyfind(node(i).internal, "@nid", 0),
+         %{^id => {fx, fy, _, _}} <- Process.get(:dom_page_rects, %{}) do
+      {x, y, w, h} = rect
+      {x - fx, y - fy, w, h}
+    else
+      _ -> rect
+    end
+  end
+
+  # (a frame that was not laid out yet: its elements are as wide as the frame, with no height)
+  defp inherited_rect(nil) do
+    if st().doc == st().main,
+      do: {0.0, 0.0, 0.0, 0.0},
+      else: {0.0, 0.0, st().width * 1.0, st().height * 1.0}
+  end
 
   defp inherited_rect(parent) do
     case page_rect(parent) do
-      {x, y, _, _} -> {x, y, 0.0, 0.0}
+      {x, y, w, _} -> {x, y, if(st().doc == st().main, do: 0.0, else: w), 0.0}
     end
   end
 
@@ -706,6 +1202,11 @@ defmodule Browser.JS.DOM do
     Enum.flat_map(node(nid).kids, fn k -> [k | descendants(k)] end)
   end
 
+  @doc "True when the node is inside a `<template>` (its content is inert: no script in it runs)."
+  def in_template?(nid) do
+    Enum.any?(ancestors(nid), fn a -> node(a).kind == :element and node(a).tag == "template" end)
+  end
+
   defp elements(nid), do: Enum.filter(descendants(nid), &(node(&1).kind == :element))
 
   # the first element below `nid` in document order that `pred` accepts, without building the
@@ -731,10 +1232,98 @@ defmodule Browser.JS.DOM do
     Enum.find_index(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), &(&1 == nid))
   end
 
+  @doc "Calls the page-global function `name` (a hook the prelude defines), if there is one."
+  def call_global(name, args) do
+    case deref_global(name) do
+      f when is_tuple(f) -> if function?(f), do: call(f, :undefined, args), else: :ok
+      _ -> :ok
+    end
+  end
+
+  @doc "What a click that no script stopped does to popovers: the button's target, light dismiss."
+  def popover_click(target) do
+    nid =
+      case target do
+        {:control, cid} -> control_node(cid)
+        {:numbered, n} -> nid_numbered(n)
+        _ -> nil
+      end
+
+    call_global("__popoverClick", [if(nid, do: wrap(nid), else: :null)])
+  end
+
+  @doc "The controls in the form numbered `fid` go back to the values their markup gives."
+  def reset_form(fid) do
+    case form_node(fid) do
+      nil -> :ok
+      nid -> reset_controls(nid)
+    end
+  end
+
+  # the same for the form with element number `nid`
+  def reset_controls(nid) do
+    for el <- elements(nid), node(el).tag in ["input", "textarea", "select", "option"] do
+      update_node(el, fn n ->
+        %{n | props: Map.drop(n.props, ["value", "checked", "selectedIndex", "selected"])}
+      end)
+    end
+
+    :ok
+  end
+
+  @doc "A click on the backdrop of the dialog whose number, made negative, is `n`."
+  def dialog_backdrop(n) do
+    case nid_numbered(n) do
+      nil -> :ok
+      nid -> call_global("__dialogBackdrop", [wrap(nid)])
+    end
+  end
+
+  @doc "`<form method=dialog>` number `fid` was submitted by the control `cid` (nil: by script)."
+  def dialog_submit(fid, cid) do
+    case form_node(fid) do
+      nil ->
+        :ok
+
+      form when is_integer(form) ->
+        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+             not formmethod_dialog?(cid),
+           do: :ok,
+           else: do_dialog_submit(form, cid)
+    end
+  end
+
+  defp formmethod_dialog?(nil), do: false
+
+  defp formmethod_dialog?(cid) do
+    case control_node(cid) do
+      nil -> false
+      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+    end
+  end
+
+  defp do_dialog_submit(form, cid) do
+    case form do
+      nil ->
+        :ok
+
+      form ->
+        submitter = cid && control_node(cid)
+
+        call_global("__dialogSubmit", [
+          wrap(form),
+          if(submitter, do: wrap(submitter), else: :null)
+        ])
+    end
+  end
+
   @doc "The node id of the element for the page's control `cid`, or nil."
   def control_node(cid) do
-    Enum.find(elements(st().doc), fn nid ->
-      List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+    # (the controls of the frames are numbered with the page's)
+    Enum.find_value(realm_docs(), fn doc ->
+      Enum.find(elements(doc), fn nid ->
+        List.keyfind(node(nid).internal, "@cid", 0) == {"@cid", cid}
+      end)
     end)
   end
 
@@ -751,10 +1340,12 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # a node of a frame that was removed is gone from the map; it has no ancestors
   defp ancestors(nid) do
-    case node(nid).parent do
-      nil -> []
-      p -> [p | ancestors(p)]
+    case st().nodes do
+      %{^nid => %{parent: nil}} -> []
+      %{^nid => %{parent: p}} -> [p | ancestors(p)]
+      _ -> []
     end
   end
 
@@ -780,6 +1371,7 @@ defmodule Browser.JS.DOM do
     n = node(nid)
 
     if n.parent do
+      frames_leaving(nid)
       update_node(n.parent, &%{&1 | kids: List.delete(&1.kids, nid)})
       update_node(nid, &%{&1 | parent: nil})
     end
@@ -809,12 +1401,17 @@ defmodule Browser.JS.DOM do
           %{p | kids: kids}
         end)
 
+        adopt(child, node(parent).doc)
         connect(child)
     end
   end
 
   defp set_children(nid, kid_ids) do
-    for k <- node(nid).kids, do: update_node(k, &%{&1 | parent: nil})
+    for k <- node(nid).kids do
+      frames_leaving(k)
+      update_node(k, &%{&1 | parent: nil})
+    end
+
     update_node(nid, &%{&1 | kids: []})
     for k <- kid_ids, do: insert(nid, k, nil)
   end
@@ -844,6 +1441,11 @@ defmodule Browser.JS.DOM do
 
     if deep? do
       for k <- n.kids, do: insert(copy, clone(k, true), nil)
+
+      if n.content != nil do
+        content = clone(n.content, true)
+        update_node_quiet(copy, &%{&1 | content: content})
+      end
     end
 
     copy
@@ -851,7 +1453,7 @@ defmodule Browser.JS.DOM do
 
   defp parse_fragment(html) do
     frag = new_node(%{kind: :fragment})
-    for raw <- Browser.HTML.parse(html), do: insert(frag, build(raw, nil), nil)
+    for raw <- Browser.HTML.parse(html, comments: true), do: insert(frag, build(raw, nil), nil)
     node(frag).kids
   end
 
@@ -878,7 +1480,15 @@ defmodule Browser.JS.DOM do
 
   defp remove_attr(nid, name) do
     name = String.downcase(name)
-    update_node(nid, fn n -> %{n | attrs: List.keydelete(n.attrs, name, 0)} end)
+
+    # a dialog that is not open is not modal any more
+    if name == "open" and List.keymember?(node(nid).internal, "@modal", 0),
+      do: out({:modal, :close})
+
+    update_node(nid, fn n ->
+      n = %{n | attrs: List.keydelete(n.attrs, name, 0)}
+      if name == "open", do: %{n | internal: List.keydelete(n.internal, "@modal", 0)}, else: n
+    end)
   end
 
   # ── wrappers ───────────────────────────────────────────────
@@ -928,28 +1538,69 @@ defmodule Browser.JS.DOM do
   # ── host protocol: reads ───────────────────────────────────
 
   @doc false
-  def host_get(nid, key, self) when is_integer(nid) do
+  def host_get(data, key, self) do
+    if map_size(st().realms) == 0 do
+      hget(data, key, self)
+    else
+      {doc, data} = split_realm(data)
+      in_realm(doc, fn -> hget(data, key, self) end)
+    end
+  end
+
+  defp hget(nid, key, self) when is_integer(nid) do
     n = node(nid)
     node_get(n, key, self)
   end
 
-  def host_get({:classlist, nid}, key, _self), do: classlist_get(nid, key)
-  def host_get({:style, nid}, key, _self), do: style_get(nid, key)
-  def host_get({:dataset, nid}, key, _self), do: dataset_get(nid, key)
-  def host_get(:window, key, _self), do: window_get(key)
-  def host_get(:location, key, _self), do: location_get(key)
-  def host_get({:usp, k}, key, _self), do: usp_get(k, key)
-  def host_get({:storage, area}, key, _self), do: storage_get(area, key)
+  defp hget({:classlist, nid}, key, _self), do: classlist_get(nid, key)
+  defp hget({:style, nid}, key, _self), do: style_get(nid, key)
+  defp hget({:style, nid, :computed}, key, _self), do: computed_get(nid, key)
+  defp hget({:dataset, nid}, key, _self), do: dataset_get(nid, key)
+  defp hget(:window, key, _self), do: window_get(key)
+  defp hget(:location, key, _self), do: location_get(key)
+  defp hget({:usp, k}, key, _self), do: usp_get(k, key)
+  defp hget({:storage, area}, key, _self), do: storage_get(area, key)
 
-  def host_get(:history, "length", _self),
+  defp hget(:history, "length", _self),
     do: {:ok, float(st().history_before + length(st().hist))}
 
-  def host_get(:history, "state", _self), do: {:ok, hist_state()}
-  def host_get(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
-  def host_get(_other, _key, _self), do: :miss
+  defp hget(:history, "state", _self), do: {:ok, hist_state()}
+  defp hget(:history, "scrollRestoration", _self), do: {:ok, st().scroll_restoration}
+  defp hget(_other, _key, _self), do: :miss
+
+  # the event handler properties an element has (`"onclick" in el`; `el.onclick` is null)
+  @on_events ~w(click dblclick auxclick mousedown mouseup mousemove mouseover mouseout mouseenter
+                mouseleave keydown keyup keypress input change submit reset focus blur focusin
+                focusout select scroll wheel contextmenu touchstart touchend touchmove touchcancel
+                pointerdown pointerup pointermove pointerover pointerout pointerenter pointerleave
+                pointercancel gotpointercapture lostpointercapture drag dragstart dragend dragover
+                dragenter dragleave drop copy cut paste load error abort cancel close toggle
+                beforeinput compositionstart compositionend compositionupdate animationstart
+                animationend animationiteration transitionend transitionstart transitionrun
+                transitioncancel resize invalid play pause ended canplay loadeddata loadedmetadata
+                timeupdate volumechange seeking seeked readystatechange visibilitychange
+                fullscreenchange selectionchange beforecopy beforecut beforepaste search selectstart
+                securitypolicyviolation slotchange)
 
   defp node_get(n, key, self) do
     case {key, n.kind} do
+      {"on" <> ev, k} when k in [:element, :document] and ev in @on_events ->
+        handler =
+          case Enum.find(Map.get(st().listeners, n.id, []), &(&1.type == ev and &1[:inline])) do
+            %{fun: f} ->
+              f
+
+            nil ->
+              with code when is_binary(code) <- if(k == :element, do: get_attr(n, key)),
+                   f when is_tuple(f) <- inline_function(n.id, ev, code) do
+                f
+              else
+                _ -> :null
+              end
+          end
+
+        {:ok, handler}
+
       {"nodeType", k} ->
         {:ok, float(%{element: 1, text: 3, comment: 8, document: 9, fragment: 11}[k])}
 
@@ -967,6 +1618,9 @@ defmodule Browser.JS.DOM do
 
       {"nodeName", :fragment} ->
         {:ok, "#document-fragment"}
+
+      {"innerHTML", :fragment} ->
+        {:ok, serialize_kids(n.id)}
 
       {"parentNode", _} ->
         {:ok, wrap_or_null(n.parent)}
@@ -1023,10 +1677,10 @@ defmodule Browser.JS.DOM do
         {:ok, float(cp_len(n.text))}
 
       {"ownerDocument", _} ->
-        {:ok, wrap(st().doc)}
+        {:ok, if(n.kind == :document, do: :null, else: wrap(n.doc))}
 
       {"isConnected", _} ->
-        {:ok, n.id == st().doc or st().doc in ancestors(n.id)}
+        {:ok, connected?(n.id)}
 
       {"rows", :element} when n.tag in ["table", "thead", "tbody", "tfoot"] ->
         {:ok, nodes_array(table_rows(n))}
@@ -1125,7 +1779,7 @@ defmodule Browser.JS.DOM do
         {:ok, aux_host({:dataset, n.id}, :dataset)}
 
       "innerHTML" ->
-        {:ok, serialize_kids(n.id)}
+        {:ok, serialize_kids(inner_holder(n))}
 
       "outerHTML" ->
         {:ok, serialize(n.id)}
@@ -1150,7 +1804,7 @@ defmodule Browser.JS.DOM do
         {:ok, checked_of(n)}
 
       "open" ->
-        {:ok, open_of(n)}
+        {:ok, if(n.tag == "dialog", do: get_attr(n, "open") != nil, else: open_of(n))}
 
       "selectedIndex" ->
         {:ok, float(Map.get(n.props, "selectedIndex") || 0)}
@@ -1196,7 +1850,19 @@ defmodule Browser.JS.DOM do
         {:ok, attr_or(n, "for", "")}
 
       "content" when n.tag == "template" ->
-        {:ok, :undefined}
+        {:ok, wrap(template_content(n.id))}
+
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        {:ok, canvas_size(n, k)}
+
+      "contentWindow" when n.tag == "iframe" ->
+        {:ok, with(d when d != nil <- frame_doc_of(n.id), do: window_host_of(d)) || :null}
+
+      "contentDocument" when n.tag == "iframe" ->
+        {:ok, with(d when d != nil <- frame_doc_of(n.id), do: wrap(d)) || :null}
+
+      "srcdoc" when n.tag == "iframe" ->
+        {:ok, attr_or(n, "srcdoc", "")}
 
       _ ->
         :miss
@@ -1272,10 +1938,10 @@ defmodule Browser.JS.DOM do
          |> String.trim()}
 
       "location" ->
-        {:ok, aux_host(:location, :location)}
+        {:ok, loc_host()}
 
       "defaultView" ->
-        {:ok, aux_host(:window, :window)}
+        {:ok, win_host()}
 
       "readyState" ->
         {:ok, "complete"}
@@ -1299,7 +1965,7 @@ defmodule Browser.JS.DOM do
         {:ok, "text/html"}
 
       "activeElement" ->
-        {:ok, wrap_or_null(ed_focused() || find_tag(s.doc, "body"))}
+        {:ok, wrap_or_null(ed_focused() || ctl_focused() || find_tag(s.doc, "body"))}
 
       "designMode" ->
         {:ok, if(s.design_mode, do: "on", else: "off")}
@@ -1320,23 +1986,32 @@ defmodule Browser.JS.DOM do
   # ── host protocol: writes ──────────────────────────────────
 
   @doc false
-  def host_put(nid, key, v, _self) when is_integer(nid) do
+  def host_put(data, key, v, self) do
+    if map_size(st().realms) == 0 do
+      hput(data, key, v, self)
+    else
+      {doc, data} = split_realm(data)
+      in_realm(doc, fn -> hput(data, key, v, self) end)
+    end
+  end
+
+  defp hput(nid, key, v, _self) when is_integer(nid) do
     n = node(nid)
     node_put(n, key, v)
   end
 
-  def host_put({:style, nid}, key, v, _), do: style_put(nid, key, v)
-  def host_put({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
-  def host_put(:window, key, v, _), do: window_put(key, v)
-  def host_put(:location, key, v, _), do: location_put(key, v)
+  defp hput({:style, nid}, key, v, _), do: style_put(nid, key, v)
+  defp hput({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
+  defp hput(:window, key, v, _), do: window_put(key, v)
+  defp hput(:location, key, v, _), do: location_put(key, v)
 
-  def host_put(:history, "scrollRestoration", v, _) do
+  defp hput(:history, "scrollRestoration", v, _) do
     if to_str(v) in ["auto", "manual"], do: put_st(%{st() | scroll_restoration: to_str(v)})
     :ok
   end
 
-  def host_put({:storage, area}, key, v, _), do: storage_put(area, key, v)
-  def host_put(_other, _key, _v, _self), do: :miss
+  defp hput({:storage, area}, key, v, _), do: storage_put(area, key, v)
+  defp hput(_other, _key, _v, _self), do: :miss
 
   defp node_put(n, key, v) do
     case {key, n.kind} do
@@ -1353,6 +2028,11 @@ defmodule Browser.JS.DOM do
 
       {"title", :document} ->
         set_title(to_str(v))
+        :ok
+
+      # (a shadow root is a fragment)
+      {"innerHTML", :fragment} ->
+        set_children(n.id, parse_fragment(to_str_or_empty(v)))
         :ok
 
       {"on" <> event, :document} ->
@@ -1383,6 +2063,11 @@ defmodule Browser.JS.DOM do
         set_attr(nid, "id", to_str(v))
         :ok
 
+      k when k in ["width", "height"] and n.tag == "canvas" ->
+        num = to_num_or_zero(v)
+        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
+        :ok
+
       "className" ->
         set_attr(nid, "class", to_str(v))
         :ok
@@ -1397,7 +2082,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       "innerHTML" ->
-        set_children(nid, parse_fragment(to_str_or_empty(v)))
+        set_children(inner_holder(node(nid)), parse_fragment(to_str_or_empty(v)))
         :ok
 
       "outerHTML" ->
@@ -1417,7 +2102,17 @@ defmodule Browser.JS.DOM do
         :ok
 
       "open" ->
-        update_node(nid, &%{&1 | props: Map.put(&1.props, "open", truthy(v))})
+        cond do
+          node(nid).tag != "dialog" ->
+            update_node(nid, &%{&1 | props: Map.put(&1.props, "open", truthy(v))})
+
+          truthy(v) ->
+            set_attr(nid, "open", "")
+
+          true ->
+            remove_attr(nid, "open")
+        end
+
         :ok
 
       "selectedIndex" ->
@@ -1437,7 +2132,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       k
-      when k in ~w(href src name placeholder title alt action method target rel lang dir role type) ->
+      when k in ~w(href src srcdoc name placeholder title alt action method target rel lang dir role type) ->
         set_attr(nid, k, to_str(v))
         :ok
 
@@ -1506,6 +2201,14 @@ defmodule Browser.JS.DOM do
 
   defp classlist_get(nid, "length"), do: {:ok, float(length(classes(nid)))}
   defp classlist_get(nid, "value"), do: {:ok, attr_or(node(nid), "class", "")}
+
+  defp classlist_get(nid, key) when is_binary(key) do
+    case Integer.parse(key) do
+      {i, ""} when i >= 0 -> with c when is_binary(c) <- Enum.at(classes(nid), i), do: {:ok, c}
+      _ -> :miss
+    end
+  end
+
   defp classlist_get(_nid, _), do: :miss
 
   defp style_decls(nid) do
@@ -1531,8 +2234,63 @@ defmodule Browser.JS.DOM do
     |> then(fn k -> if String.starts_with?(k, "css-float"), do: "float", else: k end)
   end
 
+  # `getComputedStyle(el)`: what the element declares itself, then the size it was laid out at
+  # (a frame's elements as wide as the frame), then the browser's usual values
+  @block_tags ~w(html body div p section article aside header footer main nav ul ol li dl dt dd h1 h2 h3 h4 h5 h6
+                 form fieldset table pre blockquote figure figcaption address hr details summary dialog)
+
+  defp computed_get(_nid, key) when not is_binary(key), do: :miss
+  defp computed_get(_nid, "length"), do: {:ok, 0.0}
+
+  defp computed_get(nid, key) do
+    if key in ~w(setProperty getPropertyValue removeProperty item getPropertyPriority) do
+      :miss
+    else
+      n = node(nid)
+      prop = kebab(key)
+
+      case List.keyfind(style_decls(nid), prop, 0) do
+        {_, v} -> {:ok, v}
+        nil -> {:ok, computed_default(n, prop)}
+      end
+    end
+  end
+
+  defp computed_default(n, prop) do
+    {_, _, w, h} = page_rect(n.id)
+    px = fn v -> "#{round(v)}px" end
+
+    case prop do
+      "width" -> px.(w)
+      "height" -> px.(h)
+      "display" -> if(n.tag in @block_tags, do: "block", else: "inline")
+      "position" -> "static"
+      "visibility" -> "visible"
+      "opacity" -> "1"
+      "overflow" -> "visible"
+      "float" -> "none"
+      "z-index" -> "auto"
+      "box-sizing" -> "content-box"
+      "color" -> "rgb(0, 0, 0)"
+      "background-color" -> "rgba(0, 0, 0, 0)"
+      "font-size" -> "16px"
+      "font-weight" -> "400"
+      "line-height" -> "normal"
+      "text-align" -> "start"
+      "direction" -> "ltr"
+      "cursor" -> "auto"
+      "transform" -> "none"
+      "pointer-events" -> "auto"
+      "padding" <> _ -> "0px"
+      "margin" <> _ -> "0px"
+      "border" <> _ -> if String.ends_with?(prop, "width"), do: "0px", else: ""
+      _ -> ""
+    end
+  end
+
   defp style_get(nid, "cssText"), do: {:ok, attr_or(node(nid), "style", "")}
   defp style_get(nid, "length"), do: {:ok, float(length(style_decls(nid)))}
+  defp style_get(_nid, key) when not is_binary(key), do: :miss
 
   defp style_get(nid, key) do
     if key in ~w(setProperty getPropertyValue removeProperty item),
@@ -1614,6 +2372,8 @@ defmodule Browser.JS.DOM do
   end
 
   defp target_obj(:window), do: aux_host(:window, :window)
+  defp target_obj({:window, _} = key), do: aux_host(key, :window)
+  defp target_obj({:objt, id}), do: {:obj, id}
   defp target_obj(nid), do: wrap(nid)
 
   @doc """
@@ -1622,6 +2382,12 @@ defmodule Browser.JS.DOM do
   `:bubbles`/`:cancelable`. Returns `:prevented` or `:ok`.
   """
   def dispatch(target, type, init \\ %{}) do
+    # (`:window` is the window of the document that is running)
+    target = if target == :window, do: win_key(), else: target
+    in_realm(realm_key_to_doc(target), fn -> do_dispatch(target, type, init) end)
+  end
+
+  defp do_dispatch(target, type, init) do
     bubbles = Map.get(init, :bubbles, true)
     cancelable = Map.get(init, :cancelable, true)
 
@@ -1645,7 +2411,9 @@ defmodule Browser.JS.DOM do
     path =
       case target do
         :window -> [:window]
-        nid -> [nid | ancestors(nid)] ++ [:window]
+        {:window, _} -> [target]
+        {:objt, _} -> [target]
+        nid -> tree_path(nid, Map.get(init, :composed, true)) ++ [window_key_of(nid)]
       end
 
     # capture: from the outermost down to the target's parent
@@ -1662,6 +2430,16 @@ defmodule Browser.JS.DOM do
     put(event, "currentTarget", :null)
     put(event, "eventPhase", 0.0)
     if truthy(Interp.get(event, "defaultPrevented")), do: :prevented, else: :ok
+  end
+
+  # the node and its ancestors; a composed event goes on from a shadow root to its host
+  defp tree_path(nid, composed) do
+    chain = [nid | ancestors(nid)]
+
+    case node(List.last(chain)).shost do
+      host when composed and host != nil -> chain ++ tree_path(host, composed)
+      _ -> chain
+    end
   end
 
   defp put(o, k, v), do: Interp.put(o, k, v)
@@ -1709,7 +2487,8 @@ defmodule Browser.JS.DOM do
   defp run_inline_handler(target, type, event) do
     holder =
       case target do
-        :window when type in @window_events -> find_tag(st().doc, "body")
+        :window when type in @window_events -> find_tag(st().main, "body")
+        {:window, d} when type in @window_events -> find_tag(d, "body")
         nid when is_integer(nid) -> nid
         _ -> nil
       end
@@ -1764,12 +2543,8 @@ defmodule Browser.JS.DOM do
 
   defp describe(v) when is_binary(v), do: v
 
-  defp describe({:obj, _} = v) do
-    case Interp.get(v, "message") do
-      m when is_binary(m) -> m
-      _ -> Browser.JS.Builtins.inspect_js(v, 0, [])
-    end
-  end
+  defp describe({:obj, _} = v),
+    do: Interp.describe_error(v) || Browser.JS.Builtins.inspect_js(v, 0, [])
 
   defp describe(v), do: Browser.JS.Builtins.inspect_js(v, 0, [])
 
@@ -1933,16 +2708,169 @@ defmodule Browser.JS.DOM do
     do: List.last(element_kids(n.parent || -1)) == n.id
 
   defp match_cond(n, {:pseudo, "only-child", _}), do: element_kids(n.parent || -1) == [n.id]
+
+  defp match_cond(n, {:pseudo, "first-of-type", _}),
+    do: List.first(same_type_kids(n)) == n.id
+
+  defp match_cond(n, {:pseudo, "last-of-type", _}), do: List.last(same_type_kids(n)) == n.id
+  defp match_cond(n, {:pseudo, "only-of-type", _}), do: same_type_kids(n) == [n.id]
+
+  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, &kid_elements/1)
+
+  defp match_cond(n, {:pseudo, "nth-last-child", arg}),
+    do: nth_match(n, arg, true, &kid_elements/1)
+
+  defp match_cond(n, {:pseudo, "nth-of-type", arg}),
+    do: nth_match(n, arg, false, &same_type_kids/1)
+
+  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}),
+    do: nth_match(n, arg, true, &same_type_kids/1)
+
+  defp match_cond(n, {:pseudo, "has", arg}) when is_binary(arg) do
+    arg
+    |> split_top(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.any?(fn rel ->
+      {comb, rest} =
+        case rel do
+          <<c, r::binary>> when c in [?>, ?+, ?~] -> {<<c>>, String.trim(r)}
+          _ -> {" ", rel}
+        end
+
+      sels = parse_selectors(rest)
+      {_, after_sibs} = siblings(n.id)
+      after_els = Enum.filter(after_sibs, &(node(&1).kind == :element))
+
+      candidates =
+        case comb do
+          " " -> elements(n.id)
+          ">" -> element_kids(n.id)
+          "+" -> Enum.take(after_els, 1)
+          "~" -> after_els
+        end
+
+      candidates =
+        if comb in ["+", "~"],
+          do: candidates ++ Enum.flat_map(candidates, &elements/1),
+          else: candidates
+
+      (comb in ["+", "~"] &&
+         Enum.any?(
+           Enum.take(after_els, if(comb == "+", do: 1, else: length(after_els))),
+           &matches?(&1, sels)
+         )) or
+        (comb in [" ", ">"] and Enum.any?(candidates, &matches?(&1, sels)))
+    end)
+  end
+
+  defp match_cond(n, {:pseudo, "link", _}),
+    do: n.tag in ["a", "area"] and get_attr(n, "href") != nil
+
+  defp match_cond(n, {:pseudo, "any-link", _}),
+    do: n.tag in ["a", "area"] and get_attr(n, "href") != nil
+
+  defp match_cond(n, {:pseudo, "required", _}), do: get_attr(n, "required") != nil
+  defp match_cond(n, {:pseudo, "optional", _}), do: get_attr(n, "required") == nil
+
+  defp match_cond(n, {:pseudo, "read-only", _}),
+    do:
+      not (n.tag in ["input", "textarea"] and get_attr(n, "readonly") == nil and
+             get_attr(n, "disabled") == nil)
+
+  defp match_cond(n, {:pseudo, "read-write", _}),
+    do:
+      n.tag in ["input", "textarea"] and get_attr(n, "readonly") == nil and
+        get_attr(n, "disabled") == nil
+
+  defp match_cond(n, {:pseudo, "defined", _}),
+    do: not String.contains?(n.tag || "", "-") or registered(n.tag) != nil
+
+  defp match_cond(_n, {:pseudo, "scope", _}), do: false
   defp match_cond(n, {:pseudo, "empty", _}), do: n.kids == []
   defp match_cond(n, {:pseudo, "checked", _}), do: checked_of(n) == true
   defp match_cond(n, {:pseudo, "disabled", _}), do: get_attr(n, "disabled") != nil
   defp match_cond(n, {:pseudo, "enabled", _}), do: get_attr(n, "disabled") == nil
   defp match_cond(n, {:pseudo, "root", _}), do: n.tag == "html"
+  defp match_cond(n, {:pseudo, "modal", _}), do: List.keymember?(n.internal, "@modal", 0)
+  defp match_cond(n, {:pseudo, "popover-open", _}), do: List.keymember?(n.internal, "@popover", 0)
+
+  defp match_cond(n, {:pseudo, "open", _}),
+    do: n.tag in ["dialog", "details"] and open_of(n) == true
+
   defp match_cond(n, {:pseudo, "not", arg}), do: not matches?(n.id, parse_selectors(arg))
   defp match_cond(n, {:pseudo, "is", arg}), do: matches?(n.id, parse_selectors(arg))
   defp match_cond(n, {:pseudo, "where", arg}), do: matches?(n.id, parse_selectors(arg))
   defp match_cond(_n, {:pseudo, _, _}), do: false
   defp match_cond(_n, _), do: false
+
+  defp kid_elements(n), do: if(n.parent, do: element_kids(n.parent), else: [n.id])
+
+  # the element children of the parent that have the element's tag
+  defp same_type_kids(n) do
+    Enum.filter(kid_elements(n), &(node(&1).tag == n.tag))
+  end
+
+  # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
+  defp nth_match(n, arg, from_end?, siblings_fun) do
+    {formula, of_sel} =
+      case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+        [f, sel] -> {f, parse_selectors(sel)}
+        [f] -> {f, nil}
+      end
+
+    kids = siblings_fun.(n)
+    kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
+    kids = if from_end?, do: Enum.reverse(kids), else: kids
+
+    case Enum.find_index(kids, &(&1 == n.id)) do
+      nil ->
+        false
+
+      i ->
+        case parse_anb(formula) do
+          {a, b} ->
+            pos = i + 1
+
+            if a == 0,
+              do: pos == b,
+              else: rem(pos - b, a) == 0 and div(pos - b, a) >= 0
+
+          :error ->
+            false
+        end
+    end
+  end
+
+  defp parse_anb(f) do
+    f = f |> String.downcase() |> String.replace(~r/\s+/, "")
+
+    case f do
+      "odd" ->
+        {2, 1}
+
+      "even" ->
+        {2, 0}
+
+      _ ->
+        case Regex.run(~r/^([+-]?\d*)n([+-]\d+)?$/, f) do
+          [_, a] ->
+            {anb_coef(a), 0}
+
+          [_, a, b] ->
+            {anb_coef(a), String.to_integer(String.trim_leading(b, "+"))}
+
+          nil ->
+            case Integer.parse(f) do
+              {b, ""} -> {0, b}
+              _ -> :error
+            end
+        end
+    end
+  end
+
+  defp anb_coef(a) when a in ["", "+"], do: 1
+  defp anb_coef("-"), do: -1
+  defp anb_coef(a), do: String.to_integer(String.trim_leading(a, "+"))
 
   defp attr_match(nil, _v, _), do: true
   defp attr_match("=", v, val), do: v == val
@@ -1987,7 +2915,11 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp serialize_kids(nid), do: node(nid).kids |> Enum.map_join(&serialize/1)
+  defp serialize_kids(nid) do
+    n = node(nid)
+    holder = if n.kind == :element and n.tag == "template", do: template_content(nid), else: nid
+    node(holder).kids |> Enum.map_join(&serialize/1)
+  end
 
   defp parent_tag(n), do: n.parent && node(n.parent).tag
 
@@ -2034,8 +2966,29 @@ defmodule Browser.JS.DOM do
     s = st()
 
     case key do
-      k when k in ["window", "self", "top", "parent", "globalThis", "frames"] ->
+      k when k in ["window", "self", "globalThis", "frames"] ->
+        {:ok, win_host()}
+
+      "top" ->
         {:ok, aux_host(:window, :window)}
+
+      "parent" ->
+        case Map.get(s.meta, s.doc) do
+          %{parent: p} when p != nil ->
+            {:ok, aux_host(if(p == s.main, do: :window, else: {:window, p}), :window)}
+
+          _ ->
+            {:ok, win_host()}
+        end
+
+      "frameElement" ->
+        case Map.get(s.meta, s.doc) do
+          %{iframe: i} when i != nil -> {:ok, wrap(i)}
+          _ -> {:ok, :null}
+        end
+
+      "length" ->
+        {:ok, float(length(child_frames(s.doc)))}
 
       "document" ->
         {:ok, wrap(s.doc)}
@@ -2044,10 +2997,10 @@ defmodule Browser.JS.DOM do
         {:ok, window_handler(event)}
 
       "location" ->
-        {:ok, aux_host(:location, :location)}
+        {:ok, loc_host()}
 
       "history" ->
-        {:ok, aux_host(:history, :history)}
+        {:ok, hist_host()}
 
       "innerWidth" ->
         {:ok, float(s.width)}
@@ -2074,10 +3027,10 @@ defmodule Browser.JS.DOM do
         {:ok, elem(s.scroll, 1)}
 
       "localStorage" ->
-        {:ok, aux_host({:storage, :local}, :storage)}
+        {:ok, storage_host(:local)}
 
       "sessionStorage" ->
-        {:ok, aux_host({:storage, :session}, :storage)}
+        {:ok, storage_host(:session)}
 
       "navigator" ->
         {:ok, Process.get(:dom_navigator, :undefined)}
@@ -2089,13 +3042,38 @@ defmodule Browser.JS.DOM do
             {:ok, v}
 
           :error ->
-            case named_element(key) do
-              {:ok, _} = found -> found
-              :error -> :miss
+            case frame_by_index(key) do
+              {:ok, _} = frame ->
+                frame
+
+              :error ->
+                case named_element(key) do
+                  {:ok, _} = found -> found
+                  :error -> :miss
+                end
             end
         end
     end
   end
+
+  # the documents of the frames in the document `doc`, oldest element first
+  defp child_frames(doc) do
+    for({d, %{parent: ^doc, iframe: i}} <- st().meta, is_integer(i), do: {i, d})
+    |> Enum.sort()
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  # `window[0]`: the window of a frame
+  defp frame_by_index(key) when is_binary(key) do
+    with {i, ""} <- Integer.parse(key),
+         d when d != nil <- Enum.at(child_frames(st().doc), i) do
+      {:ok, aux_host(if(d == st().main, do: :window, else: {:window, d}), :window)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp frame_by_index(_), do: :error
 
   @doc """
   Named access on the window: an element with that `id` is a global (`<div id=log>` is `log`),
@@ -2119,12 +3097,12 @@ defmodule Browser.JS.DOM do
 
     index =
       case Process.get(:dom_ids) do
-        {^rev, m} ->
+        {^rev, ^doc, m} ->
           m
 
         _ ->
           m = collect_ids(doc, %{})
-          Process.put(:dom_ids, {rev, m})
+          Process.put(:dom_ids, {rev, doc, m})
           m
       end
 
@@ -2152,7 +3130,7 @@ defmodule Browser.JS.DOM do
         location_put("href", v)
 
       "on" <> event when event in @window_events ->
-        set_inline_handler(:window, event, if(function?(v), do: v))
+        set_inline_handler(win_key(), event, if(function?(v), do: v))
         :ok
 
       _ ->
@@ -2163,7 +3141,7 @@ defmodule Browser.JS.DOM do
 
   # `window.onload` and the like: the function assigned, or null
   defp window_handler(event) do
-    case Enum.find(Map.get(st().listeners, :window, []), &(&1.type == event and &1[:inline])) do
+    case Enum.find(Map.get(st().listeners, win_key(), []), &(&1.type == event and &1[:inline])) do
       nil -> :null
       l -> l.fun
     end
@@ -2309,7 +3287,33 @@ defmodule Browser.JS.DOM do
       # the same address again, or only another fragment: the document stays
       fragment != nil and target == here and url == st().url -> :ok
       fragment != nil and target == here -> hash_navigation(url, mode)
+      st().doc != st().main -> navigate_frame(url)
       true -> out({:navigate, url, mode})
+    end
+
+    :ok
+  end
+
+  # a frame goes to another page: its element loads it
+  defp navigate_frame(url) do
+    iframe = st().meta |> Map.get(st().doc, %{}) |> Map.get(:iframe)
+
+    if iframe do
+      page = node(iframe).doc
+      source = {:url, url}
+      tok = make_ref()
+      Process.put({:dom_frame_tok, iframe}, tok)
+
+      fire = fn _this, _ ->
+        with true <- Process.get({:dom_frame_tok, iframe}) == tok,
+             hook when is_function(hook) <- Process.get(:rt_load_frame) do
+          hook.(iframe, source, page)
+        end
+
+        :undefined
+      end
+
+      Browser.JS.Builtins.add_timer(native("", fire), 0.0)
     end
 
     :ok
@@ -2542,6 +3546,9 @@ defmodule Browser.JS.DOM do
 
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
 
+  @doc "The address of the page, for the origin of its databases."
+  def page_url, do: st().url
+
   @doc """
   Another page changed `localStorage`: fires `storage` on the window with what changed
   (`key` is nil for `clear`).
@@ -2610,12 +3617,14 @@ defmodule Browser.JS.DOM do
 
   defp set_proto({:obj, id}, proto), do: store(id, %{deref(id) | proto: proto})
 
-  defp connected?(nid), do: nid == st().doc or st().doc in ancestors(nid)
+  defp connected?(nid), do: node(root_of(nid)).kind == :document
 
   # an element that is in the document gets upgraded, or told it was connected again
   defp connect(nid) do
+    frames_arriving(nid)
+
     if st().ce != %{} and connected?(nid) do
-      for e <- [nid | elements(nid)], node(e).kind == :element, ctor = registered(node(e).tag) do
+      for e <- elements_deep([nid]), node(e).kind == :element, ctor = registered(node(e).tag) do
         if MapSet.member?(st().ce_done, e) do
           call_callback(e, "connectedCallback", [])
         else
@@ -2626,6 +3635,128 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # the nodes and the elements below them, and the ones in the shadow roots of those
+  defp elements_deep(roots) do
+    Enum.flat_map(roots, fn r ->
+      all = [r | elements(r)]
+
+      all ++
+        Enum.flat_map(all, fn e ->
+          case node(e).shadow do
+            nil -> []
+            sh -> elements_deep([sh])
+          end
+        end)
+    end)
+  end
+
+  # a node taken into another document (a script put one document's node in another's tree)
+  defp adopt(nid, doc) do
+    n = node(nid)
+
+    if n.doc != doc do
+      update_node_quiet(nid, &%{&1 | doc: doc})
+      for k <- n.kids, do: adopt(k, doc)
+      if n.content != nil, do: adopt(n.content, doc)
+    end
+
+    :ok
+  end
+
+  # ── frames ─────────────────────────────────────────────────
+
+  # `<iframe>`s in the subtree that a script is putting into the document
+  defp frames_arriving(nid) do
+    if Process.get(:dom_has_iframe) && connected?(nid) do
+      for e <- [nid | descendants(nid)], node(e).kind == :element, node(e).tag == "iframe" do
+        load_frame(e)
+      end
+    end
+
+    :ok
+  end
+
+  # the realms of the frames in a subtree that is leaving the document go with it
+  defp frames_leaving(nid) do
+    if Process.get(:dom_has_iframe) && st().frames != %{} do
+      for e <- [nid | descendants(nid)],
+          node(e).kind == :element,
+          node(e).tag == "iframe" do
+        cancel_frame_load(e)
+        if d = Map.get(st().frames, e), do: destroy_realm(d)
+      end
+    end
+
+    :ok
+  end
+
+  @doc "The `<iframe>`s of the page's document that have not been loaded yet get their load."
+  def load_initial_frames do
+    if Process.get(:dom_has_iframe) do
+      for e <- elements(st().doc), node(e).tag == "iframe", not is_map_key(st().frames, e) do
+        load_frame(e)
+      end
+    end
+
+    :ok
+  end
+
+  # what an `<iframe>` shows: its `srcdoc`, the page at its `src`, or an empty page
+  defp frame_source(n) do
+    cond do
+      (v = get_attr(n, "srcdoc")) != nil ->
+        {:srcdoc, v}
+
+      (v = get_attr(n, "src")) not in [nil, "", "about:blank"] ->
+        {:url, resolve_url(String.trim(v))}
+
+      true ->
+        :blank
+    end
+  end
+
+  defp cancel_frame_load(iframe), do: Process.put({:dom_frame_tok, iframe}, make_ref())
+
+  # loads the frame in a task of its own (the runtime does it: `:rt_load_frame`)
+  defp load_frame(iframe) do
+    source = frame_source(node(iframe))
+    tok = make_ref()
+    Process.put({:dom_frame_tok, iframe}, tok)
+    page = st().doc
+
+    fire = fn _this, _ ->
+      with true <- Process.get({:dom_frame_tok, iframe}) == tok,
+           hook when is_function(hook) <- Process.get(:rt_load_frame) do
+        hook.(iframe, source, page)
+      end
+
+      :undefined
+    end
+
+    Browser.JS.Builtins.add_timer(native("", fire), 0.0)
+  end
+
+  # `contentWindow` and `contentDocument` of a frame that is in a document: until it has loaded
+  # something, an empty page
+  defp frame_doc_of(nid) do
+    case Map.get(st().frames, nid) do
+      nil ->
+        with true <- connected?(nid),
+             hook when is_function(hook) <- Process.get(:rt_blank_frame),
+             d when is_integer(d) <- hook.(nid) do
+          d
+        else
+          _ -> nil
+        end
+
+      d ->
+        d
+    end
+  end
+
+  defp window_host_of(d),
+    do: aux_host(if(d == st().main, do: :window, else: {:window, d}), :window)
 
   defp upgrade(nid, ctor) do
     put_st(%{st() | ce_done: MapSet.put(st().ce_done, nid)})
@@ -2683,6 +3814,13 @@ defmodule Browser.JS.DOM do
     end
 
     image_src_changed(nid, name, new)
+
+    if name in ["src", "srcdoc"] and node(nid).tag == "iframe" and
+         (old != new or name == "srcdoc") and connected?(nid) do
+      if d = Map.get(st().frames, nid), do: destroy_realm(d)
+      load_frame(nid)
+    end
+
     :ok
   end
 
@@ -2773,6 +3911,14 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # the focused form control, if it is still in the document
+  defp ctl_focused do
+    case st().focus_ctl do
+      nil -> nil
+      nid -> if Map.has_key?(st().nodes, nid) and connected?(nid), do: nid
+    end
+  end
+
   # the focused host, if it is still in the document
   defp ed_focused do
     case st().focus_ed do
@@ -2800,9 +3946,35 @@ defmodule Browser.JS.DOM do
         dispatch(nid, "focusin", %{bubbles: true, cancelable: false})
         :ok
 
+      # a form control: the window gives it focus
+      control?(nid) ->
+        put_st(%{st() | focus_ctl: nid})
+        out({:focus_control, ensure_nid(nid)})
+        :ok
+
+      # other elements a script may focus: the window has nothing to show for them
+      script_focusable?(nid) ->
+        put_st(%{st() | focus_ctl: nid})
+        :ok
+
       true ->
         :ok
     end
+  end
+
+  defp script_focusable?(nid) do
+    n = node(nid)
+
+    n.kind == :element and
+      (n.tag == "dialog" or get_attr(n, "tabindex") != nil or
+         (n.tag == "a" and get_attr(n, "href") != nil))
+  end
+
+  defp control?(nid) do
+    n = node(nid)
+
+    n.kind == :element and n.tag in ["input", "select", "textarea", "button"] and
+      get_attr(n, "disabled") == nil and not (n.tag == "input" and type_of(n) == "hidden")
   end
 
   defp blur_focused do
@@ -2858,6 +4030,48 @@ defmodule Browser.JS.DOM do
   def node_numbered(n), do: nid_numbered(n)
 
   @doc """
+  A click on a link, which the layout reports as `href` over the element it numbers `nid`. When
+  the link is in a frame, the frame follows it (`target="_top"` and `"_parent"` send the
+  page, or the frame around, instead): `:frame`. A link of the page itself is for the session:
+  `:page`.
+  """
+  def follow_link(nid, href) do
+    main = st().main
+
+    with id when id != nil <- nid && nid_numbered(nid),
+         doc when doc != main <- node(id).doc,
+         %{parent: parent} <- frame_of(doc) do
+      target = link_target([id | ancestors(id)])
+
+      case target do
+        t when t in ["_top", "_parent"] ->
+          # the frame's own address is the base of a link that leaves it
+          url = in_realm(doc, fn -> resolve_url(href) end)
+
+          if t == "_top" or parent == st().main do
+            out({:navigate, url, :push})
+          else
+            in_realm(parent, fn -> navigate_to(url) end)
+          end
+
+        _ ->
+          in_realm(doc, fn -> navigate_to(resolve_url(href)) end)
+      end
+
+      :frame
+    else
+      _ -> :page
+    end
+  end
+
+  defp link_target(chain) do
+    Enum.find_value(chain, fn id ->
+      n = node(id)
+      if n.kind == :element and n.tag == "a", do: get_attr(n, "target") || "", else: nil
+    end)
+  end
+
+  @doc """
   The pointer moved from the element the layout numbers `old` to the one it numbers `new` (nil:
   none): `mouseout` and `mouseover` (which bubble, and are what frameworks listen to), and
   `mouseleave` / `mouseenter` for each element the pointer left or came into.
@@ -2885,6 +4099,9 @@ defmodule Browser.JS.DOM do
   end
 
   # the node (element or text) the layout numbers `n`
+  # (the backdrop of a modal dialog, which has the dialog's number made negative, is the dialog)
+  defp nid_numbered(n) when is_integer(n) and n < 0, do: nid_numbered(-n - 1)
+
   defp nid_numbered(n) do
     Enum.find_value(st().nodes, fn {id, node} ->
       if List.keyfind(node.internal, "@nid", 0) == {"@nid", n}, do: id
@@ -2990,15 +4207,61 @@ defmodule Browser.JS.DOM do
     install_aux()
     install_globals(scope, event_target, node_proto, element, text, document, event)
     Interp.declare(scope, "__ed", ed_object())
+
+    Interp.declare(
+      scope,
+      "__set_shadow",
+      native("__set_shadow", fn _, [host, root | _] ->
+        h = nid_of(host)
+        r = nid_of(root)
+        update_node_quiet(h, &%{&1 | shadow: r})
+        update_node_quiet(r, &%{&1 | shost: h})
+        # (a host that is in the document: what is in its shadow root is too)
+        if connected?(h), do: connect(r)
+        :undefined
+      end)
+    )
+
+    # the style sheets a shadow root adopts, as text (they apply inside the shadow tree)
+    Interp.declare(
+      scope,
+      "__set_adopted",
+      native("__set_adopted", fn _, [root, list | _] ->
+        r = nid_of(root)
+        texts = if array?(list), do: Enum.map(array_list(list), &to_str/1), else: []
+
+        update_node(r, fn n ->
+          %{n | internal: List.keystore(n.internal, "@adopted", 0, {"@adopted", texts})}
+        end)
+
+        :undefined
+      end)
+    )
+
+    Interp.declare(scope, "__cur_doc", native("__cur_doc", fn _, _ -> wrap(st().doc) end))
+    Interp.declare(scope, "__cur_loc", native("__cur_loc", fn _, _ -> loc_host() end))
     :ok
   end
 
-  defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+  # (a method called on a node of a frame's document runs as that document's script would)
+  defp def_fn(obj, name, fun),
+    do:
+      put_hidden(
+        obj,
+        name,
+        native(name, fn this, args -> maybe_realm(this, fn -> fun.(this, args) end) end)
+      )
 
   # -- canvas 2D ------------------------------------------------------------------
 
-  # `canvas.getContext("2d")`: one context per canvas, drawing into `Browser.Canvas`
-  # (rectangles only). Other kinds of context are not there: null, as the standard says.
+  # `canvas.getContext("2d")`: one context per canvas. What a script draws is kept as a display
+  # list in `Browser.Canvas` (the page paints it; the pixels are only made for `toDataURL`).
+  # The style properties live on the context object, as plain properties.
+  @canvas_props ~w(fillStyle strokeStyle lineWidth lineCap lineJoin miterLimit globalAlpha font
+                   textAlign textBaseline lineDashOffset direction globalCompositeOperation
+                   imageSmoothingEnabled imageSmoothingQuality shadowBlur shadowColor shadowOffsetX
+                   shadowOffsetY filter letterSpacing __dash)
+
   defp canvas_context(this, "2d") do
     nid = this_nid(this)
 
@@ -3011,12 +4274,30 @@ defmodule Browser.JS.DOM do
                 {"fillStyle", "#000000"},
                 {"strokeStyle", "#000000"},
                 {"lineWidth", 1.0},
+                {"lineCap", "butt"},
+                {"lineJoin", "miter"},
+                {"miterLimit", 10.0},
                 {"globalAlpha", 1.0},
+                {"font", "10px sans-serif"},
+                {"textAlign", "start"},
+                {"textBaseline", "alphabetic"},
+                {"lineDashOffset", 0.0},
+                {"direction", "ltr"},
+                {"globalCompositeOperation", "source-over"},
+                {"imageSmoothingEnabled", true},
+                {"imageSmoothingQuality", "low"},
+                {"shadowBlur", 0.0},
+                {"shadowColor", "rgba(0, 0, 0, 0)"},
+                {"shadowOffsetX", 0.0},
+                {"shadowOffsetY", 0.0},
+                {"filter", "none"},
+                {"letterSpacing", "0px"},
                 {"canvas", this}
               ],
               Process.get(:canvas_ctx_proto)
             )
 
+          put_hidden(ctx, "__dash", new_array([]))
           Process.put({:canvas_ctx, nid}, ctx)
           ctx
 
@@ -3046,6 +4327,22 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # `canvas.width` and `.height`: the attribute as a number, else 300 by 150
+  defp canvas_size(n, name) do
+    default = if name == "width", do: 300, else: 150
+
+    case get_attr(n, name) do
+      v when is_binary(v) ->
+        case Integer.parse(String.trim(v)) do
+          {i, _} when i >= 0 -> i * 1.0
+          _ -> default * 1.0
+        end
+
+      _ ->
+        default * 1.0
+    end
+  end
+
   defp canvas_dim(this, nid, name, default) do
     from_prop = Interp.get(this, name)
 
@@ -3059,17 +4356,15 @@ defmodule Browser.JS.DOM do
     if is_number(n) and n >= 0, do: trunc(n), else: default
   end
 
-  defp canvas_color(ctx, prop) do
-    alpha = ctx |> Interp.get("globalAlpha") |> to_num_or_zero() |> min(1) |> max(0)
-
-    case Browser.Color.parse_alpha(to_str(Interp.get(ctx, prop))) do
-      {r, g, b, a} -> {r, g, b, round(a * alpha)}
-      # unparsable colours leave the previous one, which is not tracked: black
-      _ -> {0, 0, 0, round(255 * alpha)}
-    end
+  # `n` finite numbers from the arguments as floats, or nil: a call with a NaN or an infinite
+  # argument does nothing, as the standard says
+  defp canvas_nums(args, n) do
+    vals = for i <- 0..(n - 1)//1, do: to_num(arg(args, i))
+    if Enum.all?(vals, &is_number/1), do: Enum.map(vals, &(&1 * 1.0))
   end
 
-  defp canvas_draw(ctx, fun) do
+  # changes the state of the canvas of `ctx` without drawing (the path, the transform)
+  defp canvas_state(ctx, fun) do
     this = Interp.get(ctx, "canvas")
 
     with surface when surface != nil <- canvas_surface(this) do
@@ -3079,30 +4374,585 @@ defmodule Browser.JS.DOM do
     :undefined
   end
 
-  defp install_canvas_context(p) do
-    def_fn(p, "fillRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
+  # draws on the canvas of `ctx`; the page has to be laid out again to show it
+  defp canvas_draw(ctx, fun) do
+    this = Interp.get(ctx, "canvas")
 
-      canvas_draw(
-        this,
-        &Browser.Canvas.fill_rect(&1, x, y, w, h, canvas_color(this, "fillStyle"))
-      )
+    with surface when surface != nil <- canvas_surface(this) do
+      nid = this_nid(this)
+      Process.put({:canvas, nid}, fun.(surface))
+      update_node(nid, & &1)
+    end
+
+    :undefined
+  end
+
+  defp canvas_alpha(ctx),
+    do: ctx |> Interp.get("globalAlpha") |> to_num_or_zero() |> min(1) |> max(0) |> Kernel.*(1.0)
+
+  # the paint of `fillStyle` or `strokeStyle`: a colour, or a gradient, with the points the
+  # script gave. (Patterns paint nothing.)
+  defp canvas_paint(ctx, prop) do
+    case Interp.get(ctx, prop) do
+      {:obj, id} ->
+        case Process.get({:canvas_grad, id}) do
+          nil -> {:color, {0, 0, 0, 0}}
+          grad -> gradient_paint(grad)
+        end
+
+      v ->
+        case Browser.Color.parse_alpha(to_str(v)) do
+          {r, g, b, a} -> {:color, {r, g, b, a}}
+          _ -> {:color, {0, 0, 0, 255}}
+        end
+    end
+  end
+
+  defp gradient_paint(%{stops: []}), do: {:color, {0, 0, 0, 0}}
+  defp gradient_paint(%{stops: [{_, color}]}), do: {:color, color}
+
+  defp gradient_paint(%{kind: :linear, geom: geom, stops: stops}), do: {:linear, geom, stops}
+
+  defp gradient_paint(%{kind: :radial, geom: {x0, y0, r0, x1, y1, r1}, stops: stops}) do
+    if r1 <= 0 do
+      {:color, stops |> List.last() |> elem(1)}
+    else
+      f = min(r0 / r1, 0.99)
+      stops = if f > 0, do: Enum.map(stops, fn {o, c} -> {f + o * (1 - f), c} end), else: stops
+      {:radial, {x1, y1, r1, x0, y0}, stops}
+    end
+  end
+
+  defp canvas_line_style(ctx) do
+    dash =
+      case Interp.get(ctx, "__dash") do
+        {:obj, _} = list ->
+          nums = list |> array_list() |> Enum.map(&to_num_or_zero/1)
+          if nums != [] and Enum.sum(nums) > 0, do: nums
+
+        _ ->
+          nil
+      end
+
+    %{
+      width: ctx |> Interp.get("lineWidth") |> to_num_or_zero() |> Kernel.*(1.0),
+      cap:
+        case Interp.get(ctx, "lineCap") do
+          "round" -> :round
+          "square" -> :square
+          _ -> :butt
+        end,
+      join:
+        case Interp.get(ctx, "lineJoin") do
+          "round" -> :round
+          "bevel" -> :bevel
+          _ -> :miter
+        end,
+      miter: ctx |> Interp.get("miterLimit") |> to_num_or_zero() |> Kernel.*(1.0),
+      dash: dash
+    }
+  end
+
+  defp canvas_text_style(ctx, prop) do
+    %{
+      paint: canvas_paint(ctx, prop),
+      alpha: canvas_alpha(ctx),
+      font: to_str(Interp.get(ctx, "font")),
+      align:
+        case Interp.get(ctx, "textAlign") do
+          a when a in ["center"] -> :middle
+          a when a in ["right", "end"] -> :end
+          _ -> :start
+        end,
+      baseline:
+        case Interp.get(ctx, "textBaseline") do
+          "top" -> :top
+          "hanging" -> :hanging
+          "middle" -> :middle
+          "bottom" -> :bottom
+          "ideographic" -> :ideographic
+          _ -> :alphabetic
+        end
+    }
+  end
+
+  # a path function shared by the context and `Path2D`: `c` is a `Browser.Canvas`
+  @path_methods ~w(moveTo lineTo bezierCurveTo quadraticCurveTo arc arcTo ellipse rect roundRect
+                   closePath)
+  defp path_call(c, "closePath", _args), do: Browser.Canvas.close_path(c)
+
+  defp path_call(c, name, args) do
+    case path_args(name, args) do
+      nil -> c
+      {:error, kind, msg} -> throw_error(kind, msg)
+      call -> apply_path_call(c, call)
+    end
+  end
+
+  defp path_args(name, args) do
+    n =
+      case name do
+        "moveTo" -> 2
+        "lineTo" -> 2
+        "bezierCurveTo" -> 6
+        "quadraticCurveTo" -> 4
+        "arc" -> 5
+        "arcTo" -> 5
+        "ellipse" -> 7
+        "rect" -> 4
+        "roundRect" -> 4
+      end
+
+    with nums when nums != nil <- canvas_nums(args, n) do
+      case {name, nums} do
+        {"arc", [_, _, r | _]} when r < 0 ->
+          {:error, "IndexSizeError", "The radius provided (#{trunc(r)}) is negative."}
+
+        {"arcTo", [_, _, _, _, r]} when r < 0 ->
+          {:error, "IndexSizeError", "The radius provided (#{trunc(r)}) is negative."}
+
+        {"ellipse", [_, _, rx, ry | _]} when rx < 0 or ry < 0 ->
+          {:error, "IndexSizeError", "The radius provided is negative."}
+
+        {"arc", nums} ->
+          {:arc, nums, truthy(arg(args, 5))}
+
+        {"ellipse", nums} ->
+          {:ellipse, nums, truthy(arg(args, 7))}
+
+        {"roundRect", nums} ->
+          {:round_rect, nums, round_rect_radii(arg(args, 4))}
+
+        {name, nums} ->
+          {String.to_atom(Macro.underscore(name)), nums}
+      end
+    end
+  end
+
+  defp apply_path_call(c, {:move_to, [x, y]}), do: Browser.Canvas.move_to(c, x, y)
+  defp apply_path_call(c, {:line_to, [x, y]}), do: Browser.Canvas.line_to(c, x, y)
+
+  defp apply_path_call(c, {:bezier_curve_to, [a, b, d, e, f, g]}),
+    do: Browser.Canvas.bezier_to(c, a, b, d, e, f, g)
+
+  defp apply_path_call(c, {:quadratic_curve_to, [a, b, d, e]}),
+    do: Browser.Canvas.quad_to(c, a, b, d, e)
+
+  defp apply_path_call(c, {:arc_to, [a, b, d, e, r]}), do: Browser.Canvas.arc_to(c, a, b, d, e, r)
+  defp apply_path_call(c, {:rect, [x, y, w, h]}), do: Browser.Canvas.rect(c, x, y, w, h)
+
+  defp apply_path_call(c, {:arc, [x, y, r, a0, a1], ccw}),
+    do: Browser.Canvas.arc(c, x, y, r, a0, a1, ccw)
+
+  defp apply_path_call(c, {:ellipse, [x, y, rx, ry, rot, a0, a1], ccw}),
+    do: Browser.Canvas.ellipse(c, x, y, rx, ry, rot, a0, a1, ccw)
+
+  defp apply_path_call(c, {:round_rect, [x, y, w, h], radii}),
+    do: Browser.Canvas.round_rect(c, x, y, w, h, radii)
+
+  # `roundRect` radii: a number, or a list of one to four numbers (or `{x, y}` points)
+  defp round_rect_radii(v) do
+    radius = fn
+      {:obj, _} = o -> o |> Interp.get("x") |> to_num_or_zero()
+      n -> to_num_or_zero(n)
+    end
+
+    list =
+      case v do
+        :undefined ->
+          [0]
+
+        {:obj, _} = o ->
+          if Interp.array?(o), do: Enum.map(array_list(o), radius), else: [radius.(o)]
+
+        n ->
+          [radius.(n)]
+      end
+
+    case list do
+      [] -> [0.0, 0.0, 0.0, 0.0]
+      [a] -> [a, a, a, a]
+      [a, b] -> [a, b, a, b]
+      [a, b, c] -> [a, b, c, b]
+      [a, b, c, d | _] -> [a, b, c, d]
+    end
+    |> Enum.map(&(&1 * 1.0))
+  end
+
+  defp matrix_args(args) do
+    case arg(args, 0) do
+      {:obj, _} = m ->
+        vals = for k <- ~w(a b c d e f), do: to_num(Interp.get(m, k))
+        if Enum.all?(vals, &is_number/1), do: List.to_tuple(Enum.map(vals, &(&1 * 1.0)))
+
+      _ ->
+        with nums when nums != nil <- canvas_nums(args, 6), do: List.to_tuple(nums)
+    end
+  end
+
+  defp canvas_fill_args(args) do
+    case arg(args, 0) do
+      {:obj, id} ->
+        case Process.get({:path2d, id}) do
+          nil -> {nil, fill_rule(arg(args, 0))}
+          path -> {path, fill_rule(arg(args, 1))}
+        end
+
+      rule ->
+        {nil, fill_rule(rule)}
+    end
+  end
+
+  defp fill_rule("evenodd"), do: :evenodd
+  defp fill_rule(_), do: :nonzero
+
+  defp install_canvas_context(p) do
+    for name <- @path_methods do
+      def_fn(p, name, fn this, args ->
+        canvas_state(this, &path_call(&1, name, args))
+      end)
+    end
+
+    def_fn(p, "beginPath", fn this, _ -> canvas_state(this, &Browser.Canvas.begin_path/1) end)
+
+    def_fn(p, "fill", fn this, args ->
+      {path, rule} = canvas_fill_args(args)
+      paint = canvas_paint(this, "fillStyle")
+      alpha = canvas_alpha(this)
+      draw = &Browser.Canvas.fill(&1, paint, rule, alpha)
+
+      canvas_draw(this, fn c ->
+        if path, do: Browser.Canvas.with_path(c, path, draw), else: draw.(c)
+      end)
+    end)
+
+    def_fn(p, "stroke", fn this, args ->
+      path =
+        with {:obj, id} <- arg(args, 0), do: Process.get({:path2d, id}), else: (_ -> nil)
+
+      paint = canvas_paint(this, "strokeStyle")
+      alpha = canvas_alpha(this)
+      style = canvas_line_style(this)
+      draw = &Browser.Canvas.stroke(&1, paint, style, alpha)
+
+      canvas_draw(this, fn c ->
+        if path, do: Browser.Canvas.with_path(c, path, draw), else: draw.(c)
+      end)
+    end)
+
+    def_fn(p, "clip", fn this, args ->
+      {path, _rule} = canvas_fill_args(args)
+
+      canvas_state(this, fn c ->
+        if path,
+          do: Browser.Canvas.with_path(c, path, &Browser.Canvas.clip/1),
+          else: Browser.Canvas.clip(c)
+      end)
+    end)
+
+    def_fn(p, "isPointInPath", fn _, _ -> false end)
+    def_fn(p, "isPointInStroke", fn _, _ -> false end)
+
+    def_fn(p, "fillRect", fn this, args ->
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        paint = canvas_paint(this, "fillStyle")
+        alpha = canvas_alpha(this)
+        canvas_draw(this, &Browser.Canvas.fill_rect(&1, x, y, w, h, paint, alpha))
+      else
+        _ -> :undefined
+      end
     end)
 
     def_fn(p, "strokeRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
-      lw = this |> Interp.get("lineWidth") |> to_num_or_zero()
-
-      canvas_draw(
-        this,
-        &Browser.Canvas.stroke_rect(&1, x, y, w, h, lw, canvas_color(this, "strokeStyle"))
-      )
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        paint = canvas_paint(this, "strokeStyle")
+        alpha = canvas_alpha(this)
+        style = canvas_line_style(this)
+        canvas_draw(this, &Browser.Canvas.stroke_rect(&1, x, y, w, h, paint, style, alpha))
+      else
+        _ -> :undefined
+      end
     end)
 
     def_fn(p, "clearRect", fn this, args ->
-      [x, y, w, h] = for i <- 0..3, do: to_num_or_zero(arg(args, i))
-      canvas_draw(this, &Browser.Canvas.clear_rect(&1, x, y, w, h))
+      with [x, y, w, h] <- canvas_nums(args, 4) do
+        canvas_draw(this, &Browser.Canvas.clear_rect(&1, x, y, w, h))
+      else
+        _ -> :undefined
+      end
     end)
+
+    for {name, prop} <- [{"fillText", "fillStyle"}, {"strokeText", "strokeStyle"}] do
+      def_fn(p, name, fn this, args ->
+        with [x, y] <- canvas_nums(Enum.drop(args, 1), 2) do
+          style = canvas_text_style(this, prop)
+          canvas_draw(this, &Browser.Canvas.text(&1, to_str(arg(args, 0)), x, y, style))
+        else
+          _ -> :undefined
+        end
+      end)
+    end
+
+    def_fn(p, "measureText", fn this, args ->
+      text = to_str(arg(args, 0))
+      font = Browser.Canvas.parse_font(to_str(Interp.get(this, "font")))
+      w = Browser.Canvas.text_width(text, font)
+      s = font.size
+
+      new_object([
+        {"width", w},
+        {"actualBoundingBoxLeft", 0.0},
+        {"actualBoundingBoxRight", w},
+        {"actualBoundingBoxAscent", 0.72 * s},
+        {"actualBoundingBoxDescent", 0.2 * s},
+        {"fontBoundingBoxAscent", 0.8 * s},
+        {"fontBoundingBoxDescent", 0.2 * s},
+        {"emHeightAscent", 0.8 * s},
+        {"emHeightDescent", 0.2 * s},
+        {"alphabeticBaseline", 0.0}
+      ])
+    end)
+
+    def_fn(p, "save", fn this, _ ->
+      props = for name <- @canvas_props, do: {name, Interp.get(this, name)}
+      canvas_state(this, &Browser.Canvas.save(&1, props))
+    end)
+
+    def_fn(p, "restore", fn this, _ ->
+      canvas_state(this, fn c ->
+        {c, props} = Browser.Canvas.restore(c)
+        for {name, v} <- props || [], do: Interp.put(this, name, v)
+        c
+      end)
+    end)
+
+    def_fn(p, "scale", fn this, args ->
+      with [x, y] <- canvas_nums(args, 2),
+           do: canvas_state(this, &Browser.Canvas.scale(&1, x, y)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "translate", fn this, args ->
+      with [x, y] <- canvas_nums(args, 2),
+           do: canvas_state(this, &Browser.Canvas.translate(&1, x, y)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "rotate", fn this, args ->
+      with [a] <- canvas_nums(args, 1),
+           do: canvas_state(this, &Browser.Canvas.rotate(&1, a)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "transform", fn this, args ->
+      with m when m != nil <- matrix_args(args),
+           do: canvas_state(this, &Browser.Canvas.transform(&1, m)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "setTransform", fn this, args ->
+      with m when m != nil <-
+             if(args == [], do: {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}, else: matrix_args(args)),
+           do: canvas_state(this, &Browser.Canvas.set_transform(&1, m)),
+           else: (_ -> :undefined)
+    end)
+
+    def_fn(p, "resetTransform", fn this, _ ->
+      canvas_state(this, &Browser.Canvas.reset_transform/1)
+    end)
+
+    def_fn(p, "getTransform", fn this, _ ->
+      {a, b, c, d, e, f} =
+        case canvas_surface(Interp.get(this, "canvas")) do
+          nil -> {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}
+          surface -> Browser.Canvas.matrix(surface)
+        end
+
+      new_object([
+        {"a", a},
+        {"b", b},
+        {"c", c},
+        {"d", d},
+        {"e", e},
+        {"f", f},
+        {"m11", a},
+        {"m12", b},
+        {"m21", c},
+        {"m22", d},
+        {"m41", e},
+        {"m42", f},
+        {"is2D", true},
+        {"isIdentity", {a, b, c, d, e, f} == {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}}
+      ])
+    end)
+
+    def_fn(p, "setLineDash", fn this, args ->
+      segments =
+        case arg(args, 0) do
+          {:obj, _} = list -> Enum.map(array_list(list), &to_num/1)
+          _ -> []
+        end
+
+      # an odd count is repeated; a negative or non-finite length makes the call a no-op
+      if Enum.all?(segments, &(is_number(&1) and &1 >= 0)) do
+        segments = if rem(length(segments), 2) == 1, do: segments ++ segments, else: segments
+        put_hidden(this, "__dash", new_array(Enum.map(segments, &(&1 * 1.0))))
+      end
+
+      :undefined
+    end)
+
+    def_fn(p, "getLineDash", fn this, _ ->
+      case Interp.get(this, "__dash") do
+        {:obj, _} = list -> new_array(array_list(list))
+        _ -> new_array([])
+      end
+    end)
+
+    def_fn(p, "createLinearGradient", fn _this, args ->
+      case canvas_nums(args, 4) do
+        [x0, y0, x1, y1] -> new_gradient(%{kind: :linear, geom: {x0, y0, x1, y1}, stops: []})
+        nil -> throw_error("TypeError", "createLinearGradient: arguments must be finite numbers")
+      end
+    end)
+
+    def_fn(p, "createRadialGradient", fn _this, args ->
+      case canvas_nums(args, 6) do
+        [x0, y0, r0, x1, y1, r1] when r0 >= 0 and r1 >= 0 ->
+          new_gradient(%{kind: :radial, geom: {x0, y0, r0, x1, y1, r1}, stops: []})
+
+        nil ->
+          throw_error("TypeError", "createRadialGradient: arguments must be finite numbers")
+
+        _ ->
+          throw_error("IndexSizeError", "The radius provided is negative.")
+      end
+    end)
+
+    # a conic gradient is drawn as a colour: its first stop
+    def_fn(p, "createConicGradient", fn _this, _ ->
+      new_gradient(%{kind: :linear, geom: {0.0, 0.0, 1.0, 0.0}, stops: []})
+    end)
+
+    def_fn(p, "drawImage", fn this, args ->
+      source = arg(args, 0)
+
+      with {:obj, _} <- source,
+           %Browser.Canvas{} = src <- canvas_source(source),
+           [a, b | rest] <- canvas_nums(Enum.drop(args, 1), min(length(args) - 1, 8)) do
+        {sx, sy, sw, sh, dx, dy, dw, dh} =
+          case rest do
+            [] -> {0.0, 0.0, src.w * 1.0, src.h * 1.0, a, b, src.w * 1.0, src.h * 1.0}
+            [dw, dh] -> {0.0, 0.0, src.w * 1.0, src.h * 1.0, a, b, dw, dh}
+            [sw, sh, dx, dy, dw, dh] -> {a, b, sw, sh, dx, dy, dw, dh}
+            _ -> {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+          end
+
+        alpha = canvas_alpha(this)
+
+        canvas_draw(
+          this,
+          &Browser.Canvas.draw_canvas(&1, src, sx, sy, sw, sh, dx, dy, dw, dh, alpha)
+        )
+      else
+        _ -> :undefined
+      end
+    end)
+  end
+
+  # the pixels of an element used as an image source, if it is a canvas with a surface
+  defp canvas_source({:obj, id}) do
+    case deref(id) do
+      %{class: :host, host: {__MODULE__, nid}} when is_integer(nid) ->
+        if node(nid).tag == "canvas", do: Process.get({:canvas, nid})
+
+      _ ->
+        nil
+    end
+  end
+
+  defp new_gradient(data) do
+    grad = new_object([], Process.get(:canvas_grad_proto))
+    {:obj, id} = grad
+    Process.put({:canvas_grad, id}, data)
+    grad
+  end
+
+  defp install_canvas_gradient(p) do
+    def_fn(p, "addColorStop", fn this, args ->
+      {:obj, id} = this
+      offset = to_num(arg(args, 0))
+
+      unless is_number(offset) and offset >= 0 and offset <= 1,
+        do: throw_error("IndexSizeError", "The provided value is outside the range (0.0, 1.0).")
+
+      case Browser.Color.parse_alpha(to_str(arg(args, 1))) do
+        {r, g, b, a} ->
+          grad = Process.get({:canvas_grad, id})
+          # stops of the same offset keep the order they came in
+          stops = Enum.sort_by(grad.stops ++ [{offset * 1.0, {r, g, b, a}}], &elem(&1, 0))
+          Process.put({:canvas_grad, id}, %{grad | stops: stops})
+
+        _ ->
+          throw_error(
+            "SyntaxError",
+            "The value provided ('#{to_str(arg(args, 1))}') could not be parsed as a color."
+          )
+      end
+
+      :undefined
+    end)
+  end
+
+  # `new Path2D()`, `new Path2D(path)` or `new Path2D("M0 0 L10 10")`: a path kept apart from
+  # any canvas, to be passed to `fill`, `stroke` and `clip`
+  defp install_path2d(scope) do
+    proto = new_object([])
+
+    for name <- @path_methods do
+      def_fn(proto, name, fn this, args -> path2d_update(this, &path_call(&1, name, args)) end)
+    end
+
+    def_fn(proto, "addPath", fn this, args ->
+      other =
+        with {:obj, oid} <- arg(args, 0), do: Process.get({:path2d, oid}), else: (_ -> nil)
+
+      m =
+        case matrix_args([arg(args, 1)]) do
+          nil -> {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}
+          m -> m
+        end
+
+      if other, do: path2d_update(this, &Browser.Canvas.add_path(&1, other, m))
+      :undefined
+    end)
+
+    Process.put(:path2d_proto, proto)
+
+    ctor(scope, "Path2D", proto, fn _this, args ->
+      obj = new_object([], proto)
+      {:obj, id} = obj
+
+      path =
+        case arg(args, 0) do
+          :undefined ->
+            Browser.Canvas.new(1, 1)
+
+          {:obj, oid} = _other ->
+            Process.get({:path2d, oid}) || Browser.Canvas.new(1, 1)
+
+          d ->
+            Browser.Canvas.from_segments(Browser.Svg.PathData.parse(to_str(d)))
+        end
+
+      Process.put({:path2d, id}, path)
+      obj
+    end)
+  end
+
+  defp path2d_update({:obj, id}, fun) do
+    Process.put({:path2d, id}, fun.(Process.get({:path2d, id})))
+    :undefined
   end
 
   defp ctor(scope, name, proto, fun) do
@@ -3138,7 +4988,8 @@ defmodule Browser.JS.DOM do
 
       init = %{
         bubbles: truthy(Interp.get(ev, "bubbles")),
-        cancelable: truthy(Interp.get(ev, "cancelable"))
+        cancelable: truthy(Interp.get(ev, "cancelable")),
+        composed: truthy(Interp.get(ev, "composed"))
       }
 
       extra =
@@ -3155,6 +5006,10 @@ defmodule Browser.JS.DOM do
   defp listener_target({:obj, id} = this) do
     case deref(id) do
       %{class: :host, host: {__MODULE__, :window}} -> :window
+      %{class: :host, host: {__MODULE__, {:window, _} = key}} -> key
+      %{class: :host, host: {__MODULE__, nid}} when is_integer(nid) -> nid
+      # (`new EventTarget()` and the classes that extend it: the object is its own target)
+      %{class: _} -> {:objt, id}
       _ -> this_nid(this)
     end
   end
@@ -3203,7 +5058,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "isSameNode", fn this, args -> this_nid(this) == nid_of(arg(args, 0)) end)
-    def_fn(p, "getRootNode", fn _this, _ -> wrap(st().doc) end)
+    def_fn(p, "getRootNode", fn this, _ -> wrap(top_of(this_nid(this))) end)
 
     def_fn(p, "normalize", fn this, _ ->
       normalize(this_nid(this))
@@ -3484,7 +5339,14 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "blur", fn this, _ ->
-      if st().focus_ed == this_nid(this), do: ed_blur()
+      nid = this_nid(this)
+
+      if st().focus_ctl == nid do
+        put_st(%{st() | focus_ctl: nil})
+        out({:modal, :blur})
+      end
+
+      if st().focus_ed == nid, do: ed_blur()
       :undefined
     end)
 
@@ -3518,23 +5380,58 @@ defmodule Browser.JS.DOM do
       scroll_to(elem(st().scroll, 0), target)
     end)
 
+    # the dialog is (or is no longer) shown modally; see `Browser.Modal`
+    def_fn(p, "__setModal", fn this, args ->
+      nid = this_nid(this)
+      on? = truthy(arg(args, 0))
+      was? = List.keymember?(node(nid).internal, "@modal", 0)
+
+      update_node(nid, fn n ->
+        internal = List.keydelete(n.internal, "@modal", 0)
+        %{n | internal: if(on?, do: internal ++ [{"@modal", 1}], else: internal)}
+      end)
+
+      # the window remembers where the focus was, and gives it back when the dialog closes
+      if on? != was?, do: out({:modal, if(on?, do: :open, else: :close)})
+      :undefined
+    end)
+
+    # a popover is (or is no longer) showing
+    def_fn(p, "__setPopover", fn this, args ->
+      on? = truthy(arg(args, 0))
+
+      update_node(this_nid(this), fn n ->
+        internal = List.keydelete(n.internal, "@popover", 0)
+        %{n | internal: if(on?, do: internal ++ [{"@popover", 1}], else: internal)}
+      end)
+
+      :undefined
+    end)
+
     def_fn(p, "click", fn this, _ ->
-      dispatch(this_nid(this), "click", %{})
+      nid = this_nid(this)
+      if dispatch(nid, "click", %{}) == :ok, do: activate(nid)
       :undefined
     end)
 
     def_fn(p, "submit", fn this, _ ->
-      out({:submit, form_index(this_nid(this))})
+      submit_form(this_nid(this), nil)
       :undefined
     end)
 
-    def_fn(p, "requestSubmit", fn this, _ ->
+    def_fn(p, "requestSubmit", fn this, args ->
+      request_submit(this_nid(this), submitter_arg(arg(args, 0)))
+      :undefined
+    end)
+
+    def_fn(p, "reset", fn this, _ ->
       nid = this_nid(this)
-      if dispatch(nid, "submit", %{}) == :ok, do: out({:submit, form_index(nid)})
+
+      if dispatch(nid, "reset", %{bubbles: true, cancelable: true}) != :prevented,
+        do: reset_controls(nid)
+
       :undefined
     end)
-
-    def_fn(p, "reset", fn _this, _ -> :undefined end)
 
     def_fn(p, "getBoundingClientRect", fn this, _ -> rect_object(this_nid(this)) end)
 
@@ -3546,6 +5443,50 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "animate", fn _this, _ -> new_object([]) end)
+  end
+
+  defp submitter_arg({:obj, _} = o), do: nid_of(o)
+  defp submitter_arg(_), do: nil
+
+  # the submit event, then the submission unless a script stopped it
+  defp request_submit(form, submitter) do
+    if dispatch(form, "submit", %{}) == :ok, do: submit_form(form, submitter)
+  end
+
+  # `<form method="dialog">` closes its dialog (see `Browser.Modal`); any other goes to the window
+  defp submit_form(form, submitter) do
+    method =
+      with s when s != nil <- submitter && get_attr(node(submitter), "formmethod") do
+        s
+      else
+        _ -> get_attr(node(form), "method") || ""
+      end
+
+    if String.downcase(method) == "dialog" do
+      call_global("__dialogSubmit", [wrap(form), if(submitter, do: wrap(submitter), else: :null)])
+    else
+      out({:submit, form_index(form)})
+    end
+  end
+
+  # what a click does when no script stopped it: a submit button submits its form
+  defp activate(nid) do
+    n = node(nid)
+
+    if n.tag in ["button", "input"] and get_attr(n, "popovertarget") != nil and
+         get_attr(n, "disabled") == nil,
+       do: call_global("__popoverInvoke", [wrap(nid)])
+
+    submit? =
+      get_attr(n, "disabled") == nil and
+        ((n.tag == "button" and type_of(n) == "submit") or
+           (n.tag == "input" and type_of(n) in ["submit", "image"]))
+
+    with true <- submit?, form when form != nil <- form_of(nid) do
+      request_submit(form, nid)
+    end
+
+    :ok
   end
 
   defp adjacent(nid, position, ids) do
@@ -3582,6 +5523,30 @@ defmodule Browser.JS.DOM do
   # `document.write`: what is written goes in after the running script (after what an earlier
   # write of the same script put there), or at the end of the body when nothing is running
   defp write_html(html) do
+    case Process.get({:dom_open, st().doc}) do
+      nil -> write_into_page(html)
+      buf -> rewrite_document(buf <> html)
+    end
+
+    :undefined
+  end
+
+  # after `document.open()` what is written is the new content of the document
+  defp rewrite_document(buf) do
+    doc = st().doc
+    Process.put({:dom_open, doc}, buf)
+
+    kids =
+      buf
+      |> Browser.HTML.parse_document()
+      |> Enum.map(&build(&1, doc))
+
+    for k <- node(doc).kids, do: update_node(k, &%{&1 | parent: nil})
+    update_node(doc, &%{&1 | kids: []})
+    Enum.each(kids, &insert(doc, &1, nil))
+  end
+
+  defp write_into_page(html) do
     ids = parse_fragment(html)
     s = st()
 
@@ -3600,7 +5565,6 @@ defmodule Browser.JS.DOM do
     end
 
     if ids != [], do: put_st(%{st() | write_after: List.last(ids)})
-    :undefined
   end
 
   defp install_document(p) do
@@ -3611,9 +5575,16 @@ defmodule Browser.JS.DOM do
       end)
     end
 
-    for name <- ~w(open close) do
-      def_fn(p, name, fn _this, _ -> :undefined end)
-    end
+    def_fn(p, "open", fn _this, _ ->
+      # (a document that is still being parsed keeps what it has)
+      if st().current_script == nil, do: rewrite_document("")
+      :undefined
+    end)
+
+    def_fn(p, "close", fn _this, _ ->
+      Process.delete({:dom_open, st().doc})
+      :undefined
+    end)
 
     def_fn(p, "getElementById", fn _this, args ->
       id = to_str(arg(args, 0))
@@ -3640,7 +5611,8 @@ defmodule Browser.JS.DOM do
     def_fn(p, "createDocumentFragment", fn _this, _ -> wrap(new_node(%{kind: :fragment})) end)
 
     def_fn(p, "createEvent", fn _this, _ ->
-      new_object([], proto({:dom, :event}))
+      ev = deref_global("Event")
+      construct(ev, [""], ev)
     end)
 
     def_fn(p, "hasFocus", fn _this, _ -> true end)
@@ -3664,7 +5636,38 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "composedPath", fn _this, _ -> new_array([]) end)
-    def_fn(p, "initEvent", fn _this, _ -> :undefined end)
+
+    # the old way to fill in an event made by `document.createEvent` (type, bubbles, cancelable,
+    # then the extra arguments of each kind)
+    init = fn extra ->
+      fn this, args ->
+        put(this, "type", to_str(arg(args, 0)))
+        put(this, "bubbles", truthy(arg(args, 1)))
+        put(this, "cancelable", truthy(arg(args, 2)))
+
+        for {name, i} <- Enum.with_index(extra, 3), name != nil, do: put(this, name, arg(args, i))
+
+        :undefined
+      end
+    end
+
+    def_fn(p, "initEvent", init.([]))
+    def_fn(p, "initCustomEvent", init.(["detail"]))
+    def_fn(p, "initUIEvent", init.(["view", "detail"]))
+
+    def_fn(
+      p,
+      "initMouseEvent",
+      init.(
+        ~w(view detail screenX screenY clientX clientY ctrlKey altKey shiftKey metaKey button relatedTarget)
+      )
+    )
+
+    def_fn(
+      p,
+      "initKeyboardEvent",
+      init.(["view", "key", "location", "ctrlKey", "altKey", "shiftKey", "metaKey"])
+    )
   end
 
   defp install_aux do
@@ -3725,6 +5728,13 @@ defmodule Browser.JS.DOM do
 
     sp = proto({:dom, :style})
 
+    def_fn(sp, "item", fn this, args ->
+      case Enum.at(style_decls(style_nid(this)), to_int(arg(args, 0))) do
+        {k, _} -> k
+        nil -> ""
+      end
+    end)
+
     def_fn(sp, "setProperty", fn this, args ->
       set_style(
         style_nid(this),
@@ -3736,9 +5746,18 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(sp, "getPropertyValue", fn this, args ->
-      style_decls(style_nid(this))
-      |> List.keyfind(String.downcase(to_str(arg(args, 0))), 0)
-      |> then(&if(&1, do: elem(&1, 1), else: ""))
+      name = String.downcase(to_str(arg(args, 0)))
+
+      if computed_style?(this) do
+        case computed_get(style_nid(this), name) do
+          {:ok, v} -> v
+          _ -> ""
+        end
+      else
+        style_decls(style_nid(this))
+        |> List.keyfind(name, 0)
+        |> then(&if(&1, do: elem(&1, 1), else: ""))
+      end
     end)
 
     def_fn(sp, "removeProperty", fn this, args ->
@@ -3869,7 +5888,16 @@ defmodule Browser.JS.DOM do
   defp classlist_nid({:obj, id}),
     do: with(%{host: {__MODULE__, {:classlist, nid}}} <- deref(id), do: nid)
 
-  defp style_nid({:obj, id}), do: with(%{host: {__MODULE__, {:style, nid}}} <- deref(id), do: nid)
+  defp style_nid({:obj, id}) do
+    case deref(id) do
+      %{host: {__MODULE__, {:style, nid}}} -> nid
+      %{host: {__MODULE__, {:style, nid, :computed}}} -> nid
+      _ -> nil
+    end
+  end
+
+  defp computed_style?({:obj, id}),
+    do: match?(%{host: {__MODULE__, {:style, _, :computed}}}, deref(id))
 
   defp install_usp(p) do
     def_fn(p, "get", fn this, args ->
@@ -4010,6 +6038,64 @@ defmodule Browser.JS.DOM do
     {"DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC", 32}
   ]
 
+  # the window-level names of the running realm: `window`, `document`, `location`, its size, ...
+  @doc false
+  def declare_window(scope) do
+    # globals that point into the document
+    window = win_host()
+    declare(scope, "window", window)
+    # `this` at the top of a classic script is the window
+    declare(scope, :this, window)
+    declare(scope, "self", window)
+    # there are no frames: the window is its own top and parent
+    declare(scope, "top", aux_host(:window, :window))
+    declare(scope, "parent", Interp.get(window, "parent"))
+    declare(scope, "frames", window)
+    declare(scope, "opener", :null)
+    declare(scope, "closed", false)
+    declare(scope, "name", "")
+    declare(scope, "isSecureContext", secure_context?(st().url))
+    declare(scope, "globalThis", window)
+    declare(scope, "document", wrap(st().doc))
+    declare(scope, "location", loc_host())
+    declare(scope, "history", hist_host())
+    declare(scope, "localStorage", storage_host(:local))
+    declare(scope, "sessionStorage", storage_host(:session))
+
+    for {name, v} <- [
+          {"innerWidth", float(st().width)},
+          {"innerHeight", float(st().height)},
+          {"outerWidth", float(st().width)},
+          {"outerHeight", float(st().height)},
+          {"devicePixelRatio", 1.0},
+          {"scrollX", 0.0},
+          {"scrollY", 0.0},
+          {"pageXOffset", 0.0},
+          {"pageYOffset", 0.0}
+        ] do
+      declare(scope, name, v)
+    end
+
+    for name <- ~w(alert focus blur print) do
+      declare(scope, name, native(name, fn _, _ -> :undefined end))
+    end
+
+    for {name, relative?} <- [{"scrollTo", false}, {"scroll", false}, {"scrollBy", true}] do
+      declare(scope, name, native(name, fn _, args -> scroll_args(args, relative?) end))
+    end
+
+    # `addEventListener(...)` without `window.` is the window's
+    for name <- ~w(addEventListener removeEventListener dispatchEvent) do
+      declare(
+        scope,
+        name,
+        native(name, fn _, args ->
+          call(Interp.get(proto({:dom, :window}), name), window, args)
+        end)
+      )
+    end
+  end
+
   defp install_globals(scope, event_target, node_proto, element, text, document, event) do
     # constructors, so `instanceof` works (and `new Event(...)`)
     ctor(scope, "EventTarget", event_target, fn _, _ -> :undefined end)
@@ -4026,7 +6112,18 @@ defmodule Browser.JS.DOM do
       p = new_object([], element)
       for tag <- tags, do: put_proto({:dom, {:tag, tag}}, p)
       ctor(scope, name, p, fn _, _ -> throw_error("TypeError", "Illegal constructor") end)
+      # `Object.prototype.toString.call(el)`: Vue and others tell what is not worth a proxy by it
+      Interp.put_tag(p, name)
     end
+
+    for {proto, tag} <- [
+          {element, "HTMLElement"},
+          {text, "Text"},
+          {document, "HTMLDocument"},
+          {event, "Event"},
+          {node_proto, "Node"}
+        ],
+        do: Interp.put_tag(proto, tag)
 
     for name <- ~w(SVGElement SVGAElement ShadowRoot DocumentFragment Comment KeyframeEffect) do
       ctor(scope, name, new_object([], element), fn _, _ -> :undefined end)
@@ -4035,6 +6132,15 @@ defmodule Browser.JS.DOM do
     ctx_proto = new_object([])
     install_canvas_context(ctx_proto)
     Process.put(:canvas_ctx_proto, ctx_proto)
+    grad_proto = new_object([])
+    install_canvas_gradient(grad_proto)
+    Process.put(:canvas_grad_proto, grad_proto)
+
+    ctor(scope, "CanvasGradient", grad_proto, fn _, _ ->
+      throw_error("TypeError", "Illegal constructor")
+    end)
+
+    install_path2d(scope)
 
     ctor(scope, "CanvasRenderingContext2D", ctx_proto, fn _, _ ->
       throw_error("TypeError", "Illegal constructor")
@@ -4189,60 +6295,8 @@ defmodule Browser.JS.DOM do
 
     def_fn(registry, "upgrade", fn _, _ -> :undefined end)
 
-    # globals that point into the document
-    window = aux_host(:window, :window)
-    declare(scope, "window", window)
-    # `this` at the top of a classic script is the window
-    declare(scope, :this, window)
-    declare(scope, "self", window)
-    # there are no frames: the window is its own top and parent
-    declare(scope, "top", window)
-    declare(scope, "parent", window)
-    declare(scope, "frames", window)
-    declare(scope, "opener", :null)
-    declare(scope, "closed", false)
-    declare(scope, "name", "")
-    declare(scope, "isSecureContext", secure_context?(st().url))
-    declare(scope, "globalThis", window)
-    declare(scope, "document", wrap(st().doc))
-    declare(scope, "location", aux_host(:location, :location))
-    declare(scope, "history", aux_host(:history, :history))
-    declare(scope, "localStorage", aux_host({:storage, :local}, :storage))
-    declare(scope, "sessionStorage", aux_host({:storage, :session}, :storage))
+    declare_window(scope)
     subscribe_storage()
-
-    for {name, v} <- [
-          {"innerWidth", float(st().width)},
-          {"innerHeight", float(st().height)},
-          {"outerWidth", float(st().width)},
-          {"outerHeight", float(st().height)},
-          {"devicePixelRatio", 1.0},
-          {"scrollX", 0.0},
-          {"scrollY", 0.0},
-          {"pageXOffset", 0.0},
-          {"pageYOffset", 0.0}
-        ] do
-      declare(scope, name, v)
-    end
-
-    for name <- ~w(alert focus blur print) do
-      declare(scope, name, native(name, fn _, _ -> :undefined end))
-    end
-
-    for {name, relative?} <- [{"scrollTo", false}, {"scroll", false}, {"scrollBy", true}] do
-      declare(scope, name, native(name, fn _, args -> scroll_args(args, relative?) end))
-    end
-
-    # `addEventListener(...)` without `window.` is the window's
-    for name <- ~w(addEventListener removeEventListener dispatchEvent) do
-      declare(
-        scope,
-        name,
-        native(name, fn _, args ->
-          call(Interp.get(proto({:dom, :window}), name), window, args)
-        end)
-      )
-    end
 
     navigator =
       new_object([
@@ -4262,7 +6316,7 @@ defmodule Browser.JS.DOM do
       "getComputedStyle",
       native("getComputedStyle", fn _, args ->
         el = arg(args, 0)
-        aux_host({:style, nid_of(el)}, :style)
+        aux_host({:style, nid_of(el), :computed}, :style)
       end)
     )
 

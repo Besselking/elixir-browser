@@ -301,6 +301,9 @@ defmodule Browser.Layout do
     src = Enum.find(items, &(Map.get(&1, :cid) == cid and Map.has_key?(&1, :sc)))
     extra = if src, do: Enum.map(extra, &Map.merge(&1, Map.take(src, [:sc, :clips]))), else: extra
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
+    # and above the box it is in: fixed items are drawn in the order of their `z`
+    z = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :z)))
+    extra = if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
     items ++ extra
   end
 
@@ -720,9 +723,13 @@ defmodule Browser.Layout do
     walk_zwsp_text("\u200B", style, acc)
   end
 
-  defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg"] do
+  defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg", "canvas"] do
     ops = fn acc ->
-      if tag == "img", do: image_ops(el, style, acc), else: svg_ops(el, style, acc)
+      case tag do
+        "img" -> image_ops(el, style, acc)
+        "canvas" -> canvas_ops(el, style, acc)
+        _ -> svg_ops(el, style, acc)
+      end
     end
 
     c = computed(attrs)
@@ -1085,6 +1092,7 @@ defmodule Browser.Layout do
   # properties belong to the placement, so they are removed from the element's
   # own box.
   defp image_sub({:element, "img", _, _} = el, style), do: image_ops(el, style, [])
+  defp image_sub({:element, "canvas", _, _} = el, style), do: canvas_ops(el, style, [])
   defp image_sub(el, style), do: svg_ops(el, style, [])
 
   defp abs_ops({:element, tag, attrs, kids}, parent_style, c, acc) do
@@ -1093,7 +1101,7 @@ defmodule Browser.Layout do
     else
       box = box(tag, c)
       # a picture is sized by its own width and height: they stay with it
-      replaced? = tag in ["img", "svg"]
+      replaced? = tag in ["img", "svg", "canvas"]
 
       own =
         Map.drop(
@@ -1151,6 +1159,8 @@ defmodule Browser.Layout do
         rextra: box.pr + br,
         mextra: 0,
         fixed: c["position"] == "fixed",
+        # `width: fit-content` between two insets shrinks to the content, not stretches
+        fit: c["width"] in [:fit, :minc, :maxc],
         # an inline-level box is where it would be on a line: beside the floats
         inline: kind(tag, c) in [:inline, :inline_block],
         align: parent_style.align,
@@ -1296,6 +1306,13 @@ defmodule Browser.Layout do
     end
   end
 
+  defp attr_int(attrs, name) do
+    case Integer.parse(attr_value(attrs, name)) do
+      {n, _} when n >= 0 -> n
+      _ -> nil
+    end
+  end
+
   defp attr_value(attrs, name), do: List.keyfind(attrs, name, 0, {nil, ""}) |> elem(1)
 
   # An inline <svg> is a replaced element too. Its width/height attributes size it (a
@@ -1328,6 +1345,32 @@ defmodule Browser.Layout do
       attrs: %{w: num.(scene.width), h: num.(scene.height)},
       current: color4(c["color"]),
       tag: "svg"
+    }
+
+    image_atom(nil, nil, attrs, c, style, acc, extra)
+  end
+
+  # A <canvas> is a replaced element with the size of its bitmap (300 x 150 unless set). What
+  # the page's scripts drew on it comes as the "@canvas" attribute: `{width, height, display
+  # list}`, which is painted like an inline <svg>, scaled to the box.
+  defp canvas_ops({:element, "canvas", attrs, _}, parent_style, acc) do
+    c = computed(attrs)
+    style = restyle("canvas", attrs, parent_style, c)
+    dim = fn name, default -> attr_int(attrs, name) || default end
+
+    {bw, bh, ops} =
+      case List.keyfind(attrs, "@canvas", 0) do
+        {_, {w, h, ops}} -> {w, h, ops}
+        _ -> {dim.("width", 300), dim.("height", 150), []}
+      end
+
+    extra = %{
+      canvas: {max(bw, 1), max(bh, 1), ops},
+      intrinsic: {max(bw, 1), max(bh, 1)},
+      paint?: true,
+      attrs: declared_size(attrs) || %{w: nil, h: nil},
+      current: color4(c["color"]),
+      tag: "canvas"
     }
 
     image_atom(nil, nil, attrs, c, style, acc, extra)
@@ -3915,6 +3958,10 @@ defmodule Browser.Layout do
             ops = Browser.Svg.render(scene, cw, ch, current: spec.current)
             [Map.merge(item, %{type: :svg, ops: ops})]
 
+          %{canvas: {bw, bh, ops}} ->
+            ops = Browser.Canvas.scaled_ops(ops, cw / bw, ch / bh)
+            [Map.merge(item, %{type: :svg, ops: ops})]
+
           _ ->
             item = Map.merge(item, %{type: :image, url: spec.url})
 
@@ -5417,7 +5464,7 @@ defmodule Browser.Layout do
               do: @unbounded,
               else: avail
 
-          if left && right && !spec.replaced do
+          if left && right && !spec.replaced && !Map.get(spec, :fit, false) do
             avail
           else
             min(avail, shrink_extent(st, sub, at, Map.get(spec, :key)))

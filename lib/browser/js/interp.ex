@@ -172,11 +172,41 @@ defmodule Browser.JS.Interp do
     frames =
       Process.get(:js_stack, [])
       |> Enum.take(12)
+      |> Enum.map(fn
+        {:method, name} -> name
+        name -> name
+      end)
       |> Enum.map(fn name ->
         "\n    at " <> if(is_binary(name) and name != "", do: name, else: "<anonymous>")
       end)
 
     header <> Enum.join(frames)
+  end
+
+  @doc "`Name: message` of an error object, with the function names it was thrown under."
+  def describe_error({:obj, id} = v) do
+    case get(v, "message") do
+      m when is_binary(m) ->
+        head =
+          case get(v, "name") do
+            n when is_binary(n) -> n <> ": " <> m
+            _ -> m
+          end
+
+        case deref(id) do
+          %{stack_str: s} ->
+            case String.split(s, "\n", parts: 2) do
+              [_, frames] -> head <> "\n" <> frames
+              _ -> head
+            end
+
+          _ ->
+            head
+        end
+
+      _ ->
+        nil
+    end
   end
 
   def throw_error(type, message), do: throw({:js_error, make_error(type, message)})
@@ -191,6 +221,10 @@ defmodule Browser.JS.Interp do
   def new_fn_scope(parent, vars \\ %{}) do
     alloc(%{scope: true, fnscope: true, vars: vars, consts: MapSet.new(), parent: parent})
   end
+
+  @doc "A global scope that starts with the variables `vars` (a frame's), not made the current one."
+  def new_scope_with(vars),
+    do: alloc(%{scope: true, vars: vars, consts: MapSet.new(), parent: nil})
 
   def new_global_scope do
     id = new_scope(nil)
@@ -299,11 +333,20 @@ defmodule Browser.JS.Interp do
       s.parent == nil and is_binary(name) and global_own_property?(s, name) ->
         put(s.vars.this, name, val)
 
+      # `onmessage = f` and `name = "x"` set the window's own property, when it has one
+      s.parent == nil and is_binary(name) and window_property?(s, name) ->
+        put(s.vars.this, name, val)
+
       true ->
         # an undeclared variable becomes a global
         store(scope, %{s | vars: Map.put(s.vars, name, val)})
     end
   end
+
+  defp window_property?(%{vars: %{this: {:obj, _} = window}}, name),
+    do: has_property?(window, name)
+
+  defp window_property?(_, _), do: false
 
   defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
     do: match?(%{props: %{^name => _}}, deref(gid))
