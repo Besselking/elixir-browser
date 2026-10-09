@@ -611,6 +611,7 @@ defmodule Browser.JS.Classes do
   @doc "`new C(...)` for a class (`nt` is `new.target`)."
   def construct({:obj, id} = f, info, args, nt) do
     {:closure, c} = deref(id).fun
+    c = Interp.with_hoist(id, c)
     extra = [{:ctor_fn, f}, {:new_target, nt}]
 
     if info.derived? do

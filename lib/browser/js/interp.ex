@@ -60,6 +60,14 @@ defmodule Browser.JS.Interp do
     id
   end
 
+  # an id for an entry that `store/2` fills in later (a scope whose closures need its id first)
+  defp reserve do
+    id = :erlang.get(:js_next)
+    :erlang.put(:js_next, id + 1)
+    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
+    id
+  end
+
   def deref(id) do
     case :erlang.get(id) do
       :undefined -> raise KeyError, key: id, term: :js_heap
@@ -2065,7 +2073,7 @@ defmodule Browser.JS.Interp do
 
             %{fun: {:closure, c}} ->
               tick()
-              elem(run_closure_scope(c, this, args, [{:new_target, nt}]), 0)
+              elem(run_closure_scope(with_hoist(id, c), this, args, [{:new_target, nt}]), 0)
 
             _ ->
               Process.put(:js_native_new, this)
@@ -2158,36 +2166,102 @@ defmodule Browser.JS.Interp do
   @doc false
   # the scope a function body runs in: `this`, the parameters, hoisted declarations
   def call_scope(c, this, args) do
-    scope =
-      alloc(%{
-        scope: true,
-        fnscope: true,
-        fid: Map.get(c, :fid),
-        vars: strict_marks(c, %{}),
-        consts: MapSet.new(),
-        parent: c.scope
-      })
+    {_, body_scope} = call_frame(c, this, args, [])
+    body_scope
+  end
 
-    if c.mode in [false, nil] do
-      declare(scope, :this, sloppy_this(c, this))
-      declare(scope, :args, args)
-    end
+  # The scopes of a call: the one the parameters live in and the one the body runs in (one and
+  # the same unless a parameter has an initialiser, see `hoist_into_body/4`). The closure
+  # comes through `with_hoist/2`, which worked out what the call must know. When every
+  # parameter is a plain name, the scope is built as one map before it is stored: `this`,
+  # the parameters, the hoisted `var` names, the lexical names and the function declarations.
+  # Declaring them one at a time would read and write the heap entry once for each.
+  defp call_frame(%{mode: :arrow_expr} = c, _this, args, extra) do
+    # (an arrow with an expression body hoists nothing and has no `this` of its own)
+    vars = if extra == [], do: %{}, else: Map.new(extra)
 
-    if h = Map.get(c, :home), do: declare(scope, :home, h)
-    bind_params(c.params, args, scope)
-
-    if c.mode != :arrow_expr do
-      hoist_into_body(scope, c, hoisted_names(c.body), fundecls(c.body))
+    if plain_params?(c.params) do
+      scope = alloc(fn_scope(c, bind_plain(c.params, args, vars)))
+      {scope, scope}
     else
-      scope
+      scope = alloc(fn_scope(c, vars))
+      bind_params(c.params, args, scope)
+      {scope, scope}
     end
   end
+
+  defp call_frame(c, this, args, extra) do
+    vars =
+      if c.mode in [false, nil],
+        do: %{this: sloppy_this(c, this), args: args, new_target: :undefined},
+        else: %{}
+
+    vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
+    vars = if extra == [], do: vars, else: Enum.into(extra, vars)
+    vars = strict_marks(c, vars)
+    {names, funs} = c.hoist
+
+    if c.plain? do
+      vars = bind_plain(c.params, args, vars)
+      # `var arguments;` keeps the arguments object (it only names the binding again)
+      args_obj? = c.args_var? and is_map_key(vars, :args) and not is_map_key(vars, "arguments")
+      vars = put_new_all(vars, names, :undefined)
+      vars = put_all(vars, c.lex, :tdz)
+
+      scope =
+        if funs == [] do
+          alloc(fn_scope(c, vars))
+        else
+          # (the declarations close over the scope, so its id comes first and its entry after)
+          scope = reserve()
+
+          vars =
+            Enum.reduce(funs, vars, fn {n, f}, m -> Map.put(m, n, make_fn(f, scope, false)) end)
+
+          store(scope, fn_scope(c, vars))
+          scope
+        end
+
+      if args_obj?, do: lazy_arguments(scope)
+      {scope, scope}
+    else
+      scope = alloc(fn_scope(c, vars))
+      bind_params(c.params, args, scope)
+      {scope, hoist_into_body(scope, c, names, funs)}
+    end
+  end
+
+  defp put_new_all(vars, [], _v), do: vars
+  defp put_new_all(vars, [n | ns], v), do: put_new_all(Map.put_new(vars, n, v), ns, v)
+
+  defp put_all(vars, [], _v), do: vars
+  defp put_all(vars, [n | ns], v), do: put_all(Map.put(vars, n, v), ns, v)
+
+  defp fn_scope(c, vars) do
+    %{
+      scope: true,
+      fnscope: true,
+      fid: Map.get(c, :fid),
+      vars: vars,
+      consts: MapSet.new(),
+      parent: c.scope
+    }
+  end
+
+  # plain parameters, bound in order: a missing argument is undefined, the last of equal names wins
+  defp bind_plain([], _args, vars), do: vars
+
+  defp bind_plain([{:id, name} | ps], [a | args], vars),
+    do: bind_plain(ps, args, Map.put(vars, name, a))
+
+  defp bind_plain([{:id, name} | ps], [], vars),
+    do: bind_plain(ps, [], Map.put(vars, name, :undefined))
 
   # A parameter list with initialisers closes over a scope of its own: the body's `var`s and
   # functions live in a second scope that starts from the parameters' values. Without
   # initialisers one scope serves both.
   defp hoist_into_body(scope, c, names, funs) do
-    lex = Map.get(c, :lex, [])
+    lex = c.lex
 
     if names == [] and funs == [] and lex == [] do
       scope
@@ -2224,9 +2298,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp param_exprs?(params) do
-    not Enum.all?(params, &match?({:id, _}, &1)) and has_default?(params)
-  end
+  defp param_exprs?(params), do: not plain_params?(params) and has_default?(params)
 
   defp has_default?({:default, _, _}), do: true
   defp has_default?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_default?()
@@ -2301,44 +2373,18 @@ defmodule Browser.JS.Interp do
     stack = Process.get(:js_stack, [])
     pos = Process.get(:js_pos)
     :erlang.put(:js_stack, [{c.name, pos} | stack])
-    old_tail = Process.put(:js_tail, extra == [])
+    # only a strict function's `return f()` is a tail call (and a constructor's never is)
+    old_tail = Process.put(:js_tail, extra == [] and strict?(c))
 
     try do
-      vars =
-        if c.mode in [false, nil],
-          do: %{this: sloppy_this(c, this), args: args, new_target: :undefined},
-          else: %{}
-
-      vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
-      vars = Enum.reduce(extra, vars, fn {k, v}, m -> Map.put(m, k, v) end)
-      vars = strict_marks(c, vars)
-
-      scope =
-        alloc(%{
-          scope: true,
-          fnscope: true,
-          fid: Map.get(c, :fid),
-          vars: vars,
-          consts: MapSet.new(),
-          parent: c.scope
-        })
-
-      bind_params(c.params, args, scope)
+      {scope, body_scope} = call_frame(c, this, args, extra)
 
       result =
         case c.mode do
           :arrow_expr ->
-            ev(c.body, scope)
+            ev(c.body, body_scope)
 
           _ ->
-            {names, funs} =
-              case c do
-                %{hoist: h} -> h
-                _ -> {hoisted_names(c.body), fundecls(c.body)}
-              end
-
-            body_scope = hoist_into_body(scope, c, names, funs)
-
             try do
               case exec_fn(c.body, body_scope) do
                 {:ret, v} -> v
@@ -2590,29 +2636,20 @@ defmodule Browser.JS.Interp do
   end
 
   # strict functions mark their scope, so that eval code called from them is strict too
-  defp strict_marks(%{body: [{:expr, {:str, "use strict"}} | _]}, vars),
-    do: Map.put(vars, :strict, true)
-
+  defp strict_marks(%{strict?: true}, vars), do: Map.put(vars, :strict, true)
   defp strict_marks(_, vars), do: vars
 
   # A function that is not strict gets the global object for a `this` that is undefined or null
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
   # (no page) nothing changes.
-  defp sloppy_this(c, this) do
-    strict? =
-      case c.body do
-        [{:expr, {:str, "use strict"}} | _] -> true
-        _ -> false
-      end
+  defp sloppy_this(%{strict?: true}, this), do: this
 
+  defp sloppy_this(_c, this) do
     cond do
-      strict? ->
-        this
-
       this in [:undefined, :null] ->
-        case lookup_var(global(), :this) do
-          {:ok, w} -> w
-          :error -> this
+        case deref(global()) do
+          %{vars: %{this: w}} -> w
+          _ -> this
         end
 
       is_binary(this) or is_number(this) or is_boolean(this) or
@@ -2708,7 +2745,7 @@ defmodule Browser.JS.Interp do
     case Map.get(scope, :fid) do
       fid when is_integer(fid) ->
         case deref(fid) do
-          %{fun: {:closure, %{params: params}}} -> Enum.all?(params, &match?({:id, _}, &1))
+          %{fun: {:closure, %{params: params}}} -> plain_params?(params)
           _ -> true
         end
 
@@ -2721,7 +2758,7 @@ defmodule Browser.JS.Interp do
     with false <- Map.has_key?(scope.vars, :strict),
          fid when is_integer(fid) <- Map.get(scope, :fid),
          %{fun: {:closure, %{params: params}}} <- deref(fid),
-         true <- params != [] and Enum.all?(params, &match?({:id, _}, &1)) do
+         true <- params != [] and plain_params?(params) do
       count = length(args)
 
       {mapped, names} =
@@ -2791,18 +2828,45 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
-  # What a call must hoist is worked out from the body once per function object and kept in
-  # its closure: looking the body up by value costs time proportional to its size on every call.
-  defp with_hoist(_id, %{hoist: _} = c), do: c
-  defp with_hoist(_id, %{mode: :arrow_expr} = c), do: c
+  @doc false
+  # What a call must know about a function is worked out from its syntax once per function
+  # object and kept in its closure: looking at the body on every call costs time proportional
+  # to its size. `hoist` holds the `var` names and the function declarations of the body,
+  # `lex` its `let`, `const` and class names, `strict?` whether it begins with "use strict"
+  # (the parser puts the directive in every function inside strict code), whether
+  # every parameter is a plain name (`plain?`) and whether the body declares `var arguments`.
+  # An arrow with an expression body has none of this to know, so its closure stays as it is
+  # (`call_frame/4` has a clause for it): the write back to the heap would cost more than it
+  # saves for an arrow that is made and called once, as callbacks are.
+  def with_hoist(_id, %{hoist: _} = c), do: c
+  def with_hoist(_id, %{mode: :arrow_expr} = c), do: c
 
-  defp with_hoist(id, c) do
-    lex = for stmt <- c.body, name <- lexical_names(stmt), do: name
-    c = Map.merge(c, %{hoist: {hoisted_names(c.body), fundecls(c.body)}, lex: lex, fid: id})
+  def with_hoist(id, c) do
+    names = hoisted_names(c.body)
+    funs = fundecls(c.body)
+
+    c =
+      Map.merge(c, %{
+        fid: id,
+        hoist: {names, funs},
+        lex: for(stmt <- c.body, name <- lexical_names(stmt), do: name),
+        strict?: match?([{:expr, {:str, "use strict"}} | _], c.body),
+        plain?: plain_params?(c.params),
+        args_var?: "arguments" in names and not Enum.any?(funs, &(elem(&1, 0) == "arguments"))
+      })
+
     o = deref(id)
     store(id, %{o | fun: {:closure, c}})
     c
   end
+
+  # every parameter a plain name: no default, pattern or rest parameter
+  defp plain_params?([{:id, _} | ps]), do: plain_params?(ps)
+  defp plain_params?([]), do: true
+  defp plain_params?(_), do: false
+
+  defp strict?(%{strict?: strict?}), do: strict?
+  defp strict?(_), do: false
 
   defp fundecls(stmts) do
     Enum.flat_map(stmts, fn
@@ -2937,9 +3001,11 @@ defmodule Browser.JS.Interp do
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
     exec_list(stmts, scope)
+    # (the process dictionary reports a stored :undefined as missing, hence the default; the
+    # microtasks run after the script and must not change its completion value)
+    result = Process.get(:js_last, :undefined)
     Browser.JS.Promise.run_microtasks()
-    # (the process dictionary reports a stored :undefined as missing, hence the default)
-    Process.get(:js_last, :undefined)
+    result
   end
 
   # GlobalDeclarationInstantiation: a script's `let`/`const`/class names may not collide with
@@ -3186,8 +3252,9 @@ defmodule Browser.JS.Interp do
   end
 
   # A function body: a `return` that is reached through `if` and block statements only gives its
-  # value back as `{:ret, value}` instead of being thrown. A `return` of a call (or of a form that
-  # holds one in tail position) is left to `exec/3`, which may turn it into a tail call.
+  # value back as `{:ret, value}` instead of being thrown. In a strict function (the tail flag
+  # says so) a `return` of a call, or of a form that holds one in tail position, becomes a tail
+  # call instead: `tail_value/2` throws it to the function's frame.
   defp exec_fn([], _env), do: :ok
 
   defp exec_fn([{:pos, loc} | rest], env) do
@@ -3208,9 +3275,17 @@ defmodule Browser.JS.Interp do
        when not (is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical]),
        do: {:ret, ev(e, env)}
 
-  defp exec_fn_stmt({:if, c, a, b}, env) do
-    :erlang.put(:js_last, :undefined)
+  defp exec_fn_stmt({:return, e}, env) do
+    if Process.get(:js_tail) == true, do: tail_value(e, env), else: {:ret, ev(e, env)}
+  end
 
+  # (a statement's completion value only matters outside function bodies: in a script or eval code)
+  defp exec_fn_stmt({:expr, e}, env) do
+    ev(e, env)
+    :ok
+  end
+
+  defp exec_fn_stmt({:if, c, a, b}, env) do
     cond do
       truthy(ev(c, env)) -> exec_fn_stmt(a, env)
       b != nil -> exec_fn_stmt(b, env)
@@ -3431,9 +3506,12 @@ defmodule Browser.JS.Interp do
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
 
   defp exec({:return, e}, env, _) do
-    if Process.get(:js_tail) == true and lookup_var(env, :strict) == {:ok, true},
-      do: tail_return(e, env),
-      else: throw({:js_return, ev(e, env)})
+    if Process.get(:js_tail) == true do
+      {:ret, v} = tail_value(e, env)
+      throw({:js_return, v})
+    else
+      throw({:js_return, ev(e, env)})
+    end
   end
 
   defp exec({:throw, e}, env, _) do
@@ -3646,39 +3724,39 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # `return <call>` in a strict function: evaluate the callee and arguments, then throw them
-  # to the function's frame, which gives them to `tail_loop`
-  defp tail_return({:call, callee, args, false} = e, env) do
-    case callee do
-      {:id, "eval"} ->
-        if ev(callee, env) == :erlang.get(:js_eval_fn), do: throw({:js_return, ev(e, env)})
+  # The value of a `return` in a strict function. A call in tail position is not made here:
+  # the callee and the arguments are thrown to the function's frame, which gives them to
+  # `tail_loop`. Anything else comes back as `{:ret, value}`.
+  defp tail_value({:call, callee, args, false} = e, env) do
+    plain? =
+      case callee do
+        # (a direct eval, an optional chain and a `super()` call are no tail calls)
+        {:id, "eval"} -> ev(callee, env) != :erlang.get(:js_eval_fn)
+        {:chain, _} -> false
+        {:super} -> false
+        _ -> true
+      end
 
-      {:chain, _} ->
-        throw({:js_return, ev(e, env)})
-
-      {:member, _, _, true} ->
-        throw({:js_return, ev(e, env)})
-
-      _ ->
-        :ok
+    if plain? do
+      {f, this} = call_target(callee, env)
+      argv = eval_list(args, env)
+      unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
+      throw({:js_tail, f, this, argv})
+    else
+      {:ret, ev(e, env)}
     end
-
-    {f, this} = call_target(callee, env)
-    argv = eval_list(args, env)
-    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-    throw({:js_tail, f, this, argv})
   end
 
-  defp tail_return({:cond, c, a, b}, env),
-    do: tail_return(if(truthy(ev(c, env)), do: a, else: b), env)
+  defp tail_value({:cond, c, a, b}, env),
+    do: tail_value(if(truthy(ev(c, env)), do: a, else: b), env)
 
-  defp tail_return({:seq, es}, env) do
+  defp tail_value({:seq, es}, env) do
     {init, [last]} = Enum.split(es, -1)
     Enum.each(init, &ev(&1, env))
-    tail_return(last, env)
+    tail_value(last, env)
   end
 
-  defp tail_return({:logical, op, l, r}, env) do
+  defp tail_value({:logical, op, l, r}, env) do
     lv = ev(l, env)
 
     take_right? =
@@ -3688,10 +3766,10 @@ defmodule Browser.JS.Interp do
         "??" -> nullish?(lv)
       end
 
-    if take_right?, do: tail_return(r, env), else: throw({:js_return, lv})
+    if take_right?, do: tail_value(r, env), else: {:ret, lv}
   end
 
-  defp tail_return(e, env), do: throw({:js_return, ev(e, env)})
+  defp tail_value(e, env), do: {:ret, ev(e, env)}
 
   defp while_loop(c, body, env, labels) do
     if truthy(ev(c, env)) do
