@@ -6800,7 +6800,7 @@ defmodule Browser.Layout do
       |> Enum.map(&Map.drop(&1, [:glue, :lm]))
       |> apply_rel()
 
-    placed = justify(placed, st, List.last(st.line), shift)
+    {placed, st, widen} = justify(placed, st, List.last(st.line), shift)
 
     top_of = fn
       %{valign: "top"} -> st.y
@@ -6832,7 +6832,7 @@ defmodule Browser.Layout do
     ctx = %{
       shift: shift,
       first_x: (st.line |> List.last() |> Map.fetch!(:x)) - st.line_lead,
-      last_right: (fn l -> l.x + l.w end).(hd(st.line)),
+      last_right: (fn l -> l.x + l.w end).(hd(st.line)) + widen,
       split: st.splitting,
       y_ref: fn size ->
         if normal > 0,
@@ -7056,9 +7056,9 @@ defmodule Browser.Layout do
 
   # Justified lines share their free room out between the spaces. Lines with inline boxes
   # that draw something, and text that keeps its white space, are left as they are.
+  # -> {items, state with the inline box marks moved along, how far the last word moved}
   defp justify(placed, st, first, shift) do
     if line_mode(first, st) in [:justify, :rjustify] and not Map.get(first, :nojust, false) and
-         st.marks == [] and
          st.active == [] and
          Enum.all?(placed, &(&1.type == :text and not Map.get(&1, :nojust, false))) do
       ordered = Enum.reverse(placed)
@@ -7072,12 +7072,30 @@ defmodule Browser.Layout do
             {[%{it | x: it.x - shift + round(j * free / gaps)} | acc], it, j}
           end)
 
-        out
+        # (the boxes of inline elements follow the words they hold)
+        starts =
+          ordered
+          |> Enum.chunk_every(2, 1, :discard)
+          |> Enum.filter(&gap?/1)
+          |> Enum.map(fn [_, b] -> b.x - shift end)
+
+        moved = fn x, le ->
+          j = Enum.count(starts, &if(le, do: &1 <= x, else: &1 < x))
+          x + round(j * free / gaps)
+        end
+
+        marks =
+          Enum.map(st.marks, fn
+            {:start, ref, spec, x} -> {:start, ref, spec, moved.(x, true)}
+            {:end, ref, x} -> {:end, ref, moved.(x, false)}
+          end)
+
+        {out, %{st | marks: marks}, round(free)}
       else
-        placed
+        {placed, st, 0}
       end
     else
-      placed
+      {placed, st, 0}
     end
   end
 

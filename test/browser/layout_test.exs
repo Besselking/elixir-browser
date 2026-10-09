@@ -7794,4 +7794,17 @@ defmodule Browser.LayoutTest do
       assert abs_blue("direction:rtl;text-indent:20px", ~s|<div class="i"></div>|).x == 60
     end
   end
+
+  describe "justified lines with inline backgrounds" do
+    test "the background follows the words it holds" do
+      html =
+        ~s|<style>body{margin:0}div{width:100px;font:10px monospace;text-align:justify}span{background:green}</style><div><span>aa bb</span> cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      text = Enum.find(laid, &(&1.type == :text and &1.text == "bb"))
+      assert box.x + box.w == text.x + text.w
+    end
+  end
 end
