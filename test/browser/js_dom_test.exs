@@ -1330,6 +1330,35 @@ defmodule Browser.JS.DOMTest do
       assert errors(r) == []
     end
 
+    test "the id index follows id changes, removal, detached elements and duplicates" do
+      r =
+        run(
+          ~S"""
+          var a = document.getElementById("a");
+          console.log(window.a === a, window.zed === undefined);
+          a.id = "zed";
+          console.log(window.zed === a);
+          a.removeAttribute("id");
+          console.log(window.zed === undefined);
+          var d = document.createElement("div"); d.id = "det";
+          console.log(window.det === undefined);
+          document.body.appendChild(d);
+          console.log(window.det === d);
+          var e = document.createElement("span"); e.id = "det";
+          document.body.insertBefore(e, document.body.firstChild);
+          console.log(window.det === e);
+          e.remove();
+          console.log(window.det === d);
+          d.remove();
+          console.log(window.det === undefined);
+          """,
+          "<p id=a>x</p>"
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["true true", "true", "true", "true", "true", "true", "true", "true"]
+    end
+
     test "a button that appends to the log by its global name" do
       {pid, r} =
         start(

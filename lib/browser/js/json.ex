@@ -283,15 +283,68 @@ defmodule Browser.JS.Json do
   defp hex4(s), do: syntax_error(s)
 
   defp number(s) do
-    case Regex.run(~r/\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/, s) do
-      [m] ->
-        rest = binary_part(s, byte_size(m), byte_size(s) - byte_size(m))
-        {Num.parse(m), rest}
+    n = number_len(s)
 
-      nil ->
-        syntax_error(s)
+    if n == 0 do
+      syntax_error(s)
+    else
+      <<m::binary-size(^n), rest::binary>> = s
+      {Num.parse(m), rest}
     end
   end
+
+  # how long the JSON number at the start of `s` is (0 when there is none)
+  defp number_len(<<?-, r::binary>>) do
+    case int_len(r) do
+      0 -> 0
+      n -> 1 + n + frac_exp_len(binary_part(r, n, byte_size(r) - n))
+    end
+  end
+
+  defp number_len(s) do
+    case int_len(s) do
+      0 -> 0
+      n -> n + frac_exp_len(binary_part(s, n, byte_size(s) - n))
+    end
+  end
+
+  defp int_len(<<?0, _::binary>>), do: 1
+  defp int_len(<<c, r::binary>>) when c in ?1..?9, do: 1 + digits_len(r, 0)
+  defp int_len(_), do: 0
+
+  defp digits_len(<<c, r::binary>>, n) when c in ?0..?9, do: digits_len(r, n + 1)
+  defp digits_len(_, n), do: n
+
+  defp frac_exp_len(s) do
+    {f, r} =
+      case s do
+        <<?., r::binary>> ->
+          case digits_len(r, 0) do
+            0 -> {0, s}
+            n -> {1 + n, binary_part(r, n, byte_size(r) - n)}
+          end
+
+        _ ->
+          {0, s}
+      end
+
+    f + exp_len(r)
+  end
+
+  defp exp_len(<<e, r::binary>>) when e in [?e, ?E] do
+    {sign, r} =
+      case r do
+        <<c, r2::binary>> when c in [?+, ?-] -> {1, r2}
+        _ -> {0, r}
+      end
+
+    case digits_len(r, 0) do
+      0 -> 0
+      n -> 1 + sign + n
+    end
+  end
+
+  defp exp_len(_), do: 0
 
   defp internalize(holder, name, reviver, snap) do
     val = get(holder, name)

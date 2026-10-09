@@ -50,6 +50,41 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # The elements by `id` attribute: name => node ids (any element of any tree, attached or not).
+  # `window.Foo` and bare names that nothing declares look an element up by id, so this is kept
+  # up to date by the writes to the node table instead of being rebuilt after every change.
+  defp element_id(%{kind: :element, attrs: attrs}) do
+    case List.keyfind(attrs, "id", 0) do
+      {_, id} when is_binary(id) and id != "" -> id
+      _ -> nil
+    end
+  end
+
+  defp element_id(_), do: nil
+
+  defp reindex(ids, nid, old, new) do
+    o = element_id(old)
+    n = element_id(new)
+
+    cond do
+      o == n -> ids
+      true -> ids |> unindex(o, nid) |> index_in(n, nid)
+    end
+  end
+
+  defp unindex(ids, nil, _), do: ids
+
+  defp unindex(ids, id, nid) do
+    case ids do
+      %{^id => [^nid]} -> Map.delete(ids, id)
+      %{^id => list} -> Map.put(ids, id, List.delete(list, nid))
+      _ -> ids
+    end
+  end
+
+  defp index_in(ids, nil, _), do: ids
+  defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
+
   defp put_node(n) do
     s = st()
 
@@ -58,7 +93,8 @@ defmodule Browser.JS.DOM do
         do: %{s | dirty: true},
         else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
 
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
+    ids = reindex(s.ids, n.id, Map.get(s.nodes, n.id), n)
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), ids: ids, rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -92,7 +128,15 @@ defmodule Browser.JS.DOM do
 
     # (the checks that frames need are only made once the page has an <iframe>)
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
-    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
+
+    put_st(%{
+      s
+      | next: id + 1,
+        nodes: Map.put(s.nodes, id, n),
+        ids: reindex(s.ids, id, nil, n),
+        rev: s.rev + 1
+    })
+
     id
   end
 
@@ -262,6 +306,8 @@ defmodule Browser.JS.DOM do
     put_st(%{
       s
       | nodes: Map.drop(s.nodes, ids),
+        ids:
+          Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -403,6 +449,7 @@ defmodule Browser.JS.DOM do
   def init(raw, info) do
     put_st(%{
       nodes: %{},
+      ids: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -461,7 +508,15 @@ defmodule Browser.JS.DOM do
 
   defp update_node_quiet(nid, fun) do
     s = st()
-    put_st(%{s | nodes: Map.put(s.nodes, nid, fun.(node(nid))), rev: s.rev + 1})
+    old = node(nid)
+    n = fun.(old)
+
+    put_st(%{
+      s
+      | nodes: Map.put(s.nodes, nid, n),
+        ids: reindex(s.ids, nid, old, n),
+        rev: s.rev + 1
+    })
   end
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
@@ -1198,16 +1253,27 @@ defmodule Browser.JS.DOM do
   # ── queries ────────────────────────────────────────────────
 
   @doc "Every `<script>` element's id, in document order."
-  def descendants(nid) do
-    Enum.flat_map(node(nid).kids, fn k -> [k | descendants(k)] end)
-  end
+  def descendants(nid),
+    do: nid |> node() |> Map.fetch!(:kids) |> walk_kids([]) |> :lists.reverse()
+
+  # pre-order, newest first
+  defp walk_kids([], acc), do: acc
+  defp walk_kids([k | rest], acc), do: walk_kids(rest, walk_kids(node(k).kids, [k | acc]))
 
   @doc "True when the node is inside a `<template>` (its content is inert: no script in it runs)."
   def in_template?(nid) do
     Enum.any?(ancestors(nid), fn a -> node(a).kind == :element and node(a).tag == "template" end)
   end
 
-  defp elements(nid), do: Enum.filter(descendants(nid), &(node(&1).kind == :element))
+  defp elements(nid), do: walk_elements(node(nid).kids, []) |> :lists.reverse()
+
+  defp walk_elements([], acc), do: acc
+
+  defp walk_elements([k | rest], acc) do
+    n = node(k)
+    acc = if n.kind == :element, do: [k | acc], else: acc
+    walk_elements(rest, walk_elements(n.kids, acc))
+  end
 
   # the first element below `nid` in document order that `pred` accepts, without building the
   # list of every descendant
@@ -1981,7 +2047,7 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp find_tag(nid, tag), do: Enum.find(descendants(nid), &(node(&1).tag == tag))
+  defp find_tag(nid, tag), do: find_element(nid, &(&1.tag == tag))
 
   # ── host protocol: writes ──────────────────────────────────
 
@@ -2229,8 +2295,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp kebab(name) do
-    name
-    |> String.replace(~r/[A-Z]/, fn c -> "-" <> String.downcase(c) end)
+    for(<<c <- name>>, into: "", do: if(c in ?A..?Z, do: <<?-, c + 32>>, else: <<c>>))
     |> then(fn k -> if String.starts_with?(k, "css-float"), do: "float", else: k end)
   end
 
@@ -2553,13 +2618,34 @@ defmodule Browser.JS.DOM do
 
   # ── selectors ──────────────────────────────────────────────
 
-  # a selector list: [[{combinator, compound}, ...], ...], leftmost first
+  # a selector list: [[{combinator, compound}, ...], ...], leftmost first. Scripts ask the same
+  # few selectors again and again, so what was parsed is kept.
   defp parse_selectors(str) do
-    str
-    |> split_top(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.map(&parse_complex/1)
+    memo({:sel, str}, fn ->
+      str
+      |> split_top(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&parse_complex/1)
+    end)
+  end
+
+  @memo_max 2_000
+
+  defp memo(key, fun) do
+    cache = :erlang.get(:js_memo)
+    cache = if cache == :undefined, do: %{}, else: cache
+
+    case cache do
+      %{^key => v} ->
+        v
+
+      _ ->
+        v = fun.()
+        cache = if map_size(cache) >= @memo_max, do: %{}, else: cache
+        :erlang.put(:js_memo, Map.put(cache, key, v))
+        v
+    end
   end
 
   defp split_top(str, sep), do: split_top(String.graphemes(str), sep, 0, nil, [], [])
@@ -2812,11 +2898,13 @@ defmodule Browser.JS.DOM do
 
   # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
   defp nth_match(n, arg, from_end?, siblings_fun) do
-    {formula, of_sel} =
-      case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
-        [f, sel] -> {f, parse_selectors(sel)}
-        [f] -> {f, nil}
-      end
+    {anb, of_sel} =
+      memo({:nth, arg}, fn ->
+        case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+          [f, sel] -> {parse_anb(f), parse_selectors(sel)}
+          [f] -> {parse_anb(f), nil}
+        end
+      end)
 
     kids = siblings_fun.(n)
     kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
@@ -2827,7 +2915,7 @@ defmodule Browser.JS.DOM do
         false
 
       i ->
-        case parse_anb(formula) do
+        case anb do
           {a, b} ->
             pos = i + 1
 
@@ -2882,7 +2970,22 @@ defmodule Browser.JS.DOM do
 
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
-    Enum.filter(elements(root), &matches?(&1, sels))
+    walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+  end
+
+  # the elements below a node that match, in document order (newest first)
+  defp walk_matches([], _sels, acc), do: acc
+
+  defp walk_matches([k | rest], sels, acc) do
+    n = node(k)
+    acc = if n.kind == :element and matches?(k, sels), do: [k | acc], else: acc
+    walk_matches(rest, sels, walk_matches(n.kids, sels, acc))
+  end
+
+  # the first element below a node that matches
+  defp query_first(root, selector) do
+    sels = parse_selectors(selector)
+    find_element(root, fn n -> matches?(n.id, sels) end)
   end
 
   # ── serialising ────────────────────────────────────────────
@@ -3091,37 +3194,19 @@ defmodule Browser.JS.DOM do
   def named_element(_), do: :error
 
   # Scripts (and the runtime's own shims) probe undeclared globals (`typeof Foo`, `window.Foo`)
-  # over and over: one pass over the tree makes an index of the ids, kept until the tree changes.
+  # over and over: the index of the ids says which elements might be the one.
   defp named_nid(doc, name) do
-    rev = st().rev
+    case Map.get(st().ids, name) do
+      nil ->
+        nil
 
-    index =
-      case Process.get(:dom_ids) do
-        {^rev, ^doc, m} ->
-          m
-
-        _ ->
-          m = collect_ids(doc, %{})
-          Process.put(:dom_ids, {rev, doc, m})
-          m
-      end
-
-    Map.get(index, name)
-  end
-
-  # id => the first element (in document order) with it
-  defp collect_ids(nid, acc) do
-    Enum.reduce(node(nid).kids, acc, fn k, acc ->
-      n = node(k)
-
-      acc =
-        case n.kind == :element and get_attr(n, "id") do
-          id when is_binary(id) -> Map.put_new(acc, id, k)
-          _ -> acc
+      candidates ->
+        case Enum.filter(candidates, &(List.last([&1 | ancestors(&1)]) == doc)) do
+          [] -> nil
+          [one] -> one
+          _ -> element_by_id(doc, name)
         end
-
-      collect_ids(k, acc)
-    end)
+    end
   end
 
   defp window_put(key, v) do
@@ -5195,7 +5280,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "querySelector", fn this, args ->
-      wrap_or_null(List.first(query_all(this_nid(this), to_str(arg(args, 0)))))
+      wrap_or_null(query_first(this_nid(this), to_str(arg(args, 0))))
     end)
 
     def_fn(p, "querySelectorAll", fn this, args ->

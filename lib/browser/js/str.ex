@@ -51,12 +51,82 @@ defmodule Browser.JS.Str do
     end
   end
 
+  # A long string with wider characters gets an index: where every @chunk-th byte falls and how
+  # many units come before it. Matching a regular expression against such a string asks for
+  # positions again and again, so the index of the last few strings is kept.
+  @chunk 128
+  @indexed 4
+
+  defp index(s) do
+    cache = Process.get(:js_str_idx, [])
+
+    case List.keyfind(cache, s, 0) do
+      {_, idx} = hit ->
+        if hd(cache) != hit, do: Process.put(:js_str_idx, [hit | List.delete(cache, hit)])
+        idx
+
+      nil ->
+        idx = build_index(s, 0, 0, 0, [{0, 0}])
+        Process.put(:js_str_idx, Enum.take([{s, idx} | cache], @indexed))
+        idx
+    end
+  end
+
+  # -> {total units, tuple of {byte, units before it}}
+  defp build_index(<<>>, _byte, units, _next, marks),
+    do: {units, marks |> Enum.reverse() |> List.to_tuple()}
+
+  defp build_index(<<b, rest::binary>>, byte, units, next, marks) when b >= 0x80 and b < 0xC0,
+    do: build_index(rest, byte + 1, units, next, marks)
+
+  defp build_index(<<b, rest::binary>>, byte, units, next, marks) do
+    {marks, next} =
+      if byte >= next, do: {[{byte, units} | marks], byte + @chunk}, else: {marks, next}
+
+    build_index(rest, byte + 1, units + if(b < 0xF0, do: 1, else: 2), next, marks)
+  end
+
+  # the last mark at or before the key (`pos` selects byte or units), by binary search
+  defp mark_before(marks, key, pos), do: mark_search(marks, key, pos, 0, tuple_size(marks) - 1)
+
+  defp mark_search(marks, _key, _pos, lo, hi) when lo >= hi, do: elem(marks, lo)
+
+  defp mark_search(marks, key, pos, lo, hi) do
+    mid = div(lo + hi + 1, 2)
+
+    if elem(elem(marks, mid), pos) <= key,
+      do: mark_search(marks, key, pos, mid, hi),
+      else: mark_search(marks, key, pos, lo, mid - 1)
+  end
+
+  @doc "The number of code units in the first `bytes` bytes of `s` (cut at a character)."
+  def units_before(s, bytes) do
+    cond do
+      bytes <= 0 ->
+        0
+
+      bytes >= byte_size(s) ->
+        __MODULE__.length(s)
+
+      ascii?(s) ->
+        bytes
+
+      byte_size(s) <= @small ->
+        unit_count(binary_part(s, 0, bytes))
+
+      true ->
+        {_, marks} = index(s)
+        {b, u} = mark_before(marks, bytes, 0)
+        u + unit_count(binary_part(s, b, bytes - b))
+    end
+  end
+
   @doc "The length in UTF-16 code units."
   def length(s) do
     cond do
       ascii?(s) -> byte_size(s)
       byte_size(s) <= @small -> unit_count(s)
-      true -> tuple_size(units_tuple(s))
+      true -> elem(index(s), 0)
     end
   end
 
@@ -167,13 +237,38 @@ defmodule Browser.JS.Str do
       count = if count == nil, do: size - from, else: count |> max(0) |> min(size - from)
       binary_part(s, from, count)
     else
-      us = if byte_size(s) <= @small, do: units(s), else: s |> units_tuple() |> Tuple.to_list()
-      from = max(from, 0)
+      slice_wide(s, from, count)
+    end
+  end
 
-      case count do
-        nil -> us |> Enum.drop(from) |> from_units()
-        count -> us |> Enum.slice(from, max(count, 0)) |> from_units()
+  # a string with wider characters: cut by bytes when both ends fall between characters (not
+  # inside a surrogate pair), else by code units
+  defp slice_wide(s, from, count) do
+    from = max(from, 0)
+
+    fast =
+      if byte_size(s) > @small do
+        total = __MODULE__.length(s)
+        from = min(from, total)
+        stop = if count == nil, do: total, else: min(from + max(count, 0), total)
+        b1 = byte_offset(s, from)
+        b2 = byte_offset(s, stop)
+
+        if units_before(s, b1) == from and units_before(s, b2) == stop,
+          do: {:ok, binary_part(s, b1, max(b2 - b1, 0))}
       end
+
+    case fast do
+      {:ok, r} ->
+        r
+
+      nil ->
+        us = if byte_size(s) <= @small, do: units(s), else: s |> units_tuple() |> Tuple.to_list()
+
+        case count do
+          nil -> us |> Enum.drop(from) |> from_units()
+          count -> us |> Enum.slice(from, max(count, 0)) |> from_units()
+        end
     end
   end
 
@@ -219,7 +314,21 @@ defmodule Browser.JS.Str do
 
   @doc "The byte offset of the unit index `n` (the start of a character that `n` falls inside)."
   def byte_offset(s, n) do
-    if ascii?(s), do: min(max(n, 0), byte_size(s)), else: walk(s, n, 0)
+    cond do
+      ascii?(s) ->
+        min(max(n, 0), byte_size(s))
+
+      n <= 0 ->
+        0
+
+      byte_size(s) <= @small ->
+        walk(s, n, 0)
+
+      true ->
+        {_, marks} = index(s)
+        {b, u} = mark_before(marks, n, 1)
+        walk(s, n - u, b)
+    end
   end
 
   defp walk(s, n, acc) when n <= 0 or acc >= byte_size(s), do: acc

@@ -45,7 +45,9 @@ defmodule Browser.JS.TypedArrays do
     f
   end
 
-  defp size_of(kind), do: Enum.find_value(@kinds, fn {_, k, s} -> if k == kind, do: s end)
+  for {_, kind, size} <- @kinds do
+    defp size_of(unquote(kind)), do: unquote(size)
+  end
 
   # ── element codecs ─────────────────────────────────────────
 
@@ -578,6 +580,30 @@ defmodule Browser.JS.TypedArrays do
   end
 
   def host_get(_, _, _), do: :miss
+
+  @doc false
+  # `ta[i]` for a number `i`, without turning it into a string key first
+  def get_index({:ta, kind, bid, _, _} = d0, i) do
+    case eff(d0) do
+      {off, len} when i < len -> elem_at({:ta, kind, bid, off, len}, i)
+      _ -> :undefined
+    end
+  end
+
+  @doc false
+  # `ta[i] = v` for a number `i`; `:readonly` when the buffer is immutable
+  def put_index({:ta, kind, bid, _, _} = d0, i, v) do
+    # the value is converted first, whatever the index
+    bytes = write(kind, v)
+
+    case eff(d0) do
+      {off, len} when i < len ->
+        if immutable?(bid), do: :readonly, else: buffer_put(bid, off + i * size_of(kind), bytes)
+
+      _ ->
+        :ok
+    end
+  end
 
   # CanonicalNumericIndexString: `{:index, i}` for a non-negative integer key, `:invalid` for any
   # other canonical number ("-0", "1.5", "-1", "Infinity", "NaN"), `:none` for every other key
