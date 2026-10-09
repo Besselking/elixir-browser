@@ -2298,7 +2298,8 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp param_exprs?(params), do: not plain_params?(params) and has_default?(params)
+  @doc false
+  def param_exprs?(params), do: not plain_params?(params) and has_default?(params)
 
   defp has_default?({:default, _, _}), do: true
   defp has_default?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_default?()
@@ -2866,14 +2867,16 @@ defmodule Browser.JS.Interp do
   end
 
   # every parameter a plain name: no default, pattern or rest parameter
-  defp plain_params?([{:id, _} | ps]), do: plain_params?(ps)
-  defp plain_params?([]), do: true
-  defp plain_params?(_), do: false
+  @doc false
+  def plain_params?([{:id, _} | ps]), do: plain_params?(ps)
+  def plain_params?([]), do: true
+  def plain_params?(_), do: false
 
   defp strict?(%{strict?: strict?}), do: strict?
   defp strict?(_), do: false
 
-  defp fundecls(stmts) do
+  @doc false
+  def fundecls(stmts) do
     Enum.flat_map(stmts, fn
       {:using, _, _, _, rest} -> fundecls(rest)
       stmt -> for {:fundecl, n, f} <- [unexport(stmt)], do: {n, f}
@@ -3090,11 +3093,12 @@ defmodule Browser.JS.Interp do
     hoist_functions(stmts, scope)
   end
 
-  defp lexical_names({:var, kind, decls}) when kind in [:let, :const],
+  @doc false
+  def lexical_names({:var, kind, decls}) when kind in [:let, :const],
     do: Enum.reduce(decls, [], fn {pat, _}, a -> pattern_names(pat, a) end)
 
-  defp lexical_names({:export_default, {:classdecl, name, _}}), do: [name]
-  defp lexical_names(_), do: []
+  def lexical_names({:export_default, {:classdecl, name, _}}), do: [name]
+  def lexical_names(_), do: []
 
   @doc false
   def module_exec(stmts, scope), do: exec_list(stmts, scope)
