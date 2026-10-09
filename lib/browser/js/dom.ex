@@ -1112,19 +1112,69 @@ defmodule Browser.JS.DOM do
 
     case List.keyfind(n.internal, "@nid", 0) do
       {_, id} ->
-        case rects_here() do
-          %{^id => {x, y, w, h}} -> frame_relative({x, y, w, h})
-          _ -> inherited_rect(n.parent)
+        case rect_of(id) do
+          {x, y, w, h} -> frame_relative({x, y, w, h})
+          nil -> inherited_rect(n.parent)
         end
 
       nil ->
-        inherited_rect(n.parent)
+        # (an element no layout was asked about has no number yet: laying out numbers it)
+        with true <- layout_now(),
+             {_, id} <- List.keyfind(node(nid).internal, "@nid", 0),
+             %{^id => {x, y, w, h}} <- rects_here() do
+          frame_relative({x, y, w, h})
+        else
+          _ -> inherited_rect(n.parent)
+        end
     end
   end
 
   # the boxes the layout made: for a frame those of the page, whose coordinates are the page's
   defp rects_here do
-    if st().doc == st().main, do: st().rects, else: Process.get(:dom_page_rects, %{})
+    Process.get(:dom_page_rects) || st().rects
+  end
+
+  # the box of a numbered element. The page is laid out in the background, so a script that
+  # made an element and asks for its size at once would find no box: then the page is laid
+  # out now (see `layout_now/0`), when the host can do it.
+  defp rect_of(id) do
+    case rects_here() do
+      %{^id => rect} -> rect
+      _ -> layout_now() && Map.get(rects_here(), id)
+    end
+  end
+
+  # A layout for the scripts, made while they wait. It costs as much as the layout of the
+  # page, so it is made only when the tree changed since the last one, and no more than
+  # about a fifth of the time (an element that is not drawn has no box, and each question
+  # about it would ask for a layout again).
+  defp layout_now do
+    info = Process.get(:rt_info, %{})
+    rev = st().rev
+    now = System.monotonic_time(:millisecond)
+    {last_rev, last_end, cost} = Process.get(:dom_forced, {nil, nil, 0})
+
+    if info[:layout_now] && rev != last_rev && (last_end == nil or now - last_end >= 4 * cost) do
+      raw = Enum.map(node(st().main).kids, &export/1)
+      ref = make_ref()
+      send(info.owner, {:layout_now, self(), ref, raw})
+
+      result =
+        receive do
+          {:layout_now_done, ^ref, rects, content} -> {rects, content}
+        after
+          5_000 -> nil
+        end
+
+      done = System.monotonic_time(:millisecond)
+      Process.put(:dom_forced, {rev, done, done - now})
+
+      with {rects, content} <- result do
+        Process.put(:dom_page_rects, rects)
+        put_st(%{st() | rects: rects, content: content})
+        true
+      end
+    end
   end
 
   # in a frame, a box is where it is in the frame: the page coordinates less the frame's corner
@@ -2452,6 +2502,24 @@ defmodule Browser.JS.DOM do
     in_realm(realm_key_to_doc(target), fn -> do_dispatch(target, type, init) end)
   end
 
+  # a pointer event also says where it is in the page and in the element it went to
+  defp pointer_coords(event, target, init) do
+    with cx when is_number(cx) <- Map.get(init, "clientX"),
+         cy when is_number(cy) <- Map.get(init, "clientY"),
+         true <- is_integer(target) do
+      {sx, sy} = st().scroll
+      {x, y, _, _} = page_rect(target)
+      px = cx + sx
+      py = cy + sy
+
+      for {k, v} <- [{"pageX", px}, {"pageY", py}, {"offsetX", px - x}, {"offsetY", py - y}],
+          not Map.has_key?(init, k),
+          do: put(event, k, v * 1.0)
+    end
+
+    :ok
+  end
+
   defp do_dispatch(target, type, init) do
     bubbles = Map.get(init, :bubbles, true)
     cancelable = Map.get(init, :cancelable, true)
@@ -2472,6 +2540,8 @@ defmodule Browser.JS.DOM do
           for({k, v} <- init, is_binary(k), do: {k, v}),
         proto({:dom, :event})
       )
+
+    pointer_coords(event, target, init)
 
     path =
       case target do

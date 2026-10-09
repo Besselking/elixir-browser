@@ -1013,6 +1013,63 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["3 function"]
     end
 
+    test "a mouse event says where it is in the page and in the element" do
+      r =
+        run(
+          """
+          var seen;
+          a.addEventListener('mousemove', function (e) { seen = [e.pageX, e.pageY, e.offsetX, e.offsetY]; });
+          a.dispatchEvent(new MouseEvent('mousemove', { clientX: 30, clientY: 20 }));
+          console.log(seen.join(' '));
+          """,
+          "<p id=a>x</p>"
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["30 20 30 20"]
+    end
+
+    test "the page is laid out for a script that asks for the box of a new element" do
+      raw =
+        ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>
+          ~s|var r = d.getBoundingClientRect(); console.log(r.width, r.height);| <>
+          ~s|var r2 = d.getBoundingClientRect(); console.log(r2.width)</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      # (the host numbers the new element and says where it is, as the session does)
+      requests =
+        Stream.repeatedly(fn ->
+          receive do
+            {:layout_now, ^pid, ref, tree} ->
+              nid = nid_of_id(tree, "x")
+              send(pid, {:layout_now_done, ref, %{nid => {10, 20, 300, 40}}, {800.0, 600.0}})
+              :asked
+          after
+            1000 -> :none
+          end
+        end)
+        |> Enum.take(1)
+
+      assert requests == [:asked]
+      reply = Task.await(task)
+      assert errors(reply) == []
+      # (asked once: the second question is for the same tree)
+      assert logs(reply) == ["300 40", "300"]
+      refute_received {:layout_now, _, _, _}
+    end
+
     test "a module namespace with exports cannot be frozen" do
       {_, r} =
         start(
@@ -1928,5 +1985,14 @@ defmodule Browser.JS.DOMTest do
       r = Runtime.dispatch(pid, {:control, 0}, "click")
       assert logs(r) == ["doc click"]
     end
+  end
+
+  defp nid_of_id(nodes, id) when is_list(nodes), do: Enum.find_value(nodes, &nid_of_id(&1, id))
+  defp nid_of_id({:text, _}, _), do: nil
+
+  defp nid_of_id({:element, _, attrs, kids}, id) do
+    if List.keyfind(attrs, "id", 0) == {"id", id},
+      do: attrs |> List.keyfind("@nid", 0) |> elem(1),
+      else: nid_of_id(kids, id)
   end
 end

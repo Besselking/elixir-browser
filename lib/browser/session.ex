@@ -829,6 +829,38 @@ defmodule Browser.Session do
 
   def handle_info({:page_done, _, _, _, _, _, _, _}, state), do: {:noreply, state}
 
+  # the scripts ask where the elements are while the layout in the background is behind:
+  # the page is laid out for them in a process of its own
+  def handle_info({:layout_now, js, ref, raw}, %{page: %Page{} = base} = state) do
+    wx_env = :wx.get_env()
+    env = env(state)
+    width = max(UI.client_width(state.ui), 200)
+    view_h = UI.client_height(state.ui)
+    measure = state.measure_bg
+    images = state.images
+
+    spawn(fn ->
+      :wx.set_env(wx_env)
+      page = Page.from_raw(base, raw, env)
+
+      {items, height} =
+        Layout.layout(page.nodes, width, measure, view_h,
+          scrollers: true,
+          boxes: true,
+          metrics: &measure.(:content_height, &1),
+          images: images,
+          svg_defs: page.svg_defs
+        )
+
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+      send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:layout_now, _js, _ref, _raw}, state), do: {:noreply, state}
+
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
 
@@ -2127,6 +2159,7 @@ defmodule Browser.Session do
         width: state.width,
         height: UI.client_height(state.ui),
         history_before: length(state.history.back),
+        layout_now: true,
         fetch: &Fetch.load(&1, initiator: initiator),
         request: &Fetch.load(&1, [initiator: initiator] ++ &2)
       }
@@ -2260,6 +2293,7 @@ defmodule Browser.Session do
     view_h = UI.client_height(state.ui)
     images = state.images
     measure = state.measure_bg
+    boxes = state.js != nil
 
     pid =
       :erlang.spawn_opt(
@@ -2270,6 +2304,7 @@ defmodule Browser.Session do
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
               scrollers: true,
+              boxes: boxes,
               metrics: &measure.(:content_height, &1),
               images: images,
               svg_defs: page.svg_defs
@@ -2458,6 +2493,7 @@ defmodule Browser.Session do
     {items, height} =
       Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
         scrollers: true,
+        boxes: state.js != nil,
         metrics: &state.measure.(:content_height, &1),
         focus: focus_option(state),
         images: state.images,
@@ -2479,6 +2515,7 @@ defmodule Browser.Session do
     focus = focus_option(state)
     images = state.images
     measure = state.measure_bg
+    boxes = state.js != nil
 
     # a layout allocates a lot: a big initial heap saves it growing the heap by many collections
     pid =
@@ -2490,6 +2527,7 @@ defmodule Browser.Session do
           {items, height} =
             Layout.layout(page.nodes, width, measure, view_h,
               scrollers: true,
+              boxes: boxes,
               metrics: &measure.(:content_height, &1),
               focus: focus,
               images: images,
