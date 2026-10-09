@@ -7551,6 +7551,19 @@ defmodule Browser.LayoutTest do
       assert length(firsts) == 2
     end
 
+    test "a float beside the first lines narrows what is balanced" do
+      html =
+        ~s|<style>body{margin:0}div{width:100px;text-wrap:balance}p{float:left;width:20px;height:5px;margin:0}</style><div><p></p>aa bb cc dd ee ff</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      lines = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(lines) >= 2
+      first = for %{type: :text, y: y, w: w} <- items, y == hd(lines), do: w
+      last = for %{type: :text, y: y, w: w} <- items, y == List.last(lines), do: w
+      assert abs(Enum.sum(first) - Enum.sum(last)) <= 30
+    end
+
     test "text-wrap-style: stable does not balance" do
       html =
         ~s|<style>body{margin:0}div{width:80px;text-wrap:balance;text-wrap-style:stable}</style><div>aa bb cc dd</div>|
@@ -7688,6 +7701,24 @@ defmodule Browser.LayoutTest do
       assert Enum.find(laid, &(&1.type == :rect and &1.color == {255, 0, 0})).h == 100
     end
 
+    test "percentage margins of flex items count as zero in min-content width" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;width:min-content;height:10px;background:green"><div style="width:100px;margin-left:50%"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
+    end
+
+    test "min-width: stretch makes a block with a width as wide as its container" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="width:100px"><div style="width:50px;min-width:stretch;height:10px;background:green"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(
@@ -7696,6 +7727,154 @@ defmodule Browser.LayoutTest do
         )
 
       assert widths == [100]
+    end
+  end
+
+  describe "calc() sizes of boxes inside a bordered absolutely positioned box" do
+    test "percentages are of its content width and a float's calc height is of its container" do
+      html =
+        ~s|<style>body{margin:0}.c{width:300px;height:100px;border:2px solid black;position:absolute}.b{width:calc(50% - 10px);height:calc(100% - 10px);padding:5px;float:left;background:green}</style><div class="c"><div class="b">L</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.w, box.h} == {150, 100}
+    end
+  end
+
+  describe "tables with a max-height" do
+    test "the rows share the height the max-height leaves" do
+      html =
+        ~s|<style>body{margin:0}#t{display:table;background:black;height:300px;max-height:100px;width:100px}.r{display:table-row}.c{display:table-cell}</style><div id="t"><div class="r"><div class="c">a</div></div><div class="r"><div class="c">b</div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      texts = for %{type: :text, y: y} <- laid, do: y
+      assert Enum.max(texts) < 100
+    end
+  end
+
+  describe "percentage heights of inline-blocks" do
+    test "an inline-block child is a percentage of its parent's used height" do
+      html =
+        ~s|<style>body{margin:0}#p{display:inline-block;height:200px;max-height:100px;background:red}#c{display:inline-block;width:100px;height:100%;background:green}</style><div id="p"><span id="c"></span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+  end
+
+  describe "floats in shrink-to-fit boxes" do
+    test "a left float that holds a right float is as wide as the right float" do
+      html =
+        ~s|<style>body{margin:0}.l{float:left;background:green}.r{float:right;width:100px;height:20px}</style><div class="l"><div class="r"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
+    end
+  end
+
+  describe "static position of an absolute box with text-indent" do
+    defp abs_blue(style, inner) do
+      html =
+        ~s|<style>body{margin:0}.c{width:100px;height:20px;font:10px monospace;#{style}}.i{display:inline;position:absolute;width:20px;height:20px;background:blue}</style><div class="c">#{inner}</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      Enum.find(laid, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    end
+
+    test "it starts after the indent of the first line" do
+      assert abs_blue("text-indent:20px", ~s|<div class="i"></div>|).x == 20
+    end
+
+    test "in rtl it ends before the indent, and after the text" do
+      assert abs_blue("direction:rtl;text-indent:20px", ~s|<div class="i"></div>|).x == 60
+    end
+  end
+
+  describe "justified lines with inline backgrounds" do
+    test "the background follows the words it holds" do
+      html =
+        ~s|<style>body{margin:0}div{width:100px;font:10px monospace;text-align:justify}span{background:green}</style><div><span>aa bb</span> cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      text = Enum.find(laid, &(&1.type == :text and &1.text == "bb"))
+      assert box.x + box.w == text.x + text.w
+    end
+  end
+
+  describe "blocks as wide as their content" do
+    test "their vertical margins collapse and the line has no strut" do
+      html =
+        ~s|<style>body{margin:0;font-size:30px}div{height:20px;margin:20px 0;background:green}.f{width:fit-content}</style><div></div><div class="f">x</div><div class="f">x</div><div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      ys = for %{type: :rect, color: {0, 128, 0}, y: y} <- laid, do: y
+      assert Enum.sort(ys) == [20, 60, 100, 140]
+    end
+  end
+
+  describe "baseline of an inline table" do
+    test "is the baseline of its first line" do
+      html =
+        ~s|<style>body{margin:0;font:10px monospace}span{display:inline-table}span>span{display:block;visibility:hidden}</style>a<span>bcd<span>x</span></span>e|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      a = Enum.find(laid, &(&1.type == :text and &1.text == "a"))
+      b = Enum.find(laid, &(&1.type == :text and &1.text == "bcd"))
+      assert a.y == b.y
+    end
+  end
+
+  describe "small text beside an inline-block with larger text" do
+    test "sits where it would beside inline larger text" do
+      ib =
+        ~s|<style>body{margin:0}</style>XXXXX<span style="display:inline-block;font-size:2em">XXXXX</span>|
+
+      inline = ~s|<style>body{margin:0}</style>XXXXX<span style="font-size:2em">XXXXX</span>|
+
+      y = fn html ->
+        page = Browser.Page.build(html, "about:home")
+        {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+        Enum.find(laid, &(&1.type == :text)).y
+      end
+
+      assert y.(ib) == y.(inline)
+    end
+  end
+
+  describe "a table with only a caption" do
+    test "is as wide as the caption" do
+      html =
+        ~s|<style>body{margin:0}table{background:green}</style><table><caption>abcde</caption></table><p>x</p>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      cap = Enum.find(laid, &(&1.type == :text and &1.text == "abcde"))
+      assert cap.x == 0
+    end
+  end
+
+  describe "absolute box in a relatively positioned inline" do
+    test "is placed against the box around its fragments" do
+      html =
+        ~s|<style>body{margin:0;font:20px monospace}.rel{position:relative}.c{position:absolute;inset:0;background:green}</style>XX <span class="rel">XXXX<br>XXXXXXXX<br>XXXXXXXX<span class="c"></span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      first = Enum.find(laid, &(&1.type == :text and &1.text == "XXXX"))
+      last = Enum.filter(laid, &(&1.type == :text and &1.text == "XXXXXXXX")) |> List.last()
+      assert box.x == first.x
+      assert box.x + box.w == last.x + last.w
+      assert box.h > 0
     end
   end
 end

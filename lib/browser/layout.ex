@@ -273,6 +273,32 @@ defmodule Browser.Layout do
 
   defp table_beside_floats(_st, _sub, _spec, _avail, first), do: first
 
+  defp pending_space_w(%{pending_space: nil}), do: 0
+  defp pending_space_w(st), do: st.measure.(" ", st.pending_space)
+
+  # the first and the last box of an inline: {l, r, t, b} each
+  defp add_fragment(frag, origin, _st, right, top, bottom, left) do
+    # (the space before the inline counts when something of it follows on the line)
+    start = if right > origin.x, do: origin.x + origin.space, else: origin.x
+    left = if frag == nil, do: max(left, start), else: left
+    top = if frag == nil, do: max(top, origin.y), else: top
+    box = {left, right, top, bottom}
+
+    case frag do
+      nil -> {box, box}
+      {first, _} -> {first, box}
+    end
+  end
+
+  # the box a fragmented inline's absolute children are placed against: from the first box's start
+  # corner to the last box's end corner
+  defp fragments_box(nil, origin), do: %{x: origin.x, y: origin.y, w: 0, h: 0}
+
+  defp fragments_box({{fl, fr, ft, _}, {ll, lr, _, lb}}, origin) do
+    {x0, x1} = if origin.rtl, do: {ll, fr}, else: {fl, lr}
+    %{x: x0, y: ft, w: max(x1 - x0, 0), h: max(lb - ft, 0)}
+  end
+
   # -- focus -----------------------------------------------------------------------
 
   @ring_color {26, 115, 232}
@@ -791,7 +817,14 @@ defmodule Browser.Layout do
             abs_ops(el, style, c, acc)
 
           c["position"] == "relative" ->
-            rel = %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+            rel = %{
+              top: c["top"],
+              bottom: c["bottom"],
+              left: c["left"],
+              right: c["right"],
+              rtl: style.rtl
+            }
+
             acc = [{:pos_inline, rel} | acc]
             [{:pos_end} | ops.(acc)]
 
@@ -1119,10 +1152,11 @@ defmodule Browser.Layout do
 
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
+          {mt, mb} = vertical_margins(c)
           acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
-          acc = [{:flush} | acc]
-          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true))
-          [{:flush} | acc]
+          acc = [{:gap, mt}, {:flush} | acc]
+          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, false, true))
+          [{:gap, mb}, {:flush} | acc]
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
@@ -1181,6 +1215,16 @@ defmodule Browser.Layout do
       # it was written in: it stays unresolved until the box is placed
       raw = attrs |> List.keyfind("@computed", 0) |> elem(1)
       calc = fn key -> match?({:calc, _, _}, raw[key]) && raw[key] end
+
+      # (its width is gone from `own`: what its children's percentages are of is kept)
+      own =
+        case dim(c["width"]) do
+          w when is_number(w) or (is_tuple(w) and elem(w, 0) == :pct) ->
+            Map.put(own, "@child_w", child_width(c, box))
+
+          _ ->
+            own
+        end
 
       attrs = List.keyreplace(attrs, "@computed", 0, {"@computed", own})
       el = {:element, tag, attrs, kids}
@@ -1541,7 +1585,8 @@ defmodule Browser.Layout do
          c,
          acc,
          block? \\ false,
-         table? \\ false
+         table? \\ false,
+         gapped? \\ false
        ) do
     c = collapsed_table_border(c)
     box = box(tag, c)
@@ -1555,7 +1600,9 @@ defmodule Browser.Layout do
       |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
 
     own =
-      if table?, do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}), else: own
+      if table? or gapped?,
+        do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}),
+        else: own
 
     # (a table is told its width was given: with collapsed borders that is the width of its columns)
     own = if table? and dim(c["width"]) != nil, do: Map.put(own, "@sized", true), else: own
@@ -1597,8 +1644,10 @@ defmodule Browser.Layout do
       rextra: box.pr + br + mr,
       valign: c["vertical-align"],
       cell?: c["display"] == "table-cell",
+      hpct_atom: pct_of(c["height"]) || calc_pct(c["height"]),
       table?: table? or c["display"] == "inline-table",
       block_table?: table? and block?,
+      block_line?: block?,
       flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
@@ -1701,7 +1750,13 @@ defmodule Browser.Layout do
 
     rel =
       if c["position"] == "relative",
-        do: %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+        do: %{
+          top: c["top"],
+          bottom: c["bottom"],
+          left: c["left"],
+          right: c["right"],
+          rtl: style.rtl
+        }
 
     acc = if positioned?, do: [{:pos_inline, rel} | acc], else: acc
 
@@ -2579,7 +2634,7 @@ defmodule Browser.Layout do
     Enum.reduce(["width", "min-width", "max-width"], map, fn key, acc ->
       case acc[key] do
         {:calc, px, f} -> Map.put(acc, key, max(px + f * containing_width(), 0.0))
-        :stretch -> Map.put(acc, key, stretched(acc))
+        :stretch when key == "width" -> Map.put(acc, key, stretched(acc))
         _ -> acc
       end
     end)
@@ -3668,6 +3723,13 @@ defmodule Browser.Layout do
     top = clear_top(st, Map.get(spec, :clear))
     top = if line_bottom, do: max(top, line_bottom), else: top
 
+    # (measured against an unbounded width, a right float would sit far away: it is the room
+    # the floats take together that is wanted, so it goes where a left one would)
+    side =
+      if Process.get(:layout_intrinsic) == true,
+        do: :left,
+        else: side
+
     {x, y} =
       place_float(st, side, w, height, top, st.margin + st.left, st.width - st.margin - st.right)
 
@@ -3909,19 +3971,27 @@ defmodule Browser.Layout do
   defp op({:inline_block, sub, spec, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key))
+    {items, height, base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
 
     {w, items, height, base} =
       table_beside_floats(st, sub, spec, avail, {w, items, height, base})
 
+    # the baseline of an inline table is the one of its first row
+    base =
+      if Map.get(spec, :table?, false) or Map.get(spec, :cell?, false),
+        do: table_baseline(items, base),
+        else: base
+
     place_atom(st, %{
       w: w,
       h: height,
-      base: base,
+      base: if(Map.get(spec, :block_line?, false), do: min(base, height), else: base),
       items: items,
       align: Map.get(spec, :malign) || style.align,
       valign: spec.valign,
-      block: Map.get(spec, :cell?, false)
+      block: Map.get(spec, :cell?, false),
+      block_line?: Map.get(spec, :block_line?, false),
+      tn: last_line_tn(items)
     })
   end
 
@@ -3942,6 +4012,13 @@ defmodule Browser.Layout do
 
   defp op({:flex, cs, items, style}, st) do
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
+
+    # (measuring how wide the container wants to be, a percentage margin is of nothing)
+    items =
+      if Process.get(:layout_intrinsic, false),
+        do: Enum.map(items, &intrinsic_margins/1),
+        else: items
+
     # a balanced column without a height is as tall as holds its items in that many columns
     cs =
       if cs.height == nil and cs.maxh == nil and cs.wrap and Map.get(cs, :balance) == true and
@@ -4264,7 +4341,42 @@ defmodule Browser.Layout do
         do: {st.margin + st.left, st.y + st.gap + st.ngap},
         else: {st.x, st.y}
 
-    push_pos(st, %{x: x, y: y, w: max(st.width - st.margin - st.right - x, 0), h: nil})
+    push_pos(st, %{
+      x: x,
+      y: y,
+      w: max(st.width - st.margin - st.right - x, 0),
+      h: nil,
+      inline: true,
+      space: if(st.line == [], do: 0, else: pending_space_w(st)),
+      rtl: (rel && Map.get(rel, :rtl, false)) || false,
+      ref: make_ref(),
+      frag: nil
+    })
+  end
+
+  defp op({:pos_end}, %{pos: [%{inline: true} = origin | _]} = st) do
+    st = %{st | pos: tl(st.pos), rels: tl(st.rels)}
+    {mine, rest} = Enum.split_with(st.deferred, fn {ref, _, _} -> ref == origin.ref end)
+
+    # the containing block of an absolute box in an inline is the box around all of its fragments
+    frag =
+      if st.line == [] do
+        origin.frag
+      else
+        shift = static_shift(Enum.reverse(st.line), st)
+        first_x = (st.line |> Enum.map(& &1.x) |> Enum.min()) + shift
+        last_x = (st.line |> Enum.map(&(&1.x + &1.w)) |> Enum.max()) + shift
+
+        add_fragment(origin.frag, origin, st, last_x, st.y, st.y + max(st.lmax, st.lh), first_x)
+      end
+
+    box = fragments_box(frag, origin)
+
+    mine
+    |> Enum.reverse()
+    |> Enum.reduce(%{st | deferred: rest}, fn {_, sub, spec}, acc ->
+      place_absolute(acc, sub, spec, box)
+    end)
   end
 
   defp op({:pos_end}, st), do: %{st | pos: tl(st.pos), rels: tl(st.rels)}
@@ -4288,7 +4400,8 @@ defmodule Browser.Layout do
     # `bottom` and a percentage `top` need the containing box's height, known only once it closes
     needs_height? = (spec.bottom && !spec.top) || match?({:pct, _}, spec.top)
 
-    if needs_height? && is_nil(origin.h) && Map.get(origin, :ref) do
+    if (needs_height? && is_nil(origin.h) && Map.get(origin, :ref)) ||
+         (Map.get(origin, :inline) && (spec.top || spec.bottom) && (spec.left || spec.right)) do
       %{st | deferred: [{origin.ref, sub, spec} | st.deferred]}
     else
       place_absolute(st, sub, spec, origin)
@@ -4428,10 +4541,9 @@ defmodule Browser.Layout do
 
   defp balance_run(st, run) do
     avail = max(st.width - 2 * st.margin - st.left - st.right - st.fr, 1)
-    n = balance_line_count(st, run, avail)
+    n = balance_line_count(st, run, avail, avail)
 
-    # (floats beside the lines change how wide each is: left as they are)
-    if n < 2 or Enum.any?(st.floats, &(&1.y1 > st.y)) do
+    if n < 2 do
       Enum.reduce(run, st, &op/2)
     else
       # (no narrower than the longest word: a word that may break anywhere does not count)
@@ -4446,7 +4558,7 @@ defmodule Browser.Layout do
 
       narrow =
         balance_width(min(max(longest, 1), avail), avail, fn w ->
-          balance_line_count(st, run, w) <= n
+          balance_line_count(st, run, w, avail) <= n
         end)
 
       st = Enum.reduce(run, %{st | bal: avail - narrow}, &op/2)
@@ -4454,11 +4566,14 @@ defmodule Browser.Layout do
     end
   end
 
-  defp balance_line_count(st, ops, width) do
-    sub = run(ops, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+  # the number of lines the run makes in `width` (of the `avail` there is), laid out from where
+  # the state is: floats beside the lines and the indent count
+  defp balance_line_count(st, ops, width, avail) do
+    done = ops |> Enum.reduce(%{st | bal: avail - width}, &op/2) |> flush()
+    fresh = length(done.items) - length(st.items)
 
-    sub
-    |> finalize()
+    done.items
+    |> Enum.take(max(fresh, 0))
     |> Enum.filter(&(&1.type == :text))
     |> Enum.map(& &1.y)
     |> Enum.uniq()
@@ -4700,6 +4815,8 @@ defmodule Browser.Layout do
 
     cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
     cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
+    # `min-width: stretch`: at least what the containing block leaves
+    cw = if o.minw == :stretch, do: max(cw, beside - ml0 - mr0 - hpad), else: cw
     box_w = hpad + cw
     free = beside - ml0 - mr0 - box_w
 
@@ -5364,8 +5481,10 @@ defmodule Browser.Layout do
         Map.get(spec, :inline) ->
           y = st.y + st.gap + st.ngap
           {fl, fr} = float_offsets(st, y)
-          left = st.margin + st.left + fl
-          room = st.width - st.margin - st.right - fr - left
+          # (the first line's indent, and any open inline box, come before the empty box)
+          base = st.margin + st.left + fl
+          room = st.width - st.margin - st.right - fr - base - st.lead
+          left = if spec.rtl, do: base, else: base + st.lead
 
           # the static position of the box is that of an empty one on the line
           shift =
@@ -5386,9 +5505,17 @@ defmodule Browser.Layout do
     # a right-to-left box ends where the empty line would put it (a box on a line is at the
     # line's start edge)
     static_right =
-      if spec.rtl and st.line == [] and Map.get(spec, :inline),
-        do: round(static_x),
-        else: st.width - st.margin - st.right
+      cond do
+        spec.rtl and st.line == [] and Map.get(spec, :inline) ->
+          round(static_x)
+
+        # after the text on its line, which runs in from the right edge
+        spec.rtl and st.line != [] and Map.get(spec, :inline, true) ->
+          st.width - st.margin - st.right - (round(st.x) - (st.margin + st.left))
+
+        true ->
+          st.width - st.margin - st.right
+      end
 
     left = resolve_h(spec.left, cw)
     right = resolve_h(spec.right, cw)
@@ -5757,6 +5884,7 @@ defmodule Browser.Layout do
   defp resolve(nil, _base), do: nil
 
   defp resolve({:kw, _}, _base), do: nil
+  defp resolve(:stretch, _base), do: nil
   defp resolve({:pct, f}, base), do: round(f * base)
   defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 
@@ -6073,6 +6201,29 @@ defmodule Browser.Layout do
       layout_atom(st, sub, width, {:flex, key || :erlang.phash2(sub)})
     after
       Process.delete(:layout_flex_item)
+    end
+  end
+
+  defp table_baseline(items, default) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        default
+
+      texts ->
+        first_y = texts |> Enum.map(& &1.y) |> Enum.min()
+        for(%{y: ^first_y} = t <- texts, do: t.y + t.h) |> Enum.max()
+    end
+  end
+
+  # the `normal` line height of the last line of text in an atom
+  defp last_line_tn(items) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        0
+
+      texts ->
+        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
+        for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
     end
   end
 
@@ -6737,6 +6888,13 @@ defmodule Browser.Layout do
         do: Enum.split_with(st.line, &(&1.type == :atom)),
         else: {[], st.line}
 
+    # (a block-level box on a line of its own has no strut)
+    st =
+      if atoms != [] and Enum.all?(texts, &Map.get(&1, :strut, false)) and
+           Enum.all?(atoms, &Map.get(&1, :block_line?, false)),
+         do: %{st | lh: 0, lmax: 0},
+         else: st
+
     {floating, on_baseline} =
       if atoms == [],
         do: {[], []},
@@ -6779,21 +6937,28 @@ defmodule Browser.Layout do
     shift = static_shift(Enum.reverse(st.line), st)
     dy = base - text_base
 
+    # (text next to an inline-block sits as high above the baseline as the text in the box is
+    # tall)
+    fnormal = Enum.reduce(on_baseline, normal, &max(&2, Map.get(&1, :tn, 0)))
+    lift_fudge = if fnormal > normal, do: div(normal - st.lh, 4), else: 0
+
     placed =
       for it <- texts,
           do: %{
             it
             | x: it.x + shift,
-              y: st.y + dy + half + normal - it.h - div(normal - it.h, 4) - Map.get(it, :vs, 0)
+              y:
+                st.y + dy + half + normal - it.h - div(fnormal - it.h, 4) + lift_fudge -
+                  Map.get(it, :vs, 0)
           }
 
     placed =
       placed
       |> Enum.reject(&Map.get(&1, :strut))
-      |> Enum.map(&Map.drop(&1, [:glue, :lm]))
+      |> Enum.map(&(&1 |> Map.drop([:glue, :lm]) |> Map.put(:tn, normal)))
       |> apply_rel()
 
-    placed = justify(placed, st, List.last(st.line), shift)
+    {placed, st, widen} = justify(placed, st, List.last(st.line), shift)
 
     top_of = fn
       %{valign: "top"} -> st.y
@@ -6825,7 +6990,7 @@ defmodule Browser.Layout do
     ctx = %{
       shift: shift,
       first_x: (st.line |> List.last() |> Map.fetch!(:x)) - st.line_lead,
-      last_right: (fn l -> l.x + l.w end).(hd(st.line)),
+      last_right: (fn l -> l.x + l.w end).(hd(st.line)) + widen,
       split: st.splitting,
       y_ref: fn size ->
         if normal > 0,
@@ -6838,6 +7003,22 @@ defmodule Browser.Layout do
     # `boxes` is already newest-first like st.rects
     inline_rects = Enum.reverse(inline_rects) ++ boxes
 
+    # (the lines of the relatively positioned inlines around, for their absolute children)
+    pos =
+      Enum.map(st.pos, fn
+        %{inline: true} = origin ->
+          first_x = (st.line |> Enum.map(& &1.x) |> Enum.min(fn -> st.indent end)) + shift
+          last_x = (st.line |> Enum.map(&(&1.x + &1.w)) |> Enum.max(fn -> st.indent end)) + shift
+
+          %{
+            origin
+            | frag: add_fragment(origin.frag, origin, st, last_x, st.y, st.y + line_h, first_x)
+          }
+
+        origin ->
+          origin
+      end)
+
     # (what a line holds paints as inline content: above the backgrounds of the blocks, whatever
     # their order in the page)
     %{
@@ -6847,6 +7028,7 @@ defmodule Browser.Layout do
         rects: Enum.reverse(rects) ++ st.rects,
         nr: st.nr + length(rects),
         line: [],
+        pos: pos,
         y: st.y + line_h,
         strut: nil,
         lh: 0,
@@ -7021,7 +7203,13 @@ defmodule Browser.Layout do
   defp line_free([first | _] = items, st) do
     last = List.last(items)
     left = min(first.x, st.indent)
-    right = max(last.x + last.w, st.x)
+    # (an ideographic space at the end of the line hangs)
+    hang =
+      if String.ends_with?(Map.get(last, :text, ""), "\u3000"),
+        do: Map.get(last, :hang, 0),
+        else: 0
+
+    right = max(last.x + last.w, st.x) - hang
     st.width - st.margin - st.right - st.fr - st.indent - (right - left)
   end
 
@@ -7049,9 +7237,9 @@ defmodule Browser.Layout do
 
   # Justified lines share their free room out between the spaces. Lines with inline boxes
   # that draw something, and text that keeps its white space, are left as they are.
+  # -> {items, state with the inline box marks moved along, how far the last word moved}
   defp justify(placed, st, first, shift) do
     if line_mode(first, st) in [:justify, :rjustify] and not Map.get(first, :nojust, false) and
-         st.marks == [] and
          st.active == [] and
          Enum.all?(placed, &(&1.type == :text and not Map.get(&1, :nojust, false))) do
       ordered = Enum.reverse(placed)
@@ -7065,12 +7253,30 @@ defmodule Browser.Layout do
             {[%{it | x: it.x - shift + round(j * free / gaps)} | acc], it, j}
           end)
 
-        out
+        # (the boxes of inline elements follow the words they hold)
+        starts =
+          ordered
+          |> Enum.chunk_every(2, 1, :discard)
+          |> Enum.filter(&gap?/1)
+          |> Enum.map(fn [_, b] -> b.x - shift end)
+
+        moved = fn x, le ->
+          j = Enum.count(starts, &if(le, do: &1 <= x, else: &1 < x))
+          x + round(j * free / gaps)
+        end
+
+        marks =
+          Enum.map(st.marks, fn
+            {:start, ref, spec, x} -> {:start, ref, spec, moved.(x, true)}
+            {:end, ref, x} -> {:end, ref, moved.(x, false)}
+          end)
+
+        {out, %{st | marks: marks}, round(free)}
       else
-        placed
+        {placed, st, 0}
       end
     else
-      placed
+      {placed, st, 0}
     end
   end
 
@@ -8088,6 +8294,8 @@ defmodule Browser.Layout do
       rextra: box.pr + br,
       ml: box.ml,
       mr: box.mr,
+      mlraw: c["margin-left"],
+      mrraw: c["margin-right"],
       mt: box.mt,
       mb: box.mb,
       vextra: box.pt + box.pb + bt + bb,
@@ -8228,6 +8436,15 @@ defmodule Browser.Layout do
       length(flex_break(pseudo, gap, room)) <= lines
     end)
   end
+
+  defp intrinsic_margins(%{mlraw: l, mrraw: r} = it),
+    do: %{it | ml: intrinsic_margin(l, it.ml), mr: intrinsic_margin(r, it.mr)}
+
+  defp intrinsic_margins(it), do: it
+
+  defp intrinsic_margin({:pct, _}, _), do: 0
+  defp intrinsic_margin({:calc, px, _}, _), do: round(px)
+  defp intrinsic_margin(_, current), do: current
 
   defp flex_widest(st, cs, items, avail) do
     items
@@ -9300,8 +9517,13 @@ defmodule Browser.Layout do
   # the height a table is given, which `min-height` raises
   defp table_height(c) do
     case {num(c["height"]), num(c["min-height"])} do
-      {nil, nil} -> nil
-      {h, min} -> max(h || 0, min || 0)
+      {nil, nil} ->
+        nil
+
+      {h, min} ->
+        # (`max-height` holds the height down, `min-height` wins over it)
+        h = if max = num(c["max-height"]), do: min(h || 0, max), else: h || 0
+        max(h, min || 0)
     end
   end
 
@@ -10124,8 +10346,16 @@ defmodule Browser.Layout do
 
   # a table with only a caption
   defp table_caption_only(st, model, avail) do
-    {items, h} = table_caption_items(st, model.caption, avail)
-    {items, avail, h}
+    # (as wide as its caption wants, when no width was given)
+    w =
+      if model.caption && avail > @unbounded / 2 do
+        shrink_extent(st, model.caption, @unbounded, nil)
+      else
+        avail
+      end
+
+    {items, h} = table_caption_items(st, model.caption, w)
+    {items, w, h}
   end
 
   defp table_caption_items(_st, nil, _w), do: {[], 0}
@@ -10534,6 +10764,8 @@ defmodule Browser.Layout do
 
   # the width of a block's content box, which its children's percentages refer to: its width
   # (or what is left of the container) less padding and borders
+  defp child_width(%{"@child_w" => w}, _box), do: w
+
   defp child_width(c, box) do
     outer = containing_width()
     {_bt, br, _bb, bl} = box.bw
@@ -10677,7 +10909,11 @@ defmodule Browser.Layout do
     [{:inline_block, sub, spec, style}] =
       inline_block_ops(el, parent_style, c, [], true, c["display"] == "table")
 
-    spec = spec |> Map.put(:clear, clear_side(c)) |> Map.put(:hpct_atom, pct_of(c["height"]))
+    spec =
+      spec
+      |> Map.put(:clear, clear_side(c))
+      |> Map.put(:hpct_atom, pct_of(c["height"]) || calc_pct(c["height"]))
+
     [{:float, side, sub, spec, style} | acc]
   end
 

@@ -1112,6 +1112,7 @@ css/CSS2/floats-clear/floats-039.xht
 css/CSS2/floats-clear/floats-040.xht
 css/CSS2/floats-clear/floats-041.xht
 css/CSS2/floats-clear/floats-043.xht
+css/CSS2/floats-clear/floats-101.xht
 css/CSS2/floats-clear/floats-111.xht
 css/CSS2/floats-clear/floats-112.xht
 css/CSS2/floats-clear/floats-113.xht
@@ -1141,6 +1142,8 @@ css/CSS2/floats-clear/floats-145.xht
 css/CSS2/floats-clear/floats-146.xht
 css/CSS2/floats-clear/floats-147.xht
 css/CSS2/floats-clear/floats-149.xht
+css/CSS2/floats-clear/floats-150.xht
+css/CSS2/floats-clear/floats-152.xht
 css/CSS2/floats-clear/floats-bfc-001.xht
 css/CSS2/floats-clear/floats-bfc-002.xht
 css/CSS2/floats-clear/floats-clear-multicol-001.html
@@ -1249,6 +1252,7 @@ css/CSS2/floats/floats-wrap-top-below-inline-003l.xht
 css/CSS2/floats/floats-wrap-top-below-inline-003r.xht
 css/CSS2/floats/floats-zero-height-wrap-001.xht
 css/CSS2/floats/floats-zero-height-wrap-002.xht
+css/CSS2/floats/intrinsic-size-float-and-line.html
 css/CSS2/floats/negative-block-margin-pushing-float-out-of-block-formatting-context.html
 css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-margin.html
@@ -1422,8 +1426,10 @@ css/CSS2/linebox/vertical-align-applies-to-014.xht
 css/CSS2/linebox/vertical-align-applies-to-015.xht
 css/CSS2/linebox/vertical-align-baseline-001.xht
 css/CSS2/linebox/vertical-align-baseline-002.xht
+css/CSS2/linebox/vertical-align-baseline-006.xht
 css/CSS2/linebox/vertical-align-baseline-007.xht
 css/CSS2/linebox/vertical-align-baseline-008.xht
+css/CSS2/linebox/vertical-align-baseline-009.xht
 css/CSS2/linebox/vertical-align-baseline-010.xht
 css/CSS2/linebox/vertical-align-nested-top-001.html
 css/CSS2/linebox/vertical-align-sub-001.xht
@@ -2289,9 +2295,12 @@ css/CSS2/normal-flow/inline-replaced-width-014.xht
 css/CSS2/normal-flow/inline-replaced-width-015.xht
 css/CSS2/normal-flow/inline-replaced-width-016.xht
 css/CSS2/normal-flow/inline-replaced-width-017.xht
+css/CSS2/normal-flow/inline-table-002a.xht
+css/CSS2/normal-flow/inline-table-002b.xht
 css/CSS2/normal-flow/inline-table-003.xht
 css/CSS2/normal-flow/inline-table-height-001.xht
 css/CSS2/normal-flow/inline-table-height-002.xht
+css/CSS2/normal-flow/inline-table-valign-001.xht
 css/CSS2/normal-flow/inline-table-width-001a.xht
 css/CSS2/normal-flow/inline-table-width-001b.xht
 css/CSS2/normal-flow/inline-table-width-002a.xht
@@ -2387,8 +2396,11 @@ css/CSS2/normal-flow/max-height-applies-to-006.xht
 css/CSS2/normal-flow/max-height-applies-to-008.xht
 css/CSS2/normal-flow/max-height-applies-to-009.xht
 css/CSS2/normal-flow/max-height-applies-to-012.xht
+css/CSS2/normal-flow/max-height-applies-to-013.xht
+css/CSS2/normal-flow/max-height-applies-to-014.xht
 css/CSS2/normal-flow/max-height-applies-to-015.xht
 css/CSS2/normal-flow/max-height-applies-to-016.xht
+css/CSS2/normal-flow/max-height-applies-to-017.html
 css/CSS2/normal-flow/max-height-applies-to-018.html
 css/CSS2/normal-flow/max-height-percentage-001.xht
 css/CSS2/normal-flow/max-height-percentage-002.xht
@@ -4297,6 +4309,7 @@ css/css-flexbox/flexbox_wrap-long.html
 css/css-flexbox/flexbox_wrap-reverse.html
 css/css-flexbox/flexbox_wrap.html
 css/css-flexbox/flexible-order.html
+css/css-flexbox/flexitem-stretch-range.html
 css/css-flexbox/gap-001-lr.html
 css/css-flexbox/gap-001-ltr.html
 css/css-flexbox/gap-001-rl.html
@@ -4377,6 +4390,7 @@ css/css-flexbox/overflow-area-001.html
 css/css-flexbox/overflow-area-002.html
 css/css-flexbox/overflow-area-003.html
 css/css-flexbox/padding-overflow.html
+css/css-flexbox/percentage-descendant-of-anonymous-flex-item.html
 css/css-flexbox/percentage-heights-002.html
 css/css-flexbox/percentage-heights-005.html
 css/css-flexbox/percentage-heights-006.html
@@ -4637,6 +4651,8 @@ css/css-multicol/spanner-fragmentation-007.html
 css/css-multicol/subpixel-column-rule-width.tentative.html
 css/css-multicol/table/multicol-table-cell-height-001.xht
 css/css-multicol/table/table-cell-multicol-nested-003.html
+css/css-position/multicol/vlr-ltr-ltr-in-multicols.html
+css/css-position/multicol/vrl-ltr-ltr-in-multicols.html
 css/css-position/nested-inline-abspos-child-with-siblings.html
 css/css-position/nested-inline-abspos-child.html
 css/css-position/position-absolute-center-003.html
@@ -4647,6 +4663,16 @@ css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
 css/css-position/position-absolute-in-inline-003.html
 css/css-position/position-absolute-in-inline-004.html
+css/css-position/position-absolute-in-inline-005.html
+css/css-position/position-absolute-in-inline-006.html
+css/css-position/position-absolute-in-inline-007a.html
+css/css-position/position-absolute-in-inline-007b.html
+css/css-position/position-absolute-in-inline-008a.html
+css/css-position/position-absolute-in-inline-008b.html
+css/css-position/position-absolute-in-inline-009.html
+css/css-position/position-absolute-in-inline-010.html
+css/css-position/position-absolute-in-inline-011.html
+css/css-position/position-absolute-in-inline-012.html
 css/css-position/position-absolute-in-inline-margin-top.html
 css/css-position/position-absolute-large-negative-inset.html
 css/css-position/position-absolute-multicol-001.html
@@ -4929,6 +4955,7 @@ css/css-sizing/box-sizing-border-box-002.xht
 css/css-sizing/box-sizing-border-box-003.xht
 css/css-sizing/box-sizing-border-box-004.xht
 css/css-sizing/box-sizing-content-box-001.xht
+css/css-sizing/box-sizing-content-box-002.xht
 css/css-sizing/box-sizing-content-box-003.xht
 css/css-sizing/box-sizing-replaced-001.xht
 css/css-sizing/box-sizing-replaced-002.xht
@@ -4936,6 +4963,8 @@ css/css-sizing/box-sizing-replaced-003.xht
 css/css-sizing/calc-margins-block.html
 css/css-sizing/calc-margins-fieldset-content.html
 css/css-sizing/calc-margins-fieldset-legend.html
+css/css-sizing/calc-margins-flex.html
+css/css-sizing/calc-margins-percent-flex.html
 css/css-sizing/clone-intrinsic-size.html
 css/css-sizing/clone-nowrap-intrinsic-size-bidi.html
 css/css-sizing/clone-nowrap-intrinsic-size.html
@@ -5054,6 +5083,7 @@ css/css-sizing/stretch/block-height-010.html
 css/css-sizing/stretch/fixed-table-1.html
 css/css-sizing/stretch/flexbox-stretch-minimum-001.html
 css/css-sizing/stretch/flexbox-stretch-minimum-002.html
+css/css-sizing/stretch/min-width-1.html
 css/css-sizing/stretch/stretch-float-with-sibling.html
 css/css-sizing/stretch/stretch-float.html
 css/css-sizing/whitespace-and-break.html
@@ -5406,6 +5436,7 @@ css/css-text/text-indent/text-indent-percentage-002.html
 css/css-text/text-indent/text-indent-percentage-003.html
 css/css-text/text-indent/text-indent-percentage-004.html
 css/css-text/text-indent/text-indent-text-align-end.html
+css/css-text/text-indent/text-indent-with-absolute-pos-child.html
 css/css-text/text-justify/text-justify-001.html
 css/css-text/text-justify/text-justify-006.html
 css/css-text/text-justify/text-justify-and-trailing-spaces-001.html
@@ -5430,6 +5461,7 @@ css/css-text/text-transform/text-transform-fullwidth-004.xht
 css/css-text/text-transform/text-transform-fullwidth-005.xht
 css/css-text/text-transform/text-transform-fullwidth-006.html
 css/css-text/text-transform/text-transform-fullwidth-007.html
+css/css-text/text-transform/text-transform-fullwidth-008.html
 css/css-text/text-transform/text-transform-letter-spacing-001.html
 css/css-text/text-transform/text-transform-lowercase-101.xht
 css/css-text/text-transform/text-transform-lowercase-102.xht
@@ -5615,6 +5647,7 @@ css/css-text/white-space/pre-wrap-010.html
 css/css-text/white-space/pre-wrap-011.html
 css/css-text/white-space/pre-wrap-012.html
 css/css-text/white-space/pre-wrap-013.html
+css/css-text/white-space/pre-wrap-014.html
 css/css-text/white-space/pre-wrap-015.html
 css/css-text/white-space/pre-wrap-016.html
 css/css-text/white-space/pre-wrap-017.html
@@ -5662,9 +5695,14 @@ css/css-text/white-space/text-wrap-balance-004.html
 css/css-text/white-space/text-wrap-balance-align-001.html
 css/css-text/white-space/text-wrap-balance-before-after-001.html
 css/css-text/white-space/text-wrap-balance-before-after-002.html
+css/css-text/white-space/text-wrap-balance-float-001.html
+css/css-text/white-space/text-wrap-balance-float-002.html
+css/css-text/white-space/text-wrap-balance-float-003.html
+css/css-text/white-space/text-wrap-balance-float-004.html
 css/css-text/white-space/text-wrap-balance-float-006.html
 css/css-text/white-space/text-wrap-balance-line-clamp-001.html
 css/css-text/white-space/text-wrap-balance-overflow-001.html
+css/css-text/white-space/text-wrap-balance-text-indent-001.html
 css/css-text/white-space/text-wrap-nowrap-001.html
 css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html
