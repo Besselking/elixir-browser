@@ -35,6 +35,8 @@ defmodule Browser.CSS do
     css
     |> String.replace_invalid()
     |> strip_comments()
+    |> strip_markup_comments()
+    |> xml_entities()
     |> blocks([], [])
     |> Enum.flat_map(fn {prelude, body, conds} ->
       decls = parse_declarations(body)
@@ -54,6 +56,34 @@ defmodule Browser.CSS do
     end)
   end
 
+  # an XML comment (`<!-- text -->`) in a stylesheet of an XHTML page is no part of it; one that
+  # holds rules is the old way to hide them from browsers that know no style, and stays
+  defp strip_markup_comments(css) do
+    if String.contains?(css, "<!--"),
+      do: Regex.replace(~r/<!--([^{}]*?)-->/s, css, ""),
+      else: css
+  end
+
+  # In an XHTML page the `>` of a child selector is written `&gt;`: outside of strings, the three
+  # entities XML defines stand for their characters.
+  defp xml_entities(css) do
+    if String.contains?(css, ["&gt;", "&lt;", "&amp;"]),
+      do: xml_entities(css, nil, []),
+      else: css
+  end
+
+  defp xml_entities(<<>>, _q, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp xml_entities(<<?\\, c, r::binary>>, q, acc), do: xml_entities(r, q, [<<?\\, c>> | acc])
+
+  defp xml_entities(<<c, r::binary>>, nil, acc) when c in [?", ?'],
+    do: xml_entities(r, c, [<<c>> | acc])
+
+  defp xml_entities(<<c, r::binary>>, c, acc), do: xml_entities(r, nil, [<<c>> | acc])
+  defp xml_entities(<<"&gt;", r::binary>>, nil, acc), do: xml_entities(r, nil, [">" | acc])
+  defp xml_entities(<<"&lt;", r::binary>>, nil, acc), do: xml_entities(r, nil, ["<" | acc])
+  defp xml_entities(<<"&amp;", r::binary>>, nil, acc), do: xml_entities(r, nil, ["&" | acc])
+  defp xml_entities(<<c, r::binary>>, q, acc), do: xml_entities(r, q, [<<c>> | acc])
+
   @doc "Parses the contents of a declaration block / `style` attribute."
   def parse_declarations(body) when is_binary(body) do
     body
@@ -65,9 +95,10 @@ defmodule Browser.CSS do
            [prop, value] <- :binary.split(piece, ":"),
            prop = prop |> String.trim() |> fold_prop(),
            true <- prop not in ["", "--"] do
+        bad? = bad_string?(value)
         {value, important?} = split_important(String.trim(value))
 
-        if valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
+        if not bad? and valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
           do: [{prop, value, important?}],
           else: []
       else
@@ -75,6 +106,20 @@ defmodule Browser.CSS do
       end
     end)
   end
+
+  # a string cut short by a line break is a bad string, which makes the declaration invalid (one
+  # that the input's end cuts short is closed there)
+  defp bad_string?(<<>>), do: false
+  defp bad_string?(<<?\\, _, r::binary>>), do: bad_string?(r)
+
+  defp bad_string?(<<q, r::binary>>) when q in [?", ?'] do
+    case Regex.run(~r/\A(?:[^\\\n#{<<q>>}]|\\.)*(.?)/s, r) do
+      [_, "\n"] -> true
+      [whole, _] -> bad_string?(binary_part(r, byte_size(whole), byte_size(r) - byte_size(whole)))
+    end
+  end
+
+  defp bad_string?(<<_, r::binary>>), do: bad_string?(r)
 
   defp var_reference?(piece), do: Regex.match?(~r/var\(/i, piece)
 
@@ -299,7 +344,7 @@ defmodule Browser.CSS do
             border-spacing border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius border-top-right-radius
             border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after
             break-before break-inside caption-side caret-color clear clip clip-path color
-            color-scheme column-count column-fill column-gap column-rule column-rule-color column-rule-style column-rule-width
+            color-scheme column-count column-fill column-gap column-height column-wrap column-rule column-rule-color column-rule-style column-rule-width
             column-span column-width columns contain contain-intrinsic-size container container-name container-type
             content content-visibility counter-increment counter-reset counter-set cursor direction display
             empty-cells filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink
@@ -551,7 +596,7 @@ defmodule Browser.CSS do
 
       m =
           Regex.run(
-            ~r/\A\[\s*([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
+            ~r/\A\[\s*\|?([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
             s
           ) ->
         [whole, name | rest] = m
@@ -712,8 +757,45 @@ defmodule Browser.CSS do
 
   defp drop(s, prefix), do: binary_part(s, byte_size(prefix), byte_size(s) - byte_size(prefix))
 
+  @form_controls ~w(input select textarea)
+  @text_inputs [
+    nil,
+    "text",
+    "search",
+    "url",
+    "tel",
+    "email",
+    "password",
+    "number",
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week"
+  ]
+
+  # a text field the user can edit, or content made editable
+  defp editable?(ctx) do
+    attr = fn name -> List.keyfind(ctx.attrs, name, 0) end
+
+    case ctx.tag do
+      "input" ->
+        type = with {_, t} <- attr.("type"), do: String.downcase(t)
+
+        type in @text_inputs and not List.keymember?(ctx.attrs, "readonly", 0) and
+          not List.keymember?(ctx.attrs, "disabled", 0)
+
+      "textarea" ->
+        not List.keymember?(ctx.attrs, "readonly", 0) and
+          not List.keymember?(ctx.attrs, "disabled", 0)
+
+      _ ->
+        match?({_, v} when v in ["", "true", "plaintext-only"], attr.("contenteditable"))
+    end
+  end
+
   @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked modal open mb-backdrop popover-open host)
+  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only modal open mb-backdrop popover-open host)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -1014,6 +1096,15 @@ defmodule Browser.CSS do
     do: List.keymember?(ctx.attrs, "checked", 0) or List.keymember?(ctx.attrs, "selected", 0)
 
   defp pseudo?(:enabled, ctx), do: not List.keymember?(ctx.attrs, "disabled", 0)
+
+  defp pseudo?(:required, ctx),
+    do: ctx.tag in @form_controls and List.keymember?(ctx.attrs, "required", 0)
+
+  defp pseudo?(:optional, ctx),
+    do: ctx.tag in @form_controls and not List.keymember?(ctx.attrs, "required", 0)
+
+  defp pseudo?(:read_write, ctx), do: editable?(ctx)
+  defp pseudo?(:read_only, ctx), do: not editable?(ctx)
   defp pseudo?({:anchor, key}, ctx), do: ctx.key == key
   defp pseudo?({:has, rels}, ctx), do: Enum.any?(rels, &has?(&1, ctx))
   defp pseudo?(:host, ctx), do: shadow_host?(ctx)

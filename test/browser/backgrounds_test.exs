@@ -162,6 +162,8 @@ defmodule Browser.BackgroundsTest do
     test "keywords and lengths" do
       assert B.parse_position("left top") == [{{:pct, +0.0}, {:pct, +0.0}}]
       assert B.parse_position("top left") == [{{:pct, +0.0}, {:pct, +0.0}}]
+      assert B.parse_position("center left") == [{{:pct, +0.0}, {:pct, 0.5}}]
+      assert B.parse_position("center right") == [{{:pct, 1.0}, {:pct, 0.5}}]
       assert B.parse_position("right bottom") == [{{:pct, 1.0}, {:pct, 1.0}}]
       assert B.parse_position("center") == [{{:pct, 0.5}, {:pct, 0.5}}]
       assert B.parse_position("center top") == [{{:pct, 0.5}, {:pct, +0.0}}]
@@ -207,6 +209,7 @@ defmodule Browser.BackgroundsTest do
       assert B.shorthand("#fff") == %{
                color: "#fff",
                image: "none",
+               attachment: "scroll",
                repeat: "repeat",
                position: "0% 0%",
                size: "auto"
@@ -215,6 +218,7 @@ defmodule Browser.BackgroundsTest do
       assert B.shorthand("none") == %{
                color: "transparent",
                image: "none",
+               attachment: "scroll",
                repeat: "repeat",
                position: "0% 0%",
                size: "auto"
@@ -226,6 +230,12 @@ defmodule Browser.BackgroundsTest do
       assert %{color: "#eee", image: "url(a.png)", repeat: "no-repeat"} = s
       s = B.shorthand("no-repeat url(a.png) red")
       assert %{color: "red", image: "url(a.png)", repeat: "no-repeat"} = s
+    end
+
+    test "attachment, with one value for each layer" do
+      assert %{attachment: "fixed"} = B.shorthand("url(a.png) fixed no-repeat")
+      assert %{attachment: "fixed, scroll"} = B.shorthand("url(a.png) fixed, url(b.png)")
+      assert B.parse_attachment("fixed, local, scroll") == [:fixed, :local, :scroll]
     end
 
     test "position and size around the slash" do

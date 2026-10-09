@@ -21,7 +21,7 @@ defmodule Browser.Style do
             border-top-color border-right-color border-bottom-color border-left-color
             border-top-left-radius border-top-right-radius border-bottom-right-radius
             border-bottom-left-radius line-height
-            background-image background-repeat background-position background-size box-shadow
+            background-image background-attachment background-repeat background-position background-size box-shadow
             color background-color font-size font-weight font-style font-family
             text-decoration-line text-align direction list-style-type flex-direction
             margin-top margin-bottom margin-left padding-top padding-bottom padding-left
@@ -30,8 +30,8 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
-            grid-template-columns grid-column grid-column-start grid-column-end justify-items justify-self)
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
+            grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
                 fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -62,7 +62,7 @@ defmodule Browser.Style do
     "text-decoration" => ~w(text-decoration-line),
     "font" => ~w(font-style font-weight font-size line-height font-family),
     "background" =>
-      ~w(background-color background-image background-repeat background-position background-size),
+      ~w(background-color background-image background-attachment background-repeat background-position background-size),
     "border-width" =>
       ~w(border-top-width border-right-width border-bottom-width border-left-width),
     "border-style" =>
@@ -396,9 +396,18 @@ defmodule Browser.Style do
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
       (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
-        not invalid_color?(p, v) and not percent_width?(p, v)
+        not invalid_color?(p, v) and not percent_width?(p, v) and not invalid_integer?(p, v)
     end)
   end
+
+  # `order` and `z-index` take integers: `1.5` is dropped, so an earlier declaration still applies
+  defp invalid_integer?(prop, v) when prop in ["order", "z-index"] and is_binary(v) do
+    v = String.trim(v)
+
+    simple_value?(v) and v != "auto" and not Regex.match?(~r/\A[+-]?\d+\z/, v)
+  end
+
+  defp invalid_integer?(_prop, _v), do: false
 
   # a colour that is not one is dropped before the cascade, so an earlier declaration still
   # applies (`color: green; color: invalidValue`)
@@ -423,11 +432,16 @@ defmodule Browser.Style do
   # a negative width, height, min/max size or padding is invalid: the declaration is dropped
   # before the cascade, so an earlier value still applies
   defp negative_size?(prop, "-" <> rest) when is_binary(rest) do
-    (prop in @non_negative or String.starts_with?(prop, "padding-")) and
+    (prop in @non_negative or String.starts_with?(prop, "padding-") or border_width_prop?(prop)) and
       match?({n, _} when n > 0, Float.parse(String.replace_prefix(rest, ".", "0.")))
   end
 
   defp negative_size?(_prop, _v), do: false
+
+  defp negative_width?(w), do: is_binary(w) and negative_size?("border-top-width", w)
+
+  defp border_width_prop?(prop),
+    do: String.ends_with?(prop, "-width") and String.starts_with?(prop, "border-")
 
   # Shorthands become longhands so the cascade can order them against each
   # other. A shorthand whose value uses var() can't be split until the
@@ -503,10 +517,51 @@ defmodule Browser.Style do
 
   # `columns: <width> || <count>`, in either order, either of them `auto`
   defp expand({"columns", value, imp}) do
-    for t <- tokens(String.trim(value)), t != "auto" do
-      if Regex.match?(~r/\A\d+\z/, t),
-        do: {"column-count", t, imp},
-        else: {"column-width", t, imp}
+    toks = tokens(String.trim(value))
+
+    # (a declaration with a part that is no count or width is dropped as a whole)
+    if length(toks) in 1..2 and Enum.all?(toks, &valid_column_token?/1) do
+      for t <- toks, t != "auto" do
+        if Regex.match?(~r/\A\d+\z/, t),
+          do: {"column-count", t, imp},
+          else: {"column-width", t, imp}
+      end
+    else
+      []
+    end
+  end
+
+  # an invalid `column-count` is dropped when the stylesheet is read, so an earlier one stays
+  defp expand({"column-count", value, _imp} = decl) do
+    v = String.trim(value)
+
+    if v == "auto" or Regex.match?(~r/\A\+?0*[1-9]\d*\z/, v) or not simple_value?(v),
+      do: [decl],
+      else: []
+  end
+
+  # `grid-template: <rows> / <columns>` (the form with named areas is not read)
+  defp expand({"grid-template", value, imp}) do
+    v = String.trim(value)
+
+    cond do
+      v in ["none", ""] ->
+        [{"grid-template-rows", "none", imp}, {"grid-template-columns", "none", imp}]
+
+      String.contains?(v, ["\"", "'"]) ->
+        []
+
+      true ->
+        case String.split(v, "/", parts: 2) do
+          [rows, cols] ->
+            [
+              {"grid-template-rows", String.trim(rows), imp},
+              {"grid-template-columns", String.trim(cols), imp}
+            ]
+
+          _ ->
+            []
+        end
     end
   end
 
@@ -562,6 +617,15 @@ defmodule Browser.Style do
   end
 
   defp expand(decl), do: [decl]
+
+  defp valid_column_token?(t),
+    do:
+      t == "auto" or Regex.match?(~r/\A\+?\d+\z/, t) or Regex.match?(~r/\A\+?[\d.]+[a-z]+\z/i, t) or
+        not simple_value?(t)
+
+  # false for values the reader cannot judge: `var()`, `calc()` and the like
+  defp simple_value?(v),
+    do: not String.contains?(v, "(") and v not in ~w(inherit initial unset revert)
 
   @keywords ~w(inherit initial unset revert)
 
@@ -627,11 +691,13 @@ defmodule Browser.Style do
         do: {long, "#{a} #{b}"}
   end
 
+  # (a negative width makes the whole shorthand invalid)
   defp do_split("border", _v, toks) do
     {w, st, c} = border_parts(toks)
 
     for side <- ~w(top right bottom left),
         {suffix, val} <- [{"width", w}, {"style", st}, {"color", c}],
+        not negative_width?(w),
         do: {"border-#{side}-#{suffix}", val}
   end
 
@@ -642,7 +708,14 @@ defmodule Browser.Style do
 
   defp do_split("border-" <> side, _v, toks) when side in ~w(top right bottom left) do
     {w, st, c} = border_parts(toks)
-    [{"border-#{side}-width", w}, {"border-#{side}-style", st}, {"border-#{side}-color", c}]
+
+    if negative_width?(w),
+      do: [],
+      else: [
+        {"border-#{side}-width", w},
+        {"border-#{side}-style", st},
+        {"border-#{side}-color", c}
+      ]
   end
 
   defp do_split("overflow", _v, toks) do
@@ -674,6 +747,7 @@ defmodule Browser.Style do
     [
       {"background-color", parts.color},
       {"background-image", parts.image},
+      {"background-attachment", parts.attachment},
       {"background-repeat", parts.repeat},
       {"background-position", parts.position},
       {"background-size", parts.size}
@@ -1411,8 +1485,13 @@ defmodule Browser.Style do
 
     fs =
       case resolved do
-        %{"font-size" => v} -> font_size(v, pfs, parent_root || @default_fs) || pfs
-        _ -> pfs
+        %{"font-size" => v} ->
+          font_size(v, pfs, parent_root || @default_fs, fn ->
+            font_units(idx, %{}, inherited, pfs)
+          end) || pfs
+
+        _ ->
+          pfs
       end
 
     color =
@@ -1443,7 +1522,14 @@ defmodule Browser.Style do
           end
       end
 
-    base = Map.merge(inherited, typed) |> size_containment(resolved, env)
+    # (`initial` on an inherited property cuts the value off the parent's)
+    reset = for {k, v} <- resolved, v == "initial", k not in ["font-size", "color"], do: k
+
+    base =
+      inherited
+      |> Map.drop(reset)
+      |> Map.merge(typed)
+      |> size_containment(resolved, env)
 
     # `<center>` centres blocks and tables, but its text alignment stops at a table
     base =
@@ -1485,8 +1571,15 @@ defmodule Browser.Style do
     if "size" in contain or "strict" in contain do
       {iw, ih} = intrinsic_size(resolved, env)
 
+      # (a width and an aspect ratio give the height already)
+      ratio? =
+        Map.get(resolved, "aspect-ratio", "auto") not in ["auto", "", "initial"] and
+          Map.get(base, "width", :auto) != :auto
+
       base =
-        if Map.get(base, "height", :auto) == :auto, do: Map.put(base, "height", ih), else: base
+        if Map.get(base, "height", :auto) == :auto and not ratio?,
+          do: Map.put(base, "height", ih),
+          else: base
 
       if Map.get(base, "width") in [:maxc, :fit, :minc],
         do: Map.put(base, "width", iw),
@@ -1728,6 +1821,17 @@ defmodule Browser.Style do
 
   # -- typed values --------------------------------------------------------------------
 
+  # (an inherited border colour that is the parent's `currentcolor` stays `currentcolor`: it is
+  # the colour of this element)
+  defp typed(prop, "inherit", env, pc)
+       when prop in ~w(border-top-color border-right-color border-bottom-color border-left-color) do
+    case pc do
+      %{^prop => c, "color" => c} when is_tuple(c) -> {:ok, env.color}
+      %{^prop => c} -> {:ok, c}
+      _ -> :skip
+    end
+  end
+
   defp typed(prop, v, _env, pc) when v in @keywords do
     if v == "inherit" and Map.has_key?(pc, prop), do: {:ok, pc[prop]}, else: :skip
   end
@@ -1790,6 +1894,16 @@ defmodule Browser.Style do
               ],
        do: {:ok, {:kw, %{"min-content" => :minc, "max-content" => :maxc}[v] || :fit}}
 
+  defp typed(prop, "fit-content(" <> rest, env, _pc) when prop in ["min-width", "max-width"] do
+    arg = rest |> String.trim_trailing(")") |> String.trim()
+
+    cond do
+      pct = percentage(arg) -> {:ok, {:kw, {:fitc, {:pct, pct}}}}
+      px = length(arg, env) -> {:ok, {:kw, {:fitc, px}}}
+      true -> :skip
+    end
+  end
+
   # stretch: fill the containing block; a block already does, so layout only looks at it for
   # boxes that would otherwise shrink to fit
   defp typed(prop, v, _env, _pc)
@@ -1810,7 +1924,7 @@ defmodule Browser.Style do
   end
 
   defp typed(prop, v, _env, _pc)
-       when prop in ["width", "height", "max-height"] and
+       when prop in ["width", "height", "min-height", "max-height"] and
               v in [
                 "fit-content",
                 "max-content",
@@ -1918,6 +2032,11 @@ defmodule Browser.Style do
     end
   end
 
+  defp typed("column-height", v, env, _pc) do
+    px = length(v, env)
+    if px && px > 0, do: {:ok, px}, else: :skip
+  end
+
   defp typed("column-width", v, env, _pc) do
     px = length(v, env)
     if px && px > 0, do: {:ok, px}, else: :skip
@@ -1930,6 +2049,10 @@ defmodule Browser.Style do
 
       Regex.match?(~r/\A\+?(\d+\.?\d*|\.\d+)\z/, v) ->
         {:ok, {:num, to_float(v)}}
+
+      # (a negative zero is zero)
+      Regex.match?(~r/\A-0*\.?0*%?\z/, v) and Regex.match?(~r/0/, v) ->
+        {:ok, {:px, 0.0}}
 
       m = Regex.run(~r/\A\+?(\d+\.?\d*|\.\d+)%\z/, v) ->
         {:ok, {:px, env.fs * to_float(Enum.at(m, 1)) / 100}}
@@ -1944,6 +2067,9 @@ defmodule Browser.Style do
 
   defp typed("background-image", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_images(v)}
   defp typed("background-repeat", v, _env, _pc), do: {:ok, Browser.Backgrounds.parse_repeat(v)}
+
+  defp typed("background-attachment", v, _env, _pc),
+    do: {:ok, Browser.Backgrounds.parse_attachment(v)}
 
   defp typed("background-position", v, env, _pc),
     do: {:ok, Browser.Backgrounds.parse_position(font_units_to_px(v, env))}
@@ -1980,6 +2106,7 @@ defmodule Browser.Style do
     cond do
       px = length(v, env) -> {:ok, px}
       pct = percentage(v) -> {:ok, {:pct, pct}}
+      mixed = mixed_calc(v, env) -> {:ok, mixed}
       true -> :skip
     end
   end
@@ -2008,6 +2135,14 @@ defmodule Browser.Style do
     {:ok, if(bold?, do: "bold", else: "normal")}
   end
 
+  # a length is computed where it is declared (the inherited value is absolute)
+  defp typed("tab-size", v, env, _pc) do
+    case Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, v) do
+      true -> {:ok, v}
+      false -> if px = length(v, env), do: {:ok, "#{px}px"}, else: {:ok, v}
+    end
+  end
+
   defp typed("font-style", v, _env, _pc),
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
 
@@ -2016,16 +2151,14 @@ defmodule Browser.Style do
   # `em` in a background's position or size is the element's font size
   # em and ch lengths of a background position or size, as pixels
   defp font_units_to_px(v, env) do
-    ch = env.fs * Map.get(env, :ch, 0.6)
+    units = [{"ch", env.fs * Map.get(env, :ch, 0.6)}, {"ex", env.fs * Map.get(env, :ex, 0.5)}]
 
-    v
-    |> ems_to_px(env.fs)
-    |> then(
-      &Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i, &1, fn _, n ->
+    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit, size}, acc ->
+      Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))#{unit}\b/i, acc, fn _, n ->
         {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
-        "#{Float.round(f * ch, 3)}px"
+        "#{Float.round(f * size, 3)}px"
       end)
-    )
+    end)
   end
 
   defp ems_to_px(v, fs) do
@@ -2069,7 +2202,7 @@ defmodule Browser.Style do
     "xxx-large" => 48.0
   }
 
-  defp font_size(v, pfs, root) do
+  defp font_size(v, pfs, root, units) do
     cond do
       Map.has_key?(@font_keywords, v) ->
         @font_keywords[v]
@@ -2085,6 +2218,11 @@ defmodule Browser.Style do
 
       m = Regex.run(~r/\A([\d.]+)%\z/, v) ->
         pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
+
+      # (an `ex` or `ch` in a font size is of the parent's font)
+      Regex.match?(~r/(ex|ch)\b/i, v) ->
+        {ex, ch} = units.()
+        length(v, %{fs: pfs, root: root, ex: ex, ch: ch})
 
       true ->
         length(v, %{fs: pfs, root: root})

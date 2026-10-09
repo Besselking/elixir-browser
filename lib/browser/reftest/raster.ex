@@ -119,6 +119,10 @@ defmodule Browser.Reftest.Raster do
     end)
   end
 
+  # the canvas takes the background images of the root or the body
+  defp draw(grid, %{type: :canvas, layers: [_ | _]} = c, w, h, pics),
+    do: draw(grid, %{c | type: :bgimage}, w, h, pics)
+
   defp draw(grid, %{type: :text, hidden: true}, _w, _h, _pics), do: grid
 
   defp draw(grid, %{type: :text} = t, w, h, _pics), do: text(grid, t, clip_box(t, w, h))
@@ -175,7 +179,7 @@ defmodule Browser.Reftest.Raster do
             do: g,
             else: fill(g, t.x + round(off), gy, gw, gh, ink(g, t, off, gy, ch, ahem?), clip)
 
-        {g, off + cadv * size + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
+        {g, off + round(cadv * size) + ls + if(ch in [" ", "\u00A0"], do: wsp, else: 0)}
       end)
 
     width = round(advance_x)

@@ -346,5 +346,31 @@ defmodule Browser.CSSTest do
     test "unbalanced brackets drop the declaration" do
       assert [%{decls: [{"--a", "ok", false}]}] = CSS.parse("p { --a: ok; --b: red) }")
     end
+
+    test "a string cut short by a line break drops the declaration, the end of input closes it" do
+      assert [%{decls: [{"color", "green", false}]}] =
+               CSS.parse("p { color: green; color: var(--a, \"\n}")
+
+      assert [%{decls: [{"color", "var(--a, url(\"", false}]}] =
+               CSS.parse("p { color: var(--a, url(\"")
+    end
+
+    test "XHTML entities in a selector stand for their characters, strings keep theirs" do
+      assert [%{selector: [_, _], decls: [{"content", "\"&amp;\"", false}]}] =
+               CSS.parse("a &gt; b { content: \"&amp;\" }")
+    end
+
+    test "an attribute selector may name the null namespace" do
+      assert [%{decls: [{"color", "green", false}]}] = CSS.parse("[|a] { color: green }")
+    end
+  end
+
+  describe "markup comments" do
+    test "an XML comment without braces is dropped, one holding rules stays" do
+      assert [%{decls: [{"color", "green", false}]}] =
+               CSS.parse("<!-- note --> p { color: green }")
+
+      assert [%{decls: [{"color", "red", false}]}] = CSS.parse("<!-- p { color: red } -->")
+    end
   end
 end

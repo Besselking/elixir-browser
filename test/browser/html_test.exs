@@ -2,6 +2,16 @@ defmodule Browser.HTMLTest do
   use ExUnit.Case, async: true
   alias Browser.HTML
 
+  test "a table cell ends an open column group" do
+    assert [
+             {:element, "table", [],
+              [
+                {:element, "colgroup", [], []},
+                {:element, "td", [], [{:text, "a"}]}
+              ]}
+           ] = HTML.parse("<table><colgroup></col><td>a</table>")
+  end
+
   test "nests elements and decodes entities" do
     assert [{:element, "p", [], [{:text, "a & b "}, {:element, "b", [], [{:text, "c"}]}]}] =
              HTML.parse("<p>a &amp; b <b>c</b></p>")
@@ -116,6 +126,17 @@ defmodule Browser.HTMLTest do
     test "keep an explicit body" do
       assert [{:element, "html", [], [{:element, "head", [], []}, {:element, "body", _, _}]}] =
                HTML.parse_document("<html><head></head><body class=a>x</body></html>")
+    end
+
+    test "content before a body tag is in that body" do
+      assert [
+               {:element, "html", [],
+                [
+                  {:element, "title", [], _},
+                  {:element, "body", [{"class", "a"}],
+                   [{:element, "p", [], _}, {:element, "div", [], _}]}
+                ]}
+             ] = HTML.parse_document("<title>t</title><p>x</p></head><body class=a><div>y</div>")
     end
 
     test "style text loses the CDATA markers of XHTML pages" do

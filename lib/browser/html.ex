@@ -81,16 +81,22 @@ defmodule Browser.HTML do
           [{:element, "html", attrs, with_body(kids)} | others]
 
         {[], _} ->
-          if Enum.any?(nodes, &match?({:element, "body", _, _}, &1)),
-            do: [{:element, "html", [], nodes}],
-            else: [{:element, "html", [], with_body(nodes)}]
+          [{:element, "html", [], with_body(nodes)}]
       end
     end
   end
 
   defp with_body(kids) do
-    if Enum.any?(kids, &match?({:element, "body", _, _}, &1)) do
-      kids
+    if i = Enum.find_index(kids, &match?({:element, "body", _, _}, &1)) do
+      # content before a `<body>` tag already started the body: the tag joins it
+      {before, [{:element, "body", attrs, body_kids} | after_body]} = Enum.split(kids, i)
+      {head, early} = Enum.split_while(before, &head_node?/1)
+
+      if Enum.all?(early, &head_node?/1) do
+        kids
+      else
+        head ++ [{:element, "body", attrs, early ++ body_kids} | after_body]
+      end
     else
       {head, rest} = Enum.split_while(kids, &head_node?/1)
 
@@ -275,6 +281,12 @@ defmodule Browser.HTML do
     do: build(rest, [{tag, [{:comment, t} | kids]} | stack])
 
   defp build([{:open, name, attrs, self_close?} | rest], stack) do
+    # (a column group ends where the rows begin)
+    stack =
+      if name in ~w(td th tr thead tbody tfoot caption),
+        do: close_within(stack, ["colgroup"], "table"),
+        else: stack
+
     stack = implied_close(name, stack)
 
     if name in @void or self_close? do

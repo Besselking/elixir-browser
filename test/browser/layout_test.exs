@@ -179,7 +179,7 @@ defmodule Browser.LayoutTest do
 
     test "display:inline list items flow on one line" do
       css = "<style>ul { list-style: none; margin: 0; padding: 0 } li { display: inline }</style>"
-      {items, _} = styled(css <> "<ul><li>a</li><li>b</li></ul>")
+      {items, _} = styled(css <> "<ul><li>a</li> <li>b</li></ul>")
       assert word(items, "a").y == word(items, "b").y
     end
 
@@ -280,7 +280,7 @@ defmodule Browser.LayoutTest do
 
     test "display overrides the tag: a div can be inline, a span can be block" do
       {items, _} =
-        styled(~s(<div style="display:inline">a</div><div style="display:inline">b</div>))
+        styled(~s(<div style="display:inline">a</div> <div style="display:inline">b</div>))
 
       assert word(items, "a").y == word(items, "b").y
 
@@ -1890,6 +1890,23 @@ defmodule Browser.LayoutTest do
       assert [%{url: @img, w: 120, h: 80, x: 4}] = pics(items)
     end
 
+    test "a percentage height attribute is of a containing block with a height" do
+      {items, _} =
+        im(~s(<div style="height:200px"><img src="a.png" height="50%"></div>), loaded(30, 30))
+
+      assert [%{h: 100}] = pics(items)
+    end
+
+    test "a percentage height is auto when the block around has none" do
+      {items, _} =
+        im(
+          ~s(<div style="height:200px"><div><img src="a.png" height="50%"></div></div>),
+          loaded(30, 30)
+        )
+
+      assert [%{h: 30}] = pics(items)
+    end
+
     test "the page collects the urls to fetch" do
       page =
         Page.build(~s(<img src="a.png"><p><img src="/b.jpg" alt="b"><img src="a.png"></p>), @base)
@@ -2101,7 +2118,7 @@ defmodule Browser.LayoutTest do
     test "while an image loads without declared size it takes no room" do
       {items, _} = im(~s(a<img src="a.png">b), %{"http://example.test/other.png" => {:ok, 1, 1}})
       assert pics(items) == []
-      assert tw(items, "a") && tw(items, "b")
+      assert tw(items, "ab")
     end
 
     test "a failed image shows its alt text, or nothing without one" do
@@ -2109,7 +2126,8 @@ defmodule Browser.LayoutTest do
       assert pics(items) == []
       assert tw(items, "[A") && tw(items, "picture]")
       {items, _} = im(~s(x<img src="a.png">y), %{@img => :failed})
-      assert Enum.filter(items, &(&1.type == :text)) |> length() == 2
+      # (nothing between the two letters, so they are one run)
+      assert Enum.filter(items, &(&1.type == :text)) |> length() == 1
     end
 
     test "without image information the alt text is shown, as before" do
@@ -2176,6 +2194,15 @@ defmodule Browser.LayoutTest do
       assert %{kind: :linear, tile: {4, 0, 392, 40}, line: {x1, y1, x2, y2}} = layer
       assert {x1, y1, x2, y2} == {0.0, 20.0, 392.0, 20.0}
       assert [{+0.0, {255, 0, 0, 255}}, {1.0, {0, 0, 255, 255}}] = layer.stops
+    end
+
+    test "the canvas places its image in the root element's padding box" do
+      html =
+        ~s|<html style="margin:20px;border:5px solid blue;padding:3px"><body style="background:url(a.png) no-repeat">x</body></html>|
+
+      {items, _} = bgl(html, %{@pic => {:ok, 10, 10}})
+      [%{layers: [%{tile: {x, y, 10, 10}}]}] = of_type(items, :canvas)
+      assert {x, y} == {25, 25}
     end
 
     test "an image layer appears once its size is known" do
@@ -2919,8 +2946,8 @@ defmodule Browser.LayoutTest do
 
       {items, _} = tbl(html, 60)
       [r] = table_rects(items)
-      # the same width the cells get when laid out one word per line
-      assert r.w == 52
+      # the columns need 50 + 42 and the spacing: a table is not narrower than that
+      assert r.w == 98
       assert at(items, "aa").y < at(items, "bbbbbb").y
       assert at(items, "dd").y < at(items, "eeee").y
     end
@@ -3299,7 +3326,7 @@ defmodule Browser.LayoutTest do
       assert %{h: 50} = box_of(items)
     end
 
-    test "a float with clear goes below the earlier floats on that side only" do
+    test "a float with clear goes below the earlier floats on that side; a later one is not higher" do
       {items, _} =
         fl(
           ~s|<div style="float:right;width:40px;height:20px;background:#111"></div><div style="float:right;clear:right;width:50px;height:30px;background:#222"></div><div style="float:left;width:50px;height:30px;background:#333"></div>|
@@ -3307,7 +3334,7 @@ defmodule Browser.LayoutTest do
 
       rects = items |> Enum.filter(&(&1.type == :rect)) |> Map.new(&{&1.color, &1})
       assert %{y: 20} = rects[{34, 34, 34}]
-      assert %{y: 0} = rects[{51, 51, 51}]
+      assert %{y: 20} = rects[{51, 51, 51}]
     end
 
     test "an inline-block that does not fit beside the floats goes below them" do
@@ -3400,14 +3427,12 @@ defmodule Browser.LayoutTest do
       assert word_at(items, "text").x == 64
     end
 
-    test "a box holding only floats contains them" do
+    test "a box holding only floats is no higher than what it holds in flow" do
       html =
-        ~s|<div style="background:#eee"><div style="float:left;width:60px;height:100px"></div></div><p>below</p>|
+        ~s|<div><div><div style="float:left;width:60px;height:100px"></div></div><p>below</p></div>|
 
       {items, _} = fl(html)
-      assert box_of(items).h == 100
-      assert word_at(items, "below").y >= 100
-      assert word_at(items, "below").x == 4
+      assert word_at(items, "below").y < 100
     end
 
     test "a box with overflow hidden contains its floats" do
@@ -4369,7 +4394,7 @@ defmodule Browser.LayoutTest do
   test "flex items shrink no further than their min-content next to a very wide item" do
     {items, _} =
       run(
-        ~s|<div style="display:flex"><a style="padding:0 5px">Over</a><a style="padding:0 5px">Store</a><div style="flex-grow:1"><div style="float:right">Login</div></div></div>|,
+        ~s|<div style="display:flex"><a style="padding:0 5px">Over</a> <a style="padding:0 5px">Store</a><div style="flex-grow:1"><div style="float:right">Login</div></div></div>|,
         300
       )
 
@@ -4456,18 +4481,188 @@ defmodule Browser.LayoutTest do
     assert red.h < 50
   end
 
+  test "a column flex item that is not stretched is no narrower than its longest word" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:flex;flex-direction:column;width:4px"><div style="align-self:flex-start;background:#0f0">start</div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.w > 4
+  end
+
+  test "a calc() percentage in an absolute box's child is of the box's own width" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:absolute;width:300px;height:100px"><div style="float:left;width:calc(50% - 10px);height:10px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.w == 140
+  end
+
+  test "an inline grid with auto columns is as wide as its items' widths" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:inline-grid;grid-template-columns:auto auto"><div style="width:50px;height:10px;background:#0f0"></div><div style="width:50px;height:10px;background:#00f"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.x == 58
+  end
+
+  test "cells of rows with display: contents share one anonymous row" do
+    page =
+      Browser.Page.build(
+        ~s|<style>tr{display:contents}</style><table cellpadding="0" cellspacing="0"><tr><td>P</td></tr>\n<tr><td>S</td></tr></table>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    text = fn t -> Enum.find(items, &(&1[:text] == t)) end
+    assert text.("P").y == text.("S").y
+  end
+
+  test "an absolute child of a flex container is centred by justify-content and align-items" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:relative;display:flex;width:100px;height:100px;align-items:center;justify-content:center"><div style="position:absolute;width:40px;height:20px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert {green.x, green.y} == {38, 48}
+  end
+
+  test "a tab after an inline box runs to the next tab stop of the line" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="white-space:pre;tab-size:8"><span style="display:inline-block;width:20px;height:5px"></span>\tP</div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    assert word_x(items, "P") == 8 + 64
+  end
+
+  test "a relatively positioned box paints above a later absolute one only through tree order and z-index" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="position:relative"><div style="position:absolute;width:10px;height:10px;background:#f00"></div><div style="position:relative;width:10px;height:10px;background:#00f"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    rects = Enum.filter(items, &(&1.type == :rect))
+    assert List.last(rects).color == {0, 0, 255}
+  end
+
+  test "a negative border width is dropped, the shorthand with one too" do
+    page =
+      Browser.Page.build(
+        ~s|<style>div{border:0 solid;border-width:-4px}p{border:0 solid;border:red solid -1px}</style><div>a</div><p>b</p>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    assert Enum.filter(items, &(&1.type == :rect)) == []
+  end
+
+  test "a float is not placed higher than an earlier float" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="width:200px"><div style="float:left;width:120px;height:10px"></div><div style="float:left;width:100px;height:10px"></div><div style="float:left;width:40px;height:10px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.y >= 18
+  end
+
+  test "an inline box with a margin that holds only a float still makes a line" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="background:#00f"><span style="margin-left:40px"><span style="float:left;width:10px;height:5px"></span> </span></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.h > 0
+  end
+
+  test "the margin after an empty cleared box stays in the box and is not taken off the clearance" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="background:#0f0;width:100px"><div style="float:left;height:1px"></div><div style="clear:left"></div><div style="margin-top:99px"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.h == 100
+  end
+
+  test "a float wider than its container stays at the top beside an outside float of the other side" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="float:left;width:500px;height:500px"><div style="float:right;width:50px;height:300px"></div><div style="margin-right:100px"><div style="float:left;width:425px;height:10px;background:#00f"></div></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.y == 8
+  end
+
+  test ":required, :optional, :read-only and :open match form controls and details" do
+    html =
+      ~s|<style>input:required{background:#f00}input:optional{background:#0f0}div:read-only{background:#00f}details:open{background:#ff0}</style><input required><input readonly><div>x</div><details open><summary>s</summary></details>|
+
+    page = Browser.Page.build(html, "about:home")
+    {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, margin: 0)
+    colors = for %{type: :rect, color: c} <- items, do: c
+    assert {255, 0, 0} in colors
+    assert {0, 255, 0} in colors
+    assert {0, 0, 255} in colors
+    assert {255, 255, 0} in colors
+  end
+
+  test "a table cell made from a div does not take its row's vertical-align" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="display:table"><div style="display:table-row;vertical-align:bottom"><div style="display:table-cell;height:100px">a</div></div></div><table><tr style="vertical-align:bottom"><td style="height:100px">b</td></tr></table>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    text = fn t -> Enum.find(items, &(&1[:text] == t)) end
+    assert text.("a").y < 20
+    assert text.("b").y > 50
+  end
+
+  defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
+
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
     page = Browser.Page.build("<pre>ab\tc\n\td</pre>", "about:home")
     {items, _} = Layout.layout(page.nodes, 600, &measure/2)
-    words = for %{type: :text, text: t} <- items, do: t
-    assert Enum.any?(words, &(&1 == "ab" <> String.duplicate(" ", 6) <> "c"))
-    assert Enum.any?(words, &(&1 == String.duplicate(" ", 8) <> "d"))
+    # (a column is 8px wide here)
+    assert word_x(items, "c") - word_x(items, "ab") == 64
+    assert word_x(items, "d") - word_x(items, "ab") == 64
   end
 
   test "tab-size sets the columns a tab spans" do
     page = Browser.Page.build(~s|<pre style="tab-size:4">a\tb</pre>|, "about:home")
     {items, _} = Layout.layout(page.nodes, 600, &measure/2)
-    assert Enum.any?(items, &(&1[:text] == "a   b"))
+    assert word_x(items, "b") - word_x(items, "a") == 32
   end
 
   test "an absolute box is as wide as an empty inline-block in it" do
@@ -4582,6 +4777,35 @@ defmodule Browser.LayoutTest do
         |> Enum.uniq()
 
       assert length(xs) == 3
+    end
+
+    test "an invalid column-count or columns leaves the earlier declaration in force" do
+      for bad <- ["column-count: -1", "column-count: 2.1", "columns: 8 normal"] do
+        items = columns("column-count: 3; column-gap: 10px; " <> bad, 6, 400)
+
+        xs =
+          items
+          |> Enum.filter(&String.starts_with?(&1[:text] || "", "item"))
+          |> Enum.map(& &1.x)
+          |> Enum.uniq()
+
+        assert length(xs) == 3, bad
+      end
+    end
+
+    test "column-height makes the columns that tall and wraps the rest into rows" do
+      items = columns("columns: 2; column-gap: 0; column-height: 60px; row-gap: 10px", 8, 400)
+      first = col_at(items, "item1")
+      # two lines fill a column; two columns make a row
+      assert col_at(items, "item2").x == first.x
+      assert col_at(items, "item3").x > first.x
+      assert col_at(items, "item5").x == first.x
+      assert col_at(items, "item5").y > first.y + 60
+    end
+
+    test "one column of a set height with column-fill: auto spills into another" do
+      items = columns("columns: 1; column-fill: auto; height: 40px; column-gap: 0", 6, 400)
+      assert col_at(items, "item4").x > col_at(items, "item1").x
     end
 
     test "a column width that does not fit twice leaves one column" do
@@ -4926,7 +5150,7 @@ defmodule Browser.LayoutTest do
     test "capitalize leaves the rest of a word begun before an inline box" do
       items = ts_items("<p>T<span style=\"text-transform:capitalize\">his text</span></p>")
       texts = for %{type: :text, text: t} <- items, do: t
-      assert texts == ["T", "his", "Text"]
+      assert texts == ["This", "Text"]
     end
   end
 
@@ -5282,12 +5506,10 @@ defmodule Browser.LayoutTest do
   end
 
   describe "tab-size lengths, calc() text-indent and words beside floats" do
-    defp tab_rows(html), do: wb_rows(html, 400)
-
-    test "a tab-size given as a length is that many pixels of spaces" do
+    test "a tab-size given as a length is that many pixels" do
       html = ~s|<pre style="font-size:10px;tab-size:20px">a\tb</pre>|
-      # a space is 5px wide here, so 20px is four columns: the b starts in column 4
-      assert tab_rows(html) == ["a   b"]
+      {items, _} = Layout.layout(Browser.Page.build(html, "about:home").nodes, 400, &measure/2)
+      assert word_x(items, "b") - word_x(items, "a") == 20
     end
 
     test "a word too wide for the room beside a float goes below it" do
@@ -5401,6 +5623,31 @@ defmodule Browser.LayoutTest do
       """
 
       assert green_rects(html) == [{0, 10}, {10, 5}]
+    end
+
+    test "a grid drops the margins of the items at its edges" do
+      item = ~s|<div style="margin:10px 0;height:20px;background:green"></div>|
+
+      html =
+        ~s|<div style="display:grid;grid-template-columns:50% 50%;margin-trim:block">#{item}#{item}#{item}#{item}</div>|
+
+      # (two rows: the first row loses its top margin, the last one its bottom margin)
+      assert green_rects(html) |> Enum.uniq() == [{0, 20}, {40, 20}]
+    end
+
+    test "the margins of grid items count once in a row" do
+      html =
+        ~s|<div style="display:grid"><div style="margin:10px 0;height:20px;width:50px;background:green"></div></div><div style="height:5px;background:blue"></div>|
+
+      assert green_rects(html) == [{40, 5}, {10, 20}]
+    end
+
+    test "an item of a flex container with a height is stretched to it, shorter or taller" do
+      html =
+        ~s|<div style="display:flex;height:20px"><div style="width:30px;background:green">a</div><div style="width:30px;height:5px;background:blue"></div></div><div style="display:flex;height:4px"><div style="width:30px;background:green;font-size:16px;line-height:16px">a</div></div>|
+
+      assert green_rects(html) |> Enum.map(&elem(&1, 1)) |> Enum.take(1) == [20]
+      assert Enum.any?(green_rects(html), &(&1 == {20, 4}))
     end
 
     test "without margin-trim the margins stay" do
@@ -5576,7 +5823,8 @@ defmodule Browser.LayoutTest do
       xs = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(&{&1.text, &1.x})
       # a (10), b (10 + 10 spacing), b (10, no spacing after it), c
       assert xs == [{"a", 0}, {"b", 10}, {"b", 30}, {"c", 40}] or
-               Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40}
+               Enum.find(xs, &(elem(&1, 0) == "c")) == {"c", 40} or
+               xs == [{"a", 0}, {"b", 10}, {"bc", 30}]
     end
   end
 
@@ -6194,9 +6442,180 @@ defmodule Browser.LayoutTest do
       html =
         ~s|<div style="display:flex;align-items:baseline;font-family:Ahem"><div style="font-size:10px;line-height:10px">a</div><div style="font-size:30px;line-height:30px">b</div></div>|
 
-      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + h
+      # (the baseline of Ahem is 0.8em down)
+      bottoms = for %{type: :text, y: y, h: h} <- laid_out(html), do: y + round(h * 0.8)
       assert [same] = Enum.uniq(bottoms)
       assert is_integer(same)
+    end
+  end
+
+  describe "flex containers between offsets and overflow" do
+    test "an absolute flex column between top and bottom gives its items percentage heights" do
+      html =
+        ~s|<div style="position:relative;width:200px;height:100px"><div style="position:absolute;top:0;bottom:0;left:0;right:0;display:flex;flex-direction:column"><div style="height:10%;background:green"></div><div style="flex:1;background:blue"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 10}, &1))
+    end
+
+    test "overflow-y: hidden makes the automatic minimum width zero" do
+      html =
+        ~s|<div style="display:flex;width:30px"><div style="overflow-y:hidden;background:red"><div style="width:80px;height:10px;background:green"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {255, 0, 0}, w: 30}, &1))
+    end
+  end
+
+  describe "margins after a float" do
+    test "a min-height taller than the content drops the last child's bottom margin" do
+      html =
+        ~s|<div style="min-height:50px;background:green;width:20px"><div style="height:10px;margin-bottom:40px"></div></div><div style="height:5px;background:blue;width:20px"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 0, 255}, y: 58}, &1))
+    end
+
+    test "a cleared first child clears the floats of its parent whatever its margin" do
+      html =
+        ~s|<div style="width:100px;overflow:hidden"><div><div style="float:left;width:100px;height:50px"></div><div style="margin-top:300px;clear:left;height:50px;background:green"></div></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, y: 58}, &1))
+    end
+
+    test "a tab in preserved text goes to the next tab stop of the block container" do
+      html =
+        ~s|<div style="font:10px/1 Ahem;white-space:pre;tab-size:4"><span style="font-size:20px">\tc</span></div>|
+
+      texts = for %{type: :text} = t <- laid_out(html), do: {t.text, t.x}
+      # (a tab stop is 4 spaces of the block's 10px font, whatever the font of the text)
+      assert {"c", 28} in texts
+    end
+
+    test "a float on a table column group floats" do
+      html =
+        ~s|<div style="display:table;width:100%"><div style="display:table-column-group;float:right;width:30px;height:30px;background:blue"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 0, 255}, w: 30, h: 30}, &1)
+             )
+    end
+
+    test "letter-spacing takes a length mixed with a percentage" do
+      html = ~s|<div style="font:20px/1 Ahem;letter-spacing:calc(5px + 10%)">XX</div>|
+      assert [%{w: 34}] = for(%{type: :text, text: "XX"} = t <- laid_out(html), do: t)
+    end
+
+    test "a table with clear goes below the float" do
+      html =
+        ~s|<div style="float:left;width:10px;height:30px"></div><div style="clear:both;display:table;width:50px;height:20px;background:blue"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 0, 255}, y: 38}, &1))
+    end
+
+    test "a box's top follows the margin of its first child when a float comes before it" do
+      html =
+        ~s|<div style="float:left;width:10px;height:10px"></div><div style="background:red;width:50px"><div style="margin-top:30px;height:20px"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {255, 0, 0}, y: 30, h: 20}, &1)
+             )
+    end
+  end
+
+  describe "keyword sizes" do
+    test "min-height: max-content is the height of the content" do
+      html =
+        ~s|<div style="background:green;width:50px;height:0;min-height:max-content"><div style="height:30px"></div></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 30}, &1))
+    end
+
+    test "min-width: fit-content(<length>) widens a narrow block up to the length" do
+      html =
+        ~s|<div style="background:green;width:10px;min-width:fit-content(100px)"><span style="display:inline-block;width:60px;height:5px"></span> <span style="display:inline-block;width:60px;height:5px"></span></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
+    end
+
+    test "an empty grid keeps its rows" do
+      html =
+        ~s|<div style="background:green;display:grid;grid-template-rows:40px;width:50px"></div>|
+
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 40}, &1))
+    end
+  end
+
+  describe "shrink-to-fit with auto margins" do
+    test "an absolute box is as wide as a child with auto margins, not the room around it" do
+      html =
+        ~s|<div style="position:absolute;background:green"><div style="width:100px;height:5px;margin:auto"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
+    end
+  end
+
+  describe "table and inline-block widths" do
+    test "a table is as wide as its columns need, even in a narrower box" do
+      html =
+        ~s|<div style="width:100px"><div style="display:table;background:green"><div style="width:200px;height:5px"></div></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 200)
+             )
+    end
+
+    test "an inline-block whose text wraps fills the room, it is not cut to the longest line" do
+      html =
+        ~s|<div style="width:100px"><span style="display:inline-block;background:green">aaaa bbbb cccc dddd eeee ffff</span></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &(match?(%{type: :rect, color: {0, 128, 0}}, &1) and &1.w == 100)
+             )
+    end
+  end
+
+  describe "grid rows" do
+    test "explicit rows have their size, fr rows share the height" do
+      html =
+        ~s|<div style="display:grid;height:100px;grid-template-rows:20px 1fr 1fr"><div style="background:red"></div><div style="background:green"></div><div style="background:blue"></div></div>|
+
+      rects = for %{type: :rect} = r <- laid_out(html), do: {r.color, r.h}
+      assert {{255, 0, 0}, 20} in rects
+      assert {{0, 128, 0}, 40} in rects
+      assert {{0, 0, 255}, 40} in rects
+    end
+
+    test "an auto row stretches to the height of the container" do
+      html = ~s|<div style="display:grid;height:70px"><div style="background:green"></div></div>|
+      assert Enum.any?(laid_out(html), &match?(%{type: :rect, color: {0, 128, 0}, h: 70}, &1))
+    end
+
+    test "grid-template gives rows and columns" do
+      html =
+        ~s|<div style="display:grid;grid-template:30px / 50px"><div style="background:green"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, h: 30, w: 50}, &1)
+             )
+    end
+
+    test "an item with a ratio takes its width from a row it stretches across" do
+      html =
+        ~s|<div style="display:grid;grid-template:40px / 200px"><div style="aspect-ratio:1/1;align-self:stretch;background:green"></div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, h: 40, w: 40}, &1)
+             )
     end
   end
 
@@ -6217,6 +6636,16 @@ defmodule Browser.LayoutTest do
       xs = for %{type: :text, text: t, x: x} <- laid_out(html), t in ["a", "b"], do: x
       assert Enum.max(xs) - Enum.min(xs) == 110
     end
+
+    test "an absolutely positioned box in a multicol container spans the container" do
+      html =
+        ~s|<div style="position:relative;columns:2;column-gap:0;width:200px;height:50px"><div style="position:absolute;left:0;top:0;width:150px;height:10px;background:green"></div><div style="height:20px">a</div></div>|
+
+      assert Enum.any?(
+               laid_out(html),
+               &match?(%{type: :rect, color: {0, 128, 0}, x: 8, w: 150}, &1)
+             )
+    end
   end
 
   describe "segment breaks between wide characters" do
@@ -6235,6 +6664,20 @@ defmodule Browser.LayoutTest do
     test "a line break between other characters is a space" do
       texts = for %{type: :text, text: t} <- laid_out("<p>ab\ncd</p>"), do: t
       assert texts == ["ab", "cd"]
+    end
+
+    test "a line break next to a zero-width space or CJK punctuation leaves no space" do
+      for html <- ["<p>測試\u200B\n\n測試</p>", "<p>ab。\nCD</p>", "<p>ab\n・\nCD</p>"] do
+        text = laid_out(html) |> Enum.filter(&(&1.type == :text)) |> Enum.map_join(& &1.text)
+        refute String.contains?(text, " "), html
+      end
+    end
+
+    test "a line break next to a fullwidth letter is a space" do
+      words = for %{type: :text} = t <- laid_out("<p>ＦＵＬＬ\nnarrow</p>"), do: t
+      {last, narrow} = {Enum.at(words, -2), List.last(words)}
+      assert narrow.text == "narrow"
+      assert narrow.x > last.x + last.w
     end
   end
 
@@ -6436,20 +6879,16 @@ defmodule Browser.LayoutTest do
     end
 
     test "a run-in becomes the start of the block after it" do
-      [{"head", x1, y1}, {"body", x2, y2}] =
-        run_in_items(~s(<div style="display:run-in">head</div><div>body</div>))
-
-      assert y1 == y2
-      assert x2 > x1
+      # (one line, one run)
+      assert [{"headbody", _, _}] =
+               run_in_items(~s(<div style="display:run-in">head</div><div>body</div>))
     end
 
     test "floats, positioned boxes and white space between do not stop a run-in" do
-      [{"head", _, y1}, {"body", _, y2}] =
-        run_in_items(
-          ~s(<div style="display:run-in">head</div> <div style="position:absolute"></div><div style="float:right"></div><div>body</div>)
-        )
-
-      assert y1 == y2
+      assert [{"headbody", _, _}] =
+               run_in_items(
+                 ~s(<div style="display:run-in">head</div> <div style="position:absolute"></div><div style="float:right"></div> <div>body</div>)
+               )
     end
 
     test "text between, a following run-in that holds a block, or nothing after keep it a block" do
@@ -6562,6 +7001,325 @@ defmodule Browser.LayoutTest do
       assert h == 104
       rects = for %{type: :rect, color: {0, 128, 0}} = r <- items, do: r
       assert Enum.max(Enum.map(rects, &(&1.x + &1.w))) == 104
+    end
+  end
+
+  describe "conflicts between collapsed borders" do
+    defp collapsed_rects(css, body) do
+      html =
+        "<style>body{margin:0}table{border-collapse:collapse;float:left}td{padding:0}#{css}</style>#{body}"
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      for %{type: :rect} = r <- items, do: {r.color, r.x + r.w}
+    end
+
+    test "a row's hidden border removes the borders of its cells" do
+      assert collapsed_rects(
+               "tr{border:5px hidden}td{border:5px solid red}",
+               "<table><tr><td></td></tr></table>"
+             ) == []
+    end
+
+    test "a cell's border wins over the table's of the same size" do
+      rects =
+        collapsed_rects(
+          ".t{border:5px solid red}.c{border:5px solid green}",
+          ~s(<table class=t><td class=c></td></table>)
+        )
+
+      assert rects != [] and Enum.all?(rects, &(elem(&1, 0) == {0, 128, 0}))
+      assert rects |> Enum.map(&elem(&1, 1)) |> Enum.max() == 10
+    end
+
+    test "the border of a column group makes the table as wide as it needs" do
+      rects =
+        collapsed_rects(
+          "colgroup{border:5px solid green}",
+          "<table><colgroup></colgroup><td></td></table>"
+        )
+
+      assert rects |> Enum.map(&elem(&1, 1)) |> Enum.max() == 10
+    end
+
+    test "the right border of a column is drawn between it and the next" do
+      rects =
+        collapsed_rects(
+          "col.a{border-right:4px solid green}td{width:30px}",
+          "<table><col class=a><col><tr><td></td><td></td></tr></table>"
+        )
+
+      assert Enum.any?(rects, &(elem(&1, 1) == 34))
+    end
+
+    test "a line break with clear moves below floats without a line of its own" do
+      page =
+        Browser.Page.build(
+          "<style>body{margin:0}</style><div style=\"float:left;height:30px;width:10px\"></div><br style=\"clear:both\"><span>x</span>",
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.find(items, &(&1.type == :text)).y >= 30
+    end
+
+    test "cells straight in a row group sit in an anonymous row" do
+      {items, _} =
+        group_table(
+          "<div style=\"display:table\"><div style=\"display:table-row-group\"><div style=\"display:table-cell\">a</div><div style=\"display:table-cell\">b</div></div></div>"
+        )
+
+      assert [%{y: y1}, %{y: y2}] = for(%{type: :text} = t <- items, do: t)
+      assert y1 == y2
+    end
+  end
+
+  describe "a right float that comes in the middle of a line" do
+    test "goes to the top of that line when it fits beside what is there" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:200px">ab <span style="float:right;width:20px;height:5px;background:red"></span>cd</div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.y == 0 and float.x == 180
+      assert [_] = Enum.uniq(for(%{type: :text} = t <- items, do: t.y))
+    end
+
+    test "goes below the line when the line is already too long" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:60px">abcdefgh<span style="float:right;width:30px;height:5px;background:red"></span></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.y > 0
+    end
+  end
+
+  describe "blocks that hold only floats" do
+    test "have no height of their own" do
+      html =
+        ~s(<style>body{margin:0}</style><div><div><div id=a><div style="float:left;width:10px;height:50px;background:red"></div></div><div id=b style="height:7px;background:green"></div></div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 0
+    end
+
+    test "a box that starts a formatting context moves below a float it does not fit beside, from where its margin put it" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="float:left;width:100px;height:30px"></div><div style="overflow:hidden;width:100px;height:5px;margin-top:30px;background:green"></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 30
+    end
+  end
+
+  describe "a left float that comes in the middle of a line" do
+    test "goes to the left of that line and pushes what is on it to the right" do
+      html =
+        ~s(<style>body{margin:0}</style><div style="font-size:10px;width:200px">ab<span style="float:left;width:20px;height:5px;background:red"></span>cd</div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      float = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert float.x == 0 and float.y == 0
+      text = Enum.find(items, &(&1.type == :text))
+      assert text.x == 20 and text.y < 10
+    end
+  end
+
+  describe "clearance next to floats in an empty block" do
+    test "is applied however large the margin of the cleared block is" do
+      html =
+        ~s(<style>body{margin:0}</style><div><div><div style="float:left;width:10px;height:50px"></div></div><div id=c style="margin-top:400px;clear:left;height:5px;background:green"></div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert green.y == 50
+    end
+  end
+
+  describe "background-attachment: fixed" do
+    test "places the picture against the window, the box only shows part of it" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="height:50px"></div><div style="height:40px;background:url(p.png) fixed no-repeat"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+
+      {items, _} =
+        Layout.layout(page.nodes, 400, &measure/2, 300,
+          margin: 0,
+          images: %{"about:p.png" => {:ok, 30, 80}}
+        )
+
+      assert %{layers: [layer]} = Enum.find(items, &(&1.type == :bgimage))
+      assert layer.fixed and layer.tile == {0, 0, 30, 80}
+      assert layer.clip == {0, 50, 400, 40}
+    end
+  end
+
+  describe "paint order of inline content" do
+    test "an inline-block paints above the background of the block after it" do
+      html =
+        ~s|<style>body{margin:0}div{width:20px;height:10px}span{display:inline-block;vertical-align:top;width:20px;height:10px;background:green}#b{margin-top:-10px;background:red}</style><div><span>&nbsp;</span></div><div id=b>&nbsp;</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      rects = Enum.filter(items, &(&1.type == :rect))
+      assert Enum.map(rects, & &1.color) == [{255, 0, 0}, {0, 128, 0}]
+    end
+  end
+
+  describe "boxes around inline text" do
+    test "span the content area from the top of the line when no font was measured" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:normal}</style><div>x<span style="background:green">y</span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, h} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.y == 0 and box.h == h
+    end
+  end
+
+  describe "empty inline boxes" do
+    test "with a border make a line of their own" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}</style><div><div><span style="padding-right:10px;border:5px solid blue;border-left:none"></span></div></div><div id=b>x</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.y >= 20
+    end
+
+    test "add no line when text follows on the same line" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}</style><div><div><span style="padding-right:10px"></span>a</div></div><div>x</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.y < 40
+    end
+  end
+
+  describe "margins that run through an empty block holding only floats or positioned boxes" do
+    for {name, kid} <- [
+          {"a float", "<div style='float:left;width:10px;height:10px'></div>"},
+          {"an absolute box", "<div style='position:absolute;width:10px;height:10px'></div>"}
+        ] do
+      for style <- ["", "position:relative"] do
+        test "still collapse with the margin below (#{name}, #{inspect(style)})" do
+          html =
+            ~s|<style>body{margin:0}.a{margin-bottom:10px;height:10px}.b{margin-top:20px;#{unquote(style)}}.c{margin-top:30px;height:10px;background:aqua}</style><div class=a></div><div class=b>#{unquote(kid)}</div><div class=c></div>|
+
+          page = Browser.Page.build(html, "about:home")
+          {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+          c = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 255}))
+          # 10 (a) + 30 (the largest of the margins), not 10 + 20 + 30
+          assert c.y == 40
+        end
+      end
+    end
+  end
+
+  describe "a block inside an inline box" do
+    test "is not covered by the box, whose right side comes in a line after it" do
+      html =
+        ~s|<style>body{margin:0}</style><span style="border:5px solid blue;border-left:none;border-right:none;padding-right:10px"><span style="display:block">x</span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      blues = Enum.filter(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert length(blues) == 2
+      assert Enum.all?(blues, &(&1.y > x.y and &1.w == 10))
+    end
+
+    test "has the left side of the box in a line before it" do
+      html =
+        ~s|<style>body{margin:0}</style><span style="border:5px solid blue;border-left:none;border-right:none;padding-left:10px"><span style="display:block">x</span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      blues = Enum.filter(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert length(blues) == 2
+      assert Enum.all?(blues, &(&1.y < x.y))
+    end
+  end
+
+  describe "display: contents" do
+    test "text on either side of the box is one run" do
+      html = ~s|<div style="display:contents">PA</div><span style="display:contents">SS</span>|
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert [%{text: "PASS"}] = Enum.filter(items, &(&1.type == :text))
+    end
+  end
+
+  describe "display: flow-root" do
+    test "holds the margins of its children inside" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flow-root"><div style="margin:20px 0;height:10px"></div></div><div id=b style="height:5px;background:red"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      b = Enum.find(items, &(&1.type == :rect and &1.color == {255, 0, 0}))
+      assert b.y == 50
+    end
+  end
+
+  describe "a block-level absolutely positioned box in the middle of a line" do
+    test "starts at the left of the line, under it" do
+      html =
+        ~s|<style>body{margin:0}div{font-size:20px;line-height:20px}.a{position:absolute;width:10px;height:10px;background:green}</style><div>abc<div class=a></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert box.x == 0
+      assert box.y == 20
+    end
+  end
+
+  describe "initial on an inherited property" do
+    test "stops the value of the parent from reaching the element" do
+      html =
+        ~s|<style>body{margin:0}.p{text-indent:20px}.c{text-indent:initial}</style><div class=p><div class=c>x</div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      x = Enum.find(items, &(&1.type == :text and &1.text == "x"))
+      assert x.x == 0
+    end
+  end
+
+  describe "flex items with an aspect ratio" do
+    test "a percentage height of a row container with a height and the ratio give the width" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;width:0;height:100px"><div style="background:green;aspect-ratio:1;height:100%"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.w, box.h} == {100, 100}
+    end
+
+    test "a child with a percentage height fills a ratio-sized item" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="display:flex;flex-direction:column;width:100px"><div style="aspect-ratio:1;background:red"><div style="height:100%;background:green"></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      assert Enum.any?(items, &(&1.type == :rect and &1.color == {0, 128, 0} and &1.h == 100))
     end
   end
 end

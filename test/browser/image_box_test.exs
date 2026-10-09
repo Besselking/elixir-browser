@@ -9,6 +9,21 @@ defmodule Browser.ImageBoxTest do
     assert size({120, 80}) == {120, 80}
   end
 
+  test "min and max sizes follow the table of CSS 2.1: both broken at once" do
+    # too wide and too short: the picture takes the max width and the min height
+    assert size({300, 150}, %{}, %{maxw: 75, minh: 75}) == {75, 75}
+    # too narrow and too tall
+    assert size({50, 200}, %{}, %{minw: 100, maxh: 100}) == {100, 100}
+    # only too wide: the ratio holds
+    assert size({300, 150}, %{}, %{maxw: 100}) == {100, 50}
+  end
+
+  test "a ratio for the border box counts the padding and border" do
+    css = %{ratio: {0.25, :sizing}, pad: {15, 0}}
+    # 25px wide with a 15px border: 10px of content, a border box 100px tall
+    assert size({20, 50}, %{}, Map.put(css, :w, 10.0)) == {10, 100}
+  end
+
   test "nothing known yet: zero" do
     assert size(nil) == {0, 0}
   end
