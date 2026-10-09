@@ -3646,6 +3646,13 @@ defmodule Browser.Layout do
     top = clear_top(st, Map.get(spec, :clear))
     top = if line_bottom, do: max(top, line_bottom), else: top
 
+    # (measured against an unbounded width, a right float would sit far away: it is the room
+    # the floats take together that is wanted, so it goes where a left one would)
+    side =
+      if Process.get(:layout_intrinsic) == true,
+        do: :left,
+        else: side
+
     {x, y} =
       place_float(st, side, w, height, top, st.margin + st.left, st.width - st.margin - st.right)
 

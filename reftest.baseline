@@ -1112,6 +1112,7 @@ css/CSS2/floats-clear/floats-039.xht
 css/CSS2/floats-clear/floats-040.xht
 css/CSS2/floats-clear/floats-041.xht
 css/CSS2/floats-clear/floats-043.xht
+css/CSS2/floats-clear/floats-101.xht
 css/CSS2/floats-clear/floats-111.xht
 css/CSS2/floats-clear/floats-112.xht
 css/CSS2/floats-clear/floats-113.xht
@@ -1141,6 +1142,8 @@ css/CSS2/floats-clear/floats-145.xht
 css/CSS2/floats-clear/floats-146.xht
 css/CSS2/floats-clear/floats-147.xht
 css/CSS2/floats-clear/floats-149.xht
+css/CSS2/floats-clear/floats-150.xht
+css/CSS2/floats-clear/floats-152.xht
 css/CSS2/floats-clear/floats-bfc-001.xht
 css/CSS2/floats-clear/floats-bfc-002.xht
 css/CSS2/floats-clear/floats-clear-multicol-001.html
@@ -1249,6 +1252,7 @@ css/CSS2/floats/floats-wrap-top-below-inline-003l.xht
 css/CSS2/floats/floats-wrap-top-below-inline-003r.xht
 css/CSS2/floats/floats-zero-height-wrap-001.xht
 css/CSS2/floats/floats-zero-height-wrap-002.xht
+css/CSS2/floats/intrinsic-size-float-and-line.html
 css/CSS2/floats/negative-block-margin-pushing-float-out-of-block-formatting-context.html
 css/CSS2/floats/new-fc-beside-float-with-margin-rtl.html
 css/CSS2/floats/new-fc-beside-float-with-margin.html
