@@ -5662,9 +5662,14 @@ css/css-text/white-space/text-wrap-balance-004.html
 css/css-text/white-space/text-wrap-balance-align-001.html
 css/css-text/white-space/text-wrap-balance-before-after-001.html
 css/css-text/white-space/text-wrap-balance-before-after-002.html
+css/css-text/white-space/text-wrap-balance-float-001.html
+css/css-text/white-space/text-wrap-balance-float-002.html
+css/css-text/white-space/text-wrap-balance-float-003.html
+css/css-text/white-space/text-wrap-balance-float-004.html
 css/css-text/white-space/text-wrap-balance-float-006.html
 css/css-text/white-space/text-wrap-balance-line-clamp-001.html
 css/css-text/white-space/text-wrap-balance-overflow-001.html
+css/css-text/white-space/text-wrap-balance-text-indent-001.html
 css/css-text/white-space/text-wrap-nowrap-001.html
 css/css-text/white-space/textarea-always-preserves-spaces-001.tentative.html
 css/css-text/white-space/textarea-pre-wrap-011.html

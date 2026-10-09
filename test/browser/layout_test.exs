@@ -7551,6 +7551,19 @@ defmodule Browser.LayoutTest do
       assert length(firsts) == 2
     end
 
+    test "a float beside the first lines narrows what is balanced" do
+      html =
+        ~s|<style>body{margin:0}div{width:100px;text-wrap:balance}p{float:left;width:20px;height:5px;margin:0}</style><div><p></p>aa bb cc dd ee ff</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      lines = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(lines) >= 2
+      first = for %{type: :text, y: y, w: w} <- items, y == hd(lines), do: w
+      last = for %{type: :text, y: y, w: w} <- items, y == List.last(lines), do: w
+      assert abs(Enum.sum(first) - Enum.sum(last)) <= 30
+    end
+
     test "text-wrap-style: stable does not balance" do
       html =
         ~s|<style>body{margin:0}div{width:80px;text-wrap:balance;text-wrap-style:stable}</style><div>aa bb cc dd</div>|

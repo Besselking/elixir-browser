@@ -4395,10 +4395,9 @@ defmodule Browser.Layout do
 
   defp balance_run(st, run) do
     avail = max(st.width - 2 * st.margin - st.left - st.right - st.fr, 1)
-    n = balance_line_count(st, run, avail)
+    n = balance_line_count(st, run, avail, avail)
 
-    # (floats beside the lines change how wide each is: left as they are)
-    if n < 2 or Enum.any?(st.floats, &(&1.y1 > st.y)) do
+    if n < 2 do
       Enum.reduce(run, st, &op/2)
     else
       # (no narrower than the longest word: a word that may break anywhere does not count)
@@ -4413,7 +4412,7 @@ defmodule Browser.Layout do
 
       narrow =
         balance_width(min(max(longest, 1), avail), avail, fn w ->
-          balance_line_count(st, run, w) <= n
+          balance_line_count(st, run, w, avail) <= n
         end)
 
       st = Enum.reduce(run, %{st | bal: avail - narrow}, &op/2)
@@ -4421,11 +4420,14 @@ defmodule Browser.Layout do
     end
   end
 
-  defp balance_line_count(st, ops, width) do
-    sub = run(ops, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+  # the number of lines the run makes in `width` (of the `avail` there is), laid out from where
+  # the state is: floats beside the lines and the indent count
+  defp balance_line_count(st, ops, width, avail) do
+    done = ops |> Enum.reduce(%{st | bal: avail - width}, &op/2) |> flush()
+    fresh = length(done.items) - length(st.items)
 
-    sub
-    |> finalize()
+    done.items
+    |> Enum.take(max(fresh, 0))
     |> Enum.filter(&(&1.type == :text))
     |> Enum.map(& &1.y)
     |> Enum.uniq()
