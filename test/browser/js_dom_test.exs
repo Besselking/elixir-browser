@@ -1136,6 +1136,38 @@ defmodule Browser.JS.DOMTest do
       assert logs(Task.await(task)) == ["100 200"]
     end
 
+    test "an element without a box gets a layout again after the tree changed" do
+      raw =
+        ~s|<body><div id="h"></div><script>var h = document.getElementById('h'); var a = h.getBoundingClientRect().width;| <>
+          ~s|h.style.display = 'block'; var b = h.getBoundingClientRect().width; console.log(a, b)</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      for w <- [nil, 300] do
+        receive do
+          {:layout_now, ^pid, ref, tree} ->
+            nid = nid_of_id(tree, "h")
+            rects = if w, do: %{nid => {0, 0, w, 10}}, else: %{}
+            send(pid, {:layout_now_done, ref, rects, {800.0, 600.0}})
+        after
+          1000 -> flunk("no layout asked for")
+        end
+      end
+
+      assert logs(Task.await(task)) == ["0 300"]
+    end
+
     test "a module namespace with exports cannot be frozen" do
       {_, r} =
         start(
