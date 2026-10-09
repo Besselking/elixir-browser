@@ -7807,4 +7807,16 @@ defmodule Browser.LayoutTest do
       assert box.x + box.w == text.x + text.w
     end
   end
+
+  describe "blocks as wide as their content" do
+    test "their vertical margins collapse and the line has no strut" do
+      html =
+        ~s|<style>body{margin:0;font-size:30px}div{height:20px;margin:20px 0;background:green}.f{width:fit-content}</style><div></div><div class="f">x</div><div class="f">x</div><div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      ys = for %{type: :rect, color: {0, 128, 0}, y: y} <- laid, do: y
+      assert Enum.sort(ys) == [20, 60, 100, 140]
+    end
+  end
 end

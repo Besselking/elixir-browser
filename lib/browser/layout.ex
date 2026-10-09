@@ -1119,10 +1119,11 @@ defmodule Browser.Layout do
 
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
+          {mt, mb} = vertical_margins(c)
           acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
-          acc = [{:flush} | acc]
-          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true))
-          [{:flush} | acc]
+          acc = [{:gap, mt}, {:flush} | acc]
+          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, false, true))
+          [{:gap, mb}, {:flush} | acc]
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
@@ -1551,7 +1552,8 @@ defmodule Browser.Layout do
          c,
          acc,
          block? \\ false,
-         table? \\ false
+         table? \\ false,
+         gapped? \\ false
        ) do
     c = collapsed_table_border(c)
     box = box(tag, c)
@@ -1565,7 +1567,9 @@ defmodule Browser.Layout do
       |> Map.merge(%{"margin-left" => ml * 1.0, "margin-right" => mr * 1.0})
 
     own =
-      if table?, do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}), else: own
+      if table? or gapped?,
+        do: Map.merge(own, %{"margin-top" => 0.0, "margin-bottom" => 0.0}),
+        else: own
 
     # (a table is told its width was given: with collapsed borders that is the width of its columns)
     own = if table? and dim(c["width"]) != nil, do: Map.put(own, "@sized", true), else: own
@@ -1610,6 +1614,7 @@ defmodule Browser.Layout do
       hpct_atom: pct_of(c["height"]) || calc_pct(c["height"]),
       table?: table? or c["display"] == "inline-table",
       block_table?: table? and block?,
+      block_line?: block?,
       flex?: c["display"] in ["flex", "inline-flex", "grid", "inline-grid"],
       # a block-level box with auto side margins sits in the middle (or at the right)
       malign:
@@ -3902,11 +3907,12 @@ defmodule Browser.Layout do
     place_atom(st, %{
       w: w,
       h: height,
-      base: base,
+      base: if(Map.get(spec, :block_line?, false), do: min(base, height), else: base),
       items: items,
       align: Map.get(spec, :malign) || style.align,
       valign: spec.valign,
-      block: Map.get(spec, :cell?, false)
+      block: Map.get(spec, :cell?, false),
+      block_line?: Map.get(spec, :block_line?, false)
     })
   end
 
@@ -6744,6 +6750,13 @@ defmodule Browser.Layout do
         do: Enum.split_with(st.line, &(&1.type == :atom)),
         else: {[], st.line}
 
+    # (a block-level box on a line of its own has no strut)
+    st =
+      if atoms != [] and Enum.all?(texts, &Map.get(&1, :strut, false)) and
+           Enum.all?(atoms, &Map.get(&1, :block_line?, false)),
+         do: %{st | lh: 0, lmax: 0},
+         else: st
+
     {floating, on_baseline} =
       if atoms == [],
         do: {[], []},
@@ -7028,7 +7041,13 @@ defmodule Browser.Layout do
   defp line_free([first | _] = items, st) do
     last = List.last(items)
     left = min(first.x, st.indent)
-    right = max(last.x + last.w, st.x)
+    # (an ideographic space at the end of the line hangs)
+    hang =
+      if String.ends_with?(Map.get(last, :text, ""), "\u3000"),
+        do: Map.get(last, :hang, 0),
+        else: 0
+
+    right = max(last.x + last.w, st.x) - hang
     st.width - st.margin - st.right - st.fr - st.indent - (right - left)
   end
 
