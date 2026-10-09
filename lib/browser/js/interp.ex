@@ -283,7 +283,7 @@ defmodule Browser.JS.Interp do
               if has_property?(obj, name) do
                 {:ok, get(obj, name)}
               else
-                Process.put(:js_with_gone, true)
+                Process.put(:js_with_gone, name)
                 {:ok, :undefined}
               end
             else
@@ -2639,13 +2639,11 @@ defmodule Browser.JS.Interp do
   defp args_shadowed?(_), do: false
 
   defp ev_id({:id, name}, env) do
-    if Process.get(:js_with_used, false), do: Process.delete(:js_with_gone)
-
     case lookup_var(env, name) do
       {:ok, :undefined} ->
         # a binding that left the `with` object while its unscopables were read is a missing
         # reference in strict code
-        if Process.delete(:js_with_gone) == true and lookup_var(env, :strict) == {:ok, true},
+        if Process.delete(:js_with_gone) == name and lookup_var(env, :strict) == {:ok, true},
           do: throw_error("ReferenceError", "#{name} is not defined"),
           else: :undefined
 
