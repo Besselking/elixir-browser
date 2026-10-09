@@ -26,6 +26,13 @@ info = %{
   fetch: &Fetch.load/1
 }
 
+# LAYOUT=1 answers the scripts' questions about sizes with a real layout (the way the session
+# does, but with a fixed width per character), and adds up what those layouts cost
+layout? = System.get_env("LAYOUT") != nil
+info = if layout?, do: Map.put(info, :layout_now, true), else: info
+{:ok, forced} = Agent.start_link(fn -> {0, 0} end)
+{:ok, lsamples} = Agent.start_link(fn -> [] end)
+
 t0 = System.monotonic_time(:millisecond)
 pid = Runtime.start(page.raw, info)
 
@@ -58,7 +65,11 @@ sampler =
                 {_, [_ | _] = st} ->
                   [{m, f, a, _} | _] = st
                   fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
-                  acc = Enum.reduce(fs, [{:self, {m, f, a}} | acc], fn k, acc -> [{:incl, k} | acc] end)
+
+                  acc =
+                    Enum.reduce(fs, [{:self, {m, f, a}} | acc], fn k, acc ->
+                      [{:incl, k} | acc]
+                    end)
 
                   # PROFCALLER=name also counts who called a function with that name (the first
                   # frame above its last call)
@@ -108,7 +119,10 @@ gc_tracer =
 
             {:trace_ts, _, :gc_minor_end, info, ts} ->
               if System.get_env("GCDETAIL") && diff.(ts, start) > 30_000,
-                do: IO.puts("minor #{div(diff.(ts, start), 1000)} ms at #{div(diff.(ts, t0_us), 1000)} #{inspect(Keyword.take(info, [:heap_size, :old_heap_size, :recent_size, :mbuf_size, :bin_vheap_size]))}")
+                do:
+                  IO.puts(
+                    "minor #{div(diff.(ts, start), 1000)} ms at #{div(diff.(ts, t0_us), 1000)} #{inspect(Keyword.take(info, [:heap_size, :old_heap_size, :recent_size, :mbuf_size, :bin_vheap_size]))}"
+                  )
 
               tr.(tr, nil, minor + diff.(ts, start), major, nmin + 1, nmaj)
 
@@ -189,6 +203,71 @@ loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
   receive do
+    {:layout_now, js, ref, raw} ->
+      base = page
+
+      spawn(fn ->
+        me = self()
+
+        # LAYOUT=3 also samples the stack of the process that makes the layout
+        if System.get_env("LAYOUT") == "3" do
+          spawn(fn ->
+            sample = fn sample ->
+              case Process.info(me, :current_stacktrace) do
+                {_, [{m, f, a, _} | _] = st} ->
+                  Agent.update(lsamples, fn acc ->
+                    fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
+
+                    above =
+                      fs
+                      |> Enum.drop_while(fn {m, _, _} -> m != Regex end)
+                      |> Enum.drop_while(fn {m, _, _} -> m == Regex end)
+
+                    callers =
+                      if m == Regex, do: Enum.map(Enum.take(above, 2), &{:caller, &1}), else: []
+
+                    [{:self, {m, f, a}} | Enum.map(fs, &{:incl, &1}) ++ callers ++ acc]
+                  end)
+
+                  Process.sleep(1)
+                  sample.(sample)
+
+                _ ->
+                  :ok
+              end
+            end
+
+            sample.(sample)
+          end)
+        end
+
+        t = System.monotonic_time(:microsecond)
+        env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
+        laid = Browser.Page.from_raw(base, raw, env)
+        t1 = System.monotonic_time(:microsecond)
+
+        {items, height} =
+          Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
+            scrollers: true,
+            boxes: true,
+            svg_defs: laid.svg_defs
+          )
+
+        t2 = System.monotonic_time(:microsecond)
+        rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
+        Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
+
+        if System.get_env("LAYOUT") == "2",
+          do:
+            IO.puts(
+              "layout #{div(t1 - t, 1000)} ms style, #{div(t2 - t1, 1000)} ms layout, #{length(items)} items"
+            )
+
+        send(js, {:layout_now_done, ref, rects, {1000.0, height}})
+      end)
+
+      loop.(loop)
+
     {:js_async, ^pid, reply} ->
       print.(reply)
 
@@ -300,6 +379,28 @@ if System.get_env("PDSTAT") do
     end)
 
   IO.inspect(kinds, label: "heap objects by kind {count, words}")
+end
+
+if System.get_env("LAYOUT") == "3" do
+  acc = Agent.get(lsamples, & &1)
+
+  for kind <- [:self, :incl, :caller] do
+    IO.puts("-- layout process, #{kind}")
+
+    acc
+    |> Enum.filter(&match?({^kind, _}, &1))
+    |> Enum.frequencies()
+    |> Enum.sort_by(&elem(&1, 1), :desc)
+    |> Enum.take(40)
+    |> Enum.each(fn {{_, {m, f, a}}, c} ->
+      IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+    end)
+  end
+end
+
+if layout? do
+  {n, us} = Agent.get(forced, & &1)
+  IO.puts("forced layouts: #{n}, #{div(us, 1000)} ms")
 end
 
 IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")
