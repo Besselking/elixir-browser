@@ -29,7 +29,7 @@ defmodule Browser.Style do
             fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
-            flex-wrap justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
+            flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
             row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
@@ -496,7 +496,7 @@ defmodule Browser.Style do
   defp expand({"flex-flow", value, imp}) do
     toks = value |> String.trim() |> String.downcase() |> tokens()
     dir = Enum.find(toks, &(&1 in ~w(row row-reverse column column-reverse))) || "row"
-    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse))) || "nowrap"
+    wrap = Enum.find(toks, &(&1 in ~w(nowrap wrap wrap-reverse balance))) || "nowrap"
     [{"flex-direction", dir, imp}, {"flex-wrap", wrap, imp}]
   end
 

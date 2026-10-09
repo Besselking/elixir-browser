@@ -838,7 +838,7 @@ defmodule Browser.Layout do
               flex_trim(
                 sides,
                 c["flex-direction"],
-                c["flex-wrap"] in ["wrap", "wrap-reverse"],
+                wraps?(c["flex-wrap"]),
                 idx
               )
 
@@ -7456,8 +7456,10 @@ defmodule Browser.Layout do
 
     %{
       dir: flex_direction(c["flex-direction"]),
-      wrap: c["flex-wrap"] in ["wrap", "wrap-reverse"],
-      wrap_reverse: c["flex-wrap"] == "wrap-reverse",
+      wrap: wraps?(c["flex-wrap"]),
+      balance: wrap_words(c["flex-wrap"]) |> Enum.member?("balance"),
+      line_count: flex_line_count(c["flex-line-count"]),
+      wrap_reverse: wrap_words(c["flex-wrap"]) |> Enum.member?("wrap-reverse"),
       trim: trim_sides(c["margin-trim"]),
       justify: c["justify-content"] || "flex-start",
       content: c["align-content"] || "stretch",
@@ -7468,7 +7470,7 @@ defmodule Browser.Layout do
       height: inner.(num(c["height"])) || inner.(num(c["min-height"])),
       maxh: inner.(num(c["max-height"])),
       dir_rtl: c["direction"] == "rtl",
-      rtl: c["direction"] == "rtl" and c["flex-wrap"] not in ["wrap", "wrap-reverse"],
+      rtl: c["direction"] == "rtl" and not wraps?(c["flex-wrap"]),
       hpct: pct_of(c["height"]),
       ratio: aspect_ratio(c["aspect-ratio"]),
       hdef: inner.(num(c["height"])) != nil,
@@ -7997,7 +7999,7 @@ defmodule Browser.Layout do
       end)
 
     lines =
-      if cs.wrap, do: flex_break(items, cs.col_gap, avail), else: [items]
+      if cs.wrap, do: flex_lines(items, cs, avail), else: [items]
 
     lines = if cs.dir == :row_reverse, do: Enum.map(lines, &Enum.reverse/1), else: lines
     # `wrap-reverse` stacks the lines upwards: the first one is last
@@ -8058,6 +8060,29 @@ defmodule Browser.Layout do
   end
 
   # wrapping: a new line when the next item no longer fits
+  # `flex-wrap` is `nowrap | wrap | wrap-reverse | balance`, or `balance` with `wrap-reverse`
+  defp wrap_words(v) when is_binary(v), do: String.split(v)
+  defp wrap_words(_), do: []
+
+  defp wraps?(v), do: Enum.any?(wrap_words(v), &(&1 in ["wrap", "wrap-reverse", "balance"]))
+
+  defp flex_line_count(v) do
+    case Integer.parse(to_string(v)) do
+      {n, ""} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  # `flex-wrap: balance`: as many lines as filling them in order would make, but as evenly
+  # filled as the narrowest room that still gives that many
+  defp flex_lines(items, %{balance: true, col_gap: gap} = cs, avail) do
+    sizes = Enum.map(items, &(&1.hw + auto_zero(&1.ml) + auto_zero(&1.mr)))
+    lines = flex_break(items, gap, avail)
+    balance_lines(items, sizes, gap, avail, length(lines), cs.line_count) || lines
+  end
+
+  defp flex_lines(items, cs, avail), do: flex_break(items, cs.col_gap, avail)
+
   defp flex_break(items, gap, avail) do
     {lines, current, _used} =
       Enum.reduce(items, {[], [], 0.0}, fn it, {lines, cur, used} ->
@@ -8429,7 +8454,7 @@ defmodule Browser.Layout do
     if cs.wrap and (cs.height || cs.maxh) do
       # a wrapping column breaks into columns when the next item no longer fits the height
       sized = Enum.map(sized, &flex_column_basis(st, &1))
-      cols = flex_column_break(sized, cs.height || cs.maxh, round(cs.row_gap))
+      cols = flex_column_lines(sized, cs, cs.height || cs.maxh, round(cs.row_gap))
       cols = flex_column_stretch(st, cs, cols, avail)
       cols = if cs.dir == :column_reverse, do: Enum.map(cols, &Enum.reverse/1), else: cols
       last = length(cols) - 1
@@ -8518,6 +8543,88 @@ defmodule Browser.Layout do
         end
       end)
     end)
+  end
+
+  # `flex-wrap: balance`: the shortest height that still gives as many columns
+  defp flex_column_lines(items, %{balance: true} = cs, height, gap) do
+    cols = flex_column_break(items, height, gap)
+    sizes = Enum.map(items, & &1.h)
+    balance_lines(items, sizes, gap, height, length(cols), cs.line_count) || cols
+  end
+
+  defp flex_column_lines(items, _cs, height, gap), do: flex_column_break(items, height, gap)
+
+  # `flex-wrap: balance`: the same number of lines as filling them in order makes (or the
+  # `flex-line-count` if that is more), with the items spread over them as evenly as can be:
+  # the least sum of squared line sizes, the earlier lines the longer on a tie
+  defp balance_lines(items, sizes, gap, avail, n, min_count) do
+    count = length(items)
+    t = min(max(n, min_count || 0), count)
+
+    if t < 2 or count > 300 do
+      nil
+    else
+      pre = Enum.scan(sizes, 0, &(&1 + &2)) |> then(&List.to_tuple([0 | &1]))
+      width = fn i, j -> elem(pre, i + j) - elem(pre, i) + gap * (j - 1) end
+
+      {best, _memo} = balance_cut(0, t, count, width, avail, %{})
+      best && cut_lines(items, best)
+    end
+  end
+
+  defp cut_lines(_items, []), do: []
+
+  defp cut_lines(items, [j | rest]) do
+    {line, others} = Enum.split(items, j)
+    [line | cut_lines(others, rest)]
+  end
+
+  # {line lengths from item i on in k lines | nil, memo}; the cost is the sum of the squares
+  defp balance_cut(i, 1, count, width, avail, memo) do
+    j = count - i
+    {if(j == 1 or width.(i, j) <= avail, do: [j]), memo}
+  end
+
+  defp balance_cut(i, k, count, width, avail, memo) do
+    case memo do
+      %{{^i, ^k} => hit} ->
+        {hit, memo}
+
+      _ ->
+        most = count - i - (k - 1)
+
+        {best, memo} =
+          Enum.reduce(most..1//-1, {nil, memo}, fn j, {best, memo} ->
+            if j > 1 and width.(i, j) > avail do
+              {best, memo}
+            else
+              {rest, memo} = balance_cut(i + j, k - 1, count, width, avail, memo)
+
+              if rest do
+                total = {line_cost([j | rest], i, width), -j}
+
+                if best == nil or total < elem(best, 0),
+                  do: {{total, [j | rest]}, memo},
+                  else: {best, memo}
+              else
+                {best, memo}
+              end
+            end
+          end)
+
+        result = best && elem(best, 1)
+        {result, Map.put(memo, {i, k}, result)}
+    end
+  end
+
+  defp line_cost(lens, i, width) do
+    {sum, _} =
+      Enum.reduce(lens, {0, i}, fn l, {sum, at} ->
+        w = width.(at, l)
+        {sum + w * w, at + l}
+      end)
+
+    sum
   end
 
   defp flex_column_break(items, height, gap) do

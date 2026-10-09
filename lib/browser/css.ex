@@ -348,7 +348,7 @@ defmodule Browser.CSS do
             column-span column-width columns contain contain-intrinsic-size container container-name container-type
             content content-visibility counter-increment counter-reset counter-set cursor direction display
             empty-cells filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink
-            flex-wrap float font font-family font-feature-settings font-kerning font-language-override font-optical-sizing
+            flex-wrap flex-line-count float font font-family font-feature-settings font-kerning font-language-override font-optical-sizing
             font-size font-size-adjust font-stretch font-style font-synthesis font-variant font-variant-alternates font-variant-caps
             font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight gap grid
             grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-gap grid-column-start

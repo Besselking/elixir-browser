@@ -7373,4 +7373,30 @@ defmodule Browser.LayoutTest do
       assert {box.x, box.w} == {50, 100}
     end
   end
+
+  describe "flex-wrap: balance" do
+    defp balanced(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+
+      items
+      |> Enum.filter(&(&1.type == :rect and &1.color == {0, 128, 0}))
+      |> Enum.map(&{&1.x, &1.y})
+      |> Enum.sort()
+    end
+
+    test "four items that would wrap as three and one go two and two" do
+      html =
+        ~s|<style>body{margin:0}div div{width:25px;height:25px;background:green}</style><div style="display:flex;flex-wrap:balance;width:90px;gap:10px"><div></div><div></div><div></div><div></div></div>|
+
+      assert balanced(html) == [{0, 0}, {0, 35}, {35, 0}, {35, 35}]
+    end
+
+    test "flex-line-count asks for at least that many lines" do
+      html =
+        ~s|<style>body{margin:0}div div{width:20px;height:20px;background:green}</style><div style="display:flex;flex-wrap:balance;flex-line-count:3;width:200px"><div></div><div></div><div></div></div>|
+
+      assert balanced(html) == [{0, 0}, {0, 20}, {0, 40}]
+    end
+  end
 end
