@@ -3904,6 +3904,12 @@ defmodule Browser.Layout do
     {w, items, height, base} =
       table_beside_floats(st, sub, spec, avail, {w, items, height, base})
 
+    # the baseline of an inline table is the one of its first row
+    base =
+      if Map.get(spec, :table?, false) or Map.get(spec, :cell?, false),
+        do: table_baseline(items, base),
+        else: base
+
     place_atom(st, %{
       w: w,
       h: height,
@@ -6086,6 +6092,17 @@ defmodule Browser.Layout do
       layout_atom(st, sub, width, {:flex, key || :erlang.phash2(sub)})
     after
       Process.delete(:layout_flex_item)
+    end
+  end
+
+  defp table_baseline(items, default) do
+    case Enum.filter(items, &(&1.type == :text)) do
+      [] ->
+        default
+
+      texts ->
+        first_y = texts |> Enum.map(& &1.y) |> Enum.min()
+        for(%{y: ^first_y} = t <- texts, do: t.y + t.h) |> Enum.max()
     end
   end
 

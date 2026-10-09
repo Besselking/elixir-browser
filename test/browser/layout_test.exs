@@ -7819,4 +7819,17 @@ defmodule Browser.LayoutTest do
       assert Enum.sort(ys) == [20, 60, 100, 140]
     end
   end
+
+  describe "baseline of an inline table" do
+    test "is the baseline of its first line" do
+      html =
+        ~s|<style>body{margin:0;font:10px monospace}span{display:inline-table}span>span{display:block;visibility:hidden}</style>a<span>bcd<span>x</span></span>e|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      a = Enum.find(laid, &(&1.type == :text and &1.text == "a"))
+      b = Enum.find(laid, &(&1.type == :text and &1.text == "bcd"))
+      assert a.y == b.y
+    end
+  end
 end
