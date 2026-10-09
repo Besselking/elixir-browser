@@ -2219,9 +2219,11 @@ defmodule Browser.Session do
   end
 
   # fires an event in the page's scripts: -> {state, default prevented?}
-  defp js_event(%{js: nil} = state, _target, _type), do: {state, false}
+  @doc false
+  def js_event(state, target, type, init \\ %{})
+  def js_event(%{js: nil} = state, _target, _type, _init), do: {state, false}
 
-  defp js_event(state, target, type, init \\ %{}) do
+  def js_event(state, target, type, init) do
     reply = Browser.JS.Runtime.dispatch(state.js, target, type, init, controls_snapshot(state))
     {apply_js(state, reply), reply.prevented}
   end
