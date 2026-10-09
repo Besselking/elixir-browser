@@ -7351,4 +7351,26 @@ defmodule Browser.LayoutTest do
       assert Enum.find(items, &(&1.type == :text)).color == {0, 0, 255}
     end
   end
+
+  describe "relative positioning of inlines and table parts" do
+    test "a positioned block in a relative inline moves with the inline" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="width:100px;height:100px"><span style="position:relative;top:100px;left:100px"><div style="width:10px;height:10px;background:green;position:relative;top:-100px;left:-100px"></div></span></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.x, box.y} == {0, 0}
+    end
+
+    test "an absolutely positioned table between left and right shrinks and centres with auto margins" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="position:relative;width:200px;height:50px"><div style="display:table;position:absolute;left:0;right:0;margin:auto;background:green"><div style="width:100px;height:50px"></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      box = Enum.find(items, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      assert {box.x, box.w} == {50, 100}
+    end
+  end
 end

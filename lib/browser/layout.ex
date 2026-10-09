@@ -1170,7 +1170,9 @@ defmodule Browser.Layout do
         mextra: 0,
         fixed: c["position"] == "fixed",
         # `width: fit-content` between two insets shrinks to the content, not stretches
-        fit: c["width"] in [:fit, :minc, :maxc],
+        fit:
+          c["width"] in [:fit, :minc, :maxc] or tag == "table" or
+            c["display"] in ["table", "inline-table"],
         # an inline-level box is where it would be on a line: beside the floats
         inline: kind(tag, c) in [:inline, :inline_block],
         align: parent_style.align,
@@ -4668,6 +4670,12 @@ defmodule Browser.Layout do
     # with both given, `left` wins in a left-to-right block and `right` in a right-to-left one
     dx = if box.o.rtl && right, do: -right, else: left || -(right || 0)
     dy = rel_offset(rel.top, box.pcbh) || -(rel_offset(rel.bottom, box.pcbh) || 0)
+    # (a block inside a relatively positioned inline goes along with it)
+    {dx, dy} =
+      case current_rel(st) do
+        {rx, ry, _} -> {dx + rx, dy + ry}
+        nil -> {dx, dy}
+      end
 
     {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
@@ -9108,7 +9116,7 @@ defmodule Browser.Layout do
           tag not in @skip,
           c = computed(attrs),
           tag == "tr" or c["display"] == "table-row",
-          do: table_row(el, c, ekids, style, bg)
+          do: table_row(el, c, ekids, style, bg, num(gc["height"]))
 
     # with collapsed borders the group's own borders are those of the rows at its edges
     last = length(rows) - 1
@@ -9172,9 +9180,14 @@ defmodule Browser.Layout do
   defp paint_above(items, seq), do: Enum.map(items, &Map.merge(&1, %{over: true, pz: seq}))
 
   # `position: relative` on a part of a table moves what it holds
-  defp rel_shift(c) do
+  defp rel_shift(c, base \\ nil) do
     if c["position"] == "relative" do
-      num = fn v -> if is_number(v), do: round(v), else: nil end
+      num = fn
+        v when is_number(v) -> round(v)
+        {:pct, f} when is_number(base) -> round(f * base)
+        _ -> nil
+      end
+
       {num.(c["left"]) || -(num.(c["right"]) || 0), num.(c["top"]) || -(num.(c["bottom"]) || 0)}
     else
       {0, 0}
@@ -9230,7 +9243,7 @@ defmodule Browser.Layout do
   defp row_bg(c), do: if(color?(c["background-color"]), do: c["background-color"])
 
   # a row's background shows behind its cells; a row group's behind its rows
-  defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg) do
+  defp table_row({:element, _tag, _attrs, _}, c, kids, style, group_bg, parent_h \\ nil) do
     cells =
       for {:element, tag, attrs, _} = el <- anonymous_cells(kids, c),
           tag not in @skip,
@@ -9246,7 +9259,7 @@ defmodule Browser.Layout do
       bgimg: bg_pictures(c),
       gimg: nil,
       edges: edges_of(c),
-      shift: rel_shift(c)
+      shift: rel_shift(c, parent_h)
     }
   end
 
