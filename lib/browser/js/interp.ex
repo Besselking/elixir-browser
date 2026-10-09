@@ -3533,11 +3533,9 @@ defmodule Browser.JS.Interp do
               # GetBindingValue asks again whether the binding is still there
               {if(has_property?(obj, name), do: get(obj, name), else: :undefined), obj}
 
-            {:var, sc} ->
-              case Map.fetch(deref(sc).vars, name) do
-                {:ok, v} when v != :tdz -> {v, :undefined}
-                _ -> {ev(callee, env), :undefined}
-              end
+            # (an import is a live binding: the slot holds a reference, not the value)
+            {:var, _} ->
+              {ev(callee, env), :undefined}
 
             _ ->
               {ev(callee, env), :undefined}

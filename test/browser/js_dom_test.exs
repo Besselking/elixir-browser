@@ -996,6 +996,23 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["2 3 hi x 1 4 2 add,default,shown,two"]
     end
 
+    test "an imported function can be called once a script has used with" do
+      {_, r} =
+        start(
+          """
+          <body><script>with ({ a: 1 }) { var seen = a; }</script>
+          <script type=module>
+          import { add } from "/lib.js";
+          console.log(add(1, 2), typeof add);
+          </script></body>
+          """,
+          @files
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["3 function"]
+    end
+
     test "a module namespace with exports cannot be frozen" do
       {_, r} =
         start(
