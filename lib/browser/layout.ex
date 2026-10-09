@@ -2502,9 +2502,6 @@ defmodule Browser.Layout do
 
   defp containing_width, do: Process.get(:layout_cw, 0)
 
-  defp intrinsic_cw,
-    do: if(Process.get(:layout_intrinsic, false), do: 0, else: containing_width())
-
   # -- styles ----------------------------------------------------------------------
 
   defp restyle_inline(style, attrs), do: apply_computed(style, computed(attrs))
@@ -2582,7 +2579,7 @@ defmodule Browser.Layout do
     Enum.reduce(["width", "min-width", "max-width"], map, fn key, acc ->
       case acc[key] do
         {:calc, px, f} -> Map.put(acc, key, max(px + f * containing_width(), 0.0))
-        :stretch -> Map.put(acc, key, stretched(acc))
+        :stretch when key == "width" -> Map.put(acc, key, stretched(acc))
         _ -> acc
       end
     end)
@@ -4679,6 +4676,8 @@ defmodule Browser.Layout do
 
     cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
     cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
+    # `min-width: stretch`: at least what the containing block leaves
+    cw = if o.minw == :stretch, do: max(cw, beside - ml0 - mr0 - hpad), else: cw
     box_w = hpad + cw
     free = beside - ml0 - mr0 - box_w
 
@@ -5736,6 +5735,7 @@ defmodule Browser.Layout do
   defp resolve(nil, _base), do: nil
 
   defp resolve({:kw, _}, _base), do: nil
+  defp resolve(:stretch, _base), do: nil
   defp resolve({:pct, f}, base), do: round(f * base)
   defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 

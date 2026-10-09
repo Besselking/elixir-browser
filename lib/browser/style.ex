@@ -1911,7 +1911,7 @@ defmodule Browser.Style do
   defp typed(prop, v, _env, _pc)
        when prop in ["width", "min-width"] and
               v in ["stretch", "-webkit-fill-available", "-moz-available"],
-       do: {:ok, if(prop == "width", do: :stretch, else: 0.0)}
+       do: {:ok, :stretch}
 
   # `height: stretch`: the room the containing block's (definite) height leaves
   defp typed(prop, v, _env, _pc)

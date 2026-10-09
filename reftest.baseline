@@ -5056,6 +5056,7 @@ css/css-sizing/stretch/block-height-010.html
 css/css-sizing/stretch/fixed-table-1.html
 css/css-sizing/stretch/flexbox-stretch-minimum-001.html
 css/css-sizing/stretch/flexbox-stretch-minimum-002.html
+css/css-sizing/stretch/min-width-1.html
 css/css-sizing/stretch/stretch-float-with-sibling.html
 css/css-sizing/stretch/stretch-float.html
 css/css-sizing/whitespace-and-break.html

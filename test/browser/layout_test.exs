@@ -7710,6 +7710,15 @@ defmodule Browser.LayoutTest do
       assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
     end
 
+    test "min-width: stretch makes a block with a width as wide as its container" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="width:100px"><div style="width:50px;min-width:stretch;height:10px;background:green"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).w == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(
