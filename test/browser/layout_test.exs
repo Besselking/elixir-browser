@@ -7660,6 +7660,16 @@ defmodule Browser.LayoutTest do
       assert Enum.max(widths) == 100
     end
 
+    test "a wrapping column with a max-height flexes each column to the tallest" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;flex-direction:column;flex-wrap:wrap;max-height:100px;width:100px}</style><div id="f"><div style="background:green;width:50px;height:50px;flex-grow:1"></div><div style="background:green;width:50px;height:100px"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      first = Enum.min_by(Enum.filter(laid, &(&1.type == :rect)), & &1.x)
+      assert first.h == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(

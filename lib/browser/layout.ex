@@ -8784,9 +8784,25 @@ defmodule Browser.Layout do
 
       cols = if cs.wrap_reverse != cs.dir_rtl, do: Enum.reverse(cols), else: cols
 
+      # (with only a `max-height` the container is as tall as its tallest column, and every
+      # column is flexed to that)
+      pcs =
+        if cs.height == nil and length(cols) > 1 do
+          tall =
+            cols
+            |> Enum.map(
+              &(Enum.sum(Enum.map(&1, fn it -> it.h end)) + round(cs.row_gap) * (length(&1) - 1))
+            )
+            |> Enum.max()
+
+          %{cs | height: min(tall, cs.maxh) * 1.0}
+        else
+          cs
+        end
+
       {laid, {x_end, tallest}} =
         Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
-          {items, y} = flex_column_place(st, cs, col)
+          {items, y} = flex_column_place(st, pcs, col)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
 
           {Enum.map(items, &{&1, y}) |> Enum.map(fn {i, y} -> {move(i, x, 0), y} end),
