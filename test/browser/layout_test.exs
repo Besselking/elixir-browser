@@ -7488,4 +7488,16 @@ defmodule Browser.LayoutTest do
       assert Enum.count(items, &(&1.type == :text and &1.y == first_y)) == 3
     end
   end
+
+  describe "static position of an inline-level absolute box in rtl" do
+    test "it ends at the aligned point of the line beside a float" do
+      html =
+        ~s|<style>body{margin:0}#c{position:relative;width:100px;height:100px;direction:rtl;text-align:center}#f{float:left;width:50px;height:50px}#a{display:inline;position:absolute;width:50px;height:50px;background:green}</style><div id=c><div id=f></div><div id=a></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      green = Enum.find(items, &(&1.type == :rect and &1[:color] == {0, 128, 0}))
+      assert green.x == 25
+    end
+  end
 end

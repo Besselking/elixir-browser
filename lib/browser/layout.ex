@@ -5254,7 +5254,13 @@ defmodule Browser.Layout do
       end
 
     static_x = round(static_x)
-    static_right = st.width - st.margin - st.right
+
+    # a right-to-left box ends where the empty line would put it (a box on a line is at the
+    # line's start edge)
+    static_right =
+      if spec.rtl and st.line == [] and Map.get(spec, :inline),
+        do: round(static_x),
+        else: st.width - st.margin - st.right
 
     left = resolve_h(spec.left, cw)
     right = resolve_h(spec.right, cw)
