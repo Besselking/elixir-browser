@@ -3326,7 +3326,7 @@ defmodule Browser.LayoutTest do
       assert %{h: 50} = box_of(items)
     end
 
-    test "a float with clear goes below the earlier floats on that side only" do
+    test "a float with clear goes below the earlier floats on that side; a later one is not higher" do
       {items, _} =
         fl(
           ~s|<div style="float:right;width:40px;height:20px;background:#111"></div><div style="float:right;clear:right;width:50px;height:30px;background:#222"></div><div style="float:left;width:50px;height:30px;background:#333"></div>|
@@ -3334,7 +3334,7 @@ defmodule Browser.LayoutTest do
 
       rects = items |> Enum.filter(&(&1.type == :rect)) |> Map.new(&{&1.color, &1})
       assert %{y: 20} = rects[{34, 34, 34}]
-      assert %{y: 0} = rects[{51, 51, 51}]
+      assert %{y: 20} = rects[{51, 51, 51}]
     end
 
     test "an inline-block that does not fit beside the floats goes below them" do
@@ -4573,6 +4573,42 @@ defmodule Browser.LayoutTest do
 
     {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
     assert Enum.filter(items, &(&1.type == :rect)) == []
+  end
+
+  test "a float is not placed higher than an earlier float" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="width:200px"><div style="float:left;width:120px;height:10px"></div><div style="float:left;width:100px;height:10px"></div><div style="float:left;width:40px;height:10px;background:#0f0"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.y >= 18
+  end
+
+  test "an inline box with a margin that holds only a float still makes a line" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="background:#00f"><span style="margin-left:40px"><span style="float:left;width:10px;height:5px"></span> </span></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.h > 0
+  end
+
+  test "the margin after an empty cleared box stays in the box and is not taken off the clearance" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="background:#0f0;width:100px"><div style="float:left;height:1px"></div><div style="clear:left"></div><div style="margin-top:99px"></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 300, &measure/2, 600, margin: 0)
+    green = Enum.find(items, &(&1.type == :rect and &1.color == {0, 255, 0}))
+    assert green.h == 100
   end
 
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))

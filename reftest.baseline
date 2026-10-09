@@ -1132,11 +1132,14 @@ css/CSS2/floats-clear/floats-134.xht
 css/CSS2/floats-clear/floats-135.xht
 css/CSS2/floats-clear/floats-138.xht
 css/CSS2/floats-clear/floats-139.xht
+css/CSS2/floats-clear/floats-141.xht
 css/CSS2/floats-clear/floats-142.xht
 css/CSS2/floats-clear/floats-143.xht
 css/CSS2/floats-clear/floats-144.xht
 css/CSS2/floats-clear/floats-145.xht
+css/CSS2/floats-clear/floats-146.xht
 css/CSS2/floats-clear/floats-147.xht
+css/CSS2/floats-clear/floats-149.xht
 css/CSS2/floats-clear/floats-bfc-001.xht
 css/CSS2/floats-clear/floats-bfc-002.xht
 css/CSS2/floats-clear/floats-clear-multicol-001.html
@@ -1146,6 +1149,9 @@ css/CSS2/floats-clear/margin-collapse-023.xht
 css/CSS2/floats-clear/margin-collapse-024.xht
 css/CSS2/floats-clear/margin-collapse-027.xht
 css/CSS2/floats-clear/margin-collapse-031.xht
+css/CSS2/floats-clear/margin-collapse-033.xht
+css/CSS2/floats-clear/margin-collapse-034.xht
+css/CSS2/floats-clear/margin-collapse-035.xht
 css/CSS2/floats-clear/margin-collapse-121.xht
 css/CSS2/floats-clear/margin-collapse-122.xht
 css/CSS2/floats-clear/margin-collapse-123.xht
@@ -1189,7 +1195,9 @@ css/CSS2/floats/float-with-absolutely-positioned-child-with-static-inset.html
 css/CSS2/floats/floats-in-table-caption-001.html
 css/CSS2/floats/floats-placement-001.html
 css/CSS2/floats/floats-placement-002.html
+css/CSS2/floats/floats-placement-003.html
 css/CSS2/floats/floats-placement-004.html
+css/CSS2/floats/floats-placement-005.html
 css/CSS2/floats/floats-placement-006.html
 css/CSS2/floats/floats-placement-007.html
 css/CSS2/floats/floats-placement-008.html

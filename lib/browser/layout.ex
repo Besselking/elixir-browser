@@ -3262,6 +3262,8 @@ defmodule Browser.Layout do
       deferred: [],
       open: %{},
       clr: nil,
+      # a margin that follows a cleared box and stays inside the box around it
+      hold: 0,
       adj: nil,
       strut: nil,
       pos: [
@@ -3443,6 +3445,14 @@ defmodule Browser.Layout do
   defp op({:gap, _px}, %{line: [%{marker: true}]} = st), do: st
   defp op({:gap, px}, st) when px < 0, do: %{flush(st) | ngap: min(st.ngap, px)}
 
+  # (the margin of what follows a cleared box with no margin of its own counts from its border
+  # edge: it is not subtracted from the clearance)
+  defp op({:gap, px}, %{clr: {_, 0, bottom, :cleared}} = st) when st.y == bottom do
+    st = flush(st)
+    gap = max(st.gap, px)
+    %{st | gap: gap, hold: gap}
+  end
+
   defp op({:gap, px}, %{clr: clr} = st) when is_tuple(clr) and st.y == elem(clr, 2) do
     {y0, gap, bottom} = {elem(clr, 0), elem(clr, 1), elem(clr, 2)}
     st = flush(st)
@@ -3467,7 +3477,7 @@ defmodule Browser.Layout do
            st.x + fit_width(st, sub, spec, max(st.width - 2 * st.margin - st.left - st.right, 0)) >
              st.width - st.margin - st.right,
          do: {st, st.y + st.lmax},
-         else: {flush(st), nil}
+         else: {if(st.line == [], do: st, else: flush(st)), nil}
 
     {y0, gap, old} = {st.y, max(st.gap, 0), st.clr}
     st = if line_bottom, do: st, else: apply_gap(st)
@@ -3562,8 +3572,14 @@ defmodule Browser.Layout do
     # floats that left that margin pending: then it is empty and its margins go on collapsing
     st =
       case st.clr do
-        {c0, _, bottom} when bottom == st.y and c0 >= y0 -> st
-        _ -> %{st | clr: nil}
+        {c0, _, bottom} when bottom == st.y and c0 >= y0 ->
+          st
+
+        {c0, g, bottom, :clearance} when bottom == st.y ->
+          %{st | clr: {c0, g, bottom, :cleared}}
+
+        _ ->
+          %{st | clr: nil}
       end
 
     st = end_block(st)
@@ -3654,6 +3670,8 @@ defmodule Browser.Layout do
     o = st.open[ref].o
     {_, _, obb, _} = o.bw
 
+    held? = st.hold > 0 and st.hold == st.gap
+
     empty? =
       o.h in [nil, 0, 0.0] and o.min in [nil, 0, 0.0] and o[:ratio] == nil and o.pb == 0 and
         obb == 0
@@ -3663,6 +3681,9 @@ defmodule Browser.Layout do
     # an empty box that held floats leaves the margin above them pending, to collapse on
     clr =
       case st.clr do
+        {c0, g, bottom, :clearance} when empty? and bottom == st.y ->
+          if c0 >= st.open[ref].top, do: {c0, g, bottom, :cleared}
+
         {c0, _, bottom} = clr when empty? and bottom == st.y ->
           if c0 >= st.open[ref].top or st.y == st.open[ref].top, do: clr
 
@@ -3693,6 +3714,9 @@ defmodule Browser.Layout do
     st =
       cond do
         box.o.pb > 0 or bb > 0 or Map.get(box, :bfc, false) -> apply_gap(st)
+        # (a margin that follows a cleared box stays in the box: clearance separates it from the
+        # box's own bottom margin)
+        held? -> apply_gap(st)
         # (the margin below the last child is lost: the height is the one that was set)
         sized? -> %{st | gap: 0, ngap: 0, clr: nil}
         true -> st
@@ -10115,6 +10139,8 @@ defmodule Browser.Layout do
   # the top-left corner of a float `w` x `h` whose top is no higher than `y`: lower down when the
   # floats beside it leave no room
   defp place_float(st, side, w, h, y, left, right) do
+    # a float is never higher than one that came before it in the source
+    y = Enum.reduce(st.floats, y, &max(&1.y0, &2))
     {fl, fr} = float_offsets(st, y, y + max(h, 1))
     overlapping = Enum.filter(st.floats, &(&1.y0 < y + max(h, 1) and &1.y1 > y))
 
