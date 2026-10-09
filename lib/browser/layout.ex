@@ -8393,7 +8393,8 @@ defmodule Browser.Layout do
   defp flex_break(items, gap, avail) do
     {lines, current, _used} =
       Enum.reduce(items, {[], [], 0.0}, fn it, {lines, cur, used} ->
-        outer = it.hw + auto_zero(it.ml) + auto_zero(it.mr)
+        # (an item never takes less than no room on a line)
+        outer = max(it.hw + auto_zero(it.ml) + auto_zero(it.mr), 0)
         needed = if cur == [], do: outer, else: used + gap + outer
 
         if cur != [] and needed > avail,

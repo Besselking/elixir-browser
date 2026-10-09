@@ -7624,6 +7624,15 @@ defmodule Browser.LayoutTest do
       assert {box.w, box.h} == {100, 100}
     end
 
+    test "an item with negative margins does not fit on a line it would overflow" do
+      html =
+        ~s|<style>body{margin:0}#f{display:flex;flex-wrap:wrap;width:100px;background:green}#f>div{height:50px}</style><div id="f"><div style="width:150px"></div><div style="width:0;margin:0 -50px"></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
+    end
+
     test "min-content of a wrapping row is its widest item" do
       items = String.duplicate(~s|<div style="width:100px"></div>|, 3)
       box = flex_green("width:min-content;gap:20px;flex-wrap:wrap;height:10px", items)
