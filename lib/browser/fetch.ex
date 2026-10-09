@@ -1,7 +1,7 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
-  alias Browser.{Cookies, HttpCache, Proxy}
+  alias Browser.{Cookies, HttpCache, NetLog, Proxy}
 
   @max_redirects 8
 
@@ -198,9 +198,15 @@ defmodule Browser.Fetch do
 
   defp fetch(url, :get, body, redirects, %{full: false, cache: cache} = ctx) do
     case lookup(url, cache) do
-      {:fresh, entry} when cache != :reload -> {:ok, entry.body, url}
-      {_, entry} -> request(url, :get, body, redirects, ctx, entry)
-      :miss -> request(url, :get, body, redirects, ctx, nil)
+      {:fresh, entry} when cache != :reload ->
+        log_cached(url, ctx, entry)
+        {:ok, entry.body, url}
+
+      {_, entry} ->
+        request(url, :get, body, redirects, ctx, entry)
+
+      :miss ->
+        request(url, :get, body, redirects, ctx, nil)
     end
   end
 
@@ -239,6 +245,8 @@ defmodule Browser.Fetch do
         ]
       ] ++ proxy_opts
 
+    started = System.monotonic_time(:millisecond)
+
     result =
       if method == :get and ctx.on_chunk,
         do: stream_get(request, http_opts, url, ctx.on_chunk, profile),
@@ -247,6 +255,8 @@ defmodule Browser.Fetch do
     with true <- cookies?, {:ok, {_, resp_headers, _}} <- result do
       store_cookies(url, resp_headers, cookie_opts)
     end
+
+    log_request(url, method, ctx, headers, result, started, entry != nil)
 
     case result do
       {:ok, {{_, 304, _}, headers, _body}} when entry != nil ->
@@ -293,6 +303,71 @@ defmodule Browser.Fetch do
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
     end
+  end
+
+  # ── the network log ────────────────────────────────────────
+
+  defp request_kind(%{navigation: true}), do: :document
+  defp request_kind(%{full: true}), do: :fetch
+  defp request_kind(_), do: :resource
+
+  defp log_cached(url, ctx, entry) do
+    NetLog.add(%{
+      time: System.system_time(:millisecond),
+      method: "GET",
+      url: url,
+      status: 200,
+      status_text: "OK",
+      type: NetLog.type(request_kind(ctx), cached_headers(entry), url),
+      size: byte_size(entry.body),
+      ms: 0,
+      source: :cache,
+      error: nil,
+      request_headers: [],
+      response_headers: cached_headers(entry),
+      initiator: ctx.initiator
+    })
+  end
+
+  # what is kept of a cached response's headers
+  defp cached_headers(%{content_type: nil}), do: []
+  defp cached_headers(%{content_type: type}), do: [{"content-type", type}]
+
+  defp log_request(url, method, ctx, req_headers, result, started, revalidating?) do
+    {status, text, resp_headers, size, error} =
+      case result do
+        {:ok, {{_, status, reason}, headers, body}} ->
+          {status, to_string(reason), headers, byte_size(body), nil}
+
+        {:error, reason} ->
+          {nil, "", [], 0, inspect(reason)}
+      end
+
+    resp_headers =
+      for {k, v} <- resp_headers, do: {k |> to_string() |> String.downcase(), to_string(v)}
+
+    ms = System.monotonic_time(:millisecond) - started
+
+    NetLog.add(%{
+      time: System.system_time(:millisecond) - ms,
+      method: method |> to_string() |> String.upcase(),
+      url: url,
+      status: status,
+      status_text: text,
+      type: NetLog.type(request_kind(ctx), resp_headers, url),
+      size: size,
+      ms: ms,
+      source:
+        cond do
+          status == nil -> :error
+          status == 304 and revalidating? -> :revalidated
+          true -> :network
+        end,
+      error: error,
+      request_headers: for({k, v} <- req_headers, do: {to_string(k), to_string(v)}),
+      response_headers: resp_headers,
+      initiator: ctx.initiator
+    })
   end
 
   # 301/302 turn a POST into a GET and 303 turns anything but HEAD into a GET

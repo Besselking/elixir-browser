@@ -12,6 +12,7 @@ defmodule Browser.Application do
     children =
       [
         Browser.Console,
+        Browser.NetLog,
         Browser.HttpCache,
         Browser.Cookies,
         Browser.LocalStorage,

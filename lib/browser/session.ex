@@ -9,7 +9,7 @@ defmodule Browser.Session do
   again without re-running the style cascade.
   """
   use GenServer
-  import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1]
+  import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxList: 1]
 
   alias Browser.{
     Editing,
@@ -148,6 +148,8 @@ defmodule Browser.Session do
       closed: [],
       # the developer console: `%{win, pid, seq, hist, hpos}` once opened (see `open_console/1`)
       console: nil,
+      # the network panel: `%{win, seq, filter, rows}` once opened (see `open_net/1`)
+      net: nil,
       # editing hosts (`contenteditable`): what the layout says about them (`Browser.Editing`),
       # the host that has focus, the selection the page reported in it, whether the mouse is
       # dragging one out, and the column the caret keeps going up and down
@@ -394,6 +396,24 @@ defmodule Browser.Session do
 
   def handle_info(wx(id: 5211, event: wxCommand(type: :command_text_enter)), state),
     do: {:noreply, console_eval(state)}
+
+  # Develop > Network, and the network window: clear button, filter, list
+  def handle_info(wx(id: 5201, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, open_net(state)}
+
+  def handle_info(wx(id: 5220, event: wxCommand(type: :command_button_clicked)), state),
+    do: {:noreply, clear_net(state)}
+
+  def handle_info(wx(id: 5221, event: wxCommand(type: :command_text_updated)), state),
+    do: {:noreply, refilter_net(state)}
+
+  def handle_info(
+        wx(id: 5222, event: wxList(type: :command_list_item_selected, itemIndex: i)),
+        state
+      ),
+      do: {:noreply, select_net(state, i)}
+
+  def handle_info(:net_tick, state), do: {:noreply, net_tick(state)}
 
   def handle_info({:console_key, key}, state), do: {:noreply, console_history(state, key)}
 
@@ -3083,6 +3103,75 @@ defmodule Browser.Session do
   end
 
   defp console_history(state, _key), do: state
+
+  # -- network panel -----------------------------------------------------------------
+
+  # the window is made on first use; `rows` are the numbers of the entries in the list, top down
+  defp open_net(%{net: nil} = state) do
+    win = Browser.NetworkWindow.new(state.ui.frame)
+    open_net(%{state | net: %{win: win, seq: 0, filter: "", rows: [], ticking: false}})
+  end
+
+  defp open_net(%{net: n} = state) do
+    Browser.NetworkWindow.show(n.win)
+    net_schedule(%{state | net: net_refresh(n)})
+  end
+
+  # (`ticking`: a tick is on its way, so there is no need for another)
+  defp net_schedule(%{net: %{ticking: true}} = state), do: state
+
+  defp net_schedule(%{net: n} = state) do
+    Process.send_after(self(), :net_tick, 300)
+    %{state | net: %{n | ticking: true}}
+  end
+
+  # the list follows the log: once in a while, as long as the window is shown
+  defp net_tick(%{net: nil} = state), do: state
+
+  defp net_tick(%{net: n} = state) do
+    state = %{state | net: %{n | ticking: false}}
+
+    if Browser.NetworkWindow.shown?(n.win),
+      do: net_schedule(%{state | net: net_refresh(state.net)}),
+      else: state
+  end
+
+  defp net_refresh(n) do
+    case Browser.NetLog.since(n.seq) do
+      [] ->
+        n
+
+      entries ->
+        shown = Enum.filter(entries, &Browser.NetworkWindow.match?(&1, n.filter))
+        Browser.NetworkWindow.append(n.win, shown)
+        %{n | seq: List.last(entries).seq, rows: n.rows ++ Enum.map(shown, & &1.seq)}
+    end
+  end
+
+  defp clear_net(%{net: nil} = state), do: state
+
+  defp clear_net(%{net: n} = state) do
+    Browser.NetLog.clear()
+    Browser.NetworkWindow.clear(n.win)
+    %{state | net: %{n | seq: Browser.NetLog.last_seq(), rows: []}}
+  end
+
+  # the list is made again from the whole log when the filter changes
+  defp refilter_net(%{net: nil} = state), do: state
+
+  defp refilter_net(%{net: n} = state) do
+    Browser.NetworkWindow.clear(n.win)
+    filter = Browser.NetworkWindow.filter_text(n.win)
+    %{state | net: net_refresh(%{n | seq: 0, rows: [], filter: filter})}
+  end
+
+  defp select_net(%{net: nil} = state, _), do: state
+
+  defp select_net(%{net: n} = state, i) do
+    entry = with seq when seq != nil <- Enum.at(n.rows, i), do: Browser.NetLog.get(seq)
+    Browser.NetworkWindow.show_details(n.win, entry)
+    state
+  end
 
   # -- tabs ------------------------------------------------------------------------
 

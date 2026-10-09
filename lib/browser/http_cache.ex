@@ -18,7 +18,7 @@ defmodule Browser.HttpCache do
 
   defmodule Entry do
     @moduledoc false
-    defstruct [:url, :body, :etag, :last_modified, :expires_at, :used_at]
+    defstruct [:url, :body, :etag, :last_modified, :expires_at, :used_at, :content_type]
   end
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
@@ -79,7 +79,8 @@ defmodule Browser.HttpCache do
                etag: etag,
                last_modified: last_modified,
                expires_at: now() + (lifetime(headers, cc) || 0),
-               used_at: now()
+               used_at: now(),
+               content_type: header(headers, "content-type")
              }}
           )
       end
