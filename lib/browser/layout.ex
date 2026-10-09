@@ -9300,8 +9300,13 @@ defmodule Browser.Layout do
   # the height a table is given, which `min-height` raises
   defp table_height(c) do
     case {num(c["height"]), num(c["min-height"])} do
-      {nil, nil} -> nil
-      {h, min} -> max(h || 0, min || 0)
+      {nil, nil} ->
+        nil
+
+      {h, min} ->
+        # (`max-height` holds the height down, `min-height` wins over it)
+        h = if max = num(c["max-height"]), do: min(h || 0, max), else: h || 0
+        max(h, min || 0)
     end
   end
 

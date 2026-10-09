@@ -7741,4 +7741,16 @@ defmodule Browser.LayoutTest do
       assert {box.w, box.h} == {150, 100}
     end
   end
+
+  describe "tables with a max-height" do
+    test "the rows share the height the max-height leaves" do
+      html =
+        ~s|<style>body{margin:0}#t{display:table;background:black;height:300px;max-height:100px;width:100px}.r{display:table-row}.c{display:table-cell}</style><div id="t"><div class="r"><div class="c">a</div></div><div class="r"><div class="c">b</div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      texts = for %{type: :text, y: y} <- laid, do: y
+      assert Enum.max(texts) < 100
+    end
+  end
 end
