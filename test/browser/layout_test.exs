@@ -7454,4 +7454,28 @@ defmodule Browser.LayoutTest do
       assert green_box(html).y == 100
     end
   end
+
+  describe "text-wrap: balance" do
+    test "four words that wrap as three and one go two and two" do
+      html =
+        ~s|<style>body{margin:0}div{width:80px;text-wrap:balance}</style><div>aa bb cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      lines = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.uniq()
+      assert length(lines) == 2
+      firsts = for %{type: :text, text: t, y: y} <- items, y == hd(lines), do: t
+      assert length(firsts) == 2
+    end
+
+    test "text-wrap-style: stable does not balance" do
+      html =
+        ~s|<style>body{margin:0}div{width:80px;text-wrap:balance;text-wrap-style:stable}</style><div>aa bb cc dd</div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      first_y = items |> Enum.filter(&(&1.type == :text)) |> Enum.map(& &1.y) |> Enum.min()
+      assert Enum.count(items, &(&1.type == :text and &1.y == first_y)) == 3
+    end
+  end
 end

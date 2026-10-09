@@ -1811,7 +1811,7 @@ defmodule Browser.Layout do
           acc =
             with_cw(child_width(c, box), fn ->
               with_definite(own_definite?(tag, c), fn ->
-                block_children(tag, kind, kids, style, c, acc)
+                balanced_children(tag, kind, kids, style, c, acc)
               end)
             end)
 
@@ -1830,7 +1830,7 @@ defmodule Browser.Layout do
           acc =
             with_cw(child_width(c, box), fn ->
               with_definite(own_definite?(tag, c), fn ->
-                block_children(tag, kind, kids, style, c, acc)
+                balanced_children(tag, kind, kids, style, c, acc)
               end)
             end)
 
@@ -1841,6 +1841,20 @@ defmodule Browser.Layout do
       end
     end
   end
+
+  # `text-wrap: balance`: the lines of a block of text are as even as the same number of lines
+  # can be. Its content is laid out at a width found when the block is reached.
+  defp balanced_children(tag, kind, kids, style, c, acc) do
+    if balance_text?(c) and kind in [:block, :list_item] do
+      inner = tag |> block_children(kind, kids, style, c, []) |> Enum.reverse()
+      [{:balance, inner} | acc]
+    else
+      block_children(tag, kind, kids, style, c, acc)
+    end
+  end
+
+  defp balance_text?(c),
+    do: "balance" in String.split(to_string(c["text-wrap-style"] || c["text-wrap"]))
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -3359,6 +3373,7 @@ defmodule Browser.Layout do
       soft: false,
       # offsets of the relatively positioned inline elements the layout is inside (or nil)
       rels: [],
+      bal: 0,
       # the most negative margin waiting to be applied, which adds to the largest positive one
       ngap: 0,
       pending_space: nil,
@@ -4061,6 +4076,19 @@ defmodule Browser.Layout do
     %{st | lmax: max(st.lmax, line_px(style))}
   end
 
+  # the narrowest room that keeps the number of lines: the lines of each run of text between
+  # blocks and forced breaks are then the evenest the text allows. Only where lines may wrap
+  # does the room shrink: the box and the alignment keep their width.
+  defp op({:balance, inner}, st) do
+    inner
+    |> tail_extents()
+    |> balance_runs()
+    |> Enum.reduce(st, fn
+      {:run, run}, st -> balance_run(st, run)
+      {:ops, ops}, st -> Enum.reduce(ops, st, &op/2)
+    end)
+  end
+
   defp op({:inline_close, ref, spec}, st) do
     st = strut_for_empty(st, ref, spec)
     right = spec.pr + spec.br
@@ -4236,6 +4264,90 @@ defmodule Browser.Layout do
   # them (the strut)
   # (only a line height taller than the font's own counts: the font metrics are approximate, so
   # a strut of the normal height would move pictures)
+  # the runs of text that belong to the block itself, between its forced breaks and the blocks
+  # inside it (the text of those is theirs); the rest as it is
+  defp balance_runs(ops) do
+    {parts, cur, _depth} =
+      Enum.reduce(ops, {[], [], 0}, fn op, {parts, cur, depth} ->
+        kind = elem(op, 0)
+
+        depth =
+          cond do
+            kind in [:inset, :box_start] -> depth + 1
+            kind in [:inset_end, :box_end] -> depth - 1
+            true -> depth
+          end
+
+        inline? = balance_inline?(op) and depth == 0
+
+        case cur do
+          [{inl, _} | _] when inl == inline? -> {parts, [{inline?, op} | cur], depth}
+          _ -> {flush_balance_part(parts, cur), [{inline?, op}], depth}
+        end
+      end)
+
+    Enum.reverse(flush_balance_part(parts, cur))
+  end
+
+  defp flush_balance_part(parts, []), do: parts
+
+  defp flush_balance_part(parts, cur) do
+    ops = cur |> Enum.map(&elem(&1, 1)) |> Enum.reverse()
+    [{inline_part(cur), ops} | parts]
+  end
+
+  defp inline_part([{inl, _} | _] = cur),
+    do: if(inl and Enum.any?(cur, &(elem(elem(&1, 1), 0) == :word)), do: :run, else: :ops)
+
+  defp balance_inline?(op),
+    do: elem(op, 0) in [:word, :space, :inline_open, :inline_close, :pos_inline, :pos_end]
+
+  defp balance_run(st, run) do
+    avail = max(st.width - 2 * st.margin - st.left - st.right - st.fr, 1)
+    n = balance_line_count(st, run, avail)
+
+    # (floats beside the lines change how wide each is: left as they are)
+    if n < 2 or Enum.any?(st.floats, &(&1.y1 > st.y)) do
+      Enum.reduce(run, st, &op/2)
+    else
+      # (no narrower than the longest word: a word that may break anywhere does not count)
+      longest =
+        run
+        |> Enum.map(fn
+          {:word, text, style} -> st.measure.(text, style)
+          {:word, text, style, _} -> st.measure.(text, style)
+          _ -> 0
+        end)
+        |> Enum.max()
+
+      narrow =
+        balance_width(min(max(longest, 1), avail), avail, fn w ->
+          balance_line_count(st, run, w) <= n
+        end)
+
+      st = Enum.reduce(run, %{st | bal: avail - narrow}, &op/2)
+      %{st | bal: 0}
+    end
+  end
+
+  defp balance_line_count(st, ops, width) do
+    sub = run(ops, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+
+    sub
+    |> finalize()
+    |> Enum.filter(&(&1.type == :text))
+    |> Enum.map(& &1.y)
+    |> Enum.uniq()
+    |> length()
+  end
+
+  defp balance_width(lo, hi, _fits?) when lo >= hi, do: hi
+
+  defp balance_width(lo, hi, fits?) do
+    mid = div(lo + hi, 2)
+    if fits?.(mid), do: balance_width(lo, mid, fits?), else: balance_width(mid + 1, hi, fits?)
+  end
+
   defp strut(%{line: [], lh: 0} = st, style) do
     lf = content_factor(style)
     px = line_px(style)
@@ -4256,7 +4368,8 @@ defmodule Browser.Layout do
     st = if st.line == [], do: st |> apply_gap() |> start_atom_line(atom, line_left), else: st
 
     st =
-      if st.line != [] and st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr and
+      if st.line != [] and
+           st.x + space_w + atom.w > st.width - st.margin - st.right - st.fr - st.bal and
            not glued_before?(st, space_w) do
         st |> wrap_flush() |> apply_gap() |> start_atom_line(atom, line_left)
       else
@@ -6011,7 +6124,7 @@ defmodule Browser.Layout do
     space_w =
       if st.pending_space && st.line != [], do: st.measure.(" ", st.pending_space), else: 0
 
-    room = st.width - st.margin - st.right - st.fr - st.x - space_w
+    room = st.width - st.margin - st.right - st.fr - st.bal - st.x - space_w
     segs = String.split(text, "\u00AD")
 
     cond do
@@ -6078,7 +6191,7 @@ defmodule Browser.Layout do
     mode = if mode == :word and Process.get(:layout_intrinsic), do: :none, else: mode
     mode = if mode == :anywhere, do: :word, else: mode
     mode = if mode == :every, do: :all, else: mode
-    right = st.width - st.margin - st.right - st.fr
+    right = st.width - st.margin - st.right - st.fr - st.bal
     space_w = if st.line == [], do: 0, else: space_w
 
     cond do
@@ -6176,7 +6289,7 @@ defmodule Browser.Layout do
       cond do
         st.line == [] or nowrap? or hang == w or glued_after?(st, text, space_w) or
             st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
-              st.width - st.margin - st.right - st.fr ->
+              st.width - st.margin - st.right - st.fr - st.bal ->
           st
 
         # no space between this word and what comes before: they only break before all of it
@@ -6296,7 +6409,7 @@ defmodule Browser.Layout do
     w = st.measure.(text, style)
 
     if text != "" and String.trim(text, "\u00A0") == "" and
-         st.x + w > st.width - st.margin - st.right - st.fr,
+         st.x + w > st.width - st.margin - st.right - st.fr - st.bal,
        do: w,
        else: ideographic_hang(text, style, st)
   end
