@@ -37,8 +37,13 @@ jobs:
   # passed in test262.baseline must keep passing. `mix js.test262 --update` records progress.
   # On a pull request that touches nothing the runtime depends on the job still runs (so the
   # check always reports) but skips its slow steps.
-  test262:
+  test262-shard:
+    name: test262 (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +68,16 @@ jobs:
           otp-version: "29"
           version-type: loose
 
+      - name: Cache deps and build
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: build-${{ runner.os }}-${{ hashFiles('mix.lock', 'lib/**') }}
+          restore-keys: build-${{ runner.os }}-
+
       - name: Cache the test262 checkout
         if: steps.scope.outputs.run == 'true'
         uses: actions/cache@v4
@@ -75,13 +90,18 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         # a shared runner is several times slower than a laptop: the 65536-iteration eval tests
         # take about 5 s here and passed the default 10 s only just
-        run: mix js.test262 --fetch --check --timeout 30000
+        run: mix js.test262 --fetch --check --timeout 30000 --shard ${{ matrix.shard }}/4
 
   # The layout and paint engine against the WPT reftests: a test that passed in
   # reftest.baseline must keep passing. `mix reftest --update` records progress. A pull request
   # that only touches the JavaScript runtime or documentation skips the slow steps.
-  reftest:
+  reftest-shard:
+    name: reftest (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,6 +126,16 @@ jobs:
           otp-version: "29"
           version-type: loose
 
+      - name: Cache deps and build
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: build-${{ runner.os }}-${{ hashFiles('mix.lock', 'lib/**') }}
+          restore-keys: build-${{ runner.os }}-
+
       - name: Cache the WPT checkout
         if: steps.scope.outputs.run == 'true'
         uses: actions/cache@v4
@@ -116,4 +146,21 @@ jobs:
 
       - name: Run the reftests and compare with the baseline
         if: steps.scope.outputs.run == 'true'
-        run: mix reftest --fetch --check
+        run: mix reftest --fetch --check --shard ${{ matrix.shard }}/3
+
+  # One check per suite with the old names, so a branch protection rule that requires
+  # `test262` or `reftest` keeps working. `if: always()` so that a failed or cancelled shard
+  # fails the check instead of leaving it skipped (a skipped required check passes).
+  test262:
+    if: always()
+    needs: test262-shard
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test262-shard.result }}" = success
+
+  reftest:
+    if: always()
+    needs: reftest-shard
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.reftest-shard.result }}" = success
