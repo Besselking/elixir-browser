@@ -28,11 +28,14 @@ defmodule Browser.JS.Resolve.Info do
     A dynamic function contains a direct `eval` or a `with`, or sits inside one.
   - `params`: `:plain` (names only), `:patterns` (a pattern or a rest
     parameter, no initializer) or `:exprs` (an initializer).
-  - `nparams`: the number of parameter positions. `rest?`: the last parameter
-    is a rest parameter.
+  - `nparams`: the number of parameter positions, the rest parameter not
+    counted. `rest?`: the last parameter is a rest parameter.
   - `size`: the size of the frame tuple, header included.
   - `slots`: name or hidden atom to slot index. A name-based lookup on a frame
-    reads this map. Block names are not in it.
+    reads this map. Block names are not in it. The arguments object sits
+    under the name `"arguments"`, or under the atom `:arguments` when the
+    body declares a function or a lexical of that name (the object is then
+    visible from the parameter defaults only).
   - `hidden`: the hidden slots in slot order: `:this`, `:args`, `:arguments`,
     `:new_target`, `:home`, `:ctor_fn`, `:self`.
   - `kinds`: a tuple with one element per frame position. Positions 1 to 5
@@ -40,7 +43,9 @@ defmodule Browser.JS.Resolve.Info do
     From position 6: `:param`, `:var`, `:fun`, `:let`, `:const`, `:class`,
     `:using`, `:hidden` or `:self`.
   - `template`: the initial values of the slots after the parameters and the
-    hidden slots, in slot order (`:undefined` or `:tdz`).
+    hidden slots, in slot order (`:undefined` or `:tdz`). The parameter slots
+    are not in it: a frame builder fills them from the arguments, and sets
+    them to `:tdz` first when `params` is `:exprs`.
   - `hoist`: `{slot, function_node}` pairs to instantiate at entry, in source
     order. The last pair for a slot wins.
   - `copies`: `{from, to}` slot pairs copied at body entry (a `var` that has a

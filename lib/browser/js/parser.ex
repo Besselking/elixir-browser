@@ -81,11 +81,11 @@ defmodule Browser.JS.Parser do
         if Keyword.get(opts, :module, false) and Process.get(:lex_esc_await),
           do: throw({:syntax, "an escaped await is not allowed in a module"})
 
-        Process.put(
-          :js_strict,
+        strict? =
           use_strict?(tokens) or Keyword.get(opts, :module, false) or
             Keyword.get(opts, :strict, false)
-        )
+
+        Process.put(:js_strict, strict?)
 
         Process.put(:js_priv_refs, [])
         Process.put(:js_module, Keyword.get(opts, :module, false))
@@ -118,7 +118,9 @@ defmodule Browser.JS.Parser do
 
         if eval?, do: check_eval_context(program, opts)
 
-        {:ok, {:program, program}}
+        # the resolver runs here so that every caller gets it; with the level `:off` (the
+        # default) it hands the program back untouched
+        {:ok, Browser.JS.Resolve.maybe({:program, program}, opts, strict?)}
       catch
         {:syntax, msg} -> {:error, msg}
       end

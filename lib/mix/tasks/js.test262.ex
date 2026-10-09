@@ -35,6 +35,8 @@ defmodule Mix.Tasks.Js.Test262 do
       several machines. With `--check` only the baseline entries of that part are compared;
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found (a quick look)
+    * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info`, `1`,
+      `2`, `3` or `4` (see `Browser.JS.Resolve`)
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -92,13 +94,19 @@ defmodule Mix.Tasks.Js.Test262 do
           jobs: :integer,
           shard: :string,
           limit: :integer,
-          timings: :string
+          timings: :string,
+          resolve: :string
         ],
         aliases: [v: :verbose]
       )
 
     root = Path.expand(opts[:dir] || @default_dir)
     baseline_file = opts[:baseline] || @default_baseline
+
+    # the resolver level for every parse of the run: the harness is parsed in this process
+    # and each test in a spawned one, so a process key would not reach them
+    if opts[:resolve],
+      do: Application.put_env(:browser, :js_resolve, resolve_level(opts[:resolve]))
 
     paths =
       if paths == [], do: @default_paths, else: Enum.map(paths, &String.trim_trailing(&1, "/"))
@@ -154,6 +162,13 @@ defmodule Mix.Tasks.Js.Test262 do
     if timings, do: report_timings(timings, opts[:timings])
     baseline(results, paths, baseline_file, opts)
   end
+
+  defp resolve_level("off"), do: :off
+  defp resolve_level("info"), do: :info
+  defp resolve_level(n) when n in ["1", "2", "3", "4"], do: String.to_integer(n)
+
+  defp resolve_level(other),
+    do: Mix.raise("--resolve takes off, info, 1, 2, 3 or 4, not #{other}")
 
   # ── fetching ───────────────────────────────────────────────
 
