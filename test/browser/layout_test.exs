@@ -7679,6 +7679,15 @@ defmodule Browser.LayoutTest do
       assert Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0})).h == 100
     end
 
+    test "the only line of a row is held to the max-height of its container" do
+      html =
+        ~s|<style>body{margin:0}.o{display:flex;width:100px;max-height:100px;background:green}.n{display:flex;width:100px;align-items:flex-end;background:red}</style><div class="o"><div class="n"><div style="width:100px;max-height:100%;background:green"><div style="height:999px"></div></div></div></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      assert Enum.find(laid, &(&1.type == :rect and &1.color == {255, 0, 0})).h == 100
+    end
+
     test "shrink factors under one only take their share of the overflow" do
       widths =
         flex_widths(

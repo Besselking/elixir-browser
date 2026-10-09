@@ -8486,6 +8486,12 @@ defmodule Browser.Layout do
         do: round(min_cross),
         else: sized |> Enum.map(&(&1.h + &1.boff)) |> Enum.max() |> max(round(min_cross))
 
+    # (and a line that is alone is held to the container's `max-height`)
+    cross =
+      if single? and is_number(cs.maxh),
+        do: max(min(cross, round(cs.maxh)), round(min_cross)),
+        else: cross
+
     {placed, _x} =
       Enum.map_reduce(sized, start, fn it, x ->
         it = flex_stretch(st, it, cs.align, cross)
