@@ -273,6 +273,32 @@ defmodule Browser.Layout do
 
   defp table_beside_floats(_st, _sub, _spec, _avail, first), do: first
 
+  defp pending_space_w(%{pending_space: nil}), do: 0
+  defp pending_space_w(st), do: st.measure.(" ", st.pending_space)
+
+  # the first and the last box of an inline: {l, r, t, b} each
+  defp add_fragment(frag, origin, _st, right, top, bottom, left) do
+    # (the space before the inline counts when something of it follows on the line)
+    start = if right > origin.x, do: origin.x + origin.space, else: origin.x
+    left = if frag == nil, do: max(left, start), else: left
+    top = if frag == nil, do: max(top, origin.y), else: top
+    box = {left, right, top, bottom}
+
+    case frag do
+      nil -> {box, box}
+      {first, _} -> {first, box}
+    end
+  end
+
+  # the box a fragmented inline's absolute children are placed against: from the first box's start
+  # corner to the last box's end corner
+  defp fragments_box(nil, origin), do: %{x: origin.x, y: origin.y, w: 0, h: 0}
+
+  defp fragments_box({{fl, fr, ft, _}, {ll, lr, _, lb}}, origin) do
+    {x0, x1} = if origin.rtl, do: {ll, fr}, else: {fl, lr}
+    %{x: x0, y: ft, w: max(x1 - x0, 0), h: max(lb - ft, 0)}
+  end
+
   # -- focus -----------------------------------------------------------------------
 
   @ring_color {26, 115, 232}
@@ -791,7 +817,14 @@ defmodule Browser.Layout do
             abs_ops(el, style, c, acc)
 
           c["position"] == "relative" ->
-            rel = %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+            rel = %{
+              top: c["top"],
+              bottom: c["bottom"],
+              left: c["left"],
+              right: c["right"],
+              rtl: style.rtl
+            }
+
             acc = [{:pos_inline, rel} | acc]
             [{:pos_end} | ops.(acc)]
 
@@ -1717,7 +1750,13 @@ defmodule Browser.Layout do
 
     rel =
       if c["position"] == "relative",
-        do: %{top: c["top"], bottom: c["bottom"], left: c["left"], right: c["right"]}
+        do: %{
+          top: c["top"],
+          bottom: c["bottom"],
+          left: c["left"],
+          right: c["right"],
+          rtl: style.rtl
+        }
 
     acc = if positioned?, do: [{:pos_inline, rel} | acc], else: acc
 
@@ -4269,7 +4308,42 @@ defmodule Browser.Layout do
         do: {st.margin + st.left, st.y + st.gap + st.ngap},
         else: {st.x, st.y}
 
-    push_pos(st, %{x: x, y: y, w: max(st.width - st.margin - st.right - x, 0), h: nil})
+    push_pos(st, %{
+      x: x,
+      y: y,
+      w: max(st.width - st.margin - st.right - x, 0),
+      h: nil,
+      inline: true,
+      space: if(st.line == [], do: 0, else: pending_space_w(st)),
+      rtl: (rel && Map.get(rel, :rtl, false)) || false,
+      ref: make_ref(),
+      frag: nil
+    })
+  end
+
+  defp op({:pos_end}, %{pos: [%{inline: true} = origin | _]} = st) do
+    st = %{st | pos: tl(st.pos), rels: tl(st.rels)}
+    {mine, rest} = Enum.split_with(st.deferred, fn {ref, _, _} -> ref == origin.ref end)
+
+    # the containing block of an absolute box in an inline is the box around all of its fragments
+    frag =
+      if st.line == [] do
+        origin.frag
+      else
+        shift = static_shift(Enum.reverse(st.line), st)
+        first_x = (st.line |> Enum.map(& &1.x) |> Enum.min()) + shift
+        last_x = (st.line |> Enum.map(&(&1.x + &1.w)) |> Enum.max()) + shift
+
+        add_fragment(origin.frag, origin, st, last_x, st.y, st.y + max(st.lmax, st.lh), first_x)
+      end
+
+    box = fragments_box(frag, origin)
+
+    mine
+    |> Enum.reverse()
+    |> Enum.reduce(%{st | deferred: rest}, fn {_, sub, spec}, acc ->
+      place_absolute(acc, sub, spec, box)
+    end)
   end
 
   defp op({:pos_end}, st), do: %{st | pos: tl(st.pos), rels: tl(st.rels)}
@@ -4293,7 +4367,8 @@ defmodule Browser.Layout do
     # `bottom` and a percentage `top` need the containing box's height, known only once it closes
     needs_height? = (spec.bottom && !spec.top) || match?({:pct, _}, spec.top)
 
-    if needs_height? && is_nil(origin.h) && Map.get(origin, :ref) do
+    if (needs_height? && is_nil(origin.h) && Map.get(origin, :ref)) ||
+         (Map.get(origin, :inline) && (spec.top || spec.bottom) && (spec.left || spec.right)) do
       %{st | deferred: [{origin.ref, sub, spec} | st.deferred]}
     else
       place_absolute(st, sub, spec, origin)
@@ -6895,6 +6970,22 @@ defmodule Browser.Layout do
     # `boxes` is already newest-first like st.rects
     inline_rects = Enum.reverse(inline_rects) ++ boxes
 
+    # (the lines of the relatively positioned inlines around, for their absolute children)
+    pos =
+      Enum.map(st.pos, fn
+        %{inline: true} = origin ->
+          first_x = (st.line |> Enum.map(& &1.x) |> Enum.min(fn -> st.indent end)) + shift
+          last_x = (st.line |> Enum.map(&(&1.x + &1.w)) |> Enum.max(fn -> st.indent end)) + shift
+
+          %{
+            origin
+            | frag: add_fragment(origin.frag, origin, st, last_x, st.y, st.y + line_h, first_x)
+          }
+
+        origin ->
+          origin
+      end)
+
     # (what a line holds paints as inline content: above the backgrounds of the blocks, whatever
     # their order in the page)
     %{
@@ -6904,6 +6995,7 @@ defmodule Browser.Layout do
         rects: Enum.reverse(rects) ++ st.rects,
         nr: st.nr + length(rects),
         line: [],
+        pos: pos,
         y: st.y + line_h,
         strut: nil,
         lh: 0,

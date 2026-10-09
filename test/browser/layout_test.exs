@@ -7861,4 +7861,20 @@ defmodule Browser.LayoutTest do
       assert cap.x == 0
     end
   end
+
+  describe "absolute box in a relatively positioned inline" do
+    test "is placed against the box around its fragments" do
+      html =
+        ~s|<style>body{margin:0;font:20px monospace}.rel{position:relative}.c{position:absolute;inset:0;background:green}</style>XX <span class="rel">XXXX<br>XXXXXXXX<br>XXXXXXXX<span class="c"></span></span>|
+
+      page = Browser.Page.build(html, "about:home")
+      {laid, _} = Layout.layout(page.nodes, 800, &measure/2, 768, margin: 0)
+      box = Enum.find(laid, &(&1.type == :rect and &1.color == {0, 128, 0}))
+      first = Enum.find(laid, &(&1.type == :text and &1.text == "XXXX"))
+      last = Enum.filter(laid, &(&1.type == :text and &1.text == "XXXXXXXX")) |> List.last()
+      assert box.x == first.x
+      assert box.x + box.w == last.x + last.w
+      assert box.h > 0
+    end
+  end
 end

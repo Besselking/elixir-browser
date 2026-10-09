@@ -4651,6 +4651,8 @@ css/css-multicol/spanner-fragmentation-007.html
 css/css-multicol/subpixel-column-rule-width.tentative.html
 css/css-multicol/table/multicol-table-cell-height-001.xht
 css/css-multicol/table/table-cell-multicol-nested-003.html
+css/css-position/multicol/vlr-ltr-ltr-in-multicols.html
+css/css-position/multicol/vrl-ltr-ltr-in-multicols.html
 css/css-position/nested-inline-abspos-child-with-siblings.html
 css/css-position/nested-inline-abspos-child.html
 css/css-position/position-absolute-center-003.html
@@ -4661,6 +4663,16 @@ css/css-position/position-absolute-fieldset.html
 css/css-position/position-absolute-fit-content.html
 css/css-position/position-absolute-in-inline-003.html
 css/css-position/position-absolute-in-inline-004.html
+css/css-position/position-absolute-in-inline-005.html
+css/css-position/position-absolute-in-inline-006.html
+css/css-position/position-absolute-in-inline-007a.html
+css/css-position/position-absolute-in-inline-007b.html
+css/css-position/position-absolute-in-inline-008a.html
+css/css-position/position-absolute-in-inline-008b.html
+css/css-position/position-absolute-in-inline-009.html
+css/css-position/position-absolute-in-inline-010.html
+css/css-position/position-absolute-in-inline-011.html
+css/css-position/position-absolute-in-inline-012.html
 css/css-position/position-absolute-in-inline-margin-top.html
 css/css-position/position-absolute-large-negative-inset.html
 css/css-position/position-absolute-multicol-001.html
