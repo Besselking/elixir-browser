@@ -913,8 +913,13 @@ defmodule Browser.Layout do
 
   defp trim_run(m, true, kids, idx, side) do
     {empty, rest} = Enum.split_while(idx, &self_collapsing?(Enum.at(kids, &1)))
-    items = if rest == [], do: empty, else: empty ++ [hd(rest)]
-    Enum.reduce(items, m, &add_trim(&2, true, &1, side))
+    # (a self-collapsing box has no margin of its own: its top and bottom both run through it)
+    m =
+      Enum.reduce(empty, m, fn i, m ->
+        m |> add_trim(true, i, :top) |> add_trim(true, i, :bottom)
+      end)
+
+    if rest == [], do: m, else: add_trim(m, true, hd(rest), side)
   end
 
   defp self_collapsing?({:element, _, attrs, sub}) do

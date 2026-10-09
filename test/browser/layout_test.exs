@@ -7586,4 +7586,16 @@ defmodule Browser.LayoutTest do
       assert yellow.y == 0
     end
   end
+
+  describe "margin-trim with self-collapsing children" do
+    test "trailing empty boxes lose their margins on both sides" do
+      html =
+        ~s|<style>body{margin:0}</style><div style="margin-trim:block-end;border:solid green;background:red"><div style="height:94px;background:green"></div><div style="margin-top:222px"></div><div style="margin-top:222px"></div></div><div style="height:10px;background:blue"></div>|
+
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 768, margin: 0)
+      blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+      assert blue.y == 100
+    end
+  end
 end
