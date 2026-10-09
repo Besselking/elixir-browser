@@ -22,6 +22,9 @@ defmodule Mix.Tasks.Reftest do
     * `--dump DIR` - save the two pictures of every failing pair there, as `.ppm` files
     * `--timeout MS` - per test, default 10000
     * `--jobs N` - parallel tests, default the number of schedulers
+    * `--shard N/M` - run only part N of M (1-based) of the tests, for splitting a run over
+      several machines. With `--check` only the baseline entries of that part are compared;
+      `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found
   """
   use Mix.Task
@@ -64,6 +67,7 @@ defmodule Mix.Tasks.Reftest do
           dump: :string,
           timeout: :integer,
           jobs: :integer,
+          shard: :string,
           limit: :integer
         ],
         aliases: [v: :verbose]
@@ -89,6 +93,10 @@ defmodule Mix.Tasks.Reftest do
 
     files = Reftest.collect(root, paths)
     files = if opts[:limit], do: Enum.take(files, opts[:limit]), else: files
+
+    shard = if opts[:shard], do: Browser.Shard.parse!(opts[:shard])
+    if shard && opts[:update], do: Mix.raise("--update needs the whole suite: drop --shard")
+    files = if shard, do: Browser.Shard.take(files, shard), else: files
 
     if files == [] do
       Mix.raise("no tests found under #{Enum.join(paths, ", ")} (try --fetch)")
@@ -239,7 +247,12 @@ defmodule Mix.Tasks.Reftest do
         Mix.shell().info("Baseline #{file} updated: #{length(new)} passing tests.")
 
       opts[:check] ->
-        expected = file |> read_baseline() |> Enum.filter(&in_scope?(&1, paths))
+        expected =
+          file
+          |> read_baseline()
+          |> Enum.filter(&in_scope?(&1, paths))
+          |> Enum.filter(&(opts[:shard] == nil or Map.has_key?(results, &1)))
+
         regressed = for t <- expected, Map.get(results, t) != :pass, do: t
         gained = passing -- expected
 

@@ -31,6 +31,9 @@ defmodule Mix.Tasks.Js.Test262 do
     * `--jobs N` - parallel tests, default the number of schedulers
     * `--timings FILE` - write how long each test took (ms, path) to a file, slowest first, and
       print the slowest tests and the time per directory
+    * `--shard N/M` - run only part N of M (1-based) of the tests, for splitting a run over
+      several machines. With `--check` only the baseline entries of that part are compared;
+      `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found (a quick look)
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
@@ -87,6 +90,7 @@ defmodule Mix.Tasks.Js.Test262 do
           all_features: :boolean,
           timeout: :integer,
           jobs: :integer,
+          shard: :string,
           limit: :integer,
           timings: :string
         ],
@@ -111,6 +115,10 @@ defmodule Mix.Tasks.Js.Test262 do
     # the paths may be outside the default sparse set
     files = Test262.collect(root, paths)
     files = if opts[:limit], do: Enum.take(files, opts[:limit]), else: files
+
+    shard = if opts[:shard], do: Browser.Shard.parse!(opts[:shard])
+    if shard && opts[:update], do: Mix.raise("--update needs the whole suite: drop --shard")
+    files = if shard, do: Browser.Shard.take(files, shard), else: files
 
     if files == [] do
       Mix.raise(
@@ -310,7 +318,12 @@ defmodule Mix.Tasks.Js.Test262 do
         Mix.shell().info("Baseline #{file} updated: #{length(new)} passing tests.")
 
       opts[:check] ->
-        expected = file |> read_baseline() |> Enum.filter(&in_scope?(&1, paths))
+        expected =
+          file
+          |> read_baseline()
+          |> Enum.filter(&in_scope?(&1, paths))
+          |> Enum.filter(&(opts[:shard] == nil or Map.has_key?(results, &1)))
+
         regressed = for t <- expected, Map.get(results, t) != :pass, do: t
         gained = passing -- expected
 
