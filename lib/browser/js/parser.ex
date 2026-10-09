@@ -485,13 +485,15 @@ defmodule Browser.JS.Parser do
   end
 
   defp module_statements(ts) do
+    line = start_line(ts)
     {stmt, rest} = module_item(ts)
-    posted(ts, stmt) ++ statements(rest)
+    posted(line, stmt) ++ statements(rest)
   end
 
   defp script_statements(ts) do
+    line = start_line(ts)
     {stmt, rest} = statement(ts)
-    posted(ts, stmt) ++ statements(rest)
+    posted(line, stmt) ++ statements(rest)
   end
 
   # ── statements ─────────────────────────────────────────────
@@ -1073,16 +1075,20 @@ defmodule Browser.JS.Parser do
   # `[stmt]`, or `[{:pos, {file, line}}, stmt]` when the script has a file name: running the
   # `:pos` node tells the interpreter where it is, for the lines of error stacks. A statement on
   # the line of the one before it in the same block, and statements that cannot fail, get none.
-  defp posted(ts, stmt) do
+  defp posted(line, stmt) do
     with file when file != nil <- Process.get(:js_file),
          true <- positioned?(stmt),
-         line when line != nil <- line_of(ts),
+         line when line != nil <- line,
          true <- Process.put(:js_pos_line, line) != line do
       [{:pos, {file, line}}, stmt]
     else
       _ -> [stmt]
     end
   end
+
+  # the line is asked for before the statement is parsed: the position it is counted from only
+  # moves forward, and a statement's own parts would take it past the start of the statement
+  defp start_line(ts), do: if(Process.get(:js_file), do: line_of(ts))
 
   defp positioned?({:empty}), do: false
   defp positioned?({:block, _}), do: false
@@ -1518,11 +1524,12 @@ defmodule Browser.JS.Parser do
 
   defp case_body(ts, acc) do
     if acc == [], do: Process.put(:js_pos_line, nil)
+    line = start_line(ts)
     {stmt, rest} = statement(ts)
 
     if using_decl?(stmt), do: throw({:syntax, "using declaration in a case clause"})
 
-    case_body(rest, Enum.reverse(posted(ts, stmt), acc))
+    case_body(rest, Enum.reverse(posted(line, stmt), acc))
   end
 
   defp block_body([{:p, "}", _} | ts], acc) do
@@ -1536,8 +1543,9 @@ defmodule Browser.JS.Parser do
   defp block_body(ts, acc) do
     # the first statement of a block always says where it is (see `posted/2`)
     if acc == [], do: Process.put(:js_pos_line, nil)
+    line = start_line(ts)
     {stmt, rest} = statement(ts)
-    block_body(rest, Enum.reverse(posted(ts, stmt), acc))
+    block_body(rest, Enum.reverse(posted(line, stmt), acc))
   end
 
   # automatic semicolon insertion
