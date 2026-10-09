@@ -10143,9 +10143,19 @@ defmodule Browser.Layout do
     y = Enum.reduce(st.floats, y, &max(&1.y0, &2))
     {fl, fr} = float_offsets(st, y, y + max(h, 1))
     overlapping = Enum.filter(st.floats, &(&1.y0 < y + max(h, 1) and &1.y1 > y))
+    x = if side == :left, do: left + fl, else: right - fr - w
 
-    if overlapping == [] or w <= right - fr - (left + fl) do
-      x = if side == :left, do: left + fl, else: right - fr - w
+    # (a float too wide for its container still goes here when the floats beside it are all
+    # outside the container, and clear of the space it takes)
+    clear_beside? =
+      right > left and
+        Enum.all?(
+          overlapping,
+          &(&1.side != side and (&1.x0 >= right or &1.x1 <= left) and
+              (&1.x0 >= x + w or &1.x1 <= x))
+        )
+
+    if overlapping == [] or w <= right - fr - (left + fl) or clear_beside? do
       {x, y}
     else
       # below the lowest edge of the floats in the way, and look again

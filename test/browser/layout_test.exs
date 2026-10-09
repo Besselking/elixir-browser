@@ -4611,6 +4611,18 @@ defmodule Browser.LayoutTest do
     assert green.h == 100
   end
 
+  test "a float wider than its container stays at the top beside an outside float of the other side" do
+    page =
+      Browser.Page.build(
+        ~s|<div style="float:left;width:500px;height:500px"><div style="float:right;width:50px;height:300px"></div><div style="margin-right:100px"><div style="float:left;width:425px;height:10px;background:#00f"></div></div></div>|,
+        "about:home"
+      )
+
+    {items, _} = Layout.layout(page.nodes, 800, &measure/2, 600, margin: 0)
+    blue = Enum.find(items, &(&1.type == :rect and &1.color == {0, 0, 255}))
+    assert blue.y == 8
+  end
+
   defp word_x(items, text), do: Enum.find_value(items, &(&1[:text] == text && &1.x))
 
   test "a tab in preformatted text advances to the next multiple of 8 columns" do
