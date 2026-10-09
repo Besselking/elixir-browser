@@ -1093,6 +1093,16 @@ defmodule Browser.JS.DOM do
     set_scroll(sx, sy)
   end
 
+  @doc "The tab of the page was put behind another (or is shown again): the document hears `visibilitychange`."
+  def set_hidden(hidden?) do
+    if Process.get(:js_hidden, false) != hidden? do
+      Process.put(:js_hidden, hidden?)
+      dispatch(document(), "visibilitychange", %{bubbles: true, cancelable: false})
+    end
+
+    :ok
+  end
+
   @doc "The window scrolled (or a script asked it to): the position scripts read."
   def set_scroll(x, y) do
     x = x * 1.0
@@ -1154,7 +1164,8 @@ defmodule Browser.JS.DOM do
     now = System.monotonic_time(:millisecond)
     {last_rev, last_end, cost} = Process.get(:dom_forced, {nil, nil, 0})
 
-    if info[:layout_now] && rev != last_rev && (last_end == nil or now - last_end >= 4 * cost) do
+    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev &&
+         (last_end == nil or now - last_end >= 4 * cost) do
       raw = Enum.map(node(st().main).kids, &export/1)
       ref = make_ref()
       send(info.owner, {:layout_now, self(), ref, raw})
@@ -2087,10 +2098,10 @@ defmodule Browser.JS.DOM do
         {:ok, if(s.design_mode, do: "on", else: "off")}
 
       "hidden" ->
-        {:ok, false}
+        {:ok, Process.get(:js_hidden, false)}
 
       "visibilityState" ->
-        {:ok, "visible"}
+        {:ok, if(Process.get(:js_hidden, false), do: "hidden", else: "visible")}
 
       _ ->
         :miss

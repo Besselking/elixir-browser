@@ -50,6 +50,13 @@ defmodule Browser.JS.Runtime do
   def layout(pid, rects, scroll_x, scroll_y, content),
     do: send(pid, {:layout, rects, scroll_x, scroll_y, content})
 
+  @doc """
+  The tab of the page is shown (`true`) or put behind another (`false`): `document.hidden` and
+  `visibilityState` change and the page gets `visibilitychange`. A page that is hidden has its
+  timers run at most once a second.
+  """
+  def visible(pid, visible?), do: send(pid, {:visible, visible?})
+
   @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
   def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
 
@@ -153,6 +160,7 @@ defmodule Browser.JS.Runtime do
     DOM.init(raw, info)
     DOM.install(scope)
     Process.put(:rt_info, info)
+    Process.put(:js_hidden, info[:hidden] == true)
     Browser.JS.WebAPI.install(scope, &http/1)
     Browser.JS.Editing.install(scope)
     Browser.JS.WebAssembly.install(scope)
@@ -279,7 +287,7 @@ defmodule Browser.JS.Runtime do
     wait =
       case Builtins.next_timer_at() do
         nil -> :infinity
-        at -> max(trunc(at - elapsed(t0)), 0)
+        at -> max(trunc(at - elapsed(t0)), throttle_wait(t0))
       end
 
     receive do
@@ -330,6 +338,16 @@ defmodule Browser.JS.Runtime do
 
       {:idb, :versionchange, _, _, _, _, _} = msg ->
         idb_message(t0, msg)
+        loop(t0)
+
+      {:visible, visible?} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        guard(fn -> DOM.set_hidden(not visible?) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
       {:scrolled, x, y} ->
@@ -391,6 +409,19 @@ defmodule Browser.JS.Runtime do
     end
   end
 
+  # A page that is hidden gets its timers once a second at most, however busy they are: the
+  # time that is left before the second since they last ran is up (0 for a page that is shown).
+  @hidden_interval_ms 1_000
+
+  defp throttle_wait(t0) do
+    with true <- Process.get(:js_hidden, false),
+         last when is_float(last) <- Process.get(:js_last_fire) do
+      max(trunc(last + @hidden_interval_ms - elapsed(t0)), 0)
+    else
+      _ -> 0
+    end
+  end
+
   defp elapsed(t0), do: (System.monotonic_time(:millisecond) - t0) * 1.0
 
   # the timers that have come due run, then whatever they changed goes to the session
@@ -398,6 +429,7 @@ defmodule Browser.JS.Runtime do
     now = elapsed(t0)
     Process.put(:js_now, now)
     Process.put(:js_steps, @steps)
+    Process.put(:js_last_fire, now)
 
     # a slice is bounded, so that events (clicks) are served between the slices of a task
     # that keeps rescheduling itself, as a browser's event loop does
