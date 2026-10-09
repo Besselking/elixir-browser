@@ -1990,6 +1990,10 @@ defmodule Browser.Style do
       Regex.match?(~r/\A\+?(\d+\.?\d*|\.\d+)\z/, v) ->
         {:ok, {:num, to_float(v)}}
 
+      # (a negative zero is zero)
+      Regex.match?(~r/\A-0*\.?0*%?\z/, v) and Regex.match?(~r/0/, v) ->
+        {:ok, {:px, 0.0}}
+
       m = Regex.run(~r/\A\+?(\d+\.?\d*|\.\d+)%\z/, v) ->
         {:ok, {:px, env.fs * to_float(Enum.at(m, 1)) / 100}}
 

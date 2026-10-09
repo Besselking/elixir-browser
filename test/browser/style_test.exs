@@ -685,6 +685,10 @@ defmodule Browser.StyleTest do
   describe "line-height" do
     defp lhv(css, html \\ "<p>a</p>", tag \\ "p"), do: comp(html, css, tag)["line-height"]
 
+    test "a negative zero is zero" do
+      assert lhv("p { line-height: -0% }") == {:px, 0.0}
+    end
+
     test "normal, numbers, lengths and percentages" do
       assert lhv("p { line-height: normal }") == :normal
       assert lhv("p { line-height: 1.5 }") == {:num, 1.5}
