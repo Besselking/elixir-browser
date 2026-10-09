@@ -124,7 +124,29 @@ defmodule Browser.Color do
   # blend a channel over white
   defp blend(c, a), do: round(c * a + 255 * (1 - a))
 
+  # a page repeats a few colour strings over and over (a canvas sets one for every shape), so
+  # parsed ones are kept in the process dictionary, up to a limit
   defp raw(str) do
+    key = {:js_memo, {:color, str}}
+
+    case :erlang.get(key) do
+      :undefined ->
+        parsed = raw_parse(str)
+        n = :erlang.get({:js_memo, :color_n})
+
+        if n == :undefined or n < 4096 do
+          :erlang.put({:js_memo, :color_n}, if(n == :undefined, do: 1, else: n + 1))
+          :erlang.put(key, parsed)
+        end
+
+        parsed
+
+      parsed ->
+        parsed
+    end
+  end
+
+  defp raw_parse(str) do
     s = str |> String.trim() |> String.downcase()
 
     cond do
@@ -367,7 +389,10 @@ defmodule Browser.Color do
   end
 
   # CSS allows ".5" and "-.5", which Float.parse/1 rejects
-  defp leading_zero(num), do: Regex.replace(~r/\A([+-]?)\./, num, "\\g{1}0.")
+  defp leading_zero("." <> _ = num), do: "0" <> num
+  defp leading_zero("+." <> rest), do: "+0." <> rest
+  defp leading_zero("-." <> rest), do: "-0." <> rest
+  defp leading_zero(num), do: num
 
   defp hsl(h, s, l, a) when is_number(h) and is_number(s) and is_number(l) do
     h = :math.fmod(h, 360) / 360
