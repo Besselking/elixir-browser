@@ -672,6 +672,13 @@ defmodule Browser.JS.Runtime do
 
   # runs `fun`, turning a script's uncaught error into a console line
   defp guard(fun, default) do
+    result = guarded(fun, default)
+    # (check mode only: every call restored the call stack, also on a throw)
+    Interp.check_task_end()
+    result
+  end
+
+  defp guarded(fun, default) do
     fun.()
   rescue
     # a bug in a built-in must not take the page's scripts down with it

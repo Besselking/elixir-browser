@@ -39,6 +39,19 @@ defmodule Browser.JS.Interp do
 
   @max_depth 1000
 
+  @doc false
+  # The call depth of a chain in `:js_stack` (step 2f). The depth of the current call is in
+  # the head cell. Any other value is the bottom of the chain. This includes `:undefined` in
+  # a process that did not call `init/1`.
+  defmacro depth_of(chain) do
+    quote do
+      case unquote(chain) do
+        [{_, _, d} | _] -> d
+        _ -> 0
+      end
+    end
+  end
+
   # The position of the first slot in a frame tuple, after the five header elements. The
   # parameters come first, so argument `k` of a function with plain parameters is in slot
   # `@frame_base + k` (`Browser.JS.Resolve.Info`).
@@ -71,7 +84,9 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_heap_n, 0)
     :erlang.put(:js_next, 0)
     :erlang.put(:js_steps, max_steps)
-    :erlang.put(:js_depth, 0)
+    # The call chain of step 2f: one cell for each active call, with its depth. See
+    # `run_frame/6`.
+    :erlang.put(:js_stack, [])
     :erlang.put(:js_last, :undefined)
 
     # A fresh heap gives out the ids from 0 again, so the marks of `frame_done/2` from an
@@ -79,6 +94,9 @@ defmodule Browser.JS.Interp do
     # new frames with the same ids.
     if @check do
       for {{:js_cps_done, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      # (the oracle of the call stack, see `check_oracle/3`)
+      :erlang.put(:js_check_stack, [])
+      :erlang.put(:js_check_depth, 0)
     end
 
     # (the closure count starts here and only goes up, see `make_fn/3`)
@@ -241,20 +259,30 @@ defmodule Browser.JS.Interp do
   and line it was at (`at name (file:line)`) when the script has a file name.
   """
   def stack_string(header) do
-    stack = Process.get(:js_stack, [])
+    text = header <> walk(:erlang.get(:js_stack), pget(:js_pos), 0)
 
-    {frames, top} =
-      Enum.map_reduce(stack, Process.get(:js_pos), fn {name, call_pos}, loc ->
-        {frame_line(name, loc), call_pos}
-      end)
+    if @check do
+      old = check_stack_string(header)
+      if text != old, do: check_fail("the stack text #{inspect(text)} is not #{inspect(old)}")
+    end
 
-    frames = Enum.take(frames, 12)
-    # the script's own code, when it is in sight
-    frames =
-      if top != nil and length(stack) < 12, do: frames ++ [frame_line(nil, top)], else: frames
-
-    header <> Enum.join(frames)
+    text
   end
+
+  # One line for each visible cell of the chain, innermost first. The innermost function is
+  # at `:js_pos`. Every other function is at the call position of the cell above it. A
+  # hidden cell (the sync part of an async call) prints nothing and keeps the position,
+  # because an async call had no cell before step 2f. After 12 lines the walk stops and the
+  # line of the script is left out, as the text had at most 12 lines before step 2f.
+  defp walk([{:hidden, _, _} | below], loc, n), do: walk(below, loc, n)
+  defp walk(_, _loc, 12), do: ""
+
+  defp walk([{name, pos, _} | below], loc, n),
+    do: frame_line(name, loc) <> walk(below, pos, n + 1)
+
+  # (the bottom of the chain: the line of the script's own code, when it has a position)
+  defp walk(_, nil, _), do: ""
+  defp walk(_, top, _), do: frame_line(nil, top)
 
   defp frame_line(name, loc) do
     name =
@@ -343,7 +371,7 @@ defmodule Browser.JS.Interp do
 
   # ── frames ─────────────────────────────────────────────────
 
-  # A frame is a tuple `{parent_id, info, caller_id, call_pos, root_id, slot_6, ...}` in the
+  # A frame is a tuple `{parent_id, info, chain, call_pos, root_id, slot_6, ...}` in the
   # heap (see `Browser.JS.Resolve.Info`). The hop count of a slot form counts run-time
   # scopes: a frame hops to its parent through its header, a map scope through `.parent`.
   if @check do
@@ -731,6 +759,139 @@ defmodule Browser.JS.Interp do
     end
 
     :ok
+  end
+
+  @doc false
+  # Check mode only (C1, C3, C4 of step 2f). The oracle keeps the call stack as it was before
+  # step 2f, in keys of its own: `:js_check_stack` holds `{name, call_pos}` cells, and
+  # `:js_check_depth` counts the calls. An async call (`async? = true`) counts but pushes no
+  # cell. Each call entry runs its real code as `fun` inside the oracle. Before the call,
+  # the real depth and the head of the real stack must equal those of the oracle (C3). Every
+  # push is compared, so by induction the whole stacks are equal. After the call, the real
+  # stack and position must be as they were (C4). The oracle has its own `try/after` and
+  # does not share code with the real entries, so it cannot copy a mistake from them.
+  def check_oracle(name, async?, fun) do
+    ostack = Process.get(:js_check_stack, [])
+    odepth = Process.get(:js_check_depth, 0)
+    below = :erlang.get(:js_stack)
+    pos = Process.get(:js_pos)
+    check_entry(below, ostack, odepth)
+
+    if odepth >= @max_depth do
+      # The real entry must refuse the call before it pushes anything.
+      try do
+        fun.()
+      catch
+        {:js_error, _} = e ->
+          check_restored(below, pos, async?)
+          throw(e)
+      else
+        _ -> check_fail("a call at depth #{odepth} was not refused")
+      end
+    else
+      :erlang.put(:js_check_depth, odepth + 1)
+      if not async?, do: :erlang.put(:js_check_stack, [{name, pos} | ostack])
+
+      try do
+        fun.()
+      after
+        :erlang.put(:js_check_depth, odepth)
+        :erlang.put(:js_check_stack, ostack)
+        check_restored(below, pos, async?)
+      end
+    end
+  end
+
+  # C3: the depth and the innermost visible cell of the real stack equal the oracle's.
+  defp check_entry(below, ostack, odepth) do
+    depth = depth_of(below)
+
+    if depth != odepth,
+      do: check_fail("the call depth is #{inspect(depth)}, and the oracle has #{odepth}")
+
+    head = check_head(below)
+
+    if head != List.first(ostack),
+      do: check_fail("the stack head is #{inspect(head)}, and the oracle has #{inspect(ostack)}")
+  end
+
+  # (the innermost cell of the real stack that prints a line, as `{name, call_pos}`)
+  defp check_head([{:hidden, _, _} | below]), do: check_head(below)
+  defp check_head([{name, pos, _} | _]), do: {name, pos}
+  defp check_head(_), do: nil
+
+  # C4: a call entry restored the stack, and also the position unless the call is async.
+  # An async call does not restore `:js_pos` (row F15 of step 2f).
+  defp check_restored(below, pos, async?) do
+    now = :erlang.get(:js_stack)
+
+    if now !== below,
+      do: check_fail("a call left the stack #{inspect(now)}, not #{inspect(below)}")
+
+    if not async? and Process.get(:js_pos) != pos,
+      do:
+        check_fail(
+          "a call left the position #{inspect(Process.get(:js_pos))}, not #{inspect(pos)}"
+        )
+  end
+
+  @doc false
+  # Check mode only (C6 of step 2f): the state of the call stack, for `check_task_end/1`.
+  # Without check mode it is `nil`.
+  def check_mark, do: if(@check, do: {:erlang.get(:js_stack), Process.get(:js_check_depth, 0)})
+
+  @doc false
+  # Check mode only (C6 of step 2f): at the end of a task, every call has restored the
+  # stack. The task ends with the state `mark` from `check_mark/0` at its start. A task that
+  # does not run inside JS code ends with the default, an empty stack and depth 0.
+  def check_task_end(mark \\ {[], 0}) do
+    if @check do
+      now = {Process.get(:js_stack, []), Process.get(:js_check_depth, 0)}
+
+      if now !== mark,
+        do: check_fail("a task ended with the stack #{inspect(now)}, not #{inspect(mark)}")
+    end
+
+    :ok
+  end
+
+  # Check mode only (C5 of step 2f): code that runs in a frame of a sync call runs while
+  # that call is on top of the stack, so element 3 of the frame is the current chain. This
+  # proves at each call and at each JS `catch` that every callee restored the chain, also
+  # on the throw path. A CPS frame (`enter_frame/4`), a frame made by hand in a test and a
+  # map scope hold no chain and are skipped.
+  defp check_link(env) when is_integer(env) do
+    case :erlang.get(env) do
+      f when is_tuple(f) and tuple_size(f) >= 5 and is_list(:erlang.element(3, f)) ->
+        now = :erlang.get(:js_stack)
+        chain = :erlang.element(3, f)
+
+        if chain !== now,
+          do: check_fail("the frame #{env} has the chain #{inspect(chain)}, not #{inspect(now)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp check_link(_env), do: :ok
+
+  # Check mode only (C2 of step 2f): the stack text from the oracle, made with the code from
+  # before step 2f. `stack_string/1` must give the same text.
+  defp check_stack_string(header) do
+    stack = Process.get(:js_check_stack, [])
+
+    {frames, top} =
+      Enum.map_reduce(stack, Process.get(:js_pos), fn {name, call_pos}, loc ->
+        {frame_line(name, loc), call_pos}
+      end)
+
+    frames = Enum.take(frames, 12)
+
+    frames =
+      if top != nil and length(stack) < 12, do: frames ++ [frame_line(nil, top)], else: frames
+
+    header <> Enum.join(frames)
   end
 
   # A closure must not be made in a level 1 frame, also not through a map scope under it
@@ -3232,12 +3393,21 @@ defmodule Browser.JS.Interp do
     if @check and match?(%{info: %Info{rewritten: true}}, c),
       do: check_fail("a rewritten function on the old call path (run_closure_scope)")
 
-    depth = pget(:js_depth)
+    if @check,
+      do: check_oracle(c.name, false, fn -> closure_scope(c, this, args, extra) end),
+      else: closure_scope(c, this, args, extra)
+  end
+
+  # (the old call path of `run_closure_scope/4`, without the check-mode oracle)
+  @compile {:inline, closure_scope: 4}
+  defp closure_scope(c, this, args, extra) do
+    below = :erlang.get(:js_stack)
+    depth = depth_of(below)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
-    :erlang.put(:js_depth, depth + 1)
-    stack = Process.get(:js_stack, [])
-    pos = Process.get(:js_pos)
-    :erlang.put(:js_stack, [{c.name, pos} | stack])
+    pos = pget(:js_pos)
+    # The old path pushes the same cell as `run_frame/6`, so both paths share one chain and
+    # one depth (step 2f). Its `after` block stays, because it also restores the tail flag.
+    :erlang.put(:js_stack, [{c.name, pos, depth + 1} | below])
     # only a strict function's `return f()` is a tail call (and a constructor's never is)
     old_tail = Process.put(:js_tail, extra == [] and strict?(c))
 
@@ -3264,39 +3434,59 @@ defmodule Browser.JS.Interp do
       {result, scope}
     after
       Process.put(:js_tail, old_tail)
-      :erlang.put(:js_depth, depth)
-      :erlang.put(:js_stack, stack)
+      :erlang.put(:js_stack, below)
       :erlang.put(:js_pos, pos)
     end
   end
 
   # A call of a rewritten function (step 2b). The frame is one tuple
-  # `{parent_id, info, nil, call_pos, root_id, params..., hidden..., template...}` built
-  # before the body runs and erased in `after` unless a closure made during the call can
-  # hold its id. `:js_depth`, `:js_stack` and `:js_pos` are kept and restored as the old
-  # path does, until step 2f. The tail flag is never written: the resolver marked every
-  # return inside the function. The function does not tick: its callers tick as they do
-  # on the old path, so the step counts stay the same.
+  # `{parent_id, info, chain, call_pos, root_id, params..., hidden..., template...}`. It is
+  # built before the body runs. When the call ends, `leave/5` erases it, unless a closure
+  # made during the call can hold its id. The tail flag is never written: the resolver
+  # marked every return inside the function. The function does not tick: its callers tick
+  # as they do on the old path, so the step counts stay the same.
+  #
+  # The call stack (step 2f): `:js_stack` is a chain of cells, innermost first. A call
+  # pushes `{name, call_pos, depth}`, and an async call pushes a hidden cell (see
+  # `Browser.JS.Async.call_closure/4`). The depth of the current call is in the head cell,
+  # so there is no separate counter. A call is refused with a RangeError when the depth
+  # of its caller is `@max_depth`, before it pushes. The frame keeps its own chain in
+  # element 3, and `:js_stack` gets the same chain just before the `try`. `stack_string/1`
+  # makes the text of `Error.stack` from the chain only when an error needs it.
   #
   # `nt` is the value of `new.target`, and `mode` (step 2d) says how the call came:
   #
   # - `:call`: a tail call goes to `tail_loop` after the frame is gone.
   # - `:new`: a call through `new`. The callee of a tail site runs inside the frame, so
-  #   the constructor keeps its line in `Error.stack`.
+  #   the constructor keeps its line in `Error.stack` (see `ctor_tail/9`).
   # - `:ctor`: a derived class constructor. It runs as `:new` and gives back
-  #   `{value, this}`: the `this` slot is read inside the `try`, before the frame is freed,
-  #   because `super()` writes it during the body.
+  #   `{value, this}`: the `this` slot is read before the frame is freed, because
+  #   `super()` writes it during the body.
   defp run_frame(id, c, this, args, nt, mode) do
-    depth = pget(:js_depth)
+    result =
+      if @check,
+        do: check_oracle(c.name, false, fn -> frame_call(id, c, this, args, nt, mode) end),
+        else: frame_call(id, c, this, args, nt, mode)
+
+    case result do
+      {:js_tailcall, f, t, a} -> tail_loop(f, t, a)
+      _ -> result
+    end
+  end
+
+  # (the call of `run_frame/6` up to its tail call, without the check-mode oracle; a tail
+  # call in mode `:call` runs after the frame and the oracle have left the stack)
+  @compile {:inline, frame_call: 6}
+  defp frame_call(id, c, this, args, nt, mode) do
+    below = :erlang.get(:js_stack)
+    depth = depth_of(below)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
-    :erlang.put(:js_depth, depth + 1)
-    stack = Process.get(:js_stack, [])
-    pos = Process.get(:js_pos)
-    :erlang.put(:js_stack, [{c.name, pos} | stack])
+    pos = pget(:js_pos)
+    chain = [{c.name, pos, depth + 1} | below]
     info = c.info
 
     tuple =
-      List.to_tuple([c.scope, info, nil, pos, c.root | frame_slots(c, id, this, args, nt)])
+      List.to_tuple([c.scope, info, chain, pos, c.root | frame_slots(c, id, this, args, nt)])
 
     if @check, do: check_frame(tuple, info, id, mode)
     frame = alloc(tuple)
@@ -3305,59 +3495,106 @@ defmodule Browser.JS.Interp do
     # closure count decides, as `free_scope/2` does on the old path. A leaf (`free:
     # :always`) makes no closure and skips the read.
     fns = if info.free == :counter, do: :erlang.get(:js_fns)
+    # The chain goes in last, just before the `try`, so that no throw can leave it pushed.
+    :erlang.put(:js_stack, chain)
 
+    # One `try` covers the parameters and the body. Only a `return` statement of this
+    # function throws `{:js_return}` or `{:js_tail}`, so the parameters and `enter_body`
+    # cannot throw them.
     result =
       try do
         if info.params != :plain, do: bind_params_list(c.params, args, frame)
         enter_body(frame, info, id)
         if @check, do: check_hoisted(frame, info)
+        ctor_value(mode, body_value(c, frame), frame, info)
+      catch
+        {:js_return, v} ->
+          if @check and c.mode == :arrow_expr,
+            do: check_fail("a return out of the arrow expression #{check_name(info)}")
 
-        value =
-          case c.mode do
-            :arrow_expr ->
-              ev(c.body, frame)
+          ctor_value(mode, v, frame, info)
 
-            _ ->
-              try do
-                case exec_fn(c.body, frame) do
-                  {:ret, v} -> v
-                  :ok -> :undefined
-                end
-              catch
-                {:js_return, v} ->
-                  v
+        {:js_tail, f, t, a} when mode == :call ->
+          {:js_tailcall, f, t, a}
 
-                {:js_tail, f, t, a} ->
-                  case mode do
-                    :call ->
-                      {:js_tailcall, f, t, a}
+        {:js_tail, f, t, a} ->
+          ctor_tail(mode, f, t, a, frame, info, fns, below, pos)
 
-                    _ ->
-                      if @check and mode == :ctor,
-                        do: check_fail("a tail call in the constructor #{check_name(info)}")
+        # A JS throw, the step limit or an engine error leaves the frame here. The value
+        # is thrown again, so the cost is the same as the rethrow of an `after` block.
+        :throw, v ->
+          leave(frame, info, fns, below, pos)
+          throw(v)
 
-                      call(f, t, a)
-                  end
-              end
-          end
-
-        if mode == :ctor,
-          do: {value, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))},
-          else: value
-      after
-        # (the argument map test stays here, so a frame without one pays only `free/1`)
-        if fns == nil or :erlang.get(:js_fns) == fns,
-          do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
-
-        :erlang.put(:js_depth, depth)
-        :erlang.put(:js_stack, stack)
-        :erlang.put(:js_pos, pos)
+        kind, reason ->
+          leave(frame, info, fns, below, pos)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
 
-    case result do
-      {:js_tailcall, f, t, a} -> tail_loop(f, t, a)
-      _ -> result
+    leave(frame, info, fns, below, pos)
+    result
+  end
+
+  # The value of the body of a frame call: an arrow with an expression body gives the
+  # value of the expression, and a body that ends without `return` gives `undefined`.
+  @compile {:inline, body_value: 2}
+  defp body_value(c, frame) do
+    case c.mode do
+      :arrow_expr ->
+        ev(c.body, frame)
+
+      _ ->
+        case exec_fn(c.body, frame) do
+          {:ret, v} -> v
+          :ok -> :undefined
+        end
     end
+  end
+
+  # A derived class constructor gives back `{value, this}`. The `this` slot is read while
+  # the frame is live, because `super()` writes it during the body.
+  @compile {:inline, ctor_value: 4}
+  defp ctor_value(:ctor, v, frame, info),
+    do: {v, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))}
+
+  defp ctor_value(_mode, v, _frame, _info), do: v
+
+  # The end of a frame call: the frame is erased unless a closure made during the call can
+  # hold its id, and the caller's chain and position come back. The chain holds no frame
+  # id, so the order of the erase and the restore does not matter.
+  @compile {:inline, leave: 5}
+  defp leave(frame, info, fns, below, pos) do
+    # (the argument map test stays here, so a frame without one pays only `free/1`)
+    if fns == nil or :erlang.get(:js_fns) == fns,
+      do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
+    :erlang.put(:js_stack, below)
+    :erlang.put(:js_pos, pos)
+  end
+
+  # A tail site in a constructor (mode `:new` or `:ctor`): the callee runs while the cell
+  # of the constructor is on the chain, so the constructor keeps its line in
+  # `Error.stack`. This code runs in a `catch` clause of `frame_call/6`, which is outside
+  # its `try`. So it has a `try` of its own, which leaves the frame when the callee throws.
+  # On a normal return, `frame_call/6` leaves the frame.
+  defp ctor_tail(mode, f, t, a, frame, info, fns, below, pos) do
+    v =
+      try do
+        if @check and mode == :ctor,
+          do: check_fail("a tail call in the constructor #{check_name(info)}")
+
+        call(f, t, a)
+      catch
+        :throw, e ->
+          leave(frame, info, fns, below, pos)
+          throw(e)
+
+        kind, reason ->
+          leave(frame, info, fns, below, pos)
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
+
+    ctor_value(mode, v, frame, info)
   end
 
   @doc false
@@ -3371,8 +3608,10 @@ defmodule Browser.JS.Interp do
   # 2e). It is built as `run_frame/6` builds a frame, but the body does not run here: the CPS
   # evaluator in `Browser.JS.Async` runs it later and can suspend it. So nothing here frees
   # the frame, except a throw from a parameter, after which no body code can run.
-  # `frame_done/2` frees it when the body has ended. The entry does not push `:js_stack`,
-  # and `Async.call_closure/4` keeps its own `:js_depth` increase, as the old path does.
+  # `frame_done/2` frees it when the body has ended. The entry does not push a cell on
+  # `:js_stack`, and element 3 of the frame is `nil`, because the body can run again after
+  # the call has returned, under another chain. `Async.call_closure/4` pushes a hidden cell
+  # for the sync part of an async call, so that the call counts for the depth (step 2f).
   # Returns the frame id and the closure count at entry.
   def enter_frame(id, c, this, args) do
     info = c.info
@@ -5116,6 +5355,7 @@ defmodule Browser.JS.Interp do
         no_tail(fn -> exec(block, env) end)
       catch
         {:js_error, v} when handler != nil ->
+          if @check, do: check_link(env)
           enter_frameless(env, sc)
           if param, do: bind(param, v, env, :let)
           if finalizer, do: no_tail(fn -> exec(handler, env) end), else: exec(handler, env)
@@ -5141,6 +5381,7 @@ defmodule Browser.JS.Interp do
         no_tail(fn -> exec(block, env) end)
       catch
         {:js_error, v} when handler != nil ->
+          if @check, do: check_link(env)
           fns = :erlang.get(:js_fns)
           c = enter_scope(env, sc)
 
@@ -5171,6 +5412,7 @@ defmodule Browser.JS.Interp do
       catch
         {:js_error, v} when handler != nil ->
           if @check, do: check_old_path(env, "a catch clause")
+          if @check, do: check_link(env)
           scope = new_scope(env)
           if param, do: bind(param, v, scope, :let)
 
@@ -6541,6 +6783,7 @@ defmodule Browser.JS.Interp do
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
     unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
+    if @check, do: check_link(env)
     call(f, this, argv)
   end
 
@@ -6552,6 +6795,7 @@ defmodule Browser.JS.Interp do
     unless function?(f) and constructor?(f),
       do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
 
+    if @check, do: check_link(env)
     construct(f, argv)
   end
 

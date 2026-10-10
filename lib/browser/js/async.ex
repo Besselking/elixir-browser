@@ -17,6 +17,15 @@ defmodule Browser.JS.Async do
   evaluated with their values (`f(a(), await b)` calls `a` after waiting for `b`); `&&`, `||`,
   `??` and `?:` keep their short-circuiting.
 
+  ## The call stack (step 2f)
+
+  `call_closure/4` pushes a hidden cell `{:hidden, nil, depth}` on the chain in `:js_stack`
+  while the sync part of the body runs. The cell counts for the depth limit, but it prints no
+  line in `Error.stack`, as before step 2f. A body that resumes after an `await`, and every
+  generator body, runs under the chain of the code that resumed it and pushes no cell. A
+  frame from `Browser.JS.Interp.enter_frame/4` has `nil` in element 3, because its body can
+  run under more than one chain.
+
   ## Frame mode (step 2e)
 
   A function that the resolver rewrote (level 4) runs its body on a frame. The frame is built
@@ -40,6 +49,7 @@ defmodule Browser.JS.Async do
   """
 
   alias Browser.JS.{Interp, Promise}
+  require Interp
   alias Browser.JS.Resolve.Info
 
   @max_depth 1000
@@ -78,13 +88,24 @@ defmodule Browser.JS.Async do
   function object, which the frame of a rewritten closure needs for its hidden slots.
   """
   def call_closure(id, c, this, args) do
+    if @check,
+      do: Interp.check_oracle(c.name, true, fn -> start_closure(id, c, this, args) end),
+      else: start_closure(id, c, this, args)
+  end
+
+  # (the call of `call_closure/4`, without the check-mode oracle of `Interp.check_oracle/3`)
+  @compile {:inline, start_closure: 4}
+  defp start_closure(id, c, this, args) do
     p = Promise.new()
-    depth = Process.get(:js_depth)
+    below = :erlang.get(:js_stack)
+    depth = Interp.depth_of(below)
 
     if depth >= @max_depth,
       do: Interp.throw_error("RangeError", "Maximum call stack size exceeded")
 
-    Process.put(:js_depth, depth + 1)
+    # The sync part of the body runs under a hidden cell: it counts for the depth, but it
+    # prints no line in `Error.stack`, because an async call had no line before step 2f.
+    :erlang.put(:js_stack, [{:hidden, nil, depth + 1} | below])
 
     try do
       {env, frame, fns} = body_env(id, c, this, args)
@@ -113,7 +134,7 @@ defmodule Browser.JS.Async do
     catch
       {:js_error, e} -> Promise.reject(p, e)
     after
-      Process.put(:js_depth, depth)
+      :erlang.put(:js_stack, below)
     end
 
     p

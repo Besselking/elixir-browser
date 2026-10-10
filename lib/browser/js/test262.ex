@@ -274,8 +274,10 @@ defmodule Browser.JS.Test262 do
             else: Interp.run_program(program, true)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
-          # (check mode only: no value that is still reachable may hold a freed frame)
+          # (check mode only: no value that is still reachable may hold a freed frame, and
+          # every call restored the call stack)
           Interp.check_dangling(nil)
+          Interp.check_task_end()
           {:ok, printed()}
       end
     rescue
@@ -292,6 +294,7 @@ defmodule Browser.JS.Test262 do
   # failure here raises out of the test process, so the test fails loudly.
   defp scanned(v) do
     Interp.check_dangling(v)
+    Interp.check_task_end()
     v
   end
 

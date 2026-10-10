@@ -60,6 +60,10 @@ defmodule Browser.JS.GC do
           {{:js_hoist, _}, _}, acc -> acc
           {:js_memo, _}, acc -> acc
           {:js_heap_n, _}, acc -> acc
+          # (the call chain holds names, positions and depths, never an id; a depth or a
+          # line that equals the id of a dead object must not keep it alive)
+          {:js_stack, _}, acc -> acc
+          {:js_check_stack, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -114,6 +118,9 @@ defmodule Browser.JS.GC do
           {{:js_hoist, _}, _}, roots -> roots
           {:js_memo, _}, roots -> roots
           {:js_heap_n, _}, roots -> roots
+          # (the call chain holds names, positions and depths, never an id)
+          {:js_stack, _}, roots -> roots
+          {:js_check_stack, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots
@@ -142,7 +149,10 @@ defmodule Browser.JS.GC do
        when is_tuple(t) and tuple_size(t) >= 5 and
               (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
                  is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
-    stack = spush_from(t, 3, tuple_size(t), rest, marks)
+    # The scan starts at the root id (element 5), as `mark/2` does. Elements 3 and 4 hold
+    # the call chain and the call position. Their integers (depths and line numbers) are
+    # not ids, and an object found through them by accident could report a false hit.
+    stack = spush_from(t, 5, tuple_size(t), rest, marks)
     scan(spush(elem(t, 0), stack, marks, true), marks)
   end
 
@@ -220,9 +230,9 @@ defmodule Browser.JS.GC do
   defp mark([], _marks), do: :ok
 
   # A frame: element 2 is the resolver's record. Only the parent, the root and the slots can
-  # hold ids. The caller id and the line number in `call_pos` must not keep a random object
-  # alive. The guard names the two record structs: other tuples, such as the function
-  # tuple of a WebAssembly instance, can also have a struct in position 2.
+  # hold ids. The depths and the lines in the call chain and the line in `call_pos` must not
+  # keep a random object alive. The guard names the two record structs: other tuples, such
+  # as the function tuple of a WebAssembly instance, can also have a struct in position 2.
   defp mark([t | rest], marks)
        when is_tuple(t) and tuple_size(t) >= 5 and
               (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or

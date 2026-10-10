@@ -2159,6 +2159,10 @@ defmodule Browser.JS.Builtins do
           ])
         end
 
+        # (check mode only: a timer can run inside JS code, when a top-level `await` waits
+        # for it, so the call stack must end as it was at the start of the timer)
+        mark = Interp.check_mark()
+
         try do
           # (a timer of a frame runs in the frame; one of a frame that has gone does not run)
           if Browser.JS.DOM.realm_alive?(t[:realm]) do
@@ -2169,6 +2173,8 @@ defmodule Browser.JS.Builtins do
         catch
           {:js_error, v} -> on_error.(v)
         end
+
+        Interp.check_task_end(mark)
 
         # no script is on the stack now: the one safe moment to free unreachable objects
         Browser.JS.GC.maybe_collect()

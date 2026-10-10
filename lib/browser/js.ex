@@ -31,11 +31,13 @@ defmodule Browser.JS do
   arrays, maps for objects and `:function` for functions.
 
   Options: `:max_steps` (calls and loop iterations, default 1,000,000), `:timeout` in ms
-  (default 5,000) and `:resolve` (the resolver level, see `Browser.JS.Resolve`).
+  (default 5,000), `:resolve` (the resolver level, see `Browser.JS.Resolve`) and `:file`
+  (the name of the source file. When it is set, `Error.stack` shows the file and the line of
+  each function).
   """
   @spec eval(String.t(), keyword) :: {:ok, result, console} | {:error, term, console}
   def eval(source, opts \\ []) do
-    case Parser.parse(source, Keyword.take(opts, [:resolve])) do
+    case Parser.parse(source, Keyword.take(opts, [:resolve, :file])) do
       {:error, msg} -> {:error, {:syntax, msg}, []}
       {:ok, program} -> run(program, opts)
     end
@@ -81,7 +83,13 @@ defmodule Browser.JS do
   defp execute(program, max_steps) do
     Interp.init(max_steps)
     Builtins.install()
+    result = run_script(program)
+    # (check mode only: every call restored the call stack)
+    Interp.check_task_end()
+    result
+  end
 
+  defp run_script(program) do
     try do
       value = Interp.run_program(program, true)
 
