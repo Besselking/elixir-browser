@@ -14,17 +14,25 @@ defmodule Browser.JS.Resolve.Scope do
 
   The fields:
 
+  The interpreter reads `frame`, `per_iter` and `hoist` from step 2c. A framed
+  scope gets a block frame `{parent_id, scope, caller_id, call_pos, root_id,
+  slot_6, ...}` at each entry. The header copies elements 3 to 5 from the frame
+  around it. The block frame is erased at exit when no closure was made since
+  the entry.
+
   - `kind`: `:block`, `:loop`, `:each`, `:switch` or `:catch`.
-  - `frame`: true when the scope has a frame of its own (step 2c).
+  - `frame`: true when the scope has a frame of its own.
   - `slots`: name to slot index. For a frameless scope the index is a slot of
     the home frame.
   - `kinds`: slot index to `:let`, `:const`, `:using` or `:fun` (a class
     declaration is a `:let`, see `Browser.JS.Resolve.Info`).
-  - `hoist`: `{slot, function_node}` pairs to instantiate at entry.
+  - `hoist`: `{slot, function_node}` pairs to instantiate at entry, also for a
+    frameless scope, whose slots are in the home frame.
   - `size`, `template`: the frame size and the initial values of the slots
     from position 6, for a framed scope only.
   - `tdz`: the home-frame slots a frameless scope resets to `:tdz` at entry.
-  - `per_iter`: a framed `for` head with `let` copies its frame per iteration.
+  - `per_iter`: a framed `for` head with `let` copies its frame per iteration,
+    but only when a closure was made since the last copy.
   """
 
   defstruct kind: :block,

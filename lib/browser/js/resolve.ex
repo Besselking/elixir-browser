@@ -62,6 +62,13 @@ defmodule Browser.JS.Resolve do
     parameter phase, and gives the `var` a slot of its own that `copies`
     fills from the object at body entry: a closure made in an initializer
     must keep the object when the body assigns the `var`.
+  - A direct `eval` inside an arrow sets `uses_this`, `uses_arguments`,
+    `uses_new_target` and `uses_home` on the nearest function that is not an
+    arrow. The eval code reads these bindings by name from that function, so
+    it becomes level 3 and does not run on a frame without them.
+  - A direct `eval` or a `with` inside a parameter list, also inside a
+    function in a default value, makes the function of that list dynamic. A
+    by-name walk cannot tell a parameter from a body `var` of the same name.
   """
 
   alias Browser.JS.Interp
@@ -561,7 +568,23 @@ defmodule Browser.JS.Resolve do
   # function-like scope above it is dynamic too: the TDZ names have no frame
   # and no slot, so only a by-name walk through today's `{:tdz_names}` scope
   # can give the eval code the TDZ error.
-  defp a_dynamic(st), do: a_dynamic(st, st.chain, true)
+  #
+  # A function whose parameter list holds the eval or the `with` (also inside
+  # a function in a default value) is dynamic too. The eval code reads a
+  # parameter by name, and a body `var` of the same name has its own slot
+  # with the same name in `slots`, so a by-name walk through a frame would
+  # find the body slot and not the parameter.
+  defp a_dynamic(st) do
+    st = a_dynamic(st, st.chain, true)
+    Enum.reduce(st.chain, st, &a_param_dynamic(&2, &1))
+  end
+
+  defp a_param_dynamic(st, sid) do
+    case a_scope(st, sid) do
+      %{kind: :fn, phase: :params} -> a_update(st, sid, &%{&1 | own_dynamic: true})
+      _ -> st
+    end
+  end
 
   defp a_dynamic(st, [], _mark), do: st
 
@@ -804,8 +827,23 @@ defmodule Browser.JS.Resolve do
 
   # A direct eval is the syntactic form; whether the callee is the real
   # `eval` is decided at run time, so the function must stay name-based.
+  #
+  # Eval code reads `this`, `arguments`, `new.target` and `super` by name
+  # from the nearest function that is not an arrow (interp.ex `direct_eval`,
+  # `lazy_arguments`). When the eval sits in an arrow, that function is not
+  # dynamic itself, so it must at least own these bindings: the flags make
+  # it level 3, which keeps it off the frame path until step 2d gives it
+  # the hidden slots that the eval code reads by name.
   defp a_expr({:call, {:id, "eval"} = callee, args, false}, st) do
     st = a_dynamic(st)
+
+    st =
+      Enum.reduce(
+        [:uses_this, :uses_arguments, :uses_new_target, :uses_home],
+        st,
+        &a_owner(&2, &2.chain, &1, false)
+      )
+
     a_args(args, a_expr(callee, st))
   end
 
@@ -1355,7 +1393,9 @@ defmodule Browser.JS.Resolve do
 
     %Info{
       src: nil,
-      kind: s.fn_kind,
+      # (an arrow's position is `:fn`; the kind names the arrow, as the `Info` doc says,
+      # so that a walk over frames can tell an arrow from a function with its own `this`)
+      kind: if(s.arrow?, do: s.mode, else: s.fn_kind),
       name: s.name,
       level: level_of,
       rewritten: rewritten,

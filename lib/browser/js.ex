@@ -91,9 +91,11 @@ defmodule Browser.JS do
         :js_limit -> report_uncaught("step limit reached while running timers", :warn)
       end
 
+      # (check mode only: no value that is still reachable may hold a freed frame)
+      Interp.check_dangling(value)
       {:ok, export(value, 0), console()}
     catch
-      {:js_error, v} -> {:error, {:uncaught, describe(v)}, console()}
+      {:js_error, v} -> {:error, {:uncaught, describe(scanned(v))}, console()}
       :js_limit -> {:error, :step_limit, console()}
       {:js_break, _} -> {:error, {:syntax, "illegal break"}, console()}
       {:js_continue, _} -> {:error, {:syntax, "illegal continue"}, console()}
@@ -103,6 +105,12 @@ defmodule Browser.JS do
   end
 
   defp console, do: Enum.reverse(Process.get(:js_console, []))
+
+  # (check mode only: the thrown value and what is still reachable hold no freed frame)
+  defp scanned(v) do
+    Interp.check_dangling(v)
+    v
+  end
 
   defp report_uncaught(v), do: report_uncaught("Uncaught " <> describe(v), :error)
 
