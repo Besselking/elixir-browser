@@ -132,6 +132,15 @@ defmodule Browser.JS.Runtime do
     timeout = timeout || Application.get_env(:browser, :js_call_timeout, @call_timeout)
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
+    await(pid, ref, System.monotonic_time(:millisecond) + timeout)
+  end
+
+  # Waits for the reply. A caller that has a `:layout_serve` function (the session) still answers
+  # the scripts' requests for a layout meanwhile: they wait for it while they run, so a caller
+  # that waited without answering would hold them up until they gave up.
+  defp await(pid, ref, deadline) do
+    serve = Process.get(:layout_serve)
+    left = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^ref, reply} ->
@@ -140,8 +149,12 @@ defmodule Browser.JS.Runtime do
 
       {:DOWN, ^ref, _, _, reason} ->
         %{dirty: false, raw: nil, outbox: [], console: [], prevented: false, crashed: reason}
+
+      {:layout_now, _, _, _} = msg when serve != nil ->
+        serve.(msg)
+        await(pid, ref, deadline)
     after
-      timeout ->
+      left ->
         Process.demonitor(ref, [:flush])
         Browser.Console.add(pid, [{:error, "script timed out"}])
 

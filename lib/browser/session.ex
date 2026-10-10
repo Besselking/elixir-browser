@@ -41,6 +41,7 @@ defmodule Browser.Session do
 
   @impl true
   def init(_) do
+    Process.put(:layout_serve, &__MODULE__.serve_layout/1)
     ui = UI.build()
     cache = UI.new_measure_cache()
 
@@ -884,42 +885,10 @@ defmodule Browser.Session do
 
   # the scripts ask where the elements are while the layout in the background is behind:
   # the page is laid out for them in a process of its own
-  def handle_info({:layout_now, js, ref, raw}, %{page: %Page{} = page} = state) do
-    # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
-    # shared styles would take gigabytes and seconds)
-    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
-    wx_env = :wx.get_env()
-    env = env(state)
-    width = max(UI.client_width(state.ui), 200)
-    view_h = UI.client_height(state.ui)
-    measure = state.measure_bg
-    images = state.images
-    me = self()
-
-    spawn(fn ->
-      :wx.set_env(wx_env)
-      page = Page.from_raw(base, raw, env)
-      # (the sheets a script added are parsed once, and the elements that did not change are not
-      # styled again by the next layout: it starts from what this one worked out)
-      send(me, {:style_state, Page.style_state(page)})
-
-      {items, height} =
-        Layout.layout(page.nodes, width, measure, view_h,
-          scrollers: true,
-          boxes: true,
-          metrics: &measure.(:content_height, &1),
-          images: images,
-          svg_defs: page.svg_defs
-        )
-
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
-      send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
-    end)
-
+  def handle_info({:layout_now, js, ref, raw}, state) do
+    start_layout_for_scripts(state, js, ref, raw)
     {:noreply, state}
   end
-
-  def handle_info({:layout_now, _js, _ref, _raw}, state), do: {:noreply, state}
 
   def handle_info({:style_state, style}, %{page: %Page{} = page} = state),
     do: {:noreply, %{state | page: Page.adopt_style_state(page, style)}}
@@ -985,7 +954,7 @@ defmodule Browser.Session do
 
     reply =
       Browser.JS.Runtime.dispatch(
-        state.js,
+        js(state),
         target,
         type,
         key_props(key),
@@ -1313,20 +1282,20 @@ defmodule Browser.Session do
   defp edit(%{js: nil} = state, _action, _args), do: state
 
   defp edit(state, action, args) do
-    state |> apply_js(Browser.JS.Runtime.edit(state.js, action, args))
+    state |> apply_js(Browser.JS.Runtime.edit(js(state), action, args))
   end
 
   defp edit(state, action), do: edit(state, action, [])
 
   defp focus_editor(state, host) do
     state = %{state | sel: nil, sel_items: []}
-    state |> apply_js(Browser.JS.Runtime.edit_focus(state.js, host))
+    state |> apply_js(Browser.JS.Runtime.edit_focus(js(state), host))
   end
 
   defp blur_editor(%{js: nil} = state), do: %{state | efocus: nil, esel: nil}
 
   defp blur_editor(state) do
-    state = apply_js(state, Browser.JS.Runtime.edit_blur(state.js))
+    state = apply_js(state, Browser.JS.Runtime.edit_blur(js(state)))
     state = %{state | efocus: nil, edrag: false, egoal: nil}
     state |> stop_blink() |> set_overlay([])
   end
@@ -1409,7 +1378,7 @@ defmodule Browser.Session do
   end
 
   defp editor_copy(state, action) do
-    reply = Browser.JS.Runtime.edit(state.js, action, [])
+    reply = Browser.JS.Runtime.edit(js(state), action, [])
 
     case reply[:result] do
       text when is_binary(text) and text != "" -> UI.set_clipboard_text(text)
@@ -1596,7 +1565,7 @@ defmodule Browser.Session do
 
   defp follow_in_frame(state, x, y, href) do
     nid = UI.nid_at(state.items, x, y, state.scroll)
-    reply = Browser.JS.Runtime.follow_link(state.js, nid, href)
+    reply = Browser.JS.Runtime.follow_link(js(state), nid, href)
     state = apply_js(state, reply)
     if reply.frame, do: state, else: follow(state, href, false)
   end
@@ -2002,7 +1971,7 @@ defmodule Browser.Session do
 
     reply =
       Browser.JS.Runtime.dispatch(
-        state.js,
+        js(state),
         target,
         "contextmenu",
         props,
@@ -2328,7 +2297,7 @@ defmodule Browser.Session do
   def js_event(%{js: nil} = state, _target, _type, _init), do: {state, false}
 
   def js_event(state, target, type, init) do
-    reply = Browser.JS.Runtime.dispatch(state.js, target, type, init, controls_snapshot(state))
+    reply = Browser.JS.Runtime.dispatch(js(state), target, type, init, controls_snapshot(state))
     {apply_js(state, reply), reply.prevented}
   end
 
@@ -2339,6 +2308,58 @@ defmodule Browser.Session do
   end
 
   # what a script did: address changes, navigations, and a changed document
+  # The pid of the page's scripts, for a call that waits for them. While it waits, the session
+  # still lays the page out for the scripts (`serve_layout/1`): they may be waiting for that.
+  defp js(state) do
+    Process.put(:session_state, state)
+    state.js
+  end
+
+  @doc false
+  def serve_layout({:layout_now, js, ref, raw}) do
+    case Process.get(:session_state) do
+      nil -> :ok
+      state -> start_layout_for_scripts(state, js, ref, raw)
+    end
+  end
+
+  defp start_layout_for_scripts(%{page: %Page{} = page} = state, js, ref, raw) do
+    # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
+    # shared styles would take gigabytes and seconds)
+    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
+    wx_env = :wx.get_env()
+    env = env(state)
+    width = max(UI.client_width(state.ui), 200)
+    view_h = UI.client_height(state.ui)
+    measure = state.measure_bg
+    images = state.images
+    me = self()
+
+    spawn(fn ->
+      :wx.set_env(wx_env)
+      page = Page.from_raw(base, raw, env)
+      # (the sheets a script added are parsed once, and the elements that did not change are not
+      # styled again by the next layout: it starts from what this one worked out)
+      send(me, {:style_state, Page.style_state(page)})
+
+      {items, height} =
+        Layout.layout(page.nodes, width, measure, view_h,
+          scrollers: true,
+          boxes: true,
+          metrics: &measure.(:content_height, &1),
+          images: images,
+          svg_defs: page.svg_defs
+        )
+
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+      send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+    end)
+
+    :ok
+  end
+
+  defp start_layout_for_scripts(_state, _js, _ref, _raw), do: :ok
+
   defp apply_js(state, reply) do
     state = Enum.reduce(reply.outbox, state, &js_effect/2)
 
@@ -2536,7 +2557,7 @@ defmodule Browser.Session do
   defp history_step(state, n) do
     case step_history(state.history, n) do
       {:ok, h} ->
-        reply = state.js && state.page && Browser.JS.Runtime.traverse(state.js, n)
+        reply = state.js && state.page && Browser.JS.Runtime.traverse(js(state), n)
 
         if reply && Map.get(reply, :moved) do
           state = set_url_text(%{state | history: h, url: h.current}, h.current)
@@ -2718,7 +2739,7 @@ defmodule Browser.Session do
 
     state =
       if state.js do
-        apply_js(state, Browser.JS.Runtime.fragment(state.js, url))
+        apply_js(state, Browser.JS.Runtime.fragment(js(state), url))
       else
         state
       end
@@ -3137,7 +3158,7 @@ defmodule Browser.Session do
         state
 
       true ->
-        reply = Browser.JS.Runtime.eval(state.js, text)
+        reply = Browser.JS.Runtime.eval(js(state), text)
         hist = [text | List.delete(c.hist, text)] |> Enum.take(100)
         state = apply_js(%{state | console: %{c | hist: hist, hpos: nil}}, reply)
         %{state | console: console_refresh(state.console, state)}
