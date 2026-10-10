@@ -528,9 +528,13 @@ defmodule Browser.JS.Interp do
 
     ok? =
       case h do
+        # (a derived constructor that runs from a computed key of its own class has no
+        # class record yet, so `new` runs it as a plain function; `super()` then throws)
+        :this when info.kind == :derived_ctor and mode != :ctor ->
+          not Map.has_key?(deref(id), :class_info)
+
         :this ->
-          v == :uninit_this == (info.kind == :derived_ctor and mode == :ctor) and
-            (info.kind != :derived_ctor or mode == :ctor)
+          v == :uninit_this == (info.kind == :derived_ctor and mode == :ctor)
 
         :args ->
           is_list(v)
@@ -588,7 +592,9 @@ defmodule Browser.JS.Interp do
   # The aliasing invariant of a mapped arguments object (step 2d): the object records this
   # frame, maps only parameter indexes, and each mapped element holds the value of its
   # parameter's slot.
-  defp check_args_alias(frame) do
+  # A builtin can change the elements in bulk without a sync (the Array fast paths, as on
+  # the old path), so the value test runs only for the index `k` that was just written.
+  defp check_args_alias(frame, k \\ nil) do
     f = :erlang.get(frame)
 
     with %Info{slots: %{args: ai}} = info <- :erlang.element(2, f),
@@ -602,9 +608,8 @@ defmodule Browser.JS.Interp do
         Enum.any?(o.mapped, fn {k, _} -> k >= info.nparams end) ->
           check_fail("the arguments object of #{check_name(info)} maps #{inspect(o.mapped)}")
 
-        not Enum.all?(o.mapped, fn {k, _} ->
-          Map.get(o.items, k) === :erlang.element(@frame_base + k, f)
-        end) ->
+        k != nil and is_map_key(o.mapped, k) and
+            Map.get(o.items, k) !== :erlang.element(@frame_base + k, f) ->
           check_fail("an element of the arguments object of #{check_name(info)} is out of sync")
 
         true ->
@@ -1007,7 +1012,7 @@ defmodule Browser.JS.Interp do
           _ -> :ok
         end
 
-        if @check, do: check_args_alias(frame)
+        if @check, do: check_args_alias(frame, k)
         :ok
 
       _ ->
@@ -1107,7 +1112,7 @@ defmodule Browser.JS.Interp do
           f when is_tuple(f) ->
             if @check, do: check_live(scope)
             slot_put(scope, @frame_base + idx, val)
-            if @check, do: check_args_alias(scope)
+            if @check, do: check_args_alias(scope, idx)
 
           _ ->
             assign_var(scope, name, val)
@@ -3298,7 +3303,10 @@ defmodule Browser.JS.Interp do
           do: {value, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))},
           else: value
       after
-        if fns == nil or :erlang.get(:js_fns) == fns, do: free_frame(frame, info)
+        # (the argument map test stays here, so a frame without one pays only `free/1`)
+        if fns == nil or :erlang.get(:js_fns) == fns,
+          do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
         :erlang.put(:js_depth, depth)
         :erlang.put(:js_stack, stack)
         :erlang.put(:js_pos, pos)
@@ -3322,8 +3330,6 @@ defmodule Browser.JS.Interp do
   # no code can read a parameter after the return, and the object's `items` already hold
   # the values of the mapped parameters. Only a sloppy function with plain parameters has
   # an `argmap`, so every other frame pays one clause match.
-  defp free_frame(frame, %Info{argmap: nil}), do: free(frame)
-
   defp free_frame(frame, %Info{slots: %{args: i}}) do
     case :erlang.element(i, :erlang.get(frame)) do
       {:mapped, aid} ->

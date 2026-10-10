@@ -805,10 +805,11 @@ defmodule Browser.JS.Classes do
   # block frame, and `declare/3` writes the `this` slot of the frame.
   @doc "`super(...)` in a constructor."
   def super_call(args, env) do
-    with {:ok, f} <- Interp.lookup_scoped(env, :ctor_fn),
-         {:ok, nt} <- Interp.lookup_scoped(env, :new_target) do
-      {:obj, fid} = f
-      info = deref(fid).class_info
+    # (a constructor called from a computed key of its own class runs before the class
+    # record exists; the old path gives the SyntaxError there too)
+    with {:ok, {:obj, fid} = f} <- Interp.lookup_scoped(env, :ctor_fn),
+         {:ok, nt} <- Interp.lookup_scoped(env, :new_target),
+         %{class_info: info} <- deref(fid) do
       sc = Interp.scope_of(env, :ctor_fn)
       if @check, do: check_super_scope(sc)
 

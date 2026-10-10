@@ -2673,9 +2673,10 @@ defmodule Browser.JS.FramesTest do
         gid = heap()
         {fid, _} = args_frame(gid, [1.0, 2.0])
         {:obj, aid} = build(fid)
-        # The item of `a` changes behind the sync; the next mapped write checks all pairs.
+        # The object loses its frame behind the sync; the next mapped write checks it. (A
+        # bulk change of the elements is legal: the Array fast paths do it on every level.)
         o = Interp.deref(aid)
-        Interp.store(aid, %{o | items: Map.put(o.items, 0, 99.0)})
+        Interp.store(aid, %{o | map_scope: gid})
 
         e =
           assert_raise(ArgumentError, fn ->
@@ -2907,7 +2908,21 @@ defmodule Browser.JS.FramesTest do
      "object"},
     {"69b",
      ~S|class A { constructor(){ this.s = new Error('x').stack } } class B extends A {} new B().s|,
-     "Error: x\n    at A\n    at B"}
+     "Error: x\n    at A\n    at B"},
+    # (found in review) a computed key in a parameter pattern reads the arguments object
+    # before a body `var arguments`
+    {76, ~S|function f({[arguments.length]: x}){ var arguments; return x } f({1: 'one'})|, "one"},
+    {77, ~S|function f({[(() => arguments[1])()]: x}){ var arguments; return x } f({k: 7}, 'k')|,
+     7.0},
+    # (found in review) a class constructed from its own computed key
+    {78,
+     ~S|class A {} var r; try { class B extends A { [(new B(), 'k')](){} } } catch(e){ r = e.constructor.name } r|,
+     "SyntaxError"},
+    # (found in review) the Array fast paths change a mapped arguments object in bulk
+    {79, ~S|function f(a, b){ [].shift.call(arguments); return a + ',' + arguments[0] } f(1, 2)|,
+     "1,2"},
+    {80, ~S|function f(a, b){ [].reverse.call(arguments); a = 9; return arguments[1] } f(1, 2)|,
+     1.0}
   ]
 
   # The two rows of design 5.3 that change at level 3. Each one keeps the `:off` value at

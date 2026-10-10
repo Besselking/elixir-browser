@@ -248,6 +248,11 @@ defmodule Browser.JS.Resolve do
   defp has_default?(l) when is_list(l), do: Enum.any?(l, &has_default?/1)
   defp has_default?(_), do: false
 
+  defp has_computed?({:computed, _}), do: true
+  defp has_computed?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_computed?()
+  defp has_computed?(l) when is_list(l), do: Enum.any?(l, &has_computed?/1)
+  defp has_computed?(_), do: false
+
   defp params_kind(params) do
     cond do
       plain?(params) -> :plain
@@ -1059,6 +1064,11 @@ defmodule Browser.JS.Resolve do
     # A body declaration of the self name hides the self name only in the body. The
     # parameter expressions still see the self binding, and a slot frame has no place for
     # a name that only the parameters see, so such a function keeps its names.
+    # A computed key in a parameter pattern runs while the parameters bind, but the
+    # parameter list has no initializer, so a body `var arguments` would give the key the
+    # `var` slot before the object is in it. Such a function keeps its names (level 3 on).
+    args_key? = level3?(st) and "arguments" in vars and has_computed?(params)
+
     hidden_self? =
       expr? and kind == :fn and is_binary(name) and mode == false and
         name not in param_names and name in declared and params_kind(params) != :plain
@@ -1078,7 +1088,7 @@ defmodule Browser.JS.Resolve do
         fun_names: Enum.uniq(fun_names),
         lex: lex,
         self: self,
-        own_dynamic: hidden_self?,
+        own_dynamic: hidden_self? or args_key?,
         phase: :params,
         makes_closures: false,
         uses_this: false,
