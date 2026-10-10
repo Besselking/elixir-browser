@@ -276,6 +276,9 @@ defmodule Browser.JS.Runtime do
         end
 
       if ok? do
+        # (the host starts on the frame's style while the frame's scripts load and run)
+        DOM.prewarm_layout()
+
         DOM.in_realm(doc, fn ->
           Process.put(:js_steps, @steps)
           run_all_scripts()
@@ -283,6 +286,8 @@ defmodule Browser.JS.Runtime do
       end
 
       Process.put(:js_steps, @steps)
+      # (what the scripts made is laid out now, before the page goes on with the frame)
+      if ok?, do: DOM.prewarm_layout()
 
       guard(
         fn ->

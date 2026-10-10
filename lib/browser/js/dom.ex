@@ -1213,6 +1213,24 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  @doc """
+  Asks the host to lay the page out as it is now, and does not wait for the answer: what the host
+  works out about the page's style sheets and cascade (it keeps it for the layouts that follow) is
+  then ready by the time a script asks where something is. A frame that has just been parsed calls
+  this before its scripts run.
+  """
+  def prewarm_layout do
+    info = Process.get(:rt_info, %{})
+
+    if info[:layout_now] && not Process.get(:js_hidden, false) do
+      Process.delete(:dom_export_frames)
+      raw = Enum.map(node(st().main).kids, &export/1)
+      send(info.owner, {:layout_now, self(), make_ref(), raw})
+    end
+
+    :ok
+  end
+
   # the frames whose content a layout for the scripts of `doc` needs: the frame of `doc` and
   # the frames it is in. The other frames are left out, as they cost a lot to
   # send and to lay out. (The page itself: all of them.)

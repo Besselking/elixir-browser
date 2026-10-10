@@ -190,6 +190,17 @@ if System.get_env("TPROF") do
   :erlang.trace(pid, true, [:call, {:tracer, sink}])
 end
 
+# TPROF2=1 traces every function of the script process (call time, own time) and prints the
+# heaviest at the end; slow, so use a suite or two
+tprof2 =
+  if System.get_env("TPROF2") do
+    Code.prepend_path(Path.join([to_string(:code.root_dir()), "lib", "tools-4.2.3", "ebin"]))
+    {:ok, _} = :tprof.start(%{type: :call_time})
+    :tprof.set_pattern(:_, :_, :_)
+    :tprof.enable_trace(pid)
+    true
+  end
+
 # MEM=1 prints the size of the script process every 5 s
 if System.get_env("MEM") do
   spawn(fn ->
@@ -353,6 +364,40 @@ if result == :done do
   Process.sleep(1500)
   reply = Runtime.eval(pid, "(document.getElementById('result-number') || {}).textContent")
   IO.puts("score: #{inspect(reply.console |> List.last() |> elem(1))}")
+end
+
+if tprof2 do
+  :tprof.disable_trace(pid)
+  samples = :tprof.collect()
+
+  {_, {:call_time, total, traces}} =
+    :tprof.inspect(samples, :process, :measurement)
+    |> Enum.to_list()
+    |> Enum.max_by(fn {_, {:call_time, total, _}} -> total end)
+
+  IO.puts("-- own time (us, calls), total #{total} us")
+
+  IO.puts("-- by module")
+
+  traces
+  |> Enum.group_by(fn {m, _, _, _, _, _} -> m end, fn {_, _, _, us, _, _} -> us end)
+  |> Enum.map(fn {m, l} -> {m, Enum.sum(l)} end)
+  |> Enum.sort_by(&(-elem(&1, 1)))
+  |> Enum.take(14)
+  |> Enum.each(fn {m, us} ->
+    IO.puts("#{String.pad_leading(Integer.to_string(us), 9)} #{inspect(m)}")
+  end)
+
+  IO.puts("-- by function")
+
+  traces
+  |> Enum.sort_by(fn {_, _, _, us, _, _} -> -us end)
+  |> Enum.take(45)
+  |> Enum.each(fn {m, {f, a}, calls, us, _, _} ->
+    IO.puts(
+      "#{String.pad_leading(Integer.to_string(us), 9)} #{String.pad_leading(Integer.to_string(calls), 9)} #{inspect(m)}.#{f}/#{a}"
+    )
+  end)
 end
 
 if sampler do
