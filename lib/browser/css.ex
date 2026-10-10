@@ -1011,24 +1011,92 @@ defmodule Browser.CSS do
 
   def matches?(parts, ctx), do: match_parts(parts, ctx)
 
+  @doc """
+  True when a selector can tell elements apart that have the same tag, attributes, ancestors and
+  tree: one that looks at the place among the siblings (`:first-child`, `:nth-child()`, `+`, `~`),
+  at the content (`:empty`, `:has()`), or at anything this function does not know. Elements that are
+  the same in all else match a selector that is not structural alike, which lets the cascade work out
+  what a rule set says about one of them once.
+  """
+  def structural?(parts) when is_list(parts) do
+    Enum.any?(parts, fn {cmp, comb} ->
+      comb in [:next, :subsequent] or structural_compound?(cmp)
+    end)
+  end
+
+  defp structural_compound?(c), do: Enum.any?(c.pseudos, &structural_pseudo?/1)
+
+  @doc """
+  Whether a selector could match an element of the same kind as `ctx` (same tag, attributes, ancestors
+  and tree) at some place among its siblings and with some content: what looks at the place or at the
+  content is taken to hold. A selector this says no to matches none of them.
+  """
+  def matches_loosely?(parts, ctx), do: loose_parts(parts, ctx)
+
+  defp loose_parts([{cmp, comb} | rest], ctx),
+    do: loose_compound(cmp, ctx) and loose_rel(comb, rest, ctx)
+
+  defp loose_rel(nil, _rest, _ctx), do: true
+
+  defp loose_rel(:descendant, rest, ctx), do: loose_ancestor?(ctx.parent, rest)
+
+  defp loose_rel(:child, rest, %{parent: p}), do: p != nil and loose_parts(rest, p)
+  defp loose_rel(rel, _rest, _ctx) when rel in [:next, :subsequent], do: true
+
+  defp loose_ancestor?(nil, _rest), do: false
+  defp loose_ancestor?(p, rest), do: loose_parts(rest, p) or loose_ancestor?(p.parent, rest)
+
+  defp loose_compound(c, ctx) do
+    (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
+      (c.tag in [nil, :any] or c.tag == ctx.tag) and
+      (c.id == nil or c.id == ctx.id) and
+      Enum.all?(c.classes, &(&1 in ctx.classes)) and
+      Enum.all?(c.attrs, &attr_match?(&1, ctx.attrs)) and
+      Enum.all?(c.pseudos, &(structural_pseudo?(&1) or pseudo?(&1, ctx)))
+  end
+
+  @plain_pseudos [
+    :scope,
+    :root,
+    :link,
+    :any_link,
+    :modal,
+    :popover_open,
+    :mb_backdrop,
+    :open,
+    :disabled,
+    :enabled,
+    :checked,
+    :required,
+    :optional,
+    :read_write,
+    :read_only,
+    :host,
+    :never
+  ]
+
+  defp structural_pseudo?(p) when p in @plain_pseudos, do: false
+  defp structural_pseudo?({:dir, _}), do: false
+  defp structural_pseudo?({:lang, _}), do: false
+  defp structural_pseudo?({:fn, _, cmps}), do: Enum.any?(cmps, &structural_compound?/1)
+  defp structural_pseudo?(_), do: true
+
   defp match_parts([{cmp, comb} | rest], ctx),
     do: match_compound(cmp, ctx) and match_rel(comb, rest, ctx)
 
   defp match_rel(nil, _rest, _ctx), do: true
 
-  defp match_rel(:descendant, rest, ctx) do
-    ctx.parent
-    |> Stream.unfold(fn
-      nil -> nil
-      p -> {p, p.parent}
-    end)
-    |> Enum.any?(&match_parts(rest, &1))
-  end
+  defp match_rel(:descendant, rest, ctx), do: ancestor_matches?(ctx.parent, rest)
 
   defp match_rel(:child, rest, %{parent: p}), do: p != nil and match_parts(rest, p)
   defp match_rel(:next, rest, %{prev: [p | _]}), do: match_parts(rest, p)
   defp match_rel(:next, _rest, _ctx), do: false
   defp match_rel(:subsequent, rest, %{prev: prev}), do: Enum.any?(prev, &match_parts(rest, &1))
+
+  defp ancestor_matches?(nil, _rest), do: false
+
+  defp ancestor_matches?(p, rest),
+    do: match_parts(rest, p) or ancestor_matches?(p.parent, rest)
 
   defp match_compound(c, ctx) do
     # the backdrop of a dialog is only styled by its own rules, not by those for the dialog

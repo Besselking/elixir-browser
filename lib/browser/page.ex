@@ -383,6 +383,23 @@ defmodule Browser.Page do
     )
   end
 
+  @doc """
+  What `from_raw/3` worked out about the style sheets and the cascade, to be handed to another copy
+  of the page (`adopt_style_state/2`) so that the next tree it is given starts from it: the sheets
+  that were parsed and the memo of the cascade.
+  """
+  def style_state(%__MODULE__{} = page) do
+    Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
+  end
+
+  @doc "Puts a `style_state/1` of a later tree in `page` (its rules, sheets and memo go together)."
+  def adopt_style_state(%__MODULE__{} = page, style) do
+    # (only the sheets of that tree stay: the cache would hold every tree there was, and be
+    # copied whole into every process that lays out a page)
+    cache = page.sheet_cache |> Map.merge(style.sheet_cache) |> Map.take([:ua | style.sheet_refs])
+    struct(page, %{style | sheet_cache: cache})
+  end
+
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
   defp refresh_sheets(page, raw, base) do
@@ -420,23 +437,57 @@ defmodule Browser.Page do
         {key, if(scope == nil, do: prefetched(ref, at), else: ref), at}
       end)
 
-    parsed =
-      jobs
+    # (a `<style>` has its text at hand, and a page may have hundreds of them: only what has to be
+    # fetched, or may import something, goes to a task of its own. Then each different text is parsed
+    # once, however many trees have it)
+    {inline, remote} =
+      Enum.split_with(jobs, fn
+        {_key, {:style, css}, _at} -> not String.contains?(css, "@import")
+        _ -> false
+      end)
+
+    fetched =
+      Enum.map(inline, fn {{_, scope, _} = key, {:style, css}, at} ->
+        {key, scope, [{css, at}]}
+      end) ++
+        (remote
+         |> Task.async_stream(
+           fn {key, ref, at} ->
+             {_, scope, _} = key
+             {key, scope, ref |> sheet(at) |> with_imports(0)}
+           end,
+           max_concurrency: 8,
+           timeout: @sheet_timeout,
+           on_timeout: :kill_task,
+           ordered: true
+         )
+         |> Enum.zip(remote)
+         |> Enum.map(fn
+           {{:ok, got}, _} -> got
+           {_, {key, _, _}} -> {key, nil, []}
+         end))
+
+    texts =
+      fetched
+      |> Enum.flat_map(fn {_, _, sheets} -> sheets end)
+      |> Enum.uniq()
       |> Task.async_stream(
-        fn {key, ref, at} ->
-          {_, scope, _} = key
-          sheets = ref |> sheet(at) |> with_imports(0)
-          {key, Style.parse_sheets(for {css, from} <- sheets, do: {:author, css, from, scope})}
-        end,
+        fn {css, from} -> {{css, from}, Style.parse_sheet(:author, css, from)} end,
         max_concurrency: 8,
         timeout: @sheet_timeout,
         on_timeout: :kill_task,
         ordered: true
       )
-      |> Enum.zip(jobs)
-      |> Enum.reduce(cache, fn
-        {{:ok, {key, rules}}, _}, cache -> Map.put(cache, key, rules)
-        {_, {key, _, _}}, cache -> Map.put(cache, key, [])
+      |> Enum.flat_map(fn
+        {:ok, parsed} -> [parsed]
+        _ -> []
+      end)
+      |> Map.new()
+
+    parsed =
+      Enum.reduce(fetched, cache, fn {key, scope, sheets}, cache ->
+        rules = Enum.flat_map(sheets, &(texts |> Map.get(&1, []) |> Style.scope_rules(scope)))
+        Map.put(cache, key, rules)
       end)
 
     rules = Enum.flat_map([:ua | refs], &Map.get(parsed, &1, []))

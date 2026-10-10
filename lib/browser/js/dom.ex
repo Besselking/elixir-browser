@@ -665,8 +665,13 @@ defmodule Browser.JS.DOM do
         el
 
       doc ->
-        url = get_in(st().realms, [doc, :fields, :url])
-        kids = Enum.map(node(doc).kids, &export/1)
+        # (the realm that is running is not in `realms`: its fields are the state's own)
+        url = if doc == st().doc, do: st().url, else: get_in(st().realms, [doc, :fields, :url])
+
+        docs = Process.get(:dom_export_frames)
+
+        kids =
+          if is_list(docs) and doc not in docs, do: [], else: Enum.map(node(doc).kids, &export/1)
 
         marks =
           [{"data-b-frame", Integer.to_string(doc)}] ++
@@ -1088,6 +1093,9 @@ defmodule Browser.JS.DOM do
   @doc "What the layout knows: element boxes, scroll position, page size."
   def set_layout(rects, sx, sy, content) do
     # (the boxes of the frames' elements are in the same layout, in page coordinates)
+    # (a layout made for the scripts knew elements that the page's layout, made from an older tree,
+    # does not: they keep the boxes they have until the page's layout has them)
+    rects = Map.merge(Process.get(:dom_forced_rects, %{}), rects)
     Process.put(:dom_page_rects, rects)
     put_st(%{st() | rects: rects, content: content})
     set_scroll(sx, sy)
@@ -1149,24 +1157,33 @@ defmodule Browser.JS.DOM do
   # out now (see `layout_now/0`), when the host can do it.
   defp rect_of(id) do
     case rects_here() do
-      %{^id => rect} -> rect
-      _ -> layout_now() && Map.get(rects_here(), id)
+      %{^id => rect} ->
+        rect
+
+      _ ->
+        layout_now() && Map.get(rects_here(), id)
     end
   end
 
   # A layout for the scripts, made while they wait. It costs as much as the layout of the
-  # page, so it is made only when the tree changed since the last one, and no more than
-  # about a fifth of the time (an element that is not drawn has no box, and each question
-  # about it would ask for a layout again).
+  # page, so it is made only when the tree changed since the last one, and only while the
+  # layouts made for the document so far have taken less than a few seconds and a third of the
+  # time its scripts have run. (An element can have no box because it was asked for before its shadow
+  # tree was made, so it cannot be told from one that is never drawn.)
   defp layout_now do
     info = Process.get(:rt_info, %{})
     rev = st().rev
     now = System.monotonic_time(:millisecond)
-    {last_rev, last_end, cost} = Process.get(:dom_forced, {nil, nil, 0})
+    {last_rev, _last_end, _cost} = Process.get(:dom_forced, {nil, nil, 0})
+    doc = st().doc
+    {first_at, spent} = Map.get(Process.get(:dom_forced_spent, %{}), doc, {now, 0})
 
-    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev &&
-         (last_end == nil or now - last_end >= 4 * cost) do
+    allowed = spent <= 2_000 + div(now - first_at, 3)
+
+    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev && allowed do
+      Process.put(:dom_export_frames, frame_chain(doc))
       raw = Enum.map(node(st().main).kids, &export/1)
+      Process.delete(:dom_export_frames)
       ref = make_ref()
       send(info.owner, {:layout_now, self(), ref, raw})
 
@@ -1180,11 +1197,55 @@ defmodule Browser.JS.DOM do
       done = System.monotonic_time(:millisecond)
       Process.put(:dom_forced, {rev, done, done - now})
 
+      Process.put(
+        :dom_forced_spent,
+        Map.put(Process.get(:dom_forced_spent, %{}), doc, {first_at, spent + done - now})
+      )
+
       with {rects, content} <- result do
+        # (the frames that were left out keep the boxes they had)
+        rects = Map.merge(Process.get(:dom_page_rects, %{}), rects)
+        Process.put(:dom_forced_rects, rects)
         Process.put(:dom_page_rects, rects)
         put_st(%{st() | rects: rects, content: content})
         true
       end
+    end
+  end
+
+  @doc """
+  Asks the host to lay the page out as it is now, and does not wait for the answer: what the host
+  works out about the page's style sheets and cascade (it keeps it for the layouts that follow) is
+  then ready by the time a script asks where something is. A frame that has just been parsed calls
+  this before its scripts run.
+  """
+  def prewarm_layout do
+    info = Process.get(:rt_info, %{})
+
+    if info[:layout_now] && not Process.get(:js_hidden, false) do
+      Process.delete(:dom_export_frames)
+      raw = Enum.map(node(st().main).kids, &export/1)
+      send(info.owner, {:layout_now, self(), make_ref(), raw})
+    end
+
+    :ok
+  end
+
+  # the frames whose content a layout for the scripts of `doc` needs: the frame of `doc` and
+  # the frames it is in. The other frames are left out, as they cost a lot to
+  # send and to lay out. (The page itself: all of them.)
+  defp frame_chain(doc) do
+    if doc == st().main, do: nil, else: [doc | frame_parents(doc)]
+  end
+
+  defp frame_parents(doc) do
+    case Map.get(st().meta, doc) do
+      %{iframe: i} when i != nil ->
+        up = node(i).doc
+        if up == st().main, do: [], else: [up | frame_parents(up)]
+
+      _ ->
+        []
     end
   end
 

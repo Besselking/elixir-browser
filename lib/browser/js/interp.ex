@@ -325,19 +325,24 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @no_consts MapSet.new()
+
   defp assign_var(scope, name, val) do
     s = deref(scope)
 
     cond do
       Map.has_key?(s.vars, name) ->
-        if MapSet.member?(s.consts, name),
+        # (most scopes have no constants: nothing to look up)
+        consts? = s.consts != @no_consts
+
+        if consts? and MapSet.member?(s.consts, name),
           do: throw_error("TypeError", "Assignment to constant variable.")
 
         cond do
           :erlang.map_get(name, s.vars) == :tdz ->
             throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
-          MapSet.member?(s.consts, {:fname, name}) ->
+          consts? and MapSet.member?(s.consts, {:fname, name}) ->
             :fname_ignored
 
           # the global `undefined`, `NaN` and `Infinity` can not be assigned

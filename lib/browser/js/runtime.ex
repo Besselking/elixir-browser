@@ -100,6 +100,12 @@ defmodule Browser.JS.Runtime do
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
+  @doc """
+  The same without waiting: the session goes on while the scripts run (a script that is busy
+  may be asking the session for a layout), and hears what the scripts did as an async reply.
+  """
+  def hover_async(pid, old, new), do: send(pid, {:hover_async, old, new})
+
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
 
@@ -126,6 +132,15 @@ defmodule Browser.JS.Runtime do
     timeout = timeout || Application.get_env(:browser, :js_call_timeout, @call_timeout)
     ref = Process.monitor(pid)
     send(pid, {:call, self(), ref, request})
+    await(pid, ref, System.monotonic_time(:millisecond) + timeout)
+  end
+
+  # Waits for the reply. A caller that has a `:layout_serve` function (the session) still answers
+  # the scripts' requests for a layout meanwhile: they wait for it while they run, so a caller
+  # that waited without answering would hold them up until they gave up.
+  defp await(pid, ref, deadline) do
+    serve = Process.get(:layout_serve)
+    left = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^ref, reply} ->
@@ -134,8 +149,12 @@ defmodule Browser.JS.Runtime do
 
       {:DOWN, ^ref, _, _, reason} ->
         %{dirty: false, raw: nil, outbox: [], console: [], prevented: false, crashed: reason}
+
+      {:layout_now, _, _, _} = msg when serve != nil ->
+        serve.(msg)
+        await(pid, ref, deadline)
     after
-      timeout ->
+      left ->
         Process.demonitor(ref, [:flush])
         Browser.Console.add(pid, [{:error, "script timed out"}])
 
@@ -257,6 +276,9 @@ defmodule Browser.JS.Runtime do
         end
 
       if ok? do
+        # (the host starts on the frame's style while the frame's scripts load and run)
+        DOM.prewarm_layout()
+
         DOM.in_realm(doc, fn ->
           Process.put(:js_steps, @steps)
           run_all_scripts()
@@ -264,6 +286,8 @@ defmodule Browser.JS.Runtime do
       end
 
       Process.put(:js_steps, @steps)
+      # (what the scripts made is laid out now, before the page goes on with the frame)
+      if ok?, do: DOM.prewarm_layout()
 
       guard(
         fn ->
@@ -302,6 +326,10 @@ defmodule Browser.JS.Runtime do
         DOM.set_layout(rects, sx, sy, content)
         loop(t0)
 
+      # (a layout for the scripts that came after they stopped waiting for it)
+      {:layout_now_done, _ref, _rects, _content} ->
+        loop(t0)
+
       {:storage, _origin, key, old, new} ->
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
@@ -338,6 +366,13 @@ defmodule Browser.JS.Runtime do
 
       {:idb, :versionchange, _, _, _, _, _} = msg ->
         idb_message(t0, msg)
+        loop(t0)
+
+      {:hover_async, old, new} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        reply = handle({:hover, old, new})
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
       {:visible, visible?} ->
@@ -713,7 +748,7 @@ defmodule Browser.JS.Runtime do
     scripts =
       for nid <- DOM.descendants(doc), s = script_info(nid), not DOM.in_template?(nid), do: s
 
-    prefetch(scripts)
+    prefetch(scripts, stylesheet_urls(doc))
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
 
@@ -818,7 +853,7 @@ defmodule Browser.JS.Runtime do
   end
 
   # the files of external scripts are fetched side by side; `script_source/1` takes them from here
-  defp prefetch(scripts) do
+  defp prefetch(scripts, sheets \\ []) do
     fetch = Process.get(:rt_info)[:fetch]
 
     urls =
@@ -831,20 +866,44 @@ defmodule Browser.JS.Runtime do
           uniq: true,
           do: url
 
+    # (the style sheets are fetched with them, so that the page's first layout finds them in the
+    # cache; what is fetched for them is not kept here)
+    sheet_urls =
+      for href <- sheets,
+          url = Browser.Fetch.resolve(base_url(), href),
+          allowed_url?(url),
+          is_function(fetch, 1),
+          url not in urls,
+          uniq: true,
+          do: url
+
     done =
-      urls
+      (urls ++ sheet_urls)
       |> Task.async_stream(fn url -> {url, fetch.(url)} end,
         max_concurrency: 8,
         timeout: 30_000,
         on_timeout: :kill_task
       )
       |> Enum.flat_map(fn
-        {:ok, {url, {:ok, _, _} = ok}} -> [{url, ok}]
+        {:ok, {url, {:ok, _, _} = ok}} -> if url in sheet_urls, do: [], else: [{url, ok}]
         _ -> []
       end)
       |> Map.new()
 
     Process.put(:rt_prefetched, Map.merge(Process.get(:rt_prefetched, %{}), done))
+  end
+
+  # the addresses of the `<link rel=stylesheet>` elements of the document
+  defp stylesheet_urls(doc) do
+    for nid <- DOM.descendants(doc),
+        n = DOM.node_data(nid),
+        n.kind == :element and n.tag == "link",
+        rel = DOM.get_attr(n, "rel"),
+        "stylesheet" in String.split(String.downcase(rel)),
+        href = DOM.get_attr(n, "href"),
+        href != "",
+        not DOM.in_template?(nid),
+        do: href
   end
 
   defp script_info(nid) do

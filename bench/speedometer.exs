@@ -9,6 +9,15 @@ alias Browser.JS.Runtime
 suites = if Enum.at(rest, 0) in [nil, "", "all"], do: nil, else: Enum.at(rest, 0)
 timeout = String.to_integer(Enum.at(rest, 1) || "300") * 1000
 Application.put_env(:browser, :gui, false)
+
+# RESOLVE=1..4|info|off sets the level of the resolver pass (`Browser.JS.Resolve`)
+case System.get_env("RESOLVE") do
+  nil -> :ok
+  "off" -> Application.put_env(:browser, :js_resolve, :off)
+  "info" -> Application.put_env(:browser, :js_resolve, :info)
+  n -> Application.put_env(:browser, :js_resolve, String.to_integer(n))
+end
+
 {:ok, _} = Application.ensure_all_started(:browser)
 
 full =
@@ -32,6 +41,9 @@ layout? = System.get_env("LAYOUT") != nil
 info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, forced} = Agent.start_link(fn -> {0, 0} end)
 {:ok, lsamples} = Agent.start_link(fn -> [] end)
+# the page the layouts for the scripts start from; each layout hands on what it worked out about
+# the sheets and the cascade, as the session does
+{:ok, base_agent} = Agent.start_link(fn -> page end)
 
 t0 = System.monotonic_time(:millisecond)
 pid = Runtime.start(page.raw, info)
@@ -63,7 +75,11 @@ sampler =
             acc =
               case Process.info(pid, :current_stacktrace) do
                 {_, [_ | _] = st} ->
-                  [{m, f, a, _} | _] = st
+                  [{m, f, a, loc} | _] = st
+
+                  {m, f, a} =
+                    if System.get_env("PROFLINE"), do: {m, f, {a, loc[:line]}}, else: {m, f, a}
+
                   fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
 
                   acc =
@@ -174,6 +190,17 @@ if System.get_env("TPROF") do
   :erlang.trace(pid, true, [:call, {:tracer, sink}])
 end
 
+# TPROF2=1 traces every function of the script process (call time, own time) and prints the
+# heaviest at the end; slow, so use a suite or two
+tprof2 =
+  if System.get_env("TPROF2") do
+    Code.prepend_path(Path.join([to_string(:code.root_dir()), "lib", "tools-4.2.3", "ebin"]))
+    {:ok, _} = :tprof.start(%{type: :call_time})
+    :tprof.set_pattern(:_, :_, :_)
+    :tprof.enable_trace(pid)
+    true
+  end
+
 # MEM=1 prints the size of the script process every 5 s
 if System.get_env("MEM") do
   spawn(fn ->
@@ -197,17 +224,31 @@ if System.get_env("MEM") do
   end)
 end
 
-print.(Runtime.run_scripts(pid))
+# (the session runs the scripts in a process of its own, so that it can answer their questions
+# about sizes meanwhile)
+me = self()
+spawn(fn -> send(me, {:scripts_done, Runtime.run_scripts(pid)}) end)
 
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
   receive do
     {:layout_now, js, ref, raw} ->
-      base = page
+      base = Agent.get(base_agent, & &1)
 
       spawn(fn ->
+        Process.flag(:trap_exit, false)
         me = self()
+        guard = self()
+
+        spawn(fn ->
+          ref = Process.monitor(guard)
+
+          receive do
+            {:DOWN, ^ref, _, _, reason} when reason not in [:normal] ->
+              IO.puts("LAYOUT CRASHED: #{inspect(reason, limit: 30, printable_limit: 300)}")
+          end
+        end)
 
         # LAYOUT=3 also samples the stack of the process that makes the layout
         if System.get_env("LAYOUT") == "3" do
@@ -244,6 +285,23 @@ loop = fn loop ->
         t = System.monotonic_time(:microsecond)
         env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
         laid = Browser.Page.from_raw(base, raw, env)
+
+        Agent.update(
+          base_agent,
+          &Browser.Page.adopt_style_state(&1, Browser.Page.style_state(laid))
+        )
+
+        # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
+        if dir = System.get_env("DUMPRAW") do
+          File.mkdir_p!(dir)
+          n = length(File.ls!(dir))
+
+          File.write!(
+            Path.join(dir, "raw#{n}.term"),
+            :erlang.term_to_binary({base, raw, laid.sheet_cache})
+          )
+        end
+
         t1 = System.monotonic_time(:microsecond)
 
         {items, height} =
@@ -254,6 +312,19 @@ loop = fn loop ->
           )
 
         t2 = System.monotonic_time(:microsecond)
+
+        # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
+        with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
+             [dir, ms] <- String.split(spec, ","),
+             true <- (t2 - t) / 1000 > String.to_integer(ms) do
+          File.mkdir_p!(dir)
+
+          File.write!(
+            Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
+            :erlang.term_to_binary({base, raw, laid.sheet_cache})
+          )
+        end
+
         rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
         Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
 
@@ -268,6 +339,13 @@ loop = fn loop ->
 
       loop.(loop)
 
+    {:scripts_done, reply} ->
+      print.(reply)
+
+      if Enum.any?(reply.console, fn {_, t} -> t == "DONE" or String.starts_with?(t, "ERROR") end),
+         do: :done,
+         else: loop.(loop)
+
     {:js_async, ^pid, reply} ->
       print.(reply)
 
@@ -279,7 +357,48 @@ loop = fn loop ->
   end
 end
 
-loop.(loop)
+result = loop.(loop)
+
+# the score the page shows (1000 / the geometric mean of the suites' times in ms)
+if result == :done do
+  Process.sleep(1500)
+  reply = Runtime.eval(pid, "(document.getElementById('result-number') || {}).textContent")
+  IO.puts("score: #{inspect(reply.console |> List.last() |> elem(1))}")
+end
+
+if tprof2 do
+  :tprof.disable_trace(pid)
+  samples = :tprof.collect()
+
+  {_, {:call_time, total, traces}} =
+    :tprof.inspect(samples, :process, :measurement)
+    |> Enum.to_list()
+    |> Enum.max_by(fn {_, {:call_time, total, _}} -> total end)
+
+  IO.puts("-- own time (us, calls), total #{total} us")
+
+  IO.puts("-- by module")
+
+  traces
+  |> Enum.group_by(fn {m, _, _, _, _, _} -> m end, fn {_, _, _, us, _, _} -> us end)
+  |> Enum.map(fn {m, l} -> {m, Enum.sum(l)} end)
+  |> Enum.sort_by(&(-elem(&1, 1)))
+  |> Enum.take(14)
+  |> Enum.each(fn {m, us} ->
+    IO.puts("#{String.pad_leading(Integer.to_string(us), 9)} #{inspect(m)}")
+  end)
+
+  IO.puts("-- by function")
+
+  traces
+  |> Enum.sort_by(fn {_, _, _, us, _, _} -> -us end)
+  |> Enum.take(45)
+  |> Enum.each(fn {m, {f, a}, calls, us, _, _} ->
+    IO.puts(
+      "#{String.pad_leading(Integer.to_string(us), 9)} #{String.pad_leading(Integer.to_string(calls), 9)} #{inspect(m)}.#{f}/#{a}"
+    )
+  end)
+end
 
 if sampler do
   send(sampler, {:stop, self()})
@@ -298,7 +417,9 @@ if sampler do
         |> Enum.sort_by(&elem(&1, 1), :desc)
         |> Enum.take(45)
         |> Enum.each(fn {{_, {m, f, a}}, c} ->
-          IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+          IO.puts(
+            "#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}"
+          )
         end)
       end
   end
@@ -393,7 +514,7 @@ if System.get_env("LAYOUT") == "3" do
     |> Enum.sort_by(&elem(&1, 1), :desc)
     |> Enum.take(40)
     |> Enum.each(fn {{_, {m, f, a}}, c} ->
-      IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+      IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}")
     end)
   end
 end

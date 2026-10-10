@@ -151,8 +151,29 @@ defmodule Browser.HttpCache do
 
           max(exp - date, 0)
         else
-          _ -> nil
+          _ -> heuristic(headers)
         end
+    end
+  end
+
+  # No lifetime was given: a browser takes a tenth of the time since the file last changed (at most
+  # a day) as the time the response stays fresh, so that a file nobody changed for hours is not asked
+  # for again with every page that uses it.
+  @max_heuristic 86_400
+
+  defp heuristic(headers) do
+    with lm when lm != nil <- header(headers, "last-modified"),
+         {:ok, lm} <- parse_date(lm) do
+      date =
+        with d when d != nil <- header(headers, "date"), {:ok, d} <- parse_date(d) do
+          d
+        else
+          _ -> :calendar.universal_time() |> :calendar.datetime_to_gregorian_seconds()
+        end
+
+      min(div(max(date - lm, 0), 10), @max_heuristic)
+    else
+      _ -> nil
     end
   end
 
