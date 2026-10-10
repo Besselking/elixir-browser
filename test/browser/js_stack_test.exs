@@ -30,6 +30,14 @@ defmodule Browser.JS.StackTest do
   @file_rows_2f [
     {"F1", "function a(){ return b() }\nfunction b(){\n return new Error(\"x\").stack }\na()",
      {:ok, "Error: x" <> @s <> "b (t.js:3)" <> @s <> "a (t.js:1)" <> @s <> "t.js:4", []}},
+    # F1c and F1d (from the review): a throw out of a derived class constructor, before
+    # and after `super()`, leaves the caller's stack as it was.
+    {"F1c",
+     "class A { constructor(){ throw 1 } }\nclass B extends A { constructor(){ super() } }\nfunction f(){ try { new B() } catch(e) {}\n return new Error(\"z\").stack }\nf()",
+     {:ok, "Error: z" <> @s <> "f (t.js:4)" <> @s <> "t.js:5", []}},
+    {"F1d",
+     "class A {}\nclass B extends A { constructor(){ super(); throw 2 } }\nfunction f(){ try { new B() } catch(e) {}\n return new Error(\"z\").stack }\nf()",
+     {:ok, "Error: z" <> @s <> "f (t.js:4)" <> @s <> "t.js:5", []}},
     {"F2",
      "function cb(){ return new Error(\"x\").stack }\nfunction o(){\n return [1].map(cb)[0] }\no()",
      {:ok, "Error: x" <> @s <> "cb (t.js:1)" <> @s <> "o (t.js:3)" <> @s <> "t.js:4", []}},
@@ -336,6 +344,9 @@ defmodule Browser.JS.StackTest do
     put_chain(chain)
     :erlang.put(:js_pos, pos)
   end
+
+  # Element 3 of a frame: its chain in the check build, `nil` in a normal build.
+  defp link(chain), do: if(@check, do: chain)
 
   # Writes a hand-built chain to `:js_stack`. In the check build, the oracle compares each
   # call with its own keys (design section 5, C3), so the test must also give the oracle
@@ -659,13 +670,13 @@ defmodule Browser.JS.StackTest do
       below = [{"outer", {"u.js", 1}, 4}]
       pos = {"u.js", 2}
 
-      # A leaf: element 3 is its own cell on the caller's chain, and it equals the chain
-      # while the body runs.
+      # A leaf: in check mode element 3 is its own cell on the caller's chain, and it
+      # equals the chain while the body runs. A normal build keeps `nil` there.
       put_caller(below, pos)
       Interp.call(f, :undefined, [])
       assert {chain, {_, frame}, _} = Process.get(:probed)
       assert chain == [{"f", pos, 5} | below]
-      assert elem(frame, 2) == chain
+      assert elem(frame, 2) == link(chain)
       assert elem(frame, 3) == pos
 
       # A catch frame: the header elements 3 to 5 are copies of the function frame's.
@@ -674,8 +685,8 @@ defmodule Browser.JS.StackTest do
       assert {chain, {_, frame}, {_, catch_frame}} = Process.get(:probed)
       assert %Scope{kind: :catch, frame: true} = elem(catch_frame, 1)
       assert chain == [{"g", pos, 5} | below]
-      assert elem(frame, 2) == chain
-      assert elem(catch_frame, 2) == chain
+      assert elem(frame, 2) == link(chain)
+      assert elem(catch_frame, 2) == link(chain)
       assert elem(catch_frame, 3) == pos
       assert :erlang.get(:js_stack) == below
     end

@@ -127,11 +127,13 @@ defmodule Browser.JS.FramesTest do
 
       # Design 6: `{gid, %Info{}, chain, nil, gid, 1.0, :undefined, :undefined, :tdz}`. The
       # missing `b` is `:undefined`, `var c` starts as `:undefined` and `let d` in the TDZ.
-      # Element 3 is the chain of the call (step 2f): the cell of `f` with its call
-      # position and the depth 1, on the empty chain that `Interp.init/1` writes.
+      # In the check build, element 3 is the chain of the call (step 2f): the cell of `f`
+      # with its call position and the depth 1, on the empty chain that `Interp.init/1`
+      # writes. A normal build keeps `nil` there.
+      link = if @check, do: [{"f", pos, 1}]
+
       assert {fid,
-              {^gid, %Info{rewritten: true}, [{"f", ^pos, 1}], ^pos, ^gid, 1.0, :undefined,
-               :undefined, :tdz}} =
+              {^gid, %Info{rewritten: true}, ^link, ^pos, ^gid, 1.0, :undefined, :undefined, :tdz}} =
                peeked()
 
       assert tuple_size(elem(peeked(), 1)) == info(node).size

@@ -3450,8 +3450,8 @@ defmodule Browser.JS.Interp do
   # pushes `{name, call_pos, depth}`, and an async call pushes a hidden cell (see
   # `Browser.JS.Async.call_closure/4`). The depth of the current call is in the head cell,
   # so there is no separate counter. A call is refused with a RangeError when the depth
-  # of its caller is `@max_depth`, before it pushes. The frame keeps its own chain in
-  # element 3, and `:js_stack` gets the same chain just before the `try`. `stack_string/1`
+  # of its caller is `@max_depth`, before it pushes. In check mode the frame keeps its own
+  # chain in element 3. `:js_stack` gets the chain just before the `try`. `stack_string/1`
   # makes the text of `Error.stack` from the chain only when an error needs it.
   #
   # `nt` is the value of `new.target`, and `mode` (step 2d) says how the call came:
@@ -3485,8 +3485,11 @@ defmodule Browser.JS.Interp do
     chain = [{c.name, pos, depth + 1} | below]
     info = c.info
 
-    tuple =
-      List.to_tuple([c.scope, info, chain, pos, c.root | frame_slots(c, id, this, args, nt)])
+    # Only check mode reads the chain in element 3 (C5). In a normal build the element
+    # stays `nil`: a frame that a closure keeps would otherwise keep every cell of its
+    # callers too, which the collector does not count.
+    link = if @check, do: chain
+    tuple = List.to_tuple([c.scope, info, link, pos, c.root | frame_slots(c, id, this, args, nt)])
 
     if @check, do: check_frame(tuple, info, id, mode)
     frame = alloc(tuple)

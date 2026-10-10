@@ -11,7 +11,10 @@ defmodule Browser.JS.Resolve.Info do
   start at position 6. A slot index in this struct is the absolute position in
   that tuple.
 
-  From step 2f, `chain` is the call chain of the call that made the frame. It is
+  From step 2f, in the check build (`JS_RESOLVE_CHECK=1`), `chain` is the call
+  chain of the call that made the frame. In a normal build it is `nil`, because
+  no code reads it there and a frame that a closure keeps would keep the cells
+  of all its callers. In the check build it is
   the value that `:js_stack` has while the body runs. Its head is the cell of
   this call, `{name, call_pos, depth}`, and its tail is the chain of the
   caller. The chain holds the inferred name of the function, and it mixes
