@@ -44,7 +44,21 @@ defmodule Browser.JS.Resolve.Info do
     visible from the parameter defaults only; the `var` has its own slot
     under the name, see `copies`).
   - `hidden`: the hidden slots in slot order: `:this`, `:args`, `:arguments`,
-    `:new_target`, `:home`, `:ctor_fn`, `:self`.
+    `:new_target`, `:home`, `:ctor_fn`, `:self`. From step 2d the frame builder fills
+    them at entry: `:this` with the receiver (`:uninit_this` in a derived constructor
+    until `super()`), `:args` with the argument list, `:arguments` with `{:unbuilt, id}`
+    (the id of the function), `:new_target` with the new target or `undefined`, `:home`
+    with the home object of the closure or `undefined`, and `:ctor_fn` and `:self` with
+    the function itself.
+
+    The `:args` slot has two shapes. It holds the argument list until a mapped arguments
+    object is built. The build then writes `{:mapped, aid}` (the id of the object) into
+    it, so that a write to a mapped parameter finds the object. Only the build and the
+    sync read the slot. The by-name probes of `:args` on the old path test only the key.
+
+    The `:arguments` slot holds `{:unbuilt, id}` until the first read. Only the
+    `{:aslot, d, i}` form reads it (and the by-name lookup through a frame), and that read
+    builds the object into the slot.
   - `kinds`: a tuple with one element per frame position. Positions 1 to 5
     name the header (`:parent`, `:rec`, `:caller`, `:call_pos`, `:root`).
     From position 6: `:param`, `:var`, `:fun`, `:let`, `:const`, `:using`,
@@ -62,7 +76,11 @@ defmodule Browser.JS.Resolve.Info do
     slot of the arguments object.
   - `self`: the slot of the function's own name, or `nil`.
   - `argmap`: parameter name to argument index for a mapped `arguments`
-    object, or `nil`.
+    object, or `nil`. Only sloppy code with plain parameters (at least one) has it. A
+    duplicate name maps to its last position, and argument `k` is always in slot `6 + k`.
+    A write to a mapped parameter is a `{:mslot, d, i, name, k}` form, which also writes
+    element `k` of the object while the object maps it. When the frame is freed, the
+    object is detached first (its `mapped` and `map_scope` go away).
   - `uses_this`, `uses_arguments`, `uses_new_target`, `uses_super`: the
     function or an arrow inside it reads these.
   - `args_var`: the body declares `var arguments` and no function of that name.

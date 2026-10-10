@@ -8,10 +8,21 @@ defmodule Browser.JS.Classes do
   with `this` unset (`:uninit_this`); `super(...)` constructs the parent with the same
   `new.target` and sets it. Methods remember the object they were defined on (`home`), which is
   where `super.method` starts looking, one prototype up.
+
+  From resolve level 3 (step 2d) a rewritten constructor runs on a frame (`construct/4`): the
+  hidden slots `:this`, `:new_target`, `:home` and `:ctor_fn` take the place of the names of
+  the old call scope, and `super(...)` finds them by name through the frames. A class without
+  a `constructor` member gets a default constructor in slot form when the resolver put its
+  `Info` on the class node. The class scope, the field scope and the static scope stay map
+  scopes, and private names stay names in the class scope.
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props}
+
+  # Check mode (`JS_RESOLVE_CHECK=1`), as in `Browser.JS.Interp`: the flag is read at
+  # compile time, so without it no check costs anything.
+  @check Application.compile_env(:browser, :js_resolve_check, false)
 
   # a proxy would run its traps while being printed
   defp inspect_heritage(v) do
@@ -21,7 +32,11 @@ defmodule Browser.JS.Classes do
   @doc "Evaluates a class definition: the constructor function."
   def define(class, env, inferred \\ nil)
 
-  def define({:class, name, super_node, members, class_src}, env, inferred) do
+  def define({:class, name, super_node, members, src}, env, inferred) do
+    # From resolve level 3 a class without a `constructor` member carries the `Info` of its
+    # default constructor in place of the source text (resolver rule R4).
+    {class_src, dinfo} = Browser.JS.Resolve.unpack(src)
+
     # decorators ride along as a last element of the member list; their expressions are
     # evaluated first, in order, class decorators before those of the members
     {members, class_decs, member_decs} =
@@ -76,7 +91,7 @@ defmodule Browser.JS.Classes do
           {:fn, name, params, body, mode, Browser.JS.Resolve.with_src(src, class_src)}
 
         nil ->
-          default_constructor(name, derived?, class_src)
+          default_constructor(name, derived?, class_src, dinfo)
       end
 
     # each private name of the class gets a key of its own, visible to the class body
@@ -231,11 +246,28 @@ defmodule Browser.JS.Classes do
     f
   end
 
-  defp default_constructor(name, false, src), do: {:fn, name, [], [], false, src}
+  # The default constructor: `constructor() {}` for a base class and
+  # `constructor(...args) { super(...args) }` for a derived class. With the `Info` of rule
+  # R4 the node is in slot form, so it runs on a frame: the rest parameter `args` is slot 6.
+  defp default_constructor(name, false, src, nil), do: {:fn, name, [], [], false, src}
 
-  defp default_constructor(name, true, src) do
+  defp default_constructor(name, true, src, nil) do
     {:fn, name, [{:rest, {:id, "args"}}],
      [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false, src}
+  end
+
+  defp default_constructor(name, derived?, _src, %Browser.JS.Resolve.Info{} = dinfo) do
+    if @check and dinfo.kind != if(derived?, do: :derived_ctor, else: :ctor),
+      do: raise(ArgumentError, "resolve check: a default constructor of kind #{dinfo.kind}")
+
+    if derived? do
+      args = {:slot, 0, 6, "args"}
+
+      {:fn, name, [{:rest, args}], [{:expr, {:call, {:super}, [{:spread, args}], false}}], false,
+       dinfo}
+    else
+      {:fn, name, [], [], false, dinfo}
+    end
   end
 
   # the name an anonymous function takes from the field it initializes
@@ -611,43 +643,82 @@ defmodule Browser.JS.Classes do
 
   @doc "`new C(...)` for a class (`nt` is `new.target`)."
   def construct({:obj, id} = f, info, args, nt) do
-    {:closure, c} = deref(id).fun
+    case deref(id).fun do
+      {:closure, %{info: %Browser.JS.Resolve.Info{rewritten: true}} = c} ->
+        construct_frame(id, c, info, args, nt)
+
+      {:closure, c} ->
+        construct_scope(f, id, c, info, args, nt)
+    end
+  end
+
+  # A rewritten constructor (step 2d) runs on a frame. The hidden slots replace the extra
+  # names of the old path: `:ctor_fn` is the class itself and `:new_target` is `nt`. The
+  # frame hoists for itself, so `with_hoist` is not called. A derived constructor gives
+  # back its `this` slot as it was at the end of the body, before the frame is freed.
+  defp construct_frame(id, c, info, args, nt) do
+    if info.derived? do
+      {ret, this} = Interp.run_class_frame(id, c, :uninit_this, args, nt, :ctor)
+      derived_result(ret, this)
+    else
+      this = new_object([], instance_proto(nt))
+      init_fields(info, this)
+      ret = Interp.run_class_frame(id, c, this, args, nt, :new)
+      if match?({:obj, _}, ret), do: ret, else: this
+    end
+  end
+
+  defp construct_scope(f, id, c, info, args, nt) do
     c = Interp.with_hoist(id, c)
     extra = [{:ctor_fn, f}, {:new_target, nt}]
 
     if info.derived? do
       {ret, scope} = Interp.run_closure_scope(c, :uninit_this, args, extra)
 
-      case ret do
-        {:obj, _} ->
-          ret
-
-        r when r != :undefined ->
-          throw_error("TypeError", "Derived constructors may only return object or undefined")
-
-        _ ->
-          case Interp.lookup_scoped(scope, :this) do
-            {:ok, :uninit_this} ->
-              throw_error(
-                "ReferenceError",
-                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
-              )
-
-            {:ok, this} ->
-              this
-          end
-      end
-    else
-      proto =
-        case Interp.get(nt, "prototype") do
-          {:obj, _} = p -> p
-          _ -> proto(:object)
+      this =
+        case ret do
+          {:obj, _} -> nil
+          _ -> elem(Interp.lookup_scoped(scope, :this), 1)
         end
 
-      this = new_object([], proto)
+      derived_result(ret, this)
+    else
+      this = new_object([], instance_proto(nt))
       init_fields(info, this)
       {ret, _} = Interp.run_closure_scope(c, this, args, extra)
       if match?({:obj, _}, ret), do: ret, else: this
+    end
+  end
+
+  defp instance_proto(nt) do
+    case Interp.get(nt, "prototype") do
+      {:obj, _} = p -> p
+      _ -> proto(:object)
+    end
+  end
+
+  # The result of a derived constructor, in the order of the checks of the spec: an object
+  # result wins, any other value except `undefined` is a TypeError, and a `this` that
+  # `super()` never set is a ReferenceError.
+  defp derived_result(ret, this) do
+    case ret do
+      {:obj, _} ->
+        ret
+
+      r when r != :undefined ->
+        throw_error("TypeError", "Derived constructors may only return object or undefined")
+
+      _ ->
+        case this do
+          :uninit_this ->
+            throw_error(
+              "ReferenceError",
+              "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+            )
+
+          this ->
+            this
+        end
     end
   end
 
@@ -728,6 +799,10 @@ defmodule Browser.JS.Classes do
     store(id, %{o | props: Map.put(o.props, key, stored)})
   end
 
+  # `super(...)` and `super_base/1` find their bindings by name. From resolve level 3 (step
+  # 2d) these bindings can be hidden slots of a constructor or method frame: the by-name
+  # walk reads `info.slots` of each frame on the way, also through an arrow frame or a
+  # block frame, and `declare/3` writes the `this` slot of the frame.
   @doc "`super(...)` in a constructor."
   def super_call(args, env) do
     with {:ok, f} <- Interp.lookup_scoped(env, :ctor_fn),
@@ -735,6 +810,7 @@ defmodule Browser.JS.Classes do
       {:obj, fid} = f
       info = deref(fid).class_info
       sc = Interp.scope_of(env, :ctor_fn)
+      if @check, do: check_super_scope(sc)
 
       unless info.parent,
         do:
@@ -762,6 +838,24 @@ defmodule Browser.JS.Classes do
     else
       _ -> throw_error("SyntaxError", "'super' keyword unexpected here")
     end
+  end
+
+  # The scope `super()` writes `this` into is a constructor frame or an old-path call scope
+  # with `:ctor_fn`.
+  defp check_super_scope(sc) do
+    ok? =
+      case deref(sc) do
+        f when is_tuple(f) ->
+          match?(%Browser.JS.Resolve.Info{kind: k} when k in [:ctor, :derived_ctor], elem(f, 1))
+
+        %{vars: vars} ->
+          is_map_key(vars, :ctor_fn)
+
+        _ ->
+          false
+      end
+
+    unless ok?, do: raise(ArgumentError, "resolve check: super() lands on #{inspect(sc)}")
   end
 
   @doc "The object `super.x` reads from, and the current `this`."

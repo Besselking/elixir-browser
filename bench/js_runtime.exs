@@ -1,11 +1,12 @@
 # Usage: RUNS=5 RESOLVE=off mix run --no-start bench/js_runtime.exs [name ...]
 #
 # RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`,
-# 1 or 2; see `Browser.JS.Resolve`). Levels 3 and 4 run from steps 2d and 2e.
+# 1, 2 or 3; see `Browser.JS.Resolve`). Level 4 runs from step 2e.
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
-# walk and DOM-like objects. The script wraps each program in a function. Page scripts
+# walk and DOM-like objects. After their total it measures four programs of step 2d, which
+# are not in the total. The script wraps each program in a function. Page scripts
 # usually run in a function too. The script runs each program RUNS times (default 5). The
 # table shows the minimum time and the minimum number of reductions in millions. A reduction
 # is a BEAM work unit. The number of reductions does not change with the speed of the
@@ -56,16 +57,35 @@ programs = [
    """}
 ]
 
+# Four programs of step 2d (level 3 functions on frames: class constructors, default derived
+# constructors, `super` and private names in methods, and `arguments`). They show the gain
+# of that step and are not in the total of the nine programs above. QuickJS has no time
+# for them. The expected values are the results at `:off`.
+extra_programs = [
+  {"classnew30k", "new of a class 30k", nil, 449_985_000.0,
+   "class P { y = 1; constructor(x){ this.x = x } } var s = 0; for (var i = 0; i < 30000; i++) s += new P(i).x; return s"},
+  {"subclass30k", "new of a default subclass 30k", nil, 449_985_000.0,
+   "class B { constructor(x){ this.x = x } } class D extends B {} var s = 0; for (var i = 0; i < 30000; i++) s += new D(i).x; return s"},
+  {"supercalls30k", "super.m() and this.#x 30k", nil, 73650.0,
+   "class A { m(x){ return x + 1 } } class B extends A { #x = 2; m(x){ return super.m(x) + this.#x } } var b = new B(); var s = 0; for (var i = 0; i < 30000; i++) s = (s + b.m(i)) % 1000003; return s"},
+  {"args30k", "arguments reads 30k", nil, 149_995.0,
+   "function g(a, b){ return arguments.length + arguments[1] } var s = 0; for (var i = 0; i < 30000; i++) s += g(i, i % 7); return s"}
+]
+
 runs = String.to_integer(System.get_env("RUNS", "5"))
 filter = System.argv()
 
-selected =
+pick = fn list ->
   if filter == [],
-    do: programs,
+    do: list,
     else:
-      Enum.filter(programs, fn {id, _, _, _, _} ->
+      Enum.filter(list, fn {id, _, _, _, _} ->
         Enum.any?(filter, &String.contains?(id, &1))
       end)
+end
+
+selected = pick.(programs)
+selected_extra = pick.(extra_programs)
 
 resolve =
   case System.get_env("RESOLVE", "off") do
@@ -73,7 +93,8 @@ resolve =
     "info" -> :info
     "1" -> 1
     "2" -> 2
-    other -> raise "RESOLVE takes off, info, 1 or 2, not #{other}"
+    "3" -> 3
+    other -> raise "RESOLVE takes off, info, 1, 2 or 3, not #{other}"
   end
 
 opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
@@ -85,8 +106,10 @@ IO.puts(
     String.pad_leading("QuickJS", 9) <> String.pad_leading("ratio", 7) <> "   result"
 )
 
-{total, bad} =
-  Enum.reduce(selected, {0.0, 0}, fn {_id, name, qjs, expected, body}, {total, bad} ->
+# Runs the programs of `list` and prints one row for each. Returns the total of the minimum
+# times and the number of wrong results.
+run_list = fn list ->
+  Enum.reduce(list, {0.0, 0}, fn {_id, name, qjs, expected, body}, {total, bad} ->
     src = wrap.(body)
 
     {ms, reds, val, ok} =
@@ -102,21 +125,39 @@ IO.puts(
          ok and val == expected}
       end)
 
+    {qjs_col, ratio_col} =
+      if qjs,
+        do:
+          {:erlang.float_to_binary(qjs, decimals: 1),
+           :erlang.float_to_binary(ms / qjs, decimals: 0) <> "x"},
+        else: {"-", "-"}
+
     IO.puts(
       String.pad_trailing(name, 34) <>
         String.pad_leading(:erlang.float_to_binary(ms, decimals: 1), 8) <>
         String.pad_leading(:erlang.float_to_binary(reds / 1_000_000, decimals: 1), 7) <>
-        String.pad_leading(:erlang.float_to_binary(qjs, decimals: 1), 9) <>
-        String.pad_leading(:erlang.float_to_binary(ms / qjs, decimals: 0) <> "x", 7) <>
+        String.pad_leading(qjs_col, 9) <>
+        String.pad_leading(ratio_col, 7) <>
         "   " <> inspect(val) <> if(ok, do: "", else: "  WRONG, expected #{inspect(expected)}")
     )
 
     {total + ms, if(ok, do: bad, else: bad + 1)}
   end)
+end
+
+{total, bad} = run_list.(selected)
 
 IO.puts(
   String.pad_trailing("total", 34) <>
     String.pad_leading(:erlang.float_to_binary(total, decimals: 1), 8)
 )
 
-if bad > 0, do: System.halt(1)
+{_, bad_extra} =
+  if selected_extra == [] do
+    {0.0, 0}
+  else
+    IO.puts("step 2d programs (not in the total)")
+    run_list.(selected_extra)
+  end
+
+if bad + bad_extra > 0, do: System.halt(1)
