@@ -71,8 +71,9 @@ defmodule Browser.JS.Classes do
 
     ctor_node =
       case Enum.find(members, &match?({:cmember, :method, {:str, "constructor"}, _, false}, &1)) do
-        {:cmember, _, _, {:fn, _, params, body, mode, _}, _} ->
-          {:fn, name, params, body, mode, class_src}
+        {:cmember, _, _, {:fn, _, params, body, mode, src}, _} ->
+          # the constructor's source is the whole class; its resolver facts stay
+          {:fn, name, params, body, mode, Browser.JS.Resolve.with_src(src, class_src)}
 
         nil ->
           default_constructor(name, derived?, class_src)
@@ -88,7 +89,7 @@ defmodule Browser.JS.Classes do
         do: put_elem(ctor_node, 1, inferred),
         else: ctor_node
 
-    f = Interp.make_function(ctor_node, cenv)
+    f = Interp.make_function(ctor_node, cenv, false)
     if name, do: Interp.declare(cenv, name, f, true)
     Interp.set_home(f, proto)
     put_hidden(f, "prototype", proto)
@@ -611,6 +612,7 @@ defmodule Browser.JS.Classes do
   @doc "`new C(...)` for a class (`nt` is `new.target`)."
   def construct({:obj, id} = f, info, args, nt) do
     {:closure, c} = deref(id).fun
+    c = Interp.with_hoist(id, c)
     extra = [{:ctor_fn, f}, {:new_target, nt}]
 
     if info.derived? do

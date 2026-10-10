@@ -30,12 +30,12 @@ defmodule Browser.JS do
   `:infinity`, `:neg_infinity`), strings, booleans, `:undefined`, `nil` for `null`, lists for
   arrays, maps for objects and `:function` for functions.
 
-  Options: `:max_steps` (calls and loop iterations, default 1,000,000) and `:timeout` in ms
-  (default 5,000).
+  Options: `:max_steps` (calls and loop iterations, default 1,000,000), `:timeout` in ms
+  (default 5,000) and `:resolve` (the resolver level, see `Browser.JS.Resolve`).
   """
   @spec eval(String.t(), keyword) :: {:ok, result, console} | {:error, term, console}
   def eval(source, opts \\ []) do
-    case Parser.parse(source) do
+    case Parser.parse(source, Keyword.take(opts, [:resolve])) do
       {:error, msg} -> {:error, {:syntax, msg}, []}
       {:ok, program} -> run(program, opts)
     end

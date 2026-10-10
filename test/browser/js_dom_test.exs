@@ -622,9 +622,11 @@ defmodule Browser.JS.DOMTest do
     end
 
     test "an image given a data URL fires load, or error when it is no image" do
-      # the events come from a timer, so the page reports once all timers have run
-      lines =
-        run_page("""
+      # the events come from a timer, so the page reports once all timers have run; the
+      # whole console is compared, so that a failure shows an error the script hit
+      {pid, reply} =
+        start("""
+        <body><script>
         var seen = [];
         var c = document.createElement("canvas");
         c.width = 2; c.height = 2;
@@ -639,9 +641,11 @@ defmodule Browser.JS.DOMTest do
         bad.src = "data:,hello";
         seen.push("sync");
         setTimeout(function () { console.log(seen.join(", ")); }, 50);
+        </script></body>
         """)
 
-      assert lines == ["sync, good load, bad error"]
+      flushed = Runtime.flush(pid)
+      assert reply.console ++ flushed.console == [log: "sync, good load, bad error"]
     end
 
     test "a promise rejected with nobody listening is reported" do

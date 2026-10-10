@@ -1211,6 +1211,18 @@ defmodule Browser.JSTest do
       assert js("var C = class Named { who() { return Named.name } }; new C().who()") == "Named"
     end
 
+    test "the inferred name of an anonymous class is not a binding in the constructor" do
+      assert js("let X = class { constructor() { X = 5 } }; new X(); X") == 5.0
+
+      assert js(
+               "class Y { constructor() { try { Y = 1 } catch (e) { this.e = e.constructor.name } } }; new Y().e"
+             ) == "TypeError"
+
+      assert js(
+               "let Z = class N { constructor() { try { N = 1 } catch (e) { this.e = e.constructor.name } } }; new Z().e"
+             ) == "TypeError"
+    end
+
     test "extends, super calls and super.method" do
       assert js(
                "class A { constructor(x) { this.x = x } hi() { return 'A' + this.x } } class B extends A { constructor() { super(7); this.y = 1 } hi() { return 'B' + super.hi() } } var b = new B; [b.x, b.y, b.hi(), b instanceof A, Object.getPrototypeOf(B) === A].join()"
