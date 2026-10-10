@@ -436,6 +436,7 @@ defmodule Browser.JS.ResolveTest do
 
   defp form?({k, _, _, _}) when k in [:slot, :cslot, :fname], do: true
   defp form?({:mslot, _, _, _, _}), do: true
+  defp form?({:aslot, _, _}), do: true
   defp form?({:mref, _, _}), do: true
   defp form?({:gref, _}), do: true
   defp form?({:this, _, _}), do: true
@@ -511,7 +512,7 @@ defmodule Browser.JS.ResolveTest do
   defp mark?(%Scope{}), do: true
 
   defp mark?(t) when is_tuple(t) and tuple_size(t) > 0 and is_atom(elem(t, 0)),
-    do: elem(t, 0) in [:slot, :cslot, :fname, :mslot, :mref, :gref, :in_tdz, :aw]
+    do: elem(t, 0) in [:slot, :cslot, :fname, :mslot, :aslot, :mref, :gref, :in_tdz, :aw]
 
   defp mark?(_), do: false
 
@@ -1101,8 +1102,9 @@ defmodule Browser.JS.ResolveTest do
     assert i.size == 8
     assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :param, :hidden, :hidden}
 
+    # The hidden slot of the object is read through `{:aslot}` (step 2d, rule R3).
     assert forms(body(f)) == [
-             {:slot, 0, 8, "arguments"},
+             {:aslot, 0, 8},
              {:mslot, 0, 6, "a", 0},
              {:slot, 0, 6, "a"}
            ]
@@ -1112,7 +1114,7 @@ defmodule Browser.JS.ResolveTest do
 
     assert body(f) == [
              {:var, :var, [{{:mslot, 0, 6, "a", 0}, {:num, 1.0}}]},
-             {:return, {:member, {:slot, 0, 8, "arguments"}, {:num, 0.0}, false}, :plain}
+             {:return, {:member, {:aslot, 0, 8}, {:num, 0.0}, false}, :plain}
            ]
 
     f = fun(resolve(@s12b), "f")
@@ -1158,7 +1160,7 @@ defmodule Browser.JS.ResolveTest do
     assert i.uses_arguments
     assert i.level == 3
     assert i.slots == %{"a" => 6, "arguments" => 8, args: 7}
-    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert forms(arrow(f)) == [{:aslot, 1, 8}]
     assert i.captured == MapSet.new([8])
   end
 
@@ -1604,7 +1606,8 @@ defmodule Browser.JS.ResolveTest do
                   Resolve.strip(resolved) != tree ->
                     ["#{label}: strip at #{level} differs"]
 
-                  level == 4 and Resolve.check(resolved, top: top_of(opts)) != :ok ->
+                  # (level 3 too: rules R3 and R4 of step 2d emit only from level 3)
+                  level in [3, 4] and Resolve.check(resolved, top: top_of(opts)) != :ok ->
                     ["#{label}: #{inspect(Resolve.check(resolved, top: top_of(opts)))}"]
 
                   true ->
@@ -1740,7 +1743,7 @@ defmodule Browser.JS.ResolveTest do
     assert i.copies == [{8, 9}]
     assert i.captured == MapSet.new([8])
     # The closure in the default reads the object; the body reads and writes the `var`.
-    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert forms(arrow(f)) == [{:aslot, 1, 8}]
 
     assert [
              {:var, :var, [{{:slot, 0, 9, "arguments"}, _}]},
@@ -1750,7 +1753,7 @@ defmodule Browser.JS.ResolveTest do
     assert Resolve.check(resolve(@s32a)) == :ok
 
     f = fun(resolve(@s32b), "f")
-    assert forms(params(f)) == [{:slot, 0, 6, "a"}, {:slot, 0, 8, "arguments"}]
+    assert forms(params(f)) == [{:slot, 0, 6, "a"}, {:aslot, 0, 8}]
     assert forms(body(f)) == [{:slot, 0, 9, "arguments"}, {:slot, 0, 9, "arguments"}]
     assert Resolve.check(resolve(@s32b)) == :ok
 
@@ -1763,10 +1766,10 @@ defmodule Browser.JS.ResolveTest do
     # takes the name in the body.
     f = fun(resolve(@s32c), "f")
     assert info(f).slots[:arguments] == 8
-    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert forms(arrow(f)) == [{:aslot, 1, 8}]
     assert info(f).captured == MapSet.new([8])
     f = fun(resolve(@s32d), "f")
-    assert forms(arrow(f)) == [{:slot, 1, 8, "arguments"}]
+    assert forms(arrow(f)) == [{:aslot, 1, 8}]
     assert info(f).captured == MapSet.new([8])
   end
 
@@ -2052,6 +2055,240 @@ defmodule Browser.JS.ResolveTest do
 
     tree = resolve("function f(o, b = function(){ with (o) { return a } }){ var a }", resolve: 2)
     assert %Info{level: nil, dynamic: true} = info(fun(tree, "f"))
+  end
+
+  # ── step 2d: rules R1 to R4 (notes/js-frames-2d-design.md, 1.5, 1.6, 2.4 and 2.6) ──
+
+  test "2d. R1: eval in an arrow gives the super bindings of the old path from level 3" do
+    src = "class B extends A { constructor(){ (() => eval('super()'))() } }"
+    c = info(fun(resolve(src, resolve: 3), "constructor"))
+    assert c.hidden == [:this, :args, :arguments, :new_target, :home, :ctor_fn]
+    assert c.rewritten
+
+    # Below level 3 the facts stay as they were: the owner is not rewritten there.
+    c = info(fun(resolve(src, resolve: 2), "constructor"))
+    assert c.hidden == [:this, :args, :arguments, :new_target, :home]
+
+    # A plain function gets no `:home`, so the by-name walk of `super.m()` goes on to the
+    # method, as on the old path.
+    src =
+      "class B extends A { m(){ function g(){ return (() => eval('super.m()'))() } " <>
+        "return g.call(this) } }"
+
+    assert info(fun(resolve(src, resolve: 3), "g")).hidden == [
+             :this,
+             :args,
+             :arguments,
+             :new_target
+           ]
+
+    assert :home in info(fun(resolve(src, resolve: 2), "g")).hidden
+
+    # A method gets `:home` and no `:ctor_fn`.
+    m = info(fun(resolve("({ m(){ return (() => eval('1'))() } })", resolve: 3), "m"))
+    assert :home in m.hidden
+    refute :ctor_fn in m.hidden
+  end
+
+  test "2d. R2: an async arrow in the parameters makes the owner dynamic" do
+    for decl <- ["let arguments = 1", "var arguments = 1", "function arguments(){}"] do
+      src = "function f(a = async () => { r = arguments.length }){ #{decl}; return a }"
+      assert %Info{dynamic: true, level: nil} = info(fun(resolve(src, resolve: 3), "f"))
+      assert %Info{dynamic: false, level: 3} = info(fun(resolve(src, resolve: 2), "f"))
+    end
+
+    # Without a body declaration of the name the by-name walk finds the object.
+    src = "function f(a = async () => arguments.length){ return a }"
+    assert %Info{dynamic: false, level: 3, rewritten: true} = info(fun(resolve(src), "f"))
+
+    # A rewritten arrow reads the hidden slot, so the owner keeps its level.
+    src = "function f(a = () => arguments.length){ let arguments = 1; return a }"
+    tree = resolve(src, resolve: 3)
+    assert %Info{dynamic: false, level: 3, rewritten: true} = info(fun(tree, "f"))
+    assert forms(arrow(tree)) == [{:aslot, 1, 8}]
+  end
+
+  test "2d. R3: a hidden arguments slot is an aslot, a var arguments slot is a slot" do
+    for level <- [3, 4] do
+      tree = resolve(@s12a, resolve: level)
+      assert {:aslot, 0, 8} in forms(tree)
+      assert Resolve.check(tree) == :ok
+      assert Resolve.strip(tree) == off(@s12a)
+    end
+
+    tree = resolve(@s12d, resolve: 3)
+    assert forms(tree) == [{:slot, 0, 7, "arguments"}, {:slot, 0, 7, "arguments"}]
+
+    # An assignment to `arguments` keeps the form in its write role.
+    src = "function f(){ arguments = 5; return arguments }"
+    assert [{:aslot, 0, 7}, {:aslot, 0, 7}] = forms(resolve(src, resolve: 3))
+    assert Resolve.check(resolve(src, resolve: 3)) == :ok
+
+    # The check refuses an aslot that lands on a slot that is not the object's.
+    bad =
+      {:program,
+       [
+         {:fundecl, "f",
+          put_elem(fun(resolve(@s12d, resolve: 3), "f"), 3, [{:return, {:aslot, 0, 7}, :plain}])}
+       ]}
+
+    assert {:error, _} = Resolve.check(bad)
+  end
+
+  test "2d. R4: a class without a constructor carries a default constructor Info from level 3" do
+    src = "class A {} class B extends A {} class C { constructor(){} }"
+
+    for level <- [3, 4] do
+      tree = resolve(src, resolve: level)
+      [a, b, c] = collect(tree, &match?({:class, _, _, _, _}, &1))
+      assert {:class, "A", nil, [], %Info{kind: :ctor, rewritten: true, src: "class A {}"}} = a
+      assert {:class, "B", _, [], %Info{kind: :derived_ctor, rewritten: true}} = b
+      assert {:class, "C", nil, _, "class C { constructor(){} }"} = c
+      assert Resolve.check(tree) == :ok
+      assert Resolve.strip(tree) == off(src)
+    end
+
+    # At `:info`, 1 and 2 the class node keeps its source text.
+    for level <- [:info, 1, 2] do
+      for {:class, _, _, _, x} <-
+            collect(resolve(src, resolve: level), &match?({:class, _, _, _, _}, &1)),
+          do: assert(is_binary(x))
+    end
+
+    # A class in a dynamic region keeps its source text.
+    tree = resolve("function f(){ eval(''); class A {} }", resolve: 3)
+    assert [{:class, _, _, _, x}] = collect(tree, &match?({:class, _, _, _, _}, &1))
+    assert is_binary(x)
+
+    # The check refuses an Info on a class with a constructor member.
+    {:program, [{:var, :let, [{id, {:class, n, h, m, s}}]}]} =
+      resolve("class C { constructor(){} }", resolve: 3)
+
+    bad =
+      {:program,
+       [
+         {:var, :let,
+          [{id, {:class, n, h, m, %{Resolve.default_ctor_info(false, s) | rewritten: true}}}]}
+       ]}
+
+    assert {:error, _} = Resolve.check(bad)
+  end
+
+  # ── step 2d: more cases of R1 to R4 ─────────────────────────
+
+  # The cases of design 6.1, item 11, that the tests above do not cover.
+
+  # The class nodes of a term, in source order.
+  defp classes(term), do: collect(term, &match?({:class, _, _, _, _}, &1))
+
+  # Replaces every subterm `from` of `term` with `to`, and fails when `term` has none: a
+  # negative test of `check` proves nothing when it checks the unchanged term.
+  defp swap(term, from, to) do
+    swapped = replace(term, from, to)
+    assert swapped != term, "no #{inspect(from)} in the term"
+    swapped
+  end
+
+  # Replaces every subterm `from` of `term` with `to`, also inside the hoist list of an
+  # `Info`, where a function node of the body is kept a second time.
+  defp replace(term, from, to) when term == from, do: to
+
+  defp replace(%Info{hoist: h} = i, from, to),
+    do: %{i | hoist: Enum.map(h, fn {s, n} -> {s, replace(n, from, to)} end)}
+
+  defp replace(%{__struct__: _} = s, _from, _to), do: s
+
+  defp replace(t, from, to) when is_tuple(t),
+    do: t |> Tuple.to_list() |> Enum.map(&replace(&1, from, to)) |> List.to_tuple()
+
+  defp replace(l, from, to) when is_list(l), do: Enum.map(l, &replace(&1, from, to))
+  defp replace(x, _from, _to), do: x
+
+  test "2d. R1: a base constructor gets :ctor_fn, as `:off` gives it to every constructor" do
+    src = "class C { constructor(){ (() => eval('1'))() } }"
+    base = info(fun(resolve(src, resolve: 3), "constructor"))
+    assert base.kind == :ctor
+    assert :ctor_fn in base.hidden and :new_target in base.hidden and :home in base.hidden
+  end
+
+  test "2d. R2: an async arrow in the body keeps the owner at level 3" do
+    # The body phase sees the body binding of `arguments`, as the spec says, so the rule of
+    # design 2.6 does not apply.
+    src = "function f(){ var arguments; return async () => arguments.length }"
+
+    assert %Info{dynamic: false, level: 3, rewritten: true} =
+             info(fun(resolve(src, resolve: 3), "f"))
+  end
+
+  test "2d. R3: every role of a hidden arguments slot, the hop of an arrow, the round trip" do
+    src =
+      "function f(a){ arguments = 5; return typeof arguments + delete arguments + arguments[0] }"
+
+    tree = resolve(src, resolve: 3)
+    f = fun(tree, "f")
+    assert %Info{slots: %{"a" => 6, :args => 7, "arguments" => 8}} = info(f)
+    assert collect(f, &match?({:aslot, _, _}, &1)) == List.duplicate({:aslot, 0, 8}, 4)
+    refute find(f, &match?({:slot, _, _, "arguments"}, &1))
+    assert Resolve.strip(tree) == off(src)
+    assert Resolve.check(tree) == :ok
+
+    # Under parameter expressions the default reads the hidden slot, the body the `var`.
+    src = "function f(a = arguments){ var arguments; return arguments }"
+    tree = resolve(src, resolve: 3)
+    assert %Info{slots: %{:arguments => 8, "arguments" => 9}} = info(fun(tree, "f"))
+    assert collect(tree, &match?({:aslot, _, _}, &1)) == [{:aslot, 0, 8}]
+    assert Resolve.strip(tree) == off(src)
+    assert Resolve.check(tree) == :ok
+
+    # Below level 3 the function is not rewritten, so no form is emitted.
+    assert collect(
+             resolve("function f(){ return arguments }", resolve: 2),
+             &match?({:aslot, _, _}, &1)
+           ) == []
+  end
+
+  # Design 5.2, item 3: `check` asserts statically that an `{:mslot}` lands only where
+  # `argmap` has the name, and that no `{:slot}` writes a mapped parameter.
+  test "2d. R3: check refuses an {:mslot} without a mapping and a {:slot} write to a mapped parameter" do
+    # A strict function maps nothing, so an `{:mslot}` there is wrong.
+    tree = resolve("function f(a){ 'use strict'; a = 1; return arguments }", resolve: 3)
+    assert Resolve.check(tree) == :ok
+
+    bad =
+      swap(
+        tree,
+        {:sassign, "=", {:slot, 0, 6, "a"}, {:num, 1.0}},
+        {:sassign, "=", {:mslot, 0, 6, "a", 0}, {:num, 1.0}}
+      )
+
+    assert {:error, _} = Resolve.check(bad)
+
+    # A write to a mapped parameter must sync, so a `{:slot}` write there is wrong.
+    tree = resolve("function f(a){ a = 1; return arguments }", resolve: 3)
+    assert Resolve.check(tree) == :ok
+    assert {:error, _} = Resolve.check(swap(tree, {:mslot, 0, 6, "a", 0}, {:slot, 0, 6, "a"}))
+  end
+
+  test "2d. R4: the record on the class node is the default constructor record of design 1.5" do
+    for {src, derived?} <- [{"(class A {})", false}, {"(class B extends A {})", true}] do
+      [{:class, _, _, [], text}] = classes(off(src))
+      expected = %{Resolve.default_ctor_info(derived?, text) | rewritten: true}
+
+      for level <- [3, 4] do
+        assert [{:class, _, _, [], ^expected}] = classes(resolve(src, resolve: level)),
+               "#{src} at #{level}"
+      end
+
+      # At `:info`, 1 and 2 the class node is the node of `:off`.
+      for level <- [:info, 1, 2] do
+        assert classes(resolve(src, resolve: level)) == classes(off(src)), "#{src} at #{level}"
+      end
+    end
+
+    # A derived class with an explicit constructor keeps its text.
+    src = "(class B extends A { constructor(){ super() } })"
+    assert [{:class, _, _, [_], text}] = classes(resolve(src, resolve: 3))
+    assert is_binary(text)
   end
 end
 
