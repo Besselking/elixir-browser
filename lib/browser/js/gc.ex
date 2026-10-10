@@ -100,7 +100,9 @@ defmodule Browser.JS.GC do
   # freed frames that a reachable value still holds. A freed frame is a tombstone
   # `{:js_freed, name}` in check mode. The walk is the walk of `collect/0`, but a tombstone
   # counts only when it is reached through an edge that holds a scope: the `scope` and
-  # `home` of a closure, the `parent` and `env` of a map, and the parent of a frame. The
+  # `home` of a closure, the `parent` and `env` of a map, the `map_scope` of a mapped
+  # arguments object (a frame from step 2d, which must be detached before its frame is
+  # freed), and the parent of a frame. The
   # conservative walk reads every integer as an id, so an array length or a line number
   # that equals the id of a tombstone must not count.
   def dangling(extra) do
@@ -160,8 +162,11 @@ defmodule Browser.JS.GC do
     stack =
       :maps.fold(
         fn
-          k, v, acc when is_integer(k) -> spush(v, acc, marks, false)
-          k, v, acc -> spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env])
+          k, v, acc when is_integer(k) ->
+            spush(v, acc, marks, false)
+
+          k, v, acc ->
+            spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env, :map_scope])
         end,
         rest,
         t

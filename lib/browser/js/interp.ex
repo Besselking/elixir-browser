@@ -39,6 +39,11 @@ defmodule Browser.JS.Interp do
 
   @max_depth 1000
 
+  # The position of the first slot in a frame tuple, after the five header elements. The
+  # parameters come first, so argument `k` of a function with plain parameters is in slot
+  # `@frame_base + k` (`Browser.JS.Resolve.Info`).
+  @frame_base 6
+
   # Check mode (`JS_RESOLVE_CHECK=1`, see `config/config.exs`): every slot access asserts
   # that the hop lands on a scope that owns the name at that index, and every frame is
   # checked at its build. The flag is read at compile time, so without it no check costs
@@ -312,8 +317,8 @@ defmodule Browser.JS.Interp do
     case deref(scope) do
       f when is_tuple(f) ->
         # A frame has a fixed layout: it can take a value for a name it has a slot for, and
-        # nothing else. Nothing declares into a frame at level 1; this clause is a guard
-        # for the later steps.
+        # nothing else. From level 3, `super()` writes the `this` slot of a constructor
+        # frame through this clause (step 2d).
         case :erlang.element(2, f).slots do
           %{^name => i} -> slot_put(scope, i, val)
           _ -> raise ArgumentError, "a frame cannot take the new name #{inspect(name)}"
@@ -383,6 +388,42 @@ defmodule Browser.JS.Interp do
 
   defp check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
 
+  # A write to a mapped parameter lands on the parameter's slot, in a function whose
+  # `argmap` maps the name to the same argument index: the sync writes that element.
+  defp check_landing({:mslot, d, i, name, k}, env) do
+    id = hop(env, d)
+    check_slot(id, i, name)
+
+    case :erlang.get(id) do
+      f when is_tuple(f) ->
+        unless match?(%Info{argmap: %{^name => ^k}}, :erlang.element(2, f)),
+          do: check_fail("{:mslot} #{inspect(name)} #{k} lands on a frame without that mapping")
+
+      _ ->
+        :ok
+    end
+  end
+
+  # The arguments object form lands on the hidden slot of the object (rule R3 of step 2d):
+  # only that slot holds `{:unbuilt, id}` before the first read.
+  defp check_landing({:aslot, d, i}, env) do
+    case :erlang.get(hop(env, d)) do
+      f when is_tuple(f) and i <= tuple_size(f) ->
+        rec = :erlang.element(2, f)
+
+        unless match?(%Info{}, rec) and
+                 (Map.get(rec.slots, :arguments) == i or Map.get(rec.slots, "arguments") == i) and
+                 kind_at(rec, i) == :hidden,
+               do:
+                 check_fail(
+                   "{:aslot, #{d}, #{i}} lands on no arguments slot of #{check_name(rec)}"
+                 )
+
+      other ->
+        check_fail("{:aslot, #{d}, #{i}} lands on #{inspect(other, limit: 3)}")
+    end
+  end
+
   # A closure in a parameter expression does not see the body names of its function, so a
   # `{:gref}` there can pass a function frame that has a body slot of the same name. The
   # check cannot tell where the form sits, so it accepts a body slot of a function whose
@@ -431,15 +472,18 @@ defmodule Browser.JS.Interp do
 
   defp param_own_slot?(_rec, _i, _name), do: false
 
-  # A frame as `run_frame/5` built it: the size of the layout, only the hidden slots of
-  # levels 1 and 2, the free rule of its level, and copies from a parameter slot to a `var`
-  # slot. A leaf has nothing to hoist or copy.
-  defp check_frame(f, %Info{} = info) do
+  # A frame as `run_frame/6` built it: the size of the layout, the levels 1 to 3, the
+  # free rule of its level, and copies from a parameter slot (or from the hidden slot of
+  # the arguments object) to a `var` slot. A leaf has nothing to hoist or copy. Levels 1
+  # and 2 have only the hidden slots `:this` and `:self`. From level 3 (step 2d) the
+  # hidden slots must fit the function and hold the values of a call entry (see
+  # `check_hidden/4`), and `argmap` must describe plain parameters of sloppy code.
+  defp check_frame(f, %Info{} = info, id, mode) do
     cond do
       tuple_size(f) != info.size ->
         check_fail("frame of #{check_name(info)} has size #{tuple_size(f)}, not #{info.size}")
 
-      info.level not in [1, 2] ->
+      info.level not in [1, 2, 3] ->
         check_fail("frame of #{check_name(info)} at level #{inspect(info.level)}")
 
       info.level == 1 and (info.hoist != [] or info.copies != []) ->
@@ -448,18 +492,149 @@ defmodule Browser.JS.Interp do
       info.free == :always != (info.level == 1) ->
         check_fail("frame of #{check_name(info)} at level #{info.level} frees #{info.free}")
 
-      info.hidden -- [:this, :self] != [] ->
+      info.level < 3 and info.hidden -- [:this, :self] != [] ->
         check_fail("frame of #{check_name(info)} has hidden slots #{inspect(info.hidden)}")
 
       # A copy can land on a `:fun` slot when a `var` and a function declaration share the
       # name: the copy runs first and the hoist then overwrites it, as the spec orders.
       not Enum.all?(info.copies, fn {from, to} ->
-        from <= info.size and to <= info.size and kind_at(info, from) == :param and
+        from <= info.size and to <= info.size and
+          (kind_at(info, from) == :param or Map.get(info.slots, :arguments) == from) and
             kind_at(info, to) in [:var, :fun]
       end) ->
         check_fail("frame of #{check_name(info)} has copies #{inspect(info.copies)}")
 
       true ->
+        check_argmap(info)
+        Enum.each(info.hidden, &check_hidden(&1, f, info, {id, mode}))
+    end
+  end
+
+  # `argmap` exists only for sloppy code with plain parameters, and each name maps to the
+  # slot of its argument index.
+  defp check_argmap(%Info{argmap: nil}), do: :ok
+
+  defp check_argmap(%Info{argmap: argmap} = info) do
+    unless not info.strict and info.params == :plain and info.nparams > 0 and
+             Enum.all?(argmap, fn {name, k} -> Map.get(info.slots, name) == @frame_base + k end),
+           do: check_fail("frame of #{check_name(info)} has argmap #{inspect(argmap)}")
+  end
+
+  # One hidden slot of a new frame: the kinds of function that may have it, and the value
+  # it must hold at entry.
+  defp check_hidden(h, f, info, {id, mode}) do
+    v = :erlang.element(hidden_index(info, h), f)
+    ctor? = info.kind in [:ctor, :derived_ctor]
+
+    ok? =
+      case h do
+        # (a derived constructor that runs from a computed key of its own class has no
+        # class record yet, so `new` runs it as a plain function; `super()` then throws)
+        :this when info.kind == :derived_ctor and mode != :ctor ->
+          not Map.has_key?(deref(id), :class_info)
+
+        :this ->
+          v == :uninit_this == (info.kind == :derived_ctor and mode == :ctor)
+
+        :args ->
+          is_list(v)
+
+        :arguments ->
+          v == {:unbuilt, id} and Map.has_key?(info.slots, :args)
+
+        :new_target ->
+          v == :undefined or constructor?(v)
+
+        :home ->
+          (ctor? or info.kind in [:method, :get, :set]) and
+            (v == :undefined or match?({:obj, _}, v))
+
+        :ctor_fn ->
+          ctor? and v == {:obj, id}
+
+        :self ->
+          v == {:obj, id}
+      end
+
+    unless ok?,
+      do: check_fail("hidden slot #{inspect(h)} of #{check_name(info)} holds #{inspect(v)}")
+  end
+
+  # A by-name read of `this` or `new.target` must not pass a level 3 function frame that
+  # is not an arrow: such a function owns both, and the resolver gives it the slot when
+  # any code inside it reads the binding by name (step 2d). `:home` and `:ctor_fn` may
+  # pass, as on the old path, whose call scopes have them only for methods and class
+  # constructors. A level 1 or 2 frame is not checked: no code inside it reads the
+  # bindings by name, and the unit tests of the walkers build such frames by hand under
+  # map scopes that do not have them.
+  defp check_hidden_presence(f, name) when name in [:this, :new_target] do
+    case :erlang.element(2, f) do
+      %Info{kind: k, level: 3} = info when k not in [:arrow, :arrow_expr] ->
+        check_fail("a by-name #{inspect(name)} passes the frame of #{check_name(info)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp check_hidden_presence(_f, _name), do: :ok
+
+  # The slot of a hidden binding. The self slot is under the function's name (`info.self`
+  # gives its index), and the arguments object is under the name `"arguments"` unless the
+  # body takes that name (`Browser.JS.Resolve.Info`).
+  defp hidden_index(info, :self), do: info.self
+
+  defp hidden_index(info, :arguments),
+    do: Map.get(info.slots, :arguments) || :erlang.map_get("arguments", info.slots)
+
+  defp hidden_index(info, h), do: :erlang.map_get(h, info.slots)
+
+  # The aliasing invariant of a mapped arguments object (step 2d): the object records this
+  # frame, maps only parameter indexes, and each mapped element holds the value of its
+  # parameter's slot.
+  # A builtin can change the elements in bulk without a sync (the Array fast paths, as on
+  # the old path), so the value test runs only for the index `k` that was just written.
+  defp check_args_alias(frame, k \\ nil) do
+    f = :erlang.get(frame)
+
+    with %Info{slots: %{args: ai}} = info <- :erlang.element(2, f),
+         {:mapped, aid} <- :erlang.element(ai, f) do
+      o = deref(aid)
+
+      cond do
+        Map.get(o, :map_scope) != frame or not is_map_key(o, :mapped) ->
+          check_fail("the arguments object of #{check_name(info)} does not map its frame")
+
+        Enum.any?(o.mapped, fn {k, _} -> k >= info.nparams end) ->
+          check_fail("the arguments object of #{check_name(info)} maps #{inspect(o.mapped)}")
+
+        k != nil and is_map_key(o.mapped, k) and
+            Map.get(o.items, k) !== :erlang.element(@frame_base + k, f) ->
+          check_fail("an element of the arguments object of #{check_name(info)} is out of sync")
+
+        true ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  # A write to the slot of a mapped parameter must go through `{:mslot}` or a by-name
+  # write, which sync the arguments object. A plain slot write would skip the sync.
+  defp check_unsynced(frame, i) do
+    case :erlang.get(frame) do
+      f when is_tuple(f) ->
+        case :erlang.element(2, f) do
+          %Info{argmap: %{}} = info ->
+            if kind_at(info, i) == :param,
+              do: check_fail("an unsynced write to parameter slot #{i} of #{check_name(info)}")
+
+          _ ->
+            :ok
+        end
+
+      _ ->
         :ok
     end
   end
@@ -633,10 +808,20 @@ defmodule Browser.JS.Interp do
   # The body entry of a function frame, after the parameters are bound: first the copies
   # of the parameter values into the body's own `var` slots, then the function
   # declarations. This is the order of the spec, so a declaration overwrites a copy and
-  # never the reverse. A function with neither pays one clause match.
-  defp enter_body(_frame, [], []), do: :ok
+  # never the reverse. A function with neither, and without `var arguments`, pays one
+  # clause match.
+  #
+  # `var arguments` (`args_var`) holds the arguments object from the body entry, as
+  # `call_frame` does on the old path. With parameter initializers the object is built into
+  # its hidden slot before the copies, because a copy fills the `var` from that slot. The
+  # object is then unmapped, so the order against the hoist cannot be seen. Without
+  # initializers it is built into the `var` slot after the hoist, so that a mapped element
+  # shows a function that a declaration put into its parameter.
+  defp enter_body(_frame, %Info{copies: [], hoist: [], args_var: false}, _id), do: :ok
 
-  defp enter_body(frame, copies, hoist) do
+  defp enter_body(frame, %Info{copies: copies, hoist: hoist} = info, id) do
+    if info.args_var and info.params == :exprs, do: build_hidden_arguments(frame, info)
+
     t =
       Enum.reduce(copies, :erlang.get(frame), fn {from, to}, t ->
         :erlang.setelement(to, t, :erlang.element(from, t))
@@ -648,18 +833,46 @@ defmodule Browser.JS.Interp do
       end)
 
     :erlang.put(frame, t)
+
+    if info.args_var and info.params != :exprs,
+      do: build_arguments(frame, :erlang.map_get("arguments", info.slots), id)
+
+    if @check, do: check_args_alias(frame)
+    :ok
   end
+
+  # Builds the object in the hidden slot of `var arguments` under parameter initializers,
+  # unless a parameter default read `arguments` and built it already.
+  defp build_hidden_arguments(frame, %Info{slots: %{arguments: i}}) do
+    case :erlang.element(i, :erlang.get(frame)) do
+      {:unbuilt, fid} -> build_arguments(frame, i, fid)
+      _ -> :ok
+    end
+  end
+
+  defp build_hidden_arguments(_frame, _info), do: :ok
 
   # A by-name lookup through a frame: the names of the function are in `info.slots`
   # (block names are not: only slot forms reach those). `:strict` is not a slot, the
-  # `Info` answers it. Anything else goes on to the parent.
-  defp lookup_frame(f, name) do
+  # `Info` answers it. Anything else goes on to the parent. `id` is the frame's own id: a
+  # hit on an arguments object that is not built yet builds it into the frame (step 2d).
+  # This serves eval code and the old-path functions (level 4) inside a level 3 function.
+  defp lookup_frame(id, f, name) do
     case :erlang.element(2, f) do
       %Info{slots: slots, strict: strict} ->
         case slots do
-          %{^name => i} -> {:ok, :erlang.element(i, f)}
-          _ when name == :strict and strict -> {:ok, true}
-          _ -> lookup_var(:erlang.element(1, f), name)
+          %{^name => i} ->
+            case :erlang.element(i, f) do
+              {:unbuilt, fid} -> {:ok, build_arguments(id, i, fid)}
+              v -> {:ok, v}
+            end
+
+          _ when name == :strict and strict ->
+            {:ok, true}
+
+          _ ->
+            if @check, do: check_hidden_presence(f, name)
+            lookup_var(:erlang.element(1, f), name)
         end
 
       # A block frame (step 2c) answers its own names. It has no strictness of its own,
@@ -678,7 +891,7 @@ defmodule Browser.JS.Interp do
   defp lookup_var(scope, name) do
     if @check, do: check_live(scope)
     s = deref(scope)
-    if is_tuple(s), do: lookup_frame(s, name), else: lookup_map(s, name)
+    if is_tuple(s), do: lookup_frame(scope, s, name), else: lookup_map(s, name)
   end
 
   defp lookup_map(s, name) do
@@ -763,6 +976,7 @@ defmodule Browser.JS.Interp do
 
           true ->
             slot_put(scope, i, val)
+            sync_by_name(scope, info, name, val)
         end
 
       _ ->
@@ -770,6 +984,39 @@ defmodule Browser.JS.Interp do
           nil -> raise ArgumentError, "a frame has no parent to take #{inspect(name)}"
           parent -> assign_var(parent, name, val)
         end
+    end
+  end
+
+  # A by-name write to a mapped parameter (from eval code or from an old-path function
+  # inside a level 3 function) updates the arguments object as a `{:mslot}` write does.
+  defp sync_by_name(frame, %Info{argmap: %{} = argmap}, name, val) do
+    case argmap do
+      %{^name => k} -> sync_mapped(frame, k, val)
+      _ -> :ok
+    end
+  end
+
+  defp sync_by_name(_frame, _rec, _name, _val), do: :ok
+
+  # After a write of `val` to the slot of mapped parameter `k` of `frame`: when the frame
+  # built a mapped arguments object (its `:args` slot holds `{:mapped, aid}`) and element
+  # `k` is still mapped, the element takes the value too. The sync goes through the object
+  # that the build recorded, not through the `arguments` binding, which code may assign.
+  defp sync_mapped(frame, k, val) do
+    f = :erlang.get(frame)
+
+    case :erlang.element(:erlang.map_get(:args, :erlang.element(2, f).slots), f) do
+      {:mapped, aid} ->
+        case deref(aid) do
+          %{mapped: %{^k => _}} = o -> store(aid, %{o | items: Map.put(o.items, k, val)})
+          _ -> :ok
+        end
+
+        if @check, do: check_args_alias(frame, k)
+        :ok
+
+      _ ->
+        :ok
     end
   end
 
@@ -849,12 +1096,30 @@ defmodule Browser.JS.Interp do
   defp sync_argument(_, _, _), do: :ok
 
   @doc false
-  # a write to a mapped `arguments` element reaches its parameter
+  # A write to a mapped `arguments` element reaches its parameter. `map_scope` is a map
+  # scope on the old path and a frame on the frame path (step 2d): `deref` tells them
+  # apart. The frame keeps argument `idx` in slot `@frame_base + idx`. A scope that is gone
+  # (a map scope freed after its call) has no reader left that could see the parameter. A
+  # frame is never gone here: `free_frame/2` takes `map_scope` away before it frees the
+  # frame, so in check mode a tombstone fails.
   def sync_param(%{mapped: mapped, map_scope: scope}, idx, val) do
-    # a scope dropped after its call has no reader left that could see the parameter
     case mapped do
-      %{^idx => name} -> if :erlang.get(scope) != :undefined, do: assign_var(scope, name, val)
-      _ -> :ok
+      %{^idx => name} ->
+        case :erlang.get(scope) do
+          :undefined ->
+            :ok
+
+          f when is_tuple(f) ->
+            if @check, do: check_live(scope)
+            slot_put(scope, @frame_base + idx, val)
+            if @check, do: check_args_alias(scope, idx)
+
+          _ ->
+            assign_var(scope, name, val)
+        end
+
+      _ ->
+        :ok
     end
 
     :ok
@@ -2606,7 +2871,7 @@ defmodule Browser.JS.Interp do
             # not leave the frame, so the constructor keeps its line in `Error.stack`)
             %{fun: {:closure, %{info: %Info{rewritten: true}} = c}} ->
               tick()
-              run_frame(id, c, this, args, false)
+              run_frame(id, c, this, args, nt, :new)
 
             %{fun: {:closure, c}} ->
               tick()
@@ -2863,7 +3128,7 @@ defmodule Browser.JS.Interp do
   # scope is garbage on return: dropping it keeps the heap from growing with every call.
   # the closure decides: a function the resolver rewrote runs on a tuple frame
   defp run_closure(id, %{info: %Info{rewritten: true}} = c, this, args),
-    do: run_frame(id, c, this, args, true)
+    do: run_frame(id, c, this, args, :undefined, :call)
 
   defp run_closure(id, c, this, args) do
     c = with_hoist(id, c)
@@ -2885,7 +3150,7 @@ defmodule Browser.JS.Interp do
       when not is_map_key(o, :generator) and not is_map_key(o, :async) and
              not is_map_key(o, :class_info) ->
         tick()
-        run_frame(id, c, this, args, true)
+        run_frame(id, c, this, args, :undefined, :call)
 
       %{class: :function, fun: {:closure, c}} = o
       when not is_map_key(o, :generator) and not is_map_key(o, :async) and
@@ -2965,13 +3230,21 @@ defmodule Browser.JS.Interp do
 
   # A call of a rewritten function (step 2b). The frame is one tuple
   # `{parent_id, info, nil, call_pos, root_id, params..., hidden..., template...}` built
-  # before the body runs and erased in `after`: nothing at level 1 can hold its id (no
-  # closure, no `arguments`, no eval). `:js_depth`, `:js_stack` and `:js_pos` are kept and
-  # restored as the old path does, until step 2f. The tail flag is never written: the
-  # resolver marked every return inside the function. With `tail?` a tail call goes to
-  # `tail_loop` after the frame is gone; without it (a call through `new`) the callee runs
-  # inside the frame, so the constructor keeps its line in `Error.stack`.
-  defp run_frame(id, c, this, args, tail?) do
+  # before the body runs and erased in `after` unless a closure made during the call can
+  # hold its id. `:js_depth`, `:js_stack` and `:js_pos` are kept and restored as the old
+  # path does, until step 2f. The tail flag is never written: the resolver marked every
+  # return inside the function. The function does not tick: its callers tick as they do
+  # on the old path, so the step counts stay the same.
+  #
+  # `nt` is the value of `new.target`, and `mode` (step 2d) says how the call came:
+  #
+  # - `:call`: a tail call goes to `tail_loop` after the frame is gone.
+  # - `:new`: a call through `new`. The callee of a tail site runs inside the frame, so
+  #   the constructor keeps its line in `Error.stack`.
+  # - `:ctor`: a derived class constructor. It runs as `:new` and gives back
+  #   `{value, this}`: the `this` slot is read inside the `try`, before the frame is freed,
+  #   because `super()` writes it during the body.
+  defp run_frame(id, c, this, args, nt, mode) do
     depth = pget(:js_depth)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     :erlang.put(:js_depth, depth + 1)
@@ -2980,8 +3253,10 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_stack, [{c.name, pos} | stack])
     info = c.info
 
-    tuple = List.to_tuple([c.scope, info, nil, pos, c.root | frame_slots(c, id, this, args)])
-    if @check, do: check_frame(tuple, info)
+    tuple =
+      List.to_tuple([c.scope, info, nil, pos, c.root | frame_slots(c, id, this, args, nt)])
+
+    if @check, do: check_frame(tuple, info, id, mode)
     frame = alloc(tuple)
     # A level 2 frame can outlive its call: the closures made in it (also in a parameter
     # default, so the count is read before the parameters are bound) hold its id. The
@@ -2992,26 +3267,46 @@ defmodule Browser.JS.Interp do
     result =
       try do
         if info.params != :plain, do: bind_params_list(c.params, args, frame)
-        enter_body(frame, info.copies, info.hoist)
+        enter_body(frame, info, id)
         if @check, do: check_hoisted(frame, info)
 
-        case c.mode do
-          :arrow_expr ->
-            ev(c.body, frame)
+        value =
+          case c.mode do
+            :arrow_expr ->
+              ev(c.body, frame)
 
-          _ ->
-            try do
-              case exec_fn(c.body, frame) do
-                {:ret, v} -> v
-                :ok -> :undefined
+            _ ->
+              try do
+                case exec_fn(c.body, frame) do
+                  {:ret, v} -> v
+                  :ok -> :undefined
+                end
+              catch
+                {:js_return, v} ->
+                  v
+
+                {:js_tail, f, t, a} ->
+                  case mode do
+                    :call ->
+                      {:js_tailcall, f, t, a}
+
+                    _ ->
+                      if @check and mode == :ctor,
+                        do: check_fail("a tail call in the constructor #{check_name(info)}")
+
+                      call(f, t, a)
+                  end
               end
-            catch
-              {:js_return, v} -> v
-              {:js_tail, f, t, a} -> if tail?, do: {:js_tailcall, f, t, a}, else: call(f, t, a)
-            end
-        end
+          end
+
+        if mode == :ctor,
+          do: {value, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))},
+          else: value
       after
-        if fns == nil or :erlang.get(:js_fns) == fns, do: free(frame)
+        # (the argument map test stays here, so a frame without one pays only `free/1`)
+        if fns == nil or :erlang.get(:js_fns) == fns,
+          do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
         :erlang.put(:js_depth, depth)
         :erlang.put(:js_stack, stack)
         :erlang.put(:js_pos, pos)
@@ -3023,13 +3318,39 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # The frame call of a rewritten class constructor, for `Classes.construct/4`: `mode` is
+  # `:new` for a base class and `:ctor` for a derived class (see `run_frame/6`).
+  def run_class_frame(id, c, this, args, nt, mode) when mode in [:new, :ctor],
+    do: run_frame(id, c, this, args, nt, mode)
+
+  # Frees a function frame on return. A frame that built a mapped arguments object first
+  # detaches the object: it takes away `mapped` and `map_scope`, because `put` tests the
+  # first and `sync_param` reads the second. Nobody can see the detach. Without a closure
+  # no code can read a parameter after the return, and the object's `items` already hold
+  # the values of the mapped parameters. Only a sloppy function with plain parameters has
+  # an `argmap`, so every other frame pays one clause match.
+  defp free_frame(frame, %Info{slots: %{args: i}}) do
+    case :erlang.element(i, :erlang.get(frame)) do
+      {:mapped, aid} ->
+        if @check, do: check_args_alias(frame)
+        o = deref(aid)
+        store(aid, o |> Map.delete(:mapped) |> Map.delete(:map_scope))
+
+      _ ->
+        :ok
+    end
+
+    free(frame)
+  end
+
   # The slots of a frame, from position 6: the parameters, the hidden slots, the template.
   # Plain parameters take the arguments by position (missing ones are `undefined`, extra
   # ones are dropped). Pattern parameters start as `undefined`, parameters with
   # initializers as `:tdz`; `bind_params_list/3` fills them.
-  defp frame_slots(c, id, this, args) do
+  defp frame_slots(c, id, this, args, nt) do
     info = c.info
-    rest = hidden_slots(info.hidden, info, id, this, info.template)
+    rest = hidden_slots(info.hidden, info, c, id, this, args, nt, info.template)
 
     case info.params do
       :plain -> plain_slots(args, info.nparams, rest)
@@ -3042,13 +3363,40 @@ defmodule Browser.JS.Interp do
   defp plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
   defp plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
 
-  defp hidden_slots([], _info, _id, _this, rest), do: rest
+  # The values of the hidden slots at entry, in the order of `info.hidden`:
+  #
+  # - `:this`: the receiver, boxed or replaced by the global `this` in sloppy code. A
+  #   derived constructor gets `:uninit_this`, which passes, because class code is strict.
+  # - `:args`: the argument list. The arguments object is built from it, and a mapped
+  #   build replaces it with `{:mapped, aid}` (see `build_arguments/3`).
+  # - `:arguments`: `{:unbuilt, id}`. The object is built at the first read, and `id` gives
+  #   its `callee`.
+  # - `:new_target`: `nt`, which is `undefined` for every call that is not a `new`.
+  # - `:home`: the home object of a method, which `set_home` wrote into the closure.
+  # - `:ctor_fn` and `:self`: the function that runs. For a class constructor this is the
+  #   class, because `Classes.construct` runs the class's own closure.
+  defp hidden_slots([], _info, _c, _id, _this, _args, _nt, rest), do: rest
 
-  defp hidden_slots([:this | hs], info, id, this, rest),
-    do: [sloppy_this(info.strict, this) | hidden_slots(hs, info, id, this, rest)]
+  defp hidden_slots([:this | hs], info, c, id, this, args, nt, rest),
+    do: [sloppy_this(info.strict, this) | hidden_slots(hs, info, c, id, this, args, nt, rest)]
 
-  defp hidden_slots([:self | hs], info, id, this, rest),
-    do: [{:obj, id} | hidden_slots(hs, info, id, this, rest)]
+  defp hidden_slots([:self | hs], info, c, id, this, args, nt, rest),
+    do: [{:obj, id} | hidden_slots(hs, info, c, id, this, args, nt, rest)]
+
+  defp hidden_slots([:args | hs], info, c, id, this, args, nt, rest),
+    do: [args | hidden_slots(hs, info, c, id, this, args, nt, rest)]
+
+  defp hidden_slots([:arguments | hs], info, c, id, this, args, nt, rest),
+    do: [{:unbuilt, id} | hidden_slots(hs, info, c, id, this, args, nt, rest)]
+
+  defp hidden_slots([:new_target | hs], info, c, id, this, args, nt, rest),
+    do: [nt | hidden_slots(hs, info, c, id, this, args, nt, rest)]
+
+  defp hidden_slots([:home | hs], info, c, id, this, args, nt, rest),
+    do: [Map.get(c, :home, :undefined) | hidden_slots(hs, info, c, id, this, args, nt, rest)]
+
+  defp hidden_slots([:ctor_fn | hs], info, c, id, this, args, nt, rest),
+    do: [{:obj, id} | hidden_slots(hs, info, c, id, this, args, nt, rest)]
 
   # `named?: false` makes no self-name scope: a class constructor gets its name
   # from the class scope, so an anonymous class expression must not bind the
@@ -3274,14 +3622,13 @@ defmodule Browser.JS.Interp do
     rewritten? = match?(%Info{rewritten: true}, info)
     named? = named? and is_binary(name) and mode == false
 
-    # Only level 1 and level 2 functions can run on a frame now. A rewritten function of a
-    # higher level needs the hidden slots of `arguments`, `new.target` and `super`, and
-    # suspended frames (steps 2d and 2e), so it must stop here with a clear error.
-    if rewritten? and info.level > 2,
+    # Functions of levels 1 to 3 can run on a frame now. A rewritten function of a higher
+    # level needs suspended frames (step 2e), so it must stop here with a clear error.
+    if rewritten? and info.level > 3,
       do:
         raise(
           ArgumentError,
-          "resolve level #{info.level} functions cannot run yet; use :off, :info, 1 or 2"
+          "resolve level #{info.level} functions cannot run yet; use :off, :info, 1, 2 or 3"
         )
 
     # (a self slot exists only for a named function expression; a parameter or a
@@ -3304,7 +3651,7 @@ defmodule Browser.JS.Interp do
         env
       end
 
-    # The closure count only goes up: `run_frame/5`, block frames and `free_scope/2` free a
+    # The closure count only goes up: `run_frame/6`, block frames and `free_scope/2` free a
     # scope when the count did not change, so a write that lowers it would free a scope
     # that a closure still holds.
     :erlang.put(:js_fns, pget(:js_fns) + 1)
@@ -3453,32 +3800,22 @@ defmodule Browser.JS.Interp do
   defp lazy_arguments(env) do
     case lookup_var(env, :args) do
       {:ok, args} ->
-        {:obj, aid} = a = new_array(args)
         owner = scope_with(env, :args)
         scope = deref(owner)
 
-        store(aid, deref(aid) |> Map.put(:arguments, true) |> Map.put(:proto, proto(:object)))
+        # (a frame owner keeps the object in a slot of its own, which `build_arguments/3`
+        # fills; resolver rule R2 keeps this path away from frames)
+        if @check and is_tuple(scope),
+          do:
+            check_fail("lazy_arguments on the frame of #{check_name(:erlang.element(2, scope))}")
 
-        thrower = :erlang.get(:js_throw_type_error)
+        callee =
+          arguments_callee(
+            Map.has_key?(scope.vars, :strict) or not simple_params?(scope),
+            Map.get(scope, :fid)
+          )
 
-        cond do
-          (Map.has_key?(scope.vars, :strict) or not simple_params?(scope)) and
-              thrower != :undefined ->
-            Browser.JS.Props.define_accessor(a, "callee",
-              get: thrower,
-              set: thrower,
-              enumerable: false,
-              configurable: false
-            )
-
-          is_integer(Map.get(scope, :fid)) ->
-            put_hidden(a, "callee", {:obj, scope.fid})
-
-          true ->
-            :ok
-        end
-
-        put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
+        {:obj, aid} = a = arguments_object(args, callee)
         map_arguments(aid, owner, scope, args)
         declare(owner, "arguments", a)
         a
@@ -3487,6 +3824,102 @@ defmodule Browser.JS.Interp do
         throw_error("ReferenceError", "arguments is not defined")
     end
   end
+
+  # The `callee` of an arguments object: the thrower accessor for strict code and for a
+  # parameter list that is not plain, else the function itself, or nothing when the
+  # function is not known. Without a thrower (no realm set up) the function is used.
+  defp arguments_callee(poison?, fid) do
+    thrower = :erlang.get(:js_throw_type_error)
+
+    cond do
+      poison? and thrower != :undefined -> {:thrower, thrower}
+      is_integer(fid) -> {:obj, fid}
+      true -> nil
+    end
+  end
+
+  # The unmapped part of an arguments object, which both paths build: an array of the
+  # arguments with `Object.prototype`, its `callee` and a hidden `Symbol.iterator`.
+  defp arguments_object(args, callee) do
+    {:obj, aid} = a = new_array(args)
+    store(aid, deref(aid) |> Map.put(:arguments, true) |> Map.put(:proto, proto(:object)))
+
+    case callee do
+      {:thrower, thrower} ->
+        Browser.JS.Props.define_accessor(a, "callee",
+          get: thrower,
+          set: thrower,
+          enumerable: false,
+          configurable: false
+        )
+
+      {:obj, _} = f ->
+        put_hidden(a, "callee", f)
+
+      nil ->
+        :ok
+    end
+
+    put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
+    a
+  end
+
+  # Builds the arguments object of a frame (step 2d) into slot `i` and gives it back. `fid`
+  # is the id of the function, for `callee`. The frame is read once.
+  #
+  # A sloppy function with plain parameters (`argmap`) maps each parameter whose index is
+  # below the argument count. `argmap` gives a duplicate name to its last position
+  # already. A mapped element takes the current value of its parameter, so a write before
+  # the build shows. The object then records `mapped` (index to name, as the old path does)
+  # and `map_scope` (the frame), and the `:args` slot takes `{:mapped, aid}`, so that a
+  # write to a parameter finds the object (see `sync_mapped/3`). The object and the two
+  # slots are written with one `put` of the frame.
+  defp build_arguments(frame, i, fid) do
+    f = :erlang.get(frame)
+    info = :erlang.element(2, f)
+    args_slot = :erlang.map_get(:args, info.slots)
+    args = :erlang.element(args_slot, f)
+
+    if @check and not is_list(args),
+      do: check_fail("a second build of arguments in #{check_name(info)}")
+
+    callee = arguments_callee(info.strict or info.params != :plain, fid)
+    {:obj, aid} = a = arguments_object(args, callee)
+    mapped = argument_map(info.argmap, length(args))
+
+    if mapped == %{} do
+      slot_put(frame, i, a)
+    else
+      o = deref(aid)
+
+      items =
+        Enum.reduce(mapped, o.items, fn {k, _}, acc ->
+          Map.put(acc, k, :erlang.element(@frame_base + k, f))
+        end)
+
+      store(
+        aid,
+        o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, frame)
+      )
+
+      t = :erlang.get(frame)
+
+      :erlang.put(
+        frame,
+        :erlang.setelement(args_slot, :erlang.setelement(i, t, a), {:mapped, aid})
+      )
+
+      if @check, do: check_args_alias(frame)
+    end
+
+    a
+  end
+
+  # index to name for the mapped parameters: only the indices below the argument count
+  defp argument_map(nil, _argc), do: %{}
+
+  defp argument_map(argmap, argc),
+    do: for({name, k} <- argmap, k < argc, into: %{}, do: {k, name})
 
   # A sloppy function with plain parameters maps `arguments[i]` to the i-th parameter. The
   # last of equal names owns the mapping, and only indices below the argument count map.
@@ -4950,7 +5383,27 @@ defmodule Browser.JS.Interp do
   defp bind({:slot, d, i, name}, v, env, _mode) do
     frame = hop(env, d)
     if @check, do: check_slot(frame, i, name)
+    if @check, do: check_unsynced(frame, i)
     slot_put(frame, i, v)
+  end
+
+  # A mapped parameter as a binding target (`var a = 2`, `[a] = ...`, `for (a in o)`): the
+  # write also reaches the arguments object (step 2d).
+  defp bind({:mslot, d, i, name, k}, v, env, :assign),
+    do: mslot_assign(hop(env, d), i, name, k, v)
+
+  defp bind({:mslot, d, i, _name, k} = form, v, env, _mode) do
+    frame = hop(env, d)
+    if @check, do: check_landing(form, env)
+    slot_put(frame, i, v)
+    sync_mapped(frame, k, v)
+  end
+
+  # `arguments` as a binding target in sloppy code replaces the binding; the object and
+  # its mapping stay as they are.
+  defp bind({:aslot, d, i} = form, v, env, _mode) do
+    if @check, do: check_landing(form, env)
+    slot_put(hop(env, d), i, v)
   end
 
   defp bind({:cslot, d, i, name}, _v, env, _mode), do: cslot_assign(hop(env, d), i, name)
@@ -5162,10 +5615,28 @@ defmodule Browser.JS.Interp do
   # value. A declaration pattern writes with `slot_put/3` directly.
   defp slot_assign(env, i, name, v) do
     if @check, do: check_slot(env, i, name)
+    if @check, do: check_unsynced(env, i)
 
     case :erlang.element(i, :erlang.get(env)) do
       :tdz -> tdz_error(name)
       _ -> slot_put(env, i, v)
+    end
+  end
+
+  # A write to a mapped parameter by an assignment (step 2d): the slot as `slot_assign/4`
+  # writes it, then the element of the arguments object. A plain parameter is never in its
+  # temporal dead zone, but the test keeps the order of `slot_assign/4`. The result is a
+  # true value, because `compound_assign/5` joins the write and the value with `&&`.
+  defp mslot_assign(env, i, name, k, v) do
+    if @check, do: check_slot(env, i, name)
+
+    case :erlang.element(i, :erlang.get(env)) do
+      :tdz ->
+        tdz_error(name)
+
+      _ ->
+        slot_put(env, i, v)
+        sync_mapped(env, k, v)
     end
   end
 
@@ -5266,12 +5737,32 @@ defmodule Browser.JS.Interp do
     if @check, do: check_landing(form, env)
 
     case :erlang.element(i, :erlang.get(env)) do
-      :tdz -> tdz_error(name)
-      v -> v
+      :tdz ->
+        tdz_error(name)
+
+      v ->
+        # (only `{:aslot}` may meet the marker of an arguments object that is not built)
+        if @check and match?({:unbuilt, _}, v),
+          do: check_fail("{:slot} #{inspect(name)} reads an unbuilt arguments object")
+
+        v
     end
   end
 
   def ev({:slot, d, i, name}, env), do: ev({:slot, 0, i, name}, hop(env, d))
+
+  # The arguments object of a level 3 function (step 2d, rule R3): its hidden slot holds
+  # `{:unbuilt, id}` until the first read, which builds the object into the slot. Only this
+  # form reads the slot, so the generic slot read never meets the marker.
+  def ev({:aslot, d, i} = form, env) do
+    if @check, do: check_landing(form, env)
+    frame = hop(env, d)
+
+    case :erlang.element(i, :erlang.get(frame)) do
+      {:unbuilt, fid} -> build_arguments(frame, i, fid)
+      v -> v
+    end
+  end
 
   def ev({:this, d, i} = form, env) do
     if @check, do: check_landing(form, env)
@@ -5415,6 +5906,16 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # (an object that is not built yet is an object: the read does not need to build it)
+  def ev({:unary, "typeof", {:aslot, d, i} = form}, env) do
+    if @check, do: check_landing(form, env)
+
+    case :erlang.element(i, :erlang.get(hop(env, d))) do
+      {:unbuilt, _} -> "object"
+      v -> typeof(v)
+    end
+  end
+
   def ev({:unary, "typeof", {:gref, name}}, env),
     do: ev({:unary, "typeof", {:id, name}}, root(env))
 
@@ -5458,8 +5959,15 @@ defmodule Browser.JS.Interp do
 
   # a binding the resolver found in a frame or a map scope can not be deleted; one it did
   # not find is looked up from the root, as today
+  # (`new.target` in a slot is a value, not a binding: `delete` evaluates it and is true)
+  def ev({:unary, "delete", {:slot, _, _, :new_target} = e}, env) do
+    ev(e, env)
+    true
+  end
+
   def ev({:unary, "delete", {k, _, _, _}}, _env) when k in [:slot, :cslot, :fname], do: false
   def ev({:unary, "delete", {:mref, _, _}}, _env), do: false
+  def ev({:unary, "delete", {:aslot, _, _}}, _env), do: false
 
   def ev({:unary, "delete", {:gref, name}}, env),
     do: ev({:unary, "delete", {:id, name}}, root(env))
@@ -5628,6 +6136,23 @@ defmodule Browser.JS.Interp do
     if prefix?, do: new, else: old
   end
 
+  # A write to a mapped parameter also writes the element of the arguments object that it
+  # is mapped to (step 2d).
+  def ev({:update, op, prefix?, {:mslot, d, i, name, k}}, env) do
+    frame = hop(env, d)
+    old = numeric(ev({:slot, 0, i, name}, frame))
+    new = bump(op, old)
+    mslot_assign(frame, i, name, k, new)
+    if prefix?, do: new, else: old
+  end
+
+  def ev({:update, op, prefix?, {:aslot, d, i} = target}, env) do
+    old = numeric(ev(target, env))
+    new = bump(op, old)
+    slot_put(hop(env, d), i, new)
+    if prefix?, do: new, else: old
+  end
+
   def ev({:update, op, _prefix?, {:cslot, d, i, name}}, env) do
     old = numeric(ev({:slot, d, i, name}, env))
     _new = bump(op, old)
@@ -5697,6 +6222,21 @@ defmodule Browser.JS.Interp do
     v
   end
 
+  def ev({:assign, "=", {:mslot, d, i, name, k} = target, value}, env) do
+    v = ev_named(value, env, target)
+    mslot_assign(hop(env, d), i, name, k, v)
+    v
+  end
+
+  # Sloppy code may assign `arguments`: the binding changes, the object and its mapping
+  # stay.
+  def ev({:assign, "=", {:aslot, d, i} = target, value}, env) do
+    v = ev_named(value, env, target)
+    if @check, do: check_landing(target, env)
+    slot_put(hop(env, d), i, v)
+    v
+  end
+
   def ev({:assign, "=", {:cslot, d, i, name} = target, value}, env) do
     ev_named(value, env, target)
     cslot_assign(hop(env, d), i, name)
@@ -5749,6 +6289,9 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:sassign, "=", {k, _, _, _} = target, value}, env) when k in [:slot, :cslot, :fname],
+    do: ev({:assign, "=", target, value}, env)
+
+  def ev({:sassign, "=", {:mslot, _, _, _, _} = target, value}, env),
     do: ev({:assign, "=", target, value}, env)
 
   def ev({:sassign, "=", {:gref, name}, value}, env) do
@@ -5805,6 +6348,9 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:supdate, op, prefix?, {k, _, _, _} = target}, env) when k in [:slot, :cslot, :fname],
+    do: ev({:update, op, prefix?, target}, env)
+
+  def ev({:supdate, op, prefix?, {:mslot, _, _, _, _} = target}, env),
     do: ev({:update, op, prefix?, target}, env)
 
   def ev({:supdate, op, prefix?, {:gref, name}}, env),
@@ -6230,6 +6776,16 @@ defmodule Browser.JS.Interp do
           frame = hop(env, d)
           {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
 
+        {:mslot, d, i, name, k} ->
+          frame = hop(env, d)
+
+          {fn -> ev({:slot, 0, i, name}, frame) end,
+           fn v -> mslot_assign(frame, i, name, k, v) end}
+
+        {:aslot, d, i} ->
+          frame = hop(env, d)
+          {fn -> ev({:aslot, 0, i}, frame) end, fn v -> slot_put(frame, i, v) end}
+
         {:fname, d, i, name} ->
           {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
 
@@ -6296,6 +6852,8 @@ defmodule Browser.JS.Interp do
   defp describe({:this}), do: "this"
   # (the slot forms of the resolver keep the name, so `g is not a function` keeps it too)
   defp describe({k, _, _, n}) when k in [:slot, :cslot, :fname] and is_binary(n), do: n
+  defp describe({:mslot, _, _, n, _}), do: n
+  defp describe({:aslot, _, _}), do: "arguments"
   defp describe({:mref, _, n}), do: n
   defp describe({:gref, n}), do: n
   defp describe({:this, _, _}), do: "this"
@@ -6399,6 +6957,11 @@ defmodule Browser.JS.Interp do
   def ev_named(e, env, {k, _, _, name})
       when k in [:slot, :cslot, :fname] and is_binary(name) and nameable(e),
       do: ev_named(e, env, {:id, name})
+
+  def ev_named(e, env, {:mslot, _, _, name, _}) when is_binary(name) and nameable(e),
+    do: ev_named(e, env, {:id, name})
+
+  def ev_named(e, env, {:aslot, _, _}) when nameable(e), do: ev_named(e, env, {:id, "arguments"})
 
   def ev_named(e, env, {:mref, _, name}) when is_binary(name) and nameable(e),
     do: ev_named(e, env, {:id, name})

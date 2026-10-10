@@ -1,8 +1,8 @@
 import Config
 
 # The resolver level for every parsed script: :off (the default), :info, or 1 to 4.
-# Levels 1 and 2 run now; levels 3 and 4 run from steps 2d and 2e. See
-# `Browser.JS.Resolve`. The parse option `resolve:` overrides it.
+# Levels 1 to 3 run now; level 4 runs from step 2e. See `Browser.JS.Resolve`. The parse
+# option `resolve:` overrides it.
 # config :browser, js_resolve: :off
 
 # Check mode of the slot frames (`JS_RESOLVE_CHECK=1`): the interpreter asserts that every

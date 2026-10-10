@@ -62,10 +62,33 @@ defmodule Browser.JS.Resolve do
     parameter phase, and gives the `var` a slot of its own that `copies`
     fills from the object at body entry: a closure made in an initializer
     must keep the object when the body assigns the `var`.
-  - A direct `eval` inside an arrow sets `uses_this`, `uses_arguments`,
-    `uses_new_target` and `uses_home` on the nearest function that is not an
-    arrow. The eval code reads these bindings by name from that function, so
-    it becomes level 3 and does not run on a frame without them.
+  - A direct `eval` inside an arrow sets `uses_this`, `uses_arguments` and
+    `uses_new_target` on the nearest function that is not an arrow. The eval code
+    reads these bindings by name from that function, so it becomes level 3 and
+    does not run on a frame without them. Below level 3 the function also gets
+    `uses_home`, as before step 2d.
+
+  Step 2d (level 3 functions on frames) adds four rules. Rules R1 and R2 apply
+  only from level 3, and rules R3 and R4 emit forms only from level 3, so the
+  `:info`, 1 and 2 terms do not change:
+
+  - R1. For a direct `eval`, the nearest method, accessor or class constructor
+    around it gets `uses_home`, and the nearest class constructor gets
+    `uses_super_call` (with `:new_target`). The walk goes through arrows and plain
+    functions and stops at a field or static scope. The eval code reads `:home`
+    and `:ctor_fn` by name, and the old path has them only in these functions,
+    so the results of `eval('super.x')` and `eval('super()')` stay as at `:off`.
+  - R2. When an async arrow in the parameter list reads `arguments` and the body
+    declares that name (a `var`, a function or a lexical), the owner of
+    `arguments` is dynamic. The async arrow stays on the old path and reads the
+    name, which a frame keeps for the body's binding, not for the object.
+  - R3. A reference to the arguments object in a hidden slot is
+    `{:aslot, d, i}` in every role. A `var arguments` slot keeps `{:slot}`,
+    because the frame builds the object into it at body entry.
+  - R4. A class without a `constructor` member, outside a dynamic region, has
+    the `Info` of its default constructor (`default_ctor_info/2`, rewritten) as
+    the fifth element of its node, in place of the source text that the `Info`
+    keeps. `strip/1` restores the text.
   - A direct `eval` or a `with` inside a parameter list, also inside a
     function in a default value, makes the function of that list dynamic. A
     by-name walk cannot tell a parameter from a body `var` of the same name.
@@ -124,7 +147,7 @@ defmodule Browser.JS.Resolve do
     unless level == :info or level in [1, 2, 3, 4],
       do: raise(ArgumentError, "unknown resolve level #{inspect(level)}")
 
-    st1 = analyse(stmts, top, strict)
+    st1 = analyse(stmts, top, strict, level)
     scopes = layout(st1.scopes, level)
     {stmts2, st2} = rewrite(stmts, scopes, top, strict, level)
 
@@ -164,8 +187,9 @@ defmodule Browser.JS.Resolve do
   @doc """
   The `Info` of a default class constructor. A base class gets an empty
   constructor. A derived class gets `constructor(...args) { super(...args) }`.
-  The struct is constant: `rewritten` is false, and step 2d sets it when it
-  gives the default constructors a frame.
+  The struct is constant: `rewritten` is false. From level 3 the resolver puts the
+  struct with `rewritten: true` on the class node (rule R4), and `Classes.define`
+  then builds a constructor node in slot form that runs on a frame.
   """
   @spec default_ctor_info(boolean, binary | nil) :: Info.t()
   def default_ctor_info(false, src) do
@@ -223,6 +247,11 @@ defmodule Browser.JS.Resolve do
   defp has_default?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_default?()
   defp has_default?(l) when is_list(l), do: Enum.any?(l, &has_default?/1)
   defp has_default?(_), do: false
+
+  defp has_computed?({:computed, _}), do: true
+  defp has_computed?(t) when is_tuple(t), do: t |> Tuple.to_list() |> has_computed?()
+  defp has_computed?(l) when is_list(l), do: Enum.any?(l, &has_computed?/1)
+  defp has_computed?(_), do: false
 
   defp params_kind(params) do
     cond do
@@ -364,8 +393,11 @@ defmodule Browser.JS.Resolve do
   # The state of pass 1: the scope records by number, the chain of open scope
   # numbers (innermost first), the next number, the nearest function scope
   # and the strictness of the code being walked.
-  defp analyse(stmts, top, strict) do
-    st = %{scopes: %{}, chain: [], next: 1, fn: nil, strict: strict, top: top}
+  # `level` is kept for the rules of step 2d (R1 and R2), which apply only from level 3:
+  # below it their owners are never rewritten, and the `:info`, 1 and 2 terms stay as they
+  # were.
+  defp analyse(stmts, top, strict, level) do
+    st = %{scopes: %{}, chain: [], next: 1, fn: nil, strict: strict, top: top, level: level}
     {sid, st} = a_open(st, top_scope_kind(top), stmts)
     st = a_declare_top(st, sid, top, stmts, strict)
 
@@ -513,9 +545,19 @@ defmodule Browser.JS.Resolve do
   # `arguments` belongs to the nearest function that is not an arrow and does
   # not declare the name itself. A field initializer or a static block stops
   # the walk: the name is a parse error there, and nothing above it owns it.
-  defp a_arguments(st, [], _passed), do: st
+  #
+  # `async_passed` says whether the walk passed an async arrow. Such an arrow stays on the
+  # old path (level 4) and reads `arguments` by name. When it sits in the parameter list of
+  # a function whose body declares the name, the by-name walk through a frame finds the
+  # body's binding and not the object (the frame keeps the object under the atom). From
+  # level 3 such a function is made dynamic (rule R2 of step 2d), so that it runs on the
+  # old path, where the parameter scope holds the object. A rewritten arrow reads the
+  # object's slot, so it does not need the rule.
+  defp a_arguments(st, chain, passed), do: a_arguments(st, chain, passed, false)
 
-  defp a_arguments(st, [sid | rest], passed) do
+  defp a_arguments(st, [], _passed, _async_passed), do: st
+
+  defp a_arguments(st, [sid | rest], passed, async_passed) do
     s = a_scope(st, sid)
 
     cond do
@@ -527,6 +569,13 @@ defmodule Browser.JS.Resolve do
       s.kind == :fn and not s.arrow? and
           (not visible?(s, "arguments") or s.decls["arguments"] == :var) ->
         st = a_update(st, sid, &%{&1 | uses_arguments: true})
+
+        st =
+          if async_passed and level3?(st) and s.phase == :params and
+               Map.has_key?(s.decls, "arguments"),
+             do: a_update(st, sid, &%{&1 | own_dynamic: true}),
+             else: st
+
         if passed, do: a_capture(st, sid, :arguments), else: st
 
       visible?(s, "arguments") ->
@@ -536,7 +585,8 @@ defmodule Browser.JS.Resolve do
         st
 
       true ->
-        a_arguments(st, rest, passed or s.kind == :fn)
+        async_arrow? = s.kind == :fn and s.arrow? and s.async?
+        a_arguments(st, rest, passed or s.kind == :fn, async_passed or async_arrow?)
     end
   end
 
@@ -558,6 +608,28 @@ defmodule Browser.JS.Resolve do
 
       true ->
         a_owner(st, rest, flag, passed or s.kind == :fn)
+    end
+  end
+
+  defp level3?(%{level: level}), do: is_integer(level) and level >= 3
+
+  # Sets `flag` on the nearest function around the eval whose kind is in `kinds` (rule
+  # R1). A field or static scope stops the walk: its scope has `:home` of its own on the
+  # old path (classes.ex `init_fields` and `run_statics`).
+  defp a_nearest(st, [], _kinds, _flag), do: st
+
+  defp a_nearest(st, [sid | rest], kinds, flag) do
+    s = a_scope(st, sid)
+
+    cond do
+      s.kind == :fn and not s.arrow? and s.fn_kind in kinds ->
+        a_update(st, sid, &Map.put(&1, flag, true))
+
+      s.kind in [:field, :static, :static_block] ->
+        st
+
+      true ->
+        a_nearest(st, rest, kinds, flag)
     end
   end
 
@@ -834,15 +906,36 @@ defmodule Browser.JS.Resolve do
   # dynamic itself, so it must at least own these bindings: the flags make
   # it level 3, which keeps it off the frame path until step 2d gives it
   # the hidden slots that the eval code reads by name.
+  #
+  # From level 3 (rule R1 of step 2d) the eval code gets the `super` bindings that it has
+  # on the old path, and no others. The old path puts `:home` in a call scope only when
+  # the closure has a home object (a method, an accessor or a class constructor), and
+  # `:ctor_fn` only in a class constructor (classes.ex `construct`). Eval code reads them
+  # by name, and the walk passes every function that does not have them. So the nearest
+  # function of a method kind around the eval gets `:home`, and the nearest constructor
+  # gets `:ctor_fn` (with `:new_target`), also through plain functions on the way. A
+  # `:home` slot that holds `undefined` in a plain function would stop the walk too early.
   defp a_expr({:call, {:id, "eval"} = callee, args, false}, st) do
     st = a_dynamic(st)
 
     st =
-      Enum.reduce(
-        [:uses_this, :uses_arguments, :uses_new_target, :uses_home],
-        st,
-        &a_owner(&2, &2.chain, &1, false)
-      )
+      if level3?(st) do
+        st =
+          Enum.reduce(
+            [:uses_this, :uses_arguments, :uses_new_target],
+            st,
+            &a_owner(&2, &2.chain, &1, false)
+          )
+
+        st = a_nearest(st, st.chain, [:method, :get, :set, :ctor, :derived_ctor], :uses_home)
+        a_nearest(st, st.chain, [:ctor, :derived_ctor], :uses_super_call)
+      else
+        Enum.reduce(
+          [:uses_this, :uses_arguments, :uses_new_target, :uses_home],
+          st,
+          &a_owner(&2, &2.chain, &1, false)
+        )
+      end
 
     a_args(args, a_expr(callee, st))
   end
@@ -971,6 +1064,11 @@ defmodule Browser.JS.Resolve do
     # A body declaration of the self name hides the self name only in the body. The
     # parameter expressions still see the self binding, and a slot frame has no place for
     # a name that only the parameters see, so such a function keeps its names.
+    # A computed key in a parameter pattern runs while the parameters bind, but the
+    # parameter list has no initializer, so a body `var arguments` would give the key the
+    # `var` slot before the object is in it. Such a function keeps its names (level 3 on).
+    args_key? = level3?(st) and "arguments" in vars and has_computed?(params)
+
     hidden_self? =
       expr? and kind == :fn and is_binary(name) and mode == false and
         name not in param_names and name in declared and params_kind(params) != :plain
@@ -990,7 +1088,7 @@ defmodule Browser.JS.Resolve do
         fun_names: Enum.uniq(fun_names),
         lex: lex,
         self: self,
-        own_dynamic: hidden_self?,
+        own_dynamic: hidden_self? or args_key?,
         phase: :params,
         makes_closures: false,
         uses_this: false,
@@ -1763,12 +1861,10 @@ defmodule Browser.JS.Resolve do
             {:id, "arguments"}
 
           s.phase == :params ->
-            {:slot, d, Map.get(s.index, :arguments) || Map.fetch!(s.index, "arguments"),
-             "arguments"}
+            arguments_form(s, d, Map.get(s.index, :arguments) || Map.fetch!(s.index, "arguments"))
 
           true ->
-            {:slot, d, Map.get(s.index, "arguments") || Map.fetch!(s.index, :arguments),
-             "arguments"}
+            arguments_form(s, d, Map.get(s.index, "arguments") || Map.fetch!(s.index, :arguments))
         end
 
       visible?(s, "arguments") ->
@@ -1780,6 +1876,17 @@ defmodule Browser.JS.Resolve do
       true ->
         resolve_arguments(st, rest, role, d + hops(s), blocked or blocks?(s))
     end
+  end
+
+  # The form of a reference to the arguments object in slot `i` of the owner (rule R3 of
+  # step 2d). A hidden slot holds `{:unbuilt, id}` until the first read, so it gets the
+  # form `{:aslot, d, i}`, whose clauses build the object. The generic slot read then
+  # never meets the marker. The `var arguments` slot gets `{:slot}`, because the frame
+  # builds the object into it at body entry.
+  defp arguments_form(s, d, i) do
+    if :erlang.element(i, s.info.kinds) == :hidden,
+      do: {:aslot, d, i},
+      else: {:slot, d, i, "arguments"}
   end
 
   # `this` and `new.target` of the nearest function that is not an arrow. A
@@ -2372,7 +2479,8 @@ defmodule Browser.JS.Resolve do
     {{class_decs, member_decs}, plain_members} = split_decorations(members)
     {class_decs, st} = r_exprs(class_decs, st)
 
-    {_, st} = r_open(st, :class, node)
+    {class_sid, st} = r_open(st, :class, node)
+    dynamic_class? = r_scope(st, class_sid).dynamic
     outer_strict = st.strict
     st = %{st | strict: true}
     {heritage, st} = if heritage, do: r_expr(heritage, st), else: {nil, st}
@@ -2407,8 +2515,23 @@ defmodule Browser.JS.Resolve do
         do: members ++ [{:decorations, class_decs, member_decs}],
         else: members
 
-    {{:class, name, heritage, members, src}, st}
+    {{:class, name, heritage, members,
+      class_src(st, src, heritage, plain_members, dynamic_class?)}, st}
   end
+
+  # The fifth element of a class node (rule R4 of step 2d). From level 3 a class without a
+  # `constructor` member outside a dynamic region carries the `Info` of its default
+  # constructor, with the source text inside it. `Classes.define` then builds a
+  # constructor node that runs on a frame. At the lower levels the element stays the
+  # source text, so the `:info`, 1 and 2 terms do not change.
+  defp class_src(st, src, heritage, members, dynamic?) do
+    if is_integer(st.level) and st.level >= 3 and not dynamic? and not has_ctor?(members),
+      do: %{default_ctor_info(heritage != nil, src) | rewritten: true},
+      else: src
+  end
+
+  defp has_ctor?(members),
+    do: Enum.any?(members, &match?({:cmember, :method, {:str, "constructor"}, _, false}, &1))
 
   defp r_member({:cmember, kind, key, f, static?}, _, _, st)
        when kind in [:method, :get, :set] do
@@ -2465,6 +2588,8 @@ defmodule Browser.JS.Resolve do
   def strip({:fn, name, params, body, mode, %Info{src: src}}),
     do: {:fn, name, strip(params), strip(body), mode, src}
 
+  def strip({:class, n, h, m, %Info{src: s}}), do: {:class, n, strip(h), strip(m), s}
+  def strip({:aslot, _, _}), do: {:id, "arguments"}
   def strip({:slot, _, _, :new_target}), do: {:new_target}
   def strip({:slot, _, _, name}), do: {:id, name}
   def strip({:cslot, _, _, name}), do: {:id, name}
@@ -2553,7 +2678,8 @@ defmodule Browser.JS.Resolve do
 
   defp fail(msg), do: throw({:check, msg})
 
-  # The chain of `check`: `{:frame, slots, size}` for a function frame or a
+  # The chain of `check`: `{:frame, slots, size, rec}` (`rec` is the `Info` or the
+  # `Scope`) for a function frame or a
   # framed scope, `{:frameless, slots}` for a frameless scope, `{:map, names}`
   # for a map scope, `{:blocked}` for a scope the hop count cannot cross, and
   # `{:top, kind, names}` at the end.
@@ -2719,7 +2845,7 @@ defmodule Browser.JS.Resolve do
         do: fail("hoist slot #{i} outside a frame of size #{sc.size}")
     end)
 
-    c_push(ctx, {:frame, sc.slots, sc.size})
+    c_push(ctx, {:frame, sc.slots, sc.size, sc})
   end
 
   defp c_enter(ctx, %Scope{frame: false} = sc) do
@@ -2733,9 +2859,13 @@ defmodule Browser.JS.Resolve do
     c_push(ctx, {:frameless, sc.slots})
   end
 
-  defp c_home_size([{:frame, _, size} | _]), do: size
+  defp c_home_size([{:frame, _, size, _} | _]), do: size
   defp c_home_size([_ | rest]), do: c_home_size(rest)
   defp c_home_size([]), do: 0
+
+  defp c_kind(%Info{kinds: kinds}, i) when i <= tuple_size(kinds), do: :erlang.element(i, kinds)
+  defp c_kind(%Scope{kinds: kinds}, i), do: Map.get(kinds, i)
+  defp c_kind(_, _), do: nil
 
   defp c_pat({:id, _}, _ctx), do: :ok
 
@@ -2758,7 +2888,41 @@ defmodule Browser.JS.Resolve do
 
   defp c_pat({:member, _, _, _} = m, ctx), do: c_expr(m, ctx)
   defp c_pat({:call, _, _, _} = c, ctx), do: c_expr(c, ctx)
-  defp c_pat(form, ctx), do: c_form(form, ctx)
+
+  defp c_pat(form, ctx) do
+    unless Map.get(ctx, :params, false), do: c_unsynced(form, ctx)
+    c_form(form, ctx)
+  end
+
+  # A write to a mapped parameter must be an `{:mslot}`, which syncs the arguments object.
+  # A `{:slot}` write that lands on such a parameter would skip the sync (step 2d). Only
+  # the binding of the parameter list itself writes the slot directly.
+  defp c_unsynced({:slot, d, i, name}, ctx) when is_binary(name) do
+    case c_landing_rec(ctx.chain, d, name, 0) do
+      %Info{argmap: %{^name => _}} = rec ->
+        if c_kind(rec, i) == :param,
+          do: fail("a {:slot} write to the mapped parameter #{inspect(name)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp c_unsynced(_form, _ctx), do: :ok
+
+  # The record of the frame that a form with depth `d` lands on, or `nil` when it lands on
+  # a frameless scope that declares the name, a map scope or nothing.
+  defp c_landing_rec([{:frameless, slots} | rest], d, name, hops) do
+    if Map.has_key?(slots, name), do: nil, else: c_landing_rec(rest, d, name, hops)
+  end
+
+  defp c_landing_rec([{:frame, _, _, rec} | _], d, _name, d), do: rec
+
+  defp c_landing_rec([{:frame, _, _, _} | rest], d, name, h),
+    do: c_landing_rec(rest, d, name, h + 1)
+
+  defp c_landing_rec([{:map, _} | rest], d, name, h), do: c_landing_rec(rest, d, name, h + 1)
+  defp c_landing_rec(_, _d, _name, _hops), do: nil
 
   defp c_key({:computed, e}, ctx), do: c_expr(e, ctx)
   defp c_key(_, _ctx), do: :ok
@@ -2839,9 +3003,14 @@ defmodule Browser.JS.Resolve do
   end
 
   defp c_expr({:seq, es}, ctx), do: Enum.each(es, &c_expr(&1, ctx))
-  defp c_expr({k, _, _, t}, ctx) when k in [:update, :supdate], do: c_expr(t, ctx)
+
+  defp c_expr({k, _, _, t}, ctx) when k in [:update, :supdate] do
+    c_unsynced(t, ctx)
+    c_expr(t, ctx)
+  end
 
   defp c_expr({k, _, t, v}, ctx) when k in [:assign, :sassign] do
+    c_unsynced(t, ctx)
     c_expr(t, ctx)
     c_expr(v, ctx)
   end
@@ -2902,7 +3071,8 @@ defmodule Browser.JS.Resolve do
   defp c_form({:slot, d, i, name}, ctx), do: c_land(ctx, d, i, name, :slot)
   defp c_form({:cslot, d, i, name}, ctx), do: c_land(ctx, d, i, name, :slot)
   defp c_form({:fname, d, i, name}, ctx), do: c_land(ctx, d, i, name, :slot)
-  defp c_form({:mslot, d, i, name, _}, ctx), do: c_land(ctx, d, i, name, :slot)
+  defp c_form({:mslot, d, i, name, k}, ctx), do: c_land(ctx, d, i, name, {:mslot, k})
+  defp c_form({:aslot, d, i}, ctx), do: c_land(ctx, d, i, "arguments", :aslot)
   defp c_form({:mref, d, name}, ctx), do: c_land(ctx, d, nil, name, :map)
   defp c_form({:this, d, i}, ctx), do: c_land(ctx, d, i, :this, :slot)
 
@@ -2910,7 +3080,7 @@ defmodule Browser.JS.Resolve do
     unless ctx.rewriting, do: fail("{:gref, #{inspect(name)}} outside a rewritten function")
 
     Enum.each(ctx.chain, fn
-      {:frame, slots, _} ->
+      {:frame, slots, _, _} ->
         if Map.has_key?(slots, name), do: fail("{:gref, #{inspect(name)}} shadowed by a frame")
 
       {:frameless, slots} ->
@@ -2952,10 +3122,33 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  defp c_walk([{:frame, slots, size} | rest], d, i, name, want, hops) do
+  # An `{:aslot}` must land on the hidden slot of the arguments object, under the atom or
+  # under the name (rule R3 of step 2d), because only that slot holds the `{:unbuilt, id}`
+  # marker that its clauses build from.
+  defp c_walk([{:frame, slots, size, rec} | _rest], d, i, "arguments", :aslot, hops)
+       when hops == d do
+    unless Map.get(slots, :arguments) == i or Map.get(slots, "arguments") == i,
+      do: fail("{:aslot, #{d}, #{i}} lands on no arguments slot")
+
+    if i > size, do: fail("{:aslot, #{d}, #{i}} outside a frame of size #{size}")
+
+    unless c_kind(rec, i) == :hidden,
+      do: fail("{:aslot, #{d}, #{i}} lands on a slot of kind #{inspect(c_kind(rec, i))}")
+
+    :ok
+  end
+
+  defp c_walk([{:frame, slots, size, rec} | rest], d, i, name, want, hops) do
     cond do
       hops == d ->
-        if want != :slot, do: fail("#{inspect(name)}: an mref lands on a frame")
+        if want == :map, do: fail("#{inspect(name)}: an mref lands on a frame")
+
+        # A write to a mapped parameter must land on a function whose `argmap` maps the
+        # name to the same argument index, because the sync writes that element.
+        with {:mslot, k} <- want do
+          unless match?(%Info{argmap: %{^name => ^k}}, rec),
+            do: fail("{:mslot} #{inspect(name)} #{k} lands on a frame without that mapping")
+        end
 
         # (the arguments object sits under the atom when the body declares
         # the name, see `layout_fn`)
@@ -3001,7 +3194,8 @@ defmodule Browser.JS.Resolve do
     case src do
       %Info{} = info ->
         c_struct(info)
-        ctx = %{ctx | rewriting: info.rewritten}
+        # (a nested function's own patterns are writes again, also inside a default)
+        ctx = Map.merge(ctx, %{rewriting: info.rewritten, params: false})
 
         Enum.each(info.hoist, fn {i, _} ->
           if i < @header + 1 or i > info.size,
@@ -3022,17 +3216,26 @@ defmodule Browser.JS.Resolve do
         param_slots = Enum.reduce(params, param_slots, &c_param_binds/2)
 
         param_ctx =
-          c_push(ctx, if(info.rewritten, do: {:frame, param_slots, info.size}, else: {:blocked}))
+          c_push(
+            Map.put(ctx, :params, true),
+            if(info.rewritten,
+              do: {:frame, param_slots, info.size, info},
+              else: {:blocked}
+            )
+          )
 
         Enum.each(params, &c_pat(&1, param_ctx))
 
         ctx =
-          c_push(ctx, if(info.rewritten, do: {:frame, info.slots, info.size}, else: {:blocked}))
+          c_push(
+            ctx,
+            if(info.rewritten, do: {:frame, info.slots, info.size, info}, else: {:blocked})
+          )
 
         if mode == :arrow_expr, do: c_expr(body, ctx), else: c_stmts(body, ctx)
 
       _ ->
-        ctx = c_push(%{ctx | rewriting: false}, {:blocked})
+        ctx = c_push(Map.merge(ctx, %{rewriting: false, params: false}), {:blocked})
         Enum.each(params, &c_pat(&1, ctx))
         if mode == :arrow_expr, do: c_expr(body, ctx), else: c_stmts(body, ctx)
     end
@@ -3055,8 +3258,24 @@ defmodule Browser.JS.Resolve do
 
   defp c_param_binds(_, acc), do: acc
 
-  defp c_class({:class, name, heritage, members, _}, ctx) do
+  defp c_class({:class, name, heritage, members, src}, ctx) do
     {{class_decs, member_decs}, members} = split_decorations(members)
+
+    # The `Info` of a default constructor (rule R4) belongs only to a class without a
+    # `constructor` member, and its kind must follow the heritage: `super(...args)` runs
+    # only in a derived constructor.
+    with %Info{} = info <- src do
+      c_struct(info)
+      want = if heritage, do: :derived_ctor, else: :ctor
+
+      cond do
+        has_ctor?(members) -> fail("a default constructor Info on a class with a constructor")
+        info.kind != want -> fail("a default constructor of kind #{info.kind}, not #{want}")
+        not info.rewritten -> fail("a default constructor Info that is not rewritten")
+        true -> :ok
+      end
+    end
+
     Enum.each(class_decs, &c_expr(&1, ctx))
     inner = c_push(ctx, {:map, MapSet.new(if(name, do: [name], else: []))})
     if heritage, do: c_expr(heritage, inner)

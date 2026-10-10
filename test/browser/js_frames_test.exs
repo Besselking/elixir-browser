@@ -1,15 +1,16 @@
 defmodule Browser.JS.FramesTest do
   # Step 2b: a function that the resolver rewrote at level 1 runs on a tuple frame. Step
   # 2c: a level 2 function, which makes closures, runs on a frame too, and a scope whose
-  # names a closure captures gets a block frame. The first part builds frames by hand in
-  # the test process and calls the evaluator on each new node form. The second part runs
-  # the semantic tables of the designs at `:off`, at level 1 and at level 2 and compares
-  # the results. The designs are notes/js-frames-2b-design.md and
-  # notes/js-frames-2c-design.md.
+  # names a closure captures gets a block frame. Step 2d: a level 3 function (`arguments`,
+  # `new.target`, `super`, constructors) runs on a frame with hidden slots. The first part
+  # builds frames by hand in the test process and calls the evaluator on each new node
+  # form. The second part runs the semantic tables of the designs at `:off` and at levels
+  # 1, 2 and 3 and compares the results. The designs are notes/js-frames-2b-design.md,
+  # notes/js-frames-2c-design.md and notes/js-frames-2d-design.md.
   use ExUnit.Case, async: true
 
   alias Browser.JS
-  alias Browser.JS.{Interp, Parser}
+  alias Browser.JS.{GC, Interp, Parser, Resolve}
   alias Browser.JS.Resolve.{Info, Scope}
 
   @tdz_x "Cannot access 'x' before initialization"
@@ -1411,11 +1412,11 @@ defmodule Browser.JS.FramesTest do
 
   # ── the semantic table (design section 6) ──────────────────
 
-  # Each row runs at `:off`, at level 1 and at level 2 through `Browser.JS.eval`; the
-  # result must be the one of the design, and the same at each level. The expected values
-  # were checked at `:off` on bb2d6f5. Rows 30, 31, 57 and 58 need a page and are in the
-  # module below. Step 2c added level 2 (2c design 6.2).
-  @levels [:off, 1, 2]
+  # Each row runs at `:off` and at levels 1, 2 and 3 through `Browser.JS.eval`; the result
+  # must be the one of the design, and the same at each level. The expected values were
+  # checked at `:off` on bb2d6f5. Rows 30, 31, 57 and 58 need a page and are in the module
+  # below. Step 2c added level 2 (2c design 6.2), and step 2d added level 3 (2d design 5.1).
+  @levels [:off, 1, 2, 3]
 
   @rows [
     {1, "function f(){ return x; let x = 1 } try { f() } catch (e) { e.message }",
@@ -1542,7 +1543,7 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table" do
-    test "every row gives the design's value at :off, level 1 and level 2" do
+    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
       for {n, src, expected} <- @rows, level <- @levels do
         assert JS.eval(src, resolve: level) == expected, "row #{n} at #{level}: #{src}"
       end
@@ -1554,8 +1555,8 @@ defmodule Browser.JS.FramesTest do
 
       assert JS.eval(src, resolve: :off) == {:ok, "ReferenceError:a is not defined", []}
 
-      # The function is a leaf, so level 2 runs it as level 1 does.
-      for level <- [1, 2] do
+      # The function is a leaf, so levels 2 and 3 run it as level 1 does.
+      for level <- [1, 2, 3] do
         assert JS.eval(src, resolve: level) ==
                  {:ok, "ReferenceError:Cannot access 'a' before initialization", []}
       end
@@ -1579,14 +1580,14 @@ defmodule Browser.JS.FramesTest do
       for level <- @levels, do: assert(JS.eval(src, resolve: level) == {:ok, 1.0, []})
     end
 
-    # `arguments` makes a function level 3, which runs from step 2d (2c design 5).
-    test "a function of a level above 2 stops with a clear error" do
-      src = "function f(){ return arguments[0] } f(1)"
+    # `async` makes a function level 4, which runs from step 2e (2d design 5.1).
+    test "a function of a level above 3 stops with a clear error" do
+      src = "async function f(){} f()"
 
-      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 3)
+      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 4)
 
       assert inspect(crash) =~
-               "resolve level 3 functions cannot run yet; use :off, :info, 1 or 2"
+               "resolve level 4 functions cannot run yet; use :off, :info, 1, 2 or 3"
     end
 
     test "row 37: the step limit at each level" do
@@ -1814,7 +1815,7 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table of step 2c" do
-    test "every row gives the design's value at :off, level 1 and level 2" do
+    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
       for {n, src, value} <- @rows_2c, level <- @levels do
         assert JS.eval(src, resolve: level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
       end
@@ -1888,6 +1889,1146 @@ defmodule Browser.JS.FramesTest do
       end
     end
   end
+
+  # ── step 2d: level 3 functions ──────────────────────────────
+
+  # The tests below follow section 6.1 of notes/js-frames-2d-design.md. A level 3 function
+  # has hidden slots for `this`, the argument list, the arguments object, `new.target`,
+  # the home object of `super` and the constructor that runs. The arguments object is
+  # built on its first read. A mapped object and the parameter slots follow each other
+  # through the `{:mapped, aid}` value in the `:args` slot.
+
+  # The first function node named `name` in `src`, resolved at level 3. A method node
+  # carries `{:method, name}`.
+  defp fn3(src, name) do
+    assert {:ok, tree} = Parser.parse(src, resolve: 3), src
+
+    node =
+      find(tree, fn
+        {:fn, ^name, _, _, _, %Info{}} -> true
+        {:fn, {:method, ^name}, _, _, _, %Info{}} -> true
+        _ -> false
+      end)
+
+    assert node != nil, "no function #{name} in #{inspect(tree)}"
+    node
+  end
+
+  # The value of a global binding that a script made.
+  defp global!(gid, name) do
+    assert {:ok, v} = Interp.lookup_scoped(gid, name), name
+    v
+  end
+
+  # A native `peekall()`: it records every live frame of the heap, newest first. A test
+  # uses it when the frame it wants to see is not the newest one, for example the frame of
+  # a default constructor while the parent constructor runs.
+  defp install_peek_all(gid) do
+    peek =
+      Interp.native("peekall", fn _this, _args ->
+        last = :erlang.get(:js_next) - 1
+
+        found =
+          for id <- last..0//-1,
+              t = :erlang.get(id),
+              is_tuple(t) and tuple_size(t) >= 5 and match?(%Info{}, elem(t, 1)),
+              do: {id, t}
+
+        Process.put(:peeked_all, found)
+        :undefined
+      end)
+
+    Interp.declare(gid, "peekall", peek)
+  end
+
+  # The slot `i` of a frame tuple that a peek recorded.
+  defp at(t, i), do: elem(t, i - 1)
+
+  # The heap entry of an object.
+  defp entry({:obj, id}), do: Interp.deref(id)
+
+  # `a` is slot 6, `b` 7, the argument list 8 and the arguments object 9.
+  @args2 "function f(a, b){ return arguments }"
+
+  # A hand-built frame of `@args2` for the call `f(args...)`, with the hidden slots as the
+  # frame builder fills them at entry: the argument list and `{:unbuilt, id}`. `params`
+  # overrides the parameter slots, so that a test can see that the build reads the slots
+  # and not the list. Returns the frame and the function object.
+  defp args_frame(gid, args, params \\ nil) do
+    node = fn3(@args2, "f")
+    i = info(node)
+
+    assert %Info{
+             level: 3,
+             slots: %{"a" => 6, "b" => 7, :args => 8, "arguments" => 9},
+             hidden: [:args, :arguments],
+             argmap: %{"a" => 0, "b" => 1}
+           } = i
+
+    {:obj, id} = f = Interp.make_function(node, gid, false)
+    [p0, p1] = params || Enum.take(args ++ [:undefined, :undefined], 2)
+    {frame(gid, i, [p0, p1, args, {:unbuilt, id}]), f}
+  end
+
+  # The arguments object of a hand-built `args_frame`, built by the first read.
+  defp build(fid), do: Interp.ev({:aslot, 0, 9}, fid)
+
+  describe "level 3: the hidden slots at call entry (hidden_slots)" do
+    @hidden_src "function F(){ peek(); this.v = [new.target, arguments] }"
+
+    defp hidden_fn(gid, src) do
+      node = fn3(src, "F")
+
+      assert %Info{
+               level: 3,
+               hidden: [:this, :args, :arguments, :new_target],
+               slots: %{:this => 6, :args => 7, "arguments" => 8, :new_target => 9}
+             } = info(node)
+
+      Interp.make_function(node, gid, false)
+    end
+
+    test "a call: `this` boxed or the global `this` when sloppy, raw when strict, nt undefined" do
+      gid = heap()
+      install_peek(gid)
+      {:obj, id} = f = hidden_fn(gid, @hidden_src)
+
+      Interp.call(f, 5.0, [1.0, 2.0])
+      {_, t} = peeked()
+      assert tuple_size(t) == info(fn3(@hidden_src, "F")).size
+      assert Interp.typeof(at(t, 6)) == "object"
+      assert at(t, 7) == [1.0, 2.0]
+      # The object is built on the first read, and the marker names the function.
+      assert at(t, 8) == {:unbuilt, id}
+      assert at(t, 9) == :undefined
+
+      global_this =
+        case Interp.lookup_scoped(gid, :this) do
+          {:ok, w} -> w
+          :error -> :undefined
+        end
+
+      Interp.call(f, :undefined, [])
+      {_, t} = peeked()
+      assert at(t, 6) == global_this
+      assert at(t, 7) == []
+
+      strict =
+        hidden_fn(gid, "function F(){ 'use strict'; peek(); this.v = [new.target, arguments] }")
+
+      obj = Interp.new_object([])
+      Interp.call(strict, obj, [])
+      {_, t} = peeked()
+      assert at(t, 6) == obj
+      assert at(t, 9) == :undefined
+    end
+
+    test "`new`: the new object and the new target; Reflect.construct gives its own target" do
+      gid = heap()
+      install_peek(gid)
+      f = hidden_fn(gid, @hidden_src)
+
+      o = Interp.construct(f, [1.0])
+      {fid, t} = peeked()
+      assert at(t, 6) == o
+      assert at(t, 7) == [1.0]
+      assert at(t, 9) == f
+      assert Interp.get(o, "v") |> Interp.array_list() |> hd() == f
+      # Nothing holds the frame after the construction: no closure was made.
+      assert freed?(fid)
+
+      run_script("function G(){}")
+      g = global!(gid, "G")
+      o = Interp.construct(f, [], g)
+      {_, t} = peeked()
+      assert at(t, 9) == g
+      assert entry(o).proto == Interp.get(g, "prototype")
+    end
+
+    test "`:home` comes from the closure; a method without a home gets undefined" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var o = { m(){ peek(); return super.toString === Object.prototype.toString } }",
+        3
+      )
+
+      o = global!(gid, "o")
+      m = Interp.get(o, "m")
+      %Info{slots: %{home: home_slot}} = closure(m).info
+
+      assert Interp.call(m, o, []) == true
+      {_, t} = peeked()
+      assert at(t, home_slot) == closure(m).home
+      assert at(t, home_slot) == o
+
+      # `set_home` never ran for this closure, so the slot holds `undefined`, and `super`
+      # finds no home, as at `:off`.
+      bare = Interp.make_function(fn3("({ m(){ peek(); return super.x } })", "m"), gid, false)
+      %Info{slots: %{home: bare_slot}} = closure(bare).info
+      refute Map.has_key?(closure(bare), :home)
+
+      assert caught(fn -> Interp.call(bare, o, []) end) ==
+               {"SyntaxError", "'super' keyword unexpected here"}
+
+      {_, t} = peeked()
+      assert at(t, bare_slot) == :undefined
+    end
+
+    test "a derived constructor: `:uninit_this`, the new target and `:ctor_fn` == the class" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var A = class A { constructor(){ this.a = 1 } }; " <>
+          "var B = class B extends A { constructor(x){ peek(); super(); this.x = x } }; " <>
+          "var C = class C { constructor(){ peek(); this.t = new.target } }; function G(){}",
+        3
+      )
+
+      [b, c, g] = Enum.map(~w(B C G), &global!(gid, &1))
+      %Info{kind: :derived_ctor, slots: slots} = closure(b).info
+      assert %{"x" => 6, :this => ti, :new_target => ni, :ctor_fn => ci} = slots
+
+      o = Interp.construct(b, [3.0])
+      {fid, t} = peeked()
+      assert at(t, ti) == :uninit_this
+      assert at(t, ni) == b
+      assert at(t, ci) == b
+      assert Interp.get(o, "a") == 1.0 and Interp.get(o, "x") == 3.0
+      assert entry(o).proto == Interp.get(b, "prototype")
+      assert freed?(fid)
+
+      # `Reflect.construct(B, [], G)`: the frame holds `G`, and `super()` passes it on.
+      o = Interp.construct(b, [], g)
+      {_, t} = peeked()
+      assert at(t, ni) == g
+      assert entry(o).proto == Interp.get(g, "prototype")
+
+      # A base constructor runs in `:new` mode: `this` is the new object.
+      %Info{kind: :ctor, slots: %{:this => cti, :new_target => cni}} = closure(c).info
+      o = Interp.construct(c, [])
+      {_, t} = peeked()
+      assert at(t, cti) == o
+      assert at(t, cni) == c
+      assert Interp.get(o, "t") == c
+    end
+
+    test "the frames of both default constructor records have the size of the record" do
+      gid = heap()
+      install_peek(gid)
+      install_peek_all(gid)
+
+      # The base record, on a node as `Classes` builds it from the record (design 1.5),
+      # with a call of `peek` as its body so that the frame can be seen.
+      base = %{Resolve.default_ctor_info(false, nil) | rewritten: true}
+      peek_call = [{:expr, {:call, {:gref, "peek"}, [], false}}]
+      f = Interp.make_function({:fn, "A", [], peek_call, false, base}, gid, false)
+      o = Interp.construct(f, [])
+      {_, t} = peeked()
+      assert tuple_size(t) == base.size
+      assert at(t, 6) == o
+
+      # The derived record: its frame is live while the parent constructor runs.
+      run_script(
+        "var P = class P { constructor(){ peekall() } }; var D = class D extends P {}",
+        3
+      )
+
+      d = global!(gid, "D")
+      derived = %{Resolve.default_ctor_info(true, nil) | rewritten: true}
+      Interp.construct(d, [1.0, 2.0])
+
+      assert [{_, t}] =
+               for(
+                 {_, t} = e <- Process.get(:peeked_all),
+                 match?(%Info{kind: :derived_ctor}, elem(t, 1)),
+                 do: e
+               )
+
+      assert tuple_size(t) == derived.size
+      assert %Info{slots: %{"args" => 6, this: 7, new_target: 8, ctor_fn: 9}} = elem(t, 1)
+      assert Interp.array_list(at(t, 6)) == [1.0, 2.0]
+      assert at(t, 7) == :uninit_this
+      assert at(t, 8) == d
+      assert at(t, 9) == d
+    end
+  end
+
+  describe "level 3: the arguments object (build_arguments)" do
+    test "a mapped object: the indices below the argument count, `{:mapped, aid}` in `:args`" do
+      gid = heap()
+      {fid, f} = args_frame(gid, [1.0])
+      {:obj, aid} = ao = build(fid)
+
+      # Only `a` has an argument, so only index 0 maps (design 2.2, step 2).
+      assert %{arguments: true, mapped: %{0 => "a"}, map_scope: ^fid} = Interp.deref(aid)
+      assert slot(fid, 8) == {:mapped, aid}
+      assert slot(fid, 9) == ao
+      assert Interp.get(ao, "length") == 1.0
+      assert Interp.get(ao, "0") == 1.0
+      assert Interp.get(ao, "callee") == f
+
+      assert Interp.get(ao, {:symbol, :iterator, "Symbol.iterator"}) ==
+               Interp.get(Interp.proto(:array), "values")
+
+      assert entry(ao).proto == Interp.proto(:object)
+    end
+
+    test "the items come from the current slots, not from the argument list" do
+      gid = heap()
+      # The body wrote `a = 5` before the first read of `arguments` (row 1).
+      {fid, _} = args_frame(gid, [1.0, 2.0], [5.0, 2.0])
+      ao = build(fid)
+      assert Interp.get(ao, "0") == 5.0
+      assert Interp.get(ao, "1") == 2.0
+      assert %{mapped: %{0 => "a", 1 => "b"}} = entry(ao)
+    end
+
+    test "duplicate names: the last position owns the name" do
+      gid = heap()
+      node = fn3("function f(a, a){ return arguments }", "f")
+
+      assert %Info{slots: %{"a" => 7, :args => 8, "arguments" => 9}, argmap: %{"a" => 1}} =
+               i = info(node)
+
+      {:obj, id} = Interp.make_function(node, gid, false)
+      fid = frame(gid, i, [1.0, 2.0, [1.0, 2.0], {:unbuilt, id}])
+      ao = Interp.ev({:aslot, 0, 9}, fid)
+      assert %{mapped: %{1 => "a"}} = entry(ao)
+      assert Interp.get(ao, "0") == 1.0
+      assert Interp.get(ao, "1") == 2.0
+
+      # The first `a` is not mapped: a write to index 0 does not reach slot 7.
+      Interp.put(ao, "0", 9.0)
+      assert slot(fid, 7) == 2.0
+      Interp.put(ao, "1", 8.0)
+      assert slot(fid, 7) == 8.0
+    end
+
+    # Each source returns the object and a closure, so the frame stays and the object is
+    # not detached: a mapped object would keep its `:mapped` key.
+    test "unmapped for strict code, patterns, initializers and no parameters" do
+      gid = heap()
+
+      for {src, callee} <- [
+            {"function f(a){ 'use strict'; return [arguments, () => a] }", :thrower},
+            {"function f({a}){ return [arguments, () => a] }", :thrower},
+            {"function f(a = 1){ return [arguments, () => a] }", :thrower},
+            {"function f(){ return [arguments, () => 1] }", :function}
+          ] do
+        f = Interp.make_function(fn3(src, "f"), gid, false)
+        [ao, g] = Interp.array_list(Interp.call(f, :undefined, [Interp.new_object([]), 2.0]))
+        refute Map.has_key?(entry(ao), :mapped), src
+        refute Map.has_key?(entry(ao), :map_scope), src
+        assert Interp.get(ao, "length") == 2.0, src
+
+        # The argument list stays a list in the frame that the closure keeps.
+        %Info{slots: %{args: args_slot}} = closure(f).info
+        assert is_list(slot(closure(g).scope, args_slot)), src
+
+        case callee do
+          :thrower -> assert {"TypeError", _} = caught(fn -> Interp.get(ao, "callee") end), src
+          :function -> assert Interp.get(ao, "callee") == f
+        end
+      end
+    end
+  end
+
+  describe "level 3: the {:aslot} form" do
+    test "the build runs once, and the object keeps its identity" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0, 2.0])
+      ao = build(fid)
+      n = :erlang.get(:js_next)
+      assert build(fid) == ao
+      assert Interp.ev({:member, {:aslot, 0, 9}, {:num, 1.0}, false}, fid) == 2.0
+      assert :erlang.get(:js_next) == n
+    end
+
+    test "a write replaces the binding; the mapping stays with the first object (row 20)" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0, 2.0])
+      {:obj, aid} = ao = build(fid)
+
+      assert Interp.ev({:assign, "=", {:aslot, 0, 9}, {:num, 5.0}}, fid) == 5.0
+      assert slot(fid, 9) == 5.0
+      assert slot(fid, 8) == {:mapped, aid}
+      assert Interp.ev({:aslot, 0, 9}, fid) == 5.0
+
+      # The sync goes through the object in `:args`, not through the binding.
+      Interp.ev({:assign, "=", {:mslot, 0, 6, "a", 0}, {:num, 2.0}}, fid)
+      assert Interp.get(ao, "0") == 2.0
+    end
+
+    test "a write before the first read: no object is built and nothing is mapped (D1)" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0, 2.0])
+      n = :erlang.get(:js_next)
+      Interp.ev({:assign, "=", {:aslot, 0, 9}, {:num, 5.0}}, fid)
+      assert :erlang.get(:js_next) == n
+      Interp.ev({:assign, "=", {:mslot, 0, 6, "a", 0}, {:num, 9.0}}, fid)
+      assert slot(fid, 6) == 9.0
+      assert slot(fid, 8) == [1.0, 2.0]
+      assert slot(fid, 9) == 5.0
+    end
+
+    test "typeof and delete" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0])
+      assert Interp.ev({:unary, "typeof", {:aslot, 0, 9}}, fid) == "object"
+      assert Interp.ev({:unary, "delete", {:aslot, 0, 9}}, fid) == false
+      build(fid)
+      assert Interp.ev({:unary, "typeof", {:aslot, 0, 9}}, fid) == "object"
+      Interp.ev({:assign, "=", {:aslot, 0, 9}, {:num, 5.0}}, fid)
+      assert Interp.ev({:unary, "typeof", {:aslot, 0, 9}}, fid) == "number"
+      assert Interp.ev({:unary, "delete", {:aslot, 0, 9}}, fid) == false
+    end
+
+    test "the build at depth 1 after the owner returned (row 32)" do
+      gid = heap()
+      node = fn3("function f(){ return () => arguments.length }", "f")
+      assert %Info{slots: %{:args => 6, "arguments" => 7}} = info(node)
+      {:obj, id} = f = Interp.make_function(node, gid, false)
+
+      g = Interp.call(f, :undefined, [1.0, 2.0, 3.0])
+      fid = closure(g).scope
+      refute freed?(fid)
+      assert slot(fid, 7) == {:unbuilt, id}
+
+      assert Interp.call(g, :undefined, []) == 3.0
+      assert {:obj, _} = ao = slot(fid, 7)
+      assert Interp.get(ao, "callee") == f
+      assert Interp.call(g, :undefined, []) == 3.0
+      assert slot(fid, 7) == ao
+    end
+
+    test "ev_named gives a function the name of a mapped parameter" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0])
+      build(fid)
+      g = Interp.ev_named({:fn, nil, [], [], false, nil}, fid, {:mslot, 0, 6, "a", 0})
+      assert Interp.get(g, "name") == "a"
+    end
+  end
+
+  describe "level 3: the sync of a mapped parameter" do
+    # Each write role of the parameter `a`, as the resolver gives it at level 3, with the
+    # value that `arguments[0]` must show after it. The parameter starts at 1.
+    @roles [
+      {"a = 1", 1.0},
+      {"a += 2", 3.0},
+      {"a ||= 3", 1.0},
+      {"a &&= 4", 4.0},
+      {"a++", 2.0},
+      {"--a", 0.0},
+      {"[a] = [4]", 4.0},
+      {"({a} = {a: 5})", 5.0},
+      {"var a = 6", 6.0},
+      {"var [a] = [7]", 7.0},
+      {"for (a in {k: 1});", "k"},
+      {"for (var a of [8]);", 8.0}
+    ]
+
+    test "{:mslot} in each write role writes the slot and the item" do
+      gid = heap()
+
+      for {stmt, value} <- @roles do
+        src = "function f(a, b){ #{stmt}; return arguments }"
+        {[s | _], i} = body_of(fn3(src, "f"))
+        assert %Info{slots: %{"a" => 6, :args => 8, "arguments" => 9}} = i
+        assert {:mslot, 0, 6, "a", 0} = find(s, &match?({:mslot, _, _, _, _}, &1)), src
+        {:obj, id} = Interp.make_function(fn3(src, "f"), gid, false)
+        fid = frame(gid, i, [1.0, 2.0, [1.0, 2.0], {:unbuilt, id}])
+        ao = Interp.ev({:aslot, 0, 9}, fid)
+
+        Interp.exec_stmt(s, fid)
+        assert slot(fid, 6) == value, src
+        assert Interp.get(ao, "0") == value, src
+        assert Interp.get(ao, "1") == 2.0, src
+      end
+    end
+
+    test "a strict inner function writes through {:sassign} and {:supdate} at depth 1 (row 16)" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0])
+      ao = build(fid)
+      inner = frame(fid, info(fn3("function g(){ 'use strict'; return 1 }", "g")), [])
+
+      Interp.ev({:sassign, "=", {:mslot, 1, 6, "a", 0}, {:num, 5.0}}, inner)
+      assert Interp.get(ao, "0") == 5.0
+      Interp.ev({:supdate, "++", false, {:mslot, 1, 6, "a", 0}}, inner)
+      assert slot(fid, 6) == 6.0
+      assert Interp.get(ao, "0") == 6.0
+      Interp.bind_pattern({:mslot, 1, 6, "a", 0}, 7.0, inner, :assign)
+      assert Interp.get(ao, "0") == 7.0
+    end
+
+    test "no sync after unmap_argument, and none into a foreign object" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0, 2.0])
+      {:obj, aid} = ao = build(fid)
+
+      Interp.unmap_argument(aid, 0)
+      Interp.ev({:assign, "=", {:mslot, 0, 6, "a", 0}, {:num, 9.0}}, fid)
+      assert slot(fid, 6) == 9.0
+      assert Interp.get(ao, "0") == 1.0
+      Interp.put(ao, "0", 4.0)
+      assert slot(fid, 6) == 9.0
+
+      # `arguments = other` then `b = 3`: the other object does not change.
+      other = Interp.new_array([0.0, 0.0])
+      Interp.ev({:assign, "=", {:aslot, 0, 9}, {:val, other}}, fid)
+      Interp.ev({:assign, "=", {:mslot, 0, 7, "b", 1}, {:num, 3.0}}, fid)
+      assert Interp.array_list(other) == [0.0, 0.0]
+      assert Interp.get(ao, "1") == 3.0
+    end
+
+    test "sync_param on a frame: a write to the object reaches the slot" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0])
+      {:obj, aid} = ao = build(fid)
+
+      Interp.put(ao, "0", 7.0)
+      assert slot(fid, 6) == 7.0
+
+      # The direct call, after the item write, as `put` makes it. The alias check of check
+      # mode reads the item, so the item is written first.
+      o = Interp.deref(aid)
+      Interp.store(aid, %{o | items: Map.put(o.items, 0, 8.0)})
+      Interp.sync_param(Interp.deref(aid), 0, 8.0)
+      assert slot(fid, 6) == 8.0
+
+      # Index 1 has no argument, so `b` is not mapped.
+      Interp.put(ao, "1", 9.0)
+      assert slot(fid, 7) == :undefined
+      assert Interp.get(ao, "length") == 1.0
+    end
+
+    test "assign_frame: a write by name syncs the item, also from a map scope (eval code)" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0, 2.0])
+      ao = build(fid)
+
+      Interp.assign_scoped(fid, "a", 4.0)
+      assert slot(fid, 6) == 4.0
+      assert Interp.get(ao, "0") == 4.0
+
+      m = Interp.new_scope(fid)
+      Interp.assign_scoped(m, "b", 5.0)
+      assert slot(fid, 7) == 5.0
+      assert Interp.get(ao, "1") == 5.0
+    end
+  end
+
+  describe "level 3: the frame free and the detach (free_frame)" do
+    test "a plain return detaches the object and frees the frame (row 23)" do
+      gid = heap()
+      install_peek(gid)
+      f = Interp.make_function(fn3("function f(a){ peek(); return arguments }", "f"), gid, false)
+
+      {:obj, aid} = ao = Interp.call(f, :undefined, [1.0])
+      {fid, _} = peeked()
+      assert freed?(fid)
+      o = Interp.deref(aid)
+      refute Map.has_key?(o, :mapped)
+      refute Map.has_key?(o, :map_scope)
+      assert o.arguments
+
+      # The detached object is an ordinary arguments object.
+      Interp.put(ao, "0", 5.0)
+      assert Interp.get(ao, "0") == 5.0
+      assert Interp.get(ao, "length") == 1.0
+    end
+
+    test "a closure keeps the frame and the mapping, also after a throw" do
+      gid = heap()
+
+      f =
+        Interp.make_function(
+          fn3("function f(a){ throw [arguments, (v) => { a = v }, () => a] }", "f"),
+          gid,
+          false
+        )
+
+      assert {:js_error, arr} = catch_throw(Interp.call(f, :undefined, [1.0]))
+      [ao, set, get] = Interp.array_list(arr)
+      fid = closure(set).scope
+      refute freed?(fid)
+      assert %{mapped: %{0 => "a"}, map_scope: ^fid} = entry(ao)
+
+      Interp.call(set, :undefined, [9.0])
+      assert Interp.get(ao, "0") == 9.0
+      Interp.put(ao, "0", 3.0)
+      assert Interp.call(get, :undefined, []) == 3.0
+    end
+
+    test "the GC keeps a frame that an escaped mapped object holds, and sweeps both later" do
+      gid = heap()
+      install_peek(gid)
+
+      f =
+        Interp.make_function(
+          fn3("function f(a){ peek(); return [arguments, () => a] }", "f"),
+          gid,
+          false
+        )
+
+      [{:obj, aid} = ao, _g] = Interp.array_list(Interp.call(f, :undefined, [1.0]))
+      {fid, _} = peeked()
+      # Only the object is a root: the array and the closure are garbage. The object's
+      # `map_scope` keeps the frame (design 2.5). The copy of the frame that `peek` keeps
+      # in the process would be a root too, so it goes first.
+      Process.delete(:peeked)
+      Process.put(:frames_test_hold, ao)
+      GC.collect()
+      refute freed?(fid)
+      Interp.put(ao, "0", 7.0)
+      assert slot(fid, 6) == 7.0
+
+      Process.delete(:frames_test_hold)
+      GC.collect()
+      assert freed?(fid)
+      assert :erlang.get(aid) == :undefined
+    end
+
+    test "1000 calls that read `arguments` leave no frame; the GC takes back the objects" do
+      gid = heap()
+      run_script("function f(a){ return arguments[0] }", 3)
+      f = global!(gid, "f")
+      assert %{info: %Info{level: 3, rewritten: true, argmap: %{"a" => 0}}} = closure(f)
+
+      GC.collect()
+      base = Interp.heap_size()
+      for _ <- 1..1000, do: assert(Interp.call(f, :undefined, [1.0]) == 1.0)
+      # Each call leaves its arguments object, as `:off` does, and no frame.
+      assert Interp.heap_size() == base + 1000
+      GC.collect()
+      assert Interp.heap_size() == base
+    end
+
+    test "the dangling scan follows `map_scope`" do
+      gid = heap()
+      {fid, _} = args_frame(gid, [1.0])
+      ao = build(fid)
+      assert GC.dangling(ao) == []
+
+      # A free without the detach leaves the object pointing at a tombstone. The scan must
+      # find it through the `map_scope` edge (design 2.5, the gc.ex change).
+      :erlang.put(fid, {:js_freed, ~s("f")})
+      assert GC.dangling(ao) == [~s("f")]
+    end
+  end
+
+  describe "level 3: the by-name walk and the body entry" do
+    test "lookup_frame builds the object on a by-name hit" do
+      gid = heap()
+      {fid, f} = args_frame(gid, [1.0, 2.0])
+
+      assert {:ok, {:obj, aid} = ao} = Interp.lookup_scoped(fid, "arguments")
+      assert slot(fid, 9) == ao
+      assert slot(fid, 8) == {:mapped, aid}
+      assert Interp.get(ao, "callee") == f
+
+      # Eval code in a map scope over the frame reads the same object.
+      m = Interp.new_scope(fid)
+      assert Interp.ev({:id, "arguments"}, m) == ao
+
+      {fid, _} = args_frame(gid, [1.0])
+      assert {:obj, _} = Interp.ev({:id, "arguments"}, Interp.new_scope(fid))
+      assert {:obj, _} = slot(fid, 9)
+    end
+
+    test "enter_body with `var arguments`: after the hoist with plain parameters (row 10)" do
+      gid = heap()
+      install_peek(gid)
+      node = fn3("function f(a){ var arguments; function a(){} peek(); return arguments }", "f")
+      assert %Info{args_var: true, slots: %{"a" => 6, :args => 7, "arguments" => 8}} = info(node)
+      f = Interp.make_function(node, gid, false)
+
+      ao = Interp.call(f, :undefined, [1.0, 2.0])
+      # The object exists before any read, and it maps the hoisted function.
+      {_, t} = peeked()
+      assert at(t, 8) == ao
+      assert Interp.typeof(Interp.get(ao, "0")) == "function"
+      assert Interp.get(ao, "0") == at(t, 6)
+      assert Interp.get(ao, "1") == 2.0
+    end
+
+    test "enter_body with `var arguments`: before the copies with parameter expressions" do
+      gid = heap()
+      install_peek(gid)
+      node = fn3("function f(a = 1){ var arguments; peek(); return arguments }", "f")
+
+      assert %Info{
+               args_var: true,
+               copies: [{8, 9}],
+               slots: %{:args => 7, :arguments => 8, "arguments" => 9}
+             } = info(node)
+
+      f = Interp.make_function(node, gid, false)
+      ao = Interp.call(f, :undefined, [5.0, 6.0])
+      {_, t} = peeked()
+      assert at(t, 8) == ao
+      assert at(t, 9) == ao
+      refute Map.has_key?(entry(ao), :mapped)
+      assert Interp.array_list(ao) == [5.0, 6.0]
+    end
+  end
+
+  describe "level 3: constructors" do
+    test ":ctor mode returns the value and `this`, and frees the frame after the read" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var A = class A { constructor(){ this.a = 1 } }; " <>
+          "var B = class B extends A { constructor(r){ peek(); super(); this.b = 2; if (r) return r } }",
+        3
+      )
+
+      {:obj, id} = b = global!(gid, "B")
+
+      assert {:undefined, {:obj, _} = this} =
+               Interp.run_class_frame(id, closure(b), :uninit_this, [:undefined], b, :ctor)
+
+      {fid, _} = peeked()
+      assert freed?(fid)
+      assert Interp.get(this, "a") == 1.0 and Interp.get(this, "b") == 2.0
+      assert entry(this).proto == Interp.get(b, "prototype")
+
+      r = Interp.new_object([])
+      assert {^r, {:obj, _}} = Interp.run_class_frame(id, closure(b), :uninit_this, [r], b, :ctor)
+    end
+
+    test "super() from an arrow writes the frame slot; a second super() throws" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var A = class A { constructor(){ this.s = 'A' } }; " <>
+          "var B = class B extends A { constructor(){ peek(); const f = () => super(); f(); this.t = this.s + 'B' } }; " <>
+          "var C = class C extends A { constructor(){ super(); super() } }",
+        3
+      )
+
+      b = global!(gid, "B")
+      %Info{slots: %{this: ti}} = closure(b).info
+      o = Interp.construct(b, [])
+      assert Interp.get(o, "t") == "AB"
+      {fid, t} = peeked()
+      assert at(t, ti) == :uninit_this
+      # The arrow moved the closure count, so the frame stays, and its slot holds `this`.
+      refute freed?(fid)
+      assert slot(fid, ti) == o
+
+      assert caught(fn -> Interp.construct(global!(gid, "C"), []) end) ==
+               {"ReferenceError", "Super constructor may only be called once"}
+    end
+
+    test "a derived constructor that does not call super() throws the ReferenceError" do
+      gid = heap()
+      run_script("var A = class A {}; var B = class B extends A { constructor(){ } }", 3)
+
+      assert caught(fn -> Interp.construct(global!(gid, "B"), []) end) ==
+               {"ReferenceError",
+                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"}
+    end
+
+    test "default constructors run on a frame from the Info of the class node" do
+      gid = heap()
+
+      run_script(
+        "var A = class A { constructor(...a){ this.a = a.join() } }; var B = class B extends A {}; var E = class E {}",
+        3
+      )
+
+      b = global!(gid, "B")
+      e = global!(gid, "E")
+
+      # The nodes of design 1.5: the records of `default_ctor_info` with `rewritten` set.
+      derived = Resolve.default_ctor_info(true, nil)
+      base = Resolve.default_ctor_info(false, nil)
+
+      assert %{
+               info: %Info{kind: :derived_ctor, rewritten: true} = di,
+               params: [{:rest, {:slot, 0, 6, "args"}}],
+               body: [{:expr, {:call, {:super}, [{:spread, {:slot, 0, 6, "args"}}], false}}]
+             } = closure(b)
+
+      assert %{di | src: nil, rewritten: false} == derived
+
+      assert %{info: %Info{kind: :ctor, rewritten: true} = bi, params: [], body: []} = closure(e)
+      assert %{bi | src: nil, rewritten: false} == base
+
+      assert Interp.get(Interp.construct(b, [1.0, 2.0, 3.0]), "a") == "1,2,3"
+      assert entry(Interp.construct(e, [])).proto == Interp.get(e, "prototype")
+    end
+  end
+
+  if @check do
+    describe "level 3: check mode" do
+      test "a forced desync fails the alias check" do
+        gid = heap()
+        {fid, _} = args_frame(gid, [1.0, 2.0])
+        {:obj, aid} = build(fid)
+        # The object loses its frame behind the sync; the next mapped write checks it. (A
+        # bulk change of the elements is legal: the Array fast paths do it on every level.)
+        o = Interp.deref(aid)
+        Interp.store(aid, %{o | map_scope: gid})
+
+        e =
+          assert_raise(ArgumentError, fn ->
+            Interp.ev({:assign, "=", {:mslot, 0, 7, "b", 1}, {:num, 3.0}}, fid)
+          end)
+
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "a {:slot} write to a mapped parameter fails" do
+        gid = heap()
+        {fid, _} = args_frame(gid, [1.0, 2.0])
+
+        e =
+          assert_raise(ArgumentError, fn ->
+            Interp.ev({:assign, "=", {:slot, 0, 6, "a"}, {:num, 3.0}}, fid)
+          end)
+
+        assert Exception.message(e) =~ "resolve check"
+
+        assert_raise(ArgumentError, fn ->
+          Interp.bind_pattern({:slot, 0, 6, "a"}, 3.0, fid, :assign)
+        end)
+      end
+
+      test "an escaped {:unbuilt} marker fails" do
+        gid = heap()
+        {fid, _} = args_frame(gid, [1.0])
+
+        e =
+          assert_raise(ArgumentError, fn -> Interp.ev({:slot, 0, 9, "arguments"}, fid) end)
+
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "a free without the detach fails in sync_param and in the dangling scan" do
+        gid = heap()
+        {fid, _} = args_frame(gid, [1.0])
+        ao = build(fid)
+        Interp.free(fid)
+        assert freed?(fid)
+
+        e = assert_raise(ArgumentError, fn -> Interp.put(ao, "0", 5.0) end)
+        assert Exception.message(e) =~ "resolve check"
+        assert GC.dangling(ao) == [~s("f")]
+        assert_raise(ArgumentError, fn -> Interp.check_dangling(ao) end)
+      end
+    end
+  else
+    @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode tests"
+    test "level 3: check mode" do
+      :ok
+    end
+  end
+
+  # ── the semantic table of step 2d (2d design 6.2) ──────────
+
+  # Each value was checked at `:off`, at level 1 and at level 2 on 75a8328, and each one
+  # is the value of the design table. Row 28 is row 27 with `delete r[0][0]` before the
+  # call, and row 74 is row 73 with `var arguments`. Row 60 defines the getter on
+  # `Number.prototype` twice, sloppy and then strict. Row "69b" is not in the design: it
+  # reads `Error.stack` in the parent of a default constructor (design 6.1, item 9).
+  @rows_2d [
+    {1, ~S|function f(a, b){ a = 5; return arguments[0] + ',' + arguments.length } f(1, 2)|,
+     "5,2"},
+    {2, ~S|function f(a){ arguments[0] = 7; return a } f(1)|, 7.0},
+    {3, ~S|function f(a){ "use strict"; a = 5; return arguments[0] } f(1)|, 1.0},
+    {4, ~S|function f(a){ "use strict"; arguments[0] = 7; return a } f(1)|, 1.0},
+    {5, ~S|function f(a, b = 2){ a = 9; return arguments[0] + ',' + arguments.length } f(1)|,
+     "1,1"},
+    {6, ~S|function f(a, b){ b = 3; return arguments[1] + ',' + arguments.length } String(f(1))|,
+     "undefined,1"},
+    {7, ~S|function f(a){ delete arguments[0]; arguments[0] = 4; return a } f(1)|, 1.0},
+    {8,
+     ~S|function f(a){ Object.defineProperty(arguments, '0', {value: 3}); var x = a; Object.defineProperty(arguments, '0', {writable: false}); a = 9; return x + ',' + arguments[0] } f(1)|,
+     "3,3"},
+    {9, ~S|function f(a, a){ a = 3; return arguments[0] + ',' + arguments[1] } f(1, 2)|, "1,3"},
+    {10, ~S|function f(a){ function a(){ return 'fn' } return typeof arguments[0] } f(1)|,
+     "function"},
+    {11, ~S|function f(a){ var arguments; return typeof arguments + arguments.length } f(1, 2)|,
+     "object2"},
+    {12, ~S|function f(a){ var a = 2; return arguments[0] } f(1)|, 2.0},
+    {13, ~S|function f(a){ for (var a of [3]); return arguments[0] } f(1)|, 3.0},
+    {14, ~S|function f(a){ [a] = [8]; return arguments[0] } f(1)|, 8.0},
+    {15, ~S|function f(a){ a++; a += 10; return arguments[0] } f(1)|, 12.0},
+    {16,
+     ~S|function f(a){ function g(){ "use strict"; a = 5; a++ } g(); return arguments[0] } f(1)|,
+     6.0},
+    {17, ~S|function f(a){ function g(){ a = 3 } g(); return arguments[0] } f(1)|, 3.0},
+    {18, ~S|function f(a){ var h = async () => { a = 4 }; h(); return arguments[0] } f(1)|, 4.0},
+    {19, ~S|function f(a){ return (() => eval('arguments[0] = 4; a'))() } f(1)|, 4.0},
+    {20,
+     ~S|function f(a){ var o = arguments; arguments = 5; a = 2; return o[0] + ',' + arguments } f(1)|,
+     "2,5"},
+    {21, ~S|function f(a){ arguments[1] = 5; return arguments.length + ',' + arguments[1] } f(1)|,
+     "1,5"},
+    {22,
+     ~S|function f(a){ a = 2; var d = Object.getOwnPropertyDescriptor(arguments, '0'); return d.value + ',' + d.writable } f(1)|,
+     "2,true"},
+    {23, ~S|function f(a){ return arguments } var o = f(1); o[0] = 5; o[0]|, 5.0},
+    {24,
+     ~S|function f(a){ return arguments } var o = f(1, 2, 3); o[0] = 9; [o.length, o[0], Array.prototype.slice.call(o).join()].join()|,
+     "3,9,9,2,3"},
+    {25,
+     ~S|function f(){ var a = arguments; return function(){ return a[0] + arguments[0] } } f(1)(2)|,
+     3.0},
+    {26, ~S|function f(a){ return [arguments, () => a] } var r = f(1); r[0][0] = 7; r[1]()|, 7.0},
+    {27, ~S|function f(a){ return [arguments, (v) => { a = v }] } var r = f(1); r[1](9); r[0][0]|,
+     9.0},
+    {28,
+     ~S|function f(a){ return [arguments, (v) => { a = v }] } var r = f(1); delete r[0][0]; r[1](9); String(r[0][0])|,
+     "undefined"},
+    {29, ~S|function f(){ return [...arguments].join() } f(1, 2, 3)|, "1,2,3"},
+    {30, ~S|function f(){ return arguments.callee === f } f()|, true},
+    {31,
+     ~S|function f(){ "use strict"; try { return arguments.callee } catch (e) { return e.constructor.name } } f()|,
+     "TypeError"},
+    {32, ~S|function f(){ return (() => () => arguments.length)()() } f(1, 2, 3)|, 3.0},
+    {33,
+     ~S|function f(a = arguments.length, b = arguments[0]){ return a + ',' + b } f(undefined, undefined, 3)|,
+     "3,undefined"},
+    {34, ~S|function f(...r){ r[0] = 9; return arguments[0] + ',' + arguments.length } f(1, 2)|,
+     "1,2"},
+    {35, ~S|function f(){ return typeof arguments + (delete arguments) } f()|, "objectfalse"},
+    {36,
+     ~S|function f(a, b){ var r = []; for (var k in arguments) r.push(k); return r.join() } f(1, 2)|,
+     "0,1"},
+    {37, ~S|function F(){ return new.target === F } [F(), new F() instanceof F].join()|,
+     "false,true"},
+    {38,
+     ~S|function F(){ this.t = new.target } function G(){} var o = Reflect.construct(F, [], G); [o.t === G, Object.getPrototypeOf(o) === G.prototype].join()|,
+     "true,true"},
+    {39,
+     ~S|function F(){ return (() => () => new.target)()() } [F() === undefined, new F() === F].join()|,
+     "true,true"},
+    {40,
+     ~S|class A { constructor(){ this.t = new.target.name } } class B extends A {} function G(){} G.prototype = B.prototype; var o = Reflect.construct(B, [], G); o.t + (o instanceof B)|,
+     "Gtrue"},
+    {41,
+     ~S|class A {} class B extends A { constructor(){ var g = () => this; super(); return g() === this ? {ok: 1} : undefined } } new B().ok|,
+     1.0},
+    {42,
+     ~S|class A { constructor(x){ this.x = x } } class B extends A { constructor(){ try { this.y = 1 } catch (e) { var m = e.constructor.name } super(5); this.m = m } } var b = new B(); b.x + b.m|,
+     "5ReferenceError"},
+    {43,
+     ~S|class A {} class B extends A { constructor(){ } } try { new B() } catch (e) { e.constructor.name }|,
+     "ReferenceError"},
+    {44,
+     ~S|class A {} class B extends A { constructor(){ super(); try { super() } catch (e) { this.e = e.constructor.name } } } new B().e|,
+     "ReferenceError"},
+    {45, ~S|class A {} class B extends A { constructor(){ return {k: 1} } } new B().k|, 1.0},
+    {46,
+     ~S|class A { constructor(){ this.s = 'A' } } class B extends A { constructor(){ const f = () => super(); f(); this.t = this.s + 'B' } } new B().t|,
+     "AB"},
+    {47,
+     ~S|class A { constructor(...a){ this.a = a.join() } } class B extends A {} new B(1, 2, 3).a|,
+     "1,2,3"},
+    {48,
+     ~S|class B extends Object { constructor(){ (() => eval('super()'))(); this.k = 1 } } new B().k|,
+     1.0},
+    {49,
+     ~S|var base = { hi(){ return 'b' + this.n } }; var o = { __proto__: base, n: 1, hi(){ return super.hi() + '!' } }; o.hi()|,
+     "b1!"},
+    {50,
+     ~S|class A { m(){ return 'A' } } class B extends A { m(){ return () => super.m() + 'B' } } new B().m()()|,
+     "AB"},
+    {51,
+     ~S|class A { static f(){ return this.name } } class B extends A { static g(){ return super.f() } } B.g()|,
+     "B"},
+    {52,
+     ~S|class A { get v(){ return 1 } } class B extends A { get v(){ return super.v + 1 } } new B().v|,
+     2.0},
+    {53,
+     ~S|class C { #x = 1; #m(){ return this.#x + 1 } get #g(){ return this.#m() * 10 } static #s = 5; t(){ return this.#g + C.#s } static has(o){ return #x in o } } [new C().t(), C.has(new C()), C.has({})].join()|,
+     "25,true,false"},
+    {54,
+     ~S|class A { #x = 1; static g(o){ return o.#x } } class B extends A { #x = 2; static h(o){ return o.#x } } var b = new B(); A.g(b) + B.h(b)|,
+     3.0},
+    {55,
+     ~S|class C { #p(){ return 1 } q(o){ try { return o.#p() } catch (e) { return e.constructor.name } } } new C().q({})|,
+     "TypeError"},
+    {56, ~S|class C { a = 1; b = this.a + 1; c = () => this.b } new C().c()|, 2.0},
+    {57,
+     ~S|class A { x = 1 } class B extends A { y = this.x + 1; constructor(){ super(); this.z = this.y + 1 } } new B().z|,
+     3.0},
+    {58, ~S|class C { static x = 1; static { this.y = this.x + 1 } static z = this.y * 10 } C.z|,
+     20.0},
+    {59,
+     ~S|var o = { _v: 1, get v(){ return this._v }, set v(x){ this._v = x * 2 } }; o.v = 5; o.v|,
+     10.0},
+    {60,
+     ~S|Object.defineProperty(Number.prototype, 'ty', {get(){ return typeof this }, configurable: true}); var s = (5).ty; Object.defineProperty(Number.prototype, 'ty', {get(){ "use strict"; return typeof this }}); s + ',' + (5).ty|,
+     "object,number"},
+    {61,
+     ~S|function P(x){ this.x = x; this.nt = new.target === P } var B = P.bind(null, 7); var o = new B(); [o.x, o.nt, o instanceof P].join()|,
+     "7,true,true"},
+    {62,
+     ~S|function F(a){ this.a = a; this.n = arguments.length } var B = F.bind(null, 1, 2); var o = new B(3); o.a + ',' + o.n|,
+     "1,3"},
+    {63, ~S|class A { constructor(x){ this.x = x } } var B = A.bind(null, 3); new B().x|, 3.0},
+    {64,
+     ~S|class A { constructor(){ this.c = 0 } inc(){ this.c++; return this } } class B extends A { inc(){ super.inc(); this.c += 10; return this } } var b = new B(); for (var i = 0; i < 3; i++) b.inc(); b.c|,
+     33.0},
+    {65,
+     ~S|function f(){ class A { constructor(){ this.a = arguments.length } } return new A(1, 2).a } f()|,
+     2.0},
+    {66, ~S|class A { m(){ return this } } var m = new A().m; m() === undefined|, true},
+    {67,
+     ~S|function outer(){ var fs = []; for (let i = 0; i < 2; i++) fs.push(() => arguments[i]); return fs.map(g => g()).join() } outer(7, 8)|,
+     "7,8"},
+    {68, ~S|function f(a){ (function(){ eval('a = 3') })(); return arguments[0] } f(1)|, 3.0},
+    {69,
+     ~S|class A { constructor(){ this.s = new Error('y').stack } } new A().s.split('\n')[1].trim()|,
+     "at A"},
+    {70,
+     ~S|function f(a){ function* g(){ yield arguments.length; yield a } return [...g(1, 2, 3)].join() } f(7)|,
+     "3,7"},
+    {71,
+     ~S|function f(x){ class K extends (arguments[1]) { m(){ return x } } return new K().m() } f(4, Object)|,
+     4.0},
+    {73,
+     ~S|var r; function f(a = async () => { r = arguments.length }){ let arguments = 1; return a } f(undefined, 2)(); r|,
+     2.0},
+    {74,
+     ~S|var r; function f(a = async () => { r = arguments.length }){ var arguments = 1; return a } f(undefined, 2)(); r|,
+     2.0},
+    {75,
+     ~S|var r; function f(a = async () => { r = typeof arguments }){ function arguments(){} return a } f(undefined, 2)(); r|,
+     "object"},
+    {"69b",
+     ~S|class A { constructor(){ this.s = new Error('x').stack } } class B extends A {} new B().s|,
+     "Error: x\n    at A\n    at B"},
+    # (found in review) a computed key in a parameter pattern reads the arguments object
+    # before a body `var arguments`
+    {76, ~S|function f({[arguments.length]: x}){ var arguments; return x } f({1: 'one'})|, "one"},
+    {77, ~S|function f({[(() => arguments[1])()]: x}){ var arguments; return x } f({k: 7}, 'k')|,
+     7.0},
+    # (found in review) a class constructed from its own computed key
+    {78,
+     ~S|class A {} var r; try { class B extends A { [(new B(), 'k')](){} } } catch(e){ r = e.constructor.name } r|,
+     "SyntaxError"},
+    # (found in review) the Array fast paths change a mapped arguments object in bulk
+    {79, ~S|function f(a, b){ [].shift.call(arguments); return a + ',' + arguments[0] } f(1, 2)|,
+     "1,2"},
+    {80, ~S|function f(a, b){ [].reverse.call(arguments); a = 9; return arguments[1] } f(1, 2)|,
+     1.0}
+  ]
+
+  # The two rows of design 5.3 that change at level 3. Each one keeps the `:off` value at
+  # levels 1 and 2, where the function is not rewritten, and gives the value of the spec
+  # at level 3.
+  @diffs_2d [
+    # D1: at `:off` the write goes to a global, so the object that the read builds maps `a`.
+    {"D1", ~S|function f(a){ arguments = {0: 5}; a = 9; return arguments[0] } f(1)|, 9.0, 5.0},
+    # D2: `var arguments` under parameter expressions starts as the arguments object.
+    {"D2",
+     ~S|function f(a = () => arguments.length){ var arguments; return a() + ',' + typeof arguments } f(undefined, 2)|,
+     "2,undefined", "2,object"},
+    # D3 and D4 have the cause of D1: a write to `arguments` before the first read goes to a
+    # global at `:off`. Here the write is a pattern target and a for-in head.
+    {"D3", ~S|function f(a, b){ [arguments] = [7]; return String(arguments) } f(1)|,
+     "[object Arguments]", "7"},
+    {"D4", ~S|function f(a){ for (arguments in {x: 1}); return String(arguments) } f(1)|,
+     "[object Arguments]", "x"}
+  ]
+
+  # The four programs that show the gain of step 2d (design 8). They are copies of the
+  # programs in bench/js_runtime.exs, in the same wrapper, so that the test checks what the
+  # bench measures. Their expected values are the results at `:off`.
+  @bench_2d [
+    {"classnew30k",
+     "class P { y = 1; constructor(x){ this.x = x } } var s = 0; for (var i = 0; i < 30000; i++) s += new P(i).x; return s",
+     449_985_000.0},
+    {"subclass30k",
+     "class B { constructor(x){ this.x = x } } class D extends B {} var s = 0; for (var i = 0; i < 30000; i++) s += new D(i).x; return s",
+     449_985_000.0},
+    {"supercalls30k",
+     "class A { m(x){ return x + 1 } } class B extends A { #x = 2; m(x){ return super.m(x) + this.#x } } var b = new B(); var s = 0; for (var i = 0; i < 30000; i++) s = (s + b.m(i)) % 1000003; return s",
+     73650.0},
+    {"args30k",
+     "function g(a, b){ return arguments.length + arguments[1] } var s = 0; for (var i = 0; i < 30000; i++) s += g(i, i % 7); return s",
+     149_995.0}
+  ]
+
+  describe "the semantic table of step 2d" do
+    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
+      for {n, src, value} <- @rows_2d, level <- @levels do
+        assert JS.eval(src, resolve: level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
+      end
+    end
+
+    # Row 72 is apart because it fails at level 2 on 75a8328 already: the method `m` is a
+    # level 2 frame without a `:home` slot, so the by-name walk of the eval code finds no
+    # home and throws a SyntaxError. At `:off` the scope of `m` holds `:home`. Rule R1 does
+    # not change level 2, and level 2 behaviour must not change in step 2d, so the test
+    # records the level 2 result of the base. The design's claim of parity at level 2 is
+    # wrong.
+    test "row 72: eval('super.m()') in an arrow in a plain function inside a method" do
+      src =
+        ~S|class A { m(){ return 1 } } class B extends A { m(){ function g(){ return (() => eval('super.m()'))() } return g.call(this) } } new B().m()|
+
+      for level <- [:off, 1, 3] do
+        assert JS.eval(src, resolve: level) == {:ok, 1.0, []}, "row 72 at #{level}"
+      end
+
+      assert JS.eval(src, resolve: 2) ==
+               {:error, {:uncaught, "SyntaxError: 'super' keyword unexpected here"}, []}
+    end
+
+    test "D1 and D2: the value of :off at levels 1 and 2, the value of the spec at level 3" do
+      for {n, src, off, spec} <- @diffs_2d do
+        for level <- [:off, 1, 2] do
+          assert JS.eval(src, resolve: level) == {:ok, off, []}, "#{n} at #{level}"
+        end
+
+        assert JS.eval(src, resolve: 3) == {:ok, spec, []}, "#{n} at 3"
+      end
+    end
+
+    test "the functions that the rows test are level 3 and rewritten at level 3" do
+      # A row proves nothing at level 3 if its function took the old path.
+      for {n, src, name} <- [
+            {1, "function f(a, b){ a = 5; return arguments[0] + ',' + arguments.length }", "f"},
+            {20, "function f(a){ var o = arguments; arguments = 5; a = 2; return o }", "f"},
+            {32, "function f(){ return (() => () => arguments.length)()() }", "f"},
+            {37, "function F(){ return new.target === F }", "F"},
+            {41,
+             "class B extends A { constructor(){ var g = () => this; super(); return g() === this ? {ok: 1} : undefined } }",
+             "constructor"},
+            {49, "var o = { __proto__: base, n: 1, hi(){ return super.hi() + '!' } }", "hi"},
+            {53, "class C { #x = 1; t(){ return this.#x } }", "t"},
+            {"D2", "function f(a = () => arguments.length){ var arguments; return a() }", "f"}
+          ] do
+        assert %Info{level: 3, rewritten: true} = info(fn3(src, name)), "row #{n}"
+      end
+
+      # Row 47: the default constructor is level 3 and rewritten through the class node.
+      assert {:ok, tree} = Parser.parse("class B extends A {}", resolve: 3)
+
+      assert find(tree, &match?({:class, "B", _, [], %Info{level: 3, rewritten: true}}, &1)),
+             "row 47"
+    end
+
+    @tag timeout: 300_000
+    test "the nine bench programs and the four programs of step 2d give their values at level 3" do
+      for {name, body, expected} <- @bench ++ @bench_2d do
+        src = "(function(){ function f(){ #{body} } return f() })()"
+        opts = [resolve: 3, max_steps: 1_000_000_000, timeout: 120_000]
+        assert JS.eval(src, opts) == {:ok, expected, []}, name
+      end
+    end
+  end
 end
 
 defmodule Browser.JS.FramesPageTest do
@@ -1898,7 +3039,7 @@ defmodule Browser.JS.FramesPageTest do
 
   alias Browser.JS.Runtime
 
-  @levels [:off, 1, 2]
+  @levels [:off, 1, 2, 3]
 
   # The suite-wide level (`JS_RESOLVE=1`) lives in the same key, so the test restores it
   # instead of deleting it; a delete would run every later sync module at `:off`.
