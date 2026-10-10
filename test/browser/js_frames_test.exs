@@ -125,10 +125,13 @@ defmodule Browser.JS.FramesTest do
 
       assert Interp.call(f, :undefined, [1.0]) == 0.0
 
-      # Design 6: `{gid, %Info{}, nil, nil, gid, 1.0, :undefined, :undefined, :tdz}`. The
+      # Design 6: `{gid, %Info{}, chain, nil, gid, 1.0, :undefined, :undefined, :tdz}`. The
       # missing `b` is `:undefined`, `var c` starts as `:undefined` and `let d` in the TDZ.
+      # Element 3 is the chain of the call (step 2f): the cell of `f` with its call
+      # position and the depth 1, on the empty chain that `Interp.init/1` writes.
       assert {fid,
-              {^gid, %Info{rewritten: true}, nil, ^pos, ^gid, 1.0, :undefined, :undefined, :tdz}} =
+              {^gid, %Info{rewritten: true}, [{"f", ^pos, 1}], ^pos, ^gid, 1.0, :undefined,
+               :undefined, :tdz}} =
                peeked()
 
       assert tuple_size(elem(peeked(), 1)) == info(node).size
@@ -737,8 +740,9 @@ defmodule Browser.JS.FramesTest do
       spin =
         Interp.make_function(leaf("function f(){ peek(); while (true) {} }", "f"), gid, false)
 
-      depth = :erlang.get(:js_depth)
-      stack = Process.get(:js_stack, [])
+      # Step 2f: the chain holds the depth, so the chain is all that must come back. The
+      # full test of the restore is in test/browser/js_stack_test.exs.
+      stack = :erlang.get(:js_stack)
 
       assert Interp.call(ok, :undefined, []) == 1.0
       {fid, _} = peeked()
@@ -747,14 +751,13 @@ defmodule Browser.JS.FramesTest do
       assert catch_throw(Interp.call(bad, :undefined, [])) == {:js_error, 1.0}
       {fid, _} = peeked()
       assert freed?(fid)
-      assert :erlang.get(:js_depth) == depth
-      assert Process.get(:js_stack, []) == stack
+      assert :erlang.get(:js_stack) == stack
 
       :erlang.put(:js_steps, 100)
       assert catch_throw(Interp.call(spin, :undefined, [])) == :js_limit
       {fid, _} = peeked()
       assert freed?(fid)
-      assert :erlang.get(:js_depth) == depth
+      assert :erlang.get(:js_stack) == stack
     end
 
     test "1000 calls and 1000 throws leave the heap as it was" do
@@ -3119,19 +3122,18 @@ defmodule Browser.JS.FramesTest do
 
       this = Interp.new_object()
       pos = :erlang.get(:js_pos)
-      depth = :erlang.get(:js_depth)
-      stack = Process.get(:js_stack, [])
+      stack = :erlang.get(:js_stack)
       {fid, fns} = Interp.enter_frame(id, c, this, [1.0, 2.0])
 
       # Class code is strict, so `this` is raw. The home object of a class method is the
-      # prototype. An extra argument is dropped.
+      # prototype. An extra argument is dropped. Element 3 stays `nil`, because a body that
+      # can suspend has no chain of its own (step 2f).
       assert :erlang.get(fid) == {c.scope, c.info, nil, pos, c.root, 1.0, this, proto}
       assert fns == :erlang.get(:js_fns)
 
-      # The entry does not run the body, and `call_closure` keeps the depth and the stack
-      # (design 1.2), so the entry changes neither.
-      assert :erlang.get(:js_depth) == depth
-      assert Process.get(:js_stack, []) == stack
+      # The entry does not run the body and does not push a cell. `call_closure` pushes
+      # the hidden cell of an async call (step 2f), so the entry leaves the chain as it was.
+      assert :erlang.get(:js_stack) == stack
       refute freed?(fid)
     end
 
