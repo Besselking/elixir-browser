@@ -5,14 +5,14 @@ config :browser, local_storage_path: nil
 config :browser, crash_dir: nil
 config :browser, indexed_db_path: nil
 
-# `JS_RESOLVE=1 mix test` runs every JS, DOM and page test with the resolver at level 1,
-# and `JS_RESOLVE=2`, `JS_RESOLVE=3` and `JS_RESOLVE=4` run them at levels 2, 3 and 4 (see
-# `Browser.JS.Resolve`); `:off` is the default. A test that passes `resolve:` to the parser
-# keeps its own level.
+# `JS_RESOLVE=off mix test` runs every JS, DOM and page test with the resolver off, and
+# `JS_RESOLVE=1`, `JS_RESOLVE=2` and `JS_RESOLVE=3` run them at levels 1, 2 and 3 (see
+# `Browser.JS.Resolve`). Level 4 is the default, as in the browser. A test that passes
+# `resolve:` to the parser keeps its own level.
 config :browser,
   js_resolve:
     (case System.get_env("JS_RESOLVE") do
-       nil -> :off
+       nil -> 4
        "off" -> :off
        "info" -> :info
        "1" -> 1

@@ -121,11 +121,11 @@ defmodule Browser.JS.Resolve do
   @doc """
   The hook at the end of `Parser.parse/2`. Returns the program unchanged when
   the resolve level is `:off`. The level comes from the parse option
-  `resolve:` or from the application setting `:js_resolve`.
+  `resolve:` or from the application setting `:js_resolve`. The default is 4.
   """
   @spec maybe({:program, [term]}, keyword, boolean) :: {:program, [term]}
   def maybe({:program, _} = program, opts, strict?) do
-    case Keyword.get(opts, :resolve) || Application.get_env(:browser, :js_resolve, :off) do
+    case Keyword.get(opts, :resolve) || Application.get_env(:browser, :js_resolve, 4) do
       :off -> program
       level -> program(program, level: level, top: top_kind(opts), strict: strict?)
     end
