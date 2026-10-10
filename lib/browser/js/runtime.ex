@@ -302,6 +302,10 @@ defmodule Browser.JS.Runtime do
         DOM.set_layout(rects, sx, sy, content)
         loop(t0)
 
+      # (a layout for the scripts that came after they stopped waiting for it)
+      {:layout_now_done, _ref, _rects, _content} ->
+        loop(t0)
+
       {:storage, _origin, key, old, new} ->
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)

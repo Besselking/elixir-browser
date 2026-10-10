@@ -884,7 +884,10 @@ defmodule Browser.Session do
 
   # the scripts ask where the elements are while the layout in the background is behind:
   # the page is laid out for them in a process of its own
-  def handle_info({:layout_now, js, ref, raw}, %{page: %Page{} = base} = state) do
+  def handle_info({:layout_now, js, ref, raw}, %{page: %Page{} = page} = state) do
+    # (what `Page.from_raw/3` builds afresh and the cascade's memo stay behind: copied into the
+    # process, their shared styles would take gigabytes and seconds)
+    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}, memo: nil}
     wx_env = :wx.get_env()
     env = env(state)
     width = max(UI.client_width(state.ui), 200)
