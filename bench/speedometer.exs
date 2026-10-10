@@ -9,6 +9,15 @@ alias Browser.JS.Runtime
 suites = if Enum.at(rest, 0) in [nil, "", "all"], do: nil, else: Enum.at(rest, 0)
 timeout = String.to_integer(Enum.at(rest, 1) || "300") * 1000
 Application.put_env(:browser, :gui, false)
+
+# RESOLVE=1..4|info|off sets the level of the resolver pass (`Browser.JS.Resolve`)
+case System.get_env("RESOLVE") do
+  nil -> :ok
+  "off" -> Application.put_env(:browser, :js_resolve, :off)
+  "info" -> Application.put_env(:browser, :js_resolve, :info)
+  n -> Application.put_env(:browser, :js_resolve, String.to_integer(n))
+end
+
 {:ok, _} = Application.ensure_all_started(:browser)
 
 full =
@@ -63,7 +72,8 @@ sampler =
             acc =
               case Process.info(pid, :current_stacktrace) do
                 {_, [_ | _] = st} ->
-                  [{m, f, a, _} | _] = st
+                  [{m, f, a, loc} | _] = st
+                  {m, f, a} = if System.get_env("PROFLINE"), do: {m, f, {a, loc[:line]}}, else: {m, f, a}
                   fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
 
                   acc =
@@ -197,7 +207,10 @@ if System.get_env("MEM") do
   end)
 end
 
-print.(Runtime.run_scripts(pid))
+# (the session runs the scripts in a process of its own, so that it can answer their questions
+# about sizes meanwhile)
+me = self()
+spawn(fn -> send(me, {:scripts_done, Runtime.run_scripts(pid)}) end)
 
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
@@ -207,7 +220,18 @@ loop = fn loop ->
       base = page
 
       spawn(fn ->
+        Process.flag(:trap_exit, false)
         me = self()
+        guard = self()
+
+        spawn(fn ->
+          ref = Process.monitor(guard)
+
+          receive do
+            {:DOWN, ^ref, _, _, reason} when reason not in [:normal] ->
+              IO.puts("LAYOUT CRASHED: #{inspect(reason, limit: 30, printable_limit: 300)}")
+          end
+        end)
 
         # LAYOUT=3 also samples the stack of the process that makes the layout
         if System.get_env("LAYOUT") == "3" do
@@ -268,6 +292,13 @@ loop = fn loop ->
 
       loop.(loop)
 
+    {:scripts_done, reply} ->
+      print.(reply)
+
+      if Enum.any?(reply.console, fn {_, t} -> t == "DONE" or String.starts_with?(t, "ERROR") end),
+        do: :done,
+        else: loop.(loop)
+
     {:js_async, ^pid, reply} ->
       print.(reply)
 
@@ -279,7 +310,14 @@ loop = fn loop ->
   end
 end
 
-loop.(loop)
+result = loop.(loop)
+
+# the score the page shows (1000 / the geometric mean of the suites' times in ms)
+if result == :done do
+  Process.sleep(1500)
+  reply = Runtime.eval(pid, "(document.getElementById('result-number') || {}).textContent")
+  IO.puts("score: #{inspect(reply.console |> List.last() |> elem(1))}")
+end
 
 if sampler do
   send(sampler, {:stop, self()})
@@ -298,7 +336,7 @@ if sampler do
         |> Enum.sort_by(&elem(&1, 1), :desc)
         |> Enum.take(45)
         |> Enum.each(fn {{_, {m, f, a}}, c} ->
-          IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+          IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}")
         end)
       end
   end
@@ -393,7 +431,7 @@ if System.get_env("LAYOUT") == "3" do
     |> Enum.sort_by(&elem(&1, 1), :desc)
     |> Enum.take(40)
     |> Enum.each(fn {{_, {m, f, a}}, c} ->
-      IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{a}")
+      IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}")
     end)
   end
 end

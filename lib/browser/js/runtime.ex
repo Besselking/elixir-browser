@@ -100,6 +100,12 @@ defmodule Browser.JS.Runtime do
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
+  @doc """
+  The same without waiting: the session goes on while the scripts run (a script that is busy
+  may be asking the session for a layout), and hears what the scripts did as an async reply.
+  """
+  def hover_async(pid, old, new), do: send(pid, {:hover_async, old, new})
+
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
 
@@ -342,6 +348,13 @@ defmodule Browser.JS.Runtime do
 
       {:idb, :versionchange, _, _, _, _, _} = msg ->
         idb_message(t0, msg)
+        loop(t0)
+
+      {:hover_async, old, new} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        reply = handle({:hover, old, new})
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 
       {:visible, visible?} ->

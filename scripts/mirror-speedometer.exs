@@ -26,8 +26,22 @@ defmodule Mirror do
   end
 
   # The page shows its progress in the window only. A few `console.log` lines make `bench/speedometer.exs`
-  # able to follow it: one per step, one at the end, and the stack of an error.
+  # able to follow it: one per step, one at the end, and the stack of an error. The runner logs
+  # the time of each test (what the score is made of).
   defp log_progress(file) do
+    runner = Path.join(Path.dirname(file), "benchmark-runner.mjs")
+    rsrc = File.read!(runner)
+
+    if not String.contains?(rsrc, "console.log(`TIME") do
+      rsrc
+      |> String.replace(
+        "const total = syncTime + asyncTime;\n",
+        "const total = syncTime + asyncTime;\n        console.log(`TIME ${suite.name} / ${test.name} sync ${Math.round(syncTime)} async ${Math.round(asyncTime)}`);\n",
+        global: false
+      )
+      |> then(&File.write!(runner, &1))
+    end
+
     src = File.read!(file)
 
     if not String.contains?(src, "console.log(`STEP") do
