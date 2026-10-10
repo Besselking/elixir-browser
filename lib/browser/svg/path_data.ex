@@ -24,10 +24,24 @@ defmodule Browser.Svg.PathData do
   @doc "Absolute segments for path data, or `[]` for empty or unusable data."
   @spec parse(String.t()) :: [segment]
   def parse(d) when is_binary(d) do
-    d
-    |> String.trim()
-    |> commands(%{cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, last: nil, cmd: nil}, [])
-    |> Enum.reverse()
+    # (a page that has a hundred of the same icon parses its path once per process)
+    cache = Process.get(:svg_path_cache, %{})
+
+    case cache do
+      %{^d => parsed} ->
+        parsed
+
+      _ ->
+        parsed =
+          d
+          |> String.trim()
+          |> commands(%{cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, last: nil, cmd: nil}, [])
+          |> Enum.reverse()
+
+        cache = if map_size(cache) >= 500, do: %{}, else: cache
+        Process.put(:svg_path_cache, Map.put(cache, d, parsed))
+        parsed
+    end
   end
 
   # -- reading commands ----------------------------------------------------------------
