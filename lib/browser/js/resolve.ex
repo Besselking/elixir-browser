@@ -36,6 +36,9 @@ defmodule Browser.JS.Resolve do
   - `{:tdz_names, names, e}` gets slots of its own that nothing ever writes,
     so a read inside `e` always finds `:tdz`.
   - A reference to `arguments` that no function owns keeps `{:id}`.
+  - Every `return` with a value inside a rewritten function carries a marker:
+    `{:return, e, :tail}` at a tail site, `{:return, e, :plain}` elsewhere. The
+    evaluator then never reads the run-time tail flag inside such a function.
   - A constructor gets the hidden slots it uses: `:this` always, `:new_target`
     and `:ctor_fn` for a `super()` call, `:home` for a `super.x` access.
   - `nparams` does not count a rest parameter.
@@ -1826,12 +1829,18 @@ defmodule Browser.JS.Resolve do
 
   defp r_stmt1({:return, nil} = r, st), do: {r, st}
 
+  # Inside a rewritten function every `return` with a value carries a marker: `:tail` for
+  # a tail site, `:plain` for the others. The evaluator then never reads the run-time tail
+  # flag inside such a function, so a stale flag from a caller cannot turn a plain return
+  # into a tail call.
   defp r_stmt1({:return, e}, st) do
     {e2, st} = r_expr(e, st)
 
-    if st.tail_ok and tail_expr?(e),
-      do: {{:return, e2, :tail}, r_tail(st)},
-      else: {{:return, e2}, st}
+    cond do
+      st.tail_ok and tail_expr?(e) -> {{:return, e2, :tail}, r_tail(st)}
+      st.rewriting -> {{:return, e2, :plain}, st}
+      true -> {{:return, e2}, st}
+    end
   end
 
   defp r_stmt1({:throw, e}, st) do
@@ -2418,6 +2427,7 @@ defmodule Browser.JS.Resolve do
   def strip({:this, _, _}), do: {:this}
   def strip({:in_tdz, names, e}), do: {:tdz_names, names, strip(e)}
   def strip({:return, e, :tail}), do: {:return, strip(e)}
+  def strip({:return, e, :plain}), do: {:return, strip(e)}
   def strip({:aw, s}), do: strip(s)
 
   def strip({:block, stmts, sc}) when is_nil(sc) or is_struct(sc, Scope),
@@ -2527,10 +2537,14 @@ defmodule Browser.JS.Resolve do
 
   defp c_stmt({:fundecl, _, f}, ctx), do: c_expr(f, ctx)
   defp c_stmt({:return, nil}, _ctx), do: :ok
-  defp c_stmt({:return, e}, ctx), do: c_expr(e, ctx)
 
-  defp c_stmt({:return, e, :tail}, ctx) do
-    unless ctx.rewriting, do: fail("tail return outside a rewritten function")
+  defp c_stmt({:return, e}, ctx) do
+    if ctx.rewriting, do: fail("a return without a marker inside a rewritten function")
+    c_expr(e, ctx)
+  end
+
+  defp c_stmt({:return, e, mark}, ctx) when mark in [:tail, :plain] do
+    unless ctx.rewriting, do: fail("#{mark} return outside a rewritten function")
     c_expr(e, ctx)
   end
 

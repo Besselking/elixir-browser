@@ -371,6 +371,9 @@ defmodule Browser.JS.ResolveTest do
   ]
 
   @levels [:info, 1, 2, 3, 4]
+  # The levels test 26 runs the js_test.exs groups at: `:info` rewrites nothing, 1 runs
+  # the leaf functions on frames (step 2b). Both must give the result of `:off`.
+  @eval_levels [:info, 1]
 
   # ── helpers of design section 6 ─────────────────────────────
 
@@ -380,9 +383,10 @@ defmodule Browser.JS.ResolveTest do
     tree
   end
 
-  # Parses `src` the way every caller does today: without the resolver.
+  # Parses `src` the way every caller does today: without the resolver (also when
+  # `JS_RESOLVE` sets a level for the whole suite).
   defp off(src, opts \\ []) do
-    assert {:ok, tree} = Parser.parse(src, opts), src
+    assert {:ok, tree} = Parser.parse(src, Keyword.put_new(opts, :resolve, :off)), src
     tree
   end
 
@@ -825,14 +829,14 @@ defmodule Browser.JS.ResolveTest do
     assert i.free == :always
     assert forms(f) == [{:slot, 0, 6, "x"}, {:slot, 0, 7, "x"}, {:slot, 0, 7, "x"}]
 
-    assert {:block, [_, {:return, {:slot, 0, 7, "x"}}], %Scope{} = sc} =
+    assert {:block, [_, {:return, {:slot, 0, 7, "x"}, :plain}], %Scope{} = sc} =
              f |> scope_stmts() |> List.first()
 
     assert %Scope{kind: :block, frame: false, tdz: [7], slots: %{"x" => 7}, kinds: %{7 => :let}} =
              sc
 
     f = fun(resolve(@s4b), "f")
-    assert {:block, [{:return, {:num, 1.0}}], nil} = f |> scope_stmts() |> List.first()
+    assert {:block, [{:return, {:num, 1.0}, :plain}], nil} = f |> scope_stmts() |> List.first()
     assert scope_of(f, 0) == nil
   end
 
@@ -988,7 +992,7 @@ defmodule Browser.JS.ResolveTest do
              {:try, {:block, [throw: {:num, 1.0}], nil}, {:slot, 0, 7, "e"},
               {:block, [{:var, :var, [{{:slot, 0, 7, "e"}, {:num, 2.0}}]}], nil}, nil,
               %Scope{kind: :catch, frame: false, slots: %{"e" => 7}, tdz: [7]}},
-             {:return, {:slot, 0, 6, "e"}}
+             {:return, {:slot, 0, 6, "e"}, :plain}
            ] = body(f)
 
     # A catch parameter shadows a parameter of the same name.
@@ -1014,7 +1018,7 @@ defmodule Browser.JS.ResolveTest do
     assert [
              {:var, :let, [{{:slot, 0, 7, "y"}, {:num, 1.0}}]},
              {:expr, {:assign, "=", {:cslot, 0, 6, "r"}, {:num, 2.0}}},
-             {:return, {:slot, 0, 7, "y"}}
+             {:return, {:slot, 0, 7, "y"}, :plain}
            ] = rest
   end
 
@@ -1108,7 +1112,7 @@ defmodule Browser.JS.ResolveTest do
 
     assert body(f) == [
              {:var, :var, [{{:mslot, 0, 6, "a", 0}, {:num, 1.0}}]},
-             {:return, {:member, {:slot, 0, 8, "arguments"}, {:num, 0.0}, false}}
+             {:return, {:member, {:slot, 0, 8, "arguments"}, {:num, 0.0}, false}, :plain}
            ]
 
     f = fun(resolve(@s12b), "f")
@@ -1193,7 +1197,11 @@ defmodule Browser.JS.ResolveTest do
     assert i.size == 8
     assert i.kinds == {:parent, :rec, :caller, :call_pos, :root, :hidden, :hidden, :hidden}
 
-    assert [_, {:expr, {:call, {:super}, [], false}}, {:return, {:slot, 0, 7, :new_target}}] =
+    assert [
+             _,
+             {:expr, {:call, {:super}, [], false}},
+             {:return, {:slot, 0, 7, :new_target}, :plain}
+           ] =
              body(c)
 
     # `super.m()` adds `:home`, which comes before `:ctor_fn` in the slot order.
@@ -1238,7 +1246,7 @@ defmodule Browser.JS.ResolveTest do
     assert info(outer).level == 2
     assert info(outer).rewritten
     refute info(outer).dynamic
-    assert {:return, {:slot, 0, 6, "z"}} = List.last(body(outer))
+    assert {:return, {:slot, 0, 6, "z"}, :plain} = List.last(body(outer))
 
     f = fun(tree, "f")
     assert info(f).dynamic
@@ -1294,7 +1302,7 @@ defmodule Browser.JS.ResolveTest do
     assert [
              {:return,
               {:call, {:member, {:id, "Math"}, {:str, "max"}, false},
-               [{:id, "y"}, {:mref, 1, "l"}], false}}
+               [{:id, "y"}, {:mref, 1, "l"}], false}, :plain}
            ] = body(f)
 
     f = fun(resolve(@s17c, eval: true, indirect: true), "f")
@@ -1350,7 +1358,7 @@ defmodule Browser.JS.ResolveTest do
              find(tree, &match?({:cmember, :block, _, _, _}, &1))
 
     m = fun(resolve(@s19b), "m")
-    assert [_, {:return, {:binary, "in", {:priv_ref, "p"}, {:slot, 0, 6, "o"}}}] = body(m)
+    assert [_, {:return, {:binary, "in", {:priv_ref, "p"}, {:slot, 0, 6, "o"}}, :plain}] = body(m)
     # A private name needs the class scope by name, level 3 (design 3.2).
     assert info(m).level == 3
 
@@ -1415,17 +1423,19 @@ defmodule Browser.JS.ResolveTest do
     assert i.params == :patterns and i.rest? and i.nparams == 1
     assert slots(i) == [{6, "a", :param}, {7, "r", :param}] and i.size == 7
     assert params(f) == [{:slot, 0, 6, "a"}, {:rest, {:slot, 0, 7, "r"}}]
-    assert body(f) == [{:return, {:slot, 0, 7, "r"}}]
+    assert body(f) == [{:return, {:slot, 0, 7, "r"}, :plain}]
   end
 
   test "21. strictness comes from the directive, the file position follows it" do
     f = fun(resolve(@s21a), "f")
     assert info(f).strict
-    assert [{:expr, {:str, "use strict"}}, {:return, {:num, 1.0}}] = body(f)
+    assert [{:expr, {:str, "use strict"}}, {:return, {:num, 1.0}, :plain}] = body(f)
 
     f = fun(resolve(@s21a, file: "t.js"), "f")
     assert info(f).strict
-    assert [{:expr, {:str, "use strict"}}, {:pos, {"t.js", 1}}, {:return, {:num, 1.0}}] = body(f)
+
+    assert [{:expr, {:str, "use strict"}}, {:pos, {"t.js", 1}}, {:return, {:num, 1.0}, :plain}] =
+             body(f)
 
     assert info(arrow(resolve(@s21b))).strict
     refute info(arrow(resolve(@s21c))).strict
@@ -1449,6 +1459,35 @@ defmodule Browser.JS.ResolveTest do
       assert tails(f) == [], src
       assert info(f).tail_sites == 0, src
     end
+
+    # Step 2b: every other `return` with a value inside a rewritten function is `:plain`,
+    # so the evaluator never reads the run-time tail flag there. A sloppy function has no
+    # tail sites at all. A function the level does not rewrite keeps the bare form, and
+    # `check/1` refuses a bare return inside a rewritten function.
+    f = fun(resolve("function f(n) { if (n) return g(); return 1 }"), "f")
+
+    assert [
+             {:if, {:slot, 0, 6, "n"}, {:return, {:call, {:gref, "g"}, [], false}, :plain}, nil},
+             {:return, {:num, 1.0}, :plain}
+           ] = body(f)
+
+    f = fun(resolve("'use strict'; function f(n) { while (n) { return g() } return 1 }"), "f")
+
+    assert [_, {:while, _, {:block, [{:return, _, :tail}], nil}}, {:return, {:num, 1.0}, :plain}] =
+             body(f)
+
+    f = fun(resolve("function f() { return 1 }", resolve: :info), "f")
+    assert body(f) == [{:return, {:num, 1.0}}]
+
+    assert {:error, _} =
+             Resolve.check(
+               {:program,
+                [
+                  {:fundecl, "f",
+                   {:fn, "f", [], [{:return, {:num, 1.0}}], false,
+                    %Info{rewritten: true, level: 1}}}
+                ]}
+             )
   end
 
   test "23. await wraps the statements of async and generator bodies" do
@@ -1502,7 +1541,8 @@ defmodule Browser.JS.ResolveTest do
   end
 
   test "25. with the flag off the parsed term is today's" do
-    assert Application.get_env(:browser, :js_resolve, :off) == :off
+    # (under `JS_RESOLVE` the default parse resolves, so only the explicit `:off` is checked)
+    default_off? = Application.get_env(:browser, :js_resolve, :off) == :off
 
     sources =
       @cases ++
@@ -1511,8 +1551,8 @@ defmodule Browser.JS.ResolveTest do
         Enum.map(prelude_sources(), fn {_, src} -> {src, []} end)
 
     for {src, opts} <- sources do
-      plain = Parser.parse(src, opts)
-      assert plain == Parser.parse(src, [resolve: :off] ++ opts), src
+      plain = Parser.parse(src, [resolve: :off] ++ opts)
+      if default_off?, do: assert(plain == Parser.parse(src, opts), src)
       assert marks(plain) == [], src
     end
   end
@@ -1526,22 +1566,23 @@ defmodule Browser.JS.ResolveTest do
       assert Enum.all?(fns(marked), &match?({:fn, _, _, _, _, %Info{rewritten: false}}, &1)), src
     end
 
-    for src <- @eval_sources do
-      assert Browser.JS.eval(src, resolve: :info) == Browser.JS.eval(src), src
+    for level <- @eval_levels, src <- @eval_sources do
+      assert Browser.JS.eval(src, resolve: level) == Browser.JS.eval(src, resolve: :off),
+             "#{src} at #{level}"
     end
 
-    for src <- @early_error_scripts do
-      assert Browser.JS.eval(src, resolve: :info, max_steps: 10_000) ==
-               Browser.JS.eval(src, max_steps: 10_000),
-             src
+    for level <- @eval_levels, src <- @early_error_scripts do
+      assert Browser.JS.eval(src, resolve: level, max_steps: 10_000) ==
+               Browser.JS.eval(src, resolve: :off, max_steps: 10_000),
+             "#{src} at #{level}"
     end
 
-    for src <- @early_error_modules do
-      plain = Parser.parse(src, module: true)
+    for level <- @eval_levels, src <- @early_error_modules do
+      plain = Parser.parse(src, module: true, resolve: :off)
 
       assert match?({:ok, _}, plain) ==
-               match?({:ok, _}, Parser.parse(src, module: true, resolve: :info)),
-             src
+               match?({:ok, _}, Parser.parse(src, module: true, resolve: level)),
+             "#{src} at #{level}"
     end
   end
 
@@ -1703,7 +1744,7 @@ defmodule Browser.JS.ResolveTest do
 
     assert [
              {:var, :var, [{{:slot, 0, 9, "arguments"}, _}]},
-             {:return, {:array, [_, {:slot, 0, 9, "arguments"}]}}
+             {:return, {:array, [_, {:slot, 0, 9, "arguments"}]}, :plain}
            ] = body(f)
 
     assert Resolve.check(resolve(@s32a)) == :ok
@@ -1921,13 +1962,16 @@ defmodule Browser.JS.ResolveTest do
     # `{:id}`; only a name that no scope declares becomes `{:gref}`.
     g = fun(resolve("{ let z = 1; function g() { return z + w } }"), "g")
     assert info(g).rewritten
-    assert body(g) == [{:return, {:binary, "+", {:id, "z"}, {:gref, "w"}}}]
+    assert body(g) == [{:return, {:binary, "+", {:id, "z"}, {:gref, "w"}}, :plain}]
 
     g =
       fun(resolve("const b = 1; { let z; function g() { return b + z + c } }", module: true), "g")
 
-    assert [_, {:return, {:binary, "+", {:binary, "+", {:id, "b"}, {:id, "z"}}, {:gref, "c"}}}] =
-             body(g)
+    assert [
+             _,
+             {:return, {:binary, "+", {:binary, "+", {:id, "b"}, {:id, "z"}}, {:gref, "c"}},
+              :plain}
+           ] = body(g)
   end
 
   test "43. a function as the sole if-branch or labeled body, new.target in an arrow, strict eval" do
@@ -1939,12 +1983,12 @@ defmodule Browser.JS.ResolveTest do
     assert [
              {:if, {:slot, 0, 6, "c"},
               {:fundecl, "g", {:fn, "g", [], [], false, %Info{rewritten: true}}}, nil},
-             {:return, {:gref, "g"}}
+             {:return, {:gref, "g"}, :plain}
            ] = body(f)
 
     f = fun(resolve("function f() { l: function g() {} return g }"), "f")
     assert info(f).slots == %{}
-    assert [{:labeled, "l", {:fundecl, "g", _}}, {:return, {:gref, "g"}}] = body(f)
+    assert [{:labeled, "l", {:fundecl, "g", _}}, {:return, {:gref, "g"}, :plain}] = body(f)
 
     # Design 4.4: `new.target` in an arrow is a hidden slot of the nearest function.
     f = fun(resolve("function f() { return () => new.target }"), "f")
@@ -1970,7 +2014,7 @@ defmodule Browser.JS.ResolveTest do
            ) ==
              [{:mref, 1, "v"}]
 
-    assert [{:return, {:id, "v"}}] =
+    assert [{:return, {:id, "v"}, :plain}] =
              body(fun(resolve("var v = 1; function f() { return v }", eval: true), "f"))
   end
 end

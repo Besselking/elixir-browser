@@ -25,6 +25,7 @@ defmodule Browser.JS.Interp do
   """
 
   alias Browser.JS.Num
+  alias Browser.JS.Resolve.Info
 
   # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
   defmacrop pget(key) do
@@ -37,6 +38,23 @@ defmodule Browser.JS.Interp do
   end
 
   @max_depth 1000
+
+  # Check mode (`JS_RESOLVE_CHECK=1`, see `config/config.exs`): every slot access asserts
+  # that the hop lands on a scope that owns the name at that index, and every frame is
+  # checked at its build. The flag is read at compile time, so without it no check costs
+  # anything.
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
+  # a statement's scope element from the resolver: `nil` (nothing to declare) or a frameless
+  # `%Scope{}` whose names live in slots of the frame. A framed scope (step 2c) matches no
+  # clause, so it fails loudly.
+  defguardp frameless(sc) when sc == nil or (is_map(sc) and :erlang.map_get(:frame, sc) == false)
+
+  # an anonymous function or class node, or a generator or async wrapper around one: the
+  # node shapes that take the name of the binding they are assigned to
+  defguardp nameable(e)
+            when (elem(e, 0) in [:fn, :class] and elem(e, 1) == nil) or
+                   elem(e, 0) in [:gen, :async]
 
   # ── heap ───────────────────────────────────────────────────
 
@@ -241,6 +259,9 @@ defmodule Browser.JS.Interp do
 
   @doc false
   def new_scope(parent) do
+    if @check and parent != nil and is_tuple(:erlang.get(parent)),
+      do: raise(ArgumentError, "a map scope under a frame (no such scope at level 1)")
+
     alloc(%{scope: true, vars: %{}, consts: MapSet.new(), parent: parent})
   end
 
@@ -261,13 +282,123 @@ defmodule Browser.JS.Interp do
   end
 
   def declare(scope, name, val, const? \\ false) do
-    s = deref(scope)
+    case deref(scope) do
+      f when is_tuple(f) ->
+        # A frame has a fixed layout: it can take a value for a name it has a slot for, and
+        # nothing else. Nothing declares into a frame at level 1; this clause is a guard
+        # for the later steps.
+        case :erlang.element(2, f).slots do
+          %{^name => i} -> slot_put(scope, i, val)
+          _ -> raise ArgumentError, "a frame cannot take the new name #{inspect(name)}"
+        end
 
-    store(scope, %{
-      s
-      | vars: Map.put(s.vars, name, val),
-        consts: if(const?, do: MapSet.put(s.consts, name), else: s.consts)
-    })
+      s ->
+        store(scope, %{
+          s
+          | vars: Map.put(s.vars, name, val),
+            consts: if(const?, do: MapSet.put(s.consts, name), else: s.consts)
+        })
+    end
+  end
+
+  # ── frames ─────────────────────────────────────────────────
+
+  # A frame is a tuple `{parent_id, info, caller_id, call_pos, root_id, slot_6, ...}` in the
+  # heap (see `Browser.JS.Resolve.Info`). The hop count of a slot form counts run-time
+  # scopes: a frame hops to its parent through its header, a map scope through `.parent`.
+  defp hop(id, 0), do: id
+  defp hop(id, d), do: hop(parent_of(:erlang.get(id)), d - 1)
+
+  defp parent_of(f) when is_tuple(f), do: :erlang.element(1, f)
+  defp parent_of(%{parent: p}), do: p
+
+  defp slot_put(env, i, v),
+    do: :erlang.put(env, :erlang.setelement(i, :erlang.get(env), v))
+
+  # ── check mode ─────────────────────────────────────────────
+
+  # A slot form must land, after its hops, on a frame that owns `name` at index `i`: a
+  # function name through `info.slots`, a block name through a block kind in `kinds` (a
+  # block name can shadow a function name, so a name in `slots` may still be a block slot).
+  defp check_landing({:this, d, i}, env), do: check_slot(hop(env, d), i, :this)
+
+  defp check_landing({:mref, d, name}, env) do
+    case :erlang.get(hop(env, d)) do
+      %{vars: vars} when is_map_key(vars, name) -> :ok
+      other -> check_fail("{:mref, #{d}, #{inspect(name)}} lands on #{inspect(other, limit: 3)}")
+    end
+  end
+
+  defp check_landing({:gref, name}, env) do
+    case scope_of(env, name) do
+      nil -> :ok
+      sc -> if sc == root(env), do: :ok, else: check_fail("{:gref, #{inspect(name)}} is shadowed")
+    end
+  end
+
+  defp check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
+
+  defp check_slot(id, i, name) do
+    case :erlang.get(id) do
+      f when is_tuple(f) and i <= tuple_size(f) ->
+        rec = :erlang.element(2, f)
+
+        cond do
+          match?(%{^name => ^i}, rec.slots) -> :ok
+          :erlang.element(i, rec.kinds) in [:let, :const, :using, :fun] -> :ok
+          true -> check_fail("#{inspect(name)} is not slot #{i} of #{check_name(rec)}")
+        end
+
+      other ->
+        check_fail("#{inspect(name)} at #{i} lands on #{inspect(other, limit: 3)}")
+    end
+  end
+
+  # a frame as `run_frame/5` built it: the size of the layout, nothing to hoist or copy,
+  # and only the hidden slots of level 1
+  defp check_frame(f, %Info{} = info) do
+    cond do
+      tuple_size(f) != info.size ->
+        check_fail("frame of #{check_name(info)} has size #{tuple_size(f)}, not #{info.size}")
+
+      info.hoist != [] or info.copies != [] ->
+        check_fail("frame of #{check_name(info)} has hoist or copies")
+
+      info.hidden -- [:this, :self] != [] ->
+        check_fail("frame of #{check_name(info)} has hidden slots #{inspect(info.hidden)}")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_name(%Info{name: name}), do: inspect(name)
+  defp check_name(rec), do: inspect(rec.kind)
+
+  defp check_fail(msg), do: raise(ArgumentError, "resolve check: " <> msg)
+
+  # A frameless scope keeps its `let` and `const` names in slots of the frame. At each entry
+  # of the statement the slots go back to the temporal dead zone, so a loop body sees its
+  # `let` uninitialized again on every iteration.
+  defp reset_tdz(_env, nil), do: :ok
+  defp reset_tdz(_env, %Browser.JS.Resolve.Scope{tdz: []}), do: :ok
+
+  defp reset_tdz(env, %Browser.JS.Resolve.Scope{tdz: idx}) do
+    f = Enum.reduce(idx, :erlang.get(env), fn i, acc -> :erlang.setelement(i, acc, :tdz) end)
+    :erlang.put(env, f)
+  end
+
+  # A by-name lookup through a frame: the names of the function are in `info.slots`
+  # (block names are not: only slot forms reach those). `:strict` is not a slot, the
+  # `Info` answers it. Anything else goes on to the parent.
+  defp lookup_frame(f, name) do
+    info = :erlang.element(2, f)
+
+    case info.slots do
+      %{^name => i} -> {:ok, :erlang.element(i, f)}
+      _ when name == :strict and info.strict -> {:ok, true}
+      _ -> lookup_var(:erlang.element(1, f), name)
+    end
   end
 
   # walks the scope chain
@@ -275,7 +406,10 @@ defmodule Browser.JS.Interp do
 
   defp lookup_var(scope, name) do
     s = deref(scope)
+    if is_tuple(s), do: lookup_frame(s, name), else: lookup_map(s, name)
+  end
 
+  defp lookup_map(s, name) do
     case s.vars do
       %{^name => {:alias, target, var}} ->
         lookup_var(target, var)
@@ -328,8 +462,44 @@ defmodule Browser.JS.Interp do
   @no_consts MapSet.new()
 
   defp assign_var(scope, name, val) do
-    s = deref(scope)
+    case deref(scope) do
+      f when is_tuple(f) -> assign_frame(scope, f, name, val)
+      s -> assign_map(scope, s, name, val)
+    end
+  end
 
+  # A write by name through a frame. The order of the checks is today's: a `const` in its
+  # temporal dead zone is a ReferenceError, not a TypeError. The self name of a function
+  # expression takes no write; `strict_assign_var` turns that into the TypeError of strict
+  # code.
+  defp assign_frame(scope, f, name, val) do
+    info = :erlang.element(2, f)
+
+    case info.slots do
+      %{^name => i} ->
+        cond do
+          :erlang.element(i, f) == :tdz ->
+            throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
+          :erlang.element(i, info.kinds) in [:const, :using] ->
+            throw_error("TypeError", "Assignment to constant variable.")
+
+          :erlang.element(i, info.kinds) == :self ->
+            :fname_ignored
+
+          true ->
+            slot_put(scope, i, val)
+        end
+
+      _ ->
+        case :erlang.element(1, f) do
+          nil -> raise ArgumentError, "a frame has no parent to take #{inspect(name)}"
+          parent -> assign_var(parent, name, val)
+        end
+    end
+  end
+
+  defp assign_map(scope, s, name, val) do
     cond do
       Map.has_key?(s.vars, name) ->
         # (most scopes have no constants: nothing to look up)
@@ -1365,34 +1535,46 @@ defmodule Browser.JS.Interp do
 
   # an assignment to a name nothing declares is a ReferenceError in strict code
   defp resolvable?(scope, name) do
-    s = deref(scope)
+    case deref(scope) do
+      f when is_tuple(f) ->
+        if is_map_key(:erlang.element(2, f).slots, name),
+          do: true,
+          else: resolvable?(:erlang.element(1, f), name)
 
-    cond do
-      Map.has_key?(s.vars, name) -> true
-      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
-      s.parent != nil -> resolvable?(s.parent, name)
-      is_binary(name) -> global_own_property?(s, name)
-      true -> false
+      s ->
+        cond do
+          Map.has_key?(s.vars, name) -> true
+          is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) -> true
+          s.parent != nil -> resolvable?(s.parent, name)
+          is_binary(name) -> global_own_property?(s, name)
+          true -> false
+        end
     end
   end
 
   # where a name resolves to: the scope declaring it or the `with` object having it
   defp with_binding(scope, name) do
-    s = deref(scope)
+    case deref(scope) do
+      f when is_tuple(f) ->
+        if is_map_key(:erlang.element(2, f).slots, name),
+          do: {:var, scope},
+          else: with_binding(:erlang.element(1, f), name)
 
-    cond do
-      Map.has_key?(s.vars, name) ->
-        {:var, scope}
+      s ->
+        cond do
+          Map.has_key?(s.vars, name) ->
+            {:var, scope}
 
-      is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
-          not unscopable?(s.with, name) ->
-        {:with, s.with}
+          is_binary(name) and is_map_key(s, :with) and has_property?(s.with, name) and
+              not unscopable?(s.with, name) ->
+            {:with, s.with}
 
-      s.parent != nil ->
-        with_binding(s.parent, name)
+          s.parent != nil ->
+            with_binding(s.parent, name)
 
-      true ->
-        nil
+          true ->
+            nil
+        end
     end
   end
 
@@ -1833,14 +2015,24 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp proto_loop(it, next, {pat, mode, body, env} = spec, labels) do
+  # The fifth element of the spec says where an item runs: `:fresh` makes a scope per item,
+  # as a map-scope loop needs; a frameless `%Scope{}` (or `nil`) runs in `env`, a frame, and
+  # resets the head's slots to the temporal dead zone for every item.
+  defp proto_loop(it, next, {pat, mode, body, env, scope} = spec, labels) do
     case iter_step(it, next) do
       :done ->
         :ok
 
       {:ok, item} ->
         tick()
-        iter_env = new_scope(env)
+
+        iter_env =
+          if scope == :fresh do
+            new_scope(env)
+          else
+            reset_tdz(env, scope)
+            env
+          end
 
         result =
           try do
@@ -2076,6 +2268,12 @@ defmodule Browser.JS.Interp do
             %{fun: {:closure, _}, async: true} ->
               call(f, this, args)
 
+            # (a rewritten function under `new` runs on a frame; a tail site inside it must
+            # not leave the frame, so the constructor keeps its line in `Error.stack`)
+            %{fun: {:closure, %{info: %Info{rewritten: true}} = c}} ->
+              tick()
+              run_frame(id, c, this, args, false)
+
             %{fun: {:closure, c}} ->
               tick()
               elem(run_closure_scope(with_hoist(id, c), this, args, [{:new_target, nt}]), 0)
@@ -2171,6 +2369,9 @@ defmodule Browser.JS.Interp do
   @doc false
   # the scope a function body runs in: `this`, the parameters, hoisted declarations
   def call_scope(c, this, args) do
+    if @check and match?(%{info: %Info{rewritten: true}}, c),
+      do: check_fail("a rewritten function on the old call path (call_scope)")
+
     {_, body_scope} = call_frame(c, this, args, [])
     body_scope
   end
@@ -2198,7 +2399,7 @@ defmodule Browser.JS.Interp do
   defp call_frame(c, this, args, extra) do
     vars =
       if c.mode in [false, nil],
-        do: %{this: sloppy_this(c, this), args: args, new_target: :undefined},
+        do: %{this: sloppy_this(strict?(c), this), args: args, new_target: :undefined},
         else: %{}
 
     vars = if h = Map.get(c, :home), do: Map.put(vars, :home, h), else: vars
@@ -2217,8 +2418,12 @@ defmodule Browser.JS.Interp do
         if funs == [] do
           alloc(fn_scope(c, vars))
         else
-          # (the declarations close over the scope, so its id comes first and its entry after)
+          # The declarations close over the scope, so its id comes first. When one of
+          # them is rewritten, the entry is stored before the functions are made, because
+          # `make_fn` reads the chain from the scope to find the root of a rewritten
+          # function; the final entry with the functions replaces it.
           scope = reserve()
+          if rewritten_funs?(funs), do: store(scope, fn_scope(c, vars))
 
           vars =
             Enum.reduce(funs, vars, fn {n, f}, m -> Map.put(m, n, make_fn(f, scope, false)) end)
@@ -2322,6 +2527,10 @@ defmodule Browser.JS.Interp do
   # A call's scope can only outlive the call through a closure created inside it (a function,
   # method, class or arrow all go through `make_fn`, which counts them). When none was, the
   # scope is garbage on return: dropping it keeps the heap from growing with every call.
+  # the closure decides: a function the resolver rewrote runs on a tuple frame
+  defp run_closure(id, %{info: %Info{rewritten: true}} = c, this, args),
+    do: run_frame(id, c, this, args, true)
+
   defp run_closure(id, c, this, args) do
     c = with_hoist(id, c)
     before = pget(:js_fns)
@@ -2338,6 +2547,12 @@ defmodule Browser.JS.Interp do
   # chain of tail calls runs in constant stack depth.
   defp tail_loop({:obj, id} = f, this, args) do
     case deref(id) do
+      %{class: :function, fun: {:closure, %{info: %Info{rewritten: true}} = c}} = o
+      when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+             not is_map_key(o, :class_info) ->
+        tick()
+        run_frame(id, c, this, args, true)
+
       %{class: :function, fun: {:closure, c}} = o
       when not is_map_key(o, :generator) and not is_map_key(o, :async) and
              not is_map_key(o, :class_info) ->
@@ -2373,6 +2588,9 @@ defmodule Browser.JS.Interp do
   # runs a function body, also handing back its scope (a constructor reads `this` from it);
   # `extra` are more variables for the scope
   def run_closure_scope(c, this, args, extra) do
+    if @check and match?(%{info: %Info{rewritten: true}}, c),
+      do: check_fail("a rewritten function on the old call path (run_closure_scope)")
+
     depth = pget(:js_depth)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     :erlang.put(:js_depth, depth + 1)
@@ -2411,6 +2629,86 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # A call of a rewritten function (step 2b). The frame is one tuple
+  # `{parent_id, info, nil, call_pos, root_id, params..., hidden..., template...}` built
+  # before the body runs and erased in `after`: nothing at level 1 can hold its id (no
+  # closure, no `arguments`, no eval). `:js_depth`, `:js_stack` and `:js_pos` are kept and
+  # restored as the old path does, until step 2f. The tail flag is never written: the
+  # resolver marked every return inside the function. With `tail?` a tail call goes to
+  # `tail_loop` after the frame is gone; without it (a call through `new`) the callee runs
+  # inside the frame, so the constructor keeps its line in `Error.stack`.
+  defp run_frame(id, c, this, args, tail?) do
+    depth = pget(:js_depth)
+    if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
+    :erlang.put(:js_depth, depth + 1)
+    stack = Process.get(:js_stack, [])
+    pos = Process.get(:js_pos)
+    :erlang.put(:js_stack, [{c.name, pos} | stack])
+    info = c.info
+
+    tuple = List.to_tuple([c.scope, info, nil, pos, c.root | frame_slots(c, id, this, args)])
+    if @check, do: check_frame(tuple, info)
+    frame = alloc(tuple)
+
+    result =
+      try do
+        if info.params != :plain, do: bind_params_list(c.params, args, frame)
+
+        case c.mode do
+          :arrow_expr ->
+            ev(c.body, frame)
+
+          _ ->
+            try do
+              case exec_fn(c.body, frame) do
+                {:ret, v} -> v
+                :ok -> :undefined
+              end
+            catch
+              {:js_return, v} -> v
+              {:js_tail, f, t, a} -> if tail?, do: {:js_tailcall, f, t, a}, else: call(f, t, a)
+            end
+        end
+      after
+        free(frame)
+        :erlang.put(:js_depth, depth)
+        :erlang.put(:js_stack, stack)
+        :erlang.put(:js_pos, pos)
+      end
+
+    case result do
+      {:js_tailcall, f, t, a} -> tail_loop(f, t, a)
+      _ -> result
+    end
+  end
+
+  # The slots of a frame, from position 6: the parameters, the hidden slots, the template.
+  # Plain parameters take the arguments by position (missing ones are `undefined`, extra
+  # ones are dropped). Pattern parameters start as `undefined`, parameters with
+  # initializers as `:tdz`; `bind_params_list/3` fills them.
+  defp frame_slots(c, id, this, args) do
+    info = c.info
+    rest = hidden_slots(info.hidden, info, id, this, info.template)
+
+    case info.params do
+      :plain -> plain_slots(args, info.nparams, rest)
+      :patterns -> List.duplicate(:undefined, c.nnames) ++ rest
+      :exprs -> List.duplicate(:tdz, c.nnames) ++ rest
+    end
+  end
+
+  defp plain_slots(_args, 0, rest), do: rest
+  defp plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
+  defp plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
+
+  defp hidden_slots([], _info, _id, _this, rest), do: rest
+
+  defp hidden_slots([:this | hs], info, id, this, rest),
+    do: [sloppy_this(info.strict, this) | hidden_slots(hs, info, id, this, rest)]
+
+  defp hidden_slots([:self | hs], info, id, this, rest),
+    do: [{:obj, id} | hidden_slots(hs, info, id, this, rest)]
+
   # `named?: false` makes no self-name scope: a class constructor gets its name
   # from the class scope, so an anonymous class expression must not bind the
   # name it inferred (`let X = class { constructor() { X = 5 } }` writes the `let`).
@@ -2430,6 +2728,10 @@ defmodule Browser.JS.Interp do
 
   @doc false
   def lookup_scoped(env, name), do: lookup_var(env, name)
+
+  @doc false
+  # (the by-name write, for the unit tests of the frame walkers)
+  def assign_scoped(env, name, v), do: assign_var(env, name, v)
 
   # an unresolved name is an element with that id when the page has one, else a ReferenceError
   defp named_global(name) do
@@ -2459,8 +2761,15 @@ defmodule Browser.JS.Interp do
   def scope_of(nil, _), do: nil
 
   def scope_of(env, name) do
-    s = deref(env)
-    if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
+    case deref(env) do
+      f when is_tuple(f) ->
+        if is_map_key(:erlang.element(2, f).slots, name),
+          do: env,
+          else: scope_of(:erlang.element(1, f), name)
+
+      s ->
+        if Map.has_key?(s.vars, name), do: env, else: scope_of(s.parent, name)
+    end
   end
 
   # a generator or async function's `prototype` is its own (or none), never the one its kind's
@@ -2592,6 +2901,11 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
+  # true when a hoisted declaration of `funs` was rewritten by the resolver
+  defp rewritten_funs?(funs) do
+    Enum.any?(funs, fn {_, f} -> match?({:fn, _, _, _, _, %Info{rewritten: true}}, f) end)
+  end
+
   defp make_fn(node, env), do: make_fn(node, env, true)
 
   # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
@@ -2610,9 +2924,29 @@ defmodule Browser.JS.Interp do
   end
 
   defp make_fn({:fn, name, params, body, mode, src}, env, named?) do
-    named? = named? and is_binary(name) and mode == false
     # the resolver, when it ran, left its facts in the place of the source text
     {src, info} = Browser.JS.Resolve.unpack(src)
+    rewritten? = match?(%Info{rewritten: true}, info)
+    named? = named? and is_binary(name) and mode == false
+
+    # Only level 1 functions can run on a frame now. A rewritten function of a higher
+    # level needs hoisting, copies and frames that outlive the call (steps 2c to 2e), so
+    # it must stop here with a clear error and not read a freed frame later.
+    if rewritten? and info.level > 1,
+      do:
+        raise(
+          ArgumentError,
+          "resolve level #{info.level} functions cannot run yet; use :off, :info or 1"
+        )
+
+    # (a self slot exists only for a named function expression; a parameter or a
+    # declaration of the same name shadows the self name, which then has no slot)
+    if @check and rewritten? and info.self != nil and not named?,
+      do: check_fail("self slot #{inspect(info.self)} of #{inspect(name)} without a self name")
+
+    # A rewritten function keeps its own name in a slot of its frame (`info.self`), so it
+    # must not get the self-name scope: one more map scope would shift every hop count.
+    named? = named? and not rewritten?
 
     env =
       if named? do
@@ -2625,21 +2959,35 @@ defmodule Browser.JS.Interp do
 
     :erlang.put(:js_fns, pget(:js_fns) + 1)
 
+    closure = %{
+      name: name,
+      params: params,
+      body: body,
+      mode: mode,
+      scope: env,
+      src: src,
+      info: info
+    }
+
+    closure =
+      if rewritten? do
+        # The frame of a call needs the root scope of the closure's own chain (the realm
+        # of the function, not the current global) and the number of parameter name slots
+        # (the frame size minus the header, the hidden slots and the template). Both are
+        # computed once per function object here, not on every call.
+        Map.merge(closure, %{
+          root: root_of(env),
+          nnames: info.size - 5 - length(info.hidden) - length(info.template)
+        })
+      else
+        closure
+      end
+
     fun =
       {:obj,
        alloc(%{
          class: :function,
-         fun:
-           {:closure,
-            %{
-              name: name,
-              params: params,
-              body: body,
-              mode: mode,
-              scope: env,
-              src: src,
-              info: info
-            }},
+         fun: {:closure, closure},
          props: %{},
          keys: [],
          proto: proto(:function)
@@ -2655,16 +3003,31 @@ defmodule Browser.JS.Interp do
     fun
   end
 
+  # The root of a scope chain: the scope whose parent is `nil`. A frame keeps its root in
+  # its header. With no scope at all (`nil`) or an id that has no entry yet there is no
+  # root to give.
+  defp root_of(nil), do: nil
+
+  defp root_of(id) do
+    case :erlang.get(id) do
+      f when is_tuple(f) -> :erlang.element(5, f)
+      %{parent: nil} -> id
+      %{parent: p} -> root_of(p)
+      :undefined -> nil
+    end
+  end
+
   # strict functions mark their scope, so that eval code called from them is strict too
   defp strict_marks(%{strict?: true}, vars), do: Map.put(vars, :strict, true)
   defp strict_marks(_, vars), do: vars
 
   # A function that is not strict gets the global object for a `this` that is undefined or null
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
-  # (no page) nothing changes.
-  defp sloppy_this(%{strict?: true}, this), do: this
+  # (no page) nothing changes. The first argument is the strictness of the function: a
+  # rewritten closure never goes through `with_hoist`, so it has no `strict?` key to match.
+  defp sloppy_this(true, this), do: this
 
-  defp sloppy_this(_c, this) do
+  defp sloppy_this(false, this) do
     cond do
       this in [:undefined, :null] ->
         case deref(global()) do
@@ -2689,11 +3052,21 @@ defmodule Browser.JS.Interp do
       %{vars: %{args: _}} -> true
       %{parent: nil} -> false
       %{parent: parent} -> args_shadowed?(parent)
+      # (a frame: an arrow leaf under a function that owns `arguments` must keep walking)
+      f when is_tuple(f) -> frame_args_shadowed?(f)
       _ -> false
     end
   end
 
   defp args_shadowed?(_), do: false
+
+  defp frame_args_shadowed?(f) do
+    case :erlang.element(2, f).slots do
+      %{"arguments" => _} -> false
+      %{args: _} -> true
+      _ -> args_shadowed?(:erlang.element(1, f))
+    end
+  end
 
   defp ev_id({:id, name}, env) do
     case lookup_var(env, name) do
@@ -2819,9 +3192,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp scope_with(scope, name) do
-    if Map.has_key?(deref(scope).vars, name),
-      do: scope,
-      else: scope_with(deref(scope).parent, name)
+    case deref(scope) do
+      f when is_tuple(f) ->
+        if is_map_key(:erlang.element(2, f).slots, name),
+          do: scope,
+          else: scope_with(:erlang.element(1, f), name)
+
+      s ->
+        if Map.has_key?(s.vars, name), do: scope, else: scope_with(s.parent, name)
+    end
   end
 
   # ── hoisting ───────────────────────────────────────────────
@@ -2858,6 +3237,9 @@ defmodule Browser.JS.Interp do
   # An arrow with an expression body has none of this to know, so its closure stays as it is
   # (`call_frame/4` has a clause for it): the write back to the heap would cost more than it
   # saves for an arrow that is made and called once, as callbacks are.
+  # A rewritten closure runs on a frame that the resolver laid out, so nothing here applies:
+  # `hoisted_names` over slot forms would even be wrong.
+  def with_hoist(_id, %{info: %Info{rewritten: true}} = c), do: c
   def with_hoist(_id, %{hoist: _} = c), do: c
   def with_hoist(_id, %{mode: :arrow_expr} = c), do: c
 
@@ -3302,6 +3684,11 @@ defmodule Browser.JS.Interp do
     if Process.get(:js_tail) == true, do: tail_value(e, env), else: {:ret, ev(e, env)}
   end
 
+  # The resolver marked the return of a rewritten function: a tail site runs the
+  # trampoline, every other return is plain. Neither reads the run-time tail flag.
+  defp exec_fn_stmt({:return, e, :plain}, env), do: {:ret, ev(e, env)}
+  defp exec_fn_stmt({:return, e, :tail}, env), do: tail_value(e, env)
+
   # (a statement's completion value only matters outside function bodies: in a script or eval code)
   defp exec_fn_stmt({:expr, e}, env) do
     ev(e, env)
@@ -3318,6 +3705,12 @@ defmodule Browser.JS.Interp do
 
   defp exec_fn_stmt({:block, stmts}, env) do
     if scoped_block?(stmts), do: exec_other({:block, stmts}, env), else: exec_fn(stmts, env)
+  end
+
+  # (a block inside a rewritten function: its names are slots of the frame, no scope is made)
+  defp exec_fn_stmt({:block, stmts, sc}, env) when frameless(sc) do
+    reset_tdz(env, sc)
+    exec_fn(stmts, env)
   end
 
   defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
@@ -3467,7 +3860,23 @@ defmodule Browser.JS.Interp do
 
   # `using x = v; rest`: the rest of the list runs, then the resource is disposed, whichever
   # way the rest ended
-  defp exec({:using, kind, name, init, rest}, env, _) do
+  defp exec({:using, kind, {:slot, 0, i, name}, init, rest}, env, _) do
+    v = ev_named(init, env, {:id, name})
+    res = using_resource(kind, v)
+    slot_put(env, i, v)
+
+    outcome =
+      try do
+        no_tail(fn -> exec_list(rest, env) end)
+        :ok
+      catch
+        t -> {:thrown, t}
+      end
+
+    using_finish(outcome, dispose_sync(res))
+  end
+
+  defp exec({:using, kind, name, init, rest}, env, _) when is_binary(name) do
     v = ev_named(init, env, {:id, name})
     res = using_resource(kind, v)
     declare(env, name, v, true)
@@ -3526,6 +3935,11 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  defp exec({:block, stmts, sc}, env, _) when frameless(sc) do
+    reset_tdz(env, sc)
+    exec_list(stmts, env)
+  end
+
   defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
 
   defp exec({:return, e}, env, _) do
@@ -3535,6 +3949,13 @@ defmodule Browser.JS.Interp do
     else
       throw({:js_return, ev(e, env)})
     end
+  end
+
+  defp exec({:return, e, :plain}, env, _), do: throw({:js_return, ev(e, env)})
+
+  defp exec({:return, e, :tail}, env, _) do
+    {:ret, v} = tail_value(e, env)
+    throw({:js_return, v})
   end
 
   defp exec({:throw, e}, env, _) do
@@ -3599,8 +4020,27 @@ defmodule Browser.JS.Interp do
     for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
   end
 
+  # a `for` inside a rewritten function: the head's names are slots of the frame, so the
+  # loop runs in `env` with no scope, no copy per iteration and no closure count to read
+  defp exec({:for, init, test, update, body, sc}, env, labels) when frameless(sc) do
+    :erlang.put(:js_last, :undefined)
+    reset_tdz(env, sc)
+
+    case init do
+      {:var, _, _} = d -> exec(d, env)
+      {:expr, e} -> ev(e, env)
+      nil -> :ok
+    end
+
+    frame_for_loop(test, update, body, env, labels)
+  end
+
   defp exec({kind, _, _, _, _} = node, env, labels) when kind in [:forin, :forof],
     do: no_tail(fn -> exec_for_each(node, env, labels) end)
+
+  defp exec({kind, _, _, _, _, sc} = node, env, labels)
+       when kind in [:forin, :forof] and frameless(sc),
+       do: no_tail(fn -> exec_for_each_frame(node, env, labels) end)
 
   defp exec({:switch, disc, cases}, env, _) do
     :erlang.put(:js_last, :undefined)
@@ -3622,6 +4062,51 @@ defmodule Browser.JS.Interp do
       :ok
     catch
       {:js_break, nil} -> :ok
+    end
+  end
+
+  defp exec({:switch, disc, cases, sc}, env, _) when frameless(sc) do
+    :erlang.put(:js_last, :undefined)
+    v = ev(disc, env)
+    reset_tdz(env, sc)
+
+    start =
+      Enum.find_index(cases, fn {test, _} ->
+        test != :default and strict_eq(v, ev(test, env))
+      end) ||
+        Enum.find_index(cases, fn {test, _} -> test == :default end)
+
+    try do
+      if start,
+        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, env) end)
+
+      :ok
+    catch
+      {:js_break, nil} -> :ok
+    end
+  end
+
+  # a `try` inside a rewritten function: the catch parameter is a slot of the frame
+  defp exec({:try, block, param, handler, finalizer, sc}, env, _) when frameless(sc) do
+    :erlang.put(:js_last, :undefined)
+
+    try do
+      try do
+        no_tail(fn -> exec(block, env) end)
+      catch
+        {:js_error, v} when handler != nil ->
+          reset_tdz(env, sc)
+          if param, do: bind(param, v, env, :let)
+          if finalizer, do: no_tail(fn -> exec(handler, env) end), else: exec(handler, env)
+      end
+    after
+      # a finalizer that completes normally leaves the try statement's own value
+      if finalizer do
+        saved = :erlang.get(:js_last)
+        :erlang.put(:js_last, :undefined)
+        exec(finalizer, env)
+        :erlang.put(:js_last, saved)
+      end
     end
   end
 
@@ -3723,7 +4208,7 @@ defmodule Browser.JS.Interp do
 
     case source do
       {:proto, it, next} ->
-        proto_loop(it, next, {pat, mode, body, env}, labels)
+        proto_loop(it, next, {pat, mode, body, env, :fresh}, labels)
 
       {:list, items} ->
         Enum.reduce_while(items, :ok, fn item, _ ->
@@ -3744,6 +4229,62 @@ defmodule Browser.JS.Interp do
             end
           end
         end)
+    end
+  end
+
+  # A for-in or for-of inside a rewritten function. The head's names are slots of the frame:
+  # they go back to the temporal dead zone before the object is evaluated and again before
+  # every item, so a default that reads its own name throws on every round.
+  defp exec_for_each_frame({kind, decl, pat, obj, body, sc}, env, labels) do
+    :erlang.put(:js_last, :undefined)
+    reset_tdz(env, sc)
+    target = ev(obj, env)
+    mode = if decl == nil, do: :assign, else: decl
+
+    source =
+      case kind do
+        :forin -> {:list, if(nullish?(target), do: [], else: for_in_keys(target))}
+        :forof -> for_of_source(target)
+      end
+
+    case source do
+      {:proto, it, next} ->
+        proto_loop(it, next, {pat, mode, body, env, sc}, labels)
+
+      {:list, items} ->
+        Enum.reduce_while(items, :ok, fn item, _ ->
+          # a key that was deleted before its turn is skipped
+          if kind == :forin and not has_property?(target, item) do
+            {:cont, :ok}
+          else
+            tick()
+            reset_tdz(env, sc)
+            bind(pat, item, env, mode)
+
+            case run_body(body, env, labels) do
+              :break -> {:halt, :ok}
+              :next -> {:cont, :ok}
+            end
+          end
+        end)
+    end
+  end
+
+  # the loop of a `for` inside a rewritten function: one scope, the frame, for every round
+  defp frame_for_loop(test, update, body, env, labels) do
+    tick()
+
+    if test == nil or truthy(ev(test, env)) do
+      case run_body(body, env, labels) do
+        :break ->
+          :ok
+
+        :next ->
+          if update, do: ev(update, env)
+          frame_for_loop(test, update, body, env, labels)
+      end
+    else
+      :ok
     end
   end
 
@@ -3845,6 +4386,32 @@ defmodule Browser.JS.Interp do
   def bind_pattern(pat, v, env, mode), do: bind(pat, v, env, mode)
 
   defp bind({:id, name}, v, env, mode), do: bind_name(mode, env, name, v)
+
+  # the slot forms as binding targets: a declaration writes the slot, a destructuring
+  # assignment is an assignment and checks the temporal dead zone
+  defp bind({:slot, d, i, name}, v, env, :assign), do: slot_assign(hop(env, d), i, name, v)
+
+  defp bind({:slot, d, i, name}, v, env, _mode) do
+    frame = hop(env, d)
+    if @check, do: check_slot(frame, i, name)
+    slot_put(frame, i, v)
+  end
+
+  defp bind({:cslot, d, i, name}, _v, env, _mode), do: cslot_assign(hop(env, d), i, name)
+  defp bind({:fname, _, _, _}, _v, _env, _mode), do: :ok
+  # A destructuring assignment or a for-in/of head takes its strictness from the function
+  # that runs it. The root has `:strict` only while a strict script runs, so the write
+  # must not read it there.
+  defp bind({:gref, name}, v, env, :assign) do
+    g = root(env)
+
+    if lookup_var(env, :strict) == {:ok, true},
+      do: strict_assign_var(g, name, v, resolvable?(g, name)),
+      else: assign_var(g, name, v)
+  end
+
+  defp bind({:gref, name}, v, env, mode), do: bind_name(mode, root(env), name, v)
+  defp bind({:mref, d, name}, v, env, mode), do: bind_name(mode, hop(env, d), name, v)
 
   defp bind({:default, pat, e}, v, env, mode),
     do: bind(pat, if(v == :undefined, do: ev_named(e, env, pat), else: v), env, mode)
@@ -4011,6 +4578,42 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  defp uninit_this_error do
+    throw_error(
+      "ReferenceError",
+      "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+    )
+  end
+
+  defp tdz_error(name),
+    do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
+
+  defp const_error, do: throw_error("TypeError", "Assignment to constant variable.")
+
+  # the root of the chain a frame is on (its realm's global scope)
+  defp root(env), do: :erlang.element(5, :erlang.get(env))
+
+  # A write to a slot by an assignment: a binding still in its temporal dead zone takes no
+  # value. A declaration pattern writes with `slot_put/3` directly.
+  defp slot_assign(env, i, name, v) do
+    if @check, do: check_slot(env, i, name)
+
+    case :erlang.element(i, :erlang.get(env)) do
+      :tdz -> tdz_error(name)
+      _ -> slot_put(env, i, v)
+    end
+  end
+
+  # a write to a `const` slot: the value is evaluated first, as today
+  defp cslot_assign(env, i, name) do
+    if @check, do: check_slot(env, i, name)
+
+    case :erlang.element(i, :erlang.get(env)) do
+      :tdz -> tdz_error(name)
+      _ -> const_error()
+    end
+  end
+
   # ── expressions ────────────────────────────────────────────
 
   def ev({:num, n}, _), do: n
@@ -4040,17 +4643,9 @@ defmodule Browser.JS.Interp do
 
   def ev({:this}, env) do
     case lookup_var(env, :this) do
-      {:ok, :uninit_this} ->
-        throw_error(
-          "ReferenceError",
-          "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
-        )
-
-      {:ok, v} ->
-        v
-
-      :error ->
-        :undefined
+      {:ok, :uninit_this} -> uninit_this_error()
+      {:ok, v} -> v
+      :error -> :undefined
     end
   end
 
@@ -4097,6 +4692,43 @@ defmodule Browser.JS.Interp do
   end
 
   def ev({:id, _} = e, env), do: ev_id(e, env)
+
+  # The slot forms of the resolver (see `Browser.JS.Resolve`). A read of a slot at depth 0
+  # is one `element/2` on the frame; a deeper one hops first. `{:gref}` and `{:mref}` are
+  # today's by-name reads from the root or from the map scope the hop lands on, so their
+  # semantics are today's by construction.
+  def ev({:slot, 0, i, name} = form, env) do
+    if @check, do: check_landing(form, env)
+
+    case :erlang.element(i, :erlang.get(env)) do
+      :tdz -> tdz_error(name)
+      v -> v
+    end
+  end
+
+  def ev({:slot, d, i, name}, env), do: ev({:slot, 0, i, name}, hop(env, d))
+
+  def ev({:this, d, i} = form, env) do
+    if @check, do: check_landing(form, env)
+
+    case :erlang.element(i, :erlang.get(hop(env, d))) do
+      :uninit_this -> uninit_this_error()
+      v -> v
+    end
+  end
+
+  def ev({:gref, name} = form, env) do
+    if @check, do: check_landing(form, env)
+    ev_id({:id, name}, root(env))
+  end
+
+  def ev({:mref, d, name} = form, env) do
+    if @check, do: check_landing(form, env)
+    ev_id({:id, name}, hop(env, d))
+  end
+
+  # (the names of a `for (using x of e)` head hold `:tdz` in their own slots already)
+  def ev({:in_tdz, _names, e}, env), do: ev(e, env)
 
   # the strings argument of a tagged template: an array with a `raw` twin
   # (made once for each place in the source and then reused)
@@ -4209,6 +4841,21 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  def ev({:unary, "typeof", {:slot, d, i, name} = form}, env) do
+    if @check, do: check_landing(form, env)
+
+    case :erlang.element(i, :erlang.get(hop(env, d))) do
+      :tdz -> tdz_error(name)
+      v -> typeof(v)
+    end
+  end
+
+  def ev({:unary, "typeof", {:gref, name}}, env),
+    do: ev({:unary, "typeof", {:id, name}}, root(env))
+
+  def ev({:unary, "typeof", {:mref, d, name}}, env),
+    do: ev({:unary, "typeof", {:id, name}}, hop(env, d))
+
   def ev({:unary, "typeof", {:id, name}}, env) do
     case lookup_var(env, name) do
       {:ok, :tdz} ->
@@ -4244,6 +4891,14 @@ defmodule Browser.JS.Interp do
     throw_error("ReferenceError", "Unsupported reference to 'super'")
   end
 
+  # a binding the resolver found in a frame or a map scope can not be deleted; one it did
+  # not find is looked up from the root, as today
+  def ev({:unary, "delete", {k, _, _, _}}, _env) when k in [:slot, :cslot, :fname], do: false
+  def ev({:unary, "delete", {:mref, _, _}}, _env), do: false
+
+  def ev({:unary, "delete", {:gref, name}}, env),
+    do: ev({:unary, "delete", {:id, name}}, root(env))
+
   # an identifier found on a `with` object is deleted from it
   def ev({:unary, "delete", {:id, name}}, env) do
     case with_binding(env, name) do
@@ -4253,6 +4908,10 @@ defmodule Browser.JS.Interp do
       # a declared local binding can not be deleted
       {:var, sc} ->
         cond do
+          # (a binding in a frame is a declared local)
+          is_tuple(deref(sc)) ->
+            false
+
           deref(sc).parent == nil and name in ["NaN", "Infinity", "undefined"] ->
             false
 
@@ -4397,6 +5056,32 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  def ev({:update, op, prefix?, {:slot, d, i, _} = target}, env) do
+    old = numeric(ev(target, env))
+    new = bump(op, old)
+    slot_put(hop(env, d), i, new)
+    if prefix?, do: new, else: old
+  end
+
+  def ev({:update, op, _prefix?, {:cslot, d, i, name}}, env) do
+    old = numeric(ev({:slot, d, i, name}, env))
+    _new = bump(op, old)
+    const_error()
+  end
+
+  def ev({:update, op, prefix?, {:fname, d, i, name}}, env) do
+    # (a sloppy function's own name takes no write)
+    old = numeric(ev({:slot, d, i, name}, env))
+    new = bump(op, old)
+    if prefix?, do: new, else: old
+  end
+
+  def ev({:update, op, prefix?, {:gref, name}}, env),
+    do: ev({:update, op, prefix?, {:id, name}}, root(env))
+
+  def ev({:update, op, prefix?, {:mref, d, name}}, env),
+    do: ev({:update, op, prefix?, {:id, name}}, hop(env, d))
+
   # `f()++`: the operand is evaluated, then it is no reference
   def ev({:update, _op, _prefix?, target}, env) do
     ev(target, env)
@@ -4441,6 +5126,32 @@ defmodule Browser.JS.Interp do
     v
   end
 
+  def ev({:assign, "=", {:slot, d, i, name} = target, value}, env) do
+    v = ev_named(value, env, target)
+    slot_assign(hop(env, d), i, name, v)
+    v
+  end
+
+  def ev({:assign, "=", {:cslot, d, i, name} = target, value}, env) do
+    ev_named(value, env, target)
+    cslot_assign(hop(env, d), i, name)
+  end
+
+  def ev({:assign, "=", {:fname, _, _, _} = target, value}, env),
+    do: ev_named(value, env, target)
+
+  def ev({:assign, "=", {:gref, name}, value}, env) do
+    v = ev_named(value, env, {:id, name})
+    assign_var(root(env), name, v)
+    v
+  end
+
+  def ev({:assign, "=", {:mref, d, name}, value}, env) do
+    v = ev_named(value, env, {:id, name})
+    assign_var(hop(env, d), name, v)
+    v
+  end
+
   def ev({:assign, op, target, value}, env), do: compound_assign(op, target, value, env, false)
 
   # assignments in strict code: a failed [[Set]] or an undeclared name throws
@@ -4472,6 +5183,39 @@ defmodule Browser.JS.Interp do
     strict_put(ov, key, v)
   end
 
+  def ev({:sassign, "=", {k, _, _, _} = target, value}, env) when k in [:slot, :cslot, :fname],
+    do: ev({:assign, "=", target, value}, env)
+
+  def ev({:sassign, "=", {:gref, name}, value}, env) do
+    root = root(env)
+    resolved? = resolvable?(root, name)
+    v = ev_named(value, env, {:id, name})
+    # the binding may have been deleted while the right-hand side ran
+    strict_assign_var(
+      root,
+      name,
+      v,
+      resolved? and (simple_value?(value) or resolvable?(root, name))
+    )
+
+    v
+  end
+
+  def ev({:sassign, "=", {:mref, d, name}, value}, env) do
+    target = hop(env, d)
+    resolved? = resolvable?(target, name)
+    v = ev_named(value, env, {:id, name})
+
+    strict_assign_var(
+      target,
+      name,
+      v,
+      resolved? and (simple_value?(value) or resolvable?(target, name))
+    )
+
+    v
+  end
+
   def ev({:sassign, op, target, value}, env), do: compound_assign(op, target, value, env, true)
 
   def ev({:supdate, op, prefix?, {:member, o, k, _}}, env) do
@@ -4494,6 +5238,15 @@ defmodule Browser.JS.Interp do
     strict_assign_var(env, name, new, resolvable?(env, name))
     if prefix?, do: new, else: old
   end
+
+  def ev({:supdate, op, prefix?, {k, _, _, _} = target}, env) when k in [:slot, :cslot, :fname],
+    do: ev({:update, op, prefix?, target}, env)
+
+  def ev({:supdate, op, prefix?, {:gref, name}}, env),
+    do: ev({:supdate, op, prefix?, {:id, name}}, root(env))
+
+  def ev({:supdate, op, prefix?, {:mref, d, name}}, env),
+    do: ev({:supdate, op, prefix?, {:id, name}}, hop(env, d))
 
   def ev({:member, o, k, opt}, env) do
     ov = ev(o, env)
@@ -4568,22 +5321,33 @@ defmodule Browser.JS.Interp do
   defp in_field_initializer?(nil), do: false
 
   defp in_field_initializer?(env) do
-    s = deref(env)
+    case deref(env) do
+      f when is_tuple(f) ->
+        if is_map_key(:erlang.element(2, f).slots, :args),
+          do: false,
+          else: in_field_initializer?(:erlang.element(1, f))
 
-    cond do
-      Map.has_key?(s.vars, :field_init) -> true
-      Map.has_key?(s.vars, :args) -> false
-      true -> in_field_initializer?(s.parent)
+      s ->
+        cond do
+          Map.has_key?(s.vars, :field_init) -> true
+          Map.has_key?(s.vars, :args) -> false
+          true -> in_field_initializer?(s.parent)
+        end
     end
   end
 
-  # the private names (`#x`) declared by the classes around `env`
+  # the private names (`#x`) declared by the classes around `env` (a frame holds none)
   defp private_names_in(nil, acc), do: acc
 
   defp private_names_in(env, acc) do
-    s = deref(env)
-    acc = for({:priv, n} <- Map.keys(s.vars), do: n) ++ acc
-    private_names_in(s.parent, acc)
+    case deref(env) do
+      f when is_tuple(f) ->
+        private_names_in(:erlang.element(1, f), acc)
+
+      s ->
+        acc = for({:priv, n} <- Map.keys(s.vars), do: n) ++ acc
+        private_names_in(s.parent, acc)
+    end
   end
 
   # Runs eval code: `var`s and functions go to the caller's function scope (sloppy code) while
@@ -4746,8 +5510,18 @@ defmodule Browser.JS.Interp do
 
   # the nearest function scope (or the global one) from `env` outwards
   defp variable_scope(env) do
-    s = deref(env)
-    if Map.get(s, :fnscope, false) or s.parent == nil, do: env, else: variable_scope(s.parent)
+    case deref(env) do
+      # (a function frame is a function scope; a block frame of step 2c is not)
+      f when is_tuple(f) ->
+        if match?(%Info{}, :erlang.element(2, f)),
+          do: env,
+          else: variable_scope(:erlang.element(1, f))
+
+      s ->
+        if Map.get(s, :fnscope, false) or s.parent == nil,
+          do: env,
+          else: variable_scope(s.parent)
+    end
   end
 
   # a method written in an object literal finds `super` through the object
@@ -4880,6 +5654,23 @@ defmodule Browser.JS.Interp do
         {:id, name} ->
           id_ref(env, name, target, strict?)
 
+        {:slot, d, i, name} ->
+          frame = hop(env, d)
+          {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> slot_assign(frame, i, name, v) end}
+
+        {:cslot, d, i, name} ->
+          frame = hop(env, d)
+          {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
+
+        {:fname, d, i, name} ->
+          {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
+
+        {:gref, name} ->
+          id_ref(root(env), name, {:id, name}, strict?)
+
+        {:mref, d, name} ->
+          id_ref(hop(env, d), name, {:id, name}, strict?)
+
         {:super_member, k} ->
           {base, this} = Browser.JS.Classes.super_base(env)
           key = to_key(ev_key(k, env))
@@ -4935,6 +5726,11 @@ defmodule Browser.JS.Interp do
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k
   defp describe({:member, o, _, _}), do: describe(o) <> "[...]"
   defp describe({:this}), do: "this"
+  # (the slot forms of the resolver keep the name, so `g is not a function` keeps it too)
+  defp describe({k, _, _, n}) when k in [:slot, :cslot, :fname] and is_binary(n), do: n
+  defp describe({:mref, _, n}), do: n
+  defp describe({:gref, n}), do: n
+  defp describe({:this, _, _}), do: "this"
   defp describe(_), do: "expression"
 
   defp eval_list(nodes, env) do
@@ -5028,6 +5824,19 @@ defmodule Browser.JS.Interp do
 
   def ev_named({:async, {:gen, {:fn, nil, _, _, _, _}}} = e, env, {:id, name}),
     do: name_fn(ev(e, env), name)
+
+  # A slot form of the resolver as the hint names the value as `{:id, name}` does. The
+  # clauses are limited to the node shapes that can take a name, so no other initializer
+  # pays an extra clause.
+  def ev_named(e, env, {k, _, _, name})
+      when k in [:slot, :cslot, :fname] and is_binary(name) and nameable(e),
+      do: ev_named(e, env, {:id, name})
+
+  def ev_named(e, env, {:mref, _, name}) when is_binary(name) and nameable(e),
+    do: ev_named(e, env, {:id, name})
+
+  def ev_named(e, env, {:gref, name}) when is_binary(name) and nameable(e),
+    do: ev_named(e, env, {:id, name})
 
   def ev_named(e, env, _), do: ev(e, env)
 

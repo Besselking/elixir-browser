@@ -11,6 +11,10 @@ defmodule Browser.JS.Resolve.Info do
   start at position 6. A slot index in this struct is the absolute position in
   that tuple.
 
+  Until step 2f `caller_id` is `nil`: `Error.stack` still comes from the
+  `:js_stack` list, which carries the inferred names of functions and mixes
+  frame calls with calls on the old path. `call_pos` is filled.
+
   The fields and the step that reads them:
 
   - `src`: the source text of the function, or `nil`. The closure keeps it for
