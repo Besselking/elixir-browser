@@ -1,4 +1,7 @@
-# Usage: RUNS=5 mix run --no-start bench/js_runtime.exs [name ...]
+# Usage: RUNS=5 RESOLVE=off mix run --no-start bench/js_runtime.exs [name ...]
+#
+# RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`,
+# or 1 to 4; see `Browser.JS.Resolve`).
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
@@ -64,7 +67,14 @@ selected =
         Enum.any?(filter, &String.contains?(id, &1))
       end)
 
-opts = [max_steps: 1_000_000_000, timeout: 300_000]
+resolve =
+  case System.get_env("RESOLVE", "off") do
+    "off" -> :off
+    "info" -> :info
+    n -> String.to_integer(n)
+  end
+
+opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
 
 IO.puts(
   String.pad_trailing("program", 34) <>
