@@ -1790,7 +1790,17 @@ defmodule Browser.JS.FramesTest do
      ",2"},
     {68,
      "class A { x = () => { let q = 1; return () => eval('arguments') } } try { new A().x()() } catch (e) { e.constructor.name }",
-     "SyntaxError"}
+     "SyntaxError"},
+    # (found in review) a closure in a parameter default does not see a body name
+    {69, "var x = 'glob'; function f(g = () => x) { let x = 1; return g() } f()", "glob"},
+    {70, "var x = 'glob'; function f(g = () => x) { var x = 1; return g() } f()", "glob"},
+    {71, "var x = 'glob'; function f(g = () => x) { function x(){} return g() } f()", "glob"},
+    # (found in review) the parameters still see the self name that a body declaration hides
+    {72, "(function g(x = () => typeof g) { var g = 1; return x() })()", "function"},
+    {73, "(function g(x = () => typeof g) { function g(){} return x() })()", "function"},
+    {74,
+     "(function g(x = class { m() { return g } }) { var g = 1; return typeof new x().m() })()",
+     "function"}
   ]
 
   # Rows 27 and 57 log from a microtask; their value is `undefined`.

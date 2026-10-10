@@ -132,7 +132,9 @@ defmodule Browser.JS.GC do
   defp scan([%Browser.JS.Resolve.Scope{} | rest], marks), do: scan(rest, marks)
 
   defp scan([t | rest], marks)
-       when is_tuple(t) and tuple_size(t) >= 5 and is_struct(elem(t, 1)) do
+       when is_tuple(t) and tuple_size(t) >= 5 and
+              (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
+                 is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
     stack = spush_from(t, 3, tuple_size(t), rest, marks)
     scan(spush(elem(t, 0), stack, marks, true), marks)
   end
@@ -209,9 +211,12 @@ defmodule Browser.JS.GC do
 
   # A frame: element 2 is the resolver's record. Only the parent, the root and the slots can
   # hold ids. The caller id and the line number in `call_pos` must not keep a random object
-  # alive. No other term has a struct in position 2, so the guard matches frames only.
+  # alive. The guard names the two record structs: other tuples, such as the function
+  # tuple of a WebAssembly instance, can also have a struct in position 2.
   defp mark([t | rest], marks)
-       when is_tuple(t) and tuple_size(t) >= 5 and is_struct(elem(t, 1)) do
+       when is_tuple(t) and tuple_size(t) >= 5 and
+              (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
+                 is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
     stack = push_frame_slots(t, 5, tuple_size(t), rest, marks)
     mark(push(elem(t, 0), stack, marks), marks)
   end

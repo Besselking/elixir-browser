@@ -968,6 +968,13 @@ defmodule Browser.JS.Resolve do
         do: name,
         else: nil
 
+    # A body declaration of the self name hides the self name only in the body. The
+    # parameter expressions still see the self binding, and a slot frame has no place for
+    # a name that only the parameters see, so such a function keeps its names.
+    hidden_self? =
+      expr? and kind == :fn and is_binary(name) and mode == false and
+        name not in param_names and name in declared and params_kind(params) != :plain
+
     {sid, st} =
       a_open(st, :fn, node, %{
         fn_kind: kind,
@@ -983,6 +990,7 @@ defmodule Browser.JS.Resolve do
         fun_names: Enum.uniq(fun_names),
         lex: lex,
         self: self,
+        own_dynamic: hidden_self?,
         phase: :params,
         makes_closures: false,
         uses_this: false,

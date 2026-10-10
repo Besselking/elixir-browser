@@ -89,6 +89,24 @@ defmodule Browser.JSGCTest do
     |> Task.await()
   end
 
+  test "walks every element of a tuple that is not a frame, even with a struct in position 2" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      # A WebAssembly instance keeps its functions as a tuple of structs; element 2 can hold
+      # the only reference to a JS function.
+      {:obj, held} = Interp.new_object([{"x", 1.0}])
+      fun = fn -> {:obj, held} end
+      tuple = {%URI{}, %URI{path: "a"}, fun, %URI{}, %URI{}}
+      Process.put({:gc_test_tuple, 1}, tuple)
+
+      GC.collect()
+      assert is_map(:erlang.get(held))
+    end)
+    |> Task.await()
+  end
+
   test "does nothing unless enabled" do
     Task.async(fn ->
       Interp.init(1000)

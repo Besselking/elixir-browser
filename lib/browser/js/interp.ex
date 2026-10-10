@@ -116,7 +116,9 @@ defmodule Browser.JS.Interp do
         {:js_freed, name} ->
           check_fail("a second free of the frame of #{name}")
 
-        f when is_tuple(f) and tuple_size(f) >= 5 and is_struct(:erlang.element(2, f)) ->
+        f
+        when is_tuple(f) and tuple_size(f) >= 5 and
+               (is_struct(:erlang.element(2, f), Info) or is_struct(:erlang.element(2, f), Scope)) ->
           :erlang.put(id, {:js_freed, check_name(:erlang.element(2, f))})
           :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
           :ok
@@ -369,12 +371,37 @@ defmodule Browser.JS.Interp do
 
   defp check_landing({:gref, name}, env) do
     case scope_of(env, name) do
-      nil -> :ok
-      sc -> if sc == root(env), do: :ok, else: check_fail("{:gref, #{inspect(name)}} is shadowed")
+      nil ->
+        :ok
+
+      sc ->
+        if sc == root(env) or body_only_slot?(sc, name),
+          do: :ok,
+          else: check_fail("{:gref, #{inspect(name)}} is shadowed")
     end
   end
 
   defp check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
+
+  # A closure in a parameter expression does not see the body names of its function, so a
+  # `{:gref}` there can pass a function frame that has a body slot of the same name. The
+  # check cannot tell where the form sits, so it accepts a body slot of a function whose
+  # parameters have expressions.
+  defp body_only_slot?(sc, name) do
+    case :erlang.get(sc) do
+      f when is_tuple(f) ->
+        rec = :erlang.element(2, f)
+
+        match?(%Info{params: p} when p != :plain, rec) and
+          case rec.slots do
+            %{^name => i} -> kind_at(rec, i) not in [:param, :self]
+            _ -> false
+          end
+
+      _ ->
+        false
+    end
+  end
 
   defp check_slot(id, i, name) do
     case :erlang.get(id) do
