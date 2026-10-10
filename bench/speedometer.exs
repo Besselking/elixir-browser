@@ -268,6 +268,14 @@ loop = fn loop ->
         t = System.monotonic_time(:microsecond)
         env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
         laid = Browser.Page.from_raw(base, raw, env)
+
+        # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
+        if dir = System.get_env("DUMPRAW") do
+          File.mkdir_p!(dir)
+          n = length(File.ls!(dir))
+          File.write!(Path.join(dir, "raw#{n}.term"), :erlang.term_to_binary({base, raw, laid.sheet_cache}))
+        end
+
         t1 = System.monotonic_time(:microsecond)
 
         {items, height} =

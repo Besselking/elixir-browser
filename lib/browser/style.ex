@@ -290,7 +290,13 @@ defmodule Browser.Style do
       fn {rule, order}, idx ->
         idx = note_pseudo(idx, rule)
         rule = Map.put(rule, :order, order)
-        Map.update(idx, {Map.get(rule, :pseudo), key(rule)}, [rule], &[rule | &1])
+
+        Map.update(
+          idx,
+          {Map.get(rule, :pseudo), scope_key(rule), key(rule)},
+          [rule],
+          &[rule | &1]
+        )
       end
     )
   end
@@ -322,6 +328,10 @@ defmodule Browser.Style do
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
 
+  # (the rules of the user agent apply in every tree)
+  defp scope_key(%{origin: :ua}), do: :ua
+  defp scope_key(rule), do: Map.get(rule, :scope)
+
   # bucket by the rightmost compound so lookups only test plausible rules
   defp key(%{selector: [{cmp, _} | _]}) do
     cond do
@@ -344,16 +354,33 @@ defmodule Browser.Style do
 
   @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
   def declared(idx, ctx, pseudo \\ nil) do
-    # rules are bucketed by the pseudo-element they are for, and then by their rightmost compound
+    # rules are bucketed by the pseudo-element they are for, the shadow tree they come from, and
+    # then by their rightmost compound. The rules of the tree `ctx` is in, those of the user agent
+    # and those of the tree `ctx` is the host of (`:host`) are the ones that can apply: a page
+    # that makes a hundred copies of a component has a hundred sets of the same rules, and an
+    # element looks at one.
+    scope = Map.get(ctx, :scope)
+    scope_in = Map.get(ctx, :scope_in)
+
+    scopes =
+      case {scope, scope_in} do
+        {nil, nil} -> [nil, :ua]
+        {nil, s} -> [nil, :ua, s]
+        {s, nil} -> [s, :ua]
+        {s, s} -> [s, :ua]
+        {s, h} -> [s, :ua, h]
+      end
+
     candidates =
-      Map.get(idx, {pseudo, {:tag, ctx.tag}}, []) ++
-        Map.get(idx, {pseudo, :other}, []) ++
-        if(ctx.id, do: Map.get(idx, {pseudo, {:id, ctx.id}}, []), else: []) ++
-        Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, {:class, &1}}, []))
+      Enum.flat_map(scopes, fn sc ->
+        Map.get(idx, {pseudo, sc, {:tag, ctx.tag}}, []) ++
+          Map.get(idx, {pseudo, sc, :other}, []) ++
+          if(ctx.id, do: Map.get(idx, {pseudo, sc, {:id, ctx.id}}, []), else: []) ++
+          Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, sc, {:class, &1}}, []))
+      end)
 
     from_rules =
       for rule <- candidates,
-          Map.get(rule, :pseudo) == pseudo,
           from_host <- [from_shadow?(rule, ctx)],
           from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
           CSS.matches?(rule.selector, ctx),
