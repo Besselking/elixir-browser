@@ -383,6 +383,21 @@ defmodule Browser.Page do
     )
   end
 
+  @doc """
+  What `from_raw/3` worked out about the style sheets and the cascade, to be handed to another copy
+  of the page (`adopt_style_state/2`) so that the next tree it is given starts from it: the sheets
+  that were parsed and the memo of the cascade.
+  """
+  def style_state(%__MODULE__{} = page) do
+    Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
+  end
+
+  @doc "Puts a `style_state/1` of a later tree in `page` (its rules, sheets and memo go together)."
+  def adopt_style_state(%__MODULE__{} = page, style) do
+    style = %{style | sheet_cache: Map.merge(page.sheet_cache, style.sheet_cache)}
+    struct(page, style)
+  end
+
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
   defp refresh_sheets(page, raw, base) do

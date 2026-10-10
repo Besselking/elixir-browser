@@ -1079,4 +1079,55 @@ defmodule Browser.StyleTest do
     # taken over from the memo, the tree is the same
     assert {^pruned, _} = Style.prune(nodes, idx, memo)
   end
+
+  describe "style sharing" do
+    # the same page styled with and without elements sharing what the rules say about them
+    defp both_ways(html, css) do
+      nodes = html |> HTML.parse() |> Browser.Nids.index()
+      idx = Style.index([{:ua, Style.ua_css()}, {:author, css}])
+      Process.delete(:style_no_share)
+      shared = Style.prune(nodes, idx)
+      Process.put(:style_no_share, true)
+      plain = Style.prune(nodes, idx)
+      Process.delete(:style_no_share)
+      {shared, plain}
+    end
+
+    test "rules that look at the place among the siblings or at the content still tell elements apart" do
+      html =
+        "<ul class=l>" <>
+          String.duplicate("<li class=i><b>x</b><i></i></li>", 6) <>
+          "</ul><div><p class=i>a</p><p class=i>b</p><p class=i></p></div>"
+
+      css = """
+      li:first-child { color: red } li:last-child { color: blue } li:nth-child(3) { color: green }
+      li + li { margin-left: 3px } li ~ li { padding-left: 2px } i:empty { width: 4px }
+      p:not(:first-child) { font-size: 20px } div:has(> p.i) { border-top-width: 2px }
+      .l li:nth-of-type(2n) { background-color: #123456 } li.i b { font-weight: 300 }
+      """
+
+      {shared, plain} = both_ways(html, css)
+      assert shared == plain
+    end
+
+    test "rules for each of several copies of a component's tree give the same as without sharing" do
+      html =
+        String.duplicate("<div class=host><span class=a>1</span><span class=a>2</span></div>", 4)
+
+      css = ".host { display: block } .a { color: red } .a:first-child { color: blue }"
+
+      {shared, plain} = both_ways(html, css)
+      assert shared == plain
+    end
+
+    test "elements that differ in an attribute or a class get their own style" do
+      html =
+        ~s|<p class=a>x</p><p class=b>y</p><p class=a style="color: red">z</p><p dir=auto>w</p>|
+
+      css = ".a { color: green } .b { color: blue } [dir=auto] { text-align: right }"
+
+      {shared, plain} = both_ways(html, css)
+      assert shared == plain
+    end
+  end
 end

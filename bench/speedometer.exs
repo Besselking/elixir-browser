@@ -41,6 +41,9 @@ layout? = System.get_env("LAYOUT") != nil
 info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, forced} = Agent.start_link(fn -> {0, 0} end)
 {:ok, lsamples} = Agent.start_link(fn -> [] end)
+# the page the layouts for the scripts start from; each layout hands on what it worked out about
+# the sheets and the cascade, as the session does
+{:ok, base_agent} = Agent.start_link(fn -> page end)
 
 t0 = System.monotonic_time(:millisecond)
 pid = Runtime.start(page.raw, info)
@@ -73,7 +76,10 @@ sampler =
               case Process.info(pid, :current_stacktrace) do
                 {_, [_ | _] = st} ->
                   [{m, f, a, loc} | _] = st
-                  {m, f, a} = if System.get_env("PROFLINE"), do: {m, f, {a, loc[:line]}}, else: {m, f, a}
+
+                  {m, f, a} =
+                    if System.get_env("PROFLINE"), do: {m, f, {a, loc[:line]}}, else: {m, f, a}
+
                   fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
 
                   acc =
@@ -217,7 +223,7 @@ loop = fn loop ->
 
   receive do
     {:layout_now, js, ref, raw} ->
-      base = page
+      base = Agent.get(base_agent, & &1)
 
       spawn(fn ->
         Process.flag(:trap_exit, false)
@@ -269,11 +275,20 @@ loop = fn loop ->
         env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
         laid = Browser.Page.from_raw(base, raw, env)
 
+        Agent.update(
+          base_agent,
+          &Browser.Page.adopt_style_state(&1, Browser.Page.style_state(laid))
+        )
+
         # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
         if dir = System.get_env("DUMPRAW") do
           File.mkdir_p!(dir)
           n = length(File.ls!(dir))
-          File.write!(Path.join(dir, "raw#{n}.term"), :erlang.term_to_binary({base, raw, laid.sheet_cache}))
+
+          File.write!(
+            Path.join(dir, "raw#{n}.term"),
+            :erlang.term_to_binary({base, raw, laid.sheet_cache})
+          )
         end
 
         t1 = System.monotonic_time(:microsecond)
@@ -304,8 +319,8 @@ loop = fn loop ->
       print.(reply)
 
       if Enum.any?(reply.console, fn {_, t} -> t == "DONE" or String.starts_with?(t, "ERROR") end),
-        do: :done,
-        else: loop.(loop)
+         do: :done,
+         else: loop.(loop)
 
     {:js_async, ^pid, reply} ->
       print.(reply)
@@ -344,7 +359,9 @@ if sampler do
         |> Enum.sort_by(&elem(&1, 1), :desc)
         |> Enum.take(45)
         |> Enum.each(fn {{_, {m, f, a}}, c} ->
-          IO.puts("#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}")
+          IO.puts(
+            "#{String.pad_leading(Integer.to_string(c), 6)} #{inspect(m)}.#{f}/#{inspect(a)}"
+          )
         end)
       end
   end

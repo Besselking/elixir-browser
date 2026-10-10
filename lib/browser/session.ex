@@ -899,8 +899,9 @@ defmodule Browser.Session do
     spawn(fn ->
       :wx.set_env(wx_env)
       page = Page.from_raw(base, raw, env)
-      # (the sheets a script added are parsed once, not for every layout)
-      send(me, {:sheet_cache, page.sheet_cache})
+      # (the sheets a script added are parsed once, and the elements that did not change are not
+      # styled again by the next layout: it starts from what this one worked out)
+      send(me, {:style_state, Page.style_state(page)})
 
       {items, height} =
         Layout.layout(page.nodes, width, measure, view_h,
@@ -920,10 +921,10 @@ defmodule Browser.Session do
 
   def handle_info({:layout_now, _js, _ref, _raw}, state), do: {:noreply, state}
 
-  def handle_info({:sheet_cache, cache}, %{page: %Page{} = page} = state),
-    do: {:noreply, %{state | page: %{page | sheet_cache: Map.merge(cache, page.sheet_cache)}}}
+  def handle_info({:style_state, style}, %{page: %Page{} = page} = state),
+    do: {:noreply, %{state | page: Page.adopt_style_state(page, style)}}
 
-  def handle_info({:sheet_cache, _cache}, state), do: {:noreply, state}
+  def handle_info({:style_state, _style}, state), do: {:noreply, state}
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}

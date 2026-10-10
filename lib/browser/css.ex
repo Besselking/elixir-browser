@@ -1011,6 +1011,47 @@ defmodule Browser.CSS do
 
   def matches?(parts, ctx), do: match_parts(parts, ctx)
 
+  @doc """
+  True when a selector can tell elements apart that have the same tag, attributes, ancestors and
+  tree: one that looks at the place among the siblings (`:first-child`, `:nth-child()`, `+`, `~`),
+  at the content (`:empty`, `:has()`), or at anything this function does not know. Elements that are
+  the same in all else match a selector that is not structural alike, which lets the cascade work out
+  what a rule set says about one of them once.
+  """
+  def structural?(parts) when is_list(parts) do
+    Enum.any?(parts, fn {cmp, comb} ->
+      comb in [:next, :subsequent] or structural_compound?(cmp)
+    end)
+  end
+
+  defp structural_compound?(c), do: Enum.any?(c.pseudos, &structural_pseudo?/1)
+
+  @plain_pseudos [
+    :scope,
+    :root,
+    :link,
+    :any_link,
+    :modal,
+    :popover_open,
+    :mb_backdrop,
+    :open,
+    :disabled,
+    :enabled,
+    :checked,
+    :required,
+    :optional,
+    :read_write,
+    :read_only,
+    :host,
+    :never
+  ]
+
+  defp structural_pseudo?(p) when p in @plain_pseudos, do: false
+  defp structural_pseudo?({:dir, _}), do: false
+  defp structural_pseudo?({:lang, _}), do: false
+  defp structural_pseudo?({:fn, _, cmps}), do: Enum.any?(cmps, &structural_compound?/1)
+  defp structural_pseudo?(_), do: true
+
   defp match_parts([{cmp, comb} | rest], ctx),
     do: match_compound(cmp, ctx) and match_rel(comb, rest, ctx)
 

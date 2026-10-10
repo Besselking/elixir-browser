@@ -244,7 +244,11 @@ defmodule Browser.Style do
       for rule <- CSS.parse(css),
           decls = rule.decls |> absolutize_urls(base) |> relevant(),
           decls != [],
-          do: %{rule | decls: decls} |> Map.put(:origin, origin) |> Map.put(:scope, scope)
+          do:
+            %{rule | decls: decls}
+            |> Map.put(:origin, origin)
+            |> Map.put(:scope, scope)
+            |> Map.put(:structural, CSS.structural?(rule.selector))
     end)
   end
 
@@ -281,24 +285,57 @@ defmodule Browser.Style do
         {Map.put(rule, :lrank, lrank), order}
       end)
     end)
-    |> Enum.reduce(
-      %{
-        viewport: {env.width, env.height},
-        font_units: Map.get(env, :font_units),
-        pseudo: MapSet.new()
-      },
-      fn {rule, order}, idx ->
-        idx = note_pseudo(idx, rule)
-        rule = Map.put(rule, :order, order)
+    |> then(fn ranked ->
+      # (the order of the rules of a tree is counted from the first of them: a copy of the rules
+      # of a component, for another tree, ranks its rules against each other the same way)
+      bases = scope_bases(ranked)
 
-        Map.update(
-          idx,
-          {Map.get(rule, :pseudo), scope_key(rule), key(rule)},
-          [rule],
-          &[rule | &1]
-        )
+      Enum.reduce(
+        ranked,
+        %{
+          viewport: {env.width, env.height},
+          font_units: Map.get(env, :font_units),
+          pseudo: MapSet.new(),
+          scope_class: scope_classes(ranked)
+        },
+        fn {rule, order}, idx ->
+          idx = note_pseudo(idx, rule)
+          rule = Map.put(rule, :order, order - Map.get(bases, scope_key(rule), 0))
+
+          Map.update(
+            idx,
+            {Map.get(rule, :pseudo), scope_key(rule), key(rule)},
+            [rule],
+            &[rule | &1]
+          )
+        end
+      )
+    end)
+  end
+
+  defp scope_bases(ranked) do
+    ranked
+    |> Enum.reject(fn {rule, _} -> rule.origin == :ua or Map.get(rule, :scope) == nil end)
+    |> Enum.reduce(%{}, fn {rule, order}, bases ->
+      Map.update(bases, rule.scope, order, &min(&1, order))
+    end)
+  end
+
+  # The trees (shadow trees, frames) whose sets of rules are the same have a class in common:
+  # what they say about an element is the same too (a page that makes a hundred copies of a
+  # component has a hundred copies of its rules, each for a tree of its own).
+  defp scope_classes(ranked) do
+    ranked
+    |> Enum.reject(fn {rule, _} -> rule.origin == :ua or Map.get(rule, :scope) == nil end)
+    |> Enum.group_by(
+      fn {rule, _} -> rule.scope end,
+      fn {rule, _} ->
+        {rule.selector, rule.decls, rule.media, Map.get(rule, :pseudo), Map.get(rule, :lrank)}
       end
     )
+    |> Map.new(fn {scope, rules} ->
+      {scope, :erlang.phash2({length(rules), rules}, 4_294_967_296)}
+    end)
   end
 
   # Cascade layers rank in the order they first appear; unlayered rules (nil) are above all
@@ -352,8 +389,57 @@ defmodule Browser.Style do
       CSS.host_rule?(rule.selector)
   end
 
-  @doc "Declared (cascaded) values for the element `ctx`: `%{property => value}`."
+  @doc """
+  Declared (cascaded) values for the element `ctx`: `%{property => value}`.
+
+  While a tree is pruned (`prune/2`, `prune/3`) elements have a `:sig` that stands for their tag,
+  attributes, ancestors and tree (`sign/2`), and what the rules say about one of them is worked out
+  once for the elements with the same `:sig`, unless a rule that could apply is `structural` (it looks
+  at the place among the siblings or at the content, which the `:sig` does not tell).
+  """
   def declared(idx, ctx, pseudo \\ nil) do
+    with sig when sig != nil <- Map.get(ctx, :sig),
+         %{} = cache <- Process.get(:style_decl) do
+      key = {pseudo, sig}
+
+      case cache do
+        %{^key => shared} ->
+          shared_declared(shared, idx, ctx, pseudo)
+
+        _ ->
+          # (the rules that do not look at the place of the element are matched once; the ones that
+          # do are matched for each element)
+          {structural, plain} =
+            idx |> candidates(ctx, pseudo) |> Enum.split_with(&Map.get(&1, :structural, true))
+
+          base = cascade(own_declarations(ctx, pseudo) ++ rule_declarations(plain, ctx))
+          shared = {base, structural != [], if(structural == [], do: finish(base))}
+          Process.put(:style_decl, Map.put(cache, key, shared))
+          shared_declared(shared, idx, ctx, pseudo)
+      end
+    else
+      _ ->
+        cascade(
+          own_declarations(ctx, pseudo) ++ rule_declarations(candidates(idx, ctx, pseudo), ctx)
+        )
+        |> finish()
+    end
+  end
+
+  defp shared_declared({_base, false, decl}, _idx, _ctx, _pseudo), do: decl
+
+  # (the structural rules are the ones of the element's own tree: the other trees' copies of the
+  # same rules are for elements of those)
+  defp shared_declared({base, true, _}, idx, ctx, pseudo) do
+    idx
+    |> candidates(ctx, pseudo)
+    |> Enum.filter(&Map.get(&1, :structural, true))
+    |> rule_declarations(ctx)
+    |> Enum.reduce(base, &keep_higher/2)
+    |> finish()
+  end
+
+  defp candidates(idx, ctx, pseudo) do
     # rules are bucketed by the pseudo-element they are for, the shadow tree they come from, and
     # then by their rightmost compound. The rules of the tree `ctx` is in, those of the user agent
     # and those of the tree `ctx` is the host of (`:host`) are the ones that can apply: a page
@@ -371,49 +457,58 @@ defmodule Browser.Style do
         {s, h} -> [s, :ua, h]
       end
 
-    candidates =
-      Enum.flat_map(scopes, fn sc ->
-        Map.get(idx, {pseudo, sc, {:tag, ctx.tag}}, []) ++
-          Map.get(idx, {pseudo, sc, :other}, []) ++
-          if(ctx.id, do: Map.get(idx, {pseudo, sc, {:id, ctx.id}}, []), else: []) ++
-          Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, sc, {:class, &1}}, []))
-      end)
+    Enum.flat_map(scopes, fn sc ->
+      Map.get(idx, {pseudo, sc, {:tag, ctx.tag}}, []) ++
+        Map.get(idx, {pseudo, sc, :other}, []) ++
+        if(ctx.id, do: Map.get(idx, {pseudo, sc, {:id, ctx.id}}, []), else: []) ++
+        Enum.flat_map(ctx.classes, &Map.get(idx, {pseudo, sc, {:class, &1}}, []))
+    end)
+  end
 
-    from_rules =
-      for rule <- candidates,
-          from_host <- [from_shadow?(rule, ctx)],
-          from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
-          CSS.matches?(rule.selector, ctx),
-          {prop, value, important?} <- rule.decls do
-        # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
-        {prop,
-         {rank(rule.origin, important?), layer_rank(Map.get(rule, :lrank), important?),
-          {if(from_host, do: -1, else: 0), rule.specificity}, rule.order}, value}
-      end
+  # `{property, rank, value}` of the rules that match `ctx`
+  defp rule_declarations(rules, ctx) do
+    for rule <- rules,
+        from_host <- [from_shadow?(rule, ctx)],
+        from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
+        CSS.matches?(rule.selector, ctx),
+        {prop, value, important?} <- rule.decls do
+      # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
+      {prop,
+       {rank(rule.origin, important?), layer_rank(Map.get(rule, :lrank), important?),
+        {if(from_host, do: -1, else: 0), rule.specificity}, rule.order}, value}
+    end
+  end
 
-    # inline styles and presentational attributes belong to the element, not its generated boxes
+  # presentational attributes and inline styles, which belong to the element and not to its
+  # generated boxes. The attributes rank below every author rule and the inline styles above all.
+  # (First in the list: what is equal in rank is won by the one that comes last.)
+  defp own_declarations(ctx, pseudo) do
     own = if pseudo, do: %{attrs: [], tag: nil}, else: ctx
+
+    from_hints =
+      for {prop, value} <- dir_hint(own) ++ hints(own) do
+        {prop, {rank(:author, false), -@above_layers, {-1, {0, 0, 0}}, -1}, value}
+      end
 
     from_inline =
       for {prop, value, important?} <- inline_decls(own.attrs) do
         {prop, {rank(:author, important?), @above_layers, {1, {0, 0, 0}}, 0}, value}
       end
 
-    # presentational attributes (size, cols, rows) rank below every author rule
-    from_hints =
-      for {prop, value} <- dir_hint(own) ++ hints(own) do
-        {prop, {rank(:author, false), -@above_layers, {-1, {0, 0, 0}}, -1}, value}
-      end
-
-    (from_hints ++ from_rules ++ from_inline)
-    |> Enum.reduce(%{}, fn {prop, k, v}, acc ->
-      case acc do
-        %{^prop => {k0, _}} when k0 > k -> acc
-        _ -> Map.put(acc, prop, {k, v})
-      end
-    end)
-    |> Map.new(fn {prop, {_k, v}} -> {prop, v} end)
+    from_hints ++ from_inline
   end
+
+  # the declaration with the highest rank for each property
+  defp cascade(declarations), do: Enum.reduce(declarations, %{}, &keep_higher/2)
+
+  defp keep_higher({prop, k, v}, acc) do
+    case acc do
+      %{^prop => {k0, _}} when k0 > k -> acc
+      _ -> Map.put(acc, prop, {k, v})
+    end
+  end
+
+  defp finish(acc), do: Map.new(acc, fn {prop, {_k, v}} -> {prop, v} end)
 
   # sizes that cannot be negative: a negative value is invalid and the declaration is dropped
   @non_negative ~w(width height min-height max-height min-width max-width flex-basis)
@@ -1090,9 +1185,11 @@ defmodule Browser.Style do
     Process.delete(:style_memo)
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
+    start_signs()
     pruned = prune_children(nodes, nil, idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
+    end_signs()
     pruned
   end
 
@@ -1109,9 +1206,11 @@ defmodule Browser.Style do
     Process.put(:style_custom, Map.get(memo, :custom_table, %{}))
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
+    start_signs()
     pruned = prune_children(nodes, nil, idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
+    end_signs()
     memo = Process.delete(:style_memo)
     table = Process.delete(:style_custom)
     {pruned, keep_custom(memo, table)}
@@ -1203,6 +1302,75 @@ defmodule Browser.Style do
      end)}
   end
 
+  # -- style sharing ---------------------------------------------------------------
+  #
+  # Elements with the same tag, attributes (but for the numbers that tell each one from the
+  # others), ancestors and tree are matched by the same rules, but for rules that look at the place
+  # among the siblings or at the content (see `declared/3`). A list of a hundred rows or a hundred
+  # copies of a component has a few of them, so what the rules say is worked out for those.
+
+  defp start_signs do
+    Process.put(:style_sigs, %{})
+    Process.put(:style_decl, %{})
+  end
+
+  defp end_signs do
+    Process.delete(:style_sigs)
+    Process.delete(:style_decl)
+  end
+
+  # the element's context with its `:sig` (nil for an element that cannot share)
+  defp sign(idx, %{attrs: attrs, parent: parent} = ctx) do
+    psig = if parent == nil, do: nil, else: Map.get(parent, :sig)
+
+    sig =
+      if (parent == nil or psig != nil) and not Process.get(:style_no_share, false) and
+           shareable?(attrs) do
+        classes = Map.get(idx, :scope_class, %{})
+
+        key =
+          {ctx.tag, plain_attrs(attrs), psig, scope_tag(classes, ctx.scope),
+           scope_tag(classes, ctx.scope_in), frame_kind(attrs)}
+
+        sigs = Process.get(:style_sigs, %{})
+
+        case sigs do
+          %{^key => id} ->
+            id
+
+          _ ->
+            id = map_size(sigs) + 1
+            Process.put(:style_sigs, Map.put(sigs, key, id))
+            id
+        end
+      end
+
+    Map.put(ctx, :sig, sig)
+  end
+
+  # (`dir="auto"` looks at the text of the element)
+  defp shareable?(attrs) do
+    case List.keyfind(attrs, "dir", 0) do
+      {_, v} when is_binary(v) -> String.downcase(v) != "auto"
+      _ -> true
+    end
+  end
+
+  # (each element has numbers of its own, and each shadow root a name of its own)
+  defp plain_attrs(attrs),
+    do: Enum.reject(attrs, fn {k, _} -> k in ["@nid", "@cid", "data-b-frame"] end)
+
+  defp scope_tag(_classes, nil), do: :doc
+  defp scope_tag(classes, scope), do: Map.get(classes, scope, :norules)
+
+  defp frame_kind(attrs) do
+    case List.keyfind(attrs, "data-b-frame", 0) do
+      {_, "s" <> _} -> :shadow
+      {_, _} -> :frame
+      nil -> nil
+    end
+  end
+
   defp parent_sig(nil), do: nil
   defp parent_sig(p), do: {p.computed, p.custom_id, p.root_fs}
 
@@ -1275,6 +1443,7 @@ defmodule Browser.Style do
       ctx =
         tag
         |> CSS.context(attrs, kids, parent, prev, i, count, rest)
+        |> then(&sign(idx, &1))
         |> Map.merge(%{
           computed: e.computed,
           custom: Process.get(:style_custom) |> Map.fetch!(e.custom),
@@ -1286,7 +1455,7 @@ defmodule Browser.Style do
       acc = if onode == :hidden, do: acc, else: [unshallow(onode) | acc]
       prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
     else
-      ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
+      ctx = tag |> CSS.context(attrs, kids, parent, prev, i, count, rest) |> then(&sign(idx, &1))
       {computed, custom} = compute(idx, ctx, parent)
       computed = computed |> blockify_grid_item(parent) |> flex_item_align(parent)
       root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
@@ -1337,7 +1506,7 @@ defmodule Browser.Style do
     toggled = fn open? ->
       pattrs = List.keydelete(pattrs, "open", 0)
       pattrs = if open?, do: [{"open", ""} | pattrs], else: pattrs
-      %{ctx | parent: %{parent | attrs: pattrs}}
+      %{ctx | parent: %{parent | attrs: pattrs}} |> Map.delete(:sig)
     end
 
     closed = marker_text(idx, toggled.(false), ctx)
@@ -1356,7 +1525,9 @@ defmodule Browser.Style do
     if type in ["checkbox", "radio"] and pseudo_any?(idx, [:before, :after]) do
       toggled = fn checked? ->
         iattrs = List.keydelete(iattrs, "checked", 0)
+
         %{ctx | attrs: if(checked?, do: [{"checked", ""} | iattrs], else: iattrs)}
+        |> Map.delete(:sig)
       end
 
       text = fn checked? ->
