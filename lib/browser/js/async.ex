@@ -22,6 +22,20 @@ defmodule Browser.JS.Async do
 
   @max_depth 1000
 
+  # A generator or async body makes no tail calls: a `return f()` in it must still see the
+  # body's `try` and `finally`. The body starts and resumes inside some caller's frame, which
+  # may be a strict function's with the tail flag on, so every entry into a body runs with the
+  # flag off (an ordinary call inside the body sets and restores the flag for itself).
+  defp no_tail(fun) do
+    tail = Process.put(:js_tail, false)
+
+    try do
+      fun.()
+    after
+      Process.put(:js_tail, tail)
+    end
+  end
+
   @doc "Calls an async closure: starts its body and returns its promise."
   def call_closure(c, this, args) do
     p = Promise.new()
@@ -43,10 +57,12 @@ defmodule Browser.JS.Async do
     try do
       scope = Interp.call_scope(c, this, args)
 
-      case c.mode do
-        :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
-        _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
-      end
+      no_tail(fn ->
+        case c.mode do
+          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
+          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+        end
+      end)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     after
@@ -71,7 +87,7 @@ defmodule Browser.JS.Async do
     }
 
     try do
-      clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end)
+      no_tail(fn -> clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end) end)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     end
@@ -173,7 +189,7 @@ defmodule Browser.JS.Async do
         Process.delete(:js_gen_out)
 
         try do
-          gen.resume.(msg)
+          no_tail(fn -> gen.resume.(msg) end)
         catch
           {:js_error, e} -> finish(gid, {:throw, e})
         end
@@ -329,7 +345,7 @@ defmodule Browser.JS.Async do
           update_agen(gid, %{running: true, cur: p})
 
           try do
-            g.resume.(msg)
+            no_tail(fn -> g.resume.(msg) end)
           catch
             {:js_error, e} -> ag_finish(gid, {:throw, e})
           end
@@ -1030,11 +1046,11 @@ defmodule Browser.JS.Async do
     Promise.then(
       p,
       Interp.native("", fn _, args ->
-        k.(Enum.at(args, 0, :undefined))
+        no_tail(fn -> k.(Enum.at(args, 0, :undefined)) end)
         :undefined
       end),
       Interp.native("", fn _, args ->
-        ctx.throw.(Enum.at(args, 0, :undefined))
+        no_tail(fn -> ctx.throw.(Enum.at(args, 0, :undefined)) end)
         :undefined
       end)
     )
@@ -1061,6 +1077,7 @@ defmodule Browser.JS.Async do
   end
 
   # a statement without awaits, by the ordinary evaluator; its abrupt completions are routed
+  # (the tail flag is off, see `no_tail/1`, so a `return f()` here is a plain return)
   defp sync_stmt(stmt, env, ctx, k, labels) do
     result =
       try do
