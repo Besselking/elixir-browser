@@ -1,12 +1,12 @@
 # Usage: RUNS=5 RESOLVE=off mix run --no-start bench/js_runtime.exs [name ...]
 #
 # RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`,
-# 1, 2 or 3; see `Browser.JS.Resolve`). Level 4 runs from step 2e.
+# 1, 2, 3 or 4; see `Browser.JS.Resolve`).
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
-# walk and DOM-like objects. After their total it measures four programs of step 2d, which
-# are not in the total. The script wraps each program in a function. Page scripts
+# walk and DOM-like objects. After their total it measures four programs of step 2d and six
+# programs of step 2e, which are not in the total. The script wraps each program in a function. Page scripts
 # usually run in a function too. The script runs each program RUNS times (default 5). The
 # table shows the minimum time and the minimum number of reductions in millions. A reduction
 # is a BEAM work unit. The number of reductions does not change with the speed of the
@@ -72,6 +72,25 @@ extra_programs = [
    "function g(a, b){ return arguments.length + arguments[1] } var s = 0; for (var i = 0; i < 30000; i++) s += g(i, i % 7); return s"}
 ]
 
+# Six programs of step 2e (level 4: async functions, generators and async generators on
+# frames). They are not in the total either. An async program returns a box, which the
+# script reads after the microtasks and timers ran. The expected values are the results at
+# `:off`.
+programs_2e = [
+  {"await20k", "await in a loop 20k", nil, %{"v" => 989_403.0},
+   "var box = {}; async function run(){ var s = 0; for (let i = 0; i < 20000; i++) { s = (s + await i) % 1000003 } return s } run().then(v => { box.v = v }); return box"},
+  {"asynccalls10k", "async function calls 10k", nil, %{"v" => 994_853.0},
+   "var box = {}; async function add(a, b){ return a + b } async function run(){ var s = 0; for (let i = 0; i < 10000; i++) { s = (await add(s, i)) % 1000003 } return s } run().then(v => { box.v = v }); return box"},
+  {"awaitclosures10k", "closures over a let after await 10k", nil, %{"v" => 49_995_000.0},
+   "var box = {}; async function run(){ var fs = []; for (let i = 0; i < 10000; i++) { await null; fs.push(() => i) } var s = 0; for (var j = 0; j < fs.length; j++) s += fs[j](); return s } run().then(v => { box.v = v }); return box"},
+  {"gen30k", "generator range 30k", nil, 983_653.0,
+   "function* range(n){ for (let i = 0; i < n; i++) yield i } var s = 0; for (const v of range(30000)) s = (s + v) % 1000003; return s"},
+  {"yieldstar10k", "yield* delegation 10k", nil, 30000.0,
+   "function* two(){ yield 1; yield 2 } function* outer(n){ for (let i = 0; i < n; i++) yield* two() } var s = 0; for (const v of outer(10000)) s += v; return s"},
+  {"asyncgen5k", "async generator with for await 5k", nil, %{"v" => 12_497_500.0},
+   "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box"}
+]
+
 runs = String.to_integer(System.get_env("RUNS", "5"))
 filter = System.argv()
 
@@ -86,6 +105,7 @@ end
 
 selected = pick.(programs)
 selected_extra = pick.(extra_programs)
+selected_2e = pick.(programs_2e)
 
 resolve =
   case System.get_env("RESOLVE", "off") do
@@ -94,7 +114,8 @@ resolve =
     "1" -> 1
     "2" -> 2
     "3" -> 3
-    other -> raise "RESOLVE takes off, info, 1, 2 or 3, not #{other}"
+    "4" -> 4
+    other -> raise "RESOLVE takes off, info, 1, 2, 3 or 4, not #{other}"
   end
 
 opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
@@ -160,4 +181,12 @@ IO.puts(
     run_list.(selected_extra)
   end
 
-if bad + bad_extra > 0, do: System.halt(1)
+{_, bad_2e} =
+  if selected_2e == [] do
+    {0.0, 0}
+  else
+    IO.puts("step 2e programs (not in the total)")
+    run_list.(selected_2e)
+  end
+
+if bad + bad_extra + bad_2e > 0, do: System.halt(1)

@@ -36,7 +36,7 @@ defmodule Mix.Tasks.Js.Test262 do
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found (a quick look)
     * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info`, `1`,
-      `2` or `3` (see `Browser.JS.Resolve`)
+      `2`, `3` or `4` (see `Browser.JS.Resolve`)
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -165,13 +165,13 @@ defmodule Mix.Tasks.Js.Test262 do
 
   defp resolve_level("off"), do: :off
   defp resolve_level("info"), do: :info
-  # (level 4 runs from step 2e of the JS redesign)
   defp resolve_level("1"), do: 1
   defp resolve_level("2"), do: 2
   defp resolve_level("3"), do: 3
+  defp resolve_level("4"), do: 4
 
   defp resolve_level(other),
-    do: Mix.raise("--resolve takes off, info, 1, 2 or 3, not #{other}")
+    do: Mix.raise("--resolve takes off, info, 1, 2, 3 or 4, not #{other}")
 
   # ── fetching ───────────────────────────────────────────────
 
