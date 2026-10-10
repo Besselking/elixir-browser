@@ -2017,6 +2017,42 @@ defmodule Browser.JS.ResolveTest do
     assert [{:return, {:id, "v"}, :plain}] =
              body(fun(resolve("var v = 1; function f() { return v }", eval: true), "f"))
   end
+
+  # Step 2c design 4.3, hole 1: the eval code reads `this`, `arguments` and `new.target`
+  # by name from the function around the arrow, so that function owns them and is level 3.
+  test "2c. a direct eval in an arrow makes the function around it level 3" do
+    tree = resolve("function f(){ return (() => eval('this.k'))() }", resolve: 2)
+    f = info(fun(tree, "f"))
+    assert %Info{level: 3, rewritten: false, dynamic: false} = f
+    assert f.uses_this and f.uses_arguments and f.uses_new_target
+    # (the kind names the arrow: the interpreter's frame walks tell arrows apart by it)
+    assert %Info{level: nil, dynamic: true, kind: :arrow_expr} = info(arrow(tree))
+
+    assert %Info{kind: :arrow} =
+             info(arrow(resolve("function g(){ return () => { return 1 } }", resolve: 2)))
+
+    # A function without such an arrow keeps its level.
+    assert %Info{level: 2, rewritten: true} =
+             info(fun(resolve("function g(){ return () => this.k }", resolve: 2), "g"))
+  end
+
+  # Step 2c design 4.3, hole 2: a dynamic function in a parameter initializer makes the
+  # function of that list dynamic; the functions beside it keep their levels.
+  test "2c. a direct eval in a default value makes the function of the list dynamic" do
+    tree =
+      resolve(
+        "function f(a = 1, b = function(){ return eval('a') }){ var a = 2; return b() } " <>
+          "function s(){ return () => 1 }",
+        resolve: 2
+      )
+
+    assert %Info{level: nil, dynamic: true} = info(fun(tree, "f"))
+    assert %Info{level: 2, rewritten: true} = info(fun(tree, "s"))
+    assert %Info{level: 1, rewritten: true} = info(arrow(tree))
+
+    tree = resolve("function f(o, b = function(){ with (o) { return a } }){ var a }", resolve: 2)
+    assert %Info{level: nil, dynamic: true} = info(fun(tree, "f"))
+  end
 end
 
 defmodule Browser.JS.ResolveEnvTest do
