@@ -435,24 +435,35 @@ defmodule Browser.Page do
         {key, if(scope == nil, do: prefetched(ref, at), else: ref), at}
       end)
 
-    # (fetched in parallel; then each different text is parsed once, however many trees have it)
-    fetched =
-      jobs
-      |> Task.async_stream(
-        fn {key, ref, at} ->
-          {_, scope, _} = key
-          {key, scope, ref |> sheet(at) |> with_imports(0)}
-        end,
-        max_concurrency: 8,
-        timeout: @sheet_timeout,
-        on_timeout: :kill_task,
-        ordered: true
-      )
-      |> Enum.zip(jobs)
-      |> Enum.map(fn
-        {{:ok, got}, _} -> got
-        {_, {key, _, _}} -> {key, nil, []}
+    # (a `<style>` has its text at hand, and a page may have hundreds of them: only what has to be
+    # fetched, or may import something, goes to a task of its own. Then each different text is parsed
+    # once, however many trees have it)
+    {inline, remote} =
+      Enum.split_with(jobs, fn
+        {_key, {:style, css}, _at} -> not String.contains?(css, "@import")
+        _ -> false
       end)
+
+    fetched =
+      Enum.map(inline, fn {{_, scope, _} = key, {:style, css}, at} ->
+        {key, scope, [{css, at}]}
+      end) ++
+        (remote
+         |> Task.async_stream(
+           fn {key, ref, at} ->
+             {_, scope, _} = key
+             {key, scope, ref |> sheet(at) |> with_imports(0)}
+           end,
+           max_concurrency: 8,
+           timeout: @sheet_timeout,
+           on_timeout: :kill_task,
+           ordered: true
+         )
+         |> Enum.zip(remote)
+         |> Enum.map(fn
+           {{:ok, got}, _} -> got
+           {_, {key, _, _}} -> {key, nil, []}
+         end))
 
     texts =
       fetched

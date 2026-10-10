@@ -1077,6 +1077,50 @@ defmodule Browser.JS.DOMTest do
       refute_received {:layout_now, _, _, _}
     end
 
+    test "the tree sent for a layout knows the address of the frame whose script asked" do
+      frame = """
+      <link rel=stylesheet href="s.css"><body><script>
+      var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);
+      d.getBoundingClientRect();
+      </script></body>
+      """
+
+      files = %{"http://t.test/f/frame.html" => frame, "http://t.test/f/s.css" => "p {}"}
+      fetch = fn url -> with {:ok, body} <- Map.fetch(files, url), do: {:ok, body, url} end
+
+      {parsed, _} =
+        "<body><iframe src='f/frame.html'></iframe></body>"
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fetch
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      tree =
+        receive do
+          {:layout_now, ^pid, ref, tree} ->
+            send(pid, {:layout_now_done, ref, %{}, {800.0, 600.0}})
+            tree
+        after
+          2000 -> nil
+        end
+
+      Task.await(task)
+      assert tree != nil
+
+      iframes = for el <- find_all(tree, "iframe"), do: el
+      assert [{:element, "iframe", attrs, _}] = iframes
+      assert {"data-b-base", "http://t.test/f/frame.html"} in attrs
+    end
+
     test "boxes from a layout made for the scripts stay when the page's older layout arrives" do
       raw =
         ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>
@@ -2088,6 +2132,12 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["doc click"]
     end
   end
+
+  defp find_all(nodes, tag) when is_list(nodes), do: Enum.flat_map(nodes, &find_all(&1, tag))
+  defp find_all({:text, _}, _), do: []
+
+  defp find_all({:element, t, _, kids} = el, tag),
+    do: if(t == tag, do: [el], else: []) ++ find_all(kids, tag)
 
   defp nid_of_id(nodes, id) when is_list(nodes), do: Enum.find_value(nodes, &nid_of_id(&1, id))
   defp nid_of_id({:text, _}, _), do: nil

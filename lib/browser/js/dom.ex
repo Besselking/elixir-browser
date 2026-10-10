@@ -665,7 +665,8 @@ defmodule Browser.JS.DOM do
         el
 
       doc ->
-        url = get_in(st().realms, [doc, :fields, :url])
+        # (the realm that is running is not in `realms`: its fields are the state's own)
+        url = if doc == st().doc, do: st().url, else: get_in(st().realms, [doc, :fields, :url])
 
         docs = Process.get(:dom_export_frames)
 

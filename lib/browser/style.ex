@@ -426,7 +426,21 @@ defmodule Browser.Style do
             idx |> candidates(ctx, pseudo) |> Enum.split_with(&Map.get(&1, :structural, true))
 
           base = cascade(own_declarations(ctx, pseudo) ++ rule_declarations(plain, ctx))
-          shared = {base, structural != [], if(structural == [], do: finish(base))}
+
+          # (of the rules that look at the place, the ones that could apply to this kind of
+          # element; they are in the same places in the lists of the elements in the trees that
+          # have the same rules)
+          possible =
+            for {rule, i} <- Enum.with_index(structural),
+                CSS.matches_loosely?(rule.selector, ctx),
+                into: MapSet.new(),
+                do: i
+
+          shared =
+            if MapSet.size(possible) == 0,
+              do: {base, false, finish(base)},
+              else: {base, possible, nil}
+
           Process.put(:style_decl, Map.put(cache, key, shared))
           shared_declared(shared, idx, ctx, pseudo)
       end
@@ -443,10 +457,12 @@ defmodule Browser.Style do
 
   # (the structural rules are the ones of the element's own tree: the other trees' copies of the
   # same rules are for elements of those)
-  defp shared_declared({base, true, _}, idx, ctx, pseudo) do
+  defp shared_declared({base, possible, _}, idx, ctx, pseudo) do
     idx
     |> candidates(ctx, pseudo)
     |> Enum.filter(&Map.get(&1, :structural, true))
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {rule, i} -> if MapSet.member?(possible, i), do: [rule], else: [] end)
     |> rule_declarations(ctx)
     |> Enum.reduce(base, &keep_higher/2)
     |> finish()
@@ -1216,6 +1232,7 @@ defmodule Browser.Style do
   def prune(nodes, idx, memo) do
     memo = memo || %{}
     Process.put(:style_memo, memo)
+    Process.put(:style_hashes, subtree_hashes(nodes))
     Process.put(:style_custom, Map.get(memo, :custom_table, %{}))
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
@@ -1225,6 +1242,7 @@ defmodule Browser.Style do
     Process.delete(:style_inline)
     end_signs()
     memo = Process.delete(:style_memo)
+    Process.delete(:style_hashes)
     table = Process.delete(:style_custom)
     {pruned, keep_custom(memo, table)}
   end
@@ -1270,7 +1288,7 @@ defmodule Browser.Style do
       entry = %{
         tag: ctx.tag,
         attrs: attrs,
-        kids: :erlang.phash2(kids, 4_294_967_296),
+        kids: kids_hash(kids),
         shape: shape(kids),
         index: ctx.index,
         count: ctx.count,
@@ -1325,11 +1343,13 @@ defmodule Browser.Style do
   defp start_signs do
     Process.put(:style_sigs, %{})
     Process.put(:style_decl, %{})
+    Process.put(:style_content, %{})
   end
 
   defp end_signs do
     Process.delete(:style_sigs)
     Process.delete(:style_decl)
+    Process.delete(:style_content)
   end
 
   # the element's context with its `:sig` (nil for an element that cannot share)
@@ -1382,6 +1402,39 @@ defmodule Browser.Style do
       {_, _} -> :frame
       nil -> nil
     end
+  end
+
+  # What the children of an element are, as one number: each element has the hash of everything
+  # below it (worked out once for the tree, bottom up), so the number is a hash of the children's
+  # numbers and not of the whole subtree below the element, for every element.
+  defp subtree_hashes(nodes), do: Enum.reduce(nodes, %{}, &hash_node/2)
+
+  defp hash_node({:element, tag, attrs, kids}, acc) do
+    acc = Enum.reduce(kids, acc, &hash_node/2)
+    h = :erlang.phash2({tag, attrs, Enum.map(kids, &kid_hash(&1, acc))}, 4_294_967_296)
+
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} -> Map.put(acc, nid, h)
+      nil -> acc
+    end
+  end
+
+  defp hash_node(_other, acc), do: acc
+
+  defp kid_hash({:element, _, attrs, _} = el, hashes) do
+    with {_, nid} <- List.keyfind(attrs, "@nid", 0),
+         h when h != nil <- Map.get(hashes, nid) do
+      h
+    else
+      _ -> :erlang.phash2(el)
+    end
+  end
+
+  defp kid_hash(other, _hashes), do: :erlang.phash2(other)
+
+  defp kids_hash(kids) do
+    hashes = Process.get(:style_hashes, %{})
+    :erlang.phash2(Enum.map(kids, &kid_hash(&1, hashes)), 4_294_967_296)
   end
 
   defp parent_sig(nil), do: nil
@@ -1444,7 +1497,7 @@ defmodule Browser.Style do
 
     reusable? =
       same_self? and tags_same? and clean and old != nil and
-        elem(old, 0).kids == :erlang.phash2(kids, 4_294_967_296) and
+        elem(old, 0).kids == kids_hash(kids) and
         elem(old, 0).index == i + 1 and elem(old, 0).count == count and
         parent_same?(parent, elem(old, 0).parent)
 
@@ -1639,6 +1692,26 @@ defmodule Browser.Style do
 
   # the text of a `content` value: strings, `attr()` and quotes joined; nil for no box
   defp content_text(value, attrs) when is_binary(value) do
+    # (a text that names no attribute is the same for every element: worked out once per pruning)
+    with false <- String.contains?(value, "attr("),
+         %{} = cache <- Process.get(:style_content) do
+      case cache do
+        %{^value => text} ->
+          text
+
+        _ ->
+          text = content_text_of(value, attrs)
+          Process.put(:style_content, Map.put(cache, value, text))
+          text
+      end
+    else
+      _ -> content_text_of(value, attrs)
+    end
+  end
+
+  defp content_text(_value, _attrs), do: nil
+
+  defp content_text_of(value, attrs) do
     value = String.trim(value)
 
     parts =
@@ -1660,8 +1733,6 @@ defmodule Browser.Style do
       end)
     end
   end
-
-  defp content_text(_value, _attrs), do: nil
 
   # `\201C` and `\"` in a CSS string
   defp css_string(s) do
@@ -1716,7 +1787,10 @@ defmodule Browser.Style do
         compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
 
       shared ->
-        key = {decl, ctx.tag == "table", pc, parent_custom, parent_root}
+        # (the parent's custom properties are named by their number: they can be hundreds, and
+        # a key is hashed whole)
+        custom_key = if parent == nil, do: nil, else: Map.get(parent, :custom_id, parent_custom)
+        key = {decl, ctx.tag == "table", pc, custom_key, parent_root}
 
         case shared do
           %{^key => result} ->
@@ -1965,11 +2039,32 @@ defmodule Browser.Style do
   defp has_var?(value), do: Regex.match?(~r/var\(/i, value)
 
   @doc false
+  # where `var(` is, in any case: {position, 4} or nil
+  @var_spellings for a <- ["v", "V"], b <- ["a", "A"], c <- ["r", "R"], do: a <> b <> c <> "("
+
+  defp var_at(value) do
+    pattern =
+      case :persistent_term.get({__MODULE__, :var_pattern}, nil) do
+        nil ->
+          pattern = :binary.compile_pattern(@var_spellings)
+          :persistent_term.put({__MODULE__, :var_pattern}, pattern)
+          pattern
+
+        pattern ->
+          pattern
+      end
+
+    case :binary.match(value, pattern) do
+      {pos, 4} -> [{pos, 4}]
+      :nomatch -> nil
+    end
+  end
+
   def substitute(value, _custom, depth) when depth > 16,
     do: if(has_var?(value), do: :error, else: {:ok, value})
 
   def substitute(value, custom, depth) do
-    case Regex.run(~r/var\(/i, value, return: :index) do
+    case var_at(value) do
       nil ->
         {:ok, value}
 
@@ -2012,9 +2107,13 @@ defmodule Browser.Style do
       Map.new(own, fn
         {k, v} when is_binary(v) ->
           names =
-            ~r/var\(\s*(--[^\s,)]*)/i
-            |> Regex.scan(v, capture: :all_but_first)
-            |> Enum.map(fn [n] -> Browser.CSS.unescape(n) end)
+            if var_at(v) == nil do
+              []
+            else
+              ~r/var\(\s*(--[^\s,)]*)/i
+              |> Regex.scan(v, capture: :all_but_first)
+              |> Enum.map(fn [n] -> Browser.CSS.unescape(n) end)
+            end
 
           {k, Enum.filter(names, &is_map_key(own, &1))}
 
@@ -2033,7 +2132,7 @@ defmodule Browser.Style do
         Map.new(own, fn {k, _} -> {k, refs[k]} end)
       )
 
-    Map.reject(final, fn {_, v} -> v == :invalid end)
+    final
   end
 
   # a substituted value that is a wide keyword acts as that keyword
@@ -2055,7 +2154,9 @@ defmodule Browser.Style do
     end
   end
 
-  # resolve what no longer waits on another own property, until nothing is left
+  # resolve what no longer waits on another own property, until nothing is left. `done` holds the
+  # values there are: a property that is invalid is not in it (what was inherited under its name
+  # was dropped before), so a value is substituted against `done` as it is.
   defp settle(pending, done, _parent, _refs) when map_size(pending) == 0, do: done
 
   defp settle(pending, done, parent, refs) do
@@ -2066,18 +2167,21 @@ defmodule Browser.Style do
       Enum.reduce(ready, done, fn k, acc ->
         case pending[k] do
           v when is_binary(v) ->
-            case substitute(v, Map.reject(acc, fn {_, x} -> x == :invalid end), 0) do
-              {:ok, r} -> Map.put(acc, k, wide_keyword(String.trim(r), k, parent))
-              :error -> Map.put(acc, k, :invalid)
+            case substitute(v, acc, 0) do
+              {:ok, r} -> put_valid(acc, k, wide_keyword(String.trim(r), k, parent))
+              :error -> acc
             end
 
           other ->
-            Map.put(acc, k, other)
+            put_valid(acc, k, other)
         end
       end)
 
     settle(Map.drop(pending, ready), done, parent, refs)
   end
+
+  defp put_valid(acc, _k, :invalid), do: acc
+  defp put_valid(acc, k, v), do: Map.put(acc, k, v)
 
   # `rest` follows an opening paren: -> {inside, after_closing_paren}
   defp take_parens(rest), do: take_parens(rest, rest, 1, 0)

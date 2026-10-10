@@ -17,10 +17,22 @@ time = fn f ->
 end
 
 run = fn -> Browser.Page.from_raw(%{base | memo: nil, key: nil, nodes: nil, pruned: nil}, raw, env) end
+cold_run = run
 # the first call fetches and parses the sheets the tree names
-{_, laid} = time.(run)
+{cold, laid} = time.(run)
+IO.puts("cold from_raw ms: #{cold}")
 base = %{base | sheet_cache: laid.sheet_cache, sheet_refs: laid.sheet_refs, rules: laid.rules, queries: laid.queries}
 run = fn -> Browser.Page.from_raw(%{base | memo: nil, key: nil, nodes: nil, pruned: nil}, raw, env) end
+
+if System.get_env("TPROF") do
+  # exact time per function (call_time tracing: slow, but not blind inside a NIF)
+  Code.prepend_path(Path.join([to_string(:code.root_dir()), "lib", "tools-4.2.3", "ebin"]))
+  :tprof.profile(fn -> run.() end, %{type: :call_time, set_on_spawn: false})
+  |> then(fn {_, [{_, res}]} -> res end)
+  |> elem(1)
+  |> then(&:tprof.format(%{call_time: &1}))
+  |> IO.puts()
+end
 
 if System.get_env("PROF") do
   # (samples the stack of the process that works, every millisecond)
@@ -41,7 +53,9 @@ if System.get_env("PROF") do
         case Process.info(worker, :current_stacktrace) do
           {_, [{m, f, a, _} | _] = st} ->
             fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
-            sample.(sample, [{:self, {m, f, a}} | Enum.map(fs, &{:incl, &1}) ++ acc])
+            # (who calls into Regex: the first function above it that is not)
+            caller = if m == Regex, do: [{:caller, Enum.find(fs, fn {m, _, _} -> m != Regex end)}], else: []
+            sample.(sample, [{:self, {m, f, a}} | Enum.map(fs, &{:incl, &1}) ++ caller ++ acc])
 
           _ ->
             sample.(sample, acc)
@@ -51,7 +65,7 @@ if System.get_env("PROF") do
 
   acc = sample.(sample, [])
 
-  for kind <- [:self, :incl] do
+  for kind <- [:self, :incl, :caller] do
     IO.puts("-- #{kind}")
 
     acc
