@@ -1077,13 +1077,17 @@ defmodule Browser.Style do
   elements that changed, and the ones their selectors can reach, are styled afresh.
   """
   def prune(nodes, idx, memo) do
-    Process.put(:style_memo, memo || %{})
+    memo = memo || %{}
+    Process.put(:style_memo, memo)
+    Process.put(:style_custom, Map.get(memo, :custom_table, %{}))
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     pruned = prune_children(nodes, nil, idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
-    {pruned, Process.delete(:style_memo)}
+    memo = Process.delete(:style_memo)
+    table = Process.delete(:style_custom)
+    {pruned, keep_custom(memo, table)}
   end
 
   defp prune_children(nodes, parent, idx) do
@@ -1094,7 +1098,11 @@ defmodule Browser.Style do
 
   # What the memo keeps per element is plain data: contexts link to their parent, their
   # earlier siblings and their later ones, and copying such a term (into another process, say)
-  # takes it apart into a tree that grows with every sibling.
+  # takes it apart into a tree that grows with every sibling. The same goes for the pruned
+  # element it keeps: with its children in it, every element holds its whole subtree, and a copy
+  # (which does not keep what the terms share) is as big as the elements times their depth. So
+  # a kept element holds `{:memo_ref, nid}` for the children that have an entry of their own,
+  # and `unshallow/1` puts them back when the element is taken over.
 
   # the elements among the children are the ones there were
   defp same_shape?(nil, _nodes), do: true
@@ -1128,27 +1136,85 @@ defmodule Browser.Style do
         index: ctx.index,
         count: ctx.count,
         computed: ctx.computed,
-        custom: ctx.custom,
+        custom: ctx.custom_id,
         root_fs: ctx.root_fs,
         chain_same: ctx.chain_same,
         parent: parent_sig(ctx.parent)
       }
 
-      Process.put(:style_memo, Map.put(memo, nid, {entry, node}))
+      Process.put(:style_memo, Map.put(memo, nid, {entry, shallow(node)}))
     end
 
     :ok
   end
 
+  defp shallow({:element, tag, attrs, kids}),
+    do: {:element, tag, attrs, Enum.map(kids, &shallow_kid/1)}
+
+  defp shallow(:hidden), do: :hidden
+
+  defp shallow_kid({:element, _, attrs, _} = kid) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} when is_integer(nid) -> {:memo_ref, nid}
+      _ -> kid
+    end
+  end
+
+  defp shallow_kid(kid), do: kid
+
+  defp unshallow({:element, tag, attrs, kids}) do
+    memo = Process.get(:style_memo)
+
+    {:element, tag, attrs,
+     Enum.map(kids, fn
+       {:memo_ref, nid} ->
+         {_, node} = Map.fetch!(memo, nid)
+         unshallow(node)
+
+       kid ->
+         kid
+     end)}
+  end
+
   defp parent_sig(nil), do: nil
-  defp parent_sig(p), do: {p.computed, p.custom, p.root_fs}
+  defp parent_sig(p), do: {p.computed, p.custom_id, p.root_fs}
+
+  # The custom properties an element has are the same, mostly, as its parent's, and many elements
+  # have the same ones as others: the memo holds each set once, under its number, and an entry
+  # names the set (a copy of the memo would otherwise hold a set for every element).
+  defp custom_id(custom, parent) do
+    if parent != nil and parent.custom == custom do
+      parent.custom_id
+    else
+      table = Process.get(:style_custom, %{})
+      id = custom_slot(table, custom, :erlang.phash2(custom, 4_294_967_296))
+      Process.put(:style_custom, Map.put_new(table, id, custom))
+      id
+    end
+  end
+
+  defp custom_slot(table, custom, id) do
+    case table do
+      %{^id => ^custom} -> id
+      %{^id => _other} -> custom_slot(table, custom, id + 4_294_967_296)
+      _ -> id
+    end
+  end
+
+  # (only the sets that entries name stay)
+  defp keep_custom(memo, table) do
+    used =
+      for {nid, {e, _}} <- memo, is_integer(nid), into: MapSet.new(), do: e.custom
+
+    Map.put(memo, :custom_table, Map.take(table, MapSet.to_list(used)))
+  end
 
   defp parent_same?(nil, nil), do: true
   defp parent_same?(nil, _), do: false
   defp parent_same?(_, nil), do: false
 
   defp parent_same?(p, sig),
-    do: p.chain_same and {p.computed, p.custom, p.root_fs} == sig
+    do: p.chain_same and {p.computed, p.custom_id, p.root_fs} == sig
 
   defp prune_list([], _parent, _idx, _count, _i, _prev, acc, _flags), do: Enum.reverse(acc)
 
@@ -1184,12 +1250,13 @@ defmodule Browser.Style do
         |> CSS.context(attrs, kids, parent, prev, i, count, rest)
         |> Map.merge(%{
           computed: e.computed,
-          custom: e.custom,
+          custom: Process.get(:style_custom) |> Map.fetch!(e.custom),
+          custom_id: e.custom,
           root_fs: e.root_fs,
           chain_same: true
         })
 
-      acc = if onode == :hidden, do: acc, else: [onode | acc]
+      acc = if onode == :hidden, do: acc, else: [unshallow(onode) | acc]
       prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
     else
       ctx = CSS.context(tag, attrs, kids, parent, prev, i, count, rest)
@@ -1201,6 +1268,7 @@ defmodule Browser.Style do
         ctx
         |> Map.put(:computed, computed)
         |> Map.put(:custom, custom)
+        |> Map.put(:custom_id, custom_id(custom, parent))
         |> Map.put(:root_fs, root)
         |> Map.put(:chain_same, same_self? and (parent == nil or parent.chain_same))
 

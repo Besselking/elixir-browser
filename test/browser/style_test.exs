@@ -1064,4 +1064,19 @@ defmodule Browser.StyleTest do
       assert p_color("body { color: green } .1 { color: red }", html) == @green
     end
   end
+
+  test "the memo of a deep tree with many custom properties is small when copied" do
+    vars = Enum.map_join(1..200, " ", &"--v#{&1}: #{&1}px;")
+    html = String.duplicate("<div>", 150) <> "x" <> String.duplicate("</div>", 150)
+    nodes = html |> HTML.parse() |> Browser.Nids.index()
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, ":root { #{vars} }"}])
+
+    {pruned, memo} = Style.prune(nodes, idx, nil)
+
+    # (a copy into another process keeps nothing that terms share)
+    assert :erts_debug.flat_size(memo) * 8 < 1_000_000
+
+    # taken over from the memo, the tree is the same
+    assert {^pruned, _} = Style.prune(nodes, idx, memo)
+  end
 end
