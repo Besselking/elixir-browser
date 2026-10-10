@@ -743,7 +743,7 @@ defmodule Browser.JS.Runtime do
     scripts =
       for nid <- DOM.descendants(doc), s = script_info(nid), not DOM.in_template?(nid), do: s
 
-    prefetch(scripts)
+    prefetch(scripts, stylesheet_urls(doc))
 
     for s <- scripts, s.kind == :importmap, do: add_importmap(s)
 
@@ -848,7 +848,7 @@ defmodule Browser.JS.Runtime do
   end
 
   # the files of external scripts are fetched side by side; `script_source/1` takes them from here
-  defp prefetch(scripts) do
+  defp prefetch(scripts, sheets \\ []) do
     fetch = Process.get(:rt_info)[:fetch]
 
     urls =
@@ -861,20 +861,44 @@ defmodule Browser.JS.Runtime do
           uniq: true,
           do: url
 
+    # (the style sheets are fetched with them, so that the page's first layout finds them in the
+    # cache; what is fetched for them is not kept here)
+    sheet_urls =
+      for href <- sheets,
+          url = Browser.Fetch.resolve(base_url(), href),
+          allowed_url?(url),
+          is_function(fetch, 1),
+          url not in urls,
+          uniq: true,
+          do: url
+
     done =
-      urls
+      (urls ++ sheet_urls)
       |> Task.async_stream(fn url -> {url, fetch.(url)} end,
         max_concurrency: 8,
         timeout: 30_000,
         on_timeout: :kill_task
       )
       |> Enum.flat_map(fn
-        {:ok, {url, {:ok, _, _} = ok}} -> [{url, ok}]
+        {:ok, {url, {:ok, _, _} = ok}} -> if url in sheet_urls, do: [], else: [{url, ok}]
         _ -> []
       end)
       |> Map.new()
 
     Process.put(:rt_prefetched, Map.merge(Process.get(:rt_prefetched, %{}), done))
+  end
+
+  # the addresses of the `<link rel=stylesheet>` elements of the document
+  defp stylesheet_urls(doc) do
+    for nid <- DOM.descendants(doc),
+        n = DOM.node_data(nid),
+        n.kind == :element and n.tag == "link",
+        rel = DOM.get_attr(n, "rel"),
+        "stylesheet" in String.split(String.downcase(rel)),
+        href = DOM.get_attr(n, "href"),
+        href != "",
+        not DOM.in_template?(nid),
+        do: href
   end
 
   defp script_info(nid) do

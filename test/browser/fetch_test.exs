@@ -224,12 +224,33 @@ defmodule Browser.FetchTest do
 
     test "Last-Modified revalidates with If-Modified-Since, and a 200 replaces the entry" do
       lm = "Mon, 01 Jan 2024 00:00:00 GMT"
-      base = serve([response("old", ["Last-Modified: #{lm}"]), response("new", [])])
+
+      base =
+        serve([
+          response("old", ["Last-Modified: #{lm}", "Cache-Control: no-cache"]),
+          response("new", [])
+        ])
 
       assert {:ok, "old", _} = Fetch.load(base <> "/m")
       assert {:ok, "new", _} = Fetch.load(base <> "/m")
       assert_receive {:request, "GET", "/m", _, ""}
       assert_receive {:request, "GET", "/m", %{"if-modified-since" => ^lm}, ""}
+    end
+
+    test "a response with only Last-Modified stays fresh for a tenth of its age" do
+      lm = "Mon, 01 Jan 2024 00:00:00 GMT"
+      base = serve([response("old", ["Last-Modified: #{lm}"]), response("new", [])])
+
+      assert {:ok, "old", _} = Fetch.load(base <> "/h")
+      assert {:ok, "old", _} = Fetch.load(base <> "/h")
+      assert_receive {:request, "GET", "/h", _, ""}
+      refute_receive {:request, "GET", "/h", _, ""}, 50
+
+      # (changed a moment ago: nothing to go by, so it is asked for again)
+      now = :httpd_util.rfc1123_date() |> to_string()
+      base = serve([response("a", ["Last-Modified: #{now}"]), response("b", [])])
+      assert {:ok, "a", _} = Fetch.load(base <> "/h2")
+      assert {:ok, "b", _} = Fetch.load(base <> "/h2")
     end
 
     test "Expires sets the lifetime when there is no max-age" do
