@@ -1567,17 +1567,18 @@ defmodule Browser.JS.ResolveTest do
     end
 
     for level <- @eval_levels, src <- @eval_sources do
-      assert Browser.JS.eval(src, resolve: level) == Browser.JS.eval(src), "#{src} at #{level}"
+      assert Browser.JS.eval(src, resolve: level) == Browser.JS.eval(src, resolve: :off),
+             "#{src} at #{level}"
     end
 
     for level <- @eval_levels, src <- @early_error_scripts do
       assert Browser.JS.eval(src, resolve: level, max_steps: 10_000) ==
-               Browser.JS.eval(src, max_steps: 10_000),
+               Browser.JS.eval(src, resolve: :off, max_steps: 10_000),
              "#{src} at #{level}"
     end
 
     for level <- @eval_levels, src <- @early_error_modules do
-      plain = Parser.parse(src, module: true)
+      plain = Parser.parse(src, module: true, resolve: :off)
 
       assert match?({:ok, _}, plain) ==
                match?({:ok, _}, Parser.parse(src, module: true, resolve: level)),

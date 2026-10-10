@@ -2418,12 +2418,12 @@ defmodule Browser.JS.Interp do
         if funs == [] do
           alloc(fn_scope(c, vars))
         else
-          # The declarations close over the scope, so its id comes first. The entry is
-          # stored before the functions are made, because `make_fn` reads the chain from
-          # the scope to find the root of a rewritten function; the final entry with the
-          # functions replaces it.
+          # The declarations close over the scope, so its id comes first. When one of
+          # them is rewritten, the entry is stored before the functions are made, because
+          # `make_fn` reads the chain from the scope to find the root of a rewritten
+          # function; the final entry with the functions replaces it.
           scope = reserve()
-          store(scope, fn_scope(c, vars))
+          if rewritten_funs?(funs), do: store(scope, fn_scope(c, vars))
 
           vars =
             Enum.reduce(funs, vars, fn {n, f}, m -> Map.put(m, n, make_fn(f, scope, false)) end)
@@ -2901,6 +2901,11 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
+  # true when a hoisted declaration of `funs` was rewritten by the resolver
+  defp rewritten_funs?(funs) do
+    Enum.any?(funs, fn {_, f} -> match?({:fn, _, _, _, _, %Info{rewritten: true}}, f) end)
+  end
+
   defp make_fn(node, env), do: make_fn(node, env, true)
 
   # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
@@ -2923,6 +2928,16 @@ defmodule Browser.JS.Interp do
     {src, info} = Browser.JS.Resolve.unpack(src)
     rewritten? = match?(%Info{rewritten: true}, info)
     named? = named? and is_binary(name) and mode == false
+
+    # Only level 1 functions can run on a frame now. A rewritten function of a higher
+    # level needs hoisting, copies and frames that outlive the call (steps 2c to 2e), so
+    # it must stop here with a clear error and not read a freed frame later.
+    if rewritten? and info.level > 1,
+      do:
+        raise(
+          ArgumentError,
+          "resolve level #{info.level} functions cannot run yet; use :off, :info or 1"
+        )
 
     # (a self slot exists only for a named function expression; a parameter or a
     # declaration of the same name shadows the self name, which then has no slot)
@@ -4384,6 +4399,17 @@ defmodule Browser.JS.Interp do
 
   defp bind({:cslot, d, i, name}, _v, env, _mode), do: cslot_assign(hop(env, d), i, name)
   defp bind({:fname, _, _, _}, _v, _env, _mode), do: :ok
+  # A destructuring assignment or a for-in/of head takes its strictness from the function
+  # that runs it. The root has `:strict` only while a strict script runs, so the write
+  # must not read it there.
+  defp bind({:gref, name}, v, env, :assign) do
+    g = root(env)
+
+    if lookup_var(env, :strict) == {:ok, true},
+      do: strict_assign_var(g, name, v, resolvable?(g, name)),
+      else: assign_var(g, name, v)
+  end
+
   defp bind({:gref, name}, v, env, mode), do: bind_name(mode, root(env), name, v)
   defp bind({:mref, d, name}, v, env, mode), do: bind_name(mode, hop(env, d), name, v)
 

@@ -35,8 +35,8 @@ defmodule Mix.Tasks.Js.Test262 do
       several machines. With `--check` only the baseline entries of that part are compared;
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found (a quick look)
-    * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info`, `1`,
-      `2`, `3` or `4` (see `Browser.JS.Resolve`)
+    * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info` or
+      `1` (see `Browser.JS.Resolve`)
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -165,10 +165,11 @@ defmodule Mix.Tasks.Js.Test262 do
 
   defp resolve_level("off"), do: :off
   defp resolve_level("info"), do: :info
-  defp resolve_level(n) when n in ["1", "2", "3", "4"], do: String.to_integer(n)
+  # (levels 2 to 4 run from steps 2c to 2e of the JS redesign)
+  defp resolve_level("1"), do: 1
 
   defp resolve_level(other),
-    do: Mix.raise("--resolve takes off, info, 1, 2, 3 or 4, not #{other}")
+    do: Mix.raise("--resolve takes off, info or 1, not #{other}")
 
   # ── fetching ───────────────────────────────────────────────
 

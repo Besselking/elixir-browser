@@ -946,6 +946,32 @@ defmodule Browser.JS.FramesTest do
                {:ok, "ReferenceError:Cannot access 'a' before initialization", []}
     end
 
+    test "a strict leaf in a sloppy script does not make a global by destructuring" do
+      for src <- [
+            ~S|function f(){ "use strict"; [zz] = [1] } try { f(); "created " + zz } catch (e) { e.message }|,
+            ~S|function f(){ "use strict"; for (zz of [1]); } try { f(); "created " + zz } catch (e) { e.message }|,
+            ~S|function f(){ "use strict"; for (zz in {a: 1}); } try { f(); "created " + zz } catch (e) { e.message }|,
+            ~S|class A { m(){ [zz] = [1] } } try { new A().m(); "created " + zz } catch (e) { e.message }|
+          ] do
+        assert JS.eval(src, resolve: :off) == {:ok, "zz is not defined", []}, src
+        assert JS.eval(src, resolve: 1) == {:ok, "zz is not defined", []}, src
+      end
+    end
+
+    test "a sloppy leaf still makes a global by destructuring" do
+      src = ~S|function f(){ [zz] = [1] } f(); zz|
+
+      assert JS.eval(src, resolve: :off) == {:ok, 1.0, []}
+      assert JS.eval(src, resolve: 1) == {:ok, 1.0, []}
+    end
+
+    test "a function of a level above 1 stops with a clear error" do
+      src = "function mk(){ var x = 1; return function(){ return x } } mk()()"
+
+      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 2)
+      assert inspect(crash) =~ "resolve level 2 functions cannot run yet"
+    end
+
     test "row 37: the step limit at both levels" do
       src = "function f(){ var n = 0; while (true) n++ } f()"
       assert JS.eval(src, resolve: :off, max_steps: 10_000) == {:error, :step_limit, []}
@@ -978,11 +1004,9 @@ defmodule Browser.JS.FramesPageTest do
 
   @levels [:off, 1]
 
-  # Runs the page's scripts at `level`; `files` maps urls to what fetching them returns.
-  # Returns the console lines, the ones logged by timers and loads included, and the errors.
-  defp page(html, level, files \\ %{}) do
-    # The suite-wide level (`JS_RESOLVE=1`) lives in the same key, so the test restores
-    # it instead of deleting it; a delete would run every later sync module at `:off`.
+  # The suite-wide level (`JS_RESOLVE=1`) lives in the same key, so the test restores it
+  # instead of deleting it; a delete would run every later sync module at `:off`.
+  defp set_level(level) do
     previous = Application.get_env(:browser, :js_resolve)
     Application.put_env(:browser, :js_resolve, level)
 
@@ -992,6 +1016,24 @@ defmodule Browser.JS.FramesPageTest do
         v -> Application.put_env(:browser, :js_resolve, v)
       end
     end)
+  end
+
+  # Runs `fun` with the env at `level` and puts the previous level back.
+  defp with_level(level, fun) do
+    previous = Application.get_env(:browser, :js_resolve)
+    Application.put_env(:browser, :js_resolve, level)
+
+    try do
+      fun.()
+    after
+      Application.put_env(:browser, :js_resolve, previous || :off)
+    end
+  end
+
+  # Runs the page's scripts at `level`; `files` maps urls to what fetching them returns.
+  # Returns the console lines, the ones logged by timers and loads included, and the errors.
+  defp page(html, level, files \\ %{}) do
+    set_level(level)
 
     {raw, _} = html |> Browser.HTML.parse() |> Browser.Forms.index()
 
@@ -1047,6 +1089,25 @@ defmodule Browser.JS.FramesPageTest do
 
     for level <- @levels do
       assert page(html, level, files) == {["TypeError 0"], []}, "level #{level}"
+    end
+  end
+
+  # `JS.eval(src, resolve: 1)` sets the level of the first parse only; the code that eval
+  # and the Function constructor parse reads the env, so these rows set the env.
+  test "eval and new Function code runs at the level of the env" do
+    for level <- @levels do
+      with_level(level, fn ->
+        assert Browser.JS.eval(~S|eval("let q = 5; function leaf(a){ return q + a } leaf(1)")|) ==
+                 {:ok, 6.0, []}
+
+        assert Browser.JS.eval(
+                 ~S|new Function("a", "function leaf(b){ return a + b } return leaf(2)")(1)|
+               ) ==
+                 {:ok, 3.0, []}
+
+        assert Browser.JS.eval(~S|(0, eval)("var g9 = 4; function leaf(){ return g9 } leaf()")|) ==
+                 {:ok, 4.0, []}
+      end)
     end
   end
 

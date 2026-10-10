@@ -14,5 +14,7 @@ config :browser,
        nil -> :off
        "off" -> :off
        "info" -> :info
-       n -> String.to_integer(n)
+       "1" -> 1
+       # (levels 2 to 4 run from steps 2c to 2e)
+       other -> raise "JS_RESOLVE takes off, info or 1, not #{other}"
      end)

@@ -1,7 +1,7 @@
 # Usage: RUNS=5 RESOLVE=off mix run --no-start bench/js_runtime.exs [name ...]
 #
-# RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`,
-# or 1 to 4; see `Browser.JS.Resolve`).
+# RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`
+# or 1; see `Browser.JS.Resolve`). Levels 2 to 4 run from steps 2c to 2e.
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
@@ -71,7 +71,8 @@ resolve =
   case System.get_env("RESOLVE", "off") do
     "off" -> :off
     "info" -> :info
-    n -> String.to_integer(n)
+    "1" -> 1
+    other -> raise "RESOLVE takes off, info or 1, not #{other}"
   end
 
 opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
