@@ -301,6 +301,19 @@ loop = fn loop ->
           )
 
         t2 = System.monotonic_time(:microsecond)
+
+        # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
+        with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
+             [dir, ms] <- String.split(spec, ","),
+             true <- (t2 - t) / 1000 > String.to_integer(ms) do
+          File.mkdir_p!(dir)
+
+          File.write!(
+            Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
+            :erlang.term_to_binary({base, raw, laid.sheet_cache})
+          )
+        end
+
         rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
         Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
 

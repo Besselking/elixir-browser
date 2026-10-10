@@ -394,8 +394,10 @@ defmodule Browser.Page do
 
   @doc "Puts a `style_state/1` of a later tree in `page` (its rules, sheets and memo go together)."
   def adopt_style_state(%__MODULE__{} = page, style) do
-    style = %{style | sheet_cache: Map.merge(page.sheet_cache, style.sheet_cache)}
-    struct(page, style)
+    # (only the sheets of that tree stay: the cache would hold every tree there was, and be
+    # copied whole into every process that lays out a page)
+    cache = page.sheet_cache |> Map.merge(style.sheet_cache) |> Map.take([:ua | style.sheet_refs])
+    struct(page, %{style | sheet_cache: cache})
   end
 
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
