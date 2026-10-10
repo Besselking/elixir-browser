@@ -2,15 +2,18 @@ defmodule Browser.JS.FramesTest do
   # Step 2b: a function that the resolver rewrote at level 1 runs on a tuple frame. Step
   # 2c: a level 2 function, which makes closures, runs on a frame too, and a scope whose
   # names a closure captures gets a block frame. Step 2d: a level 3 function (`arguments`,
-  # `new.target`, `super`, constructors) runs on a frame with hidden slots. The first part
-  # builds frames by hand in the test process and calls the evaluator on each new node
-  # form. The second part runs the semantic tables of the designs at `:off` and at levels
-  # 1, 2 and 3 and compares the results. The designs are notes/js-frames-2b-design.md,
-  # notes/js-frames-2c-design.md and notes/js-frames-2d-design.md.
+  # `new.target`, `super`, constructors) runs on a frame with hidden slots. Step 2e: a
+  # level 4 function (an async function, an async arrow, a generator or an async
+  # generator) runs on a frame that its suspended body keeps. The first part builds frames
+  # by hand in the test process and calls the evaluator on each new node form. The second
+  # part runs the semantic tables of the designs at `:off` and at levels 1 to 4 and
+  # compares the results. The designs are notes/js-frames-2b-design.md,
+  # notes/js-frames-2c-design.md, notes/js-frames-2d-design.md and
+  # notes/js-frames-2e-design.md.
   use ExUnit.Case, async: true
 
   alias Browser.JS
-  alias Browser.JS.{GC, Interp, Parser, Resolve}
+  alias Browser.JS.{Async, GC, Interp, Parser, Resolve}
   alias Browser.JS.Resolve.{Info, Scope}
 
   @tdz_x "Cannot access 'x' before initialization"
@@ -1415,8 +1418,9 @@ defmodule Browser.JS.FramesTest do
   # Each row runs at `:off` and at levels 1, 2 and 3 through `Browser.JS.eval`; the result
   # must be the one of the design, and the same at each level. The expected values were
   # checked at `:off` on bb2d6f5. Rows 30, 31, 57 and 58 need a page and are in the module
-  # below. Step 2c added level 2 (2c design 6.2), and step 2d added level 3 (2d design 5.1).
-  @levels [:off, 1, 2, 3]
+  # below. Step 2c added level 2 (2c design 6.2), step 2d added level 3 (2d design 5.1), and
+  # step 2e added level 4 (2e design 5.1).
+  @levels [:off, 1, 2, 3, 4]
 
   @rows [
     {1, "function f(){ return x; let x = 1 } try { f() } catch (e) { e.message }",
@@ -1543,7 +1547,7 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table" do
-    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
+    test "every row gives the design's value at :off and at levels 1 to 4" do
       for {n, src, expected} <- @rows, level <- @levels do
         assert JS.eval(src, resolve: level) == expected, "row #{n} at #{level}: #{src}"
       end
@@ -1555,8 +1559,8 @@ defmodule Browser.JS.FramesTest do
 
       assert JS.eval(src, resolve: :off) == {:ok, "ReferenceError:a is not defined", []}
 
-      # The function is a leaf, so levels 2 and 3 run it as level 1 does.
-      for level <- [1, 2, 3] do
+      # The function is a leaf, so levels 2, 3 and 4 run it as level 1 does.
+      for level <- [1, 2, 3, 4] do
         assert JS.eval(src, resolve: level) ==
                  {:ok, "ReferenceError:Cannot access 'a' before initialization", []}
       end
@@ -1580,14 +1584,18 @@ defmodule Browser.JS.FramesTest do
       for level <- @levels, do: assert(JS.eval(src, resolve: level) == {:ok, 1.0, []})
     end
 
-    # `async` makes a function level 4, which runs from step 2e (2d design 5.1).
-    test "a function of a level above 3 stops with a clear error" do
+    # `async` makes a function level 4. Up to step 2d the call stopped with an error; from
+    # step 2e it runs on a frame (2e design 5.1 and 8, item 6). The promise is an object
+    # with no own keys, so it is exported as an empty map.
+    test "level 4 runs `async function f(){} f()`" do
       src = "async function f(){} f()"
 
-      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 4)
+      for level <- @levels do
+        assert JS.eval(src, resolve: level) == {:ok, %{}, []}, "level #{level}"
+      end
 
-      assert inspect(crash) =~
-               "resolve level 4 functions cannot run yet; use :off, :info, 1, 2 or 3"
+      assert {:ok, tree} = Parser.parse(src, resolve: 4)
+      assert find(tree, &match?({:fn, "f", _, _, _, %Info{level: 4, rewritten: true}}, &1))
     end
 
     test "row 37: the step limit at each level" do
@@ -1815,7 +1823,7 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table of step 2c" do
-    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
+    test "every row gives the design's value at :off and at levels 1 to 4" do
       for {n, src, value} <- @rows_2c, level <- @levels do
         assert JS.eval(src, resolve: level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
       end
@@ -2962,7 +2970,7 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table of step 2d" do
-    test "every row gives the design's value at :off and at levels 1, 2 and 3" do
+    test "every row gives the design's value at :off and at levels 1 to 4" do
       for {n, src, value} <- @rows_2d, level <- @levels do
         assert JS.eval(src, resolve: level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
       end
@@ -2978,7 +2986,7 @@ defmodule Browser.JS.FramesTest do
       src =
         ~S|class A { m(){ return 1 } } class B extends A { m(){ function g(){ return (() => eval('super.m()'))() } return g.call(this) } } new B().m()|
 
-      for level <- [:off, 1, 3] do
+      for level <- [:off, 1, 3, 4] do
         assert JS.eval(src, resolve: level) == {:ok, 1.0, []}, "row 72 at #{level}"
       end
 
@@ -2986,13 +2994,16 @@ defmodule Browser.JS.FramesTest do
                {:error, {:uncaught, "SyntaxError: 'super' keyword unexpected here"}, []}
     end
 
-    test "D1 and D2: the value of :off at levels 1 and 2, the value of the spec at level 3" do
+    # Level 4 rewrites these functions as level 3 does, so it gives the value of the spec too.
+    test "D1 and D2: the value of :off at levels 1 and 2, the value of the spec at levels 3 and 4" do
       for {n, src, off, spec} <- @diffs_2d do
         for level <- [:off, 1, 2] do
           assert JS.eval(src, resolve: level) == {:ok, off, []}, "#{n} at #{level}"
         end
 
-        assert JS.eval(src, resolve: 3) == {:ok, spec, []}, "#{n} at 3"
+        for level <- [3, 4] do
+          assert JS.eval(src, resolve: level) == {:ok, spec, []}, "#{n} at #{level}"
+        end
       end
     end
 
@@ -3029,6 +3040,1087 @@ defmodule Browser.JS.FramesTest do
       end
     end
   end
+
+  # ── step 2e: level 4 functions ──────────────────────────────
+
+  # The tests below follow section 6.1 of notes/js-frames-2e-design.md. A level 4 function
+  # (an async function, an async arrow, a generator or an async generator) runs on a frame
+  # that `Interp.enter_frame/4` builds. The CPS evaluator can suspend the body, so the
+  # frame lives on in the continuations, and `Interp.frame_done/2` frees it once, when the
+  # body has ended. The tests that look at the private CPS helpers through call traces are
+  # in `Browser.JS.FramesSerialTest` below, because a trace pattern is global to the node.
+
+  # The first function node named `name` in `src`, resolved at level 4. A method node
+  # carries `{:method, name}`.
+  defp fn4(src, name) do
+    assert {:ok, tree} = Parser.parse(src, resolve: 4), src
+
+    node =
+      find(tree, fn
+        {:fn, ^name, _, _, _, %Info{}} -> true
+        {:fn, {:method, ^name}, _, _, _, %Info{}} -> true
+        _ -> false
+      end)
+
+    assert node != nil, "no function #{name} in #{inspect(tree)}"
+    node
+  end
+
+  # The function object that a script bound to the global `name`, its id and its closure
+  # record. The record must be the one of a rewritten level 4 function, because a test of
+  # the old path proves nothing about frames.
+  defp fun4(gid, name) do
+    {:obj, id} = f = global!(gid, name)
+    c = closure(f)
+    assert %Info{level: 4, rewritten: true} = c.info, name
+    {f, id, c}
+  end
+
+  # Runs the jobs of the microtask queue, as the event loop does after a task.
+  defp microtasks, do: Browser.JS.Promise.run_microtasks()
+
+  # The live frames of the function record `info`: the heap entries that are tuples with
+  # `info` in their second position. A tombstone of check mode is not such a tuple.
+  defp frames_of(info) do
+    for {k, t} <- Process.get(),
+        is_integer(k) and is_tuple(t) and tuple_size(t) >= 5 and elem(t, 1) == info,
+        do: k
+  end
+
+  # The live block frames whose scope record has the kind `kind`.
+  defp scope_frames(kind) do
+    for {k, t} <- Process.get(),
+        is_integer(k) and is_tuple(t) and tuple_size(t) >= 5 and
+          match?(%Scope{kind: ^kind}, elem(t, 1)),
+        do: k
+  end
+
+  # One step of a generator: the `value` and the `done` of the result of `next()`.
+  defp step(it, arg \\ :undefined) do
+    r = Async.resume(it, {:next, arg})
+    {Interp.get(r, "value"), Interp.get(r, "done")}
+  end
+
+  describe "level 4: the frame entry (enter_frame)" do
+    test "an async method: the parameters, then `this` and `home`, under the header of a call" do
+      gid = heap()
+      run_script("var A = class { async m(a){ await 0; return super.x } }", 4)
+      proto = Interp.get(global!(gid, "A"), "prototype")
+      {:obj, id} = m = Interp.get(proto, "m")
+      c = closure(m)
+
+      assert %Info{
+               kind: :method,
+               async?: true,
+               hidden: [:this, :home],
+               size: 8,
+               slots: %{"a" => 6, :this => 7, :home => 8}
+             } = c.info
+
+      this = Interp.new_object()
+      pos = :erlang.get(:js_pos)
+      depth = :erlang.get(:js_depth)
+      stack = Process.get(:js_stack, [])
+      {fid, fns} = Interp.enter_frame(id, c, this, [1.0, 2.0])
+
+      # Class code is strict, so `this` is raw. The home object of a class method is the
+      # prototype. An extra argument is dropped.
+      assert :erlang.get(fid) == {c.scope, c.info, nil, pos, c.root, 1.0, this, proto}
+      assert fns == :erlang.get(:js_fns)
+
+      # The entry does not run the body, and `call_closure` keeps the depth and the stack
+      # (design 1.2), so the entry changes neither.
+      assert :erlang.get(:js_depth) == depth
+      assert Process.get(:js_stack, []) == stack
+      refute freed?(fid)
+    end
+
+    test "a sloppy generator: the arguments, the list and `{:unbuilt, id}`; the object is mapped" do
+      gid = heap()
+      run_script("function* g(a, b){ yield arguments }", 4)
+      {_g, id, c} = fun4(gid, "g")
+
+      assert %Info{
+               generator?: true,
+               hidden: [:args, :arguments],
+               argmap: %{"a" => 0, "b" => 1},
+               slots: %{"a" => 6, "b" => 7, :args => 8, "arguments" => 9}
+             } = c.info
+
+      {fid, _} = Interp.enter_frame(id, c, :undefined, [1.0])
+      assert {_, _, nil, _, _, 1.0, :undefined, [1.0], {:unbuilt, ^id}} = :erlang.get(fid)
+
+      # The first read builds a mapped object, as at level 3: a write to the parameter
+      # reaches the item.
+      {:obj, aid} = ao = Interp.ev({:aslot, 0, 9}, fid)
+      assert slot(fid, 8) == {:mapped, aid}
+      Interp.ev({:assign, "=", {:mslot, 0, 6, "a", 0}, {:num, 5.0}}, fid)
+      assert Interp.get(ao, "0") == 5.0
+    end
+
+    test "an async arrow: no hidden slots" do
+      gid = heap()
+      run_script("var h = async (x) => { await x; return x }", 4)
+      {_h, id, c} = fun4(gid, "h")
+      assert %Info{kind: :arrow, hidden: [], size: 6, slots: %{"x" => 6}} = c.info
+
+      {fid, _} = Interp.enter_frame(id, c, :undefined, [3.0, 4.0])
+      assert tuple_size(:erlang.get(fid)) == 6
+      assert slot(fid, 6) == 3.0
+    end
+
+    test "the closure count is read before the defaults run" do
+      gid = heap()
+      run_script("async function f(a = () => 1){ await 0; return a }", 4)
+      {_f, id, c} = fun4(gid, "f")
+      before = :erlang.get(:js_fns)
+
+      {fid, fns} = Interp.enter_frame(id, c, :undefined, [])
+      assert fns == before
+      assert :erlang.get(:js_fns) == before + 1
+      assert closure(slot(fid, 6)).scope == fid
+
+      # So `frame_done` sees that the counter moved, and the closure keeps its frame.
+      Interp.frame_done(fid, fns)
+      refute freed?(fid)
+    end
+
+    test "a throwing default frees the frame, so the heap is as before" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "function thrower(){ throw 1 } function* g(a = peek(), b = thrower()){ yield a }",
+        4
+      )
+
+      {g, id, c} = fun4(gid, "g")
+      refute c.info.makes_closures
+      size = Interp.heap_size()
+
+      assert catch_throw(Interp.enter_frame(id, c, :undefined, [])) == {:js_error, 1.0}
+      {fid, _} = peeked()
+      assert freed?(fid)
+      assert Interp.heap_size() == size
+
+      # The call throws at once (design 1.3), before the generator object is made.
+      assert catch_throw(Interp.call(g, :undefined, [])) == {:js_error, 1.0}
+      {fid, _} = peeked()
+      assert freed?(fid)
+      assert Interp.heap_size() == size
+    end
+
+    test "a closure made by a default keeps the frame after the throw" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "function thrower(){ throw 1 } async function f(a = peek(), b = () => a, c = thrower()){ await 0 }",
+        4
+      )
+
+      {_f, id, c} = fun4(gid, "f")
+      assert catch_throw(Interp.enter_frame(id, c, :undefined, [])) == {:js_error, 1.0}
+      {fid, _} = peeked()
+      refute freed?(fid)
+      assert closure(slot(fid, 7)).scope == fid
+    end
+  end
+
+  describe "level 4: the free at the end of the body (frame_done)" do
+    test "no closures: the frame is freed, and a mapped object is detached first" do
+      gid = heap()
+      run_script("async function f(a){ await 0; return arguments }", 4)
+      {_f, id, c} = fun4(gid, "f")
+
+      assert %Info{makes_closures: false, argmap: %{"a" => 0}, slots: %{"arguments" => 8}} =
+               c.info
+
+      {fid, fns} = Interp.enter_frame(id, c, :undefined, [1.0])
+      {:obj, aid} = ao = Interp.ev({:aslot, 0, 8}, fid)
+      assert %{mapped: %{0 => "a"}, map_scope: ^fid} = entry(ao)
+
+      assert Interp.frame_done(fid, fns) == :ok
+      assert freed?(fid)
+      o = Interp.deref(aid)
+      refute Map.has_key?(o, :mapped)
+      refute Map.has_key?(o, :map_scope)
+      assert Interp.get(ao, "0") == 1.0
+    end
+
+    test "closures: the frame is kept when the counter moved, and freed when it did not" do
+      gid = heap()
+      run_script("async function f(){ await 0; return () => 1 }", 4)
+      {_f, id, c} = fun4(gid, "f")
+      assert c.info.makes_closures
+
+      {kept, fns} = Interp.enter_frame(id, c, :undefined, [])
+      # Any closure moves the counter, as one that the body makes does.
+      Interp.make_function(leaf("function q(){}", "q"), gid, false)
+      assert Interp.frame_done(kept, fns) == :ok
+      refute freed?(kept)
+
+      {done, fns} = Interp.enter_frame(id, c, :undefined, [])
+      assert Interp.frame_done(done, fns) == :ok
+      assert freed?(done)
+    end
+
+    if @check do
+      test "check mode: a second frame_done fails, also when the first one kept the frame" do
+        gid = heap()
+        run_script("async function f(){ await 0; return () => 1 }", 4)
+        {_f, id, c} = fun4(gid, "f")
+
+        {kept, fns} = Interp.enter_frame(id, c, :undefined, [])
+        Interp.make_function(leaf("function q(){}", "q"), gid, false)
+        Interp.frame_done(kept, fns)
+        refute freed?(kept)
+        e = assert_raise(ArgumentError, fn -> Interp.frame_done(kept, fns) end)
+        assert Exception.message(e) =~ "resolve check"
+
+        {done, fns} = Interp.enter_frame(id, c, :undefined, [])
+        Interp.frame_done(done, fns)
+        e = assert_raise(ArgumentError, fn -> Interp.frame_done(done, fns) end)
+        assert Exception.message(e) =~ "resolve check"
+      end
+    else
+      @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode test"
+      test "check mode: a second frame_done fails, also when the first one kept the frame" do
+        :ok
+      end
+    end
+  end
+
+  describe "level 4: the scopes of CPS statements (cps_enter)" do
+    test "nil and a frameless scope give env: the TDZ reset, then the hoist into env" do
+      gid = heap()
+
+      {body, i} =
+        body_of(fn4("async function f(){ { let q = 1; function h(){ return 1 } await q } }", "f"))
+
+      assert [{:aw, {:block, _, %Scope{frame: false, tdz: [6], hoist: [{7, _}]} = sc}}] = body
+      fid = frame(gid, i, [1.0, :undefined])
+
+      assert Interp.cps_enter(fid, nil) == fid
+      assert slot(fid, 6) == 1.0
+
+      assert Interp.cps_enter(fid, sc) == fid
+      assert slot(fid, 6) == :tdz
+      h = slot(fid, 7)
+      assert closure(h).scope == fid
+      assert Interp.call(h, :undefined, []) == 1.0
+    end
+
+    test "a framed scope gives a block frame with the header of env" do
+      gid = heap()
+
+      {body, i} =
+        body_of(fn4("async function f(){ { let q = 1; await q; return () => q } }", "f"))
+
+      assert [{:aw, {:block, _, %Scope{frame: true, template: [:tdz]} = sc}}] = body
+      fid = frame_at(gid, i, 7, [])
+
+      bid = Interp.cps_enter(fid, sc)
+      assert bid != fid
+      assert :erlang.get(bid) == {fid, sc, nil, 7, Interp.global(), :tdz}
+    end
+
+    test "for (let) with an await: each closure keeps the copy of its own round" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var g; async function f(){ peek(); for (let i = 0; i < 3; i++) { if (i == 1) g = () => i; await 0 } } f()",
+        4
+      )
+
+      {fid, _} = peeked()
+      g = global!(gid, "g")
+      assert Interp.call(g, :undefined, []) == 1.0
+
+      assert {^fid, %Scope{kind: :loop, frame: true, per_iter: true}, _, _, _, 1.0} =
+               :erlang.get(closure(g).scope)
+    end
+
+    test "for-of with an await: item frames only when a closure captures the name" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var fs = []; async function f(){ peek(); for (const k of ['a', 'b']) { await 0; fs.push(() => k) } } f()",
+        4
+      )
+
+      {fid, _} = peeked()
+      [a, b] = fns_in(global!(gid, "fs"))
+      assert Interp.call(a, :undefined, []) == "a"
+      assert Interp.call(b, :undefined, []) == "b"
+      assert closure(a).scope != closure(b).scope
+
+      assert {^fid, %Scope{kind: :each, frame: true}, _, _, _, "a"} =
+               :erlang.get(closure(a).scope)
+
+      assert {^fid, %Scope{kind: :each, frame: true}, _, _, _, "b"} =
+               :erlang.get(closure(b).scope)
+
+      # Without a capture the name is a slot of the function frame, so no frame is made.
+      before = length(scope_frames(:each))
+
+      run_script(
+        "var seen = []; async function u(){ for (const k of ['a', 'b']) { await 0; seen.push(k) } } u()",
+        4
+      )
+
+      assert fns_in(global!(gid, "seen")) == ["a", "b"]
+      assert length(scope_frames(:each)) == before
+    end
+
+    test "catch and switch with an await: the frame of the scope holds the name" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var fs = []; async function f(){ peek(); try { await Promise.reject(7) } catch (e) { fs.push(() => e); await 0 } switch (1) { case 1: let z = await 'z'; fs.push(() => z) } } f()",
+        4
+      )
+
+      {fid, _} = peeked()
+      [ce, sz] = fns_in(global!(gid, "fs"))
+
+      assert {^fid, %Scope{kind: :catch, frame: true}, _, _, _, 7.0} =
+               :erlang.get(closure(ce).scope)
+
+      assert {^fid, %Scope{kind: :switch, frame: true}, _, _, _, "z"} =
+               :erlang.get(closure(sz).scope)
+    end
+  end
+
+  describe "level 4: the CPS statement dispatch" do
+    # The resolver writes the 6-tuple `{:forawait, ..., scope}`. A `for await` always
+    # awaits, also when its body has no await, so `has_await?` must say so (design 2.4).
+    # `has_tla?/1` is the public entry to `has_await?/1`.
+    test "has_await? is true for the 6-tuple `for await`" do
+      {body, _} = body_of(fn4("async function f(){ for await (const y of [1]) {} }", "f"))
+      assert [{:aw, {:forawait, _, _, _, {:block, [], nil}, %Scope{}} = s}] = body
+      assert Async.has_tla?([s])
+    end
+
+    test "a closure made in a lifted template gets the frame as its scope" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var g; async function f(){ peek(); let y = 5; return [await 1, () => y][1] } f().then(v => { g = v })",
+        4
+      )
+
+      {fid, _} = peeked()
+      g = global!(gid, "g")
+      assert closure(g).scope == fid
+      assert Interp.call(g, :undefined, []) == 5.0
+    end
+  end
+
+  describe "level 4: generator frames" do
+    test "the frame lives across yields and is freed when the body ends" do
+      gid = heap()
+      run_script("function* g(){ let x = 1; yield x; x++; yield x } var it = g()", 4)
+      {_g, _id, c} = fun4(gid, "g")
+      assert %Info{makes_closures: false, slots: %{"x" => 6}} = c.info
+      it = global!(gid, "it")
+
+      assert %{state: :start, frame: fid} = entry(it).gen
+      assert elem(:erlang.get(fid), 1) == c.info
+
+      assert step(it) == {1.0, false}
+      assert entry(it).gen.frame == fid
+      assert slot(fid, 6) == 1.0
+      assert step(it) == {2.0, false}
+      assert slot(fid, 6) == 2.0
+
+      assert step(it) == {:undefined, true}
+      assert freed?(fid)
+      assert entry(it).gen.frame == nil
+      assert step(it) == {:undefined, true}
+    end
+
+    test "1000 complete runs that make no closure leave no frame" do
+      gid = heap()
+      run_script("function* g(n){ for (let i = 0; i < n; i++) yield i }", 4)
+      {_g, _id, c} = fun4(gid, "g")
+      refute c.info.makes_closures
+
+      loop = "var s = 0; for (var k = 0; k < 1000; k++) for (var v of g(2)) s += v"
+      run_script(loop, 4)
+      GC.collect()
+      base = Interp.heap_size()
+
+      run_script(loop, 4)
+      assert global!(gid, "s") == 1000.0
+      # `frame_done` freed each frame; the GC did not run.
+      assert frames_of(c.info) == []
+      GC.collect()
+      assert Interp.heap_size() == base
+    end
+
+    test "return() and throw() at the start run no body code and free the frame" do
+      gid = heap()
+
+      run_script(
+        "var log = []; function* g(){ try { log.push('body'); yield 1 } finally { log.push('fin') } } var a = g(), b = g()",
+        4
+      )
+
+      a = global!(gid, "a")
+      b = global!(gid, "b")
+      %{frame: fa} = entry(a).gen
+      %{frame: fb} = entry(b).gen
+      refute freed?(fa)
+      refute freed?(fb)
+
+      assert Interp.get(Async.resume(a, {:return, 4.0}), "value") == 4.0
+      assert freed?(fa)
+      assert entry(a).gen.frame == nil
+
+      assert catch_throw(Async.resume(b, {:throw, 5.0})) == {:js_error, 5.0}
+      assert freed?(fb)
+      assert entry(b).gen.frame == nil
+
+      # The release sets the frame to nil, so a second message frees nothing again.
+      assert Interp.get(Async.resume(a, {:return, 6.0}), "value") == 6.0
+      assert fns_in(global!(gid, "log")) == []
+    end
+
+    test "the GC keeps a suspended generator while it is referenced, and sweeps it after" do
+      gid = heap()
+      run_script("function* g(){ let x = 1; yield x; yield x + 1 } var it = g(); it.next()", 4)
+      %{frame: fid, state: :suspended} = entry(global!(gid, "it")).gen
+
+      GC.collect()
+      refute freed?(fid)
+      assert slot(fid, 6) == 1.0
+
+      run_script("it = null", 4)
+      GC.collect()
+      assert freed?(fid)
+    end
+  end
+
+  describe "level 4: async function frames" do
+    test "1000 completed calls that make no closure leave no frame after the microtasks" do
+      gid = heap()
+      run_script("async function f(n){ await 0; return n + 1 }", 4)
+      {f, _id, c} = fun4(gid, "f")
+      refute c.info.makes_closures
+      GC.collect()
+      base = Interp.heap_size()
+
+      for _ <- 1..1000, do: Interp.call(f, :undefined, [1.0])
+      # Each body waits at its await, so each frame is alive.
+      assert length(frames_of(c.info)) == 1000
+
+      microtasks()
+      assert frames_of(c.info) == []
+      GC.collect()
+      assert Interp.heap_size() == base
+    end
+
+    test "a frame that waits on a promise: kept while the promise is reachable, swept when not" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var hold = new Promise(r => {}); async function f(){ peek(); let x = 2; await hold; return x } f()",
+        4
+      )
+
+      {fid, _} = peeked()
+      # The copy of the frame that `peek` keeps would be a root, so it goes first.
+      Process.delete(:peeked)
+      GC.collect()
+      refute freed?(fid)
+      assert slot(fid, 6) == 2.0
+
+      run_script("hold = null", 4)
+      GC.collect()
+      assert freed?(fid)
+
+      # A body that waits on a promise that nothing can reach is garbage at once.
+      run_script("async function u(){ peek(); await new Promise(r => {}) } u()", 4)
+      {uid, _} = peeked()
+      Process.delete(:peeked)
+      refute freed?(uid)
+      GC.collect()
+      assert freed?(uid)
+    end
+  end
+
+  describe "level 4: async generator frames" do
+    test "requests queue up while the body runs; the end of the body frees the frame" do
+      gid = heap()
+
+      run_script(
+        "var out = []; async function* ag(){ yield 1; await 0; yield 2 } var it = ag()",
+        4
+      )
+
+      it = global!(gid, "it")
+      %{frame: fid, state: :start} = entry(it).agen
+      refute freed?(fid)
+
+      run_script(
+        "it.next().then(v => out.push(v.value)); it.next().then(v => out.push(v.value)); it.next().then(v => out.push(v.done))",
+        4
+      )
+
+      assert fns_in(global!(gid, "out")) == [1.0, 2.0, true]
+      assert freed?(fid)
+      assert entry(it).agen.frame == nil
+    end
+
+    test "a throw from the body ends it in ag_finish, which frees the frame" do
+      gid = heap()
+
+      run_script(
+        "var out = []; async function* ag(){ yield 1; throw 2 } var it = ag(); it.next().then(v => out.push(v.value)); it.next().catch(e => out.push(e))",
+        4
+      )
+
+      it = global!(gid, "it")
+      assert fns_in(global!(gid, "out")) == [1.0, 2.0]
+      assert entry(it).agen.frame == nil
+      assert frames_of(closure(global!(gid, "ag")).info) == []
+    end
+
+    test "return() and throw() at the start free the frame without running the body" do
+      gid = heap()
+
+      run_script(
+        "var log = []; async function* ag(){ log.push('body'); yield 1 } var a = ag(), b = ag()",
+        4
+      )
+
+      %{frame: fa} = entry(global!(gid, "a")).agen
+      %{frame: fb} = entry(global!(gid, "b")).agen
+      refute freed?(fa)
+      refute freed?(fb)
+
+      run_script(
+        "a.return(5).then(v => log.push(v.value)); b.throw(6).catch(e => log.push(e))",
+        4
+      )
+
+      # The value of :off: the rejection of `b` is settled first, `a` awaits its value.
+      assert fns_in(global!(gid, "log")) == [6.0, 5.0]
+      assert freed?(fa)
+      assert freed?(fb)
+      assert entry(global!(gid, "a")).agen.frame == nil
+      assert entry(global!(gid, "b")).agen.frame == nil
+    end
+  end
+
+  describe "level 4: the dangling scan (GC.dangling)" do
+    test "the `:frame` edge counts, and an integer under another key does not" do
+      gid = heap()
+      fid = frame(gid, info(fn4("async function f(){ await 0 }", "f")), [])
+      assert GC.dangling(%{frame: fid}) == []
+
+      :erlang.put(fid, {:js_freed, ~s("f")})
+      assert GC.dangling(%{frame: fid}) == [~s("f")]
+      assert GC.dangling(%{other: fid}) == []
+    end
+
+    test "a context of a waiting body and a generator record name a freed frame" do
+      gid = heap()
+      install_peek(gid)
+
+      run_script(
+        "var hold = new Promise(r => {}); async function f(){ peek(); await hold } f(); function* g(){ yield 1 } var it = g(); it.next()",
+        4
+      )
+
+      {fid, _} = peeked()
+      Process.delete(:peeked)
+      %{frame: gfid} = entry(global!(gid, "it")).gen
+      assert GC.dangling(nil) == []
+
+      # A free without `frame_done` leaves the context of the await (held by the reaction
+      # of `hold`) and the generator record with a freed frame. The scan must find both
+      # through their `frame` keys (design C6).
+      :erlang.put(fid, {:js_freed, ~s("f")})
+      :erlang.put(gfid, {:js_freed, ~s("g")})
+      assert Enum.sort(GC.dangling(nil)) == [~s("f"), ~s("g")]
+    end
+  end
+
+  if @check do
+    describe "level 4: check mode" do
+      test "C1: enter_frame refuses a function that is not level 4" do
+        gid = heap()
+        run_script("function f(a){ return arguments }", 3)
+        {:obj, id} = f = global!(gid, "f")
+
+        e =
+          assert_raise(ArgumentError, fn -> Interp.enter_frame(id, closure(f), :undefined, []) end)
+
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "C2: a forced early free fails at the next check_resume" do
+        gid = heap()
+        run_script("function* g(){ yield 1; yield 2 } var it = g(); it.next()", 4)
+        it = global!(gid, "it")
+        %{frame: fid} = entry(it).gen
+        assert Interp.check_resume(fid) == :ok
+        assert Interp.check_resume(nil) == :ok
+
+        Interp.free(fid)
+        assert_raise(ArgumentError, fn -> Interp.check_resume(fid) end)
+        e = assert_raise(ArgumentError, fn -> Async.resume(it, {:next, :undefined}) end)
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "C2: a forced early free of a waiting body fails when the promise settles" do
+        gid = heap()
+        install_peek(gid)
+
+        run_script(
+          "var res; var hold = new Promise(r => { res = r }); async function f(){ peek(); await hold; return 1 } f()",
+          4
+        )
+
+        {fid, _} = peeked()
+        Interp.free(fid)
+        Interp.call(global!(gid, "res"), :undefined, [1.0])
+        e = assert_raise(ArgumentError, fn -> microtasks() end)
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "C2 and C5: a resume after frame_done fails, also when the frame was kept" do
+        gid = heap()
+        run_script("function* g(){ yield 1; yield 2 } var it = g(); it.next()", 4)
+        it = global!(gid, "it")
+        %{frame: fid, fns: fns} = entry(it).gen
+        Interp.frame_done(fid, fns)
+        assert freed?(fid)
+        e = assert_raise(ArgumentError, fn -> Async.resume(it, {:next, :undefined}) end)
+        assert Exception.message(e) =~ "resolve check"
+
+        # This body made a closure, so `frame_done` keeps the frame. The resume must fail
+        # all the same, because no continuation may run after the body ended.
+        run_script("function* h(){ yield () => 1; yield 2 } var jt = h(); jt.next()", 4)
+        jt = global!(gid, "jt")
+        %{frame: hid, fns: hfns} = entry(jt).gen
+        Interp.frame_done(hid, hfns)
+        refute freed?(hid)
+        e = assert_raise(ArgumentError, fn -> Async.resume(jt, {:next, :undefined}) end)
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "C3: ev({:await}) in a frame fails without the process key and runs with it" do
+        gid = heap()
+        run_script("async function f(){ await 0 }", 4)
+        {_f, id, c} = fun4(gid, "f")
+        {fid, _} = Interp.enter_frame(id, c, :undefined, [])
+
+        e = assert_raise(ArgumentError, fn -> Interp.ev({:await, {:num, 1.0}}, fid) end)
+        assert Exception.message(e) =~ "resolve check"
+
+        Process.put(:js_cps_sync_await, true)
+
+        try do
+          assert Interp.ev({:await, {:num, 1.0}}, fid) == 1.0
+        after
+          Process.delete(:js_cps_sync_await)
+        end
+
+        # A map scope is the old path, where the sync await is legal.
+        assert Interp.ev({:await, {:num, 1.0}}, gid) == 1.0
+      end
+
+      test "C3: the sync interpreter refuses `{:aw}`" do
+        gid = heap()
+
+        e =
+          assert_raise(ArgumentError, fn ->
+            Interp.exec_stmt({:aw, {:expr, {:num, 1.0}}}, gid)
+          end)
+
+        assert Exception.message(e) =~ "resolve check"
+      end
+
+      test "C3: a statement that awaits without `{:aw}`, and `{:aw}` on one that does not, fail" do
+        gid = heap()
+
+        unwrap = fn
+          {:aw, s} -> s
+          s -> s
+        end
+
+        wrap = fn s -> {:aw, s} end
+
+        for {src, change} <- [
+              {"async function f(){ await 0; return 1 }", unwrap},
+              {"async function f(){ var a = 1; await 0; return a }", wrap}
+            ] do
+          {:fn, name, params, body, mode, i} = fn4(src, "f")
+          node = {:async, {:fn, name, params, Enum.map(body, change), mode, i}}
+          f = Interp.make_function(node, gid, false)
+          e = assert_raise(ArgumentError, fn -> Interp.call(f, :undefined, []) end)
+          assert Exception.message(e) =~ "resolve check", src
+        end
+      end
+    end
+  else
+    @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode tests"
+    test "level 4: check mode" do
+      :ok
+    end
+  end
+
+  # ── the semantic table of step 2e (2e design 6.2) ──────────
+
+  # A row marked `:r` runs as `var r=[]; <src>; r`, and its value is `r` after the timers
+  # and the microtasks ran. An unmarked row gives the value of its last expression. Each
+  # value was checked at `:off`, `:info` and levels 1, 2 and 3 on c8737b3, and each one is
+  # the value of the design table. The design dropped rows 52 and 73. The rows with a letter
+  # are not in the design: they read a compound target before the await for the forms
+  # `{:mslot}` (9b), `{:cslot}` (9c) and `{:fname}` (9d) (design 2.5, unit test 4). Their
+  # values were checked at `:off` and at levels 1 and 3.
+  @rows_2e [
+    {1, :r,
+     ~S|async function f(){ var fs=[]; for (let i=0;i<3;i++){ fs.push(()=>i); await 0 } r.push(fs.map(g=>g()).join()) } f()|,
+     ["0,1,2"]},
+    {2, :r,
+     ~S|async function f(){ var fs=[]; for (var i=0;i<3;i++){ fs.push(()=>i); await 0 } r.push(fs.map(g=>g()).join()) } f()|,
+     ["3,3,3"]},
+    {3, :r,
+     ~S|async function f(){ var fs=[]; for (let i=0;i<3;fs.push(()=>i), i++) await 0; r.push(fs.map(g=>g()).join()) } f()|,
+     ["1,2,3"]},
+    {4, :r,
+     ~S|async function f(){ var fs=[]; for (const k of ['a','b']) { await 0; fs.push(()=>k) } for (const k in {x:1,y:2}) { fs.push(()=>k); await k } r.push(fs.map(g=>g()).join()) } f()|,
+     ["a,b,x,y"]},
+    {5, :r,
+     ~S|async function f(){ var fs=[]; let i=0; while(i<3){ let j=i; await 0; fs.push(()=>j); i++ } r.push(fs.map(g=>g()).join()) } f()|,
+     ["0,1,2"]},
+    {6, :r,
+     ~S|async function f(){ var fs=[]; try { await Promise.reject(7) } catch (e) { fs.push(() => e); await 0 } r.push(fs[0]()) } f()|,
+     [7.0]},
+    {7, :r,
+     ~S|async function f(){ var fs=[]; L: for (let i=0;i<3;i++){ for (let j=0;j<3;j++){ await 0; fs.push(()=>i+':'+j); if (j==1) continue L } } r.push(fs.map(g=>g()).join()) } f()|,
+     ["0:0,0:1,1:0,1:1,2:0,2:1"]},
+    {8, :r,
+     ~S|async function f(){ var fs=[]; switch (1) { case 1: let z = await 'z'; fs.push(() => z) } r.push(fs[0]()) } f()|,
+     ["z"]},
+    {9, :r,
+     ~S|async function f(){ let x = 1; const set = () => { x = 10 }; x += await (set(), 5); r.push(x) } f()|,
+     [6.0]},
+    {"9b", :r,
+     ~S|async function f(a){ const s = () => { arguments[0] = 10 }; a += await (s(), 5); r.push(a + ',' + arguments[0]) } f(1)|,
+     ["6,6"]},
+    {"9c", :r,
+     ~S|async function f(){ const c = 1; try { c += await (r.push('rhs'), 1) } catch (e) { r.push(e.constructor.name) } r.push(c) } f()|,
+     ["rhs", "TypeError", 1.0]},
+    {"9d", :r,
+     ~S|var g = async function h(){ h += await 1; return typeof h }; g().then(v => r.push(v))|,
+     ["function"]},
+    {10, :r,
+     ~S|async function f(){ let g = () => 'old'; const s = () => { g = () => 'new' }; r.push(g(await (s(), 0))) } f()|,
+     ["new"]},
+    {11, :r,
+     ~S|async function f(){ let o = {m(){ return 'o' }}; const s = () => { o = {m(){ return 'p' }} }; r.push(o.m(await (s(), 0))) } f()|,
+     ["o"]},
+    {12, :v, ~S|function* g(){ for (let i=0;i<3;i++) yield () => i } [...g()].map(f=>f()).join()|,
+     "0,1,2"},
+    {13, :v,
+     ~S|function f(){ let x = 1; function* g(){ yield x; x++; yield x } return [...g()].join() + ',' + x } f()|,
+     "1,2,2"},
+    {14, :v,
+     ~S|function* g(){ for (const k of ['a','b']) yield () => k } [...g()].map(f=>f()).join()|,
+     "a,b"},
+    {15, :r,
+     ~S|function* g(){ try { yield 1; yield 2 } finally { r.push('fin') } } var it = g(); it.next(); r.push(JSON.stringify(it.return(9)))|,
+     ["fin", ~S|{"value":9,"done":true}|]},
+    {16, :r,
+     ~S|function* g(){ try { yield 1 } finally { yield 'f'; r.push('after') } } var it=g(); it.next(); var a = it.return(5); var b = it.next(); r.push([a.value, a.done, b.value, b.done].join())|,
+     ["after", "f,false,5,true"]},
+    {17, :v,
+     ~S|function* g(){ try { yield 1 } catch (e) { yield 'c' + e } } var it=g(); it.next(); it.throw(3).value|,
+     "c3"},
+    {18, :v,
+     ~S|var r=[]; function* g(){ try { yield 1 } finally { r.push('no') } } var it = g(); it.return(4).value + ',' + r.length|,
+     "4,0"},
+    {19, :r,
+     ~S|function* g(){ try { try { yield 1 } finally { r.push('a') } } finally { r.push('b') } } var it = g(); it.next(); try { it.throw(new Error('t')) } catch (e) { r.push(e.message) } r.push(String(it.next().done))|,
+     ["a", "b", "t", "true"]},
+    {20, :r,
+     ~S|async function* ag(){ yield 1; yield 2 } (async () => { for await (const x of ag()) r.push(x) })()|,
+     [1.0, 2.0]},
+    {21, :r, ~S|(async () => { for await (const x of [Promise.resolve('a'), 'b']) r.push(x) })()|,
+     ["a", "b"]},
+    {22, :r,
+     ~S|async function* ag(){ try { yield 1; yield 2 } finally { r.push('closed') } } (async () => { for await (const x of ag()) { r.push(x); break } r.push('out') })()|,
+     [1.0, "closed", "out"]},
+    {23, :r,
+     ~S|async function* ag(){ yield 1; yield 2 } var it = ag(); it.next().then(v=>r.push(v.value)); it.next().then(v=>r.push(v.value)); it.next().then(v=>r.push(v.done))|,
+     [1.0, 2.0, true]},
+    {24, :r,
+     ~S|async function* ag(){ try { yield 1 } finally { await 0; r.push('f') } } var it = ag(); it.next().then(()=> it.return(7)).then(v => r.push(v.value))|,
+     ["f", 7.0]},
+    {25, :r,
+     ~S|async function* ag(){ yield Promise.resolve('p'); const x = yield 2; r.push('got ' + x) } var it = ag(); it.next().then(v => r.push(v.value)); it.next().then(v => r.push(v.value)); it.next('x')|,
+     ["p", "got x", 2.0]},
+    {26, :v, ~S|function* g(){ yield* [1,2]; yield* 'ab'; return 3 } [...g()].join()|, "1,2,a,b"},
+    {27, :v,
+     ~S|function* inner(){ yield 1; return 'r' } function* g(){ var v = yield* inner(); yield v } [...g()].join()|,
+     "1,r"},
+    {28, :r,
+     ~S|function* inner(){ try { yield 1 } finally { r.push('inner fin') } } function* g(){ try { yield* inner() } finally { r.push('outer fin') } } var it = g(); it.next(); it.return(0)|,
+     ["inner fin", "outer fin"]},
+    {29, :r,
+     ~S|async function* ag(){ yield* [1, Promise.resolve(2)]; const v = yield* (async function*(){ yield 3; return 'ret' })(); yield v } (async () => { for await (const x of ag()) r.push(x) })()|,
+     [1.0, 2.0, 3.0, "ret"]},
+    {30, :r,
+     ~S|async function f(a){ arguments[0] = 9; await 0; return a + arguments.length } f(1, 2).then(v => r.push(v))|,
+     [11.0]},
+    {31, :r,
+     ~S|var x = 1; async function f(){ x += await g(); return x } function g(){ x = 10; return 5 } f().then(v => r.push(v))|,
+     [6.0]},
+    {32, :r,
+     ~S|async function f(a){ 'use strict'; a = 5; await 0; return arguments[0] } f(1).then(v => r.push(v))|,
+     [1.0]},
+    {33, :v, ~S|function* g(){ yield arguments.length; yield arguments[1] } [...g(4,5)].join()|,
+     "2,5"},
+    {34, :r,
+     ~S|async function f(){ await 0; return (() => arguments[0])() } f(3).then(v => r.push(v))|,
+     [3.0]},
+    {35, :r,
+     ~S|function o(){ return async () => { await 0; return arguments[0] + this.k } } o.call({k: 1}, 8)().then(v => r.push(v))|,
+     [9.0]},
+    {36, :r,
+     ~S|async function f(a){ await 0; a = 5; return arguments[0] } f(1).then(v => r.push(v))|,
+     [5.0]},
+    {37, :r,
+     ~S|class A { m(){ return 1 } } class B extends A { async m(){ await 0; return super.m() + 1 } } new B().m().then(v => r.push(v))|,
+     [2.0]},
+    {38, :v, ~S|var o = { k: 'k', *g(){ yield this.k } }; o.g().next().value|, "k"},
+    {39, :r,
+     ~S|async function f(){ await 0; return typeof this } async function s(){ 'use strict'; await 0; return typeof this } f().then(v => r.push(v)); s().then(v => r.push(v))|,
+     ["object", "undefined"]},
+    {40, :r,
+     ~S|async function f(){ await 0; throw new Error('x') } f().catch(e => r.push(e.message))|,
+     ["x"]},
+    {41, :r,
+     ~S|async function f(){ try { await Promise.reject(1) } catch (e) { return 'c' + e } finally { r.push('fin') } } f().then(v => r.push(v))|,
+     ["fin", "c1"]},
+    {42, :r,
+     ~S|async function f(){ await 0; try { x; } catch (e) { return e.constructor.name } let x = 1 } f().then(v => r.push(v))|,
+     ["ReferenceError"]},
+    {43, :r,
+     ~S|async function f(a = (() => { throw 5 })()){ } f().catch(e => r.push(e)); function* g(a = (() => { throw 6 })()){} try { g() } catch (e) { r.push(e) }|,
+     [6.0, 5.0]},
+    {44, :r,
+     ~S|async function a(){ r.push('a1'); await 0; r.push('a2') } a(); Promise.resolve().then(()=>r.push('p')); r.push('sync')|,
+     ["a1", "sync", "a2", "p"]},
+    {45, :r,
+     ~S|async function a(){ await Promise.resolve(); r.push('a') } a(); Promise.resolve().then(()=>r.push('p1')).then(()=>r.push('p2'))|,
+     ["a", "p1", "p2"]},
+    {46, :r,
+     ~S|async function a(){ return Promise.resolve(1) } a().then(()=>r.push('a')); Promise.resolve().then(()=>r.push('p1')).then(()=>r.push('p2')).then(()=>r.push('p3'))|,
+     ["p1", "p2", "a", "p3"]},
+    {47, :r,
+     ~S|async function f(){ { await using x = { [Symbol.asyncDispose](){ r.push('d'); return Promise.resolve() } }; r.push('body'); await 0 } r.push('after') } f()|,
+     ["body", "d", "after"]},
+    {48, :r,
+     ~S|function* g(){ using x = { [Symbol.dispose](){ r.push('d') } }; yield 1 } var it = g(); it.next(); it.return()|,
+     ["d"]},
+    {49, :r,
+     ~S|async function f(){ let y = 5; return [await 1, () => y][1]() } f().then(v => r.push(v))|,
+     [5.0]},
+    {50, :r,
+     ~S|async function f(){ let v = 3; const C = class { [await 'k'](){ return v } }; return new C().k() } f().then(v => r.push(v))|,
+     [3.0]},
+    {51, :r,
+     ~S|async function f(){ let o = {a: 2}; let k = 'a'; return o?.[await k] } f().then(v => r.push(v))|,
+     [2.0]},
+    {53, :v,
+     ~S|function* g(){ const x = yield 1; const y = yield x + 1; return x + y } var it = g(); [it.next().value, it.next(10).value, it.next(20).value].join()|,
+     "1,11,30"},
+    {54, :r,
+     ~S|async function f(){ const {a = await 3} = {}; let [b = await 4] = []; return a + b } f().then(v => r.push(v))|,
+     [7.0]},
+    {56, :r,
+     ~S|async function f(){ let x = 'outer'; { await 0; try { r.push(x) } catch (e) { r.push(e.constructor.name) } let x = 'inner' } } f()|,
+     ["ReferenceError"]},
+    {57, :r,
+     ~S|function* g(){ var fs = []; for (let i = 0; i < 2; i++) { let j = yield i; fs.push(() => i + j) } return fs.map(f => f()).join() } var it = g(); it.next(); it.next('a'); r.push(it.next('b').value)|,
+     ["0a,1b"]},
+    {58, :r,
+     ~S|async function f(){ var c = 0; async function inc(){ await 0; return ++c } await Promise.all([inc(), inc(), inc()]); return c } f().then(v => r.push(v))|,
+     [3.0]},
+    {59, :r,
+     ~S|async function f(n){ if (n == 0) return 0; return 1 + await f(n - 1) } f(50).then(v => r.push(v))|,
+     [50.0]},
+    {60, :v,
+     ~S|var r=[]; function* fib(){ let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, a + b] } } for (const v of fib()) { if (v > 50) break; r.push(v) } r.join()|,
+     "0,1,1,2,3,5,8,13,21,34"},
+    {61, :r,
+     ~S|async function f(){ try { await 0; throw 1 } finally { return 'o' } } f().then(v => r.push(v))|,
+     ["o"]},
+    {62, :v,
+     ~S|function mk(){ return function*(){ let n = 0; while (true) yield n++ } } var g = mk()(); [g.next().value, g.next().value].join()|,
+     "0,1"},
+    {63, :r,
+     ~S|async function f(){ let x = 1; await 0; return () => ++x } f().then(g => { g(); r.push(g()) })|,
+     [3.0]},
+    {64, :r,
+     ~S|async function f(){ let x = 4; await 0; return (function(){ return eval('x + 1') })() } f().then(v => r.push(v))|,
+     [5.0]},
+    {66, :v,
+     ~S|var r; function f(a = async () => { r = arguments.length }){ let arguments = 1; return a } f(undefined, 2)(); r|,
+     2.0},
+    {68, :r,
+     ~S|function* g(){ var x = 0; try { while (true) { try { yield x++ } finally { r.push('i' + x) } } } finally { r.push('o') } } var it = g(); it.next(); it.next(); it.return()|,
+     ["i1", "i2", "o"]},
+    {69, :r,
+     ~S|async function f(){ await null; r.push(1); await { then(res){ r.push('t'); res(2) } }; r.push(3) } f(); Promise.resolve().then(() => r.push('p'))|,
+     [1.0, "p", "t", 3.0]},
+    {70, :r,
+     ~S|class A { #x = 1; async m(){ await 0; return this.#x + (await this.n()) } n(){ return 2 } } new A().m().then(v => r.push(v))|,
+     [3.0]},
+    {71, :r,
+     ~S|async function f(){ var o = { async *g(){ yield* [1, 2]; } }; for await (const v of o.g()) r.push(v) } f()|,
+     [1.0, 2.0]},
+    {72, :r,
+     ~S|function* g(){ let x = yield; r.push(x); x = yield x * 2; r.push(x) } var it = g(); it.next(); r.push(it.next(5).value); it.next(7)|,
+     [5.0, 10.0, 7.0]},
+    {74, :r,
+     ~S|var g = function* gen(){ yield typeof gen; yield gen === g }; r.push([...g()].join())|,
+     ["function,true"]},
+    {75, :r, ~S|async function f(){ let x = 1; { let x = await 2; r.push(x) } r.push(x) } f()|,
+     [2.0, 1.0]},
+    {76, :r, ~S|async function f(){ var g = () => 'a'; r.push(g?.(await 'x')) } f()|, ["a"]},
+    {79, :r, ~S|async function f(){ for await (const y of [1]) {} r.push('ok') } f()|, ["ok"]},
+    {80, :r,
+     ~S|var closed = 0; var it = { [Symbol.iterator](){ return { i: 0, next(){ return { value: this.i++, done: false } }, return(){ closed++; return {} } } } }; async function f(){ for (const x of it) { await 0; if (x == 2) break } r.push(closed) } f()|,
+     [1.0]},
+    {81, :v,
+     ~S|var it; function* g(){ try { it.next() } catch (e) { yield e.constructor.name } } it = g(); it.next().value|,
+     "TypeError"},
+    {82, :r,
+     ~S|function F(){ this.p = (async () => { await 0; return new.target === F })() } new F().p.then(v => r.push(v))|,
+     [true]}
+  ]
+
+  # The rows of design 5.3 that change at level 4: each one keeps the `:off` value at
+  # levels 1 to 3, where the function is not rewritten, and gives the value of the spec at
+  # level 4. Each row runs as `var r=[]; <src>; r`.
+  @diffs_2e [
+    # D1 (row 65): a `var` head of `for await` hoists, so `x = 1` writes the local.
+    {"D1",
+     ~S|async function f(){ x = 1; for await (var x of []); r.push(typeof globalThis.x) } f()|,
+     ["number"], ["undefined"]},
+    # D2 (row 55): the head names are in their TDZ while the object expression runs.
+    {"D2",
+     ~S|async function f(){ let x = [1]; for (const x of (function(){ try { return x } catch (e) { return [e.constructor.name] } })()) { await 0; r.push(x) } } f()|,
+     [1.0], ["ReferenceError"]},
+    # D3 (row 67): the init of `for (let ...)` sees its own names in their TDZ.
+    {"D3",
+     ~S|async function f(){ let i = 0; for (let i = (function(){ try { return i } catch (e) { return -1 } })(); i < 1; i++) { await 0; r.push(i) } } f()|,
+     [0.0], [-1.0, 0.0]},
+    # D5 (row 77): `:off` deletes the binding of its temporary; the spec gives `true`.
+    {"D5", ~S|async function f(){ r.push(delete await 1) } f()|, [false], [true]},
+    # D6 (row 78): a lifted callee is a value, so the message names no temporary.
+    {"D6", ~S|async function f(){ try { (await 1)() } catch (e) { r.push(e.message) } } f()|,
+     ["\0s0 is not a function"], ["expression is not a function"]}
+  ]
+
+  defp row_src(:r, src), do: "var r=[]; " <> src <> "; r"
+  defp row_src(:v, src), do: src
+
+  # The six programs of step 2e (design 6.4), in the wrapper of bench/js_runtime.exs. An
+  # async program returns a box, which `JS.eval` exports after the microtasks ran. The
+  # expected values are the results at `:off` on c8737b3.
+  @bench_2e [
+    {"await20k",
+     "var box = {}; async function run(){ var s = 0; for (let i = 0; i < 20000; i++) { s = (s + await i) % 1000003 } return s } run().then(v => { box.v = v }); return box",
+     %{"v" => 989_403.0}},
+    {"asynccalls10k",
+     "var box = {}; async function add(a, b){ return a + b } async function run(){ var s = 0; for (let i = 0; i < 10000; i++) { s = (await add(s, i)) % 1000003 } return s } run().then(v => { box.v = v }); return box",
+     %{"v" => 994_853.0}},
+    {"awaitclosures10k",
+     "var box = {}; async function run(){ var fs = []; for (let i = 0; i < 10000; i++) { await null; fs.push(() => i) } var s = 0; for (var j = 0; j < fs.length; j++) s += fs[j](); return s } run().then(v => { box.v = v }); return box",
+     %{"v" => 49_995_000.0}},
+    {"gen30k",
+     "function* range(n){ for (let i = 0; i < n; i++) yield i } var s = 0; for (const v of range(30000)) s = (s + v) % 1000003; return s",
+     983_653.0},
+    {"yieldstar10k",
+     "function* two(){ yield 1; yield 2 } function* outer(n){ for (let i = 0; i < n; i++) yield* two() } var s = 0; for (const v of outer(10000)) s += v; return s",
+     30000.0},
+    {"asyncgen5k",
+     "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box",
+     %{"v" => 12_497_500.0}}
+  ]
+
+  describe "the semantic table of step 2e" do
+    test "every row gives the design's value at :off and at levels 1 to 4" do
+      for {n, kind, src, value} <- @rows_2e, level <- @levels do
+        assert JS.eval(row_src(kind, src), resolve: level) == {:ok, value, []},
+               "row #{n} at #{level}: #{src}"
+      end
+    end
+
+    test "D1, D2, D3, D5 and D6: the value of :off at levels 1 to 3, the value of the spec at 4" do
+      for {n, src, off, spec} <- @diffs_2e do
+        for level <- [:off, 1, 2, 3] do
+          assert JS.eval(row_src(:r, src), resolve: level) == {:ok, off, []}, "#{n} at #{level}"
+        end
+
+        assert JS.eval(row_src(:r, src), resolve: 4) == {:ok, spec, []}, "#{n} at 4"
+      end
+    end
+
+    test "the functions that the rows test are level 4 and rewritten at level 4" do
+      # A row proves nothing at level 4 if its function took the old path.
+      for {n, src, name, kind} <- [
+            {1, "async function f(){ for (let i=0;i<3;i++){ await 0 } }", "f", :async},
+            {12, "function* g(){ for (let i=0;i<3;i++) yield () => i }", "g", :gen},
+            {20, "async function* ag(){ yield 1; yield 2 }", "ag", :async_gen},
+            {37, "class B extends A { async m(){ await 0; return super.m() + 1 } }", "m", :async},
+            {38, "var o = { k: 'k', *g(){ yield this.k } }", "g", :gen},
+            {71, "var o = { async *g(){ yield* [1, 2]; } }", "g", :async_gen}
+          ] do
+        i = info(fn4(src, name))
+        assert %Info{level: 4, rewritten: true, free: :counter, tail_sites: 0} = i, "row #{n}"
+
+        assert {i.async?, i.generator?} ==
+                 %{async: {true, false}, gen: {false, true}, async_gen: {true, true}}[kind],
+               "row #{n}"
+      end
+
+      # Row 35: an async arrow is rewritten too, and it has no hidden slot of its own.
+      {:ok, tree} =
+        Parser.parse(
+          "function o(){ return async () => { await 0; return arguments[0] + this.k } }",
+          resolve: 4
+        )
+
+      assert find(
+               tree,
+               &match?({:fn, nil, _, _, :arrow, %Info{level: 4, rewritten: true, hidden: []}}, &1)
+             ),
+             "row 35"
+    end
+
+    @tag timeout: 600_000
+    test "the bench programs of steps 2b to 2e give their values at level 4" do
+      for {name, body, expected} <- @bench ++ @bench_2d ++ @bench_2e do
+        src = "(function(){ function f(){ #{body} } return f() })()"
+        opts = [resolve: 4, max_steps: 1_000_000_000, timeout: 120_000]
+        assert JS.eval(src, opts) == {:ok, expected, []}, name
+      end
+    end
+  end
 end
 
 defmodule Browser.JS.FramesPageTest do
@@ -3039,7 +4131,7 @@ defmodule Browser.JS.FramesPageTest do
 
   alias Browser.JS.Runtime
 
-  @levels [:off, 1, 2, 3]
+  @levels [:off, 1, 2, 3, 4]
 
   # The suite-wide level (`JS_RESOLVE=1`) lives in the same key, so the test restores it
   # instead of deleting it; a delete would run every later sync module at `:off`.
@@ -3170,6 +4262,449 @@ defmodule Browser.JS.FramesPageTest do
 
     for level <- @levels do
       assert page(html, level) == {["child parent"], []}, "level #{level}"
+    end
+  end
+end
+
+defmodule Browser.JS.FramesSerialTest do
+  # Step 2e (notes/js-frames-2e-design.md, section 6.1): the private CPS helpers of
+  # `Browser.JS.Async` (`lift/3`, `fill/2`, `ordered/1`, `read_form/1`, `cexec/5`,
+  # `has_await?/1`, `await_value/3`) cannot be called from a test, so these tests trace
+  # their calls while a script runs and look at the arguments and the results. A trace
+  # pattern is global to the node, so this module runs on its own, after the async ones.
+  # The module also checks that each place that reads a resolver level accepts `4`.
+  use ExUnit.Case, async: false
+
+  alias Browser.JS.{Async, Interp, Parser}
+  alias Browser.JS.Resolve.Info
+
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
+  # ── helpers ────────────────────────────────────────────────
+
+  defp heap do
+    Interp.init(1_000_000)
+    Browser.JS.Builtins.install()
+    Interp.global()
+  end
+
+  defp run_script(src, level) do
+    assert {:ok, program} = Parser.parse(src, resolve: level), src
+    Interp.run_program(program, true)
+  end
+
+  # Runs `fun` while the calls of the functions `mfas` in this process are traced, local
+  # calls included, so that private functions count. Returns the result of `fun` and the
+  # calls in the order in which they began. Each call is `{mfa, args, depth, outcome}`:
+  # `depth` is the number of traced calls that it runs inside, and `outcome` is
+  # `{:return_from, value}`, `{:exception_from, {class, reason}}` or `:open`. The tracer is
+  # a process of its own, because the traced process cannot be its own tracer.
+  defp traced(mfas, fun) do
+    me = self()
+    tracer = spawn_link(fn -> trace_loop([]) end)
+
+    for mfa <- mfas,
+        do: :erlang.trace_pattern(mfa, [{:_, [], [{:exception_trace}]}], [:local])
+
+    :erlang.trace(me, true, [:call, {:tracer, tracer}])
+
+    result =
+      try do
+        fun.()
+      after
+        :erlang.trace(me, false, [:call])
+        for mfa <- mfas, do: :erlang.trace_pattern(mfa, false, [:local])
+      end
+
+    # (the trace messages are sent before this returns, so the tracer has them all)
+    ref = :erlang.trace_delivered(me)
+
+    receive do
+      {:trace_delivered, ^me, ^ref} -> :ok
+    end
+
+    send(tracer, {:done, me})
+
+    msgs =
+      receive do
+        {:trace_msgs, m} -> m
+      end
+
+    {result, pair(msgs)}
+  end
+
+  defp trace_loop(acc) do
+    receive do
+      {:done, to} -> send(to, {:trace_msgs, Enum.reverse(acc)})
+      m -> trace_loop([m | acc])
+    end
+  end
+
+  # Pairs each call message with its return or exception message. The return messages of
+  # one process come in the reverse order of their calls, so a stack is enough.
+  defp pair(msgs) do
+    {calls, _open, _n} =
+      Enum.reduce(msgs, {%{}, [], 0}, fn
+        {:trace, _, :call, {m, f, args}}, {calls, open, n} ->
+          {Map.put(calls, n, {{m, f, length(args)}, args, length(open), :open}), [n | open],
+           n + 1}
+
+        {:trace, _, kind, _mfa, v}, {calls, [i | open], n}
+        when kind in [:return_from, :exception_from] ->
+          {Map.update!(calls, i, &put_elem(&1, 3, {kind, v})), open, n}
+      end)
+
+    calls |> Enum.sort() |> Enum.map(&elem(&1, 1))
+  end
+
+  # The calls of `fun` (a name) that run inside no other traced call.
+  defp top(calls, fun), do: for({{_, ^fun, _}, args, 0, out} <- calls, do: {args, out})
+
+  defp calls_of(calls, fun), do: for({{_, ^fun, _}, args, _, out} <- calls, do: {args, out})
+
+  # True when the term `t` holds a node for which `pred` is true.
+  defp holds?(t, pred) do
+    cond do
+      pred.(t) -> true
+      is_tuple(t) -> t |> Tuple.to_list() |> holds?(pred)
+      is_list(t) -> Enum.any?(t, &holds?(&1, pred))
+      true -> false
+    end
+  end
+
+  # The body statements of the async function `name` in `src`, resolved at `level`.
+  defp body(src, level, name \\ "f") do
+    {:ok, {:program, stmts}} = Parser.parse(src, resolve: level)
+
+    Enum.find_value(stmts, fn
+      {:fundecl, ^name, {:async, {:fn, _, _, b, _, _}}} -> b
+      _ -> nil
+    end)
+  end
+
+  # ── lift/3 and fill/2 (design 2.5, unit test 3) ────────────
+
+  # The output of `lift/2` at `:off` on c8737b3 for each expression, as `{template, leaves}`
+  # (the leaves come last first). At `:off` the async function is not rewritten, so
+  # `lift/3` runs in `:map` mode and must give the same output.
+  @lift_map [
+    {"a() + await b()",
+     {{:binary, "+", {:id, "\0s0"}, {:id, "\0s1"}},
+      [{:await, {:call, {:id, "b"}, [], false}}, {:call, {:id, "a"}, [], false}]}},
+    {"g(await (s(), 0))",
+     {{:call, {:id, "g"}, [{:id, "\0s0"}], false},
+      [{:await, {:seq, [{:call, {:id, "s"}, [], false}, {:num, 0.0}]}}]}},
+    {"o.m(await k, c)",
+     {{:call, {:member, {:id, "\0s0"}, {:str, "m"}, false}, [{:id, "\0s1"}, {:id, "c"}], false},
+      [{:await, {:id, "k"}}, {:id, "o"}]}},
+    {"x += await 1",
+     {{:assign, "=", {:id, "x"}, {:binary, "+", {:id, "\0s0"}, {:id, "\0s1"}}},
+      [{:await, {:num, 1.0}}, {:id, "x"}]}},
+    {"`${a}${await b}`",
+     {{:tmpl, ["", {:id, "\0s0"}, "", {:id, "\0s1"}, ""]}, [{:await, {:id, "b"}}, {:id, "a"}]}},
+    {"({k: a(), [await b]: c})",
+     {{:object,
+       [{:init, {:str, "k"}, {:id, "\0s0"}}, {:init, {:computed, {:id, "\0s1"}}, {:id, "c"}}]},
+      [{:await, {:id, "b"}}, {:call, {:id, "a"}, [], false}]}},
+    {"new C(await x, y)",
+     {{:new, {:id, "\0s0"}, [{:id, "\0s1"}, {:id, "y"}]}, [{:await, {:id, "x"}}, {:id, "C"}]}},
+    {"(await h)()", {{:call, {:id, "\0s0"}, [], false}, [{:await, {:id, "h"}}]}},
+    {"[a, , ...await b, c]",
+     {{:array, [{:id, "\0s0"}, :hole, {:spread, {:id, "\0s1"}}, {:id, "c"}]},
+      [{:await, {:id, "b"}}, {:id, "a"}]}},
+    {"o.p = await v",
+     {{:assign, "=", {:member, {:id, "\0s0"}, {:str, "p"}, false}, {:id, "\0s1"}},
+      [{:await, {:id, "v"}}, {:id, "o"}]}},
+    {"a(await b, await c)",
+     {{:call, {:id, "a"}, [{:id, "\0s0"}, {:id, "\0s1"}], false},
+      [{:await, {:id, "c"}}, {:await, {:id, "b"}}]}}
+  ]
+
+  describe "lift/3 and fill/2" do
+    test ":map mode gives the output of lift/2 before step 2e" do
+      for {expr, expected} <- @lift_map do
+        heap()
+        {:ok, program} = Parser.parse("async function f(){ " <> expr <> " } f()", resolve: :off)
+        {_, calls} = traced([{Async, :lift, 3}], fn -> Interp.run_program(program, true) end)
+        [{:expr, node}] = body("async function f(){ " <> expr <> " }", :off)
+
+        assert [{[^node, [], :map], {:return_from, out}}] = top(calls, :lift), expr
+        assert out == expected, expr
+      end
+    end
+
+    # Each source has one function `f` with one expression that awaits. The leaves come
+    # last first, as in `:map` mode, and `{:cps_leaf, i}` takes the place of `"\0s<i>"`.
+    # A name callee (`{:slot}`, `{:gref}`) is not lifted. A compound target is read first
+    # in its read form, and the write keeps the target's own form (design 2.5).
+    @lift_frame [
+      {"holes in source order, a slot callee stays",
+       "async function f(){ let a = (p, q) => p + q, b = 1, c = 2; return a(await b, await c) } f()",
+       {{:call, {:slot, 0, 6, "a"}, [{:cps_leaf, 0}, {:cps_leaf, 1}], false},
+        [{:await, {:slot, 0, 8, "c"}}, {:await, {:slot, 0, 7, "b"}}]}},
+      {"a {:gref} callee stays", "var g = (v) => v; async function f(){ return g(await 1) } f()",
+       {{:call, {:gref, "g"}, [{:cps_leaf, 0}], false}, [{:await, {:num, 1.0}}]}},
+      {"a {:slot} target", "async function f(){ let x = 1; x += await 2 } f()",
+       {{:assign, "=", {:slot, 0, 6, "x"}, {:binary, "+", {:cps_leaf, 0}, {:cps_leaf, 1}}},
+        [{:await, {:num, 2.0}}, {:slot, 0, 6, "x"}]}},
+      {"a {:cslot} target", "async function f(){ const c = 1; c += await 2 } f().catch(e => 0)",
+       {{:assign, "=", {:cslot, 0, 6, "c"}, {:binary, "+", {:cps_leaf, 0}, {:cps_leaf, 1}}},
+        [{:await, {:num, 2.0}}, {:slot, 0, 6, "c"}]}},
+      {"an {:mslot} target", "async function f(a){ arguments; a += await 2 } f(1)",
+       {{:assign, "=", {:mslot, 0, 6, "a", 0}, {:binary, "+", {:cps_leaf, 0}, {:cps_leaf, 1}}},
+        [{:await, {:num, 2.0}}, {:slot, 0, 6, "a"}]}},
+      {"a {:gref} target", "var x = 1; async function f(){ x += await 2 } f()",
+       {{:assign, "=", {:gref, "x"}, {:binary, "+", {:cps_leaf, 0}, {:cps_leaf, 1}}},
+        [{:await, {:num, 2.0}}, {:gref, "x"}]}},
+      {"an {:fname} target", "var f = async function h(){ h += await 2 }; f()",
+       {{:assign, "=", {:fname, 0, 6, "h"}, {:binary, "+", {:cps_leaf, 0}, {:cps_leaf, 1}}},
+        [{:await, {:num, 2.0}}, {:slot, 0, 6, "h"}]}}
+    ]
+
+    test ":frame mode: holes, name callees, and compound targets read first" do
+      for {name, src, expected} <- @lift_frame do
+        heap()
+
+        {_, calls} =
+          traced([{Async, :lift, 3}, {Async, :read_form, 1}], fn -> run_script(src, 4) end)
+
+        assert [{[_node, [], :frame], {:return_from, out}}] = top(calls, :lift), name
+        assert out == expected, name
+        refute holds?(out, &match?({:id, "\0s" <> _}, &1)), name
+      end
+    end
+
+    test "read_form gives the slot read of each target form and keeps the others" do
+      heap()
+
+      {_, calls} =
+        traced([{Async, :read_form, 1}], fn ->
+          for {_, src, _} <- @lift_frame, do: run_script(src, 4)
+        end)
+
+      forms = Map.new(calls_of(calls, :read_form), fn {[t], {:return_from, r}} -> {t, r} end)
+      assert forms[{:slot, 0, 6, "x"}] == {:slot, 0, 6, "x"}
+      assert forms[{:cslot, 0, 6, "c"}] == {:slot, 0, 6, "c"}
+      assert forms[{:mslot, 0, 6, "a", 0}] == {:slot, 0, 6, "a"}
+      assert forms[{:gref, "x"}] == {:gref, "x"}
+      assert forms[{:fname, 0, 6, "h"}] == {:slot, 0, 6, "h"}
+    end
+
+    test "fill puts the values in the holes in order, and leaves no hole" do
+      gid = heap()
+
+      {_, calls} =
+        traced([{Async, :fill, 2}], fn ->
+          run_script(
+            "var out; async function f(){ let a = (p, q) => p + '' + q, b = 1, c = 2; return a(await b, await c) } f().then(v => { out = v })",
+            4
+          )
+        end)
+
+      assert [{_, {:return_from, filled}}] = top(calls, :fill)
+      assert filled == {:call, {:slot, 0, 6, "a"}, [{:val, 1.0}, {:val, 2.0}], false}
+      assert {:ok, "12"} = Interp.lookup_scoped(gid, "out")
+    end
+
+    test "fill does not go into a function node, which keeps its Info" do
+      heap()
+      src = "async function f(){ let y = 5; return [await 1, () => y][1]() } f()"
+
+      [_, {:aw, {:return, {:call, {:member, {:array, [_, arrow]}, _, _}, _, _}, :plain}}] =
+        body(src, 4)
+
+      assert {:fn, nil, [], _, :arrow_expr, %Info{}} = arrow
+
+      {_, calls} = traced([{Async, :fill, 2}], fn -> run_script(src, 4) end)
+      assert [{_, {:return_from, filled}}] = top(calls, :fill)
+
+      assert filled ==
+               {:call, {:member, {:array, [{:val, 1.0}, arrow]}, {:num, 1.0}, false}, [], false}
+    end
+
+    test "an optional chain continues on `{:val}`, and frame mode makes no map scope" do
+      heap()
+      src = "async function f(){ let o = {a: 2}; let k = 'a'; return o?.[await k] } f()"
+
+      {_, calls} =
+        traced([{Async, :cev_await, 4}, {Interp, :new_scope, 1}], fn ->
+          run_script(src, 4)
+        end)
+
+      assert Enum.any?(calls_of(calls, :cev_await), fn {[node | _], _} ->
+               match?(
+                 {:chain, {:member, {:val, {:obj, _}}, {:await, {:slot, 0, 7, "k"}}, false}},
+                 node
+               )
+             end)
+
+      refute Enum.any?(calls_of(calls, :cev_await), fn {[node | _], _} ->
+               holds?(node, &match?({:id, "\0o" <> _}, &1))
+             end)
+
+      # The top-level script makes no map scope either, so every call would be a fault.
+      assert calls_of(calls, :new_scope) == []
+    end
+  end
+
+  # ── cexec and has_await? (design 2.4, unit test 5) ─────────
+
+  describe "cexec and has_await?" do
+    @plain "async function f(){ var a = 1; a = a + 1; await 0; a = 3; return a } f()"
+
+    test "{:aw} goes to cs, and a plain statement goes to sync_stmt" do
+      heap()
+      [s1, s2, {:aw, s3} = aw, s4, s5] = body(@plain, 4)
+
+      {_, calls} =
+        traced(
+          [{Async, :cs, 5}, {Async, :sync_stmt, 5}, {Async, :has_await?, 1}],
+          fn -> run_script(@plain, 4) end
+        )
+
+      cs = for {[s | _], _} <- calls_of(calls, :cs), do: s
+      sync = for {[s | _], _} <- calls_of(calls, :sync_stmt), do: s
+      assert s3 in cs
+      refute aw in cs
+      for s <- [s1, s2, s4, s5], do: refute(s in cs)
+      for s <- [s1, s2, s4, s5], do: assert(s in sync)
+
+      # Check mode asserts the mark with a `has_await?` walk (design C3), so only the
+      # normal build is free of the walk.
+      unless @check do
+        walked = for {[t], _} <- calls_of(calls, :has_await?), do: t
+        for s <- [s1, s2, s4, s5], do: refute(s in walked)
+      end
+    end
+
+    test "at :off the old path still walks each statement (the trace sees the calls)" do
+      heap()
+      [s1 | _] = body(@plain, :off)
+
+      {_, calls} = traced([{Async, :has_await?, 1}], fn -> run_script(@plain, :off) end)
+      assert [s1] in for({args, _} <- calls_of(calls, :has_await?), do: args)
+    end
+  end
+
+  # ── loops and async generators (unit tests 6 and 9) ─────────
+
+  describe "the CPS for loop and the contexts of an async generator" do
+    test "for (let) in an awaiting body copies the frame in each round, as :off copies a map" do
+      for level <- [:off, 4] do
+        gid = heap()
+
+        src =
+          "var out; async function f(){ var g; for (let i = 0; i < 3; i++) { if (i == 1) g = () => i; await 0 } return g() } f().then(v => { out = v })"
+
+        {_, calls} = traced([{Interp, :copy_scope, 2}], fn -> run_script(src, level) end)
+        # One copy before the first round and one after each round (design 3).
+        assert length(calls_of(calls, :copy_scope)) == 4, "level #{level}"
+        assert Interp.lookup_scoped(gid, "out") == {:ok, 1.0}
+
+        if level == 4 do
+          for {[src_frame, _], _} <- calls_of(calls, :copy_scope),
+              do: assert(is_tuple(:erlang.get(src_frame)))
+        end
+      end
+    end
+
+    test "the contexts of `ag_yield` and of the return carry the frame (design 1.3)" do
+      gid = heap()
+      run_script("var out = []; async function* ag(){ yield 1; return 2 } var it = ag()", 4)
+      {:obj, oid} = global!(gid, "it")
+      %{frame: fid} = Interp.deref(oid).agen
+      assert is_integer(fid)
+
+      {_, calls} =
+        traced([{Async, :await_value, 3}], fn ->
+          run_script(
+            "it.next().then(v => out.push(v.value)); it.next().then(v => out.push(v.value))",
+            4
+          )
+        end)
+
+      ctxs = for {[_v, ctx, _k], _} <- calls_of(calls, :await_value), do: ctx
+      # One await of the yielded value (S7) and one of the returned value (S11).
+      assert length(ctxs) == 2
+      for ctx <- ctxs, do: assert(Map.get(ctx, :frame) == fid)
+      assert {:ok, out} = Interp.lookup_scoped(gid, "out")
+      assert Interp.array_list(out) == [1.0, 2.0]
+    end
+  end
+
+  defp global!(gid, name) do
+    assert {:ok, v} = Interp.lookup_scoped(gid, name), name
+    v
+  end
+
+  # ── flags (design 5.1, unit test 12) ───────────────────────
+
+  describe "the level flags accept 4" do
+    # Runs `fun` with the OS variable `var` at `value` and puts the old value back.
+    defp with_env(var, value, fun) do
+      old = System.get_env(var)
+      System.put_env(var, value)
+
+      try do
+        fun.()
+      after
+        if old, do: System.put_env(var, old), else: System.delete_env(var)
+      end
+    end
+
+    test "JS_RESOLVE=4 in config/test.exs" do
+      for {v, level} <- [{"3", 3}, {"4", 4}] do
+        config = with_env("JS_RESOLVE", v, fn -> Config.Reader.read!("config/test.exs") end)
+        assert get_in(config, [:browser, :js_resolve]) == level
+      end
+
+      assert_raise(RuntimeError, ~r/JS_RESOLVE takes/, fn ->
+        with_env("JS_RESOLVE", "5", fn -> Config.Reader.read!("config/test.exs") end)
+      end)
+    end
+
+    # The task reads `--resolve` before it looks for test262, so a missing directory stops
+    # it after the level is set and before any test runs.
+    test "--resolve 4 in mix js.test262" do
+      old = Application.get_env(:browser, :js_resolve)
+
+      try do
+        assert_raise(Mix.Error, ~r/test262 is not at/, fn ->
+          Mix.Tasks.Js.Test262.run(["--resolve", "4", "--dir", "/nonexistent/test262"])
+        end)
+
+        assert Application.get_env(:browser, :js_resolve) == 4
+
+        assert_raise(Mix.Error, ~r/--resolve takes/, fn ->
+          Mix.Tasks.Js.Test262.run(["--resolve", "5", "--dir", "/nonexistent/test262"])
+        end)
+      after
+        Application.put_env(:browser, :js_resolve, old)
+      end
+    end
+
+    # The bench script runs its programs when it is loaded, so the test evaluates only the
+    # expression that reads `RESOLVE`.
+    test "RESOLVE=4 in bench/js_runtime.exs" do
+      ast = Code.string_to_quoted!(File.read!("bench/js_runtime.exs"))
+
+      {_, found} =
+        Macro.prewalk(ast, nil, fn
+          {:case, _,
+           [{{:., _, [{:__aliases__, _, [:System]}, :get_env]}, _, ["RESOLVE" | _]} | _]} =
+              node,
+          nil ->
+            {node, node}
+
+          node, acc ->
+            {node, acc}
+        end)
+
+      assert found != nil, "no case on RESOLVE in bench/js_runtime.exs"
+
+      for {v, level} <- [{"off", :off}, {"3", 3}, {"4", 4}] do
+        assert {^level, _} = with_env("RESOLVE", v, fn -> Code.eval_quoted(found) end)
+      end
     end
   end
 end
