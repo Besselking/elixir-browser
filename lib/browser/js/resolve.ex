@@ -92,6 +92,13 @@ defmodule Browser.JS.Resolve do
   - A direct `eval` or a `with` inside a parameter list, also inside a
     function in a default value, makes the function of that list dynamic. A
     by-name walk cannot tell a parameter from a body `var` of the same name.
+
+  Step 2e (level 4 functions on frames) adds no rule. At level 4 the async
+  functions, async arrows, generators and async generators run on frames, and
+  `Browser.JS.Async` runs their bodies in frame mode. Every level from 1 to 4
+  runs. R2 stays active at level 4, because the rules of step 2d apply from
+  level 3 on, so a level 4 term differs from a level 3 term only inside these
+  functions and the closures in them.
   """
 
   alias Browser.JS.Interp

@@ -73,6 +73,14 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_steps, max_steps)
     :erlang.put(:js_depth, 0)
     :erlang.put(:js_last, :undefined)
+
+    # A fresh heap gives out the ids from 0 again, so the marks of `frame_done/2` from an
+    # earlier heap in this process must go: check mode would read them as the marks of the
+    # new frames with the same ids.
+    if @check do
+      for {{:js_cps_done, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+    end
+
     # (the closure count starts here and only goes up, see `make_fn/3`)
     :erlang.put(:js_fns, 0)
   end
@@ -483,6 +491,9 @@ defmodule Browser.JS.Interp do
       tuple_size(f) != info.size ->
         check_fail("frame of #{check_name(info)} has size #{tuple_size(f)}, not #{info.size}")
 
+      mode == :suspend ->
+        check_suspend(f, info, id)
+
       info.level not in [1, 2, 3] ->
         check_fail("frame of #{check_name(info)} at level #{inspect(info.level)}")
 
@@ -507,6 +518,30 @@ defmodule Browser.JS.Interp do
       true ->
         check_argmap(info)
         Enum.each(info.hidden, &check_hidden(&1, f, info, {id, mode}))
+    end
+  end
+
+  # A frame from `enter_frame/4` (step 2e): a level 4 async function or generator, which
+  # frees by the closure counter, makes no tail calls and is never a constructor. Its hidden
+  # slots hold the values of a plain call.
+  defp check_suspend(f, info, id) do
+    cond do
+      info.level != 4 or not (info.async? or info.generator?) ->
+        check_fail("a suspendable frame of #{check_name(info)} at level #{inspect(info.level)}")
+
+      info.free != :counter ->
+        check_fail("a suspendable frame of #{check_name(info)} frees #{info.free}")
+
+      info.tail_sites != 0 or :ctor_fn in info.hidden ->
+        check_fail("a suspendable frame of #{check_name(info)} has tail sites or :ctor_fn")
+
+      :new_target in info.hidden and
+          :erlang.element(hidden_index(info, :new_target), f) != :undefined ->
+        check_fail("a suspendable frame of #{check_name(info)} has a new.target")
+
+      true ->
+        check_argmap(info)
+        Enum.each(info.hidden, &check_hidden(&1, f, info, {id, :suspend}))
     end
   end
 
@@ -564,12 +599,13 @@ defmodule Browser.JS.Interp do
   # is not an arrow: such a function owns both, and the resolver gives it the slot when
   # any code inside it reads the binding by name (step 2d). `:home` and `:ctor_fn` may
   # pass, as on the old path, whose call scopes have them only for methods and class
-  # constructors. A level 1 or 2 frame is not checked: no code inside it reads the
+  # constructors. A level 4 frame (step 2e) gets the same check, because its hidden slots
+  # follow the same rules. A level 1 or 2 frame is not checked: no code inside it reads the
   # bindings by name, and the unit tests of the walkers build such frames by hand under
   # map scopes that do not have them.
   defp check_hidden_presence(f, name) when name in [:this, :new_target] do
     case :erlang.element(2, f) do
-      %Info{kind: k, level: 3} = info when k not in [:arrow, :arrow_expr] ->
+      %Info{kind: k, level: l} = info when l in [3, 4] and k not in [:arrow, :arrow_expr] ->
         check_fail("a by-name #{inspect(name)} passes the frame of #{check_name(info)}")
 
       _ ->
@@ -648,6 +684,11 @@ defmodule Browser.JS.Interp do
 
     :ok
   end
+
+  @doc false
+  # A failed assertion of the CPS evaluator in frame mode (step 2e). `Browser.JS.Async`
+  # calls it only from code that its own check flag guards.
+  def check_cps(msg), do: check_fail(msg)
 
   # A block frame is made only inside a rewritten function: its `env` is a live frame, its
   # template fills its size, and the function around it frees by the closure counter.
@@ -856,7 +897,8 @@ defmodule Browser.JS.Interp do
   # (block names are not: only slot forms reach those). `:strict` is not a slot, the
   # `Info` answers it. Anything else goes on to the parent. `id` is the frame's own id: a
   # hit on an arguments object that is not built yet builds it into the frame (step 2d).
-  # This serves eval code and the old-path functions (level 4) inside a level 3 function.
+  # This serves eval code and the functions on the old path inside a frame: a dynamic
+  # function, and an async function or a generator when the level is below 4.
   defp lookup_frame(id, f, name) do
     case :erlang.element(2, f) do
       %Info{slots: slots, strict: strict} ->
@@ -2732,7 +2774,7 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
-        Browser.JS.Async.call_closure(with_hoist(id, c), this, args)
+        Browser.JS.Async.call_closure(id, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
@@ -3324,6 +3366,112 @@ defmodule Browser.JS.Interp do
   def run_class_frame(id, c, this, args, nt, mode) when mode in [:new, :ctor],
     do: run_frame(id, c, this, args, nt, mode)
 
+  @doc false
+  # The frame of an async function, an async arrow, a generator or an async generator (step
+  # 2e). It is built as `run_frame/6` builds a frame, but the body does not run here: the CPS
+  # evaluator in `Browser.JS.Async` runs it later and can suspend it. So nothing here frees
+  # the frame, except a throw from a parameter, after which no body code can run.
+  # `frame_done/2` frees it when the body has ended. The entry does not push `:js_stack`,
+  # and `Async.call_closure/4` keeps its own `:js_depth` increase, as the old path does.
+  # Returns the frame id and the closure count at entry.
+  def enter_frame(id, c, this, args) do
+    info = c.info
+
+    t =
+      List.to_tuple([
+        c.scope,
+        info,
+        nil,
+        :erlang.get(:js_pos),
+        c.root | frame_slots(c, id, this, args, :undefined)
+      ])
+
+    if @check, do: check_frame(t, info, id, :suspend)
+    frame = alloc(t)
+    # The count is read before the defaults run, because a default can make a closure.
+    fns = :erlang.get(:js_fns)
+
+    try do
+      if info.params != :plain, do: bind_params_list(c.params, args, frame)
+      enter_body(frame, info, id)
+      if @check, do: check_hoisted(frame, info)
+    catch
+      k, e ->
+        frame_done(frame, fns)
+        :erlang.raise(k, e, __STACKTRACE__)
+    end
+
+    {frame, fns}
+  end
+
+  @doc false
+  # The body of a frame from `enter_frame/4` has ended, so no continuation of it can run
+  # again, and only a closure can still hold the frame. The frame is freed when the
+  # function makes no closures, or when no closure was made since the entry (the counter
+  # rule of step 2c). In all other cases the collector takes it later, as it takes a call
+  # scope of the old path.
+  def frame_done(frame, fns) do
+    if @check, do: check_done_once(frame)
+    info = :erlang.element(2, :erlang.get(frame))
+
+    if not info.makes_closures or :erlang.get(:js_fns) == fns,
+      do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
+    :ok
+  end
+
+  @doc false
+  # The scope of a statement in a CPS body in frame mode. A frameless scope (or `nil`) resets
+  # its TDZ slots and makes its functions in `env`, and the statement runs in `env`. A
+  # framed scope gets a block frame, which the statement then uses. The CPS evaluator never
+  # frees a block frame early, because each abrupt continuation would then need cleanup
+  # code; the collector takes it, as it takes the CPS map scopes of the old path.
+  def cps_enter(env, sc) when frameless(sc) do
+    enter_frameless(env, sc)
+    env
+  end
+
+  def cps_enter(env, sc), do: enter_scope(env, sc)
+
+  @doc false
+  # The binding of a `using` declaration in a CPS body in frame mode: the slot of the frame
+  # takes the value, because a frame cannot take a new name (`declare/4`).
+  def using_bind(env, {:slot, 0, i, _name}, v), do: slot_put(env, i, v)
+
+  @doc false
+  # Check mode: a CPS body resumes on a frame that is live and whose body has not ended.
+  # `nil` is the frame of an old-path body or of a small context with no frame.
+  def check_resume(nil), do: :ok
+
+  def check_resume(frame) do
+    if @check do
+      check_live(frame)
+
+      if :erlang.get({:js_cps_done, frame}) == true,
+        do: check_fail("a resume after frame_done of #{check_name(frame_rec(frame))}")
+    end
+
+    :ok
+  end
+
+  # The record of a frame gives its name to a check-mode message. A tombstone has no
+  # record, so it gives a placeholder.
+  defp frame_rec(frame) do
+    case :erlang.get(frame) do
+      f when is_tuple(f) and tuple_size(f) >= 5 -> :erlang.element(2, f)
+      _ -> %{kind: :unknown}
+    end
+  end
+
+  # Check mode: `frame_done/2` runs once for each frame. The process key stays after the
+  # free, so a second call fails also when the first call kept the frame.
+  defp check_done_once(frame) do
+    check_live(frame)
+
+    if :erlang.put({:js_cps_done, frame}, true) == true,
+      do: check_fail("a second frame_done of #{check_name(frame_rec(frame))}")
+  end
+
   # Frees a function frame on return. A frame that built a mapped arguments object first
   # detaches the object: it takes away `mapped` and `map_scope`, because `put` tests the
   # first and `sync_param` reads the second. Nobody can see the detach. Without a closure
@@ -3621,15 +3769,6 @@ defmodule Browser.JS.Interp do
     {src, info} = Browser.JS.Resolve.unpack(src)
     rewritten? = match?(%Info{rewritten: true}, info)
     named? = named? and is_binary(name) and mode == false
-
-    # Functions of levels 1 to 3 can run on a frame now. A rewritten function of a higher
-    # level needs suspended frames (step 2e), so it must stop here with a clear error.
-    if rewritten? and info.level > 3,
-      do:
-        raise(
-          ArgumentError,
-          "resolve level #{info.level} functions cannot run yet; use :off, :info, 1, 2 or 3"
-        )
 
     # (a self slot exists only for a named function expression; a parameter or a
     # declaration of the same name shadows the self name, which then has no slot)
@@ -4708,6 +4847,12 @@ defmodule Browser.JS.Interp do
     no_tail(fn -> exec(body, scope, []) end)
   end
 
+  # The CPS evaluator takes every statement that is marked `{:aw}`, so in check mode the
+  # sync evaluator fails when it sees the mark.
+  if @check do
+    defp exec({:aw, s}, _, _), do: check_fail("the sync evaluator meets {:aw, #{elem(s, 0)}}")
+  end
+
   defp exec({:fundecl, _, _}, _, _), do: :ok
   defp exec({:empty}, _, _), do: :ok
   defp exec({:import, _, _}, _, _), do: :ok
@@ -5665,7 +5810,21 @@ defmodule Browser.JS.Interp do
 
   def ev({:async, fun}, env), do: make_fn({:async, fun}, env)
   def ev({:gen, fun}, env), do: make_fn({:gen, fun}, env)
-  def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
+
+  if @check do
+    # A frame runs its awaits in the CPS evaluator. The one legal sync await in a frame is
+    # `f?.(await x)`, which `Browser.JS.Async` marks with the process key around it.
+    def ev({:await, e}, env) do
+      if is_integer(env) and is_tuple(:erlang.get(env)) and
+           Process.get(:js_cps_sync_await) != true,
+         do: check_fail("a sync await in a frame")
+
+      Browser.JS.Promise.await(ev(e, env))
+    end
+  else
+    def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
+  end
+
   def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v

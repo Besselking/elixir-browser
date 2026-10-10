@@ -102,7 +102,8 @@ defmodule Browser.JS.GC do
   # counts only when it is reached through an edge that holds a scope: the `scope` and
   # `home` of a closure, the `parent` and `env` of a map, the `map_scope` of a mapped
   # arguments object (a frame from step 2d, which must be detached before its frame is
-  # freed), and the parent of a frame. The
+  # freed), the `frame` of a CPS context or a generator record (step 2e, which must not
+  # outlive `Browser.JS.Interp.frame_done/2`), and the parent of a frame. The
   # conservative walk reads every integer as an id, so an array length or a line number
   # that equals the id of a tombstone must not count.
   def dangling(extra) do
@@ -166,7 +167,7 @@ defmodule Browser.JS.GC do
             spush(v, acc, marks, false)
 
           k, v, acc ->
-            spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env, :map_scope])
+            spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env, :map_scope, :frame])
         end,
         rest,
         t

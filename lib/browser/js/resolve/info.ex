@@ -86,7 +86,7 @@ defmodule Browser.JS.Resolve.Info do
   - `args_var`: the body declares `var arguments` and no function of that name.
   - `makes_closures`: a function or class node is inside this function.
   - `has_await`: a statement of the body contains `await`, `yield` or
-    `for await`.
+    `for await`. Such a statement is marked `{:aw, stmt}` (step 2e).
   - `captured`: the slots that an inner function or an instance field
     initializer reads or writes, the hidden slots included: `super()` in an
     arrow captures `:ctor_fn`, `:new_target` and `:this`, `super.x` captures
@@ -95,6 +95,10 @@ defmodule Browser.JS.Resolve.Info do
     `:counter` when the closure counter decides. The interpreter reads it from
     step 2c: a `:counter` frame is erased on return only when no closure was
     made during the call, because only a closure can hold the frame's id.
+    A level 4 function uses `:counter`. Its frame lives across each suspension,
+    and `Browser.JS.Interp.frame_done/2` erases it once, when the body has ended:
+    when `makes_closures` is false, or when the counter did not move since the
+    entry. In all other cases the collector takes the frame.
   - `tail_sites`: the number of `return` statements marked as tail calls.
   """
 
