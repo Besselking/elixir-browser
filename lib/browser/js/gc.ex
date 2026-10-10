@@ -111,6 +111,10 @@ defmodule Browser.JS.GC do
           {{:js_hoist, _}, _}, roots -> roots
           {:js_memo, _}, roots -> roots
           {:js_heap_n, _}, roots -> roots
+          # (the parser's source table holds token offsets; an offset that equals the id of
+          # an unreachable closure would make that garbage look live)
+          {:js_srctab, _}, roots -> roots
+          {:lex_table, _}, roots -> roots
           {_, v}, roots -> [v | roots]
         end,
         [extra],
