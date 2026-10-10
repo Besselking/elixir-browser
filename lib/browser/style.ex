@@ -241,16 +241,29 @@ defmodule Browser.Style do
           {origin, css, base, scope} -> {origin, css, base, scope}
         end
 
-      for rule <- CSS.parse(css),
-          decls = rule.decls |> absolutize_urls(base) |> relevant(),
-          decls != [],
-          do:
-            %{rule | decls: decls}
-            |> Map.put(:origin, origin)
-            |> Map.put(:scope, scope)
-            |> Map.put(:structural, CSS.structural?(rule.selector))
+      origin |> parse_sheet(css, base) |> scope_rules(scope)
     end)
   end
+
+  @doc """
+  The rules of one style sheet (`css`, at the address `base`), not yet for a tree: `scope_rules/2`
+  gives them one. A page that has the same sheet in each of a hundred copies of a component parses
+  it once.
+  """
+  def parse_sheet(origin, css, base) do
+    for rule <- CSS.parse(css),
+        decls = rule.decls |> absolutize_urls(base) |> relevant(),
+        decls != [],
+        do:
+          %{rule | decls: decls}
+          |> Map.put(:origin, origin)
+          |> Map.put(:scope, nil)
+          |> Map.put(:structural, CSS.structural?(rule.selector))
+  end
+
+  @doc "The rules of a sheet that is in the tree `scope` (a shadow tree or a frame; nil for the page)."
+  def scope_rules(rules, nil), do: rules
+  def scope_rules(rules, scope), do: Enum.map(rules, &Map.put(&1, :scope, scope))
 
   # url() in a stylesheet is relative to the stylesheet, not to the page
   defp absolutize_urls(decls, nil), do: decls

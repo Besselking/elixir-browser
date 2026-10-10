@@ -435,13 +435,13 @@ defmodule Browser.Page do
         {key, if(scope == nil, do: prefetched(ref, at), else: ref), at}
       end)
 
-    parsed =
+    # (fetched in parallel; then each different text is parsed once, however many trees have it)
+    fetched =
       jobs
       |> Task.async_stream(
         fn {key, ref, at} ->
           {_, scope, _} = key
-          sheets = ref |> sheet(at) |> with_imports(0)
-          {key, Style.parse_sheets(for {css, from} <- sheets, do: {:author, css, from, scope})}
+          {key, scope, ref |> sheet(at) |> with_imports(0)}
         end,
         max_concurrency: 8,
         timeout: @sheet_timeout,
@@ -449,9 +449,32 @@ defmodule Browser.Page do
         ordered: true
       )
       |> Enum.zip(jobs)
-      |> Enum.reduce(cache, fn
-        {{:ok, {key, rules}}, _}, cache -> Map.put(cache, key, rules)
-        {_, {key, _, _}}, cache -> Map.put(cache, key, [])
+      |> Enum.map(fn
+        {{:ok, got}, _} -> got
+        {_, {key, _, _}} -> {key, nil, []}
+      end)
+
+    texts =
+      fetched
+      |> Enum.flat_map(fn {_, _, sheets} -> sheets end)
+      |> Enum.uniq()
+      |> Task.async_stream(
+        fn {css, from} -> {{css, from}, Style.parse_sheet(:author, css, from)} end,
+        max_concurrency: 8,
+        timeout: @sheet_timeout,
+        on_timeout: :kill_task,
+        ordered: true
+      )
+      |> Enum.flat_map(fn
+        {:ok, parsed} -> [parsed]
+        _ -> []
+      end)
+      |> Map.new()
+
+    parsed =
+      Enum.reduce(fetched, cache, fn {key, scope, sheets}, cache ->
+        rules = Enum.flat_map(sheets, &(texts |> Map.get(&1, []) |> Style.scope_rules(scope)))
+        Map.put(cache, key, rules)
       end)
 
     rules = Enum.flat_map([:ua | refs], &Map.get(parsed, &1, []))
