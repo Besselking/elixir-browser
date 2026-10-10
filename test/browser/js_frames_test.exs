@@ -1,8 +1,11 @@
 defmodule Browser.JS.FramesTest do
-  # Step 2b: a function that the resolver rewrote at level 1 runs on a tuple frame. The
-  # first part builds frames by hand in the test process and calls the evaluator on each
-  # new node form. The second part runs the semantic table of the design at `:off` and at
-  # level 1 and compares the results. The design is notes/js-frames-2b-design.md.
+  # Step 2b: a function that the resolver rewrote at level 1 runs on a tuple frame. Step
+  # 2c: a level 2 function, which makes closures, runs on a frame too, and a scope whose
+  # names a closure captures gets a block frame. The first part builds frames by hand in
+  # the test process and calls the evaluator on each new node form. The second part runs
+  # the semantic tables of the designs at `:off`, at level 1 and at level 2 and compares
+  # the results. The designs are notes/js-frames-2b-design.md and
+  # notes/js-frames-2c-design.md.
   use ExUnit.Case, async: true
 
   alias Browser.JS
@@ -127,7 +130,7 @@ defmodule Browser.JS.FramesTest do
       assert tuple_size(elem(peeked(), 1)) == info(node).size
 
       # The frame is erased when the call returns.
-      assert :erlang.get(fid) == :undefined
+      assert freed?(fid)
 
       # Extra arguments are dropped.
       assert Interp.call(f, :undefined, [1.0, 2.0, 3.0]) == 0.0
@@ -402,7 +405,10 @@ defmodule Browser.JS.FramesTest do
 
     test "ev_named gives a function the slot's name" do
       gid = heap()
-      fid = vars_frame(gid)
+      # A closure can only be made in a frame that frees by the closure count (check mode
+      # fails a closure in a leaf), so the record of the hand-built frame is made level 2.
+      i = info(leaf(@vars, "f"))
+      fid = frame(gid, %{i | level: 2, free: :counter}, [1.0, 2.0, :undefined, :tdz, :tdz])
       f = Interp.ev_named({:fn, nil, [], [], false, nil}, fid, {:slot, 0, 6, "a"})
       assert Interp.get(f, "name") == "a"
       g = Interp.ev_named({:fn, nil, [], [], false, nil}, fid, {:gref, "gg"})
@@ -732,18 +738,18 @@ defmodule Browser.JS.FramesTest do
 
       assert Interp.call(ok, :undefined, []) == 1.0
       {fid, _} = peeked()
-      assert :erlang.get(fid) == :undefined
+      assert freed?(fid)
 
       assert catch_throw(Interp.call(bad, :undefined, [])) == {:js_error, 1.0}
       {fid, _} = peeked()
-      assert :erlang.get(fid) == :undefined
+      assert freed?(fid)
       assert :erlang.get(:js_depth) == depth
       assert Process.get(:js_stack, []) == stack
 
       :erlang.put(:js_steps, 100)
       assert catch_throw(Interp.call(spin, :undefined, [])) == :js_limit
       {fid, _} = peeked()
-      assert :erlang.get(fid) == :undefined
+      assert freed?(fid)
       assert :erlang.get(:js_depth) == depth
     end
 
@@ -799,11 +805,618 @@ defmodule Browser.JS.FramesTest do
     end
   end
 
+  # ── step 2c: level 2 functions, block frames, loop frames ──
+
+  # The tests below follow section 6.1 of notes/js-frames-2c-design.md. A level 2 function
+  # makes closures, so its frame and its block frames can live after the statement or the
+  # call that made them. The counter `:js_fns` decides if a frame is freed.
+
+  # The first function node named `name` in `src`, resolved at level 2.
+  defp fn2(src, name) do
+    assert {:ok, tree} = Parser.parse(src, resolve: 2), src
+    node = find(tree, &match?({:fn, ^name, _, _, _, %Info{}}, &1))
+    assert node != nil, "no function #{name} in #{inspect(tree)}"
+    node
+  end
+
+  # The body statements and the record of a function node.
+  defp body_of({:fn, _, _, body, _, %Info{} = i}), do: {body, i}
+
+  # True when the heap entry `id` is freed. Without check mode a free erases the entry. In
+  # check mode it leaves a tombstone, so that a later read can name the frame (design 5).
+  defp freed?(id) do
+    case :erlang.get(id) do
+      :undefined -> true
+      {:js_freed, _} -> true
+      _ -> false
+    end
+  end
+
+  # A frame with a call position in its header, so a test can see that a block frame
+  # copies the header of its parent.
+  defp frame_at(parent, info, pos, slots) do
+    Interp.alloc(List.to_tuple([parent, info, nil, pos, Interp.global() | slots]))
+  end
+
+  # A block frame of `sc` under the frame `parent`, with the header copied from `parent`
+  # as `enter_scope` copies it (design 3.2).
+  defp block_frame(parent, %Scope{} = sc, slots) do
+    p = :erlang.get(parent)
+
+    Interp.alloc(List.to_tuple([parent, sc, elem(p, 2), elem(p, 3), elem(p, 4) | slots]))
+  end
+
+  # The function objects in the JS array `arr`.
+  defp fns_in(arr), do: Interp.array_list(arr)
+
+  describe "level 2: the body entry (enter_body)" do
+    test "the copies run before the hoist, and each closure is made on the stored frame" do
+      gid = heap()
+      install_peek(gid)
+
+      src =
+        "function f(a, g = () => a){ peek(); var a; function a(){} return [typeof a, typeof g()].join() }"
+
+      node = fn2(src, "f")
+      assert %Info{level: 2, free: :counter, copies: [{6, 8}], hoist: [{8, _}]} = info(node)
+      f = Interp.make_function(node, gid, false)
+
+      # The copy writes the parameter into slot 8 first. The hoist then puts the function
+      # there. In the other order the copy would overwrite the function with `1`.
+      assert Interp.call(f, :undefined, [1.0]) == "function,number"
+      {fid, t} = peeked()
+      assert elem(t, 5) == 1.0
+      assert Interp.typeof(elem(t, 7)) == "function"
+
+      # Both closures hop from this frame, and their root is the root in its header.
+      for fun <- [elem(t, 6), elem(t, 7)] do
+        assert closure(fun).scope == fid
+        assert closure(fun).root == elem(t, 4)
+      end
+
+      # The closures moved the counter, so the frame lives after the call.
+      refute freed?(fid)
+    end
+
+    test "the last hoist pair for a slot wins" do
+      gid = heap()
+
+      node =
+        fn2("function f(){ function g(){ return 1 } function g(){ return 2 } return g() }", "f")
+
+      assert [{6, _}, {6, _}] = info(node).hoist
+      f = Interp.make_function(node, gid, false)
+      assert Interp.call(f, :undefined, []) == 2.0
+    end
+
+    test "a hoisted function overwrites the slot of a parameter with the same name" do
+      gid = heap()
+      install_peek(gid)
+      node = fn2("function f(a){ function a(){} peek(); return typeof a }", "f")
+      assert %Info{slots: %{"a" => 6}, hoist: [{6, _}]} = info(node)
+      f = Interp.make_function(node, gid, false)
+      assert Interp.call(f, :undefined, [1.0]) == "function"
+      {_, t} = peeked()
+      assert Interp.typeof(elem(t, 5)) == "function"
+    end
+
+    test "a default sees the parameter, the body sees the copy (design 1.1, `d`)" do
+      gid = heap()
+      node = fn2("function d(a = 1, g = () => a){ var a = 5; return [a, g()].join() }", "d")
+      assert %Info{params: :exprs, copies: [{6, 8}], template: [:undefined]} = info(node)
+      d = Interp.make_function(node, gid, false)
+      assert Interp.call(d, :undefined, []) == "5,1"
+    end
+
+    test "a level 2 call that makes no closure frees its frame; one that makes one keeps it" do
+      gid = heap()
+      install_peek(gid)
+      node = fn2("function f(x){ peek(); if (x) return () => x * 2; return 2 }", "f")
+      f = Interp.make_function(node, gid, false)
+
+      assert Interp.call(f, :undefined, [0.0]) == 2.0
+      {fid, _} = peeked()
+      assert freed?(fid)
+
+      g = Interp.call(f, :undefined, [3.0])
+      {fid, _} = peeked()
+      refute freed?(fid)
+      assert closure(g).scope == fid
+      assert Interp.call(g, :undefined, []) == 6.0
+    end
+
+    test "a block in the body of a call: the closure keeps the block frame" do
+      gid = heap()
+      node = fn2("function f(){ { let x = 1; return () => x } }", "f")
+      f = Interp.make_function(node, gid, false)
+      g = Interp.call(f, :undefined, [])
+      assert Interp.call(g, :undefined, []) == 1.0
+      assert {_, %Scope{kind: :block, frame: true}, _, _, _, 1.0} = :erlang.get(closure(g).scope)
+    end
+  end
+
+  describe "level 2: block frames through exec_stmt (enter_scope, leave_scope)" do
+    @blocks "function f(){ var fs = []; { let x = 1; fs.push(() => x) } { fs.push(() => x); throw 0; let x } }"
+
+    test "a framed block: the header of env, the template, the frame kept by a closure" do
+      gid = heap()
+      {[_var, kept, thrown], i} = body_of(fn2(@blocks, "f"))
+      assert {:block, _, %Scope{frame: true, kind: :block, template: [:tdz]} = sc} = kept
+      arr = Interp.new_array([])
+      fid = frame_at(gid, i, 42, [arr])
+
+      assert Interp.exec_stmt(kept, fid) == :ok
+      [g] = fns_in(arr)
+      bid = closure(g).scope
+      # The header copies `caller_id`, `call_pos` and `root_id` from the function frame.
+      assert :erlang.get(bid) == {fid, sc, nil, 42, gid, 1.0}
+      assert Interp.call(g, :undefined, []) == 1.0
+
+      # The second block throws before its `let` runs. The frame comes from the template,
+      # so the closure sees `x` in its TDZ, and the throw does not free the frame.
+      assert catch_throw(Interp.exec_stmt(thrown, fid)) == {:js_error, 0.0}
+      [_, h] = fns_in(arr)
+      hid = closure(h).scope
+      assert hid != bid
+      refute freed?(hid)
+      assert elem(:erlang.get(hid), 5) == :tdz
+
+      assert caught(fn -> Interp.call(h, :undefined, []) end) ==
+               {"ReferenceError", @tdz_x}
+    end
+
+    test "a framed block that made no closure is freed, also after a throw" do
+      gid = heap()
+      {[_var, {:block, _, sc}, _], i} = body_of(fn2(@blocks, "f"))
+      fid = frame(gid, i, [Interp.new_array([])])
+      let_x = {:var, :let, [{{:slot, 0, 6, "x"}, {:num, 1.0}}]}
+      size = Interp.heap_size()
+
+      n = :erlang.get(:js_next)
+      assert Interp.exec_stmt({:block, [let_x], sc}, fid) == :ok
+      assert freed?(n)
+      assert Interp.heap_size() == size
+
+      n = :erlang.get(:js_next)
+
+      assert catch_throw(Interp.exec_stmt({:block, [let_x, {:throw, {:num, 1.0}}], sc}, fid)) ==
+               {:js_error, 1.0}
+
+      assert freed?(n)
+      assert Interp.heap_size() == size
+    end
+
+    test "a switch frame: the hoist runs at entry, so the frame is kept" do
+      gid = heap()
+
+      src =
+        "function f(){ switch (1) { case 0: function h(){ return 1 } case 1: let z = 2; return () => z + h() } }"
+
+      {[switch], i} = body_of(fn2(src, "f"))
+
+      assert {:switch, _, _,
+              %Scope{kind: :switch, frame: true, slots: %{"z" => 6, "h" => 7}, hoist: [{7, _}]} =
+                sc} = switch
+
+      fid = frame(gid, i, [])
+
+      assert {:return, g} = caught(fn -> Interp.exec_stmt(switch, fid) end)
+      assert Interp.call(g, :undefined, []) == 3.0
+      sid = closure(g).scope
+      assert {^fid, ^sc, _, _, ^gid, 2.0, h} = :erlang.get(sid)
+      assert Interp.typeof(h) == "function"
+      assert closure(h).scope == sid
+
+      # No case matches, but the hoist made `h`: the counter moved and the frame stays.
+      n = :erlang.get(:js_next)
+      assert Interp.exec_stmt({:switch, {:num, 5.0}, elem(switch, 2), sc}, fid) == :ok
+      refute freed?(n)
+    end
+
+    test "a catch frame holds the parameter; the handler runs in it" do
+      gid = heap()
+      src = "function f(){ try { throw 7 } catch (e) { return () => e } }"
+      {[try], i} = body_of(fn2(src, "f"))
+      assert {:try, _, _, _, nil, %Scope{kind: :catch, frame: true} = sc} = try
+      fid = frame(gid, i, [])
+
+      assert {:return, g} = caught(fn -> Interp.exec_stmt(try, fid) end)
+      assert :erlang.get(closure(g).scope) == {fid, sc, nil, nil, gid, 7.0}
+      assert Interp.call(g, :undefined, []) == 7.0
+
+      # A handler that makes no closure leaves nothing behind.
+      n = :erlang.get(:js_next)
+      size = Interp.heap_size()
+      thrower = {:block, [{:throw, {:num, 1.0}}], nil}
+      Interp.exec_stmt({:try, thrower, {:slot, 0, 6, "e"}, {:block, [], nil}, nil, sc}, fid)
+      assert freed?(n)
+      assert Interp.heap_size() == size
+    end
+  end
+
+  describe "level 2: loop frames" do
+    test "copy_scope on a frame: a new id, the same parent, the values copied" do
+      gid = heap()
+      fid = frame(gid, info(fn2("function f(){ var a }", "f")), [:undefined])
+      sc = %Scope{kind: :loop, frame: true, per_iter: true, size: 6, slots: %{"i" => 6}}
+      src = block_frame(fid, sc, [1.0])
+
+      copy = Interp.copy_scope(src, gid)
+      assert copy != src
+      assert :erlang.get(copy) == :erlang.get(src)
+      assert elem(:erlang.get(copy), 0) == fid
+
+      # The copy is a frame of its own: a write to it does not reach the source.
+      Interp.ev({:assign, "=", {:slot, 0, 6, "i"}, {:num, 2.0}}, copy)
+      assert elem(:erlang.get(src), 5) == 1.0
+    end
+
+    @for_let "function f(k){ var fs = []; for (let i = 0; i < 3; i++) if (k) fs.push(() => i); return fs }"
+
+    test "for (let): no copy and no frame left while no closure is made" do
+      gid = heap()
+      {[_, for_stmt, _], i} = body_of(fn2(@for_let, "f"))
+      assert {:for, _, _, _, _, %Scope{kind: :loop, frame: true, per_iter: true}} = for_stmt
+      fid = frame(gid, i, [false, Interp.new_array([])])
+
+      n = :erlang.get(:js_next)
+      size = Interp.heap_size()
+      assert Interp.exec_stmt(for_stmt, fid) == :ok
+      # One frame was made for the loop and freed after it.
+      assert :erlang.get(:js_next) == n + 1
+      assert freed?(n)
+      assert Interp.heap_size() == size
+    end
+
+    test "for (let): a copy per round after a closure, and the update runs in the copy" do
+      gid = heap()
+      {[_, for_stmt, _], i} = body_of(fn2(@for_let, "f"))
+      arr = Interp.new_array([])
+      fid = frame(gid, i, [true, arr])
+
+      n = :erlang.get(:js_next)
+      size = Interp.heap_size()
+      assert Interp.exec_stmt(for_stmt, fid) == :ok
+
+      # The loop frame, three closures, and a copy after each round in which the counter
+      # moved: three copies (the last one is made before the test that ends the loop, as
+      # `:off` makes it). The init made no closure, so the first round runs in the loop
+      # frame itself.
+      assert :erlang.get(:js_next) == n + 7
+      assert Interp.heap_size() == size + 7
+
+      fs = fns_in(arr)
+      assert Enum.map(fs, &Interp.call(&1, :undefined, [])) == [0.0, 1.0, 2.0]
+      scopes = Enum.map(fs, &closure(&1).scope)
+      assert hd(scopes) == n
+      assert length(Enum.uniq(scopes)) == 3
+      for s <- scopes, do: assert(elem(:erlang.get(s), 0) == fid)
+    end
+
+    @for_of "function f(xs, c){ var fs = []; for (const k of xs) if (c) fs.push(() => k); return fs }"
+
+    test "for-of: the item frame is renewed in place while no closure is made" do
+      gid = heap()
+      {[_, for_of, _], i} = body_of(fn2(@for_of, "f"))
+      assert {:forof, :const, _, _, _, %Scope{kind: :each, frame: true, per_iter: false}} = for_of
+      xs = Interp.new_array(["a", "b", "c"])
+      fid = frame(gid, i, [xs, false, Interp.new_array([])])
+
+      n = :erlang.get(:js_next)
+      size = Interp.heap_size()
+      assert Interp.exec_stmt(for_of, fid) == :ok
+      # The head frame serves every item, and it is freed at the end.
+      assert :erlang.get(:js_next) == n + 1
+      assert freed?(n)
+      assert Interp.heap_size() == size
+    end
+
+    test "for-of: a new item frame after a closure was made" do
+      gid = heap()
+      {[_, for_of, _], i} = body_of(fn2(@for_of, "f"))
+      arr = Interp.new_array([])
+      fid = frame(gid, i, [Interp.new_array(["a", "b", "c"]), true, arr])
+
+      n = :erlang.get(:js_next)
+      assert Interp.exec_stmt(for_of, fid) == :ok
+
+      # The head frame takes the first item; each later item gets a new frame because the
+      # closure of the round before moved the counter: 1 + 3 closures + 2 frames.
+      assert :erlang.get(:js_next) == n + 6
+
+      fs = fns_in(arr)
+      assert Enum.map(fs, &Interp.call(&1, :undefined, [])) == ["a", "b", "c"]
+      scopes = Enum.map(fs, &closure(&1).scope)
+      assert hd(scopes) == n
+      assert length(Enum.uniq(scopes)) == 3
+      for s <- scopes, do: assert(elem(:erlang.get(s), 0) == fid)
+    end
+
+    test "for-of over an iterator (proto_loop with a frame per item)" do
+      gid = heap()
+      {[_, for_of, _], i} = body_of(fn2(@for_of, "f"))
+      run_script("var S = new Set(['a', 'b', 'c'])")
+      {:ok, set} = Interp.lookup_scoped(gid, "S")
+
+      arr = Interp.new_array([])
+      fid = frame(gid, i, [set, true, arr])
+      n = :erlang.get(:js_next)
+      assert Interp.exec_stmt(for_of, fid) == :ok
+      fs = fns_in(arr)
+      assert Enum.map(fs, &Interp.call(&1, :undefined, [])) == ["a", "b", "c"]
+      scopes = Enum.map(fs, &closure(&1).scope)
+      assert hd(scopes) == n
+      assert length(Enum.uniq(scopes)) == 3
+
+      # Without a closure the head frame is freed.
+      fid = frame(gid, i, [set, false, Interp.new_array([])])
+      n = :erlang.get(:js_next)
+      assert Interp.exec_stmt(for_of, fid) == :ok
+      assert freed?(n)
+    end
+
+    test "for-of: a closure made by the object expression keeps the head frame in its TDZ" do
+      gid = heap()
+      src = "function f(){ for (const k of [() => k]) k() }"
+      {[for_of], i} = body_of(fn2(src, "f"))
+      fid = frame(gid, i, [])
+
+      assert caught(fn -> Interp.exec_stmt(for_of, fid) end) ==
+               {"ReferenceError", "Cannot access 'k' before initialization"}
+    end
+  end
+
+  describe "level 2: the by-name walkers on a block frame" do
+    # A framed block that also holds the slot of a frameless block inside it: `y` at 8 is
+    # in `kinds` but not in `slots` (design 3.1).
+    @sc %Scope{
+      kind: :block,
+      frame: true,
+      size: 8,
+      slots: %{"x" => 6, "c" => 7},
+      kinds: %{6 => :let, 7 => :const, 8 => :let},
+      template: [:tdz, :tdz, :tdz]
+    }
+
+    test "kind_at: assign_frame reads the kinds of a Scope and of an Info" do
+      gid = heap()
+      fid = vars_frame(gid)
+      bid = block_frame(fid, @sc, [:tdz, 1.0, 3.0])
+
+      assert caught(fn -> Interp.assign_scoped(bid, "x", 5.0) end) == {"ReferenceError", @tdz_x}
+      :erlang.put(bid, :erlang.setelement(6, :erlang.get(bid), 0.0))
+      Interp.assign_scoped(bid, "x", 5.0)
+      assert elem(:erlang.get(bid), 5) == 5.0
+
+      assert caught(fn -> Interp.assign_scoped(bid, "c", 2.0) end) == {"TypeError", @const_msg}
+      assert elem(:erlang.get(bid), 6) == 1.0
+
+      # A name that the block does not hold goes on to the function frame, whose kinds
+      # are a tuple.
+      Interp.assign_scoped(bid, "a", 7.0)
+      assert slot(fid, 6) == 7.0
+      :erlang.put(fid, :erlang.setelement(10, :erlang.get(fid), 1.0))
+      assert caught(fn -> Interp.assign_scoped(bid, "e", 2.0) end) == {"TypeError", @const_msg}
+    end
+
+    test "lookup_frame: block names from `slots`, the rest from the parent" do
+      gid = heap()
+      fid = vars_frame(gid)
+      bid = block_frame(fid, @sc, [5.0, 1.0, 3.0])
+
+      assert Interp.lookup_scoped(bid, "x") == {:ok, 5.0}
+      assert Interp.lookup_scoped(bid, "a") == {:ok, 1.0}
+      assert Interp.lookup_scoped(bid, "nope") == :error
+      assert Interp.ev({:id, "c"}, bid) == 1.0
+    end
+
+    test "slot forms on a block frame (check_slot reads the Scope kinds in check mode)" do
+      gid = heap()
+      fid = vars_frame(gid)
+      bid = block_frame(fid, @sc, [5.0, 1.0, 3.0])
+
+      assert Interp.ev({:slot, 0, 6, "x"}, bid) == 5.0
+      assert Interp.ev({:slot, 0, 8, "y"}, bid) == 3.0
+      assert Interp.ev({:assign, "=", {:slot, 0, 8, "y"}, {:num, 4.0}}, bid) == 4.0
+      assert Interp.ev({:slot, 1, 6, "a"}, bid) == 1.0
+
+      assert caught(fn -> Interp.ev({:assign, "=", {:cslot, 0, 7, "c"}, {:num, 2.0}}, bid) end) ==
+               {"TypeError", @const_msg}
+    end
+
+    test ":strict through a block frame" do
+      gid = heap()
+      strict = frame(gid, info(fn2("function f(){ 'use strict'; return () => 1 }", "f")), [])
+      sloppy = frame(gid, info(fn2("function f(){ return () => 1 }", "f")), [])
+      sc = %Scope{kind: :block, frame: true}
+
+      assert Interp.lookup_scoped(block_frame(strict, sc, []), :strict) == {:ok, true}
+
+      assert Interp.lookup_scoped(block_frame(sloppy, sc, []), :strict) ==
+               Interp.lookup_scoped(gid, :strict)
+    end
+
+    test "{:gref} in a map scope over a frame (root/1 with a map env)" do
+      gid = heap()
+      fid = vars_frame(gid)
+      Interp.declare(gid, "G", 10.0)
+      # A class scope over a frame, as `Classes.define` makes it (classes.ex:35). The
+      # check build no longer refuses it.
+      cenv = Interp.new_scope(fid)
+      field = Interp.new_fn_scope(cenv, %{this: :undefined, field_init: true})
+
+      assert Interp.ev({:gref, "G"}, cenv) == 10.0
+      assert Interp.ev({:assign, "=", {:gref, "G"}, {:num, 11.0}}, cenv) == 11.0
+      assert Interp.lookup_scoped(gid, "G") == {:ok, 11.0}
+      assert Interp.ev({:gref, "G"}, field) == 11.0
+      assert Interp.ev({:unary, "typeof", {:gref, "nope"}}, cenv) == "undefined"
+    end
+
+    test "in_field_initializer?: a function frame stops the walk, an arrow or a block does not" do
+      gid = heap()
+      # The scope of a field initializer, as `Classes` makes it (classes.ex:253).
+      fsc =
+        Interp.new_fn_scope(gid, %{
+          this: :undefined,
+          home: :undefined,
+          new_target: :undefined,
+          field_init: true
+        })
+
+      plain = frame(fsc, info(fn2("function f(){ return () => 1 }", "f")), [])
+
+      {:ok, tree} =
+        Parser.parse(
+          "class A { x = () => { let q = 1; return () => eval('arguments') } }",
+          resolve: 2
+        )
+
+      arrow_node = find(tree, &match?({:fn, nil, [], _, :arrow, %Info{level: 2}}, &1))
+      assert arrow_node != nil
+      arrow = frame(fsc, info(arrow_node), [1.0])
+      sc = %Scope{kind: :block, frame: true}
+
+      # Eval code never runs in a frame itself: the function that holds the eval is
+      # dynamic, so it runs on the old path in a map scope over the frame.
+      in_dynamic = fn env -> Interp.new_fn_scope(env) end
+
+      # Outside a field initializer, eval code may name `arguments`.
+      assert Interp.direct_eval(["typeof arguments"], in_dynamic.(plain)) == "undefined"
+
+      assert Interp.direct_eval(["typeof arguments"], in_dynamic.(block_frame(plain, sc, []))) ==
+               "undefined"
+
+      # In a field initializer (an arrow does not end it), `arguments` is a SyntaxError.
+      assert {"SyntaxError", _} =
+               caught(fn -> Interp.direct_eval(["arguments"], in_dynamic.(arrow)) end)
+
+      assert {"SyntaxError", _} =
+               caught(fn ->
+                 Interp.direct_eval(["arguments"], in_dynamic.(block_frame(arrow, sc, [])))
+               end)
+    end
+  end
+
+  describe "level 2: the free rule and the GC" do
+    test "calls that make no closure leave the heap flat; the GC takes back the others" do
+      gid = heap()
+      run_script("function f(x){ if (x) return () => 1; return 2 }", 2)
+      {:ok, f} = Interp.lookup_scoped(gid, "f")
+      assert %{info: %Info{level: 2, rewritten: true, free: :counter}} = closure(f)
+
+      Browser.JS.GC.collect()
+      base = Interp.heap_size()
+
+      for _ <- 1..1000, do: assert(Interp.call(f, :undefined, [0.0]) == 2.0)
+      assert Interp.heap_size() == base
+
+      # Each call keeps its frame and makes one function object.
+      for _ <- 1..1000, do: Interp.call(f, :undefined, [1.0])
+      assert Interp.heap_size() == base + 2000
+
+      Browser.JS.GC.collect()
+      assert Interp.heap_size() == base
+    end
+
+    test "a frame held by a returned closure survives the GC" do
+      gid = heap()
+      run_script("function mk(x){ let y = x * 2; return () => y }", 2)
+      {:ok, mk} = Interp.lookup_scoped(gid, "mk")
+      g = Interp.call(mk, :undefined, [3.0])
+      # A process key is a root of the GC.
+      Process.put(:frames_test_hold, g)
+
+      Browser.JS.GC.collect()
+      refute freed?(closure(g).scope)
+      assert Interp.call(g, :undefined, []) == 6.0
+    end
+
+    test "a throw keeps the frame of an escaped closure and frees the others" do
+      gid = heap()
+
+      run_script(
+        "function t(){ let x = 'kept'; var g = () => x; throw g } " <>
+          "function u(x){ let y = x; if (x) { var g = () => y } throw 1 }",
+        2
+      )
+
+      {:ok, t} = Interp.lookup_scoped(gid, "t")
+      {:ok, u} = Interp.lookup_scoped(gid, "u")
+
+      assert {:js_error, g} = catch_throw(Interp.call(t, :undefined, []))
+      refute freed?(closure(g).scope)
+      assert Interp.call(g, :undefined, []) == "kept"
+
+      size = Interp.heap_size()
+
+      for _ <- 1..100,
+          do: assert(catch_throw(Interp.call(u, :undefined, [0.0])) == {:js_error, 1.0})
+
+      assert Interp.heap_size() == size
+    end
+
+    test "the GC marks the slots of a frame, and not the integer in `call_pos`" do
+      gid = heap()
+      i = info(leaf("function f(a){ }", "f"))
+      {:obj, kept} = obj = Interp.new_object([])
+      {:obj, stray} = Interp.new_object([])
+      # The line number in `call_pos` can be equal to the id of a heap entry by chance.
+      fid = Interp.alloc({gid, i, nil, stray, gid, obj})
+      Process.put(:frames_test_hold, fid)
+
+      Browser.JS.GC.collect()
+      assert :erlang.get(fid) != :undefined
+      assert :erlang.get(kept) != :undefined
+      assert :erlang.get(stray) == :undefined
+    end
+  end
+
+  if @check do
+    test "check mode: a hop to a freed frame raises and names the frame" do
+      gid = heap()
+      fid = frame(gid, info(fn2("function f(a){ return () => a }", "f")), [1.0])
+      bid = block_frame(fid, %Scope{kind: :block, frame: true}, [])
+      assert Interp.ev({:slot, 1, 6, "a"}, bid) == 1.0
+
+      size = Interp.heap_size()
+      Interp.free(fid)
+      assert freed?(fid)
+      assert Interp.heap_size() == size - 1
+
+      e = assert_raise(ArgumentError, fn -> Interp.ev({:slot, 1, 6, "a"}, bid) end)
+      assert Exception.message(e) =~ "use of a freed frame of"
+      assert Exception.message(e) =~ "f"
+    end
+
+    test "check mode: a leaf that makes a closure fails the leaf invariant" do
+      gid = heap()
+      node = fn2("function f(){ return () => 1 }", "f")
+      # The resolver would give this function level 2. Here its record says level 1, so
+      # the frame is freed on return although a closure holds it.
+      fake = put_elem(node, 5, %{info(node) | level: 1, free: :always})
+      f = Interp.make_function(fake, gid, false)
+      assert_raise(ArgumentError, fn -> Interp.call(f, :undefined, []) end)
+    end
+  else
+    @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode tests"
+    test "check mode: a hop to a freed frame raises and names the frame" do
+      :ok
+    end
+
+    @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode tests"
+    test "check mode: a leaf that makes a closure fails the leaf invariant" do
+      :ok
+    end
+  end
+
   # ── the semantic table (design section 6) ──────────────────
 
-  # Each row runs at `:off` and at level 1 through `Browser.JS.eval`; the result must be
-  # the one of the design, and the same at both levels. The expected values were checked
-  # at `:off` on bb2d6f5. Rows 30, 31, 57 and 58 need a page and are in the module below.
+  # Each row runs at `:off`, at level 1 and at level 2 through `Browser.JS.eval`; the
+  # result must be the one of the design, and the same at each level. The expected values
+  # were checked at `:off` on bb2d6f5. Rows 30, 31, 57 and 58 need a page and are in the
+  # module below. Step 2c added level 2 (2c design 6.2).
+  @levels [:off, 1, 2]
+
   @rows [
     {1, "function f(){ return x; let x = 1 } try { f() } catch (e) { e.message }",
      {:ok, "Cannot access 'x' before initialization", []}},
@@ -929,10 +1542,9 @@ defmodule Browser.JS.FramesTest do
   ]
 
   describe "the semantic table" do
-    test "every row gives the design's value at :off and the same value at level 1" do
-      for {n, src, expected} <- @rows do
-        assert JS.eval(src, resolve: :off) == expected, "row #{n} at :off: #{src}"
-        assert JS.eval(src, resolve: 1) == expected, "row #{n} at level 1: #{src}"
+    test "every row gives the design's value at :off, level 1 and level 2" do
+      for {n, src, expected} <- @rows, level <- @levels do
+        assert JS.eval(src, resolve: level) == expected, "row #{n} at #{level}: #{src}"
       end
     end
 
@@ -942,8 +1554,11 @@ defmodule Browser.JS.FramesTest do
 
       assert JS.eval(src, resolve: :off) == {:ok, "ReferenceError:a is not defined", []}
 
-      assert JS.eval(src, resolve: 1) ==
-               {:ok, "ReferenceError:Cannot access 'a' before initialization", []}
+      # The function is a leaf, so level 2 runs it as level 1 does.
+      for level <- [1, 2] do
+        assert JS.eval(src, resolve: level) ==
+                 {:ok, "ReferenceError:Cannot access 'a' before initialization", []}
+      end
     end
 
     test "a strict leaf in a sloppy script does not make a global by destructuring" do
@@ -953,29 +1568,40 @@ defmodule Browser.JS.FramesTest do
             ~S|function f(){ "use strict"; for (zz in {a: 1}); } try { f(); "created " + zz } catch (e) { e.message }|,
             ~S|class A { m(){ [zz] = [1] } } try { new A().m(); "created " + zz } catch (e) { e.message }|
           ] do
-        assert JS.eval(src, resolve: :off) == {:ok, "zz is not defined", []}, src
-        assert JS.eval(src, resolve: 1) == {:ok, "zz is not defined", []}, src
+        for level <- @levels,
+            do: assert(JS.eval(src, resolve: level) == {:ok, "zz is not defined", []}, src)
       end
     end
 
     test "a sloppy leaf still makes a global by destructuring" do
       src = ~S|function f(){ [zz] = [1] } f(); zz|
 
-      assert JS.eval(src, resolve: :off) == {:ok, 1.0, []}
-      assert JS.eval(src, resolve: 1) == {:ok, 1.0, []}
+      for level <- @levels, do: assert(JS.eval(src, resolve: level) == {:ok, 1.0, []})
     end
 
-    test "a function of a level above 1 stops with a clear error" do
-      src = "function mk(){ var x = 1; return function(){ return x } } mk()()"
+    # `arguments` makes a function level 3, which runs from step 2d (2c design 5).
+    test "a function of a level above 2 stops with a clear error" do
+      src = "function f(){ return arguments[0] } f(1)"
 
-      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 2)
-      assert inspect(crash) =~ "resolve level 2 functions cannot run yet"
+      assert {:error, {:crash, _} = crash, _} = JS.eval(src, resolve: 3)
+
+      assert inspect(crash) =~
+               "resolve level 3 functions cannot run yet; use :off, :info, 1 or 2"
     end
 
-    test "row 37: the step limit at both levels" do
+    test "row 37: the step limit at each level" do
       src = "function f(){ var n = 0; while (true) n++ } f()"
-      assert JS.eval(src, resolve: :off, max_steps: 10_000) == {:error, :step_limit, []}
-      assert JS.eval(src, resolve: 1, max_steps: 10_000) == {:error, :step_limit, []}
+
+      for level <- @levels do
+        assert JS.eval(src, resolve: level, max_steps: 10_000) == {:error, :step_limit, []}
+      end
+
+      # A level 2 function that loops in a framed block stops the same way.
+      src = "function f(){ var fs = []; for (let i = 0; ; i++) fs.push(() => i) } f()"
+
+      for level <- @levels do
+        assert JS.eval(src, resolve: level, max_steps: 10_000) == {:error, :step_limit, []}
+      end
     end
 
     test "the leaf functions of the table are rewritten at level 1" do
@@ -992,6 +1618,276 @@ defmodule Browser.JS.FramesTest do
       end
     end
   end
+
+  # ── the semantic table of step 2c (2c design 6.2) ──────────
+
+  # A short row runs inside a function that collects closures in `fs` and joins what
+  # they give. Each value was checked at `:off` and at level 1 on 8b654a1, and each one is
+  # the value of the design table. Rows with a letter are not in the design: they test
+  # the renew rule and the iterator loop with frames (7b, 7c, 7d, 8b), the order of the
+  # copies and the hoist (23b), and an arrow frame inside a field initializer (68).
+  @pre "function f(){ var fs = []; "
+  @post "; return fs.map(g => g()).join() } f()"
+
+  @rows_2c [
+    {1, @pre <> "for (let i = 0; i < 3; i++) fs.push(() => i)" <> @post, "0,1,2"},
+    {2, @pre <> "for (var i = 0; i < 3; i++) fs.push(() => i)" <> @post, "3,3,3"},
+    {3,
+     "function f(){ var fs = []; for (let i = 0, j = () => i; i < 3; i++) fs.push(j); return fs.map(g => g()).join() } f()",
+     "0,0,0"},
+    {4, @pre <> "for (let i = 0; i < 3; fs.push(() => i), i++) ;" <> @post, "1,2,3"},
+    {5,
+     @pre <>
+       "for (let i = 0; i < 4; i++) { if (i == 1) continue; fs.push(() => i); if (i == 2) break }" <>
+       @post, "0,2"},
+    {6, @pre <> "for (let i = 0; i < 2; i++) { let y = i * 10; fs.push(() => y + i) }" <> @post,
+     "0,11"},
+    {7,
+     @pre <>
+       "for (const k of ['a','b']) fs.push(() => k); for (const k in {x:1,y:2}) fs.push(() => k)" <>
+       @post, "a,b,x,y"},
+    {"7b", @pre <> "for (const k of new Set(['a','b'])) fs.push(() => k)" <> @post, "a,b"},
+    {"7c",
+     @pre <>
+       "for (const k of ['a','b','c']) if (k != 'b') fs.push(() => k); for (const k of ['d','e','f']) if (k == 'd') fs.push(() => k)" <>
+       @post, "a,c,d"},
+    {"7d", @pre <> "for (let i = 0; i < 4; i++) if (i % 2) fs.push(() => i)" <> @post, "1,3"},
+    {8,
+     "function f(){ try { for (const k of [() => k]) k() } catch (e) { return e.constructor.name } } f()",
+     "ReferenceError"},
+    {"8b",
+     "function f(){ try { for (const k of new Set([() => k])) k() } catch (e) { return e.constructor.name } } f()",
+     "ReferenceError"},
+    {9,
+     @pre <>
+       "L: for (let i = 0; i < 3; i++) { for (let j = 0; j < 3; j++) { fs.push(() => i + ':' + j); if (j == 1) continue L } }" <>
+       @post, "0:0,0:1,1:0,1:1,2:0,2:1"},
+    {10,
+     @pre <>
+       "switch (1) { case 1: let z = 'z'; fs.push(() => z); case 2: fs.push(() => typeof z) }" <>
+       @post, "z,string"},
+    {11, "function f(){ var g; try { throw 7 } catch (e) { g = () => e } return g() } f()", 7.0},
+    {12,
+     "function f(){ var g; try { throw {a: 1} } catch ({a}) { g = () => a; a = 2 } return g() } f()",
+     2.0},
+    {13, "function f(){ var n = 0; function inc(){ return ++n } inc(); inc(); return n } f()",
+     2.0},
+    {14,
+     "function mk(){ var c = 0; return { inc(){ return ++c }, get v(){ return c } } } var o = mk(); o.inc(); o.inc(); o.v",
+     2.0},
+    {15,
+     "function f(){ function fib(n){ return n < 2 ? n : fib(n - 1) + fib(n - 2) } return fib(15) } f()",
+     610.0},
+    {16, "function f(){ return g(); function g(){ return h() } function h(){ return 'h' } } f()",
+     "h"},
+    {17, "function f(x){ return (function(){ return x * 2 })() + (() => x)() } f(5)", 15.0},
+    {18,
+     "function f(){ var r = []; [1,2,3].forEach(function (v) { r.push(v * this.k) }, {k: 10}); return r.join() } f()",
+     "10,20,30"},
+    {19,
+     "function f(){ class A { constructor(v){ this.v = v } get d(){ return this.v * 2 } static make(){ return new A(4) } } return A.make().d } f()",
+     8.0},
+    {20,
+     "function f(){ let base = 3; class A { x = base; m(){ return this.x + base } } base = 5; return new A().m() } f()",
+     10.0},
+    {21,
+     "var o = { k: 9, m(){ var self = this; return [1].map(() => [2].map(() => this.k + self.k)[0])[0] } }; o.m()",
+     18.0},
+    {22, "function f(a, g = () => a){ var a = 2; return [a, g()].join() } f(1)", "2,1"},
+    {23, "function f(a = 1, b = () => a){ function a(){} return [typeof a, b()].join() } f()",
+     "function,1"},
+    {"23b",
+     "function f(a, g = () => a){ var a; function a(){} return [typeof a, typeof g()].join() } f(1)",
+     "function,number"},
+    {24,
+     "function f(){ let x = 1; var g = () => x; try { x = 2; throw g } catch (h) { return h() } } f()",
+     2.0},
+    {25, "function f(){ let x = 'kept'; var g = () => x; throw g } try { f() } catch (h) { h() }",
+     "kept"},
+    {26,
+     "function f(){ let x = 1; function* g(){ yield x; x++; yield x } return [...g()].join() + ',' + x } f()",
+     "1,2,2"},
+    {28, "function f(){ let x = 4; function g(){ return eval('x + 1') } return g() } f()", 5.0},
+    {29, "function f(){ let x = 4; function g(){ eval('x = 9') } g(); return x } f()", 9.0},
+    {30, "function f(){ { let x = 1; (function(){ eval('x = 2') })(); return x } } f()", 2.0},
+    {31, "function f(){ return (() => eval('this.k'))() } f.call({k: 5})", 5.0},
+    {32, ~S|"use strict"; function f(){ let x = 5; function g(){ return x } return g() } f()|,
+     5.0},
+    {33,
+     ~S|"use strict"; function f(n){ let s = n; function g(m){ return m == 0 ? s : g(m - 1) } return g(2000) } f(7)|,
+     7.0},
+    {34, "function f(){ var g = function h(n){ return n ? h(n - 1) + 1 : 0 }; return g(5) } f()",
+     5.0},
+    {35,
+     "function f(){ const c = 1; var g = () => { c = 2 }; try { g() } catch (e) { return e.constructor.name } } f()",
+     "TypeError"},
+    {36, "function f(){ var g = () => x; let x = 3; return g() } f()", 3.0},
+    {37,
+     "function f(){ var g = () => x; try { g() } catch (e) { return e.message } let x = 3 } f()",
+     "Cannot access 'x' before initialization"},
+    {38,
+     "function outer(){ var fs = []; for (let i = 0; i < 3; i++) setTimeout(() => fs.push(i), 0); return fs } outer().length",
+     0.0},
+    {39,
+     @pre <> "for (var i = 0; i < 3; i++) { let j = i; fs.push(function(){ return j }) }" <> @post,
+     "0,1,2"},
+    {40,
+     "function f(){ var s = 0; var add = function(a){ return function(b){ return a + b } }; for (var i = 0; i < 100; i++) s = add(i)(s); return s } f()",
+     4950.0},
+    {41, "function f(){ { function g(){ return 1 } } return typeof g } f()", "undefined"},
+    {42, "function f(o){ with (o) { return function(){ return x } } } f({x: 3})()", 3.0},
+    {43, "function f(){ let v = 1; var g = new Function('return typeof v'); return g() } f()",
+     "undefined"},
+    {44, @pre <> "for (let i of [1, 2]) { fs.push(() => i); i = i * 10 }" <> @post, "10,20"},
+    {45,
+     "function f(){ var x = 'f'; function g(){ var x = 'g'; return () => x } return g()() + x } f()",
+     "gf"},
+    {46, @pre <> "let i = 0; while (i < 3) { let j = i; fs.push(() => j); i++ }" <> @post,
+     "0,1,2"},
+    {47, @pre <> "var i = 0; do { let j = i; fs.push(() => j) } while (++i < 2)" <> @post, "0,1"},
+    {48, "function P(x){ this.x = x; this.get = () => this.x } new P(6).get()", 6.0},
+    {49,
+     @pre <>
+       "for (let i = 0; i < 2; i++) { try { throw i } catch (e) { fs.push(() => e + i) } }" <>
+       @post, "0,2"},
+    {50, "function f(a){ return (() => eval('arguments[0]'))() } f(4)", 4.0},
+    {51, "function f(){ var x = 1; return (function(){ return eval('delete x') })() } f()",
+     false},
+    {52, "function f(a = 1, b = function(){ return eval('a') }){ var a = 2; return b() } f()",
+     1.0},
+    {53,
+     "function f(){ switch (1) { case 0: function h(){ return 'h' } case 1: return h() } } f()",
+     "h"},
+    {54, "function f(){ var x = 1; (function(){ eval('x = 5') })(); return x } f()", 5.0},
+    {55, "function f(){ { let y = 3; var e = function(){ return eval('y') } } return e() } f()",
+     3.0},
+    {56,
+     "function f(){ { let x = 1; var h = function(){ x = arguments[0] }; h(4); return x } } f()",
+     4.0},
+    {58,
+     "function f(){ class A extends Object { [k()] = 1 } function k(){ return 'p' } return new A().p } f()",
+     1.0},
+    {59,
+     "function f(){ function even(n){ return n == 0 ? true : odd(n - 1) } function odd(n){ return n == 0 ? false : even(n - 1) } return even(10) + ',' + odd(7) } f()",
+     "true,true"},
+    {60, "function f(){ function g(){ return 1 } function g(){ return 2 } return g() } f()", 2.0},
+    {61, "function f(){ var g = 1; function g(){} return typeof g } f()", "number"},
+    {62,
+     "function f(){ var a = 1; return function(){ var b = 2; return function(){ var c = 3; return () => a + b + c } } } f()()()()",
+     6.0},
+    {63,
+     "function outer(){ var x = 0; function m(){ function k(){ return ++x } return k } return m } var k = outer()(); k(); k()",
+     2.0},
+    {64, "var g = function h(){ var k = () => 1; h = 5; return typeof h }; g()", "function"},
+    {65,
+     "function f(){ var x = 2; function g(){ return arguments.length + x } return g(1, 2) } f()",
+     4.0},
+    {66,
+     "function f(){ var x = 1; function g(o){ with (o) { return x } } return g({}) + g({x: 2}) } f()",
+     3.0},
+    {67,
+     ~S|function f(){ "use strict"; var x = 1; var g = () => { x = 2; return this }; return [g(), x].join() } f()|,
+     ",2"},
+    {68,
+     "class A { x = () => { let q = 1; return () => eval('arguments') } } try { new A().x()() } catch (e) { e.constructor.name }",
+     "SyntaxError"},
+    # (found in review) a closure in a parameter default does not see a body name
+    {69, "var x = 'glob'; function f(g = () => x) { let x = 1; return g() } f()", "glob"},
+    {70, "var x = 'glob'; function f(g = () => x) { var x = 1; return g() } f()", "glob"},
+    {71, "var x = 'glob'; function f(g = () => x) { function x(){} return g() } f()", "glob"},
+    # (found in review) the parameters still see the self name that a body declaration hides
+    {72, "(function g(x = () => typeof g) { var g = 1; return x() })()", "function"},
+    {73, "(function g(x = () => typeof g) { function g(){} return x() })()", "function"},
+    {74,
+     "(function g(x = class { m() { return g } }) { var g = 1; return typeof new x().m() })()",
+     "function"}
+  ]
+
+  # Rows 27 and 57 log from a microtask; their value is `undefined`.
+  @log_rows_2c [
+    {27,
+     "function f(){ let x = 21; const g = async () => { await 0; return x * 2 }; g().then(v => console.log(v)) } f()",
+     "42"},
+    {57,
+     "function f(){ { let x = 1; var a = async () => { await 0; x = 2; console.log(x) } } a() } f()",
+     "2"}
+  ]
+
+  describe "the semantic table of step 2c" do
+    test "every row gives the design's value at :off, level 1 and level 2" do
+      for {n, src, value} <- @rows_2c, level <- @levels do
+        assert JS.eval(src, resolve: level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
+      end
+
+      for {n, src, line} <- @log_rows_2c, level <- @levels do
+        assert JS.eval(src, resolve: level) == {:ok, :undefined, [{:log, line}]},
+               "row #{n} at #{level}: #{src}"
+      end
+    end
+
+    test "the functions that the rows test are level 2 and rewritten at level 2" do
+      # A row proves nothing at level 2 if its function took the old path.
+      for {n, src, name} <- [
+            {1, @pre <> "for (let i = 0; i < 3; i++) fs.push(() => i)" <> @post, "f"},
+            {13, "function f(){ var n = 0; function inc(){ return ++n } inc(); return n }", "f"},
+            {22, "function f(a, g = () => a){ var a = 2; return [a, g()].join() }", "f"},
+            {48, "function P(x){ this.x = x; this.get = () => this.x }", "P"},
+            {58,
+             "function f(){ class A extends Object { [k()] = 1 } function k(){ return 'p' } return new A().p }",
+             "f"},
+            {62, "function f(){ var a = 1; return function(){ return () => a } }", "f"}
+          ] do
+        {:ok, tree} = Parser.parse(src, resolve: 2)
+        node = find(tree, &match?({:fn, ^name, _, _, _, %Info{}}, &1))
+        assert %Info{level: 2, rewritten: true} = info(node), "row #{n}"
+      end
+    end
+
+    # The nine programs of bench/js_runtime.exs, wrapped as that script wraps them. The
+    # expected values are the ones of that script.
+    @bench_big "function big(x) { var t = 0;" <>
+                 String.duplicate(" if (x < 0) { t += 1 }", 300) <>
+                 " return t + x } var r = 0; for (var i = 0; i < 20000; i++) r += big(i); return r"
+
+    @bench [
+      {"fib25", "function fib(n){ return n < 2 ? n : fib(n-1) + fib(n-2) } return fib(25)",
+       75025.0},
+      {"closures60k",
+       "var s = 0; var add = function(a){ return function(b){ return a + b } }; for (var i = 0; i < 60000; i++) { s = add(i)(s) % 1000003 } return s",
+       964_603.0},
+      {"propaccess60k",
+       "var o = {a:1,b:2,c:3}; var t = 0; for (let i = 0; i < 60000; i++) { o.a = i; t += o.a + o.b + o.c } return t",
+       1_800_270_000.0},
+      {"array20k",
+       "var a = []; for (var i = 0; i < 20000; i++) a.push(i); return a.map(x => x * 2).filter(x => x % 3 == 0).reduce((p, c) => p + c, 0)",
+       133_326_666.0},
+      {"strbuild20k",
+       "var s = ''; for (var i = 0; i < 20000; i++) { s += String(i % 10) } return s.length",
+       20000.0},
+      {"bigfn20k", @bench_big, 199_990_000.0},
+      {"classcalls30k",
+       "class P { constructor(x){ this.x = x } inc(){ this.x++; return this } } var p = new P(0); for (var i = 0; i < 30000; i++) p.inc(); return p.x",
+       30000.0},
+      {"treewalk",
+       "function mk(d){ if(d==0) return {w:10,h:5,kids:[]}; var k=[]; for(var i=0;i<4;i++) k.push(mk(d-1)); return {w:0,h:0,kids:k}; } " <>
+         "function lay(n,x,y){ if(n.kids.length==0){ n.x=x;n.y=y; return n.h; } var cy=y; for(var i=0;i<n.kids.length;i++){ cy+=lay(n.kids[i],x+2,cy) } n.x=x;n.y=y;n.h=cy-y; return n.h } " <>
+         "var t=mk(6); var s=0; for(var r=0;r<3;r++) s+=lay(t,0,0); return s", 61440.0},
+      {"domlike",
+       "var els=[]; for(var i=0;i<3000;i++){ els.push({tag:'div',attrs:{id:'e'+i,class:'c'+(i%7)},children:[],parent:null}) } " <>
+         "for(var i=1;i<els.length;i++){ var p=els[(i-1)>>1]; p.children.push(els[i]); els[i].parent=p } " <>
+         "var cnt=0; function q(n,c){ if(n.attrs['class']===c) cnt++; for(var i=0;i<n.children.length;i++) q(n.children[i],c) } " <>
+         "for(var k=0;k<7;k++) q(els[0],'c'+k); return cnt", 3000.0}
+    ]
+
+    @tag timeout: 300_000
+    test "the nine bench programs give their values at level 2" do
+      for {name, body, expected} <- @bench do
+        src = "(function(){ function f(){ #{body} } return f() })()"
+        opts = [resolve: 2, max_steps: 1_000_000_000, timeout: 120_000]
+        assert JS.eval(src, opts) == {:ok, expected, []}, name
+      end
+    end
+  end
 end
 
 defmodule Browser.JS.FramesPageTest do
@@ -1002,7 +1898,7 @@ defmodule Browser.JS.FramesPageTest do
 
   alias Browser.JS.Runtime
 
-  @levels [:off, 1]
+  @levels [:off, 1, 2]
 
   # The suite-wide level (`JS_RESOLVE=1`) lives in the same key, so the test restores it
   # instead of deleting it; a delete would run every later sync module at `:off`.

@@ -95,8 +95,135 @@ defmodule Browser.JS.GC do
     end
   end
 
+  @doc false
+  # The dangling scan of check mode (`Browser.JS.Interp.check_dangling/1`): the names of the
+  # freed frames that a reachable value still holds. A freed frame is a tombstone
+  # `{:js_freed, name}` in check mode. The walk is the walk of `collect/0`, but a tombstone
+  # counts only when it is reached through an edge that holds a scope: the `scope` and
+  # `home` of a closure, the `parent` and `env` of a map, and the parent of a frame. The
+  # conservative walk reads every integer as an id, so an array length or a line number
+  # that equals the id of a tombstone must not count.
+  def dangling(extra) do
+    roots =
+      :lists.foldl(
+        fn
+          {k, _}, roots when is_integer(k) -> roots
+          {{:js_hoist, _}, _}, roots -> roots
+          {:js_memo, _}, roots -> roots
+          {:js_heap_n, _}, roots -> roots
+          # (the parser's source table holds token offsets; an offset that equals the id of
+          # an unreachable closure would make that garbage look live)
+          {:js_srctab, _}, roots -> roots
+          {:lex_table, _}, roots -> roots
+          {_, v}, roots -> [v | roots]
+        end,
+        [extra],
+        Process.get()
+      )
+
+    marks = :ets.new(:js_marks, [:set, :private])
+
+    try do
+      scan(Enum.reduce(roots, [], &spush(&1, &2, marks, false)), marks)
+      for {{:hit, _}, name} <- :ets.tab2list(marks), uniq: true, do: name
+    after
+      :ets.delete(marks)
+    end
+  end
+
+  defp scan([], _marks), do: :ok
+  defp scan([%Browser.JS.Resolve.Info{} | rest], marks), do: scan(rest, marks)
+  defp scan([%Browser.JS.Resolve.Scope{} | rest], marks), do: scan(rest, marks)
+
+  defp scan([t | rest], marks)
+       when is_tuple(t) and tuple_size(t) >= 5 and
+              (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
+                 is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
+    stack = spush_from(t, 3, tuple_size(t), rest, marks)
+    scan(spush(elem(t, 0), stack, marks, true), marks)
+  end
+
+  defp scan([t | rest], marks) when is_tuple(t),
+    do: scan(spush_from(t, 1, tuple_size(t), rest, marks), marks)
+
+  defp scan([l | rest], marks) when is_list(l) do
+    stack = Enum.reduce(improper_to_list(l), rest, &spush(&1, &2, marks, false))
+    scan(stack, marks)
+  end
+
+  defp scan([%{params: _, body: _} = closure | rest], marks) do
+    stack = spush(Map.get(closure, :scope), rest, marks, true)
+    scan(spush(Map.get(closure, :home), stack, marks, true), marks)
+  end
+
+  defp scan([t | rest], marks) when is_map(t) do
+    stack =
+      :maps.fold(
+        fn
+          k, v, acc when is_integer(k) -> spush(v, acc, marks, false)
+          k, v, acc -> spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env])
+        end,
+        rest,
+        t
+      )
+
+    scan(stack, marks)
+  end
+
+  defp scan([t | rest], marks) when is_function(t) do
+    case :erlang.fun_info(t, :env) do
+      {:env, env} -> scan(Enum.reduce(env, rest, &spush(&1, &2, marks, false)), marks)
+      _ -> scan(rest, marks)
+    end
+  end
+
+  defp scan([_ | rest], marks), do: scan(rest, marks)
+
+  # (the elements of a tuple from the 1-based position `i` to `n`)
+  defp spush_from(_t, i, n, stack, _marks) when i > n, do: stack
+
+  defp spush_from(t, i, n, stack, marks),
+    do: spush_from(t, i + 1, n, spush(elem(t, i - 1), stack, marks, false), marks)
+
+  defp improper_to_list([h | t]) when is_list(t), do: [h | improper_to_list(t)]
+  defp improper_to_list([h | t]), do: [h, t]
+  defp improper_to_list([]), do: []
+
+  # `scope?` says whether the edge to `t` holds a scope: a tombstone found there is a hit
+  defp spush(t, stack, marks, scope?) when is_integer(t) do
+    case :erlang.get(t) do
+      :undefined ->
+        stack
+
+      {:js_freed, name} = obj ->
+        if scope?, do: :ets.insert(marks, {{:hit, t}, name})
+        if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+
+      obj ->
+        if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+    end
+  end
+
+  defp spush(t, stack, _marks, _scope?)
+       when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
+       do: [t | stack]
+
+  defp spush(_, stack, _marks, _scope?), do: stack
+
   # `stack` holds what is still to be looked at: only terms that can lead to heap entries
   defp mark([], _marks), do: :ok
+
+  # A frame: element 2 is the resolver's record. Only the parent, the root and the slots can
+  # hold ids. The caller id and the line number in `call_pos` must not keep a random object
+  # alive. The guard names the two record structs: other tuples, such as the function
+  # tuple of a WebAssembly instance, can also have a struct in position 2.
+  defp mark([t | rest], marks)
+       when is_tuple(t) and tuple_size(t) >= 5 and
+              (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
+                 is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
+    stack = push_frame_slots(t, 5, tuple_size(t), rest, marks)
+    mark(push(elem(t, 0), stack, marks), marks)
+  end
 
   defp mark([t | rest], marks) when is_tuple(t),
     do: mark(push_tuple(t, tuple_size(t), rest, marks), marks)
@@ -138,6 +265,12 @@ defmodule Browser.JS.GC do
 
   defp mark([_ | rest], marks), do: mark(rest, marks)
 
+  # (the elements of a frame from the 1-based position `i` to `n`)
+  defp push_frame_slots(_t, i, n, stack, _marks) when i > n, do: stack
+
+  defp push_frame_slots(t, i, n, stack, marks),
+    do: push_frame_slots(t, i + 1, n, push(elem(t, i - 1), stack, marks), marks)
+
   defp push_tuple(_t, 0, stack, _marks), do: stack
 
   defp push_tuple(t, n, stack, marks),
@@ -152,8 +285,17 @@ defmodule Browser.JS.GC do
   # a heap id is marked when it is first reached, and its entry is looked at then
   defp push(t, stack, marks) when is_integer(t) do
     case :erlang.get(t) do
-      :undefined -> stack
-      obj -> if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+      :undefined ->
+        stack
+
+      # A tombstone of check mode is a freed frame, not a live entry. The walk reads any
+      # integer as an id, so a stray number must not keep a tombstone or count it as live.
+      # The dangling scan reports a real reference to it.
+      {:js_freed, _} ->
+        stack
+
+      obj ->
+        if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
     end
   end
 

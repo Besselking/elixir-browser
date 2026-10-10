@@ -274,16 +274,25 @@ defmodule Browser.JS.Test262 do
             else: Interp.run_program(program, true)
 
           if async?, do: Builtins.run_timers(fn _ -> :ok end)
+          # (check mode only: no value that is still reachable may hold a freed frame)
+          Interp.check_dangling(nil)
           {:ok, printed()}
       end
     rescue
       e -> {:uncaught, "internal error: " <> Exception.message(e), printed()}
     catch
-      {:js_error, v} -> {:uncaught, describe(v), printed()}
+      {:js_error, v} -> {:uncaught, describe(scanned(v)), printed()}
       :js_limit -> :limit
       {:syntax, msg} -> {:syntax, msg}
       other -> {:uncaught, "internal: " <> inspect(other), printed()}
     end
+  end
+
+  # Check mode only: the thrown value and what is still reachable hold no freed frame. A
+  # failure here raises out of the test process, so the test fails loudly.
+  defp scanned(v) do
+    Interp.check_dangling(v)
+    v
   end
 
   # module files are found next to the module that imports them

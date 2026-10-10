@@ -20,7 +20,8 @@ defmodule Browser.JS.Resolve.Info do
   - `src`: the source text of the function, or `nil`. The closure keeps it for
     `Function.prototype.toString`.
   - `kind`: `:fn`, `:arrow`, `:arrow_expr`, `:method`, `:get`, `:set`, `:ctor`
-    or `:derived_ctor`.
+    or `:derived_ctor`. An arrow has the kind of its mode, so that a walk over
+    frames can tell an arrow from a function with its own `this`.
   - `name`: the name of the function, or `nil`.
   - `level`: the smallest resolve level that can run this function with slots:
     1 (a leaf: no closures, no `arguments`, not a constructor), 2 (makes
@@ -72,8 +73,10 @@ defmodule Browser.JS.Resolve.Info do
     initializer reads or writes, the hidden slots included: `super()` in an
     arrow captures `:ctor_fn`, `:new_target` and `:this`, `super.x` captures
     `:home` and `:this`, and `arguments` captures the object's slot.
-  - `free`: `:always` when the frame is erased on return, `:counter` when the
-    closure counter decides (step 2c).
+  - `free`: `:always` when the frame is erased on return (a level 1 leaf),
+    `:counter` when the closure counter decides. The interpreter reads it from
+    step 2c: a `:counter` frame is erased on return only when no closure was
+    made during the call, because only a closure can hold the frame's id.
   - `tail_sites`: the number of `return` statements marked as tail calls.
   """
 

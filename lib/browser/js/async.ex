@@ -1190,6 +1190,9 @@ defmodule Browser.JS.Async do
   end
 
   defp cs({:for, init, test, update, body}, env, ctx, k, labels) do
+    # The CPS loop copies map scopes only (`Interp.copy_scope/2`). An async body is never
+    # rewritten, so its `env` is no frame; check mode proves it.
+    Interp.check_old_path(env, "a CPS for loop")
     loop_env = Interp.new_scope(env)
     per_iteration? = match?({:var, :let, _}, init)
 
