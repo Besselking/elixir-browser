@@ -3655,6 +3655,18 @@ defmodule Browser.JS.FramesTest do
 
   if @check do
     describe "level 4: check mode" do
+      test "an async generator closed at the start leaves no live value on its frame" do
+        # `return()` and `throw()` at the start free the frame. The record must drop the
+        # start continuation too, because it holds the frame; the dangling scan of
+        # `JS.eval` finds such a value.
+        for src <- [
+              "async function* g(){} var it = g(); it.return(1); 0",
+              "async function* g(){} var it = g(); it.throw(1).catch(e => 0); 0"
+            ] do
+          assert JS.eval(src, resolve: 4) == {:ok, 0.0, []}, src
+        end
+      end
+
       test "C1: enter_frame refuses a function that is not level 4" do
         gid = heap()
         run_script("function f(a){ return arguments }", 3)
@@ -4009,7 +4021,33 @@ defmodule Browser.JS.FramesTest do
      "TypeError"},
     {82, :r,
      ~S|function F(){ this.p = (async () => { await 0; return new.target === F })() } new F().p.then(v => r.push(v))|,
-     [true]}
+     [true]},
+    # Rows 83 to 89 come from the review: an await in a computed key or in the heritage of
+    # a class runs in the class scope, where the resolver counted its hops.
+    {83, :r,
+     ~S|async function f(){ const key='m'; class C { [await key](){ return 7 } } return new C().m() } f().then(v=>r.push(v))|,
+     [7.0]},
+    {84, :r,
+     ~S|function outer(){ let z='Z'; async function f(){ const key='m'; class C { [await key](){} } return Object.getOwnPropertyNames(C.prototype).join() } return f() } outer().then(v=>r.push(v))|,
+     ["constructor,m"]},
+    {85, :r,
+     ~S|async function f(){ for (let i=0;i<2;i++){ const C = class { [await ('k'+i)](){} }; r.push(Object.getOwnPropertyNames(C.prototype).join()) } } f()|,
+     ["constructor,k0", "constructor,k1"]},
+    {86, :r,
+     ~S|async function f(){ class B { get x(){ return 1 } } class C extends (await B) {} r.push(new C().x) } f()|,
+     [1.0]},
+    {87, :r,
+     ~S|function* g(){ let k='a'; class C { [yield k](){} } r.push(Object.getOwnPropertyNames(C.prototype).join()) } var it=g(); it.next(); it.next('b')|,
+     ["constructor,b"]},
+    {88, :r,
+     ~S|async function f(){ let p='a'; class C { [p + await 'b'](){} } r.push(Object.getOwnPropertyNames(C.prototype).join()) } f()|,
+     ["constructor,ab"]},
+    {89, :r,
+     ~S|async function f(){ try { class C extends (await C) {} } catch (e) { r.push(e.constructor.name) } } f()|,
+     ["ReferenceError"]},
+    # Row 90 comes from the review: an await in a default of the catch parameter.
+    {90, :r, ~S|async function f(){ try { throw {} } catch ({ a = await 1 }) { r.push(a) } } f()|,
+     [1.0]}
   ]
 
   # The rows of design 5.3 that change at level 4: each one keeps the `:off` value at
@@ -4032,7 +4070,13 @@ defmodule Browser.JS.FramesTest do
     {"D5", ~S|async function f(){ r.push(delete await 1) } f()|, [false], [true]},
     # D6 (row 78): a lifted callee is a value, so the message names no temporary.
     {"D6", ~S|async function f(){ try { (await 1)() } catch (e) { r.push(e.message) } } f()|,
-     ["\0s0 is not a function"], ["expression is not a function"]}
+     ["\0s0 is not a function"], ["expression is not a function"]},
+    # D7 (from the review): `delete` of an optional chain that awaits deletes a lifted value.
+    # `:off` deletes the binding of its temporary and gives `false`; level 4 gives `true`.
+    # Neither deletes the property, which the spec does.
+    {"D7",
+     ~S|async function f(){ var o={p:1}; var d = delete (await o)?.p; r.push(d, 'p' in o) } f()|,
+     [false, true], [true, true]}
   ]
 
   defp row_src(:r, src), do: "var r=[]; " <> src <> "; r"
@@ -4070,7 +4114,7 @@ defmodule Browser.JS.FramesTest do
       end
     end
 
-    test "D1, D2, D3, D5 and D6: the value of :off at levels 1 to 3, the value of the spec at 4" do
+    test "D1, D2, D3, D5, D6 and D7: the value of :off at levels 1 to 3, the value of the spec at 4" do
       for {n, src, off, spec} <- @diffs_2e do
         for level <- [:off, 1, 2, 3] do
           assert JS.eval(row_src(:r, src), resolve: level) == {:ok, off, []}, "#{n} at #{level}"

@@ -223,20 +223,19 @@ defmodule Browser.JS.Async do
   end
 
   defp set_gen(gid, gen), do: Interp.store(gid, Map.put(Interp.deref(gid), :gen, gen))
-  defp get_gen(gid), do: Map.get(Interp.deref(gid), :gen)
-
-  # The record keeps `frame` and `fns` across each change of state, so that the frame is
-  # released exactly once, when the generator is done.
-  defp update_gen(gid, changes), do: set_gen(gid, Map.merge(get_gen(gid), changes))
 
   defp finish(gid, out) do
-    set_gen(gid, %{release(get_gen(gid)) | state: :done, resume: nil})
+    obj = Interp.deref(gid)
+    Interp.store(gid, %{obj | gen: %{release(obj.gen) | state: :done, resume: nil}})
     Process.put(:js_gen_out, out)
     :done
   end
 
   defp suspend(gid, v, resume) do
-    update_gen(gid, %{state: :suspended, resume: resume})
+    # (the record keeps `frame` and `fns`, so that the frame is released exactly once, when
+    # the generator is done; the object is read once, because this runs on every `yield`)
+    obj = Interp.deref(gid)
+    Interp.store(gid, %{obj | gen: %{obj.gen | state: :suspended, resume: resume}})
     Process.put(:js_gen_out, {:yield, v})
     :suspended
   end
@@ -433,14 +432,15 @@ defmodule Browser.JS.Async do
           Promise.reject(p, e)
           ag_drain(gid)
 
-        # A request at the start runs no body code, so the frame is released at once.
+        # A request at the start runs no body code, so the frame is released at once. The
+        # start continuation holds the frame too, so it is dropped with it.
         {state, {:throw, e}} when state == :start ->
-          set_agen(gid, %{release(g) | queue: rest, state: :done})
+          set_agen(gid, %{release(g) | queue: rest, state: :done, resume: nil})
           Promise.reject(p, e)
           ag_drain(gid)
 
         {state, {:return, v}} when state in [:done, :start] ->
-          set_agen(gid, %{release(g) | queue: rest, state: :done, running: true})
+          set_agen(gid, %{release(g) | queue: rest, state: :done, running: true, resume: nil})
 
           await_value(v, %{throw: fn e -> ag_settle(gid, p, {:throw, e}) end}, fn v2 ->
             ag_settle(gid, p, {:return, v2})
@@ -991,6 +991,9 @@ defmodule Browser.JS.Async do
       is_tuple(node) and elem(node, 0) in [:fn, :async] ->
         {node, leaves}
 
+      mode == :frame and is_tuple(node) and elem(node, 0) == :class ->
+        lift_class(node, leaves)
+
       is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
         {:ok, kids, rebuild} = ordered(node)
 
@@ -1026,6 +1029,27 @@ defmodule Browser.JS.Async do
       true ->
         {node, leaves}
     end
+  end
+
+  # The resolver resolves the heritage, the keys and the member decorators of a class in
+  # the class scope, which `Classes.define` makes as a map scope over `env`. A leaf from
+  # these parts must run in such a scope too, or its hop counts are one short. So each such
+  # leaf is wrapped in `{:cps_class, name, leaf}`, and `eval_vals/5` makes the scope. The
+  # class decorators run in `env`, as in `Classes.define`.
+  defp lift_class({:class, name, heritage, members, src}, leaves) do
+    {members, decs} =
+      case List.last(members) do
+        {:decorations, cd, md} -> {Enum.drop(members, -1), {cd, md}}
+        _ -> {members, nil}
+      end
+
+    {cd, leaves} = if decs, do: lift(elem(decs, 0), leaves, :frame), else: {nil, leaves}
+    outer = length(leaves)
+    {{heritage, members}, leaves} = lift({heritage, members}, leaves, :frame)
+    {inner, rest} = Enum.split(leaves, length(leaves) - outer)
+    leaves = Enum.map(inner, &{:cps_class, name, &1}) ++ rest
+    members = if decs, do: members ++ [{:decorations, cd, elem(decs, 1)}], else: members
+    {{:class, name, heritage, members, src}, leaves}
   end
 
   defp hole(:map, i), do: {:id, "\0s#{i}"}
@@ -1199,8 +1223,21 @@ defmodule Browser.JS.Async do
   # The values of the holes of a template in frame mode, in source order, as a tuple.
   defp eval_vals([], acc, _env, _ctx, done), do: done.(List.to_tuple(:lists.reverse(acc)))
 
-  defp eval_vals([leaf | rest], acc, env, ctx, done),
-    do: cev(leaf, env, ctx, fn v -> eval_vals(rest, [v | acc], env, ctx, done) end)
+  defp eval_vals([leaf | rest], acc, env, ctx, done) do
+    {leaf, leaf_env} = class_env(leaf, env)
+    cev(leaf, leaf_env, ctx, fn v -> eval_vals(rest, [v | acc], env, ctx, done) end)
+  end
+
+  # The scope of a leaf from a class (see `lift_class/2`): a map scope over `env` where the
+  # name of the class is in its TDZ, as in `Classes.define`. A leaf from a nested class
+  # gets one such scope for each class.
+  defp class_env({:cps_class, name, leaf}, env) do
+    cenv = Interp.new_scope(env)
+    if name, do: Interp.declare(cenv, name, :tdz)
+    class_env(leaf, cenv)
+  end
+
+  defp class_env(leaf, env), do: {leaf, env}
 
   # Check mode looks for a hole that `fill/2` did not replace, because such a hole would run
   # as an unknown form.
@@ -1655,7 +1692,7 @@ defmodule Browser.JS.Async do
               attempt(
                 fn ->
                   scope = item_env(env, sc)
-                  if param, do: Interp.bind_pattern(param, e, scope, :let)
+                  if param, do: bind_catch(param, e, scope)
                   scope
                 end,
                 wrapped,
@@ -1668,6 +1705,23 @@ defmodule Browser.JS.Async do
       end
 
     cexec(block, env, in_try, done)
+  end
+
+  # The catch parameter is bound by the sync binder, as on the old path, so an await in a
+  # default of the pattern waits with `Promise.await`. Check mode allows that sync await,
+  # as it does for the fallback of `f?.(await x)`.
+  if @check do
+    defp bind_catch(param, e, scope) do
+      old = Process.put(:js_cps_sync_await, true)
+
+      try do
+        Interp.bind_pattern(param, e, scope, :let)
+      after
+        Process.put(:js_cps_sync_await, old)
+      end
+    end
+  else
+    defp bind_catch(param, e, scope), do: Interp.bind_pattern(param, e, scope, :let)
   end
 
   # The scope of one item of a for-in, for-of or for-await, and of a catch clause: a new map
