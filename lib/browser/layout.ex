@@ -3351,9 +3351,12 @@ defmodule Browser.Layout do
   defp line_ops(line, style, :pre_wrap, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    ~r/ +|[^ ]+/
-    |> Regex.scan(expand_tabs(line, style))
-    |> then(&Enum.with_index(&1, fn token, i -> {token, i, i == length(&1) - 1} end))
+    tokens = Regex.scan(~r/ +|[^ ]+/, expand_tabs(line, style))
+    # (counted once: the length of the list for each of its words made a long paragraph quadratic)
+    count = length(tokens)
+
+    tokens
+    |> Enum.with_index(fn token, i -> {token, i, i == count - 1} end)
     |> Enum.map(fn {[run], i, last?} ->
       cond do
         # a space that starts or ends a line stays (a lone one would be dropped there)
