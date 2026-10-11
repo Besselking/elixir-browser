@@ -59,7 +59,7 @@ defmodule Browser.JS.Async do
     not write the value.
   """
 
-  alias Browser.JS.{Awaits, Interp, Promise}
+  alias Browser.JS.{Awaits, Compile, Interp, Promise}
   import Awaits, only: [is_leaf_form: 1]
   require Interp
   alias Browser.JS.Resolve.Info
@@ -146,9 +146,25 @@ defmodule Browser.JS.Async do
   end
 
   # Starts a body: an arrow with an expression body returns its value, any other body falls
-  # off its end with `ending`.
-  defp run_body(%{mode: :arrow_expr} = c, env, ctx, _ending), do: cev(c.body, env, ctx, ctx.ret)
-  defp run_body(c, env, ctx, ending), do: clist(c.body, env, ctx, fn _ -> ctx.ret.(ending) end)
+  # off its end with `ending`. In frame mode the body runs its compiled plan (step 5c, see
+  # "Compiled plans" below), when `Browser.JS.Compile` gives one.
+  defp run_body(c, env, %{frame: _} = ctx, ending) do
+    case Compile.cps_body(c) do
+      nil ->
+        tree_body(c, env, ctx, ending)
+
+      plan ->
+        case c.mode do
+          :arrow_expr -> plan.(env, ctx, ctx.ret)
+          _ -> plan.(env, ctx, fn _ -> ctx.ret.(ending) end)
+        end
+    end
+  end
+
+  defp run_body(c, env, ctx, ending), do: tree_body(c, env, ctx, ending)
+
+  defp tree_body(%{mode: :arrow_expr} = c, env, ctx, _ending), do: cev(c.body, env, ctx, ctx.ret)
+  defp tree_body(c, env, ctx, ending), do: clist(c.body, env, ctx, fn _ -> ctx.ret.(ending) end)
 
   # The frame of a rewritten closure, or the call scope of the old path, and the frame
   # fields of a generator record (`nil` on the old path).
@@ -1492,18 +1508,20 @@ defmodule Browser.JS.Async do
     abrupt(result, ctx, k)
   end
 
-  defp abrupt(:ok, _ctx, k), do: k.(:ok)
-  defp abrupt({:throw, e}, ctx, _k), do: ctx.throw.(e)
-  defp abrupt({:ret, v}, ctx, _k), do: ctx.ret.(v)
+  @doc false
+  # Sends a completion to its continuation. (public: compiled plans call it)
+  def abrupt(:ok, _ctx, k), do: k.(:ok)
+  def abrupt({:throw, e}, ctx, _k), do: ctx.throw.(e)
+  def abrupt({:ret, v}, ctx, _k), do: ctx.ret.(v)
 
-  defp abrupt({:brk, l}, ctx, _k) do
+  def abrupt({:brk, l}, ctx, _k) do
     case ctx.brk do
       %{^l => target} -> target.(:ok)
       _ -> :ok
     end
   end
 
-  defp abrupt({:cont, l}, ctx, _k) do
+  def abrupt({:cont, l}, ctx, _k) do
     case ctx.cont do
       %{^l => target} -> target.(:ok)
       _ -> :ok
@@ -2389,4 +2407,47 @@ defmodule Browser.JS.Async do
         end)
     end
   end
+
+  # ── compiled plans (step 5c) ───────────────────────────────
+  #
+  # `Browser.JS.Compile` compiles the body of a rewritten async function or generator into
+  # a plan (see "CPS plans" in its moduledoc). The plan does the work of `clist/4`: it runs
+  # each run of statements without an await as one compiled list, and it gives each
+  # statement that awaits to `cs/5`. The functions below are the run-time part of the
+  # plans.
+  #
+  # The collector (`Browser.JS.GC`) does not walk the funs of `Browser.JS.Compile`, because
+  # a compiled closure keeps no heap id and no frame id. A continuation keeps the frame, the
+  # context and the next continuation. Thus a plan makes no continuation itself: it calls
+  # a function of this part, which makes the continuation. The fun of the continuation is a
+  # fun of this module, which the collector walks. The walk stops at the compiled closures
+  # that the continuation keeps.
+  #
+  # A compiled statement is `fn env, ctx, k -> ... end`. It calls `k` when it completes
+  # normally.
+
+  @doc false
+  # Runs the compiled statement `a`, then the compiled statements `r`.
+  def then(a, r, env, ctx, k), do: a.(env, ctx, fn _ -> r.(env, ctx, k) end)
+
+  @doc false
+  # Runs the compiled sync statement or statement list `f` and gives its completion, as
+  # `sync_stmt/5` does. A pending call (only the old path makes one) runs here, under the
+  # `try`.
+  def run_stmt(f, env) do
+    case f.(env) do
+      {:tail, tf, tt, ta} ->
+        if @check, do: Interp.check_run_tail(env)
+        {:ret, Interp.call(tf, tt, ta)}
+
+      c ->
+        c
+    end
+  catch
+    {:js_error, e} -> {:throw, e}
+  end
+
+  @doc false
+  # A statement that awaits and stays on the tree path in a compiled plan.
+  def tree_stmt(s, env, ctx, k, labels), do: cs(s, env, ctx, k, labels)
 end

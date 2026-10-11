@@ -4607,8 +4607,11 @@ defmodule Browser.JS.FramesSerialTest do
   describe "cexec and has_await?" do
     @plain "async function f(){ var a = 1; a = a + 1; await 0; a = 3; return a } f()"
 
+    # (with the switch `:js_compile` off: step 5c compiles the plan of the body, which
+    # does not call `sync_stmt/5`, see the next test)
     test "{:aw} goes to cs, and a plain statement goes to sync_stmt" do
       heap()
+      Process.put(:js_compile, false)
       [s1, s2, {:aw, s3} = aw, s4, s5] = body(@plain, 4)
 
       {_, calls} =
@@ -4630,6 +4633,28 @@ defmodule Browser.JS.FramesSerialTest do
         walked = for {[t], _} <- calls_of(calls, :has_await?), do: t
         for s <- [s1, s2, s4, s5], do: refute(s in walked)
       end
+    end
+
+    test "with compilation on, the compiled plan runs the plain statements" do
+      # Step 5c: the plan splits the body at the marks when it compiles. At run time the
+      # plain statements run as compiled lists, not through `sync_stmt/5`, and the walk of
+      # `has_await?/1` does not visit them.
+      gid = heap()
+      Process.put(:js_compile, true)
+      [s1, s2, {:aw, s3}, s4, s5] = body(@plain, 4)
+      src = "var out; " <> @plain <> ".then(v => { out = v })"
+
+      {_, calls} =
+        traced(
+          [{Async, :cs, 5}, {Async, :sync_stmt, 5}, {Async, :has_await?, 1}],
+          fn -> run_script(src, 4) end
+        )
+
+      assert for({[s | _], _} <- calls_of(calls, :cs), do: s) == [s3]
+      assert calls_of(calls, :sync_stmt) == []
+      walked = for {[t], _} <- calls_of(calls, :has_await?), do: t
+      for s <- [s1, s2, s4, s5], do: refute(s in walked)
+      assert {:ok, 3.0} = Interp.lookup_scoped(gid, "out")
     end
 
     test "at :off the old path still walks each statement (the trace sees the calls)" do

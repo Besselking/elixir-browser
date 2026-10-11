@@ -1011,13 +1011,15 @@ defmodule Browser.JS.CompileTest do
 
     test "a suspended async function with compiled callees collects fast and resumes" do
       # Judge 2 found that a suspended async function can hold compiled code in its
-      # continuation, and that a walk of that code took 1.49 s. In step 5 async bodies stay
-      # on the tree, so the continuation holds tree nodes and the compiled callee is reached
-      # only through its closure record, whose `code` the collector does not read. Thus this
-      # test pins the time of the collection and the resume; it does not reach rule 2 of
-      # `Browser.JS.GC` (the skip of the funs of `Browser.JS.Compile`), which is there for
-      # the compiled async bodies of a later step. The time bound of the design is 5 ms. The
-      # minimum of five collections removes most of the noise of a busy machine.
+      # continuation, and that a walk of that code took 1.49 s. Since step 5c the body of
+      # the async function compiles too. Its continuation is a fun of `Browser.JS.Async`,
+      # which keeps the frame and the compiled closures of the 20 ifs after the await.
+      # Rule 2 of `Browser.JS.GC` skips the funs of `Browser.JS.Compile`, so the walk stops
+      # at these closures. Without compilation the continuation keeps the tree nodes of
+      # the rest of the body, which the walk visits. Thus the collection with compilation
+      # makes at most the calls of the collection without it. The time bound of the design
+      # is 5 ms. The minimum of five collections removes most of the noise of a busy
+      # machine.
       check = fn ->
         calls = gc_calls(&GC.collect/0)
 
@@ -1039,7 +1041,7 @@ defmodule Browser.JS.CompileTest do
 
       assert on_v == off_v
       assert is_float(on_v)
-      for {a, b} <- Enum.zip(off_calls, on_calls), do: assert(abs(a - b) <= 8)
+      for {a, b} <- Enum.zip(off_calls, on_calls), do: assert(b <= a + 8)
       assert on_ms < 5, "one collection took #{on_ms} ms (#{off_ms} ms without compilation)"
     end
 

@@ -202,8 +202,7 @@ defmodule Browser.JS.Compile do
   that stays on the tree. The coverage test uses this list.
   """
 
-  alias Browser.JS.Interp
-  alias Browser.JS.Num
+  alias Browser.JS.{Async, Awaits, Interp, Num}
   alias Browser.JS.Resolve.Info
 
   # In check mode compiled code makes the checks of its twins on the tree. The attribute is
@@ -230,15 +229,38 @@ defmodule Browser.JS.Compile do
 
   def code(_c), do: nil
 
+  @doc """
+  Gives the compiled plan of the closure record `c` of an async function or a generator
+  (step 5c), or `nil` when the body stays on the tree path. The plan is
+  `fn env, ctx, k -> ... end` (see "CPS plans"). The first call for a function compiles
+  the body and puts the plan in the cache, as `{plan, nil}`.
+  """
+  @spec cps_body(map) :: function | nil
+  # (a function object that was made after its body compiled has the plan in its record;
+  # `make_fn` copies it from the cache)
+  def cps_body(%{code: plan, info: %Info{async?: a, generator?: g}}) when a or g, do: plan
+
+  def cps_body(%{info: %Info{rewritten: true, uid: uid, async?: a, generator?: g}} = c)
+      when uid != nil and (a or g) do
+    if :erlang.get(:js_compile) == true do
+      case :erlang.get({:jsc, uid}) do
+        {plan, _} -> plan
+        :undefined -> elem(compile_and_store(c, uid, &cps_code/1), 0)
+      end
+    end
+  end
+
+  def cps_body(_c), do: nil
+
   # The fixed part of an entry, in nodes (about 230 words for a small function).
   @entry_nodes 16
 
-  defp compile_and_store(c, uid) do
+  defp compile_and_store(c, uid, build \\ &sync_code/1) do
     :erlang.put(:jsc_count, 0)
 
     {code, n} =
       try do
-        {{body(c), maker(c.info)}, :erlang.get(:jsc_count)}
+        {build.(c), :erlang.get(:jsc_count)}
       catch
         # (a function over the cap stays on the tree; its entry in the cache tells the
         # next function objects so)
@@ -256,6 +278,8 @@ defmodule Browser.JS.Compile do
     :erlang.put({:jsc, uid}, code)
     code
   end
+
+  defp sync_code(c), do: {body(c), maker(c.info)}
 
   # ── memory bound ───────────────────────────────────────────
 
@@ -1746,6 +1770,144 @@ defmodule Browser.JS.Compile do
       {:tail, f, :undefined, argv}
     end
   end
+
+  # ── CPS plans (step 5c) ────────────────────────────────────
+
+  # The plan of an async or generator body: `{plan, nil}`. The body runs its statement list
+  # and then calls `k`. An arrow with an expression body has no statement list, so it stays
+  # on the tree path.
+  defp cps_code(%{mode: :arrow_expr}), do: {nil, nil}
+  defp cps_code(%{body: stmts}), do: {kentry(klist(stmts)), nil}
+
+  # S1 of check mode, for a plan.
+  if @check do
+    defp kentry(f) do
+      fn env, ctx, k ->
+        unless is_tuple(:erlang.get(env)),
+          do: raise(ArgumentError, "resolve check: a compiled plan runs on #{inspect(env)}")
+
+        f.(env, ctx, k)
+      end
+    end
+  else
+    defp kentry(f), do: f
+  end
+
+  # A statement list of a plan (the twin of `Async.clist/4`). The list splits at each
+  # statement that can suspend: a statement with the mark `{:aw}`, and a `return;`, which
+  # finishes an async generator without an await of the value. Each run of statements
+  # between these runs as one compiled list of the sync compiler, under one `try`. The plan
+  # is a chain that is built from the end, as in `list/1`.
+  defp klist(stmts) do
+    stmts
+    |> Enum.reject(&(match?({:fundecl, _, _}, &1) or &1 == {:empty}))
+    |> segments([], [])
+    |> kchain(nil)
+  end
+
+  # The segments of a list, in reverse order: `{:run, stmts}` for a run of sync statements
+  # and `{:one, stmt}` for a statement that can suspend.
+  defp segments([], [], acc), do: acc
+  defp segments([], run, acc), do: [{:run, Enum.reverse(run)} | acc]
+
+  defp segments([s | rest], run, acc) do
+    if suspends?(s) do
+      acc = if run == [], do: acc, else: [{:run, Enum.reverse(run)} | acc]
+      segments(rest, [], [{:one, s} | acc])
+    else
+      segments(rest, [s | run], acc)
+    end
+  end
+
+  defp suspends?({:aw, _}), do: true
+  defp suspends?({:return, nil}), do: true
+  defp suspends?(_), do: false
+
+  # The segments are reversed: the head is the last segment. `rest` is the plan of the
+  # segments after the head, or `nil` at the end of the list.
+  defp kchain([], nil), do: fn _env, _ctx, k -> k.(:ok) end
+  defp kchain([], rest), do: rest
+  defp kchain([seg | before], rest), do: kchain(before, kseg(seg, rest))
+
+  # A run of positions only (the position of a statement that suspends) writes `:js_pos`,
+  # which can not throw.
+  defp kseg({:run, ss}, rest) do
+    case positions(ss) do
+      {:ok, loc} -> kpos(loc, rest)
+      :error -> krun(list(ss), rest)
+    end
+  end
+
+  defp kseg({:one, s}, nil), do: kstmt(s, [])
+
+  defp kseg({:one, s}, rest) do
+    a = kstmt(s, [])
+    fn env, ctx, k -> Async.then(a, rest, env, ctx, k) end
+  end
+
+  # The last position of a run that has only positions.
+  defp positions([{:pos, loc}]), do: {:ok, loc}
+  defp positions([{:pos, _} | rest]), do: positions(rest)
+  defp positions(_), do: :error
+
+  defp kpos(loc, nil) do
+    fn _env, _ctx, k ->
+      :erlang.put(:js_pos, loc)
+      k.(:ok)
+    end
+  end
+
+  defp kpos(loc, rest) do
+    fn env, ctx, k ->
+      :erlang.put(:js_pos, loc)
+      rest.(env, ctx, k)
+    end
+  end
+
+  # A run of sync statements, as `Async.sync_stmt/5` runs each of them: a completion that
+  # is not `:ok` goes to the context, and `:ok` goes on to the rest.
+  defp krun(sc, nil), do: fn env, ctx, k -> Async.abrupt(Async.run_stmt(sc, env), ctx, k) end
+
+  defp krun(sc, rest) do
+    fn env, ctx, k ->
+      case Async.run_stmt(sc, env) do
+        :ok -> rest.(env, ctx, k)
+        c -> Async.abrupt(c, ctx, k)
+      end
+    end
+  end
+
+  # A statement of a plan (the twin of `Async.cexec/5` in frame mode). `labels` are the
+  # labels of the statement. Each node counts for the memory bound.
+  defp kstmt(s, labels) do
+    count()
+    kstmt_node(s, labels)
+  end
+
+  # In an async generator, `return;` finishes the body without an await of the value.
+  defp kstmt_node({:return, nil}, _labels) do
+    fn _env, ctx, _k ->
+      if is_map_key(ctx, :async_gen), do: ctx.ret.(:ag_bare), else: ctx.ret.(:undefined)
+    end
+  end
+
+  defp kstmt_node({:aw, s}, labels) do
+    if @check and not Awaits.any?(s),
+      do: raise(ArgumentError, "resolve check: {:aw} on #{elem(s, 0)}, which does not await")
+
+    kaw(s, labels)
+  end
+
+  defp kstmt_node(s, labels) do
+    if @check and Awaits.any?(s),
+      do: raise(ArgumentError, "resolve check: no {:aw} on #{elem(s, 0)}, which awaits")
+
+    krun(stmt(s, labels), nil)
+  end
+
+  # A statement that awaits stays on the tree path (`Async.cs/5`).
+  defp kaw(s, labels),
+    do: trace(:cps_stmt, s, fn env, ctx, k -> Async.tree_stmt(s, env, ctx, k, labels) end)
 
   # ── nodes on the tree ──────────────────────────────────────
 
