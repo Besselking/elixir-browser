@@ -94,6 +94,12 @@ defmodule Browser.JS.ObjectStatics do
       %{proxy: _} ->
         Props.descriptor(o, key) != :undefined
 
+      # A module namespace reads the binding: a binding in its TDZ throws, and a deferred
+      # namespace evaluates its module, which runs user code. The shadow run must not run
+      # user code, so a namespace takes the old path, as a proxy does.
+      %{host: {Browser.JS.Modules, _}} ->
+        Props.descriptor(o, key) != :undefined
+
       _ ->
         if Fast.on?(:has_own),
           do: Fast.shadow(id, Props.has_own?(o, key), Props.descriptor(o, key) != :undefined),

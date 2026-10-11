@@ -43,10 +43,12 @@ defmodule Browser.JS.Fast do
   # same state, and the two must give the same result and leave the same record at `id`.
   # The old path must not fail a write and must not call JavaScript code: the guard of each
   # fast path excludes setters, getters and proxies, so the old path cannot get to user
-  # code. The old path must not change the heap either: the objects that it makes are
-  # erased, and the heap counters go back to their values before it. In the normal build
-  # the old path is in a branch that the compiler drops, so that a name or a function that
-  # only the old path uses is not reported as unused.
+  # code. The old path can throw a JavaScript error that the operation itself throws (a
+  # ReferenceError for a binding in its TDZ): then the fast path must throw an error of the
+  # same prototype with the same message. The old path must not change the heap either:
+  # the objects that it makes are erased, and the heap counters go back to their values
+  # before it. In the normal build the old path is in a branch that the compiler drops, so
+  # that a name or a function that only the old path uses is not reported as unused.
   defmacro shadow(id, fast, old) do
     if @check do
       quote do
@@ -77,10 +79,15 @@ defmodule Browser.JS.Fast do
       # the test below sees its own failure)
       :erlang.put(:js_put_failed, false)
 
+      # (a JavaScript error is a result: the error object is erased with the state below,
+      # so the result holds what identifies the error, `thrown/1`)
       old_result =
         try do
           old.()
         catch
+          :throw, {:js_error, e} ->
+            {:js_throw, thrown(e)}
+
           kind, reason ->
             fail("the old path of a fast path stopped with #{inspect({kind, reason}, limit: 8)}")
         end
@@ -103,7 +110,34 @@ defmodule Browser.JS.Fast do
         do: :erlang.erase(:js_put_failed),
         else: :erlang.put(:js_put_failed, flag)
 
-      fast_result = fast.()
+      # (when the old path throws, the fast path must throw too, and its error goes on)
+      fast_result =
+        case old_result do
+          {:js_throw, _} ->
+            try do
+              fast.()
+            catch
+              :throw, {:js_error, e} = error ->
+                if {:js_throw, thrown(e)} !== old_result,
+                  do:
+                    fail(
+                      "a fast path throws #{inspect(thrown(e), limit: 8)}, " <>
+                        "the old path #{inspect(old_result, limit: 8)}"
+                    )
+
+                throw(error)
+            else
+              r ->
+                fail(
+                  "a fast path gives #{inspect(r, limit: 8)}, " <>
+                    "the old path throws #{inspect(old_result, limit: 8)}"
+                )
+            end
+
+          _ ->
+            fast.()
+        end
+
       fast_record = if id, do: :erlang.get(id)
 
       if fast_result !== old_result,
@@ -122,6 +156,17 @@ defmodule Browser.JS.Fast do
 
       fast_result
     end
+
+    # What identifies a thrown value: the prototype and the message of an error object, or
+    # the value itself. It reads the record and no getter, so it runs no JavaScript code.
+    defp thrown({:obj, id} = v) do
+      case :erlang.get(id) do
+        %{props: props} = o -> {Map.get(o, :proto), Map.get(props, "message")}
+        _ -> v
+      end
+    end
+
+    defp thrown(v), do: v
 
     defp fail(msg), do: raise(ArgumentError, "fast path check: " <> msg)
   end

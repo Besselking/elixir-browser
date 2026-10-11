@@ -30,7 +30,7 @@ defmodule Browser.JS.FastTest do
   @moduletag timeout: 1_800_000
 
   if @check do
-    alias Browser.JS.{Builtins, Fast, GC, Interp, Parser, Props}
+    alias Browser.JS.{Builtins, Fast, GC, Interp, Modules, Parser, Props}
     alias Browser.JS.CompileTest.Corpus
 
     @file_name "t.js"
@@ -356,6 +356,83 @@ defmodule Browser.JS.FastTest do
         assert Enum.all?(outcomes, &match?(%{console: [_ | _], heap: h} when is_integer(h), &1))
         assert outcomes |> Enum.map(& &1.heap) |> Enum.uniq() |> length() > 3
         assert outcomes |> Enum.map(& &1.console) |> Enum.uniq() |> length() == length(outcomes)
+      end
+    end
+
+    describe "the shadow run" do
+      # A JavaScript error that the operation itself throws is a result: the old path and
+      # the fast path must throw the same error, and the error of the fast path goes on.
+      test "both paths throw the same JavaScript error" do
+        result =
+          in_process(fn ->
+            Interp.init(1_000)
+            Builtins.install()
+            err = fn msg -> fn -> Interp.throw_error("ReferenceError", msg) end end
+
+            same =
+              try do
+                Fast.shadow_run(nil, err.("x is not initialized"), err.("x is not initialized"))
+              catch
+                :throw, {:js_error, e} -> Interp.get(e, "message")
+              end
+
+            other =
+              try do
+                Fast.shadow_run(nil, err.("y"), err.("x"))
+              rescue
+                e in ArgumentError -> e.message
+              end
+
+            fast_gives =
+              try do
+                Fast.shadow_run(nil, fn -> true end, err.("x"))
+              rescue
+                e in ArgumentError -> e.message
+              end
+
+            {same, other, fast_gives}
+          end)
+
+        assert {"x is not initialized", "fast path check: a fast path throws" <> _,
+                "fast path check: a fast path gives true, the old path throws" <> _} = result
+      end
+
+      # `hasOwnProperty` on a namespace reads the binding, and a binding in its TDZ throws a
+      # ReferenceError. A namespace takes the old path of `Object.hasOwn`, so the shadow run
+      # does not see it.
+      test "hasOwnProperty on a module namespace with a binding in its TDZ" do
+        dir = Path.join(System.tmp_dir!(), "js-fast-ns-#{System.unique_integer([:positive])}")
+        File.mkdir_p!(dir)
+        path = Path.join(dir, "self.js")
+
+        src = ~S"""
+        import * as self from './self.js';
+        var r = [];
+        try { Object.prototype.hasOwnProperty.call(self, 'x') } catch (e) { r.push(e.constructor.name) }
+        try { Object.hasOwn(self, 'x') } catch (e) { r.push(e.constructor.name) }
+        r.push(Object.hasOwn(self, 'nope'), self.hasOwnProperty === undefined);
+        console.log(r.join());
+        export let x = 1;
+        """
+
+        File.write!(path, src)
+
+        loader =
+          {fn spec, base -> {:ok, Path.expand(spec, Path.dirname(base))} end,
+           fn p -> {:ok, File.read!(p), p} end}
+
+        console =
+          in_process(fn ->
+            Interp.init(100_000)
+            Builtins.install()
+            Modules.reset()
+            {:ok, program} = Parser.parse(src, module: true)
+            Modules.run(path, path, program, loader)
+            Enum.reverse(Process.get(:js_console, []))
+          end)
+
+        File.rm_rf!(dir)
+        assert [{_, "ReferenceError,ReferenceError,false,true"}] = console
       end
     end
   end
