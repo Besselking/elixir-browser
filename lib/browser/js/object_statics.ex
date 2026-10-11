@@ -7,6 +7,7 @@ defmodule Browser.JS.ObjectStatics do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Builtins, Interp, Props}
+  require Browser.JS.Fast, as: Fast
 
   defp get(o, k), do: Interp.get(o, k)
   defp arg(args, i), do: Enum.at(args, i, :undefined)
@@ -83,6 +84,22 @@ defmodule Browser.JS.ObjectStatics do
 
   defp proxy?({:obj, id}), do: Map.has_key?(deref(id), :proxy)
   defp proxy?(_), do: false
+
+  # A proxy answers through its getOwnPropertyDescriptor trap, so it needs the descriptor.
+  # Any other object does not: `Props.descriptor/2` gives :undefined exactly when the state
+  # of the key is nil, which is `Props.has_own?/2`, and that makes no descriptor object
+  # (fast path `:has_own`).
+  defp has_own?({:obj, id} = o, key) do
+    case deref(id) do
+      %{proxy: _} ->
+        Props.descriptor(o, key) != :undefined
+
+      _ ->
+        if Fast.on?(:has_own),
+          do: Fast.shadow(id, Props.has_own?(o, key), Props.descriptor(o, key) != :undefined),
+          else: Props.descriptor(o, key) != :undefined
+    end
+  end
 
   defp has_own?(o, key), do: Props.descriptor(o, key) != :undefined
 

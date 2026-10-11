@@ -11,6 +11,7 @@ defmodule Browser.JS.Props do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  require Browser.JS.Fast, as: Fast
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -63,7 +64,20 @@ defmodule Browser.JS.Props do
   end
 
   @doc "Whether the object has the key as an own property (virtual function properties too)."
-  def has_own?(obj, key), do: state(obj, key) != nil
+  def has_own?({:obj, id} = obj, key) do
+    case deref(id) do
+      # For a class other than :array, a key in `props` is an own property: `own/2` reaches
+      # its clause `Map.has_key?(o.props, key)` (the clauses before it are for arrays), and
+      # `state/2` asks `own/2` first (fast path `:has_own`).
+      %{class: c, props: %{^key => _}} when c != :array ->
+        if Fast.on?(:has_own),
+          do: Fast.shadow(id, true, state(obj, key) != nil),
+          else: state(obj, key) != nil
+
+      _ ->
+        state(obj, key) != nil
+    end
+  end
 
   defp state({:obj, id}, key) do
     o = deref(id)

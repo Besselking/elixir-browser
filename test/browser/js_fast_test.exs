@@ -340,6 +340,15 @@ defmodule Browser.JS.FastTest do
         )
       end
 
+      test "the switch turns a fast path off: hasOwnProperty makes its descriptors again" do
+        src =
+          "function f(){ var o = {a: 1}, n = 0; for (var i = 0; i < 10; i++) if (o.hasOwnProperty('a')) n++; return n } f()"
+
+        [{_, off, on}] = both([{"has own", src, []}], Fast.names(), [], ids: true)
+        assert off.result == {:ok, 10.0} and on.result == {:ok, 10.0}
+        assert off.next == on.next + 10
+      end
+
       test "the runner reports results, errors, the console and the export" do
         # A broken runner gives one outcome for every program and so passes the oracle.
         outcomes = for {_, a, _} <- both(Browser.JS.DatamodelCorpus.rows(), [], [], []), do: a

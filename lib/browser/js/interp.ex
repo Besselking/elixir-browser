@@ -48,6 +48,7 @@ defmodule Browser.JS.Interp do
 
   alias Browser.JS.Num
   alias Browser.JS.Resolve.{Info, Scope}
+  require Browser.JS.Fast, as: Fast
 
   # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
   defmacrop pget(key) do
@@ -2790,7 +2791,26 @@ defmodule Browser.JS.Interp do
 
   def own_keys(_), do: []
 
-  defp own_keys_plain(o) do
+  # The common case: a plain object whose keys all start with a character that is not a
+  # digit. Such a key cannot be an array index, so the sort of the index keys in
+  # `own_keys_plain2/1` has nothing to do, and the keys are the list in reverse (fast path
+  # `:has_own`). A symbol in `keys` is no plain name, and it goes to the long path, which
+  # drops it.
+  defp own_keys_plain(%{class: c, keys: keys} = o)
+       when c != :array and c != :function and not is_map_key(o, :prim) do
+    if Fast.on?(:has_own) and plain_names?(keys),
+      do: Fast.shadow(nil, :lists.reverse(keys), own_keys_plain2(o)),
+      else: own_keys_plain2(o)
+  end
+
+  defp own_keys_plain(o), do: own_keys_plain2(o)
+
+  defp plain_names?([<<c, _::binary>> | rest]) when c < ?0 or c > ?9, do: plain_names?(rest)
+  defp plain_names?(["" | rest]), do: plain_names?(rest)
+  defp plain_names?([]), do: true
+  defp plain_names?(_), do: false
+
+  defp own_keys_plain2(o) do
     base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
     case o do
