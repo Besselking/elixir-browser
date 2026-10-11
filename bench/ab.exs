@@ -119,7 +119,9 @@ parse_runtime = fn text ->
       String.starts_with?(line, "step 3") ->
         {"3", rows}
 
-      m = Regex.run(~r/^(.{34})\s*(\d+\.\d+)\s+(\d+\.\d+)\s/, line) ->
+      # (the name column is 34 wide, but a longer name pushes the numbers to the right, so
+      # the name is the text before the first two decimal numbers)
+      m = Regex.run(~r/^(.+?)\s+(\d+\.\d+)\s+(\d+\.\d+)\s/, line) ->
         [_, name, ms, mred] = m
         name = String.trim(name)
 

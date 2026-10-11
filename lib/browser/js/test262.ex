@@ -197,7 +197,8 @@ defmodule Browser.JS.Test262 do
   with the closure compiler of step 5 off, then on (`Browser.JS.Compile`). The two runs
   must give the same outcome (the result, or the error and its text, and the console),
   the same steps left (`:js_steps`), the same next heap id (`:js_next`), the same heap
-  count (`:js_heap_n`) and the same position (`:js_pos`). A difference is a failure with
+  count (`:js_heap_n`) and the same position (`:js_pos`). The steps of a test that reads
+  the clock are not compared (`clock?/2`). A difference is a failure with
   a reason that starts with "compile diff". When only one of the runs ends (the other
   times out or crashes), that is a compile diff too. When the two runs agree, or when
   neither run ends, the run with the compiler on is judged as usual.
@@ -226,7 +227,7 @@ defmodule Browser.JS.Test262 do
             outcome =
               execute(programs, source, max_steps, async?, regexp_utils?, path, module?, compile)
 
-            if compile == nil, do: outcome, else: {:done, outcome, probe()}
+            if compile == nil, do: outcome, else: {:done, outcome, probe(clock?(source, path))}
           end)
         end
 
@@ -244,8 +245,24 @@ defmodule Browser.JS.Test262 do
   # The state of the heap at the end of a run, which the two runs of `compile_diff` must
   # agree on: a change in the order of evaluation or of allocation changes the ids or the
   # count, and a change in the steps or the position shows a missed `tick` or `:js_pos`.
-  defp probe do
-    Map.new([:js_steps, :js_next, :js_heap_n, :js_pos], &{&1, :erlang.get(&1)})
+  # A test that waits for the clock does a number of steps that depends on the speed of
+  # the run, so its steps are not compared.
+  defp probe(clock?) do
+    keys =
+      if clock?,
+        do: [:js_next, :js_heap_n, :js_pos],
+        else: [:js_steps, :js_next, :js_heap_n, :js_pos]
+
+    Map.new(keys, &{&1, :erlang.get(&1)})
+  end
+
+  # The tests that read the clock: the source calls `Date.now`, or the test imports a
+  # fixture that does (the list names these tests).
+  @clock_tests ["language/expressions/dynamic-import/await-import-evaluation.js"]
+
+  defp clock?(source, path) do
+    String.contains?(source, "Date.now") or
+      (is_binary(path) and Enum.any?(@clock_tests, &String.ends_with?(path, &1)))
   end
 
   # Two runs that ended (no timeout and no crash) must agree. A run that ended is tagged

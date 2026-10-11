@@ -9,6 +9,11 @@ defmodule Browser.JS.CompileCoverageTest do
   # The test does not run the programs. It finds each function node of the parsed program
   # and compiles its body with the process key `:jsc_trace`, which makes the compiler list
   # the nodes that it gives to the tree walker.
+  #
+  # Two parts of design 5.4 are not here. The corpus is the snippets below and the bench
+  # programs; the four Speedometer bundles are left out, because they are not in the
+  # repository. And the test checks that the kinds on the tree are a subset of the allowed
+  # list, not that they are the full list: a kind that compiles now is not a fault.
   use ExUnit.Case, async: true
 
   alias Browser.JS.{Compile, Parser, Resolve}

@@ -389,6 +389,10 @@ defmodule Browser.JS.CompileTest do
      ~S|var G = 5; function f(){ G = G + 1; H = 2; return G + H + typeof Nope + typeof Math } console.log(f(), G, H)|},
     {"binary",
      ~S"function f(a, b){ return [a + b, a - b, a * b, a / b, a % b, a ** b, a < b, a > b, a <= b, a >= b, a == b, a === b, a != b, a !== b, a & b, a | b, a ^ b, a << b, a >> b, a >>> b].join() } function g(a, b){ return [a + b, a - b, a * b, a ** b, a < b, a == b, a & b, a << b, a >> b].join() } console.log(f(7, 3), f(-7.5, 2), f('7', 3), f(NaN, 0), g(1n, 2n), g(5n, 1n))"},
+    {"binary operand order",
+     ~S"function f(){ var log = []; function a(){ log.push('a'); return 6 } function b(){ log.push('b'); return 4 } var o = {valueOf(){ log.push('L'); return 7 }}, p = {valueOf(){ log.push('R'); return 2 }}; var r = [a() + b(), a() - b(), a() * b(), a() / b(), a() % b(), a() ** b(), a() < b(), a() == b(), a() === b(), a() & b(), a() | b(), a() ^ b(), a() << b(), a() >> b(), a() >>> b(), o % p, o / p, o ** p, o | p, o < p, o >= p]; var k = {x: 1}; r.push((log.push('k'), 'x') in (log.push('o'), k), (log.push('v'), k) instanceof (log.push('C'), Object)); return r.join() + ';' + log.join('') } console.log(f())"},
+    {"parameters and arguments",
+     ~S"function z(){ return arguments.length } function p1(a){ return [a] } function p2(a, b){ return [a, b] } function p3(a, b, c){ return [a, b, c] } function l2(a, b){ var t = a; return [t, b] } function s2(a, b){ 'use strict'; return [typeof this, a, b] } function w2(a, b){ return [this === globalThis, a, b] } function f(){ return [z(), z(1, 2), p1(), p1(1, 2), p2(), p2(1), p2(1, 2, 3), p3(1), p3(1, 2), p3(1, 2, 3, 4), l2(1), l2(), s2(1), w2(), w2.call(5, 1)].map(String).join(';') } console.log(f())"},
     {"binary in instanceof",
      ~S|function f(o){ return ['a' in o, 0 in [1], o instanceof Object, [] instanceof Array, f instanceof Function].join() } console.log(f({a: 1}))|},
     {"binary errors",
@@ -479,7 +483,7 @@ defmodule Browser.JS.CompileTest do
   ]
 
   # One object of each class, read and written with constant keys (design 5.4, "Classes").
-  # The compiler sends a constant key that is not an index and not "length" to
+  # The compiler sends a constant key that is not an array index (also "length") to
   # `get_named/2` and `put_named/3`, and every other key to `get/2` and `put/3`. The two
   # runs must agree for every class.
   @classes [

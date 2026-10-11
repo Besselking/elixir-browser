@@ -784,9 +784,7 @@ defmodule Browser.JS.Interp do
   end
 
   # Fails when `id` is the tombstone of a freed frame.
-  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
-  @doc false
-  def check_live(id) do
+  defp check_live(id) do
     case :erlang.get(id) do
       {:js_freed, name} -> check_fail("use of a freed frame of #{name}")
       _ -> :ok
@@ -3811,7 +3809,12 @@ defmodule Browser.JS.Interp do
   # does not compile, and the tree walker runs it.
   @compile {:inline, with_code: 2}
   defp with_code(_id, %{code: _} = c), do: c
-  defp with_code(id, c), do: first_call(id, c)
+
+  # (with the switch off, the record stays as it is, so that `JS_COMPILE=0` does the work
+  # of the tree walker only and is a true baseline for the A/B runs)
+  defp with_code(id, c) do
+    if :erlang.get(:js_compile) == true, do: first_call(id, c), else: c
+  end
 
   # The first call of a function object: the code comes from the cache or the compiler,
   # and goes into the closure record in the heap, so that the next calls find it there.
@@ -5273,18 +5276,16 @@ defmodule Browser.JS.Interp do
   # or generator, see `Browser.JS.Async`)
   def exec_frame_stmt(stmt, env, labels \\ []), do: fstmt(stmt, env, labels)
 
-  @doc false
   # A statement list inside a rewritten function. A statement that does not complete
-  # normally ends the list, as in `exec_list/2`. (public: the compiled body of
-  # `Browser.JS.Compile` calls it)
-  def fbody([], _env), do: :ok
+  # normally ends the list, as in `exec_list/2`.
+  defp fbody([], _env), do: :ok
 
-  def fbody([{:pos, loc} | rest], env) do
+  defp fbody([{:pos, loc} | rest], env) do
     :erlang.put(:js_pos, loc)
     fbody(rest, env)
   end
 
-  def fbody([stmt | rest], env) do
+  defp fbody([stmt | rest], env) do
     case fstmt(stmt, env, []) do
       :ok ->
         fbody(rest, env)

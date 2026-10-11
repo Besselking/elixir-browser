@@ -71,6 +71,8 @@ defmodule Browser.JS.Compile do
   A property read or write with a constant key uses `Interp.get_named/2` or
   `Interp.put_named/3` when the key is not an array index. These functions use the same
   class dispatch as `Interp.get/2` and `Interp.put/3`, but they do not convert the key.
+  The key `"length"` also goes to these functions (the design kept it on `get/2`): their
+  class dispatch has the `length` clauses of arrays, strings and functions.
 
   ## Shells
 
@@ -120,12 +122,19 @@ defmodule Browser.JS.Compile do
     * the `Info` has a `uid`;
     * the switch `:js_compile` of the process is on.
 
+  The level of a function is the level of the parse that made it. The JS built-ins
+  (`Browser.JS.Prelude` and the prelude of the web API) parse at the level of the
+  application. Thus, with the application at level 4, they compile also in a script that
+  parses at `:off`. For a run with no compiled code, set the application level to `:off`
+  (`JS_RESOLVE=off`) or the switch to `false` (`JS_COMPILE=0`).
+
   ## The switch
 
   The application setting `:js_compile` is the switch. Its default is `true`.
   `JS_COMPILE=0` sets it to `false`. `Browser.JS.Interp.init/1` copies the setting into
   the process dictionary. Thus each heap has its own value, and one VM can run the two
-  modes.
+  modes. With the switch off, a closure record gets no `code` key, so the run does the
+  work of the tree walker only.
 
   ## The cache
 
@@ -275,7 +284,14 @@ defmodule Browser.JS.Compile do
         b -> b
       end
 
-    if total + n > @budget do
+    # (a test can set a smaller budget in the process key `:jsc_budget_max`)
+    max =
+      case :erlang.get(:jsc_budget_max) do
+        :undefined -> @budget
+        m -> m
+      end
+
+    if total + n > max do
       for {{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
       :erlang.put(:jsc_budget, {n, erases + 1})
     else

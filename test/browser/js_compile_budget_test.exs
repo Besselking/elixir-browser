@@ -39,6 +39,23 @@ defmodule Browser.JS.CompileBudgetTest do
     assert entries < 100_000
   end
 
+  test "over a small budget the cache is erased, and the count stays under the budget" do
+    # (the same loop as the corpus test above, with a budget of 50,000 words in place of
+    # the 5,000,000 of the browser, so that the erase happens in a fast test)
+    src = """
+    var body = 'var s = a;' + ' s = s + 1;'.repeat(10) + ' return s';
+    var t = 0;
+    for (var i = 0; i < 2000; i++) { t += new Function('a', body)(i) }
+    t
+    """
+
+    {value, {words, erases}, entries} = run(src, 50_000)
+    assert value == Enum.sum(0..1999) + 10 * 2000 * 1.0
+    assert words <= 50_000
+    assert erases >= 5
+    assert entries < 2000
+  end
+
   test "eval in a loop compiles each new function and counts its words" do
     src = """
     var t = 0;
@@ -82,8 +99,9 @@ defmodule Browser.JS.CompileBudgetTest do
 
   # Runs `src` in a fresh heap. Gives the value, the count of the cache and the number of
   # entries of the cache.
-  defp run(src) do
+  defp run(src, budget \\ nil) do
     in_heap(fn ->
+      if budget, do: :erlang.put(:jsc_budget_max, budget)
       {:ok, program} = Parser.parse(src, resolve: 4)
       value = Interp.run_program(program, true)
       entries = Enum.count(:erlang.get(), &match?({{:jsc, _}, _}, &1))
