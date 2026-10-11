@@ -5,6 +5,7 @@ defmodule Browser.JS.Global do
   """
 
   alias Browser.JS.Interp
+  require Browser.JS.Obj, as: Obj
 
   def new, do: Interp.new_host(__MODULE__, :global, Interp.proto(:object))
 
@@ -38,7 +39,7 @@ defmodule Browser.JS.Global do
 
   def host_put(:global, _key, _v, _self), do: :miss
 
-  defp own_defined?({:obj, id}, key), do: Map.has_key?(Interp.deref(id).props, key)
+  defp own_defined?({:obj, id}, key), do: Obj.has_own?(Interp.deref(id), key)
   defp own_defined?(_, _), do: false
 
   def host_has(:global, key),

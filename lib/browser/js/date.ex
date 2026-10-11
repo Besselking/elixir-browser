@@ -6,6 +6,7 @@ defmodule Browser.JS.Date do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  require Browser.JS.Obj, as: Obj
 
   @ms_day 86_400_000
   @max_time 8.64e15
@@ -159,10 +160,8 @@ defmodule Browser.JS.Date do
 
     set_arity(to_prim, 1)
     {:obj, pid} = proto
-    po = deref(pid)
     key = {:symbol, :toPrimitive, "Symbol.toPrimitive"}
-    attrs = Map.put(Map.get(po, :attrs, %{}), key, %{w: false, c: true, e: false})
-    store(pid, po |> Map.put(:props, Map.put(po.props, key, to_prim)) |> Map.put(:attrs, attrs))
+    store(pid, Obj.put_with_attrs(deref(pid), key, to_prim, %{w: false, c: true, e: false}))
   end
 
   defp to_object({:obj, _} = o), do: o

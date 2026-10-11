@@ -12,24 +12,25 @@ defmodule Browser.JS.Builtins do
   alias Browser.JS.Str
   alias Browser.JS.Num
   require Browser.JS.Fast, as: Fast
+  require Browser.JS.Obj, as: Obj
 
   @timer_horizon 60_000.0
   @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
 
   @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
   def install do
-    object_proto = {:obj, alloc(%{class: :object, props: %{}, keys: [], proto: nil})}
+    object_proto = {:obj, alloc(Obj.record(class: :object, proto: nil))}
     put_proto(:object, object_proto)
 
     function_proto =
       {:obj,
-       alloc(%{
-         class: :function,
-         fun: {:native, "", fn _, _ -> :undefined end},
-         props: %{},
-         keys: [],
-         proto: object_proto
-       })}
+       alloc(
+         Obj.record(
+           class: :function,
+           fun: {:native, "", fn _, _ -> :undefined end},
+           proto: object_proto
+         )
+       )}
 
     put_proto(:function, function_proto)
 
@@ -427,8 +428,8 @@ defmodule Browser.JS.Builtins do
     o = deref(id)
 
     o.class == :array and
-      not (Map.get(o, :frozen, false) or Map.get(o, :sealed, false) or
-             Map.get(o, :len_ro, false) or Map.get(o, :ext, true) == false)
+      not (Obj.frozen?(o) or Obj.sealed?(o) or Map.get(o, :len_ro, false) or
+             Obj.extensible?(o) == false)
   end
 
   defp plain_array?(_), do: false

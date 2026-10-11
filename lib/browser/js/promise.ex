@@ -14,6 +14,7 @@ defmodule Browser.JS.Promise do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  require Browser.JS.Obj, as: Obj
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -21,15 +22,15 @@ defmodule Browser.JS.Promise do
 
   def new do
     {:obj,
-     alloc(%{
-       class: :promise,
-       state: :pending,
-       value: :undefined,
-       reactions: [],
-       props: %{},
-       keys: [],
-       proto: proto(:promise)
-     })}
+     alloc(
+       Obj.record(
+         class: :promise,
+         state: :pending,
+         value: :undefined,
+         reactions: [],
+         proto: proto(:promise)
+       )
+     )}
   end
 
   def promise?({:obj, id}), do: match?(%{class: :promise}, deref(id))

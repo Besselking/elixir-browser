@@ -19,6 +19,7 @@ defmodule Browser.JS.Classes do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props}
+  require Browser.JS.Obj, as: Obj
 
   # Check mode (`JS_RESOLVE_CHECK=1`), as in `Browser.JS.Interp`: the flag is read at
   # compile time, so without it no check costs anything.
@@ -113,14 +114,7 @@ defmodule Browser.JS.Classes do
     {:obj, fid} = f
     fobj = deref(fid)
     fobj = Map.put(fobj, :class_ctor, true)
-
-    fobj =
-      Map.update(
-        fobj,
-        :attrs,
-        %{"prototype" => %{w: false, c: false}},
-        &Map.put(&1, "prototype", %{w: false, c: false})
-      )
+    fobj = Obj.put_attrs(fobj, "prototype", %{w: false, c: false})
 
     store(fid, if(parent, do: %{fobj | proto: parent}, else: fobj))
 
@@ -377,7 +371,7 @@ defmodule Browser.JS.Classes do
         case List.first(args, :undefined) do
           {:obj, id} = o ->
             case k do
-              {:private, _} -> Map.has_key?(deref(id).props, k)
+              {:private, _} -> Obj.has_own?(deref(id), k)
               _ -> Interp.has_property?(o, k)
             end
 
@@ -599,7 +593,7 @@ defmodule Browser.JS.Classes do
   end
 
   defp accessor_slot!({:obj, id}, storage) do
-    unless Map.has_key?(deref(id).props, storage),
+    unless Obj.has_own?(deref(id), storage),
       do: throw_error("TypeError", "Cannot access an auto-accessor on an object that lacks it")
   end
 
@@ -770,7 +764,7 @@ defmodule Browser.JS.Classes do
   # stores a private method, accessor half or field value on an object
   defp put_private({:obj, id}, key, kind, value) do
     o = deref(id)
-    existing = Map.get(o.props, key)
+    existing = Obj.own_value(o, key)
 
     duplicate? =
       case {kind, existing} do
@@ -796,7 +790,7 @@ defmodule Browser.JS.Classes do
       end
 
     o = if kind == :method, do: Map.update(o, :pmethods, [key], &[key | &1]), else: o
-    store(id, %{o | props: Map.put(o.props, key, stored)})
+    store(id, Obj.own_put_value(o, key, stored))
   end
 
   # `super(...)` and `super_base/1` find their bindings by name. From resolve level 3 (step

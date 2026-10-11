@@ -6,6 +6,7 @@ defmodule Browser.JS.FunctionProto do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  require Browser.JS.Obj, as: Obj
 
   @has_instance {:symbol, :hasInstance, "Symbol.hasInstance"}
 
@@ -132,16 +133,8 @@ defmodule Browser.JS.FunctionProto do
     unless function?(f), do: throw_error("TypeError", "#{what} called on a non-function")
   end
 
-  defp put_attr({:obj, id}, key, v, attrs) do
-    o = deref(id)
-
-    store(
-      id,
-      o
-      |> Map.put(:props, Map.put(o.props, key, v))
-      |> Map.put(:attrs, Map.put(Map.get(o, :attrs, %{}), key, attrs))
-    )
-  end
+  defp put_attr({:obj, id}, key, v, attrs),
+    do: store(id, Obj.put_with_attrs(deref(id), key, v, attrs))
 
   defp to_length(v) do
     case to_num(v) do

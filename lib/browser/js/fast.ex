@@ -68,6 +68,8 @@ defmodule Browser.JS.Fast do
   end
 
   if @check do
+    require Browser.JS.Obj
+
     @doc false
     # `on?/1` of the check build. When the process key `:js_fast_hits` holds a map, it
     # counts the times that each fast path is on where the code asks, so that a test can
@@ -184,8 +186,11 @@ defmodule Browser.JS.Fast do
     # the value itself. It reads the record and no getter, so it runs no JavaScript code.
     defp thrown({:obj, id} = v) do
       case :erlang.get(id) do
-        %{props: props} = o -> {Map.get(o, :proto), Map.get(props, "message")}
-        _ -> v
+        o when Browser.JS.Obj.object?(o) ->
+          {Map.get(o, :proto), Browser.JS.Obj.own_value(o, "message")}
+
+        _ ->
+          v
       end
     end
 

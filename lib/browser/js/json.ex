@@ -7,6 +7,7 @@ defmodule Browser.JS.Json do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Num, Props, Proxy}
+  require Browser.JS.Obj, as: Obj
 
   defp get(o, k), do: Interp.get(o, k)
   defp arg(args, i), do: Enum.at(args, i, :undefined)
@@ -54,11 +55,10 @@ defmodule Browser.JS.Json do
 
     store(
       id,
-      Map.merge(deref(id), %{
-        ext: false,
-        raw_json: true,
-        attrs: %{"rawJSON" => %{w: false, c: false, e: true}}
-      })
+      deref(id)
+      |> Obj.put_with_attrs("rawJSON", text, %{w: false, c: false, e: true})
+      |> Obj.prevent()
+      |> Map.put(:raw_json, true)
     )
 
     obj

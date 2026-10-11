@@ -4,8 +4,9 @@ defmodule Browser.JS.Collections do
   for the JavaScript runtime.
 
   A symbol is `{:symbol, id, description}`; the well-known ones have atoms for their id
-  (`{:symbol, :iterator, "Symbol.iterator"}`). A symbol-keyed property is an ordinary entry in the
-  object's `props` that is not listed in `keys`, so it stays out of `Object.keys` and `for in`.
+  (`{:symbol, :iterator, "Symbol.iterator"}`). A symbol-keyed property is an own property that is
+  not in the list of enumerable names (`Browser.JS.Obj`), so it stays out of `Object.keys` and
+  `for in`.
 
   A `Map` or `Set` is a heap object of class `:map` or `:set` with its entries under `data`,
   keyed by the SameValueZero form of the key and numbered by insertion.
@@ -13,6 +14,7 @@ defmodule Browser.JS.Collections do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props}
+  require Browser.JS.Obj, as: Obj
 
   @iterator {:symbol, :iterator, "Symbol.iterator"}
   @well_known ~w(iterator asyncIterator hasInstance toPrimitive toStringTag species isConcatSpreadable
@@ -108,9 +110,7 @@ defmodule Browser.JS.Collections do
     store(tp_id, Map.put(deref(tp_id), :arity, 1.0))
     key = {:symbol, :toPrimitive, "Symbol.toPrimitive"}
     {:obj, pid} = p
-    po = deref(pid)
-    attrs = Map.put(Map.get(po, :attrs, %{}), key, %{w: false, c: true, e: false})
-    store(pid, po |> Map.put(:props, Map.put(po.props, key, to_prim)) |> Map.put(:attrs, attrs))
+    store(pid, Obj.put_with_attrs(deref(pid), key, to_prim, %{w: false, c: true, e: false}))
     :ok
   end
 
@@ -285,8 +285,7 @@ defmodule Browser.JS.Collections do
     key = {:symbol, :unscopables, "Symbol.unscopables"}
     put_hidden(array, key, unscopables)
     {:obj, aid} = array
-    ao = deref(aid)
-    store(aid, Map.put(ao, :attrs, Map.put(Map.get(ao, :attrs, %{}), key, %{w: false, c: true})))
+    store(aid, Obj.put_attrs(deref(aid), key, %{w: false, c: true}))
 
     def_fn(array, "keys", fn this, _ -> live_array_iterator(this, :keys) end)
     def_fn(array, "entries", fn this, _ -> live_array_iterator(this, :entries) end)
@@ -314,15 +313,15 @@ defmodule Browser.JS.Collections do
 
   defp new_collection(class, proto_name) do
     {:obj,
-     alloc(%{
-       class: class,
-       data: %{},
-       seq: 0,
-       order: :gb_trees.empty(),
-       props: %{},
-       keys: [],
-       proto: proto(proto_name)
-     })}
+     alloc(
+       Obj.record(
+         class: class,
+         data: %{},
+         seq: 0,
+         order: :gb_trees.empty(),
+         proto: proto(proto_name)
+       )
+     )}
   end
 
   # a constructor was called with `new`: `this` is the object to turn into the collection
