@@ -1622,16 +1622,19 @@ defmodule Browser.JS.Interp do
   # ── properties ─────────────────────────────────────────────
 
   # array indices stop below 2^32 - 1; larger integers are ordinary property names
-  defp index(k) when is_number(k) and k >= 0 and k < 4_294_967_295 and k == trunc(k), do: trunc(k)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it when it
+  # compiles, to find the constant keys that `get_named/2` and `put_named/3` can take.
+  @doc false
+  def index(k) when is_number(k) and k >= 0 and k < 4_294_967_295 and k == trunc(k), do: trunc(k)
 
-  defp index(k) when is_binary(k) do
+  def index(k) when is_binary(k) do
     case Integer.parse(k) do
       {i, ""} when i >= 0 and i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
       _ -> nil
     end
   end
 
-  defp index(_), do: nil
+  def index(_), do: nil
 
   def get({:obj, id} = obj, {:private, _} = key) do
     case Map.fetch(deref(id).props, key) do
@@ -1654,12 +1657,62 @@ defmodule Browser.JS.Interp do
   def get(_, {:private, _}),
     do: throw_error("TypeError", "Cannot read private member from a non-object")
 
-  def get({:obj, id}, key) do
-    o = deref(id)
+  def get({:obj, id}, key), do: get_obj(id, deref(id), key, false)
 
+  def get(s, key) when is_binary(s), do: get_str(s, key, false)
+
+  def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
+    do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
+
+  def get({:bigint, _} = n, key), do: lookup(deref(elem(proto(:bigint), 1)), to_key(key), n)
+  def get({:symbol, _, _} = s, key), do: lookup(deref(elem(proto(:symbol), 1)), to_key(key), s)
+
+  def get(b, key) when is_boolean(b),
+    do: lookup(deref(elem(proto(:boolean), 1)), to_key(key), b)
+
+  def get(v, key),
+    do:
+      throw_error(
+        "TypeError",
+        "Cannot read properties of #{to_str(v)} (reading '#{safe_key(key)}')"
+      )
+
+  @doc false
+  # A property read with a constant key (step 5, `Browser.JS.Compile`). The compiler gives
+  # only a string key that is not an array index, so the read skips `index/1` and
+  # `to_key/1`. The class dispatch is the one of `get/2`, in `get_obj/4`, so the two reads
+  # cannot drift apart. A primitive goes to `get/2`.
+  def get_named({:obj, id}, key), do: get_obj(id, deref(id), key, true)
+  def get_named(s, key) when is_binary(s), do: get_str(s, key, true)
+  def get_named(v, key), do: get(v, key)
+
+  # The read of `key` from the string `s`, for `get/2` and `get_named/2`: an index gives a
+  # character, `length` gives the length, and every other key comes from the prototype of
+  # strings. `named?` is as in `get_obj/4`. A string receiver is common in compiled code
+  # (`s.charAt(i)`, `s.length`), and a named key skips the parse of `index/1`.
+  @compile {:inline, get_str: 3}
+  defp get_str(s, key, named?) do
+    case if(named?, do: nil, else: index(key)) do
+      i when is_integer(i) ->
+        Browser.JS.Str.at(s, i) || :undefined
+
+      nil ->
+        if key == "length",
+          do: Browser.JS.Str.length(s) * 1.0,
+          else: lookup(deref(elem(proto(:string), 1)), if(named?, do: key, else: to_key(key)), s)
+    end
+  end
+
+  # The read of `key` from the object `o` with the id `id`: the class dispatch of `get/2`
+  # and `get_named/2`. `named?` is true when the key is a string that is not an array
+  # index, so `index/1` and `to_key/1` have nothing to do. The function is inline, so each
+  # caller has its own copy, in which the compiler removes the tests of the constant
+  # `named?`, and a read does not cost one more call.
+  @compile {:inline, get_obj: 4}
+  defp get_obj(id, o, key, named?) do
     case o.class do
       :array ->
-        case index(key) do
+        case if(named?, do: nil, else: index(key)) do
           i when is_integer(i) ->
             case o.items do
               %{^i => {:accessor, g, _}} ->
@@ -1684,12 +1737,12 @@ defmodule Browser.JS.Interp do
                 o.len * 1.0
 
               true ->
-                lookup(o, to_key(key), {:obj, id})
+                lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
             end
         end
 
       :function ->
-        key = to_key(key)
+        key = if(named?, do: key, else: to_key(key))
 
         if Map.has_key?(o, :proxy) do
           Browser.JS.Proxy.get({:obj, id}, key, {:obj, id})
@@ -1703,7 +1756,7 @@ defmodule Browser.JS.Interp do
         Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
 
       :host ->
-        key = to_key(key)
+        key = if(named?, do: key, else: to_key(key))
         {mod, data} = o.host
 
         # the typed array accessors are inherited: an own property of the same name wins
@@ -1721,43 +1774,20 @@ defmodule Browser.JS.Interp do
         case o do
           # a String wrapper's characters
           %{prim: str} when is_binary(str) ->
-            case index(key) do
+            case if(named?, do: nil, else: index(key)) do
               i when is_integer(i) ->
-                Browser.JS.Str.at(str, i) || lookup(o, to_key(key), {:obj, id})
+                Browser.JS.Str.at(str, i) ||
+                  lookup(o, to_key(key), {:obj, id})
 
               _ ->
-                lookup(o, to_key(key), {:obj, id})
+                lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
             end
 
           _ ->
-            lookup(o, to_key(key), {:obj, id})
+            lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
         end
     end
   end
-
-  def get(s, key) when is_binary(s) do
-    case {index(key), key} do
-      {i, _} when is_integer(i) -> Browser.JS.Str.at(s, i) || :undefined
-      {_, "length"} -> Browser.JS.Str.length(s) * 1.0
-      _ -> lookup(deref(elem(proto(:string), 1)), to_key(key), s)
-    end
-  end
-
-  def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
-    do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
-
-  def get({:bigint, _} = n, key), do: lookup(deref(elem(proto(:bigint), 1)), to_key(key), n)
-  def get({:symbol, _, _} = s, key), do: lookup(deref(elem(proto(:symbol), 1)), to_key(key), s)
-
-  def get(b, key) when is_boolean(b),
-    do: lookup(deref(elem(proto(:boolean), 1)), to_key(key), b)
-
-  def get(v, key),
-    do:
-      throw_error(
-        "TypeError",
-        "Cannot read properties of #{to_str(v)} (reading '#{safe_key(key)}')"
-      )
 
   # a property found along the prototype chain; a getter is called with the object it was
   # asked of as `this`
@@ -2133,12 +2163,48 @@ defmodule Browser.JS.Interp do
   def put(_, {:private, _}, _),
     do: throw_error("TypeError", "Cannot write private member to a non-object")
 
-  def put({:obj, id}, key, v) do
-    o = deref(id)
+  def put({:obj, id}, key, v), do: put_obj(id, deref(id), key, v, false)
 
+  def put(v, key, _) when v in [:undefined, :null],
+    do:
+      throw_error(
+        "TypeError",
+        "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
+      )
+
+  # a primitive has no property of its own to set, but a setter (or proxy) on its prototype
+  # chain still runs
+  def put(primitive, key, v) do
+    primitive_set(primitive, key, v)
+    v
+  end
+
+  @doc false
+  # A property write with a constant key (step 5, `Browser.JS.Compile`), as `get_named/2`
+  # reads one: the key is a string that is not an array index, and the class dispatch is
+  # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`.
+  def put_named({:obj, id}, key, v), do: put_obj(id, deref(id), key, v, true)
+  def put_named(ov, key, v), do: put(ov, key, v)
+
+  @doc false
+  # `strict_put/3` with a constant key, through `put_named/3`. A primitive goes to
+  # `strict_put/3`, which has a clause of its own for primitives.
+  def strict_put_named({:obj, _} = ov, key, v) do
+    :erlang.put(:js_put_failed, false)
+    put_named(ov, key, v)
+    strict_done(key, v)
+  end
+
+  def strict_put_named(ov, key, v), do: strict_put(ov, key, v)
+
+  # The write of `v` to `key` of the object `o` with the id `id`: the class dispatch of
+  # `put/3` and `put_named/3`. `named?` is true when the key is a string that is not an
+  # array index, as in `get_obj/4`. The function is inline for the same reason.
+  @compile {:inline, put_obj: 5}
+  defp put_obj(id, o, key, v, named?) do
     case o do
       %{class: :array} ->
-        case index(key) do
+        case if(named?, do: nil, else: index(key)) do
           i when is_integer(i) ->
             cond do
               match?(%{^i => {:accessor, _, _}}, o.items) ->
@@ -2198,7 +2264,7 @@ defmodule Browser.JS.Interp do
         end
 
       %{class: :host, host: {mod, data}} ->
-        key = to_key(key)
+        key = if(named?, do: key, else: to_key(key))
 
         case mod.host_put(data, key, v, {:obj, id}) do
           :ok -> :ok
@@ -2207,7 +2273,14 @@ defmodule Browser.JS.Interp do
         end
 
       %{proxy: _} ->
-        unless Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id}), do: fail_put()
+        unless Browser.JS.Proxy.set(
+                 {:obj, id},
+                 if(named?, do: key, else: to_key(key)),
+                 v,
+                 {:obj, id}
+               ),
+               do: fail_put()
+
         :ok
 
       # a function's own name and length are not writable
@@ -2217,23 +2290,9 @@ defmodule Browser.JS.Interp do
           else: put_prop(id, o, key, v)
 
       _ ->
-        put_prop(id, o, to_key(key), v)
+        put_prop(id, o, if(named?, do: key, else: to_key(key)), v)
     end
 
-    v
-  end
-
-  def put(v, key, _) when v in [:undefined, :null],
-    do:
-      throw_error(
-        "TypeError",
-        "Cannot set properties of #{to_str(v)} (setting '#{safe_key(key)}')"
-      )
-
-  # a primitive has no property of its own to set, but a setter (or proxy) on its prototype
-  # chain still runs
-  def put(primitive, key, v) do
-    primitive_set(primitive, key, v)
     v
   end
 
@@ -2349,7 +2408,13 @@ defmodule Browser.JS.Interp do
   def strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
     put(ov, key, v)
+    strict_done(key, v)
+  end
 
+  # The end of a strict write (`strict_put/3`, `strict_put_named/3`): a write that failed
+  # throws, and a write that did not fail gives the value.
+  @compile {:inline, strict_done: 2}
+  defp strict_done(key, v) do
     if :erlang.get(:js_put_failed) == true do
       :erlang.put(:js_put_failed, false)
       throw_error("TypeError", "Cannot assign to read only property '#{to_str(key)}'")

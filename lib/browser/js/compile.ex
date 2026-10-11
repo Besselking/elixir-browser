@@ -131,7 +131,8 @@ defmodule Browser.JS.Compile do
     * a slot read or write calls the same checks as its twin on the tree, and a call
       checks the call chain (S3);
     * a shell has no compiled child in a function, in a class or in the callee of a call
-      (S4).
+      (S4);
+    * the compiled code of a body keeps no object, no `{:val}` node and no frame (S5).
 
   When the process key `:jsc_trace` holds a list, the compiler adds to it each node that
   stays on the tree. The coverage test uses this list.
@@ -166,6 +167,7 @@ defmodule Browser.JS.Compile do
 
   defp compile_and_store(c, uid) do
     body = body(c)
+    check_capture(body)
     :erlang.put({:jsc, uid}, {body, nil})
     body
   end
@@ -225,9 +227,24 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  # The scope `d` hops above `env`, as `Interp.hop/2` finds it. One hop reads the header
-  # of the frame inline. Check mode always calls `hop/2`, which checks that each frame is
-  # live.
+  # The parent of the scope `env`: the first element of a frame, or the `parent` of a map
+  # scope, as `parent_of/1` in `Interp` reads it. (check mode reads parents with `hop/2`,
+  # so only the normal build has the macro)
+  unless @check do
+    defmacrop parent(env) do
+      quote do
+        case :erlang.get(unquote(env)) do
+          parent_f when is_tuple(parent_f) -> :erlang.element(1, parent_f)
+          %{parent: parent_p} -> parent_p
+        end
+      end
+    end
+  end
+
+  # The scope `d` hops above `env`, as `Interp.hop/2` finds it. Up to three hops read the
+  # headers inline, because the code of a bundle runs in functions that are nested in the
+  # function of its module, and a read of a name of the module is two or three hops away.
+  # Check mode always calls `hop/2`, which checks that each frame is live.
   defmacrop up(env, d) do
     if @check do
       quote do: Interp.hop(unquote(env), unquote(d))
@@ -236,17 +253,11 @@ defmodule Browser.JS.Compile do
         env = unquote(env)
 
         case unquote(d) do
-          0 ->
-            env
-
-          1 ->
-            case :erlang.get(env) do
-              f when is_tuple(f) -> :erlang.element(1, f)
-              %{parent: p} -> p
-            end
-
-          d ->
-            Interp.hop(env, d)
+          0 -> env
+          1 -> parent(env)
+          2 -> parent(parent(env))
+          3 -> parent(parent(parent(env)))
+          d -> Interp.hop(env, d)
         end
       end
     end
@@ -697,7 +708,7 @@ defmodule Browser.JS.Compile do
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_id(id, Interp.hop(env, d))
+      Interp.ev_id(id, up(env, d))
     end
   end
 
@@ -873,9 +884,19 @@ defmodule Browser.JS.Compile do
   defp key_code({:str, s}), do: {:k, s}
   defp key_code(k), do: opnd(k)
 
+  # A constant key that `Interp.get_named/2` and `Interp.put_named/3` can take: a string
+  # that is not an array index. Such a key needs no `index/1` and no `to_key/1` when the
+  # code runs.
+  defp named?(k), do: is_binary(k) and Interp.index(k) == nil
+
   # A property read, as `ev/2` reads `{:member, o, k, opt}`: the object, the test of an
-  # optional member, then the key.
-  defp member(oo, {:k, s}, false), do: one(env, oo, ov, Interp.get(ov, s))
+  # optional member, then the key. A named key reads through `get_named/2`, which has the
+  # class dispatch of `get/2`.
+  defp member(oo, {:k, s}, false) do
+    if named?(s),
+      do: one(env, oo, ov, Interp.get_named(ov, s)),
+      else: one(env, oo, ov, Interp.get(ov, s))
+  end
 
   defp member(oo, ko, false), do: pair(env, oo, ko, ov, key, Interp.get(ov, key))
 
@@ -893,22 +914,31 @@ defmodule Browser.JS.Compile do
 
   # A property write `o[k] = v`: the object, the key, then the value, as `ev/2` writes it.
   # Sloppy code gives the value, and strict code gives what `strict_put/3` gives. A
-  # constant key has nothing to evaluate, so the object and the value are a pair.
+  # constant key has nothing to evaluate, so the object and the value are a pair. A named
+  # key writes through `put_named/3`, which has the class dispatch of `put/3`.
   defp put(:assign, oo, {:k, s}, vo) do
-    pair(
-      env,
-      oo,
-      vo,
-      ov,
-      v,
-      (
-        Interp.put(ov, s, v)
-        v
+    if named?(s) do
+      pair(env, oo, vo, ov, v, Interp.put_named(ov, s, v))
+    else
+      pair(
+        env,
+        oo,
+        vo,
+        ov,
+        v,
+        (
+          Interp.put(ov, s, v)
+          v
+        )
       )
-    )
+    end
   end
 
-  defp put(:sassign, oo, {:k, s}, vo), do: pair(env, oo, vo, ov, v, Interp.strict_put(ov, s, v))
+  defp put(:sassign, oo, {:k, s}, vo) do
+    if named?(s),
+      do: pair(env, oo, vo, ov, v, Interp.strict_put_named(ov, s, v)),
+      else: pair(env, oo, vo, ov, v, Interp.strict_put(ov, s, v))
+  end
 
   defp put(:assign, oo, ko, vo) do
     fn env ->
@@ -1032,12 +1062,29 @@ defmodule Browser.JS.Compile do
   # A callee that `call_target/2` reads by name, a `super` callee and an optional chain
   # stay on the tree.
   defp target({:member, o, k, mopt}) when elem(k, 0) != :priv,
-    do: {:ok, {:member, opnd(o), key_code(k), mopt}}
+    do: {:ok, {:member, opnd(o), method_key(k), mopt}}
 
   defp target({k, _}) when k in [:id, :super_member, :chain], do: :error
   defp target({:member, _, _, _}), do: :error
   defp target({:super}), do: :error
   defp target(callee), do: {:ok, {:plain, opnd(callee)}}
+
+  # The key of a method call: `{:named, key}` for a named key (see `named?/1`), or an
+  # operand form.
+  defp method_key({:str, s} = k), do: if(named?(s), do: {:named, s}, else: key_code(k))
+  defp method_key(k), do: key_code(k)
+
+  # The read of the method of a call from the object `ov`, with the key form of
+  # `method_key/1`. The test of the form is one `case` on a term of the closure, so it
+  # costs no call.
+  defmacrop method(ov, ko, env) do
+    quote do
+      case unquote(ko) do
+        {:named, method_s} -> Interp.get_named(unquote(ov), method_s)
+        method_k -> Interp.get(unquote(ov), av(method_k, unquote(env)))
+      end
+    end
+  end
 
   # A call, in the order of `ev/2`: the callee and `this`, the test of an optional call,
   # the arguments, then `Interp.ccall/5`, which the tree walker also uses.
@@ -1045,7 +1092,7 @@ defmodule Browser.JS.Compile do
     fn env ->
       ov = av(oo, env)
       if mopt and Interp.nullish?(ov), do: throw(:js_short)
-      f = Interp.get(ov, av(ko, env))
+      f = method(ov, ko, env)
       if opt and Interp.nullish?(f), do: throw(:js_short)
       argv = argv(al, env)
       Interp.ccall(f, ov, argv, callee, env)
@@ -1447,7 +1494,7 @@ defmodule Browser.JS.Compile do
     fn env ->
       ov = av(oo, env)
       if mopt and Interp.nullish?(ov), do: throw(:js_short)
-      f = Interp.get(ov, av(ko, env))
+      f = method(ov, ko, env)
       argv = argv(al, env)
 
       unless Interp.callable?(f),
@@ -1566,6 +1613,53 @@ defmodule Browser.JS.Compile do
     defp has_cc?(_), do: false
   else
     defp check_shell(_node), do: :ok
+  end
+
+  # S5: in check mode the compiled code of a body may not keep a value of the run time (the
+  # capture rule). The walk visits the values that each fun keeps, and the values in them.
+  # An object, a `{:val}` node (a value that the tree walker put into a syntax node) and a
+  # frame (a tuple with an `Info` as its second element) fail. A heap id is an integer, as
+  # a slot number is, so the walk cannot see it; the differential oracle moves the heap ids
+  # to find it. The walk runs once, when a body compiles.
+  if @check do
+    defp check_capture(t) do
+      case t do
+        f when is_function(f) ->
+          {:env, env} = :erlang.fun_info(f, :env)
+          Enum.each(env, &check_capture/1)
+
+        {:obj, id} when is_integer(id) ->
+          capture_fail(t)
+
+        {:val, _} ->
+          capture_fail(t)
+
+        t when is_tuple(t) and tuple_size(t) >= 5 and is_struct(elem(t, 1), Info) ->
+          capture_fail(t)
+
+        t when is_tuple(t) ->
+          check_capture(Tuple.to_list(t))
+
+        [h | rest] ->
+          check_capture(h)
+          check_capture(rest)
+
+        %Info{} ->
+          :ok
+
+        # (a struct is a map too, and `:maps.to_list/1` takes it)
+        m when is_map(m) ->
+          check_capture(:maps.to_list(m))
+
+        _ ->
+          :ok
+      end
+    end
+
+    defp capture_fail(t),
+      do: raise(ArgumentError, "resolve check: compiled code keeps #{inspect(t, limit: 5)}")
+  else
+    defp check_capture(_code), do: :ok
   end
 
   # The coverage test of the design (5.4) asks which nodes stay on the tree. When the
