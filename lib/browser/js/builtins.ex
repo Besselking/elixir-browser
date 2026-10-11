@@ -964,10 +964,13 @@ defmodule Browser.JS.Builtins do
   # arguments object take the generic path. The tests for a proxy and a mapped arguments
   # object are defence in depth today: a proxy is a host object, not an array, and each
   # write of a parameter also writes the element of a mapped arguments object.
+  # (the read is `:erlang.get/1`, not `deref/1`: it runs once per element, and `deref/1`
+  # is a remote call from this module. An id that is not in the heap gives :undefined,
+  # which takes the generic path, and that path raises the error of `deref/1`)
   @compile {:inline, own_element: 2}
   defp own_element({:obj, id} = this, i) do
     if Fast.on?(:iter) do
-      case deref(id) do
+      case :erlang.get(id) do
         %{class: :array, items: %{^i => x}} = o
         when not is_map_key(o, :proxy) and not is_map_key(o, :mapped) and
                not (is_tuple(x) and tuple_size(x) == 3 and elem(x, 0) == :accessor) ->

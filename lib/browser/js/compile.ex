@@ -1095,11 +1095,13 @@ defmodule Browser.JS.Compile do
   # The values of an object literal from the first to the last, as `{key, value}` pairs in
   # source order, for `Interp.fill_literal/3`. The home of a method value is set as in
   # `props/3`. It is a named function, so the compiled code makes no fun when it runs.
+  # Only an object can be a method that needs its home, so a primitive value does not
+  # call `Interp.method_home/2`, which is a remote call.
   defp lit_vals([], _obj, _env, acc), do: :lists.reverse(acc)
 
   defp lit_vals([{k, vo} | rest], obj, env, acc) do
     v = av(vo, env)
-    Interp.method_home(v, obj)
+    if is_tuple(v) and elem(v, 0) == :obj, do: Interp.method_home(v, obj)
     lit_vals(rest, obj, env, [{k, v} | acc])
   end
 
