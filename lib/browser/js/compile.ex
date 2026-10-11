@@ -164,6 +164,8 @@ defmodule Browser.JS.Compile do
 
     * `yield*`, because it runs through the delegate functions of `Async`;
     * an optional chain that awaits, because it puts its value into the tree;
+    * a logical assignment (`&&=`, `||=`, `??=`) that awaits, because its right side runs
+      only when the operator does not short-circuit;
     * a lift plan with a leaf from a class, because the leaf runs in a class scope;
     * for-in, for-of and for-await;
     * `try` with an await, and `using`;
@@ -2204,10 +2206,15 @@ defmodule Browser.JS.Compile do
     {:c, fn env, ctx, k -> Async.destructure(x, pat, env, ctx, k) end}
   end
 
-  # `yield*` and an optional chain stay on the tree path: `yield*` runs through
-  # `delegate` and `adelegate`, and the chain puts its value into the tree.
+  # `yield*`, an optional chain and a logical assignment stay on the tree path: `yield*`
+  # runs through `delegate` and `adelegate`, the chain puts its value into the tree, and
+  # the logical assignment runs its right side only when it does not short-circuit.
   defp kexpr_aw({:yield, _, true} = e), do: ktree(e)
   defp kexpr_aw({:chain, _} = e), do: ktree(e)
+
+  defp kexpr_aw({kind, op, _, _} = e)
+       when kind in [:assign, :sassign] and op in ["&&=", "||=", "??="],
+       do: ktree(e)
 
   # Any other expression gets its lift plan. A leaf from a class must run in a class scope,
   # which the tree path makes, so such a plan stays on the tree path.

@@ -5139,7 +5139,10 @@ defmodule Browser.JS.Interp do
   # The keys `for (k in o)` visits: the enumerable string keys of `o`, then of each object on
   # its prototype chain, none twice and none that an object nearer in the chain (enumerable
   # or not) already has.
-  defp for_in_keys({:obj, id} = o) do
+  @doc false
+  # The keys that a for-in loop visits. It is public because the CPS evaluator
+  # (`Browser.JS.Async`) runs for-in loops whose bodies await.
+  def for_in_keys({:obj, id} = o) do
     if Map.has_key?(deref(id), :proxy) do
       own_keys(o)
     else
@@ -5155,13 +5158,13 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp for_in_keys(target), do: own_keys(target)
+  def for_in_keys(target), do: own_keys(target)
 
   # The object of `for (k in v)`: a primitive becomes its wrapper object (ToObject), so a
   # string visits its indexes. `null` and `undefined` stay, and the loop visits nothing.
-  defp for_in_object({:obj, _} = o), do: o
-  defp for_in_object(v) when v in [:null, :undefined], do: v
-  defp for_in_object(v), do: Browser.JS.Builtins.box(v)
+  def for_in_object({:obj, _} = o), do: o
+  def for_in_object(v) when v in [:null, :undefined], do: v
+  def for_in_object(v), do: Browser.JS.Builtins.box(v)
 
   # protos on the chain that have an enumerable key of their own
   defp inherited_enumerable({:obj, id} = p, acc) do
@@ -5959,7 +5962,10 @@ defmodule Browser.JS.Interp do
   defp finish_outcome({:thrown, v}), do: throw(v)
   defp finish_outcome({:raised, kind, reason, st}), do: :erlang.raise(kind, reason, st)
 
-  defp call_target(callee, env) do
+  @doc false
+  # The function and the `this` value of a call site. It is public because the CPS evaluator
+  # (`Browser.JS.Async`) settles the callee of an optional call before its arguments await.
+  def call_target(callee, env) do
     case callee do
       {:super_member, key} ->
         {home, this} = Browser.JS.Classes.super_base(env)
@@ -6684,7 +6690,8 @@ defmodule Browser.JS.Interp do
 
   if @check do
     # A frame runs its awaits in the CPS evaluator. The one legal sync await in a frame is
-    # `f?.(await x)`, which `Browser.JS.Async` marks with the process key around it.
+    # an await in a default of a catch parameter, which `Browser.JS.Async` marks with the
+    # process key around it.
     def ev({:await, e}, env) do
       if is_integer(env) and is_tuple(:erlang.get(env)) and
            Process.get(:js_cps_sync_await) != true,
@@ -7823,63 +7830,7 @@ defmodule Browser.JS.Interp do
 
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
-    {read, write} =
-      case target do
-        {:id, name} ->
-          id_ref(env, name, target, strict?)
-
-        {:slot, d, i, name} ->
-          frame = hop(env, d)
-          {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> slot_assign(frame, i, name, v) end}
-
-        {:cslot, d, i, name} ->
-          frame = hop(env, d)
-          {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
-
-        {:mslot, d, i, name, k} ->
-          frame = hop(env, d)
-
-          {fn -> ev({:slot, 0, i, name}, frame) end,
-           fn v -> mslot_assign(frame, i, name, k, v) end}
-
-        {:aslot, d, i} ->
-          frame = hop(env, d)
-          {fn -> ev({:aslot, 0, i}, frame) end, fn v -> slot_put(frame, i, v) end}
-
-        {:fname, d, i, name} ->
-          {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
-
-        {:gref, name} ->
-          id_ref(root(env), name, {:id, name}, strict?)
-
-        {:mref, d, name} ->
-          id_ref(hop(env, d), name, {:id, name}, strict?)
-
-        {:super_member, k} ->
-          {base, this} = Browser.JS.Classes.super_base(env)
-          key = to_key(ev_key(k, env))
-
-          {fn -> get_with_receiver(base, key, this) end,
-           fn v -> super_put(base, key, v, this, strict?) end}
-
-        {:member, o, k, _} ->
-          ov = ev(o, env)
-          key = ev_key(k, env)
-
-          if nullish?(ov),
-            do:
-              throw_error(
-                "TypeError",
-                "Cannot read properties of #{to_str(ov)} (reading '#{safe_key(key)}')"
-              )
-
-          # the key is converted once, for the read and for the write
-          key = to_key(key)
-
-          {fn -> get(ov, key) end,
-           fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
-      end
-
+    {read, write} = compound_ref(target, env, strict?)
     old = read.()
     base = binary_part(op, 0, byte_size(op) - 1)
 
@@ -7894,6 +7845,68 @@ defmodule Browser.JS.Interp do
     case result do
       :keep -> old
       {:set, v} -> write.(v) && v
+    end
+  end
+
+  @doc false
+  # The reference of a compound assignment target: a read function and a write function.
+  # The object and the key of the target are evaluated here, one time. It is public because
+  # the CPS evaluator (`Browser.JS.Async`) reads the target of a logical assignment before
+  # its right side awaits.
+  def compound_ref(target, env, strict?) do
+    case target do
+      {:id, name} ->
+        id_ref(env, name, target, strict?)
+
+      {:slot, d, i, name} ->
+        frame = hop(env, d)
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> slot_assign(frame, i, name, v) end}
+
+      {:cslot, d, i, name} ->
+        frame = hop(env, d)
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
+
+      {:mslot, d, i, name, k} ->
+        frame = hop(env, d)
+
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> mslot_assign(frame, i, name, k, v) end}
+
+      {:aslot, d, i} ->
+        frame = hop(env, d)
+        {fn -> ev({:aslot, 0, i}, frame) end, fn v -> slot_put(frame, i, v) end}
+
+      {:fname, d, i, name} ->
+        {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
+
+      {:gref, name} ->
+        id_ref(root(env), name, {:id, name}, strict?)
+
+      {:mref, d, name} ->
+        id_ref(hop(env, d), name, {:id, name}, strict?)
+
+      {:super_member, k} ->
+        {base, this} = Browser.JS.Classes.super_base(env)
+        key = to_key(ev_key(k, env))
+
+        {fn -> get_with_receiver(base, key, this) end,
+         fn v -> super_put(base, key, v, this, strict?) end}
+
+      {:member, o, k, _} ->
+        ov = ev(o, env)
+        key = ev_key(k, env)
+
+        if nullish?(ov),
+          do:
+            throw_error(
+              "TypeError",
+              "Cannot read properties of #{to_str(ov)} (reading '#{safe_key(key)}')"
+            )
+
+        # the key is converted once, for the read and for the write
+        key = to_key(key)
+
+        {fn -> get(ov, key) end,
+         fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
     end
   end
 

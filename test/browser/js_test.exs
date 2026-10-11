@@ -787,6 +787,56 @@ defmodule Browser.JSTest do
              """) == ["3", "undefined", "undefined", "6", "done"]
     end
 
+    test "an optional call suspends at an await in its arguments" do
+      # Before the fix, `f?.(await x)` waited with a sync await, so the other task ran
+      # only after it.
+      assert logs_of("""
+             var r = [];
+             var o = { m(x) { return this === o ? x : -1 } }, u;
+             function f(x) { return x * 2 }
+             async function a() {
+               r.push(f?.(await 1), o.m?.(await 2), o?.m(await 3), u?.(await r.push('no')), u?.m(4));
+               r.push((await o)?.m?.(await 5), o[await 'm']?.(6));
+               console.log(r.join());
+             }
+             a();
+             Promise.resolve().then(() => r.push('w'));
+             """) == ["w,2,2,3,,,5,6"]
+    end
+
+    test "a logical assignment runs its right side only when it does not short-circuit" do
+      assert logs_of("""
+             var r = [];
+             function t(v) { r.push(v); return v }
+             async function a() {
+               var y = 1, z = null, o = { p: 1, q: 0 }, k = 0;
+               y ??= await t('y');
+               z ??= await t('z');
+               o.p ||= await t('p');
+               o.q ||= await t('q');
+               o[k++ ? 'p' : 'q'] &&= await t('k');
+               (await o).p &&= await t('w');
+               r.push(y, z, o.p, o.q, k);
+               console.log(r.join());
+             }
+             a();
+             """) == ["z,q,k,w,1,z,w,k,1"]
+    end
+
+    test "a for-in loop whose body awaits skips the keys deleted before their turn" do
+      assert logs_of("""
+             var r = [];
+             async function a() {
+               var o = Object.create({ inherited: 1 });
+               o.a = 1; o.b = 2; o.c = 3;
+               for (var k in o) { r.push(k); await 0; if (k == 'a') delete o.c }
+               for (var k in 'xy') { await 0; r.push(k) }
+               console.log(r.join());
+             }
+             a();
+             """) == ["a,b,inherited,0,1"]
+    end
+
     test "operands before an await are evaluated before it" do
       assert logs_of("""
              var log = [];

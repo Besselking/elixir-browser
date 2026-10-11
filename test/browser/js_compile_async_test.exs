@@ -494,13 +494,6 @@ defmodule Browser.JS.CompileAsyncTest do
 
   @race_order ["f1", "w1", "f2", "w2", "w3"]
 
-  # The race rows that do not suspend today, at every level, with compilation off. An
-  # optional call with an await in its arguments (`o.m?.(await 1)`) runs the await to its
-  # end before the next statement, so `f2` comes before `w1`. The oracle still compares the
-  # two runs of these rows, but the order test does not apply to them until the bug is
-  # fixed.
-  @race_known_bugs ["race optional call"]
-
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the
   # gate of 5c, with small loop counts.
   @bench_file Path.expand("../../bench/js_runtime.exs", __DIR__)
@@ -845,7 +838,7 @@ defmodule Browser.JS.CompileAsyncTest do
     test "the race rows give the order of one suspension, at every level" do
       # With one await in the statement, `f` gives way once to `w`. If a compiled plan
       # missed the await, `f2` would come before `w1`.
-      rows = for {n, s} <- @races, n not in @race_known_bugs, do: {n, s, []}
+      rows = for {n, s} <- @races, do: {n, s, []}
 
       for level <- @levels do
         for {{n, _, _}, off, on} <-

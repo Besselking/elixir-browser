@@ -76,7 +76,7 @@ defmodule Browser.JS.Async do
   `:off` and on the old path, all bodies when the switch `:js_compile` is off, a body over
   the cap of the compiler, and the kinds that a plan keeps on the tree path (`yield*`,
   for-in, for-of and for-await, `try` with an await, `using`, an optional chain that
-  awaits, and a lift plan with a leaf from a class).
+  awaits, a logical assignment that awaits, and a lift plan with a leaf from a class).
   """
 
   alias Browser.JS.{Awaits, Compile, Interp, Promise}
@@ -100,6 +100,7 @@ defmodule Browser.JS.Async do
   @target @name ++ [:cslot, :fname, :mslot]
 
   @compound ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
+  @logical_assign ~w(&&= ||= ??=)
 
   @doc """
   Calls an async closure: starts its body and returns its promise. `id` is the id of the
@@ -960,10 +961,49 @@ defmodule Browser.JS.Async do
           end
         end)
 
-      # `f?.(...)` with an await after it is left to the plain evaluator
-      _ ->
-        sync_await_expr({:chain, e}, env, ctx, k)
+      # `f?.(args)`: the callee is settled first. When it is `null` or `undefined`, the
+      # whole chain is `undefined` and the arguments do not run. Else the arguments run
+      # (they can await), the call is made, and its value goes into the tree.
+      {:call, callee, args, true} = node ->
+        call_target(callee, env, ctx, fn {f, this} ->
+          if Interp.nullish?(f) do
+            k.(:undefined)
+          else
+            cev({:array, args}, env, ctx, fn arr ->
+              attempt(
+                fn -> Interp.ccall(f, this, Interp.array_list(arr), callee, env) end,
+                ctx,
+                fn v ->
+                  cev_await({:chain, replace_node(e, node, {:val, v})}, env, ctx, k)
+                end
+              )
+            end)
+          end
+        end)
     end
+  end
+
+  # `a &&= v`, `a ||= v` and `a ??= v`: the target is read first, and the right side runs
+  # (and awaits) only when the operator does not short-circuit, as in `Interp`. A target
+  # that awaits is settled part by part first.
+  defp cev_await({kind, op, target, value}, env, ctx, k)
+       when kind in [:assign, :sassign] and op in @logical_assign do
+    settle_target(target, env, ctx, fn target ->
+      attempt(fn -> logical_ref(target, env, kind == :sassign) end, ctx, fn {old, write} ->
+        short =
+          case op do
+            "&&=" -> not Interp.truthy(old)
+            "||=" -> Interp.truthy(old)
+            "??=" -> not Interp.nullish?(old)
+          end
+
+        if short do
+          k.(old)
+        else
+          cev(value, env, ctx, fn v -> attempt(fn -> write.(v) && v end, ctx, k) end)
+        end
+      end)
+    end)
   end
 
   defp cev_await({:destructure, pat, right}, env, ctx, k) do
@@ -1000,29 +1040,50 @@ defmodule Browser.JS.Async do
     end)
   end
 
-  # The sync fallback of `f?.(await x)`: `Interp.ev/2` waits for the promise with
-  # `Promise.await/1`, as at `:off`. In check mode a process key allows this one sync await
-  # in a frame (check item C3).
-  if @check do
-    defp sync_await_expr(node, env, ctx, k) do
-      old = Process.put(:js_cps_sync_await, true)
+  # The function and the `this` value of a callee. A callee that awaits is settled part by
+  # part, and the values go into the tree, so the object and the key run one time each.
+  defp call_target(callee, env, ctx, k) do
+    cond do
+      not Awaits.any?(callee) ->
+        attempt(fn -> Interp.call_target(callee, env) end, ctx, k)
 
-      result =
-        try do
-          {:ok, Interp.ev(node, env)}
-        catch
-          {:js_error, e} -> {:throw, e}
-        after
-          Process.put(:js_cps_sync_await, old)
-        end
+      match?({:member, _, _, false}, callee) ->
+        {:member, o, key, false} = callee
 
-      case result do
-        {:ok, v} -> k.(v)
-        {:throw, e} -> ctx.throw.(e)
-      end
+        cev(o, env, ctx, fn ov ->
+          settle_key(key, env, ctx, fn key ->
+            attempt(fn -> Interp.call_target({:member, {:val, ov}, key, false}, env) end, ctx, k)
+          end)
+        end)
+
+      true ->
+        cev(callee, env, ctx, fn f -> k.({f, :undefined}) end)
     end
-  else
-    defp sync_await_expr(node, env, ctx, k), do: sync_expr(node, env, ctx, k)
+  end
+
+  # A key that awaits runs here, and its value goes into the tree.
+  defp settle_key(key, env, ctx, k) do
+    if Awaits.any?(key), do: cev(key, env, ctx, fn kv -> k.({:val, kv}) end), else: k.(key)
+  end
+
+  defp settle_target({:member, o, key, opt}, env, ctx, k) do
+    if Awaits.any?(o) or Awaits.any?(key) do
+      cev(o, env, ctx, fn ov ->
+        settle_key(key, env, ctx, fn key -> k.({:member, {:val, ov}, key, opt}) end)
+      end)
+    else
+      k.({:member, o, key, opt})
+    end
+  end
+
+  defp settle_target({:super_member, key}, env, ctx, k),
+    do: settle_key(key, env, ctx, fn key -> k.({:super_member, key}) end)
+
+  defp settle_target(target, _env, _ctx, k), do: k.(target)
+
+  defp logical_ref(target, env, strict?) do
+    {read, write} = Interp.compound_ref(target, env, strict?)
+    {read.(), write}
   end
 
   # the innermost `?.` along the spine (object or callee) of a chain
@@ -1167,6 +1228,11 @@ defmodule Browser.JS.Async do
 
     defp leaf_ref?({:chain, _} = n), do: has_await_ref?(n)
     defp leaf_ref?({:destructure, _, _} = n), do: has_await_ref?(n)
+
+    defp leaf_ref?({kind, op, _, _} = n)
+         when kind in [:assign, :sassign] and op in @logical_assign,
+         do: has_await_ref?(n)
+
     defp leaf_ref?(_), do: false
   else
     # Without check mode the calls of `check_lift/3` are dead code, but they must compile.
@@ -1352,6 +1418,10 @@ defmodule Browser.JS.Async do
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
   defp leaf?({:chain, _} = n), do: has_await?(n)
   defp leaf?({:destructure, _, _} = n), do: has_await?(n)
+
+  defp leaf?({kind, op, _, _} = n) when kind in [:assign, :sassign] and op in @logical_assign,
+    do: has_await?(n)
+
   defp leaf?(_), do: false
 
   defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
@@ -1700,11 +1770,7 @@ defmodule Browser.JS.Async do
     cev(obj, env, ctx, fn target ->
       items =
         try do
-          {:ok,
-           case kind do
-             :forin -> {:list, if(Interp.nullish?(target), do: [], else: Interp.own_keys(target))}
-             :forof -> Interp.iter_source(target)
-           end}
+          {:ok, loop_source(kind, target)}
         catch
           {:js_error, e} -> {:throw, e}
         end
@@ -1712,6 +1778,9 @@ defmodule Browser.JS.Async do
       mode = if decl == nil, do: :assign, else: decl
 
       case items do
+        {:ok, {:keys, o, list}} ->
+          forin(list, o, {pat, mode, body, env, :map}, ctx, k, labels)
+
         {:ok, {:list, list}} ->
           foreach(list, {pat, mode, body, env, :map}, ctx, k, labels)
 
@@ -1731,14 +1800,7 @@ defmodule Browser.JS.Async do
       cev(obj, h, ctx, fn target ->
         items =
           try do
-            {:ok,
-             case kind do
-               :forin ->
-                 {:list, if(Interp.nullish?(target), do: [], else: Interp.own_keys(target))}
-
-               :forof ->
-                 Interp.iter_source(target)
-             end}
+            {:ok, loop_source(kind, target)}
           catch
             {:js_error, e} -> {:throw, e}
           end
@@ -1746,6 +1808,9 @@ defmodule Browser.JS.Async do
         mode = if decl == nil, do: :assign, else: decl
 
         case items do
+          {:ok, {:keys, o, list}} ->
+            forin(list, o, {pat, mode, body, env, sc}, ctx, k, labels)
+
           {:ok, {:list, list}} ->
             foreach(list, {pat, mode, body, env, sc}, ctx, k, labels)
 
@@ -1897,8 +1962,7 @@ defmodule Browser.JS.Async do
   end
 
   # The catch parameter is bound by the sync binder, as on the old path, so an await in a
-  # default of the pattern waits with `Promise.await`. Check mode allows that sync await,
-  # as it does for the fallback of `f?.(await x)`.
+  # default of the pattern waits with `Promise.await`. Check mode allows that sync await.
   if @check do
     defp bind_catch(param, e, scope) do
       old = Process.put(:js_cps_sync_await, true)
@@ -2262,14 +2326,41 @@ defmodule Browser.JS.Async do
     end
   end
 
+  # The items of a for-in or a for-of loop. A for-in loop visits the keys of the object
+  # (a primitive gives the keys of its wrapper object) and of its prototypes, as the sync
+  # loop of `Interp` does.
+  defp loop_source(:forin, target) do
+    o = Interp.for_in_object(target)
+    {:keys, o, if(Interp.nullish?(o), do: [], else: Interp.for_in_keys(o))}
+  end
+
+  defp loop_source(:forof, target), do: Interp.iter_source(target)
+
+  # A for-in loop does not visit a key that was deleted before its turn. The check runs for
+  # each key, because a body that awaits can let other code delete keys.
+  defp forin([], _o, _spec, _ctx, k, _labels), do: k.(:ok)
+
+  defp forin([key | rest], o, spec, ctx, k, labels) do
+    attempt(fn -> Interp.has_property?(o, key) end, ctx, fn
+      true ->
+        foreach_item(key, spec, ctx, k, labels, fn -> forin(rest, o, spec, ctx, k, labels) end)
+
+      false ->
+        forin(rest, o, spec, ctx, k, labels)
+    end)
+  end
+
   defp foreach([], _spec, _ctx, k, _labels), do: k.(:ok)
 
-  defp foreach([item | rest], {pat, mode, body, env, sc} = spec, ctx, k, labels) do
+  defp foreach([item | rest], spec, ctx, k, labels),
+    do: foreach_item(item, spec, ctx, k, labels, fn -> foreach(rest, spec, ctx, k, labels) end)
+
+  defp foreach_item(item, {pat, mode, body, env, sc}, ctx, k, labels, next) do
     Interp.tick()
     iter_env = item_env(env, sc)
 
     cbind(pat, item, mode, iter_env, ctx, fn ->
-      run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
+      run_body(body, iter_env, ctx, k, labels, fn _ -> next.() end)
     end)
   end
 
