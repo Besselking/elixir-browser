@@ -1593,7 +1593,8 @@ defmodule Browser.JS.ResolveTest do
   test "27. round trip and check over the corpus" do
     {failures, parsed, unparsed} =
       Enum.reduce(corpus(), {[], 0, 0}, fn {label, src, opts}, {failures, parsed, unparsed} ->
-        case Parser.parse(src, opts) do
+        # (the plain tree: the parser resolves at the default level, which is 4)
+        case Parser.parse(src, [resolve: :off] ++ opts) do
           {:error, _} ->
             {failures, parsed, unparsed + 1}
 
@@ -1631,7 +1632,7 @@ defmodule Browser.JS.ResolveTest do
   test "28. the Info of every function agrees with the interpreter's hoisting helpers" do
     {failures, functions} =
       Enum.reduce(corpus(), {[], 0}, fn {label, src, opts}, {failures, functions} ->
-        case Parser.parse(src, opts) do
+        case Parser.parse(src, [resolve: :off] ++ opts) do
           {:error, _} ->
             {failures, functions}
 
