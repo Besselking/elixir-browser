@@ -2219,23 +2219,79 @@ defmodule Browser.JS.Interp do
     v
   end
 
+  # The guard of the fast update (fast path `:update`): the record `o` is not an array, not
+  # a host object and not a proxy, `old` (the value of `key` in `o.props`) is not an
+  # accessor, and `key` has no attributes, so it is writable. For such a write `put_obj/5`
+  # only stores the value: the clauses for arrays, host objects (typed arrays, proxies of
+  # plain objects, the global object, module namespaces and DOM objects) and proxies of
+  # functions do not match, the clause for the `name` and `length` of a function goes to
+  # `put_prop/4` because `props` has the key, and `put_prop/4` stores the value when
+  # `props` has a key that is not an accessor and `writable?/2` is true. A change to one of
+  # these clauses needs a change to this guard.
+  defmacrop plain_update(o, key, old) do
+    quote do
+      :erlang.map_get(:class, unquote(o)) != :array and
+        :erlang.map_get(:class, unquote(o)) != :host and
+        not is_map_key(unquote(o), :proxy) and
+        not (is_tuple(unquote(old)) and tuple_size(unquote(old)) == 3 and
+               :erlang.element(1, unquote(old)) == :accessor) and
+        not (is_map_key(unquote(o), :attrs) and
+               is_map_key(:erlang.map_get(:attrs, unquote(o)), unquote(key)))
+    end
+  end
+
+  # The store of the fast update: `props` has `key`, so the map update keeps the key tuple.
+  @compile {:inline, update_prop: 5}
+  defp update_prop(id, o, props, key, v) do
+    :erlang.put(id, %{o | props: %{props | key => v}})
+    v
+  end
+
   @doc false
   # A property write with a constant key (step 5, `Browser.JS.Compile`), as `get_named/2`
   # reads one: the key is a string that is not an array index, and the class dispatch is
-  # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`.
-  def put_named({:obj, id}, key, v), do: put_obj(id, deref(id), key, v, true)
+  # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`. The update of an own
+  # writable data property reads the record once and does not go through `put_obj/5`
+  # (`plain_update/3`).
+  def put_named({:obj, id}, key, v) do
+    case :erlang.get(id) do
+      %{props: %{^key => old} = props} = o when plain_update(o, key, old) ->
+        if Fast.on?(:update),
+          do: Fast.shadow(id, update_prop(id, o, props, key, v), put_obj(id, o, key, v, true)),
+          else: put_obj(id, o, key, v, true)
+
+      # (a second read, so that an id that is not in the heap gives the error of `deref/1`)
+      _ ->
+        put_obj(id, deref(id), key, v, true)
+    end
+  end
+
   def put_named(ov, key, v), do: put(ov, key, v)
 
   @doc false
-  # `strict_put/3` with a constant key, through `put_named/3`. A primitive goes to
-  # `strict_put/3`, which has a clause of its own for primitives.
-  def strict_put_named({:obj, _} = ov, key, v) do
-    :erlang.put(:js_put_failed, false)
-    put_named(ov, key, v)
-    strict_done(key, v)
+  # `strict_put/3` with a constant key, as `put_named/3`. A primitive goes to
+  # `strict_put/3`, which has a clause of its own for primitives. The update of an own
+  # writable data property cannot fail, so the fast update does not set and read the flag
+  # `:js_put_failed`: every reader of the flag sets it to false before its own write.
+  def strict_put_named({:obj, id}, key, v) do
+    case :erlang.get(id) do
+      %{props: %{^key => old} = props} = o when plain_update(o, key, old) ->
+        if Fast.on?(:update),
+          do: Fast.shadow(id, update_prop(id, o, props, key, v), put_obj(id, o, key, v, true)),
+          else: strict_put_obj(id, o, key, v)
+
+      _ ->
+        strict_put_obj(id, deref(id), key, v)
+    end
   end
 
   def strict_put_named(ov, key, v), do: strict_put(ov, key, v)
+
+  defp strict_put_obj(id, o, key, v) do
+    :erlang.put(:js_put_failed, false)
+    put_obj(id, o, key, v, true)
+    strict_done(key, v)
+  end
 
   # The write of `v` to `key` of the object `o` with the id `id`: the class dispatch of
   # `put/3` and `put_named/3`. `named?` is true when the key is a string that is not an
@@ -2372,7 +2428,7 @@ defmodule Browser.JS.Interp do
 
       {:ok, _} ->
         if writable?(o, key),
-          do: store(id, %{o | props: Map.put(o.props, key, v)}),
+          do: store(id, %{o | props: %{o.props | key => v}}),
           else: fail_put()
 
       # a generator function's own `prototype` is made on first use and shadows the one of
@@ -2612,11 +2668,26 @@ defmodule Browser.JS.Interp do
   defp index_hook(_, _), do: :none
 
   @doc false
-  def writable?(o, key), do: match?(%{w: true}, Map.get(Map.get(o, :attrs, %{}), key, %{w: true}))
+  # (most records have no `attrs`: then each property is writable and configurable, with
+  # no map read)
+  def writable?(%{attrs: attrs}, key) do
+    case attrs do
+      %{^key => a} -> match?(%{w: true}, a)
+      _ -> true
+    end
+  end
+
+  def writable?(_, _), do: true
 
   @doc false
-  def configurable?(o, key),
-    do: match?(%{c: true}, Map.get(Map.get(o, :attrs, %{}), key, %{c: true}))
+  def configurable?(%{attrs: attrs}, key) do
+    case attrs do
+      %{^key => a} -> match?(%{c: true}, a)
+      _ -> true
+    end
+  end
+
+  def configurable?(_, _), do: true
 
   @doc false
   def array_index(key), do: index(key)
