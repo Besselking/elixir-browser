@@ -1101,6 +1101,28 @@ defmodule Browser.JSTest do
              """) == "RangeError"
     end
 
+    test "a strict write through a setter or a trap fails only when the write itself fails" do
+      # The sloppy setter and trap make a failed write of their own. That failure does not
+      # belong to the strict write that runs them.
+      assert js(~S"""
+             var sloppy = 'Object.freeze({a: 1}).a = 2;';
+             var o = {};
+             Object.defineProperty(o, 'x', {set: Function('v', sloppy)});
+             var p = new Proxy({}, {set: Function('t', 'k', 'v', sloppy + ' return true')});
+             var q = Object.create(o);
+             var r = [];
+             function w(f) { try { f(); r.push('ok') } catch (e) { r.push(e.name) } }
+             w(function () { 'use strict'; o.x = 1 });
+             w(function () { 'use strict'; o['x'] = 1 });
+             w(function () { 'use strict'; p.y = 1 });
+             w(function () { 'use strict'; q.x = 1 });
+             w(function () { 'use strict'; Object.freeze({a: 1}).a = 2 });
+             w(function () { 'use strict'; Object.defineProperty({}, 'g', {get() {}}).g = 1 });
+             w(function () { 'use strict'; new Proxy({}, {set() { return false }}).z = 1 });
+             r.join()
+             """) == "ok,ok,ok,ok,TypeError,TypeError,TypeError"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"

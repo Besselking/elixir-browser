@@ -2138,13 +2138,29 @@ defmodule Browser.JS.Interp do
     store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
   end
 
+  # Runs a setter or a proxy trap of a write and puts the flag `:js_put_failed` back as it
+  # was. A sloppy write in the callee that fails sets the flag, but that failure is not a
+  # failure of this write: the strict write that runs the setter must not throw for it.
+  defmacrop keep_put_flag(expr) do
+    quote do
+      flag = :erlang.get(:js_put_failed)
+      result = unquote(expr)
+      :erlang.put(:js_put_failed, flag)
+      result
+    end
+  end
+
+  @doc false
+  # `keep_put_flag/1` for the other modules (`Browser.JS.Proxy`).
+  def keep_put_flag_fun(fun), do: keep_put_flag(fun.())
+
   def put({:obj, id} = obj, {:private, _} = key, v) do
     o = deref(id)
 
     case Map.fetch(o.props, key) do
       {:ok, {:accessor, _, setter}} ->
         if function?(setter),
-          do: call(setter, obj, [v]),
+          do: keep_put_flag(call(setter, obj, [v])),
           else: throw_error("TypeError", "'#x' was defined without a setter")
 
         :ok
@@ -2212,7 +2228,11 @@ defmodule Browser.JS.Interp do
             cond do
               match?(%{^i => {:accessor, _, _}}, o.items) ->
                 {:accessor, _, setter} = o.items[i]
-                if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
+
+                if function?(setter),
+                  do: keep_put_flag(call(setter, {:obj, id}, [v])),
+                  else: fail_put()
+
                 :ok
 
               Map.get(o, :frozen, false) ->
@@ -2230,7 +2250,7 @@ defmodule Browser.JS.Interp do
               not is_map_key(o.items, i) and index_hook(o.proto, i) != :none ->
                 case index_hook(o.proto, i) do
                   {:setter, setter} ->
-                    call(setter, {:obj, id}, [v])
+                    keep_put_flag(call(setter, {:obj, id}, [v]))
 
                   {:proxy, proxy} ->
                     unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
@@ -2304,7 +2324,7 @@ defmodule Browser.JS.Interp do
 
     case inherited_set(Browser.JS.Builtins.box(ov), k) do
       {:setter, setter} ->
-        call(setter, ov, [v])
+        keep_put_flag(call(setter, ov, [v]))
         :ok
 
       {:proxy, proxy} ->
@@ -2326,7 +2346,7 @@ defmodule Browser.JS.Interp do
   defp put_prop(id, o, key, v) do
     case Map.fetch(o.props, key) do
       {:ok, {:accessor, _, setter}} ->
-        if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
+        if function?(setter), do: keep_put_flag(call(setter, {:obj, id}, [v])), else: fail_put()
         :ok
 
       {:ok, _} ->
@@ -2345,7 +2365,7 @@ defmodule Browser.JS.Interp do
       :error ->
         case inherited_set(o.proto, key) do
           {:setter, setter} ->
-            call(setter, {:obj, id}, [v])
+            keep_put_flag(call(setter, {:obj, id}, [v]))
             :ok
 
           :readonly ->
@@ -2356,7 +2376,9 @@ defmodule Browser.JS.Interp do
             :ok
 
           {:typed_array, ta} ->
-            unless Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id}), do: fail_put()
+            unless keep_put_flag(Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id})),
+              do: fail_put()
+
             :ok
 
           :none ->
@@ -7719,7 +7741,7 @@ defmodule Browser.JS.Interp do
         super_set(deref(id).proto, key, v, this)
 
       {:accessor, _, setter, _, _} ->
-        if function?(setter), do: call(setter, this, [v]), else: fail_put()
+        if function?(setter), do: keep_put_flag(call(setter, this, [v])), else: fail_put()
 
       {:data, _, false, _, _} ->
         fail_put()

@@ -167,12 +167,18 @@ defmodule Browser.JS.Proxy do
 
   # the result of [[Set]]: true when it worked
   def set(p, key, value, receiver) do
+    # A failed sloppy write in the trap is not a failure of this write (see
+    # `Interp.keep_put_flag_fun/1`); the result of this function says if it failed.
+    Interp.keep_put_flag_fun(fn -> do_set(p, key, value, receiver) end)
+  end
+
+  defp do_set(p, key, value, receiver) do
     {target, handler} = state(p)
 
     case trap(handler, "set") do
       nil ->
         if proxy?(target),
-          do: set(target, key, value, receiver),
+          do: do_set(target, key, value, receiver),
           else: Props.ordinary_set(target, key, value, receiver)
 
       f ->
