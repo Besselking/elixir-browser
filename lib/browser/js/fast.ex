@@ -23,14 +23,15 @@ defmodule Browser.JS.Fast do
   def names, do: @names
 
   @doc false
-  # Whether the fast path `name` is on. In the normal build it is the constant `true`.
+  # Whether the fast path `name` is on. In the normal build it is the constant `true`. The
+  # name must be one of `names/0`: a wrong name would never turn off, and the oracle would
+  # then compare the fast path with itself.
   defmacro on?(name) do
+    unless name in @names, do: raise(ArgumentError, "unknown fast path #{inspect(name)}")
+
     if @check do
       quote do
-        case :erlang.get(:js_fast_off) do
-          :undefined -> true
-          off -> not :lists.member(unquote(name), off)
-        end
+        Browser.JS.Fast.check_on?(unquote(name))
       end
     else
       true
@@ -67,6 +68,28 @@ defmodule Browser.JS.Fast do
   end
 
   if @check do
+    @doc false
+    # `on?/1` of the check build. When the process key `:js_fast_hits` holds a map, it
+    # counts the times that each fast path is on where the code asks, so that a test can
+    # see that each name of `names/0` has a place in the code that the corpus gets to.
+    def check_on?(name) do
+      on =
+        case :erlang.get(:js_fast_off) do
+          :undefined -> true
+          off -> not :lists.member(name, off)
+        end
+
+      case :erlang.get(:js_fast_hits) do
+        hits when is_map(hits) and on ->
+          :erlang.put(:js_fast_hits, Map.update(hits, name, 1, &(&1 + 1)))
+
+        _ ->
+          :ok
+      end
+
+      on
+    end
+
     @doc false
     def shadow_run(id, fast, old) do
       record = if id, do: :erlang.get(id)

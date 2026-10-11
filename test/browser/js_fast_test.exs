@@ -96,6 +96,7 @@ defmodule Browser.JS.FastTest do
 
     defp execute(program, off, opts) do
       Process.put(:js_fast_off, off)
+      if opts[:hits], do: Process.put(:js_fast_hits, %{})
       Interp.init(Keyword.get(opts, :max_steps, 1_000_000))
       Builtins.install()
 
@@ -132,6 +133,8 @@ defmodule Browser.JS.FastTest do
         console: Enum.reverse(Process.get(:js_console, [])),
         heap: safely(fn -> heap_export(opts[:ids]) end)
       }
+
+      items = if opts[:hits], do: Map.put(items, :hits, Process.get(:js_fast_hits)), else: items
 
       items =
         if opts[:ids],
@@ -356,6 +359,27 @@ defmodule Browser.JS.FastTest do
         assert Enum.all?(outcomes, &match?(%{console: [_ | _], heap: h} when is_integer(h), &1))
         assert outcomes |> Enum.map(& &1.heap) |> Enum.uniq() |> length() > 3
         assert outcomes |> Enum.map(& &1.console) |> Enum.uniq() |> length() == length(outcomes)
+      end
+    end
+
+    describe "the names of the fast paths" do
+      # A name that has no place in the code, or a place that the corpus does not get to,
+      # turns nothing off, and the oracle then compares the fast path with itself.
+      test "the data-model corpus gets to each fast path" do
+        rows = Browser.JS.DatamodelCorpus.rows()
+        hits = for a <- run_all(rows, [], hits: true), do: a.hits
+        total = Enum.reduce(hits, %{}, &Map.merge(&1, &2, fn _, x, y -> x + y end))
+        assert Enum.sort(Map.keys(total)) == Enum.sort(Fast.names())
+
+        # (with all fast paths off, no fast path is on anywhere)
+        off = for a <- run_all(rows, Fast.names(), hits: true), do: a.hits
+        assert Enum.all?(off, &(&1 == %{}))
+      end
+
+      test "a wrong name does not compile" do
+        assert_raise ArgumentError, "unknown fast path :literall", fn ->
+          Code.eval_string("require Browser.JS.Fast; Browser.JS.Fast.on?(:literall)")
+        end
       end
     end
 
