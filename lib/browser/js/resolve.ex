@@ -37,8 +37,8 @@ defmodule Browser.JS.Resolve do
     so a read inside `e` always finds `:tdz`.
   - A reference to `arguments` that no function owns keeps `{:id}`.
   - Every `return` with a value inside a rewritten function carries a marker:
-    `{:return, e, :tail}` at a tail site, `{:return, e, :plain}` elsewhere. The
-    evaluator then never reads the run-time tail flag inside such a function.
+    `{:return, e, :tail}` at a tail site, `{:return, e, :plain}` elsewhere. Only
+    a tail site gives a pending call (`{:tail, f, this, args}`) to the frame.
   - A constructor gets the hidden slots it uses: `:this` always, `:new_target`
     and `:ctor_fn` for a `super()` call, `:home` for a `super.x` access.
   - `nparams` does not count a rest parameter.
@@ -1979,7 +1979,7 @@ defmodule Browser.JS.Resolve do
     {init, st} = r_expr(init, st)
     target = if st.rewriting, do: resolve(st, name, :bind), else: name
     # The rest of the list runs under the `using` cleanup, where a `return`
-    # cannot be a tail call (interp.ex `no_tail`).
+    # cannot be a tail call (a run site in interp.ex, see `run_tail/2`).
     {rest, st} = with_tail(st, false, &r_stmts(rest, &1))
     {{:using, kind, target, init, rest}, st}
   end
@@ -2067,7 +2067,7 @@ defmodule Browser.JS.Resolve do
     {obj, st} = r_expr(obj, st)
     {pat, st} = r_pat(pat, if(decl in [:let, :const], do: :bind, else: :write), st)
     # The body of a for-in/of loop runs under the iterator's cleanup, where a
-    # `return` cannot be a tail call (interp.ex `no_tail`).
+    # `return` cannot be a tail call (a run site in interp.ex, see `run_tail/2`).
     {body, st} = with_tail(st, false, &r_substmt(body, &1))
     {sc, st} = r_leave(st, sid)
     {with_scope({k, decl, pat, obj, body}, sc), st}

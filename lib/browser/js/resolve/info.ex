@@ -107,7 +107,10 @@ defmodule Browser.JS.Resolve.Info do
     and `Browser.JS.Interp.frame_done/2` erases it once, when the body has ended:
     when `makes_closures` is false, or when the counter did not move since the
     entry. In all other cases the collector takes the frame.
-  - `tail_sites`: the number of `return` statements marked as tail calls.
+  - `tail_sites`: the number of `return` statements marked as tail calls. Only
+    these statements give a pending call `{:tail, f, this, args}` to the frame
+    (step 3). In check mode a pending call from a function with no tail site is a
+    fault.
   """
 
   defstruct src: nil,

@@ -60,15 +60,13 @@ defmodule Browser.JS.FramesTest do
 
   defp slot(fid, i), do: elem(:erlang.get(fid), i - 1)
 
-  # Runs `fun` and reports what it threw: a JS error as `{name, message}`, a return or a
-  # tail call as a tagged tuple, or `{:value, v}` when nothing was thrown.
+  # Runs `fun` and reports what it threw: a JS error as `{name, message}`, or
+  # `{:value, v}` when nothing was thrown.
   defp caught(fun) do
     try do
       {:value, fun.()}
     catch
       {:js_error, v} -> {Interp.get(v, "name"), Interp.get(v, "message")}
-      {:js_return, v} -> {:return, v}
-      {:js_tail, f, t, a} -> {:tail, f, t, a}
       :js_limit -> :js_limit
     end
   end
@@ -575,22 +573,16 @@ defmodule Browser.JS.FramesTest do
       g = Interp.native("g", fn _, _ -> 42.0 end)
       Interp.declare(gid, "g", g)
 
-      assert caught(fn -> Interp.exec_stmt({:return, {:num, 1.0}, :plain}, fid) end) ==
-               {:return, 1.0}
+      assert Interp.exec_stmt({:return, {:num, 1.0}, :plain}, fid) == {:ret, 1.0}
+      assert Interp.exec_stmt({:return, {:num, 1.0}, :tail}, fid) == {:ret, 1.0}
 
-      assert caught(fn -> Interp.exec_stmt({:return, {:num, 1.0}, :tail}, fid) end) ==
-               {:return, 1.0}
-
-      # A call under `:plain` is made here, whatever `:js_tail` says.
-      Process.put(:js_tail, true)
+      # A call under `:plain` is made here. A call under `:tail` comes back as a pending
+      # call, which the frame gives to the trampoline.
       call = {:call, {:gref, "g"}, [], false}
-      assert caught(fn -> Interp.exec_stmt({:return, call, :plain}, fid) end) == {:return, 42.0}
-      Process.put(:js_tail, false)
+      assert Interp.exec_stmt({:return, call, :plain}, fid) == {:ret, 42.0}
+      assert Interp.exec_stmt({:return, call, :tail}, fid) == {:tail, g, :undefined, []}
 
-      assert caught(fn -> Interp.exec_stmt({:return, call, :tail}, fid) end) ==
-               {:tail, g, :undefined, []}
-
-      assert caught(fn -> Interp.exec_stmt({:return, nil}, fid) end) == {:return, :undefined}
+      assert Interp.exec_stmt({:return, nil}, fid) == {:ret, :undefined}
     end
 
     test "{:block}: nil runs the list, a Scope resets its slots first" do
@@ -623,7 +615,7 @@ defmodule Browser.JS.FramesTest do
       Interp.exec_stmt(var_s, fid)
       Interp.exec_stmt(for_stmt, fid)
       assert slot(fid, 6) == 3.0
-      assert caught(fn -> Interp.exec_stmt(ret, fid) end) == {:return, 3.0}
+      assert Interp.exec_stmt(ret, fid) == {:ret, 3.0}
 
       # No scope was made for the loop: the frame is the newest heap entry.
       assert :erlang.get(:js_next) == fid + 1
@@ -1009,7 +1001,7 @@ defmodule Browser.JS.FramesTest do
 
       fid = frame(gid, i, [])
 
-      assert {:return, g} = caught(fn -> Interp.exec_stmt(switch, fid) end)
+      assert {:ret, g} = Interp.exec_stmt(switch, fid)
       assert Interp.call(g, :undefined, []) == 3.0
       sid = closure(g).scope
       assert {^fid, ^sc, _, _, ^gid, 2.0, h} = :erlang.get(sid)
@@ -1029,7 +1021,7 @@ defmodule Browser.JS.FramesTest do
       assert {:try, _, _, _, nil, %Scope{kind: :catch, frame: true} = sc} = try
       fid = frame(gid, i, [])
 
-      assert {:return, g} = caught(fn -> Interp.exec_stmt(try, fid) end)
+      assert {:ret, g} = Interp.exec_stmt(try, fid)
       assert :erlang.get(closure(g).scope) == {fid, sc, nil, nil, gid, 7.0}
       assert Interp.call(g, :undefined, []) == 7.0
 

@@ -19,9 +19,31 @@ defmodule Browser.JS.Interp do
 
   ## Control flow
 
-  `return`, `break`, `continue` and `throw` are Elixir throws (`{:js_return, v}`,
-  `{:js_break, label}`, `{:js_continue, label}`, `{:js_error, value}`); `:js_limit` aborts a
-  script that ran out of steps and can't be caught from JavaScript.
+  Each statement gives a completion:
+
+  | Completion               | Meaning                                                  |
+  |--------------------------|----------------------------------------------------------|
+  | `:ok`                    | the statement completed normally                         |
+  | `{:ret, v}`              | `return v`                                               |
+  | `{:brk, label}`          | `break`; `label` is `nil` or a string                    |
+  | `{:cont, label}`         | `continue`; `label` is `nil` or a string                 |
+  | `{:tail, f, this, args}` | `return f(...)` at a tail site, before the call is made  |
+
+  A statement list stops at the first completion that is not `:ok` and gives it to the
+  statement around it. A loop takes the `break` and the `continue` that are for it. The
+  function boundary takes the return and the pending call. A strict function that is not a
+  constructor gives the pending call to `tail_loop/3`, so the stack does not grow. Other
+  functions make the call at the boundary. A statement that must see the call before it
+  completes makes the call immediately (see `run_tail/2`): a `try` block, a handler that a
+  `finally` follows, the body of a for-in or for-of loop, the rest of a `using` list and a
+  `with` body.
+
+  A JS exception is an Elixir throw, `{:js_error, value}`. When a script uses all its
+  steps, `:js_limit` is thrown. JavaScript code cannot catch it.
+
+  Only script and eval code have a completion value. It is in `:js_last`, which the
+  statements of that code write. The statements of a rewritten function run through
+  `fbody/2` and `fstmt/3` and do not write it. The old path writes it as before step 3.
   """
 
   alias Browser.JS.Num
@@ -2799,23 +2821,37 @@ defmodule Browser.JS.Interp do
         result =
           try do
             bind(pat, item, cur, mode)
-            run_body(body, cur, labels)
+            # (a pending call runs before the close of the iterator)
+            run_tail(run_body(body, cur, labels, :fn), cur)
           catch
+            # Only a throw arrives here. An error from `return()` does not replace it, and
+            # a JS throw needs no stack trace.
+            :throw, e ->
+              leave_scope(cur, fns)
+              iter_close(it, true)
+              throw(e)
+
             kind, e ->
               leave_scope(cur, fns)
-              # an error from `return` replaces a return or labeled break, not a throw
-              iter_close(it, not match?({:js_return, _}, e) and not match?({:js_break, _}, e))
+              iter_close(it, true)
               :erlang.raise(kind, e, __STACKTRACE__)
           end
 
         case result do
+          :next ->
+            proto_loop(it, next, {pat, mode, body, env, {:frame, fresh, cur, fns}}, labels)
+
+          # A break, a continue to an outer label and a return are normal exits: an error
+          # from `return()` replaces them, and its result must be an object.
           :break ->
             leave_scope(cur, fns)
             iter_close(it, false)
             :ok
 
-          :next ->
-            proto_loop(it, next, {pat, mode, body, env, {:frame, fresh, cur, fns}}, labels)
+          c ->
+            leave_scope(cur, fns)
+            iter_close(it, false)
+            loop_exit(c)
         end
     end
   end
@@ -2839,24 +2875,41 @@ defmodule Browser.JS.Interp do
         result =
           try do
             bind(pat, item, iter_env, mode)
-            run_body(body, iter_env, labels)
+            # (a pending call runs before the close of the iterator)
+            run_tail(run_body(body, iter_env, labels, loop_mode(scope)), iter_env)
           catch
+            # Only a throw arrives here. An error from `return()` does not replace it, and
+            # a JS throw needs no stack trace.
+            :throw, e ->
+              iter_close(it, true)
+              throw(e)
+
             kind, e ->
-              # an error from `return` replaces a return or labeled break, not a throw
-              iter_close(it, not match?({:js_return, _}, e) and not match?({:js_break, _}, e))
+              iter_close(it, true)
               :erlang.raise(kind, e, __STACKTRACE__)
           end
 
         case result do
+          :next ->
+            proto_loop(it, next, spec, labels)
+
+          # A break, a continue to an outer label and a return are normal exits: an error
+          # from `return()` replaces them, and its result must be an object.
           :break ->
             iter_close(it, false)
             :ok
 
-          :next ->
-            proto_loop(it, next, spec, labels)
+          c ->
+            iter_close(it, false)
+            loop_exit(c)
         end
     end
   end
+
+  # (the old path runs each item in a fresh map scope; a rewritten function passes its
+  # frameless scope or `nil`)
+  defp loop_mode(:fresh), do: :top
+  defp loop_mode(_scope), do: :fn
 
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
   @doc false
@@ -3340,7 +3393,7 @@ defmodule Browser.JS.Interp do
     free_scope(scope, before)
 
     case result do
-      {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+      {:tail, f, this, args} -> tail_loop(f, this, args)
       _ -> result
     end
   end
@@ -3365,7 +3418,7 @@ defmodule Browser.JS.Interp do
         free_scope(scope, before)
 
         case result do
-          {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+          {:tail, f, this, args} -> tail_loop(f, this, args)
           _ -> result
         end
 
@@ -3376,14 +3429,28 @@ defmodule Browser.JS.Interp do
 
   defp tail_loop(f, this, args), do: call(f, this, args)
 
-  defp no_tail(fun) do
-    old = Process.put(:js_tail, false)
+  # A pending tail call that must not leave this statement: the call runs here, inside the
+  # protection of the statement (a `catch`, a `finally`, the close of an iterator or a
+  # disposal), and the statement sees its value as a plain return. These run sites are
+  # the places where the resolver marks every `return` as `:plain`, so only the old path
+  # gives a `{:tail}` to them.
+  @compile {:inline, run_tail: 2}
+  defp run_tail({:tail, f, t, a}, env) do
+    if @check, do: check_run_tail(env)
+    {:ret, call(f, t, a)}
+  end
 
-    try do
-      fun.()
-    after
-      Process.put(:js_tail, old)
-    end
+  defp run_tail(c, _env), do: c
+
+  @doc false
+  # Check mode only (K3 of step 3): the frame path never needs a run site, because the
+  # resolver marks every return under one as `:plain`. The env of both paths is a heap id,
+  # so the test looks at the stored value: a frame is a tuple.
+  def check_run_tail(env) do
+    if is_integer(env) and is_tuple(:erlang.get(env)),
+      do: check_fail("a pending tail call at a run site of the frame #{env}")
+
+    :ok
   end
 
   @doc false
@@ -3406,10 +3473,8 @@ defmodule Browser.JS.Interp do
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
     pos = pget(:js_pos)
     # The old path pushes the same cell as `run_frame/6`, so both paths share one chain and
-    # one depth (step 2f). Its `after` block stays, because it also restores the tail flag.
+    # one depth (step 2f). The `after` block restores the chain and the position.
     :erlang.put(:js_stack, [{c.name, pos, depth + 1} | below])
-    # only a strict function's `return f()` is a tail call (and a constructor's never is)
-    old_tail = Process.put(:js_tail, extra == [] and strict?(c))
 
     try do
       {scope, body_scope} = call_frame(c, this, args, extra)
@@ -3420,20 +3485,26 @@ defmodule Browser.JS.Interp do
             ev(c.body, body_scope)
 
           _ ->
-            try do
-              case exec_fn(c.body, body_scope) do
-                {:ret, v} -> v
-                :ok -> :undefined
-              end
-            catch
-              {:js_return, v} -> v
-              {:js_tail, f, t, a} -> {:js_tailcall, f, t, a}
+            case exec_fn(c.body, body_scope) do
+              {:ret, v} ->
+                v
+
+              :ok ->
+                :undefined
+
+              # Only a strict function that is not a constructor gives the call back to
+              # `tail_loop/3`. Any other function makes the call here, while its own cell
+              # is on the chain, so its depth and its line in `Error.stack` stay.
+              {:tail, f, t, a} = tc ->
+                if extra == [] and strict?(c), do: tc, else: call(f, t, a)
+
+              other ->
+                bad_body_completion(other, c.name)
             end
         end
 
       {result, scope}
     after
-      Process.put(:js_tail, old_tail)
       :erlang.put(:js_stack, below)
       :erlang.put(:js_pos, pos)
     end
@@ -3442,9 +3513,9 @@ defmodule Browser.JS.Interp do
   # A call of a rewritten function (step 2b). The frame is one tuple
   # `{parent_id, info, chain, call_pos, root_id, params..., hidden..., template...}`. It is
   # built before the body runs. When the call ends, `leave/5` erases it, unless a closure
-  # made during the call can hold its id. The tail flag is never written: the resolver
-  # marked every return inside the function. The function does not tick: its callers tick
-  # as they do on the old path, so the step counts stay the same.
+  # made during the call can hold its id. The resolver marked every return inside the
+  # function, so a `{:tail}` completion comes only from a tail site. The function does not
+  # tick: its callers tick as they do on the old path, so the step counts stay the same.
   #
   # The call stack (step 2f): `:js_stack` is a chain of cells, innermost first. A call
   # pushes `{name, call_pos, depth}`, and an async call pushes a hidden cell (see
@@ -3458,7 +3529,7 @@ defmodule Browser.JS.Interp do
   #
   # - `:call`: a tail call goes to `tail_loop` after the frame is gone.
   # - `:new`: a call through `new`. The callee of a tail site runs inside the frame, so
-  #   the constructor keeps its line in `Error.stack` (see `ctor_tail/9`).
+  #   the constructor keeps its line in `Error.stack`.
   # - `:ctor`: a derived class constructor. It runs as `:new` and gives back
   #   `{value, this}`: the `this` slot is read before the frame is freed, because
   #   `super()` writes it during the body.
@@ -3469,7 +3540,7 @@ defmodule Browser.JS.Interp do
         else: frame_call(id, c, this, args, nt, mode)
 
     case result do
-      {:js_tailcall, f, t, a} -> tail_loop(f, t, a)
+      {:tail, f, t, a} -> tail_loop(f, t, a)
       _ -> result
     end
   end
@@ -3501,28 +3572,34 @@ defmodule Browser.JS.Interp do
     # The chain goes in last, just before the `try`, so that no throw can leave it pushed.
     :erlang.put(:js_stack, chain)
 
-    # One `try` covers the parameters and the body. Only a `return` statement of this
-    # function throws `{:js_return}` or `{:js_tail}`, so the parameters and `enter_body`
-    # cannot throw them.
+    # One `try` covers the parameters and the body. A return and a tail call are
+    # completions (step 3), so only a JS throw, the step limit or an engine error comes to
+    # the `catch`. The `try` stays, because it costs no time when nothing is thrown (the
+    # step 3 design, section 4) and it leaves the frame on every throw.
     result =
       try do
         if info.params != :plain, do: bind_params_list(c.params, args, frame)
         enter_body(frame, info, id)
         if @check, do: check_hoisted(frame, info)
-        ctor_value(mode, body_value(c, frame), frame, info)
+
+        case body_value(c, frame) do
+          # A plain call gives the pending call back after `leave/5`. `run_frame/6` then
+          # calls `tail_loop/3`, so the Elixir stack and the chain do not grow.
+          {:tail, _, _, _} = t when mode == :call ->
+            if @check, do: check_tail_sites(info, mode)
+            t
+
+          # Under `new` the callee runs here, inside the frame and this `try`. The
+          # constructor keeps its line in `Error.stack`, and a throw from the callee
+          # leaves the frame through the `catch` below.
+          {:tail, f, t, a} ->
+            if @check, do: check_tail_sites(info, mode)
+            ctor_value(mode, call(f, t, a), frame, info)
+
+          v ->
+            ctor_value(mode, v, frame, info)
+        end
       catch
-        {:js_return, v} ->
-          if @check and c.mode == :arrow_expr,
-            do: check_fail("a return out of the arrow expression #{check_name(info)}")
-
-          ctor_value(mode, v, frame, info)
-
-        {:js_tail, f, t, a} when mode == :call ->
-          {:js_tailcall, f, t, a}
-
-        {:js_tail, f, t, a} ->
-          ctor_tail(mode, f, t, a, frame, info, fns, below, pos)
-
         # A JS throw, the step limit or an engine error leaves the frame here. The value
         # is thrown again, so the cost is the same as the rethrow of an `after` block.
         :throw, v ->
@@ -3539,7 +3616,8 @@ defmodule Browser.JS.Interp do
   end
 
   # The value of the body of a frame call: an arrow with an expression body gives the
-  # value of the expression, and a body that ends without `return` gives `undefined`.
+  # value of the expression, and a body that ends without `return` gives `undefined`. A
+  # tail site gives the pending call `{:tail, f, this, args}`, which no JS value can be.
   @compile {:inline, body_value: 2}
   defp body_value(c, frame) do
     case c.mode do
@@ -3547,12 +3625,29 @@ defmodule Browser.JS.Interp do
         ev(c.body, frame)
 
       _ ->
-        case exec_fn(c.body, frame) do
+        case fbody(c.body, frame) do
           {:ret, v} -> v
           :ok -> :undefined
+          {:tail, _, _, _} = t -> t
+          other -> bad_body_completion(other, c.name)
         end
     end
   end
+
+  # Check mode only (K2 and K3 of step 3): a pending tail call comes only from a function
+  # with a tail site, and never from a derived class constructor, which has none.
+  defp check_tail_sites(info, mode) do
+    if info.tail_sites == 0,
+      do: check_fail("a tail call from #{check_name(info)}, which has no tail site")
+
+    if mode == :ctor, do: check_fail("a tail call in the constructor #{check_name(info)}")
+    :ok
+  end
+
+  # (K2 of step 3) A function body completes normally or with a return. A break or a
+  # continue cannot leave it, because the parser refuses one without a target.
+  defp bad_body_completion(c, name),
+    do: check_fail("the body of #{inspect(name)} completed with #{inspect(c)}")
 
   # A derived class constructor gives back `{value, this}`. The `this` slot is read while
   # the frame is live, because `super()` writes it during the body.
@@ -3573,31 +3668,6 @@ defmodule Browser.JS.Interp do
 
     :erlang.put(:js_stack, below)
     :erlang.put(:js_pos, pos)
-  end
-
-  # A tail site in a constructor (mode `:new` or `:ctor`): the callee runs while the cell
-  # of the constructor is on the chain, so the constructor keeps its line in
-  # `Error.stack`. This code runs in a `catch` clause of `frame_call/6`, which is outside
-  # its `try`. So it has a `try` of its own, which leaves the frame when the callee throws.
-  # On a normal return, `frame_call/6` leaves the frame.
-  defp ctor_tail(mode, f, t, a, frame, info, fns, below, pos) do
-    v =
-      try do
-        if @check and mode == :ctor,
-          do: check_fail("a tail call in the constructor #{check_name(info)}")
-
-        call(f, t, a)
-      catch
-        :throw, e ->
-          leave(frame, info, fns, below, pos)
-          throw(e)
-
-        kind, reason ->
-          leave(frame, info, fns, below, pos)
-          :erlang.raise(kind, reason, __STACKTRACE__)
-      end
-
-    ctor_value(mode, v, frame, info)
   end
 
   @doc false
@@ -4575,7 +4645,7 @@ defmodule Browser.JS.Interp do
 
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
+    top_completion(exec_list(stmts, scope))
     # (the process dictionary reports a stored :undefined as missing, hence the default; the
     # microtasks run after the script and must not change its completion value)
     result = Process.get(:js_last, :undefined)
@@ -4668,7 +4738,28 @@ defmodule Browser.JS.Interp do
   def lexical_names(_), do: []
 
   @doc false
-  def module_exec(stmts, scope), do: exec_list(stmts, scope)
+  def module_exec(stmts, scope), do: top_completion(exec_list(stmts, scope))
+
+  @doc false
+  # The completion of script, eval or module code or of a class static block. Such code
+  # cannot complete with a `return`, `break` or `continue`: the parser refuses them. So
+  # this is only a safety net. In check mode any other completion is a failure. In a
+  # normal build it becomes `{:js_illegal, kind}`, which `Browser.JS` reports as a syntax
+  # error, as it did before step 3.
+  def top_completion(:ok), do: :ok
+
+  def top_completion(c) do
+    if @check, do: check_fail("top-level code completed with #{inspect(c)}")
+
+    kind =
+      case c do
+        {:brk, _} -> :break
+        {:cont, _} -> :continue
+        _ -> :return
+      end
+
+    throw({:js_illegal, kind})
+  end
 
   # `import.source(x)`: a source text module has no source to give, so the promise rejects
   # with a SyntaxError once the specifier and the options have been converted
@@ -4822,15 +4913,24 @@ defmodule Browser.JS.Interp do
     exec_list(rest, env)
   end
 
+  # A statement that does not complete normally ends the list, and its completion is the
+  # completion of the list.
   defp exec_list([stmt | rest], env) do
-    exec(stmt, env, [])
-    exec_list(rest, env)
+    case exec(stmt, env, []) do
+      :ok ->
+        exec_list(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
+    end
   end
 
-  # A function body: a `return` that is reached through `if` and block statements only gives its
-  # value back as `{:ret, value}` instead of being thrown. In a strict function (the tail flag
-  # says so) a `return` of a call, or of a form that holds one in tail position, becomes a tail
-  # call instead: `tail_value/2` throws it to the function's frame.
+  # The body of a function on the old path. The `return`, `if` and block statements at the
+  # top of the body run here, and a top-level expression statement does not write
+  # `:js_last`. Other statements run through `exec/3`, which writes `:js_last` as before
+  # step 3, so the completion values at `:off` do not change. A rewritten body runs
+  # through `fbody/2`.
   defp exec_fn([], _env), do: :ok
 
   defp exec_fn([{:pos, loc} | rest], env) do
@@ -4840,8 +4940,12 @@ defmodule Browser.JS.Interp do
 
   defp exec_fn([stmt | rest], env) do
     case exec_fn_stmt(stmt, env) do
-      :ok -> exec_fn(rest, env)
-      {:ret, _} = ret -> ret
+      :ok ->
+        exec_fn(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
     end
   end
 
@@ -4851,14 +4955,9 @@ defmodule Browser.JS.Interp do
        when not (is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical]),
        do: {:ret, ev(e, env)}
 
-  defp exec_fn_stmt({:return, e}, env) do
-    if Process.get(:js_tail) == true, do: tail_value(e, env), else: {:ret, ev(e, env)}
-  end
-
-  # The resolver marked the return of a rewritten function: a tail site runs the
-  # trampoline, every other return is plain. Neither reads the run-time tail flag.
-  defp exec_fn_stmt({:return, e, :plain}, env), do: {:ret, ev(e, env)}
-  defp exec_fn_stmt({:return, e, :tail}, env), do: tail_value(e, env)
+  # (on the old path a call form always goes to `tail_value/2`: the function boundary in
+  # `closure_scope/4` decides if the pending call is a tail call)
+  defp exec_fn_stmt({:return, e}, env), do: tail_value(e, env)
 
   # (a statement's completion value only matters outside function bodies: in a script or eval code)
   defp exec_fn_stmt({:expr, e}, env) do
@@ -4878,36 +4977,145 @@ defmodule Browser.JS.Interp do
     if scoped_block?(stmts), do: exec_other({:block, stmts}, env), else: exec_fn(stmts, env)
   end
 
+  defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
+
+  defp exec_other(stmt, env) do
+    c = exec(stmt, env, [])
+    if @check, do: check_completion(c, stmt)
+    c
+  end
+
+  # ── statements inside a rewritten function ─────────────────
+
+  # Only script and eval code have a completion value, so the statements of a rewritten
+  # function do not write `:js_last` (step 3). `fbody/2` and `fstmt/3` run these
+  # statements. `fstmt/3` has its own clauses for the kinds whose `exec/3` clause writes
+  # `:js_last` and that occur in both kinds of code: expression statements, `if`,
+  # labeled statements, `while` and `do-while`. It also has the blocks and the marked
+  # returns. Every other kind goes to `exec/3`, whose clauses for the frame shapes write
+  # nothing and run their children through `fstmt/3` and `fbody/2`.
+
+  @doc false
+  # (the statement runner of the CPS evaluator for the body of a rewritten async function
+  # or generator, see `Browser.JS.Async`)
+  def exec_frame_stmt(stmt, env, labels), do: fstmt(stmt, env, labels)
+
+  # A statement list inside a rewritten function. A statement that does not complete
+  # normally ends the list, as in `exec_list/2`.
+  defp fbody([], _env), do: :ok
+
+  defp fbody([{:pos, loc} | rest], env) do
+    :erlang.put(:js_pos, loc)
+    fbody(rest, env)
+  end
+
+  defp fbody([stmt | rest], env) do
+    case fstmt(stmt, env, []) do
+      :ok ->
+        fbody(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
+    end
+  end
+
+  # (the twin of the `exec/3` clause for `{:expr}`, without the write)
+  defp fstmt({:expr, e}, env, _) do
+    ev(e, env)
+    :ok
+  end
+
+  # The resolver marked each return of a rewritten function: a tail site gives back a
+  # pending call, and every other return is plain.
+  defp fstmt({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
+  defp fstmt({:return, e, :tail}, env, _), do: tail_value(e, env)
+
+  # (the twin of the `exec/3` clause for `{:if}`, without the write)
+  defp fstmt({:if, c, a, b}, env, _) do
+    cond do
+      truthy(ev(c, env)) -> fstmt(a, env, [])
+      b != nil -> fstmt(b, env, [])
+      true -> :ok
+    end
+  end
+
+  # (the twin of the `exec/3` clause for `{:labeled}`)
+  defp fstmt({:labeled, l, s}, env, labels) do
+    case fstmt(s, env, [l | labels]) do
+      {:brk, ^l} -> :ok
+      c -> c
+    end
+  end
+
+  # (the twins of the `exec/3` clauses for `{:while}` and `{:dowhile}`, without the write)
+  defp fstmt({:while, c, body}, env, labels), do: while_loop(c, body, env, labels, :fn)
+
+  defp fstmt({:dowhile, body, c}, env, labels) do
+    case run_body(body, env, labels, :fn) do
+      :break -> :ok
+      :next -> while_loop(c, body, env, labels, :fn)
+      exit -> loop_exit(exit)
+    end
+  end
+
   # (a block inside a rewritten function: its names are slots of the frame, no scope is made)
-  defp exec_fn_stmt({:block, stmts, sc}, env) when frameless(sc) do
+  defp fstmt({:block, stmts, sc}, env, _) when frameless(sc) do
     enter_frameless(env, sc)
-    exec_fn(stmts, env)
+    fbody(stmts, env)
   end
 
   # (a block whose names a closure captures: the names live in a block frame of their own)
-  defp exec_fn_stmt({:block, stmts, sc}, env) when framed(sc) do
+  defp fstmt({:block, stmts, sc}, env, _) when framed(sc) do
     fns = :erlang.get(:js_fns)
     b = enter_scope(env, sc)
 
     try do
-      exec_fn(stmts, b)
+      fbody(stmts, b)
     after
       leave_scope(b, fns)
     end
   end
 
-  defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
+  defp fstmt(stmt, env, labels), do: exec(stmt, env, labels)
 
-  defp exec_other(stmt, env) do
-    exec(stmt, env, [])
-    :ok
-  end
+  # A loop body or a case body in the mode of the loop: `:top` for script, eval and
+  # old-path code, which writes `:js_last`, and `:fn` for a rewritten function.
+  @compile {:inline, mode_exec: 3, mode_list: 3}
+  defp mode_exec(stmt, env, :fn), do: fstmt(stmt, env, [])
+  defp mode_exec(stmt, env, :top), do: exec(stmt, env, [])
+  defp mode_list(stmts, env, :fn), do: fbody(stmts, env)
+  defp mode_list(stmts, env, :top), do: exec_list(stmts, env)
 
-  @doc "Runs statements as a function body in `scope`: hoists, then executes."
+  @doc "Runs statements as a class static block in `scope`: hoists, then executes."
   def run_body(stmts, scope) do
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
+    top_completion(exec_list(stmts, scope))
+  end
+
+  # Check mode only (K6 of step 3): the `exec/3` clauses that write `:js_last` and have a
+  # twin in `fstmt/3` run only in script, eval and old-path code, whose scopes are maps.
+  # A frame is a tuple, so a statement of a rewritten function that comes here is a fault.
+  defp check_script_env(env, kind) do
+    if is_integer(env) and is_tuple(:erlang.get(env)),
+      do: check_fail("the statement #{inspect(kind)} of a rewritten function in exec/3")
+
+    :ok
+  end
+
+  @doc false
+  # Check mode only (K1 of step 3): a statement completes with one of the five completion
+  # shapes. Any other value is a clause that gives back a result by accident, and a list
+  # would stop on it.
+  def check_completion(c, stmt) do
+    case c do
+      :ok -> :ok
+      {:ret, _} -> :ok
+      {tag, l} when tag in [:brk, :cont] and (l == nil or is_binary(l)) -> :ok
+      {:tail, _, _, _} -> :ok
+      _ -> check_fail("the statement #{inspect(elem(stmt, 0))} completed with #{inspect(c)}")
+    end
   end
 
   # ── using declarations ─────────────────────────────────────
@@ -4984,8 +5192,10 @@ defmodule Browser.JS.Interp do
 
   @doc false
   # how the rest of a list ended (:ok, or {:thrown, t}) together with its disposal
-  def using_finish(:ok, :ok), do: :ok
-  def using_finish(:ok, {:error, e}), do: throw({:js_error, e})
+  # `{:done, c}` is the completion of the rest of the list. A clean disposal keeps it, and
+  # an error from the disposal replaces it, also a return or a break.
+  def using_finish({:done, c}, :ok), do: c
+  def using_finish({:done, _}, {:error, e}), do: throw({:js_error, e})
   def using_finish({:thrown, t}, :ok), do: throw(t)
 
   def using_finish({:thrown, {:js_error, e}}, {:error, e2}),
@@ -5002,7 +5212,13 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
-  def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
+  # Runs one statement and gives its completion. A statement of a rewritten function (its
+  # env holds a frame, which is a tuple) runs through `fstmt/3`, as it does in the body.
+  def exec_stmt(stmt, env, labels \\ []) do
+    if is_integer(env) and is_tuple(:erlang.get(env)),
+      do: fstmt(stmt, env, labels),
+      else: exec(stmt, env, labels)
+  end
 
   defp exec(stmt, env), do: exec(stmt, env, [])
 
@@ -5012,7 +5228,9 @@ defmodule Browser.JS.Interp do
     :ok
   end
 
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:expr, e}, env, _) do
+    if @check, do: check_script_env(env, :expr)
     :erlang.put(:js_last, ev(e, env))
     :ok
   end
@@ -5050,8 +5268,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        no_tail(fn -> exec_list(rest, env) end)
-        :ok
+        {:done, run_tail(fbody(rest, env), env)}
       catch
         t -> {:thrown, t}
       end
@@ -5066,8 +5283,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        no_tail(fn -> exec_list(rest, env) end)
-        :ok
+        {:done, run_tail(exec_list(rest, env), env)}
       catch
         t -> {:thrown, t}
       end
@@ -5086,7 +5302,7 @@ defmodule Browser.JS.Interp do
     scope = new_scope(env)
     s = deref(scope)
     store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
-    no_tail(fn -> exec(body, scope, []) end)
+    run_tail(exec(body, scope, []), scope)
   end
 
   # The CPS evaluator takes every statement that is marked `{:aw}`, so in check mode the
@@ -5101,16 +5317,23 @@ defmodule Browser.JS.Interp do
   defp exec({:export, stmt}, env, _), do: exec(stmt, env, [])
   defp exec({:export_default, {:fundecl, _, _}}, _, _), do: :ok
 
-  defp exec({:export_default, {:classdecl, name, node}}, env, _),
-    do: declare(env, name, ev_named(node, env, {:id, "default"}))
+  # (`declare/3` gives back a value that is not a completion, so these clauses give `:ok`)
+  defp exec({:export_default, {:classdecl, name, node}}, env, _) do
+    declare(env, name, ev_named(node, env, {:id, "default"}))
+    :ok
+  end
 
-  defp exec({:export_default, {:expr, e}}, env, _),
-    do: declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+  defp exec({:export_default, {:expr, e}}, env, _) do
+    declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+    :ok
+  end
 
   defp exec({:export_names, _}, _, _), do: :ok
   defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
+    if @check, do: check_script_env(env, :block)
+
     if scoped_block?(stmts) do
       if @check, do: check_old_path(env, "a block")
       fns = pget(:js_fns)
@@ -5125,39 +5348,21 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp exec({:block, stmts, sc}, env, _) when frameless(sc) do
-    enter_frameless(env, sc)
-    exec_list(stmts, env)
-  end
+  # (the blocks of a rewritten function, also through `exec_stmt/3`)
+  defp exec({:block, _, _} = stmt, env, labels), do: fstmt(stmt, env, labels)
 
-  defp exec({:block, stmts, sc}, env, _) when framed(sc) do
-    fns = :erlang.get(:js_fns)
-    b = enter_scope(env, sc)
+  defp exec({:return, nil}, _, _), do: {:ret, :undefined}
 
-    try do
-      exec_list(stmts, b)
-    after
-      leave_scope(b, fns)
-    end
-  end
+  # (on the old path a call form always goes to `tail_value/2`: a run site or the function
+  # boundary in `closure_scope/4` decides what happens with the pending call)
+  defp exec({:return, e}, env, _)
+       when is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical],
+       do: tail_value(e, env)
 
-  defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
+  defp exec({:return, e}, env, _), do: {:ret, ev(e, env)}
 
-  defp exec({:return, e}, env, _) do
-    if Process.get(:js_tail) == true do
-      {:ret, v} = tail_value(e, env)
-      throw({:js_return, v})
-    else
-      throw({:js_return, ev(e, env)})
-    end
-  end
-
-  defp exec({:return, e, :plain}, env, _), do: throw({:js_return, ev(e, env)})
-
-  defp exec({:return, e, :tail}, env, _) do
-    {:ret, v} = tail_value(e, env)
-    throw({:js_return, v})
-  end
+  defp exec({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
+  defp exec({:return, e, :tail}, env, _), do: tail_value(e, env)
 
   defp exec({:throw, e}, env, _) do
     v = ev(e, env)
@@ -5166,10 +5371,12 @@ defmodule Browser.JS.Interp do
     throw({:js_error, v})
   end
 
-  defp exec({:break, label}, _, _), do: throw({:js_break, label})
-  defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
+  defp exec({:break, label}, _, _), do: {:brk, label}
+  defp exec({:continue, label}, _, _), do: {:cont, label}
 
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:if, c, a, b}, env, _) do
+    if @check, do: check_script_env(env, :if)
     :erlang.put(:js_last, :undefined)
 
     cond do
@@ -5179,23 +5386,33 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # A break to this label ends the labeled statement normally. A continue to the label is
+  # for the loop that has the label in `labels`.
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:labeled, l, s}, env, labels) do
-    exec(s, env, [l | labels])
-  catch
-    {:js_break, ^l} -> :ok
+    if @check, do: check_script_env(env, :labeled)
+
+    case exec(s, env, [l | labels]) do
+      {:brk, ^l} -> :ok
+      c -> c
+    end
   end
 
+  # (the `fstmt/3` clauses are the twins of these two for a rewritten function)
   defp exec({:while, c, body}, env, labels) do
+    if @check, do: check_script_env(env, :while)
     :erlang.put(:js_last, :undefined)
-    while_loop(c, body, env, labels)
+    while_loop(c, body, env, labels, :top)
   end
 
   defp exec({:dowhile, body, c}, env, labels) do
+    if @check, do: check_script_env(env, :dowhile)
     :erlang.put(:js_last, :undefined)
 
-    case run_body(body, env, labels) do
+    case run_body(body, env, labels, :top) do
       :break -> :ok
-      :next -> while_loop(c, body, env, labels)
+      :next -> while_loop(c, body, env, labels, :top)
+      exit -> loop_exit(exit)
     end
   end
 
@@ -5219,13 +5436,12 @@ defmodule Browser.JS.Interp do
     first =
       if per_iteration? and pget(:js_fns) != fns, do: copy_scope(loop_env, env), else: loop_env
 
-    for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
+    for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns), :top)
   end
 
   # a `for` inside a rewritten function: the head's names are slots of the frame, so the
   # loop runs in `env` with no scope, no copy per iteration and no closure count to read
   defp exec({:for, init, test, update, body, sc}, env, labels) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
     enter_frameless(env, sc)
 
     case init do
@@ -5243,7 +5459,6 @@ defmodule Browser.JS.Interp do
   # With a `const` head one frame serves every round. The head frame is freed when no
   # closure was made during the whole loop, which also means that no copy was made.
   defp exec({:for, init, test, update, body, sc}, env, labels) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
     fns = :erlang.get(:js_fns)
     l0 = enter_scope(env, sc)
 
@@ -5256,7 +5471,7 @@ defmodule Browser.JS.Interp do
 
       if sc.per_iter do
         first = if :erlang.get(:js_fns) != fns, do: copy_scope(l0, env), else: l0
-        for_loop(test, update, body, env, first, true, labels, :erlang.get(:js_fns))
+        for_loop(test, update, body, env, first, true, labels, :erlang.get(:js_fns), :fn)
       else
         frame_for_loop(test, update, body, l0, labels)
       end
@@ -5266,15 +5481,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({kind, _, _, _, _} = node, env, labels) when kind in [:forin, :forof],
-    do: no_tail(fn -> exec_for_each(node, env, labels) end)
+    do: exec_for_each(node, env, labels)
 
   defp exec({kind, _, _, _, _, sc} = node, env, labels)
        when kind in [:forin, :forof] and framed(sc),
-       do: no_tail(fn -> exec_for_each_framed(node, env, labels) end)
+       do: exec_for_each_framed(node, env, labels)
 
   defp exec({kind, _, _, _, _, sc} = node, env, labels)
        when kind in [:forin, :forof] and frameless(sc),
-       do: no_tail(fn -> exec_for_each_frame(node, env, labels) end)
+       do: exec_for_each_frame(node, env, labels)
 
   defp exec({:switch, disc, cases}, env, _) do
     :erlang.put(:js_last, :undefined)
@@ -5290,20 +5505,12 @@ defmodule Browser.JS.Interp do
       end) ||
         Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-    try do
-      if start,
-        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, scope) end)
-
-      :ok
-    catch
-      {:js_break, nil} -> :ok
-    end
+    if start, do: run_cases(Enum.drop(cases, start), scope, :top), else: :ok
   end
 
   # (a switch whose names a closure captures: the discriminant runs outside the switch, the
   # tests and the bodies in its block frame, where every case's functions are already made)
   defp exec({:switch, disc, cases, sc}, env, _) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
     v = ev(disc, env)
     fns = :erlang.get(:js_fns)
     s = enter_scope(env, sc)
@@ -5315,21 +5522,13 @@ defmodule Browser.JS.Interp do
         end) ||
           Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-      try do
-        if start,
-          do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, s) end)
-
-        :ok
-      catch
-        {:js_break, nil} -> :ok
-      end
+      if start, do: run_cases(Enum.drop(cases, start), s, :fn), else: :ok
     after
       leave_scope(s, fns)
     end
   end
 
   defp exec({:switch, disc, cases, sc}, env, _) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
     v = ev(disc, env)
     enter_frameless(env, sc)
 
@@ -5339,101 +5538,137 @@ defmodule Browser.JS.Interp do
       end) ||
         Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-    try do
-      if start,
-        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, env) end)
-
-      :ok
-    catch
-      {:js_break, nil} -> :ok
-    end
+    if start, do: run_cases(Enum.drop(cases, start), env, :fn), else: :ok
   end
 
-  # a `try` inside a rewritten function: the catch parameter is a slot of the frame
-  defp exec({:try, block, param, handler, finalizer, sc}, env, _) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
+  # A `try` inside a rewritten function. The catch parameter is a slot of the frame, or of
+  # a catch frame when a closure captures a name of the catch (see `run_handler/6`).
+  defp exec({:try, block, param, handler, finalizer, sc}, env, _),
+    do: try_statement(block, param, handler, finalizer, sc, env)
 
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          if @check, do: check_link(env)
-          enter_frameless(env, sc)
-          if param, do: bind(param, v, env, :let)
-          if finalizer, do: no_tail(fn -> exec(handler, env) end), else: exec(handler, env)
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
-    end
-  end
-
-  # (a try whose catch names a closure captures: the try block and the finalizer run in
-  # `env`, the parameter and the handler in a catch frame made when the error is caught)
-  defp exec({:try, block, param, handler, finalizer, sc}, env, _) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
-
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          if @check, do: check_link(env)
-          fns = :erlang.get(:js_fns)
-          c = enter_scope(env, sc)
-
-          try do
-            if param, do: bind(param, v, c, :let)
-            if finalizer, do: no_tail(fn -> exec(handler, c) end), else: exec(handler, c)
-          after
-            leave_scope(c, fns)
-          end
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
-    end
-  end
-
+  # (a `try` on the old path: the handler runs in a new map scope)
   defp exec({:try, block, param, handler, finalizer}, env, _) do
     :erlang.put(:js_last, :undefined)
+    try_statement(block, param, handler, finalizer, :map, env)
+  end
 
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          if @check, do: check_old_path(env, "a catch clause")
-          if @check, do: check_link(env)
-          scope = new_scope(env)
-          if param, do: bind(param, v, scope, :let)
+  # The cases of a switch run in order from the first match until one does not complete
+  # normally. This is the fallthrough of JS. A break without a label ends the switch. A
+  # continue without a label goes up to the loop around the switch.
+  defp run_cases([], _env, _mode), do: :ok
 
-          with {:id, pname} <- param,
-               do: declare(scope, :catch_param, pname)
-
-          if finalizer, do: no_tail(fn -> exec(handler, scope) end), else: exec(handler, scope)
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
+  defp run_cases([{_, body} | rest], env, mode) do
+    case mode_list(body, env, mode) do
+      :ok -> run_cases(rest, env, mode)
+      {:brk, nil} -> :ok
+      c -> c
     end
   end
+
+  # A `try` statement. Without a finalizer, the block and the handler are all of it. With
+  # a finalizer, the outcome of the block and the handler is kept as a value, so that the
+  # finalizer can run after every way out, as an Elixir `after` block would.
+  defp try_statement(block, param, handler, nil, sc, env),
+    do: try_part(block, param, handler, false, sc, env)
+
+  defp try_statement(block, param, handler, finalizer, sc, env) do
+    outcome =
+      try do
+        {:done, try_part(block, param, handler, true, sc, env)}
+      catch
+        :throw, v -> {:thrown, v}
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+
+    run_finally(outcome, finalizer, env, try_mode(sc))
+  end
+
+  # The block of a `try`, and the handler when the block throws a JS error. The handler
+  # runs in the `catch` clause, outside the inner `try`, so a throw from the handler goes
+  # to the finalizer. `fin?` says whether a finalizer follows.
+  defp try_part(block, param, handler, fin?, sc, env) do
+    try do
+      # (the block is no tail position: a pending call runs here, where the catch sees it)
+      run_tail(mode_exec(block, env, try_mode(sc)), env)
+    catch
+      {:js_error, v} when handler != nil -> run_handler(v, param, handler, fin?, sc, env)
+    end
+  end
+
+  # The catch clause. A frameless scope binds the parameter in a slot of the frame. A
+  # framed scope makes a catch frame, which is left when the handler ends. The old path
+  # (`:map`) makes a map scope.
+  defp run_handler(v, param, handler, fin?, sc, env) when frameless(sc) do
+    if @check, do: check_link(env)
+    enter_frameless(env, sc)
+    if param, do: bind(param, v, env, :let)
+    handler_body(handler, env, fin?, :fn)
+  end
+
+  defp run_handler(v, param, handler, fin?, sc, env) when framed(sc) do
+    if @check, do: check_link(env)
+    fns = :erlang.get(:js_fns)
+    c = enter_scope(env, sc)
+
+    try do
+      if param, do: bind(param, v, c, :let)
+      handler_body(handler, c, fin?, :fn)
+    after
+      leave_scope(c, fns)
+    end
+  end
+
+  defp run_handler(v, param, handler, fin?, :map, env) do
+    if @check, do: check_old_path(env, "a catch clause")
+    if @check, do: check_link(env)
+    scope = new_scope(env)
+    if param, do: bind(param, v, scope, :let)
+
+    with {:id, pname} <- param,
+         do: declare(scope, :catch_param, pname)
+
+    handler_body(handler, scope, fin?, :top)
+  end
+
+  # A handler that a finalizer follows makes no tail call, because the finalizer must run
+  # after the call.
+  defp handler_body(handler, env, true, mode), do: run_tail(mode_exec(handler, env, mode), env)
+  defp handler_body(handler, env, false, mode), do: mode_exec(handler, env, mode)
+
+  # (the 5-tuple `try` of script, eval and old-path code passes `:map`)
+  defp try_mode(:map), do: :top
+  defp try_mode(_sc), do: :fn
+
+  # The finalizer runs after every way out of the block and the handler. When it completes
+  # normally, the statement keeps the outcome of the block and the handler, and its own
+  # value. When it completes abruptly, its completion replaces that outcome, also a pending
+  # throw or the step limit, as a throw out of an Elixir `after` block did before step 3.
+  defp run_finally(outcome, finalizer, env, :top) do
+    saved = :erlang.get(:js_last)
+    :erlang.put(:js_last, :undefined)
+
+    case exec(finalizer, env, []) do
+      :ok ->
+        :erlang.put(:js_last, saved)
+        finish_outcome(outcome)
+
+      c ->
+        c
+    end
+  end
+
+  # (a rewritten function has no completion value to keep)
+  defp run_finally(outcome, finalizer, env, :fn) do
+    case fstmt(finalizer, env, []) do
+      :ok -> finish_outcome(outcome)
+      c -> c
+    end
+  end
+
+  # The outcome of the block and the handler, after a finalizer that completed normally.
+  defp finish_outcome({:done, c}), do: c
+  defp finish_outcome({:thrown, v}), do: throw(v)
+  defp finish_outcome({:raised, kind, reason, st}), do: :erlang.raise(kind, reason, st)
 
   defp call_target(callee, env) do
     case callee do
@@ -5519,12 +5754,13 @@ defmodule Browser.JS.Interp do
             fns = pget(:js_fns)
             iter_env = new_scope(env)
             bind(pat, item, iter_env, mode)
-            outcome = run_body(body, iter_env, labels)
+            outcome = run_tail(run_body(body, iter_env, labels, :top), iter_env)
             free_scope(iter_env, fns)
 
             case outcome do
               :break -> {:halt, :ok}
               :next -> {:cont, :ok}
+              c -> {:halt, loop_exit(c)}
             end
           end
         end)
@@ -5535,7 +5771,6 @@ defmodule Browser.JS.Interp do
   # they go back to the temporal dead zone before the object is evaluated and again before
   # every item, so a default that reads its own name throws on every round.
   defp exec_for_each_frame({kind, decl, pat, obj, body, sc}, env, labels) do
-    :erlang.put(:js_last, :undefined)
     reset_tdz(env, sc)
     target = ev(obj, env)
     mode = if decl == nil, do: :assign, else: decl
@@ -5560,9 +5795,10 @@ defmodule Browser.JS.Interp do
             reset_tdz(env, sc)
             bind(pat, item, env, mode)
 
-            case run_body(body, env, labels) do
+            case run_tail(run_body(body, env, labels, :fn), env) do
               :break -> {:halt, :ok}
               :next -> {:cont, :ok}
+              c -> {:halt, loop_exit(c)}
             end
           end
         end)
@@ -5576,7 +5812,6 @@ defmodule Browser.JS.Interp do
   # `h` is the first item frame, so `for (const k of [() => k]) k()` keeps `h` for the
   # arrow and runs the first item in a new frame.
   defp exec_for_each_framed({kind, decl, pat, obj, body, sc}, env, labels) do
-    :erlang.put(:js_last, :undefined)
     h = enter_scope(env, sc)
     fresh = :erlang.get(h)
     fns = :erlang.get(:js_fns)
@@ -5605,7 +5840,7 @@ defmodule Browser.JS.Interp do
 
       {:list, items} ->
         last =
-          Enum.reduce_while(items, {h, fns}, fn item, {cur, cur_fns} = acc ->
+          Enum.reduce_while(items, {h, fns, :ok}, fn item, {cur, cur_fns, _} = acc ->
             # a key that was deleted before its turn is skipped
             if kind == :forin and not has_property?(target, item) do
               {:cont, acc}
@@ -5616,7 +5851,7 @@ defmodule Browser.JS.Interp do
               outcome =
                 try do
                   bind(pat, item, cur, mode)
-                  run_body(body, cur, labels)
+                  run_tail(run_body(body, cur, labels, :fn), cur)
                 catch
                   k, e ->
                     leave_scope(cur, cur_fns)
@@ -5624,14 +5859,16 @@ defmodule Browser.JS.Interp do
                 end
 
               case outcome do
-                :break -> {:halt, {cur, cur_fns}}
-                :next -> {:cont, {cur, cur_fns}}
+                :break -> {:halt, {cur, cur_fns, :ok}}
+                :next -> {:cont, {cur, cur_fns, :ok}}
+                c -> {:halt, {cur, cur_fns, loop_exit(c)}}
               end
             end
           end)
 
-        {cur, cur_fns} = last
+        {cur, cur_fns, c} = last
         leave_scope(cur, cur_fns)
+        c
     end
   end
 
@@ -5654,27 +5891,38 @@ defmodule Browser.JS.Interp do
     tick()
 
     if test == nil or truthy(ev(test, env)) do
-      case run_body(body, env, labels) do
+      case run_body(body, env, labels, :fn) do
         :break ->
           :ok
 
         :next ->
           if update, do: ev(update, env)
           frame_for_loop(test, update, body, env, labels)
+
+        c ->
+          loop_exit(c)
       end
     else
       :ok
     end
   end
 
-  # The value of a `return` in a strict function. A call in tail position is not made here:
-  # the callee and the arguments are thrown to the function's frame, which gives them to
-  # `tail_loop`. Anything else comes back as `{:ret, value}`.
+  # The completion of a `return` at a tail site. A call in tail position is not made here:
+  # the callee, `this` and the arguments come back as `{:tail, f, this, args}`. A run site
+  # or the function boundary makes the call. Anything else comes back as `{:ret, value}`.
+  # A call of the name `eval` is a tail call when the callee is not the built-in `eval`. A
+  # direct eval runs here, because it needs the scope of this function.
+  defp tail_value({:call, {:id, "eval"} = callee, args, false}, env) do
+    case eval_call(callee, args, env) do
+      {:value, v} -> {:ret, v}
+      {:call, f, this, argv} -> {:tail, f, this, argv}
+    end
+  end
+
   defp tail_value({:call, callee, args, false} = e, env) do
     plain? =
       case callee do
-        # (a direct eval, an optional chain and a `super()` call are no tail calls)
-        {:id, "eval"} -> ev(callee, env) != :erlang.get(:js_eval_fn)
+        # (an optional chain and a `super()` call are no tail calls)
         {:chain, _} -> false
         {:super} -> false
         _ -> true
@@ -5684,7 +5932,7 @@ defmodule Browser.JS.Interp do
       {f, this} = call_target(callee, env)
       argv = eval_list(args, env)
       unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-      throw({:js_tail, f, this, argv})
+      {:tail, f, this, argv}
     else
       {:ret, ev(e, env)}
     end
@@ -5714,13 +5962,14 @@ defmodule Browser.JS.Interp do
 
   defp tail_value(e, env), do: {:ret, ev(e, env)}
 
-  defp while_loop(c, body, env, labels) do
+  defp while_loop(c, body, env, labels, mode) do
     if truthy(ev(c, env)) do
       tick()
 
-      case run_body(body, env, labels) do
+      case run_body(body, env, labels, mode) do
         :break -> :ok
-        :next -> while_loop(c, body, env, labels)
+        :next -> while_loop(c, body, env, labels, mode)
+        exit -> loop_exit(exit)
       end
     else
       :ok
@@ -5729,11 +5978,11 @@ defmodule Browser.JS.Interp do
 
   # `fns` is the closure count from before this iteration's update expression ran (which
   # evaluates in the iteration's scope), so a closure made there keeps the scope alive too
-  defp for_loop(test, update, body, env, iter_env, copy?, labels, fns) do
+  defp for_loop(test, update, body, env, iter_env, copy?, labels, fns, mode) do
     tick()
 
     if test == nil or truthy(ev(test, iter_env)) do
-      case run_body(body, iter_env, labels) do
+      case run_body(body, iter_env, labels, mode) do
         :break ->
           :ok
 
@@ -5743,20 +5992,37 @@ defmodule Browser.JS.Interp do
 
           next_fns = pget(:js_fns)
           if update, do: ev(update, next_env)
-          for_loop(test, update, body, env, next_env, copy?, labels, next_fns)
+          for_loop(test, update, body, env, next_env, copy?, labels, next_fns, mode)
+
+        c ->
+          loop_exit(c)
       end
     else
       :ok
     end
   end
 
-  # runs a loop body, translating break / continue aimed at this loop
-  defp run_body(body, env, labels) do
-    exec(body, env)
-    :next
-  catch
-    {:js_break, l} = signal -> if l == nil or l in labels, do: :break, else: throw(signal)
-    {:js_continue, l} = signal -> if l == nil or l in labels, do: :next, else: throw(signal)
+  # What a loop does with the completion of its body: `:next` runs the next round, `:break`
+  # ends the loop normally, and any other completion leaves the loop. `labels` are the
+  # labels on this loop. A break or continue without a label always belongs to the
+  # innermost loop or switch. `mode` says how the body runs (see `mode_exec/3`).
+  defp run_body(body, env, labels, mode) do
+    case mode_exec(body, env, mode) do
+      :ok -> :next
+      {:cont, l} = c -> if l == nil or l in labels, do: :next, else: c
+      {:brk, l} = c -> if l == nil or l in labels, do: :break, else: c
+      c -> c
+    end
+  end
+
+  # A completion that leaves a loop. In check mode (K7 of step 3) it is never a break or a
+  # continue without a label, because `run_body/3` gives these to the innermost loop.
+  @compile {:inline, loop_exit: 1}
+  defp loop_exit(c) do
+    if @check and c in [{:brk, nil}, {:cont, nil}],
+      do: check_fail("a loop gave back #{inspect(c)}")
+
+    c
   end
 
   # ── binding ────────────────────────────────────────────────
@@ -6771,12 +7037,10 @@ defmodule Browser.JS.Interp do
 
   # `eval(...)` where `eval` is the built-in function runs in the caller's scope
   def ev({:call, {:id, "eval"} = callee, args, false}, env) do
-    f = ev(callee, env)
-    unless function?(f), do: throw_error("TypeError", "eval is not a function")
-
-    if f == :erlang.get(:js_eval_fn),
-      do: direct_eval(eval_list(args, env), env),
-      else: call(f, :undefined, eval_list(args, env))
+    case eval_call(callee, args, env) do
+      {:value, v} -> v
+      {:call, f, this, argv} -> call(f, this, argv)
+    end
   end
 
   def ev({:call, callee, args, opt}, env) do
@@ -6800,6 +7064,25 @@ defmodule Browser.JS.Interp do
 
     if @check, do: check_link(env)
     construct(f, argv)
+  end
+
+  # A call whose callee is the name `eval` (EvaluateCall). The callee is read one time,
+  # through `call_target/2`, so a function that a `with` object holds gets that object as
+  # `this`. The arguments are evaluated before the callee is examined. When the callee is
+  # the built-in `eval`, the call is a direct eval and the result is `{:value, v}`. Else the
+  # result is `{:call, f, this, args}`, and the caller makes the call. The plain call and
+  # the tail call share this function, so they read the callee the same number of times and
+  # give the same `this`.
+  defp eval_call(callee, args, env) do
+    {f, this} = call_target(callee, env)
+    argv = eval_list(args, env)
+
+    if f == :erlang.get(:js_eval_fn) do
+      {:value, direct_eval(argv, env)}
+    else
+      unless function?(f), do: throw_error("TypeError", "eval is not a function")
+      {:call, f, this, argv}
+    end
   end
 
   # ── direct eval ────────────────────────────────────────────
@@ -6927,7 +7210,7 @@ defmodule Browser.JS.Interp do
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
     :erlang.put(:js_last, :undefined)
-    exec_list(stmts, lex)
+    top_completion(exec_list(stmts, lex))
     result = Process.get(:js_last, :undefined)
     free_scope(lex, before)
     result
@@ -7265,12 +7548,22 @@ defmodule Browser.JS.Interp do
   defp describe({:this, _, _}), do: "this"
   defp describe(_), do: "expression"
 
-  defp eval_list(nodes, env) do
-    Enum.flat_map(nodes, fn
-      {:spread, e} -> iterate(ev(e, env))
-      :hole -> [:undefined]
-      n -> [ev(n, env)]
-    end)
+  # The values of an argument list, from left to right. Each value is bound before the
+  # recursive call, because Erlang does not define the order in which the parts of a list
+  # expression are evaluated. Plain recursion is faster than `Enum.flat_map/2` with a fun,
+  # and a call evaluates an argument list every time.
+  defp eval_list([], _env), do: []
+
+  defp eval_list([{:spread, e} | rest], env) do
+    vs = iterate(ev(e, env))
+    vs ++ eval_list(rest, env)
+  end
+
+  defp eval_list([:hole | rest], env), do: [:undefined | eval_list(rest, env)]
+
+  defp eval_list([n | rest], env) do
+    v = ev(n, env)
+    [v | eval_list(rest, env)]
   end
 
   defp spread_into(obj, src) do

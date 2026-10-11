@@ -105,9 +105,8 @@ defmodule Browser.JS do
     catch
       {:js_error, v} -> {:error, {:uncaught, describe(scanned(v))}, console()}
       :js_limit -> {:error, :step_limit, console()}
-      {:js_break, _} -> {:error, {:syntax, "illegal break"}, console()}
-      {:js_continue, _} -> {:error, {:syntax, "illegal continue"}, console()}
-      {:js_return, _} -> {:error, {:syntax, "illegal return"}, console()}
+      # (a safety net: the parser refuses these statements outside a function or a loop)
+      {:js_illegal, kind} -> {:error, {:syntax, "illegal #{kind}"}, console()}
       :js_short -> {:error, {:uncaught, "optional chain"}, console()}
     end
   end

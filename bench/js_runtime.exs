@@ -5,13 +5,14 @@
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
-# walk and DOM-like objects. After their total it measures four programs of step 2d and six
-# programs of step 2e, which are not in the total. The script wraps each program in a function. Page scripts
-# usually run in a function too. The script runs each program RUNS times (default 5). The
-# table shows the minimum time and the minimum number of reductions in millions. A reduction
-# is a BEAM work unit. The number of reductions does not change with the speed of the
-# machine. Use it to compare two builds on a noisy machine. The script compares the result of
-# every run with the expected value. It exits with status 1 when a result is wrong.
+# walk and DOM-like objects. After their total it measures four programs of step 2d, six
+# programs of step 2e and five programs of step 3, which are not in the total. The script
+# wraps each program in a function. Page scripts usually run in a function too. The script
+# runs each program RUNS times (default 5). The table shows the minimum time and the minimum
+# number of reductions in millions. A reduction is a BEAM work unit. The number of
+# reductions does not change with the speed of the machine. Use it to compare two builds on
+# a noisy machine. The script compares the result of every run with the expected value. It
+# exits with status 1 when a result is wrong.
 #
 # The QuickJS column shows the time of QuickJS 2021-03-27 (a bytecode interpreter, gcc -O2)
 # on the same machine. It is the mean of 5 runs. We measured it on 2026-10-09 for the language
@@ -91,6 +92,23 @@ programs_2e = [
    "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box"}
 ]
 
+# Five programs of step 3 (control flow as completions: strict tail calls, a `return` inside
+# a `for`, a `switch` and a for-of, and `continue`). Before step 3 each of these exits is an
+# Elixir throw, so these programs show the gain of that step. The nine programs above throw
+# no control value. They are not in the total. The expected values are the results at `:off`.
+programs_3 = [
+  {"stricttail40k", "strict tail calls 40k", nil, 20720.0,
+   ~S|"use strict"; function loop(n, acc){ if (n === 0) return acc; return loop(n - 1, (acc + n) % 1000003) } var s = 0; for (var i = 0; i < 40; i++) s = (s + loop(1000, i)) % 1000003; return s|},
+  {"find20k", "return inside a for 20k", nil, 30000.0,
+   "function find(a, x){ for (var i = 0; i < a.length; i++) { if (a[i] === x) return i } return -1 } var a = [0, 1, 2, 3]; var s = 0; for (var k = 0; k < 20000; k++) s += find(a, k % 4); return s"},
+  {"switchret30k", "return inside a switch 30k", nil, 60000.0,
+   "function kind(x){ switch (x % 3) { case 0: return 1; case 1: return 2; default: return 3 } } var s = 0; for (var i = 0; i < 30000; i++) s += kind(i); return s"},
+  {"continue60k", "continue in a for 60k", nil, 899_970_000.0,
+   "var s = 0; for (var i = 0; i < 60000; i++) { if (i % 2) continue; s += i } return s"},
+  {"forofret10k", "return inside a for-of 10k", nil, 10000.0,
+   "function mk(){ var i = 0; return {[Symbol.iterator](){ return this }, next(){ return {value: i++, done: i > 3} }} } function first(it){ for (var x of it) { if (x > 0) return x } return 0 } var s = 0; for (var i = 0; i < 10000; i++) s += first(mk()); return s"}
+]
+
 runs = String.to_integer(System.get_env("RUNS", "5"))
 filter = System.argv()
 
@@ -106,6 +124,7 @@ end
 selected = pick.(programs)
 selected_extra = pick.(extra_programs)
 selected_2e = pick.(programs_2e)
+selected_3 = pick.(programs_3)
 
 resolve =
   case System.get_env("RESOLVE", "off") do
@@ -189,4 +208,12 @@ IO.puts(
     run_list.(selected_2e)
   end
 
-if bad + bad_extra + bad_2e > 0, do: System.halt(1)
+{_, bad_3} =
+  if selected_3 == [] do
+    {0.0, 0}
+  else
+    IO.puts("step 3 programs (not in the total)")
+    run_list.(selected_3)
+  end
+
+if bad + bad_extra + bad_2e + bad_3 > 0, do: System.halt(1)

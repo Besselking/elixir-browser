@@ -13,6 +13,13 @@ defmodule Browser.JS.Async do
   too, kept in the `ctx` map, so that `try`/`finally` and labelled loops behave as usual across
   an `await`.
 
+  The sync evaluator gives a completion for each statement (step 3, see the "Control flow"
+  part of `Browser.JS.Interp`). `sync_stmt/5` sends `{:ret, v}`, `{:brk, label}` and
+  `{:cont, label}` to these continuations. A generator or async body makes no tail calls. So
+  when a `return f()` of the old path gives a pending call `{:tail, f, this, args}`,
+  `sync_stmt/5` makes the call immediately, inside its `try`, and a throw from the call
+  rejects the body.
+
   Within an expression the awaits are evaluated first, left to right, and the expression is then
   evaluated with their values (`f(a(), await b)` calls `a` after waiting for `b`); `&&`, `||`,
   `??` and `?:` keep their short-circuiting.
@@ -46,6 +53,10 @@ defmodule Browser.JS.Async do
     promise, a microtask or the `resume` of a generator holds the frame id in its
     environment. When the body has ended, `Browser.JS.Interp.frame_done/2` runs once. It
     erases the frame when no closure can hold it.
+  - The statements do not write `:js_last` (step 3), because only script and eval code
+    have a completion value. A statement without awaits runs through
+    `Browser.JS.Interp.exec_frame_stmt/3`, and an expression statement with an await does
+    not write the value.
   """
 
   alias Browser.JS.{Interp, Promise}
@@ -68,20 +79,6 @@ defmodule Browser.JS.Async do
   @target @name ++ [:cslot, :fname, :mslot]
 
   @compound ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
-
-  # A generator or async body makes no tail calls: a `return f()` in it must still see the
-  # body's `try` and `finally`. The body starts and resumes inside some caller's frame, which
-  # may be a strict function's with the tail flag on, so every entry into a body runs with the
-  # flag off (an ordinary call inside the body sets and restores the flag for itself).
-  defp no_tail(fun) do
-    tail = Process.put(:js_tail, false)
-
-    try do
-      fun.()
-    after
-      Process.put(:js_tail, tail)
-    end
-  end
 
   @doc """
   Calls an async closure: starts its body and returns its promise. `id` is the id of the
@@ -130,7 +127,7 @@ defmodule Browser.JS.Async do
           }
         end
 
-      no_tail(fn -> run_body(c, env, ctx, :undefined) end)
+      run_body(c, env, ctx, :undefined)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     after
@@ -193,7 +190,7 @@ defmodule Browser.JS.Async do
     }
 
     try do
-      no_tail(fn -> clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end) end)
+      clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     end
@@ -306,7 +303,7 @@ defmodule Browser.JS.Async do
         if @check, do: Interp.check_resume(gen.frame)
 
         try do
-          no_tail(fn -> gen.resume.(msg) end)
+          gen.resume.(msg)
         catch
           {:js_error, e} -> finish(gid, {:throw, e})
         end
@@ -472,7 +469,7 @@ defmodule Browser.JS.Async do
           if @check, do: Interp.check_resume(g.frame)
 
           try do
-            no_tail(fn -> g.resume.(msg) end)
+            g.resume.(msg)
           catch
             {:js_error, e} -> ag_finish(gid, {:throw, e})
           end
@@ -1314,12 +1311,12 @@ defmodule Browser.JS.Async do
       p,
       Interp.native("", fn _, args ->
         if @check, do: Interp.check_resume(Map.get(ctx, :frame))
-        no_tail(fn -> k.(Enum.at(args, 0, :undefined)) end)
+        k.(Enum.at(args, 0, :undefined))
         :undefined
       end),
       Interp.native("", fn _, args ->
         if @check, do: Interp.check_resume(Map.get(ctx, :frame))
-        no_tail(fn -> ctx.throw.(Enum.at(args, 0, :undefined)) end)
+        ctx.throw.(Enum.at(args, 0, :undefined))
         :undefined
       end)
     )
@@ -1361,18 +1358,32 @@ defmodule Browser.JS.Async do
       else: sync_stmt(stmt, env, ctx, k, labels)
   end
 
-  # a statement without awaits, by the ordinary evaluator; its abrupt completions are routed
-  # (the tail flag is off, see `no_tail/1`, so a `return f()` here is a plain return)
+  # A statement without awaits runs by the ordinary evaluator, and its abrupt completions
+  # are routed to the continuations. A generator or async body makes no tail calls, so a
+  # pending call runs here, under this `try`: a throw from it rejects the body as before.
+  # Only the old path gives a pending call, because the resolver marks every return of a
+  # generator or async body as `:plain`.
   defp sync_stmt(stmt, env, ctx, k, labels) do
     result =
       try do
-        Interp.exec_stmt(stmt, env, labels)
-        :ok
+        # (a rewritten body runs its statements without writes to `:js_last`)
+        c =
+          if is_map_key(ctx, :frame),
+            do: Interp.exec_frame_stmt(stmt, env, labels),
+            else: Interp.exec_stmt(stmt, env, labels)
+
+        if @check, do: Interp.check_completion(c, stmt)
+
+        case c do
+          {:tail, f, t, a} ->
+            if @check, do: Interp.check_run_tail(env)
+            {:ret, Interp.call(f, t, a)}
+
+          c ->
+            c
+        end
       catch
         {:js_error, e} -> {:throw, e}
-        {:js_return, v} -> {:ret, v}
-        {:js_break, l} -> {:brk, l}
-        {:js_continue, l} -> {:cont, l}
       end
 
     abrupt(result, ctx, k)
@@ -1411,6 +1422,11 @@ defmodule Browser.JS.Async do
       {:throw, e} -> ctx.throw.(e)
     end
   end
+
+  # (only script and eval code have a completion value, so a rewritten body does not
+  # write `:js_last`)
+  defp cs({:expr, e}, env, %{frame: _} = ctx, k, _labels),
+    do: cev(e, env, ctx, fn _ -> k.(:ok) end)
 
   defp cs({:expr, e}, env, ctx, k, _labels) do
     cev(e, env, ctx, fn v ->
