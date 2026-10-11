@@ -49,6 +49,7 @@ defmodule Browser.JS.Interp do
   alias Browser.JS.Num
   alias Browser.JS.Resolve.{Info, Scope}
   require Browser.JS.Fast, as: Fast
+  require Browser.JS.Obj, as: Obj
 
   # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
   defmacrop pget(key) do
@@ -212,32 +213,23 @@ defmodule Browser.JS.Interp do
   def global, do: pget(:js_global)
 
   @doc "A plain object with the given `{key, value}` pairs."
-  def new_object,
-    do: {:obj, alloc(%{class: :object, props: %{}, keys: [], proto: proto(:object)})}
+  def new_object, do: {:obj, alloc(Obj.record(class: :object, proto: proto(:object)))}
 
   def new_object(pairs, proto \\ nil) do
-    props = Map.new(pairs)
-    keys = pairs |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
-
     {:obj,
-     alloc(%{
-       class: :object,
-       props: props,
-       keys: keys,
-       proto: if(proto == :null, do: nil, else: proto || proto(:object))
-     })}
+     alloc(
+       Obj.record(
+         [class: :object, proto: if(proto == :null, do: nil, else: proto || proto(:object))],
+         pairs
+       )
+     )}
   end
 
   def new_array(list) do
     {:obj,
-     alloc(%{
-       class: :array,
-       items: items_map(list),
-       len: length(list),
-       props: %{},
-       keys: [],
-       proto: proto(:array)
-     })}
+     alloc(
+       Obj.record(class: :array, items: items_map(list), len: length(list), proto: proto(:array))
+     )}
   end
 
   defp items_map(list), do: list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
@@ -248,18 +240,12 @@ defmodule Browser.JS.Interp do
   properties and the prototype chain, where its methods live).
   """
   def new_host(mod, data, proto) do
-    {:obj, alloc(%{class: :host, host: {mod, data}, props: %{}, keys: [], proto: proto})}
+    {:obj, alloc(Obj.record(class: :host, host: {mod, data}, proto: proto))}
   end
 
   def native(name, fun) do
     {:obj,
-     alloc(%{
-       class: :function,
-       fun: {:native, name, fun},
-       props: %{},
-       keys: [],
-       proto: proto(:function)
-     })}
+     alloc(Obj.record(class: :function, fun: {:native, name, fun}, proto: proto(:function)))}
   end
 
   @doc "`get [Symbol.species]` on a built-in constructor: returns `this`."
@@ -1175,14 +1161,14 @@ defmodule Browser.JS.Interp do
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
             # a property defined on the global object itself (an accessor, say) is a variable too
-            case deref(gid) do
-              %{props: %{^name => {:accessor, g, _}}} ->
+            Obj.own_case deref(gid), name do
+              {:ok, {:accessor, g, _}} ->
                 {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
 
-              %{props: %{^name => v}} ->
+              {:ok, v} ->
                 {:ok, v}
 
-              _ ->
+              :error ->
                 :error
             end
 
@@ -1335,7 +1321,7 @@ defmodule Browser.JS.Interp do
   defp window_property?(_, _), do: false
 
   defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
-    do: match?(%{props: %{^name => _}}, deref(gid))
+    do: Obj.has_own?(deref(gid), name)
 
   defp global_own_property?(_, _), do: false
 
@@ -1666,7 +1652,7 @@ defmodule Browser.JS.Interp do
   def index(_), do: nil
 
   def get({:obj, id} = obj, {:private, _} = key) do
-    case Map.fetch(deref(id).props, key) do
+    case Obj.own_fetch(deref(id), key) do
       {:ok, {:accessor, g, _}} ->
         if function?(g),
           do: call(g, obj, []),
@@ -1756,8 +1742,8 @@ defmodule Browser.JS.Interp do
 
           nil ->
             cond do
-              key == "length" and is_map_key(o, :arguments) and is_map_key(o.props, "length") ->
-                o.props["length"]
+              key == "length" and is_map_key(o, :arguments) and Obj.has_own?(o, "length") ->
+                Obj.own_value(o, "length")
 
               key == "length" and is_map_key(o, :len_gone) ->
                 lookup(o, "length", {:obj, id})
@@ -1790,7 +1776,7 @@ defmodule Browser.JS.Interp do
 
         # the typed array accessors are inherited: an own property of the same name wins
         if key in ["length", "byteLength", "byteOffset", "buffer"] and
-             is_map_key(o.props, key) and match?({Browser.JS.TypedArrays, _}, o.host) do
+             Obj.has_own?(o, key) and match?({Browser.JS.TypedArrays, _}, o.host) do
           lookup(o, key, {:obj, id})
         else
           case mod.host_get(data, key, {:obj, id}) do
@@ -1821,14 +1807,14 @@ defmodule Browser.JS.Interp do
   # a property found along the prototype chain; a getter is called with the object it was
   # asked of as `this`
   defp lookup(o, key, receiver) do
-    case o.props do
-      %{^key => {:accessor, getter, _}} ->
+    Obj.own_case o, key do
+      {:ok, {:accessor, getter, _}} ->
         if function?(getter), do: call(getter, receiver, []), else: :undefined
 
-      %{^key => v} ->
+      {:ok, v} ->
         v
 
-      _ ->
+      :error ->
         case o do
           # an array further up the prototype chain: its length and elements show through
           %{class: :array} when key == "length" ->
@@ -2054,8 +2040,7 @@ defmodule Browser.JS.Interp do
   defp function_prop(id, %{generator: true} = o, "prototype") do
     p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
     o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs))
+    store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
     p
   end
 
@@ -2070,13 +2055,7 @@ defmodule Browser.JS.Interp do
         p = new_object()
         put_hidden(p, "constructor", {:obj, id})
         o = deref(id)
-        attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
-
-        store(
-          id,
-          o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs)
-        )
-
+        store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
         p
 
       {:native, _, _} ->
@@ -2115,65 +2094,32 @@ defmodule Browser.JS.Interp do
   defp function_prop(_id, _o, _key), do: :undefined
 
   @doc "Sets an own property without making it show up in `Object.keys`."
-  def put_hidden({:obj, id}, key, v) do
-    o = deref(id)
-
-    o =
-      if Map.has_key?(o.props, key) do
-        o
-      else
-        # (where it stands among the enumerable names, so `ownKeys` can put it in creation order)
-        named =
-          if o.keys == [],
-            do: 0,
-            else:
-              Enum.count(
-                o.keys,
-                &(is_binary(&1) and not (is_integer(index(&1)) and index(&1) < 4_294_967_295))
-              )
-
-        o
-        |> Map.update(:horder, [key], &[key | &1])
-        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
-      end
-
-    store(id, %{o | props: Map.put(o.props, key, v)})
-  end
+  def put_hidden({:obj, id}, key, v), do: store(id, Obj.put_hidden(deref(id), key, v))
 
   @doc false
   # The end of an object literal with constant keys (`Browser.JS.Compile`): all its
-  # properties in one write to the empty object `id`. `keys` lists the distinct keys,
-  # newest first, as `define_data/3` makes the list, and `pairs` gives each value in source
-  # order. `:maps.from_list/1` keeps the last value of a key, as `define_data/3` does.
-  def fill_literal(id, keys, pairs) do
+  # properties in one write to the empty object `id`. `layout` is the key layout of
+  # `Obj.literal_keys/1`, and `pairs` gives each value in source order (`Obj.fill/3`).
+  def fill_literal(id, layout, pairs) do
     o = :erlang.get(id)
-    :erlang.put(id, %{o | props: :maps.from_list(pairs), keys: keys})
+    :erlang.put(id, Obj.fill(o, layout, pairs))
   end
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
-  def define_data({:obj, id}, key, v) do
-    o = deref(id)
-    keys = if Map.has_key?(o.props, key), do: o.keys, else: [key | o.keys]
-    store(id, %{o | props: Map.put(o.props, key, v), keys: keys})
-  end
+  def define_data({:obj, id}, key, v), do: store(id, Obj.define_data(deref(id), key, v))
 
   @doc "Sets `@@toStringTag`: not writable or enumerable, but configurable."
   def put_tag({:obj, id}, name) do
     key = {:symbol, :toStringTag, "Symbol.toStringTag"}
-    o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, key, name)) |> Map.put(:attrs, attrs))
+    store(id, Obj.put_with_attrs(deref(id), key, name, %{w: false, c: true, e: false}))
   end
 
   @doc "Overrides the `length` of a native function."
   def set_arity({:obj, id}, n), do: store(id, Map.put(deref(id), :arity, n * 1.0))
 
   @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."
-  def put_const({:obj, id}, key, v) do
-    o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: false, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
-  end
+  def put_const({:obj, id}, key, v),
+    do: store(id, Obj.put_with_attrs(deref(id), key, v, %{w: false, c: false, e: false}))
 
   # Runs a setter or a proxy trap of a write and puts the flag `:js_put_failed` back as it
   # was. A sloppy write in the callee that fails sets the flag, but that failure is not a
@@ -2194,7 +2140,7 @@ defmodule Browser.JS.Interp do
   def put({:obj, id} = obj, {:private, _} = key, v) do
     o = deref(id)
 
-    case Map.fetch(o.props, key) do
+    case Obj.own_fetch(o, key) do
       {:ok, {:accessor, _, setter}} ->
         if function?(setter),
           do: keep_put_flag(call(setter, obj, [v])),
@@ -2206,7 +2152,7 @@ defmodule Browser.JS.Interp do
         if key in Map.get(o, :pmethods, []),
           do: throw_error("TypeError", "Private methods are not writable")
 
-        store(id, %{o | props: Map.put(o.props, key, v)})
+        store(id, Obj.own_put_value(o, key, v))
 
       :error ->
         throw_error(
@@ -2236,17 +2182,16 @@ defmodule Browser.JS.Interp do
   end
 
   # The guard of the fast update (fast path `:update`): the record `o` is not an array, not
-  # a host object and not a proxy, `old` (the value of `key` in `o.props`) is not an
+  # a host object and not a proxy, `old` (the stored value of the own key `key`) is not an
   # accessor, and `key` has no attributes, so it is writable. For such a write `put_obj/5`
   # only stores the value: the clauses for arrays, host objects (typed arrays, proxies of
   # plain objects, the global object, module namespaces and DOM objects) and proxies of
   # functions do not match, the clause for the `name` and `length` of a function goes to
-  # `put_prop/4` because `props` has the key, and `put_prop/4` stores the value when
-  # `props` has a key that is not an accessor and `writable?/2` is true. A change to one of
-  # these clauses needs a change to this guard. Today the tests of the class and of `proxy`
-  # are also defence in depth: a proxy of a function keeps an empty `props`, a proxy of a
-  # plain object is a host object, and `put_obj/5` stores a named key of an array as this
-  # path does. They stay, so that a change to the layout of these records is not a wrong
+  # `put_prop/4` because the record has the own key, and `put_prop/4` stores the value when
+  # the own key is not an accessor and `Obj.writable?/2` is true. A change to one of these
+  # clauses needs a change to this guard. Today the tests of the class and of `proxy` are
+  # also defence in depth: a proxy of a function has no own key, a proxy of a plain object
+  # is a host object, and `put_obj/5` stores a named key of an array as this path does. They stay, so that a change to the layout of these records is not a wrong
   # write. The row "dm update guard terms" of the data-model corpus tries each one.
   defmacrop plain_update(o, key, old) do
     quote do
@@ -2255,15 +2200,15 @@ defmodule Browser.JS.Interp do
         not is_map_key(unquote(o), :proxy) and
         not (is_tuple(unquote(old)) and tuple_size(unquote(old)) == 3 and
                :erlang.element(1, unquote(old)) == :accessor) and
-        not (is_map_key(unquote(o), :attrs) and
-               is_map_key(:erlang.map_get(:attrs, unquote(o)), unquote(key)))
+        Obj.default_attrs?(unquote(o), unquote(key))
     end
   end
 
-  # The store of the fast update: `props` has `key`, so the map update keeps the key tuple.
-  @compile {:inline, update_prop: 5}
-  defp update_prop(id, o, props, key, v) do
-    :erlang.put(id, %{o | props: %{props | key => v}})
+  # The store of the fast update: the record has `key`, so the map update keeps the key
+  # tuple (`Obj.own_update/3`).
+  @compile {:inline, update_prop: 4}
+  defp update_prop(id, o, key, v) do
+    :erlang.put(id, Obj.own_update(o, key, v))
     v
   end
 
@@ -2281,13 +2226,15 @@ defmodule Browser.JS.Interp do
     end
 
     quote do
-      case :erlang.get(unquote(id)) do
-        %{props: %{^unquote(key) => old} = props} = o when plain_update(o, unquote(key), old) ->
+      o = :erlang.get(unquote(id))
+
+      Obj.own_case o, unquote(key) do
+        {:ok, old} when plain_update(o, unquote(key), old) ->
           if Fast.on?(:update),
             do:
               Fast.shadow(
                 unquote(id),
-                update_prop(unquote(id), o, props, unquote(key), unquote(v)),
+                update_prop(unquote(id), o, unquote(key), unquote(v)),
                 put_obj(unquote(id), o, unquote(key), unquote(v), true)
               ),
             else: unquote(slow.(quote(do: o)))
@@ -2345,17 +2292,16 @@ defmodule Browser.JS.Interp do
 
                 :ok
 
-              Map.get(o, :frozen, false) ->
+              Obj.frozen?(o) ->
                 fail_put()
 
-              cur == :error and not Map.get(o, :ext, true) ->
+              cur == :error and not Obj.extensible?(o) ->
                 fail_put()
 
               i >= o.len and Map.get(o, :len_ro, false) ->
                 fail_put()
 
-              # (with no `attrs`, each element is writable)
-              is_map_key(o, :attrs) and not writable?(o, i) ->
+              not Obj.writable?(o, i) ->
                 fail_put()
 
               cur == :error and index_hook(o.proto, i) != :none ->
@@ -2382,7 +2328,7 @@ defmodule Browser.JS.Interp do
 
           nil ->
             # an arguments object's `length` is an ordinary property that takes any value
-            if key == "length" and is_map_key(o, :arguments) and not Map.get(o, :frozen, false) do
+            if key == "length" and is_map_key(o, :arguments) and not Obj.frozen?(o) do
               if is_map_key(o, :len_gone), do: store(id, Map.delete(o, :len_gone))
               put_hidden({:obj, id}, "length", v)
             else
@@ -2418,8 +2364,8 @@ defmodule Browser.JS.Interp do
         :ok
 
       # a function's own name and length are not writable
-      %{class: :function, props: props} when key in ["name", "length"] ->
-        unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
+      %{class: :function} when key in ["name", "length"] ->
+        unless Obj.has_own?(o, key) or key in Map.get(o, :gone, []),
           do: fail_put(),
           else: put_prop(id, o, key, v)
 
@@ -2455,21 +2401,21 @@ defmodule Browser.JS.Interp do
 
   # an assignment: own accessor or non-writable property, inherited ones, then a new property
   defp put_prop(id, o, key, v) do
-    case Map.fetch(o.props, key) do
+    Obj.own_case o, key do
       {:ok, {:accessor, _, setter}} ->
         if function?(setter), do: keep_put_flag(call(setter, {:obj, id}, [v])), else: fail_put()
         :ok
 
       {:ok, _} ->
-        if writable?(o, key),
-          do: store(id, %{o | props: %{o.props | key => v}}),
+        if Obj.writable?(o, key),
+          do: store(id, Obj.own_update(o, key, v)),
           else: fail_put()
 
       # a generator function's own `prototype` is made on first use and shadows the one of
       # its kind's prototype object
       :error
       when key == "prototype" and is_map_key(o, :generator) and
-             not is_map_key(o.props, "prototype") ->
+             not Obj.has_own?(o, "prototype") ->
         function_prop(id, o, "prototype")
         put({:obj, id}, key, v)
 
@@ -2493,29 +2439,9 @@ defmodule Browser.JS.Interp do
             :ok
 
           :none ->
-            if Map.get(o, :ext, true) do
-              o2 = %{
-                o
-                | props: Map.put(o.props, key, v),
-                  # a symbol-keyed property is not listed by Object.keys or for-in; it is
-                  # marked enumerable in its attributes instead
-                  keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
-              }
-
-              if is_binary(key),
-                do: store(id, o2),
-                else:
-                  store(
-                    id,
-                    Map.put(
-                      o2,
-                      :attrs,
-                      Map.put(Map.get(o, :attrs, %{}), key, %{e: true, w: true, c: true})
-                    )
-                  )
-            else
-              fail_put()
-            end
+            if Obj.extensible?(o),
+              do: store(id, Obj.own_add_assigned(o, key, v)),
+              else: fail_put()
         end
     end
   end
@@ -2624,17 +2550,17 @@ defmodule Browser.JS.Interp do
   defp inherited_set({:obj, pid}, key) do
     p = deref(pid)
 
-    case p.props do
+    Obj.own_case p, key do
       _ when is_map_key(p, :proxy) ->
         {:proxy, {:obj, pid}}
 
-      %{^key => {:accessor, _, setter}} ->
+      {:ok, {:accessor, _, setter}} ->
         if function?(setter), do: {:setter, setter}, else: :readonly
 
-      %{^key => _} ->
-        if writable?(p, key), do: :none, else: :readonly
+      {:ok, _} ->
+        if Obj.writable?(p, key), do: :none, else: :readonly
 
-      _ ->
+      :error ->
         if is_binary(key) and typed_array_record?(pid, p) and
              Browser.JS.TypedArrays.numeric_key?(key),
            do: {:typed_array, {:obj, pid}},
@@ -2666,17 +2592,13 @@ defmodule Browser.JS.Interp do
       # the coercion may have run code that changed the array
       o = deref(id)
 
-      if Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) do
+      if Obj.frozen?(o) or Map.get(o, :len_ro, false) do
         fail_put()
       else
         # an element that cannot be deleted stops the array from shrinking past it
-        attrs = Map.get(o, :attrs, %{})
-
         stop =
-          o.items
-          |> Map.keys()
-          |> Enum.filter(&(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
-          |> Enum.max(fn -> nil end)
+          o
+          |> Obj.max_fixed_element(new_len)
           |> then(&if(&1, do: &1 + 1, else: new_len))
 
         store(id, %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop})
@@ -2705,8 +2627,8 @@ defmodule Browser.JS.Interp do
         # an index outside a typed array in the chain stops the set without creating it
         if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, k), do: :skip, else: :none
 
-      match?(%{props: %{^k => {:accessor, _, _}}}, p) ->
-        {:accessor, _, setter} = p.props[k]
+      match?({:ok, {:accessor, _, _}}, Obj.own_fetch(p, k)) ->
+        {:ok, {:accessor, _, setter}} = Obj.own_fetch(p, k)
         if function?(setter), do: {:setter, setter}, else: :none
 
       true ->
@@ -2715,28 +2637,6 @@ defmodule Browser.JS.Interp do
   end
 
   defp index_hook(_, _), do: :none
-
-  @doc false
-  # (most records have no `attrs`: then each property is writable and configurable, with
-  # no map read)
-  def writable?(%{attrs: attrs}, key) do
-    case attrs do
-      %{^key => a} -> match?(%{w: true}, a)
-      _ -> true
-    end
-  end
-
-  def writable?(_, _), do: true
-
-  @doc false
-  def configurable?(%{attrs: attrs}, key) do
-    case attrs do
-      %{^key => a} -> match?(%{c: true}, a)
-      _ -> true
-    end
-  end
-
-  def configurable?(_, _), do: true
 
   @doc false
   def array_index(key), do: index(key)
@@ -2771,20 +2671,20 @@ defmodule Browser.JS.Interp do
              (is_integer(index(key)) and index(key) < Browser.JS.Str.length(o.prim))) ->
         false
 
-      o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
+      o.class == :function and key in ["name", "length"] and not Obj.has_own?(o, key) ->
         store(id, Map.update(o, :gone, [key], &[key | &1]))
         true
 
       # the `prototype` a function has of its own cannot be deleted
-      o.class == :function and key == "prototype" and not Map.has_key?(o.props, key) and
+      o.class == :function and key == "prototype" and not Obj.has_own?(o, key) and
           Browser.JS.Props.has_own?({:obj, id}, key) ->
         false
 
-      i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
+      i && not Obj.configurable?(o, i) && Map.has_key?(o.items, i) ->
         false
 
       # a frozen or sealed array keeps its elements, and `length` is never configurable
-      i && (Map.get(o, :frozen, false) or Map.get(o, :sealed, false)) && Map.has_key?(o.items, i) ->
+      i && (Obj.frozen?(o) or Obj.sealed?(o)) && Map.has_key?(o.items, i) ->
         false
 
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
@@ -2792,7 +2692,7 @@ defmodule Browser.JS.Interp do
 
       # an arguments object's `length` can go: reads then see the prototype chain
       o.class == :array and key == "length" ->
-        store(id, o |> Map.put(:len_gone, true) |> Map.update!(:props, &Map.delete(&1, "length")))
+        store(id, o |> Map.put(:len_gone, true) |> Obj.own_drop("length"))
         true
 
       i ->
@@ -2803,19 +2703,13 @@ defmodule Browser.JS.Interp do
       true ->
         key = to_key(key)
 
-        if Map.has_key?(o.props, key) and not configurable?(o, key) do
+        if Obj.has_own?(o, key) and not Obj.configurable?(o, key) do
           false
         else
-          attrs = Map.delete(Map.get(o, :attrs, %{}), key)
-
           store(
             id,
-            %{
-              o
-              | props: Map.delete(o.props, key),
-                keys: List.delete(o.keys, key)
-            }
-            |> Map.put(:attrs, attrs)
+            o
+            |> Obj.own_delete(key)
             |> then(fn o2 ->
               # a function's own `name` or `length` that is gone must not reappear as the virtual one
               if o.class == :function and key in ["name", "length"],
@@ -2857,7 +2751,7 @@ defmodule Browser.JS.Interp do
         Map.has_key?(o.items, index(key)) or
           (match?({:obj, _}, o.proto) and has_property?(o.proto, key_s))
 
-      Map.has_key?(o.props, key_s) ->
+      Obj.has_own?(o, key_s) ->
         true
 
       o.class == :function and key_s in ["name", "length", "prototype"] and
@@ -2919,14 +2813,16 @@ defmodule Browser.JS.Interp do
   # they pay no extra call.
   defp own_keys_plain(o) do
     case o do
-      %{class: c, keys: keys} when c != :array and c != :function and not is_map_key(o, :prim) ->
+      %{class: c} when c != :array and c != :function and not is_map_key(o, :prim) ->
+        keys = Obj.enum_rev(o)
+
         if Fast.on?(:has_own) and plain_names?(keys),
           do: Fast.shadow(nil, :lists.reverse(keys), own_keys_index_first(o)),
           else: own_keys_index_first(o)
 
       %{class: :array} ->
-        base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
-        attrs = Map.get(o, :attrs, %{})
+        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
+        attrs = Obj.attr_map(o)
 
         for(
           i <- o.items |> Map.keys() |> Enum.sort(),
@@ -2936,7 +2832,7 @@ defmodule Browser.JS.Interp do
         ) ++ base
 
       %{prim: str} when is_binary(str) ->
-        base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
+        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
@@ -2945,7 +2841,7 @@ defmodule Browser.JS.Interp do
           Enum.sort_by(ints, &index/1) ++ rest
 
       _ ->
-        base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
+        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
@@ -2970,7 +2866,7 @@ defmodule Browser.JS.Interp do
   # The keys of an object that is not an array, a function or a primitive wrapper, with the
   # index keys first: the last clause of `own_keys_plain/1` for such an object.
   defp own_keys_index_first(o) do
-    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
+    base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
 
     {ints, rest} =
       Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
@@ -3262,9 +3158,9 @@ defmodule Browser.JS.Interp do
     o = deref(id)
     key = {:symbol, :iterator, "Symbol.iterator"}
 
-    o.class == :array and not Map.has_key?(o.props, key) and o.proto == proto(:array) and
-      Map.get(deref(elem(proto(:array), 1)).props, key) == Process.get(:js_arr_values) and
-      Map.get(deref(elem(proto(:array_iterator), 1)).props, "next") == Process.get(:js_arr_next)
+    o.class == :array and not Obj.has_own?(o, key) and o.proto == proto(:array) and
+      Obj.own_value(deref(elem(proto(:array), 1)), key) == Process.get(:js_arr_values) and
+      Obj.own_value(deref(elem(proto(:array_iterator), 1)), "next") == Process.get(:js_arr_next)
   end
 
   @doc false
@@ -3392,7 +3288,7 @@ defmodule Browser.JS.Interp do
         %{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr] -> false
         %{fun: {:closure, %{name: {:method, _}}}} -> false
         %{fun: {:closure, _}, async: true} -> false
-        %{fun: {:native, _, _}, props: props} -> Map.has_key?(props, "prototype")
+        %{fun: {:native, _, _}} -> Obj.has_own?(o, "prototype")
         _ -> true
       end
   end
@@ -4381,14 +4277,13 @@ defmodule Browser.JS.Interp do
 
   # a generator or async function's `prototype` is its own (or none), never the one its kind's
   # prototype object carries
-  defp function_get(id, %{props: props} = o, "prototype")
+  defp function_get(id, o, "prototype")
        when (is_map_key(o, :generator) or is_map_key(o, :async)) and
-              not is_map_key(props, "prototype"),
+              not Obj.has_own?(o, "prototype"),
        do: function_prop(id, o, "prototype")
 
   # the lazily made own `prototype` shadows anything the prototype chain has
-  defp function_get(id, %{props: props} = o, "prototype")
-       when not is_map_key(props, "prototype") do
+  defp function_get(id, o, "prototype") when not Obj.has_own?(o, "prototype") do
     case function_prop(id, o, "prototype") do
       :undefined -> function_get_chain(id, o, "prototype")
       p -> p
@@ -4409,7 +4304,7 @@ defmodule Browser.JS.Interp do
             end
 
           # `f.prototype = undefined` is a value, not a missing property
-          key in ["name", "length", "prototype"] and Map.has_key?(o.props, key) ->
+          key in ["name", "length", "prototype"] and Obj.has_own?(o, key) ->
             :undefined
 
           true ->
@@ -4613,13 +4508,7 @@ defmodule Browser.JS.Interp do
 
     fun =
       {:obj,
-       alloc(%{
-         class: :function,
-         fun: {:closure, closure},
-         props: %{},
-         keys: [],
-         proto: proto(:function)
-       })}
+       alloc(Obj.record(class: :function, fun: {:closure, closure}, proto: proto(:function)))}
 
     if named? and env != nil do
       declare(env, name, fun)
@@ -5170,20 +5059,20 @@ defmodule Browser.JS.Interp do
     fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
     {:obj, gid} = g
 
-    props_before = deref(gid).props
+    before = deref(gid)
 
-    for n <- fun_names, Map.has_key?(props_before, n) and not global_fixed?(n) do
+    for n <- fun_names, Obj.has_own?(before, n) and not global_fixed?(n) do
       o = deref(gid)
 
       if match?({_, _, _, _, true}, Browser.JS.Props.own_state(g, n)),
-        do: store(gid, %{o | props: Map.delete(o.props, n), keys: List.delete(o.keys, n)})
+        do: store(gid, Obj.own_remove(o, n))
     end
 
     gvars = deref(global()).vars
 
     fresh =
       for n <- vars,
-          n in fun_names or not (Map.has_key?(gvars, n) or Map.has_key?(props_before, n)),
+          n in fun_names or not (Map.has_key?(gvars, n) or Obj.has_own?(before, n)),
           do: n
 
     # a lexical name hides a configurable built-in: the global object keeps its own property
@@ -5191,7 +5080,7 @@ defmodule Browser.JS.Interp do
         MapSet.member?(Process.get(:js_builtin_names) || MapSet.new(), n),
         n not in ["NaN", "Infinity", "undefined"],
         Map.has_key?(gvars, n),
-        not Map.has_key?(deref(gid).props, n),
+        not Obj.has_own?(deref(gid), n),
         do: put_hidden(g, n, Map.fetch!(gvars, n))
 
     Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
@@ -7324,7 +7213,7 @@ defmodule Browser.JS.Interp do
 
     case ev(r, env) do
       {:obj, id} ->
-        Map.has_key?(deref(id).props, key)
+        Obj.has_own?(deref(id), key)
 
       _ ->
         throw_error(
@@ -7810,11 +7699,10 @@ defmodule Browser.JS.Interp do
   # by a fully open data property holding the function
   defp reopen_global_property(scope, name, f) do
     with %{parent: nil, vars: %{this: {:obj, gid}}} <- deref(scope),
-         %{props: %{^name => _}} = g <- deref(gid),
-         true <- configurable?(g, name) do
-      attrs = Map.put(Map.get(g, :attrs, %{}), name, %{w: true, e: true, c: true})
-      keys = if name in g.keys, do: g.keys, else: [name | g.keys]
-      store(gid, %{g | props: Map.put(g.props, name, f), attrs: attrs, keys: keys})
+         g = deref(gid),
+         true <- Obj.has_own?(g, name),
+         true <- Obj.configurable?(g, name) do
+      store(gid, Obj.reopen(g, name, f))
     end
 
     :ok
