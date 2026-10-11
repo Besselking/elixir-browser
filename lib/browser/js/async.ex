@@ -60,6 +60,7 @@ defmodule Browser.JS.Async do
   """
 
   alias Browser.JS.{Awaits, Interp, Promise}
+  import Awaits, only: [is_leaf_form: 1]
   require Interp
   alias Browser.JS.Resolve.Info
 
@@ -957,6 +958,7 @@ defmodule Browser.JS.Async do
   # template, which then runs in `env`, the scope where the resolver resolved it.
   defp cev_await(node, env, %{frame: _} = ctx, k) do
     {template, leaves} = lift(node, [], :frame)
+    if @check, do: check_lift(node, :frame, {template, leaves})
 
     eval_vals(Enum.reverse(leaves), [], env, ctx, fn vals ->
       filled = fill(template, vals)
@@ -967,6 +969,7 @@ defmodule Browser.JS.Async do
 
   defp cev_await(node, env, ctx, k) do
     {template, leaves} = lift(node, [], :map)
+    if @check, do: check_lift(node, :map, {template, leaves})
     if @check, do: Interp.check_old_path(env, "a CPS leaf scope")
     scope = Interp.new_scope(env)
 
@@ -1019,69 +1022,151 @@ defmodule Browser.JS.Async do
   # leaf scope. In `:frame` mode (a rewritten body) the hole is `{:cps_leaf, i}`, which
   # `fill/2` replaces with the value, so that no scope comes between the frame and the code
   # and every hop count stays exact.
+  #
+  # A leaf form (`Awaits.is_leaf_form/1`) and a term that is not a tuple or a list hold no
+  # syntax, so they stay as they are and the walk does not go into them.
+  defp lift(node, leaves, _mode) when is_leaf_form(node), do: {node, leaves}
+  defp lift(node, leaves, mode) when is_list(node), do: lift_list(node, leaves, mode)
+  defp lift(node, leaves, _mode) when not is_tuple(node), do: {node, leaves}
+
   defp lift(node, leaves, mode) do
     cond do
       leaf?(node) ->
         {hole(mode, length(leaves)), [node | leaves]}
 
-      is_tuple(node) and elem(node, 0) in [:fn, :async] ->
+      # `{:async, f}` is a leaf form and stopped above, so only a function node is left
+      # here. The awaits of a nested function belong to that function.
+      elem(node, 0) == :fn ->
         {node, leaves}
 
-      mode == :frame and is_tuple(node) and elem(node, 0) == :class ->
-        lift_class(node, leaves)
-
-      is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
-        {:ok, kids, rebuild} = ordered(node)
-
-        last =
-          kids
-          |> Enum.map(&has_await?/1)
-          |> Enum.reduce({0, -1}, fn
-            true, {i, _} -> {i + 1, i}
-            false, {i, l} -> {i + 1, l}
-          end)
-          |> elem(1)
-
-        {kids, leaves} =
-          kids
-          |> Enum.with_index()
-          |> Enum.map_reduce(leaves, fn {kid, i}, acc ->
-            if i < last and not has_await?(kid) and not pure?(kid) do
-              {hole(mode, length(acc)), [kid | acc]}
-            else
-              lift(kid, acc, mode)
-            end
-          end)
-
-        {rebuild.(kids), leaves}
-
-      is_tuple(node) ->
-        {items, leaves} = lift_list(Tuple.to_list(node), leaves, mode)
-        {List.to_tuple(items), leaves}
-
-      is_list(node) ->
-        lift_list(node, leaves, mode)
+      mode == :frame and elem(node, 0) == :class ->
+        lift_class(node, leaves, &lift/3)
 
       true ->
-        {node, leaves}
+        case ordered(node) do
+          {:ok, kids, rebuild} ->
+            # The flags of the children are found once. Both the position of the last
+            # child that awaits and the choice for each child read them.
+            flags = Enum.map(kids, &has_await?/1)
+            last = last_await(flags, 0, -1)
+            {kids, leaves} = lift_kids(kids, flags, 0, last, leaves, mode, [])
+            {rebuild.(kids), leaves}
+
+          :none ->
+            {items, leaves} = lift_list(Tuple.to_list(node), leaves, mode)
+            {List.to_tuple(items), leaves}
+        end
     end
+  end
+
+  # The position of the last child that awaits, or -1 when no child awaits.
+  defp last_await([], _i, last), do: last
+  defp last_await([true | flags], i, _last), do: last_await(flags, i + 1, i)
+  defp last_await([false | flags], i, last), do: last_await(flags, i + 1, last)
+
+  # A child before the last child that awaits is evaluated before the awaits. So when it
+  # does not await and is not pure, it becomes a leaf of its own.
+  defp lift_kids([], [], _i, _last, leaves, _mode, acc), do: {:lists.reverse(acc), leaves}
+
+  defp lift_kids([kid | kids], [aw? | flags], i, last, leaves, mode, acc) do
+    {kid, leaves} =
+      if i < last and not aw? and not pure?(kid),
+        do: {hole(mode, length(leaves)), [kid | leaves]},
+        else: lift(kid, leaves, mode)
+
+    lift_kids(kids, flags, i + 1, last, leaves, mode, [kid | acc])
+  end
+
+  # Check mode (item A2) runs the old `lift/3` next to the new one and compares the results.
+  # The old walk has no leaf form clauses, calls `ordered/1` two times and walks each child
+  # two times. So a difference shows a fault in the tidy form, which would change the order
+  # of evaluation with no error.
+  if @check do
+    defp check_lift(node, mode, result) do
+      if lift_ref(node, [], mode) != result,
+        do: Interp.check_cps("lift and lift_ref differ on #{inspect(node, limit: 8)}")
+    end
+
+    defp lift_ref(node, leaves, mode) do
+      cond do
+        leaf_ref?(node) ->
+          {hole(mode, length(leaves)), [node | leaves]}
+
+        is_tuple(node) and elem(node, 0) in [:fn, :async] ->
+          {node, leaves}
+
+        mode == :frame and is_tuple(node) and elem(node, 0) == :class ->
+          lift_class(node, leaves, &lift_ref/3)
+
+        is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
+          {:ok, kids, rebuild} = ordered(node)
+
+          last =
+            kids
+            |> Enum.map(&has_await_ref?/1)
+            |> Enum.reduce({0, -1}, fn
+              true, {i, _} -> {i + 1, i}
+              false, {i, l} -> {i + 1, l}
+            end)
+            |> elem(1)
+
+          {kids, leaves} =
+            kids
+            |> Enum.with_index()
+            |> Enum.map_reduce(leaves, fn {kid, i}, acc ->
+              if i < last and not has_await_ref?(kid) and not pure?(kid) do
+                {hole(mode, length(acc)), [kid | acc]}
+              else
+                lift_ref(kid, acc, mode)
+              end
+            end)
+
+          {rebuild.(kids), leaves}
+
+        is_tuple(node) ->
+          {items, leaves} =
+            Enum.map_reduce(Tuple.to_list(node), leaves, &lift_ref(&1, &2, mode))
+
+          {List.to_tuple(items), leaves}
+
+        is_list(node) ->
+          Enum.map_reduce(node, leaves, &lift_ref(&1, &2, mode))
+
+        true ->
+          {node, leaves}
+      end
+    end
+
+    defp leaf_ref?({:await, _}), do: true
+    defp leaf_ref?({:yield, _, _}), do: true
+
+    defp leaf_ref?({tag, _, _, _} = n) when tag in [:logical, :cond],
+      do: has_await_ref?(n)
+
+    defp leaf_ref?({:chain, _} = n), do: has_await_ref?(n)
+    defp leaf_ref?({:destructure, _, _} = n), do: has_await_ref?(n)
+    defp leaf_ref?(_), do: false
+  else
+    # Without check mode the calls of `check_lift/3` are dead code, but they must compile.
+    defp check_lift(_node, _mode, _result), do: :ok
   end
 
   # The resolver resolves the heritage, the keys and the member decorators of a class in
   # the class scope, which `Classes.define` makes as a map scope over `env`. A leaf from
   # these parts must run in such a scope too, or its hop counts are one short. So each such
   # leaf is wrapped in `{:cps_class, name, leaf}`, and `eval_vals/5` makes the scope. The
-  # class decorators run in `env`, as in `Classes.define`.
-  defp lift_class({:class, name, heritage, members, src}, leaves) do
+  # class decorators run in `env`, as in `Classes.define`. The walk `lift` is an argument, so
+  # that check mode can run this code with the old walk too (`lift_ref/3`).
+  defp lift_class({:class, name, heritage, members, src}, leaves, lift) do
     {members, decs} =
       case List.last(members) do
         {:decorations, cd, md} -> {Enum.drop(members, -1), {cd, md}}
         _ -> {members, nil}
       end
 
-    {cd, leaves} = if decs, do: lift(elem(decs, 0), leaves, :frame), else: {nil, leaves}
+    {cd, leaves} = if decs, do: lift.(elem(decs, 0), leaves, :frame), else: {nil, leaves}
     outer = length(leaves)
-    {{heritage, members}, leaves} = lift({heritage, members}, leaves, :frame)
+    {{heritage, members}, leaves} = lift.({heritage, members}, leaves, :frame)
     {inner, rest} = Enum.split(leaves, length(leaves) - outer)
     leaves = Enum.map(inner, &{:cps_class, name, &1}) ++ rest
     members = if decs, do: members ++ [{:decorations, cd, elem(decs, 1)}], else: members
