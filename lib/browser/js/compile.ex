@@ -269,6 +269,7 @@ defmodule Browser.JS.Compile do
 
   alias Browser.JS.{Async, Awaits, Interp, Num}
   alias Browser.JS.Resolve.Info
+  require Browser.JS.Fast, as: Fast
 
   # In check mode compiled code makes the checks of its twins on the tree. The attribute is
   # a constant, so a normal build has no test.
@@ -1307,10 +1308,41 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # `o.name op= v` with a constant key that is not an array index (fast path `:compound`):
+  # the read and the write go through `Interp.get_named/2` and `Interp.put_named/3`, as
+  # `o.name` and `o.name = v` do. For such a key `to_key/1` gives the key and `index/1`
+  # gives nil, so `get/2` and `put/3` take the same branch as the named functions, and the
+  # message of a nullish object is the same (`safe_key/1` gives the key).
+  defp compound_member(base, strict?, oo, {:k, s} = ko, vo) when is_binary(s) do
+    if Fast.on?(:compound) and named?(s) do
+      fn env ->
+        ov = av(oo, env)
+
+        if Interp.nullish?(ov),
+          do:
+            Interp.throw_error(
+              "TypeError",
+              "Cannot read properties of #{Interp.to_str(ov)} (reading '#{s}')"
+            )
+
+        old = Interp.get_named(ov, s)
+        v = Interp.binop(base, old, av(vo, env))
+
+        if(strict?, do: Interp.strict_put_named(ov, s, v), else: Interp.put_named(ov, s, v)) &&
+          v
+      end
+    else
+      compound_computed(base, strict?, oo, ko, vo)
+    end
+  end
+
+  defp compound_member(base, strict?, oo, ko, vo),
+    do: compound_computed(base, strict?, oo, ko, vo)
+
   # `o[k] op= v`, as `compound_assign/5` does it: the object, the key, the test of a
   # nullish object, the key conversion (once, for the read and the write, as
   # `Interp.prop_key/1` does it), the read, the value, the operator, then the write.
-  defp compound_member(base, strict?, oo, ko, vo) do
+  defp compound_computed(base, strict?, oo, ko, vo) do
     fn env ->
       ov = av(oo, env)
       key = av(ko, env)
@@ -1357,10 +1389,34 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # `++o.name` and `o.name--` with a constant key that is not an array index (fast path
+  # `:compound`), through `Interp.get_named/2` and `Interp.put_named/3`, as
+  # `compound_member/5` does it.
+  defp update_member(op, prefix?, strict?, oo, {:k, s} = ko) when is_binary(s) do
+    if Fast.on?(:compound) and named?(s) do
+      fn env ->
+        ov = av(oo, env)
+
+        if Interp.nullish?(ov),
+          do: Interp.throw_error("TypeError", "Cannot read properties of #{Interp.to_str(ov)}")
+
+        old = Interp.numeric(Interp.get_named(ov, s))
+        new = Interp.bump(op, old)
+        if strict?, do: Interp.strict_put_named(ov, s, new), else: Interp.put_named(ov, s, new)
+        if prefix?, do: new, else: old
+      end
+    else
+      update_computed(op, prefix?, strict?, oo, ko)
+    end
+  end
+
+  defp update_member(op, prefix?, strict?, oo, ko),
+    do: update_computed(op, prefix?, strict?, oo, ko)
+
   # `++o[k]` and `o[k]--`, as `ev/2` does them: the object, the key, the test of a nullish
   # object, the key conversion (as `Interp.prop_key/1` does it), the read, the number, then
   # the write.
-  defp update_member(op, prefix?, strict?, oo, ko) do
+  defp update_computed(op, prefix?, strict?, oo, ko) do
     fn env ->
       ov = av(oo, env)
       raw = av(ko, env)

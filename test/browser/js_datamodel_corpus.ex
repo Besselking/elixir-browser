@@ -93,7 +93,22 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm update strict in setter",
      ~S|var inner = { b: 1 }; function strictWrite(){ "use strict"; inner.b = 2; inner.b = 3 } var frozen = Object.freeze({x: 1}); var o = { set s(v){ frozen.x = 2; strictWrite() } }; function sloppy(){ o.s = 1; return inner.b } function strictOuter(){ "use strict"; o.s = 1; var q = {a: 1}; q.a = 2; frozen.y; try { frozen.x = 3 } catch (e) { return inner.b + q.a + e.constructor.name } } console.log(sloppy(), strictOuter())|},
     {"dm update class fields",
-     ~S|class P { constructor(){ this.x = 1; this.y = 2 } bump(){ this.x = this.x + 1; this.y += 1; this.x++; return this.x + this.y } } function f(){ var p = new P(); var r = [p.bump(), p.bump()]; Object.freeze(p); try { p.bump() } catch (e) { r.push(e.constructor.name, e.message) } return r.join() } console.log(f())|}
+     ~S|class P { constructor(){ this.x = 1; this.y = 2 } bump(){ this.x = this.x + 1; this.y += 1; this.x++; return this.x + this.y } } function f(){ var p = new P(); var r = [p.bump(), p.bump()]; Object.freeze(p); try { p.bump() } catch (e) { r.push(e.constructor.name, e.message) } return r.join() } console.log(f())|},
+    # ── D4: compound and update writes with a constant key ──────
+    {"dm compound plain",
+     ~S|function f(){ var o = {a: 1, s: 'x'}; var r = [o.a += 1, o.a++, --o.a, ++o.a, o.a--, o.a, o.s += 'y', o.s, o.n += 1, o.m++, o.m, o.length += 2]; var big = {}; for (var i = 0; i < 20; i++) big['p' + i] = i; big.p7 *= 3; big.p19 **= 2; big.p3 <<= 2; big.p0 ??= 5; big.p1 &&= 7; r.push(big.p7, big.p19, big.p3, big.p0); return r.map(String).join() } console.log(f())|},
+    {"dm compound frozen",
+     ~S|function f(){ var o = Object.freeze({a: 1}); var r = [o.a += 1, o.a++, --o.a, o.a, o.b++, o.b]; return r.map(String).join() } function g(){ "use strict"; var o = Object.freeze({a: 1}); var r = []; try { o.a += 1 } catch (e) { r.push(e.message) } try { o.a++ } catch (e) { r.push(e.message) } try { --o.a } catch (e) { r.push(e.message) } try { o.b++ } catch (e) { r.push(e.message) } r.push(o.a); return r.join() } console.log(f(), g())|},
+    {"dm compound getter only",
+     ~S|function f(){ var log = []; var o = { get a(){ log.push('get'); return 1 } }; var r = [o.a += 1, o.a++, --o.a, o.a]; return r.join() + ' ' + log.join() } function g(){ "use strict"; var o = { get a(){ return 1 } }; var r = []; try { o.a += 1 } catch (e) { r.push(e.constructor.name, e.message) } try { o.a++ } catch (e) { r.push(e.message) } return r.join() } console.log(f(), g())|},
+    {"dm compound proxy",
+     ~S|function f(){ var log = []; var p = new Proxy({a: 1}, { get(t, k, r){ log.push('get ' + String(k)); return t[k] }, set(t, k, v, r){ log.push('set ' + String(k) + ' ' + v); t[k] = v; return true } }); p.a += 2; p.a++; --p.a; p.a **= 2; return p.a + ' ' + log.join('/') } console.log(f())|},
+    {"dm compound primitives",
+     ~S|function f(){ var s = 'abc'; var n = 5; var r = [s.length += 1, s.length++, s.length, s.x += 1, n.y++, true.z += 1]; return r.map(String).join() } function g(){ "use strict"; var s = 'abc'; var r = []; try { s.length += 1 } catch (e) { r.push(e.message) } try { s.length++ } catch (e) { r.push(e.message) } try { s.x += 1 } catch (e) { r.push(e.message) } try { (5).y++ } catch (e) { r.push(e.message) } return r.join() } console.log(f(), g())|},
+    {"dm compound nullish",
+     ~S|function f(){ var r = []; var n = null, u; try { n.a += 1 } catch (e) { r.push(e.message) } try { u.a++ } catch (e) { r.push(e.message) } try { --n.b } catch (e) { r.push(e.message) } try { n.a += (r.push('rhs'), 1) } catch (e) { r.push(e.constructor.name) } return r.join('/') } console.log(f())|},
+    {"dm compound arrays and functions",
+     ~S|function f(){ var a = [1, 2]; a.length += 1; a.x = 1; a.x += 1; a.length--; function h(){} h.c = 1; h.c += 1; h.c++; var args = (function(){ arguments.length += 1; return arguments.length })(1, 2); var t = new Int8Array(2); t.length += 1; var w = new String('ab'); w.length += 1; w.q = 1; w.q++; return [a.length, a.x, h.c, args, t.length, w.length, w.q].join() } console.log(f())|}
   ]
 
   @doc "Gives the rows as `{name, source, options}`."
