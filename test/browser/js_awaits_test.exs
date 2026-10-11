@@ -455,6 +455,10 @@ defmodule Browser.JS.AwaitsTest do
       end
     end
 
+    # The test traces each call of `Awaits.any?/1` while it runs the corpus two times. Alone
+    # it takes about 1 s. In the full suite on a busy machine the trace messages wait for the
+    # tracer, and the run took more than the default limit of 60 s.
+    @tag timeout: 300_000
     test "on every term that the evaluator walks while it runs the corpus" do
       # The run adds terms that no parse makes, such as the `{:val, v}` nodes that the
       # optional-chain path puts in a tree.

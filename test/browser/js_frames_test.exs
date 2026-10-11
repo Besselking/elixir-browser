@@ -4721,7 +4721,7 @@ defmodule Browser.JS.FramesSerialTest do
     # The task reads `--resolve` before it looks for test262, so a missing directory stops
     # it after the level is set and before any test runs.
     test "--resolve 4 in mix js.test262" do
-      old = Application.get_env(:browser, :js_resolve)
+      old = Application.fetch_env(:browser, :js_resolve)
 
       try do
         assert_raise(Mix.Error, ~r/test262 is not at/, fn ->
@@ -4734,7 +4734,11 @@ defmodule Browser.JS.FramesSerialTest do
           Mix.Tasks.Js.Test262.run(["--resolve", "5", "--dir", "/nonexistent/test262"])
         end)
       after
-        Application.put_env(:browser, :js_resolve, old)
+        # A put of `nil` makes every later parse fail with "unknown resolve level nil".
+        case old do
+          {:ok, v} -> Application.put_env(:browser, :js_resolve, v)
+          :error -> Application.delete_env(:browser, :js_resolve)
+        end
       end
     end
 

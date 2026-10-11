@@ -2379,8 +2379,17 @@ defmodule Browser.JS.ResolveEnvTest do
   alias Browser.JS.Resolve.Info
 
   test "the application env is the second source of the flag" do
+    # The suite-wide level (`JS_RESOLVE=off`) lives in the same key, so the test puts the
+    # old value back. A delete runs every later sync module at the default level.
+    previous = Application.fetch_env(:browser, :js_resolve)
     Application.put_env(:browser, :js_resolve, :info)
-    on_exit(fn -> Application.delete_env(:browser, :js_resolve) end)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:browser, :js_resolve, v)
+        :error -> Application.delete_env(:browser, :js_resolve)
+      end
+    end)
 
     assert {:ok,
             {:program, [{:fundecl, "f", {:fn, "f", [], [], false, %Info{rewritten: false}}}]}} =
