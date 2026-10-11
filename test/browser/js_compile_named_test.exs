@@ -58,20 +58,18 @@ defmodule Browser.JS.CompileNamedTest do
     for {n, p} <- reads, do: assert(n == p)
   end
 
-  test "a primitive goes to get and put" do
+  test "a string primitive reads the same with get_named and get" do
+    # A number or a boolean goes to `get/2` in a clause of its own, so only the string path
+    # (`get_str/3`) is tested here. The compiler sends only keys that are not array indexes
+    # to `get_named/2`. The writes on primitives, with a setter on the prototype, are a row
+    # of the compile oracle ("class primitive receivers" in js_compile_test.exs).
     reads =
       run_in_heap(fn _objs ->
-        for v <- ["abc", 1.5, true], k <- ["length", "toString", "x"] do
-          {Interp.get_named(v, k), Interp.get(v, k), Interp.put_named(v, k, 1.0),
-           safe(fn -> Interp.strict_put_named(v, k, 1.0) end),
-           safe(fn -> Interp.strict_put(v, k, 1.0) end)}
-        end
+        for k <- ["length", "toString", "x", "charAt"],
+            do: {Interp.get_named("abc", k), Interp.get("abc", k)}
       end)
 
-    for {gn, g, _, sn, s} <- reads do
-      assert gn == g
-      assert sn == s
-    end
+    for {gn, g} <- reads, do: assert(gn == g)
   end
 
   # The record of each key of each object: the read, the sloppy write of 7, the flag of a

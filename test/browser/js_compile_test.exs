@@ -483,6 +483,8 @@ defmodule Browser.JS.CompileTest do
   # `get_named/2` and `put_named/3`, and every other key to `get/2` and `put/3`. The two
   # runs must agree for every class.
   @classes [
+    {"class primitive receivers",
+     ~S|function f(){ var log = []; [Number, String, Boolean].forEach(function (C) { Object.defineProperty(C.prototype, 'x', {set(v){ log.push(typeof this + ':' + v) }, configurable: true}) }); (1.5).x = 1; 'abc'.x = 2; true.x = 3; (1.5).y = 4; 'abc'.length = 5; var s = (function(){ 'use strict'; try { 'abc'.y = 6; return 'no' } catch (e) { return e.name } })(); [Number, String, Boolean].forEach(function (C) { delete C.prototype.x }); return [log.join(), (1.5).y, s].join(';') } console.log(f())|},
     {"class plain",
      ~S|function f(){ var o = {a: 1}; var p = Object.create(o); p.b = 2; o.a = 3; return [p.a, p.b, p.c, o.constructor === Object, p.hasOwnProperty('a')].join() } console.log(f())|},
     {"class array",
