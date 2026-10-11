@@ -1,3 +1,39 @@
+defmodule Browser.JS.Compile.Operand do
+  @moduledoc """
+  Gives the code that reads an operand form of `Browser.JS.Compile`.
+
+  The macros `pair/6` and `one/4` of `Browser.JS.Compile` use this module when they expand.
+  At that time, the functions of `Browser.JS.Compile` do not exist. Thus, this function is
+  in a different module, which compiles first.
+  """
+
+  @doc """
+  Gives the pattern of an operand form with the tag `tag` and the code that reads the value
+  of the form in `env`. `side` gives a different name to the variables of each operand of a
+  pair.
+  """
+  def form(tag, side, env) do
+    var = fn name -> Macro.var(:"#{side}_#{name}", Browser.JS.Compile) end
+
+    case tag do
+      :k ->
+        {quote(do: {:k, unquote(var.(:v))}), var.(:v)}
+
+      :s ->
+        {i, n} = {var.(:i), var.(:n)}
+
+        {quote(do: {:s, unquote(i), unquote(n)}),
+         quote(
+           do: slot0(unquote(env), unquote(i), unquote(n), {:slot, 0, unquote(i), unquote(n)})
+         )}
+
+      :f ->
+        f = var.(:f)
+        {quote(do: {:f, unquote(f)}), quote(do: unquote(f).(unquote(env)))}
+    end
+  end
+end
+
 defmodule Browser.JS.Compile do
   @moduledoc """
   Closure compilation of JS function bodies (step 5).
@@ -20,6 +56,13 @@ defmodule Browser.JS.Compile do
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
       `while`, labels, `break`, `continue` and `throw`.
+
+  A parent reads an operand that is a constant or a slot of its own frame inline, without
+  the call of a closure. A binary operator and a test have one closure for each kind of
+  operand, so that the closure does no test of the kind when it runs. The tests of `if`,
+  `?:`, `for` and `while` give an Elixir boolean: a comparison gives its value, and `!`,
+  `&&` and `||` join the booleans of their operands. A comparison of operands goes into the
+  closure of its branch.
 
   Some nodes stay on the tree walker, but their children compile (a shell). The compiler
   makes a copy of the node in which each expression or statement child is
@@ -209,6 +252,203 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # ── operands ───────────────────────────────────────────────
+
+  # Most operands of hot code are constants and slots of the frame itself. A parent reads
+  # such an operand inline, because a closure call costs one reduction and one jump. An
+  # operand form (`opnd/1`) is one of these:
+  #
+  #   * `{:k, value}`: a constant;
+  #   * `{:s, i, name}`: slot `i` of the frame itself (depth 0);
+  #   * `{:f, closure}`: the closure of any other expression.
+  #
+  # A parent that reads the form at run time uses `av/2`, which is one `case` and no call.
+  # A hot parent (a binary operator, a test) has one closure for each form of its
+  # operands (`pair/6`, `one/4`), so that its closure tests nothing at run time.
+
+  # The value of the operand form `o`.
+  defmacrop av(o, env) do
+    # The code is marked as generated because a parent that knows the tag of a form when
+    # it compiles also uses this macro, and the type checker would warn about the clauses
+    # that do not match.
+    quote generated: true do
+      case unquote(o) do
+        {:k, av_v} -> av_v
+        {:s, av_i, av_n} -> slot0(unquote(env), av_i, av_n, {:slot, 0, av_i, av_n})
+        {:f, av_f} -> av_f.(unquote(env))
+      end
+    end
+  end
+
+  # The closure of a node with two operand forms, `lo` and `ro`: one closure for each pair
+  # of tags. The closure reads the left operand into `a`, then the right operand into `b`
+  # (the order of the tree walker), then gives the value of `body`.
+  defmacrop pair(env, lo, ro, a, b, body) do
+    clauses =
+      for l <- [:k, :s, :f], r <- [:k, :s, :f] do
+        {lp, lr} = Browser.JS.Compile.Operand.form(l, :l, env)
+        {rp, rr} = Browser.JS.Compile.Operand.form(r, :r, env)
+
+        hd(
+          quote generated: true do
+            {unquote(lp), unquote(rp)} ->
+              fn unquote(env) ->
+                _ = unquote(env)
+                unquote(a) = unquote(lr)
+                unquote(b) = unquote(rr)
+                unquote(body)
+              end
+          end
+        )
+      end
+
+    quote generated: true do
+      case {unquote(lo), unquote(ro)} do
+        unquote(clauses)
+      end
+    end
+  end
+
+  # The closure of a node with one operand form `o`: one closure for each tag. The closure
+  # reads the operand into `a`, then gives the value of `body`.
+  defmacrop one(env, o, a, body) do
+    clauses =
+      for t <- [:k, :s, :f] do
+        {p, read} = Browser.JS.Compile.Operand.form(t, :o, env)
+
+        hd(
+          quote generated: true do
+            unquote(p) ->
+              fn unquote(env) ->
+                _ = unquote(env)
+                unquote(a) = unquote(read)
+                unquote(body)
+              end
+          end
+        )
+      end
+
+    quote generated: true do
+      case unquote(o) do
+        unquote(clauses)
+      end
+    end
+  end
+
+  # The truthiness of `v`, as `Interp.truthy/1` gives it. The common values are tested
+  # inline, so that a test needs no call. The last clause calls `truthy/1` for the rest.
+  defmacrop tru(v) do
+    quote do
+      case unquote(v) do
+        true -> true
+        false -> false
+        :undefined -> false
+        :null -> false
+        {:obj, _} -> true
+        tru_x when is_number(tru_x) -> tru_x != 0
+        "" -> false
+        tru_x when is_binary(tru_x) -> true
+        tru_x -> Interp.truthy(tru_x)
+      end
+    end
+  end
+
+  # The operators that a parent computes inline. `+`, `-`, `*` and the comparisons do the
+  # first clauses of `Interp.binop/3` for two floats inline and call `binop/3` for every
+  # other pair. The equality operators call `strict_eq/2` and `loose_eq/2`, which are the
+  # clauses of `binop/3` for them. Because of this, the semantics are those of `binop/3`.
+  @inline_ops ["+", "-", "*", "<", ">", "<=", ">=", "===", "!==", "==", "!="]
+
+  # The operators whose value is always a boolean. A test (`ctest/1`) uses their value as
+  # it is, without `truthy/1`.
+  @tests ["<", ">", "<=", ">=", "===", "!==", "==", "!="]
+
+  # The value of `a op b` for an operator `op` that is known when the macro expands.
+  defmacrop op_body(op, a, b) do
+    floats = quote do: is_float(unquote(a)) and is_float(unquote(b))
+    slow = quote do: Interp.binop(unquote(op), unquote(a), unquote(b))
+
+    # Two floats are equal for `Num.equal?/2` when `==` says so, because a float is never
+    # NaN, and `==` gives true for 0.0 and -0.0.
+    fast =
+      case op do
+        "+" -> quote do: Num.add(unquote(a), unquote(b))
+        "-" -> quote do: Num.add(unquote(a), -unquote(b))
+        "*" -> quote do: Num.mul(unquote(a), unquote(b))
+        "<" -> quote do: unquote(a) < unquote(b)
+        ">" -> quote do: unquote(a) > unquote(b)
+        "<=" -> quote do: unquote(a) <= unquote(b)
+        ">=" -> quote do: unquote(a) >= unquote(b)
+        "===" -> quote do: unquote(a) == unquote(b)
+        "!==" -> quote do: unquote(a) != unquote(b)
+        "==" -> quote do: unquote(a) == unquote(b)
+        "!=" -> quote do: unquote(a) != unquote(b)
+      end
+
+    slow =
+      case op do
+        "===" -> quote do: Interp.strict_eq(unquote(a), unquote(b))
+        "!==" -> quote do: not Interp.strict_eq(unquote(a), unquote(b))
+        "==" -> quote do: Interp.loose_eq(unquote(a), unquote(b))
+        "!=" -> quote do: not Interp.loose_eq(unquote(a), unquote(b))
+        _ -> slow
+      end
+
+    quote do
+      if unquote(floats), do: unquote(fast), else: unquote(slow)
+    end
+  end
+
+  # A branch closure, or `:ok` for a missing branch of an `if`.
+  defmacrop run(c, env) do
+    quote do
+      case unquote(c) do
+        nil -> :ok
+        run_c -> run_c.(unquote(env))
+      end
+    end
+  end
+
+  # `x = v` to a slot: the write with `slot_assign/4`, which tests the temporal dead zone
+  # and a constant, then the value.
+  defmacrop assign_slot(env, d, i, name, v) do
+    quote do
+      Interp.slot_assign(up(unquote(env), unquote(d)), unquote(i), unquote(name), unquote(v))
+      unquote(v)
+    end
+  end
+
+  # The values of an argument list form, from left to right. Each value is bound before the
+  # next one is read, because Erlang does not define the order of the parts of a list.
+  defmacrop argv(al, env) do
+    quote do
+      env = unquote(env)
+
+      case unquote(al) do
+        {:a} ->
+          []
+
+        {:a, argv_x} ->
+          [av(argv_x, env)]
+
+        {:a, argv_x, argv_y} ->
+          argv_a = av(argv_x, env)
+          [argv_a, av(argv_y, env)]
+
+        {:a, argv_x, argv_y, argv_z} ->
+          argv_a = av(argv_x, env)
+          argv_b = av(argv_y, env)
+          [argv_a, argv_b, av(argv_z, env)]
+
+        {:n, argv_os} ->
+          values(argv_os, env)
+
+        {:list, argv_cs} ->
+          Interp.eval_list(argv_cs, env)
+      end
+    end
+  end
+
   # ── expressions ────────────────────────────────────────────
 
   # The closure of the expression `e`: `fn env -> value end`.
@@ -246,50 +486,30 @@ defmodule Browser.JS.Compile do
 
   defp expr({:in_tdz, _names, e}), do: expr(e)
 
-  defp expr({:cond, c, a, b}) do
-    {cc, ac, bc} = {expr(c), expr(a), expr(b)}
-    fn env -> if Interp.truthy(cc.(env)), do: ac.(env), else: bc.(env) end
-  end
+  defp expr({:cond, c, a, b}), do: cbranch(c, expr(a), expr(b))
 
+  # (the right operand is read only when the left one does not give the value)
   defp expr({:logical, op, l, r}) do
-    {lc, rc} = {expr(l), expr(r)}
+    {lo, ro} = {opnd(l), opnd(r)}
 
     case op do
-      "&&" ->
-        fn env ->
-          lv = lc.(env)
-          if Interp.truthy(lv), do: rc.(env), else: lv
-        end
-
-      "||" ->
-        fn env ->
-          lv = lc.(env)
-          if Interp.truthy(lv), do: lv, else: rc.(env)
-        end
-
-      "??" ->
-        fn env ->
-          lv = lc.(env)
-          if Interp.nullish?(lv), do: rc.(env), else: lv
-        end
+      "&&" -> one(env, lo, lv, if(tru(lv), do: av(ro, env), else: lv))
+      "||" -> one(env, lo, lv, if(tru(lv), do: lv, else: av(ro, env)))
+      "??" -> one(env, lo, lv, if(lv == :undefined or lv == :null, do: av(ro, env), else: lv))
     end
   end
 
   # (`!` has no special form in `ev/2`: its operand is a plain expression)
-  defp expr({:unary, "!", e}) do
-    ec = expr(e)
-    fn env -> not Interp.truthy(ec.(env)) end
-  end
+  defp expr({:unary, "!", _} = e), do: ctest(e)
 
   # (`#x in o` reads the private name in its own clause of `ev/2`)
   defp expr({:binary, "in", {:priv_ref, _} = l, r}), do: shell({:binary, "in", l, cc(r)})
-  defp expr({:binary, op, l, r}), do: binary(op, expr(l), expr(r))
+  defp expr({:binary, op, l, r}), do: binary(op, opnd(l), opnd(r))
 
   defp expr({:member, o, k, opt}) do
     case k do
       {:priv, _} -> shell({:member, cc(o), k, opt})
-      {:str, s} -> member(expr(o), s, opt)
-      _ -> member(expr(o), expr(k), opt)
+      _ -> member(opnd(o), key_code(k), opt)
     end
   end
 
@@ -303,12 +523,12 @@ defmodule Browser.JS.Compile do
   end
 
   defp expr({:new, callee, args}) do
-    {cc, ac} = {expr(callee), list_code(args)}
+    {cc, al} = {expr(callee), list_code(args)}
 
     fn env ->
       f = cc.(env)
       # (the arguments are evaluated before the callee is checked)
-      argv = ac.(env)
+      argv = argv(al, env)
 
       unless Interp.function?(f) and Interp.constructor?(f),
         do:
@@ -326,20 +546,14 @@ defmodule Browser.JS.Compile do
     if nameable(value) do
       fallback(node)
     else
-      vc = expr(value)
-
-      fn env ->
-        v = vc.(env)
-        Interp.slot_assign(up(env, d), i, name, v)
-        v
-      end
+      one(env, opnd(value), v, assign_slot(env, d, i, name, v))
     end
   end
 
   defp expr({kind, "=", {:member, o, k, _} = target, value}) when kind in [:assign, :sassign] do
     case k do
       {:priv, _} -> shell({kind, "=", cmember(target), cc(value)})
-      _ -> put(kind, expr(o), key_code(k), expr(value))
+      _ -> put(kind, opnd(o), key_code(k), opnd(value))
     end
   end
 
@@ -371,10 +585,10 @@ defmodule Browser.JS.Compile do
 
     case target do
       {:slot, d, i, name} ->
-        compound_slot(base, d, i, name, expr(value))
+        compound_slot(base, d, i, name, opnd(value))
 
       {:member, o, k, _} when elem(k, 0) != :priv ->
-        compound_member(base, kind == :sassign, expr(o), key_code(k), expr(value))
+        compound_member(base, kind == :sassign, opnd(o), key_code(k), opnd(value))
 
       # (`compound_assign/5` evaluates the value with `ev/2`, so the value is a child)
       _ ->
@@ -390,7 +604,7 @@ defmodule Browser.JS.Compile do
         update_slot(op, prefix?, d, i, name)
 
       {:member, o, k, _} when elem(k, 0) != :priv ->
-        update_member(op, prefix?, kind == :supdate, expr(o), key_code(k))
+        update_member(op, prefix?, kind == :supdate, opnd(o), key_code(k))
 
       {:member, _, _, _} ->
         shell({kind, op, prefix?, cmember(target)})
@@ -402,9 +616,9 @@ defmodule Browser.JS.Compile do
 
   defp expr({:array, elems}) do
     if plain_list?(elems) do
-      ac = args_code(elems)
+      al = list_code(elems)
       # (`ev/2` evaluates the elements before it makes the array, as here)
-      fn env -> Interp.new_array(ac.(env)) end
+      fn env -> Interp.new_array(argv(al, env)) end
     else
       shell({:array, Enum.map(elems, &carg/1)})
     end
@@ -412,7 +626,7 @@ defmodule Browser.JS.Compile do
 
   defp expr({:object, props}) do
     if Enum.all?(props, &plain_prop?/1) do
-      pcs = for {:init, {:str, k}, v} <- props, do: {k, expr(v)}
+      pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
 
       # (`ev/2` makes the object before it evaluates the values, as here)
       fn env ->
@@ -453,16 +667,14 @@ defmodule Browser.JS.Compile do
 
   defp expr({:unary, "void", {:num, _}}), do: fn _env -> :undefined end
 
-  defp expr({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"] do
-    ec = expr(e)
-    unary(op, ec)
-  end
+  defp expr({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"],
+    do: unary(op, opnd(e))
 
   defp expr({:unary, d, {:member, _, _, _} = target}) when d in ["delete", "sdelete"],
     do: shell({:unary, d, cmember(target)})
 
   defp expr({:tmpl, parts}) do
-    pcs = Enum.map(parts, fn p -> if is_binary(p), do: p, else: expr(p) end)
+    pcs = Enum.map(parts, fn p -> if is_binary(p), do: p, else: opnd(p) end)
     fn env -> parts(pcs, env, []) |> Browser.JS.Str.join() end
   end
 
@@ -496,6 +708,17 @@ defmodule Browser.JS.Compile do
 
   defp expr(node), do: fallback(node)
 
+  # The operand form of `e` (see the section on operands). A negative number and `void` of
+  # a number are constants, as in `expr/1`. The markers `{:in_tdz}` and `{:unnamed}` do
+  # nothing when they run, so their operand is the form of the expression in them.
+  defp opnd({k, v}) when k in [:num, :str, :lit], do: {:k, v}
+  defp opnd({:slot, 0, i, name}), do: {:s, i, name}
+  defp opnd({:unary, "-", {:num, n}}), do: {:k, Num.neg(n)}
+  defp opnd({:unary, "void", {:num, _}}), do: {:k, :undefined}
+  defp opnd({:in_tdz, _names, e}), do: opnd(e)
+  defp opnd({:unnamed, e}), do: opnd(e)
+  defp opnd(e), do: {:f, expr(e)}
+
   # An item of an argument list or an array literal that `eval_list/2` evaluates as a plain
   # expression: no spread and no hole.
   defp plain_list?(items),
@@ -515,8 +738,8 @@ defmodule Browser.JS.Compile do
   # them: the value, then the home of a method, then the property.
   defp props([], _obj, _env), do: :ok
 
-  defp props([{k, vc} | rest], obj, env) do
-    v = vc.(env)
+  defp props([{k, vo} | rest], obj, env) do
+    v = av(vo, env)
     Interp.method_home(v, obj)
     Interp.define_data(obj, k, v)
     props(rest, obj, env)
@@ -535,188 +758,202 @@ defmodule Browser.JS.Compile do
   defp parts([], _env, acc), do: Enum.reverse(acc)
   defp parts([p | ps], env, acc) when is_binary(p), do: parts(ps, env, [p | acc])
 
-  defp parts([pc | ps], env, acc) do
-    s = Interp.to_str(pc.(env))
+  defp parts([po | ps], env, acc) do
+    s = Interp.to_str(av(po, env))
     parts(ps, env, [s | acc])
   end
 
   # The unary operators of the last clause of `ev/2` for `{:unary}`: the value, then the
   # operator.
-  defp unary("-", ec) do
-    fn env ->
-      case Interp.numeric(ec.(env)) do
+  defp unary("-", o) do
+    one(
+      env,
+      o,
+      x,
+      case Interp.numeric(x) do
         {:bigint, n} -> {:bigint, -n}
         n -> Num.neg(n)
       end
-    end
+    )
   end
 
-  defp unary("+", ec), do: fn env -> Interp.to_num(ec.(env)) end
+  defp unary("+", o), do: one(env, o, x, Interp.to_num(x))
 
-  defp unary("~", ec) do
-    fn env ->
-      case Interp.numeric(ec.(env)) do
+  defp unary("~", o) do
+    one(
+      env,
+      o,
+      x,
+      case Interp.numeric(x) do
         {:bigint, n} -> {:bigint, Bitwise.bnot(n)}
         n -> (Num.int32(n) |> Bitwise.bnot()) * 1.0
       end
+    )
+  end
+
+  defp unary("typeof", o), do: one(env, o, x, Interp.typeof(x))
+  defp unary("void", o), do: one(env, o, _x, :undefined)
+
+  # ── operators and tests ────────────────────────────────────
+
+  # A binary operator, chosen at compile time, on two operand forms. The left operand is
+  # read first. The operators of `@inline_ops` compute two floats inline (`op_body/3`), and
+  # every other case calls `Interp.binop/3`, so the semantics are those of `binop/3`.
+  for op <- @inline_ops do
+    defp binary(unquote(op), lo, ro), do: pair(env, lo, ro, a, b, op_body(unquote(op), a, b))
+  end
+
+  defp binary(op, lo, ro), do: pair(env, lo, ro, a, b, Interp.binop(op, a, b))
+
+  # The closure of a test: `fn env -> boolean end`, with the truthiness of `e`. A
+  # comparison gives its boolean as it is. `!`, `&&` and `||` join the booleans of their
+  # operands, which keeps the order and the short circuit of the operators, because only
+  # the truthiness of their value is used. Every other value goes through `tru/1`.
+  defp ctest({:binary, op, l, r}) when op in @tests, do: binary(op, opnd(l), opnd(r))
+
+  defp ctest({:unary, "!", e}) do
+    if test?(e) do
+      tc = ctest(e)
+      fn env -> not tc.(env) end
+    else
+      one(env, opnd(e), x, not tru(x))
     end
   end
 
-  defp unary("typeof", ec), do: fn env -> Interp.typeof(ec.(env)) end
+  defp ctest({:logical, "&&", l, r}) do
+    {lc, rc} = {ctest(l), ctest(r)}
+    fn env -> lc.(env) and rc.(env) end
+  end
 
-  defp unary("void", ec) do
-    fn env ->
-      ec.(env)
-      :undefined
+  defp ctest({:logical, "||", l, r}) do
+    {lc, rc} = {ctest(l), ctest(r)}
+    fn env -> lc.(env) or rc.(env) end
+  end
+
+  defp ctest(e), do: one(env, opnd(e), x, tru(x))
+
+  # The nodes that `ctest/1` gives a test of their own.
+  defp test?({:binary, op, _, _}), do: op in @tests
+  defp test?({:unary, "!", _}), do: true
+  defp test?({:logical, op, _, _}), do: op in ["&&", "||"]
+  defp test?(_), do: false
+
+  # A branch on the truthiness of `c`, for `if`, `?:` and `?:` at a tail site: the closure
+  # runs `yc` when `c` is truthy and `nc` when it is not. A missing branch (`nil`) gives
+  # `:ok`. A comparison and a plain operand go into the closure of the branch, so a branch
+  # costs one closure call and its test. Each branch closure has this closure as its only
+  # parent.
+  for op <- @tests do
+    defp cbranch({:binary, unquote(op), l, r}, yc, nc) do
+      pair(
+        env,
+        opnd(l),
+        opnd(r),
+        a,
+        b,
+        if(op_body(unquote(op), a, b), do: run(yc, env), else: run(nc, env))
+      )
     end
   end
 
-  # ── operators ──────────────────────────────────────────────
+  # (`!c` swaps the two branches)
+  defp cbranch({:unary, "!", c}, yc, nc), do: cbranch(c, nc, yc)
 
-  # A binary operator, chosen at compile time. The left operand is evaluated first. For
-  # `+`, `-` and the comparisons, two floats take the first clauses of `Interp.binop/3`
-  # inline. Every other case calls `binop/3`, so the semantics are those of `binop/3`.
-  defp binary("+", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: Num.add(a, b), else: Interp.binop("+", a, b)
-    end
+  defp cbranch({:logical, op, _, _} = c, yc, nc) when op in ["&&", "||"] do
+    tc = ctest(c)
+    fn env -> if tc.(env), do: run(yc, env), else: run(nc, env) end
   end
 
-  defp binary("-", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: Num.add(a, -b), else: Interp.binop("-", a, b)
-    end
-  end
-
-  defp binary("<", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: a < b, else: Interp.binop("<", a, b)
-    end
-  end
-
-  defp binary(">", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: a > b, else: Interp.binop(">", a, b)
-    end
-  end
-
-  defp binary("<=", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: a <= b, else: Interp.binop("<=", a, b)
-    end
-  end
-
-  defp binary(">=", lc, rc) do
-    fn env ->
-      a = lc.(env)
-      b = rc.(env)
-      if is_float(a) and is_float(b), do: a >= b, else: Interp.binop(">=", a, b)
-    end
-  end
-
-  defp binary(op, lc, rc) do
-    fn env ->
-      a = lc.(env)
-      Interp.binop(op, a, rc.(env))
-    end
-  end
+  defp cbranch(c, yc, nc),
+    do: one(env, opnd(c), x, if(tru(x), do: run(yc, env), else: run(nc, env)))
 
   # ── properties ─────────────────────────────────────────────
 
-  # The key of a property node: a constant string, or the closure of a computed key.
-  defp key_code({:str, s}), do: s
-  defp key_code(k), do: expr(k)
+  # The key of a property node, as an operand form. A constant name is `{:k, name}`.
+  defp key_code({:str, s}), do: {:k, s}
+  defp key_code(k), do: opnd(k)
 
   # A property read, as `ev/2` reads `{:member, o, k, opt}`: the object, the test of an
   # optional member, then the key.
-  defp member(oc, s, opt) when is_binary(s) do
-    if opt do
-      fn env ->
-        ov = oc.(env)
-        if Interp.nullish?(ov), do: throw(:js_short)
-        Interp.get(ov, s)
-      end
-    else
-      fn env -> Interp.get(oc.(env), s) end
-    end
-  end
+  defp member(oo, {:k, s}, false), do: one(env, oo, ov, Interp.get(ov, s))
 
-  defp member(oc, kc, opt) do
-    fn env ->
-      ov = oc.(env)
-      if opt and Interp.nullish?(ov), do: throw(:js_short)
-      Interp.get(ov, kc.(env))
-    end
+  defp member(oo, ko, false), do: pair(env, oo, ko, ov, key, Interp.get(ov, key))
+
+  defp member(oo, ko, true) do
+    one(
+      env,
+      oo,
+      ov,
+      (
+        if ov == :undefined or ov == :null, do: throw(:js_short)
+        Interp.get(ov, av(ko, env))
+      )
+    )
   end
 
   # A property write `o[k] = v`: the object, the key, then the value, as `ev/2` writes it.
-  # Sloppy code gives the value, and strict code gives what `strict_put/3` gives.
-  defp put(:assign, oc, s, vc) when is_binary(s) do
-    fn env ->
-      ov = oc.(env)
-      v = vc.(env)
-      Interp.put(ov, s, v)
-      v
-    end
+  # Sloppy code gives the value, and strict code gives what `strict_put/3` gives. A
+  # constant key has nothing to evaluate, so the object and the value are a pair.
+  defp put(:assign, oo, {:k, s}, vo) do
+    pair(
+      env,
+      oo,
+      vo,
+      ov,
+      v,
+      (
+        Interp.put(ov, s, v)
+        v
+      )
+    )
   end
 
-  defp put(:assign, oc, kc, vc) do
+  defp put(:sassign, oo, {:k, s}, vo), do: pair(env, oo, vo, ov, v, Interp.strict_put(ov, s, v))
+
+  defp put(:assign, oo, ko, vo) do
     fn env ->
-      ov = oc.(env)
-      key = kc.(env)
-      v = vc.(env)
+      ov = av(oo, env)
+      key = av(ko, env)
+      v = av(vo, env)
       Interp.put(ov, key, v)
       v
     end
   end
 
-  defp put(:sassign, oc, s, vc) when is_binary(s) do
+  defp put(:sassign, oo, ko, vo) do
     fn env ->
-      ov = oc.(env)
-      v = vc.(env)
-      Interp.strict_put(ov, s, v)
-    end
-  end
-
-  defp put(:sassign, oc, kc, vc) do
-    fn env ->
-      ov = oc.(env)
-      key = kc.(env)
-      v = vc.(env)
+      ov = av(oo, env)
+      key = av(ko, env)
+      v = av(vo, env)
       Interp.strict_put(ov, key, v)
-    end
-  end
-
-  # The value of a key closure, or the constant key.
-  defmacrop key(kc, env) do
-    quote do
-      case unquote(kc) do
-        s when is_binary(s) -> s
-        kc -> kc.(unquote(env))
-      end
     end
   end
 
   # `x op= v` to a slot, as `compound_assign/5` does it: one hop, the read with its test
   # of the temporal dead zone, the value, the operator, then the write. The result is the
-  # write joined with the value by `&&`, as in `compound_assign/5`.
-  defp compound_slot(base, d, i, name, vc) do
+  # write joined with the value by `&&`, as in `compound_assign/5`. `+`, `-` and `*`
+  # compute two floats inline.
+  for op <- ["+", "-", "*"] do
+    defp compound_slot(unquote(op), d, i, name, vo) do
+      form = {:slot, 0, i, name}
+
+      fn env ->
+        frame = up(env, d)
+        old = slot0(frame, i, name, form)
+        b = av(vo, env)
+        v = op_body(unquote(op), old, b)
+        Interp.slot_assign(frame, i, name, v) && v
+      end
+    end
+  end
+
+  defp compound_slot(base, d, i, name, vo) do
     form = {:slot, 0, i, name}
 
     fn env ->
       frame = up(env, d)
       old = slot0(frame, i, name, form)
-      v = Interp.binop(base, old, vc.(env))
+      v = Interp.binop(base, old, av(vo, env))
       Interp.slot_assign(frame, i, name, v) && v
     end
   end
@@ -724,10 +961,10 @@ defmodule Browser.JS.Compile do
   # `o[k] op= v`, as `compound_assign/5` does it: the object, the key, the test of a
   # nullish object, the key conversion (once, for the read and the write), the read, the
   # value, the operator, then the write.
-  defp compound_member(base, strict?, oc, kc, vc) do
+  defp compound_member(base, strict?, oo, ko, vo) do
     fn env ->
-      ov = oc.(env)
-      key = key(kc, env)
+      ov = av(oo, env)
+      key = av(ko, env)
 
       if Interp.nullish?(ov),
         do:
@@ -738,21 +975,33 @@ defmodule Browser.JS.Compile do
 
       key = Interp.to_key(key)
       old = Interp.get(ov, key)
-      v = Interp.binop(base, old, vc.(env))
+      v = Interp.binop(base, old, av(vo, env))
 
       if(strict?, do: Interp.strict_put(ov, key, v), else: Interp.put(ov, key, v)) && v
     end
   end
 
   # `++x` and `x--` to a slot, as `ev/2` does them: the read with its test of the temporal
-  # dead zone, the number, then the write with `slot_put/3`.
+  # dead zone, the number, then the write with `slot_put/3`. A float needs no conversion,
+  # and its step is the float clause of `Interp.bump/2` (`Num.sub(x, 1.0)` is
+  # `Num.add(x, -1.0)`).
   defp update_slot(op, prefix?, d, i, name) do
     form = {:slot, 0, i, name}
+    delta = if op == "++", do: 1.0, else: -1.0
 
     fn env ->
       frame = up(env, d)
-      old = Interp.numeric(slot0(frame, i, name, form))
-      new = Interp.bump(op, old)
+
+      {old, new} =
+        case slot0(frame, i, name, form) do
+          x when is_float(x) ->
+            {x, Num.add(x, delta)}
+
+          x ->
+            old = Interp.numeric(x)
+            {old, Interp.bump(op, old)}
+        end
+
       Interp.slot_put(frame, i, new)
       if prefix?, do: new, else: old
     end
@@ -760,10 +1009,10 @@ defmodule Browser.JS.Compile do
 
   # `++o[k]` and `o[k]--`, as `ev/2` does them: the object, the key, the test of a nullish
   # object, the key conversion, the read, the number, then the write.
-  defp update_member(op, prefix?, strict?, oc, kc) do
+  defp update_member(op, prefix?, strict?, oo, ko) do
     fn env ->
-      ov = oc.(env)
-      raw = key(kc, env)
+      ov = av(oo, env)
+      raw = av(ko, env)
 
       if Interp.nullish?(ov),
         do: Interp.throw_error("TypeError", "Cannot read properties of #{Interp.to_str(ov)}")
@@ -779,88 +1028,59 @@ defmodule Browser.JS.Compile do
   # ── calls ──────────────────────────────────────────────────
 
   # The callee of a call, as `call_target/2` finds it: `{:member, object, key, optional?}`
-  # for a method call, whose `this` is the object, or `{:plain, closure}`. A callee that
-  # `call_target/2` reads by name, a `super` callee and an optional chain stay on the tree.
+  # for a method call, whose `this` is the object, or `{:plain, callee}`, as operand forms.
+  # A callee that `call_target/2` reads by name, a `super` callee and an optional chain
+  # stay on the tree.
   defp target({:member, o, k, mopt}) when elem(k, 0) != :priv,
-    do: {:ok, {:member, expr(o), key_code(k), mopt}}
+    do: {:ok, {:member, opnd(o), key_code(k), mopt}}
 
   defp target({k, _}) when k in [:id, :super_member, :chain], do: :error
   defp target({:member, _, _, _}), do: :error
   defp target({:super}), do: :error
-  defp target(callee), do: {:ok, {:plain, expr(callee)}}
+  defp target(callee), do: {:ok, {:plain, opnd(callee)}}
 
   # A call, in the order of `ev/2`: the callee and `this`, the test of an optional call,
   # the arguments, then `Interp.ccall/5`, which the tree walker also uses.
-  defp call({:member, oc, kc, mopt}, ac, opt, callee) do
+  defp call({:member, oo, ko, mopt}, al, opt, callee) do
     fn env ->
-      ov = oc.(env)
+      ov = av(oo, env)
       if mopt and Interp.nullish?(ov), do: throw(:js_short)
-      f = Interp.get(ov, key(kc, env))
+      f = Interp.get(ov, av(ko, env))
       if opt and Interp.nullish?(f), do: throw(:js_short)
-      argv = ac.(env)
+      argv = argv(al, env)
       Interp.ccall(f, ov, argv, callee, env)
     end
   end
 
-  defp call({:plain, fc}, ac, opt, callee) do
+  defp call({:plain, fo}, al, opt, callee) do
     fn env ->
-      f = fc.(env)
+      f = av(fo, env)
       if opt and Interp.nullish?(f), do: throw(:js_short)
-      argv = ac.(env)
+      argv = argv(al, env)
       Interp.ccall(f, :undefined, argv, callee, env)
     end
   end
 
-  # The closure of an argument list without spread and holes: `fn env -> values end`. The
-  # values are evaluated from left to right. Each value is bound before the next one is
-  # evaluated, because Erlang does not define the order of the parts of a list.
-  defp args_code([]), do: fn _env -> [] end
-
-  defp args_code([a]) do
-    ac = expr(a)
-    fn env -> [ac.(env)] end
-  end
-
-  defp args_code([a, b]) do
-    {ac, bc} = {expr(a), expr(b)}
-
-    fn env ->
-      x = ac.(env)
-      [x, bc.(env)]
-    end
-  end
-
-  defp args_code([a, b, c]) do
-    {ac, bc, cc} = {expr(a), expr(b), expr(c)}
-
-    fn env ->
-      x = ac.(env)
-      y = bc.(env)
-      [x, y, cc.(env)]
-    end
-  end
-
-  defp args_code(args) do
-    cs = Enum.map(args, &expr/1)
-    fn env -> values(cs, env) end
-  end
-
-  # The closure of any argument list. A list with a spread or a hole goes to
-  # `Interp.eval_list/2` with compiled children, so the spread iterates as on the tree.
+  # An argument list, as a form that its parent reads inline with `argv/2`: up to three
+  # operand forms, `{:n, forms}` for a longer list, or `{:list, children}` for a list with
+  # a spread or a hole, which `Interp.eval_list/2` evaluates with compiled children, so
+  # that the spread iterates as on the tree.
   defp list_code(args) do
     if plain_list?(args) do
-      args_code(args)
+      case Enum.map(args, &opnd/1) do
+        os when length(os) <= 3 -> List.to_tuple([:a | os])
+        os -> {:n, os}
+      end
     else
-      cargs = Enum.map(args, &carg/1)
-      fn env -> Interp.eval_list(cargs, env) end
+      {:list, Enum.map(args, &carg/1)}
     end
   end
 
   defp values([], _env), do: []
 
-  defp values([c | cs], env) do
-    v = c.(env)
-    [v | values(cs, env)]
+  defp values([o | os], env) do
+    v = av(o, env)
+    [v | values(os, env)]
   end
 
   # ── statements ─────────────────────────────────────────────
@@ -964,23 +1184,12 @@ defmodule Browser.JS.Compile do
 
   defp stmt({:return, nil}, _labels), do: fn _env -> {:ret, :undefined} end
 
-  defp stmt({:return, e, :plain}, _labels) do
-    ec = expr(e)
-    fn env -> {:ret, ec.(env)} end
-  end
+  defp stmt({:return, e, :plain}, _labels), do: ret(opnd(e))
 
   defp stmt({:return, e, :tail}, _labels), do: tail(e)
 
   # (the branches of an `if` run without labels, as in `fstmt/3`)
-  defp stmt({:if, c, a, nil}, _labels) do
-    {cc, ac} = {expr(c), stmt(a, [])}
-    fn env -> if Interp.truthy(cc.(env)), do: ac.(env), else: :ok end
-  end
-
-  defp stmt({:if, c, a, b}, _labels) do
-    {cc, ac, bc} = {expr(c), stmt(a, []), stmt(b, [])}
-    fn env -> if Interp.truthy(cc.(env)), do: ac.(env), else: bc.(env) end
-  end
+  defp stmt({:if, c, a, b}, _labels), do: cbranch(c, stmt(a, []), b && stmt(b, []))
 
   defp stmt({:block, stmts, sc}, _labels) when frameless(sc) do
     bc = list(stmts)
@@ -993,7 +1202,7 @@ defmodule Browser.JS.Compile do
       ds =
         for {{:slot, d, i, name}, init} <- decls,
             not (init == nil and kind == :var),
-            do: {d, i, name, if(init, do: expr(init))}
+            do: {d, i, name, if(init, do: opnd(init), else: {:k, :undefined})}
 
       fn env ->
         decls(ds, env)
@@ -1021,7 +1230,7 @@ defmodule Browser.JS.Compile do
         nil -> nil
       end
 
-    {tc, uc, bc} = {test && expr(test), update && expr(update), stmt(body, [])}
+    {tc, uc, bc} = {test && ctest(test), update && expr(update), stmt(body, [])}
 
     lc =
       fn env ->
@@ -1033,8 +1242,8 @@ defmodule Browser.JS.Compile do
   end
 
   defp stmt({:while, c, body}, labels) do
-    {cc, bc} = {expr(c), stmt(body, [])}
-    fn env -> while_loop(cc, bc, env, labels) end
+    {tc, bc} = {ctest(c), stmt(body, [])}
+    fn env -> while_loop(tc, bc, env, labels) end
   end
 
   # A break to this label ends the labeled statement normally, as in `fstmt/3`.
@@ -1131,8 +1340,8 @@ defmodule Browser.JS.Compile do
   # them: the value, then the write with the checks of check mode.
   defp decls([], _env), do: :ok
 
-  defp decls([{d, i, name, ic} | rest], env) do
-    v = if ic, do: ic.(env), else: :undefined
+  defp decls([{d, i, name, io} | rest], env) do
+    v = av(io, env)
     frame = up(env, d)
     if @check, do: Interp.check_slot(frame, i, name)
     if @check, do: Interp.check_unsynced(frame, i)
@@ -1154,7 +1363,7 @@ defmodule Browser.JS.Compile do
   defp for_loop(tc, uc, bc, env, labels) do
     Interp.tick()
 
-    if tc == nil or Interp.truthy(tc.(env)) do
+    if tc == nil or tc.(env) do
       case bc.(env) do
         :ok ->
           if uc, do: uc.(env)
@@ -1181,16 +1390,16 @@ defmodule Browser.JS.Compile do
 
   # The rounds of a `while`, as `while_loop/5` and `run_body/4` run them: the test, a step,
   # then the body.
-  defp while_loop(cc, bc, env, labels) do
-    if Interp.truthy(cc.(env)) do
+  defp while_loop(tc, bc, env, labels) do
+    if tc.(env) do
       Interp.tick()
 
       case bc.(env) do
         :ok ->
-          while_loop(cc, bc, env, labels)
+          while_loop(tc, bc, env, labels)
 
         {:cont, l} = c ->
-          if l == nil or l in labels, do: while_loop(cc, bc, env, labels), else: leave(c)
+          if l == nil or l in labels, do: while_loop(tc, bc, env, labels), else: leave(c)
 
         {:brk, l} = c ->
           if l == nil or l in labels, do: :ok, else: leave(c)
@@ -1216,27 +1425,30 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp tail({:cond, c, a, b}) do
-    {cc, ac, bc} = {expr(c), tail(a), tail(b)}
-    fn env -> if Interp.truthy(cc.(env)), do: ac.(env), else: bc.(env) end
-  end
+  defp tail({:cond, c, a, b}), do: cbranch(c, tail(a), tail(b))
 
   defp tail({:seq, _} = e), do: fallback_tail(e)
   defp tail({:logical, _, _, _} = e), do: fallback_tail(e)
 
-  defp tail(e) do
-    ec = expr(e)
-    fn env -> {:ret, ec.(env)} end
+  defp tail(e), do: ret(opnd(e))
+
+  # The completion `{:ret, value}`. A constant gives the same completion at each run, so
+  # the completion is made once.
+  defp ret({:k, v}) do
+    c = {:ret, v}
+    fn _env -> c end
   end
+
+  defp ret(o), do: one(env, o, v, {:ret, v})
 
   # (the test of the callee comes here, inside the frame of the caller, as in
   # `tail_value/2`)
-  defp tail_call({:member, oc, kc, mopt}, ac, callee) do
+  defp tail_call({:member, oo, ko, mopt}, al, callee) do
     fn env ->
-      ov = oc.(env)
+      ov = av(oo, env)
       if mopt and Interp.nullish?(ov), do: throw(:js_short)
-      f = Interp.get(ov, key(kc, env))
-      argv = ac.(env)
+      f = Interp.get(ov, av(ko, env))
+      argv = argv(al, env)
 
       unless Interp.callable?(f),
         do: Interp.throw_error("TypeError", "#{Interp.describe_node(callee)} is not a function")
@@ -1245,10 +1457,10 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp tail_call({:plain, fc}, ac, callee) do
+  defp tail_call({:plain, fo}, al, callee) do
     fn env ->
-      f = fc.(env)
-      argv = ac.(env)
+      f = av(fo, env)
+      argv = argv(al, env)
 
       unless Interp.callable?(f),
         do: Interp.throw_error("TypeError", "#{Interp.describe_node(callee)} is not a function")
