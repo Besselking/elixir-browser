@@ -21,3 +21,5 @@ config :browser,
        "4" -> 4
        other -> raise "JS_RESOLVE takes off, info, 1, 2, 3 or 4, not #{other}"
      end)
+
+config :browser, disk_cache_dir: nil
