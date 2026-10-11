@@ -1534,6 +1534,15 @@ defmodule Browser.JS.Interp do
 
   def to_key(k), do: to_str(k)
 
+  @doc false
+  # ToPropertyKey for a key that is used two times, for a read and then a write (`a[i]++`,
+  # `a[i] += x`). A number stays a number: its conversion has no side effect, and `get/2` and
+  # `put/3` take it as an array index with no string, or convert it with `to_key/1`. Any
+  # other key is converted once, so a `toString` runs once.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  def prop_key(k) when is_number(k), do: k
+  def prop_key(k), do: to_key(k)
+
   def to_primitive({:obj, _} = o, hint) do
     case get(o, {:symbol, :toPrimitive, "Symbol.toPrimitive"}) do
       m when m in [:undefined, :null] ->
@@ -1626,11 +1635,23 @@ defmodule Browser.JS.Interp do
   # It is public because the closure compiler (`Browser.JS.Compile`) calls it when it
   # compiles, to find the constant keys that `get_named/2` and `put_named/3` can take.
   @doc false
-  def index(k) when is_number(k) and k >= 0 and k < 4_294_967_295 and k == trunc(k), do: trunc(k)
+  # (the float clause compares a float only with floats: a compare of a float with an
+  # integer is slow on the BEAM)
+  def index(k) when is_float(k) and k >= 0.0 and k < 4_294_967_295.0 do
+    i = trunc(k)
+    if i * 1.0 == k, do: i
+  end
 
-  def index(k) when is_binary(k) do
+  def index(k) when is_integer(k) and k >= 0 and k < 4_294_967_295, do: k
+
+  # A canonical index string has no sign, no space and no leading zero, so it starts with a
+  # digit, and a digit other than `0` when it has more than one. Other strings (`push`,
+  # `length`) need no parse.
+  def index(<<c>>) when c >= ?0 and c <= ?9, do: c - ?0
+
+  def index(<<c, _::binary>> = k) when c >= ?1 and c <= ?9 do
     case Integer.parse(k) do
-      {i, ""} when i >= 0 and i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
+      {i, ""} when i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
       _ -> nil
     end
   end
@@ -1806,7 +1827,8 @@ defmodule Browser.JS.Interp do
           %{class: :array} when key == "length" ->
             o.len * 1.0
 
-          %{class: :array, items: items} when is_binary(key) ->
+          # (an array with no elements, as `Array.prototype`, needs no parse of the key)
+          %{class: :array, items: items} when is_binary(key) and map_size(items) > 0 ->
             case index(key) do
               i when is_integer(i) and is_map_key(items, i) ->
                 case items[i] do
@@ -2420,11 +2442,16 @@ defmodule Browser.JS.Interp do
       :ok ->
         v
 
+      # (a number key comes from `prop_key/1`: the message names it as its string)
       :fail ->
-        throw_error(
-          "TypeError",
-          "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
-        )
+        name =
+          cond do
+            is_binary(key) -> key
+            is_number(key) -> to_str(key)
+            true -> "#"
+          end
+
+        throw_error("TypeError", "Cannot create property '#{name}' on #{typeof(ov)}")
     end
   end
 
@@ -7144,7 +7171,7 @@ defmodule Browser.JS.Interp do
     if nullish?(ov),
       do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
 
-    key = to_key(raw)
+    key = prop_key(raw)
     old = numeric(get(ov, key))
     new = bump(op, old)
     put(ov, key, new)
@@ -7370,7 +7397,7 @@ defmodule Browser.JS.Interp do
     if nullish?(ov),
       do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
 
-    key = to_key(raw)
+    key = prop_key(raw)
     old = numeric(get(ov, key))
     new = bump(op, old)
     strict_put(ov, key, new)
@@ -7903,7 +7930,7 @@ defmodule Browser.JS.Interp do
             )
 
         # the key is converted once, for the read and for the write
-        key = to_key(key)
+        key = prop_key(key)
 
         {fn -> get(ov, key) end,
          fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}

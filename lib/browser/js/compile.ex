@@ -1308,8 +1308,8 @@ defmodule Browser.JS.Compile do
   end
 
   # `o[k] op= v`, as `compound_assign/5` does it: the object, the key, the test of a
-  # nullish object, the key conversion (once, for the read and the write), the read, the
-  # value, the operator, then the write.
+  # nullish object, the key conversion (once, for the read and the write, as
+  # `Interp.prop_key/1` does it), the read, the value, the operator, then the write.
   defp compound_member(base, strict?, oo, ko, vo) do
     fn env ->
       ov = av(oo, env)
@@ -1322,7 +1322,8 @@ defmodule Browser.JS.Compile do
             "Cannot read properties of #{Interp.to_str(ov)} (reading '#{Interp.safe_key(key)}')"
           )
 
-      key = Interp.to_key(key)
+      # (`Interp.prop_key/1` inline: a string key does not pay one more call)
+      key = if is_number(key), do: key, else: Interp.to_key(key)
       old = Interp.get(ov, key)
       v = Interp.binop(base, old, av(vo, env))
 
@@ -1357,7 +1358,8 @@ defmodule Browser.JS.Compile do
   end
 
   # `++o[k]` and `o[k]--`, as `ev/2` does them: the object, the key, the test of a nullish
-  # object, the key conversion, the read, the number, then the write.
+  # object, the key conversion (as `Interp.prop_key/1` does it), the read, the number, then
+  # the write.
   defp update_member(op, prefix?, strict?, oo, ko) do
     fn env ->
       ov = av(oo, env)
@@ -1366,7 +1368,7 @@ defmodule Browser.JS.Compile do
       if Interp.nullish?(ov),
         do: Interp.throw_error("TypeError", "Cannot read properties of #{Interp.to_str(ov)}")
 
-      key = Interp.to_key(raw)
+      key = if is_number(raw), do: raw, else: Interp.to_key(raw)
       old = Interp.numeric(Interp.get(ov, key))
       new = Interp.bump(op, old)
       if strict?, do: Interp.strict_put(ov, key, new), else: Interp.put(ov, key, new)
