@@ -548,17 +548,20 @@ end
 IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")
 
 # JSC=1 prints the code cache of the closure compiler (step 5) in the script process: the
-# number of entries, the count of compiled nodes against the budget, the number of times
-# the budget erased the cache, and the size of the code in words. The copy of the process
-# dictionary is large, so the option is off by default.
+# number of entries, the count of words against the budget, the number of times the
+# budget erased the cache, and the size of the code in words now (after an erase, this is
+# less than the count). The copy of the process dictionary is large, so the option is off
+# by default.
 if System.get_env("JSC") do
   case Process.info(pid, :dictionary) do
     {:dictionary, dict} ->
       codes = for {{:jsc, _}, code} <- dict, do: code
-      {nodes, erases} = Enum.find_value(dict, {0, 0}, fn {k, v} -> k == :jsc_budget && v end)
+
+      {counted, erases} =
+        Enum.find_value(dict, {0, 0}, fn {k, v} -> k == :jsc_budget && v end)
 
       IO.puts(
-        "JSC entries #{length(codes)} nodes #{nodes} erases #{erases} words #{:erts_debug.size(codes)}"
+        "JSC entries #{length(codes)} counted #{counted} erases #{erases} words #{:erts_debug.size(codes)}"
       )
 
     _ ->

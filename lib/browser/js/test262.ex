@@ -198,8 +198,9 @@ defmodule Browser.JS.Test262 do
   must give the same outcome (the result, or the error and its text, and the console),
   the same steps left (`:js_steps`), the same next heap id (`:js_next`), the same heap
   count (`:js_heap_n`) and the same position (`:js_pos`). A difference is a failure with
-  a reason that starts with "compile diff". When the two runs agree, the run with the
-  compiler on is judged as usual.
+  a reason that starts with "compile diff". When only one of the runs ends (the other
+  times out or crashes), that is a compile diff too. When the two runs agree, or when
+  neither run ends, the run with the compiler on is judged as usual.
   """
   def run_test(source, meta, harness, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 10_000)
@@ -225,7 +226,7 @@ defmodule Browser.JS.Test262 do
             outcome =
               execute(programs, source, max_steps, async?, regexp_utils?, path, module?, compile)
 
-            if compile == nil, do: outcome, else: {outcome, probe()}
+            if compile == nil, do: outcome, else: {:done, outcome, probe()}
           end)
         end
 
@@ -247,9 +248,12 @@ defmodule Browser.JS.Test262 do
     Map.new([:js_steps, :js_next, :js_heap_n, :js_pos], &{&1, :erlang.get(&1)})
   end
 
-  # Two runs that ended (no timeout and no crash) must agree. When one of them did not
-  # end, there is nothing to compare, and the run with the compiler on is judged.
-  defp compare({off, off_probe}, {on, on_probe}, negative, async?) do
+  # Two runs that ended (no timeout and no crash) must agree. A run that ended is tagged
+  # `:done`, so a crash (`{:crash, reason}`) does not look like an end. When only one of
+  # the two runs ended, that is a diff too: a missed `tick` in compiled code makes the
+  # compiled run spin to the timeout where the tree run stops at the step limit. When
+  # neither run ended, the run with the compiler on is judged.
+  defp compare({:done, off, off_probe}, {:done, on, on_probe}, negative, async?) do
     cond do
       off != on ->
         {:fail,
@@ -263,7 +267,12 @@ defmodule Browser.JS.Test262 do
     end
   end
 
-  defp compare(_off, {on, _probe}, negative, async?), do: judge(on, negative, async?)
+  defp compare({:done, off, _}, on, _negative, _async?),
+    do: {:fail, "compile diff: outcome off #{short(off)}, on #{short(on)}"}
+
+  defp compare(off, {:done, on, _}, _negative, _async?),
+    do: {:fail, "compile diff: outcome off #{short(off)}, on #{short(on)}"}
+
   defp compare(_off, on, negative, async?), do: judge(on, negative, async?)
 
   defp short(v), do: inspect(v, limit: 8, printable_limit: 120)
