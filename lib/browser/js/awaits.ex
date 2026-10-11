@@ -7,8 +7,10 @@ defmodule Browser.JS.Awaits do
   function belong to that function. The walk goes into a class node, because the body of a
   class is evaluated inline.
 
-  The CPS evaluator (`Browser.JS.Async`) and the resolver (`Browser.JS.Resolve`) use this
-  walk. Thus the two modules always find the same awaits.
+  The CPS evaluator (`Browser.JS.Async`) uses this walk for each expression and for each
+  statement of the old path. The resolver (`Browser.JS.Resolve`) uses it for
+  `Info.has_await` and for the top-level awaits of a module. The `{:aw}` marks of the
+  resolver come from a walk of its own, and check item C3 compares them with the evaluator.
 
   ## The leaf forms
 

@@ -375,13 +375,66 @@ defmodule Browser.JS.AwaitsTest do
       end
     end
 
-    test "the functions of the snippets are rewritten at level 4" do
-      # A snippet proves nothing about the frame path if its function took the old path.
-      for {n, src, _} <- @snippets do
-        tree = parse!("var r=[]; " <> src <> "; r", 4)
-        f = find(tree, &match?({:fn, _, _, _, _, %Info{rewritten: true}}, &1))
-        assert f != nil, "#{n}: no rewritten function"
+    test "the async functions and generators of the snippets are rewritten at level 4" do
+      # A snippet proves nothing about the frame path if its async function or generator
+      # took the old path. Plain functions are always rewritten, so they prove nothing here.
+      for {n, src, _} <- @snippets ++ for({k, src} <- races(), do: {k, src, nil}) do
+        fns = cps_fns(parse!("var r=[]; " <> src <> "; r", 4))
+        assert fns != [], "#{n}: no async function or generator"
+        for info <- fns, do: assert(info.rewritten, "#{n}: #{inspect(info.name)} not rewritten")
       end
+    end
+
+    test "an expression that awaits lets other tasks run, at every level" do
+      # One async task alone gives the same value on the sync path, because `Interp.ev`
+      # waits for the promise. A second task shows the order: if the walk missed the await,
+      # `f2` would come before `w1`. There is one row for each node kind that the leaf
+      # forms of `Awaits` could hide by mistake.
+      for {n, src} <- races(), level <- @levels do
+        assert JS.eval(src, resolve: level) == {:ok, ["f1", "w1", "f2", "w2", "w3"], []},
+               "#{n} at #{level}: #{src}"
+      end
+    end
+  end
+
+  # The function nodes under `{:async, _}` and `{:gen, _}` wrappers, as their `Info`.
+  defp cps_fns(tree) do
+    for {tag, inner} <- subterms(tree),
+        tag in [:async, :gen],
+        {:fn, _, _, _, _, %Info{} = info} <- [unwrap(inner)],
+        do: info
+  end
+
+  defp unwrap({:gen, inner}), do: unwrap(inner)
+  defp unwrap(node), do: node
+
+  # A task `f` that evaluates one expression with an await, and a witness task `w`.
+  defp races do
+    w = "async function w(){ r.push('w1'); await 0; r.push('w2'); await 0; r.push('w3') } "
+
+    exprs = [
+      {"chain", "var o = {a: 1}; ", "var x = o?.[await 'a']"},
+      {"spread", "", "var x = [...[await 1]]"},
+      {"object spread", "", "var x = ({...(await {q: 1})})"},
+      {"computed key", "", "var x = ({[await 'k']: 1})"},
+      {"template", "", "var x = `${await 1}`"},
+      {"tagged template", "function tag(s, v){ return v } ", "var x = tag`a${await 1}`"},
+      {"object", "", "var x = ({a: await 1})"},
+      {"array", "", "var x = [0, await 1]"},
+      {"new", "function C(v){ this.v = v } ", "var x = new C(await 1)"},
+      {"call arguments", "function h(a, b){ return b } ", "var x = h(0, await 1)"},
+      {"conditional", "", "var x = (await 1) ? 1 : 2"},
+      {"logical", "", "var x = 0 || await 1"},
+      {"unary", "", "var x = -(await 1)"},
+      {"compound assignment", "var z = 0; ", "z += await 1"},
+      {"class key", "", "var x = class { [await 'm']() {} }"},
+      {"pattern default", "", "var {p = await 1} = {}"}
+    ]
+
+    for {n, pre, stmt} <- exprs do
+      {n,
+       "var r = []; " <>
+         pre <> w <> "async function f(){ r.push('f1'); #{stmt}; r.push('f2') } f(); w(); r"}
     end
   end
 
