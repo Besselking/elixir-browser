@@ -406,17 +406,19 @@ defmodule Browser.JS.Interp do
   # A frame is a tuple `{parent_id, info, chain, call_pos, root_id, slot_6, ...}` in the
   # heap (see `Browser.JS.Resolve.Info`). The hop count of a slot form counts run-time
   # scopes: a frame hops to its parent through its header, a map scope through `.parent`.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
   if @check do
     # (in check mode a hop that lands on a freed frame fails at once)
-    defp hop(id, 0) do
+    def hop(id, 0) do
       check_live(id)
       id
     end
   else
-    defp hop(id, 0), do: id
+    def hop(id, 0), do: id
   end
 
-  defp hop(id, d), do: hop(parent_of(:erlang.get(id)), d - 1)
+  def hop(id, d), do: hop(parent_of(:erlang.get(id)), d - 1)
 
   if @check do
     defp parent_of({:js_freed, name}), do: check_fail("use of a freed frame of #{name}")
@@ -425,7 +427,9 @@ defmodule Browser.JS.Interp do
   defp parent_of(f) when is_tuple(f), do: :erlang.element(1, f)
   defp parent_of(%{parent: p}), do: p
 
-  defp slot_put(env, i, v),
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def slot_put(env, i, v),
     do: :erlang.put(env, :erlang.setelement(i, :erlang.get(env), v))
 
   # ── check mode ─────────────────────────────────────────────
@@ -433,16 +437,18 @@ defmodule Browser.JS.Interp do
   # A slot form must land, after its hops, on a frame that owns `name` at index `i`: a
   # function name through `info.slots`, a block name through a block kind in `kinds` (a
   # block name can shadow a function name, so a name in `slots` may still be a block slot).
-  defp check_landing({:this, d, i}, env), do: check_slot(hop(env, d), i, :this)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_landing({:this, d, i}, env), do: check_slot(hop(env, d), i, :this)
 
-  defp check_landing({:mref, d, name}, env) do
+  def check_landing({:mref, d, name}, env) do
     case :erlang.get(hop(env, d)) do
       %{vars: vars} when is_map_key(vars, name) -> :ok
       other -> check_fail("{:mref, #{d}, #{inspect(name)}} lands on #{inspect(other, limit: 3)}")
     end
   end
 
-  defp check_landing({:gref, name}, env) do
+  def check_landing({:gref, name}, env) do
     case scope_of(env, name) do
       nil ->
         :ok
@@ -454,11 +460,11 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
+  def check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
 
   # A write to a mapped parameter lands on the parameter's slot, in a function whose
   # `argmap` maps the name to the same argument index: the sync writes that element.
-  defp check_landing({:mslot, d, i, name, k}, env) do
+  def check_landing({:mslot, d, i, name, k}, env) do
     id = hop(env, d)
     check_slot(id, i, name)
 
@@ -474,7 +480,7 @@ defmodule Browser.JS.Interp do
 
   # The arguments object form lands on the hidden slot of the object (rule R3 of step 2d):
   # only that slot holds `{:unbuilt, id}` before the first read.
-  defp check_landing({:aslot, d, i}, env) do
+  def check_landing({:aslot, d, i}, env) do
     case :erlang.get(hop(env, d)) do
       f when is_tuple(f) and i <= tuple_size(f) ->
         rec = :erlang.element(2, f)
@@ -512,7 +518,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp check_slot(id, i, name) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_slot(id, i, name) do
     case :erlang.get(id) do
       f when is_tuple(f) and i <= tuple_size(f) ->
         rec = :erlang.element(2, f)
@@ -718,7 +726,9 @@ defmodule Browser.JS.Interp do
 
   # A write to the slot of a mapped parameter must go through `{:mslot}` or a by-name
   # write, which sync the arguments object. A plain slot write would skip the sync.
-  defp check_unsynced(frame, i) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_unsynced(frame, i) do
     case :erlang.get(frame) do
       f when is_tuple(f) ->
         case :erlang.element(2, f) do
@@ -771,7 +781,9 @@ defmodule Browser.JS.Interp do
   end
 
   # Fails when `id` is the tombstone of a freed frame.
-  defp check_live(id) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_live(id) do
     case :erlang.get(id) do
       {:js_freed, name} -> check_fail("use of a freed frame of #{name}")
       _ -> :ok
@@ -892,7 +904,9 @@ defmodule Browser.JS.Interp do
   # proves at each call and at each JS `catch` that every callee restored the chain, also
   # on the throw path. A CPS frame (`enter_frame/4`), a frame made by hand in a test and a
   # map scope hold no chain and are skipped.
-  defp check_link(env) when is_integer(env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_link(env) when is_integer(env) do
     case :erlang.get(env) do
       f when is_tuple(f) and tuple_size(f) >= 5 and is_list(:erlang.element(3, f)) ->
         now = :erlang.get(:js_stack)
@@ -906,7 +920,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp check_link(_env), do: :ok
+  def check_link(_env), do: :ok
 
   # Check mode only (C2 of step 2f): the stack text from the oracle, made with the code from
   # before step 2f. `stack_string/1` must give the same text.
@@ -988,9 +1002,11 @@ defmodule Browser.JS.Interp do
   # A frameless scope that declares functions (a block or a switch, from level 2 on) makes
   # them at each entry, as `hoist_functions` does on the old path. Their slots are in the
   # home frame `env`, and the TDZ reset comes first, so the order of the old path stays.
-  defp enter_frameless(env, nil), do: reset_tdz(env, nil)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def enter_frameless(env, nil), do: reset_tdz(env, nil)
 
-  defp enter_frameless(env, %Scope{hoist: h} = sc) do
+  def enter_frameless(env, %Scope{hoist: h} = sc) do
     reset_tdz(env, sc)
     hoist_slots(env, h)
   end
@@ -1394,8 +1410,10 @@ defmodule Browser.JS.Interp do
   def function?(_), do: false
 
   # `function?/1` without the two calls, for a call site on the hot path.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
   @compile {:inline, callable?: 1}
-  defp callable?({:obj, id}) do
+  def callable?({:obj, id}) do
     case :erlang.get(id) do
       %{class: :function} -> true
       # (a missing entry fails as `deref/1` fails)
@@ -1404,7 +1422,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp callable?(_), do: false
+  def callable?(_), do: false
 
   def truthy(v) when v in [false, :undefined, :null, :nan, "", {:bigint, 0}], do: false
   def truthy(v) when is_number(v), do: v != 0
@@ -2236,9 +2254,11 @@ defmodule Browser.JS.Interp do
   end
 
   # naming a key in an error must not run user code (a toString that throws)
-  defp safe_key(key) when is_binary(key), do: key
-  defp safe_key(key) when is_number(key), do: to_str(key)
-  defp safe_key(_), do: "?"
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def safe_key(key) when is_binary(key), do: key
+  def safe_key(key) when is_number(key), do: to_str(key)
+  def safe_key(_), do: "?"
 
   # an assignment: own accessor or non-writable property, inherited ones, then a new property
   defp put_prop(id, o, key, v) do
@@ -2309,9 +2329,11 @@ defmodule Browser.JS.Interp do
   defp fail_put, do: :erlang.put(:js_put_failed, true)
 
   # a primitive has no property to set: in strict code only a setter on its prototype chain works
-  defp strict_put(ov, key, v)
-       when is_binary(ov) or is_number(ov) or is_boolean(ov) or
-              (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def strict_put(ov, key, v)
+      when is_binary(ov) or is_number(ov) or is_boolean(ov) or
+             (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
     case primitive_set(ov, key, v) do
       :ok ->
         v
@@ -2324,7 +2346,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp strict_put(ov, key, v) do
+  def strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
     put(ov, key, v)
 
@@ -4320,7 +4342,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp ev_id({:id, name}, env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def ev_id({:id, name}, env) do
     case lookup_var(env, name) do
       {:ok, :undefined} ->
         # a binding that left the `with` object while its unscopables were read is a missing
@@ -6023,14 +6047,17 @@ defmodule Browser.JS.Interp do
   # or the function boundary makes the call. Anything else comes back as `{:ret, value}`.
   # A call of the name `eval` is a tail call when the callee is not the built-in `eval`. A
   # direct eval runs here, because it needs the scope of this function.
-  defp tail_value({:call, {:id, "eval"} = callee, args, false}, env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it for the tail
+  # sites that it does not compile.
+  @doc false
+  def tail_value({:call, {:id, "eval"} = callee, args, false}, env) do
     case eval_call(callee, args, env) do
       {:value, v} -> {:ret, v}
       {:call, f, this, argv} -> {:tail, f, this, argv}
     end
   end
 
-  defp tail_value({:call, callee, args, false} = e, env) do
+  def tail_value({:call, callee, args, false} = e, env) do
     plain? =
       case callee do
         # (an optional chain and a `super()` call are no tail calls)
@@ -6054,16 +6081,16 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp tail_value({:cond, c, a, b}, env),
+  def tail_value({:cond, c, a, b}, env),
     do: tail_value(if(truthy(ev(c, env)), do: a, else: b), env)
 
-  defp tail_value({:seq, es}, env) do
+  def tail_value({:seq, es}, env) do
     {init, [last]} = Enum.split(es, -1)
     Enum.each(init, &ev(&1, env))
     tail_value(last, env)
   end
 
-  defp tail_value({:logical, op, l, r}, env) do
+  def tail_value({:logical, op, l, r}, env) do
     lv = ev(l, env)
 
     take_right? =
@@ -6076,7 +6103,7 @@ defmodule Browser.JS.Interp do
     if take_right?, do: tail_value(r, env), else: {:ret, lv}
   end
 
-  defp tail_value(e, env), do: {:ret, ev(e, env)}
+  def tail_value(e, env), do: {:ret, ev(e, env)}
 
   defp while_loop(c, body, env, labels, mode) do
     if truthy(ev(c, env)) do
@@ -6133,8 +6160,10 @@ defmodule Browser.JS.Interp do
 
   # A completion that leaves a loop. In check mode (K7 of step 3) it is never a break or a
   # continue without a label, because `run_body/4` gives these to the innermost loop.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
   @compile {:inline, loop_exit: 1}
-  defp loop_exit(c) do
+  def loop_exit(c) do
     if @check and c in [{:brk, nil}, {:cont, nil}],
       do: check_fail("a loop gave back #{inspect(c)}")
 
@@ -6352,21 +6381,27 @@ defmodule Browser.JS.Interp do
   defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
 
-  defp bump(op, old) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def bump(op, old) do
     case old do
       {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
       _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
     end
   end
 
-  defp uninit_this_error do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def uninit_this_error do
     throw_error(
       "ReferenceError",
       "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
     )
   end
 
-  defp tdz_error(name),
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def tdz_error(name),
     do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
   defp const_error, do: throw_error("TypeError", "Assignment to constant variable.")
@@ -6374,7 +6409,9 @@ defmodule Browser.JS.Interp do
   # The root of the chain `env` is on (its realm's global scope). A frame keeps the root in
   # its header. A `{:gref}` can also run in a map scope under a frame (the class scope of a
   # heritage, a computed key or a field initializer), which must walk to a frame or the root.
-  defp root(env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def root(env) do
     if @check, do: check_live(env)
 
     case :erlang.get(env) do
@@ -6385,7 +6422,9 @@ defmodule Browser.JS.Interp do
 
   # A write to a slot by an assignment: a binding still in its temporal dead zone takes no
   # value. A declaration pattern writes with `slot_put/3` directly.
-  defp slot_assign(env, i, name, v) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def slot_assign(env, i, name, v) do
     if @check, do: check_slot(env, i, name)
     if @check, do: check_unsynced(env, i)
 
@@ -6419,6 +6458,46 @@ defmodule Browser.JS.Interp do
     case :erlang.element(i, :erlang.get(env)) do
       :tdz -> tdz_error(name)
       _ -> const_error()
+    end
+  end
+
+  # The call fast path (step 5): one read of the heap finds the callee. A plain function
+  # that the resolver rewrote runs its frame at once, as `call/3` and `run_closure/4` would
+  # run it, but without the second read and the two extra calls. Every other function goes
+  # to `call_obj/4` with the object that was read. The test that the callee is a function
+  # and its error come first, in the order of `function?/1` and `call/3`. `callee` is the
+  # node of the callee, for the text of the error, and `env` is the scope of the call site,
+  # for the check build. The tree walker (`ev/2`) and the compiled calls (`ccall/5`) expand
+  # this one macro, so the two paths call in the same way. (a macro and not an inline
+  # function: `call_obj/4` is inline, and an inline function inside an inline function
+  # stays a call, which would cost one reduction per JS call)
+  defmacrop call_fast(f, this, argv, callee, env) do
+    quote do
+      case unquote(f) do
+        {:obj, id} ->
+          case :erlang.get(id) do
+            %{class: :function, fun: {:closure, %{info: %Info{rewritten: true}} = c}} = o
+            when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+                   not is_map_key(o, :class_info) ->
+              if @check, do: check_link(unquote(env))
+              tick()
+              run_frame(id, c, unquote(this), unquote(argv), :undefined, :call)
+
+            %{class: :function} = o ->
+              if @check, do: check_link(unquote(env))
+              call_obj(id, o, unquote(this), unquote(argv))
+
+            # (a missing entry fails as `deref/1` fails)
+            :undefined ->
+              deref(id)
+
+            _ ->
+              throw_error("TypeError", "#{describe(unquote(callee))} is not a function")
+          end
+
+        _ ->
+          throw_error("TypeError", "#{describe(unquote(callee))} is not a function")
+      end
     end
   end
 
@@ -7163,43 +7242,13 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # The call fast path (step 5): one read of the heap finds the callee. A plain function
-  # that the resolver rewrote runs its frame at once, as `call/3` and `run_closure/4` would
-  # run it, but without the second read and the two extra calls. Every other function goes
-  # to `call_obj/4` with the object that was read. The test that the callee is a function
-  # and its error come first, in the order of `function?/1` and `call/3`.
   def ev({:call, callee, args, opt}, env) do
     {f, this} = call_target(callee, env)
 
     if opt and nullish?(f), do: throw(:js_short)
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
-
-    case f do
-      {:obj, id} ->
-        case :erlang.get(id) do
-          %{class: :function, fun: {:closure, %{info: %Info{rewritten: true}} = c}} = o
-          when not is_map_key(o, :generator) and not is_map_key(o, :async) and
-                 not is_map_key(o, :class_info) ->
-            if @check, do: check_link(env)
-            tick()
-            run_frame(id, c, this, argv, :undefined, :call)
-
-          %{class: :function} = o ->
-            if @check, do: check_link(env)
-            call_obj(id, o, this, argv)
-
-          # (a missing entry fails as `deref/1` fails)
-          :undefined ->
-            deref(id)
-
-          _ ->
-            throw_error("TypeError", "#{describe(callee)} is not a function")
-        end
-
-      _ ->
-        throw_error("TypeError", "#{describe(callee)} is not a function")
-    end
+    call_fast(f, this, argv, callee, env)
   end
 
   def ev({:new, callee, args}, env) do
@@ -7213,6 +7262,13 @@ defmodule Browser.JS.Interp do
     if @check, do: check_link(env)
     construct(f, argv)
   end
+
+  @doc false
+  # The call of `f` with `this` and the argument values `argv` at a call site. It is the
+  # code of `call_fast/5` in a function of its own, for the compiled calls of
+  # `Browser.JS.Compile`. `callee` is the node of the callee, and `env` is the scope of the
+  # call site.
+  def ccall(f, this, argv, callee, env), do: call_fast(f, this, argv, callee, env)
 
   # A call whose callee is the name `eval` (EvaluateCall). The callee is read one time,
   # through `call_target/2`, so a function that a `with` object holds gets that object as
@@ -7480,14 +7536,16 @@ defmodule Browser.JS.Interp do
   end
 
   # a method written in an object literal finds `super` through the object
-  defp method_home({:obj, id} = f, obj) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def method_home({:obj, id} = f, obj) do
     case deref(id) do
       %{fun: {:closure, %{name: {:method, _}}}} -> set_home(f, obj)
       _ -> :ok
     end
   end
 
-  defp method_home(_, _), do: :ok
+  def method_home(_, _), do: :ok
 
   defp super_assign(k, value, env, strict?) do
     {base, this} = Browser.JS.Classes.super_base(env)
@@ -7686,6 +7744,12 @@ defmodule Browser.JS.Interp do
       )
 
   defp delete_base_check(_, _), do: :ok
+
+  @doc false
+  # The name of a callee node in an error text. It is public because the closure compiler
+  # (`Browser.JS.Compile`) calls it. (`describe/1` stays private, because modules that
+  # import this module have functions of that name)
+  def describe_node(e), do: describe(e)
 
   defp describe({:id, n}), do: n
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k
