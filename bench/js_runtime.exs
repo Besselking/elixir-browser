@@ -9,10 +9,12 @@
 # programs of steps 2e and 4 and five programs of step 3, which are not in the total. The script
 # wraps each program in a function. Page scripts usually run in a function too. The script
 # runs each program RUNS times (default 5). The table shows the minimum time and the minimum
-# number of reductions in millions. A reduction is a BEAM work unit. The number of
-# reductions does not change with the speed of the machine. Use it to compare two builds on
-# a noisy machine. The script compares the result of every run with the expected value. It
-# exits with status 1 when a result is wrong.
+# number of reductions in millions (Mred, with three decimals). A reduction is a BEAM work
+# unit. The number of reductions does not change with the speed of the machine, and it
+# changes little between runs. Use it to compare two builds on a noisy machine
+# (`bench/ab.exs` runs two builds in turn and compares them). The script compares the
+# result of every run with the expected value. It exits with status 1 when a result is
+# wrong.
 #
 # The QuickJS column shows the time of QuickJS 2021-03-27 (a bytecode interpreter, gcc -O2)
 # on the same machine. It is the mean of 5 runs. We measured it on 2026-10-09 for the language
@@ -185,7 +187,7 @@ opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
 IO.puts(
   String.pad_trailing("program", 34) <>
     String.pad_leading("min ms", 8) <>
-    String.pad_leading("Mred", 7) <>
+    String.pad_leading("Mred", 9) <>
     String.pad_leading("QuickJS", 9) <> String.pad_leading("ratio", 7) <> "   result"
 )
 
@@ -218,7 +220,7 @@ run_list = fn list ->
     IO.puts(
       String.pad_trailing(name, 34) <>
         String.pad_leading(:erlang.float_to_binary(ms, decimals: 1), 8) <>
-        String.pad_leading(:erlang.float_to_binary(reds / 1_000_000, decimals: 1), 7) <>
+        String.pad_leading(:erlang.float_to_binary(reds / 1_000_000, decimals: 3), 9) <>
         String.pad_leading(qjs_col, 9) <>
         String.pad_leading(ratio_col, 7) <>
         "   " <> inspect(val) <> if(ok, do: "", else: "  WRONG, expected #{inspect(expected)}")

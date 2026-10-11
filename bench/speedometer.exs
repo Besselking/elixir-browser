@@ -1,9 +1,15 @@
 # Usage: mix run --no-start bench/speedometer.exs URL [SUITES] [TIMEOUT_S]
 # Runs Speedometer 3.1 headlessly. URL is the folder with a local mirror, for example
 # http://localhost:8765/Speedometer3.1/ . SUITES is a comma separated list of suite names.
-# Prints console lines and the time until the run ends.
+# Prints console lines, the time until the run ends and a `MRED` line with the exact
+# reductions of the whole VM and of the run phase.
 alias Browser.{Fetch, Page}
 alias Browser.JS.Runtime
+
+# The reductions and the CPU time of the whole VM are counted from here, so that the
+# `MRED` line at the end of the run can compare two builds on a noisy machine.
+{red_start, _} = :erlang.statistics(:exact_reductions)
+{cpu_start, _} = :erlang.statistics(:runtime)
 
 [url | rest] = System.argv()
 suites = if Enum.at(rest, 0) in [nil, "", "all"], do: nil, else: Enum.at(rest, 0)
@@ -46,6 +52,9 @@ info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, base_agent} = Agent.start_link(fn -> page end)
 
 t0 = System.monotonic_time(:millisecond)
+# (the run phase starts with the script process; the page load and the start of the
+# application before it are in the whole-VM count only)
+{red_run, _} = :erlang.statistics(:exact_reductions)
 pid = Runtime.start(page.raw, info)
 
 print = fn reply ->
@@ -358,6 +367,18 @@ loop = fn loop ->
 end
 
 result = loop.(loop)
+
+# One line with the exact reductions in millions (the whole VM and the run phase), the wall
+# time of the run phase and the CPU time of the whole VM in ms. The reductions do not depend
+# on the speed of the machine, so an A/B comparison (`bench/ab.exs`) reads this line.
+{red_end, _} = :erlang.statistics(:exact_reductions)
+{cpu_end, _} = :erlang.statistics(:runtime)
+
+IO.puts(
+  "MRED whole #{:erlang.float_to_binary((red_end - red_start) / 1.0e6, decimals: 3)}" <>
+    " run #{:erlang.float_to_binary((red_end - red_run) / 1.0e6, decimals: 3)}" <>
+    " ms #{System.monotonic_time(:millisecond) - t0} cpu #{cpu_end - cpu_start}"
+)
 
 # the score the page shows (1000 / the geometric mean of the suites' times in ms)
 if result == :done do
