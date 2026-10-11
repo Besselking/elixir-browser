@@ -956,14 +956,15 @@ defmodule Browser.JS.Compile do
       if Fast.on?(:literal) do
         # The properties go in with one write at the end (fast path `:literal`). Nothing
         # can see the object before the literal is done: no name refers to it, and the home
-        # of a method value is used only for its prototype, which is set already. The keys
-        # are the distinct keys, newest first, as `Interp.define_data/3` lists them: a key
-        # that comes two times keeps its first place and its last value.
-        keys = pcs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.reverse()
+        # of a method value is used only for its prototype, which is set already. The key
+        # layout comes from the record API when the literal compiles, as
+        # `Interp.define_data/3` would make it: a key that comes two times keeps its first
+        # place and its last value. It holds only the constant keys, no heap id.
+        layout = pcs |> Enum.map(&elem(&1, 0)) |> Browser.JS.Obj.literal_keys()
 
         fn env ->
           {:obj, id} = obj = Interp.new_object()
-          Interp.fill_literal(id, keys, lit_vals(pcs, obj, env, []))
+          Interp.fill_literal(id, layout, lit_vals(pcs, obj, env, []))
           obj
         end
       else
