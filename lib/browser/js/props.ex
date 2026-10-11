@@ -68,7 +68,8 @@ defmodule Browser.JS.Props do
     case deref(id) do
       # For a class other than :array, a key in `props` is an own property: `own/2` reaches
       # its clause `Map.has_key?(o.props, key)` (the clauses before it are for arrays), and
-      # `state/2` asks `own/2` first (fast path `:has_own`).
+      # `state/2` asks `own/2` first (fast path `:has_own`). The test for an array is defence
+      # in depth today: `own/2` also gets to that clause for a key of an array in `props`.
       %{class: c, props: %{^key => _}} when c != :array ->
         if Fast.on?(:has_own),
           do: Fast.shadow(id, true, state(obj, key) != nil),

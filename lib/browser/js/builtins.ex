@@ -961,7 +961,9 @@ defmodule Browser.JS.Builtins do
   # mapped arguments object, else `:slow`. For such an element HasProperty is true and Get
   # gives the value, with no user code between them, so one read of `items` is the two
   # reads of the spec (fast path `:iter`). A hole, an accessor, a proxy and a mapped
-  # arguments object take the generic path.
+  # arguments object take the generic path. The tests for a proxy and a mapped arguments
+  # object are defence in depth today: a proxy is a host object, not an array, and each
+  # write of a parameter also writes the element of a mapped arguments object.
   @compile {:inline, own_element: 2}
   defp own_element({:obj, id} = this, i) do
     if Fast.on?(:iter) do

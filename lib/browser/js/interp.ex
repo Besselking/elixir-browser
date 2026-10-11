@@ -2240,7 +2240,11 @@ defmodule Browser.JS.Interp do
   # functions do not match, the clause for the `name` and `length` of a function goes to
   # `put_prop/4` because `props` has the key, and `put_prop/4` stores the value when
   # `props` has a key that is not an accessor and `writable?/2` is true. A change to one of
-  # these clauses needs a change to this guard.
+  # these clauses needs a change to this guard. Today the tests of the class and of `proxy`
+  # are also defence in depth: a proxy of a function keeps an empty `props`, a proxy of a
+  # plain object is a host object, and `put_obj/5` stores a named key of an array as this
+  # path does. They stay, so that a change to the layout of these records is not a wrong
+  # write. The row "dm update guard terms" of the data-model corpus tries each one.
   defmacrop plain_update(o, key, old) do
     quote do
       :erlang.map_get(:class, unquote(o)) != :array and
@@ -3048,7 +3052,9 @@ defmodule Browser.JS.Interp do
   # that changes the array. For an array that is not an arguments object, the `length` is
   # `len` (no getter is possible), and an own data element is what the read of the key
   # gives, so the step reads `items` at the integer `i`, with no string key (fast path
-  # `:iter`). A hole or an accessor goes to `get/2`.
+  # `:iter`). A hole or an accessor goes to `get/2`. The test for an arguments object is
+  # defence in depth today: an arguments object has an own `@@iterator`, so a for-of loop
+  # over it does not get to this step.
   @compile {:inline, for_of_step: 3}
   defp for_of_step(id, v, i) do
     if Fast.on?(:iter) do

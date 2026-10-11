@@ -1267,6 +1267,71 @@ defmodule Browser.JSTest do
     end
   end
 
+  describe "array element writes" do
+    # The writes run in functions, so that the compiled code runs them too. The second call
+    # of each function finds the values of the first call.
+    test "a write respects the attributes of the element and of the array" do
+      src = ~S"""
+      function sloppy(){
+        var d = [1, 2]; Object.defineProperty(d, 0, {writable: false}); d[0] = 5; d[1] = 6;
+        var ne = Object.preventExtensions([1, , 3]); ne[0] = 7; ne[1] = 8; ne[5] = 9;
+        var fr = Object.freeze([1, 2]); fr[0] = 9; fr[2] = 3;
+        var se = Object.seal([1, , 3]); se[0] = 4; se[1] = 5;
+        return [d.join('/'), ne.join('/'), 1 in ne, ne.length, fr.join('/'), fr.length,
+                se.join('/'), 1 in se].join(' ')
+      }
+      function strict(){
+        "use strict";
+        var r = [];
+        function t(f){ try { f(); r.push('ok') } catch (e) { r.push(e.constructor.name) } }
+        var d = [1, 2]; Object.defineProperty(d, 0, {writable: false});
+        var ne = Object.preventExtensions([1, , 3]);
+        var fr = Object.freeze([1, 2]);
+        var se = Object.seal([1, , 3]);
+        t(() => { d[0] = 5 }); t(() => { d[1] = 7 });
+        t(() => { ne[1] = 8 }); t(() => { ne[0] = 70 });
+        t(() => { fr[0] = 9 }); t(() => { fr[2] = 3 });
+        t(() => { se[1] = 5 }); t(() => { se[0] = 40 });
+        return r.join() + ' ' + [d.join('/'), ne.join('/'), 1 in ne, fr.join('/'),
+                                 se.join('/'), 1 in se].join(' ')
+      }
+      [sloppy(), sloppy(), strict(), strict()].join(' | ')
+      """
+
+      s = "1/6 7//3 false 3 1/2 2 4//3 false"
+
+      t =
+        "TypeError,ok,TypeError,ok,TypeError,TypeError,TypeError,ok 1/7 70//3 false 1/2 40//3 false"
+
+      assert js(src) == Enum.join([s, s, t, t], " | ")
+    end
+
+    test "a compound write with a constant index string writes the element" do
+      src = ~S"""
+      function f(){
+        var a = [1, 2, 3]; a["0"] += 10; a["1"]++; --a["2"];
+        var t = new Int8Array(3); t["1"] += 7; t["2"]++;
+        var fr = Object.freeze([1, 2]); fr["0"] += 10; fr["1"]++;
+        return [a.join(), Object.keys(a).join(), t.join(), Object.keys(t).join(),
+                fr.join(), Object.keys(fr).join()].join(' ')
+      }
+      function g(){
+        "use strict";
+        var a = [1, 2, 3]; a["0"] += 10; a["1"]++; --a["2"];
+        var fr = Object.freeze([1, 2]), r = [];
+        try { fr["0"] += 10 } catch (e) { r.push(e.constructor.name) }
+        try { fr["1"]++ } catch (e) { r.push(e.constructor.name) }
+        return [a.join(), Object.keys(a).join(), r.join(), fr.join()].join(' ')
+      }
+      [f(), f(), g(), g()].join(' | ')
+      """
+
+      f = "11,3,2 0,1,2 0,7,1 0,1,2 1,2 0,1"
+      g = "11,3,2 0,1,2 TypeError,TypeError 1,2"
+      assert js(src) == Enum.join([f, f, g, g], " | ")
+    end
+  end
+
   describe "array methods on array-likes" do
     test "work on any object with a length" do
       assert js(
