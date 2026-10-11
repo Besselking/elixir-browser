@@ -5157,6 +5157,12 @@ defmodule Browser.JS.Interp do
 
   defp for_in_keys(target), do: own_keys(target)
 
+  # The object of `for (k in v)`: a primitive becomes its wrapper object (ToObject), so a
+  # string visits its indexes. `null` and `undefined` stay, and the loop visits nothing.
+  defp for_in_object({:obj, _} = o), do: o
+  defp for_in_object(v) when v in [:null, :undefined], do: v
+  defp for_in_object(v), do: Browser.JS.Builtins.box(v)
+
   # protos on the chain that have an enumerable key of their own
   defp inherited_enumerable({:obj, id} = p, acc) do
     if Map.has_key?(deref(id), :proxy) do
@@ -6016,6 +6022,7 @@ defmodule Browser.JS.Interp do
       end
 
     mode = if decl == nil, do: :assign, else: decl
+    target = if kind == :forin, do: for_in_object(target), else: target
 
     source =
       case kind do
@@ -6057,6 +6064,7 @@ defmodule Browser.JS.Interp do
     reset_tdz(env, sc)
     target = ev(obj, env)
     mode = if decl == nil, do: :assign, else: decl
+    target = if kind == :forin, do: for_in_object(target), else: target
 
     source =
       case kind do

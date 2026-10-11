@@ -1101,6 +1101,20 @@ defmodule Browser.JSTest do
              """) == "RangeError"
     end
 
+    test "for-in over a primitive visits the keys of its wrapper object" do
+      assert js(~S"""
+             var r = [];
+             for (var k in 'xy') r.push(k);
+             for (var k in 5) r.push(k);
+             for (var k in null) r.push(k);
+             String.prototype.extra = 1;
+             for (var k in 'z') r.push(k);
+             delete String.prototype.extra;
+             (function () { for (let k in 'ab') r.push(k + '!') })();
+             r.join()
+             """) == "0,1,0,extra,0!,1!"
+    end
+
     test "a strict write through a setter or a trap fails only when the write itself fails" do
       # The sloppy setter and trap make a failed write of their own. That failure does not
       # belong to the strict write that runs them.
