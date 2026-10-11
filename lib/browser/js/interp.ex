@@ -1653,9 +1653,12 @@ defmodule Browser.JS.Interp do
   # `length`) need no parse.
   def index(<<c>>) when c >= ?0 and c <= ?9, do: c - ?0
 
+  # (the first byte is 1 to 9, and `Integer.parse/1` takes only ASCII digits after it, so a
+  # string that it reads to the end has no sign and no leading zero: it is canonical, and
+  # no round trip through `Integer.to_string/1` is necessary)
   def index(<<c, _::binary>> = k) when c >= ?1 and c <= ?9 do
     case Integer.parse(k) do
-      {i, ""} when i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
+      {i, ""} when i < 4_294_967_295 -> i
       _ -> nil
     end
   end
@@ -2264,25 +2267,46 @@ defmodule Browser.JS.Interp do
     v
   end
 
+  # The write of `put_named/3` and `strict_put_named/3` to the object with the id `id`, in
+  # one place, so that the strict and the sloppy write cannot drift apart. Only the write
+  # that does not take the fast update differs: `strict_put_obj/4` or `put_obj/5`. It is a
+  # macro, not an inline function, because the compiler does not inline `put_obj/5` into a
+  # function that it inlines, and each write would then pay one more call. `id`, `key`
+  # and `v` must be variables.
+  defmacrop named_write(id, key, v, strict?) do
+    slow = fn o ->
+      if strict?,
+        do: quote(do: strict_put_obj(unquote(id), unquote(o), unquote(key), unquote(v))),
+        else: quote(do: put_obj(unquote(id), unquote(o), unquote(key), unquote(v), true))
+    end
+
+    quote do
+      case :erlang.get(unquote(id)) do
+        %{props: %{^unquote(key) => old} = props} = o when plain_update(o, unquote(key), old) ->
+          if Fast.on?(:update),
+            do:
+              Fast.shadow(
+                unquote(id),
+                update_prop(unquote(id), o, props, unquote(key), unquote(v)),
+                put_obj(unquote(id), o, unquote(key), unquote(v), true)
+              ),
+            else: unquote(slow.(quote(do: o)))
+
+        # (a second read, so that an id that is not in the heap gives the error of `deref/1`)
+        _ ->
+          o = deref(unquote(id))
+          unquote(slow.(quote(do: o)))
+      end
+    end
+  end
+
   @doc false
   # A property write with a constant key (step 5, `Browser.JS.Compile`), as `get_named/2`
   # reads one: the key is a string that is not an array index, and the class dispatch is
   # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`. The update of an own
   # writable data property reads the record once and does not go through `put_obj/5`
   # (`plain_update/3`).
-  def put_named({:obj, id}, key, v) do
-    case :erlang.get(id) do
-      %{props: %{^key => old} = props} = o when plain_update(o, key, old) ->
-        if Fast.on?(:update),
-          do: Fast.shadow(id, update_prop(id, o, props, key, v), put_obj(id, o, key, v, true)),
-          else: put_obj(id, o, key, v, true)
-
-      # (a second read, so that an id that is not in the heap gives the error of `deref/1`)
-      _ ->
-        put_obj(id, deref(id), key, v, true)
-    end
-  end
-
+  def put_named({:obj, id}, key, v), do: named_write(id, key, v, false)
   def put_named(ov, key, v), do: put(ov, key, v)
 
   @doc false
@@ -2290,18 +2314,7 @@ defmodule Browser.JS.Interp do
   # `strict_put/3`, which has a clause of its own for primitives. The update of an own
   # writable data property cannot fail, so the fast update does not set and read the flag
   # `:js_put_failed`: every reader of the flag sets it to false before its own write.
-  def strict_put_named({:obj, id}, key, v) do
-    case :erlang.get(id) do
-      %{props: %{^key => old} = props} = o when plain_update(o, key, old) ->
-        if Fast.on?(:update),
-          do: Fast.shadow(id, update_prop(id, o, props, key, v), put_obj(id, o, key, v, true)),
-          else: strict_put_obj(id, o, key, v)
-
-      _ ->
-        strict_put_obj(id, deref(id), key, v)
-    end
-  end
-
+  def strict_put_named({:obj, id}, key, v), do: named_write(id, key, v, true)
   def strict_put_named(ov, key, v), do: strict_put(ov, key, v)
 
   defp strict_put_obj(id, o, key, v) do
