@@ -5,8 +5,8 @@
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
-# walk and DOM-like objects. After their total it measures four programs of step 2d, six
-# programs of step 2e and five programs of step 3, which are not in the total. The script
+# walk and DOM-like objects. After their total it measures four programs of step 2d, eleven
+# programs of steps 2e and 4 and five programs of step 3, which are not in the total. The script
 # wraps each program in a function. Page scripts usually run in a function too. The script
 # runs each program RUNS times (default 5). The table shows the minimum time and the minimum
 # number of reductions in millions. A reduction is a BEAM work unit. The number of
@@ -74,7 +74,8 @@ extra_programs = [
 ]
 
 # Six programs of step 2e (level 4: async functions, generators and async generators on
-# frames). They are not in the total either. An async program returns a box, which the
+# frames) and five programs of step 4 (the walks that find an await). They are not in the
+# total either. An async program returns a box, which the
 # script reads after the microtasks and timers ran. The expected values are the results at
 # `:off`.
 programs_2e = [
@@ -89,7 +90,49 @@ programs_2e = [
   {"yieldstar10k", "yield* delegation 10k", nil, 30000.0,
    "function* two(){ yield 1; yield 2 } function* outer(n){ for (let i = 0; i < n; i++) yield* two() } var s = 0; for (const v of outer(10000)) s += v; return s"},
   {"asyncgen5k", "async generator with for await 5k", nil, %{"v" => 12_497_500.0},
-   "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box"}
+   "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box"},
+  # Five programs of step 4. They have the shapes of async code in Speedometer-like pages:
+  # a large loop body with `if`, `try`/`finally` and an inner `for`, the `scheduleUpdate`
+  # of Lit, the `measure` and `suite` of the Speedometer runner, wide expressions with more
+  # than one await and a pattern default that awaits, and an app-like loop body.
+  {"bigasync2k", "large async loop body 2k", nil, %{"v" => 6303.0},
+   "var box = {}; async function step(x){ return x } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 2000; i++) { " <>
+     "if (i % 3 == 0) { s += 1 } else { s += 2 } " <>
+     "var o = {a: i, b: [i, i + 1], c: {d: i * 2}}; " <>
+     "try { s = (s + o.a + o.b[1] + o.c.d) % 1000003; " <>
+     "s = (s + await step(i)) % 1000003 } catch (e) { s = -1 } finally { s += 0 } " <>
+     "for (var j = 0; j < 3; j++) { s = (s + j) % 1000003 } } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"litlike3k", "Lit-like scheduleUpdate 3k", nil, %{"v" => 3000.0},
+   "var box = {}; class El { constructor(){ this.n = 0; this.p = Promise.resolve(true) } " <>
+     "async scheduleUpdate(){ this.isPending = true; try { await this.p } catch (e) { Promise.reject(e) } " <>
+     "const r = this.performUpdate(); if (r != null) { await r } return !this.isPending } " <>
+     "performUpdate(){ this.n++; this.isPending = false; const changed = new Map(); changed.set('x', this.n); " <>
+     "if (this.shouldUpdate(changed)) { this.update(changed) } } shouldUpdate(c){ return c.size > 0 } update(c){ this.last = c.get('x') } } " <>
+     "async function run(){ var e = new El(); for (let i = 0; i < 3000; i++) { await e.scheduleUpdate() } return e.n } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"runnerlike2k", "Speedometer-runner-like measure 2k", nil, %{"v" => 21988.0},
+   "var box = {}; var log = []; async function measure(name, fn){ const start = Date.now(); " <>
+     "let result; try { result = await fn(); } finally { const end = Date.now(); log.push({name, t: end - start}); } return result } " <>
+     "async function suite(i){ const a = await measure('a', async () => i + 1); " <>
+     "const b = await measure('b', async () => { let t = 0; for (let k = 0; k < 5; k++) t += k; return t + a }); " <>
+     "return {a, b, total: a + b} } " <>
+     "async function run(){ let s = 0; for (let i = 0; i < 2000; i++) { const r = await suite(i); s = (s + r.total) % 1000003 } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"exprawait5k", "wide expressions with awaits 5k", nil, %{"v" => 64916.0},
+   "var box = {}; var o = {a: 1, b: [1, 2, 3]}; async function g(x){ return x } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 5000; i++) { " <>
+     "s = (s + o.a * 2 + o.b[1] + (await g(i)) + o.b.length * (i % 7) + Math.max(i, await g(3))) % 1000003; " <>
+     "var {p = await g(1)} = o; s = (s + p) % 1000003 } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"appish5k", "app-like async loop body 5k", nil, %{"v" => 18_793_890.0},
+   "var box = {}; var st = {items: [], n: 0}; function upd(x){ st.n += x; return st.n } " <>
+     "async function load(i){ return {id: i, title: 't' + i, done: i % 2 === 0} } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 5000; i++) { const it = await load(i); st.items.push(it); " <>
+     "if (it.done) { s += upd(1) } else { s += upd(2) } const label = it.title + ':' + (it.done ? 'yes' : 'no'); " <>
+     "s += label.length; st.items.length > 100 && st.items.shift() } return s } " <>
+     "run().then(v => { box.v = v }); return box"}
 ]
 
 # Five programs of step 3 (control flow as completions: strict tail calls, a `return` inside
@@ -204,7 +247,7 @@ IO.puts(
   if selected_2e == [] do
     {0.0, 0}
   else
-    IO.puts("step 2e programs (not in the total)")
+    IO.puts("step 2e and step 4 programs (not in the total)")
     run_list.(selected_2e)
   end
 

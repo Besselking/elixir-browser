@@ -101,7 +101,7 @@ defmodule Browser.JS.Resolve do
   functions and the closures in them.
   """
 
-  alias Browser.JS.Interp
+  alias Browser.JS.{Awaits, Interp}
   alias Browser.JS.Resolve.{Info, Scope}
 
   @type level :: :off | :info | 1 | 2 | 3 | 4
@@ -268,19 +268,6 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  # The same walk as `Async.has_await?/1`: it stops at function nodes and not
-  # at class nodes, because a class body is evaluated inline.
-  defp awaits?({:await, _}), do: true
-  defp awaits?({:yield, _, _}), do: true
-  defp awaits?({:forawait, _, _, _, _}), do: true
-  defp awaits?({:using, :await_using, _, _, _}), do: true
-  defp awaits?({:gen, _}), do: false
-  defp awaits?({:fn, _, _, _, _, _}), do: false
-  defp awaits?({:async, _}), do: false
-  defp awaits?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&awaits?/1)
-  defp awaits?(l) when is_list(l), do: Enum.any?(l, &awaits?/1)
-  defp awaits?(_), do: false
-
   # Whether a `return` of this expression is a tail call today: `tail_value`
   # (interp.ex) makes the call itself only for a plain call, and looks through
   # the branches of `?:`, the last element of a sequence and the right side of
@@ -421,7 +408,7 @@ defmodule Browser.JS.Resolve do
   # does (or the code is not a module), so that the walk runs once per
   # statement and both passes read the same answer.
   defp tla_flags(stmts, :module) do
-    flags = Enum.map(stmts, &awaits?/1)
+    flags = Enum.map(stmts, &Awaits.any?/1)
     if Enum.any?(flags), do: flags, else: nil
   end
 
@@ -1106,7 +1093,7 @@ defmodule Browser.JS.Resolve do
         priv: false,
         # Only an async or generator body can hold an await, a yield, a `for
         # await` or an `await using`; the walk would find nothing elsewhere.
-        has_await: (flags.async? or flags.generator?) and awaits?(body)
+        has_await: (flags.async? or flags.generator?) and Awaits.any?(body)
       })
 
     st = a_declare_names(st, sid, param_names, :param)
@@ -1938,7 +1925,7 @@ defmodule Browser.JS.Resolve do
   # Inside the body of a rewritten async or generator function, a statement
   # that awaits is wrapped so that the CPS evaluator knows without a walk.
   # The walk of the statement itself sets `awaited` when it meets an await,
-  # a yield, a `for await` or an `await using` (the test of `awaits?/1`), and
+  # a yield, a `for await` or an `await using` (the test of `Awaits.any?/1`), and
   # a nested function keeps its awaits to itself (`r_function`). The flag of
   # the statement around this one stays set when this one awaited.
   defp r_stmt(stmt, %{aw: true} = st) do

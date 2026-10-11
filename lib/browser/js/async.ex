@@ -59,7 +59,7 @@ defmodule Browser.JS.Async do
     not write the value.
   """
 
-  alias Browser.JS.{Interp, Promise}
+  alias Browser.JS.{Awaits, Interp, Promise}
   require Interp
   alias Browser.JS.Resolve.Info
 
@@ -805,19 +805,37 @@ defmodule Browser.JS.Async do
 
   # ── what contains an await ─────────────────────────────────
 
-  defp has_await?({:await, _}), do: true
-  defp has_await?({:yield, _, _}), do: true
-  defp has_await?({:forawait, _, _, _, _}), do: true
-  # A `for await` in a rewritten body carries its scope as a sixth element. Its loop awaits
-  # even when nothing inside it does, so the shape alone gives the answer.
-  defp has_await?({:forawait, _, _, _, _, _}), do: true
-  defp has_await?({:using, :await_using, _, _, _}), do: true
-  defp has_await?({:gen, _}), do: false
-  defp has_await?({:fn, _, _, _, _, _}), do: false
-  defp has_await?({:async, _}), do: false
-  defp has_await?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_await?/1)
-  defp has_await?(l) when is_list(l), do: Enum.any?(l, &has_await?/1)
-  defp has_await?(_), do: false
+  # The walk is `Awaits.any?/1`, which the resolver uses too. In check mode (item A1) each
+  # call also runs the old walk, which builds a list of each tuple and does not skip the
+  # leaf forms. A difference means that a leaf form of `Awaits` holds syntax, and that an
+  # expression which awaits would run on the sync path.
+  if @check do
+    defp has_await?(t) do
+      aw? = Awaits.any?(t)
+
+      if aw? != has_await_ref?(t),
+        do: Interp.check_cps("Awaits.any? gives #{aw?} for #{inspect(t, limit: 8)}")
+
+      aw?
+    end
+
+    defp has_await_ref?({:await, _}), do: true
+    defp has_await_ref?({:yield, _, _}), do: true
+    defp has_await_ref?({:forawait, _, _, _, _}), do: true
+    defp has_await_ref?({:forawait, _, _, _, _, _}), do: true
+    defp has_await_ref?({:using, :await_using, _, _, _}), do: true
+    defp has_await_ref?({:gen, _}), do: false
+    defp has_await_ref?({:fn, _, _, _, _, _}), do: false
+    defp has_await_ref?({:async, _}), do: false
+
+    defp has_await_ref?(t) when is_tuple(t),
+      do: t |> Tuple.to_list() |> Enum.any?(&has_await_ref?/1)
+
+    defp has_await_ref?(l) when is_list(l), do: Enum.any?(l, &has_await_ref?/1)
+    defp has_await_ref?(_), do: false
+  else
+    defp has_await?(t), do: Awaits.any?(t)
+  end
 
   # ── expressions ────────────────────────────────────────────
 
