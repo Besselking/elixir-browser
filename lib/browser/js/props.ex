@@ -2,16 +2,15 @@ defmodule Browser.JS.Props do
   @moduledoc """
   Property attributes for the JavaScript runtime: `Object.defineProperty` and friends.
 
-  A property is a value in the object's `props`, or `{:accessor, getter, setter}` for an accessor.
-  Whether it is enumerable is whether its key is in the object's `keys`; `writable` and
-  `configurable` are kept in the object's `attrs` map only when they are not both true (the
-  default of an assignment). `ext: false` marks a non-extensible object, and `frozen: true` an
-  array whose elements may not change.
+  A property is a stored value, or `{:accessor, getter, setter}` for an accessor. The fields
+  of the record that hold the own properties, their attributes and their order are read and
+  written only through `Browser.JS.Obj`, which describes them.
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
   require Browser.JS.Fast, as: Fast
+  require Browser.JS.Obj, as: Obj
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -23,14 +22,13 @@ defmodule Browser.JS.Props do
       o.class == :array and is_integer(array_index(key)) ->
         case Map.fetch(o.items, array_index(key)) do
           {:ok, {:accessor, g, s}} ->
-            a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
+            a = Obj.attr_flags(o, array_index(key))
 
-            {:accessor, g, s, Map.get(a, :e, true),
-             not Map.get(o, :frozen, false) and Map.get(a, :c, true)}
+            {:accessor, g, s, Map.get(a, :e, true), not Obj.frozen?(o) and Map.get(a, :c, true)}
 
           {:ok, v} ->
-            frozen = Map.get(o, :frozen, false)
-            a = Map.get(Map.get(o, :attrs, %{}), array_index(key), %{})
+            frozen = Obj.frozen?(o)
+            a = Obj.attr_flags(o, array_index(key))
 
             {:data, v, not frozen and Map.get(a, :w, true), Map.get(a, :e, true),
              not frozen and Map.get(a, :c, true)}
@@ -40,37 +38,27 @@ defmodule Browser.JS.Props do
         end
 
       o.class == :array and key == "length" and is_map_key(o, :len_gone) and
-          not Map.has_key?(o.props, "length") ->
+          not Obj.has_own?(o, "length") ->
         nil
 
       o.class == :array and key == "length" and
-          not (is_map_key(o, :arguments) and is_map_key(o.props, "length")) ->
-        {:data, o.len * 1.0, not Map.get(o, :frozen, false) and not Map.get(o, :len_ro, false),
-         false, is_map_key(o, :arguments)}
-
-      Map.has_key?(o.props, key) ->
-        attrs = Map.get(o.attrs_or_default, key, %{})
-        e = key in o.keys or (not is_binary(key) and Map.get(attrs, :e, false))
-        c = Map.get(attrs, :c, true)
-
-        case o.props[key] do
-          {:accessor, g, s} -> {:accessor, g, s, e, c}
-          v -> {:data, v, Map.get(attrs, :w, true), e, c}
-        end
+          not (is_map_key(o, :arguments) and Obj.has_own?(o, "length")) ->
+        {:data, o.len * 1.0, not Obj.frozen?(o) and not Map.get(o, :len_ro, false), false,
+         is_map_key(o, :arguments)}
 
       true ->
-        nil
+        Obj.own_state(o, key)
     end
   end
 
   @doc "Whether the object has the key as an own property (virtual function properties too)."
   def has_own?({:obj, id} = obj, key) do
     case deref(id) do
-      # For a class other than :array, a key in `props` is an own property: `own/2` reaches
-      # its clause `Map.has_key?(o.props, key)` (the clauses before it are for arrays), and
+      # For a class other than :array, a stored own key is an own property: `own/2` reaches
+      # its last clause, `Obj.own_state/2` (the clauses before it are for arrays), and
       # `state/2` asks `own/2` first (fast path `:has_own`). The test for an array is defence
-      # in depth today: `own/2` also gets to that clause for a key of an array in `props`.
-      %{class: c, props: %{^key => _}} when c != :array ->
+      # in depth today: `own/2` also gets to that clause for a stored key of an array.
+      %{class: c} = o when c != :array and Obj.has_own?(o, key) ->
         if Fast.on?(:has_own),
           do: Fast.shadow(id, true, state(obj, key) != nil),
           else: state(obj, key) != nil
@@ -82,7 +70,6 @@ defmodule Browser.JS.Props do
 
   defp state({:obj, id}, key) do
     o = deref(id)
-    o = Map.put(o, :attrs_or_default, Map.get(o, :attrs, %{}))
     own(o, key) || virtual(id, o, key)
   end
 
@@ -219,14 +206,7 @@ defmodule Browser.JS.Props do
   defp index_key?(k), do: is_integer(array_index(k)) and array_index(k) < 4_294_967_295
 
   defp own_names_plain2(id, o) do
-    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
-
-    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
-
-    ordered =
-      o |> Map.get(:horder, []) |> Enum.reverse() |> Enum.uniq() |> Enum.filter(&(&1 in hidden0))
-
-    hidden = ordered ++ Enum.sort(hidden0 -- ordered)
+    {base, hidden, ordered} = Obj.name_lists(o)
 
     case o do
       %{class: :array} ->
@@ -244,7 +224,7 @@ defmodule Browser.JS.Props do
         {hints, hrest} = Enum.split_with(hidden -- std, &index_key?/1)
 
         Enum.sort_by(ints ++ hints, &array_index/1) ++
-          std ++ interleave(rest, ordered -- (std ++ hints), o, hrest)
+          std ++ Obj.interleave(rest, ordered -- (std ++ hints), o, hrest)
 
       %{prim: s} when is_binary(s) ->
         {ints, rest} = Enum.split_with(base, &index_key?/1)
@@ -256,30 +236,8 @@ defmodule Browser.JS.Props do
         {ints, rest} = Enum.split_with(base, &index_key?/1)
         {hints, hidden} = Enum.split_with(hidden, &index_key?/1)
         ordered = ordered -- hints
-        Enum.sort_by(ints ++ hints, &array_index/1) ++ interleave(rest, ordered, o, hidden)
+        Enum.sort_by(ints ++ hints, &array_index/1) ++ Obj.interleave(rest, ordered, o, hidden)
     end
-  end
-
-  # keys `defineProperty` made non-enumerable go where they were created among the others
-  defp interleave(rest, ordered, o, hidden) do
-    pos = Map.get(o, :hpos, %{})
-    # positions are only known when every hidden key was created by `defineProperty`
-    placed =
-      if Enum.all?(ordered, &Map.has_key?(pos, &1)),
-        do: for(k <- ordered, do: {pos[k], k}),
-        else: []
-
-    done = Enum.map(placed, &elem(&1, 1))
-
-    merged =
-      rest
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {k, i} ->
-        [k | for({n, h} <- placed, n == i + 1, do: h)]
-      end)
-
-    lead = for {0, h} <- placed, do: h
-    lead ++ merged ++ (hidden -- done)
   end
 
   @doc "Every own key, strings first then symbols (a proxy's `ownKeys` result as it is)."
@@ -360,7 +318,7 @@ defmodule Browser.JS.Props do
   def own_symbols(_), do: []
 
   defp own_symbols_plain(o),
-    do: o.props |> Map.keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+    do: o |> Obj.all_keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
 
   # ── defining ───────────────────────────────────────────────
 
@@ -583,14 +541,14 @@ defmodule Browser.JS.Props do
 
       # a plain object whose property only gets a new value: no descriptor object is needed
       {:data, _, true, _, _} when plain? ->
-        store(rid, %{o | props: Map.put(o.props, key, value)})
+        store(rid, Obj.own_put_value(o, key, value))
         true
 
       {:data, _, _, _, _} ->
         try_define(receiver, key, new_object([{"value", value}]))
 
       nil when plain? and is_binary(key) ->
-        if Map.get(o, :ext, true) do
+        if Obj.extensible?(o) do
           create(rid, key, %{value: value, writable: true, enumerable: true, configurable: true})
           true
         else
@@ -666,7 +624,7 @@ defmodule Browser.JS.Props do
       true ->
         case state(obj, key) do
           nil ->
-            unless Map.get(o, :ext, true),
+            unless Obj.extensible?(o),
               do:
                 throw_error(
                   "TypeError",
@@ -691,36 +649,10 @@ defmodule Browser.JS.Props do
         do: {:accessor, Map.get(desc, :get, :undefined), Map.get(desc, :set, :undefined)},
         else: Map.get(desc, :value, :undefined)
 
-    attrs = Map.get(o, :attrs, %{})
     flags = %{c: Map.get(desc, :configurable, false)}
     flags = if accessor?, do: flags, else: Map.put(flags, :w, Map.get(desc, :writable, false))
     flags = Map.put_new(flags, :w, true)
-
-    attrs =
-      if flags == %{c: true, w: true},
-        do: Map.delete(attrs, key),
-        else: Map.put(attrs, key, flags)
-
-    keys = if Map.get(desc, :enumerable, false), do: [key | o.keys], else: o.keys
-
-    o =
-      if Map.get(desc, :enumerable, false) do
-        o
-      else
-        named = Enum.count(o.keys, &(is_binary(&1) and not index_key?(&1)))
-
-        o
-        |> Map.update(:horder, [key], &[key | &1])
-        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
-      end
-
-    store(
-      id,
-      o
-      |> Map.put(:attrs, attrs)
-      |> Map.put(:props, Map.put(o.props, key, value))
-      |> Map.put(:keys, keys)
-    )
+    store(id, Obj.own_add(o, key, value, flags, Map.get(desc, :enumerable, false)))
   end
 
   # the rules for changing a property that is not configurable
@@ -809,29 +741,10 @@ defmodule Browser.JS.Props do
           {{:accessor, g, s}, true}
       end
 
-    attrs = Map.get(o, :attrs, %{})
     flags = if match?({:accessor, _, _}, value), do: %{c: c, w: true}, else: %{c: c, w: w}
 
-    attrs =
-      if flags == %{c: true, w: true},
-        do: Map.delete(attrs, key),
-        else: Map.put(attrs, key, flags)
-
-    keys =
-      cond do
-        e and key in o.keys -> o.keys
-        e -> [key | o.keys]
-        true -> List.delete(o.keys, key)
-      end
-
     # a function's own name, length and prototype become real properties
-    store(
-      id,
-      o
-      |> Map.put(:attrs, attrs)
-      |> Map.put(:props, Map.put(o.props, key, value))
-      |> Map.put(:keys, keys)
-    )
+    store(id, Obj.own_redefine(o, key, value, flags, e))
   end
 
   # array elements: a value with writable/configurable kept per index (enumerable stays true,
@@ -852,7 +765,7 @@ defmodule Browser.JS.Props do
 
   defp define_element_accessor(id, o, key, i, desc, exists?) do
     cond do
-      not exists? and not Map.get(o, :ext, true) ->
+      not exists? and not Obj.extensible?(o) ->
         throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
 
       not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
@@ -869,21 +782,14 @@ defmodule Browser.JS.Props do
           end
 
         item = {:accessor, Map.get(desc, :get, g0), Map.get(desc, :set, s0)}
-        attrs = Map.get(o, :attrs, %{})
         c = Map.get(desc, :configurable, if(exists?, do: elem(current, 4), else: false))
-        cur = Map.get(attrs, i, %{})
+        cur = Obj.attr_flags(o, i)
         e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
-        flags = %{w: true, c: c, e: e}
-
-        attrs =
-          if flags == %{w: true, c: true, e: true},
-            do: Map.delete(attrs, i),
-            else: Map.put(attrs, i, flags)
 
         store(
           id,
           o
-          |> Map.put(:attrs, attrs)
+          |> Obj.put_element_attrs(i, %{w: true, c: c, e: e})
           |> Map.put(:items, Map.put(o.items, i, item))
           |> Map.put(:len, max(o.len, i + 1))
         )
@@ -892,7 +798,7 @@ defmodule Browser.JS.Props do
 
   defp define_element_data(id, o, key, i, desc, exists?) do
     cond do
-      not exists? and not Map.get(o, :ext, true) ->
+      not exists? and not Obj.extensible?(o) ->
         throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
 
       not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
@@ -906,8 +812,7 @@ defmodule Browser.JS.Props do
 
         if current, do: validate_element(current, desc, key)
 
-        attrs = Map.get(o, :attrs, %{})
-        cur = Map.get(attrs, i, %{})
+        cur = Obj.attr_flags(o, i)
         # turning an accessor into a data property starts from undefined and read-only
         was_accessor? = match?({:accessor, _, _}, o.items[i])
 
@@ -920,12 +825,6 @@ defmodule Browser.JS.Props do
 
         c = Map.get(desc, :configurable, if(exists?, do: Map.get(cur, :c, true), else: false))
         e = Map.get(desc, :enumerable, if(exists?, do: Map.get(cur, :e, true), else: false))
-        flags = %{w: w, c: c, e: e}
-
-        attrs =
-          if flags == %{w: true, c: true, e: true},
-            do: Map.delete(attrs, i),
-            else: Map.put(attrs, i, flags)
 
         v =
           Map.get(
@@ -937,7 +836,7 @@ defmodule Browser.JS.Props do
         store(
           id,
           o
-          |> Map.put(:attrs, attrs)
+          |> Obj.put_element_attrs(i, %{w: w, c: c, e: e})
           |> Map.put(:items, Map.put(o.items, i, v))
           |> Map.put(:len, max(o.len, i + 1))
         )
@@ -966,7 +865,7 @@ defmodule Browser.JS.Props do
         reject("length")
 
       true ->
-        read_only? = Map.get(o, :len_ro, false) or Map.get(o, :frozen, false)
+        read_only? = Map.get(o, :len_ro, false) or Obj.frozen?(o)
 
         if read_only? and Map.get(desc, :writable) == true, do: reject("length")
 
@@ -997,13 +896,7 @@ defmodule Browser.JS.Props do
 
   # cut an array to `len`, but not below an element that cannot be deleted; that is an error
   defp shrink(id, o, len) do
-    attrs = Map.get(o, :attrs, %{})
-
-    keep =
-      o.items
-      |> Map.keys()
-      |> Enum.filter(&(&1 >= len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
-      |> Enum.max(fn -> nil end)
+    keep = Obj.max_fixed_element(o, len)
 
     stop = if keep, do: keep + 1, else: len
     o = %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop}
@@ -1022,7 +915,7 @@ defmodule Browser.JS.Props do
       unless Browser.JS.Proxy.prevent_extensions(obj),
         do: throw_error("TypeError", "'preventExtensions' on proxy: trap returned falsish")
     else
-      store(id, Map.put(o, :ext, false))
+      store(id, Obj.prevent(o))
     end
 
     obj
@@ -1033,14 +926,11 @@ defmodule Browser.JS.Props do
   def extensible?({:obj, id} = obj) do
     case deref(id) do
       %{proxy: _} -> Browser.JS.Proxy.extensible?(obj)
-      o -> Map.get(o, :ext, true)
+      o -> Obj.extensible?(o)
     end
   end
 
   def extensible?(_), do: false
-
-  # private fields are outside freezing and sealing
-  defp public_keys(o), do: Enum.reject(Map.keys(o.props), &match?({:private, _}, &1))
 
   @doc "`Object.seal` (`freeze?` false) and `Object.freeze` (true)."
   def lock({:obj, id} = obj, freeze?) do
@@ -1060,7 +950,8 @@ defmodule Browser.JS.Props do
         throw_error("TypeError", "Cannot freeze a module namespace object with exports")
 
       true ->
-        lock_plain(obj, id, o, freeze?)
+        store(id, Obj.lock(o, freeze?))
+        obj
     end
   end
 
@@ -1089,22 +980,6 @@ defmodule Browser.JS.Props do
     obj
   end
 
-  defp lock_plain(obj, id, o, freeze?) do
-    attrs =
-      Enum.reduce(public_keys(o), Map.get(o, :attrs, %{}), fn key, attrs ->
-        accessor? = match?({:accessor, _, _}, o.props[key])
-        cur = Map.get(attrs, key, %{})
-        w = if freeze? and not accessor?, do: false, else: Map.get(cur, :w, true)
-        Map.put(attrs, key, %{c: false, w: w})
-      end)
-
-    o = o |> Map.put(:attrs, attrs) |> Map.put(:ext, false)
-    o = if freeze? and o.class == :array, do: Map.put(o, :frozen, true), else: o
-    o = if not freeze? and o.class == :array, do: Map.put(o, :sealed, true), else: o
-    store(id, o)
-    obj
-  end
-
   @doc "`Object.isFrozen` (`freeze?` true) and `Object.isSealed`."
   def locked?({:obj, id} = obj, freeze?) do
     o = deref(id)
@@ -1112,7 +987,7 @@ defmodule Browser.JS.Props do
     cond do
       Map.has_key?(o, :proxy) -> locked_proxy?(obj, freeze?)
       Browser.JS.Modules.unlockable?(obj, freeze?) -> false
-      true -> locked_plain?(o, freeze?)
+      true -> Obj.locked?(o, freeze?)
     end
   end
 
@@ -1131,19 +1006,6 @@ defmodule Browser.JS.Props do
                  not truthy(Interp.get(d, "writable")))
         end
       end)
-  end
-
-  defp locked_plain?(o, freeze?) do
-    not Map.get(o, :ext, true) and
-      Enum.all?(public_keys(o), fn key ->
-        a = Map.get(Map.get(o, :attrs, %{}), key, %{})
-        accessor? = match?({:accessor, _, _}, o.props[key])
-
-        Map.get(a, :c, true) == false and
-          (not freeze? or accessor? or Map.get(a, :w, true) == false)
-      end) and
-      (o.class != :array or o.items == %{} or
-         Map.get(o, :frozen, false) or (not freeze? and Map.get(o, :sealed, false)))
   end
 
   # ── install ────────────────────────────────────────────────
@@ -1457,7 +1319,7 @@ defmodule Browser.JS.Props do
       current == p ->
         true
 
-      not Map.get(rec, :ext, true) ->
+      not Obj.extensible?(rec) ->
         :extensible
 
       o == proto(:object) ->
