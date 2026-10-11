@@ -212,7 +212,10 @@ defmodule Browser.JS.Interp do
   def global, do: pget(:js_global)
 
   @doc "A plain object with the given `{key, value}` pairs."
-  def new_object(pairs \\ [], proto \\ nil) do
+  def new_object,
+    do: {:obj, alloc(%{class: :object, props: %{}, keys: [], proto: proto(:object)})}
+
+  def new_object(pairs, proto \\ nil) do
     props = Map.new(pairs)
     keys = pairs |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
 
@@ -2132,6 +2135,16 @@ defmodule Browser.JS.Interp do
       end
 
     store(id, %{o | props: Map.put(o.props, key, v)})
+  end
+
+  @doc false
+  # The end of an object literal with constant keys (`Browser.JS.Compile`): all its
+  # properties in one write to the empty object `id`. `keys` lists the distinct keys,
+  # newest first, as `define_data/3` makes the list, and `pairs` gives each value in source
+  # order. `:maps.from_list/1` keeps the last value of a key, as `define_data/3` does.
+  def fill_literal(id, keys, pairs) do
+    o = :erlang.get(id)
+    :erlang.put(id, %{o | props: :maps.from_list(pairs), keys: keys})
   end
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."

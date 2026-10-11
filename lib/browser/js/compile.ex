@@ -953,10 +953,25 @@ defmodule Browser.JS.Compile do
       pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
 
       # (`ev/2` makes the object before it evaluates the values, as here)
-      fn env ->
-        obj = Interp.new_object()
-        props(pcs, obj, env)
-        obj
+      if Fast.on?(:literal) do
+        # The properties go in with one write at the end (fast path `:literal`). Nothing
+        # can see the object before the literal is done: no name refers to it, and the home
+        # of a method value is used only for its prototype, which is set already. The keys
+        # are the distinct keys, newest first, as `Interp.define_data/3` lists them: a key
+        # that comes two times keeps its first place and its last value.
+        keys = pcs |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.reverse()
+
+        fn env ->
+          {:obj, id} = obj = Interp.new_object()
+          Interp.fill_literal(id, keys, lit_vals(pcs, obj, env, []))
+          obj
+        end
+      else
+        fn env ->
+          obj = Interp.new_object()
+          props(pcs, obj, env)
+          obj
+        end
       end
     else
       shell({:object, Enum.map(props, &cprop/1)})
@@ -1066,7 +1081,8 @@ defmodule Browser.JS.Compile do
   defp method_node?(_), do: false
 
   # The properties of an object literal, from the first to the last, as `ev/2` defines
-  # them: the value, then the home of a method, then the property.
+  # them: the value, then the home of a method, then the property. This is the old path of
+  # the fast path `:literal`, which only the check build can take.
   defp props([], _obj, _env), do: :ok
 
   defp props([{k, vo} | rest], obj, env) do
@@ -1074,6 +1090,17 @@ defmodule Browser.JS.Compile do
     Interp.method_home(v, obj)
     Interp.define_data(obj, k, v)
     props(rest, obj, env)
+  end
+
+  # The values of an object literal from the first to the last, as `{key, value}` pairs in
+  # source order, for `Interp.fill_literal/3`. The home of a method value is set as in
+  # `props/3`. It is a named function, so the compiled code makes no fun when it runs.
+  defp lit_vals([], _obj, _env, acc), do: :lists.reverse(acc)
+
+  defp lit_vals([{k, vo} | rest], obj, env, acc) do
+    v = av(vo, env)
+    Interp.method_home(v, obj)
+    lit_vals(rest, obj, env, [{k, v} | acc])
   end
 
   # The values of a comma expression, from left to right. The value is the last one.

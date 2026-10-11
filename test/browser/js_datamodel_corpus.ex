@@ -108,7 +108,20 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm compound nullish",
      ~S|function f(){ var r = []; var n = null, u; try { n.a += 1 } catch (e) { r.push(e.message) } try { u.a++ } catch (e) { r.push(e.message) } try { --n.b } catch (e) { r.push(e.message) } try { n.a += (r.push('rhs'), 1) } catch (e) { r.push(e.constructor.name) } return r.join('/') } console.log(f())|},
     {"dm compound arrays and functions",
-     ~S|function f(){ var a = [1, 2]; a.length += 1; a.x = 1; a.x += 1; a.length--; function h(){} h.c = 1; h.c += 1; h.c++; var args = (function(){ arguments.length += 1; return arguments.length })(1, 2); var t = new Int8Array(2); t.length += 1; var w = new String('ab'); w.length += 1; w.q = 1; w.q++; return [a.length, a.x, h.c, args, t.length, w.length, w.q].join() } console.log(f())|}
+     ~S|function f(){ var a = [1, 2]; a.length += 1; a.x = 1; a.x += 1; a.length--; function h(){} h.c = 1; h.c += 1; h.c++; var args = (function(){ arguments.length += 1; return arguments.length })(1, 2); var t = new Int8Array(2); t.length += 1; var w = new String('ab'); w.length += 1; w.q = 1; w.q++; return [a.length, a.x, h.c, args, t.length, w.length, w.q].join() } console.log(f())|},
+    # ── D5: a literal in one write ──────────────────────────────
+    {"dm literal duplicates",
+     ~S|function f(){ var a = {a: 1, a: 2}; var b = {a: 1, b: 2, a: 3}; var c = {0: 1, a: 2, 1: 3, b: 4, 0: 5}; var d = {}; var e = {x: undefined, y: null, z: 0}; return [JSON.stringify(a), JSON.stringify(b), Object.keys(b).join(), JSON.stringify(c), Object.keys(c).join(), Object.keys(d).length, Object.keys(e).join(), 'x' in e, e.hasOwnProperty('x')].join(' ') } console.log(f())|},
+    {"dm literal throws",
+     ~S|function f(){ var n = 0; function bad(){ n++; throw new Error('v' + n) } var r = []; try { var o = {a: 1, b: bad(), c: 3} } catch (e) { r.push(e.message, typeof o) } try { var p = {a: (r.push('a'), 1), b: (r.push('b'), 2), c: bad()} } catch (e) { r.push(e.message) } return r.join() } console.log(f())|},
+    {"dm literal order",
+     ~S|function f(){ var log = []; function v(x){ log.push(x); return x } var o = {z: v(1), a: v(2), m: v(3), a: v(4)}; for (var i = 0; i < 3; i++) { var p = {k: i, j: i * 2}; p.k += p.j; log.push(p.k) } return log.join() + ' ' + Object.keys(o).join() + ' ' + JSON.stringify(o) } console.log(f())|},
+    {"dm literal method home",
+     ~S|var base = { hi(){ return 'base' } }; var obj = { __proto__: base, m(){ return super.hi() + '!' } }; function f(){ var r = [obj.m()]; var o2 = {m: obj.m, n: 1}; try { r.push(o2.m(), obj.m()) } catch (e) { r.push(e.constructor.name) } var o3 = {g: obj.m, h: 1}; try { r.push(o3.g()) } catch (e) { r.push(e.constructor.name) } return r.join() } console.log(f())|},
+    {"dm literal wide",
+     ~S|function f(){ var o = {k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: 10, k11: 11, k12: 12, k13: 13, k14: 14, k15: 15, k16: 16, k17: 17, k18: 18, k19: 19, k20: 20, k21: 21, k22: 22, k23: 23, k24: 24, k25: 25, k26: 26, k27: 27, k28: 28, k29: 29, k30: 30, k31: 31, k32: 32, k33: 33, k34: 34, k35: 35, k36: 36, k37: 37, k38: 38, k39: 39}; o.k20 = 'x'; o.k40 = 40; delete o.k3; return Object.keys(o).join() + ' ' + o.k39 + o.k20 + o.k40 + Object.values(o).length } console.log(f())|},
+    {"dm literal nested and frozen",
+     ~S|function f(){ var o = {a: {b: {c: 1}}, d: [1, {e: 2}]}; var fr = Object.freeze({x: 1, y: {z: 2}}); fr.x = 5; fr.y.z = 3; var sym = Symbol('s'); var mixed = {a: 1, [sym]: 2, ['c' + 1]: 3, get g(){ return 4 }, m(){ return 5 }, b: 6}; return [JSON.stringify(o), fr.x, fr.y.z, Object.isFrozen(fr), Object.keys(mixed).join(), mixed.g, mixed.m(), mixed[sym]].join(' ') } console.log(f())|}
   ]
 
   @doc "Gives the rows as `{name, source, options}`."
