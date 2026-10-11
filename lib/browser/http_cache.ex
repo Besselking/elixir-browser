@@ -7,6 +7,13 @@ defmodule Browser.HttpCache do
   server (`{:stale, entry}`) or is absent (`:miss`). `store/3` decides from the response
   headers whether and for how long a response may be kept (`Cache-Control`, `Expires`,
   `ETag`, `Last-Modified`); `refresh/3` renews an entry after a 304.
+
+  Under the memory layer sits a disk layer that survives restarts. Every stored response is
+  also written (by this process, in the background) to a file in the cache folder, except
+  ones with `Set-Cookie`. A memory miss reads the file and puts the entry back in memory.
+  The folder is config `:disk_cache_dir`, else `http_cache/` under the user cache folder;
+  `nil` turns the disk layer off. When the files together pass 256 MB, the ones used least
+  recently go first (a file's modification time is its last use).
   """
   use GenServer
 
@@ -15,6 +22,9 @@ defmodule Browser.HttpCache do
   @max_bytes 64 * 1024 * 1024
   # a single response above this is not worth keeping
   @max_entry_bytes 8 * 1024 * 1024
+  @max_disk_bytes 256 * 1024 * 1024
+  # prune the folder after this many writes
+  @prune_every 32
 
   defmodule Entry do
     @moduledoc false
@@ -26,11 +36,62 @@ defmodule Browser.HttpCache do
   @impl true
   def init(_) do
     :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
-    {:ok, nil}
+    {:ok, 0}
   end
 
-  @doc "Drops everything."
-  def clear, do: if(table?(), do: :ets.delete_all_objects(@table))
+  @impl true
+  def handle_cast({:write, dir, url, record}, writes) do
+    write_file(dir, url, record)
+    writes = writes + 1
+
+    if rem(writes, @prune_every) == 0,
+      do: prune_dir(dir)
+
+    {:noreply, writes}
+  end
+
+  def handle_cast({:delete, dir, url}, writes) do
+    File.rm(file(dir, url))
+    {:noreply, writes}
+  end
+
+  @impl true
+  def handle_call(:sync, _from, writes), do: {:reply, :ok, writes}
+
+  def handle_call({:prune, dir, cap}, _from, writes) do
+    prune_dir(dir, cap)
+    {:reply, :ok, writes}
+  end
+
+  @doc "Waits until the background disk writes queued so far are done."
+  def sync, do: GenServer.call(__MODULE__, :sync)
+
+  @doc "Brings the disk folder under its size cap now."
+  def prune(cap \\ @max_disk_bytes),
+    do: if(dir(), do: GenServer.call(__MODULE__, {:prune, dir(), cap}))
+
+  @doc "The disk cache folder; `nil` when the disk layer is off."
+  def dir do
+    case Application.fetch_env(:browser, :disk_cache_dir) do
+      {:ok, dir} ->
+        dir
+
+      :error ->
+        Path.join(:filename.basedir(:user_cache, ~c"elixir_browser") |> to_string(), "http_cache")
+    end
+  end
+
+  @doc "Drops everything, on disk too."
+  def clear do
+    if table?(), do: :ets.delete_all_objects(@table)
+
+    with dir when dir != nil <- dir(), {:ok, names} <- File.ls(dir) do
+      sync()
+      for name <- names, String.ends_with?(name, ".entry"), do: File.rm(Path.join(dir, name))
+    end
+
+    :ok
+  end
 
   @doc """
   The cached entry for `url`: `{:fresh, entry}`, `{:stale, entry}` or `:miss`.
@@ -41,13 +102,25 @@ defmodule Browser.HttpCache do
     with true <- table?(),
          [{_, entry}] <- :ets.lookup(@table, url) do
       :ets.update_element(@table, url, {2, %{entry | used_at: now()}})
-
-      if Keyword.get(opts, :use_stale, false) or entry.expires_at > now(),
-        do: {:fresh, entry},
-        else: {:stale, entry}
+      classify(entry, opts)
     else
-      _ -> :miss
+      _ ->
+        case table?() && read_disk(url) do
+          %Entry{} = entry ->
+            evict_for(byte_size(entry.body))
+            :ets.insert(@table, {url, entry})
+            classify(entry, opts)
+
+          _ ->
+            :miss
+        end
     end
+  end
+
+  defp classify(entry, opts) do
+    if Keyword.get(opts, :use_stale, false) or entry.expires_at > now(),
+      do: {:fresh, entry},
+      else: {:stale, entry}
   end
 
   @doc """
@@ -65,24 +138,24 @@ defmodule Browser.HttpCache do
         not storable?(headers, cc, body) or
             (is_nil(etag) and is_nil(last_modified) and
                lifetime(headers, cc) in [nil, 0]) ->
-          :ets.delete(@table, url)
+          drop(url)
 
         true ->
           evict_for(byte_size(body))
 
-          :ets.insert(
-            @table,
-            {url,
-             %Entry{
-               url: url,
-               body: body,
-               etag: etag,
-               last_modified: last_modified,
-               expires_at: now() + (lifetime(headers, cc) || 0),
-               used_at: now(),
-               content_type: header(headers, "content-type")
-             }}
-          )
+          entry = %Entry{
+            url: url,
+            body: body,
+            etag: etag,
+            last_modified: last_modified,
+            expires_at: now() + (lifetime(headers, cc) || 0),
+            used_at: now(),
+            content_type: header(headers, "content-type")
+          }
+
+          :ets.insert(@table, {url, entry})
+
+          if header(headers, "set-cookie") == nil, do: persist(entry), else: drop_disk(url)
       end
     end
 
@@ -102,9 +175,12 @@ defmodule Browser.HttpCache do
           used_at: now()
       }
 
-      if storable?(headers, cc, entry.body),
-        do: :ets.insert(@table, {url, entry}),
-        else: :ets.delete(@table, url)
+      if storable?(headers, cc, entry.body) do
+        :ets.insert(@table, {url, entry})
+        if header(headers, "set-cookie") == nil, do: persist(entry), else: drop_disk(url)
+      else
+        drop(url)
+      end
     end
 
     :ok
@@ -118,6 +194,102 @@ defmodule Browser.HttpCache do
         ],
         value != nil,
         do: {name, String.to_charlist(value)}
+  end
+
+  # -- disk ----------------------------------------------------------------------
+
+  defp drop(url) do
+    :ets.delete(@table, url)
+    drop_disk(url)
+  end
+
+  defp drop_disk(url) do
+    if dir = dir(), do: GenServer.cast(__MODULE__, {:delete, dir, url})
+  end
+
+  # queue the entry for the background writer; the expiry goes to the file as wall-clock time
+  defp persist(entry) do
+    if dir = dir() do
+      record = %{
+        v: 1,
+        url: entry.url,
+        body: entry.body,
+        etag: entry.etag,
+        last_modified: entry.last_modified,
+        content_type: entry.content_type,
+        expires_at: System.os_time(:second) + (entry.expires_at - now())
+      }
+
+      GenServer.cast(__MODULE__, {:write, dir, entry.url, record})
+    end
+  end
+
+  defp file(dir, url),
+    do: Path.join(dir, Base.encode16(:crypto.hash(:sha256, url), case: :lower) <> ".entry")
+
+  defp write_file(dir, url, record) do
+    path = file(dir, url)
+    File.mkdir_p!(dir)
+    tmp = path <> ".#{System.unique_integer([:positive])}.tmp"
+    File.write!(tmp, :erlang.term_to_binary(record))
+    File.rename!(tmp, path)
+  rescue
+    _ -> :ok
+  end
+
+  defp read_disk(url) do
+    with dir when dir != nil <- dir(),
+         path = file(dir, url),
+         {:ok, bin} <- File.read(path),
+         %{v: 1, url: ^url} = r <- safe_decode(bin) do
+      File.touch(path)
+
+      %Entry{
+        url: url,
+        body: r.body,
+        etag: r.etag,
+        last_modified: r.last_modified,
+        content_type: r.content_type,
+        expires_at: now() + (r.expires_at - System.os_time(:second)),
+        used_at: now()
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp safe_decode(bin) do
+    :erlang.binary_to_term(bin, [:safe])
+  rescue
+    ArgumentError -> nil
+  end
+
+  # delete the least recently used files until the folder is under its cap
+  defp prune_dir(dir, cap \\ @max_disk_bytes) do
+    with {:ok, names} <- File.ls(dir) do
+      files =
+        for name <- names,
+            String.ends_with?(name, ".entry"),
+            path = Path.join(dir, name),
+            {:ok, %File.Stat{size: size, mtime: mtime}} <- [File.stat(path, time: :posix)] do
+          {path, size, mtime}
+        end
+
+      total = Enum.reduce(files, 0, fn {_, size, _}, n -> n + size end)
+
+      files
+      |> Enum.sort_by(fn {_, _, mtime} -> mtime end)
+      |> Enum.reduce_while(total, fn {path, size, _}, total ->
+        if total <= cap do
+          {:halt, total}
+        else
+          File.rm(path)
+          {:cont, total - size}
+        end
+      end)
+    end
+
+    :ok
   end
 
   # -- policy --------------------------------------------------------------------
