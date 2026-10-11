@@ -3678,7 +3678,20 @@ defmodule Browser.JS.Interp do
     # stays `nil`: a frame that a closure keeps would otherwise keep every cell of its
     # callers too, which the collector does not count.
     link = if @check, do: chain
-    tuple = List.to_tuple([c.scope, info, link, pos, c.root | frame_slots(c, id, this, args, nt)])
+
+    # A compiled function can have a frame maker (step 5, `Browser.JS.Compile`), which
+    # knows the shape of the frame and gives the same tuple as `frame_slots/5`. Check mode
+    # uses the maker too, and compares its tuple with the tuple of `frame_slots/5` (S6).
+    tuple =
+      case c do
+        %{mk: mk} when mk != nil ->
+          tuple = mk.(c.scope, link, pos, c.root, this, args)
+          if @check, do: check_maker(tuple, c, id, this, args, nt)
+          tuple
+
+        _ ->
+          List.to_tuple([c.scope, info, link, pos, c.root | frame_slots(c, id, this, args, nt)])
+      end
 
     if @check, do: check_frame(tuple, info, id, mode)
     frame = alloc(tuple)
@@ -3733,6 +3746,39 @@ defmodule Browser.JS.Interp do
     result
   end
 
+  # Check mode only (S6 of step 5): the tuple of a frame maker equals the tuple that the
+  # frame builder of the tree makes for the same call. The builder gets the value of the
+  # `this` slot of the maker's tuple, because a sloppy `this` that is a primitive boxes
+  # into a new object, and a second box would change the heap ids. The boxing of a
+  # sloppy `this` gives an object, and an object stays as it is, so the test still sees a
+  # maker that does not box.
+  defp check_maker(tuple, c, id, this, args, nt) do
+    info = c.info
+
+    this =
+      case info.hidden do
+        [:this] -> :erlang.element(6 + info.nparams, tuple)
+        _ -> this
+      end
+
+    tree =
+      List.to_tuple([
+        c.scope,
+        info,
+        :erlang.element(3, tuple),
+        :erlang.element(4, tuple),
+        c.root | frame_slots(c, id, this, args, nt)
+      ])
+
+    if tree != tuple,
+      do:
+        check_fail(
+          "the frame maker of #{check_name(info)} gives #{inspect(tuple)}, not #{inspect(tree)}"
+        )
+
+    :ok
+  end
+
   # The closure record with its compiled code (step 5). Every entry to a sync frame
   # (`run_closure/4`, `tail_loop/3`, `new` and the class constructors, and the call fast
   # path of `ev/2`) comes through `run_frame/6`, so the first call of a function object
@@ -3748,17 +3794,21 @@ defmodule Browser.JS.Interp do
   # (a `home` or a property) since. The body of a function object never changes, so the
   # code of `c` is the code of the record.
   defp first_call(id, c) do
-    code = Browser.JS.Compile.code(c)
+    {code, mk} =
+      case Browser.JS.Compile.code(c) do
+        nil -> {nil, nil}
+        code_and_maker -> code_and_maker
+      end
 
     case :erlang.get(id) do
       %{fun: {:closure, now}} = o ->
-        :erlang.put(id, %{o | fun: {:closure, Map.put(now, :code, code)}})
+        :erlang.put(id, %{o | fun: {:closure, Map.merge(now, %{code: code, mk: mk})}})
 
       _ ->
         :ok
     end
 
-    Map.put(c, :code, code)
+    Map.merge(c, %{code: code, mk: mk})
   end
 
   # The value of the body of a frame call: an arrow with an expression body gives the
@@ -3983,9 +4033,12 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp plain_slots(_args, 0, rest), do: rest
-  defp plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
-  defp plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
+  # It is public because the frame makers of the closure compiler (`Browser.JS.Compile`)
+  # call it.
+  @doc false
+  def plain_slots(_args, 0, rest), do: rest
+  def plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
+  def plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
 
   # The values of the hidden slots at entry, in the order of `info.hidden`:
   #
@@ -4289,7 +4342,7 @@ defmodule Browser.JS.Interp do
         # The key and the value are those of `Browser.JS.Compile`. (each branch builds its
         # map at once: a merge would cost one more call per function object)
         case :erlang.get({:jsc, info.uid}) do
-          {code, _maker} ->
+          {code, mk} ->
             %{
               name: name,
               params: params,
@@ -4300,7 +4353,8 @@ defmodule Browser.JS.Interp do
               info: info,
               root: root,
               nnames: nnames,
-              code: code
+              code: code,
+              mk: mk
             }
 
           _ ->
@@ -4364,9 +4418,12 @@ defmodule Browser.JS.Interp do
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
   # (no page) nothing changes. The first argument is the strictness of the function: a
   # rewritten closure never goes through `with_hoist`, so it has no `strict?` key to match.
-  defp sloppy_this(true, this), do: this
+  # It is public because the frame makers of the closure compiler (`Browser.JS.Compile`)
+  # call it.
+  @doc false
+  def sloppy_this(true, this), do: this
 
-  defp sloppy_this(false, this) do
+  def sloppy_this(false, this) do
     cond do
       this in [:undefined, :null] ->
         case deref(global()) do

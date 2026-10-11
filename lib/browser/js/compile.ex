@@ -105,8 +105,9 @@ defmodule Browser.JS.Compile do
 
   The process dictionary keeps the compiled code of each function under the key
   `{:jsc, uid}`. The value is `{body, maker}`. `body` is the closure of the body. `maker`
-  is the frame maker, which is `nil` in this version. Each function object keeps its code
-  in its closure record (the `code` key), so that a call does not read the cache.
+  is the frame maker of the function, or `nil` when it has none. Each function object keeps
+  its code in its closure record (the keys `code` and `mk`), so that a call does not read
+  the cache.
 
   ## Rules for the code
 
@@ -132,7 +133,9 @@ defmodule Browser.JS.Compile do
       checks the call chain (S3);
     * a shell has no compiled child in a function, in a class or in the callee of a call
       (S4);
-    * the compiled code of a body keeps no object, no `{:val}` node and no frame (S5).
+    * the compiled code of a body keeps no object, no `{:val}` node and no frame (S5);
+    * the tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
+      (S6, in `Interp.frame_call/6`).
 
   When the process key `:jsc_trace` holds a list, the compiler adds to it each node that
   stays on the tree. The coverage test uses this list.
@@ -147,17 +150,18 @@ defmodule Browser.JS.Compile do
   @check Application.compile_env(:browser, :js_resolve_check, false)
 
   @doc """
-  Gives the compiled body of the closure record `c`, or `nil` when the function does not
-  compile. The first call for a function compiles the body and puts it in the cache.
+  Gives the compiled code of the closure record `c`: `{body, maker}`, or `nil` when the
+  function does not compile. `maker` is the frame maker of the function, or `nil`. The
+  first call for a function compiles the body and puts it in the cache.
   """
-  @spec code(map) :: (integer -> term) | nil
+  @spec code(map) :: {(integer -> term), function | nil} | nil
   def code(%{info: %Info{rewritten: true, async?: false, generator?: false, uid: uid}} = c)
       when uid != nil do
     # (the switch is off when it was never set: a process that did not start its heap with
     # `Interp.init/1` runs on the tree walker)
     if :erlang.get(:js_compile) == true do
       case :erlang.get({:jsc, uid}) do
-        {body, _maker} -> body
+        {_body, _maker} = code -> code
         :undefined -> compile_and_store(c, uid)
       end
     end
@@ -166,11 +170,92 @@ defmodule Browser.JS.Compile do
   def code(_c), do: nil
 
   defp compile_and_store(c, uid) do
-    body = body(c)
-    check_capture(body)
-    :erlang.put({:jsc, uid}, {body, nil})
-    body
+    code = {body(c), maker(c.info)}
+    check_capture(code)
+    :erlang.put({:jsc, uid}, code)
+    code
   end
+
+  # ── frame makers ───────────────────────────────────────────
+
+  # The value of the `this` slot at entry, as `hidden_slots/8` in `Interp` gives it: a
+  # sloppy function gets the global object for `undefined` and a boxed primitive.
+  defmacrop entry_this(strict, this) do
+    quote do
+      if unquote(strict), do: unquote(this), else: Interp.sloppy_this(false, unquote(this))
+    end
+  end
+
+  # The frame maker of a function: `fn scope, link, pos, root, this, args -> frame tuple
+  # end`. It gives the tuple that `frame_slots/5` in `Interp` gives with the header, but it
+  # knows the shape of the frame when it compiles. Thus it does not walk the lists of
+  # hidden slots and parameters for each call. Only a function with plain parameters and
+  # no hidden slot other than `this` gets a maker. The other hidden slots need the function
+  # object or the new target, which only the frame builder of `Interp` fills.
+  #
+  # For up to two parameters and no template, the maker is a tuple literal. Otherwise it
+  # puts the arguments in front of the prebuilt list of the hidden slot and the template,
+  # and makes the tuple of the list. A missing argument is `undefined`, and an extra
+  # argument is dropped, as in `plain_slots/3`.
+  defp maker(
+         %Info{params: :plain, hidden: hidden, nparams: n, template: t, strict: strict} = info
+       )
+       when hidden in [[], [:this]] do
+    case {n, hidden, t} do
+      {0, [], []} ->
+        fn s, l, p, r, _this, _args -> {s, info, l, p, r} end
+
+      {1, [], []} ->
+        fn s, l, p, r, _this, args ->
+          case args do
+            [a | _] -> {s, info, l, p, r, a}
+            [] -> {s, info, l, p, r, :undefined}
+          end
+        end
+
+      {2, [], []} ->
+        fn s, l, p, r, _this, args ->
+          case args do
+            [a, b | _] -> {s, info, l, p, r, a, b}
+            [a] -> {s, info, l, p, r, a, :undefined}
+            [] -> {s, info, l, p, r, :undefined, :undefined}
+          end
+        end
+
+      {0, [:this], []} ->
+        fn s, l, p, r, this, _args -> {s, info, l, p, r, entry_this(strict, this)} end
+
+      {1, [:this], []} ->
+        fn s, l, p, r, this, args ->
+          case args do
+            [a | _] -> {s, info, l, p, r, a, entry_this(strict, this)}
+            [] -> {s, info, l, p, r, :undefined, entry_this(strict, this)}
+          end
+        end
+
+      {2, [:this], []} ->
+        fn s, l, p, r, this, args ->
+          case args do
+            [a, b | _] -> {s, info, l, p, r, a, b, entry_this(strict, this)}
+            [a] -> {s, info, l, p, r, a, :undefined, entry_this(strict, this)}
+            [] -> {s, info, l, p, r, :undefined, :undefined, entry_this(strict, this)}
+          end
+        end
+
+      {n, [], t} ->
+        fn s, l, p, r, _this, args ->
+          :erlang.list_to_tuple([s, info, l, p, r | Interp.plain_slots(args, n, t)])
+        end
+
+      {n, [:this], t} ->
+        fn s, l, p, r, this, args ->
+          rest = [entry_this(strict, this) | t]
+          :erlang.list_to_tuple([s, info, l, p, r | Interp.plain_slots(args, n, rest)])
+        end
+    end
+  end
+
+  defp maker(_info), do: nil
 
   # The closure of a body. An arrow with an expression body gives the value of the
   # expression, and every other body gives the completion of its statement list.
