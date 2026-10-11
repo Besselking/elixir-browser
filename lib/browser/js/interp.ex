@@ -2315,9 +2315,12 @@ defmodule Browser.JS.Interp do
       %{class: :array} ->
         case if(named?, do: nil, else: index(key)) do
           i when is_integer(i) ->
+            # (the element at `i` now, read once for all the tests below)
+            cur = Map.fetch(o.items, i)
+
             cond do
-              match?(%{^i => {:accessor, _, _}}, o.items) ->
-                {:accessor, _, setter} = o.items[i]
+              match?({:ok, {:accessor, _, _}}, cur) ->
+                {:ok, {:accessor, _, setter}} = cur
 
                 if function?(setter),
                   do: keep_put_flag(call(setter, {:obj, id}, [v])),
@@ -2328,16 +2331,17 @@ defmodule Browser.JS.Interp do
               Map.get(o, :frozen, false) ->
                 fail_put()
 
-              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) ->
+              cur == :error and not Map.get(o, :ext, true) ->
                 fail_put()
 
               i >= o.len and Map.get(o, :len_ro, false) ->
                 fail_put()
 
-              not writable?(o, i) ->
+              # (with no `attrs`, each element is writable)
+              is_map_key(o, :attrs) and not writable?(o, i) ->
                 fail_put()
 
-              not is_map_key(o.items, i) and index_hook(o.proto, i) != :none ->
+              cur == :error and index_hook(o.proto, i) != :none ->
                 case index_hook(o.proto, i) do
                   {:setter, setter} ->
                     keep_put_flag(call(setter, {:obj, id}, [v]))
@@ -3027,10 +3031,7 @@ defmodule Browser.JS.Interp do
 
     cond do
       o.class == :array and array_iteration_pristine?(v) ->
-        {:list,
-         Stream.unfold(0, fn i ->
-           if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
-         end)}
+        {:list, Stream.unfold(0, fn i -> for_of_step(id, v, i) end)}
 
       o.class in [:map, :set] ->
         proto_source(v)
@@ -3041,6 +3042,38 @@ defmodule Browser.JS.Interp do
   end
 
   def for_of_source(v), do: iter_source(v)
+
+  # One step of a for-of loop over the array `v` at `id`: `{element, next index}`, or nil
+  # after the last element. The record is read again at each step, so the loop sees a body
+  # that changes the array. For an array that is not an arguments object, the `length` is
+  # `len` (no getter is possible), and an own data element is what the read of the key
+  # gives, so the step reads `items` at the integer `i`, with no string key (fast path
+  # `:iter`). A hole or an accessor goes to `get/2`.
+  @compile {:inline, for_of_step: 3}
+  defp for_of_step(id, v, i) do
+    if Fast.on?(:iter) do
+      case deref(id) do
+        %{class: :array, len: len, items: items} = a when not is_map_key(a, :arguments) ->
+          if i < len do
+            case items do
+              %{^i => {:accessor, _, _}} -> {get(v, i * 1.0), i + 1}
+              %{^i => x} -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
+              _ -> {get(v, i * 1.0), i + 1}
+            end
+          end
+
+        _ ->
+          for_of_step_key(v, i)
+      end
+    else
+      for_of_step_key(v, i)
+    end
+  end
+
+  # The step of `for_of_step/3` by the generic read: `length`, then the key as a string.
+  defp for_of_step_key(v, i) do
+    if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
+  end
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`

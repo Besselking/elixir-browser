@@ -17,7 +17,7 @@ defmodule Browser.JS.Fast do
   @check Application.compile_env(:browser, :js_resolve_check, false)
 
   # The names of all fast paths. The oracle turns them all off with this list.
-  @names [:has_own, :update, :compound, :literal, :add]
+  @names [:has_own, :update, :compound, :literal, :add, :iter]
 
   @doc false
   def names, do: @names
@@ -44,7 +44,9 @@ defmodule Browser.JS.Fast do
   # The old path must not fail a write and must not call JavaScript code: the guard of each
   # fast path excludes setters, getters and proxies, so the old path cannot get to user
   # code. The old path must not change the heap either: the objects that it makes are
-  # erased, and the heap counters go back to their values before it.
+  # erased, and the heap counters go back to their values before it. In the normal build
+  # the old path is in a branch that the compiler drops, so that a name or a function that
+  # only the old path uses is not reported as unused.
   defmacro shadow(id, fast, old) do
     if @check do
       quote do
@@ -55,7 +57,10 @@ defmodule Browser.JS.Fast do
         )
       end
     else
-      fast
+      quote do
+        _ = unquote(id)
+        if false, do: unquote(old), else: unquote(fast)
+      end
     end
   end
 

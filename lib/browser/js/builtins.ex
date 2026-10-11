@@ -11,6 +11,7 @@ defmodule Browser.JS.Builtins do
   alias Browser.JS.Interp
   alias Browser.JS.Str
   alias Browser.JS.Num
+  require Browser.JS.Fast, as: Fast
 
   @timer_horizon 60_000.0
   @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
@@ -942,12 +943,47 @@ defmodule Browser.JS.Builtins do
       end)
     else
       Stream.flat_map(range, fn i ->
-        present =
-          if is_binary(this), do: i < len, else: has_property?(this, float(i))
+        case own_element(this, i) do
+          {:ok, v} ->
+            [{i, v}]
 
-        if present, do: [{i, Interp.get(this, float(i))}], else: []
+          :slow ->
+            present =
+              if is_binary(this), do: i < len, else: has_property?(this, float(i))
+
+            if present, do: [{i, Interp.get(this, float(i))}], else: []
+        end
       end)
     end
+  end
+
+  # `{:ok, value}` for an own data element at `i` of an array that is not a proxy and not a
+  # mapped arguments object, else `:slow`. For such an element HasProperty is true and Get
+  # gives the value, with no user code between them, so one read of `items` is the two
+  # reads of the spec (fast path `:iter`). A hole, an accessor, a proxy and a mapped
+  # arguments object take the generic path.
+  @compile {:inline, own_element: 2}
+  defp own_element({:obj, id} = this, i) do
+    if Fast.on?(:iter) do
+      case deref(id) do
+        %{class: :array, items: %{^i => x}} = o
+        when not is_map_key(o, :proxy) and not is_map_key(o, :mapped) and
+               not (is_tuple(x) and tuple_size(x) == 3 and elem(x, 0) == :accessor) ->
+          Fast.shadow(id, {:ok, x}, own_element_slow(this, i))
+
+        _ ->
+          :slow
+      end
+    else
+      :slow
+    end
+  end
+
+  defp own_element(_, _), do: :slow
+
+  # The read of `own_element/2` by the generic path, for the shadow run of the check build.
+  defp own_element_slow(this, i) do
+    if has_property?(this, float(i)), do: {:ok, Interp.get(this, float(i))}, else: :slow
   end
 
   defp very_sparse?({:obj, id} = this, len) do
