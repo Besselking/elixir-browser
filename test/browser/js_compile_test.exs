@@ -1007,9 +1007,13 @@ defmodule Browser.JS.CompileTest do
 
     test "a suspended async function with compiled callees collects fast and resumes" do
       # Judge 2 found that a suspended async function can hold compiled code in its
-      # continuation, and that a walk of that code took 1.49 s. The time bound of the
-      # design is 5 ms. The minimum of five collections removes most of the noise of a
-      # busy machine.
+      # continuation, and that a walk of that code took 1.49 s. In step 5 async bodies stay
+      # on the tree, so the continuation holds tree nodes and the compiled callee is reached
+      # only through its closure record, whose `code` the collector does not read. Thus this
+      # test pins the time of the collection and the resume; it does not reach rule 2 of
+      # `Browser.JS.GC` (the skip of the funs of `Browser.JS.Compile`), which is there for
+      # the compiled async bodies of a later step. The time bound of the design is 5 ms. The
+      # minimum of five collections removes most of the noise of a busy machine.
       check = fn ->
         calls = gc_calls(&GC.collect/0)
 
