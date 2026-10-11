@@ -21,3 +21,5 @@ config :browser,
        # Level 4 is refused here because it cannot run until step 2e.
        other -> raise "JS_RESOLVE takes off, info, 1, 2 or 3, not #{other}"
      end)
+
+config :browser, disk_cache_dir: nil
