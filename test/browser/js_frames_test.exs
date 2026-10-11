@@ -4326,7 +4326,7 @@ defmodule Browser.JS.FramesSerialTest do
   # The module also checks that each place that reads a resolver level accepts `4`.
   use ExUnit.Case, async: false
 
-  alias Browser.JS.{Async, Interp, Parser}
+  alias Browser.JS.{Async, Interp, Parser, Resolve}
   alias Browser.JS.Resolve.Info
 
   @check Application.compile_env(:browser, :js_resolve_check, false)
@@ -4569,8 +4569,12 @@ defmodule Browser.JS.FramesSerialTest do
       {_, calls} = traced([{Async, :fill, 2}], fn -> run_script(src, 4) end)
       assert [{_, {:return_from, filled}}] = top(calls, :fill)
 
-      assert filled ==
-               {:call, {:member, {:array, [{:val, 1.0}, arrow]}, {:num, 1.0}, false}, [], false}
+      # (the two parses give the arrow two `uid`s, which `strip/1` removes from the Info)
+      assert {:call, {:member, {:array, [{:val, 1.0}, got]}, {:num, 1.0}, false}, [], false} =
+               filled
+
+      assert put_elem(got, 5, Resolve.strip(elem(got, 5))) ==
+               put_elem(arrow, 5, Resolve.strip(elem(arrow, 5)))
     end
 
     test "an optional chain continues on `{:val}`, and frame mode makes no map scope" do

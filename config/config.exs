@@ -13,4 +13,10 @@ import Config
 # checks cost nothing.
 config :browser, js_resolve_check: System.get_env("JS_RESOLVE_CHECK") == "1"
 
+# Closure compilation (step 5): a function that the resolver rewrote compiles at its first
+# call into Elixir closures (`Browser.JS.Compile`). `JS_COMPILE=0` turns it off, so that the
+# tree walker runs every function. `Browser.JS.Interp.init/1` reads the setting for each new
+# heap, so one VM can run both modes (the differential oracle does).
+config :browser, js_compile: System.get_env("JS_COMPILE") != "0"
+
 import_config "#{config_env()}.exs"

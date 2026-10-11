@@ -1240,7 +1240,11 @@ defmodule Browser.JS.Resolve do
 
     # Every frame takes the names of the frameless scopes under it, in
     # pre-order, which is the order of the numbers.
-    scopes = Enum.reduce(sids, scopes, &layout_scope(&2, &1, level))
+    # One number for this parse makes the `uid` of each function unique in the VM: the
+    # cache of compiled code is keyed by it, and a later parse must not find the code of
+    # another body (design 3, "Identity").
+    parse = :erlang.unique_integer([:positive])
+    scopes = Enum.reduce(sids, scopes, &layout_scope(&2, &1, level, parse))
 
     frameless =
       scopes
@@ -1274,11 +1278,11 @@ defmodule Browser.JS.Resolve do
   defp frame_scope?(%{kind: k, frame: true}) when k in @block_kinds, do: true
   defp frame_scope?(_), do: false
 
-  defp layout_scope(scopes, sid, level) do
+  defp layout_scope(scopes, sid, level, parse) do
     s = scopes[sid]
 
     case s.kind do
-      :fn -> Map.put(scopes, sid, layout_fn(s, level))
+      :fn -> Map.put(scopes, sid, layout_fn(s, level, {parse, sid}))
       k when k in @block_kinds -> layout_block(scopes, sid, s)
       _ -> Map.put(scopes, sid, Map.merge(s, %{index: %{}, home: nil}))
     end
@@ -1291,7 +1295,7 @@ defmodule Browser.JS.Resolve do
   # accumulator: `index` (name to slot), `kinds` (slot to kind), `next` (the
   # first free slot), `template` (the initial values after the parameters and
   # the hidden slots, reversed while the layout grows) and `copies`.
-  defp layout_fn(s, level) do
+  defp layout_fn(s, level, uid) do
     pkind = params_kind(s.params_list)
     uses = fn_uses(s, pkind)
 
@@ -1307,7 +1311,7 @@ defmodule Browser.JS.Resolve do
 
     level_of = fn_level(s, uses)
     rewritten = is_integer(level) and level_of != nil and level_of <= level
-    info = build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten)
+    info = build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten, uid)
 
     Map.merge(s, %{
       info: info,
@@ -1481,7 +1485,7 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  defp build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten) do
+  defp build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten, uid) do
     params = s.params_list
     rest? = match?({:rest, _}, List.last(params))
     nparams = if rest?, do: length(params) - 1, else: length(params)
@@ -1524,7 +1528,8 @@ defmodule Browser.JS.Resolve do
       has_await: s.has_await,
       captured: MapSet.new(),
       free: if(level_of == 1, do: :always, else: :counter),
-      tail_sites: 0
+      tail_sites: 0,
+      uid: uid
     }
   end
 
@@ -2576,7 +2581,9 @@ defmodule Browser.JS.Resolve do
   @doc """
   Removes everything the resolver added: the `Info` of every function node,
   the trailing `Scope` of statements, and every slot form. The result of
-  `strip(program(ast, level: n))` equals `ast`.
+  `strip(program(ast, level: n))` equals `ast`. An `Info` that is not in a
+  function node or a class node keeps its facts but loses its `uid`, which is
+  new for each parse: so two parses of the same text give equal records.
   """
   @spec strip(term) :: term
   def strip({:fn, name, params, body, mode, %Info{src: src}}),
@@ -2619,6 +2626,7 @@ defmodule Browser.JS.Resolve do
   def strip(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.map(&strip/1) |> List.to_tuple()
   def strip(l) when is_list(l), do: Enum.map(l, &strip/1)
   def strip(%MapSet{} = s), do: s
+  def strip(%Info{} = info), do: %{info | uid: nil}
   def strip(%{__struct__: _} = s), do: s
   def strip(m) when is_map(m), do: Map.new(m, fn {k, v} -> {k, strip(v)} end)
   def strip(x), do: x

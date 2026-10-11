@@ -10,7 +10,8 @@ defmodule Browser.JS.GC do
   `{:obj, id}` and every integer that is a heap id, in any tuple, list, map and in the
   environment of Elixir funs (the built-ins capture ids). A stray integer can keep a dead object
   alive, but nothing reachable is ever freed. Function bodies are syntax trees and not walked;
-  only the scope and `home` of a closure are.
+  only the scope and `home` of a closure are. The compiled code of step 5 (the `{:jsc, _}`
+  keys and the funs of `Browser.JS.Compile`) is not walked either: it holds no heap id.
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers).
@@ -58,6 +59,9 @@ defmodule Browser.JS.GC do
         fn
           {k, _}, {ids, roots} when is_integer(k) -> {[k | ids], roots}
           {{:js_hoist, _}, _}, acc -> acc
+          # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its
+          # syntax nodes hold slot numbers, which must not keep an object alive)
+          {{:jsc, _}, _}, acc -> acc
           {:js_memo, _}, acc -> acc
           {:js_heap_n, _}, acc -> acc
           # (the call chain holds names, positions and depths, never an id; a depth or a
@@ -116,6 +120,8 @@ defmodule Browser.JS.GC do
         fn
           {k, _}, roots when is_integer(k) -> roots
           {{:js_hoist, _}, _}, roots -> roots
+          # (the cache of compiled code holds no heap id)
+          {{:jsc, _}, _}, roots -> roots
           {:js_memo, _}, roots -> roots
           {:js_heap_n, _}, roots -> roots
           # (the call chain holds names, positions and depths, never an id)
@@ -187,9 +193,13 @@ defmodule Browser.JS.GC do
   end
 
   defp scan([t | rest], marks) when is_function(t) do
-    case :erlang.fun_info(t, :env) do
-      {:env, env} -> scan(Enum.reduce(env, rest, &spush(&1, &2, marks, false)), marks)
-      _ -> scan(rest, marks)
+    if compiled?(t) do
+      scan(rest, marks)
+    else
+      case :erlang.fun_info(t, :env) do
+        {:env, env} -> scan(Enum.reduce(env, rest, &spush(&1, &2, marks, false)), marks)
+        _ -> scan(rest, marks)
+      end
     end
   end
 
@@ -273,9 +283,13 @@ defmodule Browser.JS.GC do
   end
 
   defp mark([t | rest], marks) when is_function(t) do
-    case :erlang.fun_info(t, :env) do
-      {:env, env} -> mark(push_list(env, rest, marks), marks)
-      _ -> mark(rest, marks)
+    if compiled?(t) do
+      mark(rest, marks)
+    else
+      case :erlang.fun_info(t, :env) do
+        {:env, env} -> mark(push_list(env, rest, marks), marks)
+        _ -> mark(rest, marks)
+      end
     end
   end
 
@@ -321,4 +335,12 @@ defmodule Browser.JS.GC do
     do: [t | stack]
 
   defp push(_, stack, _marks), do: stack
+
+  # A fun of the compiled code (step 5). It holds only values known at compile time: no
+  # heap id and no frame id (the capture rule of `Browser.JS.Compile`). So the walk does
+  # not go into it, also when a continuation of an async function holds it. Its syntax
+  # nodes and slot numbers are integers that the walk would read as ids, and a large body
+  # would cost a long walk at each collection.
+  @compile {:inline, compiled?: 1}
+  defp compiled?(f), do: :erlang.fun_info(f, :module) == {:module, Browser.JS.Compile}
 end

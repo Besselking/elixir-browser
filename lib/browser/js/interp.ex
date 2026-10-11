@@ -110,6 +110,16 @@ defmodule Browser.JS.Interp do
     # `run_frame/6`.
     :erlang.put(:js_stack, [])
     :erlang.put(:js_last, :undefined)
+    # The switch of closure compilation (step 5, `Browser.JS.Compile`). Each heap reads the
+    # application setting once, so that the differential oracle can run both modes in one
+    # VM and a call does not read the application environment. With the switch off, the
+    # code that an earlier heap of this process compiled must go: `make_fn` would give it
+    # to the new function objects.
+    compile? = Application.get_env(:browser, :js_compile, true)
+    :erlang.put(:js_compile, compile?)
+
+    if compile? != true,
+      do: for({{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key))
 
     # A fresh heap gives out the ids from 0 again, so the marks of `frame_done/2` from an
     # earlier heap in this process must go: check mode would read them as the marks of the
@@ -3553,6 +3563,8 @@ defmodule Browser.JS.Interp do
   #   `{value, this}`: the `this` slot is read before the frame is freed, because
   #   `super()` writes it during the body.
   defp run_frame(id, c, this, args, nt, mode) do
+    c = with_code(id, c)
+
     result =
       if @check,
         do: check_oracle(c.name, false, fn -> frame_call(id, c, this, args, nt, mode) end),
@@ -3634,10 +3646,56 @@ defmodule Browser.JS.Interp do
     result
   end
 
+  # The closure record with its compiled code (step 5). Every entry to a sync frame
+  # (`run_closure/4`, `tail_loop/3`, `new` and the class constructors, and the call fast
+  # path of `ev/2`) comes through `run_frame/6`, so the first call of a function object
+  # is found here: its record has no `code` key yet. `nil` code means that the function
+  # does not compile, and the tree walker runs it.
+  @compile {:inline, with_code: 2}
+  defp with_code(_id, %{code: _} = c), do: c
+  defp with_code(id, c), do: first_call(id, c)
+
+  # The first call of a function object: the code comes from the cache or the compiler,
+  # and goes into the closure record in the heap, so that the next calls find it there.
+  # The record is read again, because the call that got `c` can have changed the object
+  # (a `home` or a property) since. The body of a function object never changes, so the
+  # code of `c` is the code of the record.
+  defp first_call(id, c) do
+    code = Browser.JS.Compile.code(c)
+
+    case :erlang.get(id) do
+      %{fun: {:closure, now}} = o ->
+        :erlang.put(id, %{o | fun: {:closure, Map.put(now, :code, code)}})
+
+      _ ->
+        :ok
+    end
+
+    Map.put(c, :code, code)
+  end
+
   # The value of the body of a frame call: an arrow with an expression body gives the
   # value of the expression, and a body that ends without `return` gives `undefined`. A
   # tail site gives the pending call `{:tail, f, this, args}`, which no JS value can be.
+  # Compiled code (step 5) gives the same value or completion as the tree.
+  # (the two clauses repeat the `case` of the completion: an inline function inside an
+  # inline function stays a call, which would cost one reduction per JS call)
   @compile {:inline, body_value: 2}
+  defp body_value(%{code: code} = c, frame) when code != nil do
+    case c.mode do
+      :arrow_expr ->
+        code.(frame)
+
+      _ ->
+        case code.(frame) do
+          {:ret, v} -> v
+          :ok -> :undefined
+          {:tail, _, _, _} = t -> t
+          other -> bad_body_completion(other, c.name)
+        end
+    end
+  end
+
   defp body_value(c, frame) do
     case c.mode do
       :arrow_expr ->
@@ -4126,16 +4184,6 @@ defmodule Browser.JS.Interp do
     # that a closure still holds.
     :erlang.put(:js_fns, pget(:js_fns) + 1)
 
-    closure = %{
-      name: name,
-      params: params,
-      body: body,
-      mode: mode,
-      scope: env,
-      src: src,
-      info: info
-    }
-
     closure =
       if rewritten? do
         # The frame of a call needs the root scope of the closure's own chain (the realm
@@ -4147,12 +4195,42 @@ defmodule Browser.JS.Interp do
         if @check and not match?(%{parent: nil}, :erlang.get(root)),
           do: check_fail("the root of #{inspect(name)} is #{inspect(root)}, no global scope")
 
-        Map.merge(closure, %{
-          root: root,
-          nnames: info.size - 5 - length(info.hidden) - length(info.template)
-        })
+        nnames = info.size - 5 - length(info.hidden) - length(info.template)
+
+        # A function whose body compiled already (step 5) gives its code to each new
+        # function object, so that the first call of the object does not read the cache.
+        # The key and the value are those of `Browser.JS.Compile`. (each branch builds its
+        # map at once: a merge would cost one more call per function object)
+        case :erlang.get({:jsc, info.uid}) do
+          {code, _maker} ->
+            %{
+              name: name,
+              params: params,
+              body: body,
+              mode: mode,
+              scope: env,
+              src: src,
+              info: info,
+              root: root,
+              nnames: nnames,
+              code: code
+            }
+
+          _ ->
+            %{
+              name: name,
+              params: params,
+              body: body,
+              mode: mode,
+              scope: env,
+              src: src,
+              info: info,
+              root: root,
+              nnames: nnames
+            }
+        end
       else
-        closure
+        %{name: name, params: params, body: body, mode: mode, scope: env, src: src, info: info}
       end
 
     fun =
@@ -5024,16 +5102,18 @@ defmodule Browser.JS.Interp do
   # or generator, see `Browser.JS.Async`)
   def exec_frame_stmt(stmt, env, labels \\ []), do: fstmt(stmt, env, labels)
 
+  @doc false
   # A statement list inside a rewritten function. A statement that does not complete
-  # normally ends the list, as in `exec_list/2`.
-  defp fbody([], _env), do: :ok
+  # normally ends the list, as in `exec_list/2`. (public: the compiled body of
+  # `Browser.JS.Compile` calls it)
+  def fbody([], _env), do: :ok
 
-  defp fbody([{:pos, loc} | rest], env) do
+  def fbody([{:pos, loc} | rest], env) do
     :erlang.put(:js_pos, loc)
     fbody(rest, env)
   end
 
-  defp fbody([stmt | rest], env) do
+  def fbody([stmt | rest], env) do
     case fstmt(stmt, env, []) do
       :ok ->
         fbody(rest, env)
@@ -5044,19 +5124,27 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # A statement of a rewritten function. (public: a statement that `Browser.JS.Compile`
+  # does not compile runs through it)
+  #
+  # A compiled child (step 5): the compiler puts `{:cc, fun}` in the place of a statement
+  # child of a node that stays on the tree, so the tree runs the closure.
+  def fstmt({:cc, f}, env, _), do: f.(env)
+
   # (the twin of the `exec/3` clause for `{:expr}`, without the write)
-  defp fstmt({:expr, e}, env, _) do
+  def fstmt({:expr, e}, env, _) do
     ev(e, env)
     :ok
   end
 
   # The resolver marked each return of a rewritten function: a tail site gives back a
   # pending call, and every other return is plain.
-  defp fstmt({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
-  defp fstmt({:return, e, :tail}, env, _), do: tail_value(e, env)
+  def fstmt({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
+  def fstmt({:return, e, :tail}, env, _), do: tail_value(e, env)
 
   # (the twin of the `exec/3` clause for `{:if}`, without the write)
-  defp fstmt({:if, c, a, b}, env, _) do
+  def fstmt({:if, c, a, b}, env, _) do
     cond do
       truthy(ev(c, env)) -> fstmt(a, env, [])
       b != nil -> fstmt(b, env, [])
@@ -5065,7 +5153,7 @@ defmodule Browser.JS.Interp do
   end
 
   # (the twin of the `exec/3` clause for `{:labeled}`)
-  defp fstmt({:labeled, l, s}, env, labels) do
+  def fstmt({:labeled, l, s}, env, labels) do
     case fstmt(s, env, [l | labels]) do
       {:brk, ^l} -> :ok
       c -> c
@@ -5073,9 +5161,9 @@ defmodule Browser.JS.Interp do
   end
 
   # (the twins of the `exec/3` clauses for `{:while}` and `{:dowhile}`, without the write)
-  defp fstmt({:while, c, body}, env, labels), do: while_loop(c, body, env, labels, :fn)
+  def fstmt({:while, c, body}, env, labels), do: while_loop(c, body, env, labels, :fn)
 
-  defp fstmt({:dowhile, body, c}, env, labels) do
+  def fstmt({:dowhile, body, c}, env, labels) do
     case run_body(body, env, labels, :fn) do
       :break -> :ok
       :next -> while_loop(c, body, env, labels, :fn)
@@ -5084,13 +5172,13 @@ defmodule Browser.JS.Interp do
   end
 
   # (a block inside a rewritten function: its names are slots of the frame, no scope is made)
-  defp fstmt({:block, stmts, sc}, env, _) when frameless(sc) do
+  def fstmt({:block, stmts, sc}, env, _) when frameless(sc) do
     enter_frameless(env, sc)
     fbody(stmts, env)
   end
 
   # (a block whose names a closure captures: the names live in a block frame of their own)
-  defp fstmt({:block, stmts, sc}, env, _) when framed(sc) do
+  def fstmt({:block, stmts, sc}, env, _) when framed(sc) do
     fns = :erlang.get(:js_fns)
     b = enter_scope(env, sc)
 
@@ -5101,7 +5189,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp fstmt(stmt, env, labels), do: exec(stmt, env, labels)
+  def fstmt(stmt, env, labels), do: exec(stmt, env, labels)
 
   # A loop body or a case body in the mode of the loop: `:top` for script, eval and
   # old-path code, which writes `:js_last`, and `:fn` for a rewritten function.
@@ -5243,6 +5331,9 @@ defmodule Browser.JS.Interp do
   defp exec(stmt, env), do: exec(stmt, env, [])
 
   # where the script is: the file and line of the statement that follows (see the parser)
+  # A compiled child (step 5), as in `fstmt/3`.
+  defp exec({:cc, f}, env, _), do: f.(env)
+
   defp exec({:pos, loc}, _, _) do
     :erlang.put(:js_pos, loc)
     :ok
@@ -6332,6 +6423,10 @@ defmodule Browser.JS.Interp do
   end
 
   # ── expressions ────────────────────────────────────────────
+
+  # A compiled child (step 5): the compiler puts `{:cc, fun}` in the place of an expression
+  # child of a node that stays on the tree, so the tree runs the closure.
+  def ev({:cc, f}, env), do: f.(env)
 
   def ev({:num, n}, _), do: n
   def ev({:bigint, n}, _), do: {:bigint, n}

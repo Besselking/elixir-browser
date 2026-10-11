@@ -37,6 +37,10 @@ defmodule Mix.Tasks.Js.Test262 do
     * `--limit N` - run only the first N tests found (a quick look)
     * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info`, `1`,
       `2`, `3` or `4` (see `Browser.JS.Resolve`)
+    * `--compile-diff` - run each test two times, with the closure compiler of step 5 off
+      and on (`Browser.JS.Compile`), and fail it when the two runs differ in the outcome,
+      the console, the steps left, the heap ids, the heap count or the position (see
+      `Browser.JS.Test262.run_test/4`). The run takes about twice the time.
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -95,7 +99,8 @@ defmodule Mix.Tasks.Js.Test262 do
           shard: :string,
           limit: :integer,
           timings: :string,
-          resolve: :string
+          resolve: :string,
+          compile_diff: :boolean
         ],
         aliases: [v: :verbose]
       )
@@ -153,7 +158,9 @@ defmodule Mix.Tasks.Js.Test262 do
           n = :counters.get(counter, 1)
           if tty? and rem(n, 500) == 0, do: IO.write(:stderr, "\r  #{n}/#{total}")
         end
-      ] ++ if(opts[:all_features], do: [skip_features: []], else: [])
+      ] ++
+        if(opts[:all_features], do: [skip_features: []], else: []) ++
+        if(opts[:compile_diff], do: [compile_diff: true], else: [])
 
     results = Test262.run(root, files, run_opts)
     if tty?, do: IO.write(:stderr, "\r" <> String.duplicate(" ", 30) <> "\r")
@@ -270,6 +277,12 @@ defmodule Mix.Tasks.Js.Test262 do
       )
 
       Mix.shell().info("Failures written to #{file}")
+    end
+
+    # (the count that `--compile-diff` is for: it must be 0)
+    if opts[:compile_diff] do
+      diffs = Enum.count(failures, fn {_, r} -> String.starts_with?(r, "compile diff") end)
+      Mix.shell().info("compile diff: #{diffs} tests differ with the compiler off and on")
     end
 
     if failures != [] and opts[:verbose] != true do

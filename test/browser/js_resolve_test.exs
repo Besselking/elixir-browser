@@ -1857,11 +1857,12 @@ defmodule Browser.JS.ResolveTest do
     assert %Scope{frame: false, slots: %{"c" => 8, "g" => 9}, hoist: [{9, _}]} = scope_of(f, 1)
 
     # The constants agree with the resolver's own Info for the same text, except for the
-    # source and `rewritten` (which step 2d sets).
+    # source, `rewritten` (which step 2d sets) and the `uid` of the parse (which `strip/1`
+    # removes).
     for {src, derived?} <- [{@s38b, false}, {@s38c, true}] do
       i = info(fun(resolve(src), "constructor"))
       d = Resolve.default_ctor_info(derived?, i.src)
-      assert %{i | rewritten: false} == d, src
+      assert Resolve.strip(%{i | rewritten: false}) == d, src
     end
   end
 

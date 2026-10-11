@@ -192,6 +192,14 @@ defmodule Browser.JS.Test262 do
   @doc """
   Runs one test (its source, header and the parsed harness) in a fresh process.
   Returns `:pass` or `{:fail, reason}`.
+
+  With the option `compile_diff: true` the test runs two times, in two fresh processes:
+  with the closure compiler of step 5 off, then on (`Browser.JS.Compile`). The two runs
+  must give the same outcome (the result, or the error and its text, and the console),
+  the same steps left (`:js_steps`), the same next heap id (`:js_next`), the same heap
+  count (`:js_heap_n`) and the same position (`:js_pos`). A difference is a failure with
+  a reason that starts with "compile diff". When the two runs agree, the run with the
+  compiler on is judged as usual.
   """
   def run_test(source, meta, harness, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 10_000)
@@ -209,17 +217,56 @@ defmodule Browser.JS.Test262 do
         path = Keyword.get(opts, :path)
         module? = "module" in flags
 
-        spawn_and_wait(timeout, fn ->
-          Process.put(:js_cannot_block, "CanBlockIsFalse" in flags)
+        once = fn compile ->
+          spawn_and_wait(timeout, fn ->
+            Process.put(:js_cannot_block, "CanBlockIsFalse" in flags)
+            regexp_utils? = "regExpUtils.js" in names
 
-          execute(programs, source, max_steps, async?, "regExpUtils.js" in names, path, module?)
-        end)
-        |> judge(negative, async?)
+            outcome =
+              execute(programs, source, max_steps, async?, regexp_utils?, path, module?, compile)
+
+            if compile == nil, do: outcome, else: {outcome, probe()}
+          end)
+        end
+
+        if Keyword.get(opts, :compile_diff, false) do
+          compare(once.(false), once.(true), negative, async?)
+        else
+          judge(once.(nil), negative, async?)
+        end
 
       missing ->
         {:fail, "harness file #{missing} unavailable: #{inspect(harness[missing])}"}
     end
   end
+
+  # The state of the heap at the end of a run, which the two runs of `compile_diff` must
+  # agree on: a change in the order of evaluation or of allocation changes the ids or the
+  # count, and a change in the steps or the position shows a missed `tick` or `:js_pos`.
+  defp probe do
+    Map.new([:js_steps, :js_next, :js_heap_n, :js_pos], &{&1, :erlang.get(&1)})
+  end
+
+  # Two runs that ended (no timeout and no crash) must agree. When one of them did not
+  # end, there is nothing to compare, and the run with the compiler on is judged.
+  defp compare({off, off_probe}, {on, on_probe}, negative, async?) do
+    cond do
+      off != on ->
+        {:fail,
+         "compile diff: outcome off #{short(off)}, on #{short(on)}" |> String.slice(0, 400)}
+
+      off_probe != on_probe ->
+        {:fail, "compile diff: state off #{inspect(off_probe)}, on #{inspect(on_probe)}"}
+
+      true ->
+        judge(on, negative, async?)
+    end
+  end
+
+  defp compare(_off, {on, _probe}, negative, async?), do: judge(on, negative, async?)
+  defp compare(_off, on, negative, async?), do: judge(on, negative, async?)
+
+  defp short(v), do: inspect(v, limit: 8, printable_limit: 120)
 
   defp spawn_and_wait(timeout, fun) do
     parent = self()
@@ -247,8 +294,11 @@ defmodule Browser.JS.Test262 do
   end
 
   # -> {:ok, printed} | {:syntax, msg} | {:uncaught, text} | :limit
-  defp execute(programs, source, max_steps, async?, regexp_utils?, path, module?) do
+  # `compile` sets the switch of the closure compiler for this heap (`nil` keeps the
+  # application setting that `Interp.init/1` reads).
+  defp execute(programs, source, max_steps, async?, regexp_utils?, path, module?, compile) do
     Interp.init(max_steps)
+    if compile != nil, do: Process.put(:js_compile, compile)
     scope = Builtins.install()
     install_host(scope)
     Modules.reset()
@@ -470,7 +520,8 @@ defmodule Browser.JS.Test262 do
   Runs the tests at `files` (relative to the suite's `test/` directory). Returns
   `%{"path" => :pass | {:fail, reason} | {:skip, reason}}`.
 
-  Options: `:timeout` (ms per test), `:max_steps`, `:skip_features`, `:jobs`, `:on_result`
+  Options: `:timeout` (ms per test), `:max_steps`, `:skip_features`, `:jobs`,
+  `:compile_diff` (see `run_test/4`), `:on_result`
   (called with `{path, result}` as results come in), `:on_time` (called with `path` and the
   microseconds the test took, from the worker process).
   """

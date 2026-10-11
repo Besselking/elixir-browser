@@ -111,6 +111,12 @@ defmodule Browser.JS.Resolve.Info do
     these statements give a pending call `{:tail, f, this, args}` to the frame
     (step 3). In check mode a pending call from a function with no tail site is a
     fault.
+  - `uid`: the identity of the function in the cache of compiled code (step 5),
+    `{parse, n}`. `parse` is a number that is new for each parse, and `n` is the
+    number of the function's scope in that parse. Two function nodes with the same
+    `uid` have the same body. The default value `nil` is on each `Info` that the
+    resolver did not make for a function (for example a default class
+    constructor). A function with no `uid` does not compile.
   """
 
   defstruct src: nil,
@@ -143,7 +149,8 @@ defmodule Browser.JS.Resolve.Info do
             has_await: false,
             captured: MapSet.new(),
             free: :always,
-            tail_sites: 0
+            tail_sites: 0,
+            uid: nil
 
   @type t :: %__MODULE__{}
 end
