@@ -4586,18 +4586,16 @@ defmodule Browser.JS.FramesSerialTest do
       src = "async function f(){ let o = {a: 2}; let k = 'a'; return o?.[await k] } f()"
 
       {_, calls} =
-        traced([{Async, :cev_await, 4}, {Interp, :new_scope, 1}], fn ->
+        traced([{Async, :cev_chain, 5}, {Interp, :new_scope, 1}], fn ->
           run_script(src, 4)
         end)
 
-      assert Enum.any?(calls_of(calls, :cev_await), fn {[node | _], _} ->
-               match?(
-                 {:chain, {:member, {:val, {:obj, _}}, {:await, {:slot, 0, 7, "k"}}, false}},
-                 node
-               )
+      # (`cev_chain/5` gets the spine of the chain, without the `{:chain, _}` around it)
+      assert Enum.any?(calls_of(calls, :cev_chain), fn {[node | _], _} ->
+               match?({:member, {:val, {:obj, _}}, {:await, {:slot, 0, 7, "k"}}, false}, node)
              end)
 
-      refute Enum.any?(calls_of(calls, :cev_await), fn {[node | _], _} ->
+      refute Enum.any?(calls_of(calls, :cev_chain), fn {[node | _], _} ->
                holds?(node, &match?({:id, "\0o" <> _}, &1))
              end)
 

@@ -135,7 +135,10 @@ defmodule Browser.JS.CompileAsyncTest do
     {"agen yield star sync",
      ~S|var r = []; async function* g(){ var v = yield* [1, Promise.resolve(2)]; r.push('v' + v); yield* (async function*(){ yield 3; return 'inner' })() } (async () => { for await (var x of g()) r.push(x) })(); r|},
     {"agen break closes",
-     ~S|var r = []; async function* g(){ try { yield 1; yield 2 } finally { r.push('closed'); await 0; r.push('closed2') } } (async () => { for await (var v of g()) { r.push(v); break } r.push('after') })(); r|}
+     ~S|var r = []; async function* g(){ try { yield 1; yield 2 } finally { r.push('closed'); await 0; r.push('closed2') } } (async () => { for await (var v of g()) { r.push(v); break } r.push('after') })(); r|},
+    # A bare `return;` finishes without an await, at any depth; `return undefined;` awaits.
+    {"agen bare return race",
+     ~S|var r = []; async function* a(){ return } async function* b(){ if (r) return } async function* c(){ await 0; { return } } async function* d(){ await 0; return undefined } async function* e(){ for (;;) { await 0; return } } async function* f(){ var g = () => { return }; yield g() } [a, b, c, d, e, f].forEach((g, i) => g().next().then(v => r.push('g' + i + v.value))); Promise.resolve().then(() => r.push(1)).then(() => r.push(2)).then(() => r.push(3)).then(() => r.push(4)); r|}
   ]
 
   # `for await` loops.
@@ -205,7 +208,11 @@ defmodule Browser.JS.CompileAsyncTest do
     {"switch case order",
      ~S"var r = []; async function f(x){ var log = []; function c(v){ log.push('c' + v); return v } switch (x) { case c(1): log.push('one'); case await c(2): log.push('two'); break; case c(3): log.push('three') } return log.join() } Promise.all([f(2), f(3), f(9)]).then(v => r.push(v.join('|'))); r"},
     {"switch let tdz",
-     ~S|var r = []; async function f(x){ switch (x) { case 1: let y = await 'one'; return y; case 2: try { return y } catch (e) { return e.constructor.name } } } Promise.all([f(1), f(2), f(3)]).then(v => r.push(v.join())); r|}
+     ~S|var r = []; async function f(x){ switch (x) { case 1: let y = await 'one'; return y; case 2: try { return y } catch (e) { return e.constructor.name } } } Promise.all([f(1), f(2), f(3)]).then(v => r.push(v.join())); r|},
+    # A `default` in the middle: the search goes on to the later cases first, and comes
+    # back to the `default` when no case matches.
+    {"switch default in middle",
+     ~S|var r = []; async function g(v){ var o = []; switch (await v) { case 1: o.push('one'); default: o.push('def'); break; case await 2: o.push('two') } return o.join() } (async () => { r.push(await g(2), await g(1), await g(3)) })(); r|}
   ]
 
   # Awaits in the test and the update of loops, and the loops of the step 4 design.
@@ -231,7 +238,11 @@ defmodule Browser.JS.CompileAsyncTest do
     {"gen loop parts",
      ~S|function* g(){ var n = 0; for (var i = yield 'init'; yield 'test' + i; i = yield 'upd' + i) { n++ } return n } var it = g(); var out = [it.next().value]; out.push(it.next(1).value, it.next(true).value, it.next(2).value, it.next(false).value); console.log(out.join(), JSON.stringify(it.next()))|},
     {"agen loop",
-     ~S|var r = []; async function* g(){ var i = 0; while (await (i < 3)) yield await i++ } (async () => { for await (const v of g()) r.push(v); r.push('end') })(); r|}
+     ~S|var r = []; async function* g(){ var i = 0; while (await (i < 3)) yield await i++ } (async () => { for await (const v of g()) r.push(v); r.push('end') })(); r|},
+    # A `var` without an init in a declaration that awaits keeps its value, and a `let`
+    # without an init is `undefined`.
+    {"var without init after await",
+     ~S|var r = []; async function f(){ var x = 1; var x, y = await 0; let z, w = await 2; r.push(x, y, z, w) } f(); r|}
   ]
 
   # Closures made after an await or a yield.

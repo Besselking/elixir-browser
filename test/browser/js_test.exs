@@ -820,6 +820,23 @@ defmodule Browser.JSTest do
              """) == ["o,o,,B,B"]
     end
 
+    test "a bare return in an async generator does not await, at any depth" do
+      # `return;` finishes at once, but `return undefined;` awaits its value. A `return;`
+      # in an arrow inside the generator is a plain return (the `yield` of its value
+      # awaits, as the spec says).
+      assert logs_of("""
+             var log = [];
+             async function* a() { return }
+             async function* b() { if (true) return }
+             async function* c() { { return } }
+             async function* d() { return undefined }
+             async function* e() { yield (() => { return })() }
+             [a, b, c, d, e].forEach((g, i) => g().next().then(v => log.push(i + ':' + v.value)));
+             Promise.resolve().then(() => log.push('p1')).then(() => log.push('p2'))
+               .then(() => console.log(log.join()));
+             """) == ["0:undefined,1:undefined,2:undefined,p1,3:undefined,4:undefined,p2"]
+    end
+
     test "a function or class after an await takes the name of its binding" do
       assert logs_of("""
              var out = [];
@@ -848,10 +865,12 @@ defmodule Browser.JSTest do
                o[k++ ? 'p' : 'q'] &&= await t('k');
                (await o).p &&= await t('w');
                r.push(y, z, o.p, o.q, k);
+               // (inside a larger expression, a logical assignment is a leaf of the lift)
+               r.push(y ??= await t('no'), o.q ||= await t('no'), z &&= await t('z2'));
                console.log(r.join());
              }
              a();
-             """) == ["z,q,k,w,1,z,w,k,1"]
+             """) == ["z,q,k,w,1,z,w,k,1,z2,1,k,z2"]
     end
 
     test "a for-in loop whose body awaits skips the keys deleted before their turn" do

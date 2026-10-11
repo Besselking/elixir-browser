@@ -142,9 +142,11 @@ defmodule Browser.JS.Compile do
   The tree path of `Async` finds some facts each time that it runs. The plan finds them
   once, when it compiles:
 
-    * Statement facts. A statement list splits at each statement with the mark `{:aw}`
-      and at each `return;`. A run of statements between these compiles with the sync
-      compiler into one closure, which runs under one `try`.
+    * Statement facts. A statement list splits at each statement with the mark `{:aw}`.
+      A run of statements between these compiles with the sync compiler into one
+      closure, which runs under one `try`. (A `return;` of an async generator is
+      `{:return, {:lit, :ag_bare}}` from the parser, so a sync run gives the marker and
+      the generator finishes without an await.)
     * Expression facts. `Browser.JS.Awaits.any?/1` runs once for each node that the plan
       compiles. An expression that does not await is a closure of the sync compiler.
     * Lift plans. `Async.lift_plan/1` gives the template and the leaves of an expression
@@ -169,7 +171,8 @@ defmodule Browser.JS.Compile do
     * a lift plan with a leaf from a class, because the leaf runs in a class scope;
     * for-in, for-of and for-await;
     * `try` with an await, and `using`;
-    * a pattern that awaits, which binds through `Async.cbind/6`.
+    * the bind of a pattern that awaits, which runs through `Async.cbind_cps/6` (the
+      declaration itself is part of the plan).
 
   A plan makes no fun when it runs. A continuation keeps the frame id, so the collector
   must walk it. Thus only the named functions of `Async` (for example `Async.then/5`,
@@ -1887,8 +1890,7 @@ defmodule Browser.JS.Compile do
   end
 
   # A statement list of a plan (the twin of `Async.clist/4`). The list splits at each
-  # statement that can suspend: a statement with the mark `{:aw}`, and a `return;`, which
-  # finishes an async generator without an await of the value. Each run of statements
+  # statement that can suspend, which is a statement with the mark `{:aw}`. Each run of statements
   # between these runs as one compiled list of the sync compiler, under one `try`. The plan
   # is a chain that is built from the end, as in `list/1`.
   defp klist(stmts) do
@@ -1913,7 +1915,6 @@ defmodule Browser.JS.Compile do
   end
 
   defp suspends?({:aw, _}), do: true
-  defp suspends?({:return, nil}), do: true
   defp suspends?(_), do: false
 
   # The segments are reversed: the head is the last segment. `rest` is the plan of the
@@ -1975,13 +1976,6 @@ defmodule Browser.JS.Compile do
   defp kstmt(s, labels) do
     count()
     kstmt_node(s, labels)
-  end
-
-  # In an async generator, `return;` finishes the body without an await of the value.
-  defp kstmt_node({:return, nil}, _labels) do
-    fn _env, ctx, _k ->
-      if is_map_key(ctx, :async_gen), do: ctx.ret.(:ag_bare), else: ctx.ret.(:undefined)
-    end
   end
 
   defp kstmt_node({:aw, s}, labels) do

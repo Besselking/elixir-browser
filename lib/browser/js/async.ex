@@ -1593,9 +1593,6 @@ defmodule Browser.JS.Async do
 
   defp cexec(stmt, env, ctx, k, labels \\ [])
 
-  defp cexec({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels),
-    do: ctx.ret.(:ag_bare)
-
   # In a rewritten body the resolver marks each statement that awaits with `{:aw}`, so no
   # walk is needed: a marked statement goes to `cs/5`, every other one to `sync_stmt/5`.
   defp cexec({:aw, stmt}, env, ctx, k, labels) do
@@ -1699,8 +1696,6 @@ defmodule Browser.JS.Async do
 
   defp cs({:var, kind, decls}, env, ctx, k, _labels), do: cdecls(decls, kind, env, ctx, k)
 
-  # in an async generator `return;` and falling off the end finish without awaiting a value
-  defp cs({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels), do: ctx.ret.(:ag_bare)
   defp cs({:return, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
   defp cs({:return, e, :plain}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
   defp cs({:throw, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.throw)
