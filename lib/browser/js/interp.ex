@@ -4628,7 +4628,11 @@ defmodule Browser.JS.Interp do
 
   @doc "Runs a whole program in the global scope; returns the completion value."
   def run_program({:program, stmts}, script? \\ false) do
-    :erlang.put(:js_last, :undefined)
+    # Global code can run inside a JS call (the Function constructor, `$262.evalScript`).
+    # It must not change the completion value of the code that called it, so the old value
+    # comes back at the end. Since step 3 a rewritten function writes no completion value
+    # that could hide such a leak.
+    caller_last = :erlang.put(:js_last, :undefined)
     scope = global()
 
     if script? do
@@ -4650,6 +4654,7 @@ defmodule Browser.JS.Interp do
     # microtasks run after the script and must not change its completion value)
     result = Process.get(:js_last, :undefined)
     Browser.JS.Promise.run_microtasks()
+    :erlang.put(:js_last, caller_last)
     result
   end
 
@@ -7209,9 +7214,13 @@ defmodule Browser.JS.Interp do
 
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
-    :erlang.put(:js_last, :undefined)
+    # The completion value of the eval code is the result of the call, not a value of the
+    # caller: the caller's value comes back, so that an eval inside a function cannot change
+    # the completion value of the script.
+    caller_last = :erlang.put(:js_last, :undefined)
     top_completion(exec_list(stmts, lex))
     result = Process.get(:js_last, :undefined)
+    :erlang.put(:js_last, caller_last)
     free_scope(lex, before)
     result
   end

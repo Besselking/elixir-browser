@@ -310,7 +310,23 @@ defmodule Browser.JS.CompletionTest do
   # with the direct eval of the design are in `Browser.JS.CompletionEvalLevelTest` below.
   @d1 [
     {"D1", "5; var x = (function(){ for (var i = 0; i < 1; i++) { 42 } })();", 42.0, 5.0},
-    {"X11", "1; var x = (function(){ for (;;) { break } })();", :undefined, 1.0}
+    {"X11", "1; var x = (function(){ for (;;) { break } })();", :undefined, 1.0},
+    # Found in review: global code in a function (an indirect eval here) wrote the
+    # completion value of the script, and before commit 10 a later write of the function
+    # hid this.
+    {"R-ie", "5; var x = (function(){ var t = (0,eval)('77'); for (;;) { 88; break } })();", 88.0,
+     5.0},
+    {"R-gen", "5; var x = (function*(){ var t = (0,eval)('77'); 88 })().next();", 88.0, 5.0}
+  ]
+
+  # Eval code and the global code of the Function constructor give their completion value
+  # as the result of the call. They do not change the completion value of the code that
+  # called them, at every level. Each row is the source and its value at `:off` and 4.
+  @nested_global [
+    {"5; var f = new Function('return 1');", 5.0},
+    {"5; var y = eval('7');", 5.0},
+    {"5; x = eval('7');", 7.0},
+    {"1; (function(){ eval('2') })();", :undefined}
   ]
 
   describe "6.2: the snippet rows" do
@@ -332,6 +348,12 @@ defmodule Browser.JS.CompletionTest do
 
       for level <- @levels do
         assert eval(src, level, max_steps: 100_000) == {:error, :step_limit, []}, "at #{level}"
+      end
+    end
+
+    test "nested global code keeps the completion value of its caller" do
+      for {src, value} <- @nested_global, level <- @levels do
+        assert eval(src, level) == {:ok, value, []}, "at #{level}: #{src}"
       end
     end
 
