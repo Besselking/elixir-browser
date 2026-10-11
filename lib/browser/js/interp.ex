@@ -1383,6 +1383,19 @@ defmodule Browser.JS.Interp do
   def function?({:obj, id}), do: deref(id).class == :function
   def function?(_), do: false
 
+  # `function?/1` without the two calls, for a call site on the hot path.
+  @compile {:inline, callable?: 1}
+  defp callable?({:obj, id}) do
+    case :erlang.get(id) do
+      %{class: :function} -> true
+      # (a missing entry fails as `deref/1` fails)
+      :undefined -> deref(id)
+      _ -> false
+    end
+  end
+
+  defp callable?(_), do: false
+
   def truthy(v) when v in [false, :undefined, :null, :nan, "", {:bigint, 0}], do: false
   def truthy(v) when is_number(v), do: v != 0
   def truthy(_), do: true
@@ -2966,8 +2979,16 @@ defmodule Browser.JS.Interp do
 
   # ── calling ────────────────────────────────────────────────
 
-  def call({:obj, id}, this, args) do
-    case deref(id) do
+  def call({:obj, id}, this, args), do: call_obj(id, deref(id), this, args)
+
+  def call(_, _, _), do: throw_error("TypeError", "value is not a function")
+
+  # The call of the function object `o` at heap id `id`. The caller has read `o` already, so
+  # a call site that tests the callee first (`ev/2` for a call) reads the heap only once.
+  # (inline: `call/3` keeps the cost of one local call)
+  @compile {:inline, call_obj: 4}
+  defp call_obj(id, o, this, args) do
+    case o do
       %{class_info: info} ->
         throw_error(
           "TypeError",
@@ -2998,8 +3019,6 @@ defmodule Browser.JS.Interp do
         throw_error("TypeError", "value is not a function")
     end
   end
-
-  def call(_, _, _), do: throw_error("TypeError", "value is not a function")
 
   def construct(f, args, new_target \\ nil)
 
@@ -5932,7 +5951,12 @@ defmodule Browser.JS.Interp do
     if plain? do
       {f, this} = call_target(callee, env)
       argv = eval_list(args, env)
-      unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
+
+      # (the test of `function?/1` inline: `tail_loop/3` reads the callee again to run it,
+      # and the error must come here, inside the frame of the caller)
+      unless callable?(f),
+        do: throw_error("TypeError", "#{describe(callee)} is not a function")
+
       {:tail, f, this, argv}
     else
       {:ret, ev(e, env)}
@@ -7044,15 +7068,43 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The call fast path (step 5): one read of the heap finds the callee. A plain function
+  # that the resolver rewrote runs its frame at once, as `call/3` and `run_closure/4` would
+  # run it, but without the second read and the two extra calls. Every other function goes
+  # to `call_obj/4` with the object that was read. The test that the callee is a function
+  # and its error come first, in the order of `function?/1` and `call/3`.
   def ev({:call, callee, args, opt}, env) do
     {f, this} = call_target(callee, env)
 
     if opt and nullish?(f), do: throw(:js_short)
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
-    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-    if @check, do: check_link(env)
-    call(f, this, argv)
+
+    case f do
+      {:obj, id} ->
+        case :erlang.get(id) do
+          %{class: :function, fun: {:closure, %{info: %Info{rewritten: true}} = c}} = o
+          when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+                 not is_map_key(o, :class_info) ->
+            if @check, do: check_link(env)
+            tick()
+            run_frame(id, c, this, argv, :undefined, :call)
+
+          %{class: :function} = o ->
+            if @check, do: check_link(env)
+            call_obj(id, o, this, argv)
+
+          # (a missing entry fails as `deref/1` fails)
+          :undefined ->
+            deref(id)
+
+          _ ->
+            throw_error("TypeError", "#{describe(callee)} is not a function")
+        end
+
+      _ ->
+        throw_error("TypeError", "#{describe(callee)} is not a function")
+    end
   end
 
   def ev({:new, callee, args}, env) do
