@@ -7768,16 +7768,19 @@ defmodule Browser.JS.Interp do
   # recursive call, because Erlang does not define the order in which the parts of a list
   # expression are evaluated. Plain recursion is faster than `Enum.flat_map/2` with a fun,
   # and a call evaluates an argument list every time.
-  defp eval_list([], _env), do: []
+  @doc false
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it for an
+  # argument list with a spread or a hole.
+  def eval_list([], _env), do: []
 
-  defp eval_list([{:spread, e} | rest], env) do
+  def eval_list([{:spread, e} | rest], env) do
     vs = iterate(ev(e, env))
     vs ++ eval_list(rest, env)
   end
 
-  defp eval_list([:hole | rest], env), do: [:undefined | eval_list(rest, env)]
+  def eval_list([:hole | rest], env), do: [:undefined | eval_list(rest, env)]
 
-  defp eval_list([n | rest], env) do
+  def eval_list([n | rest], env) do
     v = ev(n, env)
     [v | eval_list(rest, env)]
   end
