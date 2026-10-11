@@ -31,6 +31,7 @@ defmodule Browser.JS.FastTest do
 
   if @check do
     alias Browser.JS.{Builtins, Fast, GC, Interp, Modules, Parser, Props}
+    require Browser.JS.Obj, as: Obj
     alias Browser.JS.CompileTest.Corpus
 
     @file_name "t.js"
@@ -248,15 +249,15 @@ defmodule Browser.JS.FastTest do
       o = Interp.deref(id)
 
       head =
-        {Map.get(o, :class), Map.get(o, :proto), Map.get(o, :ext, true), Map.get(o, :frozen),
-         Map.get(o, :sealed), Map.get(o, :len)}
+        {Map.get(o, :class), Map.get(o, :proto), Obj.extensible?(o), Obj.frozen?(o),
+         Obj.sealed?(o), Map.get(o, :len)}
 
       entry =
         if is_map_key(o, :proxy) do
           {head, :proxy}
         else
           enumerable = Interp.own_keys(obj)
-          other = Map.keys(o.props) -- enumerable
+          other = Obj.all_keys(o) -- enumerable
 
           # (a private name holds a reference, which differs between two runs, so it goes
           # out of the export; the other keys are sorted after the objects get their names)
