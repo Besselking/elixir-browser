@@ -865,23 +865,7 @@ defmodule Browser.JS.Async do
   end
 
   defp cev_await({:yield, e, false}, env, ctx, k) do
-    cev(e, env, ctx, fn v ->
-      ctx.yield.(v, fn
-        {:next, x} ->
-          k.(x)
-
-        {:throw, err} ->
-          ctx.throw.(err)
-
-        # in an async generator the value of a `return()` is awaited first, and a rejection
-        # is thrown at the `yield`
-        {:return, r} when is_map_key(ctx, :async_gen) ->
-          await_value(r, ctx, fn v -> ctx.ret.({:ag_done, v}) end)
-
-        {:return, r} ->
-          ctx.ret.(r)
-      end)
-    end)
+    cev(e, env, ctx, fn v -> yield_value(v, ctx, k) end)
   end
 
   defp cev_await({:yield, e, true}, env, %{async_gen: true} = ctx, k) do
@@ -1400,7 +1384,9 @@ defmodule Browser.JS.Async do
     end
   end
 
-  defp await_value(v, ctx, k) do
+  @doc false
+  # (public: compiled plans call it, see "Compiled plans")
+  def await_value(v, ctx, k) do
     # PromiseResolve: a promise is reused only when its `constructor` is Promise itself; reading
     # that property may throw
     case (try do
@@ -1423,6 +1409,29 @@ defmodule Browser.JS.Async do
         Promise.resolve(np, v)
         await_promise(np, ctx, k)
     end
+  end
+
+  @doc false
+  # Yields `v` and goes on with `k` when the generator resumes with `next`. (public:
+  # compiled plans call it; the tree path gets it inline, so that its yield costs no more
+  # than before step 5c)
+  @compile {:inline, yield_value: 3}
+  def yield_value(v, ctx, k) do
+    ctx.yield.(v, fn
+      {:next, x} ->
+        k.(x)
+
+      {:throw, err} ->
+        ctx.throw.(err)
+
+      # in an async generator the value of a `return()` is awaited first, and a rejection
+      # is thrown at the `yield`
+      {:return, r} when is_map_key(ctx, :async_gen) ->
+        await_value(r, ctx, fn v -> ctx.ret.({:ag_done, v}) end)
+
+      {:return, r} ->
+        ctx.ret.(r)
+    end)
   end
 
   defp await_promise(p, ctx, k) do
@@ -1968,7 +1977,9 @@ defmodule Browser.JS.Async do
   # binds a pattern (`k` runs afterwards). When a `yield` or `await` sits inside it, in a default,
   # a computed key or a target, the pattern is walked step by step so that the iterator stays
   # open (and is closed on a throw or `return()`) while the generator is suspended.
-  defp cbind(pat, v, mode, env, ctx, k) do
+  @doc false
+  # (public: compiled plans call it)
+  def cbind(pat, v, mode, env, ctx, k) do
     if has_await?(pat),
       do: cbind_cps(pat, v, mode, env, ctx, k),
       else: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
@@ -2411,10 +2422,10 @@ defmodule Browser.JS.Async do
   # ── compiled plans (step 5c) ───────────────────────────────
   #
   # `Browser.JS.Compile` compiles the body of a rewritten async function or generator into
-  # a plan (see "CPS plans" in its moduledoc). The plan does the work of `clist/4`: it runs
-  # each run of statements without an await as one compiled list, and it gives each
-  # statement that awaits to `cs/5`. The functions below are the run-time part of the
-  # plans.
+  # a plan (see "CPS plans" in its moduledoc). The plan does the work of `clist/4`, `cs/5`
+  # and `cev/4`, but it finds the facts of the body (which statement and which expression
+  # awaits, the lift plan of an expression, the parts of a loop) once, when it compiles.
+  # The functions below are the run-time part of the plans.
   #
   # The collector (`Browser.JS.GC`) does not walk the funs of `Browser.JS.Compile`, because
   # a compiled closure keeps no heap id and no frame id. A continuation keeps the frame, the
@@ -2423,12 +2434,178 @@ defmodule Browser.JS.Async do
   # fun of this module, which the collector walks. The walk stops at the compiled closures
   # that the continuation keeps.
   #
+  # A compiled expression is one of these:
+  #
+  #   * `{:s, f}`: the expression does not await. `f` is the closure of the sync compiler,
+  #     `fn env -> value end`.
+  #   * `{:t, f}`: the test of `?:` that does not await. `f` gives an Elixir boolean.
+  #   * `{:c, f}`: the expression can suspend. `f` is `fn env, ctx, k -> ... end`, and it
+  #     gives the value to `k`.
+  #
   # A compiled statement is `fn env, ctx, k -> ... end`. It calls `k` when it completes
-  # normally.
+  # normally. Each continuation that a plan gives to a statement does not read its
+  # argument, so a statement can give `k` any value (an expression statement gives its
+  # value).
+
+  # The value of the sync closure `f` in `env`, or the value that it throws. A throw goes to
+  # the context after the `try`, so that the rest of the body does not run inside it (as in
+  # `sync_expr/4`).
+  defmacrop sync_value(f, env) do
+    quote do
+      try do
+        {:ok, unquote(f).(unquote(env))}
+      catch
+        {:js_error, sync_e} -> {:throw, sync_e}
+      end
+    end
+  end
+
+  @doc false
+  # Gives the value of the compiled expression `x` to `k`.
+  def value({:c, f}, env, ctx, k), do: f.(env, ctx, k)
+
+  def value({:s, f}, env, ctx, k) do
+    case sync_value(f, env) do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
 
   @doc false
   # Runs the compiled statement `a`, then the compiled statements `r`.
   def then(a, r, env, ctx, k), do: a.(env, ctx, fn _ -> r.(env, ctx, k) end)
+
+  @doc false
+  # `await x` where `x` can suspend.
+  def await_cps(f, env, ctx, k), do: f.(env, ctx, fn v -> await_value(v, ctx, k) end)
+
+  @doc false
+  # `yield x` where `x` can suspend.
+  def yield_cps(f, env, ctx, k), do: f.(env, ctx, fn v -> yield_value(v, ctx, k) end)
+
+  @doc false
+  # `&&`, `||` or `??` where the left operand can suspend (the twin of the clause of
+  # `cev_await/4`).
+  def logical_cps(op, f, r, env, ctx, k),
+    do: f.(env, ctx, fn lv -> logical_rest(op, lv, r, env, ctx, k) end)
+
+  @doc false
+  # The right operand of `&&`, `||` or `??`, when the left value `lv` does not decide.
+  def logical_rest(op, lv, r, env, ctx, k) do
+    short =
+      case op do
+        "&&" -> not Interp.truthy(lv)
+        "||" -> Interp.truthy(lv)
+        "??" -> not Interp.nullish?(lv)
+      end
+
+    if short, do: k.(lv), else: value(r, env, ctx, k)
+  end
+
+  @doc false
+  # `c ? a : b` where the test can suspend.
+  def cond_cps(f, a, b, env, ctx, k) do
+    f.(env, ctx, fn cv ->
+      if Interp.truthy(cv), do: value(a, env, ctx, k), else: value(b, env, ctx, k)
+    end)
+  end
+
+  @doc false
+  # A destructuring assignment where the value can suspend. The pattern binds through
+  # `cbind/6`, as in the clause of `cev_await/4`.
+  def destructure(x, pat, env, ctx, k),
+    do: value(x, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
+
+  @doc false
+  # The lift plan of an expression: the leaves run in source order. Then the template runs
+  # with their values in a tuple, as in the frame clause of `cev_await/4`. The template is
+  # compiled. A hole of the template reads its value from the process key
+  # `:js_cps_vals`, which holds the tuple while the template runs. The template makes no
+  # suspension, but it can call code that runs another template, so the key gets its old
+  # value back after the template.
+  def lifted(leaves, t, env, ctx, k), do: lift_vals(leaves, [], t, env, ctx, k)
+
+  defp lift_vals([], acc, t, env, ctx, k) do
+    old = :erlang.put(:js_cps_vals, List.to_tuple(:lists.reverse(acc)))
+
+    result =
+      try do
+        {:ok, t.(env)}
+      catch
+        {:js_error, e} -> {:throw, e}
+      after
+        :erlang.put(:js_cps_vals, old)
+      end
+
+    case result do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp lift_vals([{:s, f} | rest], acc, t, env, ctx, k) do
+    case sync_value(f, env) do
+      {:ok, v} -> lift_vals(rest, [v | acc], t, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp lift_vals([{:c, f} | rest], acc, t, env, ctx, k),
+    do: f.(env, ctx, fn v -> lift_vals(rest, [v | acc], t, env, ctx, k) end)
+
+  @doc false
+  # The declarations of a `var`, `let` or `const` that awaits, one at a time (the twin of
+  # `cdecls/5`). Each part is `{pattern, init, cps?}`: `init` is `nil` or a compiled
+  # expression, and `cps?` tells that the pattern awaits, so that `cbind_cps/6` binds it.
+  def decls([], _kind, _env, _ctx, k), do: k.(:ok)
+
+  def decls([{_pat, nil, _} | rest], :var, env, ctx, k), do: decls(rest, :var, env, ctx, k)
+
+  def decls([{pat, nil, _} | rest], kind, env, ctx, k) do
+    case bind_value(pat, :undefined, env, kind) do
+      :ok -> decls(rest, kind, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  # (a sync value and a sync pattern: the two steps run under one `try`, because nothing
+  # comes between them)
+  def decls([{pat, {:s, f}, false} | rest], kind, env, ctx, k) do
+    result =
+      try do
+        Interp.bind_pattern(pat, f.(env), env, kind)
+        :ok
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case result do
+      :ok -> decls(rest, kind, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  def decls([{pat, x, false} | rest], kind, env, ctx, k) do
+    value(x, env, ctx, fn v ->
+      case bind_value(pat, v, env, kind) do
+        :ok -> decls(rest, kind, env, ctx, k)
+        {:throw, e} -> ctx.throw.(e)
+      end
+    end)
+  end
+
+  def decls([{pat, x, true} | rest], kind, env, ctx, k) do
+    value(x, env, ctx, fn v ->
+      cbind_cps(pat, v, kind, env, ctx, fn -> decls(rest, kind, env, ctx, k) end)
+    end)
+  end
+
+  defp bind_value(pat, v, env, kind) do
+    Interp.bind_pattern(pat, v, env, kind)
+    :ok
+  catch
+    {:js_error, e} -> {:throw, e}
+  end
 
   @doc false
   # Runs the compiled sync statement or statement list `f` and gives its completion, as
@@ -2448,6 +2625,21 @@ defmodule Browser.JS.Async do
   end
 
   @doc false
+  # An expression that stays on the tree path in a compiled plan: `yield*`, an optional
+  # chain that awaits, and a lift plan with a leaf from a class.
+  def tree_expr(e, env, ctx, k), do: cev_await(e, env, ctx, k)
+
+  @doc false
   # A statement that awaits and stays on the tree path in a compiled plan.
   def tree_stmt(s, env, ctx, k, labels), do: cs(s, env, ctx, k, labels)
+
+  @doc false
+  # The lift plan of an expression that awaits, for the compiler: `{template, leaves}`,
+  # with the leaves in source order. The plan is the plan of the frame clause of
+  # `cev_await/4`, and check mode compares it with the old walk (item A2).
+  def lift_plan(e) do
+    {template, leaves} = lift(e, [], :frame)
+    if @check, do: check_lift(e, :frame, {template, leaves})
+    {template, Enum.reverse(leaves)}
+  end
 end

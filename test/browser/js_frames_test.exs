@@ -4541,8 +4541,11 @@ defmodule Browser.JS.FramesSerialTest do
       assert forms[{:fname, 0, 6, "h"}] == {:slot, 0, 6, "h"}
     end
 
+    # Step 5c compiles the plans of async bodies, and a compiled plan does not call `fill`.
+    # Thus the tests of `fill` run with the switch `:js_compile` off, on the tree path.
     test "fill puts the values in the holes in order, and leaves no hole" do
       gid = heap()
+      Process.put(:js_compile, false)
 
       {_, calls} =
         traced([{Async, :fill, 2}], fn ->
@@ -4559,6 +4562,7 @@ defmodule Browser.JS.FramesSerialTest do
 
     test "fill does not go into a function node, which keeps its Info" do
       heap()
+      Process.put(:js_compile, false)
       src = "async function f(){ let y = 5; return [await 1, () => y][1]() } f()"
 
       [_, {:aw, {:return, {:call, {:member, {:array, [_, arrow]}, _, _}, _, _}, :plain}}] =
@@ -4608,7 +4612,7 @@ defmodule Browser.JS.FramesSerialTest do
     @plain "async function f(){ var a = 1; a = a + 1; await 0; a = 3; return a } f()"
 
     # (with the switch `:js_compile` off: step 5c compiles the plan of the body, which
-    # does not call `sync_stmt/5`, see the next test)
+    # calls neither `cs/5` nor `sync_stmt/5`, see the next test)
     test "{:aw} goes to cs, and a plain statement goes to sync_stmt" do
       heap()
       Process.put(:js_compile, false)
@@ -4635,25 +4639,29 @@ defmodule Browser.JS.FramesSerialTest do
       end
     end
 
-    test "with compilation on, the compiled plan runs the plain statements" do
-      # Step 5c: the plan splits the body at the marks when it compiles. At run time the
-      # plain statements run as compiled lists, not through `sync_stmt/5`, and the walk of
-      # `has_await?/1` does not visit them.
+    test "with compilation on, the compiled plan runs the body without the tree path" do
+      # Step 5c: the plan finds the marks and the lift plans when it compiles. At run time
+      # no statement goes to `cs/5` or `sync_stmt/5`, nothing is filled, and the walk of
+      # `has_await?/1` does not run.
       gid = heap()
       Process.put(:js_compile, true)
-      [s1, s2, {:aw, s3}, s4, s5] = body(@plain, 4)
       src = "var out; " <> @plain <> ".then(v => { out = v })"
 
       {_, calls} =
         traced(
-          [{Async, :cs, 5}, {Async, :sync_stmt, 5}, {Async, :has_await?, 1}],
+          [
+            {Async, :cs, 5},
+            {Async, :sync_stmt, 5},
+            {Async, :has_await?, 1},
+            {Async, :fill, 2}
+          ],
           fn -> run_script(src, 4) end
         )
 
-      assert for({[s | _], _} <- calls_of(calls, :cs), do: s) == [s3]
+      assert calls_of(calls, :cs) == []
       assert calls_of(calls, :sync_stmt) == []
-      walked = for {[t], _} <- calls_of(calls, :has_await?), do: t
-      for s <- [s1, s2, s4, s5], do: refute(s in walked)
+      assert calls_of(calls, :fill) == []
+      assert calls_of(calls, :has_await?) == []
       assert {:ok, 3.0} = Interp.lookup_scoped(gid, "out")
     end
 

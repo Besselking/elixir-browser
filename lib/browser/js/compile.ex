@@ -966,6 +966,11 @@ defmodule Browser.JS.Compile do
 
   defp expr_node({:destructure, pat, right}), do: shell({:destructure, pat, cc(right)})
 
+  # A hole of a compiled lift template (step 5c): the value of the leaf `i`, which
+  # `Async.lifted/5` keeps in the process key `:js_cps_vals` while the template runs.
+  defp expr_node({:cps_leaf, i}),
+    do: fn _env -> :erlang.element(i + 1, :erlang.get(:js_cps_vals)) end
+
   defp expr_node(node), do: fallback(node)
 
   # The operand form of `e` (see the section on operands). A negative number and `void` of
@@ -1773,10 +1778,23 @@ defmodule Browser.JS.Compile do
 
   # ── CPS plans (step 5c) ────────────────────────────────────
 
-  # The plan of an async or generator body: `{plan, nil}`. The body runs its statement list
-  # and then calls `k`. An arrow with an expression body has no statement list, so it stays
-  # on the tree path.
-  defp cps_code(%{mode: :arrow_expr}), do: {nil, nil}
+  # The value of the sync closure `f` in `env`, or the value that it throws. The continuation
+  # runs after the `try`, as in `Async.sync_expr/4`, so that the rest of the body does not
+  # run inside it.
+  defmacrop sync_value(f, env) do
+    quote do
+      try do
+        {:ok, unquote(f).(unquote(env))}
+      catch
+        {:js_error, sync_e} -> {:throw, sync_e}
+      end
+    end
+  end
+
+  # The plan of an async or generator body: `{plan, nil}`. An arrow with an expression body
+  # gives the value of the expression to `k`. Any other body runs its statement list and
+  # then calls `k`.
+  defp cps_code(%{mode: :arrow_expr, body: e}), do: {kentry(kfun(kexpr(e))), nil}
   defp cps_code(%{body: stmts}), do: {kentry(klist(stmts)), nil}
 
   # S1 of check mode, for a plan.
@@ -1791,6 +1809,19 @@ defmodule Browser.JS.Compile do
     end
   else
     defp kentry(f), do: f
+  end
+
+  # The closure `fn env, ctx, k -> ... end` of a compiled expression, which gives the value
+  # to `k`.
+  defp kfun({:c, f}), do: f
+
+  defp kfun({:s, f}) do
+    fn env, ctx, k ->
+      case sync_value(f, env) do
+        {:ok, v} -> k.(v)
+        {:throw, e} -> ctx.throw.(e)
+      end
+    end
   end
 
   # A statement list of a plan (the twin of `Async.clist/4`). The list splits at each
@@ -1905,9 +1936,141 @@ defmodule Browser.JS.Compile do
     krun(stmt(s, labels), nil)
   end
 
-  # A statement that awaits stays on the tree path (`Async.cs/5`).
+  # A statement that awaits (the twin of `Async.cs/5` in frame mode).
+  defp kaw({:expr, e}, _labels), do: kfun(kexpr(e))
+
+  defp kaw({:var, kind, decls}, _labels) when kind in [:var, :let, :const] do
+    parts = for {pat, init} <- decls, do: {pat, init && kexpr(init), Awaits.any?(pat)}
+    fn env, ctx, k -> Async.decls(parts, kind, env, ctx, k) end
+  end
+
+  defp kaw({:return, e, :plain}, _labels), do: kto(kexpr(e), :ret)
+  defp kaw({:return, e}, _labels) when e != nil, do: kto(kexpr(e), :ret)
+  defp kaw({:throw, e}, _labels), do: kto(kexpr(e), :throw)
+
+  # Every other statement that awaits stays on the tree path.
   defp kaw(s, labels),
     do: trace(:cps_stmt, s, fn env, ctx, k -> Async.tree_stmt(s, env, ctx, k, labels) end)
+
+  # A `return` or a `throw` that awaits: the value goes to `ctx.ret` or `ctx.throw`.
+  defp kto({:c, f}, :ret), do: fn env, ctx, _k -> f.(env, ctx, ctx.ret) end
+  defp kto({:c, f}, :throw), do: fn env, ctx, _k -> f.(env, ctx, ctx.throw) end
+  defp kto(x, :ret), do: fn env, ctx, _k -> Async.value(x, env, ctx, ctx.ret) end
+  defp kto(x, :throw), do: fn env, ctx, _k -> Async.value(x, env, ctx, ctx.throw) end
+
+  # A test: `{:t, closure}` with an Elixir boolean when it does not await, else
+  # `{:c, closure}`.
+  defp ktest(c) do
+    if Awaits.any?(c), do: kexpr(c), else: {:t, ctest(c)}
+  end
+
+  # An expression of a plan (the twin of `Async.cev/4`): `{:s, closure}` when it does not
+  # await, else `{:c, closure}`.
+  defp kexpr(e) do
+    if Awaits.any?(e) do
+      count()
+      kexpr_aw(e)
+    else
+      {:s, expr(e)}
+    end
+  end
+
+  # An expression that awaits (the twin of `Async.cev_await/4` in frame mode).
+  defp kexpr_aw({:await, x}) do
+    case kexpr(x) do
+      {:s, f} ->
+        {:c,
+         fn env, ctx, k ->
+           case sync_value(f, env) do
+             {:ok, v} -> Async.await_value(v, ctx, k)
+             {:throw, e} -> ctx.throw.(e)
+           end
+         end}
+
+      {:c, f} ->
+        {:c, fn env, ctx, k -> Async.await_cps(f, env, ctx, k) end}
+    end
+  end
+
+  defp kexpr_aw({:yield, x, false}) do
+    case kexpr(x) do
+      {:s, f} ->
+        {:c,
+         fn env, ctx, k ->
+           case sync_value(f, env) do
+             {:ok, v} -> Async.yield_value(v, ctx, k)
+             {:throw, e} -> ctx.throw.(e)
+           end
+         end}
+
+      {:c, f} ->
+        {:c, fn env, ctx, k -> Async.yield_cps(f, env, ctx, k) end}
+    end
+  end
+
+  defp kexpr_aw({:logical, op, l, r}) do
+    kr = kexpr(r)
+
+    case kexpr(l) do
+      {:s, f} ->
+        {:c,
+         fn env, ctx, k ->
+           case sync_value(f, env) do
+             {:ok, lv} -> Async.logical_rest(op, lv, kr, env, ctx, k)
+             {:throw, e} -> ctx.throw.(e)
+           end
+         end}
+
+      {:c, f} ->
+        {:c, fn env, ctx, k -> Async.logical_cps(op, f, kr, env, ctx, k) end}
+    end
+  end
+
+  defp kexpr_aw({:cond, c, a, b}) do
+    ka = kexpr(a)
+    kb = kexpr(b)
+
+    case ktest(c) do
+      {:t, t} ->
+        {:c,
+         fn env, ctx, k ->
+           case sync_value(t, env) do
+             {:ok, true} -> Async.value(ka, env, ctx, k)
+             {:ok, false} -> Async.value(kb, env, ctx, k)
+             {:throw, e} -> ctx.throw.(e)
+           end
+         end}
+
+      {:c, f} ->
+        {:c, fn env, ctx, k -> Async.cond_cps(f, ka, kb, env, ctx, k) end}
+    end
+  end
+
+  defp kexpr_aw({:destructure, pat, right}) do
+    x = kexpr(right)
+    {:c, fn env, ctx, k -> Async.destructure(x, pat, env, ctx, k) end}
+  end
+
+  # `yield*` and an optional chain stay on the tree path: `yield*` runs through
+  # `delegate` and `adelegate`, and the chain puts its value into the tree.
+  defp kexpr_aw({:yield, _, true} = e), do: ktree(e)
+  defp kexpr_aw({:chain, _} = e), do: ktree(e)
+
+  # Any other expression gets its lift plan. A leaf from a class must run in a class scope,
+  # which the tree path makes, so such a plan stays on the tree path.
+  defp kexpr_aw(e) do
+    {template, leaves} = Async.lift_plan(e)
+
+    if Enum.any?(leaves, &match?({:cps_class, _, _}, &1)) do
+      ktree(e)
+    else
+      kleaves = Enum.map(leaves, &kexpr/1)
+      t = expr(template)
+      {:c, fn env, ctx, k -> Async.lifted(kleaves, t, env, ctx, k) end}
+    end
+  end
+
+  defp ktree(e), do: {:c, trace(:cps, e, fn env, ctx, k -> Async.tree_expr(e, env, ctx, k) end)}
 
   # ── nodes on the tree ──────────────────────────────────────
 

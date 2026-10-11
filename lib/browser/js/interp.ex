@@ -6668,6 +6668,11 @@ defmodule Browser.JS.Interp do
 
   def ev({:val, v}, _env), do: v
 
+  # A hole of a compiled lift template (step 5c, `Browser.JS.Async.lifted/5`) in a part of
+  # the template that stays on the tree: the value of the leaf `i`, which the process key
+  # `:js_cps_vals` holds while the template runs.
+  def ev({:cps_leaf, i}, _env), do: :erlang.element(i + 1, :erlang.get(:js_cps_vals))
+
   def ev({:destructure, pat, right}, env) do
     v = ev(right, env)
     bind(pat, v, env, :assign)
