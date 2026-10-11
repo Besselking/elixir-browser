@@ -2614,7 +2614,7 @@ defmodule Browser.JS.Interp do
         if writable?(p, key), do: :none, else: :readonly
 
       _ ->
-        if is_binary(key) and Browser.JS.TypedArrays.typed_array?({:obj, pid}) and
+        if is_binary(key) and typed_array_record?(pid, p) and
              Browser.JS.TypedArrays.numeric_key?(key),
            do: {:typed_array, {:obj, pid}},
            else: inherited_set(p.proto, key)
@@ -2622,6 +2622,21 @@ defmodule Browser.JS.Interp do
   end
 
   defp inherited_set(_, _), do: :none
+
+  # Whether the record `p` at `pid` is a typed array. `TypedArrays.typed_array?/1` is this
+  # match on the record, which it reads again; the walk of `inherited_set/2` has the record
+  # already (fast path `:add`).
+  @compile {:inline, typed_array_record?: 2}
+  defp typed_array_record?(pid, p) do
+    if Fast.on?(:add),
+      do:
+        Fast.shadow(
+          nil,
+          match?(%{host: {Browser.JS.TypedArrays, {:ta, _, _, _, _}}}, p),
+          Browser.JS.TypedArrays.typed_array?({:obj, pid})
+        ),
+      else: Browser.JS.TypedArrays.typed_array?({:obj, pid})
+  end
 
   # a missing array element: an index setter or a proxy further up the prototype chain
   defp put_array_prop(id, o, key, v) do
