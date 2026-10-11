@@ -33,6 +33,11 @@ jobs:
       - name: Test (warnings as errors)
         run: mix test --warnings-as-errors
 
+      # Level 4 of the resolver is the default. The old evaluator (`:off`) stays as a
+      # fallback until step 3 of the JS redesign, so it is tested too.
+      - name: Test with the resolver off
+        run: JS_RESOLVE=off mix test
+
   # The JavaScript runtime against test262 (the ECMAScript conformance suite): a test that
   # passed in test262.baseline must keep passing. `mix js.test262 --update` records progress.
   # On a pull request that touches nothing the runtime depends on the job still runs (so the
