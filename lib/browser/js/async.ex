@@ -934,54 +934,8 @@ defmodule Browser.JS.Async do
   end
 
   # an optional chain with an await in it: the first `?.` is settled before anything after it runs
-  defp cev_await({:chain, e}, env, ctx, k) do
-    case opt_node(e) do
-      nil ->
-        cev(e, env, ctx, k)
-
-      {:member, base, key, true} = node ->
-        cev(base, env, ctx, fn v ->
-          cond do
-            Interp.nullish?(v) ->
-              k.(:undefined)
-
-            # In frame mode the value goes into the tree, so the rest of the chain runs in
-            # `env` and its hop counts stay exact.
-            is_map_key(ctx, :frame) ->
-              plain = {:member, {:val, v}, key, false}
-              cev_await({:chain, replace_node(e, node, plain)}, env, ctx, k)
-
-            true ->
-              if @check, do: Interp.check_old_path(env, "a CPS optional chain")
-              scope = Interp.new_scope(env)
-              name = "\0o#{System.unique_integer([:positive])}"
-              Interp.declare(scope, name, v)
-              plain = {:member, {:id, name}, key, false}
-              cev_await({:chain, replace_node(e, node, plain)}, scope, ctx, k)
-          end
-        end)
-
-      # `f?.(args)`: the callee is settled first. When it is `null` or `undefined`, the
-      # whole chain is `undefined` and the arguments do not run. Else the arguments run
-      # (they can await), the call is made, and its value goes into the tree.
-      {:call, callee, args, true} = node ->
-        call_target(callee, env, ctx, fn {f, this} ->
-          if Interp.nullish?(f) do
-            k.(:undefined)
-          else
-            cev({:array, args}, env, ctx, fn arr ->
-              attempt(
-                fn -> Interp.ccall(f, this, Interp.array_list(arr), callee, env) end,
-                ctx,
-                fn v ->
-                  cev_await({:chain, replace_node(e, node, {:val, v})}, env, ctx, k)
-                end
-              )
-            end)
-          end
-        end)
-    end
-  end
+  defp cev_await({:chain, e}, env, ctx, k),
+    do: cev_chain(e, env, ctx, k, fn -> k.(:undefined) end)
 
   # `a &&= v`, `a ||= v` and `a ??= v`: the target is read first, and the right side runs
   # (and awaits) only when the operator does not short-circuit, as in `Interp`. A target
@@ -1000,7 +954,9 @@ defmodule Browser.JS.Async do
         if short do
           k.(old)
         else
-          cev(value, env, ctx, fn v -> attempt(fn -> write.(v) && v end, ctx, k) end)
+          named_value(value, target, env, ctx, fn v ->
+            attempt(fn -> write.(v) && v end, ctx, k)
+          end)
         end
       end)
     end)
@@ -1040,6 +996,58 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # The spine `e` of an optional chain that awaits. `k` gets the value of the chain, and
+  # `short` runs when a `?.` short-circuits, so that a caller can tell a short-circuit from
+  # a value that is `undefined`.
+  defp cev_chain(e, env, ctx, k, short) do
+    case opt_node(e) do
+      nil ->
+        cev(e, env, ctx, k)
+
+      {:member, base, key, true} = node ->
+        cev(base, env, ctx, fn v ->
+          cond do
+            Interp.nullish?(v) ->
+              short.()
+
+            # In frame mode the value goes into the tree, so the rest of the chain runs in
+            # `env` and its hop counts stay exact.
+            is_map_key(ctx, :frame) ->
+              plain = {:member, {:val, v}, key, false}
+              cev_chain(replace_node(e, node, plain), env, ctx, k, short)
+
+            true ->
+              if @check, do: Interp.check_old_path(env, "a CPS optional chain")
+              scope = Interp.new_scope(env)
+              name = "\0o#{System.unique_integer([:positive])}"
+              Interp.declare(scope, name, v)
+              plain = {:member, {:id, name}, key, false}
+              cev_chain(replace_node(e, node, plain), scope, ctx, k, short)
+          end
+        end)
+
+      # `f?.(args)`: the callee is settled first. When it is `null` or `undefined`, the
+      # whole chain is `undefined` and the arguments do not run. Else the arguments run
+      # (they can await), the call is made, and its value goes into the tree.
+      {:call, callee, args, true} = node ->
+        call_target(callee, env, ctx, fn {f, this} ->
+          if Interp.nullish?(f) do
+            short.()
+          else
+            cev({:array, args}, env, ctx, fn arr ->
+              attempt(
+                fn -> Interp.ccall(f, this, Interp.array_list(arr), callee, env) end,
+                ctx,
+                fn v ->
+                  cev_chain(replace_node(e, node, {:val, v}), env, ctx, k, short)
+                end
+              )
+            end)
+          end
+        end)
+    end
+  end
+
   # The function and the `this` value of a callee. A callee that awaits is settled part by
   # part, and the values go into the tree, so the object and the key run one time each.
   defp call_target(callee, env, ctx, k) do
@@ -1047,19 +1055,51 @@ defmodule Browser.JS.Async do
       not Awaits.any?(callee) ->
         attempt(fn -> Interp.call_target(callee, env) end, ctx, k)
 
-      match?({:member, _, _, false}, callee) ->
-        {:member, o, key, false} = callee
-
-        cev(o, env, ctx, fn ov ->
-          settle_key(key, env, ctx, fn key ->
-            attempt(fn -> Interp.call_target({:member, {:val, ov}, key, false}, env) end, ctx, k)
-          end)
-        end)
-
       true ->
-        cev(callee, env, ctx, fn f -> k.({f, :undefined}) end)
+        call_target_cps(callee, env, ctx, k)
     end
   end
+
+  # A callee that awaits. A member keeps its object as `this`, also inside parentheses
+  # (`(a?.b)?.()`, where a short-circuit gives `undefined` for the function and `this`),
+  # and `super[k]` keeps the `this` of the method, as `Interp.call_target/2` does.
+  defp call_target_cps({:member, o, key, false}, env, ctx, k) do
+    cev(o, env, ctx, fn ov ->
+      settle_key(key, env, ctx, fn key ->
+        attempt(fn -> Interp.call_target({:member, {:val, ov}, key, false}, env) end, ctx, k)
+      end)
+    end)
+  end
+
+  defp call_target_cps({:super_member, key}, env, ctx, k) do
+    settle_key(key, env, ctx, fn key ->
+      attempt(fn -> Interp.call_target({:super_member, key}, env) end, ctx, k)
+    end)
+  end
+
+  defp call_target_cps({:chain, {:member, o, key, opt}}, env, ctx, k) do
+    short = fn -> k.({:undefined, :undefined}) end
+
+    cev_chain(
+      o,
+      env,
+      ctx,
+      fn ov ->
+        if opt and Interp.nullish?(ov) do
+          short.()
+        else
+          settle_key(key, env, ctx, fn key ->
+            target = {:member, {:val, ov}, key, false}
+            attempt(fn -> Interp.call_target(target, env) end, ctx, k)
+          end)
+        end
+      end,
+      short
+    )
+  end
+
+  defp call_target_cps(callee, env, ctx, k),
+    do: cev(callee, env, ctx, fn f -> k.({f, :undefined}) end)
 
   # A key that awaits runs here, and its value goes into the tree.
   defp settle_key(key, env, ctx, k) do
@@ -2029,11 +2069,39 @@ defmodule Browser.JS.Async do
   end
 
   # the initializer, named after the binding when it is an anonymous function
-  defp cev_named(init, name, env, ctx, k) do
-    if has_await?(init) do
-      cev(init, env, ctx, k)
-    else
-      attempt(fn -> Interp.ev_named(init, env, {:id, name}) end, ctx, k)
+  defp cev_named(init, name, env, ctx, k), do: named_value(init, {:id, name}, env, ctx, k)
+
+  @doc false
+  # (public: compiled plans call it)
+  # The value of `init`, named after `target` when `init` is an anonymous function or class
+  # and `target` is a binding (NamedEvaluation, as `Interp.ev_named/3`). A class can await
+  # in a computed key. Its leaves run first, and then the template gets its name.
+  def named_value(init, target, env, ctx, k) do
+    cond do
+      not has_await?(init) ->
+        attempt(fn -> Interp.ev_named(init, env, target) end, ctx, k)
+
+      match?({:class, nil, _, _, _}, init) and is_map_key(ctx, :frame) ->
+        {template, leaves} = lift(init, [], :frame)
+        if @check, do: check_lift(init, :frame, {template, leaves})
+
+        eval_vals(Enum.reverse(leaves), [], env, ctx, fn vals ->
+          filled = fill(template, vals)
+          attempt(fn -> Interp.ev_named(filled, env, target) end, ctx, k)
+        end)
+
+      match?({:class, nil, _, _, _}, init) ->
+        {template, leaves} = lift(init, [], :map)
+        if @check, do: check_lift(init, :map, {template, leaves})
+        if @check, do: Interp.check_old_path(env, "a CPS leaf scope")
+        scope = Interp.new_scope(env)
+
+        eval_leaves(Enum.reverse(leaves), 0, scope, env, ctx, fn ->
+          attempt(fn -> Interp.ev_named(template, scope, target) end, ctx, k)
+        end)
+
+      true ->
+        cev(init, env, ctx, k)
     end
   end
 
@@ -2261,7 +2329,7 @@ defmodule Browser.JS.Async do
 
     cond do
       init != nil ->
-        cev(init, env, ctx, fn v ->
+        named_value(init, pat, env, ctx, fn v ->
           cbind(pat, v, kind, env, ctx, next)
         end)
 
@@ -2959,7 +3027,8 @@ defmodule Browser.JS.Async do
 
   @doc false
   # An expression that stays on the tree path in a compiled plan: `yield*`, an optional
-  # chain that awaits, and a lift plan with a leaf from a class.
+  # chain that awaits, a logical assignment that awaits, and a lift plan with a leaf from a
+  # class.
   def tree_expr(e, env, ctx, k), do: cev_await(e, env, ctx, k)
 
   @doc false

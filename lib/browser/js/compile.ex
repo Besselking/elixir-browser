@@ -198,8 +198,11 @@ defmodule Browser.JS.Compile do
     * `maker` is the frame maker of the function, or `nil`. An async function and a
       generator have no maker, because `Interp.enter_frame/4` makes their frames.
 
-  Each function object keeps its code in its closure record, in the keys `code` and `mk`.
-  Thus a call does not read the cache.
+  A sync function object keeps its code in its closure record, in the keys `code` and
+  `mk`. Its first call writes them (`Interp.first_call/2`), so the next calls do not read
+  the cache. An async function or a generator gets its plan in its record only when
+  `make_fn` makes the object after the plan compiled. Else each call reads the cache, and
+  after an erase the next call compiles the plan again.
 
   ## Frame makers
 
@@ -1999,7 +2002,7 @@ defmodule Browser.JS.Compile do
   defp kaw({:expr, e}, _labels), do: kfun(kexpr(e))
 
   defp kaw({:var, kind, decls}, _labels) when kind in [:var, :let, :const] do
-    parts = for {pat, init} <- decls, do: {pat, init && kexpr(init), Awaits.any?(pat)}
+    parts = for {pat, init} <- decls, do: {pat, kinit(pat, init), Awaits.any?(pat)}
     fn env, ctx, k -> Async.decls(parts, kind, env, ctx, k) end
   end
 
@@ -2100,6 +2103,15 @@ defmodule Browser.JS.Compile do
   # Every other statement that awaits stays on the tree path.
   defp kaw(s, labels),
     do: trace(:cps_stmt, s, fn env, ctx, k -> Async.tree_stmt(s, env, ctx, k, labels) end)
+
+  # An anonymous function or class takes the name of its binding through
+  # `Async.named_value/5`, on the tree.
+  defp kinit(_pat, nil), do: nil
+
+  defp kinit(pat, init) when nameable(init),
+    do: {:c, trace(:cps, init, fn env, ctx, k -> Async.named_value(init, pat, env, ctx, k) end)}
+
+  defp kinit(_pat, init), do: kexpr(init)
 
   # The scope that a statement enters with `Interp.cps_enter/2`, or `nil` when the entry
   # has no work: a frameless scope with no name in its temporal dead zone and no function.

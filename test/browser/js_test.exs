@@ -804,6 +804,37 @@ defmodule Browser.JSTest do
              """) == ["w,2,2,3,,,5,6"]
     end
 
+    test "an optional call keeps its this when its callee awaits" do
+      assert logs_of("""
+             var out = [];
+             var o = { m() { return this === o ? 'o' : String(this) } }, u;
+             class A { m() { return this instanceof B ? 'B' : String(this) } }
+             class B extends A {
+               async t() { out.push(super[await 'm']?.(), super[await 'm']?.(await 1)) }
+             }
+             (async () => {
+               out.push((o?.[await 'm'])?.(), (o?.[await 'm'])?.(await 1), (u?.[await 'm'])?.());
+               await new B().t();
+               console.log(out.join());
+             })();
+             """) == ["o,o,,B,B"]
+    end
+
+    test "a function or class after an await takes the name of its binding" do
+      assert logs_of("""
+             var out = [];
+             async function f() {
+               const a = await 1, b = function () {}, c = () => {}, d = class {};
+               let e = class { [await 'k']() {} }, g;
+               g ??= class { [await 'k']() {} };
+               out.push(b.name, c.name, d.name, e.name, g.name);
+             }
+             function* h() { const a = yield 1, b = function () {}; out.push(b.name) }
+             var it = h(); it.next(); it.next();
+             f().then(() => console.log(out.join()));
+             """) == ["b,b,c,d,e,g"]
+    end
+
     test "a logical assignment runs its right side only when it does not short-circuit" do
       assert logs_of("""
              var r = [];
