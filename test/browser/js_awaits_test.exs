@@ -641,9 +641,12 @@ defmodule Browser.JS.AwaitsTest do
   end
 
   describe "unit test 4: the visits of the walk" do
+    # The counts are those of the tree path, so the switch `:js_compile` is off. Step 5c
+    # compiles the plans of the bodies at level 4: see the next test.
     test "a loop walks its test and its update once in each evaluation, and the count of visits is fixed" do
       for {name, src, walks, visits} <- @loops, level <- [:off, 4] do
         heap()
+        Process.put(:js_compile, false)
         # The parse runs before the trace, because at level 4 the resolver walks each
         # function once (`Resolve.awaits?`), and the count is about the evaluator.
         program = parse!(src, level)
@@ -663,6 +666,24 @@ defmodule Browser.JS.AwaitsTest do
         unless @check do
           assert length(calls) == visits[level],
                  "#{name} at #{level}: #{length(calls)} visits"
+        end
+      end
+    end
+
+    test "with compilation on, a compiled loop walks its test and its update at most once" do
+      # Step 5c: the compiler of the plan finds the facts of the loop once, when the body
+      # compiles at its first call. The rounds of the loop do not walk.
+      for {name, src, walks, _visits} <- @loops do
+        heap()
+        Process.put(:js_compile, true)
+        program = parse!(src, 4)
+        {_, calls} = traced([{Awaits, :any?, 1}], fn -> Interp.run_program(program, true) end)
+        parts = loop_parts(program)
+        walked = roots(calls, :any?)
+        assert length(parts) == length(walks)
+
+        for part <- parts do
+          assert Enum.count(walked, &(&1 == part)) <= 1, "#{name}: #{inspect(part)}"
         end
       end
     end

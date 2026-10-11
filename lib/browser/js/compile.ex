@@ -1948,9 +1948,105 @@ defmodule Browser.JS.Compile do
   defp kaw({:return, e}, _labels) when e != nil, do: kto(kexpr(e), :ret)
   defp kaw({:throw, e}, _labels), do: kto(kexpr(e), :throw)
 
+  defp kaw({:if, c, a, b}, _labels) do
+    ka = kstmt(a, [])
+    kb = b && kstmt(b, [])
+
+    case ktest(c) do
+      {:t, t} ->
+        fn env, ctx, k ->
+          case sync_value(t, env) do
+            {:ok, true} -> ka.(env, ctx, k)
+            {:ok, false} -> if kb, do: kb.(env, ctx, k), else: k.(:ok)
+            {:throw, e} -> ctx.throw.(e)
+          end
+        end
+
+      {:c, f} ->
+        fn env, ctx, k -> Async.if_cps(f, ka, kb, env, ctx, k) end
+    end
+  end
+
+  defp kaw({:block, stmts, sc}, _labels) do
+    kl = klist(stmts)
+
+    case kscope(sc) do
+      nil ->
+        kl
+
+      sc ->
+        fn env, ctx, k ->
+          entered =
+            try do
+              {:ok, Interp.cps_enter(env, sc)}
+            catch
+              {:js_error, e} -> {:throw, e}
+            end
+
+          case entered do
+            {:ok, b} -> kl.(b, ctx, k)
+            {:throw, e} -> ctx.throw.(e)
+          end
+        end
+    end
+  end
+
+  defp kaw({:labeled, l, s}, labels) do
+    ks = kstmt(s, [l | labels])
+    fn env, ctx, k -> ks.(env, %{ctx | brk: Map.put(ctx.brk, l, k)}, k) end
+  end
+
+  defp kaw({:while, c, body}, labels) do
+    t = ktest(c)
+    b = kstmt(body, [])
+    fn env, ctx, k -> Async.while_k(t, b, env, ctx, k, labels) end
+  end
+
+  defp kaw({:dowhile, body, c}, labels) do
+    b = kstmt(body, [])
+    t = ktest(c)
+    fn env, ctx, k -> Async.dowhile_k(t, b, env, ctx, k, labels) end
+  end
+
+  # The init is never marked `{:aw}`, so the compiler tests it, as `Async.cs/5` does when
+  # it runs.
+  defp kaw({:for, init, test, update, body, sc}, labels) do
+    init =
+      case init do
+        nil -> nil
+        {:var, _, _} = d -> if Awaits.any?(d), do: {:c, kaw(d, [])}, else: {:stmt, stmt(d, [])}
+        {:expr, e} -> kexpr(e)
+      end
+
+    t = test && ktest(test)
+    u = update && kexpr(update)
+    b = kstmt(body, [])
+    spec = {init, t, u, b, kscope(sc), match?(%{per_iter: true}, sc)}
+    fn env, ctx, k -> Async.for_k(spec, env, ctx, k, labels) end
+  end
+
+  # A `switch` that awaits (the twin of the frame clause of `Async.cs/5`). The tests run in
+  # order until one is equal to the value. Then the bodies run from that case to the end.
+  # Each case body is a plan of its own, so that the code stays linear in the size of the
+  # switch, and `Async.switch_k/4` runs the bodies one after the other.
+  defp kaw({:switch, disc, cases, sc}, _labels) do
+    x = kexpr(disc)
+    tests = for {t, _} <- cases, do: if(t == :default, do: :default, else: kexpr(t))
+    bodies = for {_, b} <- cases, do: klist(b)
+    default = Enum.find_index(cases, fn {t, _} -> t == :default end)
+    spec = {x, tests, bodies, default, kscope(sc)}
+    fn env, ctx, k -> Async.switch_k(spec, env, ctx, k) end
+  end
+
   # Every other statement that awaits stays on the tree path.
   defp kaw(s, labels),
     do: trace(:cps_stmt, s, fn env, ctx, k -> Async.tree_stmt(s, env, ctx, k, labels) end)
+
+  # The scope that a statement enters with `Interp.cps_enter/2`, or `nil` when the entry
+  # has no work: a frameless scope with no name in its temporal dead zone and no function.
+  defp kscope(nil), do: nil
+  defp kscope(%{frame: false, tdz: [], hoist: []}), do: nil
+  defp kscope(sc), do: sc
 
   # A `return` or a `throw` that awaits: the value goes to `ctx.ret` or `ctx.throw`.
   defp kto({:c, f}, :ret), do: fn env, ctx, _k -> f.(env, ctx, ctx.ret) end

@@ -2190,7 +2190,9 @@ defmodule Browser.JS.Async do
   # ── loops ──────────────────────────────────────────────────
 
   # the context for a loop body: where `break` and `continue` (bare or with this loop's labels) go
-  defp loop_ctx(ctx, labels, on_break, on_continue) do
+  @doc false
+  # (public: compiled plans call it)
+  def loop_ctx(ctx, labels, on_break, on_continue) do
     brk = Enum.reduce([nil | labels], ctx.brk, &Map.put(&2, &1, on_break))
     cont = Enum.reduce([nil | labels], ctx.cont, &Map.put(&2, &1, on_continue))
     %{ctx | brk: brk, cont: cont}
@@ -2438,7 +2440,8 @@ defmodule Browser.JS.Async do
   #
   #   * `{:s, f}`: the expression does not await. `f` is the closure of the sync compiler,
   #     `fn env -> value end`.
-  #   * `{:t, f}`: the test of `?:` that does not await. `f` gives an Elixir boolean.
+  #   * `{:t, f}`: the test of an `if` or a loop that does not await. `f` gives an Elixir
+  #     boolean.
   #   * `{:c, f}`: the expression can suspend. `f` is `fn env, ctx, k -> ... end`, and it
   #     gives the value to `k`.
   #
@@ -2606,6 +2609,223 @@ defmodule Browser.JS.Async do
   catch
     {:js_error, e} -> {:throw, e}
   end
+
+  @doc false
+  # An `if` where the test can suspend. `a` and `b` are compiled statements, and `b` can be
+  # `nil`.
+  def if_cps(f, a, b, env, ctx, k) do
+    f.(env, ctx, fn v ->
+      cond do
+        Interp.truthy(v) -> a.(env, ctx, k)
+        b != nil -> b.(env, ctx, k)
+        true -> k.(:ok)
+      end
+    end)
+  end
+
+  @doc false
+  # A compiled `while` (the twin of `while_loop/6`). `t` is the compiled test (`{:t, f}` or
+  # `{:c, f}`), and `b` is the compiled body.
+  def while_k(t, b, env, ctx, k, labels) do
+    case t do
+      {:t, f} ->
+        case sync_value(f, env) do
+          {:ok, true} -> while_round(t, b, env, ctx, k, labels)
+          {:ok, false} -> k.(:ok)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(env, ctx, fn v ->
+          if Interp.truthy(v), do: while_round(t, b, env, ctx, k, labels), else: k.(:ok)
+        end)
+    end
+  end
+
+  defp while_round(t, b, env, ctx, k, labels) do
+    Interp.tick()
+    next = fn _ -> while_k(t, b, env, ctx, k, labels) end
+    b.(env, loop_ctx(ctx, labels, k, next), next)
+  end
+
+  @doc false
+  # A compiled `do`/`while`: the body runs once before the first test, with no step, as in
+  # the clause of `cs/5`.
+  def dowhile_k(t, b, env, ctx, k, labels) do
+    next = fn _ -> while_k(t, b, env, ctx, k, labels) end
+    b.(env, loop_ctx(ctx, labels, k, next), next)
+  end
+
+  @doc false
+  # A compiled `for` in frame mode (the twin of the clause of `cs/5` and of `for_iter/5`).
+  # `sc` is the scope to enter, or `nil` when the entry has no work. `init` is `nil`, a
+  # compiled expression, a statement that can suspend (`{:c, f}`) or a sync statement
+  # (`{:stmt, f}`). With `copy?` each round runs in its own copy of the head frame.
+  def for_k({init, t, u, b, sc, copy?}, env, ctx, k, labels) do
+    entered =
+      if sc == nil do
+        {:ok, env}
+      else
+        try do
+          {:ok, Interp.cps_enter(env, sc)}
+        catch
+          {:js_error, e} -> {:throw, e}
+        end
+      end
+
+    case entered do
+      {:ok, l} ->
+        spec = {t, u, b, env, copy?}
+
+        case init do
+          nil ->
+            for_start(spec, l, ctx, k, labels)
+
+          {:stmt, f} ->
+            case run_stmt(f, l) do
+              :ok -> for_start(spec, l, ctx, k, labels)
+              c -> abrupt(c, ctx, k)
+            end
+
+          {:s, f} ->
+            case sync_value(f, l) do
+              {:ok, _} -> for_start(spec, l, ctx, k, labels)
+              {:throw, e} -> ctx.throw.(e)
+            end
+
+          {:c, f} ->
+            f.(l, ctx, fn _ -> for_start(spec, l, ctx, k, labels) end)
+        end
+
+      {:throw, e} ->
+        ctx.throw.(e)
+    end
+  end
+
+  defp for_start({_, _, _, env, copy?} = spec, l, ctx, k, labels) do
+    first = if copy?, do: Interp.copy_scope(l, env), else: l
+    for_round(spec, first, ctx, k, labels)
+  end
+
+  defp for_round({t, _, _, _, _} = spec, iter_env, ctx, k, labels) do
+    Interp.tick()
+
+    case t do
+      nil ->
+        for_body(spec, iter_env, ctx, k, labels)
+
+      {:t, f} ->
+        case sync_value(f, iter_env) do
+          {:ok, true} -> for_body(spec, iter_env, ctx, k, labels)
+          {:ok, false} -> k.(:ok)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(iter_env, ctx, fn v ->
+          if Interp.truthy(v), do: for_body(spec, iter_env, ctx, k, labels), else: k.(:ok)
+        end)
+    end
+  end
+
+  defp for_body({_, _, b, _, _} = spec, iter_env, ctx, k, labels) do
+    advance = fn _ -> for_next(spec, iter_env, ctx, k, labels) end
+    b.(iter_env, loop_ctx(ctx, labels, k, advance), advance)
+  end
+
+  defp for_next({_, u, _, env, copy?} = spec, iter_env, ctx, k, labels) do
+    next_env = if copy?, do: Interp.copy_scope(iter_env, env), else: iter_env
+
+    case u do
+      nil ->
+        for_round(spec, next_env, ctx, k, labels)
+
+      {:s, f} ->
+        case sync_value(f, next_env) do
+          {:ok, _} -> for_round(spec, next_env, ctx, k, labels)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(next_env, ctx, fn _ -> for_round(spec, next_env, ctx, k, labels) end)
+    end
+  end
+
+  @doc false
+  # A compiled `switch` in frame mode (the twin of the frame clause of `cs/5` and of
+  # `find_case/6`). The discriminant runs in `env`. The tests and the bodies run in the
+  # scope of the switch. `sc` is the scope to enter, or `nil` when the entry has no work.
+  def switch_k({x, _, _, _, _} = spec, env, ctx, k) do
+    case x do
+      {:s, f} ->
+        case sync_value(f, env) do
+          {:ok, v} -> switch_enter(spec, v, env, ctx, k)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(env, ctx, fn v -> switch_enter(spec, v, env, ctx, k) end)
+    end
+  end
+
+  defp switch_enter({_, tests, _, _, sc} = spec, v, env, ctx, k) do
+    entered =
+      if sc == nil do
+        {:ok, env}
+      else
+        try do
+          {:ok, Interp.cps_enter(env, sc)}
+        catch
+          {:js_error, e} -> {:throw, e}
+        end
+      end
+
+    case entered do
+      {:ok, scope} -> switch_find(tests, 0, spec, v, scope, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  # The first case whose test is equal to the value, else the default case.
+  defp switch_find([], _i, {_, _, _, default, _} = spec, _v, scope, ctx, k),
+    do: switch_run(spec, default, scope, ctx, k)
+
+  defp switch_find([:default | rest], i, spec, v, scope, ctx, k),
+    do: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+
+  defp switch_find([{:s, f} | rest], i, spec, v, scope, ctx, k) do
+    case sync_value(f, scope) do
+      {:ok, tv} ->
+        if Interp.strict_eq(v, tv),
+          do: switch_run(spec, i, scope, ctx, k),
+          else: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+
+      {:throw, e} ->
+        ctx.throw.(e)
+    end
+  end
+
+  defp switch_find([{:c, f} | rest], i, spec, v, scope, ctx, k) do
+    f.(scope, ctx, fn tv ->
+      if Interp.strict_eq(v, tv),
+        do: switch_run(spec, i, scope, ctx, k),
+        else: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+    end)
+  end
+
+  # A `break` without a label ends the switch.
+  defp switch_run(_spec, nil, _scope, _ctx, k), do: k.(:ok)
+
+  defp switch_run({_, _, bodies, _, _}, start, scope, ctx, k) do
+    ctx = %{ctx | brk: Map.put(ctx.brk, nil, k)}
+    cases_from(Enum.drop(bodies, start), scope, ctx, k)
+  end
+
+  defp cases_from([], _scope, _ctx, k), do: k.(:ok)
+  defp cases_from([b], scope, ctx, k), do: b.(scope, ctx, k)
+
+  defp cases_from([b | rest], scope, ctx, k),
+    do: b.(scope, ctx, fn _ -> cases_from(rest, scope, ctx, k) end)
 
   @doc false
   # Runs the compiled sync statement or statement list `f` and gives its completion, as
