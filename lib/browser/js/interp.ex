@@ -118,8 +118,11 @@ defmodule Browser.JS.Interp do
     compile? = Application.get_env(:browser, :js_compile, true)
     :erlang.put(:js_compile, compile?)
 
-    if compile? != true,
-      do: for({{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key))
+    if compile? != true do
+      for {{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      # (the count of the cache goes with the cache, see `Browser.JS.Compile`)
+      :erlang.erase(:jsc_budget)
+    end
 
     # A fresh heap gives out the ids from 0 again, so the marks of `frame_done/2` from an
     # earlier heap in this process must go: check mode would read them as the marks of the

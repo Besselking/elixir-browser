@@ -38,53 +38,78 @@ defmodule Browser.JS.Compile do
   @moduledoc """
   Closure compilation of JS function bodies (step 5).
 
-  The resolver rewrites a function so that it runs on a slot frame. At the first call of
-  such a function, this module changes the body of the function into Elixir closures. A
-  closure takes the frame id and gives the value or the completion of the code that it
-  replaces. The interpreter (`Browser.JS.Interp`) then calls the closures, and does not
-  walk the syntax tree of the body again.
+  The resolver rewrites a function so that the function runs on a slot frame. At the first
+  call of such a function, this module changes the body into Elixir closures. A closure
+  takes the frame id. It gives the value or the completion of the code that it replaces.
+  The interpreter (`Browser.JS.Interp`) then calls the closures. It does not walk the
+  syntax tree of the body again.
 
   ## Which nodes compile
 
-  The node kinds that most programs use have closures of their own:
+  These node kinds have closures of their own:
 
-    * constants, slot reads, `this`, the reads of a name in the global scope or in a map
-      scope (`{:gref}`, `{:mref}`);
-    * `?:`, `&&`, `||`, `??`, the comma operator, templates, optional chains, the unary
-      operators and the binary operators;
-    * property reads, calls, `new`, array and object literals;
+    * constants, slot reads and `this`;
+    * the reads of a name in the global scope or in a map scope (`{:gref}`, `{:mref}`);
+    * `?:`, `&&`, `||`, `??`, the comma operator, templates and optional chains;
+    * the unary operators and the binary operators;
+    * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, labels, `break`, `continue` and `throw`.
+      `while`, `break`, `continue`, `throw` and labels.
 
-  A parent reads an operand that is a constant or a slot of its own frame inline, without
-  the call of a closure. A binary operator and a test have one closure for each kind of
-  operand, so that the closure does no test of the kind when it runs. The tests of `if`,
-  `?:`, `for` and `while` give an Elixir boolean: a comparison gives its value, and `!`,
-  `&&` and `||` join the booleans of their operands. A comparison of operands goes into the
-  closure of its branch.
+  A parent reads a constant operand inline. It also reads a slot of its own frame inline.
+  Thus these operands need no closure call. A binary operator and a test have one closure
+  for each kind of operand. Thus the closure does not test the kind when it runs.
 
-  Some nodes stay on the tree walker, but their children compile (a shell). The compiler
-  makes a copy of the node in which each expression or statement child is
+  The tests of `if`, `?:`, `for` and `while` give an Elixir boolean. A comparison gives its
+  value. `!`, `&&` and `||` join the booleans of their operands. A comparison of operands
+  goes into the closure of its branch.
+
+  A slot read reads up to three scope headers inline. For more hops, it calls
+  `Interp.hop/2`.
+
+  A property read or write with a constant key uses `Interp.get_named/2` or
+  `Interp.put_named/3` when the key is not an array index. These functions use the same
+  class dispatch as `Interp.get/2` and `Interp.put/3`, but they do not convert the key.
+
+  ## Shells
+
+  Some nodes stay on the tree walker, but their children compile. Such a node is a shell.
+  The compiler makes a copy of the node. In the copy, each expression or statement child is
   `{:cc, closure}`. `Interp.ev/2`, `exec/3` and `fstmt/3` run such a child with one call.
-  These nodes are `switch`, `try`, `for-in`, `for-of`, `do-while`, a block or a `for`
-  that makes a block frame, a declaration with a pattern, a literal with a spread or a
-  method, a call with a callee that the tree reads by name, and some rare forms of
-  assignment and `delete`. Because of this, the order of `try` and `finally`, the closing
-  of iterators, the copies of a loop scope and the block frames have one implementation,
-  in `Interp`. A shell keeps the nodes that the heap keeps (functions and classes) and the
-  callee of a call (its node names the callee in an error) as they are.
 
-  Every other node stays on the tree walker with all the nodes in it. Its closure gives
-  the node to `Interp.ev/2`, `Interp.fstmt/3` or `Interp.tail_value/2`. These nodes are
-  the functions and classes, the reads and writes of a name that the resolver did not put
-  in a slot, the special forms of `typeof` and `delete`, `super`, `import`, regular
-  expressions and the strings of a tagged template.
+  These nodes are shells:
+
+    * `switch`, `try`, `for-in`, `for-of` and `do-while`;
+    * a block or a `for` that makes a block frame;
+    * a declaration with a pattern;
+    * a literal with a spread or a method;
+    * a call with a callee that the tree reads by name;
+    * some rare forms of assignment and of `delete`.
+
+  Thus the order of `try` and `finally`, the close of iterators, the copies of a loop scope
+  and the block frames have one implementation, in `Interp`. A shell keeps the functions
+  and the classes as they are, because the heap keeps these nodes. A shell also keeps the
+  callee of a call as it is, because the text of an error names the callee.
+
+  ## Nodes on the tree
+
+  Every other node stays on the tree walker with all the nodes in it. Its closure gives the
+  node to `Interp.ev/2`, `Interp.fstmt/3` or `Interp.tail_value/2`. These nodes are:
+
+    * functions and classes;
+    * the reads and writes of a name that the resolver did not put in a slot;
+    * the special forms of `typeof` and `delete`;
+    * `super`, `import` and regular expressions;
+    * the strings of a tagged template.
+
+  ## Same results
 
   A compiled node does the same steps in the same order as its clause in `Interp`. It
-  calls the same helpers of `Interp` for the work that the two share: the frame of a call,
-  the operators, the property reads and writes and the slot writes. Because of this, a
-  compiled body and the tree walker give the same values, errors, steps and heap ids.
+  calls the same helpers of `Interp` for the work that the two share. This work is the
+  frame of a call, the operators, the property reads and writes, and the slot writes.
+  Thus a compiled body and the tree walker give the same values, errors, steps and heap
+  ids.
 
   ## Which functions compile
 
@@ -97,48 +122,72 @@ defmodule Browser.JS.Compile do
 
   ## The switch
 
-  The application setting `:js_compile` (default `true`, `JS_COMPILE=0` sets it to `false`)
-  is the switch. `Browser.JS.Interp.init/1` copies it into the process dictionary. Because
-  of this, each heap has its own value, and one VM can run the two modes.
+  The application setting `:js_compile` is the switch. Its default is `true`.
+  `JS_COMPILE=0` sets it to `false`. `Browser.JS.Interp.init/1` copies the setting into
+  the process dictionary. Thus each heap has its own value, and one VM can run the two
+  modes.
 
   ## The cache
 
   The process dictionary keeps the compiled code of each function under the key
-  `{:jsc, uid}`. The value is `{body, maker}`. `body` is the closure of the body. `maker`
-  is the frame maker of the function, or `nil` when it has none. Each function object keeps
-  its code in its closure record (the keys `code` and `mk`), so that a call does not read
-  the cache.
+  `{:jsc, uid}`. The value is `{body, maker}`:
+
+    * `body` is the closure of the body, or `nil` when the body stays on the tree.
+    * `maker` is the frame maker of the function, or `nil`.
+
+  Each function object keeps its code in its closure record, in the keys `code` and `mk`.
+  Thus a call does not read the cache.
+
+  ## Frame makers
+
+  A frame maker makes the frame tuple of a call. It knows the shape of the frame when it
+  compiles. Thus it does not walk the lists of the parameters and of the hidden slots for
+  each call. Only a function with plain parameters gets a maker. The function must have no
+  hidden slot, or only the `this` slot.
+
+  ## Memory bound
+
+    * A function with more than 65,536 compiled nodes stays on the tree. Its cache entry is
+      `{nil, nil}`.
+    * The process key `:jsc_budget` holds `{nodes, erases}`. `nodes` is the number of
+      compiled nodes in the cache.
+    * When the number of nodes goes above 2,000,000 (about 40 MB), all the entries of the
+      cache go. Then the count starts again. `erases` counts these events.
+
+  A function object keeps its code. Thus the live code stays bounded by the live
+  functions. Each parse of `new Function` code or of `eval` code makes new uids. Thus a
+  loop that makes functions without end can not fill the memory.
 
   ## Rules for the code
 
     * A compiled closure keeps only values that are known at compile time: slot numbers,
-      names, constants, syntax nodes and other compiled closures. It never keeps a frame id
-      or a heap id. Because of this, the collector (`Browser.JS.GC`) does not walk the
-      cache or the funs of this module.
-    * Each closure has one parent closure. Because of this, the size of the code is linear
-      in the size of the body.
-    * Compiled code makes no fun when it runs. A loop is a named function of this module,
-      which gets the closures of the loop as arguments.
-    * The code stays in its process. Do not send it in a message, and do not put it in ETS,
-      in `persistent_term` or in `term_to_binary`.
+      names, constants, syntax nodes and other compiled closures. It never keeps a frame
+      id or a heap id. Thus the collector (`Browser.JS.GC`) does not walk the cache or the
+      funs of this module.
+    * Each closure has one parent closure. Thus the size of the code is linear in the size
+      of the body.
+    * Compiled code makes no fun when it runs. A loop is a named function of this module.
+      The loop gets its closures as arguments.
+    * The code stays in its process. Do not send it in a message. Do not put it in ETS, in
+      `persistent_term` or in `term_to_binary`.
 
   ## Check mode
 
   When the application has `:js_resolve_check`, compiled code does these checks:
 
-    * a body runs only on a frame (S1);
-    * each statement of a list completes with one of the shapes of step 3, and a loop
-      gives back no break or continue of its own (S2);
-    * a slot read or write calls the same checks as its twin on the tree, and a call
-      checks the call chain (S3);
-    * a shell has no compiled child in a function, in a class or in the callee of a call
-      (S4);
-    * the compiled code of a body keeps no object, no `{:val}` node and no frame (S5);
-    * the tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
+    * A body runs only on a frame (S1).
+    * Each statement of a list completes with one of the shapes of step 3. A loop gives
+      back no break or continue of its own (S2).
+    * A slot read or write calls the same checks as its twin on the tree. A call checks
+      the call chain (S3).
+    * A shell has no compiled child in a function, in a class or in the callee of a call
+      (S4).
+    * The compiled code of a body keeps no object, no `{:val}` node and no frame (S5).
+    * The tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
       (S6, in `Interp.frame_call/6`).
 
-  When the process key `:jsc_trace` holds a list, the compiler adds to it each node that
-  stays on the tree. The coverage test uses this list.
+  When the process key `:jsc_trace` holds a list, the compiler adds to the list each node
+  that stays on the tree. The coverage test uses this list.
   """
 
   alias Browser.JS.Interp
@@ -170,10 +219,63 @@ defmodule Browser.JS.Compile do
   def code(_c), do: nil
 
   defp compile_and_store(c, uid) do
-    code = {body(c), maker(c.info)}
+    :erlang.put(:jsc_count, 0)
+
+    {code, n} =
+      try do
+        {{body(c), maker(c.info)}, :erlang.get(:jsc_count)}
+      catch
+        # (a function over the cap stays on the tree; its entry in the cache tells the
+        # next function objects so, and they do not count its nodes again)
+        :jsc_too_big -> {{nil, nil}, 0}
+      after
+        :erlang.erase(:jsc_count)
+      end
+
     check_capture(code)
+    budget(n)
     :erlang.put({:jsc, uid}, code)
     code
+  end
+
+  # ── memory bound ───────────────────────────────────────────
+
+  # A function with more nodes than this stays on the tree. The largest function of the
+  # Speedometer suites has about 10.7k words of compiled code, so the cap is far above
+  # real code. It stops a generated function of megabytes from making code of megabytes.
+  @max_nodes 65_536
+
+  # The budget of the cache of a process, in compiled nodes (about 20 words each, so about
+  # 40 MB). A page that makes new functions without end (`new Function` or `eval` in a
+  # loop) makes new uids, and each uid gets its own entry.
+  @budget 2_000_000
+
+  # Counts one compiled node of the body that compiles now. The count is in the process
+  # key `:jsc_count`, which `compile_and_store/2` sets and erases.
+  defp count do
+    n = :erlang.get(:jsc_count) + 1
+    if n > @max_nodes, do: throw(:jsc_too_big)
+    :erlang.put(:jsc_count, n)
+  end
+
+  # Adds the `n` nodes of a new entry to the count of the cache. Over the budget, all the
+  # entries go, and the count starts again with the new entry. A function object keeps
+  # its code in its closure record, so the live code stays bounded by the live functions.
+  # The process key `:jsc_budget` holds `{nodes, erases}`. The collector does not read it
+  # as a root (`Browser.JS.GC`).
+  defp budget(n) do
+    {total, erases} =
+      case :erlang.get(:jsc_budget) do
+        :undefined -> {0, 0}
+        b -> b
+      end
+
+    if total + n > @budget do
+      for {{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      :erlang.put(:jsc_budget, {n, erases + 1})
+    else
+      :erlang.put(:jsc_budget, {total + n, erases})
+    end
   end
 
   # ── frame makers ───────────────────────────────────────────
@@ -547,19 +649,25 @@ defmodule Browser.JS.Compile do
 
   # ── expressions ────────────────────────────────────────────
 
-  # The closure of the expression `e`: `fn env -> value end`.
-  defp expr({:num, n}), do: fn _env -> n end
-  defp expr({:str, s}), do: fn _env -> s end
-  defp expr({:lit, v}), do: fn _env -> v end
+  # The closure of the expression `e`: `fn env -> value end`. Each node counts for the
+  # memory bound (see `count/0`).
+  defp expr(e) do
+    count()
+    expr_node(e)
+  end
 
-  defp expr({:slot, 0, i, name} = form), do: fn env -> slot0(env, i, name, form) end
+  defp expr_node({:num, n}), do: fn _env -> n end
+  defp expr_node({:str, s}), do: fn _env -> s end
+  defp expr_node({:lit, v}), do: fn _env -> v end
 
-  defp expr({:slot, d, i, name}) do
+  defp expr_node({:slot, 0, i, name} = form), do: fn env -> slot0(env, i, name, form) end
+
+  defp expr_node({:slot, d, i, name}) do
     form = {:slot, 0, i, name}
     fn env -> slot0(up(env, d), i, name, form) end
   end
 
-  defp expr({:this, d, i} = form) do
+  defp expr_node({:this, d, i} = form) do
     fn env ->
       if @check, do: Interp.check_landing(form, env)
 
@@ -570,7 +678,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:gref, name} = form) do
+  defp expr_node({:gref, name} = form) do
     # (the by-name read of `ev_id/2` takes this node, so it is built once)
     id = {:id, name}
 
@@ -580,12 +688,12 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:in_tdz, _names, e}), do: expr(e)
+  defp expr_node({:in_tdz, _names, e}), do: expr(e)
 
-  defp expr({:cond, c, a, b}), do: cbranch(c, expr(a), expr(b))
+  defp expr_node({:cond, c, a, b}), do: cbranch(c, expr(a), expr(b))
 
   # (the right operand is read only when the left one does not give the value)
-  defp expr({:logical, op, l, r}) do
+  defp expr_node({:logical, op, l, r}) do
     {lo, ro} = {opnd(l), opnd(r)}
 
     case op do
@@ -596,20 +704,20 @@ defmodule Browser.JS.Compile do
   end
 
   # (`!` has no special form in `ev/2`: its operand is a plain expression)
-  defp expr({:unary, "!", _} = e), do: ctest(e)
+  defp expr_node({:unary, "!", _} = e), do: ctest(e)
 
   # (`#x in o` reads the private name in its own clause of `ev/2`)
-  defp expr({:binary, "in", {:priv_ref, _} = l, r}), do: shell({:binary, "in", l, cc(r)})
-  defp expr({:binary, op, l, r}), do: binary(op, opnd(l), opnd(r))
+  defp expr_node({:binary, "in", {:priv_ref, _} = l, r}), do: shell({:binary, "in", l, cc(r)})
+  defp expr_node({:binary, op, l, r}), do: binary(op, opnd(l), opnd(r))
 
-  defp expr({:member, o, k, opt}) do
+  defp expr_node({:member, o, k, opt}) do
     case k do
       {:priv, _} -> shell({:member, cc(o), k, opt})
       _ -> member(opnd(o), key_code(k), opt)
     end
   end
 
-  defp expr({:call, callee, args, opt}) do
+  defp expr_node({:call, callee, args, opt}) do
     case target(callee) do
       {:ok, target} -> call(target, list_code(args), opt, callee)
       # (the callee keeps its node: `call_target/2` reads its shape, and the text of an
@@ -618,7 +726,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:new, callee, args}) do
+  defp expr_node({:new, callee, args}) do
     {cc, al} = {expr(callee), list_code(args)}
 
     fn env ->
@@ -638,7 +746,8 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({kind, "=", {:slot, d, i, name}, value} = node) when kind in [:assign, :sassign] do
+  defp expr_node({kind, "=", {:slot, d, i, name}, value} = node)
+       when kind in [:assign, :sassign] do
     if nameable(value) do
       fallback(node)
     else
@@ -646,7 +755,8 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({kind, "=", {:member, o, k, _} = target, value}) when kind in [:assign, :sassign] do
+  defp expr_node({kind, "=", {:member, o, k, _} = target, value})
+       when kind in [:assign, :sassign] do
     case k do
       {:priv, _} -> shell({kind, "=", cmember(target), cc(value)})
       _ -> put(kind, opnd(o), key_code(k), opnd(value))
@@ -655,26 +765,26 @@ defmodule Browser.JS.Compile do
 
   # (a slot form that is not `{:slot}` writes through its own helper in `ev/2`, which
   # reads the value with `ev_named/3`)
-  defp expr({kind, "=", {t, _, _, _} = target, value} = node)
+  defp expr_node({kind, "=", {t, _, _, _} = target, value} = node)
        when kind in [:assign, :sassign] and t in [:cslot, :fname] do
     if nameable(value), do: fallback(node), else: shell({kind, "=", target, cc(value)})
   end
 
-  defp expr({kind, "=", {t, _, _, _, _} = target, value} = node)
+  defp expr_node({kind, "=", {t, _, _, _, _} = target, value} = node)
        when kind in [:assign, :sassign] and t == :mslot do
     if nameable(value), do: fallback(node), else: shell({kind, "=", target, cc(value)})
   end
 
   # A logical assignment (`&&=`, `||=`, `??=`) stays on the tree, which names a function
   # value through `ev_named/3`.
-  defp expr({kind, op, target, value} = node)
+  defp expr_node({kind, op, target, value} = node)
        when kind in [:assign, :sassign] and op in ["&&=", "||=", "??="] do
     if nameable(value),
       do: fallback(node),
       else: shell({kind, op, ctarget(target), cc(value)})
   end
 
-  defp expr({kind, op, target, value} = node)
+  defp expr_node({kind, op, target, value} = node)
        when kind in [:assign, :sassign] and op not in ["=", "&&=", "||=", "??="] do
     # (the operator of `x op= v` is `op` without the `=`, as in `compound_assign/5`)
     base = binary_part(op, 0, byte_size(op) - 1)
@@ -694,7 +804,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({kind, op, prefix?, target} = node) when kind in [:update, :supdate] do
+  defp expr_node({kind, op, prefix?, target} = node) when kind in [:update, :supdate] do
     case target do
       {:slot, d, i, name} ->
         update_slot(op, prefix?, d, i, name)
@@ -710,7 +820,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:array, elems}) do
+  defp expr_node({:array, elems}) do
     if plain_list?(elems) do
       al = list_code(elems)
       # (`ev/2` evaluates the elements before it makes the array, as here)
@@ -720,7 +830,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:object, props}) do
+  defp expr_node({:object, props}) do
     if Enum.all?(props, &plain_prop?/1) do
       pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
 
@@ -735,13 +845,13 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:seq, es}) do
+  defp expr_node({:seq, es}) do
     cs = Enum.map(es, &expr/1)
     fn env -> seq(cs, env) end
   end
 
   # (as `ev/2`: the special forms of `typeof` read a name that can be missing)
-  defp expr({:unary, "typeof", {:slot, d, i, name} = form}) do
+  defp expr_node({:unary, "typeof", {:slot, d, i, name} = form}) do
     fn env ->
       if @check, do: Interp.check_landing(form, env)
 
@@ -752,30 +862,32 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:unary, "typeof", {k, _, _}} = node) when k in [:aslot, :mref], do: fallback(node)
-  defp expr({:unary, "typeof", {k, _}} = node) when k in [:gref, :id], do: fallback(node)
+  defp expr_node({:unary, "typeof", {k, _, _}} = node) when k in [:aslot, :mref],
+    do: fallback(node)
+
+  defp expr_node({:unary, "typeof", {k, _}} = node) when k in [:gref, :id], do: fallback(node)
 
   # (a constant operand gives the same value at each run, so the value is computed once)
-  defp expr({:unary, "-", {:num, n}}) do
+  defp expr_node({:unary, "-", {:num, n}}) do
     v = Num.neg(n)
     fn _env -> v end
   end
 
-  defp expr({:unary, "void", {:num, _}}), do: fn _env -> :undefined end
+  defp expr_node({:unary, "void", {:num, _}}), do: fn _env -> :undefined end
 
-  defp expr({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"],
+  defp expr_node({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"],
     do: unary(op, opnd(e))
 
-  defp expr({:unary, d, {:member, _, _, _} = target}) when d in ["delete", "sdelete"],
+  defp expr_node({:unary, d, {:member, _, _, _} = target}) when d in ["delete", "sdelete"],
     do: shell({:unary, d, cmember(target)})
 
-  defp expr({:tmpl, parts}) do
+  defp expr_node({:tmpl, parts}) do
     pcs = Enum.map(parts, fn p -> if is_binary(p), do: p, else: opnd(p) end)
     fn env -> parts(pcs, env, []) |> Browser.JS.Str.join() end
   end
 
   # (an optional member or call in the chain throws `:js_short`, as in `ev/2`)
-  defp expr({:chain, e}) do
+  defp expr_node({:chain, e}) do
     ec = expr(e)
 
     fn env ->
@@ -787,7 +899,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr({:mref, d, name} = form) do
+  defp expr_node({:mref, d, name} = form) do
     # (the by-name read of `ev_id/2` takes this node, so it is built once)
     id = {:id, name}
 
@@ -798,11 +910,11 @@ defmodule Browser.JS.Compile do
   end
 
   # (the marker only keeps a name from the value, see `ev_named/3`)
-  defp expr({:unnamed, e}), do: expr(e)
+  defp expr_node({:unnamed, e}), do: expr(e)
 
-  defp expr({:destructure, pat, right}), do: shell({:destructure, pat, cc(right)})
+  defp expr_node({:destructure, pat, right}), do: shell({:destructure, pat, cc(right)})
 
-  defp expr(node), do: fallback(node)
+  defp expr_node(node), do: fallback(node)
 
   # The operand form of `e` (see the section on operands). A negative number and `void` of
   # a number are constants, as in `expr/1`. The markers `{:in_tdz}` and `{:unnamed}` do
@@ -1304,8 +1416,14 @@ defmodule Browser.JS.Compile do
   end
 
   # The closure of the statement `s`: `fn env -> completion end`. `labels` are the labels
-  # of the statement, as `fstmt/3` gets them.
-  defp stmt({:expr, e}, _labels) do
+  # of the statement, as `fstmt/3` gets them. Each node counts for the memory bound (see
+  # `count/0`).
+  defp stmt(s, labels) do
+    count()
+    stmt_node(s, labels)
+  end
+
+  defp stmt_node({:expr, e}, _labels) do
     ec = expr(e)
 
     fn env ->
@@ -1314,21 +1432,21 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp stmt({:return, nil}, _labels), do: fn _env -> {:ret, :undefined} end
+  defp stmt_node({:return, nil}, _labels), do: fn _env -> {:ret, :undefined} end
 
-  defp stmt({:return, e, :plain}, _labels), do: ret(opnd(e))
+  defp stmt_node({:return, e, :plain}, _labels), do: ret(opnd(e))
 
-  defp stmt({:return, e, :tail}, _labels), do: tail(e)
+  defp stmt_node({:return, e, :tail}, _labels), do: tail(e)
 
   # (the branches of an `if` run without labels, as in `fstmt/3`)
-  defp stmt({:if, c, a, b}, _labels), do: cbranch(c, stmt(a, []), b && stmt(b, []))
+  defp stmt_node({:if, c, a, b}, _labels), do: cbranch(c, stmt(a, []), b && stmt(b, []))
 
-  defp stmt({:block, stmts, sc}, _labels) when frameless(sc) do
+  defp stmt_node({:block, stmts, sc}, _labels) when frameless(sc) do
     bc = list(stmts)
     enter(sc, bc)
   end
 
-  defp stmt({:var, kind, decls}, labels) do
+  defp stmt_node({:var, kind, decls}, labels) do
     if Enum.all?(decls, &slot_decl?/1) do
       # (a `var` without a value does nothing, as in `exec/3`)
       ds =
@@ -1351,7 +1469,7 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp stmt({:for, init, test, update, body, sc}, labels)
+  defp stmt_node({:for, init, test, update, body, sc}, labels)
        when frameless(sc) and (init == nil or elem(init, 0) in [:var, :expr]) do
     # (the head runs as `exec/3` runs it: a declaration as a statement, an expression for
     # its value)
@@ -1373,13 +1491,13 @@ defmodule Browser.JS.Compile do
     enter(sc, lc)
   end
 
-  defp stmt({:while, c, body}, labels) do
+  defp stmt_node({:while, c, body}, labels) do
     {tc, bc} = {ctest(c), stmt(body, [])}
     fn env -> while_loop(tc, bc, env, labels) end
   end
 
   # A break to this label ends the labeled statement normally, as in `fstmt/3`.
-  defp stmt({:labeled, l, s}, labels) do
+  defp stmt_node({:labeled, l, s}, labels) do
     sc = stmt(s, [l | labels])
 
     fn env ->
@@ -1390,17 +1508,17 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp stmt({:break, l}, _labels) do
+  defp stmt_node({:break, l}, _labels) do
     c = {:brk, l}
     fn _env -> c end
   end
 
-  defp stmt({:continue, l}, _labels) do
+  defp stmt_node({:continue, l}, _labels) do
     c = {:cont, l}
     fn _env -> c end
   end
 
-  defp stmt({:throw, e}, _labels) do
+  defp stmt_node({:throw, e}, _labels) do
     ec = expr(e)
 
     fn env ->
@@ -1415,7 +1533,7 @@ defmodule Browser.JS.Compile do
   # The statements below stay on the tree with compiled children, so that the order of
   # `try`/`finally`, the closing of iterators, the copies of a loop scope for each round
   # and the block frames keep one implementation, in `Interp`.
-  defp stmt({:switch, disc, cases, sc}, labels) do
+  defp stmt_node({:switch, disc, cases, sc}, labels) do
     cases =
       for {t, body} <- cases,
           do: {if(t == :default, do: :default, else: cc(t)), [{:cc, list(body)}]}
@@ -1423,22 +1541,22 @@ defmodule Browser.JS.Compile do
     shell_stmt({:switch, cc(disc), cases, sc}, labels)
   end
 
-  defp stmt({:try, block, param, handler, finalizer, sc}, labels) do
+  defp stmt_node({:try, block, param, handler, finalizer, sc}, labels) do
     node = {:try, cs(block), param, handler && cs(handler), finalizer && cs(finalizer), sc}
     shell_stmt(node, labels)
   end
 
-  defp stmt({kind, decl, pat, obj, body, sc}, labels) when kind in [:forin, :forof],
+  defp stmt_node({kind, decl, pat, obj, body, sc}, labels) when kind in [:forin, :forof],
     do: shell_stmt({kind, decl, pat, cc(obj), cs(body), sc}, labels)
 
-  defp stmt({:dowhile, body, c}, labels), do: shell_stmt({:dowhile, cs(body), cc(c)}, labels)
+  defp stmt_node({:dowhile, body, c}, labels), do: shell_stmt({:dowhile, cs(body), cc(c)}, labels)
 
-  defp stmt({:block, stmts, sc}, labels),
+  defp stmt_node({:block, stmts, sc}, labels),
     do: shell_stmt({:block, [{:cc, list(stmts)}], sc}, labels)
 
   # (a framed `for` matches the shape of its head: a declaration runs as an expression
   # child that gives `:ok`, which the loop drops)
-  defp stmt({:for, init, test, update, body, sc}, labels)
+  defp stmt_node({:for, init, test, update, body, sc}, labels)
        when init == nil or elem(init, 0) in [:var, :expr] do
     init =
       case init do
@@ -1450,7 +1568,7 @@ defmodule Browser.JS.Compile do
     shell_stmt({:for, init, test && cc(test), update && cc(update), cs(body), sc}, labels)
   end
 
-  defp stmt(node, labels), do: fallback_stmt(node, labels)
+  defp stmt_node(node, labels), do: fallback_stmt(node, labels)
 
   # The entry of a frameless scope: `enter_frameless/2` resets the temporal dead zone of
   # its names and makes its functions. A scope with neither needs no call.

@@ -62,6 +62,8 @@ defmodule Browser.JS.GC do
           # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its
           # syntax nodes hold slot numbers, which must not keep an object alive)
           {{:jsc, _}, _}, acc -> acc
+          # (the count of the code cache holds two integers, which are not heap ids)
+          {:jsc_budget, _}, acc -> acc
           {:js_memo, _}, acc -> acc
           {:js_heap_n, _}, acc -> acc
           # (the call chain holds names, positions and depths, never an id; a depth or a
@@ -122,6 +124,7 @@ defmodule Browser.JS.GC do
           {{:js_hoist, _}, _}, roots -> roots
           # (the cache of compiled code holds no heap id)
           {{:jsc, _}, _}, roots -> roots
+          {:jsc_budget, _}, roots -> roots
           {:js_memo, _}, roots -> roots
           {:js_heap_n, _}, roots -> roots
           # (the call chain holds names, positions and depths, never an id)
