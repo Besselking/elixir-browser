@@ -198,27 +198,21 @@ defmodule Browser.JS.FastTest do
 
     # ── the ordered export ───────────────────────────────────
 
-    # The heap as the program left it, from the variables of the global scope (the global
-    # object is one of them, `globalThis`): for each object that the walk reaches, its class,
-    # its prototype, its own enumerable string keys in their order (`Interp.own_keys/1`) and
-    # then the other keys of its `props`, each with its state (`Props.own_state/2`: the value
-    # and the attributes). The walk reads no getter and calls no trap, so it runs no
-    # JavaScript code, and it makes no object. A proxy is not walked. An object has the name
-    # of the order of its first visit, or its id when `ids?` is true. The export is a hash,
-    # so that the runs of all programs fit in memory.
+    # The heap as the program left it, from the global scope: for each object that the walk
+    # reaches, its class, its prototype, its own enumerable string keys in their order
+    # (`Interp.own_keys/1`) and then the other keys of its `props`, each with its state
+    # (`Props.own_state/2`: the value and the attributes). The walk also goes into the
+    # scope of each closure and up its chain, as the collector does, because the code under
+    # test runs in functions, and an object that only a closure holds is otherwise not in
+    # the export. A scope gives its variables (a map scope) or its slots (a frame). The
+    # walk reads no getter and calls no trap, so it runs no JavaScript code, and it makes
+    # no object. A proxy is not walked. A node (an object or a scope) has the name of the
+    # order of its first visit, or its id when `ids?` is true. The export is a hash, so that
+    # the runs of all programs fit in memory.
     defp heap_export(ids?) do
-      roots = Interp.deref(Interp.global()).vars |> Enum.sort()
-      ids = refs(roots, [])
-
-      {names, n} =
-        Enum.reduce(ids, {%{}, 0}, fn r, {nm, k} ->
-          if is_map_key(nm, r), do: {nm, k}, else: {Map.put(nm, r, k), k + 1}
-        end)
-
-      queue = ids |> Enum.uniq() |> :queue.from_list()
-      {entries, names} = walk(queue, names, n, [], ids?)
-      name = fn r -> if ids?, do: {:id, r}, else: {:ref, Map.fetch!(names, r)} end
-      :erlang.phash2({rename(roots, name), entries}, 4_294_967_296)
+      root = {:scope, Interp.global()}
+      {entries, _} = walk(:queue.from_list([root]), %{root => 0}, 1, [], ids?)
+      :erlang.phash2(entries, 4_294_967_296)
     end
 
     defp walk(queue, names, n, acc, ids?) do
@@ -226,8 +220,8 @@ defmodule Browser.JS.FastTest do
         {:empty, _} ->
           {Enum.reverse(acc), names}
 
-        {{:value, id}, queue} ->
-          {entry, refs} = entry(id)
+        {{:value, node}, queue} ->
+          {entry, refs} = entry(node)
 
           {queue, names, n} =
             Enum.reduce(refs, {queue, names, n}, fn r, {q, nm, k} ->
@@ -236,7 +230,7 @@ defmodule Browser.JS.FastTest do
                 else: {:queue.in(r, q), Map.put(nm, r, k), k + 1}
             end)
 
-          name = fn r -> if ids?, do: {:id, r}, else: {:ref, Map.fetch!(names, r)} end
+          name = fn r -> if ids?, do: r, else: {:ref, Map.fetch!(names, r)} end
 
           entry =
             case rename(entry, name) do
@@ -244,15 +238,14 @@ defmodule Browser.JS.FastTest do
               e -> e
             end
 
-          walk(queue, names, n, [{name.(id), entry} | acc], ids?)
+          walk(queue, names, n, [{name.(node), entry} | acc], ids?)
       end
     end
 
-    # The entry of one object, with its references as `{:obj, id}`, and the list of the ids
-    # that it refers to, in order.
-    defp entry(id) do
+    # The entry of one node, with its references as `{:obj, id}` and `{:scope, id}`, and
+    # the list of the nodes that it refers to, in order.
+    defp entry({:obj, id} = obj) do
       o = Interp.deref(id)
-      obj = {:obj, id}
 
       head =
         {Map.get(o, :class), Map.get(o, :proto), Map.get(o, :ext, true), Map.get(o, :frozen),
@@ -271,8 +264,37 @@ defmodule Browser.JS.FastTest do
            for(k <- other, do: {private(k), state(obj, k)})}
         end
 
+      # (the scope and the home of a closure, after the references of the entry)
+      closure =
+        case o do
+          %{fun: {:closure, c}} -> [scope(Map.get(c, :scope)), Map.get(c, :home)]
+          _ -> []
+        end
+
+      {entry, refs(entry, refs(closure, []))}
+    end
+
+    defp entry({:scope, id}) do
+      entry =
+        case Interp.deref(id) do
+          # A frame: `{parent_id, info, chain, call_pos, root_id, slots...}`. The info, the
+          # chain and the position hold no value of the program.
+          f when is_tuple(f) ->
+            slots = f |> Tuple.to_list() |> Enum.drop(5)
+            {:frame, scope(elem(f, 0)), slots}
+
+          %{vars: vars} = s ->
+            {:scope, scope(Map.get(s, :parent)), Enum.sort(Map.to_list(vars))}
+
+          other ->
+            {:other, other}
+        end
+
       {entry, refs(entry, [])}
     end
+
+    defp scope(id) when is_integer(id), do: {:scope, id}
+    defp scope(_), do: nil
 
     defp private({:private, _}), do: :private
     defp private(k), do: k
@@ -283,20 +305,29 @@ defmodule Browser.JS.FastTest do
       kind, reason -> {:state_failed, kind, inspect(reason, limit: 6)}
     end
 
-    defp refs({:obj, id}, acc), do: [id | acc]
+    defp refs({:obj, id}, acc), do: [{:obj, id} | acc]
+    defp refs({:scope, id}, acc), do: [{:scope, id} | acc]
 
     defp refs(t, acc) when is_tuple(t),
       do: t |> Tuple.to_list() |> Enum.reverse() |> Enum.reduce(acc, &refs/2)
 
     defp refs([h | t], acc), do: refs(h, refs(t, acc))
+    defp refs(m, acc) when is_map(m), do: m |> Map.to_list() |> Enum.sort() |> refs(acc)
     defp refs(_, acc), do: acc
 
-    defp rename({:obj, id}, name), do: name.(id)
+    defp rename({:obj, _} = node, name), do: name.(node)
+    defp rename({:scope, _} = node, name), do: name.(node)
 
     defp rename(t, name) when is_tuple(t),
       do: t |> Tuple.to_list() |> Enum.map(&rename(&1, name)) |> List.to_tuple()
 
     defp rename(l, name) when is_list(l), do: Enum.map(l, &rename(&1, name))
+    defp rename(m, name) when is_map(m), do: Map.new(m, &rename(&1, name))
+
+    # (a fun can hold ids, and a private name of a class scope holds a reference: both
+    # differ between two runs, so the export does not go into them)
+    defp rename(f, _) when is_function(f), do: :fun
+    defp rename(r, _) when is_reference(r), do: :reference
     defp rename(v, _), do: v
 
     # ── the comparison ───────────────────────────────────────
@@ -359,6 +390,26 @@ defmodule Browser.JS.FastTest do
         assert Enum.all?(outcomes, &match?(%{console: [_ | _], heap: h} when is_integer(h), &1))
         assert outcomes |> Enum.map(& &1.heap) |> Enum.uniq() |> length() > 3
         assert outcomes |> Enum.map(& &1.console) |> Enum.uniq() |> length() == length(outcomes)
+      end
+    end
+
+    describe "the ordered export" do
+      # The code under test runs in functions, so an object that only a closure holds must
+      # be in the export: a slip in its order or its attributes changes the hash.
+      test "an object that only a closure holds is in the export" do
+        progs = [
+          "function f(){ var o = {a: 1, b: 2}; return () => o } var g = f()",
+          "function f(){ var o = {b: 2, a: 1}; return () => o } var g = f()",
+          "function f(){ var o = {a: 1}; Object.defineProperty(o, 'a', {configurable: false}); return () => o } var g = f()",
+          "function f(){ let o = {a: 1, b: 2}; { let p = [o]; return function(){ return p } } } var g = f()",
+          "function f(){ let o = {b: 2, a: 1}; { let p = [o]; return function(){ return p } } } var g = f()"
+        ]
+
+        for ids? <- [false, true] do
+          heaps = for p <- progs, do: run(p, [], ids: ids?).heap
+          assert Enum.all?(heaps, &is_integer/1)
+          assert length(Enum.uniq(heaps)) == length(progs)
+        end
       end
     end
 
