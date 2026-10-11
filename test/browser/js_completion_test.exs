@@ -4,7 +4,7 @@ defmodule Browser.JS.CompletionTest do
   # `{:brk, l}`, `{:cont, l}` or `{:tail, f, this, args}` at every level. The design is
   # notes/js-step3-design.md. This file pins the observable results before the change
   # (section 6.2 and the unit tests of 6.1), so every later commit must give the same
-  # results at `:off` and at level 4. A few tests pin the result after a named commit of
+  # results at every resolver level. A few tests pin the result after a named commit of
   # section 8: the internal shapes of `exec_stmt`, the new `exec_frame_stmt/3` and the three
   # behaviour changes B1, D2 and D1.
   use ExUnit.Case, async: true
@@ -13,7 +13,8 @@ defmodule Browser.JS.CompletionTest do
   alias Browser.JS.{Interp, Parser}
   alias Browser.JS.Resolve.Info
 
-  @levels [:off, 4]
+  # Every level, because levels 1 to 3 mix rewritten and old-path functions in one program.
+  @levels [:off, :info, 1, 2, 3, 4]
 
   # ── helpers ────────────────────────────────────────────────
 
@@ -452,8 +453,10 @@ defmodule Browser.JS.CompletionTest do
     test "break and continue give {:brk, l} and {:cont, l}" do
       gid = heap()
       {body, fid} = frame_of(~S|function f(){ l: for (;;) { if (0) break; continue l } }|, gid)
-      assert Interp.exec_stmt(find(body, &match?({:break, nil}, &1)), fid) == {:brk, nil}
-      assert Interp.exec_stmt(find(body, &match?({:continue, "l"}, &1)), fid) == {:cont, "l"}
+      assert Interp.exec_frame_stmt(find(body, &match?({:break, nil}, &1)), fid) == {:brk, nil}
+
+      assert Interp.exec_frame_stmt(find(body, &match?({:continue, "l"}, &1)), fid) ==
+               {:cont, "l"}
 
       # The old path gives the same shapes on a map scope.
       scope = Interp.new_scope(gid)
@@ -465,14 +468,16 @@ defmodule Browser.JS.CompletionTest do
       gid = heap()
       native_g(gid)
       {body, fid} = frame_of(~S|function f(){ if (0) return; return 1 }|, gid)
-      assert Interp.exec_stmt(find(body, &match?({:return, nil}, &1)), fid) == {:ret, :undefined}
+
+      assert Interp.exec_frame_stmt(find(body, &match?({:return, nil}, &1)), fid) ==
+               {:ret, :undefined}
 
       assert {:return, {:num, 1.0}, :plain} = ret = find(body, &match?({:return, _, _}, &1))
-      assert Interp.exec_stmt(ret, fid) == {:ret, 1.0}
+      assert Interp.exec_frame_stmt(ret, fid) == {:ret, 1.0}
 
       # A call under `:plain` is made here.
       call = {:call, {:gref, "g"}, [], false}
-      assert Interp.exec_stmt({:return, call, :plain}, fid) == {:ret, 42.0}
+      assert Interp.exec_frame_stmt({:return, call, :plain}, fid) == {:ret, 42.0}
 
       {:fn, "f", _, off_body, _, _} = fn_f(~S|function f(){ return 1 }|, :off)
       scope = Interp.new_scope(gid)
@@ -484,7 +489,7 @@ defmodule Browser.JS.CompletionTest do
       g = native_g(gid)
       {body, fid} = frame_of(~S|"use strict"; function f(){ return g(1) }|, gid)
       assert {:return, {:call, _, _, _}, :tail} = ret = find(body, &match?({:return, _, _}, &1))
-      assert Interp.exec_stmt(ret, fid) == {:tail, g, :undefined, [1.0]}
+      assert Interp.exec_frame_stmt(ret, fid) == {:tail, g, :undefined, [1.0]}
 
       # On the old path a call form always gives the pending call. The function boundary
       # decides later if it runs there or in the trampoline (design 3.4).
@@ -517,13 +522,12 @@ defmodule Browser.JS.CompletionTest do
         {Interp.exec_stmt(find(stmts, &match?({:while, _, _}, &1)), scope, labels), g}
 
       # The frame path: a frame and `exec_frame_stmt`, which runs a statement of a
-      # rewritten body without writes of `:js_last` (commit 10). The call goes through
-      # `apply/3`, because the function does not exist before commit 10.
+      # rewritten body without writes of `:js_last` (commit 10).
       :fn ->
         {stmts, fid} = frame_of(src, gid)
         :erlang.put(fid, :erlang.setelement(6, :erlang.get(fid), 0.0))
         loop = find(stmts, &match?({:while, _, _}, &1))
-        {apply(Interp, :exec_frame_stmt, [loop, fid, labels]), g}
+        {Interp.exec_frame_stmt(loop, fid, labels), g}
     end
   end
 

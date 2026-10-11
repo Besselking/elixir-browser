@@ -1463,7 +1463,7 @@ defmodule Browser.JS.ResolveTest do
     end
 
     # Step 2b: every other `return` with a value inside a rewritten function is `:plain`,
-    # so the evaluator never reads the run-time tail flag there. A sloppy function has no
+    # so it never gives a `{:tail, ...}` completion. A sloppy function has no
     # tail sites at all. A function the level does not rewrite keeps the bare form, and
     # `check/1` refuses a bare return inside a rewritten function.
     f = fun(resolve("function f(n) { if (n) return g(); return 1 }"), "f")

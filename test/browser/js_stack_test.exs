@@ -739,7 +739,7 @@ defmodule Browser.JS.StackTest do
     end
   end
 
-  describe "a tail site in a constructor (ctor_tail)" do
+  describe "a tail site in a constructor (the tail call under `new` in frame_call/6)" do
     test "a throw restores the chain and frees the frame; a return gives the right value" do
       gid = heap()
       install_peek(gid)

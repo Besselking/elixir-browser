@@ -303,7 +303,7 @@ defmodule Browser.JS.FramesTest do
       assert Interp.array_list(slot(fid, 7)) == [2.0, 3.0]
 
       # A `const` declaration writes its slot like any other declaration.
-      Interp.exec_stmt({:var, :const, [{{:slot, 0, 10, "e"}, {:num, 3.0}}]}, fid)
+      Interp.exec_frame_stmt({:var, :const, [{{:slot, 0, 10, "e"}, {:num, 3.0}}]}, fid)
       assert slot(fid, 10) == 3.0
 
       # `let x = x` reads the slot in the initializer first and throws there. The slot is
@@ -311,7 +311,10 @@ defmodule Browser.JS.FramesTest do
       :erlang.put(fid, :erlang.setelement(9, :erlang.get(fid), :tdz))
 
       assert caught(fn ->
-               Interp.exec_stmt({:var, :let, [{{:slot, 0, 9, "d"}, {:slot, 0, 9, "d"}}]}, fid)
+               Interp.exec_frame_stmt(
+                 {:var, :let, [{{:slot, 0, 9, "d"}, {:slot, 0, 9, "d"}}]},
+                 fid
+               )
              end) == {"ReferenceError", "Cannot access 'd' before initialization"}
     end
 
@@ -573,16 +576,16 @@ defmodule Browser.JS.FramesTest do
       g = Interp.native("g", fn _, _ -> 42.0 end)
       Interp.declare(gid, "g", g)
 
-      assert Interp.exec_stmt({:return, {:num, 1.0}, :plain}, fid) == {:ret, 1.0}
-      assert Interp.exec_stmt({:return, {:num, 1.0}, :tail}, fid) == {:ret, 1.0}
+      assert Interp.exec_frame_stmt({:return, {:num, 1.0}, :plain}, fid) == {:ret, 1.0}
+      assert Interp.exec_frame_stmt({:return, {:num, 1.0}, :tail}, fid) == {:ret, 1.0}
 
       # A call under `:plain` is made here. A call under `:tail` comes back as a pending
       # call, which the frame gives to the trampoline.
       call = {:call, {:gref, "g"}, [], false}
-      assert Interp.exec_stmt({:return, call, :plain}, fid) == {:ret, 42.0}
-      assert Interp.exec_stmt({:return, call, :tail}, fid) == {:tail, g, :undefined, []}
+      assert Interp.exec_frame_stmt({:return, call, :plain}, fid) == {:ret, 42.0}
+      assert Interp.exec_frame_stmt({:return, call, :tail}, fid) == {:tail, g, :undefined, []}
 
-      assert Interp.exec_stmt({:return, nil}, fid) == {:ret, :undefined}
+      assert Interp.exec_frame_stmt({:return, nil}, fid) == {:ret, :undefined}
     end
 
     test "{:block}: nil runs the list, a Scope resets its slots first" do
@@ -590,10 +593,10 @@ defmodule Browser.JS.FramesTest do
       fid = two_frame(gid, 5.0, 6.0)
       write = {:expr, {:assign, "=", {:slot, 0, 7, "y"}, {:num, 1.0}}}
 
-      Interp.exec_stmt({:block, [write], nil}, fid)
+      Interp.exec_frame_stmt({:block, [write], nil}, fid)
       assert slot(fid, 7) == 1.0
 
-      Interp.exec_stmt({:block, [], %Scope{kind: :block, tdz: [6]}}, fid)
+      Interp.exec_frame_stmt({:block, [], %Scope{kind: :block, tdz: [6]}}, fid)
       assert slot(fid, 6) == :tdz
       assert slot(fid, 7) == 1.0
 
@@ -601,7 +604,9 @@ defmodule Browser.JS.FramesTest do
       sc = %Scope{kind: :block, tdz: [6]}
       :erlang.put(fid, :erlang.setelement(6, :erlang.get(fid), 5.0))
 
-      assert caught(fn -> Interp.exec_stmt({:block, [{:expr, {:slot, 0, 6, "x"}}], sc}, fid) end) ==
+      assert caught(fn ->
+               Interp.exec_frame_stmt({:block, [{:expr, {:slot, 0, 6, "x"}}], sc}, fid)
+             end) ==
                {"ReferenceError", @tdz_x}
     end
 
@@ -612,10 +617,10 @@ defmodule Browser.JS.FramesTest do
       assert {:for, _, _, _, _, %Scope{kind: :loop, tdz: [7]}} = for_stmt
       fid = frame(gid, i, [:undefined, 5.0])
 
-      Interp.exec_stmt(var_s, fid)
-      Interp.exec_stmt(for_stmt, fid)
+      Interp.exec_frame_stmt(var_s, fid)
+      Interp.exec_frame_stmt(for_stmt, fid)
       assert slot(fid, 6) == 3.0
-      assert Interp.exec_stmt(ret, fid) == {:ret, 3.0}
+      assert Interp.exec_frame_stmt(ret, fid) == {:ret, 3.0}
 
       # No scope was made for the loop: the frame is the newest heap entry.
       assert :erlang.get(:js_next) == fid + 1
@@ -627,21 +632,25 @@ defmodule Browser.JS.FramesTest do
       sc = %Scope{kind: :each, tdz: [6]}
 
       obj = {:object, [{:init, {:str, "k"}, {:num, 1.0}}]}
-      Interp.exec_stmt({:forin, :const, {:slot, 0, 6, "x"}, obj, {:empty}, sc}, fid)
+      Interp.exec_frame_stmt({:forin, :const, {:slot, 0, 6, "x"}, obj, {:empty}, sc}, fid)
       assert slot(fid, 6) == "k"
 
-      Interp.exec_stmt({:forin, :const, {:slot, 0, 6, "x"}, {:object, []}, {:empty}, sc}, fid)
+      Interp.exec_frame_stmt(
+        {:forin, :const, {:slot, 0, 6, "x"}, {:object, []}, {:empty}, sc},
+        fid
+      )
+
       assert slot(fid, 6) == :tdz
 
       arr = {:array, [{:num, 1.0}, {:num, 2.0}]}
       body = {:expr, {:assign, "+=", {:slot, 0, 7, "y"}, {:slot, 0, 6, "x"}}}
-      Interp.exec_stmt({:forof, :let, {:slot, 0, 6, "x"}, arr, body, sc}, fid)
+      Interp.exec_frame_stmt({:forof, :let, {:slot, 0, 6, "x"}, arr, body, sc}, fid)
       assert slot(fid, 6) == 2.0
       assert slot(fid, 7) == 9.0
 
       # The head names are in the TDZ while the object expression runs.
       assert caught(fn ->
-               Interp.exec_stmt(
+               Interp.exec_frame_stmt(
                  {:forof, :let, {:slot, 0, 6, "x"}, {:slot, 0, 6, "x"}, {:empty}, sc},
                  fid
                )
@@ -652,7 +661,7 @@ defmodule Browser.JS.FramesTest do
       {:fn, _, _, [forof], _, i} = leaf("function f(){ for (const [a = a] of [[1], []]) ; }", "f")
       afid = frame(gid, i, [:tdz])
 
-      assert caught(fn -> Interp.exec_stmt(forof, afid) end) ==
+      assert caught(fn -> Interp.exec_frame_stmt(forof, afid) end) ==
                {"ReferenceError", "Cannot access 'a' before initialization"}
     end
 
@@ -662,7 +671,7 @@ defmodule Browser.JS.FramesTest do
       sc = %Scope{kind: :switch, tdz: [6]}
 
       # The discriminant still sees the old value: the reset comes after it.
-      Interp.exec_stmt({:switch, {:slot, 0, 6, "x"}, [], sc}, fid)
+      Interp.exec_frame_stmt({:switch, {:slot, 0, 6, "x"}, [], sc}, fid)
       assert slot(fid, 6) == :tdz
 
       cases = [
@@ -670,9 +679,9 @@ defmodule Browser.JS.FramesTest do
         {:default, [{:expr, {:assign, "=", {:slot, 0, 7, "y"}, {:str, "other"}}}]}
       ]
 
-      Interp.exec_stmt({:switch, {:num, 1.0}, cases, sc}, fid)
+      Interp.exec_frame_stmt({:switch, {:num, 1.0}, cases, sc}, fid)
       assert slot(fid, 6) == "one"
-      Interp.exec_stmt({:switch, {:num, 2.0}, cases, sc}, fid)
+      Interp.exec_frame_stmt({:switch, {:num, 2.0}, cases, sc}, fid)
       assert slot(fid, 6) == :tdz
       assert slot(fid, 7) == "other"
     end
@@ -686,19 +695,19 @@ defmodule Browser.JS.FramesTest do
       body = {:block, [{:throw, {:num, 1.0}}], nil}
       handler = {:block, [{:expr, {:assign, "=", {:slot, 0, 7, "y"}, {:slot, 0, 6, "x"}}}], nil}
 
-      Interp.exec_stmt({:try, body, {:slot, 0, 6, "x"}, handler, nil, sc}, fid)
+      Interp.exec_frame_stmt({:try, body, {:slot, 0, 6, "x"}, handler, nil, sc}, fid)
       assert slot(fid, 6) == 1.0
       assert slot(fid, 7) == 1.0
 
       # A pattern parameter binds through the slot clauses too.
       pat = {:objpat, [{{:str, "a"}, {:slot, 0, 6, "x"}}], nil}
       thrown = {:block, [{:throw, {:object, [{:init, {:str, "a"}, {:num, 7.0}}]}}], nil}
-      Interp.exec_stmt({:try, thrown, pat, {:block, [], nil}, nil, sc}, fid)
+      Interp.exec_frame_stmt({:try, thrown, pat, {:block, [], nil}, nil, sc}, fid)
       assert slot(fid, 6) == 7.0
 
       # Without a throw the slots are not touched, and the finalizer runs.
       fin = {:block, [{:expr, {:assign, "=", {:slot, 0, 7, "y"}, {:num, 2.0}}}], nil}
-      Interp.exec_stmt({:try, {:block, [], nil}, {:slot, 0, 6, "x"}, handler, fin, sc}, fid)
+      Interp.exec_frame_stmt({:try, {:block, [], nil}, {:slot, 0, 6, "x"}, handler, fin, sc}, fid)
       assert slot(fid, 6) == 7.0
       assert slot(fid, 7) == 2.0
     end
@@ -714,7 +723,7 @@ defmodule Browser.JS.FramesTest do
 
       fid = frame(gid, i, [:tdz])
 
-      Interp.exec_stmt(block, fid)
+      Interp.exec_frame_stmt(block, fid)
       {:ok, log} = Interp.lookup_scoped(gid, "log")
       assert Interp.array_list(log) == ["b", "d"]
       {:ok, res} = Interp.lookup_scoped(gid, "res")
@@ -946,7 +955,7 @@ defmodule Browser.JS.FramesTest do
       arr = Interp.new_array([])
       fid = frame_at(gid, i, 42, [arr])
 
-      assert Interp.exec_stmt(kept, fid) == :ok
+      assert Interp.exec_frame_stmt(kept, fid) == :ok
       [g] = fns_in(arr)
       bid = closure(g).scope
       # The header copies `caller_id`, `call_pos` and `root_id` from the function frame.
@@ -955,7 +964,7 @@ defmodule Browser.JS.FramesTest do
 
       # The second block throws before its `let` runs. The frame comes from the template,
       # so the closure sees `x` in its TDZ, and the throw does not free the frame.
-      assert catch_throw(Interp.exec_stmt(thrown, fid)) == {:js_error, 0.0}
+      assert catch_throw(Interp.exec_frame_stmt(thrown, fid)) == {:js_error, 0.0}
       [_, h] = fns_in(arr)
       hid = closure(h).scope
       assert hid != bid
@@ -974,13 +983,15 @@ defmodule Browser.JS.FramesTest do
       size = Interp.heap_size()
 
       n = :erlang.get(:js_next)
-      assert Interp.exec_stmt({:block, [let_x], sc}, fid) == :ok
+      assert Interp.exec_frame_stmt({:block, [let_x], sc}, fid) == :ok
       assert freed?(n)
       assert Interp.heap_size() == size
 
       n = :erlang.get(:js_next)
 
-      assert catch_throw(Interp.exec_stmt({:block, [let_x, {:throw, {:num, 1.0}}], sc}, fid)) ==
+      assert catch_throw(
+               Interp.exec_frame_stmt({:block, [let_x, {:throw, {:num, 1.0}}], sc}, fid)
+             ) ==
                {:js_error, 1.0}
 
       assert freed?(n)
@@ -1001,7 +1012,7 @@ defmodule Browser.JS.FramesTest do
 
       fid = frame(gid, i, [])
 
-      assert {:ret, g} = Interp.exec_stmt(switch, fid)
+      assert {:ret, g} = Interp.exec_frame_stmt(switch, fid)
       assert Interp.call(g, :undefined, []) == 3.0
       sid = closure(g).scope
       assert {^fid, ^sc, _, _, ^gid, 2.0, h} = :erlang.get(sid)
@@ -1010,7 +1021,7 @@ defmodule Browser.JS.FramesTest do
 
       # No case matches, but the hoist made `h`: the counter moved and the frame stays.
       n = :erlang.get(:js_next)
-      assert Interp.exec_stmt({:switch, {:num, 5.0}, elem(switch, 2), sc}, fid) == :ok
+      assert Interp.exec_frame_stmt({:switch, {:num, 5.0}, elem(switch, 2), sc}, fid) == :ok
       refute freed?(n)
     end
 
@@ -1021,7 +1032,7 @@ defmodule Browser.JS.FramesTest do
       assert {:try, _, _, _, nil, %Scope{kind: :catch, frame: true} = sc} = try
       fid = frame(gid, i, [])
 
-      assert {:ret, g} = Interp.exec_stmt(try, fid)
+      assert {:ret, g} = Interp.exec_frame_stmt(try, fid)
       assert :erlang.get(closure(g).scope) == {fid, sc, nil, nil, gid, 7.0}
       assert Interp.call(g, :undefined, []) == 7.0
 
@@ -1029,7 +1040,7 @@ defmodule Browser.JS.FramesTest do
       n = :erlang.get(:js_next)
       size = Interp.heap_size()
       thrower = {:block, [{:throw, {:num, 1.0}}], nil}
-      Interp.exec_stmt({:try, thrower, {:slot, 0, 6, "e"}, {:block, [], nil}, nil, sc}, fid)
+      Interp.exec_frame_stmt({:try, thrower, {:slot, 0, 6, "e"}, {:block, [], nil}, nil, sc}, fid)
       assert freed?(n)
       assert Interp.heap_size() == size
     end
@@ -1062,7 +1073,7 @@ defmodule Browser.JS.FramesTest do
 
       n = :erlang.get(:js_next)
       size = Interp.heap_size()
-      assert Interp.exec_stmt(for_stmt, fid) == :ok
+      assert Interp.exec_frame_stmt(for_stmt, fid) == :ok
       # One frame was made for the loop and freed after it.
       assert :erlang.get(:js_next) == n + 1
       assert freed?(n)
@@ -1077,7 +1088,7 @@ defmodule Browser.JS.FramesTest do
 
       n = :erlang.get(:js_next)
       size = Interp.heap_size()
-      assert Interp.exec_stmt(for_stmt, fid) == :ok
+      assert Interp.exec_frame_stmt(for_stmt, fid) == :ok
 
       # The loop frame, three closures, and a copy after each round in which the counter
       # moved: three copies (the last one is made before the test that ends the loop, as
@@ -1105,7 +1116,7 @@ defmodule Browser.JS.FramesTest do
 
       n = :erlang.get(:js_next)
       size = Interp.heap_size()
-      assert Interp.exec_stmt(for_of, fid) == :ok
+      assert Interp.exec_frame_stmt(for_of, fid) == :ok
       # The head frame serves every item, and it is freed at the end.
       assert :erlang.get(:js_next) == n + 1
       assert freed?(n)
@@ -1119,7 +1130,7 @@ defmodule Browser.JS.FramesTest do
       fid = frame(gid, i, [Interp.new_array(["a", "b", "c"]), true, arr])
 
       n = :erlang.get(:js_next)
-      assert Interp.exec_stmt(for_of, fid) == :ok
+      assert Interp.exec_frame_stmt(for_of, fid) == :ok
 
       # The head frame takes the first item; each later item gets a new frame because the
       # closure of the round before moved the counter: 1 + 3 closures + 2 frames.
@@ -1142,7 +1153,7 @@ defmodule Browser.JS.FramesTest do
       arr = Interp.new_array([])
       fid = frame(gid, i, [set, true, arr])
       n = :erlang.get(:js_next)
-      assert Interp.exec_stmt(for_of, fid) == :ok
+      assert Interp.exec_frame_stmt(for_of, fid) == :ok
       fs = fns_in(arr)
       assert Enum.map(fs, &Interp.call(&1, :undefined, [])) == ["a", "b", "c"]
       scopes = Enum.map(fs, &closure(&1).scope)
@@ -1152,7 +1163,7 @@ defmodule Browser.JS.FramesTest do
       # Without a closure the head frame is freed.
       fid = frame(gid, i, [set, false, Interp.new_array([])])
       n = :erlang.get(:js_next)
-      assert Interp.exec_stmt(for_of, fid) == :ok
+      assert Interp.exec_frame_stmt(for_of, fid) == :ok
       assert freed?(n)
     end
 
@@ -1162,7 +1173,7 @@ defmodule Browser.JS.FramesTest do
       {[for_of], i} = body_of(fn2(src, "f"))
       fid = frame(gid, i, [])
 
-      assert caught(fn -> Interp.exec_stmt(for_of, fid) end) ==
+      assert caught(fn -> Interp.exec_frame_stmt(for_of, fid) end) ==
                {"ReferenceError", "Cannot access 'k' before initialization"}
     end
   end
@@ -1498,7 +1509,7 @@ defmodule Browser.JS.FramesTest do
     # strict caller's `return leaf()` is a tail call, so `s` leaves the stack. The row now
     # has a sloppy leaf under a strict tail caller, which runs inside a strict non-tail
     # call: the leaf's `return probe()` in a loop is `:plain`, so `leaf` stays on the stack.
-    # A stale tail flag from `outer` would have dropped it.
+    # Before step 3 a stale run-time tail flag from `outer` could have dropped it.
     {41,
      "function outer(){ \"use strict\"; var r = s(); return r } function s(){ \"use strict\"; return leaf() } function leaf(){ var i = 0; while (true) { if (++i == 3) return probe() } } function probe(){ return new Error('x').stack } outer()",
      {:ok, "Error: x\n    at probe\n    at leaf\n    at outer", []}},
@@ -2348,7 +2359,7 @@ defmodule Browser.JS.FramesTest do
         fid = frame(gid, i, [1.0, 2.0, [1.0, 2.0], {:unbuilt, id}])
         ao = Interp.ev({:aslot, 0, 9}, fid)
 
-        Interp.exec_stmt(s, fid)
+        Interp.exec_frame_stmt(s, fid)
         assert slot(fid, 6) == value, src
         assert Interp.get(ao, "0") == value, src
         assert Interp.get(ao, "1") == 2.0, src

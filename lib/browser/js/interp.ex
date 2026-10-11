@@ -5003,7 +5003,7 @@ defmodule Browser.JS.Interp do
   @doc false
   # (the statement runner of the CPS evaluator for the body of a rewritten async function
   # or generator, see `Browser.JS.Async`)
-  def exec_frame_stmt(stmt, env, labels), do: fstmt(stmt, env, labels)
+  def exec_frame_stmt(stmt, env, labels \\ []), do: fstmt(stmt, env, labels)
 
   # A statement list inside a rewritten function. A statement that does not complete
   # normally ends the list, as in `exec_list/2`.
@@ -5196,9 +5196,9 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
-  # how the rest of a list ended (:ok, or {:thrown, t}) together with its disposal
-  # `{:done, c}` is the completion of the rest of the list. A clean disposal keeps it, and
-  # an error from the disposal replaces it, also a return or a break.
+  # How the rest of a list ended, `{:done, completion}` or `{:thrown, t}`, together with its
+  # disposal. A clean disposal keeps the completion, and an error from the disposal replaces
+  # it, also a return or a break.
   def using_finish({:done, c}, :ok), do: c
   def using_finish({:done, _}, {:error, e}), do: throw({:js_error, e})
   def using_finish({:thrown, t}, :ok), do: throw(t)
@@ -5217,13 +5217,9 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
-  # Runs one statement and gives its completion. A statement of a rewritten function (its
-  # env holds a frame, which is a tuple) runs through `fstmt/3`, as it does in the body.
-  def exec_stmt(stmt, env, labels \\ []) do
-    if is_integer(env) and is_tuple(:erlang.get(env)),
-      do: fstmt(stmt, env, labels),
-      else: exec(stmt, env, labels)
-  end
+  # Runs one statement of old-path code and gives its completion. A statement of a rewritten
+  # function runs through `exec_frame_stmt/3`.
+  def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
 
   defp exec(stmt, env), do: exec(stmt, env, [])
 
@@ -5353,7 +5349,7 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # (the blocks of a rewritten function, also through `exec_stmt/3`)
+  # (the blocks of a rewritten function, also through `exec_frame_stmt/3`)
   defp exec({:block, _, _} = stmt, env, labels), do: fstmt(stmt, env, labels)
 
   defp exec({:return, nil}, _, _), do: {:ret, :undefined}
@@ -5459,7 +5455,7 @@ defmodule Browser.JS.Interp do
   end
 
   # A `for` whose head names a closure captures. With a `let` head each iteration gets its
-  # own copy of the head frame, as on the old path: `for_loop/8` copies the frame only when
+  # own copy of the head frame, as on the old path: `for_loop/9` copies the frame only when
   # a closure was made since the last copy, through the tuple clause of `copy_scope/2`.
   # With a `const` head one frame serves every round. The head frame is freed when no
   # closure was made during the whole loop, which also means that no copy was made.
@@ -6021,7 +6017,7 @@ defmodule Browser.JS.Interp do
   end
 
   # A completion that leaves a loop. In check mode (K7 of step 3) it is never a break or a
-  # continue without a label, because `run_body/3` gives these to the innermost loop.
+  # continue without a label, because `run_body/4` gives these to the innermost loop.
   @compile {:inline, loop_exit: 1}
   defp loop_exit(c) do
     if @check and c in [{:brk, nil}, {:cont, nil}],
