@@ -548,7 +548,7 @@ end
 IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")
 
 # JSC=1 prints the code cache of the closure compiler (step 5) in the script process: the
-# number of entries, the count of words against the budget, the number of times the
+# number of entries, the count of nodes against the budget, the number of times the
 # budget erased the cache, and the size of the code in words now (after an erase, this is
 # less than the count). The copy of the process dictionary is large, so the option is off
 # by default.

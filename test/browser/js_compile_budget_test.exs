@@ -1,7 +1,7 @@
 defmodule Browser.JS.CompileBudgetTest do
   # Step 5, the memory bound of design 3 and the budget test of design 5.4. Each parse of
   # `new Function` or `eval` code gives new uids, so a page that makes functions in a loop
-  # adds an entry to the code cache for each one. The cache has a budget in machine words
+  # adds an entry to the code cache for each one. The cache has a budget in compiled nodes
   # (`Browser.JS.Compile`): over the budget, all the entries go, and the count starts again.
   # A function with too many nodes stays on the tree.
   #
@@ -16,8 +16,8 @@ defmodule Browser.JS.CompileBudgetTest do
 
   alias Browser.JS.{Builtins, Interp, Parser}
 
-  # The budget of `Browser.JS.Compile`, in machine words.
-  @budget 5_000_000
+  # The budget of `Browser.JS.Compile`, in compiled nodes.
+  @budget 400_000
 
   # The test parses about 3.2M nodes of `new Function` code, which takes about 40 s, so it
   # runs only with `mix test --include corpus`.
@@ -31,17 +31,17 @@ defmodule Browser.JS.CompileBudgetTest do
     t
     """
 
-    {value, {words, erases}, entries} = run(src)
+    {value, {nodes, erases}, entries} = run(src)
     # (each call gives i + 10)
     assert value == Enum.sum(0..99_999) + 10 * 100_000 * 1.0
-    assert words <= @budget
+    assert nodes <= @budget
     assert erases >= 1
     assert entries < 100_000
   end
 
   test "over a small budget the cache is erased, and the count stays under the budget" do
-    # (the same loop as the corpus test above, with a budget of 50,000 words in place of
-    # the 5,000,000 of the browser, so that the erase happens in a fast test)
+    # (the same loop as the corpus test above, with a budget of 5,000 nodes in place of
+    # the 400,000 of the browser, so that the erase happens in a fast test)
     src = """
     var body = 'var s = a;' + ' s = s + 1;'.repeat(10) + ' return s';
     var t = 0;
@@ -49,38 +49,27 @@ defmodule Browser.JS.CompileBudgetTest do
     t
     """
 
-    {value, {words, erases}, entries} = run(src, 50_000)
+    {value, {nodes, erases}, entries} = run(src, 5_000)
     assert value == Enum.sum(0..1999) + 10 * 2000 * 1.0
-    assert words <= 50_000
+    assert nodes <= 5_000
     assert erases >= 5
     assert entries < 2000
   end
 
-  test "eval in a loop compiles each new function and counts its words" do
+  test "eval in a loop compiles each new function and counts its nodes" do
     src = """
     var t = 0;
     for (var i = 0; i < 2000; i++) { t += (0, eval)('(function (a) { var s = a; s = s + 1; return s })')(i) }
     t
     """
 
-    {value, {words, erases}, entries} = run(src)
+    {value, {nodes, erases}, entries} = run(src)
     assert value == Enum.sum(0..1999) + 2000 * 1.0
-    # (the 2000 functions of the eval code, and the few functions of the prelude)
+    # (the 2000 functions of the eval code, and the few functions of the prelude; each
+    # entry counts its fixed part of 16 and its compiled nodes)
     assert entries >= 2000
     assert erases == 0
-    assert words > 2000 * 20 and words <= @budget
-
-    # (with no erase, the count is the sum of the sizes of the entries in the cache; the
-    # sizes are read in the heap process, because a copy in a message loses the sharing)
-    {:ok, program} = Parser.parse(src, resolve: 4)
-
-    sizes =
-      in_heap(fn ->
-        Interp.run_program(program, true)
-        for {{:jsc, _}, code} <- :erlang.get(), do: :erts_debug.size(code)
-      end)
-
-    assert words == Enum.sum(sizes)
+    assert nodes >= 2000 * 17 and nodes <= @budget
   end
 
   test "a function over the cap of nodes runs on the tree and gives the same value" do

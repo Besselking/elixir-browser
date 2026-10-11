@@ -158,11 +158,13 @@ defmodule Browser.JS.Compile do
 
     * A function with more than 65,536 compiled nodes stays on the tree. Its cache entry is
       `{nil, nil}`.
-    * The process key `:jsc_budget` holds `{words, erases}`. `words` is the size of the
-      entries of the cache in machine words, as `:erts_debug.size/1` gives it. This size
-      includes the syntax nodes and the `Info` records that the closures keep.
-    * When the size goes above 5,000,000 words (40 MB on a 64-bit VM), all the entries of
-      the cache go. Then the count starts again. `erases` counts these events.
+    * The process key `:jsc_budget` holds `{nodes, erases}`. `nodes` is the number of
+      compiled nodes in the cache, plus 16 for each entry (its fixed part).
+    * When the count goes above 400,000 (about 25 to 60 MB on a 64-bit VM), all the
+      entries of the cache go. Then the count starts again. `erases` counts these events.
+    * The count does not include the syntax that a closure of the tree keeps (for example
+      a nested function). The heap keeps that syntax also while a function of the parse
+      is alive.
 
   A function object keeps its code. Thus the live code stays bounded by the live
   functions. Each parse of `new Function` code or of `eval` code makes new uids. Thus a
@@ -228,25 +230,29 @@ defmodule Browser.JS.Compile do
 
   def code(_c), do: nil
 
+  # The fixed part of an entry, in nodes (about 230 words for a small function).
+  @entry_nodes 16
+
   defp compile_and_store(c, uid) do
     :erlang.put(:jsc_count, 0)
 
-    code =
+    {code, n} =
       try do
-        {body(c), maker(c.info)}
+        {{body(c), maker(c.info)}, :erlang.get(:jsc_count)}
       catch
         # (a function over the cap stays on the tree; its entry in the cache tells the
         # next function objects so)
-        :jsc_too_big -> {nil, nil}
+        :jsc_too_big -> {{nil, nil}, 0}
       after
         :erlang.erase(:jsc_count)
       end
 
     check_capture(code)
-    # The node count does not see the subtrees that a fallback keeps or the `Info` that a
-    # maker keeps, so the budget uses the size of the entry. `:erts_debug.size/1` counts a
-    # shared term one time, as the memory holds it.
-    budget(:erts_debug.size(code))
+    # Each entry also costs its fixed part: the tuple, the maker and the `Info` that the
+    # maker keeps. `@entry_nodes` counts that part, so that an entry with no compiled node
+    # also uses the budget. (an exact size with `:erts_debug.size/1` doubled the
+    # reductions of a React suite, because it walks the syntax that the closures keep)
+    budget(n + @entry_nodes)
     :erlang.put({:jsc, uid}, code)
     code
   end
@@ -258,11 +264,12 @@ defmodule Browser.JS.Compile do
   # real code. It stops a generated function of megabytes from making code of megabytes.
   @max_nodes 65_536
 
-  # The budget of the cache of a process, in machine words (40 MB on a 64-bit VM). A page
-  # that makes new functions without end (`new Function` or `eval` in a loop) makes new
-  # uids, and each uid gets its own entry. The Speedometer suites keep less than 1 MB of
-  # code.
-  @budget 5_000_000
+  # The budget of the cache of a process, in compiled nodes. A node of a cache entry costs
+  # 8 to 18 words (measured with `:erts_debug.size/1` on `new Function` bodies), so the
+  # budget is about 25 to 60 MB on a 64-bit VM. A page that makes new functions without
+  # end (`new Function` or `eval` in a loop) makes new uids, and each uid gets its own
+  # entry. A Speedometer suite keeps about 20,000 nodes.
+  @budget 400_000
 
   # Counts one compiled node of the body that compiles now. The count is in the process
   # key `:jsc_count`, which `compile_and_store/2` sets and erases.
@@ -272,10 +279,10 @@ defmodule Browser.JS.Compile do
     :erlang.put(:jsc_count, n)
   end
 
-  # Adds the `n` words of a new entry to the count of the cache. Over the budget, all the
+  # Adds the `n` nodes of a new entry to the count of the cache. Over the budget, all the
   # entries go, and the count starts again with the new entry. A function object keeps
   # its code in its closure record, so the live code stays bounded by the live functions.
-  # The process key `:jsc_budget` holds `{words, erases}`. The collector does not read it
+  # The process key `:jsc_budget` holds `{nodes, erases}`. The collector does not read it
   # as a root (`Browser.JS.GC`).
   defp budget(n) do
     {total, erases} =
