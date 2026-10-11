@@ -86,6 +86,46 @@ defmodule Browser.JS.CompileBudgetTest do
     assert {nil, nil} in codes
   end
 
+  test "the plans of generators count in the budget, and over a small budget the cache is erased" do
+    # Step 5c: the plan of an async body or a generator goes into the same cache, under the
+    # same uid, with the same count. Each parse of `GeneratorFunction` code gives a new uid.
+    # The body yields in the middle, so the plan has a run of sync statements on each side.
+    src = """
+    var G = (function* () {}).constructor;
+    var body = 'var s = a;' + ' s = s + 1;'.repeat(5) + ' yield s;' + ' s = s + 1;'.repeat(5);
+    var t = 0;
+    for (var i = 0; i < 2000; i++) { t += G('a', body)(i).next().value }
+    t
+    """
+
+    {value, {nodes, erases}, entries} = run(src)
+    assert value == Enum.sum(0..1999) + 5 * 2000 * 1.0
+    assert entries >= 2000
+    assert erases == 0
+    assert nodes >= 2000 * 17 and nodes <= @budget
+
+    {value, {nodes, erases}, entries} = run(src, 5_000)
+    assert value == Enum.sum(0..1999) + 5 * 2000 * 1.0
+    assert nodes <= 5_000
+    assert erases >= 5
+    assert entries < 2000
+  end
+
+  test "a generator over the cap of nodes runs on the tree path and gives the same value" do
+    stmts = String.duplicate(" s = s + 1;", 22_000)
+
+    src =
+      "function* big(a) { var s = a;#{stmts} yield s } big(1).next().value + big(2).next().value"
+
+    {value, _budget, _entries} = run(src)
+    assert value == 22_001 + 22_002 * 1.0
+
+    # (the body stays on the tree path: its cache entry has no plan)
+    {:ok, program} = Parser.parse(src, resolve: 4)
+    codes = run_codes(program)
+    assert {nil, nil} in codes
+  end
+
   # Runs `src` in a fresh heap. Gives the value, the count of the cache and the number of
   # entries of the cache.
   defp run(src, budget \\ nil) do

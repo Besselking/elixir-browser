@@ -118,15 +118,65 @@ defmodule Browser.JS.Compile do
   A function compiles when all of these conditions are true:
 
     * the resolver rewrote the function (`Info.rewritten`);
-    * the function is not async and not a generator;
     * the `Info` has a `uid`;
     * the switch `:js_compile` of the process is on.
+
+  The body of a sync function becomes a closure (`code/1`). The body of an async function
+  or a generator becomes a plan (`cps_body/1`, see "CPS plans").
 
   The level of a function is the level of the parse that made it. The JS built-ins
   (`Browser.JS.Prelude` and the prelude of the web API) parse at the level of the
   application. Thus, with the application at level 4, they compile also in a script that
   parses at `:off`. For a run with no compiled code, set the application level to `:off`
   (`JS_RESOLVE=off`) or the switch to `false` (`JS_COMPILE=0`).
+
+  ## CPS plans (step 5c)
+
+  `Browser.JS.Async` runs the body of an async function or a generator in
+  continuation-passing style, so that an `await` or a `yield` can suspend it. At the first
+  call of such a function, this module changes the body into a plan. The plan is a closure
+  `fn env, ctx, k -> ... end`. `env` is the frame, `ctx` is the context of `Async` (the
+  continuations of `return`, `throw`, `yield`, `break` and `continue`), and `k` is the
+  continuation of the body. `Async.run_body/4` runs the plan in frame mode.
+
+  The tree path of `Async` finds some facts each time that it runs. The plan finds them
+  once, when it compiles:
+
+    * Statement facts. A statement list splits at each statement with the mark `{:aw}`
+      and at each `return;`. A run of statements between these compiles with the sync
+      compiler into one closure, which runs under one `try`.
+    * Expression facts. `Browser.JS.Awaits.any?/1` runs once for each node that the plan
+      compiles. An expression that does not await is a closure of the sync compiler.
+    * Lift plans. `Async.lift_plan/1` gives the template and the leaves of an expression
+      that awaits. The template compiles with the sync compiler. A hole `{:cps_leaf, i}`
+      reads the value of the leaf `i` from the process key `:js_cps_vals`, which
+      `Async.lifted/5` sets while the template runs. The leaves run first, in source order,
+      and then the template. This is the order of the tree path, and `:off` has the same
+      order, so all levels agree.
+    * Loop facts. The test and the update of a `for` or a `while` compile once.
+
+  These kinds compile into the plan: `await`, a plain `yield`, `&&`, `||`, `??`, `?:` and a
+  destructuring assignment that awaits, the lift plan of each other expression, and the
+  statements `expr`, `var`, `let`, `const`, `return`, `throw`, `if`, `block`, labels,
+  `while`, `do`/`while`, `for` and `switch`.
+
+  These kinds stay on the tree path of `Async`:
+
+    * `yield*`, because it runs through the delegate functions of `Async`;
+    * an optional chain that awaits, because it puts its value into the tree;
+    * a lift plan with a leaf from a class, because the leaf runs in a class scope;
+    * for-in, for-of and for-await;
+    * `try` with an await, and `using`;
+    * a pattern that awaits, which binds through `Async.cbind/6`.
+
+  A plan makes no fun when it runs. A continuation keeps the frame id, so the collector
+  must walk it. Thus only the named functions of `Async` (for example `Async.then/5`,
+  `Async.await_cps/4`, `Async.lifted/5` and `Async.for_k/5`) make the continuations of a
+  plan. Their funs belong to `Async`, and the collector walks them. The walk stops at the
+  compiled closures that they keep.
+
+  The plan uses the cache, the uid and the budget of a sync body (see "The cache" and
+  "Memory bound").
 
   ## The switch
 
@@ -141,8 +191,10 @@ defmodule Browser.JS.Compile do
   The process dictionary keeps the compiled code of each function under the key
   `{:jsc, uid}`. The value is `{body, maker}`:
 
-    * `body` is the closure of the body, or `nil` when the body stays on the tree.
-    * `maker` is the frame maker of the function, or `nil`.
+    * `body` is the closure of the body, or `nil` when the body stays on the tree. For an
+      async function or a generator, `body` is the plan.
+    * `maker` is the frame maker of the function, or `nil`. An async function and a
+      generator have no maker, because `Interp.enter_frame/4` makes their frames.
 
   Each function object keeps its code in its closure record, in the keys `code` and `mk`.
   Thus a call does not read the cache.
@@ -157,7 +209,7 @@ defmodule Browser.JS.Compile do
   ## Memory bound
 
     * A function with more than 65,536 compiled nodes stays on the tree. Its cache entry is
-      `{nil, nil}`.
+      `{nil, nil}`. A node of a plan counts as one node, as a node of a sync body does.
     * The process key `:jsc_budget` holds `{nodes, erases}`. `nodes` is the number of
       compiled nodes in the cache, plus 16 for each entry (its fixed part).
     * When the count goes above 400,000 (about 25 to 60 MB on a 64-bit VM), all the
@@ -179,7 +231,8 @@ defmodule Browser.JS.Compile do
     * Each closure has one parent closure. Thus the size of the code is linear in the size
       of the body.
     * Compiled code makes no fun when it runs. A loop is a named function of this module.
-      The loop gets its closures as arguments.
+      The loop gets its closures as arguments. A plan gives each continuation to a named
+      function of `Browser.JS.Async`, which makes it.
     * The code stays in its process. Do not send it in a message. Do not put it in ETS, in
       `persistent_term` or in `term_to_binary`.
 
@@ -194,7 +247,11 @@ defmodule Browser.JS.Compile do
       the call chain (S3).
     * A shell has no compiled child in a function, in a class or in the callee of a call
       (S4).
-    * The compiled code of a body keeps no object, no `{:val}` node and no frame (S5).
+    * The compiled code of a body or a plan keeps no object, no `{:val}` node and no frame
+      (S5).
+    * A plan runs only on a frame (S1). A statement of a plan has the mark `{:aw}` only
+      when it awaits, and the lift plan is the lift plan of the old walk (item A2 of
+      step 4).
     * The tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
       (S6, in `Interp.frame_call/6`).
 

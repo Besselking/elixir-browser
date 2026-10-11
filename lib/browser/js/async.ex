@@ -57,6 +57,26 @@ defmodule Browser.JS.Async do
     have a completion value. A statement without awaits runs through
     `Browser.JS.Interp.exec_frame_stmt/3`, and an expression statement with an await does
     not write the value.
+
+  ## Compiled plans (step 5c)
+
+  In frame mode, `run_body/4` runs the plan that `Browser.JS.Compile.cps_body/1` gives for
+  the body (see "CPS plans" in `Browser.JS.Compile`). The plan finds the marks, the lift
+  plans and the parts of the loops once, when the body compiles at its first call. It
+  runs each run of statements without an await as one compiled list, and each expression
+  without an await as one compiled closure.
+
+  The plan does the same steps in the same order as the tree path: the same values,
+  errors, steps (`:js_steps`), heap ids and positions. The functions of the part
+  "compiled plans" below are the run-time half of the plans. Only they make the
+  continuations of a plan, because the collector (`Browser.JS.GC`) walks the funs of this
+  module but not the funs of `Browser.JS.Compile`.
+
+  The tree path (`clist/4`, `cexec/5`, `cs/5` and `cev/4`) stays. It runs the bodies at
+  `:off` and on the old path, all bodies when the switch `:js_compile` is off, a body over
+  the cap of the compiler, and the kinds that a plan keeps on the tree path (`yield*`,
+  for-in, for-of and for-await, `try` with an await, `using`, an optional chain that
+  awaits, and a lift plan with a leaf from a class).
   """
 
   alias Browser.JS.{Awaits, Compile, Interp, Promise}
@@ -163,6 +183,8 @@ defmodule Browser.JS.Async do
 
   defp run_body(c, env, ctx, ending), do: tree_body(c, env, ctx, ending)
 
+  # (inline, so that a body on the tree path costs no more calls than before step 5c)
+  @compile {:inline, tree_body: 4}
   defp tree_body(%{mode: :arrow_expr} = c, env, ctx, _ending), do: cev(c.body, env, ctx, ctx.ret)
   defp tree_body(c, env, ctx, ending), do: clist(c.body, env, ctx, fn _ -> ctx.ret.(ending) end)
 

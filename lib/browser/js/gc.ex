@@ -12,6 +12,10 @@ defmodule Browser.JS.GC do
   alive, but nothing reachable is ever freed. Function bodies are syntax trees and not walked;
   only the scope and `home` of a closure are. The compiled code of step 5 (the `{:jsc, _}`
   keys and the funs of `Browser.JS.Compile`) is not walked either: it holds no heap id.
+  The continuation of a compiled plan of an async body or a generator (step 5c) is a fun
+  of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
+  stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
+  a lift template only while the template runs, so it is a root like any other key.
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers).
