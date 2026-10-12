@@ -309,10 +309,13 @@ defmodule Browser.Layout do
 
   defp add_focus(items, _measure, nil), do: items
 
-  defp add_focus(items, measure, %{cid: cid, caret: caret} = focus) do
+  defp add_focus(items, measure, %{cid: cid} = focus) do
     # one pass over the page: what the control owns is a short list
-    mine = Enum.filter(items, &(Map.get(&1, :cid) == cid))
+    items ++ focus_items(Enum.filter(items, &(Map.get(&1, :cid) == cid)), measure, focus)
+  end
 
+  # the ring, caret and selection of the focused control, from the items it owns (`mine`)
+  defp focus_items(mine, measure, %{cid: cid, caret: caret} = focus) do
     texts =
       mine
       |> Enum.filter(&(&1.type == :text))
@@ -372,8 +375,7 @@ defmodule Browser.Layout do
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
     # and above the box it is in: fixed items are drawn in the order of their `z`
     z = Enum.find_value(mine, &Map.get(&1, :z))
-    extra = if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
-    items ++ extra
+    if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
   end
 
   # The highlight of the text selected in the focused field: `sel` is `{from, to}` with
@@ -434,27 +436,45 @@ defmodule Browser.Layout do
   def patch_field(items, cid, old_text, new_text, focus, measure) do
     old_text = if old_text == "", do: "\u200B", else: old_text
     new_text = if new_text == "", do: "\u200B", else: new_text
-    # one pass over the page: what the control owns is a short list
-    mine = Enum.filter(items, &(Map.get(&1, :cid) == cid))
+    # one pass over the page, which takes out the old ring and caret and puts the new text in
+    # (`patched/5`); what the control owns is a short list, checked after it
+    {items, old, new} = patched(items, cid, spaced(measure), new_text, {[], [], []})
 
-    with [%{text: ^old_text, align: :left} = item] <- Enum.filter(mine, &(&1.type == :text)),
-         [_ | _] = owned <- Enum.filter(mine, &(&1.type in [:rect, :box, :text])),
+    with [%{text: ^old_text, align: :left}] <- Enum.filter(old, &(&1.type == :text)),
+         [_ | _] = owned <- Enum.filter(old, &(&1.type in [:rect, :box, :text])),
          %{w: box_w} <- bounds(owned),
-         width = spaced(measure).(new_text, item),
+         [%{w: width}] <- Enum.filter(new, &(&1.type == :text)),
          true <- width <= box_w - 8 do
-      items =
-        for it <- items,
-            not (it.type in [:ring, :caret, :selection] and Map.get(it, :cid) == cid) do
-          if it.type == :text and Map.get(it, :cid) == cid,
-            do: %{it | text: new_text, w: width},
-            else: it
-        end
-
-      {:ok, add_focus(items, measure, focus)}
+      case focus do
+        %{cid: ^cid} -> {:ok, items ++ focus_items(new, measure, focus)}
+        _ -> {:ok, add_focus(items, measure, focus)}
+      end
     else
       _ -> :error
     end
   end
+
+  # `items` without the control's ring, caret and selection and with its text replaced, the
+  # control's items before (`old`, ring and caret left out) and after (`new`)
+  defp patched([], _cid, _measure, _text, {acc, old, new}),
+    do: {Enum.reverse(acc), Enum.reverse(old), Enum.reverse(new)}
+
+  defp patched([%{cid: cid} = it | rest], cid, measure, text, {acc, old, new}) do
+    case it.type do
+      type when type in [:ring, :caret, :selection] ->
+        patched(rest, cid, measure, text, {acc, old, new})
+
+      :text ->
+        it2 = %{it | text: text, w: measure.(text, it)}
+        patched(rest, cid, measure, text, {[it2 | acc], [it | old], [it2 | new]})
+
+      _ ->
+        patched(rest, cid, measure, text, {[it | acc], [it | old], [it | new]})
+    end
+  end
+
+  defp patched([it | rest], cid, measure, text, {acc, old, new}),
+    do: patched(rest, cid, measure, text, {[it | acc], old, new})
 
   defp grow(nil, _by), do: nil
 

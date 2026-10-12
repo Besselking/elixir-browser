@@ -2854,7 +2854,13 @@ defmodule Browser.Session do
              do: UI.links(items),
              else: state.links
 
-        sticky = items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0))
+        # (the patch changes the field's items only: when none of them is sticky or fixed, the
+        # sticky ones are the same as before)
+        sticky =
+          if Enum.any?(state.sticky, &(Map.get(&1, :cid) == control.cid)),
+            do: items |> Enum.filter(&moved_on_screen?/1) |> Enum.sort_by(&Map.get(&1, :z, 0)),
+            else: state.sticky
+
         scroll_by(%{state | items: items, links: links, sticky: sticky}, 0, :diff)
 
       :error ->

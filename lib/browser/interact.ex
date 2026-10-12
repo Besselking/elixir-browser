@@ -177,15 +177,28 @@ defmodule Browser.Interact do
 
   @doc """
   The smallest scroll (in characters) of a single-line field for which the text from
-  the scroll to the caret fits into `inner_width`, never scrolling past the caret.
+  the scroll to the caret fits into `inner_width`, never scrolling past the caret. A scroll
+  that hides more than it must is pulled back while the text from it to the end still fits,
+  so that deleting at the end of a long value shows the text before it again.
   """
   def fit_chars(value, caret, scroll, inner_width, font, measure) do
     scroll = min(scroll, caret)
 
-    Enum.find(scroll..caret//1, caret, fn s ->
-      s == caret or measure.(String.slice(value, s, caret - s), font) <= inner_width
-    end)
+    scroll =
+      Enum.find(scroll..caret//1, caret, fn s ->
+        s == caret or measure.(String.slice(value, s, caret - s), font) <= inner_width
+      end)
+
+    pull_back(value, scroll, inner_width, font, measure)
   end
+
+  defp pull_back(value, scroll, inner_width, font, measure) when scroll > 0 do
+    if measure.(String.slice(value, (scroll - 1)..-1//1), font) <= inner_width,
+      do: pull_back(value, scroll - 1, inner_width, font, measure),
+      else: scroll
+  end
+
+  defp pull_back(_value, scroll, _inner_width, _font, _measure), do: scroll
 
   @doc "The scroll (in lines) of a textarea that keeps `caret_line` among `visible` lines."
   def fit_lines(caret_line, scroll, visible) when visible > 0 do
