@@ -470,10 +470,39 @@ defmodule Browser.JS.Builtins do
   defp list_array?(%{class: :array} = o), do: not is_map_key(o, :arguments)
   defp list_array?(_), do: false
 
+  # The record of `this` when `fast_array?/2` is true, or `nil`: the same tests on one read
+  # of the record, for `push`, which runs very often. It reads `Array.prototype` with no
+  # call: the process key of the prototype and its record.
+  defp fast_record({:obj, id}, extra) do
+    case deref(id) do
+      %{class: :array, items: _, len: len} = o
+      when not is_map_key(o, :arguments) and not is_map_key(o, :len_ro) ->
+        if not (Obj.frozen?(o) or Obj.sealed?(o) or Obj.extensible?(o) == false) and
+             len + extra <= 50_000_000 and no_proto_elements?(),
+           do: o
+
+      _ ->
+        nil
+    end
+  end
+
+  defp fast_record(_, _extra), do: nil
+
+  # Whether `Array.prototype` has no element (see `fast_array?/2`).
+  @compile {:inline, no_proto_elements?: 0}
+  defp no_proto_elements? do
+    {:obj, pid} = :erlang.get({:proto, :array})
+
+    case :erlang.get(pid) do
+      %{items: items} -> map_size(items) == 0
+      _ -> true
+    end
+  end
+
   # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
   defp fast_array?(this, extra \\ 0) do
     # an element on Array.prototype shows through holes and can run setters: take the generic path
-    plain_array?(this) and Map.get(deref(elem(proto(:array), 1)), :items, %{}) == %{} and
+    plain_array?(this) and no_proto_elements?() and
       elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
   end
 
@@ -536,33 +565,47 @@ defmodule Browser.JS.Builtins do
     target
   end
 
-  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers
+  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers. An
+  # object `this`, the common case, needs no test of the other kinds, and whether the
+  # method takes a callback is known when the method is made.
   defp array_fn(obj, name, fun) do
-    def_fn(obj, name, fn this, args ->
-      this =
-        cond do
-          nullish?(this) ->
-            throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+    callback? = name in @callback_methods
 
-          is_binary(this) ->
-            box(this)
+    def_fn(obj, name, fn
+      {:obj, _} = this, args ->
+        if callback? and not array?(this), do: length_of(this, false)
+        fun.(this, args)
 
-          is_boolean(this) or match?({:symbol, _, _}, this) or match?({:bigint, _}, this) ->
-            box(this)
-
-          is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
-            wrap(new_object([], proto(:number)), this)
-
-          true ->
-            this
-        end
-
-      # the length is read before the callback is checked
-      if name in @callback_methods and not array?(this) and not is_binary(this),
-        do: length_of(this, false)
-
-      fun.(this, args)
+      this, args ->
+        array_fn_other(name, callback?, fun, this, args)
     end)
+  end
+
+  # `array_fn/3` for a `this` that is not an object.
+  defp array_fn_other(name, callback?, fun, this, args) do
+    this =
+      cond do
+        nullish?(this) ->
+          throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+
+        is_binary(this) ->
+          box(this)
+
+        is_boolean(this) or match?({:symbol, _, _}, this) or match?({:bigint, _}, this) ->
+          box(this)
+
+        is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
+          wrap(new_object([], proto(:number)), this)
+
+        true ->
+          this
+      end
+
+    # the length is read before the callback is checked
+    if callback? and not array?(this) and not is_binary(this),
+      do: length_of(this, false)
+
+    fun.(this, args)
   end
 
   defp array_methods(p) do
@@ -572,19 +615,26 @@ defmodule Browser.JS.Builtins do
     store(pid, po |> Obj.with_class(:array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
 
     array_fn(p, "push", fn this, args ->
-      if fast_array?(this, length(args)) do
-        {:obj, id} = this
-        o = deref(id)
+      case fast_record(this, length(args)) do
+        nil ->
+          ArrayGeneric.push(this, args)
 
-        {items, len} =
-          Enum.reduce(args, {o.items, o.len}, fn v, {items, i} ->
-            {Map.put(items, i, v), i + 1}
-          end)
+        o ->
+          {:obj, id} = this
 
-        Interp.store(id, %{o | items: items, len: len})
-        float(len)
-      else
-        ArrayGeneric.push(this, args)
+          {items, len} =
+            case args do
+              [v] ->
+                {Map.put(o.items, o.len, v), o.len + 1}
+
+              _ ->
+                Enum.reduce(args, {o.items, o.len}, fn v, {items, i} ->
+                  {Map.put(items, i, v), i + 1}
+                end)
+            end
+
+          Interp.store(id, %{o | items: items, len: len})
+          float(len)
       end
     end)
 
