@@ -193,6 +193,47 @@ defmodule Browser.JS.ShapesTest do
                0
     end
 
+    test "the application setting :js_shapes false turns the fast records off in each heap" do
+      # (JS_SHAPES=0 and `mix js.test262 --shapes off` set it; `Interp.init/1` reads it)
+      src = "var o = {a: 1}, a = [1], f = function(){};"
+      {:ok, program} = Parser.parse(src, resolve: 4, file: "t.js")
+
+      fast = fn key ->
+        HeapOracle.in_process(fn ->
+          if key != nil, do: Process.put(:js_shapes, key)
+          Interp.init(1_000_000)
+          Builtins.install()
+          Interp.run_program(program, true)
+          {Process.get(:js_shapes), Enum.count(records(), fn {_, o} -> Obj.fast?(o) end)}
+        end)
+      end
+
+      old = Application.get_env(:browser, :js_shapes)
+
+      try do
+        Application.put_env(:browser, :js_shapes, false)
+        assert fast.(nil) == {false, 0}
+        assert fast.(true) == {false, 0}
+
+        # (with the setting on, a process that set its own switch keeps it)
+        Application.put_env(:browser, :js_shapes, true)
+        assert fast.(false) == {false, 0}
+        assert {nil, n} = fast.(nil)
+        assert n > 100
+
+        # (the option of the task sets the setting before it looks for the checkout)
+        assert_raise Mix.Error, fn ->
+          Mix.Tasks.Js.Test262.run(["--shapes", "off", "--dir", "/nonexistent/test262"])
+        end
+
+        assert Application.get_env(:browser, :js_shapes) == false
+      after
+        if old == nil,
+          do: Application.delete_env(:browser, :js_shapes),
+          else: Application.put_env(:browser, :js_shapes, old)
+      end
+    end
+
     test "a built-in prototype stays exact at the limits of its shape" do
       # (a polyfill that adds many keys passes the limit of 128 keys: `Array.prototype`
       # goes to dictionary mode, and every key stays)
