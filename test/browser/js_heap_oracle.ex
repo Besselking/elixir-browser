@@ -1,11 +1,13 @@
 defmodule Browser.JS.HeapOracle do
   # The runner and the ordered export of the heap of the data-model oracles: the fast-path
-  # oracle (`js_fast_test.exs`, fast paths off and on) and the shapes oracle
-  # (`js_shapes_test.exs`, fast records off and on). Each oracle runs the same programs two
-  # times in one VM with a different setting, and compares the outcomes.
+  # oracle (`js_fast_test.exs`, fast paths off and on), the shapes oracle
+  # (`js_shapes_test.exs`, fast records off and on) and the form oracle of the elements
+  # (`js_elems_form_test.exs`, all arrays sparse, then the dense form). Each oracle runs the
+  # same programs two times in one VM with a different setting, and compares the outcomes.
   #
   # The setting is a function that runs in the process of the program before
-  # `Interp.init/1`: it puts the process keys of the setting (`:js_fast_off`, `:js_shapes`).
+  # `Interp.init/1`: it puts the process keys of the setting (`:js_fast_off`, `:js_shapes`,
+  # `:js_elems_sparse`).
   @moduledoc false
 
   import ExUnit.Assertions

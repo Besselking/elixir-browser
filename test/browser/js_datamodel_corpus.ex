@@ -279,11 +279,46 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm fast Math JSON Reflect",
      ~S|function mx(a, b){ return Math.max(a, b) } function rd(o){ return String(o.PI) } function js(v){ return JSON.stringify(v) } function f(){ var r = []; for (var i = 0; i < 3; i++) r.push(mx(i, 1), rd(Math), js({i: i}), Reflect.has({a: 1}, 'a')); var omax = Math.max; Math.max = function(){ return 'mine' }; r.push(mx(1, 2)); Math.max = omax; delete Math.max; try { mx(1, 2) } catch (e) { r.push(e.constructor.name) } Math.max = omax; r.push(mx(4, 5), Object.getOwnPropertyDescriptor(Math, 'max').enumerable); Math.extra = 1; r.push(Object.keys(Math).join()); try { Object.defineProperty(Math, 'PI', {value: 3}) } catch (e) { r.push(e.constructor.name) } Math.PI = 4; r.push(rd(Math)); var ostr = JSON.stringify; JSON.stringify = function(){ return 'js' }; r.push(js(1)); JSON.stringify = ostr; r.push(js([1])); Object.freeze(Math); Math.abs = null; r.push(typeof Math.abs, Object.isFrozen(Math)); Reflect.extra = 'r'; r.push(Reflect.extra, typeof Reflect.ownKeys, Object.keys(Reflect).join()); return r.join(' ') } console.log(f())|},
     {"dm fast function proxies",
-     ~S|function rd(o){ return String(o.call === Function.prototype.call) + ':' + String(o.k) } function f(){ var r = [], log = []; var plain = function(){}; var px = new Proxy(function(){}, {get(t, k){ log.push(String(k)); return k === 'k' ? 'trap' : t[k] }}); var px2 = new Proxy(plain, {}); for (var i = 0; i < 3; i++) r.push(rd(plain), rd(px), rd(px2)); plain.k = 'own'; r.push(rd(plain), rd(px2)); px.k = 'set'; r.push(rd(px)); return r.join() + ' ' + log.join() } console.log(f())|}
+     ~S|function rd(o){ return String(o.call === Function.prototype.call) + ':' + String(o.k) } function f(){ var r = [], log = []; var plain = function(){}; var px = new Proxy(function(){}, {get(t, k){ log.push(String(k)); return k === 'k' ? 'trap' : t[k] }}); var px2 = new Proxy(plain, {}); for (var i = 0; i < 3; i++) r.push(rd(plain), rd(px), rd(px2)); plain.k = 'own'; r.push(rd(plain), rd(px2)); px.k = 'set'; r.push(rd(px)); return r.join() + ' ' + log.join() } console.log(f())|},
+    # ── B2: dense elements ───────────────────────────────────────
+    {"dm elems literals",
+     ~S|function f(){ var x = 5, s = [7, 8]; var r = [[], [x], [x, x], [x, x, x], [x, 'a', null, undefined, true], [...s], [x, ...s, x], [...s, , x], [, ...s], [[x]], [x, [x, [x]]]]; console.log(r.map(a => a.length + ':' + JSON.stringify(a) + ':' + Object.keys(a).join('')).join(' ')); var t = []; for (var i = 0; i < 3; i++) { var l = [i, i, i]; l[1] = 'w'; t.push(l.join()) } console.log(t.join(' ')) } f()|},
+    {"dm elems holes",
+     ~S|function d(a){ var k = []; for (var i = 0; i < a.length && i < 5; i++) k.push(i in a); return a.length + ':' + Object.keys(a).length + ':' + k.join('') + ':' + a.slice(0, 4).join('-') } function f(){ var r = [d([1, , 3]), d([, , ]), d([1, , ]), d([, 1]), d(new Array(3)), d(new Array(64)), d(new Array(65)), d(new Array(1000)), d(Array(2).fill(7)), d(Array.from({length: 3}))]; console.log(r.join(' ')) } f()|},
+    {"dm elems writes past the end",
+     ~S|function w(i){ var a = [1, 2, 3]; a[i] = 'x'; return a.length + ':' + Object.keys(a).length + ':' + (3 in a) + ':' + a[i] + ':' + a.indexOf('x') + ':' + a.lastIndexOf(undefined) } function f(){ console.log([3, 4, 63, 64, 65, 1000].map(w).join(' ')) } f()|},
+    {"dm elems append writes",
+     ~S|function f(){ var r = []; var a = []; for (var i = 0; i < 70; i++) a[a.length] = i; r.push(a.length, a[63], a[64], a[69], Object.keys(a).length); var b = [1]; b[b.length] = 2; b[b.length + 1] = 4; r.push(b.length, b.join(), 2 in b); var c = []; c[0] = 'a'; c[1] = 'b'; c[0] = 'c'; r.push(c.join(), c.length); console.log(r.join(' ')) } f()|},
+    {"dm elems length changes",
+     ~S|function f(){ var r = []; var a = [1, 2, 3, 4]; a.length = 2; r.push(a.join(), a.length, 2 in a); a.length = 4; r.push(a.join(), a.length, 2 in a, Object.keys(a).join()); a.push(5); r.push(a.join()); var b = []; for (var i = 0; i < 64; i++) b.push(i); b.length = 65; r.push(b.length, 64 in b, b[63]); b.length = 64; r.push(b.length, b[63]); b.length = 0; r.push(b.length, b.join(), 0 in b); b.push('n'); r.push(b.join(), b.length); var c = [1, 2, 3]; c.length = 3; c.length = 0; c[0] = 'z'; r.push(c.join(), c.length); console.log(r.join(' ')) } f()|},
+    {"dm elems shrink past a fixed element",
+     ~S|function f(){ var r = []; var a = [0, 1, 2, 3, 4, 5, 6]; Object.defineProperty(a, 5, {configurable: false}); a.length = 2; r.push(a.length, a.join()); a.length = 1; r.push(a.length); try { Object.defineProperty(a, 'length', {value: 0}) } catch (e) { r.push(e.constructor.name) } r.push(a.length, Object.keys(a).join()); console.log(r.join(' ')) } f()|},
+    {"dm elems delete",
+     ~S|function f(){ var r = []; var a = [1, 2, 3]; r.push(delete a[2], a.length, a.join(), 2 in a); var b = [1, 2, 3]; r.push(delete b[1], b.length, b.join(), Object.keys(b).join()); var c = [1, 2, 3]; r.push(delete c[7], c.length, c.join(), Object.keys(c).join()); b[1] = 'back'; r.push(b.join(), b.length); c.push(4); r.push(c.join()); console.log(r.join(' ')) } f()|},
+    {"dm elems accessor elements",
+     ~S|function f(){ var r = [], log = []; var a = [1, 2, 3]; Object.defineProperty(a, 1, {get(){ return 'g' }, set(v){ log.push('set ' + v) }, enumerable: true, configurable: true}); a[1] = 9; r.push(a[1], a.join(), Object.keys(a).join(), JSON.stringify(Object.getOwnPropertyDescriptor(a, 1).set ? 'acc' : 'data')); a.push(4); r.push(a.length, a.join()); Object.defineProperty(a, 0, {enumerable: false}); r.push(Object.keys(a).join(), a.join()); var b = [5, 6]; Object.defineProperty(b, 3, {get(){ return 'h' }}); r.push(b.length, b.join(), Object.keys(b).join()); console.log(r.join(' '), log.join()) } f()|},
+    {"dm elems defineProperty with default attributes",
+     ~S|function f(){ var r = []; var a = [1, 2, 3]; Object.defineProperty(a, 1, {value: 'v', writable: true, enumerable: true, configurable: true}); Object.defineProperty(a, 3, {value: 'e', writable: true, enumerable: true, configurable: true}); r.push(a.join(), a.length); Object.defineProperty(a, 6, {value: 'h', writable: true, enumerable: true, configurable: true}); r.push(a.join(), a.length, 5 in a); var b = [1, 2]; Object.defineProperty(b, 0, {value: 'r'}); b[0] = 'w'; r.push(b.join(), JSON.stringify(Object.getOwnPropertyDescriptor(b, 0))); Object.defineProperty(b, 2, {value: 'n', enumerable: false, writable: true, configurable: true}); r.push(b.length, Object.keys(b).join(), b.join()); console.log(r.join(' ')) } f()|},
+    {"dm elems freeze seal prevent",
+     ~S/function t(mk, name){ var a = mk(), r = [name]; a[0] = 'w'; a[5] = 'h'; r.push(a.join(), a.length); try { a.push(1) } catch (e) { r.push(e.constructor.name) } try { (function(){ "use strict"; a[0] = 's' })() } catch (e) { r.push(e.constructor.name) } try { (function(){ "use strict"; a[3] = 's' })() } catch (e) { r.push(e.constructor.name) } r.push(delete a[1], a.join(), Object.isFrozen(a), Object.isSealed(a), Object.isExtensible(a)); try { a.length = 5 } catch (e) { r.push(e.constructor.name) } r.push(a.length); return r.join(',') } function f(){ console.log([t(() => Object.freeze([1, 2, 3]), 'freeze'), t(() => Object.seal([1, 2, 3]), 'seal'), t(() => Object.preventExtensions([1, 2, 3]), 'prevent'), t(() => Object.freeze([]), 'empty')].join(' | ')) } f()/},
+    {"dm elems non-writable length",
+     ~S|function f(){ var r = []; var a = [1, 2, 3]; Object.defineProperty(a, 'length', {writable: false}); a[1] = 'w'; a[3] = 'n'; r.push(a.join(), a.length, 3 in a); try { a.push(4) } catch (e) { r.push(e.constructor.name) } try { (function(){ "use strict"; a[5] = 1 })() } catch (e) { r.push(e.constructor.name) } try { a.length = 0 } catch (e) { r.push('len') } r.push(a.length, a.pop === Array.prototype.pop); try { a.pop() } catch (e) { r.push(e.constructor.name) } r.push(a.join()); console.log(r.join(' ')) } f()|},
+    {"dm elems prototype elements",
+     ~S|function f(){ var r = [], log = []; Object.defineProperty(Array.prototype, 3, {get(){ return 'ap' }, set(v){ log.push('aset ' + v) }, configurable: true}); var a = [0, 1, 2]; r.push(a[3], a.length); a[3] = 'x'; r.push(a.length, a[3], 3 in a, a.hasOwnProperty(3)); a.push('p'); r.push(a.length); var b = [0, , 2, , 4]; r.push(b[1], b[3], b.join()); delete Array.prototype[3]; Object.defineProperty(Object.prototype, 2, {get(){ return 'op' }, set(v){ log.push('oset ' + v) }, configurable: true}); var c = [0, 1]; c[2] = 'y'; r.push(c.length, c[2]); var d = [0]; d.push(1, 2); r.push(d.length, d.join()); delete Object.prototype[2]; var e = [0, 1]; e[2] = 'z'; r.push(e.length, e.join()); console.log(r.join(' '), '/', log.join()) } f()|},
+    {"dm elems proxy of an array",
+     ~S|function f(){ var log = [], a = [1, 2, 3]; var p = new Proxy(a, {get(t, k, rc){ log.push('get ' + String(k)); return Reflect.get(t, k, rc) }, set(t, k, v, rc){ log.push('set ' + String(k)); return Reflect.set(t, k, v, rc) }, has(t, k){ log.push('has ' + String(k)); return Reflect.has(t, k) }, ownKeys(t){ log.push('keys'); return Reflect.ownKeys(t) }}); p[1] = 'b'; p.push('d'); var r = [p[0], 1 in p, Object.keys(p).join(), Array.isArray(p), p.length, a.join()]; console.log(r.join(' '), '/', log.join()) } f()|},
+    {"dm elems arguments objects",
+     ~S/function sl(a, b){ arguments[0] = 'A'; b = 'B'; arguments[2] = 'C'; return [a, b, arguments[0], arguments[1], arguments[2], arguments.length, Object.keys(arguments).filter(k => k < 2).join(), Array.prototype.join.call(arguments)].join() } function st(a, b){ "use strict"; arguments[0] = 'A'; b = 'B'; return [a, b, arguments[0], arguments[1], arguments.length].join() } function del(a){ delete arguments[0]; a = 'n'; return [a, arguments[0], 0 in arguments, arguments.length].join() } function f(){ console.log(sl(1, 2), '|', st(1, 2), '|', del(1), '|', sl(1)) } f()/},
+    {"dm elems methods across the limit",
+     ~S|function f(){ var a = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69]; var r = []; r.push(a.length, a[69]); var s = a.slice(); s.sort((x, y) => y - x); r.push(s[0], s[69], s.length); s.reverse(); r.push(s[0], s[63], s[64]); var sp = a.slice(0, 66); var rm = sp.splice(60, 3, 'x', 'y'); r.push(rm.join(), sp.length, sp[62], sp[63]); var c = a.slice(0, 40).concat(a.slice(40, 70), [70, 71]); r.push(c.length, c[71], c.indexOf(64), c.includes(65)); var p = []; for (var i = 0; i < 66; i++) p.push(i); r.push(p.length, p.pop(), p.pop(), p.pop(), p.length, p[62]); p.unshift('u'); r.push(p.length, p[0], p[63]); var m = a.map(x => x * 2).filter(x => x % 3 == 0); r.push(m.length, m[m.length - 1], a.reduce((x, y) => x + y, 0)); console.log(r.join(' ')) } f()|},
+    {"dm elems callbacks that change the array",
+     ~S/function f(){ var r = []; var a = [1, 2, 3, 4]; a.forEach((x, i) => { r.push(x); if (i == 0) a.push(9); if (i == 1) a.length = 3 }); r.push('|', a.join()); var b = [1, 2, 3, 4]; var m = b.map((x, i) => { if (i == 0) delete b[2]; return x * 10 }); r.push(m.join(), Object.keys(m).join(), '|'); var c = [1, 2, 3]; for (var x of c) { r.push(x); if (x == 1) c.push(4); if (x == 3) c.length = 3 } r.push('|'); var d = [1, 2, 3]; var fl = d.filter((x, i) => { if (i == 0) Object.defineProperty(d, 2, {get(){ return 'G' }}); return true }); r.push(fl.join()); var e = [1, 2, 3]; r.push(e.some((x, i) => { e[i + 1] = 'n' + i; return false }), e.join()); console.log(r.join(' ')) } f()/},
+    {"dm elems JSON and holes",
+     ~S|function f(){ var a = [1, , 3]; a[5] = 6; var b = new Array(3); b[1] = 'b'; console.log(JSON.stringify(a), JSON.stringify(b), JSON.stringify([[], [[]], [1, [2, [3]]]]), JSON.stringify(JSON.parse('[1,[2,3],[]]')), String([1, [2, 3], [], [, ]])) } f()|}
   ]
 
-  # The console output of node 22 for the rows of steps A3 and A4 (from "dm lit shapes"
-  # on). The oracles compare two modes of this engine, so they cannot see a fault that
+  # The console output of node 22 for the rows of steps A3, A4 and B2 (from "dm lit
+  # shapes" on). The oracles compare two modes of this engine, so they cannot see a fault that
   # gives the same wrong output in the two modes, for example a fault of a fast path that
   # the tree walker also takes. `test/browser/js_shapes_test.exs` compares the output of
   # each of these rows with this output. A new row of these steps gets its output here.
@@ -333,7 +368,39 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm fast Math JSON Reflect",
      ~S|1 3.141592653589793 {"i":0} true 1 3.141592653589793 {"i":1} true 2 3.141592653589793 {"i":2} true mine TypeError 5 true max,extra TypeError 3.141592653589793 js [1] function true r function extra|},
     {"dm fast function proxies",
-     ~S|true:undefined,true:trap,true:undefined,true:undefined,true:trap,true:undefined,true:undefined,true:trap,true:undefined,true:own,true:own,true:trap call,k,call,k,call,k,call,k|}
+     ~S|true:undefined,true:trap,true:undefined,true:undefined,true:trap,true:undefined,true:undefined,true:trap,true:undefined,true:own,true:own,true:trap call,k,call,k,call,k,call,k|},
+    {"dm elems literals",
+     ~S|0:[]: 1:[5]:0 2:[5,5]:01 3:[5,5,5]:012 5:[5,"a",null,null,true]:01234 2:[7,8]:01 4:[5,7,8,5]:0123 4:[7,8,null,5]:013 3:[null,7,8]:12 1:[[5]]:0 2:[5,[5,[5]]]:01
+0,w,0 1,w,1 2,w,2|},
+    {"dm elems holes",
+     ~S|3:2:truefalsetrue:1--3 2:0:falsefalse:- 2:1:truefalse:1- 2:1:falsetrue:-1 3:0:falsefalsefalse:-- 64:0:falsefalsefalsefalsefalse:--- 65:0:falsefalsefalsefalsefalse:--- 1000:0:falsefalsefalsefalsefalse:--- 2:2:truetrue:7-7 3:3:truetruetrue:--|},
+    {"dm elems writes past the end",
+     ~S|4:4:true:x:3:-1 5:4:false:x:4:-1 64:4:false:x:63:-1 65:4:false:x:64:-1 66:4:false:x:65:-1 1001:4:false:x:1000:-1|},
+    {"dm elems append writes", ~S|70 63 64 69 70 4 1,2,,4 false c,b 2|},
+    {"dm elems length changes",
+     ~S|1,2 2 false 1,2,, 4 false 0,1 1,2,,,5 65 false 63 64 63 0  false n 1 z 1|},
+    {"dm elems shrink past a fixed element", ~S|6 0,1,2,3,4,5 6 TypeError 6 0,1,2,3,4,5|},
+    {"dm elems delete",
+     ~S|true 3 1,2, false true 3 1,,3 0,2 true 3 1,2,3 0,1,2 1,back,3 3 1,2,3,4|},
+    {"dm elems accessor elements",
+     ~S|g 1,g,3 0,1,2 "acc" 4 1,g,3,4 1,2,3 1,g,3,4 4 5,6,,h 0,1 set 9|},
+    {"dm elems defineProperty with default attributes",
+     ~S|1,v,3,e 4 1,v,3,e,,,h 7 false w,2 {"value":"w","writable":true,"enumerable":true,"configurable":true} 3 0,1 w,2,n|},
+    {"dm elems freeze seal prevent",
+     ~S/freeze,1,2,3,3,TypeError,TypeError,TypeError,false,1,2,3,true,true,false,3 | seal,w,2,3,3,TypeError,TypeError,false,s,2,3,false,true,false,5 | prevent,w,2,3,3,TypeError,TypeError,true,s,,3,false,false,false,5 | empty,,0,TypeError,TypeError,TypeError,true,,true,true,false,0/},
+    {"dm elems non-writable length", ~S|1,w,3 3 false TypeError TypeError 3 true TypeError 1,w,|},
+    {"dm elems prototype elements",
+     ~S|ap 3 3  true false 4  ap 0,,2,ap,4 2 op 3 0,1,op 3 0,1,z / aset x,aset ap,aset p,oset y,oset 2|},
+    {"dm elems proxy of an array",
+     ~S|1 true 0,1,2,3 true 4 1,b,3,d / set 1,get push,get length,set 3,set length,get 0,has 1,keys,get length|},
+    {"dm elems arguments objects",
+     ~S/A,B,A,B,C,2,0,1,A,B | 1,B,A,2,2 | n,,false,1 | A,B,A,,C,1,0,A/},
+    {"dm elems methods across the limit",
+     ~S|70 69 69 0 70 0 63 64 60,61,62 65 63 64 72 71 64 true 66 65 64 63 63 62 64 u 62 24 138 2415|},
+    {"dm elems callbacks that change the array",
+     ~S/1 2 3 | 1,2,3 10,20,,40 0,1,3 | 1 2 3 | 1,2,G false 1,n0,n1,n2/},
+    {"dm elems JSON and holes",
+     ~S|[1,null,3,null,null,6] [null,"b",null] [[],[[]],[1,[2,[3]]]] [1,[2,3],[]] 1,2,3,,|}
   ]
 
   @doc "Gives the rows as `{name, source, options}`."
