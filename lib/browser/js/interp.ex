@@ -2232,12 +2232,13 @@ defmodule Browser.JS.Interp do
   end
 
   # The write of `put_named/3` and `strict_put_named/3` to the object with the id `id`, in
-  # one place, so that the strict and the sloppy write cannot drift apart. Only the write
-  # that does not take the fast update differs: `strict_put_obj/4` or `put_obj/5`. It is a
-  # macro, not an inline function, because the compiler does not inline `put_obj/5` into a
-  # function that it inlines, and each write would then pay one more call. `id`, `key`
-  # and `v` must be variables.
-  defmacrop named_write(id, key, v, strict?) do
+  # one place, so that the strict and the sloppy write cannot drift apart. `o` is the entry
+  # at `id` (`:undefined` when the heap has none). Only the write that does not take the
+  # fast update differs: `strict_put_obj/4` or `put_obj/5`. It is a macro, not an inline
+  # function, because the compiler does not inline `put_obj/5` into a function that it
+  # inlines, and each write would then pay one more call. `id`, `key` and `v` must be
+  # variables. The inline caches use it for the records that are not fast (`put_ic/4`).
+  defmacrop named_write(id, o, key, v, strict?) do
     slow = fn o ->
       if strict?,
         do: quote(do: strict_put_obj(unquote(id), unquote(o), unquote(key), unquote(v))),
@@ -2245,7 +2246,7 @@ defmodule Browser.JS.Interp do
     end
 
     quote do
-      o = :erlang.get(unquote(id))
+      o = unquote(o)
 
       Obj.own_case o, unquote(key) do
         {:ok, old} when plain_update(o, unquote(key), old) ->
@@ -2272,7 +2273,7 @@ defmodule Browser.JS.Interp do
   # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`. The update of an own
   # writable data property reads the record once and does not go through `put_obj/5`
   # (`plain_update/3`).
-  def put_named({:obj, id}, key, v), do: named_write(id, key, v, false)
+  def put_named({:obj, id}, key, v), do: named_write(id, :erlang.get(id), key, v, false)
   def put_named(ov, key, v), do: put(ov, key, v)
 
   @doc false
@@ -2280,8 +2281,349 @@ defmodule Browser.JS.Interp do
   # `strict_put/3`, which has a clause of its own for primitives. The update of an own
   # writable data property cannot fail, so the fast update does not set and read the flag
   # `:js_put_failed`: every reader of the flag sets it to false before its own write.
-  def strict_put_named({:obj, id}, key, v), do: named_write(id, key, v, true)
+  def strict_put_named({:obj, id}, key, v), do: named_write(id, :erlang.get(id), key, v, true)
   def strict_put_named(ov, key, v), do: strict_put(ov, key, v)
+
+  # ── inline caches (step A2) ────────────────────────────────
+  # The named sites of the compiled code read and write through an inline cache. The site
+  # number, the cells and the rules of a hit are in the moduledoc of `Browser.JS.Shape`. A
+  # record that is not fast, and every record when the fast path `:ic` is off, takes the
+  # path of `get_named/2` or `put_named/3`. A hit makes no change of the heap and calls
+  # nothing that the generic path would not call, so the steps, the heap ids and the
+  # results of the oracles stay the same. In the check build each hit also runs the
+  # generic path and compares (`Fast.shadow/3`).
+
+  # The misses that a cell can count before it becomes `:mega`.
+  @ic_misses 16
+
+  @doc false
+  # A property read with a constant key at the site `site` of the compiled code: the read
+  # of `get_named/2` with an inline cache.
+  def get_ic({:obj, id} = obj, key, site) do
+    case :erlang.get(id) do
+      Obj.fast_record(sid, vals) = o ->
+        if Fast.on?(:ic) do
+          case :erlang.get(site) do
+            {^sid, pos, _} ->
+              case :erlang.element(pos, vals) do
+                {:accessor, _, _} -> get_ic_miss(id, o, key, site)
+                v -> Fast.shadow(nil, v, get_obj(id, o, key, true))
+              end
+
+            {^sid, _} ->
+              get_obj(id, o, key, true)
+
+            {^sid, pid, psid, pos, _} ->
+              case ic_proto(o, pid, psid) do
+                nil -> get_ic_miss(id, o, key, site)
+                p -> ic_data(Obj.slot(p, pos), id, o, key, site)
+              end
+
+            {^sid, :get, pos, _} ->
+              ic_getter(:erlang.element(pos, vals), obj, o, key, site)
+
+            {^sid, :get, pid, psid, pos, _} ->
+              case ic_proto(o, pid, psid) do
+                nil -> get_ic_miss(id, o, key, site)
+                p -> ic_getter(Obj.slot(p, pos), obj, o, key, site)
+              end
+
+            {^sid, pid1, psid1, pid2, psid2, pos, _} ->
+              with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
+                   p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                ic_data(Obj.slot(p2, pos), id, o, key, site)
+              else
+                _ -> get_ic_miss(id, o, key, site)
+              end
+
+            {^sid, :get, pid1, psid1, pid2, psid2, pos, _} ->
+              with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
+                   p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                ic_getter(Obj.slot(p2, pos), obj, o, key, site)
+              else
+                _ -> get_ic_miss(id, o, key, site)
+              end
+
+            :mega ->
+              get_obj(id, o, key, true)
+
+            _ ->
+              get_ic_miss(id, o, key, site)
+          end
+        else
+          get_obj(id, o, key, true)
+        end
+
+      # (an id that is not in the heap gives the error of `deref/1`)
+      :undefined ->
+        get_obj(id, deref(id), key, true)
+
+      o ->
+        get_obj(id, o, key, true)
+    end
+  end
+
+  def get_ic(s, key, _site) when is_binary(s), do: get_str(s, key, true)
+  def get_ic(v, key, _site), do: get(v, key)
+
+  # The record at `pid` when it is the prototype of `o` and has the shape `psid`, or `nil`.
+  # A freed id gives `:undefined`, which does not match.
+  @compile {:inline, ic_proto: 3}
+  defp ic_proto(o, pid, psid) do
+    case :erlang.map_get(:proto, o) do
+      {:obj, ^pid} ->
+        case :erlang.get(pid) do
+          Obj.fast_record(^psid, _) = p -> p
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # The hit of a data cell of a prototype: the value `v`, or a miss when the value is now an
+  # accessor (`defineProperty` can make a data property an accessor with the same bits).
+  @compile {:inline, ic_data: 5}
+  defp ic_data(v, id, o, key, site) do
+    case v do
+      {:accessor, _, _} -> get_ic_miss(id, o, key, site)
+      v -> Fast.shadow(nil, v, get_obj(id, o, key, true))
+    end
+  end
+
+  # The hit of a getter cell: the getter of the stored accessor `stored`, called with the
+  # receiver `obj` as `lookup/3` calls it, or a miss when the value is now a data property.
+  # The shadow run compares the accessor with the one that the generic read finds
+  # (`ic_stored/2`), because the generic read would call the getter a second time.
+  defp ic_getter(stored, {:obj, id} = obj, o, key, site) do
+    case stored do
+      {:accessor, getter, _} ->
+        _ = Fast.shadow(nil, stored, ic_stored(o, key))
+        if function?(getter), do: call(getter, obj, []), else: :undefined
+
+      _ ->
+        get_ic_miss(id, o, key, site)
+    end
+  end
+
+  # The stored value of `key` that `lookup/3` finds from the record `o`, with no call of a
+  # getter: an accessor is `{:accessor, getter, setter}`, and no key gives `:none`. Only the
+  # shadow run of a getter cell uses it, and a getter cell holds only plain records, so
+  # the walk has no clause for a proxy, a host object or an array.
+  defp ic_stored(o, key) do
+    Obj.own_case o, key do
+      {:ok, v} ->
+        v
+
+      :error ->
+        case :erlang.map_get(:proto, o) do
+          {:obj, pid} -> ic_stored(deref(pid), key)
+          _ -> :none
+        end
+    end
+  end
+
+  # A miss of a read: the cell of the site gets the place where the generic read finds the
+  # key, and the generic read gives the value.
+  defp get_ic_miss(id, o, key, site) do
+    ic_learn(site, ic_read_cell(o, key))
+    get_obj(id, o, key, true)
+  end
+
+  # The cell of a read of `key` from the fast record `o`, without the count of the misses
+  # (see `Browser.JS.Shape`): the own key, or the key of the prototype or of its prototype
+  # when these are fast plain records, as `lookup/3` and `lookup_proto/3` find it. Any other
+  # case is the generic path `{sid}`.
+  defp ic_read_cell(o, key) do
+    sid = Obj.shape_id(o)
+
+    with true <- ic_plain?(o),
+         {where, stored} <- ic_find(o, key, 0) do
+      case {where, stored} do
+        {{pos}, {:accessor, _, _}} ->
+          {sid, :get, pos}
+
+        {{pos}, _} ->
+          {sid, pos}
+
+        {{pid, psid, pos}, {:accessor, _, _}} ->
+          {sid, :get, pid, psid, pos}
+
+        {{pid, psid, pos}, _} ->
+          {sid, pid, psid, pos}
+
+        {{pid1, psid1, pid2, psid2, pos}, {:accessor, _, _}} ->
+          {sid, :get, pid1, psid1, pid2, psid2, pos}
+
+        {{pid1, psid1, pid2, psid2, pos}, _} ->
+          {sid, pid1, psid1, pid2, psid2, pos}
+      end
+    else
+      _ -> {sid}
+    end
+  end
+
+  # Where the plain chain from the fast record `o` holds `key`, at the depth `depth` of `o`
+  # (0 for the receiver): `{place, stored}`, where `place` is `{pos}`, `{pid, psid, pos}` or
+  # `{pid1, psid1, pid2, psid2, pos}`, or `nil`. A prototype counts only when it is a fast
+  # plain record, so that its shape tells what it holds.
+  defp ic_find(o, key, depth) do
+    case Obj.fast_slot(o, key) do
+      {pos, _bits} ->
+        {{pos}, Obj.slot(o, pos)}
+
+      nil when depth < 2 ->
+        with {:obj, pid} <- :erlang.map_get(:proto, o),
+             p when is_map(p) <- :erlang.get(pid),
+             true <- ic_plain?(p),
+             {place, stored} <- ic_find(p, key, depth + 1) do
+          {:erlang.insert_element(1, :erlang.insert_element(1, place, Obj.shape_id(p)), pid),
+           stored}
+        else
+          _ -> nil
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  # Whether the record `o` can be in a cell: a fast record of a plain object. Its reads and
+  # writes of a named key then take the last clause of `get_obj/4` and `put_obj/5`, which
+  # `lookup/3` and `put_prop/4` do. (step A2 makes only plain objects fast; a later step
+  # that makes other records fast must look at this test)
+  @compile {:inline, ic_plain?: 1}
+  defp ic_plain?(o),
+    do: Obj.fast?(o) and :erlang.map_get(:class, o) == :object and not is_map_key(o, :proxy)
+
+  # Writes the cell `cell` (without its count) to the site `site`. The count goes up by one
+  # for each miss, and past `@ic_misses` the cell becomes `:mega`.
+  defp ic_learn(site, cell) do
+    n =
+      case :erlang.get(site) do
+        :undefined -> 0
+        old -> :erlang.element(tuple_size(old), old)
+      end
+
+    if n >= @ic_misses,
+      do: :erlang.put(site, :mega),
+      else: :erlang.put(site, :erlang.append_element(cell, n + 1))
+  end
+
+  @doc false
+  # A property write with a constant key at the site `site` of the compiled code: the write
+  # of `put_named/3` with an inline cache.
+  def put_ic({:obj, id}, key, v, site) do
+    case :erlang.get(id) do
+      Obj.fast_record(sid, vals) = o ->
+        if Fast.on?(:ic) do
+          case :erlang.get(site) do
+            {^sid, pos, _} ->
+              case :erlang.element(pos, vals) do
+                {:accessor, _, _} ->
+                  put_ic_miss(id, o, key, v, site)
+
+                _ ->
+                  Fast.shadow(id, ic_store(id, o, vals, pos, v), put_obj(id, o, key, v, true))
+              end
+
+            {^sid, _} ->
+              put_obj(id, o, key, v, true)
+
+            :mega ->
+              put_obj(id, o, key, v, true)
+
+            _ ->
+              put_ic_miss(id, o, key, v, site)
+          end
+        else
+          named_write(id, o, key, v, false)
+        end
+
+      o ->
+        named_write(id, o, key, v, false)
+    end
+  end
+
+  def put_ic(ov, key, v, _site), do: put(ov, key, v)
+
+  @doc false
+  # `put_ic/4` for strict code: the write of `strict_put_named/3` with an inline cache. A hit
+  # writes a writable data property, which cannot fail, so it does not set and read the
+  # flag `:js_put_failed`.
+  def strict_put_ic({:obj, id}, key, v, site) do
+    case :erlang.get(id) do
+      Obj.fast_record(sid, vals) = o ->
+        if Fast.on?(:ic) do
+          case :erlang.get(site) do
+            {^sid, pos, _} ->
+              case :erlang.element(pos, vals) do
+                {:accessor, _, _} ->
+                  strict_put_ic_miss(id, o, key, v, site)
+
+                _ ->
+                  Fast.shadow(id, ic_store(id, o, vals, pos, v), put_obj(id, o, key, v, true))
+              end
+
+            {^sid, _} ->
+              strict_put_obj(id, o, key, v)
+
+            :mega ->
+              strict_put_obj(id, o, key, v)
+
+            _ ->
+              strict_put_ic_miss(id, o, key, v, site)
+          end
+        else
+          named_write(id, o, key, v, true)
+        end
+
+      o ->
+        named_write(id, o, key, v, true)
+    end
+  end
+
+  def strict_put_ic(ov, key, v, _site), do: strict_put(ov, key, v)
+
+  # The store of a write hit: the value at the position `pos` of the fast record `o`.
+  @compile {:inline, ic_store: 5}
+  defp ic_store(id, o, vals, pos, v) do
+    :erlang.put(id, Obj.put_slot(o, vals, pos, v))
+    v
+  end
+
+  # A miss of a write: the cell of the site gets the position of the key when the record
+  # holds it as a writable data property, and the generic write runs.
+  defp put_ic_miss(id, o, key, v, site) do
+    ic_learn(site, ic_write_cell(o, key))
+    put_obj(id, o, key, v, true)
+  end
+
+  defp strict_put_ic_miss(id, o, key, v, site) do
+    ic_learn(site, ic_write_cell(o, key))
+    strict_put_obj(id, o, key, v)
+  end
+
+  # The cell of a write of `key` to the fast record `o` (without the count of the misses):
+  # `{sid, pos}` when `o` is a plain record that holds `key` as a writable data property.
+  # For such a key `put_obj/5` goes to `put_prop/4`, which only stores the value (the own
+  # key is not an accessor and `Obj.writable?/2` is true). Any other write is the generic
+  # path `{sid}`: an add, a setter, a key that is not writable.
+  defp ic_write_cell(o, key) do
+    sid = Obj.shape_id(o)
+
+    case Obj.fast_slot(o, key) do
+      {pos, bits} ->
+        if ic_plain?(o) and Bitwise.band(bits, 1) != 0 and
+             not match?({:accessor, _, _}, Obj.slot(o, pos)),
+           do: {sid, pos},
+           else: {sid}
+
+      nil ->
+        {sid}
+    end
+  end
 
   defp strict_put_obj(id, o, key, v) do
     :erlang.put(:js_put_failed, false)

@@ -412,8 +412,10 @@ defmodule Browser.JS.Obj do
     pos = Macro.unique_var(:pos, __MODULE__)
     vals = Macro.unique_var(:vals, __MODULE__)
 
+    # (the clause is generated: a caller that knows that its record is not fast, as the
+    # inline caches of `Browser.JS.Interp` do, gets no warning that it cannot match)
     fast =
-      quote do
+      quote generated: true do
         %{
           shape: {:js_shape, _, %{unquote(kpat) => unquote(pos)}, _, _, _, _},
           vals: unquote(vals)
@@ -907,6 +909,62 @@ defmodule Browser.JS.Obj do
         else: :erlang.setelement(6, acc, Map.put(at, k, %{w: Shape.w?(b), c: Shape.c?(b)}))
 
     dict_fields(keys, bits, vals, i + 1, n, acc)
+  end
+
+  # ── inline caches ──────────────────────────────────────────
+  # The inline caches of the compiled code (step A2, `Browser.JS.Interp.get_ic/3`) read and
+  # write a fast record through these macros, so that the fields stay in this module. The
+  # cells and the rules of a hit are in the moduledoc of `Browser.JS.Shape`.
+
+  @doc """
+  A pattern that matches a record in fast mode. It binds the `sid` of the shape to `sid` and
+  the tuple of the values to `vals`. With a pinned `sid` (`^sid`) it matches only a record
+  with that shape. It costs no call: it is a match of a map and a tuple.
+  """
+  defmacro fast_record(sid, vals) do
+    quote do
+      %{shape: {:js_shape, unquote(sid), _, _, _, _, _}, vals: unquote(vals)}
+    end
+  end
+
+  @doc "The value at the position `pos` of the fast record `o`."
+  defmacro slot(o, pos) do
+    quote do: :erlang.element(unquote(pos), :erlang.map_get(:vals, unquote(o)))
+  end
+
+  @doc """
+  The fast record `o`, whose values are `vals`, with the value at the position `pos` set to
+  `v`. It is the write of `own_update/3` without the search of the key: the caller knows
+  the position from the shape.
+  """
+  defmacro put_slot(o, vals, pos, v) do
+    quote do
+      o = unquote(o)
+      vals = unquote(vals)
+      pos = unquote(pos)
+      v = unquote(v)
+      %{o | vals: unquote(@put_val)}
+    end
+  end
+
+  @doc "The `sid` of the shape of `o`, or `nil` when `o` is not a fast record."
+  def shape_id(o) do
+    case o do
+      %{shape: {:js_shape, sid, _, _, _, _, _}} -> sid
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Where the fast record `o` holds the own key `key`: `{pos, bits}`, the position of its value
+  and its attribute bits (writable `1`, enumerable `2`, configurable `4`), or `nil` when `o`
+  is not a fast record or has no such key. A miss of an inline cache uses it.
+  """
+  def fast_slot(o, key) do
+    case o do
+      %{shape: {:js_shape, _, %{^key => pos}, _, bits, _, _}} -> {pos, :erlang.element(pos, bits)}
+      _ -> nil
+    end
   end
 
   # ── writing ────────────────────────────────────────────────

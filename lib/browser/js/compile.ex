@@ -68,11 +68,15 @@ defmodule Browser.JS.Compile do
   A slot read reads up to three scope headers inline. For more hops, it calls
   `Interp.hop/2`.
 
-  A property read or write with a constant key uses `Interp.get_named/2` or
-  `Interp.put_named/3` when the key is not an array index. These functions use the same
-  class dispatch as `Interp.get/2` and `Interp.put/3`, but they do not convert the key.
-  The key `"length"` also goes to these functions (the design kept it on `get/2`): their
-  class dispatch has the `length` clauses of arrays, strings and functions.
+  A property read or write with a constant key uses `Interp.get_ic/3`, `Interp.put_ic/4`
+  or `Interp.strict_put_ic/4` when the key is not an array index. Each such site gets a
+  site number when it compiles, and the cell of its inline cache is the process key with
+  that number (step A2, see "The inline caches" in `Browser.JS.Shape`). A miss and every
+  record that is not fast go to the class dispatch of `Interp.get_named/2` and
+  `Interp.put_named/3`, which is the one of `Interp.get/2` and `Interp.put/3` without the
+  conversion of the key. The key `"length"` also goes to these functions (the design kept
+  it on `get/2`): their class dispatch has the `length` clauses of arrays, strings and
+  functions.
 
   ## Shells
 
@@ -1259,13 +1263,24 @@ defmodule Browser.JS.Compile do
   # code runs.
   defp named?(k), do: is_binary(k) and Interp.index(k) == nil
 
+  # A new site of an inline cache (step A2, see `Browser.JS.Shape`): a negative integer that
+  # the closure of the site keeps. The site counts as one node of the memory bound, because
+  # its cell is memory of the cache.
+  defp site do
+    count()
+    Browser.JS.Shape.new_site()
+  end
+
   # A property read, as `ev/2` reads `{:member, o, k, opt}`: the object, the test of an
-  # optional member, then the key. A named key reads through `get_named/2`, which has the
-  # class dispatch of `get/2`.
+  # optional member, then the key. A named key reads through the inline cache of its site
+  # (`Interp.get_ic/3`), whose generic path is the class dispatch of `get/2`.
   defp member(oo, {:k, s}, false) do
-    if named?(s),
-      do: one(env, oo, ov, Interp.get_named(ov, s)),
-      else: one(env, oo, ov, Interp.get(ov, s))
+    if named?(s) do
+      site = site()
+      one(env, oo, ov, Interp.get_ic(ov, s, site))
+    else
+      one(env, oo, ov, Interp.get(ov, s))
+    end
   end
 
   defp member(oo, ko, false), do: pair(env, oo, ko, ov, key, Interp.get(ov, key))
@@ -1285,10 +1300,12 @@ defmodule Browser.JS.Compile do
   # A property write `o[k] = v`: the object, the key, then the value, as `ev/2` writes it.
   # Sloppy code gives the value, and strict code gives what `strict_put/3` gives. A
   # constant key has nothing to evaluate, so the object and the value are a pair. A named
-  # key writes through `put_named/3`, which has the class dispatch of `put/3`.
+  # key writes through the inline cache of its site (`Interp.put_ic/4`), whose generic path
+  # is the class dispatch of `put/3`.
   defp put(:assign, oo, {:k, s}, vo) do
     if named?(s) do
-      pair(env, oo, vo, ov, v, Interp.put_named(ov, s, v))
+      site = site()
+      pair(env, oo, vo, ov, v, Interp.put_ic(ov, s, v, site))
     else
       pair(
         env,
@@ -1305,9 +1322,12 @@ defmodule Browser.JS.Compile do
   end
 
   defp put(:sassign, oo, {:k, s}, vo) do
-    if named?(s),
-      do: pair(env, oo, vo, ov, v, Interp.strict_put_named(ov, s, v)),
-      else: pair(env, oo, vo, ov, v, Interp.strict_put(ov, s, v))
+    if named?(s) do
+      site = site()
+      pair(env, oo, vo, ov, v, Interp.strict_put_ic(ov, s, v, site))
+    else
+      pair(env, oo, vo, ov, v, Interp.strict_put(ov, s, v))
+    end
   end
 
   defp put(:assign, oo, ko, vo) do
@@ -1359,12 +1379,14 @@ defmodule Browser.JS.Compile do
   end
 
   # `o.name op= v` with a constant key that is not an array index (fast path `:compound`):
-  # the read and the write go through `Interp.get_named/2` and `Interp.put_named/3`, as
-  # `o.name` and `o.name = v` do. For such a key `to_key/1` gives the key and `index/1`
-  # gives nil, so `get/2` and `put/3` take the same branch as the named functions, and the
-  # message of a nullish object is the same (`safe_key/1` gives the key).
+  # the read and the write go through the inline caches of two sites (`Interp.get_ic/3` and
+  # `Interp.put_ic/4`), as `o.name` and `o.name = v` do. For such a key `to_key/1` gives the
+  # key and `index/1` gives nil, so `get/2` and `put/3` take the same branch as the named
+  # functions, and the message of a nullish object is the same (`safe_key/1` gives the key).
   defp compound_member(base, strict?, oo, {:k, s} = ko, vo) when is_binary(s) do
     if Fast.on?(:compound) and named?(s) do
+      {rsite, wsite} = {site(), site()}
+
       fn env ->
         ov = av(oo, env)
 
@@ -1375,11 +1397,13 @@ defmodule Browser.JS.Compile do
               "Cannot read properties of #{Interp.to_str(ov)} (reading '#{s}')"
             )
 
-        old = Interp.get_named(ov, s)
+        old = Interp.get_ic(ov, s, rsite)
         v = Interp.binop(base, old, av(vo, env))
 
-        if(strict?, do: Interp.strict_put_named(ov, s, v), else: Interp.put_named(ov, s, v)) &&
-          v
+        if(strict?,
+          do: Interp.strict_put_ic(ov, s, v, wsite),
+          else: Interp.put_ic(ov, s, v, wsite)
+        ) && v
       end
     else
       compound_computed(base, strict?, oo, ko, vo)
@@ -1440,19 +1464,24 @@ defmodule Browser.JS.Compile do
   end
 
   # `++o.name` and `o.name--` with a constant key that is not an array index (fast path
-  # `:compound`), through `Interp.get_named/2` and `Interp.put_named/3`, as
-  # `compound_member/5` does it.
+  # `:compound`), through the inline caches of two sites, as `compound_member/5` does it.
   defp update_member(op, prefix?, strict?, oo, {:k, s} = ko) when is_binary(s) do
     if Fast.on?(:compound) and named?(s) do
+      {rsite, wsite} = {site(), site()}
+
       fn env ->
         ov = av(oo, env)
 
         if Interp.nullish?(ov),
           do: Interp.throw_error("TypeError", "Cannot read properties of #{Interp.to_str(ov)}")
 
-        old = Interp.numeric(Interp.get_named(ov, s))
+        old = Interp.numeric(Interp.get_ic(ov, s, rsite))
         new = Interp.bump(op, old)
-        if strict?, do: Interp.strict_put_named(ov, s, new), else: Interp.put_named(ov, s, new)
+
+        if strict?,
+          do: Interp.strict_put_ic(ov, s, new, wsite),
+          else: Interp.put_ic(ov, s, new, wsite)
+
         if prefix?, do: new, else: old
       end
     else
@@ -1496,9 +1525,11 @@ defmodule Browser.JS.Compile do
   defp target({:super}), do: :error
   defp target(callee), do: {:ok, {:plain, opnd(callee)}}
 
-  # The key of a method call: `{:named, key}` for a named key (see `named?/1`), or an
-  # operand form.
-  defp method_key({:str, s} = k), do: if(named?(s), do: {:named, s}, else: key_code(k))
+  # The key of a method call: `{:named, key, site}` for a named key (see `named?/1`), whose
+  # read goes through the inline cache of the site, or an operand form.
+  defp method_key({:str, s} = k),
+    do: if(named?(s), do: {:named, s, site()}, else: key_code(k))
+
   defp method_key(k), do: key_code(k)
 
   # The read of the method of a call from the object `ov`, with the key form of
@@ -1507,7 +1538,7 @@ defmodule Browser.JS.Compile do
   defmacrop method(ov, ko, env) do
     quote do
       case unquote(ko) do
-        {:named, method_s} -> Interp.get_named(unquote(ov), method_s)
+        {:named, method_s, method_site} -> Interp.get_ic(unquote(ov), method_s, method_site)
         method_k -> Interp.get(unquote(ov), av(method_k, unquote(env)))
       end
     end
