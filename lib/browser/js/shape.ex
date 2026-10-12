@@ -93,6 +93,26 @@ defmodule Browser.JS.Shape do
   same in each heap of a process, so its shapes are made once and found in the table
   after that. The limit of 128 keys stays.
 
+  ## The realm of a new process
+
+  Each JS process (a `JS.eval`, a test of test262, a page, a worker) starts with an empty
+  table, and the built-in objects make about 570 shapes (about 1,180 with the web API).
+  This costs about 0.5 ms of CPU for each new process, more than the reductions show,
+  because the tuples and the index maps of the shapes cost time that the reductions do
+  not count. So `realm/2` makes these shapes once in the VM: the first new process that
+  makes a realm keeps a copy of its table and of its counters in `:persistent_term`, and
+  each later new process puts the copy back before it makes the realm. The adds of the
+  realm then find their shapes in the table, and the records share the shape terms of
+  the copy, which are not copied into the heap of the process.
+
+  The copy is correct only in a process that has made no shape yet (`:js_shape_next` is
+  not set): then no `sid` of the process can be the `sid` of a shape of the copy, and the
+  counter that the copy puts back is past each `sid` of the copy. The realm need not make
+  the same shapes in each process: a shape of the copy that a process does not use only
+  costs a key of the table, and a shape that the copy does not have gets a new `sid`. A
+  process that has its own `:js_shape_next` (the oracle of the tests) or the fast records
+  off makes its realm as before.
+
   The table is erased when the shapes that it made since the last erase cost more than
   2,000,000 words. A new shape of `n` keys costs about `50 + 8 * n` words with its entries
   in the table (the shape term, the index, the tuples, the `enum` list, the `:up` entry,
@@ -490,6 +510,42 @@ defmodule Browser.JS.Shape do
     :erlang.put(:js_shape_since, {next, []})
     :erlang.erase(:js_shape_n)
     :ok
+  end
+
+  @doc """
+  Runs `fun`, which makes the built-in objects of a realm, and gives its result. In a
+  process that has made no shape yet, the shapes of the realm `name` come from the copy
+  that the first such process kept in the VM (see "The realm of a new process"); the
+  first process makes the copy.
+  """
+  def realm(name, fun) do
+    if :erlang.get(:js_shape_next) == :undefined and :erlang.get(:js_shapes) != false do
+      key = {__MODULE__, :realm, name}
+
+      case :persistent_term.get(key, nil) do
+        nil ->
+          result = fun.()
+          copy = realm_copy()
+          # (two processes can make the copy at the same time; a second put of an equal
+          # term does nothing)
+          if :persistent_term.get(key, nil) == nil, do: :persistent_term.put(key, copy)
+          result
+
+        {entries, counters} ->
+          for {k, v} <- entries, do: :erlang.put(k, v)
+          for {k, v} <- counters, v != :undefined, do: :erlang.put(k, v)
+          fun.()
+      end
+    else
+      fun.()
+    end
+  end
+
+  # The table and the counters of the process, for `realm/2`.
+  defp realm_copy do
+    entries = for {{:jst, _}, _} = e <- :erlang.get(), do: e
+    counters = for k <- [:js_shape_next, :js_shape_n, :js_shape_since], do: {k, :erlang.get(k)}
+    {entries, counters}
   end
 
   @doc """

@@ -22,8 +22,10 @@ defmodule Browser.JS.Builtins do
 
   The records that it makes are the built-in prototypes, constructors and namespaces. It
   makes them with `built/1`, so they are fast records when the switch `:js_shapes` is on.
+  In a new process the shapes of these records come from a copy in the VM
+  (`Browser.JS.Shape.realm/2`).
   """
-  def install, do: built(&install_realm/0)
+  def install, do: Browser.JS.Shape.realm(:install, fn -> built(&install_realm/0) end)
 
   @doc """
   Runs `fun`, which makes built-in objects, and gives its result. While `fun` runs, the

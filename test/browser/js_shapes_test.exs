@@ -234,6 +234,36 @@ defmodule Browser.JS.ShapesTest do
       end
     end
 
+    test "a new process gets the shapes of the realm from a copy in the VM" do
+      # (a process with its own counter makes the realm itself, as the first process did)
+      install = fn setup ->
+        HeapOracle.in_process(fn ->
+          setup.()
+          Interp.init(1_000_000)
+          {_, r0} = Process.info(self(), :reductions)
+          Builtins.install()
+          {_, r1} = Process.info(self(), :reductions)
+          table = Map.new(for {{:jst, _}, _} = e <- :erlang.get(), do: e)
+          {:ok, program} = Parser.parse("var o = {zz9: 1};", resolve: 4, file: "t.js")
+          Interp.run_program(program, true)
+          {:js_shape, sid, _, _, _, _, _} = Obj.shape(global_record("o"))
+          {table, Process.get(:js_shape_n), r1 - r0, sid}
+        end)
+      end
+
+      {cold, cold_n, cold_r, _} = install.(fn -> Process.put(:js_shape_next, 1) end)
+      _ = install.(fn -> :ok end)
+      {entries, counters} = :persistent_term.get({Shape, :realm, :install})
+      {warm, warm_n, warm_r, sid} = install.(fn -> :ok end)
+
+      # (the same table as a cold build, a new shape past the copy, and less work)
+      assert warm == cold
+      assert Map.new(entries) == warm
+      assert warm_n == cold_n
+      assert sid >= Keyword.fetch!(counters, :js_shape_next)
+      assert warm_r < cold_r
+    end
+
     test "a built-in prototype stays exact at the limits of its shape" do
       # (a polyfill that adds many keys passes the limit of 128 keys: `Array.prototype`
       # goes to dictionary mode, and every key stays)
