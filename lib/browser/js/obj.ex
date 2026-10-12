@@ -1,14 +1,25 @@
 defmodule Browser.JS.Obj do
   @moduledoc """
-  The record API for the own properties of a JavaScript object (data-model steps A0a and
-  A0b).
+  The record API for the own properties of a JavaScript object (data-model steps A0a, A0b
+  and A1).
 
   This module is the only module that reads or writes the fields of a heap record that hold
-  own properties: `props`, `keys`, `skeys`, `syms`, `attrs`, `ext`, `frozen` and `sealed`.
-  The other modules call the functions and macros here. Thus a later step (A1, fast records
-  with shapes) can change the representation in this module alone.
+  own properties: `props`, `keys`, `skeys`, `syms`, `attrs`, `ext`, `frozen`, `sealed`,
+  `shape` and `vals`. The other modules call the functions and macros here. Thus a change of
+  the representation changes this module alone.
 
-  ## The representation of today
+  ## The two modes of a record
+
+  A record is in **fast mode** or in **dictionary mode**. Each function and macro here has
+  one clause for each mode, and the two clauses give the same result for the same content.
+
+  A record in fast mode has `shape` and `vals` (step A1). The shape (`Browser.JS.Shape`) is
+  a shared, immutable term that holds the keys in creation order, the position of each key
+  in the tuple `vals` and the attributes of each key, and the flag of an object that is not
+  extensible. `vals` holds the value of each key, or `{:accessor, getter, setter}` for an
+  accessor.
+
+  A record in dictionary mode has the fields of before step A1:
 
   * `props`: a map of each own key to its value, or to `{:accessor, getter, setter}` for an
     accessor. A key is a string, a symbol `{:symbol, id, description}` or a private name
@@ -28,11 +39,31 @@ defmodule Browser.JS.Obj do
   * `ext: false`: the object is not extensible. `frozen: true` and `sealed: true`: an array
     whose elements are frozen or sealed.
 
-  A private name is in `props` alone: it has no place in the key order.
+  A private name has no place in the key order, in the two modes.
+
+  ### Which records are fast
+
+  `plain_record/1` and `plain_record/2` make a fast record when the switch `:js_shapes` is
+  on (`Browser.JS.Shape.on?/0`). `Interp.new_object/0` and `Interp.new_object/2` use them, so
+  plain objects, object literals, the objects of `new` (of a function or of a class),
+  `JSON.parse` and error objects are fast. `record/1` and `record/2` always make a
+  dictionary record: arrays, functions, host objects, proxies, the collections and the
+  built-in objects. The prototype objects that the interpreter makes (`F.prototype`, the
+  prototype of a class) and every object that `Browser.JS.Builtins.install/0` makes stay
+  dictionaries too. A later step (A4) makes some of them fast.
+
+  ### From fast mode to dictionary mode
+
+  A fast record goes to dictionary mode once, and never back (`to_dict/1`). This occurs
+  when a change passes a limit of `Browser.JS.Shape` (too many keys, an index-like key, too
+  many changes of attributes), at a `delete` of a key that is not the last key, and in the
+  functions that only arrays and the global object need (`put_element_attrs/3`,
+  `own_remove/2`). The writer then does its change on the dictionary record, and the
+  caller stores that record. A reader never changes the mode.
 
   The elements of an array (`items`, `len`) are not in this API (part B of the shapes
   plan). Their attributes share the `attrs` map, so `attr_flags/2`,
-  `element_enumerable?/2` and `put_element_attrs/3` are here.
+  `element_enumerable?/2` and `put_element_attrs/3` are here. An array is never fast.
 
   ## The order of the keys
 
@@ -47,10 +78,11 @@ defmodule Browser.JS.Obj do
   string keys) and `symbol_keys/1` (all symbols). These give the order, not the stored
   lists, so that a change of the stored lists changes this module alone.
 
-  The lists are separate for the cost. An assignment, a literal, `Object.keys` and for-in
-  read and write `keys` alone, as before the exact order. Only a record that has a string
-  key that is not enumerable pays for `skeys`, and only a record with a symbol pays for
-  `syms`.
+  In dictionary mode the lists are separate for the cost. An assignment, a literal,
+  `Object.keys` and for-in read and write `keys` alone. Only a record that has a string key
+  that is not enumerable pays for `skeys`, and only a record with a symbol pays for `syms`.
+  In fast mode the shape holds the order of all keys, and the `enum` list of the shape is
+  the list of `Object.keys` (before the index keys, which a fast record does not have).
 
   ## Cost
 
@@ -58,9 +90,11 @@ defmodule Browser.JS.Obj do
   update, an add, a literal, `hasOwnProperty`, `Object.keys`, for-in, the elements of an
   array). A remote call costs one reduction, and a remote BIF call such as `Map.has_key?/2`
   or `Map.get/3` costs four. A macro here expands to code that costs the same as the code
-  that it replaces, or less: it uses guard BIFs (`is_map_key/2`, `:erlang.map_get/2`),
-  pattern matches and map updates, which cost no reduction. A function here is used only on
-  a path that is not hot, or where the BIF calls that it removes pay for the call.
+  that it replaces, or less: it uses guard BIFs (`is_map_key/2`, `:erlang.map_get/2`,
+  `:erlang.element/2`), pattern matches and map updates, which cost no reduction. A
+  function here is used only on a path that is not hot, or where the BIF calls that it
+  removes pay for the call. The add of an assignment to a fast record reads the transition
+  table in the macro, so an add that finds its shape there makes no call.
 
   ## The grep gate
 
@@ -71,7 +105,7 @@ defmodule Browser.JS.Obj do
   allow-list below. So the command prints nothing. `test/browser/js_obj_test.exs` runs
   the same search with the same patterns, and it fails when they are not the same as here.
 
-      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|skeys|syms|attrs|ext|frozen|sealed)\\b(?![?!(])|\\b(props|keys|skeys|syms|attrs|ext|frozen|sealed):|(?<![{\\w:]):(props|keys|skeys|syms|attrs|ext|frozen|sealed)\\b' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:' | grep -vP '^lib/browser/js/dom\\.ex:\\d+:.*((\\bn|&1)\\.(attrs|props)\\b|node\\(this_nid\\(this\\)\\)\\.attrs\\b|\\b(attrs|props): (\\[\\]|%\\{\\}|%\\{"value"|visible\\b|attrs\\b|props\\b)|%\\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\\.ex:\\d+:(\\s*:keys ->|.*_iterator\\(this, (:\\w+, )?:keys\\))|^lib/browser/js/collections\\.ex:\\d+:.*(has: has, keys: keys\\}|call\\(rec\\.keys, rec\\.obj, \\[\\]\\))'
+      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|skeys|syms|attrs|ext|frozen|sealed|shape|vals)\\b(?![?!(])|\\b(props|keys|skeys|syms|attrs|ext|frozen|sealed|shape|vals):|(?<![{\\w:]):(props|keys|skeys|syms|attrs|ext|frozen|sealed|shape|vals)\\b' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:' | grep -vP '^lib/browser/js/dom\\.ex:\\d+:.*((\\bn|&1)\\.(attrs|props)\\b|node\\(this_nid\\(this\\)\\)\\.attrs\\b|\\b(attrs|props): (\\[\\]|%\\{\\}|%\\{"value"|visible\\b|attrs\\b|props\\b)|%\\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\\.ex:\\d+:(\\s*:keys ->|.*_iterator\\(this, (:\\w+, )?:keys\\))|^lib/browser/js/collections\\.ex:\\d+:.*(has: has, keys: keys\\}|call\\(rec\\.keys, rec\\.obj, \\[\\]\\))'
 
   The allow-list (the reason for each):
 
@@ -90,28 +124,67 @@ defmodule Browser.JS.Obj do
 
   The garbage collector (`Browser.JS.GC`) names no field. It walks every map generically,
   but for a heap record (`heap_record?/1`) it skips the fields that `no_refs?/1` names,
-  because the walk reads each integer as a heap id and these fields hold only keys and
-  attributes (the id of a symbol can be an integer). A1 must change these two guards for
-  its record: a shape id and a slot position are integers too.
-  The shadow run of `Browser.JS.Fast` compares two records by `normal/1`, which A1 must
-  also change. The other modules under `lib/browser` (layout, style, HTML, cookies, the
-  console of the session) have their own `attrs` and `props`, but they never read a
-  heap record, so the gate does not search them.
+  because the walk reads each integer as a heap id and these fields hold only keys,
+  attributes and shapes (the id of a symbol, the `sid` of a shape and a position are
+  integers). It walks `vals`, which holds the values. The shadow run of `Browser.JS.Fast`
+  compares two records by `normal/1`, which gives one form for the two modes. The other
+  modules under `lib/browser` (layout, style, HTML, cookies, the console of the session)
+  have their own `attrs` and `props`, but they never read a heap record, so the gate does
+  not search them.
 
   ## The length of an arguments object
 
   The `length` of an arguments object is an ordinary own property, as in the spec. The
   interpreter makes it with `put_hidden/3` when it makes the object, and `delete
   arguments.length` removes it with `own_delete/2`, as for any other key. So each key in the
-  order has a value, which a record of A1 needs.
+  order has a value, which a fast record needs.
   """
+
+  alias Browser.JS.Shape
+  require Browser.JS.Shape
+
+  # The bits of a key with the default attributes, and of a key that is writable and
+  # configurable but not enumerable (a hidden key and a private name).
+  @default 7
+  @hidden 5
+
+  # The shape with no key. The macros below expand to code that tests the bits of a shape
+  # with `:erlang.band/2`, and not with the macros of `Browser.JS.Shape`, so that a caller
+  # does not have to require that module: writable `1`, enumerable `2`, configurable `4`;
+  # the flag `1` of an object that is not extensible and the flag `2` of an enumerable
+  # symbol.
+  @root Shape.root_shape()
+
+  # The new tuple `vals` with the value `v` at the position `pos`, as an expression that
+  # the write macros put in their code. `:erlang.setelement/3` is a call of a built-in
+  # function, and each call costs one reduction. For a tuple of at most 8 values, the
+  # expression first finds the size and the position, and then it calls `setelement` with
+  # a literal position on a tuple of a known size. The compiler makes that an
+  # `update_record` instruction, which costs no reduction. Thus an update of a fast record
+  # costs no more reductions than the update of a map in a dictionary record.
+  @put_val (
+             sizes =
+               for n <- 1..8 do
+                 pattern = {:{}, [], List.duplicate({:_, [], nil}, n)}
+
+                 positions =
+                   for i <- 1..n do
+                     hd(quote do: (unquote(i) -> :erlang.setelement(unquote(i), vals, v)))
+                   end
+
+                 hd(quote do: (unquote(pattern) -> case(pos, do: unquote(positions))))
+               end
+
+             other = quote do: (_ -> :erlang.setelement(pos, vals, v))
+             {:case, [], [quote(do: vals), [do: sizes ++ other]]}
+           )
 
   # ── building ───────────────────────────────────────────────
 
   @doc """
-  A new record with no own property: the map `fields` (a keyword list in the source, for
-  example `class: :object, proto: p`) plus the empty own-property fields. It is a macro,
-  so the record is one map literal at the call site.
+  A new dictionary record with no own property: the map `fields` (a keyword list in the
+  source, for example `class: :object, proto: p`) plus the empty own-property fields. It is
+  a macro, so the record is one map literal at the call site.
   """
   defmacro record(fields) do
     quote do
@@ -120,10 +193,10 @@ defmodule Browser.JS.Obj do
   end
 
   @doc """
-  A new record with the enumerable data properties `pairs` (a list of `{key, value}`, in
-  creation order) and the fields of `record/1`. The keys must be distinct: each key of
-  `pairs` goes into the key order as it is. A key can be a symbol (the rest of an object
-  pattern copies the enumerable symbols too).
+  A new dictionary record with the enumerable data properties `pairs` (a list of
+  `{key, value}`, in creation order) and the fields of `record/1`. The keys must be
+  distinct: each key of `pairs` goes into the key order as it is. A key can be a symbol (the
+  rest of an object pattern copies the enumerable symbols too).
   """
   defmacro record(fields, pairs) do
     quote do
@@ -143,6 +216,37 @@ defmodule Browser.JS.Obj do
     end
   end
 
+  @doc """
+  A new record of a plain object with no own property, as `record/1`. It is a fast record
+  when the switch `:js_shapes` is on (see the moduledoc), and a dictionary record when it
+  is off.
+  """
+  defmacro plain_record(fields) do
+    quote do
+      if :erlang.get(:js_shapes) != false,
+        do: %{unquote_splicing(fields), shape: unquote(Macro.escape(@root)), vals: {}},
+        else: %{unquote_splicing(fields), props: %{}, keys: []}
+    end
+  end
+
+  @doc """
+  A new record of a plain object with the enumerable data properties `pairs`, as
+  `record/2`. It is a fast record when the switch `:js_shapes` is on.
+  """
+  defmacro plain_record(fields, pairs) do
+    quote do
+      if :erlang.get(:js_shapes) != false,
+        do:
+          Browser.JS.Obj.add_pairs(
+            %{unquote_splicing(fields), shape: unquote(Macro.escape(@root)), vals: {}},
+            unquote(pairs),
+            unquote(Macro.escape(@root)),
+            []
+          ),
+        else: Browser.JS.Obj.record(unquote(fields), unquote(pairs))
+    end
+  end
+
   @doc false
   # The string keys of `pairs` (see `record/2`), newest first, or `:symbols` when a key is a
   # symbol. One walk makes the list newest first, which costs less than a map and a
@@ -153,29 +257,66 @@ defmodule Browser.JS.Obj do
 
   @doc """
   The key layout of an object literal with the constant keys `keys` (in source order), for
-  `fill/3`. The compiler calls it once, when it compiles the literal. Today it is the list
-  of the distinct keys, newest first: a key that comes two times keeps its first place.
+  `fill/3`. The compiler calls it once, when it compiles the literal. It holds the list of
+  the distinct keys, newest first (a key that comes two times keeps its first place), the
+  keys in source order, the shape of the distinct keys (`nil` when a limit of
+  `Browser.JS.Shape` stops it), and for a key that comes two times, the position of the
+  last value of each distinct key. It holds no heap id.
   """
-  def literal_keys(keys), do: keys |> Enum.uniq() |> Enum.reverse()
+  def literal_keys(keys) do
+    uniq = Enum.uniq(keys)
+
+    picks =
+      if uniq != keys do
+        last = keys |> Enum.with_index(1) |> Map.new()
+        for k <- uniq, do: Map.fetch!(last, k)
+      end
+
+    {Enum.reverse(uniq), keys, Shape.from_keys(uniq), picks}
+  end
 
   @doc """
   The record `o` (a new empty object) with all the properties of an object literal in one
-  write: `layout` is from `literal_keys/1`, and `pairs` gives each value in source order.
-  `:maps.from_list/1` keeps the last value of a key, as `define_data/3` does.
+  write: `layout` is from `literal_keys/1`, and `values` gives the value of each key in
+  source order. A key that comes two times gets its last value, as with `define_data/3`.
+  A fast record with no key that comes two times takes the shape of the layout and the
+  values as they are, with no call.
   """
-  defmacro fill(o, layout, pairs) do
-    quote do
-      %{unquote(o) | props: :maps.from_list(unquote(pairs)), keys: unquote(layout)}
+  defmacro fill(o, layout, values) do
+    quote bind_quoted: [o: o, layout: layout, values: values] do
+      case layout do
+        {_, _, {:js_shape, _, _, _, _, _, _} = sh, nil} when is_map_key(o, :shape) ->
+          %{o | shape: sh, vals: :erlang.list_to_tuple(values)}
+
+        _ ->
+          Browser.JS.Obj.fill_other(o, layout, values)
+      end
+    end
+  end
+
+  @doc false
+  # `fill/3` for a dictionary record, for a layout with no shape, and for a key that comes
+  # two times.
+  def fill_other(o, {names, keys, sh, picks}, values) do
+    if is_map_key(o, :shape) and sh != nil do
+      t = List.to_tuple(values)
+      %{o | shape: sh, vals: List.to_tuple(for i <- picks, do: :erlang.element(i, t))}
+    else
+      o = if is_map_key(o, :shape), do: to_dict(o), else: o
+      %{o | props: :maps.from_list(:lists.zip(keys, values)), keys: names}
     end
   end
 
   # ── reading ────────────────────────────────────────────────
 
   @doc "Whether the record `o` has the own key `key`. It is a guard."
-  defguard has_own?(o, key) when is_map_key(:erlang.map_get(:props, o), key)
+  defguard has_own?(o, key)
+           when (is_map_key(o, :shape) and
+                   is_map_key(:erlang.element(3, :erlang.map_get(:shape, o)), key)) or
+                  (is_map_key(o, :props) and is_map_key(:erlang.map_get(:props, o), key))
 
   @doc "Whether `o` is a record of an object (it has own-property fields). It is a guard."
-  defguard object?(o) when is_map(o) and is_map_key(o, :props)
+  defguard object?(o) when is_map(o) and (is_map_key(o, :props) or is_map_key(o, :shape))
 
   @doc """
   Whether `o` is the record of a heap object: a map with own-property fields and a class.
@@ -185,11 +326,15 @@ defmodule Browser.JS.Obj do
 
   @doc """
   Whether the field `field` of a heap record holds no heap id, so that the garbage collector
-  does not walk it. It is a guard. These own-property fields hold keys that `props` also
-  holds (or keys that are gone) and attributes. The collector reads each integer as an id,
-  so the integer id of a symbol could keep a dead object alive.
+  does not walk it. It is a guard. These own-property fields hold keys that `props` or the
+  shape also holds (or keys that are gone), attributes, and the shape. The collector reads
+  each integer as an id, so the integer id of a symbol, the `sid` of a shape or a position
+  could keep a dead object alive.
   """
-  defguard no_refs?(field) when field in [:keys, :skeys, :syms, :attrs]
+  defguard no_refs?(field) when field in [:keys, :skeys, :syms, :attrs, :shape]
+
+  @doc "Whether `o` is a record in fast mode."
+  defguard fast?(o) when is_map_key(o, :shape)
 
   @doc """
   The stored value of the own key `key` of `o`: `{:ok, value}` or `:error`. An accessor
@@ -198,8 +343,14 @@ defmodule Browser.JS.Obj do
   defmacro own_fetch(o, key) do
     quote do
       case unquote(o) do
-        %{props: %{unquote(key) => v}} -> {:ok, v}
-        _ -> :error
+        %{shape: {:js_shape, _, %{unquote(key) => pos}, _, _, _, _}, vals: vals} ->
+          {:ok, :erlang.element(pos, vals)}
+
+        %{props: %{unquote(key) => v}} ->
+          {:ok, v}
+
+        _ ->
+          :error
       end
     end
     |> pin_key(key)
@@ -209,8 +360,14 @@ defmodule Browser.JS.Obj do
   defmacro own_value(o, key) do
     quote do
       case unquote(o) do
-        %{props: %{unquote(key) => v}} -> v
-        _ -> nil
+        %{shape: {:js_shape, _, %{unquote(key) => pos}, _, _, _, _}, vals: vals} ->
+          :erlang.element(pos, vals)
+
+        %{props: %{unquote(key) => v}} ->
+          v
+
+        _ ->
+          nil
       end
     end
     |> pin_key(key)
@@ -230,8 +387,15 @@ defmodule Browser.JS.Obj do
 
   An `:error` clause must come after a clause `{:ok, v}` (or `{:ok, _}`) with no guard.
   The expansion of `:error` is `_`, which also matches a record with the key, so only that
-  order makes it match a missing key alone. A representation that gets `{:ok, v}` or
-  `:error` first and then matches would otherwise give a different result.
+  order makes it match a missing key alone.
+
+  The expansion has first one clause for a fast record with the key, then the clauses of a
+  dictionary record as they are. The first clause reads the value from `vals` and has an
+  inner `case` with all the clauses in their order, up to the first clause that matches
+  every value: `{:ok, pattern}` matches the value with `pattern`, and `:error` and `_`
+  match any value. So the bodies of these clauses are in the expansion two times. A fast
+  record without the key gets to the clauses of a dictionary record, where only `:error`
+  and `_` can match it.
   """
   defmacro own_case(o, key, do: clauses) do
     {kpat, pre} = key_pattern(key)
@@ -240,7 +404,21 @@ defmodule Browser.JS.Obj do
       check_order(head, all_ok?)
     end)
 
-    clauses =
+    pos = Macro.unique_var(:pos, __MODULE__)
+    vals = Macro.unique_var(:vals, __MODULE__)
+
+    fast =
+      quote do
+        %{
+          shape: {:js_shape, _, %{unquote(kpat) => unquote(pos)}, _, _, _, _},
+          vals: unquote(vals)
+        } ->
+          case :erlang.element(unquote(pos), unquote(vals)) do
+            unquote(value_clauses(clauses))
+          end
+      end
+
+    dict =
       Enum.map(clauses, fn {:->, meta, [[head], body]} ->
         {:->, meta, [[own_head(head, kpat)], body]}
       end)
@@ -249,10 +427,30 @@ defmodule Browser.JS.Obj do
       unquote_splicing(pre)
 
       case unquote(o) do
-        unquote(clauses)
+        unquote(fast ++ dict)
       end
     end
   end
+
+  # The clauses of `own_case/3` for the value of an own key of a fast record: a clause
+  # `{:ok, pattern}` matches the value with `pattern`, and `:error` and `_` match any value
+  # (as their expansion `_` does for a dictionary record). The clauses after the first one
+  # that matches every value go, because they cannot match.
+  defp value_clauses([{:->, meta, [[head], body]} | rest]) do
+    clause = {:->, meta, [[value_head(head)], body]}
+    if catch_all?(head), do: [clause], else: [clause | value_clauses(rest)]
+  end
+
+  defp value_clauses([]), do: []
+
+  defp value_head({:when, meta, [head, guard]}), do: {:when, meta, [value_head(head), guard]}
+  defp value_head({:ok, pattern}), do: pattern
+  defp value_head(_), do: quote(do: _)
+
+  defp catch_all?({:ok, {name, _, ctx}}) when is_atom(name) and is_atom(ctx), do: true
+  defp catch_all?(:error), do: true
+  defp catch_all?({:_, _, ctx}) when is_atom(ctx), do: true
+  defp catch_all?(_), do: false
 
   # Whether the clauses up to `head` match every own key (`all_ok?`). An `:error` clause
   # before that point raises (see `own_case/3`).
@@ -321,7 +519,10 @@ defmodule Browser.JS.Obj do
   """
   defmacro enum_names(o) do
     quote do
-      :erlang.map_get(:keys, unquote(o)) |> :lists.reverse() |> Enum.filter(&is_binary/1)
+      case unquote(o) do
+        %{shape: {:js_shape, _, _, _, _, _, enum}} -> enum
+        o -> :erlang.map_get(:keys, o) |> :lists.reverse() |> Enum.filter(&is_binary/1)
+      end
     end
   end
 
@@ -329,12 +530,20 @@ defmodule Browser.JS.Obj do
   The enumerable keys of `o` in creation order when each one is a plain name, or `nil`. A
   plain name is a string that does not start with a digit, so it cannot be an array index,
   and the list is then the order of `Object.keys` as it is (fast path `:has_own` of
-  `Browser.JS.Interp`). A symbol is no plain name.
+  `Browser.JS.Interp`). A symbol is no plain name. A fast record has no key that starts
+  with a digit (`Browser.JS.Shape`), so its `enum` list is the answer when no enumerable key
+  is a symbol.
   """
   defmacro plain_names(o) do
     quote do
-      keys = :erlang.map_get(:keys, unquote(o))
-      if Browser.JS.Obj.plain_names?(keys), do: :lists.reverse(keys)
+      case unquote(o) do
+        %{shape: {:js_shape, _, _, _, _, flags, enum}} ->
+          if :erlang.band(flags, 2) == 0, do: enum
+
+        o ->
+          keys = :erlang.map_get(:keys, o)
+          if Browser.JS.Obj.plain_names?(keys), do: :lists.reverse(keys)
+      end
     end
   end
 
@@ -358,9 +567,10 @@ defmodule Browser.JS.Obj do
   end
 
   @doc false
-  # The attribute map of `o`: each key or element index with non-default attributes, to a
-  # map with some of `w`, `c` and `e`. Only the macros of this module use it: their
-  # expansion calls it at the call site, so it must be public.
+  # The attribute map of a dictionary record `o`: each key or element index with
+  # non-default attributes, to a map with some of `w`, `c` and `e`. A fast record has none.
+  # Only the macros of this module use it: their expansion calls it at the call site, so it
+  # must be public.
   defmacro attr_map(o) do
     quote do
       case unquote(o) do
@@ -372,13 +582,20 @@ defmodule Browser.JS.Obj do
 
   @doc """
   The non-default attributes of `key` (or of an element index) of `o`: a map with some of
-  `w`, `c` and `e`.
+  `w`, `c` and `e`. For a key of a fast record it has all three.
   """
   defmacro attr_flags(o, key) do
     quote do
       case unquote(o) do
-        %{attrs: %{unquote(key) => flags}} -> flags
-        _ -> %{}
+        %{shape: {:js_shape, _, %{unquote(key) => pos}, _, bits, _, _}} ->
+          b = :erlang.element(pos, bits)
+          %{w: :erlang.band(b, 1) != 0, c: :erlang.band(b, 4) != 0, e: :erlang.band(b, 2) != 0}
+
+        %{attrs: %{unquote(key) => flags}} ->
+          flags
+
+        _ ->
+          %{}
       end
     end
     |> pin_key(key)
@@ -388,8 +605,14 @@ defmodule Browser.JS.Obj do
   defmacro writable?(o, key) do
     quote do
       case unquote(o) do
-        %{attrs: %{unquote(key) => a}} -> match?(%{w: true}, a)
-        _ -> true
+        %{shape: {:js_shape, _, %{unquote(key) => pos}, _, bits, _, _}} ->
+          :erlang.band(:erlang.element(pos, bits), 1) != 0
+
+        %{attrs: %{unquote(key) => a}} ->
+          match?(%{w: true}, a)
+
+        _ ->
+          true
       end
     end
     |> pin_key(key)
@@ -399,24 +622,41 @@ defmodule Browser.JS.Obj do
   defmacro configurable?(o, key) do
     quote do
       case unquote(o) do
-        %{attrs: %{unquote(key) => a}} -> match?(%{c: true}, a)
-        _ -> true
+        %{shape: {:js_shape, _, %{unquote(key) => pos}, _, bits, _, _}} ->
+          :erlang.band(:erlang.element(pos, bits), 4) != 0
+
+        %{attrs: %{unquote(key) => a}} ->
+          match?(%{c: true}, a)
+
+        _ ->
+          true
       end
     end
     |> pin_key(key)
   end
 
   @doc """
-  Whether `key` has only the default attributes in `o` (writable and configurable). It is
-  a guard, for the fast update of `Browser.JS.Interp`.
+  Whether `key` has only the default attributes in `o` (writable and configurable), or `o`
+  has no such key. It is a guard, for the fast update of `Browser.JS.Interp`.
   """
   defguard default_attrs?(o, key)
-           when not (is_map_key(o, :attrs) and is_map_key(:erlang.map_get(:attrs, o), key))
+           when (is_map_key(o, :shape) and
+                   (not is_map_key(:erlang.element(3, :erlang.map_get(:shape, o)), key) or
+                      :erlang.band(
+                        :erlang.element(
+                          :erlang.map_get(key, :erlang.element(3, :erlang.map_get(:shape, o))),
+                          :erlang.element(5, :erlang.map_get(:shape, o))
+                        ),
+                        5
+                      ) == 5)) or
+                  (not is_map_key(o, :shape) and
+                     not (is_map_key(o, :attrs) and is_map_key(:erlang.map_get(:attrs, o), key)))
 
   @doc "Whether `o` is extensible."
   defmacro extensible?(o) do
     quote do
       case unquote(o) do
+        %{shape: {:js_shape, _, _, _, _, flags, _}} -> :erlang.band(flags, 1) == 0
         %{ext: ext} -> ext
         _ -> true
       end
@@ -451,8 +691,25 @@ defmodule Browser.JS.Obj do
   defmacro own_state(o, key) do
     quote bind_quoted: [o: o, key: key] do
       case o do
+        %{shape: {:js_shape, _, %{^key => pos}, _, bits, _, _}, vals: vals} ->
+          b = :erlang.element(pos, bits)
+
+          case :erlang.element(pos, vals) do
+            {:accessor, g, s} ->
+              {:accessor, g, s, :erlang.band(b, 2) != 0, :erlang.band(b, 4) != 0}
+
+            v ->
+              {:data, v, :erlang.band(b, 1) != 0, :erlang.band(b, 2) != 0,
+               :erlang.band(b, 4) != 0}
+          end
+
         %{props: %{^key => stored}} ->
-          attrs = Browser.JS.Obj.attr_flags(o, key)
+          attrs =
+            case o do
+              %{attrs: %{^key => flags}} -> flags
+              _ -> %{}
+            end
+
           e = key in o.keys
           c = Map.get(attrs, :c, true)
 
@@ -469,11 +726,16 @@ defmodule Browser.JS.Obj do
 
   @doc "Every own key of `o` (strings, symbols and private names), in term order."
   defmacro all_keys(o) do
-    quote do: Map.keys(:erlang.map_get(:props, unquote(o)))
+    quote do
+      case unquote(o) do
+        %{shape: {:js_shape, _, index, _, _, _, _}} -> Map.keys(index)
+        o -> Map.keys(:erlang.map_get(:props, o))
+      end
+    end
   end
 
   # private names are outside freezing and sealing
-  defp public_keys(o), do: Enum.reject(Map.keys(o.props), &match?({:private, _}, &1))
+  defp public_keys(o), do: Enum.reject(all_keys(o), &match?({:private, _}, &1))
 
   @doc """
   Every own string key of `o`, enumerable or not, in creation order (the string keys of
@@ -482,16 +744,32 @@ defmodule Browser.JS.Obj do
   """
   def string_keys(o) do
     case o do
-      %{skeys: skeys} -> :lists.reverse(skeys)
-      %{keys: keys} -> keys |> :lists.reverse() |> Enum.filter(&is_binary/1)
+      %{shape: {:js_shape, _, _, keys, _, _, _}} ->
+        for k <- Tuple.to_list(keys), is_binary(k), do: k
+
+      %{skeys: skeys} ->
+        :lists.reverse(skeys)
+
+      %{keys: keys} ->
+        keys |> :lists.reverse() |> Enum.filter(&is_binary/1)
     end
   end
 
   @doc "Every own symbol key of `o`, enumerable or not, in creation order."
   def symbol_keys(o) do
     case o do
-      %{syms: syms} -> :lists.reverse(syms)
-      _ -> []
+      # (the flag 8 of the shape tells if a key is a symbol, so most records do not look at
+      # their keys)
+      %{shape: {:js_shape, _, _, keys, _, flags, _}} ->
+        if :erlang.band(flags, 8) == 0,
+          do: [],
+          else: for({:symbol, _, _} = k <- Tuple.to_list(keys), do: k)
+
+      %{syms: syms} ->
+        :lists.reverse(syms)
+
+      _ ->
+        []
     end
   end
 
@@ -514,11 +792,10 @@ defmodule Browser.JS.Obj do
   def locked?(o, freeze?) do
     not extensible?(o) and
       Enum.all?(public_keys(o), fn key ->
-        a = attr_flags(o, key)
-        accessor? = match?({:accessor, _, _}, o.props[key])
-
-        Map.get(a, :c, true) == false and
-          (not freeze? or accessor? or Map.get(a, :w, true) == false)
+        case own_state(o, key) do
+          {:accessor, _, _, _, c} -> c == false
+          {:data, _, w, _, c} -> c == false and (not freeze? or w == false)
+        end
       end) and
       (o.class != :array or o.items == %{} or
          frozen?(o) or (not freeze? and sealed?(o)))
@@ -527,21 +804,65 @@ defmodule Browser.JS.Obj do
   @doc """
   The record `o` in its normal form, for a compare of two records. Two records that hold the
   same own properties, in the same order and with the same attributes, have the same normal
-  form. A record has some forms for the same content: `skeys` can be equal to `keys` (all
-  the hidden keys are gone or enumerable again), and `syms` and `attrs` can be empty (all
-  the symbols or all the attributes are gone). The normal form has no such field. A
-  representation with two forms of a record (in A1, a fast record and a dictionary record)
-  gives one form here, so that the shadow run of `Browser.JS.Fast` compares what two
-  records hold, not their form. A term that is not a map (`nil` when the shadow run has no
-  record) is its own normal form.
+  form, in fast mode and in dictionary mode. The normal form has the fields of the record
+  that are not own-property fields, and `own` (each string key, then each symbol, with its
+  state from `own_state/2`), `private` (each private name with its value, in term order),
+  `ext` (whether the object is extensible) and `elements` (the attributes of the elements
+  of an array that are not the default). So the shadow run of `Browser.JS.Fast` compares
+  what two records hold, not their form. A term that is not a record (`nil` when the shadow
+  run has no record) is its own normal form.
   """
-  def normal(o) when is_map(o) do
-    o = if is_map_key(o, :skeys) and o.skeys == o.keys, do: Map.delete(o, :skeys), else: o
-    o = if Map.get(o, :syms) == [], do: Map.delete(o, :syms), else: o
-    if Map.get(o, :attrs) == %{}, do: Map.delete(o, :attrs), else: o
+  def normal(o) when object?(o) do
+    own = for k <- string_keys(o) ++ symbol_keys(o), do: {k, own_state(o, k)}
+
+    private =
+      for {:private, _} = k <- Enum.sort(all_keys(o)), do: {k, own_value(o, k)}
+
+    elements =
+      for {i, a} when is_integer(i) <- attr_map(o),
+          {Map.get(a, :w, true), Map.get(a, :c, true), Map.get(a, :e, true)} !=
+            {true, true, true},
+          into: %{},
+          do: {i, {Map.get(a, :w, true), Map.get(a, :c, true), Map.get(a, :e, true)}}
+
+    o
+    |> Map.drop([:props, :keys, :skeys, :syms, :attrs, :ext, :shape, :vals])
+    |> Map.merge(%{own: own, private: private, ext: extensible?(o), elements: elements})
   end
 
   def normal(other), do: other
+
+  @doc """
+  The fast record `o` in dictionary mode: the record that the writers of this module make
+  for a dictionary record with the same changes. A dictionary record is given as it is.
+  """
+  def to_dict(%{shape: {:js_shape, _, _, keys, bits, flags, _}, vals: vals} = o) do
+    {props, enum, strings, syms, attrs} =
+      Enum.reduce(1..tuple_size(keys)//1, {%{}, [], [], [], %{}}, fn i, {p, en, st, sy, at} ->
+        k = :erlang.element(i, keys)
+        b = :erlang.element(i, bits)
+        p = Map.put(p, k, :erlang.element(i, vals))
+        public? = not match?({:private, _}, k)
+        en = if public? and Shape.e?(b), do: [k | en], else: en
+        st = if is_binary(k), do: [k | st], else: st
+        sy = if match?({:symbol, _, _}, k), do: [k | sy], else: sy
+
+        at =
+          if Shape.w?(b) and Shape.c?(b),
+            do: at,
+            else: Map.put(at, k, %{w: Shape.w?(b), c: Shape.c?(b)})
+
+        {p, en, st, sy, at}
+      end)
+
+    o = o |> Map.delete(:shape) |> Map.delete(:vals) |> Map.merge(%{props: props, keys: enum})
+    o = if Enum.any?(strings, &(&1 not in enum)), do: Map.put(o, :skeys, strings), else: o
+    o = if syms == [], do: o, else: Map.put(o, :syms, syms)
+    o = if attrs == %{}, do: o, else: Map.put(o, :attrs, attrs)
+    if Shape.extensible?(flags), do: o, else: Map.put(o, :ext, false)
+  end
+
+  def to_dict(o), do: o
 
   # ── writing ────────────────────────────────────────────────
   # Each writer takes a record and gives the new record. The caller stores it. The writers
@@ -554,8 +875,18 @@ defmodule Browser.JS.Obj do
   be an accessor or read-only (the caller tests that). Nothing else changes.
   """
   defmacro own_update(o, key, v) do
-    quote bind_quoted: [o: o, key: key, v: v] do
-      %{o | props: %{:erlang.map_get(:props, o) | key => v}}
+    quote do
+      o = unquote(o)
+      key = unquote(key)
+      v = unquote(v)
+
+      case o do
+        %{shape: {:js_shape, _, %{^key => pos}, _, _, _, _}, vals: vals} ->
+          %{o | vals: unquote(@put_val)}
+
+        _ ->
+          %{o | props: %{:erlang.map_get(:props, o) | key => v}}
+      end
     end
   end
 
@@ -566,8 +897,22 @@ defmodule Browser.JS.Obj do
   (`Reflect.set`) and an accessor of a private name use it.
   """
   defmacro own_put_value(o, key, v) do
-    quote bind_quoted: [o: o, key: key, v: v] do
-      %{o | props: Map.put(o.props, key, v)}
+    quote do
+      o = unquote(o)
+      key = unquote(key)
+      v = unquote(v)
+
+      case o do
+        %{shape: {:js_shape, _, %{^key => pos}, _, _, _, _}, vals: vals} ->
+          %{o | vals: unquote(@put_val)}
+
+        # (a private name: writable and configurable, not in the order)
+        %{shape: _} ->
+          Browser.JS.Obj.fast_add(o, key, v, unquote(@hidden))
+
+        _ ->
+          %{o | props: Map.put(o.props, key, v)}
+      end
     end
   end
 
@@ -577,9 +922,30 @@ defmodule Browser.JS.Obj do
   """
   defmacro own_add_assigned(o, key, v) do
     quote bind_quoted: [o: o, key: key, v: v] do
-      if is_binary(key),
-        do: Browser.JS.Obj.add_name(o, key, v),
-        else: Browser.JS.Obj.add_symbol(o, key, v)
+      case o do
+        %{shape: _} -> Browser.JS.Obj.add_default(o, key, v)
+        _ when is_binary(key) -> Browser.JS.Obj.add_name(o, key, v)
+        _ -> Browser.JS.Obj.add_symbol(o, key, v)
+      end
+    end
+  end
+
+  @doc false
+  # `o` (a fast record without `key`) with the new key `key` with the default attributes and
+  # the value `v`. The transition that the table has already costs no call: the macro reads
+  # the table of the shape. Only the macros of this module use it.
+  defmacro add_default(o, key, v) do
+    quote bind_quoted: [o: o, key: key, v: v] do
+      %{shape: {:js_shape, sid, _, _, _, _, _}, vals: vals} = o
+
+      # (7 is `@default`, as a literal, because `bind_quoted` turns `unquote` off)
+      case :erlang.get({:jst, sid}) do
+        %{^key => %{7 => child}} ->
+          %{o | shape: child, vals: :erlang.append_element(vals, v)}
+
+        _ ->
+          Browser.JS.Obj.fast_add(o, key, v, 7)
+      end
     end
   end
 
@@ -615,6 +981,54 @@ defmodule Browser.JS.Obj do
   end
 
   @doc false
+  # The fast record `o` with the new key `key` with the attribute bits `b` and the value
+  # `v`, or the record in dictionary mode with that key when the add passes a limit of
+  # `Browser.JS.Shape`.
+  def fast_add(%{shape: {:js_shape, sid, _, _, _, _, _} = sh, vals: vals} = o, key, v, b) do
+    case :erlang.get({:jst, sid}) do
+      %{^key => %{^b => child}} ->
+        %{o | shape: child, vals: :erlang.append_element(vals, v)}
+
+      _ ->
+        case Shape.add(sh, key, b) do
+          :dict -> o |> to_dict() |> dict_add(key, v, b)
+          child -> %{o | shape: child, vals: :erlang.append_element(vals, v)}
+        end
+    end
+  end
+
+  # The dictionary record `o` with the new key `key` with the bits `b` and the value `v`.
+  defp dict_add(o, key, v, b) do
+    o = add_key(o, key, Shape.e?(b))
+    put_entry(%{o | props: Map.put(o.props, key, v)}, key, %{c: Shape.c?(b), w: Shape.w?(b)})
+  end
+
+  # The fast record `o` with the bits of its own key `key` set to `b`, or the record in
+  # dictionary mode with these attributes when the change passes a limit of
+  # `Browser.JS.Shape`. The key keeps its place.
+  defp fast_reconf(%{shape: {:js_shape, _, index, _, _, _, _} = sh} = o, key, b) do
+    case Shape.reconf(sh, :erlang.map_get(key, index), b) do
+      :dict ->
+        o = to_dict(o)
+        o = set_enumerable(o, key, Shape.e?(b))
+        put_entry(o, key, %{c: Shape.c?(b), w: Shape.w?(b)})
+
+      new ->
+        %{o | shape: new}
+    end
+  end
+
+  # The attribute bits of a key from its writable, enumerable and configurable values
+  # (`Browser.JS.Shape`). It is inline, so that a define costs no more calls than before.
+  @compile {:inline, bits: 3}
+  defp bits(w, e, c),
+    do: if(w, do: 1, else: 0) + if(e, do: 2, else: 0) + if(c, do: 4, else: 0)
+
+  # The bits of the own key `key` of the fast record `o`.
+  defp fast_bits(%{shape: {:js_shape, _, index, _, bits, _, _}}, key),
+    do: :erlang.element(:erlang.map_get(key, index), bits)
+
+  @doc false
   # `o` with the new key `key` at the end of the order, enumerable when `e`, and with no
   # value or attributes yet. A private name gets no place.
   def add_key(o, key, e) when is_binary(key) do
@@ -638,11 +1052,26 @@ defmodule Browser.JS.Obj do
   (also a symbol). An existing key keeps its place and its attributes.
   """
   defmacro define_data(o, key, v) do
-    quote bind_quoted: [o: o, key: key, v: v] do
-      cond do
-        Browser.JS.Obj.has_own?(o, key) -> %{o | props: Map.put(o.props, key, v)}
-        is_binary(key) -> Browser.JS.Obj.add_name(o, key, v)
-        true -> Browser.JS.Obj.add_symbol(o, key, v)
+    quote do
+      o = unquote(o)
+      key = unquote(key)
+      v = unquote(v)
+
+      case o do
+        %{shape: {:js_shape, _, %{^key => pos}, _, _, _, _}, vals: vals} ->
+          %{o | vals: unquote(@put_val)}
+
+        %{shape: _} ->
+          Browser.JS.Obj.add_default(o, key, v)
+
+        %{props: %{^key => _}} ->
+          %{o | props: Map.put(o.props, key, v)}
+
+        _ when is_binary(key) ->
+          Browser.JS.Obj.add_name(o, key, v)
+
+        _ ->
+          Browser.JS.Obj.add_symbol(o, key, v)
       end
     end
   end
@@ -653,25 +1082,54 @@ defmodule Browser.JS.Obj do
   key keeps its attributes and its place.
   """
   def put_hidden(o, key, v) do
-    o = if has_own?(o, key), do: o, else: add_key(o, key, false)
-    %{o | props: Map.put(o.props, key, v)}
+    cond do
+      has_own?(o, key) -> own_put_value(o, key, v)
+      fast?(o) -> fast_add(o, key, v, @hidden)
+      true -> %{add_key(o, key, false) | props: Map.put(o.props, key, v)}
+    end
   end
 
   @doc """
   `o` with `key` set to `v` with the attributes `flags` (a map of `w`, `c` and `e`, stored
-  as they are). A new key goes to the end of the order, enumerable only when `flags` has
-  `e: true`. An existing key keeps its place and its enumerability. Built-ins use it for
-  properties that are not enumerable (`@@toStringTag`, `prototype`).
+  as they are in a dictionary record). A new key goes to the end of the order, enumerable
+  only when `flags` has `e: true`. An existing key keeps its place and its enumerability.
+  Built-ins use it for properties that are not enumerable (`@@toStringTag`, `prototype`).
   """
   def put_with_attrs(o, key, v, flags) do
-    o = if has_own?(o, key), do: o, else: add_key(o, key, match?(%{e: true}, flags))
-    %{o | props: Map.put(o.props, key, v)} |> Map.put(:attrs, Map.put(attr_map(o), key, flags))
+    w = Map.get(flags, :w, true)
+    c = Map.get(flags, :c, true)
+
+    cond do
+      fast?(o) and has_own?(o, key) ->
+        o
+        |> own_put_value(key, v)
+        |> fast_reconf(key, bits(w, Shape.e?(fast_bits(o, key)), c))
+
+      fast?(o) ->
+        fast_add(o, key, v, bits(w, match?(%{e: true}, flags), c))
+
+      true ->
+        o = if has_own?(o, key), do: o, else: add_key(o, key, match?(%{e: true}, flags))
+
+        %{o | props: Map.put(o.props, key, v)}
+        |> Map.put(:attrs, Map.put(attr_map(o), key, flags))
+    end
   end
 
   @doc "`o` with the attributes of the existing key `key` set to `flags` (stored as they are)."
-  defmacro put_attrs(o, key, flags) do
-    quote bind_quoted: [o: o, key: key, flags: flags] do
-      Map.put(o, :attrs, Map.put(Browser.JS.Obj.attr_map(o), key, flags))
+  def put_attrs(o, key, flags) do
+    if fast?(o) and has_own?(o, key) do
+      b =
+        bits(
+          Map.get(flags, :w, true),
+          Shape.e?(fast_bits(o, key)),
+          Map.get(flags, :c, true)
+        )
+
+      fast_reconf(o, key, b)
+    else
+      o = to_dict(o)
+      Map.put(o, :attrs, Map.put(attr_map(o), key, flags))
     end
   end
 
@@ -679,17 +1137,16 @@ defmodule Browser.JS.Obj do
   `o` with the attributes of the element at index `i` set to `flags` (`%{w, c, e}`). The
   default attributes take no entry.
   """
-  defmacro put_element_attrs(o, i, flags) do
-    quote bind_quoted: [o: o, i: i, flags: flags] do
-      attrs = Browser.JS.Obj.attr_map(o)
+  def put_element_attrs(o, i, flags) do
+    o = to_dict(o)
+    attrs = attr_map(o)
 
-      attrs =
-        if flags == %{w: true, c: true, e: true},
-          do: Map.delete(attrs, i),
-          else: Map.put(attrs, i, flags)
+    attrs =
+      if flags == %{w: true, c: true, e: true},
+        do: Map.delete(attrs, i),
+        else: Map.put(attrs, i, flags)
 
-      Map.put(o, :attrs, attrs)
-    end
+    Map.put(o, :attrs, attrs)
   end
 
   @doc """
@@ -699,8 +1156,12 @@ defmodule Browser.JS.Obj do
   order.
   """
   def own_add(o, key, value, flags, e) do
-    o = add_key(o, key, e)
-    put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
+    if fast?(o) do
+      fast_add(o, key, value, bits(flags.w, e, flags.c))
+    else
+      o = add_key(o, key, e)
+      put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
+    end
   end
 
   @doc """
@@ -710,8 +1171,17 @@ defmodule Browser.JS.Obj do
   (the `name` of a function) goes to the end of the order.
   """
   def own_redefine(o, key, value, flags, e) do
-    o = if has_own?(o, key), do: set_enumerable(o, key, e), else: add_key(o, key, e)
-    put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
+    cond do
+      fast?(o) and has_own?(o, key) ->
+        o |> own_put_value(key, value) |> fast_reconf(key, bits(flags.w, e, flags.c))
+
+      fast?(o) ->
+        fast_add(o, key, value, bits(flags.w, e, flags.c))
+
+      true ->
+        o = if has_own?(o, key), do: set_enumerable(o, key, e), else: add_key(o, key, e)
+        put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
+    end
   end
 
   # Every string key of `o`, newest first: `skeys`, or the names in `keys` when the record
@@ -765,21 +1235,40 @@ defmodule Browser.JS.Obj do
   `v`, as a sloppy `eval` makes a global function. The key must exist. It keeps its place.
   """
   def reopen(o, key, v) do
-    o = set_enumerable(o, key, true)
-    put_entry(%{o | props: Map.put(o.props, key, v)}, key, %{c: true, w: true})
+    if fast?(o) do
+      o |> own_put_value(key, v) |> fast_reconf(key, @default)
+    else
+      o = set_enumerable(o, key, true)
+      put_entry(%{o | props: Map.put(o.props, key, v)}, key, %{c: true, w: true})
+    end
   end
 
-  @doc "`o` without the own key `key`: its value, its place and its attributes go."
+  @doc """
+  `o` without the own key `key`: its value, its place and its attributes go. A fast record
+  goes back to the shape before the add of its last key. The delete of another key makes
+  the record a dictionary.
+  """
   def own_delete(o, key) do
-    o = own_remove(o, key)
-    if is_map_key(o, :attrs), do: %{o | attrs: Map.delete(o.attrs, key)}, else: o
+    with %{shape: {:js_shape, _, %{^key => pos}, _, _, _, _} = sh, vals: vals} <- o,
+         true <- pos == tuple_size(vals),
+         {:js_shape, _, _, _, _, _, _} = up <- Shape.parent(sh) do
+      %{o | shape: up, vals: :erlang.delete_element(pos, vals)}
+    else
+      %{shape: {:js_shape, _, index, _, _, _, _}} when not is_map_key(index, key) ->
+        o
+
+      _ ->
+        o = o |> to_dict() |> own_remove(key)
+        if is_map_key(o, :attrs), do: %{o | attrs: Map.delete(o.attrs, key)}, else: o
+    end
   end
 
   @doc """
   `o` without the own key `key` and without its place in the order. The attributes stay (a
-  global function declaration replaces the property).
+  global function declaration replaces the property). The record goes to dictionary mode.
   """
   def own_remove(o, key) do
+    o = to_dict(o)
     o = %{o | props: Map.delete(o.props, key), keys: List.delete(o.keys, key)}
 
     case o do
@@ -790,8 +1279,11 @@ defmodule Browser.JS.Obj do
   end
 
   @doc "`o` made not extensible."
-  defmacro prevent(o) do
-    quote do: Map.put(unquote(o), :ext, false)
+  def prevent(o) do
+    case o do
+      %{shape: sh} -> %{o | shape: Shape.prevent(sh)}
+      _ -> Map.put(o, :ext, false)
+    end
   end
 
   @doc """
@@ -799,6 +1291,15 @@ defmodule Browser.JS.Obj do
   each data property not writable when frozen), the object becomes not extensible, and an
   array gets the element flag.
   """
+  def lock(%{shape: sh, vals: vals} = o, freeze?) do
+    accessors =
+      for i <- 1..tuple_size(vals)//1,
+          match?({:accessor, _, _}, :erlang.element(i, vals)),
+          do: i
+
+    %{o | shape: Shape.lock(sh, freeze?, accessors)}
+  end
+
   def lock(o, freeze?) do
     attrs =
       Enum.reduce(public_keys(o), attr_map(o), fn key, attrs ->
@@ -811,5 +1312,46 @@ defmodule Browser.JS.Obj do
     o = o |> Map.put(:attrs, attrs) |> Map.put(:ext, false)
     o = if freeze? and o.class == :array, do: Map.put(o, :frozen, true), else: o
     if not freeze? and o.class == :array, do: Map.put(o, :sealed, true), else: o
+  end
+
+  @doc false
+  # The fast record `o` with the shape `sh` and the values `acc` (newest first), with the
+  # enumerable data properties `pairs` added through the transitions. A key that is there
+  # already gets the new value. `plain_record/2` calls it with the empty record and the
+  # root. A transition that the table has already costs no call (`add_default/3`), so the
+  # build costs one call for each key, as the build of a dictionary record does.
+  def add_pairs(o, [{k, v} | rest], {:js_shape, sid, index, _, _, _, _} = sh, acc)
+      when not is_map_key(index, k) do
+    case :erlang.get({:jst, sid}) do
+      %{^k => %{@default => child}} ->
+        add_pairs(o, rest, child, [v | acc])
+
+      _ ->
+        case Shape.add(sh, k, @default) do
+          :dict ->
+            o = to_dict(%{o | shape: sh, vals: :erlang.list_to_tuple(:lists.reverse(acc, []))})
+            Enum.reduce([{k, v} | rest], o, &put_pair/2)
+
+          child ->
+            add_pairs(o, rest, child, [v | acc])
+        end
+    end
+  end
+
+  def add_pairs(o, [_ | _] = pairs, sh, acc) do
+    o = %{o | shape: sh, vals: :erlang.list_to_tuple(:lists.reverse(acc, []))}
+    Enum.reduce(pairs, o, &put_pair/2)
+  end
+
+  def add_pairs(o, [], sh, acc),
+    do: %{o | shape: sh, vals: :erlang.list_to_tuple(:lists.reverse(acc, []))}
+
+  # `define_data/3` for `add_pairs/4`, in the two modes.
+  defp put_pair({k, v}, o) do
+    cond do
+      has_own?(o, k) -> own_put_value(o, k, v)
+      fast?(o) -> fast_add(o, k, v, @default)
+      true -> dict_add(o, k, v, @default)
+    end
   end
 end

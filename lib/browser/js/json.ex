@@ -7,7 +7,7 @@ defmodule Browser.JS.Json do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Num, Props, Proxy}
-  require Browser.JS.Obj, as: Obj
+  alias Browser.JS.Obj
 
   defp get(o, k), do: Interp.get(o, k)
   defp arg(args, i), do: Enum.at(args, i, :undefined)

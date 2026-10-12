@@ -212,18 +212,36 @@ defmodule Browser.JS.Interp do
 
   def global, do: pget(:js_global)
 
-  @doc "A plain object with the given `{key, value}` pairs."
-  def new_object, do: {:obj, alloc(Obj.record(class: :object, proto: proto(:object)))}
+  @doc """
+  A plain object with the given `{key, value}` pairs. It is a fast record when the switch
+  `:js_shapes` is on (`Browser.JS.Obj.plain_record/1`).
+  """
+  def new_object, do: {:obj, alloc(Obj.plain_record(class: :object, proto: proto(:object)))}
 
   def new_object(pairs, proto \\ nil) do
     {:obj,
      alloc(
-       Obj.record(
+       Obj.plain_record(
          [class: :object, proto: if(proto == :null, do: nil, else: proto || proto(:object))],
          pairs
        )
      )}
   end
+
+  @doc """
+  A plain object with no own property that is to be a prototype (`F.prototype`, the
+  prototype of a class). It is a dictionary record also when the switch `:js_shapes` is on:
+  in step A1 only the objects that are not prototypes are fast (`Browser.JS.Obj`).
+  """
+  def new_proto_object(proto \\ nil),
+    do:
+      {:obj,
+       alloc(
+         Obj.record(
+           class: :object,
+           proto: if(proto == :null, do: nil, else: proto || proto(:object))
+         )
+       )}
 
   def new_array(list) do
     {:obj,
@@ -2036,7 +2054,7 @@ defmodule Browser.JS.Interp do
   }
 
   defp function_prop(id, %{generator: true} = o, "prototype") do
-    p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
+    p = new_proto_object(proto(if Map.get(o, :async), do: :async_generator, else: :generator))
     o = deref(id)
     store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
     p
@@ -2050,7 +2068,7 @@ defmodule Browser.JS.Interp do
         :undefined
 
       {:closure, %{mode: mode}} when mode in [false, nil] ->
-        p = new_object()
+        p = new_proto_object()
         put_hidden(p, "constructor", {:obj, id})
         o = deref(id)
         store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
@@ -2097,10 +2115,11 @@ defmodule Browser.JS.Interp do
   @doc false
   # The end of an object literal with constant keys (`Browser.JS.Compile`): all its
   # properties in one write to the empty object `id`. `layout` is the key layout of
-  # `Obj.literal_keys/1`, and `pairs` gives each value in source order (`Obj.fill/3`).
-  def fill_literal(id, layout, pairs) do
+  # `Obj.literal_keys/1`, and `values` gives the value of each key in source order
+  # (`Obj.fill/3`).
+  def fill_literal(id, layout, values) do
     o = :erlang.get(id)
-    :erlang.put(id, Obj.fill(o, layout, pairs))
+    :erlang.put(id, Obj.fill(o, layout, values))
   end
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."

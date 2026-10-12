@@ -78,6 +78,12 @@ defmodule Browser.JS.GC do
           # line that equals the id of a dead object must not keep it alive)
           {:js_stack, _}, acc -> acc
           {:js_check_stack, _}, acc -> acc
+          # (the transition table of the shapes and its counters hold keys, shapes and
+          # integers, never a heap id, see `Browser.JS.Shape`; a count that equals the id
+          # of a dead object must not keep it alive)
+          {{:jst, _}, _}, acc -> acc
+          {:js_shape_next, _}, acc -> acc
+          {:js_shape_n, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -138,6 +144,10 @@ defmodule Browser.JS.GC do
           # (the call chain holds names, positions and depths, never an id)
           {:js_stack, _}, roots -> roots
           {:js_check_stack, _}, roots -> roots
+          # (the transition table of the shapes and its counters hold no heap id)
+          {{:jst, _}, _}, roots -> roots
+          {:js_shape_next, _}, roots -> roots
+          {:js_shape_n, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots
@@ -172,6 +182,9 @@ defmodule Browser.JS.GC do
     stack = spush_from(t, 5, tuple_size(t), rest, marks)
     scan(spush(elem(t, 0), stack, marks, true), marks)
   end
+
+  # (a shape holds keys, positions and attributes, never a heap id, see `Browser.JS.Shape`)
+  defp scan([{:js_shape, _, _, _, _, _, _} | rest], marks), do: scan(rest, marks)
 
   defp scan([t | rest], marks) when is_tuple(t),
     do: scan(spush_from(t, 1, tuple_size(t), rest, marks), marks)
@@ -262,6 +275,11 @@ defmodule Browser.JS.GC do
     mark(push(elem(t, 0), stack, marks), marks)
   end
 
+  # A shape holds keys, positions and attributes, never a heap id (`Browser.JS.Shape`).
+  # The record clause below skips the `shape` field, so the walk gets here only for a shape
+  # in another place.
+  defp mark([{:js_shape, _, _, _, _, _, _} | rest], marks), do: mark(rest, marks)
+
   defp mark([t | rest], marks) when is_tuple(t),
     do: mark(push_tuple(t, tuple_size(t), rest, marks), marks)
 
@@ -279,8 +297,9 @@ defmodule Browser.JS.GC do
   end
 
   # The record of a heap object: the walk skips the fields that hold no id
-  # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, and
-  # keys that `props` also holds.
+  # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, keys
+  # that `props` or the shape also holds, and the shape. The values of a fast record are
+  # in the tuple `vals`, which the walk visits as any tuple.
   defp mark([t | rest], marks) when Obj.heap_record?(t) do
     stack =
       :maps.fold(

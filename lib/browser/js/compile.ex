@@ -959,7 +959,8 @@ defmodule Browser.JS.Compile do
         # of a method value is used only for its prototype, which is set already. The key
         # layout comes from the record API when the literal compiles, as
         # `Interp.define_data/3` would make it: a key that comes two times keeps its first
-        # place and its last value. It holds only the constant keys, no heap id.
+        # place and its last value. It holds only the constant keys and a shape, which
+        # holds no heap id (`Browser.JS.Shape`).
         layout = pcs |> Enum.map(&elem(&1, 0)) |> Browser.JS.Obj.literal_keys()
 
         fn env ->
@@ -1093,17 +1094,17 @@ defmodule Browser.JS.Compile do
     props(rest, obj, env)
   end
 
-  # The values of an object literal from the first to the last, as `{key, value}` pairs in
-  # source order, for `Interp.fill_literal/3`. The home of a method value is set as in
-  # `props/3`. It is a named function, so the compiled code makes no fun when it runs.
-  # Only an object can be a method that needs its home, so a primitive value does not
-  # call `Interp.method_home/2`, which is a remote call.
+  # The values of an object literal from the first to the last, in source order, for
+  # `Interp.fill_literal/3`. The home of a method value is set as in `props/3`. It is a
+  # named function, so the compiled code makes no fun when it runs. Only an object can be
+  # a method that needs its home, so a primitive value does not call
+  # `Interp.method_home/2`, which is a remote call.
   defp lit_vals([], _obj, _env, acc), do: :lists.reverse(acc)
 
-  defp lit_vals([{k, vo} | rest], obj, env, acc) do
+  defp lit_vals([{_k, vo} | rest], obj, env, acc) do
     v = av(vo, env)
     if is_tuple(v) and elem(v, 0) == :obj, do: Interp.method_home(v, obj)
-    lit_vals(rest, obj, env, [{k, v} | acc])
+    lit_vals(rest, obj, env, [v | acc])
   end
 
   # The values of a comma expression, from left to right. The value is the last one.

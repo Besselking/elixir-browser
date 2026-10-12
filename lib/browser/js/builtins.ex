@@ -17,8 +17,27 @@ defmodule Browser.JS.Builtins do
   @timer_horizon 60_000.0
   @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
 
-  @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
+  @doc """
+  Creates the prototypes and the global scope. Call after `Interp.init/1`.
+
+  The records that it makes are the built-in prototypes, constructors and namespaces. They
+  stay dictionaries in step A1 of the shapes plan (`Browser.JS.Obj`), so the switch
+  `:js_shapes` is off while they are made, and it goes back to its value after.
+  """
   def install do
+    shapes = :erlang.get(:js_shapes)
+    :erlang.put(:js_shapes, false)
+
+    try do
+      install_realm()
+    after
+      if shapes == :undefined,
+        do: :erlang.erase(:js_shapes),
+        else: :erlang.put(:js_shapes, shapes)
+    end
+  end
+
+  defp install_realm do
     object_proto = {:obj, alloc(Obj.record(class: :object, proto: nil))}
     put_proto(:object, object_proto)
 

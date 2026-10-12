@@ -20,7 +20,7 @@ defmodule Browser.JS.Modules do
   """
 
   alias Browser.JS.{Async, Interp, Parser, Promise}
-  require Browser.JS.Obj, as: Obj
+  alias Browser.JS.Obj
 
   @tag {:symbol, :toStringTag, "Symbol.toStringTag"}
 

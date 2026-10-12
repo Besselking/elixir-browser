@@ -81,7 +81,7 @@ defmodule Browser.JS.Classes do
           "Class extends value does not have valid prototype property"
         )
 
-    proto = new_object([], parent_proto)
+    proto = new_proto_object(parent_proto)
     parent = if parent == :null, do: nil, else: parent
     derived? = super_node != nil
 
