@@ -1164,7 +1164,7 @@ defmodule Browser.JS.Compile do
       fn env ->
         _ = env
         id = Interp.reserve()
-        proto = Interp.literal_proto()
+        proto = Interp.proto(:object)
 
         unquote_splicing(
           for {v, o} <- Enum.zip(vals, vars) do
@@ -1181,7 +1181,7 @@ defmodule Browser.JS.Compile do
   defp literal(layout, os) do
     fn env ->
       id = Interp.reserve()
-      proto = Interp.literal_proto()
+      proto = Interp.proto(:object)
       Interp.fill_new(id, proto, layout, lit_vals(os, env, []))
       {:obj, id}
     end

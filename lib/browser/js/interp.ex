@@ -217,8 +217,18 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  @doc "The built-in prototype object registered under `name` (`:object`, `:array`, ...)."
-  def proto(name), do: Process.get({:proto, name})
+  @doc """
+  The built-in prototype object registered under `name` (`:object`, `:array`, ...), or
+  `nil`. It reads the process key with no call of `Process.get/1`, because each new object
+  and each object literal reads it.
+  """
+  def proto(name) do
+    case :erlang.get({:proto, name}) do
+      :undefined -> nil
+      p -> p
+    end
+  end
+
   def put_proto(name, val), do: :erlang.put({:proto, name}, val)
 
   def global, do: pget(:js_global)
@@ -2140,17 +2150,6 @@ defmodule Browser.JS.Interp do
   # Nothing reads it there: no name refers to the object, and a garbage collection runs
   # only between tasks. A literal of this path defines no method (`method_node?/1` in
   # `Browser.JS.Compile`), so no value needs the object as its home.
-
-  @doc false
-  # The prototype of a new plain object, `Object.prototype` of the running realm, read once
-  # with the id of an object literal. The literal reads it before its values, as the tree
-  # walker does.
-  def literal_proto do
-    case :erlang.get({:proto, :object}) do
-      :undefined -> nil
-      p -> p
-    end
-  end
 
   @doc false
   # The record of the object literal `id` with the prototype `proto`, from the key layout
