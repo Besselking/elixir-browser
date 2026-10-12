@@ -26,6 +26,10 @@ defmodule Mix.Tasks.Reftest do
       several machines. With `--check` only the baseline entries of that part are compared;
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found
+    * `--layout-check` - lay out every page also from the layout memo the page before it left
+      and from its own (`LAYOUT_MEMO=check`, see `Browser.Layout.layout_kept/6`), compare each
+      with a fresh layout, and exit with an error if one differs. This finds a wrong layout
+      that gives the same picture, and also checks pages that fail their reference
   """
   use Mix.Task
 
@@ -68,12 +72,14 @@ defmodule Mix.Tasks.Reftest do
           timeout: :integer,
           jobs: :integer,
           shard: :string,
-          limit: :integer
+          limit: :integer,
+          layout_check: :boolean
         ],
         aliases: [v: :verbose]
       )
 
     Application.put_env(:browser, :gui, false)
+    if opts[:layout_check], do: System.put_env("LAYOUT_MEMO", "check")
     Mix.Task.run("app.start")
 
     root = Path.expand(opts[:dir] || @default_dir)
@@ -123,7 +129,9 @@ defmodule Mix.Tasks.Reftest do
     if tty?, do: IO.write(:stderr, "\r" <> String.duplicate(" ", 30) <> "\r")
 
     report(results, opts, started)
+    differ = layout_check(results, opts)
     baseline(results, paths, baseline_file, opts)
+    if differ > 0, do: Mix.raise("layout check: #{differ} pages laid out differently")
   end
 
   # ── fetching ───────────────────────────────────────────────
@@ -231,6 +239,26 @@ defmodule Mix.Tasks.Reftest do
         Mix.shell().info("  #{String.pad_leading(Integer.to_string(n), 6)}  #{why}")
       end)
     end
+  end
+
+  # -> the number of tests where a layout from the memo differed from a fresh layout
+  defp layout_check(results, opts) do
+    differ =
+      for {path, {:fail, "crash: layout check" <> _ = reason}} <- results,
+          do: {path, reason}
+
+    if opts[:layout_check] do
+      if differ == [] do
+        Mix.shell().info("Layout check: every page is laid out the same from the memo.")
+      else
+        Mix.shell().error("\nLayout check: #{length(differ)} pages differ from a fresh layout:")
+
+        for {path, reason} <- Enum.sort(differ) |> Enum.take(50),
+            do: Mix.shell().error("  #{path}\n      #{reason}")
+      end
+    end
+
+    length(differ)
   end
 
   # ── the baseline ───────────────────────────────────────────
