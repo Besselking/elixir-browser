@@ -6774,10 +6774,21 @@ defmodule Browser.Layout do
           nil ->
             st1 = Enum.reduce(ops, %{st | ext: 0}, &op/2)
 
-            states =
+            {st1, states} =
               case capture_span(st, st1) do
-                nil -> :unsafe
-                frag -> Enum.take([{skey, frag} | states], 4)
+                nil ->
+                  {st1, :unsafe}
+
+                {frag, rest} ->
+                  # (what it placed stays one entry, so that a span around it that is captured
+                  # too takes it as one; with paint orders, they stay apart as `replay_span/2`
+                  # keeps them)
+                  st1 =
+                    if frag.pz?,
+                      do: st1,
+                      else: %{st1 | items: [{:frag, 0, frag.items, frag.n} | rest]}
+
+                  {st1, Enum.take([{skey, frag} | states], 4)}
               end
 
             Process.put(
@@ -6846,7 +6857,7 @@ defmodule Browser.Layout do
     changed? = Enum.any?(Map.drop(st1, @span_vary), fn {k, v} -> Map.get(st0, k) != v end)
 
     if st1.clr == nil and st1.adj == nil and not changed? do
-      {items, _} = split_entries(st1.items, st1.n - st0.n, [])
+      {items, rest} = split_entries(st1.items, st1.n - st0.n, [])
       {rects, _} = Enum.split(st1.rects, st1.nr - st0.nr)
 
       %{
@@ -6863,6 +6874,7 @@ defmodule Browser.Layout do
         pz?: Enum.any?(items, &(is_map(&1) and Map.has_key?(&1, :pz))),
         values: Map.take(st1, @span_values)
       }
+      |> then(&{&1, rest})
     end
   end
 
