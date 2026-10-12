@@ -402,11 +402,11 @@ defmodule Browser.JS.ShapesTest do
     test "an erase of the transition table keeps the records correct" do
       src = ~S"""
       function mk(){ var o = {a: 1}; o.b = 2; return o }
-      var before = mk();
+      mk(); var before = mk();
       """
 
       # (with compilation on, the closure of `mk` keeps the shape of its literal and the add
-      # cell of `o.b` keeps its child, so the records that `mk` makes after the erase have
+      # cell of `o.b`, which the second call makes, keeps its child, so the records that `mk` makes after the erase have
       # the shapes of the records from before it; on the tree walker the adds make new
       # shapes)
       for compile? <- [false, true] do
@@ -472,6 +472,7 @@ defmodule Browser.JS.ShapesTest do
     # The kind of the cell `cell`.
     defp cell_kind(:mega), do: :mega
     defp cell_kind({_, _}), do: :generic
+    defp cell_kind({:add, _, _}), do: :add_first
     defp cell_kind({_, _, _}), do: :own
     defp cell_kind({_, :get, _, _}), do: :own_getter
     defp cell_kind({_, {:js_shape, _, _, _, _, _, _}, protos, _}) when is_list(protos), do: :add
@@ -522,6 +523,7 @@ defmodule Browser.JS.ShapesTest do
                Enum.sort([
                  :mega,
                  :generic,
+                 :add_first,
                  :add,
                  :own,
                  :own_getter,
@@ -585,6 +587,22 @@ defmodule Browser.JS.ShapesTest do
       at = fn n -> with_compile(true, fn -> inspect_run(src.(n), fn -> cells() end) end) end
       assert [{_, _, 16}] = at.(16)
       assert at.(17) == [:mega]
+    end
+
+    test "an add site gets its add cell at the second miss with the same shape" do
+      # (a site that runs once keeps the cell {:add, sid}, which matches no record; the
+      # second record with the same shape makes the add cell, and a record with another
+      # shape between the two starts again)
+      kinds = fn calls ->
+        src = "function add(o){ o.k = 1; return o } " <> calls
+
+        with_compile(true, fn -> inspect_run(src, fn -> Enum.map(cells(), &cell_kind/1) end) end)
+      end
+
+      assert kinds.("add({});") == [:add_first]
+      assert kinds.("add({}); add({});") == [:add]
+      assert kinds.("add({}); add({a: 1}); add({});") == [:add_first]
+      assert kinds.("add({}); add({}); add({});") == [:add]
     end
 
     test "a cell is not a root, it does not keep its prototype alive, and a sweep keeps it" do

@@ -2675,9 +2675,9 @@ defmodule Browser.JS.Interp do
   #     is not writable), or the miss wrote a new cell. The fast update of `named_write/5`
   #     cannot apply, and its search of the key would only cost more, so the write goes to
   #     `put_obj/5` or `strict_put_obj/4` at once, with the record that it read.
-  #   * `{:add, protos}`: a miss of an add that an add cell can do (`ic_add_chain/2`). The
-  #     write takes the generic path as for `:slow`, and then the cell gets the new shape
-  #     of the record (`ic_learn_add/5`).
+  #   * `{:add, protos}`: the second miss of an add that an add cell can do
+  #     (`ic_write_miss/4`). The write takes the generic path as for `:slow`, and then the
+  #     cell gets the new shape of the record (`ic_learn_add/5`).
   #   * `:named`: `:mega`, a record that is not fast, or the fast path `:ic` off. The write
   #     takes `named_write/5`, so that it costs no more than the write of `put_named/3`.
   #
@@ -2789,16 +2789,37 @@ defmodule Browser.JS.Interp do
   # A miss of a write of `key` to the fast record `o` with the shape `sid`: the cell of the
   # site gets the position of the key when the record holds it as a writable data property
   # (`ic_write_cell/3`). It gives `:slow`, so that the generic write of `ic_write/6` runs.
-  # When the write is an add that an add cell can do (`ic_add_chain/2`), it gives
-  # `{:add, protos}`, and the cell is written after the generic write (`ic_learn_add/5`).
+  #
+  # An add that an add cell can do (`ic_add_ok?/2`) gets its add cell only at the second
+  # miss of the site with the same shape. The first miss writes the cell `{:add, sid}`,
+  # which matches no record, and gives `:slow`. The second miss finds that cell, tests that
+  # the key is not numeric, walks the prototype chain (`ic_chain/3`), and gives
+  # `{:add, protos}`; the cell is then written after the generic write
+  # (`ic_learn_add/5`). Many add sites run only once (the code of a module, the set-up of
+  # an object), and an add cell there would cost the test of the key, the walk of the
+  # chain, a second read of the record and a cell that no record uses. A site of a
+  # constructor loses only one run.
   defp ic_write_miss(o, sid, key, site) do
-    case ic_add_chain(o, key) do
-      nil ->
-        ic_learn(site, ic_write_cell(o, sid, key))
-        :slow
+    if ic_add_ok?(o, key) do
+      case :erlang.get(site) do
+        {:add, ^sid, _} ->
+          case not Browser.JS.TypedArrays.numeric_key?(key) and
+                 ic_chain(:erlang.map_get(:proto, o), key, 0) do
+            protos when is_list(protos) ->
+              {:add, protos}
 
-      protos ->
-        {:add, protos}
+            _ ->
+              ic_learn(site, {sid})
+              :slow
+          end
+
+        _ ->
+          ic_learn(site, {:add, sid})
+          :slow
+      end
+    else
+      ic_learn(site, ic_write_cell(o, sid, key))
+      :slow
     end
   end
 
@@ -2833,14 +2854,13 @@ defmodule Browser.JS.Interp do
   # The longest prototype chain of an add cell.
   @ic_add_depth 4
 
-  # The prototype chain of the add of `key` to the fast record `o`, as a list of ids, when
-  # an add cell can do the add (see above), or `nil`. The record must be a plain object
-  # that is extensible and does not hold the key.
-  defp ic_add_chain(o, key) do
-    if Fast.on?(:ic_add) and ic_plain?(o) and Obj.fast_slot(o, key) == nil and
-         Obj.extensible?(o) and not Browser.JS.TypedArrays.numeric_key?(key),
-       do: ic_chain(:erlang.map_get(:proto, o), key, 0),
-       else: nil
+  # Whether an add cell can do the add of `key` to the fast record `o` when its prototype
+  # chain allows it (`ic_chain/3`, see above) and the key is not numeric: the record is a
+  # plain object that is extensible and does not hold the key. (the test of a numeric key
+  # parses the key, so `ic_write_miss/4` makes it only at the second miss)
+  defp ic_add_ok?(o, key) do
+    Fast.on?(:ic_add) and ic_plain?(o) and Obj.fast_slot(o, key) == nil and
+      Obj.extensible?(o)
   end
 
   # The ids of the chain from the prototype link `proto`, when no record there holds `key`
@@ -2911,17 +2931,17 @@ defmodule Browser.JS.Interp do
   end
 
   # The cell of a miss of an add of `key`, after the generic write of the add to the record
-  # `o` at `id` with the prototype chain `protos` (`ic_add_chain/2`): the add cell with the
+  # `o` at `id` with the prototype chain `protos` (`ic_chain/3`): the add cell with the
   # new shape of the record. The record is in dictionary mode when the add passed a limit
   # of `Browser.JS.Shape`. Then the cell gets no shape: it is `{nil}`, which matches no
   # record, so the next record of the shape misses again. (the next record can get a
   # shape there, see "The limits" in `Browser.JS.Shape`)
   #
   # A hit of an add cell appends one value for `key`, so the cell must hold the shape of
-  # `o` with `key` added at the end, and nothing else. `ic_add_chain/2` tells before the
-  # write that the generic write adds the key. The cell does not trust that prediction:
-  # it gets the new shape only when the record really got the one key at the end
-  # (`Obj.added?/3`). Else the cell is the generic path `{sid}`, so that a wrong
+  # `o` with `key` added at the end, and nothing else. `ic_add_ok?/2` and `ic_chain/3` tell
+  # before the write that the generic write adds the key. The cell does not trust that
+  # prediction: it gets the new shape only when the record really got the one key at the
+  # end (`Obj.added?/3`). Else the cell is the generic path `{sid}`, so that a wrong
   # prediction costs speed but never gives a record with more values than keys.
   defp ic_learn_add(site, id, Obj.fast_record(sid, _) = o, protos, key) do
     case :erlang.get(id) do

@@ -131,12 +131,16 @@ defmodule Browser.JS.Shape do
   | `{sid, pid1, psid1, pid2, psid2, pos, n}` | data of the prototype of the prototype | as above for `pid1`, and the prototype of `pid1` is `{:obj, pid2}` with the shape `psid2` |
   | `{sid, :get, pid1, psid1, pid2, psid2, pos, n}` | a getter there | the same, and the value is an accessor |
   | `{sid, child, protos, n}` | add (step A3) | the record has `sid` and the class `:object`, its prototype chain is the list of ids `protos`, and no record of the chain holds the key or is a proxy |
+  | `{:add, sid, n}` | first miss of an add (step A3) | never: the next miss of a record with the shape `sid` makes the add cell |
   | `{sid, n}` | the generic path | the record has `sid`: the site takes the generic path, and it does not look for a cell again |
   | `{nil, n}` | none | never: an add went to dictionary mode at a limit, so the next record of the shape misses again |
   | `:mega` | the generic path | always: the site had 16 misses |
 
   A write site uses only `{sid, pos, n}` (a writable data property of the record), the add
-  cell, `{sid, n}` and `{nil, n}`. An add cell gives the record the shape `child` (the
+  cell, `{:add, sid, n}`, `{sid, n}` and `{nil, n}`. An add site gets its add cell at its
+  second miss with the same shape, so that a site that runs once (the code of a module,
+  the set-up of an object) does not pay for the walk of the chain and for a cell that no
+  record uses. An add cell gives the record the shape `child` (the
   shape after the add) and the new value at the end, with no walk of the prototype chain
   and no read of the transition table (the part "add cells" of `Browser.JS.Interp` tells
   why its test of the chain is exact). A read or write cell is made only from fast
