@@ -528,7 +528,7 @@ defmodule Browser.JS.ObjTest do
   end
 
   test "element attributes and the stop of a shrink" do
-    a = Api.record([class: :array, items: %{0 => 1, 1 => 2, 2 => 3}, len: 3, proto: nil], [])
+    a = Api.record([class: :array, proto: nil], []) |> Browser.JS.Elems.put_args([1, 2, 3])
     assert Api.max_fixed_element(a, 0) == nil
     a = Api.put_element_attrs(a, 1, %{w: true, c: false, e: true})
     assert Api.max_fixed_element(a, 0) == 1

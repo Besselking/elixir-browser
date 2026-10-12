@@ -11,6 +11,7 @@ defmodule Browser.JS.Props do
   alias Browser.JS.Interp
   require Browser.JS.Fast, as: Fast
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems, as: Elems
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -20,7 +21,7 @@ defmodule Browser.JS.Props do
   defp own(o, key) do
     cond do
       o.class == :array and is_integer(array_index(key)) ->
-        case Map.fetch(o.items, array_index(key)) do
+        case Elems.fetch(o, array_index(key)) do
           {:ok, {:accessor, g, s}} ->
             a = Obj.attr_flags(o, array_index(key))
 
@@ -39,7 +40,8 @@ defmodule Browser.JS.Props do
 
       # (the `length` of an arguments object is an ordinary own property)
       o.class == :array and key == "length" and not is_map_key(o, :arguments) ->
-        {:data, o.len * 1.0, not Obj.frozen?(o) and not Map.get(o, :len_ro, false), false, false}
+        {:data, Elems.len(o) * 1.0, not Obj.frozen?(o) and not Map.get(o, :len_ro, false), false,
+         false}
 
       true ->
         Obj.own_state(o, key)
@@ -204,7 +206,9 @@ defmodule Browser.JS.Props do
     case o do
       # (the `length` of an arguments object is an own key in its place)
       %{class: :array} ->
-        for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
+        len = Elems.len(o)
+
+        for(i <- Elems.keys(o), i < len, do: Integer.to_string(i)) ++
           if(is_map_key(o, :arguments), do: [], else: ["length"]) ++ Obj.string_keys(o)
 
       %{class: :function} ->
@@ -572,7 +576,7 @@ defmodule Browser.JS.Props do
 
       desc2 =
         if not accessor? and Map.get(desc, :writable) == false and not Map.has_key?(desc, :value),
-          do: Map.put(desc, :value, Map.get(o.items, i, :undefined)),
+          do: Map.put(desc, :value, Elems.get(o, i, :undefined)),
           else: desc
 
       define_own_plain(obj, id, key, desc2)
@@ -741,13 +745,13 @@ defmodule Browser.JS.Props do
   defp define_element(id, o, key, desc) do
     i = array_index(key)
 
-    exists? = Map.has_key?(o.items, i)
+    exists? = Elems.has?(o, i)
 
     # a generic descriptor (no value, writable, get or set) keeps an accessor an accessor
     generic? = not (Map.has_key?(desc, :value) or Map.has_key?(desc, :writable))
 
     if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or
-         (generic? and match?({:accessor, _, _}, o.items[i])),
+         (generic? and match?({:ok, {:accessor, _, _}}, Elems.fetch(o, i))),
        do: define_element_accessor(id, o, key, i, desc, exists?),
        else: define_element_data(id, o, key, i, desc, exists?)
   end
@@ -757,7 +761,7 @@ defmodule Browser.JS.Props do
       not exists? and not Obj.extensible?(o) ->
         throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
 
-      not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
+      not exists? and i >= Elems.len(o) and Map.get(o, :len_ro, false) ->
         throw_error("TypeError", "Cannot define property #{key}, array length is not writable")
 
       true ->
@@ -765,7 +769,7 @@ defmodule Browser.JS.Props do
         if current, do: validate(current, desc, key)
 
         {g0, s0} =
-          case o.items[i] do
+          case Elems.get(o, i, nil) do
             {:accessor, g, s} -> {g, s}
             _ -> {:undefined, :undefined}
           end
@@ -779,8 +783,7 @@ defmodule Browser.JS.Props do
           id,
           o
           |> Obj.put_element_attrs(i, %{w: true, c: c, e: e})
-          |> Map.put(:items, Map.put(o.items, i, item))
-          |> Map.put(:len, max(o.len, i + 1))
+          |> Elems.define(i, item)
         )
     end
   end
@@ -790,7 +793,7 @@ defmodule Browser.JS.Props do
       not exists? and not Obj.extensible?(o) ->
         throw_error("TypeError", "Cannot define property #{key}, object is not extensible")
 
-      not exists? and i >= o.len and Map.get(o, :len_ro, false) ->
+      not exists? and i >= Elems.len(o) and Map.get(o, :len_ro, false) ->
         throw_error("TypeError", "Cannot define property #{key}, array length is not writable")
 
       true ->
@@ -803,7 +806,7 @@ defmodule Browser.JS.Props do
 
         cur = Obj.attr_flags(o, i)
         # turning an accessor into a data property starts from undefined and read-only
-        was_accessor? = match?({:accessor, _, _}, o.items[i])
+        was_accessor? = match?({:ok, {:accessor, _, _}}, Elems.fetch(o, i))
 
         w =
           Map.get(
@@ -819,15 +822,14 @@ defmodule Browser.JS.Props do
           Map.get(
             desc,
             :value,
-            if(was_accessor?, do: :undefined, else: Map.get(o.items, i, :undefined))
+            if(was_accessor?, do: :undefined, else: Elems.get(o, i, :undefined))
           )
 
         store(
           id,
           o
           |> Obj.put_element_attrs(i, %{w: w, c: c, e: e})
-          |> Map.put(:items, Map.put(o.items, i, v))
-          |> Map.put(:len, max(o.len, i + 1))
+          |> Elems.define(i, v)
         )
     end
   end
@@ -860,7 +862,7 @@ defmodule Browser.JS.Props do
 
         o =
           if new_len do
-            if read_only? and new_len != o.len, do: reject("length")
+            if read_only? and new_len != Elems.len(o), do: reject("length")
 
             try do
               shrink(id, o, new_len)
@@ -868,7 +870,7 @@ defmodule Browser.JS.Props do
               {:js_error, _} = err ->
                 # a blocked shrink still makes the length read-only when that was asked for
                 if Map.get(desc, :writable) == false,
-                  do: store(id, Map.put(deref(id), :len_ro, true))
+                  do: store(id, Map.put(Elems.sparse(deref(id)), :len_ro, true))
 
                 throw(err)
             end
@@ -877,7 +879,7 @@ defmodule Browser.JS.Props do
           end
 
         if Map.get(desc, :writable) == false,
-          do: store(id, Map.put(deref(id) || o, :len_ro, true))
+          do: store(id, Map.put(Elems.sparse(deref(id) || o), :len_ro, true))
 
         :ok
     end
@@ -888,7 +890,7 @@ defmodule Browser.JS.Props do
     keep = Obj.max_fixed_element(o, len)
 
     stop = if keep, do: keep + 1, else: len
-    o = %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop}
+    o = Elems.set_len(o, stop)
     store(id, o)
     if keep, do: reject("length")
     o

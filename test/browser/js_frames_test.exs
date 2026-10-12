@@ -2412,7 +2412,7 @@ defmodule Browser.JS.FramesTest do
       # The direct call, after the item write, as `put` makes it. The alias check of check
       # mode reads the item, so the item is written first.
       o = Interp.deref(aid)
-      Interp.store(aid, %{o | items: Map.put(o.items, 0, 8.0)})
+      Interp.store(aid, Browser.JS.Elems.put_arg(o, 0, 8.0))
       Interp.sync_param(Interp.deref(aid), 0, 8.0)
       assert slot(fid, 6) == 8.0
 

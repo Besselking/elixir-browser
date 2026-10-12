@@ -378,7 +378,7 @@ defmodule Browser.JS.ShapesTest do
           fast = fn name ->
             {:obj, id} = Map.fetch!(Interp.deref(Interp.global()).vars, name)
 
-            for {_, v} <- Enum.sort(Interp.deref(id).items),
+            for v <- Browser.JS.Elems.to_list(Interp.deref(id)),
                 do: Obj.fast?(Interp.deref(elem(v, 1)))
           end
 
@@ -448,7 +448,7 @@ defmodule Browser.JS.ShapesTest do
       {sids, used, {first, old}, last_ok} =
         inspect_run(src, fn ->
           {:obj, id} = Map.fetch!(Interp.deref(Interp.global()).vars, "keep")
-          last = Interp.deref(elem(Interp.deref(id).items[39], 1))
+          last = Interp.deref(elem(Enum.at(Browser.JS.Elems.to_list(Interp.deref(id)), 39), 1))
 
           {table_sids(), :erlang.get(:js_shape_n), :erlang.get(:js_shape_since),
            Obj.own_value(last, "k39000") == 39_000.0}

@@ -8,6 +8,7 @@ defmodule Browser.JS.ArrayGeneric do
 
   import Browser.JS.Interp, except: [get: 2, put: 3, delete: 2, to_int: 1]
   alias Browser.JS.{Builtins, Interp, Props, Proxy}
+  require Browser.JS.Elems, as: Elems
 
   @max 9_007_199_254_740_991
   @max_array 4_294_967_295
@@ -57,11 +58,13 @@ defmodule Browser.JS.ArrayGeneric do
   # accessor, or not an array at all) and the caller goes through the property protocol
   defp stored({:obj, id}, k) do
     case deref(id) do
-      %{class: :array, items: items} = o when not is_map_key(o, :proxy) ->
-        case items do
-          %{^k => {:accessor, _, _}} -> :other
-          %{^k => v} -> {:ok, v}
-          _ -> :other
+      o when Elems.dense_index?(o, k) ->
+        {:ok, Elems.dense_at(o, k)}
+
+      %{class: :array} = o when Elems.sparse_index?(o, k) and not is_map_key(o, :proxy) ->
+        case Elems.sparse_at(o, k) do
+          {:accessor, _, _} -> :other
+          v -> {:ok, v}
         end
 
       _ ->
@@ -413,7 +416,7 @@ defmodule Browser.JS.ArrayGeneric do
   defp sparse_includes?(o, start, v) do
     {:obj, id} = o
 
-    Enum.any?(Map.keys(deref(id).items), fn k ->
+    Enum.any?(Elems.keys(deref(id)), fn k ->
       k >= start and same_value_zero(get(o, k), v)
     end)
   end
@@ -424,7 +427,7 @@ defmodule Browser.JS.ArrayGeneric do
 
     if very_sparse?(o, from, to) do
       {:obj, id} = o
-      keys = for k <- Map.keys(deref(id).items), k >= from and k <= to, do: k
+      keys = for k <- Elems.keys(deref(id)), k >= from and k <= to, do: k
       if dir == :asc, do: Enum.sort(keys), else: Enum.sort(keys, :desc)
     else
       range
@@ -433,8 +436,8 @@ defmodule Browser.JS.ArrayGeneric do
 
   defp very_sparse?({:obj, id}, from, to) do
     case deref(id) do
-      %{class: :array, items: items} ->
-        to - from > 100_000 and to - from - map_size(items) > 100_000
+      %{class: :array} = o ->
+        to - from > 100_000 and to - from - Elems.count(o) > 100_000
 
       _ ->
         false
@@ -708,7 +711,7 @@ defmodule Browser.JS.ArrayGeneric do
     if plain? do
       if n > @max_array, do: throw_error("RangeError", "Invalid array length")
       {:obj, id} = a
-      store(id, %{deref(id) | items: acc, len: n})
+      store(id, Elems.replace_map(deref(id), acc, n))
     else
       set_length!(a, n)
     end
@@ -719,8 +722,8 @@ defmodule Browser.JS.ArrayGeneric do
   # a result array that nothing else could have observed: elements may be stored directly
   defp fresh_array?({:obj, id}) do
     case deref(id) do
-      %{class: :array, len: 0, proto: pr} ->
-        pr == proto(:array) and not Map.has_key?(deref(id), :proxy)
+      %{class: :array, proto: pr} = o ->
+        Elems.len(o) == 0 and pr == proto(:array) and not Map.has_key?(o, :proxy)
 
       _ ->
         false
@@ -750,7 +753,8 @@ defmodule Browser.JS.ArrayGeneric do
 
     case dense_items(e, len) do
       {:ok, items} when plain? ->
-        {n + len, Enum.reduce(items, acc, fn {i, v}, acc -> Map.put(acc, n + i, v) end)}
+        {n + len,
+         Enum.reduce(Enum.with_index(items), acc, fn {v, i}, acc -> Map.put(acc, n + i, v) end)}
 
       _ ->
         Enum.reduce(0..(len - 1)//1, {n, acc}, fn k, {m, acc} ->
@@ -760,20 +764,19 @@ defmodule Browser.JS.ArrayGeneric do
     end
   end
 
-  # the elements of an ordinary array without accessors or holes, as they are stored
+  # the elements of an ordinary array without accessors or holes, as a list
   defp dense_items({:obj, id}, len) do
     case deref(id) do
-      %{class: :array, items: items, len: ^len} = o when map_size(items) == len ->
-        if Map.has_key?(o, :proxy) or
-             Enum.any?(items, fn {_, v} -> match?({:accessor, _, _}, v) end),
-           do: :slow,
-           else: {:ok, items}
+      %{class: :array} = o ->
+        if Map.has_key?(o, :proxy) or not Elems.packed?(o, len),
+          do: :slow,
+          else: {:ok, Elems.to_list(o)}
 
       _ ->
         :slow
     end
   end
 
-  @doc "Every element 0..len-1 read through Get (holes read as undefined)."
+  @doc "Every element from 0 to `len - 1`, read through Get (a hole reads as undefined)."
   def read_all(o, len), do: for(k <- 0..(len - 1)//1, do: get(o, k))
 end

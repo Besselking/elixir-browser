@@ -50,6 +50,7 @@ defmodule Browser.JS.Interp do
   alias Browser.JS.Resolve.{Info, Scope}
   require Browser.JS.Fast, as: Fast
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems, as: Elems
 
   # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
   defmacrop pget(key) do
@@ -265,19 +266,7 @@ defmodule Browser.JS.Interp do
          )
        )}
 
-  def new_array(list) do
-    {:obj,
-     alloc(
-       Obj.array_record(
-         class: :array,
-         items: items_map(list),
-         len: length(list),
-         proto: proto(:array)
-       )
-     )}
-  end
-
-  defp items_map(list), do: list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+  def new_array(list), do: {:obj, alloc(Elems.new(list, proto(:array)))}
 
   @doc """
   An object backed by Elixir: reads and writes of its properties go to `mod.host_get/3` and
@@ -753,7 +742,7 @@ defmodule Browser.JS.Interp do
           check_fail("the arguments object of #{check_name(info)} maps #{inspect(o.mapped)}")
 
         k != nil and is_map_key(o.mapped, k) and
-            Map.get(o.items, k) !== :erlang.element(@frame_base + k, f) ->
+            Elems.get(o, k, nil) !== :erlang.element(@frame_base + k, f) ->
           check_fail("an element of the arguments object of #{check_name(info)} is out of sync")
 
         true ->
@@ -1297,7 +1286,7 @@ defmodule Browser.JS.Interp do
     case :erlang.element(:erlang.map_get(:args, :erlang.element(2, f).slots), f) do
       {:mapped, aid} ->
         case deref(aid) do
-          %{mapped: %{^k => _}} = o -> store(aid, %{o | items: Map.put(o.items, k, val)})
+          %{mapped: %{^k => _}} = o -> store(aid, Elems.put_arg(o, k, val))
           _ -> :ok
         end
 
@@ -1376,7 +1365,7 @@ defmodule Browser.JS.Interp do
   defp sync_argument(%{argmap: {aid, names}}, name, val) do
     with %{^name => idx} <- names,
          %{mapped: %{^idx => ^name}} = o <- deref(aid) do
-      store(aid, %{o | items: Map.put(o.items, idx, val)})
+      store(aid, Elems.put_arg(o, idx, val))
     end
 
     :ok
@@ -1776,14 +1765,22 @@ defmodule Browser.JS.Interp do
       :array ->
         case if(named?, do: nil, else: index(key)) do
           i when is_integer(i) ->
-            case o.items do
-              %{^i => {:accessor, g, _}} ->
-                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+            # (a dense element is a data value; an item of a sparse record can be an
+            # accessor)
+            cond do
+              Elems.dense_index?(o, i) ->
+                Elems.dense_at(o, i)
 
-              %{^i => v} ->
-                v
+              Elems.sparse_index?(o, i) ->
+                case Elems.sparse_at(o, i) do
+                  {:accessor, g, _} ->
+                    if function?(g), do: call(g, {:obj, id}, []), else: :undefined
 
-              _ ->
+                  v ->
+                    v
+                end
+
+              true ->
                 lookup(o, to_key(key), {:obj, id})
             end
 
@@ -1794,7 +1791,7 @@ defmodule Browser.JS.Interp do
                 lookup(o, "length", {:obj, id})
 
               key == "length" ->
-                o.len * 1.0
+                Elems.len(o) * 1.0
 
               true ->
                 lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
@@ -1863,18 +1860,21 @@ defmodule Browser.JS.Interp do
         case o do
           # an array further up the prototype chain: its length and elements show through
           %{class: :array} when key == "length" and not is_map_key(o, :arguments) ->
-            o.len * 1.0
+            Elems.len(o) * 1.0
 
           # (an array with no elements, as `Array.prototype`, needs no parse of the key)
-          %{class: :array, items: items} when is_binary(key) and map_size(items) > 0 ->
+          %{class: :array} when is_binary(key) and not Elems.empty?(o) ->
             case index(key) do
-              i when is_integer(i) and is_map_key(items, i) ->
-                case items[i] do
-                  {:accessor, getter, _} ->
+              i when is_integer(i) ->
+                case Elems.fetch(o, i) do
+                  {:ok, {:accessor, getter, _}} ->
                     if function?(getter), do: call(getter, receiver, []), else: :undefined
 
-                  v ->
+                  {:ok, v} ->
                     v
+
+                  :error ->
+                    lookup_proto(o, key, receiver)
                 end
 
               _ ->
@@ -2974,52 +2974,35 @@ defmodule Browser.JS.Interp do
     case o do
       %{class: :array} ->
         case if(named?, do: nil, else: index(key)) do
+          # A dense record holds only writable data elements, and it is extensible, not
+          # frozen and not sealed, with a writable `length` (`Browser.JS.Elems`). So a write
+          # in bounds needs no test, and a write at the end needs only the test that no
+          # element of the prototype chain shows through (`Elems.std_chain?/1`), which
+          # `index_hook/2` would find (fast path `:elems`).
           i when is_integer(i) ->
-            # (the element at `i` now, read once for all the tests below)
-            cur = Map.fetch(o.items, i)
-
             cond do
-              match?({:ok, {:accessor, _, _}}, cur) ->
-                {:ok, {:accessor, _, setter}} = cur
-
-                if function?(setter),
-                  do: keep_put_flag(call(setter, {:obj, id}, [v])),
-                  else: fail_put()
-
-                :ok
-
-              Obj.frozen?(o) ->
-                fail_put()
-
-              cur == :error and not Obj.extensible?(o) ->
-                fail_put()
-
-              i >= o.len and Map.get(o, :len_ro, false) ->
-                fail_put()
-
-              not Obj.writable?(o, i) ->
-                fail_put()
-
-              cur == :error and index_hook(o.proto, i) != :none ->
-                case index_hook(o.proto, i) do
-                  {:setter, setter} ->
-                    keep_put_flag(call(setter, {:obj, id}, [v]))
-
-                  {:proxy, proxy} ->
-                    unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
-                      do: fail_put()
-
-                  :skip ->
+              Fast.on?(:elems) and Elems.dense_index?(o, i) ->
+                Fast.shadow(
+                  id,
+                  (
+                    store(id, Elems.dense_put(o, i, v))
                     :ok
-                end
+                  ),
+                  put_element(id, o, key, i, v)
+                )
 
-                :ok
+              Fast.on?(:elems) and Elems.dense_append?(o, i) and Elems.std_chain?(o) ->
+                Fast.shadow(
+                  id,
+                  (
+                    store(id, Elems.dense_append(o, v))
+                    :ok
+                  ),
+                  put_element(id, o, key, i, v)
+                )
 
               true ->
-                # an arguments object's `length` is an ordinary property: it does not grow
-                len = if Map.has_key?(o, :arguments), do: o.len, else: max(o.len, i + 1)
-                store(id, %{o | items: Map.put(o.items, i, v), len: len})
-                if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
+                put_element(id, o, key, i, v)
             end
 
           nil ->
@@ -3278,6 +3261,60 @@ defmodule Browser.JS.Interp do
       else: Browser.JS.TypedArrays.typed_array?({:obj, pid})
   end
 
+  # The write of `v` to the element `i` of the array record `o` (the key `key`), by the
+  # generic path of `put_obj/5`. It is inline, so that the write to a sparse record costs
+  # no call more than before step B2.
+  @compile {:inline, put_element: 5}
+  defp put_element(id, o, key, i, v) do
+    # (the element at `i` now, read once for all the tests below)
+    cur = Elems.fetch(o, i)
+
+    cond do
+      match?({:ok, {:accessor, _, _}}, cur) ->
+        {:ok, {:accessor, _, setter}} = cur
+
+        if function?(setter),
+          do: keep_put_flag(call(setter, {:obj, id}, [v])),
+          else: fail_put()
+
+        :ok
+
+      Obj.frozen?(o) ->
+        fail_put()
+
+      cur == :error and not Obj.extensible?(o) ->
+        fail_put()
+
+      i >= Elems.len(o) and Map.get(o, :len_ro, false) ->
+        fail_put()
+
+      not Obj.writable?(o, i) ->
+        fail_put()
+
+      cur == :error and index_hook(o.proto, i) != :none ->
+        case index_hook(o.proto, i) do
+          {:setter, setter} ->
+            keep_put_flag(call(setter, {:obj, id}, [v]))
+
+          {:proxy, proxy} ->
+            unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
+              do: fail_put()
+
+          :skip ->
+            :ok
+        end
+
+        :ok
+
+      true ->
+        # (the `length` of an arguments object is an ordinary property: `Elems.put/3` does
+        # not make it grow)
+        store(id, Elems.put(o, i, v))
+        if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
+        :ok
+    end
+  end
+
   # a missing array element: an index setter or a proxy further up the prototype chain
   defp put_array_prop(id, o, key, v) do
     if key == "length" do
@@ -3294,7 +3331,7 @@ defmodule Browser.JS.Interp do
           |> Obj.max_fixed_element(new_len)
           |> then(&if(&1, do: &1 + 1, else: new_len))
 
-        store(id, %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop})
+        store(id, Elems.set_len(o, stop))
       end
     else
       put_prop(id, o, to_key(key), v)
@@ -3309,11 +3346,11 @@ defmodule Browser.JS.Interp do
       is_map_key(p, :proxy) ->
         {:proxy, {:obj, pid}}
 
-      match?(%{class: :array, items: %{^i => {:accessor, _, _}}}, p) ->
-        {:accessor, _, setter} = p.items[i]
+      p.class == :array and match?({:ok, {:accessor, _, _}}, Elems.fetch(p, i)) ->
+        {:ok, {:accessor, _, setter}} = Elems.fetch(p, i)
         if function?(setter), do: {:setter, setter}, else: :none
 
-      match?(%{class: :array, items: %{^i => _}}, p) ->
+      p.class == :array and Elems.has?(p, i) ->
         :none
 
       Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
@@ -3373,18 +3410,18 @@ defmodule Browser.JS.Interp do
           Browser.JS.Props.has_own?({:obj, id}, key) ->
         false
 
-      i && not Obj.configurable?(o, i) && Map.has_key?(o.items, i) ->
+      i && not Obj.configurable?(o, i) && Elems.has?(o, i) ->
         false
 
       # a frozen or sealed array keeps its elements, and `length` is never configurable
-      i && (Obj.frozen?(o) or Obj.sealed?(o)) && Map.has_key?(o.items, i) ->
+      i && (Obj.frozen?(o) or Obj.sealed?(o)) && Elems.has?(o, i) ->
         false
 
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
 
       i ->
-        store(id, %{o | items: Map.delete(o.items, i)})
+        store(id, Elems.delete(o, i))
         if Map.has_key?(o, :mapped), do: unmap_argument(id, i)
         true
 
@@ -3436,7 +3473,7 @@ defmodule Browser.JS.Interp do
         true
 
       o.class == :array and is_integer(index(key)) ->
-        Map.has_key?(o.items, index(key)) or
+        Elems.has?(o, index(key)) or
           (match?({:obj, _}, o.proto) and has_property?(o.proto, key_s))
 
       Obj.has_own?(o, key_s) ->
@@ -3509,9 +3546,11 @@ defmodule Browser.JS.Interp do
           else: own_keys_index_first(o)
 
       %{class: :array} ->
+        len = Elems.len(o)
+
         for(
-          i <- o.items |> Map.keys() |> Enum.sort(),
-          i < o.len,
+          i <- Elems.keys(o),
+          i < len,
           Obj.element_enumerable?(o, i),
           do: Integer.to_string(i)
         ) ++ Obj.enum_names(o)
@@ -3557,17 +3596,22 @@ defmodule Browser.JS.Interp do
   def array_list({:obj, id}) do
     o = deref(id)
 
-    for i <- 0..(o.len - 1)//1 do
-      case Map.get(o.items, i, :undefined) do
-        {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
-        v -> v
+    # (a dense record holds no accessor, so its list is its tuple)
+    if Elems.dense?(o) do
+      Elems.to_list(o)
+    else
+      for item <- Elems.to_list(o) do
+        case item do
+          {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+          v -> v
+        end
       end
     end
   end
 
   def set_array_list({:obj, id}, list) do
     o = deref(id)
-    store(id, %{o | items: items_map(list), len: length(list)})
+    store(id, Elems.replace(o, list))
   end
 
   def array?({:obj, id}), do: deref(id).class == :array
@@ -3650,21 +3694,27 @@ defmodule Browser.JS.Interp do
   # One step of a for-of loop over the array `v` at `id`: `{element, next index}`, or nil
   # after the last element. The record is read again at each step, so the loop sees a body
   # that changes the array. For an array that is not an arguments object, the `length` is
-  # `len` (no getter is possible), and an own data element is what the read of the key
-  # gives, so the step reads `items` at the integer `i`, with no string key (fast path
-  # `:iter`). A hole or an accessor goes to `get/2`. The test for an arguments object is
-  # defence in depth today: an arguments object has an own `@@iterator`, so a for-of loop
-  # over it does not get to this step.
+  # the length of the record (no getter is possible), and an own data element is what the
+  # read of the key gives, so the step reads the element at the integer `i`, with no string
+  # key (fast path `:iter`). A hole or an accessor goes to `get/2`. The test for an
+  # arguments object is defence in depth today: an arguments object has an own
+  # `@@iterator`, so a for-of loop over it does not get to this step.
   @compile {:inline, for_of_step: 3}
   defp for_of_step(id, v, i) do
     if Fast.on?(:iter) do
       case deref(id) do
-        %{class: :array, len: len, items: items} = a when not is_map_key(a, :arguments) ->
-          if i < len do
-            case items do
-              %{^i => {:accessor, _, _}} -> {get(v, i * 1.0), i + 1}
-              %{^i => x} -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
-              _ -> {get(v, i * 1.0), i + 1}
+        a when Elems.dense_index?(a, i) ->
+          Fast.shadow(id, {Elems.dense_at(a, i), i + 1}, for_of_step_key(v, i))
+
+        %{class: :array} = a when not is_map_key(a, :arguments) ->
+          if i < Elems.len(a) do
+            if Elems.sparse_index?(a, i) do
+              case Elems.sparse_at(a, i) do
+                {:accessor, _, _} -> {get(v, i * 1.0), i + 1}
+                x -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
+              end
+            else
+              {get(v, i * 1.0), i + 1}
             end
           end
 
@@ -4902,8 +4952,8 @@ defmodule Browser.JS.Interp do
   # Frees a function frame on return. A frame that built a mapped arguments object first
   # detaches the object: it takes away `mapped` and `map_scope`, because `put` tests the
   # first and `sync_param` reads the second. Nobody can see the detach. Without a closure
-  # no code can read a parameter after the return, and the object's `items` already hold
-  # the values of the mapped parameters. Only a sloppy function with plain parameters has
+  # no code can read a parameter after the return, and the elements of the object already
+  # hold the values of the mapped parameters. Only a sloppy function with plain parameters has
   # an `argmap`, so every other frame pays one clause match.
   defp free_frame(frame, %Info{slots: %{args: i}}) do
     case :erlang.element(i, :erlang.get(frame)) do
@@ -5447,13 +5497,8 @@ defmodule Browser.JS.Interp do
     len = length(args)
 
     o =
-      Obj.record(
-        class: :array,
-        items: items_map(args),
-        len: len,
-        proto: proto(:object),
-        arguments: true
-      )
+      Obj.record(class: :array, proto: proto(:object), arguments: true)
+      |> Elems.put_args(args)
       |> Obj.put_hidden("length", len * 1.0)
       |> Obj.put_hidden({:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
 
@@ -5506,15 +5551,12 @@ defmodule Browser.JS.Interp do
     else
       o = deref(aid)
 
-      items =
-        Enum.reduce(mapped, o.items, fn {k, _}, acc ->
-          Map.put(acc, k, :erlang.element(@frame_base + k, f))
+      o =
+        Enum.reduce(mapped, o, fn {k, _}, acc ->
+          Elems.put_arg(acc, k, :erlang.element(@frame_base + k, f))
         end)
 
-      store(
-        aid,
-        o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, frame)
-      )
+      store(aid, o |> Map.put(:mapped, mapped) |> Map.put(:map_scope, frame))
 
       t = :erlang.get(frame)
 
@@ -5575,18 +5617,15 @@ defmodule Browser.JS.Interp do
       if mapped != %{} do
         o = deref(aid)
 
-        items =
-          Enum.reduce(mapped, o.items, fn {idx, name}, acc ->
+        o =
+          Enum.reduce(mapped, o, fn {idx, name}, acc ->
             case scope.vars do
-              %{^name => v} -> Map.put(acc, idx, v)
+              %{^name => v} -> Elems.put_arg(acc, idx, v)
               _ -> acc
             end
           end)
 
-        store(
-          aid,
-          o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner)
-        )
+        store(aid, o |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner))
 
         declare(owner, :argmap, {aid, names})
       end
@@ -7741,28 +7780,33 @@ defmodule Browser.JS.Interp do
     |> Browser.JS.Str.join()
   end
 
-  # an elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length
+  # An elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length. The
+  # values are in a list, newest first, with `:undefined` at a hole and the index of each
+  # hole in `holes`. A literal with no hole then makes its array from the list
+  # (`Browser.JS.Elems.new/2`), and only a literal with a hole makes a map.
   def ev({:array, elems}, env) do
-    {items, len} =
-      Enum.reduce(elems, {%{}, 0}, fn
-        {:spread, e}, {m, i} ->
+    {rev, len, holes} =
+      Enum.reduce(elems, {[], 0, []}, fn
+        {:spread, e}, {r, i, h} ->
           vals = iterate(ev(e, env))
+          {:lists.reverse(vals, r), i + length(vals), h}
 
-          m =
-            vals |> Enum.with_index(i) |> Enum.reduce(m, fn {v, j}, acc -> Map.put(acc, j, v) end)
+        :hole, {r, i, h} ->
+          {[:undefined | r], i + 1, [i | h]}
 
-          {m, i + length(vals)}
-
-        :hole, {m, i} ->
-          {m, i + 1}
-
-        n, {m, i} ->
-          {Map.put(m, i, ev(n, env)), i + 1}
+        n, {r, i, h} ->
+          {[ev(n, env) | r], i + 1, h}
       end)
 
-    {:obj, id} = arr = new_array([])
-    store(id, %{deref(id) | items: items, len: len})
-    arr
+    record =
+      if holes == [] do
+        Elems.new(:lists.reverse(rev), proto(:array))
+      else
+        items = rev |> :lists.reverse() |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+        Elems.from_map(Map.drop(items, holes), len, proto(:array))
+      end
+
+    {:obj, alloc(record)}
   end
 
   def ev({:object, props}, env) do

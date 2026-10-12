@@ -69,12 +69,14 @@ defmodule Browser.JS.Obj do
   `own_remove/2`). The writer then does its change on the dictionary record, and the
   caller stores that record. A reader never changes the mode.
 
-  The elements of an array (`items`, `len`) are not in this API (part B of the shapes
-  plan). Their attributes share the `attrs` map, so `attr_flags/2`,
-  `element_enumerable?/2` and `put_element_attrs/3` are here. An array with an element
-  that does not have the default attributes is a dictionary record
-  (`put_element_attrs/3`), because a fast record has no `attrs`. The flags `frozen` and
-  `sealed` of an array stay in the record in the two modes.
+  The elements of an array are not in this API: `Browser.JS.Elems` holds them (step B2).
+  Their attributes share the `attrs` map, so `attr_flags/2`, `element_enumerable?/2` and
+  `put_element_attrs/3` are here. An array with an element that does not have the default
+  attributes is a dictionary record (`put_element_attrs/3`), because a fast record has no
+  `attrs`, and its elements are in the sparse form of `Browser.JS.Elems`. The flags
+  `frozen` and `sealed` of an array stay in the record in the two modes. `prevent/1` and
+  `lock/2` make the elements of an array sparse first, because the dense form is only for
+  an array that is extensible and not frozen or sealed.
 
   ## The order of the keys
 
@@ -268,8 +270,8 @@ defmodule Browser.JS.Obj do
   @doc """
   A new record of an array with no own named property: the map `fields`, as `record/1`. It
   is a fast record with the root of the arrays (`Browser.JS.Shape`) when the switch
-  `:js_shapes` is on. Its elements and its `length` (`items` and `len` in `fields`) are
-  not in the shape.
+  `:js_shapes` is on. Its elements and its `length` (the fields of `Browser.JS.Elems`, in
+  `fields`) are not in the shape.
   """
   defmacro array_record(fields) do
     quote do
@@ -837,16 +839,16 @@ defmodule Browser.JS.Obj do
   end
 
   @doc """
-  The highest index at or above `len` of an element of the array `o` that is not
+  The highest index at or above `stop` of an element of the array `o` that is not
   configurable, or `nil`. A shrink of `length` stops above it.
   """
-  defmacro max_fixed_element(o, len) do
-    quote bind_quoted: [o: o, len: len] do
+  defmacro max_fixed_element(o, stop) do
+    quote bind_quoted: [o: o, stop: stop] do
       attrs = Browser.JS.Obj.attr_map(o)
 
-      o.items
-      |> Map.keys()
-      |> Enum.filter(&(&1 >= len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+      o
+      |> Browser.JS.Elems.keys()
+      |> Enum.filter(&(&1 >= stop and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
       |> Enum.max(fn -> nil end)
     end
   end
@@ -860,7 +862,7 @@ defmodule Browser.JS.Obj do
           {:data, _, w, _, c} -> c == false and (not freeze? or w == false)
         end
       end) and
-      (o.class != :array or o.items == %{} or
+      (o.class != :array or Browser.JS.Elems.count(o) == 0 or
          frozen?(o) or (not freeze? and sealed?(o)))
   end
 
@@ -1361,12 +1363,11 @@ defmodule Browser.JS.Obj do
     o = to_dict(o)
     attrs = attr_map(o)
 
-    attrs =
-      if flags == %{w: true, c: true, e: true},
-        do: Map.delete(attrs, i),
-        else: Map.put(attrs, i, flags)
-
-    Map.put(o, :attrs, attrs)
+    # (a dense array has only elements with the default attributes, see
+    # `Browser.JS.Elems`)
+    if flags == %{w: true, c: true, e: true},
+      do: Map.put(o, :attrs, Map.delete(attrs, i)),
+      else: o |> Browser.JS.Elems.sparse() |> Map.put(:attrs, Map.put(attrs, i, flags))
   end
 
   @doc """
@@ -1501,11 +1502,11 @@ defmodule Browser.JS.Obj do
     end
   end
 
-  @doc "`o` made not extensible."
+  @doc "`o` made not extensible. An array becomes sparse (`Browser.JS.Elems`)."
   def prevent(o) do
-    case o do
-      %{shape: sh} -> %{o | shape: Shape.prevent(sh)}
-      _ -> Map.put(o, :ext, false)
+    case Browser.JS.Elems.sparse(o) do
+      %{shape: sh} = o -> %{o | shape: Shape.prevent(sh)}
+      o -> Map.put(o, :ext, false)
     end
   end
 
@@ -1514,7 +1515,11 @@ defmodule Browser.JS.Obj do
   each data property not writable when frozen), the object becomes not extensible, and an
   array gets the element flag.
   """
-  def lock(%{shape: sh, vals: vals} = o, freeze?) do
+  def lock(o, freeze?), do: lock_record(Browser.JS.Elems.sparse(o), freeze?)
+
+  # `lock/2` of a record that is not a dense array: a dense array has only elements with
+  # the default attributes (`Browser.JS.Elems`), so it becomes sparse first.
+  defp lock_record(%{shape: sh, vals: vals} = o, freeze?) do
     accessors =
       for i <- 1..tuple_size(vals)//1,
           match?({:accessor, _, _}, :erlang.element(i, vals)),
@@ -1531,7 +1536,7 @@ defmodule Browser.JS.Obj do
     end
   end
 
-  def lock(o, freeze?) do
+  defp lock_record(o, freeze?) do
     attrs =
       Enum.reduce(public_keys(o), attr_map(o), fn key, attrs ->
         accessor? = match?({:accessor, _, _}, o.props[key])

@@ -11,6 +11,7 @@ defmodule Browser.JS.HeapOracle do
   import ExUnit.Assertions
   alias Browser.JS.{Builtins, GC, Interp, Parser, Props}
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems
 
   @file_name "t.js"
 
@@ -236,7 +237,7 @@ defmodule Browser.JS.HeapOracle do
 
     head =
       {Map.get(o, :class), Map.get(o, :proto), Obj.extensible?(o), Obj.frozen?(o), Obj.sealed?(o),
-       Map.get(o, :len)}
+       if(Map.get(o, :class) == :array, do: Browser.JS.Elems.len(o))}
 
     entry =
       if is_map_key(o, :proxy) do
