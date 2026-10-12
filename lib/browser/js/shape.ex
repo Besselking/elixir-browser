@@ -128,12 +128,17 @@ defmodule Browser.JS.Shape do
   def add(sh, key, b), do: add(sh, key, b, true)
 
   # `add/3`; `limit?` false for a key from the source text, which the limit of new shapes in
-  # a row does not count (`from_keys/1`).
+  # a row does not count (`from_keys/1`). (an index-like key never has a transition, so the
+  # test comes before the read of the table)
   defp add({:js_shape, sid, _, _, _, _, _} = sh, key, b, limit?) do
-    case :erlang.get({:jst, sid}) do
-      %{^key => %{^b => child}} -> child
-      :undefined -> make_add(sh, %{}, key, b, limit?)
-      t -> make_add(sh, t, key, b, limit?)
+    if index_like?(key) do
+      :dict
+    else
+      case :erlang.get({:jst, sid}) do
+        %{^key => %{^b => child}} -> child
+        :undefined -> make_add(sh, %{}, key, b, limit?)
+        t -> make_add(sh, t, key, b, limit?)
+      end
     end
   end
 
@@ -142,9 +147,6 @@ defmodule Browser.JS.Shape do
 
     cond do
       n >= @max_keys ->
-        :dict
-
-      index_like?(key) ->
         :dict
 
       sid != 0 and map_size(t) > @max_children ->
@@ -188,18 +190,6 @@ defmodule Browser.JS.Shape do
   # (a string that starts with a digit can be an array index, see `Obj.plain_names/1`)
   defp index_like?(<<c, _::binary>>) when c >= ?0 and c <= ?9, do: true
   defp index_like?(_), do: false
-
-  @doc """
-  The shape before the last add that made `sh`, or `nil`: the shape of a record after the
-  `delete` of its last key. A shape that a change of attributes or an integrity level made
-  has none, and the table can be erased, so the caller must take `nil`.
-  """
-  def parent({:js_shape, sid, _, _, _, _, _}) do
-    case table(sid) do
-      %{up: up} -> up
-      _ -> nil
-    end
-  end
 
   @doc """
   The shape `sh` with the bits of the key at the position `pos` changed to `b`, or `:dict`

@@ -836,33 +836,73 @@ defmodule Browser.JS.Obj do
   The fast record `o` in dictionary mode: the record that the writers of this module make
   for a dictionary record with the same changes. A dictionary record is given as it is.
   """
-  def to_dict(%{shape: {:js_shape, _, _, keys, bits, flags, _}, vals: vals} = o) do
-    {props, enum, strings, syms, attrs} =
-      Enum.reduce(1..tuple_size(keys)//1, {%{}, [], [], [], %{}}, fn i, {p, en, st, sy, at} ->
-        k = :erlang.element(i, keys)
-        b = :erlang.element(i, bits)
-        p = Map.put(p, k, :erlang.element(i, vals))
-        public? = not match?({:private, _}, k)
-        en = if public? and Shape.e?(b), do: [k | en], else: en
-        st = if is_binary(k), do: [k | st], else: st
-        sy = if match?({:symbol, _, _}, k), do: [k | sy], else: sy
+  def to_dict(%{shape: {:js_shape, _, _, keys, bits, flags, enum}, vals: vals} = o) do
+    n = tuple_size(keys)
+    o = :maps.remove(:vals, :maps.remove(:shape, o))
 
-        at =
-          if Shape.w?(b) and Shape.c?(b),
-            do: at,
-            else: Map.put(at, k, %{w: Shape.w?(b), c: Shape.c?(b)})
+    # (the usual record: string keys with the default attributes, no symbol, extensible.
+    # Then `enum` holds all the keys in order, and the record needs only `props` and `keys`)
+    cond do
+      :erlang.band(flags, 9) != 0 ->
+        dict_other(o, keys, bits, flags, vals, n)
 
-        {p, en, st, sy, at}
-      end)
+      n == 0 ->
+        :maps.put(:keys, [], :maps.put(:props, %{}, o))
 
-    o = o |> Map.delete(:shape) |> Map.delete(:vals) |> Map.merge(%{props: props, keys: enum})
-    o = if Enum.any?(strings, &(&1 not in enum)), do: Map.put(o, :skeys, strings), else: o
+      bits == :erlang.make_tuple(n, @default) ->
+        props =
+          :maps.from_list(:lists.zip(:erlang.tuple_to_list(keys), :erlang.tuple_to_list(vals)))
+
+        :maps.put(:keys, :lists.reverse(enum), :maps.put(:props, props, o))
+
+      true ->
+        dict_other(o, keys, bits, flags, vals, n)
+    end
+  end
+
+  def to_dict(o), do: o
+
+  # `to_dict/1` for a record with a symbol, a key with other attributes, or the flag of an
+  # object that is not extensible.
+  defp dict_other(o, keys, bits, flags, vals, n) do
+    {props, en, strings, hidden?, syms, attrs} =
+      dict_fields(keys, bits, vals, 1, n, {%{}, [], [], false, [], %{}})
+
+    o = Map.merge(o, %{props: props, keys: en})
+    o = if hidden?, do: Map.put(o, :skeys, strings), else: o
     o = if syms == [], do: o, else: Map.put(o, :syms, syms)
     o = if attrs == %{}, do: o, else: Map.put(o, :attrs, attrs)
     if Shape.extensible?(flags), do: o, else: Map.put(o, :ext, false)
   end
 
-  def to_dict(o), do: o
+  # The fields of a dictionary record from the keys `i` to `n` of a fast record: `props`,
+  # the enumerable keys and all the string keys (newest first), whether a string key is not
+  # enumerable (then the record needs `skeys`), the symbols (newest first) and the
+  # attributes that are not the default.
+  defp dict_fields(_keys, _bits, _vals, i, n, acc) when i > n, do: acc
+
+  defp dict_fields(keys, bits, vals, i, n, {p, en, st, hidden?, sy, at}) do
+    k = :erlang.element(i, keys)
+    b = :erlang.element(i, bits)
+    p = Map.put(p, k, :erlang.element(i, vals))
+    e = Shape.e?(b)
+
+    acc =
+      case k do
+        {:private, _} -> {p, en, st, hidden?, sy, at}
+        {:symbol, _, _} when e -> {p, [k | en], st, hidden?, [k | sy], at}
+        {:symbol, _, _} -> {p, en, st, hidden?, [k | sy], at}
+        _ when e -> {p, [k | en], [k | st], hidden?, sy, at}
+        _ -> {p, en, [k | st], true, sy, at}
+      end
+
+    acc =
+      if Shape.w?(b) and Shape.c?(b),
+        do: acc,
+        else: :erlang.setelement(6, acc, Map.put(at, k, %{w: Shape.w?(b), c: Shape.c?(b)}))
+
+    dict_fields(keys, bits, vals, i + 1, n, acc)
+  end
 
   # ── writing ────────────────────────────────────────────────
   # Each writer takes a record and gives the new record. The caller stores it. The writers
@@ -984,6 +1024,12 @@ defmodule Browser.JS.Obj do
   # The fast record `o` with the new key `key` with the attribute bits `b` and the value
   # `v`, or the record in dictionary mode with that key when the add passes a limit of
   # `Browser.JS.Shape`.
+  # (an index-like key is past a limit, so the test comes before the reads of the table)
+  def fast_add(o, key, v, b)
+      when is_binary(key) and byte_size(key) > 0 and binary_part(key, 0, 1) >= "0" and
+             binary_part(key, 0, 1) <= "9",
+      do: o |> to_dict() |> dict_add(key, v, b)
+
   def fast_add(%{shape: {:js_shape, sid, _, _, _, _, _} = sh, vals: vals} = o, key, v, b) do
     case :erlang.get({:jst, sid}) do
       %{^key => %{^b => child}} ->
@@ -1249,9 +1295,12 @@ defmodule Browser.JS.Obj do
   the record a dictionary.
   """
   def own_delete(o, key) do
-    with %{shape: {:js_shape, _, %{^key => pos}, _, _, _, _} = sh, vals: vals} <- o,
+    # (the entry `:up` of the table holds the shape before the add of the last key. A shape
+    # that a change of attributes or an integrity level made has none, and the table can be
+    # erased, so the record then goes to dictionary mode)
+    with %{shape: {:js_shape, sid, %{^key => pos}, _, _, _, _}, vals: vals} <- o,
          true <- pos == tuple_size(vals),
-         {:js_shape, _, _, _, _, _, _} = up <- Shape.parent(sh) do
+         %{up: up} <- :erlang.get({:jst, sid}) do
       %{o | shape: up, vals: :erlang.delete_element(pos, vals)}
     else
       %{shape: {:js_shape, _, index, _, _, _, _}} when not is_map_key(index, key) ->
