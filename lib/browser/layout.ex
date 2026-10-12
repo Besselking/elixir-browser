@@ -4030,19 +4030,38 @@ defmodule Browser.Layout do
   defp finalize(st) do
     # what an absolutely positioned box painted (`:over`) stays above the flow, even when it came
     # through a line or an inline-block that sorts its items into backgrounds and the rest
-    {over, flow} =
-      (Enum.reverse(st.rects) ++ flat_into(st.items, 0, []))
-      |> Enum.split_with(&Map.get(&1, :over))
+    limits = if st.limits == %{}, do: nil, else: st.limits
+    {over, under_flow, flow} = sort_into(st.items, 0, limits, {[], [], []})
+    {over, under_flow, flow} = sort_into(st.rects, 0, limits, {over, under_flow, flow})
 
-    {under, overlays} =
-      st.overlays |> Enum.reverse() |> Enum.concat() |> Enum.split_with(&Map.get(&1, :under))
+    overlays = st.overlays |> Enum.reverse() |> Enum.concat()
+    overlays = if limits, do: Enum.map(overlays, &stick_limit(&1, limits)), else: overlays
+    {under, overlays} = Enum.split_with(overlays, &Map.get(&1, :under))
 
-    {under_flow, flow} = Enum.split_with(flow, &Map.get(&1, :under))
     # positioned boxes paint in tree order, whichever of the two lists they came through
     positioned = Enum.sort_by(overlays ++ over, &pz_key(Map.get(&1, :pz, 0)))
-    all = under ++ under_flow ++ flow ++ positioned
+    under ++ under_flow ++ flow ++ positioned
+  end
 
-    if st.limits == %{}, do: all, else: Enum.map(all, &stick_limit(&1, st.limits))
+  # Takes the items of a run apart (newest first, as `flat_into/3`) into what paints over the
+  # flow, under it and in it, oldest first, in one pass.
+  defp sort_into([], _dy, _limits, acc), do: acc
+
+  defp sort_into([{:frag, fdy, items, _n} | rest], dy, limits, acc),
+    do: sort_into(rest, dy, limits, sort_into(items, dy + fdy, limits, acc))
+
+  defp sort_into([item | rest], dy, limits, {over, under, flow}) do
+    item = if dy == 0, do: item, else: move(item, 0, dy)
+    item = if limits, do: stick_limit(item, limits), else: item
+
+    acc =
+      cond do
+        Map.get(item, :over) -> {[item | over], under, flow}
+        Map.get(item, :under) -> {over, [item | under], flow}
+        true -> {over, under, [item | flow]}
+      end
+
+    sort_into(rest, dy, limits, acc)
   end
 
   # A block ends: its content bottom is as far as sticky boxes inside it can go.
