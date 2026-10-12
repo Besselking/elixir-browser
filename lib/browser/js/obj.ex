@@ -63,8 +63,10 @@ defmodule Browser.JS.Obj do
     GetSetRecord (`%{obj, size, has, keys}`) holds the `keys` method of a set-like object.
     It is not a heap record.
 
-  The garbage collector (`Browser.JS.GC`) walks every map generically and names no field,
-  so it is not in the list. The other modules under `lib/browser` (layout, style, HTML,
+  The garbage collector (`Browser.JS.GC`) names no field. It walks every map generically,
+  but for a heap record (`heap_record?/1`) it skips the fields that `no_refs?/1` names,
+  because the walk reads each integer as a heap id and these fields hold counts. A1 must
+  change these two guards for its record: a shape id and a slot position are integers too. The other modules under `lib/browser` (layout, style, HTML,
   cookies, the console of the session) have their own `attrs`, `props` and `hpos`, but they
   never read a heap record, so the gate does not search them.
   """
@@ -124,6 +126,20 @@ defmodule Browser.JS.Obj do
 
   @doc "Whether `o` is a record of an object (it has own-property fields). It is a guard."
   defguard object?(o) when is_map(o) and is_map_key(o, :props)
+
+  @doc """
+  Whether `o` is the record of a heap object: a map with own-property fields and a class.
+  It is a guard. A DOM node also has a `props` field, but it has no class.
+  """
+  defguard heap_record?(o) when object?(o) and is_map_key(o, :class)
+
+  @doc """
+  Whether the field `field` of a heap record holds no heap id, so that the garbage collector
+  does not walk it. It is a guard. These own-property fields hold keys that `props` also
+  holds (or keys that are gone), attributes and counts. The collector reads each integer
+  as an id, so a count could keep a dead object alive.
+  """
+  defguard no_refs?(field) when field in [:keys, :attrs, :horder, :hpos]
 
   @doc """
   The stored value of the own key `key` of `o`: `{:ok, value}` or `:error`. An accessor

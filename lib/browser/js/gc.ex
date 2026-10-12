@@ -15,11 +15,15 @@ defmodule Browser.JS.GC do
   The continuation of a compiled plan of an async body or a generator (step 5c) is a fun
   of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
-  a lift template only while the template runs, so it is a root like any other key.
+  a lift template only while the template runs, so it is a root like any other key. The
+  fields of a heap record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold
+  counts and keys, and a count must not keep a dead object alive.
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers).
   """
+
+  require Browser.JS.Obj, as: Obj
 
   @min_collect 100_000
 
@@ -272,6 +276,23 @@ defmodule Browser.JS.GC do
   defp mark([%{params: _, body: _} = closure | rest], marks) do
     stack = push(Map.get(closure, :scope), rest, marks)
     mark(push(Map.get(closure, :home), stack, marks), marks)
+  end
+
+  # The record of a heap object: the walk skips the fields that hold no id
+  # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, and
+  # keys that `props` also holds.
+  defp mark([t | rest], marks) when Obj.heap_record?(t) do
+    stack =
+      :maps.fold(
+        fn
+          k, _v, acc when Obj.no_refs?(k) -> acc
+          _k, v, acc -> push(v, acc, marks)
+        end,
+        rest,
+        t
+      )
+
+    mark(stack, marks)
   end
 
   defp mark([t | rest], marks) when is_map(t) do

@@ -107,6 +107,35 @@ defmodule Browser.JSGCTest do
     |> Task.await()
   end
 
+  # The own-property fields of an object record also hold integers that are not heap ids:
+  # the place of a key that is not enumerable among the enumerable names is a count. Such a
+  # count must not keep the object with that id alive. The loop makes the count equal to the
+  # id of an object that nothing holds.
+  test "the place of a hidden key keeps no object alive" do
+    for enumerable <- [false, true] do
+      Task.async(fn ->
+        Interp.init(10_000_000)
+        Builtins.install()
+        {:obj, gid} = Interp.new_object()
+
+        {:ok, p} =
+          Parser.parse("""
+          var o = {};
+          for (var i = 0; i < #{gid}; i++) o['k' + i] = i;
+          Object.defineProperty(o, 'h', {value: 1, enumerable: #{enumerable}});
+          """)
+
+        Interp.run_program(p)
+        GC.collect()
+        assert :erlang.get(gid) == :undefined, "enumerable: #{enumerable}"
+
+        {:ok, names} = Parser.parse("Object.getOwnPropertyNames(o).slice(-2).join()")
+        assert Interp.run_program(names) == "k#{gid - 1},h"
+      end)
+      |> Task.await(30_000)
+    end
+  end
+
   test "does nothing unless enabled" do
     Task.async(fn ->
       Interp.init(1000)
