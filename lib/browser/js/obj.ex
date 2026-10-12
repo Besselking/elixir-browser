@@ -46,11 +46,13 @@ defmodule Browser.JS.Obj do
   `plain_record/1` and `plain_record/2` make a fast record when the switch `:js_shapes` is
   on (`Browser.JS.Shape.on?/0`). `Interp.new_object/0` and `Interp.new_object/2` use them, so
   plain objects, object literals, the objects of `new` (of a function or of a class),
-  `JSON.parse` and error objects are fast. `record/1` and `record/2` always make a
-  dictionary record: arrays, functions, host objects, proxies, the collections and the
-  built-in objects. The prototype objects that the interpreter makes (`F.prototype`, the
-  prototype of a class) and every object that `Browser.JS.Builtins.install/0` makes stay
-  dictionaries too. A later step (A4) makes some of them fast.
+  `JSON.parse` and error objects are fast. `Interp.new_proto_object/1` uses them too (step
+  A2), so the prototype objects that the interpreter makes (`F.prototype`, the prototype of
+  a class) are fast, and the inline caches of the compiled code can read their methods.
+  `record/1` and `record/2` always make a dictionary record: arrays, functions, host
+  objects, proxies, the collections and the built-in objects. Every object that
+  `Browser.JS.Builtins.install/0` makes stays a dictionary too. A later step (A4) makes
+  some of them fast.
 
   ### From fast mode to dictionary mode
 

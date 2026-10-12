@@ -231,14 +231,15 @@ defmodule Browser.JS.Interp do
 
   @doc """
   A plain object with no own property that is to be a prototype (`F.prototype`, the
-  prototype of a class). It is a dictionary record also when the switch `:js_shapes` is on:
-  in step A1 only the objects that are not prototypes are fast (`Browser.JS.Obj`).
+  prototype of a class). It is a fast record when the switch `:js_shapes` is on, as
+  `new_object/0` makes one (step A2): the inline caches of the compiled code read a method
+  from a fast prototype with no search of its keys (`Browser.JS.Shape`).
   """
   def new_proto_object(proto \\ nil),
     do:
       {:obj,
        alloc(
-         Obj.record(
+         Obj.plain_record(
            class: :object,
            proto: if(proto == :null, do: nil, else: proto || proto(:object))
          )

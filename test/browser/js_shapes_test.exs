@@ -142,13 +142,13 @@ defmodule Browser.JS.ShapesTest do
       assert Enum.sort(fast) == Enum.sort(~w(lit empty inst fobj parsed err made))
       assert Enum.sort(dict) == ["arr", "fn"]
 
-      # (the prototypes that the interpreter makes stay dictionaries in step A1)
+      # (the prototypes that the interpreter makes are fast from step A2 on)
       protos =
         inspect_run("function F(){}; class K {}; var p = F.prototype, q = K.prototype", fn ->
           {Obj.fast?(global_record("p")), Obj.fast?(global_record("q"))}
         end)
 
-      assert protos == {false, false}
+      assert protos == {true, true}
 
       # (the built-in objects stay dictionaries, and the switch goes back on after them)
       builtins =
