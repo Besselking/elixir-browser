@@ -503,6 +503,15 @@ defmodule Browser.JS.Obj do
          frozen?(o) or (not freeze? and sealed?(o)))
   end
 
+  @doc """
+  The record `o` in its normal form, for a compare of two records. Two records that hold the
+  same own properties, in the same order and with the same attributes, have the same normal
+  form. Today a record has one form, so it is its own normal form. A representation with
+  two forms of a record (in A1, a fast record and a dictionary record) gives one form here,
+  so that the shadow run of `Browser.JS.Fast` compares what two records hold, not their form.
+  """
+  def normal(o), do: o
+
   # ── writing ────────────────────────────────────────────────
   # Each writer takes a record and gives the new record. The caller stores it. Most writers
   # are macros: the interpreter calls them on paths that run for each call or each object

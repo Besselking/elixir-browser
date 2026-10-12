@@ -41,15 +41,16 @@ defmodule Browser.JS.Fast do
   @doc false
   # The result of a fast path, `fast`, for the object with the id `id` (or `nil` when the
   # fast path reads no object). In the check build the old path, `old`, runs first on the
-  # same state, and the two must give the same result and leave the same record at `id`.
-  # The old path must not fail a write and must not call JavaScript code: the guard of each
-  # fast path excludes setters, getters and proxies, so the old path cannot get to user
-  # code. The old path can throw a JavaScript error that the operation itself throws (a
-  # ReferenceError for a binding in its TDZ): then the fast path must throw an error of the
-  # same prototype with the same message. The old path must not change the heap either:
-  # the objects that it makes are erased, and the heap counters go back to their values
-  # before it. In the normal build the old path is in a branch that the compiler drops, so
-  # that a name or a function that only the old path uses is not reported as unused.
+  # same state, and the two must give the same result and leave the same record at `id`
+  # (the same `Browser.JS.Obj.normal/1`). The old path must not fail a write and must not
+  # call JavaScript code: the guard of each fast path excludes setters, getters and
+  # proxies, so the old path cannot get to user code. The old path can throw a JavaScript
+  # error that the operation itself throws (a ReferenceError for a binding in its TDZ):
+  # then the fast path must throw an error of the same prototype with the same message. The
+  # old path must not change the heap either: the objects that it makes are erased, and the
+  # heap counters go back to their values before it. In the normal build the old path is in
+  # a branch that the compiler drops, so that a name or a function that only the old path
+  # uses is not reported as unused.
   defmacro shadow(id, fast, old) do
     if @check do
       quote do
@@ -172,7 +173,8 @@ defmodule Browser.JS.Fast do
               "the old path #{inspect(old_result, limit: 8)}"
           )
 
-      if fast_record !== old_record,
+      # (the two paths can leave a record in two forms that hold the same properties)
+      if Browser.JS.Obj.normal(fast_record) !== Browser.JS.Obj.normal(old_record),
         do:
           fail(
             "a fast path stores #{inspect(fast_record, limit: 12)}, " <>
