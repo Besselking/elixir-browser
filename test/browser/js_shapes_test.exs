@@ -171,17 +171,20 @@ defmodule Browser.JS.ShapesTest do
     end
 
     test "a record goes to dictionary mode at the limits, and stays correct" do
+      # (the objects of a constructor of 128 keys are fast once the chain is in the table,
+      # and the add of a 129th key is past the limit)
       src = ~S"""
       var last = {a: 1, b: 2}; delete last.b;
       var mid = {a: 1, b: 2, c: 3}; delete mid.b;
-      var many = {}; for (var i = 0; i < 129; i++) many['k' + i] = i;
-      var limit = {}; for (var i = 0; i < 128; i++) limit['k' + i] = i;
       var index = {a: 1}; index[0] = 2;
       var reconf = {a: 1};
       for (var i = 0; i < 9; i++) Object.defineProperty(reconf, 'a', {enumerable: i % 2 == 1});
       var few = {a: 1};
       for (var i = 0; i < 8; i++) Object.defineProperty(few, 'a', {enumerable: i % 2 == 1});
       var one = {a: 1};
+      function L(){ for (var j = 0; j < 128; j++) this['k' + j] = j }
+      for (var i = 0; i < 20; i++) var limit = new L();
+      var many = new L(); many.k128 = 1;
       """
 
       modes =
@@ -209,6 +212,35 @@ defmodule Browser.JS.ShapesTest do
         end)
 
       assert same
+    end
+
+    test "a chain that makes too many new shapes in a row goes to dictionary mode once" do
+      # (a hash map gets keys that no other object has; the objects of a constructor use the
+      # same chain again, so each one gets further, and the later ones are fast)
+      src = ~S"""
+      var h8 = {}, h9 = {};
+      for (var i = 0; i < 8; i++) h8['a' + i] = i;
+      for (var i = 0; i < 9; i++) h9['b' + i] = i;
+      function C(){ for (var j = 0; j < 20; j++) this['f' + j] = j }
+      var c1 = new C(), c2 = new C(), c3 = new C(), c4 = new C();
+      """
+
+      result =
+        inspect_run(src, fn ->
+          modes = for n <- ~w(h8 h9 c1 c2 c3 c4), do: Obj.fast?(global_record(n))
+          {modes, global_record("c3").shape == global_record("c4").shape}
+        end)
+
+      assert result == {[true, false, false, false, true, true], true}
+
+      # (the keys of an object literal that the compiler sees have no such limit; past 128
+      # keys the literal has no shape)
+      keys = for i <- 0..127, do: "q#{i}"
+
+      assert {:js_shape, _, _, _, _, _, _} =
+               HeapOracle.in_process(fn -> Shape.from_keys(keys) end)
+
+      assert HeapOracle.in_process(fn -> Shape.from_keys(keys ++ ["q128"]) end) == nil
     end
 
     test "the table is erased past its budget, and an erase does not walk the heap" do

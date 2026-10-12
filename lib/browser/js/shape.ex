@@ -18,8 +18,9 @@ defmodule Browser.JS.Shape do
     because it is not in the key order.
   * `flags`: `1` when the object is not extensible, `2` when an enumerable key is a symbol
     (then `Obj.plain_names/1` gives `nil`), `8` when a key is a symbol (else
-    `Obj.symbol_keys/1` does not look at the keys). The bits from `16` up count the changes
-    of attributes (`reconf/3`).
+    `Obj.symbol_keys/1` does not look at the keys). The bits `16` to `128` count the
+    changes of attributes (`reconf/3`). The bits from `256` up count the new shapes in a
+    row that the adds of the chain made (see the limits).
   * `enum`: the enumerable string keys in creation order, which `Object.keys` gives. It is
     made once, when the shape is made.
 
@@ -34,8 +35,9 @@ defmodule Browser.JS.Shape do
   a map of the bits to the child shape (an add), and the keys `{:reconf, position, bits}`,
   `:prevent` and `{:lock, freeze?, accessors}` for the other changes. The entry of a shape
   that an add made also holds `:up`, the shape before the add, for the `delete` of the last
-  key. Two records that get the same keys in the same order with the same attributes thus
-  get the same shape.
+  key. The key `{:dict, key, bits}` tells that an add of this key went to dictionary mode
+  at the limit of new shapes in a row. Two records that get the same keys in the same order
+  with the same attributes thus get the same shape.
 
   The table is only for the sharing. A record keeps its shape term, and the term stays
   correct when the table goes. So `erase/0` can erase the table at any time: the next
@@ -55,6 +57,13 @@ defmodule Browser.JS.Shape do
     the index keys first, and an object with such keys is often a hash map);
   * the 65th child of a shape other than the root (an object that is used as a hash
     map must not fill the table);
+  * the 9th new shape in a row in the chain of a record: an object that is used as a hash
+    map gets keys that no other object has, so each add makes a new shape, which costs
+    more than the add to a dictionary. The add then leaves the key `{:dict, key, bits}` in
+    the table. The next record that makes the same add (the second object of a
+    constructor) thus finds the chain used again, and it makes the shape, with the count
+    at zero. The shapes of an object literal (`from_keys/1`) have no such limit, because
+    their keys come from the source text;
   * more than 8 changes of attributes in the history of a shape.
 
   The root has no limit of children: the first keys of the objects of a page are few, and
@@ -84,10 +93,12 @@ defmodule Browser.JS.Shape do
   @enum_symbol 2
   @symbol 8
   @reconf_one 16
+  @run_one 256
 
   @max_keys 128
   @max_children 64
   @max_reconf 8
+  @max_run 8
   @budget 2_000_000
 
   @root {:js_shape, 0, %{}, {}, {}, 0, []}
@@ -114,15 +125,19 @@ defmodule Browser.JS.Shape do
   The child of the shape `sh` with the new key `key` with the bits `b` at the end, or
   `:dict` when the add passes a limit. The key must not be in `sh`.
   """
-  def add({:js_shape, sid, _, _, _, _, _} = sh, key, b) do
+  def add(sh, key, b), do: add(sh, key, b, true)
+
+  # `add/3`; `limit?` false for a key from the source text, which the limit of new shapes in
+  # a row does not count (`from_keys/1`).
+  defp add({:js_shape, sid, _, _, _, _, _} = sh, key, b, limit?) do
     case :erlang.get({:jst, sid}) do
       %{^key => %{^b => child}} -> child
-      :undefined -> make_add(sh, %{}, key, b)
-      t -> make_add(sh, t, key, b)
+      :undefined -> make_add(sh, %{}, key, b, limit?)
+      t -> make_add(sh, t, key, b, limit?)
     end
   end
 
-  defp make_add({:js_shape, sid, index, keys, bits, flags, enum} = sh, t, key, b) do
+  defp make_add({:js_shape, sid, index, keys, bits, flags, enum} = sh, t, key, b, limit?) do
     n = tuple_size(keys)
 
     cond do
@@ -135,6 +150,12 @@ defmodule Browser.JS.Shape do
       sid != 0 and map_size(t) > @max_children ->
         :dict
 
+      # (the chain made too many new shapes in a row: the first time, the record goes to
+      # dictionary mode; the next time, the chain is used again and the count starts again)
+      limit? and flags >>> 8 >= @max_run and not is_map_key(t, {:dict, key, b}) ->
+        record(sid, t, {:dict, key, b}, true, 10)
+        :dict
+
       true ->
         e = e?(b)
 
@@ -145,6 +166,11 @@ defmodule Browser.JS.Shape do
             _ -> flags
           end
 
+        flags =
+          if limit? and not is_map_key(t, {:dict, key, b}),
+            do: flags + @run_one,
+            else: flags &&& @run_one - 1
+
         enum = if e and is_binary(key), do: enum ++ [key], else: enum
 
         child =
@@ -153,6 +179,7 @@ defmodule Browser.JS.Shape do
 
         # (the entry `:up` comes first, so that an erase in `record/5` also erases it)
         :erlang.put({:jst, elem(child, 1)}, %{up: sh})
+        t = Map.delete(t, {:dict, key, b})
         record(sid, t, key, Map.put(Map.get(t, key, %{}), b, child), 50 + 8 * (n + 1))
         child
     end
@@ -184,7 +211,7 @@ defmodule Browser.JS.Shape do
       :erlang.element(pos, bits) == b ->
         sh
 
-      flags >>> 4 >= @max_reconf ->
+      (flags >>> 4 &&& 15) >= @max_reconf ->
         :dict
 
       true ->
@@ -259,7 +286,7 @@ defmodule Browser.JS.Shape do
   """
   def from_keys(keys) do
     Enum.reduce_while(keys, @root, fn k, sh ->
-      case add(sh, k, @w ||| @e ||| @c) do
+      case add(sh, k, @w ||| @e ||| @c, false) do
         :dict -> {:halt, nil}
         child -> {:cont, child}
       end
