@@ -147,6 +147,12 @@ defmodule Browser.JS.Interp do
     # when the setting is on, so that the oracles can run the two modes in one VM.
     if Application.get_env(:browser, :js_shapes, true) == false,
       do: :erlang.put(:js_shapes, false)
+
+    # The form switch of the elements of an array (`Browser.JS.Elems`): the application
+    # setting `:js_elems_sparse` (`JS_ELEMS=sparse`, or `mix js.test262 --elems sparse`)
+    # makes each new array sparse in each heap of the process, in the same way.
+    if Application.get_env(:browser, :js_elems_sparse, false) == true,
+      do: :erlang.put(:js_elems_sparse, true)
   end
 
   def alloc(obj) do

@@ -45,6 +45,10 @@ defmodule Mix.Tasks.Js.Test262 do
       default is the application setting (on, or off with `JS_SHAPES=0`). With `off`,
       every object is a dictionary record, so that two runs can show that the two modes
       give the same results.
+    * `--elems dense|sparse` - the form of the elements of a new array
+      (`Browser.JS.Elems`). The default is the application setting (dense, or sparse with
+      `JS_ELEMS=sparse`). With `sparse`, every array keeps its elements in a map, so that
+      two runs can show that the two forms give the same results.
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -105,7 +109,8 @@ defmodule Mix.Tasks.Js.Test262 do
           timings: :string,
           resolve: :string,
           compile_diff: :boolean,
-          shapes: :string
+          shapes: :string,
+          elems: :string
         ],
         aliases: [v: :verbose]
       )
@@ -124,6 +129,13 @@ defmodule Mix.Tasks.Js.Test262 do
       "on" -> Application.put_env(:browser, :js_shapes, true)
       "off" -> Application.put_env(:browser, :js_shapes, false)
       other -> Mix.raise("--shapes must be on or off, not #{other}")
+    end
+
+    case opts[:elems] do
+      nil -> :ok
+      "dense" -> Application.put_env(:browser, :js_elems_sparse, false)
+      "sparse" -> Application.put_env(:browser, :js_elems_sparse, true)
+      other -> Mix.raise("--elems must be dense or sparse, not #{other}")
     end
 
     paths =

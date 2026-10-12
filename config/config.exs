@@ -24,4 +24,10 @@ config :browser, js_compile: System.get_env("JS_COMPILE") != "0"
 # setting for each new heap.
 config :browser, js_shapes: System.get_env("JS_SHAPES") != "0"
 
+# The form of the elements of a new array (`Browser.JS.Elems`). `JS_ELEMS=sparse` makes
+# each new array sparse (a map of the elements), so that two runs can show that the two
+# forms give the same results. `Browser.JS.Interp.init/1` reads the setting for each new
+# heap.
+config :browser, js_elems_sparse: System.get_env("JS_ELEMS") == "sparse"
+
 import_config "#{config_env()}.exs"
