@@ -258,6 +258,15 @@ defmodule Browser.JS.Elems do
   end
 
   @doc """
+  `new/2` with the elements in the tuple `vec`, which has at most `max/0` elements.
+  """
+  def new_vec(vec, proto) do
+    if sparse_on?(),
+      do: new(:erlang.tuple_to_list(vec), proto),
+      else: Browser.JS.Obj.array_record(class: :array, vec: vec, proto: proto)
+  end
+
+  @doc """
   A new array record with the items `items` (a map of each index to its item) and the
   length `len`. It is dense when it has no hole and no accessor, `len` is at most `max/0`
   and the form switch is off.

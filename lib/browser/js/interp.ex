@@ -269,6 +269,13 @@ defmodule Browser.JS.Interp do
   def new_array(list), do: {:obj, alloc(Elems.new(list, proto(:array)))}
 
   @doc """
+  `new_array/1` with the elements in the tuple `vec` (at most `Browser.JS.Elems.max/0`
+  of them). The array literals of the compiled code use it, so that a short literal
+  makes no list.
+  """
+  def new_array_vec(vec), do: {:obj, alloc(Elems.new_vec(vec, proto(:array)))}
+
+  @doc """
   An object backed by Elixir: reads and writes of its properties go to `mod.host_get/3` and
   `mod.host_put/4` first (`{:ok, value}` / `:ok`, or `:miss` to fall back to ordinary
   properties and the prototype chain, where its methods live).

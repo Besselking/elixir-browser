@@ -978,9 +978,31 @@ defmodule Browser.JS.Compile do
 
   defp expr_node({:array, elems}) do
     if plain_list?(elems) do
-      al = list_code(elems)
-      # (`ev/2` evaluates the elements before it makes the array, as here)
-      fn env -> Interp.new_array(argv(al, env)) end
+      # (`ev/2` evaluates the elements before it makes the array, as here. A literal of
+      # at most three elements makes the tuple of a dense array with no list, step B2)
+      case list_code(elems) do
+        {:a} ->
+          fn _env -> Interp.new_array_vec({}) end
+
+        {:a, x} ->
+          fn env -> Interp.new_array_vec({av(x, env)}) end
+
+        {:a, x, y} ->
+          fn env ->
+            a = av(x, env)
+            Interp.new_array_vec({a, av(y, env)})
+          end
+
+        {:a, x, y, z} ->
+          fn env ->
+            a = av(x, env)
+            b = av(y, env)
+            Interp.new_array_vec({a, b, av(z, env)})
+          end
+
+        {:n, os} ->
+          fn env -> Interp.new_array(values(os, env)) end
+      end
     else
       shell({:array, Enum.map(elems, &carg/1)})
     end
