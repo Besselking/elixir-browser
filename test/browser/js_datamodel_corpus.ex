@@ -314,7 +314,9 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm elems callbacks that change the array",
      ~S/function f(){ var r = []; var a = [1, 2, 3, 4]; a.forEach((x, i) => { r.push(x); if (i == 0) a.push(9); if (i == 1) a.length = 3 }); r.push('|', a.join()); var b = [1, 2, 3, 4]; var m = b.map((x, i) => { if (i == 0) delete b[2]; return x * 10 }); r.push(m.join(), Object.keys(m).join(), '|'); var c = [1, 2, 3]; for (var x of c) { r.push(x); if (x == 1) c.push(4); if (x == 3) c.length = 3 } r.push('|'); var d = [1, 2, 3]; var fl = d.filter((x, i) => { if (i == 0) Object.defineProperty(d, 2, {get(){ return 'G' }}); return true }); r.push(fl.join()); var e = [1, 2, 3]; r.push(e.some((x, i) => { e[i + 1] = 'n' + i; return false }), e.join()); console.log(r.join(' ')) } f()/},
     {"dm elems JSON and holes",
-     ~S|function f(){ var a = [1, , 3]; a[5] = 6; var b = new Array(3); b[1] = 'b'; console.log(JSON.stringify(a), JSON.stringify(b), JSON.stringify([[], [[]], [1, [2, [3]]]]), JSON.stringify(JSON.parse('[1,[2,3],[]]')), String([1, [2, 3], [], [, ]])) } f()|}
+     ~S|function f(){ var a = [1, , 3]; a[5] = 6; var b = new Array(3); b[1] = 'b'; console.log(JSON.stringify(a), JSON.stringify(b), JSON.stringify([[], [[]], [1, [2, [3]]]]), JSON.stringify(JSON.parse('[1,[2,3],[]]')), String([1, [2, 3], [], [, ]])) } f()|},
+    {"dm elems across the size limit",
+     ~S|function t(n){ var r = []; for (var k of [n - 1, n, n + 1]) { var a = []; for (var i = 0; i < k; i++) a.push(i); r.push(a.length, a[k - 1]); a[a.length] = 'e'; r.push(a.length, a[k]); a[k + 2] = 'h'; r.push(a.length, (k + 1) in a) } var b = []; for (var i = 0; i < n; i++) b[b.length] = i; b.length = n + 1; r.push(b.length, n in b, b[n - 1]); b.length = n; r.push(b.length, b[n - 1]); var w = []; for (var i = 0; i < n; i++) w.push(i); var s = w.slice(); s.sort((x, y) => y - x); r.push(s[0], s[n - 1]); s.reverse(); s.push('p'); r.push(s[0], s[n], s.length); var sp = w.slice(); var rm = sp.splice(n - 4, 2, 'x', 'y', 'z'); r.push(rm.join(), sp.length, sp[n - 2], sp[n]); var c = w.concat([n, n + 1]); r.push(c.length, c[n + 1], c.indexOf(n), c.includes(n + 1)); var p = w.slice(); p.push('q'); r.push(p.length, p.pop(), p.pop(), p.length); p.unshift('u'); r.push(p.length, p[0], p[n - 1]); var m = w.map(x => x * 2).filter(x => x % 3 == 0); r.push(m.length, m[m.length - 1]); var h = new Array(n), h2 = new Array(n + 1); r.push(h.length, Object.keys(h).length, h2.length, 0 in h2); var x = [1, 2, 3]; x[n] = 'x'; r.push(x.length, Object.keys(x).length, n in x, x.indexOf('x')); return r.join(' ') } function f(){ console.log(t(64)); console.log(t(128)) } f()|}
   ]
 
   # The console output of node 22 for the rows of steps A3, A4 and B2 (from "dm lit
@@ -400,7 +402,10 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm elems callbacks that change the array",
      ~S/1 2 3 | 1,2,3 10,20,,40 0,1,3 | 1 2 3 | 1,2,G false 1,n0,n1,n2/},
     {"dm elems JSON and holes",
-     ~S|[1,null,3,null,null,6] [null,"b",null] [[],[[]],[1,[2,[3]]]] [1,[2,3],[]] 1,2,3,,|}
+     ~S|[1,null,3,null,null,6] [null,"b",null] [[],[[]],[1,[2,[3]]]] [1,[2,3],[]] 1,2,3,,|},
+    {"dm elems across the size limit",
+     "63 62 64 e 66 false 64 63 65 e 67 false 65 64 66 e 68 false 65 false 63 64 63 63 0 0 p 65 60,61 65 z 63 66 65 64 true 65 q 63 63 64 u 62 22 126 64 0 65 false 65 4 true 64\n" <>
+       "127 126 128 e 130 false 128 127 129 e 131 false 129 128 130 e 132 false 129 false 127 128 127 127 0 0 p 129 124,125 129 z 127 130 129 128 true 129 q 127 127 128 u 126 43 252 128 0 129 false 129 4 true 128"}
   ]
 
   @doc "Gives the rows as `{name, source, options}`."

@@ -16,6 +16,9 @@ defmodule Browser.JS.ElemsTest do
 
   @fields "items|len|vec"
 
+  # The size limit of the dense form: the oracle uses indices and lengths around it.
+  @max Elems.max()
+
   # The patterns of the grep command in the moduledoc of `Browser.JS.Elems`: `@gate` finds
   # a direct use, and `@allow` is the allow-list. Each is matched against
   # "path:line number:line", as grep prints it.
@@ -95,15 +98,15 @@ defmodule Browser.JS.ElemsTest do
       0,
       1,
       2,
-      62,
-      63,
-      64,
-      65,
-      66,
+      @max - 2,
+      @max - 1,
+      @max,
+      @max + 1,
+      @max + 2,
       max(len - 1, 0),
       len,
       len + 1,
-      :rand.uniform(70) - 1
+      :rand.uniform(@max + 6) - 1
     ])
   end
 
@@ -135,15 +138,15 @@ defmodule Browser.JS.ElemsTest do
         {{:delete, i}, Elems.delete(o, i), {Map.delete(map, i), len}}
 
       4 ->
-        n = Enum.random([0, 1, max(len - 1, 0), len, len + 1, 63, 64, 65, 66])
+        n = Enum.random([0, 1, max(len - 1, 0), len, len + 1, @max - 1, @max, @max + 1, @max + 2])
         {{:set_len, n}, Elems.set_len(o, n), {Map.filter(map, fn {i, _} -> i < n end), n}}
 
       5 ->
-        list = values(Enum.random([0, 3, 63, 64, 65]))
+        list = values(Enum.random([0, 3, @max - 1, @max, @max + 1]))
         {{:replace, length(list)}, Elems.replace(o, list), model(list)}
 
       6 ->
-        n = Enum.random([0, 2, 64, 65, 70])
+        n = Enum.random([0, 2, @max, @max + 1, @max + 6])
         items = for i <- 0..(n - 1)//1, :rand.uniform(8) > 1, into: %{}, do: {i, item()}
         {{:replace_map, n}, Elems.replace_map(o, items, n), {items, n}}
 
@@ -208,7 +211,7 @@ defmodule Browser.JS.ElemsTest do
       :rand.seed(:exsss, {2, 7, 64})
 
       for _run <- 1..400 do
-        list = values(Enum.random([0, 1, 3, 62, 63, 64, 65]))
+        list = values(Enum.random([0, 1, 3, @max - 2, @max - 1, @max, @max + 1]))
         o = Elems.new(list, nil)
         assert Elems.dense?(o) == length(list) <= Elems.max()
         agree!(o, model(list), Elems.dense?(o), [{:new, length(list)}])
@@ -229,8 +232,8 @@ defmodule Browser.JS.ElemsTest do
       assert dense.(%{0 => 1.0, 1 => 2.0}, 2)
       refute dense.(%{0 => 1.0}, 2)
       refute dense.(%{0 => {:accessor, :undefined, :undefined}}, 1)
-      assert dense.(Map.new(0..63, &{&1, 1.0}), 64)
-      refute dense.(Map.new(0..64, &{&1, 1.0}), 65)
+      assert dense.(Map.new(0..(@max - 1), &{&1, 1.0}), @max)
+      refute dense.(Map.new(0..@max, &{&1, 1.0}), @max + 1)
     end
 
     test "the form switch makes the new records sparse" do
@@ -271,10 +274,10 @@ defmodule Browser.JS.ElemsTest do
 
   describe "the forms of the arrays of a program" do
     test "each change rule makes the sparse form, and the other changes keep the dense form" do
-      src = ~S"""
+      src = """
       var lit = [1, 2, 3], empty = [], spread = [...lit, 4], holes = [1, , 3];
-      var big = []; for (var i = 0; i < 64; i++) big.push(i);
-      var over = big.slice(); over.push(64);
+      var big = []; for (var i = 0; i < #{@max}; i++) big.push(i);
+      var over = big.slice(); over.push(#{@max});
       var hole = [1, 2, 3]; hole[4] = 5;
       var append = [1, 2, 3]; append[3] = 4;
       var del = [1, 2, 3]; delete del[1];
@@ -308,7 +311,7 @@ defmodule Browser.JS.ElemsTest do
     test "a dense record is never frozen, sealed, closed or an arguments object" do
       src = """
       var all = [];
-      for (var i = 0; i < 70; i++) { var a = [i]; if (i % 3 == 0) Object.freeze(a); all.push(a, [i, i]) }
+      for (var i = 0; i < #{@max + 6}; i++) { var a = [i]; if (i % 3 == 0) Object.freeze(a); all.push(a, [i, i]) }
       """
 
       bad =

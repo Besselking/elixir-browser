@@ -60,9 +60,12 @@ defmodule Browser.JS.Elems do
 
   ## The size limit
 
-  `max/0` is 64 (see `b2-numbers.md` for the measurements of other limits). A write
-  copies the whole tuple, so a large tuple costs more than a map for each write. At 64
-  elements the garbage of one write is near the garbage of a path copy in a large map.
+  `max/0` is 128. A write copies the whole tuple, and an append makes a new tuple, so the
+  cost of a write grows with the size. Measured with limits of 32, 64, 128 and 256: at
+  128, a read or a write of an array of 65 to 128 elements is 25 to 35% faster than in the
+  sparse form, and a `slice` of such an array is 6 times faster. An array that grows past
+  the limit pays for the copies of the appends before it, about 1% more for each push of a
+  loop of 1,024 pushes than with a limit of 64. At 256, that cost is 3 times larger.
 
   ## The form switch
 
@@ -103,7 +106,7 @@ defmodule Browser.JS.Elems do
 
   require Browser.JS.Obj
 
-  @max 64
+  @max 128
 
   @doc "The most elements that a dense record holds."
   def max, do: @max
