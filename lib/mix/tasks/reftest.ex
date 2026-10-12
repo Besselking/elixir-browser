@@ -26,10 +26,15 @@ defmodule Mix.Tasks.Reftest do
       several machines. With `--check` only the baseline entries of that part are compared;
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found
+    * `--sweep` - do not compare pictures: lay out every test file found (also those a reftest
+      skips) with the sizing fold in check mode, count per folder the widths the fold found
+      and refused, and exit with an error if the fold finds another width than a layout, or
+      makes a page crash that does not crash without it
     * `--layout-check` - lay out every page also from the layout memo the page before it left
       and from its own (`LAYOUT_MEMO=check`, see `Browser.Layout.layout_kept/6`), compare each
-      with a fresh layout, and exit with an error if one differs. This finds a wrong layout
-      that gives the same picture, and also checks pages that fail their reference
+      with a fresh layout, compare every width the sizing fold finds with the width a layout
+      finds (`LAYOUT_FOLD=check`), and exit with an error if one differs. This finds a wrong
+      layout that gives the same picture, and also checks pages that fail their reference
   """
   use Mix.Task
 
@@ -73,17 +78,22 @@ defmodule Mix.Tasks.Reftest do
           jobs: :integer,
           shard: :string,
           limit: :integer,
-          layout_check: :boolean
+          layout_check: :boolean,
+          sweep: :boolean
         ],
         aliases: [v: :verbose]
       )
 
     Application.put_env(:browser, :gui, false)
-    if opts[:layout_check], do: System.put_env("LAYOUT_MEMO", "check")
+
+    if opts[:layout_check] do
+      System.put_env("LAYOUT_MEMO", "check")
+      System.put_env("LAYOUT_FOLD", "check")
+    end
+
     Mix.Task.run("app.start")
 
     root = Path.expand(opts[:dir] || @default_dir)
-    baseline_file = opts[:baseline] || @default_baseline
 
     paths =
       if paths == [], do: @default_paths, else: Enum.map(paths, &String.trim_trailing(&1, "/"))
@@ -108,6 +118,13 @@ defmodule Mix.Tasks.Reftest do
       Mix.raise("no tests found under #{Enum.join(paths, ", ")} (try --fetch)")
     end
 
+    if opts[:sweep],
+      do: sweep(root, files, paths, opts),
+      else: run_tests(root, files, paths, opts)
+  end
+
+  defp run_tests(root, files, paths, opts) do
+    baseline_file = opts[:baseline] || @default_baseline
     Mix.shell().info("Running #{length(files)} tests from #{root} ...")
     started = System.monotonic_time(:millisecond)
     total = length(files)
@@ -239,6 +256,93 @@ defmodule Mix.Tasks.Reftest do
         Mix.shell().info("  #{String.pad_leading(Integer.to_string(n), 6)}  #{why}")
       end)
     end
+  end
+
+  # ── the sweep ─────────────────────────────────────────────
+
+  defp sweep(root, files, paths, opts) do
+    Mix.shell().info(
+      "Laying out #{length(files)} files from #{root} with the fold in check mode ..."
+    )
+
+    started = System.monotonic_time(:millisecond)
+
+    one = fn rel ->
+      try do
+        Reftest.sweep_file(root, rel)
+      rescue
+        e ->
+          message = e |> Exception.message() |> String.split("\n") |> hd()
+
+          cond do
+            String.starts_with?(message, "layout check") -> {:wrong, message}
+            fold_crash?(root, rel) -> {:wrong, "crash with the fold only: " <> message}
+            true -> {:crash, message}
+          end
+      end
+    end
+
+    results =
+      files
+      |> Task.async_stream(fn rel -> {rel, one.(rel)} end,
+        max_concurrency: opts[:jobs] || System.schedulers_online(),
+        timeout: opts[:timeout] || 10_000,
+        on_timeout: :kill_task,
+        ordered: true,
+        zip_input_on_exit: true
+      )
+      |> Enum.map(fn
+        {:ok, result} -> result
+        {:exit, {rel, _}} -> {rel, {:crash, "timeout"}}
+      end)
+
+    groups =
+      Enum.group_by(results, fn {rel, _} ->
+        Enum.find(paths, rel, &(rel == &1 or String.starts_with?(rel, &1 <> "/")))
+      end)
+
+    width = paths |> Enum.map(&String.length/1) |> Enum.max(fn -> 10 end)
+
+    Mix.shell().info(
+      "\n" <> String.pad_trailing("folder", width) <> "  files  folded  refused  wrong  crashed"
+    )
+
+    for {path, entries} <- Enum.sort(groups) do
+      count = fn kind -> Enum.count(entries, fn {_, r} -> elem(r, 0) == kind end) end
+      folded = for({_, {:ok, h, _}} <- entries, do: h) |> Enum.sum()
+      refused = for({_, {:ok, _, f}} <- entries, do: f) |> Enum.sum()
+
+      Mix.shell().info(
+        String.pad_trailing(path, width) <>
+          Enum.map_join(
+            [
+              {length(entries), 7},
+              {folded, 8},
+              {refused, 9},
+              {count.(:wrong), 7},
+              {count.(:crash), 9}
+            ],
+            fn {n, w} -> String.pad_leading(Integer.to_string(n), w) end
+          )
+      )
+    end
+
+    seconds = Float.round((System.monotonic_time(:millisecond) - started) / 1000, 1)
+    Mix.shell().info("\n#{length(results)} files in #{seconds}s")
+    wrong = for {rel, {:wrong, why}} <- results, do: {rel, why}
+
+    if wrong != [] do
+      Mix.shell().error("\nThe fold is wrong in #{length(wrong)} files:")
+      for {rel, why} <- Enum.take(wrong, 50), do: Mix.shell().error("  #{rel}\n      #{why}")
+      Mix.raise("sweep: the fold is wrong in #{length(wrong)} files")
+    end
+  end
+
+  defp fold_crash?(root, rel) do
+    Reftest.sweep_file(root, rel, :off)
+    true
+  rescue
+    _ -> false
   end
 
   # -> the number of tests where a layout from the memo differed from a fresh layout

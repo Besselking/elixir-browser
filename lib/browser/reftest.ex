@@ -288,6 +288,33 @@ defmodule Browser.Reftest do
   defp layout(nodes, opts, _memo),
     do: Layout.layout(nodes, @width, &measure/2, @view_height, opts)
 
+  @doc """
+  Lays out the page at `rel` (relative to `root`) as `run_test/3` lays out a test page, with the
+  sizing fold in check mode (`LAYOUT_FOLD=check`), whatever the page needs that a reftest
+  cannot do: `{:ok, folded, fallbacks}`, the widths the fold found (each the same as a
+  layout's) and refused. Raises when the fold finds another width than a layout. `fold: :off`
+  lays out without the fold (to see whether a crash is the fold's).
+  """
+  def sweep_file(root, rel, fold \\ :check) do
+    path = Path.join(root, rel)
+    page = Page.build(rewrite_absolute(read(path), root), "file://" <> path, @env)
+
+    # (a picture that cannot be decoded is left out, as one that does not load)
+    images =
+      for url <- Page.all_image_urls(page),
+          "file://" <> file <- [url],
+          {:ok, bytes} <- [File.read(URI.decode(file))],
+          {:ok, picture} <- [Picture.decode(bytes)],
+          into: %{},
+          do: {url, {:ok, picture.w, picture.h}}
+
+    Process.put(:layout_fold_hits, 0)
+    Process.put(:layout_fold_fallbacks, 0)
+    opts = [images: images, margin: 0, svg_defs: page.svg_defs, fold: fold]
+    Layout.layout(page.nodes, @width, &measure/2, @view_height, opts)
+    {:ok, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
+  end
+
   # The pictures a page uses, decoded: `%{url => picture}`. A picture that is not a PNG file on
   # disk cannot be painted, so a page that needs one is skipped.
   defp load_pictures(urls) do

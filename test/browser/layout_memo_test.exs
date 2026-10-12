@@ -71,6 +71,29 @@ defmodule Browser.LayoutMemoTest do
     same!(p, memo)
   end
 
+  # (the infobox of the article page: a table with a caption whose column sizes the memo keeps
+  # are found again when text elsewhere changes)
+  test "a text changed in a realistic page" do
+    html = File.read!("bench/pages/article.html")
+    p = page(html)
+    {_, _, memo} = kept(p, nil, [], 1000, 768)
+
+    edited =
+      page(
+        String.replace(html, "Grid float page table", "Grid float page table edited",
+          global: false
+        )
+      )
+
+    {_, memo} = same!(edited, memo, [], 1000, 768)
+
+    assert Enum.any?(memo.entries, fn {key, {gen, _, _}} ->
+             elem(key, 0) == :tcols and gen == 1
+           end)
+
+    same!(p, memo, [], 1000, 768)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

@@ -287,6 +287,7 @@ defmodule Browser.Layout do
     Process.put(:layout_gen, memo.gen)
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
+    Process.put(:layout_fold, Keyword.get_lazy(opts, :fold, &fold_mode_of_env/0))
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
@@ -6247,13 +6248,47 @@ defmodule Browser.Layout do
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
   defp shrink_extent(st, sub, width, key) do
-    memo({:extent, key || :erlang.phash2(sub), width}, sub, fn ->
-      # a percentage width depends on the very width being measured: it counts as auto
-      outer = Process.put(:layout_intrinsic, true)
-      sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
-      Process.put(:layout_intrinsic, outer)
-      max(sub_st |> finalize() |> extent(), sub_st.ext)
-    end)
+    # (every unbounded width is the same measurement)
+    side =
+      cond do
+        width > @unbounded / 2 -> :max
+        width <= 1 -> :min
+        true -> nil
+      end
+
+    memo(
+      {:extent, key || :erlang.phash2(sub), if(side == :max, do: @unbounded, else: width)},
+      sub,
+      fn ->
+        case fold_mode() do
+          :on ->
+            case fold_at(st, sub, width) do
+              :layout -> shrink_layout(st, sub, width)
+              found -> found
+            end
+
+          :check ->
+            real = shrink_layout(st, sub, width)
+
+            case fold_at(st, sub, width) do
+              # (counted for `mix reftest --sweep`)
+              :layout ->
+                Process.put(:layout_fold_fallbacks, Process.get(:layout_fold_fallbacks, 0) + 1)
+
+              ^real ->
+                Process.put(:layout_fold_hits, Process.get(:layout_fold_hits, 0) + 1)
+
+              found ->
+                fold_mismatch(side || width, found, real)
+            end
+
+            real
+
+          :off ->
+            shrink_layout(st, sub, width)
+        end
+      end
+    )
   end
 
   # The narrowest content can be: what `shrink_extent(st, sub, 1)` gives, which puts one word on
@@ -6334,7 +6369,7 @@ defmodule Browser.Layout do
           %{^key => {_gen, old, value}} when old === sub ->
             # (positioned boxes in it are painted in their order after what this layout placed
             # before them, as a fresh layout would)
-            value = renumber_memo(value)
+            value = renumber_memo(key, value)
             Process.put(:layout_memo, Map.put(cache, key, {gen, sub, value}))
             value
 
@@ -6346,10 +6381,10 @@ defmodule Browser.Layout do
     end
   end
 
-  defp renumber_memo({items, height, baseline}) when is_list(items),
+  defp renumber_memo({:atom, _, _, _, _, _}, {items, height, baseline}),
     do: {renumber_pz(items), height, baseline}
 
-  defp renumber_memo(value), do: value
+  defp renumber_memo(_key, value), do: value
 
   defp layout_sub(st, sub, width) do
     sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
@@ -9749,11 +9784,14 @@ defmodule Browser.Layout do
       end)
     end
 
-    %{
+    model = %{
       caption: caption,
       rows: rows_of.(:head) ++ rows_of.(:body) ++ rows_of.(:foot),
       cols: table_columns_bg(parts)
     }
+
+    # (the key of the column sizes remembered for it: `table_column_sizes/6`)
+    Map.put(model, :key, :erlang.phash2(model))
   end
 
   # white space between two kids that `loose?` accepts is dropped, so they chunk together
@@ -10356,8 +10394,7 @@ defmodule Browser.Layout do
           do: avail + outer_borders(placed, ncols),
           else: avail
 
-      {mins, maxs, pcts} =
-        st |> table_columns(placed, ncols, nrows, ts.collapse?) |> column_widths(model.cols)
+      {mins, maxs, pcts} = table_column_sizes(st, placed, ncols, nrows, ts, model)
 
       # `table-layout: fixed`: the content decides nothing, columns without a width share what is left
       {mins, maxs} =
@@ -11173,5 +11210,1362 @@ defmodule Browser.Layout do
         bottom = mine |> Enum.map(& &1.y1) |> Enum.max()
         %{st | floats: Enum.drop(st.floats, length(mine)), y: max(st.y, bottom)}
     end
+  end
+
+  # -- intrinsic sizes without a layout (the sizing fold) ------------------------------------
+  #
+  # The min-content and max-content widths of a run of ops: what `shrink_extent` finds with a
+  # layout at width 1 and at an unbounded width, found here by a fold over the ops instead. The
+  # fold follows the rules of `run` that decide widths only: where a word goes on a line, what
+  # an inset, a box, a marker or an inline box adds, how wide an atom (an inline-block, a
+  # picture, a table, a flex container) is. Nested atoms are measured through the same sizing
+  # functions as before (`fit_width`, `flex_base`, `table_columns`, ...), which come back here
+  # through `shrink_extent` and its memo, so a nested atom is measured once and never laid out
+  # just to measure its parent. Whatever the fold does not follow (floats beside lines, heights
+  # that decide widths, absolute boxes, ...) throws `:layout`: the caller then lays the content
+  # out as before, so the result is the old one in every case the fold does not cover.
+  #
+  # The fold copies the width rules of `run`: a change to one of them must be made in both
+  # places. `LAYOUT_FOLD=off` turns the fold off; `LAYOUT_FOLD=check` lays out as before and
+  # raises when the fold finds another width (what `mix reftest --layout-check` and
+  # `mix reftest --sweep` run).
+
+  defp fold_mode_of_env do
+    case System.get_env("LAYOUT_FOLD") do
+      "off" -> :off
+      "check" -> :check
+      _ -> :on
+    end
+  end
+
+  defp fold_mode, do: Process.get(:layout_fold, :on)
+
+  # the extent `shrink_extent(st, sub, width)` gives, by a layout (the old way)
+  defp shrink_layout(st, sub, width) do
+    # a percentage width depends on the very width being measured: it counts as auto
+    outer = Process.put(:layout_intrinsic, true)
+    sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
+    Process.put(:layout_intrinsic, outer)
+    max(sub_st |> finalize() |> extent(), sub_st.ext)
+  end
+
+  defp fold_mismatch(side, got, real) do
+    at =
+      case side do
+        :max -> "at max-content"
+        :min -> "at min-content"
+        w -> "at width #{w}"
+      end
+
+    raise "layout check: the sizing fold finds #{got} where a layout finds #{real} #{at}"
+  end
+
+  # -> the extent of the content laid out `width` wide, or :layout when the fold cannot follow it
+  defp fold_at(st, sub, width) do
+    outer = Process.get(:layout_intrinsic)
+    Process.put(:layout_intrinsic, true)
+
+    try do
+      f = fold_run(st, sub, width, nil)
+      if f.caps != [], do: throw(:layout)
+      max(fold_best(f), f.ext)
+    catch
+      :throw, :layout -> :layout
+    after
+      if outer == nil,
+        do: Process.delete(:layout_intrinsic),
+        else: Process.put(:layout_intrinsic, outer)
+    end
+  end
+
+  defp fold_best(%{edges: edges}) do
+    edges |> Enum.map(fn {rr, edge} -> edge + rr end) |> Enum.max(fn -> 0 end)
+  end
+
+  # The edges of the items alone of content laid out `width` wide (what `layout_atom` hands its
+  # caller: the `ext` of boxes and insets stays inside), by their `rr`, in the content's own
+  # coordinates, and whether a line was aligned in a way the fold does not follow.
+  # -> {edges, aligned?}
+  defp fold_items_at(st, sub, width, key) do
+    width = if width > @unbounded / 2, do: @unbounded, else: width
+
+    memo({:fold_items, key || :erlang.phash2(sub), width}, sub, fn ->
+      outer = Process.get(:layout_intrinsic)
+      Process.put(:layout_intrinsic, true)
+
+      try do
+        f = fold_run(st, sub, width, nil, true)
+        if f.caps != [], do: throw(:layout)
+        {f.edges, f.aligned}
+      after
+        if outer == nil,
+          do: Process.delete(:layout_intrinsic),
+          else: Process.put(:layout_intrinsic, outer)
+      end
+    end)
+  end
+
+  # The edges of the items of an inline-block or a float laid out `w` wide (`at`, as the fold
+  # keys it): by the fold, or, when the fold does not follow what is inside, by the layout of
+  # the atom that `run` makes too, so that what the fold refuses inside an atom costs the layout
+  # of that atom and not of all the content around it
+  defp fold_atom_edges(f, sub, w, at, spec) do
+    case fold_items_at(f.st, sub, at, Map.get(spec, :key)) do
+      {edges, false} -> edges
+      {_edges, true} -> throw(:layout)
+    end
+  catch
+    :throw, :layout ->
+      # (the height of the box it sits in, which its percentage heights refer to: not followed)
+      if Map.get(spec, :hpct_atom) != nil, do: throw(:layout)
+      {items, _height, _base} = layout_atom(f.st, sub, w, Map.get(spec, :key))
+      item_edges(items)
+  end
+
+  # what `extent/1` finds, by `rr`
+  defp item_edges(items) do
+    items
+    |> Enum.filter(
+      &(&1.type in [:text, :image, :svg] or
+          (&1.type == :box and fixed_width?(&1) and not Map.get(&1, :anchor, false)) or
+          (&1.type == :bgimage and Map.get(&1, :sized, false)))
+    )
+    |> Enum.reduce(%{}, fn it, acc ->
+      edge = min(it.x + it.w - hanging(it, items), Map.get(it, :xlim, @unbounded))
+      Map.update(acc, Map.get(it, :rr, 0), edge, &max(&1, edge))
+    end)
+  end
+
+  # The edges of content laid out 1 wide whose items are then all capped at `cap` (a multi-column
+  # box's: its items are moved into columns the fold cannot see, which does not matter when
+  # every item reaches the cap, since the cap is then all that is left of its edge).
+  # -> edges, when every `rr` has an item that reaches the cap
+  defp fold_capped_edges(st, sub, cap) do
+    f = fold_run(st, sub, 1, cap, true)
+    if f.caps != [], do: throw(:layout)
+    if Enum.any?(f.edges, fn {_rr, edge} -> edge < cap end), do: throw(:layout)
+    f.edges
+  end
+
+  # `inner` edges moved `dx` to the right, merged into `edges`
+  defp fold_merge(edges, inner, dx) do
+    Enum.reduce(inner, edges, fn {rr, e}, acc -> Map.update(acc, rr, dx + e, &max(&1, dx + e)) end)
+  end
+
+  # the `%{type: :box}` item a table, flex, grid or column box puts first among its items: its
+  # own width, when that is not the measuring width (`fixed_width?`)
+  defp fold_marker(w), do: if(w < @unbounded / 2, do: %{0 => w}, else: %{})
+
+  # `cap`: the fold is for content whose items are capped at that (a multi-column box's, an
+  # inline-block's laid out narrower than its content): it records the `rr` of the words and
+  # refuses the atoms it cannot see inside
+  defp fold_run(st, ops, width, cap, shift? \\ false) do
+    side =
+      cond do
+        width <= 1 -> :min
+        width > @unbounded / 2 -> :max
+        true -> :mid
+      end
+
+    f = %{
+      side: side,
+      width: max(width, 1),
+      st: st,
+      cap: cap,
+      # the run is an aligned one (`layout_atom`): its lines move by `static_shift`; a measuring
+      # run (`shrink_extent`) is not
+      shift?: shift?,
+      # a line was aligned in a way the fold does not follow (rtl, an atom or a max-content line
+      # moved): only `fold_at` may use the result
+      aligned: false,
+      flex_item: Process.get(:layout_flex_item, false),
+      # the insets around the content, the room boxes with a width keep free, the running
+      # `st.ext`: what boxes, insets and atoms need
+      l: 0,
+      r: 0,
+      free: 0,
+      ext: 0,
+      # the right edges of the items placed (words, pictures, the items of atoms), by their
+      # `rr` (`extent/1`); `caps` holds the edges outside each open box that caps its items
+      # (`limit_new_items`)
+      edges: %{},
+      caps: [],
+      # the line
+      empty: true,
+      x: 0,
+      lead: 0,
+      indent: 0,
+      line_lead: 0,
+      pending: nil,
+      after_space: false,
+      line: [],
+      marks: [],
+      active: [],
+      strut: false,
+      # floats were placed (they stack at the left: lines go below them)
+      floats: false,
+      blocks: 0,
+      boxes: %{},
+      insets: [],
+      cbh: nil,
+      scbh: nil
+    }
+
+    ops |> tail_extents() |> Enum.reduce(f, &fold_op/2) |> fold_flush()
+  end
+
+  # -- the ops
+
+  defp fold_op({:indent, px}, f), do: if(f.empty, do: %{f | lead: px}, else: f)
+
+  defp fold_op({:space, style}, f),
+    do: if(f.empty or f.after_space, do: f, else: %{f | pending: style})
+
+  defp fold_op({:word, text, style}, f), do: fold_word(f, text, style, false, 0, false)
+
+  defp fold_op(
+         {:word, text, %{ws: :pre} = style, :pre},
+         %{line: [%{type: :text, text: "​"} | _]} = f
+       ),
+       do: fold_word(f, text, style, false, 0, false)
+
+  defp fold_op({:word, text, style, :pre}, f), do: fold_word(f, text, style, true, 0, false)
+  defp fold_op({:word, text, style, :glue}, f), do: fold_word(f, text, style, false, 0, true)
+
+  defp fold_op({:marker, m, style}, f) do
+    f =
+      case f.line do
+        [%{marker: true}] -> %{f | x: f.l - 18, indent: f.l, pending: nil}
+        _ -> f
+      end
+
+    f = fold_word(f, m, style, true, -18, false)
+    [head | rest] = f.line
+    %{f | line: [Map.put(head, :marker, true) | rest], pending: style}
+  end
+
+  defp fold_op({:flush}, %{line: [%{marker: true}]} = f), do: f
+  defp fold_op({:flush}, f), do: fold_flush(f)
+  defp fold_op({:br, _style}, %{line: [%{marker: true}]} = f), do: f
+  defp fold_op({:br, _style}, f), do: fold_flush(f)
+  defp fold_op({:gap, _px}, %{line: [%{marker: true}]} = f), do: f
+  defp fold_op({:gap, _px}, f), do: fold_flush(f)
+  defp fold_op({:pad, _px}, f), do: fold_flush(f)
+  defp fold_op({:hr}, f), do: fold_flush(f)
+  defp fold_op({:colbreak}, f), do: fold_flush(f)
+  defp fold_op({:clear, _side}, f), do: fold_flush(f)
+  defp fold_op({:anchor, _nid}, f), do: f
+  defp fold_op({:empty_inline, _style}, f), do: f
+  defp fold_op({:run_on}, f), do: f
+  defp fold_op({:pos_end}, f), do: f
+
+  defp fold_op({:pos_inline, rel}, f) do
+    if rel == nil or
+         Enum.all?([:left, :right, :top, :bottom], &(Map.get(rel, &1) in [nil, 0, 0.0])),
+       do: f,
+       else: throw(:layout)
+  end
+
+  defp fold_op({:inset, l, r}, f) do
+    f = if f.empty, do: %{f | lead: 0}, else: f
+
+    %{
+      f
+      | insets: [{f.l, f.r, f.scbh} | f.insets],
+        scbh: nil,
+        l: f.l + l,
+        r: f.r + r,
+        blocks: f.blocks + 1,
+        ext: max(f.ext, f.l + l + f.r + r - f.free)
+    }
+  end
+
+  defp fold_op({:inset_end}, %{insets: [{l, r, scbh} | rest]} = f),
+    do: %{f | insets: rest, l: l, r: r, scbh: scbh, blocks: f.blocks - 1}
+
+  defp fold_op({:box_start, ref, o}, f) do
+    f = if f.empty, do: %{f | lead: 0}, else: f
+    f = fold_flush(f)
+    fold_place_box(f, ref, o)
+  end
+
+  defp fold_op({:box_end, ref}, f) do
+    f = fold_flush(f)
+    {box, boxes} = Map.pop(f.boxes, ref)
+    o = box.o
+    {l, r, free} = box.saved
+
+    f = %{
+      f
+      | boxes: boxes,
+        blocks: f.blocks - 1,
+        l: l,
+        r: r,
+        free: free,
+        cbh: box.pcbh,
+        scbh: box.pscbh
+    }
+
+    f = if o.bfc == true, do: %{f | floats: box.floats}, else: f
+    if box.clip_h?, do: fold_clip_ok!(f, box)
+
+    cond do
+      box.capping? ->
+        [{cap, parent} | caps] = f.caps
+
+        edges =
+          Enum.reduce(f.edges, parent, fn {rr, edge}, acc ->
+            Map.update(acc, rr, min(edge, cap), &max(&1, min(edge, cap)))
+          end)
+
+        %{
+          f
+          | caps: caps,
+            edges: edges,
+            ext: max(f.ext, box.x + box.w + box_mr(o) + max(r - free, 0))
+        }
+
+      box.sized? ->
+        f
+
+      true ->
+        %{f | ext: max(f.ext, box.need)}
+    end
+  end
+
+  defp fold_op({:inline_open, ref, spec}, f) do
+    if f.empty do
+      # (the start of a box beside a float is placed by where the float ends: not followed)
+      if f.floats and spec.ml + spec.bl + spec.pl > 0, do: throw(:layout)
+      x = f.l + f.lead + spec.ml
+
+      %{
+        f
+        | lead: f.lead + spec.ml + spec.bl + spec.pl,
+          marks: [{:start, ref, spec, x} | f.marks]
+      }
+    else
+      space_w = if f.pending, do: f.st.measure.(" ", f.pending), else: 0
+      x = f.x + space_w
+
+      %{
+        f
+        | x: x + spec.ml + spec.bl + spec.pl,
+          pending: nil,
+          after_space: f.after_space or space_w > 0,
+          marks: [{:start, ref, spec, x + spec.ml} | f.marks]
+      }
+    end
+  end
+
+  defp fold_op({:inline_close, ref, spec}, f) do
+    f = fold_strut_for_empty(f, ref, spec)
+    right = spec.pr + spec.br
+
+    if f.empty do
+      x = f.l + f.lead + right
+      %{f | lead: f.lead + right + spec.mr, marks: [{:end, ref, x} | f.marks]}
+    else
+      %{f | x: f.x + right + spec.mr, marks: [{:end, ref, f.x + right} | f.marks]}
+    end
+  end
+
+  defp fold_op({:balance, inner}, %{side: :max} = f),
+    do: inner |> tail_extents() |> Enum.reduce(f, &fold_op/2)
+
+  defp fold_op({:inline_block, sub, spec, style}, f) do
+    if f.cap != nil, do: throw(:layout)
+    avail = max(f.width - f.l - f.r, 0)
+    w = fit_width(f.st, sub, spec, avail)
+    align = Map.get(spec, :malign) || style.align
+
+    inner =
+      fold_atom_edges(f, sub, w, if(w >= @unbounded / 2, do: @unbounded, else: max(w, 1)), spec)
+
+    fold_place_atom(f, w, align, inner)
+  end
+
+  defp fold_op({:image, spec, style}, f) do
+    if f.cap != nil, do: throw(:layout)
+    if is_number(spec[:fill_ratio]) or spec[:xform] != nil, do: throw(:layout)
+    avail = max(f.width - f.l - f.r, 0)
+
+    pct_h = fn
+      {:pct, _} -> if f.scbh == :num, do: throw(:layout), else: nil
+      h -> h
+    end
+
+    attrs = Map.update(spec.attrs, :h, nil, pct_h)
+    css = Map.update(spec.css, :h, nil, pct_h)
+    {cw, ch} = Browser.ImageBox.size(spec.intrinsic, attrs, css, avail)
+    box = spec.box
+    {_bt, br, _bb, bl} = box.bw
+    ml = if box.ml == :auto, do: 0, else: box.ml
+    mr = if box.mr == :auto, do: 0, else: box.mr
+    # (the picture item: `rr: box.pr + br + mr`)
+    inner =
+      if spec.paint? and cw > 0 and ch > 0,
+        do: %{(box.pr + br + mr) => ml + bl + box.pl + cw},
+        else: %{}
+
+    fold_place_atom(f, ml + bl + box.pl + cw + box.pr + br + mr, style.align, inner)
+  end
+
+  defp fold_op({:float, _side, sub, spec, style}, %{side: :min} = f) do
+    if f.cap != nil, do: throw(:layout)
+    avail = max(f.width - f.l - f.r, 0)
+    w = fit_width(f.st, sub, spec, avail)
+    # (a narrow float could still have a marker or a word beside it)
+    if w < 24, do: throw(:layout)
+    minc = shrink_extent(f.st, sub, 1, Map.get(spec, :key))
+    if w < minc, do: throw(:layout)
+
+    # a float in a line that does not wrap goes below it, and the line goes on
+    f =
+      cond do
+        style.ws == :nowrap and not f.empty -> f
+        f.empty -> f
+        true -> fold_flush(f)
+      end
+
+    # its items, capped at its width (`limit_extent`), at its left edge (below the floats before
+    # it, there is nothing beside it at this width)
+    inner = fold_atom_edges(f, sub, w, w, spec)
+    inner = Map.new(inner, fn {rr, e} -> {rr, min(e, w)} end)
+
+    %{
+      f
+      | ext: max(f.ext, f.l + w + f.r - f.free),
+        edges: fold_merge(f.edges, inner, f.l),
+        floats: true
+    }
+  end
+
+  defp fold_op({:table, ts, model, _style}, f) do
+    avail = max(f.width - f.l - f.r, 0)
+    {w, placed, widths} = fold_table_width(f, ts, model, avail)
+
+    # The cells' items stay inside the table (no column is narrower than its cells need; a
+    # fixed layout, which could make one, is not followed) and so does the caption (unless it
+    # cannot be that narrow), so the table's own box item is all that reaches: unless the
+    # items are capped (`caps`, `cap`, or an atom's run the table overflows: `limit_extent`),
+    # when what each item's `rr` adds past the cap counts
+    inner = fold_marker(w)
+
+    if model.caption != nil and avail <= @unbounded / 2 and
+         shrink_extent(f.st, model.caption, 1, nil) > w,
+       do: throw(:layout)
+
+    inner =
+      if f.cap != nil or f.caps != [] or (f.shift? and w > avail) or
+           Enum.any?(placed, &fold_margins?(&1.cell)) do
+        if ts.collapse? or model.caption != nil, do: throw(:layout)
+        xs = column_positions(widths, ts.sx)
+
+        Enum.reduce(placed, inner, fn p, acc ->
+          span_w =
+            Enum.sum(Enum.slice(widths, p.col, p.cell.colspan)) + ts.sx * (p.cell.colspan - 1)
+
+          {edges, aligned} = fold_items_at(f.st, p.cell.sub, max(span_w, 1), p.cell.key)
+          if aligned, do: throw(:layout)
+          {sdx, _sdy} = p.shift
+          fold_merge(acc, edges, Enum.at(xs, p.col) + sdx)
+        end)
+      else
+        inner
+      end
+
+    fold_place_atom(f, w, :left, inner)
+  end
+
+  defp fold_op({:flex, cs, items, style}, f) do
+    if f.cap != nil, do: throw(:layout)
+    avail = max(f.width - f.l - f.r, 0)
+    {w, inner} = fold_flex(f, cs, items, avail)
+    # (items that overflow the container still count: `overflow_counts`)
+    fold_place_atom(f, w, style.align, fold_merge(fold_marker(w), inner, 0), true)
+  end
+
+  defp fold_op({:grid, gs, items, style}, f) do
+    if f.cap != nil, do: throw(:layout)
+    avail = max(f.width - f.l - f.r, 0)
+    {w, inner} = fold_grid(f, gs, items, avail)
+    fold_place_atom(f, w, style.align, fold_merge(fold_marker(w), inner, 0))
+  end
+
+  defp fold_op({:columns, cs, sub, style}, f) do
+    avail = max(f.width - f.l - f.r, 0)
+    cs = with %{gap: {:pct, p}} <- cs, do: %{cs | gap: p * avail}
+    {n, _colw} = column_geometry(cs, avail)
+
+    if (n <= 1 and not ((cs.height != nil and cs.fill == "auto") or cs[:colh] != nil)) or
+         avail > @unbounded / 2 do
+      Enum.reduce(sub, f, &fold_op/2)
+    else
+      if f.cap != nil or f.caps != [], do: throw(:layout)
+      {abs, sub} = split_outer_abs(sub)
+      if abs != [], do: throw(:layout)
+      # the content is laid out one column wide (1) and every item is capped at the box's
+      # width: what reaches past it is the `rr` of the items
+      inner = fold_merge(fold_marker(avail), fold_capped_edges(f.st, sub, avail), 0)
+      fold_place_atom(f, avail, style.align, inner)
+    end
+  end
+
+  defp fold_op(_op, _f), do: throw(:layout)
+
+  # -- words
+
+  defp fold_word(f, text, style, nowrap?, dx, glue) do
+    if style.tabw != nil, do: throw(:layout)
+
+    {text, f, dx} =
+      if String.contains?(text, "­") do
+        # (`shy_word` starts the line once more than `plain_word`: the lead is used up unapplied)
+        f = if f.empty, do: %{f | lead: 0}, else: f
+        {String.replace(text, "­", ""), f, 0}
+      else
+        {text, f, dx}
+      end
+
+    w = f.st.measure.(text, style)
+    # (a word beside a float, or one the fold cannot see going below it, is not followed)
+    if f.floats and
+         ((w == 0 and text != "") or style.ws in [:pre, :nowrap] or
+            style.wrap_chars != :none),
+       do: throw(:layout)
+
+    space_w = if f.pending && not f.empty, do: f.st.measure.(" ", f.pending), else: 0
+    f = if f.empty, do: fold_start_line(f, dx), else: f
+    right = f.width - f.r
+
+    # `split_point`
+    mode = Map.get(style, :wrap_chars, :none)
+    mode = if mode == :word, do: :none, else: mode
+    mode = if mode == :anywhere, do: :word, else: mode
+    mode = if mode == :every, do: :all, else: mode
+    space_w0 = if f.empty, do: 0, else: space_w
+
+    cond do
+      nowrap? or mode == :none or String.length(text) < 2 -> :ok
+      f.x + space_w0 + w - trailing_ls(style) <= right -> :ok
+      mode == :word and w <= right - f.indent -> :ok
+      true -> throw(:layout)
+    end
+
+    # `word_placed`
+    glued? = glue != false
+    hang = fold_hang(f, text, style, w)
+
+    f =
+      cond do
+        f.empty or nowrap? or hang == w or fold_glued_after?(f, text, space_w) or
+            f.x + space_w + w + Map.get(style, :tail, 0) - hang <= right ->
+          f
+
+        glued? and space_w == 0 and not f.after_space ->
+          fold_wrap_glued(f, style)
+
+        true ->
+          f |> fold_flush(true) |> fold_start_line(0)
+      end
+
+    glue? = glued? and not f.empty and space_w == 0 and not f.after_space
+    space_w = if f.empty, do: 0, else: space_w
+    x = f.x + space_w
+    item = fold_text_item(f, text, style, x, w, hang, glue?)
+
+    case f.line do
+      [%{type: :text} = prev | older] when glue? and hang == 0 and space_w == 0 ->
+        if fold_mergeable?(prev, item) do
+          mtext = prev.text <> text
+          mw = f.st.measure.(mtext, style)
+          merged = %{prev | text: mtext, w: mw}
+          %{f | line: [merged | older], x: prev.x + mw, pending: nil, after_space: false}
+        else
+          fold_push(f, item, x, w)
+        end
+
+      _ ->
+        fold_push(f, item, x, w)
+    end
+  end
+
+  defp fold_push(f, item, x, w) do
+    %{
+      f
+      | line: [item | f.line],
+        empty: false,
+        x: x + w,
+        pending: nil,
+        after_space: false
+    }
+  end
+
+  defp fold_text_item(f, text, style, x, w, hang, glue?) do
+    item = %{
+      type: :text,
+      glue: glue?,
+      x: x,
+      w: w,
+      h: style.size,
+      text: text,
+      size: style.size,
+      bold: style.bold,
+      italic: style.italic,
+      mono: style.mono,
+      family: style.family,
+      href: if(style.hidden, do: nil, else: style.href),
+      blank: style.blank,
+      hidden: style.hidden,
+      color: style.color,
+      underline: style.underline,
+      strike: style.strike,
+      ls: style.ls,
+      vs: style.vs,
+      wsp: style.wsp,
+      alast: style.alast,
+      nojust: style.nojust or style.ws == :pre,
+      align: style.align,
+      cid: style.cid,
+      rr: f.r - f.free
+    }
+
+    item = if hang > 0, do: Map.put(item, :hang, hang), else: item
+    if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
+  end
+
+  defp fold_mergeable?(prev, item) do
+    keys = [:x, :w, :text, :glue, :hang]
+
+    Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
+      not String.match?(prev.text <> item.text, ~r/\s|[\x{2000}-\x{200A}\x{3000}]/u) and
+      not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
+  end
+
+  defp fold_hang(f, text, style, w) do
+    cond do
+      style.ws == :break_spaces ->
+        0
+
+      style.ws == :pre_wrap and text != "" and String.trim(text, " ") == "" and
+          f.x + w > f.width - f.r ->
+        w
+
+      true ->
+        ideographic_hang(text, style, f.st)
+    end
+  end
+
+  defp fold_glued_after?(%{line: [%{type: :atom} | _]}, text, 0),
+    do: String.starts_with?(text, @no_break)
+
+  defp fold_glued_after?(_, _, _), do: false
+
+  defp fold_glued_before?(%{line: [%{type: :text, text: text} | _]}, 0),
+    do: String.ends_with?(text, @no_break)
+
+  defp fold_glued_before?(_, _), do: false
+
+  # `start_line` after a wrap (nothing beside floats: the fold refuses what would be)
+  defp fold_start_line(f, dx) do
+    used = if dx == 0, do: f.lead, else: 0
+    %{f | x: f.l + dx + used, indent: f.l, lead: f.lead - used, line_lead: used}
+  end
+
+  defp fold_wrap_glued(f, style) do
+    if style.wrap_chars == :all, do: throw(:layout)
+    {chain, rest} = Enum.split_while(f.line, &Map.get(&1, :glue, false))
+
+    case {style.wrap_chars, rest} do
+      {:none, [%{type: :text}]} ->
+        if Enum.all?(chain ++ rest, &(&1.type == :text and not is_map_key(&1, :wc))),
+          do: f,
+          else: fold_wrap_glued(f, chain, rest)
+
+      _ ->
+        fold_wrap_glued(f, chain, rest)
+    end
+  end
+
+  defp fold_wrap_glued(f, chain, rest) do
+    case rest do
+      [%{type: :text} = first | [_ | _] = older] ->
+        if Enum.all?(chain, &(&1.type == :text)),
+          do: fold_carry_chain(f, [first | chain], older),
+          else: f |> fold_flush(true) |> fold_start_line(0)
+
+      _ ->
+        f |> fold_flush(true) |> fold_start_line(0)
+    end
+  end
+
+  defp fold_carry_chain(f, chain_newest_first, older) do
+    chain = Enum.reverse(chain_newest_first)
+    first_x = hd(chain).x
+    last0 = List.last(chain)
+    pending = f.x - (last0.x + last0.w)
+
+    {moved, kept} =
+      Enum.split_with(f.marks, fn
+        {:start, _ref, spec, x} -> x + spec.bl + spec.pl >= first_x
+        {:end, _ref, x} -> x >= first_x
+      end)
+
+    f = %{f | line: older, marks: kept, x: hd(older).x + hd(older).w}
+    f = f |> fold_flush(true) |> fold_start_line(0)
+    shift = f.x - first_x
+
+    mark_shift = fn
+      {:start, ref, spec, x} -> {:start, ref, spec, x + shift}
+      {:end, ref, x} -> {:end, ref, x + shift}
+    end
+
+    chain = Enum.map(chain, &%{&1 | x: &1.x + shift})
+    last = List.last(chain)
+
+    %{
+      f
+      | line: Enum.reverse(chain),
+        empty: false,
+        x: last.x + last.w + pending,
+        marks: Enum.map(moved, mark_shift) ++ f.marks
+    }
+  end
+
+  defp fold_strut_for_empty(%{empty: true} = f, ref, spec) do
+    empty? = Enum.any?(f.marks, &match?({:start, ^ref, _, _}, &1))
+    sides = if empty?, do: spec.ml + spec.mr + spec.pl + spec.pr + spec.bl + spec.br, else: 0
+    if sides > 0, do: %{f | strut: spec.style}, else: f
+  end
+
+  defp fold_strut_for_empty(f, _ref, _spec), do: f
+
+  # -- lines
+
+  defp fold_flush(f, soft? \\ false)
+
+  # (an empty inline box with sides makes a line of its own, with the strut of its font)
+  defp fold_flush(%{empty: true, strut: style} = f, soft?) when style != false do
+    f = fold_word(%{f | strut: false}, "", style, false, 0, false)
+    [head | rest] = f.line
+    fold_flush(%{f | line: [Map.put(head, :strut, true) | rest]}, soft?)
+  end
+
+  defp fold_flush(%{empty: true} = f, _soft?) do
+    active =
+      f.marks
+      |> Enum.reverse()
+      |> Enum.reduce(f.active, fn
+        {:start, ref, spec, _x}, active -> active ++ [%{ref: ref, spec: spec}]
+        {:end, ref, _x}, active -> Enum.reject(active, &(&1.ref == ref))
+      end)
+
+    %{f | pending: nil, marks: [], active: active}
+  end
+
+  defp fold_flush(f, soft?) do
+    fold_justified!(f, soft?)
+    {f, shift} = fold_shift(f, soft?)
+    f = fold_line_edges(f, shift)
+    last = hd(f.line)
+    {carried, active, lead} = fold_inline_boxes(f, last.x + last.w)
+
+    %{
+      f
+      | line: [],
+        empty: true,
+        x: f.indent,
+        pending: nil,
+        marks: carried,
+        active: active,
+        lead: lead,
+        strut: false
+    }
+  end
+
+  # `line_mode`: how the line is aligned
+  defp fold_line_mode(f, soft?) do
+    first = List.last(f.line)
+
+    cond do
+      soft? -> Map.get(first, :align)
+      Map.get(first, :alast) -> Map.get(first, :alast)
+      Map.get(first, :align) == :justify -> :left
+      Map.get(first, :align) == :rjustify -> :rstart
+      true -> Map.get(first, :align)
+    end
+  end
+
+  # `line_free`: the room left on the line (the run has no margin and no float beside the line)
+  defp fold_line_free(f) do
+    first = List.last(f.line)
+    last = hd(f.line)
+    left = min(first.x, f.indent)
+
+    hang =
+      if String.ends_with?(Map.get(last, :text, ""), "　"),
+        do: Map.get(last, :hang, 0),
+        else: 0
+
+    right = max(last.x + last.w, f.x) - hang
+    f.width - f.r - f.indent - (right - left)
+  end
+
+  # `static_shift`: how far an aligned run (`layout_atom`) moves the line's words and atoms. A
+  # right-to-left line or a line of a max-content run (its room is unbounded) is not followed:
+  # the run is flagged `aligned`.
+  # -> {f, shift}
+  defp fold_shift(%{shift?: false} = f, _soft?), do: {f, 0}
+
+  defp fold_shift(f, soft?) do
+    mode = fold_line_mode(f, soft?)
+
+    cond do
+      mode in [:rstart, :rjustify] ->
+        {%{f | aligned: true}, 0}
+
+      mode in [:center, :right] and f.side == :max ->
+        {%{f | aligned: true}, 0}
+
+      mode == :center ->
+        {f, max(round(fold_line_free(f) / 2), 0)}
+
+      mode == :right ->
+        {f, max(round(fold_line_free(f)), 0)}
+
+      true ->
+        {f, 0}
+    end
+  end
+
+  # a justified line spreads its words over the room there is: only when there is some
+  defp fold_justified!(f, soft?) do
+    first = List.last(f.line)
+    mode = fold_line_mode(f, soft?)
+    texts = Enum.reject(f.line, &(&1.type == :atom or Map.get(&1, :strut, false)))
+
+    if mode in [:justify, :rjustify] and not Map.get(first, :nojust, false) and
+         f.active == [] and
+         Enum.all?(texts, &(&1.type == :text and not Map.get(&1, :nojust, false))) do
+      free = fold_line_free(f)
+
+      gaps =
+        texts
+        |> Enum.reverse()
+        |> Enum.chunk_every(2, 1, :discard)
+        |> Enum.count(fn [a, b] -> b.x - (a.x + a.w) > 0 end)
+
+      if free > 0 and gaps > 0, do: throw(:layout)
+    end
+
+    :ok
+  end
+
+  # what the words and the atoms of the line add to the extent (`extent/1`): their right edges
+  # (moved by the line's shift), less what hangs past the line's end, by their `rr`
+  defp fold_line_edges(f, shift) do
+    texts = Enum.filter(f.line, &(&1.type == :text and not Map.get(&1, :strut, false)))
+
+    f =
+      Enum.reduce(f.line, f, fn
+        %{type: :atom, x: x, inner: inner}, f ->
+          %{f | edges: fold_merge(f.edges, inner, x + shift)}
+
+        _, f ->
+          f
+      end)
+
+    Enum.reduce(texts, f, fn it, f ->
+      hang =
+        case Map.get(it, :hang, 0) do
+          0 ->
+            0
+
+          hang ->
+            later = Enum.filter(texts, &(&1.x > it.x))
+            same = Enum.any?(later, &(&1.size == it.size and &1.vs == it.vs))
+            # (text of another size on the line may or may not share its baseline: not followed)
+            if Enum.any?(later, &(&1.size != it.size or &1.vs != it.vs)), do: throw(:layout)
+            if same, do: 0, else: hang
+        end
+
+      edge = min(it.x + shift + it.w - hang, @unbounded)
+      %{f | edges: Map.update(f.edges, it.rr, edge, &max(&1, edge))}
+    end)
+  end
+
+  # -> {the marks carried to the next line, the boxes still open, the lead of the next line}
+  defp fold_inline_boxes(%{marks: [], active: []} = f, _last_right), do: {[], [], f.lead}
+
+  defp fold_inline_boxes(f, last_right) do
+    ended = for {:end, ref, _} <- f.marks, into: MapSet.new(), do: ref
+
+    {open, carried, lead} =
+      f.marks
+      |> Enum.reverse()
+      |> Enum.reduce({f.active, [], f.lead}, fn
+        {:start, ref, spec, x}, {open, carried, lead} ->
+          if x >= last_right and not MapSet.member?(ended, ref) do
+            mark = {:start, ref, spec, f.indent + lead + spec.ml}
+            {open, [mark | carried], lead + spec.ml + spec.bl + spec.pl}
+          else
+            {open ++ [%{ref: ref, spec: spec}], carried, lead}
+          end
+
+        {:end, ref, _x}, {open, carried, lead} ->
+          {Enum.reject(open, &(&1.ref == ref)), carried, lead}
+      end)
+
+    {carried, open, lead}
+  end
+
+  # -- atoms and boxes
+
+  # `place_atom`: `inner` is the edges of the atom's items in its own coordinates (nil: none).
+  # They are capped at its width (`limit_extent`) unless the atom lets them overflow
+  # (`overflow_counts`), they get the room kept free on the right added to their `rr`
+  # (`add_rr`), and the atom's width counts for what the content needs (`st.ext`) when it is
+  # not the measuring width or nothing is drawn in it.
+  defp fold_place_atom(f, w, align, inner, overflow? \\ false) do
+    space_w = if f.pending && not f.empty, do: f.st.measure.(" ", f.pending), else: 0
+    f = if f.empty, do: fold_start_line(f, 0), else: f
+
+    f =
+      if not f.empty and f.x + space_w + w > f.width - f.r and
+           not fold_glued_before?(f, space_w),
+         do: f |> fold_flush(true) |> fold_start_line(0),
+         else: f
+
+    space_w = if f.empty, do: 0, else: space_w
+    x = f.x + space_w
+    extra = f.r - f.free
+    inner = inner || %{}
+
+    inner =
+      if overflow?,
+        do: Map.new(inner, fn {rr, e} -> {rr, min(e, @unbounded)} end),
+        else: Map.new(inner, fn {rr, e} -> {rr, min(e, w)} end)
+
+    inner =
+      if extra > 0,
+        do:
+          Enum.reduce(inner, %{}, fn {rr, e}, acc ->
+            Map.update(acc, rr + extra, e, &max(&1, e))
+          end),
+        else: inner
+
+    drawn = inner |> Enum.map(fn {rr, e} -> e + rr end) |> Enum.max(fn -> 0 end)
+    ext = if drawn == 0 or w < @unbounded / 2, do: max(f.ext, x + w + max(extra, 0)), else: f.ext
+
+    %{
+      f
+      | line: [%{type: :atom, x: x, w: w, align: align, inner: inner} | f.line],
+        empty: false,
+        x: x + w,
+        pending: nil,
+        ext: ext
+    }
+  end
+
+  # the edges of the items of a flex or grid item laid out `w` wide (what its layout hands
+  # the container)
+  defp fold_item_edges(f, sub, key, w) do
+    if w < 1, do: throw(:layout)
+    {edges, aligned} = fold_items_at(f.st, sub, w, key)
+    if aligned, do: throw(:layout)
+    edges
+  end
+
+  # a box with a height that clips (`drop_below` drops the items below it; what was added to
+  # `st.ext` stays): what it cuts off is not followed, unless no item inside reaches further
+  # than the box itself does, so that what is cut cannot change the reach: inside a box with a
+  # width, nothing past its content box; inside one without, nothing past what the box needs
+  # (`need`). Not in a capped fold, which counts every item.
+  defp fold_clip_ok!(f, box) do
+    if f.cap != nil, do: throw(:layout)
+
+    past? =
+      if box.capping?,
+        do: Enum.any?(f.edges, fn {_rr, edge} -> edge > box.content_right end),
+        else:
+          Enum.any?(f.edges, fn {rr, edge} ->
+            edge > Map.get(box.edges0, rr, -1) and edge + rr > box.need
+          end)
+
+    if past?, do: throw(:layout)
+  end
+
+  defp fold_place_box(f, ref, o) do
+    {_bt, br, _bb, bl} = o.bw
+
+    if o[:ratio] != nil or o.cisw != nil or o.minw == :stretch or o.rtl == true or
+         o.rel != nil or o[:legend] == true,
+       do: throw(:layout)
+
+    # a box with `overflow` that cuts its content to its height: what is cut is not followed,
+    # unless nothing inside reaches further than the box itself does (`fold_clip_ok!`)
+    clip_h? =
+      o.clip == true and
+        (o.h != nil or o.max != nil or o[:maxc] == true or
+           ((o.hpct != nil or o.maxpct != nil or o[:hstretch] == true) and f.cbh == :num))
+
+    avail = max(f.width - f.l - f.r, 0)
+    hpad = o.pl + o.pr + bl + br
+
+    to_content = fn
+      nil -> nil
+      {:pct, _} -> nil
+      {:kw, _} -> nil
+      v -> v |> resolve(avail) |> then(&if(o.sizing == :border, do: max(&1 - hpad, 0), else: &1))
+    end
+
+    ml0 = if o.ml == :auto, do: 0, else: o.ml
+    mr0 = if o.mr == :auto, do: 0, else: o.mr
+    if ml0 < 0 or mr0 < 0, do: throw(:layout)
+    beside = avail
+    cw = to_content.(o.width) || max(beside - ml0 - mr0 - hpad, 0)
+    cw = if m = to_content.(o.maxw), do: min(cw, m), else: cw
+    cw = if m = to_content.(o.minw), do: max(cw, m), else: cw
+    box_w = hpad + cw
+
+    # `open_box`
+    left = f.l + ml0
+    rest = beside - ml0 - box_w
+    rest = if own_width?(o.width), do: rest, else: max(rest, 0)
+    x = left
+    sized? = own_width?(o.width) or o.maxw != nil
+    own_free = if sized?, do: max(rest - mr0, 0), else: 0
+    need = x + bl + o.pl + f.r + rest + br + o.pr - f.free - own_free
+    capping? = sized? and box_w < @unbounded / 2
+
+    # what the percentage heights inside refer to
+    h_known? =
+      is_number(o.h) or
+        ((o.hpct != nil or o[:hstretch] == true) and f.cbh == :num)
+
+    new_cbh =
+      if f.flex_item and f.blocks == 0 and not Map.get(o, :definite, false),
+        do: nil,
+        else: if(h_known?, do: :num, else: nil)
+
+    box = %{
+      o: o,
+      x: x,
+      w: box_w,
+      need: need,
+      saved: {f.l, f.r, f.free},
+      sized?: sized?,
+      capping?: capping?,
+      clip_h?: clip_h?,
+      content_right: x + bl + o.pl + cw,
+      edges0: f.edges,
+      floats: f.floats,
+      pcbh: f.cbh,
+      pscbh: f.scbh
+    }
+
+    f = %{
+      f
+      | boxes: Map.put(f.boxes, ref, box),
+        blocks: f.blocks + 1,
+        l: left + bl + o.pl,
+        r: f.r + rest + br + o.pr,
+        free: f.free + own_free,
+        floats: if(o.bfc == true, do: false, else: f.floats),
+        cbh: new_cbh,
+        scbh: new_cbh
+    }
+
+    if capping?, do: %{f | caps: [{x + box_w, f.edges} | f.caps], edges: %{}}, else: f
+  end
+
+  # -- tables and flex containers: the sizing half of `table_layout` and `flex_layout`
+
+  defp fold_table_width(f, ts, model, avail) do
+    placed = table_grid(model.rows)
+    ncols = placed |> Enum.map(&(&1.col + &1.cell.colspan)) |> Enum.max(fn -> 0 end)
+    nrows = length(model.rows)
+    placed = if ts.collapse?, do: column_edges(placed, model.cols, nrows), else: placed
+    placed = if ts.tedges, do: table_edges(placed, ts.tedges, ncols, nrows), else: placed
+    natural? = avail > @unbounded / 2
+
+    cond do
+      ncols == 0 ->
+        w =
+          if model.caption && natural?,
+            do: shrink_extent(f.st, model.caption, @unbounded, nil),
+            else: avail
+
+        {w, [], []}
+
+      natural? ->
+        {_mins, maxs, _pcts} = table_column_sizes(f.st, placed, ncols, nrows, ts, model)
+        spacing = ts.sx * (ncols + 1)
+        w = Enum.sum(maxs) + spacing
+        cap = if model.caption, do: shrink_extent(f.st, model.caption, @unbounded, nil), else: 0
+        # (a wider caption widens the last column)
+        widths = if cap > w, do: List.update_at(maxs, ncols - 1, &(&1 + cap - w)), else: maxs
+        {max(cap, w), placed, widths}
+
+      true ->
+        # (cells narrower than their content, as a fixed layout makes them, overflow: not followed)
+        if ts.fixed? or ts.fixed_css?, do: throw(:layout)
+
+        avail =
+          if ts.collapse? and ts.sized?, do: avail + outer_borders(placed, ncols), else: avail
+
+        {mins, maxs, pcts} = table_column_sizes(f.st, placed, ncols, nrows, ts, model)
+
+        exact =
+          for i <- 0..(ncols - 1)//1,
+              do: with(%{w: w} when is_number(w) <- Enum.at(model.cols, i), do: round(w))
+
+        spacing = ts.sx * (ncols + 1)
+        widths = table_widths(mins, maxs, pcts, max(avail - spacing, 0), exact)
+        {max(avail, Enum.sum(widths) + spacing), placed, widths}
+    end
+  end
+
+  # the column widths a table wants, remembered for the layout of the same table
+  defp table_column_sizes(st, placed, ncols, nrows, ts, model) do
+    key = {:tcols, model.key, :erlang.phash2(ts), Process.get(:layout_intrinsic, false)}
+
+    memo(key, {model, ts}, fn ->
+      st |> table_columns(placed, ncols, nrows, ts.collapse?) |> column_widths(model.cols)
+    end)
+  end
+
+  # Whether a cell holds a box with a right margin: at the width of its column such a box keeps
+  # the room of its margin as `rr` for the words inside, which a layout at width 1 (what the
+  # column's min width came from) could not: the words then reach past the column. (A box
+  # inside an atom of the cell counts too: the atom is laid out at its own width in both.)
+  defp fold_margins?(cell) do
+    memo({:fold_margins, cell.key}, cell.sub, fn -> fold_margins_in?(cell.sub) end)
+  end
+
+  defp fold_margins_in?(ops) do
+    Enum.any?(ops, fn
+      {:box_start, _ref, o} ->
+        is_number(o.mr) and o.mr > 0
+
+      {:inline_block, sub, _spec, _style} ->
+        fold_margins_in?(sub)
+
+      {:float, _side, sub, _spec, _style} ->
+        fold_margins_in?(sub)
+
+      {:float_below, _side, sub, _spec, _style} ->
+        fold_margins_in?(sub)
+
+      {:table, _ts, model, _style} ->
+        Enum.any?(model.rows, fn row -> Enum.any?(row.cells, &fold_margins_in?(&1.sub)) end)
+
+      {:flex, _cs, items, _style} ->
+        Enum.any?(items, &fold_margins_in?(&1.sub))
+
+      {:grid, _gs, items, _style} ->
+        Enum.any?(items, &fold_margins_in?(&1.sub))
+
+      {:columns, _cs, sub, _style} ->
+        fold_margins_in?(sub)
+
+      {:balance, inner} ->
+        fold_margins_in?(inner)
+
+      {:legend, sub, _spec, _style} ->
+        fold_margins_in?(sub)
+
+      _ ->
+        false
+    end)
+  end
+
+  # the sizing half of `grid_layout` -> {the width of the grid, the edges of its items' items}
+  defp fold_grid(f, gs, items, avail) do
+    # (rows with a height may cut their items; a ratio or a height sizes an item by its row)
+    if gs.height != nil or gs.rows != [] or gs.auto_row != {:auto}, do: throw(:layout)
+    natural? = avail > @unbounded / 2
+    explicit = expand_repeats(gs.tracks, avail, gs.col_gap, natural?)
+    explicit = if explicit == [], do: [{:auto}], else: explicit
+    placed = place_in_grid(items, length(explicit))
+
+    ncols =
+      max(length(explicit), placed |> Enum.map(&(&1.col + &1.span)) |> Enum.max(fn -> 0 end))
+
+    tracks = explicit ++ List.duplicate({:auto}, ncols - length(explicit))
+    sizes = track_sizes(f.st, tracks, placed, avail, gs.col_gap, natural?)
+    gap = round(gs.col_gap)
+    xs = sizes |> Enum.scan(0, fn w, x -> x + w + gap end) |> then(&[0 | Enum.drop(&1, -1)])
+    width = Enum.sum(sizes) + gap * (ncols - 1)
+
+    edges =
+      Enum.reduce(placed, %{}, fn it, acc ->
+        if Map.get(it, :ratio) != nil or (Map.get(it, :ch) != nil and it.width == nil),
+          do: throw(:layout)
+
+        span_w = Enum.sum(Enum.slice(sizes, it.col, it.span)) + gap * (it.span - 1)
+        room = max(span_w - auto_zero(it.ml) - auto_zero(it.mr), 1)
+
+        w =
+          cond do
+            it.width != nil ->
+              resolve(it.width, span_w) + it.extra
+
+            it.fit? or justify_shrink?(it, gs) ->
+              min(room, shrink_extent(f.st, it.sub, @unbounded, it.key))
+
+            true ->
+              room
+          end
+
+        w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, span_w)
+        w = max(round(w), 1)
+        e = fold_item_edges(f, it.sub, it.key, w)
+        dx = grid_justify(Map.put(it, :w, w), gs, room)
+        fold_merge(acc, e, round(Enum.at(xs, it.col) + auto_zero(it.ml) + dx))
+      end)
+
+    {width, edges}
+  end
+
+  # -> {the width of the container, the edges of its items' items from its left edge}
+  defp fold_flex(f, cs, items, avail) do
+    items = Enum.map(items, &intrinsic_margins/1)
+    row? = cs.dir in [:row, :row_reverse]
+
+    if Map.get(cs, :balance) == true or (cs.hpct != nil and f.cbh == :num) or
+         Map.get(cs, :ratio) != nil or cs.col_pct > 0 or
+         (not row? and cs.wrap and (cs.height || cs.maxh) != nil),
+       do: throw(:layout)
+
+    # (an item that clips, in a container with a height, may be cut to the line: not followed)
+    if Enum.any?(items, fn it ->
+         Map.get(it, :ratio) != nil or (Map.get(it, :scroll?, false) and cs.height != nil) or
+           (is_number(it.ml) and it.ml < 0) or (is_number(it.mr) and it.mr < 0)
+       end),
+       do: throw(:layout)
+
+    avail =
+      cond do
+        avail > @unbounded / 2 -> flex_natural_width(f.st, cs, items, avail)
+        avail <= 1 and cs.wrap and row? -> max(avail, flex_widest(f.st, cs, items, avail))
+        true -> avail
+      end
+
+    sorted = Enum.sort_by(items, & &1.order)
+
+    edges =
+      if row? do
+        fold_flex_row(f, cs, sorted, avail)
+      else
+        sorted = if cs.dir == :column_reverse, do: Enum.reverse(sorted), else: sorted
+        fold_flex_column(f, cs, sorted, avail)
+      end
+
+    {avail, edges}
+  end
+
+  defp fold_flex_row(f, cs, items, avail) do
+    items =
+      Enum.map(items, fn it ->
+        it |> Map.put(:rmin, 0.0) |> Map.put(:hw, flex_base(f.st, it, avail, cs) * 1.0)
+      end)
+
+    lines = if cs.wrap, do: flex_lines(items, cs, avail), else: [items]
+    lines = if cs.dir == :row_reverse, do: Enum.map(lines, &Enum.reverse/1), else: lines
+
+    Enum.reduce(lines, %{}, fn line, acc ->
+      fold_merge(acc, fold_flex_line(f, cs, line, avail), 0)
+    end)
+  end
+
+  # the sizing half of `flex_line` and `flex_line_live`
+  defp fold_flex_line(f, cs, line, avail) do
+    # collapsed items only keep their cross size, they take no part in the main axis
+    line = Enum.reject(line, & &1.collapsed)
+    if line == [], do: %{}, else: fold_flex_line_live(f, cs, line, avail)
+  end
+
+  defp fold_flex_line_live(f, cs, line, avail) do
+    n = length(line)
+    gaps = cs.col_gap * (n - 1)
+    outer = fn it -> it.hw + auto_zero(it.ml) + auto_zero(it.mr) end
+    free = avail - Enum.sum(Enum.map(line, outer)) - gaps
+    line = flex_resize(f.st, line, free, avail)
+
+    line =
+      Enum.map(line, fn it ->
+        c = %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}
+        %{it | hw: clamp_width(it.hw, c, avail) * 1.0}
+      end)
+
+    line =
+      Enum.map(line, fn it ->
+        if (it.basis != nil or (it.width == nil and Map.get(it, :ratio) != nil)) and
+             flex_auto_min?(it) and it.hw < flex_min(f.st, it, avail),
+           do: %{it | hw: flex_min(f.st, it, avail)},
+           else: it
+      end)
+
+    free = avail - Enum.sum(Enum.map(line, outer)) - gaps
+    autos = Enum.sum(for it <- line, m <- [it.ml, it.mr], m == :auto, do: 1)
+
+    {line, free} =
+      if free > 0 and autos > 0 do
+        share = free / autos
+        fix = fn m -> if m == :auto, do: share, else: m end
+        {Enum.map(line, &%{&1 | ml: fix.(&1.ml), mr: fix.(&1.mr)}), 0.0}
+      else
+        {Enum.map(line, &%{&1 | ml: auto_zero(&1.ml), mr: auto_zero(&1.mr)}), free}
+      end
+
+    {start, between} = flex_justify(cs.justify, cs.dir == :row_reverse, free * 1.0, n)
+
+    {edges, _} =
+      Enum.reduce(line, {%{}, start}, fn it, {acc, x} ->
+        ix = x + it.ml
+        right = floor(ix + it.hw + 0.5)
+        w = max(right - floor(ix + 0.5), 0)
+        e = fold_item_edges(f, it.sub, it.key, w)
+
+        {fold_merge(acc, e, floor(ix + 0.5)),
+         ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
+      end)
+
+    edges
+  end
+
+  # the sizing half of `flex_column_item`
+  defp fold_flex_column(f, cs, items, avail) do
+    Enum.reduce(items, %{}, fn it, acc ->
+      room = avail - auto_zero(it.ml) - auto_zero(it.mr)
+      align = flex_align(it, cs.align)
+
+      w =
+        cond do
+          it.width != nil ->
+            resolve(it.width, avail) + it.extra
+
+          align in ["stretch", "normal"] and not it.fit? ->
+            room
+
+          true ->
+            max_c = shrink_extent(f.st, it.sub, @unbounded, it.key)
+            if max_c <= room, do: max_c, else: max(room, min_extent(f.st, it.sub, it.key))
+        end
+
+      w = clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, avail)
+      w = max(round(w), 1)
+
+      {sub, key} =
+        if Map.get(it, :restretch) && it.width == nil && align in ["stretch", "normal"] &&
+             not it.fit? && it.auto_height?,
+           do: {it.restretch.(%{"width" => w - it.extra * 1.0}), nil},
+           else: {it.sub, it.key}
+
+      e = fold_item_edges(f, sub, key, w)
+      fold_merge(acc, e, round(column_x(cs, it, align, w, avail)))
+    end)
   end
 end
