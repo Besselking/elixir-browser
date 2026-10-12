@@ -24,7 +24,7 @@ defmodule Browser.JS.ShapesTest do
 
   @moduletag timeout: 1_800_000
 
-  alias Browser.JS.{Builtins, HeapOracle, Interp, Parser, Shape}
+  alias Browser.JS.{Builtins, GC, HeapOracle, Interp, Parser, Shape}
   alias Browser.JS.CompileTest.Corpus
   require Browser.JS.Obj, as: Obj
 
@@ -403,6 +403,164 @@ defmodule Browser.JS.ShapesTest do
         end)
 
       assert result == {true, true}
+    end
+  end
+
+  describe "the inline caches" do
+    # The cells of the inline caches of step A2 (the moduledoc of `Browser.JS.Shape`): the
+    # oracles of the corpus compare the results with the cells on and off. These tests look
+    # at the cells themselves.
+
+    # The kind of the cell `cell`.
+    defp cell_kind(:mega), do: :mega
+    defp cell_kind({_, _}), do: :generic
+    defp cell_kind({_, _, _}), do: :own
+    defp cell_kind({_, :get, _, _}), do: :own_getter
+    defp cell_kind({_, _, _, _, _}), do: :proto
+    defp cell_kind({_, :get, _, _, _, _}), do: :proto_getter
+    defp cell_kind({_, _, _, _, _, _, _}), do: :proto2
+    defp cell_kind({_, :get, _, _, _, _, _, _}), do: :proto2_getter
+
+    defp cells, do: for({k, cell} <- :erlang.get(), is_integer(k) and k < 0, do: cell)
+
+    # The global variable `name` of the heap of the process.
+    defp global(name), do: Map.fetch!(Interp.deref(Interp.global()).vars, name)
+
+    defp run_here(src) do
+      {:ok, program} = Parser.parse(src, resolve: 4, file: "t.js")
+      Interp.run_program(program, true)
+    end
+
+    test "the rows of the corpus make each kind of cell" do
+      rows = for {"dm ic" <> _, _, _} = row <- Browser.JS.DatamodelCorpus.rows(), do: row
+      assert length(rows) >= 5
+
+      kinds =
+        rows
+        |> HeapOracle.run_all(shapes(true), after: fn -> Enum.map(cells(), &cell_kind/1) end)
+        |> Enum.flat_map(& &1.after)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert kinds ==
+               Enum.sort([
+                 :mega,
+                 :generic,
+                 :own,
+                 :own_getter,
+                 :proto,
+                 :proto_getter,
+                 :proto2,
+                 :proto2_getter
+               ])
+
+      # (with the fast records off, no site writes a cell)
+      off = HeapOracle.run_all(rows, shapes(false), after: fn -> cells() end)
+      assert Enum.all?(off, &(&1.after == []))
+    end
+
+    test "a cell is not a root, it does not keep its prototype alive, and a sweep keeps it" do
+      src = ~S"""
+      function mk(tag){ var p = {m: tag}; var o = Object.create(p); o.x = 1; return o }
+      var o1 = mk('a');
+      """
+
+      result =
+        inspect_run(src, fn ->
+          site = Shape.new_site()
+          o1 = global("o1")
+          {:obj, pid} = Interp.deref(elem(o1, 1)).proto
+          reads = [Interp.get_ic(o1, "m", site), Interp.get_ic(o1, "m", site)]
+          cell = :erlang.get(site)
+          run_here("o1 = null; var o2 = mk('b');")
+          # (a root that holds the site number: a negative integer is not a heap id, so the
+          # walk does not go into the cell)
+          Process.put(:ic_test_root, {site})
+          GC.collect()
+          freed? = :erlang.get(pid) == :undefined
+          kept = :erlang.get(site)
+          # (the next object has the same shape and a prototype with the same shape, at a
+          # new id: the cell misses on the link, and the read is right)
+          read = Interp.get_ic(global("o2"), "m", site)
+          {reads, cell_kind(cell), elem(cell, 1) == pid, freed?, kept == cell, read}
+        end)
+
+      assert result == {["a", "a"], :proto, true, true, true, "b"}
+    end
+
+    test "a cell stays exact in a new heap that gives the same ids to other objects" do
+      src = fn proto -> "var p = #{proto}; var o = Object.create(p); o.x = 1;" end
+
+      result =
+        HeapOracle.in_process(fn ->
+          site = Shape.new_site()
+
+          heap = fn proto ->
+            Interp.init(1_000_000)
+            Builtins.install()
+            run_here(src.(proto))
+            o = global("o")
+
+            {Interp.get_ic(o, "m", site), Interp.get_ic(o, "m", site), Interp.get(o, "m"),
+             global("p"), :erlang.get(site)}
+          end
+
+          {a1, a2, a, pa, cell} = heap.("{m: 'first'}")
+          # (the same ids and the same shapes, other values: the cell hits and reads the
+          # object of the new heap)
+          {b1, b2, b, pb, cell_b} = heap.("{m: 'second'}")
+          # (the same id for the prototype, but another shape: the cell misses)
+          {c1, c2, c, pc, cell_c} = heap.("{q: 0, m: 'third'}")
+
+          {[a1, a2, a, b1, b2, b, c1, c2, c], pa == pb and pb == pc, cell_kind(cell),
+           cell_b == cell, cell_kind(cell_c), elem(cell_c, tuple_size(cell_c) - 1)}
+        end)
+
+      assert result ==
+               {[
+                  "first",
+                  "first",
+                  "first",
+                  "second",
+                  "second",
+                  "second",
+                  "third",
+                  "third",
+                  "third"
+                ], true, :proto, true, :proto, 2}
+    end
+
+    test "the cells go with the code cache: at an erase of the budget and with JS_COMPILE=0" do
+      erased =
+        inspect_run("", fn ->
+          :erlang.put(-1_000_000_000, {1, 1, 1})
+          :erlang.put(:jsc_budget_max, 10)
+          run_here("function f(){ return {a: 1}.a } f()")
+          {:erlang.get(-1_000_000_000), elem(:erlang.get(:jsc_budget), 1) > 0}
+        end)
+
+      assert erased == {:undefined, true}
+
+      old = Application.get_env(:browser, :js_compile)
+
+      try do
+        Application.put_env(:browser, :js_compile, false)
+
+        result =
+          HeapOracle.in_process(fn ->
+            :erlang.put(-1_000_000_000, {1, 1, 1})
+            next = Shape.new_site()
+            Interp.init(1_000)
+            # (the site numbers are never given two times, also after a new heap)
+            {:erlang.get(-1_000_000_000), Shape.new_site() < next}
+          end)
+
+        assert result == {:undefined, true}
+      after
+        if old == nil,
+          do: Application.delete_env(:browser, :js_compile),
+          else: Application.put_env(:browser, :js_compile, old)
+      end
     end
   end
 end

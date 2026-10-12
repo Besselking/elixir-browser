@@ -3,14 +3,17 @@ defmodule Browser.JS.CompileNamedTest do
   # `Interp.get_named/2` and `Interp.put_named/3` (the paths of compiled code) give the same
   # results as through `Interp.get/2` and `Interp.put/3` (the paths of the tree walker), for
   # one object of each class. The two pairs share the class dispatch (`get_obj/4` and
-  # `put_obj/5`), so this test fails when a change gives one path a different key.
+  # `put_obj/5`), so this test fails when a change gives one path a different key. The
+  # inline caches of step A2 (`Interp.get_ic/3`, `put_ic/4` and `strict_put_ic/4`) give the
+  # same results too: each operation runs two times on one site, so the first run is a miss
+  # that writes the cell and the second run can hit it.
   #
   # Each mode runs in a fresh process with its own heap. The script that makes the objects
   # is the same, so both heaps give the same ids, and the results of the two modes are
   # equal terms, also when they hold objects.
   use ExUnit.Case, async: true
 
-  alias Browser.JS.{Builtins, Interp, Parser}
+  alias Browser.JS.{Builtins, Interp, Parser, Shape}
 
   # One object of each class: plain (with an accessor), array, arguments object, function,
   # class, bound function, proxy, proxy of a function, host (the global object), typed
@@ -47,6 +50,16 @@ defmodule Browser.JS.CompileNamedTest do
     end
   end
 
+  test "the inline caches give the results of get and put for each class" do
+    ic = in_heap(:ic)
+    plain = in_heap(:plain)
+    assert length(ic) == length(plain)
+
+    for {i, p} <- Enum.zip(ic, plain) do
+      assert i == p
+    end
+  end
+
   test "get_named and get read the same value in one heap" do
     reads =
       run_in_heap(fn objs ->
@@ -72,36 +85,39 @@ defmodule Browser.JS.CompileNamedTest do
     for {gn, g} <- reads, do: assert(gn == g)
   end
 
-  # The record of each key of each object: the read, the sloppy write of 7, the flag of a
-  # failed write, the strict write of 8 (or its error), and the value after the writes.
+  # The record of each key of each object: the two reads, the two sloppy writes of 7, the
+  # flag of a failed write, the two strict writes of 8 (or their errors), and the value
+  # after the writes.
   defp in_heap(mode) do
     run_in_heap(fn objs ->
       rows =
         for o <- objs, k <- @keys do
-          read =
-            safe(fn -> if mode == :named, do: Interp.get_named(o, k), else: Interp.get(o, k) end)
-
+          {get, put, strict_put} = ops(mode)
+          read = {safe(fn -> get.(o, k) end), safe(fn -> get.(o, k) end)}
           :erlang.put(:js_put_failed, false)
-
-          write =
-            safe(fn ->
-              if mode == :named, do: Interp.put_named(o, k, 7.0), else: Interp.put(o, k, 7.0)
-            end)
-
+          write = {safe(fn -> put.(o, k, 7.0) end), safe(fn -> put.(o, k, 7.0) end)}
           failed = :erlang.get(:js_put_failed)
 
           strict =
-            safe(fn ->
-              if mode == :named,
-                do: Interp.strict_put_named(o, k, 8.0),
-                else: Interp.strict_put(o, k, 8.0)
-            end)
+            {safe(fn -> strict_put.(o, k, 8.0) end), safe(fn -> strict_put.(o, k, 8.0) end)}
 
           {k, read, write, failed, strict, safe(fn -> Interp.get(o, k) end)}
         end
 
       rows ++ [{:js_next, :erlang.get(:js_next)}]
     end)
+  end
+
+  # The read, the write and the strict write of a mode. The inline caches get new sites for
+  # each object and key.
+  defp ops(:plain), do: {&Interp.get/2, &Interp.put/3, &Interp.strict_put/3}
+  defp ops(:named), do: {&Interp.get_named/2, &Interp.put_named/3, &Interp.strict_put_named/3}
+
+  defp ops(:ic) do
+    {r, w, s} = {Shape.new_site(), Shape.new_site(), Shape.new_site()}
+
+    {&Interp.get_ic(&1, &2, r), &Interp.put_ic(&1, &2, &3, w),
+     &Interp.strict_put_ic(&1, &2, &3, s)}
   end
 
   # Runs `fun` on the list of objects of `@objects` in a fresh heap, in a process of its own,
