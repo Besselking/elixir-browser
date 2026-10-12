@@ -245,7 +245,7 @@ defmodule Browser.Layout do
   @walk_gens 8
 
   defp fresh_memo(epoch),
-    do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}, frags: %{}, nodes: nil}
+    do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}, frags: %{}, trims: %{}, nodes: nil}
 
   defp kept(%{epoch: epoch} = memo, epoch), do: %{memo | gen: memo.gen + 1}
   defp kept(_memo, epoch), do: fresh_memo(epoch)
@@ -364,6 +364,7 @@ defmodule Browser.Layout do
     spans? = Keyword.get_lazy(opts, :spans, fn -> System.get_env("LAYOUT_SPANS") != "off" end)
     Process.put(:layout_spans, spans?)
     Process.put(:layout_frags, if(spans?, do: memo.frags))
+    Process.put(:layout_trims, memo.trims)
 
     # what percentage margins and padding refer to, as the walk goes down the tree
     margin = Keyword.get(opts, :margin, @margin)
@@ -378,8 +379,6 @@ defmodule Browser.Layout do
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
-    # column break markers that no column set read
-    items = Enum.reject(items, &(&1.type == :colbreak))
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -388,10 +387,12 @@ defmodule Browser.Layout do
           "walk #{div(t1 - t0, 1000)}ms place #{div(System.monotonic_time(:microsecond) - t1, 1000)}ms ops=#{length(ops)}"
         )
 
+    # column break markers that no column set read go, and so do the scrollers when not asked for;
     # absolutely positioned boxes take no room in the flow but do extend the scrollable page
-    height = max(height, content_bottom(items))
+    # (one pass over the items)
+    {items, bottom} = top_items(items, opts[:scrollers])
+    height = max(height, bottom)
     items = add_focus(items, measure, opts[:focus])
-    items = if opts[:scrollers], do: items, else: Enum.reject(items, &(&1.type == :scroller))
 
     # what this layout used is kept for the next one
     gen = memo.gen
@@ -413,7 +414,13 @@ defmodule Browser.Layout do
         frags -> :maps.filter(fn _key, entry -> elem(entry, 0) > gen - @walk_gens end, frags)
       end
 
-    memo = %{memo | entries: entries, walk: walk, frags: frags, nodes: tree}
+    trims =
+      :maps.filter(
+        fn _key, entry -> elem(entry, 0) > gen - @walk_gens end,
+        Process.delete(:layout_trims)
+      )
+
+    memo = %{memo | entries: entries, walk: walk, frags: frags, trims: trims, nodes: tree}
 
     case canvas do
       nil ->
@@ -702,17 +709,32 @@ defmodule Browser.Layout do
   How far down the laid out page extends (inside the boxes that clip it): the bottom of
   what is drawn.
   """
-  def content_bottom(items) do
-    items
-    |> Enum.filter(
-      &(&1.type in [:text, :rect, :image, :svg, :hr] and not Map.get(&1, :hidden, false))
-    )
-    |> Enum.reduce(0, fn item, acc ->
-      bottom = item.y + Map.get(item, :h, 0)
-      bottom = if clip = Map.get(item, :clip), do: min(bottom, clip.y + clip.h), else: bottom
-      max(acc, bottom)
-    end)
+  def content_bottom(items), do: Enum.reduce(items, 0, &max(&2, item_bottom(&1)))
+
+  # the items without column break markers (and scrollers unless asked for), and their bottom
+  defp top_items(items, scrollers?) do
+    drop_scrollers? = !scrollers?
+
+    {kept, bottom} =
+      Enum.reduce(items, {[], 0}, fn
+        %{type: :colbreak}, acc -> acc
+        %{type: :scroller}, acc when drop_scrollers? -> acc
+        item, {kept, bottom} -> {[item | kept], max(bottom, item_bottom(item))}
+      end)
+
+    {:lists.reverse(kept), bottom}
   end
+
+  defp item_bottom(%{type: type} = item) when type in [:text, :rect, :image, :svg, :hr] do
+    if Map.get(item, :hidden, false) do
+      0
+    else
+      bottom = item.y + Map.get(item, :h, 0)
+      if clip = Map.get(item, :clip), do: min(bottom, clip.y + clip.h), else: bottom
+    end
+  end
+
+  defp item_bottom(_item), do: 0
 
   @doc """
   How far right the laid out page extends: the right edge of what is drawn (inside the boxes
@@ -3837,7 +3859,7 @@ defmodule Browser.Layout do
       # (the ops of a span are trimmed as if they were in the list; the key of a span whose ops
       # change says from what end they were trimmed)
       {:span, key, sops, safe?} = span, {acc, edge?} ->
-        case trim_reversed(Enum.reverse(sops), edge?) do
+        case trim_span(key, sops, edge?) do
           {^sops, edge?} -> {[span | acc], edge?}
           {trimmed, edge_out} -> {[{:span, {:trim, key, edge?}, trimmed, safe?} | acc], edge_out}
         end
@@ -3854,6 +3876,37 @@ defmodule Browser.Layout do
       op, {acc, _} ->
         {[op | acc], false}
     end)
+  end
+
+  # (what a span's ops trim to is kept with the memo, for the ops and the end they were trimmed
+  # from: a span the walk kept is not looked through again)
+  defp trim_span(key, ops, edge?) do
+    trims = Process.get(:layout_trims, %{})
+    gen = Process.get(:layout_gen)
+
+    case trims do
+      %{^key => {_gen, old, ^edge?, result}} ->
+        if :erts_debug.same(old, ops) do
+          Process.put(:layout_trims, Map.put(trims, key, {gen, old, edge?, result}))
+          result
+        else
+          trim_span_miss(key, ops, edge?, gen)
+        end
+
+      _ ->
+        trim_span_miss(key, ops, edge?, gen)
+    end
+  end
+
+  defp trim_span_miss(key, ops, edge?, gen) do
+    result = trim_reversed(Enum.reverse(ops), edge?)
+
+    Process.put(
+      :layout_trims,
+      Map.put(Process.get(:layout_trims, %{}), key, {gen, ops, edge?, result})
+    )
+
+    result
   end
 
   # -- ops -> positioned items -------------------------------------------------------
@@ -3978,7 +4031,7 @@ defmodule Browser.Layout do
     # what an absolutely positioned box painted (`:over`) stays above the flow, even when it came
     # through a line or an inline-block that sorts its items into backgrounds and the rest
     {over, flow} =
-      (Enum.reverse(st.rects) ++ Enum.reverse(st.items))
+      (Enum.reverse(st.rects) ++ flat_into(st.items, 0, []))
       |> Enum.split_with(&Map.get(&1, :over))
 
     {under, overlays} =
@@ -4894,7 +4947,7 @@ defmodule Browser.Layout do
 
   # the items a box of its own width holds stop counting for shrink-to-fit at its right edge
   defp limit_new_items(st, box) do
-    {new, old} = Enum.split(st.items, st.n - box.n0)
+    {new, old} = take_new(st.items, st.n - box.n0)
     limit = box.x + box.w
     %{st | items: Enum.map(new, &limit_extent(&1, limit)) ++ old}
   end
@@ -4977,10 +5030,10 @@ defmodule Browser.Layout do
   # the state is: floats beside the lines and the indent count
   defp balance_line_count(st, ops, width, avail) do
     done = ops |> Enum.reduce(%{st | bal: avail - width}, &op/2) |> flush()
-    fresh = length(done.items) - length(st.items)
 
     done.items
-    |> Enum.take(max(fresh, 0))
+    |> take_new(max(done.n - st.n, 0))
+    |> elem(0)
     |> Enum.filter(&(&1.type == :text))
     |> Enum.map(& &1.y)
     |> Enum.uniq()
@@ -5480,7 +5533,7 @@ defmodule Browser.Layout do
         nil -> {dx, dy}
       end
 
-    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_items, old_items} = take_new(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
 
@@ -5531,7 +5584,7 @@ defmodule Browser.Layout do
   defp stick_new(st, %{o: o} = box, height) do
     # `parent` is the block it sits in, whose bottom becomes its `limit` when layout is done
     stick = %{top: o.sticky, y0: box.top, h: height, parent: List.first(st.blocks)}
-    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_items, old_items} = take_new(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     # absolutely positioned children are placed in `overlays`, outside the flow
     {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
@@ -5779,7 +5832,7 @@ defmodule Browser.Layout do
   # box for the scripts, drawn or not: `:bounds` stay)
   defp drop_below(st, box, limit) do
     keep? = &(&1.y < limit or &1.type == :bounds)
-    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_items, old_items} = take_new(st.items, st.n - box.n0)
     kept_items = Enum.filter(new_items, keep?)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     kept_rects = Enum.filter(new_rects, keep?)
@@ -5795,7 +5848,7 @@ defmodule Browser.Layout do
 
   # items and rects created inside a clipping box get (intersected) clip rectangles
   defp clip_new(st, box, clip, sid) do
-    {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+    {new_items, old_items} = take_new(st.items, st.n - box.n0)
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
 
     %{
@@ -6752,7 +6805,7 @@ defmodule Browser.Layout do
     changed? = Enum.any?(Map.drop(st1, @span_vary), fn {k, v} -> Map.get(st0, k) != v end)
 
     if st1.clr == nil and st1.adj == nil and not changed? do
-      {items, _} = Enum.split(st1.items, st1.n - st0.n)
+      {items, _} = split_entries(st1.items, st1.n - st0.n, [])
       {rects, _} = Enum.split(st1.rects, st1.nr - st0.nr)
 
       %{
@@ -6765,7 +6818,8 @@ defmodule Browser.Layout do
         ext: st1.ext,
         # (items with a paint order (outlines, positioned boxes) get fresh ones when placed
         # again, so they still paint in tree order among what the layout placed before them)
-        pz?: Enum.any?(items, &Map.has_key?(&1, :pz)),
+        # (a fragment placed again inside it has none: one with them is taken apart)
+        pz?: Enum.any?(items, &(is_map(&1) and Map.has_key?(&1, :pz))),
         values: Map.take(st1, @span_values)
       }
     end
@@ -6773,18 +6827,19 @@ defmodule Browser.Layout do
 
   defp replay_span(st, frag) do
     dy = st.y - frag.y0
+    rects = if dy == 0, do: frag.rects, else: Enum.map(frag.rects, &move(&1, 0, dy))
 
-    {items, rects} =
-      if dy == 0,
-        do: {frag.items, frag.rects},
-        else: {Enum.map(frag.items, &move(&1, 0, dy)), Enum.map(frag.rects, &move(&1, 0, dy))}
+    # (the items stay one entry, moved when they are taken apart)
+    items =
+      if frag.pz?,
+        do: frag.items |> flat_items(dy) |> renumber_pz() |> Enum.concat(st.items),
+        else: [{:frag, dy, frag.items, frag.n} | st.items]
 
-    items = if frag.pz?, do: renumber_pz(items), else: items
     st = Map.merge(st, frag.values)
 
     %{
       st
-      | items: items ++ st.items,
+      | items: items,
         rects: rects ++ st.rects,
         n: st.n + frag.n,
         nr: st.nr + frag.nr,
@@ -6792,6 +6847,40 @@ defmodule Browser.Layout do
         ext: max(st.ext, frag.ext)
     }
   end
+
+  # The items of a run are a list, newest first, of items and of the items of fragments placed
+  # again (`{:frag, dy, items, n}`: `n` items, `dy` lower than where they were placed). They are
+  # taken apart at the end of the run (`finalize/1`), or before a box changes what it holds.
+
+  # the items, newest first, and `dy` lower
+  defp flat_items(entries, dy \\ 0), do: entries |> flat_into(dy, []) |> :lists.reverse()
+
+  # the items `dy` lower, oldest first, on top of `acc`
+  defp flat_into([], _dy, acc), do: acc
+
+  defp flat_into([{:frag, fdy, items, _n} | rest], dy, acc),
+    do: flat_into(rest, dy, flat_into(items, dy + fdy, acc))
+
+  defp flat_into([item | rest], 0, acc), do: flat_into(rest, 0, [item | acc])
+  defp flat_into([item | rest], dy, acc), do: flat_into(rest, dy, [move(item, 0, dy) | acc])
+
+  # the `k` newest items, taken apart, and the rest
+  defp take_new(entries, k) do
+    {new, old} = split_entries(entries, k, [])
+    {flat_items(new), old}
+  end
+
+  # the entries of the `k` newest items and the rest (a fragment that holds both is taken apart)
+  defp split_entries(entries, 0, acc), do: {:lists.reverse(acc), entries}
+  defp split_entries([], _k, acc), do: {:lists.reverse(acc), []}
+
+  defp split_entries([{:frag, _dy, _items, n} = frag | rest], k, acc) when n <= k,
+    do: split_entries(rest, k - n, [frag | acc])
+
+  defp split_entries([{:frag, dy, items, _n} | rest], k, acc),
+    do: split_entries(flat_items(items, dy) ++ rest, k, acc)
+
+  defp split_entries([item | rest], k, acc), do: split_entries(rest, k - 1, [item | acc])
 
   # What a span may hold for its fragment to be placed again elsewhere: nothing that reaches
   # outside the span (floats, clears, out-of-flow boxes, positioned boxes with a paint order,
@@ -11539,7 +11628,7 @@ defmodule Browser.Layout do
       :collapsed ->
         %{
           st
-          | items: Enum.drop(st.items, st.n - box.n0),
+          | items: elem(take_new(st.items, st.n - box.n0), 1),
             n: box.n0,
             rects: Enum.drop(st.rects, st.nr - box.nr0),
             nr: box.nr0,
@@ -11547,7 +11636,7 @@ defmodule Browser.Layout do
         }
 
       matrix ->
-        {new_items, old_items} = Enum.split(st.items, st.n - box.n0)
+        {new_items, old_items} = take_new(st.items, st.n - box.n0)
         {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
         {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
 
