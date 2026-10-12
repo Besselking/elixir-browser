@@ -121,7 +121,8 @@ defmodule Browser.JS.Interp do
     :erlang.put(:js_compile, compile?)
 
     if compile? != true do
-      for {{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      # (the cells of the inline caches go with the cache, see `Browser.JS.Shape`)
+      Browser.JS.Compile.erase_entries()
       # (the count of the cache goes with the cache, see `Browser.JS.Compile`)
       :erlang.erase(:jsc_budget)
     end

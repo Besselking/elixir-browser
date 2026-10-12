@@ -81,6 +81,58 @@ defmodule Browser.JS.Shape do
   a dictionary record. The macros of `Browser.JS.Obj` that make a record read it (`on?/0`).
   No read of a property reads it. The oracle of `test/browser/js_shapes_test.exs` runs each
   program with the switch off and on, and compares the two runs.
+
+  ## The inline caches (step A2)
+
+  Each named read and write of the compiled code (`o.k`, `o.k = v`, `o.k()`, `o.k += v`,
+  `o.k++`) has a site number, which `new_site/0` gives when the site compiles. The number is
+  a negative integer, and the cell of the site is the process key with that number. A heap
+  id is 0 or more, so a cell is never a heap entry, and a closure that keeps its site
+  number keeps no heap id (the capture rule of `Browser.JS.Compile`). The counter
+  `:js_ic_next` is never reset, also not by `Interp.init/1` or by an erase of the code
+  cache: a live closure keeps its number after an erase, and two sites must never share a
+  cell.
+
+  A cell tells where the last record that the site saw holds the key, as the shape of that
+  record gives it. The last element of each cell is the count of the misses that wrote
+  the cell. `Browser.JS.Interp.get_ic/3`, `put_ic/4` and `strict_put_ic/4` read and write
+  the cells:
+
+  | Cell | Kind | A hit needs |
+  |---|---|---|
+  | `{sid, pos, n}` | own data | the record has the shape `sid`, and value `pos` is not an accessor |
+  | `{sid, :get, pos, n}` | own getter | the same, and value `pos` is an accessor |
+  | `{sid, pid, psid, pos, n}` | data of the prototype | the record has `sid`, its prototype is `{:obj, pid}`, the record at `pid` has the shape `psid`, and its value `pos` is not an accessor |
+  | `{sid, :get, pid, psid, pos, n}` | getter of the prototype | the same, and the value is an accessor |
+  | `{sid, pid1, psid1, pid2, psid2, pos, n}` | data of the prototype of the prototype | as above for `pid1`, and the prototype of `pid1` is `{:obj, pid2}` with the shape `psid2` |
+  | `{sid, :get, pid1, psid1, pid2, psid2, pos, n}` | a getter there | the same, and the value is an accessor |
+  | `{sid, n}` | the generic path | the record has `sid`: the site takes the generic path, and it does not look for a cell again |
+  | `:mega` | the generic path | always: the site had 16 misses |
+
+  A write site uses only `{sid, pos, n}` (a writable data property of the record) and
+  `{sid, n}`. A cell is made only from a fast record of the class `:object` and from fast
+  prototypes, after the generic path found the key there. A dictionary record, an array, a
+  function, a host object and a proxy never get a cell, and every operation on them takes
+  the generic path. On a miss, the site takes the generic path and writes the cell again.
+  After 16 misses the cell becomes `:mega`, so that a site that sees many shapes does not
+  pay for the search of a cell at each run.
+
+  A hit is exact because a shape is immutable and a `sid` is never given two times in a
+  process. The shape `sid` tells that a record has the key at the position `pos` with the
+  same attributes, or that it does not have the key. The shape does not tell an accessor
+  from a data property, so each hit looks at the value. The prototype of a record is not
+  in its shape, so a cell of a prototype compares the prototype link of each record on the
+  path. `Object.setPrototypeOf` changes the link, so the cell misses. A change of the keys
+  or of the attributes of a prototype gives it a new shape, so the cell misses. A freed
+  prototype gives `:undefined`, because the heap does not give an id two times, so the
+  cell misses. A new heap (`Interp.init/1`) gives the ids from 0 again, and a cell can then
+  read an object of the new heap with the same id. This is still exact: the cell reads a
+  value only of a record with the shape `psid`, and that shape tells what the value is.
+
+  The cells belong to the code cache of `Browser.JS.Compile`. The budget of the cache
+  counts each site as one node, and an erase of the cache erases all the cells. A cell can
+  hold the id of a prototype, but it is not a root of the garbage collector
+  (`Browser.JS.GC`), so a cell never keeps an object alive.
   """
 
   import Bitwise
@@ -365,6 +417,21 @@ defmodule Browser.JS.Shape do
     :erlang.put(:js_shape_since, {next, []})
     :erlang.erase(:js_shape_n)
     :ok
+  end
+
+  @doc """
+  A new site number for an inline cache: a negative integer that no other site of this
+  process has (see "The inline caches"). The compiler calls it when a named site compiles.
+  """
+  def new_site do
+    n =
+      case :erlang.get(:js_ic_next) do
+        :undefined -> -1
+        n -> n
+      end
+
+    :erlang.put(:js_ic_next, n - 1)
+    n
   end
 
   defp next_sid do

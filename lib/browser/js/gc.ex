@@ -17,7 +17,10 @@ defmodule Browser.JS.GC do
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
   a lift template only while the template runs, so it is a root like any other key. The
   fields of a heap record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold
-  counts and keys, and a count must not keep a dead object alive.
+  counts and keys, and a count must not keep a dead object alive. The cells of the inline
+  caches (step A2) are process keys that are negative integers. They are not heap entries
+  and not roots: a cell can hold the id of a prototype, and a freed prototype makes the
+  cell miss (`Browser.JS.Shape`).
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers).
@@ -65,7 +68,11 @@ defmodule Browser.JS.GC do
     {ids, roots} =
       :lists.foldl(
         fn
-          {k, _}, {ids, roots} when is_integer(k) -> {[k | ids], roots}
+          {k, _}, {ids, roots} when is_integer(k) and k >= 0 -> {[k | ids], roots}
+          # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
+          # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
+          # a prototype in it does not keep the prototype alive)
+          {k, _}, acc when is_integer(k) -> acc
           {{:js_hoist, _}, _}, acc -> acc
           # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its
           # syntax nodes hold slot numbers, which must not keep an object alive)
@@ -83,6 +90,7 @@ defmodule Browser.JS.GC do
           # of a dead object must not keep it alive)
           {{:jst, _}, _}, acc -> acc
           {:js_shape_next, _}, acc -> acc
+          {:js_ic_next, _}, acc -> acc
           {:js_shape_n, _}, acc -> acc
           {:js_shape_since, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
@@ -148,6 +156,9 @@ defmodule Browser.JS.GC do
           # (the transition table of the shapes and its counters hold no heap id)
           {{:jst, _}, _}, roots -> roots
           {:js_shape_next, _}, roots -> roots
+          # (the counter of the site numbers of the inline caches holds no heap id; the
+          # cells have integer keys, so the first clause skips them)
+          {:js_ic_next, _}, roots -> roots
           {:js_shape_n, _}, roots -> roots
           {:js_shape_since, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
@@ -241,8 +252,10 @@ defmodule Browser.JS.GC do
   defp improper_to_list([h | t]), do: [h, t]
   defp improper_to_list([]), do: []
 
-  # `scope?` says whether the edge to `t` holds a scope: a tombstone found there is a hit
-  defp spush(t, stack, marks, scope?) when is_integer(t) do
+  # `scope?` says whether the edge to `t` holds a scope: a tombstone found there is a hit.
+  # Only an integer of 0 or more can be a heap id: a negative integer is the key of the cell
+  # of an inline cache.
+  defp spush(t, stack, marks, scope?) when is_integer(t) and t >= 0 do
     case :erlang.get(t) do
       :undefined ->
         stack
@@ -361,8 +374,10 @@ defmodule Browser.JS.GC do
   defp push_list([h | t], stack, marks), do: push(t, push(h, stack, marks), marks)
   defp push_list(_, stack, _marks), do: stack
 
-  # a heap id is marked when it is first reached, and its entry is looked at then
-  defp push(t, stack, marks) when is_integer(t) do
+  # A heap id is marked when it is first reached, and its entry is looked at then. Only an
+  # integer of 0 or more can be a heap id: a negative integer (a JS value, a count) is the
+  # key of the cell of an inline cache, which must not be walked as an object.
+  defp push(t, stack, marks) when is_integer(t) and t >= 0 do
     case :erlang.get(t) do
       :undefined ->
         stack

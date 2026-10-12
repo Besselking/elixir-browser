@@ -222,6 +222,9 @@ defmodule Browser.JS.Compile do
       compiled nodes in the cache, plus 16 for each entry (its fixed part).
     * When the count goes above 400,000 (about 25 to 60 MB on a 64-bit VM), all the
       entries of the cache go. Then the count starts again. `erases` counts these events.
+    * Each site of an inline cache counts as one more node, because its cell (a tuple of
+      up to 8 elements under its own process key) is memory of the cache. An erase of the
+      cache erases all the cells too (`erase_entries/0`).
     * The count does not include the syntax that a closure of the tree keeps (for example
       a nested function). The heap keeps that syntax also while a function of the parse
       is alive.
@@ -233,9 +236,10 @@ defmodule Browser.JS.Compile do
   ## Rules for the code
 
     * A compiled closure keeps only values that are known at compile time: slot numbers,
-      names, constants, syntax nodes and other compiled closures. It never keeps a frame
-      id or a heap id. Thus the collector (`Browser.JS.GC`) does not walk the cache or the
-      funs of this module.
+      names, constants, syntax nodes, other compiled closures, the site numbers of the
+      inline caches (negative integers, see `Browser.JS.Shape`) and the shapes of object
+      literals (a shape holds no heap id). It never keeps a frame id or a heap id. Thus
+      the collector (`Browser.JS.GC`) does not walk the cache or the funs of this module.
     * Each closure has one parent closure. Thus the size of the code is linear in the size
       of the body.
     * Compiled code makes no fun when it runs. A loop is a named function of this module.
@@ -389,11 +393,26 @@ defmodule Browser.JS.Compile do
       end
 
     if total + n > max do
-      for {{:jsc, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      erase_entries()
       :erlang.put(:jsc_budget, {n, erases + 1})
     else
       :erlang.put(:jsc_budget, {total + n, erases})
     end
+  end
+
+  @doc """
+  Erases the entries of the code cache and the cells of the inline caches (the process keys
+  that are negative integers, see `Browser.JS.Shape`), in one walk of the process
+  dictionary. The cells go with the cache, so that the memory bound of the cache is also a
+  bound of the cells. A function object keeps its code after an erase, and its sites then
+  write their cells again. The count of the cache (`:jsc_budget`) is for the caller.
+  """
+  def erase_entries do
+    for {k, _} <- :erlang.get(),
+        match?({:jsc, _}, k) or (is_integer(k) and k < 0),
+        do: :erlang.erase(k)
+
+    :ok
   end
 
   # ── frame makers ───────────────────────────────────────────
