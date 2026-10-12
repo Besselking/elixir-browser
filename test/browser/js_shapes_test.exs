@@ -30,6 +30,9 @@ defmodule Browser.JS.ShapesTest do
 
   defp shapes(on?), do: fn -> Process.put(:js_shapes, on?) end
 
+  # The keys of the transition table, and the process keys of `Browser.JS.Shape`.
+  defp table_sids, do: for({{:jst, sid}, _} <- :erlang.get(), do: sid)
+
   # The records of the heap of the process: `{id, record}` for each heap object.
   defp records do
     for {id, o} <- :erlang.get(), is_integer(id), Obj.heap_record?(o), do: {id, o}
@@ -208,6 +211,52 @@ defmodule Browser.JS.ShapesTest do
       assert same
     end
 
+    test "the table is erased past its budget, and an erase does not walk the heap" do
+      # (each object gets a new first key, so each one makes a new child of the root)
+      src = ~S"""
+      var keep = [];
+      for (var i = 0; i < 40000; i++) { var o = {}; o['k' + i] = i; if (i % 1000 == 0) keep.push(o) }
+      """
+
+      {sids, used, {first, old}, last_ok} =
+        inspect_run(src, fn ->
+          {:obj, id} = Map.fetch!(Interp.deref(Interp.global()).vars, "keep")
+          last = Interp.deref(elem(Interp.deref(id).items[39], 1))
+
+          {table_sids(), :erlang.get(:js_shape_n), :erlang.get(:js_shape_since),
+           Obj.own_value(last, "k39000") == 39_000.0}
+        end)
+
+      # (a shape of one key costs 58 words of the budget of 2,000,000 words)
+      assert length(sids) < 40_000 - div(2_000_000, 58) + 100
+      assert used <= 2_000_000
+      assert first > div(2_000_000, 58) and old == []
+      assert Enum.all?(sids, &(&1 == 0 or &1 >= first))
+      assert last_ok
+
+      # (an erase removes the entries of the shapes from before the last erase that got an
+      # entry after it, and only the entries of the table)
+      src = ~S"""
+      function mk(){ var o = {a: 1}; o.b = 2; return o }
+      var x = mk(), y = mk();
+      """
+
+      result =
+        inspect_run(src, fn ->
+          Shape.erase()
+          sid = elem(global_record("x").shape, 1)
+          {:ok, program} = Parser.parse("x.c = 3; y.c = 4; var z = {q: 1};", resolve: 4)
+          Interp.run_program(program, true)
+          shared = global_record("x").shape == global_record("y").shape
+          {_, old} = :erlang.get(:js_shape_since)
+          before = length(table_sids())
+          Shape.erase()
+          {shared, old == [sid], before > 0, table_sids(), Obj.own_value(global_record("y"), "c")}
+        end)
+
+      assert result == {true, true, true, [], 4.0}
+    end
+
     test "an erase of the transition table keeps the records correct" do
       src = ~S"""
       function mk(){ var o = {a: 1}; o.b = 2; return o }
@@ -241,6 +290,7 @@ defmodule Browser.JS.ShapesTest do
           Process.put(:js_shape_next, dead)
           Process.put(:js_shape_n, dead)
           Process.put({:jst, dead}, %{up: dead, x: %{7 => dead}})
+          Process.put(:js_shape_since, {dead, [dead]})
           Browser.JS.GC.collect()
           {:erlang.get(dead) == :undefined, :erlang.get(keep) != :undefined}
         end)

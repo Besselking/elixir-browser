@@ -84,6 +84,7 @@ defmodule Browser.JS.GC do
           {{:jst, _}, _}, acc -> acc
           {:js_shape_next, _}, acc -> acc
           {:js_shape_n, _}, acc -> acc
+          {:js_shape_since, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -148,6 +149,7 @@ defmodule Browser.JS.GC do
           {{:jst, _}, _}, roots -> roots
           {:js_shape_next, _}, roots -> roots
           {:js_shape_n, _}, roots -> roots
+          {:js_shape_since, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots

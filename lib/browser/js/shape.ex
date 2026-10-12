@@ -39,8 +39,11 @@ defmodule Browser.JS.Shape do
 
   The table is only for the sharing. A record keeps its shape term, and the term stays
   correct when the table goes. So `erase/0` can erase the table at any time: the next
-  changes make new shapes with new `sid`s. The table and the two counters are not roots of
-  the garbage collector, because they hold no heap id (`Browser.JS.GC`).
+  changes make new shapes with new `sid`s. The process key `:js_shape_since` holds the
+  first `sid` after the last erase and the older `sid`s that got an entry since then, so
+  that `erase/0` finds the entries without a walk of the process dictionary (which holds
+  the heap). The table and its process keys are not roots of the garbage collector, because
+  they hold no heap id (`Browser.JS.GC`).
 
   ## The limits
 
@@ -54,9 +57,14 @@ defmodule Browser.JS.Shape do
     map must not fill the table);
   * more than 8 changes of attributes in the history of a shape.
 
-  The table is erased when the shapes that it made since the last erase hold more than
-  250,000 keys in all. A shape of `n` keys costs about `8 * n` words, so the shapes that
-  the table keeps cost at most about 16 MB.
+  The root has no limit of children: the first keys of the objects of a page are few, and
+  the budget below stops a program that gives each object a new first key.
+
+  The table is erased when the shapes that it made since the last erase cost more than
+  2,000,000 words. A new shape of `n` keys costs about `50 + 8 * n` words with its entries
+  in the table (the shape term, the index, the tuples, the `enum` list, the `:up` entry,
+  the entry in the table of the parent and the process dictionary). So the table holds at
+  most about 16 MB.
 
   ## The switch
 
@@ -80,7 +88,7 @@ defmodule Browser.JS.Shape do
   @max_keys 128
   @max_children 64
   @max_reconf 8
-  @budget 250_000
+  @budget 2_000_000
 
   @root {:js_shape, 0, %{}, {}, {}, 0, []}
 
@@ -143,8 +151,9 @@ defmodule Browser.JS.Shape do
           {:js_shape, next_sid(), Map.put(index, key, n + 1), :erlang.append_element(keys, key),
            :erlang.append_element(bits, b), flags, enum}
 
-        record(sid, t, key, Map.put(Map.get(t, key, %{}), b, child), n + 1)
+        # (the entry `:up` comes first, so that an erase in `record/5` also erases it)
         :erlang.put({:jst, elem(child, 1)}, %{up: sh})
+        record(sid, t, key, Map.put(Map.get(t, key, %{}), b, child), 50 + 8 * (n + 1))
         child
     end
   end
@@ -188,7 +197,7 @@ defmodule Browser.JS.Shape do
           t ->
             bits = :erlang.setelement(pos, bits, b)
             child = remake(keys, bits, flags + @reconf_one)
-            record(sid, t, k, child, tuple_size(keys))
+            record(sid, t, k, child, 50 + 8 * tuple_size(keys))
             child
         end
     end
@@ -205,7 +214,7 @@ defmodule Browser.JS.Shape do
 
         t ->
           child = remake(keys, bits, flags ||| @not_ext)
-          record(sid, t, :prevent, child, tuple_size(keys))
+          record(sid, t, :prevent, child, 50 + 8 * tuple_size(keys))
           child
       end
     end
@@ -238,7 +247,7 @@ defmodule Browser.JS.Shape do
           end)
 
         child = remake(keys, bits, flags ||| @not_ext)
-        record(sid, t, k, child, tuple_size(keys))
+        record(sid, t, k, child, 50 + 8 * tuple_size(keys))
         child
     end
   end
@@ -286,29 +295,57 @@ defmodule Browser.JS.Shape do
   end
 
   # Writes the transition `k` of the shape `sid` (its table is `t`) to `child`, and counts
-  # the `n` keys of the new shape. Past the budget the whole table goes first.
-  defp record(sid, t, k, child, n) do
+  # the cost `words` of the new entry. Past the budget the whole table goes, and the
+  # transition is not written. A shape from before the last erase that gets its first entry
+  # goes into the list of `:js_shape_since`, so that the next erase finds it.
+  defp record(sid, t, k, child, words) do
     used =
       case :erlang.get(:js_shape_n) do
-        :undefined -> n
-        used -> used + n
+        :undefined -> words
+        used -> used + words
       end
 
     if used > @budget do
       erase()
-      :erlang.put(:js_shape_n, n)
     else
       :erlang.put(:js_shape_n, used)
+
+      with true <- t == %{} and sid != 0,
+           {first, old} when sid < first <- since() do
+        :erlang.put(:js_shape_since, {first, [sid | old]})
+      end
+
       :erlang.put({:jst, sid}, Map.put(t, k, child))
+    end
+  end
+
+  # The first `sid` after the last erase, and the older `sid`s with an entry.
+  defp since do
+    case :erlang.get(:js_shape_since) do
+      :undefined -> {1, []}
+      since -> since
     end
   end
 
   @doc """
   Erases the transition table. The records keep their shapes, which stay correct, and the
-  next changes make new shapes.
+  next changes make new shapes. The `sid`s only go up, so the entries are those of the root,
+  of the `sid`s from the first after the last erase, and of the older `sid`s in the list.
+  The cost is thus that of the shapes, not that of the heap.
   """
   def erase do
-    for {{:jst, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+    {first, old} = since()
+
+    next =
+      case :erlang.get(:js_shape_next) do
+        :undefined -> 1
+        n -> n
+      end
+
+    :erlang.erase({:jst, 0})
+    for sid <- old, do: :erlang.erase({:jst, sid})
+    for sid <- first..(next - 1)//1, do: :erlang.erase({:jst, sid})
+    :erlang.put(:js_shape_since, {next, []})
     :erlang.erase(:js_shape_n)
     :ok
   end
