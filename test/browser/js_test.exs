@@ -1218,11 +1218,11 @@ defmodule Browser.JSTest do
 
     test "indexed setters on a prototype run for holes and the arguments of non-simple functions are unmapped" do
       assert js("""
-             var l = [];
-             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l.push(v) }, configurable: true});
+             var l = '';
+             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l += v }, configurable: true});
              var a = [, 1]; a[0] = 5;
              delete Object.prototype[0];
-             l.join() + '|' + a.hasOwnProperty(0)
+             l + '|' + a.hasOwnProperty(0)
              """) == "5|false"
 
       assert js(

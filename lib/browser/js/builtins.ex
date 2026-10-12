@@ -451,17 +451,6 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  # an array that push/pop may edit in place: not frozen, sealed, non-extensible or length-locked
-  defp plain_array?({:obj, id}) do
-    o = deref(id)
-
-    list_array?(o) and
-      not (Obj.frozen?(o) or Obj.sealed?(o) or Map.get(o, :len_ro, false) or
-             Obj.extensible?(o) == false)
-  end
-
-  defp plain_array?(_), do: false
-
   # Whether `o` (a value or a record) is an array whose `len` is its `length`, so that a list
   # path can read and write the elements as a list. The `length` of an arguments object is
   # an own property that a list path does not change, so an arguments object takes the
@@ -470,15 +459,18 @@ defmodule Browser.JS.Builtins do
   defp list_array?(%{class: :array} = o), do: not is_map_key(o, :arguments)
   defp list_array?(_), do: false
 
-  # The record of `this` when `fast_array?/2` is true, or `nil`: the same tests on one read
-  # of the record, for `push`, which runs very often. It reads `Array.prototype` with no
-  # call: the process key of the prototype and its record.
+  # The record of `this` when the list paths of the array methods (`push`, `pop`, `shift`,
+  # `splice` and the others) can edit its elements in place, or `nil`. The record must be
+  # an array that is not an arguments object, with a `length` that can change, that is not
+  # frozen, sealed or non-extensible, and that has room for `extra` more elements. Its
+  # chain must be the standard chain with no element (`std_chain?/1`). The tests read the
+  # record once, because `push` runs very often.
   defp fast_record({:obj, id}, extra) do
     case deref(id) do
       %{class: :array, items: _, len: len} = o
       when not is_map_key(o, :arguments) and not is_map_key(o, :len_ro) ->
         if not (Obj.frozen?(o) or Obj.sealed?(o) or Obj.extensible?(o) == false) and
-             len + extra <= 50_000_000 and no_proto_elements?(),
+             len + extra <= 50_000_000 and std_chain?(o),
            do: o
 
       _ ->
@@ -488,23 +480,36 @@ defmodule Browser.JS.Builtins do
 
   defp fast_record(_, _extra), do: nil
 
-  # Whether `Array.prototype` has no element (see `fast_array?/2`).
-  @compile {:inline, no_proto_elements?: 0}
-  defp no_proto_elements? do
-    {:obj, pid} = :erlang.get({:proto, :array})
+  # Whether the prototype chain of the array record `o` can hold no element: the chain is
+  # `Array.prototype` and then `Object.prototype`, `Array.prototype` has no element, and
+  # `Object.prototype` has no key that is an index. Else an element of the chain shows
+  # through the holes, and a write of an element must call a setter there or fail at a key
+  # that is not writable, so the method takes the generic path. A fast record never holds
+  # a key that starts with a digit (`Browser.JS.Shape`), so a fast `Object.prototype` needs
+  # no walk of its keys. The process keys of the prototypes and the records are read with
+  # no call.
+  @compile {:inline, std_chain?: 1}
+  defp std_chain?(o) do
+    {:obj, apid} = ap = :erlang.get({:proto, :array})
 
-    case :erlang.get(pid) do
-      %{items: items} -> map_size(items) == 0
-      _ -> true
-    end
+    :erlang.map_get(:proto, o) == ap and
+      case :erlang.get(apid) do
+        %{items: items, proto: {:obj, opid} = op} when map_size(items) == 0 ->
+          op == :erlang.get({:proto, :object}) and no_index_keys?(:erlang.get(opid))
+
+        _ ->
+          false
+      end
   end
 
-  # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
-  defp fast_array?(this, extra \\ 0) do
-    # an element on Array.prototype shows through holes and can run setters: take the generic path
-    plain_array?(this) and no_proto_elements?() and
-      elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
-  end
+  # Whether the record `o` (`Object.prototype`) has no own key that is an index.
+  @compile {:inline, no_index_keys?: 1}
+  defp no_index_keys?(o) when Obj.fast?(o), do: true
+  defp no_index_keys?(o), do: Obj.plain_names?(Obj.string_keys(o))
+
+  # Whether the list paths of the array methods can edit `this` in place, with room for
+  # `extra` more elements (see `fast_record/2`).
+  defp fast_array?(this, extra \\ 0), do: fast_record(this, extra) != nil
 
   @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
                        findLastIndex)
