@@ -48,6 +48,22 @@ defmodule Browser.LayoutMemoTest do
     same!(p, memo)
   end
 
+  test "after an edit, the elements it did not change are not walked again" do
+    p = page(@atoms)
+    {_, _, memo} = kept(p, nil)
+    control = p.forms.controls |> Map.values() |> Enum.find(&Forms.editable?/1)
+    edited = Page.render(p, Forms.put(p.form_state, control.cid, value: "typed"))
+    {_, kept_memo} = same!(edited, memo)
+
+    reused =
+      for {key, {1, _node, _style, ops, _wlog}} <- kept_memo.walk,
+          {_, _, _, old_ops, _} <- [memo.walk[key]],
+          :erts_debug.same(ops, old_ops),
+          do: key
+
+    assert length(reused) >= 4
+  end
+
   test "a picture that arrives between two layouts" do
     html = ~s(<div style="float:left"><img src="a.png"> beside</div><p>text</p>)
     p = page(html)

@@ -2,14 +2,15 @@
 # The edit-differential check of the kept layout memo (Browser.Layout.layout_kept/6): each page
 # in bench/pages/ gets a series of edits to its tree, as a script makes them (a text changes,
 # grows or empties, an element is hidden or shown, an element is added or removed, the window
-# width changes). After each edit the page is laid out from the memo of the layout before and
+# width changes) or as typing makes them (a field gets a new value: `Page.render/2`, which keeps
+# every element the edit did not change, so that their ops are taken from the layout before). After each edit the page is laid out from the memo of the layout before and
 # also afresh, and the two results must be the same (references and paint orders numbered).
 #
 # Prints the edits and differences per page and exits with status 1 when a difference is found.
 # EDITS=40 sets the number of edits per page; SEED=1 the random seed. Uses a stub measurer.
 Application.ensure_all_started(:inets)
 Application.ensure_all_started(:ssl)
-alias Browser.{Layout, Page}
+alias Browser.{Forms, Layout, Page}
 
 measure = fn t, _s -> String.length(t) * 7 end
 edits = String.to_integer(System.get_env("EDITS", "40"))
@@ -137,8 +138,19 @@ failed =
       {_, _, _, kinds, diffs} =
         Enum.reduce(1..edits, {page, 1000, memo, %{}, []}, fn i,
                                                               {page, width, memo, kinds, diffs} ->
-          {name, raw, width} = edit.(page.raw, width, i)
-          page = Page.from_raw(page, raw, env.(width))
+          fields = page.forms.controls |> Map.values() |> Enum.filter(&Forms.editable?/1)
+
+          {name, page, width} =
+            if fields != [] and :rand.uniform(3) == 1 do
+              field = Enum.random(fields)
+              value = String.duplicate("typed ", :rand.uniform(6))
+
+              {"field typed in",
+               Page.render(page, Forms.put(page.form_state, field.cid, value: value)), width}
+            else
+              {name, raw, width} = edit.(page.raw, width, i)
+              {name, Page.from_raw(page, raw, env.(width)), width}
+            end
 
           {items, height, memo} =
             Layout.layout_kept(page.nodes, width, measure, 768, opts.(page), memo)

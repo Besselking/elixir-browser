@@ -166,7 +166,10 @@ defmodule Browser.Layout do
     end
   end
 
-  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}}
+  # How many layouts an element's ops are kept when nothing looks them up (`walk_kept/5`).
+  @walk_gens 8
+
+  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}}
 
   defp kept(%{epoch: epoch} = memo, epoch), do: %{memo | gen: memo.gen + 1}
   defp kept(_memo, epoch), do: fresh_memo(epoch)
@@ -279,6 +282,8 @@ defmodule Browser.Layout do
     Process.put(:layout_svg_defs, Keyword.get(opts, :svg_defs, %{}))
     # the keys of boxes and atoms: the same from one layout of a tree to the next (see `wkey/1`)
     Process.put(:layout_wkeys, %{})
+    Process.put(:layout_wlog, {0, []})
+    Process.put(:layout_walk, memo.walk)
 
     # what percentage margins and padding refer to, as the walk goes down the tree
     margin = Keyword.get(opts, :margin, @margin)
@@ -312,7 +317,16 @@ defmodule Browser.Layout do
     gen = memo.gen
     entries = :maps.filter(fn _key, {g, _sub, _value} -> g == gen end, Process.get(:layout_memo))
     Process.delete(:layout_memo)
-    memo = %{memo | entries: entries}
+    # (the ops of an element inside one whose ops were taken whole are not looked up, but are
+    # what the next edit inside it needs: they are kept for some layouts more)
+    walk =
+      :maps.filter(
+        fn _key, entry -> elem(entry, 0) > gen - @walk_gens end,
+        Process.get(:layout_walk)
+      )
+
+    Process.delete(:layout_walk)
+    memo = %{memo | entries: entries, walk: walk}
 
     case canvas do
       nil ->
@@ -1242,7 +1256,7 @@ defmodule Browser.Layout do
 
   defp put_computed(attrs, c), do: List.keyreplace(attrs, "@computed", 0, {"@computed", c})
 
-  defp walk_element_inner({:element, tag, attrs, kids}, parent_style, acc, force) do
+  defp walk_element_inner({:element, tag, attrs, kids} = node, parent_style, acc, force) do
     c = computed(attrs)
     kids = trim_margins(kids, c)
     el = {:element, tag, attrs, kids}
@@ -1278,9 +1292,11 @@ defmodule Browser.Layout do
       table? = kind == :table and force != :inline_inner
       float? = force == nil and c["float"] in ["left", "right"]
 
+      kept = &walk_kept(node, parent_style, force, acc, &1)
+
       case kind do
         _ when float? and kind != :contents ->
-          float_ops(el, parent_style, c, acc)
+          kept.(&float_ops(el, parent_style, c, &1))
 
         # (what is in it goes on the line as if it were in the parent: text on either side is
         # one run)
@@ -1293,23 +1309,27 @@ defmodule Browser.Layout do
           inline_ops(tag, kids, style, parent_style, c, acc)
 
         :inline_block ->
-          hoist_atom(inline_block_ops(el, parent_style, c, acc))
+          kept.(&hoist_atom(inline_block_ops(el, parent_style, c, &1)))
 
         # `width: fit-content`: a block as wide as its content, on a line of its own
         _ when fit? ->
-          {mt, mb} = vertical_margins(c)
-          acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
-          acc = [{:gap, mt}, {:flush} | acc]
-          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, false, true))
-          [{:gap, mb}, {:flush} | acc]
+          kept.(fn acc ->
+            {mt, mb} = vertical_margins(c)
+            acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
+            acc = [{:gap, mt}, {:flush} | acc]
+            acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, false, true))
+            [{:gap, mb}, {:flush} | acc]
+          end)
 
         # a table is as wide as its columns need, on a line of its own
         _ when table? ->
-          {mt, mb} = vertical_margins(c)
-          acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
-          acc = [{:gap, mt}, {:flush} | acc]
-          acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
-          [{:gap, mb}, {:flush} | acc]
+          kept.(fn acc ->
+            {mt, mb} = vertical_margins(c)
+            acc = if side = clear_side(c), do: [{:clear, side}, {:flush} | acc], else: acc
+            acc = [{:gap, mt}, {:flush} | acc]
+            acc = hoist_atom(inline_block_ops(el, parent_style, c, acc, true, true))
+            [{:gap, mb}, {:flush} | acc]
+          end)
 
         kind ->
           # an element that can be linked to (`#id`) needs to know where its box starts, which
@@ -1323,7 +1343,7 @@ defmodule Browser.Layout do
             acc = block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
             [{:ib_join} | acc]
           else
-            block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
+            kept.(&block_ops(tag, kind, kids, %{style | inl: false}, c, &1))
           end
       end
     end
@@ -2708,7 +2728,55 @@ defmodule Browser.Layout do
     seen = Process.get(:layout_wkeys, %{})
     n = Map.get(seen, nid, 0)
     Process.put(:layout_wkeys, Map.put(seen, nid, n + 1))
+    {count, log} = Process.get(:layout_wlog, {0, []})
+    Process.put(:layout_wlog, {count + 1, [nid | log]})
     {:k, nid, n}
+  end
+
+  # The ops an element in flow adds to `acc` (what `fun.(acc)` adds): taken from an earlier
+  # layout when the element is the same term, it inherits an equal style and what the walk
+  # reads besides (the containing width, the pass and its flags) is the same. After an edit,
+  # `Forms.render/4` gives back the same term for every element the edit did not change, so
+  # only the elements on the path from the edit to the root are walked again. The walk keys
+  # the elements inside made (`wkey/1`) are counted again in their order, so that what is
+  # walked later (a flex item or cell built again at its final size) gets the keys a full
+  # walk gives it.
+  defp walk_kept({:element, _tag, attrs, _kids} = node, parent_style, force, acc, fun) do
+    with table when table != nil <- Process.get(:layout_walk),
+         nid when nid != nil <- nid_of(attrs) do
+      ctx =
+        {containing_width(), force, Process.get(:layout_definite), Process.get(:layout_intrinsic),
+         Process.get(:layout_flex_item)}
+
+      key = {nid, ctx}
+      gen = Process.get(:layout_gen)
+
+      case table do
+        %{^key => {_gen, old, style, ops, wlog}} when style == parent_style ->
+          if :erts_debug.same(old, node) do
+            Enum.each(Enum.reverse(wlog), &wkey/1)
+            Process.put(:layout_walk, Map.put(table, key, {gen, old, style, ops, wlog}))
+            ops ++ acc
+          else
+            walk_miss(node, parent_style, key, gen, acc, fun)
+          end
+
+        _ ->
+          walk_miss(node, parent_style, key, gen, acc, fun)
+      end
+    else
+      _ -> fun.(acc)
+    end
+  end
+
+  defp walk_miss(node, parent_style, key, gen, acc, fun) do
+    {n0, _} = Process.get(:layout_wlog)
+    ops = fun.([])
+    {n1, log} = Process.get(:layout_wlog)
+    wlog = Enum.take(log, n1 - n0)
+    entry = {gen, node, parent_style, ops, wlog}
+    Process.put(:layout_walk, Map.put(Process.get(:layout_walk), key, entry))
+    ops ++ acc
   end
 
   # The key of an atom (a float, an inline-block, a flex item, a cell, ...) and of what is
