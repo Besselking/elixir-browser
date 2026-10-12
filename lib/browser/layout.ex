@@ -2956,7 +2956,26 @@ defmodule Browser.Layout do
   # remembered of its layout (`memo/2`): its walk key and a hash of its content, taken once
   # here so that the memo does not hash the content again on every lookup. The content carries
   # every value resolved against the containing width.
-  defp atom_key(nid, sub), do: Tuple.insert_at(wkey(nid), 3, :erlang.phash2(sub))
+  defp atom_key(nid, sub), do: Tuple.insert_at(wkey(nid), 3, ops_hash(sub))
+
+  # A hash of ops in which a table counts by the key of its model, which is a hash of its
+  # content already. (A table's model holds the ops of each cell, and `phash2` does not see
+  # terms that are shared: an atom around a table would hash the table again, and so would
+  # each level of tables in cells.)
+  defp ops_hash(ops),
+    do: :erlang.phash2(if(has_table?(ops), do: shallow_ops(ops), else: ops))
+
+  defp has_table?([{:table, _, _, _} | _]), do: true
+  defp has_table?([{:span, _, ops, _} | rest]), do: has_table?(ops) or has_table?(rest)
+  defp has_table?([_ | rest]), do: has_table?(rest)
+  defp has_table?(_), do: false
+
+  defp shallow_ops(ops) when is_list(ops), do: Enum.map(ops, &shallow_op/1)
+  defp shallow_ops(other), do: other
+
+  defp shallow_op({:table, ts, model, style}), do: {:table, ts, model.key, style}
+  defp shallow_op({:span, key, ops, safe?}), do: {:span, key, shallow_ops(ops), safe?}
+  defp shallow_op(op), do: op
 
   defp nid_of(attrs) do
     case List.keyfind(attrs, "@nid", 0) do
@@ -4913,15 +4932,12 @@ defmodule Browser.Layout do
   defp atom_items(%{rel: rel, items: items}), do: Enum.map(items, &Map.put(&1, :rel, rel))
   defp atom_items(%{items: items}), do: items
 
-  defp apply_rel(items) do
-    Enum.map(items, fn
-      %{rel: {dx, dy, seq}} = it ->
-        it |> Map.delete(:rel) |> move(dx, dy) |> Map.merge(%{over: true, pz: seq})
+  defp apply_rel(items), do: Enum.map(items, &rel_moved/1)
 
-      it ->
-        it
-    end)
-  end
+  defp rel_moved(%{rel: {dx, dy, seq}} = it),
+    do: it |> Map.delete(:rel) |> move(dx, dy) |> Map.merge(%{over: true, pz: seq})
+
+  defp rel_moved(it), do: it
 
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
@@ -4973,7 +4989,8 @@ defmodule Browser.Layout do
 
   # what overflows an inline-level box does not make the line wider: shrink-to-fit stops
   # counting its content at the box's right edge (`xlim`, which moves with the item)
-  defp limit_extent(%{xlim: l} = item, w), do: %{item | xlim: min(l, w)}
+  defp limit_extent(%{xlim: l} = item, w) when l <= w, do: item
+  defp limit_extent(%{xlim: _} = item, w), do: %{item | xlim: w}
   defp limit_extent(item, w), do: Map.put(item, :xlim, w)
 
   # A line made of nothing but boxes still has the height of the font and line height around
@@ -5105,13 +5122,15 @@ defmodule Browser.Layout do
         do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
         else: atom
 
+    counts? = Map.get(atom, :overflow_counts)
+
     atom = %{
       atom
       | items:
           atom.items
           |> Enum.map(fn item ->
             item = adopt_sticky(item, st)
-            if atom[:overflow_counts], do: item, else: limit_extent(item, atom.w)
+            if counts?, do: item, else: limit_extent(item, atom.w)
           end)
           |> renumber_pz()
     }
@@ -5164,9 +5183,7 @@ defmodule Browser.Layout do
 
   defp renumber_pz(items) do
     order =
-      items
-      |> Enum.flat_map(&List.wrap(Map.get(&1, :pz)))
-      |> Enum.uniq()
+      for(%{pz: pz} when pz != nil <- items, uniq: true, do: pz)
       |> Enum.sort_by(&pz_key/1)
 
     if order == [] do
@@ -6292,7 +6309,12 @@ defmodule Browser.Layout do
   # clip of background layers, the shapes of shadows.
   defp move(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
-    it = if it[:xlim], do: %{it | xlim: it.xlim + dx}, else: it
+
+    it =
+      case it do
+        %{xlim: xlim} when xlim != nil -> %{it | xlim: xlim + dx}
+        _ -> it
+      end
 
     it =
       case it do
@@ -7767,25 +7789,31 @@ defmodule Browser.Layout do
       a -> st.y + base - a.base - raise.(a)
     end
 
-    moved =
-      for atom <- Enum.reverse(atoms),
-          sub <- atom_items(atom),
-          do: move(sub, atom.x + shift, top_of.(atom)) |> Map.put(:blk, Map.get(atom, :block))
+    # The atoms' items, moved to their place, in one pass and newest first: what a box paints
+    # behind its text (colours, borders, images, shadows) apart from the rest. (A table cell
+    # outside a table is a block of its own; what an inline-block paints is inline content,
+    # above the backgrounds of blocks.)
+    {others, rects, inline_rects} =
+      Enum.reduce(Enum.reverse(atoms), {[], [], []}, fn atom, acc ->
+        {dx, dy, blk} = {atom.x + shift, top_of.(atom), Map.get(atom, :block)}
 
-    moved = apply_rel(moved)
+        Enum.reduce(atom_items(atom), acc, fn sub, {others, rects, inline_rects} ->
+          it = sub |> move(dx, dy) |> rel_moved()
 
-    # everything a box paints behind its text: colours, borders, images, shadows
-    {behind, others} =
-      Enum.split_with(moved, &(&1.type in @behind_text and !Map.get(&1, :over)))
+          cond do
+            it.type not in @behind_text or Map.get(it, :over) ->
+              {[it | others], rects, inline_rects}
 
-    # (a table cell outside a table is a block of its own; what an inline-block paints is inline
-    # content, above the backgrounds of blocks)
-    {rects, inline_rects} = Enum.split_with(behind, &Map.get(&1, :blk))
-    others = Enum.map(others, &Map.delete(&1, :blk))
-    rects = Enum.map(rects, &Map.delete(&1, :blk))
-    inline_rects = Enum.map(inline_rects, &Map.delete(&1, :blk))
+            blk ->
+              {others, [it | rects], inline_rects}
 
-    new_items = Enum.reverse(others) ++ placed
+            true ->
+              {others, rects, [it | inline_rects]}
+          end
+        end)
+      end)
+
+    new_items = others ++ placed
 
     ctx = %{
       shift: shift,
@@ -7801,7 +7829,7 @@ defmodule Browser.Layout do
 
     {boxes, active, carried, lead} = inline_boxes(st, ctx)
     # `boxes` is already newest-first like st.rects
-    inline_rects = Enum.reverse(inline_rects) ++ boxes
+    inline_rects = inline_rects ++ boxes
 
     # (the lines of the relatively positioned inlines around, for their absolute children)
     pos =
@@ -7825,7 +7853,7 @@ defmodule Browser.Layout do
       st
       | items: new_items ++ inline_rects ++ st.items,
         n: st.n + length(new_items) + length(inline_rects),
-        rects: Enum.reverse(rects) ++ st.rects,
+        rects: rects ++ st.rects,
         nr: st.nr + length(rects),
         line: [],
         pos: pos,
@@ -10377,8 +10405,15 @@ defmodule Browser.Layout do
       cols: table_columns_bg(parts)
     }
 
-    # (the key of the column sizes remembered for it: `table_column_sizes/6`)
-    Map.put(model, :key, :erlang.phash2(model))
+    # (the key of the column sizes remembered for it: `table_column_sizes/6`; a cell counts by
+    # its key, a hash of its content)
+    shallow = %{
+      model
+      | caption: shallow_ops(caption),
+        rows: Enum.map(model.rows, fn row -> %{row | cells: Enum.map(row.cells, & &1.key)} end)
+    }
+
+    Map.put(model, :key, :erlang.phash2(shallow))
   end
 
   # white space between two kids that `loose?` accepts is dropped, so they chunk together
@@ -10388,21 +10423,19 @@ defmodule Browser.Layout do
       _ -> false
     end
 
-    kids
-    |> Enum.chunk_by(blank?)
-    |> then(fn chunks ->
-      chunks
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {chunk, i} ->
-        before = if i > 0, do: chunks |> Enum.at(i - 1) |> List.last()
-        after_ = Enum.at(chunks, i + 1)
+    chunks = Enum.chunk_by(kids, blank?)
+    # (each chunk with the one before and the one after)
+    befores = [nil | chunks]
+    afters = Enum.drop(chunks, 1) ++ [nil]
 
-        if blank?.(hd(chunk)) and before != nil and after_ != nil and loose?.(before) and
-             loose?.(hd(after_)),
-           do: [],
-           else: chunk
-      end)
+    [chunks, befores, afters]
+    |> Enum.zip_with(fn [chunk, before, after_] ->
+      if blank?.(hd(chunk)) and before != nil and after_ != nil and loose?.(List.last(before)) and
+           loose?.(hd(after_)),
+         do: [],
+         else: chunk
     end)
+    |> Enum.concat()
   end
 
   # an element with `display: contents` makes no box: its children take its place
@@ -11052,6 +11085,8 @@ defmodule Browser.Layout do
       top = caption_h
       row_heights = grow_rows(row_heights, ts.h, top + sy + sy * nrows)
       ys = row_positions(row_heights, sy, top)
+      # (by row and column, for the cells: a list would be walked for each one)
+      {rh_t, ys_t, xs_t} = {List.to_tuple(row_heights), List.to_tuple(ys), List.to_tuple(xs)}
 
       # the columns each column (group) with a background picture spans
       spans =
@@ -11078,7 +11113,7 @@ defmodule Browser.Layout do
       cells =
         for p <- sized do
           rs = min(p.cell.rowspan, nrows - p.row)
-          full_h = Enum.sum(Enum.slice(row_heights, p.row, rs)) + sy * (rs - 1)
+          full_h = elems_sum(rh_t, p.row, rs) + sy * (rs - 1)
           valign = p.cell.valign || "top"
 
           extra_top =
@@ -11111,8 +11146,8 @@ defmodule Browser.Layout do
             end
 
           {sdx, sdy} = p.shift
-          dx = Enum.at(xs, p.col) + sdx
-          dy = Enum.at(ys, p.row) + sdy
+          dx = elem(xs_t, p.col) + sdx
+          dy = elem(ys_t, p.row) + sdy
           behind = column_backgrounds(model.cols, widths, sx, p, full_h)
           behind = behind ++ if(p.row_bg, do: [rect(0, 0, p.w, full_h, p.row_bg)], else: [])
 
@@ -11267,7 +11302,7 @@ defmodule Browser.Layout do
   # and beside it
   defp table_grid(rows) do
     nrows = length(rows)
-    edges = Enum.map(rows, & &1.edges)
+    edges = rows |> Enum.map(& &1.edges) |> List.to_tuple()
 
     {placed, _taken} =
       rows
@@ -11284,10 +11319,10 @@ defmodule Browser.Layout do
             # the lower
             top =
               if r > 0,
-                do: best_edge(row.edges.top, Enum.at(edges, r - 1).bottom),
+                do: best_edge(row.edges.top, elem(edges, r - 1).bottom),
                 else: row.edges.top
 
-            last_row = Enum.at(edges, min(r + cell.rowspan, nrows) - 1)
+            last_row = elem(edges, min(r + cell.rowspan, nrows) - 1)
 
             entry = %{
               cell: cell,
@@ -11516,13 +11551,13 @@ defmodule Browser.Layout do
     do: round(cell.minh) + if(cell.sizing == :border, do: 0, else: vdelta)
 
   defp table_row_heights(sized, nrows, sy) do
-    base = List.duplicate(0, nrows)
+    base = :erlang.make_tuple(nrows, 0)
 
     single =
       sized
       |> Enum.filter(&(min(&1.cell.rowspan, nrows - &1.row) == 1))
       |> Enum.reduce(base, fn p, heights ->
-        List.update_at(heights, p.row, &max(&1, max(p.h0, cell_minh(p))))
+        put_elem(heights, p.row, max(elem(heights, p.row), max(p.h0, cell_minh(p))))
       end)
 
     sized
@@ -11530,11 +11565,17 @@ defmodule Browser.Layout do
     |> Enum.sort_by(& &1.cell.rowspan)
     |> Enum.reduce(single, fn p, heights ->
       rs = min(p.cell.rowspan, nrows - p.row)
-      have = heights |> Enum.slice(p.row, rs) |> Enum.sum() |> Kernel.+(sy * (rs - 1))
+      have = elems_sum(heights, p.row, rs) + sy * (rs - 1)
       need = max(p.h0, cell_minh(p)) - have
-      if need > 0, do: List.update_at(heights, p.row + rs - 1, &(&1 + need)), else: heights
+      last = p.row + rs - 1
+      if need > 0, do: put_elem(heights, last, elem(heights, last) + need), else: heights
     end)
+    |> Tuple.to_list()
   end
+
+  # the sum of the `n` elements of `tuple` from `i` on
+  defp elems_sum(_tuple, _i, n) when n <= 0, do: 0
+  defp elems_sum(tuple, i, n), do: elem(tuple, i) + elems_sum(tuple, i + 1, n - 1)
 
   # -- percentage margins and padding -------------------------------------------------------
 
