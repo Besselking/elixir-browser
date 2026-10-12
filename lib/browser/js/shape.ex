@@ -117,6 +117,21 @@ defmodule Browser.JS.Shape do
   After 16 misses the cell becomes `:mega`, so that a site that sees many shapes does not
   pay for the search of a cell at each run.
 
+  The count is of all the misses in the life of the site, not of the misses in a row. A
+  hit does not set it back to zero, and `Interp.init/1` does not either. Thus a site that
+  sees one shape nearly always, but a different shape now and then, becomes `:mega` after
+  16 such misses. A count in a row was measured on TodoMVC-React-Complex-DOM: it got 0.45%
+  more hits, but 24 times more misses, because a site that sees a few shapes in turn then
+  never becomes `:mega` and a miss is the most expensive read. A read at a `:mega` site
+  costs less than the generic read before step A2. Do not change the count to a count in a
+  row without a new measurement. In a new heap that keeps the code cache, the prototypes
+  have new ids and a record can get a new shape, so a site can count more misses in each
+  heap.
+
+  A site that runs only once costs about 10 to 15 reductions more than the generic path:
+  the site number and its node of the budget when it compiles, and a miss that writes the
+  cell when it runs. A read site pays this back after about 4 or 5 hits.
+
   A hit is exact because a shape is immutable and a `sid` is never given two times in a
   process. The shape `sid` tells that a record has the key at the position `pos` with the
   same attributes, or that it does not have the key. The shape does not tell an accessor
