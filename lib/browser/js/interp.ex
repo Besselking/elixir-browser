@@ -2191,8 +2191,9 @@ defmodule Browser.JS.Interp do
   # the own key is not an accessor and `Obj.writable?/2` is true. A change to one of these
   # clauses needs a change to this guard. Today the tests of the class and of `proxy` are
   # also defence in depth: a proxy of a function has no own key, a proxy of a plain object
-  # is a host object, and `put_obj/5` stores a named key of an array as this path does. They stay, so that a change to the layout of these records is not a wrong
-  # write. The row "dm update guard terms" of the data-model corpus tries each one.
+  # is a host object, and `put_obj/5` stores a named key of an array as this path does.
+  # They stay, so that a change to the layout of these records is not a wrong write. The
+  # row "dm update guard terms" of the data-model corpus tries each one.
   defmacrop plain_update(o, key, old) do
     quote do
       :erlang.map_get(:class, unquote(o)) != :array and
@@ -2805,34 +2806,31 @@ defmodule Browser.JS.Interp do
 
   def own_keys(_), do: []
 
-  # The keys of `keys`, with the index keys first. The common case is a plain object whose
-  # keys all start with a character that is not a digit. Such a key cannot be an array
-  # index, so the sort of the index keys has nothing to do, and the keys are the list in
-  # reverse (fast path `:has_own`). A symbol in `keys` is no plain name, and it goes to the
-  # long path, which drops it. The other classes are clauses of the same `case`, so that
-  # they pay no extra call.
+  # The enumerable keys (`Obj.enum_names/1`), with the index keys first. The common case is
+  # a plain object whose keys all start with a character that is not a digit. Such a key
+  # cannot be an array index, so the sort of the index keys has nothing to do, and the keys
+  # are the list as it is (fast path `:has_own`, `Obj.plain_names/1`). A symbol among the
+  # enumerable keys is no plain name, and it goes to the long path, which drops it. The
+  # other classes are clauses of the same `case`, so that they pay no extra call.
   defp own_keys_plain(o) do
     case o do
       %{class: c} when c != :array and c != :function and not is_map_key(o, :prim) ->
-        keys = Obj.enum_rev(o)
+        names = if Fast.on?(:has_own), do: Obj.plain_names(o)
 
-        if Fast.on?(:has_own) and plain_names?(keys),
-          do: Fast.shadow(nil, :lists.reverse(keys), own_keys_index_first(o)),
+        if names,
+          do: Fast.shadow(nil, names, own_keys_index_first(o)),
           else: own_keys_index_first(o)
 
       %{class: :array} ->
-        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
-        attrs = Obj.attr_map(o)
-
         for(
           i <- o.items |> Map.keys() |> Enum.sort(),
           i < o.len,
-          Map.get(Map.get(attrs, i, %{}), :e, true),
+          Obj.element_enumerable?(o, i),
           do: Integer.to_string(i)
-        ) ++ base
+        ) ++ Obj.enum_names(o)
 
       %{prim: str} when is_binary(str) ->
-        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
+        base = Obj.enum_names(o)
 
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
@@ -2841,7 +2839,7 @@ defmodule Browser.JS.Interp do
           Enum.sort_by(ints, &index/1) ++ rest
 
       _ ->
-        base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
+        base = Obj.enum_names(o)
 
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
@@ -2858,15 +2856,10 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp plain_names?([<<c, _::binary>> | rest]) when c < ?0 or c > ?9, do: plain_names?(rest)
-  defp plain_names?(["" | rest]), do: plain_names?(rest)
-  defp plain_names?([]), do: true
-  defp plain_names?(_), do: false
-
   # The keys of an object that is not an array, a function or a primitive wrapper, with the
   # index keys first: the last clause of `own_keys_plain/1` for such an object.
   defp own_keys_index_first(o) do
-    base = o |> Obj.enum_rev() |> Enum.reverse() |> Enum.filter(&is_binary/1)
+    base = Obj.enum_names(o)
 
     {ints, rest} =
       Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))

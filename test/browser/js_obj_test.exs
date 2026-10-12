@@ -11,7 +11,9 @@ defmodule Browser.JS.ObjTest.Api do
   def own_value(o, k), do: Obj.own_value(o, k)
   def own_state(o, k), do: Obj.own_state(o, k)
   def own_update(o, k, v), do: Obj.own_update(o, k, v)
-  def enum_rev(o), do: Obj.enum_rev(o)
+  def enum_names(o), do: Obj.enum_names(o)
+  def plain_names(o), do: Obj.plain_names(o)
+  def element_enumerable?(o, i), do: Obj.element_enumerable?(o, i)
   def attr_map(o), do: Obj.attr_map(o)
   def attr_flags(o, k), do: Obj.attr_flags(o, k)
   def writable?(o, k), do: Obj.writable?(o, k)
@@ -19,7 +21,6 @@ defmodule Browser.JS.ObjTest.Api do
   def extensible?(o), do: Obj.extensible?(o)
   def frozen?(o), do: Obj.frozen?(o)
   def sealed?(o), do: Obj.sealed?(o)
-  def name_lists(o), do: Obj.name_lists(o)
   def max_fixed_element(o, len), do: Obj.max_fixed_element(o, len)
   def own_add_assigned(o, k, v), do: Obj.own_add_assigned(o, k, v)
   def define_data(o, k, v), do: Obj.define_data(o, k, v)
@@ -112,7 +113,9 @@ defmodule Browser.JS.ObjTest do
     assert Api.own_state(o, "c") == nil
     assert Api.extensible?(o)
     refute Api.frozen?(o) or Api.sealed?(o)
-    assert {["b", "a"], [], []} == Api.name_lists(o)
+    assert Api.enum_names(o) == ["b", "a"]
+    assert Api.plain_names(o) == ["b", "a"]
+    assert Obj.own_names(o, []) == {[], ["b", "a"]}
     assert Obj.record(class: :object, proto: nil) == plain()
   end
 
@@ -179,7 +182,13 @@ defmodule Browser.JS.ObjTest do
     o = plain([{"a", 1}]) |> Api.own_add_assigned("b", 2) |> Api.own_add_assigned(sym, 3)
     assert Api.own_state(o, "b") == {:data, 2, true, true, true}
     assert Api.own_state(o, sym) == {:data, 3, true, true, true}
-    assert Api.enum_rev(o) == ["b", "a"]
+    assert Api.enum_names(o) == ["a", "b"]
+    assert Api.plain_names(o) == ["a", "b"]
+
+    # (a symbol that defineProperty makes enumerable is no plain name)
+    o = Api.own_add(o, {:symbol, 2, "t"}, 4, %{c: true, w: true}, true)
+    assert Api.enum_names(o) == ["a", "b"]
+    assert Api.plain_names(o) == nil
     assert Api.writable?(o, "b") and Api.configurable?(o, "b")
   end
 
@@ -193,9 +202,9 @@ defmodule Browser.JS.ObjTest do
     refute Api.writable?(o, "h") or Api.configurable?(o, "h")
     assert Api.attr_flags(o, "h") == %{c: false, w: false}
     assert Api.attr_flags(o, "b") == %{}
-    {base, hidden, ordered} = Api.name_lists(o)
-    assert {base, hidden, ordered} == {["a", "b"], ["h"], ["h"]}
-    assert Obj.interleave(base, ordered, o, hidden) == ["a", "h", "b"]
+    assert Obj.split_names(o) == {["a", "b"], ["h"]}
+    assert Obj.own_names(o, []) == {[], ["a", "h", "b"]}
+    assert Obj.own_names(o, ["h"]) == {[], ["a", "b"]}
 
     o = Api.own_redefine(o, "h", 2, %{c: false, w: false}, true)
     assert Api.own_state(o, "h") == {:data, 2, false, true, false}
@@ -206,8 +215,9 @@ defmodule Browser.JS.ObjTest do
   test "a hidden key keeps its place among the enumerable names" do
     o = plain([{"a", 1}, {"0", 2}]) |> Api.put_hidden("h", 3) |> Api.define_data("b", 4)
     assert Api.own_state(o, "h") == {:data, 3, true, false, true}
-    {base, hidden, ordered} = Api.name_lists(o)
-    assert Obj.interleave(base -- ["0"], ordered, o, hidden) == ["a", "h", "b"]
+    assert Obj.own_names(o, []) == {["0"], ["a", "h", "b"]}
+    assert Api.enum_names(o) == ["a", "0", "b"]
+    assert Api.plain_names(o) == nil
 
     # (a hidden write to an existing key keeps the key enumerable)
     assert o |> Api.put_hidden("a", 5) |> Api.own_state("a") == {:data, 5, true, true, true}
@@ -223,7 +233,7 @@ defmodule Browser.JS.ObjTest do
 
     d = Api.own_delete(o, "a")
     refute Api.has_own?(d, "a")
-    assert Api.enum_rev(d) == []
+    assert Api.enum_names(d) == []
     refute Api.has_own?(Api.own_remove(o, "a"), "a")
     refute Api.has_own?(Api.own_drop(o, "a"), "a")
 
@@ -243,6 +253,12 @@ defmodule Browser.JS.ObjTest do
     assert Api.max_fixed_element(a, 0) == 1
     assert Api.max_fixed_element(a, 2) == nil
     refute Api.configurable?(a, 1)
+    assert Api.element_enumerable?(a, 1) and Api.element_enumerable?(a, 0)
+
+    refute a
+           |> Api.put_element_attrs(2, %{w: true, c: true, e: false})
+           |> Api.element_enumerable?(2)
+
     assert Api.attr_map(a) == %{1 => %{w: true, c: false, e: true}}
     a = Api.put_element_attrs(a, 1, %{w: true, c: true, e: true})
     assert Api.attr_map(a) == %{}

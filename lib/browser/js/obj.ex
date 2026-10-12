@@ -25,8 +25,16 @@ defmodule Browser.JS.Obj do
     whose elements are frozen or sealed.
 
   The elements of an array (`items`, `len`) are not in this API (part B of the shapes
-  plan). Their attributes share the `attrs` map, so `attr_map/1`, `attr_flags/2` and
-  `put_element_attrs/3` are here.
+  plan). Their attributes share the `attrs` map, so `attr_flags/2`,
+  `element_enumerable?/2` and `put_element_attrs/3` are here.
+
+  ## The order of the keys
+
+  The callers get the order of the keys from `enum_names/1` (the enumerable string keys in
+  creation order), `plain_names/1` (the same list for a plain object, or `nil`),
+  `own_names/2` and `split_names/1` (all string keys, for `Object.getOwnPropertyNames`).
+  These give the order, not the stored lists, so that a change of the stored order changes
+  this module alone.
 
   ## Cost
 
@@ -242,17 +250,51 @@ defmodule Browser.JS.Obj do
   end
 
   @doc """
-  The enumerable keys of `o`, newest first (as stored). A symbol that `defineProperty` made
-  enumerable can be in the list, so a reader of string keys filters it.
+  The enumerable string keys of `o` in creation order. A caller puts the index keys first
+  when the order of the spec needs it.
   """
-  defmacro enum_rev(o) do
-    quote do: :erlang.map_get(:keys, unquote(o))
+  defmacro enum_names(o) do
+    quote do
+      :erlang.map_get(:keys, unquote(o)) |> :lists.reverse() |> Enum.filter(&is_binary/1)
+    end
   end
 
   @doc """
-  The attribute map of `o`: each key or element index with non-default attributes, to a map
-  with some of `w`, `c` and `e`. A reader that tests many elements reads it once.
+  The enumerable keys of `o` in creation order when each one is a plain name, or `nil`. A
+  plain name is a string that does not start with a digit, so it cannot be an array index,
+  and the list is then the order of `Object.keys` as it is (fast path `:has_own` of
+  `Browser.JS.Interp`). A symbol is no plain name.
   """
+  defmacro plain_names(o) do
+    quote do
+      keys = :erlang.map_get(:keys, unquote(o))
+      if Browser.JS.Obj.plain_names?(keys), do: :lists.reverse(keys)
+    end
+  end
+
+  @doc false
+  # (the test of `plain_names/1`: a function, as the local function of the interpreter
+  # was, so that the walk costs the same)
+  def plain_names?([<<c, _::binary>> | rest]) when c < ?0 or c > ?9, do: plain_names?(rest)
+  def plain_names?(["" | rest]), do: plain_names?(rest)
+  def plain_names?([]), do: true
+  def plain_names?(_), do: false
+
+  @doc "Whether the element at index `i` of the array `o` is enumerable."
+  defmacro element_enumerable?(o, i) do
+    quote do
+      case unquote(o) do
+        %{attrs: %{unquote(i) => %{e: e}}} -> e
+        _ -> true
+      end
+    end
+    |> pin_key(i)
+  end
+
+  @doc false
+  # The attribute map of `o`: each key or element index with non-default attributes, to a
+  # map with some of `w`, `c` and `e`. Only the macros of this module use it: their
+  # expansion calls it at the call site, so it must be public.
   defmacro attr_map(o) do
     quote do
       case unquote(o) do
@@ -262,7 +304,10 @@ defmodule Browser.JS.Obj do
     end
   end
 
-  @doc "The non-default attributes of `key` (or of an element index) of `o`: a map with some of `w`, `c` and `e`."
+  @doc """
+  The non-default attributes of `key` (or of an element index) of `o`: a map with some of
+  `w`, `c` and `e`.
+  """
   defmacro attr_flags(o, key) do
     quote do
       case unquote(o) do
@@ -365,33 +410,50 @@ defmodule Browser.JS.Obj do
   defp public_keys(o), do: Enum.reject(Map.keys(o.props), &match?({:private, _}, &1))
 
   @doc """
-  The string keys of `o` for `Object.getOwnPropertyNames`, in three lists:
-  `{enumerable, hidden, ordered}`. `enumerable` is in creation order. `hidden` are the
-  string keys that are not enumerable: first the ones with a known creation order
-  (`ordered`), then the others, sorted.
+  The own string keys of `o` for `Object.getOwnPropertyNames`, without the keys `std`, as
+  `{indexes, names}`. `indexes` are the keys that are array indexes, in no order: the
+  caller sorts them. `names` are the other keys in creation order, with each key that is
+  not enumerable at the place where it was made, when that place is known. The caller puts
+  the keys of `std` (a function puts `length`, `name` and `prototype` after the indexes).
   """
-  defmacro name_lists(o) do
-    quote bind_quoted: [o: o] do
-      base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
-      hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
-
-      ordered =
-        o
-        |> Map.get(:horder, [])
-        |> Enum.reverse()
-        |> Enum.uniq()
-        |> Enum.filter(&(&1 in hidden0))
-
-      {base, ordered ++ Enum.sort(hidden0 -- ordered), ordered}
-    end
+  def own_names(o, std) do
+    {base, hidden, ordered} = name_lists(o)
+    {ints, rest} = Enum.split_with(base -- std, &(not named_key?(&1)))
+    {hints, hrest} = Enum.split_with(hidden -- std, &(not named_key?(&1)))
+    {ints ++ hints, interleave(rest, ordered -- (std ++ hints), o, hrest)}
   end
 
   @doc """
-  The keys `rest` (enumerable, in creation order) with the hidden keys `ordered` of `o` put
-  where they were made among them, then the other `hidden` keys. A position is only known
-  when every hidden key was made by `defineProperty` or `put_hidden/3`.
+  The own string keys of `o` as `{enumerable, hidden}`. `enumerable` is in creation order.
+  `hidden` are the keys that are not enumerable: first the ones with a known creation
+  order, in that order, then the others, sorted. An array and a string wrapper put the
+  hidden keys after the enumerable keys.
   """
-  def interleave(rest, ordered, o, hidden) do
+  def split_names(o) do
+    {base, hidden, _ordered} = name_lists(o)
+    {base, hidden}
+  end
+
+  # The string keys of `o` in three lists: `{enumerable, hidden, ordered}`, as
+  # `split_names/1` gives them, and `ordered`, the hidden keys with a known creation order.
+  defp name_lists(o) do
+    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
+    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
+
+    ordered =
+      o
+      |> Map.get(:horder, [])
+      |> Enum.reverse()
+      |> Enum.uniq()
+      |> Enum.filter(&(&1 in hidden0))
+
+    {base, ordered ++ Enum.sort(hidden0 -- ordered), ordered}
+  end
+
+  # The keys `rest` (enumerable, in creation order) with the hidden keys `ordered` of `o` put
+  # where they were made among them, then the other `hidden` keys. A position is only known
+  # when every hidden key was made by `defineProperty` or `put_hidden/3`.
+  defp interleave(rest, ordered, o, hidden) do
     pos = Map.get(o, :hpos, %{})
 
     placed =

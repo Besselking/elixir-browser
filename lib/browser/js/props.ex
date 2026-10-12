@@ -206,10 +206,10 @@ defmodule Browser.JS.Props do
   defp index_key?(k), do: is_integer(array_index(k)) and array_index(k) < 4_294_967_295
 
   defp own_names_plain2(id, o) do
-    {base, hidden, ordered} = Obj.name_lists(o)
-
     case o do
       %{class: :array} ->
+        {base, hidden} = Obj.split_names(o)
+
         for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
           ["length"] ++ base ++ hidden
 
@@ -217,26 +217,22 @@ defmodule Browser.JS.Props do
         # length, name and prototype come first, in that order, whether stored or not
         std =
           for k <- ["length", "name", "prototype"],
-              k in hidden or k in base or state({:obj, id}, k) != nil,
+              Obj.has_own?(o, k) or state({:obj, id}, k) != nil,
               do: k
 
-        {ints, rest} = Enum.split_with(base -- std, &index_key?/1)
-        {hints, hrest} = Enum.split_with(hidden -- std, &index_key?/1)
-
-        Enum.sort_by(ints ++ hints, &array_index/1) ++
-          std ++ Obj.interleave(rest, ordered -- (std ++ hints), o, hrest)
+        {ints, names} = Obj.own_names(o, std)
+        Enum.sort_by(ints, &array_index/1) ++ std ++ names
 
       %{prim: s} when is_binary(s) ->
+        {base, hidden} = Obj.split_names(o)
         {ints, rest} = Enum.split_with(base, &index_key?/1)
 
         for(i <- 0..(Browser.JS.Str.length(s) - 1)//1, do: Integer.to_string(i)) ++
           Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ ((rest ++ hidden) -- ["length"])
 
       _ ->
-        {ints, rest} = Enum.split_with(base, &index_key?/1)
-        {hints, hidden} = Enum.split_with(hidden, &index_key?/1)
-        ordered = ordered -- hints
-        Enum.sort_by(ints ++ hints, &array_index/1) ++ Obj.interleave(rest, ordered, o, hidden)
+        {ints, names} = Obj.own_names(o, [])
+        Enum.sort_by(ints, &array_index/1) ++ names
     end
   end
 
