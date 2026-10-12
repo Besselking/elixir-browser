@@ -150,6 +150,30 @@ defmodule Browser.JS.ObjTest do
     refute_received :key
   end
 
+  test "own_case refuses an :error clause that can match a record with the key" do
+    # (with the accessor clause alone before it, `:error` would also match the data
+    # property "a")
+    code = """
+    require Browser.JS.Obj, as: Obj
+
+    Obj.own_case o, "a" do
+      {:ok, {:accessor, _, _}} -> :accessor
+      :error -> :missing
+    end
+    """
+
+    assert_raise ArgumentError, ~r/own_case: an :error clause/, fn ->
+      Code.eval_string(code, o: plain([{"a", 1}]))
+    end
+
+    # (after a guarded clause too, but not after `{:ok, _}`)
+    guarded = String.replace(code, "{:accessor, _, _}}", "v} when v == 1")
+    assert_raise ArgumentError, fn -> Code.eval_string(guarded, o: plain([{"a", 1}])) end
+    fine = String.replace(code, "{:accessor, _, _}}", "_}")
+    assert {:accessor, _} = Code.eval_string(fine, o: plain([{"a", 1}]))
+    assert {:missing, _} = Code.eval_string(fine, o: plain())
+  end
+
   test "an assignment adds an enumerable key; a symbol is enumerable by its attributes" do
     sym = {:symbol, 1, "s"}
     o = plain([{"a", 1}]) |> Api.own_add_assigned("b", 2) |> Api.own_add_assigned(sym, 3)

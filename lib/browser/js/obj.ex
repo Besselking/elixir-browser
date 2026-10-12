@@ -153,9 +153,18 @@ defmodule Browser.JS.Obj do
         {:ok, v} -> v
         :error -> lookup_proto(o)
       end
+
+  An `:error` clause must come after a clause `{:ok, v}` (or `{:ok, _}`) with no guard.
+  The expansion of `:error` is `_`, which also matches a record with the key, so only that
+  order makes it match a missing key alone. A representation that gets `{:ok, v}` or
+  `:error` first and then matches would otherwise give a different result.
   """
   defmacro own_case(o, key, do: clauses) do
     {kpat, pre} = key_pattern(key)
+
+    Enum.reduce(clauses, false, fn {:->, _, [[head], _]}, all_ok? ->
+      check_order(head, all_ok?)
+    end)
 
     clauses =
       Enum.map(clauses, fn {:->, meta, [[head], body]} ->
@@ -170,6 +179,22 @@ defmodule Browser.JS.Obj do
       end
     end
   end
+
+  # Whether the clauses up to `head` match every own key (`all_ok?`). An `:error` clause
+  # before that point raises (see `own_case/3`).
+  defp check_order({:ok, {name, _, ctx}}, _all_ok?) when is_atom(name) and is_atom(ctx),
+    do: true
+
+  defp check_order(:error, false), do: own_order_error()
+  defp check_order({:when, _, [:error, _]}, false), do: own_order_error()
+  defp check_order(_head, all_ok?), do: all_ok?
+
+  defp own_order_error,
+    do:
+      raise(
+        ArgumentError,
+        "own_case: an :error clause must come after a clause {:ok, v} with no guard"
+      )
 
   defp own_head({:when, meta, [pattern, guard]}, kpat),
     do: {:when, meta, [own_head(pattern, kpat), guard]}
