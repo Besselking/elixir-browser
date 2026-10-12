@@ -2832,14 +2832,21 @@ defmodule Browser.Session do
     state = fit_scroll(state)
     cur = Forms.current(control, state.page.form_state)
 
-    case Layout.patch_field(
-           state.items,
-           control.cid,
-           old_text,
-           Forms.visible_text(control, cur),
-           focus_option(state),
-           state.measure
-         ) do
+    # (an empty field with a placeholder shows the placeholder, in its own style)
+    patched =
+      if control.placeholder? and (old_text == "" or cur.value == ""),
+        do: :error,
+        else:
+          Layout.patch_field(
+            state.items,
+            control.cid,
+            old_text,
+            Forms.visible_text(control, cur),
+            focus_option(state),
+            state.measure
+          )
+
+    case patched do
       {:ok, items} ->
         # field items are never links, unless the field sits inside one
         links =

@@ -137,7 +137,8 @@ defmodule Browser.Forms do
       checked: has?(attrs, "checked"),
       selected: initial_selected(options),
       options: options,
-      maxlength: attrs |> attr("maxlength") |> Integer.parse() |> max_length()
+      maxlength: attrs |> attr("maxlength") |> Integer.parse() |> max_length(),
+      placeholder?: attr(attrs, "placeholder") != ""
     }
   end
 

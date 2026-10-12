@@ -310,25 +310,24 @@ defmodule Browser.Layout do
   defp add_focus(items, _measure, nil), do: items
 
   defp add_focus(items, measure, %{cid: cid, caret: caret} = focus) do
+    # one pass over the page: what the control owns is a short list
+    mine = Enum.filter(items, &(Map.get(&1, :cid) == cid))
+
     texts =
-      items
-      |> Enum.filter(&(&1.type == :text and Map.get(&1, :cid) == cid))
+      mine
+      |> Enum.filter(&(&1.type == :text))
       |> Enum.sort_by(&{&1.y, &1.x})
 
     # the box item is clipped by ancestors only: the control's own clip applies to its text
-    clip =
-      Enum.find_value(
-        items,
-        &((Map.get(&1, :cid) == cid and &1.type in [:rect, :box]) && Map.get(&1, :clip))
-      )
+    clip = Enum.find_value(mine, &(&1.type in [:rect, :box] && Map.get(&1, :clip)))
 
     ring =
-      case controls(items)[cid] do
-        nil ->
+      case Enum.filter(mine, &(&1.type in [:rect, :box, :text])) do
+        [] ->
           []
 
-        b ->
-          b = within(b, clip)
+        owned ->
+          b = within(bounds(owned), clip)
 
           [
             %{
@@ -365,14 +364,14 @@ defmodule Browser.Layout do
       end
 
     # a control in a sticky or fixed box has its ring and caret there too
-    stick = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :stick)))
+    stick = Enum.find_value(mine, &Map.get(&1, :stick))
     extra = selection_items(texts, cid, focus[:sel], measure) ++ ring ++ caret
     # and in a scrolling box it scrolls with the control
-    src = Enum.find(items, &(Map.get(&1, :cid) == cid and Map.has_key?(&1, :sc)))
+    src = Enum.find(mine, &Map.has_key?(&1, :sc))
     extra = if src, do: Enum.map(extra, &Map.merge(&1, Map.take(src, [:sc, :clips]))), else: extra
     extra = if stick, do: Enum.map(extra, &Map.put(&1, :stick, stick)), else: extra
     # and above the box it is in: fixed items are drawn in the order of their `z`
-    z = Enum.find_value(items, &(Map.get(&1, :cid) == cid && Map.get(&1, :z)))
+    z = Enum.find_value(mine, &Map.get(&1, :z))
     extra = if z, do: Enum.map(extra, &Map.put(&1, :z, z)), else: extra
     items ++ extra
   end
@@ -426,19 +425,29 @@ defmodule Browser.Layout do
   left-aligned item showing `old_text`, or the new text wouldn't fit the field on one line
   (a field's box doesn't depend on its text, so when it fits, nothing else moves).
 
+  An empty text is the zero-width space an empty field shows (see `Browser.Forms`). A field
+  that shows its placeholder when empty is the caller's business: it must not ask for a patch
+  to or from an empty text.
+
   `focus` is as for the `:focus` option of `layout/5`; the ring and caret are redone.
   """
   def patch_field(items, cid, old_text, new_text, focus, measure) do
-    mine = fn it -> Map.get(it, :cid) == cid end
+    old_text = if old_text == "", do: "\u200B", else: old_text
+    new_text = if new_text == "", do: "\u200B", else: new_text
+    # one pass over the page: what the control owns is a short list
+    mine = Enum.filter(items, &(Map.get(&1, :cid) == cid))
 
-    with [%{text: ^old_text, align: :left} = item] when old_text != "" and new_text != "" <-
-           Enum.filter(items, &(&1.type == :text and mine.(&1))),
-         %{w: box_w} <- controls(items)[cid],
-         width = measure.(new_text, item),
+    with [%{text: ^old_text, align: :left} = item] <- Enum.filter(mine, &(&1.type == :text)),
+         [_ | _] = owned <- Enum.filter(mine, &(&1.type in [:rect, :box, :text])),
+         %{w: box_w} <- bounds(owned),
+         width = spaced(measure).(new_text, item),
          true <- width <= box_w - 8 do
       items =
-        for it <- items, not (it.type in [:ring, :caret, :selection] and mine.(it)) do
-          if it.type == :text and mine.(it), do: %{it | text: new_text, w: width}, else: it
+        for it <- items,
+            not (it.type in [:ring, :caret, :selection] and Map.get(it, :cid) == cid) do
+          if it.type == :text and Map.get(it, :cid) == cid,
+            do: %{it | text: new_text, w: width},
+            else: it
         end
 
       {:ok, add_focus(items, measure, focus)}
