@@ -64,6 +64,19 @@ defmodule Browser.LayoutMemoTest do
     assert length(reused) >= 4
   end
 
+  # (the layout worker gets each tree as a copy, in a message)
+  test "an edited tree that comes as a copy is not walked again either" do
+    p = page(@atoms)
+    {_, _, memo} = kept(p, nil)
+    control = p.forms.controls |> Map.values() |> Enum.find(&Forms.editable?/1)
+    edited = Page.render(p, Forms.put(p.form_state, control.cid, value: "typed"))
+    copy = :erlang.binary_to_term(:erlang.term_to_binary(edited.nodes))
+    {_, kept_memo} = same!(%{edited | nodes: copy}, memo)
+
+    walked = for {key, {1, _, _, _, _}} <- kept_memo.walk, do: key
+    assert length(walked) < map_size(kept_memo.walk) - 4
+  end
+
   test "a picture that arrives between two layouts" do
     html = ~s(<div style="float:left"><img src="a.png"> beside</div><p>text</p>)
     p = page(html)

@@ -145,8 +145,10 @@ defmodule Browser.Layout do
         run_layout(nodes, width, measure, view_height, opts, fresh_memo(epoch))
 
       "check" ->
+        memo = kept(memo, epoch)
+
         {items, height, memo} =
-          run_layout(nodes, width, measure, view_height, opts, kept(memo, epoch))
+          run_layout(keep_same(nodes, memo.nodes), width, measure, view_height, opts, memo)
 
         {fresh, fresh_height, _} =
           run_layout(nodes, width, measure, view_height, opts, fresh_memo(epoch))
@@ -162,14 +164,72 @@ defmodule Browser.Layout do
         {items, height, memo}
 
       _ ->
-        run_layout(nodes, width, measure, view_height, opts, kept(memo, epoch))
+        memo = kept(memo, epoch)
+        run_layout(keep_same(nodes, memo.nodes), width, measure, view_height, opts, memo)
     end
   end
+
+  # `new` with each part that equals the same part of `old` replaced by that part of `old`: the
+  # tree of the last layout. (A tree that comes in a message is a copy, and the walk table knows
+  # an element by its term, `walk_kept/5`.) Kids are paired from the start and from the end,
+  # then by their places.
+  defp keep_same(new, old) do
+    cond do
+      :erts_debug.same(new, old) -> old
+      true -> keep_part(new, old)
+    end
+  end
+
+  defp keep_part({:element, tag, attrs, kids} = new, {:element, tag, oattrs, okids} = old) do
+    kids = keep_kids(kids, okids)
+
+    cond do
+      :erts_debug.same(kids, okids) and equal?(attrs, oattrs) -> old
+      equal?(attrs, oattrs) -> {:element, tag, oattrs, kids}
+      :erts_debug.same(kids, elem(new, 3)) -> new
+      true -> {:element, tag, attrs, kids}
+    end
+  end
+
+  defp keep_part(new, old) when is_list(new), do: keep_kids(new, old)
+  defp keep_part(new, old), do: if(equal?(new, old), do: old, else: new)
+
+  # (not a guard or a test in the caller: there the compiler knows the two are equal and may
+  # give back either one)
+  defp equal?(a, b), do: a === b
+
+  defp keep_kids(kids, okids) when is_list(kids) and is_list(okids) do
+    if length(kids) == length(okids) do
+      kept = keep_pairs(kids, okids)
+      if same_list?(kept, okids), do: okids, else: kept
+    else
+      {front, kids, okids} = keep_front(kids, okids, [])
+      {back, mid, omid} = keep_front(Enum.reverse(kids), Enum.reverse(okids), [])
+      Enum.reverse(front, keep_pairs(Enum.reverse(mid), Enum.reverse(omid)) ++ back)
+    end
+  end
+
+  defp keep_kids(kids, _okids), do: kids
+
+  defp keep_pairs([a | as], [b | bs]), do: [keep_same(a, b) | keep_pairs(as, bs)]
+  defp keep_pairs(as, _), do: as
+
+  # pairs kids while they are kept whole; -> {kept (reversed), kids left, old kids left}
+  defp keep_front([a | as] = kids, [b | bs] = okids, acc) do
+    kept = keep_same(a, b)
+    if :erts_debug.same(kept, b), do: keep_front(as, bs, [kept | acc]), else: {acc, kids, okids}
+  end
+
+  defp keep_front(kids, okids, acc), do: {acc, kids, okids}
+
+  defp same_list?([a | as], [b | bs]), do: :erts_debug.same(a, b) and same_list?(as, bs)
+  defp same_list?([], []), do: true
+  defp same_list?(_, _), do: false
 
   # How many layouts an element's ops are kept when nothing looks them up (`walk_kept/5`).
   @walk_gens 8
 
-  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}}
+  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}, nodes: nil}
 
   defp kept(%{epoch: epoch} = memo, epoch), do: %{memo | gen: memo.gen + 1}
   defp kept(_memo, epoch), do: fresh_memo(epoch)
@@ -225,6 +285,7 @@ defmodule Browser.Layout do
   defp norm_refs(term, refs), do: {term, refs}
 
   defp run_layout(nodes, width, measure, view_height, opts, memo) do
+    tree = nodes
     measure = spaced(measure)
     # (a tab-size given as a length is turned into columns with the width of a space)
     Process.put(:layout_measure, measure)
@@ -326,7 +387,7 @@ defmodule Browser.Layout do
       )
 
     Process.delete(:layout_walk)
-    memo = %{memo | entries: entries, walk: walk}
+    memo = %{memo | entries: entries, walk: walk, nodes: tree}
 
     case canvas do
       nil ->
@@ -8572,8 +8633,12 @@ defmodule Browser.Layout do
     # built again when the container stretches the item: with the same reference width
     cw = containing_width()
 
+    # (an item built again with the same props is the same term as the last layout's: see
+    # `kept_walk/4`)
     build = fn extra_props ->
-      with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+      kept_walk(el, style, {:flex_item, extra_props}, fn ->
+        with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+      end)
     end
 
     {sub, key} =
@@ -10325,7 +10390,13 @@ defmodule Browser.Layout do
     # cells are built again at their final size: with the same reference width
     cw = containing_width()
 
-    build = fn props -> with_cw(cw, fn -> build_cell(tag, attrs, kids, c, style, props) end) end
+    # (a cell built again with the same props is the same term as the last layout's: see
+    # `kept_walk/4`)
+    build = fn props ->
+      kept_walk(node, style, {:cell, props}, fn ->
+        with_cw(cw, fn -> build_cell(tag, attrs, kids, c, style, props) end)
+      end)
+    end
 
     {sub, key} =
       kept_walk(node, style, :cell, fn ->
@@ -10523,7 +10594,8 @@ defmodule Browser.Layout do
           w = max(span_w.(p.col, p.cell.colspan), 0)
           {eprops, vdelta} = if ts.collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
           sub = if eprops == %{}, do: p.cell.sub, else: p.cell.build.(eprops)
-          {items0, h, _} = layout_atom(st, sub, w, if(eprops == %{}, do: p.cell.key))
+          key = if eprops == %{}, do: p.cell.key, else: {p.cell.key, eprops}
+          {items0, h, _} = layout_atom(st, sub, w, key)
           Map.merge(p, %{w: w, h0: h, items0: items0, eprops: eprops, vdelta: vdelta})
         end)
 
@@ -10592,7 +10664,7 @@ defmodule Browser.Layout do
             if p.cell.plain and not ts.collapse? and p.eprops == %{} do
               if extra_top == 0, do: p.items0, else: Enum.map(p.items0, &move(&1, 0, extra_top))
             else
-              {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w)
+              {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w, {p.cell.key, props})
               items
             end
 
@@ -10812,7 +10884,9 @@ defmodule Browser.Layout do
         {eprops, _} = if collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
 
         {sub, key} =
-          if eprops == %{}, do: {cell.sub, cell.key}, else: {cell.build.(eprops), nil}
+          if eprops == %{},
+            do: {cell.sub, cell.key},
+            else: {cell.build.(eprops), {cell.key, eprops}}
 
         min = min_extent(st, sub, key)
         max = shrink_extent(st, sub, @unbounded, key)

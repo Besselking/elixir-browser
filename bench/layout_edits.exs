@@ -3,8 +3,9 @@
 # in bench/pages/ gets a series of edits to its tree, as a script makes them (a text changes,
 # grows or empties, an element is hidden or shown, an element is added or removed, the window
 # width changes) or as typing makes them (a field gets a new value: `Page.render/2`, which keeps
-# every element the edit did not change, so that their ops are taken from the layout before). After each edit the page is laid out from the memo of the layout before and
-# also afresh, and the two results must be the same (references and paint orders numbered).
+# every element the edit did not change, so that their ops are taken from the layout before).
+# After each edit the page is laid out from the memo of the layout before (from a copy of the
+# tree, as the layout worker gets it) and also afresh, and the two results must be the same (references and paint orders numbered).
 #
 # Prints the edits and differences per page and exits with status 1 when a difference is found.
 # EDITS=40 sets the number of edits per page; SEED=1 the random seed. Uses a stub measurer.
@@ -152,8 +153,9 @@ failed =
               {name, Page.from_raw(page, raw, env.(width)), width}
             end
 
-          {items, height, memo} =
-            Layout.layout_kept(page.nodes, width, measure, 768, opts.(page), memo)
+          # (a copy, as the layout worker gets it in a message)
+          copy = :erlang.binary_to_term(:erlang.term_to_binary(page.nodes))
+          {items, height, memo} = Layout.layout_kept(copy, width, measure, 768, opts.(page), memo)
 
           {fresh, fresh_height} = Layout.layout(page.nodes, width, measure, 768, opts.(page))
           same? = height == fresh_height and Layout.memo_norm(items) == Layout.memo_norm(fresh)
