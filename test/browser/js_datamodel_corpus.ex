@@ -209,7 +209,18 @@ defmodule Browser.JS.DatamodelCorpus do
     {"dm ic own data then accessor",
      ~S|function rd(o){ return o.x } function f(){ var r = []; r.push(rd({x: 1}), rd({x: 2})); r.push(String(rd({get x(){ return 'getter' }}))); var d = {x: 3}; r.push(rd(d)); Object.defineProperty(d, 'x', {get(){ return 'dp-getter' }}); r.push(String(rd(d)), String(rd(d))); return r.join() } console.log(f())|},
     {"dm ic freed prototype",
-     ~S|function rd(o){ return o.m + o.x } var out = []; function step(tag){ var p = {m: tag}; var o = Object.create(p); o.x = 1; out.push(rd(o), rd(o)) } step('a'); step('b'); step('c'); console.log(out.join())|}
+     ~S|function rd(o){ return o.m + o.x } var out = []; function step(tag){ var p = {m: tag}; var o = Object.create(p); o.x = 1; out.push(rd(o), rd(o)) } step('a'); step('b'); step('c'); console.log(out.join())|},
+    # ── A3: literals and constructors ───────────────────────────
+    # (a literal with constant keys gets its shape when it compiles; the others take the
+    # generic path; each runs in a loop, so that the compiled closure runs more than once)
+    {"dm lit shapes",
+     ~S|function f(){ var r = []; for (var i = 0; i < 3; i++) { var e = {}, one = {a: i}, two = {a: i, b: 'x'}, eight = {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: i}, nine = {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, k: i}, dup = {a: 1, b: 2, a: i}, idx = {b: 1, 2: 'two', a: 3, 0: i}, digit = {x: 1, '1x': 2}, empty = {'': i, ' ': 2}; e.z = i; r.push(JSON.stringify([e, one, two, eight, nine, dup, idx, digit, empty]), Object.keys(dup).join(), Object.keys(idx).join()) } return r.join(' ') } console.log(f())|},
+    {"dm lit generic forms",
+     ~S|function f(){ var r = [], log = []; var s = Symbol('s'); var base = {inh: 'i'}; for (var i = 0; i < 3; i++) { var pr = {__proto__: base, own: i}; var acc = {a: 1, get g(){ return this.a + i }, set g(v){ log.push(v) }, b: 2}; acc.g = i; var sp = {x: 1, ...{y: i, x: 9}, z: 3}; var ck = 'k' + i; var comp = {a: 1, [ck]: i, [s]: 's', b: 2}; var meth = {a: i, m(){ return this.a }}; var named = {fn: function(){}, ar: () => 1}; r.push(pr.inh, Object.keys(pr).join(), Object.getPrototypeOf(pr) === base, acc.g, Object.keys(acc).join(), JSON.stringify(sp), Object.keys(comp).join(), comp[s], meth.m(), named.fn.name, named.ar.name) } return r.join() + ' ' + log.join() } console.log(f())|},
+    {"dm lit values and home",
+     ~S|var obj = { m(){ return typeof super.toString } }; function f(){ var r = [], n = 0; function v(x){ n++; return x } for (var i = 0; i < 3; i++) { var o = {a: v(i), b: {c: v(i + 1), d: [v(2)]}, e: v(3)}; r.push(JSON.stringify(o), n); try { var h = {m: obj.m, r: obj.m()}; r.push(h.r, h.m()) } catch (e) { r.push(e.constructor.name) } try { var t = {a: 1, b: (function(){ throw new Error('in ' + i) })(), c: 3} } catch (e) { r.push(e.message, typeof t) } } return r.join() } console.log(f())|},
+    {"dm lit frozen and changed",
+     ~S|function mk(i){ return {a: i, b: i + 1} } function f(){ var r = []; var xs = []; for (var i = 0; i < 4; i++) xs.push(mk(i)); Object.freeze(xs[0]); xs[0].a = 9; Object.preventExtensions(xs[1]); xs[1].c = 1; delete xs[2].a; xs[2].a = 'again'; Object.defineProperty(xs[3], 'b', {enumerable: false}); r.push(xs.map(x => JSON.stringify(x) + Object.isFrozen(x) + Object.isExtensible(x)).join('/')); var y = mk(5); y.c = 6; r.push(JSON.stringify(y), JSON.stringify(Object.getOwnPropertyDescriptors(mk(7)))); return r.join(' ') } console.log(f())|}
   ]
 
   @doc "Gives the rows as `{name, source, options}`."

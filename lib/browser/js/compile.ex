@@ -78,6 +78,10 @@ defmodule Browser.JS.Compile do
   it on `get/2`): their class dispatch has the `length` clauses of arrays, strings and
   functions.
 
+  An object literal with constant keys and plain values gets the shape of its keys when it
+  compiles (step A3). When it runs, it gets the id of the object first, then it evaluates
+  the values, and then it writes the record in one write (`Interp.put_literal/4`).
+
   ## Shells
 
   Some nodes stay on the tree walker, but their children compile. Such a node is a shell.
@@ -975,22 +979,19 @@ defmodule Browser.JS.Compile do
     if Enum.all?(props, &plain_prop?/1) do
       pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
 
-      # (`ev/2` makes the object before it evaluates the values, as here)
       if Fast.on?(:literal) do
-        # The properties go in with one write at the end (fast path `:literal`). Nothing
-        # can see the object before the literal is done: no name refers to it, and the home
-        # of a method value is used only for its prototype, which is set already. The key
-        # layout comes from the record API when the literal compiles, as
-        # `Interp.define_data/3` would make it: a key that comes two times keeps its first
-        # place and its last value. It holds only the constant keys and a shape, which
-        # holds no heap id (`Browser.JS.Shape`).
+        # The object gets its id first, as `ev/2` makes the object before it evaluates the
+        # values, and its record in one write at the end (fast path `:literal`, see "object
+        # literals" in `Browser.JS.Interp`). Nothing can see the object before the literal
+        # is done: no name refers to it, and a method value gets its home through
+        # `Interp.literal_home/3`. The key layout comes from the record API when the
+        # literal compiles, as `Interp.define_data/3` would make it: a key that comes two
+        # times keeps its first place and its last value. The layout holds only the
+        # constant keys and a shape. A shape holds no heap id and stays correct when the
+        # transition table is erased (`Browser.JS.Shape`), so the closure keeps it, also
+        # in a new heap.
         layout = pcs |> Enum.map(&elem(&1, 0)) |> Browser.JS.Obj.literal_keys()
-
-        fn env ->
-          {:obj, id} = obj = Interp.new_object()
-          Interp.fill_literal(id, layout, lit_vals(pcs, obj, env, []))
-          obj
-        end
+        literal(layout, Enum.map(pcs, &elem(&1, 1)))
       else
         fn env ->
           obj = Interp.new_object()
@@ -1117,17 +1118,66 @@ defmodule Browser.JS.Compile do
     props(rest, obj, env)
   end
 
-  # The values of an object literal from the first to the last, in source order, for
-  # `Interp.fill_literal/3`. The home of a method value is set as in `props/3`. It is a
-  # named function, so the compiled code makes no fun when it runs. Only an object can be
-  # a method that needs its home, so a primitive value does not call
-  # `Interp.method_home/2`, which is a remote call.
-  defp lit_vals([], _obj, _env, acc), do: :lists.reverse(acc)
+  # The value of the operand form `o` of an object literal with the id `id` and the
+  # prototype `proto`. The home of a method value is set as in `props/3`. Only an object can
+  # be a method that needs its home, so a primitive value does not call
+  # `Interp.literal_home/3`, which is a remote call.
+  defmacrop lit_val(o, env, id, proto) do
+    quote do
+      v = av(unquote(o), unquote(env))
 
-  defp lit_vals([{_k, vo} | rest], obj, env, acc) do
-    v = av(vo, env)
-    if is_tuple(v) and elem(v, 0) == :obj, do: Interp.method_home(v, obj)
-    lit_vals(rest, obj, env, [v | acc])
+      if is_tuple(v) and elem(v, 0) == :obj,
+        do: Interp.literal_home(v, unquote(id), unquote(proto))
+
+      v
+    end
+  end
+
+  # The values of an object literal from the first to the last, in source order, for
+  # `Interp.fill_new/4`. It is a named function, so the compiled code makes no fun when it
+  # runs.
+  defp lit_vals([], _id, _proto, _env, acc), do: :lists.reverse(acc)
+
+  defp lit_vals([vo | rest], id, proto, env, acc) do
+    v = lit_val(vo, env, id, proto)
+    lit_vals(rest, id, proto, env, [v | acc])
+  end
+
+  # The closure of an object literal with constant keys for the fast path `:literal`: the
+  # layout `layout` (`Obj.literal_keys/1`) and the operand forms `os` of the values in
+  # source order. A literal of up to 8 keys with a shape and no key that comes two times
+  # (the usual literal, also `{}`) puts its values in a tuple, with no list, and the record
+  # is one map literal (`Interp.put_literal/4`). The other literals give the list of their
+  # values to `Interp.fill_new/4`.
+  for n <- 0..8 do
+    vars = for i <- 1..n//1, do: Macro.var(:"o#{i}", nil)
+    vals = for i <- 1..n//1, do: Macro.var(:"v#{i}", nil)
+
+    defp literal({_, _, {:js_shape, _, _, _, _, _, _}, nil} = layout, unquote(vars)) do
+      fn env ->
+        _ = env
+        id = Interp.reserve()
+        proto = Interp.literal_proto()
+
+        unquote_splicing(
+          for {v, o} <- Enum.zip(vals, vars) do
+            quote do: unquote(v) = lit_val(unquote(o), var!(env), var!(id), var!(proto))
+          end
+        )
+
+        Interp.put_literal(id, proto, layout, {unquote_splicing(vals)})
+        {:obj, id}
+      end
+    end
+  end
+
+  defp literal(layout, os) do
+    fn env ->
+      id = Interp.reserve()
+      proto = Interp.literal_proto()
+      Interp.fill_new(id, proto, layout, lit_vals(os, id, proto, env, []))
+      {:obj, id}
+    end
   end
 
   # The values of a comma expression, from left to right. The value is the last one.

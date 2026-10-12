@@ -149,8 +149,11 @@ defmodule Browser.JS.Interp do
     id
   end
 
-  # an id for an entry that `store/2` fills in later (a scope whose closures need its id first)
-  defp reserve do
+  @doc false
+  # An id for an entry that `store/2` fills in later: a scope whose closures need its id
+  # first, and an object literal of the compiled code, which gets its id before its values
+  # and its record after them (`put_literal/4`).
+  def reserve do
     id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
     :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
@@ -2114,15 +2117,80 @@ defmodule Browser.JS.Interp do
   @doc "Sets an own property without making it show up in `Object.keys`."
   def put_hidden({:obj, id}, key, v), do: store(id, Obj.put_hidden(deref(id), key, v))
 
+  # ── object literals (step A3) ──────────────────────────────
+  # An object literal of the compiled code with constant keys (fast path `:literal`) gets
+  # its id from `reserve/0` before its values, as the tree walker allocates the object
+  # before its values, so the heap ids are the same. When the values are known, the record
+  # goes in with one write: `put_literal/4` for a literal with a shape and no key that
+  # comes two times, `fill_new/4` for the others. Between the two, the id has no entry.
+  # Nothing reads it there: no name refers to the object, and a garbage collection runs
+  # only between tasks. The one exception is the home of a method value
+  # (`literal_home/3`).
+
   @doc false
-  # The end of an object literal with constant keys (`Browser.JS.Compile`): all its
-  # properties in one write to the empty object `id`. `layout` is the key layout of
-  # `Obj.literal_keys/1`, and `values` gives the value of each key in source order
-  # (`Obj.fill/3`).
-  def fill_literal(id, layout, values) do
-    o = :erlang.get(id)
-    :erlang.put(id, Obj.fill(o, layout, values))
+  # The prototype of a new plain object, `Object.prototype` of the running realm, read once
+  # with the id of an object literal. The literal reads it before its values, as the tree
+  # walker does.
+  def literal_proto do
+    case :erlang.get({:proto, :object}) do
+      :undefined -> nil
+      p -> p
+    end
   end
+
+  @doc false
+  # The record of the object literal `id` with the prototype `proto`, from the key layout
+  # `layout` of `Obj.literal_keys/1` (it has a shape, and no key comes two times) and the
+  # tuple `vals` of the values in the order of the keys: one map literal in one write. In
+  # the check build the shadow run compares it with the record that the tree walker
+  # makes, one key at a time (`literal_old/4`).
+  def put_literal(id, proto, {_, keys, sh, nil}, vals) do
+    Fast.shadow(
+      id,
+      :erlang.put(id, Obj.shaped_record([class: :object, proto: proto], sh, vals)),
+      literal_old(id, proto, keys, :erlang.tuple_to_list(vals))
+    )
+  end
+
+  @doc false
+  # `put_literal/4` for any other layout: the values are a list in source order, and
+  # `Obj.fill/3` makes the record (a key that comes two times, an index-like key, more
+  # values than the compiled code puts in a tuple).
+  def fill_new(id, proto, {_, keys, _, _} = layout, values) do
+    Fast.shadow(
+      id,
+      :erlang.put(id, Obj.fill(Obj.plain_record(class: :object, proto: proto), layout, values)),
+      literal_old(id, proto, keys, values)
+    )
+  end
+
+  # The old path of the literal `id`: the empty object, then each value with its key in
+  # source order (`define_data/3`), as `ev/2` makes it. It gives the entry at `id` before
+  # it, as the one write of the fast path does.
+  defp literal_old(id, proto, keys, values) do
+    before = :erlang.put(id, Obj.plain_record(class: :object, proto: proto))
+    Enum.each(:lists.zip(keys, values), fn {k, v} -> define_data({:obj, id}, k, v) end)
+    before
+  end
+
+  @doc false
+  # The home of a method value `v` of the object literal `id` (`method_home/2`). A method
+  # with a home reads the prototype of the home for `super`, and the next value of the
+  # literal can call it. So the id gets the empty object first when it has no entry yet.
+  def literal_home({:obj, fid} = f, id, proto) do
+    case deref(fid) do
+      %{fun: {:closure, %{name: {:method, _}}}} ->
+        if :erlang.get(id) == :undefined,
+          do: :erlang.put(id, Obj.plain_record(class: :object, proto: proto))
+
+        set_home(f, {:obj, id})
+
+      _ ->
+        :ok
+    end
+  end
+
+  def literal_home(_v, _id, _proto), do: :ok
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
   def define_data({:obj, id}, key, v), do: store(id, Obj.define_data(deref(id), key, v))

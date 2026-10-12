@@ -561,6 +561,39 @@ defmodule Browser.JS.ShapesTest do
                 ], true, :proto, true, :proto, 2}
     end
 
+    test "a literal keeps its shape after an erase of the table and in a new heap" do
+      {:ok, program} =
+        Parser.parse(
+          "function mk(){ return {a: 1, b: 2} } function more(o){ o.c = 3; return o } var x = mk(), y = more(mk());",
+          resolve: 4,
+          file: "t.js"
+        )
+
+      result =
+        with_compile(true, fn ->
+          HeapOracle.in_process(fn ->
+            heap = fn ->
+              Interp.init(1_000_000)
+              Builtins.install()
+              Interp.run_program(program, true)
+              x = global_record("x")
+              y = global_record("y")
+
+              {elem(x.shape, 1), Obj.enum_names(y), Obj.own_value(y, "c"),
+               well_formed?(x) and well_formed?(y)}
+            end
+
+            {sid1, names1, c1, ok1} = heap.()
+            Shape.erase()
+            # (the closure of `mk` is in the code cache, which the new heap keeps)
+            {sid2, names2, c2, ok2} = heap.()
+            {sid1 == sid2, names1 == names2 and names2 == ["a", "b", "c"], c1 == c2, ok1 and ok2}
+          end)
+        end)
+
+      assert result == {true, true, true, true}
+    end
+
     test "the cells go with the code cache: at an erase of the budget and with JS_COMPILE=0" do
       erased =
         with_compile(true, fn ->

@@ -301,6 +301,21 @@ defmodule Browser.JS.Obj do
     end
   end
 
+  @doc """
+  A new record of an object literal in one map literal (step A3): the map `fields` (a
+  keyword list in the source) plus the shape `sh` of the literal and the tuple `vals` of
+  its values in the order of the keys of the shape. The shape comes from `literal_keys/1`
+  when the literal compiles, and the literal has no key that comes two times. When the
+  switch `:js_shapes` is off, the record is the same record in dictionary mode
+  (`to_dict/1`), as `plain_record/2` would make it.
+  """
+  defmacro shaped_record(fields, sh, vals) do
+    quote do
+      o = %{unquote_splicing(fields), shape: unquote(sh), vals: unquote(vals)}
+      if unquote(@on), do: o, else: Browser.JS.Obj.to_dict(o)
+    end
+  end
+
   @doc false
   # `fill/3` for a dictionary record, for a layout with no shape, and for a key that comes
   # two times.

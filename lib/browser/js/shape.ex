@@ -25,9 +25,12 @@ defmodule Browser.JS.Shape do
     made once, when the shape is made.
 
   A shape holds no heap id, so the garbage collector does not walk it, and the compiled
-  code can keep a shape that it made when it compiled (an object literal). An accessor is a
-  value `{:accessor, getter, setter}` in `vals`, as in a dictionary record, so a shape does
-  not tell an accessor from a data property.
+  code can keep a shape that it made when it compiled: the shape of an object literal
+  (`Obj.literal_keys/1`, step A3). The term stays correct after an erase of the
+  transition table and in a new heap, so the closure keeps it. After an erase, the next
+  generic add from the root can make a new shape with the same keys, which holds the same
+  properties. An accessor is a value `{:accessor, getter, setter}` in `vals`, as in a
+  dictionary record, so a shape does not tell an accessor from a data property.
 
   ## The transition table
 
