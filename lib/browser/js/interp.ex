@@ -5058,6 +5058,17 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The virtual own `name` and `length` shadow the prototype chain, as an own key does,
+  # until a `delete` puts them in `:gone`. (a record without a name or a length of its kind
+  # gives `undefined` from `function_prop/3`, and then the chain is read)
+  defp function_get(id, o, key)
+       when (key == "name" or key == "length") and not Obj.has_own?(o, key) do
+    case if(key in Map.get(o, :gone, []), do: :undefined, else: function_prop(id, o, key)) do
+      :undefined -> function_get_chain(id, o, key)
+      v -> v
+    end
+  end
+
   defp function_get(id, o, key), do: function_get_chain(id, o, key)
 
   defp function_get_chain(id, o, key) do
