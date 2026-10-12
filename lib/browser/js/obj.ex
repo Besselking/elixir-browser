@@ -49,10 +49,16 @@ defmodule Browser.JS.Obj do
   `JSON.parse` and error objects are fast. `Interp.new_proto_object/1` uses them too (step
   A2), so the prototype objects that the interpreter makes (`F.prototype`, the prototype of
   a class) are fast, and the inline caches of the compiled code can read their methods.
-  `record/1` and `record/2` always make a dictionary record: arrays, functions, host
-  objects, proxies, the collections and the built-in objects. Every object that
-  `Browser.JS.Builtins.install/0` makes stays a dictionary too. A later step (A4) makes
-  some of them fast.
+  `array_record/1` and `function_record/1` make the records of arrays and functions fast
+  too (step A4), each from the root shape of its kind (`Browser.JS.Shape`). The elements
+  and the `length` of an array are not in its shape, and the `name`, `length` and
+  `prototype` of a function stay virtual until a write makes them own keys.
+  The built-in objects are made with these functions too: the built-in prototypes, the
+  constructors and the other functions, `Math`, `JSON` and `Reflect` are fast
+  (`Browser.JS.Builtins.built/1`). `record/1` and `record/2` always make a dictionary record:
+  host objects (also the global object and the namespaces of modules), proxies, arguments
+  objects and the collections. A function that becomes a proxy goes to dictionary mode
+  first (`Browser.JS.Proxy`).
 
   ### From fast mode to dictionary mode
 
@@ -65,7 +71,10 @@ defmodule Browser.JS.Obj do
 
   The elements of an array (`items`, `len`) are not in this API (part B of the shapes
   plan). Their attributes share the `attrs` map, so `attr_flags/2`,
-  `element_enumerable?/2` and `put_element_attrs/3` are here. An array is never fast.
+  `element_enumerable?/2` and `put_element_attrs/3` are here. An array with an element
+  that does not have the default attributes is a dictionary record
+  (`put_element_attrs/3`), because a fast record has no `attrs`. The flags `frozen` and
+  `sealed` of an array stay in the record in the two modes.
 
   ## The order of the keys
 
@@ -156,6 +165,8 @@ defmodule Browser.JS.Obj do
   # the flag `1` of an object that is not extensible and the flag `2` of an enumerable
   # symbol.
   @root Shape.root_shape()
+  @array_root Shape.array_root_shape()
+  @function_root Shape.function_root_shape()
 
   # The test of the switch `:js_shapes` (`Browser.JS.Shape.on?/0`), expanded here, so that
   # the macros that make a record put it in the code of the caller, which does not require
@@ -251,6 +262,34 @@ defmodule Browser.JS.Obj do
             []
           ),
         else: Browser.JS.Obj.record(unquote(fields), unquote(pairs))
+    end
+  end
+
+  @doc """
+  A new record of an array with no own named property: the map `fields`, as `record/1`. It
+  is a fast record with the root of the arrays (`Browser.JS.Shape`) when the switch
+  `:js_shapes` is on. Its elements and its `length` (`items` and `len` in `fields`) are
+  not in the shape.
+  """
+  defmacro array_record(fields) do
+    quote do
+      if unquote(@on),
+        do: %{unquote_splicing(fields), shape: unquote(Macro.escape(@array_root)), vals: {}},
+        else: %{unquote_splicing(fields), props: %{}, keys: []}
+    end
+  end
+
+  @doc """
+  A new record of a function with no own property: the map `fields`, as `record/1`. It is
+  a fast record with the root of the functions (`Browser.JS.Shape`) when the switch
+  `:js_shapes` is on. The `name`, the `length` and the `prototype` of a function stay
+  virtual: they are not in the shape until a write makes them own keys.
+  """
+  defmacro function_record(fields) do
+    quote do
+      if unquote(@on),
+        do: %{unquote_splicing(fields), shape: unquote(Macro.escape(@function_root)), vals: {}},
+        else: %{unquote_splicing(fields), props: %{}, keys: []}
     end
   end
 
@@ -928,6 +967,24 @@ defmodule Browser.JS.Obj do
     dict_fields(keys, bits, vals, i + 1, n, acc)
   end
 
+  @doc """
+  The record `o` with the class `class`. A fast record with no own key gets the root shape
+  of the new class (`Browser.JS.Shape`), because a shape belongs to one kind of record. Any
+  other fast record goes to dictionary mode. `Browser.JS.Builtins` uses it for
+  `Array.prototype`, which it makes as a plain object first.
+  """
+  def with_class(o, class) do
+    case o do
+      %{shape: {:js_shape, _, _, {}, _, flags, _}} ->
+        sh = Shape.root_of(class)
+        sh = if Shape.extensible?(flags), do: sh, else: Shape.prevent(sh)
+        %{o | class: class, shape: sh}
+
+      _ ->
+        %{to_dict(o) | class: class}
+    end
+  end
+
   # ── inline caches ──────────────────────────────────────────
   # The inline caches of the compiled code (step A2, `Browser.JS.Interp.get_ic/3`) read and
   # write a fast record through these macros, so that the fields stay in this module. The
@@ -1445,7 +1502,15 @@ defmodule Browser.JS.Obj do
           match?({:accessor, _, _}, :erlang.element(i, vals)),
           do: i
 
-    %{o | shape: Shape.lock(sh, freeze?, accessors)}
+    o = %{o | shape: Shape.lock(sh, freeze?, accessors)}
+
+    # (the elements of an array are not in the shape: the flag of the record locks them,
+    # as for a dictionary record)
+    cond do
+      o.class != :array -> o
+      freeze? -> Map.put(o, :frozen, true)
+      true -> Map.put(o, :sealed, true)
+    end
   end
 
   def lock(o, freeze?) do

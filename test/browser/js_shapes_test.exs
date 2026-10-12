@@ -124,7 +124,7 @@ defmodule Browser.JS.ShapesTest do
   end
 
   describe "the records" do
-    test "plain objects, literals, instances and parsed objects are fast; the others are not" do
+    test "plain objects, arrays, functions and the built-in objects are fast; the others are not" do
       src = ~S"""
       class K { constructor(){ this.a = 1 } }
       function F(){ this.b = 2 }
@@ -139,8 +139,8 @@ defmodule Browser.JS.ShapesTest do
           Enum.split_with(names, &Obj.fast?(global_record(&1)))
         end)
 
-      assert Enum.sort(fast) == Enum.sort(~w(lit empty inst fobj parsed err made))
-      assert Enum.sort(dict) == ["arr", "fn"]
+      assert Enum.sort(fast) == Enum.sort(~w(lit empty inst fobj parsed err made arr fn))
+      assert dict == []
 
       # (the prototypes that the interpreter makes are fast from step A2 on)
       protos =
@@ -150,18 +150,65 @@ defmodule Browser.JS.ShapesTest do
 
       assert protos == {true, true}
 
-      # (the built-in objects stay dictionaries, and the switch goes back on after them)
+      # (the built-in objects are fast from step A4 on, and the switch goes back on after
+      # them; proxies, host objects and arguments objects stay dictionaries)
+      src2 = ~S"""
+      var names = ['Math', 'JSON', 'Reflect', 'Array', 'Object', 'op', 'ap', 'fp', 'sp', 'o',
+                   'px', 'fpx', 'mp', 'args', 'g'];
+      var op = Object.prototype, ap = Array.prototype, fp = Function.prototype;
+      var sp = String.prototype, o = {}, px = new Proxy({}, {}), fpx = new Proxy(function(){}, {});
+      var mp = new Map(), args = (function(){ return arguments })(1), g = globalThis;
+      """
+
       builtins =
-        inspect_run("var m = Math, o = {};", fn ->
-          {Obj.fast?(global_record("m")), Obj.fast?(global_record("o")),
-           Obj.fast?(Interp.deref(elem(Interp.proto(:object), 1)))}
+        inspect_run(src2, fn ->
+          for n <- ~w(Math JSON Reflect Array Object op ap fp sp o px fpx mp args g),
+              do: {n, Obj.fast?(global_record(n))}
         end)
 
-      assert builtins == {false, true, false}
+      # (a collection of `new Map()` is the record of `this`, which is fast from step A1 on:
+      # its entries are in `data`, not in the shape)
+      assert for({n, true} <- builtins, do: n) ==
+               ~w(Math JSON Reflect Array Object op ap fp sp o mp)
 
       # (with the switch off, no record is fast)
       assert inspect_run(src, fn -> Enum.count(records(), &Obj.fast?(elem(&1, 1))) end, false) ==
                0
+    end
+
+    test "a built-in prototype stays exact at the limits of its shape" do
+      # (a polyfill that adds many keys passes the limit of 128 keys: `Array.prototype`
+      # goes to dictionary mode, and every key stays)
+      src = ~S"""
+      for (var i = 0; i < 130; i++) if (!Array.prototype['poly' + i]) Array.prototype['poly' + i] = i;
+      var r = [[].poly0, [].poly129, typeof [].push, [3, 1, 2].sort().join()].join();
+      """
+
+      result =
+        inspect_run(src, fn ->
+          {Obj.fast?(Interp.deref(elem(Interp.proto(:array), 1))),
+           Interp.get(global("r"), "length"), global("r")}
+        end)
+
+      assert result == {false, 20.0, "0,129,function,1,2,3"}
+
+      # (each new heap of one process gives `Object.prototype` the same shape; a new key
+      # in each heap makes a new child of that shape, and past 64 children the add makes
+      # `Object.prototype` a dictionary, which reads the same)
+      results =
+        HeapOracle.in_process(fn ->
+          for i <- 1..70 do
+            Interp.init(1_000_000)
+            Builtins.install()
+            run_here("Object.prototype.k#{i} = #{i}; var r = ({}).k#{i} + [].k#{i};")
+            {Obj.fast?(Interp.deref(elem(Interp.proto(:object), 1))), global("r")}
+          end
+        end)
+
+      assert Enum.all?(results, fn {_, r} -> is_float(r) end)
+      assert for({_, r} <- results, do: trunc(r)) == for(i <- 1..70, do: 2 * i)
+      {fast, dict} = Enum.split_while(results, &elem(&1, 0))
+      assert length(fast) in 60..66 and Enum.all?(dict, &(not elem(&1, 0)))
     end
 
     test "objects with the same keys in the same order share one shape" do
@@ -319,11 +366,14 @@ defmodule Browser.JS.ShapesTest do
            Obj.own_value(last, "k39000") == 39_000.0}
         end)
 
-      # (a shape of one key costs 58 words of the budget of 2,000,000 words)
-      assert length(sids) < 40_000 - div(2_000_000, 58) + 100
+      # (a shape of one key costs 58 words of the budget of 2,000,000 words. The shapes of
+      # the built-in objects use a part of the budget before the program starts)
+      realm = inspect_run("", fn -> :erlang.get(:js_shape_n) end)
+      assert realm > 0 and realm < 200_000
+      assert length(sids) < 40_000 - div(2_000_000 - realm, 58) + 100
       assert used <= 2_000_000
-      assert first > div(2_000_000, 58) and old == []
-      assert Enum.all?(sids, &(&1 == 0 or &1 >= first))
+      assert first > div(2_000_000 - realm, 58) and old == []
+      assert Enum.all?(sids, &(&1 <= 0 or &1 >= first))
       assert last_ok
 
       # (an erase removes the entries of the shapes from before the last erase that got an
@@ -486,6 +536,45 @@ defmodule Browser.JS.ShapesTest do
         with_compile(true, fn -> HeapOracle.run_all(rows, shapes(false), after: &cells/0) end)
 
       assert Enum.all?(off, &(&1.after == []))
+    end
+
+    test "the cells hit through the built-in objects and miss after a change of them" do
+      src = ~S"""
+      function ts(o){ return o.toString } function pu(a){ return a.push }
+      function ca(f){ return f.call } function mx(){ return Math.max }
+      class C {} var c = new C(), o = {}, a = [], fn = function(){}, out = [];
+      function run(){ out[out.length] = [ts(o) === ts(c), typeof pu(a), typeof ca(fn), typeof mx()] }
+      for (var i = 0; i < 3; i++) run();
+      Object.prototype.toString = 1; Array.prototype.push = 2; Function.prototype.call = 3;
+      Math.max = 4; run(); run();
+      """
+
+      {kinds, pids, out} =
+        with_compile(true, fn ->
+          inspect_run(src, fn ->
+            protos = for n <- [:object, :array, :function], do: elem(Interp.proto(n), 1)
+            cs = cells()
+
+            {Enum.uniq(Enum.map(cs, &cell_kind/1)) |> Enum.sort(),
+             for({_, pid, _, _, _} <- cs, do: pid in protos) |> Enum.uniq(),
+             Interp.get(global("out"), "length")}
+          end)
+        end)
+
+      assert Enum.sort([:own, :proto, :proto2]) -- kinds == []
+      assert pids == [true]
+      assert out == 5.0
+
+      # (the values after the change are those of the generic path)
+      {:ok, _, log} =
+        Browser.JS.eval(src <> "console.log(out.join())", resolve: 4)
+
+      assert log == [
+               log:
+                 "true,function,function,function,true,function,function,function," <>
+                   "true,function,function,function,true,number,number,number," <>
+                   "true,number,number,number"
+             ]
     end
 
     test "a site goes to :mega at its 17th miss, not before" do

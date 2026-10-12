@@ -12,7 +12,7 @@ defmodule Browser.JS.Proxy do
   is one, or the target, and checks the invariants the specification lists for the trap's result.
   """
 
-  alias Browser.JS.{Interp, Props}
+  alias Browser.JS.{Interp, Obj, Props}
 
   def install(scope) do
     ctor =
@@ -60,7 +60,10 @@ defmodule Browser.JS.Proxy do
 
       Interp.store(
         id,
+        # (a proxy is never a fast record: an inline cache tests only the shape of a
+        # record, so a proxy with the shape of a plain function would hit its cells)
         Interp.deref(id)
+        |> Obj.to_dict()
         |> Map.put(:proxy, {target, handler})
         |> Map.put(:proxy_constructor, Interp.constructor?(target))
       )

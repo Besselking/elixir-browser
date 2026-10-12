@@ -20,31 +20,40 @@ defmodule Browser.JS.Builtins do
   @doc """
   Creates the prototypes and the global scope. Call after `Interp.init/1`.
 
-  The records that it makes are the built-in prototypes, constructors and namespaces. They
-  stay dictionaries in step A1 of the shapes plan (`Browser.JS.Obj`), so the switch
-  `:js_shapes` is off while they are made, and it goes back to its value after.
+  The records that it makes are the built-in prototypes, constructors and namespaces. It
+  makes them with `built/1`, so they are fast records when the switch `:js_shapes` is on.
   """
-  def install do
-    shapes = :erlang.get(:js_shapes)
-    :erlang.put(:js_shapes, false)
+  def install, do: built(&install_realm/0)
+
+  @doc """
+  Runs `fun`, which makes built-in objects, and gives its result. While `fun` runs, the
+  process key `:js_shape_realm` is true, so that the adds of these objects have no limit
+  of children and of new shapes in a row (step A4, see "The limits" in
+  `Browser.JS.Shape`). Thus the plain objects (the prototypes, `Math`, `JSON`, `Reflect`),
+  `Array.prototype` and the functions that `fun` makes are fast records when the switch
+  `:js_shapes` is on, as the records of a program are. The objects of the next heap of the
+  process find their shapes in the transition table.
+  """
+  def built(fun) do
+    old = :erlang.put(:js_shape_realm, true)
 
     try do
-      install_realm()
+      fun.()
     after
-      if shapes == :undefined,
-        do: :erlang.erase(:js_shapes),
-        else: :erlang.put(:js_shapes, shapes)
+      if old == :undefined,
+        do: :erlang.erase(:js_shape_realm),
+        else: :erlang.put(:js_shape_realm, old)
     end
   end
 
   defp install_realm do
-    object_proto = {:obj, alloc(Obj.record(class: :object, proto: nil))}
+    object_proto = {:obj, alloc(Obj.plain_record(class: :object, proto: nil))}
     put_proto(:object, object_proto)
 
     function_proto =
       {:obj,
        alloc(
-         Obj.record(
+         Obj.function_record(
            class: :function,
            fun: {:native, "", fn _, _ -> :undefined end},
            proto: object_proto
@@ -560,7 +569,7 @@ defmodule Browser.JS.Builtins do
     # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
     {:obj, pid} = p
     po = deref(pid)
-    store(pid, po |> Map.put(:class, :array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
+    store(pid, po |> Obj.with_class(:array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
 
     array_fn(p, "push", fn this, args ->
       if fast_array?(this, length(args)) do

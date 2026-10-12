@@ -251,7 +251,12 @@ defmodule Browser.JS.Interp do
   def new_array(list) do
     {:obj,
      alloc(
-       Obj.record(class: :array, items: items_map(list), len: length(list), proto: proto(:array))
+       Obj.array_record(
+         class: :array,
+         items: items_map(list),
+         len: length(list),
+         proto: proto(:array)
+       )
      )}
   end
 
@@ -268,7 +273,9 @@ defmodule Browser.JS.Interp do
 
   def native(name, fun) do
     {:obj,
-     alloc(Obj.record(class: :function, fun: {:native, name, fun}, proto: proto(:function)))}
+     alloc(
+       Obj.function_record(class: :function, fun: {:native, name, fun}, proto: proto(:function))
+     )}
   end
 
   @doc "`get [Symbol.species]` on a built-in constructor: returns `this`."
@@ -2552,7 +2559,7 @@ defmodule Browser.JS.Interp do
   # or of its prototype when these are fast plain records, as `lookup/3` and
   # `lookup_proto/3` find it. Any other case is the generic path `{sid}`.
   defp ic_read_cell(o, sid, key) do
-    with true <- ic_plain?(o),
+    with true <- ic_ok?(o, key),
          {where, stored} <- ic_find(o, key, 0) do
       case {where, stored} do
         {{pos}, {:accessor, _, _}} ->
@@ -2578,10 +2585,11 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # Where the plain chain from the fast record `o` holds `key`, at the depth `depth` of `o`
-  # (0 for the receiver): `{place, stored}`, where `place` is `{pos}`, `{pid, psid, pos}` or
+  # Where the chain from the fast record `o` holds `key`, at the depth `depth` of `o` (0 for
+  # the receiver): `{place, stored}`, where `place` is `{pos}`, `{pid, psid, pos}` or
   # `{pid1, psid1, pid2, psid2, pos}`, or `nil`. A prototype counts only when it is a fast
-  # plain record, so that its shape tells what it holds.
+  # record that reads `key` as a plain object does (`ic_ok?/2`), so that its shape tells
+  # what it holds.
   defp ic_find(o, key, depth) do
     case Obj.fast_slot(o, key) do
       {pos, _bits} ->
@@ -2590,7 +2598,7 @@ defmodule Browser.JS.Interp do
       nil when depth < 2 ->
         with {:obj, pid} <- :erlang.map_get(:proto, o),
              p when is_map(p) <- :erlang.get(pid),
-             true <- ic_plain?(p),
+             true <- ic_ok?(p, key),
              {place, stored} <- ic_find(p, key, depth + 1) do
           {:erlang.insert_element(1, :erlang.insert_element(1, place, Obj.shape_id(p)), pid),
            stored}
@@ -2603,10 +2611,30 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # Whether the record `o` can be in a cell: a fast record of a plain object. Its reads and
-  # writes of a named key then take the last clause of `get_obj/4` and `put_obj/5`, which
-  # `lookup/3` and `put_prop/4` do. (step A2 makes only plain objects fast; a later step
-  # that makes other records fast must look at this test)
+  # Whether the record `o` can be in a cell of the key `key`: a fast record that reads and
+  # writes `key` as a plain object does, with `lookup/3` and `put_prop/4`. These are a plain
+  # object, an array for a key other than `length`, and a function for a key other than
+  # `name`, `length` and `prototype` (step A4). For an array, `get_obj/4` and `put_obj/5`
+  # give such a key to `lookup/3` and `put_array_prop/4`, which gives it to `put_prop/4`.
+  # For a function, `function_get/3` gives the value of `lookup/3` when it is not
+  # `undefined`, and `function_prop/3` gives `undefined` for such a key, and `put_obj/5`
+  # gives such a key to `put_prop/4`. A cell holds the `sid` of the receiver, and an array
+  # or a function has a shape of its own root (`Browser.JS.Shape`), so a cell that a plain
+  # object made never hits on an array or a function. A proxy is never fast, but the test
+  # stays, because a cell must never hold a proxy.
+  @compile {:inline, ic_ok?: 2}
+  defp ic_ok?(o, key) do
+    Obj.fast?(o) and not is_map_key(o, :proxy) and
+      case :erlang.map_get(:class, o) do
+        :object -> true
+        :array -> key != "length" and not is_map_key(o, :arguments)
+        :function -> key != "name" and key != "length" and key != "prototype"
+        _ -> false
+      end
+  end
+
+  # Whether the record `o` can get an add cell: a fast record of a plain object (see
+  # "add cells").
   @compile {:inline, ic_plain?: 1}
   defp ic_plain?(o),
     do: Obj.fast?(o) and :erlang.map_get(:class, o) == :object and not is_map_key(o, :proxy)
@@ -2781,7 +2809,11 @@ defmodule Browser.JS.Interp do
   # again, on the records that are at the ids now (`ic_clear/3`): each prototype link
   # must still be the id of the cell, and each record there must not hold the key and
   # must not be a proxy. This test is exact for any record, in fast mode or in dictionary
-  # mode, so `Object.prototype` (a dictionary record) can be on the chain of a cell. A
+  # mode, so a prototype in dictionary mode can be on the chain of a cell. (a test of the
+  # `sid` of each prototype would also be exact for a fast prototype from step A4, but it
+  # would miss each time that a prototype gets a key that is not the key of the cell, as
+  # a polyfill or a method of a class that is added later, and it would need a second
+  # test for a prototype in dictionary mode; the test of the key costs no more) A
   # setter or a key that is not writable that a later change puts on the chain is an own
   # key there, so the cell misses. The shape `sid` tells that the record does not hold
   # the key and is extensible. A freed id gives `:undefined`, which misses, and in a new
@@ -2885,14 +2917,14 @@ defmodule Browser.JS.Interp do
   end
 
   # The cell of a write of `key` to the fast record `o` with the shape `sid` (without the
-  # count of the misses): `{sid, pos}` when `o` is a plain record that holds `key` as a
-  # writable data property. For such a key `put_obj/5` goes to `put_prop/4`, which only
+  # count of the misses): `{sid, pos}` when `o` is a record of `ic_ok?/2` that holds `key`
+  # as a writable data property. For such a key `put_obj/5` goes to `put_prop/4`, which only
   # stores the value (the own key is not an accessor and `Obj.writable?/2` is true). Any
   # other write is the generic path `{sid}`: an add, a setter, a key that is not writable.
   defp ic_write_cell(o, sid, key) do
     case Obj.fast_slot(o, key) do
       {pos, bits} ->
-        if ic_plain?(o) and Bitwise.band(bits, 1) != 0 and
+        if ic_ok?(o, key) and Bitwise.band(bits, 1) != 0 and
              not match?({:accessor, _, _}, Obj.slot(o, pos)),
            do: {sid, pos},
            else: {sid}
@@ -5199,7 +5231,9 @@ defmodule Browser.JS.Interp do
 
     fun =
       {:obj,
-       alloc(Obj.record(class: :function, fun: {:closure, closure}, proto: proto(:function)))}
+       alloc(
+         Obj.function_record(class: :function, fun: {:closure, closure}, proto: proto(:function))
+       )}
 
     if named? and env != nil do
       declare(env, name, fun)

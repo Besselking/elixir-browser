@@ -9,7 +9,8 @@ defmodule Browser.JS.Shape do
 
   * `sid`: a positive integer that no other shape of this process has. The counter
     `:js_shape_next` gives it, and nothing resets the counter, also not `Interp.init/1`.
-    The root shape (no key) has the `sid` 0.
+    The root shapes (no key) have the `sid`s 0 (plain objects), -1 (arrays) and -2
+    (functions), see "The roots".
   * `index`: a map of each key to its position in `vals` (1-based). A key is a string, a
     symbol `{:symbol, id, description}` or a private name `{:private, ref}`.
   * `keys`: a tuple of the keys in creation order. Position `i` holds the key of value `i`.
@@ -32,6 +33,17 @@ defmodule Browser.JS.Shape do
   the same keys, which holds the same properties. An accessor is a value
   `{:accessor, getter, setter}` in `vals`, as in a dictionary record, so a shape does not
   tell an accessor from a data property.
+
+  ## The roots
+
+  A record starts with the root of its class (step A4): an array starts with the root
+  `-1`, a function with the root `-2`, and every other record with the root `0`. Thus a
+  shape belongs to one of these three kinds of records, and two records with the same
+  `sid` are of the same kind. An inline cache tests only the `sid`, and this makes the
+  test exact: an array reads `length` and a function reads `name`, `length` and
+  `prototype` in a different way than a plain object (these keys are not in the shape
+  until a write makes them own keys), so a cell that a plain object made must never hit
+  on an array or a function.
 
   ## The transition table
 
@@ -70,8 +82,16 @@ defmodule Browser.JS.Shape do
     their keys come from the source text;
   * more than 8 changes of attributes in the history of a shape.
 
-  The root has no limit of children: the first keys of the objects of a page are few, and
-  the budget below stops a program that gives each object a new first key.
+  The roots have no limit of children: the first keys of the objects of a page are few,
+  and the budget below stops a program that gives each object a new first key.
+
+  The adds of the built-in objects have no limit of children and of new shapes in a row
+  either (step A4): `Browser.JS.Builtins.built/1` sets the process key
+  `:js_shape_realm` while it makes them. A built-in object gets many keys that no other
+  object has, and the constructors give many children to the shape of a function with a
+  `prototype`, so these limits would make many of them dictionaries. The realm is the
+  same in each heap of a process, so its shapes are made once and found in the table
+  after that. The limit of 128 keys stays.
 
   The table is erased when the shapes that it made since the last erase cost more than
   2,000,000 words. A new shape of `n` keys costs about `50 + 8 * n` words with its entries
@@ -119,12 +139,17 @@ defmodule Browser.JS.Shape do
   cell, `{sid, n}` and `{nil, n}`. An add cell gives the record the shape `child` (the
   shape after the add) and the new value at the end, with no walk of the prototype chain
   and no read of the transition table (the part "add cells" of `Browser.JS.Interp` tells
-  why its test of the chain is exact). A cell is made only from a fast record of the class `:object` and from fast
-  prototypes, after the generic path found the key there; the chain of an add cell can
-  hold any record that is not a proxy, also `Object.prototype`, which is a dictionary
-  record. A dictionary record, an array, a function, a host object and a proxy never get a
-  cell, and every operation on them takes the generic path. On a miss, the site takes the
-  generic path and writes the cell again. After 16 misses the cell becomes `:mega`, so
+  why its test of the chain is exact). A read or write cell is made only from fast
+  records that read the key as a plain object does: a plain object, an array for a key
+  other than `length`, and a function for a key other than `name`, `length` and
+  `prototype` (step A4, `Interp.ic_ok?/2`). It is made after the generic path found the
+  key there. An add cell is made only from a fast record of the class `:object`; its chain
+  can hold any record that is not a proxy, in fast mode or in dictionary mode. From step
+  A4 the built-in prototypes are fast, so a read of a method of `Object.prototype`,
+  `Array.prototype` or `Function.prototype` hits a cell of a prototype. A dictionary
+  record, a host object and a proxy never get a cell, and every operation on them takes
+  the generic path. On a miss, the site takes the generic path and writes the cell
+  again. After 16 misses the cell becomes `:mega`, so
   that a site that sees many shapes does not pay for the search of a cell at each run.
 
   The count is of all the misses in the life of the site, not of the misses in a row. A
@@ -179,9 +204,22 @@ defmodule Browser.JS.Shape do
   @budget 2_000_000
 
   @root {:js_shape, 0, %{}, {}, {}, 0, []}
+  @array_root {:js_shape, -1, %{}, {}, {}, 0, []}
+  @function_root {:js_shape, -2, %{}, {}, {}, 0, []}
 
   @doc "The shape with no key. `Browser.JS.Obj` puts it in its macros as a literal."
   def root_shape, do: @root
+
+  @doc "The shape with no key of an array (see \"The roots\")."
+  def array_root_shape, do: @array_root
+
+  @doc "The shape with no key of a function (see \"The roots\")."
+  def function_root_shape, do: @function_root
+
+  @doc "The root shape of a record of the class `class` (see \"The roots\")."
+  def root_of(:array), do: @array_root
+  def root_of(:function), do: @function_root
+  def root_of(_class), do: @root
 
   @doc "Whether the functions that make a record make fast records (the switch `:js_shapes`)."
   defmacro on? do
@@ -221,12 +259,16 @@ defmodule Browser.JS.Shape do
 
   defp make_add({:js_shape, sid, index, keys, bits, flags, enum} = sh, t, key, b, limit?) do
     n = tuple_size(keys)
+    # (the adds of the built-in objects have no limit of children and of new shapes in a
+    # row, see "The limits"; only an add that makes a new shape reads the process key)
+    realm? = :erlang.get(:js_shape_realm) == true
+    limit? = limit? and not realm?
 
     cond do
       n >= @max_keys ->
         :dict
 
-      sid != 0 and map_size(t) > @max_children ->
+      sid > 0 and map_size(t) > @max_children and not realm? ->
         :dict
 
       # (the chain made too many new shapes in a row: the first time, the record goes to
@@ -404,7 +446,7 @@ defmodule Browser.JS.Shape do
     else
       :erlang.put(:js_shape_n, used)
 
-      with true <- t == %{} and sid != 0,
+      with true <- t == %{} and sid > 0,
            {first, old} when sid < first <- since() do
         :erlang.put(:js_shape_since, {first, [sid | old]})
       end
@@ -436,7 +478,7 @@ defmodule Browser.JS.Shape do
         n -> n
       end
 
-    :erlang.erase({:jst, 0})
+    for sid <- [0, -1, -2], do: :erlang.erase({:jst, sid})
     for sid <- old, do: :erlang.erase({:jst, sid})
     for sid <- first..(next - 1)//1, do: :erlang.erase({:jst, sid})
     :erlang.put(:js_shape_since, {next, []})
