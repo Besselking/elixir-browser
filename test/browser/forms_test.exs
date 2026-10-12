@@ -597,6 +597,30 @@ defmodule Browser.FormsTest do
       end
     end
 
+    test "with the elements that hold a control, the rest is given back without a look inside" do
+      {nodes, %{controls: controls}} = page_nodes()
+      nodes = Browser.Nids.index(nodes)
+      hot = Forms.hot(nodes)
+      first = Forms.render(nodes, %{}, controls, nil, hot)
+      assert first == Forms.render(nodes, %{}, controls)
+
+      [a, b | _] = controls |> Map.keys() |> Enum.sort()
+
+      for state <- [%{a => %{value: "xy"}}, %{b => %{value: "z"}}, %{}] do
+        again = Forms.render(nodes, state, controls, first, hot)
+        assert again == Forms.render(nodes, state, controls, first)
+      end
+
+      again = Forms.render(nodes, %{a => %{value: "xy"}}, controls, first, hot)
+      [_, details, section] = Enum.filter(first, &match?({:element, _, _, _}, &1))
+      [_, details2, section2] = Enum.filter(again, &match?({:element, _, _, _}, &1))
+      assert :erts_debug.same(details2, details)
+      assert :erts_debug.same(section2, section)
+      # a paragraph holds no control: not hot
+      {:element, _, _, [{:element, "p", attrs, _} | _]} = section
+      refute MapSet.member?(hot, :proplists.get_value("@nid", attrs))
+    end
+
     test "a details closed again gives the summary alone, then the same term" do
       {nodes, %{controls: controls}} = page_nodes()
       first = Forms.render(nodes, %{}, controls)

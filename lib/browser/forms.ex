@@ -222,9 +222,15 @@ defmodule Browser.Forms do
   `prevs` (the tree the last render gave) when its rendering is that, else the node of `nodes`
   when its rendering is the node itself.
   """
-  def render(nodes, state, controls, prevs \\ nil) do
+  #
+  # `hot` (from `hot/1`), when given, names the elements that hold a control: the others are
+  # given back without a look inside.
+  def render(nodes, state, controls, prevs \\ nil, hot \\ nil),
+    do: render_in(nodes, state, {controls, hot}, prevs)
+
+  defp render_in(nodes, state, ctx, prevs) do
     prevs = paired(nodes, prevs)
-    the_list(render_list(nodes, state, controls, prevs), nodes, prevs)
+    the_list(render_list(nodes, state, ctx, prevs), nodes, prevs)
   end
 
   # the last render's nodes, when they can be paired with `nodes` by their place
@@ -236,18 +242,34 @@ defmodule Browser.Forms do
   # node given) or `{:new, node}`. (The answer is an atom, not the old term, as the compiler may
   # give back the new term for the old one when the two compare equal.)
   defp render_list(nodes, state, controls, nil) do
-    results = Enum.map(nodes, &render_node(&1, state, controls, nil))
-    if Enum.all?(results, &(&1 == :same)), do: :same, else: {:new, results}
+    {results, same?} = render_each(nodes, state, controls, [], true)
+    if same?, do: :same, else: {:new, results}
   end
 
   defp render_list(nodes, state, controls, prevs) do
-    results = Enum.zip_with(nodes, prevs, &render_node(&1, state, controls, &2))
+    {results, prev?, same?} = render_pairs(nodes, prevs, state, controls, [], true, true)
 
     cond do
-      Enum.all?(results, &(&1 == :prev)) -> :prev
-      Enum.all?(results, &(&1 == :same)) -> :same
+      prev? -> :prev
+      same? -> :same
       true -> {:new, results}
     end
+  end
+
+  defp render_each([], _state, _controls, acc, same?), do: {:lists.reverse(acc), same?}
+
+  defp render_each([node | nodes], state, controls, acc, same?) do
+    r = render_node(node, state, controls, nil)
+    render_each(nodes, state, controls, [r | acc], same? and r == :same)
+  end
+
+  defp render_pairs([], _prevs, _state, _controls, acc, prev?, same?),
+    do: {:lists.reverse(acc), prev?, same?}
+
+  defp render_pairs([node | nodes], [prev | prevs], state, controls, acc, prev?, same?) do
+    r = render_node(node, state, controls, prev)
+    acc = [r | acc]
+    render_pairs(nodes, prevs, state, controls, acc, prev? and r == :prev, same? and r == :same)
   end
 
   defp the_list(:same, nodes, _prevs), do: nodes
@@ -256,8 +278,12 @@ defmodule Browser.Forms do
   defp the_list({:new, results}, nodes, nil),
     do: Enum.zip_with(results, nodes, &the_node(&1, &2, nil))
 
-  defp the_list({:new, results}, nodes, prevs),
-    do: Enum.zip_with([results, nodes, prevs], fn [r, node, prev] -> the_node(r, node, prev) end)
+  defp the_list({:new, results}, nodes, prevs), do: the_nodes(results, nodes, prevs, [])
+
+  defp the_nodes([r | results], [node | nodes], [prev | prevs], acc),
+    do: the_nodes(results, nodes, prevs, [the_node(r, node, prev) | acc])
+
+  defp the_nodes([], [], [], acc), do: :lists.reverse(acc)
 
   defp the_node(:same, node, _prev), do: node
   defp the_node(:prev, _node, prev), do: prev
@@ -279,7 +305,7 @@ defmodule Browser.Forms do
   defp render_node({:element, tag, attrs, _} = node, state, controls, prev)
        when tag in ["input", "select", "textarea"] do
     with {_, cid} <- List.keyfind(attrs, "@cid", 0),
-         %{} = control <- Map.get(controls, cid) do
+         %{} = control <- Map.get(elem(controls, 0), cid) do
       cur = current(control, state)
       attrs = restyle_checked(attrs, control, cur)
       classify({:element, tag, attrs, content(control, attrs, cur)}, node, prev)
@@ -291,7 +317,7 @@ defmodule Browser.Forms do
   defp render_node({:element, "details", attrs, kids} = node, state, controls, prev) do
     kids =
       with {_, cid} <- List.keyfind(attrs, "@summary", 0),
-           %{} = control <- Map.get(controls, cid),
+           %{} = control <- Map.get(elem(controls, 0), cid),
            %{checked: false} <- current(control, state) do
         # closed: only the summary stays
         Enum.filter(kids, &summary?(&1, cid))
@@ -300,7 +326,7 @@ defmodule Browser.Forms do
       end
 
     classify(
-      {:element, "details", attrs, render(kids, state, controls, prev_kids(prev))},
+      {:element, "details", attrs, render_in(kids, state, controls, prev_kids(prev))},
       node,
       prev
     )
@@ -309,7 +335,7 @@ defmodule Browser.Forms do
   defp render_node({:element, "summary", attrs, kids} = node, state, controls, prev) do
     mark =
       with {_, cid} <- List.keyfind(attrs, "@cid", 0),
-           %{} = control <- Map.get(controls, cid),
+           %{} = control <- Map.get(elem(controls, 0), cid),
            mark when mark not in [nil, ""] <-
              summary_marker(attrs, current(control, state).checked) do
         mark
@@ -321,15 +347,21 @@ defmodule Browser.Forms do
       if mark do
         # (the marker the last render put first is not one of the children)
         pkids = with [{:text, _} | pkids] <- prev_kids(prev), do: pkids, else: (_ -> nil)
-        [text(mark) | render(kids, state, controls, pkids)]
+        [text(mark) | render_in(kids, state, controls, pkids)]
       else
-        render(kids, state, controls, prev_kids(prev))
+        render_in(kids, state, controls, prev_kids(prev))
       end
 
     classify({:element, "summary", attrs, kids}, node, prev)
   end
 
-  defp render_node({:element, tag, attrs, kids}, state, controls, prev) do
+  defp render_node({:element, tag, attrs, kids} = node, state, controls, prev) do
+    if cold?(attrs, controls),
+      do: if(node === prev, do: :prev, else: :same),
+      else: render_element(tag, attrs, kids, state, controls, prev)
+  end
+
+  defp render_element(tag, attrs, kids, state, controls, prev) do
     pkids = with {:element, ^tag, _, pkids} <- prev, do: paired(kids, pkids), else: (_ -> nil)
 
     case render_list(kids, state, controls, pkids) do
@@ -346,6 +378,41 @@ defmodule Browser.Forms do
         {:new, {:element, tag, attrs, the_list(new, kids, pkids)}}
     end
   end
+
+  # an element that holds no control (and so renders as itself), as far as `hot` tells
+  defp cold?(_attrs, {_controls, nil}), do: false
+
+  defp cold?(attrs, {_controls, hot}) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} -> not MapSet.member?(hot, nid)
+      nil -> false
+    end
+  end
+
+  @doc """
+  The numbers (`@nid`) of the elements in `nodes` that are or hold a control, a `details` or a
+  `summary`: the elements whose rendering can change (see `render/5`).
+  """
+  def hot(nodes), do: nodes |> hot_list(MapSet.new()) |> elem(1)
+
+  defp hot_list(nodes, set) do
+    Enum.reduce(nodes, {false, set}, fn node, {any?, set} ->
+      {hot?, set} = hot_node(node, set)
+      {any? or hot?, set}
+    end)
+  end
+
+  defp hot_node({:element, tag, attrs, kids}, set) do
+    {kids?, set} = hot_list(kids, set)
+    hot? = kids? or tag in ~w(input select textarea details summary)
+
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} when hot? -> {true, MapSet.put(set, nid)}
+      _ -> {hot?, set}
+    end
+  end
+
+  defp hot_node(_node, set), do: {false, set}
 
   defp prev_kids({:element, _, _, kids}), do: kids
   defp prev_kids(_prev), do: nil

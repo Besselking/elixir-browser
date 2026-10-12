@@ -258,11 +258,13 @@ defmodule Browser.UI do
   nil when the page must be indexed again: the lists differ in length, in many items, in the
   canvas or in a sticky item, or an item now reaches past the last band.
   """
-  def reindex_page(nil, _old, _new), do: nil
+  def reindex_page(page, old, new, changes \\ nil)
+  def reindex_page(nil, _old, _new, _changes), do: nil
 
-  def reindex_page(page, old, new) do
+  def reindex_page(page, old, new, changes) do
     with {:ok, old, new} <- without_canvas(old, new, page.canvas),
-         changes when is_list(changes) <- changed_items(old, new, 0, []),
+         changes when is_list(changes) <-
+           if(changes && page.canvas == nil, do: changes, else: changed_items(old, new, 0, [])),
          false <-
            Enum.any?(changes, fn {_, a, b} ->
              Map.has_key?(a, :stick) or Map.has_key?(b, :stick)
@@ -325,14 +327,18 @@ defmodule Browser.UI do
   selection), the scroll offset and the blink state of the text caret. The items are only
   indexed again when they are not the very list given last time.
   """
-  def publish(items, overlay, scroll, caret_on \\ true) do
+  def publish(items, overlay, scroll, caret_on \\ true),
+    do: publish(items, overlay, scroll, caret_on, nil)
+
+  # `changes`: the items that differ from those published last (`changed_items/4`), when known
+  defp publish(items, overlay, scroll, caret_on, changes) do
     old = Process.get(:published_items)
 
     unless old === items do
       published = Process.get(:published_page)
 
       page =
-        case reindex_page(published, old, items) do
+        case reindex_page(published, old, items, changes) do
           nil -> items |> index_page() |> put_page()
           page -> put_bands(page, published)
         end
@@ -352,11 +358,22 @@ defmodule Browser.UI do
   def update(%{panel: panel}, items, overlay, scroll, caret_on, mode \\ :full) do
     [{:view, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, :view)
     old_items = Process.get(:published_items, [])
-    publish(items, overlay, scroll, caret_on)
+    diff? = mode == :diff and old_scroll == scroll and old_overlay == overlay
+
+    # (a few items changed in place, as a keystroke changes them: the one pass that finds them
+    # serves both the index and the area to repaint)
+    changes =
+      if diff? and old_caret == caret_on and not (old_items === items),
+        do: changed_items(old_items, items, 0, [])
+
+    publish(items, overlay, scroll, caret_on, if(is_list(changes), do: changes))
 
     dirty =
       cond do
-        mode == :diff and old_scroll == scroll and old_overlay == overlay ->
+        is_list(changes) ->
+          changes_dirty(changes)
+
+        diff? ->
           if old_items === items,
             do:
               if(old_caret != caret_on, do: diff_items(old_items, items, true, nil), else: :none),
@@ -380,6 +397,20 @@ defmodule Browser.UI do
           do: :wxWindow.refresh(panel),
           else: :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
     end
+  end
+
+  # the area of what changed, as `diff_items/4` finds it
+  defp changes_dirty([]), do: :none
+
+  defp changes_dirty(changes) do
+    if Enum.any?(changes, fn {_, a, b} ->
+         match?(%{type: :canvas}, a) or match?(%{type: :canvas}, b)
+       end),
+       do: :full,
+       else:
+         Enum.reduce(changes, nil, fn {_, a, b}, acc ->
+           acc |> union(bbox(a)) |> union(bbox(b))
+         end)
   end
 
   @doc """

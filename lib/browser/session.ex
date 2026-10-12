@@ -2864,11 +2864,12 @@ defmodule Browser.Session do
 
     case patched do
       {:ok, items} ->
+        cid = control.cid
         # field items are never links, unless the field sits inside one
         links =
-          if Enum.any?(state.links, fn {_, its} -> Enum.any?(its, &(&1[:cid] == control.cid)) end),
-             do: UI.links(items),
-             else: state.links
+          if Enum.any?(state.links, fn {_, its} -> Enum.any?(its, &match?(%{cid: ^cid}, &1)) end),
+            do: UI.links(items),
+            else: state.links
 
         # (the patch changes the field's items only: when none of them is sticky or fixed, the
         # sticky ones are the same as before)
