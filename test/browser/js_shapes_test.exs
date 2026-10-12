@@ -431,13 +431,30 @@ defmodule Browser.JS.ShapesTest do
       Interp.run_program(program, true)
     end
 
+    # Runs `fun` with the application setting `:js_compile` at `on?`, which `Interp.init/1`
+    # copies into each new heap. The cells need compiled code, also when the suite runs with
+    # JS_COMPILE=0.
+    defp with_compile(on?, fun) do
+      old = Application.get_env(:browser, :js_compile)
+      Application.put_env(:browser, :js_compile, on?)
+
+      try do
+        fun.()
+      after
+        if old == nil,
+          do: Application.delete_env(:browser, :js_compile),
+          else: Application.put_env(:browser, :js_compile, old)
+      end
+    end
+
     test "the rows of the corpus make each kind of cell" do
       rows = for {"dm ic" <> _, _, _} = row <- Browser.JS.DatamodelCorpus.rows(), do: row
       assert length(rows) >= 5
 
       kinds =
-        rows
-        |> HeapOracle.run_all(shapes(true), after: fn -> Enum.map(cells(), &cell_kind/1) end)
+        with_compile(true, fn ->
+          HeapOracle.run_all(rows, shapes(true), after: fn -> Enum.map(cells(), &cell_kind/1) end)
+        end)
         |> Enum.flat_map(& &1.after)
         |> Enum.uniq()
         |> Enum.sort()
@@ -455,7 +472,9 @@ defmodule Browser.JS.ShapesTest do
                ])
 
       # (with the fast records off, no site writes a cell)
-      off = HeapOracle.run_all(rows, shapes(false), after: fn -> cells() end)
+      off =
+        with_compile(true, fn -> HeapOracle.run_all(rows, shapes(false), after: &cells/0) end)
+
       assert Enum.all?(off, &(&1.after == []))
     end
 
@@ -491,8 +510,10 @@ defmodule Browser.JS.ShapesTest do
     test "a cell stays exact in a new heap that gives the same ids to other objects" do
       src = fn proto -> "var p = #{proto}; var o = Object.create(p); o.x = 1;" end
 
+      in_heaps = fn fun -> with_compile(true, fn -> HeapOracle.in_process(fun) end) end
+
       result =
-        HeapOracle.in_process(fn ->
+        in_heaps.(fn ->
           site = Shape.new_site()
 
           heap = fn proto ->
@@ -532,21 +553,19 @@ defmodule Browser.JS.ShapesTest do
 
     test "the cells go with the code cache: at an erase of the budget and with JS_COMPILE=0" do
       erased =
-        inspect_run("", fn ->
-          :erlang.put(-1_000_000_000, {1, 1, 1})
-          :erlang.put(:jsc_budget_max, 10)
-          run_here("function f(){ return {a: 1}.a } f()")
-          {:erlang.get(-1_000_000_000), elem(:erlang.get(:jsc_budget), 1) > 0}
+        with_compile(true, fn ->
+          inspect_run("", fn ->
+            :erlang.put(-1_000_000_000, {1, 1, 1})
+            :erlang.put(:jsc_budget_max, 10)
+            run_here("function f(){ return {a: 1}.a } f()")
+            {:erlang.get(-1_000_000_000), elem(:erlang.get(:jsc_budget), 1) > 0}
+          end)
         end)
 
       assert erased == {:undefined, true}
 
-      old = Application.get_env(:browser, :js_compile)
-
-      try do
-        Application.put_env(:browser, :js_compile, false)
-
-        result =
+      result =
+        with_compile(false, fn ->
           HeapOracle.in_process(fn ->
             :erlang.put(-1_000_000_000, {1, 1, 1})
             next = Shape.new_site()
@@ -554,13 +573,9 @@ defmodule Browser.JS.ShapesTest do
             # (the site numbers are never given two times, also after a new heap)
             {:erlang.get(-1_000_000_000), Shape.new_site() < next}
           end)
+        end)
 
-        assert result == {:undefined, true}
-      after
-        if old == nil,
-          do: Application.delete_env(:browser, :js_compile),
-          else: Application.put_env(:browser, :js_compile, old)
-      end
+      assert result == {:undefined, true}
     end
   end
 end
