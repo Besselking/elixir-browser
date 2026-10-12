@@ -1742,10 +1742,8 @@ defmodule Browser.JS.Interp do
 
           nil ->
             cond do
-              key == "length" and is_map_key(o, :arguments) and Obj.has_own?(o, "length") ->
-                Obj.own_value(o, "length")
-
-              key == "length" and is_map_key(o, :len_gone) ->
+              # (the `length` of an arguments object is an ordinary own property)
+              key == "length" and is_map_key(o, :arguments) ->
                 lookup(o, "length", {:obj, id})
 
               key == "length" ->
@@ -1817,7 +1815,7 @@ defmodule Browser.JS.Interp do
       :error ->
         case o do
           # an array further up the prototype chain: its length and elements show through
-          %{class: :array} when key == "length" ->
+          %{class: :array} when key == "length" and not is_map_key(o, :arguments) ->
             o.len * 1.0
 
           # (an array with no elements, as `Array.prototype`, needs no parse of the key)
@@ -2329,12 +2327,9 @@ defmodule Browser.JS.Interp do
 
           nil ->
             # an arguments object's `length` is an ordinary property that takes any value
-            if key == "length" and is_map_key(o, :arguments) and not Obj.frozen?(o) do
-              if is_map_key(o, :len_gone), do: store(id, Map.delete(o, :len_gone))
-              put_hidden({:obj, id}, "length", v)
-            else
-              put_array_prop(id, o, key, v)
-            end
+            if key == "length" and is_map_key(o, :arguments),
+              do: put_prop(id, o, key, v),
+              else: put_array_prop(id, o, key, v)
         end
 
       %{class: :host, host: {Browser.JS.TypedArrays, data}}
@@ -2691,11 +2686,6 @@ defmodule Browser.JS.Interp do
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
 
-      # an arguments object's `length` can go: reads then see the prototype chain
-      o.class == :array and key == "length" ->
-        store(id, o |> Map.put(:len_gone, true) |> Obj.own_drop("length"))
-        true
-
       i ->
         store(id, %{o | items: Map.delete(o.items, i)})
         if Map.has_key?(o, :mapped), do: unmap_argument(id, i)
@@ -2741,7 +2731,7 @@ defmodule Browser.JS.Interp do
           Browser.JS.TypedArrays.numeric_key?(key_s) ->
         false
 
-      o.class == :array and key_s == "length" ->
+      o.class == :array and key_s == "length" and not is_map_key(o, :arguments) ->
         true
 
       match?(%{prim: str} when is_binary(str), o) and is_integer(index(key)) and
@@ -4652,13 +4642,27 @@ defmodule Browser.JS.Interp do
   end
 
   # The unmapped part of an arguments object, which both paths build: an array of the
-  # arguments with `Object.prototype`, its `callee` and a hidden `Symbol.iterator`.
+  # arguments with `Object.prototype`, and its hidden own properties in the order of the
+  # spec: `length`, `Symbol.iterator`, then `callee`. The record is made in one write, and
+  # only the thrower accessor of `callee` is a second write.
   defp arguments_object(args, callee) do
-    {:obj, aid} = a = new_array(args)
-    store(aid, deref(aid) |> Map.put(:arguments, true) |> Map.put(:proto, proto(:object)))
+    len = length(args)
+
+    o =
+      Obj.record(
+        class: :array,
+        items: items_map(args),
+        len: len,
+        proto: proto(:object),
+        arguments: true
+      )
+      |> Obj.put_hidden("length", len * 1.0)
+      |> Obj.put_hidden({:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
 
     case callee do
       {:thrower, thrower} ->
+        a = {:obj, alloc(o)}
+
         Browser.JS.Props.define_accessor(a, "callee",
           get: thrower,
           set: thrower,
@@ -4666,15 +4670,14 @@ defmodule Browser.JS.Interp do
           configurable: false
         )
 
+        a
+
       {:obj, _} = f ->
-        put_hidden(a, "callee", f)
+        {:obj, alloc(Obj.put_hidden(o, "callee", f))}
 
       nil ->
-        :ok
+        {:obj, alloc(o)}
     end
-
-    put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
-    a
   end
 
   # Builds the arguments object of a frame (step 2d) into slot `i` and gives it back. `fid`

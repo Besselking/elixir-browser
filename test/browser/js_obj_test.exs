@@ -31,7 +31,6 @@ defmodule Browser.JS.ObjTest.Api do
   def own_redefine(o, k, v, f, e), do: Obj.own_redefine(o, k, v, f, e)
   def own_delete(o, k), do: Obj.own_delete(o, k)
   def own_remove(o, k), do: Obj.own_remove(o, k)
-  def own_drop(o, k), do: Obj.own_drop(o, k)
   def prevent(o), do: Obj.prevent(o)
   def fill(o, layout, pairs), do: Obj.fill(o, layout, pairs)
 end
@@ -326,7 +325,6 @@ defmodule Browser.JS.ObjTest do
 
     refute Api.has_own?(Api.own_remove(o, "a"), "a")
     assert Obj.string_keys(Api.own_remove(o, "a")) == ["b", "h"]
-    refute Api.has_own?(Api.own_drop(o, "a"), "a")
   end
 
   test "built-in attributes, freeze and seal" do

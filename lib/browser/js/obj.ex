@@ -98,16 +98,12 @@ defmodule Browser.JS.Obj do
   console of the session) have their own `attrs` and `props`, but they never read a
   heap record, so the gate does not search them.
 
-  ## A known gap before A1
+  ## The length of an arguments object
 
-  The `length` of an arguments object is not an ordinary own property: `delete
-  arguments.length` removes the value and the place with `own_drop/2` and keeps the
-  attributes, and the interpreter marks the record with `len_gone`. A record of A1 cannot
-  hold attributes without a value. So before A1, `arguments.length` must become an ordinary
-  own property (made with `put_hidden/3`, removed with `own_delete/2`), and `own_drop/2`
-  must go. This also corrects two results that differ from the spec today: after a delete,
-  a new `arguments.length` is not enumerable, and `Object.defineProperty(arguments,
-  "length", {enumerable: true})` throws.
+  The `length` of an arguments object is an ordinary own property, as in the spec. The
+  interpreter makes it with `put_hidden/3` when it makes the object, and `delete
+  arguments.length` removes it with `own_delete/2`, as for any other key. So each key in the
+  order has a value, which a record of A1 needs.
   """
 
   # ── building ───────────────────────────────────────────────
@@ -778,12 +774,6 @@ defmodule Browser.JS.Obj do
     o = own_remove(o, key)
     if is_map_key(o, :attrs), do: %{o | attrs: Map.delete(o.attrs, key)}, else: o
   end
-
-  @doc """
-  `o` without the stored value of `key` (the `length` of an arguments object). Its place
-  goes too, and its attributes stay.
-  """
-  def own_drop(o, key), do: own_remove(o, key)
 
   @doc """
   `o` without the own key `key` and without its place in the order. The attributes stay (a

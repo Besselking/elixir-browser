@@ -410,6 +410,27 @@ defmodule Browser.JSTest do
              ) == "b,c,a,h"
     end
 
+    test "the length of an arguments object is an ordinary own property" do
+      assert js(
+               "function f(){ var r = [Object.getOwnPropertyNames(arguments).join()]; " <>
+                 "delete arguments.length; r.push(String(arguments.length), 'length' in arguments); " <>
+                 "arguments.length = 7; var d = Object.getOwnPropertyDescriptor(arguments, 'length'); " <>
+                 "r.push(Object.getOwnPropertyNames(arguments).join(), Object.keys(arguments).join(), " <>
+                 "d.value, d.enumerable); return r.join(' ') } f(1, 2)"
+             ) == "0,1,length,callee undefined false 0,1,callee,length 0,1,length 7 true"
+
+      assert js(
+               "function f(){ Object.defineProperty(arguments, 'length', {enumerable: true}); " <>
+                 "return Object.keys(arguments).join() + ' ' + arguments.length } f(1, 2)"
+             ) == "0,1,length 2"
+
+      assert js(
+               "function f(){ 'use strict'; Object.defineProperty(arguments, 'length', " <>
+                 "{value: 5, writable: false}); try { arguments.length = 3 } " <>
+                 "catch (e) { return e.name + ' ' + arguments.length } } f(1)"
+             ) == "TypeError 5"
+    end
+
     test "a typed array with elements cannot be frozen or sealed" do
       assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
                "TypeError"

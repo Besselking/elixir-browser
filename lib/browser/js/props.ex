@@ -37,14 +37,9 @@ defmodule Browser.JS.Props do
             nil
         end
 
-      o.class == :array and key == "length" and is_map_key(o, :len_gone) and
-          not Obj.has_own?(o, "length") ->
-        nil
-
-      o.class == :array and key == "length" and
-          not (is_map_key(o, :arguments) and Obj.has_own?(o, "length")) ->
-        {:data, o.len * 1.0, not Obj.frozen?(o) and not Map.get(o, :len_ro, false), false,
-         is_map_key(o, :arguments)}
+      # (the `length` of an arguments object is an ordinary own property)
+      o.class == :array and key == "length" and not is_map_key(o, :arguments) ->
+        {:data, o.len * 1.0, not Obj.frozen?(o) and not Map.get(o, :len_ro, false), false, false}
 
       true ->
         Obj.own_state(o, key)
@@ -207,10 +202,10 @@ defmodule Browser.JS.Props do
 
   defp own_names_plain2(id, o) do
     case o do
-      # (an arguments object can hold its `length`)
+      # (the `length` of an arguments object is an own key in its place)
       %{class: :array} ->
         for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
-          ["length"] ++ (Obj.string_keys(o) -- ["length"])
+          if(is_map_key(o, :arguments), do: [], else: ["length"]) ++ Obj.string_keys(o)
 
       %{class: :function} ->
         # length, name and prototype come first, in that order, whether stored or not
@@ -427,8 +422,9 @@ defmodule Browser.JS.Props do
       Browser.JS.Proxy.define_own_property(obj, key, descriptor, desc)
     else
       # an invalid array length is a RangeError, not a refusal
-      if key == "length" and is_number(Map.get(desc, :value)) and deref(id).class == :array,
-        do: Interp.array_length!(desc.value)
+      if key == "length" and is_number(Map.get(desc, :value)) and
+           match?(%{class: :array} = a when not is_map_key(a, :arguments), deref(id)),
+         do: Interp.array_length!(desc.value)
 
       try do
         define_own(obj, id, key, desc)
@@ -611,7 +607,7 @@ defmodule Browser.JS.Props do
       o.class == :array and is_integer(array_index(key)) ->
         define_element(id, o, key, desc)
 
-      o.class == :array and key == "length" ->
+      o.class == :array and key == "length" and not is_map_key(o, :arguments) ->
         define_length(id, o, desc)
 
       true ->
