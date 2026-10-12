@@ -2138,8 +2138,8 @@ defmodule Browser.JS.Interp do
   # goes in with one write: `put_literal/4` for a literal with a shape and no key that
   # comes two times, `fill_new/4` for the others. Between the two, the id has no entry.
   # Nothing reads it there: no name refers to the object, and a garbage collection runs
-  # only between tasks. The one exception is the home of a method value
-  # (`literal_home/3`).
+  # only between tasks. A literal of this path defines no method (`method_node?/1` in
+  # `Browser.JS.Compile`), so no value needs the object as its home.
 
   @doc false
   # The prototype of a new plain object, `Object.prototype` of the running realm, read once
@@ -2186,25 +2186,6 @@ defmodule Browser.JS.Interp do
     Enum.each(:lists.zip(keys, values), fn {k, v} -> define_data({:obj, id}, k, v) end)
     before
   end
-
-  @doc false
-  # The home of a method value `v` of the object literal `id` (`method_home/2`). A method
-  # with a home reads the prototype of the home for `super`, and the next value of the
-  # literal can call it. So the id gets the empty object first when it has no entry yet.
-  def literal_home({:obj, fid} = f, id, proto) do
-    case deref(fid) do
-      %{fun: {:closure, %{name: {:method, _}}}} ->
-        if :erlang.get(id) == :undefined,
-          do: :erlang.put(id, Obj.plain_record(class: :object, proto: proto))
-
-        set_home(f, {:obj, id})
-
-      _ ->
-        :ok
-    end
-  end
-
-  def literal_home(_v, _id, _proto), do: :ok
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
   def define_data({:obj, id}, key, v), do: store(id, Obj.define_data(deref(id), key, v))
@@ -7762,8 +7743,14 @@ defmodule Browser.JS.Interp do
       {:init, key, val} ->
         k = key_of(key, env)
         v = ev_named(val, env, if(fname = key_fn_name(k), do: {:id, fname}))
-        if method_node?(val), do: name_fn(v, key_fn_name(k))
-        method_home(v, obj)
+
+        # (only a method that this literal defines gets the literal as its home; a method
+        # value that comes from another object keeps its home)
+        if method_node?(val) do
+          name_fn(v, key_fn_name(k))
+          method_home(v, obj)
+        end
+
         define_data(obj, k, v)
 
       {:proto, e} ->

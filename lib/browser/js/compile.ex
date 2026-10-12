@@ -1007,8 +1007,8 @@ defmodule Browser.JS.Compile do
         # The object gets its id first, as `ev/2` makes the object before it evaluates the
         # values, and its record in one write at the end (fast path `:literal`, see "object
         # literals" in `Browser.JS.Interp`). Nothing can see the object before the literal
-        # is done: no name refers to it, and a method value gets its home through
-        # `Interp.literal_home/3`. The key layout comes from the record API when the
+        # is done: no name refers to it, and the literal defines no method that needs the
+        # object as its home (`plain_prop?/1`). The key layout comes from the record API when the
         # literal compiles, as `Interp.define_data/3` would make it: a key that comes two
         # times keeps its first place and its last value. The layout holds only the
         # constant keys and a shape. A shape holds no heap id and stays correct when the
@@ -1131,40 +1131,23 @@ defmodule Browser.JS.Compile do
   defp method_node?(_), do: false
 
   # The properties of an object literal, from the first to the last, as `ev/2` defines
-  # them: the value, then the home of a method, then the property. This is the old path of
+  # them: the value, then the property. This is the old path of
   # the fast path `:literal`, which only the check build can take.
   defp props([], _obj, _env), do: :ok
 
   defp props([{k, vo} | rest], obj, env) do
-    v = av(vo, env)
-    Interp.method_home(v, obj)
-    Interp.define_data(obj, k, v)
+    Interp.define_data(obj, k, av(vo, env))
     props(rest, obj, env)
-  end
-
-  # The value of the operand form `o` of an object literal with the id `id` and the
-  # prototype `proto`. The home of a method value is set as in `props/3`. Only an object can
-  # be a method that needs its home, so a primitive value does not call
-  # `Interp.literal_home/3`, which is a remote call.
-  defmacrop lit_val(o, env, id, proto) do
-    quote do
-      v = av(unquote(o), unquote(env))
-
-      if is_tuple(v) and elem(v, 0) == :obj,
-        do: Interp.literal_home(v, unquote(id), unquote(proto))
-
-      v
-    end
   end
 
   # The values of an object literal from the first to the last, in source order, for
   # `Interp.fill_new/4`. It is a named function, so the compiled code makes no fun when it
   # runs.
-  defp lit_vals([], _id, _proto, _env, acc), do: :lists.reverse(acc)
+  defp lit_vals([], _env, acc), do: :lists.reverse(acc)
 
-  defp lit_vals([vo | rest], id, proto, env, acc) do
-    v = lit_val(vo, env, id, proto)
-    lit_vals(rest, id, proto, env, [v | acc])
+  defp lit_vals([vo | rest], env, acc) do
+    v = av(vo, env)
+    lit_vals(rest, env, [v | acc])
   end
 
   # The closure of an object literal with constant keys for the fast path `:literal`: the
@@ -1185,7 +1168,7 @@ defmodule Browser.JS.Compile do
 
         unquote_splicing(
           for {v, o} <- Enum.zip(vals, vars) do
-            quote do: unquote(v) = lit_val(unquote(o), var!(env), var!(id), var!(proto))
+            quote do: unquote(v) = av(unquote(o), var!(env))
           end
         )
 
@@ -1199,7 +1182,7 @@ defmodule Browser.JS.Compile do
     fn env ->
       id = Interp.reserve()
       proto = Interp.literal_proto()
-      Interp.fill_new(id, proto, layout, lit_vals(os, id, proto, env, []))
+      Interp.fill_new(id, proto, layout, lit_vals(os, env, []))
       {:obj, id}
     end
   end

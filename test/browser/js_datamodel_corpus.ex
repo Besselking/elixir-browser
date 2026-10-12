@@ -219,6 +219,10 @@ defmodule Browser.JS.DatamodelCorpus do
      ~S|function f(){ var r = [], log = []; var s = Symbol('s'); var base = {inh: 'i'}; for (var i = 0; i < 3; i++) { var pr = {__proto__: base, own: i}; var acc = {a: 1, get g(){ return this.a + i }, set g(v){ log.push(v) }, b: 2}; acc.g = i; var sp = {x: 1, ...{y: i, x: 9}, z: 3}; var ck = 'k' + i; var comp = {a: 1, [ck]: i, [s]: 's', b: 2}; var meth = {a: i, m(){ return this.a }}; var named = {fn: function(){}, ar: () => 1}; r.push(pr.inh, Object.keys(pr).join(), Object.getPrototypeOf(pr) === base, acc.g, Object.keys(acc).join(), JSON.stringify(sp), Object.keys(comp).join(), comp[s], meth.m(), named.fn.name, named.ar.name) } return r.join() + ' ' + log.join() } console.log(f())|},
     {"dm lit values and home",
      ~S|var obj = { m(){ return typeof super.toString } }; function f(){ var r = [], n = 0; function v(x){ n++; return x } for (var i = 0; i < 3; i++) { var o = {a: v(i), b: {c: v(i + 1), d: [v(2)]}, e: v(3)}; r.push(JSON.stringify(o), n); try { var h = {m: obj.m, r: obj.m()}; r.push(h.r, h.m()) } catch (e) { r.push(e.constructor.name) } try { var t = {a: 1, b: (function(){ throw new Error('in ' + i) })(), c: 3} } catch (e) { r.push(e.message, typeof t) } } return r.join() } console.log(f())|},
+    # (a literal that holds a method of another object as a value does not change the home
+    # of that method)
+    {"dm lit method from another object",
+     ~S|function mk(a){ return {f: a.m, g: 1} } function f(){ var r = []; var base = {x: 'base'}; var a = {__proto__: base, m(){ return super.x }}; mk(a); mk(a); r.push(String(a.m())); var other = {x: 'other'}; var b = {__proto__: base, m(){ return super.x }}; var o2 = {__proto__: other, f: b.m, ['g' + 1]: b.m}; r.push(String(b.m()), String(o2.f())); var c = {__proto__: other, m(){ return super.x }, get g(){ return super.x }}; r.push(c.m(), c.g); console.log(r.join()) } f()|},
     {"dm lit frozen and changed",
      ~S|function mk(i){ return {a: i, b: i + 1} } function f(){ var r = []; var xs = []; for (var i = 0; i < 4; i++) xs.push(mk(i)); Object.freeze(xs[0]); xs[0].a = 9; Object.preventExtensions(xs[1]); xs[1].c = 1; delete xs[2].a; xs[2].a = 'again'; Object.defineProperty(xs[3], 'b', {enumerable: false}); r.push(xs.map(x => JSON.stringify(x) + Object.isFrozen(x) + Object.isExtensible(x)).join('/')); var y = mk(5); y.c = 6; r.push(JSON.stringify(y), JSON.stringify(Object.getOwnPropertyDescriptors(mk(7)))); return r.join(' ') } console.log(f())|},
     {"dm add cells constructor",
@@ -282,6 +286,7 @@ defmodule Browser.JS.DatamodelCorpus do
      ~S|i,own,true,1,a,g,b,{"x":9,"y":0,"z":3},a,k0,b,s,0,fn,ar,i,own,true,2,a,g,b,{"x":9,"y":1,"z":3},a,k1,b,s,1,fn,ar,i,own,true,3,a,g,b,{"x":9,"y":2,"z":3},a,k2,b,s,2,fn,ar 0,1,2|},
     {"dm lit values and home",
      ~S|{"a":0,"b":{"c":1,"d":[2]},"e":3},4,function,function,in 0,undefined,{"a":1,"b":{"c":2,"d":[2]},"e":3},8,function,function,in 1,undefined,{"a":2,"b":{"c":3,"d":[2]},"e":3},12,function,function,in 2,undefined|},
+    {"dm lit method from another object", ~S|base,base,base,other,other|},
     {"dm lit frozen and changed",
      ~S|{"a":0,"b":1}truefalse/{"a":1,"b":2}falsefalse/{"b":3,"a":"again"}falsetrue/{"a":3}falsetrue {"a":5,"b":6,"c":6} {"a":{"value":7,"writable":true,"enumerable":true,"configurable":true},"b":{"value":8,"writable":true,"enumerable":true,"configurable":true}}|},
     {"dm add cells constructor",
