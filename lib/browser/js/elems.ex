@@ -301,7 +301,12 @@ defmodule Browser.JS.Elems do
   """
   def put_args(o, list), do: o |> Map.put(:items, list_map(list)) |> Map.put(:len, length(list))
 
-  defp list_map(list), do: list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+  # (one pass that makes the pairs, then the map BIF: this costs less than `Enum.with_index/1`
+  # and `Map.new/2` with a function)
+  defp list_map(list), do: :maps.from_list(index_pairs(list, 0))
+
+  defp index_pairs([v | rest], i), do: [{i, v} | index_pairs(rest, i + 1)]
+  defp index_pairs([], _), do: []
 
   # ── the change of form ───────────────────────────────────────
 

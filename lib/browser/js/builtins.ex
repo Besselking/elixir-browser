@@ -806,10 +806,17 @@ defmodule Browser.JS.Builtins do
       len = length_of(this)
       target = species_target(this, len)
 
-      mapped =
-        for {i, v} <- pairs(this), into: %{}, do: {i, call(f, arg(args, 1), [v, float(i), this])}
+      mapped = for {i, v} <- pairs(this), do: {i, call(f, arg(args, 1), [v, float(i), this])}
 
-      species_fill(target, array_of(len, mapped), false)
+      # When the result can be dense and each index has a value, the values are in index
+      # order, so the list makes the tuple. A map of the values and a scan of the map cost
+      # more.
+      res =
+        if len <= Elems.max() and length(mapped) == len,
+          do: new_array(for({_, v} <- mapped, do: v)),
+          else: array_of(len, Map.new(mapped))
+
+      species_fill(target, res, false)
     end)
 
     array_fn(p, "filter", fn this, args ->
