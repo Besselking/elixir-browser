@@ -205,6 +205,12 @@ defmodule Browser.JS.Builtins do
   end
 
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
+  # The first three arguments by a match: a callback of an array method reads its
+  # argument for each element, and `Enum.at/3` costs several calls.
+  @compile {:inline, arg: 2}
+  defp arg([a | _], 0), do: a
+  defp arg([_, a | _], 1), do: a
+  defp arg([_, _, a | _], 2), do: a
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp float(n), do: n * 1.0
 
