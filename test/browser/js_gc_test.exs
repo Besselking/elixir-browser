@@ -2,6 +2,7 @@ defmodule Browser.JSGCTest do
   use ExUnit.Case, async: true
 
   alias Browser.JS.{Builtins, GC, Interp, Parser}
+  require Browser.JS.Elems, as: Elems
 
   # runs `src` in a fresh heap, collects, then runs the timers; returns {freed, heap size
   # before, heap size after, console}
@@ -134,6 +135,54 @@ defmodule Browser.JSGCTest do
       end)
       |> Task.await(30_000)
     end
+  end
+
+  # Step B2: a dense array keeps its elements in a tuple (`Browser.JS.Elems`). The collector
+  # and the dangling scan of check mode walk the tuple as any tuple, so each element stays
+  # alive, a frame that a closure in the tuple holds counts as a scope, and an element that
+  # a shrink of the length cuts off is freed.
+  test "walks the elements of a dense array, also in the dangling scan" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src, resolve: 4)
+        Interp.run_program(p)
+      end
+
+      run.(
+        "function mk(){ var c = { n: 1 }; return () => c } " <>
+          "var a = [mk(), { k: 2 }], drop = [1, { k: 3 }];"
+      )
+
+      global = fn name ->
+        {:ok, {:obj, id}} = Interp.lookup_scoped(Interp.global(), name)
+        id
+      end
+
+      aid = global.("a")
+      did = global.("drop")
+      assert Elems.dense?(Interp.deref(aid)) and Elems.dense?(Interp.deref(did))
+      {:obj, fid} = Interp.get({:obj, aid}, 0.0)
+      {:obj, oid} = Interp.get({:obj, aid}, 1.0)
+      {:obj, cut} = Interp.get({:obj, did}, 1.0)
+
+      run.("drop.length = 1")
+      assert Elems.dense?(Interp.deref(did))
+      GC.collect()
+      assert is_map(:erlang.get(fid)) and is_map(:erlang.get(oid))
+      assert :erlang.get(cut) == :undefined
+      assert Interp.call({:obj, fid}, :undefined, []) |> Interp.get("n") == 1.0
+
+      # A frame freed while the closure in the tuple still holds it: the scan finds it
+      # through the scope of the closure.
+      {:closure, %{scope: sid}} = Interp.deref(fid).fun
+      assert GC.dangling(nil) == []
+      :erlang.put(sid, {:js_freed, ~s("mk")})
+      assert GC.dangling(nil) == [~s("mk")]
+    end)
+    |> Task.await(30_000)
   end
 
   test "does nothing unless enabled" do
