@@ -118,6 +118,110 @@ defmodule Browser.Layout do
   focused form control and a `:caret` item at the given position of its text.
   """
   def layout(nodes, width, measure, view_height \\ 768, opts \\ []) do
+    {items, height, _memo} = layout_kept(nodes, width, measure, view_height, opts, nil)
+    {items, height}
+  end
+
+  @doc """
+  `layout/5` that starts from the sub-layouts `memo` kept of an earlier layout (nil for none)
+  and returns `{items, content_height, memo}`, the memo to give the next layout of the page.
+
+  The memo holds the layouts of atoms (floats, inline-blocks, flex items, cells, ...) and
+  their intrinsic widths, keyed by their content: an atom whose ops are the same as in the
+  last layout is not laid out again. It is valid for one set of inputs besides the tree (its
+  epoch: the window size, the measurer, the pictures known, ...) and is dropped when one of
+  them changes. After each layout it keeps only what that layout used.
+
+  `LAYOUT_MEMO=off` lays out from an empty memo every time; `LAYOUT_MEMO=check` lays out
+  afresh as well and raises when the two layouts differ.
+  """
+  def layout_kept(nodes, width, measure, view_height, opts, memo) do
+    epoch =
+      {width, view_height, measure, opts[:metrics], opts[:images], opts[:svg_defs], opts[:boxes],
+       opts[:margin]}
+
+    case System.get_env("LAYOUT_MEMO") do
+      "off" ->
+        run_layout(nodes, width, measure, view_height, opts, fresh_memo(epoch))
+
+      "check" ->
+        {items, height, memo} =
+          run_layout(nodes, width, measure, view_height, opts, kept(memo, epoch))
+
+        {fresh, fresh_height, _} =
+          run_layout(nodes, width, measure, view_height, opts, fresh_memo(epoch))
+
+        unless height == fresh_height and memo_norm(items) == memo_norm(fresh) do
+          diff =
+            Enum.zip(memo_norm(items), memo_norm(fresh)) |> Enum.find(fn {a, b} -> a != b end)
+
+          raise "layout check: the kept memo gives another layout: #{inspect(diff, limit: 30)} " <>
+                  "(#{length(items)} and #{length(fresh)} items, heights #{height} and #{fresh_height})"
+        end
+
+        {items, height, memo}
+
+      _ ->
+        run_layout(nodes, width, measure, view_height, opts, kept(memo, epoch))
+    end
+  end
+
+  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}}
+
+  defp kept(%{epoch: epoch} = memo, epoch), do: %{memo | gen: memo.gen + 1}
+  defp kept(_memo, epoch), do: fresh_memo(epoch)
+
+  # Items as two layouts of one tree can differ in nothing but the references and paint-order
+  # numbers each layout makes afresh: references are numbered in their order of first appearance
+  # and paint orders by their rank.
+  @doc false
+  def memo_norm(items) do
+    ranks =
+      items
+      |> Enum.flat_map(&List.wrap(Map.get(&1, :pz)))
+      |> Enum.uniq()
+      |> Enum.sort_by(&pz_key/1)
+      |> Enum.with_index()
+      |> Map.new()
+
+    {items, _} =
+      Enum.map_reduce(items, %{}, fn it, refs ->
+        it = if Map.has_key?(it, :pz), do: %{it | pz: ranks[it.pz]}, else: it
+        norm_refs(it, refs)
+      end)
+
+    items
+  end
+
+  defp norm_refs(ref, refs) when is_reference(ref) do
+    case refs do
+      %{^ref => n} -> {{:ref, n}, refs}
+      _ -> {{:ref, map_size(refs)}, Map.put(refs, ref, map_size(refs))}
+    end
+  end
+
+  defp norm_refs(map, refs) when is_map(map) and not is_struct(map) do
+    {kvs, refs} =
+      map
+      |> Enum.sort()
+      |> Enum.map_reduce(refs, fn {k, v}, refs ->
+        {v, refs} = norm_refs(v, refs)
+        {{k, v}, refs}
+      end)
+
+    {Map.new(kvs), refs}
+  end
+
+  defp norm_refs(list, refs) when is_list(list), do: Enum.map_reduce(list, refs, &norm_refs/2)
+
+  defp norm_refs(tuple, refs) when is_tuple(tuple) do
+    {list, refs} = tuple |> Tuple.to_list() |> norm_refs(refs)
+    {List.to_tuple(list), refs}
+  end
+
+  defp norm_refs(term, refs), do: {term, refs}
+
+  defp run_layout(nodes, width, measure, view_height, opts, memo) do
     measure = spaced(measure)
     # (a tab-size given as a length is turned into columns with the width of a space)
     Process.put(:layout_measure, measure)
@@ -179,7 +283,8 @@ defmodule Browser.Layout do
     # what percentage margins and padding refer to, as the walk goes down the tree
     margin = Keyword.get(opts, :margin, @margin)
     Process.put(:layout_cw, max(width - 2 * margin, 0))
-    Process.put(:layout_memo, %{})
+    Process.put(:layout_memo, memo.entries)
+    Process.put(:layout_gen, memo.gen)
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     {nodes, canvas} = propagate_background(nodes)
@@ -202,12 +307,18 @@ defmodule Browser.Layout do
     items = add_focus(items, measure, opts[:focus])
     items = if opts[:scrollers], do: items, else: Enum.reject(items, &(&1.type == :scroller))
 
+    # what this layout used is kept for the next one
+    gen = memo.gen
+    entries = :maps.filter(fn _key, {g, _sub, _value} -> g == gen end, Process.get(:layout_memo))
+    Process.delete(:layout_memo)
+    memo = %{memo | entries: entries}
+
     case canvas do
       nil ->
-        {items, height}
+        {items, height, memo}
 
       canvas ->
-        {[canvas_item(canvas, width, height, view_height, opts[:images]) | items], height}
+        {[canvas_item(canvas, width, height, view_height, opts[:images]) | items], height, memo}
     end
   end
 
@@ -6136,7 +6247,7 @@ defmodule Browser.Layout do
   # natural width of the content when wrapped at `width`: lines are measured
   # left-aligned, since centring inside the available width would inflate it
   defp shrink_extent(st, sub, width, key) do
-    memo({:extent, key || :erlang.phash2(sub), width}, fn ->
+    memo({:extent, key || :erlang.phash2(sub), width}, sub, fn ->
       # a percentage width depends on the very width being measured: it counts as auto
       outer = Process.put(:layout_intrinsic, true)
       sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
@@ -6150,7 +6261,7 @@ defmodule Browser.Layout do
   # it is as wide as its widest word plus the insets around it. Anything else (boxes, images,
   # floats, inline boxes, preformatted words) is laid out at width 1.
   defp min_extent(st, sub, key, right_margin \\ 0) do
-    memo({:min_extent, key || :erlang.phash2(sub)}, fn ->
+    memo({:min_extent, key || :erlang.phash2(sub)}, sub, fn ->
       case min_words(sub, st.measure, 0, 0, [], 0) do
         :layout -> shrink_extent(st, sub, 1, key) + right_margin
         ext -> ext
@@ -6203,26 +6314,42 @@ defmodule Browser.Layout do
   defp trim_hang(text), do: String.trim_trailing(text, "\u3000")
 
   # Nested tables measure and lay out the same cell content again and again (and every level
-  # multiplies the passes), so results are remembered for the duration of one layout. The key
-  # is a hash of the content, so a collision is possible in principle but not worth guarding.
-  # (no containing width in the key: the content carries what was resolved against it)
-  defp memo(key, fun) do
+  # multiplies the passes), so results are remembered: within one layout, and from one layout to
+  # the next (`layout_kept/6`). The key holds a hash of the content `sub`; within one layout a
+  # collision is possible in principle but not worth guarding, and what an earlier layout left
+  # is only taken when its content is the same as a whole. (No containing width in the key: the
+  # content carries what was resolved against it.)
+  defp memo(key, sub, fun) do
     case Process.get(:layout_memo) do
       nil ->
         fun.()
 
       cache ->
+        gen = Process.get(:layout_gen)
+
         case cache do
-          %{^key => value} ->
+          %{^key => {^gen, _sub, value}} ->
+            value
+
+          %{^key => {_gen, old, value}} when old === sub ->
+            # (positioned boxes in it are painted in their order after what this layout placed
+            # before them, as a fresh layout would)
+            value = renumber_memo(value)
+            Process.put(:layout_memo, Map.put(cache, key, {gen, sub, value}))
             value
 
           _ ->
             value = fun.()
-            Process.put(:layout_memo, Map.put(Process.get(:layout_memo), key, value))
+            Process.put(:layout_memo, Map.put(Process.get(:layout_memo), key, {gen, sub, value}))
             value
         end
     end
   end
+
+  defp renumber_memo({items, height, baseline}) when is_list(items),
+    do: {renumber_pz(items), height, baseline}
+
+  defp renumber_memo(value), do: value
 
   defp layout_sub(st, sub, width) do
     sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
@@ -6240,6 +6367,7 @@ defmodule Browser.Layout do
     memo(
       {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
        Process.get(:layout_boxes, false)},
+      sub,
       fn ->
         # (the height of the box a float or inline-block sits in is what its own percentage
         # heights refer to)

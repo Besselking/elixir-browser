@@ -262,19 +262,31 @@ defmodule Browser.Reftest do
       {:ok, pictures} ->
         images = Map.new(pictures, fn {url, p} -> {url, {:ok, p.w, p.h}} end)
 
-        {items, height} =
-          Layout.layout(page.nodes, @width, &measure/2, @view_height,
-            images: images,
-            margin: 0,
-            svg_defs: page.svg_defs
-          )
-
+        opts = [images: images, margin: 0, svg_defs: page.svg_defs]
+        {items, height} = layout(page.nodes, opts, System.get_env("LAYOUT_MEMO"))
         {:ok, {items, height, pictures}}
 
       {:error, why} ->
         {:skip, why}
     end
   end
+
+  # With `LAYOUT_MEMO=check` every page is laid out with the memo the page before it in this
+  # process left, then again with its own (see `Browser.Layout.layout_kept/6`): each of the two
+  # raises when it differs from a fresh layout.
+  defp layout(nodes, opts, "check") do
+    memo = Process.get(:reftest_memo)
+    {_, _, memo} = Layout.layout_kept(nodes, @width, &measure/2, @view_height, opts, memo)
+
+    {items, height, memo} =
+      Layout.layout_kept(nodes, @width, &measure/2, @view_height, opts, memo)
+
+    Process.put(:reftest_memo, memo)
+    {items, height}
+  end
+
+  defp layout(nodes, opts, _memo),
+    do: Layout.layout(nodes, @width, &measure/2, @view_height, opts)
 
   # The pictures a page uses, decoded: `%{url => picture}`. A picture that is not a PNG file on
   # disk cannot be painted, so a page that needs one is skipped.

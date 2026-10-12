@@ -19,6 +19,7 @@ defmodule Browser.Session do
     Images,
     Interact,
     Layout,
+    LayoutWorker,
     Page,
     Scrollbars,
     Scrollers,
@@ -44,12 +45,15 @@ defmodule Browser.Session do
     Process.put(:layout_serve, &__MODULE__.serve_layout/1)
     ui = UI.build()
     cache = UI.new_measure_cache()
+    # the same widths for a layout running in the background, which needs a DC of its own
+    measure_bg = UI.measurer(ui, cache)
 
     state = %{
       ui: ui,
       measure: UI.measurer(ui, cache),
-      # the same widths for a layout running in the background, which needs a DC of its own
-      measure_bg: UI.measurer(ui, cache),
+      measure_bg: measure_bg,
+      # the process that lays the pages out and keeps what a layout leaves for the next
+      layout_worker: LayoutWorker.start(measure_bg, :wx.get_env()),
       # `ex` and `ch` read from the fonts, for the cascade
       font_units: UI.font_units(cache),
       # a layout running in the background after a resize: {ref, pid}
@@ -2333,6 +2337,8 @@ defmodule Browser.Session do
     view_h = UI.client_height(state.ui)
     measure = state.measure_bg
     images = state.images
+    worker = state.layout_worker
+    tid = state.tid
     me = self()
 
     spawn(fn ->
@@ -2343,10 +2349,10 @@ defmodule Browser.Session do
       send(me, {:style_state, Page.style_state(page)})
 
       {items, height} =
-        Layout.layout(page.nodes, width, measure, view_h,
+        LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
           scrollers: true,
           boxes: true,
-          metrics: &measure.(:content_height, &1),
+          metrics: true,
           images: images,
           svg_defs: page.svg_defs
         )
@@ -2388,6 +2394,8 @@ defmodule Browser.Session do
     images = state.images
     measure = state.measure_bg
     boxes = state.js != nil
+    worker = state.layout_worker
+    tid = state.tid
 
     pid =
       :erlang.spawn_opt(
@@ -2396,10 +2404,10 @@ defmodule Browser.Session do
           page = Page.from_raw(base, raw, env)
 
           {items, height} =
-            Layout.layout(page.nodes, width, measure, view_h,
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
               scrollers: true,
               boxes: boxes,
-              metrics: &measure.(:content_height, &1),
+              metrics: true,
               images: images,
               svg_defs: page.svg_defs
             )
@@ -2591,10 +2599,16 @@ defmodule Browser.Session do
     width = max(UI.client_width(state.ui), 200)
 
     {items, height} =
-      Layout.layout(state.nodes, width, state.measure, UI.client_height(state.ui),
+      LayoutWorker.layout(
+        state.layout_worker,
+        state.tid,
+        state.nodes,
+        width,
+        state.measure,
+        UI.client_height(state.ui),
         scrollers: true,
         boxes: state.js != nil,
-        metrics: &state.measure.(:content_height, &1),
+        metrics: true,
         focus: focus_option(state),
         images: state.images,
         svg_defs: if(state.page, do: state.page.svg_defs, else: %{})
@@ -2616,6 +2630,8 @@ defmodule Browser.Session do
     images = state.images
     measure = state.measure_bg
     boxes = state.js != nil
+    worker = state.layout_worker
+    tid = state.tid
 
     # a layout allocates a lot: a big initial heap saves it growing the heap by many collections
     pid =
@@ -2625,10 +2641,10 @@ defmodule Browser.Session do
           page = Page.restyle(base, env)
 
           {items, height} =
-            Layout.layout(page.nodes, width, measure, view_h,
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
               scrollers: true,
               boxes: boxes,
-              metrics: &measure.(:content_height, &1),
+              metrics: true,
               focus: focus,
               images: images,
               svg_defs: page.svg_defs
@@ -3572,6 +3588,7 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) when i == state.active do
+    LayoutWorker.drop(state.layout_worker, state.tid)
     state = remember_closed(state, i, state)
     state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
     UI.hide_suggestions(state.ui)
@@ -3582,6 +3599,7 @@ defmodule Browser.Session do
 
   defp close_tab(state, i) do
     tab = Enum.at(state.tabs, i)
+    LayoutWorker.drop(state.layout_worker, tab[:tid])
     state = remember_closed(state, i, tab)
 
     case tab do
