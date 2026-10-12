@@ -14,7 +14,9 @@ defmodule Browser.JS.ShapesTest do
   # record holds the same properties as a dictionary record, and it makes no object. The
   # comparison runs one more time with a forced collection before each top-level
   # statement, so that a shape, the transition table or a counter that the collector reads
-  # as a heap id shows up as a different heap count.
+  # as a heap id shows up as a different heap count. For this, the shape ids start past the
+  # ids of the built-in objects, which are always live: a shape id is then the id of an
+  # object that the program makes, which can be garbage.
   #
   # The other tests look at the records: which ones are fast, the change to dictionary
   # mode at the limits, and the form of each fast record.
@@ -28,9 +30,17 @@ defmodule Browser.JS.ShapesTest do
 
   @programs Corpus.programs(__DIR__)
 
-  defp shapes(on?), do: fn -> Process.put(:js_shapes, on?) end
+  # The first shape id of the oracle runs: past the ids of the built-in objects.
+  @first_sid 700
 
-  # The keys of the transition table, and the process keys of `Browser.JS.Shape`.
+  defp shapes(on?) do
+    fn ->
+      Process.put(:js_shapes, on?)
+      Process.put(:js_shape_next, @first_sid)
+    end
+  end
+
+  # The ids of the shapes that have an entry in the transition table.
   defp table_sids, do: for({{:jst, sid}, _} <- :erlang.get(), do: sid)
 
   # The records of the heap of the process: `{id, record}` for each heap object.
@@ -88,6 +98,9 @@ defmodule Browser.JS.ShapesTest do
     end
 
     test "the same with a forced collection before each top-level statement" do
+      # (the shape ids of the runs must be ids of objects that a program makes)
+      assert inspect_run("", fn -> :erlang.get(:js_next) end) < @first_sid
+
       HeapOracle.assert_same(
         HeapOracle.both(@programs, shapes(false), shapes(true), ids: true, gc: true),
         "with the fast records on and forced collections"
@@ -182,6 +195,8 @@ defmodule Browser.JS.ShapesTest do
       var few = {a: 1};
       for (var i = 0; i < 8; i++) Object.defineProperty(few, 'a', {enumerable: i % 2 == 1});
       var one = {a: 1};
+      var absent = {a: 1}; delete absent.nope;
+      var twice = {a: 1, b: 2, a: 3};
       function L(){ for (var j = 0; j < 128; j++) this['k' + j] = j }
       for (var i = 0; i < 20; i++) var limit = new L();
       var many = new L(); many.k128 = 1;
@@ -189,7 +204,7 @@ defmodule Browser.JS.ShapesTest do
 
       modes =
         inspect_run(src, fn ->
-          for n <- ~w(last mid many limit index reconf few one),
+          for n <- ~w(last mid many limit index reconf few one absent twice),
               into: %{},
               do: {n, Obj.fast?(global_record(n))}
         end)
@@ -202,7 +217,9 @@ defmodule Browser.JS.ShapesTest do
                "index" => false,
                "reconf" => false,
                "few" => true,
-               "one" => true
+               "one" => true,
+               "absent" => true,
+               "twice" => true
              }
 
       # (a delete of the last key goes back to the shape of the record before the add)
@@ -212,6 +229,28 @@ defmodule Browser.JS.ShapesTest do
         end)
 
       assert same
+    end
+
+    test "a shape other than the root has at most 64 children; the root has no limit" do
+      src = ~S"""
+      var kids = [], roots = [];
+      for (var i = 0; i < 65; i++) { var o = {p: 1}; o['c' + i] = i; kids.push(o) }
+      for (var i = 0; i < 100; i++) { var o = {}; o['r' + i] = i; roots.push(o) }
+      """
+
+      result =
+        inspect_run(src, fn ->
+          fast = fn name ->
+            {:obj, id} = Map.fetch!(Interp.deref(Interp.global()).vars, name)
+
+            for {_, v} <- Enum.sort(Interp.deref(id).items),
+                do: Obj.fast?(Interp.deref(elem(v, 1)))
+          end
+
+          {fast.("kids"), fast.("roots")}
+        end)
+
+      assert result == {List.duplicate(true, 64) ++ [false], List.duplicate(true, 100)}
     end
 
     test "a chain that makes too many new shapes in a row goes to dictionary mode once" do
@@ -243,11 +282,32 @@ defmodule Browser.JS.ShapesTest do
       assert HeapOracle.in_process(fn -> Shape.from_keys(keys ++ ["q128"]) end) == nil
     end
 
+    test "two changes of attributes at two positions give two shapes" do
+      src = ~S"""
+      var a = {x: 1, y: 2}; Object.defineProperty(a, 'x', {enumerable: false});
+      var b = {x: 1, y: 2}; Object.defineProperty(b, 'y', {enumerable: false});
+      var c = Object.preventExtensions({x: 1});
+      Object.defineProperty(c, 'x', {enumerable: false});
+      """
+
+      result =
+        inspect_run(src, fn ->
+          {a, b, c} = {global_record("a"), global_record("b"), global_record("c")}
+
+          {a.shape != b.shape, Obj.enum_names(a), Obj.enum_names(b), Obj.fast?(c),
+           Obj.extensible?(c)}
+        end)
+
+      assert result == {true, ["y"], ["x"], true, false}
+    end
+
     test "the table is erased past its budget, and an erase does not walk the heap" do
       # (each object gets a new first key, so each one makes a new child of the root)
       src = ~S"""
       var keep = [];
-      for (var i = 0; i < 40000; i++) { var o = {}; o['k' + i] = i; if (i % 1000 == 0) keep.push(o) }
+      for (var i = 0; i < 40000; i++) {
+        var o = {}; o['k' + i] = i; if (i % 1000 == 0) keep.push(o)
+      }
       """
 
       {sids, used, {first, old}, last_ok} =
@@ -325,6 +385,21 @@ defmodule Browser.JS.ShapesTest do
           Process.put(:js_shape_since, {dead, [dead]})
           Browser.JS.GC.collect()
           {:erlang.get(dead) == :undefined, :erlang.get(keep) != :undefined}
+        end)
+
+      assert result == {true, true}
+
+      # (a live fast record whose shape has the id of a dead object must not keep it alive:
+      # the collector does not walk the shape)
+      result =
+        inspect_run("var keep = {a: 1};", fn ->
+          {:obj, dead} = Interp.new_object([{"x", 1}], nil)
+          Process.put(:js_shape_next, dead)
+          {:ok, program} = Parser.parse("keep.only_here = 2;", resolve: 4)
+          Interp.run_program(program, true)
+          sid = elem(global_record("keep").shape, 1)
+          Browser.JS.GC.collect()
+          {sid == dead, :erlang.get(dead) == :undefined}
         end)
 
       assert result == {true, true}

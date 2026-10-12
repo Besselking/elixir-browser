@@ -35,6 +35,7 @@ defmodule Browser.JS.ObjTest.Api do
   def own_remove(o, k), do: Obj.own_remove(o, k)
   def prevent(o), do: Obj.prevent(o)
   def fill(o, layout, pairs), do: Obj.fill(o, layout, pairs)
+  def attr_flags(o, k), do: Obj.attr_flags(o, k)
 end
 
 defmodule Browser.JS.ObjTest do
@@ -156,6 +157,10 @@ defmodule Browser.JS.ObjTest do
         assert Obj.string_keys(o) == ["b", "a"]
         assert Obj.symbol_keys(o) == []
         assert Obj.normal(Obj.record(class: :object, proto: nil)) == Obj.normal(plain(@mode, []))
+
+        # (the normal form tells an object that is not extensible, and the symbols)
+        refute Obj.normal(o) == Obj.normal(Api.prevent(o))
+        refute Obj.normal(o) == Obj.normal(Api.own_add_assigned(o, {:symbol, 1, "s"}, 1))
       end
 
       test "own_case matches an own value, an accessor and a missing key" do
@@ -271,6 +276,7 @@ defmodule Browser.JS.ObjTest do
         refute Api.default_attrs?(o, "h")
         assert Api.own_state(o, "b") == {:data, 3, true, true, true}
         assert Api.default_attrs?(o, "b")
+        refute o |> Obj.own_add("nc", 4, %{c: false, w: true}, true) |> Api.default_attrs?("nc")
         assert Api.enum_names(o) == ["a", "b"]
         assert Obj.string_keys(o) == ["a", "h", "b"]
 
@@ -311,6 +317,36 @@ defmodule Browser.JS.ObjTest do
         # (a key that the record does not hold yet, as the `name` of a function, goes to the end)
         o = Obj.own_redefine(o, "name", "f", %{c: true, w: false}, false)
         assert Obj.string_keys(o) == ["a", "0", "h", "b", "name"]
+
+        # (put_with_attrs/4 on an existing key keeps its enumerability; the record has no
+        # index-like key, so that it stays fast in the fast mode)
+        o =
+          plain(@mode, [{"a", 1}, {"b", 2}])
+          |> Api.put_hidden("h", 3)
+          |> Obj.own_redefine("name", "f", %{c: true, w: false}, false)
+
+        assert Obj.fast?(o) == (@mode == :fast)
+
+        assert o |> Api.put_with_attrs("h", 6, %{w: false, c: true}) |> Api.own_state("h") ==
+                 {:data, 6, false, false, true}
+
+        assert o |> Api.put_with_attrs("b", 7, %{w: false, c: true}) |> Api.own_state("b") ==
+                 {:data, 7, false, true, true}
+
+        # (reopen/3, as a sloppy `eval` makes a global function, makes the key a default
+        # data property in its place)
+        r = Obj.reopen(o, "name", "g")
+        assert Api.own_state(r, "name") == {:data, "g", true, true, true}
+        assert Api.enum_names(r) == ["a", "b", "name"]
+        assert Obj.string_keys(r) == ["a", "b", "h", "name"]
+
+        # (a hidden symbol does not stop the plain names, also after a change of attributes)
+        p =
+          plain(@mode, [{"a", 1}])
+          |> Api.put_hidden({:symbol, 1, "s"}, 2)
+          |> Api.put_attrs("a", %{w: false, c: true})
+
+        assert Api.plain_names(p) == ["a"]
       end
 
       test "a key that is deleted and made again goes to the end" do
@@ -343,6 +379,18 @@ defmodule Browser.JS.ObjTest do
 
         refute Api.has_own?(Api.own_remove(o, "a"), "a")
         assert Obj.string_keys(Api.own_remove(o, "a")) == ["b", "h"]
+
+        # (the attributes of a deleted key go: a key that was read-only and is made again by
+        # an assignment has the default attributes. "a" is not the last key, so a fast
+        # record goes to dictionary mode)
+        r =
+          plain(@mode, [{"a", 1}, {"b", 2}])
+          |> Api.put_attrs("a", %{w: false, c: true})
+          |> Api.own_delete("a")
+          |> Api.own_add_assigned("a", 5)
+
+        assert Api.own_state(r, "a") == {:data, 5, true, true, true}
+        assert Api.writable?(r, "a") and Api.default_attrs?(r, "a")
       end
 
       test "built-in attributes, freeze and seal" do
@@ -382,6 +430,22 @@ defmodule Browser.JS.ObjTest do
 
         assert Api.own_state(Api.put_attrs(s, sym, %{w: false, c: true}), sym) ==
                  {:data, 1, false, true, true}
+
+        # (an accessor becomes not configurable; a private name keeps its attributes)
+        priv = {:private, make_ref()}
+
+        a =
+          o
+          |> Obj.own_add("g", {:accessor, :get, :undefined}, %{c: true, w: true}, true)
+          |> Api.own_put_value(priv, 2)
+
+        frozen = Obj.lock(a, true)
+        assert Api.own_state(frozen, "g") == {:accessor, :get, :undefined, true, false}
+        assert Api.own_state(frozen, priv) == {:data, 2, true, false, true}
+        assert Obj.locked?(frozen, true)
+
+        assert Api.own_state(Obj.lock(a, false), "g") ==
+                 {:accessor, :get, :undefined, true, false}
       end
 
       test "a literal fills an empty record in one write, as define_data/3 one key at a time" do
@@ -396,6 +460,7 @@ defmodule Browser.JS.ObjTest do
 
         assert Obj.normal(o) == Obj.normal(one_by_one)
         assert Api.enum_names(o) == ["a", "b"]
+        assert Obj.fast?(o) == (@mode == :fast)
 
         assert Api.own_value(o, "a") == 3
 
@@ -411,6 +476,55 @@ defmodule Browser.JS.ObjTest do
         assert Obj.string_keys(o) == ["a", "0"]
       end
     end
+  end
+
+  test "to_dict/1 gives the record that the writers make for a dictionary record" do
+    sym = {:symbol, 1, "s"}
+    hid = {:symbol, 2, "h"}
+    priv = {:private, make_ref()}
+
+    make = fn mode ->
+      plain(mode, [{"a", 1}, {"b", 2}])
+      |> Api.own_add_assigned(sym, 3)
+      |> Api.put_hidden(hid, 4)
+      |> Obj.own_add("ro", 5, %{c: true, w: false}, true)
+      |> Obj.own_add("nc", 6, %{c: false, w: true}, true)
+      |> Api.put_hidden("hid", 7)
+      |> Obj.own_add("g", {:accessor, :get, :undefined}, %{c: true, w: true}, true)
+      |> Api.own_put_value(priv, 8)
+    end
+
+    # (the first record makes nine new shapes in a row, so it goes to dictionary mode at
+    # the last key; the second record finds the chain in the table)
+    refute Obj.fast?(make.(:fast))
+    o = make.(:fast)
+    assert Obj.fast?(o)
+    d = Obj.to_dict(o)
+    refute Obj.fast?(d)
+    assert Obj.normal(d) == Obj.normal(o)
+    assert d == make.(:dict)
+    assert Obj.to_dict(Api.prevent(o)) == Api.prevent(make.(:dict))
+    assert Obj.to_dict(d) == d
+
+    # (the usual record: string keys with the default attributes)
+    u = plain(:fast, [{"a", 1}, {"b", 2}])
+    assert Obj.to_dict(u) == plain(:dict, [{"a", 1}, {"b", 2}])
+    assert Obj.to_dict(plain(:fast, [])) == plain(:dict, [])
+  end
+
+  test "a fast record with a key two times in its pairs gets the last value" do
+    o = plain(:fast, [{"a", 1}, {"b", 2}, {"a", 3}])
+    assert Api.own_value(o, "a") == 3 and Api.enum_names(o) == ["a", "b"]
+  end
+
+  test "attr_flags/2 gives the attributes of a key of a fast record" do
+    o =
+      plain(:fast, [{"a", 1}, {"b", 2}])
+      |> Obj.own_redefine("a", 1, %{c: true, w: false}, false)
+
+    assert Api.attr_flags(o, "a") == %{w: false, c: true, e: false}
+    assert Api.attr_flags(o, "b") == %{w: true, c: true, e: true}
+    assert Api.attr_flags(o, "zz") == %{}
   end
 
   test "element attributes and the stop of a shrink" do
