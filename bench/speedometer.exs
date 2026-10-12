@@ -492,12 +492,27 @@ if System.get_env("TPROF") do
   end)
 end
 
+# PDSTAT=1 prints the process dictionary of the script process. A heap object is a key
+# that is an integer of 0 or more. A negative integer key is the cell of an inline cache
+# (step A2, the moduledoc of `Browser.JS.Shape`), so it has a line of its own: the number
+# of cells, their words (the value plus 3 words for each entry), and the number of sites
+# that the compiler gave.
 if System.get_env("PDSTAT") do
   {:dictionary, pd} = Process.info(pid, :dictionary)
-  ints = Enum.filter(pd, fn {k, _} -> is_integer(k) end)
-  IO.puts("pd entries #{length(pd)}, integer keys #{length(ints)}")
+  ints = Enum.filter(pd, fn {k, _} -> is_integer(k) and k >= 0 end)
+  cells = Enum.filter(pd, fn {k, _} -> is_integer(k) and k < 0 end)
+  IO.puts("pd entries #{length(pd)}, heap objects #{length(ints)}")
   words = Enum.reduce(pd, 0, fn {_, v}, acc -> acc + :erts_debug.flat_size(v) end)
   IO.puts("pd flat words #{words} (#{div(words * 8, 1_000_000)} MB)")
+  cell_words = Enum.reduce(cells, 0, fn {_, v}, acc -> acc + :erts_debug.flat_size(v) + 3 end)
+
+  sites =
+    case Enum.find_value(pd, fn {k, v} -> k == :js_ic_next && v end) do
+      nil -> 0
+      next -> -next - 1
+    end
+
+  IO.puts("ic cells #{length(cells)}, words #{cell_words}, sites #{sites}")
 
   pd
   |> Enum.map(fn {k, v} -> {k, :erts_debug.flat_size(v)} end)
@@ -550,18 +565,22 @@ IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")
 # JSC=1 prints the code cache of the closure compiler (step 5) in the script process: the
 # number of entries, the count of nodes against the budget, the number of times the
 # budget erased the cache, and the size of the code in words now (after an erase, this is
-# less than the count). The copy of the process dictionary is large, so the option is off
-# by default.
+# less than the count). The count of the budget includes one node for each site of an
+# inline cache (step A2), and the cells belong to the cache, so the line also gives the
+# number of cells and their words (the value plus 3 words for each entry). The copy of the
+# process dictionary is large, so the option is off by default.
 if System.get_env("JSC") do
   case Process.info(pid, :dictionary) do
     {:dictionary, dict} ->
       codes = for {{:jsc, _}, code} <- dict, do: code
+      cells = for {k, cell} <- dict, is_integer(k) and k < 0, do: cell
+      cell_words = Enum.reduce(cells, 0, &(:erts_debug.flat_size(&1) + 3 + &2))
 
       {counted, erases} =
         Enum.find_value(dict, {0, 0}, fn {k, v} -> k == :jsc_budget && v end)
 
       IO.puts(
-        "JSC entries #{length(codes)} counted #{counted} erases #{erases} words #{:erts_debug.size(codes)}"
+        "JSC entries #{length(codes)} counted #{counted} erases #{erases} words #{:erts_debug.size(codes)} cells #{length(cells)} cell words #{cell_words}"
       )
 
     _ ->
