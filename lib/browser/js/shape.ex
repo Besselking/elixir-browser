@@ -78,9 +78,9 @@ defmodule Browser.JS.Shape do
   ## The switch
 
   The process key `:js_shapes` set to `false` turns fast records off: every record is then
-  a dictionary record. The functions that make a record read it (`on?/0`). No read of a
-  property reads it. The oracle of `test/browser/js_shapes_test.exs` runs each program with
-  the switch off and on, and compares the two runs.
+  a dictionary record. The macros of `Browser.JS.Obj` that make a record read it (`on?/0`).
+  No read of a property reads it. The oracle of `test/browser/js_shapes_test.exs` runs each
+  program with the switch off and on, and compares the two runs.
   """
 
   import Bitwise

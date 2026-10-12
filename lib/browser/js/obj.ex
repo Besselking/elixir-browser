@@ -155,6 +155,11 @@ defmodule Browser.JS.Obj do
   # symbol.
   @root Shape.root_shape()
 
+  # The test of the switch `:js_shapes` (`Browser.JS.Shape.on?/0`), expanded here, so that
+  # the macros that make a record put it in the code of the caller, which does not require
+  # `Browser.JS.Shape`.
+  @on Macro.expand_once(quote(do: Shape.on?()), __ENV__)
+
   # The new tuple `vals` with the value `v` at the position `pos`, as an expression that
   # the write macros put in their code. `:erlang.setelement/3` is a call of a built-in
   # function, and each call costs one reduction. For a tuple of at most 8 values, the
@@ -223,7 +228,7 @@ defmodule Browser.JS.Obj do
   """
   defmacro plain_record(fields) do
     quote do
-      if :erlang.get(:js_shapes) != false,
+      if unquote(@on),
         do: %{unquote_splicing(fields), shape: unquote(Macro.escape(@root)), vals: {}},
         else: %{unquote_splicing(fields), props: %{}, keys: []}
     end
@@ -235,7 +240,7 @@ defmodule Browser.JS.Obj do
   """
   defmacro plain_record(fields, pairs) do
     quote do
-      if :erlang.get(:js_shapes) != false,
+      if unquote(@on),
         do:
           Browser.JS.Obj.add_pairs(
             %{unquote_splicing(fields), shape: unquote(Macro.escape(@root)), vals: {}},
