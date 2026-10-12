@@ -86,8 +86,12 @@ defmodule Browser.JS.AwaitsTest do
     me = self()
     tracer = spawn_link(fn -> trace_loop([]) end)
 
+    # A pattern on a module that is not loaded yet matches nothing, and the module that
+    # the first call loads has no pattern. Thus a test that runs first sees no calls.
+    for {mod, _, _} <- mfas, do: Code.ensure_loaded!(mod)
+
     for mfa <- mfas,
-        do: :erlang.trace_pattern(mfa, [{:_, [], [{:exception_trace}]}], [:local])
+        do: 1 = :erlang.trace_pattern(mfa, [{:_, [], [{:exception_trace}]}], [:local])
 
     :erlang.trace(me, true, [:call, {:tracer, tracer}])
 
