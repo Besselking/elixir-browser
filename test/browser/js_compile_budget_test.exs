@@ -126,6 +126,12 @@ defmodule Browser.JS.CompileBudgetTest do
     assert {nil, nil} in codes
   end
 
+  test "each site of an inline cache counts one node" do
+    {_, {named, _}, _} = run("function f(o){ return o.a + o.b + o.c } f({a: 1, b: 2, c: 3})")
+    {_, {index, _}, _} = run("function f(o){ return o['0'] + o['1'] + o['2'] } f([1, 2, 3])")
+    assert named - index == 3
+  end
+
   # Runs `src` in a fresh heap. Gives the value, the count of the cache and the number of
   # entries of the cache.
   defp run(src, budget \\ nil) do

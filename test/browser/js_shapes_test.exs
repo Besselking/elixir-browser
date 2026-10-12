@@ -478,6 +478,16 @@ defmodule Browser.JS.ShapesTest do
       assert Enum.all?(off, &(&1.after == []))
     end
 
+    test "a site goes to :mega at its 17th miss, not before" do
+      src = fn n ->
+        "function rd(o){ return o.v } var objs = []; for (var i = 0; i < #{n}; i++) { var o = {}; o['k' + i] = i; o.v = i; objs.push(o) } for (var i = 0; i < #{n}; i++) rd(objs[i]);"
+      end
+
+      at = fn n -> with_compile(true, fn -> inspect_run(src.(n), fn -> cells() end) end) end
+      assert [{_, _, 16}] = at.(16)
+      assert at.(17) == [:mega]
+    end
+
     test "a cell is not a root, it does not keep its prototype alive, and a sweep keeps it" do
       src = ~S"""
       function mk(tag){ var p = {m: tag}; var o = Object.create(p); o.x = 1; return o }

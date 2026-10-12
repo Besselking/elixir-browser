@@ -128,6 +128,15 @@ defmodule Browser.JS.FastTest do
         assert Enum.all?(off, &(&1 == %{}))
       end
 
+      test "with :ic off no site writes a cell" do
+        rows = for {"dm ic" <> _, _, _} = row <- Browser.JS.DatamodelCorpus.rows(), do: row
+        cells = fn -> for({k, c} <- :erlang.get(), is_integer(k) and k < 0, do: c) end
+        on = for a <- HeapOracle.run_all(rows, off([]), after: cells), do: a.after
+        off = for a <- HeapOracle.run_all(rows, off([:ic]), after: cells), do: a.after
+        assert Enum.any?(on, &(&1 != []))
+        assert Enum.all?(off, &(&1 == []))
+      end
+
       test "a wrong name does not compile" do
         assert_raise ArgumentError, "unknown fast path :literall", fn ->
           Code.eval_string("require Browser.JS.Fast; Browser.JS.Fast.on?(:literall)")
