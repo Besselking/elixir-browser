@@ -542,4 +542,56 @@ defmodule Browser.FormsTest do
                Forms.render(nodes, state, controls)
     end
   end
+
+  describe "rendering keeps what did not change" do
+    defp page_nodes do
+      html = """
+      <div><p>one</p><input name=a value=x><p>two</p></div>
+      <details><summary>More</summary><p>t</p></details>
+      <section><p>three</p><input name=b></section>
+      """
+
+      html |> HTML.parse() |> Forms.index()
+    end
+
+    test "a subtree without a changed control is the same term as before" do
+      {nodes, %{controls: controls}} = page_nodes()
+      first = Forms.render(nodes, %{}, controls)
+      [div, details, section] = Enum.filter(first, &match?({:element, _, _, _}, &1))
+
+      [a | _] = controls |> Map.keys() |> Enum.sort()
+      again = Forms.render(nodes, %{a => %{value: "xy"}}, controls, first)
+      [div2, details2, section2] = Enum.filter(again, &match?({:element, _, _, _}, &1))
+
+      assert div2 != div
+      assert [{:text, "xy"}] = find([div2], "input")
+      assert :erts_debug.same(details2, details)
+      assert :erts_debug.same(section2, section)
+      # the paragraphs beside the changed field too
+      {:element, _, _, [p1 | _]} = div
+      {:element, _, _, [p2 | _]} = div2
+      assert :erts_debug.same(p1, p2)
+    end
+
+    test "the same state gives the same tree, and the pristine nodes where nothing changed" do
+      {nodes, %{controls: controls}} = page_nodes()
+      first = Forms.render(nodes, %{}, controls)
+      assert :erts_debug.same(Forms.render(nodes, %{}, controls, first), first)
+
+      plain = HTML.parse("<p>no controls</p>")
+      assert :erts_debug.same(Forms.render(plain, %{}, %{}), plain)
+    end
+
+    test "a details closed again gives the summary alone, then the same term" do
+      {nodes, %{controls: controls}} = page_nodes()
+      first = Forms.render(nodes, %{}, controls)
+      cid = Enum.find(Map.keys(controls), &(controls[&1].tag == "summary"))
+      state = Forms.toggle(%{}, controls, cid)
+      opened = Forms.render(nodes, state, controls, first)
+      {:element, "details", _, kids} = Enum.find(opened, &match?({:element, "details", _, _}, &1))
+      assert length(kids) == 2
+      closed = Forms.render(nodes, %{}, controls, opened)
+      assert closed == first
+    end
+  end
 end

@@ -499,7 +499,8 @@ defmodule Browser.Page do
   so this is what typing, toggling and choosing call.
   """
   def render(%__MODULE__{} = page, form_state) do
-    nodes = Forms.render(page.pruned, form_state, page.forms.controls)
+    # (the tree of the last render: the subtrees the change left alone are given back as they were)
+    nodes = Forms.render(page.pruned, form_state, page.forms.controls, page.nodes)
     %{page | form_state: form_state, nodes: nodes, ver: make_ref()}
   end
 
