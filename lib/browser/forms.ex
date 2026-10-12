@@ -223,8 +223,13 @@ defmodule Browser.Forms do
   when its rendering is the node itself.
   """
   def render(nodes, state, controls, prevs \\ nil) do
-    prevs = if is_list(prevs) and length(prevs) == length(nodes), do: prevs
+    prevs = paired(nodes, prevs)
     the_list(render_list(nodes, state, controls, prevs), nodes, prevs)
+  end
+
+  # the last render's nodes, when they can be paired with `nodes` by their place
+  defp paired(nodes, prevs) do
+    if is_list(prevs) and length(prevs) == length(nodes), do: prevs
   end
 
   # A rendering is `:prev` (the same as the node of the last render), `:same` (the same as the
@@ -325,7 +330,7 @@ defmodule Browser.Forms do
   end
 
   defp render_node({:element, tag, attrs, kids}, state, controls, prev) do
-    pkids = with {:element, ^tag, _, pkids} <- prev, do: pkids, else: (_ -> nil)
+    pkids = with {:element, ^tag, _, pkids} <- prev, do: paired(kids, pkids), else: (_ -> nil)
 
     case render_list(kids, state, controls, pkids) do
       :same ->

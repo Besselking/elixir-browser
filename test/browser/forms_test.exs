@@ -582,6 +582,21 @@ defmodule Browser.FormsTest do
       assert :erts_debug.same(Forms.render(plain, %{}, %{}), plain)
     end
 
+    test "the last render of a different tree is never taken for this one" do
+      {nodes, %{controls: controls}} = page_nodes()
+      first = Forms.render(nodes, %{}, controls)
+      # the same tree with the paragraphs gone (as a restyle that hides them gives)
+      fewer = drop_p(nodes)
+      assert Forms.render(fewer, %{}, controls, first) == Forms.render(fewer, %{}, controls)
+      assert Forms.render(nodes, %{}, controls, Forms.render(fewer, %{}, controls)) == first
+    end
+
+    defp drop_p(nodes) do
+      for node <- nodes, not match?({:element, "p", _, _}, node) do
+        with {:element, tag, attrs, kids} <- node, do: {:element, tag, attrs, drop_p(kids)}
+      end
+    end
+
     test "a details closed again gives the summary alone, then the same term" do
       {nodes, %{controls: controls}} = page_nodes()
       first = Forms.render(nodes, %{}, controls)
