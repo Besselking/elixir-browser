@@ -167,10 +167,14 @@ defmodule Browser.Layout do
       list: nil,
       lh: :normal,
       cid: nil,
-      nid: nil,
-      images: Keyword.get(opts, :images),
-      svg_defs: Keyword.get(opts, :svg_defs, %{})
+      nid: nil
     }
+
+    # (kept out of the style: the style is in every word op, and atom keys hash the ops)
+    Process.put(:layout_images, Keyword.get(opts, :images))
+    Process.put(:layout_svg_defs, Keyword.get(opts, :svg_defs, %{}))
+    # the keys of boxes and atoms: the same from one layout of a tree to the next (see `wkey/1`)
+    Process.put(:layout_wkeys, %{})
 
     # what percentage margins and padding refer to, as the walk goes down the tree
     margin = Keyword.get(opts, :margin, @margin)
@@ -837,7 +841,7 @@ defmodule Browser.Layout do
         sub = [] |> ops.() |> Enum.reverse()
 
         spec = %{
-          key: make_ref(),
+          key: atom_key(nid_of(attrs), sub),
           width: nil,
           minw: nil,
           maxw: nil,
@@ -1249,7 +1253,7 @@ defmodule Browser.Layout do
       border_box? = c["box-sizing"] == "border-box"
 
       spec = %{
-        key: make_ref(),
+        key: atom_key(nid_of(attrs), sub),
         top: c["top"],
         left: c["left"],
         right: c["right"],
@@ -1303,7 +1307,7 @@ defmodule Browser.Layout do
     c = computed(attrs)
     style = restyle("img", attrs, parent_style, c)
     url = with "" <- attr_value(attrs, "@src"), do: nil
-    images = parent_style.images
+    images = Process.get(:layout_images)
     info = if url && images, do: Map.get(images, url)
     alt = attr_value(attrs, "alt")
     declared = declared_size(attrs)
@@ -1435,7 +1439,7 @@ defmodule Browser.Layout do
   defp svg_ops({:element, "svg", attrs, _} = el, parent_style, acc) do
     c = computed(attrs)
     style = restyle("svg", attrs, parent_style, c)
-    scene = Browser.Svg.from_element(el, parent_style.svg_defs)
+    scene = Browser.Svg.from_element(el, Process.get(:layout_svg_defs, %{}))
     {iw, ih} = Browser.Svg.intrinsic(scene)
 
     c =
@@ -1632,7 +1636,7 @@ defmodule Browser.Layout do
       end)
 
     spec = %{
-      key: make_ref(),
+      key: atom_key(nid_of(attrs), sub),
       width: dim(c["width"]),
       # `min-content` / `max-content`: the narrowest / widest the content can be
       sizing: if(c["width"] in [:minc, :maxc] or fitc?(c["width"]), do: c["width"]),
@@ -1761,7 +1765,7 @@ defmodule Browser.Layout do
     acc = if positioned?, do: [{:pos_inline, rel} | acc], else: acc
 
     spec = inline_spec(tag, c, style)
-    ref = make_ref()
+    ref = wkey(style.nid)
     acc = if spec, do: [{:inline_open, ref, spec} | acc], else: acc
 
     acc =
@@ -1907,7 +1911,7 @@ defmodule Browser.Layout do
     if tag == "hr" do
       [{:hr}, {:gap, box.mb} | acc]
     else
-      ref = make_ref()
+      ref = wkey(style.nid)
 
       case box_spec(tag, c, box, style) do
         nil ->
@@ -2556,6 +2560,28 @@ defmodule Browser.Layout do
   defp px(n), do: round(n)
 
   defp containing_width, do: Process.get(:layout_cw, 0)
+
+  # A key for a box made in the walk: unique within one layout, and the same in the next layout
+  # of the same tree (the element's number, and how many keys that element made before).
+  defp wkey(nid) do
+    seen = Process.get(:layout_wkeys, %{})
+    n = Map.get(seen, nid, 0)
+    Process.put(:layout_wkeys, Map.put(seen, nid, n + 1))
+    {:k, nid, n}
+  end
+
+  # The key of an atom (a float, an inline-block, a flex item, a cell, ...) and of what is
+  # remembered of its layout (`memo/2`): its walk key and a hash of its content, taken once
+  # here so that the memo does not hash the content again on every lookup. The content carries
+  # every value resolved against the containing width.
+  defp atom_key(nid, sub), do: Tuple.insert_at(wkey(nid), 3, :erlang.phash2(sub))
+
+  defp nid_of(attrs) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} -> nid
+      nil -> nil
+    end
+  end
 
   # -- styles ----------------------------------------------------------------------
 
@@ -6150,14 +6176,13 @@ defmodule Browser.Layout do
   # Nested tables measure and lay out the same cell content again and again (and every level
   # multiplies the passes), so results are remembered for the duration of one layout. The key
   # is a hash of the content, so a collision is possible in principle but not worth guarding.
+  # (no containing width in the key: the content carries what was resolved against it)
   defp memo(key, fun) do
     case Process.get(:layout_memo) do
       nil ->
         fun.()
 
       cache ->
-        key = {key, containing_width()}
-
         case cache do
           %{^key => value} ->
             value
@@ -6184,7 +6209,8 @@ defmodule Browser.Layout do
 
   defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
     memo(
-      {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false)},
+      {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
+       Process.get(:layout_boxes, false)},
       fn ->
         # (the height of the box a float or inline-block sits in is what its own percentage
         # heights refer to)
@@ -8212,9 +8238,11 @@ defmodule Browser.Layout do
   defp flex_direction(_), do: :row
 
   defp flex_text_item(text, style) do
+    sub = walk({:text, text}, style, []) |> Enum.reverse()
+
     %{
-      sub: walk({:text, text}, style, []) |> Enum.reverse(),
-      key: make_ref(),
+      sub: sub,
+      key: atom_key(style.nid, sub),
       rebuild: nil,
       grow: 0.0,
       shrink: 1.0,
@@ -8280,9 +8308,11 @@ defmodule Browser.Layout do
       with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
     end
 
+    sub = build.(%{})
+
     %{
-      sub: build.(%{}),
-      key: make_ref(),
+      sub: sub,
+      key: atom_key(nid_of(attrs), sub),
       rebuild: if(tag in ~w(img svg), do: nil, else: build),
       # a picture that a column stretches across takes the width that is left (its height
       # follows its ratio)
@@ -9975,7 +10005,7 @@ defmodule Browser.Layout do
   # the background pictures of a row, row group or column, painted over the cells it holds
   defp bg_pictures(c) do
     with spec when spec != nil <- bgimg_spec(c),
-         do: %{spec: spec, color: c["color"] || {0, 0, 0}, ref: make_ref()}
+         do: %{spec: spec, color: c["color"] || {0, 0, 0}, ref: wkey(nil)}
   end
 
   # whatever else a row holds sits in an anonymous cell
@@ -10026,7 +10056,7 @@ defmodule Browser.Layout do
     %{
       build: build,
       sub: sub,
-      key: make_ref(),
+      key: atom_key(nid_of(attrs), sub),
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),
