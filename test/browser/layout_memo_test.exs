@@ -148,6 +148,21 @@ defmodule Browser.LayoutMemoTest do
     same!(p, memo, [], 1000, 768)
   end
 
+  # (a first child's top margin collapses with its parent's: the span is placed again only where
+  # it starts its parent the same way)
+  test "blocks that start their parent are placed again from their fragments" do
+    html = fn text ->
+      """
+      <div style="margin-top:10px"><p style="margin-top:20px">first</p><p>#{text}</p></div>
+      <div><div style="margin:5px"><p style="margin:30px">nested first</p></div></div>
+      """
+    end
+
+    {_, _, memo} = kept(page(html.("one")), nil)
+    {_, memo} = same!(page(html.("two words")), memo)
+    same!(page(html.("one")), memo)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

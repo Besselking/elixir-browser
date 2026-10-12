@@ -6725,7 +6725,7 @@ defmodule Browser.Layout do
 
   defp span_state_ok?(st) do
     st.line == [] and st.marks == [] and st.active == [] and st.rels == [] and st.ptop == [] and
-      st.clr == nil and st.adj == nil and elem(st.bstart, 1) != st.y
+      st.clr == nil and st.adj == nil
   end
 
   # the floats that reach into the span, as the span sees them: beside it at these heights
@@ -6743,7 +6743,8 @@ defmodule Browser.Layout do
      st.lf, st.split, st.splitting, st.strut, st.pending_space, st.view_h,
      Process.get(:layout_intrinsic, false), Process.get(:layout_cw),
      Process.get(:layout_definite), Process.get(:layout_boxes, false),
-     Process.get(:layout_viewport), Process.get(:layout_flex_item, false), floats_rel(st)}
+     Process.get(:layout_viewport), Process.get(:layout_flex_item, false), floats_rel(st),
+     elem(st.bstart, 1) == st.y}
   end
 
   # the fragment, or nil when the span changed state it may not
