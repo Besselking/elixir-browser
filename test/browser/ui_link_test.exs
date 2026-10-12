@@ -201,6 +201,36 @@ defmodule Browser.UIPageIndexTest do
     assert [{_, 1}] = elem(page.bands, 0)
   end
 
+  describe "reindex_page/3" do
+    # what the painter takes from a band: the items in page order
+    defp drawn(%{bands: bands} = page),
+      do:
+        {page.canvas, page.sticky,
+         for(b <- Tuple.to_list(bands), do: Enum.sort_by(b, &elem(&1, 1)))}
+
+    test "a few items changed in place give the index of the new list" do
+      canvas = %{type: :canvas, color: {1, 2, 3}}
+      old = [canvas, box(0, 10), box(300, 10), box(600, 10, %{stick: :fixed}), box(0, 1000)]
+      # one item moves down two bands, one grows
+      new = List.replace_at(old, 2, box(560, 10)) |> List.replace_at(1, box(0, 300))
+      page = UI.reindex_page(UI.index_page(old), old, new)
+      assert drawn(page) == drawn(UI.index_page(new))
+    end
+
+    test "anything else is indexed again" do
+      old = [box(0, 10), box(300, 10, %{stick: :fixed})]
+      page = UI.index_page(old)
+      # a sticky item changed
+      assert UI.reindex_page(page, old, [box(0, 10), box(310, 10, %{stick: :fixed})]) == nil
+      # another length
+      assert UI.reindex_page(page, old, [box(0, 10)]) == nil
+      # past the last band
+      assert UI.reindex_page(page, old, [box(5000, 10), Enum.at(old, 1)]) == nil
+      # a canvas that came
+      assert UI.reindex_page(page, old, [%{type: :canvas, color: nil} | old]) == nil
+    end
+  end
+
   test "an empty page has one empty band" do
     assert %{bands: {[]}, sticky: [], canvas: nil} = UI.index_page([])
   end

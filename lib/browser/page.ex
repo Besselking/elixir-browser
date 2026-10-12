@@ -24,6 +24,8 @@ defmodule Browser.Page do
     :nodes,
     forms: %{controls: %{}, forms: %{}},
     form_state: %{},
+    # `pruned` and the elements in it that hold a control (`Browser.Forms.hot/1`)
+    form_hot: nil,
     image_urls: [],
     # whether styles use vw/vh units: then the window size is part of the cascade
     viewport_units: false,
@@ -373,7 +375,8 @@ defmodule Browser.Page do
             form_state: %{},
             key: nil,
             pruned: nil,
-            nodes: nil,
+            # (kept: `render/2` gives back the subtrees of it that the new tree has unchanged,
+            # and the layout keeps what it worked out for them)
             style_cache: %{}
         },
         raw,
@@ -499,8 +502,22 @@ defmodule Browser.Page do
   so this is what typing, toggling and choosing call.
   """
   def render(%__MODULE__{} = page, form_state) do
-    nodes = Forms.render(page.pruned, form_state, page.forms.controls)
-    %{page | form_state: form_state, nodes: nodes, ver: make_ref()}
+    # (the tree of the last render: the subtrees the change left alone are given back as they were)
+    hot =
+      case page.form_hot do
+        {pruned, hot} -> if :erts_debug.same(pruned, page.pruned), do: hot
+        nil -> nil
+      end || Forms.hot(page.pruned || [])
+
+    nodes = Forms.render(page.pruned, form_state, page.forms.controls, page.nodes, hot)
+
+    %{
+      page
+      | form_state: form_state,
+        nodes: nodes,
+        ver: make_ref(),
+        form_hot: {page.pruned, hot}
+    }
   end
 
   # Sheets `Browser.Prefetch` started while the HTML arrived are collected here, in the

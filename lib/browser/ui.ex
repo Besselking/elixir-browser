@@ -190,7 +190,37 @@ defmodule Browser.UI do
   # The painter reads the page from `:persistent_term`, which hands out the same term to every
   # reader without copying it (an ETS lookup would copy every item, on every frame). It is
   # indexed by horizontal bands of the page so a frame only looks at what is near the window.
-  defp set_page(items), do: :persistent_term.put({__MODULE__, :page}, index_page(items))
+  # A put copies the whole term, so a page that changed in a few bands (a keystroke) puts only
+  # those bands, each under a key of its own that holds the page's `gen` (see `band/3`).
+  defp set_page(items) do
+    # (what `publish/4` put last is no longer what the painter has)
+    Process.delete(:published_items)
+    Process.delete(:published_page)
+    put_page(index_page(items))
+  end
+
+  defp put_page(page) do
+    page = Map.put(page, :gen, make_ref())
+    :persistent_term.put({__MODULE__, :page}, page)
+    page
+  end
+
+  # the bands of `page` that are not those of `published` are put on their own
+  defp put_bands(page, published) do
+    for b <- 0..(tuple_size(page.bands) - 1)//1,
+        not (elem(page.bands, b) === elem(published.bands, b)),
+        do: :persistent_term.put({__MODULE__, :band, b}, {page.gen, elem(page.bands, b)})
+
+    page
+  end
+
+  # what the painter draws of band `b`: the band put on its own for this page, if any
+  defp band(bands, b, gen) do
+    case :persistent_term.get({__MODULE__, :band, b}, nil) do
+      {^gen, band} -> band
+      _ -> elem(bands, b)
+    end
+  end
 
   @doc false
   def index_page(items) do
@@ -206,13 +236,12 @@ defmodule Browser.UI do
     sticky =
       sticky |> Enum.reverse() |> Enum.map(&elem(&1, 0)) |> Enum.sort_by(&Map.get(&1, :z, 0))
 
-    reach = fn {item, _} -> item.y + Map.get(item, :h, 40) + 40 end
-    last = normal |> Enum.map(reach) |> Enum.max(fn -> 0 end) |> max(0) |> div(@band)
+    last = normal |> Enum.map(&reach/1) |> Enum.max(fn -> 0 end) |> max(0) |> div(@band)
 
     bands =
       Enum.reduce(normal, %{}, fn {item, _} = entry, acc ->
         first = item.y |> max(0) |> div(@band) |> min(last)
-        stop = reach.(entry) |> max(0) |> div(@band) |> min(last)
+        stop = entry |> reach() |> max(0) |> div(@band) |> min(last)
 
         Enum.reduce(first..stop//1, acc, fn b, acc ->
           Map.update(acc, b, [entry], &[entry | &1])
@@ -224,14 +253,98 @@ defmodule Browser.UI do
   end
 
   @doc """
+  The index of `new` made from `page`, the index of `old`, when the two lists differ in a few
+  items in place (a keystroke patched into a field): only the bands of those items change.
+  nil when the page must be indexed again: the lists differ in length, in many items, in the
+  canvas or in a sticky item, or an item now reaches past the last band.
+  """
+  def reindex_page(page, old, new, changes \\ nil)
+  def reindex_page(nil, _old, _new, _changes), do: nil
+
+  def reindex_page(page, old, new, changes) do
+    with {:ok, old, new} <- without_canvas(old, new, page.canvas),
+         changes when is_list(changes) <-
+           if(changes && page.canvas == nil, do: changes, else: changed_items(old, new, 0, [])),
+         false <-
+           Enum.any?(changes, fn {_, a, b} ->
+             Map.has_key?(a, :stick) or Map.has_key?(b, :stick)
+           end) do
+      Enum.reduce_while(changes, page, fn {i, a, b}, page ->
+        last = tuple_size(page.bands) - 1
+
+        case item_bands({b, i}) do
+          {_first, stop} when stop > last ->
+            {:halt, nil}
+
+          {first, stop} ->
+            # (an item that reached past the last band was put in the last band)
+            {a_first, a_stop} = item_bands({a, i})
+            remove = min(a_first, last)..min(a_stop, last)//1
+            bands = band_update(page.bands, remove, &Enum.reject(&1, fn {_, j} -> j == i end))
+
+            bands = band_update(bands, first..stop//1, &[{b, i} | &1])
+            {:cont, %{page | bands: bands}}
+        end
+      end)
+    else
+      _ -> nil
+    end
+  end
+
+  defp without_canvas([%{type: :canvas} = c | old], [c2 | new], canvas)
+       when c === c2 and c === canvas,
+       do: {:ok, old, new}
+
+  defp without_canvas([%{type: :canvas} | _], _new, _canvas), do: :error
+  defp without_canvas(_old, [%{type: :canvas} | _], _canvas), do: :error
+  defp without_canvas(old, new, nil), do: {:ok, old, new}
+  defp without_canvas(_old, _new, _canvas), do: :error
+
+  # the items that differ, with their place; :error for lists of other lengths or many changes
+  defp changed_items(old, new, i, acc, n \\ 0)
+  defp changed_items(_old, _new, _i, _acc, n) when n > 32, do: :error
+  defp changed_items([], [], _i, acc, _n), do: acc
+
+  defp changed_items([a | old], [b | new], i, acc, n) when a === b,
+    do: changed_items(old, new, i + 1, acc, n)
+
+  defp changed_items([a | old], [b | new], i, acc, n),
+    do: changed_items(old, new, i + 1, [{i, a, b} | acc], n + 1)
+
+  defp changed_items(_old, _new, _i, _acc, _n), do: :error
+
+  # the first and last band an entry of `index_page/1` reaches (before it is capped at the last)
+  defp item_bands({item, _} = entry),
+    do: {item.y |> max(0) |> div(@band), entry |> reach() |> max(0) |> div(@band)}
+
+  defp reach({item, _}), do: item.y + Map.get(item, :h, 40) + 40
+
+  defp band_update(bands, range, fun),
+    do: Enum.reduce(range, bands, fn b, bands -> put_elem(bands, b, fun.(elem(bands, b))) end)
+
+  @doc """
   Hands the painter what to draw: the page's `items`, `overlay` items drawn over them (the
   selection), the scroll offset and the blink state of the text caret. The items are only
   indexed again when they are not the very list given last time.
   """
-  def publish(items, overlay, scroll, caret_on \\ true) do
-    unless Process.get(:published_items) === items do
-      set_page(items)
+  def publish(items, overlay, scroll, caret_on \\ true),
+    do: publish(items, overlay, scroll, caret_on, nil)
+
+  # `changes`: the items that differ from those published last (`changed_items/4`), when known
+  defp publish(items, overlay, scroll, caret_on, changes) do
+    old = Process.get(:published_items)
+
+    unless old === items do
+      published = Process.get(:published_page)
+
+      page =
+        case reindex_page(published, old, items, changes) do
+          nil -> items |> index_page() |> put_page()
+          page -> put_bands(page, published)
+        end
+
       Process.put(:published_items, items)
+      Process.put(:published_page, page)
     end
 
     :ets.insert(@view, {:view, overlay, scroll, caret_on})
@@ -245,11 +358,22 @@ defmodule Browser.UI do
   def update(%{panel: panel}, items, overlay, scroll, caret_on, mode \\ :full) do
     [{:view, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, :view)
     old_items = Process.get(:published_items, [])
-    publish(items, overlay, scroll, caret_on)
+    diff? = mode == :diff and old_scroll == scroll and old_overlay == overlay
+
+    # (a few items changed in place, as a keystroke changes them: the one pass that finds them
+    # serves both the index and the area to repaint)
+    changes =
+      if diff? and old_caret == caret_on and not (old_items === items),
+        do: changed_items(old_items, items, 0, [])
+
+    publish(items, overlay, scroll, caret_on, if(is_list(changes), do: changes))
 
     dirty =
       cond do
-        mode == :diff and old_scroll == scroll and old_overlay == overlay ->
+        is_list(changes) ->
+          changes_dirty(changes)
+
+        diff? ->
           if old_items === items,
             do:
               if(old_caret != caret_on, do: diff_items(old_items, items, true, nil), else: :none),
@@ -273,6 +397,20 @@ defmodule Browser.UI do
           do: :wxWindow.refresh(panel),
           else: :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
     end
+  end
+
+  # the area of what changed, as `diff_items/4` finds it
+  defp changes_dirty([]), do: :none
+
+  defp changes_dirty(changes) do
+    if Enum.any?(changes, fn {_, a, b} ->
+         match?(%{type: :canvas}, a) or match?(%{type: :canvas}, b)
+       end),
+       do: :full,
+       else:
+         Enum.reduce(changes, nil, fn {_, a, b}, acc ->
+           acc |> union(bbox(a)) |> union(bbox(b))
+         end)
   end
 
   @doc """
@@ -600,8 +738,7 @@ defmodule Browser.UI do
   Returns `true` when the file was written.
   """
   def snapshot(items, width, height, path, overlay \\ [], scroll \\ 0) do
-    set_page(items)
-    :ets.insert(@view, {:view, overlay, scroll, false})
+    publish(items, overlay, scroll, false)
     bitmap = :wxBitmap.new(width, height)
     dc = :wxMemoryDC.new(bitmap)
     paint_dc(dc)
@@ -628,7 +765,7 @@ defmodule Browser.UI do
   defp paint_dc(dc) do
     [{:view, overlay, scroll, caret_on}] = :ets.lookup(@view, :view)
 
-    %{canvas: canvas_item, sticky: sticky, bands: bands} =
+    %{canvas: canvas_item, sticky: sticky, bands: bands, gen: gen} =
       :persistent_term.get({__MODULE__, :page})
 
     Process.delete(:paint_font)
@@ -655,7 +792,7 @@ defmodule Browser.UI do
 
     near =
       first_band..last_band//1
-      |> Enum.flat_map(&elem(bands, &1))
+      |> Enum.flat_map(&band(bands, &1, gen))
       |> Enum.sort_by(&elem(&1, 1))
       |> Enum.dedup_by(&elem(&1, 1))
       |> Enum.map(&elem(&1, 0))
