@@ -2741,42 +2741,50 @@ defmodule Browser.Layout do
   # the elements inside made (`wkey/1`) are counted again in their order, so that what is
   # walked later (a flex item or cell built again at its final size) gets the keys a full
   # walk gives it.
-  defp walk_kept({:element, _tag, attrs, _kids} = node, parent_style, force, acc, fun) do
+  defp walk_kept(node, parent_style, force, acc, fun) do
+    if Process.get(:layout_walk),
+      do: kept_walk(node, parent_style, force, fn -> fun.([]) end) ++ acc,
+      else: fun.(acc)
+  end
+
+  # `fun.()`, the walk of `node` as `what` (a flex item, a cell, the ops of an element in
+  # flow), or what it gave the last time (see `walk_kept/5`)
+  defp kept_walk({:element, _tag, attrs, _kids} = node, parent_style, what, fun) do
     with table when table != nil <- Process.get(:layout_walk),
          nid when nid != nil <- nid_of(attrs) do
       ctx =
-        {containing_width(), force, Process.get(:layout_definite), Process.get(:layout_intrinsic),
+        {containing_width(), what, Process.get(:layout_definite), Process.get(:layout_intrinsic),
          Process.get(:layout_flex_item)}
 
       key = {nid, ctx}
       gen = Process.get(:layout_gen)
 
       case table do
-        %{^key => {_gen, old, style, ops, wlog}} when style == parent_style ->
+        %{^key => {_gen, old, style, value, wlog}} when style == parent_style ->
           if :erts_debug.same(old, node) do
             Enum.each(Enum.reverse(wlog), &wkey/1)
-            Process.put(:layout_walk, Map.put(table, key, {gen, old, style, ops, wlog}))
-            ops ++ acc
+            Process.put(:layout_walk, Map.put(table, key, {gen, old, style, value, wlog}))
+            value
           else
-            walk_miss(node, parent_style, key, gen, acc, fun)
+            walk_miss(node, parent_style, key, gen, fun)
           end
 
         _ ->
-          walk_miss(node, parent_style, key, gen, acc, fun)
+          walk_miss(node, parent_style, key, gen, fun)
       end
     else
-      _ -> fun.(acc)
+      _ -> fun.()
     end
   end
 
-  defp walk_miss(node, parent_style, key, gen, acc, fun) do
+  defp walk_miss(node, parent_style, key, gen, fun) do
     {n0, _} = Process.get(:layout_wlog)
-    ops = fun.([])
+    value = fun.()
     {n1, log} = Process.get(:layout_wlog)
     wlog = Enum.take(log, n1 - n0)
-    entry = {gen, node, parent_style, ops, wlog}
+    entry = {gen, node, parent_style, value, wlog}
     Process.put(:layout_walk, Map.put(Process.get(:layout_walk), key, entry))
-    ops ++ acc
+    value
   end
 
   # The key of an atom (a float, an inline-block, a flex item, a cell, ...) and of what is
@@ -8568,11 +8576,15 @@ defmodule Browser.Layout do
       with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
     end
 
-    sub = build.(%{})
+    {sub, key} =
+      kept_walk(el, style, :flex_item, fn ->
+        sub = build.(%{})
+        {sub, atom_key(nid_of(attrs), sub)}
+      end)
 
     %{
       sub: sub,
-      key: atom_key(nid_of(attrs), sub),
+      key: key,
       rebuild: if(tag in ~w(img svg), do: nil, else: build),
       # a picture that a column stretches across takes the width that is left (its height
       # follows its ratio)
@@ -10305,7 +10317,7 @@ defmodule Browser.Layout do
   defp valign_of(v) when v in ["top", "middle", "bottom"], do: v
   defp valign_of(_), do: nil
 
-  defp table_cell({:element, tag, attrs, kids}, c, style) do
+  defp table_cell({:element, tag, attrs, kids} = node, c, style) do
     box = box(tag, c)
     {bt, br, bb, bl} = box.bw
     border_box? = c["box-sizing"] == "border-box"
@@ -10314,12 +10326,17 @@ defmodule Browser.Layout do
     cw = containing_width()
 
     build = fn props -> with_cw(cw, fn -> build_cell(tag, attrs, kids, c, style, props) end) end
-    sub = build.(%{})
+
+    {sub, key} =
+      kept_walk(node, style, :cell, fn ->
+        sub = build.(%{})
+        {sub, atom_key(nid_of(attrs), sub)}
+      end)
 
     %{
       build: build,
       sub: sub,
-      key: atom_key(nid_of(attrs), sub),
+      key: key,
       colspan: span_attr(attrs, "colspan"),
       rowspan: span_attr(attrs, "rowspan"),
       width: dim(c["width"]),

@@ -373,7 +373,8 @@ defmodule Browser.Page do
             form_state: %{},
             key: nil,
             pruned: nil,
-            nodes: nil,
+            # (kept: `render/2` gives back the subtrees of it that the new tree has unchanged,
+            # and the layout keeps what it worked out for them)
             style_cache: %{}
         },
         raw,
