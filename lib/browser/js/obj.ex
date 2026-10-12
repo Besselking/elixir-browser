@@ -1060,6 +1060,23 @@ defmodule Browser.JS.Obj do
     end
   end
 
+  @doc """
+  Whether the fast record `n` is the fast record `o` with one more key, `key`, at the end
+  with the default attributes: the result of an add of `key` by an assignment. An add cell
+  of an inline cache (step A3) gets the shape of `n` only when this is true, because a hit
+  of the cell appends one value for that key.
+  """
+  def added?(o, n, key) do
+    case {o, n} do
+      {%{shape: {:js_shape, _, _, keys, _, _, _}},
+       %{shape: {:js_shape, _, %{^key => pos}, new, bits, _, _}}} ->
+        pos == tuple_size(new) and pos == tuple_size(keys) + 1 and :erlang.element(pos, bits) == 7
+
+      _ ->
+        false
+    end
+  end
+
   # ── writing ────────────────────────────────────────────────
   # Each writer takes a record and gives the new record. The caller stores it. The writers
   # of the hot paths (an update, an assignment, a literal one key at a time) are macros. The

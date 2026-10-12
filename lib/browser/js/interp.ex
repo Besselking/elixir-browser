@@ -2677,7 +2677,7 @@ defmodule Browser.JS.Interp do
   #     `put_obj/5` or `strict_put_obj/4` at once, with the record that it read.
   #   * `{:add, protos}`: a miss of an add that an add cell can do (`ic_add_chain/2`). The
   #     write takes the generic path as for `:slow`, and then the cell gets the new shape
-  #     of the record (`ic_learn_add/4`).
+  #     of the record (`ic_learn_add/5`).
   #   * `:named`: `:mega`, a record that is not fast, or the fast path `:ic` off. The write
   #     takes `named_write/5`, so that it costs no more than the write of `put_named/3`.
   #
@@ -2760,7 +2760,7 @@ defmodule Browser.JS.Interp do
 
         {:add, protos} ->
           r = unquote(slow)
-          ic_learn_add(unquote(site), unquote(id), o, protos)
+          ic_learn_add(unquote(site), unquote(id), o, protos, unquote(key))
           r
       end
     end
@@ -2790,7 +2790,7 @@ defmodule Browser.JS.Interp do
   # site gets the position of the key when the record holds it as a writable data property
   # (`ic_write_cell/3`). It gives `:slow`, so that the generic write of `ic_write/6` runs.
   # When the write is an add that an add cell can do (`ic_add_chain/2`), it gives
-  # `{:add, protos}`, and the cell is written after the generic write (`ic_learn_add/4`).
+  # `{:add, protos}`, and the cell is written after the generic write (`ic_learn_add/5`).
   defp ic_write_miss(o, sid, key, site) do
     case ic_add_chain(o, key) do
       nil ->
@@ -2910,16 +2910,28 @@ defmodule Browser.JS.Interp do
     v
   end
 
-  # The cell of a miss of an add, after the generic write of the add to the record `o` at
-  # `id` with the prototype chain `protos` (`ic_add_chain/2`): the add cell with the new
-  # shape of the record. The record is in dictionary mode when the add passed a limit of
-  # `Browser.JS.Shape`. Then the cell gets no shape: it is `{nil}`, which matches no
+  # The cell of a miss of an add of `key`, after the generic write of the add to the record
+  # `o` at `id` with the prototype chain `protos` (`ic_add_chain/2`): the add cell with the
+  # new shape of the record. The record is in dictionary mode when the add passed a limit
+  # of `Browser.JS.Shape`. Then the cell gets no shape: it is `{nil}`, which matches no
   # record, so the next record of the shape misses again. (the next record can get a
   # shape there, see "The limits" in `Browser.JS.Shape`)
-  defp ic_learn_add(site, id, Obj.fast_record(sid, _), protos) do
+  #
+  # A hit of an add cell appends one value for `key`, so the cell must hold the shape of
+  # `o` with `key` added at the end, and nothing else. `ic_add_chain/2` tells before the
+  # write that the generic write adds the key. The cell does not trust that prediction:
+  # it gets the new shape only when the record really got the one key at the end
+  # (`Obj.added?/3`). Else the cell is the generic path `{sid}`, so that a wrong
+  # prediction costs speed but never gives a record with more values than keys.
+  defp ic_learn_add(site, id, Obj.fast_record(sid, _) = o, protos, key) do
     case :erlang.get(id) do
-      Obj.fast_record(_, _) = n -> ic_learn(site, {sid, Obj.shape(n), protos})
-      _ -> ic_learn(site, {nil})
+      Obj.fast_record(_, _) = n ->
+        if Obj.added?(o, n, key),
+          do: ic_learn(site, {sid, Obj.shape(n), protos}),
+          else: ic_learn(site, {sid})
+
+      _ ->
+        ic_learn(site, {nil})
     end
   end
 
