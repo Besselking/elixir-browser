@@ -82,7 +82,9 @@ defmodule Browser.JS.Compile do
 
   An object literal with constant keys and plain values gets the shape of its keys when it
   compiles (step A3). When it runs, it gets the id of the object first, then it evaluates
-  the values, and then it writes the record in one write (`Interp.put_literal/4`).
+  the values, and then it writes the record in one write (`Interp.put_literal/4`). `new`
+  of a plain function of the compiled code takes the short way of
+  `Interp.construct_new/2`, which reads the record of the function once.
 
   ## Shells
 
@@ -880,16 +882,23 @@ defmodule Browser.JS.Compile do
       f = cc.(env)
       # (the arguments are evaluated before the callee is checked)
       argv = argv(al, env)
-
-      unless Interp.function?(f) and Interp.constructor?(f),
-        do:
-          Interp.throw_error(
-            "TypeError",
-            "#{Interp.describe_node(callee)} is not a constructor"
-          )
-
       if @check, do: Interp.check_link(env)
-      Interp.construct(f, argv)
+
+      # (a plain function takes the short way of `Interp.construct_new/2`, as in `ev/2`)
+      case Interp.construct_new(f, argv) do
+        :"$js_not_plain" ->
+          unless Interp.function?(f) and Interp.constructor?(f),
+            do:
+              Interp.throw_error(
+                "TypeError",
+                "#{Interp.describe_node(callee)} is not a constructor"
+              )
+
+          Interp.construct(f, argv)
+
+        result ->
+          result
+      end
     end
   end
 

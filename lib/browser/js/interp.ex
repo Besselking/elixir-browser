@@ -3844,6 +3844,75 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The value of `construct_new/2` when the short way does not apply. No JavaScript value is
+  # this atom.
+  @not_plain :"$js_not_plain"
+
+  @doc false
+  # `new f(...args)` for a plain function (fast path `:construct`, step A3): a function of
+  # the compiled code (rewritten, so that it runs on a frame) that is not an arrow, a
+  # method, a generator, an async function, a class, a bound function or a proxy, and that
+  # has an own `prototype` that is an object. It reads the record of the function once,
+  # and gives what `construct/2` gives: a new plain object with that prototype, the
+  # constructor run on a frame in the mode `:new`, and the object or the object that the
+  # constructor returns. Any other value of `f` gives `@not_plain`, and the caller takes
+  # the generic path, with the test of `constructor?/1` and its error. In the check build
+  # the shadow run compares the prototype with the one that the generic path reads.
+  def construct_new({:obj, id} = f, args) do
+    case if(Fast.on?(:construct), do: plain_ctor(:erlang.get(id))) do
+      {c, proto} ->
+        _ = Fast.shadow(nil, proto, plain_ctor_old(f, id))
+        this = {:obj, alloc(Obj.plain_record(class: :object, proto: proto))}
+        tick()
+
+        case run_frame(id, c, this, args, f, :new) do
+          {:obj, _} = result -> result
+          _ -> this
+        end
+
+      nil ->
+        @not_plain
+    end
+  end
+
+  def construct_new(_f, _args), do: @not_plain
+
+  # The closure and the prototype of the record `o` of a plain function (see
+  # `construct_new/2`), or `nil`. These are the cases of `constructor?/1`,
+  # `construct_bound/5` and `construct_plain/5` that run the body of a closure on a frame
+  # with the prototype of its own `prototype` key.
+  defp plain_ctor(
+         %{
+           class: :function,
+           fun: {:closure, %{info: %Info{rewritten: true}, mode: m, name: n} = c}
+         } =
+           o
+       )
+       when m not in [:arrow, :arrow_expr] and not (is_tuple(n) and elem(n, 0) == :method) and
+              not is_map_key(o, :generator) and not is_map_key(o, :async) and
+              not is_map_key(o, :bound) and not is_map_key(o, :class_info) and
+              not is_map_key(o, :no_new) and not is_map_key(o, :proxy) and
+              not is_map_key(o, :proxy_constructor) and not is_map_key(o, :proxy_ctor) do
+    Obj.own_case o, "prototype" do
+      {:ok, {:obj, _} = p} -> {c, p}
+      _ -> nil
+    end
+  end
+
+  defp plain_ctor(_o), do: nil
+
+  # The old path of `plain_ctor/1` for the shadow run: the tests of `construct/3` and the
+  # prototype that `construct_plain/5` reads. It runs no JavaScript code, because the
+  # function has an own `prototype` that is a data property.
+  defp plain_ctor_old(f, id) do
+    o = deref(id)
+
+    if constructor?(f) and not is_map_key(o, :proxy) and Map.get(o, :bound) == nil and
+         Map.get(o, :class_info) == nil and not Map.get(o, :no_new, false),
+       do: get(f, "prototype"),
+       else: @not_plain
+  end
+
   def construct(f, args, new_target \\ nil)
 
   def construct({:obj, id} = f, args, new_target) do
@@ -8134,11 +8203,18 @@ defmodule Browser.JS.Interp do
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
 
-    unless function?(f) and constructor?(f),
-      do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
-
     if @check, do: check_link(env)
-    construct(f, argv)
+
+    case construct_new(f, argv) do
+      @not_plain ->
+        unless function?(f) and constructor?(f),
+          do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+
+        construct(f, argv)
+
+      result ->
+        result
+    end
   end
 
   @doc false
