@@ -2941,14 +2941,21 @@ defmodule Browser.JS.Interp do
   # `o` with `key` added at the end, and nothing else. `ic_add_ok?/2` and `ic_chain/3` tell
   # before the write that the generic write adds the key. The cell does not trust that
   # prediction: it gets the new shape only when the record really got the one key at the
-  # end (`Obj.added?/3`). Else the cell is the generic path `{sid}`, so that a wrong
+  # end (`Obj.added/3`). Else the cell is the generic path `{sid}`, so that a wrong
   # prediction costs speed but never gives a record with more values than keys.
   defp ic_learn_add(site, id, Obj.fast_record(sid, _) = o, protos, key) do
     case :erlang.get(id) do
       Obj.fast_record(_, _) = n ->
-        if Obj.added?(o, n, key),
-          do: ic_learn(site, {sid, Obj.shape(n), protos}),
-          else: ic_learn(site, {sid})
+        case Obj.added(o, n, key) do
+          nil ->
+            ic_learn(site, {sid})
+
+          size ->
+            # (the cell keeps the shape, which is memory of the code cache: see "Memory
+            # bound" in `Browser.JS.Compile`)
+            Browser.JS.Compile.charge(div(16 + 10 * size, 8))
+            ic_learn(site, {sid, Obj.shape(n), protos})
+        end
 
       _ ->
         ic_learn(site, {nil})

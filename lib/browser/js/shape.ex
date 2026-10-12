@@ -184,7 +184,9 @@ defmodule Browser.JS.Shape do
   value only of a record with the shape `psid`, and that shape tells what the value is.
 
   The cells belong to the code cache of `Browser.JS.Compile`. The budget of the cache
-  counts each site as one node, and an erase of the cache erases all the cells. A cell can
+  counts each site as one node, and each write of an add cell as the nodes of the shape
+  that it keeps (an erase of the transition table does not free that shape). An erase of
+  the cache erases all the cells. A cell can
   hold the id of a prototype, but it is not a root of the garbage collector
   (`Browser.JS.GC`), so a cell never keeps an object alive.
   """

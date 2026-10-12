@@ -1061,19 +1061,20 @@ defmodule Browser.JS.Obj do
   end
 
   @doc """
-  Whether the fast record `n` is the fast record `o` with one more key, `key`, at the end
-  with the default attributes: the result of an add of `key` by an assignment. An add cell
-  of an inline cache (step A3) gets the shape of `n` only when this is true, because a hit
-  of the cell appends one value for that key.
+  The number of keys of the fast record `n` when it is the fast record `o` with one more
+  key, `key`, at the end with the default attributes (the result of an add of `key` by an
+  assignment), or `nil`. An add cell of an inline cache (step A3) gets the shape of `n`
+  only in that case, because a hit of the cell appends one value for that key.
   """
-  def added?(o, n, key) do
+  def added(o, n, key) do
     case {o, n} do
       {%{shape: {:js_shape, _, _, keys, _, _, _}},
-       %{shape: {:js_shape, _, %{^key => pos}, new, bits, _, _}}} ->
-        pos == tuple_size(new) and pos == tuple_size(keys) + 1 and :erlang.element(pos, bits) == 7
+       %{shape: {:js_shape, _, %{^key => pos}, new, bits, _, _}}}
+      when pos == tuple_size(new) and pos == tuple_size(keys) + 1 ->
+        if :erlang.element(pos, bits) == 7, do: pos
 
       _ ->
-        false
+        nil
     end
   end
 

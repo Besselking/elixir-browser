@@ -235,8 +235,14 @@ defmodule Browser.JS.Compile do
     * When the count goes above 400,000 (about 25 to 60 MB on a 64-bit VM), all the
       entries of the cache go. Then the count starts again. `erases` counts these events.
     * Each site of an inline cache counts as one more node, because its cell (a tuple of
-      up to 8 elements under its own process key) is memory of the cache. An erase of the
-      cache erases all the cells too (`erase_entries/0`).
+      up to 8 small elements under its own process key) is memory of the cache. An erase
+      of the cache erases all the cells too (`erase_entries/0`).
+    * An add cell (step A3) also keeps a whole shape, the shape after the add. A shape of
+      `n` keys is about `16 + 10 * n` words, and an erase of the transition table does not
+      free it while the cell lives. So each write of an add cell counts `(16 + 10 * n) / 8`
+      more nodes (`charge/1`, from `Interp.ic_learn_add/5`). The count is high when many
+      cells share one shape, but it is never low, so the budget of the cache is also a
+      bound of the shapes that the cells keep.
     * The count does not include the syntax that a closure of the tree keeps (for example
       a nested function). The heap keeps that syntax also while a function of the parse
       is alive.
@@ -384,6 +390,13 @@ defmodule Browser.JS.Compile do
     if n > @max_nodes, do: throw(:jsc_too_big)
     :erlang.put(:jsc_count, n)
   end
+
+  @doc """
+  Adds `n` nodes to the count of the cache, for memory that the cache keeps outside its
+  entries: the shape that an add cell of an inline cache keeps (see "Memory bound"). Over
+  the budget, all the entries and the cells go, as for a new entry.
+  """
+  def charge(n), do: budget(n)
 
   # Adds the `n` nodes of a new entry to the count of the cache. Over the budget, all the
   # entries go, and the count starts again with the new entry. A function object keeps

@@ -746,6 +746,35 @@ defmodule Browser.JS.ShapesTest do
       assert result == {true, true, true, true}
     end
 
+    test "the shapes that add cells keep count in the budget of the code cache" do
+      # (each function adds 100 keys that no other object has, so each add cell keeps a
+      # shape of its own; after an erase of the transition table and a collection, the
+      # cells are the only holders of these shapes, and the budget must bound them)
+      budget = 4_000
+
+      fns =
+        for f <- 1..10 do
+          adds = Enum.map_join(1..100, " ", &"o.f#{f}_#{&1} = #{&1};")
+          "function f#{f}(){ var o = {}; #{adds} return 1 } for (var i = 0; i < 20; i++) f#{f}();"
+        end
+
+      words =
+        with_compile(true, fn ->
+          inspect_run("", fn ->
+            :erlang.put(:jsc_budget_max, budget)
+            run_here(Enum.join(fns, " "))
+            Shape.erase()
+            GC.collect()
+            {:erts_debug.size(cells()), Enum.count(cells(), &(cell_kind(&1) == :add))}
+          end)
+        end)
+
+      # (a node of the cache is 8 to 18 words)
+      assert {w, adds} = words
+      assert adds > 0
+      assert w < 20 * budget
+    end
+
     test "the cells go with the code cache: at an erase of the budget and with JS_COMPILE=0" do
       erased =
         with_compile(true, fn ->
