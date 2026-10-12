@@ -238,6 +238,12 @@ defmodule Browser.JS.DatamodelCorpus do
     # wrong value at the next add)
     {"dm add cells typed array on the chain",
      ~S|function w(o, v){ o.Infinity = v; return o } function z(o, v){ o.z = v; return o } function f(){ var r = []; var ta = new Uint8Array(2), tb = new Int8Array(2); var a = w(Object.create(ta), 1), b = w(Object.create(ta), 2), c = w(Object.create(ta), 3); b.k = 'K'; r.push(JSON.stringify(Object.getOwnPropertyNames(b)), b.k, String(b.Infinity)); for (var i = 0; i < 4; i++) { var ot = w(Object.create(tb), i); z(ot, 'z' + i); r.push(Object.keys(ot) + ':' + String(ot.Infinity) + ':' + ot.z) } for (var i = 0; i < 3; i++) { var p = w({}, i); z(p, 'p' + i); r.push(Object.keys(p) + ':' + p.Infinity + ':' + p.z) } console.log(r.join(' ')) } f()|},
+    # (a chain that ends in null gets a prototype with a setter after the add cell hits)
+    {"dm add cells chain end gets a prototype",
+     ~S|function add(o, v){ o.k = v; return o } function f(){ var r = [], log = []; var n = Object.create(null); for (var i = 0; i < 3; i++) r.push(JSON.stringify(add(Object.create(n), i))); Object.setPrototypeOf(n, {set k(v){ log.push('setter ' + v) }}); r.push(JSON.stringify(add(Object.create(n), 9))); var m = Object.create(null); var mid = Object.create(m); for (var i = 0; i < 3; i++) r.push(JSON.stringify(add(Object.create(mid), i))); Object.setPrototypeOf(m, Object.create({set k(v){ log.push('deep ' + v) }})); r.push(JSON.stringify(add(Object.create(mid), 8))); console.log(r.join(' '), '/', log.join()) } f()|},
+    # (the add site runs 3 times or more with a proxy on the chain: each add calls the trap)
+    {"dm add cells proxy on the chain in a loop",
+     ~S|function add(o, v){ o.k = v; return o } function f(){ var r = [], log = []; var px = new Proxy({}, {set(t, k, v, rc){ log.push('trap ' + String(k) + ' ' + v); return Reflect.set(t, k, v, rc) }}); var a = Object.create(px); for (var i = 0; i < 4; i++) r.push(JSON.stringify(add(Object.create(a), i))); for (var i = 0; i < 3; i++) r.push(JSON.stringify(add(Object.create(px), i))); console.log(r.join(' '), '/', log.join()) } f()|},
     # ── A4: more fast records ──────────────────────────────────
     # (functions, the named keys of arrays, class prototypes and the built-in objects are
     # fast records; a site sees records of each kind, and user code changes the built-in
