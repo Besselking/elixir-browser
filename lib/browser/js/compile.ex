@@ -76,7 +76,9 @@ defmodule Browser.JS.Compile do
   `Interp.put_named/3`, which is the one of `Interp.get/2` and `Interp.put/3` without the
   conversion of the key. The key `"length"` also goes to these functions (the design kept
   it on `get/2`): their class dispatch has the `length` clauses of arrays, strings and
-  functions.
+  functions. A write site that adds a new key, as `this.x = v` in a constructor does, can
+  get an add cell (step A3), which gives the record its new shape with no walk of the
+  prototype chain.
 
   An object literal with constant keys and plain values gets the shape of its keys when it
   compiles (step A3). When it runs, it gets the id of the object first, then it evaluates

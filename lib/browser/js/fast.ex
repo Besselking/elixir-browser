@@ -18,7 +18,7 @@ defmodule Browser.JS.Fast do
   @check Application.compile_env(:browser, :js_resolve_check, false)
 
   # The names of all fast paths. The oracle turns them all off with this list.
-  @names [:has_own, :update, :compound, :literal, :add, :iter, :ic]
+  @names [:has_own, :update, :compound, :literal, :add, :iter, :ic, :ic_add]
 
   @doc false
   def names, do: @names

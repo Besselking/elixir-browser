@@ -355,22 +355,30 @@ defmodule Browser.JS.ShapesTest do
       var before = mk();
       """
 
-      result =
-        inspect_run(src, fn ->
-          Shape.erase()
+      # (with compilation on, the closure of `mk` keeps the shape of its literal and the add
+      # cell of `o.b` keeps its child, so the records that `mk` makes after the erase have
+      # the shapes of the records from before it; on the tree walker the adds make new
+      # shapes)
+      for compile? <- [false, true] do
+        result =
+          with_compile(compile?, fn ->
+            inspect_run(src, fn ->
+              Shape.erase()
 
-          {:ok, program} =
-            Parser.parse("var after = mk(); after.c = 3; before.c = 4;", resolve: 4)
+              {:ok, program} =
+                Parser.parse("var after = mk(); after.c = 3; before.c = 4;", resolve: 4)
 
-          Interp.run_program(program, true)
-          b = global_record("before")
-          a = global_record("after")
+              Interp.run_program(program, true)
+              b = global_record("before")
+              a = global_record("after")
 
-          {Obj.enum_names(b), Obj.enum_names(a), Obj.own_value(b, "c"), Obj.own_value(a, "c"),
-           elem(b.shape, 1) != elem(a.shape, 1), well_formed?(a) and well_formed?(b)}
-        end)
+              {Obj.enum_names(b), Obj.enum_names(a), Obj.own_value(b, "c"), Obj.own_value(a, "c"),
+               elem(b.shape, 1) == elem(a.shape, 1), well_formed?(a) and well_formed?(b)}
+            end)
+          end)
 
-      assert result == {["a", "b", "c"], ["a", "b", "c"], 4, 3, true, true}
+        assert result == {["a", "b", "c"], ["a", "b", "c"], 4, 3, compile?, true}
+      end
     end
 
     test "the transition table and its counters are not roots of the collector" do
@@ -416,6 +424,7 @@ defmodule Browser.JS.ShapesTest do
     defp cell_kind({_, _}), do: :generic
     defp cell_kind({_, _, _}), do: :own
     defp cell_kind({_, :get, _, _}), do: :own_getter
+    defp cell_kind({_, {:js_shape, _, _, _, _, _, _}, protos, _}) when is_list(protos), do: :add
     defp cell_kind({_, _, _, _, _}), do: :proto
     defp cell_kind({_, :get, _, _, _, _}), do: :proto_getter
     defp cell_kind({_, _, _, _, _, _, _}), do: :proto2
@@ -463,6 +472,7 @@ defmodule Browser.JS.ShapesTest do
                Enum.sort([
                  :mega,
                  :generic,
+                 :add,
                  :own,
                  :own_getter,
                  :proto,
@@ -559,6 +569,41 @@ defmodule Browser.JS.ShapesTest do
                   "third",
                   "third"
                 ], true, :proto, true, :proto, 2}
+    end
+
+    test "an add cell sees a setter that a new heap has at the same prototype id" do
+      result =
+        with_compile(true, fn ->
+          HeapOracle.in_process(fn ->
+            site = Shape.new_site()
+
+            heap = fn setup ->
+              Interp.init(1_000_000)
+              Builtins.install()
+              run_here(setup)
+              a = Interp.new_object()
+              b = Interp.new_object()
+              Interp.put_ic(a, "k", 1.0, site)
+              Interp.put_ic(b, "k", 2.0, site)
+
+              {Interp.get(a, "k"), Interp.get(b, "k"), cell_kind(:erlang.get(site)),
+               global("log"), Interp.proto(:object)}
+            end
+
+            {a1, b1, kind1, log1, op1} = heap.("var log = 'none';")
+
+            # (`Object.prototype` has the same id in the new heap, and a setter of the key)
+            {a2, b2, kind2, log2, op2} =
+              heap.(
+                "var log = 'none'; Object.defineProperty(Object.prototype, 'k', {set(v){ log = 'set ' + v }, configurable: true});"
+              )
+
+            {[a1, b1, kind1, log1], [a2, b2, kind2, log2], op1 == op2}
+          end)
+        end)
+
+      assert result ==
+               {[1.0, 2.0, :add, "none"], [:undefined, :undefined, :generic, "set 2"], true}
     end
 
     test "a literal keeps its shape after an erase of the table and in a new heap" do

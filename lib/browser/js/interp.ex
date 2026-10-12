@@ -2360,7 +2360,8 @@ defmodule Browser.JS.Interp do
   # path of `get_named/2` or `put_named/3`. A hit makes no change of the heap and calls
   # nothing that the generic path would not call, so the steps, the heap ids and the
   # results of the oracles stay the same. In the check build each hit also runs the
-  # generic path and compares (`Fast.shadow/3`).
+  # generic path and compares (`Fast.shadow/3`). The add cells of step A3 are a fast path
+  # of their own, `:ic_add`, which needs `:ic` too.
 
   # The misses that a cell can count before it becomes `:mega`.
   @ic_misses 16
@@ -2609,16 +2610,20 @@ defmodule Browser.JS.Interp do
 
   # The write of `put_ic/4` and `strict_put_ic/4` to the object with the id `id`, in one
   # place, as `named_write/5` is for `put_named/3` and `strict_put_named/3`. `o` is the
-  # entry at `id`. The part that looks at the cell gives one of three results:
+  # entry at `id`. The part that looks at the cell gives one of four results:
   #
-  #   * `:hit`: the value is stored. A hit writes a writable data property, which cannot
-  #     fail, so the strict write does not set and read the flag `:js_put_failed`, and the
-  #     shadow run compares it with the sloppy `put_obj/5`.
+  #   * `:hit`: the value is stored. A hit writes a writable data property, or adds a new
+  #     key through an add cell (step A3). These writes cannot fail, so the strict write
+  #     does not set and read the flag `:js_put_failed`, and the shadow run compares them
+  #     with the sloppy `put_obj/5`.
   #   * `:slow`: a cell of the generic path, or a miss. The shape of the record tells that
   #     it does not hold the key as a writable data property (an add, a setter, a key that
   #     is not writable), or the miss wrote a new cell. The fast update of `named_write/5`
   #     cannot apply, and its search of the key would only cost more, so the write goes to
   #     `put_obj/5` or `strict_put_obj/4` at once, with the record that it read.
+  #   * `{:add, protos}`: a miss of an add that an add cell can do (`ic_add_chain/2`). The
+  #     write takes the generic path as for `:slow`, and then the cell gets the new shape
+  #     of the record (`ic_learn_add/4`).
   #   * `:named`: `:mega`, a record that is not fast, or the fast path `:ic` off. The write
   #     takes `named_write/5`, so that it costs no more than the write of `put_named/3`.
   #
@@ -2656,6 +2661,21 @@ defmodule Browser.JS.Interp do
                 {^sid, _} ->
                   :slow
 
+                {^sid, child, protos, _} ->
+                  if :erlang.map_get(:class, o) == :object and
+                       ic_clear(:erlang.map_get(:proto, o), protos, unquote(key)) do
+                    _ =
+                      Fast.shadow(
+                        unquote(id),
+                        ic_add_store(unquote(id), o, child, vals, unquote(v)),
+                        put_obj(unquote(id), o, unquote(key), unquote(v), true)
+                      )
+
+                    :hit
+                  else
+                    ic_write_miss(o, sid, unquote(key), unquote(site))
+                  end
+
                 :mega ->
                   :named
 
@@ -2671,9 +2691,19 @@ defmodule Browser.JS.Interp do
         end
 
       case result do
-        :hit -> unquote(v)
-        :slow -> unquote(slow)
-        :named -> named_write(unquote(id), o, unquote(key), unquote(v), unquote(strict?))
+        :hit ->
+          unquote(v)
+
+        :slow ->
+          unquote(slow)
+
+        :named ->
+          named_write(unquote(id), o, unquote(key), unquote(v), unquote(strict?))
+
+        {:add, protos} ->
+          r = unquote(slow)
+          ic_learn_add(unquote(site), unquote(id), o, protos)
+          r
       end
     end
   end
@@ -2701,9 +2731,134 @@ defmodule Browser.JS.Interp do
   # A miss of a write of `key` to the fast record `o` with the shape `sid`: the cell of the
   # site gets the position of the key when the record holds it as a writable data property
   # (`ic_write_cell/3`). It gives `:slow`, so that the generic write of `ic_write/6` runs.
+  # When the write is an add that an add cell can do (`ic_add_chain/2`), it gives
+  # `{:add, protos}`, and the cell is written after the generic write (`ic_learn_add/4`).
   defp ic_write_miss(o, sid, key, site) do
-    ic_learn(site, ic_write_cell(o, sid, key))
-    :slow
+    case ic_add_chain(o, key) do
+      nil ->
+        ic_learn(site, ic_write_cell(o, sid, key))
+        :slow
+
+      protos ->
+        {:add, protos}
+    end
+  end
+
+  # ── add cells (step A3) ────────────────────────────────────
+  # An add cell `{sid, child, protos, n}` adds a new key at a named write site: a record of
+  # the class `:object` with the shape `sid` gets the shape `child` and the new value at
+  # the end, with no walk of `inherited_set/2` and no read of the transition table.
+  # `protos` is the list of the ids of the prototype chain of the record when the miss
+  # made the cell, from its prototype up to the end of the chain.
+  #
+  # The generic path adds the key only when no record of the chain holds the key and no
+  # record of the chain is a proxy (`inherited_set/2` gives `:none`), and the record is
+  # extensible. A typed array of the chain can also stop the add, but only of a numeric
+  # key, and an add cell is never made for such a key. So a hit tests these conditions
+  # again, on the records that are at the ids now (`ic_clear/3`): each prototype link
+  # must still be the id of the cell, and each record there must not hold the key and
+  # must not be a proxy. This test is exact for any record, in fast mode or in dictionary
+  # mode, so `Object.prototype` (a dictionary record) can be on the chain of a cell. A
+  # setter or a key that is not writable that a later change puts on the chain is an own
+  # key there, so the cell misses. The shape `sid` tells that the record does not hold
+  # the key and is extensible. A freed id gives `:undefined`, which misses, and in a new
+  # heap the test reads the records of the new heap.
+  #
+  # The cell holds the shape `child` that the generic add gave. The shape stays correct
+  # when the transition table is erased: a later generic add then makes a new shape with
+  # the same keys, and the two records hold the same properties.
+
+  # The longest prototype chain of an add cell.
+  @ic_add_depth 4
+
+  # The prototype chain of the add of `key` to the fast record `o`, as a list of ids, when
+  # an add cell can do the add (see above), or `nil`. The record must be a plain object
+  # that is extensible and does not hold the key.
+  defp ic_add_chain(o, key) do
+    if Fast.on?(:ic_add) and ic_plain?(o) and Obj.fast_slot(o, key) == nil and
+         Obj.extensible?(o) and not Browser.JS.TypedArrays.numeric_key?(key),
+       do: ic_chain(:erlang.map_get(:proto, o), key, 0),
+       else: nil
+  end
+
+  # The ids of the chain from the prototype link `proto`, when no record there holds `key`
+  # and none is a proxy, or `nil`.
+  defp ic_chain({:obj, pid}, key, depth) when depth < @ic_add_depth do
+    case :erlang.get(pid) do
+      p when is_map(p) and not Obj.has_own?(p, key) and not is_map_key(p, :proxy) ->
+        case ic_chain(:erlang.map_get(:proto, p), key, depth + 1) do
+          nil -> nil
+          rest -> [pid | rest]
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp ic_chain({:obj, _}, _key, _depth), do: nil
+  defp ic_chain(_end, _key, _depth), do: []
+
+  # Whether the chain from the prototype link `proto` is still the chain `protos` of an add
+  # cell with no record that holds `key` and no proxy (see above). The end of a chain is any
+  # link that is not an object, as in `inherited_set/2`. The chains of one and two
+  # prototypes (`{}` and `new F()`) are inline, so that they cost no call.
+  @compile {:inline, ic_clear: 3}
+  defp ic_clear(proto, protos, key) do
+    case protos do
+      [p1] -> ic_end?(ic_step(proto, p1, key))
+      [p1, p2] -> ic_end?(ic_step(ic_step(proto, p1, key), p2, key))
+      _ -> ic_clear_list(proto, protos, key)
+    end
+  end
+
+  # The prototype link of the record at `pid` when `link` is `{:obj, pid}` and that record
+  # does not hold `key` and is not a proxy, else `:miss`.
+  @compile {:inline, ic_step: 3}
+  defp ic_step(link, pid, key) do
+    case link do
+      {:obj, ^pid} ->
+        case :erlang.get(pid) do
+          p when is_map(p) and not Obj.has_own?(p, key) and not is_map_key(p, :proxy) ->
+            :erlang.map_get(:proto, p)
+
+          _ ->
+            :miss
+        end
+
+      _ ->
+        :miss
+    end
+  end
+
+  # Whether the link `link` is the end of a chain.
+  @compile {:inline, ic_end?: 1}
+  defp ic_end?(link), do: link != :miss and not is_tuple(link)
+
+  defp ic_clear_list(link, [], _key), do: ic_end?(link)
+
+  defp ic_clear_list(link, [pid | rest], key),
+    do: ic_clear_list(ic_step(link, pid, key), rest, key)
+
+  # The store of an add hit: the record `o` with the shape `child` and the value `v` at the
+  # end of its values `vals`.
+  @compile {:inline, ic_add_store: 5}
+  defp ic_add_store(id, o, child, vals, v) do
+    :erlang.put(id, Obj.put_added(o, child, vals, v))
+    v
+  end
+
+  # The cell of a miss of an add, after the generic write of the add to the record `o` at
+  # `id` with the prototype chain `protos` (`ic_add_chain/2`): the add cell with the new
+  # shape of the record. The record is in dictionary mode when the add passed a limit of
+  # `Browser.JS.Shape`. Then the cell gets no shape: it is `{nil}`, which matches no
+  # record, so the next record of the shape misses again. (the next record can get a
+  # shape there, see "The limits" in `Browser.JS.Shape`)
+  defp ic_learn_add(site, id, Obj.fast_record(sid, _), protos) do
+    case :erlang.get(id) do
+      Obj.fast_record(_, _) = n -> ic_learn(site, {sid, Obj.shape(n), protos})
+      _ -> ic_learn(site, {nil})
+    end
   end
 
   # The cell of a write of `key` to the fast record `o` with the shape `sid` (without the

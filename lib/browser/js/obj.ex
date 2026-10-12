@@ -964,6 +964,25 @@ defmodule Browser.JS.Obj do
     end
   end
 
+  @doc """
+  The fast record `o`, whose values are `vals`, with the shape `child` and the new value `v`
+  at the end. It is the add of `add_default/3` without the read of the transition table:
+  the add cell of an inline cache (step A3) holds `child`, which is the child of the shape
+  of `o` with the new key at the end.
+  """
+  defmacro put_added(o, child, vals, v) do
+    quote do
+      %{
+        unquote(o)
+        | shape: unquote(child),
+          vals: :erlang.append_element(unquote(vals), unquote(v))
+      }
+    end
+  end
+
+  @doc "The shape of the fast record `o`."
+  defmacro shape(o), do: quote(do: :erlang.map_get(:shape, unquote(o)))
+
   @doc "The `sid` of the shape of `o`, or `nil` when `o` is not a fast record."
   def shape_id(o) do
     case o do

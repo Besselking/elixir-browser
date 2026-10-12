@@ -26,11 +26,12 @@ defmodule Browser.JS.Shape do
 
   A shape holds no heap id, so the garbage collector does not walk it, and the compiled
   code can keep a shape that it made when it compiled: the shape of an object literal
-  (`Obj.literal_keys/1`, step A3). The term stays correct after an erase of the
-  transition table and in a new heap, so the closure keeps it. After an erase, the next
-  generic add from the root can make a new shape with the same keys, which holds the same
-  properties. An accessor is a value `{:accessor, getter, setter}` in `vals`, as in a
-  dictionary record, so a shape does not tell an accessor from a data property.
+  (`Obj.literal_keys/1`, step A3) and the shape after an add in an add cell. The term
+  stays correct after an erase of the transition table and in a new heap, so the closure
+  keeps it. After an erase, the next generic add from the root can make a new shape with
+  the same keys, which holds the same properties. An accessor is a value
+  `{:accessor, getter, setter}` in `vals`, as in a dictionary record, so a shape does not
+  tell an accessor from a data property.
 
   ## The transition table
 
@@ -109,16 +110,22 @@ defmodule Browser.JS.Shape do
   | `{sid, :get, pid, psid, pos, n}` | getter of the prototype | the same, and the value is an accessor |
   | `{sid, pid1, psid1, pid2, psid2, pos, n}` | data of the prototype of the prototype | as above for `pid1`, and the prototype of `pid1` is `{:obj, pid2}` with the shape `psid2` |
   | `{sid, :get, pid1, psid1, pid2, psid2, pos, n}` | a getter there | the same, and the value is an accessor |
+  | `{sid, child, protos, n}` | add (step A3) | the record has `sid` and the class `:object`, its prototype chain is the list of ids `protos`, and no record of the chain holds the key or is a proxy |
   | `{sid, n}` | the generic path | the record has `sid`: the site takes the generic path, and it does not look for a cell again |
+  | `{nil, n}` | none | never: an add went to dictionary mode at a limit, so the next record of the shape misses again |
   | `:mega` | the generic path | always: the site had 16 misses |
 
-  A write site uses only `{sid, pos, n}` (a writable data property of the record) and
-  `{sid, n}`. A cell is made only from a fast record of the class `:object` and from fast
-  prototypes, after the generic path found the key there. A dictionary record, an array, a
-  function, a host object and a proxy never get a cell, and every operation on them takes
-  the generic path. On a miss, the site takes the generic path and writes the cell again.
-  After 16 misses the cell becomes `:mega`, so that a site that sees many shapes does not
-  pay for the search of a cell at each run.
+  A write site uses only `{sid, pos, n}` (a writable data property of the record), the add
+  cell, `{sid, n}` and `{nil, n}`. An add cell gives the record the shape `child` (the
+  shape after the add) and the new value at the end, with no walk of the prototype chain
+  and no read of the transition table (the part "add cells" of `Browser.JS.Interp` tells
+  why its test of the chain is exact). A cell is made only from a fast record of the class `:object` and from fast
+  prototypes, after the generic path found the key there; the chain of an add cell can
+  hold any record that is not a proxy, also `Object.prototype`, which is a dictionary
+  record. A dictionary record, an array, a function, a host object and a proxy never get a
+  cell, and every operation on them takes the generic path. On a miss, the site takes the
+  generic path and writes the cell again. After 16 misses the cell becomes `:mega`, so
+  that a site that sees many shapes does not pay for the search of a cell at each run.
 
   The count is of all the misses in the life of the site, not of the misses in a row. A
   hit does not set it back to zero, and `Interp.init/1` does not either. Thus a site that
