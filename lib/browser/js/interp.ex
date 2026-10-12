@@ -2384,17 +2384,23 @@ defmodule Browser.JS.Interp do
         if Fast.on?(:ic) do
           case :erlang.get(site) do
             {^sid, :get, pos, _} ->
+              Fast.count(:get_own)
               ic_getter(:erlang.element(pos, vals), obj, o, sid, key, site)
 
             {^sid, :get, pid, psid, pos, _} ->
               case ic_proto(o, pid, psid) do
-                nil -> ic_getter_miss(obj, o, sid, key, site)
-                p -> ic_getter(Obj.slot(p, pos), obj, o, sid, key, site)
+                nil ->
+                  ic_getter_miss(obj, o, sid, key, site)
+
+                p ->
+                  Fast.count(:get_proto)
+                  ic_getter(Obj.slot(p, pos), obj, o, sid, key, site)
               end
 
             {^sid, :get, pid1, psid1, pid2, psid2, pos, _} ->
               with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
                    p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                Fast.count(:get_proto)
                 ic_getter(Obj.slot(p2, pos), obj, o, sid, key, site)
               else
                 _ -> ic_getter_miss(obj, o, sid, key, site)
@@ -2405,28 +2411,39 @@ defmodule Browser.JS.Interp do
                 case cell do
                   {^sid, pos, _} ->
                     case :erlang.element(pos, vals) do
-                      {:accessor, _, _} -> ic_read_miss(o, sid, key, site)
-                      v -> Fast.shadow(nil, v, get_obj(id, o, key, true))
+                      {:accessor, _, _} ->
+                        ic_read_miss(o, sid, key, site)
+
+                      v ->
+                        Fast.count(:own)
+                        Fast.shadow(nil, v, get_obj(id, o, key, true))
                     end
 
                   {^sid, pid, psid, pos, _} ->
                     case ic_proto(o, pid, psid) do
-                      nil -> ic_read_miss(o, sid, key, site)
-                      p -> ic_data(Obj.slot(p, pos), id, o, sid, key, site)
+                      nil ->
+                        ic_read_miss(o, sid, key, site)
+
+                      p ->
+                        Fast.count(:proto1)
+                        ic_data(Obj.slot(p, pos), id, o, sid, key, site)
                     end
 
                   {^sid, pid1, psid1, pid2, psid2, pos, _} ->
                     with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
                          p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                      Fast.count(:proto2)
                       ic_data(Obj.slot(p2, pos), id, o, sid, key, site)
                     else
                       _ -> ic_read_miss(o, sid, key, site)
                     end
 
                   {^sid, _} ->
+                    Fast.count(:generic)
                     @ic_generic
 
                   :mega ->
+                    Fast.count(:mega)
                     @ic_generic
 
                   _ ->
@@ -2447,6 +2464,7 @@ defmodule Browser.JS.Interp do
         deref(id)
 
       o ->
+        Fast.count(:dict)
         get_obj(id, o, key, true)
     end
   end
@@ -2524,6 +2542,7 @@ defmodule Browser.JS.Interp do
   # site gets the place where the generic read finds the key (`ic_read_cell/3`). It gives
   # `@ic_generic`, so that the generic read of `get_ic/3` gives the value.
   defp ic_read_miss(o, sid, key, site) do
+    Fast.count(:miss)
     ic_learn(site, ic_read_cell(o, sid, key))
     @ic_generic
   end
@@ -2648,6 +2667,8 @@ defmodule Browser.JS.Interp do
                       ic_write_miss(o, sid, unquote(key), unquote(site))
 
                     _ ->
+                      Fast.count(:put_own)
+
                       _ =
                         Fast.shadow(
                           unquote(id),
@@ -2664,6 +2685,8 @@ defmodule Browser.JS.Interp do
                 {^sid, child, protos, _} ->
                   if :erlang.map_get(:class, o) == :object and
                        ic_clear(:erlang.map_get(:proto, o), protos, unquote(key)) do
+                    Fast.count(:add)
+
                     _ =
                       Fast.shadow(
                         unquote(id),

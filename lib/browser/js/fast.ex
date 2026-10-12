@@ -69,8 +69,37 @@ defmodule Browser.JS.Fast do
     end
   end
 
+  @doc false
+  # Counts one event `kind` of the inline caches (a hit of a kind of cell, a miss, a read
+  # of a record that is not fast), so that a run of a page can tell how many reads each
+  # kind of cell takes. Only the check build counts, and only when the named ETS table
+  # `:js_ic_count` exists: a script makes the table before the run and prints it after. In
+  # the normal build the macro gives no call, so the inline caches cost the same as
+  # without it.
+  defmacro count(kind) do
+    if @check do
+      quote do
+        Browser.JS.Fast.check_count(unquote(kind))
+      end
+    else
+      quote do
+        _ = unquote(kind)
+      end
+    end
+  end
+
   if @check do
     require Browser.JS.Obj
+
+    @doc false
+    # `count/1` of the check build. The table is public, so the process of a script and the
+    # process that made the table share it.
+    def check_count(kind) do
+      if :ets.whereis(:js_ic_count) != :undefined,
+        do: :ets.update_counter(:js_ic_count, kind, 1, {kind, 0})
+
+      :ok
+    end
 
     @doc false
     # `on?/1` of the check build. When the process key `:js_fast_hits` holds a map, it
