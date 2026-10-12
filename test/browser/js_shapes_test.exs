@@ -107,6 +107,23 @@ defmodule Browser.JS.ShapesTest do
       )
     end
 
+    test "the rows of steps A3 and A4 give the output of node" do
+      # (the oracles compare two modes of the engine; this test also finds a fault that
+      # gives the same wrong output in the two modes)
+      rows = Map.new(Browser.JS.DatamodelCorpus.rows(), fn {name, src, _} -> {name, src} end)
+      expected = Browser.JS.DatamodelCorpus.node_output()
+      assert length(expected) >= 20
+
+      programs = for {name, _} <- expected, do: {name, Map.fetch!(rows, name), []}
+
+      outputs =
+        for out <- HeapOracle.run_all(programs, shapes(true), []),
+            do: Enum.map_join(out.console, "\n", fn {_, text} -> text end)
+
+      for {{name, want}, got} <- Enum.zip(expected, outputs),
+          do: assert({name, got} == {name, want})
+    end
+
     test "each fast record of the corpus has a correct form, and the switch turns them off" do
       count = fn ->
         rs = records()
