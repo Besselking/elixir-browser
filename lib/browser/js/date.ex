@@ -6,7 +6,7 @@ defmodule Browser.JS.Date do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
-  require Browser.JS.Obj, as: Obj
+  alias Browser.JS.Obj
 
   @ms_day 86_400_000
   @max_time 8.64e15

@@ -6,7 +6,7 @@ defmodule Browser.JS.FunctionProto do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
-  require Browser.JS.Obj, as: Obj
+  alias Browser.JS.Obj
 
   @has_instance {:symbol, :hasInstance, "Symbol.hasInstance"}
 

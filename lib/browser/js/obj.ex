@@ -1,9 +1,10 @@
 defmodule Browser.JS.Obj do
   @moduledoc """
-  The record API for the own properties of a JavaScript object (data-model step A0a).
+  The record API for the own properties of a JavaScript object (data-model steps A0a and
+  A0b).
 
   This module is the only module that reads or writes the fields of a heap record that hold
-  own properties: `props`, `keys`, `attrs`, `horder`, `hpos`, `ext`, `frozen` and `sealed`.
+  own properties: `props`, `keys`, `skeys`, `syms`, `attrs`, `ext`, `frozen` and `sealed`.
   The other modules call the functions and macros here. Thus a later step (A1, fast records
   with shapes) can change the representation in this module alone.
 
@@ -12,17 +13,22 @@ defmodule Browser.JS.Obj do
   * `props`: a map of each own key to its value, or to `{:accessor, getter, setter}` for an
     accessor. A key is a string, a symbol `{:symbol, id, description}` or a private name
     `{:private, ref}`.
-  * `keys`: the enumerable keys, newest first. A string key that an assignment makes is in
-    it. A symbol that `defineProperty` makes enumerable is in it too, so the readers filter
-    it.
+  * `keys`: the enumerable keys, newest first. It holds the enumerable symbols too, so the
+    readers of the names filter it.
+  * `skeys`: every string key, enumerable or not, newest first. Only a record that got a
+    string key that is not enumerable has this field. A record without it has only
+    enumerable string keys, so `keys` gives the order of all its string keys.
+  * `syms`: every symbol key, newest first. Only a record that got a symbol key has this
+    field.
   * `attrs`: a map of a key (or an array element index) to its non-default attributes, a
     map with some of `w`, `c` and `e`. A key that is not in it is writable and
-    configurable. A record with no `attrs` field has only default attributes.
-  * `horder` and `hpos`: the creation order of the keys that are not enumerable, and the
-    count of named enumerable keys at the time that each was made. `Object.getOwnPropertyNames`
-    uses them to put a hidden key back among the enumerable keys.
+    configurable. A record with no `attrs` field has only default attributes. A key is
+    enumerable when it is in `keys`: an `e` in its entry has no effect. An element index has
+    no place in `keys`, so its `e` is in `attrs`.
   * `ext: false`: the object is not extensible. `frozen: true` and `sealed: true`: an array
     whose elements are frozen or sealed.
+
+  A private name is in `props` alone: it has no place in the key order.
 
   The elements of an array (`items`, `len`) are not in this API (part B of the shapes
   plan). Their attributes share the `attrs` map, so `attr_flags/2`,
@@ -30,11 +36,21 @@ defmodule Browser.JS.Obj do
 
   ## The order of the keys
 
-  The callers get the order of the keys from `enum_names/1` (the enumerable string keys in
-  creation order), `plain_names/1` (the same list for a plain object, or `nil`),
-  `own_names/2` and `split_names/1` (all string keys, for `Object.getOwnPropertyNames`).
-  These give the order, not the stored lists, so that a change of the stored order changes
-  this module alone.
+  The order is the order of OrdinaryOwnPropertyKeys: the string keys in creation order,
+  then the symbols in creation order. The callers put the array indexes first, in
+  ascending order. A key keeps its place when its value or its attributes change, also
+  when it becomes enumerable again. A key that is deleted loses its place, and a key that
+  is made again goes to the end.
+
+  The callers get the order from `enum_names/1` (the enumerable string keys),
+  `plain_names/1` (the same list for a plain object, or `nil`), `string_keys/1` (all
+  string keys) and `symbol_keys/1` (all symbols). These give the order, not the stored
+  lists, so that a change of the stored lists changes this module alone.
+
+  The lists are separate for the cost. An assignment, a literal, `Object.keys` and for-in
+  read and write `keys` alone, as before the exact order. Only a record that has a string
+  key that is not enumerable pays for `skeys`, and only a record with a symbol pays for
+  `syms`.
 
   ## Cost
 
@@ -55,7 +71,7 @@ defmodule Browser.JS.Obj do
   allow-list below. So the command prints nothing. `test/browser/js_obj_test.exs` runs
   the same search with the same patterns, and it fails when they are not the same as here.
 
-      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b(?![?!(])|\\b(props|keys|attrs|horder|hpos|ext|frozen|sealed):|(?<![{\\w:]):(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:' | grep -vP '^lib/browser/js/dom\\.ex:\\d+:.*((\\bn|&1)\\.(attrs|props)\\b|node\\(this_nid\\(this\\)\\)\\.attrs\\b|\\b(attrs|props): (\\[\\]|%\\{\\}|%\\{"value"|visible\\b|attrs\\b|props\\b)|%\\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\\.ex:\\d+:(\\s*:keys ->|.*_iterator\\(this, (:\\w+, )?:keys\\))|^lib/browser/js/collections\\.ex:\\d+:.*(has: has, keys: keys\\}|call\\(rec\\.keys, rec\\.obj, \\[\\]\\))'
+      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|skeys|syms|attrs|ext|frozen|sealed)\\b(?![?!(])|\\b(props|keys|skeys|syms|attrs|ext|frozen|sealed):|(?<![{\\w:]):(props|keys|skeys|syms|attrs|ext|frozen|sealed)\\b' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:' | grep -vP '^lib/browser/js/dom\\.ex:\\d+:.*((\\bn|&1)\\.(attrs|props)\\b|node\\(this_nid\\(this\\)\\)\\.attrs\\b|\\b(attrs|props): (\\[\\]|%\\{\\}|%\\{"value"|visible\\b|attrs\\b|props\\b)|%\\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\\.ex:\\d+:(\\s*:keys ->|.*_iterator\\(this, (:\\w+, )?:keys\\))|^lib/browser/js/collections\\.ex:\\d+:.*(has: has, keys: keys\\}|call\\(rec\\.keys, rec\\.obj, \\[\\]\\))'
 
   The allow-list (the reason for each):
 
@@ -74,23 +90,24 @@ defmodule Browser.JS.Obj do
 
   The garbage collector (`Browser.JS.GC`) names no field. It walks every map generically,
   but for a heap record (`heap_record?/1`) it skips the fields that `no_refs?/1` names,
-  because the walk reads each integer as a heap id and these fields hold counts. A1 must
-  change these two guards for its record: a shape id and a slot position are integers too.
+  because the walk reads each integer as a heap id and these fields hold only keys and
+  attributes (the id of a symbol can be an integer). A1 must change these two guards for
+  its record: a shape id and a slot position are integers too.
   The shadow run of `Browser.JS.Fast` compares two records by `normal/1`, which A1 must
   also change. The other modules under `lib/browser` (layout, style, HTML, cookies, the
-  console of the session) have their own `attrs`, `props` and `hpos`, but they never read a
+  console of the session) have their own `attrs` and `props`, but they never read a
   heap record, so the gate does not search them.
 
   ## A known gap before A1
 
-  The `length` of an arguments object can be a key without a value: `delete
-  arguments.length` removes the value with `own_drop/2` and keeps its place and its
+  The `length` of an arguments object is not an ordinary own property: `delete
+  arguments.length` removes the value and the place with `own_drop/2` and keeps the
   attributes, and the interpreter marks the record with `len_gone`. A record of A1 cannot
-  hold a key without a value. So before A1, `arguments.length` must become an ordinary own
-  property (made with `own_add/5`, removed with `own_delete/2`), and `own_drop/2` must go.
-  This also corrects two results that differ from the spec today: after a delete, a new
-  `arguments.length` is not enumerable, and `Object.defineProperty(arguments, "length",
-  {enumerable: true})` throws.
+  hold attributes without a value. So before A1, `arguments.length` must become an ordinary
+  own property (made with `put_hidden/3`, removed with `own_delete/2`), and `own_drop/2`
+  must go. This also corrects two results that differ from the spec today: after a delete,
+  a new `arguments.length` is not enumerable, and `Object.defineProperty(arguments,
+  "length", {enumerable: true})` throws.
   """
 
   # ── building ───────────────────────────────────────────────
@@ -109,19 +126,34 @@ defmodule Browser.JS.Obj do
   @doc """
   A new record with the enumerable data properties `pairs` (a list of `{key, value}`, in
   creation order) and the fields of `record/1`. The keys must be distinct: each key of
-  `pairs` goes into the key order as it is.
+  `pairs` goes into the key order as it is. A key can be a symbol (the rest of an object
+  pattern copies the enumerable symbols too).
   """
   defmacro record(fields, pairs) do
     quote do
       pairs = unquote(pairs)
 
-      %{
-        unquote_splicing(fields),
-        props: Map.new(pairs),
-        keys: pairs |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
-      }
+      case Browser.JS.Obj.pair_names(pairs, []) do
+        keys when is_list(keys) ->
+          %{unquote_splicing(fields), props: Map.new(pairs), keys: keys}
+
+        :symbols ->
+          Enum.reduce(
+            pairs,
+            %{unquote_splicing(fields), props: %{}, keys: []},
+            fn {k, v}, o -> Browser.JS.Obj.define_data(o, k, v) end
+          )
+      end
     end
   end
+
+  @doc false
+  # The string keys of `pairs` (see `record/2`), newest first, or `:symbols` when a key is a
+  # symbol. One walk makes the list newest first, which costs less than a map and a
+  # reverse.
+  def pair_names([{k, _} | rest], acc) when is_binary(k), do: pair_names(rest, [k | acc])
+  def pair_names([], acc), do: acc
+  def pair_names(_, _acc), do: :symbols
 
   @doc """
   The key layout of an object literal with the constant keys `keys` (in source order), for
@@ -158,10 +190,10 @@ defmodule Browser.JS.Obj do
   @doc """
   Whether the field `field` of a heap record holds no heap id, so that the garbage collector
   does not walk it. It is a guard. These own-property fields hold keys that `props` also
-  holds (or keys that are gone), attributes and counts. The collector reads each integer
-  as an id, so a count could keep a dead object alive.
+  holds (or keys that are gone) and attributes. The collector reads each integer as an id,
+  so the integer id of a symbol could keep a dead object alive.
   """
-  defguard no_refs?(field) when field in [:keys, :attrs, :horder, :hpos]
+  defguard no_refs?(field) when field in [:keys, :skeys, :syms, :attrs]
 
   @doc """
   The stored value of the own key `key` of `o`: `{:ok, value}` or `:error`. An accessor
@@ -425,7 +457,7 @@ defmodule Browser.JS.Obj do
       case o do
         %{props: %{^key => stored}} ->
           attrs = Browser.JS.Obj.attr_flags(o, key)
-          e = key in o.keys or (not is_binary(key) and Map.get(attrs, :e, false))
+          e = key in o.keys
           c = Map.get(attrs, :c, true)
 
           case stored do
@@ -448,68 +480,23 @@ defmodule Browser.JS.Obj do
   defp public_keys(o), do: Enum.reject(Map.keys(o.props), &match?({:private, _}, &1))
 
   @doc """
-  The own string keys of `o` for `Object.getOwnPropertyNames`, without the keys `std`, as
-  `{indexes, names}`. `indexes` are the keys that are array indexes, in no order: the
-  caller sorts them. `names` are the other keys in creation order, with each key that is
-  not enumerable at the place where it was made, when that place is known. The caller puts
-  the keys of `std` (a function puts `length`, `name` and `prototype` after the indexes).
+  Every own string key of `o`, enumerable or not, in creation order (the string keys of
+  OrdinaryOwnPropertyKeys). The caller puts the index keys first. It also adds the keys
+  that the record does not hold (the `length` of an array, the `name` of a function).
   """
-  def own_names(o, std) do
-    {base, hidden, ordered} = name_lists(o)
-    {ints, rest} = Enum.split_with(base -- std, &(not named_key?(&1)))
-    {hints, hrest} = Enum.split_with(hidden -- std, &(not named_key?(&1)))
-    {ints ++ hints, interleave(rest, ordered -- (std ++ hints), o, hrest)}
+  def string_keys(o) do
+    case o do
+      %{skeys: skeys} -> :lists.reverse(skeys)
+      %{keys: keys} -> keys |> :lists.reverse() |> Enum.filter(&is_binary/1)
+    end
   end
 
-  @doc """
-  The own string keys of `o` as `{enumerable, hidden}`. `enumerable` is in creation order.
-  `hidden` are the keys that are not enumerable: first the ones with a known creation
-  order, in that order, then the others, sorted. An array and a string wrapper put the
-  hidden keys after the enumerable keys.
-  """
-  def split_names(o) do
-    {base, hidden, _ordered} = name_lists(o)
-    {base, hidden}
-  end
-
-  # The string keys of `o` in three lists: `{enumerable, hidden, ordered}`, as
-  # `split_names/1` gives them, and `ordered`, the hidden keys with a known creation order.
-  defp name_lists(o) do
-    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
-    hidden0 = (Map.keys(o.props) -- o.keys) |> Enum.filter(&is_binary/1)
-
-    ordered =
-      o
-      |> Map.get(:horder, [])
-      |> Enum.reverse()
-      |> Enum.uniq()
-      |> Enum.filter(&(&1 in hidden0))
-
-    {base, ordered ++ Enum.sort(hidden0 -- ordered), ordered}
-  end
-
-  # The keys `rest` (enumerable, in creation order) with the hidden keys `ordered` of `o` put
-  # where they were made among them, then the other `hidden` keys. A position is only known
-  # when every hidden key was made by `defineProperty` or `put_hidden/3`.
-  defp interleave(rest, ordered, o, hidden) do
-    pos = Map.get(o, :hpos, %{})
-
-    placed =
-      if Enum.all?(ordered, &Map.has_key?(pos, &1)),
-        do: for(k <- ordered, do: {pos[k], k}),
-        else: []
-
-    done = Enum.map(placed, &elem(&1, 1))
-
-    merged =
-      rest
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {k, i} ->
-        [k | for({n, h} <- placed, n == i + 1, do: h)]
-      end)
-
-    lead = for {0, h} <- placed, do: h
-    lead ++ merged ++ (hidden -- done)
+  @doc "Every own symbol key of `o`, enumerable or not, in creation order."
+  def symbol_keys(o) do
+    case o do
+      %{syms: syms} -> :lists.reverse(syms)
+      _ -> []
+    end
   end
 
   @doc """
@@ -544,16 +531,27 @@ defmodule Browser.JS.Obj do
   @doc """
   The record `o` in its normal form, for a compare of two records. Two records that hold the
   same own properties, in the same order and with the same attributes, have the same normal
-  form. Today a record has one form, so it is its own normal form. A representation with
-  two forms of a record (in A1, a fast record and a dictionary record) gives one form here,
-  so that the shadow run of `Browser.JS.Fast` compares what two records hold, not their form.
+  form. A record has some forms for the same content: `skeys` can be equal to `keys` (all
+  the hidden keys are gone or enumerable again), and `syms` and `attrs` can be empty (all
+  the symbols or all the attributes are gone). The normal form has no such field. A
+  representation with two forms of a record (in A1, a fast record and a dictionary record)
+  gives one form here, so that the shadow run of `Browser.JS.Fast` compares what two
+  records hold, not their form. A term that is not a map (`nil` when the shadow run has no
+  record) is its own normal form.
   """
-  def normal(o), do: o
+  def normal(o) when is_map(o) do
+    o = if is_map_key(o, :skeys) and o.skeys == o.keys, do: Map.delete(o, :skeys), else: o
+    o = if Map.get(o, :syms) == [], do: Map.delete(o, :syms), else: o
+    if Map.get(o, :attrs) == %{}, do: Map.delete(o, :attrs), else: o
+  end
+
+  def normal(other), do: other
 
   # ── writing ────────────────────────────────────────────────
-  # Each writer takes a record and gives the new record. The caller stores it. Most writers
-  # are macros: the interpreter calls them on paths that run for each call or each object
-  # (an arguments object gets two hidden keys, a literal one key at a time).
+  # Each writer takes a record and gives the new record. The caller stores it. The writers
+  # of the hot paths (an update, an assignment, a literal one key at a time) are macros. The
+  # others are functions, because a function is the same for a key that the caller knows
+  # at compile time and for a key that it does not know.
 
   @doc """
   `o` with the value of its own key `key` changed to `v`. The key must exist and must not
@@ -567,8 +565,8 @@ defmodule Browser.JS.Obj do
 
   @doc """
   `o` with the stored value of `key` set to `v` and nothing else changed: no change of the
-  key order or of the attributes. A new key made this way is not enumerable and has no
-  place in the hidden order. Private names, a write to an own writable data property
+  key order or of the attributes. The key must exist, or it must be a private name, which
+  has no place in the order. Private names, a write to an own writable data property
   (`Reflect.set`) and an accessor of a private name use it.
   """
   defmacro own_put_value(o, key, v) do
@@ -579,27 +577,65 @@ defmodule Browser.JS.Obj do
 
   @doc """
   `o` with the new own property `key` that an assignment makes: writable, enumerable and
-  configurable. A string key goes to the enumerable keys. A symbol key is marked
-  enumerable in its attributes, because the list of enumerable keys is for strings.
+  configurable, at the end of the order.
   """
   defmacro own_add_assigned(o, key, v) do
     quote bind_quoted: [o: o, key: key, v: v] do
-      o2 = %{
-        o
-        | props: Map.put(o.props, key, v),
-          keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
-      }
-
       if is_binary(key),
-        do: o2,
-        else:
-          Map.put(
-            o2,
-            :attrs,
-            Map.put(Browser.JS.Obj.attr_map(o), key, %{e: true, w: true, c: true})
-          )
+        do: Browser.JS.Obj.add_name(o, key, v),
+        else: Browser.JS.Obj.add_symbol(o, key, v)
     end
   end
+
+  @doc false
+  # `o` with the new enumerable string key `key` with the value `v`, at the end of the
+  # order. A record without `skeys` needs only the change of `keys`, which is the add of an
+  # assignment before the exact order. Only the macros of this module use it.
+  defmacro add_name(o, key, v) do
+    quote bind_quoted: [o: o, key: key, v: v] do
+      case o do
+        %{skeys: skeys} ->
+          %{o | props: Map.put(o.props, key, v), keys: [key | o.keys], skeys: [key | skeys]}
+
+        _ ->
+          %{o | props: Map.put(o.props, key, v), keys: [key | o.keys]}
+      end
+    end
+  end
+
+  @doc false
+  # `o` with the new enumerable symbol key `key` with the value `v`, at the end of the
+  # symbols. Only the macros of this module use it.
+  defmacro add_symbol(o, key, v) do
+    quote bind_quoted: [o: o, key: key, v: v] do
+      case o do
+        %{syms: syms} ->
+          %{o | props: Map.put(o.props, key, v), keys: [key | o.keys], syms: [key | syms]}
+
+        _ ->
+          Map.put(%{o | props: Map.put(o.props, key, v), keys: [key | o.keys]}, :syms, [key])
+      end
+    end
+  end
+
+  @doc false
+  # `o` with the new key `key` at the end of the order, enumerable when `e`, and with no
+  # value or attributes yet. A private name gets no place.
+  def add_key(o, key, e) when is_binary(key) do
+    case o do
+      %{skeys: skeys} when e -> %{o | keys: [key | o.keys], skeys: [key | skeys]}
+      %{skeys: skeys} -> %{o | skeys: [key | skeys]}
+      _ when e -> %{o | keys: [key | o.keys]}
+      _ -> Map.put(o, :skeys, [key | all_names(o)])
+    end
+  end
+
+  def add_key(o, {:symbol, _, _} = key, e) do
+    o = Map.put(o, :syms, [key | Map.get(o, :syms, [])])
+    if e, do: %{o | keys: [key | o.keys]}, else: o
+  end
+
+  def add_key(o, _private, _e), do: o
 
   @doc """
   CreateDataProperty on the record `o`: `key` gets the value `v`. A new key is enumerable
@@ -607,55 +643,33 @@ defmodule Browser.JS.Obj do
   """
   defmacro define_data(o, key, v) do
     quote bind_quoted: [o: o, key: key, v: v] do
-      keys = if Browser.JS.Obj.has_own?(o, key), do: o.keys, else: [key | o.keys]
-      %{o | props: Map.put(o.props, key, v), keys: keys}
+      cond do
+        Browser.JS.Obj.has_own?(o, key) -> %{o | props: Map.put(o.props, key, v)}
+        is_binary(key) -> Browser.JS.Obj.add_name(o, key, v)
+        true -> Browser.JS.Obj.add_symbol(o, key, v)
+      end
     end
   end
 
   @doc """
   `o` with an own property `key` with the value `v` that does not show up in `Object.keys`.
-  A new key is writable and configurable, and it gets its place in the hidden order. An
-  existing key keeps its attributes and its place.
+  A new key is writable and configurable, and it goes to the end of the order. An existing
+  key keeps its attributes and its place.
   """
-  defmacro put_hidden(o, key, v) do
-    quote bind_quoted: [o: o, key: key, v: v] do
-      o =
-        if Browser.JS.Obj.has_own?(o, key) do
-          o
-        else
-          # (where it stands among the enumerable names, so `ownKeys` can put it in
-          # creation order)
-          named = if o.keys == [], do: 0, else: Enum.count(o.keys, &Browser.JS.Obj.named_key?/1)
-
-          o
-          |> Map.update(:horder, [key], &[key | &1])
-          |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
-        end
-
-      %{o | props: Map.put(o.props, key, v)}
-    end
-  end
-
-  @doc false
-  # A string key that is not an array index: an index comes first in the key order, so a
-  # hidden key counts only the other names before it.
-  def named_key?(k) do
-    is_binary(k) and
-      not (is_integer(Browser.JS.Interp.index(k)) and
-             Browser.JS.Interp.index(k) < 4_294_967_295)
+  def put_hidden(o, key, v) do
+    o = if has_own?(o, key), do: o, else: add_key(o, key, false)
+    %{o | props: Map.put(o.props, key, v)}
   end
 
   @doc """
   `o` with `key` set to `v` with the attributes `flags` (a map of `w`, `c` and `e`, stored
-  as they are). The key does not go into the enumerable keys or into the hidden order.
-  Built-ins use it for properties that are not enumerable (`@@toStringTag`, `prototype`).
+  as they are). A new key goes to the end of the order, enumerable only when `flags` has
+  `e: true`. An existing key keeps its place and its enumerability. Built-ins use it for
+  properties that are not enumerable (`@@toStringTag`, `prototype`).
   """
-  defmacro put_with_attrs(o, key, v, flags) do
-    quote bind_quoted: [o: o, key: key, v: v, flags: flags] do
-      o
-      |> Map.put(:props, Map.put(o.props, key, v))
-      |> Map.put(:attrs, Map.put(Browser.JS.Obj.attr_map(o), key, flags))
-    end
+  def put_with_attrs(o, key, v, flags) do
+    o = if has_own?(o, key), do: o, else: add_key(o, key, match?(%{e: true}, flags))
+    %{o | props: Map.put(o.props, key, v)} |> Map.put(:attrs, Map.put(attr_map(o), key, flags))
   end
 
   @doc "`o` with the attributes of the existing key `key` set to `flags` (stored as they are)."
@@ -685,102 +699,103 @@ defmodule Browser.JS.Obj do
   @doc """
   `o` with the new own property `key` that `defineProperty` makes: the stored value `value`
   (an accessor is `{:accessor, g, s}`), the attributes `flags` (`%{c, w}`; the default
-  attributes take no entry) and the enumerability `e`. A key that is not enumerable gets
-  its place in the hidden order.
+  attributes take no entry) and the enumerability `e`. The key goes to the end of the
+  order.
   """
-  defmacro own_add(o, key, value, flags, e) do
-    quote bind_quoted: [o: o, key: key, value: value, flags: flags, e: e] do
-      attrs = Browser.JS.Obj.attr_map(o)
-
-      attrs =
-        if flags == %{c: true, w: true},
-          do: Map.delete(attrs, key),
-          else: Map.put(attrs, key, flags)
-
-      keys = if e, do: [key | o.keys], else: o.keys
-
-      o =
-        if e do
-          o
-        else
-          named = Enum.count(o.keys, &Browser.JS.Obj.named_key?/1)
-
-          o
-          |> Map.update(:horder, [key], &[key | &1])
-          |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
-        end
-
-      o
-      |> Map.put(:attrs, attrs)
-      |> Map.put(:props, Map.put(o.props, key, value))
-      |> Map.put(:keys, keys)
-    end
+  def own_add(o, key, value, flags, e) do
+    o = add_key(o, key, e)
+    put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
   end
 
   @doc """
-  `o` with the existing own property `key` changed by `defineProperty`: the stored value
-  `value`, the attributes `flags` (`%{c, w}`) and the enumerability `e`. A key that
-  becomes enumerable goes to the head of the enumerable keys.
+  `o` with the own property `key` changed by `defineProperty`: the stored value `value`,
+  the attributes `flags` (`%{c, w}`) and the enumerability `e`. An existing key keeps its
+  place, also when it becomes enumerable again. A key that the record does not hold yet
+  (the `name` of a function) goes to the end of the order.
   """
-  defmacro own_redefine(o, key, value, flags, e) do
-    quote bind_quoted: [o: o, key: key, value: value, flags: flags, e: e] do
-      attrs = Browser.JS.Obj.attr_map(o)
+  def own_redefine(o, key, value, flags, e) do
+    o = if has_own?(o, key), do: set_enumerable(o, key, e), else: add_key(o, key, e)
+    put_entry(%{o | props: Map.put(o.props, key, value)}, key, flags)
+  end
 
-      attrs =
-        if flags == %{c: true, w: true},
-          do: Map.delete(attrs, key),
-          else: Map.put(attrs, key, flags)
+  # Every string key of `o`, newest first: `skeys`, or the names in `keys` when the record
+  # has no hidden string key.
+  defp all_names(o) do
+    case o do
+      %{skeys: skeys} -> skeys
+      %{keys: []} -> []
+      %{keys: keys} -> Enum.filter(keys, &is_binary/1)
+    end
+  end
 
-      keys =
-        cond do
-          e and key in o.keys -> o.keys
-          e -> [key | o.keys]
-          true -> List.delete(o.keys, key)
-        end
+  # `o` with the attribute entry of `key` set to the flags `flags` (`%{c, w}`). The default
+  # attributes take no entry.
+  defp put_entry(o, key, flags) do
+    cond do
+      flags != %{c: true, w: true} -> Map.put(o, :attrs, Map.put(attr_map(o), key, flags))
+      is_map_key(o, :attrs) -> %{o | attrs: Map.delete(o.attrs, key)}
+      true -> o
+    end
+  end
 
-      o
-      |> Map.put(:attrs, attrs)
-      |> Map.put(:props, Map.put(o.props, key, value))
-      |> Map.put(:keys, keys)
+  # `o` with the existing key `key` enumerable (`e`) or not. The key keeps its place in the
+  # order. A string key that becomes enumerable again goes back to its place among the
+  # enumerable names, which `skeys` gives. The place of a symbol in `keys` has no effect,
+  # because the order of the symbols is in `syms`.
+  defp set_enumerable(o, key, e) do
+    cond do
+      e == key in o.keys ->
+        o
+
+      e and is_binary(key) ->
+        names = Enum.filter(o.skeys, &(&1 == key or &1 in o.keys))
+        %{o | keys: names ++ Enum.reject(o.keys, &is_binary/1)}
+
+      e ->
+        %{o | keys: [key | o.keys]}
+
+      is_binary(key) ->
+        o
+        |> Map.put(:skeys, all_names(o))
+        |> Map.put(:keys, List.delete(o.keys, key))
+
+      true ->
+        %{o | keys: List.delete(o.keys, key)}
     end
   end
 
   @doc """
   `o` with `key` made a writable, enumerable and configurable data property with the value
-  `v`, as a sloppy `eval` makes a global function. The record must have attributes.
+  `v`, as a sloppy `eval` makes a global function. The key must exist. It keeps its place.
   """
-  defmacro reopen(o, key, v) do
-    quote bind_quoted: [o: o, key: key, v: v] do
-      attrs = Map.put(Browser.JS.Obj.attr_map(o), key, %{w: true, e: true, c: true})
-      keys = if key in o.keys, do: o.keys, else: [key | o.keys]
-      %{o | props: Map.put(o.props, key, v), attrs: attrs, keys: keys}
-    end
+  def reopen(o, key, v) do
+    o = set_enumerable(o, key, true)
+    put_entry(%{o | props: Map.put(o.props, key, v)}, key, %{c: true, w: true})
   end
 
   @doc "`o` without the own key `key`: its value, its place and its attributes go."
-  defmacro own_delete(o, key) do
-    quote bind_quoted: [o: o, key: key] do
-      attrs = Map.delete(Browser.JS.Obj.attr_map(o), key)
-
-      %{o | props: Map.delete(o.props, key), keys: List.delete(o.keys, key)}
-      |> Map.put(:attrs, attrs)
-    end
+  def own_delete(o, key) do
+    o = own_remove(o, key)
+    if is_map_key(o, :attrs), do: %{o | attrs: Map.delete(o.attrs, key)}, else: o
   end
 
   @doc """
-  `o` without the own key `key` and without its place in the enumerable keys. The
-  attributes stay (a global function declaration replaces the property).
+  `o` without the stored value of `key` (the `length` of an arguments object). Its place
+  goes too, and its attributes stay.
   """
-  defmacro own_remove(o, key) do
-    quote bind_quoted: [o: o, key: key] do
-      %{o | props: Map.delete(o.props, key), keys: List.delete(o.keys, key)}
-    end
-  end
+  def own_drop(o, key), do: own_remove(o, key)
 
-  @doc "`o` without the stored value of `key` (the `length` of an arguments object)."
-  defmacro own_drop(o, key) do
-    quote bind_quoted: [o: o, key: key] do
-      %{o | props: Map.delete(o.props, key)}
+  @doc """
+  `o` without the own key `key` and without its place in the order. The attributes stay (a
+  global function declaration replaces the property).
+  """
+  def own_remove(o, key) do
+    o = %{o | props: Map.delete(o.props, key), keys: List.delete(o.keys, key)}
+
+    case o do
+      %{skeys: skeys} when is_binary(key) -> %{o | skeys: List.delete(skeys, key)}
+      %{syms: syms} when not is_binary(key) -> %{o | syms: List.delete(syms, key)}
+      _ -> o
     end
   end
 

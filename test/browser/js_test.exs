@@ -375,6 +375,41 @@ defmodule Browser.JSTest do
       assert js("var re = /(?:)/g; re.a = 1; Reflect.ownKeys(re).join()") == "lastIndex,a"
     end
 
+    # The order of OrdinaryOwnPropertyKeys: the array indexes in ascending order, then the
+    # strings in creation order, then the symbols in creation order. A key keeps its place
+    # when its attributes change, and a key that is deleted and made again goes to the end.
+    test "the key order is the order of the spec" do
+      # (symbols in creation order, not in the order of their ids)
+      assert js(
+               "var b = Symbol('b'), a = Symbol('a'); var o = {}; o[b] = 1; o.x = 2; " <>
+                 "Object.defineProperty(o, a, {value: 3, enumerable: true}); " <>
+                 "var c = {[a]: 1, [b]: 2}; [Reflect.ownKeys(o), " <>
+                 "Object.getOwnPropertySymbols(Object.assign({}, o)), " <>
+                 "Object.getOwnPropertySymbols({...c})].map(l => l.map(String).join()).join(' ')"
+             ) == "x,Symbol(b),Symbol(a) Symbol(b),Symbol(a) Symbol(a),Symbol(b)"
+
+      # (a key made enumerable again keeps its place)
+      assert js(
+               "var o = {a: 1, b: 2, c: 3}; Object.defineProperty(o, 'a', {enumerable: false}); " <>
+                 "var r = Object.keys(o).join(); Object.defineProperty(o, 'a', {enumerable: true}); " <>
+                 "var s = ''; for (var k in o) s += k; [r, Object.keys(o).join(), s, JSON.stringify(o)].join(' ')"
+             ) == ~S(b,c a,b,c abc {"a":1,"b":2,"c":3})
+
+      # (keys that are not enumerable among the enumerable ones)
+      assert js(
+               "var o = {a: 1}; Object.defineProperty(o, 'h', {value: 2}); o.b = 3; o[2] = 4; " <>
+                 "var s = ''; for (var k in o) s += k; [Reflect.ownKeys(o).join(), " <>
+                 "Object.getOwnPropertyNames(o).join(), Object.keys(o).join(), s, JSON.stringify(o), " <>
+                 "Object.keys(Object.assign({}, o)).join(), Object.keys({...o}).join()].join(' ')"
+             ) == ~S(2,a,h,b 2,a,h,b 2,a,b 2ab {"2":4,"a":1,"b":3} 2,a,b 2,a,b)
+
+      # (a key that is deleted and made again goes to the end)
+      assert js(
+               "var o = {a: 1, b: 2}; Object.defineProperty(o, 'h', {value: 0, configurable: true}); " <>
+                 "o.c = 3; delete o.a; o.a = 4; delete o.h; o.h = 5; Reflect.ownKeys(o).join()"
+             ) == "b,c,a,h"
+    end
+
     test "a typed array with elements cannot be frozen or sealed" do
       assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
                "TypeError"

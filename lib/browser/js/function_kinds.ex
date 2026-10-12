@@ -7,7 +7,7 @@ defmodule Browser.JS.FunctionKinds do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Parser}
-  require Browser.JS.Obj, as: Obj
+  alias Browser.JS.Obj
 
   @kinds [
     {:generator_function, "GeneratorFunction", "function*", :generator},

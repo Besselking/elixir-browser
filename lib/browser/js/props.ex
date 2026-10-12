@@ -207,11 +207,10 @@ defmodule Browser.JS.Props do
 
   defp own_names_plain2(id, o) do
     case o do
+      # (an arguments object can hold its `length`)
       %{class: :array} ->
-        {base, hidden} = Obj.split_names(o)
-
         for(i <- 0..(o.len - 1)//1, Map.has_key?(o.items, i), do: Integer.to_string(i)) ++
-          ["length"] ++ base ++ hidden
+          ["length"] ++ (Obj.string_keys(o) -- ["length"])
 
       %{class: :function} ->
         # length, name and prototype come first, in that order, whether stored or not
@@ -220,18 +219,17 @@ defmodule Browser.JS.Props do
               Obj.has_own?(o, k) or state({:obj, id}, k) != nil,
               do: k
 
-        {ints, names} = Obj.own_names(o, std)
+        {ints, names} = Enum.split_with(Obj.string_keys(o) -- std, &index_key?/1)
         Enum.sort_by(ints, &array_index/1) ++ std ++ names
 
       %{prim: s} when is_binary(s) ->
-        {base, hidden} = Obj.split_names(o)
-        {ints, rest} = Enum.split_with(base, &index_key?/1)
+        {ints, rest} = Enum.split_with(Obj.string_keys(o), &index_key?/1)
 
         for(i <- 0..(Browser.JS.Str.length(s) - 1)//1, do: Integer.to_string(i)) ++
-          Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ ((rest ++ hidden) -- ["length"])
+          Enum.sort_by(ints, &array_index/1) ++ ["length"] ++ (rest -- ["length"])
 
       _ ->
-        {ints, names} = Obj.own_names(o, [])
+        {ints, names} = Enum.split_with(Obj.string_keys(o), &index_key?/1)
         Enum.sort_by(ints, &array_index/1) ++ names
     end
   end
@@ -313,8 +311,7 @@ defmodule Browser.JS.Props do
 
   def own_symbols(_), do: []
 
-  defp own_symbols_plain(o),
-    do: o |> Obj.all_keys() |> Enum.filter(&match?({:symbol, _, _}, &1))
+  defp own_symbols_plain(o), do: Obj.symbol_keys(o)
 
   # ── defining ───────────────────────────────────────────────
 

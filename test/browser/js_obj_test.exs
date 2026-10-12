@@ -37,8 +37,8 @@ defmodule Browser.JS.ObjTest.Api do
 end
 
 defmodule Browser.JS.ObjTest do
-  # The record API of the own properties of a JS object (`Browser.JS.Obj`, data-model step
-  # A0a). The first tests are the grep gate of the moduledoc of `Browser.JS.Obj`: only that
+  # The record API of the own properties of a JS object (`Browser.JS.Obj`, data-model steps
+  # A0a and A0b). The first tests are the grep gate of the moduledoc of `Browser.JS.Obj`: only that
   # module names the own-property fields of a heap record. The other tests use the API on
   # records that no heap holds, so they run without `Interp.init/1`. They test what the API
   # gives (the states, the attributes, the key order), not the fields, so that a change of
@@ -48,7 +48,7 @@ defmodule Browser.JS.ObjTest do
   require Browser.JS.Obj, as: Obj
   alias Browser.JS.ObjTest.Api
 
-  @fields "props|keys|attrs|horder|hpos|ext|frozen|sealed"
+  @fields "props|keys|skeys|syms|attrs|ext|frozen|sealed"
 
   # The patterns of the grep command in the moduledoc of `Browser.JS.Obj`: `@gate` finds a
   # direct use, and `@allow` is the allow-list. Each is matched against
@@ -88,7 +88,8 @@ defmodule Browser.JS.ObjTest do
           "%{o | keys: [k | o.keys]}",
           "Map.get(o, :attrs, %{})",
           "Map.get(deref(id), :ext, true)",
-          "|> Map.update(:horder, [key], &[key | &1])",
+          "|> Map.update(:skeys, [key], &[key | &1])",
+          "Map.get(o, :syms, [])",
           "is_map_key(o, :frozen)",
           ":erlang.map_get(:sealed, o)",
           "        :attrs,",
@@ -100,7 +101,7 @@ defmodule Browser.JS.ObjTest do
           "Map.get(o,:attrs)",
           "Map.get(o, :proto) || Map.get(o, :props)",
           "Access.key(:props) && o",
-          "o.hpos[k]"
+          "o.skeys"
         ],
         do: assert(gate?(line), line)
 
@@ -141,7 +142,8 @@ defmodule Browser.JS.ObjTest do
     refute Api.frozen?(o) or Api.sealed?(o)
     assert Api.enum_names(o) == ["b", "a"]
     assert Api.plain_names(o) == ["b", "a"]
-    assert Obj.own_names(o, []) == {[], ["b", "a"]}
+    assert Obj.string_keys(o) == ["b", "a"]
+    assert Obj.symbol_keys(o) == []
     assert Obj.normal(Obj.record(class: :object, proto: nil)) == Obj.normal(plain())
   end
 
@@ -203,66 +205,147 @@ defmodule Browser.JS.ObjTest do
     assert {:missing, _} = Code.eval_string(fine, o: plain())
   end
 
-  test "an assignment adds an enumerable key; a symbol is enumerable by its attributes" do
+  test "an assignment adds an enumerable key, a string or a symbol" do
     sym = {:symbol, 1, "s"}
-    o = plain([{"a", 1}]) |> Api.own_add_assigned("b", 2) |> Api.own_add_assigned(sym, 3)
+    o = plain([{"a", 1}]) |> Api.own_add_assigned("b", 2)
     assert Api.own_state(o, "b") == {:data, 2, true, true, true}
+    assert Api.plain_names(o) == ["a", "b"]
+    o = Api.own_add_assigned(o, sym, 3)
     assert Api.own_state(o, sym) == {:data, 3, true, true, true}
     assert Api.enum_names(o) == ["a", "b"]
-    assert Api.plain_names(o) == ["a", "b"]
+    assert Obj.string_keys(o) == ["a", "b"]
 
-    # (a symbol that defineProperty makes enumerable is no plain name)
-    o = Api.own_add(o, {:symbol, 2, "t"}, 4, %{c: true, w: true}, true)
-    assert Api.enum_names(o) == ["a", "b"]
+    # (a symbol among the enumerable keys is no plain name)
     assert Api.plain_names(o) == nil
+    o = Obj.own_add(o, {:symbol, 2, "t"}, 4, %{c: true, w: true}, true)
+    assert Api.enum_names(o) == ["a", "b"]
+    assert Api.own_state(o, {:symbol, 2, "t"}) == {:data, 4, true, true, true}
     assert Api.writable?(o, "b") and Api.configurable?(o, "b")
   end
 
-  test "defineProperty adds and changes keys with their attributes and order" do
+  test "the symbols come in creation order, not in term order" do
+    late = {:symbol, 9, "late"}
+    early = {:symbol, 1, "early"}
+
+    o =
+      plain()
+      |> Api.own_add_assigned(late, 1)
+      |> Api.define_data("a", 2)
+      |> Api.put_hidden(early, 3)
+      |> Api.define_data({:symbol, 5, "five"}, 4)
+
+    assert Obj.symbol_keys(o) == [late, early, {:symbol, 5, "five"}]
+    assert Obj.string_keys(o) == ["a"]
+    assert Api.own_state(o, early) == {:data, 3, true, false, true}
+    assert Api.own_state(o, {:symbol, 5, "five"}) == {:data, 4, true, true, true}
+
+    # (a record with a symbol among its pairs)
+    r = Api.record([class: :object, proto: nil], [{"b", 1}, {late, 2}, {"a", 3}])
+    assert Obj.string_keys(r) == ["b", "a"] and Obj.symbol_keys(r) == [late]
+    assert Api.own_state(r, late) == {:data, 2, true, true, true}
+  end
+
+  test "defineProperty adds and changes keys; each key keeps its place" do
     o =
       plain([{"a", 1}])
-      |> Api.own_add("h", 2, %{c: false, w: false}, false)
-      |> Api.own_add("b", 3, %{c: true, w: true}, true)
+      |> Obj.own_add("h", 2, %{c: false, w: false}, false)
+      |> Obj.own_add("b", 3, %{c: true, w: true}, true)
 
     assert Api.own_state(o, "h") == {:data, 2, false, false, false}
     refute Api.writable?(o, "h") or Api.configurable?(o, "h")
     refute Api.default_attrs?(o, "h")
     assert Api.own_state(o, "b") == {:data, 3, true, true, true}
     assert Api.default_attrs?(o, "b")
-    assert Obj.split_names(o) == {["a", "b"], ["h"]}
-    assert Obj.own_names(o, []) == {[], ["a", "h", "b"]}
-    assert Obj.own_names(o, ["h"]) == {[], ["a", "b"]}
+    assert Api.enum_names(o) == ["a", "b"]
+    assert Obj.string_keys(o) == ["a", "h", "b"]
 
-    o = Api.own_redefine(o, "h", 2, %{c: false, w: false}, true)
+    # (a key that becomes enumerable again goes back to its place)
+    o = Obj.own_redefine(o, "h", 2, %{c: false, w: false}, true)
     assert Api.own_state(o, "h") == {:data, 2, false, true, false}
-    o = Api.own_redefine(o, "a", 1, %{c: true, w: true}, false)
+    assert Api.enum_names(o) == ["a", "h", "b"]
+    o = Obj.own_redefine(o, "a", 1, %{c: true, w: true}, false)
     assert Api.own_state(o, "a") == {:data, 1, true, false, true}
+    assert Api.enum_names(o) == ["h", "b"]
+    assert Obj.string_keys(o) == ["a", "h", "b"]
+    o = Obj.own_redefine(o, "a", 1, %{c: true, w: true}, true)
+    assert Api.enum_names(o) == ["a", "h", "b"]
+
+    # (a symbol keeps its place when its enumerability changes)
+    s1 = {:symbol, 1, "s1"}
+    s2 = {:symbol, 2, "s2"}
+    o = o |> Obj.own_add(s1, 1, %{c: true, w: true}, false) |> Api.own_add_assigned(s2, 2)
+    o = Obj.own_redefine(o, s1, 1, %{c: true, w: true}, true)
+    assert Api.own_state(o, s1) == {:data, 1, true, true, true}
+    o = Obj.own_redefine(o, s2, 2, %{c: true, w: false}, false)
+    assert Api.own_state(o, s2) == {:data, 2, false, false, true}
+    assert Obj.symbol_keys(o) == [s1, s2]
   end
 
-  test "a hidden key keeps its place among the enumerable names" do
+  test "a hidden key has its place in the order of all string keys" do
     o = plain([{"a", 1}, {"0", 2}]) |> Api.put_hidden("h", 3) |> Api.define_data("b", 4)
     assert Api.own_state(o, "h") == {:data, 3, true, false, true}
-    assert Obj.own_names(o, []) == {["0"], ["a", "h", "b"]}
+    assert Obj.string_keys(o) == ["a", "0", "h", "b"]
     assert Api.enum_names(o) == ["a", "0", "b"]
     assert Api.plain_names(o) == nil
 
     # (a hidden write to an existing key keeps the key enumerable)
     assert o |> Api.put_hidden("a", 5) |> Api.own_state("a") == {:data, 5, true, true, true}
+
+    # (a key that the record does not hold yet, as the `name` of a function, goes to the end)
+    o = Obj.own_redefine(o, "name", "f", %{c: true, w: false}, false)
+    assert Obj.string_keys(o) == ["a", "0", "h", "b", "name"]
   end
 
-  test "built-in attributes, delete, freeze and seal" do
+  test "a key that is deleted and made again goes to the end" do
+    sym = {:symbol, 1, "s"}
+
+    o =
+      plain([{"a", 1}, {"b", 2}])
+      |> Api.put_hidden("h", 3)
+      |> Api.own_add_assigned(sym, 4)
+      |> Api.own_add_assigned({:symbol, 2, "t"}, 5)
+
+    o = o |> Api.own_delete("a") |> Api.own_delete("h") |> Api.own_delete(sym)
+    assert Obj.string_keys(o) == ["b"] and Api.enum_names(o) == ["b"]
+    assert Obj.symbol_keys(o) == [{:symbol, 2, "t"}]
+
+    o = o |> Api.own_add_assigned("h", 6) |> Api.own_add_assigned("a", 7)
+    o = Api.own_add_assigned(o, sym, 8)
+    assert Obj.string_keys(o) == ["b", "h", "a"] and Api.enum_names(o) == ["b", "h", "a"]
+    assert Obj.symbol_keys(o) == [{:symbol, 2, "t"}, sym]
+    assert Api.own_state(o, "h") == {:data, 6, true, true, true}
+
+    # (the record holds the same as one that never had the hidden key)
+    same = plain([{"b", 2}, {"h", 6}, {"a", 7}])
+
+    assert Obj.normal(Api.own_delete(Api.own_delete(o, sym), {:symbol, 2, "t"})) ==
+             Obj.normal(same)
+
+    # (the shadow run gives `nil` when it has no record)
+    assert Obj.normal(nil) == nil
+
+    refute Api.has_own?(Api.own_remove(o, "a"), "a")
+    assert Obj.string_keys(Api.own_remove(o, "a")) == ["b", "h"]
+    refute Api.has_own?(Api.own_drop(o, "a"), "a")
+  end
+
+  test "built-in attributes, freeze and seal" do
     tag = {:symbol, :toStringTag, "Symbol.toStringTag"}
     o = plain([{"a", 1}]) |> Api.put_with_attrs(tag, "T", %{w: false, c: true, e: false})
     assert Api.own_state(o, tag) == {:data, "T", false, false, true}
+    assert Obj.symbol_keys(o) == [tag]
 
     assert o |> Api.put_attrs("a", %{w: false, c: true}) |> Api.own_state("a") ==
              {:data, 1, false, true, true}
 
-    d = Api.own_delete(o, "a")
-    refute Api.has_own?(d, "a")
-    assert Api.enum_names(d) == []
-    refute Api.has_own?(Api.own_remove(o, "a"), "a")
-    refute Api.has_own?(Api.own_drop(o, "a"), "a")
+    # (a new string key with `e: true` is enumerable, one without it is hidden)
+    o2 =
+      o
+      |> Api.put_with_attrs("raw", 2, %{w: false, c: false, e: true})
+      |> Api.put_with_attrs("p", 3, %{w: true, c: false, e: false})
+
+    assert Api.enum_names(o2) == ["a", "raw"]
+    assert Obj.string_keys(o2) == ["a", "raw", "p"]
 
     refute o |> Api.prevent() |> Api.extensible?()
     frozen = Obj.lock(o, true)
@@ -271,6 +354,15 @@ defmodule Browser.JS.ObjTest do
     assert Obj.locked?(sealed, false)
     refute Obj.locked?(sealed, true)
     refute Obj.locked?(o, false)
+
+    # (an enumerable symbol stays enumerable when the object is frozen or when its
+    # attributes change)
+    sym = {:symbol, 1, "s"}
+    s = Api.own_add_assigned(o, sym, 1)
+    assert Api.own_state(Obj.lock(s, true), sym) == {:data, 1, false, true, false}
+
+    assert Api.own_state(Api.put_attrs(s, sym, %{w: false, c: true}), sym) ==
+             {:data, 1, false, true, true}
   end
 
   test "element attributes and the stop of a shrink" do
