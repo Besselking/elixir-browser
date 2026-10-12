@@ -4989,7 +4989,8 @@ defmodule Browser.Layout do
 
   # what overflows an inline-level box does not make the line wider: shrink-to-fit stops
   # counting its content at the box's right edge (`xlim`, which moves with the item)
-  defp limit_extent(%{xlim: l} = item, w), do: %{item | xlim: min(l, w)}
+  defp limit_extent(%{xlim: l} = item, w) when l <= w, do: item
+  defp limit_extent(%{xlim: _} = item, w), do: %{item | xlim: w}
   defp limit_extent(item, w), do: Map.put(item, :xlim, w)
 
   # A line made of nothing but boxes still has the height of the font and line height around
@@ -5121,13 +5122,15 @@ defmodule Browser.Layout do
         do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
         else: atom
 
+    counts? = Map.get(atom, :overflow_counts)
+
     atom = %{
       atom
       | items:
           atom.items
           |> Enum.map(fn item ->
             item = adopt_sticky(item, st)
-            if atom[:overflow_counts], do: item, else: limit_extent(item, atom.w)
+            if counts?, do: item, else: limit_extent(item, atom.w)
           end)
           |> renumber_pz()
     }
@@ -5180,9 +5183,7 @@ defmodule Browser.Layout do
 
   defp renumber_pz(items) do
     order =
-      items
-      |> Enum.flat_map(&List.wrap(Map.get(&1, :pz)))
-      |> Enum.uniq()
+      for(%{pz: pz} when pz != nil <- items, uniq: true, do: pz)
       |> Enum.sort_by(&pz_key/1)
 
     if order == [] do
@@ -6308,7 +6309,12 @@ defmodule Browser.Layout do
   # clip of background layers, the shapes of shadows.
   defp move(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
-    it = if it[:xlim], do: %{it | xlim: it.xlim + dx}, else: it
+
+    it =
+      case it do
+        %{xlim: xlim} when xlim != nil -> %{it | xlim: xlim + dx}
+        _ -> it
+      end
 
     it =
       case it do
