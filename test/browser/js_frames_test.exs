@@ -2934,9 +2934,10 @@ defmodule Browser.JS.FramesTest do
     {78,
      ~S|class A {} var r; try { class B extends A { [(new B(), 'k')](){} } } catch(e){ r = e.constructor.name } r|,
      "SyntaxError"},
-    # (found in review) the Array fast paths change a mapped arguments object in bulk
+    # (found in review) an Array method on a mapped arguments object writes each element
+    # with Set, so the parameter follows, as in the spec
     {79, ~S|function f(a, b){ [].shift.call(arguments); return a + ',' + arguments[0] } f(1, 2)|,
-     "1,2"},
+     "2,2"},
     {80, ~S|function f(a, b){ [].reverse.call(arguments); a = 9; return arguments[1] } f(1, 2)|,
      1.0}
   ]

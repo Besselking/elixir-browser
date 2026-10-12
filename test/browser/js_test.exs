@@ -431,6 +431,47 @@ defmodule Browser.JSTest do
              ) == "TypeError 5"
     end
 
+    test "the array methods read and write the own length of an arguments object" do
+      # (the list paths of the array methods change only the elements, so an arguments
+      # object must take the generic path, which writes its own `length`)
+      show =
+        "var P = Array.prototype; function show(a){ return a.length + ':' + P.join.call(a) + " <>
+          "':' + Object.getOwnPropertyDescriptor(a, 'length').value } "
+
+      assert js(
+               show <>
+                 "function f(){ var a = arguments, r = []; P.push.call(a, 9); r.push(show(a)); " <>
+                 "r.push(P.pop.call(a), show(a), 3 in a); P.shift.call(a); r.push(show(a), 2 in a); " <>
+                 "P.unshift.call(a, 0); r.push(show(a)); P.splice.call(a, 1, 1); " <>
+                 "r.push(show(a), 2 in a); P.sort.call(a); P.reverse.call(a); r.push(show(a)); " <>
+                 "return r.join(' ') } f(3, 1, 2)"
+             ) ==
+               "4:3,1,2,9:4 9 3:3,1,2:3 false 2:1,2:2 false 3:0,1,2:3 2:0,2:2 false 2:2,0:2"
+
+      assert js(
+               show <>
+                 "function f(){ 'use strict'; var a = arguments, r = []; P.push.call(a, 9); " <>
+                 "r.push(show(a)); r.push(P.pop.call(a), show(a)); P.shift.call(a); r.push(show(a)); " <>
+                 "P.unshift.call(a, 0); r.push(show(a)); P.splice.call(a, 0, 1); r.push(show(a)); " <>
+                 "return r.join(' ') } f(3, 1, 2)"
+             ) == "4:3,1,2,9:4 9 3:3,1,2:3 2:1,2:2 3:0,1,2:3 2:1,2:2"
+
+      # (after an assignment to `length` and after its delete)
+      assert js(
+               show <>
+                 "function f(){ arguments.length = 1; P.push.call(arguments, 'x'); " <>
+                 "var r = [show(arguments), P.slice.call(arguments).join()]; arguments.length = 3; " <>
+                 "P.sort.call(arguments); r.push(arguments.length, P.join.call(arguments)); " <>
+                 "return r.join(' ') } f(5, 4, 3)"
+             ) == "2:5,x:2 5,x 3 3,5,x"
+
+      assert js(
+               "function f(){ delete arguments.length; Array.prototype.push.call(arguments, 'x'); " <>
+                 "return arguments.length + ' ' + arguments[0] + ' ' + " <>
+                 "Array.prototype.pop.call(arguments) + ' ' + arguments.length } f(1, 2)"
+             ) == "1 x x 0"
+    end
+
     test "a typed array with elements cannot be frozen or sealed" do
       assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
                "TypeError"

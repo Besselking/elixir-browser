@@ -446,12 +446,20 @@ defmodule Browser.JS.Builtins do
   defp plain_array?({:obj, id}) do
     o = deref(id)
 
-    o.class == :array and
+    list_array?(o) and
       not (Obj.frozen?(o) or Obj.sealed?(o) or Map.get(o, :len_ro, false) or
              Obj.extensible?(o) == false)
   end
 
   defp plain_array?(_), do: false
+
+  # Whether `o` (a value or a record) is an array whose `len` is its `length`, so that a list
+  # path can read and write the elements as a list. The `length` of an arguments object is
+  # an own property that a list path does not change, so an arguments object takes the
+  # generic path, which reads and writes `length` with Get and Set.
+  defp list_array?({:obj, id}), do: list_array?(deref(id))
+  defp list_array?(%{class: :array} = o), do: not is_map_key(o, :arguments)
+  defp list_array?(_), do: false
 
   # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
   defp fast_array?(this, extra \\ 0) do
@@ -875,7 +883,7 @@ defmodule Browser.JS.Builtins do
 
   # an array without holes or accessor elements, which can be sorted as a plain list
   defp plain_elements?(o) do
-    array?(o) and not has_holes?(o) and
+    list_array?(o) and not has_holes?(o) and
       not Enum.any?(array_list(o), &match?({:accessor, _, _}, &1))
   end
 
@@ -1027,7 +1035,7 @@ defmodule Browser.JS.Builtins do
 
   # the elements written back: to the array, or to an object index by index
   defp put_elems(this, list) do
-    if array?(this) do
+    if list_array?(this) do
       set_array_list(this, list)
     else
       o = this_obj(this)
