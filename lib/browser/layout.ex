@@ -132,8 +132,14 @@ defmodule Browser.Layout do
   epoch: the window size, the measurer, the pictures known, ...) and is dropped when one of
   them changes. After each layout it keeps only what that layout used.
 
+  The memo also holds the ops of the elements the walk made (an element that is the same term
+  as last time is not walked again) and the fragments the place phase made of the blocks in
+  flow (`{:span, ...}` ops): a block placed again in a state it reads the same is moved into
+  place, not laid out.
+
   `LAYOUT_MEMO=off` lays out from an empty memo every time; `LAYOUT_MEMO=check` lays out
-  afresh as well and raises when the two layouts differ.
+  afresh as well, with the ops as a flat list (no spans), and raises when the two layouts
+  differ. `LAYOUT_SPANS=off` (or the option `spans: false`) makes no spans.
   """
   def layout_kept(nodes, width, measure, view_height, opts, memo) do
     epoch =
@@ -150,8 +156,17 @@ defmodule Browser.Layout do
         {items, height, memo} =
           run_layout(keep_same(nodes, memo.nodes), width, measure, view_height, opts, memo)
 
+        # (without spans and fragments: the ops as a flat list, as everything that reads them
+        # was first written for)
         {fresh, fresh_height, _} =
-          run_layout(nodes, width, measure, view_height, opts, fresh_memo(epoch))
+          run_layout(
+            nodes,
+            width,
+            measure,
+            view_height,
+            Keyword.put(opts, :spans, false),
+            fresh_memo(epoch)
+          )
 
         unless height == fresh_height and memo_norm(items) == memo_norm(fresh) do
           diff =
@@ -229,7 +244,8 @@ defmodule Browser.Layout do
   # How many layouts an element's ops are kept when nothing looks them up (`walk_kept/5`).
   @walk_gens 8
 
-  defp fresh_memo(epoch), do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}, nodes: nil}
+  defp fresh_memo(epoch),
+    do: %{epoch: epoch, gen: 0, entries: %{}, walk: %{}, frags: %{}, nodes: nil}
 
   defp kept(%{epoch: epoch} = memo, epoch), do: %{memo | gen: memo.gen + 1}
   defp kept(_memo, epoch), do: fresh_memo(epoch)
@@ -345,6 +361,9 @@ defmodule Browser.Layout do
     Process.put(:layout_wkeys, %{})
     Process.put(:layout_wlog, {0, []})
     Process.put(:layout_walk, memo.walk)
+    spans? = Keyword.get_lazy(opts, :spans, fn -> System.get_env("LAYOUT_SPANS") != "off" end)
+    Process.put(:layout_spans, spans?)
+    Process.put(:layout_frags, if(spans?, do: memo.frags))
 
     # what percentage margins and padding refer to, as the walk goes down the tree
     margin = Keyword.get(opts, :margin, @margin)
@@ -387,7 +406,14 @@ defmodule Browser.Layout do
       )
 
     Process.delete(:layout_walk)
-    memo = %{memo | entries: entries, walk: walk, nodes: tree}
+
+    frags =
+      case Process.delete(:layout_frags) do
+        nil -> %{}
+        frags -> :maps.filter(fn _key, entry -> elem(entry, 0) > gen - @walk_gens end, frags)
+      end
+
+    memo = %{memo | entries: entries, walk: walk, frags: frags, nodes: tree}
 
     case canvas do
       nil ->
@@ -1399,12 +1425,23 @@ defmodule Browser.Layout do
 
           # a block inside an inline box splits the box: what is before and after it
           # are fragments of their own
-          if parent_style.inl do
-            acc = [{:ib_split} | acc]
-            acc = block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
-            [{:ib_join} | acc]
-          else
-            kept.(&block_ops(tag, kind, kids, %{style | inl: false}, c, &1))
+          cond do
+            parent_style.inl ->
+              acc = [{:ib_split} | acc]
+              acc = block_ops(tag, kind, kids, %{style | inl: false}, c, acc)
+              [{:ib_join} | acc]
+
+            # (a block in flow, not the box of an atom or of an out-of-flow element itself)
+            force == nil ->
+              span_walk(
+                node,
+                parent_style,
+                acc,
+                &block_ops(tag, kind, kids, %{style | inl: false}, c, &1)
+              )
+
+            true ->
+              kept.(&block_ops(tag, kind, kids, %{style | inl: false}, c, &1))
           end
       end
     end
@@ -1895,18 +1932,27 @@ defmodule Browser.Layout do
     [{:inline_block, sub, spec, ps} | Enum.reduce(escaped, acc, &[&1 | &2])]
   end
 
-  # splits the absolute boxes whose containing block is outside of `ops` from the rest
+  # splits the absolute boxes whose containing block is outside of `ops` from the rest (a span
+  # is looked into, and made again without the boxes taken out)
   defp hoist_abs(ops) do
-    {kept, escaped, _} =
-      Enum.reduce(ops, {[], [], {0, []}}, fn
-        {:abs, _, %{fixed: false}} = a, {kept, esc, {0, _} = d} ->
-          {kept, [a | esc], d}
-
-        op, {kept, esc, d} ->
-          {[op | kept], esc, track_pos(op, d)}
-      end)
-
+    {kept, escaped, _} = hoist_abs_acc(ops, {[], [], {0, []}})
     {Enum.reverse(escaped), Enum.reverse(kept)}
+  end
+
+  defp hoist_abs_acc(ops, acc) do
+    Enum.reduce(ops, acc, fn
+      {:abs, _, %{fixed: false}} = a, {kept, esc, {0, _} = d} ->
+        {kept, [a | esc], d}
+
+      {:span, key, sops, safe?} = span, {kept, esc, d} ->
+        case hoist_abs_acc(sops, {[], esc, d}) do
+          {_, ^esc, d} -> {[span | kept], esc, d}
+          {skept, esc, d} -> {[{:span, key, Enum.reverse(skept), safe?} | kept], esc, d}
+        end
+
+      op, {kept, esc, d} ->
+        {[op | kept], esc, track_pos(op, d)}
+    end)
   end
 
   defp track_pos({:pos_inline, _}, {n, s}), do: {n + 1, s}
@@ -2035,32 +2081,41 @@ defmodule Browser.Layout do
   # the absolutely positioned boxes of a multicol container's content that are not inside a
   # positioned box of it (those are placed against that box) -> {them, the rest}
   defp split_outer_abs(sub) do
-    {abs, rest, _} =
-      Enum.reduce(sub, {[], [], []}, fn
-        # (one with an automatic offset in either direction goes where it would be in the flow,
-        # which is in a column)
-        {:abs, _, spec} = op, {abs, rest, []}
-        when (spec.top != nil or spec.bottom != nil) and
-               (spec.left != nil or spec.right != nil) ->
-          {[op | abs], rest, []}
-
-        {:box_start, ref, %{pos: true}} = op, {abs, rest, stack} ->
-          {abs, [op | rest], [ref | stack]}
-
-        {:box_end, ref} = op, {abs, rest, [ref | stack]} ->
-          {abs, [op | rest], stack}
-
-        {:pos_inline, _} = op, {abs, rest, stack} ->
-          {abs, [op | rest], [:inline | stack]}
-
-        {:pos_end} = op, {abs, rest, [:inline | stack]} ->
-          {abs, [op | rest], stack}
-
-        op, {abs, rest, stack} ->
-          {abs, [op | rest], stack}
-      end)
-
+    {abs, rest, _} = split_outer_abs_acc(sub, {[], [], []})
     {Enum.reverse(abs), Enum.reverse(rest)}
+  end
+
+  defp split_outer_abs_acc(sub, acc) do
+    Enum.reduce(sub, acc, fn
+      # (one with an automatic offset in either direction goes where it would be in the flow,
+      # which is in a column)
+      {:abs, _, spec} = op, {abs, rest, []}
+      when (spec.top != nil or spec.bottom != nil) and
+             (spec.left != nil or spec.right != nil) ->
+        {[op | abs], rest, []}
+
+      {:box_start, ref, %{pos: true}} = op, {abs, rest, stack} ->
+        {abs, [op | rest], [ref | stack]}
+
+      {:box_end, ref} = op, {abs, rest, [ref | stack]} ->
+        {abs, [op | rest], stack}
+
+      {:pos_inline, _} = op, {abs, rest, stack} ->
+        {abs, [op | rest], [:inline | stack]}
+
+      {:pos_end} = op, {abs, rest, [:inline | stack]} ->
+        {abs, [op | rest], stack}
+
+      # (a span is looked into, and made again without the boxes taken out)
+      {:span, key, sops, safe?} = span, {abs, rest, stack} ->
+        case split_outer_abs_acc(sops, {abs, [], stack}) do
+          {^abs, _, stack} -> {abs, [span | rest], stack}
+          {abs, srest, stack} -> {abs, [{:span, key, Enum.reverse(srest), safe?} | rest], stack}
+        end
+
+      op, {abs, rest, stack} ->
+        {abs, [op | rest], stack}
+    end)
   end
 
   defp strut_for_empty(%{line: []} = st, ref, %{style: style} = spec) do
@@ -2846,6 +2901,33 @@ defmodule Browser.Layout do
     entry = {gen, node, parent_style, value, wlog}
     Process.put(:layout_walk, Map.put(Process.get(:layout_walk), key, entry))
     value
+  end
+
+  # A block element in flow becomes one `{:span, key, ops, safe?}` op: its ops after the leading
+  # `{:flush}`, which stays outside so that the line before the block ends the same way. The
+  # place phase keeps what a span placed (`op/2` for a span) and places it again by moving it.
+  # The ops in a span have their tail extents (`tail_extents/1`) already: what is before and
+  # after a span does not change them.
+  defp span_walk(node, parent_style, acc, fun) do
+    if Process.get(:layout_spans) do
+      case kept_walk(node, parent_style, nil, fn -> span_of(node, fun.([])) end) do
+        {:span, _, _, _} = span -> [span, {:flush} | acc]
+        rev -> rev ++ acc
+      end
+    else
+      walk_kept(node, parent_style, nil, acc, fun)
+    end
+  end
+
+  defp span_of({:element, _, attrs, _}, rev) do
+    case Enum.reverse(rev) do
+      [{:flush} | ops] ->
+        ops = tail_extents(ops)
+        {:span, wkey(nid_of(attrs)), ops, safe_span?(ops)}
+
+      _ ->
+        rev
+    end
   end
 
   # The key of an atom (a float, an inline-block, a flex item, a cell, ...) and of what is
@@ -3744,12 +3826,21 @@ defmodule Browser.Layout do
 
   # collapsible spaces at the end of a line vanish even when only empty inline boxes stand
   # between them and the line break, which is why they are dropped before those boxes open
-  defp trim_line_end_spaces(ops) do
-    ops
-    |> Enum.reverse()
-    |> Enum.reduce({[], true}, fn
+  defp trim_line_end_spaces(ops), do: ops |> Enum.reverse() |> trim_reversed(true) |> elem(0)
+
+  # -> {ops, whether what comes before them ends at the end of a line}
+  defp trim_reversed(rev, edge?) do
+    Enum.reduce(rev, {[], edge?}, fn
       {:space, _}, {acc, true} ->
         {acc, true}
+
+      # (the ops of a span are trimmed as if they were in the list; the key of a span whose ops
+      # change says from what end they were trimmed)
+      {:span, key, sops, safe?} = span, {acc, edge?} ->
+        case trim_reversed(Enum.reverse(sops), edge?) do
+          {^sops, edge?} -> {[span | acc], edge?}
+          {trimmed, edge_out} -> {[{:span, {:trim, key, edge?}, trimmed, safe?} | acc], edge_out}
+        end
 
       {tag, _, _} = op, {acc, edge?} when tag in [:inline_open, :inline_close] ->
         {[op | acc], edge?}
@@ -3763,7 +3854,6 @@ defmodule Browser.Layout do
       op, {acc, _} ->
         {[op | acc], false}
     end)
-    |> elem(0)
   end
 
   # -- ops -> positioned items -------------------------------------------------------
@@ -3931,6 +4021,16 @@ defmodule Browser.Layout do
     do: %{item | stick: Map.put(stick, :limit, Map.get(limits, parent))}
 
   defp stick_limit(item, _limits), do: item
+
+  # A span placed before, with the same ops and in a state that it reads the same, is placed
+  # again from what it placed then (its fragment), moved to where it starts now.
+  defp op({:span, key, ops, safe?}, st) do
+    frags = Process.get(:layout_frags)
+
+    if frags != nil and safe? and span_state_ok?(st),
+      do: frag_op(frags, key, ops, st),
+      else: Enum.reduce(ops, st, &op/2)
+  end
 
   defp op({:indent, px}, %{line: []} = st), do: %{st | lead: px}
   defp op({:indent, _px}, st), do: st
@@ -6002,12 +6102,33 @@ defmodule Browser.Layout do
 
   # a flex container takes the height it is given (a definite one for its items' percentages)
   defp flex_height(sub, target) do
-    Enum.map(sub, fn
+    span_map(sub, fn
       {:flex, %{height: nil} = cs, items, style} ->
         {:flex, %{cs | height: max(target - cs.hx, 0), hdef: true}, items, style}
 
       op ->
         op
+    end)
+  end
+
+  # The ops of the blocks in a sub are in `{:span, ...}` ops: what looks through a sub for an op
+  # looks into them. (A span whose ops change keeps its key: its fragments are kept with its
+  # ops, and other ops do not find them.)
+  defp span_any?(ops, pred) do
+    Enum.any?(ops, fn
+      {:span, _, inner, _} -> span_any?(inner, pred)
+      op -> pred.(op)
+    end)
+  end
+
+  defp span_map(ops, fun) do
+    Enum.map(ops, fn
+      {:span, key, inner, safe?} = span ->
+        new = span_map(inner, fun)
+        if new == inner, do: span, else: {:span, key, new, safe?}
+
+      op ->
+        fun.(op)
     end)
   end
 
@@ -6237,7 +6358,7 @@ defmodule Browser.Layout do
 
           # a flex or grid container as the content wants its own natural width, not the room
           at =
-            if Enum.any?(sub, &match?({tag, _, _, _} when tag in [:flex, :grid], &1)),
+            if span_any?(sub, &match?({tag, _, _, _} when tag in [:flex, :grid], &1)),
               do: @unbounded,
               else: avail
 
@@ -6461,6 +6582,10 @@ defmodule Browser.Layout do
       {:word, text, style, :glue} ->
         min_run(rest, measure, l, r, stack, ext, cur + measure.(trim_hang(text), style))
 
+      # (a span holds what the flat list would: look through it)
+      {:span, _, ops, _} ->
+        min_words(ops ++ rest, measure, l, r, stack, ext, cur)
+
       {:inset, dl, dr} ->
         # (a box with nothing in it still takes the room of its margins, borders and padding)
         min_words(rest, measure, l + dl, r + dr, [{l, r} | stack], max(ext, l + dl + r + dr), cur)
@@ -6522,6 +6647,214 @@ defmodule Browser.Layout do
     do: {renumber_pz(items), height, baseline}
 
   defp renumber_memo(_key, value), do: value
+
+  # -- fragments ---------------------------------------------------------------------
+  #
+  # A span's fragment is what its ops added to the placer state: the items and rects (at the y
+  # they were placed), how far y moved, and the line and margin state it left. The fragment
+  # table (`memo.frags`) holds per span key the ops and up to four fragments, each for the state
+  # it was placed in (`span_key/1`). A span that changes other state (a float, a clearance, an
+  # inline box left open) is placed by its ops every time.
+
+  defp frag_op(frags, key, ops, st) do
+    gen = Process.get(:layout_gen)
+    skey = span_key(st)
+
+    states =
+      case frags do
+        %{^key => {_gen, old, states}} -> if same_ops?(old, ops), do: states, else: []
+        _ -> []
+      end
+
+    case states do
+      :unsafe ->
+        Process.put(:layout_frags, Map.put(frags, key, {gen, ops, :unsafe}))
+        Enum.reduce(ops, st, &op/2)
+
+      states ->
+        case List.keyfind(states, skey, 0) do
+          {_, frag} ->
+            Process.put(:layout_frags, Map.put(frags, key, {gen, ops, states}))
+            replay_span(st, frag)
+
+          nil ->
+            st1 = Enum.reduce(ops, %{st | ext: 0}, &op/2)
+
+            states =
+              case capture_span(st, st1) do
+                nil -> :unsafe
+                frag -> Enum.take([{skey, frag} | states], 4)
+              end
+
+            Process.put(
+              :layout_frags,
+              Map.put(Process.get(:layout_frags), key, {gen, ops, states})
+            )
+
+            %{st1 | ext: max(st.ext, st1.ext)}
+        end
+    end
+  end
+
+  defp same_ops?(old, ops), do: :erts_debug.same(old, ops) or old === ops
+
+  # what a span may change in the state, besides what it adds
+  @span_values [
+    :gap,
+    :ngap,
+    :hold,
+    :lead,
+    :line_lead,
+    :lmax,
+    :lh,
+    :lf,
+    :x,
+    :after_space,
+    :soft,
+    :runon,
+    :pending_space,
+    :strut,
+    :fr,
+    # (where the last line started: set again by `start_line/4` when the next one starts)
+    :indent,
+    # (the collapsed-top positions of boxes in `ptop`; dead once `ptop` is empty, which it is
+    # at both ends of a span that is placed again)
+    :pstart
+  ]
+  @span_vary [:items, :rects, :n, :nr, :y, :ext, :limits, :clr, :adj | @span_values]
+
+  defp span_state_ok?(st) do
+    st.line == [] and st.marks == [] and st.active == [] and st.rels == [] and st.ptop == [] and
+      st.clr == nil and st.adj == nil and elem(st.bstart, 1) != st.y
+  end
+
+  # the floats that reach into the span, as the span sees them: beside it at these heights
+  # below its top (its lines go around them the same way wherever the span starts)
+  defp floats_rel(%{floats: []}), do: []
+
+  defp floats_rel(st) do
+    for f <- st.floats, f.y1 > st.y, do: {f.side, f.x0, f.x1, f.y0 - st.y, f.y1 - st.y}
+  end
+
+  defp span_key(st) do
+    {st.width, st.margin, st.left, st.right, st.free, st.indent, st.lead, st.line_lead, st.gap,
+     st.ngap, st.hold, st.cbh, st.scbh, st.cbw, st.bal, st.fr, st.aligned?, st.flex_item,
+     st.root_view, st.blocks == [], st.after_space, st.soft, st.runon, st.x, st.lmax, st.lh,
+     st.lf, st.split, st.splitting, st.strut, st.pending_space, st.view_h,
+     Process.get(:layout_intrinsic, false), Process.get(:layout_cw),
+     Process.get(:layout_definite), Process.get(:layout_boxes, false),
+     Process.get(:layout_viewport), Process.get(:layout_flex_item, false), floats_rel(st)}
+  end
+
+  # the fragment, or nil when the span changed state it may not
+  defp capture_span(st0, st1) do
+    changed? = Enum.any?(Map.drop(st1, @span_vary), fn {k, v} -> Map.get(st0, k) != v end)
+
+    if st1.clr == nil and st1.adj == nil and not changed? do
+      {items, _} = Enum.split(st1.items, st1.n - st0.n)
+      {rects, _} = Enum.split(st1.rects, st1.nr - st0.nr)
+
+      %{
+        y0: st0.y,
+        dy: st1.y - st0.y,
+        items: items,
+        rects: rects,
+        n: st1.n - st0.n,
+        nr: st1.nr - st0.nr,
+        ext: st1.ext,
+        # (items with a paint order (outlines, positioned boxes) get fresh ones when placed
+        # again, so they still paint in tree order among what the layout placed before them)
+        pz?: Enum.any?(items, &Map.has_key?(&1, :pz)),
+        values: Map.take(st1, @span_values)
+      }
+    end
+  end
+
+  defp replay_span(st, frag) do
+    dy = st.y - frag.y0
+
+    {items, rects} =
+      if dy == 0,
+        do: {frag.items, frag.rects},
+        else: {Enum.map(frag.items, &move(&1, 0, dy)), Enum.map(frag.rects, &move(&1, 0, dy))}
+
+    items = if frag.pz?, do: renumber_pz(items), else: items
+    st = Map.merge(st, frag.values)
+
+    %{
+      st
+      | items: items ++ st.items,
+        rects: rects ++ st.rects,
+        n: st.n + frag.n,
+        nr: st.nr + frag.nr,
+        y: st.y + frag.dy,
+        ext: max(st.ext, frag.ext)
+    }
+  end
+
+  # What a span may hold for its fragment to be placed again elsewhere: nothing that reaches
+  # outside the span (floats, clears, out-of-flow boxes, positioned boxes with a paint order,
+  # sticky boxes, columns) and no block that interrupts an inline box. Inside an atom (which is
+  # a formatting context of its own) floats and relative inlines are contained.
+  defp safe_span?(ops), do: Enum.all?(ops, &safe_op?/1)
+
+  defp safe_op?({:span, _, _, safe?}), do: safe?
+  defp safe_op?({:word, _, _}), do: true
+  defp safe_op?({:word, _, _, _}), do: true
+  defp safe_op?({:space, _}), do: true
+  defp safe_op?({:box_start, _, o}), do: safe_box?(o)
+  defp safe_op?({:inline_block, sub, _spec, _}), do: safe_sub?(sub)
+  defp safe_op?({:flex, _cs, items, _}), do: Enum.all?(items, &safe_sub?(&1.sub))
+  defp safe_op?({:grid, _gs, items, _}), do: Enum.all?(items, &safe_sub?(&1.sub))
+  defp safe_op?({:table, _ts, model, _}), do: safe_table?(model)
+  defp safe_op?({:columns, _cs, sub, _}), do: safe_sub?(sub)
+  defp safe_op?({:image, _, _}), do: true
+
+  defp safe_op?({tag, _}) when tag in [:indent, :gap, :pad, :br, :anchor, :empty_inline],
+    do: true
+
+  defp safe_op?({tag, _, _}) when tag in [:marker, :inline_open, :inline_close, :inset], do: true
+  defp safe_op?({tag}) when tag in [:flush, :inset_end, :hr, :run_on], do: true
+  defp safe_op?({:box_end, _}), do: true
+  defp safe_op?(_), do: false
+
+  defp safe_box?(o),
+    do:
+      not o.pos and o.sticky == nil and o.xform == nil and o.rel == nil and o.z == 0 and
+        o.cpath in [nil, false] and o.cisw == nil
+
+  # inside a sub-layout of its own: floats, clears and relative inlines stay inside; out-of-flow
+  # boxes, positioned boxes and sticky boxes do not
+  defp safe_sub?(ops), do: Enum.all?(ops, &safe_in_sub?/1)
+
+  defp safe_in_sub?({:abs, _, _}), do: false
+  defp safe_in_sub?({:box_start, _, o}), do: safe_box?(o)
+  defp safe_in_sub?({:float, _, sub, _, _}), do: safe_sub?(sub)
+  defp safe_in_sub?({:float_below, _, sub, _, _}), do: safe_sub?(sub)
+  defp safe_in_sub?({:clear, _}), do: true
+  defp safe_in_sub?({:pos_inline, _}), do: true
+  defp safe_in_sub?({:pos_end}), do: true
+  defp safe_in_sub?({:balance, inner}), do: safe_sub?(inner)
+  defp safe_in_sub?({:legend, sub, _, _}), do: safe_sub?(sub)
+  defp safe_in_sub?({:span, _, ops, _}), do: safe_sub?(ops)
+  defp safe_in_sub?({tag}) when tag in [:ib_split, :ib_join, :colbreak], do: true
+  defp safe_in_sub?(op), do: safe_op?(op)
+
+  defp safe_table?(%{rows: rows} = model) do
+    cells_ok? =
+      Enum.all?(rows, fn row ->
+        Enum.all?(Map.get(row, :cells, []), fn cell -> safe_sub?(Map.get(cell, :sub, [])) end)
+      end)
+
+    cells_ok? and
+      case Map.get(model, :caption) do
+        nil -> true
+        sub when is_list(sub) -> safe_sub?(sub)
+        _ -> false
+      end
+  end
+
+  defp safe_table?(_), do: false
 
   defp layout_sub(st, sub, width) do
     sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images)
@@ -11871,6 +12204,7 @@ defmodule Browser.Layout do
     end
   end
 
+  defp fold_op({:span, _key, ops, _safe?}, f), do: Enum.reduce(ops, f, &fold_op/2)
   defp fold_op(_op, _f), do: throw(:layout)
 
   # -- words
@@ -12505,6 +12839,9 @@ defmodule Browser.Layout do
 
   defp fold_margins_in?(ops) do
     Enum.any?(ops, fn
+      {:span, _key, sops, _safe?} ->
+        fold_margins_in?(sops)
+
       {:box_start, _ref, o} ->
         is_number(o.mr) and o.mr > 0
 

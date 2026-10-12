@@ -5,7 +5,8 @@
 # width changes) or as typing makes them (a field gets a new value: `Page.render/2`, which keeps
 # every element the edit did not change, so that their ops are taken from the layout before).
 # After each edit the page is laid out from the memo of the layout before (from a copy of the
-# tree, as the layout worker gets it) and also afresh, and the two results must be the same (references and paint orders numbered).
+# tree, as the layout worker gets it) and also afresh with the ops as a flat list (no spans, no
+# fragments), and the two results must be the same (references and paint orders numbered).
 #
 # Prints the edits and differences per page and exits with status 1 when a difference is found.
 # EDITS=40 sets the number of edits per page; SEED=1 the random seed. Uses a stub measurer.
@@ -157,7 +158,8 @@ failed =
           copy = :erlang.binary_to_term(:erlang.term_to_binary(page.nodes))
           {items, height, memo} = Layout.layout_kept(copy, width, measure, 768, opts.(page), memo)
 
-          {fresh, fresh_height} = Layout.layout(page.nodes, width, measure, 768, opts.(page))
+          {fresh, fresh_height} =
+            Layout.layout(page.nodes, width, measure, 768, [spans: false] ++ opts.(page))
           same? = height == fresh_height and Layout.memo_norm(items) == Layout.memo_norm(fresh)
           diffs = if same?, do: diffs, else: ["edit #{i} (#{name})" | diffs]
           {page, width, memo, Map.update(kinds, name, 1, &(&1 + 1)), diffs}

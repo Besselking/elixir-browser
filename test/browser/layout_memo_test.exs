@@ -13,8 +13,9 @@ defmodule Browser.LayoutMemoTest do
     Layout.layout_kept(page.nodes, width, &measure/2, view_h, opts, memo)
   end
 
+  # (the ops as a flat list: no spans, no fragments)
   defp fresh(page, opts, width, view_h),
-    do: page |> kept(nil, opts, width, view_h) |> Tuple.delete_at(2)
+    do: page |> kept(nil, [spans: false] ++ opts, width, view_h) |> Tuple.delete_at(2)
 
   defp same!(page, memo, opts \\ [], width \\ 500, view_h \\ 600) do
     {items, height, memo} = kept(page, memo, opts, width, view_h)
@@ -101,11 +102,13 @@ defmodule Browser.LayoutMemoTest do
   end
 
   # (the infobox of the article page: a table with a caption whose column sizes the memo keeps
-  # are found again when text elsewhere changes)
+  # are found again when text elsewhere changes; without spans, whose fragments would hold the
+  # table placed)
   test "a text changed in a realistic page" do
     html = File.read!("bench/pages/article.html")
     p = page(html)
-    {_, _, memo} = kept(p, nil, [], 1000, 768)
+    flat = [spans: false]
+    {_, _, memo} = kept(p, nil, flat, 1000, 768)
 
     edited =
       page(
@@ -114,12 +117,34 @@ defmodule Browser.LayoutMemoTest do
         )
       )
 
-    {_, memo} = same!(edited, memo, [], 1000, 768)
+    {_, memo} = same!(edited, memo, flat, 1000, 768)
 
     assert Enum.any?(memo.entries, fn {key, {gen, _, _}} ->
              elem(key, 0) == :tcols and gen == 1
            end)
 
+    same!(p, memo, flat, 1000, 768)
+  end
+
+  test "the blocks a text change did not touch are placed from their fragments" do
+    html = File.read!("bench/pages/article.html")
+    p = page(html)
+    {_, _, memo0} = kept(p, nil, [], 1000, 768)
+
+    edited =
+      page(String.replace(html, "Grid float page table", "Grid float edited", global: false))
+
+    {_, memo} = same!(edited, memo0, [], 1000, 768)
+
+    placed_again =
+      for {key, {1, _ops, [_ | _] = states}} <- memo.frags,
+          {0, _, [_ | _] = old} <- [memo0.frags[key]],
+          {skey, frag} <- states,
+          {_, old_frag} <- [List.keyfind(old, skey, 0)],
+          :erts_debug.same(frag, old_frag),
+          do: key
+
+    assert length(placed_again) > 10
     same!(p, memo, [], 1000, 768)
   end
 
