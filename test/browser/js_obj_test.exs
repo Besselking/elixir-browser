@@ -14,8 +14,7 @@ defmodule Browser.JS.ObjTest.Api do
   def enum_names(o), do: Obj.enum_names(o)
   def plain_names(o), do: Obj.plain_names(o)
   def element_enumerable?(o, i), do: Obj.element_enumerable?(o, i)
-  def attr_map(o), do: Obj.attr_map(o)
-  def attr_flags(o, k), do: Obj.attr_flags(o, k)
+  def default_attrs?(o, k), do: Obj.default_attrs?(o, k)
   def writable?(o, k), do: Obj.writable?(o, k)
   def configurable?(o, k), do: Obj.configurable?(o, k)
   def extensible?(o), do: Obj.extensible?(o)
@@ -39,10 +38,11 @@ end
 
 defmodule Browser.JS.ObjTest do
   # The record API of the own properties of a JS object (`Browser.JS.Obj`, data-model step
-  # A0a). The first test is the grep gate of the moduledoc of `Browser.JS.Obj`: only that
+  # A0a). The first tests are the grep gate of the moduledoc of `Browser.JS.Obj`: only that
   # module names the own-property fields of a heap record. The other tests use the API on
   # records that no heap holds, so they run without `Interp.init/1`. They test what the API
-  # gives, not the fields, so that a change of the representation keeps them.
+  # gives (the states, the attributes, the key order), not the fields, so that a change of
+  # the representation keeps them. Two records are compared by `Obj.normal/1`.
   use ExUnit.Case, async: true
 
   require Browser.JS.Obj, as: Obj
@@ -142,7 +142,7 @@ defmodule Browser.JS.ObjTest do
     assert Api.enum_names(o) == ["b", "a"]
     assert Api.plain_names(o) == ["b", "a"]
     assert Obj.own_names(o, []) == {[], ["b", "a"]}
-    assert Obj.record(class: :object, proto: nil) == plain()
+    assert Obj.normal(Obj.record(class: :object, proto: nil)) == Obj.normal(plain())
   end
 
   test "own_case matches an own value, an accessor and a missing key" do
@@ -226,8 +226,9 @@ defmodule Browser.JS.ObjTest do
 
     assert Api.own_state(o, "h") == {:data, 2, false, false, false}
     refute Api.writable?(o, "h") or Api.configurable?(o, "h")
-    assert Api.attr_flags(o, "h") == %{c: false, w: false}
-    assert Api.attr_flags(o, "b") == %{}
+    refute Api.default_attrs?(o, "h")
+    assert Api.own_state(o, "b") == {:data, 3, true, true, true}
+    assert Api.default_attrs?(o, "b")
     assert Obj.split_names(o) == {["a", "b"], ["h"]}
     assert Obj.own_names(o, []) == {[], ["a", "h", "b"]}
     assert Obj.own_names(o, ["h"]) == {[], ["a", "b"]}
@@ -285,9 +286,12 @@ defmodule Browser.JS.ObjTest do
            |> Api.put_element_attrs(2, %{w: true, c: true, e: false})
            |> Api.element_enumerable?(2)
 
-    assert Api.attr_map(a) == %{1 => %{w: true, c: false, e: true}}
+    assert Api.writable?(a, 1)
+    refute Api.default_attrs?(a, 1)
+    assert Api.default_attrs?(a, 0)
     a = Api.put_element_attrs(a, 1, %{w: true, c: true, e: true})
-    assert Api.attr_map(a) == %{}
+    assert Api.configurable?(a, 1) and Api.default_attrs?(a, 1)
+    assert Api.max_fixed_element(a, 0) == nil
     a = Obj.lock(a, true)
     assert Api.frozen?(a) and not Api.sealed?(a)
   end
@@ -296,11 +300,14 @@ defmodule Browser.JS.ObjTest do
     layout = Obj.literal_keys(["a", "b", "a"])
     o = Api.fill(plain(), layout, [{"a", 1}, {"b", 2}, {"a", 3}])
 
-    assert o ==
-             plain()
-             |> Api.define_data("a", 1)
-             |> Api.define_data("b", 2)
-             |> Api.define_data("a", 3)
+    one_by_one =
+      plain()
+      |> Api.define_data("a", 1)
+      |> Api.define_data("b", 2)
+      |> Api.define_data("a", 3)
+
+    assert Obj.normal(o) == Obj.normal(one_by_one)
+    assert Api.enum_names(o) == ["a", "b"]
 
     assert Api.own_value(o, "a") == 3
   end
