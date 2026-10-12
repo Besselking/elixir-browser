@@ -139,6 +139,13 @@ defmodule Browser.JS.Interp do
 
     # (the closure count starts here and only goes up, see `make_fn/3`)
     :erlang.put(:js_fns, 0)
+
+    # The switch of the fast records (`Browser.JS.Shape`): the application setting
+    # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
+    # them off for each heap of the process. A process that set its own switch keeps it
+    # when the setting is on, so that the oracles can run the two modes in one VM.
+    if Application.get_env(:browser, :js_shapes, true) == false,
+      do: :erlang.put(:js_shapes, false)
   end
 
   def alloc(obj) do

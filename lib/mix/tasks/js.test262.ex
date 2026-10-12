@@ -41,6 +41,10 @@ defmodule Mix.Tasks.Js.Test262 do
       and on (`Browser.JS.Compile`), and fail it when the two runs differ in the outcome,
       the console, the steps left, the heap ids, the heap count or the position (see
       `Browser.JS.Test262.run_test/4`). The run takes about twice the time.
+    * `--shapes on|off` - the fast records of the data model (`Browser.JS.Shape`). The
+      default is the application setting (on, or off with `JS_SHAPES=0`). With `off`,
+      every object is a dictionary record, so that two runs can show that the two modes
+      give the same results.
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -100,7 +104,8 @@ defmodule Mix.Tasks.Js.Test262 do
           limit: :integer,
           timings: :string,
           resolve: :string,
-          compile_diff: :boolean
+          compile_diff: :boolean,
+          shapes: :string
         ],
         aliases: [v: :verbose]
       )
@@ -112,6 +117,14 @@ defmodule Mix.Tasks.Js.Test262 do
     # and each test in a spawned one, so a process key would not reach them
     if opts[:resolve],
       do: Application.put_env(:browser, :js_resolve, resolve_level(opts[:resolve]))
+
+    # (each test runs in a process of its own, which reads the setting in `Interp.init/1`)
+    case opts[:shapes] do
+      nil -> :ok
+      "on" -> Application.put_env(:browser, :js_shapes, true)
+      "off" -> Application.put_env(:browser, :js_shapes, false)
+      other -> Mix.raise("--shapes must be on or off, not #{other}")
+    end
 
     paths =
       if paths == [], do: @default_paths, else: Enum.map(paths, &String.trim_trailing(&1, "/"))
