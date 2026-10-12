@@ -49,16 +49,25 @@ defmodule Browser.JS.Obj do
   ## The grep gate
 
   No module other than this one names the fields. This command finds the direct uses
-  outside this module (comment lines do not count). Each line that it prints must be in the
-  allow-list below. `test/browser/js_obj_test.exs` runs the same search.
+  outside this module: a field after a dot, a field as a key of a map or a keyword list,
+  and a field atom in any other place (a call of `Map`, `:maps` or `Access`, a list of
+  fields). Comment lines do not count, and the last stage removes the lines of the
+  allow-list below. So the command prints nothing. `test/browser/js_obj_test.exs` runs
+  the same search with the same patterns, and it fails when they are not the same as here.
 
-      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|attrs|horder|hpos)\\b(?!\\()|\\b(props|keys|attrs|horder|hpos|ext|frozen|sealed):|Map\\.\\w+[?!]?\\((?:[^,]*, )?:(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b|(is_map_key\\([^,]+, |map_get\\(|\\[):(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b|^\\s+:(props|keys|attrs|horder|hpos|ext|frozen|sealed),?\\s*$' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:'
+      grep -rnP '(?<!Map|Object|Keyword|Reflect|prototype)\\.(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b(?![?!(])|\\b(props|keys|attrs|horder|hpos|ext|frozen|sealed):|(?<![{\\w:]):(props|keys|attrs|horder|hpos|ext|frozen|sealed)\\b' lib/browser/js --include=*.ex | grep -vP '^[^:]+:\\d+:\\s*#' | grep -v '^lib/browser/js/obj.ex:' | grep -vP '^lib/browser/js/dom\\.ex:\\d+:.*((\\bn|&1)\\.(attrs|props)\\b|node\\(this_nid\\(this\\)\\)\\.attrs\\b|\\b(attrs|props): (\\[\\]|%\\{\\}|%\\{"value"|visible\\b|attrs\\b|props\\b)|%\\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\\.ex:\\d+:(\\s*:keys ->|.*_iterator\\(this, (:\\w+, )?:keys\\))|^lib/browser/js/collections\\.ex:\\d+:.*(has: has, keys: keys\\}|call\\(rec\\.keys, rec\\.obj, \\[\\]\\))'
 
   The allow-list (the reason for each):
 
-  * `lib/browser/js/dom.ex`: the maps of DOM nodes have their own `attrs` (the HTML
-    attributes) and `props` (the live `value`, `checked` and `open`), and a realm has
-    `keys`. These are not JavaScript object records.
+  * `lib/browser/js/dom.ex`, only the lines with a node form (`n.attrs`, `n.props`,
+    `&1.props`, `node(this_nid(this)).attrs`, `attrs: []`, `props: %{}`, `attrs: visible`,
+    `props: props` and the like) or the realm form (`%{fields: ..., keys: ...}`): a DOM
+    node has its own `attrs` (the HTML attributes) and `props` (the live `value`,
+    `checked` and `open`), and a realm has `keys`. These are not heap records. A use of a
+    heap record in `dom.ex` has none of these forms, so the gate finds it.
+  * `lib/browser/js/collections.ex` and `lib/browser/js/typed_arrays.ex`, the lines with the
+    iterator kind `:keys` (`:keys ->`, `..._iterator(this, :keys)`): it is the kind of a
+    `keys()` iterator, not a field.
   * `lib/browser/js/collections.ex`, `set_record/1` and `each_key/2`: the record of
     GetSetRecord (`%{obj, size, has, keys}`) holds the `keys` method of a set-like object.
     It is not a heap record.
@@ -66,9 +75,22 @@ defmodule Browser.JS.Obj do
   The garbage collector (`Browser.JS.GC`) names no field. It walks every map generically,
   but for a heap record (`heap_record?/1`) it skips the fields that `no_refs?/1` names,
   because the walk reads each integer as a heap id and these fields hold counts. A1 must
-  change these two guards for its record: a shape id and a slot position are integers too. The other modules under `lib/browser` (layout, style, HTML,
-  cookies, the console of the session) have their own `attrs`, `props` and `hpos`, but they
-  never read a heap record, so the gate does not search them.
+  change these two guards for its record: a shape id and a slot position are integers too.
+  The shadow run of `Browser.JS.Fast` compares two records by `normal/1`, which A1 must
+  also change. The other modules under `lib/browser` (layout, style, HTML, cookies, the
+  console of the session) have their own `attrs`, `props` and `hpos`, but they never read a
+  heap record, so the gate does not search them.
+
+  ## A known gap before A1
+
+  The `length` of an arguments object can be a key without a value: `delete
+  arguments.length` removes the value with `own_drop/2` and keeps its place and its
+  attributes, and the interpreter marks the record with `len_gone`. A record of A1 cannot
+  hold a key without a value. So before A1, `arguments.length` must become an ordinary own
+  property (made with `own_add/5`, removed with `own_delete/2`), and `own_drop/2` must go.
+  This also corrects two results that differ from the spec today: after a delete, a new
+  `arguments.length` is not enumerable, and `Object.defineProperty(arguments, "length",
+  {enumerable: true})` throws.
   """
 
   # ── building ───────────────────────────────────────────────

@@ -48,26 +48,26 @@ defmodule Browser.JS.ObjTest do
   require Browser.JS.Obj, as: Obj
   alias Browser.JS.ObjTest.Api
 
-  @fields "props|keys|attrs|horder|hpos"
-  @flags "props|keys|attrs|horder|hpos|ext|frozen|sealed"
+  @fields "props|keys|attrs|horder|hpos|ext|frozen|sealed"
 
-  # (the regular expression of the grep command in the moduledoc of `Browser.JS.Obj`)
-  @gate Regex.compile!(
-          "(?<!Map|Object|Keyword|Reflect|prototype)\\.(#{@fields})\\b(?!\\()" <>
-            "|\\b(#{@flags}):" <>
-            "|Map\\.\\w+[?!]?\\((?:[^,]*, )?:(#{@flags})\\b" <>
-            "|(is_map_key\\([^,]+, |map_get\\(|\\[):(#{@flags})\\b" <>
-            "|^\\s+:(#{@flags}),?\\s*$"
-        )
+  # The patterns of the grep command in the moduledoc of `Browser.JS.Obj`: `@gate` finds a
+  # direct use, and `@allow` is the allow-list. Each is matched against
+  # "path:line number:line", as grep prints it.
+  @gate "(?<!Map|Object|Keyword|Reflect|prototype)\\.(#{@fields})\\b(?![?!(])" <>
+          "|\\b(#{@fields}):|(?<![{\\w:]):(#{@fields})\\b"
 
-  # The allow-list of the moduledoc: the DOM nodes of `dom.ex`, and the record of
-  # GetSetRecord in `collections.ex`. Neither is a heap record of an object.
-  defp allowed?("lib/browser/js/dom.ex", _line), do: true
+  @allow String.trim(~S"""
+         ^lib/browser/js/dom\.ex:\d+:.*((\bn|&1)\.(attrs|props)\b|node\(this_nid\(this\)\)\.attrs\b|\b(attrs|props): (\[\]|%\{\}|%\{"value"|visible\b|attrs\b|props\b)|%\{fields: [^}]*keys: )|^lib/browser/js/(collections|typed_arrays)\.ex:\d+:(\s*:keys ->|.*_iterator\(this, (:\w+, )?:keys\))|^lib/browser/js/collections\.ex:\d+:.*(has: has, keys: keys\}|call\(rec\.keys, rec\.obj, \[\]\))
+         """)
 
-  defp allowed?("lib/browser/js/collections.ex", line),
-    do: line =~ "has: has, keys: keys}" or line =~ "call(rec.keys, rec.obj, [])"
+  defp gate?(line), do: Regex.match?(Regex.compile!(@gate), line)
+  defp allowed?(path, n, line), do: Regex.match?(Regex.compile!(@allow), "#{path}:#{n}:#{line}")
 
-  defp allowed?(_, _), do: false
+  test "the moduledoc gives the patterns of this test" do
+    {:docs_v1, _, _, _, %{"en" => doc}, _, _} = Code.fetch_docs(Obj)
+    assert doc =~ "grep -rnP '#{@gate}' lib/browser/js"
+    assert doc =~ "grep -vP '#{@allow}'"
+  end
 
   test "only obj.ex names the own-property fields of a record" do
     hits =
@@ -75,8 +75,8 @@ defmodule Browser.JS.ObjTest do
           path != "lib/browser/js/obj.ex",
           {line, n} <- path |> File.read!() |> String.split("\n") |> Enum.with_index(1),
           not (line =~ ~r/^\s*#/),
-          Regex.match?(@gate, line),
-          not allowed?(path, line),
+          gate?(line),
+          not allowed?(path, n, line),
           do: "#{path}:#{n}: #{String.trim(line)}"
 
     assert hits == []
@@ -91,12 +91,38 @@ defmodule Browser.JS.ObjTest do
           "|> Map.update(:horder, [key], &[key | &1])",
           "is_map_key(o, :frozen)",
           ":erlang.map_get(:sealed, o)",
-          "        :attrs,"
+          "        :attrs,",
+          ":maps.get(:props, o)",
+          "Map.take(o, [:class, :props])",
+          "o.ext",
+          "o.frozen and o.sealed",
+          ":maps.put(:keys, [], o)",
+          "Map.get(o,:attrs)",
+          "Map.get(o, :proto) || Map.get(o, :props)",
+          "Access.key(:props) && o",
+          "o.hpos[k]"
         ],
-        do: assert(Regex.match?(@gate, line), line)
+        do: assert(gate?(line), line)
 
-    for line <- ["Map.keys(m)", "Object.keys(o)", "Headers.prototype.keys = f", "x.keys()"],
-        do: refute(Regex.match?(@gate, line), line)
+    for line <- [
+          "Map.keys(m)",
+          "Object.keys(o)",
+          "Headers.prototype.keys = f",
+          "x.keys()",
+          "Obj.frozen?(o)",
+          "Obj.extensible?(o)",
+          "{:ext, v}",
+          "Path.extname(p)"
+        ],
+        do: refute(gate?(line), line)
+
+    # (the allow-list of dom.ex takes the node forms, not a heap record)
+    dom = "lib/browser/js/dom.ex"
+    assert allowed?(dom, 1, "    case n.props do")
+    assert allowed?(dom, 1, "  update_node(nid, &%{&1 | props: Map.put(&1.props, \"open\", v)})")
+    refute allowed?(dom, 1, "    o = deref(id); o.props")
+    refute allowed?(dom, 1, "    Map.get(deref(id), :attrs)")
+    refute allowed?("lib/browser/js/interp.ex", 1, "    case n.props do")
   end
 
   defp plain(pairs \\ []), do: Api.record([class: :object, proto: nil], pairs)
