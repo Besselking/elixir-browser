@@ -543,14 +543,26 @@ defmodule Browser.JS.Elems do
   @doc """
   `{last, o}`: the last item of `o` (an array with a length of 1 or more, as
   `Array.prototype.pop` reads it, `:undefined` for a hole) and `o` without it, with a
-  length one less.
+  length one less. It is a macro, as `push/2` is: the pop of a sparse record is inline, as
+  it was before step B2, and the pop of a dense record is one call.
   """
-  def pop(%{vec: vec} = o) do
-    n = tuple_size(vec)
-    {:erlang.element(n, vec), %{o | vec: :erlang.delete_element(n, vec)}}
+  defmacro pop(o) do
+    quote generated: true, bind_quoted: [o: o] do
+      case o do
+        %{items: items, len: len} ->
+          {Map.get(items, len - 1, :undefined),
+           %{o | items: :maps.remove(len - 1, items), len: len - 1}}
+
+        _ ->
+          Browser.JS.Elems.pop_dense(o)
+      end
+    end
   end
 
-  def pop(%{items: items, len: len} = o) do
-    {Map.get(items, len - 1, :undefined), %{o | items: Map.delete(items, len - 1), len: len - 1}}
+  @doc false
+  # `pop/1` for a dense record.
+  def pop_dense(%{vec: vec} = o) do
+    n = tuple_size(vec)
+    {:erlang.element(n, vec), %{o | vec: :erlang.delete_element(n, vec)}}
   end
 end
