@@ -76,11 +76,12 @@ defmodule Browser.JS.Elems do
 
   ## Hot paths
 
-  The guards `dense_index?/2` and `sparse_index?/2` and the macros `dense_at/2` and
-  `sparse_at/2` let a hot caller read an element inline with no call: the read of an
-  element in `Browser.JS.Interp`, a for-of loop, the callbacks of the array methods and
-  `ArrayGeneric`. `dense_put/3` and `dense_append/2` let the write of an element in
-  bounds and at the end take no call either. The other functions are calls.
+  The guard `dense_index?/2` with the macro `dense_at/2`, and the macro `get/3` with
+  `none/0`, let a hot caller read an element inline with no call: the read of an element
+  in `Browser.JS.Interp`, a for-of loop, the callbacks of the array methods and
+  `ArrayGeneric`. `get/3` searches the map of a sparse record one time. `dense_put/3` and
+  `dense_append/2` let the write of an element in bounds and at the end take no call
+  either. The other functions are calls.
 
   ## The grep gate
 
@@ -154,11 +155,6 @@ defmodule Browser.JS.Elems do
     quote do: :erlang.element(unquote(i) + 1, :erlang.map_get(:vec, unquote(o)))
   end
 
-  @doc "The item at `i` of a record for which `sparse_index?/2` is true."
-  defmacro sparse_at(o, i) do
-    quote do: :erlang.map_get(unquote(i), :erlang.map_get(:items, unquote(o)))
-  end
-
   @doc """
   `o` with `v` at the index `i`, for a record for which `dense_index?/2` is true. The
   value must be a data value: the element keeps the default attributes.
@@ -202,7 +198,17 @@ defmodule Browser.JS.Elems do
     end
   end
 
-  @doc "The item at the index `i` of the array record `o`, or `default`."
+  @doc """
+  An atom that is never a JS value, for the `default` of `get/3`: a caller can match it
+  in a pattern and so tell a missing item from any item.
+  """
+  defmacro none, do: :"$elems_none"
+
+  @doc """
+  The item at the index `i` of the array record `o`, or `default`. For a sparse record
+  this is one search of the map of the items, where a test of `sparse_index?/2` and a read
+  of the item would be two.
+  """
   defmacro get(o, i, default) do
     quote generated: true, bind_quoted: [o: o, i: i, default: default] do
       case o do

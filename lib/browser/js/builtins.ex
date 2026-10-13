@@ -1028,21 +1028,22 @@ defmodule Browser.JS.Builtins do
     else
       Stream.flat_map(range, fn i ->
         case own_element(this, i) do
-          {:ok, v} ->
-            [{i, v}]
-
-          :slow ->
+          Elems.none() ->
             present =
               if is_binary(this), do: i < len, else: has_property?(this, float(i))
 
             if present, do: [{i, Interp.get(this, float(i))}], else: []
+
+          v ->
+            [{i, v}]
         end
       end)
     end
   end
 
-  # `{:ok, value}` for an own data element at `i` of an array that is not a proxy and not a
-  # mapped arguments object, else `:slow`. For such an element HasProperty is true and Get
+  # The value of an own data element at `i` of an array that is not a proxy and not a
+  # mapped arguments object, else `Elems.none()`. (The atom of `Elems.none/0` is never a
+  # JS value, and a bare value costs no tuple for each element.) For such an element HasProperty is true and Get
   # gives the value, with no user code between them, so one read of the element is the two
   # reads of the spec (fast path `:iter`). A hole, an accessor, a proxy and a mapped
   # arguments object take the generic path. The tests for a proxy and a mapped arguments
@@ -1056,29 +1057,28 @@ defmodule Browser.JS.Builtins do
     if Fast.on?(:iter) do
       case :erlang.get(id) do
         o when Elems.dense_index?(o, i) ->
-          Fast.shadow(id, {:ok, Elems.dense_at(o, i)}, own_element_slow(this, i))
+          Fast.shadow(id, Elems.dense_at(o, i), own_element_slow(this, i))
 
-        %{class: :array} = o
-        when Elems.sparse_index?(o, i) and not is_map_key(o, :proxy) and
-               not is_map_key(o, :mapped) ->
-          case Elems.sparse_at(o, i) do
-            {:accessor, _, _} -> :slow
-            x -> Fast.shadow(id, {:ok, x}, own_element_slow(this, i))
+        %{class: :array} = o when not is_map_key(o, :proxy) and not is_map_key(o, :mapped) ->
+          case Elems.get(o, i, Elems.none()) do
+            {:accessor, _, _} -> Elems.none()
+            Elems.none() -> Elems.none()
+            x -> Fast.shadow(id, x, own_element_slow(this, i))
           end
 
         _ ->
-          :slow
+          Elems.none()
       end
     else
-      :slow
+      Elems.none()
     end
   end
 
-  defp own_element(_, _), do: :slow
+  defp own_element(_, _), do: Elems.none()
 
   # The read of `own_element/2` by the generic path, for the shadow run of the check build.
   defp own_element_slow(this, i) do
-    if has_property?(this, float(i)), do: {:ok, Interp.get(this, float(i))}, else: :slow
+    if has_property?(this, float(i)), do: Interp.get(this, float(i)), else: Elems.none()
   end
 
   defp very_sparse?({:obj, id} = this, len) do

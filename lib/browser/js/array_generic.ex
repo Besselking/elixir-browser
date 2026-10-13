@@ -67,9 +67,10 @@ defmodule Browser.JS.ArrayGeneric do
       o when Elems.dense_index?(o, k) ->
         {:ok, Elems.dense_at(o, k)}
 
-      %{class: :array} = o when Elems.sparse_index?(o, k) and not is_map_key(o, :proxy) ->
-        case Elems.sparse_at(o, k) do
+      %{class: :array} = o when not is_map_key(o, :proxy) ->
+        case Elems.get(o, k, Elems.none()) do
           {:accessor, _, _} -> :other
+          Elems.none() -> :other
           v -> {:ok, v}
         end
 

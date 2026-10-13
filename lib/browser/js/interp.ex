@@ -1780,21 +1780,15 @@ defmodule Browser.JS.Interp do
           i when is_integer(i) ->
             # (a dense element is a data value; an item of a sparse record can be an
             # accessor)
-            cond do
-              Elems.dense_index?(o, i) ->
-                Elems.dense_at(o, i)
+            case Elems.get(o, i, Elems.none()) do
+              {:accessor, g, _} ->
+                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
 
-              Elems.sparse_index?(o, i) ->
-                case Elems.sparse_at(o, i) do
-                  {:accessor, g, _} ->
-                    if function?(g), do: call(g, {:obj, id}, []), else: :undefined
-
-                  v ->
-                    v
-                end
-
-              true ->
+              Elems.none() ->
                 lookup(o, to_key(key), {:obj, id})
+
+              v ->
+                v
             end
 
           nil ->
@@ -3721,13 +3715,10 @@ defmodule Browser.JS.Interp do
 
         %{class: :array} = a when not is_map_key(a, :arguments) ->
           if i < Elems.len(a) do
-            if Elems.sparse_index?(a, i) do
-              case Elems.sparse_at(a, i) do
-                {:accessor, _, _} -> {get(v, i * 1.0), i + 1}
-                x -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
-              end
-            else
-              {get(v, i * 1.0), i + 1}
+            case Elems.get(a, i, Elems.none()) do
+              {:accessor, _, _} -> {get(v, i * 1.0), i + 1}
+              Elems.none() -> {get(v, i * 1.0), i + 1}
+              x -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
             end
           end
 
