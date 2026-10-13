@@ -3552,12 +3552,13 @@ defmodule Browser.JS.Interp do
           do: Fast.shadow(nil, names, own_keys_index_first(o)),
           else: own_keys_index_first(o)
 
+      # Each element is an own key. An element of an array is always below its length. An
+      # element of an arguments object can be at its length or after it (a write to
+      # `arguments[i]` adds an element and does not change `length`), so the length does
+      # not bound the keys.
       %{class: :array} ->
-        len = Elems.len(o)
-
         for(
           i <- Elems.keys(o),
-          i < len,
           Obj.element_enumerable?(o, i),
           do: Integer.to_string(i)
         ) ++ Obj.enum_names(o)

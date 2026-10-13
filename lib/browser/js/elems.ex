@@ -176,7 +176,9 @@ defmodule Browser.JS.Elems do
 
   @doc """
   The length of the array record `o`. For an arguments object it is the count of the
-  arguments when the object was made, which bounds its own keys (`Interp.own_keys/1`).
+  arguments when the object was made, or more after `define/3`. It is not the `length` of
+  the arguments object (an own property), and it does not bound the own keys, because
+  `put/3` can add an element at this length or after it.
   """
   defmacro len(o) do
     quote generated: true do

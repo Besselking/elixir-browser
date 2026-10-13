@@ -204,11 +204,10 @@ defmodule Browser.JS.Props do
 
   defp own_names_plain2(id, o) do
     case o do
-      # (the `length` of an arguments object is an own key in its place)
+      # Each element is an own key, also an element of an arguments object at its length or
+      # after it. The `length` of an arguments object is an own key in its place.
       %{class: :array} ->
-        len = Elems.len(o)
-
-        for(i <- Elems.keys(o), i < len, do: Integer.to_string(i)) ++
+        for(i <- Elems.keys(o), do: Integer.to_string(i)) ++
           if(is_map_key(o, :arguments), do: [], else: ["length"]) ++ Obj.string_keys(o)
 
       %{class: :function} ->
