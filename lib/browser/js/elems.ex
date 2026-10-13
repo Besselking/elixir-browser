@@ -230,7 +230,18 @@ defmodule Browser.JS.Elems do
   with a digit (`Browser.JS.Shape`), so a fast `Object.prototype` needs no walk of its
   keys. The process keys of the prototypes and the records are read with no call.
   """
-  defmacro std_chain?(o) do
+  defmacro std_chain?(o), do: chain_test(o, true)
+
+  @doc """
+  `std_chain?/1` without the walk of the names of `Object.prototype`: it is false when
+  `Object.prototype` is not a fast record (a dictionary record, after a `delete` of one of its keys or after many
+  adds). The write of one element calls it, so that its cost does not grow with the count
+  of the keys of `Object.prototype`. A false result costs only speed: the caller takes the
+  generic path, which looks for the one index in the chain.
+  """
+  defmacro std_chain_fast?(o), do: chain_test(o, false)
+
+  defp chain_test(o, walk?) do
     quote do
       {:obj, apid} = ap = :erlang.get({:proto, :array})
 
@@ -239,8 +250,12 @@ defmodule Browser.JS.Elems do
           %{proto: {:obj, opid} = op} = arr when Browser.JS.Elems.empty?(arr) ->
             op == :erlang.get({:proto, :object}) and
               case :erlang.get(opid) do
-                op_rec when Browser.JS.Obj.fast?(op_rec) -> true
-                op_rec -> Browser.JS.Obj.plain_names?(Browser.JS.Obj.string_keys(op_rec))
+                op_rec when Browser.JS.Obj.fast?(op_rec) ->
+                  true
+
+                op_rec ->
+                  unquote(walk?) and
+                    Browser.JS.Obj.plain_names?(Browser.JS.Obj.string_keys(op_rec))
               end
 
           _ ->

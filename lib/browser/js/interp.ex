@@ -2991,8 +2991,10 @@ defmodule Browser.JS.Interp do
           # A dense record holds only writable data elements, and it is extensible, not
           # frozen and not sealed, with a writable `length` (`Browser.JS.Elems`). So a write
           # in bounds needs no test, and a write at the end needs only the test that no
-          # element of the prototype chain shows through (`Elems.std_chain?/1`), which
-          # `index_hook/2` would find (fast path `:elems`).
+          # element of the prototype chain shows through, which `index_hook/2` would find
+          # (fast path `:elems`). The test does not walk the keys of a dictionary
+          # `Object.prototype` (`Elems.std_chain_fast?/1`): for such a chain the generic
+          # write looks for the one index, which costs less.
           i when is_integer(i) ->
             cond do
               Fast.on?(:elems) and Elems.dense_index?(o, i) ->
@@ -3005,7 +3007,7 @@ defmodule Browser.JS.Interp do
                   put_element(id, o, key, i, v)
                 )
 
-              Fast.on?(:elems) and Elems.dense_append?(o, i) and Elems.std_chain?(o) ->
+              Fast.on?(:elems) and Elems.dense_append?(o, i) and Elems.std_chain_fast?(o) ->
                 Fast.shadow(
                   id,
                   (
