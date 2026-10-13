@@ -8933,6 +8933,21 @@ defmodule Browser.JS.Interp do
   def binop("<=", a, b) when is_float(a) and is_float(b), do: a <= b
   def binop(">=", a, b) when is_float(a) and is_float(b), do: a >= b
 
+  # (a float in the int32 range truncates to its ToInt32 value, and a bitwise operation on
+  # two such integers gives an integer in the int32 range, so no wrap is necessary)
+  def binop(op, a, b)
+      when op in ["&", "|", "^"] and is_float(a) and is_float(b) and abs(a) < 2_147_483_648.0 and
+             abs(b) < 2_147_483_648.0 do
+    x = trunc(a)
+    y = trunc(b)
+
+    case op do
+      "&" -> :erlang.band(x, y)
+      "|" -> :erlang.bor(x, y)
+      "^" -> :erlang.bxor(x, y)
+    end * 1.0
+  end
+
   def binop("+", a, b) do
     a = to_primitive(a, "default")
     b = to_primitive(b, "default")
