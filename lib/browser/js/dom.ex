@@ -85,7 +85,42 @@ defmodule Browser.JS.DOM do
   defp index_in(ids, nil, _), do: ids
   defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
 
+  # The tokens of the `class` attribute of an element, kept on the node as `cls`:
+  # `{value, tokens}`. Selectors and `classList` read the tokens many times for each change of
+  # the attribute, and a split of the value at each read was a large part of a search. Each
+  # write to the node table goes through this function, so the tokens follow the attribute.
+  # A reader also compares the value (`class_tokens/1`), so it never uses tokens of an old
+  # value.
+  defp with_classes(%{attrs: attrs} = n) when attrs != [] do
+    case List.keyfind(attrs, "class", 0) do
+      {_, v} when is_binary(v) ->
+        case n do
+          %{cls: {^v, _}} -> n
+          _ -> Map.put(n, :cls, {v, String.split(v)})
+        end
+
+      _ ->
+        n
+    end
+  end
+
+  defp with_classes(n), do: n
+
+  defp class_tokens(n) do
+    case List.keyfind(n.attrs, "class", 0) do
+      {_, v} ->
+        case n do
+          %{cls: {^v, tokens}} -> tokens
+          _ -> String.split(v)
+        end
+
+      nil ->
+        []
+    end
+  end
+
   defp put_node(n) do
+    n = with_classes(n)
     s = st()
 
     s =
@@ -128,6 +163,7 @@ defmodule Browser.JS.DOM do
 
     # (the checks that frames need are only made once the page has an <iframe>)
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
+    n = with_classes(n)
 
     put_st(%{
       s
@@ -551,7 +587,7 @@ defmodule Browser.JS.DOM do
   defp update_node_quiet(nid, fun) do
     s = st()
     old = node(nid)
-    n = fun.(old)
+    n = with_classes(fun.(old))
 
     put_st(%{
       s
@@ -2495,7 +2531,7 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp classes(nid), do: nid |> node() |> attr_or("class", "") |> String.split()
+  defp classes(nid), do: nid |> node() |> class_tokens()
 
   defp put_classes(nid, list) do
     set_attr(nid, "class", Enum.join(Enum.uniq(list), " "))
@@ -3045,7 +3081,7 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:tag, "*"}), do: n.kind == :element
   defp match_cond(n, {:tag, t}), do: n.tag == t
   defp match_cond(n, {:id, id}), do: get_attr(n, "id") == id
-  defp match_cond(n, {:class, c}), do: c in (n |> attr_or("class", "") |> String.split())
+  defp match_cond(n, {:class, c}), do: c in class_tokens(n)
 
   defp match_cond(n, {:attr, {name, op, val}}) do
     case get_attr(n, name) do
