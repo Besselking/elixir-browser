@@ -1452,7 +1452,56 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp element_by_id(doc, id), do: find_element(doc, &(get_attr(&1, "id") == id))
+  # The element with the id `id` that comes first in tree order below `root` (a document, a
+  # fragment, a shadow root or an element). The index of the ids (`st().ids`) gives the
+  # elements with that id in all trees, so the search does not walk the tree: it keeps the
+  # elements below `root` and takes the first of them in tree order. The writes to the node
+  # table keep the index exact, and a node that leaves a tree keeps its id but gets a new
+  # top, so it is not below `root` any more. The index has no empty id, so an empty id walks
+  # the tree as before.
+  defp element_by_id(root, ""), do: find_element(root, &(get_attr(&1, "id") == ""))
+
+  defp element_by_id(root, id) do
+    case st().ids do
+      %{^id => [nid]} -> if below?(nid, root), do: nid
+      %{^id => nids} -> first_in_tree(root, nids)
+      _ -> nil
+    end
+  end
+
+  # True when `root` is an ancestor of `nid` through the parent links (a shadow root and the
+  # content of a template are tops of their own trees, as in `find_element/2`).
+  defp below?(nid, root) do
+    case st().nodes do
+      %{^nid => %{parent: ^root}} -> true
+      %{^nid => %{parent: nil}} -> false
+      %{^nid => %{parent: p}} -> below?(p, root)
+      _ -> false
+    end
+  end
+
+  # The first of `nids` below `root` in tree order, or nil. The path of a node is the list of
+  # its positions among the children, from `root` down. An ancestor has a shorter path that
+  # is a prefix of the path of its descendant, so the smallest path is first in tree order.
+  defp first_in_tree(root, nids) do
+    paths = for nid <- nids, path = tree_path(nid, root, []), do: {path, nid}
+
+    case paths do
+      [] -> nil
+      _ -> paths |> Enum.min() |> elem(1)
+    end
+  end
+
+  defp tree_path(nid, root, acc) do
+    case node(nid).parent do
+      nil ->
+        nil
+
+      p ->
+        acc = [position_in(nid, node(p).kids) | acc]
+        if p == root, do: acc, else: tree_path(p, root, acc)
+    end
+  end
 
   @doc "The node id of the n-th `<form>` (the number the page's form index uses), or nil."
   def form_node(fid), do: Enum.at(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), fid)
@@ -3177,7 +3226,37 @@ defmodule Browser.JS.DOM do
 
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
-    walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+
+    case selector_id(sels) do
+      nil -> walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+      id -> by_id_matches(root, id, sels)
+    end
+  end
+
+  # The id in the last compound of a selector list with one selector (`#a`, `ul > li#a.b`),
+  # or nil. Only an element with that id can match such a selector, so the index of the ids
+  # gives all the candidates and the tree is not walked (see `element_by_id/2`).
+  defp selector_id([parts]) do
+    {_comb, compound} = List.last(parts)
+
+    Enum.find_value(compound, fn
+      {:id, id} -> id
+      _ -> nil
+    end)
+  end
+
+  defp selector_id(_sels), do: nil
+
+  # The elements below `root` with the id `id` that match, in tree order.
+  defp by_id_matches(root, id, sels) do
+    for(
+      nid <- Map.get(st().ids, id, []),
+      path = tree_path(nid, root, []),
+      matches?(nid, sels),
+      do: {path, nid}
+    )
+    |> :lists.usort()
+    |> Enum.map(&elem(&1, 1))
   end
 
   # the elements below a node that match, in document order (newest first)
@@ -3192,7 +3271,11 @@ defmodule Browser.JS.DOM do
   # the first element below a node that matches
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
-    find_element(root, fn n -> matches?(n.id, sels) end)
+
+    case selector_id(sels) do
+      nil -> find_element(root, fn n -> matches?(n.id, sels) end)
+      id -> List.first(by_id_matches(root, id, sels))
+    end
   end
 
   # ── serialising ────────────────────────────────────────────
@@ -3402,19 +3485,8 @@ defmodule Browser.JS.DOM do
 
   # Scripts (and the runtime's own shims) probe undeclared globals (`typeof Foo`, `window.Foo`)
   # over and over: the index of the ids says which elements might be the one.
-  defp named_nid(doc, name) do
-    case Map.get(st().ids, name) do
-      nil ->
-        nil
-
-      candidates ->
-        case Enum.filter(candidates, &(List.last([&1 | ancestors(&1)]) == doc)) do
-          [] -> nil
-          [one] -> one
-          _ -> element_by_id(doc, name)
-        end
-    end
-  end
+  defp named_nid(_doc, ""), do: nil
+  defp named_nid(doc, name), do: element_by_id(doc, name)
 
   defp window_put(key, v) do
     case key do
@@ -5492,6 +5564,11 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "querySelectorAll", fn this, args ->
       nodes_array(query_all(this_nid(this), to_str(arg(args, 0))))
+    end)
+
+    # (a fragment and a shadow root search their own tree; the document has its own method)
+    def_fn(p, "getElementById", fn this, args ->
+      wrap_or_null(element_by_id(this_nid(this), to_str(arg(args, 0))))
     end)
 
     def_fn(p, "getElementsByTagName", fn this, args ->

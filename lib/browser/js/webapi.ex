@@ -613,8 +613,6 @@ defmodule Browser.JS.WebAPI do
     addTo(SP, Symbol.iterator, function () { var a = []; for (var i = 0; i < this.length; i++) a.push(this.item(i)); return a[Symbol.iterator](); });
     var UP = Object.getPrototypeOf(new URLSearchParams());
     if (UP.entries) addTo(UP, Symbol.iterator, function () { return this.entries()[Symbol.iterator](); });
-    var FP = Object.getPrototypeOf(document.createDocumentFragment());
-    if (!("getElementById" in FP)) addTo(FP, "getElementById", function (id) { return this.querySelector('[id="' + String(id).replace(/(["\\])/g, "\\$1") + '"]'); });
     getter(EP, "shadowRoot", function () { return this.__shadow && this.__shadow.mode === "open" ? this.__shadow : null; });
 
     var DP = Object.getPrototypeOf(document);
