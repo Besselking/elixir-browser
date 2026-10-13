@@ -2967,7 +2967,8 @@ defmodule Browser.JS.DOM do
   defp flush_token([], acc), do: acc
   defp flush_token(cur, acc), do: [{:compound, cur |> Enum.reverse() |> Enum.join()} | acc]
 
-  defp build_complex([], _comb, acc), do: Enum.reverse(acc)
+  # (the parts come out rightmost first, the order in which `match_parts/2` tests them)
+  defp build_complex([], _comb, acc), do: acc
   defp build_complex([{:comb, c} | rest], _comb, acc), do: build_complex(rest, c, acc)
 
   defp build_complex([{:compound, s} | rest], comb, acc),
@@ -3005,30 +3006,40 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp matches?(nid, selectors),
-    do: node(nid).kind == :element and Enum.any?(selectors, &match_complex(nid, Enum.reverse(&1)))
+  defp matches?(nid, selectors), do: node_matches?(node(nid), selectors)
+
+  # The tests below take the node, not its id, so that a walk of the tree reads each node
+  # from the table one time only.
+  defp node_matches?(%{kind: :element} = n, selectors), do: any_selector?(n, selectors)
+  defp node_matches?(_n, _selectors), do: false
+
+  defp any_selector?(_n, []), do: false
+  defp any_selector?(n, [parts | more]), do: match_parts(n, parts) or any_selector?(n, more)
 
   # `parts` is rightmost first
-  defp match_complex(nid, [{_comb, compound}]), do: match_compound(nid, compound)
+  defp match_parts(n, [{_comb, compound}]), do: match_conds(n, compound)
 
-  defp match_complex(nid, [{comb, compound} | rest]) do
-    match_compound(nid, compound) and
+  defp match_parts(n, [{comb, compound} | rest]) do
+    match_conds(n, compound) and
       case comb do
-        " " -> Enum.any?(ancestors(nid), &(node(&1).kind == :element and match_complex(&1, rest)))
-        ">" -> (p = parent_element(nid)) != nil and match_complex(p, rest)
-        "+" -> (s = sibling_elements(nid, :prev)) != nil and match_complex(s, rest)
-        "~" -> Enum.any?(prev_elements(nid), &match_complex(&1, rest))
+        " " -> Enum.any?(ancestors(n.id), &match_element(&1, rest))
+        ">" -> (p = parent_element(n.id)) != nil and match_parts(node(p), rest)
+        "+" -> (s = sibling_elements(n.id, :prev)) != nil and match_parts(node(s), rest)
+        "~" -> Enum.any?(prev_elements(n.id), &match_parts(node(&1), rest))
       end
   end
+
+  defp match_element(nid, parts) do
+    n = node(nid)
+    n.kind == :element and match_parts(n, parts)
+  end
+
+  defp match_conds(_n, []), do: true
+  defp match_conds(n, [c | more]), do: match_cond(n, c) and match_conds(n, more)
 
   defp prev_elements(nid) do
     {before, _} = siblings(nid)
     before |> Enum.filter(&(node(&1).kind == :element))
-  end
-
-  defp match_compound(nid, conds) do
-    n = node(nid)
-    Enum.all?(conds, &match_cond(n, &1))
   end
 
   defp match_cond(n, {:tag, "*"}), do: n.kind == :element
@@ -3228,7 +3239,7 @@ defmodule Browser.JS.DOM do
     sels = parse_selectors(selector)
 
     case selector_id(sels) do
-      nil -> walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+      nil -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
       id -> by_id_matches(root, id, sels)
     end
   end
@@ -3236,9 +3247,7 @@ defmodule Browser.JS.DOM do
   # The id in the last compound of a selector list with one selector (`#a`, `ul > li#a.b`),
   # or nil. Only an element with that id can match such a selector, so the index of the ids
   # gives all the candidates and the tree is not walked (see `element_by_id/2`).
-  defp selector_id([parts]) do
-    {_comb, compound} = List.last(parts)
-
+  defp selector_id([[{_comb, compound} | _]]) do
     Enum.find_value(compound, fn
       {:id, id} -> id
       _ -> nil
@@ -3259,13 +3268,36 @@ defmodule Browser.JS.DOM do
     |> Enum.map(&elem(&1, 1))
   end
 
-  # the elements below a node that match, in document order (newest first)
-  defp walk_matches([], _sels, acc), do: acc
+  # The elements below a node that match, in document order (newest first). A walk does not
+  # change the tree, so it reads the nodes from the table that it gets at the start. (A node
+  # that is not in the table reads as a node with no children, as in `node/1`.)
+  defp walk_matches([], _nodes, _sels, acc), do: acc
 
-  defp walk_matches([k | rest], sels, acc) do
-    n = node(k)
-    acc = if n.kind == :element and matches?(k, sels), do: [k | acc], else: acc
-    walk_matches(rest, sels, walk_matches(n.kids, sels, acc))
+  defp walk_matches([k | rest], nodes, sels, acc) do
+    case nodes do
+      %{^k => n} ->
+        acc = if node_matches?(n, sels), do: [k | acc], else: acc
+        walk_matches(rest, nodes, sels, walk_matches(n.kids, nodes, sels, acc))
+
+      _ ->
+        walk_matches(rest, nodes, sels, acc)
+    end
+  end
+
+  # the first element of `kids` and the nodes below them that matches, in the order of
+  # `walk_matches/4`
+  defp first_match([], _nodes, _sels), do: nil
+
+  defp first_match([k | rest], nodes, sels) do
+    case nodes do
+      %{^k => n} ->
+        if node_matches?(n, sels),
+          do: k,
+          else: first_match(n.kids, nodes, sels) || first_match(rest, nodes, sels)
+
+      _ ->
+        first_match(rest, nodes, sels)
+    end
   end
 
   # the first element below a node that matches
@@ -3273,7 +3305,7 @@ defmodule Browser.JS.DOM do
     sels = parse_selectors(selector)
 
     case selector_id(sels) do
-      nil -> find_element(root, fn n -> matches?(n.id, sels) end)
+      nil -> first_match(node(root).kids, st().nodes, sels)
       id -> List.first(by_id_matches(root, id, sels))
     end
   end
