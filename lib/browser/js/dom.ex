@@ -1490,17 +1490,19 @@ defmodule Browser.JS.DOM do
 
   # The element with the id `id` that comes first in tree order below `root` (a document, a
   # fragment, a shadow root or an element). The index of the ids (`st().ids`) gives the
-  # elements with that id in all trees, so the search does not walk the tree: it keeps the
-  # elements below `root` and takes the first of them in tree order. The writes to the node
+  # elements with that id in all trees. When only one element has the id, the search does not
+  # walk the tree: the element is the answer when it is below `root`. The writes to the node
   # table keep the index exact, and a node that leaves a tree keeps its id but gets a new
-  # top, so it is not below `root` any more. The index has no empty id, so an empty id walks
-  # the tree as before.
+  # top, so it is not below `root` any more. When more elements have the id, the search walks
+  # the tree as before. The index keeps the nodes that left their trees too, so the list of an
+  # id that a page makes again and again has no limit, and a walk stops at the first match.
+  # The index has no empty id, so an empty id walks the tree too.
   defp element_by_id(root, ""), do: find_element(root, &(get_attr(&1, "id") == ""))
 
   defp element_by_id(root, id) do
     case st().ids do
       %{^id => [nid]} -> if below?(nid, root), do: nid
-      %{^id => nids} -> first_in_tree(root, nids)
+      %{^id => _} -> find_element(root, &(get_attr(&1, "id") == id))
       _ -> nil
     end
   end
@@ -1513,29 +1515,6 @@ defmodule Browser.JS.DOM do
       %{^nid => %{parent: nil}} -> false
       %{^nid => %{parent: p}} -> below?(p, root)
       _ -> false
-    end
-  end
-
-  # The first of `nids` below `root` in tree order, or nil. The path of a node is the list of
-  # its positions among the children, from `root` down. An ancestor has a shorter path that
-  # is a prefix of the path of its descendant, so the smallest path is first in tree order.
-  defp first_in_tree(root, nids) do
-    paths = for nid <- nids, path = tree_path(nid, root, []), do: {path, nid}
-
-    case paths do
-      [] -> nil
-      _ -> paths |> Enum.min() |> elem(1)
-    end
-  end
-
-  defp tree_path(nid, root, acc) do
-    case node(nid).parent do
-      nil ->
-        nil
-
-      p ->
-        acc = [position_in(nid, node(p).kids) | acc]
-        if p == root, do: acc, else: tree_path(p, root, acc)
     end
   end
 
@@ -3274,15 +3253,32 @@ defmodule Browser.JS.DOM do
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
 
-    case selector_id(sels) do
-      nil -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
-      id -> by_id_matches(root, id, sels)
+    case id_candidates(sels) do
+      :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
+      nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
     end
   end
 
-  # The id in the last compound of a selector list with one selector (`#a`, `ul > li#a.b`),
-  # or nil. Only an element with that id can match such a selector, so the index of the ids
-  # gives all the candidates and the tree is not walked (see `element_by_id/2`).
+  # The elements that can match a selector list, when the index of the ids gives them, or
+  # :walk. A selector list with one selector whose last compound has an id (`#a`,
+  # `ul > li#a.b`) can match only an element with that id. When at most one element has the id,
+  # the tree is not walked. When more elements have it, the tree is walked, for the reason
+  # that `element_by_id/2` gives.
+  defp id_candidates(sels) do
+    case selector_id(sels) do
+      nil ->
+        :walk
+
+      id ->
+        case st().ids do
+          %{^id => [nid]} -> [nid]
+          %{^id => _} -> :walk
+          _ -> []
+        end
+    end
+  end
+
+  # the id in the last compound of a selector list with one selector, or nil
   defp selector_id([[{_comb, compound} | _]]) do
     Enum.find_value(compound, fn
       {:id, id} -> id
@@ -3291,18 +3287,6 @@ defmodule Browser.JS.DOM do
   end
 
   defp selector_id(_sels), do: nil
-
-  # The elements below `root` with the id `id` that match, in tree order.
-  defp by_id_matches(root, id, sels) do
-    for(
-      nid <- Map.get(st().ids, id, []),
-      path = tree_path(nid, root, []),
-      matches?(nid, sels),
-      do: {path, nid}
-    )
-    |> :lists.usort()
-    |> Enum.map(&elem(&1, 1))
-  end
 
   # The elements below a node that match, in document order (newest first). A walk does not
   # change the tree, so it reads the nodes from the table that it gets at the start. (A node
@@ -3340,9 +3324,9 @@ defmodule Browser.JS.DOM do
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
 
-    case selector_id(sels) do
-      nil -> first_match(node(root).kids, st().nodes, sels)
-      id -> List.first(by_id_matches(root, id, sels))
+    case id_candidates(sels) do
+      :walk -> first_match(node(root).kids, st().nodes, sels)
+      nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
     end
   end
 
