@@ -207,6 +207,22 @@ defmodule Browser.LayoutMemoTest do
     same!(page(html.("hidden")), memo, [], 800)
   end
 
+  # (a measure of content puts the mark of an intrinsic size back as it found it, so that the
+  # keys of the memo after it are the same as in a layout whose measures come from the memo)
+  test "a float with a positioned box in an inline flex box is laid out the same from the memo" do
+    html = fn word ->
+      ~s(<body style="width:700px"><b style="display:inline-flex">elit <section>dolor <div>) <>
+        ~s(incididunt <b style="float:right">adipiscing <b style="position:absolute">amet </b>) <>
+        "sed </b></div>adipiscing elit incididunt labore #{word} tempor</section>dolor " <>
+        ~s(<b style="position:relative">labore<fieldset style="width:60%">eiusmod ) <>
+        "<fieldset><legend>leg </legend>sed </fieldset></fieldset></b>adipiscing </b>"
+    end
+
+    {_, _, memo} = kept(page(html.("lorem")), nil, [], 800)
+    {_, memo} = same!(page(html.("lorem lorem extra words here")), memo, [], 800)
+    same!(page(html.("lorem")), memo, [], 800)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

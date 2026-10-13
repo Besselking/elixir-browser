@@ -12042,7 +12042,14 @@ defmodule Browser.Layout do
     # a percentage width depends on the very width being measured: it counts as auto
     outer = Process.put(:layout_intrinsic, true)
     sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
-    Process.put(:layout_intrinsic, outer)
+
+    # (the mark is put back as it was found, also when there was none: the keys of the memo
+    # read it with a default of false, so a mark of nil after a measure gave other keys than a
+    # layout whose measures all come from the memo)
+    if outer == nil,
+      do: Process.delete(:layout_intrinsic),
+      else: Process.put(:layout_intrinsic, outer)
+
     max(sub_st |> finalize() |> extent(), sub_st.ext)
   end
 
