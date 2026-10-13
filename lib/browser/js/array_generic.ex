@@ -704,12 +704,17 @@ defmodule Browser.JS.ArrayGeneric do
 
   @spreadable {:symbol, :isConcatSpreadable, "Symbol.isConcatSpreadable"}
 
+  # A plain result (`fresh_array?/1`) collects the values in `acc`: `{:list, rev}`, the
+  # values last first, while the values have no hole, and `{:map, items}` after the first
+  # hole. Most sources are dense arrays or values, so the result is made from a list
+  # (`Elems.replace/2`) and needs no map. A result that is not plain gets each value with
+  # `create!/3`, and `acc` does not change.
   def concat(o, args) do
     a = species_create(o, 0)
     plain? = fresh_array?(a)
 
     {n, acc} =
-      Enum.reduce([o | args], {0, %{}}, fn e, {n, acc} ->
+      Enum.reduce([o | args], {0, {:list, []}}, fn e, {n, acc} ->
         if spreadable?(e),
           do: spread(e, a, plain?, n, acc),
           else: {n + 1, add(a, plain?, acc, n, e)}
@@ -718,7 +723,11 @@ defmodule Browser.JS.ArrayGeneric do
     if plain? do
       if n > @max_array, do: throw_error("RangeError", "Invalid array length")
       {:obj, id} = a
-      store(id, Elems.replace_map(deref(id), acc, n))
+
+      case acc do
+        {:list, rev} -> store(id, Elems.replace(deref(id), :lists.reverse(rev)))
+        {:map, items} -> store(id, Elems.replace_map(deref(id), items, n))
+      end
     else
       set_length!(a, n)
     end
@@ -737,13 +746,21 @@ defmodule Browser.JS.ArrayGeneric do
     end
   end
 
-  defp add(_a, true, acc, n, v), do: Map.put(acc, n, v)
+  defp add(_a, true, {:list, rev}, _n, v), do: {:list, [v | rev]}
+  defp add(_a, true, {:map, items}, n, v), do: {:map, Map.put(items, n, v)}
 
   defp add(a, false, acc, n, v) do
     if n >= @max, do: throw_error("TypeError", "Invalid array length")
     create!(a, n, v)
     acc
   end
+
+  # `acc` of `concat/2` as a map, for a source that can have a hole.
+  defp acc_map({:list, rev}), do: {:map, :maps.from_list(rev_pairs(rev, length(rev) - 1, []))}
+  defp acc_map(acc), do: acc
+
+  defp rev_pairs([v | rev], i, pairs), do: rev_pairs(rev, i - 1, [{i, v} | pairs])
+  defp rev_pairs([], _, pairs), do: pairs
 
   defp spreadable?({:obj, _} = e) do
     case Interp.get(e, @spreadable) do
@@ -760,10 +777,19 @@ defmodule Browser.JS.ArrayGeneric do
 
     case dense_items(e, len) do
       {:ok, items} when plain? ->
-        {n + len,
-         Enum.reduce(Enum.with_index(items), acc, fn {v, i}, acc -> Map.put(acc, n + i, v) end)}
+        case acc do
+          {:list, rev} ->
+            {n + len, {:list, :lists.reverse(items, rev)}}
+
+          {:map, m} ->
+            {n + len,
+             {:map,
+              Enum.reduce(Enum.with_index(items, n), m, fn {v, i}, m -> Map.put(m, i, v) end)}}
+        end
 
       _ ->
+        acc = if plain?, do: acc_map(acc), else: acc
+
         Enum.reduce(0..(len - 1)//1, {n, acc}, fn k, {m, acc} ->
           acc = if has?(e, k), do: add(a, plain?, acc, m, get(e, k)), else: acc
           {m + 1, acc}
