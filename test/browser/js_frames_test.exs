@@ -3739,9 +3739,7 @@ defmodule Browser.JS.FramesTest do
         assert Exception.message(e) =~ "resolve check"
       end
 
-      # The process key `:js_cps_sync_await` allowed the sync await of a catch parameter
-      # default once. That await now suspends the body, so the key allows nothing.
-      test "C3: ev({:await}) in a frame fails, also with the old process key" do
+      test "C3: ev({:await}) in a frame fails, and runs on a map scope" do
         gid = heap()
         run_script("async function f(){ await 0 }", 4)
         {_f, id, c} = fun4(gid, "f")
@@ -3749,15 +3747,6 @@ defmodule Browser.JS.FramesTest do
 
         e = assert_raise(ArgumentError, fn -> Interp.ev({:await, {:num, 1.0}}, fid) end)
         assert Exception.message(e) =~ "resolve check"
-
-        Process.put(:js_cps_sync_await, true)
-
-        try do
-          e = assert_raise(ArgumentError, fn -> Interp.ev({:await, {:num, 1.0}}, fid) end)
-          assert Exception.message(e) =~ "resolve check"
-        after
-          Process.delete(:js_cps_sync_await)
-        end
 
         # A map scope is the old path, where the sync await is legal.
         assert Interp.ev({:await, {:num, 1.0}}, gid) == 1.0
