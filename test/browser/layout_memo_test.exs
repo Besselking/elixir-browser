@@ -189,6 +189,24 @@ defmodule Browser.LayoutMemoTest do
     assert Enum.any?(items, &(&1.type == :text and &1.text == "more"))
   end
 
+  # (the inner flex item ends inside the outer one: what comes after it is still in a flex item,
+  # whether the inner one is laid out or placed again from its fragment)
+  test "a flex item inside a flex item is laid out the same from the memo" do
+    html = fn overflow ->
+      ~s(<body style="width:700px"><section style="display:flex">adipiscing amet adipiscing ) <>
+        ~s(eiusmod ipsum eiusmod ut<section style="overflow:#{overflow}">sed ) <>
+        ~s(<div style="position:absolute">eiusmod <p style="display:flex">incididunt </p>) <>
+        "labore dolor consectetur lorem tempor amet consectetur incididunt" <>
+        ~s(<div style="max-width:90px">lorem<div style="float:left;text-indent:30px">amet ) <>
+        "</div></div>adipiscing</div></section></section>"
+    end
+
+    {_, _, memo} = kept(page(html.("hidden")), nil, [], 800)
+    {_, memo} = same!(page(html.("hidden")), memo, [], 800)
+    {_, memo} = same!(page(html.("visible")), memo, [], 800)
+    same!(page(html.("hidden")), memo, [], 800)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

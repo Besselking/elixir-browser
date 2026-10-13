@@ -7166,13 +7166,18 @@ defmodule Browser.Layout do
   end
 
   # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
+  # (a flex item in a flex item puts back the mark of the outer one when it ends: else the rest
+  # of the outer item is laid out without it, and differently when the inner item is placed
+  # again from its fragment, which does not run it)
   defp flex_atom(st, sub, width, key) do
-    Process.put(:layout_flex_item, true)
+    outer = Process.put(:layout_flex_item, true)
 
     try do
       layout_atom(st, sub, width, {:flex, key || :erlang.phash2(sub)})
     after
-      Process.delete(:layout_flex_item)
+      if outer == nil,
+        do: Process.delete(:layout_flex_item),
+        else: Process.put(:layout_flex_item, outer)
     end
   end
 
