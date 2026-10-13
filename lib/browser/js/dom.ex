@@ -2889,8 +2889,9 @@ defmodule Browser.JS.DOM do
 
   # ── selectors ──────────────────────────────────────────────
 
-  # a selector list: [[{combinator, compound}, ...], ...], leftmost first. Scripts ask the same
-  # few selectors again and again, so what was parsed is kept.
+  # a selector list: [[{combinator, compound}, ...], ...], each selector rightmost first (the
+  # order in which `match_parts/2` tests them). Scripts ask the same few selectors again and
+  # again, so what was parsed is kept.
   defp parse_selectors(str) do
     memo({:sel, str}, fn ->
       str
