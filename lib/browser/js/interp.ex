@@ -3625,16 +3625,26 @@ defmodule Browser.JS.Interp do
     Enum.sort_by(ints, &index/1) ++ rest
   end
 
+  @doc """
+  The values of the array at `v` from index 0 to its length - 1, as `Get` reads each one
+  (CreateListFromArrayLike): an accessor element calls its getter, and a hole reads the
+  prototype chain. Only when a prototype can hold an element (`Elems.std_chain?/1` is
+  false) does a hole cost a `get/2`; else it reads `undefined`.
+  """
   def array_list({:obj, id}) do
     o = deref(id)
 
-    # (a dense record holds no accessor, so its list is its tuple)
+    # (a dense record holds no accessor and no hole, so its list is its tuple)
     if Elems.dense?(o) do
       Elems.to_list(o)
     else
-      for item <- Elems.to_list(o) do
-        case item do
+      len = Elems.len(o)
+      chain? = Elems.count(o) != len and not Elems.std_chain?(o)
+
+      for i <- 0..(len - 1)//1 do
+        case Elems.get(o, i, Elems.none()) do
           {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+          Elems.none() -> if chain?, do: get({:obj, id}, i * 1.0), else: :undefined
           v -> v
         end
       end

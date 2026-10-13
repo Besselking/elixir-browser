@@ -900,12 +900,13 @@ defmodule Browser.JS.Builtins do
           )
 
       o = this_obj(this)
-      len = if plain_elements?(o), do: nil, else: length_of(o, false)
+      plain? = plain_elements?(o)
+      len = if plain?, do: nil, else: length_of(o, false)
 
       # the values are read first (holes skipped), sorted, then written back and the
       # slots left over deleted, so getters and setters see the spec's order of access
       items =
-        if plain_elements?(o),
+        if plain?,
           do: array_list(o),
           else: for({_, v} <- pairs(o), do: v)
 
@@ -938,10 +939,10 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
-  # an array without holes or accessor elements, which can be sorted as a plain list
+  # An array without holes or accessor elements, which can be sorted as a plain list. The
+  # test reads the store and not `array_list/1`, which calls each getter.
   defp plain_elements?(o) do
-    list_array?(o) and not has_holes?(o) and
-      not Enum.any?(array_list(o), &match?({:accessor, _, _}, &1))
+    list_array?(o) and not has_holes?(o) and not has_accessors?(o)
   end
 
   # ── array methods on anything with a `length` ──────────────
