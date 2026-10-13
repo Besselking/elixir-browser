@@ -7028,12 +7028,27 @@ defmodule Browser.JS.Interp do
     if @check, do: check_old_path(env, "a catch clause")
     if @check, do: check_link(env)
     scope = new_scope(env)
+    catch_tdz(param, scope)
     if param, do: bind(param, v, scope, :let)
 
     with {:id, pname} <- param,
          do: declare(scope, :catch_param, pname)
 
     handler_body(handler, scope, fin?, :top)
+  end
+
+  @doc false
+  # The names of a catch parameter that is a pattern are in their TDZ while the pattern
+  # binds, as the names of a `let` declaration are. So a default that reads a later name
+  # of the pattern throws a ReferenceError and does not read an outer name. A map scope
+  # needs this, because it has no names before the binding. A frame starts its slots in the
+  # TDZ already. (public: the CPS evaluator binds a catch parameter too)
+  def catch_tdz({:id, _}, _scope), do: :ok
+  def catch_tdz(nil, _scope), do: :ok
+
+  def catch_tdz(pat, scope) do
+    for name <- pattern_names(pat, []), do: declare(scope, name, :tdz)
+    :ok
   end
 
   # A handler that a finalizer follows makes no tail call, because the finalizer must run

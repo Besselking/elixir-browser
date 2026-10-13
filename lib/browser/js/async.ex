@@ -2146,7 +2146,7 @@ defmodule Browser.JS.Async do
               # A catch parameter with an await in a default binds step by step, so
               # that the await suspends the body as any other await does. The sync
               # binder would wait in place, and other tasks would run inside it.
-              attempt(fn -> item_env(env, sc) end, wrapped, fn scope ->
+              attempt(fn -> catch_env(env, sc, param) end, wrapped, fn scope ->
                 run = fn -> cexec(handler, scope, wrapped, done) end
 
                 cond do
@@ -2177,6 +2177,16 @@ defmodule Browser.JS.Async do
   end
 
   defp item_env(env, sc), do: Interp.cps_enter(env, sc)
+
+  # The scope of a catch clause. In a map scope the names of a pattern parameter start in
+  # their TDZ, as in the sync catch clause (`Interp.catch_tdz/2`).
+  defp catch_env(env, :map, param) do
+    scope = item_env(env, :map)
+    Interp.catch_tdz(param, scope)
+    scope
+  end
+
+  defp catch_env(env, sc, _param), do: item_env(env, sc)
 
   # `using` / `await using`: the rest of the list runs under a context that disposes the
   # resource before any way out. `bind` writes the binding: a `declare` on the old path, a

@@ -520,6 +520,18 @@ defmodule Browser.JS.CompileAsyncTest do
        "async function f(){ log.push('f1'); try { throw {} } catch ({a = await p}) { log.push('a' + a) } try { throw [] } catch ([x = await p]) { log.push('x' + x) } log.push('f2') } " <>
        "f().then(() => log.push('end'), e => log.push('rej ' + e)); w(); log",
      ~w(f1 w1 ad w2 xd f2 w3 end w4)},
+    # The names of a catch parameter that is a pattern are in their TDZ while it binds, as
+    # those of a `let` declaration are. A default that reads a later name of the pattern
+    # throws a ReferenceError, in a sync function and in an async function, before and
+    # after an await.
+    {"catch param tdz",
+     "var log = []; var b = 'ob'; function s1(){ try { throw {} } catch ({b2 = b, b}) { log.push('s1no' + b2) } } try { s1() } catch (e) { log.push('s1' + e.constructor.name) } " <>
+       "function s2(){ try { throw [] } catch ([x = y, y]) { log.push('s2no') } } try { s2() } catch (e) { log.push('s2' + e.constructor.name) } " <>
+       "async function a1(){ try { throw {} } catch ({b2 = b, b}) { log.push('a1no' + b2) } } a1().then(null, e => log.push('a1' + e.constructor.name)); " <>
+       "async function a2(){ try { throw {} } catch ({a = await 0, b2 = b, b}) { log.push('a2no' + b2) } } a2().then(null, e => log.push('a2' + e.constructor.name)); " <>
+       "async function a3(){ await 0; try { throw {} } catch ({b2 = b, b}) { log.push('a3no' + b2) } } a3().then(null, e => log.push('a3' + e.constructor.name)); " <>
+       "async function a4(){ try { throw { b: 'in' } } catch ({b2 = 'd', b}) { log.push('a4' + b2 + b) } } a4(); log",
+     ~w(s1ReferenceError s2ReferenceError a4din a1ReferenceError a2ReferenceError a3ReferenceError)},
     # A yield in a default of a catch parameter suspends the generator.
     {"catch param default yield",
      "var r = []; function* g(){ try { throw {} } catch ({a = yield 'y'}) { yield 'a' + a } try { throw [] } catch ([b = yield 'z']) { return 'b' + b } } " <>
