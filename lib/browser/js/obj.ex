@@ -844,17 +844,23 @@ defmodule Browser.JS.Obj do
   frozen array is not configurable, but the flag of the record holds this and the
   attributes of the elements do not.
   """
+  # Only an element with an entry in `attrs` can be not configurable when the array is not
+  # sealed or frozen. So the search reads the integer keys of `attrs` (usually none) and not
+  # the elements, and it does not sort them.
   defmacro max_fixed_element(o, stop) do
     quote bind_quoted: [o: o, stop: stop] do
-      attrs = Browser.JS.Obj.attr_map(o)
-      locked? = Browser.JS.Obj.sealed?(o) or Browser.JS.Obj.frozen?(o)
+      require Browser.JS.Elems
 
-      o
-      |> Browser.JS.Elems.keys()
-      |> Enum.filter(
-        &(&1 >= stop and (locked? or Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
-      )
-      |> Enum.max(fn -> nil end)
+      if Browser.JS.Obj.sealed?(o) or Browser.JS.Obj.frozen?(o) do
+        o |> Browser.JS.Elems.keys() |> Enum.filter(&(&1 >= stop)) |> Enum.max(fn -> nil end)
+      else
+        for(
+          {i, %{c: false}} when is_integer(i) and i >= stop <- Browser.JS.Obj.attr_map(o),
+          Browser.JS.Elems.has?(o, i),
+          do: i
+        )
+        |> Enum.max(fn -> nil end)
+      end
     end
   end
 

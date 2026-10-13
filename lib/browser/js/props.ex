@@ -867,7 +867,11 @@ defmodule Browser.JS.Props do
               shrink(id, o, new_len)
             catch
               {:js_error, _} = err ->
-                # a blocked shrink still makes the length read-only when that was asked for
+                # A blocked shrink still makes the length read-only when that was asked for.
+                # (The record is already sparse here: `shrink/3` stops only at an element
+                # that is not configurable, and only `Obj.put_element_attrs/3` makes such an
+                # element, which makes the record sparse. The call of `Elems.sparse/1` stays
+                # so that a record with `len_ro` is never dense, also after a change there.)
                 if Map.get(desc, :writable) == false,
                   do: store(id, Map.put(Elems.sparse(deref(id)), :len_ro, true))
 
