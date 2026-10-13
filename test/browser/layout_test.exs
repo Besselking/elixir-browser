@@ -7878,3 +7878,54 @@ defmodule Browser.LayoutTest do
     end
   end
 end
+
+defmodule Browser.LayoutNestedBoxesTest do
+  use ExUnit.Case, async: true
+  alias Browser.{Layout, Page}
+
+  # Each clipping or relatively positioned box changes all the items inside it. When the change
+  # is made on each item at each box, a layout of `k` items in boxes `d` deep costs `k * d`.
+
+  defp measure(text, style), do: String.length(text) * div(round(style.size), 2)
+
+  defp nested(depth, words) do
+    open = String.duplicate(~s(<div style="position:relative;top:1px;overflow:hidden">), depth)
+    text = Enum.map_join(1..words, " ", &"w#{&1}")
+
+    Page.build(
+      open <> ~s(<p style="margin:0">#{text}</p>) <> String.duplicate("</div>", depth),
+      "about:test"
+    )
+  end
+
+  # -> {items, reductions of the layout}
+  defp lay(page) do
+    task =
+      Task.async(fn ->
+        {:reductions, r0} = Process.info(self(), :reductions)
+        {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+        {:reductions, r1} = Process.info(self(), :reductions)
+        {items, r1 - r0}
+      end)
+
+    Task.await(task, 60_000)
+  end
+
+  test "each item gets the clips and offsets of all the boxes around it" do
+    {items, _} = lay(nested(5, 3))
+    word = Enum.find(items, &(&1.type == :text and &1.text == "w1"))
+    {flat, _} = lay(nested(0, 3))
+    flat_word = Enum.find(flat, &(&1.type == :text and &1.text == "w1"))
+    assert word.y == flat_word.y + 5
+    assert length(word.clips) == 5
+    assert word.clip.h > 0
+    assert word.over
+  end
+
+  test "boxes nested deep around many items cost little more than one box" do
+    {_, shallow} = lay(nested(1, 2000))
+    {_, deep} = lay(nested(16, 2000))
+    # (one item made again for each box would cost about five times as much)
+    assert deep < 2 * shallow
+  end
+end
