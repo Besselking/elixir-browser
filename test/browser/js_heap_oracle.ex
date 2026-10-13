@@ -127,7 +127,8 @@ defmodule Browser.JS.HeapOracle do
 
     items =
       if opts[:ids],
-        do: Map.merge(items, %{next: :erlang.get(:js_next), heap_n: :erlang.get(:js_heap_n)}),
+        do:
+          Map.merge(items, %{next: :erlang.get(:js_next), heap_n: Browser.JS.Interp.heap_size()}),
         else: items
 
     items = if f = opts[:after], do: Map.put(items, :after, safely(f)), else: items

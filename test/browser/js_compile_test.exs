@@ -493,7 +493,7 @@ defmodule Browser.JS.CompileTest do
     items = %{
       steps: :erlang.get(:js_steps),
       next: :erlang.get(:js_next),
-      heap_n: :erlang.get(:js_heap_n),
+      heap_n: Browser.JS.Interp.heap_size(),
       pos: Process.get(:js_pos),
       throw_pos: Process.get(:js_throw_pos),
       console: Enum.reverse(Process.get(:js_console, []))
@@ -729,6 +729,15 @@ defmodule Browser.JS.CompileTest do
   # code may hold: slot indices, depths, line numbers and counts.
   @id_base 1_000_000_000_000
 
+  # Moves the next heap id to `@id_base`. The heap count is the ids given out minus the
+  # entries taken away (`Interp.heap_size/0`), so the moved ids count as taken away and the
+  # count stays the same.
+  defp move_heap_ids do
+    next = :erlang.get(:js_next)
+    :erlang.put(:js_next, @id_base)
+    :erlang.put(:js_freed, :erlang.get(:js_freed) + @id_base - next)
+  end
+
   describe "5.4: the capture rule" do
     test "compiled code holds no object, no frame, no {:val} node and no heap id" do
       results =
@@ -741,7 +750,7 @@ defmodule Browser.JS.CompileTest do
                 execute(
                   program,
                   Keyword.merge(opts,
-                    before: fn -> :erlang.put(:js_next, @id_base) end,
+                    before: &move_heap_ids/0,
                     inspect: fn ->
                       ids = @id_base..(:erlang.get(:js_next) - 1)//1
                       bad = cache() |> bad_captures(ids) |> Enum.uniq() |> Enum.take(5)
@@ -771,7 +780,7 @@ defmodule Browser.JS.CompileTest do
           in_process(fn ->
             execute(
               program,
-              Keyword.put(opts, :before, fn -> :erlang.put(:js_next, @id_base) end)
+              Keyword.put(opts, :before, &move_heap_ids/0)
             )
           end)
 

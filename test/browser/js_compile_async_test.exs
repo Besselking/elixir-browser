@@ -814,7 +814,7 @@ defmodule Browser.JS.CompileAsyncTest do
     items = %{
       steps: :erlang.get(:js_steps),
       next: :erlang.get(:js_next),
-      heap_n: :erlang.get(:js_heap_n),
+      heap_n: Browser.JS.Interp.heap_size(),
       pos: Process.get(:js_pos),
       throw_pos: Process.get(:js_throw_pos),
       unhandled: Process.get(:js_unhandled, []),

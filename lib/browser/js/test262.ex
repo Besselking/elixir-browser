@@ -196,12 +196,12 @@ defmodule Browser.JS.Test262 do
   With the option `compile_diff: true` the test runs two times, in two fresh processes:
   with the closure compiler of step 5 off, then on (`Browser.JS.Compile`). The two runs
   must give the same outcome (the result, or the error and its text, and the console),
-  the same steps left (`:js_steps`), the same next heap id (`:js_next`), the same heap
-  count (`:js_heap_n`) and the same position (`:js_pos`). The steps of a test that reads
-  the clock are not compared (`clock?/2`). A difference is a failure with
-  a reason that starts with "compile diff". When only one of the runs ends (the other
-  times out or crashes), that is a compile diff too. When the two runs agree, or when
-  neither run ends, the run with the compiler on is judged as usual.
+  the same steps left (`:js_steps`), the same next heap id (`:js_next`), the same count
+  of the entries taken away (`:js_freed`, so the same heap count) and the same position
+  (`:js_pos`). The steps of a test that reads the clock are not compared (`clock?/2`). A
+  difference is a failure with a reason that starts with "compile diff". When only one of
+  the runs ends (the other times out or crashes), that is a compile diff too. When the two
+  runs agree, or when neither run ends, the run with the compiler on is judged as usual.
   """
   def run_test(source, meta, harness, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 10_000)
@@ -250,8 +250,8 @@ defmodule Browser.JS.Test262 do
   defp probe(clock?) do
     keys =
       if clock?,
-        do: [:js_next, :js_heap_n, :js_pos],
-        else: [:js_steps, :js_next, :js_heap_n, :js_pos]
+        do: [:js_next, :js_freed, :js_pos],
+        else: [:js_steps, :js_next, :js_freed, :js_pos]
 
     Map.new(keys, &{&1, :erlang.get(&1)})
   end

@@ -80,7 +80,7 @@ defmodule Browser.JS.GC do
           # (the count of the code cache holds two integers, which are not heap ids)
           {:jsc_budget, _}, acc -> acc
           {:js_memo, _}, acc -> acc
-          {:js_heap_n, _}, acc -> acc
+          {:js_freed, _}, acc -> acc
           # (the call chain holds names, positions and depths, never an id; a depth or a
           # line that equals the id of a dead object must not keep it alive)
           {:js_stack, _}, acc -> acc
@@ -124,7 +124,7 @@ defmodule Browser.JS.GC do
           ids
         )
 
-      Process.put(:js_heap_n, live)
+      Process.put(:js_freed, :erlang.get(:js_next) - live)
       Process.put(:js_gc_at, max(@min_collect, 2 * live))
       freed
     after
@@ -153,7 +153,7 @@ defmodule Browser.JS.GC do
           {{:jsc, _}, _}, roots -> roots
           {:jsc_budget, _}, roots -> roots
           {:js_memo, _}, roots -> roots
-          {:js_heap_n, _}, roots -> roots
+          {:js_freed, _}, roots -> roots
           # (the call chain holds names, positions and depths, never an id)
           {:js_stack, _}, roots -> roots
           {:js_check_stack, _}, roots -> roots

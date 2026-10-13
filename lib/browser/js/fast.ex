@@ -128,7 +128,7 @@ defmodule Browser.JS.Fast do
       record = if id, do: :erlang.get(id)
       flag = :erlang.get(:js_put_failed)
       next = :erlang.get(:js_next)
-      heap_n = :erlang.get(:js_heap_n)
+      freed = :erlang.get(:js_freed)
       steps = :erlang.get(:js_steps)
 
       # (a write that fails sets the flag; the old path starts with the flag clear, so that
@@ -159,7 +159,7 @@ defmodule Browser.JS.Fast do
       # The state goes back to what it was before the old path.
       for i <- next..(:erlang.get(:js_next) - 1)//1, do: :erlang.erase(i)
       :erlang.put(:js_next, next)
-      :erlang.put(:js_heap_n, heap_n)
+      :erlang.put(:js_freed, freed)
       if id, do: :erlang.put(id, record)
 
       if flag == :undefined,

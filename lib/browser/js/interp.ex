@@ -62,6 +62,19 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # One step of the budget of a script (`init/1`): a call, a loop round. It is a macro, so
+  # that each of the many steps costs one read and one write of the process key, not also a
+  # call. When the budget is spent, `:js_limit` is thrown.
+  defmacro tick do
+    quote do
+      case :erlang.get(:js_steps) - 1 do
+        n when n < 0 -> throw(:js_limit)
+        n -> :erlang.put(:js_steps, n)
+      end
+    end
+  end
+
   @max_depth 1000
 
   # The key of the well-known symbol `Symbol.iterator`.
@@ -109,7 +122,9 @@ defmodule Browser.JS.Interp do
   def init(max_steps) do
     # the heap's objects are entries of the process dictionary under their integer ids: a write
     # replaces one entry in place instead of copying the path to it through a big map
-    :erlang.put(:js_heap_n, 0)
+    # The heap holds `:js_next` minus `:js_freed` entries (`heap_size/0`). The count is not
+    # kept in a key of its own, because then each new object would write two keys.
+    :erlang.put(:js_freed, 0)
     :erlang.put(:js_next, 0)
     :erlang.put(:js_steps, max_steps)
     # The call chain of step 2f: one cell for each active call, with its depth. See
@@ -165,7 +180,6 @@ defmodule Browser.JS.Interp do
   def alloc(obj) do
     id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
-    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
     :erlang.put(id, obj)
     id
   end
@@ -177,7 +191,6 @@ defmodule Browser.JS.Interp do
   def reserve do
     id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
-    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
     id
   end
 
@@ -193,8 +206,11 @@ defmodule Browser.JS.Interp do
     true
   end
 
-  @doc "How many objects the heap holds."
-  def heap_size, do: :erlang.get(:js_heap_n)
+  @doc """
+  How many objects the heap holds: the ids given out (`:js_next`) minus the entries that
+  `free/1` and the collector took away (`:js_freed`).
+  """
+  def heap_size, do: :erlang.get(:js_next) - :erlang.get(:js_freed)
 
   @doc false
   # drops a heap entry (a scope that nothing can reach any more)
@@ -213,19 +229,19 @@ defmodule Browser.JS.Interp do
         when is_tuple(f) and tuple_size(f) >= 5 and
                (is_struct(:erlang.element(2, f), Info) or is_struct(:erlang.element(2, f), Scope)) ->
           :erlang.put(id, {:js_freed, check_name(:erlang.element(2, f))})
-          :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+          :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
           :ok
 
         _ ->
           :erlang.erase(id)
-          :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+          :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
           :ok
       end
     end
   else
     def free(id) do
       if :erlang.erase(id) != :undefined,
-        do: :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+        do: :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
 
       :ok
     end
@@ -4446,13 +4462,6 @@ defmodule Browser.JS.Interp do
       {:obj, _} = p -> p == target or walk_protos(p, target)
       _ -> false
     end
-  end
-
-  @doc false
-  def tick do
-    n = pget(:js_steps) - 1
-    if n < 0, do: throw(:js_limit)
-    :erlang.put(:js_steps, n)
   end
 
   @doc false

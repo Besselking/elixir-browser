@@ -295,6 +295,7 @@ defmodule Browser.JS.Compile do
 
   alias Browser.JS.{Async, Awaits, Interp, Num}
   require Async
+  require Interp
   alias Browser.JS.Resolve.Info
   require Browser.JS.Fast, as: Fast
 
