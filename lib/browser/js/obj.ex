@@ -840,15 +840,20 @@ defmodule Browser.JS.Obj do
 
   @doc """
   The highest index at or above `stop` of an element of the array `o` that is not
-  configurable, or `nil`. A shrink of `length` stops above it.
+  configurable, or `nil`. A shrink of `length` stops above it. Each element of a sealed or
+  frozen array is not configurable, but the flag of the record holds this and the
+  attributes of the elements do not.
   """
   defmacro max_fixed_element(o, stop) do
     quote bind_quoted: [o: o, stop: stop] do
       attrs = Browser.JS.Obj.attr_map(o)
+      locked? = Browser.JS.Obj.sealed?(o) or Browser.JS.Obj.frozen?(o)
 
       o
       |> Browser.JS.Elems.keys()
-      |> Enum.filter(&(&1 >= stop and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+      |> Enum.filter(
+        &(&1 >= stop and (locked? or Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
+      )
       |> Enum.max(fn -> nil end)
     end
   end
