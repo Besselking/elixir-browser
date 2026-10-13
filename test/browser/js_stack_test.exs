@@ -810,7 +810,10 @@ defmodule Browser.JS.StackTest do
                   {[{"g", nil, 1}], {"t.js", 5}}
                 ]} = {level, snaps()}
 
+        # Each resumed body gives back the position, so after the jobs the position is
+        # that of the last line of the script.
         assert :erlang.get(:js_stack) == []
+        assert {^level, {"t.js", 6}} = {level, :erlang.get(:js_pos)}
       end
     end
   end

@@ -596,7 +596,16 @@ defmodule Browser.JS.CompileAsyncTest do
     # the first `yield`. The body is in its own cell then, so it shows one time only.
     {"stack async generator queued request",
      "async function* ag(){\n  yield 1\n  throw new Error('q') }\nfunction d(){\n  var it = ag(); it.next(); it.next().catch(e => console.log(e.stack)) }\nd()\nvar u = 1",
-     [log: "Error: q" <> @s <> "ag (t.js:3)"]}
+     [log: "Error: q" <> @s <> "ag (t.js:3)"]},
+    # A rejected await resumes the body in its cell too, through the catch block.
+    {"stack async rejected await",
+     "async function rj(){\n  try { await Promise.reject(1) } catch (e) {\n    return new Error('j').stack } }\nrj().then(s => console.log(s))",
+     [log: "Error: j" <> @s <> "rj (t.js:3)"]},
+    # The same for an async generator, where the yield of a rejected promise throws at
+    # the `yield`.
+    {"stack async generator rejected yield",
+     "async function* ag(){\n  try { yield Promise.reject(2) } catch (e) {\n    yield new Error('y').stack } }\nag().next().then(r => console.log(r.value))",
+     [log: "Error: y" <> @s <> "ag (t.js:3)"]}
   ]
 
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the
