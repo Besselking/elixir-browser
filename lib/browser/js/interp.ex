@@ -3332,13 +3332,17 @@ defmodule Browser.JS.Interp do
       if Obj.frozen?(o) or Map.get(o, :len_ro, false) do
         fail_put()
       else
-        # an element that cannot be deleted stops the array from shrinking past it
-        stop =
-          o
-          |> Obj.max_fixed_element(new_len)
-          |> then(&if(&1, do: &1 + 1, else: new_len))
+        # An element that cannot be deleted stops the array from shrinking past it. The
+        # length then ends after that element, and the write fails (ArraySetLength gives
+        # false), so that strict code throws a TypeError.
+        case Obj.max_fixed_element(o, new_len) do
+          nil ->
+            store(id, Elems.set_len(o, new_len))
 
-        store(id, Elems.set_len(o, stop))
+          keep ->
+            store(id, Elems.set_len(o, keep + 1))
+            fail_put()
+        end
       end
     else
       put_prop(id, o, to_key(key), v)
