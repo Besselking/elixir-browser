@@ -3019,6 +3019,12 @@ defmodule Browser.JS.Interp do
                 put_element(id, o, key, i, v)
             end
 
+          # An object key becomes a property key first (ToPropertyKey), because its
+          # `toString` can give an index. Its `toString` can also change the array, so the
+          # write reads the record again.
+          nil when is_tuple(key) and elem(key, 0) == :obj ->
+            put({:obj, id}, to_key(key), v)
+
           nil ->
             # an arguments object's `length` is an ordinary property that takes any value
             if key == "length" and is_map_key(o, :arguments),
@@ -3389,6 +3395,10 @@ defmodule Browser.JS.Interp do
   @doc false
   def array_index(key), do: index(key)
 
+  # (an object key becomes a property key first: its `toString` can change the object, and
+  # it can give an index)
+  def delete({:obj, id}, {:obj, _} = key), do: delete({:obj, id}, to_key(key))
+
   def delete({:obj, id}, key) do
     o = deref(id)
 
@@ -3467,8 +3477,11 @@ defmodule Browser.JS.Interp do
   end
 
   def has_property?({:obj, id}, key) do
-    o = deref(id)
+    # (ToPropertyKey comes first: the `toString` of an object key can change the object,
+    # and it can give an index)
     key_s = to_key(key)
+    key = if is_tuple(key) and elem(key, 0) == :obj, do: key_s, else: key
+    o = deref(id)
 
     cond do
       Map.has_key?(o, :proxy) ->
