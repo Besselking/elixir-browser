@@ -6357,7 +6357,7 @@ defmodule Browser.Layout do
     end
   end
 
-  # the place of an item and the clips that move with it (the keys in `@place_keys`)
+  # the place of an item and the clips that move with it (x, y, xlim, clip, clips)
   defp move_place(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
 
@@ -6951,8 +6951,8 @@ defmodule Browser.Layout do
   defp add_op({t, _}, op), do: ops_ctx([op | t])
 
   # -> {ops, {moves, set} | nil}: `moves` are the {dx, dy} of the ops in their order, `set` the
-  # keys besides `x` and `y` that they give an item with none of `@own_place` (nil when an op
-  # does more than `place_op/3` follows)
+  # keys besides `x` and `y` that they give an item for which `own_place?/1` is false (nil when
+  # an op does more than `place_op/3` follows)
   defp ops_ctx(t) do
     if Enum.any?(t, &(elem(&1, 0) == :stick)) do
       {t, nil}
@@ -6974,7 +6974,8 @@ defmodule Browser.Layout do
   @place_keys [:x, :y, :xlim, :clip, :clips, :sc]
 
   # (an item whose place is only in `@place_keys` gets the ops in a small map of these keys, and
-  # is made again one time; one with none of `@own_place` takes what the context worked out)
+  # is made again one time; an item for which `own_place?/1` is false takes what the context
+  # worked out)
   defp apply_ctx(item, {t, nil}), do: Enum.reduce(t, item, &apply_op(&2, &1))
 
   defp apply_ctx(item, {t, {moves, set}}) do
@@ -7006,6 +7007,13 @@ defmodule Browser.Layout do
        do: true
 
   defp own_place?(_item), do: false
+
+  @doc false
+  # For the tests: `item` with the ops `ops` (innermost first) done through their context, and
+  # done one by one. The two must be equal for each item and each list of ops, because the
+  # context only makes the same change in fewer steps.
+  def ctx_and_eager(item, ops),
+    do: {apply_ctx(item, ops_ctx(ops)), Enum.reduce(ops, item, &apply_op(&2, &1))}
 
   # `apply_op/2` on the keys of `item` in `@place_keys` (`place`)
   defp place_op({:dy, dy}, place, _item), do: move_place(place, 0, dy)
