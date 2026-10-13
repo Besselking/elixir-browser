@@ -144,6 +144,10 @@ defmodule Browser.JS.Interp do
     # (the closure count starts here and only goes up, see `make_fn/3`)
     :erlang.put(:js_fns, 0)
 
+    # (the positions of the keys of the array iterators name the prototypes of an earlier
+    # heap, see `array_record_pristine?/1`)
+    :erlang.erase(:js_arr_iter_pos)
+
     # The switch of the fast records (`Browser.JS.Shape`): the application setting
     # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
     # them off for each heap of the process. A process that set its own switch keeps it
@@ -3637,7 +3641,7 @@ defmodule Browser.JS.Interp do
 
     cond do
       o.class == :array and is_map_key(o, :arguments) -> arguments_list(v, o)
-      o.class == :array -> array_list(v)
+      o.class == :array -> spread_list(v, o)
       o.class in [:map, :set] -> Browser.JS.Collections.entries(o)
       true -> iterate_protocol(v)
     end
@@ -3645,6 +3649,24 @@ defmodule Browser.JS.Interp do
 
   def iterate(s) when is_binary(s), do: Browser.JS.Str.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+
+  # The values of the array `o` (at `v`, not an arguments object) for a spread. The spread
+  # uses the iterator protocol, as the spec says, so that a replaced `@@iterator` (own,
+  # of `Array.prototype` or of a subclass) or a replaced `next` of the array iterators
+  # shows. The common case takes no iterator, but only when the result is exactly the
+  # result of the protocol: the iteration is pristine (`array_record_pristine?/1`), no
+  # element is an accessor (a getter can change the array while the iterator runs), and a
+  # hole reads `undefined` because no prototype holds an element (`Elems.std_chain?/1`).
+  @compile {:inline, spread_list: 2}
+  defp spread_list(v, o) do
+    cond do
+      not array_record_pristine?(o) -> iterate_protocol(v)
+      Elems.dense?(o) -> Elems.to_list(o)
+      Elems.any_accessor?(o) -> iterate_protocol(v)
+      Elems.count(o) == Elems.len(o) or Elems.std_chain?(o) -> Elems.to_list(o)
+      true -> iterate_protocol(v)
+    end
+  end
 
   # The values of the arguments object `o` (at `v`) for a spread. The spread uses the
   # iterator protocol, as the spec says, so that a change of `length`, of an element or of
@@ -3669,7 +3691,10 @@ defmodule Browser.JS.Interp do
 
   # Whether the `next` of `%ArrayIteratorPrototype%` is the built-in one.
   defp array_iterator_next_pristine? do
-    Obj.own_value(deref(elem(proto(:array_iterator), 1)), "next") == Process.get(:js_arr_next)
+    case :erlang.get({:proto, :array_iterator}) do
+      {:obj, aipid} -> Obj.own_value(:erlang.get(aipid), "next") == :erlang.get(:js_arr_next)
+      _ -> false
+    end
   end
 
   @doc false
@@ -3925,11 +3950,70 @@ defmodule Browser.JS.Interp do
   # can be read straight from the list.
   def array_iteration_pristine?({:obj, id}) do
     o = deref(id)
-    key = {:symbol, :iterator, "Symbol.iterator"}
+    o.class == :array and array_record_pristine?(o)
+  end
 
-    o.class == :array and not Obj.has_own?(o, key) and o.proto == proto(:array) and
-      Obj.own_value(deref(elem(proto(:array), 1)), key) == Process.get(:js_arr_values) and
-      array_iterator_next_pristine?()
+  # `array_iteration_pristine?/1` of the array record `o`: it has no own `@@iterator`, its
+  # prototype is `Array.prototype` (not the prototype of a subclass), the `@@iterator` of
+  # `Array.prototype` is `%Array.prototype.values%`, and the `next` of
+  # `%ArrayIteratorPrototype%` is the built-in one.
+  #
+  # A spread runs this test each time, and the search of a key in the two prototypes and
+  # the read of a process key that is a tuple cost more than the rest of a short spread. So
+  # the process key `:js_arr_iter_pos` keeps the ids of the two prototypes, the `sid` of the
+  # shape of each one, the position of the key in it and the built-in value of the key,
+  # from the last test that found the two values. A shape is immutable and a `sid` is never
+  # given two times in a process, so when the two records still have these shapes, the
+  # values are at these positions, and the test reads them with no search. A record with a
+  # new shape (a new key or a change of attributes) or in dictionary mode takes the search
+  # again. A new heap and a new realm erase the key (`init/1`, `Browser.JS.Collections`),
+  # so the ids are the ids of the prototypes of the realm. The prototypes and the two
+  # built-in values are roots anyway (`:js_arr_values` and `:js_arr_next`), so the
+  # collector does not read the key (`Browser.JS.GC`).
+  @compile {:inline, array_record_pristine?: 1}
+  defp array_record_pristine?(o) do
+    with {apid, s1, p1, values, aipid, s2, p2, next} <- :erlang.get(:js_arr_iter_pos),
+         {:obj, ^apid} <- :erlang.map_get(:proto, o),
+         Obj.fast_record(^s1, v1) <- :erlang.get(apid),
+         Obj.fast_record(^s2, v2) <- :erlang.get(aipid) do
+      # (the root shape of an array, `sid` -1, has no key, and most arrays have it)
+      case o do
+        Obj.fast_record(-1, _) -> true
+        _ -> not Obj.has_own?(o, @iterator_key)
+      end and
+        :erlang.element(p1, v1) == values and :erlang.element(p2, v2) == next
+    else
+      {:obj, _} -> false
+      _ -> array_record_search?(o)
+    end
+  end
+
+  # `array_record_pristine?/1` with a search of the two keys. When the result is true and
+  # the two prototypes are fast, it keeps the positions for the next test.
+  defp array_record_search?(o) do
+    with {:obj, apid} = ap <- :erlang.get({:proto, :array}),
+         {:obj, aipid} <- :erlang.get({:proto, :array_iterator}),
+         true <- not Obj.has_own?(o, @iterator_key) and :erlang.map_get(:proto, o) == ap,
+         apr = :erlang.get(apid),
+         aipr = :erlang.get(aipid),
+         true <-
+           Obj.own_value(apr, @iterator_key) == :erlang.get(:js_arr_values) and
+             Obj.own_value(aipr, "next") == :erlang.get(:js_arr_next) do
+      with {p1, _} <- Obj.fast_slot(apr, @iterator_key),
+           {p2, _} <- Obj.fast_slot(aipr, "next"),
+           s1 = Obj.shape_id(apr),
+           s2 = Obj.shape_id(aipr),
+           do:
+             :erlang.put(
+               :js_arr_iter_pos,
+               {apid, s1, p1, :erlang.get(:js_arr_values), aipid, s2, p2,
+                :erlang.get(:js_arr_next)}
+             )
+
+      true
+    else
+      _ -> false
+    end
   end
 
   @doc false
@@ -8941,6 +9025,14 @@ defmodule Browser.JS.Interp do
   end
 
   def eval_list([:hole | rest], env), do: [:undefined | eval_list(rest, env)]
+
+  # The arguments of the default constructor of a derived class: the spec passes them on
+  # as they are, with no iterator (`Browser.JS.Classes`). The rest array is new and has
+  # no hole, so its list is the arguments.
+  def eval_list([{:spread_rest, e} | rest], env) do
+    vs = array_list(ev(e, env))
+    vs ++ eval_list(rest, env)
+  end
 
   def eval_list([n | rest], env) do
     v = ev(n, env)

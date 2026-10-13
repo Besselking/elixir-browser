@@ -93,6 +93,10 @@ defmodule Browser.JS.GC do
           {:js_ic_next, _}, acc -> acc
           {:js_shape_n, _}, acc -> acc
           {:js_shape_since, _}, acc -> acc
+          # (the positions of the keys of the array iterators hold two prototypes and two
+          # built-in functions, which are roots anyway, and shape ids and positions, which
+          # are not heap ids, see `Browser.JS.Interp`)
+          {:js_arr_iter_pos, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -161,6 +165,7 @@ defmodule Browser.JS.GC do
           {:js_ic_next, _}, roots -> roots
           {:js_shape_n, _}, roots -> roots
           {:js_shape_since, _}, roots -> roots
+          {:js_arr_iter_pos, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots

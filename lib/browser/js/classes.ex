@@ -243,11 +243,14 @@ defmodule Browser.JS.Classes do
   # The default constructor: `constructor() {}` for a base class and
   # `constructor(...args) { super(...args) }` for a derived class. With the `Info` of rule
   # R4 the node is in slot form, so it runs on a frame: the rest parameter `args` is slot 6.
+  # The spec gives the arguments to the parent constructor with no iterator, so a
+  # replaced `Array.prototype[Symbol.iterator]` does not run: the argument is
+  # `{:spread_rest, args}` and not a spread (`Interp.eval_list/2`).
   defp default_constructor(name, false, src, nil), do: {:fn, name, [], [], false, src}
 
   defp default_constructor(name, true, src, nil) do
     {:fn, name, [{:rest, {:id, "args"}}],
-     [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false, src}
+     [{:expr, {:call, {:super}, [{:spread_rest, {:id, "args"}}], false}}], false, src}
   end
 
   defp default_constructor(name, derived?, _src, %Browser.JS.Resolve.Info{} = dinfo) do
@@ -257,8 +260,8 @@ defmodule Browser.JS.Classes do
     if derived? do
       args = {:slot, 0, 6, "args"}
 
-      {:fn, name, [{:rest, args}], [{:expr, {:call, {:super}, [{:spread, args}], false}}], false,
-       dinfo}
+      {:fn, name, [{:rest, args}], [{:expr, {:call, {:super}, [{:spread_rest, args}], false}}],
+       false, dinfo}
     else
       {:fn, name, [], [], false, dinfo}
     end

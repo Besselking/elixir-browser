@@ -2670,7 +2670,9 @@ defmodule Browser.JS.FramesTest do
       assert %{
                info: %Info{kind: :derived_ctor, rewritten: true} = di,
                params: [{:rest, {:slot, 0, 6, "args"}}],
-               body: [{:expr, {:call, {:super}, [{:spread, {:slot, 0, 6, "args"}}], false}}]
+               body: [
+                 {:expr, {:call, {:super}, [{:spread_rest, {:slot, 0, 6, "args"}}], false}}
+               ]
              } = closure(b)
 
       assert %{di | src: nil, rewritten: false} == derived

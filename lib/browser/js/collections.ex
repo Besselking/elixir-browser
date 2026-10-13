@@ -275,6 +275,8 @@ defmodule Browser.JS.Collections do
     # what a pristine array iteration looks like (see `Interp.array_iteration_pristine?/1`)
     Process.put(:js_arr_values, values)
     Process.put(:js_arr_next, Interp.get(proto(:array_iterator), "next"))
+    # (the positions that `Interp.array_iteration_pristine?/1` keeps are of an earlier realm)
+    Process.delete(:js_arr_iter_pos)
 
     unscopables = new_object([], :null)
 
