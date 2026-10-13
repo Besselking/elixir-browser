@@ -61,11 +61,28 @@ defmodule Browser.JS.Elems do
   ## The size limit
 
   `max/0` is 128. A write copies the whole tuple, and an append makes a new tuple, so the
-  cost of a write grows with the size. Measured with limits of 32, 64, 128 and 256: at
-  128, a read or a write of an array of 65 to 128 elements is 25 to 35% faster than in the
-  sparse form, and a `slice` of such an array is 6 times faster. An array that grows past
-  the limit pays for the copies of the appends before it, about 1% more for each push of a
-  loop of 1,024 pushes than with a limit of 64. At 256, that cost is 3 times larger.
+  garbage of a write grows with the size. Its count of reductions does not grow
+  (`setelement/3` and `append_element/2` cost the same reductions at each size), so the
+  reductions do not show the copies: the words of garbage and the minor collections show
+  them. Measured with limits of 32, 64, 128 and 256: at 128, a read or a write of an array
+  of 65 to 128 elements is 25 to 35% faster than in the sparse form, and a `slice` of such
+  an array is 6 times faster. The cost is in the arrays that grow by appends (measured
+  against bbcdc02, where each array is sparse):
+
+  * An array that grows to 65 to 128 elements makes up to 1.6 times the garbage (12,700
+    words in place of 8,016 for 128 pushes), and it is still as fast or faster.
+  * An array that grows past the limit pays for the copies and then for the change to the
+    sparse form (about 250 reductions for 128 elements, `sparse/1`). For an array that
+    ends at 129 to 256 elements, a push costs 2.5 to 5% more reductions, 6 to 16% more CPU
+    and 32 to 64% more garbage. At 1,024 elements it costs about 1% more.
+  * A push and a pop on an array of 65 to 127 elements make 3.6 times the garbage (291
+    words in place of 81) at the same reductions.
+
+  A limit of 64 for the appends only (with 128 for the arrays that are made whole:
+  literals, `slice`, `map`, `concat`) was measured and not taken. It removes the extra
+  garbage above 64, but an array that grows to 65 to 128 elements is then sparse: 128
+  pushes cost 36% more CPU, a fill by `t[k] = k` 77% more, and `fill`, `reverse`, `sort`,
+  `shift` and `splice` on such an array 1.4 to 25 times more reductions.
 
   ## The form switch
 
@@ -352,13 +369,20 @@ defmodule Browser.JS.Elems do
 
   @doc "The array record `o` in the sparse form (see the moduledoc)."
   def sparse(%{vec: vec} = o) do
+    n = tuple_size(vec)
+
     o
     |> Map.delete(:vec)
-    |> Map.put(:items, list_map(:erlang.tuple_to_list(vec)))
-    |> Map.put(:len, tuple_size(vec))
+    |> Map.put(:items, :maps.from_list(vec_pairs(vec, n, [])))
+    |> Map.put(:len, n)
   end
 
   def sparse(o), do: o
+
+  # (the pairs `{index, value}` of the tuple, made from the last element to the first while
+  # the tuple is read, so that no list of the values is made first)
+  defp vec_pairs(_vec, 0, acc), do: acc
+  defp vec_pairs(vec, i, acc), do: vec_pairs(vec, i - 1, [{i - 1, :erlang.element(i, vec)} | acc])
 
   # ── reads ────────────────────────────────────────────────────
 
