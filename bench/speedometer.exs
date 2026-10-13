@@ -238,6 +238,16 @@ end
 me = self()
 spawn(fn -> send(me, {:scripts_done, Runtime.run_scripts(pid)}) end)
 
+# (a layout starts with the heap the session gives the process: `Browser.Session.spawn_layout/1`.
+# An older tree has no such function, and `bench/ab.exs` runs this file in both trees, so such a
+# tree starts its layouts as its own session does)
+Code.ensure_loaded(Browser.Session)
+
+spawn_layout =
+  if function_exported?(Browser.Session, :spawn_layout, 1),
+    do: &Browser.Session.spawn_layout/1,
+    else: &spawn/1
+
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
@@ -245,8 +255,7 @@ loop = fn loop ->
     {:layout_now, js, ref, raw} ->
       base = Agent.get(base_agent, & &1)
 
-      # (with the heap the session gives the process: `Browser.Session.spawn_layout/1`)
-      Browser.Session.spawn_layout(fn ->
+      spawn_layout.(fn ->
         Process.flag(:trap_exit, false)
         me = self()
         guard = self()
