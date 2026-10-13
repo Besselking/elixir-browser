@@ -591,7 +591,12 @@ defmodule Browser.JS.CompileAsyncTest do
      ]},
     {"stack async callee after await",
      "async function inner(){\n  return new Error('i').stack }\nasync function outer(){\n  await 0\n  return await inner() }\nouter().then(s => console.log(s))",
-     [log: "Error: i" <> @s <> "inner (t.js:2)" <> @s <> "outer (t.js:5)"]}
+     [log: "Error: i" <> @s <> "inner (t.js:2)" <> @s <> "outer (t.js:5)"]},
+    # The second `next` is queued while the body runs, and the body starts it itself after
+    # the first `yield`. The body is in its own cell then, so it shows one time only.
+    {"stack async generator queued request",
+     "async function* ag(){\n  yield 1\n  throw new Error('q') }\nfunction d(){\n  var it = ag(); it.next(); it.next().catch(e => console.log(e.stack)) }\nd()\nvar u = 1",
+     [log: "Error: q" <> @s <> "ag (t.js:3)"]}
   ]
 
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the

@@ -32,7 +32,9 @@ defmodule Browser.JS.Async do
   function or of an async generator that resumes after an `await` runs under a cell of its
   own too, with the call position `nil`, because a job and not a caller runs it. An async
   generator body that a request (`next`, `throw` or `return`) runs has a cell at the
-  position of the request. Each cell gives back the chain and the position after it, as a
+  position of the request. A request that waits in the queue while the body runs is
+  started by the body itself, after a `yield` or at its end. The body is then in its own
+  cell already, so it gets no second cell. Each cell gives back the chain and the position after it, as a
   call does. A sync generator body runs under the chain of the code that resumed it and
   pushes no cell. A frame from `Browser.JS.Interp.enter_frame/4` has `nil` in element 3,
   because its body can run under more than one chain.
@@ -511,7 +513,7 @@ defmodule Browser.JS.Async do
       %{agen: g} ->
         p = Promise.new()
         update_agen(gid, %{queue: g.queue ++ [{msg, p}]})
-        ag_drain(gid)
+        ag_drain(gid, true)
         p
 
       _ ->
@@ -537,8 +539,12 @@ defmodule Browser.JS.Async do
     p
   end
 
-  # starts the next queued request, unless the body is running
-  defp ag_drain(gid) do
+  # Starts the next queued request, unless the body is running. The flag `request?` is true
+  # when the caller is `next`, `return` or `throw`. Then the body gets a new cell at the
+  # position of the request. Otherwise the body itself drains the queue after a `yield` or
+  # at its end, from inside its own cell, and a second cell would show the body two times
+  # in the stack.
+  defp ag_drain(gid, request?) do
     g = agen(gid)
 
     with false <- g.running, [{msg, p} | rest] <- g.queue do
@@ -547,18 +553,18 @@ defmodule Browser.JS.Async do
       case {g.state, msg} do
         {:done, {:next, _}} ->
           Promise.resolve(p, iter_result(:undefined, true))
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
         {:done, {:throw, e}} ->
           Promise.reject(p, e)
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
         # A request at the start runs no body code, so the frame is released at once. The
         # start continuation holds the frame too, so it is dropped with it.
         {state, {:throw, e}} when state == :start ->
           set_agen(gid, %{release(g) | queue: rest, state: :done, resume: nil})
           Promise.reject(p, e)
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
         {state, {:return, v}} when state in [:done, :start] ->
           set_agen(gid, %{release(g) | queue: rest, state: :done, running: true, resume: nil})
@@ -571,15 +577,15 @@ defmodule Browser.JS.Async do
           update_agen(gid, %{running: true, cur: p})
           if @check, do: Interp.check_resume(g.frame)
 
-          # The body runs under its cell, at the position of the request.
-          at = :erlang.get(:js_pos)
+          if request? do
+            # The body runs under its cell, at the position of the request.
+            at = :erlang.get(:js_pos)
 
-          in_cell g.name, if(at == :undefined, do: nil, else: at) do
-            try do
-              g.resume.(msg)
-            catch
-              {:js_error, e} -> ag_finish(gid, {:throw, e})
+            in_cell g.name, if(at == :undefined, do: nil, else: at) do
+              ag_resume(gid, g, msg)
             end
+          else
+            ag_resume(gid, g, msg)
           end
       end
     else
@@ -587,16 +593,23 @@ defmodule Browser.JS.Async do
     end
   end
 
+  @compile {:inline, ag_resume: 3}
+  defp ag_resume(gid, g, msg) do
+    g.resume.(msg)
+  catch
+    {:js_error, e} -> ag_finish(gid, {:throw, e})
+  end
+
   defp ag_settle(gid, p, {:return, v}) do
     Promise.resolve(p, iter_result(v, true))
     update_agen(gid, %{running: false})
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   defp ag_settle(gid, p, {:throw, e}) do
     Promise.reject(p, e)
     update_agen(gid, %{running: false})
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   defp ag_finish(gid, out) do
@@ -624,7 +637,7 @@ defmodule Browser.JS.Async do
     g = agen(gid)
     update_agen(gid, %{state: :suspended, resume: resume, running: false, cur: nil})
     Promise.resolve(g.cur, iter_result(v, false))
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   @doc "`AsyncGenerator.prototype`."
