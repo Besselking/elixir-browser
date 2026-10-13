@@ -245,7 +245,8 @@ loop = fn loop ->
     {:layout_now, js, ref, raw} ->
       base = Agent.get(base_agent, & &1)
 
-      spawn(fn ->
+      # (with the heap the session gives the process: `Browser.Session.spawn_layout/1`)
+      Browser.Session.spawn_layout(fn ->
         Process.flag(:trap_exit, false)
         me = self()
         guard = self()

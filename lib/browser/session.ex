@@ -2341,7 +2341,7 @@ defmodule Browser.Session do
     tid = state.tid
     me = self()
 
-    spawn(fn ->
+    spawn_layout(fn ->
       :wx.set_env(wx_env)
       page = Page.from_raw(base, raw, env)
       # (the sheets a script added are parsed once, and the elements that did not change are not
@@ -2365,6 +2365,17 @@ defmodule Browser.Session do
   end
 
   defp start_layout_for_scripts(_state, _js, _ref, _raw), do: :ok
+
+  # The words of heap that a process that styles and lays out a page starts with. The style and
+  # the layout of a big tree allocate a lot, and a small heap grows by many collections, each of
+  # which copies all that the process holds. In the Speedometer TodoMVC suites, with 1, 2 and 4
+  # million words, the layouts the scripts wait for were fastest with 2 million (16 MB).
+  @layout_heap 2_000_000
+
+  @doc false
+  # (a process for the style and the layout of a page: a page job, a layout after a resize, or a
+  # layout for the scripts)
+  def spawn_layout(fun), do: :erlang.spawn_opt(fun, min_heap_size: @layout_heap)
 
   defp apply_js(state, reply) do
     state = Enum.reduce(reply.outbox, state, &js_effect/2)
@@ -2398,24 +2409,21 @@ defmodule Browser.Session do
     tid = state.tid
 
     pid =
-      :erlang.spawn_opt(
-        fn ->
-          :wx.set_env(wx_env)
-          page = Page.from_raw(base, raw, env)
+      spawn_layout(fn ->
+        :wx.set_env(wx_env)
+        page = Page.from_raw(base, raw, env)
 
-          {items, height} =
-            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-              scrollers: true,
-              boxes: boxes,
-              metrics: true,
-              images: images,
-              svg_defs: page.svg_defs
-            )
+        {items, height} =
+          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+            scrollers: true,
+            boxes: boxes,
+            metrics: true,
+            images: images,
+            svg_defs: page.svg_defs
+          )
 
-          send(me, {:page_done, ref, nonce, page, items, height, width, images})
-        end,
-        min_heap_size: 2_000_000
-      )
+        send(me, {:page_done, ref, nonce, page, items, height, width, images})
+      end)
 
     %{state | page_job: {ref, pid}, page_pending: nil}
   end
@@ -2633,27 +2641,23 @@ defmodule Browser.Session do
     worker = state.layout_worker
     tid = state.tid
 
-    # a layout allocates a lot: a big initial heap saves it growing the heap by many collections
     pid =
-      :erlang.spawn_opt(
-        fn ->
-          :wx.set_env(wx_env)
-          page = Page.restyle(base, env)
+      spawn_layout(fn ->
+        :wx.set_env(wx_env)
+        page = Page.restyle(base, env)
 
-          {items, height} =
-            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-              scrollers: true,
-              boxes: boxes,
-              metrics: true,
-              focus: focus,
-              images: images,
-              svg_defs: page.svg_defs
-            )
+        {items, height} =
+          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+            scrollers: true,
+            boxes: boxes,
+            metrics: true,
+            focus: focus,
+            images: images,
+            svg_defs: page.svg_defs
+          )
 
-          send(me, {:layout_done, ref, base.ver, page, items, height, width, images})
-        end,
-        min_heap_size: 2_000_000
-      )
+        send(me, {:layout_done, ref, base.ver, page, items, height, width, images})
+      end)
 
     %{state | layout_job: {ref, pid}}
   end
