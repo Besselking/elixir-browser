@@ -8,12 +8,11 @@ defmodule Browser.JS.Props do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.JS.Args
   alias Browser.JS.Interp
   require Browser.JS.Fast, as: Fast
   require Browser.JS.Obj, as: Obj
   require Browser.JS.Elems, as: Elems
-
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
 
   # ── reading ────────────────────────────────────────────────
 

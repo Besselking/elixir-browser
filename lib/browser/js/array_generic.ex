@@ -7,20 +7,13 @@ defmodule Browser.JS.ArrayGeneric do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3, delete: 2, to_int: 1]
+  import Browser.JS.Args
   alias Browser.JS.{Builtins, Interp, Props, Proxy}
   require Browser.JS.Elems, as: Elems
 
   @max 9_007_199_254_740_991
   @max_array 4_294_967_295
   @huge 18_014_398_509_481_984
-
-  # The first three arguments by a match: a callback of an array method reads its
-  # argument for each element, and `Enum.at/3` costs several calls.
-  @compile {:inline, arg: 2}
-  defp arg([a | _], 0), do: a
-  defp arg([_, a | _], 1), do: a
-  defp arg([_, _, a | _], 2), do: a
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
 
   # ── plumbing ───────────────────────────────────────────────
 
