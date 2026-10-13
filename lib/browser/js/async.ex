@@ -76,7 +76,8 @@ defmodule Browser.JS.Async do
   `:off` and on the old path, all bodies when the switch `:js_compile` is off, a body over
   the cap of the compiler, and the kinds that a plan keeps on the tree path (`yield*`,
   for-in, for-of and for-await, `try` with an await, `using`, an optional chain that
-  awaits, a logical assignment that awaits, and a lift plan with a leaf from a class).
+  awaits, a logical assignment that awaits, a compound assignment to `super[k]` that
+  awaits, and a lift plan with a leaf from a class).
   """
 
   alias Browser.JS.{Awaits, Compile, Interp, Promise}
@@ -962,6 +963,19 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # `o[k] op= v` and `super[k] op= v`, where `op` is an arithmetic or a bitwise operator.
+  # The object, the key and the old value are read before the right side runs (and
+  # awaits), and the write comes after it, as in `Interp.compound_assign/5`. A lift plan
+  # would read the target after the awaits of the right side. A name target needs no
+  # clause here, because `ordered/1` reads the name before those awaits.
+  defp cev_await({kind, op, target, value}, env, ctx, k)
+       when kind in [:assign, :sassign] and op in @compound and
+              elem(target, 0) in [:member, :super_member] do
+    compound_target(target, env, ctx, fn target ->
+      compound_rest(target, op, kind == :sassign, env, ctx, k, &cev(value, env, ctx, &1))
+    end)
+  end
+
   defp cev_await({:destructure, pat, right}, env, ctx, k) do
     cev(right, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
   end
@@ -1121,6 +1135,46 @@ defmodule Browser.JS.Async do
 
   defp settle_target(target, _env, _ctx, k), do: k.(target)
 
+  # The target of a compound assignment that awaits. The object and a computed key run
+  # here, and their values go into the tree, so that the compiled plan
+  # (`compound_k/4`) and this path give the same target to `compound_rest/7`.
+  defp compound_target({:member, o, key, _}, env, ctx, k) do
+    cev(o, env, ctx, fn ov ->
+      if const_key?(key),
+        do: k.({:member, {:val, ov}, key, false}),
+        else: cev(key, env, ctx, fn kv -> k.({:member, {:val, ov}, {:val, kv}, false}) end)
+    end)
+  end
+
+  defp compound_target(target, env, ctx, k), do: settle_target(target, env, ctx, k)
+
+  # A key that `Interp.compound_ref/3` reads with no evaluation: a name after a dot, or a
+  # private name.
+  defp const_key?({tag, _}) when tag in [:str, :priv], do: true
+  defp const_key?(_), do: false
+
+  # The rest of a compound assignment that awaits, after its target: the read of the old
+  # value, the right side, the operator and the write. `right` runs the right side and
+  # gives its value to the continuation that it gets.
+  defp compound_rest(target, op, strict?, env, ctx, k, right) do
+    base = binary_part(op, 0, byte_size(op) - 1)
+
+    attempt(fn -> logical_ref(target, env, strict?) end, ctx, fn {old, write} ->
+      right.(fn v -> compound_write(base, old, v, write, ctx, k) end)
+    end)
+  end
+
+  defp compound_write(base, old, v, write, ctx, k) do
+    attempt(
+      fn ->
+        r = Interp.binop(base, old, v)
+        write.(r) && r
+      end,
+      ctx,
+      k
+    )
+  end
+
   defp logical_ref(target, env, strict?) do
     {read, write} = Interp.compound_ref(target, env, strict?)
     {read.(), write}
@@ -1271,6 +1325,11 @@ defmodule Browser.JS.Async do
 
     defp leaf_ref?({kind, op, _, _} = n)
          when kind in [:assign, :sassign] and op in @logical_assign,
+         do: has_await_ref?(n)
+
+    defp leaf_ref?({kind, op, t, _} = n)
+         when kind in [:assign, :sassign] and op in @compound and
+                elem(t, 0) in [:member, :super_member],
          do: has_await_ref?(n)
 
     defp leaf_ref?(_), do: false
@@ -1461,6 +1520,13 @@ defmodule Browser.JS.Async do
 
   defp leaf?({kind, op, _, _} = n) when kind in [:assign, :sassign] and op in @logical_assign,
     do: has_await?(n)
+
+  # A compound assignment to a member is a leaf, so that `cev_await/4` reads its target
+  # before the awaits of its right side.
+  defp leaf?({kind, op, t, _} = n)
+       when kind in [:assign, :sassign] and op in @compound and
+              elem(t, 0) in [:member, :super_member],
+       do: has_await?(n)
 
   defp leaf?(_), do: false
 
@@ -2640,6 +2706,24 @@ defmodule Browser.JS.Async do
       {:ok, v} -> k.(v)
       {:throw, e} -> ctx.throw.(e)
     end
+  end
+
+  @doc false
+  # `o[k] op= v` that awaits, in a plan (the twin of the clause of `cev_await/4`). `o`,
+  # `key` and `x` are compiled expressions, and `key` is `{:node, key}` for a key that
+  # needs no evaluation (see `const_key?/1`).
+  def compound_k({op, strict?, o, key, x}, env, ctx, k) do
+    value(o, env, ctx, fn ov ->
+      rest = fn kn ->
+        target = {:member, {:val, ov}, kn, false}
+        compound_rest(target, op, strict?, env, ctx, k, &value(x, env, ctx, &1))
+      end
+
+      case key do
+        {:node, kn} -> rest.(kn)
+        _ -> value(key, env, ctx, fn kv -> rest.({:val, kv}) end)
+      end
+    end)
   end
 
   @doc false

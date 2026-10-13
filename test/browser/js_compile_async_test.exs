@@ -524,7 +524,32 @@ defmodule Browser.JS.CompileAsyncTest do
     {"catch param default yield",
      "var r = []; function* g(){ try { throw {} } catch ({a = yield 'y'}) { yield 'a' + a } try { throw [] } catch ([b = yield 'z']) { return 'b' + b } } " <>
        "var it = g(); r.push(it.next().value, it.next(1).value, it.next().value, it.next(2).value); r",
-     ~w(y a1 z b2)}
+     ~w(y a1 z b2)},
+    # A compound assignment to a member reads the object, the key and the old value before
+    # the await of its right side, and writes after it. The same is true for a name, for
+    # `super[k]`, for a private name, for a key that awaits and for a base that is `null`.
+    # (Node converts a key object to a property key a second time before the write. The
+    # spec converts it one time, in GetValue, and this engine does the same, so the row has
+    # string keys only.)
+    {"compound member await",
+     "var log = []; function t(n, v){ log.push(n); return v } " <>
+       "async function w(){ for (var i = 1; i <= 6; i++) { log.push('w' + i); await 0 } } " <>
+       "var o = { _p: 1, get p(){ log.push('get' + this._p); return this._p }, set p(v){ log.push('set' + v); this._p = v } }; var x = 1; " <>
+       "class A { get q(){ log.push('getq'); return 10 } set q(v){ log.push('setq' + v) } } " <>
+       "class B extends A { #z = 4; async m(){ super[t('k', 'q')] -= await t('v', 3); this.#z <<= await t('v', 2); return this.#z } } " <>
+       "async function f(){ t('o', o)[t('k', 'p')] += await t('v', 1); t('o', o).p *= await t('v', 3); x += await (x = 10, t('v', 1)); " <>
+       "var y = (t('o', o)[t('k', 'p')] -= t('a', 1) + await t('v', 1)) + t('b', 1); t('o', o)[await t('k', 'p')] += t('v', 0); " <>
+       "try { t('o', null)[t('k', 'p')] += await t('no', 1) } catch (e) { log.push(e.constructor.name) } " <>
+       "return [o._p, x, y, await new B().m()].join() } " <>
+       "f().then(v => log.push('=' + v), e => log.push('rej ' + e)); w(); log",
+     ~w(o k get1 v w1 set2 o get2 v w2 set6 v w3 o k get6 a v w4 set4 b o k w5 get4 v set4) ++
+       ~w(o k TypeError k getq v w6 setq7 v =4,2,5,16)},
+    {"compound member yield",
+     "var log = []; function t(n, v){ log.push(n); return v } " <>
+       "var o = { _p: 1, get p(){ log.push('get' + this._p); return this._p }, set p(v){ log.push('set' + v); this._p = v } }; " <>
+       "function* g(){ t('o', o)[t('k', 'p')] += yield 'y'; t('o', o).p **= yield 'z'; return 'r' + o._p } " <>
+       "var it = g(); for (var a of [undefined, 2, 2]) log.push('|' + it.next(a).value); log",
+     ~w(o k get1 |y set3 o get3 |z set9 |r9)}
   ]
 
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the

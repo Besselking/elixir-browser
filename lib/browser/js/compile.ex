@@ -169,10 +169,13 @@ defmodule Browser.JS.Compile do
       order, so all levels agree.
     * Loop facts. The test and the update of a `for` or a `while` compile once.
 
-  These kinds compile into the plan: `await`, a plain `yield`, `&&`, `||`, `??`, `?:` and a
-  destructuring assignment that awaits, the lift plan of each other expression, and the
-  statements `expr`, `var`, `let`, `const`, `return`, `throw`, `if`, `block`, labels,
-  `while`, `do`/`while`, `for` and `switch`.
+  These kinds compile into the plan: `await`, a plain `yield`, `&&`, `||`, `??`, `?:`, a
+  destructuring assignment and a compound assignment to a member that await, the lift
+  plan of each other expression, and the statements `expr`, `var`, `let`, `const`,
+  `return`, `throw`, `if`, `block`, labels, `while`, `do`/`while`, `for` and `switch`.
+  A compound assignment to a member is not a lift plan, because a lift plan runs the
+  template after the leaves, and the spec reads the target and its old value before the
+  right side.
 
   These kinds stay on the tree path of `Async`:
 
@@ -180,6 +183,7 @@ defmodule Browser.JS.Compile do
     * an optional chain that awaits, because it puts its value into the tree;
     * a logical assignment (`&&=`, `||=`, `??=`) that awaits, because its right side runs
       only when the operator does not short-circuit;
+    * a compound assignment to `super[k]` that awaits, because it is rare;
     * a lift plan with a leaf from a class, because the leaf runs in a class scope;
     * for-in, for-of and for-await;
     * `try` with an await, and `using`;
@@ -2425,6 +2429,23 @@ defmodule Browser.JS.Compile do
 
   defp kexpr_aw({kind, op, _, _} = e)
        when kind in [:assign, :sassign] and op in ["&&=", "||=", "??="],
+       do: ktree(e)
+
+  # The operators of a compound assignment that are not logical, as in `Async`.
+  @compound_ops ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
+
+  # A compound assignment to a member reads its object, its key and the old value before
+  # the awaits of its right side (`Async.compound_k/4`). A lift plan would read them after
+  # those awaits. A `super[k]` target is rare, so it stays on the tree path.
+  defp kexpr_aw({kind, op, {:member, o, key, _}, value})
+       when kind in [:assign, :sassign] and op in @compound_ops do
+    key = if match?({tag, _} when tag in [:str, :priv], key), do: {:node, key}, else: kexpr(key)
+    spec = {op, kind == :sassign, kexpr(o), key, kexpr(value)}
+    {:c, fn env, ctx, k -> Async.compound_k(spec, env, ctx, k) end}
+  end
+
+  defp kexpr_aw({kind, op, {:super_member, _}, _} = e)
+       when kind in [:assign, :sassign] and op in @compound_ops,
        do: ktree(e)
 
   # Any other expression gets its lift plan. A leaf from a class must run in a class scope,
