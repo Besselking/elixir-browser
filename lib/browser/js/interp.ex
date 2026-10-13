@@ -64,6 +64,9 @@ defmodule Browser.JS.Interp do
 
   @max_depth 1000
 
+  # The key of the well-known symbol `Symbol.iterator`.
+  @iterator_key {:symbol, :iterator, "Symbol.iterator"}
+
   @doc false
   # The call depth of a chain in `:js_stack` (step 2f). The depth of the current call is in
   # the head cell. Any other value is the bottom of the chain. This includes `:undefined` in
@@ -3633,6 +3636,7 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     cond do
+      o.class == :array and is_map_key(o, :arguments) -> arguments_list(v, o)
       o.class == :array -> array_list(v)
       o.class in [:map, :set] -> Browser.JS.Collections.entries(o)
       true -> iterate_protocol(v)
@@ -3641,6 +3645,32 @@ defmodule Browser.JS.Interp do
 
   def iterate(s) when is_binary(s), do: Browser.JS.Str.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+
+  # The values of the arguments object `o` (at `v`) for a spread. The spread uses the
+  # iterator protocol, as the spec says, so that a change of `length`, of an element or of
+  # the iterator shows. The common case takes no iterator, but only when the result is
+  # exactly the result of the protocol: the own `@@iterator` is `%Array.prototype.values%`
+  # of the realm, the `next` of the array iterators is the built-in one, the own `length`
+  # is a data value that is a whole number, and each index below it holds a data element.
+  # Then the protocol runs no JS code and reads these elements in order.
+  defp arguments_list(v, o) do
+    values = Process.get(:js_arr_values)
+
+    with true <- values != nil and Obj.own_value(o, @iterator_key) == values,
+         true <- array_iterator_next_pristine?(),
+         n when is_number(n) and n >= 0 and n <= 4_294_967_295 <- Obj.own_value(o, "length"),
+         true <- n == trunc(n),
+         {:ok, list} <- Elems.values_below(o, trunc(n)) do
+      list
+    else
+      _ -> iterate_protocol(v)
+    end
+  end
+
+  # Whether the `next` of `%ArrayIteratorPrototype%` is the built-in one.
+  defp array_iterator_next_pristine? do
+    Obj.own_value(deref(elem(proto(:array_iterator), 1)), "next") == Process.get(:js_arr_next)
+  end
 
   @doc false
   # what `for of` loops over: a list that is known up front (arrays, strings, Map, Set), or an
@@ -3899,7 +3929,7 @@ defmodule Browser.JS.Interp do
 
     o.class == :array and not Obj.has_own?(o, key) and o.proto == proto(:array) and
       Obj.own_value(deref(elem(proto(:array), 1)), key) == Process.get(:js_arr_values) and
-      Obj.own_value(deref(elem(proto(:array_iterator), 1)), "next") == Process.get(:js_arr_next)
+      array_iterator_next_pristine?()
   end
 
   @doc false
@@ -5509,7 +5539,7 @@ defmodule Browser.JS.Interp do
       Obj.record(class: :array, proto: proto(:object), arguments: true)
       |> Elems.put_args(args)
       |> Obj.put_hidden("length", len * 1.0)
-      |> Obj.put_hidden({:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
+      |> Obj.put_hidden(@iterator_key, arguments_iterator())
 
     case callee do
       {:thrower, thrower} ->
@@ -5529,6 +5559,16 @@ defmodule Browser.JS.Interp do
 
       nil ->
         {:obj, alloc(o)}
+    end
+  end
+
+  # The `@@iterator` of a new arguments object: `%Array.prototype.values%` of the realm,
+  # also when a script replaced `Array.prototype.values`. Before the realm has it (no
+  # `Browser.JS.Collections` yet), the value of the property is the only one there is.
+  defp arguments_iterator do
+    case Process.get(:js_arr_values) do
+      nil -> get(proto(:array), "values")
+      values -> values
     end
   end
 

@@ -354,6 +354,27 @@ defmodule Browser.JS.Elems do
   def to_list(%{items: items, len: len}),
     do: for(i <- 0..(len - 1)//1, do: Map.get(items, i, :undefined))
 
+  @doc """
+  `{:ok, values}`: the values of the array record `o` at the indices 0 to `n - 1`, when each
+  of these indices holds a data value. Else `:error` (a hole or an accessor). The items at
+  `n` and after it do not count.
+  """
+  def values_below(%{vec: vec}, n) when n <= tuple_size(vec),
+    do: {:ok, :lists.sublist(:erlang.tuple_to_list(vec), n)}
+
+  def values_below(%{vec: _}, _n), do: :error
+  def values_below(%{items: items}, n), do: values_below(items, n - 1, [])
+
+  defp values_below(_items, -1, acc), do: {:ok, acc}
+
+  defp values_below(items, i, acc) do
+    case items do
+      %{^i => {:accessor, _, _}} -> :error
+      %{^i => v} -> values_below(items, i - 1, [v | acc])
+      _ -> :error
+    end
+  end
+
   @doc "`{index, item}` of each element (and item) of the array record `o`, in no order."
   def to_pairs(o), do: Map.to_list(to_map(o))
 
