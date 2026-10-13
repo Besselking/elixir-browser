@@ -3322,6 +3322,9 @@ defmodule Browser.JS.Interp do
 
           :skip ->
             :ok
+
+          :fail ->
+            fail_put()
         end
 
         :ok
@@ -3362,31 +3365,46 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The first property at the index `i` in the prototype chain from `{:obj, pid}`, as the
+  # write of a new element meets it (OrdinarySet): `{:setter, f}` for an accessor with a
+  # setter, `:fail` for an accessor with no setter or a data property that is not
+  # writable (the write fails), `:none` for a writable data property or no property (the
+  # write adds an own element), `{:proxy, p}` for a proxy, and `:skip` for a typed array.
   defp index_hook({:obj, pid}, i) do
     p = deref(pid)
-    k = Integer.to_string(i)
 
     cond do
       is_map_key(p, :proxy) ->
         {:proxy, {:obj, pid}}
 
-      p.class == :array and match?({:ok, {:accessor, _, _}}, Elems.fetch(p, i)) ->
-        {:ok, {:accessor, _, setter}} = Elems.fetch(p, i)
-        if function?(setter), do: {:setter, setter}, else: :none
-
       p.class == :array and Elems.has?(p, i) ->
-        :none
+        case Elems.fetch(p, i) do
+          {:ok, {:accessor, _, setter}} ->
+            if function?(setter), do: {:setter, setter}, else: :fail
+
+          _ ->
+            if Obj.frozen?(p) or not Obj.writable?(p, i), do: :fail, else: :none
+        end
 
       Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
         # an index outside a typed array in the chain stops the set without creating it
-        if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, k), do: :skip, else: :none
-
-      match?({:ok, {:accessor, _, _}}, Obj.own_fetch(p, k)) ->
-        {:ok, {:accessor, _, setter}} = Obj.own_fetch(p, k)
-        if function?(setter), do: {:setter, setter}, else: :none
+        if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, Integer.to_string(i)),
+          do: :skip,
+          else: :none
 
       true ->
-        index_hook(p.proto, i)
+        k = Integer.to_string(i)
+
+        case Obj.own_fetch(p, k) do
+          {:ok, {:accessor, _, setter}} ->
+            if function?(setter), do: {:setter, setter}, else: :fail
+
+          {:ok, _} ->
+            if Obj.frozen?(p) or not Obj.writable?(p, k), do: :fail, else: :none
+
+          :error ->
+            index_hook(p.proto, i)
+        end
     end
   end
 
