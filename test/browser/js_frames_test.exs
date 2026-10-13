@@ -3739,7 +3739,9 @@ defmodule Browser.JS.FramesTest do
         assert Exception.message(e) =~ "resolve check"
       end
 
-      test "C3: ev({:await}) in a frame fails without the process key and runs with it" do
+      # The process key `:js_cps_sync_await` allowed the sync await of a catch parameter
+      # default once. That await now suspends the body, so the key allows nothing.
+      test "C3: ev({:await}) in a frame fails, also with the old process key" do
         gid = heap()
         run_script("async function f(){ await 0 }", 4)
         {_f, id, c} = fun4(gid, "f")
@@ -3751,7 +3753,8 @@ defmodule Browser.JS.FramesTest do
         Process.put(:js_cps_sync_await, true)
 
         try do
-          assert Interp.ev({:await, {:num, 1.0}}, fid) == 1.0
+          e = assert_raise(ArgumentError, fn -> Interp.ev({:await, {:num, 1.0}}, fid) end)
+          assert Exception.message(e) =~ "resolve check"
         after
           Process.delete(:js_cps_sync_await)
         end

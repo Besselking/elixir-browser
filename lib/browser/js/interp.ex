@@ -7796,13 +7796,11 @@ defmodule Browser.JS.Interp do
   def ev({:gen, fun}, env), do: make_fn({:gen, fun}, env)
 
   if @check do
-    # A frame runs its awaits in the CPS evaluator. The one legal sync await in a frame is
-    # an await in a default of a catch parameter, which `Browser.JS.Async` marks with the
-    # process key around it.
+    # A frame runs all its awaits in the CPS evaluator, the awaits in a default of a catch
+    # parameter too. Thus a sync await in a frame is an error of the evaluator.
     def ev({:await, e}, env) do
-      if is_integer(env) and is_tuple(:erlang.get(env)) and
-           Process.get(:js_cps_sync_await) != true,
-         do: check_fail("a sync await in a frame")
+      if is_integer(env) and is_tuple(:erlang.get(env)),
+        do: check_fail("a sync await in a frame")
 
       Browser.JS.Promise.await(ev(e, env))
     end

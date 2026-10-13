@@ -505,6 +505,28 @@ defmodule Browser.JS.CompileAsyncTest do
 
   @race_order ["f1", "w1", "f2", "w2", "w3"]
 
+  # Programs whose result must be the result of node 22, at every level and with
+  # compilation off and on. Each row is `{name, source, result}`, and the result is what
+  # node 22 gives for the source. In the async rows a witness task `w` writes to the same
+  # log as the code under test, so that the log shows each suspension in its order.
+  @node_witness "async function w(){ for (var i = 1; i <= 4; i++) { log.push('w' + i); await 0 } } "
+
+  @node_rows [
+    # An await in a default of a catch parameter is an await of the async function: the
+    # body suspends, and the witness runs before the handler.
+    {"catch param default await",
+     "var log = []; var p = Promise.resolve('d'); " <>
+       @node_witness <>
+       "async function f(){ log.push('f1'); try { throw {} } catch ({a = await p}) { log.push('a' + a) } try { throw [] } catch ([x = await p]) { log.push('x' + x) } log.push('f2') } " <>
+       "f().then(() => log.push('end'), e => log.push('rej ' + e)); w(); log",
+     ~w(f1 w1 ad w2 xd f2 w3 end w4)},
+    # A yield in a default of a catch parameter suspends the generator.
+    {"catch param default yield",
+     "var r = []; function* g(){ try { throw {} } catch ({a = yield 'y'}) { yield 'a' + a } try { throw [] } catch ([b = yield 'z']) { return 'b' + b } } " <>
+       "var it = g(); r.push(it.next().value, it.next(1).value, it.next().value, it.next(2).value); r",
+     ~w(y a1 z b2)}
+  ]
+
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the
   # gate of 5c, with small loop counts.
   @bench_file Path.expand("../../bench/js_runtime.exs", __DIR__)
@@ -546,6 +568,7 @@ defmodule Browser.JS.CompileAsyncTest do
     positions: @positions,
     gen_positions: @gen_positions,
     races: @races,
+    node_order: for({n, s, _} <- @node_rows, do: {n, s}),
     bench: @bench
   ]
 
@@ -856,6 +879,17 @@ defmodule Browser.JS.CompileAsyncTest do
               both(rows, level: level) do
           assert off.items.result == {:ok, @race_order}, "#{n} at #{level} (off)"
           assert on.items.result == off.items.result, "#{n} at #{level} (on)"
+        end
+      end
+    end
+
+    test "the node rows give the result of node 22, at every level" do
+      rows = for {n, s, _} <- @node_rows, do: {n, s, []}
+
+      for level <- @levels do
+        for {{{n, _, _}, off, on}, {_, _, want}} <- Enum.zip(both(rows, level: level), @node_rows) do
+          assert off.items.result == {:ok, want}, "#{n} at #{level} (off)"
+          assert on.items.result == {:ok, want}, "#{n} at #{level} (on)"
         end
       end
     end

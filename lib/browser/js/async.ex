@@ -1978,15 +1978,23 @@ defmodule Browser.JS.Async do
         %{
           wrapped
           | throw: fn e ->
-              attempt(
-                fn ->
-                  scope = item_env(env, sc)
-                  if param, do: bind_catch(param, e, scope)
-                  scope
-                end,
-                wrapped,
-                fn scope -> cexec(handler, scope, wrapped, done) end
-              )
+              # A catch parameter with an await in a default binds step by step, so
+              # that the await suspends the body as any other await does. The sync
+              # binder would wait in place, and other tasks would run inside it.
+              attempt(fn -> item_env(env, sc) end, wrapped, fn scope ->
+                run = fn -> cexec(handler, scope, wrapped, done) end
+
+                cond do
+                  param == nil ->
+                    run.()
+
+                  has_await?(param) ->
+                    cbind_cps(param, e, :let, scope, wrapped, run)
+
+                  true ->
+                    guarded(fn -> Interp.bind_pattern(param, e, scope, :let) end, wrapped, run)
+                end
+              end)
             end
         }
       else
@@ -1994,22 +2002,6 @@ defmodule Browser.JS.Async do
       end
 
     cexec(block, env, in_try, done)
-  end
-
-  # The catch parameter is bound by the sync binder, as on the old path, so an await in a
-  # default of the pattern waits with `Promise.await`. Check mode allows that sync await.
-  if @check do
-    defp bind_catch(param, e, scope) do
-      old = Process.put(:js_cps_sync_await, true)
-
-      try do
-        Interp.bind_pattern(param, e, scope, :let)
-      after
-        Process.put(:js_cps_sync_await, old)
-      end
-    end
-  else
-    defp bind_catch(param, e, scope), do: Interp.bind_pattern(param, e, scope, :let)
   end
 
   # The scope of one item of a for-in, for-of or for-await, and of a catch clause: a new map
