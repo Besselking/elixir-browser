@@ -7978,8 +7978,7 @@ defmodule Browser.JS.Interp do
       if holes == [] do
         Elems.new(:lists.reverse(rev), proto(:array))
       else
-        items = rev |> :lists.reverse() |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
-        Elems.from_map(Map.drop(items, holes), len, proto(:array))
+        Elems.from_holes(rev, len, holes, proto(:array))
       end
 
     {:obj, alloc(record)}

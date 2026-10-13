@@ -304,6 +304,20 @@ defmodule Browser.JS.Elems do
     end
   end
 
+  @doc """
+  A new array record for an array literal with a hole: `rev` holds the values, last first,
+  with a placeholder at each hole, and `holes` holds the indices of the holes, last first.
+  The record is sparse, because it has a hole.
+  """
+  def from_holes(rev, len, holes, proto) do
+    from_map(:maps.from_list(hole_pairs(rev, len - 1, holes, [])), len, proto)
+  end
+
+  # (one pass makes the pairs without the holes, then the map BIF makes the map)
+  defp hole_pairs([_ | rev], i, [i | holes], acc), do: hole_pairs(rev, i - 1, holes, acc)
+  defp hole_pairs([v | rev], i, holes, acc), do: hole_pairs(rev, i - 1, holes, [{i, v} | acc])
+  defp hole_pairs([], _, _, acc), do: acc
+
   # The tuple of the items `items` with the length `len`, or nil when they have a hole or
   # an accessor, or when `len` is more than `max/0`.
   defp map_vec(items, len) do
