@@ -180,7 +180,7 @@ defmodule Browser.JS.ElemsTest do
 
   # The record and the model hold the same store, and the record has a correct form.
   defp agree!(o, {map, len} = m, was_dense?, trace) do
-    check!(Elems.to_map(o) == map, trace)
+    check!(Map.new(Elems.keys(o), fn i -> {i, elem(Elems.fetch(o, i), 1)} end) == map, trace)
     check!(Elems.keys(o) == Enum.sort(Map.keys(map)), trace)
     check!(Elems.count(o) == map_size(map), trace)
     check!(Elems.len(o) == len, trace)

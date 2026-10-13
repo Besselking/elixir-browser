@@ -1038,12 +1038,13 @@ defmodule Browser.JS.Builtins do
 
   # The value of an own data element at `i` of an array that is not a proxy and not a
   # mapped arguments object, else `Elems.none()`. (The atom of `Elems.none/0` is never a
-  # JS value, and a bare value costs no tuple for each element.) For such an element HasProperty is true and Get
-  # gives the value, with no user code between them, so one read of the element is the two
-  # reads of the spec (fast path `:iter`). A hole, an accessor, a proxy and a mapped
-  # arguments object take the generic path. The tests for a proxy and a mapped arguments
-  # object are defence in depth today: a proxy is a host object, not an array, and each
-  # write of a parameter also writes the element of a mapped arguments object.
+  # JS value, and a bare value costs no tuple for each element.) For such an element
+  # HasProperty is true and Get gives the value, with no user code between them, so one
+  # read of the element is the two reads of the spec (fast path `:iter`). A hole, an
+  # accessor, a proxy and a mapped arguments object take the generic path. The tests for a
+  # proxy and a mapped arguments object are defence in depth today: a proxy is a host
+  # object, not an array, and each write of a parameter also writes the element of a
+  # mapped arguments object.
   # (the read is `:erlang.get/1`, not `deref/1`: it runs once per element, and `deref/1`
   # is a remote call from this module. An id that is not in the heap gives :undefined,
   # which takes the generic path, and that path raises the error of `deref/1`)

@@ -87,9 +87,9 @@ defmodule Browser.JS.Elems do
   ## The form switch
 
   The process key `:js_elems_sparse` set to `true` makes the functions that make a new
-  record (`new/2`, `from_map/3` and `put_empty/1`) give the sparse form. No other function
-  reads the key: a record that is sparse stays sparse, so the other functions need not
-  read it. The form oracle uses it.
+  record (`new/2`, `new_vec/2`, `from_map/3` and `put_empty/1`, and `from_holes/4`, which
+  calls `from_map/3`) give the sparse form. No other function reads the key: a record that
+  is sparse stays sparse, so the other functions need not read it. The form oracle uses it.
 
   ## Hot paths
 
@@ -120,6 +120,14 @@ defmodule Browser.JS.Elems do
   value, and a JS value is never a frame or a shape, so the walk sees each element once.
   A dense record has no `len`, so its length is not an integer that the walk reads as a
   heap id.
+
+  The test of the walk of the tuple in the dangling scan of check mode is the test "walks
+  the elements of a dense array, also in the dangling scan" in
+  `test/browser/js_gc_test.exs`, which is part of the tests of this module. The oracles
+  cannot be this test: the scan finds only a freed frame that a value still holds, and a
+  correct program leaves no such frame, so a scan that skips the tuple also gives `[]`.
+  The mark of the collector is different: a mark that skips the tuple frees live
+  elements, and the oracles with forced collections find it.
   """
 
   require Browser.JS.Obj
@@ -394,10 +402,6 @@ defmodule Browser.JS.Elems do
   def count(%{vec: vec}), do: tuple_size(vec)
   def count(%{items: items}), do: map_size(items)
 
-  @doc "The items of the array record `o` as a map of each index to its item."
-  def to_map(%{vec: vec}), do: list_map(:erlang.tuple_to_list(vec))
-  def to_map(%{items: items}), do: items
-
   @doc """
   The items of the array record `o` from index 0 to its length - 1, with `:undefined` for
   a hole. An accessor stays an accessor.
@@ -427,9 +431,6 @@ defmodule Browser.JS.Elems do
       _ -> :error
     end
   end
-
-  @doc "`{index, item}` of each element (and item) of the array record `o`, in no order."
-  def to_pairs(o), do: Map.to_list(to_map(o))
 
   @doc "Whether an element of the array record `o` is an accessor."
   def any_accessor?(%{vec: _}), do: false
