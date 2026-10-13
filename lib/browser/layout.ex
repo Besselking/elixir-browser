@@ -6966,8 +6966,16 @@ defmodule Browser.Layout do
   defp op_move({:dy, dy}), do: {0, dy}
   defp op_move({:rel, dx, dy, _, _}), do: {dx, dy}
 
-  # `entries` (newest first, `n` items in all) with `op` to do on each item
+  # `entries` (newest first, `n` items in all) with `op` to do on each item. A box that holds
+  # fewer than `@wrap_min` items changes them at once, as before: for so few items, an entry and
+  # the context of its op cost more than the changes they save.
+  @wrap_min 8
+
   defp wrap([], _op, _n), do: []
+
+  defp wrap(entries, op, n) when n < @wrap_min,
+    do: entries |> flat_items() |> Enum.map(&apply_op(&1, op))
+
   defp wrap(entries, op, n), do: [{:wrap, op, entries, n}]
 
   # the keys `move/3` changes in an item that has none of the keys `plain_place?/1` looks for
