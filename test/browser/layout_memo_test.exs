@@ -163,6 +163,32 @@ defmodule Browser.LayoutMemoTest do
     same!(page(html.("one")), memo)
   end
 
+  # (an inner block placed again at another y is one entry in the fragment of its outer block;
+  # when the outer block is then placed again at another y, its items move by both offsets)
+  test "a block placed again inside a block placed again moves by both offsets" do
+    html = fn above, before ->
+      """
+      <p>#{above}</p>
+      <div><p>#{before}</p><div><p>inner block text</p><p>more inner text</p></div></div>
+      <p>after</p>
+      """
+    end
+
+    long = Enum.map_join(1..40, " ", &"w#{&1}")
+    {_, _, memo} = kept(page(html.("one", "x")), nil)
+    {_, memo} = same!(page(html.("one", long)), memo)
+
+    assert Enum.any?(memo.frags, fn {_key, {_gen, _ops, states}} ->
+             is_list(states) and
+               Enum.any?(states, fn {_skey, frag} ->
+                 Enum.any?(frag.items, &match?({:frag, dy, _, _} when dy != 0, &1))
+               end)
+           end)
+
+    {items, _memo} = same!(page(html.("one " <> long, long)), memo)
+    assert Enum.any?(items, &(&1.type == :text and &1.text == "more"))
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)
