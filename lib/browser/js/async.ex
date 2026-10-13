@@ -107,6 +107,12 @@ defmodule Browser.JS.Async do
   @target @name ++ [:cslot, :fname, :mslot]
 
   @compound ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
+
+  @doc false
+  # True for an operator of a compound assignment that is not logical. (public:
+  # `Browser.JS.Compile` uses it, so that the compiled plans and this module take the same
+  # operators to `compound_k/4`)
+  defguard compound_op?(op) when op in @compound
   @logical_assign ~w(&&= ||= ??=)
 
   # Runs `body` under the cell `{name, call_pos, depth}` of an async body (see "The call
@@ -1227,10 +1233,12 @@ defmodule Browser.JS.Async do
 
   defp compound_target(target, env, ctx, k), do: settle_target(target, env, ctx, k)
 
+  @doc false
   # A key that `Interp.compound_ref/3` reads with no evaluation: a name after a dot, or a
-  # private name.
-  defp const_key?({tag, _}) when tag in [:str, :priv], do: true
-  defp const_key?(_), do: false
+  # private name. (public: `Browser.JS.Compile` uses it, so that a compiled plan and this
+  # module evaluate the same keys)
+  def const_key?({tag, _}) when tag in [:str, :priv], do: true
+  def const_key?(_), do: false
 
   # The rest of a compound assignment that awaits, after its target: the read of the old
   # value, the right side, the operator and the write. `right` runs the right side and

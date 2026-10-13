@@ -294,6 +294,7 @@ defmodule Browser.JS.Compile do
   """
 
   alias Browser.JS.{Async, Awaits, Interp, Num}
+  require Async
   alias Browser.JS.Resolve.Info
   require Browser.JS.Fast, as: Fast
 
@@ -2431,21 +2432,18 @@ defmodule Browser.JS.Compile do
        when kind in [:assign, :sassign] and op in ["&&=", "||=", "??="],
        do: ktree(e)
 
-  # The operators of a compound assignment that are not logical, as in `Async`.
-  @compound_ops ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
-
   # A compound assignment to a member reads its object, its key and the old value before
   # the awaits of its right side (`Async.compound_k/4`). A lift plan would read them after
   # those awaits. A `super[k]` target is rare, so it stays on the tree path.
   defp kexpr_aw({kind, op, {:member, o, key, _}, value})
-       when kind in [:assign, :sassign] and op in @compound_ops do
-    key = if match?({tag, _} when tag in [:str, :priv], key), do: {:node, key}, else: kexpr(key)
+       when kind in [:assign, :sassign] and Async.compound_op?(op) do
+    key = if Async.const_key?(key), do: {:node, key}, else: kexpr(key)
     spec = {op, kind == :sassign, kexpr(o), key, kexpr(value)}
     {:c, fn env, ctx, k -> Async.compound_k(spec, env, ctx, k) end}
   end
 
   defp kexpr_aw({kind, op, {:super_member, _}, _} = e)
-       when kind in [:assign, :sassign] and op in @compound_ops,
+       when kind in [:assign, :sassign] and Async.compound_op?(op),
        do: ktree(e)
 
   # Any other expression gets its lift plan. A leaf from a class must run in a class scope,
