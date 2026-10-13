@@ -74,11 +74,12 @@ defmodule Browser.JS.StackTest do
     {"F14",
      "function f(){\n  return [g(), new Error(\"q\").stack][1] }\nfunction g(){\n  return 1 }\nf()",
      {:ok, "Error: q" <> @s <> "f (t.js:2)" <> @s <> "t.js:5", []}},
-    # The async call `a()` moves the position to line 3 and does not restore it, so `c`
-    # reports line 3. Step 2f keeps this quirk (design 1.3).
+    # The async call `a()` gives back the position of `c` after its sync part, as a sync
+    # call does, so `c` reports line 4, as in node 22. (Before the async call had a cell,
+    # the position stayed at line 3, a quirk of design 1.3.)
     {"F15",
      "var x;\nasync function a(){\n  x = 1 }\nfunction c(){ a(); return new Error(\"z\").stack }\nc()",
-     {:ok, "Error: z" <> @s <> "c (t.js:3)" <> @s <> "t.js:5", []}},
+     {:ok, "Error: z" <> @s <> "c (t.js:4)" <> @s <> "t.js:5", []}},
     {"F16",
      "function th(){\n  throw new Error(\"in\") }\nfunction c(){ try { th() } catch (e) { return e.stack + \" # \" + new Error(\"after\").stack } }\nc()",
      {:ok,
@@ -107,15 +108,21 @@ defmodule Browser.JS.StackTest do
      "function f(){\n  return [3,1,2].sort(function cmp(a, b){\n    if (a == 1) console.log(new Error('s').stack)\n    return a - b })\n}\nf()",
      {:ok, [1.0, 2.0, 3.0],
       [log: "Error: s" <> @s <> "cmp (t.js:3)" <> @s <> "f (t.js:2)" <> @s <> "t.js:6"]}},
-    # The sync part of `a` has no line of its own, so `outer` is at the call of `inner`.
+    # The sync part of `a` has a line of its own, as in node 22.
     {"F25",
      "function inner(){ return new Error('i').stack }\nasync function a(){\n  return inner()\n}\nfunction outer(){\n  a().then(v => console.log(v))\n}\nouter()",
      {:ok, :undefined,
-      [log: "Error: i" <> @s <> "inner (t.js:1)" <> @s <> "outer (t.js:3)" <> @s <> "t.js:8"]}},
-    # After `await` the body runs from a job, so no caller is on the stack.
+      [
+        log:
+          "Error: i" <>
+            @s <>
+            "inner (t.js:1)" <> @s <> "a (t.js:3)" <> @s <> "outer (t.js:6)" <> @s <> "t.js:8"
+      ]}},
+    # After `await` the body runs from a job, so it has a line, but no caller is on the
+    # stack, as in node 22.
     {"F26",
      "function inner(){ return new Error('i').stack }\nasync function a(){\n  await 0\n  return inner()\n}\nfunction outer(){\n  a().then(v => console.log(v))\n}\nouter()",
-     {:ok, :undefined, [log: "Error: i" <> @s <> "inner (t.js:1)" <> @s <> "t.js:4"]}},
+     {:ok, :undefined, [log: "Error: i" <> @s <> "inner (t.js:1)" <> @s <> "a (t.js:4)"]}},
     {"F29", "function f(){ return (() => new Error('arrow').stack)() }\nf()",
      {:ok, "Error: arrow" <> @s <> "t.js:1" <> @s <> "f (t.js:1)" <> @s <> "t.js:2", []}}
   ]
@@ -219,12 +226,12 @@ defmodule Browser.JS.StackTest do
      {:ok, "Error: m" <> Enum.map_join(?m..?b//-1, fn c -> @s <> <<c>> end), []}},
     {"E29",
      "var s; async function a(){ await 0; s = (function inner(){ return new Error(\"aw\").stack })() } function c(){ a() } c(); setTimeout(() => console.log(s), 0); 1",
-     {:ok, 1.0, [log: "Error: aw" <> @s <> "inner"]}},
+     {:ok, 1.0, [log: "Error: aw" <> @s <> "inner" <> @s <> "a"]}},
     {"E30",
      "function* g(){ try { yield 1 } catch (e) { yield (function c(){ return new Error(\"gc\").stack })() } } function o(){ var it = g(); it.next(); return it.throw(1).value } o()",
      {:ok, "Error: gc" <> @s <> "c" <> @s <> "o", []}},
     {"E31", "async function a(){ throw new Error('rej') } a().catch(e => console.log(e.stack))",
-     {:ok, %{}, [log: "Error: rej"]}},
+     {:ok, %{}, [log: "Error: rej" <> @s <> "a"]}},
     # A generator call and its resume do not count, so the recursion ends at the step
     # limit and not at the depth limit. The row runs with a lower step limit (see
     # `@row_opts`), because each `yield*` level makes the next step slower.
@@ -350,7 +357,7 @@ defmodule Browser.JS.StackTest do
 
   # Writes a hand-built chain to `:js_stack`. In the check build, the oracle compares each
   # call with its own keys (design section 5, C3), so the test must also give the oracle
-  # the same calls: the visible cells as `{name, call_pos}` and the depth of the head.
+  # the same calls: the cells as `{name, call_pos}` and the depth of the head.
   # Without this, the oracle stays empty and the first call fails the check.
   defp put_chain(:undefined) do
     :erlang.erase(:js_stack)
@@ -365,10 +372,7 @@ defmodule Browser.JS.StackTest do
     :erlang.put(:js_stack, chain)
 
     if @check do
-      :erlang.put(
-        :js_check_stack,
-        for({name, pos, _} when name != :hidden <- chain, do: {name, pos})
-      )
+      :erlang.put(:js_check_stack, for({name, pos, _} <- chain, do: {name, pos}))
 
       depth =
         case chain do
@@ -440,24 +444,18 @@ defmodule Browser.JS.StackTest do
   end
 
   # A chain of `n` cells, innermost first, as the calls would push them. The cell at the
-  # bottom has the depth 1. When `hidden?.(depth)` is true, the cell is the hidden cell of
-  # an async call. A visible cell has the name "c<depth>" and the call position
+  # bottom has the depth 1. A cell has the name "c<depth>" and the call position
   # `{"t.js", depth}`.
-  defp chain(n, hidden? \\ fn _ -> false end) do
-    for d <- n..1//-1 do
-      if hidden?.(d), do: {:hidden, nil, d}, else: {"c#{d}", {"t.js", d}, d}
-    end
-  end
+  defp chain(n), do: for(d <- n..1//-1, do: {"c#{d}", {"t.js", d}, d})
 
   # The stack text of `chain` under the innermost position `pos`, as the design says it
-  # (2.5): one line per visible cell, at most 12 lines, and the script line only when
+  # (2.5): one line per cell, at most 12 lines, and the script line only when
   # the walk reaches the bottom before 12 lines. This is a second, plain statement of
   # the rule, so the tests do not compare the evaluator with itself.
   defp text_of(header, chain, pos) do
     {lines, top} =
-      Enum.reduce(chain, {[], pos}, fn
-        {:hidden, _, _}, {lines, loc} -> {lines, loc}
-        {name, call_pos, _}, {lines, loc} -> {[line(name, loc) | lines], call_pos}
+      Enum.reduce(chain, {[], pos}, fn {name, call_pos, _}, {lines, loc} ->
+        {[line(name, loc) | lines], call_pos}
       end)
 
     lines = Enum.reverse(lines)
@@ -508,7 +506,7 @@ defmodule Browser.JS.StackTest do
   describe "the depth of a chain (depth_of)" do
     # `depth_of/1` is a macro for the engine only, so the test reads the depth that a call
     # puts in its own cell: the depth of the chain below it plus 1.
-    test "an empty chain, no chain, a visible cell and a hidden cell" do
+    test "an empty chain, no chain and a cell" do
       for level <- [:off, 1] do
         gid = heap()
         install_snap(gid)
@@ -520,8 +518,7 @@ defmodule Browser.JS.StackTest do
         for {below, d} <- [
               {[], 0},
               {:undefined, 0},
-              {[{"g", {"u.js", 1}, 7}], 7},
-              {[{:hidden, nil, 7}], 7}
+              {[{"g", {"u.js", 1}, 7}], 7}
             ] do
           Process.delete(:snaps)
           put_caller(below, pos)
@@ -537,7 +534,7 @@ defmodule Browser.JS.StackTest do
   end
 
   describe "the stack text (walk)" do
-    test "0, 11, 12 and 13 visible cells, with positions" do
+    test "0, 11, 12 and 13 cells, with positions" do
       heap()
       assert text([], {"t.js", 100}) == "H" <> @s <> "t.js:100"
       assert text([], nil) == "H"
@@ -556,7 +553,7 @@ defmodule Browser.JS.StackTest do
       assert text(chain(13), {"t.js", 100}) == "H" <> Enum.join(Enum.take(lines.(13), 12))
     end
 
-    test "0, 11, 12 and 13 visible cells, without positions" do
+    test "0, 11, 12 and 13 cells, without positions" do
       heap()
       bare = fn n -> for d <- n..1//-1, do: {"c#{d}", nil, d} end
       names = fn n, k -> Enum.map_join(n..(n - k + 1)//-1, fn d -> @s <> "c#{d}" end) end
@@ -565,32 +562,6 @@ defmodule Browser.JS.StackTest do
       assert text(bare.(11), nil) == "H" <> names.(11, 11)
       assert text(bare.(12), nil) == "H" <> names.(12, 12)
       assert text(bare.(13), nil) == "H" <> names.(13, 12)
-    end
-
-    test "a hidden cell prints nothing and keeps the position" do
-      heap()
-
-      # First: the innermost visible function is still at `:js_pos`.
-      first = [{:hidden, nil, 3}, {"b", {"t.js", 2}, 2}, {"a", {"t.js", 1}, 1}]
-
-      assert text(first, {"t.js", 5}) ==
-               "H" <> @s <> "b (t.js:5)" <> @s <> "a (t.js:2)" <> @s <> "t.js:1"
-
-      # In the middle: the function below the hidden cell is at the call position of the
-      # visible cell above it, as row F25 shows.
-      middle = [{"c", {"t.js", 3}, 3}, {:hidden, nil, 2}, {"a", {"t.js", 1}, 1}]
-
-      assert text(middle, {"t.js", 7}) ==
-               "H" <> @s <> "c (t.js:7)" <> @s <> "a (t.js:3)" <> @s <> "t.js:1"
-
-      # Last: the script line is at the call position of the visible cell above it.
-      last = [{"b", {"t.js", 2}, 2}, {:hidden, nil, 1}]
-      assert text(last, {"t.js", 4}) == "H" <> @s <> "b (t.js:4)" <> @s <> "t.js:2"
-
-      # Hidden cells do not count to the limit of 12 lines.
-      mixed = chain(26, &(rem(&1, 2) == 0))
-      assert text(mixed, {"t.js", 100}) == text_of("H", mixed, {"t.js", 100})
-      assert String.split(text(mixed, {"t.js", 100}), "\n") |> length() == 13
     end
 
     test "a method name, an empty name and no name" do
@@ -694,18 +665,18 @@ defmodule Browser.JS.StackTest do
 
   describe "the depth limit with hand-built chains" do
     test "999 cells: the call works; 1000 cells: it throws with the caller's stack" do
-      for hidden? <- [fn _ -> false end, &(rem(&1, 3) == 0)], {what, f} <- callees() do
+      for {what, f} <- callees() do
         pos = {"t.js", 1000}
-        put_caller(chain(999, hidden?), pos)
+        put_caller(chain(999), pos)
         Interp.call(f, :undefined, [])
-        assert {what, :erlang.get(:js_stack)} == {what, chain(999, hidden?)}
+        assert {what, :erlang.get(:js_stack)} == {what, chain(999)}
 
-        deep = chain(1000, hidden?)
+        deep = chain(1000)
         put_caller(deep, pos)
         header = "RangeError: " <> @range
 
         # The call is refused before it pushes, so the stack of the error is the chain of
-        # the caller: 1000 cells, of which the first 12 visible cells print.
+        # the caller: 1000 cells, of which the first 12 cells print.
         assert {"RangeError", @range, stack} = js_error(fn -> Interp.call(f, :undefined, []) end)
         assert {what, stack} == {what, text_of(header, deep, pos)}
         assert :erlang.get(:js_stack) == deep
@@ -783,7 +754,7 @@ defmodule Browser.JS.StackTest do
   end
 
   describe "async calls (call_closure)" do
-    test "the hidden cell is on the chain during the sync part and goes after it" do
+    test "the cell of the function is on the chain during the sync part and goes after it" do
       for level <- [:off, 4] do
         gid = heap()
         install_snap(gid)
@@ -800,8 +771,9 @@ defmodule Browser.JS.StackTest do
           Process.delete(:snaps)
           put_caller(below, pos)
           assert {:obj, _} = Interp.call(global!(gid, name), :undefined, [])
-          assert {^level, ^name, [{[{:hidden, nil, 4} | ^below], _}]} = {level, name, snaps()}
+          assert {^level, ^name, [{[{^name, ^pos, 4} | ^below], _}]} = {level, name, snaps()}
           assert {level, name, :erlang.get(:js_stack)} == {level, name, below}
+          assert {level, name, :erlang.get(:js_pos)} == {level, name, pos}
         end
 
         # At the depth limit the call is refused before the body runs.
@@ -812,6 +784,33 @@ defmodule Browser.JS.StackTest do
         assert {"RangeError", @range, _} = js_error(fn -> Interp.call(ok, :undefined, []) end)
         assert snaps() == []
         assert :erlang.get(:js_stack) == deep
+      end
+    end
+  end
+
+  describe "async bodies that run again" do
+    # A job runs the rest of the body after an await, so the cell has no call position,
+    # and the chain under it is the chain of the job. A request of an async generator runs
+    # the body at the position of the request, as a call does.
+    test "after an await, and at a request of an async generator" do
+      for level <- [:off, 4] do
+        gid = heap()
+        install_snap(gid)
+        Process.delete(:snaps)
+
+        run_script(
+          "async function r(){ await 0\n snap() }\nasync function* g(){ snap()\n await 0\n snap() }\nr(); g().next()",
+          level
+        )
+
+        assert {^level,
+                [
+                  {[{"g", {"t.js", 6}, 1}], {"t.js", 3}},
+                  {[{"r", nil, 1}], {"t.js", 2}},
+                  {[{"g", nil, 1}], {"t.js", 5}}
+                ]} = {level, snaps()}
+
+        assert :erlang.get(:js_stack) == []
       end
     end
   end

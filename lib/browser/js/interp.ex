@@ -350,12 +350,12 @@ defmodule Browser.JS.Interp do
     text
   end
 
-  # One line for each visible cell of the chain, innermost first. The innermost function is
-  # at `:js_pos`. Every other function is at the call position of the cell above it. A
-  # hidden cell (the sync part of an async call) prints nothing and keeps the position,
-  # because an async call had no cell before step 2f. After 12 lines the walk stops and the
-  # line of the script is left out, as the text had at most 12 lines before step 2f.
-  defp walk([{:hidden, _, _} | below], loc, n), do: walk(below, loc, n)
+  # One line for each cell of the chain, innermost first. The innermost function is at
+  # `:js_pos`. Every other function is at the call position of the cell above it. The body
+  # of an async function or of an async generator that runs again from a job has the call
+  # position `nil` (`Browser.JS.Async`), so no line comes under it. After 12 lines the walk
+  # stops and the line of the script is left out, as the text had at most 12 lines before
+  # step 2f.
   defp walk(_, _loc, 12), do: ""
 
   defp walk([{name, pos, _} | below], loc, n),
@@ -855,40 +855,48 @@ defmodule Browser.JS.Interp do
   @doc false
   # Check mode only (C1, C3, C4 of step 2f). The oracle keeps the call stack as it was before
   # step 2f, in keys of its own: `:js_check_stack` holds `{name, call_pos}` cells, and
-  # `:js_check_depth` counts the calls. An async call (`async? = true`) counts but pushes no
-  # cell. Each call entry runs its real code as `fun` inside the oracle. Before the call,
-  # the real depth and the head of the real stack must equal those of the oracle (C3). Every
-  # push is compared, so by induction the whole stacks are equal. After the call, the real
-  # stack and position must be as they were (C4). The oracle has its own `try/after` and
-  # does not share code with the real entries, so it cannot copy a mistake from them.
-  def check_oracle(name, async?, fun) do
+  # `:js_check_depth` counts the calls. Each entry runs its real code as `fun` inside the
+  # oracle. `kind` is `:call` for a call, which has the call position `:js_pos` and is
+  # refused at the depth limit. It is `{:cell, call_pos}` for the cell of an async body that
+  # runs again (`Browser.JS.Async`), which is never refused. Before the entry, the real
+  # depth and the head of the real stack must equal those of the oracle (C3). Every push is
+  # compared, so by induction the whole stacks are equal. After the entry, the real stack
+  # and position must be as they were (C4). The oracle has its own `try/after` and does not
+  # share code with the real entries, so it cannot copy a mistake from them.
+  def check_oracle(name, kind, fun) do
     ostack = Process.get(:js_check_stack, [])
     odepth = Process.get(:js_check_depth, 0)
     below = :erlang.get(:js_stack)
     pos = Process.get(:js_pos)
     check_entry(below, ostack, odepth)
 
-    if odepth >= @max_depth do
+    if kind == :call and odepth >= @max_depth do
       # The real entry must refuse the call before it pushes anything.
       try do
         fun.()
       catch
         {:js_error, _} = e ->
-          check_restored(below, pos, async?)
+          check_restored(below, pos)
           throw(e)
       else
         _ -> check_fail("a call at depth #{odepth} was not refused")
       end
     else
+      call_pos =
+        case kind do
+          :call -> pos
+          {:cell, p} -> p
+        end
+
       :erlang.put(:js_check_depth, odepth + 1)
-      if not async?, do: :erlang.put(:js_check_stack, [{name, pos} | ostack])
+      :erlang.put(:js_check_stack, [{name, call_pos} | ostack])
 
       try do
         fun.()
       after
         :erlang.put(:js_check_depth, odepth)
         :erlang.put(:js_check_stack, ostack)
-        check_restored(below, pos, async?)
+        check_restored(below, pos)
       end
     end
   end
@@ -906,20 +914,18 @@ defmodule Browser.JS.Interp do
       do: check_fail("the stack head is #{inspect(head)}, and the oracle has #{inspect(ostack)}")
   end
 
-  # (the innermost cell of the real stack that prints a line, as `{name, call_pos}`)
-  defp check_head([{:hidden, _, _} | below]), do: check_head(below)
+  # (the innermost cell of the real stack, as `{name, call_pos}`)
   defp check_head([{name, pos, _} | _]), do: {name, pos}
   defp check_head(_), do: nil
 
-  # C4: a call entry restored the stack, and also the position unless the call is async.
-  # An async call does not restore `:js_pos` (row F15 of step 2f).
-  defp check_restored(below, pos, async?) do
+  # C4: an entry restored the stack and the position.
+  defp check_restored(below, pos) do
     now = :erlang.get(:js_stack)
 
     if now !== below,
       do: check_fail("a call left the stack #{inspect(now)}, not #{inspect(below)}")
 
-    if not async? and Process.get(:js_pos) != pos,
+    if Process.get(:js_pos) != pos,
       do:
         check_fail(
           "a call left the position #{inspect(Process.get(:js_pos))}, not #{inspect(pos)}"
@@ -4689,7 +4695,7 @@ defmodule Browser.JS.Interp do
       do: check_fail("a rewritten function on the old call path (run_closure_scope)")
 
     if @check,
-      do: check_oracle(c.name, false, fn -> closure_scope(c, this, args, extra) end),
+      do: check_oracle(c.name, :call, fn -> closure_scope(c, this, args, extra) end),
       else: closure_scope(c, this, args, extra)
   end
 
@@ -4746,8 +4752,8 @@ defmodule Browser.JS.Interp do
   # tick: its callers tick as they do on the old path, so the step counts stay the same.
   #
   # The call stack (step 2f): `:js_stack` is a chain of cells, innermost first. A call
-  # pushes `{name, call_pos, depth}`, and an async call pushes a hidden cell (see
-  # `Browser.JS.Async.call_closure/4`). The depth of the current call is in the head cell,
+  # pushes `{name, call_pos, depth}`, and so does an async call and an async body that
+  # runs again (see `Browser.JS.Async`). The depth of the current call is in the head cell,
   # so there is no separate counter. A call is refused with a RangeError when the depth
   # of its caller is `@max_depth`, before it pushes. In check mode the frame keeps its own
   # chain in element 3. `:js_stack` gets the chain just before the `try`. `stack_string/1`
@@ -4766,7 +4772,7 @@ defmodule Browser.JS.Interp do
 
     result =
       if @check,
-        do: check_oracle(c.name, false, fn -> frame_call(id, c, this, args, nt, mode) end),
+        do: check_oracle(c.name, :call, fn -> frame_call(id, c, this, args, nt, mode) end),
         else: frame_call(id, c, this, args, nt, mode)
 
     case result do
@@ -5014,8 +5020,9 @@ defmodule Browser.JS.Interp do
   # the frame, except a throw from a parameter, after which no body code can run.
   # `frame_done/2` frees it when the body has ended. The entry does not push a cell on
   # `:js_stack`, and element 3 of the frame is `nil`, because the body can run again after
-  # the call has returned, under another chain. `Async.call_closure/4` pushes a hidden cell
-  # for the sync part of an async call, so that the call counts for the depth (step 2f).
+  # the call has returned, under another chain. `Browser.JS.Async` pushes the cell of an
+  # async body each time that the body runs, so that it counts for the depth and prints a
+  # line in `Error.stack`.
   # Returns the frame id and the closure count at entry.
   def enter_frame(id, c, this, args) do
     info = c.info

@@ -3140,7 +3140,7 @@ defmodule Browser.JS.FramesTest do
       assert fns == :erlang.get(:js_fns)
 
       # The entry does not run the body and does not push a cell. `call_closure` pushes
-      # the hidden cell of an async call (step 2f), so the entry leaves the chain as it was.
+      # the cell of an async call (step 2f), so the entry leaves the chain as it was.
       assert :erlang.get(:js_stack) == stack
       refute freed?(fid)
     end

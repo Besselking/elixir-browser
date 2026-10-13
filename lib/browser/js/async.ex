@@ -26,12 +26,16 @@ defmodule Browser.JS.Async do
 
   ## The call stack (step 2f)
 
-  `call_closure/4` pushes a hidden cell `{:hidden, nil, depth}` on the chain in `:js_stack`
-  while the sync part of the body runs. The cell counts for the depth limit, but it prints no
-  line in `Error.stack`, as before step 2f. A body that resumes after an `await`, and every
-  generator body, runs under the chain of the code that resumed it and pushes no cell. A
-  frame from `Browser.JS.Interp.enter_frame/4` has `nil` in element 3, because its body can
-  run under more than one chain.
+  `call_closure/4` pushes the cell `{name, call_pos, depth}` on the chain in `:js_stack`
+  while the sync part of the body runs, as a sync call does. So the cell counts for the
+  depth limit, and the function has its line in `Error.stack`. The body of an async
+  function or of an async generator that resumes after an `await` runs under a cell of its
+  own too, with the call position `nil`, because a job and not a caller runs it. An async
+  generator body that a request (`next`, `throw` or `return`) runs has a cell at the
+  position of the request. Each cell gives back the chain and the position after it, as a
+  call does. A sync generator body runs under the chain of the code that resumed it and
+  pushes no cell. A frame from `Browser.JS.Interp.enter_frame/4` has `nil` in element 3,
+  because its body can run under more than one chain.
 
   ## Frame mode (step 2e)
 
@@ -103,13 +107,59 @@ defmodule Browser.JS.Async do
   @compound ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
   @logical_assign ~w(&&= ||= ??=)
 
+  # Runs `body` under the cell `{name, call_pos, depth}` of an async body (see "The call
+  # stack" above). After `body`, the chain and the position come back, as after a call.
+  # The cell is not refused at the depth limit, because the body has started already and
+  # must go on. The code is inline, so that a cell costs no call: a body pushes a cell at
+  # each resume after an await. Check mode runs the cell inside the oracle of
+  # `Interp.check_oracle/3`.
+  defmacrop in_cell(name, call_pos, do: body) do
+    if @check do
+      quote do
+        Interp.check_oracle(unquote(name), {:cell, unquote(call_pos)}, fn ->
+          push_cell(unquote(name), unquote(call_pos), fn -> unquote(body) end)
+        end)
+      end
+    else
+      quote do
+        below = :erlang.get(:js_stack)
+        pos = :erlang.get(:js_pos)
+        cell = {unquote(name), unquote(call_pos), Interp.depth_of(below) + 1}
+        :erlang.put(:js_stack, [cell | below])
+
+        try do
+          unquote(body)
+        after
+          :erlang.put(:js_stack, below)
+          :erlang.put(:js_pos, pos)
+        end
+      end
+    end
+  end
+
+  # (the cell of `in_cell/3` in check mode, as a function that the oracle runs)
+  if @check do
+    defp push_cell(name, call_pos, fun) do
+      below = :erlang.get(:js_stack)
+      pos = :erlang.get(:js_pos)
+      :erlang.put(:js_stack, [{name, call_pos, Interp.depth_of(below) + 1} | below])
+
+      try do
+        fun.()
+      after
+        :erlang.put(:js_stack, below)
+        :erlang.put(:js_pos, pos)
+      end
+    end
+  end
+
   @doc """
   Calls an async closure: starts its body and returns its promise. `id` is the id of the
   function object, which the frame of a rewritten closure needs for its hidden slots.
   """
   def call_closure(id, c, this, args) do
     if @check,
-      do: Interp.check_oracle(c.name, true, fn -> start_closure(id, c, this, args) end),
+      do: Interp.check_oracle(c.name, :call, fn -> start_closure(id, c, this, args) end),
       else: start_closure(id, c, this, args)
   end
 
@@ -123,20 +173,27 @@ defmodule Browser.JS.Async do
     if depth >= @max_depth,
       do: Interp.throw_error("RangeError", "Maximum call stack size exceeded")
 
-    # The sync part of the body runs under a hidden cell: it counts for the depth, but it
-    # prints no line in `Error.stack`, because an async call had no line before step 2f.
-    :erlang.put(:js_stack, [{:hidden, nil, depth + 1} | below])
+    # The sync part of the body runs under the cell of the function, as a sync call does.
+    pos =
+      case :erlang.get(:js_pos) do
+        :undefined -> nil
+        at -> at
+      end
+
+    :erlang.put(:js_stack, [{c.name, pos, depth + 1} | below])
 
     try do
       {env, frame, fns} = body_env(id, c, this, args)
 
+      # The key `cell` names the cell that the body gets when it resumes after an await.
       ctx =
         if frame == nil do
           %{
             ret: fn v -> Promise.resolve(p, v) end,
             throw: fn e -> Promise.reject(p, e) end,
             brk: %{},
-            cont: %{}
+            cont: %{},
+            cell: c.name
           }
         else
           # A rewritten body runs on a frame. The promise settles first, and then the frame
@@ -146,6 +203,7 @@ defmodule Browser.JS.Async do
             throw: fn e -> settled(Promise.reject(p, e), frame, fns) end,
             brk: %{},
             cont: %{},
+            cell: c.name,
             frame: frame
           }
         end
@@ -155,6 +213,7 @@ defmodule Browser.JS.Async do
       {:js_error, e} -> Promise.reject(p, e)
     after
       :erlang.put(:js_stack, below)
+      :erlang.put(:js_pos, pos)
     end
 
     p
@@ -401,15 +460,17 @@ defmodule Browser.JS.Async do
     {:obj, gid} = gen = Interp.new_object([], proto)
 
     # The `base` context carries the frame too, because `ret` awaits its value with `base`
-    # as the context.
+    # as the context. The key `cell` names the cell that the body gets when it resumes
+    # after an await.
     base =
       with_frame(
         %{
           throw: fn e -> ag_finish(gid, {:throw, e}) end,
-          yield: fn v, resume -> ag_yield(gid, v, resume, frame) end,
+          yield: fn v, resume -> ag_yield(gid, v, resume, frame, c.name) end,
           async_gen: true,
           brk: %{},
-          cont: %{}
+          cont: %{},
+          cell: c.name
         },
         frame
       )
@@ -434,7 +495,8 @@ defmodule Browser.JS.Async do
       running: false,
       cur: nil,
       frame: frame,
-      fns: fns
+      fns: fns,
+      name: c.name
     })
 
     gen
@@ -509,10 +571,15 @@ defmodule Browser.JS.Async do
           update_agen(gid, %{running: true, cur: p})
           if @check, do: Interp.check_resume(g.frame)
 
-          try do
-            g.resume.(msg)
-          catch
-            {:js_error, e} -> ag_finish(gid, {:throw, e})
+          # The body runs under its cell, at the position of the request.
+          at = :erlang.get(:js_pos)
+
+          in_cell g.name, if(at == :undefined, do: nil, else: at) do
+            try do
+              g.resume.(msg)
+            catch
+              {:js_error, e} -> ag_finish(gid, {:throw, e})
+            end
           end
       end
     else
@@ -539,17 +606,16 @@ defmodule Browser.JS.Async do
     :done
   end
 
-  defp ag_yield(gid, {:ag_raw, v}, resume, _frame) do
+  defp ag_yield(gid, {:ag_raw, v}, resume, _frame, _name) do
     ag_suspend(gid, v, resume)
     :suspended
   end
 
   # The small context carries the frame, so that check mode tests the frame when the await
-  # resumes.
-  defp ag_yield(gid, v, resume, frame) do
-    await_value(v, with_frame(%{throw: fn e -> resume.({:throw, e}) end}, frame), fn v2 ->
-      ag_suspend(gid, v2, resume)
-    end)
+  # resumes, and the cell, because a rejection resumes the body at the `yield`.
+  defp ag_yield(gid, v, resume, frame, name) do
+    ctx = with_frame(%{throw: fn e -> resume.({:throw, e}) end, cell: name}, frame)
+    await_value(v, ctx, fn v2 -> ag_suspend(gid, v2, resume) end)
 
     :suspended
   end
@@ -1637,12 +1703,24 @@ defmodule Browser.JS.Async do
       p,
       Interp.native("", fn _, args ->
         if @check, do: Interp.check_resume(Map.get(ctx, :frame))
-        k.(Enum.at(args, 0, :undefined))
+        v = Enum.at(args, 0, :undefined)
+
+        case ctx do
+          %{cell: name} -> in_cell(name, nil, do: k.(v))
+          _ -> k.(v)
+        end
+
         :undefined
       end),
       Interp.native("", fn _, args ->
         if @check, do: Interp.check_resume(Map.get(ctx, :frame))
-        ctx.throw.(Enum.at(args, 0, :undefined))
+        e = Enum.at(args, 0, :undefined)
+
+        case ctx do
+          %{cell: name} -> in_cell(name, nil, do: ctx.throw.(e))
+          _ -> ctx.throw.(e)
+        end
+
         :undefined
       end)
     )

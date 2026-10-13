@@ -552,6 +552,48 @@ defmodule Browser.JS.CompileAsyncTest do
      ~w(o k get1 |y set3 o get3 |z set9 |r9)}
   ]
 
+  # The stack text of an error made in an async function, an async arrow, an async method
+  # and an async generator, before and after an await. Each row is `{name, source,
+  # console}`. The body names itself as a sync function does (test/browser/js_stack_test.exs):
+  # `at name (file:line)`, and a method has its name only. The lines are those of node 22,
+  # without the columns, the class name of a method, the native `next` of a generator and
+  # the line of the script object. After an await the body runs from a job, so its line is
+  # the last one. Node marks an async caller that awaits with `at async name`; this engine
+  # keeps no such chain of awaits, so the callers of a resumed body do not show.
+  @s "\n    at "
+
+  @stack_rows [
+    {"stack async before await",
+     "async function af(){\n  throw new Error('a') }\nfunction c(){\n  af().catch(e => console.log(e.stack)) }\nc()",
+     [log: "Error: a" <> @s <> "af (t.js:2)" <> @s <> "c (t.js:4)" <> @s <> "t.js:5"]},
+    {"stack async after await",
+     "async function bf(){\n  await 0\n  throw new Error('b') }\nfunction c(){\n  bf().catch(e => console.log(e.stack)) }\nc()",
+     [log: "Error: b" <> @s <> "bf (t.js:3)"]},
+    {"stack async arrows",
+     "var ar = async () => {\n  await 0\n  return new Error('r').stack }\nvar ar2 = async x => {\n  return new Error('s').stack }\nar2().then(s => console.log(s)); ar().then(s => console.log(s))",
+     [
+       log: "Error: s" <> @s <> "ar2 (t.js:5)" <> @s <> "t.js:6",
+       log: "Error: r" <> @s <> "ar (t.js:3)"
+     ]},
+    {"stack async methods",
+     "class K {\n  async m(){ return new Error('m').stack }\n  static async s(){\n    await 0\n    return new Error('s').stack } }\nvar o = { async om(){\n  return new Error('o').stack } }\n" <>
+       "new K().m().then(s => console.log(s)); K.s().then(s => console.log(s)); o.om().then(s => console.log(s))",
+     [
+       log: "Error: m" <> @s <> "m (t.js:2)" <> @s <> "t.js:8",
+       log: "Error: o" <> @s <> "om (t.js:7)" <> @s <> "t.js:8",
+       log: "Error: s" <> @s <> "s (t.js:5)"
+     ]},
+    {"stack async generator",
+     "async function* ag(){\n  yield new Error('g').stack\n  await 0\n  yield new Error('h').stack }\nfunction d(){\n  var it = ag(); it.next().then(r => { console.log(r.value); return it.next() }).then(r => console.log(r.value)) }\nd()",
+     [
+       log: "Error: g" <> @s <> "ag (t.js:2)" <> @s <> "d (t.js:6)" <> @s <> "t.js:7",
+       log: "Error: h" <> @s <> "ag (t.js:4)"
+     ]},
+    {"stack async callee after await",
+     "async function inner(){\n  return new Error('i').stack }\nasync function outer(){\n  await 0\n  return await inner() }\nouter().then(s => console.log(s))",
+     [log: "Error: i" <> @s <> "inner (t.js:2)" <> @s <> "outer (t.js:5)"]}
+  ]
+
   # The eleven async programs of bench/js_runtime.exs (`programs_2e`), the programs of the
   # gate of 5c, with small loop counts.
   @bench_file Path.expand("../../bench/js_runtime.exs", __DIR__)
@@ -594,6 +636,7 @@ defmodule Browser.JS.CompileAsyncTest do
     gen_positions: @gen_positions,
     races: @races,
     node_order: for({n, s, _} <- @node_rows, do: {n, s}),
+    stack_order: for({n, s, _} <- @stack_rows, do: {n, s}),
     bench: @bench
   ]
 
@@ -915,6 +958,18 @@ defmodule Browser.JS.CompileAsyncTest do
         for {{{n, _, _}, off, on}, {_, _, want}} <- Enum.zip(both(rows, level: level), @node_rows) do
           assert off.items.result == {:ok, want}, "#{n} at #{level} (off)"
           assert on.items.result == {:ok, want}, "#{n} at #{level} (on)"
+        end
+      end
+    end
+
+    test "the stack rows name the async function, at every level" do
+      rows = for {n, s, _} <- @stack_rows, do: {n, s, []}
+
+      for level <- @levels do
+        for {{{n, _, _}, off, on}, {_, _, want}} <-
+              Enum.zip(both(rows, level: level), @stack_rows) do
+          assert off.items.console == want, "#{n} at #{level} (off)"
+          assert on.items.console == want, "#{n} at #{level} (on)"
         end
       end
     end
