@@ -7081,9 +7081,15 @@ defmodule Browser.JS.Interp do
   # (`Browser.JS.Async`) settles the callee of an optional call before its arguments await.
   def call_target(callee, env) do
     case callee do
-      {:super_member, key} ->
+      {:super_member, {:str, key}} ->
         {home, this} = Browser.JS.Classes.super_base(env)
-        {get_with_receiver(home, ev_key(key, env), this), this}
+        {get_with_receiver(home, key, this), this}
+
+      # (the key runs before the read of the super base, see `super_this/1`)
+      {:super_member, key} ->
+        {home, this} = Browser.JS.Classes.super_this(env)
+        key = ev_key(key, env)
+        {get_with_receiver(Browser.JS.Classes.super_proto(home), key, this), this}
 
       {:member, o, k, mopt} ->
         ov = ev(o, env)
@@ -7865,10 +7871,21 @@ defmodule Browser.JS.Interp do
   def ev({:call, {:super}, args, _}, env),
     do: Browser.JS.Classes.super_call(eval_list(args, env), env)
 
-  def ev({:super_member, key}, env) do
+  # `super.x`: its key has no effect, so one call reads `this` and the super base.
+  def ev({:super_member, {:str, key}}, env) do
     {home, this} = Browser.JS.Classes.super_base(env)
     if home == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
-    get_with_receiver(home, ev_key(key, env), this)
+    get_with_receiver(home, key, this)
+  end
+
+  # The key runs before the read of the super base, so that a key which changes the
+  # prototype of the home object reads from the new prototype (`Classes.super_this/1`).
+  def ev({:super_member, key}, env) do
+    {home, this} = Browser.JS.Classes.super_this(env)
+    key = ev_key(key, env)
+    base = Browser.JS.Classes.super_proto(home)
+    if base == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
+    get_with_receiver(base, key, this)
   end
 
   def ev({:id, "arguments"} = e, env) do
@@ -8111,7 +8128,7 @@ defmodule Browser.JS.Interp do
 
   # `delete super.x` is always a ReferenceError (the key is evaluated, never converted)
   def ev({:unary, d, {:super_member, key}}, env) when d in ["delete", "sdelete"] do
-    Browser.JS.Classes.super_base(env)
+    Browser.JS.Classes.super_this(env)
     ev_key(key, env)
     throw_error("ReferenceError", "Unsupported reference to 'super'")
   end
@@ -8834,9 +8851,12 @@ defmodule Browser.JS.Interp do
 
   def method_home(_, _), do: :ok
 
+  # In `super_assign/4`, `super_update/5` and `compound_ref/3` the key runs before the read
+  # of the super base (`Classes.super_this/1`), and the base is read before the right side.
   defp super_assign(k, value, env, strict?) do
-    {base, this} = Browser.JS.Classes.super_base(env)
+    {home, this} = Browser.JS.Classes.super_this(env)
     raw = ev_key(k, env)
+    base = Browser.JS.Classes.super_proto(home)
     v = ev(value, env)
     key = to_key(raw)
 
@@ -8847,8 +8867,10 @@ defmodule Browser.JS.Interp do
   end
 
   defp super_update(op, prefix?, k, env, strict?) do
-    {base, this} = Browser.JS.Classes.super_base(env)
-    key = to_key(ev_key(k, env))
+    {home, this} = Browser.JS.Classes.super_this(env)
+    raw = ev_key(k, env)
+    base = Browser.JS.Classes.super_proto(home)
+    key = to_key(raw)
     old = numeric(get_with_receiver(base, key, this))
 
     new =
@@ -9004,8 +9026,10 @@ defmodule Browser.JS.Interp do
         id_ref(hop(env, d), name, {:id, name}, strict?)
 
       {:super_member, k} ->
-        {base, this} = Browser.JS.Classes.super_base(env)
-        key = to_key(ev_key(k, env))
+        {home, this} = Browser.JS.Classes.super_this(env)
+        raw = ev_key(k, env)
+        base = Browser.JS.Classes.super_proto(home)
+        key = to_key(raw)
 
         {fn -> get_with_receiver(base, key, this) end,
          fn v -> super_put(base, key, v, this, strict?) end}

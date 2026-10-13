@@ -796,7 +796,7 @@ defmodule Browser.JS.Classes do
     store(id, Obj.own_put_value(o, key, stored))
   end
 
-  # `super(...)` and `super_base/1` find their bindings by name. From resolve level 3 (step
+  # `super(...)`, `super_base/1` and `super_this/1` find their bindings by name. From resolve level 3 (step
   # 2d) these bindings can be hidden slots of a constructor or method frame: the by-name
   # walk reads `info.slots` of each frame on the way, also through an arrow frame or a
   # block frame, and `declare/3` writes the `this` slot of the frame.
@@ -856,7 +856,11 @@ defmodule Browser.JS.Classes do
     unless ok?, do: raise(ArgumentError, "resolve check: super() lands on #{inspect(sc)}")
   end
 
-  @doc "The object `super.x` reads from, and the current `this`."
+  @doc """
+  The object `super.x` reads from, and the current `this`. The key of `super.x` has no
+  effect, so this one call can read `this` and the prototype together. For `super[k]`, see
+  `super_this/1`.
+  """
   def super_base(env) do
     with {:ok, {:obj, hid}} <- Interp.lookup_scoped(env, :home),
          {:ok, this} <- Interp.lookup_scoped(env, :this) do
@@ -867,10 +871,33 @@ defmodule Browser.JS.Classes do
             "Must call super constructor in derived class before accessing 'this'"
           )
 
-      parent = deref(hid).proto
-      {parent || :null, this}
+      {deref(hid).proto || :null, this}
     else
       _ -> throw_error("SyntaxError", "'super' keyword unexpected here")
     end
   end
+
+  @doc """
+  The home object and the current `this` of `super[k]`. The spec reads `this` before it
+  evaluates the key, and the prototype of the home object (`super_proto/1`) after it. A key
+  that changes that prototype therefore changes the object that `super[k]` uses.
+  """
+  def super_this(env) do
+    with {:ok, {:obj, _} = home} <- Interp.lookup_scoped(env, :home),
+         {:ok, this} <- Interp.lookup_scoped(env, :this) do
+      if this == :uninit_this,
+        do:
+          throw_error(
+            "ReferenceError",
+            "Must call super constructor in derived class before accessing 'this'"
+          )
+
+      {home, this}
+    else
+      _ -> throw_error("SyntaxError", "'super' keyword unexpected here")
+    end
+  end
+
+  @doc "The object that `super` reads from: the prototype of the home object, or `:null`."
+  def super_proto({:obj, hid}), do: deref(hid).proto || :null
 end

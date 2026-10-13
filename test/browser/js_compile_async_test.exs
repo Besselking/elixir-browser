@@ -549,7 +549,19 @@ defmodule Browser.JS.CompileAsyncTest do
        "var o = { _p: 1, get p(){ log.push('get' + this._p); return this._p }, set p(v){ log.push('set' + v); this._p = v } }; " <>
        "function* g(){ t('o', o)[t('k', 'p')] += yield 'y'; t('o', o).p **= yield 'z'; return 'r' + o._p } " <>
        "var it = g(); for (var a of [undefined, 2, 2]) log.push('|' + it.next(a).value); log",
-     ~w(o k get1 |y set3 o get3 |z set9 |r9)}
+     ~w(o k get1 |y set3 o get3 |z set9 |r9)},
+    # `super[k]` evaluates its key before it reads the prototype of the home object. A key
+    # that changes that prototype therefore reads and writes the new prototype, in a read,
+    # an assignment, an update, a call and a compound assignment that awaits.
+    {"super key changes the prototype",
+     "var log = []; class A { get q(){ log.push('Aget'); return 10 } set q(v){ log.push('Aset' + v) } m(){ log.push('Am') } } " <>
+       "class A2 { get q(){ log.push('A2get'); return 100 } set q(v){ log.push('A2set' + v) } m(){ log.push('A2m') } } " <>
+       "function sw(k){ Object.setPrototypeOf(B.prototype, A2.prototype); return k } " <>
+       "class B extends A { s1(){ super[sw('q')] += 1 } s2(){ return super[sw('q')] } s3(){ super[sw('q')] = 1 } s4(){ super[sw('q')]++ } s5(){ super[sw('m')]() } " <>
+       "async a1(){ super[sw('q')] += await 1 } async a2(){ log.push('v' + (super[sw('q')] + await 1)) } } " <>
+       "var b = new B(); for (var n of ['s1', 's2', 's3', 's4', 's5']) { log.push(n); b[n](); Object.setPrototypeOf(B.prototype, A.prototype) } " <>
+       "(async () => { log.push('a1'); await b.a1(); Object.setPrototypeOf(B.prototype, A.prototype); log.push('a2'); await b.a2() })(); log",
+     ~w(s1 A2get A2set101 s2 A2get s3 A2set1 s4 A2get A2set101 s5 A2m a1 A2get A2set101 a2 A2get v101)}
   ]
 
   # The stack text of an error made in an async function, an async arrow, an async method
