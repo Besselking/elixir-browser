@@ -1303,8 +1303,8 @@ defmodule Browser.JS.Async do
       elem(node, 0) == :fn ->
         {node, leaves}
 
-      mode == :frame and elem(node, 0) == :class ->
-        lift_class(node, leaves, &lift/3)
+      elem(node, 0) == :class ->
+        lift_class(node, leaves, mode, &lift/3)
 
       true ->
         case ordered(node) do
@@ -1359,8 +1359,8 @@ defmodule Browser.JS.Async do
         is_tuple(node) and elem(node, 0) in [:fn, :async] ->
           {node, leaves}
 
-        mode == :frame and is_tuple(node) and elem(node, 0) == :class ->
-          lift_class(node, leaves, &lift_ref/3)
+        is_tuple(node) and elem(node, 0) == :class ->
+          lift_class(node, leaves, mode, &lift_ref/3)
 
         is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
           {:ok, kids, rebuild} = ordered(node)
@@ -1427,24 +1427,65 @@ defmodule Browser.JS.Async do
 
   # The resolver resolves the heritage, the keys and the member decorators of a class in
   # the class scope, which `Classes.define` makes as a map scope over `env`. A leaf from
-  # these parts must run in such a scope too, or its hop counts are one short. So each such
-  # leaf is wrapped in `{:cps_class, name, leaf}`, and `eval_vals/5` makes the scope. The
-  # class decorators run in `env`, as in `Classes.define`. The walk `lift` is an argument, so
-  # that check mode can run this code with the old walk too (`lift_ref/3`).
-  defp lift_class({:class, name, heritage, members, src}, leaves, lift) do
+  # these parts must run in such a scope too. In frame mode its hop counts are otherwise one
+  # short, and in both modes the name of the class must be in its TDZ. So each such leaf is
+  # wrapped in `{:cps_class, name, leaf}`, and `eval_vals/5` or `eval_leaves/6` makes the
+  # scope. The class decorators run in `env`, as in `Classes.define`. The walk `lift` is an
+  # argument, so that check mode can run this code with the old walk too (`lift_ref/3`).
+  defp lift_class({:class, name, heritage, members, src}, leaves, mode, lift) do
     {members, decs} =
       case List.last(members) do
         {:decorations, cd, md} -> {Enum.drop(members, -1), {cd, md}}
         _ -> {members, nil}
       end
 
-    {cd, leaves} = if decs, do: lift.(elem(decs, 0), leaves, :frame), else: {nil, leaves}
+    {cd, leaves} = if decs, do: lift.(elem(decs, 0), leaves, mode), else: {nil, leaves}
     outer = length(leaves)
-    {{heritage, members}, leaves} = lift.({heritage, members}, leaves, :frame)
+    {heritage, members, leaves} = lift_class_parts(heritage, members, leaves, mode, lift)
     {inner, rest} = Enum.split(leaves, length(leaves) - outer)
+
     leaves = Enum.map(inner, &{:cps_class, name, &1}) ++ rest
+
     members = if decs, do: members ++ [{:decorations, cd, elem(decs, 1)}], else: members
     {{:class, name, heritage, members, src}, leaves}
+  end
+
+  # The heritage and the computed keys of a class run in source order. So a part before
+  # the last part that awaits, which does not await and is not pure, becomes a leaf of its
+  # own, as an operand does in `lift_kids/7`. If it stayed in the template, it would run
+  # after the awaits. The other parts of a member (a method, an initializer) do not run
+  # when the class is made, and the walk `lift` takes them as before.
+  defp lift_class_parts(heritage, members, leaves, mode, lift) do
+    keys = for {:cmember, _, {:computed, e}, _, _} <- members, do: e
+    flags = Enum.map(if(heritage, do: [heritage | keys], else: keys), &has_await?/1)
+    last = last_await(flags, 0, -1)
+
+    # (the state is the flags of the parts still to come, the position and the leaves)
+    part = fn e, {[aw? | flags], i, acc} ->
+      {e, acc} =
+        if i < last and not aw? and not pure?(e),
+          do: {hole(mode, length(acc)), [e | acc]},
+          else: lift.(e, acc, mode)
+
+      {e, {flags, i + 1, acc}}
+    end
+
+    {heritage, state} =
+      if heritage, do: part.(heritage, {flags, 0, leaves}), else: {nil, {flags, 0, leaves}}
+
+    {members, {[], _, leaves}} =
+      Enum.map_reduce(members, state, fn
+        {:cmember, kind, {:computed, e}, value, static?}, state ->
+          {e, {flags, i, acc}} = part.(e, state)
+          {value, acc} = lift.(value, acc, mode)
+          {{:cmember, kind, {:computed, e}, value, static?}, {flags, i, acc}}
+
+        member, {flags, i, acc} ->
+          {member, acc} = lift.(member, acc, mode)
+          {member, {flags, i, acc}}
+      end)
+
+    {heritage, members, leaves}
   end
 
   defp hole(:map, i), do: {:id, "\0s#{i}"}
@@ -1620,7 +1661,9 @@ defmodule Browser.JS.Async do
   defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
 
   defp eval_leaves([leaf | rest], i, scope, env, ctx, done) do
-    cev(leaf, env, ctx, fn v ->
+    {leaf, leaf_env} = class_env(leaf, env)
+
+    cev(leaf, leaf_env, ctx, fn v ->
       Interp.declare(scope, "\0s#{i}", v)
       eval_leaves(rest, i + 1, scope, env, ctx, done)
     end)
@@ -1634,7 +1677,7 @@ defmodule Browser.JS.Async do
     cev(leaf, leaf_env, ctx, fn v -> eval_vals(rest, [v | acc], env, ctx, done) end)
   end
 
-  # The scope of a leaf from a class (see `lift_class/2`): a map scope over `env` where the
+  # The scope of a leaf from a class (see `lift_class/4`): a map scope over `env` where the
   # name of the class is in its TDZ, as in `Classes.define`. A leaf from a nested class
   # gets one such scope for each class.
   defp class_env({:cps_class, name, leaf}, env) do

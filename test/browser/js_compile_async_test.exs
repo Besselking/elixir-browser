@@ -562,6 +562,18 @@ defmodule Browser.JS.CompileAsyncTest do
        "function* g(){ t('o', o)[t('k', 'p')] += yield 'y'; t('o', o).p **= yield 'z'; return 'r' + o._p } " <>
        "var it = g(); for (var a of [undefined, 2, 2]) log.push('|' + it.next(a).value); log",
      ~w(o k get1 |y set3 o get3 |z set9 |r9)},
+    # The heritage and the computed keys of a class run in source order, also when a later
+    # key awaits. A key before the await still runs in the class scope, where the name of
+    # the class is in its TDZ.
+    {"class keys in order",
+     "var log = []; function t(n, v){ log.push(n); return v } " <>
+       "async function w(){ for (var i = 1; i <= 6; i++) { log.push('w' + i); await 0 } } class H { static h(){ return 'H' } } " <>
+       "async function f(){ var C = class { static [t('ck', 'q')] = 1; static [await t('k2', 'z')](){} }; log.push(Object.getOwnPropertyNames(C).join()); " <>
+       "var D = class extends t('h', H) { [t('a', 'x')](){} static [await t('b', 'y')](){} [t('c', 'u')](){} }; log.push(D.h() + Object.getOwnPropertyNames(D.prototype).join()); " <>
+       "try { var E = class E { static [typeof E] = 1; static [await t('e', 'v')](){} } } catch (e) { log.push(e.constructor.name) } " <>
+       "var F = class { static [await t('f1', 'a')](){} static [t('f2', 'b')](){} static [await t('f3', 'c')](){} }; log.push(Object.getOwnPropertyNames(F).join()) } " <>
+       "w(); f(); log",
+     ~w(w1 ck k2 w2 length,name,prototype,z,q h a b w3 c Hconstructor,x,u ReferenceError f1 w4 f2 f3 w5 length,name,prototype,a,b,c w6)},
     # `super[k]` evaluates its key before it reads the prototype of the home object. A key
     # that changes that prototype therefore reads and writes the new prototype, in a read,
     # an assignment, an update, a call and a compound assignment that awaits.
