@@ -120,4 +120,36 @@ defmodule Browser.JS.IframeTest do
     assert errors == []
     assert logs == ["2,true,true 0"]
   end
+
+  test "the page reads the nodes of a frame without the realm of the frame, and stays in its own" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const f = document.createElement("iframe");
+        f.srcdoc = "<body id=fb><canvas id=c width=120 height=40></canvas><p id=p class='a b'>hi <b>x</b></p><input id=i value=v></body>";
+        f.onload = () => {
+          const d = f.contentDocument, p = d.getElementById("p"), c = d.getElementById("c");
+          console.log(p.parentNode === d.body, p.ownerDocument === d, p.isConnected, p.nodeName, p.tagName);
+          console.log(p.firstChild.data, p.lastElementChild.localName, p.childElementCount, p.textContent);
+          console.log(p.className, p.classList.length, p.id, d.getElementById("i").value, c.width, c.height);
+          const ctx = c.getContext("2d");
+          ctx.fillRect(0, 0, 10, 10);
+          console.log(c.width, typeof ctx.fillRect, d.body.id, document.body.id, document.getElementById("p"));
+          console.log(document === window.document, f.contentWindow.document === d, d.defaultView === f.contentWindow);
+        };
+        document.body.appendChild(f);
+        """,
+        "<b id=mb></b>"
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "true true true P P",
+             "hi  b 1 hi x",
+             "a b 2 p v 120 40",
+             "120 function fb  null",
+             "true true true"
+           ]
+  end
 end

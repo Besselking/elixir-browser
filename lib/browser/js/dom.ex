@@ -160,13 +160,56 @@ defmodule Browser.JS.DOM do
   @realm_keys ~w(js_global js_global_fixed js_global_lex js_modules js_import rt_info rt_importmap
                  rt_seen_scripts rt_prefetched rt_script)a
 
-  defp take_keys, do: Map.new(@realm_keys, &{&1, Process.get(&1, :__unset)})
+  # A script of the page that runs code of a frame (Speedometer calls a function of the frame
+  # for each step) swaps the realm for each node it touches, so the swap must be cheap. The
+  # functions below read and write the fields and the keys with one map update and one
+  # process key operation each. They do not walk lists and do not make closures.
+  s_var = Macro.var(:s, nil)
+  f_var = Macro.var(:f, nil)
+  keys_var = Macro.var(:saved, nil)
 
-  defp put_keys(keys) do
-    Enum.each(keys, fn
-      {k, :__unset} -> Process.delete(k)
-      {k, v} -> Process.put(k, v)
-    end)
+  defp take_fields(unquote(s_var)) do
+    %{unquote_splicing(for k <- @realm_fields, do: {k, quote(do: unquote(s_var).unquote(k))})}
+  end
+
+  defp put_fields(unquote(s_var), unquote(f_var)) do
+    %{
+      unquote(s_var)
+      | unquote_splicing(
+          for k <- @realm_fields, do: {k, quote(do: :erlang.map_get(unquote(k), unquote(f_var)))}
+        )
+    }
+  end
+
+  defp take_keys do
+    %{
+      unquote_splicing(
+        for k <- @realm_keys do
+          {k,
+           quote do
+             case :erlang.get(unquote(k)) do
+               :undefined -> :__unset
+               v -> v
+             end
+           end}
+        end
+      )
+    }
+  end
+
+  defp put_keys(unquote(keys_var)) do
+    unquote_splicing(
+      for k <- @realm_keys do
+        quote do
+          case :erlang.map_get(unquote(k), unquote(keys_var)) do
+            :__unset -> :erlang.erase(unquote(k))
+            v -> :erlang.put(unquote(k), v)
+          end
+        end
+      end
+    )
+
+    :ok
   end
 
   @doc """
@@ -202,10 +245,9 @@ defmodule Browser.JS.DOM do
   defp swap_realm(doc) do
     s = st()
     prev = s.doc
-    %{fields: fields, keys: keys} = Map.fetch!(s.realms, doc)
-    saved = %{fields: Map.take(s, @realm_fields), keys: take_keys()}
-    realms = s.realms |> Map.delete(doc) |> Map.put(prev, saved)
-    put_st(Map.merge(%{s | realms: realms}, fields))
+    {%{fields: fields, keys: keys}, realms} = Map.pop!(s.realms, doc)
+    saved = %{fields: take_fields(s), keys: take_keys()}
+    put_st(put_fields(%{s | realms: Map.put(realms, prev, saved)}, fields))
     put_keys(keys)
     prev
   end
@@ -1725,9 +1767,32 @@ defmodule Browser.JS.DOM do
 
   # ── host protocol: reads ───────────────────────────────────
 
+  # The reads of a node that do not use the state of a realm: they read the node table and
+  # make wrappers, and the prototypes of the wrappers are the same in all realms. A script of
+  # the page that runs code of a frame reads them very often (a canvas of the frame gives its
+  # size to each drawing call), so they do not swap the realm. A read of a document uses its
+  # realm (`document.body` is the body of the running document), so it is not in the list.
+  @realm_free_reads ~w(nodeType nodeName parentNode parentElement childNodes firstChild lastChild
+                       nextSibling previousSibling nextElementSibling previousElementSibling
+                       firstElementChild lastElementChild children childElementCount nodeValue
+                       data length isConnected ownerDocument textContent tagName localName id
+                       className classList style dataset value checked)
+
+  defp realm_free?(nid, key) when is_integer(nid) and key in @realm_free_reads,
+    do: node(nid).kind != :document
+
+  defp realm_free?(nid, key) when is_integer(nid) and key in ["width", "height"] do
+    case node(nid) do
+      %{kind: :element, tag: "canvas"} -> true
+      _ -> false
+    end
+  end
+
+  defp realm_free?(_data, _key), do: false
+
   @doc false
   def host_get(data, key, self) do
-    if map_size(st().realms) == 0 do
+    if map_size(st().realms) == 0 or realm_free?(data, key) do
       hget(data, key, self)
     else
       {doc, data} = split_realm(data)
