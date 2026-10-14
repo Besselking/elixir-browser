@@ -8293,6 +8293,11 @@ defmodule Browser.LayoutNestedBoxesTest do
                )
     end
 
+    test "a table with overflow keeps the height of its content" do
+      # (overflow does not apply to a table box, CSS 2.1 §11.1.1: it is not a scroll container)
+      assert item_height("height:100px", "display:table;overflow:hidden;width:100px") == 500
+    end
+
     test "a form control keeps the height of its content" do
       # (the UA sheet gives it `overflow: hidden` only to clip what is in it)
       page =
