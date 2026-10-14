@@ -6657,10 +6657,32 @@ defmodule Browser.Layout do
   defp min_extent(st, sub, key, right_margin \\ 0) do
     memo({:min_extent, key || :erlang.phash2(sub)}, sub, fn ->
       case min_words(sub, st.measure, 0, 0, [], 0) do
-        :layout -> shrink_extent(st, sub, 1, key) + right_margin
-        ext -> ext
+        :layout ->
+          shrink_extent(st, sub, 1, key) + right_margin
+
+        ext ->
+          if fold_mode() == :check and min_new?(sub), do: min_check(st, sub, ext)
+          ext
       end
     end)
+  end
+
+  # (`LAYOUT_FOLD=check`: the words find what a layout at width 1 finds)
+  defp min_check(st, sub, ext) do
+    outer = Process.get(:layout_intrinsic)
+    Process.put(:layout_intrinsic, true)
+
+    real =
+      try do
+        shrink_layout(st, sub, 1)
+      after
+        if outer == nil,
+          do: Process.delete(:layout_intrinsic),
+          else: Process.put(:layout_intrinsic, outer)
+      end
+
+    if real != ext,
+      do: raise("layout check: the min-content words find #{ext} where a layout finds #{real}")
   end
 
   # `cur` is the width of the unbreakable run the words so far end in: a word glued to the
@@ -6671,10 +6693,18 @@ defmodule Browser.Layout do
 
   defp min_words([op | rest], measure, l, r, stack, ext, cur) do
     case op do
-      {:word, _, %{wrap_chars: mode}} when mode in [:all, :every, :anywhere] ->
+      # (`anywhere` breaks between any two characters: the widest is what counts)
+      # (and between it and a word glued to it)
+      {:word, text, %{wrap_chars: :anywhere} = style} ->
+        min_chars(text, style, rest, measure, l, r, stack, ext)
+
+      {:word, text, %{wrap_chars: :anywhere} = style, _} ->
+        min_chars(text, style, rest, measure, l, r, stack, ext)
+
+      {:word, _, %{wrap_chars: mode}} when mode in [:all, :every] ->
         :layout
 
-      {:word, _, %{wrap_chars: mode}, _} when mode in [:all, :every, :anywhere] ->
+      {:word, _, %{wrap_chars: mode}, _} when mode in [:all, :every] ->
         :layout
 
       {:word, text, style} ->
@@ -6701,9 +6731,62 @@ defmodule Browser.Layout do
       {:flush} ->
         min_words(rest, measure, l, r, stack, ext, 0)
 
+      {:br, _style} ->
+        min_words(rest, measure, l, r, stack, ext, 0)
+
+      # A box with a `max-width` (and nothing else that sizes it) is as narrow as the room at
+      # width 1 makes it, and what it holds reaches no further than it: the box caps its items
+      {:box_start, ref, o} ->
+        with true <- min_capped_box?(o),
+             rest when is_list(rest) <- min_skip_box(rest, ref) do
+          {_bt, br, _bb, bl} = o.bw
+          hpad = o.pl + o.pr + bl + br
+          cw = max(max(1 - l - r, 0) - o.ml - o.mr - hpad, 0)
+          maxw = if o.sizing == :border, do: max(o.maxw - hpad, 0), else: o.maxw
+          box = l + o.ml + hpad + min(cw, maxw) + o.mr + r
+          min_words(rest, measure, l, r, stack, max(ext, box), 0)
+        else
+          _ -> :layout
+        end
+
       _ ->
         :layout
     end
+  end
+
+  defp min_chars(text, style, rest, measure, l, r, stack, ext) do
+    widest =
+      text
+      |> trim_hang()
+      |> String.graphemes()
+      |> Enum.map(&measure.(&1, style))
+      |> Enum.max(fn -> 0 end)
+
+    min_run(rest, measure, l, r, stack, max(ext, l + r + widest), 0)
+  end
+
+  defp min_new?(ops) do
+    Enum.any?(ops, fn
+      {:span, _, ops, _} -> min_new?(ops)
+      {:br, _} -> true
+      {:box_start, _, _} -> true
+      {:word, _, %{wrap_chars: :anywhere}} -> true
+      {:word, _, %{wrap_chars: :anywhere}, _} -> true
+      _ -> false
+    end)
+  end
+
+  # the ops after the end of box `ref`
+  defp min_skip_box([], _ref), do: :layout
+  defp min_skip_box([{:box_end, ref} | rest], ref), do: rest
+  defp min_skip_box([{:span, _, ops, _} | rest], ref), do: min_skip_box(ops ++ rest, ref)
+  defp min_skip_box([_ | rest], ref), do: min_skip_box(rest, ref)
+
+  defp min_capped_box?(o) do
+    is_number(o.maxw) and o.width == nil and o.minw == nil and is_number(o.ml) and
+      is_number(o.mr) and o.ml >= 0 and o.mr >= 0 and o[:ratio] == nil and o.cisw == nil and
+      o.rel == nil and o.rtl != true and o[:legend] != true and o.clip != true and
+      o.xform == nil and o.pos != true
   end
 
   defp min_run(rest, measure, l, r, stack, ext, cur),
@@ -12460,13 +12543,18 @@ defmodule Browser.Layout do
          shrink_extent(f.st, model.caption, 1, nil) > w,
        do: throw(:layout)
 
+    # (uncapped, only the cells with such a box can reach past their column)
+    reaching =
+      if f.cap != nil or f.caps != [] or (f.shift? and w > avail),
+        do: placed,
+        else: Enum.filter(placed, &fold_margins?(&1.cell))
+
     inner =
-      if f.cap != nil or f.caps != [] or (f.shift? and w > avail) or
-           Enum.any?(placed, &fold_margins?(&1.cell)) do
+      if reaching != [] do
         if ts.collapse? or model.caption != nil, do: throw(:layout)
         xs = column_positions(widths, ts.sx)
 
-        Enum.reduce(placed, inner, fn p, acc ->
+        Enum.reduce(reaching, inner, fn p, acc ->
           span_w =
             Enum.sum(Enum.slice(widths, p.col, p.cell.colspan)) + ts.sx * (p.cell.colspan - 1)
 
