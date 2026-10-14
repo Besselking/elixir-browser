@@ -9830,9 +9830,20 @@ defmodule Browser.Layout do
         ix = x + it.ml
         right = floor(ix + it.hw + 0.5)
         w = max(right - floor(ix + 0.5), 0)
-        {items, h, _base} = flex_row_atom(st, cs, it, w)
+
+        {items, h, stretched} =
+          case known_cross(cs, it, min_cross, single?) do
+            nil ->
+              {items, h, _base} = flex_row_atom(st, cs, it, w)
+              {items, h, false}
+
+            cross ->
+              {items, h, _base} = flex_stretch_atom(st, it, w, cross)
+              {items, h, true}
+          end
+
         next = ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)
-        {Map.merge(it, %{w: w, items: items, h: h}), next}
+        {Map.merge(it, %{w: w, items: items, h: h, stretched: stretched}), next}
       end)
 
     # items aligned on their baselines hang from the lowest one
@@ -10084,17 +10095,50 @@ defmodule Browser.Layout do
   defp flex_offset(align, cross, h) when align in ["flex-end", "end"], do: cross - h
   defp flex_offset(_align, _cross, _h), do: 0
 
+  # The cross size of the line, when it is known before the items are laid out and the item is
+  # stretched to it: the only line of a container with a definite height is as high as the
+  # container (Flexbox §9.4 step 8), and a stretched item with an automatic height takes the
+  # size of its line as its definite height (step 11, §9.8 item 1). Such an item is laid out one
+  # time, at that height, and not first at its hypothetical height. Not for an item whose
+  # hypothetical height is used: an item aligned otherwise or on its baseline, with an `auto`
+  # margin, a percentage height or min-height, a ratio, or a picture.
+  defp known_cross(cs, it, min_cross, single?) do
+    if single? and cs.height != nil and cs.hdef and
+         flex_align(it, cs.align) in ["stretch", "normal"] and it.auto_height? and
+         it.rebuild != nil and it.mta == false and it.mba == false and is_number(it.mt) and
+         is_number(it.mb) and it.hpct == nil and it.minhpct == nil and
+         Map.get(it, :ratio) == nil and Map.get(it, :restretch) == nil do
+      # (as the cross size of the line in `flex_line_live/7`)
+      cross = round(min_cross)
+
+      cross =
+        if is_number(cs.maxh),
+          do: max(min(cross, round(cs.maxh)), round(min_cross)),
+          else: cross
+
+      if cross >= 0, do: cross
+    end
+  end
+
+  # an item stretched to a line of a known cross size
+  defp flex_stretch_atom(st, it, w, cross) do
+    box_h = cross - it.mt - it.mb
+    h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
+    sub = it.rebuild.(%{"height" => max(h, 0) * 1.0})
+    flex_atom(st, sub, w, {it.key, :cut, h})
+  end
+
   # a stretched item with an automatic height fills the line: laid out again with a minimum height
+  # (an item laid out at the known cross size of its line is not laid out again)
+  defp flex_stretch(_st, %{stretched: true} = it, _container_align, _cross), do: it
+
   defp flex_stretch(st, it, container_align, cross) do
     stretch? = flex_align(it, container_align) in ["stretch", "normal"]
 
     if stretch? and it.auto_height? and it.rebuild != nil and it.h > cross and cross >= 0 and
          it.mta == false and it.mba == false do
       # an item taller than the line (of a container with a height) is cut down to it
-      box_h = cross - it.mt - it.mb
-      h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
-      sub = it.rebuild.(%{"height" => max(h, 0) * 1.0})
-      {items, h2, _} = flex_atom(st, sub, it.w, {it.key, :cut, h})
+      {items, h2, _} = flex_stretch_atom(st, it, it.w, cross)
       %{it | items: items, h: h2}
     else
       flex_stretch_grow(st, it, stretch?, cross)

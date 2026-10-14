@@ -8099,5 +8099,39 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert measured == 2 * 5
       assert Enum.count(items, &(&1.type == :text and &1.text == "zq")) == 5
     end
+
+    test "a stretched item in a row with a definite height is laid out one time" do
+      # (Flexbox §9.4 steps 8 and 11: the only line of a container with a definite height is as
+      # high as the container, and a stretched item takes that height as its own definite
+      # height; so its hypothetical height is not needed)
+      item = fn n, style, inner ->
+        ~s(<div style="background:##{n}00000;width:30px;#{style}">#{inner}</div>)
+      end
+
+      {items, measured} =
+        count_lay(
+          ~s(<div style="display:flex;height:300px">) <>
+            item.(1, "", ~s(<div style="height:100px">zq</div>)) <>
+            item.(2, "", ~s(<div style="height:500px">b</div>)) <>
+            item.(3, "max-height:100px", "c") <>
+            item.(4, "min-height:400px", "d") <>
+            item.(5, "align-self:baseline", "e") <>
+            item.(6, "padding:10px;border:5px solid;margin:7px 0 3px", "f") <>
+            "</div>"
+        )
+
+      box = fn n -> Enum.find(items, &(&1.type == :rect and &1.color == {n * 16, 0, 0})) end
+      assert %{y: 8, h: 300} = box.(1)
+      assert %{y: 8, h: 300} = box.(2)
+      # (the stretched height is held to the max-height and min-height of the item)
+      assert %{h: 100} = box.(3)
+      assert %{h: 400} = box.(4)
+      # (an item aligned on its baseline is not stretched)
+      assert %{h: 22} = box.(5)
+      # (the margins are outside the line's height)
+      assert %{y: 15, h: 290} = box.(6)
+      # (the word is measured by the one layout of its item and by the measure of its width)
+      assert measured == 2
+    end
   end
 end
