@@ -8064,4 +8064,40 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert refused > 0
     end
   end
+
+  describe "flex relayouts" do
+    alias Browser.Page
+
+    # -> {items, how many times the word "zq" was measured}
+    defp count_lay(html, width \\ 1000) do
+      measure = fn text, style ->
+        if text == "zq", do: Process.put(:zq_measured, Process.get(:zq_measured, 0) + 1)
+        measure(text, style)
+      end
+
+      Process.put(:zq_measured, 0)
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, width, measure, 800, images: %{}, scrollers: true)
+      {items, Process.get(:zq_measured)}
+    end
+
+    test "a flex item laid out again in a flex item finds the walk of its first layout" do
+      # (the body row stretches the column, and the column gives its item another height: both
+      # lay the item out again, and each time its words come from the fragments of the first
+      # layout. A word is measured by that layout and by the sizing fold, no more)
+      text = "<p>zq " <> Enum.map_join(1..30, " ", &"w#{&1}") <> "</p>"
+
+      {items, measured} =
+        count_lay(
+          ~s(<body style="margin:0;display:flex;height:800px;padding:5px;box-sizing:border-box">) <>
+            ~s(<div style="flex:1 1 0%;display:flex;flex-direction:column">) <>
+            ~s(<div style="flex:1 1 0%;overflow:auto">) <>
+            ~s(<div style="position:relative;white-space:break-spaces">) <>
+            String.duplicate(text, 5) <> "</div></div></div></body>"
+        )
+
+      assert measured == 2 * 5
+      assert Enum.count(items, &(&1.type == :text and &1.text == "zq")) == 5
+    end
+  end
 end

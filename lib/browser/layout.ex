@@ -6621,7 +6621,8 @@ defmodule Browser.Layout do
       end
 
     memo(
-      {:extent, key || :erlang.phash2(sub), if(side == :max, do: @unbounded, else: width)},
+      {:extent, key || :erlang.phash2(sub), if(side == :max, do: @unbounded, else: width),
+       Process.get(:layout_flex_item, false)},
       sub,
       fn ->
         case fold_mode() do
@@ -6660,16 +6661,20 @@ defmodule Browser.Layout do
   # it is as wide as its widest word plus the insets around it. Anything else (boxes, images,
   # floats, inline boxes, preformatted words) is laid out at width 1.
   defp min_extent(st, sub, key, right_margin \\ 0) do
-    memo({:min_extent, key || :erlang.phash2(sub)}, sub, fn ->
-      case min_words(sub, st.measure, 0, 0, [], 0) do
-        :layout ->
-          shrink_extent(st, sub, 1, key) + right_margin
+    memo(
+      {:min_extent, key || :erlang.phash2(sub), Process.get(:layout_flex_item, false)},
+      sub,
+      fn ->
+        case min_words(sub, st.measure, 0, 0, [], 0) do
+          :layout ->
+            shrink_extent(st, sub, 1, key) + right_margin
 
-        ext ->
-          if fold_mode() == :check and min_new?(sub), do: min_check(st, sub, ext)
-          ext
+          ext ->
+            if fold_mode() == :check and min_new?(sub), do: min_check(st, sub, ext)
+            ext
+        end
       end
-    end)
+    )
   end
 
   # (`LAYOUT_FOLD=check`: the words find what a layout at width 1 finds)
@@ -6832,7 +6837,7 @@ defmodule Browser.Layout do
     end
   end
 
-  defp renumber_memo({:atom, _, _, _, _, _}, {items, height, baseline}),
+  defp renumber_memo({:atom, _, _, _, _, _, _}, {items, height, baseline}),
     do: {renumber_pz(items), height, baseline}
 
   defp renumber_memo(_key, value), do: value
@@ -7237,10 +7242,12 @@ defmodule Browser.Layout do
   defp atom_cbh(st, %{hpct_atom: pct}) when pct != nil, do: st.cbh
   defp atom_cbh(_st, _spec), do: nil
 
+  # (the memo keys of atoms, extents, minimum extents and fold items hold the flex mark: the
+  # layout under them reads it, and the same ops can be laid out with and without it)
   defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
     memo(
       {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
-       Process.get(:layout_boxes, false)},
+       Process.get(:layout_boxes, false), Process.get(:layout_flex_item, false)},
       sub,
       fn ->
         # (the height of the box a float or inline-block sits in is what its own percentage
@@ -7266,6 +7273,21 @@ defmodule Browser.Layout do
       if outer == nil,
         do: Process.delete(:layout_flex_item),
         else: Process.put(:layout_flex_item, outer)
+    end
+  end
+
+  # `fun.()` with no flex mark, which is put back after as it was found
+  defp without_flex_mark(fun) do
+    case Process.delete(:layout_flex_item) do
+      nil ->
+        fun.()
+
+      outer ->
+        try do
+          fun.()
+        after
+          Process.put(:layout_flex_item, outer)
+        end
     end
   end
 
@@ -9347,10 +9369,13 @@ defmodule Browser.Layout do
     cw = containing_width()
 
     # (an item built again with the same props is the same term as the last layout's: see
-    # `kept_walk/4`)
+    # `kept_walk/4`. It is walked without the flex mark, as the walk phase walks it: a relayout
+    # inside a flex item then finds the walk of the first pass, and its spans their fragments)
     build = fn extra_props ->
-      kept_walk(el, style, {:flex_item, extra_props}, fn ->
-        with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+      without_flex_mark(fn ->
+        kept_walk(el, style, {:flex_item, extra_props}, fn ->
+          with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+        end)
       end)
     end
 
@@ -12181,20 +12206,24 @@ defmodule Browser.Layout do
   defp fold_items_at(st, sub, width, key) do
     width = if width > @unbounded / 2, do: @unbounded, else: width
 
-    memo({:fold_items, key || :erlang.phash2(sub), width}, sub, fn ->
-      outer = Process.get(:layout_intrinsic)
-      Process.put(:layout_intrinsic, true)
+    memo(
+      {:fold_items, key || :erlang.phash2(sub), width, Process.get(:layout_flex_item, false)},
+      sub,
+      fn ->
+        outer = Process.get(:layout_intrinsic)
+        Process.put(:layout_intrinsic, true)
 
-      try do
-        f = fold_run(st, sub, width, nil, true)
-        if f.caps != [], do: throw(:layout)
-        {f.edges, f.aligned}
-      after
-        if outer == nil,
-          do: Process.delete(:layout_intrinsic),
-          else: Process.put(:layout_intrinsic, outer)
+        try do
+          f = fold_run(st, sub, width, nil, true)
+          if f.caps != [], do: throw(:layout)
+          {f.edges, f.aligned}
+        after
+          if outer == nil,
+            do: Process.delete(:layout_intrinsic),
+            else: Process.put(:layout_intrinsic, outer)
+        end
       end
-    end)
+    )
   end
 
   # The edges of the items of an inline-block or a float laid out `w` wide (`at`, as the fold
