@@ -9426,6 +9426,13 @@ defmodule Browser.Layout do
       scroll?:
         c["overflow-x"] in ~w(hidden scroll auto) or
           (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
+      # a scroll container in the main axis of a column has no automatic minimum height
+      # (Flexbox §4.5). Not a form control: the UA sheet gives it `overflow: hidden` only to
+      # clip what is in it, and its content size stays its minimum.
+      col_scroll?:
+        tag not in ~w(input select textarea button) and
+          (c["overflow-y"] in ~w(hidden scroll auto) or
+             (c["overflow-y"] in [nil, "visible"] and c["overflow-x"] in ~w(hidden scroll auto))),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
       hpct:
@@ -10507,7 +10514,18 @@ defmodule Browser.Layout do
 
     # (the height of the content, for `flex_content_floor/2`)
     content_h = if Map.get(it, :plain_h?, false), do: {w, h}
-    Map.merge(it, %{w: w, items: items, h: h, x: x, base: base, content_h: content_h})
+    # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
+    basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.height != nil)
+
+    Map.merge(it, %{
+      w: w,
+      items: items,
+      h: h,
+      x: x,
+      base: base,
+      content_h: content_h,
+      basis_def?: basis_def?
+    })
   end
 
   # The height the content of a column item needs (its automatic minimum height): the item laid
@@ -10571,7 +10589,9 @@ defmodule Browser.Layout do
     more =
       if total > 0 do
         for it <- open,
-            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil,
+            # (a scroll container has no automatic minimum to hold it)
+            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil and
+              not Map.get(it, :col_scroll?, false),
             it.base + (free + give) * it.shrink * it.base / total < it.h,
             do: it.key
       else
@@ -10587,7 +10607,11 @@ defmodule Browser.Layout do
   # content needs
   defp flex_column_basis(st, %{basis: basis, rebuild: rebuild} = it)
        when basis != nil and rebuild != nil do
-    floor = flex_content_floor(st, it)
+    # (a scroll container has no automatic minimum: with a definite basis, it is that high)
+    floor =
+      if Map.get(it, :col_scroll?, false) and Map.get(it, :basis_def?, false),
+        do: 0,
+        else: flex_content_floor(st, it)
 
     # (an item that cannot flex has a definite size when its container has none)
     # (a `min-height` of the item is not part of the floor above: it is added back here)
@@ -10610,7 +10634,7 @@ defmodule Browser.Layout do
             # a `min-height` of its own replaces the automatic minimum
             it.minh + if(it.sizing == :border, do: 0, else: it.vextra)
           else
-            flex_content_floor(st, it)
+            if Map.get(it, :col_scroll?, false), do: 0, else: flex_content_floor(st, it)
           end
 
         # (a size the item is given caps the automatic minimum)

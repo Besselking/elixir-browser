@@ -8152,4 +8152,51 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert measured == 2
     end
   end
+
+  describe "automatic minimum height in a flex column" do
+    alias Browser.Page
+
+    # -> the height of the one item of a column
+    defp item_height(column_style, item_style) do
+      html =
+        ~s(<div style="display:flex;flex-direction:column;#{column_style}">) <>
+          ~s(<div style="background:#100000;#{item_style}"><div style="height:500px">a</div>) <>
+          "</div></div>"
+
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0})).h
+    end
+
+    test "a scroll container has an automatic minimum height of 0" do
+      # (Flexbox §4.5: the content-based minimum size is for an item that is not a scroll
+      # container; `hidden`, `scroll` and `auto` make a scroll container, `clip` does not:
+      # CSS Overflow 3 §3)
+      for overflow <- ~w(auto hidden scroll),
+          do: assert(item_height("height:100px", "overflow:#{overflow}") == 100)
+
+      assert item_height("height:100px", "overflow:clip") == 500
+      assert item_height("height:100px", "") == 500
+      # (a min-height of its own is still kept)
+      assert item_height("height:100px", "overflow:auto;min-height:200px") == 200
+      # (only the main axis counts: an item that does not scroll in it keeps its minimum)
+      assert item_height("height:100px", "overflow-x:hidden;overflow-y:clip") == 500
+      # (in a column with no height, a scroll container with a definite basis is that high)
+      assert item_height("", "flex-basis:50px;overflow:auto") == 50
+      assert item_height("", "flex-basis:50px") == 500
+    end
+
+    test "a form control keeps the height of its content" do
+      # (the UA sheet gives it `overflow: hidden` only to clip what is in it)
+      page =
+        Page.build(
+          ~s(<div style="display:flex;flex-direction:column;height:0">) <>
+            ~s(<select style="background:#100000"><option>a</option></select></div>),
+          "about:test"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      assert %{h: 20} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+    end
+  end
 end
