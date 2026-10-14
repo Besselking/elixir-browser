@@ -8249,6 +8249,51 @@ defmodule Browser.LayoutNestedBoxesTest do
                )
     end
 
+    test "a percentage in an item resolves only against a definite height" do
+      # (a stretched item of a single-line row with a definite height has a definite height,
+      # Flexbox §9.8: `min-height: 30%` of the inner row is 30% of 600 px)
+      assert {_, 190} =
+               red_box(
+                 ~s(<body style="display:flex;height:600px"><div style="display:flex">) <>
+                   ~s(<div style="display:flex"><span style="height:50px;min-height:30%;) <>
+                   ~s(border:5px solid;white-space:nowrap;background:#100000">) <>
+                   "d dddd b aaaa aaaaa dddd dd dddddd</span></div>" <>
+                   String.duplicate("c ccccc cccccc ", 12) <> "</div></body>"
+               )
+
+      # (the flexed height of an item in a column with no definite height is not definite:
+      # a percentage height or basis in it is automatic)
+      assert {_, 20} =
+               red_box(
+                 ~s(<section style="display:flex;flex-direction:column">) <>
+                   ~s(<div style="display:inline-flex;flex:1 0 0"><span style="height:50%;) <>
+                   ~s(padding:10px;background:#100000"></span></div></section>)
+               )
+
+      assert {_, 22} =
+               red_box(
+                 ~s(<div style="display:flex;flex-direction:column"><div style="display:flex;) <>
+                   ~s(flex-direction:column;flex-basis:40px"><span style="flex:0 0 30%;) <>
+                   ~s(background:#100000">a</span><div style="height:900px"></div></div></div>)
+               )
+    end
+
+    test "positioned flex items paint in the order of the document" do
+      # (CSS 2.1 Appendix E: the second item paints over the first, also when the first is
+      # stretched)
+      page =
+        Page.build(
+          ~s(<div style="display:flex;height:100px"><span style="flex:1 1 auto;) <>
+            ~s(position:relative;top:5px;background:#100000"></span><div style="height:300px;) <>
+            ~s(flex:1;position:relative;background:#200000"></div></div>),
+          "about:test"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      pz = fn r -> Enum.find(items, &(&1.type == :rect and &1.color == {r, 0, 0})).pz end
+      assert pz.(16) < pz.(32)
+    end
+
     test "only a column item that keeps its height and is not made definite is kept" do
       # (a flexed height is definite: a percentage in the item resolves against it)
       assert {_, 15} =
