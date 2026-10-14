@@ -9421,6 +9421,8 @@ defmodule Browser.Layout do
       collapsed: collapsed?,
       minh: num(c["min-height"]),
       minhpct: pct_of(c["min-height"]),
+      # (no height and no min-height of its own: laid out without them, it is laid out the same)
+      plain_h?: c["height"] in [nil, :auto] and c["min-height"] in [nil, :auto],
       scroll?:
         c["overflow-x"] in ~w(hidden scroll auto) or
           (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
@@ -10503,7 +10505,27 @@ defmodule Browser.Layout do
           max(size, it.vextra) + auto_zero(it.mt) + auto_zero(it.mb)
       end
 
-    Map.merge(it, %{w: w, items: items, h: h, x: x, base: base})
+    # (the height of the content, for `flex_content_floor/2`)
+    content_h = if Map.get(it, :plain_h?, false), do: {w, h}
+    Map.merge(it, %{w: w, items: items, h: h, x: x, base: base, content_h: content_h})
+  end
+
+  # The height the content of a column item needs (its automatic minimum height): the item laid
+  # out with no height and no min-height. An item that has neither of its own was laid out so by
+  # `flex_column_item/4` at the same width, and is not laid out again.
+  defp flex_content_floor(st, it) do
+    w = it.w
+
+    case Map.get(it, :content_h) do
+      {^w, h} ->
+        h
+
+      _ ->
+        {_, floor, _} =
+          flex_atom(st, it.rebuild.(%{"height" => nil, "min-height" => nil}), w, {it.key, :min})
+
+        floor
+    end
   end
 
   # in a column with a height of its own the items grow into what is left, or shrink in
@@ -10565,8 +10587,7 @@ defmodule Browser.Layout do
   # content needs
   defp flex_column_basis(st, %{basis: basis, rebuild: rebuild} = it)
        when basis != nil and rebuild != nil do
-    {_, floor, _} =
-      flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
+    floor = flex_content_floor(st, it)
 
     # (an item that cannot flex has a definite size when its container has none)
     # (a `min-height` of the item is not part of the floor above: it is added back here)
@@ -10589,15 +10610,7 @@ defmodule Browser.Layout do
             # a `min-height` of its own replaces the automatic minimum
             it.minh + if(it.sizing == :border, do: 0, else: it.vextra)
           else
-            {_, floor, _} =
-              flex_atom(
-                st,
-                it.rebuild.(%{"height" => nil, "min-height" => nil}),
-                it.w,
-                {it.key, :min}
-              )
-
-            floor
+            flex_content_floor(st, it)
           end
 
         # (a size the item is given caps the automatic minimum)
@@ -10621,7 +10634,11 @@ defmodule Browser.Layout do
         target
       end
 
-    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) do
+    # (an item that keeps its height, and that the height does not make definite, is laid out
+    # as it is: the same layout with that height set gives the same items)
+    same? = not definite? and abs(target - it.h) < 0.5 and Map.get(it, :ratio) == nil
+
+    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) and not same? do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
       content = if it.sizing == :border, do: box, else: box - it.vextra

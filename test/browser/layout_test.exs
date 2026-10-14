@@ -8133,5 +8133,23 @@ defmodule Browser.LayoutNestedBoxesTest do
       # (the word is measured by the one layout of its item and by the measure of its width)
       assert measured == 2
     end
+
+    test "a column item with no height of its own is laid out one time" do
+      # (laid out with no height and no min-height, the item gives its automatic minimum height,
+      # and its flex base size from a basis of 0% in a column of automatic height: Flexbox §4.5,
+      # §9.2 step 3. That is the layout it already has, at the same width; and kept at that
+      # height, it is not laid out again)
+      {items, measured} =
+        count_lay(
+          ~s(<div style="display:flex;flex-direction:column">) <>
+            ~s(<div style="flex:1 1 0%;background:#100000">zq a b</div>) <>
+            ~s(<div style="flex:1 1 0%;background:#200000;min-height:50px">c</div></div>)
+        )
+
+      assert %{h: 22} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+      assert %{h: 50} = Enum.find(items, &(&1.type == :rect and &1.color == {32, 0, 0}))
+      # (one measure is the layout of the item, one is for the widths)
+      assert measured == 2
+    end
   end
 end
