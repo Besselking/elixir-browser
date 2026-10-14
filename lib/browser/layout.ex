@@ -13511,9 +13511,13 @@ defmodule Browser.Layout do
          (not row? and cs.wrap and (cs.height || cs.maxh) != nil),
        do: throw(:layout)
 
-    # (an item that clips, in a container with a height, may be cut to the line: not followed)
+    # (an item that clips, in a container with a height, may be cut to the line: not followed.
+    # In a column, a scroll container can also be shorter than its content when the column
+    # has a definite height or the item has a basis that is not a percentage)
     if Enum.any?(items, fn it ->
          Map.get(it, :ratio) != nil or (Map.get(it, :scroll?, false) and cs.height != nil) or
+           (not row? and Map.get(it, :col_scroll?, false) and
+              (cs.hdef or (it.basis != nil and not match?({:pct, _}, it.basis)))) or
            (is_number(it.ml) and it.ml < 0) or (is_number(it.mr) and it.mr < 0)
        end),
        do: throw(:layout)

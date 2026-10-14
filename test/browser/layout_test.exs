@@ -8026,6 +8026,41 @@ defmodule Browser.LayoutNestedBoxesTest do
                )
     end
 
+    test "a scroll container in a column that can be shorter than its content is laid out" do
+      # (its automatic minimum height is 0, so its height and the width of what wraps in it
+      # depend on the column. Here the item wraps into 2 columns at 50 px high)
+      wrap = "display:flex;flex-direction:column;flex-wrap:wrap"
+      text = "cccc <b>ddd </b> <b>cc </b> ccc"
+
+      assert {56, _, refused} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;) <>
+                   ~s(background:red"><div style="#{wrap};flex:0 1 50px;overflow:scroll">) <>
+                   text <> "</div></div></div>"
+               )
+
+      assert refused > 0
+
+      # (with a basis in percent in a column with no definite height, it is as high as its
+      # content: the fold measures it)
+      assert {_, hits, 0} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;) <>
+                   ~s(background:red"><div style="#{wrap};flex:1;overflow:auto">) <>
+                   text <> "</div></div></div>"
+               )
+
+      assert hits > 0
+
+      # (a box that scrolls in one axis and clips in the other is a scroll container)
+      assert {56, _, _} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;height:50px;) <>
+                   ~s(background:red"><div style="#{wrap};overflow-x:clip;overflow-y:auto">) <>
+                   text <> "</div></div></div>"
+               )
+    end
+
     test "a relative box with an offset is still laid out to be measured" do
       assert {_, 0, refused} =
                fold_width(
