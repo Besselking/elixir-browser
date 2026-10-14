@@ -3698,6 +3698,7 @@ css/css-display/display-contents-list-001.html
 css/css-display/display-contents-multicol-001.html
 css/css-display/display-contents-oof-001.html
 css/css-display/display-contents-oof-002.html
+css/css-display/display-contents-replaced-content.html
 css/css-display/display-contents-root-background.html
 css/css-display/display-contents-table-001.html
 css/css-display/display-contents-table-002.html
@@ -3870,6 +3871,7 @@ css/css-flexbox/balance/balance-zero-size.html
 css/css-flexbox/baseline-outside-flex-item.html
 css/css-flexbox/break-nested-float-in-flex-item-001-print.html
 css/css-flexbox/break-nested-float-in-flex-item-002-print.html
+css/css-flexbox/column-flex-child-center-with-indefinite-height.html
 css/css-flexbox/column-flex-child-with-max-width.html
 css/css-flexbox/css-flexbox-height-animation-stretch.html
 css/css-flexbox/display-flex-001.htm

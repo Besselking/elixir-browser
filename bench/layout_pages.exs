@@ -1,7 +1,8 @@
 # Usage: mix run --no-start bench/layout_pages.exs [pages...]
 # Layout cost of realistic pages: the local HTML files in bench/pages/ (article, search results,
-# news table, product grid, docs). No network. Where bench/layout_features.exs times one feature
-# per generated page, this times whole pages, per phase:
+# news table, product grid, docs, a comment thread in nested tables). No network. Where
+# bench/layout_features.exs times one feature per generated page, this times whole pages, per
+# phase:
 #
 #   parse    Browser.HTML.parse (HTML text -> tree)
 #   build    Browser.Page.build (parse + stylesheets + cascade)
