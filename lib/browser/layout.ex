@@ -10525,8 +10525,16 @@ defmodule Browser.Layout do
     # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
     basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.hdef)
 
+    # (a percentage min-height resolves against the container's definite height, and replaces
+    # the automatic minimum)
+    minh =
+      if it.minh == nil and Map.get(it, :minhpct) != nil and cs.height != nil and cs.hdef,
+        do: it.minhpct * cs.height,
+        else: it.minh
+
     it =
       Map.merge(it, %{
+        minh: minh,
         w: w,
         items: items,
         h: h,

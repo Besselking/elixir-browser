@@ -8282,6 +8282,17 @@ defmodule Browser.LayoutNestedBoxesTest do
                )
     end
 
+    test "a percentage min-height of a column item replaces the automatic minimum" do
+      # (it resolves against the definite height of the column)
+      assert %{1 => 50, 2 => 80} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;overflow:auto;min-height:50%">) <>
+                   ~s(<div style="height:500px">a</div></div>) <>
+                   ~s(<div style="background:#200000;height:80px;flex-shrink:0"></div></div>)
+               )
+    end
+
     test "a form control keeps the height of its content" do
       # (the UA sheet gives it `overflow: hidden` only to clip what is in it)
       page =
