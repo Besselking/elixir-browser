@@ -12324,6 +12324,9 @@ defmodule Browser.Layout do
   defp fold_op({:word, text, style, :pre}, f), do: fold_word(f, text, style, true, 0, false)
   defp fold_op({:word, text, style, :glue}, f), do: fold_word(f, text, style, false, 0, true)
 
+  # (a word of `break-spaces` that holds the space after it: `wrap_glued` with `:hold`)
+  defp fold_op({:word, text, style, :hold}, f), do: fold_word(f, text, style, false, 0, :hold)
+
   defp fold_op({:marker, m, style}, f) do
     f =
       case f.line do
@@ -12661,6 +12664,9 @@ defmodule Browser.Layout do
             f.x + space_w + w + Map.get(style, :tail, 0) - hang <= right ->
           f
 
+        glued? and space_w == 0 and not f.after_space and glue == :hold ->
+          fold_wrap_hold(f, style)
+
         glued? and space_w == 0 and not f.after_space ->
           fold_wrap_glued(f, style)
 
@@ -12769,6 +12775,32 @@ defmodule Browser.Layout do
   defp fold_start_line(f, dx) do
     used = if dx == 0, do: f.lead, else: 0
     %{f | x: f.l + dx + used, indent: f.l, lead: f.lead - used, line_lead: used}
+  end
+
+  # `wrap_glued` with `:hold`: a space of `break-spaces` does not wrap away from the word before
+  # it. Alone on its line with `overflow-wrap: break-word` or `anywhere`, the line breaks before
+  # it. Else the chain glued to it goes to the next line, or it stays where it is.
+  defp fold_wrap_hold(f, style) do
+    cond do
+      style.wrap_chars == :all ->
+        throw(:layout)
+
+      match?([%{type: :text}], f.line) and style.wrap_chars in [:word, :anywhere] ->
+        f |> fold_flush(true) |> fold_start_line(0)
+
+      true ->
+        {chain, rest} = Enum.split_while(f.line, &Map.get(&1, :glue, false))
+
+        case rest do
+          [%{type: :text} = first | [_ | _] = older] ->
+            if Enum.all?(chain, &(&1.type == :text)),
+              do: fold_carry_chain(f, [first | chain], older),
+              else: f
+
+          _ ->
+            f
+        end
+    end
   end
 
   defp fold_wrap_glued(f, style) do
@@ -13094,11 +13126,20 @@ defmodule Browser.Layout do
     if past?, do: throw(:layout)
   end
 
+  # the offsets of a relative box do not move it (each one is `auto` or 0)
+  defp rel_still?(rel),
+    do:
+      Enum.all?(
+        [:left, :right, :top, :bottom],
+        &(Map.get(rel, &1) in [nil, :auto, "auto", 0, 0.0])
+      )
+
   defp fold_place_box(f, ref, o) do
     {_bt, br, _bb, bl} = o.bw
 
+    # (a relative box that its offsets do not move is as wide as a static box: CSS 2.1 §9.4.3)
     if o[:ratio] != nil or o.cisw != nil or o.minw == :stretch or o.rtl == true or
-         o.rel != nil or o[:legend] == true,
+         (o.rel != nil and not rel_still?(o.rel)) or o[:legend] == true,
        do: throw(:layout)
 
     # a box with `overflow` that cuts its content to its height: what is cut is not followed,

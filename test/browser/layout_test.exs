@@ -7994,4 +7994,74 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert got == eager, "ops #{inspect(ops)} on #{inspect(Map.take(item, [:type, :x, :y]))}"
     end
   end
+
+  describe "sizing fold" do
+    alias Browser.Page
+
+    # -> {the width of the first background, widths the fold found, widths it refused}; with
+    # `fold: :check` the layout raises when the fold finds another width than a layout
+    defp fold_width(html) do
+      Process.put(:layout_fold_hits, 0)
+      Process.put(:layout_fold_fallbacks, 0)
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, fold: :check, images: %{})
+      rect = Enum.find(items, &(&1.type == :rect))
+      {rect.w, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
+    end
+
+    test "a relative box that its offsets do not move is measured with no layout" do
+      # (CSS 2.1 §9.4.3: the box takes its place in the flow as a static box does)
+      assert {64, hits, 0} =
+               fold_width(
+                 ~s(<div style="float:left;background:red"><div style="position:relative">) <>
+                   "aa bb cc</div></div>"
+               )
+
+      assert hits > 0
+
+      assert {16, _, 0} =
+               fold_width(
+                 ~s(<div style="display:flex;width:0"><div style="background:red">) <>
+                   ~s(<div style="position:relative;top:0;left:auto">aa bb</div></div></div>)
+               )
+    end
+
+    test "a relative box with an offset is still laid out to be measured" do
+      assert {_, 0, refused} =
+               fold_width(
+                 ~s(<div style="float:left;background:red">) <>
+                   ~s(<div style="position:relative;left:10px">aa bb cc</div></div>)
+               )
+
+      assert refused > 0
+    end
+
+    test "break-spaces words are measured with no layout" do
+      # (CSS Text 3 §3: a line can break after each preserved space, not before it, so a word
+      # and the space after it are one unit at the min-content width)
+      flex = fn style, text ->
+        fold_width(
+          ~s(<div style="display:flex;width:0"><div style="white-space:break-spaces;) <>
+            style <> ~s(;background:red">) <> text <> "</div></div>"
+        )
+      end
+
+      assert {24, _, 0} = flex.("", "aa bb")
+      # (each space after the first is a unit of its own)
+      assert {24, _, 0} = flex.("", "aa  bb  c")
+      # (a word wider than the box overflows it with the space after it)
+      assert {40, _, 0} =
+               fold_width(
+                 ~s(<div style="width:30px"><div style="float:left;white-space:break-spaces;) <>
+                   ~s(background:red">aaaa bb cc</div></div>)
+               )
+
+      # (`overflow-wrap: anywhere` breaks between any two letters)
+      assert {8, _, _} = flex.("overflow-wrap:anywhere", "aaaa bb")
+      # (`word-break: break-all` keeps the last letter with the space after it; the fold does
+      # not follow it and lays the content out)
+      assert {16, _, refused} = flex.("word-break:break-all", "aaaa bb")
+      assert refused > 0
+    end
+  end
 end
