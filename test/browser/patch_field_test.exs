@@ -20,19 +20,23 @@ defmodule Browser.PatchFieldTest do
   # Types `@typed` a character at a time into the first text field, patching the previous
   # items whenever the page says that is allowed. Returns how many keystrokes were patched.
   defp type_into(html) do
+    type_values(html, for(n <- 0..String.length(@typed), do: String.slice(@typed, 0, n)))
+  end
+
+  # Gives the first text field each of `values` in turn (the first one is the field's value at
+  # the start), patching as above.
+  defp type_values(html, [first | values]) do
     page = Page.build(html, "about:test")
     control = page.forms.controls |> Map.values() |> Enum.find(&Forms.editable?/1)
     patchable? = MapSet.member?(page.fixed_width, control.cid)
-    {items, _} = layout(page, %{cid: control.cid, caret: {0, 0}})
     state = fn text -> Page.render(page, Forms.put(page.form_state, control.cid, value: text)) end
+    {items, _} = layout(state.(first), %{cid: control.cid, caret: {0, String.length(first)}})
 
-    {_, patched} =
-      for n <- 1..String.length(@typed), reduce: {items, 0} do
-        {items, patched} ->
-          {old, new} =
-            {state.(String.slice(@typed, 0, n - 1)), state.(String.slice(@typed, 0, n))}
-
-          focus = %{cid: control.cid, caret: {0, n}}
+    {_, _, patched} =
+      for value <- values, reduce: {items, first, 0} do
+        {items, before, patched} ->
+          {old, new} = {state.(before), state.(value)}
+          focus = %{cid: control.cid, caret: {0, String.length(value)}}
           {full, _height} = layout(new, focus)
 
           patch =
@@ -48,11 +52,11 @@ defmodule Browser.PatchFieldTest do
 
           case patch do
             {:ok, patched_items} ->
-              assert patched_items == full, "keystroke #{n} differs from a full layout"
-              {patched_items, patched + 1}
+              assert patched_items == full, "#{inspect(value)} differs from a full layout"
+              {patched_items, value, patched + 1}
 
             _ ->
-              {full, patched}
+              {full, value, patched}
           end
       end
 
@@ -88,6 +92,21 @@ defmodule Browser.PatchFieldTest do
   end
 
   test "text too wide for the field falls back to a full layout" do
-    assert type_into(~s(<input name=q style="width:40px">)) < 5
+    # (the first five keystrokes fit, the one from the empty field included; the sixth does not)
+    assert type_into(~s(<input name=q style="width:40px">)) < 6
+  end
+
+  test "deleting to an empty field and typing again is patched" do
+    values = ["ab", "a", "", "x", "", "yz"]
+    assert type_values(~s(<p>Search: <input name=q style="width:200px"></p>), values) == 5
+  end
+
+  test "a field showing its placeholder is not patched" do
+    page = Page.build(~s(<input name=q placeholder="Search" style="width:200px">), "about:test")
+    control = page.forms.controls |> Map.values() |> Enum.find(&Forms.editable?/1)
+    assert control.placeholder?
+    {items, _} = layout(page, %{cid: control.cid, caret: {0, 0}})
+
+    assert Layout.patch_field(items, control.cid, "", "a", nil, &measure/2) == :error
   end
 end

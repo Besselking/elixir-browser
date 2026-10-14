@@ -100,6 +100,10 @@ jobs:
   # The layout and paint engine against the WPT reftests: a test that passed in
   # reftest.baseline must keep passing. `mix reftest --update` records progress. A pull request
   # that only touches the JavaScript runtime or documentation skips the slow steps.
+  # `--layout-check` also lays every page out from a kept layout memo and fails when that
+  # differs from a fresh layout (about +13% time); shard 1 also runs the edit-differential
+  # check of the memo on the bench pages, and shard 2 the sweep: every test file laid out
+  # with the sizing fold in check mode (0 wrong widths is the bar).
   reftest-shard:
     name: reftest (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
@@ -151,7 +155,15 @@ jobs:
 
       - name: Run the reftests and compare with the baseline
         if: steps.scope.outputs.run == 'true'
-        run: mix reftest --fetch --check --shard ${{ matrix.shard }}/3
+        run: mix reftest --fetch --check --layout-check --shard ${{ matrix.shard }}/3
+
+      - name: Lay the bench pages out after edits, from the memo and afresh
+        if: steps.scope.outputs.run == 'true' && matrix.shard == 1
+        run: EDITS=20 mix run --no-start bench/layout_edits.exs
+
+      - name: Compare the sizing fold with layouts over every test file
+        if: steps.scope.outputs.run == 'true' && matrix.shard == 2
+        run: mix reftest --sweep
 
   # One check per suite with the old names, so a branch protection rule that requires
   # `test262` or `reftest` keeps working. `if: always()` so that a failed or cancelled shard

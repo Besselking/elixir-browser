@@ -196,6 +196,13 @@ defmodule Browser.InteractTest do
       assert fit("abcdefghij", 9, 5, 50) == 5
     end
 
+    test "deleting at the end brings the hidden text back into view" do
+      # "abcdefgh" at width 50 shows "defgh"; after a backspace "abcdefg" fits from "c"
+      assert fit("abcdefg", 7, 3, 50) == 2
+      assert fit("abc", 3, 3, 50) == 0
+      assert fit("", 0, 5, 50) == 0
+    end
+
     test "always leaves the caret reachable even in a tiny field" do
       assert fit("abc", 3, 0, 0) == 3
     end
