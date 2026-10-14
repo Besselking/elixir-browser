@@ -8186,6 +8186,63 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert item_height("", "flex-basis:50px") == 500
     end
 
+    # -> the heights of the rects of the colors 1 to 9 (#100000 to #900000) of a page
+    defp red_heights(html) do
+      page = Page.build(~s(<body style="margin:0">#{html}</body>), "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+
+      for %{type: :rect, color: {r, 0, 0}, h: h} <- items,
+          r in 16..144//16,
+          into: %{},
+          do: {div(r, 16), round(h)}
+    end
+
+    test "a column with only a min-height does not shrink its items" do
+      # (the column is as high as its items when they need more than the min-height: Flexbox
+      # §9.2 step 4 and §9.9.1. So there is no negative free space)
+      assert item_height("min-height:0", "overflow:auto") == 500
+      assert item_height("min-height:10px", "overflow:auto") == 500
+      assert item_height("min-height:600px", "overflow:auto;flex-grow:1") == 600
+
+      # (the same column as an item of a row)
+      assert %{1 => 500} =
+               red_heights(
+                 ~s(<div style="display:flex"><div style="display:flex;flex-direction:column;) <>
+                   ~s(min-height:0;width:100px"><div style="background:#100000;overflow:auto">) <>
+                   ~s(<div style="height:500px">a</div></div></div></div>)
+               )
+
+      # (a column with min-height: 0 in a column with a height: only the outer column shrinks
+      # its items)
+      assert %{1 => 96, 2 => 4, 3 => 96} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;display:flex;flex-direction:column;) <>
+                   ~s(min-height:0"><div style="background:#300000;overflow:auto">) <>
+                   ~s(<div style="height:500px">a</div></div></div>) <>
+                   ~s(<div style="background:#200000;height:20px"></div></div>)
+               )
+    end
+
+    test "a percentage basis in a column with no definite height is the content height" do
+      # (Flexbox §7.2.3 and §9.2 step 3; `flex: 1` is a basis of 0%)
+      assert item_height("", "flex:1;overflow:auto") == 500
+      # (and the item's own height is not used)
+      assert item_height("", "flex:0 0 0%;height:50px") == 500
+      assert item_height("min-height:200px", "flex-basis:50%;overflow:auto") == 500
+      assert item_height("height:200px", "flex-basis:50%;overflow:auto") == 100
+
+      # (a sticky footer: the main part is as high as its content)
+      assert %{1 => 50, 2 => 1000, 3 => 30} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;min-height:600px">) <>
+                   ~s(<header style="background:#100000;height:50px"></header>) <>
+                   ~s(<main style="background:#200000;overflow:hidden;flex:1">) <>
+                   ~s(<div style="height:1000px"></div></main>) <>
+                   ~s(<footer style="background:#300000;height:30px"></footer></div>)
+               )
+    end
+
     test "a form control keeps the height of its content" do
       # (the UA sheet gives it `overflow: hidden` only to clip what is in it)
       page =

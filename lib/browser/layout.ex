@@ -10394,6 +10394,9 @@ defmodule Browser.Layout do
     gaps = round(cs.row_gap) * max(length(sized) - 1, 0)
     outer = & &1.h
     free = if cs.height, do: cs.height - Enum.sum(Enum.map(sized, & &1.base)) - gaps, else: 0
+    # (a column with only a min-height is as high as its items when they need more: Flexbox
+    # §9.2 step 4. Then there is no negative free space, and no item shrinks)
+    free = if cs.hdef, do: free, else: max(free, 0)
 
     sized =
       if cs.height,
@@ -10507,6 +10510,10 @@ defmodule Browser.Layout do
         nil ->
           h
 
+        {:pct, _} when not cs.hdef ->
+          # (found below: a percentage of a height that is not definite is `content`)
+          nil
+
         basis ->
           size = len_px(basis, cs.height || 0) + if(it.sizing == :border, do: 0, else: it.vextra)
           max(size, it.vextra) + auto_zero(it.mt) + auto_zero(it.mb)
@@ -10515,17 +10522,26 @@ defmodule Browser.Layout do
     # (the height of the content, for `flex_content_floor/2`)
     content_h = if Map.get(it, :plain_h?, false), do: {w, h}
     # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
-    basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.height != nil)
+    basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.hdef)
 
-    Map.merge(it, %{
-      w: w,
-      items: items,
-      h: h,
-      x: x,
-      base: base,
-      content_h: content_h,
-      basis_def?: basis_def?
-    })
+    it =
+      Map.merge(it, %{
+        w: w,
+        items: items,
+        h: h,
+        x: x,
+        base: base,
+        content_h: content_h,
+        basis_def?: basis_def?
+      })
+
+    # a basis of a percentage of a height that is not definite is the height of the content,
+    # and the item's own height is not used (Flexbox §7.2.3, §9.2 step 3)
+    cond do
+      base != nil -> it
+      it.rebuild != nil -> %{it | base: flex_content_floor(st, it)}
+      true -> %{it | base: h}
+    end
   end
 
   # The height the content of a column item needs (its automatic minimum height): the item laid
