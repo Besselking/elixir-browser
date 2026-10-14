@@ -9429,10 +9429,11 @@ defmodule Browser.Layout do
       # a scroll container in the main axis of a column has no automatic minimum height
       # (Flexbox §4.5). Not a form control: the UA sheet gives it `overflow: hidden` only to
       # clip what is in it, and its content size stays its minimum.
+      # When one axis is hidden, scroll or auto, `visible` and `clip` in the other axis compute
+      # to auto and hidden (CSS Overflow 3 §3): the box is a scroll container in both axes.
       col_scroll?:
         tag not in ~w(input select textarea button) and
-          (c["overflow-y"] in ~w(hidden scroll auto) or
-             (c["overflow-y"] in [nil, "visible"] and c["overflow-x"] in ~w(hidden scroll auto))),
+          (c["overflow-y"] in ~w(hidden scroll auto) or c["overflow-x"] in ~w(hidden scroll auto)),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
       hpct:

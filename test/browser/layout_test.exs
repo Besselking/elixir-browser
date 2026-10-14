@@ -8214,8 +8214,12 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert item_height("height:100px", "") == 500
       # (a min-height of its own is still kept)
       assert item_height("height:100px", "overflow:auto;min-height:200px") == 200
-      # (only the main axis counts: an item that does not scroll in it keeps its minimum)
-      assert item_height("height:100px", "overflow-x:hidden;overflow-y:clip") == 500
+      # (when one axis is hidden, scroll or auto, `visible` and `clip` in the other axis compute
+      # to auto and hidden: CSS Overflow 3 §3)
+      assert item_height("height:100px", "overflow-x:hidden;overflow-y:clip") == 100
+      assert item_height("height:100px", "overflow-x:auto;overflow-y:clip") == 100
+      assert item_height("height:100px", "overflow-x:hidden") == 100
+      assert item_height("height:100px", "overflow-x:clip;overflow-y:hidden") == 100
       # (in a column with no height, a scroll container with a definite basis is that high)
       assert item_height("", "flex-basis:50px;overflow:auto") == 50
       assert item_height("", "flex-basis:50px") == 500
