@@ -8097,6 +8097,16 @@ defmodule Browser.LayoutNestedBoxesTest do
       # not follow it and lays the content out)
       assert {16, _, refused} = flex.("word-break:break-all", "aaaa bb")
       assert refused > 0
+
+      # (the fold finds the lines that a layout finds in a box narrower than the text)
+      assert {width, _, _} =
+               fold_width(
+                 ~s(<div style="width:100px"><span style="display:inline-block;) <>
+                   ~s(border:5px solid;white-space:break-spaces;background:red">) <>
+                   "aaaaaa dddd aa</span></div>"
+               )
+
+      assert width == 100
     end
   end
 
