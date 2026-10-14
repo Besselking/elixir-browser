@@ -19,6 +19,7 @@ defmodule Browser.JS.Classes do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props}
+  require Browser.JS.Obj, as: Obj
 
   # Check mode (`JS_RESOLVE_CHECK=1`), as in `Browser.JS.Interp`: the flag is read at
   # compile time, so without it no check costs anything.
@@ -80,7 +81,7 @@ defmodule Browser.JS.Classes do
           "Class extends value does not have valid prototype property"
         )
 
-    proto = new_object([], parent_proto)
+    proto = new_proto_object(parent_proto)
     parent = if parent == :null, do: nil, else: parent
     derived? = super_node != nil
 
@@ -113,14 +114,7 @@ defmodule Browser.JS.Classes do
     {:obj, fid} = f
     fobj = deref(fid)
     fobj = Map.put(fobj, :class_ctor, true)
-
-    fobj =
-      Map.update(
-        fobj,
-        :attrs,
-        %{"prototype" => %{w: false, c: false}},
-        &Map.put(&1, "prototype", %{w: false, c: false})
-      )
+    fobj = Obj.put_attrs(fobj, "prototype", %{w: false, c: false})
 
     store(fid, if(parent, do: %{fobj | proto: parent}, else: fobj))
 
@@ -249,11 +243,14 @@ defmodule Browser.JS.Classes do
   # The default constructor: `constructor() {}` for a base class and
   # `constructor(...args) { super(...args) }` for a derived class. With the `Info` of rule
   # R4 the node is in slot form, so it runs on a frame: the rest parameter `args` is slot 6.
+  # The spec gives the arguments to the parent constructor with no iterator, so a
+  # replaced `Array.prototype[Symbol.iterator]` does not run: the argument is
+  # `{:spread_rest, args}` and not a spread (`Interp.eval_list/2`).
   defp default_constructor(name, false, src, nil), do: {:fn, name, [], [], false, src}
 
   defp default_constructor(name, true, src, nil) do
     {:fn, name, [{:rest, {:id, "args"}}],
-     [{:expr, {:call, {:super}, [{:spread, {:id, "args"}}], false}}], false, src}
+     [{:expr, {:call, {:super}, [{:spread_rest, {:id, "args"}}], false}}], false, src}
   end
 
   defp default_constructor(name, derived?, _src, %Browser.JS.Resolve.Info{} = dinfo) do
@@ -263,8 +260,8 @@ defmodule Browser.JS.Classes do
     if derived? do
       args = {:slot, 0, 6, "args"}
 
-      {:fn, name, [{:rest, args}], [{:expr, {:call, {:super}, [{:spread, args}], false}}], false,
-       dinfo}
+      {:fn, name, [{:rest, args}], [{:expr, {:call, {:super}, [{:spread_rest, args}], false}}],
+       false, dinfo}
     else
       {:fn, name, [], [], false, dinfo}
     end
@@ -377,7 +374,7 @@ defmodule Browser.JS.Classes do
         case List.first(args, :undefined) do
           {:obj, id} = o ->
             case k do
-              {:private, _} -> Map.has_key?(deref(id).props, k)
+              {:private, _} -> Obj.has_own?(deref(id), k)
               _ -> Interp.has_property?(o, k)
             end
 
@@ -599,7 +596,7 @@ defmodule Browser.JS.Classes do
   end
 
   defp accessor_slot!({:obj, id}, storage) do
-    unless Map.has_key?(deref(id).props, storage),
+    unless Obj.has_own?(deref(id), storage),
       do: throw_error("TypeError", "Cannot access an auto-accessor on an object that lacks it")
   end
 
@@ -770,7 +767,7 @@ defmodule Browser.JS.Classes do
   # stores a private method, accessor half or field value on an object
   defp put_private({:obj, id}, key, kind, value) do
     o = deref(id)
-    existing = Map.get(o.props, key)
+    existing = Obj.own_value(o, key)
 
     duplicate? =
       case {kind, existing} do
@@ -796,10 +793,10 @@ defmodule Browser.JS.Classes do
       end
 
     o = if kind == :method, do: Map.update(o, :pmethods, [key], &[key | &1]), else: o
-    store(id, %{o | props: Map.put(o.props, key, stored)})
+    store(id, Obj.own_put_value(o, key, stored))
   end
 
-  # `super(...)` and `super_base/1` find their bindings by name. From resolve level 3 (step
+  # `super(...)`, `super_base/1` and `super_this/1` find their bindings by name. From resolve level 3 (step
   # 2d) these bindings can be hidden slots of a constructor or method frame: the by-name
   # walk reads `info.slots` of each frame on the way, also through an arrow frame or a
   # block frame, and `declare/3` writes the `this` slot of the frame.
@@ -859,7 +856,11 @@ defmodule Browser.JS.Classes do
     unless ok?, do: raise(ArgumentError, "resolve check: super() lands on #{inspect(sc)}")
   end
 
-  @doc "The object `super.x` reads from, and the current `this`."
+  @doc """
+  The object `super.x` reads from, and the current `this`. The key of `super.x` has no
+  effect, so this one call can read `this` and the prototype together. For `super[k]`, see
+  `super_this/1`.
+  """
   def super_base(env) do
     with {:ok, {:obj, hid}} <- Interp.lookup_scoped(env, :home),
          {:ok, this} <- Interp.lookup_scoped(env, :this) do
@@ -870,10 +871,33 @@ defmodule Browser.JS.Classes do
             "Must call super constructor in derived class before accessing 'this'"
           )
 
-      parent = deref(hid).proto
-      {parent || :null, this}
+      {deref(hid).proto || :null, this}
     else
       _ -> throw_error("SyntaxError", "'super' keyword unexpected here")
     end
   end
+
+  @doc """
+  The home object and the current `this` of `super[k]`. The spec reads `this` before it
+  evaluates the key, and the prototype of the home object (`super_proto/1`) after it. A key
+  that changes that prototype therefore changes the object that `super[k]` uses.
+  """
+  def super_this(env) do
+    with {:ok, {:obj, _} = home} <- Interp.lookup_scoped(env, :home),
+         {:ok, this} <- Interp.lookup_scoped(env, :this) do
+      if this == :uninit_this,
+        do:
+          throw_error(
+            "ReferenceError",
+            "Must call super constructor in derived class before accessing 'this'"
+          )
+
+      {home, this}
+    else
+      _ -> throw_error("SyntaxError", "'super' keyword unexpected here")
+    end
+  end
+
+  @doc "The object that `super` reads from: the prototype of the home object, or `:null`."
+  def super_proto({:obj, hid}), do: deref(hid).proto || :null
 end

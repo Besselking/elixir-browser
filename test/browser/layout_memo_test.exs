@@ -163,6 +163,66 @@ defmodule Browser.LayoutMemoTest do
     same!(page(html.("one")), memo)
   end
 
+  # (an inner block placed again at another y is one entry in the fragment of its outer block;
+  # when the outer block is then placed again at another y, its items move by both offsets)
+  test "a block placed again inside a block placed again moves by both offsets" do
+    html = fn above, before ->
+      """
+      <p>#{above}</p>
+      <div><p>#{before}</p><div><p>inner block text</p><p>more inner text</p></div></div>
+      <p>after</p>
+      """
+    end
+
+    long = Enum.map_join(1..40, " ", &"w#{&1}")
+    {_, _, memo} = kept(page(html.("one", "x")), nil)
+    {_, memo} = same!(page(html.("one", long)), memo)
+
+    assert Enum.any?(memo.frags, fn {_key, {_gen, _ops, states}} ->
+             is_list(states) and
+               Enum.any?(states, fn {_skey, frag} ->
+                 Enum.any?(frag.items, &match?({:frag, dy, _, _} when dy != 0, &1))
+               end)
+           end)
+
+    {items, _memo} = same!(page(html.("one " <> long, long)), memo)
+    assert Enum.any?(items, &(&1.type == :text and &1.text == "more"))
+  end
+
+  # (the inner flex item ends inside the outer one: what comes after it is still in a flex item,
+  # whether the inner one is laid out or placed again from its fragment)
+  test "a flex item inside a flex item is laid out the same from the memo" do
+    html = fn overflow ->
+      ~s(<body style="width:700px"><section style="display:flex">adipiscing amet adipiscing ) <>
+        ~s(eiusmod ipsum eiusmod ut<section style="overflow:#{overflow}">sed ) <>
+        ~s(<div style="position:absolute">eiusmod <p style="display:flex">incididunt </p>) <>
+        "labore dolor consectetur lorem tempor amet consectetur incididunt" <>
+        ~s(<div style="max-width:90px">lorem<div style="float:left;text-indent:30px">amet ) <>
+        "</div></div>adipiscing</div></section></section>"
+    end
+
+    {_, _, memo} = kept(page(html.("hidden")), nil, [], 800)
+    {_, memo} = same!(page(html.("hidden")), memo, [], 800)
+    {_, memo} = same!(page(html.("visible")), memo, [], 800)
+    same!(page(html.("hidden")), memo, [], 800)
+  end
+
+  # (a measure of content puts the mark of an intrinsic size back as it found it, so that the
+  # keys of the memo after it are the same as in a layout whose measures come from the memo)
+  test "a float with a positioned box in an inline flex box is laid out the same from the memo" do
+    html = fn word ->
+      ~s(<body style="width:700px"><b style="display:inline-flex">elit <section>dolor <div>) <>
+        ~s(incididunt <b style="float:right">adipiscing <b style="position:absolute">amet </b>) <>
+        "sed </b></div>adipiscing elit incididunt labore #{word} tempor</section>dolor " <>
+        ~s(<b style="position:relative">labore<fieldset style="width:60%">eiusmod ) <>
+        "<fieldset><legend>leg </legend>sed </fieldset></fieldset></b>adipiscing </b>"
+    end
+
+    {_, _, memo} = kept(page(html.("lorem")), nil, [], 800)
+    {_, memo} = same!(page(html.("lorem lorem extra words here")), memo, [], 800)
+    same!(page(html.("lorem")), memo, [], 800)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

@@ -500,6 +500,16 @@ defmodule Browser.JS.Parser do
 
   # ── statements ─────────────────────────────────────────────
 
+  # In an async generator, `return;` finishes without an await of its value, but
+  # `return undefined;` awaits. The value `:ag_bare` tells the two apart: the evaluator
+  # (`Browser.JS.Async`) finishes the generator on it without an await. It is a constant,
+  # so a `return;` in any statement, also one that runs on a sync path, gives it.
+  defp bare_return do
+    if Process.get(:js_ag_body, false),
+      do: {:return, {:lit, :ag_bare}},
+      else: {:return, nil}
+  end
+
   defp statement([{:p, "{", _} | ts]) do
     {body, ts} = block_body(ts, [])
     {{:block, check_scope(body, false)}, ts}
@@ -577,16 +587,16 @@ defmodule Browser.JS.Parser do
 
     case ts do
       [{:p, ";", _} | ts] ->
-        {{:return, nil}, ts}
+        {bare_return(), ts}
 
       [{_, _, nl} | _] when nl?(nl) ->
-        {{:return, nil}, ts}
+        {bare_return(), ts}
 
       [{:p, "}", _} | _] ->
-        {{:return, nil}, ts}
+        {bare_return(), ts}
 
       [{:eof, _, _} | _] ->
-        {{:return, nil}, ts}
+        {bare_return(), ts}
 
       _ ->
         {e, ts} = expression(ts)
@@ -2239,6 +2249,8 @@ defmodule Browser.JS.Parser do
     outer_async = Process.get(:js_async, false)
     Process.put(:js_generator, generator?)
     Process.put(:js_async, Process.delete(:js_async_next) == true)
+    # (true in the body of an async generator, see `bare_return/0`)
+    outer_ag = Process.put(:js_ag_body, generator? and Process.get(:js_async))
     outer_sb = Process.put(:js_static_block, false)
     class_method? = Process.delete(:js_class_method) == true
     nt = Process.put(:js_nt, true)
@@ -2266,6 +2278,7 @@ defmodule Browser.JS.Parser do
     after
       Process.put(:js_generator, outer)
       Process.put(:js_async, outer_async)
+      Process.put(:js_ag_body, outer_ag || false)
       Process.put(:js_static_block, outer_sb || false)
       Process.put(:js_nt, nt)
       Process.put(:js_fn, outer_fn)
@@ -2335,8 +2348,10 @@ defmodule Browser.JS.Parser do
 
   defp arrow_body(params, [{:p, "{", _} | ts]) do
     outer_sb = Process.put(:js_static_block, false)
+    outer_ag = Process.put(:js_ag_body, false)
     {body, ts} = function_body(ts, params, true)
     Process.put(:js_static_block, outer_sb || false)
+    Process.put(:js_ag_body, outer_ag || false)
     {{:fn, nil, params, body, :arrow, nil}, ts}
   end
 

@@ -10,11 +10,23 @@ defmodule Browser.JS.GC do
   `{:obj, id}` and every integer that is a heap id, in any tuple, list, map and in the
   environment of Elixir funs (the built-ins capture ids). A stray integer can keep a dead object
   alive, but nothing reachable is ever freed. Function bodies are syntax trees and not walked;
-  only the scope and `home` of a closure are.
+  only the scope and `home` of a closure are. The compiled code of step 5 (the `{:jsc, _}`
+  keys and the funs of `Browser.JS.Compile`) is not walked either: it holds no heap id.
+  The continuation of a compiled plan of an async body or a generator (step 5c) is a fun
+  of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
+  stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
+  a lift template only while the template runs, so it is a root like any other key. The
+  fields of a heap record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold
+  counts and keys, and a count must not keep a dead object alive. The cells of the inline
+  caches (step A2) are process keys that are negative integers. They are not heap entries
+  and not roots: a cell can hold the id of a prototype, and a freed prototype makes the
+  cell miss (`Browser.JS.Shape`).
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers).
   """
+
+  require Browser.JS.Obj, as: Obj
 
   @min_collect 100_000
 
@@ -56,10 +68,35 @@ defmodule Browser.JS.GC do
     {ids, roots} =
       :lists.foldl(
         fn
-          {k, _}, {ids, roots} when is_integer(k) -> {[k | ids], roots}
+          {k, _}, {ids, roots} when is_integer(k) and k >= 0 -> {[k | ids], roots}
+          # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
+          # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
+          # a prototype in it does not keep the prototype alive)
+          {k, _}, acc when is_integer(k) -> acc
           {{:js_hoist, _}, _}, acc -> acc
+          # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its
+          # syntax nodes hold slot numbers, which must not keep an object alive)
+          {{:jsc, _}, _}, acc -> acc
+          # (the count of the code cache holds two integers, which are not heap ids)
+          {:jsc_budget, _}, acc -> acc
           {:js_memo, _}, acc -> acc
-          {:js_heap_n, _}, acc -> acc
+          {:js_freed, _}, acc -> acc
+          # (the call chain holds names, positions and depths, never an id; a depth or a
+          # line that equals the id of a dead object must not keep it alive)
+          {:js_stack, _}, acc -> acc
+          {:js_check_stack, _}, acc -> acc
+          # (the transition table of the shapes and its counters hold keys, shapes and
+          # integers, never a heap id, see `Browser.JS.Shape`; a count that equals the id
+          # of a dead object must not keep it alive)
+          {{:jst, _}, _}, acc -> acc
+          {:js_shape_next, _}, acc -> acc
+          {:js_ic_next, _}, acc -> acc
+          {:js_shape_n, _}, acc -> acc
+          {:js_shape_since, _}, acc -> acc
+          # (the positions of the keys of the array iterators hold two prototypes and two
+          # built-in functions, which are roots anyway, and shape ids and positions, which
+          # are not heap ids, see `Browser.JS.Interp`)
+          {:js_arr_iter_pos, _}, acc -> acc
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -87,7 +124,7 @@ defmodule Browser.JS.GC do
           ids
         )
 
-      Process.put(:js_heap_n, live)
+      Process.put(:js_freed, :erlang.get(:js_next) - live)
       Process.put(:js_gc_at, max(@min_collect, 2 * live))
       freed
     after
@@ -102,7 +139,8 @@ defmodule Browser.JS.GC do
   # counts only when it is reached through an edge that holds a scope: the `scope` and
   # `home` of a closure, the `parent` and `env` of a map, the `map_scope` of a mapped
   # arguments object (a frame from step 2d, which must be detached before its frame is
-  # freed), and the parent of a frame. The
+  # freed), the `frame` of a CPS context or a generator record (step 2e, which must not
+  # outlive `Browser.JS.Interp.frame_done/2`), and the parent of a frame. The
   # conservative walk reads every integer as an id, so an array length or a line number
   # that equals the id of a tombstone must not count.
   def dangling(extra) do
@@ -111,8 +149,23 @@ defmodule Browser.JS.GC do
         fn
           {k, _}, roots when is_integer(k) -> roots
           {{:js_hoist, _}, _}, roots -> roots
+          # (the cache of compiled code holds no heap id)
+          {{:jsc, _}, _}, roots -> roots
+          {:jsc_budget, _}, roots -> roots
           {:js_memo, _}, roots -> roots
-          {:js_heap_n, _}, roots -> roots
+          {:js_freed, _}, roots -> roots
+          # (the call chain holds names, positions and depths, never an id)
+          {:js_stack, _}, roots -> roots
+          {:js_check_stack, _}, roots -> roots
+          # (the transition table of the shapes and its counters hold no heap id)
+          {{:jst, _}, _}, roots -> roots
+          {:js_shape_next, _}, roots -> roots
+          # (the counter of the site numbers of the inline caches holds no heap id; the
+          # cells have integer keys, so the first clause skips them)
+          {:js_ic_next, _}, roots -> roots
+          {:js_shape_n, _}, roots -> roots
+          {:js_shape_since, _}, roots -> roots
+          {:js_arr_iter_pos, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots
@@ -141,9 +194,15 @@ defmodule Browser.JS.GC do
        when is_tuple(t) and tuple_size(t) >= 5 and
               (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
                  is_struct(elem(t, 1), Browser.JS.Resolve.Scope)) do
-    stack = spush_from(t, 3, tuple_size(t), rest, marks)
+    # The scan starts at the root id (element 5), as `mark/2` does. Elements 3 and 4 hold
+    # the call chain and the call position. Their integers (depths and line numbers) are
+    # not ids, and an object found through them by accident could report a false hit.
+    stack = spush_from(t, 5, tuple_size(t), rest, marks)
     scan(spush(elem(t, 0), stack, marks, true), marks)
   end
+
+  # (a shape holds keys, positions and attributes, never a heap id, see `Browser.JS.Shape`)
+  defp scan([{:js_shape, _, _, _, _, _, _} | rest], marks), do: scan(rest, marks)
 
   defp scan([t | rest], marks) when is_tuple(t),
     do: scan(spush_from(t, 1, tuple_size(t), rest, marks), marks)
@@ -166,7 +225,7 @@ defmodule Browser.JS.GC do
             spush(v, acc, marks, false)
 
           k, v, acc ->
-            spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env, :map_scope])
+            spush(v, spush(k, acc, marks, false), marks, k in [:parent, :env, :map_scope, :frame])
         end,
         rest,
         t
@@ -176,9 +235,13 @@ defmodule Browser.JS.GC do
   end
 
   defp scan([t | rest], marks) when is_function(t) do
-    case :erlang.fun_info(t, :env) do
-      {:env, env} -> scan(Enum.reduce(env, rest, &spush(&1, &2, marks, false)), marks)
-      _ -> scan(rest, marks)
+    if compiled?(t) do
+      scan(rest, marks)
+    else
+      case :erlang.fun_info(t, :env) do
+        {:env, env} -> scan(Enum.reduce(env, rest, &spush(&1, &2, marks, false)), marks)
+        _ -> scan(rest, marks)
+      end
     end
   end
 
@@ -194,8 +257,10 @@ defmodule Browser.JS.GC do
   defp improper_to_list([h | t]), do: [h, t]
   defp improper_to_list([]), do: []
 
-  # `scope?` says whether the edge to `t` holds a scope: a tombstone found there is a hit
-  defp spush(t, stack, marks, scope?) when is_integer(t) do
+  # `scope?` says whether the edge to `t` holds a scope: a tombstone found there is a hit.
+  # Only an integer of 0 or more can be a heap id: a negative integer is the key of the cell
+  # of an inline cache.
+  defp spush(t, stack, marks, scope?) when is_integer(t) and t >= 0 do
     case :erlang.get(t) do
       :undefined ->
         stack
@@ -219,9 +284,9 @@ defmodule Browser.JS.GC do
   defp mark([], _marks), do: :ok
 
   # A frame: element 2 is the resolver's record. Only the parent, the root and the slots can
-  # hold ids. The caller id and the line number in `call_pos` must not keep a random object
-  # alive. The guard names the two record structs: other tuples, such as the function
-  # tuple of a WebAssembly instance, can also have a struct in position 2.
+  # hold ids. The depths and the lines in the call chain and the line in `call_pos` must not
+  # keep a random object alive. The guard names the two record structs: other tuples, such
+  # as the function tuple of a WebAssembly instance, can also have a struct in position 2.
   defp mark([t | rest], marks)
        when is_tuple(t) and tuple_size(t) >= 5 and
               (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
@@ -229,6 +294,11 @@ defmodule Browser.JS.GC do
     stack = push_frame_slots(t, 5, tuple_size(t), rest, marks)
     mark(push(elem(t, 0), stack, marks), marks)
   end
+
+  # A shape holds keys, positions and attributes, never a heap id (`Browser.JS.Shape`).
+  # The record clause below skips the `shape` field, so the walk gets here only for a shape
+  # in another place.
+  defp mark([{:js_shape, _, _, _, _, _, _} | rest], marks), do: mark(rest, marks)
 
   defp mark([t | rest], marks) when is_tuple(t),
     do: mark(push_tuple(t, tuple_size(t), rest, marks), marks)
@@ -244,6 +314,24 @@ defmodule Browser.JS.GC do
   defp mark([%{params: _, body: _} = closure | rest], marks) do
     stack = push(Map.get(closure, :scope), rest, marks)
     mark(push(Map.get(closure, :home), stack, marks), marks)
+  end
+
+  # The record of a heap object: the walk skips the fields that hold no id
+  # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, keys
+  # that `props` or the shape also holds, and the shape. The values of a fast record are
+  # in the tuple `vals`, which the walk visits as any tuple.
+  defp mark([t | rest], marks) when Obj.heap_record?(t) do
+    stack =
+      :maps.fold(
+        fn
+          k, _v, acc when Obj.no_refs?(k) -> acc
+          _k, v, acc -> push(v, acc, marks)
+        end,
+        rest,
+        t
+      )
+
+    mark(stack, marks)
   end
 
   defp mark([t | rest], marks) when is_map(t) do
@@ -262,9 +350,13 @@ defmodule Browser.JS.GC do
   end
 
   defp mark([t | rest], marks) when is_function(t) do
-    case :erlang.fun_info(t, :env) do
-      {:env, env} -> mark(push_list(env, rest, marks), marks)
-      _ -> mark(rest, marks)
+    if compiled?(t) do
+      mark(rest, marks)
+    else
+      case :erlang.fun_info(t, :env) do
+        {:env, env} -> mark(push_list(env, rest, marks), marks)
+        _ -> mark(rest, marks)
+      end
     end
   end
 
@@ -287,8 +379,10 @@ defmodule Browser.JS.GC do
   defp push_list([h | t], stack, marks), do: push(t, push(h, stack, marks), marks)
   defp push_list(_, stack, _marks), do: stack
 
-  # a heap id is marked when it is first reached, and its entry is looked at then
-  defp push(t, stack, marks) when is_integer(t) do
+  # A heap id is marked when it is first reached, and its entry is looked at then. Only an
+  # integer of 0 or more can be a heap id: a negative integer (a JS value, a count) is the
+  # key of the cell of an inline cache, which must not be walked as an object.
+  defp push(t, stack, marks) when is_integer(t) and t >= 0 do
     case :erlang.get(t) do
       :undefined ->
         stack
@@ -310,4 +404,12 @@ defmodule Browser.JS.GC do
     do: [t | stack]
 
   defp push(_, stack, _marks), do: stack
+
+  # A fun of the compiled code (step 5). It holds only values known at compile time: no
+  # heap id and no frame id (the capture rule of `Browser.JS.Compile`). So the walk does
+  # not go into it, also when a continuation of an async function holds it. Its syntax
+  # nodes and slot numbers are integers that the walk would read as ids, and a large body
+  # would cost a long walk at each collection.
+  @compile {:inline, compiled?: 1}
+  defp compiled?(f), do: :erlang.fun_info(f, :module) == {:module, Browser.JS.Compile}
 end

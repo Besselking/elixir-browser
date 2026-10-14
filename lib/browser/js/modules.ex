@@ -20,6 +20,7 @@ defmodule Browser.JS.Modules do
   """
 
   alias Browser.JS.{Async, Interp, Parser, Promise}
+  alias Browser.JS.Obj
 
   @tag {:symbol, :toStringTag, "Symbol.toStringTag"}
 
@@ -712,9 +713,8 @@ defmodule Browser.JS.Modules do
     Interp.store(
       id,
       o
-      |> Map.put(:props, %{@tag => tag_value})
-      |> Map.put(:attrs, %{@tag => %{w: false, c: false, e: false}})
-      |> Map.put(:ext, false)
+      |> Obj.put_with_attrs(@tag, tag_value, %{w: false, c: false, e: false})
+      |> Obj.prevent()
     )
 
     obj

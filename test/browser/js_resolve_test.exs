@@ -1463,7 +1463,7 @@ defmodule Browser.JS.ResolveTest do
     end
 
     # Step 2b: every other `return` with a value inside a rewritten function is `:plain`,
-    # so the evaluator never reads the run-time tail flag there. A sloppy function has no
+    # so it never gives a `{:tail, ...}` completion. A sloppy function has no
     # tail sites at all. A function the level does not rewrite keeps the bare form, and
     # `check/1` refuses a bare return inside a rewritten function.
     f = fun(resolve("function f(n) { if (n) return g(); return 1 }"), "f")
@@ -1593,7 +1593,8 @@ defmodule Browser.JS.ResolveTest do
   test "27. round trip and check over the corpus" do
     {failures, parsed, unparsed} =
       Enum.reduce(corpus(), {[], 0, 0}, fn {label, src, opts}, {failures, parsed, unparsed} ->
-        case Parser.parse(src, opts) do
+        # (the plain tree: the parser resolves at the default level, which is 4)
+        case Parser.parse(src, [resolve: :off] ++ opts) do
           {:error, _} ->
             {failures, parsed, unparsed + 1}
 
@@ -1631,7 +1632,7 @@ defmodule Browser.JS.ResolveTest do
   test "28. the Info of every function agrees with the interpreter's hoisting helpers" do
     {failures, functions} =
       Enum.reduce(corpus(), {[], 0}, fn {label, src, opts}, {failures, functions} ->
-        case Parser.parse(src, opts) do
+        case Parser.parse(src, [resolve: :off] ++ opts) do
           {:error, _} ->
             {failures, functions}
 
@@ -1857,11 +1858,12 @@ defmodule Browser.JS.ResolveTest do
     assert %Scope{frame: false, slots: %{"c" => 8, "g" => 9}, hoist: [{9, _}]} = scope_of(f, 1)
 
     # The constants agree with the resolver's own Info for the same text, except for the
-    # source and `rewritten` (which step 2d sets).
+    # source, `rewritten` (which step 2d sets) and the `uid` of the parse (which `strip/1`
+    # removes).
     for {src, derived?} <- [{@s38b, false}, {@s38c, true}] do
       i = info(fun(resolve(src), "constructor"))
       d = Resolve.default_ctor_info(derived?, i.src)
-      assert %{i | rewritten: false} == d, src
+      assert Resolve.strip(%{i | rewritten: false}) == d, src
     end
   end
 
@@ -2290,6 +2292,83 @@ defmodule Browser.JS.ResolveTest do
     assert [{:class, _, _, [_], text}] = classes(resolve(src, resolve: 3))
     assert is_binary(text)
   end
+
+  # ── step 2e: what the resolver gives a level 4 body ──────────
+
+  # Section 1.1 of notes/js-frames-2e-design.md: the resolver does not change in step 2e,
+  # but the CPS evaluator now runs these forms on a frame, so the test fixes the shapes it
+  # reads.
+  describe "step 2e: level 4 bodies (2e design 1.1)" do
+    # True when `term` holds the node `x`, or a node for which the function `x` is true.
+    defp holds?(term, x) when is_function(x, 1), do: find(term, x) != nil
+    defp holds?(term, x), do: find(term, &(&1 == x)) != nil
+
+    test "an async function: slots, `{:aw}` on each statement that awaits, plain returns" do
+      src = "async function f(a){ let x = 1; const r = await g(a); if (a) return; return x }"
+      f = fun(resolve(src), "f")
+
+      assert %Info{
+               level: 4,
+               rewritten: true,
+               async?: true,
+               free: :counter,
+               tail_sites: 0,
+               has_await: true,
+               size: 8,
+               slots: %{"a" => 6, "x" => 7, "r" => 8}
+             } = info(f)
+
+      assert [
+               {:var, :let, _},
+               {:aw, {:var, :const, [{{:slot, 0, 8, "r"}, {:await, _}}]}},
+               {:if, _, {:return, nil}, nil},
+               {:return, {:slot, 0, 7, "x"}, :plain}
+             ] = body(f)
+    end
+
+    test "hidden slots of an async function and of an async arrow inside a plain function" do
+      h = fun(resolve("async function h(){ return arguments.length + await this.k }"), "h")
+      assert %Info{hidden: [:this, :args, :arguments]} = info(h)
+      assert holds?(body(h), {:aslot, 0, 8})
+      assert holds?(body(h), {:this, 0, 6})
+
+      tree =
+        resolve(
+          "function o(){ return [async () => { await 0; return arguments[0] + this.k }, async () => await 1] }"
+        )
+
+      a = arrow(tree, 0)
+      assert %Info{level: 4, rewritten: true, hidden: []} = info(a)
+      assert holds?(body(a), {:this, 1, 6})
+      assert holds?(body(a), {:aslot, 1, 8})
+
+      # An expression body has no statement to mark, so only the record says that it awaits.
+      e = arrow(tree, 1)
+      assert %Info{level: 4, has_await: true} = info(e)
+      refute holds?(body(e), &match?({:aw, _}, &1))
+    end
+
+    test "an async method has `this` and `home`, and `super.m()` keeps its form" do
+      m = fun(resolve("class B extends A { async m(){ await 0; return super.m() } }"), "m")
+      assert %Info{kind: :method, hidden: [:this, :home]} = info(m)
+      assert holds?(body(m), &match?({:super_member, _}, &1))
+    end
+
+    test "loop, catch and using shapes, and the for-init that is not wrapped" do
+      tree =
+        resolve(
+          "async function f(fs){ for (let i = 0; i < 3; i++) { fs.push(() => i); await i } try { await 0 } catch (e) { e } { await using r = x; r } }"
+        )
+
+      assert [
+               {:aw,
+                {:for, {:var, :let, _}, _, _, _, %Scope{kind: :loop, frame: true, per_iter: true}}},
+               {:aw, {:try, _, {:slot, 0, 7, "e"}, _, nil, %Scope{kind: :catch}}},
+               {:aw,
+                {:block, [{:aw, {:using, :await_using, {:slot, 0, 8, "r"}, _, _}}], %Scope{}}}
+             ] = body(fun(tree, "f"))
+    end
+  end
 end
 
 defmodule Browser.JS.ResolveEnvTest do
@@ -2301,8 +2380,17 @@ defmodule Browser.JS.ResolveEnvTest do
   alias Browser.JS.Resolve.Info
 
   test "the application env is the second source of the flag" do
+    # The suite-wide level (`JS_RESOLVE=off`) lives in the same key, so the test puts the
+    # old value back. A delete runs every later sync module at the default level.
+    previous = Application.fetch_env(:browser, :js_resolve)
     Application.put_env(:browser, :js_resolve, :info)
-    on_exit(fn -> Application.delete_env(:browser, :js_resolve) end)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, v} -> Application.put_env(:browser, :js_resolve, v)
+        :error -> Application.delete_env(:browser, :js_resolve)
+      end
+    end)
 
     assert {:ok,
             {:program, [{:fundecl, "f", {:fn, "f", [], [], false, %Info{rewritten: false}}}]}} =

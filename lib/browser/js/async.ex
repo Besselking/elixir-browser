@@ -13,64 +13,275 @@ defmodule Browser.JS.Async do
   too, kept in the `ctx` map, so that `try`/`finally` and labelled loops behave as usual across
   an `await`.
 
+  The sync evaluator gives a completion for each statement (step 3, see the "Control flow"
+  part of `Browser.JS.Interp`). `sync_stmt/5` sends `{:ret, v}`, `{:brk, label}` and
+  `{:cont, label}` to these continuations. A generator or async body makes no tail calls. So
+  when a `return f()` of the old path gives a pending call `{:tail, f, this, args}`,
+  `sync_stmt/5` makes the call immediately, inside its `try`, and a throw from the call
+  rejects the body.
+
   Within an expression the awaits are evaluated first, left to right, and the expression is then
   evaluated with their values (`f(a(), await b)` calls `a` after waiting for `b`); `&&`, `||`,
   `??` and `?:` keep their short-circuiting.
+
+  ## The call stack (step 2f)
+
+  `call_closure/4` pushes the cell `{name, call_pos, depth}` on the chain in `:js_stack`
+  while the sync part of the body runs, as a sync call does. So the cell counts for the
+  depth limit, and the function has its line in `Error.stack`. The body of an async
+  function or of an async generator that resumes after an `await` runs under a cell of its
+  own too, with the call position `nil`, because a job and not a caller runs it. An async
+  generator body that a request (`next`, `throw` or `return`) runs has a cell at the
+  position of the request. A request that waits in the queue while the body runs is
+  started by the body itself, after a `yield` or at its end. The body is then in its own
+  cell already, so it gets no second cell. Each cell gives back the chain and the position after it, as a
+  call does. A sync generator body runs under the chain of the code that resumed it and
+  pushes no cell. A frame from `Browser.JS.Interp.enter_frame/4` has `nil` in element 3,
+  because its body can run under more than one chain.
+
+  ## Frame mode (step 2e)
+
+  A function that the resolver rewrote (level 4) runs its body on a frame. The frame is built
+  by `Browser.JS.Interp.enter_frame/4`, and the context `ctx` then has the key `frame`. Every
+  context that is made from it keeps the key. In frame mode these rules apply:
+
+  - The resolver marks each statement that awaits with `{:aw, stmt}`. `cexec` sends a marked
+    statement to the CPS clauses and every other statement to the sync evaluator, with no
+    walk of the statement.
+  - An expression that awaits is lifted into a template with holes `{:cps_leaf, i}`. The
+    awaited values fill the holes as `{:val, v}`, and the template runs in the scope where
+    the resolver resolved it. So no scope comes between the frame and the code, and every
+    hop count stays exact. The optional chain puts its value into the tree in the same way.
+  - Blocks, loops, for-each items, switches and catch clauses enter the scope of the
+    resolver (`Browser.JS.Interp.cps_enter/2`). A framed scope gets a block frame, which the
+    collector takes later, as it takes the map scopes of the old path.
+  - The frame lives while a continuation of the body can run: a reaction of an awaited
+    promise, a microtask or the `resume` of a generator holds the frame id in its
+    environment. When the body has ended, `Browser.JS.Interp.frame_done/2` runs once. It
+    erases the frame when no closure can hold it.
+  - The statements do not write `:js_last` (step 3), because only script and eval code
+    have a completion value. A statement without awaits runs through
+    `Browser.JS.Interp.exec_frame_stmt/3`, and an expression statement with an await does
+    not write the value.
+
+  ## Compiled plans (step 5c)
+
+  In frame mode, `run_body/4` runs the plan that `Browser.JS.Compile.cps_body/1` gives for
+  the body (see "CPS plans" in `Browser.JS.Compile`). The plan finds the marks, the lift
+  plans and the parts of the loops once, when the body compiles at its first call. It
+  runs each run of statements without an await as one compiled list, and each expression
+  without an await as one compiled closure.
+
+  The plan does the same steps in the same order as the tree path: the same values,
+  errors, steps (`:js_steps`), heap ids and positions. The functions of the part
+  "compiled plans" below are the run-time half of the plans. Only they make the
+  continuations of a plan, because the collector (`Browser.JS.GC`) walks the funs of this
+  module but not the funs of `Browser.JS.Compile`.
+
+  The tree path (`clist/4`, `cexec/5`, `cs/5` and `cev/4`) stays. It runs the bodies at
+  `:off` and on the old path, all bodies when the switch `:js_compile` is off, a body over
+  the cap of the compiler, and the kinds that a plan keeps on the tree path (`yield*`,
+  for-in, for-of and for-await, `try` with an await, `using`, an optional chain that
+  awaits, a logical assignment that awaits, a compound assignment to `super[k]` that
+  awaits, and a lift plan with a leaf from a class).
   """
 
-  alias Browser.JS.{Interp, Promise}
+  alias Browser.JS.{Awaits, Compile, Interp, Promise}
+  import Awaits, only: [is_leaf_form: 1]
+  require Interp
+  alias Browser.JS.Resolve.Info
 
   @max_depth 1000
 
-  # A generator or async body makes no tail calls: a `return f()` in it must still see the
-  # body's `try` and `finally`. The body starts and resumes inside some caller's frame, which
-  # may be a strict function's with the tail flag on, so every entry into a body runs with the
-  # flag off (an ordinary call inside the body sets and restores the flag for itself).
-  defp no_tail(fun) do
-    tail = Process.put(:js_tail, false)
+  # Check mode (`JS_RESOLVE_CHECK=1`, see `config/config.exs`): the CPS evaluator asserts
+  # the invariants of frame mode (step 2e). The flag is read at compile time, so without it
+  # no check costs anything.
+  @check Application.compile_env(:browser, :js_resolve_check, false)
 
-    try do
-      fun.()
-    after
-      Process.put(:js_tail, tail)
+  # The forms that read a name. A call whose callee is one of these lifts only its
+  # arguments, so the callee is read after the awaits, as `{:id}` is at `:off`.
+  @name [:id, :slot, :gref, :mref, :aslot]
+
+  # The forms that a compound assignment can write. Their value is read before the awaits
+  # of the right side, and the write keeps its own form (see `read_form/1`).
+  @target @name ++ [:cslot, :fname, :mslot]
+
+  @compound ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=)
+
+  @doc false
+  # True for an operator of a compound assignment that is not logical. (public:
+  # `Browser.JS.Compile` uses it, so that the compiled plans and this module take the same
+  # operators to `compound_k/4`)
+  defguard compound_op?(op) when op in @compound
+  @logical_assign ~w(&&= ||= ??=)
+
+  # Runs `body` under the cell `{name, call_pos, depth}` of an async body (see "The call
+  # stack" above). After `body`, the chain and the position come back, as after a call.
+  # The cell is not refused at the depth limit, because the body has started already and
+  # must go on. The code is inline, so that a cell costs no call: a body pushes a cell at
+  # each resume after an await. Check mode runs the cell inside the oracle of
+  # `Interp.check_oracle/3`.
+  defmacrop in_cell(name, call_pos, do: body) do
+    if @check do
+      quote do
+        Interp.check_oracle(unquote(name), {:cell, unquote(call_pos)}, fn ->
+          push_cell(unquote(name), unquote(call_pos), fn -> unquote(body) end)
+        end)
+      end
+    else
+      quote do
+        below = :erlang.get(:js_stack)
+        pos = :erlang.get(:js_pos)
+        cell = {unquote(name), unquote(call_pos), Interp.depth_of(below) + 1}
+        :erlang.put(:js_stack, [cell | below])
+
+        try do
+          unquote(body)
+        after
+          :erlang.put(:js_stack, below)
+          :erlang.put(:js_pos, pos)
+        end
+      end
     end
   end
 
-  @doc "Calls an async closure: starts its body and returns its promise."
-  def call_closure(c, this, args) do
+  # (the cell of `in_cell/3` in check mode, as a function that the oracle runs)
+  if @check do
+    defp push_cell(name, call_pos, fun) do
+      below = :erlang.get(:js_stack)
+      pos = :erlang.get(:js_pos)
+      :erlang.put(:js_stack, [{name, call_pos, Interp.depth_of(below) + 1} | below])
+
+      try do
+        fun.()
+      after
+        :erlang.put(:js_stack, below)
+        :erlang.put(:js_pos, pos)
+      end
+    end
+  end
+
+  @doc """
+  Calls an async closure: starts its body and returns its promise. `id` is the id of the
+  function object, which the frame of a rewritten closure needs for its hidden slots.
+  """
+  def call_closure(id, c, this, args) do
+    if @check,
+      do: Interp.check_oracle(c.name, :call, fn -> start_closure(id, c, this, args) end),
+      else: start_closure(id, c, this, args)
+  end
+
+  # (the call of `call_closure/4`, without the check-mode oracle of `Interp.check_oracle/3`)
+  @compile {:inline, start_closure: 4}
+  defp start_closure(id, c, this, args) do
     p = Promise.new()
-
-    ctx = %{
-      ret: fn v -> Promise.resolve(p, v) end,
-      throw: fn e -> Promise.reject(p, e) end,
-      brk: %{},
-      cont: %{}
-    }
-
-    depth = Process.get(:js_depth)
+    below = :erlang.get(:js_stack)
+    depth = Interp.depth_of(below)
 
     if depth >= @max_depth,
       do: Interp.throw_error("RangeError", "Maximum call stack size exceeded")
 
-    Process.put(:js_depth, depth + 1)
+    # The sync part of the body runs under the cell of the function, as a sync call does.
+    pos =
+      case :erlang.get(:js_pos) do
+        :undefined -> nil
+        at -> at
+      end
+
+    :erlang.put(:js_stack, [{c.name, pos, depth + 1} | below])
 
     try do
-      scope = Interp.call_scope(c, this, args)
+      {env, frame, fns} = body_env(id, c, this, args)
 
-      no_tail(fn ->
-        case c.mode do
-          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
-          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
+      # The key `cell` names the cell that the body gets when it resumes after an await.
+      ctx =
+        if frame == nil do
+          %{
+            ret: fn v -> Promise.resolve(p, v) end,
+            throw: fn e -> Promise.reject(p, e) end,
+            brk: %{},
+            cont: %{},
+            cell: c.name
+          }
+        else
+          # A rewritten body runs on a frame. The promise settles first, and then the frame
+          # is done, because a settle runs no code of the body.
+          %{
+            ret: fn v -> settled(Promise.resolve(p, v), frame, fns) end,
+            throw: fn e -> settled(Promise.reject(p, e), frame, fns) end,
+            brk: %{},
+            cont: %{},
+            cell: c.name,
+            frame: frame
+          }
         end
-      end)
+
+      run_body(c, env, ctx, :undefined)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     after
-      Process.put(:js_depth, depth)
+      :erlang.put(:js_stack, below)
+      :erlang.put(:js_pos, pos)
     end
 
     p
   end
+
+  # Gives back the value of the settle after the frame of the body is done, so that the
+  # caller of `ret` or `throw` gets the same value as on the old path.
+  defp settled(result, frame, fns) do
+    Interp.frame_done(frame, fns)
+    result
+  end
+
+  # Starts a body: an arrow with an expression body returns its value, any other body falls
+  # off its end with `ending`. In frame mode the body runs its compiled plan (step 5c, see
+  # "Compiled plans" below), when `Browser.JS.Compile` gives one.
+  defp run_body(c, env, %{frame: _} = ctx, ending) do
+    case Compile.cps_body(c) do
+      nil ->
+        tree_body(c, env, ctx, ending)
+
+      plan ->
+        case c.mode do
+          :arrow_expr -> plan.(env, ctx, ctx.ret)
+          _ -> plan.(env, ctx, fn _ -> ctx.ret.(ending) end)
+        end
+    end
+  end
+
+  defp run_body(c, env, ctx, ending), do: tree_body(c, env, ctx, ending)
+
+  # (inline, so that a body on the tree path costs no more calls than before step 5c)
+  @compile {:inline, tree_body: 4}
+  defp tree_body(%{mode: :arrow_expr} = c, env, ctx, _ending), do: cev(c.body, env, ctx, ctx.ret)
+  defp tree_body(c, env, ctx, ending), do: clist(c.body, env, ctx, fn _ -> ctx.ret.(ending) end)
+
+  # The frame of a rewritten closure, or the call scope of the old path, and the frame
+  # fields of a generator record (`nil` on the old path).
+  defp body_env(id, %{info: %Info{rewritten: true}} = c, this, args) do
+    {frame, fns} = Interp.enter_frame(id, c, this, args)
+    if @check, do: check_marks(c)
+    {frame, frame, fns}
+  end
+
+  defp body_env(_id, c, this, args), do: {Interp.call_scope(c, this, args), nil, nil}
+
+  # Adds the frame to a context in frame mode. An old-path context never has the key.
+  defp with_frame(ctx, nil), do: ctx
+  defp with_frame(ctx, frame), do: Map.put(ctx, :frame, frame)
+
+  # Check mode: `info.has_await` is true when the body has a statement marked `{:aw}`.
+  defp check_marks(%{info: info, body: body}) do
+    if not info.has_await and is_list(body) and Enum.any?(body, &aw_mark?/1),
+      do: Interp.check_cps("#{inspect(info.name)} has {:aw} but no has_await")
+  end
+
+  defp aw_mark?({:aw, _}), do: true
+  defp aw_mark?({:fn, _, _, _, _, _}), do: false
+  defp aw_mark?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&aw_mark?/1)
+  defp aw_mark?(l) when is_list(l), do: Enum.any?(l, &aw_mark?/1)
+  defp aw_mark?(_), do: false
 
   @doc "Whether a module body awaits at its top level (not inside a function)."
   def has_tla?(stmts), do: Enum.any?(stmts, &has_await?/1)
@@ -87,7 +298,7 @@ defmodule Browser.JS.Async do
     }
 
     try do
-      no_tail(fn -> clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end) end)
+      clist(stmts, scope, ctx, fn _ -> Promise.resolve(p, :undefined) end)
     catch
       {:js_error, e} -> Promise.reject(p, e)
     end
@@ -104,8 +315,8 @@ defmodule Browser.JS.Async do
   # the body has returned control.
 
   @doc "Calls a generator function: binds the parameters and makes the generator object."
-  def call_generator(f, c, this, args) do
-    scope = Interp.call_scope(c, this, args)
+  def call_generator({:obj, fid} = f, c, this, args) do
+    {scope, frame, fns} = body_env(fid, c, this, args)
 
     proto =
       case Interp.get(f, "prototype") do
@@ -115,44 +326,54 @@ defmodule Browser.JS.Async do
 
     {:obj, gid} = gen = Interp.new_object([], proto)
 
-    ctx = %{
-      ret: fn v -> finish(gid, {:return, v}) end,
-      throw: fn e -> finish(gid, {:throw, e}) end,
-      yield: fn v, resume -> suspend(gid, v, resume) end,
-      brk: %{},
-      cont: %{}
-    }
+    ctx =
+      with_frame(
+        %{
+          ret: fn v -> finish(gid, {:return, v}) end,
+          throw: fn e -> finish(gid, {:throw, e}) end,
+          yield: fn v, resume -> suspend(gid, v, resume) end,
+          brk: %{},
+          cont: %{}
+        },
+        frame
+      )
 
     start = fn
-      {:next, _} ->
-        case c.mode do
-          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
-          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:undefined) end)
-        end
-
-      {:throw, e} ->
-        ctx.throw.(e)
-
-      {:return, v} ->
-        ctx.ret.(v)
+      {:next, _} -> run_body(c, scope, ctx, :undefined)
+      {:throw, e} -> ctx.throw.(e)
+      {:return, v} -> ctx.ret.(v)
     end
 
-    set_gen(gid, %{state: :start, resume: start})
+    set_gen(gid, %{state: :start, resume: start, frame: frame, fns: fns})
     gen
   end
 
   defp set_gen(gid, gen), do: Interp.store(gid, Map.put(Interp.deref(gid), :gen, gen))
 
   defp finish(gid, out) do
-    set_gen(gid, %{state: :done, resume: nil})
+    obj = Interp.deref(gid)
+    Interp.store(gid, %{obj | gen: %{release(obj.gen) | state: :done, resume: nil}})
     Process.put(:js_gen_out, out)
     :done
   end
 
   defp suspend(gid, v, resume) do
-    set_gen(gid, %{state: :suspended, resume: resume})
+    # (the record keeps `frame` and `fns`, so that the frame is released exactly once, when
+    # the generator is done; the object is read once, because this runs on every `yield`)
+    obj = Interp.deref(gid)
+    Interp.store(gid, %{obj | gen: %{obj.gen | state: :suspended, resume: resume}})
     Process.put(:js_gen_out, {:yield, v})
     :suspended
+  end
+
+  # The body of a generator or an async generator has ended, so no continuation of it can
+  # run again: its frame is handed to `Interp.frame_done/2`. The record then has no frame,
+  # so a second call does nothing. A record of the old path has no frame at all.
+  defp release(%{frame: nil} = rec), do: rec
+
+  defp release(%{frame: frame, fns: fns} = rec) do
+    Interp.frame_done(frame, fns)
+    %{rec | frame: nil}
   end
 
   @doc "`next`, `throw` or `return` on a generator: `msg` is `{:next | :throw | :return, value}`."
@@ -187,9 +408,10 @@ defmodule Browser.JS.Async do
       _ ->
         set_gen(gid, %{gen | state: :running})
         Process.delete(:js_gen_out)
+        if @check, do: Interp.check_resume(gen.frame)
 
         try do
-          no_tail(fn -> gen.resume.(msg) end)
+          gen.resume.(msg)
         catch
           {:js_error, e} -> finish(gid, {:throw, e})
         end
@@ -234,8 +456,8 @@ defmodule Browser.JS.Async do
   # value is awaited first, and so is a returned one.
 
   @doc "Calls an async generator function: binds the parameters and makes the generator object."
-  def call_async_generator(f, c, this, args) do
-    scope = Interp.call_scope(c, this, args)
+  def call_async_generator({:obj, fid} = f, c, this, args) do
+    {scope, frame, fns} = body_env(fid, c, this, args)
 
     proto =
       case Interp.get(f, "prototype") do
@@ -245,13 +467,21 @@ defmodule Browser.JS.Async do
 
     {:obj, gid} = gen = Interp.new_object([], proto)
 
-    base = %{
-      throw: fn e -> ag_finish(gid, {:throw, e}) end,
-      yield: fn v, resume -> ag_yield(gid, v, resume) end,
-      async_gen: true,
-      brk: %{},
-      cont: %{}
-    }
+    # The `base` context carries the frame too, because `ret` awaits its value with `base`
+    # as the context. The key `cell` names the cell that the body gets when it resumes
+    # after an await.
+    base =
+      with_frame(
+        %{
+          throw: fn e -> ag_finish(gid, {:throw, e}) end,
+          yield: fn v, resume -> ag_yield(gid, v, resume, frame, c.name) end,
+          async_gen: true,
+          brk: %{},
+          cont: %{},
+          cell: c.name
+        },
+        frame
+      )
 
     ctx =
       Map.put(base, :ret, fn
@@ -261,20 +491,22 @@ defmodule Browser.JS.Async do
       end)
 
     start = fn
-      {:next, _} ->
-        case c.mode do
-          :arrow_expr -> cev(c.body, scope, ctx, ctx.ret)
-          _ -> clist(c.body, scope, ctx, fn _ -> ctx.ret.(:ag_bare) end)
-        end
-
-      {:throw, e} ->
-        ctx.throw.(e)
-
-      {:return, v} ->
-        ctx.ret.(v)
+      {:next, _} -> run_body(c, scope, ctx, :ag_bare)
+      {:throw, e} -> ctx.throw.(e)
+      {:return, v} -> ctx.ret.(v)
     end
 
-    set_agen(gid, %{state: :start, resume: start, queue: [], running: false, cur: nil})
+    set_agen(gid, %{
+      state: :start,
+      resume: start,
+      queue: [],
+      running: false,
+      cur: nil,
+      frame: frame,
+      fns: fns,
+      name: c.name
+    })
+
     gen
   end
 
@@ -287,7 +519,7 @@ defmodule Browser.JS.Async do
       %{agen: g} ->
         p = Promise.new()
         update_agen(gid, %{queue: g.queue ++ [{msg, p}]})
-        ag_drain(gid)
+        ag_drain(gid, true)
         p
 
       _ ->
@@ -313,8 +545,12 @@ defmodule Browser.JS.Async do
     p
   end
 
-  # starts the next queued request, unless the body is running
-  defp ag_drain(gid) do
+  # Starts the next queued request, unless the body is running. The flag `request?` is true
+  # when the caller is `next`, `return` or `throw`. Then the body gets a new cell at the
+  # position of the request. Otherwise the body itself drains the queue after a `yield` or
+  # at its end, from inside its own cell, and a second cell would show the body two times
+  # in the stack.
+  defp ag_drain(gid, request?) do
     g = agen(gid)
 
     with false <- g.running, [{msg, p} | rest] <- g.queue do
@@ -323,19 +559,21 @@ defmodule Browser.JS.Async do
       case {g.state, msg} do
         {:done, {:next, _}} ->
           Promise.resolve(p, iter_result(:undefined, true))
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
         {:done, {:throw, e}} ->
           Promise.reject(p, e)
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
+        # A request at the start runs no body code, so the frame is released at once. The
+        # start continuation holds the frame too, so it is dropped with it.
         {state, {:throw, e}} when state == :start ->
-          update_agen(gid, %{state: :done})
+          set_agen(gid, %{release(g) | queue: rest, state: :done, resume: nil})
           Promise.reject(p, e)
-          ag_drain(gid)
+          ag_drain(gid, request?)
 
         {state, {:return, v}} when state in [:done, :start] ->
-          update_agen(gid, %{state: :done, running: true})
+          set_agen(gid, %{release(g) | queue: rest, state: :done, running: true, resume: nil})
 
           await_value(v, %{throw: fn e -> ag_settle(gid, p, {:throw, e}) end}, fn v2 ->
             ag_settle(gid, p, {:return, v2})
@@ -343,11 +581,17 @@ defmodule Browser.JS.Async do
 
         _ ->
           update_agen(gid, %{running: true, cur: p})
+          if @check, do: Interp.check_resume(g.frame)
 
-          try do
-            no_tail(fn -> g.resume.(msg) end)
-          catch
-            {:js_error, e} -> ag_finish(gid, {:throw, e})
+          if request? do
+            # The body runs under its cell, at the position of the request.
+            at = :erlang.get(:js_pos)
+
+            in_cell g.name, if(at == :undefined, do: nil, else: at) do
+              ag_resume(gid, g, msg)
+            end
+          else
+            ag_resume(gid, g, msg)
           end
       end
     else
@@ -355,34 +599,42 @@ defmodule Browser.JS.Async do
     end
   end
 
+  @compile {:inline, ag_resume: 3}
+  defp ag_resume(gid, g, msg) do
+    g.resume.(msg)
+  catch
+    {:js_error, e} -> ag_finish(gid, {:throw, e})
+  end
+
   defp ag_settle(gid, p, {:return, v}) do
     Promise.resolve(p, iter_result(v, true))
     update_agen(gid, %{running: false})
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   defp ag_settle(gid, p, {:throw, e}) do
     Promise.reject(p, e)
     update_agen(gid, %{running: false})
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   defp ag_finish(gid, out) do
     g = agen(gid)
-    update_agen(gid, %{state: :done, resume: nil, cur: nil})
+    set_agen(gid, %{release(g) | state: :done, resume: nil, cur: nil})
     ag_settle(gid, g.cur, out)
     :done
   end
 
-  defp ag_yield(gid, {:ag_raw, v}, resume) do
+  defp ag_yield(gid, {:ag_raw, v}, resume, _frame, _name) do
     ag_suspend(gid, v, resume)
     :suspended
   end
 
-  defp ag_yield(gid, v, resume) do
-    await_value(v, %{throw: fn e -> resume.({:throw, e}) end}, fn v2 ->
-      ag_suspend(gid, v2, resume)
-    end)
+  # The small context carries the frame, so that check mode tests the frame when the await
+  # resumes, and the cell, because a rejection resumes the body at the `yield`.
+  defp ag_yield(gid, v, resume, frame, name) do
+    ctx = with_frame(%{throw: fn e -> resume.({:throw, e}) end, cell: name}, frame)
+    await_value(v, ctx, fn v2 -> ag_suspend(gid, v2, resume) end)
 
     :suspended
   end
@@ -391,7 +643,7 @@ defmodule Browser.JS.Async do
     g = agen(gid)
     update_agen(gid, %{state: :suspended, resume: resume, running: false, cur: nil})
     Promise.resolve(g.cur, iter_result(v, false))
-    ag_drain(gid)
+    ag_drain(gid, false)
   end
 
   @doc "`AsyncGenerator.prototype`."
@@ -679,16 +931,37 @@ defmodule Browser.JS.Async do
 
   # ── what contains an await ─────────────────────────────────
 
-  defp has_await?({:await, _}), do: true
-  defp has_await?({:yield, _, _}), do: true
-  defp has_await?({:forawait, _, _, _, _}), do: true
-  defp has_await?({:using, :await_using, _, _, _}), do: true
-  defp has_await?({:gen, _}), do: false
-  defp has_await?({:fn, _, _, _, _, _}), do: false
-  defp has_await?({:async, _}), do: false
-  defp has_await?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_await?/1)
-  defp has_await?(l) when is_list(l), do: Enum.any?(l, &has_await?/1)
-  defp has_await?(_), do: false
+  # The walk is `Awaits.any?/1`, which the resolver uses too. In check mode (item A1) each
+  # call also runs the old walk, which builds a list of each tuple and does not skip the
+  # leaf forms. A difference means that a leaf form of `Awaits` holds syntax, and that an
+  # expression which awaits would run on the sync path.
+  if @check do
+    defp has_await?(t) do
+      aw? = Awaits.any?(t)
+
+      if aw? != has_await_ref?(t),
+        do: Interp.check_cps("Awaits.any? gives #{aw?} for #{inspect(t, limit: 8)}")
+
+      aw?
+    end
+
+    defp has_await_ref?({:await, _}), do: true
+    defp has_await_ref?({:yield, _, _}), do: true
+    defp has_await_ref?({:forawait, _, _, _, _}), do: true
+    defp has_await_ref?({:forawait, _, _, _, _, _}), do: true
+    defp has_await_ref?({:using, :await_using, _, _, _}), do: true
+    defp has_await_ref?({:gen, _}), do: false
+    defp has_await_ref?({:fn, _, _, _, _, _}), do: false
+    defp has_await_ref?({:async, _}), do: false
+
+    defp has_await_ref?(t) when is_tuple(t),
+      do: t |> Tuple.to_list() |> Enum.any?(&has_await_ref?/1)
+
+    defp has_await_ref?(l) when is_list(l), do: Enum.any?(l, &has_await_ref?/1)
+    defp has_await_ref?(_), do: false
+  else
+    defp has_await?(t), do: Awaits.any?(t)
+  end
 
   # ── expressions ────────────────────────────────────────────
 
@@ -701,23 +974,7 @@ defmodule Browser.JS.Async do
   end
 
   defp cev_await({:yield, e, false}, env, ctx, k) do
-    cev(e, env, ctx, fn v ->
-      ctx.yield.(v, fn
-        {:next, x} ->
-          k.(x)
-
-        {:throw, err} ->
-          ctx.throw.(err)
-
-        # in an async generator the value of a `return()` is awaited first, and a rejection
-        # is thrown at the `yield`
-        {:return, r} when is_map_key(ctx, :async_gen) ->
-          await_value(r, ctx, fn v -> ctx.ret.({:ag_done, v}) end)
-
-        {:return, r} ->
-          ctx.ret.(r)
-      end)
-    end)
+    cev(e, env, ctx, fn v -> yield_value(v, ctx, k) end)
   end
 
   defp cev_await({:yield, e, true}, env, %{async_gen: true} = ctx, k) do
@@ -763,28 +1020,45 @@ defmodule Browser.JS.Async do
   end
 
   # an optional chain with an await in it: the first `?.` is settled before anything after it runs
-  defp cev_await({:chain, e}, env, ctx, k) do
-    case opt_node(e) do
-      nil ->
-        cev(e, env, ctx, k)
+  defp cev_await({:chain, e}, env, ctx, k),
+    do: cev_chain(e, env, ctx, k, fn -> k.(:undefined) end)
 
-      {:member, base, key, true} = node ->
-        cev(base, env, ctx, fn v ->
-          if Interp.nullish?(v) do
-            k.(:undefined)
-          else
-            scope = Interp.new_scope(env)
-            name = "\0o#{System.unique_integer([:positive])}"
-            Interp.declare(scope, name, v)
-            plain = {:member, {:id, name}, key, false}
-            cev_await({:chain, replace_node(e, node, plain)}, scope, ctx, k)
+  # `a &&= v`, `a ||= v` and `a ??= v`: the target is read first, and the right side runs
+  # (and awaits) only when the operator does not short-circuit, as in `Interp`. A target
+  # that awaits is settled part by part first.
+  defp cev_await({kind, op, target, value}, env, ctx, k)
+       when kind in [:assign, :sassign] and op in @logical_assign do
+    settle_target(target, env, ctx, fn target ->
+      attempt(fn -> logical_ref(target, env, kind == :sassign) end, ctx, fn {old, write} ->
+        short =
+          case op do
+            "&&=" -> not Interp.truthy(old)
+            "||=" -> Interp.truthy(old)
+            "??=" -> not Interp.nullish?(old)
           end
-        end)
 
-      # `f?.(...)` with an await after it is left to the plain evaluator
-      _ ->
-        sync_expr({:chain, e}, env, ctx, k)
-    end
+        if short do
+          k.(old)
+        else
+          named_value(value, target, env, ctx, fn v ->
+            attempt(fn -> write.(v) && v end, ctx, k)
+          end)
+        end
+      end)
+    end)
+  end
+
+  # `o[k] op= v` and `super[k] op= v`, where `op` is an arithmetic or a bitwise operator.
+  # The object, the key and the old value are read before the right side runs (and
+  # awaits), and the write comes after it, as in `Interp.compound_assign/5`. A lift plan
+  # would read the target after the awaits of the right side. A name target needs no
+  # clause here, because `ordered/1` reads the name before those awaits.
+  defp cev_await({kind, op, target, value}, env, ctx, k)
+       when kind in [:assign, :sassign] and op in @compound and
+              elem(target, 0) in [:member, :super_member] do
+    compound_target(target, env, ctx, fn target ->
+      compound_rest(target, op, kind == :sassign, env, ctx, k, &cev(value, env, ctx, &1))
+    end)
   end
 
   defp cev_await({:destructure, pat, right}, env, ctx, k) do
@@ -797,13 +1071,200 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # In a rewritten body the values of the holes are collected in order and filled into the
+  # template, which then runs in `env`, the scope where the resolver resolved it.
+  defp cev_await(node, env, %{frame: _} = ctx, k) do
+    {template, leaves} = lift(node, [], :frame)
+    if @check, do: check_lift(node, :frame, {template, leaves})
+
+    eval_vals(Enum.reverse(leaves), [], env, ctx, fn vals ->
+      filled = fill(template, vals)
+      if @check and has_hole?(filled), do: Interp.check_cps("a hole is left after fill")
+      sync_expr(filled, env, ctx, k)
+    end)
+  end
+
   defp cev_await(node, env, ctx, k) do
-    {template, leaves} = lift(node, [])
+    {template, leaves} = lift(node, [], :map)
+    if @check, do: check_lift(node, :map, {template, leaves})
+    if @check, do: Interp.check_old_path(env, "a CPS leaf scope")
     scope = Interp.new_scope(env)
 
     eval_leaves(Enum.reverse(leaves), 0, scope, env, ctx, fn ->
       sync_expr(template, scope, ctx, k)
     end)
+  end
+
+  # The spine `e` of an optional chain that awaits. `k` gets the value of the chain, and
+  # `short` runs when a `?.` short-circuits, so that a caller can tell a short-circuit from
+  # a value that is `undefined`.
+  defp cev_chain(e, env, ctx, k, short) do
+    case opt_node(e) do
+      nil ->
+        cev(e, env, ctx, k)
+
+      {:member, base, key, true} = node ->
+        cev(base, env, ctx, fn v ->
+          cond do
+            Interp.nullish?(v) ->
+              short.()
+
+            # In frame mode the value goes into the tree, so the rest of the chain runs in
+            # `env` and its hop counts stay exact.
+            is_map_key(ctx, :frame) ->
+              plain = {:member, {:val, v}, key, false}
+              cev_chain(replace_node(e, node, plain), env, ctx, k, short)
+
+            true ->
+              if @check, do: Interp.check_old_path(env, "a CPS optional chain")
+              scope = Interp.new_scope(env)
+              name = "\0o#{System.unique_integer([:positive])}"
+              Interp.declare(scope, name, v)
+              plain = {:member, {:id, name}, key, false}
+              cev_chain(replace_node(e, node, plain), scope, ctx, k, short)
+          end
+        end)
+
+      # `f?.(args)`: the callee is settled first. When it is `null` or `undefined`, the
+      # whole chain is `undefined` and the arguments do not run. Else the arguments run
+      # (they can await), the call is made, and its value goes into the tree.
+      {:call, callee, args, true} = node ->
+        call_target(callee, env, ctx, fn {f, this} ->
+          if Interp.nullish?(f) do
+            short.()
+          else
+            cev({:array, args}, env, ctx, fn arr ->
+              attempt(
+                fn -> Interp.ccall(f, this, Interp.array_list(arr), callee, env) end,
+                ctx,
+                fn v ->
+                  cev_chain(replace_node(e, node, {:val, v}), env, ctx, k, short)
+                end
+              )
+            end)
+          end
+        end)
+    end
+  end
+
+  # The function and the `this` value of a callee. A callee that awaits is settled part by
+  # part, and the values go into the tree, so the object and the key run one time each.
+  defp call_target(callee, env, ctx, k) do
+    cond do
+      not Awaits.any?(callee) ->
+        attempt(fn -> Interp.call_target(callee, env) end, ctx, k)
+
+      true ->
+        call_target_cps(callee, env, ctx, k)
+    end
+  end
+
+  # A callee that awaits. A member keeps its object as `this`, also inside parentheses
+  # (`(a?.b)?.()`, where a short-circuit gives `undefined` for the function and `this`),
+  # and `super[k]` keeps the `this` of the method, as `Interp.call_target/2` does.
+  defp call_target_cps({:member, o, key, false}, env, ctx, k) do
+    cev(o, env, ctx, fn ov ->
+      settle_key(key, env, ctx, fn key ->
+        attempt(fn -> Interp.call_target({:member, {:val, ov}, key, false}, env) end, ctx, k)
+      end)
+    end)
+  end
+
+  defp call_target_cps({:super_member, key}, env, ctx, k) do
+    settle_key(key, env, ctx, fn key ->
+      attempt(fn -> Interp.call_target({:super_member, key}, env) end, ctx, k)
+    end)
+  end
+
+  defp call_target_cps({:chain, {:member, o, key, opt}}, env, ctx, k) do
+    short = fn -> k.({:undefined, :undefined}) end
+
+    cev_chain(
+      o,
+      env,
+      ctx,
+      fn ov ->
+        if opt and Interp.nullish?(ov) do
+          short.()
+        else
+          settle_key(key, env, ctx, fn key ->
+            target = {:member, {:val, ov}, key, false}
+            attempt(fn -> Interp.call_target(target, env) end, ctx, k)
+          end)
+        end
+      end,
+      short
+    )
+  end
+
+  defp call_target_cps(callee, env, ctx, k),
+    do: cev(callee, env, ctx, fn f -> k.({f, :undefined}) end)
+
+  # A key that awaits runs here, and its value goes into the tree.
+  defp settle_key(key, env, ctx, k) do
+    if Awaits.any?(key), do: cev(key, env, ctx, fn kv -> k.({:val, kv}) end), else: k.(key)
+  end
+
+  defp settle_target({:member, o, key, opt}, env, ctx, k) do
+    if Awaits.any?(o) or Awaits.any?(key) do
+      cev(o, env, ctx, fn ov ->
+        settle_key(key, env, ctx, fn key -> k.({:member, {:val, ov}, key, opt}) end)
+      end)
+    else
+      k.({:member, o, key, opt})
+    end
+  end
+
+  defp settle_target({:super_member, key}, env, ctx, k),
+    do: settle_key(key, env, ctx, fn key -> k.({:super_member, key}) end)
+
+  defp settle_target(target, _env, _ctx, k), do: k.(target)
+
+  # The target of a compound assignment that awaits. The object and a computed key run
+  # here, and their values go into the tree, so that the compiled plan
+  # (`compound_k/4`) and this path give the same target to `compound_rest/7`.
+  defp compound_target({:member, o, key, _}, env, ctx, k) do
+    cev(o, env, ctx, fn ov ->
+      if const_key?(key),
+        do: k.({:member, {:val, ov}, key, false}),
+        else: cev(key, env, ctx, fn kv -> k.({:member, {:val, ov}, {:val, kv}, false}) end)
+    end)
+  end
+
+  defp compound_target(target, env, ctx, k), do: settle_target(target, env, ctx, k)
+
+  @doc false
+  # A key that `Interp.compound_ref/3` reads with no evaluation: a name after a dot, or a
+  # private name. (public: `Browser.JS.Compile` uses it, so that a compiled plan and this
+  # module evaluate the same keys)
+  def const_key?({tag, _}) when tag in [:str, :priv], do: true
+  def const_key?(_), do: false
+
+  # The rest of a compound assignment that awaits, after its target: the read of the old
+  # value, the right side, the operator and the write. `right` runs the right side and
+  # gives its value to the continuation that it gets.
+  defp compound_rest(target, op, strict?, env, ctx, k, right) do
+    base = binary_part(op, 0, byte_size(op) - 1)
+
+    attempt(fn -> logical_ref(target, env, strict?) end, ctx, fn {old, write} ->
+      right.(fn v -> compound_write(base, old, v, write, ctx, k) end)
+    end)
+  end
+
+  defp compound_write(base, old, v, write, ctx, k) do
+    attempt(
+      fn ->
+        r = Interp.binop(base, old, v)
+        write.(r) && r
+      end,
+      ctx,
+      k
+    )
+  end
+
+  defp logical_ref(target, env, strict?) do
+    {read, write} = Interp.compound_ref(target, env, strict?)
+    {read.(), write}
   end
 
   # the innermost `?.` along the spine (object or callee) of a chain
@@ -819,54 +1280,237 @@ defmodule Browser.JS.Async do
   defp replace_node({:call, c, a, opt}, n, with), do: {:call, replace_node(c, n, with), a, opt}
   defp replace_node(other, _n, _with), do: other
 
-  # the awaits (and short-circuit expressions holding one) of an expression, in order, each
-  # replaced by a variable the expression is later evaluated with
-  defp lift(node, leaves) do
+  # The awaits (and short-circuit expressions holding one) of an expression, in order. Each
+  # one is replaced by a hole that the expression is later evaluated with. In `:map` mode
+  # (the old path) the hole is a variable `"\0s<i>"`, which `eval_leaves/6` declares in a
+  # leaf scope. In `:frame` mode (a rewritten body) the hole is `{:cps_leaf, i}`, which
+  # `fill/2` replaces with the value, so that no scope comes between the frame and the code
+  # and every hop count stays exact.
+  #
+  # A leaf form (`Awaits.is_leaf_form/1`) and a term that is not a tuple or a list hold no
+  # syntax, so they stay as they are and the walk does not go into them.
+  defp lift(node, leaves, _mode) when is_leaf_form(node), do: {node, leaves}
+  defp lift(node, leaves, mode) when is_list(node), do: lift_list(node, leaves, mode)
+  defp lift(node, leaves, _mode) when not is_tuple(node), do: {node, leaves}
+
+  defp lift(node, leaves, mode) do
     cond do
       leaf?(node) ->
-        name = "\0s#{length(leaves)}"
-        {{:id, name}, [node | leaves]}
+        {hole(mode, length(leaves)), [node | leaves]}
 
-      is_tuple(node) and elem(node, 0) in [:fn, :async] ->
+      # `{:async, f}` is a leaf form and stopped above, so only a function node is left
+      # here. The awaits of a nested function belong to that function.
+      elem(node, 0) == :fn ->
         {node, leaves}
 
-      is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
-        {:ok, kids, rebuild} = ordered(node)
-
-        last =
-          kids
-          |> Enum.map(&has_await?/1)
-          |> Enum.reduce({0, -1}, fn
-            true, {i, _} -> {i + 1, i}
-            false, {i, l} -> {i + 1, l}
-          end)
-          |> elem(1)
-
-        {kids, leaves} =
-          kids
-          |> Enum.with_index()
-          |> Enum.map_reduce(leaves, fn {kid, i}, acc ->
-            if i < last and not has_await?(kid) and not pure?(kid) do
-              name = "\0s#{length(acc)}"
-              {{:id, name}, [kid | acc]}
-            else
-              lift(kid, acc)
-            end
-          end)
-
-        {rebuild.(kids), leaves}
-
-      is_tuple(node) ->
-        {items, leaves} = lift_list(Tuple.to_list(node), leaves)
-        {List.to_tuple(items), leaves}
-
-      is_list(node) ->
-        lift_list(node, leaves)
+      elem(node, 0) == :class ->
+        lift_class(node, leaves, mode, &lift/3)
 
       true ->
-        {node, leaves}
+        case ordered(node) do
+          {:ok, kids, rebuild} ->
+            # The flags of the children are found once. Both the position of the last
+            # child that awaits and the choice for each child read them.
+            flags = Enum.map(kids, &has_await?/1)
+            last = last_await(flags, 0, -1)
+            {kids, leaves} = lift_kids(kids, flags, 0, last, leaves, mode, [])
+            {rebuild.(kids), leaves}
+
+          :none ->
+            {items, leaves} = lift_list(Tuple.to_list(node), leaves, mode)
+            {List.to_tuple(items), leaves}
+        end
     end
   end
+
+  # The position of the last child that awaits, or -1 when no child awaits.
+  defp last_await([], _i, last), do: last
+  defp last_await([true | flags], i, _last), do: last_await(flags, i + 1, i)
+  defp last_await([false | flags], i, last), do: last_await(flags, i + 1, last)
+
+  # A child before the last child that awaits is evaluated before the awaits. So when it
+  # does not await and is not pure, it becomes a leaf of its own.
+  defp lift_kids([], [], _i, _last, leaves, _mode, acc), do: {:lists.reverse(acc), leaves}
+
+  defp lift_kids([kid | kids], [aw? | flags], i, last, leaves, mode, acc) do
+    {kid, leaves} =
+      if i < last and not aw? and not pure?(kid),
+        do: {hole(mode, length(leaves)), [kid | leaves]},
+        else: lift(kid, leaves, mode)
+
+    lift_kids(kids, flags, i + 1, last, leaves, mode, [kid | acc])
+  end
+
+  # Check mode (item A2) runs the old `lift/3` next to the new one and compares the results.
+  # The old walk has no leaf form clauses, calls `ordered/1` two times and walks each child
+  # two times. So a difference shows a fault in the tidy form, which would change the order
+  # of evaluation with no error.
+  if @check do
+    defp check_lift(node, mode, result) do
+      if lift_ref(node, [], mode) != result,
+        do: Interp.check_cps("lift and lift_ref differ on #{inspect(node, limit: 8)}")
+    end
+
+    defp lift_ref(node, leaves, mode) do
+      cond do
+        leaf_ref?(node) ->
+          {hole(mode, length(leaves)), [node | leaves]}
+
+        is_tuple(node) and elem(node, 0) in [:fn, :async] ->
+          {node, leaves}
+
+        is_tuple(node) and elem(node, 0) == :class ->
+          lift_class(node, leaves, mode, &lift_ref/3)
+
+        is_tuple(node) and match?({:ok, _, _}, ordered(node)) ->
+          {:ok, kids, rebuild} = ordered(node)
+
+          last =
+            kids
+            |> Enum.map(&has_await_ref?/1)
+            |> Enum.reduce({0, -1}, fn
+              true, {i, _} -> {i + 1, i}
+              false, {i, l} -> {i + 1, l}
+            end)
+            |> elem(1)
+
+          {kids, leaves} =
+            kids
+            |> Enum.with_index()
+            |> Enum.map_reduce(leaves, fn {kid, i}, acc ->
+              if i < last and not has_await_ref?(kid) and not pure?(kid) do
+                {hole(mode, length(acc)), [kid | acc]}
+              else
+                lift_ref(kid, acc, mode)
+              end
+            end)
+
+          {rebuild.(kids), leaves}
+
+        is_tuple(node) ->
+          {items, leaves} =
+            Enum.map_reduce(Tuple.to_list(node), leaves, &lift_ref(&1, &2, mode))
+
+          {List.to_tuple(items), leaves}
+
+        is_list(node) ->
+          Enum.map_reduce(node, leaves, &lift_ref(&1, &2, mode))
+
+        true ->
+          {node, leaves}
+      end
+    end
+
+    defp leaf_ref?({:await, _}), do: true
+    defp leaf_ref?({:yield, _, _}), do: true
+
+    defp leaf_ref?({tag, _, _, _} = n) when tag in [:logical, :cond],
+      do: has_await_ref?(n)
+
+    defp leaf_ref?({:chain, _} = n), do: has_await_ref?(n)
+    defp leaf_ref?({:destructure, _, _} = n), do: has_await_ref?(n)
+
+    defp leaf_ref?({kind, op, _, _} = n)
+         when kind in [:assign, :sassign] and op in @logical_assign,
+         do: has_await_ref?(n)
+
+    defp leaf_ref?({kind, op, t, _} = n)
+         when kind in [:assign, :sassign] and op in @compound and
+                elem(t, 0) in [:member, :super_member],
+         do: has_await_ref?(n)
+
+    defp leaf_ref?(_), do: false
+  else
+    # Without check mode the calls of `check_lift/3` are dead code, but they must compile.
+    defp check_lift(_node, _mode, _result), do: :ok
+  end
+
+  # The resolver resolves the heritage, the keys and the member decorators of a class in
+  # the class scope, which `Classes.define` makes as a map scope over `env`. A leaf from
+  # these parts must run in such a scope too. In frame mode its hop counts are otherwise one
+  # short, and in both modes the name of the class must be in its TDZ. So each such leaf is
+  # wrapped in `{:cps_class, name, leaf}`, and `eval_vals/5` or `eval_leaves/6` makes the
+  # scope. The class decorators run in `env`, as in `Classes.define`. The walk `lift` is an
+  # argument, so that check mode can run this code with the old walk too (`lift_ref/3`).
+  defp lift_class({:class, name, heritage, members, src}, leaves, mode, lift) do
+    {members, decs} =
+      case List.last(members) do
+        {:decorations, cd, md} -> {Enum.drop(members, -1), {cd, md}}
+        _ -> {members, nil}
+      end
+
+    {cd, leaves} = if decs, do: lift.(elem(decs, 0), leaves, mode), else: {nil, leaves}
+    outer = length(leaves)
+    {heritage, members, leaves} = lift_class_parts(heritage, members, leaves, mode, lift)
+    {inner, rest} = Enum.split(leaves, length(leaves) - outer)
+
+    leaves = Enum.map(inner, &{:cps_class, name, &1}) ++ rest
+
+    members = if decs, do: members ++ [{:decorations, cd, elem(decs, 1)}], else: members
+    {{:class, name, heritage, members, src}, leaves}
+  end
+
+  # The heritage and the computed keys of a class run in source order. So a part before
+  # the last part that awaits, which does not await and is not pure, becomes a leaf of its
+  # own, as an operand does in `lift_kids/7`. If it stayed in the template, it would run
+  # after the awaits. The other parts of a member (a method, an initializer) do not run
+  # when the class is made, and the walk `lift` takes them as before.
+  defp lift_class_parts(heritage, members, leaves, mode, lift) do
+    keys = for {:cmember, _, {:computed, e}, _, _} <- members, do: e
+    flags = Enum.map(if(heritage, do: [heritage | keys], else: keys), &has_await?/1)
+    last = last_await(flags, 0, -1)
+
+    # (the state is the flags of the parts still to come, the position and the leaves)
+    part = fn e, {[aw? | flags], i, acc} ->
+      {e, acc} =
+        if i < last and not aw? and not pure?(e),
+          do: {hole(mode, length(acc)), [e | acc]},
+          else: lift.(e, acc, mode)
+
+      {e, {flags, i + 1, acc}}
+    end
+
+    {heritage, state} =
+      if heritage, do: part.(heritage, {flags, 0, leaves}), else: {nil, {flags, 0, leaves}}
+
+    {members, {[], _, leaves}} =
+      Enum.map_reduce(members, state, fn
+        {:cmember, kind, {:computed, e}, value, static?}, state ->
+          {e, {flags, i, acc}} = part.(e, state)
+          {value, acc} = lift.(value, acc, mode)
+          {{:cmember, kind, {:computed, e}, value, static?}, {flags, i, acc}}
+
+        member, {flags, i, acc} ->
+          {member, acc} = lift.(member, acc, mode)
+          {member, {flags, i, acc}}
+      end)
+
+    {heritage, members, leaves}
+  end
+
+  defp hole(:map, i), do: {:id, "\0s#{i}"}
+  defp hole(:frame, i), do: {:cps_leaf, i}
+
+  # Replaces each hole `{:cps_leaf, i}` of a lifted template with `{:val, v}`, where `v` is
+  # element `i` of `vals`. It stops at function nodes, as `lift/3` does, so no hole can be
+  # inside one. It does not go into maps either, because the resolver's structs hold no
+  # syntax that `lift/3` changed.
+  defp fill({:cps_leaf, i}, vals), do: {:val, :erlang.element(i + 1, vals)}
+  defp fill({:val, _} = n, _vals), do: n
+  defp fill({tag, _} = n, _vals) when tag in [:gen, :async], do: n
+  defp fill({:fn, _, _, _, _, _} = n, _vals), do: n
+
+  defp fill(t, vals) when is_tuple(t),
+    do: t |> Tuple.to_list() |> Enum.map(&fill(&1, vals)) |> List.to_tuple()
+
+  defp fill(l, vals) when is_list(l), do: fill_list(l, vals)
+  defp fill(x, _vals), do: x
+
+  # A list of the syntax tree can be improper, so the tail of the last cell is filled like
+  # any other term.
+  defp fill_list([h | t], vals), do: [fill(h, vals) | fill_list(t, vals)]
+  defp fill_list([], _vals), do: []
+  defp fill_list(t, vals), do: fill(t, vals)
 
   # the operands of an expression in the order they are evaluated, and how to put them back: an
   # operand before one that awaits has to be evaluated first, so it is lifted like an await
@@ -899,12 +1543,14 @@ defmodule Browser.JS.Async do
   end
 
   defp ordered({:call, callee, args, false})
-       when elem(callee, 0) not in [:id, :super, :member, :super_member] do
+       when elem(callee, 0) not in [:super, :member, :super_member | @name] do
     {:ok, [callee | Enum.map(args, &unspread/1)],
      fn [callee | kids] -> {:call, callee, respread_all(args, kids), false} end}
   end
 
-  defp ordered({:call, {:id, _} = callee, args, false}) when args != [] do
+  # A callee that is a name is read after the awaits of the arguments. The spec reads it
+  # first, but `:off` reads it later, and every level must give the same result.
+  defp ordered({:call, callee, args, false}) when elem(callee, 0) in @name and args != [] do
     {:ok, Enum.map(args, &unspread/1),
      fn kids -> {:call, callee, respread_all(args, kids), false} end}
   end
@@ -915,11 +1561,14 @@ defmodule Browser.JS.Async do
   defp ordered({kind, "=", {:member, o, k, mo}, value}) when kind in [:assign, :sassign],
     do: {:ok, [o, k, value], fn [o, k, v] -> {kind, "=", {:member, o, k, mo}, v} end}
 
-  defp ordered({kind, op, {:id, _} = t, value})
-       when kind in [:assign, :sassign] and op in ~w(+= -= *= /= %= **= <<= >>= >>>= &= |= ^=) do
+  # A compound assignment to a name reads the name before the awaits of the right side. The
+  # read uses `read_form/1`, and the write keeps the form of the target, so a `const` still
+  # throws, a function name still ignores the write, and a mapped parameter still syncs.
+  defp ordered({kind, op, t, value})
+       when kind in [:assign, :sassign] and op in @compound and elem(t, 0) in @target do
     bin = binary_part(op, 0, byte_size(op) - 1)
 
-    {:ok, [t, value], fn [t2, v] -> {kind, "=", t, {:binary, bin, t2, v}} end}
+    {:ok, [read_form(t), value], fn [t2, v] -> {kind, "=", t, {:binary, bin, t2, v}} end}
   end
 
   defp ordered({:tmpl, parts}) do
@@ -948,6 +1597,12 @@ defmodule Browser.JS.Async do
   end
 
   defp ordered(_), do: :none
+
+  # The form that reads the value of a write target. A `const`, a function name and a
+  # mapped parameter are read like a plain slot, because only their writes differ.
+  defp read_form({k, d, i, name}) when k in [:cslot, :fname], do: {:slot, d, i, name}
+  defp read_form({:mslot, d, i, name, _k}), do: {:slot, d, i, name}
+  defp read_form(t), do: t
 
   defp object_prop_ordered?({:init, _, _}), do: true
   defp object_prop_ordered?({:spread, _}), do: true
@@ -980,8 +1635,8 @@ defmodule Browser.JS.Async do
   defp pure?({:class, _, _, _, _}), do: true
   defp pure?(_), do: false
 
-  defp lift_list(items, leaves) do
-    Enum.map_reduce(items, leaves, fn item, acc -> lift(item, acc) end)
+  defp lift_list(items, leaves, mode) do
+    Enum.map_reduce(items, leaves, fn item, acc -> lift(item, acc, mode) end)
   end
 
   defp leaf?({:await, _}), do: true
@@ -990,16 +1645,56 @@ defmodule Browser.JS.Async do
   defp leaf?({:cond, _, _, _} = n), do: has_await?(n)
   defp leaf?({:chain, _} = n), do: has_await?(n)
   defp leaf?({:destructure, _, _} = n), do: has_await?(n)
+
+  defp leaf?({kind, op, _, _} = n) when kind in [:assign, :sassign] and op in @logical_assign,
+    do: has_await?(n)
+
+  # A compound assignment to a member is a leaf, so that `cev_await/4` reads its target
+  # before the awaits of its right side.
+  defp leaf?({kind, op, t, _} = n)
+       when kind in [:assign, :sassign] and op in @compound and
+              elem(t, 0) in [:member, :super_member],
+       do: has_await?(n)
+
   defp leaf?(_), do: false
 
   defp eval_leaves([], _i, _scope, _env, _ctx, done), do: done.()
 
   defp eval_leaves([leaf | rest], i, scope, env, ctx, done) do
-    cev(leaf, env, ctx, fn v ->
+    {leaf, leaf_env} = class_env(leaf, env)
+
+    cev(leaf, leaf_env, ctx, fn v ->
       Interp.declare(scope, "\0s#{i}", v)
       eval_leaves(rest, i + 1, scope, env, ctx, done)
     end)
   end
+
+  # The values of the holes of a template in frame mode, in source order, as a tuple.
+  defp eval_vals([], acc, _env, _ctx, done), do: done.(List.to_tuple(:lists.reverse(acc)))
+
+  defp eval_vals([leaf | rest], acc, env, ctx, done) do
+    {leaf, leaf_env} = class_env(leaf, env)
+    cev(leaf, leaf_env, ctx, fn v -> eval_vals(rest, [v | acc], env, ctx, done) end)
+  end
+
+  # The scope of a leaf from a class (see `lift_class/4`): a map scope over `env` where the
+  # name of the class is in its TDZ, as in `Classes.define`. A leaf from a nested class
+  # gets one such scope for each class.
+  defp class_env({:cps_class, name, leaf}, env) do
+    cenv = Interp.new_scope(env)
+    if name, do: Interp.declare(cenv, name, :tdz)
+    class_env(leaf, cenv)
+  end
+
+  defp class_env(leaf, env), do: {leaf, env}
+
+  # Check mode looks for a hole that `fill/2` did not replace, because such a hole would run
+  # as an unknown form.
+  defp has_hole?({:cps_leaf, _}), do: true
+  defp has_hole?({:fn, _, _, _, _, _}), do: false
+  defp has_hole?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_hole?/1)
+  defp has_hole?([h | t]), do: has_hole?(h) or has_hole?(t)
+  defp has_hole?(_), do: false
 
   # evaluates a piece without awaits; a throw goes to the nearest handler, outside the `try`
   # so the rest of the function does not run inside it
@@ -1017,7 +1712,9 @@ defmodule Browser.JS.Async do
     end
   end
 
-  defp await_value(v, ctx, k) do
+  @doc false
+  # (public: compiled plans call it, see "Compiled plans")
+  def await_value(v, ctx, k) do
     # PromiseResolve: a promise is reused only when its `constructor` is Promise itself; reading
     # that property may throw
     case (try do
@@ -1042,15 +1739,52 @@ defmodule Browser.JS.Async do
     end
   end
 
+  @doc false
+  # Yields `v` and goes on with `k` when the generator resumes with `next`. (public:
+  # compiled plans call it; the tree path gets it inline, so that its yield costs no more
+  # than before step 5c)
+  @compile {:inline, yield_value: 3}
+  def yield_value(v, ctx, k) do
+    ctx.yield.(v, fn
+      {:next, x} ->
+        k.(x)
+
+      {:throw, err} ->
+        ctx.throw.(err)
+
+      # in an async generator the value of a `return()` is awaited first, and a rejection
+      # is thrown at the `yield`
+      {:return, r} when is_map_key(ctx, :async_gen) ->
+        await_value(r, ctx, fn v -> ctx.ret.({:ag_done, v}) end)
+
+      {:return, r} ->
+        ctx.ret.(r)
+    end)
+  end
+
   defp await_promise(p, ctx, k) do
     Promise.then(
       p,
       Interp.native("", fn _, args ->
-        no_tail(fn -> k.(Enum.at(args, 0, :undefined)) end)
+        if @check, do: Interp.check_resume(Map.get(ctx, :frame))
+        v = Enum.at(args, 0, :undefined)
+
+        case ctx do
+          %{cell: name} -> in_cell(name, nil, do: k.(v))
+          _ -> k.(v)
+        end
+
         :undefined
       end),
       Interp.native("", fn _, args ->
-        no_tail(fn -> ctx.throw.(Enum.at(args, 0, :undefined)) end)
+        if @check, do: Interp.check_resume(Map.get(ctx, :frame))
+        e = Enum.at(args, 0, :undefined)
+
+        case ctx do
+          %{cell: name} -> in_cell(name, nil, do: ctx.throw.(e))
+          _ -> ctx.throw.(e)
+        end
+
         :undefined
       end)
     )
@@ -1067,8 +1801,21 @@ defmodule Browser.JS.Async do
 
   defp cexec(stmt, env, ctx, k, labels \\ [])
 
-  defp cexec({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels),
-    do: ctx.ret.(:ag_bare)
+  # In a rewritten body the resolver marks each statement that awaits with `{:aw}`, so no
+  # walk is needed: a marked statement goes to `cs/5`, every other one to `sync_stmt/5`.
+  defp cexec({:aw, stmt}, env, ctx, k, labels) do
+    if @check and not has_await?(stmt),
+      do: Interp.check_cps("{:aw} on #{elem(stmt, 0)}, which does not await")
+
+    cs(stmt, env, ctx, k, labels)
+  end
+
+  defp cexec(stmt, env, %{frame: _} = ctx, k, labels) do
+    if @check and has_await?(stmt),
+      do: Interp.check_cps("no {:aw} on #{elem(stmt, 0)}, which awaits")
+
+    sync_stmt(stmt, env, ctx, k, labels)
+  end
 
   defp cexec(stmt, env, ctx, k, labels) do
     if has_await?(stmt),
@@ -1076,35 +1823,51 @@ defmodule Browser.JS.Async do
       else: sync_stmt(stmt, env, ctx, k, labels)
   end
 
-  # a statement without awaits, by the ordinary evaluator; its abrupt completions are routed
-  # (the tail flag is off, see `no_tail/1`, so a `return f()` here is a plain return)
+  # A statement without awaits runs by the ordinary evaluator, and its abrupt completions
+  # are routed to the continuations. A generator or async body makes no tail calls, so a
+  # pending call runs here, under this `try`: a throw from it rejects the body as before.
+  # Only the old path gives a pending call, because the resolver marks every return of a
+  # generator or async body as `:plain`.
   defp sync_stmt(stmt, env, ctx, k, labels) do
     result =
       try do
-        Interp.exec_stmt(stmt, env, labels)
-        :ok
+        # (a rewritten body runs its statements without writes to `:js_last`)
+        c =
+          if is_map_key(ctx, :frame),
+            do: Interp.exec_frame_stmt(stmt, env, labels),
+            else: Interp.exec_stmt(stmt, env, labels)
+
+        if @check, do: Interp.check_completion(c, stmt)
+
+        case c do
+          {:tail, f, t, a} ->
+            if @check, do: Interp.check_run_tail(env)
+            {:ret, Interp.call(f, t, a)}
+
+          c ->
+            c
+        end
       catch
         {:js_error, e} -> {:throw, e}
-        {:js_return, v} -> {:ret, v}
-        {:js_break, l} -> {:brk, l}
-        {:js_continue, l} -> {:cont, l}
       end
 
     abrupt(result, ctx, k)
   end
 
-  defp abrupt(:ok, _ctx, k), do: k.(:ok)
-  defp abrupt({:throw, e}, ctx, _k), do: ctx.throw.(e)
-  defp abrupt({:ret, v}, ctx, _k), do: ctx.ret.(v)
+  @doc false
+  # Sends a completion to its continuation. (public: compiled plans call it)
+  def abrupt(:ok, _ctx, k), do: k.(:ok)
+  def abrupt({:throw, e}, ctx, _k), do: ctx.throw.(e)
+  def abrupt({:ret, v}, ctx, _k), do: ctx.ret.(v)
 
-  defp abrupt({:brk, l}, ctx, _k) do
+  def abrupt({:brk, l}, ctx, _k) do
     case ctx.brk do
       %{^l => target} -> target.(:ok)
       _ -> :ok
     end
   end
 
-  defp abrupt({:cont, l}, ctx, _k) do
+  def abrupt({:cont, l}, ctx, _k) do
     case ctx.cont do
       %{^l => target} -> target.(:ok)
       _ -> :ok
@@ -1127,6 +1890,11 @@ defmodule Browser.JS.Async do
     end
   end
 
+  # (only script and eval code have a completion value, so a rewritten body does not
+  # write `:js_last`)
+  defp cs({:expr, e}, env, %{frame: _} = ctx, k, _labels),
+    do: cev(e, env, ctx, fn _ -> k.(:ok) end)
+
   defp cs({:expr, e}, env, ctx, k, _labels) do
     cev(e, env, ctx, fn v ->
       Process.put(:js_last, v)
@@ -1136,9 +1904,8 @@ defmodule Browser.JS.Async do
 
   defp cs({:var, kind, decls}, env, ctx, k, _labels), do: cdecls(decls, kind, env, ctx, k)
 
-  # in an async generator `return;` and falling off the end finish without awaiting a value
-  defp cs({:return, nil}, _env, %{async_gen: true} = ctx, _k, _labels), do: ctx.ret.(:ag_bare)
   defp cs({:return, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
+  defp cs({:return, e, :plain}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.ret)
   defp cs({:throw, e}, env, ctx, _k, _labels), do: cev(e, env, ctx, ctx.throw)
 
   defp cs({:if, c, a, b}, env, ctx, k, _labels) do
@@ -1152,11 +1919,18 @@ defmodule Browser.JS.Async do
   end
 
   defp cs({:block, stmts}, env, ctx, k, _labels) do
+    if @check, do: Interp.check_old_path(env, "a CPS block")
     scope = Interp.new_scope(env)
 
     guarded(fn -> Interp.hoist_functions(stmts, scope) end, ctx, fn ->
       clist(stmts, scope, ctx, k)
     end)
+  end
+
+  # In frame mode `sc.hoist` makes the functions of the block, so this clause does not call
+  # `hoist_functions`.
+  defp cs({:block, stmts, sc}, env, ctx, k, _labels) do
+    attempt(fn -> Interp.cps_enter(env, sc) end, ctx, fn b -> clist(stmts, b, ctx, k) end)
   end
 
   defp cs({:with, obj, body}, env, ctx, k, _labels) do
@@ -1169,6 +1943,7 @@ defmodule Browser.JS.Async do
         )
       else
         Process.put(:js_with_used, true)
+        if @check, do: Interp.check_old_path(env, "a CPS with")
         scope = Interp.new_scope(env)
         sc = Interp.deref(scope)
         object = if match?({:obj, _}, o), do: o, else: Interp.new_object()
@@ -1208,15 +1983,37 @@ defmodule Browser.JS.Async do
     end
   end
 
+  # A `for` in frame mode. The head scope `l` comes from `Interp.cps_enter/2`. With
+  # `per_iter` each round runs in its own copy of the head frame, which is made every round
+  # with no counter test, as the CPS loop of `:off` copies its map scope every round. The
+  # init is never marked `{:aw}` by the resolver, so it is walked here as `:off` walks it.
+  defp cs({:for, init, test, update, body, sc}, env, ctx, k, labels) do
+    attempt(fn -> Interp.cps_enter(env, sc) end, ctx, fn l ->
+      per_iter? = match?(%{per_iter: true}, sc)
+
+      start = fn _ ->
+        first = if per_iter?, do: Interp.copy_scope(l, env), else: l
+        for_iter({test, update, body, env, per_iter?}, first, ctx, k, labels)
+      end
+
+      case init do
+        {:var, _, _} = d ->
+          if has_await?(d), do: cs(d, l, ctx, start, []), else: sync_stmt(d, l, ctx, start, [])
+
+        {:expr, e} ->
+          cev(e, l, ctx, start)
+
+        nil ->
+          start.(:ok)
+      end
+    end)
+  end
+
   defp cs({kind, decl, pat, obj, body}, env, ctx, k, labels) when kind in [:forin, :forof] do
     cev(obj, env, ctx, fn target ->
       items =
         try do
-          {:ok,
-           case kind do
-             :forin -> {:list, if(Interp.nullish?(target), do: [], else: Interp.own_keys(target))}
-             :forof -> Interp.iter_source(target)
-           end}
+          {:ok, loop_source(kind, target)}
         catch
           {:js_error, e} -> {:throw, e}
         end
@@ -1224,11 +2021,14 @@ defmodule Browser.JS.Async do
       mode = if decl == nil, do: :assign, else: decl
 
       case items do
+        {:ok, {:keys, o, list}} ->
+          forin(list, o, {pat, mode, body, env, :map}, ctx, k, labels)
+
         {:ok, {:list, list}} ->
-          foreach(list, {pat, mode, body, env}, ctx, k, labels)
+          foreach(list, {pat, mode, body, env, :map}, ctx, k, labels)
 
         {:ok, {:proto, it, next}} ->
-          proto_foreach(it, next, {pat, mode, body, env}, ctx, k, labels)
+          proto_foreach(it, next, {pat, mode, body, env, :map}, ctx, k, labels)
 
         {:throw, e} ->
           ctx.throw.(e)
@@ -1236,17 +2036,61 @@ defmodule Browser.JS.Async do
     end)
   end
 
+  # A for-in or for-of in frame mode. The object runs in the head scope `h`, where the head
+  # names are in their TDZ. Each item enters the scope again (`item_env/2`).
+  defp cs({kind, decl, pat, obj, body, sc}, env, ctx, k, labels) when kind in [:forin, :forof] do
+    attempt(fn -> Interp.cps_enter(env, sc) end, ctx, fn h ->
+      cev(obj, h, ctx, fn target ->
+        items =
+          try do
+            {:ok, loop_source(kind, target)}
+          catch
+            {:js_error, e} -> {:throw, e}
+          end
+
+        mode = if decl == nil, do: :assign, else: decl
+
+        case items do
+          {:ok, {:keys, o, list}} ->
+            forin(list, o, {pat, mode, body, env, sc}, ctx, k, labels)
+
+          {:ok, {:list, list}} ->
+            foreach(list, {pat, mode, body, env, sc}, ctx, k, labels)
+
+          {:ok, {:proto, it, next}} ->
+            proto_foreach(it, next, {pat, mode, body, env, sc}, ctx, k, labels)
+
+          {:throw, e} ->
+            ctx.throw.(e)
+        end
+      end)
+    end)
+  end
+
   defp cs({:forawait, decl, pat, obj, body}, env, ctx, k, labels) do
     cev(obj, env, ctx, fn target ->
       attempt(fn -> async_iterator(target) end, ctx, fn {it, next, sync?} ->
         mode = if decl == nil, do: :assign, else: decl
-        afor(it, next, sync?, {pat, mode, body, env}, ctx, k, labels)
+        afor(it, next, sync?, {pat, mode, body, env, :map}, ctx, k, labels)
+      end)
+    end)
+  end
+
+  # A for-await in frame mode enters its scopes as the for-in and the for-of above do.
+  defp cs({:forawait, decl, pat, obj, body, sc}, env, ctx, k, labels) do
+    attempt(fn -> Interp.cps_enter(env, sc) end, ctx, fn h ->
+      cev(obj, h, ctx, fn target ->
+        attempt(fn -> async_iterator(target) end, ctx, fn {it, next, sync?} ->
+          mode = if decl == nil, do: :assign, else: decl
+          afor(it, next, sync?, {pat, mode, body, env, sc}, ctx, k, labels)
+        end)
       end)
     end)
   end
 
   defp cs({:switch, disc, cases}, env, ctx, k, _labels) do
     cev(disc, env, ctx, fn v ->
+      if @check, do: Interp.check_old_path(env, "a CPS switch")
       scope = Interp.new_scope(env)
       all = Enum.flat_map(cases, fn {_, body} -> body end)
 
@@ -1265,7 +2109,63 @@ defmodule Browser.JS.Async do
     end)
   end
 
-  defp cs({:try, block, param, handler, finalizer}, env, ctx, k, _labels) do
+  # In frame mode the discriminant runs in `env`. The tests and the bodies run in the switch
+  # scope, where `sc.hoist` has made the functions of every case.
+  defp cs({:switch, disc, cases, sc}, env, ctx, k, _labels) do
+    cev(disc, env, ctx, fn v ->
+      attempt(fn -> Interp.cps_enter(env, sc) end, ctx, fn scope ->
+        find_case(cases, 0, v, scope, ctx, fn start ->
+          ctx = %{ctx | brk: Map.put(ctx.brk, nil, k)}
+
+          if start do
+            body = cases |> Enum.drop(start) |> Enum.flat_map(fn {_, b} -> b end)
+            clist(body, scope, ctx, k)
+          else
+            k.(:ok)
+          end
+        end)
+      end)
+    end)
+  end
+
+  defp cs({:try, block, param, handler, finalizer}, env, ctx, k, labels),
+    do: cs_try(block, param, handler, finalizer, :map, env, ctx, k, labels)
+
+  # In frame mode the block and the finalizer run in `env`. The parameter and the handler
+  # run in the catch scope.
+  defp cs({:try, block, param, handler, finalizer, sc}, env, ctx, k, labels),
+    do: cs_try(block, param, handler, finalizer, sc, env, ctx, k, labels)
+
+  defp cs({:using, kind, {:slot, 0, _, n} = form, init, rest}, env, ctx, k, _labels),
+    do: cs_using(kind, n, &Interp.using_bind(env, form, &1), init, rest, env, ctx, k)
+
+  defp cs({:using, kind, name, init, rest}, env, ctx, k, _labels),
+    do: cs_using(kind, name, &Interp.declare(env, name, &1, true), init, rest, env, ctx, k)
+
+  defp cs({:export, stmt}, env, ctx, k, labels), do: cexec(stmt, env, ctx, k, labels)
+
+  defp cs({:export_default, {:expr, e}}, env, ctx, k, _labels) do
+    cev(e, env, ctx, fn v ->
+      Interp.declare(env, :default_export, v)
+      k.(:ok)
+    end)
+  end
+
+  if @check do
+    # A tail return cannot occur, because the resolver sets `tail_ok` to false in these
+    # bodies.
+    defp cs({:return, _, :tail}, _env, _ctx, _k, _labels),
+      do: Interp.check_cps("a tail return in a CPS body")
+  end
+
+  defp cs(stmt, env, ctx, k, labels) do
+    if @check and is_map_key(ctx, :frame) and has_await?(stmt),
+      do: Interp.check_cps("the sync fallback of cs meets #{elem(stmt, 0)}, which awaits")
+
+    sync_stmt(stmt, env, ctx, k, labels)
+  end
+
+  defp cs_try(block, param, handler, finalizer, sc, env, ctx, k, _labels) do
     # a `finally` runs before any way out of the statement
     leave = fn after_ ->
       if finalizer, do: cexec(finalizer, env, ctx, fn _ -> after_.() end), else: after_.()
@@ -1286,13 +2186,23 @@ defmodule Browser.JS.Async do
         %{
           wrapped
           | throw: fn e ->
-              scope = Interp.new_scope(env)
+              # A catch parameter with an await in a default binds step by step, so
+              # that the await suspends the body as any other await does. The sync
+              # binder would wait in place, and other tasks would run inside it.
+              attempt(fn -> catch_env(env, sc, param) end, wrapped, fn scope ->
+                run = fn -> cexec(handler, scope, wrapped, done) end
 
-              guarded(
-                fn -> if param, do: Interp.bind_pattern(param, e, scope, :let) end,
-                wrapped,
-                fn -> cexec(handler, scope, wrapped, done) end
-              )
+                cond do
+                  param == nil ->
+                    run.()
+
+                  has_await?(param) ->
+                    cbind_cps(param, e, :let, scope, wrapped, run)
+
+                  true ->
+                    guarded(fn -> Interp.bind_pattern(param, e, scope, :let) end, wrapped, run)
+                end
+              end)
             end
         }
       else
@@ -1302,14 +2212,34 @@ defmodule Browser.JS.Async do
     cexec(block, env, in_try, done)
   end
 
+  # The scope of one item of a for-in, for-of or for-await, and of a catch clause: a new map
+  # scope on the old path (`:map`), the scope of the resolver in frame mode.
+  defp item_env(env, :map) do
+    if @check, do: Interp.check_old_path(env, "a CPS item scope")
+    Interp.new_scope(env)
+  end
+
+  defp item_env(env, sc), do: Interp.cps_enter(env, sc)
+
+  # The scope of a catch clause. In a map scope the names of a pattern parameter start in
+  # their TDZ, as in the sync catch clause (`Interp.catch_tdz/2`).
+  defp catch_env(env, :map, param) do
+    scope = item_env(env, :map)
+    Interp.catch_tdz(param, scope)
+    scope
+  end
+
+  defp catch_env(env, sc, _param), do: item_env(env, sc)
+
   # `using` / `await using`: the rest of the list runs under a context that disposes the
-  # resource before any way out
-  defp cs({:using, kind, name, init, rest}, env, ctx, k, _labels) do
+  # resource before any way out. `bind` writes the binding: a `declare` on the old path, a
+  # slot write in frame mode.
+  defp cs_using(kind, name, bind, init, rest, env, ctx, k) do
     cev_named(init, name, env, ctx, fn v ->
       attempt(
         fn ->
           res = Interp.using_resource(kind, v)
-          Interp.declare(env, name, v, true)
+          bind.(v)
           res
         end,
         ctx,
@@ -1343,23 +2273,40 @@ defmodule Browser.JS.Async do
     end)
   end
 
-  defp cs({:export, stmt}, env, ctx, k, labels), do: cexec(stmt, env, ctx, k, labels)
-
-  defp cs({:export_default, {:expr, e}}, env, ctx, k, _labels) do
-    cev(e, env, ctx, fn v ->
-      Interp.declare(env, :default_export, v)
-      k.(:ok)
-    end)
-  end
-
-  defp cs(stmt, env, ctx, k, labels), do: sync_stmt(stmt, env, ctx, k, labels)
-
   # the initializer, named after the binding when it is an anonymous function
-  defp cev_named(init, name, env, ctx, k) do
-    if has_await?(init) do
-      cev(init, env, ctx, k)
-    else
-      attempt(fn -> Interp.ev_named(init, env, {:id, name}) end, ctx, k)
+  defp cev_named(init, name, env, ctx, k), do: named_value(init, {:id, name}, env, ctx, k)
+
+  @doc false
+  # (public: compiled plans call it)
+  # The value of `init`, named after `target` when `init` is an anonymous function or class
+  # and `target` is a binding (NamedEvaluation, as `Interp.ev_named/3`). A class can await
+  # in a computed key. Its leaves run first, and then the template gets its name.
+  def named_value(init, target, env, ctx, k) do
+    cond do
+      not has_await?(init) ->
+        attempt(fn -> Interp.ev_named(init, env, target) end, ctx, k)
+
+      match?({:class, nil, _, _, _}, init) and is_map_key(ctx, :frame) ->
+        {template, leaves} = lift(init, [], :frame)
+        if @check, do: check_lift(init, :frame, {template, leaves})
+
+        eval_vals(Enum.reverse(leaves), [], env, ctx, fn vals ->
+          filled = fill(template, vals)
+          attempt(fn -> Interp.ev_named(filled, env, target) end, ctx, k)
+        end)
+
+      match?({:class, nil, _, _, _}, init) ->
+        {template, leaves} = lift(init, [], :map)
+        if @check, do: check_lift(init, :map, {template, leaves})
+        if @check, do: Interp.check_old_path(env, "a CPS leaf scope")
+        scope = Interp.new_scope(env)
+
+        eval_leaves(Enum.reverse(leaves), 0, scope, env, ctx, fn ->
+          attempt(fn -> Interp.ev_named(template, scope, target) end, ctx, k)
+        end)
+
+      true ->
+        cev(init, env, ctx, k)
     end
   end
 
@@ -1389,7 +2336,9 @@ defmodule Browser.JS.Async do
   # binds a pattern (`k` runs afterwards). When a `yield` or `await` sits inside it, in a default,
   # a computed key or a target, the pattern is walked step by step so that the iterator stays
   # open (and is closed on a throw or `return()`) while the generator is suspended.
-  defp cbind(pat, v, mode, env, ctx, k) do
+  @doc false
+  # (public: compiled plans call it)
+  def cbind(pat, v, mode, env, ctx, k) do
     if has_await?(pat),
       do: cbind_cps(pat, v, mode, env, ctx, k),
       else: guarded(fn -> Interp.bind_pattern(pat, v, env, mode) end, ctx, k)
@@ -1585,7 +2534,7 @@ defmodule Browser.JS.Async do
 
     cond do
       init != nil ->
-        cev(init, env, ctx, fn v ->
+        named_value(init, pat, env, ctx, fn v ->
           cbind(pat, v, kind, env, ctx, next)
         end)
 
@@ -1600,7 +2549,9 @@ defmodule Browser.JS.Async do
   # ── loops ──────────────────────────────────────────────────
 
   # the context for a loop body: where `break` and `continue` (bare or with this loop's labels) go
-  defp loop_ctx(ctx, labels, on_break, on_continue) do
+  @doc false
+  # (public: compiled plans call it)
+  def loop_ctx(ctx, labels, on_break, on_continue) do
     brk = Enum.reduce([nil | labels], ctx.brk, &Map.put(&2, &1, on_break))
     cont = Enum.reduce([nil | labels], ctx.cont, &Map.put(&2, &1, on_continue))
     %{ctx | brk: brk, cont: cont}
@@ -1648,14 +2599,41 @@ defmodule Browser.JS.Async do
     end
   end
 
+  # The items of a for-in or a for-of loop. A for-in loop visits the keys of the object
+  # (a primitive gives the keys of its wrapper object) and of its prototypes, as the sync
+  # loop of `Interp` does.
+  defp loop_source(:forin, target) do
+    o = Interp.for_in_object(target)
+    {:keys, o, if(Interp.nullish?(o), do: [], else: Interp.for_in_keys(o))}
+  end
+
+  defp loop_source(:forof, target), do: Interp.iter_source(target)
+
+  # A for-in loop does not visit a key that was deleted before its turn. The check runs for
+  # each key, because a body that awaits can let other code delete keys.
+  defp forin([], _o, _spec, _ctx, k, _labels), do: k.(:ok)
+
+  defp forin([key | rest], o, spec, ctx, k, labels) do
+    attempt(fn -> Interp.has_property?(o, key) end, ctx, fn
+      true ->
+        foreach_item(key, spec, ctx, k, labels, fn -> forin(rest, o, spec, ctx, k, labels) end)
+
+      false ->
+        forin(rest, o, spec, ctx, k, labels)
+    end)
+  end
+
   defp foreach([], _spec, _ctx, k, _labels), do: k.(:ok)
 
-  defp foreach([item | rest], {pat, mode, body, env} = spec, ctx, k, labels) do
+  defp foreach([item | rest], spec, ctx, k, labels),
+    do: foreach_item(item, spec, ctx, k, labels, fn -> foreach(rest, spec, ctx, k, labels) end)
+
+  defp foreach_item(item, {pat, mode, body, env, sc}, ctx, k, labels, next) do
     Interp.tick()
-    iter_env = Interp.new_scope(env)
+    iter_env = item_env(env, sc)
 
     cbind(pat, item, mode, iter_env, ctx, fn ->
-      run_body(body, iter_env, ctx, k, labels, fn _ -> foreach(rest, spec, ctx, k, labels) end)
+      run_body(body, iter_env, ctx, k, labels, fn _ -> next.() end)
     end)
   end
 
@@ -1711,9 +2689,9 @@ defmodule Browser.JS.Async do
     {Interp.truthy(Interp.get(r, "done")), Interp.get(r, "value")}
   end
 
-  defp afor_body(item, it, next, sync?, {pat, mode, body, env} = spec, ctx, k, labels) do
+  defp afor_body(item, it, next, sync?, {pat, mode, body, env, sc} = spec, ctx, k, labels) do
     Interp.tick()
-    iter_env = Interp.new_scope(env)
+    iter_env = item_env(env, sc)
 
     # leaving the loop early calls the iterator's `return` and waits for it
     closing = fn after_ ->
@@ -1762,7 +2740,7 @@ defmodule Browser.JS.Async do
 
   # `for of` over an iterator object, one value at a time; leaving the loop early (break,
   # return, an outer label, a throw) calls the iterator's `return`
-  defp proto_foreach(it, next, {pat, mode, body, env} = spec, ctx, k, labels) do
+  defp proto_foreach(it, next, {pat, mode, body, env, sc} = spec, ctx, k, labels) do
     step =
       try do
         {:ok, Interp.iter_step(it, next)}
@@ -1779,7 +2757,7 @@ defmodule Browser.JS.Async do
 
       {:ok, {:ok, item}} ->
         Interp.tick()
-        iter_env = Interp.new_scope(env)
+        iter_env = item_env(env, sc)
 
         closing = fn after_ ->
           guarded(fn -> Interp.iter_close(it, false) end, ctx, after_)
@@ -1827,5 +2805,466 @@ defmodule Browser.JS.Async do
             else: find_case(cases, i + 1, v, scope, ctx, found)
         end)
     end
+  end
+
+  # ── compiled plans (step 5c) ───────────────────────────────
+  #
+  # `Browser.JS.Compile` compiles the body of a rewritten async function or generator into
+  # a plan (see "CPS plans" in its moduledoc). The plan does the work of `clist/4`, `cs/5`
+  # and `cev/4`, but it finds the facts of the body (which statement and which expression
+  # awaits, the lift plan of an expression, the parts of a loop) once, when it compiles.
+  # The functions below are the run-time part of the plans.
+  #
+  # The collector (`Browser.JS.GC`) does not walk the funs of `Browser.JS.Compile`, because
+  # a compiled closure keeps no heap id and no frame id. A continuation keeps the frame, the
+  # context and the next continuation. Thus a plan makes no continuation itself: it calls
+  # a function of this part, which makes the continuation. The fun of the continuation is a
+  # fun of this module, which the collector walks. The walk stops at the compiled closures
+  # that the continuation keeps.
+  #
+  # A compiled expression is one of these:
+  #
+  #   * `{:s, f}`: the expression does not await. `f` is the closure of the sync compiler,
+  #     `fn env -> value end`.
+  #   * `{:t, f}`: the test of an `if` or a loop that does not await. `f` gives an Elixir
+  #     boolean.
+  #   * `{:c, f}`: the expression can suspend. `f` is `fn env, ctx, k -> ... end`, and it
+  #     gives the value to `k`.
+  #
+  # A compiled statement is `fn env, ctx, k -> ... end`. It calls `k` when it completes
+  # normally. Each continuation that a plan gives to a statement does not read its
+  # argument, so a statement can give `k` any value (an expression statement gives its
+  # value).
+
+  # The value of the sync closure `f` in `env`, or the value that it throws. A throw goes to
+  # the context after the `try`, so that the rest of the body does not run inside it (as in
+  # `sync_expr/4`).
+  defmacrop sync_value(f, env) do
+    quote do
+      try do
+        {:ok, unquote(f).(unquote(env))}
+      catch
+        {:js_error, sync_e} -> {:throw, sync_e}
+      end
+    end
+  end
+
+  @doc false
+  # Gives the value of the compiled expression `x` to `k`.
+  def value({:c, f}, env, ctx, k), do: f.(env, ctx, k)
+
+  def value({:s, f}, env, ctx, k) do
+    case sync_value(f, env) do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  @doc false
+  # `o[k] op= v` that awaits, in a plan (the twin of the clause of `cev_await/4`). `o`,
+  # `key` and `x` are compiled expressions, and `key` is `{:node, key}` for a key that
+  # needs no evaluation (see `const_key?/1`).
+  def compound_k({op, strict?, o, key, x}, env, ctx, k) do
+    value(o, env, ctx, fn ov ->
+      rest = fn kn ->
+        target = {:member, {:val, ov}, kn, false}
+        compound_rest(target, op, strict?, env, ctx, k, &value(x, env, ctx, &1))
+      end
+
+      case key do
+        {:node, kn} -> rest.(kn)
+        _ -> value(key, env, ctx, fn kv -> rest.({:val, kv}) end)
+      end
+    end)
+  end
+
+  @doc false
+  # Runs the compiled statement `a`, then the compiled statements `r`.
+  def then(a, r, env, ctx, k), do: a.(env, ctx, fn _ -> r.(env, ctx, k) end)
+
+  @doc false
+  # `await x` where `x` can suspend.
+  def await_cps(f, env, ctx, k), do: f.(env, ctx, fn v -> await_value(v, ctx, k) end)
+
+  @doc false
+  # `yield x` where `x` can suspend.
+  def yield_cps(f, env, ctx, k), do: f.(env, ctx, fn v -> yield_value(v, ctx, k) end)
+
+  @doc false
+  # `&&`, `||` or `??` where the left operand can suspend (the twin of the clause of
+  # `cev_await/4`).
+  def logical_cps(op, f, r, env, ctx, k),
+    do: f.(env, ctx, fn lv -> logical_rest(op, lv, r, env, ctx, k) end)
+
+  @doc false
+  # The right operand of `&&`, `||` or `??`, when the left value `lv` does not decide.
+  def logical_rest(op, lv, r, env, ctx, k) do
+    short =
+      case op do
+        "&&" -> not Interp.truthy(lv)
+        "||" -> Interp.truthy(lv)
+        "??" -> not Interp.nullish?(lv)
+      end
+
+    if short, do: k.(lv), else: value(r, env, ctx, k)
+  end
+
+  @doc false
+  # `c ? a : b` where the test can suspend.
+  def cond_cps(f, a, b, env, ctx, k) do
+    f.(env, ctx, fn cv ->
+      if Interp.truthy(cv), do: value(a, env, ctx, k), else: value(b, env, ctx, k)
+    end)
+  end
+
+  @doc false
+  # A destructuring assignment where the value can suspend. The pattern binds through
+  # `cbind/6`, as in the clause of `cev_await/4`.
+  def destructure(x, pat, env, ctx, k),
+    do: value(x, env, ctx, fn v -> cbind(pat, v, :assign, env, ctx, fn -> k.(v) end) end)
+
+  @doc false
+  # The lift plan of an expression: the leaves run in source order. Then the template runs
+  # with their values in a tuple, as in the frame clause of `cev_await/4`. The template is
+  # compiled. A hole of the template reads its value from the process key
+  # `:js_cps_vals`, which holds the tuple while the template runs. The template makes no
+  # suspension, but it can call code that runs another template, so the key gets its old
+  # value back after the template.
+  def lifted(leaves, t, env, ctx, k), do: lift_vals(leaves, [], t, env, ctx, k)
+
+  defp lift_vals([], acc, t, env, ctx, k) do
+    old = :erlang.put(:js_cps_vals, List.to_tuple(:lists.reverse(acc)))
+
+    result =
+      try do
+        {:ok, t.(env)}
+      catch
+        {:js_error, e} -> {:throw, e}
+      after
+        :erlang.put(:js_cps_vals, old)
+      end
+
+    case result do
+      {:ok, v} -> k.(v)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp lift_vals([{:s, f} | rest], acc, t, env, ctx, k) do
+    case sync_value(f, env) do
+      {:ok, v} -> lift_vals(rest, [v | acc], t, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  defp lift_vals([{:c, f} | rest], acc, t, env, ctx, k),
+    do: f.(env, ctx, fn v -> lift_vals(rest, [v | acc], t, env, ctx, k) end)
+
+  @doc false
+  # The declarations of a `var`, `let` or `const` that awaits, one at a time (the twin of
+  # `cdecls/5`). Each part is `{pattern, init, cps?}`: `init` is `nil` or a compiled
+  # expression, and `cps?` tells that the pattern awaits, so that `cbind_cps/6` binds it.
+  def decls([], _kind, _env, _ctx, k), do: k.(:ok)
+
+  def decls([{_pat, nil, _} | rest], :var, env, ctx, k), do: decls(rest, :var, env, ctx, k)
+
+  def decls([{pat, nil, _} | rest], kind, env, ctx, k) do
+    case bind_value(pat, :undefined, env, kind) do
+      :ok -> decls(rest, kind, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  # (a sync value and a sync pattern: the two steps run under one `try`, because nothing
+  # comes between them)
+  def decls([{pat, {:s, f}, false} | rest], kind, env, ctx, k) do
+    result =
+      try do
+        Interp.bind_pattern(pat, f.(env), env, kind)
+        :ok
+      catch
+        {:js_error, e} -> {:throw, e}
+      end
+
+    case result do
+      :ok -> decls(rest, kind, env, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  def decls([{pat, x, false} | rest], kind, env, ctx, k) do
+    value(x, env, ctx, fn v ->
+      case bind_value(pat, v, env, kind) do
+        :ok -> decls(rest, kind, env, ctx, k)
+        {:throw, e} -> ctx.throw.(e)
+      end
+    end)
+  end
+
+  def decls([{pat, x, true} | rest], kind, env, ctx, k) do
+    value(x, env, ctx, fn v ->
+      cbind_cps(pat, v, kind, env, ctx, fn -> decls(rest, kind, env, ctx, k) end)
+    end)
+  end
+
+  defp bind_value(pat, v, env, kind) do
+    Interp.bind_pattern(pat, v, env, kind)
+    :ok
+  catch
+    {:js_error, e} -> {:throw, e}
+  end
+
+  @doc false
+  # An `if` where the test can suspend. `a` and `b` are compiled statements, and `b` can be
+  # `nil`.
+  def if_cps(f, a, b, env, ctx, k) do
+    f.(env, ctx, fn v ->
+      cond do
+        Interp.truthy(v) -> a.(env, ctx, k)
+        b != nil -> b.(env, ctx, k)
+        true -> k.(:ok)
+      end
+    end)
+  end
+
+  @doc false
+  # A compiled `while` (the twin of `while_loop/6`). `t` is the compiled test (`{:t, f}` or
+  # `{:c, f}`), and `b` is the compiled body.
+  def while_k(t, b, env, ctx, k, labels) do
+    case t do
+      {:t, f} ->
+        case sync_value(f, env) do
+          {:ok, true} -> while_round(t, b, env, ctx, k, labels)
+          {:ok, false} -> k.(:ok)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(env, ctx, fn v ->
+          if Interp.truthy(v), do: while_round(t, b, env, ctx, k, labels), else: k.(:ok)
+        end)
+    end
+  end
+
+  defp while_round(t, b, env, ctx, k, labels) do
+    Interp.tick()
+    next = fn _ -> while_k(t, b, env, ctx, k, labels) end
+    b.(env, loop_ctx(ctx, labels, k, next), next)
+  end
+
+  @doc false
+  # A compiled `do`/`while`: the body runs once before the first test, with no step, as in
+  # the clause of `cs/5`.
+  def dowhile_k(t, b, env, ctx, k, labels) do
+    next = fn _ -> while_k(t, b, env, ctx, k, labels) end
+    b.(env, loop_ctx(ctx, labels, k, next), next)
+  end
+
+  @doc false
+  # A compiled `for` in frame mode (the twin of the clause of `cs/5` and of `for_iter/5`).
+  # `sc` is the scope to enter, or `nil` when the entry has no work. `init` is `nil`, a
+  # compiled expression, a statement that can suspend (`{:c, f}`) or a sync statement
+  # (`{:stmt, f}`). With `copy?` each round runs in its own copy of the head frame.
+  def for_k({init, t, u, b, sc, copy?}, env, ctx, k, labels) do
+    entered =
+      if sc == nil do
+        {:ok, env}
+      else
+        try do
+          {:ok, Interp.cps_enter(env, sc)}
+        catch
+          {:js_error, e} -> {:throw, e}
+        end
+      end
+
+    case entered do
+      {:ok, l} ->
+        spec = {t, u, b, env, copy?}
+
+        case init do
+          nil ->
+            for_start(spec, l, ctx, k, labels)
+
+          {:stmt, f} ->
+            case run_stmt(f, l) do
+              :ok -> for_start(spec, l, ctx, k, labels)
+              c -> abrupt(c, ctx, k)
+            end
+
+          {:s, f} ->
+            case sync_value(f, l) do
+              {:ok, _} -> for_start(spec, l, ctx, k, labels)
+              {:throw, e} -> ctx.throw.(e)
+            end
+
+          {:c, f} ->
+            f.(l, ctx, fn _ -> for_start(spec, l, ctx, k, labels) end)
+        end
+
+      {:throw, e} ->
+        ctx.throw.(e)
+    end
+  end
+
+  defp for_start({_, _, _, env, copy?} = spec, l, ctx, k, labels) do
+    first = if copy?, do: Interp.copy_scope(l, env), else: l
+    for_round(spec, first, ctx, k, labels)
+  end
+
+  defp for_round({t, _, _, _, _} = spec, iter_env, ctx, k, labels) do
+    Interp.tick()
+
+    case t do
+      nil ->
+        for_body(spec, iter_env, ctx, k, labels)
+
+      {:t, f} ->
+        case sync_value(f, iter_env) do
+          {:ok, true} -> for_body(spec, iter_env, ctx, k, labels)
+          {:ok, false} -> k.(:ok)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(iter_env, ctx, fn v ->
+          if Interp.truthy(v), do: for_body(spec, iter_env, ctx, k, labels), else: k.(:ok)
+        end)
+    end
+  end
+
+  defp for_body({_, _, b, _, _} = spec, iter_env, ctx, k, labels) do
+    advance = fn _ -> for_next(spec, iter_env, ctx, k, labels) end
+    b.(iter_env, loop_ctx(ctx, labels, k, advance), advance)
+  end
+
+  defp for_next({_, u, _, env, copy?} = spec, iter_env, ctx, k, labels) do
+    next_env = if copy?, do: Interp.copy_scope(iter_env, env), else: iter_env
+
+    case u do
+      nil ->
+        for_round(spec, next_env, ctx, k, labels)
+
+      {:s, f} ->
+        case sync_value(f, next_env) do
+          {:ok, _} -> for_round(spec, next_env, ctx, k, labels)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(next_env, ctx, fn _ -> for_round(spec, next_env, ctx, k, labels) end)
+    end
+  end
+
+  @doc false
+  # A compiled `switch` in frame mode (the twin of the frame clause of `cs/5` and of
+  # `find_case/6`). The discriminant runs in `env`. The tests and the bodies run in the
+  # scope of the switch. `sc` is the scope to enter, or `nil` when the entry has no work.
+  def switch_k({x, _, _, _, _} = spec, env, ctx, k) do
+    case x do
+      {:s, f} ->
+        case sync_value(f, env) do
+          {:ok, v} -> switch_enter(spec, v, env, ctx, k)
+          {:throw, e} -> ctx.throw.(e)
+        end
+
+      {:c, f} ->
+        f.(env, ctx, fn v -> switch_enter(spec, v, env, ctx, k) end)
+    end
+  end
+
+  defp switch_enter({_, tests, _, _, sc} = spec, v, env, ctx, k) do
+    entered =
+      if sc == nil do
+        {:ok, env}
+      else
+        try do
+          {:ok, Interp.cps_enter(env, sc)}
+        catch
+          {:js_error, e} -> {:throw, e}
+        end
+      end
+
+    case entered do
+      {:ok, scope} -> switch_find(tests, 0, spec, v, scope, ctx, k)
+      {:throw, e} -> ctx.throw.(e)
+    end
+  end
+
+  # The first case whose test is equal to the value, else the default case.
+  defp switch_find([], _i, {_, _, _, default, _} = spec, _v, scope, ctx, k),
+    do: switch_run(spec, default, scope, ctx, k)
+
+  defp switch_find([:default | rest], i, spec, v, scope, ctx, k),
+    do: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+
+  defp switch_find([{:s, f} | rest], i, spec, v, scope, ctx, k) do
+    case sync_value(f, scope) do
+      {:ok, tv} ->
+        if Interp.strict_eq(v, tv),
+          do: switch_run(spec, i, scope, ctx, k),
+          else: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+
+      {:throw, e} ->
+        ctx.throw.(e)
+    end
+  end
+
+  defp switch_find([{:c, f} | rest], i, spec, v, scope, ctx, k) do
+    f.(scope, ctx, fn tv ->
+      if Interp.strict_eq(v, tv),
+        do: switch_run(spec, i, scope, ctx, k),
+        else: switch_find(rest, i + 1, spec, v, scope, ctx, k)
+    end)
+  end
+
+  # A `break` without a label ends the switch.
+  defp switch_run(_spec, nil, _scope, _ctx, k), do: k.(:ok)
+
+  defp switch_run({_, _, bodies, _, _}, start, scope, ctx, k) do
+    ctx = %{ctx | brk: Map.put(ctx.brk, nil, k)}
+    cases_from(Enum.drop(bodies, start), scope, ctx, k)
+  end
+
+  defp cases_from([], _scope, _ctx, k), do: k.(:ok)
+  defp cases_from([b], scope, ctx, k), do: b.(scope, ctx, k)
+
+  defp cases_from([b | rest], scope, ctx, k),
+    do: b.(scope, ctx, fn _ -> cases_from(rest, scope, ctx, k) end)
+
+  @doc false
+  # Runs the compiled sync statement or statement list `f` and gives its completion, as
+  # `sync_stmt/5` does. A pending call (only the old path makes one) runs here, under the
+  # `try`.
+  def run_stmt(f, env) do
+    case f.(env) do
+      {:tail, tf, tt, ta} ->
+        if @check, do: Interp.check_run_tail(env)
+        {:ret, Interp.call(tf, tt, ta)}
+
+      c ->
+        c
+    end
+  catch
+    {:js_error, e} -> {:throw, e}
+  end
+
+  @doc false
+  # An expression that stays on the tree path in a compiled plan: `yield*`, an optional
+  # chain that awaits, a logical assignment that awaits, and a lift plan with a leaf from a
+  # class.
+  def tree_expr(e, env, ctx, k), do: cev_await(e, env, ctx, k)
+
+  @doc false
+  # A statement that awaits and stays on the tree path in a compiled plan.
+  def tree_stmt(s, env, ctx, k, labels), do: cs(s, env, ctx, k, labels)
+
+  @doc false
+  # The lift plan of an expression that awaits, for the compiler: `{template, leaves}`,
+  # with the leaves in source order. The plan is the plan of the frame clause of
+  # `cev_await/4`, and check mode compares it with the old walk (item A2).
+  def lift_plan(e) do
+    {template, leaves} = lift(e, [], :frame)
+    if @check, do: check_lift(e, :frame, {template, leaves})
+    {template, Enum.reverse(leaves)}
   end
 end

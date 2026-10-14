@@ -7,13 +7,13 @@ defmodule Browser.JS.ArrayGeneric do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3, delete: 2, to_int: 1]
+  import Browser.JS.Args
   alias Browser.JS.{Builtins, Interp, Props, Proxy}
+  require Browser.JS.Elems, as: Elems
 
   @max 9_007_199_254_740_991
   @max_array 4_294_967_295
   @huge 18_014_398_509_481_984
-
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
 
   # ── plumbing ───────────────────────────────────────────────
 
@@ -57,11 +57,14 @@ defmodule Browser.JS.ArrayGeneric do
   # accessor, or not an array at all) and the caller goes through the property protocol
   defp stored({:obj, id}, k) do
     case deref(id) do
-      %{class: :array, items: items} = o when not is_map_key(o, :proxy) ->
-        case items do
-          %{^k => {:accessor, _, _}} -> :other
-          %{^k => v} -> {:ok, v}
-          _ -> :other
+      o when Elems.dense_index?(o, k) ->
+        {:ok, Elems.dense_at(o, k)}
+
+      %{class: :array} = o when not is_map_key(o, :proxy) ->
+        case Elems.get(o, k, Elems.none()) do
+          {:accessor, _, _} -> :other
+          Elems.none() -> :other
+          v -> {:ok, v}
         end
 
       _ ->
@@ -413,7 +416,7 @@ defmodule Browser.JS.ArrayGeneric do
   defp sparse_includes?(o, start, v) do
     {:obj, id} = o
 
-    Enum.any?(Map.keys(deref(id).items), fn k ->
+    Enum.any?(Elems.keys(deref(id)), fn k ->
       k >= start and same_value_zero(get(o, k), v)
     end)
   end
@@ -424,7 +427,7 @@ defmodule Browser.JS.ArrayGeneric do
 
     if very_sparse?(o, from, to) do
       {:obj, id} = o
-      keys = for k <- Map.keys(deref(id).items), k >= from and k <= to, do: k
+      keys = for k <- Elems.keys(deref(id)), k >= from and k <= to, do: k
       if dir == :asc, do: Enum.sort(keys), else: Enum.sort(keys, :desc)
     else
       range
@@ -433,8 +436,8 @@ defmodule Browser.JS.ArrayGeneric do
 
   defp very_sparse?({:obj, id}, from, to) do
     case deref(id) do
-      %{class: :array, items: items} ->
-        to - from > 100_000 and to - from - map_size(items) > 100_000
+      %{class: :array} = o ->
+        to - from > 100_000 and to - from - Elems.count(o) > 100_000
 
       _ ->
         false
@@ -694,12 +697,17 @@ defmodule Browser.JS.ArrayGeneric do
 
   @spreadable {:symbol, :isConcatSpreadable, "Symbol.isConcatSpreadable"}
 
+  # A plain result (`fresh_array?/1`) collects the values in `acc`: `{:list, rev}`, the
+  # values last first, while the values have no hole, and `{:map, items}` after the first
+  # hole. Most sources are dense arrays or values, so the result is made from a list
+  # (`Elems.replace/2`) and needs no map. A result that is not plain gets each value with
+  # `create!/3`, and `acc` does not change.
   def concat(o, args) do
     a = species_create(o, 0)
     plain? = fresh_array?(a)
 
     {n, acc} =
-      Enum.reduce([o | args], {0, %{}}, fn e, {n, acc} ->
+      Enum.reduce([o | args], {0, {:list, []}}, fn e, {n, acc} ->
         if spreadable?(e),
           do: spread(e, a, plain?, n, acc),
           else: {n + 1, add(a, plain?, acc, n, e)}
@@ -708,7 +716,11 @@ defmodule Browser.JS.ArrayGeneric do
     if plain? do
       if n > @max_array, do: throw_error("RangeError", "Invalid array length")
       {:obj, id} = a
-      store(id, %{deref(id) | items: acc, len: n})
+
+      case acc do
+        {:list, rev} -> store(id, Elems.replace(deref(id), :lists.reverse(rev)))
+        {:map, items} -> store(id, Elems.replace_map(deref(id), items, n))
+      end
     else
       set_length!(a, n)
     end
@@ -719,21 +731,29 @@ defmodule Browser.JS.ArrayGeneric do
   # a result array that nothing else could have observed: elements may be stored directly
   defp fresh_array?({:obj, id}) do
     case deref(id) do
-      %{class: :array, len: 0, proto: pr} ->
-        pr == proto(:array) and not Map.has_key?(deref(id), :proxy)
+      %{class: :array, proto: pr} = o ->
+        Elems.len(o) == 0 and pr == proto(:array) and not Map.has_key?(o, :proxy)
 
       _ ->
         false
     end
   end
 
-  defp add(_a, true, acc, n, v), do: Map.put(acc, n, v)
+  defp add(_a, true, {:list, rev}, _n, v), do: {:list, [v | rev]}
+  defp add(_a, true, {:map, items}, n, v), do: {:map, Map.put(items, n, v)}
 
   defp add(a, false, acc, n, v) do
     if n >= @max, do: throw_error("TypeError", "Invalid array length")
     create!(a, n, v)
     acc
   end
+
+  # `acc` of `concat/2` as a map, for a source that can have a hole.
+  defp acc_map({:list, rev}), do: {:map, :maps.from_list(rev_pairs(rev, length(rev) - 1, []))}
+  defp acc_map(acc), do: acc
+
+  defp rev_pairs([v | rev], i, pairs), do: rev_pairs(rev, i - 1, [{i, v} | pairs])
+  defp rev_pairs([], _, pairs), do: pairs
 
   defp spreadable?({:obj, _} = e) do
     case Interp.get(e, @spreadable) do
@@ -750,9 +770,19 @@ defmodule Browser.JS.ArrayGeneric do
 
     case dense_items(e, len) do
       {:ok, items} when plain? ->
-        {n + len, Enum.reduce(items, acc, fn {i, v}, acc -> Map.put(acc, n + i, v) end)}
+        case acc do
+          {:list, rev} ->
+            {n + len, {:list, :lists.reverse(items, rev)}}
+
+          {:map, m} ->
+            {n + len,
+             {:map,
+              Enum.reduce(Enum.with_index(items, n), m, fn {v, i}, m -> Map.put(m, i, v) end)}}
+        end
 
       _ ->
+        acc = if plain?, do: acc_map(acc), else: acc
+
         Enum.reduce(0..(len - 1)//1, {n, acc}, fn k, {m, acc} ->
           acc = if has?(e, k), do: add(a, plain?, acc, m, get(e, k)), else: acc
           {m + 1, acc}
@@ -760,20 +790,19 @@ defmodule Browser.JS.ArrayGeneric do
     end
   end
 
-  # the elements of an ordinary array without accessors or holes, as they are stored
+  # the elements of an ordinary array without accessors or holes, as a list
   defp dense_items({:obj, id}, len) do
     case deref(id) do
-      %{class: :array, items: items, len: ^len} = o when map_size(items) == len ->
-        if Map.has_key?(o, :proxy) or
-             Enum.any?(items, fn {_, v} -> match?({:accessor, _, _}, v) end),
-           do: :slow,
-           else: {:ok, items}
+      %{class: :array} = o ->
+        if Map.has_key?(o, :proxy) or not Elems.packed?(o, len),
+          do: :slow,
+          else: {:ok, Elems.to_list(o)}
 
       _ ->
         :slow
     end
   end
 
-  @doc "Every element 0..len-1 read through Get (holes read as undefined)."
+  @doc "Every element from 0 to `len - 1`, read through Get (a hole reads as undefined)."
   def read_all(o, len), do: for(k <- 0..(len - 1)//1, do: get(o, k))
 end

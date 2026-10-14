@@ -175,17 +175,28 @@ defmodule Browser.JS.Runtime do
   def boot(raw, info) do
     Interp.init(@steps)
     Browser.JS.GC.enable()
-    scope = Builtins.install()
-    DOM.init(raw, info)
-    DOM.install(scope)
-    Process.put(:rt_info, info)
-    Process.put(:js_hidden, info[:hidden] == true)
-    Browser.JS.WebAPI.install(scope, &http/1)
-    Browser.JS.Editing.install(scope)
-    Browser.JS.WebAssembly.install(scope)
-    Browser.JS.IndexedDB.install(scope)
-    Browser.JS.Workers.install(scope)
-    Browser.JS.WebSockets.install(scope)
+
+    # (in a new process the shapes of the built-in objects and of the web API come from a
+    # copy in the VM, see `Browser.JS.Shape.realm/2`)
+    Browser.JS.Shape.realm(:runtime, fn ->
+      scope = Builtins.install()
+      DOM.init(raw, info)
+
+      # (the prototypes and the functions of the web API are fast records, as the
+      # built-in objects of the language are, see `Builtins.built/1`)
+      Builtins.built(fn ->
+        DOM.install(scope)
+        Process.put(:rt_info, info)
+        Process.put(:js_hidden, info[:hidden] == true)
+        Browser.JS.WebAPI.install(scope, &http/1)
+        Browser.JS.Editing.install(scope)
+        Browser.JS.WebAssembly.install(scope)
+        Browser.JS.IndexedDB.install(scope)
+        Browser.JS.Workers.install(scope)
+        Browser.JS.WebSockets.install(scope)
+      end)
+    end)
+
     Modules.reset()
     Process.put(:js_import, import_fun())
     Process.put(:rt_importmap, %{})
@@ -672,6 +683,13 @@ defmodule Browser.JS.Runtime do
 
   # runs `fun`, turning a script's uncaught error into a console line
   defp guard(fun, default) do
+    result = guarded(fun, default)
+    # (check mode only: every call restored the call stack, also on a throw)
+    Interp.check_task_end()
+    result
+  end
+
+  defp guarded(fun, default) do
     fun.()
   rescue
     # a bug in a built-in must not take the page's scripts down with it

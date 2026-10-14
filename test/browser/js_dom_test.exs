@@ -440,8 +440,24 @@ defmodule Browser.JS.DOMTest do
   # the console lines a script writes, once timers and promises have settled
   defp run_page(script, body \\ "") do
     {pid, reply} = start("<body>#{body}<script>#{script}</script></body>")
-    flushed = Runtime.flush(pid)
-    logs(reply) ++ logs(flushed)
+    logs(reply) ++ logs(%{console: settle(pid)})
+  end
+
+  # The console of the timers that are left, in order. The runtime runs a timer on its own
+  # when it comes due before the flush arrives, which happens on a busy machine. It then
+  # sends the output to the owner as a `:js_async` message. Such a message comes before the
+  # reply to the flush, so it is in the mailbox when the flush returns.
+  defp settle(pid) do
+    flushed = Runtime.flush(pid).console
+    early_console(pid) ++ flushed
+  end
+
+  defp early_console(pid) do
+    receive do
+      {:js_async, ^pid, reply} -> reply.console ++ early_console(pid)
+    after
+      0 -> []
+    end
   end
 
   describe "streams" do
@@ -498,7 +514,7 @@ defmodule Browser.JS.DOMTest do
       """
 
       {pid, reply} = start(html, %{"http://t.test/chunk.js" => "window.chunk = 42;"})
-      flushed = Runtime.flush(pid)
+      flushed = %{console: settle(pid)}
       assert errors(reply) == []
       assert logs(reply) ++ logs(flushed) == ["added", "loaded 42"]
     end
@@ -515,7 +531,7 @@ defmodule Browser.JS.DOMTest do
       """
 
       {pid, reply} = start(html)
-      flushed = Runtime.flush(pid)
+      flushed = %{console: settle(pid)}
       assert logs(reply) ++ logs(flushed) == ["error"]
     end
   end
@@ -644,13 +660,12 @@ defmodule Browser.JS.DOMTest do
         </script></body>
         """)
 
-      flushed = Runtime.flush(pid)
-      assert reply.console ++ flushed.console == [log: "sync, good load, bad error"]
+      assert reply.console ++ settle(pid) == [log: "sync, good load, bad error"]
     end
 
     test "a promise rejected with nobody listening is reported" do
       {pid, reply} = start("<body><script>Promise.reject(new Error('nope'))</script></body>")
-      flushed = Runtime.flush(pid)
+      flushed = %{console: settle(pid)}
 
       assert errors(reply) ++ errors(flushed) == [
                "Uncaught (in promise) Error: nope\n    at inline script 1:1"
@@ -856,7 +871,7 @@ defmodule Browser.JS.DOMTest do
       assert r.prevented
       # the awaits have not finished: the handler returned at the first one
       assert logs(r) == []
-      assert logs(Runtime.flush(pid)) == ["done"]
+      assert logs(%{console: settle(pid)}) == ["done"]
     end
 
     test "timers run in real time and report what they changed" do

@@ -375,6 +375,103 @@ defmodule Browser.JSTest do
       assert js("var re = /(?:)/g; re.a = 1; Reflect.ownKeys(re).join()") == "lastIndex,a"
     end
 
+    # The order of OrdinaryOwnPropertyKeys: the array indexes in ascending order, then the
+    # strings in creation order, then the symbols in creation order. A key keeps its place
+    # when its attributes change, and a key that is deleted and made again goes to the end.
+    test "the key order is the order of the spec" do
+      # (symbols in creation order, not in the order of their ids)
+      assert js(
+               "var b = Symbol('b'), a = Symbol('a'); var o = {}; o[b] = 1; o.x = 2; " <>
+                 "Object.defineProperty(o, a, {value: 3, enumerable: true}); " <>
+                 "var c = {[a]: 1, [b]: 2}; [Reflect.ownKeys(o), " <>
+                 "Object.getOwnPropertySymbols(Object.assign({}, o)), " <>
+                 "Object.getOwnPropertySymbols({...c})].map(l => l.map(String).join()).join(' ')"
+             ) == "x,Symbol(b),Symbol(a) Symbol(b),Symbol(a) Symbol(a),Symbol(b)"
+
+      # (a key made enumerable again keeps its place)
+      assert js(
+               "var o = {a: 1, b: 2, c: 3}; Object.defineProperty(o, 'a', {enumerable: false}); " <>
+                 "var r = Object.keys(o).join(); Object.defineProperty(o, 'a', {enumerable: true}); " <>
+                 "var s = ''; for (var k in o) s += k; [r, Object.keys(o).join(), s, JSON.stringify(o)].join(' ')"
+             ) == ~S(b,c a,b,c abc {"a":1,"b":2,"c":3})
+
+      # (keys that are not enumerable among the enumerable ones)
+      assert js(
+               "var o = {a: 1}; Object.defineProperty(o, 'h', {value: 2}); o.b = 3; o[2] = 4; " <>
+                 "var s = ''; for (var k in o) s += k; [Reflect.ownKeys(o).join(), " <>
+                 "Object.getOwnPropertyNames(o).join(), Object.keys(o).join(), s, JSON.stringify(o), " <>
+                 "Object.keys(Object.assign({}, o)).join(), Object.keys({...o}).join()].join(' ')"
+             ) == ~S(2,a,h,b 2,a,h,b 2,a,b 2ab {"2":4,"a":1,"b":3} 2,a,b 2,a,b)
+
+      # (a key that is deleted and made again goes to the end)
+      assert js(
+               "var o = {a: 1, b: 2}; Object.defineProperty(o, 'h', {value: 0, configurable: true}); " <>
+                 "o.c = 3; delete o.a; o.a = 4; delete o.h; o.h = 5; Reflect.ownKeys(o).join()"
+             ) == "b,c,a,h"
+    end
+
+    test "the length of an arguments object is an ordinary own property" do
+      assert js(
+               "function f(){ var r = [Object.getOwnPropertyNames(arguments).join()]; " <>
+                 "delete arguments.length; r.push(String(arguments.length), 'length' in arguments); " <>
+                 "arguments.length = 7; var d = Object.getOwnPropertyDescriptor(arguments, 'length'); " <>
+                 "r.push(Object.getOwnPropertyNames(arguments).join(), Object.keys(arguments).join(), " <>
+                 "d.value, d.enumerable); return r.join(' ') } f(1, 2)"
+             ) == "0,1,length,callee undefined false 0,1,callee,length 0,1,length 7 true"
+
+      assert js(
+               "function f(){ Object.defineProperty(arguments, 'length', {enumerable: true}); " <>
+                 "return Object.keys(arguments).join() + ' ' + arguments.length } f(1, 2)"
+             ) == "0,1,length 2"
+
+      assert js(
+               "function f(){ 'use strict'; Object.defineProperty(arguments, 'length', " <>
+                 "{value: 5, writable: false}); try { arguments.length = 3 } " <>
+                 "catch (e) { return e.name + ' ' + arguments.length } } f(1)"
+             ) == "TypeError 5"
+    end
+
+    test "the array methods read and write the own length of an arguments object" do
+      # (the list paths of the array methods change only the elements, so an arguments
+      # object must take the generic path, which writes its own `length`)
+      show =
+        "var P = Array.prototype; function show(a){ return a.length + ':' + P.join.call(a) + " <>
+          "':' + Object.getOwnPropertyDescriptor(a, 'length').value } "
+
+      assert js(
+               show <>
+                 "function f(){ var a = arguments, r = []; P.push.call(a, 9); r.push(show(a)); " <>
+                 "r.push(P.pop.call(a), show(a), 3 in a); P.shift.call(a); r.push(show(a), 2 in a); " <>
+                 "P.unshift.call(a, 0); r.push(show(a)); P.splice.call(a, 1, 1); " <>
+                 "r.push(show(a), 2 in a); P.sort.call(a); P.reverse.call(a); r.push(show(a)); " <>
+                 "return r.join(' ') } f(3, 1, 2)"
+             ) ==
+               "4:3,1,2,9:4 9 3:3,1,2:3 false 2:1,2:2 false 3:0,1,2:3 2:0,2:2 false 2:2,0:2"
+
+      assert js(
+               show <>
+                 "function f(){ 'use strict'; var a = arguments, r = []; P.push.call(a, 9); " <>
+                 "r.push(show(a)); r.push(P.pop.call(a), show(a)); P.shift.call(a); r.push(show(a)); " <>
+                 "P.unshift.call(a, 0); r.push(show(a)); P.splice.call(a, 0, 1); r.push(show(a)); " <>
+                 "return r.join(' ') } f(3, 1, 2)"
+             ) == "4:3,1,2,9:4 9 3:3,1,2:3 2:1,2:2 3:0,1,2:3 2:1,2:2"
+
+      # (after an assignment to `length` and after its delete)
+      assert js(
+               show <>
+                 "function f(){ arguments.length = 1; P.push.call(arguments, 'x'); " <>
+                 "var r = [show(arguments), P.slice.call(arguments).join()]; arguments.length = 3; " <>
+                 "P.sort.call(arguments); r.push(arguments.length, P.join.call(arguments)); " <>
+                 "return r.join(' ') } f(5, 4, 3)"
+             ) == "2:5,x:2 5,x 3 3,5,x"
+
+      assert js(
+               "function f(){ delete arguments.length; Array.prototype.push.call(arguments, 'x'); " <>
+                 "return arguments.length + ' ' + arguments[0] + ' ' + " <>
+                 "Array.prototype.pop.call(arguments) + ' ' + arguments.length } f(1, 2)"
+             ) == "1 x x 0"
+    end
+
     test "a typed array with elements cannot be frozen or sealed" do
       assert js("try { Object.freeze(new Uint8Array(2)); 'no' } catch (e) { e.name }") ==
                "TypeError"
@@ -787,6 +884,106 @@ defmodule Browser.JSTest do
              """) == ["3", "undefined", "undefined", "6", "done"]
     end
 
+    test "an optional call suspends at an await in its arguments" do
+      # Before the fix, `f?.(await x)` waited with a sync await, so the other task ran
+      # only after it.
+      assert logs_of("""
+             var r = [];
+             var o = { m(x) { return this === o ? x : -1 } }, u;
+             function f(x) { return x * 2 }
+             async function a() {
+               r.push(f?.(await 1), o.m?.(await 2), o?.m(await 3), u?.(await r.push('no')), u?.m(4));
+               r.push((await o)?.m?.(await 5), o[await 'm']?.(6));
+               console.log(r.join());
+             }
+             a();
+             Promise.resolve().then(() => r.push('w'));
+             """) == ["w,2,2,3,,,5,6"]
+    end
+
+    test "an optional call keeps its this when its callee awaits" do
+      assert logs_of("""
+             var out = [];
+             var o = { m() { return this === o ? 'o' : String(this) } }, u;
+             class A { m() { return this instanceof B ? 'B' : String(this) } }
+             class B extends A {
+               async t() { out.push(super[await 'm']?.(), super[await 'm']?.(await 1)) }
+             }
+             (async () => {
+               out.push((o?.[await 'm'])?.(), (o?.[await 'm'])?.(await 1), (u?.[await 'm'])?.());
+               await new B().t();
+               console.log(out.join());
+             })();
+             """) == ["o,o,,B,B"]
+    end
+
+    test "a bare return in an async generator does not await, at any depth" do
+      # `return;` finishes at once, but `return undefined;` awaits its value. A `return;`
+      # in an arrow inside the generator is a plain return (the `yield` of its value
+      # awaits, as the spec says).
+      assert logs_of("""
+             var log = [];
+             async function* a() { return }
+             async function* b() { if (true) return }
+             async function* c() { { return } }
+             async function* d() { return undefined }
+             async function* e() { yield (() => { return })() }
+             [a, b, c, d, e].forEach((g, i) => g().next().then(v => log.push(i + ':' + v.value)));
+             Promise.resolve().then(() => log.push('p1')).then(() => log.push('p2'))
+               .then(() => console.log(log.join()));
+             """) == ["0:undefined,1:undefined,2:undefined,p1,3:undefined,4:undefined,p2"]
+    end
+
+    test "a function or class after an await takes the name of its binding" do
+      assert logs_of("""
+             var out = [];
+             async function f() {
+               const a = await 1, b = function () {}, c = () => {}, d = class {};
+               let e = class { [await 'k']() {} }, g;
+               g ??= class { [await 'k']() {} };
+               out.push(b.name, c.name, d.name, e.name, g.name);
+             }
+             function* h() { const a = yield 1, b = function () {}; out.push(b.name) }
+             var it = h(); it.next(); it.next();
+             f().then(() => console.log(out.join()));
+             """) == ["b,b,c,d,e,g"]
+    end
+
+    test "a logical assignment runs its right side only when it does not short-circuit" do
+      assert logs_of("""
+             var r = [];
+             function t(v) { r.push(v); return v }
+             async function a() {
+               var y = 1, z = null, o = { p: 1, q: 0 }, k = 0;
+               y ??= await t('y');
+               z ??= await t('z');
+               o.p ||= await t('p');
+               o.q ||= await t('q');
+               o[k++ ? 'p' : 'q'] &&= await t('k');
+               (await o).p &&= await t('w');
+               r.push(y, z, o.p, o.q, k);
+               // (inside a larger expression, a logical assignment is a leaf of the lift)
+               r.push(y ??= await t('no'), o.q ||= await t('no'), z &&= await t('z2'));
+               console.log(r.join());
+             }
+             a();
+             """) == ["z,q,k,w,1,z,w,k,1,z2,1,k,z2"]
+    end
+
+    test "a for-in loop whose body awaits skips the keys deleted before their turn" do
+      assert logs_of("""
+             var r = [];
+             async function a() {
+               var o = Object.create({ inherited: 1 });
+               o.a = 1; o.b = 2; o.c = 3;
+               for (var k in o) { r.push(k); await 0; if (k == 'a') delete o.c }
+               for (var k in 'xy') { await 0; r.push(k) }
+               console.log(r.join());
+             }
+             a();
+             """) == ["a,b,inherited,0,1"]
+    end
+
     test "operands before an await are evaluated before it" do
       assert logs_of("""
              var log = [];
@@ -1021,11 +1218,11 @@ defmodule Browser.JSTest do
 
     test "indexed setters on a prototype run for holes and the arguments of non-simple functions are unmapped" do
       assert js("""
-             var l = [];
-             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l.push(v) }, configurable: true});
+             var l = '';
+             Object.defineProperty(Object.prototype, '0', {get() { return 9 }, set(v) { l += v }, configurable: true});
              var a = [, 1]; a[0] = 5;
              delete Object.prototype[0];
-             l.join() + '|' + a.hasOwnProperty(0)
+             l + '|' + a.hasOwnProperty(0)
              """) == "5|false"
 
       assert js(
@@ -1101,6 +1298,42 @@ defmodule Browser.JSTest do
              """) == "RangeError"
     end
 
+    test "for-in over a primitive visits the keys of its wrapper object" do
+      assert js(~S"""
+             var r = [];
+             for (var k in 'xy') r.push(k);
+             for (var k in 5) r.push(k);
+             for (var k in null) r.push(k);
+             String.prototype.extra = 1;
+             for (var k in 'z') r.push(k);
+             delete String.prototype.extra;
+             (function () { for (let k in 'ab') r.push(k + '!') })();
+             r.join()
+             """) == "0,1,0,extra,0!,1!"
+    end
+
+    test "a strict write through a setter or a trap fails only when the write itself fails" do
+      # The sloppy setter and trap make a failed write of their own. That failure does not
+      # belong to the strict write that runs them.
+      assert js(~S"""
+             var sloppy = 'Object.freeze({a: 1}).a = 2;';
+             var o = {};
+             Object.defineProperty(o, 'x', {set: Function('v', sloppy)});
+             var p = new Proxy({}, {set: Function('t', 'k', 'v', sloppy + ' return true')});
+             var q = Object.create(o);
+             var r = [];
+             function w(f) { try { f(); r.push('ok') } catch (e) { r.push(e.name) } }
+             w(function () { 'use strict'; o.x = 1 });
+             w(function () { 'use strict'; o['x'] = 1 });
+             w(function () { 'use strict'; p.y = 1 });
+             w(function () { 'use strict'; q.x = 1 });
+             w(function () { 'use strict'; Object.freeze({a: 1}).a = 2 });
+             w(function () { 'use strict'; Object.defineProperty({}, 'g', {get() {}}).g = 1 });
+             w(function () { 'use strict'; new Proxy({}, {set() { return false }}).z = 1 });
+             r.join()
+             """) == "ok,ok,ok,ok,TypeError,TypeError,TypeError"
+    end
+
     test "freeze, seal and preventExtensions" do
       assert js(
                "var o = Object.freeze({a: 1}); o.a = 9; o.b = 1; delete o.a; o.a + ',' + o.b + ',' + Object.isFrozen(o)"
@@ -1128,6 +1361,71 @@ defmodule Browser.JSTest do
 
       assert js("[Object.is(NaN, NaN), Object.is(0, -0), Object.is(1, 1)].join()") ==
                "true,false,true"
+    end
+  end
+
+  describe "array element writes" do
+    # The writes run in functions, so that the compiled code runs them too. The second call
+    # of each function finds the values of the first call.
+    test "a write respects the attributes of the element and of the array" do
+      src = ~S"""
+      function sloppy(){
+        var d = [1, 2]; Object.defineProperty(d, 0, {writable: false}); d[0] = 5; d[1] = 6;
+        var ne = Object.preventExtensions([1, , 3]); ne[0] = 7; ne[1] = 8; ne[5] = 9;
+        var fr = Object.freeze([1, 2]); fr[0] = 9; fr[2] = 3;
+        var se = Object.seal([1, , 3]); se[0] = 4; se[1] = 5;
+        return [d.join('/'), ne.join('/'), 1 in ne, ne.length, fr.join('/'), fr.length,
+                se.join('/'), 1 in se].join(' ')
+      }
+      function strict(){
+        "use strict";
+        var r = [];
+        function t(f){ try { f(); r.push('ok') } catch (e) { r.push(e.constructor.name) } }
+        var d = [1, 2]; Object.defineProperty(d, 0, {writable: false});
+        var ne = Object.preventExtensions([1, , 3]);
+        var fr = Object.freeze([1, 2]);
+        var se = Object.seal([1, , 3]);
+        t(() => { d[0] = 5 }); t(() => { d[1] = 7 });
+        t(() => { ne[1] = 8 }); t(() => { ne[0] = 70 });
+        t(() => { fr[0] = 9 }); t(() => { fr[2] = 3 });
+        t(() => { se[1] = 5 }); t(() => { se[0] = 40 });
+        return r.join() + ' ' + [d.join('/'), ne.join('/'), 1 in ne, fr.join('/'),
+                                 se.join('/'), 1 in se].join(' ')
+      }
+      [sloppy(), sloppy(), strict(), strict()].join(' | ')
+      """
+
+      s = "1/6 7//3 false 3 1/2 2 4//3 false"
+
+      t =
+        "TypeError,ok,TypeError,ok,TypeError,TypeError,TypeError,ok 1/7 70//3 false 1/2 40//3 false"
+
+      assert js(src) == Enum.join([s, s, t, t], " | ")
+    end
+
+    test "a compound write with a constant index string writes the element" do
+      src = ~S"""
+      function f(){
+        var a = [1, 2, 3]; a["0"] += 10; a["1"]++; --a["2"];
+        var t = new Int8Array(3); t["1"] += 7; t["2"]++;
+        var fr = Object.freeze([1, 2]); fr["0"] += 10; fr["1"]++;
+        return [a.join(), Object.keys(a).join(), t.join(), Object.keys(t).join(),
+                fr.join(), Object.keys(fr).join()].join(' ')
+      }
+      function g(){
+        "use strict";
+        var a = [1, 2, 3]; a["0"] += 10; a["1"]++; --a["2"];
+        var fr = Object.freeze([1, 2]), r = [];
+        try { fr["0"] += 10 } catch (e) { r.push(e.constructor.name) }
+        try { fr["1"]++ } catch (e) { r.push(e.constructor.name) }
+        return [a.join(), Object.keys(a).join(), r.join(), fr.join()].join(' ')
+      }
+      [f(), f(), g(), g()].join(' | ')
+      """
+
+      f = "11,3,2 0,1,2 0,7,1 0,1,2 1,2 0,1"
+      g = "11,3,2 0,1,2 TypeError,TypeError 1,2"
+      assert js(src) == Enum.join([f, f, g, g], " | ")
     end
   end
 

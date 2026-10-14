@@ -15,7 +15,7 @@ defmodule Browser.JS.Resolve.Scope do
   The fields:
 
   The interpreter reads `frame`, `per_iter` and `hoist` from step 2c. A framed
-  scope gets a block frame `{parent_id, scope, caller_id, call_pos, root_id,
+  scope gets a block frame `{parent_id, scope, chain, call_pos, root_id,
   slot_6, ...}` at each entry. The header copies elements 3 to 5 from the frame
   around it. The block frame is erased at exit when no closure was made since
   the entry.

@@ -37,8 +37,8 @@ defmodule Browser.JS.Resolve do
     so a read inside `e` always finds `:tdz`.
   - A reference to `arguments` that no function owns keeps `{:id}`.
   - Every `return` with a value inside a rewritten function carries a marker:
-    `{:return, e, :tail}` at a tail site, `{:return, e, :plain}` elsewhere. The
-    evaluator then never reads the run-time tail flag inside such a function.
+    `{:return, e, :tail}` at a tail site, `{:return, e, :plain}` elsewhere. Only
+    a tail site gives a pending call (`{:tail, f, this, args}`) to the frame.
   - A constructor gets the hidden slots it uses: `:this` always, `:new_target`
     and `:ctor_fn` for a `super()` call, `:home` for a `super.x` access.
   - `nparams` does not count a rest parameter.
@@ -92,9 +92,16 @@ defmodule Browser.JS.Resolve do
   - A direct `eval` or a `with` inside a parameter list, also inside a
     function in a default value, makes the function of that list dynamic. A
     by-name walk cannot tell a parameter from a body `var` of the same name.
+
+  Step 2e (level 4 functions on frames) adds no rule. At level 4 the async
+  functions, async arrows, generators and async generators run on frames, and
+  `Browser.JS.Async` runs their bodies in frame mode. Every level from 1 to 4
+  runs. R2 stays active at level 4, because the rules of step 2d apply from
+  level 3 on, so a level 4 term differs from a level 3 term only inside these
+  functions and the closures in them.
   """
 
-  alias Browser.JS.Interp
+  alias Browser.JS.{Awaits, Interp}
   alias Browser.JS.Resolve.{Info, Scope}
 
   @type level :: :off | :info | 1 | 2 | 3 | 4
@@ -114,11 +121,11 @@ defmodule Browser.JS.Resolve do
   @doc """
   The hook at the end of `Parser.parse/2`. Returns the program unchanged when
   the resolve level is `:off`. The level comes from the parse option
-  `resolve:` or from the application setting `:js_resolve`.
+  `resolve:` or from the application setting `:js_resolve`. The default is 4.
   """
   @spec maybe({:program, [term]}, keyword, boolean) :: {:program, [term]}
   def maybe({:program, _} = program, opts, strict?) do
-    case Keyword.get(opts, :resolve) || Application.get_env(:browser, :js_resolve, :off) do
+    case Keyword.get(opts, :resolve) || Application.get_env(:browser, :js_resolve, 4) do
       :off -> program
       level -> program(program, level: level, top: top_kind(opts), strict: strict?)
     end
@@ -261,19 +268,6 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  # The same walk as `Async.has_await?/1`: it stops at function nodes and not
-  # at class nodes, because a class body is evaluated inline.
-  defp awaits?({:await, _}), do: true
-  defp awaits?({:yield, _, _}), do: true
-  defp awaits?({:forawait, _, _, _, _}), do: true
-  defp awaits?({:using, :await_using, _, _, _}), do: true
-  defp awaits?({:gen, _}), do: false
-  defp awaits?({:fn, _, _, _, _, _}), do: false
-  defp awaits?({:async, _}), do: false
-  defp awaits?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&awaits?/1)
-  defp awaits?(l) when is_list(l), do: Enum.any?(l, &awaits?/1)
-  defp awaits?(_), do: false
-
   # Whether a `return` of this expression is a tail call today: `tail_value`
   # (interp.ex) makes the call itself only for a plain call, and looks through
   # the branches of `?:`, the last element of a sequence and the right side of
@@ -414,7 +408,7 @@ defmodule Browser.JS.Resolve do
   # does (or the code is not a module), so that the walk runs once per
   # statement and both passes read the same answer.
   defp tla_flags(stmts, :module) do
-    flags = Enum.map(stmts, &awaits?/1)
+    flags = Enum.map(stmts, &Awaits.any?/1)
     if Enum.any?(flags), do: flags, else: nil
   end
 
@@ -1099,7 +1093,7 @@ defmodule Browser.JS.Resolve do
         priv: false,
         # Only an async or generator body can hold an await, a yield, a `for
         # await` or an `await using`; the walk would find nothing elsewhere.
-        has_await: (flags.async? or flags.generator?) and awaits?(body)
+        has_await: (flags.async? or flags.generator?) and Awaits.any?(body)
       })
 
     st = a_declare_names(st, sid, param_names, :param)
@@ -1246,7 +1240,11 @@ defmodule Browser.JS.Resolve do
 
     # Every frame takes the names of the frameless scopes under it, in
     # pre-order, which is the order of the numbers.
-    scopes = Enum.reduce(sids, scopes, &layout_scope(&2, &1, level))
+    # One number for this parse makes the `uid` of each function unique in the VM: the
+    # cache of compiled code is keyed by it, and a later parse must not find the code of
+    # another body (design 3, "Identity").
+    parse = :erlang.unique_integer([:positive])
+    scopes = Enum.reduce(sids, scopes, &layout_scope(&2, &1, level, parse))
 
     frameless =
       scopes
@@ -1280,11 +1278,11 @@ defmodule Browser.JS.Resolve do
   defp frame_scope?(%{kind: k, frame: true}) when k in @block_kinds, do: true
   defp frame_scope?(_), do: false
 
-  defp layout_scope(scopes, sid, level) do
+  defp layout_scope(scopes, sid, level, parse) do
     s = scopes[sid]
 
     case s.kind do
-      :fn -> Map.put(scopes, sid, layout_fn(s, level))
+      :fn -> Map.put(scopes, sid, layout_fn(s, level, {parse, sid}))
       k when k in @block_kinds -> layout_block(scopes, sid, s)
       _ -> Map.put(scopes, sid, Map.merge(s, %{index: %{}, home: nil}))
     end
@@ -1297,7 +1295,7 @@ defmodule Browser.JS.Resolve do
   # accumulator: `index` (name to slot), `kinds` (slot to kind), `next` (the
   # first free slot), `template` (the initial values after the parameters and
   # the hidden slots, reversed while the layout grows) and `copies`.
-  defp layout_fn(s, level) do
+  defp layout_fn(s, level, uid) do
     pkind = params_kind(s.params_list)
     uses = fn_uses(s, pkind)
 
@@ -1313,7 +1311,7 @@ defmodule Browser.JS.Resolve do
 
     level_of = fn_level(s, uses)
     rewritten = is_integer(level) and level_of != nil and level_of <= level
-    info = build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten)
+    info = build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten, uid)
 
     Map.merge(s, %{
       info: info,
@@ -1487,7 +1485,7 @@ defmodule Browser.JS.Resolve do
     end
   end
 
-  defp build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten) do
+  defp build_info(s, acc, uses, pkind, hidden, self, level_of, rewritten, uid) do
     params = s.params_list
     rest? = match?({:rest, _}, List.last(params))
     nparams = if rest?, do: length(params) - 1, else: length(params)
@@ -1530,7 +1528,8 @@ defmodule Browser.JS.Resolve do
       has_await: s.has_await,
       captured: MapSet.new(),
       free: if(level_of == 1, do: :always, else: :counter),
-      tail_sites: 0
+      tail_sites: 0,
+      uid: uid
     }
   end
 
@@ -1931,7 +1930,7 @@ defmodule Browser.JS.Resolve do
   # Inside the body of a rewritten async or generator function, a statement
   # that awaits is wrapped so that the CPS evaluator knows without a walk.
   # The walk of the statement itself sets `awaited` when it meets an await,
-  # a yield, a `for await` or an `await using` (the test of `awaits?/1`), and
+  # a yield, a `for await` or an `await using` (the test of `Awaits.any?/1`), and
   # a nested function keeps its awaits to itself (`r_function`). The flag of
   # the statement around this one stays set when this one awaited.
   defp r_stmt(stmt, %{aw: true} = st) do
@@ -1972,7 +1971,7 @@ defmodule Browser.JS.Resolve do
     {init, st} = r_expr(init, st)
     target = if st.rewriting, do: resolve(st, name, :bind), else: name
     # The rest of the list runs under the `using` cleanup, where a `return`
-    # cannot be a tail call (interp.ex `no_tail`).
+    # cannot be a tail call (a run site in interp.ex, see `run_tail/2`).
     {rest, st} = with_tail(st, false, &r_stmts(rest, &1))
     {{:using, kind, target, init, rest}, st}
   end
@@ -2060,7 +2059,7 @@ defmodule Browser.JS.Resolve do
     {obj, st} = r_expr(obj, st)
     {pat, st} = r_pat(pat, if(decl in [:let, :const], do: :bind, else: :write), st)
     # The body of a for-in/of loop runs under the iterator's cleanup, where a
-    # `return` cannot be a tail call (interp.ex `no_tail`).
+    # `return` cannot be a tail call (a run site in interp.ex, see `run_tail/2`).
     {body, st} = with_tail(st, false, &r_substmt(body, &1))
     {sc, st} = r_leave(st, sid)
     {with_scope({k, decl, pat, obj, body}, sc), st}
@@ -2582,7 +2581,9 @@ defmodule Browser.JS.Resolve do
   @doc """
   Removes everything the resolver added: the `Info` of every function node,
   the trailing `Scope` of statements, and every slot form. The result of
-  `strip(program(ast, level: n))` equals `ast`.
+  `strip(program(ast, level: n))` equals `ast`. An `Info` that is not in a
+  function node or a class node keeps its facts but loses its `uid`, which is
+  new for each parse: so two parses of the same text give equal records.
   """
   @spec strip(term) :: term
   def strip({:fn, name, params, body, mode, %Info{src: src}}),
@@ -2625,6 +2626,7 @@ defmodule Browser.JS.Resolve do
   def strip(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.map(&strip/1) |> List.to_tuple()
   def strip(l) when is_list(l), do: Enum.map(l, &strip/1)
   def strip(%MapSet{} = s), do: s
+  def strip(%Info{} = info), do: %{info | uid: nil}
   def strip(%{__struct__: _} = s), do: s
   def strip(m) when is_map(m), do: Map.new(m, fn {k, v} -> {k, strip(v)} end)
   def strip(x), do: x

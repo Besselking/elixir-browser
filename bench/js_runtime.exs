@@ -1,17 +1,20 @@
 # Usage: RUNS=5 RESOLVE=off mix run --no-start bench/js_runtime.exs [name ...]
 #
 # RESOLVE is the resolver level the programs are parsed with (`off`, the default, `info`,
-# 1, 2 or 3; see `Browser.JS.Resolve`). Level 4 runs from step 2e.
+# 1, 2, 3 or 4; see `Browser.JS.Resolve`).
 #
 # This script measures nine JS programs. The programs stress the interpreter core: calls,
 # closures, property access, arrays, strings, a large function body, class methods, a tree
-# walk and DOM-like objects. After their total it measures four programs of step 2d, which
-# are not in the total. The script wraps each program in a function. Page scripts
-# usually run in a function too. The script runs each program RUNS times (default 5). The
-# table shows the minimum time and the minimum number of reductions in millions. A reduction
-# is a BEAM work unit. The number of reductions does not change with the speed of the
-# machine. Use it to compare two builds on a noisy machine. The script compares the result of
-# every run with the expected value. It exits with status 1 when a result is wrong.
+# walk and DOM-like objects. After their total it measures four programs of step 2d, eleven
+# programs of steps 2e and 4 and five programs of step 3, which are not in the total. The script
+# wraps each program in a function. Page scripts usually run in a function too. The script
+# runs each program RUNS times (default 5). The table shows the minimum time and the minimum
+# number of reductions in millions (Mred, with three decimals). A reduction is a BEAM work
+# unit. The number of reductions does not change with the speed of the machine, and it
+# changes little between runs. Use it to compare two builds on a noisy machine
+# (`bench/ab.exs` runs two builds in turn and compares them). The script compares the
+# result of every run with the expected value. It exits with status 1 when a result is
+# wrong.
 #
 # The QuickJS column shows the time of QuickJS 2021-03-27 (a bytecode interpreter, gcc -O2)
 # on the same machine. It is the mean of 5 runs. We measured it on 2026-10-09 for the language
@@ -72,6 +75,85 @@ extra_programs = [
    "function g(a, b){ return arguments.length + arguments[1] } var s = 0; for (var i = 0; i < 30000; i++) s += g(i, i % 7); return s"}
 ]
 
+# Six programs of step 2e (level 4: async functions, generators and async generators on
+# frames) and five programs of step 4 (the walks that find an await). They are not in the
+# total either. An async program returns a box, which the
+# script reads after the microtasks and timers ran. The expected values are the results at
+# `:off`.
+programs_2e = [
+  {"await20k", "await in a loop 20k", nil, %{"v" => 989_403.0},
+   "var box = {}; async function run(){ var s = 0; for (let i = 0; i < 20000; i++) { s = (s + await i) % 1000003 } return s } run().then(v => { box.v = v }); return box"},
+  {"asynccalls10k", "async function calls 10k", nil, %{"v" => 994_853.0},
+   "var box = {}; async function add(a, b){ return a + b } async function run(){ var s = 0; for (let i = 0; i < 10000; i++) { s = (await add(s, i)) % 1000003 } return s } run().then(v => { box.v = v }); return box"},
+  {"awaitclosures10k", "closures over a let after await 10k", nil, %{"v" => 49_995_000.0},
+   "var box = {}; async function run(){ var fs = []; for (let i = 0; i < 10000; i++) { await null; fs.push(() => i) } var s = 0; for (var j = 0; j < fs.length; j++) s += fs[j](); return s } run().then(v => { box.v = v }); return box"},
+  {"gen30k", "generator range 30k", nil, 983_653.0,
+   "function* range(n){ for (let i = 0; i < n; i++) yield i } var s = 0; for (const v of range(30000)) s = (s + v) % 1000003; return s"},
+  {"yieldstar10k", "yield* delegation 10k", nil, 30000.0,
+   "function* two(){ yield 1; yield 2 } function* outer(n){ for (let i = 0; i < n; i++) yield* two() } var s = 0; for (const v of outer(10000)) s += v; return s"},
+  {"asyncgen5k", "async generator with for await 5k", nil, %{"v" => 12_497_500.0},
+   "var box = {}; async function* ag(n){ for (let i = 0; i < n; i++) yield i } async function run(){ var s = 0; for await (const v of ag(5000)) s += v; return s } run().then(v => { box.v = v }); return box"},
+  # Five programs of step 4. They have the shapes of async code in Speedometer-like pages:
+  # a large loop body with `if`, `try`/`finally` and an inner `for`, the `scheduleUpdate`
+  # of Lit, the `measure` and `suite` of the Speedometer runner, wide expressions with more
+  # than one await and a pattern default that awaits, and an app-like loop body.
+  {"bigasync2k", "large async loop body 2k", nil, %{"v" => 6303.0},
+   "var box = {}; async function step(x){ return x } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 2000; i++) { " <>
+     "if (i % 3 == 0) { s += 1 } else { s += 2 } " <>
+     "var o = {a: i, b: [i, i + 1], c: {d: i * 2}}; " <>
+     "try { s = (s + o.a + o.b[1] + o.c.d) % 1000003; " <>
+     "s = (s + await step(i)) % 1000003 } catch (e) { s = -1 } finally { s += 0 } " <>
+     "for (var j = 0; j < 3; j++) { s = (s + j) % 1000003 } } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"litlike3k", "Lit-like scheduleUpdate 3k", nil, %{"v" => 3000.0},
+   "var box = {}; class El { constructor(){ this.n = 0; this.p = Promise.resolve(true) } " <>
+     "async scheduleUpdate(){ this.isPending = true; try { await this.p } catch (e) { Promise.reject(e) } " <>
+     "const r = this.performUpdate(); if (r != null) { await r } return !this.isPending } " <>
+     "performUpdate(){ this.n++; this.isPending = false; const changed = new Map(); changed.set('x', this.n); " <>
+     "if (this.shouldUpdate(changed)) { this.update(changed) } } shouldUpdate(c){ return c.size > 0 } update(c){ this.last = c.get('x') } } " <>
+     "async function run(){ var e = new El(); for (let i = 0; i < 3000; i++) { await e.scheduleUpdate() } return e.n } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"runnerlike2k", "Speedometer-runner-like measure 2k", nil, %{"v" => 21988.0},
+   "var box = {}; var log = []; async function measure(name, fn){ const start = Date.now(); " <>
+     "let result; try { result = await fn(); } finally { const end = Date.now(); log.push({name, t: end - start}); } return result } " <>
+     "async function suite(i){ const a = await measure('a', async () => i + 1); " <>
+     "const b = await measure('b', async () => { let t = 0; for (let k = 0; k < 5; k++) t += k; return t + a }); " <>
+     "return {a, b, total: a + b} } " <>
+     "async function run(){ let s = 0; for (let i = 0; i < 2000; i++) { const r = await suite(i); s = (s + r.total) % 1000003 } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"exprawait5k", "wide expressions with awaits 5k", nil, %{"v" => 64916.0},
+   "var box = {}; var o = {a: 1, b: [1, 2, 3]}; async function g(x){ return x } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 5000; i++) { " <>
+     "s = (s + o.a * 2 + o.b[1] + (await g(i)) + o.b.length * (i % 7) + Math.max(i, await g(3))) % 1000003; " <>
+     "var {p = await g(1)} = o; s = (s + p) % 1000003 } return s } " <>
+     "run().then(v => { box.v = v }); return box"},
+  {"appish5k", "app-like async loop body 5k", nil, %{"v" => 18_793_890.0},
+   "var box = {}; var st = {items: [], n: 0}; function upd(x){ st.n += x; return st.n } " <>
+     "async function load(i){ return {id: i, title: 't' + i, done: i % 2 === 0} } " <>
+     "async function run(){ var s = 0; for (let i = 0; i < 5000; i++) { const it = await load(i); st.items.push(it); " <>
+     "if (it.done) { s += upd(1) } else { s += upd(2) } const label = it.title + ':' + (it.done ? 'yes' : 'no'); " <>
+     "s += label.length; st.items.length > 100 && st.items.shift() } return s } " <>
+     "run().then(v => { box.v = v }); return box"}
+]
+
+# Five programs of step 3 (control flow as completions: strict tail calls, a `return` inside
+# a `for`, a `switch` and a for-of, and `continue`). Before step 3 each of these exits is an
+# Elixir throw, so these programs show the gain of that step. The nine programs above throw
+# no control value. They are not in the total. The expected values are the results at `:off`.
+programs_3 = [
+  {"stricttail40k", "strict tail calls 40k", nil, 20720.0,
+   ~S|"use strict"; function loop(n, acc){ if (n === 0) return acc; return loop(n - 1, (acc + n) % 1000003) } var s = 0; for (var i = 0; i < 40; i++) s = (s + loop(1000, i)) % 1000003; return s|},
+  {"find20k", "return inside a for 20k", nil, 30000.0,
+   "function find(a, x){ for (var i = 0; i < a.length; i++) { if (a[i] === x) return i } return -1 } var a = [0, 1, 2, 3]; var s = 0; for (var k = 0; k < 20000; k++) s += find(a, k % 4); return s"},
+  {"switchret30k", "return inside a switch 30k", nil, 60000.0,
+   "function kind(x){ switch (x % 3) { case 0: return 1; case 1: return 2; default: return 3 } } var s = 0; for (var i = 0; i < 30000; i++) s += kind(i); return s"},
+  {"continue60k", "continue in a for 60k", nil, 899_970_000.0,
+   "var s = 0; for (var i = 0; i < 60000; i++) { if (i % 2) continue; s += i } return s"},
+  {"forofret10k", "return inside a for-of 10k", nil, 10000.0,
+   "function mk(){ var i = 0; return {[Symbol.iterator](){ return this }, next(){ return {value: i++, done: i > 3} }} } function first(it){ for (var x of it) { if (x > 0) return x } return 0 } var s = 0; for (var i = 0; i < 10000; i++) s += first(mk()); return s"}
+]
+
 runs = String.to_integer(System.get_env("RUNS", "5"))
 filter = System.argv()
 
@@ -86,6 +168,8 @@ end
 
 selected = pick.(programs)
 selected_extra = pick.(extra_programs)
+selected_2e = pick.(programs_2e)
+selected_3 = pick.(programs_3)
 
 resolve =
   case System.get_env("RESOLVE", "off") do
@@ -94,7 +178,8 @@ resolve =
     "1" -> 1
     "2" -> 2
     "3" -> 3
-    other -> raise "RESOLVE takes off, info, 1, 2 or 3, not #{other}"
+    "4" -> 4
+    other -> raise "RESOLVE takes off, info, 1, 2, 3 or 4, not #{other}"
   end
 
 opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
@@ -102,7 +187,7 @@ opts = [max_steps: 1_000_000_000, timeout: 300_000, resolve: resolve]
 IO.puts(
   String.pad_trailing("program", 34) <>
     String.pad_leading("min ms", 8) <>
-    String.pad_leading("Mred", 7) <>
+    String.pad_leading("Mred", 9) <>
     String.pad_leading("QuickJS", 9) <> String.pad_leading("ratio", 7) <> "   result"
 )
 
@@ -135,7 +220,7 @@ run_list = fn list ->
     IO.puts(
       String.pad_trailing(name, 34) <>
         String.pad_leading(:erlang.float_to_binary(ms, decimals: 1), 8) <>
-        String.pad_leading(:erlang.float_to_binary(reds / 1_000_000, decimals: 1), 7) <>
+        String.pad_leading(:erlang.float_to_binary(reds / 1_000_000, decimals: 3), 9) <>
         String.pad_leading(qjs_col, 9) <>
         String.pad_leading(ratio_col, 7) <>
         "   " <> inspect(val) <> if(ok, do: "", else: "  WRONG, expected #{inspect(expected)}")
@@ -160,4 +245,20 @@ IO.puts(
     run_list.(selected_extra)
   end
 
-if bad + bad_extra > 0, do: System.halt(1)
+{_, bad_2e} =
+  if selected_2e == [] do
+    {0.0, 0}
+  else
+    IO.puts("step 2e and step 4 programs (not in the total)")
+    run_list.(selected_2e)
+  end
+
+{_, bad_3} =
+  if selected_3 == [] do
+    {0.0, 0}
+  else
+    IO.puts("step 3 programs (not in the total)")
+    run_list.(selected_3)
+  end
+
+if bad + bad_extra + bad_2e + bad_3 > 0, do: System.halt(1)

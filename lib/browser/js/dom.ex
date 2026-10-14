@@ -85,7 +85,42 @@ defmodule Browser.JS.DOM do
   defp index_in(ids, nil, _), do: ids
   defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
 
+  # The tokens of the `class` attribute of an element, kept on the node as `cls`:
+  # `{value, tokens}`. Selectors and `classList` read the tokens many times for each change of
+  # the attribute, and a split of the value at each read was a large part of a search. Each
+  # write to the node table goes through this function, so the tokens follow the attribute.
+  # A reader also compares the value (`class_tokens/1`), so it never uses tokens of an old
+  # value.
+  defp with_classes(%{attrs: attrs} = n) when attrs != [] do
+    case List.keyfind(attrs, "class", 0) do
+      {_, v} when is_binary(v) ->
+        case n do
+          %{cls: {^v, _}} -> n
+          _ -> Map.put(n, :cls, {v, String.split(v)})
+        end
+
+      _ ->
+        n
+    end
+  end
+
+  defp with_classes(n), do: n
+
+  defp class_tokens(n) do
+    case List.keyfind(n.attrs, "class", 0) do
+      {_, v} ->
+        case n do
+          %{cls: {^v, tokens}} -> tokens
+          _ -> String.split(v)
+        end
+
+      nil ->
+        []
+    end
+  end
+
   defp put_node(n) do
+    n = with_classes(n)
     s = st()
 
     s =
@@ -128,6 +163,7 @@ defmodule Browser.JS.DOM do
 
     # (the checks that frames need are only made once the page has an <iframe>)
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
+    n = with_classes(n)
 
     put_st(%{
       s
@@ -160,13 +196,56 @@ defmodule Browser.JS.DOM do
   @realm_keys ~w(js_global js_global_fixed js_global_lex js_modules js_import rt_info rt_importmap
                  rt_seen_scripts rt_prefetched rt_script)a
 
-  defp take_keys, do: Map.new(@realm_keys, &{&1, Process.get(&1, :__unset)})
+  # A script of the page that runs code of a frame (Speedometer calls a function of the frame
+  # for each step) swaps the realm for each node it touches, so the swap must be cheap. The
+  # functions below read and write the fields and the keys with one map update and one
+  # process key operation each. They do not walk lists and do not make closures.
+  s_var = Macro.var(:s, nil)
+  f_var = Macro.var(:f, nil)
+  keys_var = Macro.var(:saved, nil)
 
-  defp put_keys(keys) do
-    Enum.each(keys, fn
-      {k, :__unset} -> Process.delete(k)
-      {k, v} -> Process.put(k, v)
-    end)
+  defp take_fields(unquote(s_var)) do
+    %{unquote_splicing(for k <- @realm_fields, do: {k, quote(do: unquote(s_var).unquote(k))})}
+  end
+
+  defp put_fields(unquote(s_var), unquote(f_var)) do
+    %{
+      unquote(s_var)
+      | unquote_splicing(
+          for k <- @realm_fields, do: {k, quote(do: :erlang.map_get(unquote(k), unquote(f_var)))}
+        )
+    }
+  end
+
+  defp take_keys do
+    %{
+      unquote_splicing(
+        for k <- @realm_keys do
+          {k,
+           quote do
+             case :erlang.get(unquote(k)) do
+               :undefined -> :__unset
+               v -> v
+             end
+           end}
+        end
+      )
+    }
+  end
+
+  defp put_keys(unquote(keys_var)) do
+    unquote_splicing(
+      for k <- @realm_keys do
+        quote do
+          case :erlang.map_get(unquote(k), unquote(keys_var)) do
+            :__unset -> :erlang.erase(unquote(k))
+            v -> :erlang.put(unquote(k), v)
+          end
+        end
+      end
+    )
+
+    :ok
   end
 
   @doc """
@@ -202,10 +281,9 @@ defmodule Browser.JS.DOM do
   defp swap_realm(doc) do
     s = st()
     prev = s.doc
-    %{fields: fields, keys: keys} = Map.fetch!(s.realms, doc)
-    saved = %{fields: Map.take(s, @realm_fields), keys: take_keys()}
-    realms = s.realms |> Map.delete(doc) |> Map.put(prev, saved)
-    put_st(Map.merge(%{s | realms: realms}, fields))
+    {%{fields: fields, keys: keys}, realms} = Map.pop!(s.realms, doc)
+    saved = %{fields: take_fields(s), keys: take_keys()}
+    put_st(put_fields(%{s | realms: Map.put(realms, prev, saved)}, fields))
     put_keys(keys)
     prev
   end
@@ -509,7 +587,7 @@ defmodule Browser.JS.DOM do
   defp update_node_quiet(nid, fun) do
     s = st()
     old = node(nid)
-    n = fun.(old)
+    n = with_classes(fun.(old))
 
     put_st(%{
       s
@@ -1410,7 +1488,35 @@ defmodule Browser.JS.DOM do
     end)
   end
 
-  defp element_by_id(doc, id), do: find_element(doc, &(get_attr(&1, "id") == id))
+  # The element with the id `id` that comes first in tree order below `root` (a document, a
+  # fragment, a shadow root or an element). The index of the ids (`st().ids`) gives the
+  # elements with that id in all trees. When only one element has the id, the search does not
+  # walk the tree: the element is the answer when it is below `root`. The writes to the node
+  # table keep the index exact, and a node that leaves a tree keeps its id but gets a new
+  # top, so it is not below `root` any more. When more elements have the id, the search walks
+  # the tree as before. The index keeps the nodes that left their trees too, so the list of an
+  # id that a page makes again and again has no limit, and a walk stops at the first match.
+  # The index has no empty id, so an empty id walks the tree too.
+  defp element_by_id(root, ""), do: find_element(root, &(get_attr(&1, "id") == ""))
+
+  defp element_by_id(root, id) do
+    case st().ids do
+      %{^id => [nid]} -> if below?(nid, root), do: nid
+      %{^id => _} -> find_element(root, &(get_attr(&1, "id") == id))
+      _ -> nil
+    end
+  end
+
+  # True when `root` is an ancestor of `nid` through the parent links (a shadow root and the
+  # content of a template are tops of their own trees, as in `find_element/2`).
+  defp below?(nid, root) do
+    case st().nodes do
+      %{^nid => %{parent: ^root}} -> true
+      %{^nid => %{parent: nil}} -> false
+      %{^nid => %{parent: p}} -> below?(p, root)
+      _ -> false
+    end
+  end
 
   @doc "The node id of the n-th `<form>` (the number the page's form index uses), or nil."
   def form_node(fid), do: Enum.at(Enum.filter(elements(st().doc), &(node(&1).tag == "form")), fid)
@@ -1725,9 +1831,32 @@ defmodule Browser.JS.DOM do
 
   # ── host protocol: reads ───────────────────────────────────
 
+  # The reads of a node that do not use the state of a realm: they read the node table and
+  # make wrappers, and the prototypes of the wrappers are the same in all realms. A script of
+  # the page that runs code of a frame reads them very often (a canvas of the frame gives its
+  # size to each drawing call), so they do not swap the realm. A read of a document uses its
+  # realm (`document.body` is the body of the running document), so it is not in the list.
+  @realm_free_reads ~w(nodeType nodeName parentNode parentElement childNodes firstChild lastChild
+                       nextSibling previousSibling nextElementSibling previousElementSibling
+                       firstElementChild lastElementChild children childElementCount nodeValue
+                       data length isConnected ownerDocument textContent tagName localName id
+                       className classList style dataset value checked)
+
+  defp realm_free?(nid, key) when is_integer(nid) and key in @realm_free_reads,
+    do: node(nid).kind != :document
+
+  defp realm_free?(nid, key) when is_integer(nid) and key in ["width", "height"] do
+    case node(nid) do
+      %{kind: :element, tag: "canvas"} -> true
+      _ -> false
+    end
+  end
+
+  defp realm_free?(_data, _key), do: false
+
   @doc false
   def host_get(data, key, self) do
-    if map_size(st().realms) == 0 do
+    if map_size(st().realms) == 0 or realm_free?(data, key) do
       hget(data, key, self)
     else
       {doc, data} = split_realm(data)
@@ -2381,7 +2510,7 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp classes(nid), do: nid |> node() |> attr_or("class", "") |> String.split()
+  defp classes(nid), do: nid |> node() |> class_tokens()
 
   defp put_classes(nid, list) do
     set_attr(nid, "class", Enum.join(Enum.uniq(list), " "))
@@ -2760,8 +2889,9 @@ defmodule Browser.JS.DOM do
 
   # ── selectors ──────────────────────────────────────────────
 
-  # a selector list: [[{combinator, compound}, ...], ...], leftmost first. Scripts ask the same
-  # few selectors again and again, so what was parsed is kept.
+  # a selector list: [[{combinator, compound}, ...], ...], each selector rightmost first (the
+  # order in which `match_parts/2` tests them). Scripts ask the same few selectors again and
+  # again, so what was parsed is kept.
   defp parse_selectors(str) do
     memo({:sel, str}, fn ->
       str
@@ -2853,7 +2983,8 @@ defmodule Browser.JS.DOM do
   defp flush_token([], acc), do: acc
   defp flush_token(cur, acc), do: [{:compound, cur |> Enum.reverse() |> Enum.join()} | acc]
 
-  defp build_complex([], _comb, acc), do: Enum.reverse(acc)
+  # (the parts come out rightmost first, the order in which `match_parts/2` tests them)
+  defp build_complex([], _comb, acc), do: acc
   defp build_complex([{:comb, c} | rest], _comb, acc), do: build_complex(rest, c, acc)
 
   defp build_complex([{:compound, s} | rest], comb, acc),
@@ -2891,36 +3022,46 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp matches?(nid, selectors),
-    do: node(nid).kind == :element and Enum.any?(selectors, &match_complex(nid, Enum.reverse(&1)))
+  defp matches?(nid, selectors), do: node_matches?(node(nid), selectors)
+
+  # The tests below take the node, not its id, so that a walk of the tree reads each node
+  # from the table one time only.
+  defp node_matches?(%{kind: :element} = n, selectors), do: any_selector?(n, selectors)
+  defp node_matches?(_n, _selectors), do: false
+
+  defp any_selector?(_n, []), do: false
+  defp any_selector?(n, [parts | more]), do: match_parts(n, parts) or any_selector?(n, more)
 
   # `parts` is rightmost first
-  defp match_complex(nid, [{_comb, compound}]), do: match_compound(nid, compound)
+  defp match_parts(n, [{_comb, compound}]), do: match_conds(n, compound)
 
-  defp match_complex(nid, [{comb, compound} | rest]) do
-    match_compound(nid, compound) and
+  defp match_parts(n, [{comb, compound} | rest]) do
+    match_conds(n, compound) and
       case comb do
-        " " -> Enum.any?(ancestors(nid), &(node(&1).kind == :element and match_complex(&1, rest)))
-        ">" -> (p = parent_element(nid)) != nil and match_complex(p, rest)
-        "+" -> (s = sibling_elements(nid, :prev)) != nil and match_complex(s, rest)
-        "~" -> Enum.any?(prev_elements(nid), &match_complex(&1, rest))
+        " " -> Enum.any?(ancestors(n.id), &match_element(&1, rest))
+        ">" -> (p = parent_element(n.id)) != nil and match_parts(node(p), rest)
+        "+" -> (s = sibling_elements(n.id, :prev)) != nil and match_parts(node(s), rest)
+        "~" -> Enum.any?(prev_elements(n.id), &match_parts(node(&1), rest))
       end
   end
+
+  defp match_element(nid, parts) do
+    n = node(nid)
+    n.kind == :element and match_parts(n, parts)
+  end
+
+  defp match_conds(_n, []), do: true
+  defp match_conds(n, [c | more]), do: match_cond(n, c) and match_conds(n, more)
 
   defp prev_elements(nid) do
     {before, _} = siblings(nid)
     before |> Enum.filter(&(node(&1).kind == :element))
   end
 
-  defp match_compound(nid, conds) do
-    n = node(nid)
-    Enum.all?(conds, &match_cond(n, &1))
-  end
-
   defp match_cond(n, {:tag, "*"}), do: n.kind == :element
   defp match_cond(n, {:tag, t}), do: n.tag == t
   defp match_cond(n, {:id, id}), do: get_attr(n, "id") == id
-  defp match_cond(n, {:class, c}), do: c in (n |> attr_or("class", "") |> String.split())
+  defp match_cond(n, {:class, c}), do: c in class_tokens(n)
 
   defp match_cond(n, {:attr, {name, op, val}}) do
     case get_attr(n, name) do
@@ -3112,22 +3253,82 @@ defmodule Browser.JS.DOM do
 
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
-    walk_matches(node(root).kids, sels, []) |> :lists.reverse()
+
+    case id_candidates(sels) do
+      :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
+      nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
+    end
   end
 
-  # the elements below a node that match, in document order (newest first)
-  defp walk_matches([], _sels, acc), do: acc
+  # The elements that can match a selector list, when the index of the ids gives them, or
+  # :walk. A selector list with one selector whose last compound has an id (`#a`,
+  # `ul > li#a.b`) can match only an element with that id. When at most one element has the id,
+  # the tree is not walked. When more elements have it, the tree is walked, for the reason
+  # that `element_by_id/2` gives.
+  defp id_candidates(sels) do
+    case selector_id(sels) do
+      nil ->
+        :walk
 
-  defp walk_matches([k | rest], sels, acc) do
-    n = node(k)
-    acc = if n.kind == :element and matches?(k, sels), do: [k | acc], else: acc
-    walk_matches(rest, sels, walk_matches(n.kids, sels, acc))
+      id ->
+        case st().ids do
+          %{^id => [nid]} -> [nid]
+          %{^id => _} -> :walk
+          _ -> []
+        end
+    end
+  end
+
+  # the id in the last compound of a selector list with one selector, or nil
+  defp selector_id([[{_comb, compound} | _]]) do
+    Enum.find_value(compound, fn
+      {:id, id} -> id
+      _ -> nil
+    end)
+  end
+
+  defp selector_id(_sels), do: nil
+
+  # The elements below a node that match, in document order (newest first). A walk does not
+  # change the tree, so it reads the nodes from the table that it gets at the start. (A node
+  # that is not in the table reads as a node with no children, as in `node/1`.)
+  defp walk_matches([], _nodes, _sels, acc), do: acc
+
+  defp walk_matches([k | rest], nodes, sels, acc) do
+    case nodes do
+      %{^k => n} ->
+        acc = if node_matches?(n, sels), do: [k | acc], else: acc
+        walk_matches(rest, nodes, sels, walk_matches(n.kids, nodes, sels, acc))
+
+      _ ->
+        walk_matches(rest, nodes, sels, acc)
+    end
+  end
+
+  # the first element of `kids` and the nodes below them that matches, in the order of
+  # `walk_matches/4`
+  defp first_match([], _nodes, _sels), do: nil
+
+  defp first_match([k | rest], nodes, sels) do
+    case nodes do
+      %{^k => n} ->
+        if node_matches?(n, sels),
+          do: k,
+          else: first_match(n.kids, nodes, sels) || first_match(rest, nodes, sels)
+
+      _ ->
+        first_match(rest, nodes, sels)
+    end
   end
 
   # the first element below a node that matches
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
-    find_element(root, fn n -> matches?(n.id, sels) end)
+
+    case id_candidates(sels) do
+      :walk -> first_match(node(root).kids, st().nodes, sels)
+      nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
+    end
   end
 
   # ── serialising ────────────────────────────────────────────
@@ -3337,19 +3538,8 @@ defmodule Browser.JS.DOM do
 
   # Scripts (and the runtime's own shims) probe undeclared globals (`typeof Foo`, `window.Foo`)
   # over and over: the index of the ids says which elements might be the one.
-  defp named_nid(doc, name) do
-    case Map.get(st().ids, name) do
-      nil ->
-        nil
-
-      candidates ->
-        case Enum.filter(candidates, &(List.last([&1 | ancestors(&1)]) == doc)) do
-          [] -> nil
-          [one] -> one
-          _ -> element_by_id(doc, name)
-        end
-    end
-  end
+  defp named_nid(_doc, ""), do: nil
+  defp named_nid(doc, name), do: element_by_id(doc, name)
 
   defp window_put(key, v) do
     case key do
@@ -5427,6 +5617,11 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "querySelectorAll", fn this, args ->
       nodes_array(query_all(this_nid(this), to_str(arg(args, 0))))
+    end)
+
+    # (a fragment and a shadow root search their own tree; the document has its own method)
+    def_fn(p, "getElementById", fn this, args ->
+      wrap_or_null(element_by_id(this_nid(this), to_str(arg(args, 0))))
     end)
 
     def_fn(p, "getElementsByTagName", fn this, args ->

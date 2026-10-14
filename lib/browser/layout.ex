@@ -4050,8 +4050,8 @@ defmodule Browser.Layout do
     # what an absolutely positioned box painted (`:over`) stays above the flow, even when it came
     # through a line or an inline-block that sorts its items into backgrounds and the rest
     limits = if st.limits == %{}, do: nil, else: st.limits
-    {over, under_flow, flow} = sort_into(st.items, 0, limits, {[], [], []})
-    {over, under_flow, flow} = sort_into(st.rects, 0, limits, {over, under_flow, flow})
+    {over, under_flow, flow} = sort_into(st.items, nil, limits, {[], [], []})
+    {over, under_flow, flow} = sort_into(st.rects, nil, limits, {over, under_flow, flow})
 
     overlays = st.overlays |> Enum.reverse() |> Enum.concat()
     overlays = if limits, do: Enum.map(overlays, &stick_limit(&1, limits)), else: overlays
@@ -4064,13 +4064,18 @@ defmodule Browser.Layout do
 
   # Takes the items of a run apart (newest first, as `flat_into/3`) into what paints over the
   # flow, under it and in it, oldest first, in one pass.
-  defp sort_into([], _dy, _limits, acc), do: acc
+  # (with the context `ctx` of the ops the entries around an item wait to do on it, see
+  # `flat_into/3`)
+  defp sort_into([], _ctx, _limits, acc), do: acc
 
-  defp sort_into([{:frag, fdy, items, _n} | rest], dy, limits, acc),
-    do: sort_into(rest, dy, limits, sort_into(items, dy + fdy, limits, acc))
+  defp sort_into([{:frag, fdy, items, _n} | rest], ctx, limits, acc),
+    do: sort_into(rest, ctx, limits, sort_into(items, add_dy(ctx, fdy), limits, acc))
 
-  defp sort_into([item | rest], dy, limits, {over, under, flow}) do
-    item = if dy == 0, do: item, else: move(item, 0, dy)
+  defp sort_into([{:wrap, op, items, _n} | rest], ctx, limits, acc),
+    do: sort_into(rest, ctx, limits, sort_into(items, add_op(ctx, op), limits, acc))
+
+  defp sort_into([item | rest], ctx, limits, {over, under, flow}) do
+    item = if ctx, do: apply_ctx(item, ctx), else: item
     item = if limits, do: stick_limit(item, limits), else: item
 
     acc =
@@ -4080,7 +4085,7 @@ defmodule Browser.Layout do
         true -> {over, under, [item | flow]}
       end
 
-    sort_into(rest, dy, limits, acc)
+    sort_into(rest, ctx, limits, acc)
   end
 
   # A block ends: its content bottom is as far as sticky boxes inside it can go.
@@ -4982,9 +4987,9 @@ defmodule Browser.Layout do
 
   # the items a box of its own width holds stop counting for shrink-to-fit at its right edge
   defp limit_new_items(st, box) do
-    {new, old} = take_new(st.items, st.n - box.n0)
-    limit = box.x + box.w
-    %{st | items: Enum.map(new, &limit_extent(&1, limit)) ++ old}
+    k = st.n - box.n0
+    {new, old} = split_entries(st.items, k, [])
+    %{st | items: wrap(new, {:xlim, box.x + box.w}, k) ++ old}
   end
 
   # what overflows an inline-level box does not make the line wider: shrink-to-fit stops
@@ -5569,21 +5574,19 @@ defmodule Browser.Layout do
         nil -> {dx, dy}
       end
 
-    {new_items, old_items} = take_new(st.items, st.n - box.n0)
+    k = st.n - box.n0
+    {new_items, old_items} = split_entries(st.items, k, [])
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
 
     # a positioned box paints above the non-positioned content of the flow
-    shift = fn list ->
-      Enum.map(list, fn it ->
-        layer = if box.o.z < 0, do: :under, else: :over
-        it |> move(dx, dy) |> Map.put(layer, true) |> Map.put_new(:pz, z_order(box.seq, box.o.z))
-      end)
-    end
+    layer = if box.o.z < 0, do: :under, else: :over
+    op = {:rel, dx, dy, layer, z_order(box.seq, box.o.z)}
+    shift = fn list -> Enum.map(list, &apply_op(&1, op)) end
 
     st = %{
       st
-      | items: shift.(new_items) ++ old_items,
+      | items: wrap(new_items, op, k) ++ old_items,
         rects: shift.(new_rects) ++ old_rects,
         overlays: Enum.map(new_over, shift) ++ old_over
     }
@@ -5620,18 +5623,17 @@ defmodule Browser.Layout do
   defp stick_new(st, %{o: o} = box, height) do
     # `parent` is the block it sits in, whose bottom becomes its `limit` when layout is done
     stick = %{top: o.sticky, y0: box.top, h: height, parent: List.first(st.blocks)}
-    {new_items, old_items} = take_new(st.items, st.n - box.n0)
+    k = st.n - box.n0
+    {new_items, old_items} = split_entries(st.items, k, [])
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     # absolutely positioned children are placed in `overlays`, outside the flow
     {new_over, old_over} = Enum.split(st.overlays, length(st.overlays) - box.ov0)
-
-    tag = fn list ->
-      Enum.map(list, &(&1 |> Map.put_new(:stick, stick) |> Map.put_new(:z, o.z)))
-    end
+    op = {:stick, stick, o.z}
+    tag = fn list -> Enum.map(list, &apply_op(&1, op)) end
 
     %{
       st
-      | items: tag.(new_items) ++ old_items,
+      | items: wrap(new_items, op, k) ++ old_items,
         rects: tag.(new_rects) ++ old_rects,
         overlays: Enum.map(new_over, tag) ++ old_over
     }
@@ -5884,12 +5886,13 @@ defmodule Browser.Layout do
 
   # items and rects created inside a clipping box get (intersected) clip rectangles
   defp clip_new(st, box, clip, sid) do
-    {new_items, old_items} = take_new(st.items, st.n - box.n0)
+    k = st.n - box.n0
+    {new_items, old_items} = split_entries(st.items, k, [])
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
 
     %{
       st
-      | items: Enum.map(new_items, &put_clip(&1, clip, sid)) ++ old_items,
+      | items: wrap(new_items, {:clip, clip, sid}, k) ++ old_items,
         rects: Enum.map(new_rects, &put_clip(&1, clip, sid)) ++ old_rects
     }
   end
@@ -6308,28 +6311,7 @@ defmodule Browser.Layout do
   # Moves an item, including the coordinates held inside it: the clip, the tiles and
   # clip of background layers, the shapes of shadows.
   defp move(it, dx, dy) do
-    it = %{it | x: it.x + dx, y: it.y + dy}
-
-    it =
-      case it do
-        %{xlim: xlim} when xlim != nil -> %{it | xlim: xlim + dx}
-        _ -> it
-      end
-
-    it =
-      case it do
-        %{clip: c} -> %{it | clip: shift_rect(c, dx, dy)}
-        _ -> it
-      end
-
-    it =
-      case it do
-        %{clips: clips} ->
-          %{it | clips: Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)}
-
-        _ ->
-          it
-      end
+    it = move_place(it, dx, dy)
 
     # a sticky box's own place moves with it
     it =
@@ -6369,6 +6351,31 @@ defmodule Browser.Layout do
 
       %{type: :inset_shadow, layers: layers} ->
         %{it | layers: Enum.map(layers, &shift_hole(&1, dx, dy))}
+
+      _ ->
+        it
+    end
+  end
+
+  # the place of an item and the clips that move with it (x, y, xlim, clip, clips)
+  defp move_place(it, dx, dy) do
+    it = %{it | x: it.x + dx, y: it.y + dy}
+
+    it =
+      case it do
+        %{xlim: xlim} when xlim != nil -> %{it | xlim: xlim + dx}
+        _ -> it
+      end
+
+    it =
+      case it do
+        %{clip: c} -> %{it | clip: shift_rect(c, dx, dy)}
+        _ -> it
+      end
+
+    case it do
+      %{clips: clips} ->
+        %{it | clips: Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)}
 
       _ ->
         it
@@ -6871,7 +6878,7 @@ defmodule Browser.Layout do
         # (items with a paint order (outlines, positioned boxes) get fresh ones when placed
         # again, so they still paint in tree order among what the layout placed before them)
         # (a fragment placed again inside it has none: one with them is taken apart)
-        pz?: Enum.any?(items, &(is_map(&1) and Map.has_key?(&1, :pz))),
+        pz?: holds_pz?(items),
         values: Map.take(st1, @span_values)
       }
       |> then(&{&1, rest})
@@ -6885,7 +6892,7 @@ defmodule Browser.Layout do
     # (the items stay one entry, moved when they are taken apart)
     items =
       if frag.pz?,
-        do: frag.items |> flat_items(dy) |> renumber_pz() |> Enum.concat(st.items),
+        do: frag.items |> flat_items(add_dy(nil, dy)) |> renumber_pz() |> Enum.concat(st.items),
         else: [{:frag, dy, frag.items, frag.n} | st.items]
 
     st = Map.merge(st, frag.values)
@@ -6901,21 +6908,151 @@ defmodule Browser.Layout do
     }
   end
 
-  # The items of a run are a list, newest first, of items and of the items of fragments placed
-  # again (`{:frag, dy, items, n}`: `n` items, `dy` lower than where they were placed). They are
-  # taken apart at the end of the run (`finalize/1`), or before a box changes what it holds.
+  # The items of a run are a list, newest first, of items and of entries that hold items:
+  #
+  # * `{:frag, dy, entries, n}`: the `n` items of a fragment placed again, `dy` lower than where
+  #   they were placed;
+  # * `{:wrap, op, entries, n}`: the `n` items a box holds, with what the box does to each of
+  #   them (`apply_op/2`: its clip, its relative offset, ...).
+  #
+  # A box that changes all the items it holds thus adds one entry, and does not make each item
+  # again: with boxes nested `d` deep around `k` items, that is `d` entries and not `d * k` new
+  # items. The items are taken apart at the end of the run (`finalize/1`), where each one gets
+  # all that the boxes around it did in one pass, or before a box looks at what it holds.
+  #
+  # Taking apart keeps the ops that wait for an item in a context (`ops_ctx/1`): the ops,
+  # innermost first, and what they do to an item that has no clip, extent limit, scrollers or
+  # paint order of its own yet (most items: the words). That is worked out one time for each
+  # entry, and such an item then gets it in one update, whatever the number of ops. A run of
+  # `{:dy, dy}` ops is one op, as a fragment in a fragment always moved its items one time.
 
-  # the items, newest first, and `dy` lower
-  defp flat_items(entries, dy \\ 0), do: entries |> flat_into(dy, []) |> :lists.reverse()
+  # the items, newest first, with the ops of the context `ctx` done on them
+  defp flat_items(entries, ctx \\ nil), do: entries |> flat_into(ctx, []) |> :lists.reverse()
 
-  # the items `dy` lower, oldest first, on top of `acc`
-  defp flat_into([], _dy, acc), do: acc
+  # the items with the ops of `ctx` done on them, oldest first, on top of `acc`
+  defp flat_into([], _ctx, acc), do: acc
 
-  defp flat_into([{:frag, fdy, items, _n} | rest], dy, acc),
-    do: flat_into(rest, dy, flat_into(items, dy + fdy, acc))
+  defp flat_into([{:frag, fdy, items, _n} | rest], ctx, acc),
+    do: flat_into(rest, ctx, flat_into(items, add_dy(ctx, fdy), acc))
 
-  defp flat_into([item | rest], 0, acc), do: flat_into(rest, 0, [item | acc])
-  defp flat_into([item | rest], dy, acc), do: flat_into(rest, dy, [move(item, 0, dy) | acc])
+  defp flat_into([{:wrap, op, items, _n} | rest], ctx, acc),
+    do: flat_into(rest, ctx, flat_into(items, add_op(ctx, op), acc))
+
+  defp flat_into([item | rest], nil, acc), do: flat_into(rest, nil, [item | acc])
+  defp flat_into([item | rest], ctx, acc), do: flat_into(rest, ctx, [apply_ctx(item, ctx) | acc])
+
+  # `ctx` with the items `fdy` lower before the rest is done (the sum in the order a fragment
+  # in a fragment added it)
+  defp add_dy(ctx, 0), do: ctx
+  defp add_dy({[{:dy, dy} | t], _}, fdy), do: ops_ctx([{:dy, dy + fdy} | t])
+  defp add_dy(ctx, fdy), do: add_op(ctx, {:dy, fdy})
+
+  defp add_op(nil, op), do: ops_ctx([op])
+  defp add_op({t, _}, op), do: ops_ctx([op | t])
+
+  # -> {ops, {moves, set} | nil}: `moves` are the {dx, dy} of the ops in their order, `set` the
+  # keys besides `x` and `y` that they give an item for which `own_place?/1` is false (nil when
+  # an op does more than `place_op/3` follows)
+  defp ops_ctx(t) do
+    if Enum.any?(t, &(elem(&1, 0) == :stick)) do
+      {t, nil}
+    else
+      place = Enum.reduce(t, %{x: 0, y: 0}, &place_op(&1, &2, %{}))
+      moves = for op <- t, elem(op, 0) in [:dy, :rel], do: op_move(op)
+      {t, {moves, Map.drop(place, [:x, :y])}}
+    end
+  end
+
+  defp op_move({:dy, dy}), do: {0, dy}
+  defp op_move({:rel, dx, dy, _, _}), do: {dx, dy}
+
+  # `entries` (newest first, `n` items in all) with `op` to do on each item. A box that holds
+  # fewer than `@wrap_min` items changes them at once, as before: for so few items, an entry and
+  # the context of its op cost more than the changes they save.
+  @wrap_min 8
+
+  defp wrap([], _op, _n), do: []
+
+  defp wrap(entries, op, n) when n < @wrap_min,
+    do: entries |> flat_items() |> Enum.map(&apply_op(&1, op))
+
+  defp wrap(entries, op, n), do: [{:wrap, op, entries, n}]
+
+  # the keys `move/3` changes in an item that has none of the keys `plain_place?/1` looks for
+  @place_keys [:x, :y, :xlim, :clip, :clips, :sc]
+
+  # (an item whose place is only in `@place_keys` gets the ops in a small map of these keys, and
+  # is made again one time; an item for which `own_place?/1` is false takes what the context
+  # worked out)
+  defp apply_ctx(item, {t, nil}), do: Enum.reduce(t, item, &apply_op(&2, &1))
+
+  defp apply_ctx(item, {t, {moves, set}}) do
+    cond do
+      not plain_place?(item) ->
+        Enum.reduce(t, item, &apply_op(&2, &1))
+
+      own_place?(item) ->
+        :maps.merge(item, Enum.reduce(t, Map.take(item, @place_keys), &place_op(&1, &2, item)))
+
+      true ->
+        {x, y} = Enum.reduce(moves, {item.x, item.y}, fn {dx, dy}, {x, y} -> {x + dx, y + dy} end)
+        :maps.merge(item, set |> Map.put(:x, x) |> Map.put(:y, y))
+    end
+  end
+
+  # (the keys of what else `move/3` moves)
+  defp plain_place?(item)
+       when is_map_key(item, :stick) or is_map_key(item, :xform) or is_map_key(item, :border) or
+              is_map_key(item, :layers),
+       do: false
+
+  defp plain_place?(_item), do: true
+
+  # (the keys whose value in an item changes what an op does to it)
+  defp own_place?(item)
+       when is_map_key(item, :xlim) or is_map_key(item, :clip) or is_map_key(item, :clips) or
+              is_map_key(item, :sc) or is_map_key(item, :pz),
+       do: true
+
+  defp own_place?(_item), do: false
+
+  @doc false
+  # For the tests: `item` with the ops `ops` (innermost first) done through their context, and
+  # done one by one. The two must be equal for each item and each list of ops, because the
+  # context only makes the same change in fewer steps.
+  def ctx_and_eager(item, ops),
+    do: {apply_ctx(item, ops_ctx(ops)), Enum.reduce(ops, item, &apply_op(&2, &1))}
+
+  # `apply_op/2` on the keys of `item` in `@place_keys` (`place`)
+  defp place_op({:dy, dy}, place, _item), do: move_place(place, 0, dy)
+  defp place_op({:clip, clip, sid}, place, _item), do: put_clip(place, clip, sid)
+  defp place_op({:xlim, limit}, place, _item), do: limit_extent(place, limit)
+
+  defp place_op({:rel, dx, dy, layer, pz}, place, item) do
+    place = place |> move_place(dx, dy) |> Map.put(layer, true)
+    if is_map_key(item, :pz), do: place, else: Map.put_new(place, :pz, pz)
+  end
+
+  defp apply_op(item, {:dy, dy}), do: move(item, 0, dy)
+  defp apply_op(item, {:clip, clip, sid}), do: put_clip(item, clip, sid)
+  defp apply_op(item, {:xlim, limit}), do: limit_extent(item, limit)
+
+  defp apply_op(item, {:rel, dx, dy, layer, pz}),
+    do: item |> move(dx, dy) |> Map.put(layer, true) |> Map.put_new(:pz, pz)
+
+  defp apply_op(item, {:stick, stick, z}),
+    do: item |> Map.put_new(:stick, stick) |> Map.put_new(:z, z)
+
+  # whether an item in `entries` has (or gets) a paint order (not in a fragment: a fragment
+  # with one is always taken apart, see `frag_op/4`)
+  defp holds_pz?(entries) do
+    Enum.any?(entries, fn
+      {:frag, _, _, _} -> false
+      {:wrap, {:rel, _, _, _, _}, _, _} -> true
+      {:wrap, _op, inner, _} -> holds_pz?(inner)
+      item -> Map.has_key?(item, :pz)
+    end)
+  end
 
   # the `k` newest items, taken apart, and the rest
   defp take_new(entries, k) do
@@ -6923,15 +7060,16 @@ defmodule Browser.Layout do
     {flat_items(new), old}
   end
 
-  # the entries of the `k` newest items and the rest (a fragment that holds both is taken apart)
+  # the entries of the `k` newest items and the rest (an entry that holds both is taken apart)
   defp split_entries(entries, 0, acc), do: {:lists.reverse(acc), entries}
   defp split_entries([], _k, acc), do: {:lists.reverse(acc), []}
 
-  defp split_entries([{:frag, _dy, _items, n} = frag | rest], k, acc) when n <= k,
-    do: split_entries(rest, k - n, [frag | acc])
+  defp split_entries([{tag, _, _items, n} = entry | rest], k, acc)
+       when tag in [:frag, :wrap] and n <= k,
+       do: split_entries(rest, k - n, [entry | acc])
 
-  defp split_entries([{:frag, dy, items, _n} | rest], k, acc),
-    do: split_entries(flat_items(items, dy) ++ rest, k, acc)
+  defp split_entries([{tag, _, _items, _n} = entry | rest], k, acc) when tag in [:frag, :wrap],
+    do: split_entries(flat_items([entry]) ++ rest, k, acc)
 
   defp split_entries([item | rest], k, acc), do: split_entries(rest, k - 1, [item | acc])
 
@@ -7028,13 +7166,18 @@ defmodule Browser.Layout do
   end
 
   # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
+  # (a flex item in a flex item puts back the mark of the outer one when it ends: else the rest
+  # of the outer item is laid out without it, and differently when the inner item is placed
+  # again from its fragment, which does not run it)
   defp flex_atom(st, sub, width, key) do
-    Process.put(:layout_flex_item, true)
+    outer = Process.put(:layout_flex_item, true)
 
     try do
       layout_atom(st, sub, width, {:flex, key || :erlang.phash2(sub)})
     after
-      Process.delete(:layout_flex_item)
+      if outer == nil,
+        do: Process.delete(:layout_flex_item),
+        else: Process.put(:layout_flex_item, outer)
     end
   end
 
@@ -11899,7 +12042,14 @@ defmodule Browser.Layout do
     # a percentage width depends on the very width being measured: it counts as auto
     outer = Process.put(:layout_intrinsic, true)
     sub_st = run(sub, max(width, 1), st.measure, st.view_h, 0, nil, false, st.images)
-    Process.put(:layout_intrinsic, outer)
+
+    # (the mark is put back as it was found, also when there was none: the keys of the memo
+    # read it with a default of false, so a mark of nil after a measure gave other keys than a
+    # layout whose measures all come from the memo)
+    if outer == nil,
+      do: Process.delete(:layout_intrinsic),
+      else: Process.put(:layout_intrinsic, outer)
+
     max(sub_st |> finalize() |> extent(), sub_st.ext)
   end
 

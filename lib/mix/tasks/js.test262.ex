@@ -36,7 +36,19 @@ defmodule Mix.Tasks.Js.Test262 do
       `--update` needs the whole suite.
     * `--limit N` - run only the first N tests found (a quick look)
     * `--resolve LEVEL` - the resolver level for every parse of the run: `off`, `info`, `1`,
-      `2` or `3` (see `Browser.JS.Resolve`)
+      `2`, `3` or `4` (see `Browser.JS.Resolve`)
+    * `--compile-diff` - run each test two times, with the closure compiler of step 5 off
+      and on (`Browser.JS.Compile`), and fail it when the two runs differ in the outcome,
+      the console, the steps left, the heap ids, the heap count or the position (see
+      `Browser.JS.Test262.run_test/4`). The run takes about twice the time.
+    * `--shapes on|off` - the fast records of the data model (`Browser.JS.Shape`). The
+      default is the application setting (on, or off with `JS_SHAPES=0`). With `off`,
+      every object is a dictionary record, so that two runs can show that the two modes
+      give the same results.
+    * `--elems dense|sparse` - the form of the elements of a new array
+      (`Browser.JS.Elems`). The default is the application setting (dense, or sparse with
+      `JS_ELEMS=sparse`). With `sparse`, every array keeps its elements in a map, so that
+      two runs can show that the two forms give the same results.
 
   A test passes when it runs without throwing (`$DONE()` for async ones) or, for a negative
   test, fails with the expected error. Tests needing language features the runtime does not
@@ -95,7 +107,10 @@ defmodule Mix.Tasks.Js.Test262 do
           shard: :string,
           limit: :integer,
           timings: :string,
-          resolve: :string
+          resolve: :string,
+          compile_diff: :boolean,
+          shapes: :string,
+          elems: :string
         ],
         aliases: [v: :verbose]
       )
@@ -107,6 +122,21 @@ defmodule Mix.Tasks.Js.Test262 do
     # and each test in a spawned one, so a process key would not reach them
     if opts[:resolve],
       do: Application.put_env(:browser, :js_resolve, resolve_level(opts[:resolve]))
+
+    # (each test runs in a process of its own, which reads the setting in `Interp.init/1`)
+    case opts[:shapes] do
+      nil -> :ok
+      "on" -> Application.put_env(:browser, :js_shapes, true)
+      "off" -> Application.put_env(:browser, :js_shapes, false)
+      other -> Mix.raise("--shapes must be on or off, not #{other}")
+    end
+
+    case opts[:elems] do
+      nil -> :ok
+      "dense" -> Application.put_env(:browser, :js_elems_sparse, false)
+      "sparse" -> Application.put_env(:browser, :js_elems_sparse, true)
+      other -> Mix.raise("--elems must be dense or sparse, not #{other}")
+    end
 
     paths =
       if paths == [], do: @default_paths, else: Enum.map(paths, &String.trim_trailing(&1, "/"))
@@ -153,7 +183,9 @@ defmodule Mix.Tasks.Js.Test262 do
           n = :counters.get(counter, 1)
           if tty? and rem(n, 500) == 0, do: IO.write(:stderr, "\r  #{n}/#{total}")
         end
-      ] ++ if(opts[:all_features], do: [skip_features: []], else: [])
+      ] ++
+        if(opts[:all_features], do: [skip_features: []], else: []) ++
+        if(opts[:compile_diff], do: [compile_diff: true], else: [])
 
     results = Test262.run(root, files, run_opts)
     if tty?, do: IO.write(:stderr, "\r" <> String.duplicate(" ", 30) <> "\r")
@@ -165,13 +197,13 @@ defmodule Mix.Tasks.Js.Test262 do
 
   defp resolve_level("off"), do: :off
   defp resolve_level("info"), do: :info
-  # (level 4 runs from step 2e of the JS redesign)
   defp resolve_level("1"), do: 1
   defp resolve_level("2"), do: 2
   defp resolve_level("3"), do: 3
+  defp resolve_level("4"), do: 4
 
   defp resolve_level(other),
-    do: Mix.raise("--resolve takes off, info, 1, 2 or 3, not #{other}")
+    do: Mix.raise("--resolve takes off, info, 1, 2, 3 or 4, not #{other}")
 
   # ── fetching ───────────────────────────────────────────────
 
@@ -270,6 +302,12 @@ defmodule Mix.Tasks.Js.Test262 do
       )
 
       Mix.shell().info("Failures written to #{file}")
+    end
+
+    # (the count that `--compile-diff` is for: it must be 0)
+    if opts[:compile_diff] do
+      diffs = Enum.count(failures, fn {_, r} -> String.starts_with?(r, "compile diff") end)
+      Mix.shell().info("compile diff: #{diffs} tests differ with the compiler off and on")
     end
 
     if failures != [] and opts[:verbose] != true do

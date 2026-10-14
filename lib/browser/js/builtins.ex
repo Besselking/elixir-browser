@@ -7,28 +7,62 @@ defmodule Browser.JS.Builtins do
   """
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.JS.Args
   alias Browser.JS.ArrayGeneric
   alias Browser.JS.Interp
   alias Browser.JS.Str
   alias Browser.JS.Num
+  require Browser.JS.Fast, as: Fast
+  require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems, as: Elems
 
   @timer_horizon 60_000.0
   @error_types ~w(Error TypeError ReferenceError RangeError SyntaxError EvalError URIError AggregateError SuppressedError)
 
-  @doc "Creates the prototypes and the global scope. Call after `Interp.init/1`."
-  def install do
-    object_proto = {:obj, alloc(%{class: :object, props: %{}, keys: [], proto: nil})}
+  @doc """
+  Creates the prototypes and the global scope. Call after `Interp.init/1`.
+
+  The records that it makes are the built-in prototypes, constructors and namespaces. It
+  makes them with `built/1`, so they are fast records when the switch `:js_shapes` is on.
+  In a new process the shapes of these records come from a copy in the VM
+  (`Browser.JS.Shape.realm/2`).
+  """
+  def install, do: Browser.JS.Shape.realm(:install, fn -> built(&install_realm/0) end)
+
+  @doc """
+  Runs `fun`, which makes built-in objects, and gives its result. While `fun` runs, the
+  process key `:js_shape_realm` is true, so that the adds of these objects have no limit
+  of children and of new shapes in a row (step A4, see "The limits" in
+  `Browser.JS.Shape`). Thus the plain objects (the prototypes, `Math`, `JSON`, `Reflect`),
+  `Array.prototype` and the functions that `fun` makes are fast records when the switch
+  `:js_shapes` is on, as the records of a program are. The objects of the next heap of the
+  process find their shapes in the transition table.
+  """
+  def built(fun) do
+    old = :erlang.put(:js_shape_realm, true)
+
+    try do
+      fun.()
+    after
+      if old == :undefined,
+        do: :erlang.erase(:js_shape_realm),
+        else: :erlang.put(:js_shape_realm, old)
+    end
+  end
+
+  defp install_realm do
+    object_proto = {:obj, alloc(Obj.plain_record(class: :object, proto: nil))}
     put_proto(:object, object_proto)
 
     function_proto =
       {:obj,
-       alloc(%{
-         class: :function,
-         fun: {:native, "", fn _, _ -> :undefined end},
-         props: %{},
-         keys: [],
-         proto: object_proto
-       })}
+       alloc(
+         Obj.function_record(
+           class: :function,
+           fun: {:native, "", fn _, _ -> :undefined end},
+           proto: object_proto
+         )
+       )}
 
     put_proto(:function, function_proto)
 
@@ -172,7 +206,6 @@ defmodule Browser.JS.Builtins do
   end
 
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp float(n), do: n * 1.0
 
   defp constructor(scope, name, proto, fun) do
@@ -421,23 +454,46 @@ defmodule Browser.JS.Builtins do
     end
   end
 
-  # an array that push/pop may edit in place: not frozen, sealed, non-extensible or length-locked
-  defp plain_array?({:obj, id}) do
-    o = deref(id)
+  # Whether `o` (a value or a record) is an array whose length is its `length`, so that a list
+  # path can read and write the elements as a list. The `length` of an arguments object is
+  # an own property that a list path does not change, so an arguments object takes the
+  # generic path, which reads and writes `length` with Get and Set.
+  defp list_array?({:obj, id}), do: list_array?(deref(id))
+  defp list_array?(%{class: :array} = o), do: not is_map_key(o, :arguments)
+  defp list_array?(_), do: false
 
-    o.class == :array and
-      not (Map.get(o, :frozen, false) or Map.get(o, :sealed, false) or
-             Map.get(o, :len_ro, false) or Map.get(o, :ext, true) == false)
+  # The record of `this` when the list paths of the array methods (`push`, `pop`, `shift`,
+  # `splice` and the others) can edit its elements in place, or `nil`. The record must be
+  # an array that is not an arguments object, with a `length` that can change, that is not
+  # frozen, sealed or non-extensible, and that has room for `extra` more elements. Its
+  # chain must be the standard chain with no element (`Elems.std_chain?/1`). The tests read the
+  # record once, because `push` runs very often.
+  defp fast_record({:obj, id}, extra) do
+    case deref(id) do
+      %{class: :array} = o when not is_map_key(o, :arguments) and not is_map_key(o, :len_ro) ->
+        if not (Obj.frozen?(o) or Obj.sealed?(o) or Obj.extensible?(o) == false) and
+             Elems.len(o) + extra <= 50_000_000 and Elems.std_chain?(o),
+           do: o
+
+      _ ->
+        nil
+    end
   end
 
-  defp plain_array?(_), do: false
+  defp fast_record(_, _extra), do: nil
 
-  # an ordinary array whose list-based fast path is safe: `extra` more elements still fit
-  defp fast_array?(this, extra \\ 0) do
-    # an element on Array.prototype shows through holes and can run setters: take the generic path
-    plain_array?(this) and Map.get(deref(elem(proto(:array), 1)), :items, %{}) == %{} and
-      elem(this, 1) |> deref() |> Map.fetch!(:len) |> Kernel.+(extra) <= 50_000_000
+  # `push` of the values `args` onto the array record `o` at `id` by the list path, as
+  # `fast_record/2` allows it: the new length.
+  @compile {:inline, push_into: 3}
+  defp push_into(id, o, args) do
+    o = Elems.push(o, args)
+    Interp.store(id, o)
+    float(Elems.len(o))
   end
+
+  # Whether the list paths of the array methods can edit `this` in place, with room for
+  # `extra` more elements (see `fast_record/2`).
+  defp fast_array?(this, extra \\ 0), do: fast_record(this, extra) != nil
 
   @callback_methods ~w(every some filter forEach map reduce reduceRight find findIndex findLast
                        findLastIndex)
@@ -498,55 +554,70 @@ defmodule Browser.JS.Builtins do
     target
   end
 
-  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers
+  # Array.prototype methods run on ToObject(this): numbers and booleans become wrappers. An
+  # object `this`, the common case, needs no test of the other kinds, and whether the
+  # method takes a callback is known when the method is made.
   defp array_fn(obj, name, fun) do
-    def_fn(obj, name, fn this, args ->
-      this =
-        cond do
-          nullish?(this) ->
-            throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+    callback? = name in @callback_methods
 
-          is_binary(this) ->
-            box(this)
+    def_fn(obj, name, fn
+      {:obj, _} = this, args ->
+        if callback? and not array?(this), do: length_of(this, false)
+        fun.(this, args)
 
-          is_boolean(this) or match?({:symbol, _, _}, this) or match?({:bigint, _}, this) ->
-            box(this)
-
-          is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
-            wrap(new_object([], proto(:number)), this)
-
-          true ->
-            this
-        end
-
-      # the length is read before the callback is checked
-      if name in @callback_methods and not array?(this) and not is_binary(this),
-        do: length_of(this, false)
-
-      fun.(this, args)
+      this, args ->
+        array_fn_other(name, callback?, fun, this, args)
     end)
+  end
+
+  # `array_fn/3` for a `this` that is not an object.
+  defp array_fn_other(name, callback?, fun, this, args) do
+    this =
+      cond do
+        nullish?(this) ->
+          throw_error("TypeError", "Array.prototype.#{name} called on null or undefined")
+
+        is_binary(this) ->
+          box(this)
+
+        is_boolean(this) or match?({:symbol, _, _}, this) or match?({:bigint, _}, this) ->
+          box(this)
+
+        is_number(this) or this in [:nan, :infinity, :neg_infinity] ->
+          wrap(new_object([], proto(:number)), this)
+
+        true ->
+          this
+      end
+
+    # the length is read before the callback is checked
+    if callback? and not array?(this) and not is_binary(this),
+      do: length_of(this, false)
+
+    fun.(this, args)
   end
 
   defp array_methods(p) do
     # Array.prototype has a `length` of 0 (it is an array exotic object in the spec)
     {:obj, pid} = p
     po = deref(pid)
-    store(pid, po |> Map.put(:class, :array) |> Map.put(:items, %{}) |> Map.put(:len, 0))
+    store(pid, po |> Obj.with_class(:array) |> Elems.put_empty())
 
     array_fn(p, "push", fn this, args ->
-      if fast_array?(this, length(args)) do
-        {:obj, id} = this
-        o = deref(id)
+      case fast_record(this, length(args)) do
+        nil ->
+          ArrayGeneric.push(this, args)
 
-        {items, len} =
-          Enum.reduce(args, {o.items, o.len}, fn v, {items, i} ->
-            {Map.put(items, i, v), i + 1}
-          end)
+        # (the push onto a dense record is fast path `:elems`, and the shadow run of the
+        # check build compares it with the generic path, which is the path of the spec. With
+        # the fast path off, the push takes the list path, as for a sparse record: the
+        # generic path makes objects, and the oracle compares the heap ids)
+        o ->
+          {:obj, id} = this
 
-        Interp.store(id, %{o | items: items, len: len})
-        float(len)
-      else
-        ArrayGeneric.push(this, args)
+          if Fast.on?(:elems) and Elems.dense?(o),
+            do: Fast.shadow(id, push_into(id, o, args), ArrayGeneric.push(this, args)),
+            else: push_into(id, o, args)
       end
     end)
 
@@ -555,16 +626,18 @@ defmodule Browser.JS.Builtins do
         {:obj, id} = this
         o = deref(id)
 
-        if o.len == 0 do
+        if Elems.len(o) == 0 do
           :undefined
         else
+          {last, rest} = Elems.pop(o)
+
           last =
-            case Map.get(o.items, o.len - 1, :undefined) do
+            case last do
               {:accessor, g, _} -> if function?(g), do: call(g, this, []), else: :undefined
               v -> v
             end
 
-          Interp.store(id, %{o | items: Map.delete(o.items, o.len - 1), len: o.len - 1})
+          Interp.store(id, rest)
           last
         end
       else
@@ -733,10 +806,17 @@ defmodule Browser.JS.Builtins do
       len = length_of(this)
       target = species_target(this, len)
 
-      mapped =
-        for {i, v} <- pairs(this), into: %{}, do: {i, call(f, arg(args, 1), [v, float(i), this])}
+      mapped = for {i, v} <- pairs(this), do: {i, call(f, arg(args, 1), [v, float(i), this])}
 
-      species_fill(target, array_of(len, mapped), false)
+      # When the result can be dense and each index has a value, the values are in index
+      # order, so the list makes the tuple. A map of the values and a scan of the map cost
+      # more.
+      res =
+        if len <= Elems.max() and length(mapped) == len,
+          do: new_array(for({_, v} <- mapped, do: v)),
+          else: array_of(len, Map.new(mapped))
+
+      species_fill(target, res, false)
     end)
 
     array_fn(p, "filter", fn this, args ->
@@ -814,12 +894,13 @@ defmodule Browser.JS.Builtins do
           )
 
       o = this_obj(this)
-      len = if plain_elements?(o), do: nil, else: length_of(o, false)
+      plain? = plain_elements?(o)
+      len = if plain?, do: nil, else: length_of(o, false)
 
       # the values are read first (holes skipped), sorted, then written back and the
       # slots left over deleted, so getters and setters see the spec's order of access
       items =
-        if plain_elements?(o),
+        if plain?,
           do: array_list(o),
           else: for({_, v} <- pairs(o), do: v)
 
@@ -852,10 +933,10 @@ defmodule Browser.JS.Builtins do
     end)
   end
 
-  # an array without holes or accessor elements, which can be sorted as a plain list
+  # An array without holes or accessor elements, which can be sorted as a plain list. The
+  # test reads the store and not `array_list/1`, which calls each getter.
   defp plain_elements?(o) do
-    array?(o) and not has_holes?(o) and
-      not Enum.any?(array_list(o), &match?({:accessor, _, _}, &1))
+    list_array?(o) and not has_holes?(o) and not has_accessors?(o)
   end
 
   # ── array methods on anything with a `length` ──────────────
@@ -915,11 +996,10 @@ defmodule Browser.JS.Builtins do
 
   defp has_holes?({:obj, id}) do
     o = deref(id)
-    map_size(o.items) != o.len
+    not Elems.dense?(o) and Elems.count(o) != Elems.len(o)
   end
 
-  defp has_accessors?({:obj, id}),
-    do: Enum.any?(deref(id).items, fn {_, v} -> match?({:accessor, _, _}, v) end)
+  defp has_accessors?({:obj, id}), do: Elems.any_accessor?(deref(id))
 
   # `{index, value}` of the elements that exist, looked at one by one as they are consumed (a
   # callback that changes the array is seen by the iteration); the length is read once
@@ -934,7 +1014,7 @@ defmodule Browser.JS.Builtins do
     if very_sparse?(this, len) do
       # an array with a huge length and few elements: only the slots that exist are visited
       {:obj, id} = this
-      keys = for k <- Map.keys(deref(id).items), k in range, do: k
+      keys = for k <- Elems.keys(deref(id)), k in range, do: k
       keys = if dir == :asc, do: Enum.sort(keys), else: Enum.sort(keys, :desc)
 
       Stream.flat_map(keys, fn i ->
@@ -942,31 +1022,73 @@ defmodule Browser.JS.Builtins do
       end)
     else
       Stream.flat_map(range, fn i ->
-        present =
-          if is_binary(this), do: i < len, else: has_property?(this, float(i))
+        case own_element(this, i) do
+          Elems.none() ->
+            present =
+              if is_binary(this), do: i < len, else: has_property?(this, float(i))
 
-        if present, do: [{i, Interp.get(this, float(i))}], else: []
+            if present, do: [{i, Interp.get(this, float(i))}], else: []
+
+          v ->
+            [{i, v}]
+        end
       end)
     end
   end
 
+  # The value of an own data element at `i` of an array that is not a proxy and not a
+  # mapped arguments object, else `Elems.none()`. (The atom of `Elems.none/0` is never a
+  # JS value, and a bare value costs no tuple for each element.) For such an element
+  # HasProperty is true and Get gives the value, with no user code between them, so one
+  # read of the element is the two reads of the spec (fast path `:iter`). A hole, an
+  # accessor, a proxy and a mapped arguments object take the generic path. The tests for a
+  # proxy and a mapped arguments object are defence in depth today: a proxy is a host
+  # object, not an array, and each write of a parameter also writes the element of a
+  # mapped arguments object.
+  # (the read is `:erlang.get/1`, not `deref/1`: it runs once per element, and `deref/1`
+  # is a remote call from this module. An id that is not in the heap gives :undefined,
+  # which takes the generic path, and that path raises the error of `deref/1`)
+  @compile {:inline, own_element: 2}
+  defp own_element({:obj, id} = this, i) do
+    if Fast.on?(:iter) do
+      case :erlang.get(id) do
+        o when Elems.dense_index?(o, i) ->
+          Fast.shadow(id, Elems.dense_at(o, i), own_element_slow(this, i))
+
+        %{class: :array} = o when not is_map_key(o, :proxy) and not is_map_key(o, :mapped) ->
+          case Elems.get(o, i, Elems.none()) do
+            {:accessor, _, _} -> Elems.none()
+            Elems.none() -> Elems.none()
+            x -> Fast.shadow(id, x, own_element_slow(this, i))
+          end
+
+        _ ->
+          Elems.none()
+      end
+    else
+      Elems.none()
+    end
+  end
+
+  defp own_element(_, _), do: Elems.none()
+
+  # The read of `own_element/2` by the generic path, for the shadow run of the check build.
+  defp own_element_slow(this, i) do
+    if has_property?(this, float(i)), do: Interp.get(this, float(i)), else: Elems.none()
+  end
+
   defp very_sparse?({:obj, id} = this, len) do
-    len > 100_000 and array?(this) and len - map_size(deref(id).items) > 100_000
+    len > 100_000 and array?(this) and len - Elems.count(deref(id)) > 100_000
   end
 
   defp very_sparse?(_, _), do: false
 
   # an array of `len` slots with values at some of them
-  def array_of(len, items) do
-    arr = new_array([])
-    {:obj, id} = arr
-    store(id, %{deref(id) | items: items, len: len})
-    arr
-  end
+  def array_of(len, items), do: {:obj, alloc(Elems.from_map(items, len, proto(:array)))}
 
   # the elements written back: to the array, or to an object index by index
   defp put_elems(this, list) do
-    if array?(this) do
+    if list_array?(this) do
       set_array_list(this, list)
     else
       o = this_obj(this)
@@ -2159,6 +2281,10 @@ defmodule Browser.JS.Builtins do
           ])
         end
 
+        # (check mode only: a timer can run inside JS code, when a top-level `await` waits
+        # for it, so the call stack must end as it was at the start of the timer)
+        mark = Interp.check_mark()
+
         try do
           # (a timer of a frame runs in the frame; one of a frame that has gone does not run)
           if Browser.JS.DOM.realm_alive?(t[:realm]) do
@@ -2169,6 +2295,8 @@ defmodule Browser.JS.Builtins do
         catch
           {:js_error, v} -> on_error.(v)
         end
+
+        Interp.check_task_end(mark)
 
         # no script is on the stack now: the one safe moment to free unreachable objects
         Browser.JS.GC.maybe_collect()

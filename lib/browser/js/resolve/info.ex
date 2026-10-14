@@ -6,14 +6,22 @@ defmodule Browser.JS.Resolve.Info do
   `Info` replaces the sixth element of the `{:fn, name, params, body, mode, src}`
   node and keeps the source text in `src`, so the node shape stays the same.
 
-  The frame of a function is a tuple: `{parent_id, rec, caller_id, call_pos,
+  The frame of a function is a tuple: `{parent_id, rec, chain, call_pos,
   root_id, slot_6, ...}`. The first five elements are the header. The slots
   start at position 6. A slot index in this struct is the absolute position in
   that tuple.
 
-  Until step 2f `caller_id` is `nil`: `Error.stack` still comes from the
-  `:js_stack` list, which carries the inferred names of functions and mixes
-  frame calls with calls on the old path. `call_pos` is filled.
+  From step 2f, in the check build (`JS_RESOLVE_CHECK=1`), `chain` is the call
+  chain of the call that made the frame. In a normal build it is `nil`, because
+  no code reads it there and a frame that a closure keeps would keep the cells
+  of all its callers. In the check build it is
+  the value that `:js_stack` has while the body runs. Its head is the cell of
+  this call, `{name, call_pos, depth}`, and its tail is the chain of the
+  caller. The chain holds the inferred name of the function, and it mixes
+  frame calls with calls on the old path. It holds no heap id. The frame of an
+  async function or a generator (`Browser.JS.Interp.enter_frame/4`) has `nil`
+  there, because its body can run again after the call has returned.
+  `call_pos` is the position of the call.
 
   The fields and the step that reads them:
 
@@ -86,7 +94,7 @@ defmodule Browser.JS.Resolve.Info do
   - `args_var`: the body declares `var arguments` and no function of that name.
   - `makes_closures`: a function or class node is inside this function.
   - `has_await`: a statement of the body contains `await`, `yield` or
-    `for await`.
+    `for await`. Such a statement is marked `{:aw, stmt}` (step 2e).
   - `captured`: the slots that an inner function or an instance field
     initializer reads or writes, the hidden slots included: `super()` in an
     arrow captures `:ctor_fn`, `:new_target` and `:this`, `super.x` captures
@@ -95,7 +103,20 @@ defmodule Browser.JS.Resolve.Info do
     `:counter` when the closure counter decides. The interpreter reads it from
     step 2c: a `:counter` frame is erased on return only when no closure was
     made during the call, because only a closure can hold the frame's id.
-  - `tail_sites`: the number of `return` statements marked as tail calls.
+    A level 4 function uses `:counter`. Its frame lives across each suspension,
+    and `Browser.JS.Interp.frame_done/2` erases it once, when the body has ended:
+    when `makes_closures` is false, or when the counter did not move since the
+    entry. In all other cases the collector takes the frame.
+  - `tail_sites`: the number of `return` statements marked as tail calls. Only
+    these statements give a pending call `{:tail, f, this, args}` to the frame
+    (step 3). In check mode a pending call from a function with no tail site is a
+    fault.
+  - `uid`: the identity of the function in the cache of compiled code (step 5),
+    `{parse, n}`. `parse` is a number that is new for each parse, and `n` is the
+    number of the function's scope in that parse. Two function nodes with the same
+    `uid` have the same body. The default value `nil` is on each `Info` that the
+    resolver did not make for a function (for example a default class
+    constructor). A function with no `uid` does not compile.
   """
 
   defstruct src: nil,
@@ -128,7 +149,8 @@ defmodule Browser.JS.Resolve.Info do
             has_await: false,
             captured: MapSet.new(),
             free: :always,
-            tail_sites: 0
+            tail_sites: 0,
+            uid: nil
 
   @type t :: %__MODULE__{}
 end

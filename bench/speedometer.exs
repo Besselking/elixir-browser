@@ -1,9 +1,15 @@
 # Usage: mix run --no-start bench/speedometer.exs URL [SUITES] [TIMEOUT_S]
 # Runs Speedometer 3.1 headlessly. URL is the folder with a local mirror, for example
 # http://localhost:8765/Speedometer3.1/ . SUITES is a comma separated list of suite names.
-# Prints console lines and the time until the run ends.
+# Prints console lines, the time until the run ends and a `MRED` line with the exact
+# reductions of the whole VM and of the run phase.
 alias Browser.{Fetch, Page}
 alias Browser.JS.Runtime
+
+# The reductions and the CPU time of the whole VM are counted from here, so that the
+# `MRED` line at the end of the run can compare two builds on a noisy machine.
+{red_start, _} = :erlang.statistics(:exact_reductions)
+{cpu_start, _} = :erlang.statistics(:runtime)
 
 [url | rest] = System.argv()
 suites = if Enum.at(rest, 0) in [nil, "", "all"], do: nil, else: Enum.at(rest, 0)
@@ -46,6 +52,9 @@ info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, base_agent} = Agent.start_link(fn -> page end)
 
 t0 = System.monotonic_time(:millisecond)
+# (the run phase starts with the script process; the page load and the start of the
+# application before it are in the whole-VM count only)
+{red_run, _} = :erlang.statistics(:exact_reductions)
 pid = Runtime.start(page.raw, info)
 
 print = fn reply ->
@@ -229,6 +238,16 @@ end
 me = self()
 spawn(fn -> send(me, {:scripts_done, Runtime.run_scripts(pid)}) end)
 
+# (a layout starts with the heap the session gives the process: `Browser.Session.spawn_layout/1`.
+# An older tree has no such function, and `bench/ab.exs` runs this file in both trees, so such a
+# tree starts its layouts as its own session does)
+Code.ensure_loaded(Browser.Session)
+
+spawn_layout =
+  if function_exported?(Browser.Session, :spawn_layout, 1),
+    do: &Browser.Session.spawn_layout/1,
+    else: &spawn/1
+
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
@@ -236,7 +255,7 @@ loop = fn loop ->
     {:layout_now, js, ref, raw} ->
       base = Agent.get(base_agent, & &1)
 
-      spawn(fn ->
+      spawn_layout.(fn ->
         Process.flag(:trap_exit, false)
         me = self()
         guard = self()
@@ -359,6 +378,18 @@ end
 
 result = loop.(loop)
 
+# One line with the exact reductions in millions (the whole VM and the run phase), the wall
+# time of the run phase and the CPU time of the whole VM in ms. The reductions do not depend
+# on the speed of the machine, so an A/B comparison (`bench/ab.exs`) reads this line.
+{red_end, _} = :erlang.statistics(:exact_reductions)
+{cpu_end, _} = :erlang.statistics(:runtime)
+
+IO.puts(
+  "MRED whole #{:erlang.float_to_binary((red_end - red_start) / 1.0e6, decimals: 3)}" <>
+    " run #{:erlang.float_to_binary((red_end - red_run) / 1.0e6, decimals: 3)}" <>
+    " ms #{System.monotonic_time(:millisecond) - t0} cpu #{cpu_end - cpu_start}"
+)
+
 # the score the page shows (1000 / the geometric mean of the suites' times in ms)
 if result == :done do
   Process.sleep(1500)
@@ -471,12 +502,27 @@ if System.get_env("TPROF") do
   end)
 end
 
+# PDSTAT=1 prints the process dictionary of the script process. A heap object is a key
+# that is an integer of 0 or more. A negative integer key is the cell of an inline cache
+# (step A2, the moduledoc of `Browser.JS.Shape`), so it has a line of its own: the number
+# of cells, their words (the value plus 3 words for each entry), and the number of sites
+# that the compiler gave.
 if System.get_env("PDSTAT") do
   {:dictionary, pd} = Process.info(pid, :dictionary)
-  ints = Enum.filter(pd, fn {k, _} -> is_integer(k) end)
-  IO.puts("pd entries #{length(pd)}, integer keys #{length(ints)}")
+  ints = Enum.filter(pd, fn {k, _} -> is_integer(k) and k >= 0 end)
+  cells = Enum.filter(pd, fn {k, _} -> is_integer(k) and k < 0 end)
+  IO.puts("pd entries #{length(pd)}, heap objects #{length(ints)}")
   words = Enum.reduce(pd, 0, fn {_, v}, acc -> acc + :erts_debug.flat_size(v) end)
   IO.puts("pd flat words #{words} (#{div(words * 8, 1_000_000)} MB)")
+  cell_words = Enum.reduce(cells, 0, fn {_, v}, acc -> acc + :erts_debug.flat_size(v) + 3 end)
+
+  sites =
+    case Enum.find_value(pd, fn {k, v} -> k == :js_ic_next && v end) do
+      nil -> 0
+      next -> -next - 1
+    end
+
+  IO.puts("ic cells #{length(cells)}, words #{cell_words}, sites #{sites}")
 
   pd
   |> Enum.map(fn {k, v} -> {k, :erts_debug.flat_size(v)} end)
@@ -525,4 +571,31 @@ if layout? do
 end
 
 IO.puts("total #{System.monotonic_time(:millisecond) - t0} ms")
+
+# JSC=1 prints the code cache of the closure compiler (step 5) in the script process: the
+# number of entries, the count of nodes against the budget, the number of times the
+# budget erased the cache, and the size of the code in words now (after an erase, this is
+# less than the count). The count of the budget includes one node for each site of an
+# inline cache (step A2), and the cells belong to the cache, so the line also gives the
+# number of cells and their words (the value plus 3 words for each entry). The copy of the
+# process dictionary is large, so the option is off by default.
+if System.get_env("JSC") do
+  case Process.info(pid, :dictionary) do
+    {:dictionary, dict} ->
+      codes = for {{:jsc, _}, code} <- dict, do: code
+      cells = for {k, cell} <- dict, is_integer(k) and k < 0, do: cell
+      cell_words = Enum.reduce(cells, 0, &(:erts_debug.flat_size(&1) + 3 + &2))
+
+      {counted, erases} =
+        Enum.find_value(dict, {0, 0}, fn {k, v} -> k == :jsc_budget && v end)
+
+      IO.puts(
+        "JSC entries #{length(codes)} counted #{counted} erases #{erases} words #{:erts_debug.size(codes)} cells #{length(cells)} cell words #{cell_words}"
+      )
+
+    _ ->
+      IO.puts("JSC the script process is gone")
+  end
+end
+
 Runtime.stop(pid)

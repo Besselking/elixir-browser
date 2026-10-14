@@ -19,13 +19,38 @@ defmodule Browser.JS.Interp do
 
   ## Control flow
 
-  `return`, `break`, `continue` and `throw` are Elixir throws (`{:js_return, v}`,
-  `{:js_break, label}`, `{:js_continue, label}`, `{:js_error, value}`); `:js_limit` aborts a
-  script that ran out of steps and can't be caught from JavaScript.
+  Each statement gives a completion:
+
+  | Completion               | Meaning                                                  |
+  |--------------------------|----------------------------------------------------------|
+  | `:ok`                    | the statement completed normally                         |
+  | `{:ret, v}`              | `return v`                                               |
+  | `{:brk, label}`          | `break`; `label` is `nil` or a string                    |
+  | `{:cont, label}`         | `continue`; `label` is `nil` or a string                 |
+  | `{:tail, f, this, args}` | `return f(...)` at a tail site, before the call is made  |
+
+  A statement list stops at the first completion that is not `:ok` and gives it to the
+  statement around it. A loop takes the `break` and the `continue` that are for it. The
+  function boundary takes the return and the pending call. A strict function that is not a
+  constructor gives the pending call to `tail_loop/3`, so the stack does not grow. Other
+  functions make the call at the boundary. A statement that must see the call before it
+  completes makes the call immediately (see `run_tail/2`): a `try` block, a handler that a
+  `finally` follows, the body of a for-in or for-of loop, the rest of a `using` list and a
+  `with` body.
+
+  A JS exception is an Elixir throw, `{:js_error, value}`. When a script uses all its
+  steps, `:js_limit` is thrown. JavaScript code cannot catch it.
+
+  Only script and eval code have a completion value. It is in `:js_last`, which the
+  statements of that code write. The statements of a rewritten function run through
+  `fbody/2` and `fstmt/3` and do not write it. The old path writes it as before step 3.
   """
 
   alias Browser.JS.Num
   alias Browser.JS.Resolve.{Info, Scope}
+  require Browser.JS.Fast, as: Fast
+  require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems, as: Elems
 
   # `Process.get/1` as a macro: the same result (nil when unset) without a call into Process
   defmacrop pget(key) do
@@ -37,7 +62,36 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # One step of the budget of a script (`init/1`): a call, a loop round. It is a macro, so
+  # that each of the many steps costs one read and one write of the process key, not also a
+  # call. When the budget is spent, `:js_limit` is thrown.
+  defmacro tick do
+    quote do
+      case :erlang.get(:js_steps) - 1 do
+        n when n < 0 -> throw(:js_limit)
+        n -> :erlang.put(:js_steps, n)
+      end
+    end
+  end
+
   @max_depth 1000
+
+  # The key of the well-known symbol `Symbol.iterator`.
+  @iterator_key {:symbol, :iterator, "Symbol.iterator"}
+
+  @doc false
+  # The call depth of a chain in `:js_stack` (step 2f). The depth of the current call is in
+  # the head cell. Any other value is the bottom of the chain. This includes `:undefined` in
+  # a process that did not call `init/1`.
+  defmacro depth_of(chain) do
+    quote do
+      case unquote(chain) do
+        [{_, _, d} | _] -> d
+        _ -> 0
+      end
+    end
+  end
 
   # The position of the first slot in a frame tuple, after the five header elements. The
   # parameters come first, so argument `k` of a function with plain parameters is in slot
@@ -68,28 +122,75 @@ defmodule Browser.JS.Interp do
   def init(max_steps) do
     # the heap's objects are entries of the process dictionary under their integer ids: a write
     # replaces one entry in place instead of copying the path to it through a big map
-    :erlang.put(:js_heap_n, 0)
+    # The heap holds `:js_next` minus `:js_freed` entries (`heap_size/0`). The count is not
+    # kept in a key of its own, because then each new object would write two keys.
+    :erlang.put(:js_freed, 0)
     :erlang.put(:js_next, 0)
     :erlang.put(:js_steps, max_steps)
-    :erlang.put(:js_depth, 0)
+    # The call chain of step 2f: one cell for each active call, with its depth. See
+    # `run_frame/6`.
+    :erlang.put(:js_stack, [])
     :erlang.put(:js_last, :undefined)
+    # The switch of closure compilation (step 5, `Browser.JS.Compile`). Each heap reads the
+    # application setting once, so that the differential oracle can run both modes in one
+    # VM and a call does not read the application environment. With the switch off, the
+    # code that an earlier heap of this process compiled must go: `make_fn` would give it
+    # to the new function objects.
+    compile? = Application.get_env(:browser, :js_compile, true)
+    :erlang.put(:js_compile, compile?)
+
+    if compile? != true do
+      # (the cells of the inline caches go with the cache, see `Browser.JS.Shape`)
+      Browser.JS.Compile.erase_entries()
+      # (the count of the cache goes with the cache, see `Browser.JS.Compile`)
+      :erlang.erase(:jsc_budget)
+    end
+
+    # A fresh heap gives out the ids from 0 again, so the marks of `frame_done/2` from an
+    # earlier heap in this process must go: check mode would read them as the marks of the
+    # new frames with the same ids.
+    if @check do
+      for {{:js_cps_done, _} = key, _} <- :erlang.get(), do: :erlang.erase(key)
+      # (the oracle of the call stack, see `check_oracle/3`)
+      :erlang.put(:js_check_stack, [])
+      :erlang.put(:js_check_depth, 0)
+    end
+
     # (the closure count starts here and only goes up, see `make_fn/3`)
     :erlang.put(:js_fns, 0)
+
+    # (the positions of the keys of the array iterators name the prototypes of an earlier
+    # heap, see `array_record_pristine?/1`)
+    :erlang.erase(:js_arr_iter_pos)
+
+    # The switch of the fast records (`Browser.JS.Shape`): the application setting
+    # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
+    # them off for each heap of the process. A process that set its own switch keeps it
+    # when the setting is on, so that the oracles can run the two modes in one VM.
+    if Application.get_env(:browser, :js_shapes, true) == false,
+      do: :erlang.put(:js_shapes, false)
+
+    # The form switch of the elements of an array (`Browser.JS.Elems`): the application
+    # setting `:js_elems_sparse` (`JS_ELEMS=sparse`, or `mix js.test262 --elems sparse`)
+    # makes each new array sparse in each heap of the process, in the same way.
+    if Application.get_env(:browser, :js_elems_sparse, false) == true,
+      do: :erlang.put(:js_elems_sparse, true)
   end
 
   def alloc(obj) do
     id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
-    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
     :erlang.put(id, obj)
     id
   end
 
-  # an id for an entry that `store/2` fills in later (a scope whose closures need its id first)
-  defp reserve do
+  @doc false
+  # An id for an entry that `store/2` fills in later: a scope whose closures need its id
+  # first, and an object literal of the compiled code, which gets its id before its values
+  # and its record after them (`put_literal/4`).
+  def reserve do
     id = :erlang.get(:js_next)
     :erlang.put(:js_next, id + 1)
-    :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) + 1)
     id
   end
 
@@ -105,8 +206,11 @@ defmodule Browser.JS.Interp do
     true
   end
 
-  @doc "How many objects the heap holds."
-  def heap_size, do: :erlang.get(:js_heap_n)
+  @doc """
+  How many objects the heap holds: the ids given out (`:js_next`) minus the entries that
+  `free/1` and the collector took away (`:js_freed`).
+  """
+  def heap_size, do: :erlang.get(:js_next) - :erlang.get(:js_freed)
 
   @doc false
   # drops a heap entry (a scope that nothing can reach any more)
@@ -125,57 +229,80 @@ defmodule Browser.JS.Interp do
         when is_tuple(f) and tuple_size(f) >= 5 and
                (is_struct(:erlang.element(2, f), Info) or is_struct(:erlang.element(2, f), Scope)) ->
           :erlang.put(id, {:js_freed, check_name(:erlang.element(2, f))})
-          :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+          :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
           :ok
 
         _ ->
           :erlang.erase(id)
-          :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+          :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
           :ok
       end
     end
   else
     def free(id) do
       if :erlang.erase(id) != :undefined,
-        do: :erlang.put(:js_heap_n, :erlang.get(:js_heap_n) - 1)
+        do: :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
 
       :ok
     end
   end
 
-  @doc "The built-in prototype object registered under `name` (`:object`, `:array`, ...)."
-  def proto(name), do: Process.get({:proto, name})
+  @doc """
+  The built-in prototype object registered under `name` (`:object`, `:array`, ...), or
+  `nil`. It reads the process key with no call of `Process.get/1`, because each new object
+  and each object literal reads it.
+  """
+  def proto(name) do
+    case :erlang.get({:proto, name}) do
+      :undefined -> nil
+      p -> p
+    end
+  end
+
   def put_proto(name, val), do: :erlang.put({:proto, name}, val)
 
   def global, do: pget(:js_global)
 
-  @doc "A plain object with the given `{key, value}` pairs."
-  def new_object(pairs \\ [], proto \\ nil) do
-    props = Map.new(pairs)
-    keys = pairs |> Enum.map(&elem(&1, 0)) |> Enum.reverse()
+  @doc """
+  A plain object with the given `{key, value}` pairs. It is a fast record when the switch
+  `:js_shapes` is on (`Browser.JS.Obj.plain_record/1`).
+  """
+  def new_object, do: {:obj, alloc(Obj.plain_record(class: :object, proto: proto(:object)))}
 
+  def new_object(pairs, proto \\ nil) do
     {:obj,
-     alloc(%{
-       class: :object,
-       props: props,
-       keys: keys,
-       proto: if(proto == :null, do: nil, else: proto || proto(:object))
-     })}
+     alloc(
+       Obj.plain_record(
+         [class: :object, proto: if(proto == :null, do: nil, else: proto || proto(:object))],
+         pairs
+       )
+     )}
   end
 
-  def new_array(list) do
-    {:obj,
-     alloc(%{
-       class: :array,
-       items: items_map(list),
-       len: length(list),
-       props: %{},
-       keys: [],
-       proto: proto(:array)
-     })}
-  end
+  @doc """
+  A plain object with no own property that is to be a prototype (`F.prototype`, the
+  prototype of a class). It is a fast record when the switch `:js_shapes` is on, as
+  `new_object/0` makes one (step A2): the inline caches of the compiled code read a method
+  from a fast prototype with no search of its keys (`Browser.JS.Shape`).
+  """
+  def new_proto_object(proto \\ nil),
+    do:
+      {:obj,
+       alloc(
+         Obj.plain_record(
+           class: :object,
+           proto: if(proto == :null, do: nil, else: proto || proto(:object))
+         )
+       )}
 
-  defp items_map(list), do: list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+  def new_array(list), do: {:obj, alloc(Elems.new(list, proto(:array)))}
+
+  @doc """
+  `new_array/1` with the elements in the tuple `vec` (at most `Browser.JS.Elems.max/0`
+  of them). The array literals of the compiled code use it, so that a short literal
+  makes no list.
+  """
+  def new_array_vec(vec), do: {:obj, alloc(Elems.new_vec(vec, proto(:array)))}
 
   @doc """
   An object backed by Elixir: reads and writes of its properties go to `mod.host_get/3` and
@@ -183,18 +310,14 @@ defmodule Browser.JS.Interp do
   properties and the prototype chain, where its methods live).
   """
   def new_host(mod, data, proto) do
-    {:obj, alloc(%{class: :host, host: {mod, data}, props: %{}, keys: [], proto: proto})}
+    {:obj, alloc(Obj.record(class: :host, host: {mod, data}, proto: proto))}
   end
 
   def native(name, fun) do
     {:obj,
-     alloc(%{
-       class: :function,
-       fun: {:native, name, fun},
-       props: %{},
-       keys: [],
-       proto: proto(:function)
-     })}
+     alloc(
+       Obj.function_record(class: :function, fun: {:native, name, fun}, proto: proto(:function))
+     )}
   end
 
   @doc "`get [Symbol.species]` on a built-in constructor: returns `this`."
@@ -233,20 +356,30 @@ defmodule Browser.JS.Interp do
   and line it was at (`at name (file:line)`) when the script has a file name.
   """
   def stack_string(header) do
-    stack = Process.get(:js_stack, [])
+    text = header <> walk(:erlang.get(:js_stack), pget(:js_pos), 0)
 
-    {frames, top} =
-      Enum.map_reduce(stack, Process.get(:js_pos), fn {name, call_pos}, loc ->
-        {frame_line(name, loc), call_pos}
-      end)
+    if @check do
+      old = check_stack_string(header)
+      if text != old, do: check_fail("the stack text #{inspect(text)} is not #{inspect(old)}")
+    end
 
-    frames = Enum.take(frames, 12)
-    # the script's own code, when it is in sight
-    frames =
-      if top != nil and length(stack) < 12, do: frames ++ [frame_line(nil, top)], else: frames
-
-    header <> Enum.join(frames)
+    text
   end
+
+  # One line for each cell of the chain, innermost first. The innermost function is at
+  # `:js_pos`. Every other function is at the call position of the cell above it. The body
+  # of an async function or of an async generator that runs again from a job has the call
+  # position `nil` (`Browser.JS.Async`), so no line comes under it. After 12 lines the walk
+  # stops and the line of the script is left out, as the text had at most 12 lines before
+  # step 2f.
+  defp walk(_, _loc, 12), do: ""
+
+  defp walk([{name, pos, _} | below], loc, n),
+    do: frame_line(name, loc) <> walk(below, pos, n + 1)
+
+  # (the bottom of the chain: the line of the script's own code, when it has a position)
+  defp walk(_, nil, _), do: ""
+  defp walk(_, top, _), do: frame_line(nil, top)
 
   defp frame_line(name, loc) do
     name =
@@ -335,20 +468,22 @@ defmodule Browser.JS.Interp do
 
   # ── frames ─────────────────────────────────────────────────
 
-  # A frame is a tuple `{parent_id, info, caller_id, call_pos, root_id, slot_6, ...}` in the
+  # A frame is a tuple `{parent_id, info, chain, call_pos, root_id, slot_6, ...}` in the
   # heap (see `Browser.JS.Resolve.Info`). The hop count of a slot form counts run-time
   # scopes: a frame hops to its parent through its header, a map scope through `.parent`.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
   if @check do
     # (in check mode a hop that lands on a freed frame fails at once)
-    defp hop(id, 0) do
+    def hop(id, 0) do
       check_live(id)
       id
     end
   else
-    defp hop(id, 0), do: id
+    def hop(id, 0), do: id
   end
 
-  defp hop(id, d), do: hop(parent_of(:erlang.get(id)), d - 1)
+  def hop(id, d), do: hop(parent_of(:erlang.get(id)), d - 1)
 
   if @check do
     defp parent_of({:js_freed, name}), do: check_fail("use of a freed frame of #{name}")
@@ -357,7 +492,9 @@ defmodule Browser.JS.Interp do
   defp parent_of(f) when is_tuple(f), do: :erlang.element(1, f)
   defp parent_of(%{parent: p}), do: p
 
-  defp slot_put(env, i, v),
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def slot_put(env, i, v),
     do: :erlang.put(env, :erlang.setelement(i, :erlang.get(env), v))
 
   # ── check mode ─────────────────────────────────────────────
@@ -365,16 +502,18 @@ defmodule Browser.JS.Interp do
   # A slot form must land, after its hops, on a frame that owns `name` at index `i`: a
   # function name through `info.slots`, a block name through a block kind in `kinds` (a
   # block name can shadow a function name, so a name in `slots` may still be a block slot).
-  defp check_landing({:this, d, i}, env), do: check_slot(hop(env, d), i, :this)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_landing({:this, d, i}, env), do: check_slot(hop(env, d), i, :this)
 
-  defp check_landing({:mref, d, name}, env) do
+  def check_landing({:mref, d, name}, env) do
     case :erlang.get(hop(env, d)) do
       %{vars: vars} when is_map_key(vars, name) -> :ok
       other -> check_fail("{:mref, #{d}, #{inspect(name)}} lands on #{inspect(other, limit: 3)}")
     end
   end
 
-  defp check_landing({:gref, name}, env) do
+  def check_landing({:gref, name}, env) do
     case scope_of(env, name) do
       nil ->
         :ok
@@ -386,11 +525,11 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
+  def check_landing({_k, d, i, name}, env), do: check_slot(hop(env, d), i, name)
 
   # A write to a mapped parameter lands on the parameter's slot, in a function whose
   # `argmap` maps the name to the same argument index: the sync writes that element.
-  defp check_landing({:mslot, d, i, name, k}, env) do
+  def check_landing({:mslot, d, i, name, k}, env) do
     id = hop(env, d)
     check_slot(id, i, name)
 
@@ -406,7 +545,7 @@ defmodule Browser.JS.Interp do
 
   # The arguments object form lands on the hidden slot of the object (rule R3 of step 2d):
   # only that slot holds `{:unbuilt, id}` before the first read.
-  defp check_landing({:aslot, d, i}, env) do
+  def check_landing({:aslot, d, i}, env) do
     case :erlang.get(hop(env, d)) do
       f when is_tuple(f) and i <= tuple_size(f) ->
         rec = :erlang.element(2, f)
@@ -444,7 +583,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp check_slot(id, i, name) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_slot(id, i, name) do
     case :erlang.get(id) do
       f when is_tuple(f) and i <= tuple_size(f) ->
         rec = :erlang.element(2, f)
@@ -483,6 +624,9 @@ defmodule Browser.JS.Interp do
       tuple_size(f) != info.size ->
         check_fail("frame of #{check_name(info)} has size #{tuple_size(f)}, not #{info.size}")
 
+      mode == :suspend ->
+        check_suspend(f, info, id)
+
       info.level not in [1, 2, 3] ->
         check_fail("frame of #{check_name(info)} at level #{inspect(info.level)}")
 
@@ -507,6 +651,30 @@ defmodule Browser.JS.Interp do
       true ->
         check_argmap(info)
         Enum.each(info.hidden, &check_hidden(&1, f, info, {id, mode}))
+    end
+  end
+
+  # A frame from `enter_frame/4` (step 2e): a level 4 async function or generator, which
+  # frees by the closure counter, makes no tail calls and is never a constructor. Its hidden
+  # slots hold the values of a plain call.
+  defp check_suspend(f, info, id) do
+    cond do
+      info.level != 4 or not (info.async? or info.generator?) ->
+        check_fail("a suspendable frame of #{check_name(info)} at level #{inspect(info.level)}")
+
+      info.free != :counter ->
+        check_fail("a suspendable frame of #{check_name(info)} frees #{info.free}")
+
+      info.tail_sites != 0 or :ctor_fn in info.hidden ->
+        check_fail("a suspendable frame of #{check_name(info)} has tail sites or :ctor_fn")
+
+      :new_target in info.hidden and
+          :erlang.element(hidden_index(info, :new_target), f) != :undefined ->
+        check_fail("a suspendable frame of #{check_name(info)} has a new.target")
+
+      true ->
+        check_argmap(info)
+        Enum.each(info.hidden, &check_hidden(&1, f, info, {id, :suspend}))
     end
   end
 
@@ -564,12 +732,13 @@ defmodule Browser.JS.Interp do
   # is not an arrow: such a function owns both, and the resolver gives it the slot when
   # any code inside it reads the binding by name (step 2d). `:home` and `:ctor_fn` may
   # pass, as on the old path, whose call scopes have them only for methods and class
-  # constructors. A level 1 or 2 frame is not checked: no code inside it reads the
+  # constructors. A level 4 frame (step 2e) gets the same check, because its hidden slots
+  # follow the same rules. A level 1 or 2 frame is not checked: no code inside it reads the
   # bindings by name, and the unit tests of the walkers build such frames by hand under
   # map scopes that do not have them.
   defp check_hidden_presence(f, name) when name in [:this, :new_target] do
     case :erlang.element(2, f) do
-      %Info{kind: k, level: 3} = info when k not in [:arrow, :arrow_expr] ->
+      %Info{kind: k, level: l} = info when l in [3, 4] and k not in [:arrow, :arrow_expr] ->
         check_fail("a by-name #{inspect(name)} passes the frame of #{check_name(info)}")
 
       _ ->
@@ -609,7 +778,7 @@ defmodule Browser.JS.Interp do
           check_fail("the arguments object of #{check_name(info)} maps #{inspect(o.mapped)}")
 
         k != nil and is_map_key(o.mapped, k) and
-            Map.get(o.items, k) !== :erlang.element(@frame_base + k, f) ->
+            Elems.get(o, k, nil) !== :erlang.element(@frame_base + k, f) ->
           check_fail("an element of the arguments object of #{check_name(info)} is out of sync")
 
         true ->
@@ -622,7 +791,9 @@ defmodule Browser.JS.Interp do
 
   # A write to the slot of a mapped parameter must go through `{:mslot}` or a by-name
   # write, which sync the arguments object. A plain slot write would skip the sync.
-  defp check_unsynced(frame, i) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_unsynced(frame, i) do
     case :erlang.get(frame) do
       f when is_tuple(f) ->
         case :erlang.element(2, f) do
@@ -648,6 +819,11 @@ defmodule Browser.JS.Interp do
 
     :ok
   end
+
+  @doc false
+  # A failed assertion of the CPS evaluator in frame mode (step 2e). `Browser.JS.Async`
+  # calls it only from code that its own check flag guards.
+  def check_cps(msg), do: check_fail(msg)
 
   # A block frame is made only inside a rewritten function: its `env` is a live frame, its
   # template fills its size, and the function around it frees by the closure counter.
@@ -690,6 +866,147 @@ defmodule Browser.JS.Interp do
     end
 
     :ok
+  end
+
+  @doc false
+  # Check mode only (C1, C3, C4 of step 2f). The oracle keeps the call stack as it was before
+  # step 2f, in keys of its own: `:js_check_stack` holds `{name, call_pos}` cells, and
+  # `:js_check_depth` counts the calls. Each entry runs its real code as `fun` inside the
+  # oracle. `kind` is `:call` for a call, which has the call position `:js_pos` and is
+  # refused at the depth limit. It is `{:cell, call_pos}` for the cell of an async body that
+  # runs again (`Browser.JS.Async`), which is never refused. Before the entry, the real
+  # depth and the head of the real stack must equal those of the oracle (C3). Every push is
+  # compared, so by induction the whole stacks are equal. After the entry, the real stack
+  # and position must be as they were (C4). The oracle has its own `try/after` and does not
+  # share code with the real entries, so it cannot copy a mistake from them.
+  def check_oracle(name, kind, fun) do
+    ostack = Process.get(:js_check_stack, [])
+    odepth = Process.get(:js_check_depth, 0)
+    below = :erlang.get(:js_stack)
+    pos = Process.get(:js_pos)
+    check_entry(below, ostack, odepth)
+
+    if kind == :call and odepth >= @max_depth do
+      # The real entry must refuse the call before it pushes anything.
+      try do
+        fun.()
+      catch
+        {:js_error, _} = e ->
+          check_restored(below, pos)
+          throw(e)
+      else
+        _ -> check_fail("a call at depth #{odepth} was not refused")
+      end
+    else
+      call_pos =
+        case kind do
+          :call -> pos
+          {:cell, p} -> p
+        end
+
+      :erlang.put(:js_check_depth, odepth + 1)
+      :erlang.put(:js_check_stack, [{name, call_pos} | ostack])
+
+      try do
+        fun.()
+      after
+        :erlang.put(:js_check_depth, odepth)
+        :erlang.put(:js_check_stack, ostack)
+        check_restored(below, pos)
+      end
+    end
+  end
+
+  # C3: the depth and the innermost visible cell of the real stack equal the oracle's.
+  defp check_entry(below, ostack, odepth) do
+    depth = depth_of(below)
+
+    if depth != odepth,
+      do: check_fail("the call depth is #{inspect(depth)}, and the oracle has #{odepth}")
+
+    head = check_head(below)
+
+    if head != List.first(ostack),
+      do: check_fail("the stack head is #{inspect(head)}, and the oracle has #{inspect(ostack)}")
+  end
+
+  # (the innermost cell of the real stack, as `{name, call_pos}`)
+  defp check_head([{name, pos, _} | _]), do: {name, pos}
+  defp check_head(_), do: nil
+
+  # C4: an entry restored the stack and the position.
+  defp check_restored(below, pos) do
+    now = :erlang.get(:js_stack)
+
+    if now !== below,
+      do: check_fail("a call left the stack #{inspect(now)}, not #{inspect(below)}")
+
+    if Process.get(:js_pos) != pos,
+      do:
+        check_fail(
+          "a call left the position #{inspect(Process.get(:js_pos))}, not #{inspect(pos)}"
+        )
+  end
+
+  @doc false
+  # Check mode only (C6 of step 2f): the state of the call stack, for `check_task_end/1`.
+  # Without check mode it is `nil`.
+  def check_mark, do: if(@check, do: {:erlang.get(:js_stack), Process.get(:js_check_depth, 0)})
+
+  @doc false
+  # Check mode only (C6 of step 2f): at the end of a task, every call has restored the
+  # stack. The task ends with the state `mark` from `check_mark/0` at its start. A task that
+  # does not run inside JS code ends with the default, an empty stack and depth 0.
+  def check_task_end(mark \\ {[], 0}) do
+    if @check do
+      now = {Process.get(:js_stack, []), Process.get(:js_check_depth, 0)}
+
+      if now !== mark,
+        do: check_fail("a task ended with the stack #{inspect(now)}, not #{inspect(mark)}")
+    end
+
+    :ok
+  end
+
+  # Check mode only (C5 of step 2f): code that runs in a frame of a sync call runs while
+  # that call is on top of the stack, so element 3 of the frame is the current chain. This
+  # proves at each call and at each JS `catch` that every callee restored the chain, also
+  # on the throw path. A CPS frame (`enter_frame/4`), a frame made by hand in a test and a
+  # map scope hold no chain and are skipped.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_link(env) when is_integer(env) do
+    case :erlang.get(env) do
+      f when is_tuple(f) and tuple_size(f) >= 5 and is_list(:erlang.element(3, f)) ->
+        now = :erlang.get(:js_stack)
+        chain = :erlang.element(3, f)
+
+        if chain !== now,
+          do: check_fail("the frame #{env} has the chain #{inspect(chain)}, not #{inspect(now)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  def check_link(_env), do: :ok
+
+  # Check mode only (C2 of step 2f): the stack text from the oracle, made with the code from
+  # before step 2f. `stack_string/1` must give the same text.
+  defp check_stack_string(header) do
+    stack = Process.get(:js_check_stack, [])
+
+    {frames, top} =
+      Enum.map_reduce(stack, Process.get(:js_pos), fn {name, call_pos}, loc ->
+        {frame_line(name, loc), call_pos}
+      end)
+
+    frames = Enum.take(frames, 12)
+
+    frames =
+      if top != nil and length(stack) < 12, do: frames ++ [frame_line(nil, top)], else: frames
+
+    header <> Enum.join(frames)
   end
 
   # A closure must not be made in a level 1 frame, also not through a map scope under it
@@ -754,9 +1071,11 @@ defmodule Browser.JS.Interp do
   # A frameless scope that declares functions (a block or a switch, from level 2 on) makes
   # them at each entry, as `hoist_functions` does on the old path. Their slots are in the
   # home frame `env`, and the TDZ reset comes first, so the order of the old path stays.
-  defp enter_frameless(env, nil), do: reset_tdz(env, nil)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def enter_frameless(env, nil), do: reset_tdz(env, nil)
 
-  defp enter_frameless(env, %Scope{hoist: h} = sc) do
+  def enter_frameless(env, %Scope{hoist: h} = sc) do
     reset_tdz(env, sc)
     hoist_slots(env, h)
   end
@@ -856,7 +1175,8 @@ defmodule Browser.JS.Interp do
   # (block names are not: only slot forms reach those). `:strict` is not a slot, the
   # `Info` answers it. Anything else goes on to the parent. `id` is the frame's own id: a
   # hit on an arguments object that is not built yet builds it into the frame (step 2d).
-  # This serves eval code and the old-path functions (level 4) inside a level 3 function.
+  # This serves eval code and the functions on the old path inside a frame: a dynamic
+  # function, and an async function or a generator when the level is below 4.
   defp lookup_frame(id, f, name) do
     case :erlang.element(2, f) do
       %Info{slots: slots, strict: strict} ->
@@ -919,14 +1239,14 @@ defmodule Browser.JS.Interp do
 
           %{parent: nil, vars: %{this: {:obj, gid}}} when is_binary(name) ->
             # a property defined on the global object itself (an accessor, say) is a variable too
-            case deref(gid) do
-              %{props: %{^name => {:accessor, g, _}}} ->
+            Obj.own_case deref(gid), name do
+              {:ok, {:accessor, g, _}} ->
                 {:ok, if(function?(g), do: call(g, {:obj, gid}, []), else: :undefined)}
 
-              %{props: %{^name => v}} ->
+              {:ok, v} ->
                 {:ok, v}
 
-              _ ->
+              :error ->
                 :error
             end
 
@@ -1008,7 +1328,7 @@ defmodule Browser.JS.Interp do
     case :erlang.element(:erlang.map_get(:args, :erlang.element(2, f).slots), f) do
       {:mapped, aid} ->
         case deref(aid) do
-          %{mapped: %{^k => _}} = o -> store(aid, %{o | items: Map.put(o.items, k, val)})
+          %{mapped: %{^k => _}} = o -> store(aid, Elems.put_arg(o, k, val))
           _ -> :ok
         end
 
@@ -1079,7 +1399,7 @@ defmodule Browser.JS.Interp do
   defp window_property?(_, _), do: false
 
   defp global_own_property?(%{vars: %{this: {:obj, gid}}}, name),
-    do: match?(%{props: %{^name => _}}, deref(gid))
+    do: Obj.has_own?(deref(gid), name)
 
   defp global_own_property?(_, _), do: false
 
@@ -1087,7 +1407,7 @@ defmodule Browser.JS.Interp do
   defp sync_argument(%{argmap: {aid, names}}, name, val) do
     with %{^name => idx} <- names,
          %{mapped: %{^idx => ^name}} = o <- deref(aid) do
-      store(aid, %{o | items: Map.put(o.items, idx, val)})
+      store(aid, Elems.put_arg(o, idx, val))
     end
 
     :ok
@@ -1157,6 +1477,21 @@ defmodule Browser.JS.Interp do
 
   def function?({:obj, id}), do: deref(id).class == :function
   def function?(_), do: false
+
+  # `function?/1` without the two calls, for a call site on the hot path.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  @compile {:inline, callable?: 1}
+  def callable?({:obj, id}) do
+    case :erlang.get(id) do
+      %{class: :function} -> true
+      # (a missing entry fails as `deref/1` fails)
+      :undefined -> deref(id)
+      _ -> false
+    end
+  end
+
+  def callable?(_), do: false
 
   def truthy(v) when v in [false, :undefined, :null, :nan, "", {:bigint, 0}], do: false
   def truthy(v) when is_number(v), do: v != 0
@@ -1267,6 +1602,15 @@ defmodule Browser.JS.Interp do
 
   def to_key(k), do: to_str(k)
 
+  @doc false
+  # ToPropertyKey for a key that is used two times, for a read and then a write (`a[i]++`,
+  # `a[i] += x`). A number stays a number: its conversion has no side effect, and `get/2` and
+  # `put/3` take it as an array index with no string, or convert it with `to_key/1`. Any
+  # other key is converted once, so a `toString` runs once.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  def prop_key(k) when is_number(k), do: k
+  def prop_key(k), do: to_key(k)
+
   def to_primitive({:obj, _} = o, hint) do
     case get(o, {:symbol, :toPrimitive, "Symbol.toPrimitive"}) do
       m when m in [:undefined, :null] ->
@@ -1356,19 +1700,37 @@ defmodule Browser.JS.Interp do
   # ── properties ─────────────────────────────────────────────
 
   # array indices stop below 2^32 - 1; larger integers are ordinary property names
-  defp index(k) when is_number(k) and k >= 0 and k < 4_294_967_295 and k == trunc(k), do: trunc(k)
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it when it
+  # compiles, to find the constant keys that `get_named/2` and `put_named/3` can take.
+  @doc false
+  # (the float clause compares a float only with floats: a compare of a float with an
+  # integer is slow on the BEAM)
+  def index(k) when is_float(k) and k >= 0.0 and k < 4_294_967_295.0 do
+    i = trunc(k)
+    if i * 1.0 == k, do: i
+  end
 
-  defp index(k) when is_binary(k) do
+  def index(k) when is_integer(k) and k >= 0 and k < 4_294_967_295, do: k
+
+  # A canonical index string has no sign, no space and no leading zero, so it starts with a
+  # digit, and a digit other than `0` when it has more than one. Other strings (`push`,
+  # `length`) need no parse.
+  def index(<<c>>) when c >= ?0 and c <= ?9, do: c - ?0
+
+  # (the first byte is 1 to 9, and `Integer.parse/1` takes only ASCII digits after it, so a
+  # string that it reads to the end has no sign and no leading zero: it is canonical, and
+  # no round trip through `Integer.to_string/1` is necessary)
+  def index(<<c, _::binary>> = k) when c >= ?1 and c <= ?9 do
     case Integer.parse(k) do
-      {i, ""} when i >= 0 and i < 4_294_967_295 -> if Integer.to_string(i) == k, do: i
+      {i, ""} when i < 4_294_967_295 -> i
       _ -> nil
     end
   end
 
-  defp index(_), do: nil
+  def index(_), do: nil
 
   def get({:obj, id} = obj, {:private, _} = key) do
-    case Map.fetch(deref(id).props, key) do
+    case Obj.own_fetch(deref(id), key) do
       {:ok, {:accessor, g, _}} ->
         if function?(g),
           do: call(g, obj, []),
@@ -1388,94 +1750,9 @@ defmodule Browser.JS.Interp do
   def get(_, {:private, _}),
     do: throw_error("TypeError", "Cannot read private member from a non-object")
 
-  def get({:obj, id}, key) do
-    o = deref(id)
+  def get({:obj, id}, key), do: get_obj(id, deref(id), key, false)
 
-    case o.class do
-      :array ->
-        case index(key) do
-          i when is_integer(i) ->
-            case o.items do
-              %{^i => {:accessor, g, _}} ->
-                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
-
-              %{^i => v} ->
-                v
-
-              _ ->
-                lookup(o, to_key(key), {:obj, id})
-            end
-
-          nil ->
-            cond do
-              key == "length" and is_map_key(o, :arguments) and is_map_key(o.props, "length") ->
-                o.props["length"]
-
-              key == "length" and is_map_key(o, :len_gone) ->
-                lookup(o, "length", {:obj, id})
-
-              key == "length" ->
-                o.len * 1.0
-
-              true ->
-                lookup(o, to_key(key), {:obj, id})
-            end
-        end
-
-      :function ->
-        key = to_key(key)
-
-        if Map.has_key?(o, :proxy) do
-          Browser.JS.Proxy.get({:obj, id}, key, {:obj, id})
-        else
-          function_get(id, o, key)
-        end
-
-      :host
-      when is_number(key) and key >= 0 and key == trunc(key) and
-             :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
-        Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
-
-      :host ->
-        key = to_key(key)
-        {mod, data} = o.host
-
-        # the typed array accessors are inherited: an own property of the same name wins
-        if key in ["length", "byteLength", "byteOffset", "buffer"] and
-             is_map_key(o.props, key) and match?({Browser.JS.TypedArrays, _}, o.host) do
-          lookup(o, key, {:obj, id})
-        else
-          case mod.host_get(data, key, {:obj, id}) do
-            {:ok, v} -> v
-            :miss -> lookup(o, key, {:obj, id})
-          end
-        end
-
-      _ ->
-        case o do
-          # a String wrapper's characters
-          %{prim: str} when is_binary(str) ->
-            case index(key) do
-              i when is_integer(i) ->
-                Browser.JS.Str.at(str, i) || lookup(o, to_key(key), {:obj, id})
-
-              _ ->
-                lookup(o, to_key(key), {:obj, id})
-            end
-
-          _ ->
-            lookup(o, to_key(key), {:obj, id})
-        end
-    end
-  end
-
-  def get(s, key) when is_binary(s) do
-    case {index(key), key} do
-      {i, _} when is_integer(i) -> Browser.JS.Str.at(s, i) || :undefined
-      {_, "length"} -> Browser.JS.Str.length(s) * 1.0
-      _ -> lookup(deref(elem(proto(:string), 1)), to_key(key), s)
-    end
-  end
+  def get(s, key) when is_binary(s), do: get_str(s, key, false)
 
   def get(n, key) when is_number(n) or n in [:nan, :infinity, :neg_infinity],
     do: lookup(deref(elem(proto(:number), 1)), to_key(key), n)
@@ -1493,31 +1770,147 @@ defmodule Browser.JS.Interp do
         "Cannot read properties of #{to_str(v)} (reading '#{safe_key(key)}')"
       )
 
-  # a property found along the prototype chain; a getter is called with the object it was
-  # asked of as `this`
-  defp lookup(o, key, receiver) do
-    case o.props do
-      %{^key => {:accessor, getter, _}} ->
-        if function?(getter), do: call(getter, receiver, []), else: :undefined
+  @doc false
+  # A property read with a constant key (step 5, `Browser.JS.Compile`). The compiler gives
+  # only a string key that is not an array index, so the read skips `index/1` and
+  # `to_key/1`. The class dispatch is the one of `get/2`, in `get_obj/4`, so the two reads
+  # cannot drift apart. A primitive goes to `get/2`.
+  def get_named({:obj, id}, key), do: get_obj(id, deref(id), key, true)
+  def get_named(s, key) when is_binary(s), do: get_str(s, key, true)
+  def get_named(v, key), do: get(v, key)
 
-      %{^key => v} ->
-        v
+  # The read of `key` from the string `s`, for `get/2` and `get_named/2`: an index gives a
+  # character, `length` gives the length, and every other key comes from the prototype of
+  # strings. `named?` is as in `get_obj/4`. A string receiver is common in compiled code
+  # (`s.charAt(i)`, `s.length`), and a named key skips the parse of `index/1`.
+  @compile {:inline, get_str: 3}
+  defp get_str(s, key, named?) do
+    case if(named?, do: nil, else: index(key)) do
+      i when is_integer(i) ->
+        Browser.JS.Str.at(s, i) || :undefined
+
+      nil ->
+        if key == "length",
+          do: Browser.JS.Str.length(s) * 1.0,
+          else: lookup(deref(elem(proto(:string), 1)), if(named?, do: key, else: to_key(key)), s)
+    end
+  end
+
+  # The read of `key` from the object `o` with the id `id`: the class dispatch of `get/2`
+  # and `get_named/2`. `named?` is true when the key is a string that is not an array
+  # index, so `index/1` and `to_key/1` have nothing to do. The function is inline, so each
+  # caller has its own copy, in which the compiler removes the tests of the constant
+  # `named?`, and a read does not cost one more call.
+  @compile {:inline, get_obj: 4}
+  defp get_obj(id, o, key, named?) do
+    case o.class do
+      :array ->
+        case if(named?, do: nil, else: index(key)) do
+          i when is_integer(i) ->
+            # (a dense element is a data value; an item of a sparse record can be an
+            # accessor)
+            case Elems.get(o, i, Elems.none()) do
+              {:accessor, g, _} ->
+                if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+
+              Elems.none() ->
+                lookup(o, to_key(key), {:obj, id})
+
+              v ->
+                v
+            end
+
+          nil ->
+            cond do
+              # (the `length` of an arguments object is an ordinary own property)
+              key == "length" and is_map_key(o, :arguments) ->
+                lookup(o, "length", {:obj, id})
+
+              key == "length" ->
+                Elems.len(o) * 1.0
+
+              true ->
+                lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
+            end
+        end
+
+      :function ->
+        key = if(named?, do: key, else: to_key(key))
+
+        if Map.has_key?(o, :proxy) do
+          Browser.JS.Proxy.get({:obj, id}, key, {:obj, id})
+        else
+          function_get(id, o, key)
+        end
+
+      :host
+      when is_number(key) and key >= 0 and key == trunc(key) and
+             :erlang.element(1, :erlang.map_get(:host, o)) == Browser.JS.TypedArrays ->
+        Browser.JS.TypedArrays.get_index(elem(o.host, 1), trunc(key))
+
+      :host ->
+        key = if(named?, do: key, else: to_key(key))
+        {mod, data} = o.host
+
+        # the typed array accessors are inherited: an own property of the same name wins
+        if key in ["length", "byteLength", "byteOffset", "buffer"] and
+             Obj.has_own?(o, key) and match?({Browser.JS.TypedArrays, _}, o.host) do
+          lookup(o, key, {:obj, id})
+        else
+          case mod.host_get(data, key, {:obj, id}) do
+            {:ok, v} -> v
+            :miss -> lookup(o, key, {:obj, id})
+          end
+        end
 
       _ ->
         case o do
-          # an array further up the prototype chain: its length and elements show through
-          %{class: :array} when key == "length" ->
-            o.len * 1.0
+          # a String wrapper's characters
+          %{prim: str} when is_binary(str) ->
+            case if(named?, do: nil, else: index(key)) do
+              i when is_integer(i) ->
+                Browser.JS.Str.at(str, i) ||
+                  lookup(o, to_key(key), {:obj, id})
 
-          %{class: :array, items: items} when is_binary(key) ->
+              _ ->
+                lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
+            end
+
+          _ ->
+            lookup(o, if(named?, do: key, else: to_key(key)), {:obj, id})
+        end
+    end
+  end
+
+  # a property found along the prototype chain; a getter is called with the object it was
+  # asked of as `this`
+  defp lookup(o, key, receiver) do
+    Obj.own_case o, key do
+      {:ok, {:accessor, getter, _}} ->
+        if function?(getter), do: call(getter, receiver, []), else: :undefined
+
+      {:ok, v} ->
+        v
+
+      :error ->
+        case o do
+          # an array further up the prototype chain: its length and elements show through
+          %{class: :array} when key == "length" and not is_map_key(o, :arguments) ->
+            Elems.len(o) * 1.0
+
+          # (an array with no elements, as `Array.prototype`, needs no parse of the key)
+          %{class: :array} when is_binary(key) and not Elems.empty?(o) ->
             case index(key) do
-              i when is_integer(i) and is_map_key(items, i) ->
-                case items[i] do
-                  {:accessor, getter, _} ->
+              i when is_integer(i) ->
+                case Elems.fetch(o, i) do
+                  {:ok, {:accessor, getter, _}} ->
                     if function?(getter), do: call(getter, receiver, []), else: :undefined
 
-                  v ->
+                  {:ok, v} ->
                     v
+
+                  :error ->
+                    lookup_proto(o, key, receiver)
                 end
 
               _ ->
@@ -1726,10 +2119,9 @@ defmodule Browser.JS.Interp do
   }
 
   defp function_prop(id, %{generator: true} = o, "prototype") do
-    p = new_object([], proto(if Map.get(o, :async), do: :async_generator, else: :generator))
+    p = new_proto_object(proto(if Map.get(o, :async), do: :async_generator, else: :generator))
     o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs))
+    store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
     p
   end
 
@@ -1741,16 +2133,10 @@ defmodule Browser.JS.Interp do
         :undefined
 
       {:closure, %{mode: mode}} when mode in [false, nil] ->
-        p = new_object()
+        p = new_proto_object()
         put_hidden(p, "constructor", {:obj, id})
         o = deref(id)
-        attrs = Map.put(Map.get(o, :attrs, %{}), "prototype", %{w: true, c: false, e: false})
-
-        store(
-          id,
-          o |> Map.put(:props, Map.put(o.props, "prototype", p)) |> Map.put(:attrs, attrs)
-        )
-
+        store(id, Obj.put_with_attrs(o, "prototype", p, %{w: true, c: false, e: false}))
         p
 
       {:native, _, _} ->
@@ -1789,63 +2175,92 @@ defmodule Browser.JS.Interp do
   defp function_prop(_id, _o, _key), do: :undefined
 
   @doc "Sets an own property without making it show up in `Object.keys`."
-  def put_hidden({:obj, id}, key, v) do
-    o = deref(id)
+  def put_hidden({:obj, id}, key, v), do: store(id, Obj.put_hidden(deref(id), key, v))
 
-    o =
-      if Map.has_key?(o.props, key) do
-        o
-      else
-        # (where it stands among the enumerable names, so `ownKeys` can put it in creation order)
-        named =
-          if o.keys == [],
-            do: 0,
-            else:
-              Enum.count(
-                o.keys,
-                &(is_binary(&1) and not (is_integer(index(&1)) and index(&1) < 4_294_967_295))
-              )
+  # ── object literals (step A3) ──────────────────────────────
+  # An object literal of the compiled code with constant keys (fast path `:literal`) gets
+  # its id from `reserve/0` before its values, as the tree walker allocates the object
+  # before its values, so the heap ids are the same. When the values are known, the record
+  # goes in with one write: `put_literal/4` for a literal with a shape and no key that
+  # comes two times, `fill_new/4` for the others. Between the two, the id has no entry.
+  # Nothing reads it there: no name refers to the object, and a garbage collection runs
+  # only between tasks. A literal of this path defines no method (`method_node?/1` in
+  # `Browser.JS.Compile`), so no value needs the object as its home.
 
-        o
-        |> Map.update(:horder, [key], &[key | &1])
-        |> Map.update(:hpos, %{key => named}, &Map.put_new(&1, key, named))
-      end
+  @doc false
+  # The record of the object literal `id` with the prototype `proto`, from the key layout
+  # `layout` of `Obj.literal_keys/1` (it has a shape, and no key comes two times) and the
+  # tuple `vals` of the values in the order of the keys: one map literal in one write. In
+  # the check build the shadow run compares it with the record that the tree walker
+  # makes, one key at a time (`literal_old/4`).
+  def put_literal(id, proto, {_, keys, sh, nil}, vals) do
+    Fast.shadow(
+      id,
+      :erlang.put(id, Obj.shaped_record([class: :object, proto: proto], sh, vals)),
+      literal_old(id, proto, keys, :erlang.tuple_to_list(vals))
+    )
+  end
 
-    store(id, %{o | props: Map.put(o.props, key, v)})
+  @doc false
+  # `put_literal/4` for any other layout: the values are a list in source order, and
+  # `Obj.fill/3` makes the record (a key that comes two times, an index-like key, more
+  # values than the compiled code puts in a tuple).
+  def fill_new(id, proto, {_, keys, _, _} = layout, values) do
+    Fast.shadow(
+      id,
+      :erlang.put(id, Obj.fill(Obj.plain_record(class: :object, proto: proto), layout, values)),
+      literal_old(id, proto, keys, values)
+    )
+  end
+
+  # The old path of the literal `id`: the empty object, then each value with its key in
+  # source order (`define_data/3`), as `ev/2` makes it. It gives the entry at `id` before
+  # it, as the one write of the fast path does.
+  defp literal_old(id, proto, keys, values) do
+    before = :erlang.put(id, Obj.plain_record(class: :object, proto: proto))
+    Enum.each(:lists.zip(keys, values), fn {k, v} -> define_data({:obj, id}, k, v) end)
+    before
   end
 
   @doc "CreateDataProperty: an own enumerable property, whatever the prototype chain says."
-  def define_data({:obj, id}, key, v) do
-    o = deref(id)
-    keys = if Map.has_key?(o.props, key), do: o.keys, else: [key | o.keys]
-    store(id, %{o | props: Map.put(o.props, key, v), keys: keys})
-  end
+  def define_data({:obj, id}, key, v), do: store(id, Obj.define_data(deref(id), key, v))
 
   @doc "Sets `@@toStringTag`: not writable or enumerable, but configurable."
   def put_tag({:obj, id}, name) do
     key = {:symbol, :toStringTag, "Symbol.toStringTag"}
-    o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, key, name)) |> Map.put(:attrs, attrs))
+    store(id, Obj.put_with_attrs(deref(id), key, name, %{w: false, c: true, e: false}))
   end
 
   @doc "Overrides the `length` of a native function."
   def set_arity({:obj, id}, n), do: store(id, Map.put(deref(id), :arity, n * 1.0))
 
   @doc "Sets an own property that is not writable, enumerable or configurable (a built-in's `prototype`)."
-  def put_const({:obj, id}, key, v) do
-    o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: false, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
+  def put_const({:obj, id}, key, v),
+    do: store(id, Obj.put_with_attrs(deref(id), key, v, %{w: false, c: false, e: false}))
+
+  # Runs a setter or a proxy trap of a write and puts the flag `:js_put_failed` back as it
+  # was. A sloppy write in the callee that fails sets the flag, but that failure is not a
+  # failure of this write: the strict write that runs the setter must not throw for it.
+  defmacrop keep_put_flag(expr) do
+    quote do
+      flag = :erlang.get(:js_put_failed)
+      result = unquote(expr)
+      :erlang.put(:js_put_failed, flag)
+      result
+    end
   end
+
+  @doc false
+  # `keep_put_flag/1` for the other modules (`Browser.JS.Proxy`).
+  def keep_put_flag_fun(fun), do: keep_put_flag(fun.())
 
   def put({:obj, id} = obj, {:private, _} = key, v) do
     o = deref(id)
 
-    case Map.fetch(o.props, key) do
+    case Obj.own_fetch(o, key) do
       {:ok, {:accessor, _, setter}} ->
         if function?(setter),
-          do: call(setter, obj, [v]),
+          do: keep_put_flag(call(setter, obj, [v])),
           else: throw_error("TypeError", "'#x' was defined without a setter")
 
         :ok
@@ -1854,7 +2269,7 @@ defmodule Browser.JS.Interp do
         if key in Map.get(o, :pmethods, []),
           do: throw_error("TypeError", "Private methods are not writable")
 
-        store(id, %{o | props: Map.put(o.props, key, v)})
+        store(id, Obj.own_put_value(o, key, v))
 
       :error ->
         throw_error(
@@ -1867,95 +2282,7 @@ defmodule Browser.JS.Interp do
   def put(_, {:private, _}, _),
     do: throw_error("TypeError", "Cannot write private member to a non-object")
 
-  def put({:obj, id}, key, v) do
-    o = deref(id)
-
-    case o do
-      %{class: :array} ->
-        case index(key) do
-          i when is_integer(i) ->
-            cond do
-              match?(%{^i => {:accessor, _, _}}, o.items) ->
-                {:accessor, _, setter} = o.items[i]
-                if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
-                :ok
-
-              Map.get(o, :frozen, false) ->
-                fail_put()
-
-              not Map.get(o, :ext, true) and not Map.has_key?(o.items, i) ->
-                fail_put()
-
-              i >= o.len and Map.get(o, :len_ro, false) ->
-                fail_put()
-
-              not writable?(o, i) ->
-                fail_put()
-
-              not is_map_key(o.items, i) and index_hook(o.proto, i) != :none ->
-                case index_hook(o.proto, i) do
-                  {:setter, setter} ->
-                    call(setter, {:obj, id}, [v])
-
-                  {:proxy, proxy} ->
-                    unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
-                      do: fail_put()
-
-                  :skip ->
-                    :ok
-                end
-
-                :ok
-
-              true ->
-                # an arguments object's `length` is an ordinary property: it does not grow
-                len = if Map.has_key?(o, :arguments), do: o.len, else: max(o.len, i + 1)
-                store(id, %{o | items: Map.put(o.items, i, v), len: len})
-                if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
-            end
-
-          nil ->
-            # an arguments object's `length` is an ordinary property that takes any value
-            if key == "length" and is_map_key(o, :arguments) and not Map.get(o, :frozen, false) do
-              if is_map_key(o, :len_gone), do: store(id, Map.delete(o, :len_gone))
-              put_hidden({:obj, id}, "length", v)
-            else
-              put_array_prop(id, o, key, v)
-            end
-        end
-
-      %{class: :host, host: {Browser.JS.TypedArrays, data}}
-      when is_number(key) and key >= 0 and key == trunc(key) ->
-        case Browser.JS.TypedArrays.put_index(data, trunc(key), v) do
-          :ok -> :ok
-          :readonly -> fail_put()
-        end
-
-      %{class: :host, host: {mod, data}} ->
-        key = to_key(key)
-
-        case mod.host_put(data, key, v, {:obj, id}) do
-          :ok -> :ok
-          :miss -> put_prop(id, o, key, v)
-          :readonly -> fail_put()
-        end
-
-      %{proxy: _} ->
-        unless Browser.JS.Proxy.set({:obj, id}, to_key(key), v, {:obj, id}), do: fail_put()
-        :ok
-
-      # a function's own name and length are not writable
-      %{class: :function, props: props} when key in ["name", "length"] ->
-        unless Map.has_key?(props, key) or key in Map.get(o, :gone, []),
-          do: fail_put(),
-          else: put_prop(id, o, key, v)
-
-      _ ->
-        put_prop(id, o, to_key(key), v)
-    end
-
-    v
-  end
+  def put({:obj, id}, key, v), do: put_obj(id, deref(id), key, v, false)
 
   def put(v, key, _) when v in [:undefined, :null],
     do:
@@ -1971,12 +2298,810 @@ defmodule Browser.JS.Interp do
     v
   end
 
+  # The guard of the fast update (fast path `:update`): the record `o` is not an array, not
+  # a host object and not a proxy, `old` (the stored value of the own key `key`) is not an
+  # accessor, and `key` has no attributes, so it is writable. For such a write `put_obj/5`
+  # only stores the value: the clauses for arrays, host objects (typed arrays, proxies of
+  # plain objects, the global object, module namespaces and DOM objects) and proxies of
+  # functions do not match, the clause for the `name` and `length` of a function goes to
+  # `put_prop/4` because the record has the own key, and `put_prop/4` stores the value when
+  # the own key is not an accessor and `Obj.writable?/2` is true. A change to one of these
+  # clauses needs a change to this guard. Today the tests of the class and of `proxy` are
+  # also defence in depth: a proxy of a function has no own key, a proxy of a plain object
+  # is a host object, and `put_obj/5` stores a named key of an array as this path does.
+  # They stay, so that a change to the layout of these records is not a wrong write. The
+  # row "dm update guard terms" of the data-model corpus tries each one.
+  defmacrop plain_update(o, key, old) do
+    quote do
+      :erlang.map_get(:class, unquote(o)) != :array and
+        :erlang.map_get(:class, unquote(o)) != :host and
+        not is_map_key(unquote(o), :proxy) and
+        not (is_tuple(unquote(old)) and tuple_size(unquote(old)) == 3 and
+               :erlang.element(1, unquote(old)) == :accessor) and
+        Obj.default_attrs?(unquote(o), unquote(key))
+    end
+  end
+
+  # The store of the fast update: the record has `key`, so the map update keeps the key
+  # tuple (`Obj.own_update/3`).
+  @compile {:inline, update_prop: 4}
+  defp update_prop(id, o, key, v) do
+    :erlang.put(id, Obj.own_update(o, key, v))
+    v
+  end
+
+  # The write of `put_named/3` and `strict_put_named/3` to the object with the id `id`, in
+  # one place, so that the strict and the sloppy write cannot drift apart. `o` is the entry
+  # at `id` (`:undefined` when the heap has none). Only the write that does not take the
+  # fast update differs: `strict_put_obj/4` or `put_obj/5`. It is a macro, not an inline
+  # function, because the compiler does not inline `put_obj/5` into a function that it
+  # inlines, and each write would then pay one more call. `id`, `key` and `v` must be
+  # variables. The inline caches use it for the records that are not fast (`put_ic/4`).
+  defmacrop named_write(id, o, key, v, strict?) do
+    slow = fn o ->
+      if strict?,
+        do: quote(do: strict_put_obj(unquote(id), unquote(o), unquote(key), unquote(v))),
+        else: quote(do: put_obj(unquote(id), unquote(o), unquote(key), unquote(v), true))
+    end
+
+    quote do
+      o = unquote(o)
+
+      Obj.own_case o, unquote(key) do
+        {:ok, old} when plain_update(o, unquote(key), old) ->
+          if Fast.on?(:update),
+            do:
+              Fast.shadow(
+                unquote(id),
+                update_prop(unquote(id), o, unquote(key), unquote(v)),
+                put_obj(unquote(id), o, unquote(key), unquote(v), true)
+              ),
+            else: unquote(slow.(quote(do: o)))
+
+        # (a second read, so that an id that is not in the heap gives the error of `deref/1`)
+        _ ->
+          o = deref(unquote(id))
+          unquote(slow.(quote(do: o)))
+      end
+    end
+  end
+
+  @doc false
+  # A property write with a constant key (step 5, `Browser.JS.Compile`), as `get_named/2`
+  # reads one: the key is a string that is not an array index, and the class dispatch is
+  # the one of `put/3`, in `put_obj/5`. A primitive goes to `put/3`. The update of an own
+  # writable data property reads the record once and does not go through `put_obj/5`
+  # (`plain_update/3`).
+  def put_named({:obj, id}, key, v), do: named_write(id, :erlang.get(id), key, v, false)
+  def put_named(ov, key, v), do: put(ov, key, v)
+
+  @doc false
+  # `strict_put/3` with a constant key, as `put_named/3`. A primitive goes to
+  # `strict_put/3`, which has a clause of its own for primitives. The update of an own
+  # writable data property cannot fail, so the fast update does not set and read the flag
+  # `:js_put_failed`: every reader of the flag sets it to false before its own write.
+  def strict_put_named({:obj, id}, key, v), do: named_write(id, :erlang.get(id), key, v, true)
+  def strict_put_named(ov, key, v), do: strict_put(ov, key, v)
+
+  # ── inline caches (step A2) ────────────────────────────────
+  # The named sites of the compiled code read and write through an inline cache. The site
+  # number, the cells and the rules of a hit are in the moduledoc of `Browser.JS.Shape`. A
+  # record that is not fast, and every record when the fast path `:ic` is off, takes the
+  # path of `get_named/2` or `put_named/3`. A hit makes no change of the heap and calls
+  # nothing that the generic path would not call, so the steps, the heap ids and the
+  # results of the oracles stay the same. In the check build each hit also runs the
+  # generic path and compares (`Fast.shadow/3`). The add cells of step A3 are a fast path
+  # of their own, `:ic_add`, which needs `:ic` too.
+
+  # The misses that a cell can count before it becomes `:mega`.
+  @ic_misses 16
+
+  # The value of the part of `get_ic/3` that looks at a data cell when the read must take
+  # the generic path: a cell of the generic path, `:mega` or a miss. No JavaScript value is
+  # this atom. These cases thus share one generic read, so that `get_ic/3` does not hold a
+  # copy of the inline `get_obj/4` for each of them.
+  @ic_generic :"$js_ic_generic"
+
+  @doc false
+  # A property read with a constant key at the site `site` of the compiled code: the read
+  # of `get_named/2` with an inline cache. The call of the getter of a getter cell is the
+  # last call of the function, so a getter cell has its own clauses. The other cells go
+  # through one case that gives the value of a hit or `@ic_generic`, and a miss writes the
+  # cell again before it gives `@ic_generic`.
+  def get_ic({:obj, id} = obj, key, site) do
+    case :erlang.get(id) do
+      Obj.fast_record(sid, vals) = o ->
+        if Fast.on?(:ic) do
+          case :erlang.get(site) do
+            {^sid, :get, pos, _} ->
+              Fast.count(:get_own)
+              ic_getter(:erlang.element(pos, vals), obj, o, sid, key, site)
+
+            {^sid, :get, pid, psid, pos, _} ->
+              case ic_proto(o, pid, psid) do
+                nil ->
+                  ic_getter_miss(obj, o, sid, key, site)
+
+                p ->
+                  Fast.count(:get_proto)
+                  ic_getter(Obj.slot(p, pos), obj, o, sid, key, site)
+              end
+
+            {^sid, :get, pid1, psid1, pid2, psid2, pos, _} ->
+              with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
+                   p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                Fast.count(:get_proto)
+                ic_getter(Obj.slot(p2, pos), obj, o, sid, key, site)
+              else
+                _ -> ic_getter_miss(obj, o, sid, key, site)
+              end
+
+            cell ->
+              hit =
+                case cell do
+                  {^sid, pos, _} ->
+                    case :erlang.element(pos, vals) do
+                      {:accessor, _, _} ->
+                        ic_read_miss(o, sid, key, site)
+
+                      v ->
+                        Fast.count(:own)
+                        Fast.shadow(nil, v, get_obj(id, o, key, true))
+                    end
+
+                  {^sid, pid, psid, pos, _} ->
+                    case ic_proto(o, pid, psid) do
+                      nil ->
+                        ic_read_miss(o, sid, key, site)
+
+                      p ->
+                        Fast.count(:proto1)
+                        ic_data(Obj.slot(p, pos), id, o, sid, key, site)
+                    end
+
+                  {^sid, pid1, psid1, pid2, psid2, pos, _} ->
+                    with p1 when p1 != nil <- ic_proto(o, pid1, psid1),
+                         p2 when p2 != nil <- ic_proto(p1, pid2, psid2) do
+                      Fast.count(:proto2)
+                      ic_data(Obj.slot(p2, pos), id, o, sid, key, site)
+                    else
+                      _ -> ic_read_miss(o, sid, key, site)
+                    end
+
+                  {^sid, _} ->
+                    Fast.count(:generic)
+                    @ic_generic
+
+                  :mega ->
+                    Fast.count(:mega)
+                    @ic_generic
+
+                  _ ->
+                    ic_read_miss(o, sid, key, site)
+                end
+
+              case hit do
+                @ic_generic -> get_obj(id, o, key, true)
+                v -> v
+              end
+          end
+        else
+          get_obj(id, o, key, true)
+        end
+
+      # (an id that is not in the heap gives the error of `deref/1`)
+      :undefined ->
+        deref(id)
+
+      o ->
+        Fast.count(:dict)
+        get_obj(id, o, key, true)
+    end
+  end
+
+  def get_ic(s, key, _site) when is_binary(s), do: get_str(s, key, true)
+  def get_ic(v, key, _site), do: get(v, key)
+
+  # The record at `pid` when it is the prototype of `o` and has the shape `psid`, or `nil`.
+  # A freed id gives `:undefined`, which does not match.
+  @compile {:inline, ic_proto: 3}
+  defp ic_proto(o, pid, psid) do
+    case :erlang.map_get(:proto, o) do
+      {:obj, ^pid} ->
+        case :erlang.get(pid) do
+          Obj.fast_record(^psid, _) = p -> p
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # The hit of a data cell of a prototype: the value `v`, or a miss when the value is now an
+  # accessor (`defineProperty` can make a data property an accessor with the same bits).
+  @compile {:inline, ic_data: 6}
+  defp ic_data(v, id, o, sid, key, site) do
+    case v do
+      {:accessor, _, _} -> ic_read_miss(o, sid, key, site)
+      v -> Fast.shadow(nil, v, get_obj(id, o, key, true))
+    end
+  end
+
+  # The hit of a getter cell: the getter of the stored accessor `stored`, called with the
+  # receiver `obj` as `lookup/3` calls it, or a miss when the value is now a data property.
+  # The shadow run compares the accessor with the one that the generic read finds
+  # (`ic_stored/2`), because the generic read would call the getter a second time.
+  defp ic_getter(stored, obj, o, sid, key, site) do
+    case stored do
+      {:accessor, getter, _} ->
+        _ = Fast.shadow(nil, stored, ic_stored(o, key))
+        if function?(getter), do: call(getter, obj, []), else: :undefined
+
+      _ ->
+        ic_getter_miss(obj, o, sid, key, site)
+    end
+  end
+
+  # A miss at a getter cell: the cell of the site is written again (`ic_read_miss/4`), and
+  # the generic read of `get_named/2` gives the value. It reads the record again, which
+  # only a miss pays.
+  defp ic_getter_miss(obj, o, sid, key, site) do
+    ic_read_miss(o, sid, key, site)
+    get_named(obj, key)
+  end
+
+  # The stored value of `key` that `lookup/3` finds from the record `o`, with no call of a
+  # getter: an accessor is `{:accessor, getter, setter}`, and no key gives `:none`. Only the
+  # shadow run of a getter cell uses it, and a getter cell holds only plain records, so
+  # the walk has no clause for a proxy, a host object or an array.
+  defp ic_stored(o, key) do
+    Obj.own_case o, key do
+      {:ok, v} ->
+        v
+
+      :error ->
+        case :erlang.map_get(:proto, o) do
+          {:obj, pid} -> ic_stored(deref(pid), key)
+          _ -> :none
+        end
+    end
+  end
+
+  # A miss of a read of `key` from the fast record `o` with the shape `sid`: the cell of the
+  # site gets the place where the generic read finds the key (`ic_read_cell/3`). It gives
+  # `@ic_generic`, so that the generic read of `get_ic/3` gives the value.
+  defp ic_read_miss(o, sid, key, site) do
+    Fast.count(:miss)
+    ic_learn(site, ic_read_cell(o, sid, key))
+    @ic_generic
+  end
+
+  # The cell of a read of `key` from the fast record `o` with the shape `sid`, without the
+  # count of the misses (see `Browser.JS.Shape`): the own key, or the key of the prototype
+  # or of its prototype when these are fast plain records, as `lookup/3` and
+  # `lookup_proto/3` find it. Any other case is the generic path `{sid}`.
+  defp ic_read_cell(o, sid, key) do
+    with true <- ic_ok?(o, key),
+         {where, stored} <- ic_find(o, key, 0) do
+      case {where, stored} do
+        {{pos}, {:accessor, _, _}} ->
+          {sid, :get, pos}
+
+        {{pos}, _} ->
+          {sid, pos}
+
+        {{pid, psid, pos}, {:accessor, _, _}} ->
+          {sid, :get, pid, psid, pos}
+
+        {{pid, psid, pos}, _} ->
+          {sid, pid, psid, pos}
+
+        {{pid1, psid1, pid2, psid2, pos}, {:accessor, _, _}} ->
+          {sid, :get, pid1, psid1, pid2, psid2, pos}
+
+        {{pid1, psid1, pid2, psid2, pos}, _} ->
+          {sid, pid1, psid1, pid2, psid2, pos}
+      end
+    else
+      _ -> {sid}
+    end
+  end
+
+  # Where the chain from the fast record `o` holds `key`, at the depth `depth` of `o` (0 for
+  # the receiver): `{place, stored}`, where `place` is `{pos}`, `{pid, psid, pos}` or
+  # `{pid1, psid1, pid2, psid2, pos}`, or `nil`. A prototype counts only when it is a fast
+  # record that reads `key` as a plain object does (`ic_ok?/2`), so that its shape tells
+  # what it holds.
+  defp ic_find(o, key, depth) do
+    case Obj.fast_slot(o, key) do
+      {pos, _bits} ->
+        {{pos}, Obj.slot(o, pos)}
+
+      nil when depth < 2 ->
+        with {:obj, pid} <- :erlang.map_get(:proto, o),
+             p when is_map(p) <- :erlang.get(pid),
+             true <- ic_ok?(p, key),
+             {place, stored} <- ic_find(p, key, depth + 1) do
+          {:erlang.insert_element(1, :erlang.insert_element(1, place, Obj.shape_id(p)), pid),
+           stored}
+        else
+          _ -> nil
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  # Whether the record `o` can be in a cell of the key `key`: a fast record that reads and
+  # writes `key` as a plain object does, with `lookup/3` and `put_prop/4`. These are a plain
+  # object, an array for a key other than `length`, and a function for a key other than
+  # `name`, `length` and `prototype` (step A4). For an array, `get_obj/4` and `put_obj/5`
+  # give such a key to `lookup/3` and `put_array_prop/4`, which gives it to `put_prop/4`.
+  # For a function, `function_get/3` gives the value of `lookup/3` when it is not
+  # `undefined`, and `function_prop/3` gives `undefined` for such a key, and `put_obj/5`
+  # gives such a key to `put_prop/4`. A cell holds the `sid` of the receiver, and an array
+  # or a function has a shape of its own root (`Browser.JS.Shape`), so a cell that a plain
+  # object made never hits on an array or a function. A proxy is never fast, but the test
+  # stays, because a cell must never hold a proxy.
+  @compile {:inline, ic_ok?: 2}
+  defp ic_ok?(o, key) do
+    Obj.fast?(o) and not is_map_key(o, :proxy) and
+      case :erlang.map_get(:class, o) do
+        :object -> true
+        :array -> key != "length" and not is_map_key(o, :arguments)
+        :function -> key != "name" and key != "length" and key != "prototype"
+        _ -> false
+      end
+  end
+
+  # Whether the record `o` can get an add cell: a fast record of a plain object (see
+  # "add cells").
+  @compile {:inline, ic_plain?: 1}
+  defp ic_plain?(o),
+    do: Obj.fast?(o) and :erlang.map_get(:class, o) == :object and not is_map_key(o, :proxy)
+
+  # Writes the cell `cell` (without its count) to the site `site`. The count goes up by one
+  # for each miss in the life of the site, and a hit does not set it back to zero (see
+  # `Browser.JS.Shape`). Past `@ic_misses` the cell becomes `:mega`.
+  @compile {:inline, ic_learn: 2}
+  defp ic_learn(site, cell) do
+    n =
+      case :erlang.get(site) do
+        :undefined -> 0
+        old -> :erlang.element(tuple_size(old), old)
+      end
+
+    if n >= @ic_misses,
+      do: :erlang.put(site, :mega),
+      else: :erlang.put(site, :erlang.append_element(cell, n + 1))
+  end
+
+  # The write of `put_ic/4` and `strict_put_ic/4` to the object with the id `id`, in one
+  # place, as `named_write/5` is for `put_named/3` and `strict_put_named/3`. `o` is the
+  # entry at `id`. The part that looks at the cell gives one of four results:
+  #
+  #   * `:hit`: the value is stored. A hit writes a writable data property, or adds a new
+  #     key through an add cell (step A3). These writes cannot fail, so the strict write
+  #     does not set and read the flag `:js_put_failed`, and the shadow run compares them
+  #     with the sloppy `put_obj/5`.
+  #   * `:slow`: a cell of the generic path, or a miss. The shape of the record tells that
+  #     it does not hold the key as a writable data property (an add, a setter, a key that
+  #     is not writable), or the miss wrote a new cell. The fast update of `named_write/5`
+  #     cannot apply, and its search of the key would only cost more, so the write goes to
+  #     `put_obj/5` or `strict_put_obj/4` at once, with the record that it read.
+  #   * `{:add, protos}`: the second miss of an add that an add cell can do
+  #     (`ic_write_miss/4`). The write takes the generic path as for `:slow`, and then the
+  #     cell gets the new shape of the record (`ic_learn_add/5`).
+  #   * `:named`: `:mega`, a record that is not fast, or the fast path `:ic` off. The write
+  #     takes `named_write/5`, so that it costs no more than the write of `put_named/3`.
+  #
+  # `id`, `key`, `v` and `site` must be variables.
+  defmacrop ic_write(id, o, key, v, site, strict?) do
+    slow =
+      if strict?,
+        do: quote(do: strict_put_obj(unquote(id), o, unquote(key), unquote(v))),
+        else: quote(do: put_obj(unquote(id), o, unquote(key), unquote(v), true))
+
+    quote do
+      o = unquote(o)
+
+      result =
+        case o do
+          Obj.fast_record(sid, vals) ->
+            if Fast.on?(:ic) do
+              case :erlang.get(unquote(site)) do
+                {^sid, pos, _} ->
+                  case :erlang.element(pos, vals) do
+                    {:accessor, _, _} ->
+                      ic_write_miss(o, sid, unquote(key), unquote(site))
+
+                    _ ->
+                      Fast.count(:put_own)
+
+                      _ =
+                        Fast.shadow(
+                          unquote(id),
+                          ic_store(unquote(id), o, vals, pos, unquote(v)),
+                          put_obj(unquote(id), o, unquote(key), unquote(v), true)
+                        )
+
+                      :hit
+                  end
+
+                {^sid, _} ->
+                  :slow
+
+                {^sid, child, protos, _} ->
+                  if :erlang.map_get(:class, o) == :object and
+                       ic_clear(:erlang.map_get(:proto, o), protos, unquote(key)) do
+                    Fast.count(:add)
+
+                    _ =
+                      Fast.shadow(
+                        unquote(id),
+                        ic_add_store(unquote(id), o, child, vals, unquote(v)),
+                        put_obj(unquote(id), o, unquote(key), unquote(v), true)
+                      )
+
+                    :hit
+                  else
+                    ic_write_miss(o, sid, unquote(key), unquote(site))
+                  end
+
+                :mega ->
+                  :named
+
+                _ ->
+                  ic_write_miss(o, sid, unquote(key), unquote(site))
+              end
+            else
+              :named
+            end
+
+          _ ->
+            :named
+        end
+
+      case result do
+        :hit ->
+          unquote(v)
+
+        :slow ->
+          unquote(slow)
+
+        :named ->
+          named_write(unquote(id), o, unquote(key), unquote(v), unquote(strict?))
+
+        {:add, protos} ->
+          r = unquote(slow)
+          ic_learn_add(unquote(site), unquote(id), o, protos, unquote(key))
+          r
+      end
+    end
+  end
+
+  @doc false
+  # A property write with a constant key at the site `site` of the compiled code: the write
+  # of `put_named/3` with an inline cache.
+  def put_ic({:obj, id}, key, v, site), do: ic_write(id, :erlang.get(id), key, v, site, false)
+  def put_ic(ov, key, v, _site), do: put(ov, key, v)
+
+  @doc false
+  # `put_ic/4` for strict code: the write of `strict_put_named/3` with an inline cache.
+  def strict_put_ic({:obj, id}, key, v, site),
+    do: ic_write(id, :erlang.get(id), key, v, site, true)
+
+  def strict_put_ic(ov, key, v, _site), do: strict_put(ov, key, v)
+
+  # The store of a write hit: the value at the position `pos` of the fast record `o`.
+  @compile {:inline, ic_store: 5}
+  defp ic_store(id, o, vals, pos, v) do
+    :erlang.put(id, Obj.put_slot(o, vals, pos, v))
+    v
+  end
+
+  # A miss of a write of `key` to the fast record `o` with the shape `sid`: the cell of the
+  # site gets the position of the key when the record holds it as a writable data property
+  # (`ic_write_cell/3`). It gives `:slow`, so that the generic write of `ic_write/6` runs.
+  #
+  # An add that an add cell can do (`ic_add_ok?/2`) gets its add cell only at the second
+  # miss of the site with the same shape. The first miss writes the cell `{:add, sid}`,
+  # which matches no record, and gives `:slow`. The second miss finds that cell, tests that
+  # the key is not numeric, walks the prototype chain (`ic_chain/3`), and gives
+  # `{:add, protos}`; the cell is then written after the generic write
+  # (`ic_learn_add/5`). Many add sites run only once (the code of a module, the set-up of
+  # an object), and an add cell there would cost the test of the key, the walk of the
+  # chain, a second read of the record and a cell that no record uses. A site of a
+  # constructor loses only one run.
+  defp ic_write_miss(o, sid, key, site) do
+    if ic_add_ok?(o, key) do
+      case :erlang.get(site) do
+        {:add, ^sid, _} ->
+          case not Browser.JS.TypedArrays.numeric_key?(key) and
+                 ic_chain(:erlang.map_get(:proto, o), key, 0) do
+            protos when is_list(protos) ->
+              {:add, protos}
+
+            _ ->
+              ic_learn(site, {sid})
+              :slow
+          end
+
+        _ ->
+          ic_learn(site, {:add, sid})
+          :slow
+      end
+    else
+      ic_learn(site, ic_write_cell(o, sid, key))
+      :slow
+    end
+  end
+
+  # ── add cells (step A3) ────────────────────────────────────
+  # An add cell `{sid, child, protos, n}` adds a new key at a named write site: a record of
+  # the class `:object` with the shape `sid` gets the shape `child` and the new value at
+  # the end, with no walk of `inherited_set/2` and no read of the transition table.
+  # `protos` is the list of the ids of the prototype chain of the record when the miss
+  # made the cell, from its prototype up to the end of the chain.
+  #
+  # The generic path adds the key only when no record of the chain holds the key and no
+  # record of the chain is a proxy (`inherited_set/2` gives `:none`), and the record is
+  # extensible. A typed array of the chain can also stop the add, but only of a numeric
+  # key, and an add cell is never made for such a key. So a hit tests these conditions
+  # again, on the records that are at the ids now (`ic_clear/3`): each prototype link
+  # must still be the id of the cell, and each record there must not hold the key and
+  # must not be a proxy. This test is exact for any record, in fast mode or in dictionary
+  # mode, so a prototype in dictionary mode can be on the chain of a cell. (a test of the
+  # `sid` of each prototype would also be exact for a fast prototype from step A4, but it
+  # would miss each time that a prototype gets a key that is not the key of the cell, as
+  # a polyfill or a method of a class that is added later, and it would need a second
+  # test for a prototype in dictionary mode; the test of the key costs no more) A
+  # setter or a key that is not writable that a later change puts on the chain is an own
+  # key there, so the cell misses. The shape `sid` tells that the record does not hold
+  # the key and is extensible. A freed id gives `:undefined`, which misses, and in a new
+  # heap the test reads the records of the new heap.
+  #
+  # The cell holds the shape `child` that the generic add gave. The shape stays correct
+  # when the transition table is erased: a later generic add then makes a new shape with
+  # the same keys, and the two records hold the same properties.
+
+  # The longest prototype chain of an add cell.
+  @ic_add_depth 4
+
+  # Whether an add cell can do the add of `key` to the fast record `o` when its prototype
+  # chain allows it (`ic_chain/3`, see above) and the key is not numeric: the record is a
+  # plain object that is extensible and does not hold the key. (the test of a numeric key
+  # parses the key, so `ic_write_miss/4` makes it only at the second miss)
+  defp ic_add_ok?(o, key) do
+    Fast.on?(:ic_add) and ic_plain?(o) and Obj.fast_slot(o, key) == nil and
+      Obj.extensible?(o)
+  end
+
+  # The ids of the chain from the prototype link `proto`, when no record there holds `key`
+  # and none is a proxy, or `nil`.
+  defp ic_chain({:obj, pid}, key, depth) when depth < @ic_add_depth do
+    case :erlang.get(pid) do
+      p when is_map(p) and not Obj.has_own?(p, key) and not is_map_key(p, :proxy) ->
+        case ic_chain(:erlang.map_get(:proto, p), key, depth + 1) do
+          nil -> nil
+          rest -> [pid | rest]
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp ic_chain({:obj, _}, _key, _depth), do: nil
+  defp ic_chain(_end, _key, _depth), do: []
+
+  # Whether the chain from the prototype link `proto` is still the chain `protos` of an add
+  # cell with no record that holds `key` and no proxy (see above). The end of a chain is any
+  # link that is not an object, as in `inherited_set/2`. The chains of one and two
+  # prototypes (`{}` and `new F()`) are inline, so that they cost no call.
+  @compile {:inline, ic_clear: 3}
+  defp ic_clear(proto, protos, key) do
+    case protos do
+      [p1] -> ic_end?(ic_step(proto, p1, key))
+      [p1, p2] -> ic_end?(ic_step(ic_step(proto, p1, key), p2, key))
+      _ -> ic_clear_list(proto, protos, key)
+    end
+  end
+
+  # The prototype link of the record at `pid` when `link` is `{:obj, pid}` and that record
+  # does not hold `key` and is not a proxy, else `:miss`.
+  @compile {:inline, ic_step: 3}
+  defp ic_step(link, pid, key) do
+    case link do
+      {:obj, ^pid} ->
+        case :erlang.get(pid) do
+          p when is_map(p) and not Obj.has_own?(p, key) and not is_map_key(p, :proxy) ->
+            :erlang.map_get(:proto, p)
+
+          _ ->
+            :miss
+        end
+
+      _ ->
+        :miss
+    end
+  end
+
+  # Whether the link `link` is the end of a chain.
+  @compile {:inline, ic_end?: 1}
+  defp ic_end?(link), do: link != :miss and not is_tuple(link)
+
+  defp ic_clear_list(link, [], _key), do: ic_end?(link)
+
+  defp ic_clear_list(link, [pid | rest], key),
+    do: ic_clear_list(ic_step(link, pid, key), rest, key)
+
+  # The store of an add hit: the record `o` with the shape `child` and the value `v` at the
+  # end of its values `vals`.
+  @compile {:inline, ic_add_store: 5}
+  defp ic_add_store(id, o, child, vals, v) do
+    :erlang.put(id, Obj.put_added(o, child, vals, v))
+    v
+  end
+
+  # The cell of a miss of an add of `key`, after the generic write of the add to the record
+  # `o` at `id` with the prototype chain `protos` (`ic_chain/3`): the add cell with the
+  # new shape of the record. The record is in dictionary mode when the add passed a limit
+  # of `Browser.JS.Shape`. Then the cell gets no shape: it is `{nil}`, which matches no
+  # record, so the next record of the shape misses again. (the next record can get a
+  # shape there, see "The limits" in `Browser.JS.Shape`)
+  #
+  # A hit of an add cell appends one value for `key`, so the cell must hold the shape of
+  # `o` with `key` added at the end, and nothing else. `ic_add_ok?/2` and `ic_chain/3` tell
+  # before the write that the generic write adds the key. The cell does not trust that
+  # prediction: it gets the new shape only when the record really got the one key at the
+  # end (`Obj.added/3`). Else the cell is the generic path `{sid}`, so that a wrong
+  # prediction costs speed but never gives a record with more values than keys.
+  defp ic_learn_add(site, id, Obj.fast_record(sid, _) = o, protos, key) do
+    case :erlang.get(id) do
+      Obj.fast_record(_, _) = n ->
+        case Obj.added(o, n, key) do
+          nil ->
+            ic_learn(site, {sid})
+
+          size ->
+            # (the cell keeps the shape, which is memory of the code cache: see "Memory
+            # bound" in `Browser.JS.Compile`)
+            Browser.JS.Compile.charge(div(16 + 10 * size, 8))
+            ic_learn(site, {sid, Obj.shape(n), protos})
+        end
+
+      _ ->
+        ic_learn(site, {nil})
+    end
+  end
+
+  # The cell of a write of `key` to the fast record `o` with the shape `sid` (without the
+  # count of the misses): `{sid, pos}` when `o` is a record of `ic_ok?/2` that holds `key`
+  # as a writable data property. For such a key `put_obj/5` goes to `put_prop/4`, which only
+  # stores the value (the own key is not an accessor and `Obj.writable?/2` is true). Any
+  # other write is the generic path `{sid}`: an add, a setter, a key that is not writable.
+  defp ic_write_cell(o, sid, key) do
+    case Obj.fast_slot(o, key) do
+      {pos, bits} ->
+        if ic_ok?(o, key) and Bitwise.band(bits, 1) != 0 and
+             not match?({:accessor, _, _}, Obj.slot(o, pos)),
+           do: {sid, pos},
+           else: {sid}
+
+      nil ->
+        {sid}
+    end
+  end
+
+  defp strict_put_obj(id, o, key, v) do
+    :erlang.put(:js_put_failed, false)
+    put_obj(id, o, key, v, true)
+    strict_done(key, v)
+  end
+
+  # The write of `v` to `key` of the object `o` with the id `id`: the class dispatch of
+  # `put/3` and `put_named/3`. `named?` is true when the key is a string that is not an
+  # array index, as in `get_obj/4`. The function is inline for the same reason.
+  @compile {:inline, put_obj: 5}
+  defp put_obj(id, o, key, v, named?) do
+    case o do
+      %{class: :array} ->
+        case if(named?, do: nil, else: index(key)) do
+          # A dense record holds only writable data elements, and it is extensible, not
+          # frozen and not sealed, with a writable `length` (`Browser.JS.Elems`). So a write
+          # in bounds needs no test, and a write at the end needs only the test that no
+          # element of the prototype chain shows through, which `index_hook/2` would find
+          # (fast path `:elems`). The test does not walk the keys of a dictionary
+          # `Object.prototype` (`Elems.std_chain_fast?/1`): for such a chain the generic
+          # write looks for the one index, which costs less.
+          i when is_integer(i) ->
+            cond do
+              Fast.on?(:elems) and Elems.dense_index?(o, i) ->
+                Fast.shadow(
+                  id,
+                  (
+                    store(id, Elems.dense_put(o, i, v))
+                    :ok
+                  ),
+                  put_element(id, o, key, i, v)
+                )
+
+              Fast.on?(:elems) and Elems.dense_append?(o, i) and Elems.std_chain_fast?(o) ->
+                Fast.shadow(
+                  id,
+                  (
+                    store(id, Elems.dense_append(o, v))
+                    :ok
+                  ),
+                  put_element(id, o, key, i, v)
+                )
+
+              true ->
+                put_element(id, o, key, i, v)
+            end
+
+          # An object key becomes a property key first (ToPropertyKey), because its
+          # `toString` can give an index. Its `toString` can also change the array, so the
+          # write reads the record again.
+          nil when is_tuple(key) and elem(key, 0) == :obj ->
+            put({:obj, id}, to_key(key), v)
+
+          nil ->
+            # an arguments object's `length` is an ordinary property that takes any value
+            if key == "length" and is_map_key(o, :arguments),
+              do: put_prop(id, o, key, v),
+              else: put_array_prop(id, o, key, v)
+        end
+
+      %{class: :host, host: {Browser.JS.TypedArrays, data}}
+      when is_number(key) and key >= 0 and key == trunc(key) ->
+        case Browser.JS.TypedArrays.put_index(data, trunc(key), v) do
+          :ok -> :ok
+          :readonly -> fail_put()
+        end
+
+      %{class: :host, host: {mod, data}} ->
+        key = if(named?, do: key, else: to_key(key))
+
+        case mod.host_put(data, key, v, {:obj, id}) do
+          :ok -> :ok
+          :miss -> put_prop(id, o, key, v)
+          :readonly -> fail_put()
+        end
+
+      %{proxy: _} ->
+        unless Browser.JS.Proxy.set(
+                 {:obj, id},
+                 if(named?, do: key, else: to_key(key)),
+                 v,
+                 {:obj, id}
+               ),
+               do: fail_put()
+
+        :ok
+
+      # a function's own name and length are not writable
+      %{class: :function} when key in ["name", "length"] ->
+        unless Obj.has_own?(o, key) or key in Map.get(o, :gone, []),
+          do: fail_put(),
+          else: put_prop(id, o, key, v)
+
+      _ ->
+        put_prop(id, o, if(named?, do: key, else: to_key(key)), v)
+    end
+
+    v
+  end
+
   defp primitive_set(ov, key, v) do
     k = to_key(key)
 
     case inherited_set(Browser.JS.Builtins.box(ov), k) do
       {:setter, setter} ->
-        call(setter, ov, [v])
+        keep_put_flag(call(setter, ov, [v]))
         :ok
 
       {:proxy, proxy} ->
@@ -1988,34 +3113,36 @@ defmodule Browser.JS.Interp do
   end
 
   # naming a key in an error must not run user code (a toString that throws)
-  defp safe_key(key) when is_binary(key), do: key
-  defp safe_key(key) when is_number(key), do: to_str(key)
-  defp safe_key(_), do: "?"
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def safe_key(key) when is_binary(key), do: key
+  def safe_key(key) when is_number(key), do: to_str(key)
+  def safe_key(_), do: "?"
 
   # an assignment: own accessor or non-writable property, inherited ones, then a new property
   defp put_prop(id, o, key, v) do
-    case Map.fetch(o.props, key) do
+    Obj.own_case o, key do
       {:ok, {:accessor, _, setter}} ->
-        if function?(setter), do: call(setter, {:obj, id}, [v]), else: fail_put()
+        if function?(setter), do: keep_put_flag(call(setter, {:obj, id}, [v])), else: fail_put()
         :ok
 
       {:ok, _} ->
-        if writable?(o, key),
-          do: store(id, %{o | props: Map.put(o.props, key, v)}),
+        if Obj.writable?(o, key),
+          do: store(id, Obj.own_update(o, key, v)),
           else: fail_put()
 
       # a generator function's own `prototype` is made on first use and shadows the one of
       # its kind's prototype object
       :error
       when key == "prototype" and is_map_key(o, :generator) and
-             not is_map_key(o.props, "prototype") ->
+             not Obj.has_own?(o, "prototype") ->
         function_prop(id, o, "prototype")
         put({:obj, id}, key, v)
 
       :error ->
         case inherited_set(o.proto, key) do
           {:setter, setter} ->
-            call(setter, {:obj, id}, [v])
+            keep_put_flag(call(setter, {:obj, id}, [v]))
             :ok
 
           :readonly ->
@@ -2026,33 +3153,15 @@ defmodule Browser.JS.Interp do
             :ok
 
           {:typed_array, ta} ->
-            unless Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id}), do: fail_put()
+            unless keep_put_flag(Browser.JS.Props.ordinary_set(ta, key, v, {:obj, id})),
+              do: fail_put()
+
             :ok
 
           :none ->
-            if Map.get(o, :ext, true) do
-              o2 = %{
-                o
-                | props: Map.put(o.props, key, v),
-                  # a symbol-keyed property is not listed by Object.keys or for-in; it is
-                  # marked enumerable in its attributes instead
-                  keys: if(is_binary(key), do: [key | o.keys], else: o.keys)
-              }
-
-              if is_binary(key),
-                do: store(id, o2),
-                else:
-                  store(
-                    id,
-                    Map.put(
-                      o2,
-                      :attrs,
-                      Map.put(Map.get(o, :attrs, %{}), key, %{e: true, w: true, c: true})
-                    )
-                  )
-            else
-              fail_put()
-            end
+            if Obj.extensible?(o),
+              do: store(id, Obj.own_add_assigned(o, key, v)),
+              else: fail_put()
         end
     end
   end
@@ -2061,25 +3170,38 @@ defmodule Browser.JS.Interp do
   defp fail_put, do: :erlang.put(:js_put_failed, true)
 
   # a primitive has no property to set: in strict code only a setter on its prototype chain works
-  defp strict_put(ov, key, v)
-       when is_binary(ov) or is_number(ov) or is_boolean(ov) or
-              (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def strict_put(ov, key, v)
+      when is_binary(ov) or is_number(ov) or is_boolean(ov) or
+             (is_tuple(ov) and elem(ov, 0) in [:symbol, :bigint]) do
     case primitive_set(ov, key, v) do
       :ok ->
         v
 
+      # (a number key comes from `prop_key/1`: the message names it as its string)
       :fail ->
-        throw_error(
-          "TypeError",
-          "Cannot create property '#{if is_binary(key), do: key, else: "#"}' on #{typeof(ov)}"
-        )
+        name =
+          cond do
+            is_binary(key) -> key
+            is_number(key) -> to_str(key)
+            true -> "#"
+          end
+
+        throw_error("TypeError", "Cannot create property '#{name}' on #{typeof(ov)}")
     end
   end
 
-  defp strict_put(ov, key, v) do
+  def strict_put(ov, key, v) do
     :erlang.put(:js_put_failed, false)
     put(ov, key, v)
+    strict_done(key, v)
+  end
 
+  # The end of a strict write (`strict_put/3`, `strict_put_named/3`): a write that failed
+  # throws, and a write that did not fail gives the value.
+  @compile {:inline, strict_done: 2}
+  defp strict_done(key, v) do
     if :erlang.get(:js_put_failed) == true do
       :erlang.put(:js_put_failed, false)
       throw_error("TypeError", "Cannot assign to read only property '#{to_str(key)}'")
@@ -2148,18 +3270,18 @@ defmodule Browser.JS.Interp do
   defp inherited_set({:obj, pid}, key) do
     p = deref(pid)
 
-    case p.props do
+    Obj.own_case p, key do
       _ when is_map_key(p, :proxy) ->
         {:proxy, {:obj, pid}}
 
-      %{^key => {:accessor, _, setter}} ->
+      {:ok, {:accessor, _, setter}} ->
         if function?(setter), do: {:setter, setter}, else: :readonly
 
-      %{^key => _} ->
-        if writable?(p, key), do: :none, else: :readonly
+      {:ok, _} ->
+        if Obj.writable?(p, key), do: :none, else: :readonly
 
-      _ ->
-        if is_binary(key) and Browser.JS.TypedArrays.typed_array?({:obj, pid}) and
+      :error ->
+        if is_binary(key) and typed_array_record?(pid, p) and
              Browser.JS.TypedArrays.numeric_key?(key),
            do: {:typed_array, {:obj, pid}},
            else: inherited_set(p.proto, key)
@@ -2168,6 +3290,78 @@ defmodule Browser.JS.Interp do
 
   defp inherited_set(_, _), do: :none
 
+  # Whether the record `p` at `pid` is a typed array. `TypedArrays.typed_array?/1` is this
+  # match on the record, which it reads again; the walk of `inherited_set/2` has the record
+  # already (fast path `:add`).
+  @compile {:inline, typed_array_record?: 2}
+  defp typed_array_record?(pid, p) do
+    if Fast.on?(:add),
+      do:
+        Fast.shadow(
+          nil,
+          match?(%{host: {Browser.JS.TypedArrays, {:ta, _, _, _, _}}}, p),
+          Browser.JS.TypedArrays.typed_array?({:obj, pid})
+        ),
+      else: Browser.JS.TypedArrays.typed_array?({:obj, pid})
+  end
+
+  # The write of `v` to the element `i` of the array record `o` (the key `key`), by the
+  # generic path of `put_obj/5`. It is inline, so that the write to a sparse record costs
+  # no call more than before step B2.
+  @compile {:inline, put_element: 5}
+  defp put_element(id, o, key, i, v) do
+    # (the element at `i` now, read once for all the tests below)
+    cur = Elems.fetch(o, i)
+
+    cond do
+      match?({:ok, {:accessor, _, _}}, cur) ->
+        {:ok, {:accessor, _, setter}} = cur
+
+        if function?(setter),
+          do: keep_put_flag(call(setter, {:obj, id}, [v])),
+          else: fail_put()
+
+        :ok
+
+      Obj.frozen?(o) ->
+        fail_put()
+
+      cur == :error and not Obj.extensible?(o) ->
+        fail_put()
+
+      i >= Elems.len(o) and Map.get(o, :len_ro, false) ->
+        fail_put()
+
+      not Obj.writable?(o, i) ->
+        fail_put()
+
+      cur == :error and index_hook(o.proto, i) != :none ->
+        case index_hook(o.proto, i) do
+          {:setter, setter} ->
+            keep_put_flag(call(setter, {:obj, id}, [v]))
+
+          {:proxy, proxy} ->
+            unless Browser.JS.Proxy.set(proxy, to_key(key), v, {:obj, id}),
+              do: fail_put()
+
+          :skip ->
+            :ok
+
+          :fail ->
+            fail_put()
+        end
+
+        :ok
+
+      true ->
+        # (the `length` of an arguments object is an ordinary property: `Elems.put/3` does
+        # not make it grow)
+        store(id, Elems.put(o, i, v))
+        if Map.has_key?(o, :mapped), do: sync_param(o, i, v)
+        :ok
+    end
+  end
+
   # a missing array element: an index setter or a proxy further up the prototype chain
   defp put_array_prop(id, o, key, v) do
     if key == "length" do
@@ -2175,65 +3369,77 @@ defmodule Browser.JS.Interp do
       # the coercion may have run code that changed the array
       o = deref(id)
 
-      if Map.get(o, :frozen, false) or Map.get(o, :len_ro, false) do
+      if Obj.frozen?(o) or Map.get(o, :len_ro, false) do
         fail_put()
       else
-        # an element that cannot be deleted stops the array from shrinking past it
-        attrs = Map.get(o, :attrs, %{})
+        # An element that cannot be deleted stops the array from shrinking past it. The
+        # length then ends after that element, and the write fails (ArraySetLength gives
+        # false), so that strict code throws a TypeError.
+        case Obj.max_fixed_element(o, new_len) do
+          nil ->
+            store(id, Elems.set_len(o, new_len))
 
-        stop =
-          o.items
-          |> Map.keys()
-          |> Enum.filter(&(&1 >= new_len and Map.get(Map.get(attrs, &1, %{}), :c, true) == false))
-          |> Enum.max(fn -> nil end)
-          |> then(&if(&1, do: &1 + 1, else: new_len))
-
-        store(id, %{o | items: Map.filter(o.items, fn {i, _} -> i < stop end), len: stop})
+          keep ->
+            store(id, Elems.set_len(o, keep + 1))
+            fail_put()
+        end
       end
     else
       put_prop(id, o, to_key(key), v)
     end
   end
 
+  # The first property at the index `i` in the prototype chain from `{:obj, pid}`, as the
+  # write of a new element meets it (OrdinarySet): `{:setter, f}` for an accessor with a
+  # setter, `:fail` for an accessor with no setter or a data property that is not
+  # writable (the write fails), `:none` for a writable data property or no property (the
+  # write adds an own element), `{:proxy, p}` for a proxy, and `:skip` for a typed array.
   defp index_hook({:obj, pid}, i) do
     p = deref(pid)
-    k = Integer.to_string(i)
 
     cond do
       is_map_key(p, :proxy) ->
         {:proxy, {:obj, pid}}
 
-      match?(%{class: :array, items: %{^i => {:accessor, _, _}}}, p) ->
-        {:accessor, _, setter} = p.items[i]
-        if function?(setter), do: {:setter, setter}, else: :none
+      p.class == :array and Elems.has?(p, i) ->
+        case Elems.fetch(p, i) do
+          {:ok, {:accessor, _, setter}} ->
+            if function?(setter), do: {:setter, setter}, else: :fail
 
-      match?(%{class: :array, items: %{^i => _}}, p) ->
-        :none
+          _ ->
+            if Obj.frozen?(p) or not Obj.writable?(p, i), do: :fail, else: :none
+        end
 
       Browser.JS.TypedArrays.typed_array?({:obj, pid}) ->
         # an index outside a typed array in the chain stops the set without creating it
-        if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, k), do: :skip, else: :none
-
-      match?(%{props: %{^k => {:accessor, _, _}}}, p) ->
-        {:accessor, _, setter} = p.props[k]
-        if function?(setter), do: {:setter, setter}, else: :none
+        if Browser.JS.TypedArrays.invalid_index?({:obj, pid}, Integer.to_string(i)),
+          do: :skip,
+          else: :none
 
       true ->
-        index_hook(p.proto, i)
+        k = Integer.to_string(i)
+
+        case Obj.own_fetch(p, k) do
+          {:ok, {:accessor, _, setter}} ->
+            if function?(setter), do: {:setter, setter}, else: :fail
+
+          {:ok, _} ->
+            if Obj.frozen?(p) or not Obj.writable?(p, k), do: :fail, else: :none
+
+          :error ->
+            index_hook(p.proto, i)
+        end
     end
   end
 
   defp index_hook(_, _), do: :none
 
   @doc false
-  def writable?(o, key), do: match?(%{w: true}, Map.get(Map.get(o, :attrs, %{}), key, %{w: true}))
-
-  @doc false
-  def configurable?(o, key),
-    do: match?(%{c: true}, Map.get(Map.get(o, :attrs, %{}), key, %{c: true}))
-
-  @doc false
   def array_index(key), do: index(key)
+
+  # (an object key becomes a property key first: its `toString` can change the object, and
+  # it can give an index)
+  def delete({:obj, id}, {:obj, _} = key), do: delete({:obj, id}, to_key(key))
 
   def delete({:obj, id}, key) do
     o = deref(id)
@@ -2265,51 +3471,40 @@ defmodule Browser.JS.Interp do
              (is_integer(index(key)) and index(key) < Browser.JS.Str.length(o.prim))) ->
         false
 
-      o.class == :function and key in ["name", "length"] and not Map.has_key?(o.props, key) ->
+      o.class == :function and key in ["name", "length"] and not Obj.has_own?(o, key) ->
         store(id, Map.update(o, :gone, [key], &[key | &1]))
         true
 
       # the `prototype` a function has of its own cannot be deleted
-      o.class == :function and key == "prototype" and not Map.has_key?(o.props, key) and
+      o.class == :function and key == "prototype" and not Obj.has_own?(o, key) and
           Browser.JS.Props.has_own?({:obj, id}, key) ->
         false
 
-      i && not configurable?(o, i) && Map.has_key?(o.items, i) ->
+      i && not Obj.configurable?(o, i) && Elems.has?(o, i) ->
         false
 
       # a frozen or sealed array keeps its elements, and `length` is never configurable
-      i && (Map.get(o, :frozen, false) or Map.get(o, :sealed, false)) && Map.has_key?(o.items, i) ->
+      i && (Obj.frozen?(o) or Obj.sealed?(o)) && Elems.has?(o, i) ->
         false
 
       o.class == :array and key == "length" and not Map.has_key?(o, :arguments) ->
         false
 
-      # an arguments object's `length` can go: reads then see the prototype chain
-      o.class == :array and key == "length" ->
-        store(id, o |> Map.put(:len_gone, true) |> Map.update!(:props, &Map.delete(&1, "length")))
-        true
-
       i ->
-        store(id, %{o | items: Map.delete(o.items, i)})
+        store(id, Elems.delete(o, i))
         if Map.has_key?(o, :mapped), do: unmap_argument(id, i)
         true
 
       true ->
         key = to_key(key)
 
-        if Map.has_key?(o.props, key) and not configurable?(o, key) do
+        if Obj.has_own?(o, key) and not Obj.configurable?(o, key) do
           false
         else
-          attrs = Map.delete(Map.get(o, :attrs, %{}), key)
-
           store(
             id,
-            %{
-              o
-              | props: Map.delete(o.props, key),
-                keys: List.delete(o.keys, key)
-            }
-            |> Map.put(:attrs, attrs)
+            o
+            |> Obj.own_delete(key)
             |> then(fn o2 ->
               # a function's own `name` or `length` that is gone must not reappear as the virtual one
               if o.class == :function and key in ["name", "length"],
@@ -2324,8 +3519,11 @@ defmodule Browser.JS.Interp do
   end
 
   def has_property?({:obj, id}, key) do
-    o = deref(id)
+    # (ToPropertyKey comes first: the `toString` of an object key can change the object,
+    # and it can give an index)
     key_s = to_key(key)
+    key = if is_tuple(key) and elem(key, 0) == :obj, do: key_s, else: key
+    o = deref(id)
 
     cond do
       Map.has_key?(o, :proxy) ->
@@ -2340,7 +3538,7 @@ defmodule Browser.JS.Interp do
           Browser.JS.TypedArrays.numeric_key?(key_s) ->
         false
 
-      o.class == :array and key_s == "length" ->
+      o.class == :array and key_s == "length" and not is_map_key(o, :arguments) ->
         true
 
       match?(%{prim: str} when is_binary(str), o) and is_integer(index(key)) and
@@ -2348,10 +3546,10 @@ defmodule Browser.JS.Interp do
         true
 
       o.class == :array and is_integer(index(key)) ->
-        Map.has_key?(o.items, index(key)) or
+        Elems.has?(o, index(key)) or
           (match?({:obj, _}, o.proto) and has_property?(o.proto, key_s))
 
-      Map.has_key?(o.props, key_s) ->
+      Obj.has_own?(o, key_s) ->
         true
 
       o.class == :function and key_s in ["name", "length", "prototype"] and
@@ -2405,21 +3603,35 @@ defmodule Browser.JS.Interp do
 
   def own_keys(_), do: []
 
+  # The enumerable keys (`Obj.enum_names/1`), with the index keys first. The common case is
+  # a plain object whose keys all start with a character that is not a digit. Such a key
+  # cannot be an array index, so the sort of the index keys has nothing to do, and the keys
+  # are the list as it is (fast path `:has_own`, `Obj.plain_names/1`). A symbol among the
+  # enumerable keys is no plain name, and it goes to the long path, which drops it. The
+  # other classes are clauses of the same `case`, so that they pay no extra call.
   defp own_keys_plain(o) do
-    base = o.keys |> Enum.reverse() |> Enum.filter(&is_binary/1)
-
     case o do
-      %{class: :array} ->
-        attrs = Map.get(o, :attrs, %{})
+      %{class: c} when c != :array and c != :function and not is_map_key(o, :prim) ->
+        names = if Fast.on?(:has_own), do: Obj.plain_names(o)
 
+        if names,
+          do: Fast.shadow(nil, names, own_keys_index_first(o)),
+          else: own_keys_index_first(o)
+
+      # Each element is an own key. An element of an array is always below its length. An
+      # element of an arguments object can be at its length or after it (a write to
+      # `arguments[i]` adds an element and does not change `length`), so the length does
+      # not bound the keys.
+      %{class: :array} ->
         for(
-          i <- o.items |> Map.keys() |> Enum.sort(),
-          i < o.len,
-          Map.get(Map.get(attrs, i, %{}), :e, true),
+          i <- Elems.keys(o),
+          Obj.element_enumerable?(o, i),
           do: Integer.to_string(i)
-        ) ++ base
+        ) ++ Obj.enum_names(o)
 
       %{prim: str} when is_binary(str) ->
+        base = Obj.enum_names(o)
+
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
 
@@ -2427,6 +3639,8 @@ defmodule Browser.JS.Interp do
           Enum.sort_by(ints, &index/1) ++ rest
 
       _ ->
+        base = Obj.enum_names(o)
+
         {ints, rest} =
           Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
 
@@ -2442,20 +3656,46 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The keys of an object that is not an array, a function or a primitive wrapper, with the
+  # index keys first: the last clause of `own_keys_plain/1` for such an object.
+  defp own_keys_index_first(o) do
+    base = Obj.enum_names(o)
+
+    {ints, rest} =
+      Enum.split_with(base, &(is_integer(index(&1)) and index(&1) < 4_294_967_295))
+
+    Enum.sort_by(ints, &index/1) ++ rest
+  end
+
+  @doc """
+  The values of the array at `v` from index 0 to its length - 1, as `Get` reads each one
+  (CreateListFromArrayLike): an accessor element calls its getter, and a hole reads the
+  prototype chain. Only when a prototype can hold an element (`Elems.std_chain?/1` is
+  false) does a hole cost a `get/2`; else it reads `undefined`.
+  """
   def array_list({:obj, id}) do
     o = deref(id)
 
-    for i <- 0..(o.len - 1)//1 do
-      case Map.get(o.items, i, :undefined) do
-        {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
-        v -> v
+    # (a dense record holds no accessor and no hole, so its list is its tuple)
+    if Elems.dense?(o) do
+      Elems.to_list(o)
+    else
+      len = Elems.len(o)
+      chain? = Elems.count(o) != len and not Elems.std_chain?(o)
+
+      for i <- 0..(len - 1)//1 do
+        case Elems.get(o, i, Elems.none()) do
+          {:accessor, g, _} -> if function?(g), do: call(g, {:obj, id}, []), else: :undefined
+          Elems.none() -> if chain?, do: get({:obj, id}, i * 1.0), else: :undefined
+          v -> v
+        end
       end
     end
   end
 
   def set_array_list({:obj, id}, list) do
     o = deref(id)
-    store(id, %{o | items: items_map(list), len: length(list)})
+    store(id, Elems.replace(o, list))
   end
 
   def array?({:obj, id}), do: deref(id).class == :array
@@ -2465,7 +3705,8 @@ defmodule Browser.JS.Interp do
     o = deref(id)
 
     cond do
-      o.class == :array -> array_list(v)
+      o.class == :array and is_map_key(o, :arguments) -> arguments_list(v, o)
+      o.class == :array -> spread_list(v, o)
       o.class in [:map, :set] -> Browser.JS.Collections.entries(o)
       true -> iterate_protocol(v)
     end
@@ -2473,6 +3714,53 @@ defmodule Browser.JS.Interp do
 
   def iterate(s) when is_binary(s), do: Browser.JS.Str.codepoints(s)
   def iterate(v), do: throw_error("TypeError", "#{to_str(v)} is not iterable")
+
+  # The values of the array `o` (at `v`, not an arguments object) for a spread. The spread
+  # uses the iterator protocol, as the spec says, so that a replaced `@@iterator` (own,
+  # of `Array.prototype` or of a subclass) or a replaced `next` of the array iterators
+  # shows. The common case takes no iterator, but only when the result is exactly the
+  # result of the protocol: the iteration is pristine (`array_record_pristine?/1`), no
+  # element is an accessor (a getter can change the array while the iterator runs), and a
+  # hole reads `undefined` because no prototype holds an element (`Elems.std_chain?/1`).
+  @compile {:inline, spread_list: 2}
+  defp spread_list(v, o) do
+    cond do
+      not array_record_pristine?(o) -> iterate_protocol(v)
+      Elems.dense?(o) -> Elems.to_list(o)
+      Elems.any_accessor?(o) -> iterate_protocol(v)
+      Elems.count(o) == Elems.len(o) or Elems.std_chain?(o) -> Elems.to_list(o)
+      true -> iterate_protocol(v)
+    end
+  end
+
+  # The values of the arguments object `o` (at `v`) for a spread. The spread uses the
+  # iterator protocol, as the spec says, so that a change of `length`, of an element or of
+  # the iterator shows. The common case takes no iterator, but only when the result is
+  # exactly the result of the protocol: the own `@@iterator` is `%Array.prototype.values%`
+  # of the realm, the `next` of the array iterators is the built-in one, the own `length`
+  # is a data value that is a whole number, and each index below it holds a data element.
+  # Then the protocol runs no JS code and reads these elements in order.
+  defp arguments_list(v, o) do
+    values = Process.get(:js_arr_values)
+
+    with true <- values != nil and Obj.own_value(o, @iterator_key) == values,
+         true <- array_iterator_next_pristine?(),
+         n when is_number(n) and n >= 0 and n <= 4_294_967_295 <- Obj.own_value(o, "length"),
+         true <- n == trunc(n),
+         {:ok, list} <- Elems.values_below(o, trunc(n)) do
+      list
+    else
+      _ -> iterate_protocol(v)
+    end
+  end
+
+  # Whether the `next` of `%ArrayIteratorPrototype%` is the built-in one.
+  defp array_iterator_next_pristine? do
+    case :erlang.get({:proto, :array_iterator}) do
+      {:obj, aipid} -> Obj.own_value(:erlang.get(aipid), "next") == :erlang.get(:js_arr_next)
+      _ -> false
+    end
+  end
 
   @doc false
   # what `for of` loops over: a list that is known up front (arrays, strings, Map, Set), or an
@@ -2523,10 +3811,7 @@ defmodule Browser.JS.Interp do
 
     cond do
       o.class == :array and array_iteration_pristine?(v) ->
-        {:list,
-         Stream.unfold(0, fn i ->
-           if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
-         end)}
+        {:list, Stream.unfold(0, fn i -> for_of_step(id, v, i) end)}
 
       o.class in [:map, :set] ->
         proto_source(v)
@@ -2537,6 +3822,43 @@ defmodule Browser.JS.Interp do
   end
 
   def for_of_source(v), do: iter_source(v)
+
+  # One step of a for-of loop over the array `v` at `id`: `{element, next index}`, or nil
+  # after the last element. The record is read again at each step, so the loop sees a body
+  # that changes the array. For an array that is not an arguments object, the `length` is
+  # the length of the record (no getter is possible), and an own data element is what the
+  # read of the key gives, so the step reads the element at the integer `i`, with no string
+  # key (fast path `:iter`). A hole or an accessor goes to `get/2`. The test for an
+  # arguments object is defence in depth today: an arguments object has an own
+  # `@@iterator`, so a for-of loop over it does not get to this step.
+  @compile {:inline, for_of_step: 3}
+  defp for_of_step(id, v, i) do
+    if Fast.on?(:iter) do
+      case deref(id) do
+        a when Elems.dense_index?(a, i) ->
+          Fast.shadow(id, {Elems.dense_at(a, i), i + 1}, for_of_step_key(v, i))
+
+        %{class: :array} = a when not is_map_key(a, :arguments) ->
+          if i < Elems.len(a) do
+            case Elems.get(a, i, Elems.none()) do
+              {:accessor, _, _} -> {get(v, i * 1.0), i + 1}
+              Elems.none() -> {get(v, i * 1.0), i + 1}
+              x -> Fast.shadow(id, {x, i + 1}, for_of_step_key(v, i))
+            end
+          end
+
+        _ ->
+          for_of_step_key(v, i)
+      end
+    else
+      for_of_step_key(v, i)
+    end
+  end
+
+  # The step of `for_of_step/3` by the generic read: `length`, then the key as a string.
+  defp for_of_step_key(v, i) do
+    if i < Browser.JS.ArrayGeneric.len(v), do: {get(v, Integer.to_string(i)), i + 1}
+  end
 
   @doc false
   # one step of an iterator: `{:ok, value}` or `:done`
@@ -2596,23 +3918,37 @@ defmodule Browser.JS.Interp do
         result =
           try do
             bind(pat, item, cur, mode)
-            run_body(body, cur, labels)
+            # (a pending call runs before the close of the iterator)
+            run_tail(run_body(body, cur, labels, :fn), cur)
           catch
+            # Only a throw arrives here. An error from `return()` does not replace it, and
+            # a JS throw needs no stack trace.
+            :throw, e ->
+              leave_scope(cur, fns)
+              iter_close(it, true)
+              throw(e)
+
             kind, e ->
               leave_scope(cur, fns)
-              # an error from `return` replaces a return or labeled break, not a throw
-              iter_close(it, not match?({:js_return, _}, e) and not match?({:js_break, _}, e))
+              iter_close(it, true)
               :erlang.raise(kind, e, __STACKTRACE__)
           end
 
         case result do
+          :next ->
+            proto_loop(it, next, {pat, mode, body, env, {:frame, fresh, cur, fns}}, labels)
+
+          # A break, a continue to an outer label and a return are normal exits: an error
+          # from `return()` replaces them, and its result must be an object.
           :break ->
             leave_scope(cur, fns)
             iter_close(it, false)
             :ok
 
-          :next ->
-            proto_loop(it, next, {pat, mode, body, env, {:frame, fresh, cur, fns}}, labels)
+          c ->
+            leave_scope(cur, fns)
+            iter_close(it, false)
+            loop_exit(c)
         end
     end
   end
@@ -2636,24 +3972,41 @@ defmodule Browser.JS.Interp do
         result =
           try do
             bind(pat, item, iter_env, mode)
-            run_body(body, iter_env, labels)
+            # (a pending call runs before the close of the iterator)
+            run_tail(run_body(body, iter_env, labels, loop_mode(scope)), iter_env)
           catch
+            # Only a throw arrives here. An error from `return()` does not replace it, and
+            # a JS throw needs no stack trace.
+            :throw, e ->
+              iter_close(it, true)
+              throw(e)
+
             kind, e ->
-              # an error from `return` replaces a return or labeled break, not a throw
-              iter_close(it, not match?({:js_return, _}, e) and not match?({:js_break, _}, e))
+              iter_close(it, true)
               :erlang.raise(kind, e, __STACKTRACE__)
           end
 
         case result do
+          :next ->
+            proto_loop(it, next, spec, labels)
+
+          # A break, a continue to an outer label and a return are normal exits: an error
+          # from `return()` replaces them, and its result must be an object.
           :break ->
             iter_close(it, false)
             :ok
 
-          :next ->
-            proto_loop(it, next, spec, labels)
+          c ->
+            iter_close(it, false)
+            loop_exit(c)
         end
     end
   end
+
+  # (the old path runs each item in a fresh map scope; a rewritten function passes its
+  # frameless scope or `nil`)
+  defp loop_mode(:fresh), do: :top
+  defp loop_mode(_scope), do: :fn
 
   # anything with a `[Symbol.iterator]` method: call it and pull values until it is done
   @doc false
@@ -2662,11 +4015,70 @@ defmodule Browser.JS.Interp do
   # can be read straight from the list.
   def array_iteration_pristine?({:obj, id}) do
     o = deref(id)
-    key = {:symbol, :iterator, "Symbol.iterator"}
+    o.class == :array and array_record_pristine?(o)
+  end
 
-    o.class == :array and not Map.has_key?(o.props, key) and o.proto == proto(:array) and
-      Map.get(deref(elem(proto(:array), 1)).props, key) == Process.get(:js_arr_values) and
-      Map.get(deref(elem(proto(:array_iterator), 1)).props, "next") == Process.get(:js_arr_next)
+  # `array_iteration_pristine?/1` of the array record `o`: it has no own `@@iterator`, its
+  # prototype is `Array.prototype` (not the prototype of a subclass), the `@@iterator` of
+  # `Array.prototype` is `%Array.prototype.values%`, and the `next` of
+  # `%ArrayIteratorPrototype%` is the built-in one.
+  #
+  # A spread runs this test each time, and the search of a key in the two prototypes and
+  # the read of a process key that is a tuple cost more than the rest of a short spread. So
+  # the process key `:js_arr_iter_pos` keeps the ids of the two prototypes, the `sid` of the
+  # shape of each one, the position of the key in it and the built-in value of the key,
+  # from the last test that found the two values. A shape is immutable and a `sid` is never
+  # given two times in a process, so when the two records still have these shapes, the
+  # values are at these positions, and the test reads them with no search. A record with a
+  # new shape (a new key or a change of attributes) or in dictionary mode takes the search
+  # again. A new heap and a new realm erase the key (`init/1`, `Browser.JS.Collections`),
+  # so the ids are the ids of the prototypes of the realm. The prototypes and the two
+  # built-in values are roots anyway (`:js_arr_values` and `:js_arr_next`), so the
+  # collector does not read the key (`Browser.JS.GC`).
+  @compile {:inline, array_record_pristine?: 1}
+  defp array_record_pristine?(o) do
+    with {apid, s1, p1, values, aipid, s2, p2, next} <- :erlang.get(:js_arr_iter_pos),
+         {:obj, ^apid} <- :erlang.map_get(:proto, o),
+         Obj.fast_record(^s1, v1) <- :erlang.get(apid),
+         Obj.fast_record(^s2, v2) <- :erlang.get(aipid) do
+      # (the root shape of an array, `sid` -1, has no key, and most arrays have it)
+      case o do
+        Obj.fast_record(-1, _) -> true
+        _ -> not Obj.has_own?(o, @iterator_key)
+      end and
+        :erlang.element(p1, v1) == values and :erlang.element(p2, v2) == next
+    else
+      {:obj, _} -> false
+      _ -> array_record_search?(o)
+    end
+  end
+
+  # `array_record_pristine?/1` with a search of the two keys. When the result is true and
+  # the two prototypes are fast, it keeps the positions for the next test.
+  defp array_record_search?(o) do
+    with {:obj, apid} = ap <- :erlang.get({:proto, :array}),
+         {:obj, aipid} <- :erlang.get({:proto, :array_iterator}),
+         true <- not Obj.has_own?(o, @iterator_key) and :erlang.map_get(:proto, o) == ap,
+         apr = :erlang.get(apid),
+         aipr = :erlang.get(aipid),
+         true <-
+           Obj.own_value(apr, @iterator_key) == :erlang.get(:js_arr_values) and
+             Obj.own_value(aipr, "next") == :erlang.get(:js_arr_next) do
+      with {p1, _} <- Obj.fast_slot(apr, @iterator_key),
+           {p2, _} <- Obj.fast_slot(aipr, "next"),
+           s1 = Obj.shape_id(apr),
+           s2 = Obj.shape_id(aipr),
+           do:
+             :erlang.put(
+               :js_arr_iter_pos,
+               {apid, s1, p1, :erlang.get(:js_arr_values), aipid, s2, p2,
+                :erlang.get(:js_arr_next)}
+             )
+
+      true
+    else
+      _ -> false
+    end
   end
 
   @doc false
@@ -2710,8 +4122,16 @@ defmodule Browser.JS.Interp do
 
   # ── calling ────────────────────────────────────────────────
 
-  def call({:obj, id}, this, args) do
-    case deref(id) do
+  def call({:obj, id}, this, args), do: call_obj(id, deref(id), this, args)
+
+  def call(_, _, _), do: throw_error("TypeError", "value is not a function")
+
+  # The call of the function object `o` at heap id `id`. The caller has read `o` already, so
+  # a call site that tests the callee first (`ev/2` for a call) reads the heap only once.
+  # (inline: `call/3` keeps the cost of one local call)
+  @compile {:inline, call_obj: 4}
+  defp call_obj(id, o, this, args) do
+    case o do
       %{class_info: info} ->
         throw_error(
           "TypeError",
@@ -2732,7 +4152,7 @@ defmodule Browser.JS.Interp do
 
       %{class: :function, fun: {:closure, c}, async: true} ->
         tick()
-        Browser.JS.Async.call_closure(with_hoist(id, c), this, args)
+        Browser.JS.Async.call_closure(id, with_hoist(id, c), this, args)
 
       %{class: :function, fun: {:closure, c}} ->
         tick()
@@ -2743,7 +4163,93 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  def call(_, _, _), do: throw_error("TypeError", "value is not a function")
+  @doc false
+  # `new f(...args)` at a site whose callee node is `callee`, for the tree walker and the
+  # compiled code. A plain function takes a short way (fast path `:construct`, step A3): a
+  # function of the compiled code (rewritten, so that it runs on a frame) that is not an
+  # arrow, a method, a generator, an async function, a class, a bound function or a proxy,
+  # and that has an own `prototype` that is an object. The short way reads the record of
+  # the function once, and gives what `construct/2` gives: a new plain object with that
+  # prototype, the constructor run on a frame in the mode `:new`, and the object or the
+  # object that the constructor returns. In the check build the shadow run compares the
+  # prototype with the one that the generic path reads.
+  #
+  # Any other value of `f` takes the generic path here, with the record that the short way
+  # read (`construct_other/5`), so that a class, a built-in constructor or a bound function
+  # does not read and match the record two times. The text of the TypeError names the
+  # callee (`describe/1`), and only an error makes the text.
+  def construct_new({:obj, id} = f, args, callee) do
+    o = :erlang.get(id)
+
+    case if(Fast.on?(:construct), do: plain_ctor(o)) do
+      {c, proto} ->
+        _ = Fast.shadow(nil, proto, plain_ctor_old(f, id))
+        this = {:obj, alloc(Obj.plain_record(class: :object, proto: proto))}
+        tick()
+
+        case run_frame(id, c, this, args, f, :new) do
+          {:obj, _} = result -> result
+          _ -> this
+        end
+
+      nil ->
+        construct_other(f, id, o, args, callee)
+    end
+  end
+
+  def construct_new(_f, _args, callee),
+    do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+
+  # The generic path of `construct_new/3` for the function `f` with the id `id` and the
+  # record `o`: the test of `constructor?/1` and then the work of `construct/3` with no
+  # new target, without its second test of `constructor?/1`.
+  defp construct_other(f, id, o, args, callee) do
+    unless constructor?(f),
+      do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+
+    case o do
+      %{proxy: _} -> Browser.JS.Proxy.construct(f, args, f)
+      _ -> construct_bound(f, id, args, nil, f)
+    end
+  end
+
+  # The closure and the prototype of the record `o` of a plain function (see
+  # `construct_new/3`), or `nil`. These are the cases of `constructor?/1`,
+  # `construct_bound/5` and `construct_plain/5` that run the body of a closure on a frame
+  # with the prototype of its own `prototype` key. It is inline, so that a record of any
+  # other function costs no call.
+  @compile {:inline, plain_ctor: 1}
+  defp plain_ctor(
+         %{
+           class: :function,
+           fun: {:closure, %{info: %Info{rewritten: true}, mode: m, name: n} = c}
+         } =
+           o
+       )
+       when m not in [:arrow, :arrow_expr] and not (is_tuple(n) and elem(n, 0) == :method) and
+              not is_map_key(o, :generator) and not is_map_key(o, :async) and
+              not is_map_key(o, :bound) and not is_map_key(o, :class_info) and
+              not is_map_key(o, :no_new) and not is_map_key(o, :proxy) and
+              not is_map_key(o, :proxy_constructor) and not is_map_key(o, :proxy_ctor) do
+    Obj.own_case o, "prototype" do
+      {:ok, {:obj, _} = p} -> {c, p}
+      _ -> nil
+    end
+  end
+
+  defp plain_ctor(_o), do: nil
+
+  # The old path of `plain_ctor/1` for the shadow run: the tests of `construct/3` and the
+  # prototype that `construct_plain/5` reads. It runs no JavaScript code, because the
+  # function has an own `prototype` that is a data property.
+  defp plain_ctor_old(f, id) do
+    o = deref(id)
+
+    if constructor?(f) and not is_map_key(o, :proxy) and Map.get(o, :bound) == nil and
+         Map.get(o, :class_info) == nil and not Map.get(o, :no_new, false),
+       do: get(f, "prototype"),
+       else: :not_plain
+  end
 
   def construct(f, args, new_target \\ nil)
 
@@ -2788,7 +4294,7 @@ defmodule Browser.JS.Interp do
         %{fun: {:closure, %{mode: m}}} when m in [:arrow, :arrow_expr] -> false
         %{fun: {:closure, %{name: {:method, _}}}} -> false
         %{fun: {:closure, _}, async: true} -> false
-        %{fun: {:native, _, _}, props: props} -> Map.has_key?(props, "prototype")
+        %{fun: {:native, _, _}} -> Obj.has_own?(o, "prototype")
         _ -> true
       end
   end
@@ -2956,13 +4462,6 @@ defmodule Browser.JS.Interp do
       {:obj, _} = p -> p == target or walk_protos(p, target)
       _ -> false
     end
-  end
-
-  @doc false
-  def tick do
-    n = pget(:js_steps) - 1
-    if n < 0, do: throw(:js_limit)
-    :erlang.put(:js_steps, n)
   end
 
   @doc false
@@ -3137,7 +4636,7 @@ defmodule Browser.JS.Interp do
     free_scope(scope, before)
 
     case result do
-      {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+      {:tail, f, this, args} -> tail_loop(f, this, args)
       _ -> result
     end
   end
@@ -3162,7 +4661,7 @@ defmodule Browser.JS.Interp do
         free_scope(scope, before)
 
         case result do
-          {:js_tailcall, f, this, args} -> tail_loop(f, this, args)
+          {:tail, f, this, args} -> tail_loop(f, this, args)
           _ -> result
         end
 
@@ -3173,14 +4672,28 @@ defmodule Browser.JS.Interp do
 
   defp tail_loop(f, this, args), do: call(f, this, args)
 
-  defp no_tail(fun) do
-    old = Process.put(:js_tail, false)
+  # A pending tail call that must not leave this statement: the call runs here, inside the
+  # protection of the statement (a `catch`, a `finally`, the close of an iterator or a
+  # disposal), and the statement sees its value as a plain return. These run sites are
+  # the places where the resolver marks every `return` as `:plain`, so only the old path
+  # gives a `{:tail}` to them.
+  @compile {:inline, run_tail: 2}
+  defp run_tail({:tail, f, t, a}, env) do
+    if @check, do: check_run_tail(env)
+    {:ret, call(f, t, a)}
+  end
 
-    try do
-      fun.()
-    after
-      Process.put(:js_tail, old)
-    end
+  defp run_tail(c, _env), do: c
+
+  @doc false
+  # Check mode only (K3 of step 3): the frame path never needs a run site, because the
+  # resolver marks every return under one as `:plain`. The env of both paths is a heap id,
+  # so the test looks at the stored value: a frame is a tuple.
+  def check_run_tail(env) do
+    if is_integer(env) and is_tuple(:erlang.get(env)),
+      do: check_fail("a pending tail call at a run site of the frame #{env}")
+
+    :ok
   end
 
   @doc false
@@ -3190,14 +4703,21 @@ defmodule Browser.JS.Interp do
     if @check and match?(%{info: %Info{rewritten: true}}, c),
       do: check_fail("a rewritten function on the old call path (run_closure_scope)")
 
-    depth = pget(:js_depth)
+    if @check,
+      do: check_oracle(c.name, :call, fn -> closure_scope(c, this, args, extra) end),
+      else: closure_scope(c, this, args, extra)
+  end
+
+  # (the old call path of `run_closure_scope/4`, without the check-mode oracle)
+  @compile {:inline, closure_scope: 4}
+  defp closure_scope(c, this, args, extra) do
+    below = :erlang.get(:js_stack)
+    depth = depth_of(below)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
-    :erlang.put(:js_depth, depth + 1)
-    stack = Process.get(:js_stack, [])
-    pos = Process.get(:js_pos)
-    :erlang.put(:js_stack, [{c.name, pos} | stack])
-    # only a strict function's `return f()` is a tail call (and a constructor's never is)
-    old_tail = Process.put(:js_tail, extra == [] and strict?(c))
+    pos = pget(:js_pos)
+    # The old path pushes the same cell as `run_frame/6`, so both paths share one chain and
+    # one depth (step 2f). The `after` block restores the chain and the position.
+    :erlang.put(:js_stack, [{c.name, pos, depth + 1} | below])
 
     try do
       {scope, body_scope} = call_frame(c, this, args, extra)
@@ -3208,33 +4728,45 @@ defmodule Browser.JS.Interp do
             ev(c.body, body_scope)
 
           _ ->
-            try do
-              case exec_fn(c.body, body_scope) do
-                {:ret, v} -> v
-                :ok -> :undefined
-              end
-            catch
-              {:js_return, v} -> v
-              {:js_tail, f, t, a} -> {:js_tailcall, f, t, a}
+            case exec_fn(c.body, body_scope) do
+              {:ret, v} ->
+                v
+
+              :ok ->
+                :undefined
+
+              # Only a strict function that is not a constructor gives the call back to
+              # `tail_loop/3`. Any other function makes the call here, while its own cell
+              # is on the chain, so its depth and its line in `Error.stack` stay.
+              {:tail, f, t, a} = tc ->
+                if extra == [] and strict?(c), do: tc, else: call(f, t, a)
+
+              other ->
+                bad_body_completion(other, c.name)
             end
         end
 
       {result, scope}
     after
-      Process.put(:js_tail, old_tail)
-      :erlang.put(:js_depth, depth)
-      :erlang.put(:js_stack, stack)
+      :erlang.put(:js_stack, below)
       :erlang.put(:js_pos, pos)
     end
   end
 
   # A call of a rewritten function (step 2b). The frame is one tuple
-  # `{parent_id, info, nil, call_pos, root_id, params..., hidden..., template...}` built
-  # before the body runs and erased in `after` unless a closure made during the call can
-  # hold its id. `:js_depth`, `:js_stack` and `:js_pos` are kept and restored as the old
-  # path does, until step 2f. The tail flag is never written: the resolver marked every
-  # return inside the function. The function does not tick: its callers tick as they do
-  # on the old path, so the step counts stay the same.
+  # `{parent_id, info, chain, call_pos, root_id, params..., hidden..., template...}`. It is
+  # built before the body runs. When the call ends, `leave/5` erases it, unless a closure
+  # made during the call can hold its id. The resolver marked every return inside the
+  # function, so a `{:tail}` completion comes only from a tail site. The function does not
+  # tick: its callers tick as they do on the old path, so the step counts stay the same.
+  #
+  # The call stack (step 2f): `:js_stack` is a chain of cells, innermost first. A call
+  # pushes `{name, call_pos, depth}`, and so does an async call and an async body that
+  # runs again (see `Browser.JS.Async`). The depth of the current call is in the head cell,
+  # so there is no separate counter. A call is refused with a RangeError when the depth
+  # of its caller is `@max_depth`, before it pushes. In check mode the frame keeps its own
+  # chain in element 3. `:js_stack` gets the chain just before the `try`. `stack_string/1`
+  # makes the text of `Error.stack` from the chain only when an error needs it.
   #
   # `nt` is the value of `new.target`, and `mode` (step 2d) says how the call came:
   #
@@ -3242,19 +4774,51 @@ defmodule Browser.JS.Interp do
   # - `:new`: a call through `new`. The callee of a tail site runs inside the frame, so
   #   the constructor keeps its line in `Error.stack`.
   # - `:ctor`: a derived class constructor. It runs as `:new` and gives back
-  #   `{value, this}`: the `this` slot is read inside the `try`, before the frame is freed,
-  #   because `super()` writes it during the body.
+  #   `{value, this}`: the `this` slot is read before the frame is freed, because
+  #   `super()` writes it during the body.
   defp run_frame(id, c, this, args, nt, mode) do
-    depth = pget(:js_depth)
+    c = with_code(id, c)
+
+    result =
+      if @check,
+        do: check_oracle(c.name, :call, fn -> frame_call(id, c, this, args, nt, mode) end),
+        else: frame_call(id, c, this, args, nt, mode)
+
+    case result do
+      {:tail, f, t, a} -> tail_loop(f, t, a)
+      _ -> result
+    end
+  end
+
+  # (the call of `run_frame/6` up to its tail call, without the check-mode oracle; a tail
+  # call in mode `:call` runs after the frame and the oracle have left the stack)
+  @compile {:inline, frame_call: 6}
+  defp frame_call(id, c, this, args, nt, mode) do
+    below = :erlang.get(:js_stack)
+    depth = depth_of(below)
     if depth >= @max_depth, do: throw_error("RangeError", "Maximum call stack size exceeded")
-    :erlang.put(:js_depth, depth + 1)
-    stack = Process.get(:js_stack, [])
-    pos = Process.get(:js_pos)
-    :erlang.put(:js_stack, [{c.name, pos} | stack])
+    pos = pget(:js_pos)
+    chain = [{c.name, pos, depth + 1} | below]
     info = c.info
 
+    # Only check mode reads the chain in element 3 (C5). In a normal build the element
+    # stays `nil`: a frame that a closure keeps would otherwise keep every cell of its
+    # callers too, which the collector does not count.
+    link = if @check, do: chain
+
+    # A compiled function can have a frame maker (step 5, `Browser.JS.Compile`), which
+    # knows the shape of the frame and gives the same tuple as `frame_slots/5`. Check mode
+    # uses the maker too, and compares its tuple with the tuple of `frame_slots/5` (S6).
     tuple =
-      List.to_tuple([c.scope, info, nil, pos, c.root | frame_slots(c, id, this, args, nt)])
+      case c do
+        %{mk: mk} when mk != nil ->
+          tuple = mk.(c.scope, link, pos, c.root, this, args)
+          if @check, do: check_maker(tuple, c, id, this, args, nt)
+          tuple
+
+        _ ->
+          List.to_tuple([c.scope, info, link, pos, c.root | frame_slots(c, id, this, args, nt)])
+      end
 
     if @check, do: check_frame(tuple, info, id, mode)
     frame = alloc(tuple)
@@ -3263,59 +4827,193 @@ defmodule Browser.JS.Interp do
     # closure count decides, as `free_scope/2` does on the old path. A leaf (`free:
     # :always`) makes no closure and skips the read.
     fns = if info.free == :counter, do: :erlang.get(:js_fns)
+    # The chain goes in last, just before the `try`, so that no throw can leave it pushed.
+    :erlang.put(:js_stack, chain)
 
+    # One `try` covers the parameters and the body. A return and a tail call are
+    # completions (step 3), so only a JS throw, the step limit or an engine error comes to
+    # the `catch`. The `try` stays, because it costs no time when nothing is thrown (the
+    # step 3 design, section 4) and it leaves the frame on every throw.
     result =
       try do
         if info.params != :plain, do: bind_params_list(c.params, args, frame)
         enter_body(frame, info, id)
         if @check, do: check_hoisted(frame, info)
 
-        value =
-          case c.mode do
-            :arrow_expr ->
-              ev(c.body, frame)
+        case body_value(c, frame) do
+          # A plain call gives the pending call back after `leave/5`. `run_frame/6` then
+          # calls `tail_loop/3`, so the Elixir stack and the chain do not grow.
+          {:tail, _, _, _} = t when mode == :call ->
+            if @check, do: check_tail_sites(info, mode)
+            t
 
-            _ ->
-              try do
-                case exec_fn(c.body, frame) do
-                  {:ret, v} -> v
-                  :ok -> :undefined
-                end
-              catch
-                {:js_return, v} ->
-                  v
+          # Under `new` the callee runs here, inside the frame and this `try`. The
+          # constructor keeps its line in `Error.stack`, and a throw from the callee
+          # leaves the frame through the `catch` below.
+          {:tail, f, t, a} ->
+            if @check, do: check_tail_sites(info, mode)
+            ctor_value(mode, call(f, t, a), frame, info)
 
-                {:js_tail, f, t, a} ->
-                  case mode do
-                    :call ->
-                      {:js_tailcall, f, t, a}
+          v ->
+            ctor_value(mode, v, frame, info)
+        end
+      catch
+        # A JS throw, the step limit or an engine error leaves the frame here. The value
+        # is thrown again, so the cost is the same as the rethrow of an `after` block.
+        :throw, v ->
+          leave(frame, info, fns, below, pos)
+          throw(v)
 
-                    _ ->
-                      if @check and mode == :ctor,
-                        do: check_fail("a tail call in the constructor #{check_name(info)}")
-
-                      call(f, t, a)
-                  end
-              end
-          end
-
-        if mode == :ctor,
-          do: {value, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))},
-          else: value
-      after
-        # (the argument map test stays here, so a frame without one pays only `free/1`)
-        if fns == nil or :erlang.get(:js_fns) == fns,
-          do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
-
-        :erlang.put(:js_depth, depth)
-        :erlang.put(:js_stack, stack)
-        :erlang.put(:js_pos, pos)
+        kind, reason ->
+          leave(frame, info, fns, below, pos)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
 
-    case result do
-      {:js_tailcall, f, t, a} -> tail_loop(f, t, a)
-      _ -> result
+    leave(frame, info, fns, below, pos)
+    result
+  end
+
+  # Check mode only (S6 of step 5): the tuple of a frame maker equals the tuple that the
+  # frame builder of the tree makes for the same call. The builder gets the value of the
+  # `this` slot of the maker's tuple, because a sloppy `this` that is a primitive boxes
+  # into a new object, and a second box would change the heap ids. The boxing of a
+  # sloppy `this` gives an object, and an object stays as it is, so the test still sees a
+  # maker that does not box.
+  defp check_maker(tuple, c, id, this, args, nt) do
+    info = c.info
+
+    this =
+      case info.hidden do
+        [:this] -> :erlang.element(6 + info.nparams, tuple)
+        _ -> this
+      end
+
+    tree =
+      List.to_tuple([
+        c.scope,
+        info,
+        :erlang.element(3, tuple),
+        :erlang.element(4, tuple),
+        c.root | frame_slots(c, id, this, args, nt)
+      ])
+
+    if tree != tuple,
+      do:
+        check_fail(
+          "the frame maker of #{check_name(info)} gives #{inspect(tuple)}, not #{inspect(tree)}"
+        )
+
+    :ok
+  end
+
+  # The closure record with its compiled code (step 5). Every entry to a sync frame
+  # (`run_closure/4`, `tail_loop/3`, `new` and the class constructors, and the call fast
+  # path of `ev/2`) comes through `run_frame/6`, so the first call of a function object
+  # is found here: its record has no `code` key yet. `nil` code means that the function
+  # does not compile, and the tree walker runs it.
+  @compile {:inline, with_code: 2}
+  defp with_code(_id, %{code: _} = c), do: c
+
+  # (with the switch off, the record stays as it is, so that `JS_COMPILE=0` does the work
+  # of the tree walker only and is a true baseline for the A/B runs)
+  defp with_code(id, c) do
+    if :erlang.get(:js_compile) == true, do: first_call(id, c), else: c
+  end
+
+  # The first call of a function object: the code comes from the cache or the compiler,
+  # and goes into the closure record in the heap, so that the next calls find it there.
+  # The record is read again, because the call that got `c` can have changed the object
+  # (a `home` or a property) since. The body of a function object never changes, so the
+  # code of `c` is the code of the record.
+  defp first_call(id, c) do
+    {code, mk} =
+      case Browser.JS.Compile.code(c) do
+        nil -> {nil, nil}
+        code_and_maker -> code_and_maker
+      end
+
+    case :erlang.get(id) do
+      %{fun: {:closure, now}} = o ->
+        :erlang.put(id, %{o | fun: {:closure, Map.merge(now, %{code: code, mk: mk})}})
+
+      _ ->
+        :ok
     end
+
+    Map.merge(c, %{code: code, mk: mk})
+  end
+
+  # The value of the body of a frame call: an arrow with an expression body gives the
+  # value of the expression, and a body that ends without `return` gives `undefined`. A
+  # tail site gives the pending call `{:tail, f, this, args}`, which no JS value can be.
+  # Compiled code (step 5) gives the same value or completion as the tree.
+  # (the two clauses repeat the `case` of the completion: an inline function inside an
+  # inline function stays a call, which would cost one reduction per JS call)
+  @compile {:inline, body_value: 2}
+  defp body_value(%{code: code} = c, frame) when code != nil do
+    case c.mode do
+      :arrow_expr ->
+        code.(frame)
+
+      _ ->
+        case code.(frame) do
+          {:ret, v} -> v
+          :ok -> :undefined
+          {:tail, _, _, _} = t -> t
+          other -> bad_body_completion(other, c.name)
+        end
+    end
+  end
+
+  defp body_value(c, frame) do
+    case c.mode do
+      :arrow_expr ->
+        ev(c.body, frame)
+
+      _ ->
+        case fbody(c.body, frame) do
+          {:ret, v} -> v
+          :ok -> :undefined
+          {:tail, _, _, _} = t -> t
+          other -> bad_body_completion(other, c.name)
+        end
+    end
+  end
+
+  # Check mode only (K2 and K3 of step 3): a pending tail call comes only from a function
+  # with a tail site, and never from a derived class constructor, which has none.
+  defp check_tail_sites(info, mode) do
+    if info.tail_sites == 0,
+      do: check_fail("a tail call from #{check_name(info)}, which has no tail site")
+
+    if mode == :ctor, do: check_fail("a tail call in the constructor #{check_name(info)}")
+    :ok
+  end
+
+  # (K2 of step 3) A function body completes normally or with a return. A break or a
+  # continue cannot leave it, because the parser refuses one without a target.
+  defp bad_body_completion(c, name),
+    do: check_fail("the body of #{inspect(name)} completed with #{inspect(c)}")
+
+  # A derived class constructor gives back `{value, this}`. The `this` slot is read while
+  # the frame is live, because `super()` writes it during the body.
+  @compile {:inline, ctor_value: 4}
+  defp ctor_value(:ctor, v, frame, info),
+    do: {v, :erlang.element(:erlang.map_get(:this, info.slots), :erlang.get(frame))}
+
+  defp ctor_value(_mode, v, _frame, _info), do: v
+
+  # The end of a frame call: the frame is erased unless a closure made during the call can
+  # hold its id, and the caller's chain and position come back. The chain holds no frame
+  # id, so the order of the erase and the restore does not matter.
+  @compile {:inline, leave: 5}
+  defp leave(frame, info, fns, below, pos) do
+    # (the argument map test stays here, so a frame without one pays only `free/1`)
+    if fns == nil or :erlang.get(:js_fns) == fns,
+      do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
+    :erlang.put(:js_stack, below)
+    :erlang.put(:js_pos, pos)
   end
 
   @doc false
@@ -3324,11 +5022,120 @@ defmodule Browser.JS.Interp do
   def run_class_frame(id, c, this, args, nt, mode) when mode in [:new, :ctor],
     do: run_frame(id, c, this, args, nt, mode)
 
+  @doc false
+  # The frame of an async function, an async arrow, a generator or an async generator (step
+  # 2e). It is built as `run_frame/6` builds a frame, but the body does not run here: the CPS
+  # evaluator in `Browser.JS.Async` runs it later and can suspend it. So nothing here frees
+  # the frame, except a throw from a parameter, after which no body code can run.
+  # `frame_done/2` frees it when the body has ended. The entry does not push a cell on
+  # `:js_stack`, and element 3 of the frame is `nil`, because the body can run again after
+  # the call has returned, under another chain. `Browser.JS.Async` pushes the cell of an
+  # async body each time that the body runs, so that it counts for the depth and prints a
+  # line in `Error.stack`.
+  # Returns the frame id and the closure count at entry.
+  def enter_frame(id, c, this, args) do
+    info = c.info
+
+    t =
+      List.to_tuple([
+        c.scope,
+        info,
+        nil,
+        :erlang.get(:js_pos),
+        c.root | frame_slots(c, id, this, args, :undefined)
+      ])
+
+    if @check, do: check_frame(t, info, id, :suspend)
+    frame = alloc(t)
+    # The count is read before the defaults run, because a default can make a closure.
+    fns = :erlang.get(:js_fns)
+
+    try do
+      if info.params != :plain, do: bind_params_list(c.params, args, frame)
+      enter_body(frame, info, id)
+      if @check, do: check_hoisted(frame, info)
+    catch
+      k, e ->
+        frame_done(frame, fns)
+        :erlang.raise(k, e, __STACKTRACE__)
+    end
+
+    {frame, fns}
+  end
+
+  @doc false
+  # The body of a frame from `enter_frame/4` has ended, so no continuation of it can run
+  # again, and only a closure can still hold the frame. The frame is freed when the
+  # function makes no closures, or when no closure was made since the entry (the counter
+  # rule of step 2c). In all other cases the collector takes it later, as it takes a call
+  # scope of the old path.
+  def frame_done(frame, fns) do
+    if @check, do: check_done_once(frame)
+    info = :erlang.element(2, :erlang.get(frame))
+
+    if not info.makes_closures or :erlang.get(:js_fns) == fns,
+      do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+
+    :ok
+  end
+
+  @doc false
+  # The scope of a statement in a CPS body in frame mode. A frameless scope (or `nil`) resets
+  # its TDZ slots and makes its functions in `env`, and the statement runs in `env`. A
+  # framed scope gets a block frame, which the statement then uses. The CPS evaluator never
+  # frees a block frame early, because each abrupt continuation would then need cleanup
+  # code; the collector takes it, as it takes the CPS map scopes of the old path.
+  def cps_enter(env, sc) when frameless(sc) do
+    enter_frameless(env, sc)
+    env
+  end
+
+  def cps_enter(env, sc), do: enter_scope(env, sc)
+
+  @doc false
+  # The binding of a `using` declaration in a CPS body in frame mode: the slot of the frame
+  # takes the value, because a frame cannot take a new name (`declare/4`).
+  def using_bind(env, {:slot, 0, i, _name}, v), do: slot_put(env, i, v)
+
+  @doc false
+  # Check mode: a CPS body resumes on a frame that is live and whose body has not ended.
+  # `nil` is the frame of an old-path body or of a small context with no frame.
+  def check_resume(nil), do: :ok
+
+  def check_resume(frame) do
+    if @check do
+      check_live(frame)
+
+      if :erlang.get({:js_cps_done, frame}) == true,
+        do: check_fail("a resume after frame_done of #{check_name(frame_rec(frame))}")
+    end
+
+    :ok
+  end
+
+  # The record of a frame gives its name to a check-mode message. A tombstone has no
+  # record, so it gives a placeholder.
+  defp frame_rec(frame) do
+    case :erlang.get(frame) do
+      f when is_tuple(f) and tuple_size(f) >= 5 -> :erlang.element(2, f)
+      _ -> %{kind: :unknown}
+    end
+  end
+
+  # Check mode: `frame_done/2` runs once for each frame. The process key stays after the
+  # free, so a second call fails also when the first call kept the frame.
+  defp check_done_once(frame) do
+    check_live(frame)
+
+    if :erlang.put({:js_cps_done, frame}, true) == true,
+      do: check_fail("a second frame_done of #{check_name(frame_rec(frame))}")
+  end
+
   # Frees a function frame on return. A frame that built a mapped arguments object first
   # detaches the object: it takes away `mapped` and `map_scope`, because `put` tests the
   # first and `sync_param` reads the second. Nobody can see the detach. Without a closure
-  # no code can read a parameter after the return, and the object's `items` already hold
-  # the values of the mapped parameters. Only a sloppy function with plain parameters has
+  # no code can read a parameter after the return, and the elements of the object already
+  # hold the values of the mapped parameters. Only a sloppy function with plain parameters has
   # an `argmap`, so every other frame pays one clause match.
   defp free_frame(frame, %Info{slots: %{args: i}}) do
     case :erlang.element(i, :erlang.get(frame)) do
@@ -3359,9 +5166,12 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp plain_slots(_args, 0, rest), do: rest
-  defp plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
-  defp plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
+  # It is public because the frame makers of the closure compiler (`Browser.JS.Compile`)
+  # call it.
+  @doc false
+  def plain_slots(_args, 0, rest), do: rest
+  def plain_slots([a | args], n, rest), do: [a | plain_slots(args, n - 1, rest)]
+  def plain_slots([], n, rest), do: [:undefined | plain_slots([], n - 1, rest)]
 
   # The values of the hidden slots at entry, in the order of `info.hidden`:
   #
@@ -3467,17 +5277,27 @@ defmodule Browser.JS.Interp do
 
   # a generator or async function's `prototype` is its own (or none), never the one its kind's
   # prototype object carries
-  defp function_get(id, %{props: props} = o, "prototype")
+  defp function_get(id, o, "prototype")
        when (is_map_key(o, :generator) or is_map_key(o, :async)) and
-              not is_map_key(props, "prototype"),
+              not Obj.has_own?(o, "prototype"),
        do: function_prop(id, o, "prototype")
 
   # the lazily made own `prototype` shadows anything the prototype chain has
-  defp function_get(id, %{props: props} = o, "prototype")
-       when not is_map_key(props, "prototype") do
+  defp function_get(id, o, "prototype") when not Obj.has_own?(o, "prototype") do
     case function_prop(id, o, "prototype") do
       :undefined -> function_get_chain(id, o, "prototype")
       p -> p
+    end
+  end
+
+  # The virtual own `name` and `length` shadow the prototype chain, as an own key does,
+  # until a `delete` puts them in `:gone`. (a record without a name or a length of its kind
+  # gives `undefined` from `function_prop/3`, and then the chain is read)
+  defp function_get(id, o, key)
+       when (key == "name" or key == "length") and not Obj.has_own?(o, key) do
+    case if(key in Map.get(o, :gone, []), do: :undefined, else: function_prop(id, o, key)) do
+      :undefined -> function_get_chain(id, o, key)
+      v -> v
     end
   end
 
@@ -3495,7 +5315,7 @@ defmodule Browser.JS.Interp do
             end
 
           # `f.prototype = undefined` is a value, not a missing property
-          key in ["name", "length", "prototype"] and Map.has_key?(o.props, key) ->
+          key in ["name", "length", "prototype"] and Obj.has_own?(o, key) ->
             :undefined
 
           true ->
@@ -3622,15 +5442,6 @@ defmodule Browser.JS.Interp do
     rewritten? = match?(%Info{rewritten: true}, info)
     named? = named? and is_binary(name) and mode == false
 
-    # Functions of levels 1 to 3 can run on a frame now. A rewritten function of a higher
-    # level needs suspended frames (step 2e), so it must stop here with a clear error.
-    if rewritten? and info.level > 3,
-      do:
-        raise(
-          ArgumentError,
-          "resolve level #{info.level} functions cannot run yet; use :off, :info, 1, 2 or 3"
-        )
-
     # (a self slot exists only for a named function expression; a parameter or a
     # declaration of the same name shadows the self name, which then has no slot)
     if @check, do: check_closure_env(env)
@@ -3656,16 +5467,6 @@ defmodule Browser.JS.Interp do
     # that a closure still holds.
     :erlang.put(:js_fns, pget(:js_fns) + 1)
 
-    closure = %{
-      name: name,
-      params: params,
-      body: body,
-      mode: mode,
-      scope: env,
-      src: src,
-      info: info
-    }
-
     closure =
       if rewritten? do
         # The frame of a call needs the root scope of the closure's own chain (the realm
@@ -3677,23 +5478,50 @@ defmodule Browser.JS.Interp do
         if @check and not match?(%{parent: nil}, :erlang.get(root)),
           do: check_fail("the root of #{inspect(name)} is #{inspect(root)}, no global scope")
 
-        Map.merge(closure, %{
-          root: root,
-          nnames: info.size - 5 - length(info.hidden) - length(info.template)
-        })
+        nnames = info.size - 5 - length(info.hidden) - length(info.template)
+
+        # A function whose body compiled already (step 5) gives its code to each new
+        # function object, so that the first call of the object does not read the cache.
+        # The key and the value are those of `Browser.JS.Compile`. (each branch builds its
+        # map at once: a merge would cost one more call per function object)
+        case :erlang.get({:jsc, info.uid}) do
+          {code, mk} ->
+            %{
+              name: name,
+              params: params,
+              body: body,
+              mode: mode,
+              scope: env,
+              src: src,
+              info: info,
+              root: root,
+              nnames: nnames,
+              code: code,
+              mk: mk
+            }
+
+          _ ->
+            %{
+              name: name,
+              params: params,
+              body: body,
+              mode: mode,
+              scope: env,
+              src: src,
+              info: info,
+              root: root,
+              nnames: nnames
+            }
+        end
       else
-        closure
+        %{name: name, params: params, body: body, mode: mode, scope: env, src: src, info: info}
       end
 
     fun =
       {:obj,
-       alloc(%{
-         class: :function,
-         fun: {:closure, closure},
-         props: %{},
-         keys: [],
-         proto: proto(:function)
-       })}
+       alloc(
+         Obj.function_record(class: :function, fun: {:closure, closure}, proto: proto(:function))
+       )}
 
     if named? and env != nil do
       declare(env, name, fun)
@@ -3729,9 +5557,12 @@ defmodule Browser.JS.Interp do
   # (a plain call): `(function () { this.x = 1 })()` sets a global. Without a global `this`
   # (no page) nothing changes. The first argument is the strictness of the function: a
   # rewritten closure never goes through `with_hoist`, so it has no `strict?` key to match.
-  defp sloppy_this(true, this), do: this
+  # It is public because the frame makers of the closure compiler (`Browser.JS.Compile`)
+  # call it.
+  @doc false
+  def sloppy_this(true, this), do: this
 
-  defp sloppy_this(false, this) do
+  def sloppy_this(false, this) do
     cond do
       this in [:undefined, :null] ->
         case deref(global()) do
@@ -3772,7 +5603,9 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp ev_id({:id, name}, env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def ev_id({:id, name}, env) do
     case lookup_var(env, name) do
       {:ok, :undefined} ->
         # a binding that left the `with` object while its unscopables were read is a missing
@@ -3839,13 +5672,22 @@ defmodule Browser.JS.Interp do
   end
 
   # The unmapped part of an arguments object, which both paths build: an array of the
-  # arguments with `Object.prototype`, its `callee` and a hidden `Symbol.iterator`.
+  # arguments with `Object.prototype`, and its hidden own properties in the order of the
+  # spec: `length`, `Symbol.iterator`, then `callee`. The record is made in one write, and
+  # only the thrower accessor of `callee` is a second write.
   defp arguments_object(args, callee) do
-    {:obj, aid} = a = new_array(args)
-    store(aid, deref(aid) |> Map.put(:arguments, true) |> Map.put(:proto, proto(:object)))
+    len = length(args)
+
+    o =
+      Obj.record(class: :array, proto: proto(:object), arguments: true)
+      |> Elems.put_args(args)
+      |> Obj.put_hidden("length", len * 1.0)
+      |> Obj.put_hidden(@iterator_key, arguments_iterator())
 
     case callee do
       {:thrower, thrower} ->
+        a = {:obj, alloc(o)}
+
         Browser.JS.Props.define_accessor(a, "callee",
           get: thrower,
           set: thrower,
@@ -3853,15 +5695,24 @@ defmodule Browser.JS.Interp do
           configurable: false
         )
 
+        a
+
       {:obj, _} = f ->
-        put_hidden(a, "callee", f)
+        {:obj, alloc(Obj.put_hidden(o, "callee", f))}
 
       nil ->
-        :ok
+        {:obj, alloc(o)}
     end
+  end
 
-    put_hidden(a, {:symbol, :iterator, "Symbol.iterator"}, get(proto(:array), "values"))
-    a
+  # The `@@iterator` of a new arguments object: `%Array.prototype.values%` of the realm,
+  # also when a script replaced `Array.prototype.values`. Before the realm has it (no
+  # `Browser.JS.Collections` yet), the value of the property is the only one there is.
+  defp arguments_iterator do
+    case Process.get(:js_arr_values) do
+      nil -> get(proto(:array), "values")
+      values -> values
+    end
   end
 
   # Builds the arguments object of a frame (step 2d) into slot `i` and gives it back. `fid`
@@ -3892,15 +5743,12 @@ defmodule Browser.JS.Interp do
     else
       o = deref(aid)
 
-      items =
-        Enum.reduce(mapped, o.items, fn {k, _}, acc ->
-          Map.put(acc, k, :erlang.element(@frame_base + k, f))
+      o =
+        Enum.reduce(mapped, o, fn {k, _}, acc ->
+          Elems.put_arg(acc, k, :erlang.element(@frame_base + k, f))
         end)
 
-      store(
-        aid,
-        o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, frame)
-      )
+      store(aid, o |> Map.put(:mapped, mapped) |> Map.put(:map_scope, frame))
 
       t = :erlang.get(frame)
 
@@ -3961,18 +5809,15 @@ defmodule Browser.JS.Interp do
       if mapped != %{} do
         o = deref(aid)
 
-        items =
-          Enum.reduce(mapped, o.items, fn {idx, name}, acc ->
+        o =
+          Enum.reduce(mapped, o, fn {idx, name}, acc ->
             case scope.vars do
-              %{^name => v} -> Map.put(acc, idx, v)
+              %{^name => v} -> Elems.put_arg(acc, idx, v)
               _ -> acc
             end
           end)
 
-        store(
-          aid,
-          o |> Map.put(:items, items) |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner)
-        )
+        store(aid, o |> Map.put(:mapped, mapped) |> Map.put(:map_scope, owner))
 
         declare(owner, :argmap, {aid, names})
       end
@@ -4177,7 +6022,11 @@ defmodule Browser.JS.Interp do
 
   @doc "Runs a whole program in the global scope; returns the completion value."
   def run_program({:program, stmts}, script? \\ false) do
-    :erlang.put(:js_last, :undefined)
+    # Global code can run inside a JS call (the Function constructor, `$262.evalScript`).
+    # It must not change the completion value of the code that called it, so the old value
+    # comes back at the end. Since step 3 a rewritten function writes no completion value
+    # that could hide such a leak.
+    caller_last = :erlang.put(:js_last, :undefined)
     scope = global()
 
     if script? do
@@ -4194,11 +6043,12 @@ defmodule Browser.JS.Interp do
 
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
+    top_completion(exec_list(stmts, scope))
     # (the process dictionary reports a stored :undefined as missing, hence the default; the
     # microtasks run after the script and must not change its completion value)
     result = Process.get(:js_last, :undefined)
     Browser.JS.Promise.run_microtasks()
+    :erlang.put(:js_last, caller_last)
     result
   end
 
@@ -4234,20 +6084,20 @@ defmodule Browser.JS.Interp do
     fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
     {:obj, gid} = g
 
-    props_before = deref(gid).props
+    before = deref(gid)
 
-    for n <- fun_names, Map.has_key?(props_before, n) and not global_fixed?(n) do
+    for n <- fun_names, Obj.has_own?(before, n) and not global_fixed?(n) do
       o = deref(gid)
 
       if match?({_, _, _, _, true}, Browser.JS.Props.own_state(g, n)),
-        do: store(gid, %{o | props: Map.delete(o.props, n), keys: List.delete(o.keys, n)})
+        do: store(gid, Obj.own_remove(o, n))
     end
 
     gvars = deref(global()).vars
 
     fresh =
       for n <- vars,
-          n in fun_names or not (Map.has_key?(gvars, n) or Map.has_key?(props_before, n)),
+          n in fun_names or not (Map.has_key?(gvars, n) or Obj.has_own?(before, n)),
           do: n
 
     # a lexical name hides a configurable built-in: the global object keeps its own property
@@ -4255,7 +6105,7 @@ defmodule Browser.JS.Interp do
         MapSet.member?(Process.get(:js_builtin_names) || MapSet.new(), n),
         n not in ["NaN", "Infinity", "undefined"],
         Map.has_key?(gvars, n),
-        not Map.has_key?(deref(gid).props, n),
+        not Obj.has_own?(deref(gid), n),
         do: put_hidden(g, n, Map.fetch!(gvars, n))
 
     Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
@@ -4287,7 +6137,28 @@ defmodule Browser.JS.Interp do
   def lexical_names(_), do: []
 
   @doc false
-  def module_exec(stmts, scope), do: exec_list(stmts, scope)
+  def module_exec(stmts, scope), do: top_completion(exec_list(stmts, scope))
+
+  @doc false
+  # The completion of script, eval or module code or of a class static block. Such code
+  # cannot complete with a `return`, `break` or `continue`: the parser refuses them. So
+  # this is only a safety net. In check mode any other completion is a failure. In a
+  # normal build it becomes `{:js_illegal, kind}`, which `Browser.JS` reports as a syntax
+  # error, as it did before step 3.
+  def top_completion(:ok), do: :ok
+
+  def top_completion(c) do
+    if @check, do: check_fail("top-level code completed with #{inspect(c)}")
+
+    kind =
+      case c do
+        {:brk, _} -> :break
+        {:cont, _} -> :continue
+        _ -> :return
+      end
+
+    throw({:js_illegal, kind})
+  end
 
   # `import.source(x)`: a source text module has no source to give, so the promise rejects
   # with a SyntaxError once the specifier and the options have been converted
@@ -4391,7 +6262,10 @@ defmodule Browser.JS.Interp do
   # The keys `for (k in o)` visits: the enumerable string keys of `o`, then of each object on
   # its prototype chain, none twice and none that an object nearer in the chain (enumerable
   # or not) already has.
-  defp for_in_keys({:obj, id} = o) do
+  @doc false
+  # The keys that a for-in loop visits. It is public because the CPS evaluator
+  # (`Browser.JS.Async`) runs for-in loops whose bodies await.
+  def for_in_keys({:obj, id} = o) do
     if Map.has_key?(deref(id), :proxy) do
       own_keys(o)
     else
@@ -4407,7 +6281,13 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp for_in_keys(target), do: own_keys(target)
+  def for_in_keys(target), do: own_keys(target)
+
+  # The object of `for (k in v)`: a primitive becomes its wrapper object (ToObject), so a
+  # string visits its indexes. `null` and `undefined` stay, and the loop visits nothing.
+  def for_in_object({:obj, _} = o), do: o
+  def for_in_object(v) when v in [:null, :undefined], do: v
+  def for_in_object(v), do: Browser.JS.Builtins.box(v)
 
   # protos on the chain that have an enumerable key of their own
   defp inherited_enumerable({:obj, id} = p, acc) do
@@ -4441,15 +6321,24 @@ defmodule Browser.JS.Interp do
     exec_list(rest, env)
   end
 
+  # A statement that does not complete normally ends the list, and its completion is the
+  # completion of the list.
   defp exec_list([stmt | rest], env) do
-    exec(stmt, env, [])
-    exec_list(rest, env)
+    case exec(stmt, env, []) do
+      :ok ->
+        exec_list(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
+    end
   end
 
-  # A function body: a `return` that is reached through `if` and block statements only gives its
-  # value back as `{:ret, value}` instead of being thrown. In a strict function (the tail flag
-  # says so) a `return` of a call, or of a form that holds one in tail position, becomes a tail
-  # call instead: `tail_value/2` throws it to the function's frame.
+  # The body of a function on the old path. The `return`, `if` and block statements at the
+  # top of the body run here, and a top-level expression statement does not write
+  # `:js_last`. Other statements run through `exec/3`, which writes `:js_last` as before
+  # step 3, so the completion values at `:off` do not change. A rewritten body runs
+  # through `fbody/2`.
   defp exec_fn([], _env), do: :ok
 
   defp exec_fn([{:pos, loc} | rest], env) do
@@ -4459,8 +6348,12 @@ defmodule Browser.JS.Interp do
 
   defp exec_fn([stmt | rest], env) do
     case exec_fn_stmt(stmt, env) do
-      :ok -> exec_fn(rest, env)
-      {:ret, _} = ret -> ret
+      :ok ->
+        exec_fn(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
     end
   end
 
@@ -4470,14 +6363,9 @@ defmodule Browser.JS.Interp do
        when not (is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical]),
        do: {:ret, ev(e, env)}
 
-  defp exec_fn_stmt({:return, e}, env) do
-    if Process.get(:js_tail) == true, do: tail_value(e, env), else: {:ret, ev(e, env)}
-  end
-
-  # The resolver marked the return of a rewritten function: a tail site runs the
-  # trampoline, every other return is plain. Neither reads the run-time tail flag.
-  defp exec_fn_stmt({:return, e, :plain}, env), do: {:ret, ev(e, env)}
-  defp exec_fn_stmt({:return, e, :tail}, env), do: tail_value(e, env)
+  # (on the old path a call form always goes to `tail_value/2`: the function boundary in
+  # `closure_scope/4` decides if the pending call is a tail call)
+  defp exec_fn_stmt({:return, e}, env), do: tail_value(e, env)
 
   # (a statement's completion value only matters outside function bodies: in a script or eval code)
   defp exec_fn_stmt({:expr, e}, env) do
@@ -4497,36 +6385,153 @@ defmodule Browser.JS.Interp do
     if scoped_block?(stmts), do: exec_other({:block, stmts}, env), else: exec_fn(stmts, env)
   end
 
+  defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
+
+  defp exec_other(stmt, env) do
+    c = exec(stmt, env, [])
+    if @check, do: check_completion(c, stmt)
+    c
+  end
+
+  # ── statements inside a rewritten function ─────────────────
+
+  # Only script and eval code have a completion value, so the statements of a rewritten
+  # function do not write `:js_last` (step 3). `fbody/2` and `fstmt/3` run these
+  # statements. `fstmt/3` has its own clauses for the kinds whose `exec/3` clause writes
+  # `:js_last` and that occur in both kinds of code: expression statements, `if`,
+  # labeled statements, `while` and `do-while`. It also has the blocks and the marked
+  # returns. Every other kind goes to `exec/3`, whose clauses for the frame shapes write
+  # nothing and run their children through `fstmt/3` and `fbody/2`.
+
+  @doc false
+  # (the statement runner of the CPS evaluator for the body of a rewritten async function
+  # or generator, see `Browser.JS.Async`)
+  def exec_frame_stmt(stmt, env, labels \\ []), do: fstmt(stmt, env, labels)
+
+  # A statement list inside a rewritten function. A statement that does not complete
+  # normally ends the list, as in `exec_list/2`.
+  defp fbody([], _env), do: :ok
+
+  defp fbody([{:pos, loc} | rest], env) do
+    :erlang.put(:js_pos, loc)
+    fbody(rest, env)
+  end
+
+  defp fbody([stmt | rest], env) do
+    case fstmt(stmt, env, []) do
+      :ok ->
+        fbody(rest, env)
+
+      c ->
+        if @check, do: check_completion(c, stmt)
+        c
+    end
+  end
+
+  @doc false
+  # A statement of a rewritten function. (public: a statement that `Browser.JS.Compile`
+  # does not compile runs through it)
+  #
+  # A compiled child (step 5): the compiler puts `{:cc, fun}` in the place of a statement
+  # child of a node that stays on the tree, so the tree runs the closure.
+  def fstmt({:cc, f}, env, _), do: f.(env)
+
+  # (the twin of the `exec/3` clause for `{:expr}`, without the write)
+  def fstmt({:expr, e}, env, _) do
+    ev(e, env)
+    :ok
+  end
+
+  # The resolver marked each return of a rewritten function: a tail site gives back a
+  # pending call, and every other return is plain.
+  def fstmt({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
+  def fstmt({:return, e, :tail}, env, _), do: tail_value(e, env)
+
+  # (the twin of the `exec/3` clause for `{:if}`, without the write)
+  def fstmt({:if, c, a, b}, env, _) do
+    cond do
+      truthy(ev(c, env)) -> fstmt(a, env, [])
+      b != nil -> fstmt(b, env, [])
+      true -> :ok
+    end
+  end
+
+  # (the twin of the `exec/3` clause for `{:labeled}`)
+  def fstmt({:labeled, l, s}, env, labels) do
+    case fstmt(s, env, [l | labels]) do
+      {:brk, ^l} -> :ok
+      c -> c
+    end
+  end
+
+  # (the twins of the `exec/3` clauses for `{:while}` and `{:dowhile}`, without the write)
+  def fstmt({:while, c, body}, env, labels), do: while_loop(c, body, env, labels, :fn)
+
+  def fstmt({:dowhile, body, c}, env, labels) do
+    case run_body(body, env, labels, :fn) do
+      :break -> :ok
+      :next -> while_loop(c, body, env, labels, :fn)
+      exit -> loop_exit(exit)
+    end
+  end
+
   # (a block inside a rewritten function: its names are slots of the frame, no scope is made)
-  defp exec_fn_stmt({:block, stmts, sc}, env) when frameless(sc) do
+  def fstmt({:block, stmts, sc}, env, _) when frameless(sc) do
     enter_frameless(env, sc)
-    exec_fn(stmts, env)
+    fbody(stmts, env)
   end
 
   # (a block whose names a closure captures: the names live in a block frame of their own)
-  defp exec_fn_stmt({:block, stmts, sc}, env) when framed(sc) do
+  def fstmt({:block, stmts, sc}, env, _) when framed(sc) do
     fns = :erlang.get(:js_fns)
     b = enter_scope(env, sc)
 
     try do
-      exec_fn(stmts, b)
+      fbody(stmts, b)
     after
       leave_scope(b, fns)
     end
   end
 
-  defp exec_fn_stmt(stmt, env), do: exec_other(stmt, env)
+  def fstmt(stmt, env, labels), do: exec(stmt, env, labels)
 
-  defp exec_other(stmt, env) do
-    exec(stmt, env, [])
-    :ok
-  end
+  # A loop body or a case body in the mode of the loop: `:top` for script, eval and
+  # old-path code, which writes `:js_last`, and `:fn` for a rewritten function.
+  @compile {:inline, mode_exec: 3, mode_list: 3}
+  defp mode_exec(stmt, env, :fn), do: fstmt(stmt, env, [])
+  defp mode_exec(stmt, env, :top), do: exec(stmt, env, [])
+  defp mode_list(stmts, env, :fn), do: fbody(stmts, env)
+  defp mode_list(stmts, env, :top), do: exec_list(stmts, env)
 
-  @doc "Runs statements as a function body in `scope`: hoists, then executes."
+  @doc "Runs statements as a class static block in `scope`: hoists, then executes."
   def run_body(stmts, scope) do
     hoist_vars(stmts, scope)
     hoist_functions(stmts, scope)
-    exec_list(stmts, scope)
+    top_completion(exec_list(stmts, scope))
+  end
+
+  # Check mode only (K6 of step 3): the `exec/3` clauses that write `:js_last` and have a
+  # twin in `fstmt/3` run only in script, eval and old-path code, whose scopes are maps.
+  # A frame is a tuple, so a statement of a rewritten function that comes here is a fault.
+  defp check_script_env(env, kind) do
+    if is_integer(env) and is_tuple(:erlang.get(env)),
+      do: check_fail("the statement #{inspect(kind)} of a rewritten function in exec/3")
+
+    :ok
+  end
+
+  @doc false
+  # Check mode only (K1 of step 3): a statement completes with one of the five completion
+  # shapes. Any other value is a clause that gives back a result by accident, and a list
+  # would stop on it.
+  def check_completion(c, stmt) do
+    case c do
+      :ok -> :ok
+      {:ret, _} -> :ok
+      {tag, l} when tag in [:brk, :cont] and (l == nil or is_binary(l)) -> :ok
+      {:tail, _, _, _} -> :ok
+      _ -> check_fail("the statement #{inspect(elem(stmt, 0))} completed with #{inspect(c)}")
+    end
   end
 
   # ── using declarations ─────────────────────────────────────
@@ -4602,9 +6607,11 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
-  # how the rest of a list ended (:ok, or {:thrown, t}) together with its disposal
-  def using_finish(:ok, :ok), do: :ok
-  def using_finish(:ok, {:error, e}), do: throw({:js_error, e})
+  # How the rest of a list ended, `{:done, completion}` or `{:thrown, t}`, together with its
+  # disposal. A clean disposal keeps the completion, and an error from the disposal replaces
+  # it, also a return or a break.
+  def using_finish({:done, c}, :ok), do: c
+  def using_finish({:done, _}, {:error, e}), do: throw({:js_error, e})
   def using_finish({:thrown, t}, :ok), do: throw(t)
 
   def using_finish({:thrown, {:js_error, e}}, {:error, e2}),
@@ -4621,17 +6628,24 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
+  # Runs one statement of old-path code and gives its completion. A statement of a rewritten
+  # function runs through `exec_frame_stmt/3`.
   def exec_stmt(stmt, env, labels \\ []), do: exec(stmt, env, labels)
 
   defp exec(stmt, env), do: exec(stmt, env, [])
 
   # where the script is: the file and line of the statement that follows (see the parser)
+  # A compiled child (step 5), as in `fstmt/3`.
+  defp exec({:cc, f}, env, _), do: f.(env)
+
   defp exec({:pos, loc}, _, _) do
     :erlang.put(:js_pos, loc)
     :ok
   end
 
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:expr, e}, env, _) do
+    if @check, do: check_script_env(env, :expr)
     :erlang.put(:js_last, ev(e, env))
     :ok
   end
@@ -4669,8 +6683,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        no_tail(fn -> exec_list(rest, env) end)
-        :ok
+        {:done, run_tail(fbody(rest, env), env)}
       catch
         t -> {:thrown, t}
       end
@@ -4685,8 +6698,7 @@ defmodule Browser.JS.Interp do
 
     outcome =
       try do
-        no_tail(fn -> exec_list(rest, env) end)
-        :ok
+        {:done, run_tail(exec_list(rest, env), env)}
       catch
         t -> {:thrown, t}
       end
@@ -4705,7 +6717,13 @@ defmodule Browser.JS.Interp do
     scope = new_scope(env)
     s = deref(scope)
     store(scope, Map.put(s, :with, if(match?({:obj, _}, o), do: o, else: new_object())))
-    no_tail(fn -> exec(body, scope, []) end)
+    run_tail(exec(body, scope, []), scope)
+  end
+
+  # The CPS evaluator takes every statement that is marked `{:aw}`, so in check mode the
+  # sync evaluator fails when it sees the mark.
+  if @check do
+    defp exec({:aw, s}, _, _), do: check_fail("the sync evaluator meets {:aw, #{elem(s, 0)}}")
   end
 
   defp exec({:fundecl, _, _}, _, _), do: :ok
@@ -4714,16 +6732,23 @@ defmodule Browser.JS.Interp do
   defp exec({:export, stmt}, env, _), do: exec(stmt, env, [])
   defp exec({:export_default, {:fundecl, _, _}}, _, _), do: :ok
 
-  defp exec({:export_default, {:classdecl, name, node}}, env, _),
-    do: declare(env, name, ev_named(node, env, {:id, "default"}))
+  # (`declare/3` gives back a value that is not a completion, so these clauses give `:ok`)
+  defp exec({:export_default, {:classdecl, name, node}}, env, _) do
+    declare(env, name, ev_named(node, env, {:id, "default"}))
+    :ok
+  end
 
-  defp exec({:export_default, {:expr, e}}, env, _),
-    do: declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+  defp exec({:export_default, {:expr, e}}, env, _) do
+    declare(env, :default_export, ev_named(e, env, {:id, "default"}))
+    :ok
+  end
 
   defp exec({:export_names, _}, _, _), do: :ok
   defp exec({:export_from, _, _}, _, _), do: :ok
 
   defp exec({:block, stmts}, env, _) do
+    if @check, do: check_script_env(env, :block)
+
     if scoped_block?(stmts) do
       if @check, do: check_old_path(env, "a block")
       fns = pget(:js_fns)
@@ -4738,39 +6763,21 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp exec({:block, stmts, sc}, env, _) when frameless(sc) do
-    enter_frameless(env, sc)
-    exec_list(stmts, env)
-  end
+  # (the blocks of a rewritten function, also through `exec_frame_stmt/3`)
+  defp exec({:block, _, _} = stmt, env, labels), do: fstmt(stmt, env, labels)
 
-  defp exec({:block, stmts, sc}, env, _) when framed(sc) do
-    fns = :erlang.get(:js_fns)
-    b = enter_scope(env, sc)
+  defp exec({:return, nil}, _, _), do: {:ret, :undefined}
 
-    try do
-      exec_list(stmts, b)
-    after
-      leave_scope(b, fns)
-    end
-  end
+  # (on the old path a call form always goes to `tail_value/2`: a run site or the function
+  # boundary in `closure_scope/4` decides what happens with the pending call)
+  defp exec({:return, e}, env, _)
+       when is_tuple(e) and elem(e, 0) in [:call, :cond, :seq, :logical],
+       do: tail_value(e, env)
 
-  defp exec({:return, nil}, _, _), do: throw({:js_return, :undefined})
+  defp exec({:return, e}, env, _), do: {:ret, ev(e, env)}
 
-  defp exec({:return, e}, env, _) do
-    if Process.get(:js_tail) == true do
-      {:ret, v} = tail_value(e, env)
-      throw({:js_return, v})
-    else
-      throw({:js_return, ev(e, env)})
-    end
-  end
-
-  defp exec({:return, e, :plain}, env, _), do: throw({:js_return, ev(e, env)})
-
-  defp exec({:return, e, :tail}, env, _) do
-    {:ret, v} = tail_value(e, env)
-    throw({:js_return, v})
-  end
+  defp exec({:return, e, :plain}, env, _), do: {:ret, ev(e, env)}
+  defp exec({:return, e, :tail}, env, _), do: tail_value(e, env)
 
   defp exec({:throw, e}, env, _) do
     v = ev(e, env)
@@ -4779,10 +6786,12 @@ defmodule Browser.JS.Interp do
     throw({:js_error, v})
   end
 
-  defp exec({:break, label}, _, _), do: throw({:js_break, label})
-  defp exec({:continue, label}, _, _), do: throw({:js_continue, label})
+  defp exec({:break, label}, _, _), do: {:brk, label}
+  defp exec({:continue, label}, _, _), do: {:cont, label}
 
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:if, c, a, b}, env, _) do
+    if @check, do: check_script_env(env, :if)
     :erlang.put(:js_last, :undefined)
 
     cond do
@@ -4792,23 +6801,33 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # A break to this label ends the labeled statement normally. A continue to the label is
+  # for the loop that has the label in `labels`.
+  # (the `fstmt/3` clause is the twin of this one for a rewritten function)
   defp exec({:labeled, l, s}, env, labels) do
-    exec(s, env, [l | labels])
-  catch
-    {:js_break, ^l} -> :ok
+    if @check, do: check_script_env(env, :labeled)
+
+    case exec(s, env, [l | labels]) do
+      {:brk, ^l} -> :ok
+      c -> c
+    end
   end
 
+  # (the `fstmt/3` clauses are the twins of these two for a rewritten function)
   defp exec({:while, c, body}, env, labels) do
+    if @check, do: check_script_env(env, :while)
     :erlang.put(:js_last, :undefined)
-    while_loop(c, body, env, labels)
+    while_loop(c, body, env, labels, :top)
   end
 
   defp exec({:dowhile, body, c}, env, labels) do
+    if @check, do: check_script_env(env, :dowhile)
     :erlang.put(:js_last, :undefined)
 
-    case run_body(body, env, labels) do
+    case run_body(body, env, labels, :top) do
       :break -> :ok
-      :next -> while_loop(c, body, env, labels)
+      :next -> while_loop(c, body, env, labels, :top)
+      exit -> loop_exit(exit)
     end
   end
 
@@ -4832,13 +6851,12 @@ defmodule Browser.JS.Interp do
     first =
       if per_iteration? and pget(:js_fns) != fns, do: copy_scope(loop_env, env), else: loop_env
 
-    for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns))
+    for_loop(test, update, body, env, first, per_iteration?, labels, pget(:js_fns), :top)
   end
 
   # a `for` inside a rewritten function: the head's names are slots of the frame, so the
   # loop runs in `env` with no scope, no copy per iteration and no closure count to read
   defp exec({:for, init, test, update, body, sc}, env, labels) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
     enter_frameless(env, sc)
 
     case init do
@@ -4851,12 +6869,11 @@ defmodule Browser.JS.Interp do
   end
 
   # A `for` whose head names a closure captures. With a `let` head each iteration gets its
-  # own copy of the head frame, as on the old path: `for_loop/8` copies the frame only when
+  # own copy of the head frame, as on the old path: `for_loop/9` copies the frame only when
   # a closure was made since the last copy, through the tuple clause of `copy_scope/2`.
   # With a `const` head one frame serves every round. The head frame is freed when no
   # closure was made during the whole loop, which also means that no copy was made.
   defp exec({:for, init, test, update, body, sc}, env, labels) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
     fns = :erlang.get(:js_fns)
     l0 = enter_scope(env, sc)
 
@@ -4869,7 +6886,7 @@ defmodule Browser.JS.Interp do
 
       if sc.per_iter do
         first = if :erlang.get(:js_fns) != fns, do: copy_scope(l0, env), else: l0
-        for_loop(test, update, body, env, first, true, labels, :erlang.get(:js_fns))
+        for_loop(test, update, body, env, first, true, labels, :erlang.get(:js_fns), :fn)
       else
         frame_for_loop(test, update, body, l0, labels)
       end
@@ -4879,15 +6896,15 @@ defmodule Browser.JS.Interp do
   end
 
   defp exec({kind, _, _, _, _} = node, env, labels) when kind in [:forin, :forof],
-    do: no_tail(fn -> exec_for_each(node, env, labels) end)
+    do: exec_for_each(node, env, labels)
 
   defp exec({kind, _, _, _, _, sc} = node, env, labels)
        when kind in [:forin, :forof] and framed(sc),
-       do: no_tail(fn -> exec_for_each_framed(node, env, labels) end)
+       do: exec_for_each_framed(node, env, labels)
 
   defp exec({kind, _, _, _, _, sc} = node, env, labels)
        when kind in [:forin, :forof] and frameless(sc),
-       do: no_tail(fn -> exec_for_each_frame(node, env, labels) end)
+       do: exec_for_each_frame(node, env, labels)
 
   defp exec({:switch, disc, cases}, env, _) do
     :erlang.put(:js_last, :undefined)
@@ -4903,20 +6920,12 @@ defmodule Browser.JS.Interp do
       end) ||
         Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-    try do
-      if start,
-        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, scope) end)
-
-      :ok
-    catch
-      {:js_break, nil} -> :ok
-    end
+    if start, do: run_cases(Enum.drop(cases, start), scope, :top), else: :ok
   end
 
   # (a switch whose names a closure captures: the discriminant runs outside the switch, the
   # tests and the bodies in its block frame, where every case's functions are already made)
   defp exec({:switch, disc, cases, sc}, env, _) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
     v = ev(disc, env)
     fns = :erlang.get(:js_fns)
     s = enter_scope(env, sc)
@@ -4928,21 +6937,13 @@ defmodule Browser.JS.Interp do
         end) ||
           Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-      try do
-        if start,
-          do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, s) end)
-
-        :ok
-      catch
-        {:js_break, nil} -> :ok
-      end
+      if start, do: run_cases(Enum.drop(cases, start), s, :fn), else: :ok
     after
       leave_scope(s, fns)
     end
   end
 
   defp exec({:switch, disc, cases, sc}, env, _) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
     v = ev(disc, env)
     enter_frameless(env, sc)
 
@@ -4952,104 +6953,167 @@ defmodule Browser.JS.Interp do
       end) ||
         Enum.find_index(cases, fn {test, _} -> test == :default end)
 
-    try do
-      if start,
-        do: cases |> Enum.drop(start) |> Enum.each(fn {_, body} -> exec_list(body, env) end)
-
-      :ok
-    catch
-      {:js_break, nil} -> :ok
-    end
+    if start, do: run_cases(Enum.drop(cases, start), env, :fn), else: :ok
   end
 
-  # a `try` inside a rewritten function: the catch parameter is a slot of the frame
-  defp exec({:try, block, param, handler, finalizer, sc}, env, _) when frameless(sc) do
-    :erlang.put(:js_last, :undefined)
+  # A `try` inside a rewritten function. The catch parameter is a slot of the frame, or of
+  # a catch frame when a closure captures a name of the catch (see `run_handler/6`).
+  defp exec({:try, block, param, handler, finalizer, sc}, env, _),
+    do: try_statement(block, param, handler, finalizer, sc, env)
 
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          enter_frameless(env, sc)
-          if param, do: bind(param, v, env, :let)
-          if finalizer, do: no_tail(fn -> exec(handler, env) end), else: exec(handler, env)
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
-    end
-  end
-
-  # (a try whose catch names a closure captures: the try block and the finalizer run in
-  # `env`, the parameter and the handler in a catch frame made when the error is caught)
-  defp exec({:try, block, param, handler, finalizer, sc}, env, _) when framed(sc) do
-    :erlang.put(:js_last, :undefined)
-
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          fns = :erlang.get(:js_fns)
-          c = enter_scope(env, sc)
-
-          try do
-            if param, do: bind(param, v, c, :let)
-            if finalizer, do: no_tail(fn -> exec(handler, c) end), else: exec(handler, c)
-          after
-            leave_scope(c, fns)
-          end
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
-    end
-  end
-
+  # (a `try` on the old path: the handler runs in a new map scope)
   defp exec({:try, block, param, handler, finalizer}, env, _) do
     :erlang.put(:js_last, :undefined)
+    try_statement(block, param, handler, finalizer, :map, env)
+  end
 
-    try do
-      try do
-        no_tail(fn -> exec(block, env) end)
-      catch
-        {:js_error, v} when handler != nil ->
-          if @check, do: check_old_path(env, "a catch clause")
-          scope = new_scope(env)
-          if param, do: bind(param, v, scope, :let)
+  # The cases of a switch run in order from the first match until one does not complete
+  # normally. This is the fallthrough of JS. A break without a label ends the switch. A
+  # continue without a label goes up to the loop around the switch.
+  defp run_cases([], _env, _mode), do: :ok
 
-          with {:id, pname} <- param,
-               do: declare(scope, :catch_param, pname)
-
-          if finalizer, do: no_tail(fn -> exec(handler, scope) end), else: exec(handler, scope)
-      end
-    after
-      # a finalizer that completes normally leaves the try statement's own value
-      if finalizer do
-        saved = :erlang.get(:js_last)
-        :erlang.put(:js_last, :undefined)
-        exec(finalizer, env)
-        :erlang.put(:js_last, saved)
-      end
+  defp run_cases([{_, body} | rest], env, mode) do
+    case mode_list(body, env, mode) do
+      :ok -> run_cases(rest, env, mode)
+      {:brk, nil} -> :ok
+      c -> c
     end
   end
 
-  defp call_target(callee, env) do
+  # A `try` statement. Without a finalizer, the block and the handler are all of it. With
+  # a finalizer, the outcome of the block and the handler is kept as a value, so that the
+  # finalizer can run after every way out, as an Elixir `after` block would.
+  defp try_statement(block, param, handler, nil, sc, env),
+    do: try_part(block, param, handler, false, sc, env)
+
+  defp try_statement(block, param, handler, finalizer, sc, env) do
+    outcome =
+      try do
+        {:done, try_part(block, param, handler, true, sc, env)}
+      catch
+        :throw, v -> {:thrown, v}
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+
+    run_finally(outcome, finalizer, env, try_mode(sc))
+  end
+
+  # The block of a `try`, and the handler when the block throws a JS error. The handler
+  # runs in the `catch` clause, outside the inner `try`, so a throw from the handler goes
+  # to the finalizer. `fin?` says whether a finalizer follows.
+  defp try_part(block, param, handler, fin?, sc, env) do
+    try do
+      # (the block is no tail position: a pending call runs here, where the catch sees it)
+      run_tail(mode_exec(block, env, try_mode(sc)), env)
+    catch
+      {:js_error, v} when handler != nil -> run_handler(v, param, handler, fin?, sc, env)
+    end
+  end
+
+  # The catch clause. A frameless scope binds the parameter in a slot of the frame. A
+  # framed scope makes a catch frame, which is left when the handler ends. The old path
+  # (`:map`) makes a map scope.
+  defp run_handler(v, param, handler, fin?, sc, env) when frameless(sc) do
+    if @check, do: check_link(env)
+    enter_frameless(env, sc)
+    if param, do: bind(param, v, env, :let)
+    handler_body(handler, env, fin?, :fn)
+  end
+
+  defp run_handler(v, param, handler, fin?, sc, env) when framed(sc) do
+    if @check, do: check_link(env)
+    fns = :erlang.get(:js_fns)
+    c = enter_scope(env, sc)
+
+    try do
+      if param, do: bind(param, v, c, :let)
+      handler_body(handler, c, fin?, :fn)
+    after
+      leave_scope(c, fns)
+    end
+  end
+
+  defp run_handler(v, param, handler, fin?, :map, env) do
+    if @check, do: check_old_path(env, "a catch clause")
+    if @check, do: check_link(env)
+    scope = new_scope(env)
+    catch_tdz(param, scope)
+    if param, do: bind(param, v, scope, :let)
+
+    with {:id, pname} <- param,
+         do: declare(scope, :catch_param, pname)
+
+    handler_body(handler, scope, fin?, :top)
+  end
+
+  @doc false
+  # The names of a catch parameter that is a pattern are in their TDZ while the pattern
+  # binds, as the names of a `let` declaration are. So a default that reads a later name
+  # of the pattern throws a ReferenceError and does not read an outer name. A map scope
+  # needs this, because it has no names before the binding. A frame starts its slots in the
+  # TDZ already. (public: the CPS evaluator binds a catch parameter too)
+  def catch_tdz({:id, _}, _scope), do: :ok
+  def catch_tdz(nil, _scope), do: :ok
+
+  def catch_tdz(pat, scope) do
+    for name <- pattern_names(pat, []), do: declare(scope, name, :tdz)
+    :ok
+  end
+
+  # A handler that a finalizer follows makes no tail call, because the finalizer must run
+  # after the call.
+  defp handler_body(handler, env, true, mode), do: run_tail(mode_exec(handler, env, mode), env)
+  defp handler_body(handler, env, false, mode), do: mode_exec(handler, env, mode)
+
+  # (the 5-tuple `try` of script, eval and old-path code passes `:map`)
+  defp try_mode(:map), do: :top
+  defp try_mode(_sc), do: :fn
+
+  # The finalizer runs after every way out of the block and the handler. When it completes
+  # normally, the statement keeps the outcome of the block and the handler, and its own
+  # value. When it completes abruptly, its completion replaces that outcome, also a pending
+  # throw or the step limit, as a throw out of an Elixir `after` block did before step 3.
+  defp run_finally(outcome, finalizer, env, :top) do
+    saved = :erlang.get(:js_last)
+    :erlang.put(:js_last, :undefined)
+
+    case exec(finalizer, env, []) do
+      :ok ->
+        :erlang.put(:js_last, saved)
+        finish_outcome(outcome)
+
+      c ->
+        c
+    end
+  end
+
+  # (a rewritten function has no completion value to keep)
+  defp run_finally(outcome, finalizer, env, :fn) do
+    case fstmt(finalizer, env, []) do
+      :ok -> finish_outcome(outcome)
+      c -> c
+    end
+  end
+
+  # The outcome of the block and the handler, after a finalizer that completed normally.
+  defp finish_outcome({:done, c}), do: c
+  defp finish_outcome({:thrown, v}), do: throw(v)
+  defp finish_outcome({:raised, kind, reason, st}), do: :erlang.raise(kind, reason, st)
+
+  @doc false
+  # The function and the `this` value of a call site. It is public because the CPS evaluator
+  # (`Browser.JS.Async`) settles the callee of an optional call before its arguments await.
+  def call_target(callee, env) do
     case callee do
-      {:super_member, key} ->
+      {:super_member, {:str, key}} ->
         {home, this} = Browser.JS.Classes.super_base(env)
-        {get_with_receiver(home, ev_key(key, env), this), this}
+        {get_with_receiver(home, key, this), this}
+
+      # (the key runs before the read of the super base, see `super_this/1`)
+      {:super_member, key} ->
+        {home, this} = Browser.JS.Classes.super_this(env)
+        key = ev_key(key, env)
+        {get_with_receiver(Browser.JS.Classes.super_proto(home), key, this), this}
 
       {:member, o, k, mopt} ->
         ov = ev(o, env)
@@ -5108,6 +7172,7 @@ defmodule Browser.JS.Interp do
       end
 
     mode = if decl == nil, do: :assign, else: decl
+    target = if kind == :forin, do: for_in_object(target), else: target
 
     source =
       case kind do
@@ -5129,12 +7194,13 @@ defmodule Browser.JS.Interp do
             fns = pget(:js_fns)
             iter_env = new_scope(env)
             bind(pat, item, iter_env, mode)
-            outcome = run_body(body, iter_env, labels)
+            outcome = run_tail(run_body(body, iter_env, labels, :top), iter_env)
             free_scope(iter_env, fns)
 
             case outcome do
               :break -> {:halt, :ok}
               :next -> {:cont, :ok}
+              c -> {:halt, loop_exit(c)}
             end
           end
         end)
@@ -5145,10 +7211,10 @@ defmodule Browser.JS.Interp do
   # they go back to the temporal dead zone before the object is evaluated and again before
   # every item, so a default that reads its own name throws on every round.
   defp exec_for_each_frame({kind, decl, pat, obj, body, sc}, env, labels) do
-    :erlang.put(:js_last, :undefined)
     reset_tdz(env, sc)
     target = ev(obj, env)
     mode = if decl == nil, do: :assign, else: decl
+    target = if kind == :forin, do: for_in_object(target), else: target
 
     source =
       case kind do
@@ -5170,9 +7236,10 @@ defmodule Browser.JS.Interp do
             reset_tdz(env, sc)
             bind(pat, item, env, mode)
 
-            case run_body(body, env, labels) do
+            case run_tail(run_body(body, env, labels, :fn), env) do
               :break -> {:halt, :ok}
               :next -> {:cont, :ok}
+              c -> {:halt, loop_exit(c)}
             end
           end
         end)
@@ -5186,7 +7253,6 @@ defmodule Browser.JS.Interp do
   # `h` is the first item frame, so `for (const k of [() => k]) k()` keeps `h` for the
   # arrow and runs the first item in a new frame.
   defp exec_for_each_framed({kind, decl, pat, obj, body, sc}, env, labels) do
-    :erlang.put(:js_last, :undefined)
     h = enter_scope(env, sc)
     fresh = :erlang.get(h)
     fns = :erlang.get(:js_fns)
@@ -5215,7 +7281,7 @@ defmodule Browser.JS.Interp do
 
       {:list, items} ->
         last =
-          Enum.reduce_while(items, {h, fns}, fn item, {cur, cur_fns} = acc ->
+          Enum.reduce_while(items, {h, fns, :ok}, fn item, {cur, cur_fns, _} = acc ->
             # a key that was deleted before its turn is skipped
             if kind == :forin and not has_property?(target, item) do
               {:cont, acc}
@@ -5226,7 +7292,7 @@ defmodule Browser.JS.Interp do
               outcome =
                 try do
                   bind(pat, item, cur, mode)
-                  run_body(body, cur, labels)
+                  run_tail(run_body(body, cur, labels, :fn), cur)
                 catch
                   k, e ->
                     leave_scope(cur, cur_fns)
@@ -5234,14 +7300,16 @@ defmodule Browser.JS.Interp do
                 end
 
               case outcome do
-                :break -> {:halt, {cur, cur_fns}}
-                :next -> {:cont, {cur, cur_fns}}
+                :break -> {:halt, {cur, cur_fns, :ok}}
+                :next -> {:cont, {cur, cur_fns, :ok}}
+                c -> {:halt, {cur, cur_fns, loop_exit(c)}}
               end
             end
           end)
 
-        {cur, cur_fns} = last
+        {cur, cur_fns, c} = last
         leave_scope(cur, cur_fns)
+        c
     end
   end
 
@@ -5264,27 +7332,41 @@ defmodule Browser.JS.Interp do
     tick()
 
     if test == nil or truthy(ev(test, env)) do
-      case run_body(body, env, labels) do
+      case run_body(body, env, labels, :fn) do
         :break ->
           :ok
 
         :next ->
           if update, do: ev(update, env)
           frame_for_loop(test, update, body, env, labels)
+
+        c ->
+          loop_exit(c)
       end
     else
       :ok
     end
   end
 
-  # The value of a `return` in a strict function. A call in tail position is not made here:
-  # the callee and the arguments are thrown to the function's frame, which gives them to
-  # `tail_loop`. Anything else comes back as `{:ret, value}`.
-  defp tail_value({:call, callee, args, false} = e, env) do
+  # The completion of a `return` at a tail site. A call in tail position is not made here:
+  # the callee, `this` and the arguments come back as `{:tail, f, this, args}`. A run site
+  # or the function boundary makes the call. Anything else comes back as `{:ret, value}`.
+  # A call of the name `eval` is a tail call when the callee is not the built-in `eval`. A
+  # direct eval runs here, because it needs the scope of this function.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it for the tail
+  # sites that it does not compile.
+  @doc false
+  def tail_value({:call, {:id, "eval"} = callee, args, false}, env) do
+    case eval_call(callee, args, env) do
+      {:value, v} -> {:ret, v}
+      {:call, f, this, argv} -> {:tail, f, this, argv}
+    end
+  end
+
+  def tail_value({:call, callee, args, false} = e, env) do
     plain? =
       case callee do
-        # (a direct eval, an optional chain and a `super()` call are no tail calls)
-        {:id, "eval"} -> ev(callee, env) != :erlang.get(:js_eval_fn)
+        # (an optional chain and a `super()` call are no tail calls)
         {:chain, _} -> false
         {:super} -> false
         _ -> true
@@ -5293,23 +7375,28 @@ defmodule Browser.JS.Interp do
     if plain? do
       {f, this} = call_target(callee, env)
       argv = eval_list(args, env)
-      unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-      throw({:js_tail, f, this, argv})
+
+      # (the test of `function?/1` inline: `tail_loop/3` reads the callee again to run it,
+      # and the error must come here, inside the frame of the caller)
+      unless callable?(f),
+        do: throw_error("TypeError", "#{describe(callee)} is not a function")
+
+      {:tail, f, this, argv}
     else
       {:ret, ev(e, env)}
     end
   end
 
-  defp tail_value({:cond, c, a, b}, env),
+  def tail_value({:cond, c, a, b}, env),
     do: tail_value(if(truthy(ev(c, env)), do: a, else: b), env)
 
-  defp tail_value({:seq, es}, env) do
+  def tail_value({:seq, es}, env) do
     {init, [last]} = Enum.split(es, -1)
     Enum.each(init, &ev(&1, env))
     tail_value(last, env)
   end
 
-  defp tail_value({:logical, op, l, r}, env) do
+  def tail_value({:logical, op, l, r}, env) do
     lv = ev(l, env)
 
     take_right? =
@@ -5322,15 +7409,16 @@ defmodule Browser.JS.Interp do
     if take_right?, do: tail_value(r, env), else: {:ret, lv}
   end
 
-  defp tail_value(e, env), do: {:ret, ev(e, env)}
+  def tail_value(e, env), do: {:ret, ev(e, env)}
 
-  defp while_loop(c, body, env, labels) do
+  defp while_loop(c, body, env, labels, mode) do
     if truthy(ev(c, env)) do
       tick()
 
-      case run_body(body, env, labels) do
+      case run_body(body, env, labels, mode) do
         :break -> :ok
-        :next -> while_loop(c, body, env, labels)
+        :next -> while_loop(c, body, env, labels, mode)
+        exit -> loop_exit(exit)
       end
     else
       :ok
@@ -5339,11 +7427,11 @@ defmodule Browser.JS.Interp do
 
   # `fns` is the closure count from before this iteration's update expression ran (which
   # evaluates in the iteration's scope), so a closure made there keeps the scope alive too
-  defp for_loop(test, update, body, env, iter_env, copy?, labels, fns) do
+  defp for_loop(test, update, body, env, iter_env, copy?, labels, fns, mode) do
     tick()
 
     if test == nil or truthy(ev(test, iter_env)) do
-      case run_body(body, iter_env, labels) do
+      case run_body(body, iter_env, labels, mode) do
         :break ->
           :ok
 
@@ -5353,20 +7441,39 @@ defmodule Browser.JS.Interp do
 
           next_fns = pget(:js_fns)
           if update, do: ev(update, next_env)
-          for_loop(test, update, body, env, next_env, copy?, labels, next_fns)
+          for_loop(test, update, body, env, next_env, copy?, labels, next_fns, mode)
+
+        c ->
+          loop_exit(c)
       end
     else
       :ok
     end
   end
 
-  # runs a loop body, translating break / continue aimed at this loop
-  defp run_body(body, env, labels) do
-    exec(body, env)
-    :next
-  catch
-    {:js_break, l} = signal -> if l == nil or l in labels, do: :break, else: throw(signal)
-    {:js_continue, l} = signal -> if l == nil or l in labels, do: :next, else: throw(signal)
+  # What a loop does with the completion of its body: `:next` runs the next round, `:break`
+  # ends the loop normally, and any other completion leaves the loop. `labels` are the
+  # labels on this loop. A break or continue without a label always belongs to the
+  # innermost loop or switch. `mode` says how the body runs (see `mode_exec/3`).
+  defp run_body(body, env, labels, mode) do
+    case mode_exec(body, env, mode) do
+      :ok -> :next
+      {:cont, l} = c -> if l == nil or l in labels, do: :next, else: c
+      {:brk, l} = c -> if l == nil or l in labels, do: :break, else: c
+      c -> c
+    end
+  end
+
+  # A completion that leaves a loop. In check mode (K7 of step 3) it is never a break or a
+  # continue without a label, because `run_body/4` gives these to the innermost loop.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  @compile {:inline, loop_exit: 1}
+  def loop_exit(c) do
+    if @check and c in [{:brk, nil}, {:cont, nil}],
+      do: check_fail("a loop gave back #{inspect(c)}")
+
+    c
   end
 
   # ── binding ────────────────────────────────────────────────
@@ -5580,21 +7687,27 @@ defmodule Browser.JS.Interp do
   defp ev_key({:priv, name}, env), do: private_key(name, env)
   defp ev_key(k, env), do: ev(k, env)
 
-  defp bump(op, old) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def bump(op, old) do
     case old do
       {:bigint, n} -> {:bigint, if(op == "++", do: n + 1, else: n - 1)}
       _ -> if op == "++", do: Num.add(old, 1.0), else: Num.sub(old, 1.0)
     end
   end
 
-  defp uninit_this_error do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def uninit_this_error do
     throw_error(
       "ReferenceError",
       "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
     )
   end
 
-  defp tdz_error(name),
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def tdz_error(name),
     do: throw_error("ReferenceError", "Cannot access '#{name}' before initialization")
 
   defp const_error, do: throw_error("TypeError", "Assignment to constant variable.")
@@ -5602,7 +7715,9 @@ defmodule Browser.JS.Interp do
   # The root of the chain `env` is on (its realm's global scope). A frame keeps the root in
   # its header. A `{:gref}` can also run in a map scope under a frame (the class scope of a
   # heritage, a computed key or a field initializer), which must walk to a frame or the root.
-  defp root(env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def root(env) do
     if @check, do: check_live(env)
 
     case :erlang.get(env) do
@@ -5613,7 +7728,9 @@ defmodule Browser.JS.Interp do
 
   # A write to a slot by an assignment: a binding still in its temporal dead zone takes no
   # value. A declaration pattern writes with `slot_put/3` directly.
-  defp slot_assign(env, i, name, v) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def slot_assign(env, i, name, v) do
     if @check, do: check_slot(env, i, name)
     if @check, do: check_unsynced(env, i)
 
@@ -5650,12 +7767,61 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The call fast path (step 5): one read of the heap finds the callee. A plain function
+  # that the resolver rewrote runs its frame at once, as `call/3` and `run_closure/4` would
+  # run it, but without the second read and the two extra calls. Every other function goes
+  # to `call_obj/4` with the object that was read. The test that the callee is a function
+  # and its error come first, in the order of `function?/1` and `call/3`. `callee` is the
+  # node of the callee, for the text of the error, and `env` is the scope of the call site,
+  # for the check build. The tree walker (`ev/2`) and the compiled calls (`ccall/5`) expand
+  # this one macro, so the two paths call in the same way. (a macro and not an inline
+  # function: `call_obj/4` is inline, and an inline function inside an inline function
+  # stays a call, which would cost one reduction per JS call)
+  defmacrop call_fast(f, this, argv, callee, env) do
+    quote do
+      case unquote(f) do
+        {:obj, id} ->
+          case :erlang.get(id) do
+            %{class: :function, fun: {:closure, %{info: %Info{rewritten: true}} = c}} = o
+            when not is_map_key(o, :generator) and not is_map_key(o, :async) and
+                   not is_map_key(o, :class_info) ->
+              if @check, do: check_link(unquote(env))
+              tick()
+              run_frame(id, c, unquote(this), unquote(argv), :undefined, :call)
+
+            %{class: :function} = o ->
+              if @check, do: check_link(unquote(env))
+              call_obj(id, o, unquote(this), unquote(argv))
+
+            # (a missing entry fails as `deref/1` fails)
+            :undefined ->
+              deref(id)
+
+            _ ->
+              throw_error("TypeError", "#{describe(unquote(callee))} is not a function")
+          end
+
+        _ ->
+          throw_error("TypeError", "#{describe(unquote(callee))} is not a function")
+      end
+    end
+  end
+
   # ── expressions ────────────────────────────────────────────
+
+  # A compiled child (step 5): the compiler puts `{:cc, fun}` in the place of an expression
+  # child of a node that stays on the tree, so the tree runs the closure.
+  def ev({:cc, f}, env), do: f.(env)
 
   def ev({:num, n}, _), do: n
   def ev({:bigint, n}, _), do: {:bigint, n}
 
   def ev({:val, v}, _env), do: v
+
+  # A hole of a compiled lift template (step 5c, `Browser.JS.Async.lifted/5`) in a part of
+  # the template that stays on the tree: the value of the leaf `i`, which the process key
+  # `:js_cps_vals` holds while the template runs.
+  def ev({:cps_leaf, i}, _env), do: :erlang.element(i + 1, :erlang.get(:js_cps_vals))
 
   def ev({:destructure, pat, right}, env) do
     v = ev(right, env)
@@ -5665,7 +7831,20 @@ defmodule Browser.JS.Interp do
 
   def ev({:async, fun}, env), do: make_fn({:async, fun}, env)
   def ev({:gen, fun}, env), do: make_fn({:gen, fun}, env)
-  def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
+
+  if @check do
+    # A frame runs all its awaits in the CPS evaluator, the awaits in a default of a catch
+    # parameter too. Thus a sync await in a frame is an error of the evaluator.
+    def ev({:await, e}, env) do
+      if is_integer(env) and is_tuple(:erlang.get(env)),
+        do: check_fail("a sync await in a frame")
+
+      Browser.JS.Promise.await(ev(e, env))
+    end
+  else
+    def ev({:await, e}, env), do: Browser.JS.Promise.await(ev(e, env))
+  end
+
   def ev({:regex, source, flags}, _env), do: Browser.JS.RegExp.new(source, flags)
   def ev({:str, s}, _), do: s
   def ev({:lit, v}, _), do: v
@@ -5716,10 +7895,21 @@ defmodule Browser.JS.Interp do
   def ev({:call, {:super}, args, _}, env),
     do: Browser.JS.Classes.super_call(eval_list(args, env), env)
 
-  def ev({:super_member, key}, env) do
+  # `super.x`: its key has no effect, so one call reads `this` and the super base.
+  def ev({:super_member, {:str, key}}, env) do
     {home, this} = Browser.JS.Classes.super_base(env)
     if home == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
-    get_with_receiver(home, ev_key(key, env), this)
+    get_with_receiver(home, key, this)
+  end
+
+  # The key runs before the read of the super base, so that a key which changes the
+  # prototype of the home object reads from the new prototype (`Classes.super_this/1`).
+  def ev({:super_member, key}, env) do
+    {home, this} = Browser.JS.Classes.super_this(env)
+    key = ev_key(key, env)
+    base = Browser.JS.Classes.super_proto(home)
+    if base == :null, do: throw_error("TypeError", "Cannot read properties of null (super)")
+    get_with_receiver(base, key, this)
   end
 
   def ev({:id, "arguments"} = e, env) do
@@ -5812,28 +8002,32 @@ defmodule Browser.JS.Interp do
     |> Browser.JS.Str.join()
   end
 
-  # an elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length
+  # An elision (`[1, , 3]`) leaves a hole: no element, but it counts in the length. The
+  # values are in a list, newest first, with `:undefined` at a hole and the index of each
+  # hole in `holes`. A literal with no hole then makes its array from the list
+  # (`Browser.JS.Elems.new/2`), and only a literal with a hole makes a map.
   def ev({:array, elems}, env) do
-    {items, len} =
-      Enum.reduce(elems, {%{}, 0}, fn
-        {:spread, e}, {m, i} ->
+    {rev, len, holes} =
+      Enum.reduce(elems, {[], 0, []}, fn
+        {:spread, e}, {r, i, h} ->
           vals = iterate(ev(e, env))
+          {:lists.reverse(vals, r), i + length(vals), h}
 
-          m =
-            vals |> Enum.with_index(i) |> Enum.reduce(m, fn {v, j}, acc -> Map.put(acc, j, v) end)
+        :hole, {r, i, h} ->
+          {[:undefined | r], i + 1, [i | h]}
 
-          {m, i + length(vals)}
-
-        :hole, {m, i} ->
-          {m, i + 1}
-
-        n, {m, i} ->
-          {Map.put(m, i, ev(n, env)), i + 1}
+        n, {r, i, h} ->
+          {[ev(n, env) | r], i + 1, h}
       end)
 
-    {:obj, id} = arr = new_array([])
-    store(id, %{deref(id) | items: items, len: len})
-    arr
+    record =
+      if holes == [] do
+        Elems.new(:lists.reverse(rev), proto(:array))
+      else
+        Elems.from_holes(rev, len, holes, proto(:array))
+      end
+
+    {:obj, alloc(record)}
   end
 
   def ev({:object, props}, env) do
@@ -5843,8 +8037,14 @@ defmodule Browser.JS.Interp do
       {:init, key, val} ->
         k = key_of(key, env)
         v = ev_named(val, env, if(fname = key_fn_name(k), do: {:id, fname}))
-        if method_node?(val), do: name_fn(v, key_fn_name(k))
-        method_home(v, obj)
+
+        # (only a method that this literal defines gets the literal as its home; a method
+        # value that comes from another object keeps its home)
+        if method_node?(val) do
+          name_fn(v, key_fn_name(k))
+          method_home(v, obj)
+        end
+
         define_data(obj, k, v)
 
       {:proto, e} ->
@@ -5952,7 +8152,7 @@ defmodule Browser.JS.Interp do
 
   # `delete super.x` is always a ReferenceError (the key is evaluated, never converted)
   def ev({:unary, d, {:super_member, key}}, env) when d in ["delete", "sdelete"] do
-    Browser.JS.Classes.super_base(env)
+    Browser.JS.Classes.super_this(env)
     ev_key(key, env)
     throw_error("ReferenceError", "Unsupported reference to 'super'")
   end
@@ -6078,7 +8278,7 @@ defmodule Browser.JS.Interp do
 
     case ev(r, env) do
       {:obj, id} ->
-        Map.has_key?(deref(id).props, key)
+        Obj.has_own?(deref(id), key)
 
       _ ->
         throw_error(
@@ -6107,7 +8307,7 @@ defmodule Browser.JS.Interp do
     if nullish?(ov),
       do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
 
-    key = to_key(raw)
+    key = prop_key(raw)
     old = numeric(get(ov, key))
     new = bump(op, old)
     put(ov, key, new)
@@ -6333,7 +8533,7 @@ defmodule Browser.JS.Interp do
     if nullish?(ov),
       do: throw_error("TypeError", "Cannot read properties of #{to_str(ov)}")
 
-    key = to_key(raw)
+    key = prop_key(raw)
     old = numeric(get(ov, key))
     new = bump(op, old)
     strict_put(ov, key, new)
@@ -6367,12 +8567,10 @@ defmodule Browser.JS.Interp do
 
   # `eval(...)` where `eval` is the built-in function runs in the caller's scope
   def ev({:call, {:id, "eval"} = callee, args, false}, env) do
-    f = ev(callee, env)
-    unless function?(f), do: throw_error("TypeError", "eval is not a function")
-
-    if f == :erlang.get(:js_eval_fn),
-      do: direct_eval(eval_list(args, env), env),
-      else: call(f, :undefined, eval_list(args, env))
+    case eval_call(callee, args, env) do
+      {:value, v} -> v
+      {:call, f, this, argv} -> call(f, this, argv)
+    end
   end
 
   def ev({:call, callee, args, opt}, env) do
@@ -6381,8 +8579,7 @@ defmodule Browser.JS.Interp do
     if opt and nullish?(f), do: throw(:js_short)
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
-    unless function?(f), do: throw_error("TypeError", "#{describe(callee)} is not a function")
-    call(f, this, argv)
+    call_fast(f, this, argv, callee, env)
   end
 
   def ev({:new, callee, args}, env) do
@@ -6390,10 +8587,35 @@ defmodule Browser.JS.Interp do
     # the arguments are evaluated before the callee is checked
     argv = eval_list(args, env)
 
-    unless function?(f) and constructor?(f),
-      do: throw_error("TypeError", "#{describe(callee)} is not a constructor")
+    if @check, do: check_link(env)
 
-    construct(f, argv)
+    construct_new(f, argv, callee)
+  end
+
+  @doc false
+  # The call of `f` with `this` and the argument values `argv` at a call site. It is the
+  # code of `call_fast/5` in a function of its own, for the compiled calls of
+  # `Browser.JS.Compile`. `callee` is the node of the callee, and `env` is the scope of the
+  # call site.
+  def ccall(f, this, argv, callee, env), do: call_fast(f, this, argv, callee, env)
+
+  # A call whose callee is the name `eval` (EvaluateCall). The callee is read one time,
+  # through `call_target/2`, so a function that a `with` object holds gets that object as
+  # `this`. The arguments are evaluated before the callee is examined. When the callee is
+  # the built-in `eval`, the call is a direct eval and the result is `{:value, v}`. Else the
+  # result is `{:call, f, this, args}`, and the caller makes the call. The plain call and
+  # the tail call share this function, so they read the callee the same number of times and
+  # give the same `this`.
+  defp eval_call(callee, args, env) do
+    {f, this} = call_target(callee, env)
+    argv = eval_list(args, env)
+
+    if f == :erlang.get(:js_eval_fn) do
+      {:value, direct_eval(argv, env)}
+    else
+      unless function?(f), do: throw_error("TypeError", "eval is not a function")
+      {:call, f, this, argv}
+    end
   end
 
   # ── direct eval ────────────────────────────────────────────
@@ -6520,9 +8742,13 @@ defmodule Browser.JS.Interp do
 
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(lex, name, :tdz)
 
-    :erlang.put(:js_last, :undefined)
-    exec_list(stmts, lex)
+    # The completion value of the eval code is the result of the call, not a value of the
+    # caller: the caller's value comes back, so that an eval inside a function cannot change
+    # the completion value of the script.
+    caller_last = :erlang.put(:js_last, :undefined)
+    top_completion(exec_list(stmts, lex))
     result = Process.get(:js_last, :undefined)
+    :erlang.put(:js_last, caller_last)
     free_scope(lex, before)
     result
   end
@@ -6536,11 +8762,10 @@ defmodule Browser.JS.Interp do
   # by a fully open data property holding the function
   defp reopen_global_property(scope, name, f) do
     with %{parent: nil, vars: %{this: {:obj, gid}}} <- deref(scope),
-         %{props: %{^name => _}} = g <- deref(gid),
-         true <- configurable?(g, name) do
-      attrs = Map.put(Map.get(g, :attrs, %{}), name, %{w: true, e: true, c: true})
-      keys = if name in g.keys, do: g.keys, else: [name | g.keys]
-      store(gid, %{g | props: Map.put(g.props, name, f), attrs: attrs, keys: keys})
+         g = deref(gid),
+         true <- Obj.has_own?(g, name),
+         true <- Obj.configurable?(g, name) do
+      store(gid, Obj.reopen(g, name, f))
     end
 
     :ok
@@ -6639,18 +8864,23 @@ defmodule Browser.JS.Interp do
   end
 
   # a method written in an object literal finds `super` through the object
-  defp method_home({:obj, id} = f, obj) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def method_home({:obj, id} = f, obj) do
     case deref(id) do
       %{fun: {:closure, %{name: {:method, _}}}} -> set_home(f, obj)
       _ -> :ok
     end
   end
 
-  defp method_home(_, _), do: :ok
+  def method_home(_, _), do: :ok
 
+  # In `super_assign/4`, `super_update/5` and `compound_ref/3` the key runs before the read
+  # of the super base (`Classes.super_this/1`), and the base is read before the right side.
   defp super_assign(k, value, env, strict?) do
-    {base, this} = Browser.JS.Classes.super_base(env)
+    {home, this} = Browser.JS.Classes.super_this(env)
     raw = ev_key(k, env)
+    base = Browser.JS.Classes.super_proto(home)
     v = ev(value, env)
     key = to_key(raw)
 
@@ -6661,8 +8891,10 @@ defmodule Browser.JS.Interp do
   end
 
   defp super_update(op, prefix?, k, env, strict?) do
-    {base, this} = Browser.JS.Classes.super_base(env)
-    key = to_key(ev_key(k, env))
+    {home, this} = Browser.JS.Classes.super_this(env)
+    raw = ev_key(k, env)
+    base = Browser.JS.Classes.super_proto(home)
+    key = to_key(raw)
     old = numeric(get_with_receiver(base, key, this))
 
     new =
@@ -6695,7 +8927,7 @@ defmodule Browser.JS.Interp do
         super_set(deref(id).proto, key, v, this)
 
       {:accessor, _, setter, _, _} ->
-        if function?(setter), do: call(setter, this, [v]), else: fail_put()
+        if function?(setter), do: keep_put_flag(call(setter, this, [v])), else: fail_put()
 
       {:data, _, false, _, _} ->
         fail_put()
@@ -6763,63 +8995,7 @@ defmodule Browser.JS.Interp do
 
   defp compound_assign(op, target, value, env, strict?) do
     # evaluate the target's object and key once
-    {read, write} =
-      case target do
-        {:id, name} ->
-          id_ref(env, name, target, strict?)
-
-        {:slot, d, i, name} ->
-          frame = hop(env, d)
-          {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> slot_assign(frame, i, name, v) end}
-
-        {:cslot, d, i, name} ->
-          frame = hop(env, d)
-          {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
-
-        {:mslot, d, i, name, k} ->
-          frame = hop(env, d)
-
-          {fn -> ev({:slot, 0, i, name}, frame) end,
-           fn v -> mslot_assign(frame, i, name, k, v) end}
-
-        {:aslot, d, i} ->
-          frame = hop(env, d)
-          {fn -> ev({:aslot, 0, i}, frame) end, fn v -> slot_put(frame, i, v) end}
-
-        {:fname, d, i, name} ->
-          {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
-
-        {:gref, name} ->
-          id_ref(root(env), name, {:id, name}, strict?)
-
-        {:mref, d, name} ->
-          id_ref(hop(env, d), name, {:id, name}, strict?)
-
-        {:super_member, k} ->
-          {base, this} = Browser.JS.Classes.super_base(env)
-          key = to_key(ev_key(k, env))
-
-          {fn -> get_with_receiver(base, key, this) end,
-           fn v -> super_put(base, key, v, this, strict?) end}
-
-        {:member, o, k, _} ->
-          ov = ev(o, env)
-          key = ev_key(k, env)
-
-          if nullish?(ov),
-            do:
-              throw_error(
-                "TypeError",
-                "Cannot read properties of #{to_str(ov)} (reading '#{safe_key(key)}')"
-              )
-
-          # the key is converted once, for the read and for the write
-          key = to_key(key)
-
-          {fn -> get(ov, key) end,
-           fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
-      end
-
+    {read, write} = compound_ref(target, env, strict?)
     old = read.()
     base = binary_part(op, 0, byte_size(op) - 1)
 
@@ -6837,6 +9013,70 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # The reference of a compound assignment target: a read function and a write function.
+  # The object and the key of the target are evaluated here, one time. It is public because
+  # the CPS evaluator (`Browser.JS.Async`) reads the target of a logical assignment before
+  # its right side awaits.
+  def compound_ref(target, env, strict?) do
+    case target do
+      {:id, name} ->
+        id_ref(env, name, target, strict?)
+
+      {:slot, d, i, name} ->
+        frame = hop(env, d)
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> slot_assign(frame, i, name, v) end}
+
+      {:cslot, d, i, name} ->
+        frame = hop(env, d)
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn _ -> cslot_assign(frame, i, name) end}
+
+      {:mslot, d, i, name, k} ->
+        frame = hop(env, d)
+
+        {fn -> ev({:slot, 0, i, name}, frame) end, fn v -> mslot_assign(frame, i, name, k, v) end}
+
+      {:aslot, d, i} ->
+        frame = hop(env, d)
+        {fn -> ev({:aslot, 0, i}, frame) end, fn v -> slot_put(frame, i, v) end}
+
+      {:fname, d, i, name} ->
+        {fn -> ev({:slot, d, i, name}, env) end, fn _ -> :ok end}
+
+      {:gref, name} ->
+        id_ref(root(env), name, {:id, name}, strict?)
+
+      {:mref, d, name} ->
+        id_ref(hop(env, d), name, {:id, name}, strict?)
+
+      {:super_member, k} ->
+        {home, this} = Browser.JS.Classes.super_this(env)
+        raw = ev_key(k, env)
+        base = Browser.JS.Classes.super_proto(home)
+        key = to_key(raw)
+
+        {fn -> get_with_receiver(base, key, this) end,
+         fn v -> super_put(base, key, v, this, strict?) end}
+
+      {:member, o, k, _} ->
+        ov = ev(o, env)
+        key = ev_key(k, env)
+
+        if nullish?(ov),
+          do:
+            throw_error(
+              "TypeError",
+              "Cannot read properties of #{to_str(ov)} (reading '#{safe_key(key)}')"
+            )
+
+        # the key is converted once, for the read and for the write
+        key = prop_key(key)
+
+        {fn -> get(ov, key) end,
+         fn v -> if strict?, do: strict_put(ov, key, v), else: put(ov, key, v) end}
+    end
+  end
+
   defp delete_base_check(base, key) when base in [:null, :undefined],
     do:
       throw_error(
@@ -6845,6 +9085,12 @@ defmodule Browser.JS.Interp do
       )
 
   defp delete_base_check(_, _), do: :ok
+
+  @doc false
+  # The name of a callee node in an error text. It is public because the closure compiler
+  # (`Browser.JS.Compile`) calls it. (`describe/1` stays private, because modules that
+  # import this module have functions of that name)
+  def describe_node(e), do: describe(e)
 
   defp describe({:id, n}), do: n
   defp describe({:member, o, {:str, k}, _}), do: describe(o) <> "." <> k
@@ -6859,12 +9105,33 @@ defmodule Browser.JS.Interp do
   defp describe({:this, _, _}), do: "this"
   defp describe(_), do: "expression"
 
-  defp eval_list(nodes, env) do
-    Enum.flat_map(nodes, fn
-      {:spread, e} -> iterate(ev(e, env))
-      :hole -> [:undefined]
-      n -> [ev(n, env)]
-    end)
+  # The values of an argument list, from left to right. Each value is bound before the
+  # recursive call, because Erlang does not define the order in which the parts of a list
+  # expression are evaluated. Plain recursion is faster than `Enum.flat_map/2` with a fun,
+  # and a call evaluates an argument list every time.
+  @doc false
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it for an
+  # argument list with a spread or a hole.
+  def eval_list([], _env), do: []
+
+  def eval_list([{:spread, e} | rest], env) do
+    vs = iterate(ev(e, env))
+    vs ++ eval_list(rest, env)
+  end
+
+  def eval_list([:hole | rest], env), do: [:undefined | eval_list(rest, env)]
+
+  # The arguments of the default constructor of a derived class: the spec passes them on
+  # as they are, with no iterator (`Browser.JS.Classes`). The rest array is new and has
+  # no hole, so its list is the arguments.
+  def eval_list([{:spread_rest, e} | rest], env) do
+    vs = array_list(ev(e, env))
+    vs ++ eval_list(rest, env)
+  end
+
+  def eval_list([n | rest], env) do
+    v = ev(n, env)
+    [v | eval_list(rest, env)]
   end
 
   defp spread_into(obj, src) do
@@ -6888,6 +9155,21 @@ defmodule Browser.JS.Interp do
   def binop(">", a, b) when is_float(a) and is_float(b), do: a > b
   def binop("<=", a, b) when is_float(a) and is_float(b), do: a <= b
   def binop(">=", a, b) when is_float(a) and is_float(b), do: a >= b
+
+  # (a float in the int32 range truncates to its ToInt32 value, and a bitwise operation on
+  # two such integers gives an integer in the int32 range, so no wrap is necessary)
+  def binop(op, a, b)
+      when op in ["&", "|", "^"] and is_float(a) and is_float(b) and abs(a) < 2_147_483_648.0 and
+             abs(b) < 2_147_483_648.0 do
+    x = trunc(a)
+    y = trunc(b)
+
+    case op do
+      "&" -> :erlang.band(x, y)
+      "|" -> :erlang.bor(x, y)
+      "^" -> :erlang.bxor(x, y)
+    end * 1.0
+  end
 
   def binop("+", a, b) do
     a = to_primitive(a, "default")

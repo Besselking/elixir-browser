@@ -9,6 +9,7 @@ defmodule Browser.JS.RegExp do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props, Str}
+  require Browser.JS.Obj, as: Obj
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
 
@@ -20,21 +21,20 @@ defmodule Browser.JS.RegExp do
 
     obj =
       {:obj,
-       alloc(%{
-         class: :regexp,
-         src: source,
-         fl: flags,
-         re: re,
-         names: names,
-         props: %{},
-         keys: [],
-         proto: proto(:regexp)
-       })}
+       alloc(
+         Obj.record(
+           class: :regexp,
+           src: source,
+           fl: flags,
+           re: re,
+           names: names,
+           proto: proto(:regexp)
+         )
+       )}
 
     put_hidden(obj, "lastIndex", 0.0)
     {:obj, id} = obj
-    o = deref(id)
-    store(id, Map.put(o, :attrs, %{"lastIndex" => %{w: true, c: false, e: false}}))
+    store(id, Obj.put_attrs(deref(id), "lastIndex", %{w: true, c: false, e: false}))
     obj
   end
 

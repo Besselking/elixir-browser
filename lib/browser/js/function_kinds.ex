@@ -7,6 +7,7 @@ defmodule Browser.JS.FunctionKinds do
 
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Parser}
+  alias Browser.JS.Obj
 
   @kinds [
     {:generator_function, "GeneratorFunction", "function*", :generator},
@@ -49,9 +50,6 @@ defmodule Browser.JS.FunctionKinds do
   end
 
   # a data property that is neither writable nor enumerable, but configurable
-  defp configurable_only({:obj, id}, key, v) do
-    o = deref(id)
-    attrs = Map.put(Map.get(o, :attrs, %{}), key, %{w: false, c: true, e: false})
-    store(id, o |> Map.put(:props, Map.put(o.props, key, v)) |> Map.put(:attrs, attrs))
-  end
+  defp configurable_only({:obj, id}, key, v),
+    do: store(id, Obj.put_with_attrs(deref(id), key, v, %{w: false, c: true, e: false}))
 end

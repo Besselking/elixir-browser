@@ -7878,3 +7878,120 @@ defmodule Browser.LayoutTest do
     end
   end
 end
+
+defmodule Browser.LayoutNestedBoxesTest do
+  use ExUnit.Case, async: true
+  alias Browser.{Layout, Page}
+
+  # Each clipping or relatively positioned box changes all the items inside it. When the change
+  # is made on each item at each box, a layout of `k` items in boxes `d` deep costs `k * d`.
+
+  defp measure(text, style), do: String.length(text) * div(round(style.size), 2)
+
+  defp nested(depth, words) do
+    open = String.duplicate(~s(<div style="position:relative;top:1px;overflow:hidden">), depth)
+    text = Enum.map_join(1..words, " ", &"w#{&1}")
+
+    Page.build(
+      open <> ~s(<p style="margin:0">#{text}</p>) <> String.duplicate("</div>", depth),
+      "about:test"
+    )
+  end
+
+  # -> {items, reductions of the layout}
+  defp lay(page) do
+    task =
+      Task.async(fn ->
+        {:reductions, r0} = Process.info(self(), :reductions)
+        {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+        {:reductions, r1} = Process.info(self(), :reductions)
+        {items, r1 - r0}
+      end)
+
+    Task.await(task, 60_000)
+  end
+
+  test "each item gets the clips and offsets of all the boxes around it" do
+    {items, _} = lay(nested(5, 3))
+    word = Enum.find(items, &(&1.type == :text and &1.text == "w1"))
+    {flat, _} = lay(nested(0, 3))
+    flat_word = Enum.find(flat, &(&1.type == :text and &1.text == "w1"))
+    assert word.y == flat_word.y + 5
+    assert length(word.clips) == 5
+    assert word.clip.h > 0
+    assert word.over
+  end
+
+  test "boxes nested deep around many items cost little more than one box" do
+    {_, shallow} = lay(nested(1, 2000))
+    {_, deep} = lay(nested(16, 2000))
+    # (one item made again for each box would cost about five times as much)
+    assert deep < 2 * shallow
+  end
+
+  test "the gap of a legend moves with the box around its fieldset" do
+    fieldset =
+      ~s(<fieldset style="display:inline-block;border:4px solid;border-radius:6px">) <>
+        "<legend>Legend</legend>text</fieldset>"
+
+    border = fn style ->
+      {items, _} = lay(Page.build(~s(<div style="#{style}">x #{fieldset}</div>), "about:test"))
+      Enum.find(items, &Map.has_key?(&1, :border))
+    end
+
+    plain = border.("overflow:hidden")
+    moved = border.("overflow:hidden;position:relative;left:40px;top:10px")
+    assert plain.border != nil
+
+    assert Map.take(moved, [:x, :y, :border]) ==
+             Map.take(Layout.shift(plain, 40, 10), [:x, :y, :border])
+  end
+
+  # Items that each path of `apply_ctx/2` takes: a border with the gap of a legend, a transform,
+  # the layers of a shadow and of a gradient, a paint order of its own (an outline, a positioned
+  # box), a clip of its own (a box that clips inside a box that clips, a scroller) and a limit of
+  # its extent. The reftests do not show all of them, so a change of a key guard or of the order
+  # of the ops could give wrong clips and offsets and pass.
+  @own_keys """
+  <p>x <fieldset style="display:inline-block;border:4px solid;border-radius:6px"><legend>Legend</legend>text</fieldset>
+  <span style="display:inline-block;transform:rotate(10deg);width:40px">turned</span>
+  <span style="display:inline-block;box-shadow:2px 3px 4px blue;background:linear-gradient(red,blue)">layers</span>
+  <span style="outline:2px solid green">outline</span>
+  <span style="position:relative;z-index:2;left:3px">positioned</span></p>
+  <div style="overflow:hidden;height:60px"><div style="overflow:auto;height:40px"><p>clipped two times</p></div></div>
+  <div style="position:sticky;top:5px">sticky</div>
+  <div style="width:80px"><span style="white-space:nowrap">a line wider than its box</span></div>
+  """
+
+  @ops [
+    {:dy, 7},
+    {:dy, -3},
+    {:rel, 40, 10, :over, 17},
+    {:rel, -5, 2, :under, {3, 18}},
+    {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+    {:clip, %{x: 20, y: 0, w: 120, h: 300}, 9},
+    {:xlim, 250},
+    {:stick, %{top: 0, y0: 0, h: 10, parent: nil}, 0}
+  ]
+
+  test "the ops of the boxes around an item give it what they give it one by one" do
+    page = Page.build(@own_keys, "about:test")
+
+    items =
+      for opts <- [[], [scrollers: true, boxes: true]],
+          item <- elem(Layout.layout(page.nodes, 500, &measure/2, 600, [images: %{}] ++ opts), 0),
+          do: item
+
+    for key <- [:border, :xform, :layers, :pz, :clip, :clips, :sc, :xlim],
+        do: assert(Enum.any?(items, &Map.has_key?(&1, key)), "no item has #{key}")
+
+    :rand.seed(:exsss, {7, 8, 9})
+    pairs = for a <- @ops, b <- @ops, do: [a, b]
+    longer = for _ <- 1..60, do: Enum.map(1..Enum.random(3..5), fn _ -> Enum.random(@ops) end)
+
+    for item <- items, ops <- Enum.map(@ops, &[&1]) ++ pairs ++ longer do
+      {got, eager} = Layout.ctx_and_eager(item, ops)
+      assert got == eager, "ops #{inspect(ops)} on #{inspect(Map.take(item, [:type, :x, :y]))}"
+    end
+  end
+end
