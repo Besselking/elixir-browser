@@ -8188,6 +8188,77 @@ defmodule Browser.LayoutNestedBoxesTest do
     end
   end
 
+  describe "flex items that are not laid out again" do
+    alias Browser.Page
+
+    # -> the {width, height} of the rect of #100000 on a page
+    defp red_box(html) do
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      %{w: w, h: h} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+      {round(w), round(h)}
+    end
+
+    test "only an item that stretches in one line of a definite height gets that height" do
+      # (an item with a height of its own does not stretch)
+      assert {_, 300} =
+               red_box(
+                 ~s(<div style="display:flex;height:2000px">) <>
+                   ~s(<span style="height:300px;background:#100000">c</span></div>)
+               )
+
+      # (an item with an automatic margin does not stretch: it is as high as its content)
+      assert {_, 332} =
+               red_box(
+                 ~s(<div style="display:flex;height:300px"><div style="margin:auto 0;) <>
+                   ~s(background:#100000"><p style="height:300px">c</p></div></div>)
+               )
+
+      # (an item with an aspect ratio is as wide as its stretched height makes it)
+      assert {4000, 2000} =
+               red_box(
+                 ~s(<div style="display:flex;height:2000px">) <>
+                   ~s(<div style="aspect-ratio:2;background:#100000">a</div></div>)
+               )
+
+      # (in a container that wraps, the line is as high as its items, not as the container)
+      assert {_, 300} =
+               red_box(
+                 ~s(<div style="height:300px"><div style="display:inline-flex;height:50%;) <>
+                   ~s(flex-wrap:wrap"><i style="background:#100000">aaaaa</i>) <>
+                   ~s(<div style="height:300px"></div></div></div>)
+               )
+
+      # (the stretched height is part of the memo key: a form control in a row with a height,
+      # in a column, keeps its own height)
+      assert {_, 22} =
+               red_box(
+                 ~s(<div><section style="display:inline-flex;flex-direction:column">) <>
+                   ~s(<div style="display:flex;height:200px;flex:1">) <>
+                   ~s(<input value="abc" style="background:#100000"></div></section></div>)
+               )
+    end
+
+    test "only a column item that keeps its height and is not made definite is kept" do
+      # (a flexed height is definite: a percentage in the item resolves against it)
+      assert {_, 15} =
+               red_box(
+                 ~s(<div style="display:flex;flex-direction:column;height:0">) <>
+                   ~s(<div style="flex:1 1 0%"><section style="height:50%;border:5px solid;) <>
+                   ~s(background:#100000"></section></div></div>)
+               )
+
+      # (an item with a min-height is laid out without it to find its content height)
+      assert {_, 900} =
+               red_box(
+                 ~s(<span style="display:flex;flex-direction:column">) <>
+                   ~s(<div style="display:flex;flex-direction:column;min-height:20px;) <>
+                   ~s(flex-basis:50%;background:#100000"><div style="height:900px"></div>) <>
+                   "</div></span>"
+               )
+    end
+  end
+
   describe "automatic minimum height in a flex column" do
     alias Browser.Page
 
