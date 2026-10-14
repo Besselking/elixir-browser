@@ -2961,12 +2961,13 @@ defmodule Browser.Layout do
   # A hash of ops in which a table counts by the key of its model, which is a hash of its
   # content already. (A table's model holds the ops of each cell, and `phash2` does not see
   # terms that are shared: an atom around a table would hash the table again, and so would
-  # each level of tables in cells.)
+  # each level of tables in cells. A table in a cell is in the atom of an inline-block.)
   defp ops_hash(ops),
     do: :erlang.phash2(if(has_table?(ops), do: shallow_ops(ops), else: ops))
 
   defp has_table?([{:table, _, _, _} | _]), do: true
   defp has_table?([{:span, _, ops, _} | rest]), do: has_table?(ops) or has_table?(rest)
+  defp has_table?([{:inline_block, sub, _, _} | rest]), do: has_table?(sub) or has_table?(rest)
   defp has_table?([_ | rest]), do: has_table?(rest)
   defp has_table?(_), do: false
 
@@ -2975,6 +2976,10 @@ defmodule Browser.Layout do
 
   defp shallow_op({:table, ts, model, style}), do: {:table, ts, model.key, style}
   defp shallow_op({:span, key, ops, safe?}), do: {:span, key, shallow_ops(ops), safe?}
+
+  defp shallow_op({:inline_block, sub, spec, style}),
+    do: {:inline_block, shallow_ops(sub), spec, style}
+
   defp shallow_op(op), do: op
 
   defp nid_of(attrs) do
