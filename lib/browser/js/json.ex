@@ -235,6 +235,9 @@ defmodule Browser.JS.Json do
     string(r, [run | acc])
   end
 
+  # A long run alone points into the whole JSON text. Copy it, so that the string does not keep
+  # the text in memory. (A short run is a copy already.)
+  defp string("\"" <> r, [run]) when byte_size(run) >= 64, do: {:binary.copy(run), r}
   defp string("\"" <> r, acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), r}
 
   defp string("\\" <> r, acc) do
