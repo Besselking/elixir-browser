@@ -1356,12 +1356,14 @@ defmodule Browser.JS.DOM do
   defp scrolling_element?(n), do: n.kind == :document or n.tag in ["html", "body"]
 
   defp metric(n, key) do
-    {x, y, w, h} = page_rect(n.id)
+    scroller = scrolling_element?(n)
+    # (only a key that reads a box or the content size lays the page out)
+    {x, y, w, h} = if box_metric?(key, scroller), do: page_rect(n.id), else: {0, 0, 0, 0}
     {sx, sy} = st().scroll
     {cw, ch} = st().content
 
     value =
-      case {key, scrolling_element?(n)} do
+      case {key, scroller} do
         {"scrollTop", true} -> sy
         {"scrollLeft", true} -> sx
         {k, false} when k in ["scrollTop", "scrollLeft"] -> 0
@@ -1382,6 +1384,14 @@ defmodule Browser.JS.DOM do
 
     value |> round() |> float()
   end
+
+  defp box_metric?(key, _) when key in ["offsetWidth", "offsetHeight", "offsetTop", "offsetLeft"],
+    do: true
+
+  defp box_metric?(key, true), do: key in ["scrollHeight", "scrollWidth"]
+
+  defp box_metric?(key, false),
+    do: key in ["clientWidth", "clientHeight", "scrollWidth", "scrollHeight"]
 
   defp rect_object(nid) do
     {x, y, w, h} = page_rect(nid)
@@ -2573,12 +2583,12 @@ defmodule Browser.JS.DOM do
   end
 
   defp computed_default(n, prop) do
-    {_, _, w, h} = page_rect(n.id)
     px = fn v -> "#{round(v)}px" end
 
+    # (only the width and the height read the box, so only they lay the page out)
     case prop do
-      "width" -> px.(w)
-      "height" -> px.(h)
+      "width" -> px.(elem(page_rect(n.id), 2))
+      "height" -> px.(elem(page_rect(n.id), 3))
       "display" -> if(n.tag in @block_tags, do: "block", else: "inline")
       "position" -> "static"
       "visibility" -> "visible"

@@ -1092,6 +1092,46 @@ defmodule Browser.JS.DOMTest do
       refute_received {:layout_now, _, _, _}
     end
 
+    test "a read that uses no box does not lay the page out; the computed width does" do
+      raw =
+        ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>
+          ~s|var cs = getComputedStyle(d); var h = document.documentElement;| <>
+          ~s|console.log(cs.display, cs.position, cs.marginLeft, d.scrollTop, d.clientLeft, h.clientWidth, h.scrollTop);| <>
+          ~s|console.log('box', cs.width, d.offsetWidth)</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      # (only the width asks for a layout: the first console line is made before it)
+      requests =
+        Stream.repeatedly(fn ->
+          receive do
+            {:layout_now, ^pid, ref, tree} ->
+              nid = nid_of_id(tree, "x")
+              send(pid, {:layout_now_done, ref, %{nid => {10, 20, 300, 40}}, {800.0, 600.0}})
+              :asked
+          after
+            1000 -> :none
+          end
+        end)
+        |> Enum.take(2)
+
+      assert requests == [:asked, :none]
+      reply = Task.await(task)
+      assert errors(reply) == []
+      assert logs(reply) == ["block static 0px 0 0 800 0", "box 300px 300"]
+    end
+
     test "the tree sent for a layout knows the address of the frame whose script asked" do
       frame = """
       <link rel=stylesheet href="s.css"><body><script>
