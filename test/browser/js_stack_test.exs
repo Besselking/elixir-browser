@@ -11,6 +11,7 @@ defmodule Browser.JS.StackTest do
   alias Browser.JS
   alias Browser.JS.{Builtins, GC, Interp, Parser, Runtime}
   alias Browser.JS.Resolve.{Info, Scope}
+  require Interp
 
   # True in the check build (`JS_RESOLVE_CHECK=1`), which compares the chain with an
   # oracle at each call (design section 5).
@@ -337,19 +338,24 @@ defmodule Browser.JS.StackTest do
     c
   end
 
+  # True when the frame `id` holds no heap entry after its call. A leaf frame of a normal
+  # build is not a heap entry: it stays under the key of its depth (`Interp.leaf_base/0`).
   defp freed?(id) do
     case :erlang.get(id) do
       :undefined -> true
       {:js_freed, _} -> true
-      _ -> false
+      _ -> id >= Interp.leaf_base()
     end
   end
 
   # Sets the chain and the position as a caller would leave them. The value `:undefined`
-  # removes the chain, as in a process that did not call `Interp.init/1`.
+  # removes the chain, as in a process that did not call `Interp.init/1`. The leaf frames
+  # of earlier calls go, so that a leaf frame that `frame_of_call/0` finds is from the
+  # next call.
   defp put_caller(chain, pos) do
     put_chain(chain)
     :erlang.put(:js_pos, pos)
+    for d <- 0..1001, do: :erlang.erase(Interp.leaf_base() + d)
   end
 
   # Element 3 of a frame: its chain in the check build, `nil` in a normal build.
@@ -406,7 +412,7 @@ defmodule Browser.JS.StackTest do
   defp install_peek(gid) do
     peek =
       Interp.native("peek", fn _this, _args ->
-        Process.put(:peeked, newest(Info))
+        Process.put(:peeked, frame_of_call())
         :undefined
       end)
 
@@ -420,11 +426,24 @@ defmodule Browser.JS.StackTest do
   defp install_probe(gid) do
     probe =
       Interp.native("probe", fn _this, _args ->
-        Process.put(:probed, {:erlang.get(:js_stack), newest(Info), newest(Scope)})
+        Process.put(:probed, {:erlang.get(:js_stack), frame_of_call(), newest(Scope)})
         :undefined
       end)
 
     Interp.declare(gid, "probe", probe)
+  end
+
+  # The frame of the JS call that called a native, as `{key, tuple}`. A native adds no
+  # cell, so the head of the chain is the cell of that call. In a normal build the frame
+  # of a leaf is under the key of the depth of its caller (`Interp.leaf_base/0`). Each
+  # other frame is the newest heap frame.
+  defp frame_of_call do
+    key = Interp.leaf_base() + Interp.depth_of(:erlang.get(:js_stack)) - 1
+
+    case :erlang.get(key) do
+      t when is_tuple(t) and tuple_size(t) >= 5 and is_struct(elem(t, 1), Info) -> {key, t}
+      _ -> newest(Info)
+    end
   end
 
   # The newest heap entry that is a frame whose record (element 2) is a `struct`, as

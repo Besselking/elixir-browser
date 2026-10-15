@@ -23,7 +23,9 @@ defmodule Browser.JS.GC do
   and a count must not keep a dead object alive. The cells of the inline
   caches (step A2) are process keys that are negative integers. They are not heap entries
   and not roots: a cell can hold the id of a prototype, and a freed prototype makes the
-  cell miss (`Browser.JS.Shape`).
+  cell miss (`Browser.JS.Shape`). The leaf frames of a normal build (the keys from
+  `Browser.JS.Interp.leaf_base/0` up) are not heap entries and not roots: no call is live
+  during a collect, so the collector erases them.
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
   since it holds a result across the timers). A threshold of 0 stays 0, so the collector
@@ -33,6 +35,7 @@ defmodule Browser.JS.GC do
 
   import Bitwise
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Interp, as: Interp
 
   @min_collect 100_000
 
@@ -81,6 +84,11 @@ defmodule Browser.JS.GC do
     {ids, roots} =
       :lists.foldl(
         fn
+          # (a leaf frame of a normal build, see `Browser.JS.Interp`: no script runs during
+          # a collect, so no call holds it. The key is not a heap id, and a bitmap up to it
+          # would be too large. The key goes, so that the walk cannot read a number of that
+          # size as the id of the old frame.)
+          {k, _}, acc when is_integer(k) and k >= Interp.leaf_base() -> erase_key(k, acc)
           {k, _}, {ids, roots} when is_integer(k) and k >= 0 -> {[k | ids], roots}
           # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
           # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
@@ -153,6 +161,12 @@ defmodule Browser.JS.GC do
     # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
     if Process.get(:js_gc_at) != 0, do: Process.put(:js_gc_at, max(@min_collect, 2 * live))
     freed
+  end
+
+  # (the erase of a leaf frame in `collect/0`)
+  defp erase_key(k, acc) do
+    :erlang.erase(k)
+    acc
   end
 
   @compile {:inline, marked?: 2}

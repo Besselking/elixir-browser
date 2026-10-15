@@ -15,6 +15,7 @@ defmodule Browser.JS.FramesTest do
   alias Browser.JS
   alias Browser.JS.{Async, GC, Interp, Parser, Resolve}
   alias Browser.JS.Resolve.{Info, Scope}
+  require Interp
 
   @tdz_x "Cannot access 'x' before initialization"
 
@@ -71,30 +72,50 @@ defmodule Browser.JS.FramesTest do
     end
   end
 
-  # A native `peek()` for a leaf body: it records the newest frame of the heap, so a test
-  # can look at a frame while the call that built it is still running. The frame is the
-  # highest id whose entry is a tuple with an `Info` in the second position.
+  # A native `peek()`: it records the newest frame of the heap, so a test can look at a
+  # frame while the call that built it is still running. The frame is the highest id whose
+  # entry is a tuple with an `Info` in the second position.
   defp install_peek(gid) do
     peek =
       Interp.native("peek", fn _this, _args ->
-        last = :erlang.get(:js_next) - 1
-
-        found =
-          Enum.find_value(last..0//-1, fn id ->
-            case :erlang.get(id) do
-              t when is_tuple(t) and tuple_size(t) >= 5 ->
-                if match?(%Info{}, elem(t, 1)), do: {id, t}
-
-              _ ->
-                nil
-            end
-          end)
-
-        Process.put(:peeked, found)
+        Process.put(:peeked, newest_frame())
         :undefined
       end)
 
     Interp.declare(gid, "peek", peek)
+  end
+
+  # A native `peek()` for a leaf body (a level 1 function). In a normal build the frame of
+  # a leaf is not a heap entry: it is under the key of the depth of its caller
+  # (`Interp.leaf_base/0`). A native adds no cell, so that depth is one less than the
+  # depth of the head of the chain. The check build keeps the leaf frame in the heap.
+  defp install_leaf_peek(gid) do
+    peek =
+      Interp.native("peek", fn _this, _args ->
+        Process.put(:peeked, if(@check, do: newest_frame(), else: leaf_frame()))
+        :undefined
+      end)
+
+    Interp.declare(gid, "peek", peek)
+  end
+
+  defp leaf_frame do
+    key = Interp.leaf_base() + Interp.depth_of(:erlang.get(:js_stack)) - 1
+    {key, :erlang.get(key)}
+  end
+
+  defp newest_frame do
+    last = :erlang.get(:js_next) - 1
+
+    Enum.find_value(last..0//-1, fn id ->
+      case :erlang.get(id) do
+        t when is_tuple(t) and tuple_size(t) >= 5 ->
+          if match?(%Info{}, elem(t, 1)), do: {id, t}
+
+        _ ->
+          nil
+      end
+    end)
   end
 
   defp peeked, do: Process.get(:peeked)
@@ -116,7 +137,7 @@ defmodule Browser.JS.FramesTest do
   describe "the frame builder" do
     test "plain parameters: arguments, hidden slots and the template in one tuple" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
       node = leaf("function f(a, b){ peek(); var c; let d; return 0 }", "f")
       f = Interp.make_function(node, gid, false)
       pos = Process.get(:js_pos)
@@ -136,8 +157,8 @@ defmodule Browser.JS.FramesTest do
 
       assert tuple_size(elem(peeked(), 1)) == info(node).size
 
-      # The frame is erased when the call returns.
-      assert freed?(fid)
+      # The frame leaves the heap when the call returns.
+      assert left?(fid)
 
       # Extra arguments are dropped.
       assert Interp.call(f, :undefined, [1.0, 2.0, 3.0]) == 0.0
@@ -146,7 +167,7 @@ defmodule Browser.JS.FramesTest do
 
     test "duplicate parameter names: both positions are filled and the last one is read" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
       f = Interp.make_function(leaf("function f(a, a){ peek(); return a }", "f"), gid, false)
 
       assert Interp.call(f, :undefined, [1.0, 2.0]) == 2.0
@@ -155,7 +176,7 @@ defmodule Browser.JS.FramesTest do
 
     test "pattern parameters: one slot per name, `nnames` counts them" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
       src = "function f({a}, [b], ...r){ peek(); return a + b + r.length }"
       node = leaf(src, "f")
       f = Interp.make_function(node, gid, false)
@@ -176,7 +197,7 @@ defmodule Browser.JS.FramesTest do
 
     test "default parameters: the slots start in the TDZ and fill in order" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
 
       f =
         Interp.make_function(
@@ -196,7 +217,7 @@ defmodule Browser.JS.FramesTest do
 
     test "the hidden `this` slot: raw when strict, the global `this` or a box when sloppy" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
 
       strict =
         Interp.make_function(
@@ -228,7 +249,7 @@ defmodule Browser.JS.FramesTest do
 
     test "the hidden `self` slot holds the function, and no self-name scope is made" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
       {:ok, tree} = Parser.parse("var g = function h(){ peek(); return h }", resolve: 1)
       node = find(tree, &match?({:fn, "h", _, _, _, %Info{}}, &1))
       assert %Info{hidden: [:self], self: 6} = info(node)
@@ -736,7 +757,7 @@ defmodule Browser.JS.FramesTest do
   describe "the free rule" do
     test "the frame is erased after a return, a throw and a step limit" do
       gid = heap()
-      install_peek(gid)
+      install_leaf_peek(gid)
       ok = Interp.make_function(leaf("function f(){ peek(); return 1 }", "f"), gid, false)
       bad = Interp.make_function(leaf("function f(){ peek(); throw 1 }", "f"), gid, false)
 
@@ -746,21 +767,24 @@ defmodule Browser.JS.FramesTest do
       # Step 2f: the chain holds the depth, so the chain is all that must come back. The
       # full test of the restore is in test/browser/js_stack_test.exs.
       stack = :erlang.get(:js_stack)
+      size = Interp.heap_size()
 
       assert Interp.call(ok, :undefined, []) == 1.0
       {fid, _} = peeked()
-      assert freed?(fid)
+      assert left?(fid)
 
       assert catch_throw(Interp.call(bad, :undefined, [])) == {:js_error, 1.0}
       {fid, _} = peeked()
-      assert freed?(fid)
+      assert left?(fid)
       assert :erlang.get(:js_stack) == stack
 
       :erlang.put(:js_steps, 100)
       assert catch_throw(Interp.call(spin, :undefined, [])) == :js_limit
       {fid, _} = peeked()
-      assert freed?(fid)
+      assert left?(fid)
       assert :erlang.get(:js_stack) == stack
+      # (the thrown 1 and the step limit make no object)
+      assert Interp.heap_size() == size
     end
 
     test "1000 calls and 1000 throws leave the heap as it was" do
@@ -841,6 +865,11 @@ defmodule Browser.JS.FramesTest do
       _ -> false
     end
   end
+
+  # True when the leaf frame `fid` holds no heap entry after its call. A normal build keeps
+  # a leaf frame under the key of its depth (`Interp.leaf_base/0`), which is not a heap
+  # entry. The check build frees it.
+  defp left?(fid), do: if(@check, do: freed?(fid), else: fid >= Interp.leaf_base())
 
   # A frame with a call position in its header, so a test can see that a block frame
   # copies the header of its parent.

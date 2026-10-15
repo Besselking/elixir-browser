@@ -98,6 +98,20 @@ defmodule Browser.JS.Interp do
   # `@frame_base + k` (`Browser.JS.Resolve.Info`).
   @frame_base 6
 
+  # The leaf frames of a normal build (see `frame_call/6`). The frame of a leaf call (a
+  # level 1 function, `free: :always`) is not a heap entry: it goes under the key
+  # `@leaf_base + d`, where `d` is the depth of the caller. The chain in `:js_stack` only
+  # grows inside a call, so two live leaf frames never have the same depth. No closure can
+  # hold a leaf frame, so the next leaf call at the same depth writes over the old frame.
+  # Thus a leaf call takes no heap id and erases no key. The base is above each heap id
+  # and each JS array index. The collector erases these keys (`Browser.JS.GC`). Check mode
+  # keeps the heap ids, so that its tombstones find each use of a frame after its call.
+  @leaf_base 1_125_899_906_842_624
+
+  @doc false
+  # The first key of the leaf frames (see `@leaf_base`).
+  defmacro leaf_base, do: @leaf_base
+
   # Check mode (`JS_RESOLVE_CHECK=1`, see `config/config.exs`): every slot access asserts
   # that the hop lands on a scope that owns the name at that index, and every frame is
   # checked at its build. The flag is read at compile time, so without it no check costs
@@ -4756,9 +4770,11 @@ defmodule Browser.JS.Interp do
   # A call of a rewritten function (step 2b). The frame is one tuple
   # `{parent_id, info, chain, call_pos, root_id, params..., hidden..., template...}`. It is
   # built before the body runs. When the call ends, `leave/5` erases it, unless a closure
-  # made during the call can hold its id. The resolver marked every return inside the
-  # function, so a `{:tail}` completion comes only from a tail site. The function does not
-  # tick: its callers tick as they do on the old path, so the step counts stay the same.
+  # made during the call can hold its id. A leaf frame of a normal build is not erased: it
+  # stays under the key of its depth (see `@leaf_base`). The resolver marked every return
+  # inside the function, so a `{:tail}` completion comes only from a tail site. The
+  # function does not tick: its callers tick as they do on the old path, so the step
+  # counts stay the same.
   #
   # The call stack (step 2f): `:js_stack` is a chain of cells, innermost first. A call
   # pushes `{name, call_pos, depth}`, and so does an async call and an async body that
@@ -4821,7 +4837,23 @@ defmodule Browser.JS.Interp do
       end
 
     if @check, do: check_frame(tuple, info, id, mode)
-    frame = alloc(tuple)
+
+    # (a leaf frame of a normal build goes under the key of its depth, see `@leaf_base`)
+    frame =
+      if @check do
+        alloc(tuple)
+      else
+        case info.free do
+          :always ->
+            key = @leaf_base + depth
+            :erlang.put(key, tuple)
+            key
+
+          :counter ->
+            alloc(tuple)
+        end
+      end
+
     # A level 2 frame can outlive its call: the closures made in it (also in a parameter
     # default, so the count is read before the parameters are bound) hold its id. The
     # closure count decides, as `free_scope/2` does on the old path. A leaf (`free:
@@ -5005,12 +5037,18 @@ defmodule Browser.JS.Interp do
 
   # The end of a frame call: the frame is erased unless a closure made during the call can
   # hold its id, and the caller's chain and position come back. The chain holds no frame
-  # id, so the order of the erase and the restore does not matter.
+  # id, so the order of the erase and the restore does not matter. In a normal build a
+  # leaf frame (`fns` is `nil`) stays under the key of its depth (see `@leaf_base`).
   @compile {:inline, leave: 5}
   defp leave(frame, info, fns, below, pos) do
     # (the argument map test stays here, so a frame without one pays only `free/1`)
-    if fns == nil or :erlang.get(:js_fns) == fns,
-      do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+    if @check do
+      if fns == nil or :erlang.get(:js_fns) == fns,
+        do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+    else
+      if fns != nil and :erlang.get(:js_fns) == fns,
+        do: if(info.argmap == nil, do: free(frame), else: free_frame(frame, info))
+    end
 
     :erlang.put(:js_stack, below)
     :erlang.put(:js_pos, pos)

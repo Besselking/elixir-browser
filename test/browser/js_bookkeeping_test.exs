@@ -10,6 +10,7 @@ defmodule Browser.JS.BookkeepingTest do
 
   alias Browser.JS
   alias Browser.JS.{Builtins, GC, Interp, Parser}
+  require Interp
 
   @levels [:off, :info, 1, 2, 3, 4]
   @s "\n    at "
@@ -180,11 +181,12 @@ defmodule Browser.JS.BookkeepingTest do
 
   # The heap entries are the keys of the process dictionary that are integers from 0 up
   # (a negative key is a cell of an inline cache). A freed frame of the check build is a
-  # tombstone, which the count does not hold.
+  # tombstone, which the count does not hold. A leaf frame of a normal build is under a key
+  # from `Interp.leaf_base/0` up, and it is not a heap entry.
   defp entries do
     Enum.count(Process.get(), fn
       {k, {:js_freed, _}} when is_integer(k) -> false
-      {k, _} -> is_integer(k) and k >= 0
+      {k, _} -> is_integer(k) and k >= 0 and k < Interp.leaf_base()
     end)
   end
 end
