@@ -258,6 +258,41 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # `Browser.JS.DOM.gc_root/1` leaves out the fields that hold no JS value. The fields that
+  # can hold one stay roots: in the running realm and in the saved fields and keys of a
+  # realm that does not run.
+  test "the fields of the document that hold JS values keep their objects alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      objs = for _ <- 1..9, do: Interp.new_object()
+      [w, l, ce, h, ses, rh, rce, rk, out] = objs
+      s = Process.get(:dom)
+
+      realm = %{
+        fields: %{hist: [{"http://f.test/", rh}], ce: %{"x-r" => rce}, hist_idx: 0},
+        keys: %{js_global: rk}
+      }
+
+      Process.put(:dom, %{
+        s
+        | wrappers: Map.put(s.wrappers, -1, w),
+          listeners: Map.put(s.listeners, -1, [l]),
+          ce: %{"x-a" => ce},
+          hist: [{"http://t.test/", h}],
+          session: %{"k" => ses},
+          outbox: [{:x, out}],
+          realms: Map.put(s.realms, -2, realm)
+      })
+
+      GC.collect()
+      for {:obj, id} <- objs, do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+    end)
+    |> Task.await(30_000)
+  end
+
   # The marks are a bitmap up to the largest heap key, not up to `:js_next`. An entry above
   # `:js_next` that a root holds stays, and so does what it holds.
   test "keeps a held entry with a key above the next heap id" do
