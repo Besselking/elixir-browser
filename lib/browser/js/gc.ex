@@ -16,22 +16,34 @@ defmodule Browser.JS.GC do
   of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
   a lift template only while the template runs, so it is a root like any other key. The
-  fields of a heap record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold
-  counts and keys, and a count must not keep a dead object alive. The cells of the inline
+  walk reads the document's state through `Browser.JS.DOM.gc_root/1`, which leaves out the
+  node table and the other fields that hold no JS value. The lexer's tables and the boxes
+  of the layout are not roots: they hold offsets and numbers only. The fields of a heap
+  record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold counts and keys,
+  and a count must not keep a dead object alive. The cells of the inline
   caches (step A2) are process keys that are negative integers. They are not heap entries
   and not roots: a cell can hold the id of a prototype, and a freed prototype makes the
   cell miss (`Browser.JS.Shape`).
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
-  since it holds a result across the timers).
+  since it holds a result across the timers). A threshold of 0 stays 0, so the collector
+  runs after each timer: `JS_GC=every` sets this for each process that `enable/0` switches
+  on, so that the tests can find a value that only an unwalked field holds.
   """
 
   require Browser.JS.Obj, as: Obj
 
   @min_collect 100_000
 
+  # Check mode (`JS_RESOLVE_CHECK=1`): the fields of the document that the walk leaves out
+  # must hold no JS value (`check_no_values/1`).
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
   @doc "Switches the collector on for this process."
-  def enable, do: Process.put(:js_gc_at, @min_collect)
+  def enable do
+    at = if Application.get_env(:browser, :js_gc_every, false), do: 0, else: @min_collect
+    Process.put(:js_gc_at, at)
+  end
 
   # The Erlang collector copies everything alive twice: out of a full young heap, then into the old
   # heap. A young heap that is small next to what is alive makes that happen often, and what dies a
@@ -97,6 +109,20 @@ defmodule Browser.JS.GC do
           # built-in functions, which are roots anyway, and shape ids and positions, which
           # are not heap ids, see `Browser.JS.Interp`)
           {:js_arr_iter_pos, _}, acc -> acc
+          # (the parser's source table and the lexer's table hold the source, token
+          # offsets and tokens: an offset that equals the id of a dead object must not keep
+          # it alive)
+          {:js_srctab, _}, acc -> acc
+          {:lex_table, _}, acc -> acc
+          # (the boxes of the layout and the counts of the forced layouts hold numbers
+          # only, see `Browser.JS.DOM`)
+          {:dom_page_rects, _}, acc -> acc
+          {:dom_forced_rects, _}, acc -> acc
+          {:dom_forced, _}, acc -> acc
+          {:dom_forced_spent, _}, acc -> acc
+          # (the document's state: only the fields that can hold a JS value, see
+          # `Browser.JS.DOM.gc_root/1`; the node table is large and holds no JS value)
+          {:dom, v}, {ids, roots} when is_map(v) -> {ids, [dom_root(v) | roots]}
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
@@ -125,12 +151,31 @@ defmodule Browser.JS.GC do
         )
 
       Process.put(:js_freed, :erlang.get(:js_next) - live)
-      Process.put(:js_gc_at, max(@min_collect, 2 * live))
+      # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
+      if Process.get(:js_gc_at) != 0, do: Process.put(:js_gc_at, max(@min_collect, 2 * live))
       freed
     after
       :ets.delete(marks)
     end
   end
+
+  defp dom_root(s) do
+    if @check, do: check_no_values(Browser.JS.DOM.gc_left_out(s))
+    Browser.JS.DOM.gc_root(s)
+  end
+
+  # Check mode: `t` holds no object and no fun. The walk of `collect/0` leaves `t` out, so
+  # a JS value in it would not keep its object alive.
+  defp check_no_values(t) do
+    if value?(t), do: raise(ArgumentError, "resolve check: a JS value in an unwalked field")
+  end
+
+  defp value?({:obj, _}), do: true
+  defp value?(t) when is_function(t), do: true
+  defp value?(t) when is_tuple(t), do: value?(Tuple.to_list(t))
+  defp value?([h | t]), do: value?(h) or value?(t)
+  defp value?(t) when is_map(t), do: value?(:maps.to_list(t))
+  defp value?(_), do: false
 
   @doc false
   # The dangling scan of check mode (`Browser.JS.Interp.check_dangling/1`): the names of the

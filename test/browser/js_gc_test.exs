@@ -185,6 +185,53 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # The walk reads each integer as a heap id. The node table of the document holds node ids,
+  # and the lexer's tables hold offsets. The walk does not read them, so such an integer
+  # does not keep a dead object alive.
+  test "a node id that equals the id of a dead object does not keep it alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      doc = Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      {:obj, gid} = Interp.new_object()
+      {:obj, held} = Interp.new_object()
+
+      # A node with the id `gid`, in the node table, in the kids of the document and in
+      # the id index. A wrapper (the only field here that holds a JS value) holds `held`.
+      s = Process.get(:dom)
+      node = %{s.nodes[doc] | id: gid, kind: :element, tag: "p", kids: [], parent: doc}
+      nodes = s.nodes |> Map.put(gid, node) |> Map.update!(doc, &%{&1 | kids: [gid | &1.kids]})
+      ids = Map.put(s.ids, "b", [gid])
+      wrappers = Map.put(s.wrappers, -1, {:obj, held})
+      Process.put(:dom, %{s | nodes: nodes, ids: ids, wrappers: wrappers, next: gid})
+
+      GC.collect()
+      assert :erlang.get(gid) == :undefined
+      assert is_map(:erlang.get(held))
+      assert Process.get(:dom).nodes[gid] == node
+    end)
+    |> Task.await(30_000)
+  end
+
+  test "the lexer's tables keep no object alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {:obj, gid} = Interp.new_object()
+
+      # The source is `gid` bytes long, so the tables hold `gid` as an offset.
+      {:ok, _} = Parser.parse(String.duplicate(" ", gid - 1) <> "1")
+      {_, starts, _} = Process.get(:lex_table)
+      assert gid in Tuple.to_list(starts)
+      assert gid in Tuple.to_list(elem(Process.get(:js_srctab), 1))
+
+      GC.collect()
+      assert :erlang.get(gid) == :undefined
+    end)
+    |> Task.await(30_000)
+  end
+
   test "does nothing unless enabled" do
     Task.async(fn ->
       Interp.init(1000)

@@ -24,6 +24,32 @@ defmodule Browser.JS.DOM do
   defp st, do: Process.get(:dom)
   defp put_st(s), do: Process.put(:dom, s)
 
+  # The fields of the state (and of the saved fields of a realm) that hold no JS value: the
+  # node table, the id index, the boxes, node ids, counts and sizes. The JS collector reads
+  # each integer as a heap id, so these fields can keep dead objects alive, and the node
+  # table makes each collection long.
+  @gc_fields ~w(nodes ids rects rev next next_nid usp doc main frames meta fdirty ce_done
+                current_script write_after focus_ed focus_ctl scroll content width height
+                hist_idx history_before)a
+
+  @doc """
+  The part of the state `s` that the JS collector walks (`Browser.JS.GC.collect/0`): the
+  state without the fields that hold no JS value. A node map holds only primitives and
+  node ids. The other fields (the wrappers, the listeners, the custom elements, the history
+  states and the saved keys of the realms) can hold JS values.
+  """
+  def gc_root(s) do
+    realms =
+      for {d, r} <- s.realms, into: %{}, do: {d, %{r | fields: Map.drop(r.fields, @gc_fields)}}
+
+    %{Map.drop(s, @gc_fields) | realms: realms}
+  end
+
+  @doc false
+  # Check mode: the fields that `gc_root/1` leaves out, which must hold no JS value.
+  def gc_left_out(s),
+    do: [Map.take(s, @gc_fields) | for({_, r} <- s.realms, do: Map.take(r.fields, @gc_fields))]
+
   # a node of a frame that was torn down is gone from the map, but a page may still hold it:
   # it then reads as an empty, detached node
   defp node(nid) do

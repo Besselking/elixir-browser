@@ -30,4 +30,9 @@ config :browser, js_shapes: System.get_env("JS_SHAPES") != "0"
 # heap.
 config :browser, js_elems_sparse: System.get_env("JS_ELEMS") == "sparse"
 
+# The JS collector (`Browser.JS.GC`). `JS_GC=every` makes each page runtime collect after
+# each timer, so that a test run shows a value that the walk does not reach.
+# `Browser.JS.GC.enable/0` reads the setting for each process.
+config :browser, js_gc_every: System.get_env("JS_GC") == "every"
+
 import_config "#{config_env()}.exs"
