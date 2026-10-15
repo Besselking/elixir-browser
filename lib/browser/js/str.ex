@@ -349,6 +349,39 @@ defmodule Browser.JS.Str do
 
   # ── lone surrogates ────────────────────────────────────────
 
+  # Most strings that scripts and the DOM change to lower or upper case are short ASCII names.
+  # The Unicode tables are slow for them, so an ASCII string takes the ASCII path. A string with
+  # a byte of 128 or more takes the full Unicode path (special casing such as ß and İ).
+
+  @doc "`String.downcase(s)`, with a fast path for ASCII strings."
+  def downcase(s) do
+    case ascii_case(s, ?A, ?Z, false) do
+      false -> s
+      true -> String.downcase(s, :ascii)
+      :other -> String.downcase(s)
+    end
+  end
+
+  @doc "`String.upcase(s)`, with a fast path for ASCII strings."
+  def upcase(s) do
+    case ascii_case(s, ?a, ?z, false) do
+      false -> s
+      true -> String.upcase(s, :ascii)
+      :other -> String.upcase(s)
+    end
+  end
+
+  # true when `s` is ASCII and has a byte in lo..hi, false when it is ASCII and has none,
+  # :other when it has a byte of 128 or more
+  defp ascii_case(<<c, rest::binary>>, lo, hi, _) when c >= lo and c <= hi,
+    do: ascii_case(rest, lo, hi, true)
+
+  defp ascii_case(<<c, rest::binary>>, lo, hi, found) when c < 128,
+    do: ascii_case(rest, lo, hi, found)
+
+  defp ascii_case(<<>>, _, _, found), do: found
+  defp ascii_case(_, _, _, _), do: :other
+
   @doc "Does `s` hold a lone surrogate?"
   def lone?(s) do
     case :binary.match(s, <<0xED>>) do

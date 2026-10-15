@@ -16,6 +16,7 @@ defmodule Browser.JS.DOM do
   import Kernel, except: [node: 1]
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  alias Browser.JS.Str
 
   @void ~w(area base br col embed hr img input link meta param source track wbr)
 
@@ -1176,7 +1177,7 @@ defmodule Browser.JS.DOM do
   defp edit_attr(n) do
     case get_attr(n, "contenteditable") do
       nil -> nil
-      v -> String.downcase(v) in ["", "true", "plaintext-only"]
+      v -> Str.downcase(v) in ["", "true", "plaintext-only"]
     end
   end
 
@@ -1616,7 +1617,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       form when is_integer(form) ->
-        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+        if Str.downcase(get_attr(node(form), "method") || "") != "dialog" and
              not formmethod_dialog?(cid),
            do: :ok,
            else: do_dialog_submit(form, cid)
@@ -1628,7 +1629,7 @@ defmodule Browser.JS.DOM do
   defp formmethod_dialog?(cid) do
     case control_node(cid) do
       nil -> false
-      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+      nid -> Str.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
     end
   end
 
@@ -1788,7 +1789,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp set_attr(nid, name, value) do
-    name = String.downcase(name)
+    name = Str.downcase(name)
     old_value = nid |> node() |> get_attr(name)
     set_attr_quiet(nid, name, value)
     attribute_changed(nid, name, old_value, value)
@@ -1809,7 +1810,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp remove_attr(nid, name) do
-    name = String.downcase(name)
+    name = Str.downcase(name)
 
     # a dialog that is not open is not modal any more
     if name == "open" and List.keymember?(node(nid).internal, "@modal", 0),
@@ -1958,7 +1959,7 @@ defmodule Browser.JS.DOM do
         {:ok, float(%{element: 1, text: 3, comment: 8, document: 9, fragment: 11}[k])}
 
       {"nodeName", :element} ->
-        {:ok, String.upcase(n.tag)}
+        {:ok, Str.upcase(n.tag)}
 
       {"nodeName", :text} ->
         {:ok, "#text"}
@@ -2111,7 +2112,7 @@ defmodule Browser.JS.DOM do
   defp element_get(n, key, _self) do
     case key do
       "tagName" ->
-        {:ok, String.upcase(n.tag)}
+        {:ok, Str.upcase(n.tag)}
 
       "localName" ->
         {:ok, n.tag}
@@ -2144,7 +2145,7 @@ defmodule Browser.JS.DOM do
         {:ok,
          case get_attr(n, "contenteditable") do
            nil -> "inherit"
-           v -> if String.downcase(v) in ["", "true"], do: "true", else: String.downcase(v)
+           v -> if Str.downcase(v) in ["", "true"], do: "true", else: Str.downcase(v)
          end}
 
       "isContentEditable" ->
@@ -2256,8 +2257,8 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp type_of(%{tag: "input"} = n), do: String.downcase(attr_or(n, "type", "text"))
-  defp type_of(%{tag: "button"} = n), do: String.downcase(attr_or(n, "type", "submit"))
+  defp type_of(%{tag: "input"} = n), do: Str.downcase(attr_or(n, "type", "text"))
+  defp type_of(%{tag: "button"} = n), do: Str.downcase(attr_or(n, "type", "submit"))
   defp type_of(n), do: attr_or(n, "type", "")
 
   defp form_of(nid) do
@@ -2397,7 +2398,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       {"designMode", :document} ->
-        put_st(%{st() | design_mode: String.downcase(to_str(v)) == "on"})
+        put_st(%{st() | design_mode: Str.downcase(to_str(v)) == "on"})
         :ok
 
       _ ->
@@ -2570,7 +2571,7 @@ defmodule Browser.JS.DOM do
     |> String.split(";")
     |> Enum.flat_map(fn d ->
       case String.split(d, ":", parts: 2) do
-        [k, v] -> [{String.trim(k) |> String.downcase(), String.trim(v)}]
+        [k, v] -> [{String.trim(k) |> Str.downcase(), String.trim(v)}]
         _ -> []
       end
     end)
@@ -3032,7 +3033,7 @@ defmodule Browser.JS.DOM do
     @compound_re
     |> Regex.scan(s)
     |> Enum.map(fn
-      [_, tag] when tag != "" -> {:tag, String.downcase(tag)}
+      [_, tag] when tag != "" -> {:tag, Str.downcase(tag)}
       [_, "", id] -> {:id, id}
       [_, "", "", cls] -> {:class, cls}
       [_, "", "", "", attr] -> {:attr, parse_attr(attr)}
@@ -3051,10 +3052,10 @@ defmodule Browser.JS.DOM do
         {s, nil, nil}
 
       [_, name] ->
-        {String.downcase(name), nil, nil}
+        {Str.downcase(name), nil, nil}
 
       [_, name, op | vals] ->
-        {String.downcase(name), op, vals |> Enum.take(3) |> Enum.find("", &(&1 != ""))}
+        {Str.downcase(name), op, vals |> Enum.take(3) |> Enum.find("", &(&1 != ""))}
     end
   end
 
@@ -3249,7 +3250,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp parse_anb(f) do
-    f = f |> String.downcase() |> String.replace(~r/\s+/, "")
+    f = f |> Str.downcase() |> String.replace(~r/\s+/, "")
 
     case f do
       "odd" ->
@@ -3437,7 +3438,7 @@ defmodule Browser.JS.DOM do
   defp loopback?(nil), do: false
 
   defp loopback?(host) do
-    host = String.downcase(host)
+    host = Str.downcase(host)
 
     host == "localhost" or String.ends_with?(host, ".localhost") or host == "::1" or
       match?({:ok, {127, _, _, _}}, :inet.parse_ipv4_address(String.to_charlist(host))) or
@@ -3674,7 +3675,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp location_put("protocol", v) do
-    scheme = v |> to_str() |> String.trim_trailing(":") |> String.downcase()
+    scheme = v |> to_str() |> String.trim_trailing(":") |> Str.downcase()
 
     if scheme in ["http", "https"] do
       location_update(fn uri ->
@@ -4299,7 +4300,7 @@ defmodule Browser.JS.DOM do
   defp image_src_changed(_nid, _name, _value), do: :ok
 
   defp define_element(name, ctor) do
-    name = String.downcase(to_str(name))
+    name = Str.downcase(to_str(name))
 
     unless function?(ctor),
       do: throw_error("TypeError", "The custom element constructor is not a function")
@@ -5661,7 +5662,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getElementsByTagName", fn this, args ->
-      tag = String.downcase(to_str(arg(args, 0)))
+      tag = Str.downcase(to_str(arg(args, 0)))
       nodes_array(Enum.filter(elements(this_nid(this)), &(tag == "*" or node(&1).tag == tag)))
     end)
 
@@ -5681,7 +5682,7 @@ defmodule Browser.JS.DOM do
 
   defp install_element(p) do
     def_fn(p, "getAttribute", fn this, args ->
-      case get_attr(node(this_nid(this)), String.downcase(to_str(arg(args, 0)))) do
+      case get_attr(node(this_nid(this)), Str.downcase(to_str(arg(args, 0)))) do
         nil -> :null
         v -> v
       end
@@ -5693,7 +5694,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "hasAttribute", fn this, args ->
-      get_attr(node(this_nid(this)), String.downcase(to_str(arg(args, 0)))) != nil
+      get_attr(node(this_nid(this)), Str.downcase(to_str(arg(args, 0)))) != nil
     end)
 
     def_fn(p, "removeAttribute", fn this, args ->
@@ -5702,7 +5703,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "toggleAttribute", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
       has = get_attr(node(this_nid(this)), name) != nil
       want = if arg(args, 1) == :undefined, do: not has, else: truthy(arg(args, 1))
       if want, do: set_attr(this_nid(this), name, ""), else: remove_attr(this_nid(this), name)
@@ -5764,7 +5765,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getAttributeNode", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
 
       case get_attr(node(this_nid(this)), name) do
         nil -> :null
@@ -5920,7 +5921,7 @@ defmodule Browser.JS.DOM do
         _ -> get_attr(node(form), "method") || ""
       end
 
-    if String.downcase(method) == "dialog" do
+    if Str.downcase(method) == "dialog" do
       call_global("__dialogSubmit", [wrap(form), if(submitter, do: wrap(submitter), else: :null)])
     else
       out({:submit, form_index(form)})
@@ -6050,7 +6051,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "createElement", fn _this, args ->
-      tag = args |> arg(0) |> to_str() |> String.downcase()
+      tag = args |> arg(0) |> to_str() |> Str.downcase()
 
       case registered(tag) do
         nil -> wrap(new_node(%{tag: tag}))
@@ -6196,7 +6197,7 @@ defmodule Browser.JS.DOM do
     def_fn(sp, "setProperty", fn this, args ->
       set_style(
         style_nid(this),
-        String.downcase(to_str(arg(args, 0))),
+        Str.downcase(to_str(arg(args, 0))),
         to_str_or_empty(arg(args, 1))
       )
 
@@ -6204,7 +6205,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(sp, "getPropertyValue", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
 
       if computed_style?(this) do
         case computed_get(style_nid(this), name) do
@@ -6220,7 +6221,7 @@ defmodule Browser.JS.DOM do
 
     def_fn(sp, "removeProperty", fn this, args ->
       nid = style_nid(this)
-      prop = String.downcase(to_str(arg(args, 0)))
+      prop = Str.downcase(to_str(arg(args, 0)))
       old = style_decls(nid) |> List.keyfind(prop, 0) |> then(&if(&1, do: elem(&1, 1), else: ""))
       set_style(nid, prop, "")
       old
@@ -6742,7 +6743,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(registry, "get", fn _, args ->
-      registered(String.downcase(to_str(arg(args, 0)))) || :undefined
+      registered(Str.downcase(to_str(arg(args, 0)))) || :undefined
     end)
 
     def_fn(registry, "whenDefined", fn _, _ ->

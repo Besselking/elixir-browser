@@ -1539,8 +1539,8 @@ defmodule Browser.JS.Builtins do
   defp string_methods(p) do
     def_fn(p, "toString", fn this, _ -> this_prim(this, :string, "String.prototype.toString") end)
     def_fn(p, "valueOf", fn this, _ -> this_prim(this, :string, "String.prototype.valueOf") end)
-    str_fn(p, "toUpperCase", fn this, _ -> String.upcase(this) end)
-    str_fn(p, "toLowerCase", fn this, _ -> String.downcase(this) end)
+    str_fn(p, "toUpperCase", fn this, _ -> Str.upcase(this) end)
+    str_fn(p, "toLowerCase", fn this, _ -> Str.downcase(this) end)
     str_fn(p, "trim", fn this, _ -> Interp.js_trim(this) end)
     str_fn(p, "trimStart", fn this, _ -> Interp.js_trim_start(this) end)
     str_fn(p, "trimEnd", fn this, _ -> Interp.js_trim_end(this) end)
