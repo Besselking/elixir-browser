@@ -1089,6 +1089,75 @@ defmodule Browser.StyleTest do
     assert {^pruned, _} = Style.prune(nodes, idx, memo)
   end
 
+  test "the memo of a long list keeps each computed style one time" do
+    html = "<ul>" <> String.duplicate(~s(<li class="a"><span>x</span></li>), 1000) <> "</ul>"
+    nodes = html |> HTML.parse() |> Browser.Nids.index()
+    css = "li { color: red; margin: 2px; padding: 3px; border: 1px solid blue }"
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, css}])
+
+    {pruned, memo} = Style.prune(nodes, idx, nil)
+    # (a computed style in each entry, its parent signature and its node would be 7.5 MB)
+    assert :erts_debug.flat_size(memo) * 8 < 3_000_000
+    assert {^pruned, _} = Style.prune(nodes, idx, memo)
+  end
+
+  test "the tables of the memo drop what no entry names when they grow" do
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, "div { --w: 1px }"}])
+
+    parse = fn n, round ->
+      Enum.map_join(1..n, &~s(<div style="width: #{&1 * 10 + round}px; --r: #{round}">x</div>))
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    {_, memo} = Style.prune(parse.(10, 0), idx, nil)
+
+    memo =
+      Enum.reduce(1..4, memo, fn round, memo ->
+        nodes = parse.(300, round)
+        {pruned, memo} = Style.prune(nodes, idx, memo)
+        assert pruned == Style.prune(nodes, idx)
+        memo
+      end)
+
+    # (300 styles and sets are named; the tables held up to 2 * 300 + 64 before a clean up)
+    {computed, _next} = memo.computed_table
+    assert map_size(computed) <= 664
+    assert map_size(memo.custom_table) <= 664
+    nodes = parse.(300, 9)
+    assert elem(Style.prune(nodes, idx, memo), 0) == Style.prune(nodes, idx)
+  end
+
+  test "the memo of a deep tree whose elements each set a custom property is small when copied" do
+    vars = Enum.map_join(1..200, " ", &"--v#{&1}: #{&1}px;")
+
+    chain = fn leaf ->
+      Enum.map_join(1..120, &~s(<div style="--d: #{&1}px">)) <>
+        leaf <> String.duplicate("</div>", 120)
+    end
+
+    css = "section { #{vars} } p { width: var(--d); height: var(--v7) }"
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, css}])
+
+    parse = fn leaf ->
+      ("<section>" <> chain.("<p>a</p>") <> "</section><section>" <> chain.(leaf) <> "</section>")
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    nodes = parse.("<p>b</p>")
+    {pruned, memo} = Style.prune(nodes, idx, nil)
+    assert :erts_debug.flat_size(memo) * 8 < 1_000_000
+    assert {^pruned, _} = Style.prune(nodes, idx, memo)
+
+    # (the first chain is taken over, the second is styled afresh; then once more from that memo)
+    changed = parse.(~s(<p class="x">b</p>))
+    {warm, memo} = Style.prune(changed, idx, memo)
+    assert warm == Style.prune(changed, idx)
+    again = parse.(~s(<p class="y">b</p>))
+    assert elem(Style.prune(again, idx, memo), 0) == Style.prune(again, idx)
+  end
+
   describe "style sharing" do
     # the same page styled with and without elements sharing what the rules say about them
     defp both_ways(html, css) do
