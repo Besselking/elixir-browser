@@ -250,12 +250,21 @@ spawn_layout =
     do: &Browser.Session.spawn_layout/1,
     else: &spawn/1
 
+# (the session stops a layout that the script no longer waits for. In an older tree, each layout
+# runs to its end)
+watch_layout =
+  if function_exported?(Browser.Session, :watch_layout, 1),
+    do: &Browser.Session.watch_layout/1,
+    else: fn _ -> :ok end
+
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
   receive do
     {:layout_now, js, ref, raw} ->
       base = Process.get(:bench_base)
+      # (the script waits 5 s for the answer, see `Browser.JS.DOM.layout_now/0`)
+      deadline = System.monotonic_time(:millisecond) + 5_000
 
       spawn_layout.(fn ->
         Process.flag(:trap_exit, false)
@@ -266,7 +275,8 @@ loop = fn loop ->
           ref = Process.monitor(guard)
 
           receive do
-            {:DOWN, ^ref, _, _, reason} when reason not in [:normal] ->
+            # (`:killed`: the watchdog stopped a layout that no script waits for)
+            {:DOWN, ^ref, _, _, reason} when reason not in [:normal, :killed] ->
               IO.puts("LAYOUT CRASHED: #{inspect(reason, limit: 30, printable_limit: 300)}")
           end
         end)
@@ -319,6 +329,12 @@ loop = fn loop ->
             :erlang.term_to_binary({base, raw, laid.sheet_cache})
           )
         end
+
+        # A prewarm (`ref` is nil) only makes the style memo: no script reads its boxes, and the
+        # bench keeps no layout memo. The watchdog stops a layout that the script no longer
+        # waits for.
+        if ref == nil, do: exit(:normal)
+        watch_layout.(deadline)
 
         t1 = System.monotonic_time(:microsecond)
 

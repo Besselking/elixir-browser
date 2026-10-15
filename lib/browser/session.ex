@@ -2327,6 +2327,10 @@ defmodule Browser.Session do
     end
   end
 
+  # The time a script waits for a layout it asked for (see `Browser.JS.DOM.layout_now/0`).
+  @layout_wait 5_000
+
+  # (`ref` is nil for a prewarm: `Browser.JS.DOM.prewarm_layout/0`)
   defp start_layout_for_scripts(%{page: %Page{} = page} = state, js, ref, raw) do
     # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
     # shared styles would take gigabytes and seconds)
@@ -2340,6 +2344,7 @@ defmodule Browser.Session do
     worker = state.layout_worker
     tid = state.tid
     me = self()
+    deadline = System.monotonic_time(:millisecond) + @layout_wait
 
     spawn_layout(fn ->
       :wx.set_env(wx_env)
@@ -2347,7 +2352,9 @@ defmodule Browser.Session do
       # (the sheets a script added are parsed once, and the elements that did not change are not
       # styled again by the next layout: it starts from what this one worked out)
       send(me, {:style_state, Page.style_state(page)})
+      if ref != nil, do: watch_layout(deadline)
 
+      # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
       {items, height} =
         LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
           scrollers: true,
@@ -2357,14 +2364,40 @@ defmodule Browser.Session do
           svg_defs: page.svg_defs
         )
 
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
-      send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+      if ref != nil do
+        rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+        send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+      end
     end)
 
     :ok
   end
 
   defp start_layout_for_scripts(_state, _js, _ref, _raw), do: :ok
+
+  @doc false
+  # Stops the calling layout process at `deadline` (monotonic ms), when the script no longer
+  # waits for it. A layout that runs on in the background takes CPU from the scripts and the
+  # next layouts. Gives the pid of the watchdog. The bench uses it too.
+  def watch_layout(deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left <= 0 ->
+        exit(:normal)
+
+      left ->
+        layout = self()
+
+        spawn(fn ->
+          watched = Process.monitor(layout)
+
+          receive do
+            {:DOWN, ^watched, _, _, _} -> :ok
+          after
+            left -> Process.exit(layout, :kill)
+          end
+        end)
+    end
+  end
 
   # The words of heap that a process that styles and lays out a page starts with. The style and
   # the layout of a big tree allocate a lot, and a small heap grows by many collections, each of

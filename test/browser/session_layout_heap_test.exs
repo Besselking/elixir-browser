@@ -10,6 +10,55 @@ defmodule Browser.SessionLayoutHeapTest do
     assert words >= 2_000_000
   end
 
+  # A script waits 5 s for a layout. After that time, the watchdog stops the layout process: no
+  # script reads its boxes, and it takes CPU from the scripts and the next layouts.
+  test "the watchdog stops a layout process after its deadline" do
+    deadline = System.monotonic_time(:millisecond) + 50
+
+    pid =
+      Browser.Session.spawn_layout(fn ->
+        Browser.Session.watch_layout(deadline)
+        Process.sleep(:infinity)
+      end)
+
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, _, _, :killed}, 2_000
+  end
+
+  test "a layout process whose deadline is gone stops at once, and one that ends stops its watchdog" do
+    past = System.monotonic_time(:millisecond) - 1
+    test = self()
+
+    # (the process waits for `:go`, so that the monitor is in place before it stops)
+    pid =
+      Browser.Session.spawn_layout(fn ->
+        receive do: (:go -> :ok)
+        Browser.Session.watch_layout(past)
+        send(test, :laid_out)
+      end)
+
+    ref = Process.monitor(pid)
+    send(pid, :go)
+    assert_receive {:DOWN, ^ref, _, _, :normal}
+    refute_received :laid_out
+
+    # (a layout that ends in time: the watchdog goes with it)
+    pid =
+      spawn(fn ->
+        send(
+          test,
+          {:watchdog, Browser.Session.watch_layout(System.monotonic_time(:millisecond) + 60_000)}
+        )
+
+        receive do: (:done -> :ok)
+      end)
+
+    assert_receive {:watchdog, watchdog}
+    watched = Process.monitor(watchdog)
+    send(pid, :done)
+    assert_receive {:DOWN, ^watched, _, _, :normal}
+  end
+
   # The session starts these processes for the page jobs, for the layouts after a resize and
   # for the layouts that the scripts wait for. It needs a window to do that, so a test can not
   # start them. Thus this test reads the source of the session: each function that styles or
