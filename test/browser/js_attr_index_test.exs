@@ -283,6 +283,13 @@ defmodule Browser.JS.AttrIndexTest do
       js.(~S|document.body.appendChild(window.d)|)
       refute :erts_debug.same(Process.get(:dom).aidx, aidx)
       assert Map.keys(Process.get(:dom).aidx["data-id"]) |> Enum.sort() == ["a", "b"]
+
+      # (an element that leaves the tree, or loses its indexed name, leaves the index)
+      js.(
+        ~S|window.d.remove(); document.querySelector('[data-id="a"]').removeAttribute("data-id")|
+      )
+
+      assert Process.get(:dom).aidx["data-id"] == %{}
     end)
     |> Task.await(30_000)
   end

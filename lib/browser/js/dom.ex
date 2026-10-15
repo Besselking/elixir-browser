@@ -4309,24 +4309,53 @@ defmodule Browser.JS.DOM do
   end
 
   # The `<iframe>` elements in the subtree of `nid` (`nid` too), in tree order. A page has few
-  # of them, so a walk up from each one costs less than a walk of the subtree. Many nodes move
-  # for each change of a large page that has a frame (a Speedometer suite runs in one).
+  # of them, so a walk up from each one costs less than a walk of a large subtree. Many nodes
+  # move for each change of a large page that has a frame (a Speedometer suite runs in one).
+  # A walk up costs the depth of the `<iframe>`, so a small subtree (at most
+  # @frames_walk_down nodes for each `<iframe>`) gets the walk down: a text node that goes
+  # into a page with deep frames does not walk up from each frame.
   @frames_walk_up 16
+  @frames_walk_down 16
 
   defp frames_in(nid) do
     s = st()
+    count = map_size(s.iframes)
 
-    if map_size(s.iframes) > @frames_walk_up do
-      for e <- [nid | descendants(nid)], iframe?(s.nodes, e), do: e
-    else
-      case for({e, _} <- s.iframes, e == nid or below?(e, nid), iframe?(s.nodes, e), do: e) do
-        [_, _ | _] = found ->
-          set = Map.new(found, &{&1, true})
-          for e <- [nid | descendants(nid)], is_map_key(set, e), do: e
+    cond do
+      count > @frames_walk_up ->
+        for e <- [nid | descendants(nid)], iframe?(s.nodes, e), do: e
 
-        found ->
-          found
-      end
+      (found = walk_frames(s.nodes, [[nid]], count * @frames_walk_down, [])) != :many ->
+        :lists.reverse(found)
+
+      true ->
+        case for({e, _} <- s.iframes, e == nid or below?(e, nid), iframe?(s.nodes, e), do: e) do
+          [_, _ | _] = found ->
+            set = Map.new(found, &{&1, true})
+            for e <- [nid | descendants(nid)], is_map_key(set, e), do: e
+
+          found ->
+            found
+        end
+    end
+  end
+
+  # The `<iframe>`s of the subtrees of the nodes in `lists`, in pre-order (newest first). The
+  # walk stops with :many when it passes more than `budget` nodes.
+  defp walk_frames(_nodes, _lists, budget, _acc) when budget < 0, do: :many
+  defp walk_frames(_nodes, [], _budget, acc), do: acc
+  defp walk_frames(nodes, [[] | lists], budget, acc), do: walk_frames(nodes, lists, budget, acc)
+
+  defp walk_frames(nodes, [[k | rest] | lists], budget, acc) do
+    case nodes do
+      %{^k => %{kind: :element, tag: "iframe", kids: kids}} ->
+        walk_frames(nodes, [kids, rest | lists], budget - 1, [k | acc])
+
+      %{^k => %{kids: kids}} ->
+        walk_frames(nodes, [kids, rest | lists], budget - 1, acc)
+
+      _ ->
+        walk_frames(nodes, [rest | lists], budget - 1, acc)
     end
   end
 
