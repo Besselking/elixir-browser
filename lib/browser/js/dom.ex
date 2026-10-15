@@ -142,13 +142,33 @@ defmodule Browser.JS.DOM do
 
   defp reindex_attrs(aidx, _nid, _old, _new) when map_size(aidx) == 0, do: aidx
 
+  # Most writes are of text nodes and of elements with no indexed name. For them the index
+  # does not change, so this function does not fold over the names.
   defp reindex_attrs(aidx, nid, old, new) do
-    Enum.reduce(aidx, aidx, fn {name, vals}, acc ->
-      o = attr_value(old, name)
-      n = attr_value(new, name)
-      if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
-    end)
+    if indexed?(old, aidx) or indexed?(new, aidx) do
+      :lists.foldl(
+        fn {name, vals}, acc ->
+          o = attr_value(old, name)
+          n = attr_value(new, name)
+          if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
+        end,
+        aidx,
+        :maps.to_list(aidx)
+      )
+    else
+      aidx
+    end
   end
+
+  # True when the node can be in the index: an element with a parent and an attribute with a
+  # name of `aidx` (for all other nodes `attr_value/2` gives nil)
+  defp indexed?(%{kind: :element, attrs: attrs, parent: p}, aidx) when p != nil,
+    do: indexed_name?(attrs, aidx)
+
+  defp indexed?(_, _), do: false
+
+  defp indexed_name?([{k, _} | rest], aidx), do: is_map_key(aidx, k) or indexed_name?(rest, aidx)
+  defp indexed_name?([], _), do: false
 
   defp attr_in(vals, nil, _), do: vals
   defp attr_in(vals, v, nid), do: Map.update(vals, v, %{nid => true}, &Map.put(&1, nid, true))
@@ -465,10 +485,43 @@ defmodule Browser.JS.DOM do
     inner = for {d, %{parent: ^doc}} <- s.meta, do: d
     Enum.each(inner, &destroy_realm/1)
     s = st()
-    ids = for {id, n} <- s.nodes, n.doc == doc, do: id
+    aidx = s.aidx
+
+    # One walk of the node table gives the nodes of the document, the id index without them,
+    # and the short list of the nodes that the attribute index has.
+    {ids, id_index, indexed} =
+      :maps.fold(
+        fn
+          nid, %{doc: ^doc} = n, {ids, id_index, indexed} ->
+            id_index = unindex(id_index, element_id(n), nid)
+
+            {[nid | ids], id_index,
+             if(indexed?(n, aidx), do: [{nid, n} | indexed], else: indexed)}
+
+          _, _, acc ->
+            acc
+        end,
+        {[], s.ids, []},
+        s.nodes
+      )
+
     iframe = s.meta |> Map.get(doc, %{}) |> Map.get(:iframe)
     frames = if iframe, do: Map.delete(s.frames, iframe), else: s.frames
-    drop = MapSet.new(ids)
+
+    aidx =
+      if indexed == [],
+        do: aidx,
+        else:
+          :maps.map(
+            fn name, vals ->
+              :lists.foldl(
+                fn {nid, n}, acc -> attr_out(acc, attr_value(n, name), nid) end,
+                vals,
+                indexed
+              )
+            end,
+            aidx
+          )
 
     listeners =
       s.listeners
@@ -480,15 +533,8 @@ defmodule Browser.JS.DOM do
     put_st(%{
       s
       | nodes: Map.drop(s.nodes, ids),
-        ids:
-          Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
-        aidx:
-          Map.new(s.aidx, fn {name, vals} ->
-            {name,
-             Enum.reduce(ids, vals, fn nid, acc ->
-               attr_out(acc, attr_value(s.nodes[nid], name), nid)
-             end)}
-          end),
+        ids: id_index,
+        aidx: aidx,
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -498,7 +544,6 @@ defmodule Browser.JS.DOM do
         rev: s.rev + 1
     })
 
-    _ = drop
     :ok
   end
 
