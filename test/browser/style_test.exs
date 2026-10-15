@@ -1035,8 +1035,9 @@ defmodule Browser.StyleTest do
       css = "p { --a: VaR( \n --\\62 , red); --b: var(--a); color: var(--a, green) }"
       assert p_color(css) == @green
 
-      assert p_color("p { --a: var(--b)var(--c); --c: var(--a); color: var(--a, green) }") ==
-               @green
+      # (--b is valid, so only the cycle through the second var() makes --a invalid)
+      css = "p { --b: red; --a: var(--b)var(--c,); --c: var(--a); color: var(--a, green) }"
+      assert p_color(css) == @green
     end
 
     test "initial, inherit and unset are taken literally" do
