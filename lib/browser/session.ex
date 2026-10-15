@@ -2390,12 +2390,8 @@ defmodule Browser.Session do
         :wx.set_env(wx_env)
         page = Page.from_raw(base, raw, env, refs)
         # (the sheets a script added are parsed once, and the elements that did not change are not
-        # styled again by the next layout: it starts from what this one worked out. A layout that a
-        # script waits for sends this state after its answer, so the copy does not delay the
-        # answer, see `Browser.StyleGate`. When the watchdog stops it first, the state is lost)
-        if ref == nil or System.monotonic_time(:millisecond) >= deadline,
-          do: send(me, {:style_state, seq, Page.style_state(page)})
-
+        # styled again by the next layout: it starts from what this one worked out)
+        send(me, {:style_state, seq, Page.style_state(page)})
         if ref != nil, do: watch_layout(deadline)
 
         # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
@@ -2411,7 +2407,6 @@ defmodule Browser.Session do
         if ref != nil do
           rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
           send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
-          send(me, {:style_state, seq, Page.style_state(page)})
         end
       end)
 

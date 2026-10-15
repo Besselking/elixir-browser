@@ -323,10 +323,7 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
           do: apply(Browser.Page, :from_raw, [base, raw, env, refs]),
           else: Browser.Page.from_raw(base, raw, env)
 
-      # (a layout that a script waits for sends its style state after its answer, as the session
-      # does; an older tree, or a layout after its deadline, sends it here)
-      if ref == nil or refs == nil or System.monotonic_time(:millisecond) >= deadline,
-        do: send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
+      send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
 
       # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
       if dir = System.get_env("DUMPRAW") do
@@ -378,7 +375,6 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
           )
 
       send(js, {:layout_now_done, ref, rects, {1000.0, height}})
-      if refs, do: send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
     end)
 
   # (the gate opens also when the process stops before it sends its style state)
