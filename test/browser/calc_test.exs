@@ -16,6 +16,11 @@ defmodule Browser.CalcTest do
     assert Calc.math?("CALC(1px)")
     refute Calc.math?("10px")
     refute Calc.math?("calcium")
+    assert Calc.math?("-WebKit-Calc(1px)")
+    assert Calc.math?("clamp(1px, 2px, 3px)")
+    refute Calc.math?("calc (1px)")
+    refute Calc.math?("xcalc(1px)")
+    refute Calc.math?("")
   end
 
   test "plain arithmetic" do

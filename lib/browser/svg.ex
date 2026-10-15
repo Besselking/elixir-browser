@@ -26,6 +26,8 @@ defmodule Browser.Svg do
   alias Browser.{Color, HTML, Style}
   alias Browser.Svg.PathData
 
+  import Browser.Re, only: [re: 1]
+
   @default_size {300.0, 150.0}
 
   @inheritable ~w(fill stroke stroke-width fill-opacity stroke-opacity fill-rule stroke-linecap
@@ -40,7 +42,7 @@ defmodule Browser.Svg do
       text
       |> String.replace_invalid()
       |> String.replace_prefix("﻿", "")
-      |> then(&Regex.replace(~r/<!\[CDATA\[(.*?)\]\]>/s, &1, "\\1"))
+      |> then(&Regex.replace(re(~r/<!\[CDATA\[(.*?)\]\]>/s), &1, "\\1"))
 
     nodes = HTML.parse(text)
 
@@ -192,7 +194,7 @@ defmodule Browser.Svg do
   defp viewbox(nil), do: nil
 
   defp viewbox(text) do
-    case text |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&number/1) do
+    case text |> String.split(re(~r/[\s,]+/), trim: true) |> Enum.map(&number/1) do
       [x, y, w, h]
       when is_number(x) and is_number(y) and is_number(w) and is_number(h) and w > 0 and h > 0 ->
         {x, y, w, h}
@@ -241,7 +243,7 @@ defmodule Browser.Svg do
   defp number(nil), do: nil
 
   defp number(text) do
-    case Regex.run(~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\z/, text) do
+    case Regex.run(re(~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\z/), text) do
       [_, n] -> to_float(n)
       nil -> nil
     end
@@ -256,8 +258,8 @@ defmodule Browser.Svg do
 
   defp to_float_slow(n) do
     n = if String.starts_with?(n, ["+", "-"]), do: n, else: "+" <> n
-    n = Regex.replace(~r/\A([+-])\./, n, "\\g{1}0.")
-    n = Regex.replace(~r/\.(?=[eE]|\z)/, n, ".0")
+    n = Regex.replace(re(~r/\A([+-])\./), n, "\\g{1}0.")
+    n = Regex.replace(re(~r/\.(?=[eE]|\z)/), n, ".0")
     n = if String.contains?(n, [".", "e", "E"]), do: n, else: n <> ".0"
     {f, _} = Float.parse(String.trim_leading(n, "+"))
     f
@@ -268,7 +270,9 @@ defmodule Browser.Svg do
 
   defp plength(text) do
     case Regex.run(
-           ~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(px|pt|pc|em|rem|ex|in|cm|mm|%)?\s*\z/,
+           re(
+             ~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(px|pt|pc|em|rem|ex|in|cm|mm|%)?\s*\z/
+           ),
            text
          ) do
       [_, n, "%"] -> {:pct, to_float(n) / 100}
@@ -302,10 +306,10 @@ defmodule Browser.Svg do
   def parse_transform(nil), do: @identity
 
   def parse_transform(text) do
-    ~r/([a-zA-Z]+)\s*\(([^)]*)\)/
+    re(~r/([a-zA-Z]+)\s*\(([^)]*)\)/)
     |> Regex.scan(text)
     |> Enum.reduce(@identity, fn [_, name, args], acc ->
-      nums = args |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&number/1)
+      nums = args |> String.split(re(~r/[\s,]+/), trim: true) |> Enum.map(&number/1)
 
       if Enum.any?(nums, &is_nil/1),
         do: acc,
@@ -634,7 +638,7 @@ defmodule Browser.Svg do
   defp poly(nil, _close?), do: []
 
   defp poly(points, close?) do
-    nums = points |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&number/1)
+    nums = points |> String.split(re(~r/[\s,]+/), trim: true) |> Enum.map(&number/1)
 
     pairs =
       nums
@@ -828,7 +832,7 @@ defmodule Browser.Svg do
   defp dashes("none", _scale), do: nil
 
   defp dashes(text, scale) do
-    nums = text |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&plength/1)
+    nums = text |> String.split(re(~r/[\s,]+/), trim: true) |> Enum.map(&plength/1)
 
     if nums != [] and Enum.all?(nums, &is_number/1) and Enum.sum(nums) > 0,
       do: Enum.map(nums, &(&1 * scale))
@@ -845,7 +849,7 @@ defmodule Browser.Svg do
   defp resolve_paint("none", _box, _state, _alpha), do: nil
 
   defp resolve_paint("url(" <> _ = value, box, state, alpha) do
-    case Regex.run(~r/\Aurl\(\s*["']?#([^"')\s]+)["']?\s*\)\s*(.*)\z/s, value) do
+    case Regex.run(re(~r/\Aurl\(\s*["']?#([^"')\s]+)["']?\s*\)\s*(.*)\z/s), value) do
       [_, id, fallback] ->
         case gradient(id, box, state, alpha) do
           nil ->

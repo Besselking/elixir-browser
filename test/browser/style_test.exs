@@ -1031,6 +1031,14 @@ defmodule Browser.StyleTest do
       assert p_color("p { --a: var(--b); --b: var(--a); color: var(--a, green) }") == @green
     end
 
+    test "a cycle is found through any case of var, white space and an escaped name" do
+      css = "p { --a: VaR( \n --\\62 , red); --b: var(--a); color: var(--a, green) }"
+      assert p_color(css) == @green
+
+      assert p_color("p { --a: var(--b)var(--c); --c: var(--a); color: var(--a, green) }") ==
+               @green
+    end
+
     test "initial, inherit and unset are taken literally" do
       css = "body { --a: green } p { --a: initial; color: var(--a, green) }"
       assert p_color(css) == @green

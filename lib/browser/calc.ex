@@ -9,6 +9,8 @@ defmodule Browser.Calc do
   worked out: an unknown unit or a bad expression.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @functions ~w(calc min max clamp)
 
   @doc "The size in px of one `unit` for text of `fs` px under a root font size of `root` px."
@@ -24,7 +26,22 @@ defmodule Browser.Calc do
   def unit_px(_unit, _fs, _root), do: nil
 
   @doc "True when `value` is one of the math functions."
-  def math?(value), do: Regex.match?(~r/\A(?:calc|min|max|clamp|-webkit-calc)\(/i, value)
+  def math?(value), do: math_head(value) != nil
+
+  @heads ~w(calc min max clamp -webkit-calc)
+
+  # the name (in lower case) of the math function at the start of `s` and the text after its
+  # `(`, or nil. No name has a `(`, so the name is all the text before the first `(`.
+  defp math_head(s) do
+    case :binary.match(s, "(", scope: {0, min(byte_size(s), 13)}) do
+      {pos, 1} ->
+        name = s |> binary_part(0, pos) |> String.downcase(:ascii)
+        if name in @heads, do: {name, binary_part(s, pos + 1, byte_size(s) - pos - 1)}
+
+      :nomatch ->
+        nil
+    end
+  end
 
   def eval(text, units) do
     with {:ok, value, rest} <- expr(String.trim(text), units),
@@ -91,16 +108,11 @@ defmodule Browser.Calc do
 
   defp factor(s, units) do
     cond do
-      m = Regex.run(~r/\A(-webkit-calc|calc|min|max|clamp)\(/i, s) ->
-        [whole, name] = m
+      head = math_head(s) ->
+        {name, rest} = head
+        function(name, rest, units)
 
-        function(
-          String.downcase(name),
-          binary_part(s, byte_size(whole), byte_size(s) - byte_size(whole)),
-          units
-        )
-
-      m = Regex.run(~r/\A((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%|[a-zA-Z]*)/, s) ->
+      m = Regex.run(re(~r/\A((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%|[a-zA-Z]*)/), s) ->
         [whole, n, unit] = m
         rest = binary_part(s, byte_size(whole), byte_size(s) - byte_size(whole))
         number(n, String.downcase(unit), units, rest)
