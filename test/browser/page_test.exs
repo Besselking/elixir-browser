@@ -416,6 +416,25 @@ defmodule Browser.PageTest do
       assert laid.pruned == Page.from_raw(%{page | memo: nil}, other, @env).pruned
       assert laid.sheet_refs == refs
     end
+
+    # (a new shadow tree with its own sheet: `from_raw/4` can keep the memo, so the base has it)
+    test "the base of a layout keeps the memo when only a new shadow tree adds a sheet" do
+      page = hosts_page()
+
+      page =
+        Page.from_raw(
+          page,
+          append(page.raw, "end", [{:element, "x-a", [{"id", "h3"}], []}]),
+          @env
+        )
+
+      raw = shadow(page.raw, "h3", "s3", [style("p { color: blue }"), para("in3")])
+      {base, refs} = Page.layout_base(page, raw)
+      assert base.memo == page.memo
+      laid = Page.from_raw(base, raw, @env, refs)
+      assert laid.pruned == Page.from_raw(%{page | memo: nil}, raw, @env).pruned
+      assert memo_kept?(page, laid, "three")
+    end
   end
 
   describe "fragments" do
