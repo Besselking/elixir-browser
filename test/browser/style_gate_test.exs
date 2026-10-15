@@ -57,6 +57,50 @@ defmodule Browser.StyleGateTest do
     assert c.tag == :c
   end
 
+  # A run that a script waits for sends its style state after its answer. The script can ask
+  # again before that state arrives: the new request then waits for it, so that it does not
+  # style again from an older state.
+  test "a script that asks again waits for the style state of the run that answered it" do
+    now = 1_000_000
+    wait = Browser.JS.DOM.layout_wait()
+    forced = fn js, tag, at -> req(js, make_ref(), tag) |> Map.put(:deadline, at + wait) end
+
+    {[a], gate} = StyleGate.request(StyleGate.new(), forced.(:js, :a, now))
+    gate = StyleGate.running(gate, a.seq, :mon_a)
+
+    # (the answer came at once: the script asks again while the state of :a is on its way)
+    assert {[], gate} = StyleGate.request(gate, forced.(:js, :b, now + 50))
+    # (another script does not wait, and a prewarm still waits for the run in flight)
+    assert {[c], gate} = StyleGate.request(gate, forced.(:other, :c, now + 60))
+    gate = StyleGate.running(gate, c.seq, :mon_c)
+    assert {[], gate} = StyleGate.request(gate, req(:third, nil, :d))
+
+    assert {true, :mon_a, [b], gate} = StyleGate.style_done(gate, a.seq)
+    assert b.tag == :b
+    gate = StyleGate.running(gate, b.seq, :mon_b)
+
+    # (a run that stops before it sends its state also lets the request start)
+    assert {[], gate} = StyleGate.request(gate, forced.(:js, :e, now + 100))
+    assert {[e], gate} = StyleGate.down(gate, :mon_b)
+    assert e.tag == :e
+    gate = StyleGate.running(gate, e.seq, :mon_e)
+
+    # (the prewarm :d starts when no run is in flight)
+    assert {true, :mon_c, [], gate} = StyleGate.style_done(gate, c.seq)
+    assert {true, :mon_e, [d], _gate} = StyleGate.style_done(gate, e.seq)
+    assert d.tag == :d
+  end
+
+  test "a script that asks again after the deadline of its run does not wait for it" do
+    wait = Browser.JS.DOM.layout_wait()
+    forced = fn tag, at -> req(:js, make_ref(), tag) |> Map.put(:deadline, at + wait) end
+
+    {[a], gate} = StyleGate.request(StyleGate.new(), forced.(:a, 0))
+    gate = StyleGate.running(gate, a.seq, :mon_a)
+    assert {[b], _gate} = StyleGate.request(gate, forced.(:b, wait))
+    assert b.tag == :b
+  end
+
   test "the gate opens when a run stops before it sends its style state" do
     test = self()
     {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))

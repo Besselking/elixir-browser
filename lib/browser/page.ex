@@ -117,7 +117,7 @@ defmodule Browser.Page do
     base = base_href(raw, url)
     {raw, image_urls} = Images.index(raw, base)
 
-    refs = raw |> Style.scoped_refs() |> cap_links()
+    refs = sheet_refs(raw)
     {rules, sheet_cache} = sheet_rules(refs, base, %{})
     queries = Style.media_queries(rules)
 
@@ -357,7 +357,13 @@ defmodule Browser.Page do
   are indexed again and the cascade runs afresh. Control state is not kept: the tree carries
   the values the controls have.
   """
-  def from_raw(%__MODULE__{} = page, raw, env) do
+  def from_raw(%__MODULE__{} = page, raw, env), do: from_raw(page, raw, env, nil)
+
+  @doc """
+  `from_raw/3` with the sheet refs of `raw` that `layout_base/2` gave (nil: `from_raw/4` finds
+  them).
+  """
+  def from_raw(%__MODULE__{} = page, raw, env, refs) do
     {raw, forms} = Forms.index(raw)
     raw = Browser.Nids.index(raw)
     base = base_href(raw, page.url)
@@ -380,10 +386,23 @@ defmodule Browser.Page do
             style_cache: %{}
         },
         raw,
+        refs || sheet_refs(raw),
         base
       ),
       env
     )
+  end
+
+  @doc """
+  The page that a layout of the tree `raw` in another process starts from, and the sheet refs of
+  `raw`: give both to `from_raw/4`. What `from_raw/4` makes again is not in the page, so the copy
+  into the process is small. When `raw` has other sheets than the page, the memo of the cascade
+  is not in it either: `from_raw/4` does not use that memo.
+  """
+  def layout_base(%__MODULE__{} = page, raw) do
+    refs = sheet_refs(raw)
+    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
+    {if(refs == page.sheet_refs, do: base, else: %{base | memo: nil}), refs}
   end
 
   @doc """
@@ -405,9 +424,8 @@ defmodule Browser.Page do
 
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
-  defp refresh_sheets(page, raw, base) do
-    refs = raw |> Style.scoped_refs() |> cap_links()
-
+  # (`refs`: the sheets of `raw`, see `sheet_refs/1`)
+  defp refresh_sheets(page, raw, refs, base) do
     if refs == page.sheet_refs do
       page
     else
@@ -424,6 +442,9 @@ defmodule Browser.Page do
       }
     end
   end
+
+  # the style sheets of the tree `raw`: `{ref, scope, base}`, in document order
+  defp sheet_refs(raw), do: raw |> Style.scoped_refs() |> cap_links()
 
   # the rules of `refs` (`{ref, scope, base}`, in document order), the user agent's first;
   # `cache` has what earlier calls parsed

@@ -261,6 +261,28 @@ defmodule Browser.PageTest do
       spawn(fn -> send(me, {:page, page}) end)
       assert_receive {:page, ^page}, 1000
     end
+
+    # A layout for the scripts starts in a process of its own from `layout_base/2`. The memo goes
+    # with the base only when the tree has the same sheets: else `from_raw/4` does not use it.
+    test "the base of a layout keeps the memo only for a tree with the same sheets" do
+      page = Page.build(@html, "about:x", @env)
+      assert page.memo != nil
+
+      same = set_attr(page.raw, "a", "class", "a on")
+      {base, refs} = Page.layout_base(page, same)
+      assert base.memo == page.memo
+      assert {base.raw, base.nodes, base.pruned} == {nil, nil, nil}
+
+      assert Page.from_raw(base, same, @env, refs).pruned ==
+               Page.from_raw(page, same, @env).pruned
+
+      other = same ++ [{:element, "style", [], [{:text, ".b { color: teal }"}]}]
+      {base, refs} = Page.layout_base(page, other)
+      assert base.memo == nil
+      laid = Page.from_raw(base, other, @env, refs)
+      assert laid.pruned == Page.from_raw(%{page | memo: nil}, other, @env).pruned
+      assert laid.sheet_refs == refs
+    end
   end
 
   describe "fragments" do

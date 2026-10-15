@@ -2371,9 +2371,10 @@ defmodule Browser.Session do
        when ref != nil or js == current do
     %{raw: raw, deadline: deadline, seq: seq} = req
 
-    # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
-    # shared styles would take gigabytes and seconds)
-    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
+    # (what `Page.from_raw/4` builds afresh stays behind: copied into the process, the tree and its
+    # shared styles would take gigabytes and seconds. The memo stays behind too when the tree has
+    # other sheets)
+    {base, refs} = Page.layout_base(page, raw)
     wx_env = :wx.get_env()
     env = env(state)
     width = max(UI.client_width(state.ui), 200)
@@ -2387,10 +2388,14 @@ defmodule Browser.Session do
     pid =
       spawn_layout(fn ->
         :wx.set_env(wx_env)
-        page = Page.from_raw(base, raw, env)
+        page = Page.from_raw(base, raw, env, refs)
         # (the sheets a script added are parsed once, and the elements that did not change are not
-        # styled again by the next layout: it starts from what this one worked out)
-        send(me, {:style_state, seq, Page.style_state(page)})
+        # styled again by the next layout: it starts from what this one worked out. A layout that a
+        # script waits for sends this state after its answer, so the copy does not delay the
+        # answer, see `Browser.StyleGate`. When the watchdog stops it first, the state is lost)
+        if ref == nil or System.monotonic_time(:millisecond) >= deadline,
+          do: send(me, {:style_state, seq, Page.style_state(page)})
+
         if ref != nil, do: watch_layout(deadline)
 
         # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
@@ -2406,6 +2411,7 @@ defmodule Browser.Session do
         if ref != nil do
           rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
           send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+          send(me, {:style_state, seq, Page.style_state(page)})
         end
       end)
 
