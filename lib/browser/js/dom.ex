@@ -112,13 +112,15 @@ defmodule Browser.JS.DOM do
   defp index_in(ids, nil, _), do: ids
   defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
 
-  # The elements by the value of an attribute, for a few names: name => value => node ids
-  # (`st().aidx`). A selector such as `[data-id="7"]` gets its candidates from it (see
-  # `attr_candidates/3`). A name gets an index the first time that a search uses it, and at
-  # most @attr_names names get one. The writes to the node table keep it up to date, as they
-  # keep `ids`. An element with no parent is the top of its tree, and a search never gives the
-  # top of a tree, so the index does not have it. A page that draws a list again and again
-  # (`innerHTML`) thus does not give a value a long list of old elements.
+  # The elements by the value of an attribute, for a few names: name => value => set of node
+  # ids (`%{nid => true}`, `st().aidx`). A selector such as `[data-id="7"]` gets its
+  # candidates from it (see `attr_candidates/3`). A name gets an index the first time that a
+  # search uses it, and at most @attr_names names get one. The writes to the node table keep it
+  # up to date, as they keep `ids`. An element with no parent is the top of its tree, and a
+  # search never gives the top of a tree, so the index does not have it. A page that draws a
+  # list again and again (`innerHTML`) thus does not give a value a long list of old elements.
+  # Many elements can have one value (`role="option"`), so each value has a set and not a list:
+  # a change of one element does not walk all of them.
   @attr_names 4
 
   defp attr_value(%{kind: :element, attrs: attrs, parent: p}, name) when p != nil do
@@ -144,8 +146,21 @@ defmodule Browser.JS.DOM do
     Enum.reduce(aidx, aidx, fn {name, vals}, acc ->
       o = attr_value(old, name)
       n = attr_value(new, name)
-      if o == n, do: acc, else: %{acc | name => vals |> unindex(o, nid) |> index_in(n, nid)}
+      if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
     end)
+  end
+
+  defp attr_in(vals, nil, _), do: vals
+  defp attr_in(vals, v, nid), do: Map.update(vals, v, %{nid => true}, &Map.put(&1, nid, true))
+
+  defp attr_out(vals, nil, _), do: vals
+
+  defp attr_out(vals, v, nid) do
+    case vals do
+      %{^v => %{^nid => _} = set} when map_size(set) == 1 -> Map.delete(vals, v)
+      %{^v => set} -> %{vals | v => Map.delete(set, nid)}
+      _ -> vals
+    end
   end
 
   # the index of the values of `name`, made now when the name has none; nil when the name has
@@ -160,7 +175,7 @@ defmodule Browser.JS.DOM do
       aidx when map_size(aidx) < @attr_names ->
         vals =
           Enum.reduce(s.nodes, %{}, fn {nid, n}, acc ->
-            index_in(acc, attr_value(n, name), nid)
+            attr_in(acc, attr_value(n, name), nid)
           end)
 
         put_st(%{s | aidx: Map.put(aidx, name, vals)})
@@ -471,7 +486,7 @@ defmodule Browser.JS.DOM do
           Map.new(s.aidx, fn {name, vals} ->
             {name,
              Enum.reduce(ids, vals, fn nid, acc ->
-               unindex(acc, attr_value(s.nodes[nid], name), nid)
+               attr_out(acc, attr_value(s.nodes[nid], name), nid)
              end)}
           end),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
@@ -3376,34 +3391,29 @@ defmodule Browser.JS.DOM do
       {:attr, name, v} ->
         case attr_index(name) do
           nil -> :walk
-          %{^v => nids} -> attr_candidates(nids, root, sels)
+          %{^v => set} -> attr_candidates(set, root, sels)
           _ -> []
         end
     end
   end
 
-  # The elements of `nids` (the elements with the value) that are below `root` and match, when
+  # The elements of `set` (the elements with the value) that are below `root` and match, when
   # there is at most one, or :walk. Two that match need a walk, which gives them in document
-  # order. The list can have elements of other trees, and of trees that left the document (a
-  # list item that the page drew again keeps its children). After @attr_tests tests the search
-  # walks too, so that a long list does not cost much more than a walk.
+  # order. The set can have elements of other trees, and of trees that left the document (a
+  # list item that the page drew again keeps its children). A set of more than @attr_tests
+  # elements is not tested: the search walks, so that it does not cost much more than a walk.
   @attr_tests 32
 
-  defp attr_candidates(nids, root, sels), do: attr_candidates(nids, root, sels, @attr_tests, [])
+  defp attr_candidates(set, _root, _sels) when map_size(set) > @attr_tests, do: :walk
+  defp attr_candidates(set, root, sels), do: one_match(Map.keys(set), root, sels, [])
 
-  defp attr_candidates([], _root, _sels, _left, acc), do: acc
-  defp attr_candidates(_nids, _root, _sels, 0, _acc), do: :walk
+  defp one_match([], _root, _sels, acc), do: acc
 
-  defp attr_candidates([nid | rest], root, sels, left, acc) do
+  defp one_match([nid | rest], root, sels, acc) do
     cond do
-      not (below?(nid, root) and matches?(nid, sels)) ->
-        attr_candidates(rest, root, sels, left - 1, acc)
-
-      acc == [] ->
-        attr_candidates(rest, root, sels, left - 1, [nid])
-
-      true ->
-        :walk
+      not (below?(nid, root) and matches?(nid, sels)) -> one_match(rest, root, sels, acc)
+      acc == [] -> one_match(rest, root, sels, [nid])
+      true -> :walk
     end
   end
 

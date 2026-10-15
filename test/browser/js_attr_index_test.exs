@@ -230,6 +230,8 @@ defmodule Browser.JS.AttrIndexTest do
         const li = document.querySelector('[data-id="3"]');
         console.log(li === ul.children[3], li.parentNode === ul);
         console.log(document.querySelectorAll('[data-id="x"]').length, ul.querySelector('[data-id="x"]') === ul.children[0].firstChild);
+        // (the other operators do not look in the index)
+        console.log(document.querySelectorAll('[data-id^="1"]').length, document.querySelectorAll('[data-id~="x"]').length);
         ul.children[3].remove();
         console.log(document.querySelector('[data-id="3"]'), li.querySelector('[data-id="x"]') === li.firstChild);
         ul.children[5].setAttribute("data-id", "4");
@@ -239,6 +241,6 @@ defmodule Browser.JS.AttrIndexTest do
       )
 
     assert errors == []
-    assert logs == ["true true", "30 true", "null true", "2 true"]
+    assert logs == ["true true", "30 true", "11 30", "null true", "2 true"]
   end
 end

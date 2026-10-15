@@ -115,8 +115,8 @@ defmodule Browser.JS.DomCostTest do
   # A list that a page draws again and again (`innerHTML`) gives an attribute value many
   # elements, and only the newest is in the document. An old item is the top of its tree, and
   # the index does not keep it. But its children keep their parent, and the index keeps them.
-  # The lookups of their values test a limited number of them and then walk the tree, so
-  # they do not cost much more than a walk.
+  # A lookup of a value that more than a few elements have walks the tree at once, so it does
+  # not cost much more than a walk.
   test "a value that a page sets again and again does not make its lookups slower" do
     make = fn rounds ->
       ~s"""
@@ -162,6 +162,30 @@ defmodule Browser.JS.DomCostTest do
 
     [few, many] = costs
     assert many < 1.5 * few
+  end
+
+  # Many elements can have one value (`role="option"`). The index of the name must not make a
+  # change of one of them cost more with the number of the others.
+  test "a value that many elements have does not make the changes of the tree slower" do
+    draw = ~s"""
+    const ul = document.getElementById("l");
+    let h = "";
+    for (let i = 0; i < 2000; i++) h += '<li role="option">x</li>';
+    for (let r = 0; r < 2; r++) ul.innerHTML = h;
+    """
+
+    [plain, indexed] =
+      for search <- ["div", ~s([role="option"])] do
+        pid = start(~s(<ul id="l">) <> String.duplicate(~s(<li role="option">x</li>), 2000))
+        # (the search by the value makes the index of the name)
+        value(pid, ~s{document.querySelectorAll('#{search}').length})
+        cost = cost(pid, draw)
+        assert value(pid, ~s{document.querySelectorAll('[role="option"]').length}) == ["2000"]
+        Runtime.stop(pid)
+        cost
+      end
+
+    assert indexed < 1.5 * plain
   end
 
   test "a class selector does not split the class attributes again for each search" do
