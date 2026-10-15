@@ -1,0 +1,73 @@
+defmodule Browser.StyleGateTest do
+  use ExUnit.Case, async: true
+
+  alias Browser.StyleGate
+
+  # a request of the script `js`: `ref` nil is a prewarm
+  defp req(js, ref, tag), do: %{js: js, ref: ref, tag: tag}
+
+  # starts the requests as the session does: one process each, monitored with a tag
+  defp start(gate, reqs, fun) do
+    Enum.reduce(reqs, gate, fn r, gate ->
+      pid = spawn(fn -> fun.(r) end)
+      mon = :erlang.monitor(:process, pid, tag: :style_gate_down)
+      StyleGate.running(gate, r.seq, mon)
+    end)
+  end
+
+  test "a request starts at once when no run is in flight" do
+    {[r], _gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    assert r.tag == :a
+    assert r.seq == 1
+  end
+
+  test "a prewarm waits for the run in flight and starts when that run sends its style state" do
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    gate = StyleGate.running(gate, a.seq, :mon_a)
+    assert {[], gate} = StyleGate.request(gate, req(:js, nil, :b))
+
+    assert {true, :mon_a, [b], gate} = StyleGate.style_done(gate, a.seq)
+    assert b.tag == :b
+    gate = StyleGate.running(gate, b.seq, :mon_b)
+    assert {true, :mon_b, [], _gate} = StyleGate.style_done(gate, b.seq)
+  end
+
+  test "a request that a script waits for starts at once and replaces the prewarm of its script" do
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    gate = StyleGate.running(gate, a.seq, :mon_a)
+    {[], gate} = StyleGate.request(gate, req(:js, nil, :b))
+    {[], gate} = StyleGate.request(gate, req(:other, nil, :c))
+
+    assert {[f], gate} = StyleGate.request(gate, req(:js, make_ref(), :forced))
+    assert f.tag == :forced
+    gate = StyleGate.running(gate, f.seq, :mon_f)
+
+    # (the prewarm :b is gone; the prewarm of the other script waits for both runs)
+    assert {true, :mon_f, [], gate} = StyleGate.style_done(gate, f.seq)
+    # (the run that started first ends last: its older state is not adopted)
+    assert {false, :mon_a, [c], _gate} = StyleGate.style_done(gate, a.seq)
+    assert c.tag == :c
+  end
+
+  test "the gate opens when a run stops before it sends its style state" do
+    test = self()
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    gate = start(gate, [a], fn _ -> exit(:style_failed) end)
+    {[], gate} = StyleGate.request(gate, req(:js, nil, :b))
+
+    assert_receive {:style_gate_down, mon, :process, _pid, :style_failed}
+    {next, gate} = StyleGate.down(gate, mon)
+    assert [%{tag: :b} = b] = next
+
+    gate = start(gate, next, fn r -> send(test, {:started, r.tag}) end)
+    assert_receive {:started, :b}
+    assert {true, _mon, [], _gate} = StyleGate.style_done(gate, b.seq)
+  end
+
+  test "the end of a run after it sent its style state does not start a request" do
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    gate = StyleGate.running(gate, a.seq, :mon_a)
+    {true, :mon_a, [], gate} = StyleGate.style_done(gate, a.seq)
+    assert {[], ^gate} = StyleGate.down(gate, :mon_a)
+  end
+end

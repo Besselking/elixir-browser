@@ -24,6 +24,7 @@ defmodule Browser.Session do
     Scrollbars,
     Scrollers,
     Selection,
+    StyleGate,
     TextEdit,
     UI,
     Visits
@@ -890,14 +891,33 @@ defmodule Browser.Session do
   # the scripts ask where the elements are while the layout in the background is behind:
   # the page is laid out for them in a process of its own
   def handle_info({:layout_now, js, ref, raw}, state) do
-    start_layout_for_scripts(state, js, ref, raw)
+    request_layout(state, js, ref, raw)
     {:noreply, state}
   end
 
-  def handle_info({:style_state, style}, %{page: %Page{} = page} = state),
-    do: {:noreply, %{state | page: Page.adopt_style_state(page, style)}}
+  # (a newer request may have sent its style state first: then the older one is not adopted)
+  def handle_info({:style_state, seq, style}, state) do
+    {adopt?, mon, next, gate} = StyleGate.style_done(style_gate(), seq)
+    if mon, do: Process.demonitor(mon, [:flush])
+    Process.put(:style_gate, gate)
 
-  def handle_info({:style_state, _style}, state), do: {:noreply, state}
+    state =
+      case state.page do
+        %Page{} = page when adopt? -> %{state | page: Page.adopt_style_state(page, style)}
+        _ -> state
+      end
+
+    Enum.each(next, &start_layout_for_scripts(state, &1))
+    {:noreply, state}
+  end
+
+  # a layout for the scripts stopped before it sent its style state: the gate opens
+  def handle_info({:style_gate_down, mon, :process, _pid, _reason}, state) do
+    {next, gate} = StyleGate.down(style_gate(), mon)
+    Process.put(:style_gate, gate)
+    Enum.each(next, &start_layout_for_scripts(state, &1))
+    {:noreply, state}
+  end
 
   # a timer for a size that has since changed again
   def handle_info({:resize, _stale}, state), do: {:noreply, state}
@@ -2323,15 +2343,29 @@ defmodule Browser.Session do
   def serve_layout({:layout_now, js, ref, raw}) do
     case Process.get(:session_state) do
       nil -> :ok
-      state -> start_layout_for_scripts(state, js, ref, raw)
+      state -> request_layout(state, js, ref, raw)
     end
   end
 
   # The time a script waits for a layout it asked for (see `Browser.JS.DOM.layout_now/0`).
   @layout_wait 5_000
 
-  # (`ref` is nil for a prewarm: `Browser.JS.DOM.prewarm_layout/0`)
-  defp start_layout_for_scripts(%{page: %Page{} = page} = state, js, ref, raw) do
+  # (the gate is in the process dictionary: `serve_layout/1` runs while the session waits for
+  # the scripts, and it cannot give a new state back)
+  defp style_gate, do: Process.get(:style_gate) || StyleGate.new()
+
+  # `ref` is nil for a prewarm (`Browser.JS.DOM.prewarm_layout/0`): see `Browser.StyleGate`
+  defp request_layout(state, js, ref, raw) do
+    deadline = System.monotonic_time(:millisecond) + @layout_wait
+    req = %{js: js, ref: ref, raw: raw, deadline: deadline}
+    {start, gate} = StyleGate.request(style_gate(), req)
+    Process.put(:style_gate, gate)
+    Enum.each(start, &start_layout_for_scripts(state, &1))
+  end
+
+  defp start_layout_for_scripts(%{page: %Page{} = page} = state, req) do
+    %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} = req
+
     # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
     # shared styles would take gigabytes and seconds)
     base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
@@ -2344,36 +2378,38 @@ defmodule Browser.Session do
     worker = state.layout_worker
     tid = state.tid
     me = self()
-    deadline = System.monotonic_time(:millisecond) + @layout_wait
 
-    spawn_layout(fn ->
-      :wx.set_env(wx_env)
-      page = Page.from_raw(base, raw, env)
-      # (the sheets a script added are parsed once, and the elements that did not change are not
-      # styled again by the next layout: it starts from what this one worked out)
-      send(me, {:style_state, Page.style_state(page)})
-      if ref != nil, do: watch_layout(deadline)
+    pid =
+      spawn_layout(fn ->
+        :wx.set_env(wx_env)
+        page = Page.from_raw(base, raw, env)
+        # (the sheets a script added are parsed once, and the elements that did not change are not
+        # styled again by the next layout: it starts from what this one worked out)
+        send(me, {:style_state, seq, Page.style_state(page)})
+        if ref != nil, do: watch_layout(deadline)
 
-      # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
-      {items, height} =
-        LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-          scrollers: true,
-          boxes: true,
-          metrics: true,
-          images: images,
-          svg_defs: page.svg_defs
-        )
+        # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
+        {items, height} =
+          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+            scrollers: true,
+            boxes: true,
+            metrics: true,
+            images: images,
+            svg_defs: page.svg_defs
+          )
 
-      if ref != nil do
-        rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
-        send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
-      end
-    end)
+        if ref != nil do
+          rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+          send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
+        end
+      end)
 
-    :ok
+    # (the gate opens also when the process stops before it sends its style state)
+    mon = :erlang.monitor(:process, pid, tag: :style_gate_down)
+    Process.put(:style_gate, StyleGate.running(style_gate(), seq, mon))
   end
 
-  defp start_layout_for_scripts(_state, _js, _ref, _raw), do: :ok
+  defp start_layout_for_scripts(_state, _req), do: :ok
 
   @doc false
   # Stops the calling layout process at `deadline` (monotonic ms), when the script no longer
