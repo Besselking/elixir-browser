@@ -112,6 +112,65 @@ defmodule Browser.JS.DOM do
   defp index_in(ids, nil, _), do: ids
   defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
 
+  # The elements by the value of an attribute, for a few names: name => value => node ids
+  # (`st().aidx`). A selector such as `[data-id="7"]` gets its candidates from it (see
+  # `attr_candidates/3`). A name gets an index the first time that a search uses it, and at
+  # most @attr_names names get one. The writes to the node table keep it up to date, as they
+  # keep `ids`. An element with no parent is the top of its tree, and a search never gives the
+  # top of a tree, so the index does not have it. A page that draws a list again and again
+  # (`innerHTML`) thus does not give a value a long list of old elements.
+  @attr_names 4
+
+  defp attr_value(%{kind: :element, attrs: attrs, parent: p}, name) when p != nil do
+    case List.keyfind(attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  defp attr_value(_, _), do: nil
+
+  # the indexes after a write of node `nid`: `old` is the node before (nil for a new node)
+  defp reindex_all(s, _nid, %{attrs: attrs, parent: p}, %{attrs: attrs, parent: q})
+       when p == q or (p != nil and q != nil),
+       do: s
+
+  defp reindex_all(s, nid, old, new),
+    do: %{s | ids: reindex(s.ids, nid, old, new), aidx: reindex_attrs(s.aidx, nid, old, new)}
+
+  defp reindex_attrs(aidx, _nid, _old, _new) when map_size(aidx) == 0, do: aidx
+
+  defp reindex_attrs(aidx, nid, old, new) do
+    Enum.reduce(aidx, aidx, fn {name, vals}, acc ->
+      o = attr_value(old, name)
+      n = attr_value(new, name)
+      if o == n, do: acc, else: %{acc | name => vals |> unindex(o, nid) |> index_in(n, nid)}
+    end)
+  end
+
+  # the index of the values of `name`, made now when the name has none; nil when the name has
+  # none and the index has no room for it
+  defp attr_index(name) do
+    s = st()
+
+    case s.aidx do
+      %{^name => vals} ->
+        vals
+
+      aidx when map_size(aidx) < @attr_names ->
+        vals =
+          Enum.reduce(s.nodes, %{}, fn {nid, n}, acc ->
+            index_in(acc, attr_value(n, name), nid)
+          end)
+
+        put_st(%{s | aidx: Map.put(aidx, name, vals)})
+        vals
+
+      _ ->
+        nil
+    end
+  end
+
   # The tokens of the `class` attribute of an element, kept on the node as `cls`:
   # `{value, tokens}`. Selectors and `classList` read the tokens many times for each change of
   # the attribute, and a split of the value at each read was a large part of a search. Each
@@ -155,8 +214,8 @@ defmodule Browser.JS.DOM do
         do: %{s | dirty: true},
         else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
 
-    ids = reindex(s.ids, n.id, Map.get(s.nodes, n.id), n)
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), ids: ids, rev: s.rev + 1})
+    s = reindex_all(s, n.id, Map.get(s.nodes, n.id), n)
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -192,13 +251,8 @@ defmodule Browser.JS.DOM do
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
     n = with_classes(n)
 
-    put_st(%{
-      s
-      | next: id + 1,
-        nodes: Map.put(s.nodes, id, n),
-        ids: reindex(s.ids, id, nil, n),
-        rev: s.rev + 1
-    })
+    s = reindex_all(s, id, nil, n)
+    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
 
     id
   end
@@ -413,6 +467,13 @@ defmodule Browser.JS.DOM do
       | nodes: Map.drop(s.nodes, ids),
         ids:
           Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
+        aidx:
+          Map.new(s.aidx, fn {name, vals} ->
+            {name,
+             Enum.reduce(ids, vals, fn nid, acc ->
+               unindex(acc, attr_value(s.nodes[nid], name), nid)
+             end)}
+          end),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -555,6 +616,7 @@ defmodule Browser.JS.DOM do
     put_st(%{
       nodes: %{},
       ids: %{},
+      aidx: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -616,12 +678,8 @@ defmodule Browser.JS.DOM do
     old = node(nid)
     n = with_classes(fun.(old))
 
-    put_st(%{
-      s
-      | nodes: Map.put(s.nodes, nid, n),
-        ids: reindex(s.ids, nid, old, n),
-        rev: s.rev + 1
-    })
+    s = reindex_all(s, nid, old, n)
+    put_st(%{s | nodes: Map.put(s.nodes, nid, n), rev: s.rev + 1})
   end
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
@@ -3291,40 +3349,78 @@ defmodule Browser.JS.DOM do
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
 
-    case id_candidates(sels) do
+    case candidates(sels, root) do
       :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
       nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
     end
   end
 
-  # The elements that can match a selector list, when the index of the ids gives them, or
-  # :walk. A selector list with one selector whose last compound has an id (`#a`,
-  # `ul > li#a.b`) can match only an element with that id. When at most one element has the id,
-  # the tree is not walked. When more elements have it, the tree is walked, for the reason
-  # that `element_by_id/2` gives.
-  defp id_candidates(sels) do
-    case selector_id(sels) do
+  # The elements that can match a selector list, when an index gives them, or :walk. A
+  # selector list with one selector whose last compound has an id (`#a`, `ul > li#a.b`) can
+  # match only an element with that id. When at most one element has the id, the tree is not
+  # walked. When more elements have it, the tree is walked, for the reason that
+  # `element_by_id/2` gives. A last compound with no id but with `[name="v"]` can match only an
+  # element with that value (see `attr_candidates/3`).
+  defp candidates(sels, root) do
+    case selector_key(sels) do
       nil ->
         :walk
 
-      id ->
+      {:id, id} ->
         case st().ids do
           %{^id => [nid]} -> [nid]
           %{^id => _} -> :walk
           _ -> []
         end
+
+      {:attr, name, v} ->
+        case attr_index(name) do
+          nil -> :walk
+          %{^v => nids} -> attr_candidates(nids, root, sels)
+          _ -> []
+        end
     end
   end
 
-  # the id in the last compound of a selector list with one selector, or nil
-  defp selector_id([[{_comb, compound} | _]]) do
-    Enum.find_value(compound, fn
-      {:id, id} -> id
-      _ -> nil
-    end)
+  # The elements of `nids` (the elements with the value) that are below `root` and match, when
+  # there is at most one, or :walk. Two that match need a walk, which gives them in document
+  # order. The list can have elements of other trees, and of trees that left the document (a
+  # list item that the page drew again keeps its children). After @attr_tests tests the search
+  # walks too, so that a long list does not cost much more than a walk.
+  @attr_tests 32
+
+  defp attr_candidates(nids, root, sels), do: attr_candidates(nids, root, sels, @attr_tests, [])
+
+  defp attr_candidates([], _root, _sels, _left, acc), do: acc
+  defp attr_candidates(_nids, _root, _sels, 0, _acc), do: :walk
+
+  defp attr_candidates([nid | rest], root, sels, left, acc) do
+    cond do
+      not (below?(nid, root) and matches?(nid, sels)) ->
+        attr_candidates(rest, root, sels, left - 1, acc)
+
+      acc == [] ->
+        attr_candidates(rest, root, sels, left - 1, [nid])
+
+      true ->
+        :walk
+    end
   end
 
-  defp selector_id(_sels), do: nil
+  # what the last compound of a selector list with one selector gives an index to look in: its
+  # id (`{:id, id}`), else its first `[name="v"]` (`{:attr, name, v}`), else nil
+  defp selector_key([[{_comb, compound} | _]]) do
+    Enum.find_value(compound, fn
+      {:id, id} -> {:id, id}
+      _ -> nil
+    end) ||
+      Enum.find_value(compound, fn
+        {:attr, {name, "=", v}} -> {:attr, name, v}
+        _ -> nil
+      end)
+  end
+
+  defp selector_key(_sels), do: nil
 
   # The elements below a node that match, in document order (newest first). A walk does not
   # change the tree, so it reads the nodes from the table that it gets at the start. (A node
@@ -3362,7 +3458,7 @@ defmodule Browser.JS.DOM do
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
 
-    case id_candidates(sels) do
+    case candidates(sels, root) do
       :walk -> first_match(node(root).kids, st().nodes, sels)
       nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
     end
