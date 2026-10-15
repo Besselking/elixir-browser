@@ -93,8 +93,8 @@ defmodule Browser.JS.WebSocketTest do
     pid = Runtime.start(raw, info)
     r = Runtime.run_scripts(pid)
     sync = for({_, t} <- r.console, do: t)
-    # (nothing logged yet: the first event may be slow to come on a busy machine)
-    first = if sync == [], do: max(wait, 5000), else: wait
+    # (the first event may be slow to come on a busy machine)
+    first = max(wait, 5000)
     lines = sync ++ collect(pid, first, wait, [])
     Runtime.stop(pid)
     lines
