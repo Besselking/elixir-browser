@@ -826,9 +826,6 @@ defmodule Browser.JS.RegExp do
   # (a unicode regexp steps over a whole surrogate pair)
   defp bump_empty(rx, matched, s) do
     if matched == "" do
-      # (a round of the loop is a step of the budget, also when no getter runs: a loop that
-      # does not advance stops at the step limit)
-      tick()
       this_index = tolen(Interp.get(rx, "lastIndex"))
       flags = to_str(flags_value(rx))
 
@@ -994,8 +991,19 @@ defmodule Browser.JS.RegExp do
 
   defp builtins_kept?(_p, []), do: true
 
-  # `rx.flags`, with no call of the getters for a pristine RegExp
-  defp flags_value(rx), do: pristine_flags(rx) || Interp.get(rx, "flags")
+  # `rx.flags`. A pristine RegExp calls no getter, but it uses the steps of the 9 calls (`flags`
+  # and its 8 getters). Thus a loop of `bump_empty/3` that does not advance uses the step budget
+  # as fast as before, and it stops at the step limit after the same number of rounds.
+  defp flags_value(rx) do
+    case pristine_flags(rx) do
+      nil ->
+        Interp.get(rx, "flags")
+
+      fl ->
+        for _ <- 1..9, do: tick()
+        fl
+    end
+  end
 
   # `ToString(rx.flags)`: the flags in the order of the `flags` getter
   defp canonical_flags(rx) do

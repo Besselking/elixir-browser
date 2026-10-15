@@ -223,5 +223,31 @@ defmodule Browser.JSRegExpFastTest do
       assert js("var r = /a/y; [r.test('ba'), r.lastIndex, r.test('ab'), r.lastIndex].join()") ==
                "false,0,true,1"
     end
+
+    test "after an empty match the search goes on one unit later, not with a longer match" do
+      assert js("'aaa'.replace(/a*?/g, '-')") == "-a-a-a-"
+      assert js("'abc'.replace(/|b/g, function (m, at) { return at; })") == "0a1b2c3"
+      assert js("'aaa'.match(/a*?/g).length") == 4.0
+    end
+
+    test "split and matchAll give the flags to the species constructor in the getter's order" do
+      assert js("""
+             var log = [];
+             Object.defineProperty(RegExp, Symbol.species, {
+               get: function () {
+                 return function (p, f) { log.push(f); return new RegExp(p, f); };
+               }
+             });
+             'xa'.split(/a/ysgd); Array.from('xa'.matchAll(/a/sgd));
+             log.join()
+             """) == "dgsy,dgs"
+    end
+
+    test "a loop of empty matches that does not advance stops at the step limit" do
+      # (the engine cannot start a search inside a surrogate pair, so the loop does not advance)
+      for src <- ["'a😀b'.replace(/(?:)/g, '-')", "'a😀b'.match(/(?:)/g)"] do
+        assert {:error, :step_limit, _} = JS.eval(src, max_steps: 2_000, timeout: 20_000)
+      end
+    end
   end
 end
