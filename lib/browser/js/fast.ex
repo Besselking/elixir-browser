@@ -3,8 +3,8 @@ defmodule Browser.JS.Fast do
   # The switch and the shadow run of the fast paths of the data model.
   #
   # A fast path is a short way to the result of a generic operation (`put_obj/5`,
-  # `Props.descriptor/2`, `has_property?/2`, `get/2`, an object literal and `construct/3`)
-  # for the common cases. The differential oracle of `test/browser/js_fast_test.exs` runs
+  # `Props.descriptor/2`, `has_property?/2`, `get/2`, an object literal, `construct/3` and
+  # `Object.assign`) for the common cases. The differential oracle of `test/browser/js_fast_test.exs` runs
   # each program with the fast paths off and on, and compares the two runs. The compile
   # oracle cannot see a wrong fast path, because the tree walker and the compiled code call
   # the same fast paths.
@@ -18,7 +18,19 @@ defmodule Browser.JS.Fast do
   @check Application.compile_env(:browser, :js_resolve_check, false)
 
   # The names of all fast paths. The oracle turns them all off with this list.
-  @names [:has_own, :update, :compound, :literal, :add, :iter, :ic, :ic_add, :construct, :elems]
+  @names [
+    :has_own,
+    :update,
+    :compound,
+    :literal,
+    :add,
+    :iter,
+    :ic,
+    :ic_add,
+    :construct,
+    :elems,
+    :assign
+  ]
 
   @doc false
   def names, do: @names
