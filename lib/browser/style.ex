@@ -281,8 +281,11 @@ defmodule Browser.Style do
   @doc "The distinct media query lists used by `rules`."
   def media_queries(rules), do: rules |> Enum.flat_map(& &1.media) |> Enum.uniq()
 
-  @doc "Media query results for `env`; changes exactly when the active rule set would."
-  def media_key(queries, env), do: Enum.map(queries, &MediaQuery.eval(&1, env))
+  @doc """
+  Media query results for `env`, as a map from each query to its result; changes exactly when the
+  active rule set would.
+  """
+  def media_key(queries, env), do: Map.new(queries, &{&1, MediaQuery.eval(&1, env)})
 
   @doc "Builds a rule index, keeping only rules whose media conditions hold in `env`."
   def index_rules(rules, env) do

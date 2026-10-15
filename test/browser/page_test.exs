@@ -255,6 +255,139 @@ defmodule Browser.PageTest do
       end
     end
 
+    @hosts """
+    <style>p { color: red } x-a { margin-left: 3px }</style>
+    <x-a id="h1"><div><p>one</p></div></x-a>
+    <x-a id="h2"><div><p>two</p></div></x-a>
+    <section id="s"><div><p>three</p></div></section>
+    <div id="end"></div>
+    """
+
+    defp edit(nodes, id, fun) when is_list(nodes), do: Enum.map(nodes, &edit(&1, id, fun))
+
+    defp edit({:element, tag, attrs, kids} = el, id, fun) do
+      if {"id", id} in attrs, do: fun.(el), else: {:element, tag, attrs, edit(kids, id, fun)}
+    end
+
+    defp edit(other, _id, _fun), do: other
+
+    # the element gets a shadow tree called `name` with `kids` in front of its own
+    defp shadow(raw, id, name, kids),
+      do:
+        edit(raw, id, fn {:element, tag, attrs, old} ->
+          {:element, tag, attrs ++ [{"data-b-frame", name}], kids ++ old}
+        end)
+
+    defp append(raw, id, kids),
+      do: edit(raw, id, fn {:element, tag, attrs, old} -> {:element, tag, attrs, old ++ kids} end)
+
+    defp style(css), do: {:element, "style", [], [{:text, css}]}
+    defp para(text), do: {:element, "div", [], [{:element, "p", [], [{:text, text}]}]}
+
+    # the computed style of the `<p>` with the text `text`
+    defp p_style(nodes, text) when is_list(nodes), do: Enum.find_value(nodes, &p_style(&1, text))
+    defp p_style({:element, "p", attrs, [{:text, text}]}, text), do: Map.new(attrs)["@computed"]
+    defp p_style({:element, _, _, kids}, text), do: p_style(kids, text)
+    defp p_style(_other, _text), do: nil
+
+    # whether the memo entry of the `<p>` with the text `text` is the one `before` had
+    defp memo_kept?(before, later, text) do
+      [{:element, _, attrs, _}] = find_p(before.raw, text)
+
+      {_, nid} = List.keyfind(attrs, "@nid", 0)
+      {_, old} = before.memo
+      {_, new} = later.memo
+      :erts_debug.same(Map.fetch!(old, nid), Map.fetch!(new, nid))
+    end
+
+    defp find_p(nodes, text) when is_list(nodes), do: Enum.flat_map(nodes, &find_p(&1, text))
+    defp find_p({:element, "p", _, [{:text, text}]} = p, text), do: [p]
+    defp find_p({:element, _, _, kids}, text), do: find_p(kids, text)
+    defp find_p(_other, _text), do: []
+
+    # (`h1` has a shadow tree with a sheet, `h2` one with no sheet)
+    defp hosts_page do
+      page = Page.build(@hosts, "about:x", @env)
+
+      raw =
+        page.raw
+        |> shadow("h1", "s1", [style("p { font-size: 30px }"), para("in1")])
+        |> shadow("h2", "s2", [para("in2")])
+
+      Page.from_raw(page, raw, @env)
+    end
+
+    defp assert_fresh(page, raw) do
+      fresh = Page.from_raw(%{page | memo: nil}, raw, @env)
+      incremental = Page.from_raw(page, raw, @env)
+      assert incremental.pruned == fresh.pruned
+      assert incremental.nodes == fresh.nodes
+      incremental
+    end
+
+    test "a new shadow tree with sheets keeps the memo, and styles as a fresh tree" do
+      page = hosts_page()
+      css = "@media (min-width: 500px) { p { color: blue } } :host { padding-left: 5px }"
+      raw = append(page.raw, "end", [{:element, "x-a", [{"id", "h3"}], []}])
+      page = Page.from_raw(page, raw, @env)
+      raw = shadow(page.raw, "h3", "s3", [style(css), para("in3")])
+
+      incremental = assert_fresh(page, raw)
+      assert memo_kept?(page, incremental, "three")
+      assert p_style(incremental.pruned, "in3")["color"] == {0, 0, 255}
+      assert p_style(incremental.pruned, "three")["color"] == {255, 0, 0}
+    end
+
+    test "a new sheet in a shadow tree that was there makes a new memo" do
+      page = hosts_page()
+
+      for {id, text} <- [{"h1", "in1"}, {"h2", "in2"}] do
+        raw = append(page.raw, id, [style("p { color: blue }")])
+        incremental = assert_fresh(page, raw)
+        refute memo_kept?(page, incremental, "three")
+        assert p_style(incremental.pruned, text)["color"] == {0, 0, 255}
+      end
+    end
+
+    test "a new sheet of the page makes a new memo" do
+      page = hosts_page()
+      raw = append(page.raw, "end", [style("p { color: blue }")])
+      incremental = assert_fresh(page, raw)
+      refute memo_kept?(page, incremental, "three")
+      assert p_style(incremental.pruned, "three")["color"] == {0, 0, 255}
+    end
+
+    test "a new shadow tree with @property or a cascade layer makes a new memo" do
+      page = hosts_page()
+      raw = append(page.raw, "end", [{:element, "x-a", [{"id", "h3"}], []}])
+      page = Page.from_raw(page, raw, @env)
+
+      for css <- [
+            "@property --w { syntax: \"*\"; inherits: true; initial-value: 4px } p { color: blue }",
+            "@layer base { p { color: blue } }"
+          ] do
+        raw = shadow(page.raw, "h3", "s3", [style(css), para("in3")])
+        incremental = assert_fresh(page, raw)
+        refute memo_kept?(page, incremental, "three")
+      end
+    end
+
+    test "a kept memo holds only for the media query results it was made with" do
+      page = hosts_page()
+      wide = "@media (min-width: 500px) { p { color: green } }"
+      raw = append(page.raw, "end", [style(wide), {:element, "x-a", [{"id", "h3"}], []}])
+      page = Page.from_raw(page, raw, @env)
+      css = "@media (max-width: 500px) { p { color: blue } }"
+      raw = shadow(page.raw, "h3", "s3", [style(css), para("in3")])
+      narrow = %{@env | width: 400}
+      incremental = Page.from_raw(page, raw, narrow)
+      assert incremental.pruned == Page.from_raw(%{page | memo: nil}, raw, narrow).pruned
+      assert p_style(incremental.pruned, "three")["color"] == {255, 0, 0}
+      assert p_style(incremental.pruned, "in3")["color"] == {0, 0, 255}
+      # (at the width the memo was made for, it is kept)
+      assert memo_kept?(page, assert_fresh(page, raw), "three")
+    end
+
     test "a page can be sent to another process" do
       page = Page.build(@html, "about:x", @env)
       me = self()
