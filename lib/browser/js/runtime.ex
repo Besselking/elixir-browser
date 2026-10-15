@@ -14,7 +14,7 @@ defmodule Browser.JS.Runtime do
   event) and `:console`.
   """
 
-  alias Browser.JS.{Builtins, DOM, Interp, Modules, Parser}
+  alias Browser.JS.{Builtins, DOM, Interp, Modules, Parser, Pos}
 
   @steps 5_000_000
   @call_timeout 15_000
@@ -712,7 +712,8 @@ defmodule Browser.JS.Runtime do
 
   # where `throw "text"` was run (an error object has the lines of its stack)
   defp thrown_at({:obj, _} = v) do
-    with nil <- Interp.describe_error(v), {file, line} <- Process.get(:js_throw_pos) do
+    with nil <- Interp.describe_error(v),
+         {file, line} <- Pos.decode(Process.get(:js_throw_pos)) do
       " (#{file}:#{line})"
     else
       _ -> ""
@@ -720,7 +721,7 @@ defmodule Browser.JS.Runtime do
   end
 
   defp thrown_at(_) do
-    case Process.get(:js_throw_pos) do
+    case Pos.decode(Process.get(:js_throw_pos)) do
       {file, line} -> " (#{file}:#{line})"
       _ -> ""
     end
