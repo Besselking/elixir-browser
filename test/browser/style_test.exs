@@ -1128,6 +1128,58 @@ defmodule Browser.StyleTest do
     assert elem(Style.prune(nodes, idx, memo), 0) == Style.prune(nodes, idx)
   end
 
+  test "a custom set that the memo keeps as a change of its parent's set is found again" do
+    css = "section { --a: 1px; --b: 2px } .r { --a: initial } p { width: var(--a, 7px) }"
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, css}])
+
+    parse = fn k ->
+      ~s(<section><i class="k#{k}"></i><div class="r"><p>x</p></div></section>)
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    {_, memo} = Style.prune(parse.(0), idx, nil)
+    # (the `<div>` is styled again after its changed sibling; its set is the one in the memo, so
+    # the `<p>` in it is taken over)
+    nodes = parse.(1)
+    {warm, later} = Style.prune(nodes, idx, memo)
+    assert warm == Style.prune(nodes, idx)
+    [{:element, "section", _, [_, {:element, "div", _, [{:element, "p", attrs, _}]}]}] = nodes
+    {_, nid} = List.keyfind(attrs, "@nid", 0)
+    assert :erts_debug.same(memo[nid], later[nid])
+  end
+
+  test "a clean up keeps what the kept entries need" do
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, "li::marker { content: 'm' }"}])
+
+    # `#p1` changes in each round: its old set is no longer named, but the set of the child of
+    # `#p2` (which is taken over) is made from it. The list items keep a style of their own (with
+    # the marker). Each round has 300 new styles, so the tables are cleaned up.
+    parse = fn round ->
+      g = round + 1
+
+      (~s(<div id="p1" style="--g: #{g}"><span style="--i: 1">a</span></div>) <>
+         ~s(<div id="p2" style="--g: 1; --i: 5"><span style="--i: 1">b</span></div>) <>
+         ~s(<ol><li>one</li><li>two</li></ol><main>) <>
+         Enum.map_join(
+           1..300,
+           &~s(<div style="width: #{&1 * 10 + round}px; --r: #{round}">x</div>)
+         ) <>
+         "</main>")
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    {_, memo} = Style.prune(parse.(0), idx, nil)
+
+    Enum.reduce(1..3, memo, fn round, memo ->
+      nodes = parse.(round)
+      {pruned, memo} = Style.prune(nodes, idx, memo)
+      assert pruned == Style.prune(nodes, idx)
+      memo
+    end)
+  end
+
   test "the memo of a deep tree whose elements each set a custom property is small when copied" do
     vars = Enum.map_join(1..200, " ", &"--v#{&1}: #{&1}px;")
 
