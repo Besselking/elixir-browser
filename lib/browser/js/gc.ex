@@ -31,6 +31,7 @@ defmodule Browser.JS.GC do
   on, so that the tests can find a value that only an unwalked field holds.
   """
 
+  import Bitwise
   require Browser.JS.Obj, as: Obj
 
   @min_collect 100_000
@@ -129,33 +130,48 @@ defmodule Browser.JS.GC do
         Process.get()
       )
 
-    # (the marks live in a table of their own: no garbage for the process's collector to sweep)
-    marks = :ets.new(:js_marks, [:set, :private])
+    # The marks are a bitmap with one bit for each heap id up to the largest key. A bit costs
+    # less than an entry of a table, and it makes no garbage for the process's collector.
+    marks = :atomics.new(div(:lists.max([0 | ids]), 64) + 1, signed: false)
+    mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
 
-    try do
-      mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
-      live = :ets.info(marks, :size)
+    {freed, live} =
+      :lists.foldl(
+        fn id, {n, live} ->
+          if marked?(marks, id) do
+            {n, live + 1}
+          else
+            :erlang.erase(id)
+            {n + 1, live}
+          end
+        end,
+        {0, 0},
+        ids
+      )
 
-      freed =
-        :lists.foldl(
-          fn id, n ->
-            if :ets.member(marks, id) do
-              n
-            else
-              :erlang.erase(id)
-              n + 1
-            end
-          end,
-          0,
-          ids
-        )
+    Process.put(:js_freed, :erlang.get(:js_next) - live)
+    # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
+    if Process.get(:js_gc_at) != 0, do: Process.put(:js_gc_at, max(@min_collect, 2 * live))
+    freed
+  end
 
-      Process.put(:js_freed, :erlang.get(:js_next) - live)
-      # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
-      if Process.get(:js_gc_at) != 0, do: Process.put(:js_gc_at, max(@min_collect, 2 * live))
-      freed
-    after
-      :ets.delete(marks)
+  @compile {:inline, marked?: 2}
+  defp marked?(marks, id),
+    do: (:atomics.get(marks, (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
+
+  # Marks `id`; false when it was marked before. Only a key of the process dictionary gets
+  # here, so the bitmap has a bit for it.
+  @compile {:inline, mark_new: 2}
+  defp mark_new(marks, id) do
+    i = (id >>> 6) + 1
+    bit = 1 <<< (id &&& 63)
+    word = :atomics.get(marks, i)
+
+    if (word &&& bit) == 0 do
+      :atomics.put(marks, i, word ||| bit)
+      true
+    else
+      false
     end
   end
 
@@ -439,7 +455,7 @@ defmodule Browser.JS.GC do
         stack
 
       obj ->
-        if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+        if mark_new(marks, t), do: [obj | stack], else: stack
     end
   end
 

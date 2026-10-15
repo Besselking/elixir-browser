@@ -4,6 +4,9 @@ defmodule Browser.JSGCTest do
   alias Browser.JS.{Builtins, GC, Interp, Parser}
   require Browser.JS.Elems, as: Elems
 
+  # True in the check build (`JS_RESOLVE_CHECK=1`).
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
   # runs `src` in a fresh heap, collects, then runs the timers; returns {freed, heap size
   # before, heap size after, console}
   defp run(src, after_src) do
@@ -214,6 +217,29 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # The node table is not a root, so a JS value in a node map does not keep its object
+  # alive. The check build (`JS_RESOLVE_CHECK=1`) stops the collection when it finds one.
+  test "a JS value in the node table stops the collection in the check build" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      doc = Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      {:obj, held} = Interp.new_object()
+      s = Process.get(:dom)
+      nodes = Map.update!(s.nodes, doc, &%{&1 | props: %{"x" => {:obj, held}}})
+      Process.put(:dom, %{s | nodes: nodes})
+
+      if @check do
+        assert_raise ArgumentError, ~r/unwalked field/, &GC.collect/0
+      else
+        GC.collect()
+        assert :erlang.get(held) == :undefined
+      end
+    end)
+    |> Task.await(30_000)
+  end
+
   test "the lexer's tables keep no object alive" do
     Task.async(fn ->
       Interp.init(10_000_000)
@@ -228,6 +254,26 @@ defmodule Browser.JSGCTest do
 
       GC.collect()
       assert :erlang.get(gid) == :undefined
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The marks are a bitmap up to the largest heap key, not up to `:js_next`. An entry above
+  # `:js_next` that a root holds stays, and so does what it holds.
+  test "keeps a held entry with a key above the next heap id" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {:obj, inner} = Interp.new_object()
+      top = Process.get(:js_next) + 1000
+      :erlang.put(top, {:obj, inner})
+      :erlang.put(top + 64, {:obj, inner})
+      Process.put({:gc_test_key, 1}, {:held, top})
+
+      GC.collect()
+      assert :erlang.get(top) == {:obj, inner}
+      assert is_map(:erlang.get(inner))
+      assert :erlang.get(top + 64) == :undefined
     end)
     |> Task.await(30_000)
   end
