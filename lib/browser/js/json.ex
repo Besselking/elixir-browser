@@ -9,6 +9,10 @@ defmodule Browser.JS.Json do
   alias Browser.JS.{Interp, Num, Props, Proxy}
   alias Browser.JS.Obj
 
+  # a byte that a JSON string and its JSON text hold the same way: printable ASCII other than
+  # the quote and the backslash
+  defguardp is_plain(c) when c >= 0x20 and c < 0x80 and c != ?" and c != ?\\
+
   defp get(o, k), do: Interp.get(o, k)
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp object?({:obj, _}), do: true
@@ -223,6 +227,14 @@ defmodule Browser.JS.Json do
     end
   end
 
+  # A run of plain bytes goes into the result as one piece. The run gives the same string as the
+  # clauses for one character.
+  defp string(<<c, _::binary>> = s, acc) when is_plain(c) do
+    n = plain_len(s, 0)
+    <<run::binary-size(^n), r::binary>> = s
+    string(r, [run | acc])
+  end
+
   defp string("\"" <> r, acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), r}
 
   defp string("\\" <> r, acc) do
@@ -244,6 +256,9 @@ defmodule Browser.JS.Json do
   defp string(<<c::utf8, r::binary>>, acc), do: string(r, [<<c::utf8>> | acc])
   defp string(<<_, r::binary>>, acc), do: string(r, ["�" | acc])
   defp string("", _), do: syntax_error("")
+
+  defp plain_len(<<c, r::binary>>, n) when is_plain(c), do: plain_len(r, n + 1)
+  defp plain_len(_, n), do: n
 
   defp unicode_escape(r, acc) do
     {hi, r} = hex4(r)
@@ -563,6 +578,14 @@ defmodule Browser.JS.Json do
   defp quote_string(s), do: "\"" <> escape(s, []) <> "\""
 
   defp escape("", acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  # a run of plain bytes needs no escape and goes into the result as one piece
+  defp escape(<<c, _::binary>> = s, acc) when is_plain(c) do
+    n = plain_len(s, 0)
+    <<run::binary-size(^n), r::binary>> = s
+    escape(r, [run | acc])
+  end
+
   defp escape("\"" <> r, acc), do: escape(r, ["\\\"" | acc])
   defp escape("\\" <> r, acc), do: escape(r, ["\\\\" | acc])
   defp escape("\b" <> r, acc), do: escape(r, ["\\b" | acc])
