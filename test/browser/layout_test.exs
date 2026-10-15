@@ -7994,4 +7994,447 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert got == eager, "ops #{inspect(ops)} on #{inspect(Map.take(item, [:type, :x, :y]))}"
     end
   end
+
+  describe "sizing fold" do
+    alias Browser.Page
+
+    # -> {the width of the first background, widths the fold found, widths it refused}; with
+    # `fold: :check` the layout raises when the fold finds another width than a layout
+    defp fold_width(html) do
+      Process.put(:layout_fold_hits, 0)
+      Process.put(:layout_fold_fallbacks, 0)
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, fold: :check, images: %{})
+      rect = Enum.find(items, &(&1.type == :rect))
+      {rect.w, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
+    end
+
+    test "a relative box that its offsets do not move is measured with no layout" do
+      # (CSS 2.1 §9.4.3: the box takes its place in the flow as a static box does)
+      assert {64, hits, 0} =
+               fold_width(
+                 ~s(<div style="float:left;background:red"><div style="position:relative">) <>
+                   "aa bb cc</div></div>"
+               )
+
+      assert hits > 0
+
+      assert {16, _, 0} =
+               fold_width(
+                 ~s(<div style="display:flex;width:0"><div style="background:red">) <>
+                   ~s(<div style="position:relative;top:0;left:auto">aa bb</div></div></div>)
+               )
+    end
+
+    test "a scroll container in a column that can be shorter than its content is laid out" do
+      # (its automatic minimum height is 0, so its height and the width of what wraps in it
+      # depend on the column. Here the item wraps into 2 columns at 50 px high)
+      wrap = "display:flex;flex-direction:column;flex-wrap:wrap"
+      text = "cccc <b>ddd </b> <b>cc </b> ccc"
+
+      assert {56, _, refused} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;) <>
+                   ~s(background:red"><div style="#{wrap};flex:0 1 50px;overflow:scroll">) <>
+                   text <> "</div></div></div>"
+               )
+
+      assert refused > 0
+
+      # (with a basis in percent in a column with no definite height, it is as high as its
+      # content: the fold measures it)
+      assert {_, hits, 0} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;) <>
+                   ~s(background:red"><div style="#{wrap};flex:1;overflow:auto">) <>
+                   text <> "</div></div></div>"
+               )
+
+      assert hits > 0
+
+      # (a box that scrolls in one axis and clips in the other is a scroll container)
+      assert {56, _, _} =
+               fold_width(
+                 ~s(<div><div style="display:inline-flex;flex-direction:column;height:50px;) <>
+                   ~s(background:red"><div style="#{wrap};overflow-x:clip;overflow-y:auto">) <>
+                   text <> "</div></div></div>"
+               )
+    end
+
+    test "a relative box with an offset is still laid out to be measured" do
+      assert {_, 0, refused} =
+               fold_width(
+                 ~s(<div style="float:left;background:red">) <>
+                   ~s(<div style="position:relative;left:10px">aa bb cc</div></div>)
+               )
+
+      assert refused > 0
+    end
+
+    test "break-spaces words are measured with no layout" do
+      # (CSS Text 3 §3: a line can break after each preserved space, not before it, so a word
+      # and the space after it are one unit at the min-content width)
+      flex = fn style, text ->
+        fold_width(
+          ~s(<div style="display:flex;width:0"><div style="white-space:break-spaces;) <>
+            style <> ~s(;background:red">) <> text <> "</div></div>"
+        )
+      end
+
+      assert {24, _, 0} = flex.("", "aa bb")
+      # (each space after the first is a unit of its own)
+      assert {24, _, 0} = flex.("", "aa  bb  c")
+      # (a word wider than the box overflows it with the space after it)
+      assert {40, _, 0} =
+               fold_width(
+                 ~s(<div style="width:30px"><div style="float:left;white-space:break-spaces;) <>
+                   ~s(background:red">aaaa bb cc</div></div>)
+               )
+
+      # (`overflow-wrap: anywhere` breaks between any two letters)
+      assert {8, _, _} = flex.("overflow-wrap:anywhere", "aaaa bb")
+      # (`word-break: break-all` keeps the last letter with the space after it; the fold does
+      # not follow it and lays the content out)
+      assert {16, _, refused} = flex.("word-break:break-all", "aaaa bb")
+      assert refused > 0
+
+      # (the fold finds the lines that a layout finds in a box narrower than the text)
+      assert {width, _, _} =
+               fold_width(
+                 ~s(<div style="width:100px"><span style="display:inline-block;) <>
+                   ~s(border:5px solid;white-space:break-spaces;background:red">) <>
+                   "aaaaaa dddd aa</span></div>"
+               )
+
+      assert width == 100
+    end
+  end
+
+  describe "flex relayouts" do
+    alias Browser.Page
+
+    # -> {items, how many times the word "zq" was measured}
+    defp count_lay(html, width \\ 1000) do
+      measure = fn text, style ->
+        if text == "zq", do: Process.put(:zq_measured, Process.get(:zq_measured, 0) + 1)
+        measure(text, style)
+      end
+
+      Process.put(:zq_measured, 0)
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, width, measure, 800, images: %{}, scrollers: true)
+      {items, Process.get(:zq_measured)}
+    end
+
+    test "a flex item laid out again in a flex item finds the walk of its first layout" do
+      # (the body row stretches the column, and the column gives its item another height: both
+      # lay the item out again, and each time its words come from the fragments of the first
+      # layout. A word is measured by that layout and by the sizing fold, no more)
+      text = "<p>zq " <> Enum.map_join(1..30, " ", &"w#{&1}") <> "</p>"
+
+      {items, measured} =
+        count_lay(
+          ~s(<body style="margin:0;display:flex;height:800px;padding:5px;box-sizing:border-box">) <>
+            ~s(<div style="flex:1 1 0%;display:flex;flex-direction:column">) <>
+            ~s(<div style="flex:1 1 0%;overflow:auto">) <>
+            ~s(<div style="position:relative;white-space:break-spaces">) <>
+            String.duplicate(text, 5) <> "</div></div></div></body>"
+        )
+
+      assert measured == 2 * 5
+      assert Enum.count(items, &(&1.type == :text and &1.text == "zq")) == 5
+    end
+
+    test "a stretched item in a row with a definite height is laid out one time" do
+      # (Flexbox §9.4 steps 8 and 11: the only line of a container with a definite height is as
+      # high as the container, and a stretched item takes that height as its own definite
+      # height; so its hypothetical height is not needed)
+      item = fn n, style, inner ->
+        ~s(<div style="background:##{n}00000;width:30px;#{style}">#{inner}</div>)
+      end
+
+      {items, measured} =
+        count_lay(
+          ~s(<div style="display:flex;height:300px">) <>
+            item.(1, "", ~s(<div style="height:100px">zq</div>)) <>
+            item.(2, "", ~s(<div style="height:500px">b</div>)) <>
+            item.(3, "max-height:100px", "c") <>
+            item.(4, "min-height:400px", "d") <>
+            item.(5, "align-self:baseline", "e") <>
+            item.(6, "padding:10px;border:5px solid;margin:7px 0 3px", "f") <>
+            "</div>"
+        )
+
+      box = fn n -> Enum.find(items, &(&1.type == :rect and &1.color == {n * 16, 0, 0})) end
+      assert %{y: 8, h: 300} = box.(1)
+      assert %{y: 8, h: 300} = box.(2)
+      # (the stretched height is held to the max-height and min-height of the item)
+      assert %{h: 100} = box.(3)
+      assert %{h: 400} = box.(4)
+      # (an item aligned on its baseline is not stretched)
+      assert %{h: 22} = box.(5)
+      # (the margins are outside the line's height)
+      assert %{y: 15, h: 290} = box.(6)
+      # (the word is measured by the one layout of its item and by the measure of its width)
+      assert measured == 2
+    end
+
+    test "a column item with no height of its own is laid out one time" do
+      # (laid out with no height and no min-height, the item gives its automatic minimum height,
+      # and its flex base size from a basis of 0% in a column of automatic height: Flexbox §4.5,
+      # §9.2 step 3. That is the layout it already has, at the same width; and kept at that
+      # height, it is not laid out again)
+      {items, measured} =
+        count_lay(
+          ~s(<div style="display:flex;flex-direction:column">) <>
+            ~s(<div style="flex:1 1 0%;background:#100000">zq a b</div>) <>
+            ~s(<div style="flex:1 1 0%;background:#200000;min-height:50px">c</div></div>)
+        )
+
+      assert %{h: 22} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+      assert %{h: 50} = Enum.find(items, &(&1.type == :rect and &1.color == {32, 0, 0}))
+      # (one measure is the layout of the item, one is for the widths)
+      assert measured == 2
+    end
+  end
+
+  describe "flex items that are not laid out again" do
+    alias Browser.Page
+
+    # -> the {width, height} of the rect of #100000 on a page
+    defp red_box(html) do
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      %{w: w, h: h} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+      {round(w), round(h)}
+    end
+
+    test "only an item that stretches in one line of a definite height gets that height" do
+      # (an item with a height of its own does not stretch)
+      assert {_, 300} =
+               red_box(
+                 ~s(<div style="display:flex;height:2000px">) <>
+                   ~s(<span style="height:300px;background:#100000">c</span></div>)
+               )
+
+      # (an item with an automatic margin does not stretch: it is as high as its content)
+      assert {_, 332} =
+               red_box(
+                 ~s(<div style="display:flex;height:300px"><div style="margin:auto 0;) <>
+                   ~s(background:#100000"><p style="height:300px">c</p></div></div>)
+               )
+
+      # (an item with an aspect ratio is as wide as its stretched height makes it)
+      assert {4000, 2000} =
+               red_box(
+                 ~s(<div style="display:flex;height:2000px">) <>
+                   ~s(<div style="aspect-ratio:2;background:#100000">a</div></div>)
+               )
+
+      # (in a container that wraps, the line is as high as its items, not as the container)
+      assert {_, 300} =
+               red_box(
+                 ~s(<div style="height:300px"><div style="display:inline-flex;height:50%;) <>
+                   ~s(flex-wrap:wrap"><i style="background:#100000">aaaaa</i>) <>
+                   ~s(<div style="height:300px"></div></div></div>)
+               )
+
+      # (the stretched height is part of the memo key: a form control in a row with a height,
+      # in a column, keeps its own height)
+      assert {_, 22} =
+               red_box(
+                 ~s(<div><section style="display:inline-flex;flex-direction:column">) <>
+                   ~s(<div style="display:flex;height:200px;flex:1">) <>
+                   ~s(<input value="abc" style="background:#100000"></div></section></div>)
+               )
+    end
+
+    test "a percentage in an item resolves only against a definite height" do
+      # (a stretched item of a single-line row with a definite height has a definite height,
+      # Flexbox §9.8: `min-height: 30%` of the inner row is 30% of 600 px)
+      assert {_, 190} =
+               red_box(
+                 ~s(<body style="display:flex;height:600px"><div style="display:flex">) <>
+                   ~s(<div style="display:flex"><span style="height:50px;min-height:30%;) <>
+                   ~s(border:5px solid;white-space:nowrap;background:#100000">) <>
+                   "d dddd b aaaa aaaaa dddd dd dddddd</span></div>" <>
+                   String.duplicate("c ccccc cccccc ", 12) <> "</div></body>"
+               )
+
+      # (the flexed height of an item in a column with no definite height is not definite:
+      # a percentage height or basis in it is automatic)
+      assert {_, 20} =
+               red_box(
+                 ~s(<section style="display:flex;flex-direction:column">) <>
+                   ~s(<div style="display:inline-flex;flex:1 0 0"><span style="height:50%;) <>
+                   ~s(padding:10px;background:#100000"></span></div></section>)
+               )
+
+      assert {_, 22} =
+               red_box(
+                 ~s(<div style="display:flex;flex-direction:column"><div style="display:flex;) <>
+                   ~s(flex-direction:column;flex-basis:40px"><span style="flex:0 0 30%;) <>
+                   ~s(background:#100000">a</span><div style="height:900px"></div></div></div>)
+               )
+    end
+
+    test "positioned flex items paint in the order of the document" do
+      # (CSS 2.1 Appendix E: the second item paints over the first, also when the first is
+      # stretched)
+      page =
+        Page.build(
+          ~s(<div style="display:flex;height:100px"><span style="flex:1 1 auto;) <>
+            ~s(position:relative;top:5px;background:#100000"></span><div style="height:300px;) <>
+            ~s(flex:1;position:relative;background:#200000"></div></div>),
+          "about:test"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      pz = fn r -> Enum.find(items, &(&1.type == :rect and &1.color == {r, 0, 0})).pz end
+      assert pz.(16) < pz.(32)
+    end
+
+    test "only a column item that keeps its height and is not made definite is kept" do
+      # (a flexed height is definite: a percentage in the item resolves against it)
+      assert {_, 15} =
+               red_box(
+                 ~s(<div style="display:flex;flex-direction:column;height:0">) <>
+                   ~s(<div style="flex:1 1 0%"><section style="height:50%;border:5px solid;) <>
+                   ~s(background:#100000"></section></div></div>)
+               )
+
+      # (an item with a min-height is laid out without it to find its content height)
+      assert {_, 900} =
+               red_box(
+                 ~s(<span style="display:flex;flex-direction:column">) <>
+                   ~s(<div style="display:flex;flex-direction:column;min-height:20px;) <>
+                   ~s(flex-basis:50%;background:#100000"><div style="height:900px"></div>) <>
+                   "</div></span>"
+               )
+    end
+  end
+
+  describe "automatic minimum height in a flex column" do
+    alias Browser.Page
+
+    # -> the height of the one item of a column
+    defp item_height(column_style, item_style) do
+      html =
+        ~s(<div style="display:flex;flex-direction:column;#{column_style}">) <>
+          ~s(<div style="background:#100000;#{item_style}"><div style="height:500px">a</div>) <>
+          "</div></div>"
+
+      page = Page.build(html, "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0})).h
+    end
+
+    test "a scroll container has an automatic minimum height of 0" do
+      # (Flexbox §4.5: the content-based minimum size is for an item that is not a scroll
+      # container; `hidden`, `scroll` and `auto` make a scroll container, `clip` does not:
+      # CSS Overflow 3 §3)
+      for overflow <- ~w(auto hidden scroll),
+          do: assert(item_height("height:100px", "overflow:#{overflow}") == 100)
+
+      assert item_height("height:100px", "overflow:clip") == 500
+      assert item_height("height:100px", "") == 500
+      # (a min-height of its own is still kept)
+      assert item_height("height:100px", "overflow:auto;min-height:200px") == 200
+      # (when one axis is hidden, scroll or auto, `visible` and `clip` in the other axis compute
+      # to auto and hidden: CSS Overflow 3 §3)
+      assert item_height("height:100px", "overflow-x:hidden;overflow-y:clip") == 100
+      assert item_height("height:100px", "overflow-x:auto;overflow-y:clip") == 100
+      assert item_height("height:100px", "overflow-x:hidden") == 100
+      assert item_height("height:100px", "overflow-x:clip;overflow-y:hidden") == 100
+      # (in a column with no height, a scroll container with a definite basis is that high)
+      assert item_height("", "flex-basis:50px;overflow:auto") == 50
+      assert item_height("", "flex-basis:50px") == 500
+    end
+
+    # -> the heights of the rects of the colors 1 to 9 (#100000 to #900000) of a page
+    defp red_heights(html) do
+      page = Page.build(~s(<body style="margin:0">#{html}</body>), "about:test")
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+
+      for %{type: :rect, color: {r, 0, 0}, h: h} <- items,
+          r in 16..144//16,
+          into: %{},
+          do: {div(r, 16), round(h)}
+    end
+
+    test "a column with only a min-height does not shrink its items" do
+      # (the column is as high as its items when they need more than the min-height: Flexbox
+      # §9.2 step 4 and §9.9.1. So there is no negative free space)
+      assert item_height("min-height:0", "overflow:auto") == 500
+      assert item_height("min-height:10px", "overflow:auto") == 500
+      assert item_height("min-height:600px", "overflow:auto;flex-grow:1") == 600
+
+      # (the same column as an item of a row)
+      assert %{1 => 500} =
+               red_heights(
+                 ~s(<div style="display:flex"><div style="display:flex;flex-direction:column;) <>
+                   ~s(min-height:0;width:100px"><div style="background:#100000;overflow:auto">) <>
+                   ~s(<div style="height:500px">a</div></div></div></div>)
+               )
+
+      # (a column with min-height: 0 in a column with a height: only the outer column shrinks
+      # its items)
+      assert %{1 => 96, 2 => 4, 3 => 96} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;display:flex;flex-direction:column;) <>
+                   ~s(min-height:0"><div style="background:#300000;overflow:auto">) <>
+                   ~s(<div style="height:500px">a</div></div></div>) <>
+                   ~s(<div style="background:#200000;height:20px"></div></div>)
+               )
+    end
+
+    test "a percentage basis in a column with no definite height is the content height" do
+      # (Flexbox §7.2.3 and §9.2 step 3; `flex: 1` is a basis of 0%)
+      assert item_height("", "flex:1;overflow:auto") == 500
+      # (and the item's own height is not used)
+      assert item_height("", "flex:0 0 0%;height:50px") == 500
+      assert item_height("min-height:200px", "flex-basis:50%;overflow:auto") == 500
+      assert item_height("height:200px", "flex-basis:50%;overflow:auto") == 100
+
+      # (a sticky footer: the main part is as high as its content)
+      assert %{1 => 50, 2 => 1000, 3 => 30} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;min-height:600px">) <>
+                   ~s(<header style="background:#100000;height:50px"></header>) <>
+                   ~s(<main style="background:#200000;overflow:hidden;flex:1">) <>
+                   ~s(<div style="height:1000px"></div></main>) <>
+                   ~s(<footer style="background:#300000;height:30px"></footer></div>)
+               )
+    end
+
+    test "a percentage min-height of a column item replaces the automatic minimum" do
+      # (it resolves against the definite height of the column)
+      assert %{1 => 50, 2 => 80} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;overflow:auto;min-height:50%">) <>
+                   ~s(<div style="height:500px">a</div></div>) <>
+                   ~s(<div style="background:#200000;height:80px;flex-shrink:0"></div></div>)
+               )
+    end
+
+    test "a table with overflow keeps the height of its content" do
+      # (overflow does not apply to a table box, CSS 2.1 §11.1.1: it is not a scroll container)
+      assert item_height("height:100px", "display:table;overflow:hidden;width:100px") == 500
+    end
+
+    test "a form control keeps the height of its content" do
+      # (the UA sheet gives it `overflow: hidden` only to clip what is in it)
+      page =
+        Page.build(
+          ~s(<div style="display:flex;flex-direction:column;height:0">) <>
+            ~s(<select style="background:#100000"><option>a</option></select></div>),
+          "about:test"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 500, &measure/2, 600, images: %{})
+      assert %{h: 20} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
+    end
+  end
 end

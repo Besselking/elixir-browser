@@ -6621,7 +6621,8 @@ defmodule Browser.Layout do
       end
 
     memo(
-      {:extent, key || :erlang.phash2(sub), if(side == :max, do: @unbounded, else: width)},
+      {:extent, key || :erlang.phash2(sub), if(side == :max, do: @unbounded, else: width),
+       Process.get(:layout_flex_item, false)},
       sub,
       fn ->
         case fold_mode() do
@@ -6660,16 +6661,20 @@ defmodule Browser.Layout do
   # it is as wide as its widest word plus the insets around it. Anything else (boxes, images,
   # floats, inline boxes, preformatted words) is laid out at width 1.
   defp min_extent(st, sub, key, right_margin \\ 0) do
-    memo({:min_extent, key || :erlang.phash2(sub)}, sub, fn ->
-      case min_words(sub, st.measure, 0, 0, [], 0) do
-        :layout ->
-          shrink_extent(st, sub, 1, key) + right_margin
+    memo(
+      {:min_extent, key || :erlang.phash2(sub), Process.get(:layout_flex_item, false)},
+      sub,
+      fn ->
+        case min_words(sub, st.measure, 0, 0, [], 0) do
+          :layout ->
+            shrink_extent(st, sub, 1, key) + right_margin
 
-        ext ->
-          if fold_mode() == :check and min_new?(sub), do: min_check(st, sub, ext)
-          ext
+          ext ->
+            if fold_mode() == :check and min_new?(sub), do: min_check(st, sub, ext)
+            ext
+        end
       end
-    end)
+    )
   end
 
   # (`LAYOUT_FOLD=check`: the words find what a layout at width 1 finds)
@@ -6832,7 +6837,7 @@ defmodule Browser.Layout do
     end
   end
 
-  defp renumber_memo({:atom, _, _, _, _, _}, {items, height, baseline}),
+  defp renumber_memo({:atom, _, _, _, _, _, _}, {items, height, baseline}),
     do: {renumber_pz(items), height, baseline}
 
   defp renumber_memo(_key, value), do: value
@@ -7237,10 +7242,12 @@ defmodule Browser.Layout do
   defp atom_cbh(st, %{hpct_atom: pct}) when pct != nil, do: st.cbh
   defp atom_cbh(_st, _spec), do: nil
 
+  # (the memo keys of atoms, extents, minimum extents and fold items hold the flex mark: the
+  # layout under them reads it, and the same ops can be laid out with and without it)
   defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
     memo(
       {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
-       Process.get(:layout_boxes, false)},
+       Process.get(:layout_boxes, false), Process.get(:layout_flex_item, false)},
       sub,
       fn ->
         # (the height of the box a float or inline-block sits in is what its own percentage
@@ -7266,6 +7273,21 @@ defmodule Browser.Layout do
       if outer == nil,
         do: Process.delete(:layout_flex_item),
         else: Process.put(:layout_flex_item, outer)
+    end
+  end
+
+  # `fun.()` with no flex mark, which is put back after as it was found
+  defp without_flex_mark(fun) do
+    case Process.delete(:layout_flex_item) do
+      nil ->
+        fun.()
+
+      outer ->
+        try do
+          fun.()
+        after
+          Process.put(:layout_flex_item, outer)
+        end
     end
   end
 
@@ -9347,10 +9369,13 @@ defmodule Browser.Layout do
     cw = containing_width()
 
     # (an item built again with the same props is the same term as the last layout's: see
-    # `kept_walk/4`)
+    # `kept_walk/4`. It is walked without the flex mark, as the walk phase walks it: a relayout
+    # inside a flex item then finds the walk of the first pass, and its spans their fragments)
     build = fn extra_props ->
-      kept_walk(el, style, {:flex_item, extra_props}, fn ->
-        with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+      without_flex_mark(fn ->
+        kept_walk(el, style, {:flex_item, extra_props}, fn ->
+          with_cw(cw, fn -> build_flex_item(tag, el, c, attrs, kids, style, extra_props) end)
+        end)
       end)
     end
 
@@ -9396,9 +9421,21 @@ defmodule Browser.Layout do
       collapsed: collapsed?,
       minh: num(c["min-height"]),
       minhpct: pct_of(c["min-height"]),
+      # (no height and no min-height of its own: laid out without them, it is laid out the same)
+      plain_h?: c["height"] in [nil, :auto] and c["min-height"] in [nil, :auto],
       scroll?:
         c["overflow-x"] in ~w(hidden scroll auto) or
           (c["overflow-x"] in [nil, "visible"] and c["overflow-y"] in ~w(hidden scroll auto)),
+      # a scroll container in the main axis of a column has no automatic minimum height
+      # (Flexbox §4.5). Not a form control: the UA sheet gives it `overflow: hidden` only to
+      # clip what is in it, and its content size stays its minimum. Not a table or a replaced
+      # element: overflow does not make them scroll containers (CSS 2.1 §11.1.1).
+      # When one axis is hidden, scroll or auto, `visible` and `clip` in the other axis compute
+      # to auto and hidden (CSS Overflow 3 §3): the box is a scroll container in both axes.
+      col_scroll?:
+        tag not in ~w(input select textarea button img svg video canvas iframe embed object) and
+          c["display"] not in ["table", "inline-table"] and
+          (c["overflow-y"] in ~w(hidden scroll auto) or c["overflow-x"] in ~w(hidden scroll auto)),
       mta: c["margin-top"] == :auto,
       mba: c["margin-bottom"] == :auto,
       hpct:
@@ -9805,9 +9842,20 @@ defmodule Browser.Layout do
         ix = x + it.ml
         right = floor(ix + it.hw + 0.5)
         w = max(right - floor(ix + 0.5), 0)
-        {items, h, _base} = flex_row_atom(st, cs, it, w)
+
+        {items, h, stretched} =
+          case known_cross(cs, it, min_cross, single?) do
+            nil ->
+              {items, h, _base} = flex_row_atom(st, cs, it, w)
+              {items, h, false}
+
+            cross ->
+              {items, h, _base} = flex_stretch_atom(st, it, w, cross)
+              {items, h, true}
+          end
+
         next = ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)
-        {Map.merge(it, %{w: w, items: items, h: h}), next}
+        {Map.merge(it, %{w: w, items: items, h: h, stretched: stretched}), next}
       end)
 
     # items aligned on their baselines hang from the lowest one
@@ -10059,17 +10107,50 @@ defmodule Browser.Layout do
   defp flex_offset(align, cross, h) when align in ["flex-end", "end"], do: cross - h
   defp flex_offset(_align, _cross, _h), do: 0
 
+  # The cross size of the line, when it is known before the items are laid out and the item is
+  # stretched to it: the only line of a container with a definite height is as high as the
+  # container (Flexbox §9.4 step 8), and a stretched item with an automatic height takes the
+  # size of its line as its definite height (step 11, §9.8 item 1). Such an item is laid out one
+  # time, at that height, and not first at its hypothetical height. Not for an item whose
+  # hypothetical height is used: an item aligned otherwise or on its baseline, with an `auto`
+  # margin, a percentage height or min-height, a ratio, or a picture.
+  defp known_cross(cs, it, min_cross, single?) do
+    if single? and cs.height != nil and cs.hdef and
+         flex_align(it, cs.align) in ["stretch", "normal"] and it.auto_height? and
+         it.rebuild != nil and it.mta == false and it.mba == false and is_number(it.mt) and
+         is_number(it.mb) and it.hpct == nil and it.minhpct == nil and
+         Map.get(it, :ratio) == nil and Map.get(it, :restretch) == nil do
+      # (as the cross size of the line in `flex_line_live/7`)
+      cross = round(min_cross)
+
+      cross =
+        if is_number(cs.maxh),
+          do: max(min(cross, round(cs.maxh)), round(min_cross)),
+          else: cross
+
+      if cross >= 0, do: cross
+    end
+  end
+
+  # an item stretched to a line of a known cross size
+  defp flex_stretch_atom(st, it, w, cross) do
+    box_h = cross - it.mt - it.mb
+    h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
+    sub = it.rebuild.(%{"height" => max(h, 0) * 1.0})
+    flex_atom(st, sub, w, {it.key, :cut, h})
+  end
+
   # a stretched item with an automatic height fills the line: laid out again with a minimum height
+  # (an item laid out at the known cross size of its line is not laid out again)
+  defp flex_stretch(_st, %{stretched: true} = it, _container_align, _cross), do: it
+
   defp flex_stretch(st, it, container_align, cross) do
     stretch? = flex_align(it, container_align) in ["stretch", "normal"]
 
     if stretch? and it.auto_height? and it.rebuild != nil and it.h > cross and cross >= 0 and
          it.mta == false and it.mba == false do
       # an item taller than the line (of a container with a height) is cut down to it
-      box_h = cross - it.mt - it.mb
-      h = if it.sizing == :border, do: box_h, else: box_h - it.vextra
-      sub = it.rebuild.(%{"height" => max(h, 0) * 1.0})
-      {items, h2, _} = flex_atom(st, sub, it.w, {it.key, :cut, h})
+      {items, h2, _} = flex_stretch_atom(st, it, it.w, cross)
       %{it | items: items, h: h2}
     else
       flex_stretch_grow(st, it, stretch?, cross)
@@ -10316,6 +10397,9 @@ defmodule Browser.Layout do
     gaps = round(cs.row_gap) * max(length(sized) - 1, 0)
     outer = & &1.h
     free = if cs.height, do: cs.height - Enum.sum(Enum.map(sized, & &1.base)) - gaps, else: 0
+    # (a column with only a min-height is as high as its items when they need more: Flexbox
+    # §9.2 step 4. Then there is no negative free space, and no item shrinks)
+    free = if cs.hdef, do: free, else: max(free, 0)
 
     sized =
       if cs.height,
@@ -10429,12 +10513,64 @@ defmodule Browser.Layout do
         nil ->
           h
 
+        {:pct, _} when not cs.hdef ->
+          # (found below: a percentage of a height that is not definite is `content`)
+          nil
+
         basis ->
           size = len_px(basis, cs.height || 0) + if(it.sizing == :border, do: 0, else: it.vextra)
           max(size, it.vextra) + auto_zero(it.mt) + auto_zero(it.mb)
       end
 
-    Map.merge(it, %{w: w, items: items, h: h, x: x, base: base})
+    # (the height of the content, for `flex_content_floor/2`)
+    content_h = if Map.get(it, :plain_h?, false), do: {w, h}
+    # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
+    basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.hdef)
+
+    # (a percentage min-height resolves against the container's definite height, and replaces
+    # the automatic minimum)
+    minh =
+      if it.minh == nil and Map.get(it, :minhpct) != nil and cs.height != nil and cs.hdef,
+        do: it.minhpct * cs.height,
+        else: it.minh
+
+    it =
+      Map.merge(it, %{
+        minh: minh,
+        w: w,
+        items: items,
+        h: h,
+        x: x,
+        base: base,
+        content_h: content_h,
+        basis_def?: basis_def?
+      })
+
+    # a basis of a percentage of a height that is not definite is the height of the content,
+    # and the item's own height is not used (Flexbox §7.2.3, §9.2 step 3)
+    cond do
+      base != nil -> it
+      it.rebuild != nil -> %{it | base: flex_content_floor(st, it)}
+      true -> %{it | base: h}
+    end
+  end
+
+  # The height the content of a column item needs (its automatic minimum height): the item laid
+  # out with no height and no min-height. An item that has neither of its own was laid out so by
+  # `flex_column_item/4` at the same width, and is not laid out again.
+  defp flex_content_floor(st, it) do
+    w = it.w
+
+    case Map.get(it, :content_h) do
+      {^w, h} ->
+        h
+
+      _ ->
+        {_, floor, _} =
+          flex_atom(st, it.rebuild.(%{"height" => nil, "min-height" => nil}), w, {it.key, :min})
+
+        floor
+    end
   end
 
   # in a column with a height of its own the items grow into what is left, or shrink in
@@ -10480,7 +10616,9 @@ defmodule Browser.Layout do
     more =
       if total > 0 do
         for it <- open,
-            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil,
+            # (a scroll container has no automatic minimum to hold it)
+            it.shrink > 0 and it.auto_height? and it.h > 0 and it.minh == nil and
+              not Map.get(it, :col_scroll?, false),
             it.base + (free + give) * it.shrink * it.base / total < it.h,
             do: it.key
       else
@@ -10496,8 +10634,11 @@ defmodule Browser.Layout do
   # content needs
   defp flex_column_basis(st, %{basis: basis, rebuild: rebuild} = it)
        when basis != nil and rebuild != nil do
-    {_, floor, _} =
-      flex_atom(st, rebuild.(%{"height" => nil, "min-height" => nil}), it.w, {it.key, :min})
+    # (a scroll container has no automatic minimum: with a definite basis, it is that high)
+    floor =
+      if Map.get(it, :col_scroll?, false) and Map.get(it, :basis_def?, false),
+        do: 0,
+        else: flex_content_floor(st, it)
 
     # (an item that cannot flex has a definite size when its container has none)
     # (a `min-height` of the item is not part of the floor above: it is added back here)
@@ -10520,15 +10661,7 @@ defmodule Browser.Layout do
             # a `min-height` of its own replaces the automatic minimum
             it.minh + if(it.sizing == :border, do: 0, else: it.vextra)
           else
-            {_, floor, _} =
-              flex_atom(
-                st,
-                it.rebuild.(%{"height" => nil, "min-height" => nil}),
-                it.w,
-                {it.key, :min}
-              )
-
-            floor
+            if Map.get(it, :col_scroll?, false), do: 0, else: flex_content_floor(st, it)
           end
 
         # (a size the item is given caps the automatic minimum)
@@ -10552,7 +10685,11 @@ defmodule Browser.Layout do
         target
       end
 
-    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) do
+    # (an item that keeps its height, and that the height does not make definite, is laid out
+    # as it is: the same layout with that height set gives the same items)
+    same? = not definite? and abs(target - it.h) < 0.5 and Map.get(it, :ratio) == nil
+
+    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) and not same? do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
       content = if it.sizing == :border, do: box, else: box - it.vextra
@@ -12181,20 +12318,24 @@ defmodule Browser.Layout do
   defp fold_items_at(st, sub, width, key) do
     width = if width > @unbounded / 2, do: @unbounded, else: width
 
-    memo({:fold_items, key || :erlang.phash2(sub), width}, sub, fn ->
-      outer = Process.get(:layout_intrinsic)
-      Process.put(:layout_intrinsic, true)
+    memo(
+      {:fold_items, key || :erlang.phash2(sub), width, Process.get(:layout_flex_item, false)},
+      sub,
+      fn ->
+        outer = Process.get(:layout_intrinsic)
+        Process.put(:layout_intrinsic, true)
 
-      try do
-        f = fold_run(st, sub, width, nil, true)
-        if f.caps != [], do: throw(:layout)
-        {f.edges, f.aligned}
-      after
-        if outer == nil,
-          do: Process.delete(:layout_intrinsic),
-          else: Process.put(:layout_intrinsic, outer)
+        try do
+          f = fold_run(st, sub, width, nil, true)
+          if f.caps != [], do: throw(:layout)
+          {f.edges, f.aligned}
+        after
+          if outer == nil,
+            do: Process.delete(:layout_intrinsic),
+            else: Process.put(:layout_intrinsic, outer)
+        end
       end
-    end)
+    )
   end
 
   # The edges of the items of an inline-block or a float laid out `w` wide (`at`, as the fold
@@ -12323,6 +12464,9 @@ defmodule Browser.Layout do
 
   defp fold_op({:word, text, style, :pre}, f), do: fold_word(f, text, style, true, 0, false)
   defp fold_op({:word, text, style, :glue}, f), do: fold_word(f, text, style, false, 0, true)
+
+  # (a word of `break-spaces` that holds the space after it: `wrap_glued` with `:hold`)
+  defp fold_op({:word, text, style, :hold}, f), do: fold_word(f, text, style, false, 0, :hold)
 
   defp fold_op({:marker, m, style}, f) do
     f =
@@ -12661,6 +12805,9 @@ defmodule Browser.Layout do
             f.x + space_w + w + Map.get(style, :tail, 0) - hang <= right ->
           f
 
+        glued? and space_w == 0 and not f.after_space and glue == :hold ->
+          fold_wrap_hold(f, style)
+
         glued? and space_w == 0 and not f.after_space ->
           fold_wrap_glued(f, style)
 
@@ -12769,6 +12916,32 @@ defmodule Browser.Layout do
   defp fold_start_line(f, dx) do
     used = if dx == 0, do: f.lead, else: 0
     %{f | x: f.l + dx + used, indent: f.l, lead: f.lead - used, line_lead: used}
+  end
+
+  # `wrap_glued` with `:hold`: a space of `break-spaces` does not wrap away from the word before
+  # it. Alone on its line with `overflow-wrap: break-word` or `anywhere`, the line breaks before
+  # it. Else the chain glued to it goes to the next line, or it stays where it is.
+  defp fold_wrap_hold(f, style) do
+    cond do
+      style.wrap_chars == :all ->
+        throw(:layout)
+
+      match?([%{type: :text}], f.line) and style.wrap_chars in [:word, :anywhere] ->
+        f |> fold_flush(true) |> fold_start_line(0)
+
+      true ->
+        {chain, rest} = Enum.split_while(f.line, &Map.get(&1, :glue, false))
+
+        case rest do
+          [%{type: :text} = first | [_ | _] = older] ->
+            if Enum.all?(chain, &(&1.type == :text)),
+              do: fold_carry_chain(f, [first | chain], older),
+              else: f
+
+          _ ->
+            f
+        end
+    end
   end
 
   defp fold_wrap_glued(f, style) do
@@ -13094,11 +13267,20 @@ defmodule Browser.Layout do
     if past?, do: throw(:layout)
   end
 
+  # the offsets of a relative box do not move it (each one is `auto` or 0)
+  defp rel_still?(rel),
+    do:
+      Enum.all?(
+        [:left, :right, :top, :bottom],
+        &(Map.get(rel, &1) in [nil, :auto, "auto", 0, 0.0])
+      )
+
   defp fold_place_box(f, ref, o) do
     {_bt, br, _bb, bl} = o.bw
 
+    # (a relative box that its offsets do not move is as wide as a static box: CSS 2.1 §9.4.3)
     if o[:ratio] != nil or o.cisw != nil or o.minw == :stretch or o.rtl == true or
-         o.rel != nil or o[:legend] == true,
+         (o.rel != nil and not rel_still?(o.rel)) or o[:legend] == true,
        do: throw(:layout)
 
     # a box with `overflow` that cuts its content to its height: what is cut is not followed,
@@ -13340,9 +13522,13 @@ defmodule Browser.Layout do
          (not row? and cs.wrap and (cs.height || cs.maxh) != nil),
        do: throw(:layout)
 
-    # (an item that clips, in a container with a height, may be cut to the line: not followed)
+    # (an item that clips, in a container with a height, may be cut to the line: not followed.
+    # In a column, a scroll container can also be shorter than its content when the column
+    # has a definite height or the item has a basis that is not a percentage)
     if Enum.any?(items, fn it ->
          Map.get(it, :ratio) != nil or (Map.get(it, :scroll?, false) and cs.height != nil) or
+           (not row? and Map.get(it, :col_scroll?, false) and
+              (cs.hdef or (it.basis != nil and not match?({:pct, _}, it.basis)))) or
            (is_number(it.ml) and it.ml < 0) or (is_number(it.mr) and it.mr < 0)
        end),
        do: throw(:layout)
