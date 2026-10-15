@@ -26,10 +26,10 @@ defmodule Browser.JS.DOM do
   defp put_st(s), do: Process.put(:dom, s)
 
   # The fields of the state (and of the saved fields of a realm) that hold no JS value: the
-  # node table, the id index, the boxes, node ids, counts and sizes. The JS collector reads
-  # each integer as a heap id, so these fields can keep dead objects alive, and the node
-  # table makes each collection long.
-  @gc_fields ~w(nodes ids rects rev next next_nid usp doc main frames meta fdirty ce_done
+  # node table, the indexes of the ids and of the attribute values, the boxes, node ids, counts
+  # and sizes. The JS collector reads each integer as a heap id, so these fields can keep dead
+  # objects alive, and the node table makes each collection long.
+  @gc_fields ~w(nodes ids aidx rects rev next next_nid usp doc main frames meta fdirty ce_done
                 current_script write_after focus_ed focus_ctl scroll content width height
                 hist_idx history_before)a
 
