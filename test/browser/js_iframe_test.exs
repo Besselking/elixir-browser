@@ -42,9 +42,10 @@ defmodule Browser.JS.IframeTest do
 
     pid = Runtime.start(raw, info)
     Runtime.run_scripts(pid)
+    # (the frame can send its request after `run_scripts/1` returns)
+    assert_receive {:layout_now, ^pid, nil, [_ | _]}, 2_000
     {:messages, msgs} = Process.info(self(), :messages)
-    refs = for {:layout_now, ^pid, ref, [_ | _]} <- msgs, do: ref
-    assert refs != [] and Enum.all?(refs, &is_nil/1)
+    assert for({:layout_now, ^pid, ref, _} <- msgs, ref != nil, do: ref) == []
     Runtime.stop(pid)
   end
 
