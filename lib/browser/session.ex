@@ -2347,8 +2347,8 @@ defmodule Browser.Session do
     end
   end
 
-  # The time a script waits for a layout it asked for (see `Browser.JS.DOM.layout_now/0`).
-  @layout_wait 5_000
+  # The time a script waits for a layout it asked for: the watchdog stops the layout after it
+  @layout_wait Browser.JS.DOM.layout_wait()
 
   # (the gate is in the process dictionary: `serve_layout/1` runs while the session waits for
   # the scripts, and it cannot give a new state back)
@@ -2363,8 +2363,13 @@ defmodule Browser.Session do
     Enum.each(start, &start_layout_for_scripts(state, &1))
   end
 
-  defp start_layout_for_scripts(%{page: %Page{} = page} = state, req) do
-    %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} = req
+  # (a prewarm of scripts that no longer run, of a page or a tab that is gone, does not start)
+  defp start_layout_for_scripts(
+         %{page: %Page{} = page, js: current} = state,
+         %{js: js, ref: ref} = req
+       )
+       when ref != nil or js == current do
+    %{raw: raw, deadline: deadline, seq: seq} = req
 
     # (what `Page.from_raw/3` builds afresh stays behind: copied into the process, the tree and its
     # shared styles would take gigabytes and seconds)
@@ -2409,7 +2414,12 @@ defmodule Browser.Session do
     Process.put(:style_gate, StyleGate.running(style_gate(), seq, mon))
   end
 
-  defp start_layout_for_scripts(_state, _req), do: :ok
+  # (no run starts: the next request that waits can start)
+  defp start_layout_for_scripts(state, _req) do
+    {next, gate} = StyleGate.next(style_gate())
+    Process.put(:style_gate, gate)
+    Enum.each(next, &start_layout_for_scripts(state, &1))
+  end
 
   @doc false
   # Stops the calling layout process at `deadline` (monotonic ms), when the script no longer

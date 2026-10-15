@@ -1343,6 +1343,11 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  @layout_wait 5_000
+
+  @doc "The time (ms) a script waits for a layout it asked for (see `layout_now/0`)."
+  def layout_wait, do: @layout_wait
+
   # A layout for the scripts, made while they wait. It costs as much as the layout of the
   # page, so it is made only when the tree changed since the last one, and only while the
   # layouts made for the document so far have taken less than a few seconds and a third of the
@@ -1369,7 +1374,7 @@ defmodule Browser.JS.DOM do
         receive do
           {:layout_now_done, ^ref, rects, content} -> {rects, content}
         after
-          5_000 -> nil
+          @layout_wait -> nil
         end
 
       done = System.monotonic_time(:millisecond)

@@ -16,7 +16,8 @@ defmodule Browser.StyleGate do
     almost as long with the state of that run as without it.
 
   The gate is pure. The caller starts the requests that it gives, monitors their processes, and
-  tells the gate with `running/3`, `style_done/2` and `down/2`.
+  tells the gate with `running/3`, `style_done/2` and `down/2`. When it does not start a request
+  that the gate gave, it asks for the next one with `next/1`.
   """
 
   defstruct runs: %{}, queue: [], seq: 0, adopted: 0
@@ -65,9 +66,12 @@ defmodule Browser.StyleGate do
     end
   end
 
-  # the request that waits first, when no run is in flight
-  defp next(%{runs: runs, queue: [req | rest]} = gate) when map_size(runs) == 0,
+  @doc """
+  The request that waits first, when no run is in flight. The caller asks for it when it did not
+  start a request that the gate gave.
+  """
+  def next(%__MODULE__{runs: runs, queue: [req | rest]} = gate) when map_size(runs) == 0,
     do: {[req], %{gate | queue: rest}}
 
-  defp next(gate), do: {[], gate}
+  def next(%__MODULE__{} = gate), do: {[], gate}
 end

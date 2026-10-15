@@ -6,11 +6,19 @@ defmodule Browser.StyleGateTest do
   # a request of the script `js`: `ref` nil is a prewarm
   defp req(js, ref, tag), do: %{js: js, ref: ref, tag: tag}
 
-  # starts the requests as the session does: one process each, monitored with a tag
+  # starts the requests as the session does: one process each, monitored with a tag. (The
+  # process waits for `:go` until the monitor is in place: a process that stops before that
+  # gives the reason `:noproc`.)
   defp start(gate, reqs, fun) do
     Enum.reduce(reqs, gate, fn r, gate ->
-      pid = spawn(fn -> fun.(r) end)
+      pid =
+        spawn(fn ->
+          receive do: (:go -> :ok)
+          fun.(r)
+        end)
+
       mon = :erlang.monitor(:process, pid, tag: :style_gate_down)
+      send(pid, :go)
       StyleGate.running(gate, r.seq, mon)
     end)
   end
@@ -69,5 +77,66 @@ defmodule Browser.StyleGateTest do
     gate = StyleGate.running(gate, a.seq, :mon_a)
     {true, :mon_a, [], gate} = StyleGate.style_done(gate, a.seq)
     assert {[], ^gate} = StyleGate.down(gate, :mon_a)
+  end
+
+  # The session keeps the gate in its process dictionary (here: that of the test). A style state
+  # that comes late from an older run must not replace the state of a newer run. (No request
+  # waits, so no layout starts.)
+  test "the session does not adopt the style state of an older run over a newer one" do
+    page = %Browser.Page{sheet_cache: %{}}
+    state = %{page: page}
+
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    {[b], gate} = StyleGate.request(gate, req(:js, make_ref(), :b))
+    gate = gate |> StyleGate.running(a.seq, make_ref()) |> StyleGate.running(b.seq, make_ref())
+    Process.put(:style_gate, gate)
+
+    style = fn rules ->
+      %{
+        rules: rules,
+        queries: [],
+        sheet_refs: [],
+        sheet_cache: %{},
+        viewport_units: false,
+        memo: nil
+      }
+    end
+
+    assert {:noreply, state} =
+             Browser.Session.handle_info({:style_state, b.seq, style.([:new])}, state)
+
+    assert state.page.rules == [:new]
+
+    assert {:noreply, state} =
+             Browser.Session.handle_info({:style_state, a.seq, style.([:old])}, state)
+
+    assert state.page.rules == [:new]
+    assert Process.get(:style_gate).runs == %{}
+  end
+
+  # A prewarm waits while another run styles. When it can start, the scripts that asked for it
+  # may be gone (another page, another tab): then it does not start, and the next one does.
+  test "the session drops a prewarm of scripts that no longer run" do
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, make_ref(), :a))
+    gate = StyleGate.running(gate, a.seq, make_ref())
+    {[], gate} = StyleGate.request(gate, req(:old_js, nil, :b))
+    {[], gate} = StyleGate.request(gate, req(:old_js2, nil, :c))
+    Process.put(:style_gate, gate)
+
+    # (`:js` is not a page that can be laid out: a layout that started here would crash)
+    state = %{page: %Browser.Page{sheet_cache: %{}}, js: :new_js}
+
+    style = %{
+      rules: [],
+      queries: [],
+      sheet_refs: [],
+      sheet_cache: %{},
+      viewport_units: false,
+      memo: nil
+    }
+
+    assert {:noreply, _state} = Browser.Session.handle_info({:style_state, a.seq, style}, state)
+    assert %{runs: runs, queue: []} = Process.get(:style_gate)
+    assert runs == %{}
   end
 end

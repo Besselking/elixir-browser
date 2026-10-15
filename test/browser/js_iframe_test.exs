@@ -24,6 +24,30 @@ defmodule Browser.JS.IframeTest do
     end
   end
 
+  # A frame that is parsed asks the host for a prewarm layout (`Browser.JS.DOM.prewarm_layout/0`).
+  # The request has no reference: no script waits for it, and the host does not answer it.
+  test "a frame asks for a prewarm layout with no reference" do
+    {raw, _} =
+      ~S|<body><iframe srcdoc="<p id=x>hi</p>"></iframe></body>|
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{
+      url: "http://t.test/",
+      width: 800,
+      height: 600,
+      layout_now: true,
+      fetch: fn _ -> {:error, "404"} end
+    }
+
+    pid = Runtime.start(raw, info)
+    Runtime.run_scripts(pid)
+    {:messages, msgs} = Process.info(self(), :messages)
+    refs = for {:layout_now, ^pid, ref, [_ | _]} <- msgs, do: ref
+    assert refs != [] and Enum.all?(refs, &is_nil/1)
+    Runtime.stop(pid)
+  end
+
   test "a new iframe has an empty document and loads srcdoc" do
     {logs, errors} =
       run(~S"""
