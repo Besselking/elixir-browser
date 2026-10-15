@@ -56,6 +56,15 @@ defmodule Browser.JSObjectAssignTest do
              """) == "a,h true"
     end
 
+    test "a copy of a source that is not extensible is extensible" do
+      assert js("""
+             var s = Object.preventExtensions({a: 1, b: 2});
+             var o = Object.assign({}, s);
+             o.c = 3;
+             [Object.isExtensible(o), Object.isExtensible(s), Object.keys(o).join()].join(' ')
+             """) == "true false a,b,c"
+    end
+
     test "a target and a source of one shape stay apart" do
       assert js("""
              var s = {a: 1, b: 2}, o = Object.assign({}, s);
