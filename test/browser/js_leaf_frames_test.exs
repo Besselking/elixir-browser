@@ -44,6 +44,12 @@ defmodule Browser.JS.LeafFramesTest do
      function down(n){ return n == 0 ? 0 : 1 + down(n - 1) }
      [fib(15), down(900)].join()
      """, "610,900"},
+    {"deep recursion of leaves reads its slots after each call",
+     ~S"""
+     function sum(n){ if (n == 0) return 0; var r = sum(n - 1); return r + n }
+     function mid(n){ var k = n; var r = n == 0 ? "" : mid(n - 1); return k + ":" + r }
+     [sum(990), mid(990).length].join()
+     """, "490545,3854"},
     {"the depth limit throws through 1000 leaves, and the leaves work after it",
      ~S"""
      function down(n){ return n == 0 ? 0 : 1 + down(n - 1) }
@@ -235,20 +241,28 @@ defmodule Browser.JS.LeafFramesTest do
 
     @tag skip: @check && "the check build keeps the leaf frames in the heap"
     test "the collector erases the leaf frames and frees what only they held" do
-      gid = heap("function keep(o){ var v = o.v; return v }\nvar r = keep({v: 1})")
+      gid =
+        heap(
+          "function keep(o){ var v = o.v; return v }\n" <>
+            "function pass(n){ var w = keep({v: n}); return w }\nvar r = pass(2)"
+        )
+
       base = Interp.leaf_base()
 
-      # The top-level call has the depth 0, so its frame is under the first key. The frame
-      # still holds the argument after the call.
-      assert {_, _, _, _, _, {:obj, oid}, 1.0} = :erlang.get(base)
+      # The top-level call has the depth 0, so its frame is under the first key. The call
+      # in it has the depth 1. The frames stay after the calls, and only the frame of the
+      # inner call holds the object.
+      assert {_, _, _, _, _, 2.0, 2.0} = :erlang.get(base)
+      assert {_, _, _, _, _, {:obj, oid}, 2.0} = :erlang.get(base + 1)
       assert is_map(:erlang.get(oid))
 
       # A number that equals a leaf key is not an id: the walk must not read the old frame.
-      Process.put(:leaf_number, base)
+      Process.put(:leaf_number, [base, base + 1])
       GC.collect()
       Process.delete(:leaf_number)
 
       assert :erlang.get(base) == :undefined
+      assert :erlang.get(base + 1) == :undefined
       assert :erlang.get(oid) == :undefined
 
       keep = global!(gid, "keep")
