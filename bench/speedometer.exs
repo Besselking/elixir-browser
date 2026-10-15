@@ -49,7 +49,9 @@ info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, lsamples} = Agent.start_link(fn -> [] end)
 # the page the layouts for the scripts start from; each layout hands on what it worked out about
 # the sheets and the cascade, as the session does
-{:ok, base_agent} = Agent.start_link(fn -> page end)
+# (the loop keeps the page with the style memo; each layout sends its style state back, as the session does)
+Process.put(:bench_base, page)
+bench_loop = self()
 
 t0 = System.monotonic_time(:millisecond)
 # (the run phase starts with the script process; the page load and the start of the
@@ -253,7 +255,7 @@ loop = fn loop ->
 
   receive do
     {:layout_now, js, ref, raw} ->
-      base = Agent.get(base_agent, & &1)
+      base = Process.get(:bench_base)
 
       spawn_layout.(fn ->
         Process.flag(:trap_exit, false)
@@ -305,10 +307,7 @@ loop = fn loop ->
         env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
         laid = Browser.Page.from_raw(base, raw, env)
 
-        Agent.update(
-          base_agent,
-          &Browser.Page.adopt_style_state(&1, Browser.Page.style_state(laid))
-        )
+        send(bench_loop, {:bench_style, Browser.Page.style_state(laid)})
 
         # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
         if dir = System.get_env("DUMPRAW") do
@@ -356,6 +355,10 @@ loop = fn loop ->
         send(js, {:layout_now_done, ref, rects, {1000.0, height}})
       end)
 
+      loop.(loop)
+
+    {:bench_style, st} ->
+      Process.put(:bench_base, Browser.Page.adopt_style_state(Process.get(:bench_base), st))
       loop.(loop)
 
     {:scripts_done, reply} ->
