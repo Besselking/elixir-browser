@@ -29,8 +29,8 @@ defmodule Browser.JS.DOM do
   # node table, the indexes of the ids and of the attribute values, the boxes, node ids, counts
   # and sizes. The JS collector reads each integer as a heap id, so these fields can keep dead
   # objects alive, and the node table makes each collection long.
-  @gc_fields ~w(nodes ids aidx rects rev next next_nid usp doc main frames meta fdirty ce_done
-                current_script write_after focus_ed focus_ctl scroll content width height
+  @gc_fields ~w(nodes ids aidx iframes rects rev next next_nid usp doc main frames meta fdirty
+                ce_done current_script write_after focus_ed focus_ctl scroll content width height
                 hist_idx history_before)a
 
   @doc """
@@ -282,8 +282,16 @@ defmodule Browser.JS.DOM do
         fields
       )
 
-    # (the checks that frames need are only made once the page has an <iframe>)
-    if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
+    # (the checks that frames need are only made once the page has an <iframe>; `iframes` has
+    # each `<iframe>` element, see `frames_in/1`)
+    s =
+      if n.tag == "iframe" do
+        Process.put(:dom_has_iframe, true)
+        %{s | iframes: Map.put(s.iframes, id, true)}
+      else
+        s
+      end
+
     n = with_classes(n)
 
     s = reindex_all(s, id, nil, n)
@@ -535,6 +543,8 @@ defmodule Browser.JS.DOM do
       | nodes: Map.drop(s.nodes, ids),
         ids: id_index,
         aidx: aidx,
+        iframes:
+          :maps.filter(fn e, _ -> not match?(%{^e => %{doc: ^doc}}, s.nodes) end, s.iframes),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -677,6 +687,7 @@ defmodule Browser.JS.DOM do
       nodes: %{},
       ids: %{},
       aidx: %{},
+      iframes: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -4279,9 +4290,7 @@ defmodule Browser.JS.DOM do
   # `<iframe>`s in the subtree that a script is putting into the document
   defp frames_arriving(nid) do
     if Process.get(:dom_has_iframe) && connected?(nid) do
-      for e <- [nid | descendants(nid)], node(e).kind == :element, node(e).tag == "iframe" do
-        load_frame(e)
-      end
+      for e <- frames_in(nid), do: load_frame(e)
     end
 
     :ok
@@ -4290,9 +4299,7 @@ defmodule Browser.JS.DOM do
   # the realms of the frames in a subtree that is leaving the document go with it
   defp frames_leaving(nid) do
     if Process.get(:dom_has_iframe) && st().frames != %{} do
-      for e <- [nid | descendants(nid)],
-          node(e).kind == :element,
-          node(e).tag == "iframe" do
+      for e <- frames_in(nid) do
         cancel_frame_load(e)
         if d = Map.get(st().frames, e), do: destroy_realm(d)
       end
@@ -4300,6 +4307,30 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # The `<iframe>` elements in the subtree of `nid` (`nid` too), in tree order. A page has few
+  # of them, so a walk up from each one costs less than a walk of the subtree. Many nodes move
+  # for each change of a large page that has a frame (a Speedometer suite runs in one).
+  @frames_walk_up 16
+
+  defp frames_in(nid) do
+    s = st()
+
+    if map_size(s.iframes) > @frames_walk_up do
+      for e <- [nid | descendants(nid)], iframe?(s.nodes, e), do: e
+    else
+      case for({e, _} <- s.iframes, e == nid or below?(e, nid), iframe?(s.nodes, e), do: e) do
+        [_, _ | _] = found ->
+          set = Map.new(found, &{&1, true})
+          for e <- [nid | descendants(nid)], is_map_key(set, e), do: e
+
+        found ->
+          found
+      end
+    end
+  end
+
+  defp iframe?(nodes, e), do: match?(%{^e => %{kind: :element, tag: "iframe"}}, nodes)
 
   @doc "The `<iframe>`s of the page's document that have not been loaded yet get their load."
   def load_initial_frames do

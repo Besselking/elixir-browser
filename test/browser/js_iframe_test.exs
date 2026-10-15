@@ -177,4 +177,43 @@ defmodule Browser.JS.IframeTest do
              "true true true"
            ]
   end
+
+  # The frames of a subtree that moves come from a list of the `<iframe>` elements, not from a
+  # walk of the subtree. The frames load in tree order, also when an `<iframe>` that a script
+  # made first comes after the other one in the tree.
+  test "iframes deep in a subtree load when it goes in and go away when it goes out" do
+    {logs, errors} =
+      run(~S"""
+      window.order = [];
+      const late = document.createElement("iframe");
+      late.srcdoc = "<script>parent.order.push('late')<\/script>";
+      const div = document.createElement("div");
+      div.innerHTML = "<section><article><iframe srcdoc=\"<script>parent.order.push('deep')<\/script>\"></iframe></article></section>";
+      div.appendChild(late);
+      const deep = div.querySelector("iframe");
+      let round = 0;
+      const loaded = () => {
+        if (order.length % 2) return;
+        round++;
+        console.log(round, order.join(), deep.contentDocument !== null, late.contentDocument !== null);
+        div.remove();
+        console.log("out", deep.contentDocument, late.contentDocument);
+        if (round < 2) setTimeout(() => document.body.appendChild(div), 0);
+      };
+      deep.onload = loaded;
+      late.onload = loaded;
+      console.log("in", deep.contentDocument, late.contentDocument);
+      document.body.appendChild(div);
+      """)
+
+    assert errors == []
+
+    assert logs == [
+             "in null null",
+             "1 deep,late true true",
+             "out null null",
+             "2 deep,late,deep,late true true",
+             "out null null"
+           ]
+  end
 end
