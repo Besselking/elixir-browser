@@ -10529,7 +10529,17 @@ defmodule Browser.Layout do
         it
       end
 
-    {items, h, _} = flex_atom(st, it.sub, w, it.key)
+    # A scroll container with a definite basis in a column of definite height has no automatic
+    # minimum height, and its content does not set its base. Thus it is laid out one time
+    # only, at its final height (see `flex_column_height/4`)
+    lazy? =
+      not it.fit? and not wrapped? and cs.height != nil and cs.hdef and
+        Map.get(it, :col_scroll?, false) and it.rebuild != nil and it.auto_height? and
+        it.minh == nil and Map.get(it, :minhpct) == nil and Map.get(it, :ratio) == nil and
+        it.hpct == nil and (match?({:px, _}, it.basis) or match?({:pct, _}, it.basis))
+
+    {items, h, _} = if lazy?, do: {[], 0, nil}, else: flex_atom(st, it.sub, w, it.key)
+    it = if lazy?, do: Map.put(it, :lazy, true), else: it
 
     x = column_x(cs, it, align, w, avail)
 
@@ -10720,7 +10730,9 @@ defmodule Browser.Layout do
     # as it is: the same layout with that height set gives the same items)
     same? = not definite? and abs(target - it.h) < 0.5 and Map.get(it, :ratio) == nil
 
-    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) and not same? do
+    if it.rebuild != nil and
+         (Map.get(it, :lazy, false) or
+            ((it.base != it.h or abs(target - it.h) >= 0.5) and not same?)) do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
       content = if it.sizing == :border, do: box, else: box - it.vextra
