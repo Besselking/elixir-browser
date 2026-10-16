@@ -2217,14 +2217,21 @@ defmodule Browser.Session do
   defp base(state), do: state.url
 
   # `navigator.clipboard.readText()` of a page: the runtime's process reads the system clipboard
-  # (the writes come back in the outbox, see `js_effect/2`)
+  # (the writes come back in the outbox, see `js_effect/2`). Nil when the session has no wx
+  # environment (no window): the page then keeps what it wrote.
   defp clipboard_reader do
-    wx_env = :wx.get_env()
+    wx_env =
+      try do
+        :wx.get_env()
+      catch
+        _, _ -> nil
+      end
 
-    fn ->
-      :wx.set_env(wx_env)
-      UI.clipboard_text()
-    end
+    wx_env &&
+      fn ->
+        :wx.set_env(wx_env)
+        UI.clipboard_text()
+      end
   end
 
   # the runtime that was started while the tab was behind others goes on; else one is started
