@@ -2205,6 +2205,17 @@ defmodule Browser.Session do
   defp base(%{page: %{base: base}}) when is_binary(base), do: base
   defp base(state), do: state.url
 
+  # `navigator.clipboard.readText()` of a page: the runtime's process reads the system clipboard
+  # (the writes come back in the outbox, see `js_effect/2`)
+  defp clipboard_reader do
+    wx_env = :wx.get_env()
+
+    fn ->
+      :wx.set_env(wx_env)
+      UI.clipboard_text()
+    end
+  end
+
   # the runtime that was started while the tab was behind others goes on; else one is started
   defp adopt_or_start_js(%{adopt_js: pid, js: pid} = state) when pid != nil,
     do: %{state | adopt_js: nil, hover_nid: nil}
@@ -2225,7 +2236,8 @@ defmodule Browser.Session do
         history_before: length(state.history.back),
         layout_now: true,
         fetch: &Fetch.load(&1, initiator: initiator),
-        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2),
+        clipboard: clipboard_reader()
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
@@ -3707,7 +3719,8 @@ defmodule Browser.Session do
         layout_now: false,
         hidden: true,
         fetch: &Fetch.load(&1, initiator: initiator),
-        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2),
+        clipboard: clipboard_reader()
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)

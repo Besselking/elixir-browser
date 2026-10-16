@@ -25,7 +25,8 @@ defmodule Browser.JS.Runtime do
   # ── API ────────────────────────────────────────────────────
 
   @doc """
-  Boots a runtime for the page. `info` has `:url`, `:width`, `:height` and `:fetch`.
+  Boots a runtime for the page. `info` has `:url`, `:width`, `:height` and `:fetch`, and can
+  have `:clipboard` (`fn -> text end`, for `navigator.clipboard.readText()`).
 
   Timers run in real time. What a timer's callback changes (and a promise that settles later)
   is sent to the process that started the runtime, as `{:js_async, pid, reply}` with a reply
@@ -188,7 +189,7 @@ defmodule Browser.JS.Runtime do
         DOM.install(scope)
         Process.put(:rt_info, info)
         Process.put(:js_hidden, info[:hidden] == true)
-        Browser.JS.WebAPI.install(scope, &http/1)
+        Browser.JS.WebAPI.install(scope, &http/1, &clipboard_text/0)
         Browser.JS.Editing.install(scope)
         Browser.JS.WebAssembly.install(scope)
         Browser.JS.IndexedDB.install(scope)
@@ -969,6 +970,15 @@ defmodule Browser.JS.Runtime do
 
   defp base_url, do: Process.get(:rt_info)[:base] || page_url()
   defp page_url, do: Process.get(:rt_info).url
+
+  # `navigator.clipboard.readText()`: the page's `info.clipboard` (`fn -> text end`, which the
+  # session gives when there is a window) reads the system clipboard; without one, nil
+  defp clipboard_text do
+    case Process.get(:rt_info)[:clipboard] do
+      read when is_function(read, 0) -> read.()
+      _ -> nil
+    end
+  end
 
   # A request from a script (`fetch`, `XMLHttpRequest`): `req` has `:method`, `:url`, `:body`,
   # `:headers` (`[{name, value}]`), `:content_type` and `:credentials`. The answer is
