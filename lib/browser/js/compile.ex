@@ -572,6 +572,9 @@ defmodule Browser.JS.Compile do
         :tdz ->
           Interp.tdz_error(unquote(name))
 
+        {:js_box, b} ->
+          :erlang.element(2, :erlang.get(b))
+
         v ->
           # (only `{:aslot}` may meet the marker of an arguments object that is not built)
           if @check and match?({:unbuilt, _}, v),
@@ -1055,7 +1058,7 @@ defmodule Browser.JS.Compile do
 
       case :erlang.element(i, :erlang.get(up(env, d))) do
         :tdz -> Interp.tdz_error(name)
-        v -> Interp.typeof(v)
+        v -> Interp.typeof(Interp.unbox(v))
       end
     end
   end
@@ -1530,7 +1533,7 @@ defmodule Browser.JS.Compile do
             {old, Interp.bump(op, old)}
         end
 
-      Interp.slot_put(frame, i, new)
+      Interp.slot_write(frame, i, new)
       if prefix?, do: new, else: old
     end
   end
