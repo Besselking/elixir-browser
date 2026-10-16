@@ -5183,7 +5183,7 @@ defmodule Browser.Layout do
     # (a width that is no more than the room there is: the width of a flex container measured
     # without a bound is not what its surroundings need)
     ext =
-      if extent(atom.items) == 0 or atom.w < @unbounded / 2,
+      if atom.w < @unbounded / 2 or extent(atom.items) == 0,
         do: max(st.ext, x + atom.w + max(extra, 0)),
         else: st.ext
 
@@ -6394,6 +6394,19 @@ defmodule Browser.Layout do
   end
 
   # the place of an item and the clips that move with it (x, y, xlim, clip, clips)
+  # (the usual item has a clip and clips and no `xlim`: one update in place of four. An item
+  # moves one time for each level of atoms around it)
+  defp move_place(%{clip: %{} = c, clips: clips} = it, dx, dy)
+       when not is_map_key(it, :xlim) or :erlang.map_get(:xlim, it) == nil do
+    %{
+      it
+      | x: it.x + dx,
+        y: it.y + dy,
+        clip: shift_rect(c, dx, dy),
+        clips: Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)
+    }
+  end
+
   defp move_place(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
 
@@ -7759,6 +7772,10 @@ defmodule Browser.Layout do
       rr: st.right - st.free
     }
 
+    # (no `alast` key when it is nil: a text item then has 32 keys or fewer, and the VM keeps
+    # it as a flat map, not as a tree. Read it with `Map.get/2`)
+    item = if style.alast == nil, do: Map.delete(item, :alast), else: item
+
     item = if hang > 0, do: Map.put(item, :hang, hang), else: item
     item = if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
     item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
@@ -7797,9 +7814,10 @@ defmodule Browser.Layout do
   defp mergeable?(prev, item) do
     keys = [:x, :w, :text, :glue, :lm, :hang, :nid]
 
-    Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
-      not String.match?(prev.text <> item.text, ~r/\s|[\x{2000}-\x{200A}\x{3000}]/u) and
-      not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
+    # (the cheap tests first, the regex last and compiled one time)
+    prev.x + prev.w == item.x and not is_map_key(prev, :hang) and not is_map_key(prev, :wc) and
+      :maps.without(keys, prev) == :maps.without(keys, item) and
+      not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u))
   end
 
   defp push_word(st, item, x, w, style) do
