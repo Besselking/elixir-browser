@@ -382,7 +382,18 @@ defmodule Browser.Layout do
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
-    {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    # (the young heap grows with what the place keeps, see `tune_young_heap/0`)
+    {:garbage_collection, gc} = Process.info(self(), :garbage_collection)
+    Process.put(:layout_young, gc[:min_heap_size])
+
+    {items, height} =
+      try do
+        place(ops, width, measure, view_height, opts[:images], margin)
+      after
+        Process.delete(:layout_young)
+        :erlang.process_flag(:min_heap_size, gc[:min_heap_size])
+      end
+
     Process.delete(:layout_transforms)
 
     if System.get_env("LAYOUT_TIMES"),
@@ -4157,6 +4168,7 @@ defmodule Browser.Layout do
   # A span placed before, with the same ops and in a state that it reads the same, is placed
   # again from what it placed then (its fragment), moved to where it starts now.
   defp op({:span, key, ops, safe?}, st) do
+    tune_young_heap()
     frags = Process.get(:layout_frags)
 
     if frags != nil and safe? and span_state_ok?(st),
@@ -6876,8 +6888,31 @@ defmodule Browser.Layout do
           _ ->
             value = fun.()
             Process.put(:layout_memo, Map.put(Process.get(:layout_memo), key, {gen, sub, value}))
+            tune_young_heap()
             value
         end
+    end
+  end
+
+  # The Erlang collector copies everything alive twice: out of a full young heap, then into the
+  # old heap. What a big layout keeps while it places (the memo, the fragments, the items of a
+  # long scroller) can grow to many times the young heap the process started with, and then
+  # each collection copies all of it, many times over. So the young heap grows with what is
+  # alive (what the old heap holds and what the last collection kept in the young one): to four
+  # times that, at most @max_young words (128 MB). It is checked at each span and after each
+  # sub-layout, and the process gets back the young heap it had when the place ends
+  # (`run_layout/6`).
+  @max_young 16_000_000
+
+  defp tune_young_heap do
+    with young when young != nil <- Process.get(:layout_young) do
+      {:garbage_collection_info, gc} = Process.info(self(), :garbage_collection_info)
+      target = min(4 * (gc[:old_heap_size] + gc[:recent_size]), @max_young)
+
+      if target > young * 5 / 4 do
+        :erlang.process_flag(:min_heap_size, target)
+        Process.put(:layout_young, target)
+      end
     end
   end
 
