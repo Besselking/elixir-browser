@@ -1801,6 +1801,16 @@ defmodule Browser.JSTest do
              a[0] = {valueOf(){ buf.transfer(); return 3 }};
              [a.length, a[0]].join()
              """) == "0,"
+
+      # (the index at the length of a view that is shorter than its buffer, and a view of an
+      # immutable buffer)
+      assert js("""
+             var b = new ArrayBuffer(8), v = new Uint8Array(b, 0, 2), w = new Float64Array(b, 0, 0);
+             v[2] = 5; w[0] = 1;
+             var t = new Uint8Array(new ArrayBuffer(4).transferToImmutable()); t[0] = 7;
+             var e = (function(){ "use strict"; try { t[1] = 8; return 'none' } catch (x) { return x.constructor.name } })();
+             [String(v[2]), new Uint8Array(b)[2], String(w[0]), t[0], t[1], e].join()
+             """) == "undefined,0,undefined,0,0,TypeError"
     end
 
     test "views share a buffer, DataView reads both byte orders" do
