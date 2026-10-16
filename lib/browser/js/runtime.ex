@@ -122,7 +122,8 @@ defmodule Browser.JS.Runtime do
 
   @doc """
   A click on the link `href` over the element numbered `nid`: `%{frame: true}` when a frame
-  took it (it loads the address itself), else the session follows the link.
+  took it (it loads the address itself) or when the link has `download` (the outbox then has
+  `{:download, url, name, data}`), else the session follows the link.
   """
   def follow_link(pid, nid, href), do: call(pid, {:follow_link, nid, href})
 
@@ -603,7 +604,8 @@ defmodule Browser.JS.Runtime do
   end
 
   defp handle({:follow_link, nid, href}) do
-    frame = guard(fn -> DOM.follow_link(nid, href) end, :page) == :frame
+    # (a link with `download` is not for the session to follow either: it saves the file)
+    frame = guard(fn -> DOM.follow_link(nid, href) end, :page) in [:frame, :download]
     Browser.JS.Promise.run_microtasks()
     finish(%{frame: frame})
   end

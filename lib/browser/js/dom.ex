@@ -10,7 +10,8 @@ defmodule Browser.JS.DOM do
   turns it back into that shape, after which the page is rebuilt (see `Browser.Page.from_raw/2`).
 
   Things the script did that reach beyond the tree are queued in the outbox for the session:
-  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:open_tab, url}`, `{:reload}`, `{:submit, form}`.
+  `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:open_tab, url}`, `{:reload}`, `{:submit, form}`,
+  `{:clipboard, text}`, `{:download, url, name, data}`.
   """
 
   import Kernel, except: [node: 1]
@@ -4721,12 +4722,18 @@ defmodule Browser.JS.DOM do
   A click on a link, which the layout reports as `href` over the element it numbers `nid`. When
   the link is in a frame, the frame follows it (`target="_top"` and `"_parent"` send the
   page, or the frame around, instead): `:frame`. A link of the page itself is for the session:
-  `:page`.
+  `:page`. A link with a `download` attribute is not followed: the outbox gets a
+  `{:download, ...}` (see `download/1`) and the answer is `:download`.
   """
   def follow_link(nid, href) do
+    id = nid && nid_numbered(nid)
+    if id != nil and download(id), do: :download, else: follow_link_in(id, href)
+  end
+
+  defp follow_link_in(id, href) do
     main = st().main
 
-    with id when id != nil <- nid && nid_numbered(nid),
+    with id when id != nil <- id,
          doc when doc != main <- node(id).doc,
          %{parent: parent} <- frame_of(doc) do
       target = link_target([id | ancestors(id)])
@@ -4751,6 +4758,50 @@ defmodule Browser.JS.DOM do
       _ -> :page
     end
   end
+
+  # A click on `nid`, or on an element in it, that is a link with a `download` attribute: the
+  # session saves what it points to instead of going there. The outbox gets
+  # `{:download, url, name, data}`, with `data` the content of a `blob:` URL of the link's
+  # document (the session cannot read the blobs of the page), else nil. True when it did.
+  defp download(nid) do
+    case Enum.find([nid | ancestors(nid)], &download_link?/1) do
+      nil ->
+        false
+
+      a ->
+        n = node(a)
+
+        {url, data} =
+          in_realm(n.doc, fn ->
+            url = resolve_url(get_attr(n, "href"))
+            {url, blob_text(url)}
+          end)
+
+        out({:download, url, get_attr(n, "download"), data})
+        true
+    end
+  end
+
+  defp download_link?(id) do
+    n = node(id)
+
+    n.kind == :element and n.tag in ["a", "area"] and get_attr(n, "href") != nil and
+      get_attr(n, "download") != nil
+  end
+
+  # (the web API prelude keeps the blobs of `URL.createObjectURL`, see `Browser.JS.WebAPI`)
+  defp blob_text("blob:" <> _ = url) do
+    with {:obj, _} = u <- deref_global("URL"),
+         f = Interp.get(u, "__blobText"),
+         true <- function?(f),
+         text when text != :undefined <- call(f, :undefined, [url]) do
+      to_str(text)
+    else
+      _ -> nil
+    end
+  end
+
+  defp blob_text(_url), do: nil
 
   defp link_target(chain) do
     Enum.find_value(chain, fn id ->
@@ -6165,6 +6216,9 @@ defmodule Browser.JS.DOM do
   # what a click does when no script stopped it: a submit button submits its form
   defp activate(nid) do
     n = node(nid)
+
+    # (`a.click()` on a link with `download`: what a click of the user does, see `download/1`)
+    if download_link?(nid), do: download(nid)
 
     if n.tag in ["button", "input"] and get_attr(n, "popovertarget") != nil and
          get_attr(n, "disabled") == nil,

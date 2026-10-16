@@ -12,6 +12,7 @@ defmodule Browser.Session do
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxList: 1]
 
   alias Browser.{
+    Download,
     Editing,
     Fetch,
     Forms,
@@ -325,6 +326,16 @@ defmodule Browser.Session do
     do: {:noreply, open_foreground_tab(state, url)}
 
   def handle_info({:open_tab, _tid, _url}, state), do: {:noreply, state}
+
+  # a download (see `js_effect/2`) was saved, or could not be
+  def handle_info({:downloaded, result}, state) do
+    case result do
+      {:ok, path} -> UI.set_status(state.ui, "Saved #{path}")
+      {:error, msg} -> UI.set_status(state.ui, "Download failed: #{msg}")
+    end
+
+    {:noreply, state}
+  end
 
   # a timer or a promise changed the page after the call that started it had returned
   def handle_info({:js_async, pid, reply}, %{js: pid} = state),
@@ -2688,6 +2699,22 @@ defmodule Browser.Session do
 
   defp js_effect({:clipboard, text}, state) do
     UI.set_clipboard_text(text)
+    state
+  end
+
+  # a link with `download` was clicked: the file is saved in the Downloads folder (a fetch can
+  # take its time), and the status bar says where
+  defp js_effect({:download, url, name, data}, state) do
+    me = self()
+    initiator = state.url
+
+    Task.start(fn ->
+      send(
+        me,
+        {:downloaded, Download.save(url, name, data, &Fetch.load(&1, initiator: initiator))}
+      )
+    end)
+
     state
   end
 
