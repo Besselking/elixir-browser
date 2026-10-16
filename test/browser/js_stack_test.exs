@@ -9,7 +9,7 @@ defmodule Browser.JS.StackTest do
   use ExUnit.Case, async: true
 
   alias Browser.JS
-  alias Browser.JS.{Builtins, GC, Interp, Parser, Runtime}
+  alias Browser.JS.{Builtins, GC, Interp, Parser, Pos, Runtime}
   alias Browser.JS.Resolve.{Info, Scope}
   require Interp
 
@@ -267,7 +267,7 @@ defmodule Browser.JS.StackTest do
           Builtins.run_timers(on_error)
           :ok
         catch
-          {:js_error, v} -> {:uncaught, Runtime.describe(v), Process.get(:js_throw_pos)}
+          {:js_error, v} -> {:uncaught, Runtime.describe(v), dec(Process.get(:js_throw_pos))}
         end
 
       {outcome, Enum.reverse(Process.get(:js_console, []))}
@@ -354,12 +354,31 @@ defmodule Browser.JS.StackTest do
   # next call.
   defp put_caller(chain, pos) do
     put_chain(chain)
-    :erlang.put(:js_pos, pos)
+    :erlang.put(:js_pos, enc(pos))
     for d <- 0..1001, do: :erlang.erase(Interp.leaf_base() + d)
   end
 
   # Element 3 of a frame: its chain in the check build, `nil` in a normal build.
   defp link(chain), do: if(@check, do: chain)
+
+  # The engine keeps a position as one integer (`Browser.JS.Pos`). The tests write and read
+  # the form `{file, line}`: the helpers below give the integer to the engine and read it
+  # back. An integer stays as it is, so a chain that the engine made can go back in.
+  defp enc({file, line}), do: Pos.encode(file, line)
+  defp enc(pos), do: pos
+
+  defp dec(pos) when is_integer(pos), do: Pos.decode(pos)
+  defp dec(pos), do: pos
+
+  defp enc_chain(chain), do: for({name, pos, d} <- chain, do: {name, enc(pos), d})
+
+  # (a chain that a call pushed on no chain ends in `:undefined`)
+  defp cur_stack, do: dec_chain(:erlang.get(:js_stack))
+
+  defp dec_chain([{name, pos, d} | rest]), do: [{name, dec(pos), d} | dec_chain(rest)]
+  defp dec_chain(tail), do: tail
+
+  defp cur_pos, do: dec(:erlang.get(:js_pos))
 
   # Writes a hand-built chain to `:js_stack`. In the check build, the oracle compares each
   # call with its own keys (design section 5, C3), so the test must also give the oracle
@@ -375,6 +394,7 @@ defmodule Browser.JS.StackTest do
   end
 
   defp put_chain(chain) do
+    chain = enc_chain(chain)
     :erlang.put(:js_stack, chain)
 
     if @check do
@@ -396,7 +416,7 @@ defmodule Browser.JS.StackTest do
   defp install_snap(gid) do
     snap =
       Interp.native("snap", fn _this, _args ->
-        seen = {:erlang.get(:js_stack), :erlang.get(:js_pos)}
+        seen = {cur_stack(), cur_pos()}
         Process.put(:snaps, [seen | Process.get(:snaps, [])])
         :undefined
       end)
@@ -426,7 +446,7 @@ defmodule Browser.JS.StackTest do
   defp install_probe(gid) do
     probe =
       Interp.native("probe", fn _this, _args ->
-        Process.put(:probed, {:erlang.get(:js_stack), frame_of_call(), newest(Scope)})
+        Process.put(:probed, {cur_stack(), frame_of_call(), newest(Scope)})
         :undefined
       end)
 
@@ -493,7 +513,7 @@ defmodule Browser.JS.StackTest do
   # The stack text of an error made under `chain` at the position `pos`.
   defp text(chain, pos) do
     put_chain(chain)
-    :erlang.put(:js_pos, pos)
+    :erlang.put(:js_pos, enc(pos))
     Interp.stack_string("H")
   end
 
@@ -545,8 +565,8 @@ defmodule Browser.JS.StackTest do
           assert [{[{"f", ^pos, depth} | rest], {"t.js", 1}}] = snaps()
           assert {level, below, depth} == {level, below, d + 1}
           assert rest == below
-          assert :erlang.get(:js_stack) == below
-          assert :erlang.get(:js_pos) == pos
+          assert cur_stack() == below
+          assert cur_pos() == pos
         end
       end
     end
@@ -634,8 +654,8 @@ defmodule Browser.JS.StackTest do
         run.()
         assert {fid, _} = peeked()
         assert {what, freed?(fid)} == {what, true}
-        assert {what, :erlang.get(:js_stack)} == {what, below}
-        assert {what, :erlang.get(:js_pos)} == {what, pos}
+        assert {what, cur_stack()} == {what, below}
+        assert {what, cur_pos()} == {what, pos}
       end
 
       assert Interp.heap_size() == size
@@ -666,8 +686,8 @@ defmodule Browser.JS.StackTest do
       Interp.call(f, :undefined, [])
       assert {chain, {_, frame}, _} = Process.get(:probed)
       assert chain == [{"f", pos, 5} | below]
-      assert elem(frame, 2) == link(chain)
-      assert elem(frame, 3) == pos
+      assert elem(frame, 2) == link(enc_chain(chain))
+      assert dec(elem(frame, 3)) == pos
 
       # A catch frame: the header elements 3 to 5 are copies of the function frame's.
       put_caller(below, pos)
@@ -675,10 +695,10 @@ defmodule Browser.JS.StackTest do
       assert {chain, {_, frame}, {_, catch_frame}} = Process.get(:probed)
       assert %Scope{kind: :catch, frame: true} = elem(catch_frame, 1)
       assert chain == [{"g", pos, 5} | below]
-      assert elem(frame, 2) == link(chain)
-      assert elem(catch_frame, 2) == link(chain)
-      assert elem(catch_frame, 3) == pos
-      assert :erlang.get(:js_stack) == below
+      assert elem(frame, 2) == link(enc_chain(chain))
+      assert elem(catch_frame, 2) == link(enc_chain(chain))
+      assert dec(elem(catch_frame, 3)) == pos
+      assert cur_stack() == below
     end
   end
 
@@ -688,7 +708,7 @@ defmodule Browser.JS.StackTest do
         pos = {"t.js", 1000}
         put_caller(chain(999), pos)
         Interp.call(f, :undefined, [])
-        assert {what, :erlang.get(:js_stack)} == {what, chain(999)}
+        assert {what, cur_stack()} == {what, chain(999)}
 
         deep = chain(1000)
         put_caller(deep, pos)
@@ -698,8 +718,8 @@ defmodule Browser.JS.StackTest do
         # the caller: 1000 cells, of which the first 12 cells print.
         assert {"RangeError", @range, stack} = js_error(fn -> Interp.call(f, :undefined, []) end)
         assert {what, stack} == {what, text_of(header, deep, pos)}
-        assert :erlang.get(:js_stack) == deep
-        assert :erlang.get(:js_pos) == pos
+        assert cur_stack() == deep
+        assert cur_pos() == pos
       end
     end
   end
@@ -724,7 +744,7 @@ defmodule Browser.JS.StackTest do
         # The tail caller leaves before its callee runs, so each callee pushes on the
         # first caller's chain with the first caller's position.
         assert {^level, [{[{"f", ^pos, 1}], {"t.js", 1}}]} = {level, snaps()}
-        assert :erlang.get(:js_stack) == []
+        assert cur_stack() == []
       end
     end
   end
@@ -752,8 +772,8 @@ defmodule Browser.JS.StackTest do
       assert catch_throw(Interp.construct(p, [])) == {:js_error, 1.0}
       assert {fid, _} = peeked()
       assert freed?(fid)
-      assert :erlang.get(:js_stack) == below
-      assert :erlang.get(:js_pos) == pos
+      assert cur_stack() == below
+      assert cur_pos() == pos
 
       # The callee of the tail site runs on top of the constructor's cell (row E24).
       put_caller(below, pos)
@@ -762,13 +782,13 @@ defmodule Browser.JS.StackTest do
       assert [{[{"mk", {"t.js", 3}, 3}, {"Q", ^pos, 2} | ^below], _}] = snaps()
       assert {fid, _} = peeked()
       assert freed?(fid)
-      assert :erlang.get(:js_stack) == below
+      assert cur_stack() == below
 
       # A primitive from the tail site gives the new object.
       put_caller(below, pos)
       obj = Interp.construct(r, [])
       assert Interp.get(obj, "w") == 2.0
-      assert :erlang.get(:js_stack) == below
+      assert cur_stack() == below
     end
   end
 
@@ -791,8 +811,8 @@ defmodule Browser.JS.StackTest do
           put_caller(below, pos)
           assert {:obj, _} = Interp.call(global!(gid, name), :undefined, [])
           assert {^level, ^name, [{[{^name, ^pos, 4} | ^below], _}]} = {level, name, snaps()}
-          assert {level, name, :erlang.get(:js_stack)} == {level, name, below}
-          assert {level, name, :erlang.get(:js_pos)} == {level, name, pos}
+          assert {level, name, cur_stack()} == {level, name, below}
+          assert {level, name, cur_pos()} == {level, name, pos}
         end
 
         # At the depth limit the call is refused before the body runs.
@@ -802,7 +822,7 @@ defmodule Browser.JS.StackTest do
         ok = global!(gid, "ok")
         assert {"RangeError", @range, _} = js_error(fn -> Interp.call(ok, :undefined, []) end)
         assert snaps() == []
-        assert :erlang.get(:js_stack) == deep
+        assert cur_stack() == deep
       end
     end
   end
@@ -831,8 +851,8 @@ defmodule Browser.JS.StackTest do
 
         # Each resumed body gives back the position, so after the jobs the position is
         # that of the last line of the script.
-        assert :erlang.get(:js_stack) == []
-        assert {^level, {"t.js", 6}} = {level, :erlang.get(:js_pos)}
+        assert cur_stack() == []
+        assert {^level, {"t.js", 6}} = {level, cur_pos()}
       end
     end
   end
@@ -856,7 +876,7 @@ defmodule Browser.JS.StackTest do
                 [{[{"c", {"t.js", 3}, 3}, {"b", {"t.js", 1}, 2}, {"a", {"u.js", 7}, 1}], _}]} =
                  {level, snaps()}
 
-        assert :erlang.get(:js_stack) == []
+        assert cur_stack() == []
       end
     end
   end
@@ -885,6 +905,10 @@ defmodule Browser.JS.StackTest do
         chain = [{"f", {"t.js", x}, x}]
         frame = Interp.alloc({nil, info, chain, {"t.js", x}, Interp.global()})
         Process.put(:gc_test_frame, frame)
+
+        # A position and the number of a file are integers, and they are no references
+        # either (`Browser.JS.Pos`).
+        for key <- [:js_pos, :js_throw_pos, :js_file_id], do: :erlang.put(key, x)
         assert GC.dangling(nil) == []
 
         GC.collect()

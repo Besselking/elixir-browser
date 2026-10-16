@@ -53,8 +53,10 @@ defmodule Browser.JS.Str do
 
   # A long string with wider characters gets an index: where every @chunk-th byte falls and how
   # many units come before it. Matching a regular expression against such a string asks for
-  # positions again and again, so the index of the last few strings is kept.
-  @chunk 128
+  # positions again and again, so the index of the last few strings is kept. A position walks
+  # from the mark before it, so a short chunk makes a short walk. The index has more marks, but
+  # it is built once for each string.
+  @chunk 16
   @indexed 4
 
   defp index(s) do
@@ -130,8 +132,11 @@ defmodule Browser.JS.Str do
     end
   end
 
-  # every UTF-8 lead byte starts a character (one unit, two outside the BMP)
-  defp unit_count(s) do
+  @doc """
+  The number of code units in `s`, by a walk over all its bytes (no index). Every UTF-8 lead
+  byte starts a character: one unit, or two outside the BMP.
+  """
+  def unit_count(s) do
     for <<b <- s>>, reduce: 0 do
       n ->
         cond do
@@ -333,19 +338,38 @@ defmodule Browser.JS.Str do
 
   defp walk(s, n, acc) when n <= 0 or acc >= byte_size(s), do: acc
 
+  # (the walk matches the rest of the binary: it makes no `:binary.at/2` call for each byte)
   defp walk(s, n, acc) do
-    b = :binary.at(s, acc)
+    <<_::binary-size(^acc), rest::binary>> = s
+    walk_rest(rest, n, acc)
+  end
 
+  defp walk_rest(_, n, acc) when n <= 0, do: acc
+  defp walk_rest(<<b, rest::binary>>, n, acc) when b < 0x80, do: walk_rest(rest, n - 1, acc + 1)
+
+  defp walk_rest(<<b, _::binary>> = r, n, acc) do
     {size, weight} =
       cond do
-        b < 0x80 -> {1, 1}
         b < 0xE0 -> {2, 1}
         b < 0xF0 -> {3, 1}
         true -> {4, 2}
       end
 
-    if weight > n, do: acc, else: walk(s, n - weight, acc + size)
+    cond do
+      weight > n ->
+        acc
+
+      # (the last character, or a character that is cut at the end: the walk stops after it)
+      byte_size(r) <= size ->
+        acc + size
+
+      true ->
+        <<_::binary-size(^size), rest::binary>> = r
+        walk_rest(rest, n - weight, acc + size)
+    end
   end
+
+  defp walk_rest(<<>>, _n, acc), do: acc
 
   # ── lone surrogates ────────────────────────────────────────
 

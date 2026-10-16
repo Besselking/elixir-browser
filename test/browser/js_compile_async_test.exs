@@ -981,7 +981,7 @@ defmodule Browser.JS.CompileAsyncTest do
       assert Enum.any?(outcomes, &match?(%{console: [_ | _]}, &1))
       assert Enum.any?(outcomes, &match?(%{result: :step_limit}, &1))
       assert Enum.any?(outcomes, &match?(%{unhandled: [_ | _]}, &1))
-      assert Enum.any?(outcomes, &match?(%{pos: {@file_name, _}}, &1))
+      assert Enum.any?(outcomes, &match?({@file_name, _}, Browser.JS.Pos.decode(&1.pos)))
       # (many rows give the same value, such as the race rows, but their steps differ)
       distinct = outcomes |> Enum.map(&{&1.result, &1.console, &1.steps}) |> Enum.uniq()
       assert length(distinct) > div(length(outcomes) * 2, 3)

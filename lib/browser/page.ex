@@ -4,7 +4,7 @@ defmodule Browser.Page do
   references, cascade and prune. Runs in a task, never in the UI process.
   """
 
-  alias Browser.{Fetch, Forms, HTML, Images, Layout, Prefetch, Style}
+  alias Browser.{Fetch, Forms, HTML, Images, Layout, MediaQuery, Prefetch, Style}
 
   @max_sheets 64
   @sheet_timeout 10_000
@@ -117,7 +117,7 @@ defmodule Browser.Page do
     base = base_href(raw, url)
     {raw, image_urls} = Images.index(raw, base)
 
-    refs = raw |> Style.scoped_refs() |> cap_links()
+    refs = sheet_refs(raw)
     {rules, sheet_cache} = sheet_rules(refs, base, %{})
     queries = Style.media_queries(rules)
 
@@ -198,7 +198,13 @@ defmodule Browser.Page do
 
           cache ->
             index = Style.index_rules(page.rules, env)
-            old = with {^key, memo} <- page.memo, do: memo, else: (_ -> nil)
+
+            old =
+              case page.memo do
+                {old_key, memo} -> if memo_fits?(old_key, env), do: memo
+                nil -> nil
+              end
+
             {pruned, memo} = Style.prune(Browser.Modal.backdrops(page.raw), index, old)
             defs = Browser.Svg.defs(page.raw, pruned)
             fixed = fixed_width(pruned)
@@ -218,6 +224,15 @@ defmodule Browser.Page do
 
       render(page, page.form_state)
     end
+  end
+
+  # The memo holds for `env` when each media query it was made with gives the same result now,
+  # and, when the styles used viewport units, the window has the same size. (A query that only
+  # new rules use does not matter: those rules reach no element that the memo holds, see
+  # `refresh_sheets/3`.)
+  defp memo_fits?({media, size}, env) do
+    (size == false or size == {env.width, env.height}) and
+      Enum.all?(media, fn {query, result} -> MediaQuery.eval(query, env) == result end)
   end
 
   # The controls whose box width doesn't depend on their content (a length or a
@@ -357,7 +372,13 @@ defmodule Browser.Page do
   are indexed again and the cascade runs afresh. Control state is not kept: the tree carries
   the values the controls have.
   """
-  def from_raw(%__MODULE__{} = page, raw, env) do
+  def from_raw(%__MODULE__{} = page, raw, env), do: from_raw(page, raw, env, nil)
+
+  @doc """
+  `from_raw/3` with the sheet refs of `raw` that `layout_base/2` gave (nil: `from_raw/4` finds
+  them).
+  """
+  def from_raw(%__MODULE__{} = page, raw, env, refs) do
     {raw, forms} = Forms.index(raw)
     raw = Browser.Nids.index(raw)
     base = base_href(raw, page.url)
@@ -380,10 +401,24 @@ defmodule Browser.Page do
             style_cache: %{}
         },
         raw,
+        refs || sheet_refs(raw),
         base
       ),
       env
     )
+  end
+
+  @doc """
+  The page that a layout of the tree `raw` in another process starts from, and the sheet refs of
+  `raw`: give both to `from_raw/4`. What `from_raw/4` makes again is not in the page, so the copy
+  into the process is small. When `raw` has other sheets than the page, the memo of the cascade
+  is not in it either when `from_raw/4` cannot keep that memo (see `kept_memo/3`).
+  """
+  def layout_base(%__MODULE__{} = page, raw) do
+    refs = sheet_refs(raw)
+    base = %{page | raw: nil, nodes: nil, pruned: nil, style_cache: %{}}
+    keep = refs == page.sheet_refs or elem(new_trees(page.sheet_refs, refs), 0) != []
+    {if(keep, do: base, else: %{base | memo: nil}), refs}
   end
 
   @doc """
@@ -405,9 +440,8 @@ defmodule Browser.Page do
 
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
-  defp refresh_sheets(page, raw, base) do
-    refs = raw |> Style.scoped_refs() |> cap_links()
-
+  # (`refs`: the sheets of `raw`, see `sheet_refs/1`)
+  defp refresh_sheets(page, raw, refs, base) do
     if refs == page.sheet_refs do
       page
     else
@@ -420,10 +454,53 @@ defmodule Browser.Page do
           sheet_refs: refs,
           sheet_cache: cache,
           viewport_units: viewport_units?(rules, raw),
-          memo: nil
+          memo: kept_memo(page, refs, cache)
       }
     end
   end
+
+  # the style sheets of the tree `raw`: `{ref, scope, base}`, in document order
+  defp sheet_refs(raw), do: raw |> Style.scoped_refs() |> cap_links()
+
+  # The memo stays when the new sheets are all in new trees (shadow trees or frames): a tree is
+  # new when no element that the memo holds has its name. The rules of such a tree reach only
+  # the elements in it and its host, and these are not in the memo as they are now, so they are
+  # styled afresh. Each other sheet must stay as it was. `@property` and cascade layers can
+  # change the rules of more than one tree, so a new rule of these makes a new memo.
+  defp kept_memo(%{memo: {_key, entries} = memo} = page, refs, cache) do
+    {added, trees} = new_trees(page.sheet_refs, refs)
+
+    if added != [] and
+         not Enum.any?(added, fn ref -> Enum.any?(Map.get(cache, ref, []), &wide_rule?/1) end) and
+         not Enum.any?(entries, &memo_in_trees?(&1, trees)),
+       do: memo
+  end
+
+  defp kept_memo(_page, _refs, _cache), do: nil
+
+  # The sheets of `refs` in trees that `old` has no sheet in, and the names of those trees,
+  # when each sheet of `old` stays as it was; else no sheets
+  defp new_trees(old, refs) do
+    old_trees = MapSet.new(old, fn {_, scope, _} -> scope end)
+
+    {added, kept} =
+      Enum.split_with(refs, fn {_, scope, _} -> scope != nil and scope not in old_trees end)
+
+    if kept == old,
+      do: {added, MapSet.new(added, fn {_, scope, _} -> scope end)},
+      else: {[], MapSet.new()}
+  end
+
+  defp wide_rule?(rule), do: Map.get(rule, :registered, false) or Map.get(rule, :layer) != nil
+
+  defp memo_in_trees?({nid, {%{attrs: attrs}, _node}}, trees) when is_integer(nid) do
+    case List.keyfind(attrs, "data-b-frame", 0) do
+      {_, name} -> MapSet.member?(trees, name)
+      nil -> false
+    end
+  end
+
+  defp memo_in_trees?(_entry, _trees), do: false
 
   # the rules of `refs` (`{ref, scope, base}`, in document order), the user agent's first;
   # `cache` has what earlier calls parsed

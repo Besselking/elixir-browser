@@ -281,8 +281,11 @@ defmodule Browser.Style do
   @doc "The distinct media query lists used by `rules`."
   def media_queries(rules), do: rules |> Enum.flat_map(& &1.media) |> Enum.uniq()
 
-  @doc "Media query results for `env`; changes exactly when the active rule set would."
-  def media_key(queries, env), do: Enum.map(queries, &MediaQuery.eval(&1, env))
+  @doc """
+  Media query results for `env`, as a map from each query to its result; changes exactly when the
+  active rule set would.
+  """
+  def media_key(queries, env), do: Map.new(queries, &{&1, MediaQuery.eval(&1, env)})
 
   @doc "Builds a rule index, keeping only rules whose media conditions hold in `env`."
   def index_rules(rules, env) do
@@ -1216,12 +1219,14 @@ defmodule Browser.Style do
   """
   def prune(nodes, idx) do
     Process.delete(:style_memo)
+    Process.put(:style_custom, %{})
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
     pruned = prune_children(nodes, nil, idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
+    Process.delete(:style_custom)
     end_signs()
     pruned
   end
@@ -1237,7 +1242,10 @@ defmodule Browser.Style do
     memo = memo || %{}
     Process.put(:style_memo, memo)
     Process.put(:style_hashes, subtree_hashes(nodes))
-    Process.put(:style_custom, Map.get(memo, :custom_table, %{}))
+    Process.put(:style_custom, %{})
+    Process.put(:style_custom_kept, Map.get(memo, :custom_table, %{}))
+    Process.put(:style_custom_from, %{})
+    start_computed(Map.get(memo, :computed_table, {%{}, 0}))
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
@@ -1247,8 +1255,11 @@ defmodule Browser.Style do
     end_signs()
     memo = Process.delete(:style_memo)
     Process.delete(:style_hashes)
-    table = Process.delete(:style_custom)
-    {pruned, keep_custom(memo, table)}
+    memo = keep_tables(memo, end_computed())
+    Process.delete(:style_custom)
+    Process.delete(:style_custom_kept)
+    Process.delete(:style_custom_from)
+    {pruned, memo}
   end
 
   defp prune_children(nodes, parent, idx) do
@@ -1296,23 +1307,29 @@ defmodule Browser.Style do
         shape: shape(kids),
         index: ctx.index,
         count: ctx.count,
-        computed: ctx.computed,
+        computed: ctx.computed_id,
         custom: ctx.custom_id,
         root_fs: ctx.root_fs,
         chain_same: ctx.chain_same,
         parent: parent_sig(ctx.parent)
       }
 
-      Process.put(:style_memo, Map.put(memo, nid, {entry, shallow(node)}))
+      Process.put(:style_memo, Map.put(memo, nid, {entry, shallow(node, ctx)}))
     end
 
     :ok
   end
 
-  defp shallow({:element, tag, attrs, kids}),
+  # (the computed style of the element is kept as its number)
+  defp shallow({:element, tag, [{"@computed", computed} | attrs], kids}, ctx) do
+    id = if computed === ctx.computed, do: ctx.computed_id, else: computed_id(computed)
+    {:element, tag, [{"@computed", {:computed_ref, id}} | attrs], Enum.map(kids, &shallow_kid/1)}
+  end
+
+  defp shallow({:element, tag, attrs, kids}, _ctx),
     do: {:element, tag, attrs, Enum.map(kids, &shallow_kid/1)}
 
-  defp shallow(:hidden), do: :hidden
+  defp shallow(:hidden, _ctx), do: :hidden
 
   defp shallow_kid({:element, _, attrs, _} = kid) do
     case List.keyfind(attrs, "@nid", 0) do
@@ -1325,6 +1342,12 @@ defmodule Browser.Style do
 
   defp unshallow({:element, tag, attrs, kids}) do
     memo = Process.get(:style_memo)
+
+    attrs =
+      case attrs do
+        [{"@computed", {:computed_ref, id}} | rest] -> [{"@computed", computed_of(id)} | rest]
+        attrs -> attrs
+      end
 
     {:element, tag, attrs,
      Enum.map(kids, fn
@@ -1442,36 +1465,176 @@ defmodule Browser.Style do
   end
 
   defp parent_sig(nil), do: nil
-  defp parent_sig(p), do: {p.computed, p.custom_id, p.root_fs}
+  defp parent_sig(p), do: {p.computed_id, p.custom_id, p.root_fs}
 
   # The custom properties an element has are the same, mostly, as its parent's, and many elements
   # have the same ones as others: the memo holds each set once, under its number, and an entry
   # names the set (a copy of the memo would otherwise hold a set for every element).
-  defp custom_id(custom, parent) do
+  # A set of hundreds of properties differs from its parent's set in a few of them: the memo
+  # keeps a set as `{parent_id, changed, removed}` (`:style_custom_kept`), and only the sets of
+  # the root elements whole. A run makes each set that it uses whole one time (`:style_custom`),
+  # and notes the parent of each new set (`:style_custom_from`).
+  defp custom_id(custom, own, parent) do
     if parent != nil and parent.custom == custom do
       parent.custom_id
     else
-      table = Process.get(:style_custom, %{})
-      id = custom_slot(table, custom, :erlang.phash2(custom, 4_294_967_296))
-      Process.put(:style_custom, Map.put_new(table, id, custom))
+      id = custom_slot(custom, :erlang.phash2(custom, 4_294_967_296))
+      Process.put(:style_custom, Map.put(Process.get(:style_custom, %{}), id, custom))
+
+      with from when is_map(from) <- Process.get(:style_custom_from),
+           false <- is_map_key(Process.get(:style_custom_kept), id) do
+        Process.put(:style_custom_from, Map.put_new(from, id, parent && {parent.custom_id, own}))
+      end
+
       id
     end
   end
 
-  defp custom_slot(table, custom, id) do
-    case table do
-      %{^id => ^custom} -> id
-      %{^id => _other} -> custom_slot(table, custom, id + 4_294_967_296)
-      _ -> id
+  defp custom_slot(custom, id) do
+    case custom_set(id) do
+      nil -> id
+      ^custom -> id
+      _other -> custom_slot(custom, id + 4_294_967_296)
     end
   end
 
-  # (only the sets that entries name stay)
-  defp keep_custom(memo, table) do
-    used =
-      for {nid, {e, _}} <- memo, is_integer(nid), into: MapSet.new(), do: e.custom
+  # The set as the memo keeps it: whole, or what changed from the set of the parent. (Only the
+  # properties that the element declares can differ from its parent's.)
+  defp custom_delta(set, nil), do: set
 
-    Map.put(memo, :custom_table, Map.take(table, MapSet.to_list(used)))
+  defp custom_delta(set, {from, own}),
+    do: {from, Map.take(set, own), Enum.reject(own, &is_map_key(set, &1))}
+
+  # the custom properties of the set `id`, nil when there is no such set
+  defp custom_set(id) do
+    case Process.get(:style_custom, %{}) do
+      %{^id => set} ->
+        set
+
+      sets ->
+        set =
+          case Process.get(:style_custom_kept, %{}) do
+            %{^id => {from, changed, removed}} ->
+              custom_set(from) |> Map.drop(removed) |> Map.merge(changed)
+
+            %{^id => set} ->
+              set
+
+            _ ->
+              nil
+          end
+
+        if set, do: Process.put(:style_custom, Map.put(sets, id, set))
+        set
+    end
+  end
+
+  # The computed styles are few (a page with thousands of elements has a few hundred), but a
+  # copy of the memo would hold one for each element, and one more in each parent signature.
+  # So the memo keeps each one time, under a number (`:computed_table`).
+  # (a number is not given again, so that a signature with the number of a style that the memo
+  # no longer keeps never matches)
+  defp start_computed({table, next}) do
+    Process.put(:style_computed, table)
+    Process.put(:style_computed_ids, Map.new(table, fn {id, computed} -> {computed, id} end))
+    Process.put(:style_computed_next, next)
+  end
+
+  defp end_computed do
+    Process.delete(:style_computed_ids)
+    {Process.delete(:style_computed), Process.delete(:style_computed_next)}
+  end
+
+  # (nil when no memo is made)
+  defp computed_id(computed) do
+    case Process.get(:style_computed_ids) do
+      nil ->
+        nil
+
+      %{^computed => id} ->
+        id
+
+      ids ->
+        id = Process.get(:style_computed_next)
+        Process.put(:style_computed_next, id + 1)
+        Process.put(:style_computed_ids, Map.put(ids, computed, id))
+        Process.put(:style_computed, Map.put(Process.get(:style_computed), id, computed))
+        id
+    end
+  end
+
+  defp computed_of(id), do: Process.get(:style_computed) |> Map.fetch!(id)
+
+  # The tables of the memo: the custom sets that were there and the new ones, and the computed
+  # styles. When a table has grown to more than two times the size it had after the last clean
+  # up, only the sets and styles that entries name stay (and the sets that the kept sets are
+  # made from). (A clean up looks at each entry: it costs as much as a small restyle. A memo
+  # that a run made from nothing names all that is in its tables.)
+  defp keep_tables(memo, {computed, next}) do
+    custom =
+      Enum.reduce(Process.get(:style_custom_from), Process.get(:style_custom_kept), fn
+        {id, from}, acc -> Map.put_new(acc, id, custom_delta(custom_set(id), from))
+      end)
+
+    case Map.get(memo, :table_sizes) do
+      {nc, ns} when map_size(computed) <= 2 * nc + 64 and map_size(custom) <= 2 * ns + 64 ->
+        memo
+        |> Map.put(:custom_table, custom)
+        |> Map.put(:computed_table, {computed, next})
+
+      nil ->
+        memo
+        |> Map.put(:custom_table, custom)
+        |> Map.put(:computed_table, {computed, next})
+        |> Map.put(:table_sizes, {map_size(computed), map_size(custom)})
+
+      _ ->
+        clean_tables(memo, custom, computed, next)
+    end
+  end
+
+  defp clean_tables(memo, custom, computed, next) do
+    {sets, styles} =
+      Enum.reduce(memo, {MapSet.new(), MapSet.new()}, fn
+        {nid, {e, node}}, {sets, styles} when is_integer(nid) ->
+          styles = MapSet.put(styles, e.computed)
+          styles = if e.parent, do: MapSet.put(styles, elem(e.parent, 0)), else: styles
+
+          styles =
+            case node do
+              {:element, _, [{"@computed", {:computed_ref, id}} | _], _} ->
+                MapSet.put(styles, id)
+
+              _ ->
+                styles
+            end
+
+          {MapSet.put(sets, e.custom), styles}
+
+        _other, acc ->
+          acc
+      end)
+
+    custom = kept_sets(MapSet.to_list(sets), custom, %{})
+    computed = Map.take(computed, MapSet.to_list(styles))
+
+    memo
+    |> Map.put(:custom_table, custom)
+    |> Map.put(:computed_table, {computed, next})
+    |> Map.put(:table_sizes, {map_size(computed), map_size(custom)})
+  end
+
+  # the sets `ids` and the sets they are made from
+  defp kept_sets([], _custom, acc), do: acc
+
+  defp kept_sets([id | ids], custom, acc) when is_map_key(acc, id),
+    do: kept_sets(ids, custom, acc)
+
+  defp kept_sets([id | ids], custom, acc) do
+    case Map.fetch!(custom, id) do
+      {from, _, _} = kept -> kept_sets([from | ids], custom, Map.put(acc, id, kept))
+      kept -> kept_sets(ids, custom, Map.put(acc, id, kept))
+    end
   end
 
   defp parent_same?(nil, nil), do: true
@@ -1479,7 +1642,7 @@ defmodule Browser.Style do
   defp parent_same?(_, nil), do: false
 
   defp parent_same?(p, sig),
-    do: p.chain_same and {p.computed, p.custom_id, p.root_fs} == sig
+    do: p.chain_same and {p.computed_id, p.custom_id, p.root_fs} == sig
 
   defp prune_list([], _parent, _idx, _count, _i, _prev, acc, _flags), do: Enum.reverse(acc)
 
@@ -1515,8 +1678,9 @@ defmodule Browser.Style do
         |> CSS.context(attrs, kids, parent, prev, i, count, rest)
         |> then(&sign(idx, &1))
         |> Map.merge(%{
-          computed: e.computed,
-          custom: Process.get(:style_custom) |> Map.fetch!(e.custom),
+          computed: computed_of(e.computed),
+          computed_id: e.computed,
+          custom: custom_set(e.custom),
           custom_id: e.custom,
           root_fs: e.root_fs,
           chain_same: true
@@ -1526,15 +1690,16 @@ defmodule Browser.Style do
       prune_list(rest, parent, idx, count, i + 1, [ctx | prev], acc, next_flags)
     else
       ctx = tag |> CSS.context(attrs, kids, parent, prev, i, count, rest) |> then(&sign(idx, &1))
-      {computed, custom} = compute(idx, ctx, parent)
+      {computed, custom, own} = compute(idx, ctx, parent)
       computed = computed |> blockify_grid_item(parent) |> flex_item_align(parent)
       root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
       ctx =
         ctx
         |> Map.put(:computed, computed)
+        |> Map.put(:computed_id, computed_id(computed))
         |> Map.put(:custom, custom)
-        |> Map.put(:custom_id, custom_id(custom, parent))
+        |> Map.put(:custom_id, custom_id(custom, own, parent))
         |> Map.put(:root_fs, root)
         |> Map.put(:chain_same, same_self? and (parent == nil or parent.chain_same))
 
@@ -1626,7 +1791,7 @@ defmodule Browser.Style do
   defp placeholder_style(idx, ctx, attrs) do
     with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :placeholder),
          decl when map_size(decl) > 0 <- declared(idx, ctx, :placeholder) do
-      {computed, _} = compute(idx, ctx, ctx, :placeholder)
+      {computed, _, _} = compute(idx, ctx, ctx, :placeholder)
 
       style =
         Map.take(computed, ["color"])
@@ -1664,7 +1829,7 @@ defmodule Browser.Style do
   # the `content` text of a pseudo-element: matched against `match_ctx`, inheriting from `ctx`
   defp pseudo_text(idx, match_ctx, ctx, which) do
     if MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), which) do
-      {computed, _} = compute(idx, match_ctx, ctx, which)
+      {computed, _, _} = compute(idx, match_ctx, ctx, which)
       content_text(computed["content"], ctx.attrs)
     end
   end
@@ -1683,7 +1848,7 @@ defmodule Browser.Style do
   end
 
   defp generate(idx, ctx, which) do
-    {computed, _custom} = compute(idx, ctx, ctx, which)
+    {computed, _custom, _own} = compute(idx, ctx, ctx, which)
 
     with text when is_binary(text) <- content_text(computed["content"], ctx.attrs),
          false <- not_rendered?(computed) do
@@ -1774,7 +1939,7 @@ defmodule Browser.Style do
 
   defp flex_item_align(computed, _parent), do: computed
 
-  # -> {computed_map, custom_properties}
+  # -> {computed_map, custom_properties, names_of_the_custom_properties_it_declares}
   #
   # What an element computes to follows from what the cascade declared for it and what its parent
   # computed to (and whether it is a table). Most elements of a page, a row of list items or the
@@ -1918,7 +2083,7 @@ defmodule Browser.Style do
         true -> Map.put(base, "visibility", "hidden")
       end
 
-    {base, custom}
+    {base, custom, Enum.map(customs, &elem(&1, 0))}
   end
 
   # `contain: size` (or `strict`): the content does not size the box, `contain-intrinsic-*` does

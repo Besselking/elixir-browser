@@ -261,7 +261,12 @@ if Code.ensure_loaded?(Browser.StyleGate), do: Process.put(:bench_gate, Browser.
 
 # starts the style and the layout of a request in a process of its own
 start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
-  base = Process.get(:bench_base)
+  # (as the session does: the process gets no memo when the tree has other sheets,
+  # `Browser.Page.layout_base/2`. An older tree copies the whole page)
+  {base, refs} =
+    if function_exported?(Browser.Page, :layout_base, 2),
+      do: Browser.Page.layout_base(Process.get(:bench_base), raw),
+      else: {Process.get(:bench_base), nil}
 
   pid =
     spawn_layout.(fn ->
@@ -313,7 +318,10 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
 
       t = System.monotonic_time(:microsecond)
       env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
-      laid = Browser.Page.from_raw(base, raw, env)
+      laid =
+        if refs,
+          do: apply(Browser.Page, :from_raw, [base, raw, env, refs]),
+          else: Browser.Page.from_raw(base, raw, env)
 
       send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
 

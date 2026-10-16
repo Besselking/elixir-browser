@@ -562,56 +562,56 @@ defmodule Browser.JS.RegExp do
 
   # ── matching ───────────────────────────────────────────────
 
-  # -> nil | %{start, stop, groups: [binary | :undefined], named: %{name => binary | :undefined}}
-  # (code point positions; `from` is a code point index)
-  defp match_at(re_obj, subject, from) do
-    %{re: re, names: names} = deref(elem(re_obj, 1))
-    from_byte = byte_of(subject, from)
-    sticky? = flag?(re_obj, "y")
+  # The engine's match at or after the code point index `from`: nil, or `[{start, length} | groups]`
+  # in bytes. `capture` is what the engine gives back (`:all`, or `:first` for the whole match
+  # alone).
+  defp run_at(re, subject, from, sticky?, capture) do
+    from_byte = if from == 0, do: 0, else: byte_of(subject, from)
 
     # (a lone surrogate is as many bytes as U+FFFD: the engine sees that, positions agree)
-    case :re.run(Str.well_formed(subject), re, [{:capture, :all, :index}, {:offset, from_byte}]) do
-      {:match, [{start, len} | caps]} when not sticky? or start == from_byte ->
-        {count, named_list} = names
-
-        # (PCRE leaves out trailing groups that did not take part)
-        groups =
-          for {s, l} <- caps do
-            if s < 0, do: :undefined, else: binary_part(subject, s, l)
-          end
-
-        groups = groups ++ List.duplicate(:undefined, count - length(groups))
-
-        named = named_groups(named_list, groups)
-
-        # (the code point spans of every group, only worked out for the `d` flag)
-        spans =
-          if flag?(re_obj, "d") do
-            spans =
-              for {s, l} <- [{start, len} | caps] do
-                if s < 0,
-                  do: :undefined,
-                  else:
-                    {cp_count(binary_part(subject, 0, s)),
-                     cp_count(binary_part(subject, 0, s + l))}
-              end
-
-            spans ++ List.duplicate(:undefined, count + 1 - length(spans))
-          end
-
-        %{
-          spans: spans,
-          start: Str.units_before(subject, start),
-          stop: Str.units_before(subject, start + len),
-          text: binary_part(subject, start, len),
-          groups: groups,
-          named: named,
-          names: named_list
-        }
-
-      _ ->
-        nil
+    case :re.run(Str.well_formed(subject), re, [{:capture, capture, :index}, {:offset, from_byte}]) do
+      {:match, [{start, _} | _] = m} when not sticky? or start == from_byte -> m
+      _ -> nil
     end
+  end
+
+  # -> %{start, groups: [binary | :undefined], named: %{name => binary | :undefined}} for the
+  # engine's match `m` (code point positions)
+  defp match_info(rec, subject, [{start, len} | caps]) do
+    %{names: {count, named_list}, fl: fl} = rec
+
+    # (PCRE leaves out trailing groups that did not take part)
+    groups =
+      for {s, l} <- caps do
+        if s < 0, do: :undefined, else: binary_part(subject, s, l)
+      end
+
+    groups = groups ++ List.duplicate(:undefined, count - length(groups))
+
+    named = named_groups(named_list, groups)
+
+    # (the code point spans of every group, only worked out for the `d` flag)
+    spans =
+      if String.contains?(fl, "d") do
+        spans =
+          for {s, l} <- [{start, len} | caps] do
+            if s < 0,
+              do: :undefined,
+              else:
+                {cp_count(binary_part(subject, 0, s)), cp_count(binary_part(subject, 0, s + l))}
+          end
+
+        spans ++ List.duplicate(:undefined, count + 1 - length(spans))
+      end
+
+    %{
+      spans: spans,
+      start: Str.units_before(subject, start),
+      text: binary_part(subject, start, len),
+      groups: groups,
+      named: named,
+      names: named_list
+    }
   end
 
   # `[{name, value}]` of the named groups, in pattern order; nil without any
@@ -729,29 +729,45 @@ defmodule Browser.JS.RegExp do
 
   @doc "RegExpBuiltinExec: the match array or null, advancing `lastIndex` for g/y regexps."
   def exec(re_obj, subject) do
+    case exec_match(re_obj, subject, true) do
+      nil -> :null
+      m -> match_array(m, subject)
+    end
+  end
+
+  # RegExpBuiltinExec up to the match: it reads `lastIndex` and sets it for g/y regexps. With
+  # `full?` it gives the match (`match_info/3`), else only true. Nil when there is no match.
+  defp exec_match(re_obj, subject, full?) do
     last = tolen(Interp.get(re_obj, "lastIndex"))
-    global? = flag?(re_obj, "g") or flag?(re_obj, "y")
+    %{re: re, fl: fl} = rec = deref(elem(re_obj, 1))
+    sticky? = String.contains?(fl, "y")
+    global? = sticky? or String.contains?(fl, "g")
     from = if global?, do: last, else: 0
 
-    if from > cp_count(subject) do
+    # (index 0 is in every string: no count of the units)
+    if from > 0 and from > cp_count(subject) do
       if global?, do: strict_set(re_obj, "lastIndex", 0.0)
-      :null
+      nil
     else
-      case match_at(re_obj, subject, from) do
+      case run_at(re, subject, from, sticky?, if(full? or global?, do: :all, else: :first)) do
         nil ->
           if global?, do: strict_set(re_obj, "lastIndex", 0.0)
-          :null
+          nil
 
-        m ->
-          if global?, do: strict_set(re_obj, "lastIndex", m.stop * 1.0)
-          match_array(m, subject)
+        [{start, len} | _] = m ->
+          if global?,
+            do: strict_set(re_obj, "lastIndex", Str.units_before(subject, start + len) * 1.0)
+
+          if full?, do: match_info(rec, subject, m), else: true
       end
     end
   end
 
   # RegExpExec: the object's own `exec` when it has one
-  defp regexp_exec(rx, s) do
-    case Interp.get(rx, "exec") do
+  defp regexp_exec(rx, s), do: regexp_exec(rx, Interp.get(rx, "exec"), s)
+
+  defp regexp_exec(rx, exec_fn, s) do
+    case exec_fn do
       f when is_tuple(f) ->
         if function?(f) do
           r = call(f, rx, [s])
@@ -811,7 +827,7 @@ defmodule Browser.JS.RegExp do
   defp bump_empty(rx, matched, s) do
     if matched == "" do
       this_index = tolen(Interp.get(rx, "lastIndex"))
-      flags = to_str(Interp.get(rx, "flags"))
+      flags = to_str(flags_value(rx))
 
       step =
         if String.contains?(flags, ["u", "v"]) and
@@ -826,13 +842,20 @@ defmodule Browser.JS.RegExp do
   def symbol_match(this, string) do
     rx = require_object(this)
     s = to_str(string)
-    flags = to_str(Interp.get(rx, "flags"))
+    fl = pristine_flags(rx)
+    flags = fl || to_str(Interp.get(rx, "flags"))
 
     if not String.contains?(flags, "g") do
-      regexp_exec(rx, s)
+      if fl, do: exec(rx, s), else: regexp_exec(rx, s)
     else
       strict_set(rx, "lastIndex", 0.0)
-      match_loop(rx, s, [])
+
+      # (a pristine RegExp: the texts of the matches come from the engine, with no match array)
+      case fl && scan_plain(rx, s, fl) do
+        {:ok, []} -> :null
+        {:ok, ms} -> new_array(for [{ms, ml} | _] <- ms, do: binary_part(s, ms, ml))
+        _ -> match_loop(rx, s, [])
+      end
     end
   end
 
@@ -852,7 +875,7 @@ defmodule Browser.JS.RegExp do
     r = require_object(this)
     s = to_str(string)
     c = species_constructor(r, ctor())
-    flags = to_str(Interp.get(r, "flags"))
+    flags = canonical_flags(r)
     matcher = construct(c, [r, flags])
     strict_set(matcher, "lastIndex", tolen(Interp.get(r, "lastIndex")) * 1.0)
 
@@ -912,7 +935,7 @@ defmodule Browser.JS.RegExp do
     rx = require_object(this)
     s = to_str(string)
     c = species_constructor(rx, ctor())
-    flags = to_str(Interp.get(rx, "flags"))
+    flags = canonical_flags(rx)
     new_flags = if String.contains?(flags, "y"), do: flags, else: flags <> "y"
     lim = if limit == :undefined, do: 4_294_967_295, else: to_uint32(limit)
 
@@ -939,6 +962,107 @@ defmodule Browser.JS.RegExp do
 
   defp plain_regexp?(rx) do
     regexp?(rx) and Interp.get(rx, "exec") == :erlang.get(:regexp_builtin_exec)
+  end
+
+  # The keys of `RegExp.prototype` that the protocol reads on a RegExp: `exec`, and `flags` with
+  # the getters that it calls.
+  @pristine_keys ~w(exec flags hasIndices global ignoreCase multiline dotAll unicode unicodeSets
+                    sticky)
+
+  # The flags of `rx` (as the record holds them) when the protocol on `rx` runs no script code,
+  # else nil. That is an ordinary RegExp with the RegExp prototype and no own key but
+  # `lastIndex`, and the prototype still has the built-in values of `@pristine_keys`. Then the
+  # `flags` getter gives these flags (in its own order), and `exec` is the built-in one.
+  defp pristine_flags({:obj, id}) do
+    with %{class: :regexp, fl: fl, proto: {:obj, pid}} = rec <- deref(id),
+         {^pid, builtins} <- :erlang.get(:regexp_pristine),
+         ["lastIndex"] <- Obj.all_keys(rec),
+         true <- builtins_kept?(deref(pid), builtins) do
+      fl
+    else
+      _ -> nil
+    end
+  end
+
+  defp pristine_flags(_), do: nil
+
+  defp builtins_kept?(p, [{key, v} | rest]),
+    do: Obj.own_value(p, key) === v and builtins_kept?(p, rest)
+
+  defp builtins_kept?(_p, []), do: true
+
+  # `rx.flags`. A pristine RegExp calls no getter, but it uses the steps of the 9 calls (`flags`
+  # and its 8 getters). Thus a loop of `bump_empty/3` that does not advance uses the step budget
+  # as fast as before, and it stops at the step limit after the same number of rounds.
+  defp flags_value(rx) do
+    case pristine_flags(rx) do
+      nil ->
+        Interp.get(rx, "flags")
+
+      fl ->
+        for _ <- 1..9, do: tick()
+        fl
+    end
+  end
+
+  # `ToString(rx.flags)`: the flags in the order of the `flags` getter
+  defp canonical_flags(rx) do
+    case pristine_flags(rx) do
+      nil -> to_str(Interp.get(rx, "flags"))
+      fl -> for f <- ~w(d g i m s u v y), String.contains?(fl, f), into: "", do: f
+    end
+  end
+
+  # The matches of a pristine RegExp `rx` with the flags `fl` in `s`, as the `exec` loop of the
+  # protocol finds them for the `g` flag: `{:ok, [[{start, length} | groups]]}` in bytes, or
+  # `:slow` when only the protocol can do it. It changes nothing. The protocol must run for the
+  # `y` flag, for a named group and for a lone surrogate in `s`.
+  defp scan_plain(rx, s, fl) do
+    if not plain_case?(rx, s, fl) do
+      :slow
+    else
+      re = deref(elem(rx, 1)).re
+
+      # (one search for all the matches; after an empty match the engine goes on in its own
+      # way, so then the search goes again as the protocol does it)
+      case :re.run(s, re, [:global, {:capture, :all, :index}]) do
+        {:match, ms} ->
+          if Enum.any?(ms, fn [{_, len} | _] -> len == 0 end),
+            do: scan_loop(re, s, String.contains?(fl, ["u", "v"]), 0, []),
+            else: {:ok, ms}
+
+        :nomatch ->
+          {:ok, []}
+      end
+    end
+  end
+
+  defp plain_case?(rx, s, fl) do
+    %{names: {_count, named}} = deref(elem(rx, 1))
+    named == [] and not String.contains?(fl, "y") and not Str.lone?(s)
+  end
+
+  # After an empty match the protocol goes on one code unit later (one code point with the `u`
+  # or `v` flag). Without the flag, an empty match before a character outside the BMP puts the
+  # next search inside a surrogate pair. Only the protocol can do that.
+  defp scan_loop(re, s, unicode?, q, acc) do
+    size = byte_size(s)
+    found = if q <= size, do: :re.run(s, re, [{:capture, :all, :index}, {:offset, q}])
+
+    case found do
+      {:match, [{ms, 0} | _] = m} ->
+        cond do
+          ms >= size -> {:ok, Enum.reverse([m | acc])}
+          not unicode? and :binary.at(s, ms) >= 0xF0 -> :slow
+          true -> scan_loop(re, s, unicode?, next_char(s, ms), [m | acc])
+        end
+
+      {:match, [{ms, ml} | _] = m} ->
+        scan_loop(re, s, unicode?, ms + ml, [m | acc])
+
+      _ ->
+        {:ok, Enum.reverse(acc)}
+    end
   end
 
   # `split` for a plain RegExp: the matches are searched from left to right in the text (with the
@@ -1072,10 +1196,92 @@ defmodule Browser.JS.RegExp do
   def symbol_replace(this, string, replace_value) do
     rx = require_object(this)
     s = to_str(string)
-    len = cp_count(s)
     functional? = function?(replace_value)
     replace_value = if functional?, do: replace_value, else: to_str(replace_value)
-    flags = to_str(Interp.get(rx, "flags"))
+
+    case pristine_flags(rx) do
+      nil ->
+        replace_by_exec(rx, s, replace_value, functional?, to_str(Interp.get(rx, "flags")))
+
+      fl ->
+        case plain_replace(rx, s, replace_value, functional?, fl) do
+          {:ok, out} -> out
+          :slow -> replace_by_exec(rx, s, replace_value, functional?, fl)
+        end
+    end
+  end
+
+  # `@@replace` of a pristine RegExp: the matches come from the engine in bytes, and no match
+  # array is made. The result is the same as the result of the protocol. The protocol must run
+  # in the cases of `scan_plain/3`, and for a non-global RegExp whose `lastIndex` is not a
+  # number (its ToLength can call script code).
+  defp plain_replace(rx, s, replace_value, functional?, fl) do
+    global? = String.contains?(fl, "g")
+
+    found =
+      cond do
+        global? ->
+          scan_plain(rx, s, fl)
+
+        not is_number(Interp.get(rx, "lastIndex")) ->
+          :slow
+
+        not plain_case?(rx, s, fl) ->
+          :slow
+
+        true ->
+          case :re.run(s, deref(elem(rx, 1)).re, [{:capture, :all, :index}]) do
+            {:match, m} -> {:ok, [m]}
+            :nomatch -> {:ok, []}
+          end
+      end
+
+    case found do
+      {:ok, matches} ->
+        if global?, do: strict_set(rx, "lastIndex", 0.0)
+        %{names: {count, _}} = deref(elem(rx, 1))
+        # (a template with no `$` is the replacement as it is)
+        as_is? = not functional? and :binary.match(replace_value, "$") == :nomatch
+        c = {s, count, replace_value, functional?, as_is?, Str.ascii?(s)}
+        {:ok, IO.iodata_to_binary(plain_pieces(matches, c, 0, 0, 0, []))}
+
+      :slow ->
+        :slow
+    end
+  end
+
+  # The pieces of the result. `p` is the byte after the last match, and `pb` and `pu` are the
+  # byte and the code unit position of the last match (the count of the units starts there).
+  defp plain_pieces([], {s, _, _, _, _, _}, p, _pb, _pu, acc),
+    do: :lists.reverse(acc, [binary_part(s, p, byte_size(s) - p)])
+
+  defp plain_pieces([[{ms, ml} | _] | rest], {s, _, rv, _, true, _} = c, p, pb, pu, acc),
+    do: plain_pieces(rest, c, ms + ml, pb, pu, [rv, binary_part(s, p, ms - p) | acc])
+
+  defp plain_pieces([[{ms, ml} | caps] | rest], c, p, pb, pu, acc) do
+    {s, count, rv, functional?, _, ascii?} = c
+    matched = binary_part(s, ms, ml)
+
+    # (PCRE leaves out trailing groups that did not take part)
+    captures =
+      for {cs, cl} <- caps, do: if(cs < 0, do: :undefined, else: binary_part(s, cs, cl))
+
+    captures = captures ++ List.duplicate(:undefined, count - length(captures))
+    position = if ascii?, do: ms, else: pu + Str.unit_count(binary_part(s, pb, ms - pb))
+
+    replacement =
+      if functional? do
+        to_str(call(rv, :undefined, [matched | captures] ++ [position * 1.0, s]))
+      else
+        get_substitution(matched, s, position, captures, :undefined, rv)
+      end
+
+    plain_pieces(rest, c, ms + ml, ms, position, [replacement, binary_part(s, p, ms - p) | acc])
+  end
+
+  # `@@replace` by the protocol: a match array from `exec` for each match
+  defp replace_by_exec(rx, s, replace_value, functional?, flags) do
+    len = cp_count(s)
     global? = String.contains?(flags, "g")
     if global?, do: strict_set(rx, "lastIndex", 0.0)
     results = collect_results(rx, s, global?, [])
@@ -1249,7 +1455,7 @@ defmodule Browser.JS.RegExp do
 
     if object?(x) do
       if is_regexp(x) do
-        flags = Interp.get(x, "flags")
+        flags = flags_value(x)
 
         if flags in [:undefined, :null],
           do: throw_error("TypeError", "flags is null or undefined")
@@ -1270,7 +1476,7 @@ defmodule Browser.JS.RegExp do
     o = coercible!(this, if(all?, do: "replaceAll", else: "replace"))
 
     if search not in [:undefined, :null] and all? and is_regexp(search) do
-      flags = Interp.get(search, "flags")
+      flags = flags_value(search)
 
       if flags in [:undefined, :null], do: throw_error("TypeError", "flags is null or undefined")
 
@@ -1504,7 +1710,13 @@ defmodule Browser.JS.RegExp do
 
     def_fn1.("test", fn this, args ->
       rx = require_object(this)
-      regexp_exec(rx, to_str(arg(args, 0))) != :null
+      s = to_str(arg(args, 0))
+      exec_fn = Interp.get(rx, "exec")
+
+      # (the built-in `exec` on a RegExp: the same steps, with no match array)
+      if exec_fn == :erlang.get(:regexp_builtin_exec) and regexp?(rx),
+        do: exec_match(rx, s, false) != nil,
+        else: regexp_exec(rx, exec_fn, s) != :null
     end)
 
     def_fn1.("exec", fn this, args ->
@@ -1515,6 +1727,11 @@ defmodule Browser.JS.RegExp do
     end)
 
     :erlang.put(:regexp_builtin_exec, Interp.get(p, "exec"))
+
+    # (the built-in values that `pristine_flags/1` looks for)
+    {:obj, pid} = p
+    builtins = for key <- @pristine_keys, do: {key, Obj.own_value(deref(pid), key)}
+    :erlang.put(:regexp_pristine, {pid, builtins})
 
     def_fn(p, "toString", fn this, _ ->
       rx = require_object(this)

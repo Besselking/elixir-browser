@@ -29,8 +29,8 @@ defmodule Browser.JS.DOM do
   # node table, the indexes of the ids and of the attribute values, the boxes, node ids, counts
   # and sizes. The JS collector reads each integer as a heap id, so these fields can keep dead
   # objects alive, and the node table makes each collection long.
-  @gc_fields ~w(nodes ids aidx rects rev next next_nid usp doc main frames meta fdirty ce_done
-                current_script write_after focus_ed focus_ctl scroll content width height
+  @gc_fields ~w(nodes ids aidx iframes rects rev next next_nid usp doc main frames meta fdirty
+                ce_done current_script write_after focus_ed focus_ctl scroll content width height
                 hist_idx history_before)a
 
   @doc """
@@ -142,13 +142,33 @@ defmodule Browser.JS.DOM do
 
   defp reindex_attrs(aidx, _nid, _old, _new) when map_size(aidx) == 0, do: aidx
 
+  # Most writes are of text nodes and of elements with no indexed name. For them the index
+  # does not change, so this function does not fold over the names.
   defp reindex_attrs(aidx, nid, old, new) do
-    Enum.reduce(aidx, aidx, fn {name, vals}, acc ->
-      o = attr_value(old, name)
-      n = attr_value(new, name)
-      if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
-    end)
+    if indexed?(old, aidx) or indexed?(new, aidx) do
+      :lists.foldl(
+        fn {name, vals}, acc ->
+          o = attr_value(old, name)
+          n = attr_value(new, name)
+          if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
+        end,
+        aidx,
+        :maps.to_list(aidx)
+      )
+    else
+      aidx
+    end
   end
+
+  # True when the node can be in the index: an element with a parent and an attribute with a
+  # name of `aidx` (for all other nodes `attr_value/2` gives nil)
+  defp indexed?(%{kind: :element, attrs: attrs, parent: p}, aidx) when p != nil,
+    do: indexed_name?(attrs, aidx)
+
+  defp indexed?(_, _), do: false
+
+  defp indexed_name?([{k, _} | rest], aidx), do: is_map_key(aidx, k) or indexed_name?(rest, aidx)
+  defp indexed_name?([], _), do: false
 
   defp attr_in(vals, nil, _), do: vals
   defp attr_in(vals, v, nid), do: Map.update(vals, v, %{nid => true}, &Map.put(&1, nid, true))
@@ -262,8 +282,16 @@ defmodule Browser.JS.DOM do
         fields
       )
 
-    # (the checks that frames need are only made once the page has an <iframe>)
-    if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
+    # (the checks that frames need are only made once the page has an <iframe>; `iframes` has
+    # each `<iframe>` element, see `frames_in/1`)
+    s =
+      if n.tag == "iframe" do
+        Process.put(:dom_has_iframe, true)
+        %{s | iframes: Map.put(s.iframes, id, true)}
+      else
+        s
+      end
+
     n = with_classes(n)
 
     s = reindex_all(s, id, nil, n)
@@ -465,10 +493,43 @@ defmodule Browser.JS.DOM do
     inner = for {d, %{parent: ^doc}} <- s.meta, do: d
     Enum.each(inner, &destroy_realm/1)
     s = st()
-    ids = for {id, n} <- s.nodes, n.doc == doc, do: id
+    aidx = s.aidx
+
+    # One walk of the node table gives the nodes of the document, the id index without them,
+    # and the short list of the nodes that the attribute index has.
+    {ids, id_index, indexed} =
+      :maps.fold(
+        fn
+          nid, %{doc: ^doc} = n, {ids, id_index, indexed} ->
+            id_index = unindex(id_index, element_id(n), nid)
+
+            {[nid | ids], id_index,
+             if(indexed?(n, aidx), do: [{nid, n} | indexed], else: indexed)}
+
+          _, _, acc ->
+            acc
+        end,
+        {[], s.ids, []},
+        s.nodes
+      )
+
     iframe = s.meta |> Map.get(doc, %{}) |> Map.get(:iframe)
     frames = if iframe, do: Map.delete(s.frames, iframe), else: s.frames
-    drop = MapSet.new(ids)
+
+    aidx =
+      if indexed == [],
+        do: aidx,
+        else:
+          :maps.map(
+            fn name, vals ->
+              :lists.foldl(
+                fn {nid, n}, acc -> attr_out(acc, attr_value(n, name), nid) end,
+                vals,
+                indexed
+              )
+            end,
+            aidx
+          )
 
     listeners =
       s.listeners
@@ -480,15 +541,10 @@ defmodule Browser.JS.DOM do
     put_st(%{
       s
       | nodes: Map.drop(s.nodes, ids),
-        ids:
-          Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
-        aidx:
-          Map.new(s.aidx, fn {name, vals} ->
-            {name,
-             Enum.reduce(ids, vals, fn nid, acc ->
-               attr_out(acc, attr_value(s.nodes[nid], name), nid)
-             end)}
-          end),
+        ids: id_index,
+        aidx: aidx,
+        iframes:
+          :maps.filter(fn e, _ -> not match?(%{^e => %{doc: ^doc}}, s.nodes) end, s.iframes),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -498,7 +554,6 @@ defmodule Browser.JS.DOM do
         rev: s.rev + 1
     })
 
-    _ = drop
     :ok
   end
 
@@ -632,6 +687,7 @@ defmodule Browser.JS.DOM do
       nodes: %{},
       ids: %{},
       aidx: %{},
+      iframes: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -4234,9 +4290,7 @@ defmodule Browser.JS.DOM do
   # `<iframe>`s in the subtree that a script is putting into the document
   defp frames_arriving(nid) do
     if Process.get(:dom_has_iframe) && connected?(nid) do
-      for e <- [nid | descendants(nid)], node(e).kind == :element, node(e).tag == "iframe" do
-        load_frame(e)
-      end
+      for e <- frames_in(nid), do: load_frame(e)
     end
 
     :ok
@@ -4245,9 +4299,7 @@ defmodule Browser.JS.DOM do
   # the realms of the frames in a subtree that is leaving the document go with it
   defp frames_leaving(nid) do
     if Process.get(:dom_has_iframe) && st().frames != %{} do
-      for e <- [nid | descendants(nid)],
-          node(e).kind == :element,
-          node(e).tag == "iframe" do
+      for e <- frames_in(nid) do
         cancel_frame_load(e)
         if d = Map.get(st().frames, e), do: destroy_realm(d)
       end
@@ -4255,6 +4307,59 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # The `<iframe>` elements in the subtree of `nid` (`nid` too), in tree order. A page has few
+  # of them, so a walk up from each one costs less than a walk of a large subtree. Many nodes
+  # move for each change of a large page that has a frame (a Speedometer suite runs in one).
+  # A walk up costs the depth of the `<iframe>`, so a small subtree (at most
+  # @frames_walk_down nodes for each `<iframe>`) gets the walk down: a text node that goes
+  # into a page with deep frames does not walk up from each frame.
+  @frames_walk_up 16
+  @frames_walk_down 16
+
+  defp frames_in(nid) do
+    s = st()
+    count = map_size(s.iframes)
+
+    cond do
+      count > @frames_walk_up ->
+        for e <- [nid | descendants(nid)], iframe?(s.nodes, e), do: e
+
+      (found = walk_frames(s.nodes, [[nid]], count * @frames_walk_down, [])) != :many ->
+        :lists.reverse(found)
+
+      true ->
+        case for({e, _} <- s.iframes, e == nid or below?(e, nid), iframe?(s.nodes, e), do: e) do
+          [_, _ | _] = found ->
+            set = Map.new(found, &{&1, true})
+            for e <- [nid | descendants(nid)], is_map_key(set, e), do: e
+
+          found ->
+            found
+        end
+    end
+  end
+
+  # The `<iframe>`s of the subtrees of the nodes in `lists`, in pre-order (newest first). The
+  # walk stops with :many when it passes more than `budget` nodes.
+  defp walk_frames(_nodes, _lists, budget, _acc) when budget < 0, do: :many
+  defp walk_frames(_nodes, [], _budget, acc), do: acc
+  defp walk_frames(nodes, [[] | lists], budget, acc), do: walk_frames(nodes, lists, budget, acc)
+
+  defp walk_frames(nodes, [[k | rest] | lists], budget, acc) do
+    case nodes do
+      %{^k => %{kind: :element, tag: "iframe", kids: kids}} ->
+        walk_frames(nodes, [kids, rest | lists], budget - 1, [k | acc])
+
+      %{^k => %{kids: kids}} ->
+        walk_frames(nodes, [kids, rest | lists], budget - 1, acc)
+
+      _ ->
+        walk_frames(nodes, [rest | lists], budget - 1, acc)
+    end
+  end
+
+  defp iframe?(nodes, e), do: match?(%{^e => %{kind: :element, tag: "iframe"}}, nodes)
 
   @doc "The `<iframe>`s of the page's document that have not been loaded yet get their load."
   def load_initial_frames do

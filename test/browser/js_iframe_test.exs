@@ -177,4 +177,81 @@ defmodule Browser.JS.IframeTest do
              "true true true"
            ]
   end
+
+  # The frames of a subtree that moves come from a walk of a small subtree, from a list of the
+  # `<iframe>` elements for a large one, and from a walk again when the page has made many
+  # `<iframe>`s. Each way loads the frames in tree order, also when an `<iframe>` that a script
+  # made first comes after the other one in the tree.
+  for {name, filler, extra} <- [{"small", 0, 0}, {"large", 100, 0}, {"many", 0, 17}] do
+    test "iframes deep in a #{name} subtree load when it goes in and go away when it goes out" do
+      {logs, errors} =
+        run(~s"""
+        window.order = [];
+        for (let i = 0; i < #{unquote(extra)}; i++) document.createElement("iframe");
+        const late = document.createElement("iframe");
+        late.srcdoc = "<script>parent.order.push('late')<\\/script>";
+        const div = document.createElement("div");
+        div.innerHTML = "#{String.duplicate("<b></b>", unquote(filler))}<section><article><iframe srcdoc=\\"<script>parent.order.push('deep')<\\/script>\\"></iframe></article></section>";
+        div.appendChild(late);
+        const deep = div.querySelector("iframe");
+        let round = 0;
+        const loaded = () => {
+          if (order.length % 2) return;
+          round++;
+          console.log(round, order.join(), deep.contentDocument !== null, late.contentDocument !== null);
+          div.remove();
+          console.log("out", deep.contentDocument, late.contentDocument);
+          if (round < 2) setTimeout(() => document.body.appendChild(div), 0);
+        };
+        deep.onload = loaded;
+        late.onload = loaded;
+        console.log("in", deep.contentDocument, late.contentDocument);
+        document.body.appendChild(div);
+        """)
+
+      assert errors == []
+
+      assert logs == [
+               "in null null",
+               "1 deep,late true true",
+               "out null null",
+               "2 deep,late,deep,late true true",
+               "out null null"
+             ]
+    end
+  end
+
+  # When a frame goes away, its nodes go out of the indexes of the ids and of the attribute
+  # values, and its `<iframe>`s go out of the list of the `<iframe>`s.
+  test "the indexes do not keep the nodes of a frame that went away" do
+    {raw, _} =
+      ~S"""
+      <body><script>
+      const f = document.createElement("iframe");
+      f.srcdoc = "<p id=fx data-k=v>x</p><div><iframe></iframe></div>";
+      f.onload = () => {
+        console.log(document.querySelector('[data-k="none"]'), f.contentDocument.getElementById("fx").id);
+        f.remove();
+        console.log("out", f.contentDocument);
+      };
+      document.body.appendChild(f);
+      </script></body>
+      """
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+    pid = Runtime.start(raw, info)
+    r = Runtime.run_scripts(pid)
+    logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+    {:dictionary, dict} = Process.info(pid, :dictionary)
+    Runtime.stop(pid)
+    dom = Keyword.fetch!(dict, :dom)
+
+    assert logs == ["null fx", "out null"]
+    refute Map.has_key?(dom.ids, "fx")
+    assert dom.aidx["data-k"] == %{}
+    assert map_size(dom.iframes) == 1
+    assert Enum.all?(Map.keys(dom.iframes), &Map.has_key?(dom.nodes, &1))
+  end
 end

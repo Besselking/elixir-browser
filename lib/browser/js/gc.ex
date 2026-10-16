@@ -123,6 +123,11 @@ defmodule Browser.JS.GC do
           # it alive)
           {:js_srctab, _}, acc -> acc
           {:lex_table, _}, acc -> acc
+          # (a position and the number of the parser's file are integers, see
+          # `Browser.JS.Pos`, never a heap id)
+          {:js_pos, _}, acc -> acc
+          {:js_throw_pos, _}, acc -> acc
+          {:js_file_id, _}, acc -> acc
           # (the boxes of the layout and the counts of the forced layouts hold numbers
           # only, see `Browser.JS.DOM`)
           {:dom_page_rects, _}, acc -> acc
@@ -245,6 +250,10 @@ defmodule Browser.JS.GC do
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots
           {:lex_table, _}, roots -> roots
+          # (a position and the number of a file are integers, never a heap id)
+          {:js_pos, _}, roots -> roots
+          {:js_throw_pos, _}, roots -> roots
+          {:js_file_id, _}, roots -> roots
           {_, v}, roots -> [v | roots]
         end,
         [extra],

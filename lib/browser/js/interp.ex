@@ -47,6 +47,7 @@ defmodule Browser.JS.Interp do
   """
 
   alias Browser.JS.Num
+  alias Browser.JS.Pos
   alias Browser.JS.Resolve.{Info, Scope}
   require Browser.JS.Fast, as: Fast
   require Browser.JS.Obj, as: Obj
@@ -404,7 +405,7 @@ defmodule Browser.JS.Interp do
 
     named? = is_binary(name) and name != ""
 
-    case loc do
+    case Pos.decode(loc) do
       {file, line} when named? -> "\n    at #{name} (#{file}:#{line})"
       {file, line} -> "\n    at #{file}:#{line}"
       _ -> "\n    at " <> if(named?, do: name, else: "<anonymous>")

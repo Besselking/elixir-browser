@@ -1091,6 +1091,38 @@ defmodule Browser.JS.Obj do
     end
   end
 
+  @doc """
+  The record `t` after the adds of all keys of `src` in their order (`Object.assign({},
+  src)`), or `nil`. `t` must be an extensible fast record with no key. `src` must be an
+  extensible fast record of the same root, with no symbol, no accessor and only the
+  default attributes. The result then has the shape and the values of `src`. The adds one
+  by one give the same keys, values and attributes, and possibly another `sid`. The caller
+  makes sure that the two records are plain objects and that no add can meet a setter or
+  a read-only key on the prototype chain of `t`.
+  """
+  def copy_plain(t, src) do
+    case {t, src} do
+      {%{shape: {:js_shape, _, _, _, _, tf, _}, vals: {}},
+       %{shape: {:js_shape, _, _, _, bits, sf, _} = sh, vals: vals}}
+      when :erlang.band(tf, 1) == 0 and :erlang.band(sf, 11) == 0 ->
+        if all_default?(bits, tuple_size(bits)) and no_accessor?(vals, tuple_size(vals)),
+          do: %{t | shape: sh, vals: vals}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp all_default?(_, 0), do: true
+
+  defp all_default?(bits, i),
+    do: :erlang.element(i, bits) == @default and all_default?(bits, i - 1)
+
+  defp no_accessor?(_, 0), do: true
+
+  defp no_accessor?(vals, i),
+    do: not match?({:accessor, _, _}, :erlang.element(i, vals)) and no_accessor?(vals, i - 1)
+
   # ── writing ────────────────────────────────────────────────
   # Each writer takes a record and gives the new record. The caller stores it. The writers
   # of the hot paths (an update, an assignment, a literal one key at a time) are macros. The

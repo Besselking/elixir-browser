@@ -1436,8 +1436,8 @@ defmodule Browser.JS.ResolveTest do
     f = fun(resolve(@s21a, file: "t.js"), "f")
     assert info(f).strict
 
-    assert [{:expr, {:str, "use strict"}}, {:pos, {"t.js", 1}}, {:return, {:num, 1.0}, :plain}] =
-             body(f)
+    assert [{:expr, {:str, "use strict"}}, {:pos, pos}, {:return, {:num, 1.0}, :plain}] = body(f)
+    assert Browser.JS.Pos.decode(pos) == {"t.js", 1}
 
     assert info(arrow(resolve(@s21b))).strict
     refute info(arrow(resolve(@s21c))).strict

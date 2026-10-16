@@ -606,7 +606,7 @@ defmodule Browser.JS.CompileTest do
       assert Enum.any?(outcomes, &match?(%{result: {:ok, _}, console: [_ | _]}, &1))
       assert Enum.any?(outcomes, &match?(%{result: {:throw, "TypeError: top" <> _, _}}, &1))
       assert Enum.any?(outcomes, &match?(%{result: :step_limit}, &1))
-      assert Enum.any?(outcomes, &match?(%{pos: {@file_name, _}}, &1))
+      assert Enum.any?(outcomes, &match?({@file_name, _}, Browser.JS.Pos.decode(&1.pos)))
       assert outcomes |> Enum.map(& &1.steps) |> Enum.uniq() |> length() > 50
     end
 

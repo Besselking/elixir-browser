@@ -243,4 +243,54 @@ defmodule Browser.JS.AttrIndexTest do
     assert errors == []
     assert logs == ["true true", "30 true", "11 30", "null true", "2 true"]
   end
+
+  # A write of a node that cannot be in the index (a text node, an element with no indexed
+  # name, an element with no parent) does not fold over the names. The index term stays the
+  # same term, not only an equal one.
+  test "a write of a node with no indexed attribute keeps the index term" do
+    Task.async(fn ->
+      {raw, _} =
+        ~S|<body><ul id=list><li data-id=a>a</li></ul></body>|
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      Runtime.boot(raw, %{url: "http://t.test/", width: 800, height: 600})
+
+      js = fn source ->
+        {:ok, program} = Browser.JS.Parser.parse(source)
+        Browser.JS.Interp.run_program(program)
+      end
+
+      js.(~S|document.querySelector('[data-id="a"]'); document.querySelector('[title="t"]');|)
+      aidx = Process.get(:dom).aidx
+      assert Map.keys(aidx) |> Enum.sort() == ["data-id", "title"]
+
+      js.(~S"""
+      const ul = document.getElementById("list");
+      const li = document.createElement("li");
+      li.className = "x";
+      li.appendChild(document.createTextNode("t"));
+      ul.appendChild(li);
+      li.setAttribute("lang", "en");
+      ul.firstChild.textContent = "b";
+      window.d = document.createElement("div");
+      d.setAttribute("data-id", "b");
+      """)
+
+      assert :erts_debug.same(Process.get(:dom).aidx, aidx)
+
+      # (an element with an indexed name that goes into the tree changes it)
+      js.(~S|document.body.appendChild(window.d)|)
+      refute :erts_debug.same(Process.get(:dom).aidx, aidx)
+      assert Map.keys(Process.get(:dom).aidx["data-id"]) |> Enum.sort() == ["a", "b"]
+
+      # (an element that leaves the tree, or loses its indexed name, leaves the index)
+      js.(
+        ~S|window.d.remove(); document.querySelector('[data-id="a"]').removeAttribute("data-id")|
+      )
+
+      assert Process.get(:dom).aidx["data-id"] == %{}
+    end)
+    |> Task.await(30_000)
+  end
 end

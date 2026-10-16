@@ -15,6 +15,7 @@ defmodule Browser.JS.Parser do
 
   alias Browser.JS.Interp
   alias Browser.JS.Lexer
+  alias Browser.JS.Pos
 
   @reserved ~w(break case catch const continue debugger default delete do else export extends finally for
                function if import in instanceof new return switch throw try typeof var void while with
@@ -67,7 +68,9 @@ defmodule Browser.JS.Parser do
       Process.delete(:js_cur_line)
       Process.delete(:js_line_at)
       Process.delete(:js_pos_line)
-      Process.put(:js_file, Keyword.get(opts, :file))
+      file = Keyword.get(opts, :file)
+      Process.put(:js_file, file)
+      Process.put(:js_file_id, if(file, do: Pos.file_id(file)))
 
       Process.put(
         :js_srctab,
@@ -1084,15 +1087,16 @@ defmodule Browser.JS.Parser do
 
   # ── positions of statements ────────────────────────────────
 
-  # `[stmt]`, or `[{:pos, {file, line}}, stmt]` when the script has a file name: running the
-  # `:pos` node tells the interpreter where it is, for the lines of error stacks. A statement on
-  # the line of the one before it in the same block, and statements that cannot fail, get none.
+  # `[stmt]`, or `[{:pos, pos}, stmt]` when the script has a file name: running the `:pos`
+  # node tells the interpreter where it is, for the lines of error stacks. `pos` is the file
+  # and the line as one integer (`Browser.JS.Pos`). A statement on the line of the one before
+  # it in the same block, and statements that cannot fail, get none.
   defp posted(line, stmt) do
-    with file when file != nil <- Process.get(:js_file),
+    with id when id != nil <- Process.get(:js_file_id),
          true <- positioned?(stmt),
          line when line != nil <- line,
          true <- Process.put(:js_pos_line, line) != line do
-      [{:pos, {file, line}}, stmt]
+      [{:pos, Pos.at(id, line)}, stmt]
     else
       _ -> [stmt]
     end
