@@ -532,22 +532,32 @@ defmodule Browser.JS.DOM do
             aidx
           )
 
-    listeners =
-      s.listeners
-      |> Map.drop([{:window, doc} | ids])
-
     realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
     if s.doc == doc, do: Process.put(:dom_dead, doc)
 
+    # The maps without the nodes of the document (`ids`). When the document has most of the
+    # nodes (a frame that held a whole app), a map is made again from the entries that stay:
+    # one walk, not one removal for each node.
+    most? = 2 * length(ids) > map_size(s.nodes)
+    gone? = fn k -> match?(%{^k => %{doc: ^doc}}, s.nodes) end
+
+    drop = fn
+      map, extra when most? -> :maps.filter(fn k, _ -> not gone?.(k) and k not in extra end, map)
+      map, extra -> Map.drop(map, extra ++ ids)
+    end
+
     put_st(%{
       s
-      | nodes: Map.drop(s.nodes, ids),
+      | nodes:
+          if(most?,
+            do: :maps.filter(fn _, n -> not match?(%{doc: ^doc}, n) end, s.nodes),
+            else: Map.drop(s.nodes, ids)
+          ),
         ids: id_index,
         aidx: aidx,
-        iframes:
-          :maps.filter(fn e, _ -> not match?(%{^e => %{doc: ^doc}}, s.nodes) end, s.iframes),
-        wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
-        listeners: listeners,
+        iframes: :maps.filter(fn e, _ -> not gone?.(e) end, s.iframes),
+        wrappers: drop.(s.wrappers, [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
+        listeners: drop.(s.listeners, [{:window, doc}]),
         realms: realms,
         frames: frames,
         meta: Map.delete(s.meta, doc),
