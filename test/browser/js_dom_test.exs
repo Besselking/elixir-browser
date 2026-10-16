@@ -1092,6 +1092,54 @@ defmodule Browser.JS.DOMTest do
       refute_received {:layout_now, _, _, _}
     end
 
+    test "an element with no box after a layout does not lay the same tree out again" do
+      # (the export gives numbers to both new elements. The hidden one gets no box, and the
+      # question about it must not ask for a second layout of the same tree)
+      raw =
+        ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>
+          ~s|var e = document.createElement('span'); e.id = 'y'; e.style.display = 'none'; document.body.appendChild(e);| <>
+          ~s|var r = d.getBoundingClientRect(); var r2 = e.getBoundingClientRect(); console.log(r.width, r2.width)</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          layout_now: true,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      task = Task.async(fn -> Runtime.run_scripts(pid) end)
+
+      # (the host answers each request until the scripts end, so no wait can be too short)
+      tref = task.ref
+
+      answer = fn answer, seen ->
+        receive do
+          {:layout_now, ^pid, nil, _tree} ->
+            answer.(answer, [:prewarm | seen])
+
+          {:layout_now, ^pid, ref, tree} ->
+            nid = nid_of_id(tree, "x")
+            send(pid, {:layout_now_done, ref, %{nid => {10, 20, 300, 40}}, {800.0, 600.0}})
+            answer.(answer, [:forced | seen])
+
+          {^tref, reply} ->
+            Process.demonitor(tref, [:flush])
+            {Enum.reverse(seen), reply}
+        after
+          10_000 -> flunk("the scripts did not end")
+        end
+      end
+
+      {requests, reply} = answer.(answer, [])
+      assert requests == [:forced]
+      assert errors(reply) == []
+      assert logs(reply) == ["300 0"]
+    end
+
     test "a read that uses no box does not lay the page out; the computed width does" do
       raw =
         ~s|<body><script>var d = document.createElement('div'); d.id = 'x'; document.body.appendChild(d);| <>

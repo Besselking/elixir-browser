@@ -1423,6 +1423,9 @@ defmodule Browser.JS.DOM do
       Process.put(:dom_export_frames, frame_chain(doc))
       raw = Enum.map(node(st().main).kids, &export/1)
       Process.delete(:dom_export_frames)
+      # (the export gives numbers to new elements, and this changes the rev. The layout is of
+      # the tree after the export, so keep that rev: else the next miss lays out the same tree)
+      rev = st().rev
       ref = make_ref()
       send(info.owner, {:layout_now, self(), ref, raw})
 
