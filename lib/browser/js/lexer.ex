@@ -13,9 +13,6 @@ defmodule Browser.JS.Lexer do
              { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
 
-  # the punctuators that begin with each byte, longest first
-  @puncts_by_byte Enum.group_by(@puncts, &:binary.first/1)
-
   @keywords ~w(break case catch class const continue debugger default delete do else enum export
     extends false finally for function if import in instanceof new null return super switch this
     throw true try typeof var void while with implements interface let package private protected
@@ -171,7 +168,7 @@ defmodule Browser.JS.Lexer do
   # `#name`: a private name
   defp lex(<<?#, c, _::binary>> = s, nl, acc)
        when c in ?a..?z or c in ?A..?Z or c in [?_, ?$, ?\\] or c > 127 do
-    {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1), [])
+    {name, rest} = ident(binary_part(s, 1, byte_size(s) - 1))
     zw_start!(name)
     push({:priv, name, nl}, byte_size(s), rest, acc)
   end
@@ -179,7 +176,10 @@ defmodule Browser.JS.Lexer do
   defp lex(s, nl, acc), do: punct(s, nl, acc)
 
   defp lex_ident(s, nl, acc) do
-    {name, rest} = ident(s, [])
+    {name, rest} = ident(s)
+    # (a `\u` with fewer than 4 bytes after it at the end of the text gives no name, and the
+    # same text would come back here again)
+    if name == "", do: throw({:syntax, "bad unicode escape in identifier"})
     zw_start!(name)
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
@@ -214,9 +214,7 @@ defmodule Browser.JS.Lexer do
   defp esc_mark(other), do: other
 
   defp punct(s, nl, acc) do
-    first = if s == "", do: nil, else: :binary.first(s)
-
-    case Enum.find(Map.get(@puncts_by_byte, first, []), &String.starts_with?(s, &1)) do
+    case punct_at(s) do
       # `a?.5:b` is a conditional, not an optional chain
       "?." when binary_part(s, 2, min(1, byte_size(s) - 2)) in ~w(0 1 2 3 4 5 6 7 8 9) ->
         push({:p, "?", nl}, byte_size(s), binary_part(s, 1, byte_size(s) - 1), acc)
@@ -233,6 +231,14 @@ defmodule Browser.JS.Lexer do
         )
     end
   end
+
+  # The punctuator at the start of `s` (nil when none): one clause for each, longest first,
+  # so that the compiler makes one match tree of them
+  for p <- @puncts do
+    defp punct_at(unquote(p) <> _), do: unquote(p)
+  end
+
+  defp punct_at(_), do: nil
 
   @regex_keywords ~w(return typeof instanceof in new delete void throw case do else yield await)
 
@@ -350,6 +356,26 @@ defmodule Browser.JS.Lexer do
     do: throw({:syntax, "invalid identifier start"})
 
   defp zw_start!(_), do: :ok
+
+  # Most names are plain ASCII: one count and one slice, without a list of bytes. A name that
+  # goes on with an escape or a byte above 127 takes the general path from there.
+  defp ident(s) do
+    n = ascii_ident_len(s, 0)
+
+    case s do
+      <<name::binary-size(^n), c, _::binary>> when c > 127 or c == ?\\ ->
+        ident(binary_part(s, n, byte_size(s) - n), [name])
+
+      <<name::binary-size(^n), rest::binary>> ->
+        {name, rest}
+    end
+  end
+
+  defp ascii_ident_len(<<c, rest::binary>>, n)
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c == ?_ or c == ?$,
+       do: ascii_ident_len(rest, n + 1)
+
+  defp ascii_ident_len(_, n), do: n
 
   defp ident(<<c, rest::binary>> = s, acc)
        when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$] or c > 127 do
@@ -536,6 +562,14 @@ defmodule Browser.JS.Lexer do
   defp string(<<c, _::binary>>, _q, _acc) when c in [?\n, ?\r],
     do: throw({:syntax, "unterminated string"})
 
+  # A run of plain ASCII characters goes in as one piece: the same string as one piece for
+  # each character, without a binary for each.
+  defp string(<<c, _::binary>> = s, q, acc) when c >= 0x20 and c < 0x80 and c != q and c != ?\\ do
+    n = plain_run(s, q, 0)
+    <<run::binary-size(^n), rest::binary>> = s
+    string(rest, q, [run | acc])
+  end
+
   # legacy octal escapes (`\1`, `\012`, `\0` followed by a digit) and `\8`, `\9`
   defp string(<<?\\, d, rest::binary>>, q, acc) when d in ?0..?9 do
     case {d, rest} do
@@ -564,6 +598,11 @@ defmodule Browser.JS.Lexer do
 
   defp string(<<c::utf8, rest::binary>>, q, acc), do: string(rest, q, [<<c::utf8>> | acc])
   defp string(_, _q, _acc), do: throw({:syntax, "unterminated string"})
+
+  defp plain_run(<<c, rest::binary>>, q, n) when c >= 0x20 and c < 0x80 and c != q and c != ?\\,
+    do: plain_run(rest, q, n + 1)
+
+  defp plain_run(_, _q, n), do: n
 
   defp octal_digits(<<n, rest::binary>>, left, acc) when left > 0 and n in ?0..?7,
     do: octal_digits(rest, left - 1, acc ++ [n])

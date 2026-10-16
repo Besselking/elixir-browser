@@ -85,13 +85,19 @@ defmodule Browser.JS.NumberFormat do
     sign <> body
   end
 
+  # (the digits of radix 36, one byte each, in lower case)
+  @digits List.to_tuple(for c <- ~c"0123456789abcdefghijklmnopqrstuvwxyz", do: <<c>>)
+
+  # `Integer.to_string/2` gives the letter digits in upper case
+  defp lower_digits(s), do: String.downcase(s, :ascii)
+
   @doc "`x.toString(radix)` for a radix other than 10."
   def to_radix(x, _r) when x in [:nan, :infinity, :neg_infinity], do: Num.to_string(x)
 
   def to_radix(x, r) do
     {sign, ax} = split_sign(x)
     int = trunc(ax)
-    int_s = int |> Integer.to_string(r) |> String.downcase()
+    int_s = if int < r, do: elem(@digits, int), else: lower_digits(Integer.to_string(int, r))
     frac = ax - int
 
     frac_s =
@@ -109,7 +115,7 @@ defmodule Browser.JS.NumberFormat do
   defp fraction_digits(frac, r, left, acc) do
     v = frac * r
     d = trunc(v)
-    acc = [Integer.to_string(d, r) |> String.downcase() | acc]
+    acc = [elem(@digits, d) | acc]
     rest = v - d
 
     if rest == 0,

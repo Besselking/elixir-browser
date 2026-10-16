@@ -5183,7 +5183,7 @@ defmodule Browser.Layout do
     # (a width that is no more than the room there is: the width of a flex container measured
     # without a bound is not what its surroundings need)
     ext =
-      if extent(atom.items) == 0 or atom.w < @unbounded / 2,
+      if atom.w < @unbounded / 2 or extent(atom.items) == 0,
         do: max(st.ext, x + atom.w + max(extra, 0)),
         else: st.ext
 
@@ -6394,6 +6394,19 @@ defmodule Browser.Layout do
   end
 
   # the place of an item and the clips that move with it (x, y, xlim, clip, clips)
+  # (the usual item has a clip and clips and no `xlim`: one update in place of four. An item
+  # moves one time for each level of atoms around it)
+  defp move_place(%{clip: %{} = c, clips: clips} = it, dx, dy)
+       when not is_map_key(it, :xlim) or :erlang.map_get(:xlim, it) == nil do
+    %{
+      it
+      | x: it.x + dx,
+        y: it.y + dy,
+        clip: shift_rect(c, dx, dy),
+        clips: Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)
+    }
+  end
+
   defp move_place(it, dx, dy) do
     it = %{it | x: it.x + dx, y: it.y + dy}
 
@@ -7759,6 +7772,10 @@ defmodule Browser.Layout do
       rr: st.right - st.free
     }
 
+    # (no `alast` key when it is nil: a text item then has 32 keys or fewer, and the VM keeps
+    # it as a flat map, not as a tree. Read it with `Map.get/2`)
+    item = if style.alast == nil, do: Map.delete(item, :alast), else: item
+
     item = if hang > 0, do: Map.put(item, :hang, hang), else: item
     item = if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
     item = if rel = current_rel(st), do: Map.put(item, :rel, rel), else: item
@@ -7797,9 +7814,10 @@ defmodule Browser.Layout do
   defp mergeable?(prev, item) do
     keys = [:x, :w, :text, :glue, :lm, :hang, :nid]
 
-    Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
-      not String.match?(prev.text <> item.text, ~r/\s|[\x{2000}-\x{200A}\x{3000}]/u) and
-      not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
+    # (the cheap tests first, the regex last and compiled one time)
+    prev.x + prev.w == item.x and not is_map_key(prev, :hang) and not is_map_key(prev, :wc) and
+      :maps.without(keys, prev) == :maps.without(keys, item) and
+      not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u))
   end
 
   defp push_word(st, item, x, w, style) do
@@ -10529,7 +10547,17 @@ defmodule Browser.Layout do
         it
       end
 
-    {items, h, _} = flex_atom(st, it.sub, w, it.key)
+    # A scroll container with a definite basis in a column of definite height has no automatic
+    # minimum height, and its content does not set its base. Thus it is laid out one time
+    # only, at its final height (see `flex_column_height/4`)
+    lazy? =
+      not it.fit? and not wrapped? and cs.height != nil and cs.hdef and
+        Map.get(it, :col_scroll?, false) and it.rebuild != nil and it.auto_height? and
+        it.minh == nil and Map.get(it, :minhpct) == nil and Map.get(it, :ratio) == nil and
+        it.hpct == nil and (match?({:px, _}, it.basis) or match?({:pct, _}, it.basis))
+
+    {items, h, _} = if lazy?, do: {[], 0, nil}, else: flex_atom(st, it.sub, w, it.key)
+    it = if lazy?, do: Map.put(it, :lazy, true), else: it
 
     x = column_x(cs, it, align, w, avail)
 
@@ -10554,7 +10582,8 @@ defmodule Browser.Layout do
       end
 
     # (the height of the content, for `flex_content_floor/2`)
-    content_h = if Map.get(it, :plain_h?, false), do: {w, h}
+    # (not for an item that is not laid out yet: its height is not the height of its content)
+    content_h = if Map.get(it, :plain_h?, false) and not lazy?, do: {w, h}
     # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
     basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.hdef)
 
@@ -10631,7 +10660,12 @@ defmodule Browser.Layout do
         flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base), true)
       end)
     else
-      sized
+      # (no item can shrink: each keeps its base. An item that `flex_column_item/4` did not lay
+      # out is laid out here, at its base)
+      Enum.map(
+        sized,
+        &if(Map.get(&1, :lazy, false), do: flex_column_height(st, &1, &1.base, true), else: &1)
+      )
     end
   end
 
@@ -10720,7 +10754,9 @@ defmodule Browser.Layout do
     # as it is: the same layout with that height set gives the same items)
     same? = not definite? and abs(target - it.h) < 0.5 and Map.get(it, :ratio) == nil
 
-    if it.rebuild != nil and (it.base != it.h or abs(target - it.h) >= 0.5) and not same? do
+    if it.rebuild != nil and
+         (Map.get(it, :lazy, false) or
+            ((it.base != it.h or abs(target - it.h) >= 0.5) and not same?)) do
       # the height of an item includes its margins
       box = target - auto_zero(it.mt) - auto_zero(it.mb)
       content = if it.sizing == :border, do: box, else: box - it.vextra

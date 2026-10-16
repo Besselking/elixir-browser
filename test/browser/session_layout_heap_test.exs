@@ -84,7 +84,8 @@ defmodule Browser.SessionLayoutHeapTest do
     assert Enum.uniq(spawns) == [:spawn_layout]
   end
 
-  # whether the code calls `Page.from_raw`, `Page.restyle` or `LayoutWorker.layout`
+  # whether the code calls `Page.from_raw`, `Page.restyle` or `LayoutWorker.layout`, or the
+  # function of the session that does these for the scripts
   defp lays_out?(code) do
     {_, found} =
       Macro.prewalk(code, false, fn
@@ -92,6 +93,9 @@ defmodule Browser.SessionLayoutHeapTest do
           {call,
            found or
              {mod, fun} in [{:Page, :from_raw}, {:Page, :restyle}, {:LayoutWorker, :layout}]}
+
+        {:layout_for_scripts, _, args} = call, _found when is_list(args) ->
+          {call, true}
 
         other, found ->
           {other, found}

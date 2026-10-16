@@ -176,6 +176,20 @@ defmodule Browser.PageTest do
       refute plain.viewport_units
       assert Page.restyle(plain, env.(800, 400)) == plain
     end
+
+    test "a new style attribute with viewport units makes restyle follow the window size" do
+      env = fn w, h -> %{type: "screen", width: w, height: h, dppx: 1.0} end
+      page = Page.build(~s|<body style="margin:0"><p>x</p></body>|, "about:home", env.(800, 600))
+      refute page.viewport_units
+
+      # a script adds the element and no sheet: the sheets of the tree are the same
+      html = ~s|<body style="margin:0"><p>x</p><div style="height: 50vh">x</div></body>|
+      raw = Page.build(html, "about:home", env.(800, 600)).raw
+      page = Page.from_raw(page, raw, env.(800, 600))
+      assert page.viewport_units
+      assert page_height(page) == 300.0
+      assert page_height(Page.restyle(page, env.(800, 400))) == 200.0
+    end
   end
 
   describe "base href" do
@@ -415,6 +429,63 @@ defmodule Browser.PageTest do
       laid = Page.from_raw(base, other, @env, refs)
       assert laid.pruned == Page.from_raw(%{page | memo: nil}, other, @env).pruned
       assert laid.sheet_refs == refs
+    end
+
+    # A layout for the scripts sends its style state back. When the tree kept the sheets of the
+    # base, the rules and the parsed sheets are not in it: the receiver keeps its own.
+    test "a style state of a tree with the sheets of its base has no rules, and the receiver keeps its own" do
+      page = Page.build(@html, "about:x", @env)
+      raw = set_attr(page.raw, "a", "class", "a on")
+      {base, refs} = Page.layout_base(page, raw)
+      laid = Page.from_raw(base, raw, @env, refs)
+      state = Page.style_state(laid, base)
+      assert Map.keys(state) |> Enum.sort() == [:memo, :sheet_refs, :viewport_units]
+
+      adopted = Page.adopt_style_state(page, state)
+      assert :erts_debug.same(adopted.rules, page.rules)
+      assert adopted.sheet_cache == page.sheet_cache
+      assert adopted.memo == laid.memo
+
+      # (the next tree styles from it as a fresh tree)
+      raw = set_attr(raw, "b", "class", "b on")
+
+      assert Page.from_raw(adopted, raw, @env).pruned ==
+               Page.from_raw(%{page | memo: nil}, raw, @env).pruned
+    end
+
+    test "a style state of a tree with other sheets has the rules again" do
+      page = Page.build(@html, "about:x", @env)
+      other = page.raw ++ [{:element, "style", [], [{:text, ".b { color: teal }"}]}]
+      {base, refs} = Page.layout_base(page, other)
+      laid = Page.from_raw(base, other, @env, refs)
+      state = Page.style_state(laid, base)
+      assert state.rules == laid.rules
+      assert state.sheet_refs == refs
+
+      adopted = Page.adopt_style_state(page, state)
+      assert {adopted.rules, adopted.sheet_refs, adopted.memo} == {laid.rules, refs, laid.memo}
+
+      # A state without the rules does not go into a page with other sheets: its memo was made
+      # with other rules. (The page that the session has may have changed since the run started)
+      raw = set_attr(page.raw, "a", "class", "a on")
+      {base, refs} = Page.layout_base(page, raw)
+      slim = Page.style_state(Page.from_raw(base, raw, @env, refs), base)
+      refute Map.has_key?(slim, :rules)
+      assert Page.adopt_style_state(adopted, slim) == adopted
+    end
+
+    # The sheets of two pages differ only in the text of one `<style>`: a state without the rules
+    # of the one does not go into the other (its memo was made with other rules)
+    test "a style state without the rules does not go into a page whose sheet has other text" do
+      red = Page.build(~s(<style>p { color: red }</style><p id="a">x</p>), "about:x", @env)
+      blue = Page.build(~s(<style>p { color: blue }</style><p id="a">x</p>), "about:x", @env)
+      raw = set_attr(red.raw, "a", "class", "on")
+      {base, refs} = Page.layout_base(red, raw)
+      slim = Page.style_state(Page.from_raw(base, raw, @env, refs), base)
+      refute Map.has_key?(slim, :rules)
+      assert slim.sheet_refs != blue.sheet_refs
+      assert Page.adopt_style_state(blue, slim) == blue
+      assert Page.adopt_style_state(red, slim).memo == slim.memo
     end
 
     # (a new shadow tree with its own sheet: `from_raw/4` can keep the memo, so the base has it)

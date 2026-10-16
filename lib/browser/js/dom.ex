@@ -636,10 +636,16 @@ defmodule Browser.JS.DOM do
   end
 
   # the root a node is in the document's tree through: past a shadow root to its host
-  defp root_of(nid) do
-    case node(nid).parent do
-      nil -> if node(nid).shost, do: root_of(node(nid).shost), else: nid
-      p -> root_of(p)
+  defp root_of(nid), do: root_in(st().nodes, nid)
+
+  # (one read of the node table for the whole walk; a node that is gone reads as a
+  # detached node, as `node/1` gives it)
+  defp root_in(nodes, nid) do
+    case nodes do
+      %{^nid => %{parent: nil, shost: nil}} -> nid
+      %{^nid => %{parent: nil, shost: h}} -> root_in(nodes, h)
+      %{^nid => %{parent: p}} -> root_in(nodes, p)
+      _ -> nid
     end
   end
 

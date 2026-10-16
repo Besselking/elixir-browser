@@ -5,6 +5,14 @@ defmodule Browser.HTMLTest do
   test "a stray end tag for br is a br" do
     assert [{:element, "p", [], [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
              HTML.parse("<p>a</br>b</p>")
+
+    # the tokenizer makes the name of an end tag lower case before it compares the name
+    for tag <- ["</BR>", "</Br >", "</br/>", "</bR\n>"] do
+      assert [{:element, "p", [], [{:text, "a"}, {:element, "br", [], []}, {:text, "b"}]}] =
+               HTML.parse("<p>a#{tag}b</p>")
+    end
+
+    assert [{:element, "p", [], [{:text, "a"}, {:text, "b"}]}] = HTML.parse("<p>a</brx>b</p>")
   end
 
   test "a table cell ends an open column group" do

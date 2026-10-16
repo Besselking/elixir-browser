@@ -1217,6 +1217,11 @@ defmodule Browser.Style do
   defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
   defp table_ancestor(_), do: nil
 
+  @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
+
+  @doc "Tells if the CSS text `css` has a length in viewport units."
+  def viewport_unit?(css), do: Regex.match?(@viewport_unit, css)
+
   # the same `style` attribute is on many elements of a page (and on one of them every time the
   # page is styled again), so its parse is kept for the run
   defp inline_decls(attrs) do
@@ -1228,7 +1233,14 @@ defmodule Browser.Style do
 
           cache ->
             decls = css |> CSS.parse_declarations() |> relevant()
-            if cache, do: Process.put(:style_inline, Map.put(cache, css, decls))
+
+            if cache do
+              Process.put(:style_inline, Map.put(cache, css, decls))
+              # (`Page.restyle/2` reads it: the new style attributes of a tree that kept its
+              # sheets can have viewport units)
+              if viewport_unit?(css), do: Process.put(:style_vu, true)
+            end
+
             decls
         end
 

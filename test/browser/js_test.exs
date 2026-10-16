@@ -18,6 +18,12 @@ defmodule Browser.JSTest do
     reason
   end
 
+  # the tokens of the lexer, without the newline flags and the end token
+  defp tokens(src) do
+    {:ok, toks} = Browser.JS.Lexer.tokenize(src)
+    for {type, value, _} <- toks, type != :eof, do: {type, value}
+  end
+
   describe "values and operators" do
     test "arithmetic follows JavaScript semantics" do
       assert js("1 + 2 * 3") == 7.0
@@ -44,6 +50,17 @@ defmodule Browser.JSTest do
       assert js("String(-0)") == "0"
       assert js("String(1 / 0) + String(0 / 0)") == "InfinityNaN"
       assert js("(255).toString(16)") == "ff"
+      # the digits of a radix other than 10 are in lower case, also in the fraction
+      assert js(
+               "[(35).toString(36), (36).toString(36), (16).toString(16), (10).toString(11)].join()"
+             ) ==
+               "z,10,10,a"
+
+      assert js(
+               "[(-255.75).toString(16), (0.5).toString(2), (-0).toString(2), (1e21).toString(36)].join()"
+             ) ==
+               "-ff.c,0.1,0,5v1j4f4ds79m9s"
+
       assert js("(0.1).toFixed(2)") == "0.10"
     end
 
@@ -661,6 +678,72 @@ defmodule Browser.JSTest do
       assert js("0xff + 0b11 + 0o7 + 1e3 + .5 + 5.") == 255.0 + 3 + 7 + 1000 + 0.5 + 5
       assert js("// line\n1 /* block\n */ + 1") == 2.0
       assert js("true ?.5:1") == 0.5
+    end
+
+    # The ASCII part of a name is one slice. These names go on after that part.
+    test "a name goes on after its ASCII part with an escape or a character above 127" do
+      assert tokens("a$_0Z x1") == [{:id, "a$_0Z"}, {:id, "x1"}]
+
+      assert tokens(~S"ab\u0063d ab\u{63}d \u0061b") == [
+               {:id, "abcd"},
+               {:id, "abcd"},
+               {:id, "ab"}
+             ]
+
+      assert tokens("a\u00e9b1 \u00e9a") == [{:id, "a\u00e9b1"}, {:id, "\u00e9a"}]
+      assert tokens(~S"a\u00e9b\u0063") == [{:id, "a\u00e9bc"}]
+      assert tokens(~S"i\u0066") == [{:eid, "if"}]
+      # a space character or a line terminator above 127 stops a name
+      assert tokens("a\u00a0b a\u2028b") == [{:id, "a"}, {:id, "b"}, {:id, "a"}, {:id, "b"}]
+
+      assert tokens(~S"this.#ab\u0063 #x\u00e9") ==
+               [{:id, "this"}, {:p, "."}, {:priv, "abc"}, {:priv, "x\u00e9"}]
+
+      # a backslash that is not a \u escape stops the name, and the backslash is an error
+      assert {:error, _} = Browser.JS.Lexer.tokenize(~S"a\x")
+
+      # a \u escape that the end of the text cuts is an error (it looped before)
+      for src <- [~S"a\u", ~S"a\u0", ~S"a\u00", ~S"a\u000", ~S"\u00"] do
+        assert {:error, _} = Browser.JS.Lexer.tokenize(src)
+      end
+    end
+
+    # A run of printable ASCII characters goes into a string as one piece.
+    test "a string with quotes, escapes and line terminators" do
+      assert tokens(~S|'abc' "a'b" 'a"b' 'a\'b' "a\"b"|) ==
+               [{:str, "abc"}, {:str, "a'b"}, {:str, "a\"b"}, {:str, "a'b"}, {:str, "a\"b"}]
+
+      assert tokens(~S|'a\nb\x41\u0042\u{1F600}c\\'|) == [{:str, "a\nbAB\u{1F600}c\\"}]
+      assert tokens("'ab\\\ncd' 'ab\\\r\ncd'") == [{:str, "abcd"}, {:str, "abcd"}]
+
+      assert tokens("'a\u2028b\u2029c' 'a\tb\x7F' 'a\u00e9b'") ==
+               [{:str, "a\u2028b\u2029c"}, {:str, "a\tb\x7F"}, {:str, "a\u00e9b"}]
+
+      long = String.duplicate("ab", 50)
+      assert tokens("'#{long}\\n#{long}'") == [{:str, long <> "\n" <> long}]
+
+      # a line feed or a carriage return in a string is an error, and so is the end of the text
+      # or a byte that is not UTF-8
+      for src <- ["'a\nb'", "'a\rb'", "'abc", "'a\\", "'a\xFFb'"] do
+        assert {:error, _} = Browser.JS.Lexer.tokenize(src)
+      end
+    end
+
+    # Each punctuator is one clause, longest first: the longest punctuator that matches wins.
+    test "every punctuator, and the longest one wins" do
+      for p <-
+            ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
+              ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @" do
+        assert tokens("a#{p}b") == [{:id, "a"}, {:p, p}, {:id, "b"}]
+      end
+
+      assert tokens("a>>>=b>>>c>>d>e") ==
+               [{:id, "a"}, {:p, ">>>="}, {:id, "b"}, {:p, ">>>"}, {:id, "c"}, {:p, ">>"}] ++
+                 [{:id, "d"}, {:p, ">"}, {:id, "e"}]
+
+      # `?.` before a digit is a `?` and a number
+      assert tokens("a?.5:b") == [{:id, "a"}, {:p, "?"}, {:num, 0.5}, {:p, ":"}, {:id, "b"}]
+      assert tokens("a??.5") == [{:id, "a"}, {:p, "??"}, {:num, 0.5}]
     end
   end
 

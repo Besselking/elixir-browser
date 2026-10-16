@@ -259,6 +259,116 @@ watch_layout =
 
 if Code.ensure_loaded?(Browser.StyleGate), do: Process.put(:bench_gate, Browser.StyleGate.new())
 
+# (a forced layout also goes to the prewarm of the same script and sheets that styles now, its
+# twin: `Browser.StyleGate`. An older tree has no twins)
+twins? = function_exported?(Browser.Session, :won_style?, 2)
+
+# (the style state leaves out the sheets that the loop has already: `Browser.Page.style_state/2`)
+style_state =
+  if function_exported?(Browser.Page, :style_state, 2),
+    do: &Browser.Page.style_state/2,
+    else: fn laid, _base -> Browser.Page.style_state(laid) end
+
+# The style of a request in the process of the layout; `job` is from `start_layout`. Gives
+# `{:layout, laid, job, t, base}` for a request that goes on to its layout (`t`: when its style
+# started), `{:twin, base, twin}` for a prewarm that has a twin to style next, else `:ok`.
+run_style = fn base, job ->
+  %{ref: ref, raw: raw, refs: refs, seq: seq} = job
+  t = System.monotonic_time(:microsecond)
+  env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
+
+  laid =
+    if refs,
+      do: apply(Browser.Page, :from_raw, [base, raw, env, refs]),
+      else: Browser.Page.from_raw(base, raw, env)
+
+  # (of a request and its twin, the first to end its style goes on)
+  won? =
+    not twins? or
+      apply(Browser.Session, :won_style?, [job.race, if(job.cold, do: :twin, else: :run)])
+
+  if not won?, do: exit(:normal)
+  send(bench_loop, {:bench_style, seq, style_state.(laid, base)})
+  if job.cold, do: Process.exit(job.cold, :kill)
+
+  # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
+  if dir = System.get_env("DUMPRAW") do
+    File.mkdir_p!(dir)
+    n = length(File.ls!(dir))
+
+    File.write!(
+      Path.join(dir, "raw#{n}.term"),
+      :erlang.term_to_binary({base, raw, laid.sheet_cache})
+    )
+  end
+
+  # A prewarm (`ref` is nil) only makes the style memo: no script reads its boxes, and the
+  # bench keeps no layout memo. A twin that came while it styled starts from that memo.
+  twin = (ref == nil and twins?) && apply(Browser.Session, :take_twin, [])
+
+  cond do
+    twin && apply(Browser.Session, :twin_wanted?, [twin]) ->
+      {base, refs} = apply(Browser.Session, :twin_base, [laid, twin])
+      {:twin, base, %{twin | refs: refs}}
+
+    ref == nil ->
+      :ok
+
+    true ->
+      {:layout, laid, job, t, if(System.get_env("DUMPSLOW"), do: base)}
+  end
+end
+
+# (a prewarm styles the twin that came while it styled)
+twin_style = fn
+  {:twin, base, twin} -> run_style.(base, twin)
+  step -> step
+end
+
+# The layout of a request after its style. The watchdog stops a layout that the script no longer
+# waits for.
+lay_out = fn
+  {:layout, laid, %{js: js, ref: ref, raw: raw, deadline: deadline} = job, t, base} ->
+    watch_layout.(deadline)
+
+    t1 = System.monotonic_time(:microsecond)
+
+    {items, height} =
+      Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
+        scrollers: true,
+        boxes: true,
+        svg_defs: laid.svg_defs
+      )
+
+    t2 = System.monotonic_time(:microsecond)
+
+    # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
+    with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
+         [dir, ms] <- String.split(spec, ","),
+         true <- (t2 - t) / 1000 > String.to_integer(ms) do
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
+        :erlang.term_to_binary({base, raw, laid.sheet_cache})
+      )
+    end
+
+    rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
+    Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
+
+    if System.get_env("LAYOUT") == "2",
+      do:
+        IO.puts(
+          "layout #{div(t1 - t, 1000)} ms style, #{div(t2 - t1, 1000)} ms layout, #{length(items)} items#{if job.cold, do: " (twin)"}"
+        )
+
+    send(js, {:layout_now_done, ref, rects, {1000.0, height}})
+
+  _ ->
+    :ok
+end
+
 # starts the style and the layout of a request in a process of its own
 start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
   # (as the session does: the process gets no memo when the tree has other sheets,
@@ -267,6 +377,17 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
     if function_exported?(Browser.Page, :layout_base, 2),
       do: Browser.Page.layout_base(Process.get(:bench_base), raw),
       else: {Process.get(:bench_base), nil}
+
+  job = %{
+    js: js,
+    ref: ref,
+    raw: raw,
+    refs: refs,
+    deadline: deadline,
+    seq: seq,
+    race: if(twins? and ref != nil, do: :atomics.new(1, [])),
+    cold: nil
+  }
 
   pid =
     spawn_layout.(fn ->
@@ -316,71 +437,25 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
         end)
       end
 
-      t = System.monotonic_time(:microsecond)
-      env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
-      laid =
-        if refs,
-          do: apply(Browser.Page, :from_raw, [base, raw, env, refs]),
-          else: Browser.Page.from_raw(base, raw, env)
-
-      send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
-
-      # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
-      if dir = System.get_env("DUMPRAW") do
-        File.mkdir_p!(dir)
-        n = length(File.ls!(dir))
-
-        File.write!(
-          Path.join(dir, "raw#{n}.term"),
-          :erlang.term_to_binary({base, raw, laid.sheet_cache})
-        )
-      end
-
-      # A prewarm (`ref` is nil) only makes the style memo: no script reads its boxes, and the
-      # bench keeps no layout memo. The watchdog stops a layout that the script no longer
-      # waits for.
-      if ref == nil, do: exit(:normal)
-      watch_layout.(deadline)
-
-      t1 = System.monotonic_time(:microsecond)
-
-      {items, height} =
-        Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
-          scrollers: true,
-          boxes: true,
-          svg_defs: laid.svg_defs
-        )
-
-      t2 = System.monotonic_time(:microsecond)
-
-      # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
-      with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
-           [dir, ms] <- String.split(spec, ","),
-           true <- (t2 - t) / 1000 > String.to_integer(ms) do
-        File.mkdir_p!(dir)
-
-        File.write!(
-          Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
-          :erlang.term_to_binary({base, raw, laid.sheet_cache})
-        )
-      end
-
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
-      Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
-
-      if System.get_env("LAYOUT") == "2",
-        do:
-          IO.puts(
-            "layout #{div(t1 - t, 1000)} ms style, #{div(t2 - t1, 1000)} ms layout, #{length(items)} items"
-          )
-
-      send(js, {:layout_now_done, ref, rects, {1000.0, height}})
+      # (This file is not compiled: a function keeps all its values while it calls another one.
+      # Each step goes as an argument into the next, so that the layout does not keep what the
+      # style worked with, as in the session)
+      lay_out.(twin_style.(run_style.(base, job)))
     end)
 
   # (the gate opens also when the process stops before it sends its style state)
   if gate = Process.get(:bench_gate) do
     mon = :erlang.monitor(:process, pid, tag: :bench_gate_down)
-    Process.put(:bench_gate, Browser.StyleGate.running(gate, seq, mon))
+
+    if twins? do
+      twin = if ref != nil, do: Browser.StyleGate.twin(gate, {js, refs})
+      light = if twin, do: apply(Browser.Page, :without_style, [base])
+      if twin, do: send(twin, {:style_twin, Map.merge(job, %{cold: pid, base: light})})
+      key = if ref == nil, do: {{js, refs}, pid}
+      Process.put(:bench_gate, apply(Browser.StyleGate, :running, [gate, seq, mon, key]))
+    else
+      Process.put(:bench_gate, Browser.StyleGate.running(gate, seq, mon))
+    end
   end
 end
 

@@ -138,7 +138,8 @@ defmodule Browser.HTML do
     {name, rest} = take_name(rest)
 
     # (a stray `</br>` is a `<br>`)
-    if String.downcase(name) == "br",
+    # (`take_name/1` gives the name in lower case already)
+    if name == "br",
       do: tokenize(skip_past(rest, ">"), [{:open, "br", [], false} | acc]),
       else: tokenize(skip_past(rest, ">"), [{:close, name} | acc])
   end

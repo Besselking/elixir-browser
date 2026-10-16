@@ -79,6 +79,34 @@ defmodule Browser.StyleGateTest do
     assert {[], ^gate} = StyleGate.down(gate, :mon_a)
   end
 
+  # A request that a script waits for also goes to the prewarm of the same key (the script and
+  # the sheets) that styles now: its twin
+  test "the twin of a request is the prewarm of its key that styles now" do
+    {[a], gate} = StyleGate.request(StyleGate.new(), req(:js, nil, :a))
+    gate = StyleGate.running(gate, a.seq, :mon_a, {{:js, [:sheet]}, :pid_a})
+    assert StyleGate.twin(gate, {:js, [:sheet]}) == :pid_a
+    assert StyleGate.twin(gate, {:js, [:other]}) == nil
+    assert StyleGate.twin(gate, {:other_js, [:sheet]}) == nil
+
+    # (a request that is not a prewarm is no twin)
+    {[f], gate} = StyleGate.request(gate, req(:js, make_ref(), :f))
+    gate = StyleGate.running(gate, f.seq, :mon_f)
+    assert StyleGate.twin(gate, {:js, [:sheet]}) == :pid_a
+
+    # (after its style the prewarm is no twin: the caller has its state)
+    {_adopt?, :mon_a, [], gate} = StyleGate.style_done(gate, a.seq)
+    assert StyleGate.twin(gate, {:js, [:sheet]}) == nil
+
+    # (nor after it stopped)
+    {_adopt?, :mon_f, [], gate} = StyleGate.style_done(gate, f.seq)
+    {[b], gate} = StyleGate.request(gate, req(:js, nil, :b))
+    gate = StyleGate.running(gate, b.seq, :mon_b, {{:js, [:sheet]}, :pid_b})
+    assert StyleGate.twin(gate, {:js, [:sheet]}) == :pid_b
+    {[], gate} = StyleGate.down(gate, :mon_b)
+    assert StyleGate.twin(gate, {:js, [:sheet]}) == nil
+    assert gate.twins == %{}
+  end
+
   # The session keeps the gate in its process dictionary (here: that of the test). A style state
   # that comes late from an older run must not replace the state of a newer run. (No request
   # waits, so no layout starts.)

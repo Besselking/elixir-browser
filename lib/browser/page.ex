@@ -159,12 +159,10 @@ defmodule Browser.Page do
 
   defp find_base({:element, _, _, kids}), do: find_base(kids)
 
-  @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
-
   defp viewport_units?(rules, raw) do
     Enum.any?(rules, fn rule ->
       Enum.any?(rule.decls, fn {_prop, value, _important} ->
-        is_binary(value) and Regex.match?(@viewport_unit, value)
+        is_binary(value) and Style.viewport_unit?(value)
       end)
     end) or inline_viewport_units?(raw)
   end
@@ -176,7 +174,7 @@ defmodule Browser.Page do
 
   defp inline_viewport_units?({:element, _tag, attrs, kids}) do
     case List.keyfind(attrs, "style", 0) do
-      {_, css} when is_binary(css) -> Regex.match?(@viewport_unit, css)
+      {_, css} when is_binary(css) -> Style.viewport_unit?(css)
       _ -> false
     end or inline_viewport_units?(kids)
   end
@@ -191,10 +189,10 @@ defmodule Browser.Page do
     if key == page.key and page.nodes != nil do
       page
     else
-      {pruned, defs, fixed, cache, memo} =
+      {key, pruned, defs, fixed, cache, memo} =
         case page.style_cache do
           %{^key => {pruned, defs, fixed}} ->
-            {pruned, defs, fixed, page.style_cache, page.memo}
+            {key, pruned, defs, fixed, page.style_cache, page.memo}
 
           cache ->
             index = Style.index_rules(page.rules, env)
@@ -205,16 +203,26 @@ defmodule Browser.Page do
                 nil -> nil
               end
 
+            Process.delete(:style_vu)
             {pruned, memo} = Style.prune(Browser.Modal.backdrops(page.raw), index, old)
+
+            # (a new style attribute with viewport units: the memo and the cache now hold for
+            # this window size only)
+            key =
+              if Process.delete(:style_vu) == true and not page.viewport_units,
+                do: {elem(key, 0), {env.width, env.height}},
+                else: key
+
             defs = Browser.Svg.defs(page.raw, pruned)
             fixed = fixed_width(pruned)
             cache = if map_size(cache) >= 4, do: %{}, else: cache
-            {pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed}), {key, memo}}
+            {key, pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed}), {key, memo}}
         end
 
       page = %{
         page
         | key: key,
+          viewport_units: page.viewport_units or elem(key, 1) != false,
           pruned: pruned,
           svg_defs: defs,
           fixed_width: fixed,
@@ -425,18 +433,49 @@ defmodule Browser.Page do
   What `from_raw/3` worked out about the style sheets and the cascade, to be handed to another copy
   of the page (`adopt_style_state/2`) so that the next tree it is given starts from it: the sheets
   that were parsed and the memo of the cascade.
-  """
-  def style_state(%__MODULE__{} = page) do
-    Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
-  end
 
-  @doc "Puts a `style_state/1` of a later tree in `page` (its rules, sheets and memo go together)."
-  def adopt_style_state(%__MODULE__{} = page, style) do
+  `base` is the page that the run started from (`layout_base/2`). When the tree has the sheets of
+  `base`, the rules and the parsed sheets are not in the state: the receiver has them already, and
+  they are a large part of the copy (in the Speedometer Lit suite, two thirds).
+  """
+  def style_state(page, base \\ nil)
+
+  def style_state(%__MODULE__{sheet_refs: refs} = page, %__MODULE__{sheet_refs: refs}),
+    do: Map.take(page, [:sheet_refs, :viewport_units, :memo])
+
+  def style_state(%__MODULE__{} = page, _base),
+    do: Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
+
+  @doc """
+  Puts a `style_state/2` of a later tree in `page` (its rules, sheets and memo go together). A state
+  without the rules is put in only when `page` has the same sheets: else `page` stays as it is (its
+  rules do not agree with the memo).
+  """
+  def adopt_style_state(%__MODULE__{} = page, %{rules: _} = style) do
     # (only the sheets of that tree stay: the cache would hold every tree there was, and be
     # copied whole into every process that lays out a page)
     cache = page.sheet_cache |> Map.merge(style.sheet_cache) |> Map.take([:ua | style.sheet_refs])
     struct(page, %{style | sheet_cache: cache})
   end
+
+  def adopt_style_state(%__MODULE__{sheet_refs: refs} = page, %{sheet_refs: refs} = style),
+    do: struct(page, style)
+
+  def adopt_style_state(%__MODULE__{} = page, _style), do: page
+
+  @doc """
+  Gives `page` with `viewport_units` true also when a style attribute in `raw` has viewport
+  units. (`from_raw/4` looks at the style attributes only when the sheets change.)
+  """
+  def inline_viewport_units(%__MODULE__{} = page, raw),
+    do: %{page | viewport_units: page.viewport_units || inline_viewport_units?(raw)}
+
+  @doc """
+  `page` without what `style_state/2` holds: small to copy into another process, which puts a
+  style state in it with `adopt_style_state/2`.
+  """
+  def without_style(%__MODULE__{} = page),
+    do: %{page | rules: nil, queries: nil, sheet_cache: %{}, memo: nil}
 
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.

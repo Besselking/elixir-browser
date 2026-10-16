@@ -2375,44 +2375,29 @@ defmodule Browser.Session do
     # shared styles would take gigabytes and seconds. The memo stays behind too when the tree has
     # other sheets)
     {base, refs} = Page.layout_base(page, raw)
-    wx_env = :wx.get_env()
-    env = env(state)
-    width = max(UI.client_width(state.ui), 200)
-    view_h = UI.client_height(state.ui)
-    measure = state.measure_bg
-    images = state.images
-    worker = state.layout_worker
-    tid = state.tid
-    me = self()
 
-    pid =
-      spawn_layout(fn ->
-        :wx.set_env(wx_env)
-        page = Page.from_raw(base, raw, env, refs)
-        # (the sheets a script added are parsed once, and the elements that did not change are not
-        # styled again by the next layout: it starts from what this one worked out)
-        send(me, {:style_state, seq, Page.style_state(page)})
-        if ref != nil, do: watch_layout(deadline)
+    job = %{
+      seq: seq,
+      js: js,
+      ref: ref,
+      raw: raw,
+      refs: refs,
+      deadline: deadline,
+      env: env(state),
+      width: max(UI.client_width(state.ui), 200),
+      view_h: UI.client_height(state.ui),
+      measure: state.measure_bg,
+      images: state.images,
+      worker: state.layout_worker,
+      tid: state.tid,
+      session: self(),
+      wx_env: :wx.get_env(),
+      # (a request and its twin race for the style, see `won_style?/2`)
+      race: if(ref != nil, do: :atomics.new(1, [])),
+      cold: nil
+    }
 
-        # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out)
-        {items, height} =
-          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-            scrollers: true,
-            boxes: true,
-            metrics: true,
-            images: images,
-            svg_defs: page.svg_defs
-          )
-
-        if ref != nil do
-          rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
-          send(js, {:layout_now_done, ref, rects, {width * 1.0, height}})
-        end
-      end)
-
-    # (the gate opens also when the process stops before it sends its style state)
-    mon = :erlang.monitor(:process, pid, tag: :style_gate_down)
-    Process.put(:style_gate, StyleGate.running(style_gate(), seq, mon))
+    start_layout_job(base, job)
   end
 
   # (no run starts: the next request that waits can start)
@@ -2420,6 +2405,130 @@ defmodule Browser.Session do
     {next, gate} = StyleGate.next(style_gate())
     Process.put(:style_gate, gate)
     Enum.each(next, &start_layout_for_scripts(state, &1))
+  end
+
+  @doc false
+  # Starts the style and the layout of `job` (see `start_layout_for_scripts/2`) from `base` in a
+  # process of its own, and tells the gate (in the process dictionary). Gives the pid. (A test
+  # starts a job with no window: `wx_env` nil)
+  def start_layout_job(base, job) do
+    pid =
+      spawn_layout(fn ->
+        if job.wx_env, do: :wx.set_env(job.wx_env)
+        layout_for_scripts(base, job)
+      end)
+
+    # (the gate opens also when the process stops before it sends its style state)
+    mon = :erlang.monitor(:process, pid, tag: :style_gate_down)
+    gate = style_gate()
+    %{js: js, ref: ref, refs: refs, seq: seq} = job
+
+    # (a prewarm of the same script and sheets that styles now is the twin of a request: it
+    # styles the tree again from its own state, see `Browser.StyleGate`. It starts from this
+    # base with that state: what this request would start from after the session adopted it)
+    twin = if ref != nil, do: StyleGate.twin(gate, {js, refs})
+
+    if twin,
+      do: send(twin, {:style_twin, Map.merge(job, %{cold: pid, base: Page.without_style(base)})})
+
+    twin_key = if ref == nil, do: {{js, refs}, pid}
+    Process.put(:style_gate, StyleGate.running(gate, seq, mon, twin_key))
+    pid
+  end
+
+  # The style and the layout of a request in the process of the layout. `base` and `job.refs` are
+  # from `Page.layout_base/2`.
+  defp layout_for_scripts(base, job) do
+    page = Page.from_raw(base, job.raw, job.env, job.refs)
+
+    # (the run that lost the race to its twin stops: the other one answers)
+    if won_style?(job.race, if(job.cold, do: :twin, else: :run)) do
+      # (the sheets a script added are parsed once, and the elements that did not change are not
+      # styled again by the next layout: it starts from what this one worked out. A twin sends it
+      # in place of its request, and stops that request)
+      send(job.session, {:style_state, job.seq, Page.style_state(page, base)})
+      if job.cold, do: Process.exit(job.cold, :kill)
+      if job.ref != nil, do: watch_layout(job.deadline)
+
+      # (a prewarm, `ref` nil, still lays out: the worker keeps what the layout worked out. A
+      # twin that came while it styled lays out in place of it: its tree is newer)
+      case if(job.ref == nil, do: take_twin()) do
+        nil ->
+          lay_out_for_scripts(page, job)
+          if job.ref == nil, do: twin_layout(page, take_twin())
+
+        twin ->
+          twin_layout(page, twin)
+      end
+    end
+  end
+
+  defp lay_out_for_scripts(page, job) do
+    {items, height} =
+      LayoutWorker.layout(job.worker, job.tid, page.nodes, job.width, job.measure, job.view_h,
+        scrollers: true,
+        boxes: true,
+        metrics: true,
+        images: job.images,
+        svg_defs: page.svg_defs
+      )
+
+    if job.ref != nil do
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+      send(job.js, {:layout_now_done, job.ref, rects, {job.width * 1.0, height}})
+    end
+  end
+
+  @doc false
+  # The style and the layout of a twin (`Browser.StyleGate`) in the process of the prewarm that
+  # worked out `page`. (A test calls it)
+  def twin_layout(_page, nil), do: :ok
+
+  def twin_layout(page, twin) do
+    if twin_wanted?(twin) do
+      {base, refs} = twin_base(page, twin)
+      layout_for_scripts(base, %{twin | refs: refs})
+    end
+  end
+
+  @doc false
+  # The base and the sheet refs that a twin (`Browser.StyleGate`) starts from: the base of its
+  # request with the style state of the prewarm `page`, as `Page.layout_base/2` gives them after
+  # the session adopted that state. The bench uses it too.
+  def twin_base(page, twin) do
+    # (the cold run finds the viewport units in the style attributes of its tree, because its
+    # sheets changed. The twin has the sheets of the prewarm, and the prewarm looked only at its
+    # own tree. Without this step, the memo of the twin stays after a resize, with the old sizes)
+    twin.base
+    |> Page.adopt_style_state(Page.style_state(page))
+    |> Page.inline_viewport_units(twin.raw)
+    |> Page.layout_base(twin.raw)
+  end
+
+  @doc false
+  # Whether a twin (`Browser.StyleGate`) is still of use: its request did not yet end its style, and
+  # the script still waits.
+  def twin_wanted?(%{race: race, deadline: deadline}),
+    do: :atomics.get(race, 1) == 0 and System.monotonic_time(:millisecond) < deadline
+
+  @doc false
+  # Whether a run goes on after its style. A request and its twin (`Browser.StyleGate`) race: the
+  # first to end its style wins, and the other stops. `race` is nil for a run with no twin, and
+  # `who` is `:run` or `:twin`. The bench uses it too.
+  def won_style?(nil, _who), do: true
+
+  def won_style?(race, who),
+    do: :atomics.compare_exchange(race, 1, 0, if(who == :twin, do: 2, else: 1)) == :ok
+
+  @doc false
+  # The newest twin (`Browser.StyleGate`) that came to the process of a prewarm, or nil. The bench
+  # uses it too.
+  def take_twin(last \\ nil) do
+    receive do
+      {:style_twin, twin} -> take_twin(twin)
+    after
+      0 -> last
+    end
   end
 
   @doc false
