@@ -2496,7 +2496,13 @@ defmodule Browser.Session do
   # request with the style state of the prewarm `page`, as `Page.layout_base/2` gives them after
   # the session adopted that state. The bench uses it too.
   def twin_base(page, twin) do
-    twin.base |> Page.adopt_style_state(Page.style_state(page)) |> Page.layout_base(twin.raw)
+    # (the cold run finds the viewport units in the style attributes of its tree, because its
+    # sheets changed. The twin has the sheets of the prewarm, and the prewarm looked only at its
+    # own tree. Without this step, the memo of the twin stays after a resize, with the old sizes)
+    twin.base
+    |> Page.adopt_style_state(Page.style_state(page))
+    |> Page.inline_viewport_units(twin.raw)
+    |> Page.layout_base(twin.raw)
   end
 
   @doc false

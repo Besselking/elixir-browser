@@ -456,6 +456,13 @@ defmodule Browser.Page do
   def adopt_style_state(%__MODULE__{} = page, _style), do: page
 
   @doc """
+  Gives `page` with `viewport_units` true also when a style attribute in `raw` has viewport
+  units. (`from_raw/4` looks at the style attributes only when the sheets change.)
+  """
+  def inline_viewport_units(%__MODULE__{} = page, raw),
+    do: %{page | viewport_units: page.viewport_units || inline_viewport_units?(raw)}
+
+  @doc """
   `page` without what `style_state/2` holds: small to copy into another process, which puts a
   style state in it with `adopt_style_state/2`.
   """

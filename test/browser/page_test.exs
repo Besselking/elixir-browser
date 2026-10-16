@@ -460,6 +460,20 @@ defmodule Browser.PageTest do
       assert Page.adopt_style_state(adopted, slim) == adopted
     end
 
+    # The sheets of two pages differ only in the text of one `<style>`: a state without the rules
+    # of the one does not go into the other (its memo was made with other rules)
+    test "a style state without the rules does not go into a page whose sheet has other text" do
+      red = Page.build(~s(<style>p { color: red }</style><p id="a">x</p>), "about:x", @env)
+      blue = Page.build(~s(<style>p { color: blue }</style><p id="a">x</p>), "about:x", @env)
+      raw = set_attr(red.raw, "a", "class", "on")
+      {base, refs} = Page.layout_base(red, raw)
+      slim = Page.style_state(Page.from_raw(base, raw, @env, refs), base)
+      refute Map.has_key?(slim, :rules)
+      assert slim.sheet_refs != blue.sheet_refs
+      assert Page.adopt_style_state(blue, slim) == blue
+      assert Page.adopt_style_state(red, slim).memo == slim.memo
+    end
+
     # (a new shadow tree with its own sheet: `from_raw/4` can keep the memo, so the base has it)
     test "the base of a layout keeps the memo when only a new shadow tree adds a sheet" do
       page = hosts_page()
