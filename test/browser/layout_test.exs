@@ -5148,6 +5148,28 @@ defmodule Browser.LayoutTest do
       assert gl_item(items, "aa").y == gl_item(items, "bb").y
       assert gl_item(items, "cc").y > gl_item(items, "bb").y
     end
+
+    test "glued text in the same style is one item only when nothing is between it" do
+      texts = fn html ->
+        for %{type: :text, text: t} <- gl_layout("<style>body{margin:0}</style>" <> html, 400),
+            do: t
+      end
+
+      # (the same style and no space: one run)
+      assert texts.("<p>foo<span>bar</span></p>") == ["foobar"]
+      # (a style that is not the same: two runs)
+      assert texts.("<p>foo<b>bar</b></p>") == ["foo", "bar"]
+      # (a margin between the two parts: they do not touch)
+      assert texts.(~s(<p>foo<span style="margin-left:5px">bar</span></p>)) == ["foo", "bar"]
+      # (a space that does not break, a six-per-em space and the ideographic space stop a run:
+      # justification stretches the spaces)
+      assert texts.("<p>foo&nbsp;<span>bar</span></p>") == ["foo\u00A0", "bar"]
+      assert texts.("<p>foo\u3000<span>bar</span></p>") |> length() == 2
+      assert texts.("<p>foo\u2005<span>bar</span></p>") |> length() == 2
+      # (with `word-break: break-all` each part is kept: a break can come between them)
+      assert texts.(~s(<p style="word-break:break-all">foo<span>bar</span></p>)) ==
+               ["foo", "bar"]
+    end
   end
 
   describe "letter-spacing and text-transform" do
@@ -5253,6 +5275,30 @@ defmodule Browser.LayoutTest do
     test "text-align-last: justify stretches the last line too" do
       items = just_items("text-align:left;text-align-last:justify;font-size:10px", "aaa bbb")
       assert just_at(items, "bbb").x + just_at(items, "bbb").w == 100
+    end
+
+    test "text-align: justify-all and text-align-last set the last line" do
+      # (a text item keeps `text-align-last` only when it is set: these read it)
+      items = just_items("text-align:justify-all;font-size:10px", "aaa bbb")
+      assert just_at(items, "bbb").x + just_at(items, "bbb").w == 100
+      items = just_items("text-align:left;text-align-last:right;font-size:10px", "aaa bbb")
+      assert just_at(items, "bbb").x + just_at(items, "bbb").w == 100
+      items = just_items("text-align:left;text-align-last:center;font-size:10px", "aaa bbb")
+      assert just_at(items, "aaa").x > 0
+      # (the room on the left and on the right are the same, to the pixel)
+      assert abs(
+               just_at(items, "aaa").x - (100 - just_at(items, "bbb").x - just_at(items, "bbb").w)
+             ) <= 1
+
+      # (the lines before the last follow `text-align`)
+      items =
+        just_items(
+          "text-align:left;text-align-last:right;font-size:10px",
+          "aaa bbb ccc ddd eee fff"
+        )
+
+      assert just_at(items, "aaa").x == 0
+      assert just_at(items, "fff").x + just_at(items, "fff").w == 100
     end
 
     test "text-justify: none leaves the spaces alone" do
@@ -8003,6 +8049,62 @@ defmodule Browser.LayoutNestedBoxesTest do
              Map.take(Layout.shift(plain, 40, 10), [:x, :y, :border])
   end
 
+  # the place of an item and the clips that move with it, one key at a time
+  defp moved_place(it, dx, dy) do
+    it = %{it | x: it.x + dx, y: it.y + dy}
+    it = if it[:xlim] != nil, do: %{it | xlim: it.xlim + dx}, else: it
+    it = if Map.has_key?(it, :clip), do: %{it | clip: %{it.clip | x: it.clip.x + dx}}, else: it
+    it = if Map.has_key?(it, :clip), do: %{it | clip: %{it.clip | y: it.clip.y + dy}}, else: it
+
+    if Map.has_key?(it, :clips),
+      do: %{
+        it
+        | clips: for({r, k, sid} <- it.clips, do: {%{r | x: r.x + dx, y: r.y + dy}, k, sid})
+      },
+      else: it
+  end
+
+  test "an item moves with its xlim, its clip and its clips, whichever of them it has" do
+    # (the usual item, with a clip and clips and no xlim, has a path of its own)
+    :rand.seed(:exsss, {3, 1, 4})
+
+    rect = fn ->
+      %{x: Enum.random(-50..50), y: Enum.random(-50..50), w: 10, h: Enum.random(0..9)}
+    end
+
+    for _ <- 1..2000 do
+      it = %{type: Enum.random([:text, :rect, :box]), x: Enum.random(-99..99), y: 3, w: 5, h: 5}
+      it = Enum.random([it, Map.put(it, :xlim, nil), Map.put(it, :xlim, Enum.random(0..400))])
+      it = Enum.random([it, Map.put(it, :clip, rect.())])
+      clips = for _ <- 1..Enum.random(0..3)//1, do: {rect.(), Enum.random([:auto, :hidden]), 7}
+      it = Enum.random([it, Map.put(it, :clips, clips)])
+      {dx, dy} = {Enum.random([0, -3, 5, 2.5]), Enum.random([0, 7, -1.5])}
+      assert Layout.shift(it, dx, dy) == moved_place(it, dx, dy), inspect({it, dx, dy})
+    end
+  end
+
+  test "a text item in many boxes has 32 keys or fewer" do
+    # (the VM keeps a map of 32 keys or fewer as a flat map, and a larger one as a tree, which is
+    # slower to make and to read. A text item with no `text-align-last` has no `alast` key)
+    page =
+      Page.build(
+        ~s(<div style="overflow:hidden"><div style="overflow:auto;height:50px;position:relative;) <>
+          ~s(z-index:1"><p style="word-break:break-all"><a href="/x">abc</a></p></div></div>),
+        "about:test"
+      )
+
+    {items, _} =
+      Layout.layout(page.nodes, 500, &measure/2, 600, images: %{}, scrollers: true, boxes: true)
+
+    text = Enum.find(items, &(&1.type == :text and &1.text == "abc"))
+    # (the keys that the boxes around it and its style give it)
+    for key <- [:clip, :clips, :sc, :pz, :over, :wc, :href, :tn],
+        do: assert(Map.has_key?(text, key))
+
+    refute Map.has_key?(text, :alast)
+    assert map_size(text) <= 32, inspect(Map.keys(text))
+  end
+
   # Items that each path of `apply_ctx/2` takes: a border with the gap of a legend, a transform,
   # the layers of a shadow and of a gradient, a paint order of its own (an outline, a positioned
   # box), a clip of its own (a box that clips inside a box that clips, a scroller) and a limit of
@@ -8472,6 +8574,71 @@ defmodule Browser.LayoutNestedBoxesTest do
                    ~s(<div style="background:#100000;overflow:auto;min-height:50%">) <>
                    ~s(<div style="height:500px">a</div></div>) <>
                    ~s(<div style="background:#200000;height:80px;flex-shrink:0"></div></div>)
+               )
+    end
+
+    test "a scroll container with a definite basis in a column with a height" do
+      # (Flexbox §4.5: it has no automatic minimum height. §9.7: an item that cannot shrink
+      # keeps its basis, and the content of the item is in it)
+      assert item_height("height:100px", "flex:0 0 150px;overflow:auto") == 150
+      assert item_height("height:100px", "flex:0 1 150px;overflow:auto") == 100
+      assert item_height("height:100px", "flex:1 1 50%;overflow:auto") == 100
+      assert item_height("height:300px", "flex:0 0 50%;overflow:auto") == 150
+
+      # (a header that cannot shrink fills the column: the main part is 0 px high, and its
+      # content is in it. An item with no height has no rect)
+      assert %{1 => 150, 3 => 500} ==
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<header style="background:#100000;height:150px;flex-shrink:0"></header>) <>
+                   ~s(<main style="background:#200000;flex:1 1 0px;overflow:auto">) <>
+                   ~s(<div style="background:#300000;height:500px"></div></main></div>)
+               )
+
+      # (two items that cannot shrink and a gap larger than the column)
+      assert %{3 => 500, 4 => 500} ==
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:10px;gap:50px">) <>
+                   ~s(<div style="background:#100000;flex:1 1 0px;overflow:auto">) <>
+                   ~s(<div style="background:#300000;height:500px"></div></div>) <>
+                   ~s(<div style="background:#200000;flex:1 1 0px;overflow:auto">) <>
+                   ~s(<div style="background:#400000;height:500px"></div></div></div>)
+               )
+    end
+
+    test "the flexed height of a scroll container in a column with a height is definite" do
+      # (Flexbox §9.8: a percentage height in the item resolves against its flexed height, also
+      # when the item keeps the height of its basis)
+      assert %{1 => 100, 2 => 100} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;flex:0 0 100px;overflow:auto">) <>
+                   ~s(<div style="background:#200000;height:100%"></div>) <>
+                   ~s(<div style="height:100px"></div></div></div>)
+               )
+
+      assert %{1 => 60, 2 => 30} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px">) <>
+                   ~s(<div style="background:#100000;flex:1 1 20px;overflow:auto;max-height:60px">) <>
+                   ~s(<div style="background:#200000;height:50%"></div>) <>
+                   ~s(<div style="height:300px"></div></div></div>)
+               )
+    end
+
+    test "a scroll container with a definite basis keeps what sets its height before it is flexed" do
+      # (a min-height, a percentage min-height, a column that wraps and a width from the
+      # content)
+      assert item_height("height:100px", "flex:0 1 150px;overflow:auto;min-height:120px") == 120
+      assert item_height("height:100px", "flex:0 1 150px;overflow:auto;min-height:120%") == 120
+      assert item_height("height:100px;flex-wrap:wrap", "flex:1 1 50px;overflow:auto") == 100
+
+      assert %{1 => 100} =
+               red_heights(
+                 ~s(<div style="display:flex;flex-direction:column;height:100px;align-items:start">) <>
+                   ~s(<div style="background:#100000;) <>
+                   ~s(flex:1 1 50px;overflow:auto"><div style="height:500px;width:30px">) <>
+                   "</div></div></div>"
                )
     end
 

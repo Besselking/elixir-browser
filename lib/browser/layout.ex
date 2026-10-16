@@ -10582,7 +10582,8 @@ defmodule Browser.Layout do
       end
 
     # (the height of the content, for `flex_content_floor/2`)
-    content_h = if Map.get(it, :plain_h?, false), do: {w, h}
+    # (not for an item that is not laid out yet: its height is not the height of its content)
+    content_h = if Map.get(it, :plain_h?, false) and not lazy?, do: {w, h}
     # (a basis of a percentage of no definite height is the content's height, Flexbox §7.2.3)
     basis_def? = match?({:px, _}, it.basis) or (match?({:pct, _}, it.basis) and cs.hdef)
 
@@ -10659,7 +10660,12 @@ defmodule Browser.Layout do
         flex_column_height(st, it, if(it.shrink > 0, do: target, else: it.base), true)
       end)
     else
-      sized
+      # (no item can shrink: each keeps its base. An item that `flex_column_item/4` did not lay
+      # out is laid out here, at its base)
+      Enum.map(
+        sized,
+        &if(Map.get(&1, :lazy, false), do: flex_column_height(st, &1, &1.base, true), else: &1)
+      )
     end
   end
 
