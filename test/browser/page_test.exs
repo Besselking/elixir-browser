@@ -417,6 +417,49 @@ defmodule Browser.PageTest do
       assert laid.sheet_refs == refs
     end
 
+    # A layout for the scripts sends its style state back. When the tree kept the sheets of the
+    # base, the rules and the parsed sheets are not in it: the receiver keeps its own.
+    test "a style state of a tree with the sheets of its base has no rules, and the receiver keeps its own" do
+      page = Page.build(@html, "about:x", @env)
+      raw = set_attr(page.raw, "a", "class", "a on")
+      {base, refs} = Page.layout_base(page, raw)
+      laid = Page.from_raw(base, raw, @env, refs)
+      state = Page.style_state(laid, base)
+      assert Map.keys(state) |> Enum.sort() == [:memo, :sheet_refs, :viewport_units]
+
+      adopted = Page.adopt_style_state(page, state)
+      assert :erts_debug.same(adopted.rules, page.rules)
+      assert adopted.sheet_cache == page.sheet_cache
+      assert adopted.memo == laid.memo
+
+      # (the next tree styles from it as a fresh tree)
+      raw = set_attr(raw, "b", "class", "b on")
+
+      assert Page.from_raw(adopted, raw, @env).pruned ==
+               Page.from_raw(%{page | memo: nil}, raw, @env).pruned
+    end
+
+    test "a style state of a tree with other sheets has the rules again" do
+      page = Page.build(@html, "about:x", @env)
+      other = page.raw ++ [{:element, "style", [], [{:text, ".b { color: teal }"}]}]
+      {base, refs} = Page.layout_base(page, other)
+      laid = Page.from_raw(base, other, @env, refs)
+      state = Page.style_state(laid, base)
+      assert state.rules == laid.rules
+      assert state.sheet_refs == refs
+
+      adopted = Page.adopt_style_state(page, state)
+      assert {adopted.rules, adopted.sheet_refs, adopted.memo} == {laid.rules, refs, laid.memo}
+
+      # A state without the rules does not go into a page with other sheets: its memo was made
+      # with other rules. (The page that the session has may have changed since the run started)
+      raw = set_attr(page.raw, "a", "class", "a on")
+      {base, refs} = Page.layout_base(page, raw)
+      slim = Page.style_state(Page.from_raw(base, raw, @env, refs), base)
+      refute Map.has_key?(slim, :rules)
+      assert Page.adopt_style_state(adopted, slim) == adopted
+    end
+
     # (a new shadow tree with its own sheet: `from_raw/4` can keep the memo, so the base has it)
     test "the base of a layout keeps the memo when only a new shadow tree adds a sheet" do
       page = hosts_page()

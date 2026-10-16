@@ -425,18 +425,42 @@ defmodule Browser.Page do
   What `from_raw/3` worked out about the style sheets and the cascade, to be handed to another copy
   of the page (`adopt_style_state/2`) so that the next tree it is given starts from it: the sheets
   that were parsed and the memo of the cascade.
-  """
-  def style_state(%__MODULE__{} = page) do
-    Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
-  end
 
-  @doc "Puts a `style_state/1` of a later tree in `page` (its rules, sheets and memo go together)."
-  def adopt_style_state(%__MODULE__{} = page, style) do
+  `base` is the page that the run started from (`layout_base/2`). When the tree has the sheets of
+  `base`, the rules and the parsed sheets are not in the state: the receiver has them already, and
+  they are a large part of the copy (in the Speedometer Lit suite, two thirds).
+  """
+  def style_state(page, base \\ nil)
+
+  def style_state(%__MODULE__{sheet_refs: refs} = page, %__MODULE__{sheet_refs: refs}),
+    do: Map.take(page, [:sheet_refs, :viewport_units, :memo])
+
+  def style_state(%__MODULE__{} = page, _base),
+    do: Map.take(page, [:rules, :queries, :sheet_refs, :sheet_cache, :viewport_units, :memo])
+
+  @doc """
+  Puts a `style_state/2` of a later tree in `page` (its rules, sheets and memo go together). A state
+  without the rules is put in only when `page` has the same sheets: else `page` stays as it is (its
+  rules do not agree with the memo).
+  """
+  def adopt_style_state(%__MODULE__{} = page, %{rules: _} = style) do
     # (only the sheets of that tree stay: the cache would hold every tree there was, and be
     # copied whole into every process that lays out a page)
     cache = page.sheet_cache |> Map.merge(style.sheet_cache) |> Map.take([:ua | style.sheet_refs])
     struct(page, %{style | sheet_cache: cache})
   end
+
+  def adopt_style_state(%__MODULE__{sheet_refs: refs} = page, %{sheet_refs: refs} = style),
+    do: struct(page, style)
+
+  def adopt_style_state(%__MODULE__{} = page, _style), do: page
+
+  @doc """
+  `page` without what `style_state/2` holds: small to copy into another process, which puts a
+  style state in it with `adopt_style_state/2`.
+  """
+  def without_style(%__MODULE__{} = page),
+    do: %{page | rules: nil, queries: nil, sheet_cache: %{}, memo: nil}
 
   # A script may add stylesheets (a `<style>`, a `<link>`, the sheets of a frame): the rules
   # follow the sheets the tree has now. Sheets seen before are not fetched or parsed again.
