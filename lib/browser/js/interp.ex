@@ -1706,9 +1706,18 @@ defmodule Browser.JS.Interp do
 
   # ── equality and comparison ────────────────────────────────
 
-  def strict_eq(a, b) do
-    if num?(a) and num?(b), do: Num.equal?(a, b), else: a === b
-  end
+  # (`num?/1` as a guard)
+  defguardp is_num(x) when is_number(x) or x == :nan or x == :infinity or x == :neg_infinity
+
+  # Two plain numbers are equal as Erlang numbers (`0.0 == -0.0`), as `Num.equal?/2` finds.
+  def strict_eq(a, b) when is_number(a) and is_number(b), do: a == b
+  def strict_eq(a, b) when is_num(a) and is_num(b), do: Num.equal?(a, b)
+  def strict_eq(a, b), do: a === b
+
+  # (the first clauses are the cases of the `cond` that come most often, with the same result)
+  def loose_eq(a, b) when is_number(a) and is_number(b), do: a == b
+  def loose_eq(a, b) when is_binary(a) and is_binary(b), do: a == b
+  def loose_eq(a, b) when b == :undefined or b == :null, do: a == :undefined or a == :null
 
   def loose_eq(a, b) do
     cond do
