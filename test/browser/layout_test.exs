@@ -4091,6 +4091,21 @@ defmodule Browser.LayoutTest do
       assert inner != outer
     end
 
+    test "boxes of two sizes with the same transform each get their own matrix" do
+      {items, _} =
+        xf(
+          ~s|<div style="transform:translateX(50%);width:100px;height:20px;background:#eee">a</div>| <>
+            ~s|<div style="transform:translateX(50%);width:40px;height:20px;background:#ddd">b</div>|
+        )
+
+      shifts =
+        for %{type: :rect, xform: [{_, _, _, _, e, _}]} <- items, do: e
+
+      assert shifts == [50.0, 20.0]
+      # (the layout keeps the transforms it read only while it runs)
+      assert Process.get(:layout_transforms) == nil
+    end
+
     test "absolutely positioned boxes keep translate in their position, not in the matrix" do
       {items, _} =
         xf(
@@ -4229,6 +4244,28 @@ defmodule Browser.LayoutTest do
       items = ws("white-space:nowrap", String.duplicate("word ", 20) <> "\n x")
       assert lines(items) == 1
       assert Enum.max_by(items, & &1.x).x > 200
+    end
+
+    test "nowrap collapses white space, with or without wide characters" do
+      place = fn text ->
+        ws("white-space:nowrap", " x<span>#{text}</span> y ") |> Enum.map(&{&1.text, &1.x})
+      end
+
+      assert place.("a\t\n  b") == place.("a b")
+      assert place.("\u00E9\t\n  b") == place.("\u00E9 b")
+      assert length(place.("a b")) == 4
+
+      # (the space at each end of the nowrap text stays)
+      page =
+        Browser.Page.build(
+          ~s|<div style="margin:0">x<span style="white-space:nowrap"> a\t</span>y</div>|,
+          "about:home"
+        )
+
+      {items, _} = Layout.layout(page.nodes, 200, &measure/2)
+      [x, a, y] = for %{type: :text} = t <- items, do: t
+      assert {x.text, a.text, y.text} == {"x", "a", "y"}
+      assert a.x > x.x + x.w and y.x > a.x + a.w
     end
 
     test "pre keeps newlines and does not wrap" do

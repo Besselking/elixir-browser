@@ -152,7 +152,28 @@ defmodule Browser.Transform do
   defp function_list(nil, _w, _h, _units, _translate?), do: nil
   defp function_list("none", _w, _h, _units, _translate?), do: nil
 
+  # (in a layout, many boxes have the same transform: the layout keeps each list it read)
   defp function_list(text, w, h, units, translate?) do
+    case Process.get(:layout_transforms) do
+      nil ->
+        parse_function_list(text, w, h, units, translate?)
+
+      memo ->
+        key = {text, w, h, units, translate?}
+
+        case memo do
+          %{^key => m} ->
+            m
+
+          _ ->
+            m = parse_function_list(text, w, h, units, translate?)
+            Process.put(:layout_transforms, Map.put(memo, key, m))
+            m
+        end
+    end
+  end
+
+  defp parse_function_list(text, w, h, units, translate?) do
     functions = Regex.scan(re(~r/([a-zA-Z0-9]+)\s*\(((?:[^()]|\([^()]*\))*)\)/), text)
 
     if functions == [] do
@@ -351,12 +372,18 @@ defmodule Browser.Transform do
   defp to_rad(n, "grad"), do: n * :math.pi() / 200
   defp to_rad(n, "turn"), do: n * 2 * :math.pi()
 
+  # a number as `angle_rad/1` matches it: `45`, `-.5`, `1.e3`. (`Float.parse/1` does not accept
+  # a leading dot, or a dot just before the exponent)
   defp float(text) do
-    text = if String.starts_with?(text, ["+", "-"]), do: text, else: "+" <> text
-    text = Regex.replace(re(~r/\A([+-])\./), text, "\\g{1}0.")
-    text = if String.contains?(text, [".", "e", "E"]), do: text, else: text <> ".0"
-    text = Regex.replace(re(~r/\.(?=[eE])/), text, ".0")
-    {f, _} = text |> String.trim_leading("+") |> Float.parse()
-    f
+    {neg?, text} =
+      case text do
+        "-" <> t -> {true, t}
+        "+" <> t -> {false, t}
+        t -> {false, t}
+      end
+
+    text = if String.starts_with?(text, "."), do: "0" <> text, else: text
+    {f, _} = text |> String.replace([".e", ".E"], ".0e") |> Float.parse()
+    if neg?, do: -f, else: f
   end
 end

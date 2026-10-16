@@ -376,11 +376,14 @@ defmodule Browser.Layout do
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     Process.put(:layout_fold, Keyword.get_lazy(opts, :fold, &fold_mode_of_env/0))
+    # the transform function lists this layout read (see `Browser.Transform.matrix/3`)
+    Process.put(:layout_transforms, %{})
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    Process.delete(:layout_transforms)
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -3463,11 +3466,20 @@ defmodule Browser.Layout do
     do: pre_text(t, style, acc, ws)
 
   defp walk_text(t, %{ws: :nowrap} = style, acc) do
-    t = drop_wide_breaks(t)
+    ascii? = ascii?(t)
+    t = if ascii?, do: t, else: drop_wide_breaks(t)
     # whitespace collapses, but the words never wrap
-    leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
-    trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
-    words = t |> css_words() |> Enum.map(&{:word, &1, style, :pre})
+    leading =
+      if (ascii? and ascii_space_start?(t)) or (not ascii? and String.match?(t, space_start())),
+        do: [{:space, style}],
+        else: []
+
+    trailing =
+      if (ascii? and ascii_space_end?(t)) or (not ascii? and String.match?(t, space_end())),
+        do: [{:space, style}],
+        else: []
+
+    words = t |> css_words(ascii?) |> Enum.map(&{:word, &1, style, :pre})
 
     case words do
       [] -> if t == "", do: acc, else: [{:space, style} | acc]

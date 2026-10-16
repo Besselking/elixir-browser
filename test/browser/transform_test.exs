@@ -43,6 +43,19 @@ defmodule Browser.TransformTest do
     assert near(point(m(%{"transform" => "rotate(200grad)"}), 10, 20), {110, 70})
   end
 
+  test "angles with a sign, a leading or trailing dot, or an exponent" do
+    quarter = point(m(%{"transform" => "rotate(90deg)"}), 10, 20)
+
+    for angle <- ~w(.25turn +.25turn 9e1deg 9E1deg 90.deg 90.e0deg 1.5707963267948966rad -270deg) do
+      assert near(point(m(%{"transform" => "rotate(#{angle})"}), 10, 20), quarter), angle
+    end
+
+    assert near(point(m(%{"transform" => "rotate(-.5turn)"}), 10, 20), {110, 70})
+    assert m(%{"transform" => "rotate(0)"}) == nil
+    assert m(%{"transform" => "rotate(-0)"}) == nil
+    assert m(%{"transform" => "rotate(5)"}) == nil
+  end
+
   test "scale grows about the centre" do
     matrix = m(%{"transform" => "scale(2)"})
     assert near(point(matrix, 60, 45), {60, 45})
