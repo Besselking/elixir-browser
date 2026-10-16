@@ -14,6 +14,7 @@ defmodule Browser.Application do
         Browser.Console,
         Browser.NetLog,
         Browser.HttpCache,
+        Browser.SheetCache,
         Browser.Cookies,
         Browser.LocalStorage,
         Browser.IndexedDB

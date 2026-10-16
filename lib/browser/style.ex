@@ -9,7 +9,7 @@ defmodule Browser.Style do
   property => value) for layout to read.
   """
 
-  alias Browser.{CSS, MediaQuery}
+  alias Browser.{CSS, MediaQuery, SheetCache}
 
   import Browser.Re, only: [re: 1]
 
@@ -54,6 +54,8 @@ defmodule Browser.Style do
   @above_layers 2_000_000
   # the rank of the initial values of `@property` registrations: below every layer
   @registered_rank 1_500_000
+  # a sheet this big or bigger is kept parsed in `Browser.SheetCache`
+  @sheet_cache_min 8 * 1024
   @default_fs 16.0
 
   @shorthands %{
@@ -251,9 +253,34 @@ defmodule Browser.Style do
   The rules of one style sheet (`css`, at the address `base`), not yet for a tree: `scope_rules/2`
   gives them one. A page that has the same sheet in each of a hundred copies of a component parses
   it once.
+
+  A sheet of `@sheet_cache_min` bytes or more goes through `Browser.SheetCache`, so that each new
+  layout process does not parse it again.
   """
-  def parse_sheet(origin, css, base) do
-    for rule <- CSS.parse(css),
+  def parse_sheet(origin, css, base) when byte_size(css) >= @sheet_cache_min do
+    # (the rules depend on `base` only through the `url(` values, see `absolutize_urls/2`. The key
+    # of a sheet without them has nil, the key of a sheet with them has `{:base, base}`)
+    case SheetCache.get({origin, css, nil}) || SheetCache.get({origin, css, {:base, base}}) do
+      nil ->
+        parsed = CSS.parse(css)
+        key_base = if urls?(parsed), do: {:base, base}
+        SheetCache.put({origin, css, key_base}, sheet_rules(origin, parsed, base))
+
+      rules ->
+        rules
+    end
+  end
+
+  def parse_sheet(origin, css, base), do: sheet_rules(origin, CSS.parse(css), base)
+
+  defp urls?(parsed) do
+    Enum.any?(parsed, fn rule ->
+      Enum.any?(rule.decls, fn {_, value, _} -> String.contains?(value, "url(") end)
+    end)
+  end
+
+  defp sheet_rules(origin, parsed, base) do
+    for rule <- parsed,
         decls = rule.decls |> absolutize_urls(base) |> relevant(),
         decls != [],
         do:
