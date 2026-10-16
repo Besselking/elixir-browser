@@ -16,22 +16,38 @@ defmodule Browser.JS.GC do
   of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
   a lift template only while the template runs, so it is a root like any other key. The
-  fields of a heap record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold
-  counts and keys, and a count must not keep a dead object alive. The cells of the inline
+  walk reads the document's state through `Browser.JS.DOM.gc_root/1`, which leaves out the
+  node table and the other fields that hold no JS value. The lexer's tables and the boxes
+  of the layout are not roots: they hold offsets and numbers only. The fields of a heap
+  record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold counts and keys,
+  and a count must not keep a dead object alive. The cells of the inline
   caches (step A2) are process keys that are negative integers. They are not heap entries
   and not roots: a cell can hold the id of a prototype, and a freed prototype makes the
-  cell miss (`Browser.JS.Shape`).
+  cell miss (`Browser.JS.Shape`). The leaf frames of a normal build (the keys from
+  `Browser.JS.Interp.leaf_base/0` up) are not heap entries and not roots: no call is live
+  during a collect, so the collector erases them.
 
   It is off unless `:js_gc_at` is set (the page runtime does, `Browser.JS.eval/2` does not,
-  since it holds a result across the timers).
+  since it holds a result across the timers). A threshold of 0 stays 0, so the collector
+  runs after each timer: `JS_GC=every` sets this for each process that `enable/0` switches
+  on, so that the tests can find a value that only an unwalked field holds.
   """
 
+  import Bitwise
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Interp, as: Interp
 
   @min_collect 100_000
 
+  # Check mode (`JS_RESOLVE_CHECK=1`): the fields of the document that the walk leaves out
+  # must hold no JS value (`check_no_values/1`).
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
   @doc "Switches the collector on for this process."
-  def enable, do: Process.put(:js_gc_at, @min_collect)
+  def enable do
+    at = if Application.get_env(:browser, :js_gc_every, false), do: 0, else: @min_collect
+    Process.put(:js_gc_at, at)
+  end
 
   # The Erlang collector copies everything alive twice: out of a full young heap, then into the old
   # heap. A young heap that is small next to what is alive makes that happen often, and what dies a
@@ -68,6 +84,11 @@ defmodule Browser.JS.GC do
     {ids, roots} =
       :lists.foldl(
         fn
+          # (a leaf frame of a normal build, see `Browser.JS.Interp`: no script runs during
+          # a collect, so no call holds it. The key is not a heap id, and a bitmap up to it
+          # would be too large. The key goes, so that the walk cannot read a number of that
+          # size as the id of the old frame.)
+          {k, _}, acc when is_integer(k) and k >= Interp.leaf_base() -> erase_key(k, acc)
           {k, _}, {ids, roots} when is_integer(k) and k >= 0 -> {[k | ids], roots}
           # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
           # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
@@ -97,40 +118,94 @@ defmodule Browser.JS.GC do
           # built-in functions, which are roots anyway, and shape ids and positions, which
           # are not heap ids, see `Browser.JS.Interp`)
           {:js_arr_iter_pos, _}, acc -> acc
+          # (the parser's source table and the lexer's table hold the source, token
+          # offsets and tokens: an offset that equals the id of a dead object must not keep
+          # it alive)
+          {:js_srctab, _}, acc -> acc
+          {:lex_table, _}, acc -> acc
+          # (the boxes of the layout and the counts of the forced layouts hold numbers
+          # only, see `Browser.JS.DOM`)
+          {:dom_page_rects, _}, acc -> acc
+          {:dom_forced_rects, _}, acc -> acc
+          {:dom_forced, _}, acc -> acc
+          {:dom_forced_spent, _}, acc -> acc
+          # (the document's state: only the fields that can hold a JS value, see
+          # `Browser.JS.DOM.gc_root/1`; the node table is large and holds no JS value)
+          {:dom, v}, {ids, roots} when is_map(v) -> {ids, [dom_root(v) | roots]}
           {_, v}, {ids, roots} -> {ids, [v | roots]}
         end,
         {[], []},
         Process.get()
       )
 
-    # (the marks live in a table of their own: no garbage for the process's collector to sweep)
-    marks = :ets.new(:js_marks, [:set, :private])
+    # The marks are a bitmap with one bit for each heap id up to the largest key. A bit costs
+    # less than an entry of a table, and it makes no garbage for the process's collector.
+    marks = :atomics.new(div(:lists.max([0 | ids]), 64) + 1, signed: false)
+    mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
 
-    try do
-      mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
-      live = :ets.info(marks, :size)
+    {freed, live} =
+      :lists.foldl(
+        fn id, {n, live} ->
+          if marked?(marks, id) do
+            {n, live + 1}
+          else
+            :erlang.erase(id)
+            {n + 1, live}
+          end
+        end,
+        {0, 0},
+        ids
+      )
 
-      freed =
-        :lists.foldl(
-          fn id, n ->
-            if :ets.member(marks, id) do
-              n
-            else
-              :erlang.erase(id)
-              n + 1
-            end
-          end,
-          0,
-          ids
-        )
+    Process.put(:js_freed, :erlang.get(:js_next) - live)
+    # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
+    if Process.get(:js_gc_at) != 0, do: Process.put(:js_gc_at, max(@min_collect, 2 * live))
+    freed
+  end
 
-      Process.put(:js_freed, :erlang.get(:js_next) - live)
-      Process.put(:js_gc_at, max(@min_collect, 2 * live))
-      freed
-    after
-      :ets.delete(marks)
+  # (the erase of a leaf frame in `collect/0`)
+  defp erase_key(k, acc) do
+    :erlang.erase(k)
+    acc
+  end
+
+  @compile {:inline, marked?: 2}
+  defp marked?(marks, id),
+    do: (:atomics.get(marks, (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
+
+  # Marks `id`; false when it was marked before. Only a key of the process dictionary gets
+  # here, so the bitmap has a bit for it.
+  @compile {:inline, mark_new: 2}
+  defp mark_new(marks, id) do
+    i = (id >>> 6) + 1
+    bit = 1 <<< (id &&& 63)
+    word = :atomics.get(marks, i)
+
+    if (word &&& bit) == 0 do
+      :atomics.put(marks, i, word ||| bit)
+      true
+    else
+      false
     end
   end
+
+  defp dom_root(s) do
+    if @check, do: check_no_values(Browser.JS.DOM.gc_left_out(s))
+    Browser.JS.DOM.gc_root(s)
+  end
+
+  # Check mode: `t` holds no object and no fun. The walk of `collect/0` leaves `t` out, so
+  # a JS value in it would not keep its object alive.
+  defp check_no_values(t) do
+    if value?(t), do: raise(ArgumentError, "resolve check: a JS value in an unwalked field")
+  end
+
+  defp value?({:obj, _}), do: true
+  defp value?(t) when is_function(t), do: true
+  defp value?(t) when is_tuple(t), do: value?(Tuple.to_list(t))
+  defp value?([h | t]), do: value?(h) or value?(t)
+  defp value?(t) when is_map(t), do: value?(:maps.to_list(t))
+  defp value?(_), do: false
 
   @doc false
   # The dangling scan of check mode (`Browser.JS.Interp.check_dangling/1`): the names of the
@@ -394,7 +469,7 @@ defmodule Browser.JS.GC do
         stack
 
       obj ->
-        if :ets.insert_new(marks, {t}), do: [obj | stack], else: stack
+        if mark_new(marks, t), do: [obj | stack], else: stack
     end
   end
 

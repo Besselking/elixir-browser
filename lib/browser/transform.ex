@@ -13,6 +13,8 @@ defmodule Browser.Transform do
 
   alias Browser.Calc
 
+  import Browser.Re, only: [re: 1]
+
   @identity {1.0, 0.0, 0.0, 1.0, 0.0, 0.0}
 
   @doc "The properties that can transform an element."
@@ -151,7 +153,7 @@ defmodule Browser.Transform do
   defp function_list("none", _w, _h, _units, _translate?), do: nil
 
   defp function_list(text, w, h, units, translate?) do
-    functions = Regex.scan(~r/([a-zA-Z0-9]+)\s*\(((?:[^()]|\([^()]*\))*)\)/, text)
+    functions = Regex.scan(re(~r/([a-zA-Z0-9]+)\s*\(((?:[^()]|\([^()]*\))*)\)/), text)
 
     if functions == [] do
       nil
@@ -288,7 +290,7 @@ defmodule Browser.Transform do
     value
     |> String.trim()
     |> String.downcase()
-    |> then(&Regex.scan(~r/[\w.%-]*\((?:[^()]|\([^()]*\))*\)|\S+/, &1))
+    |> then(&Regex.scan(re(~r/[\w.%-]*\((?:[^()]|\([^()]*\))*\)|\S+/), &1))
     |> List.flatten()
   end
 
@@ -327,7 +329,7 @@ defmodule Browser.Transform do
   # deg, rad, grad, turn; a bare 0 is allowed
   defp angle_rad(text) do
     case Regex.run(
-           ~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(deg|rad|grad|turn)?\s*\z/i,
+           re(~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(deg|rad|grad|turn)?\s*\z/i),
            text
          ) do
       [_, n] -> if(float(n) == 0.0, do: 0.0)
@@ -338,7 +340,7 @@ defmodule Browser.Transform do
 
   # `calc(...)` of angles is rare: only the plain forms above are understood, plus `calc(1turn)`
   defp calc_angle(text) do
-    case Regex.run(~r/\Acalc\(\s*(.+)\s*\)\z/i, String.trim(text)) do
+    case Regex.run(re(~r/\Acalc\(\s*(.+)\s*\)\z/i), String.trim(text)) do
       [_, inner] when inner != text -> angle_rad(inner)
       _ -> nil
     end
@@ -351,9 +353,9 @@ defmodule Browser.Transform do
 
   defp float(text) do
     text = if String.starts_with?(text, ["+", "-"]), do: text, else: "+" <> text
-    text = Regex.replace(~r/\A([+-])\./, text, "\\g{1}0.")
+    text = Regex.replace(re(~r/\A([+-])\./), text, "\\g{1}0.")
     text = if String.contains?(text, [".", "e", "E"]), do: text, else: text <> ".0"
-    text = Regex.replace(~r/\.(?=[eE])/, text, ".0")
+    text = Regex.replace(re(~r/\.(?=[eE])/), text, ".0")
     {f, _} = text |> String.trim_leading("+") |> Float.parse()
     f
   end

@@ -16,6 +16,8 @@ defmodule Browser.Layout do
 
   alias Browser.{Backgrounds, Shadows}
 
+  import Browser.Re, only: [re: 1]
+
   # item types painted before (underneath) the text of the same page
   @behind_text [:rect, :shadow, :inset_shadow, :bgimage]
 
@@ -3483,7 +3485,9 @@ defmodule Browser.Layout do
 
   defp walk_zwsp_text(t, %{wst: wst} = style, acc) do
     ops =
-      ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+|\x{200B}|[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{200B}]+/u
+      re(
+        ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+|\x{200B}|[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}\x{200B}]+/u
+      )
       |> Regex.scan(drop_wide_breaks(t))
       |> Enum.map(fn
         ["\u200B"] when wst != :none ->
@@ -3492,7 +3496,9 @@ defmodule Browser.Layout do
         [tok] ->
           if String.match?(
                tok,
-               ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+               re(
+                 ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+               )
              ),
              do: {:space, style},
              else: {:word, tok, style}
@@ -3647,15 +3653,21 @@ defmodule Browser.Layout do
 
   defp space_start,
     do:
-      ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+      re(
+        ~r/\A[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]/u
+      )
 
   defp space_end,
     do:
-      ~r/[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}][ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+\z/u
+      re(
+        ~r/[^ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}][ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+\z/u
+      )
 
   defp space_run,
     do:
-      ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+/u
+      re(
+        ~r/[ \t\n\r\f\v\x{85}\x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{2028}\x{2029}\x{205F}]+/u
+      )
 
   # words split on white space except the ideographic space and the no-break ones
   # (an ideographic space is a word character that may hang at the end of a line)
@@ -3752,7 +3764,9 @@ defmodule Browser.Layout do
   defp line_ops(line, style, :break_spaces, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    ~r/\t|[ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}]|[^ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}\t]+/u
+    re(
+      ~r/\t|[ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}]|[^ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}\t]+/u
+    )
     |> Regex.scan(String.replace(line, "\r", " "))
     |> Enum.map_reduce({prev, 0}, fn
       # a tab is one unbreakable word as wide as the spaces it stands for
@@ -3783,7 +3797,7 @@ defmodule Browser.Layout do
   defp line_ops(line, style, :pre_wrap, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    tokens = Regex.scan(~r/ +|[^ ]+/, expand_tabs(line, style))
+    tokens = Regex.scan(re(~r/ +|[^ ]+/), expand_tabs(line, style))
     # (counted once: the length of the list for each of its words made a long paragraph quadratic)
     count = length(tokens)
 
@@ -3854,7 +3868,7 @@ defmodule Browser.Layout do
     space = measure.(" ", %{style | tabw: nil})
     tab = %{style | tabw: {tab_px(style, space), space / 2}}
 
-    ~r/\t|[^\t]+/
+    re(~r/\t|[^\t]+/)
     |> Regex.scan(line)
     |> Enum.map(fn
       ["\t"] -> {:word, " ", tab, :pre}

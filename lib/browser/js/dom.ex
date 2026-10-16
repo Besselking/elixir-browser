@@ -16,6 +16,7 @@ defmodule Browser.JS.DOM do
   import Kernel, except: [node: 1]
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
+  alias Browser.JS.Str
 
   @void ~w(area base br col embed hr img input link meta param source track wbr)
 
@@ -23,6 +24,32 @@ defmodule Browser.JS.DOM do
 
   defp st, do: Process.get(:dom)
   defp put_st(s), do: Process.put(:dom, s)
+
+  # The fields of the state (and of the saved fields of a realm) that hold no JS value: the
+  # node table, the indexes of the ids and of the attribute values, the boxes, node ids, counts
+  # and sizes. The JS collector reads each integer as a heap id, so these fields can keep dead
+  # objects alive, and the node table makes each collection long.
+  @gc_fields ~w(nodes ids aidx rects rev next next_nid usp doc main frames meta fdirty ce_done
+                current_script write_after focus_ed focus_ctl scroll content width height
+                hist_idx history_before)a
+
+  @doc """
+  The part of the state `s` that the JS collector walks (`Browser.JS.GC.collect/0`): the
+  state without the fields that hold no JS value. A node map holds only primitives and
+  node ids. The other fields (the wrappers, the listeners, the custom elements, the history
+  states and the saved keys of the realms) can hold JS values.
+  """
+  def gc_root(s) do
+    realms =
+      for {d, r} <- s.realms, into: %{}, do: {d, %{r | fields: Map.drop(r.fields, @gc_fields)}}
+
+    %{Map.drop(s, @gc_fields) | realms: realms}
+  end
+
+  @doc false
+  # Check mode: the fields that `gc_root/1` leaves out, which must hold no JS value.
+  def gc_left_out(s),
+    do: [Map.take(s, @gc_fields) | for({_, r} <- s.realms, do: Map.take(r.fields, @gc_fields))]
 
   # a node of a frame that was torn down is gone from the map, but a page may still hold it:
   # it then reads as an empty, detached node
@@ -85,6 +112,80 @@ defmodule Browser.JS.DOM do
   defp index_in(ids, nil, _), do: ids
   defp index_in(ids, id, nid), do: Map.update(ids, id, [nid], &[nid | &1])
 
+  # The elements by the value of an attribute, for a few names: name => value => set of node
+  # ids (`%{nid => true}`, `st().aidx`). A selector such as `[data-id="7"]` gets its
+  # candidates from it (see `attr_candidates/3`). A name gets an index the first time that a
+  # search uses it, and at most @attr_names names get one. The writes to the node table keep it
+  # up to date, as they keep `ids`. An element with no parent is the top of its tree, and a
+  # search never gives the top of a tree, so the index does not have it. A page that draws a
+  # list again and again (`innerHTML`) thus does not give a value a long list of old elements.
+  # Many elements can have one value (`role="option"`), so each value has a set and not a list:
+  # a change of one element does not walk all of them.
+  @attr_names 4
+
+  defp attr_value(%{kind: :element, attrs: attrs, parent: p}, name) when p != nil do
+    case List.keyfind(attrs, name, 0) do
+      {_, v} -> v
+      nil -> nil
+    end
+  end
+
+  defp attr_value(_, _), do: nil
+
+  # the indexes after a write of node `nid`: `old` is the node before (nil for a new node)
+  defp reindex_all(s, _nid, %{attrs: attrs, parent: p}, %{attrs: attrs, parent: q})
+       when p == q or (p != nil and q != nil),
+       do: s
+
+  defp reindex_all(s, nid, old, new),
+    do: %{s | ids: reindex(s.ids, nid, old, new), aidx: reindex_attrs(s.aidx, nid, old, new)}
+
+  defp reindex_attrs(aidx, _nid, _old, _new) when map_size(aidx) == 0, do: aidx
+
+  defp reindex_attrs(aidx, nid, old, new) do
+    Enum.reduce(aidx, aidx, fn {name, vals}, acc ->
+      o = attr_value(old, name)
+      n = attr_value(new, name)
+      if o == n, do: acc, else: %{acc | name => vals |> attr_out(o, nid) |> attr_in(n, nid)}
+    end)
+  end
+
+  defp attr_in(vals, nil, _), do: vals
+  defp attr_in(vals, v, nid), do: Map.update(vals, v, %{nid => true}, &Map.put(&1, nid, true))
+
+  defp attr_out(vals, nil, _), do: vals
+
+  defp attr_out(vals, v, nid) do
+    case vals do
+      %{^v => %{^nid => _} = set} when map_size(set) == 1 -> Map.delete(vals, v)
+      %{^v => set} -> %{vals | v => Map.delete(set, nid)}
+      _ -> vals
+    end
+  end
+
+  # the index of the values of `name`, made now when the name has none; nil when the name has
+  # none and the index has no room for it
+  defp attr_index(name) do
+    s = st()
+
+    case s.aidx do
+      %{^name => vals} ->
+        vals
+
+      aidx when map_size(aidx) < @attr_names ->
+        vals =
+          Enum.reduce(s.nodes, %{}, fn {nid, n}, acc ->
+            attr_in(acc, attr_value(n, name), nid)
+          end)
+
+        put_st(%{s | aidx: Map.put(aidx, name, vals)})
+        vals
+
+      _ ->
+        nil
+    end
+  end
+
   # The tokens of the `class` attribute of an element, kept on the node as `cls`:
   # `{value, tokens}`. Selectors and `classList` read the tokens many times for each change of
   # the attribute, and a split of the value at each read was a large part of a search. Each
@@ -128,8 +229,8 @@ defmodule Browser.JS.DOM do
         do: %{s | dirty: true},
         else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
 
-    ids = reindex(s.ids, n.id, Map.get(s.nodes, n.id), n)
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), ids: ids, rev: s.rev + 1})
+    s = reindex_all(s, n.id, Map.get(s.nodes, n.id), n)
+    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
@@ -165,13 +266,8 @@ defmodule Browser.JS.DOM do
     if n.tag == "iframe", do: Process.put(:dom_has_iframe, true)
     n = with_classes(n)
 
-    put_st(%{
-      s
-      | next: id + 1,
-        nodes: Map.put(s.nodes, id, n),
-        ids: reindex(s.ids, id, nil, n),
-        rev: s.rev + 1
-    })
+    s = reindex_all(s, id, nil, n)
+    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
 
     id
   end
@@ -386,6 +482,13 @@ defmodule Browser.JS.DOM do
       | nodes: Map.drop(s.nodes, ids),
         ids:
           Enum.reduce(ids, s.ids, fn nid, acc -> unindex(acc, element_id(s.nodes[nid]), nid) end),
+        aidx:
+          Map.new(s.aidx, fn {name, vals} ->
+            {name,
+             Enum.reduce(ids, vals, fn nid, acc ->
+               attr_out(acc, attr_value(s.nodes[nid], name), nid)
+             end)}
+          end),
         wrappers: Map.drop(s.wrappers, ids ++ [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
         listeners: listeners,
         realms: realms,
@@ -528,6 +631,7 @@ defmodule Browser.JS.DOM do
     put_st(%{
       nodes: %{},
       ids: %{},
+      aidx: %{},
       rev: 0,
       next: 1,
       wrappers: %{},
@@ -589,12 +693,8 @@ defmodule Browser.JS.DOM do
     old = node(nid)
     n = with_classes(fun.(old))
 
-    put_st(%{
-      s
-      | nodes: Map.put(s.nodes, nid, n),
-        ids: reindex(s.ids, nid, old, n),
-        rev: s.rev + 1
-    })
+    s = reindex_all(s, nid, old, n)
+    put_st(%{s | nodes: Map.put(s.nodes, nid, n), rev: s.rev + 1})
   end
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
@@ -1150,7 +1250,7 @@ defmodule Browser.JS.DOM do
   defp edit_attr(n) do
     case get_attr(n, "contenteditable") do
       nil -> nil
-      v -> String.downcase(v) in ["", "true", "plaintext-only"]
+      v -> Str.downcase(v) in ["", "true", "plaintext-only"]
     end
   end
 
@@ -1243,6 +1343,11 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  @layout_wait 5_000
+
+  @doc "The time (ms) a script waits for a layout it asked for (see `layout_now/0`)."
+  def layout_wait, do: @layout_wait
+
   # A layout for the scripts, made while they wait. It costs as much as the layout of the
   # page, so it is made only when the tree changed since the last one, and only while the
   # layouts made for the document so far have taken less than a few seconds and a third of the
@@ -1269,7 +1374,7 @@ defmodule Browser.JS.DOM do
         receive do
           {:layout_now_done, ^ref, rects, content} -> {rects, content}
         after
-          5_000 -> nil
+          @layout_wait -> nil
         end
 
       done = System.monotonic_time(:millisecond)
@@ -1295,7 +1400,7 @@ defmodule Browser.JS.DOM do
   Asks the host to lay the page out as it is now, and does not wait for the answer: what the host
   works out about the page's style sheets and cascade (it keeps it for the layouts that follow) is
   then ready by the time a script asks where something is. A frame that has just been parsed calls
-  this before its scripts run.
+  this before its scripts run. The request has no reference (`nil`): no script reads its boxes.
   """
   def prewarm_layout do
     info = Process.get(:rt_info, %{})
@@ -1303,7 +1408,7 @@ defmodule Browser.JS.DOM do
     if info[:layout_now] && not Process.get(:js_hidden, false) do
       Process.delete(:dom_export_frames)
       raw = Enum.map(node(st().main).kids, &export/1)
-      send(info.owner, {:layout_now, self(), make_ref(), raw})
+      send(info.owner, {:layout_now, self(), nil, raw})
     end
 
     :ok
@@ -1356,12 +1461,14 @@ defmodule Browser.JS.DOM do
   defp scrolling_element?(n), do: n.kind == :document or n.tag in ["html", "body"]
 
   defp metric(n, key) do
-    {x, y, w, h} = page_rect(n.id)
+    scroller = scrolling_element?(n)
+    # (only a key that reads a box or the content size lays the page out)
+    {x, y, w, h} = if box_metric?(key, scroller), do: page_rect(n.id), else: {0, 0, 0, 0}
     {sx, sy} = st().scroll
     {cw, ch} = st().content
 
     value =
-      case {key, scrolling_element?(n)} do
+      case {key, scroller} do
         {"scrollTop", true} -> sy
         {"scrollLeft", true} -> sx
         {k, false} when k in ["scrollTop", "scrollLeft"] -> 0
@@ -1382,6 +1489,14 @@ defmodule Browser.JS.DOM do
 
     value |> round() |> float()
   end
+
+  defp box_metric?(key, _) when key in ["offsetWidth", "offsetHeight", "offsetTop", "offsetLeft"],
+    do: true
+
+  defp box_metric?(key, true), do: key in ["scrollHeight", "scrollWidth"]
+
+  defp box_metric?(key, false),
+    do: key in ["clientWidth", "clientHeight", "scrollWidth", "scrollHeight"]
 
   defp rect_object(nid) do
     {x, y, w, h} = page_rect(nid)
@@ -1580,7 +1695,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       form when is_integer(form) ->
-        if String.downcase(get_attr(node(form), "method") || "") != "dialog" and
+        if Str.downcase(get_attr(node(form), "method") || "") != "dialog" and
              not formmethod_dialog?(cid),
            do: :ok,
            else: do_dialog_submit(form, cid)
@@ -1592,7 +1707,7 @@ defmodule Browser.JS.DOM do
   defp formmethod_dialog?(cid) do
     case control_node(cid) do
       nil -> false
-      nid -> String.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
+      nid -> Str.downcase(get_attr(node(nid), "formmethod") || "") == "dialog"
     end
   end
 
@@ -1752,7 +1867,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp set_attr(nid, name, value) do
-    name = String.downcase(name)
+    name = Str.downcase(name)
     old_value = nid |> node() |> get_attr(name)
     set_attr_quiet(nid, name, value)
     attribute_changed(nid, name, old_value, value)
@@ -1773,7 +1888,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp remove_attr(nid, name) do
-    name = String.downcase(name)
+    name = Str.downcase(name)
 
     # a dialog that is not open is not modal any more
     if name == "open" and List.keymember?(node(nid).internal, "@modal", 0),
@@ -1922,7 +2037,7 @@ defmodule Browser.JS.DOM do
         {:ok, float(%{element: 1, text: 3, comment: 8, document: 9, fragment: 11}[k])}
 
       {"nodeName", :element} ->
-        {:ok, String.upcase(n.tag)}
+        {:ok, Str.upcase(n.tag)}
 
       {"nodeName", :text} ->
         {:ok, "#text"}
@@ -2075,7 +2190,7 @@ defmodule Browser.JS.DOM do
   defp element_get(n, key, _self) do
     case key do
       "tagName" ->
-        {:ok, String.upcase(n.tag)}
+        {:ok, Str.upcase(n.tag)}
 
       "localName" ->
         {:ok, n.tag}
@@ -2108,7 +2223,7 @@ defmodule Browser.JS.DOM do
         {:ok,
          case get_attr(n, "contenteditable") do
            nil -> "inherit"
-           v -> if String.downcase(v) in ["", "true"], do: "true", else: String.downcase(v)
+           v -> if Str.downcase(v) in ["", "true"], do: "true", else: Str.downcase(v)
          end}
 
       "isContentEditable" ->
@@ -2220,8 +2335,8 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp type_of(%{tag: "input"} = n), do: String.downcase(attr_or(n, "type", "text"))
-  defp type_of(%{tag: "button"} = n), do: String.downcase(attr_or(n, "type", "submit"))
+  defp type_of(%{tag: "input"} = n), do: Str.downcase(attr_or(n, "type", "text"))
+  defp type_of(%{tag: "button"} = n), do: Str.downcase(attr_or(n, "type", "submit"))
   defp type_of(n), do: attr_or(n, "type", "")
 
   defp form_of(nid) do
@@ -2361,7 +2476,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       {"designMode", :document} ->
-        put_st(%{st() | design_mode: String.downcase(to_str(v)) == "on"})
+        put_st(%{st() | design_mode: Str.downcase(to_str(v)) == "on"})
         :ok
 
       _ ->
@@ -2534,7 +2649,7 @@ defmodule Browser.JS.DOM do
     |> String.split(";")
     |> Enum.flat_map(fn d ->
       case String.split(d, ":", parts: 2) do
-        [k, v] -> [{String.trim(k) |> String.downcase(), String.trim(v)}]
+        [k, v] -> [{String.trim(k) |> Str.downcase(), String.trim(v)}]
         _ -> []
       end
     end)
@@ -2573,12 +2688,12 @@ defmodule Browser.JS.DOM do
   end
 
   defp computed_default(n, prop) do
-    {_, _, w, h} = page_rect(n.id)
     px = fn v -> "#{round(v)}px" end
 
+    # (only the width and the height read the box, so only they lay the page out)
     case prop do
-      "width" -> px.(w)
-      "height" -> px.(h)
+      "width" -> px.(elem(page_rect(n.id), 2))
+      "height" -> px.(elem(page_rect(n.id), 3))
       "display" -> if(n.tag in @block_tags, do: "block", else: "inline")
       "position" -> "static"
       "visibility" -> "visible"
@@ -2996,7 +3111,7 @@ defmodule Browser.JS.DOM do
     @compound_re
     |> Regex.scan(s)
     |> Enum.map(fn
-      [_, tag] when tag != "" -> {:tag, String.downcase(tag)}
+      [_, tag] when tag != "" -> {:tag, Str.downcase(tag)}
       [_, "", id] -> {:id, id}
       [_, "", "", cls] -> {:class, cls}
       [_, "", "", "", attr] -> {:attr, parse_attr(attr)}
@@ -3015,10 +3130,10 @@ defmodule Browser.JS.DOM do
         {s, nil, nil}
 
       [_, name] ->
-        {String.downcase(name), nil, nil}
+        {Str.downcase(name), nil, nil}
 
       [_, name, op | vals] ->
-        {String.downcase(name), op, vals |> Enum.take(3) |> Enum.find("", &(&1 != ""))}
+        {Str.downcase(name), op, vals |> Enum.take(3) |> Enum.find("", &(&1 != ""))}
     end
   end
 
@@ -3213,7 +3328,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp parse_anb(f) do
-    f = f |> String.downcase() |> String.replace(~r/\s+/, "")
+    f = f |> Str.downcase() |> String.replace(~r/\s+/, "")
 
     case f do
       "odd" ->
@@ -3254,40 +3369,73 @@ defmodule Browser.JS.DOM do
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
 
-    case id_candidates(sels) do
+    case candidates(sels, root) do
       :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
       nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
     end
   end
 
-  # The elements that can match a selector list, when the index of the ids gives them, or
-  # :walk. A selector list with one selector whose last compound has an id (`#a`,
-  # `ul > li#a.b`) can match only an element with that id. When at most one element has the id,
-  # the tree is not walked. When more elements have it, the tree is walked, for the reason
-  # that `element_by_id/2` gives.
-  defp id_candidates(sels) do
-    case selector_id(sels) do
+  # The elements that can match a selector list, when an index gives them, or :walk. A
+  # selector list with one selector whose last compound has an id (`#a`, `ul > li#a.b`) can
+  # match only an element with that id. When at most one element has the id, the tree is not
+  # walked. When more elements have it, the tree is walked, for the reason that
+  # `element_by_id/2` gives. A last compound with no id but with `[name="v"]` can match only an
+  # element with that value (see `attr_candidates/3`).
+  defp candidates(sels, root) do
+    case selector_key(sels) do
       nil ->
         :walk
 
-      id ->
+      {:id, id} ->
         case st().ids do
           %{^id => [nid]} -> [nid]
           %{^id => _} -> :walk
           _ -> []
         end
+
+      {:attr, name, v} ->
+        case attr_index(name) do
+          nil -> :walk
+          %{^v => set} -> attr_candidates(set, root, sels)
+          _ -> []
+        end
     end
   end
 
-  # the id in the last compound of a selector list with one selector, or nil
-  defp selector_id([[{_comb, compound} | _]]) do
-    Enum.find_value(compound, fn
-      {:id, id} -> id
-      _ -> nil
-    end)
+  # The elements of `set` (the elements with the value) that are below `root` and match, when
+  # there is at most one, or :walk. Two that match need a walk, which gives them in document
+  # order. The set can have elements of other trees, and of trees that left the document (a
+  # list item that the page drew again keeps its children). A set of more than @attr_tests
+  # elements is not tested: the search walks, so that it does not cost much more than a walk.
+  @attr_tests 32
+
+  defp attr_candidates(set, _root, _sels) when map_size(set) > @attr_tests, do: :walk
+  defp attr_candidates(set, root, sels), do: one_match(Map.keys(set), root, sels, [])
+
+  defp one_match([], _root, _sels, acc), do: acc
+
+  defp one_match([nid | rest], root, sels, acc) do
+    cond do
+      not (below?(nid, root) and matches?(nid, sels)) -> one_match(rest, root, sels, acc)
+      acc == [] -> one_match(rest, root, sels, [nid])
+      true -> :walk
+    end
   end
 
-  defp selector_id(_sels), do: nil
+  # what the last compound of a selector list with one selector gives an index to look in: its
+  # id (`{:id, id}`), else its first `[name="v"]` (`{:attr, name, v}`), else nil
+  defp selector_key([[{_comb, compound} | _]]) do
+    Enum.find_value(compound, fn
+      {:id, id} -> {:id, id}
+      _ -> nil
+    end) ||
+      Enum.find_value(compound, fn
+        {:attr, {name, "=", v}} -> {:attr, name, v}
+        _ -> nil
+      end)
+  end
+
+  defp selector_key(_sels), do: nil
 
   # The elements below a node that match, in document order (newest first). A walk does not
   # change the tree, so it reads the nodes from the table that it gets at the start. (A node
@@ -3325,7 +3473,7 @@ defmodule Browser.JS.DOM do
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
 
-    case id_candidates(sels) do
+    case candidates(sels, root) do
       :walk -> first_match(node(root).kids, st().nodes, sels)
       nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
     end
@@ -3401,7 +3549,7 @@ defmodule Browser.JS.DOM do
   defp loopback?(nil), do: false
 
   defp loopback?(host) do
-    host = String.downcase(host)
+    host = Str.downcase(host)
 
     host == "localhost" or String.ends_with?(host, ".localhost") or host == "::1" or
       match?({:ok, {127, _, _, _}}, :inet.parse_ipv4_address(String.to_charlist(host))) or
@@ -3638,7 +3786,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp location_put("protocol", v) do
-    scheme = v |> to_str() |> String.trim_trailing(":") |> String.downcase()
+    scheme = v |> to_str() |> String.trim_trailing(":") |> Str.downcase()
 
     if scheme in ["http", "https"] do
       location_update(fn uri ->
@@ -4263,7 +4411,7 @@ defmodule Browser.JS.DOM do
   defp image_src_changed(_nid, _name, _value), do: :ok
 
   defp define_element(name, ctor) do
-    name = String.downcase(to_str(name))
+    name = Str.downcase(to_str(name))
 
     unless function?(ctor),
       do: throw_error("TypeError", "The custom element constructor is not a function")
@@ -5625,7 +5773,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getElementsByTagName", fn this, args ->
-      tag = String.downcase(to_str(arg(args, 0)))
+      tag = Str.downcase(to_str(arg(args, 0)))
       nodes_array(Enum.filter(elements(this_nid(this)), &(tag == "*" or node(&1).tag == tag)))
     end)
 
@@ -5645,7 +5793,7 @@ defmodule Browser.JS.DOM do
 
   defp install_element(p) do
     def_fn(p, "getAttribute", fn this, args ->
-      case get_attr(node(this_nid(this)), String.downcase(to_str(arg(args, 0)))) do
+      case get_attr(node(this_nid(this)), Str.downcase(to_str(arg(args, 0)))) do
         nil -> :null
         v -> v
       end
@@ -5657,7 +5805,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "hasAttribute", fn this, args ->
-      get_attr(node(this_nid(this)), String.downcase(to_str(arg(args, 0)))) != nil
+      get_attr(node(this_nid(this)), Str.downcase(to_str(arg(args, 0)))) != nil
     end)
 
     def_fn(p, "removeAttribute", fn this, args ->
@@ -5666,7 +5814,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "toggleAttribute", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
       has = get_attr(node(this_nid(this)), name) != nil
       want = if arg(args, 1) == :undefined, do: not has, else: truthy(arg(args, 1))
       if want, do: set_attr(this_nid(this), name, ""), else: remove_attr(this_nid(this), name)
@@ -5728,7 +5876,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getAttributeNode", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
 
       case get_attr(node(this_nid(this)), name) do
         nil -> :null
@@ -5884,7 +6032,7 @@ defmodule Browser.JS.DOM do
         _ -> get_attr(node(form), "method") || ""
       end
 
-    if String.downcase(method) == "dialog" do
+    if Str.downcase(method) == "dialog" do
       call_global("__dialogSubmit", [wrap(form), if(submitter, do: wrap(submitter), else: :null)])
     else
       out({:submit, form_index(form)})
@@ -6014,7 +6162,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "createElement", fn _this, args ->
-      tag = args |> arg(0) |> to_str() |> String.downcase()
+      tag = args |> arg(0) |> to_str() |> Str.downcase()
 
       case registered(tag) do
         nil -> wrap(new_node(%{tag: tag}))
@@ -6160,7 +6308,7 @@ defmodule Browser.JS.DOM do
     def_fn(sp, "setProperty", fn this, args ->
       set_style(
         style_nid(this),
-        String.downcase(to_str(arg(args, 0))),
+        Str.downcase(to_str(arg(args, 0))),
         to_str_or_empty(arg(args, 1))
       )
 
@@ -6168,7 +6316,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(sp, "getPropertyValue", fn this, args ->
-      name = String.downcase(to_str(arg(args, 0)))
+      name = Str.downcase(to_str(arg(args, 0)))
 
       if computed_style?(this) do
         case computed_get(style_nid(this), name) do
@@ -6184,7 +6332,7 @@ defmodule Browser.JS.DOM do
 
     def_fn(sp, "removeProperty", fn this, args ->
       nid = style_nid(this)
-      prop = String.downcase(to_str(arg(args, 0)))
+      prop = Str.downcase(to_str(arg(args, 0)))
       old = style_decls(nid) |> List.keyfind(prop, 0) |> then(&if(&1, do: elem(&1, 1), else: ""))
       set_style(nid, prop, "")
       old
@@ -6706,7 +6854,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(registry, "get", fn _, args ->
-      registered(String.downcase(to_str(arg(args, 0)))) || :undefined
+      registered(Str.downcase(to_str(arg(args, 0)))) || :undefined
     end)
 
     def_fn(registry, "whenDefined", fn _, _ ->

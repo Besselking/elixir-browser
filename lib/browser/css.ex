@@ -29,6 +29,8 @@ defmodule Browser.CSS do
 
   alias Browser.MediaQuery
 
+  import Browser.Re, only: [re: 1]
+
   # -- stylesheet parsing --------------------------------------------------------
 
   def parse(css) when is_binary(css) do
@@ -562,10 +564,17 @@ defmodule Browser.CSS do
 
   @doc false
   def unescape(ident) do
-    Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, ident, fn
-      _, hex, "" -> code_point(String.to_integer(hex, 16))
-      _, _, char -> char
-    end)
+    # most names have no escape, and then the regex is not necessary
+    case :binary.match(ident, "\\") do
+      :nomatch ->
+        ident
+
+      _ ->
+        Regex.replace(re(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su), ident, fn
+          _, hex, "" -> code_point(String.to_integer(hex, 16))
+          _, _, char -> char
+        end)
+    end
   end
 
   # zero, surrogates and anything past U+10FFFF escape to the replacement character

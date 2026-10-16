@@ -4,6 +4,9 @@ defmodule Browser.JSGCTest do
   alias Browser.JS.{Builtins, GC, Interp, Parser}
   require Browser.JS.Elems, as: Elems
 
+  # True in the check build (`JS_RESOLVE_CHECK=1`).
+  @check Application.compile_env(:browser, :js_resolve_check, false)
+
   # runs `src` in a fresh heap, collects, then runs the timers; returns {freed, heap size
   # before, heap size after, console}
   defp run(src, after_src) do
@@ -181,6 +184,131 @@ defmodule Browser.JSGCTest do
       assert GC.dangling(nil) == []
       :erlang.put(sid, {:js_freed, ~s("mk")})
       assert GC.dangling(nil) == [~s("mk")]
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The walk reads each integer as a heap id. The node table of the document holds node ids,
+  # and the lexer's tables hold offsets. The walk does not read them, so such an integer
+  # does not keep a dead object alive.
+  test "a node id that equals the id of a dead object does not keep it alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      doc = Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      {:obj, gid} = Interp.new_object()
+      {:obj, held} = Interp.new_object()
+
+      # A node with the id `gid`, in the node table, in the kids of the document and in
+      # the id index. A wrapper (the only field here that holds a JS value) holds `held`.
+      s = Process.get(:dom)
+      node = %{s.nodes[doc] | id: gid, kind: :element, tag: "p", kids: [], parent: doc}
+      nodes = s.nodes |> Map.put(gid, node) |> Map.update!(doc, &%{&1 | kids: [gid | &1.kids]})
+      ids = Map.put(s.ids, "b", [gid])
+      wrappers = Map.put(s.wrappers, -1, {:obj, held})
+      Process.put(:dom, %{s | nodes: nodes, ids: ids, wrappers: wrappers, next: gid})
+
+      GC.collect()
+      assert :erlang.get(gid) == :undefined
+      assert is_map(:erlang.get(held))
+      assert Process.get(:dom).nodes[gid] == node
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The node table is not a root, so a JS value in a node map does not keep its object
+  # alive. The check build (`JS_RESOLVE_CHECK=1`) stops the collection when it finds one.
+  test "a JS value in the node table stops the collection in the check build" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      doc = Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      {:obj, held} = Interp.new_object()
+      s = Process.get(:dom)
+      nodes = Map.update!(s.nodes, doc, &%{&1 | props: %{"x" => {:obj, held}}})
+      Process.put(:dom, %{s | nodes: nodes})
+
+      if @check do
+        assert_raise ArgumentError, ~r/unwalked field/, &GC.collect/0
+      else
+        GC.collect()
+        assert :erlang.get(held) == :undefined
+      end
+    end)
+    |> Task.await(30_000)
+  end
+
+  test "the lexer's tables keep no object alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {:obj, gid} = Interp.new_object()
+
+      # The source is `gid` bytes long, so the tables hold `gid` as an offset.
+      {:ok, _} = Parser.parse(String.duplicate(" ", gid - 1) <> "1")
+      {_, starts, _} = Process.get(:lex_table)
+      assert gid in Tuple.to_list(starts)
+      assert gid in Tuple.to_list(elem(Process.get(:js_srctab), 1))
+
+      GC.collect()
+      assert :erlang.get(gid) == :undefined
+    end)
+    |> Task.await(30_000)
+  end
+
+  # `Browser.JS.DOM.gc_root/1` leaves out the fields that hold no JS value. The fields that
+  # can hold one stay roots: in the running realm and in the saved fields and keys of a
+  # realm that does not run.
+  test "the fields of the document that hold JS values keep their objects alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {raw, _} = "<body><p id=a>x</p></body>" |> Browser.HTML.parse() |> Browser.Forms.index()
+      Browser.JS.DOM.init(raw, %{url: "http://t.test/"})
+      objs = for _ <- 1..9, do: Interp.new_object()
+      [w, l, ce, h, ses, rh, rce, rk, out] = objs
+      s = Process.get(:dom)
+
+      realm = %{
+        fields: %{hist: [{"http://f.test/", rh}], ce: %{"x-r" => rce}, hist_idx: 0},
+        keys: %{js_global: rk}
+      }
+
+      Process.put(:dom, %{
+        s
+        | wrappers: Map.put(s.wrappers, -1, w),
+          listeners: Map.put(s.listeners, -1, [l]),
+          ce: %{"x-a" => ce},
+          hist: [{"http://t.test/", h}],
+          session: %{"k" => ses},
+          outbox: [{:x, out}],
+          realms: Map.put(s.realms, -2, realm)
+      })
+
+      GC.collect()
+      for {:obj, id} <- objs, do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The marks are a bitmap up to the largest heap key, not up to `:js_next`. An entry above
+  # `:js_next` that a root holds stays, and so does what it holds.
+  test "keeps a held entry with a key above the next heap id" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      {:obj, inner} = Interp.new_object()
+      top = Process.get(:js_next) + 1000
+      :erlang.put(top, {:obj, inner})
+      :erlang.put(top + 64, {:obj, inner})
+      Process.put({:gc_test_key, 1}, {:held, top})
+
+      GC.collect()
+      assert :erlang.get(top) == {:obj, inner}
+      assert is_map(:erlang.get(inner))
+      assert :erlang.get(top + 64) == :undefined
     end)
     |> Task.await(30_000)
   end

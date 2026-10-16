@@ -11,6 +11,8 @@ defmodule Browser.Style do
 
   alias Browser.{CSS, MediaQuery}
 
+  import Browser.Re, only: [re: 1]
+
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
             contain contain-intrinsic-size contain-intrinsic-width contain-intrinsic-height
             contain-intrinsic-inline-size contain-intrinsic-block-size
@@ -555,7 +557,7 @@ defmodule Browser.Style do
   defp invalid_integer?(prop, v) when prop in ["order", "z-index"] and is_binary(v) do
     v = String.trim(v)
 
-    simple_value?(v) and v != "auto" and not Regex.match?(~r/\A[+-]?\d+\z/, v)
+    simple_value?(v) and v != "auto" and not Regex.match?(re(~r/\A[+-]?\d+\z/), v)
   end
 
   defp invalid_integer?(_prop, _v), do: false
@@ -673,7 +675,7 @@ defmodule Browser.Style do
     # (a declaration with a part that is no count or width is dropped as a whole)
     if length(toks) in 1..2 and Enum.all?(toks, &valid_column_token?/1) do
       for t <- toks, t != "auto" do
-        if Regex.match?(~r/\A\d+\z/, t),
+        if Regex.match?(re(~r/\A\d+\z/), t),
           do: {"column-count", t, imp},
           else: {"column-width", t, imp}
       end
@@ -686,7 +688,7 @@ defmodule Browser.Style do
   defp expand({"column-count", value, _imp} = decl) do
     v = String.trim(value)
 
-    if v == "auto" or Regex.match?(~r/\A\+?0*[1-9]\d*\z/, v) or not simple_value?(v),
+    if v == "auto" or Regex.match?(re(~r/\A\+?0*[1-9]\d*\z/), v) or not simple_value?(v),
       do: [decl],
       else: []
   end
@@ -771,7 +773,8 @@ defmodule Browser.Style do
 
   defp valid_column_token?(t),
     do:
-      t == "auto" or Regex.match?(~r/\A\+?\d+\z/, t) or Regex.match?(~r/\A\+?[\d.]+[a-z]+\z/i, t) or
+      t == "auto" or Regex.match?(re(~r/\A\+?\d+\z/), t) or
+        Regex.match?(re(~r/\A\+?[\d.]+[a-z]+\z/i), t) or
         not simple_value?(t)
 
   # false for values the reader cannot judge: `var()`, `calc()` and the like
@@ -796,7 +799,7 @@ defmodule Browser.Style do
     Enum.reduce(toks, {"medium", "none", "currentcolor"}, fn tok, {w, st, c} ->
       cond do
         tok in @border_styles -> {w, tok, c}
-        tok in ~w(thin medium thick) or Regex.match?(~r/\A[+-]?[\d.]/, tok) -> {tok, st, c}
+        tok in ~w(thin medium thick) or Regex.match?(re(~r/\A[+-]?[\d.]/), tok) -> {tok, st, c}
         Browser.Color.parse(tok) != nil -> {w, st, tok}
         true -> {w, st, c}
       end
@@ -813,9 +816,10 @@ defmodule Browser.Style do
     end
   end
 
-  defp number?(token), do: Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, token)
+  defp number?(token), do: Regex.match?(re(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/), token)
 
-  defp tokens(v), do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(v) |> List.flatten()
+  defp tokens(v),
+    do: re(~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/) |> Regex.scan(v) |> List.flatten()
 
   defp do_split(box, _v, toks)
        when box in ["margin", "padding", "border-width", "border-style", "border-color"] do
@@ -924,7 +928,7 @@ defmodule Browser.Style do
           Enum.find(
             prefix,
             "normal",
-            &(&1 in ~w(bold bolder lighter) or Regex.match?(~r/\A[1-9]00\z/, &1))
+            &(&1 in ~w(bold bolder lighter) or Regex.match?(re(~r/\A[1-9]00\z/), &1))
           )
 
         style = if Enum.any?(prefix, &(&1 in ~w(italic oblique))), do: "italic", else: "normal"
@@ -961,7 +965,7 @@ defmodule Browser.Style do
       end)
       |> Enum.join()
 
-    if Regex.match?(~r/^[^\p{L}]*[\p{Hebrew}\p{Arabic}\p{Syriac}\p{Thaana}]/u, text),
+    if Regex.match?(re(~r/^[^\p{L}]*[\p{Hebrew}\p{Arabic}\p{Syriac}\p{Thaana}]/u), text),
       do: "rtl",
       else: "ltr"
   end
@@ -1019,7 +1023,7 @@ defmodule Browser.Style do
           []
 
         v ->
-          if Regex.match?(~r/\A\d+(\.\d+)?%?\z/, v),
+          if Regex.match?(re(~r/\A\d+(\.\d+)?%?\z/), v),
             do: [{prop, if(String.ends_with?(v, "%"), do: v, else: v <> "px")}],
             else: []
       end
@@ -1033,7 +1037,7 @@ defmodule Browser.Style do
         v ->
           [
             {"background-color",
-             if(Regex.match?(~r/\A[0-9a-fA-F]{6}\z/, v), do: "#" <> v, else: v)}
+             if(Regex.match?(re(~r/\A[0-9a-fA-F]{6}\z/), v), do: "#" <> v, else: v)}
           ]
       end
 
@@ -1069,7 +1073,7 @@ defmodule Browser.Style do
     for {name, value} <- attrs, name in @svg_attrs, is_binary(value) do
       value = String.trim(value)
 
-      if name == "font-size" and Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, value),
+      if name == "font-size" and Regex.match?(re(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/), value),
         do: {name, value <> "px"},
         else: {name, value}
     end
@@ -1081,7 +1085,7 @@ defmodule Browser.Style do
     size = fn name, prop ->
       case attrs |> attr(name) |> String.trim() do
         v when v != "" ->
-          if Regex.match?(~r/\A\d+(\.\d+)?%?\z/, v),
+          if Regex.match?(re(~r/\A\d+(\.\d+)?%?\z/), v),
             do: [{prop, if(String.ends_with?(v, "%"), do: v, else: v <> "px")}],
             else: []
 
@@ -1716,7 +1720,9 @@ defmodule Browser.Style do
 
     parts =
       Regex.scan(
-        ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su,
+        re(
+          ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su
+        ),
         value
       )
 
@@ -1736,7 +1742,7 @@ defmodule Browser.Style do
 
   # `\201C` and `\"` in a CSS string
   defp css_string(s) do
-    Regex.replace(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su, s, fn
+    Regex.replace(re(~r/\\(?:([0-9a-fA-F]{1,6})\s?|(.))/su), s, fn
       _, hex, "" ->
         cp = String.to_integer(hex, 16)
         if cp in 1..0xD7FF or cp in 0xE000..0x10FFFF, do: <<cp::utf8>>, else: "\uFFFD"
@@ -1977,7 +1983,7 @@ defmodule Browser.Style do
   defp reveal?(c) do
     c["pointer-events"] != "none" and
       Enum.any?(["transition", "transition-property"], fn k ->
-        is_binary(c[k]) and Regex.match?(~r/(\A|[\s,])opacity(\z|[\s,])/, c[k])
+        is_binary(c[k]) and Regex.match?(re(~r/(\A|[\s,])opacity(\z|[\s,])/), c[k])
       end)
   end
 
@@ -2016,27 +2022,27 @@ defmodule Browser.Style do
   end
 
   defp downcase_outside_strings(v) do
-    ~r/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/is
+    re(~r/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/is)
     |> Regex.split(v, include_captures: true)
     |> Enum.map_join(fn part ->
-      if Regex.match?(~r/\A(?:"|'|url\()/i, part), do: part, else: String.downcase(part)
+      if Regex.match?(re(~r/\A(?:"|'|url\()/i), part), do: part, else: String.downcase(part)
     end)
   end
 
   # keywords of a shorthand are folded to lower case; the address in a `url()` is left alone
   defp downcase_outside_urls(v) do
     if String.contains?(v, "url(") do
-      ~r/url\((?:"[^"]*"|'[^']*'|[^)]*)\)/i
+      re(~r/url\((?:"[^"]*"|'[^']*'|[^)]*)\)/i)
       |> Regex.split(v, include_captures: true)
       |> Enum.map_join(fn part ->
-        if Regex.match?(~r/\Aurl\(/i, part), do: part, else: String.downcase(part)
+        if Regex.match?(re(~r/\Aurl\(/i), part), do: part, else: String.downcase(part)
       end)
     else
       String.downcase(v)
     end
   end
 
-  defp has_var?(value), do: Regex.match?(~r/var\(/i, value)
+  defp has_var?(value), do: var_at(value) != nil
 
   @doc false
   # where `var(` is, in any case: {position, 4} or nil
@@ -2059,6 +2065,33 @@ defmodule Browser.Style do
       :nomatch -> nil
     end
   end
+
+  # the `--name` after each `var(` (and white space) in `value`, in order: the same names as
+  # the regex `var\(\s*(--[^\s,)]*)`, with no regex
+  defp var_names(value, acc) do
+    case var_at(value) do
+      nil ->
+        Enum.reverse(acc)
+
+      [{pos, 4}] ->
+        case skip_space(binary_part(value, pos + 4, byte_size(value) - pos - 4)) do
+          "--" <> _ = rest ->
+            len = name_length(rest, 0)
+            <<name::binary-size(^len), rest::binary>> = rest
+            var_names(rest, [name | acc])
+
+          rest ->
+            var_names(rest, acc)
+        end
+    end
+  end
+
+  defp skip_space(<<c, rest::binary>>) when c in ~c" \t\n\v\f\r", do: skip_space(rest)
+  defp skip_space(rest), do: rest
+
+  defp name_length(<<c, _::binary>>, n) when c in ~c" \t\n\v\f\r,)", do: n
+  defp name_length(<<_, rest::binary>>, n), do: name_length(rest, n + 1)
+  defp name_length(<<>>, n), do: n
 
   def substitute(value, _custom, depth) when depth > 16,
     do: if(has_var?(value), do: :error, else: {:ok, value})
@@ -2106,14 +2139,7 @@ defmodule Browser.Style do
     refs =
       Map.new(own, fn
         {k, v} when is_binary(v) ->
-          names =
-            if var_at(v) == nil do
-              []
-            else
-              ~r/var\(\s*(--[^\s,)]*)/i
-              |> Regex.scan(v, capture: :all_but_first)
-              |> Enum.map(fn [n] -> Browser.CSS.unescape(n) end)
-            end
+          names = v |> var_names([]) |> Enum.map(&Browser.CSS.unescape/1)
 
           {k, Enum.filter(names, &is_map_key(own, &1))}
 
@@ -2343,7 +2369,7 @@ defmodule Browser.Style do
             :skip
         end
 
-      m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, v) ->
+      m = Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/), v) ->
         {:ok, {:pct, m |> Enum.at(1) |> to_float() |> Kernel./(100)}}
 
       px = length(v, env) ->
@@ -2387,7 +2413,7 @@ defmodule Browser.Style do
       v
       |> String.split()
       |> Enum.map(fn tok ->
-        case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, tok) do
+        case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/), tok) do
           [_, n] -> {:pct, to_float(n) / 100}
           nil -> length(tok, env)
         end
@@ -2446,14 +2472,14 @@ defmodule Browser.Style do
       v == "normal" ->
         {:ok, :normal}
 
-      Regex.match?(~r/\A\+?(\d+\.?\d*|\.\d+)\z/, v) ->
+      Regex.match?(re(~r/\A\+?(\d+\.?\d*|\.\d+)\z/), v) ->
         {:ok, {:num, to_float(v)}}
 
       # (a negative zero is zero)
-      Regex.match?(~r/\A-0*\.?0*%?\z/, v) and Regex.match?(~r/0/, v) ->
+      Regex.match?(re(~r/\A-0*\.?0*%?\z/), v) and Regex.match?(re(~r/0/), v) ->
         {:ok, {:px, 0.0}}
 
-      m = Regex.run(~r/\A\+?(\d+\.?\d*|\.\d+)%\z/, v) ->
+      m = Regex.run(re(~r/\A\+?(\d+\.?\d*|\.\d+)%\z/), v) ->
         {:ok, {:px, env.fs * to_float(Enum.at(m, 1)) / 100}}
 
       (px = length(v, env)) && px >= 0 ->
@@ -2529,14 +2555,14 @@ defmodule Browser.Style do
   defp typed("font-weight", v, _env, _pc) do
     bold? =
       v in ["bold", "bolder"] or
-        (Regex.match?(~r/\A\d+\z/, v) and String.to_integer(v) >= 600)
+        (Regex.match?(re(~r/\A\d+\z/), v) and String.to_integer(v) >= 600)
 
     {:ok, if(bold?, do: "bold", else: "normal")}
   end
 
   # a length is computed where it is declared (the inherited value is absolute)
   defp typed("tab-size", v, env, _pc) do
-    case Regex.match?(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/, v) do
+    case Regex.match?(re(~r/\A[+-]?(\d+\.?\d*|\.\d+)\z/), v) do
       true -> {:ok, v}
       false -> if px = length(v, env), do: {:ok, "#{px}px"}, else: {:ok, v}
     end
@@ -2561,7 +2587,7 @@ defmodule Browser.Style do
   end
 
   defp ems_to_px(v, fs) do
-    Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))em\b/i, v, fn _, n ->
+    Regex.replace(re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))em\b/i), v, fn _, n ->
       {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
       "#{Float.round(f * fs, 3)}px"
     end)
@@ -2615,11 +2641,11 @@ defmodule Browser.Style do
       v == "inherit" ->
         pfs
 
-      m = Regex.run(~r/\A([\d.]+)%\z/, v) ->
+      m = Regex.run(re(~r/\A([\d.]+)%\z/), v) ->
         pfs * String.to_float(normalize_num(Enum.at(m, 1))) / 100
 
       # (an `ex` or `ch` in a font size is of the parent's font)
-      Regex.match?(~r/(ex|ch)\b/i, v) ->
+      Regex.match?(re(~r/(ex|ch)\b/i), v) ->
         {ex, ch} = units.()
         length(v, %{fs: pfs, root: root, ex: ex, ch: ch})
 
@@ -2803,9 +2829,9 @@ defmodule Browser.Style do
   defp empty_clip?(nil), do: false
 
   defp empty_clip?(v) do
-    case Regex.run(~r/\Arect\(\s*(.*?)\s*\)\z/, v) do
+    case Regex.run(re(~r/\Arect\(\s*(.*?)\s*\)\z/), v) do
       [_, args] ->
-        case args |> String.split(~r/[\s,]+/, trim: true) |> Enum.map(&clip_px/1) do
+        case args |> String.split(re(~r/[\s,]+/), trim: true) |> Enum.map(&clip_px/1) do
           [t, r, b, l] when is_number(t) and is_number(r) and is_number(b) and is_number(l) ->
             b <= t or r <= l
 
@@ -2824,9 +2850,9 @@ defmodule Browser.Style do
   defp empty_clip_path?(nil), do: false
 
   defp empty_clip_path?(v) do
-    case Regex.run(~r/\Ainset\(\s*(\d+(?:\.\d+)?)%/, v) do
+    case Regex.run(re(~r/\Ainset\(\s*(\d+(?:\.\d+)?)%/), v) do
       [_, n] -> to_float(n) >= 50.0
-      nil -> Regex.match?(~r/\Acircle\(\s*0(?:px|%)?\s*[\s)]/, v)
+      nil -> Regex.match?(re(~r/\Acircle\(\s*0(?:px|%)?\s*[\s)]/), v)
     end
   end
 end

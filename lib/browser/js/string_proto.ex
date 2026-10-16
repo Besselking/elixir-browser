@@ -99,8 +99,8 @@ defmodule Browser.JS.StringProto do
 
     str_fn(p, "toLowerCase", 0, fn s, _ -> lower(s) end)
     str_fn(p, "toLocaleLowerCase", 0, fn s, _ -> lower(s) end)
-    str_fn(p, "toUpperCase", 0, fn s, _ -> String.upcase(s) end)
-    str_fn(p, "toLocaleUpperCase", 0, fn s, _ -> String.upcase(s) end)
+    str_fn(p, "toUpperCase", 0, fn s, _ -> Str.upcase(s) end)
+    str_fn(p, "toLocaleUpperCase", 0, fn s, _ -> Str.upcase(s) end)
     str_fn(p, "isWellFormed", 0, fn s, _ -> not Str.lone?(s) end)
     str_fn(p, "toWellFormed", 0, fn s, _ -> Str.well_formed(s) end)
 
@@ -198,7 +198,7 @@ defmodule Browser.JS.StringProto do
       end)
       |> Enum.join()
     else
-      String.downcase(s)
+      Str.downcase(s)
     end
   end
 

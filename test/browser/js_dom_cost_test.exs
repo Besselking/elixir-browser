@@ -88,6 +88,106 @@ defmodule Browser.JS.DomCostTest do
     assert many < 2 * few
   end
 
+  test "a search by attribute value does not walk the tree" do
+    # (the first search makes the index of the name, with one pass over the node table)
+    lookups = ~s"""
+    document.querySelector('[data-id="0"]');
+    for (let i = 0; i < 200; i++) {
+      document.querySelector('[data-id="last"]');
+      document.querySelectorAll('li[data-id="' + (i % 20) + '"]');
+    }
+    """
+
+    [small, large] =
+      for n <- [50, 5000] do
+        items = Enum.map_join(0..(div(n, 2) - 1), &~s(<li data-id="#{&1}"><span>x</span></li>))
+        pid = start("<ul>" <> items <> ~s(</ul><p data-id="last"></p>))
+        cost = cost(pid, lookups)
+        assert value(pid, ~s{document.querySelectorAll('[data-id="7"]').length}) == ["1"]
+        Runtime.stop(pid)
+        cost
+      end
+
+    # (a walk of the tree costs about 100 times more in the large document)
+    assert large < 2 * small
+  end
+
+  # A list that a page draws again and again (`innerHTML`) gives an attribute value many
+  # elements, and only the newest is in the document. An old item is the top of its tree, and
+  # the index does not keep it. But its children keep their parent, and the index keeps them.
+  # A lookup of a value that more than a few elements have walks the tree at once, so it does
+  # not cost much more than a walk.
+  test "a value that a page sets again and again does not make its lookups slower" do
+    make = fn rounds ->
+      ~s"""
+      const list = document.getElementById("list");
+      for (let i = 0; i < #{rounds}; i++)
+        list.innerHTML = '<li data-id="row"><i data-id="in">a</i></li><li data-id="b">b</li>';
+      """
+    end
+
+    lookups = fn op, v, want ->
+      ~s"""
+      var same = 0;
+      for (let i = 0; i < 100; i++) if (document.querySelector('[data-id#{op}"#{v}"]') === #{want}) same++;
+      for (let i = 0; i < 20; i++) if (document.querySelectorAll('[data-id#{op}"#{v}"]').length === 1) same++;
+      same
+      """
+    end
+
+    body = "<ul id=list></ul>" <> String.duplicate("<div><p>x</p><span>y</span></div>", 100)
+
+    costs =
+      for rounds <- [20, 2000] do
+        pid = start(body, make.(rounds))
+        # (the first search makes the index; `~=` has no index and walks the tree)
+        assert value(pid, ~s{document.querySelector('[data-id="b"]').textContent}) == ["'b'"]
+
+        [row, inner, walk] =
+          for {op, v, want} <- [
+                {"=", "row", "list.firstChild"},
+                {"=", "in", "list.firstChild.firstChild"},
+                {"~=", "in", "list.firstChild.firstChild"}
+              ] do
+            cost = cost(pid, lookups.(op, v, want))
+            assert value(pid, "same") == ["120"]
+            cost
+          end
+
+        Runtime.stop(pid)
+        assert row < walk / 2
+        assert inner < 1.5 * walk
+        row
+      end
+
+    [few, many] = costs
+    assert many < 1.5 * few
+  end
+
+  # Many elements can have one value (`role="option"`). The index of the name must not make a
+  # change of one of them cost more with the number of the others.
+  test "a value that many elements have does not make the changes of the tree slower" do
+    draw = ~s"""
+    const ul = document.getElementById("l");
+    let h = "";
+    for (let i = 0; i < 2000; i++) h += '<li role="option">x</li>';
+    for (let r = 0; r < 2; r++) ul.innerHTML = h;
+    """
+
+    [plain, indexed] =
+      for search <- ["div", ~s([role="option"])] do
+        pid = start(~s(<ul id="l">) <> String.duplicate(~s(<li role="option">x</li>), 2000))
+        # (the search by the value makes the index of the name)
+        value(pid, ~s{document.querySelectorAll('#{search}').length})
+        cost = cost(pid, draw)
+        assert value(pid, ~s{document.querySelectorAll('[role="option"]').length}) == ["2000"]
+        Runtime.stop(pid)
+        cost
+      end
+
+    assert indexed < 1.5 * plain
+  end
+
   test "a class selector does not split the class attributes again for each search" do
     search = ~s[for (let i = 0; i < 100; i++) document.querySelectorAll(".z");]
 

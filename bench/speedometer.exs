@@ -49,7 +49,9 @@ info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, lsamples} = Agent.start_link(fn -> [] end)
 # the page the layouts for the scripts start from; each layout hands on what it worked out about
 # the sheets and the cascade, as the session does
-{:ok, base_agent} = Agent.start_link(fn -> page end)
+# (the loop keeps the page with the style memo; each layout sends its style state back, as the session does)
+Process.put(:bench_base, page)
+bench_loop = self()
 
 t0 = System.monotonic_time(:millisecond)
 # (the run phase starts with the script process; the page load and the start of the
@@ -248,114 +250,176 @@ spawn_layout =
     do: &Browser.Session.spawn_layout/1,
     else: &spawn/1
 
+# (the session stops a layout that the script no longer waits for, and lets one prewarm style
+# at a time: `Browser.StyleGate`. In an older tree, each request starts at once and runs to its end)
+watch_layout =
+  if function_exported?(Browser.Session, :watch_layout, 1),
+    do: &Browser.Session.watch_layout/1,
+    else: fn _ -> :ok end
+
+if Code.ensure_loaded?(Browser.StyleGate), do: Process.put(:bench_gate, Browser.StyleGate.new())
+
+# starts the style and the layout of a request in a process of its own
+start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
+  base = Process.get(:bench_base)
+
+  pid =
+    spawn_layout.(fn ->
+      Process.flag(:trap_exit, false)
+      me = self()
+      guard = self()
+
+      spawn(fn ->
+        ref = Process.monitor(guard)
+
+        receive do
+          # (`:killed`: the watchdog stopped a layout that no script waits for)
+          {:DOWN, ^ref, _, _, reason} when reason not in [:normal, :killed] ->
+            IO.puts("LAYOUT CRASHED: #{inspect(reason, limit: 30, printable_limit: 300)}")
+        end
+      end)
+
+      # LAYOUT=3 also samples the stack of the process that makes the layout
+      if System.get_env("LAYOUT") == "3" do
+        spawn(fn ->
+          sample = fn sample ->
+            case Process.info(me, :current_stacktrace) do
+              {_, [{m, f, a, _} | _] = st} ->
+                Agent.update(lsamples, fn acc ->
+                  fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
+
+                  above =
+                    fs
+                    |> Enum.drop_while(fn {m, _, _} -> m != Regex end)
+                    |> Enum.drop_while(fn {m, _, _} -> m == Regex end)
+
+                  callers =
+                    if m == Regex, do: Enum.map(Enum.take(above, 2), &{:caller, &1}), else: []
+
+                  [{:self, {m, f, a}} | Enum.map(fs, &{:incl, &1}) ++ callers ++ acc]
+                end)
+
+                Process.sleep(1)
+                sample.(sample)
+
+              _ ->
+                :ok
+            end
+          end
+
+          sample.(sample)
+        end)
+      end
+
+      t = System.monotonic_time(:microsecond)
+      env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
+      laid = Browser.Page.from_raw(base, raw, env)
+
+      send(bench_loop, {:bench_style, seq, Browser.Page.style_state(laid)})
+
+      # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
+      if dir = System.get_env("DUMPRAW") do
+        File.mkdir_p!(dir)
+        n = length(File.ls!(dir))
+
+        File.write!(
+          Path.join(dir, "raw#{n}.term"),
+          :erlang.term_to_binary({base, raw, laid.sheet_cache})
+        )
+      end
+
+      # A prewarm (`ref` is nil) only makes the style memo: no script reads its boxes, and the
+      # bench keeps no layout memo. The watchdog stops a layout that the script no longer
+      # waits for.
+      if ref == nil, do: exit(:normal)
+      watch_layout.(deadline)
+
+      t1 = System.monotonic_time(:microsecond)
+
+      {items, height} =
+        Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
+          scrollers: true,
+          boxes: true,
+          svg_defs: laid.svg_defs
+        )
+
+      t2 = System.monotonic_time(:microsecond)
+
+      # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
+      with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
+           [dir, ms] <- String.split(spec, ","),
+           true <- (t2 - t) / 1000 > String.to_integer(ms) do
+        File.mkdir_p!(dir)
+
+        File.write!(
+          Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
+          :erlang.term_to_binary({base, raw, laid.sheet_cache})
+        )
+      end
+
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
+      Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
+
+      if System.get_env("LAYOUT") == "2",
+        do:
+          IO.puts(
+            "layout #{div(t1 - t, 1000)} ms style, #{div(t2 - t1, 1000)} ms layout, #{length(items)} items"
+          )
+
+      send(js, {:layout_now_done, ref, rects, {1000.0, height}})
+    end)
+
+  # (the gate opens also when the process stops before it sends its style state)
+  if gate = Process.get(:bench_gate) do
+    mon = :erlang.monitor(:process, pid, tag: :bench_gate_down)
+    Process.put(:bench_gate, Browser.StyleGate.running(gate, seq, mon))
+  end
+end
+
 loop = fn loop ->
   left = timeout - (System.monotonic_time(:millisecond) - t0)
 
   receive do
     {:layout_now, js, ref, raw} ->
-      base = Agent.get(base_agent, & &1)
+      # (the script waits 5 s for the answer, see `Browser.JS.DOM.layout_now/0`)
+      deadline = System.monotonic_time(:millisecond) + 5_000
+      req = %{js: js, ref: ref, raw: raw, deadline: deadline}
 
-      spawn_layout.(fn ->
-        Process.flag(:trap_exit, false)
-        me = self()
-        guard = self()
+      case Process.get(:bench_gate) do
+        nil ->
+          start_layout.(Map.put(req, :seq, 0))
 
-        spawn(fn ->
-          ref = Process.monitor(guard)
+        gate ->
+          {start, gate} = Browser.StyleGate.request(gate, req)
+          Process.put(:bench_gate, gate)
+          Enum.each(start, start_layout)
+      end
 
-          receive do
-            {:DOWN, ^ref, _, _, reason} when reason not in [:normal] ->
-              IO.puts("LAYOUT CRASHED: #{inspect(reason, limit: 30, printable_limit: 300)}")
-          end
-        end)
+      loop.(loop)
 
-        # LAYOUT=3 also samples the stack of the process that makes the layout
-        if System.get_env("LAYOUT") == "3" do
-          spawn(fn ->
-            sample = fn sample ->
-              case Process.info(me, :current_stacktrace) do
-                {_, [{m, f, a, _} | _] = st} ->
-                  Agent.update(lsamples, fn acc ->
-                    fs = st |> Enum.map(fn {m, f, a, _} -> {m, f, a} end) |> Enum.uniq()
+    {:bench_style, seq, st} ->
+      {adopt?, next} =
+        case Process.get(:bench_gate) do
+          nil ->
+            {true, []}
 
-                    above =
-                      fs
-                      |> Enum.drop_while(fn {m, _, _} -> m != Regex end)
-                      |> Enum.drop_while(fn {m, _, _} -> m == Regex end)
-
-                    callers =
-                      if m == Regex, do: Enum.map(Enum.take(above, 2), &{:caller, &1}), else: []
-
-                    [{:self, {m, f, a}} | Enum.map(fs, &{:incl, &1}) ++ callers ++ acc]
-                  end)
-
-                  Process.sleep(1)
-                  sample.(sample)
-
-                _ ->
-                  :ok
-              end
-            end
-
-            sample.(sample)
-          end)
+          gate ->
+            {adopt?, mon, next, gate} = Browser.StyleGate.style_done(gate, seq)
+            if mon, do: Process.demonitor(mon, [:flush])
+            Process.put(:bench_gate, gate)
+            {adopt?, next}
         end
 
-        t = System.monotonic_time(:microsecond)
-        env = %{type: "screen", width: 1000, height: 800, dppx: 1.0, font_units: nil}
-        laid = Browser.Page.from_raw(base, raw, env)
+      if adopt?,
+        do: Process.put(:bench_base, Browser.Page.adopt_style_state(Process.get(:bench_base), st))
 
-        Agent.update(
-          base_agent,
-          &Browser.Page.adopt_style_state(&1, Browser.Page.style_state(laid))
-        )
+      Enum.each(next, start_layout)
+      loop.(loop)
 
-        # DUMPRAW=dir keeps the trees the scripts ask a layout for, for `bench/restyle.exs`
-        if dir = System.get_env("DUMPRAW") do
-          File.mkdir_p!(dir)
-          n = length(File.ls!(dir))
-
-          File.write!(
-            Path.join(dir, "raw#{n}.term"),
-            :erlang.term_to_binary({base, raw, laid.sheet_cache})
-          )
-        end
-
-        t1 = System.monotonic_time(:microsecond)
-
-        {items, height} =
-          Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
-            scrollers: true,
-            boxes: true,
-            svg_defs: laid.svg_defs
-          )
-
-        t2 = System.monotonic_time(:microsecond)
-
-        # DUMPSLOW=dir,ms keeps the trees whose layout took longer than that
-        with spec when is_binary(spec) <- System.get_env("DUMPSLOW"),
-             [dir, ms] <- String.split(spec, ","),
-             true <- (t2 - t) / 1000 > String.to_integer(ms) do
-          File.mkdir_p!(dir)
-
-          File.write!(
-            Path.join(dir, "slow#{length(File.ls!(dir))}.term"),
-            :erlang.term_to_binary({base, raw, laid.sheet_cache})
-          )
-        end
-
-        rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
-        Agent.update(forced, fn {n, us} -> {n + 1, us + (t2 - t)} end)
-
-        if System.get_env("LAYOUT") == "2",
-          do:
-            IO.puts(
-              "layout #{div(t1 - t, 1000)} ms style, #{div(t2 - t1, 1000)} ms layout, #{length(items)} items"
-            )
-
-        send(js, {:layout_now_done, ref, rects, {1000.0, height}})
-      end)
-
+    {:bench_gate_down, mon, :process, _, _} ->
+      {next, gate} = Browser.StyleGate.down(Process.get(:bench_gate), mon)
+      Process.put(:bench_gate, gate)
+      Enum.each(next, start_layout)
       loop.(loop)
 
     {:scripts_done, reply} ->
