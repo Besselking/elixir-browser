@@ -1413,14 +1413,16 @@ defmodule Browser.JS.DOM do
     info = Process.get(:rt_info, %{})
     rev = st().rev
     now = System.monotonic_time(:millisecond)
-    {last_rev, _last_end, _cost} = Process.get(:dom_forced, {nil, nil, 0})
+    {last, _last_end, _cost} = Process.get(:dom_forced, {nil, nil, 0})
     doc = st().doc
     {first_at, spent} = Map.get(Process.get(:dom_forced_spent, %{}), doc, {now, 0})
 
     allowed = spent <= 2_000 + div(now - first_at, 3)
 
-    if info[:layout_now] && not Process.get(:js_hidden, false) && rev != last_rev && allowed do
-      Process.put(:dom_export_frames, frame_chain(doc))
+    if info[:layout_now] && not Process.get(:js_hidden, false) && not laid_out?(last, rev, doc) &&
+         allowed do
+      chain = frame_chain(doc)
+      Process.put(:dom_export_frames, chain)
       raw = Enum.map(node(st().main).kids, &export/1)
       Process.delete(:dom_export_frames)
       # (the export gives numbers to new elements, and this changes the rev. The layout is of
@@ -1437,7 +1439,7 @@ defmodule Browser.JS.DOM do
         end
 
       done = System.monotonic_time(:millisecond)
-      Process.put(:dom_forced, {rev, done, done - now})
+      Process.put(:dom_forced, {{rev, chain}, done, done - now})
 
       Process.put(
         :dom_forced_spent,
@@ -1454,6 +1456,13 @@ defmodule Browser.JS.DOM do
       end
     end
   end
+
+  # whether the last layout for the scripts is of the tree as it is now, with the frame of `doc`
+  # in it (a layout for a frame leaves out the frames that are not on its chain: their new
+  # elements get no numbers and no boxes there)
+  defp laid_out?({rev, nil}, rev, _doc), do: true
+  defp laid_out?({rev, chain}, rev, doc), do: doc in chain
+  defp laid_out?(_last, _rev, _doc), do: false
 
   @doc """
   Asks the host to lay the page out as it is now, and does not wait for the answer: what the host

@@ -4106,6 +4106,19 @@ defmodule Browser.LayoutTest do
       assert Process.get(:layout_transforms) == nil
     end
 
+    test "boxes of two font sizes with the same transform in em each get their own matrix" do
+      {items, _} =
+        xf(
+          ~s|<div style="transform:translateX(2em);font-size:10px;height:20px;background:#eee">a</div>| <>
+            ~s|<div style="transform:translateX(2em);font-size:20px;height:20px;background:#ddd">b</div>|
+        )
+
+      shifts =
+        for %{type: :rect, xform: [{_, _, _, _, e, _}]} <- items, do: e
+
+      assert shifts == [20.0, 40.0]
+    end
+
     test "absolutely positioned boxes keep translate in their position, not in the matrix" do
       {items, _} =
         xf(

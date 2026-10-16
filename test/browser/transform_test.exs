@@ -46,7 +46,8 @@ defmodule Browser.TransformTest do
   test "angles with a sign, a leading or trailing dot, or an exponent" do
     quarter = point(m(%{"transform" => "rotate(90deg)"}), 10, 20)
 
-    for angle <- ~w(.25turn +.25turn 9e1deg 9E1deg 90.deg 90.e0deg 1.5707963267948966rad -270deg) do
+    for angle <-
+          ~w(.25turn +.25turn 9e1deg 9E1deg 90.deg 90.e0deg 9.e1deg 9.E1deg 1.5707963267948966rad -270deg) do
       assert near(point(m(%{"transform" => "rotate(#{angle})"}), 10, 20), quarter), angle
     end
 
@@ -54,6 +55,13 @@ defmodule Browser.TransformTest do
     assert m(%{"transform" => "rotate(0)"}) == nil
     assert m(%{"transform" => "rotate(-0)"}) == nil
     assert m(%{"transform" => "rotate(5)"}) == nil
+
+    # (too large for a float: no angle, and no crash)
+    for angle <- ~w(1e400deg -1e400deg 1e308turn 1e999rad 1e400) do
+      assert m(%{"transform" => "rotate(#{angle})"}) == nil, angle
+    end
+
+    assert m(%{"transform" => "skewX(1e400deg)"}) == nil
   end
 
   test "scale grows about the centre" do

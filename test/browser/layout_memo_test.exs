@@ -232,10 +232,26 @@ defmodule Browser.LayoutMemoTest do
         ~s(<i style="display:inline-block">#{word}</i> c</span></span></div><p>d</p></div>)
     end
 
-    {_, _, memo} = kept(page(html.("short")), nil, [], 800)
-    {_, memo} = same!(page(html.("a much longer word list")), memo, [], 800)
+    {_, _, memo0} = kept(page(html.("short")), nil, [], 800)
+    {_, memo} = same!(page(html.("a much longer word list")), memo0, [], 800)
+
+    # (the four boxes around the word get new keys; the flex item `c` and the paragraph keep
+    # theirs. A key is `{:k, element, count, hash}`, see `Browser.Layout.wkey/1`)
+    {before, now} = {atom_hashes(memo0), atom_hashes(memo)}
+    changed = for {k, h} <- now, Map.has_key?(before, k) and before[k] != h, do: k
+    kept = for {k, h} <- now, before[k] == h, do: k
+    assert {length(changed), length(kept)} == {5, 2}
+
     {_, memo} = same!(page(html.("short")), memo, [], 800)
     same!(page(html.("tiny")), memo, [], 800)
+  end
+
+  defp atom_hashes(memo) do
+    for {key, _} <- memo.entries,
+        k <- Tuple.to_list(key),
+        {:k, nid, n, h} <- [with({:flex, k} <- k, do: k)],
+        into: %{},
+        do: {{nid, n}, h}
   end
 
   test "another window size starts from an empty memo" do

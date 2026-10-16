@@ -353,9 +353,18 @@ defmodule Browser.Transform do
            re(~r/\A\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(deg|rad|grad|turn)?\s*\z/i),
            text
          ) do
-      [_, n] -> if(float(n) == 0.0, do: 0.0)
-      [_, n, unit] -> to_rad(float(n), String.downcase(unit))
-      nil -> calc_angle(text)
+      [_, n] ->
+        if(float(n) == 0.0, do: 0.0)
+
+      # (a number too large for a float, `1e400deg`, is no angle; nor one that overflows in radians)
+      [_, n, unit] ->
+        case float(n) do
+          f when is_float(f) and abs(f) < 1.0e300 -> to_rad(f, String.downcase(unit))
+          _ -> nil
+        end
+
+      nil ->
+        calc_angle(text)
     end
   end
 
@@ -383,7 +392,10 @@ defmodule Browser.Transform do
       end
 
     text = if String.starts_with?(text, "."), do: "0" <> text, else: text
-    {f, _} = text |> String.replace([".e", ".E"], ".0e") |> Float.parse()
-    if neg?, do: -f, else: f
+
+    case text |> String.replace([".e", ".E"], ".0e") |> Float.parse() do
+      {f, _} -> if neg?, do: -f, else: f
+      :error -> nil
+    end
   end
 end
