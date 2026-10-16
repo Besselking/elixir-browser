@@ -63,6 +63,46 @@ defmodule Browser.SheetCacheTest do
     assert Style.parse_sheet(:author, css, nil) == none
   end
 
+  test "the same text at two addresses with an unnamed @layer gives two layers" do
+    css = sheet("@layer { p { color: red } }\n@layer named { p { color: green } }\n")
+    sheets = [{:author, css, @b1}, {:author, css, @b2}]
+    p = fn -> Style.prune(Browser.HTML.parse("<p>x</p>"), Style.index(sheets)) end
+
+    # (the layers are: unnamed, named, unnamed. The last one wins)
+    for _ <- 1..2 do
+      [{:element, "p", attrs, _}] = for {:element, "p", _, _} = n <- find(p.()), do: n
+      assert {"@computed", %{"color" => {255, 0, 0}}} = List.keyfind(attrs, "@computed", 0)
+    end
+
+    assert SheetCache.get({:author, css, nil}) == nil
+  end
+
+  # all the elements of `nodes`, at any depth
+  defp find(nodes) do
+    Enum.flat_map(nodes, fn
+      {:element, _, _, kids} = n -> [n | find(kids)]
+      _ -> []
+    end)
+  end
+
+  test "a sheet in the table is not parsed again" do
+    plain = sheet("")
+    url = sheet(".x { background-image: url(img/a.png); }")
+    SheetCache.put({:author, plain, nil}, [:kept])
+    SheetCache.put({:author, url, {:base, @b1}}, [:kept])
+    assert Style.parse_sheet(:author, plain, @b2) == [:kept]
+    assert Style.parse_sheet(:author, url, @b1) == [:kept]
+    assert Style.parse_sheet(:author, url, @b2) != [:kept]
+  end
+
+  test "the table keeps more than one sheet" do
+    [a, b] = for _ <- 1..2, do: sheet("")
+    Style.parse_sheet(:author, a, nil)
+    Style.parse_sheet(:author, b, nil)
+    assert SheetCache.get({:author, a, nil}) != nil
+    assert SheetCache.get({:author, b, nil}) != nil
+  end
+
   test "a small sheet does not go into the cache" do
     css = ".small-#{System.unique_integer([:positive])} { color: red }"
     assert [_] = Style.parse_sheet(:author, css, @b1)

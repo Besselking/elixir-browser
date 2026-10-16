@@ -264,7 +264,12 @@ defmodule Browser.Style do
       nil ->
         parsed = CSS.parse(css)
         key_base = if urls?(parsed), do: {:base, base}
-        SheetCache.put({origin, css, key_base}, sheet_rules(origin, parsed, base))
+
+        # (each parse gives an unnamed `@layer` block a new name: two sheets with the same text
+        # have two layers. Thus a sheet with one does not go into the cache)
+        if anonymous_layers?(parsed),
+          do: sheet_rules(origin, parsed, base),
+          else: SheetCache.put({origin, css, key_base}, sheet_rules(origin, parsed, base))
 
       rules ->
         rules
@@ -276,6 +281,13 @@ defmodule Browser.Style do
   defp urls?(parsed) do
     Enum.any?(parsed, fn rule ->
       Enum.any?(rule.decls, fn {_, value, _} -> String.contains?(value, "url(") end)
+    end)
+  end
+
+  defp anonymous_layers?(parsed) do
+    Enum.any?(parsed, fn rule ->
+      layer = Map.get(rule, :layer)
+      layer != nil and String.contains?(layer, "(anonymous ")
     end)
   end
 
