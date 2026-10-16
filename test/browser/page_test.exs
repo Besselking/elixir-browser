@@ -176,6 +176,20 @@ defmodule Browser.PageTest do
       refute plain.viewport_units
       assert Page.restyle(plain, env.(800, 400)) == plain
     end
+
+    test "a new style attribute with viewport units makes restyle follow the window size" do
+      env = fn w, h -> %{type: "screen", width: w, height: h, dppx: 1.0} end
+      page = Page.build(~s|<body style="margin:0"><p>x</p></body>|, "about:home", env.(800, 600))
+      refute page.viewport_units
+
+      # a script adds the element and no sheet: the sheets of the tree are the same
+      html = ~s|<body style="margin:0"><p>x</p><div style="height: 50vh">x</div></body>|
+      raw = Page.build(html, "about:home", env.(800, 600)).raw
+      page = Page.from_raw(page, raw, env.(800, 600))
+      assert page.viewport_units
+      assert page_height(page) == 300.0
+      assert page_height(Page.restyle(page, env.(800, 400))) == 200.0
+    end
   end
 
   describe "base href" do

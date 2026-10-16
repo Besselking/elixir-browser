@@ -159,12 +159,10 @@ defmodule Browser.Page do
 
   defp find_base({:element, _, _, kids}), do: find_base(kids)
 
-  @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
-
   defp viewport_units?(rules, raw) do
     Enum.any?(rules, fn rule ->
       Enum.any?(rule.decls, fn {_prop, value, _important} ->
-        is_binary(value) and Regex.match?(@viewport_unit, value)
+        is_binary(value) and Style.viewport_unit?(value)
       end)
     end) or inline_viewport_units?(raw)
   end
@@ -176,7 +174,7 @@ defmodule Browser.Page do
 
   defp inline_viewport_units?({:element, _tag, attrs, kids}) do
     case List.keyfind(attrs, "style", 0) do
-      {_, css} when is_binary(css) -> Regex.match?(@viewport_unit, css)
+      {_, css} when is_binary(css) -> Style.viewport_unit?(css)
       _ -> false
     end or inline_viewport_units?(kids)
   end
@@ -191,10 +189,10 @@ defmodule Browser.Page do
     if key == page.key and page.nodes != nil do
       page
     else
-      {pruned, defs, fixed, cache, memo} =
+      {key, pruned, defs, fixed, cache, memo} =
         case page.style_cache do
           %{^key => {pruned, defs, fixed}} ->
-            {pruned, defs, fixed, page.style_cache, page.memo}
+            {key, pruned, defs, fixed, page.style_cache, page.memo}
 
           cache ->
             index = Style.index_rules(page.rules, env)
@@ -205,16 +203,26 @@ defmodule Browser.Page do
                 nil -> nil
               end
 
+            Process.delete(:style_vu)
             {pruned, memo} = Style.prune(Browser.Modal.backdrops(page.raw), index, old)
+
+            # (a new style attribute with viewport units: the memo and the cache now hold for
+            # this window size only)
+            key =
+              if Process.delete(:style_vu) == true and not page.viewport_units,
+                do: {elem(key, 0), {env.width, env.height}},
+                else: key
+
             defs = Browser.Svg.defs(page.raw, pruned)
             fixed = fixed_width(pruned)
             cache = if map_size(cache) >= 4, do: %{}, else: cache
-            {pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed}), {key, memo}}
+            {key, pruned, defs, fixed, Map.put(cache, key, {pruned, defs, fixed}), {key, memo}}
         end
 
       page = %{
         page
         | key: key,
+          viewport_units: page.viewport_units or elem(key, 1) != false,
           pruned: pruned,
           svg_defs: defs,
           fixed_width: fixed,
