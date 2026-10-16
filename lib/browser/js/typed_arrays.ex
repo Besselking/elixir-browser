@@ -61,6 +61,10 @@ defmodule Browser.JS.TypedArrays do
   defp read(:i64, <<v::little-signed-64>>), do: {:bigint, v}
   defp read(:u64, <<v::little-unsigned-64>>), do: {:bigint, v}
   defp read(:f16, <<bits::little-unsigned-16>>), do: decode_half(bits)
+  # (a finite float matches the float segment at once; NaN and the infinities do not match
+  # it, so they go to the decoder)
+  defp read(:f64, <<f::little-float-64>>), do: f
+  defp read(:f32, <<f::little-float-32>>), do: f
   defp read(:f32, <<bits::little-unsigned-32>>), do: decode_float(<<bits::32>>, 8)
   defp read(:f64, <<bits::little-unsigned-64>>), do: decode_float(<<bits::64>>, 11)
 
@@ -148,6 +152,12 @@ defmodule Browser.JS.TypedArrays do
   defp write(:f16, value) do
     <<encode_half(to_num(value))::little-unsigned-16>>
   end
+
+  # (a float in the range is the common case, and it needs no `to_num/1`)
+  defp write(:f64, x) when is_float(x), do: <<x::little-float-64>>
+
+  defp write(:f32, x) when is_float(x) and x <= @max_f32 and x >= -@max_f32,
+    do: <<x::little-float-32>>
 
   defp write(kind, value) when kind in [:f32, :f64] do
     n = to_num(value)
@@ -332,9 +342,10 @@ defmodule Browser.JS.TypedArrays do
   end
 
   # the `size` bytes at byte position `pos`, with the batched writes in
-  defp read_el(bid, pos, size) do
-    o = Interp.deref(bid)
+  defp read_el(bid, pos, size), do: el_at(bid, Interp.deref(bid), pos, size)
 
+  # `read_el/3` with the record `o` of the buffer that the caller has read
+  defp el_at(bid, o, pos, size) do
     case o do
       %{pend: pend, pend_size: ^size} when rem(pos, size) == 0 and map_size(pend) > 0 ->
         case pend do
@@ -351,10 +362,25 @@ defmodule Browser.JS.TypedArrays do
   end
 
   # writes the encoded element `enc` at byte position `pos` (in bounds)
-  defp buffer_put(bid, pos, enc) do
-    size = byte_size(enc)
-    o = Interp.deref(bid)
+  defp buffer_put(bid, pos, enc), do: put_el(bid, Interp.deref(bid), pos, enc)
 
+  # `buffer_put/3` with the record `o` of the buffer that the caller has read
+  defp put_el(bid, o, pos, enc) do
+    size = byte_size(enc)
+
+    case o do
+      # (the common case: one more batched write of the same size, which does not fill the
+      # batch)
+      %{pend: pend, pend_size: ^size} when rem(pos, size) == 0 and map_size(pend) < @pend_max - 1 ->
+        store(bid, %{o | pend: Map.put(pend, pos, enc)})
+        :ok
+
+      _ ->
+        put_el_slow(bid, o, pos, enc, size)
+    end
+  end
+
+  defp put_el_slow(bid, o, pos, enc, size) do
     o =
       case o do
         %{pend: pend, pend_size: psize} when map_size(pend) > 0 and psize != size -> flush(bid, o)
@@ -403,6 +429,14 @@ defmodule Browser.JS.TypedArrays do
       true -> {off, len}
     end
   end
+
+  # The length that `eff/1` gives a view of elements of `size` bytes in a buffer of `total`
+  # bytes that is not detached, or 0 when the view is out of bounds. The element reads and
+  # writes of `get_index/2` and `put_index/3` use it with the record of the buffer that they
+  # read once.
+  @compile {:inline, view_len: 4}
+  defp view_len(off, :auto, total, size), do: if(off > total, do: 0, else: div(total - off, size))
+  defp view_len(off, len, total, size), do: if(off + len * size > total, do: 0, else: len)
 
   defp data!({:obj, id}) do
     case deref(id) do
@@ -582,26 +616,42 @@ defmodule Browser.JS.TypedArrays do
   def host_get(_, _, _), do: :miss
 
   @doc false
-  # `ta[i]` for a number `i`, without turning it into a string key first
-  def get_index({:ta, kind, bid, _, _} = d0, i) do
-    case eff(d0) do
-      {off, len} when i < len -> elem_at({:ta, kind, bid, off, len}, i)
-      _ -> :undefined
+  # `ta[i]` for a number `i`, without turning it into a string key first. It reads the
+  # record of the buffer once: the checks of `eff/1` in the same order, then the element as
+  # `read_el/3` gives it.
+  def get_index({:ta, kind, bid, off, len}, i) do
+    case Interp.deref(bid) do
+      %{detached: d} when d not in [false, nil] ->
+        :undefined
+
+      %{bytes: bytes} = o ->
+        size = size_of(kind)
+
+        if i < view_len(off, len, byte_size(bytes), size),
+          do: read(kind, el_at(bid, o, off + i * size, size)),
+          else: :undefined
     end
   end
 
   @doc false
-  # `ta[i] = v` for a number `i`; `:readonly` when the buffer is immutable
-  def put_index({:ta, kind, bid, _, _} = d0, i, v) do
+  # `ta[i] = v` for a number `i`; `:readonly` when the buffer is immutable. It reads the
+  # record of the buffer once, after the conversion, as `get_index/2` does.
+  def put_index({:ta, kind, bid, off, len}, i, v) do
     # the value is converted first, whatever the index
     bytes = write(kind, v)
 
-    case eff(d0) do
-      {off, len} when i < len ->
-        if immutable?(bid), do: :readonly, else: buffer_put(bid, off + i * size_of(kind), bytes)
-
-      _ ->
+    case Interp.deref(bid) do
+      %{detached: d} when d not in [false, nil] ->
         :ok
+
+      %{bytes: b} = o ->
+        size = byte_size(bytes)
+
+        cond do
+          i >= view_len(off, len, byte_size(b), size) -> :ok
+          Map.get(o, :immutable, false) -> :readonly
+          true -> put_el(bid, o, off + i * size, bytes)
+        end
     end
   end
 
