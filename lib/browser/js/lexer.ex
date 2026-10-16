@@ -177,6 +177,9 @@ defmodule Browser.JS.Lexer do
 
   defp lex_ident(s, nl, acc) do
     {name, rest} = ident(s)
+    # (a `\u` with fewer than 4 bytes after it at the end of the text gives no name, and the
+    # same text would come back here again)
+    if name == "", do: throw({:syntax, "bad unicode escape in identifier"})
     zw_start!(name)
 
     # a reserved word spelled with an escape is no keyword and no identifier either: the
