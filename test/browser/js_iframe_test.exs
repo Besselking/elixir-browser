@@ -319,4 +319,60 @@ defmodule Browser.JS.IframeTest do
     assert map_size(dom.iframes) == 1
     assert Enum.all?(Map.keys(dom.iframes), &Map.has_key?(dom.nodes, &1))
   end
+
+  # The teardown of a frame takes its nodes, their wrappers and listeners, and the window and
+  # location of the frame out of the maps of the document. When the frame has most of the
+  # nodes, `DOM.destroy_realm/1` makes the maps again from the entries that stay, else it
+  # drops the keys of the frame: both ways must leave the same maps.
+  for {name, page, frame} <- [{"most of the nodes", 3, 300}, {"few of the nodes", 300, 3}] do
+    test "a frame that goes takes its nodes, wrappers and listeners: it has #{name}" do
+      {raw, _} =
+        ~s"""
+        <body><script>
+        for (let i = 0; i < #{unquote(page)}; i++) document.body.appendChild(document.createElement("i"));
+        document.body.addEventListener("click", () => console.log("page click"));
+        window.addEventListener("ping", () => console.log("page ping"));
+        const f = document.createElement("iframe");
+        f.srcdoc = "<p>" + "<b>x</b>".repeat(#{unquote(frame)}) + "</p>";
+        f.onload = () => {
+          const w = f.contentWindow, d = f.contentDocument;
+          console.log(w.location.href, d.querySelectorAll("b").length);
+          w.addEventListener("ping", () => console.log("frame ping"));
+          for (const b of d.querySelectorAll("b")) b.addEventListener("click", () => {});
+          f.remove();
+          document.body.click();
+          window.dispatchEvent(new Event("ping"));
+        };
+        document.body.appendChild(f);
+        </script></body>
+        """
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+      pid = Runtime.start(raw, info)
+      r = Runtime.run_scripts(pid)
+      logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+      {:dictionary, dict} = Process.info(pid, :dictionary)
+      Runtime.stop(pid)
+      dom = Keyword.fetch!(dict, :dom)
+
+      assert logs == ["about:srcdoc #{unquote(frame)}", "page click", "page ping"]
+      assert Enum.all?(dom.nodes, fn {_, n} -> n.doc == dom.main end)
+      assert map_size(dom.nodes) > unquote(page)
+
+      # (the keys of the nodes, and the window and the location of the frame)
+      left =
+        for map <- [dom.wrappers, dom.listeners],
+            k <- Map.keys(map),
+            (is_integer(k) and not is_map_key(dom.nodes, k)) or
+              match?({:window, _}, k) or match?({:aux, {w, _}} when w in [:window, :location], k),
+            do: k
+
+      assert left == []
+
+      assert Enum.count(dom.wrappers, fn {k, _} -> is_integer(k) end) > unquote(page)
+      assert is_map_key(dom.listeners, :window)
+    end
+  end
 end

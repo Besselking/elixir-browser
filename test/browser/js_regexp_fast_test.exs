@@ -2,6 +2,7 @@ defmodule Browser.JSRegExpFastTest do
   use ExUnit.Case, async: true
 
   alias Browser.JS
+  alias Browser.JS.{Builtins, Interp, Parser}
 
   # A RegExp with nothing changed takes the fast paths of `Browser.JS.RegExp` (`@@replace`,
   # `@@match`, `test`, `exec` and the `flags` read). A RegExp with an own `exec` key that holds
@@ -248,6 +249,46 @@ defmodule Browser.JSRegExpFastTest do
       for src <- ["'a😀b'.replace(/(?:)/g, '-')", "'a😀b'.match(/(?:)/g)"] do
         assert {:error, :step_limit, _} = JS.eval(src, max_steps: 2_000, timeout: 20_000)
       end
+    end
+  end
+
+  # `run_re/3` keeps the results of the engine for short subjects. A result is kept under the
+  # pattern, the subject and the options, so the same short subject gives other results at
+  # another position, with another pattern and with other flags.
+  describe "the memo of the engine's results" do
+    test "keeps the pattern, the flags, the subject and the position apart" do
+      assert js(~S"""
+             var s = "aXaXa", out = [];
+             var g = /a/g, m;
+             while ((m = g.exec(s))) out.push(m.index);
+             var y = /a/y;
+             y.lastIndex = 2; out.push(y.test(s), y.lastIndex);
+             y.lastIndex = 1; out.push(y.test(s), y.lastIndex);
+             out.push(s.replace(/a/, "b"), s.replace(/X/, "b"), s.replace(/x/i, "b"), s.replace(/x/, "b"));
+             out.push(s.match(/a/g).length, s.split(/X/).length, s.search(/X/), /(a)(X)?$/.exec(s)[2]);
+             out.join()
+             """) == "0,2,4,true,3,false,0,bXaXa,abaXa,abaXa,aXaXa,3,3,1,"
+    end
+
+    test "holds short subjects only, and at most 512 of them" do
+      memo =
+        Task.async(fn ->
+          Interp.init(1_000_000)
+          Builtins.install()
+
+          {:ok, p} =
+            Parser.parse(~S"""
+            var long = "b".repeat(65) + "a";
+            for (var i = 0; i < 600; i++) { /a/.test("a" + i); /a/.test(long + i) }
+            """)
+
+          Interp.run_program(p, true)
+          Process.get(:js_re_memo)
+        end)
+        |> Task.await()
+
+      assert map_size(memo) in 1..512
+      assert Enum.all?(Map.keys(memo), fn {_re, s, _opts} -> byte_size(s) <= 64 end)
     end
   end
 end

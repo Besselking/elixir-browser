@@ -227,8 +227,38 @@ defmodule Browser.JS.Interp do
   """
   def heap_size, do: :erlang.get(:js_next) - :erlang.get(:js_freed)
 
+  # The size from which a frame takes boxes (see `slot_write/3`).
+  @box_min 128
+
+  # A box is held by one slot of one frame only: a read takes the value out of it, and a
+  # copy of a frame copies the values (`copy_scope/2`, the copies of `enter_body/3`). So a
+  # box goes when its slot is written over or when its frame goes. Else every call of a
+  # large function that frees its frame, and every round of a loop that declares a name of
+  # a large frame again, would leave a heap entry until the next collection.
+  defmacrop drop_box(v) do
+    quote do
+      case unquote(v) do
+        {:js_box, b} -> free(b)
+        _ -> :ok
+      end
+    end
+  end
+
+  # The boxes of a frame that goes or that a new frame replaces.
+  defp drop_boxes(t) when is_tuple(t) and tuple_size(t) >= @box_min,
+    do: drop_boxes(t, tuple_size(t))
+
+  defp drop_boxes(_t), do: :ok
+
+  defp drop_boxes(_t, 5), do: :ok
+
+  defp drop_boxes(t, i) do
+    drop_box(:erlang.element(i, t))
+    drop_boxes(t, i - 1)
+  end
+
   @doc false
-  # drops a heap entry (a scope that nothing can reach any more)
+  # drops a heap entry (a scope that nothing can reach any more), and the boxes of a frame
   if @check do
     # In check mode a freed frame leaves a tombstone, so that a later use of its id fails
     # with the name of the frame and the dangling scan can find a value that still holds it.
@@ -245,7 +275,7 @@ defmodule Browser.JS.Interp do
                (is_struct(:erlang.element(2, f), Info) or is_struct(:erlang.element(2, f), Scope)) ->
           :erlang.put(id, {:js_freed, check_name(:erlang.element(2, f))})
           :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
-          :ok
+          drop_boxes(f)
 
         _ ->
           :erlang.erase(id)
@@ -255,10 +285,14 @@ defmodule Browser.JS.Interp do
     end
   else
     def free(id) do
-      if :erlang.erase(id) != :undefined,
-        do: :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
+      case :erlang.erase(id) do
+        :undefined ->
+          :ok
 
-      :ok
+        t ->
+          :erlang.put(:js_freed, :erlang.get(:js_freed) + 1)
+          drop_boxes(t)
+      end
     end
   end
 
@@ -509,19 +543,22 @@ defmodule Browser.JS.Interp do
 
   # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
   @doc false
-  def slot_put(env, i, v),
-    do: :erlang.put(env, :erlang.setelement(i, :erlang.get(env), v))
+  def slot_put(env, i, v) do
+    t = :erlang.get(env)
+    if tuple_size(t) >= @box_min, do: drop_box(:erlang.element(i, t))
+    :erlang.put(env, :erlang.setelement(i, t, v))
+  end
 
   # A write to a large frame copies the whole tuple: the scope of a bundle has hundreds of
   # slots, and its code assigns a few of them all the time (React's `workInProgress`). So an
   # assignment to a frame of @box_min slots or more puts the value in a box: a heap entry
   # `{:js_cell, v}`, whose id the slot keeps as `{:js_box, id}`. The next assignments write
   # the box only. A read of a slot reads through the box (`unbox/1`). A write with
-  # `slot_put/3` (a declaration, a parameter, a TDZ reset) replaces the box, so the slot
-  # holds its value again, and the box is garbage. A box never holds `:tdz`: an assignment
-  # tests the temporal dead zone first. A leaf frame (see `@leaf_base`) gets no box: its key
-  # serves the next call at its depth, which would leave the box behind.
-  @box_min 128
+  # `slot_put/3` (a declaration, a parameter), a TDZ reset or a hoist replaces the box, so
+  # the slot holds its value again, and the box goes (`drop_box/1`). A box never holds
+  # `:tdz`: an assignment tests the temporal dead zone first. A leaf frame (see
+  # `@leaf_base`) gets no box: its key serves the next call at its depth, which would leave
+  # the box behind.
 
   @doc false
   # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
@@ -1118,7 +1155,9 @@ defmodule Browser.JS.Interp do
   defp reset_tdz(_env, %Browser.JS.Resolve.Scope{tdz: []}), do: :ok
 
   defp reset_tdz(env, %Browser.JS.Resolve.Scope{tdz: idx}) do
-    f = Enum.reduce(idx, :erlang.get(env), fn i, acc -> :erlang.setelement(i, acc, :tdz) end)
+    t = :erlang.get(env)
+    if tuple_size(t) >= @box_min, do: Enum.each(idx, &drop_box(:erlang.element(&1, t)))
+    f = Enum.reduce(idx, t, fn i, acc -> :erlang.setelement(i, acc, :tdz) end)
     :erlang.put(env, f)
   end
 
@@ -1170,8 +1209,13 @@ defmodule Browser.JS.Interp do
   defp hoist_slots(_id, []), do: :ok
 
   defp hoist_slots(id, h) do
+    t = :erlang.get(id)
+
+    if tuple_size(t) >= @box_min,
+      do: Enum.each(h, fn {i, _} -> drop_box(:erlang.element(i, t)) end)
+
     t =
-      Enum.reduce(h, :erlang.get(id), fn {i, node}, t ->
+      Enum.reduce(h, t, fn {i, node}, t ->
         :erlang.setelement(i, t, make_fn(node, id, false))
       end)
 
@@ -1517,8 +1561,12 @@ defmodule Browser.JS.Interp do
         if @check and not match?(%Scope{per_iter: true}, :erlang.element(2, t)),
           do: check_fail("a copy of a frame that is not a per-iteration loop frame")
 
-        # (the copy has bindings of its own: it takes the values out of the boxes)
-        alloc(t |> :erlang.tuple_to_list() |> Enum.map(&unbox(&1)) |> :erlang.list_to_tuple())
+        # (the copy has bindings of its own: it takes the values out of the boxes. A frame
+        # below @box_min holds no box, so it is copied as it is.)
+        if tuple_size(t) >= @box_min,
+          do:
+            alloc(t |> :erlang.tuple_to_list() |> Enum.map(&unbox(&1)) |> :erlang.list_to_tuple()),
+          else: alloc(t)
 
       s ->
         alloc(%{s | parent: parent})
@@ -7408,6 +7456,7 @@ defmodule Browser.JS.Interp do
     n = :erlang.get(:js_fns)
 
     if n == cur_fns do
+      drop_boxes(:erlang.get(cur))
       :erlang.put(cur, fresh)
       {cur, n}
     else

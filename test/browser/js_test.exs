@@ -82,6 +82,23 @@ defmodule Browser.JSTest do
       assert js("Number('abc')") == :nan
     end
 
+    # `strict_eq/2` and `loose_eq/2` take two numbers, two strings and a nullish right side
+    # in clauses of their own; every other pair goes on to the general rules.
+    test "=== and == on numbers, -0, NaN, infinities, BigInts, strings, nullish and mixed values" do
+      assert js("""
+             var z = -0, n = NaN, i = Infinity, u = undefined, o = {};
+             [0 === z, z == 0, n === n, n == n, n != n, i === Infinity, -i == -Infinity,
+              i === -i, 1 === 1.0, 1 == "1", "1" == 1, "a" == "a", "a" === "b", null == null,
+              u == null, null == u, null == 0, 0 == null, u == 0, o == null, null == false,
+              1n == 1, 1n === 1, 1 == 1n, 2n == "2", true == 1, "" == 0, [1] == 1,
+              Symbol.iterator == Symbol.iterator, 0 === "0", null === null, u === undefined,
+              o == o, o === {}, n == "NaN", i == "Infinity"].join()
+             """) ==
+               "true,true,false,false,true,true,true,false,true,true,true,true,false,true," <>
+                 "true,true,false,false,false,false,false,true,false,true,true,true,true,true," <>
+                 "true,false,true,true,true,false,false,true"
+    end
+
     test "typeof" do
       assert js(
                "[typeof 1, typeof 'a', typeof null, typeof undefined, typeof {}, typeof (() => 1), typeof nope]"
