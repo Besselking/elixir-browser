@@ -4106,17 +4106,23 @@ defmodule Browser.LayoutTest do
       assert Process.get(:layout_transforms) == nil
     end
 
-    test "boxes of two font sizes with the same transform in em each get their own matrix" do
+    test "boxes with the same transform and size, but another font size or position" do
       {items, _} =
         xf(
-          ~s|<div style="transform:translateX(2em);font-size:10px;height:20px;background:#eee">a</div>| <>
-            ~s|<div style="transform:translateX(2em);font-size:20px;height:20px;background:#ddd">b</div>|
+          ~s|<div style="transform:translateX(2em);font-size:10px;width:100px;height:20px;background:#eee">a</div>| <>
+            ~s|<div style="transform:translateX(2em);font-size:20px;width:100px;height:20px;background:#ddd">b</div>| <>
+            ~s|<div style="transform:translateX(30px) rotate(90deg);width:100px;height:20px;background:#ccc">c</div>| <>
+            ~s|<div style="position:absolute;left:0;top:100px;transform:translateX(30px) rotate(90deg);width:100px;height:20px;background:#bbb">d</div>|
         )
 
-      shifts =
-        for %{type: :rect, xform: [{_, _, _, _, e, _}]} <- items, do: e
-
-      assert shifts == [20.0, 40.0]
+      [a, b, c, d] = for %{type: :rect, xform: [m]} = r <- items, do: {r, m}
+      assert elem(elem(a, 1), 4) == 20.0
+      assert elem(elem(b, 1), 4) == 40.0
+      # (the box in flow moves by the translation; the positioned box has moved already)
+      {r, m} = c
+      assert close?(pt(m, r.x + 50, r.y + 10), {r.x + 80, r.y + 10})
+      {r, m} = d
+      assert close?(pt(m, r.x + 50, r.y + 10), {r.x + 50, r.y + 10})
     end
 
     test "absolutely positioned boxes keep translate in their position, not in the matrix" do

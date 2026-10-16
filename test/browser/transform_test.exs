@@ -47,7 +47,7 @@ defmodule Browser.TransformTest do
     quarter = point(m(%{"transform" => "rotate(90deg)"}), 10, 20)
 
     for angle <-
-          ~w(.25turn +.25turn 9e1deg 9E1deg 90.deg 90.e0deg 9.e1deg 9.E1deg 1.5707963267948966rad -270deg) do
+          ~w(.25turn +.25turn 9e1deg 9E1deg 90.deg 90.e0deg 9.e1deg 9.E1deg 9.E+1deg 1.5707963267948966rad -270deg) do
       assert near(point(m(%{"transform" => "rotate(#{angle})"}), 10, 20), quarter), angle
     end
 
