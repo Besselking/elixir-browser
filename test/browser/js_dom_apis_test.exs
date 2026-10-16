@@ -235,6 +235,38 @@ defmodule Browser.JS.DOMApisTest do
     assert logs == ["got change true", "host heard 1", "true false"]
   end
 
+  # The root of a node goes past each shadow root to its host, and up to the document.
+  test "isConnected goes past shadow roots to the document" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const host = document.getElementById("h");
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = "<p id=in><span></span></p>";
+        const inner = root.getElementById("in");
+        const root2 = inner.firstChild.attachShadow({ mode: "open" });
+        root2.innerHTML = "<b></b>";
+        const deep = root2.firstChild;
+        console.log(inner.isConnected, deep.isConnected, root2.isConnected);
+        host.remove();
+        console.log(inner.isConnected, deep.isConnected, host.isConnected);
+        document.body.appendChild(host);
+        console.log(inner.isConnected, deep.isConnected);
+        const t = document.createElement("template");
+        t.innerHTML = "<i></i>";
+        document.body.appendChild(t);
+        console.log(t.content.firstChild.isConnected, t.isConnected);
+        const lone = document.createElement("div").attachShadow({ mode: "open" });
+        lone.innerHTML = "<u></u>";
+        console.log(lone.firstChild.isConnected);
+        """,
+        ~S|<div id=h></div>|
+      )
+
+    assert errors == []
+    assert logs == ["true true true", "false false false", "true true", "false true", "false"]
+  end
+
   test "custom elements inside a shadow root of a connected element are upgraded" do
     {logs, errors} =
       run(
