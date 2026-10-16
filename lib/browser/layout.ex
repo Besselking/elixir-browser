@@ -376,11 +376,14 @@ defmodule Browser.Layout do
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     Process.put(:layout_fold, Keyword.get_lazy(opts, :fold, &fold_mode_of_env/0))
+    # the transform function lists this layout read (see `Browser.Transform.matrix/3`)
+    Process.put(:layout_transforms, %{})
     {nodes, canvas} = propagate_background(nodes)
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
     {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    Process.delete(:layout_transforms)
 
     if System.get_env("LAYOUT_TIMES"),
       do:
@@ -2960,28 +2963,33 @@ defmodule Browser.Layout do
   # every value resolved against the containing width.
   defp atom_key(nid, sub), do: Tuple.insert_at(wkey(nid), 3, ops_hash(sub))
 
-  # A hash of ops in which a table counts by the key of its model, which is a hash of its
-  # content already. (A table's model holds the ops of each cell, and `phash2` does not see
-  # terms that are shared: an atom around a table would hash the table again, and so would
-  # each level of tables in cells. A table in a cell is in the atom of an inline-block.)
+  # A hash of ops in which a table counts by the key of its model, and a nested inline-block,
+  # float or flex item by its own key: each key holds a hash of that content already. (A
+  # table's model holds the ops of each cell, and `phash2` does not see terms that are shared:
+  # an atom around a table would hash the table again, and so would each level of tables in
+  # cells. In the same way, each level of nested atoms would hash all the atoms in it again.
+  # A flex item also holds the functions that build it again, with the element in them.)
+  # Within one layout the keys of two atoms differ by their walk keys; the memo takes what an
+  # earlier layout left only when its content is the same as a whole (see `memo/3`).
   defp ops_hash(ops),
-    do: :erlang.phash2(if(has_table?(ops), do: shallow_ops(ops), else: ops))
+    do: :erlang.phash2(if(has_nested?(ops), do: shallow_ops(ops), else: ops))
 
-  defp has_table?([{:table, _, _, _} | _]), do: true
-  defp has_table?([{:span, _, ops, _} | rest]), do: has_table?(ops) or has_table?(rest)
-  defp has_table?([{:inline_block, sub, _, _} | rest]), do: has_table?(sub) or has_table?(rest)
-  defp has_table?([_ | rest]), do: has_table?(rest)
-  defp has_table?(_), do: false
+  defp has_nested?([{:table, _, _, _} | _]), do: true
+  defp has_nested?([{:inline_block, _, _, _} | _]), do: true
+  defp has_nested?([{:float, _, _, _, _} | _]), do: true
+  defp has_nested?([{:flex, _, _, _} | _]), do: true
+  defp has_nested?([{:span, _, ops, _} | rest]), do: has_nested?(ops) or has_nested?(rest)
+  defp has_nested?([_ | rest]), do: has_nested?(rest)
+  defp has_nested?(_), do: false
 
   defp shallow_ops(ops) when is_list(ops), do: Enum.map(ops, &shallow_op/1)
   defp shallow_ops(other), do: other
 
   defp shallow_op({:table, ts, model, style}), do: {:table, ts, model.key, style}
   defp shallow_op({:span, key, ops, safe?}), do: {:span, key, shallow_ops(ops), safe?}
-
-  defp shallow_op({:inline_block, sub, spec, style}),
-    do: {:inline_block, shallow_ops(sub), spec, style}
-
+  defp shallow_op({:inline_block, _sub, spec, style}), do: {:inline_block, spec, style}
+  defp shallow_op({:float, side, _sub, spec, style}), do: {:float, side, spec, style}
+  defp shallow_op({:flex, cs, items, style}), do: {:flex, cs, Enum.map(items, & &1.key), style}
   defp shallow_op(op), do: op
 
   defp nid_of(attrs) do
@@ -3463,11 +3471,20 @@ defmodule Browser.Layout do
     do: pre_text(t, style, acc, ws)
 
   defp walk_text(t, %{ws: :nowrap} = style, acc) do
-    t = drop_wide_breaks(t)
+    ascii? = ascii?(t)
+    t = if ascii?, do: t, else: drop_wide_breaks(t)
     # whitespace collapses, but the words never wrap
-    leading = if String.match?(t, space_start()), do: [{:space, style}], else: []
-    trailing = if String.match?(t, space_end()), do: [{:space, style}], else: []
-    words = t |> css_words() |> Enum.map(&{:word, &1, style, :pre})
+    leading =
+      if (ascii? and ascii_space_start?(t)) or (not ascii? and String.match?(t, space_start())),
+        do: [{:space, style}],
+        else: []
+
+    trailing =
+      if (ascii? and ascii_space_end?(t)) or (not ascii? and String.match?(t, space_end())),
+        do: [{:space, style}],
+        else: []
+
+    words = t |> css_words(ascii?) |> Enum.map(&{:word, &1, style, :pre})
 
     case words do
       [] -> if t == "", do: acc, else: [{:space, style} | acc]

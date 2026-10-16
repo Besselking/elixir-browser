@@ -49,6 +49,71 @@ defmodule Browser.JS.IframeTest do
     Runtime.stop(pid)
   end
 
+  # A layout for the scripts of a frame leaves out the other frames (`Browser.JS.DOM.frame_chain/1`):
+  # a new element in another frame gets no number and no box there, so a question about it later
+  # asks for a layout again, also when nothing changed in between.
+  test "a layout for one frame does not answer for a new element of another frame" do
+    b =
+      ~S|<body><script>var x = document.createElement('div'); document.body.appendChild(x); | <>
+        ~S|setTimeout(function () { console.log('B ' + x.getBoundingClientRect().width) }, 150)</script></body>|
+
+    a =
+      ~S|<body><script>setTimeout(function () { var y = document.createElement('div'); | <>
+        ~S|document.body.appendChild(y); console.log('A ' + y.getBoundingClientRect().width) }, 50)</script></body>|
+
+    {raw, _} =
+      ~s|<body><iframe srcdoc="#{a}"></iframe><iframe srcdoc="#{b}"></iframe></body>|
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{
+      url: "http://t.test/",
+      width: 800,
+      height: 600,
+      layout_now: true,
+      fetch: fn _ -> {:error, "404"} end
+    }
+
+    pid = Runtime.start(raw, info)
+    Runtime.run_scripts(pid)
+
+    # (each element in the tree gets a box 100 px wider than its number)
+    answer = fn answer, acc ->
+      receive do
+        {:layout_now, ^pid, nil, _tree} ->
+          answer.(answer, acc)
+
+        {:layout_now, ^pid, ref, tree} ->
+          rects = Map.new(nids(tree), &{&1, {0, 0, 100 + &1, 10}})
+          send(pid, {:layout_now_done, ref, rects, {800.0, 600.0}})
+          answer.(answer, [:forced | acc])
+
+        {:js_async, ^pid, reply} ->
+          logs = for {:log, t} <- reply.console, do: t
+          acc = Enum.reverse(logs) ++ acc
+          if Enum.any?(logs, &String.starts_with?(&1, "B ")), do: acc, else: answer.(answer, acc)
+      after
+        5_000 -> flunk("no answer from the frames: #{inspect(Enum.reverse(acc))}")
+      end
+    end
+
+    events = Enum.reverse(answer.(answer, []))
+    Runtime.stop(pid)
+    assert [:forced, "A " <> _, :forced, "B " <> w] = events
+    assert String.to_integer(w) > 100
+  end
+
+  defp nids(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &nids/1)
+
+  defp nids({:element, _, attrs, kids}) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, n} -> [n | nids(kids)]
+      nil -> nids(kids)
+    end
+  end
+
+  defp nids(_), do: []
+
   test "a new iframe has an empty document and loads srcdoc" do
     {logs, errors} =
       run(~S"""

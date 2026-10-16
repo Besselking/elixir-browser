@@ -223,6 +223,83 @@ defmodule Browser.LayoutMemoTest do
     same!(page(html.("lorem")), memo, [], 800)
   end
 
+  # (the key of an atom counts the atoms in it by their own keys: a change deep inside must
+  # still give the outer atoms new keys)
+  test "a change inside nested atoms is laid out the same from the memo" do
+    html = fn word ->
+      ~s(<body style="width:700px"><div style="display:flex"><div style="float:left">a ) <>
+        ~s(<span style="display:inline-block">b <span style="display:inline-flex">) <>
+        ~s(<i style="display:inline-block">#{word}</i> c</span></span></div><p>d</p></div>)
+    end
+
+    {_, _, memo0} = kept(page(html.("short")), nil, [], 800)
+    {_, long} = same!(page(html.("a much longer word list")), memo0, [], 800)
+
+    # (the four boxes around the word get new keys; the flex item `c` and the paragraph keep
+    # theirs. A key is `{:k, element, count, hash}`, see `Browser.Layout.wkey/1`)
+    {before, now} = {atom_hashes(memo0), atom_hashes(long)}
+    changed = for {k, h} <- now, Map.has_key?(before, k) and before[k] != h, do: k
+    kept = for {k, h} <- now, before[k] == h, do: k
+    assert {length(changed), length(kept)} == {5, 2}
+
+    {_, memo} = same!(page(html.("short")), long, [], 800)
+    same!(page(html.("tiny")), memo, [], 800)
+
+    # (the float and the inline-block around the word get new keys; the item `d` does not)
+    p = page(html.("short"))
+    float = nid_with(p.nodes, &(&1["style"] == "float:left"))
+    block = nid_with(p.nodes, &(&1["style"] == "display:inline-block"))
+    item = nid_with(p.nodes, &(&1.kids == [{:text, "d"}]))
+    assert Enum.all?([float, block, item], &is_integer/1)
+    short = walk_keys(memo)
+    long = walk_keys(long)
+    assert short[{float, 1}] != long[{float, 1}]
+    assert short[{block, 1}] != long[{block, 1}]
+    assert short[{item, 1}] != nil and short[{item, 1}] == long[{item, 1}]
+  end
+
+  test "a change inside a float gives the inline-block around it a new key" do
+    html = fn word ->
+      ~s(<p>a <span style="display:inline-block">b <b style="float:right">#{word}</b> c</span></p>)
+    end
+
+    {_, _, short} = kept(page(html.("short")), nil)
+    {_, long} = same!(page(html.("a much longer word list")), short, [])
+    block = nid_with(page(html.("short")).nodes, &(&1["style"] == "display:inline-block"))
+    assert is_integer(block)
+    short = walk_keys(short)
+    long = walk_keys(long)
+    assert short[{block, 1}] != nil and short[{block, 1}] != long[{block, 1}]
+  end
+
+  defp atom_hashes(memo) do
+    for {key, _} <- memo.entries,
+        k <- Tuple.to_list(key),
+        {:k, nid, n, h} <- [with({:flex, k} <- k, do: k)],
+        into: %{},
+        do: {{nid, n}, h}
+  end
+
+  # the number of the first element for which `fun` is true (it gets the attributes as a map,
+  # and the kids in `kids`)
+  defp nid_with({:element, _, attrs, kids}, fun) do
+    if fun.(Map.put(Map.new(attrs), :kids, kids)),
+      do: attrs |> List.keyfind("@nid", 0) |> elem(1),
+      else: nid_with(kids, fun)
+  end
+
+  defp nid_with(nodes, fun) when is_list(nodes), do: Enum.find_value(nodes, &nid_with(&1, fun))
+  defp nid_with(_node, _fun), do: nil
+
+  # {element number, count} => content hash, of the walk keys in the memo entries of a layout
+  defp walk_keys(memo) do
+    for {key, _} <- memo.entries, {nid, n, hash} <- keys_in(key), into: %{}, do: {{nid, n}, hash}
+  end
+
+  defp keys_in({:k, nid, n, hash}), do: [{nid, n, hash}]
+  defp keys_in(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.flat_map(&keys_in/1)
+  defp keys_in(_), do: []
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)

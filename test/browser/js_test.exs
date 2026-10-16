@@ -1769,6 +1769,50 @@ defmodule Browser.JSTest do
       assert js("var a = new Uint8Array(2); a[5] = 1; [a.length, a[5]]") == [2.0, :undefined]
     end
 
+    test "an index read and write: special floats, batched writes, detached and shrunk buffers" do
+      # (NaN, the infinities and -0 through the float segment and the decoder)
+      assert js("""
+             var f = new Float64Array([NaN, Infinity, -Infinity, -0, 1.5]);
+             var g = new Float32Array([NaN, -Infinity, -0, 3.4e38, 3.5e38]);
+             [f[0], f[1], f[2], 1 / f[3], f[4], g[0], g[1], 1 / g[2], g[3] === Math.fround(3.4e38), g[4]].join()
+             """) ==
+               "NaN,Infinity,-Infinity,-Infinity,1.5,NaN,-Infinity,-Infinity,true,Infinity"
+
+      # (writes of one size are batched; a read through a view of another size sees them)
+      assert js("""
+             var buf = new ArrayBuffer(4096), f = new Float64Array(buf), b = new Uint8Array(buf);
+             for (var i = 0; i < 300; i++) f[i] = i + 0.5;
+             var s = 0; for (var i = 0; i < 300; i++) s += f[i];
+             f[1] = 2; b[9] = 1; [s, f[1] === 2, b[9], f[299]].join()
+             """) == "45000,false,1,299.5"
+
+      # (a detached buffer and a shrunk resizable buffer leave the elements out)
+      assert js("""
+             var buf = new ArrayBuffer(16), a = new Float64Array(buf); a[1] = 7;
+             var t = buf.transfer(); a[0] = 1;
+             var r = new ArrayBuffer(16, {maxByteLength: 32}), v = new Int32Array(r), w = new Int32Array(r, 0, 4);
+             v[3] = 5; r.resize(8); v[3] = 6; w[0] = 9; r.resize(16);
+             [a[1], a[0], a.length, new Float64Array(t)[1], v[3], v.length, w[0], w.length].join()
+             """) == ",,0,7,0,4,0,4"
+
+      # (a value that detaches the buffer while it converts: the write does nothing)
+      assert js("""
+             var buf = new ArrayBuffer(8), a = new Float64Array(buf);
+             a[0] = {valueOf(){ buf.transfer(); return 3 }};
+             [a.length, a[0]].join()
+             """) == "0,"
+
+      # (the index at the length of a view that is shorter than its buffer, and a view of an
+      # immutable buffer)
+      assert js("""
+             var b = new ArrayBuffer(8), v = new Uint8Array(b, 0, 2), w = new Float64Array(b, 0, 0);
+             v[2] = 5; w[0] = 1;
+             var t = new Uint8Array(new ArrayBuffer(4).transferToImmutable()); t[0] = 7;
+             var e = (function(){ "use strict"; try { t[1] = 8; return 'none' } catch (x) { return x.constructor.name } })();
+             [String(v[2]), new Uint8Array(b)[2], String(w[0]), t[0], t[1], e].join()
+             """) == "undefined,0,undefined,0,0,TypeError"
+    end
+
     test "views share a buffer, DataView reads both byte orders" do
       assert js("""
              var buf = new ArrayBuffer(8), dv = new DataView(buf);
