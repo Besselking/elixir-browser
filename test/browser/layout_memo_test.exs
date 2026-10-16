@@ -223,6 +223,21 @@ defmodule Browser.LayoutMemoTest do
     same!(page(html.("lorem")), memo, [], 800)
   end
 
+  # (the key of an atom counts the atoms in it by their own keys: a change deep inside must
+  # still give the outer atoms new keys)
+  test "a change inside nested atoms is laid out the same from the memo" do
+    html = fn word ->
+      ~s(<body style="width:700px"><div style="display:flex"><div style="float:left">a ) <>
+        ~s(<span style="display:inline-block">b <span style="display:inline-flex">) <>
+        ~s(<i style="display:inline-block">#{word}</i> c</span></span></div><p>d</p></div>)
+    end
+
+    {_, _, memo} = kept(page(html.("short")), nil, [], 800)
+    {_, memo} = same!(page(html.("a much longer word list")), memo, [], 800)
+    {_, memo} = same!(page(html.("short")), memo, [], 800)
+    same!(page(html.("tiny")), memo, [], 800)
+  end
+
   test "another window size starts from an empty memo" do
     p = page(~s(<div style="float:left;height:50%">half the window</div><p>text</p>))
     {_, _, memo} = kept(p, nil)
