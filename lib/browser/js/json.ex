@@ -181,11 +181,10 @@ defmodule Browser.JS.Json do
 
   defp value("{" <> r) do
     r = skip_ws(r)
-    obj = new_object()
 
     case r do
-      "}" <> r -> {obj, r}
-      _ -> object_members(r, obj)
+      "}" <> r -> {new_object(), r}
+      _ -> object_members(r, [])
     end
   end
 
@@ -202,7 +201,10 @@ defmodule Browser.JS.Json do
     end
   end
 
-  defp object_members(r, obj) do
+  # The members are collected first, and the object is made with all of them in one step:
+  # one record, not one record for each member. A key that comes again keeps its place and
+  # takes the last value, as a define of each member in turn does.
+  defp object_members(r, pairs) do
     case skip_ws(r) do
       "\"" <> r ->
         {key, r} = string(r, [])
@@ -210,11 +212,11 @@ defmodule Browser.JS.Json do
         case skip_ws(r) do
           ":" <> r ->
             {v, r} = value(skip_ws(r))
-            define_data(obj, key, v)
+            pairs = [{key, v} | pairs]
 
             case skip_ws(r) do
-              "," <> r -> object_members(r, obj)
-              "}" <> r -> {obj, r}
+              "," <> r -> object_members(r, pairs)
+              "}" <> r -> {new_object(:lists.reverse(pairs)), r}
               other -> syntax_error(other)
             end
 
@@ -238,6 +240,8 @@ defmodule Browser.JS.Json do
   # A long run alone points into the whole JSON text. Copy it, so that the string does not keep
   # the text in memory. (A short run is a copy already.)
   defp string("\"" <> r, [run]) when byte_size(run) >= 64, do: {:binary.copy(run), r}
+  # (a short run is a copy already)
+  defp string("\"" <> r, [run]), do: {run, r}
   defp string("\"" <> r, acc), do: {acc |> Enum.reverse() |> IO.iodata_to_binary(), r}
 
   defp string("\\" <> r, acc) do
