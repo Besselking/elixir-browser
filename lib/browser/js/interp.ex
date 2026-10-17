@@ -582,6 +582,38 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
+  # `slot_assign/4` inline, for the compiled code: the test of the temporal dead zone and
+  # the write of `slot_write/3` with one read of the frame, and no call when the frame is
+  # small. Check mode calls `slot_assign/4`, which makes the checks.
+  defmacro assign_inline(env, i, name, v) do
+    if @check do
+      quote do
+        Browser.JS.Interp.slot_assign(unquote(env), unquote(i), unquote(name), unquote(v))
+      end
+    else
+      quote do
+        ai_env = unquote(env)
+        ai_v = unquote(v)
+        ai_t = :erlang.get(ai_env)
+
+        case :erlang.element(unquote(i), ai_t) do
+          :tdz ->
+            Browser.JS.Interp.tdz_error(unquote(name))
+
+          {:js_box, ai_b} ->
+            :erlang.put(ai_b, {:js_cell, ai_v})
+
+          _ when tuple_size(ai_t) < unquote(@box_min) ->
+            :erlang.put(ai_env, :erlang.setelement(unquote(i), ai_t, ai_v))
+
+          _ ->
+            Browser.JS.Interp.slot_write(ai_env, unquote(i), ai_v)
+        end
+      end
+    end
+  end
+
+  @doc false
   # The value of a slot that can hold a box (see `slot_write/3`).
   defmacro unbox(v) do
     quote do

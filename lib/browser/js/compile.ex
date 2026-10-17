@@ -778,11 +778,11 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  # `x = v` to a slot: the write with `slot_assign/4`, which tests the temporal dead zone
-  # and a constant, then the value.
+  # `x = v` to a slot: the write of `slot_assign/4`, which tests the temporal dead zone,
+  # then the value. (`Interp.assign_inline/4` is that write with no call)
   defmacrop assign_slot(env, d, i, name, v) do
     quote do
-      Interp.slot_assign(up(unquote(env), unquote(d)), unquote(i), unquote(name), unquote(v))
+      Interp.assign_inline(up(unquote(env), unquote(d)), unquote(i), unquote(name), unquote(v))
       unquote(v)
     end
   end
@@ -1437,7 +1437,8 @@ defmodule Browser.JS.Compile do
         old = slot0(frame, i, name, form)
         b = av(vo, env)
         v = op_body(unquote(op), old, b)
-        Interp.slot_assign(frame, i, name, v) && v
+        Interp.assign_inline(frame, i, name, v)
+        v
       end
     end
   end
@@ -1449,7 +1450,8 @@ defmodule Browser.JS.Compile do
       frame = up(env, d)
       old = slot0(frame, i, name, form)
       v = Interp.binop(base, old, av(vo, env))
-      Interp.slot_assign(frame, i, name, v) && v
+      Interp.assign_inline(frame, i, name, v)
+      v
     end
   end
 
