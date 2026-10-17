@@ -1790,9 +1790,9 @@ defmodule Browser.JS.Compile do
             not (init == nil and kind == :var),
             do: {d, i, name, if(init, do: opnd(init), else: {:k, :undefined})}
 
-      fn env ->
-        decls(ds, env)
-        :ok
+      case ds do
+        [{d, i, name, io}] -> decl_one(d, i, name, io)
+        _ -> fn env -> decls(ds, env) end
       end
     else
       # (an initializer that takes a name keeps its node: `ev_named/3` names it after the
@@ -1922,17 +1922,54 @@ defmodule Browser.JS.Compile do
   defp slot_decl?({{:slot, _, _, _}, init}), do: init == nil or not nameable(init)
   defp slot_decl?(_), do: false
 
+  # The write of a declaration, with the checks of check mode. A frame below the size of
+  # the boxes (`Interp.box_min/0`) holds no box, so the write is a plain write of the tuple.
+  defmacrop put_decl(frame, i, name, v) do
+    quote do
+      frame = unquote(frame)
+      if @check, do: Interp.check_slot(frame, unquote(i), unquote(name))
+      if @check, do: Interp.check_unsynced(frame, unquote(i))
+      t = :erlang.get(frame)
+
+      if tuple_size(t) < Interp.box_min(),
+        do: :erlang.put(frame, :erlang.setelement(unquote(i), t, unquote(v))),
+        else: Interp.slot_put(frame, unquote(i), unquote(v))
+    end
+  end
+
   # The declarations of a `var`, `let` or `const`, from left to right, as `bind/4` writes
   # them: the value, then the write with the checks of check mode.
   defp decls([], _env), do: :ok
 
   defp decls([{d, i, name, io} | rest], env) do
     v = av(io, env)
-    frame = up(env, d)
-    if @check, do: Interp.check_slot(frame, i, name)
-    if @check, do: Interp.check_unsynced(frame, i)
-    Interp.slot_put(frame, i, v)
+    put_decl(up(env, d), i, name, v)
     decls(rest, env)
+  end
+
+  # A statement with one declaration, the common case: its closure has the value form and
+  # the hops of the slot built in, so it walks no list and reads no form when it runs.
+  defp decl_one(0, i, name, {:f, f}) do
+    fn env ->
+      v = f.(env)
+      put_decl(env, i, name, v)
+      :ok
+    end
+  end
+
+  defp decl_one(0, i, name, {:k, v}) do
+    fn env ->
+      put_decl(env, i, name, v)
+      :ok
+    end
+  end
+
+  defp decl_one(d, i, name, io) do
+    fn env ->
+      v = av(io, env)
+      put_decl(up(env, d), i, name, v)
+      :ok
+    end
   end
 
   # S2: a completion that leaves a loop, with the K7 test of check mode.

@@ -230,6 +230,10 @@ defmodule Browser.JS.Interp do
   # The size from which a frame takes boxes (see `slot_write/3`).
   @box_min 128
 
+  @doc false
+  # (the closure compiler writes a declaration to a smaller frame inline, see `Compile`)
+  defmacro box_min, do: @box_min
+
   # A box is held by one slot of one frame only: a read takes the value out of it, and a
   # copy of a frame copies the values (`copy_scope/2`, the copies of `enter_body/3`). So a
   # box goes when its slot is written over or when its frame goes. Else every call of a
