@@ -5009,6 +5009,81 @@ defmodule Browser.Layout do
 
   defp rel_moved(it), do: it
 
+  # The items of an atom with many of them wait for their place on the line (`place_atom/2`)
+  # with `pending`: {the room on the right to add to `rr`, the block a sticky box at the top
+  # is limited by, the width that limits the extent (nil when it counts), the new paint
+  # orders}. The line puts them in one entry with the op `{:atom, dx, dy, pending}` (see
+  # `flat_items/2`): each item gets it when it is taken apart, in one update, and an item that a
+  # clipping box drops is never made (`drop_below/3`). What paints behind the text is changed
+  # at once, as the line does with every item of a smaller atom.
+  defp pending_atom_items(items, op, {others, rects, inline_rects}) do
+    {mine, inline_rects, n} =
+      Enum.reduce(items, {[], inline_rects, 0}, fn sub, {mine, inline_rects, n} ->
+        # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
+        if (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub),
+          do: {[sub | mine], inline_rects, n + 1},
+          else: {mine, [apply_op(sub, op) | inline_rects], n}
+      end)
+
+    {wrap(mine, op, n) ++ others, rects, inline_rects}
+  end
+
+  # the atom with its items changed as `place_atom/2` would change them
+  defp placed_atom(%{pending: pending, items: items} = atom),
+    do: %{atom | items: Enum.map(items, &pending_place(&1, pending))}
+
+  defp placed_atom(atom), do: atom
+
+  defp pending_place(item, {extra, parent, xlim, fresh}) do
+    item = if extra > 0, do: add_rr(item, extra), else: item
+    item = adopt_sticky_in(item, parent)
+    item = if xlim, do: limit_extent(item, xlim), else: item
+    renumbered(item, fresh)
+  end
+
+  # (an item with nothing but a place to change gets all of it in one update)
+  defp atom_op(item, dx, dy, {extra, _parent, xlim, fresh} = pending) do
+    if plain_place?(item) and not match?(%{rel: {_, _, _}}, item) do
+      set = %{x: item.x + dx, y: item.y + dy}
+
+      set =
+        if extra > 0 and is_map_key(item, :rr), do: Map.put(set, :rr, item.rr + extra), else: set
+
+      limit =
+        case item do
+          %{xlim: l} when xlim == nil or l <= xlim -> l
+          _ -> xlim
+        end
+
+      set = if limit != nil, do: Map.put(set, :xlim, limit + dx), else: set
+      pz = fresh && Map.get(item, :pz)
+      set = if pz, do: Map.put(set, :pz, fresh[pz]), else: set
+
+      set =
+        case item do
+          %{clip: c} -> Map.put(set, :clip, shift_rect(c, dx, dy))
+          _ -> set
+        end
+
+      set =
+        case item do
+          %{clips: clips} ->
+            Map.put(
+              set,
+              :clips,
+              Enum.map(clips, fn {r, k, sid} -> {shift_rect(r, dx, dy), k, sid} end)
+            )
+
+          _ ->
+            set
+        end
+
+      :maps.merge(item, set)
+    else
+      item |> pending_place(pending) |> move(dx, dy) |> rel_moved()
+    end
+  end
+
   defp push_pos(st, origin), do: %{st | pos: [origin | st.pos]}
 
   defp apply_gap(st, own? \\ false)
@@ -5042,10 +5117,12 @@ defmodule Browser.Layout do
   # wrapping to a new line if it doesn't fit.
   # A sticky box that sat at the top of a layout of its own (a flex item, say) is limited by
   # the block the whole thing is placed in.
-  defp adopt_sticky(%{stick: %{parent: nil} = stick} = item, st),
-    do: %{item | stick: %{stick | parent: List.first(st.blocks)}}
+  defp adopt_sticky(item, st), do: adopt_sticky_in(item, List.first(st.blocks))
 
-  defp adopt_sticky(item, _st), do: item
+  defp adopt_sticky_in(%{stick: %{parent: nil} = stick} = item, parent),
+    do: %{item | stick: %{stick | parent: parent}}
+
+  defp adopt_sticky_in(item, _parent), do: item
 
   defp add_rr(%{rr: rr} = item, extra), do: %{item | rr: rr + extra}
   defp add_rr(item, _extra), do: item
@@ -5164,6 +5241,10 @@ defmodule Browser.Layout do
 
   defp strut(st, _style), do: st
 
+  # (an atom with fewer items changes them at once, as before: for a few hundred items, the
+  # entry and its merge cost more than the updates they save. See `pending_atom_items/3`)
+  @pending_min 200
+
   defp place_atom(st, atom) do
     line_left = st.margin + st.left
 
@@ -5187,23 +5268,32 @@ defmodule Browser.Layout do
     # (not the room beside a box that has a width of its own: that is not part of what it needs)
     extra = st.right - st.free
 
-    atom =
-      if extra > 0,
-        do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
-        else: atom
-
     counts? = Map.get(atom, :overflow_counts)
 
-    atom = %{
-      atom
-      | items:
-          atom.items
-          |> Enum.map(fn item ->
-            item = adopt_sticky(item, st)
-            if counts?, do: item, else: limit_extent(item, atom.w)
-          end)
-          |> renumber_pz()
-    }
+    # (the items of an atom that holds many are changed when the line moves them to their place,
+    # with the move: see `pending_atom_items/3`)
+    atom =
+      if atom.w < @unbounded / 2 and length(atom.items) >= @pending_min do
+        xlim = if counts?, do: nil, else: atom.w
+        pending = {max(extra, 0), List.first(st.blocks), xlim, fresh_pz(atom.items)}
+        Map.put(atom, :pending, pending)
+      else
+        atom =
+          if extra > 0,
+            do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
+            else: atom
+
+        %{
+          atom
+          | items:
+              atom.items
+              |> Enum.map(fn item ->
+                item = adopt_sticky(item, st)
+                if counts?, do: item, else: limit_extent(item, atom.w)
+              end)
+              |> renumber_pz()
+        }
+      end
 
     atom = atom |> Map.put(:type, :atom) |> Map.put(:x, x)
     atom = if rel = current_rel(st), do: Map.put(atom, :rel, rel), else: atom
@@ -5252,22 +5342,28 @@ defmodule Browser.Layout do
   defp pz_key(seq), do: {0, seq}
 
   defp renumber_pz(items) do
+    case fresh_pz(items) do
+      nil -> items
+      fresh -> Enum.map(items, &renumbered(&1, fresh))
+    end
+  end
+
+  # the new paint order of each one the items have (nil when they have none)
+  defp fresh_pz(items) do
     order =
       for(%{pz: pz} when pz != nil <- items, uniq: true, do: pz)
       |> Enum.sort_by(&pz_key/1)
 
-    if order == [] do
-      items
-    else
-      fresh =
-        Map.new(order, fn
-          {z, _} = pz -> {pz, {z, :erlang.unique_integer([:monotonic])}}
-          pz -> {pz, :erlang.unique_integer([:monotonic])}
-        end)
-
-      Enum.map(items, fn it -> if pz = Map.get(it, :pz), do: %{it | pz: fresh[pz]}, else: it end)
+    if order != [] do
+      Map.new(order, fn
+        {z, _} = pz -> {pz, {z, :erlang.unique_integer([:monotonic])}}
+        pz -> {pz, :erlang.unique_integer([:monotonic])}
+      end)
     end
   end
+
+  defp renumbered(it, nil), do: it
+  defp renumbered(it, fresh), do: if(pz = Map.get(it, :pz), do: %{it | pz: fresh[pz]}, else: it)
 
   # -- boxes: width, margins, borders, height, clipping ------------------------------------
 
@@ -5935,8 +6031,8 @@ defmodule Browser.Layout do
   # box for the scripts, drawn or not: `:bounds` stay)
   defp drop_below(st, box, limit) do
     keep? = &(&1.y < limit or &1.type == :bounds)
-    {new_items, old_items} = take_new(st.items, st.n - box.n0)
-    kept_items = Enum.filter(new_items, keep?)
+    {new_items, old_items} = split_entries(st.items, st.n - box.n0, [])
+    kept_items = new_items |> kept_into(nil, [], limit, []) |> :lists.reverse()
     {new_rects, old_rects} = Enum.split(st.rects, st.nr - box.nr0)
     kept_rects = Enum.filter(new_rects, keep?)
 
@@ -7118,6 +7214,45 @@ defmodule Browser.Layout do
   # the items, newest first, with the ops of the context `ctx` done on them
   defp flat_items(entries, ctx \\ nil), do: entries |> flat_into(ctx, []) |> :lists.reverse()
 
+  # (as `flat_into/3`, but only the items that end above `limit` or are `:bounds`: one that ends
+  # lower is not made. `dys` are the moves down of the ops of `ctx`, in the order they add up)
+  defp kept_into([], _ctx, _dys, _limit, acc), do: acc
+
+  defp kept_into([{:frag, fdy, items, _n} | rest], ctx, dys, limit, acc) do
+    inner = add_dy(ctx, fdy)
+    kept_into(rest, ctx, dys, limit, kept_into(items, inner, ctx_dys(inner), limit, acc))
+  end
+
+  defp kept_into([{:wrap, op, items, _n} | rest], ctx, dys, limit, acc) do
+    inner = add_op(ctx, op)
+    kept_into(rest, ctx, dys, limit, kept_into(items, inner, ctx_dys(inner), limit, acc))
+  end
+
+  defp kept_into([item | rest], ctx, dys, limit, acc) do
+    acc =
+      if Enum.reduce(dys, item.y, &(&2 + &1)) < limit or item.type == :bounds,
+        do: [if(ctx, do: apply_ctx(item, ctx), else: item) | acc],
+        else: acc
+
+    kept_into(rest, ctx, dys, limit, acc)
+  end
+
+  defp ctx_dys(nil), do: []
+
+  defp ctx_dys({t, _}) do
+    for op <- t, elem(op, 0) in [:dy, :rel, :atom] do
+      case op do
+        {:dy, dy} -> dy
+        {:rel, _, dy, _, _} -> dy
+        {:atom, _, dy, _} -> dy
+      end
+    end
+  end
+
+  # the number of items in an entry of a run
+  defp entry_count({tag, _, _, n}) when tag in [:frag, :wrap], do: n
+  defp entry_count(_item), do: 1
+
   # the items with the ops of `ctx` done on them, oldest first, on top of `acc`
   defp flat_into([], _ctx, acc), do: acc
 
@@ -7143,7 +7278,7 @@ defmodule Browser.Layout do
   # keys besides `x` and `y` that they give an item for which `own_place?/1` is false (nil when
   # an op does more than `place_op/3` follows)
   defp ops_ctx(t) do
-    if Enum.any?(t, &(elem(&1, 0) == :stick)) do
+    if Enum.any?(t, &(elem(&1, 0) in [:stick, :atom])) do
       {t, nil}
     else
       place = Enum.reduce(t, %{x: 0, y: 0}, &place_op(&1, &2, %{}))
@@ -7228,6 +7363,8 @@ defmodule Browser.Layout do
 
   defp apply_op(item, {:rel, dx, dy, layer, pz}),
     do: item |> move(dx, dy) |> Map.put(layer, true) |> Map.put_new(:pz, pz)
+
+  defp apply_op(item, {:atom, dx, dy, pending}), do: atom_op(item, dx, dy, pending)
 
   defp apply_op(item, {:stick, stick, z}),
     do: item |> Map.put_new(:stick, stick) |> Map.put_new(:z, z)
@@ -8163,23 +8300,33 @@ defmodule Browser.Layout do
       Enum.reduce(Enum.reverse(atoms), {[], [], []}, fn atom, acc ->
         {dx, dy, blk} = {atom.x + shift, top_of.(atom), Map.get(atom, :block)}
 
-        Enum.reduce(atom_items(atom), acc, fn sub, {others, rects, inline_rects} ->
-          it = sub |> move(dx, dy) |> rel_moved()
+        case atom do
+          %{pending: pending} when blk in [nil, false] and not is_map_key(atom, :rel) ->
+            pending_atom_items(atom.items, {:atom, dx, dy, pending}, acc)
 
-          cond do
-            it.type not in @behind_text or Map.get(it, :over) ->
-              {[it | others], rects, inline_rects}
+          _ ->
+            atom
+            |> placed_atom()
+            |> atom_items()
+            |> Enum.reduce(acc, fn sub, {others, rects, inline_rects} ->
+              it = sub |> move(dx, dy) |> rel_moved()
 
-            blk ->
-              {others, [it | rects], inline_rects}
+              cond do
+                it.type not in @behind_text or Map.get(it, :over) ->
+                  {[it | others], rects, inline_rects}
 
-            true ->
-              {others, rects, [it | inline_rects]}
-          end
-        end)
+                blk ->
+                  {others, [it | rects], inline_rects}
+
+                true ->
+                  {others, rects, [it | inline_rects]}
+              end
+            end)
+        end
       end)
 
     new_items = others ++ placed
+    added = Enum.reduce(others, length(placed), &(entry_count(&1) + &2))
 
     ctx = %{
       shift: shift,
@@ -8218,7 +8365,7 @@ defmodule Browser.Layout do
     %{
       st
       | items: new_items ++ inline_rects ++ st.items,
-        n: st.n + length(new_items) + length(inline_rects),
+        n: st.n + added + length(inline_rects),
         rects: rects ++ st.rects,
         nr: st.nr + length(rects),
         line: [],
