@@ -779,6 +779,11 @@ defmodule Browser.StyleTest do
              ]
 
       assert bg("p { background-size: cover }", "background-size") == [:cover]
+
+      # `ch` and `ex` each take their own size (0.6em and 0.5em without a font measurer)
+      css = "p { font-size: 10px; background-position: 2ch 3ex; background-size: 3ex 2ch }"
+      assert bg(css, "background-position") == [{12.0, 15.0}]
+      assert bg(css, "background-size") == [{15.0, 12.0}]
     end
 
     test "the background shorthand sets all five longhands and resets what it omits" do
@@ -1379,5 +1384,16 @@ defmodule Browser.StyleTest do
       {shared, plain} = both_ways(html, css)
       assert shared == plain
     end
+  end
+
+  test "viewport_unit? finds each viewport unit, in any case, after a digit only" do
+    for unit <- ~w(vw vh vmin vmax dvw dvh svw svh lvw lvh),
+        text <- ["1", "0.5", "calc(10px + 2"] do
+      assert Style.viewport_unit?("width: #{text}#{unit}"), unit
+      assert Style.viewport_unit?("width: #{text}#{String.upcase(unit)}"), unit
+    end
+
+    refute Style.viewport_unit?("width: 10px; content: 'vw'")
+    refute Style.viewport_unit?("width: 1vwx")
   end
 end

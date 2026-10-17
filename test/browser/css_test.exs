@@ -26,6 +26,41 @@ defmodule Browser.CSSTest do
 
   defp sm?(selector, ctx), do: CSS.matches?(sel(selector), ctx)
 
+  # an id or a class is an identifier: it cannot start with a digit, or with `-` and a digit
+  test "an id or a class that starts with a digit is no selector" do
+    for bad <- ["#1a", "#-1a", ".1a", ".-1a", "p#-2", "p.-2"] do
+      assert :error = CSS.parse_selector(bad), bad
+    end
+
+    for good <- ["#a1", "#-a", "#--a", ".-a", ".a-1", "#\\31 a", "p#x.y"] do
+      assert {:ok, _} = CSS.parse_selector(good), good
+    end
+  end
+
+  # a sheet or a declaration block with bytes that are not UTF-8 reads as its valid text, with
+  # U+FFFD in place of each bad byte
+  test "bytes that are not UTF-8 become U+FFFD" do
+    sheet = <<".a", 0xFF, " { color: red } p { content: \"", 0xC3, "\" }">>
+    assert CSS.parse(sheet) == CSS.parse(String.replace_invalid(sheet))
+    assert CSS.parse(sheet) != CSS.parse(".a { color: red } p { content: \"\" }")
+
+    block = <<"color: re", 0xFF, "d; content: \"", 0xE2, 0x80, "\"; width: 1px">>
+    assert CSS.parse_declarations(block) == CSS.parse_declarations(String.replace_invalid(block))
+    assert {"width", "1px", false} in CSS.parse_declarations(block)
+  end
+
+  # a string with a line break in it is bad, and its declaration is dropped; the other quote in
+  # the string is a plain character
+  test "a string with a line break is bad, whichever quote it has" do
+    assert CSS.parse_declarations("content: \"a'\nb\"; color: red") == [{"color", "red", false}]
+    assert CSS.parse_declarations("content: 'a\"\nb'; color: red") == [{"color", "red", false}]
+
+    assert CSS.parse_declarations("content: \"it's\"; quotes: 'a\"b' 'c'") == [
+             {"content", "\"it's\"", false},
+             {"quotes", "'a\"b' 'c'", false}
+           ]
+  end
+
   test "parses rules, declarations and !important; ignores comments" do
     css =
       "/* c */ p, .a > b { color: red; DISPLAY : none !important ; } @media print { p { x: y } } i{a:b}"

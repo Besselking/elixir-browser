@@ -797,6 +797,10 @@ defmodule Browser.JS.Lexer do
   defp expr_source(<<c::utf8, rest::binary>>, d, acc),
     do: expr_source(rest, d, [<<c::utf8>> | acc])
 
+  # a byte that is not UTF-8 (such as a lone surrogate) goes into the text as it is; the
+  # nested call then lexes it as it does outside a template
+  defp expr_source(<<c, rest::binary>>, d, acc), do: expr_source(rest, d, [<<c>> | acc])
+
   defp expr_source("", _d, _acc), do: throw({:syntax, "unterminated template expression"})
 
   defp subst_regex?(acc) do

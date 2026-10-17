@@ -38,6 +38,27 @@ defmodule Browser.JS.DOMTest do
     reply
   end
 
+  # the class attribute splits at white space of any kind, as `String.split/1` does
+  test "class names split at tabs, line breaks and runs of spaces" do
+    r =
+      run(
+        ~S"""
+        var d = document.getElementById("d");
+        console.log(d.classList.length, d.matches(".c"), d.matches(".d"));
+        console.log(document.getElementsByClassName("b\tc").length,
+          document.getElementsByClassName("  d  a ").length);
+        console.log(document.querySelectorAll('[class~="d"]').length,
+          document.querySelectorAll('[class~="c"]').length);
+        d.className = "x\fy\r\nz";
+        console.log(d.classList.length, d.matches(".y"), document.getElementsByClassName("z").length);
+        """,
+        "<div id=d class=\"a\tb\nc  d \"></div>"
+      )
+
+    assert errors(r) == []
+    assert logs(r) == ["4 true true", "1 1", "1 1", "3 true 1"]
+  end
+
   test "reading an unknown property of window is undefined, a named element is found" do
     r =
       run(

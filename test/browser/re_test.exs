@@ -77,4 +77,22 @@ defmodule Browser.ReTest do
     # (not valid UTF-8: the same bytes as String.split/1 too)
     assert split_words(<<0xFF, ?\s, 0xC3>>) == String.split(<<0xFF, ?\s, 0xC3>>)
   end
+
+  test "split_words/1 splits at the same code points as String.split/1" do
+    # (every code point up to U+3100, which holds all the white space, and the ones above that
+    # are near white space in other lists)
+    for cp <- Enum.concat(0..0x3100, [0xFEFF, 0x180E, 0x200B, 0xE000]) do
+      text = "a" <> <<cp::utf8>> <> "b" <> <<cp::utf8>>
+      assert split_words(text) == String.split(text), Integer.to_string(cp, 16)
+    end
+
+    # a lone surrogate and bytes that are not UTF-8 next to the bytes of white space
+    for text <- [
+          <<0xED, 0xA0, 0x80, ?\s, ?a>>,
+          <<0xC2, 0xC2, 0x85, ?a>>,
+          <<0xE2, 0x80, 0xE2, 0x80, 0x80>>
+        ] do
+      assert split_words(text) == String.split(text), inspect(text)
+    end
+  end
 end
