@@ -375,4 +375,181 @@ defmodule Browser.JS.IframeTest do
       assert is_map_key(dom.listeners, :window)
     end
   end
+
+  # An `<iframe>` that the page made goes, inside a `<div>` that a frame's document made, into
+  # that document (which has no `<iframe>` of its own), then into the page, then back. Each
+  # move takes the realm of its frame away and loads a new one, in the document it is now in.
+  # At the end there are two frames, the one of `host` and the one of `b`, and no other realm.
+  test "an iframe in a subtree that moves between the page and a frame loads in each" do
+    {raw, _} =
+      ~S"""
+      <body><script>
+      const host = document.createElement("iframe");
+      document.body.appendChild(host);
+      const d = host.contentDocument;
+      const div = d.createElement("div");
+      const sec = document.createElement("section");
+      const b = document.createElement("iframe");
+      b.srcdoc = "<p id=q>q</p>";
+      sec.appendChild(b);
+      div.appendChild(sec);
+      let n = 0;
+      b.onload = () => {
+        n++;
+        const w = b.contentWindow;
+        const at = b.ownerDocument === d ? "frame" : b.ownerDocument === document ? "page" : "?";
+        const up = at === "frame" ? host.contentWindow : window;
+        console.log(n, at, b.contentDocument.getElementById("q").textContent, w.parent === up, w !== window.last);
+        window.last = w;
+        if (n === 1) document.body.appendChild(div);
+        else if (n === 2) d.body.appendChild(div);
+        else if (n === 3) {
+          div.remove();
+          console.log("out", b.contentWindow, b.contentDocument);
+          d.body.appendChild(div);
+        }
+      };
+      console.log("before", b.contentDocument);
+      d.body.appendChild(div);
+      </script></body>
+      """
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+    pid = Runtime.start(raw, info)
+    r = Runtime.run_scripts(pid)
+    logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+    errors = for({:error, t} <- r.console, do: t)
+    {:dictionary, dict} = Process.info(pid, :dictionary)
+    Runtime.stop(pid)
+    dom = Keyword.fetch!(dict, :dom)
+
+    assert errors == []
+
+    assert logs == [
+             "before null",
+             "1 frame q true true",
+             "2 page q true true",
+             "3 frame q true true",
+             "out null null",
+             "4 frame q true true"
+           ]
+
+    assert map_size(dom.frames) == 2
+    assert map_size(dom.realms) == 2
+    assert dom.realms |> Map.keys() |> Enum.sort() == dom.frames |> Map.values() |> Enum.sort()
+  end
+
+  # A function of the frame (so the realm of the frame runs) takes a `<div>` of the page with a
+  # loaded `<iframe>` into the frame's document, which has no `<iframe>` of its own. The frame
+  # of that `<iframe>` goes at once as it leaves the page (it has another window then), and a
+  # new one loads in the frame's document: no realm is left behind.
+  test "a frame's script that takes a loaded iframe from the page ends its frame at once" do
+    {raw, _} =
+      ~S"""
+      <body><script>
+      const host = document.createElement("iframe");
+      host.srcdoc = "<body><script>window.take = (n) => document.body.appendChild(n);<\/script></body>";
+      host.onload = () => {
+        const b = document.createElement("iframe");
+        b.srcdoc = "<p>b</p>";
+        const div = document.createElement("div");
+        div.appendChild(b);
+        let n = 0;
+        b.onload = () => {
+          n++;
+          console.log(n, b.ownerDocument === host.contentDocument, b.contentDocument.body.textContent);
+          if (n === 1) {
+            const w = b.contentWindow;
+            host.contentWindow.take(div);
+            console.log("moved", b.contentWindow !== w);
+          }
+        };
+        document.body.appendChild(div);
+      };
+      document.body.appendChild(host);
+      </script></body>
+      """
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+    pid = Runtime.start(raw, info)
+    r = Runtime.run_scripts(pid)
+    logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+    {:dictionary, dict} = Process.info(pid, :dictionary)
+    Runtime.stop(pid)
+    dom = Keyword.fetch!(dict, :dom)
+
+    assert logs == ["1 false b", "moved true", "2 true b"]
+    assert map_size(dom.frames) == 2
+    assert dom.realms |> Map.keys() |> Enum.sort() == dom.frames |> Map.values() |> Enum.sort()
+  end
+
+  # The `<iframe>`s come into a frame's document (that has none before) and into the page by
+  # `innerHTML` in the frame, `importNode` of a template's content, the template's content
+  # itself, a fragment that the frame's document made, and a shadow root of an element of the
+  # frame. Each one loads; then each one goes with the subtree it is in.
+  test "iframes that come into a document in a fragment, a template or a shadow root load" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const host = document.createElement("iframe");
+        document.body.appendChild(host);
+        const d = host.contentDocument;
+        const seen = [];
+        const frames = {};
+        const watch = (name, f) => {
+          frames[name] = f;
+          f.onload = () => {
+            const at = f.ownerDocument === d ? ":frame" : f.ownerDocument === document ? ":page" : ":?";
+            seen.push(name + at);
+            if (seen.length < 5) return;
+            console.log(seen.sort().join());
+            d.body.innerHTML = "";
+            document.getElementById("out").remove();
+            frames.shadow.remove();
+            console.log(Object.keys(frames).sort().map((k) => k + "=" + frames[k].contentWindow).join());
+          };
+        };
+        d.body.innerHTML = "<div><p><iframe srcdoc='<p>h</p>'></iframe></p></div>";
+        watch("html", d.querySelector("iframe"));
+        const t = document.getElementById("t");
+        const copy = document.importNode(t.content, true);
+        watch("import", copy.querySelector("iframe"));
+        d.body.appendChild(copy);
+        const out = document.getElementById("out");
+        watch("content", t.content.querySelector("iframe"));
+        out.appendChild(t.content);
+        const frag = d.createDocumentFragment();
+        const p = d.createElement("p");
+        const f4 = document.createElement("iframe");
+        f4.srcdoc = "<p>f</p>";
+        p.appendChild(f4);
+        frag.appendChild(p);
+        watch("fragment", f4);
+        out.appendChild(frag);
+        const h = d.createElement("div");
+        d.body.appendChild(h);
+        const sr = h.attachShadow({ mode: "open" });
+        const f5 = document.createElement("iframe");
+        f5.srcdoc = "<p>s</p>";
+        const span = d.createElement("span");
+        span.appendChild(f5);
+        watch("shadow", f5);
+        sr.appendChild(span);
+        console.log("now", Object.keys(frames).map((k) => frames[k].contentDocument !== null).join());
+        """,
+        ~S|<div id=out></div><template id=t><section><iframe srcdoc="<p>t</p>"></iframe></section></template>|
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "now true,true,true,true,true",
+             "content:page,fragment:page,html:frame,import:frame,shadow:frame",
+             "content=null,fragment=null,html=null,import=null,shadow=null"
+           ]
+  end
 end

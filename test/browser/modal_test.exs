@@ -99,6 +99,26 @@ defmodule Browser.ModalTest do
       assert backdrop.h == 600
     end
 
+    # (the backdrop has the attributes of its dialog: a rule for the tag, the id, a class or an
+    # attribute of the dialog, also a structural one, does not style it)
+    test "rules for the dialog's id, classes, attributes and place do not style the backdrop" do
+      css =
+        "#d { background: rgb(0, 0, 255) } .c { background: rgb(0, 0, 255) } " <>
+          "[data-k] { background: rgb(0, 0, 255) } dialog:first-child { background: rgb(0, 0, 255) } " <>
+          "body > dialog:nth-child(1) { background: rgb(0, 0, 255) } " <>
+          "dialog.c#d[data-k]::backdrop { background: rgb(0, 255, 0) }"
+
+      page = modal_page("<dialog open id=d class=c data-k=v>x</dialog><p>y</p>", css)
+      items = lay(page)
+      backdrop = Enum.find(items, &(&1.type == :rect and &1[:stick] == :fixed and &1.w == 800))
+      assert backdrop.color in [{0, 255, 0}, {0, 255, 0, 255}]
+
+      css = String.replace(css, "dialog.c#d[data-k]::backdrop { background: rgb(0, 255, 0) }", "")
+      items = lay(modal_page("<dialog open id=d class=c data-k=v>x</dialog><p>y</p>", css))
+      backdrop = Enum.find(items, &(&1.type == :rect and &1[:stick] == :fixed and &1.w == 800))
+      assert backdrop.color == {0, 0, 0, 26}
+    end
+
     test "there is none for a plain open dialog or a closed one" do
       page = Page.build("<dialog open>a</dialog><dialog>b</dialog>", "about:test")
       assert Modal.backdrops(page.raw) == page.raw

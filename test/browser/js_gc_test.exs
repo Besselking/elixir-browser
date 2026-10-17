@@ -232,12 +232,13 @@ defmodule Browser.JSGCTest do
       {:obj, held} = Interp.new_object()
 
       # A node with the id `gid`, in the node table, in the kids of the document and in
-      # the id index. A wrapper (the only field here that holds a JS value) holds `held`.
+      # the id index. Its wrapper (the only field here that holds a JS value) is `held`:
+      # the node is in the document, so its wrapper lives.
       s = Process.get(:dom)
       node = %{s.nodes[doc] | id: gid, kind: :element, tag: "p", kids: [], parent: doc}
       nodes = s.nodes |> Map.put(gid, node) |> Map.update!(doc, &%{&1 | kids: [gid | &1.kids]})
       ids = Map.put(s.ids, "b", [gid])
-      wrappers = Map.put(s.wrappers, -1, {:obj, held})
+      wrappers = Map.put(s.wrappers, gid, {:obj, held})
       Process.put(:dom, %{s | nodes: nodes, ids: ids, wrappers: wrappers, next: gid})
 
       GC.collect()
@@ -309,8 +310,8 @@ defmodule Browser.JSGCTest do
 
       Process.put(:dom, %{
         s
-        | wrappers: Map.put(s.wrappers, -1, w),
-          listeners: Map.put(s.listeners, -1, [l]),
+        | wrappers: Map.put(s.wrappers, {:aux, :window}, w),
+          listeners: Map.put(s.listeners, :window, [l]),
           ce: %{"x-a" => ce},
           hist: [{"http://t.test/", h}],
           session: %{"k" => ses},
