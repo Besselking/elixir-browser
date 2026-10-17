@@ -5061,13 +5061,17 @@ defmodule Browser.JS.DOM do
   defp canvas_context(_this, _kind), do: :null
 
   # The surface of a canvas, made when first needed and again when the script changes the
-  # canvas's size (which also clears it).
+  # canvas's size (which also clears it). The size is the one that `canvas.width` and
+  # `canvas.height` give (`canvas_size/2`), read from the node: each call of the context
+  # comes here, and two reads through the properties of the element cost more than most
+  # drawing calls.
   defp canvas_surface(this) do
     nid = this_nid(this)
+    n = node(nid)
 
-    if node(nid).tag == "canvas" do
-      w = canvas_dim(this, nid, "width", 300)
-      h = canvas_dim(this, nid, "height", 150)
+    if n.tag == "canvas" do
+      w = trunc(canvas_size(n, "width"))
+      h = trunc(canvas_size(n, "height"))
 
       case Process.get({:canvas, nid}) do
         %Browser.Canvas{w: ^w, h: ^h} = surface -> surface
@@ -5090,19 +5094,6 @@ defmodule Browser.JS.DOM do
       _ ->
         default * 1.0
     end
-  end
-
-  defp canvas_dim(this, nid, name, default) do
-    from_prop = Interp.get(this, name)
-
-    n =
-      cond do
-        is_number(from_prop) -> from_prop
-        v = get_attr(node(nid), name) -> to_num(v)
-        true -> default
-      end
-
-    if is_number(n) and n >= 0, do: trunc(n), else: default
   end
 
   # `n` finite numbers from the arguments as floats, or nil: a call with a NaN or an infinite
