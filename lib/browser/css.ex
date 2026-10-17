@@ -1056,10 +1056,10 @@ defmodule Browser.CSS do
   defp loose_ancestor?(p, rest), do: loose_parts(rest, p) or loose_ancestor?(p.parent, rest)
 
   defp loose_compound(c, ctx) do
-    (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
-      (c.tag in [nil, :any] or c.tag == ctx.tag) and
+    (c.tag in [nil, :any] or c.tag == ctx.tag) and
       (c.id == nil or c.id == ctx.id) and
       Enum.all?(c.classes, &(&1 in ctx.classes)) and
+      (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
       Enum.all?(c.attrs, &attr_match?(&1, ctx.attrs)) and
       Enum.all?(c.pseudos, &(structural_pseudo?(&1) or pseudo?(&1, ctx)))
   end
@@ -1107,12 +1107,14 @@ defmodule Browser.CSS do
   defp ancestor_matches?(p, rest),
     do: match_parts(rest, p) or ancestor_matches?(p.parent, rest)
 
+  # The backdrop of a dialog is only styled by its own rules, not by those for the dialog.
+  # (the tests that most often fail, and cost the least, come first: a selector with a
+  # descendant part is tried on each ancestor)
   defp match_compound(c, ctx) do
-    # the backdrop of a dialog is only styled by its own rules, not by those for the dialog
-    (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
-      (c.tag in [nil, :any] or c.tag == ctx.tag) and
+    (c.tag in [nil, :any] or c.tag == ctx.tag) and
       (c.id == nil or c.id == ctx.id) and
       Enum.all?(c.classes, &(&1 in ctx.classes)) and
+      (:mb_backdrop in c.pseudos or not List.keymember?(ctx.attrs, "@backdrop", 0)) and
       Enum.all?(c.attrs, &attr_match?(&1, ctx.attrs)) and
       Enum.all?(c.pseudos, &pseudo?(&1, ctx))
   end
