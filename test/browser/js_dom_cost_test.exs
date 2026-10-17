@@ -22,8 +22,11 @@ defmodule Browser.JS.DomCostTest do
     pid
   end
 
-  # the reductions of the script process while it runs `source`
+  # The reductions of the script process while it runs `source`. (A garbage collection also
+  # counts reductions, for each word that it keeps. The collection first makes the count not
+  # depend on how full the heap was after the page was made.)
   defp cost(pid, source) do
+    :erlang.garbage_collect(pid)
     {:reductions, r0} = Process.info(pid, :reductions)
     Runtime.eval(pid, source)
     {:reductions, r1} = Process.info(pid, :reductions)
