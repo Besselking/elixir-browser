@@ -11,7 +11,7 @@ defmodule Browser.Style do
 
   alias Browser.{CSS, MediaQuery, SheetCache}
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1]
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
             contain contain-intrinsic-size contain-intrinsic-width contain-intrinsic-height
@@ -2210,7 +2210,7 @@ defmodule Browser.Style do
   # `none`, and the `auto` of `auto 10px` (the size last rendered), count for nothing
   defp intrinsic_lengths(value, env) do
     value
-    |> String.split()
+    |> split_words()
     |> Enum.reject(&(&1 in ["auto", "none"]))
     |> Enum.map(&(length(&1, env) || 0.0))
   end
@@ -2648,7 +2648,7 @@ defmodule Browser.Style do
   defp typed(prop, v, env, _pc) when prop in @radii do
     parsed =
       v
-      |> String.split()
+      |> split_words()
       |> Enum.map(fn tok ->
         case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/), tok) do
           [_, n] -> {:pct, to_float(n) / 100}

@@ -29,7 +29,7 @@ defmodule Browser.CSS do
 
   alias Browser.MediaQuery
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1]
 
   # -- stylesheet parsing --------------------------------------------------------
 
@@ -1305,7 +1305,7 @@ defmodule Browser.CSS do
       tag: tag,
       attrs: attrs,
       id: attr_value(attrs, "id"),
-      classes: attrs |> attr_value("class") |> Kernel.||("") |> String.split(),
+      classes: attrs |> attr_value("class") |> Kernel.||("") |> split_words(),
       parent: parent,
       prev: prev,
       first?: i == 0,

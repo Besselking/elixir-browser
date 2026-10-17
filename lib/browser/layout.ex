@@ -16,7 +16,7 @@ defmodule Browser.Layout do
 
   alias Browser.{Backgrounds, Shadows}
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1]
 
   # item types painted before (underneath) the text of the same page
   @behind_text [:rect, :shadow, :inset_shadow, :bgimage]
@@ -2304,7 +2304,7 @@ defmodule Browser.Layout do
   end
 
   defp balance_text?(c),
-    do: "balance" in String.split(to_string(c["text-wrap-style"] || c["text-wrap"]))
+    do: "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"]))
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -3405,7 +3405,7 @@ defmodule Browser.Layout do
 
   # `word-space-transform` turns the zero-width spaces and <wbr> into spaces
   defp word_space_transform(v) do
-    words = v |> to_string() |> String.split()
+    words = v |> to_string() |> split_words()
 
     cond do
       "ideographic-space" in words -> :ideo
@@ -3430,7 +3430,7 @@ defmodule Browser.Layout do
   # `text-transform` takes a case keyword and any of `full-width` and `full-size-kana`
   defp text_transform(value) do
     kinds =
-      for word <- value |> to_string() |> String.split(),
+      for word <- value |> to_string() |> split_words(),
           kind = text_transform_kind(word),
           do: kind
 
@@ -3461,7 +3461,7 @@ defmodule Browser.Layout do
   # `text-wrap` (or its `text-wrap-mode` longhand) switches line wrapping on or off
   # without touching how white space collapses
   defp text_wrap_mode(c) do
-    case to_string(c["text-wrap-mode"] || c["text-wrap"]) |> String.split() |> List.first() do
+    case to_string(c["text-wrap-mode"] || c["text-wrap"]) |> split_words() |> List.first() do
       mode when mode in ["wrap", "nowrap"] -> mode
       _ -> nil
     end
@@ -10021,7 +10021,7 @@ defmodule Browser.Layout do
 
   # wrapping: a new line when the next item no longer fits
   # `flex-wrap` is `nowrap | wrap | wrap-reverse | balance`, or `balance` with `wrap-reverse`
-  defp wrap_words(v) when is_binary(v), do: String.split(v)
+  defp wrap_words(v) when is_binary(v), do: split_words(v)
   defp wrap_words(_), do: []
 
   defp wraps?(v), do: Enum.any?(wrap_words(v), &(&1 in ["wrap", "wrap-reverse", "balance"]))
