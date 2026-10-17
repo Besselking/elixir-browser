@@ -460,9 +460,27 @@ defmodule Browser.Layout do
       text, style ->
         # (a zero-width space takes no room)
         measured =
-          if String.contains?(text, "\u200B"), do: String.replace(text, "\u200B", ""), else: text
+          if contains?(text, "\u200B"), do: String.replace(text, "\u200B", ""), else: text
 
         measure.(measured, style) + extra_width(text, style)
+    end
+  end
+
+  # `String.contains?/2` for the few patterns looked for in every word or text: compiling the
+  # pattern costs more than the search in a short word, so each one is compiled one time (see
+  # `compiled/1`)
+  defp contains?(text, pattern), do: :binary.match(text, compiled(pattern)) != :nomatch
+
+  # the pattern compiled for `:binary`, kept in `:persistent_term` (a few, put one time each)
+  defp compiled(pattern) do
+    case :persistent_term.get({__MODULE__, :pattern, pattern}, nil) do
+      nil ->
+        compiled = :binary.compile_pattern(pattern)
+        :persistent_term.put({__MODULE__, :pattern, pattern}, compiled)
+        compiled
+
+      compiled ->
+        compiled
     end
   end
 
@@ -1062,7 +1080,7 @@ defmodule Browser.Layout do
       )
 
   defp walk({:text, t}, style, acc) when is_binary(t) do
-    if String.contains?(t, "\u00AD") and not style.shy,
+    if contains?(t, "\u00AD") and not style.shy,
       do: walk({:text, String.replace(t, "\u00AD", "")}, style, acc),
       else: walk_text(t, style, acc)
   end
@@ -3523,7 +3541,7 @@ defmodule Browser.Layout do
   # a zero-width space is a place where a line may break, with nothing shown; it also keeps the
   # spaces on either side of it from collapsing into one
   defp walk_text(t, style, acc) do
-    if String.contains?(t, "\u200B"),
+    if contains?(t, "\u200B"),
       do: walk_zwsp_text(t, style, acc),
       else: walk_plain_text(t, style, acc)
   end
@@ -3720,7 +3738,7 @@ defmodule Browser.Layout do
 
   @ascii_spaces [" ", "\t", "\n", "\r", "\f", "\v"]
 
-  defp css_words(t, true), do: :binary.split(t, @ascii_spaces, [:global, :trim_all])
+  defp css_words(t, true), do: :binary.split(t, compiled(@ascii_spaces), [:global, :trim_all])
   defp css_words(t, false), do: css_words(t)
 
   # plain ASCII text (nearly all of it) needs no regular expression for white space
@@ -7593,7 +7611,7 @@ defmodule Browser.Layout do
   # font, or a fixed guess when nothing can measure the font.
   defp content_factor(style) do
     cond do
-      String.contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
+      contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
       metrics = Process.get(:layout_metrics) -> metrics.(style) / style.size
       true -> @content_factor
     end
@@ -7727,7 +7745,7 @@ defmodule Browser.Layout do
   end
 
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
-    if String.contains?(text, "\u00AD"),
+    if contains?(text, "\u00AD"),
       do: shy_word(text, style, nowrap?, st, dx, glue),
       else: plain_word(text, style, nowrap?, st, dx, glue)
   end
@@ -7987,9 +8005,9 @@ defmodule Browser.Layout do
               runon: false,
               pending_space: nil,
               after_space: false,
-              lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
+              lf: if(style.size >= st.lh, do: elem(item.lm, 1), else: st.lf),
               lh: max(st.lh, style.size),
-              lmax: max(st.lmax, line_px(style))
+              lmax: max(st.lmax, elem(item.lm, 2))
           }
         else
           push_word(st, item, x, w, style)
@@ -8009,7 +8027,10 @@ defmodule Browser.Layout do
       not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u))
   end
 
+  # (the item's `lm` holds what its style gives the line: see `word_placed/8`)
   defp push_word(st, item, x, w, style) do
+    {_, factor, px} = item.lm
+
     %{
       st
       | line: [item | st.line],
@@ -8017,9 +8038,9 @@ defmodule Browser.Layout do
         runon: false,
         pending_space: nil,
         after_space: false,
-        lf: if(style.size >= st.lh, do: content_factor(style), else: st.lf),
+        lf: if(style.size >= st.lh, do: factor, else: st.lf),
         lh: max(st.lh, style.size),
-        lmax: max(st.lmax, line_px(style))
+        lmax: max(st.lmax, px)
     }
   end
 
@@ -13028,7 +13049,7 @@ defmodule Browser.Layout do
     if style.tabw != nil, do: throw(:layout)
 
     {text, f, dx} =
-      if String.contains?(text, "­") do
+      if contains?(text, "­") do
         # (`shy_word` starts the line once more than `plain_word`: the lead is used up unapplied)
         f = if f.empty, do: %{f | lead: 0}, else: f
         {String.replace(text, "­", ""), f, 0}
