@@ -203,10 +203,10 @@ defmodule Browser.Fetch do
         {:ok, entry.body, url}
 
       {_, entry} ->
-        request(url, :get, body, redirects, ctx, entry)
+        shared(url, ctx, fn -> request(url, :get, body, redirects, ctx, entry) end)
 
       :miss ->
-        request(url, :get, body, redirects, ctx, nil)
+        shared(url, ctx, fn -> request(url, :get, body, redirects, ctx, nil) end)
     end
   end
 
@@ -215,6 +215,86 @@ defmodule Browser.Fetch do
 
   defp lookup(url, :history), do: HttpCache.lookup(url, use_stale: true)
   defp lookup(url, _), do: HttpCache.lookup(url)
+
+  # Two loads of the same address at the same time make one request: the second waits for the
+  # result of the first. (When a frame loads, the script process and the page both load each
+  # style sheet of the frame.) A load that the first load does not finish (it raised, or its
+  # process stopped) makes its own request. A load with `on_chunk` makes its own request.
+  @inflight :browser_fetch_inflight
+
+  @doc false
+  def inflight_table, do: @inflight
+
+  defp shared(url, %{on_chunk: nil} = ctx, fun) do
+    if :ets.whereis(@inflight) == :undefined do
+      fun.()
+    else
+      cross_site = ctx.cross_site or cross_site?(ctx.initiator, url)
+      lead_or_wait({url, ctx.cache, ctx.navigation, cross_site}, fun)
+    end
+  end
+
+  defp shared(_url, _ctx, fun), do: fun.()
+
+  defp lead_or_wait(key, fun) do
+    if :ets.insert_new(@inflight, {key, self()}),
+      do: lead(key, fun),
+      else: wait(key, fun)
+  end
+
+  defp lead(key, fun) do
+    outcome =
+      try do
+        {:ok, fun.()}
+      catch
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+
+    # the key goes first: a load that adds itself as a waiter after this sees no key and
+    # makes its own request
+    :ets.delete(@inflight, key)
+
+    for pid <- :ets.select(@inflight, [{{{:wait, key, :"$1"}}, [], [:"$1"]}]) do
+      send(pid, {@inflight, key, outcome})
+      :ets.delete(@inflight, {:wait, key, pid})
+    end
+
+    case outcome do
+      {:ok, result} -> result
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
+    end
+  end
+
+  defp wait(key, fun) do
+    me = self()
+    :ets.insert(@inflight, {{:wait, key, me}})
+
+    case :ets.lookup(@inflight, key) do
+      [{_, leader}] when leader != me ->
+        ref = Process.monitor(leader)
+
+        receive do
+          {@inflight, ^key, outcome} ->
+            Process.demonitor(ref, [:flush])
+
+            case outcome do
+              {:ok, result} -> result
+              _ -> fun.()
+            end
+
+          {:DOWN, ^ref, :process, _, _} ->
+            :ets.delete(@inflight, {:wait, key, me})
+            # a process that stopped in the middle leaves its key behind
+            :ets.delete_object(@inflight, {key, leader})
+            fun.()
+        end
+
+      _ ->
+        # the first load has just finished (or it is this process, in a redirect to itself)
+        :ets.delete(@inflight, {:wait, key, me})
+        fun.()
+    end
+  end
 
   # `entry`: a stale cached response to revalidate, or nil
   defp request(url, method, body, redirects, ctx, entry) do

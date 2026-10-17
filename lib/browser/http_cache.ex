@@ -36,6 +36,14 @@ defmodule Browser.HttpCache do
   @impl true
   def init(_) do
     :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
+    # the loads in progress (`Browser.Fetch`), so that two loads of one address make one request
+    :ets.new(Browser.Fetch.inflight_table(), [
+      :set,
+      :public,
+      :named_table,
+      write_concurrency: true
+    ])
+
     {:ok, 0}
   end
 
@@ -166,6 +174,13 @@ defmodule Browser.HttpCache do
   def refresh(entry, headers, url) do
     if table?() do
       cc = cache_control(headers)
+
+      # the stored response keeps the fields that the 304 does not send (RFC 9111, 4.3.4):
+      # a 304 without `Last-Modified` still gets the heuristic lifetime of the stored one
+      headers =
+        if header(headers, "last-modified") == nil and entry.last_modified != nil,
+          do: [{~c"last-modified", String.to_charlist(entry.last_modified)} | headers],
+          else: headers
 
       entry = %{
         entry
