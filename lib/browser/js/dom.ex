@@ -172,7 +172,7 @@ defmodule Browser.JS.DOM do
   def gc_reach(nid), do: gc_tree(Process.get(:js_gc_dom), nid, [])
 
   defp gc_tree(%{nodes: nodes, bits: bits} = ctx, nid, acc) when is_integer(nid) do
-    if is_map_key(nodes, nid) and not gc_live?(bits, nid) do
+    if not gc_live?(bits, nid) and is_map_key(nodes, nid) do
       acc = gc_down(ctx, [root_in(nodes, nid)], acc)
       # (a node that the kids of its parent do not list is not in the tree of its root)
       if gc_live?(bits, nid), do: acc, else: gc_down(ctx, [nid], acc)
@@ -208,7 +208,15 @@ defmodule Browser.JS.DOM do
 
           # (the document of the node, which `ownerDocument` gives)
           acc = if n.doc == nid, do: acc, else: gc_tree(ctx, n.doc, acc)
-          gc_down(ctx, [n.kids, n.content, n.shadow | work], acc)
+
+          # (most nodes have no template content and no shadow root)
+          work =
+            case n do
+              %{content: nil, shadow: nil} -> work
+              %{content: c, shadow: sh} -> [c, sh | work]
+            end
+
+          gc_down(ctx, [n.kids | work], acc)
         else
           gc_down(ctx, work, acc)
         end
