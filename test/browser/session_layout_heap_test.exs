@@ -13,7 +13,9 @@ defmodule Browser.SessionLayoutHeapTest do
   # A script waits 5 s for a layout. After that time, the watchdog stops the layout process: no
   # script reads its boxes, and it takes CPU from the scripts and the next layouts.
   test "the watchdog stops a layout process after its deadline" do
-    deadline = System.monotonic_time(:millisecond) + 50
+    # (the deadline leaves time for the process to start on a busy machine: a process that
+    # starts after its deadline stops at once, with reason :normal)
+    deadline = System.monotonic_time(:millisecond) + 500
 
     pid =
       Browser.Session.spawn_layout(fn ->
@@ -22,7 +24,7 @@ defmodule Browser.SessionLayoutHeapTest do
       end)
 
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, _, _, :killed}, 2_000
+    assert_receive {:DOWN, ^ref, _, _, :killed}, 3_000
   end
 
   test "a layout process whose deadline is gone stops at once, and one that ends stops its watchdog" do
