@@ -4346,7 +4346,7 @@ defmodule Browser.JS.DOM do
 
   # `<iframe>`s in the subtree that a script is putting into the document
   defp frames_arriving(nid) do
-    if Process.get(:dom_has_iframe) && connected?(nid) do
+    if Process.get(:dom_has_iframe) && frame_in_doc?(st(), nid) && connected?(nid) do
       for e <- frames_in(nid), do: load_frame(e)
     end
 
@@ -4355,7 +4355,7 @@ defmodule Browser.JS.DOM do
 
   # the realms of the frames in a subtree that is leaving the document go with it
   defp frames_leaving(nid) do
-    if Process.get(:dom_has_iframe) && st().frames != %{} do
+    if Process.get(:dom_has_iframe) && st().frames != %{} && frame_in_doc?(st(), nid) do
       for e <- frames_in(nid) do
         cancel_frame_load(e)
         if d = Map.get(st().frames, e), do: destroy_realm(d)
@@ -4394,6 +4394,22 @@ defmodule Browser.JS.DOM do
           found ->
             found
         end
+    end
+  end
+
+  # True when an `<iframe>` has the document of `nid`. A node in the subtree of `nid` has the
+  # document of `nid` (`adopt/2` moves a whole subtree, and `destroy_realm/1` also finds the
+  # nodes of a document by this field), so with no such `<iframe>` the subtree has none and
+  # `frames_in/1` has nothing to find. Most changes are in a document with no `<iframe>`, as
+  # the app in the frame of a Speedometer suite: they then do no walk.
+  defp frame_in_doc?(s, nid) do
+    case s.nodes do
+      %{^nid => %{doc: doc}} ->
+        nodes = s.nodes
+        Enum.any?(Map.keys(s.iframes), fn e -> match?(%{^e => %{doc: ^doc}}, nodes) end)
+
+      _ ->
+        true
     end
   end
 
