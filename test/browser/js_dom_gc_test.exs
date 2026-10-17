@@ -55,6 +55,10 @@ defmodule Browser.JS.DOMGCTest do
     for {nid, _} <- s.iframes, do: assert(in?.(nid), "iframe #{nid}")
     for nid <- s.ce_done, do: assert(in?.(nid), "ce_done #{nid}")
 
+    for {_, %{fields: %{ce_done: set}}} <- s.realms,
+        nid <- set,
+        do: assert(in?.(nid), "ce_done of a realm #{nid}")
+
     for {k, _} <- Process.get(),
         is_tuple(k) and tuple_size(k) >= 2 and
           elem(k, 0) in [:canvas, :canvas_ctx, :inline_handler, :dom_frame_tok],
@@ -136,23 +140,32 @@ defmodule Browser.JS.DOMGCTest do
         const p = document.createElement('p');
         p.id = 'p' + i;
         p.setAttribute('data-k', 'v' + (i % 4));
+        // (a child keeps its place in the attribute index when its parent leaves)
+        p.innerHTML = '<b data-k="in">b</b>';
         document.body.appendChild(p);
       }
       document.querySelectorAll('[data-k="v1"]').length
       """)
 
       base = node_count()
+      assert map_size(st().aidx["data-k"]["in"]) == 40
       js("for (let i = 0; i < 40; i += 8) document.getElementById('p' + i).remove()")
+      assert map_size(st().aidx["data-k"]["in"]) == 40
       GC.collect()
-      assert node_count() == base - 5
+      # (each <p> with its <b> and the text in it, and the fragment that each `innerHTML`
+      # parsed into)
+      assert node_count() == base - 15 - 40
+      assert map_size(st().aidx["data-k"]["in"]) == 35
+      assert_clean()
       refute is_map_key(st().ids, "p8")
       assert is_map_key(st().ids, "p9")
 
       assert js("""
              [document.getElementById('p8'), document.getElementById('p9').id,
               document.querySelectorAll('[data-k="v0"]').length,
-              document.querySelectorAll('[data-k="v1"]').length].join()
-             """) == ",p9,5,10"
+              document.querySelectorAll('[data-k="v1"]').length,
+              document.querySelectorAll('[data-k="in"]').length].join()
+             """) == ",p9,5,10,35"
     end)
   end
 
@@ -437,6 +450,11 @@ defmodule Browser.JS.DOMGCTest do
       GC.collect()
       assert js("b.onclick === f && window.hits === 1") == "true"
 
+      # (only the node holds its handler function now: the function stays with the node)
+      js("f = null; b.click(); 0")
+      GC.collect()
+      assert js("b.click(); [window.hits, typeof b.onclick].join()") == "3,function"
+
       js("b = null; f = null")
       GC.collect()
       refute is_map_key(st().nodes, btn)
@@ -518,36 +536,46 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
-  test "the nodes of a document stay when no script holds them, with a closed shadow root and a template" do
-    page(
-      "<div id=host></div><template id=t><b id=tb>x</b></template><ul id=l><li>1</li></ul>",
-      fn ->
-        js("""
-        document.getElementById('host').attachShadow({ mode: 'closed' }).innerHTML = '<i id=sh>s</i>';
-        document.getElementById('host').addEventListener('x', () => { window.fired = 1 });
-        0
-        """)
+  # (the nodes are made by the script, after the first nodes: no stray small number holds
+  # them. A shadow root is also an expando of its host, `__shadow`: it is deleted, so only
+  # the walk down from the host keeps the shadow root.)
+  test "the nodes of a document stay when no script holds them, with a shadow root and a template" do
+    page(fn ->
+      js("""
+      (() => {
+        const host = document.createElement('div');
+        host.id = 'host';
+        host.attachShadow({ mode: 'closed' }).innerHTML = '<i id=sh>s</i>';
+        delete host.__shadow;
+        host.addEventListener('x', () => { window.fired = 1 });
+        const t = document.createElement('template');
+        t.id = 't';
+        t.innerHTML = '<b id=tb>x</b>';
+        const l = document.createElement('ul');
+        l.id = 'l';
+        l.innerHTML = '<li>1</li>';
+        document.body.append(host, t, l);
+      })()
+      """)
 
-        doc = st().main
-        all = tree(doc)
-        host = nid("host")
-        assert st().nodes[host].shadow in all
-        assert st().nodes[nid("t")].content in all
-        # (no wrapper of the document's nodes is held by a script now)
-        js("for (let i = 0; i < 100; i++) document.createElement('div')")
-        GC.collect()
-        GC.collect()
-        assert Enum.all?(all, &is_map_key(st().nodes, &1))
-        assert tree(doc) == all
-        assert_clean()
+      doc = st().main
+      all = tree(doc)
+      host = nid("host")
+      assert st().nodes[host].shadow in all
+      assert st().nodes[nid("t")].content in all
+      assert nid("sh") in all
+      GC.collect()
+      GC.collect()
+      assert Enum.all?(all, &is_map_key(st().nodes, &1))
+      assert tree(doc) == all
+      assert_clean()
 
-        assert js("""
-               document.getElementById('host').dispatchEvent(new Event('x'));
-               [document.getElementById('t').content.firstChild.id,
-                document.getElementById('l').firstChild.textContent, window.fired].join()
-               """) == "tb,1,1"
-      end
-    )
+      assert js("""
+             document.getElementById('host').dispatchEvent(new Event('x'));
+             [document.getElementById('t').content.firstChild.id,
+              document.getElementById('l').firstChild.textContent, window.fired].join()
+             """) == "tb,1,1"
+    end)
   end
 
   test "a second collect frees no more, and an id that two elements had finds the live one" do
@@ -801,6 +829,30 @@ defmodule Browser.JS.DOMGCTest do
       assert js("window.blurred") == "1"
       GC.collect()
       refute is_map_key(st().nodes, ed)
+      assert_clean()
+    end)
+  end
+
+  test "a custom element of a frame that leaves is forgotten as made" do
+    page(fn ->
+      js("""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<script>customElements.define("x-f", class extends HTMLElement {});' +
+        'var e = document.createElement("x-f"); e.id = "fce"; document.body.appendChild(e);' +
+        'e.remove(); window.keepE = e; e = null;<' + '/script>';
+      document.body.appendChild(f)
+      """)
+
+      timers()
+      fce = nid("fce")
+      [doc] = Map.values(st().frames)
+      assert MapSet.member?(st().realms[doc].fields.ce_done, fce)
+      GC.collect()
+      assert MapSet.member?(st().realms[doc].fields.ce_done, fce)
+      js("f.contentWindow.keepE = null; 0")
+      GC.collect()
+      refute is_map_key(st().nodes, fce)
+      refute MapSet.member?(st().realms[doc].fields.ce_done, fce)
       assert_clean()
     end)
   end
