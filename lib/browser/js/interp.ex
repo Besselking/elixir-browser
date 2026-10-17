@@ -230,6 +230,10 @@ defmodule Browser.JS.Interp do
   # The size from which a frame takes boxes (see `slot_write/3`).
   @box_min 128
 
+  @doc false
+  # (the closure compiler writes a declaration to a smaller frame inline, see `Compile`)
+  defmacro box_min, do: @box_min
+
   # A box is held by one slot of one frame only: a read takes the value out of it, and a
   # copy of a frame copies the values (`copy_scope/2`, the copies of `enter_body/3`). So a
   # box goes when its slot is written over or when its frame goes. Else every call of a
@@ -574,6 +578,38 @@ defmodule Browser.JS.Interp do
 
       _ ->
         :erlang.put(env, :erlang.setelement(i, t, v))
+    end
+  end
+
+  @doc false
+  # `slot_assign/4` inline, for the compiled code: the test of the temporal dead zone and
+  # the write of `slot_write/3` with one read of the frame, and no call when the frame is
+  # small. Check mode calls `slot_assign/4`, which makes the checks.
+  defmacro assign_inline(env, i, name, v) do
+    if @check do
+      quote do
+        Browser.JS.Interp.slot_assign(unquote(env), unquote(i), unquote(name), unquote(v))
+      end
+    else
+      quote do
+        ai_env = unquote(env)
+        ai_v = unquote(v)
+        ai_t = :erlang.get(ai_env)
+
+        case :erlang.element(unquote(i), ai_t) do
+          :tdz ->
+            Browser.JS.Interp.tdz_error(unquote(name))
+
+          {:js_box, ai_b} ->
+            :erlang.put(ai_b, {:js_cell, ai_v})
+
+          _ when tuple_size(ai_t) < unquote(@box_min) ->
+            :erlang.put(ai_env, :erlang.setelement(unquote(i), ai_t, ai_v))
+
+          _ ->
+            Browser.JS.Interp.slot_write(ai_env, unquote(i), ai_v)
+        end
+      end
     end
   end
 

@@ -189,6 +189,20 @@ defmodule Browser.LayoutMemoTest do
     assert Enum.any?(items, &(&1.type == :text and &1.text == "more"))
   end
 
+  # (a box that clips drops what it holds below its bottom: a block placed again from its
+  # fragment is dropped by where it is now, not by where it was)
+  test "a block placed again lower or higher in a box that clips is cut where it is now" do
+    html = fn above ->
+      ~s(<div style="overflow:hidden;height:100px"><p>#{above}</p><p>) <>
+        Enum.map_join(1..80, " ", &"w#{&1}") <> "</p></div>"
+    end
+
+    long = Enum.map_join(1..30, " ", &"a#{&1}")
+    {_, _, memo} = kept(page(html.("one")), nil)
+    {_, memo} = same!(page(html.(long)), memo)
+    same!(page(html.("one")), memo)
+  end
+
   # (the inner flex item ends inside the outer one: what comes after it is still in a flex item,
   # whether the inner one is laid out or placed again from its fragment)
   test "a flex item inside a flex item is laid out the same from the memo" do

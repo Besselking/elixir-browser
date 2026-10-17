@@ -13,6 +13,7 @@ defmodule Browser.JS.FrameBoxesTest do
   use ExUnit.Case, async: true
 
   alias Browser.JS.{Builtins, GC, Interp, Parser}
+  require Browser.JS.Interp
 
   @check Application.compile_env(:browser, :js_resolve_check, false)
 
@@ -162,6 +163,39 @@ defmodule Browser.JS.FrameBoxesTest do
       assert Interp.call(global!(gid, "get"), :undefined, []) == 2.0
       assert match?({:js_cell, {:obj, _}}, :erlang.get(b))
       assert :erlang.get(c) == :undefined
+    end
+
+    # The compiled code writes a slot inline and tests the size of the frame itself, so it
+    # must draw the line where `slot_write/3` draws it. Functions with more and more names
+    # give frames just below, at and just above `Interp.box_min/0` slots.
+    test "a frame takes boxes from exactly Interp.box_min() slots" do
+      for compile? <- [true, false] do
+        sizes =
+          for n <- 110..135 do
+            names = Enum.map_join(1..n, ", ", &"p#{&1}")
+
+            gid =
+              heap(
+                "var f = (function(){ var #{names}; var x = 1; x = 2; x += 1; return function(){ return x } })();",
+                compile?
+              )
+
+            f = global!(gid, "f")
+            {:obj, id} = f
+            {:closure, c} = Interp.deref(id).fun
+            size = tuple_size(:erlang.get(c.scope))
+
+            if size >= Interp.box_min(),
+              do: assert({^size, {:js_box, _}} = {size, slot_of(f, "x")}),
+              else: assert({size, 3.0} == {size, slot_of(f, "x")})
+
+            assert Interp.call(f, :undefined, []) == 3.0
+            size
+          end
+
+        # (the sizes go across the line, and one of them is on it)
+        assert Interp.box_min() in sizes
+      end
     end
 
     test "a large leaf frame takes no box" do

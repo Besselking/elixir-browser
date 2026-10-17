@@ -408,34 +408,12 @@ defmodule Browser.JS.GC do
   # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, keys
   # that `props` or the shape also holds, and the shape. The values of a fast record are
   # in the tuple `vals`, which the walk visits as any tuple.
-  defp mark([t | rest], marks) when Obj.heap_record?(t) do
-    stack =
-      :maps.fold(
-        fn
-          k, _v, acc when Obj.no_refs?(k) -> acc
-          _k, v, acc -> push(v, acc, marks)
-        end,
-        rest,
-        t
-      )
+  defp mark([t | rest], marks) when Obj.heap_record?(t),
+    do: mark(push_fields(:maps.to_list(t), rest, marks), marks)
 
-    mark(stack, marks)
-  end
-
-  defp mark([t | rest], marks) when is_map(t) do
-    # integer keys are array indices: skip them, not references
-    stack =
-      :maps.fold(
-        fn
-          k, v, acc when is_integer(k) -> push(v, acc, marks)
-          k, v, acc -> push(v, push(k, acc, marks), marks)
-        end,
-        rest,
-        t
-      )
-
-    mark(stack, marks)
-  end
+  # (integer keys are array indices: skip them, not references)
+  defp mark([t | rest], marks) when is_map(t),
+    do: mark(push_pairs(:maps.to_list(t), rest, marks), marks)
 
   defp mark([t | rest], marks) when is_function(t) do
     if compiled?(t) do
@@ -455,6 +433,24 @@ defmodule Browser.JS.GC do
 
   defp push_frame_slots(t, i, n, stack, marks),
     do: push_frame_slots(t, i + 1, n, push(elem(t, i - 1), stack, marks), marks)
+
+  # The fields of a heap record, as `:maps.to_list/1` gives them: one call of a built-in
+  # function, which is faster than a fold with a fun.
+  defp push_fields([], stack, _marks), do: stack
+
+  defp push_fields([{k, _} | fs], stack, marks) when Obj.no_refs?(k),
+    do: push_fields(fs, stack, marks)
+
+  defp push_fields([{_, v} | fs], stack, marks), do: push_fields(fs, push(v, stack, marks), marks)
+
+  # The keys and the values of any other map, without the integer keys.
+  defp push_pairs([], stack, _marks), do: stack
+
+  defp push_pairs([{k, v} | ps], stack, marks) when is_integer(k),
+    do: push_pairs(ps, push(v, stack, marks), marks)
+
+  defp push_pairs([{k, v} | ps], stack, marks),
+    do: push_pairs(ps, push(v, push(k, stack, marks), marks), marks)
 
   defp push_tuple(_t, 0, stack, _marks), do: stack
 
@@ -485,6 +481,10 @@ defmodule Browser.JS.GC do
         if mark_new(marks, t), do: [obj | stack], else: stack
     end
   end
+
+  # A reference `{:obj, id}` is the term that the walk meets most: its id is marked at
+  # once, so the tuple does not go on the stack.
+  defp push({:obj, id}, stack, marks) when is_integer(id), do: push(id, stack, marks)
 
   defp push([], stack, _marks), do: stack
 

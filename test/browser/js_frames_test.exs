@@ -3813,6 +3813,45 @@ defmodule Browser.JS.FramesTest do
           assert Exception.message(e) =~ "resolve check", src
         end
       end
+
+      # The compiled code writes a declaration and an assignment to a slot inline. In check
+      # mode it must still test that the slot is the slot of the name. Each body gets a
+      # slot form with a wrong name, and the compiled code must stop at it. (the names are
+      # `var` names: the check takes any name for a `let` slot, which a block can own)
+      test "compiled code checks the slot of a declaration and of an assignment" do
+        gid = heap()
+        Process.put(:js_compile, true)
+
+        wrong = fn
+          # `var a = 1`, with one declaration and with two
+          {:var, k, decls} ->
+            {:var, k,
+             Enum.map(decls, fn
+               {{:slot, d, i, "a"}, init} -> {{:slot, d, i, "zz"}, init}
+               other -> other
+             end)}
+
+          # `a = 3`
+          {:expr, {kind, "=", {:slot, d, i, "a"}, v}} ->
+            {:expr, {kind, "=", {:slot, d, i, "zz"}, v}}
+
+          s ->
+            s
+        end
+
+        for {src, stmt} <- [
+              {"function f(){ var a = 1; return a }", 0},
+              {"function f(){ var a = 1, b = 2; return a + b }", 0},
+              {"function f(){ var a = 1; a = 3; return a }", 1}
+            ] do
+          {:fn, name, params, body, mode, i} = fn4(src, "f")
+          body = List.update_at(body, stmt, wrong)
+          assert Enum.at(body, stmt) != Enum.at(elem(fn4(src, "f"), 3), stmt), src
+          f = Interp.make_function({:fn, name, params, body, mode, i}, gid, false)
+          e = assert_raise(ArgumentError, fn -> Interp.call(f, :undefined, []) end)
+          assert Exception.message(e) =~ ~s("zz" is not slot), src
+        end
+      end
     end
   else
     @tag skip: "set JS_RESOLVE_CHECK=1 to run the check-mode tests"
