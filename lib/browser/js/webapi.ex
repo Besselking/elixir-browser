@@ -2,8 +2,8 @@ defmodule Browser.JS.WebAPI do
   @moduledoc """
   The web platform pieces that scripts expect beside the DOM: `fetch`, `XMLHttpRequest`, the
   observers, `AbortController`, `atob`/`btoa`, `document.fonts` and a few more. They are
-  written in JavaScript (the `@prelude`), on top of one native function, `__fetch`, that does
-  a request and hands back what came.
+  written in JavaScript (the `@prelude`), on top of a native function, `__fetch`, that does
+  a request and hands back what came (and `__clipboardText`, which reads the clipboard).
   """
 
   alias Browser.JS.{Interp, Parser}
@@ -11,10 +11,22 @@ defmodule Browser.JS.WebAPI do
   @methods ~w(get head post put patch delete options)
 
   @doc """
-  Declares `__fetch` and runs the prelude. `http` is `(request) -> {:ok, response} | {:error, msg}`;
-  see `Browser.JS.Runtime.http/1`.
+  Declares `__fetch` and `__clipboardText` and runs the prelude. `http` is
+  `(request) -> {:ok, response} | {:error, msg}`; see `Browser.JS.Runtime.http/1`. `clipboard`
+  is `() -> text | nil`: the text on the system clipboard, or nil when there is no window.
   """
-  def install(scope, http) do
+  def install(scope, http, clipboard \\ fn -> nil end) do
+    Interp.declare(
+      scope,
+      "__clipboardText",
+      Interp.native("__clipboardText", fn _this, _args ->
+        case clipboard.() do
+          text when is_binary(text) -> text
+          _ -> :undefined
+        end
+      end)
+    )
+
     Interp.declare(
       scope,
       "__fetch",
@@ -499,9 +511,15 @@ defmodule Browser.JS.WebAPI do
         clearWatch: function () {}
       });
       setNav("mediaDevices", { enumerateDevices: function () { return Promise.resolve([]); }, getUserMedia: denied, getSupportedConstraints: function () { return {}; }, addEventListener: function () {}, removeEventListener: function () {} });
-      // the clipboard holds what the page wrote to it, until the page is closed
+      // In the window the text goes on the system clipboard: the session puts it there
+      // (`__ed.clipboard`), and `__clipboardText` reads it. Without a window (tests) the page
+      // keeps what it wrote, until it is closed.
       var clip = "";
-      setNav("clipboard", { writeText: function (t) { clip = String(t); return Promise.resolve(); }, readText: function () { return Promise.resolve(clip); }, write: denied, read: denied });
+      setNav("clipboard", {
+        writeText: function (t) { clip = String(t); if (typeof __ed === "object" && __ed && __ed.clipboard) __ed.clipboard(clip); return Promise.resolve(); },
+        readText: function () { var t = __clipboardText(); return Promise.resolve(typeof t === "string" ? t : clip); },
+        write: denied, read: denied
+      });
     }
 
     // `crypto.subtle` and `randomUUID` exist in secure contexts only

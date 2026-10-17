@@ -12,6 +12,7 @@ defmodule Browser.Session do
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxList: 1]
 
   alias Browser.{
+    Download,
     Editing,
     Fetch,
     Forms,
@@ -325,6 +326,16 @@ defmodule Browser.Session do
     do: {:noreply, open_foreground_tab(state, url)}
 
   def handle_info({:open_tab, _tid, _url}, state), do: {:noreply, state}
+
+  # a download (see `js_effect/2`) was saved, or could not be
+  def handle_info({:downloaded, result}, state) do
+    case result do
+      {:ok, path} -> UI.set_status(state.ui, "Saved #{path}")
+      {:error, msg} -> UI.set_status(state.ui, "Download failed: #{msg}")
+    end
+
+    {:noreply, state}
+  end
 
   # a timer or a promise changed the page after the call that started it had returned
   def handle_info({:js_async, pid, reply}, %{js: pid} = state),
@@ -2205,6 +2216,24 @@ defmodule Browser.Session do
   defp base(%{page: %{base: base}}) when is_binary(base), do: base
   defp base(state), do: state.url
 
+  # `navigator.clipboard.readText()` of a page: the runtime's process reads the system clipboard
+  # (the writes come back in the outbox, see `js_effect/2`). Nil when the session has no wx
+  # environment (no window): the page then keeps what it wrote.
+  defp clipboard_reader do
+    wx_env =
+      try do
+        :wx.get_env()
+      catch
+        _, _ -> nil
+      end
+
+    wx_env &&
+      fn ->
+        :wx.set_env(wx_env)
+        UI.clipboard_text()
+      end
+  end
+
   # the runtime that was started while the tab was behind others goes on; else one is started
   defp adopt_or_start_js(%{adopt_js: pid, js: pid} = state) when pid != nil,
     do: %{state | adopt_js: nil, hover_nid: nil}
@@ -2225,7 +2254,8 @@ defmodule Browser.Session do
         history_before: length(state.history.back),
         layout_now: true,
         fetch: &Fetch.load(&1, initiator: initiator),
-        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2),
+        clipboard: clipboard_reader()
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
@@ -2676,6 +2706,22 @@ defmodule Browser.Session do
 
   defp js_effect({:clipboard, text}, state) do
     UI.set_clipboard_text(text)
+    state
+  end
+
+  # a link with `download` was clicked: the file is saved in the Downloads folder (a fetch can
+  # take its time), and the status bar says where
+  defp js_effect({:download, url, name, data}, state) do
+    me = self()
+    initiator = state.url
+
+    Task.start(fn ->
+      send(
+        me,
+        {:downloaded, Download.save(url, name, data, &Fetch.load(&1, initiator: initiator))}
+      )
+    end)
+
     state
   end
 
@@ -3707,7 +3753,8 @@ defmodule Browser.Session do
         layout_now: false,
         hidden: true,
         fetch: &Fetch.load(&1, initiator: initiator),
-        request: &Fetch.load(&1, [initiator: initiator] ++ &2)
+        request: &Fetch.load(&1, [initiator: initiator] ++ &2),
+        clipboard: clipboard_reader()
       }
 
       pid = Browser.JS.Runtime.start(page.raw, info)
