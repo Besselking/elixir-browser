@@ -7565,16 +7565,25 @@ defmodule Browser.Layout do
     end
   end
 
+  # the bottom of the last line of text: the lowest bottom of the texts whose top is the lowest
+  # one (in one pass over the items, which an atom of a long text has many of; of equal numbers,
+  # the first one counts, as with `Enum.max/1`, and a text sits on that line when its top is
+  # exactly the same term)
   defp last_baseline(items, height) do
-    case Enum.filter(items, &(&1.type == :text)) do
-      [] ->
-        height
-
-      texts ->
-        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
-        for(%{y: ^last_y} = t <- texts, do: t.y + t.h) |> Enum.max()
+    case Enum.reduce(items, nil, &last_text_bottom/2) do
+      nil -> height
+      {_top, bottom} -> bottom
     end
   end
+
+  defp last_text_bottom(%{type: :text, y: y, h: h}, nil), do: {y, y + h}
+  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, _}) when y > top, do: {y, y + h}
+
+  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, bottom})
+       when y === top and y + h > bottom,
+       do: {top, y + h}
+
+  defp last_text_bottom(_item, acc), do: acc
 
   # A marker box is as wide as its content only when it is not just the measuring width: the
   # box of a block-level control fills whatever width it is laid out at.
