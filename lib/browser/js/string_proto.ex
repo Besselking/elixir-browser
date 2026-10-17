@@ -6,6 +6,8 @@ defmodule Browser.JS.StringProto do
   helpers. Strings are measured in UTF-16 code units (see `Browser.JS.Str`).
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{RegExp, Str}
 
@@ -212,12 +214,12 @@ defmodule Browser.JS.StringProto do
   defp cased_before?(cps) do
     case Enum.find(cps, &(not case_ignorable?(&1))) do
       nil -> false
-      c -> Regex.match?(~r/^[\p{Lu}\p{Ll}\p{Lt}]$/u, c)
+      c -> Regex.match?(re(~r/^[\p{Lu}\p{Ll}\p{Lt}]$/u), c)
     end
   end
 
   defp case_ignorable?(c),
     do:
       c in ["'", ".", ":", "·", "’", "­"] or
-        Regex.match?(~r/^[\p{Mn}\p{Me}\p{Cf}\p{Lm}\p{Sk}]$/u, c)
+        Regex.match?(re(~r/^[\p{Mn}\p{Me}\p{Cf}\p{Lm}\p{Sk}]$/u), c)
 end

@@ -16,6 +16,7 @@ defmodule Browser.JS.DOM do
 
   import Kernel, except: [node: 1]
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.Re, only: [re: 1, split_words: 1]
   alias Browser.JS.Interp
   alias Browser.JS.Str
 
@@ -579,7 +580,7 @@ defmodule Browser.JS.DOM do
       {_, v} when is_binary(v) ->
         case n do
           %{cls: {^v, _}} -> n
-          _ -> Map.put(n, :cls, {v, String.split(v)})
+          _ -> Map.put(n, :cls, {v, split_words(v)})
         end
 
       _ ->
@@ -594,7 +595,7 @@ defmodule Browser.JS.DOM do
       {_, v} ->
         case n do
           %{cls: {^v, tokens}} -> tokens
-          _ -> String.split(v)
+          _ -> split_words(v)
         end
 
       nil ->
@@ -1597,7 +1598,7 @@ defmodule Browser.JS.DOM do
 
     case n.kind do
       :text ->
-        [if(pre?, do: n.text, else: Regex.replace(~r/[ \t\n\r\f]+/, n.text, " "))]
+        [if(pre?, do: n.text, else: Regex.replace(re(~r/[ \t\n\r\f]+/), n.text, " "))]
 
       :element when n.tag in ~w(script style template) ->
         []
@@ -3553,10 +3554,10 @@ defmodule Browser.JS.DOM do
   defp build_complex([{:compound, s} | rest], comb, acc),
     do: build_complex(rest, " ", [{comb, parse_compound(s)} | acc])
 
-  @compound_re ~r/(\*|[a-zA-Z][\w-]*)|#([\w-]+)|\.([\w-]+)|\[([^\]]*)\]|:([\w-]+)(\((?:[^()]|\([^()]*\))*\))?/
-
   defp parse_compound(s) do
-    @compound_re
+    re(
+      ~r/(\*|[a-zA-Z][\w-]*)|#([\w-]+)|\.([\w-]+)|\[([^\]]*)\]|:([\w-]+)(\((?:[^()]|\([^()]*\))*\))?/
+    )
     |> Regex.scan(s)
     |> Enum.map(fn
       [_, tag] when tag != "" -> {:tag, Str.downcase(tag)}
@@ -3571,7 +3572,9 @@ defmodule Browser.JS.DOM do
 
   defp parse_attr(s) do
     case Regex.run(
-           ~r/^\s*([\w:-]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]*))\s*(i)?)?\s*$/,
+           re(
+             ~r/^\s*([\w:-]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]*))\s*(i)?)?\s*$/
+           ),
            s
          ) do
       nil ->
@@ -3741,7 +3744,7 @@ defmodule Browser.JS.DOM do
   defp nth_match(n, arg, from_end?, same_type?) do
     {anb, of_sel} =
       memo({:nth, arg}, fn ->
-        case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+        case String.split(arg || "", re(~r/\s+of\s+/), parts: 2) do
           [f, sel] -> {parse_anb(f), parse_selectors(sel)}
           [f] -> {parse_anb(f), nil}
         end
@@ -3804,7 +3807,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp parse_anb(f) do
-    f = f |> Str.downcase() |> String.replace(~r/\s+/, "")
+    f = f |> Str.downcase() |> String.replace(re(~r/\s+/), "")
 
     case f do
       "odd" ->
@@ -3814,7 +3817,7 @@ defmodule Browser.JS.DOM do
         {2, 0}
 
       _ ->
-        case Regex.run(~r/^([+-]?\d*)n([+-]\d+)?$/, f) do
+        case Regex.run(re(~r/^([+-]?\d*)n([+-]\d+)?$/), f) do
           [_, a] ->
             {anb_coef(a), 0}
 
@@ -3836,7 +3839,7 @@ defmodule Browser.JS.DOM do
 
   defp attr_match(nil, _v, _), do: true
   defp attr_match("=", v, val), do: v == val
-  defp attr_match("~=", v, val), do: val in String.split(v)
+  defp attr_match("~=", v, val), do: val in split_words(v)
   defp attr_match("|=", v, val), do: v == val or String.starts_with?(v, val <> "-")
   defp attr_match("^=", v, val), do: val != "" and String.starts_with?(v, val)
   defp attr_match("$=", v, val), do: val != "" and String.ends_with?(v, val)
@@ -4188,10 +4191,16 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # (scripts read `location` again and again, and `URI.parse/1` runs two regexes that load their
+  # patterns again on each call: so the parts of each URL are kept)
   defp url_parts do
-    uri = URI.parse(st().url)
-    path = if uri.path in [nil, ""], do: "/", else: uri.path
-    %{uri: uri, path: path, query: uri.query, fragment: uri.fragment}
+    url = st().url
+
+    memo({:url_parts, url}, fn ->
+      uri = URI.parse(url)
+      path = if uri.path in [nil, ""], do: "/", else: uri.path
+      %{uri: uri, path: path, query: uri.query, fragment: uri.fragment}
+    end)
   end
 
   defp location_get(key) do
@@ -6360,7 +6369,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getElementsByClassName", fn this, args ->
-      wanted = String.split(to_str(arg(args, 0)))
+      wanted = split_words(to_str(arg(args, 0)))
 
       nodes_array(
         Enum.filter(elements(this_nid(this)), fn e -> Enum.all?(wanted, &(&1 in classes(e))) end)

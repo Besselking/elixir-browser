@@ -14,6 +14,8 @@ defmodule Browser.JS.Runtime do
   event) and `:console`.
   """
 
+  import Browser.Re, only: [re: 1]
+
   alias Browser.JS.{Builtins, DOM, Interp, Modules, Parser, Pos}
 
   @steps 5_000_000
@@ -1081,7 +1083,7 @@ defmodule Browser.JS.Runtime do
   defp bare?(spec),
     do:
       not (String.starts_with?(spec, ["./", "../", "/"]) or
-             Regex.match?(~r/^[a-z][a-z0-9+.-]*:/i, spec))
+             Regex.match?(re(~r/^[a-z][a-z0-9+.-]*:/i), spec))
 
   # the address an import specifier stands for
   defp resolve_specifier(spec, base) do

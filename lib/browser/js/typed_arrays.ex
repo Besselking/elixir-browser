@@ -10,6 +10,8 @@ defmodule Browser.JS.TypedArrays do
   little-endian.
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Bitwise, only: [<<<: 2, |||: 2]
   import Browser.JS.Interp, except: [get: 2, put: 3, deref: 1]
   alias Browser.JS.{Interp, Num, Props}
@@ -671,7 +673,7 @@ defmodule Browser.JS.TypedArrays do
 
   defp other_canonical(key) do
     if key in ["Infinity", "-Infinity", "NaN"] or
-         (Regex.match?(~r/\A-?[0-9.e+-]+\z/, key) and to_str(to_num(key)) == key),
+         (Regex.match?(re(~r/\A-?[0-9.e+-]+\z/), key) and to_str(to_num(key)) == key),
        do: :invalid,
        else: :none
   end

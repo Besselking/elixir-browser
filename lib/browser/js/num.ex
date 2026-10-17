@@ -6,6 +6,8 @@ defmodule Browser.JS.Num do
   non-finite floats). Integers are tolerated as inputs and treated as their float value.
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Bitwise
 
   @type t :: float | integer | :nan | :infinity | :neg_infinity
@@ -103,16 +105,16 @@ defmodule Browser.JS.Num do
       s == "-Infinity" ->
         :neg_infinity
 
-      Regex.match?(~r/\A0[xX][0-9a-fA-F]+\z/, s) ->
+      Regex.match?(re(~r/\A0[xX][0-9a-fA-F]+\z/), s) ->
         String.to_integer(binary_part(s, 2, byte_size(s) - 2), 16) * 1.0
 
-      Regex.match?(~r/\A0[oO][0-7]+\z/, s) ->
+      Regex.match?(re(~r/\A0[oO][0-7]+\z/), s) ->
         String.to_integer(binary_part(s, 2, byte_size(s) - 2), 8) * 1.0
 
-      Regex.match?(~r/\A0[bB][01]+\z/, s) ->
+      Regex.match?(re(~r/\A0[bB][01]+\z/), s) ->
         String.to_integer(binary_part(s, 2, byte_size(s) - 2), 2) * 1.0
 
-      Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\z/, s) ->
+      Regex.match?(re(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\z/), s) ->
         float(s)
 
       true ->
@@ -123,7 +125,7 @@ defmodule Browser.JS.Num do
   @doc "The longest numeric prefix (what parseFloat reads), or `:nan`."
   def parse_prefix(s) do
     case Regex.run(
-           ~r/\A([+-]?(?:Infinity|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?))/,
+           re(~r/\A([+-]?(?:Infinity|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?))/),
            Browser.JS.Interp.js_trim_start(s)
          ) do
       [_, m] -> parse(m)
@@ -133,15 +135,15 @@ defmodule Browser.JS.Num do
 
   defp float(s) do
     s = if String.starts_with?(s, "+"), do: String.slice(s, 1..-1//1), else: s
-    s = Regex.replace(~r/\A(-?)\./, s, "\\g{1}0.")
-    s = if Regex.match?(~r/\A-?\d+\z/, s), do: s <> ".0", else: s
+    s = Regex.replace(re(~r/\A(-?)\./), s, "\\g{1}0.")
+    s = if Regex.match?(re(~r/\A-?\d+\z/), s), do: s <> ".0", else: s
 
     s =
-      Regex.replace(~r/(\d)(e|E)/, s, fn _, d, e ->
+      Regex.replace(re(~r/(\d)(e|E)/), s, fn _, d, e ->
         if String.contains?(s, "."), do: d <> e, else: d <> ".0" <> e
       end)
 
-    s = Regex.replace(~r/\.(e|E)/, s, ".0\\1")
+    s = Regex.replace(re(~r/\.(e|E)/), s, ".0\\1")
 
     case Float.parse(s) do
       {f, _} -> f
@@ -154,9 +156,9 @@ defmodule Browser.JS.Num do
   # a float literal out of range: huge exponents overflow, tiny ones underflow
   defp out_of_range(s) do
     cond do
-      not Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\z/, s) -> :nan
-      not Regex.match?(~r/[1-9]/, hd(String.split(s, ~r/[eE]/))) -> 0.0
-      Regex.match?(~r/[eE]-/, s) -> if String.starts_with?(s, "-"), do: -0.0, else: 0.0
+      not Regex.match?(re(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\z/), s) -> :nan
+      not Regex.match?(re(~r/[1-9]/), hd(String.split(s, re(~r/[eE]/)))) -> 0.0
+      Regex.match?(re(~r/[eE]-/), s) -> if String.starts_with?(s, "-"), do: -0.0, else: 0.0
       String.starts_with?(s, "-") -> :neg_infinity
       true -> :infinity
     end

@@ -7,6 +7,8 @@ defmodule Browser.HTML do
   Nodes are `{:text, binary}` or `{:element, tag, attrs, children}`.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @void ~w(area base br col embed hr img input link meta param source track wbr)
   @raw_text ~w(script style)
   @block ~w(p div ul ol li h1 h2 h3 h4 h5 h6 pre blockquote table tr hr dl dt dd
@@ -178,8 +180,12 @@ defmodule Browser.HTML do
 
   defp add_raw(_name, _raw, acc), do: acc
 
-  defp take_raw(bin, name) do
-    case Regex.run(~r/<\/#{name}\s*>/i, bin, return: :index) do
+  # (`@raw_text` has only these two names; a regex for each, compiled one time: see `Browser.Re`)
+  defp take_raw(bin, "script"), do: take_raw_to(bin, re(~r/<\/script\s*>/i))
+  defp take_raw(bin, "style"), do: take_raw_to(bin, re(~r/<\/style\s*>/i))
+
+  defp take_raw_to(bin, end_re) do
+    case Regex.run(end_re, bin, return: :index) do
       [{pos, len}] ->
         {binary_part(bin, 0, pos), binary_part(bin, pos + len, byte_size(bin) - pos - len)}
 
@@ -247,7 +253,7 @@ defmodule Browser.HTML do
         split_quoted(r, "'")
 
       r ->
-        [v] = Regex.run(~r/\A[^\s>]*/, r)
+        [v] = Regex.run(re(~r/\A[^\s>]*/), r)
         {decode(v), binary_part(r, byte_size(v), byte_size(r) - byte_size(v))}
     end
   end
@@ -268,7 +274,8 @@ defmodule Browser.HTML do
   end
 
   defp do_decode(text) do
-    Regex.replace(~r/&(#[xX][0-9a-fA-F]+;?|#\d+;?|[a-zA-Z][a-zA-Z0-9]*;?)/, text, fn whole, ent ->
+    Regex.replace(re(~r/&(#[xX][0-9a-fA-F]+;?|#\d+;?|[a-zA-Z][a-zA-Z0-9]*;?)/), text, fn whole,
+                                                                                         ent ->
       case ent do
         "#" <> _ = num -> numeric(String.trim_trailing(num, ";"), whole)
         name -> Map.get(@entities, name, whole)

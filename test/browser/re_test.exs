@@ -1,7 +1,7 @@
 defmodule Browser.ReTest do
   use ExUnit.Case, async: true
 
-  import Browser.Re, only: [re: 1, split_words: 1]
+  import Browser.Re, only: [re: 1, split_words: 1, compiled: 2]
 
   test "re/1 gives the same regex as the literal, and keeps it for the next call" do
     first = re(~r/\A[+-]?\d+\z/i)
@@ -16,6 +16,42 @@ defmodule Browser.ReTest do
   test "re/1 takes only a literal with no interpolation" do
     assert_raise ArgumentError, fn ->
       Code.eval_string(~S|import Browser.Re; unit = "px"; re(~r/\d+#{unit}/)|)
+    end
+  end
+
+  test "compiled/2 gives the regex that Regex.compile!/2 gives, and keeps it under the key of re/1" do
+    source = "\\A\\x{4E00}+\\z"
+    first = compiled(source, ~c"u")
+    assert Regex.source(first) == Regex.source(Regex.compile!(source, "u"))
+    assert Regex.opts(first) == Regex.opts(Regex.compile!(source, "u"))
+    assert Regex.match?(first, "\u4E00\u4E00")
+    assert compiled(source, ~c"u") == first
+    assert re(~r/\A\x{4E00}+\z/u) == first
+  end
+
+  test "the literals that took the place of interpolated regexes are the same regexes" do
+    for q <- [?", ?'] do
+      new =
+        if q == ?", do: re(~r/\A(?:[^\\\n"]|\\.)*(.?)/s), else: re(~r/\A(?:[^\\\n']|\\.)*(.?)/s)
+
+      old = ~r/\A(?:[^\\\n#{<<q>>}]|\\.)*(.?)/s
+      assert {Regex.source(new), Regex.opts(new)} == {Regex.source(old), Regex.opts(old)}
+    end
+
+    for name <- ["script", "style"] do
+      new = if name == "script", do: re(~r/<\/script\s*>/i), else: re(~r/<\/style\s*>/i)
+      old = ~r/<\/#{name}\s*>/i
+      assert {Regex.source(new), Regex.opts(new)} == {Regex.source(old), Regex.opts(old)}
+    end
+
+    for unit <- ["ch", "ex"] do
+      new =
+        if unit == "ch",
+          do: re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i),
+          else: re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ex\b/i)
+
+      old = ~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))#{unit}\b/i
+      assert {Regex.source(new), Regex.opts(new)} == {Regex.source(old), Regex.opts(old)}
     end
   end
 

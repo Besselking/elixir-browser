@@ -9,6 +9,8 @@ defmodule Browser.JS.Lexer do
   with `{source, flags}`; anywhere else it is a division.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
              { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
@@ -744,7 +746,7 @@ defmodule Browser.JS.Lexer do
   defp bad_template_escape?(<<?u, _::binary>>), do: true
   defp bad_template_escape?(_), do: false
 
-  defp hex?(s), do: s =~ ~r/\A[0-9a-fA-F]+\z/
+  defp hex?(s), do: s =~ re(~r/\A[0-9a-fA-F]+\z/)
 
   # the source of a `${ ... }` expression, up to its matching brace
   defp expr_source("}" <> rest, 0, acc),
