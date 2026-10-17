@@ -1860,7 +1860,10 @@ defmodule Browser.JS.Parser do
   defp plain_method?(_), do: false
 
   # does `ast` hold a node satisfying `pred`, outside nested non-arrow functions and classes?
-  defp contains_node?(ast, pred) do
+  # Each `pred` matches a node, which is a tuple: so a string, a number or an atom is not
+  # asked, and a tuple is walked by its positions, without a list of its elements. The parser
+  # asks this for each function, so the walk must cost little.
+  defp contains_node?(ast, pred) when is_tuple(ast) do
     cond do
       pred.(ast) ->
         true
@@ -1878,16 +1881,19 @@ defmodule Browser.JS.Parser do
             _ -> false
           end)
 
-      is_tuple(ast) ->
-        ast |> Tuple.to_list() |> Enum.any?(&contains_node?(&1, pred))
-
-      is_list(ast) ->
-        Enum.any?(ast, &contains_node?(&1, pred))
-
       true ->
-        false
+        tuple_contains?(ast, tuple_size(ast), pred)
     end
   end
+
+  defp contains_node?([h | t], pred), do: contains_node?(h, pred) or contains_node?(t, pred)
+  defp contains_node?(_leaf, _pred), do: false
+
+  # (the elements of the tuple `t` from position `i` down to 1)
+  defp tuple_contains?(_t, 0, _pred), do: false
+
+  defp tuple_contains?(t, i, pred),
+    do: contains_node?(:erlang.element(i, t), pred) or tuple_contains?(t, i - 1, pred)
 
   defp class_rest(ts, class_decorators \\ []),
     do: allow_in(fn -> class_rest_(ts, class_decorators) end)
