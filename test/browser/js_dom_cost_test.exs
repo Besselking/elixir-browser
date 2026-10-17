@@ -234,4 +234,27 @@ defmodule Browser.JS.DomCostTest do
     # (with a swap of the realm for each read, the frame costs about a third more)
     assert frame < 1.2 * own
   end
+
+  # `innerHTML` moves the new nodes into their parent in one pass. A page that registers a
+  # custom element makes it take the path of one node at a time (a node can then be a custom
+  # element that must be told it was connected), so the two pages compare the two paths.
+  test "innerHTML moves a long list in one pass" do
+    draw = ~S"""
+    const list = document.getElementById("list");
+    let h = "";
+    for (let i = 0; i < 500; i++) h += '<li class="item" data-id="' + i + '"><span>' + i + '</span></li>';
+    for (let r = 0; r < 4; r++) list.innerHTML = h;
+    """
+
+    [fast, one] =
+      for define <- ["", "customElements.define('x-unused', class extends HTMLElement {});"] do
+        pid = start("<ul id=list></ul>", define)
+        cost = cost(pid, draw)
+        Runtime.stop(pid)
+        cost
+      end
+
+    # (one pass costs about 0.6 of the other path, with the reply that exports the list)
+    assert fast < 0.8 * one
+  end
 end

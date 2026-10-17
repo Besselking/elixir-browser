@@ -37,6 +37,38 @@ defmodule Browser.JS.DomBatchTest do
     |> Map.take([:nodes, :ids, :aidx, :rev, :next, :iframes, :dirty, :fdirty, :ce_done])
   end
 
+  # The indexes must be what a walk of the node table gives: `ids` has each element with an
+  # `id` (in any tree), `aidx` each element with a parent and an attribute of an indexed name,
+  # and an element with a `class` has the tokens of its value.
+  defp assert_indexes(s) do
+    ids =
+      for {nid, %{kind: :element, attrs: attrs}} <- s.nodes,
+          {"id", v} <- [List.keyfind(attrs, "id", 0)],
+          v != "",
+          reduce: %{} do
+        acc -> Map.update(acc, v, [nid], &[nid | &1])
+      end
+
+    assert Map.new(s.ids, fn {k, l} -> {k, Enum.sort(l)} end) ==
+             Map.new(ids, fn {k, l} -> {k, Enum.sort(l)} end)
+
+    for {name, vals} <- s.aidx do
+      walk =
+        for {nid, %{kind: :element, attrs: attrs, parent: p}} when p != nil <- s.nodes,
+            {_, v} <- [List.keyfind(attrs, name, 0)],
+            reduce: %{} do
+          acc -> Map.update(acc, v, %{nid => true}, &Map.put(&1, nid, true))
+        end
+
+      assert {name, vals} == {name, walk}
+    end
+
+    for {_, %{kind: :element, attrs: attrs} = n} <- s.nodes,
+        {"class", v} <- [List.keyfind(attrs, "class", 0)] do
+      assert n.cls == {v, String.split(v)}
+    end
+  end
+
   @changes ~S"""
   // (the first searches give the attribute names an index)
   document.querySelector('[data-id="0"]');
@@ -70,22 +102,35 @@ defmodule Browser.JS.DomBatchTest do
   list.innerHTML = '<li data-id="0" class="z">only</li>';
   """
 
-  test "the one-pass paths give the same state as one node at a time" do
-    body = ~s(<ul id="list"></ul><div id="box" data-id="0"></div>)
-
-    [a, b] =
+  # Runs `script` on the page `body` two times: the second time after an unused registration
+  # of a custom element, so that `insert_all/3` takes the path of one node at a time for a
+  # connected parent. The state and the console lines must be the same, and the indexes must
+  # agree with the node table. Gives the state and the console lines.
+  defp both_paths(body, script) do
+    [{a, logs}, {b, logs_b}] =
       for define <- ["", "customElements.define('x-unused', class extends HTMLElement {});"] do
         {pid, [], []} = start(body, "")
+        # (a frame of the page loads here)
+        Runtime.flush(pid)
         # (`eval` adds no node, so the two trees are the same before the changes)
-        r = Runtime.eval(pid, define <> @changes)
-        assert for({:error, t} <- r.console, do: t) == []
+        r = Runtime.eval(pid, define <> script)
         state = state(pid)
         Runtime.stop(pid)
-        state
+        {state, for({k, t} <- r.console, k in [:log, :error], do: {k, t})}
       end
 
+    assert logs == logs_b
     for k <- Map.keys(a), do: assert({k, a[k]} == {k, b[k]})
+    assert_indexes(a)
+    {a, logs}
+  end
+
+  test "the one-pass paths give the same state as one node at a time" do
+    body = ~s(<ul id="list"></ul><div id="box" data-id="0"></div>)
+    {a, logs} = both_paths(body, @changes)
+    assert for({:error, _} = e <- logs, do: e) == []
     assert a.rev > 100
+    assert map_size(a.aidx) == 2
   end
 
   test "the nodes, the indexes and the class tokens after innerHTML and insertAdjacentHTML" do
@@ -211,5 +256,239 @@ defmodule Browser.JS.DomBatchTest do
       """)
 
     assert logs == ["no throw", "a,X-BAD,b"]
+  end
+
+  # (the nodes of these documents have the document of the page as their document, so the
+  # moves here do not adopt; the next test moves nodes between the page and a frame)
+  test "the documents of DOMParser and createHTMLDocument on both paths" do
+    {_, logs} =
+      both_paths(~s(<div id="m"></div>), ~S"""
+      const d = new DOMParser().parseFromString("<p id=a>a</p>", "text/html");
+      const m = document.getElementById("m");
+      const f = d.createDocumentFragment();
+      f.append(d.createElement("em"), d.createTextNode("x"));
+      m.appendChild(f);
+      const g = document.createDocumentFragment();
+      g.append(document.createElement("hr"), "y");
+      d.body.appendChild(g);
+      d.body.insertAdjacentHTML("beforeend", '<i id="c" data-id="1">c</i>');
+      d.body.firstChild.outerHTML = '<u id="o1">1</u><u id="o2">2</u>';
+      const h = document.implementation.createHTMLDocument("h");
+      h.body.innerHTML = '<p id="hp" class="k">p</p>';
+      console.log([m.firstChild.ownerDocument === document, m.lastChild.ownerDocument === document,
+        d.body.lastChild.ownerDocument === d, d.getElementById("hp"), h.getElementById("hp") !== null,
+        h.body.firstChild.ownerDocument === h, d.body.innerHTML].join());
+      """)
+
+    assert logs == [
+             log:
+               "true,true,false,,true,false,<u id=\"o1\">1</u><u id=\"o2\">2</u><hr>y<i id=\"c\" data-id=\"1\">c</i>"
+           ]
+  end
+
+  test "the kids of a fragment of a frame's document are adopted, on both paths" do
+    {_, logs} =
+      both_paths(~s(<div id="box"></div><iframe id="fr" srcdoc="<p>a</p>"></iframe>), ~S"""
+      const d = document.getElementById("fr").contentDocument;
+      const box = document.getElementById("box");
+      const g = d.createDocumentFragment();
+      g.append(d.createElement("i"), d.createTextNode("t"));
+      const before = g.firstChild.ownerDocument === d;
+      box.appendChild(g);
+      const f = document.createDocumentFragment();
+      f.append(document.createElement("b"), "u");
+      d.body.appendChild(f);
+      console.log([before, box.firstChild.ownerDocument === document,
+        box.lastChild.ownerDocument === document, d.body.lastChild.ownerDocument === d,
+        d.body.lastChild.previousSibling.ownerDocument === d, box.innerHTML].join());
+      """)
+
+    assert logs == [log: "true,true,true,true,true,<i></i>t"]
+  end
+
+  test "some of the kids of a fragment, and a ref in the fragment, take the path of one node" do
+    {_, logs} =
+      both_paths(~s(<div id="box"><b>old</b></div>), ~S"""
+      const box = document.getElementById("box");
+      const f = document.createDocumentFragment();
+      f.append(document.createElement("i"), document.createElement("s"), "t");
+      box.replaceChildren(f.firstChild);
+      box.replaceChildren(f.lastChild, f.firstChild, box.firstChild);
+      console.log(f.childNodes.length, box.innerHTML);
+      const g = document.createDocumentFragment();
+      g.append(document.createElement("a"), document.createElement("q"));
+      box.insertBefore(g, g.firstChild);
+      console.log(g.childNodes.length, box.innerHTML);
+      """)
+
+    assert logs == [log: "0 t<s></s><i></i>", log: "0 t<s></s><i></i><q></q><a></a>"]
+  end
+
+  test "replaceChildren of a node that is in the fragment throws at that node" do
+    {_, logs} =
+      both_paths(~s(<div id="box"></div>), ~S"""
+      const f = document.createDocumentFragment();
+      const inner = document.createElement("div");
+      f.append(document.createElement("p"), inner, "t");
+      try { inner.replaceChildren(...f.childNodes); console.log("no throw"); }
+      catch (e) { console.log(e.message); }
+      console.log(f.childNodes.length, inner.childNodes.length, inner.parentNode === f);
+      """)
+
+    assert logs == [log: "The new child element contains the parent.", log: "2 1 true"]
+  end
+
+  test "a shadow root, a template and a fragment parent on both paths" do
+    {_, logs} =
+      both_paths(
+        ~s(<div id="host"><span slot="a">A</span></div><template id="t"></template>),
+        ~S"""
+        const host = document.getElementById("host");
+        const sr = host.attachShadow({mode: "open"});
+        sr.innerHTML = '<p data-id="1">x</p><slot name="a"></slot><slot id="d"></slot>';
+        host.innerHTML = '<i slot="a">1</i><u>3</u>';
+        sr.querySelector("slot").innerHTML = "<em>fallback</em>";
+        sr.firstChild.outerHTML = "<h1>a</h1><h2>b</h2>";
+        const t = document.getElementById("t");
+        t.innerHTML = '<div id="x" class="a b">y<template><i>q</i></template></div>';
+        t.content.firstChild.insertAdjacentHTML("afterbegin", "<b>0</b>");
+        document.body.appendChild(t.content.cloneNode(true));
+        const f = document.createDocumentFragment();
+        const a = f.appendChild(document.createElement("a"));
+        f.append("z");
+        a.outerHTML = "<b>1</b><b>2</b>";
+        document.body.append(f);
+        console.log([sr.innerHTML, sr.firstChild.isConnected, t.content.childNodes.length,
+          document.getElementById("x").parentNode === document.body, f.childNodes.length,
+          document.querySelectorAll(".a").length, document.body.lastChild.textContent].join());
+        """
+      )
+
+    assert logs == [
+             log:
+               "<h1>a</h1><h2>b</h2><slot name=\"a\"><em>fallback</em></slot><slot id=\"d\"></slot>,true,1,true,0,1,z"
+           ]
+  end
+
+  test "the move of a fragment marks the tree of the main document and of a frame" do
+    {pid, [], []} = start(~s(<div id="box"></div><iframe id="fr" srcdoc="<p>a</p>"></iframe>), "")
+    Runtime.flush(pid)
+
+    r =
+      Runtime.eval(pid, ~S"""
+      const d = document.getElementById("fr").contentDocument;
+      d.body.innerHTML = '<p id="x" data-id="1">x</p><p>y</p>';
+      window.f = document.createDocumentFragment();
+      f.append(document.createElement("i"), "t");
+      window.g = d.createDocumentFragment();
+      g.append(d.createElement("i"), "t");
+      d.body.innerHTML.length
+      """)
+
+    assert for({:result, t} <- r.console, do: t) == ["35"]
+    assert r.dirty
+    # (the reply of each call takes the marks away)
+    assert Runtime.eval(pid, "1").dirty == false
+    assert Runtime.eval(pid, ~s{document.getElementById("box").appendChild(f); 1}).dirty
+    assert Runtime.eval(pid, "1").dirty == false
+
+    r =
+      Runtime.eval(pid, ~s{document.getElementById("fr").contentDocument.body.appendChild(g); 1})
+
+    Runtime.stop(pid)
+    assert r.dirty
+  end
+
+  # A node of parsed HTML has the fields that `new_node/1` gives (the batch tests compare two
+  # paths that both make nodes this way, so they do not see a wrong field)
+  test "a node of parsed HTML has the fields of a new node and its class tokens" do
+    # (not in the document: the reply gives numbers to new elements of the document)
+    {pid, [], []} =
+      start("", ~S"""
+      document.createElement("div").innerHTML = '<p class="a  b" data-x="1">t</p>';
+      """)
+
+    s = state(pid)
+    Runtime.stop(pid)
+    [{nid, p}] = for {nid, %{tag: "p"} = n} <- s.nodes, do: {nid, n}
+    [t] = p.kids
+
+    assert Map.delete(p, :kids) == %{
+             id: nid,
+             kind: :element,
+             tag: "p",
+             attrs: [{"class", "a  b"}, {"data-x", "1"}],
+             internal: [],
+             props: %{},
+             parent: p.parent,
+             text: "",
+             content: nil,
+             shost: nil,
+             shadow: nil,
+             doc: s.nodes[p.parent].doc,
+             cls: {"a  b", ["a", "b"]}
+           }
+
+    assert s.nodes[t] == %{
+             id: t,
+             kind: :text,
+             tag: nil,
+             attrs: [],
+             internal: [],
+             props: %{},
+             kids: [],
+             parent: nid,
+             text: "t",
+             content: nil,
+             shost: nil,
+             shadow: nil,
+             doc: p.doc
+           }
+  end
+
+  # The counts that one `innerHTML` adds, as one node at a time gives them: the fragment and
+  # each node are new (`next`); `rev` counts each write of a node.
+  test "innerHTML adds the same counts as one node at a time" do
+    # (the nodes are not in the document: the reply gives numbers to new elements of the
+    # document, and that adds to `rev`)
+    {pid, [], []} =
+      start("", ~S"""
+      window.box = document.createElement("div");
+      window.lone = document.createElement("p");
+      document.createElement("div").append(lone);
+      """)
+
+    s0 = state(pid)
+
+    r =
+      Runtime.eval(pid, ~S"""
+      box.innerHTML = '<p a="1">x</p>text<template><b>t</b></template>';
+      1
+      """)
+
+    s1 = state(pid)
+
+    r2 =
+      Runtime.eval(pid, ~S"""
+      lone.insertAdjacentHTML("afterbegin", "<i>1</i><i>2</i>"); 2
+      """)
+
+    s2 = state(pid)
+    # (HTML for a place that is not there: the nodes are made, and nothing moves)
+    r3 =
+      Runtime.eval(
+        pid,
+        ~s{document.createElement("p").insertAdjacentHTML("afterend", "<b>x</b>")}
+      )
+
+    Runtime.stop(pid)
+    assert r.dirty and r2.dirty and r3.dirty
+    # (the fragment of the parse, p, "x", "text", template, its content, b and "t")
+    assert s1.next - s0.next == 8
+    # (the parse: 1 for the fragment, 3 for p and "x", 1 for "text", 8 for the template, 2
+    # for each of the 3 top nodes as they go into the fragment; then 1 for the kids of box,
+    # and 4 for each top node as it moves into box)
+    assert s1.rev - s0.rev == 19 + 1 + 12
+    assert s2.rev - s1.rev == 1 + 2 * 3 + 2 * 2 + 2 * 4
   end
 end
