@@ -2162,7 +2162,7 @@ defmodule Browser.Style do
   # (zero when it is not given). Only the height of a block and a width asked for from the
   # content are known here.
   defp size_containment(base, resolved, env) do
-    contain = String.split(Map.get(resolved, "contain", ""))
+    contain = split_words(Map.get(resolved, "contain", ""))
 
     if "size" in contain or "strict" in contain do
       {iw, ih} = intrinsic_size(resolved, env)
@@ -2813,10 +2813,14 @@ defmodule Browser.Style do
   # `em` in a background's position or size is the element's font size
   # em and ch lengths of a background position or size, as pixels
   defp font_units_to_px(v, env) do
-    units = [{"ch", env.fs * Map.get(env, :ch, 0.6)}, {"ex", env.fs * Map.get(env, :ex, 0.5)}]
+    # (one regex for each unit, compiled one time: see `Browser.Re`)
+    units = [
+      {re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i), env.fs * Map.get(env, :ch, 0.6)},
+      {re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ex\b/i), env.fs * Map.get(env, :ex, 0.5)}
+    ]
 
-    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit, size}, acc ->
-      Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))#{unit}\b/i, acc, fn _, n ->
+    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit_re, size}, acc ->
+      Regex.replace(unit_re, acc, fn _, n ->
         {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
         "#{Float.round(f * size, 3)}px"
       end)

@@ -121,7 +121,13 @@ defmodule Browser.CSS do
   defp bad_string?(<<?\\, _, r::binary>>), do: bad_string?(r)
 
   defp bad_string?(<<q, r::binary>>) when q in [?", ?'] do
-    case Regex.run(~r/\A(?:[^\\\n#{<<q>>}]|\\.)*(.?)/s, r) do
+    # (one regex for each quote, compiled one time: see `Browser.Re`)
+    string_re =
+      if q == ?",
+        do: re(~r/\A(?:[^\\\n"]|\\.)*(.?)/s),
+        else: re(~r/\A(?:[^\\\n']|\\.)*(.?)/s)
+
+    case Regex.run(string_re, r) do
       [_, "\n"] -> true
       [whole, _] -> bad_string?(binary_part(r, byte_size(whole), byte_size(r) - byte_size(whole)))
     end
