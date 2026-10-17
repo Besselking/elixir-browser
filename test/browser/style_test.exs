@@ -1053,6 +1053,27 @@ defmodule Browser.StyleTest do
       assert p_color("body { color: green } p { color: red; color: var(--missing) }") == @green
     end
 
+    test "the same declarations under parents with other custom properties give other values" do
+      # (the set of an element is kept for its parent's set and its declarations: both `p`s
+      # declare the same, and each parent gives `--c` another value)
+      css = ".a { --c: green } .b { --c: red } p { --d: var(--c); color: var(--d) }"
+      html = "<div class=a><p>x</p></div><div class=b><p>y</p></div><div class=a><p>z</p></div>"
+      page = Page.build("<style>#{css}</style>" <> html, "about:test")
+
+      colors =
+        page.nodes
+        |> Stream.flat_map(&flatten/1)
+        |> Enum.flat_map(fn
+          {:element, "p", attrs, _} ->
+            [attrs |> List.keyfind("@computed", 0) |> elem(1) |> Map.get("color")]
+
+          _ ->
+            []
+        end)
+
+      assert colors == [@green, {255, 0, 0}, @green]
+    end
+
     test "var is case-insensitive" do
       assert p_color("p { --a: green; color: VAR(--a) }") == @green
     end

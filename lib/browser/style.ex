@@ -1271,6 +1271,7 @@ defmodule Browser.Style do
   def prune(nodes, idx) do
     Process.delete(:style_memo)
     Process.put(:style_custom, %{})
+    Process.put(:style_custom_ids, %{})
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
@@ -1278,6 +1279,7 @@ defmodule Browser.Style do
     Process.delete(:style_share)
     Process.delete(:style_inline)
     Process.delete(:style_custom)
+    Process.delete(:style_custom_ids)
     end_signs()
     pruned
   end
@@ -1294,6 +1296,7 @@ defmodule Browser.Style do
     Process.put(:style_memo, memo)
     Process.put(:style_hashes, subtree_hashes(nodes))
     Process.put(:style_custom, %{})
+    Process.put(:style_custom_ids, %{})
     Process.put(:style_custom_kept, Map.get(memo, :custom_table, %{}))
     Process.put(:style_custom_from, %{})
     start_computed(Map.get(memo, :computed_table, {%{}, 0}))
@@ -1308,6 +1311,7 @@ defmodule Browser.Style do
     Process.delete(:style_hashes)
     memo = keep_tables(memo, end_computed())
     Process.delete(:style_custom)
+    Process.delete(:style_custom_ids)
     Process.delete(:style_custom_kept)
     Process.delete(:style_custom_from)
     {pruned, memo}
@@ -1525,7 +1529,25 @@ defmodule Browser.Style do
   # keeps a set as `{parent_id, changed, removed}` (`:style_custom_kept`), and only the sets of
   # the root elements whole. A run makes each set that it uses whole one time (`:style_custom`),
   # and notes the parent of each new set (`:style_custom_from`).
+  # The set of an element follows from the set of its parent and the custom properties that the
+  # element declares (`own`, with their values). A set can have a thousand properties, and to
+  # compare or hash it costs as much, so its number is worked out once for each parent set and
+  # declarations (`:style_custom_ids`).
   defp custom_id(custom, own, parent) do
+    key = {parent && parent.custom_id, own}
+
+    case Process.get(:style_custom_ids) do
+      %{^key => id} ->
+        id
+
+      ids ->
+        id = new_custom_id(custom, Enum.map(own, &elem(&1, 0)), parent)
+        if ids, do: Process.put(:style_custom_ids, Map.put(ids, key, id))
+        id
+    end
+  end
+
+  defp new_custom_id(custom, own, parent) do
     if parent != nil and parent.custom == custom do
       parent.custom_id
     else
@@ -1990,7 +2012,7 @@ defmodule Browser.Style do
 
   defp flex_item_align(computed, _parent), do: computed
 
-  # -> {computed_map, custom_properties, names_of_the_custom_properties_it_declares}
+  # -> {computed_map, custom_properties, the_custom_properties_it_declares}
   #
   # What an element computes to follows from what the cascade declared for it and what its parent
   # computed to (and whether it is a table). Most elements of a page, a row of list items or the
@@ -2134,7 +2156,7 @@ defmodule Browser.Style do
         true -> Map.put(base, "visibility", "hidden")
       end
 
-    {base, custom, Enum.map(customs, &elem(&1, 0))}
+    {base, custom, customs}
   end
 
   # `contain: size` (or `strict`): the content does not size the box, `contain-intrinsic-*` does
